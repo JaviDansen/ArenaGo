@@ -1,11 +1,13 @@
 import { Pressable, SafeAreaView, StyleSheet, Text } from 'react-native';
 
-export default function EventConfirmationScreen() {
+export default function EventConfirmationScreen({ route }) {
+  const { event } = route.params;
+
   return (
     <SafeAreaView style={styles.container}>
       <Text style={styles.title}>Evento encontrado</Text>
-      <Text style={styles.eventName}>BEAST Arena</Text>
-      <Text style={styles.location}>Evento de demonstração</Text>
+      <Text style={styles.eventName}>{event.name}</Text>
+      <Text style={styles.location}>{event.location}</Text>
       <Pressable style={styles.button}>
         <Text style={styles.buttonText}>Confirmar entrada</Text>
       </Pressable>

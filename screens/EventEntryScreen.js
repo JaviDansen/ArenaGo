@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { Pressable, SafeAreaView, StyleSheet, Text, TextInput } from 'react-native';
 
+import { mockEvents } from '../data/mockData';
+
 export default function EventEntryScreen({ navigation }) {
   const [eventCode, setEventCode] = useState('');
 
@@ -11,8 +13,14 @@ export default function EventEntryScreen({ navigation }) {
       return;
     }
 
+    const event = mockEvents[trimmedCode];
+
+    if (!event) {
+      return;
+    }
+
     console.log(trimmedCode);
-    navigation.navigate('EventConfirmation');
+    navigation.navigate('EventConfirmation', { event });
   }
 
   return (
