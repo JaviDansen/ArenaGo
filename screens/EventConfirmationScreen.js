@@ -1,14 +1,23 @@
 import { Pressable, SafeAreaView, StyleSheet, Text } from 'react-native';
 
-export default function EventConfirmationScreen({ route }) {
+export default function EventConfirmationScreen({ navigation, route }) {
   const { event } = route.params;
+
+  function handleConfirmEntry() {
+    if (event.hasArenaQueue) {
+      navigation.navigate('ArenaQueue');
+      return;
+    }
+
+    navigation.navigate('ActiveArena');
+  }
 
   return (
     <SafeAreaView style={styles.container}>
       <Text style={styles.title}>Evento encontrado</Text>
       <Text style={styles.eventName}>{event.name}</Text>
       <Text style={styles.location}>{event.location}</Text>
-      <Pressable style={styles.button}>
+      <Pressable style={styles.button} onPress={handleConfirmEntry}>
         <Text style={styles.buttonText}>Confirmar entrada</Text>
       </Pressable>
     </SafeAreaView>

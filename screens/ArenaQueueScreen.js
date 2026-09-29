@@ -1,0 +1,66 @@
+import { Pressable, SafeAreaView, StyleSheet, Text } from 'react-native';
+
+export default function ArenaQueueScreen() {
+  return (
+    <SafeAreaView style={styles.container}>
+      <Text style={styles.eventName}>BEAST Arena</Text>
+      <Text style={styles.title}>Você está na fila</Text>
+      <Text style={styles.positionLabel}>Sua posição:</Text>
+      <Text style={styles.position}>5º</Text>
+      <Text style={styles.message}>
+        Aguarde sua vez. Você será avisado quando sua entrada na Arena for liberada.
+      </Text>
+      <Text style={styles.note}>
+        O tempo de permanência só começa quando sua entrada for liberada.
+      </Text>
+      <Pressable style={styles.button}>
+        <Text style={styles.buttonText}>Sair da fila</Text>
+      </Pressable>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#fff',
+    padding: 24,
+  },
+  eventName: {
+    fontSize: 18,
+  },
+  title: {
+    fontSize: 24,
+    fontWeight: 'bold',
+    marginTop: 16,
+  },
+  positionLabel: {
+    fontSize: 16,
+    marginTop: 24,
+  },
+  position: {
+    fontSize: 32,
+    fontWeight: 'bold',
+    marginTop: 8,
+  },
+  message: {
+    fontSize: 16,
+    marginTop: 24,
+  },
+  note: {
+    fontSize: 16,
+    marginTop: 16,
+  },
+  button: {
+    alignItems: 'center',
+    backgroundColor: '#000',
+    borderRadius: 4,
+    marginTop: 24,
+    padding: 12,
+  },
+  buttonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+});
