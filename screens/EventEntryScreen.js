@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Pressable, SafeAreaView, StyleSheet, Text, TextInput } from 'react-native';
 
-export default function EventEntryScreen() {
+export default function EventEntryScreen({ navigation }) {
   const [eventCode, setEventCode] = useState('');
 
   function handleContinue() {
@@ -12,6 +12,7 @@ export default function EventEntryScreen() {
     }
 
     console.log(trimmedCode);
+    navigation.navigate('EventConfirmation');
   }
 
   return (
