@@ -1,15 +1,31 @@
+import { useContext } from 'react';
 import { Pressable, SafeAreaView, StyleSheet, Text } from 'react-native';
 
+import { ParticipationContext } from '../context/ParticipationContext';
+
 export default function EventConfirmationScreen({ navigation, route }) {
+  const { setParticipation } = useContext(ParticipationContext);
   const { event } = route.params;
 
   function handleConfirmEntry() {
     if (event.hasArenaQueue) {
-      navigation.navigate('ArenaQueue');
-      return;
+      setParticipation({
+        event,
+        status: 'waiting',
+        queuePosition: 5,
+      });
+    } else {
+      setParticipation({
+        event,
+        status: 'active',
+        queuePosition: null,
+      });
     }
 
-    navigation.navigate('ActiveArena');
+    navigation.reset({
+      index: 0,
+      routes: [{ name: 'MainTabs' }],
+    });
   }
 
   return (

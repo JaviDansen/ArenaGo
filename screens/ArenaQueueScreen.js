@@ -1,18 +1,35 @@
+import { useContext } from 'react';
 import { Pressable, SafeAreaView, StyleSheet, Text } from 'react-native';
 
+import { ParticipationContext } from '../context/ParticipationContext';
+
 export default function ArenaQueueScreen() {
+  const { participation, setParticipation } = useContext(
+    ParticipationContext
+  );
+
+  function handleRelease() {
+    setParticipation({
+      ...participation,
+      status: 'active',
+    });
+  }
+
   return (
     <SafeAreaView style={styles.container}>
       <Text style={styles.eventName}>BEAST Arena</Text>
       <Text style={styles.title}>Você está na fila</Text>
       <Text style={styles.positionLabel}>Sua posição:</Text>
-      <Text style={styles.position}>5º</Text>
+      <Text style={styles.position}>{participation.queuePosition}º</Text>
       <Text style={styles.message}>
         Aguarde sua vez. Você será avisado quando sua entrada na Arena for liberada.
       </Text>
       <Text style={styles.note}>
         O tempo de permanência só começa quando sua entrada for liberada.
       </Text>
+      <Pressable style={styles.button} onPress={handleRelease}>
+        <Text style={styles.buttonText}>Simular entrada liberada</Text>
+      </Pressable>
       <Pressable style={styles.button}>
         <Text style={styles.buttonText}>Sair da fila</Text>
       </Pressable>
