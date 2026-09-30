@@ -19,6 +19,13 @@ export default function ArenaQueueScreen() {
     setParticipation(null);
   }
 
+  function handleQueueDisabled() {
+    setParticipation({
+      ...participation,
+      status: 'active',
+    });
+  }
+
   return (
     <SafeAreaView style={styles.container}>
       <Text style={styles.eventName}>BEAST Arena</Text>
@@ -33,6 +40,9 @@ export default function ArenaQueueScreen() {
       </Text>
       <Pressable style={styles.button} onPress={handleRelease}>
         <Text style={styles.buttonText}>Simular entrada liberada</Text>
+      </Pressable>
+      <Pressable style={styles.button} onPress={handleQueueDisabled}>
+        <Text style={styles.buttonText}>Simular staff desativando fila</Text>
       </Pressable>
       <Pressable style={styles.button} onPress={handleLeaveQueue}>
         <Text style={styles.buttonText}>Sair da fila</Text>
