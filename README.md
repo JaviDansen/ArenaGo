@@ -5,12 +5,19 @@ ArenaGo é um aplicativo mobile desenvolvido para a BEAST MARAGAMES, voltado à 
 ## Funcionalidades atuais
 
 - Navegação principal por abas: Início, Eventos e Perfil.
-- Tela inicial da BEAST MARAGAMES.
-- Fluxo inicial de entrada em um evento.
 - Entrada manual por código de evento.
-- Armazenamento do código digitado usando estado local.
-- Validação local que impede o envio de código vazio ou composto apenas por espaços.
-- Navegação entre telas com React Navigation.
+- Eventos mockados para testes com e sem fila da Arena.
+- Confirmação de entrada no evento.
+- Gerenciamento do estado atual da participação através de `ParticipationContext`.
+- Fila da Arena com posição mockada.
+- Saída da fila.
+- Simulação temporária de liberação individual.
+- Simulação temporária da desativação da fila pelo staff.
+- Participação ativa na Arena.
+- Saída da Arena e retorno à Home.
+- Acesso contínuo às abas Eventos e Perfil durante uma participação.
+
+As ações de simulação são recursos temporários de desenvolvimento enquanto não há integração com backend.
 
 ## Tecnologias
 
@@ -23,17 +30,22 @@ ArenaGo é um aplicativo mobile desenvolvido para a BEAST MARAGAMES, voltado à 
 
 ## Estrutura de navegação
 
-O `NavigationContainer` contém um Stack Navigator. O Stack possui as rotas `MainTabs` e `EventEntry`. Dentro de `MainTabs`, há um Bottom Tab Navigator com as abas Início, Eventos e Perfil.
+`HomeFlowScreen` escolhe o conteúdo da aba Início de acordo com o estado atual da participação.
 
 ```text
-NavigationContainer
-└── Stack.Navigator
-    ├── MainTabs
-    │   └── Tab.Navigator
-    │       ├── Início → HomeScreen
-    │       ├── Eventos → EventsScreen
-    │       └── Perfil → ProfileScreen
-    └── EventEntry → EventEntryScreen
+ParticipationProvider
+└── NavigationContainer
+    └── Stack.Navigator
+        ├── MainTabs
+        │   └── Tab.Navigator
+        │       ├── Início → HomeFlowScreen
+        │       │   ├── sem participação → HomeScreen
+        │       │   ├── waiting → ArenaQueueScreen
+        │       │   └── active → ActiveArenaScreen
+        │       ├── Eventos → EventsScreen
+        │       └── Perfil → ProfileScreen
+        ├── EventEntry → EventEntryScreen
+        └── EventConfirmation → EventConfirmationScreen
 ```
 
 ## Como executar
@@ -60,4 +72,4 @@ Para executar em um dispositivo físico, abra o Expo Go e escaneie o QR Code exi
 
 ## Status do projeto
 
-O projeto está em desenvolvimento. A validação real do código do evento, leitura de QR Code, integração com backend e outras funcionalidades ainda serão desenvolvidas.
+O projeto está em desenvolvimento. O fluxo básico de participação na Arena já funciona com dados mockados. Leitura real de QR Code, backend, comunicação em tempo real e demais funcionalidades ainda serão desenvolvidos.
