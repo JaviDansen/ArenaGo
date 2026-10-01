@@ -23,17 +23,22 @@ Aplicativo mobile desenvolvido para a BEAST MARAGAMES, voltado à participação
 
 ## Estrutura de navegação
 
-O `NavigationContainer` contém um Stack Navigator. O Stack possui as rotas `MainTabs` e `EventEntry`. Dentro de `MainTabs`, há um Bottom Tab Navigator com as abas Início, Eventos e Perfil.
+O `NavigationContainer` contém um Stack Navigator com rota inicial na tela de `Welcome` (Boas-vindas). O Stack possui as rotas de autenticação (`Welcome`, `Login`, `Register`), além da rota principal `MainTabs`, `EventEntry` e `EventConfirmation`. Dentro de `MainTabs`, há um Bottom Tab Navigator com as abas Início, Eventos e Perfil.
 
 ```text
 NavigationContainer
 └── Stack.Navigator
+    ├── Welcome → WelcomeScreen (Boas-vindas)
+    ├── Login → LoginScreen (Login)
+    ├── Register → RegisterScreen (Cadastro)
+    ├── ForgotPassword → ForgotPasswordScreen (Recuperar Senha)
     ├── MainTabs
     │   └── Tab.Navigator
     │       ├── Início → HomeScreen
     │       ├── Eventos → EventsScreen
     │       └── Perfil → ProfileScreen
-    └── EventEntry → EventEntryScreen
+    ├── EventEntry → EventEntryScreen
+    └── EventConfirmation → EventConfirmationScreen
 ```
 
 ## Como executar
