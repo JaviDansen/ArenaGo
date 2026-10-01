@@ -1,6 +1,7 @@
 import { useContext } from 'react';
-import { Pressable, SafeAreaView, StyleSheet, Text } from 'react-native';
+import { Pressable, StyleSheet, Text } from 'react-native';
 
+import ScreenContainer from '../components/ScreenContainer';
 import { ParticipationContext } from '../context/ParticipationContext';
 
 export default function EventConfirmationScreen({ navigation, route }) {
@@ -31,23 +32,18 @@ export default function EventConfirmationScreen({ navigation, route }) {
   }
 
   return (
-    <SafeAreaView style={styles.container}>
+    <ScreenContainer>
       <Text style={styles.title}>Evento encontrado</Text>
       <Text style={styles.eventName}>{event.name}</Text>
       <Text style={styles.location}>{event.location}</Text>
       <Pressable style={styles.button} onPress={handleConfirmEntry}>
         <Text style={styles.buttonText}>Confirmar entrada</Text>
       </Pressable>
-    </SafeAreaView>
+    </ScreenContainer>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
-    padding: 24,
-  },
   title: {
     fontSize: 24,
     fontWeight: 'bold',

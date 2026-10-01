@@ -1,6 +1,7 @@
 import { useContext } from 'react';
-import { Pressable, SafeAreaView, StyleSheet, Text } from 'react-native';
+import { Pressable, StyleSheet, Text } from 'react-native';
 
+import ScreenContainer from '../components/ScreenContainer';
 import { ParticipationContext } from '../context/ParticipationContext';
 
 export default function ArenaQueueScreen() {
@@ -29,7 +30,7 @@ export default function ArenaQueueScreen() {
   }
 
   return (
-    <SafeAreaView style={styles.container}>
+    <ScreenContainer>
       <Text style={styles.eventName}>BEAST Arena</Text>
       <Text style={styles.title}>Você está na fila</Text>
       <Text style={styles.positionLabel}>Sua posição:</Text>
@@ -49,16 +50,11 @@ export default function ArenaQueueScreen() {
       <Pressable style={styles.button} onPress={handleLeaveQueue}>
         <Text style={styles.buttonText}>Sair da fila</Text>
       </Pressable>
-    </SafeAreaView>
+    </ScreenContainer>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
-    padding: 24,
-  },
   eventName: {
     fontSize: 18,
   },

@@ -1,6 +1,7 @@
 import { useState } from 'react';
-import { Pressable, SafeAreaView, StyleSheet, Text, TextInput } from 'react-native';
+import { Pressable, StyleSheet, Text, TextInput } from 'react-native';
 
+import ScreenContainer from '../components/ScreenContainer';
 import { mockEvents } from '../data/mockData';
 
 export default function EventEntryScreen({ navigation }) {
@@ -24,7 +25,7 @@ export default function EventEntryScreen({ navigation }) {
   }
 
   return (
-    <SafeAreaView style={styles.container}>
+    <ScreenContainer>
       <Text style={styles.description}>
         Escaneie o QR Code do evento ou digite o código de acesso.
       </Text>
@@ -37,16 +38,11 @@ export default function EventEntryScreen({ navigation }) {
       <Pressable style={styles.button} onPress={handleContinue}>
         <Text style={styles.buttonText}>Continuar</Text>
       </Pressable>
-    </SafeAreaView>
+    </ScreenContainer>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
-    padding: 24,
-  },
   description: {
     fontSize: 16,
     marginTop: 16,

@@ -1,9 +1,11 @@
 import { StatusBar } from 'expo-status-bar';
-import { Pressable, SafeAreaView, StyleSheet, Text } from 'react-native';
+import { Pressable, StyleSheet, Text } from 'react-native';
+
+import ScreenContainer from '../components/ScreenContainer';
 
 export default function HomeScreen({ navigation }) {
   return (
-    <SafeAreaView style={styles.container}>
+    <ScreenContainer>
       <Text style={styles.title}>BEAST MARAGAMES</Text>
       <Text style={styles.welcome}>Bem-vindo à BEAST!</Text>
       <Text style={styles.description}>
@@ -16,16 +18,11 @@ export default function HomeScreen({ navigation }) {
         <Text style={styles.eventButtonText}>Entrar em um evento</Text>
       </Pressable>
       <StatusBar style="dark" />
-    </SafeAreaView>
+    </ScreenContainer>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
-    padding: 24,
-  },
   title: {
     fontSize: 24,
     fontWeight: 'bold',

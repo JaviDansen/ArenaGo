@@ -1,6 +1,7 @@
 import { useContext } from 'react';
-import { Pressable, SafeAreaView, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 
+import ScreenContainer from '../components/ScreenContainer';
 import { ParticipationContext } from '../context/ParticipationContext';
 
 export default function ActiveArenaScreen() {
@@ -27,7 +28,7 @@ export default function ActiveArenaScreen() {
   }
 
   return (
-    <SafeAreaView style={styles.container}>
+    <ScreenContainer>
       <Text style={styles.eventName}>BEAST Arena</Text>
       <Text style={styles.title}>Arena ativa</Text>
       <Text style={styles.message}>Sua participação na Arena está ativa.</Text>
@@ -59,16 +60,11 @@ export default function ActiveArenaScreen() {
       <Pressable style={styles.leaveButton} onPress={handleLeaveArena}>
         <Text style={styles.leaveButtonText}>Sair da Arena</Text>
       </Pressable>
-    </SafeAreaView>
+    </ScreenContainer>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
-    padding: 24,
-  },
   eventName: {
     fontSize: 18,
   },
