@@ -1,6 +1,6 @@
-# BEAST MARAGAMES
+# ArenaGo
 
-Aplicativo mobile desenvolvido para a BEAST MARAGAMES, voltado à participação do público em experiências e eventos.
+ArenaGo é um aplicativo mobile desenvolvido para a BEAST MARAGAMES, voltado à participação do público em experiências e eventos.
 
 ## Funcionalidades atuais
 
