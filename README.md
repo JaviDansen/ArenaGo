@@ -6,6 +6,11 @@ Aplicativo mobile desenvolvido para a BEAST MARAGAMES, voltado à participação
 
 - Navegação principal por abas: Início, Eventos e Perfil.
 - Tela inicial da BEAST MARAGAMES.
+- Fluxo de autenticação: Boas-vindas (`WelcomeScreen`), Login (`LoginScreen`), Cadastro (`RegisterScreen`) e Recuperação Provisória (`ForgotPasswordScreen`).
+- Validação local de Cadastro: nome obrigatório, e-mail obrigatório e formato válido, senha obrigatória com no mínimo 6 caracteres e confirmação de senha idêntica.
+- Validação local de Login: e-mail obrigatório com formato válido e senha obrigatória, bloqueando navegação quando inválidos.
+- Acesso provisório à Home via Login restrito a credenciais localmente válidas (para desenvolvimento, aguardando backend).
+- Estrutura preparada para criação de conta, mensagens de erro do backend e Questionário de Perfil.
 - Fluxo inicial de entrada em um evento.
 - Entrada manual por código de evento.
 - Armazenamento do código digitado usando estado local.

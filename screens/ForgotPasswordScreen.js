@@ -1,6 +1,12 @@
 import { StatusBar } from 'expo-status-bar';
 import { Pressable, SafeAreaView, StyleSheet, Text, View } from 'react-native';
 
+// =============================================================================
+// ESTRUTURA PROVISÓRIA (TASK 2):
+// A recuperação de senha real depende da tecnologia de autenticação e backend
+// que ainda será definida pela equipe. Mantemos a tela/acesso provisório criado
+// na Task 1 sem implementar serviço de recuperação por conta própria.
+// =============================================================================
 export default function ForgotPasswordScreen({ navigation }) {
   return (
     <SafeAreaView style={styles.container}>

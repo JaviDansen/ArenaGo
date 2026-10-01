@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import {
+  Alert,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -12,16 +13,64 @@ import {
   View,
 } from 'react-native';
 
+import { validateRegisterForm } from '../utils/validation';
+
 export default function RegisterScreen({ navigation }) {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [errors, setErrors] = useState({});
+  const [isSuccess, setIsSuccess] = useState(false);
 
   function handleRegister() {
-    // Nesta task, o foco é a estrutura visual, campos e navegação.
-    // Futuro fluxo: Cadastro → Questionário de Perfil → Home.
-    // Validações e regras de negócio serão adicionadas nas próximas etapas.
+    setIsSuccess(false);
+
+    // Validação local de todos os campos do formulário
+    const validation = validateRegisterForm({
+      name,
+      email,
+      password,
+      confirmPassword,
+    });
+
+    if (!validation.isValid) {
+      setErrors(validation.errors);
+      return;
+    }
+
+    setErrors({});
+    setIsSuccess(true);
+
+    // =========================================================================
+    // ESTRUTURA PREPARADA PARA O FLUXO FUTURO:
+    // Cadastro válido -> Criação da conta (backend) -> Questionário de Perfil -> Home
+    //
+    // NOTAS DE ARQUITETURA E REQUISITOS (TASK 2):
+    // 1. Dados validados para criação da conta no perfil:
+    //    const userProfileData = {
+    //      name: name.trim(),
+    //      email: email.trim(),
+    //      password: password,
+    //    };
+    //    * 'confirmPassword' é estritamente uma validação local e NÃO faz parte do perfil.
+    //
+    // 2. Integração com Backend / Autenticação (futuro):
+    //    await authService.register(userProfileData);
+    //
+    // 3. Questionário de Perfil (futuro):
+    //    O Questionário de Perfil ainda não foi implementado nesta task.
+    //    Por especificação, NÃO criamos redirecionamento definitivo direto para a Home
+    //    como substituto do questionário.
+    //
+    // COMPORTAMENTO PROVISÓRIO DESTA TASK:
+    // Exibimos a confirmação de que os dados foram validados localmente com sucesso.
+    // =========================================================================
+    Alert.alert(
+      'Cadastro validado!',
+      'Suas informações passaram por todas as validações locais.\n\nEstrutura preparada para a criação de conta e direcionamento para o Questionário de Perfil (em desenvolvimento).',
+      [{ text: 'OK' }]
+    );
   }
 
   return (
@@ -59,54 +108,101 @@ export default function RegisterScreen({ navigation }) {
 
           {/* Formulário - Somente Nome, E-mail, Senha e Confirmar senha */}
           <View style={styles.form}>
+            {/* Mensagem de sucesso da validação local */}
+            {isSuccess ? (
+              <View style={styles.successCard}>
+                <Text style={styles.successTitle}>✓ Dados validados com sucesso</Text>
+                <Text style={styles.successText}>
+                  Todas as validações locais foram atendidas. Próxima etapa do fluxo: criação da conta e Questionário de Perfil.
+                </Text>
+              </View>
+            ) : null}
+
             <View style={styles.inputGroup}>
               <Text style={styles.label}>Nome completo</Text>
               <TextInput
-                style={styles.input}
+                style={[styles.input, errors.name ? styles.inputError : null]}
                 placeholder="Como quer ser chamado?"
                 placeholderTextColor="#64748b"
                 value={name}
-                onChangeText={setName}
+                onChangeText={(text) => {
+                  setName(text);
+                  if (errors.name) {
+                    setErrors((prev) => ({ ...prev, name: null }));
+                  }
+                  if (isSuccess) setIsSuccess(false);
+                }}
+                autoCapitalize="words"
                 autoCorrect={false}
               />
+              {errors.name ? (
+                <Text style={styles.errorText}>{errors.name}</Text>
+              ) : null}
             </View>
 
             <View style={styles.inputGroup}>
               <Text style={styles.label}>E-mail</Text>
               <TextInput
-                style={styles.input}
+                style={[styles.input, errors.email ? styles.inputError : null]}
                 placeholder="seu.email@exemplo.com"
                 placeholderTextColor="#64748b"
                 value={email}
-                onChangeText={setEmail}
+                onChangeText={(text) => {
+                  setEmail(text);
+                  if (errors.email) {
+                    setErrors((prev) => ({ ...prev, email: null }));
+                  }
+                  if (isSuccess) setIsSuccess(false);
+                }}
                 keyboardType="email-address"
                 autoCapitalize="none"
                 autoCorrect={false}
               />
+              {errors.email ? (
+                <Text style={styles.errorText}>{errors.email}</Text>
+              ) : null}
             </View>
 
             <View style={styles.inputGroup}>
               <Text style={styles.label}>Senha</Text>
               <TextInput
-                style={styles.input}
+                style={[styles.input, errors.password ? styles.inputError : null]}
                 placeholder="Crie uma senha de acesso"
                 placeholderTextColor="#64748b"
                 value={password}
-                onChangeText={setPassword}
+                onChangeText={(text) => {
+                  setPassword(text);
+                  if (errors.password) {
+                    setErrors((prev) => ({ ...prev, password: null }));
+                  }
+                  if (isSuccess) setIsSuccess(false);
+                }}
                 secureTextEntry
               />
+              {errors.password ? (
+                <Text style={styles.errorText}>{errors.password}</Text>
+              ) : null}
             </View>
 
             <View style={styles.inputGroup}>
               <Text style={styles.label}>Confirmar senha</Text>
               <TextInput
-                style={styles.input}
+                style={[styles.input, errors.confirmPassword ? styles.inputError : null]}
                 placeholder="Digite a mesma senha novamente"
                 placeholderTextColor="#64748b"
                 value={confirmPassword}
-                onChangeText={setConfirmPassword}
+                onChangeText={(text) => {
+                  setConfirmPassword(text);
+                  if (errors.confirmPassword) {
+                    setErrors((prev) => ({ ...prev, confirmPassword: null }));
+                  }
+                  if (isSuccess) setIsSuccess(false);
+                }}
                 secureTextEntry
               />
+              {errors.confirmPassword ? (
+                <Text style={styles.errorText}>{errors.confirmPassword}</Text>
+              ) : null}
             </View>
 
             <Pressable style={styles.primaryButton} onPress={handleRegister}>
@@ -216,6 +312,34 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     color: '#ffffff',
     fontSize: 15,
+  },
+  inputError: {
+    borderColor: '#ef4444',
+  },
+  errorText: {
+    color: '#f87171',
+    fontSize: 12,
+    fontWeight: '600',
+    marginTop: 2,
+  },
+  successCard: {
+    backgroundColor: '#0f291e',
+    borderWidth: 1,
+    borderColor: '#10b981',
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 4,
+  },
+  successTitle: {
+    color: '#6ee7b7',
+    fontSize: 14,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  successText: {
+    color: '#a7f3d0',
+    fontSize: 13,
+    lineHeight: 18,
   },
   primaryButton: {
     backgroundColor: '#7c3aed',
