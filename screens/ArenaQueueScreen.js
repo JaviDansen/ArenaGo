@@ -12,6 +12,7 @@ export default function ArenaQueueScreen() {
     setParticipation({
       ...participation,
       status: 'active',
+      queuePosition: null,
     });
   }
 
@@ -23,6 +24,7 @@ export default function ArenaQueueScreen() {
     setParticipation({
       ...participation,
       status: 'active',
+      queuePosition: null,
     });
   }
 

@@ -13,12 +13,14 @@ export default function EventConfirmationScreen({ navigation, route }) {
         event,
         status: 'waiting',
         queuePosition: 5,
+        experienceQueue: null,
       });
     } else {
       setParticipation({
         event,
         status: 'active',
         queuePosition: null,
+        experienceQueue: null,
       });
     }
 
