@@ -14,8 +14,8 @@ export default function ActiveArenaScreen() {
   }
 
   function handleJoinExperienceQueue(experience) {
-    // Um participante só pode aguardar em uma fila de experiência por vez.
-    if (participation.experienceQueue) {
+    // O participante não pode entrar em outra fila enquanto aguarda em uma fila ou realiza uma experiência.
+    if (participation.experienceQueue || participation.activeExperience) {
       return;
     }
 
@@ -37,6 +37,65 @@ export default function ActiveArenaScreen() {
     });
   }
 
+  function handleSimulateExperienceCall() {
+    if (!participation.experienceQueue) {
+      return;
+    }
+
+    const { experienceId } = participation.experienceQueue;
+
+    // Simulação temporária: no fluxo real, a equipe ou o backend fará a chamada.
+    setParticipation({
+      ...participation,
+      experienceQueue: null,
+      activeExperience: {
+        experienceId,
+      },
+    });
+  }
+
+  function handleSimulateStaffCheck() {
+    if (!participation.activeExperience) {
+      return;
+    }
+
+    // Botão temporário para desenvolvimento; no fluxo real, o staff/backend confirmará que o participante realizou a experiência.
+    setParticipation({
+      ...participation,
+      activeExperience: null,
+    });
+  }
+
+  function handleSimulateAbsence() {
+    if (!participation.activeExperience) {
+      return;
+    }
+
+    const { experienceId } = participation.activeExperience;
+    const experience = participation.event.experiences.find(
+      (eventExperience) => eventExperience.id === experienceId
+    );
+
+    if (!experience) {
+      return;
+    }
+
+    // Posição temporária: futuramente o backend reposicionará o participante no fim da fila.
+    setParticipation({
+      ...participation,
+      activeExperience: null,
+      experienceQueue: {
+        experienceId,
+        position: experience.queueSize + 1,
+      },
+    });
+  }
+
+  const activeExperience = participation.event.experiences.find(
+    (experience) =>
+      experience.id === participation.activeExperience?.experienceId
+  );
+
   return (
     <ScreenContainer>
       {/* As experiências variam por evento; a rolagem acomoda listas maiores. */}
@@ -44,10 +103,34 @@ export default function ActiveArenaScreen() {
         <Text style={styles.eventName}>BEAST Arena</Text>
         <Text style={styles.title}>Arena ativa</Text>
         <Text style={styles.message}>Sua participação na Arena está ativa.</Text>
+        {participation.activeExperience && (
+          <View style={styles.experience}>
+            <Text style={styles.experienceName}>É A SUA VEZ!</Text>
+            <Text style={styles.message}>
+              Dirija-se ao estande de {activeExperience?.name}.
+            </Text>
+            <Pressable
+              style={styles.leaveButton}
+              onPress={handleSimulateStaffCheck}
+            >
+              <Text style={styles.leaveButtonText}>Simular check do staff</Text>
+            </Pressable>
+            <Pressable
+              style={styles.leaveButton}
+              onPress={handleSimulateAbsence}
+            >
+              <Text style={styles.leaveButtonText}>Simular ausência</Text>
+            </Pressable>
+          </View>
+        )}
         <Text style={styles.experiencesTitle}>Experiências</Text>
         {participation.event.experiences.map((experience) => {
           // Controla as ações disponíveis enquanto o participante ocupa uma fila.
           const hasExperienceQueue = Boolean(participation.experienceQueue);
+          const hasActiveExperience = Boolean(participation.activeExperience);
+
+          const isActiveExperience =
+            participation.activeExperience?.experienceId === experience.id;
           // Indica se esta experiência renderizada é a fila atual do participante.
           const isCurrentQueue =
             participation.experienceQueue?.experienceId === experience.id;
@@ -58,18 +141,32 @@ export default function ActiveArenaScreen() {
               <Text style={styles.message}>
                 {experience.queueSize} pessoa(s) na fila
               </Text>
-              {isCurrentQueue && (
+              {isCurrentQueue && !hasActiveExperience && (
                 <Text style={styles.message}>
                   Sua posição: {participation.experienceQueue.position}º
                 </Text>
               )}
-              {isCurrentQueue ? (
-                <Pressable
-                  style={styles.leaveButton}
-                  onPress={handleLeaveExperienceQueue}
-                >
-                  <Text style={styles.leaveButtonText}>Sair da fila</Text>
-                </Pressable>
+              {isActiveExperience ? (
+                <Text style={styles.message}>Você foi chamado</Text>
+              ) : hasActiveExperience ? (
+                <Text style={styles.message}>
+                  Indisponível enquanto você estiver em outra experiência
+                </Text>
+              ) : isCurrentQueue ? (
+                <>
+                  <Pressable
+                    style={styles.leaveButton}
+                    onPress={handleLeaveExperienceQueue}
+                  >
+                    <Text style={styles.leaveButtonText}>Sair da fila</Text>
+                  </Pressable>
+                  <Pressable
+                    style={styles.leaveButton}
+                    onPress={handleSimulateExperienceCall}
+                  >
+                    <Text style={styles.leaveButtonText}>Simular chamada</Text>
+                  </Pressable>
+                </>
               ) : hasExperienceQueue ? (
                 <Text style={styles.message}>
                   Indisponível enquanto você estiver em outra fila

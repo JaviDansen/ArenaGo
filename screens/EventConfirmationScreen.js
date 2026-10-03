@@ -9,12 +9,16 @@ export default function EventConfirmationScreen({ navigation, route }) {
   const { event } = route.params;
 
   function handleConfirmEntry() {
+    // Eventos com fila externa começam em espera; os demais entram direto na Arena.
     if (event.hasArenaQueue) {
       setParticipation({
         event,
         status: 'waiting',
+        // Posição temporariamente simulada enquanto não há integração com backend.
         queuePosition: 5,
         experienceQueue: null,
+        // Será preenchida quando o participante for chamado para uma experiência.
+        activeExperience: null,
       });
     } else {
       setParticipation({
@@ -22,9 +26,11 @@ export default function EventConfirmationScreen({ navigation, route }) {
         status: 'active',
         queuePosition: null,
         experienceQueue: null,
+        activeExperience: null,
       });
     }
 
+    // Remove as telas de entrada para não retornar a elas com participação ativa.
     navigation.reset({
       index: 0,
       routes: [{ name: 'MainTabs' }],
