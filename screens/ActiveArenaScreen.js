@@ -1,16 +1,43 @@
 import { useContext } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import {
+  Alert,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 
 import ScreenContainer from '../components/ScreenContainer';
 import { ParticipationContext } from '../context/ParticipationContext';
 
-export default function ActiveArenaScreen() {
+export default function ActiveArenaScreen({ navigation }) {
   const { participation, setParticipation } = useContext(
     ParticipationContext
   );
 
   function handleLeaveArena() {
-    setParticipation(null);
+    Alert.alert(
+      'Deseja sair da Arena?',
+      'Sua participação será encerrada e não poderá ser retomada.',
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Sair da Arena',
+          style: 'destructive',
+          onPress: () => {
+            // Os dados são preservados temporariamente para a etapa de avaliação, embora a participação já esteja encerrada.
+            setParticipation({
+              ...participation,
+              status: 'finished',
+              experienceQueue: null,
+              activeExperience: null,
+            });
+            navigation.navigate('Evaluation');
+          },
+        },
+      ]
+    );
   }
 
   function handleJoinExperienceQueue(experience) {

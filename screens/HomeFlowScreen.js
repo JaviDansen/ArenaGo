@@ -17,7 +17,7 @@ export default function HomeFlowScreen({ navigation }) {
   }
 
   if (participation.status === 'active') {
-    return <ActiveArenaScreen />;
+    return <ActiveArenaScreen navigation={navigation} />;
   }
 
   return <HomeScreen navigation={navigation} />;

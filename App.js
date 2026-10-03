@@ -3,6 +3,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 
 import { ParticipationProvider } from './context/ParticipationContext';
 import MainTabs from './navigation/MainTabs';
+import EvaluationScreen from './screens/EvaluationScreen';
 import EventConfirmationScreen from './screens/EventConfirmationScreen';
 import EventEntryScreen from './screens/EventEntryScreen';
 import ForgotPasswordScreen from './screens/ForgotPasswordScreen';
@@ -33,6 +34,15 @@ export default function App() {
             name="EventConfirmation"
             component={EventConfirmationScreen}
             options={{ headerShown: true, title: 'Confirmar entrada' }}
+          />
+          <Stack.Screen
+            name="Evaluation"
+            component={EvaluationScreen}
+            options={{
+              headerShown: true,
+              headerBackVisible: false,
+              title: 'Avaliação',
+            }}
           />
         </Stack.Navigator>
       </NavigationContainer>
