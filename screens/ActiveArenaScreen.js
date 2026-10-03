@@ -14,6 +14,7 @@ export default function ActiveArenaScreen() {
   }
 
   function handleJoinExperienceQueue(experience) {
+    // Um participante só pode aguardar em uma fila de experiência por vez.
     if (participation.experienceQueue) {
       return;
     }
@@ -22,8 +23,17 @@ export default function ActiveArenaScreen() {
       ...participation,
       experienceQueue: {
         experienceId: experience.id,
+        // Simulação temporária sem backend: entra após as pessoas do mock.
         position: experience.queueSize + 1,
       },
+    });
+  }
+
+  function handleLeaveExperienceQueue() {
+    // Sair da fila não encerra a participação na Arena; apenas remove esta fila.
+    setParticipation({
+      ...participation,
+      experienceQueue: null,
     });
   }
 
@@ -36,6 +46,9 @@ export default function ActiveArenaScreen() {
         <Text style={styles.message}>Sua participação na Arena está ativa.</Text>
         <Text style={styles.experiencesTitle}>Experiências</Text>
         {participation.event.experiences.map((experience) => {
+          // Controla as ações disponíveis enquanto o participante ocupa uma fila.
+          const hasExperienceQueue = Boolean(participation.experienceQueue);
+          // Indica se esta experiência renderizada é a fila atual do participante.
           const isCurrentQueue =
             participation.experienceQueue?.experienceId === experience.id;
 
@@ -50,12 +63,25 @@ export default function ActiveArenaScreen() {
                   Sua posição: {participation.experienceQueue.position}º
                 </Text>
               )}
-              <Pressable
-                style={styles.leaveButton}
-                onPress={() => handleJoinExperienceQueue(experience)}
-              >
-                <Text style={styles.leaveButtonText}>Entrar na fila</Text>
-              </Pressable>
+              {isCurrentQueue ? (
+                <Pressable
+                  style={styles.leaveButton}
+                  onPress={handleLeaveExperienceQueue}
+                >
+                  <Text style={styles.leaveButtonText}>Sair da fila</Text>
+                </Pressable>
+              ) : hasExperienceQueue ? (
+                <Text style={styles.message}>
+                  Indisponível enquanto você estiver em outra fila
+                </Text>
+              ) : (
+                <Pressable
+                  style={styles.leaveButton}
+                  onPress={() => handleJoinExperienceQueue(experience)}
+                >
+                  <Text style={styles.leaveButtonText}>Entrar na fila</Text>
+                </Pressable>
+              )}
             </View>
           );
         })}
