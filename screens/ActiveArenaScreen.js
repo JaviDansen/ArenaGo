@@ -1,5 +1,5 @@
 import { useContext } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import ScreenContainer from '../components/ScreenContainer';
 import { ParticipationContext } from '../context/ParticipationContext';
@@ -29,37 +29,40 @@ export default function ActiveArenaScreen() {
 
   return (
     <ScreenContainer>
-      <Text style={styles.eventName}>BEAST Arena</Text>
-      <Text style={styles.title}>Arena ativa</Text>
-      <Text style={styles.message}>Sua participação na Arena está ativa.</Text>
-      <Text style={styles.experiencesTitle}>Experiências</Text>
-      {participation.event.experiences.map((experience) => {
-        const isCurrentQueue =
-          participation.experienceQueue?.experienceId === experience.id;
+      {/* As experiências variam por evento; a rolagem acomoda listas maiores. */}
+      <ScrollView>
+        <Text style={styles.eventName}>BEAST Arena</Text>
+        <Text style={styles.title}>Arena ativa</Text>
+        <Text style={styles.message}>Sua participação na Arena está ativa.</Text>
+        <Text style={styles.experiencesTitle}>Experiências</Text>
+        {participation.event.experiences.map((experience) => {
+          const isCurrentQueue =
+            participation.experienceQueue?.experienceId === experience.id;
 
-        return (
-          <View key={experience.id} style={styles.experience}>
-            <Text style={styles.experienceName}>{experience.name}</Text>
-            <Text style={styles.message}>
-              {experience.queueSize} pessoa(s) na fila
-            </Text>
-            {isCurrentQueue && (
+          return (
+            <View key={experience.id} style={styles.experience}>
+              <Text style={styles.experienceName}>{experience.name}</Text>
               <Text style={styles.message}>
-                Sua posição: {participation.experienceQueue.position}º
+                {experience.queueSize} pessoa(s) na fila
               </Text>
-            )}
-            <Pressable
-              style={styles.leaveButton}
-              onPress={() => handleJoinExperienceQueue(experience)}
-            >
-              <Text style={styles.leaveButtonText}>Entrar na fila</Text>
-            </Pressable>
-          </View>
-        );
-      })}
-      <Pressable style={styles.leaveButton} onPress={handleLeaveArena}>
-        <Text style={styles.leaveButtonText}>Sair da Arena</Text>
-      </Pressable>
+              {isCurrentQueue && (
+                <Text style={styles.message}>
+                  Sua posição: {participation.experienceQueue.position}º
+                </Text>
+              )}
+              <Pressable
+                style={styles.leaveButton}
+                onPress={() => handleJoinExperienceQueue(experience)}
+              >
+                <Text style={styles.leaveButtonText}>Entrar na fila</Text>
+              </Pressable>
+            </View>
+          );
+        })}
+        <Pressable style={styles.leaveButton} onPress={handleLeaveArena}>
+          <Text style={styles.leaveButtonText}>Sair da Arena</Text>
+        </Pressable>
+      </ScrollView>
     </ScreenContainer>
   );
 }
