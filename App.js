@@ -8,6 +8,7 @@ import EventConfirmationScreen from './screens/EventConfirmationScreen';
 import EventEntryScreen from './screens/EventEntryScreen';
 import ForgotPasswordScreen from './screens/ForgotPasswordScreen';
 import LoginScreen from './screens/LoginScreen';
+import ProfileQuestionnaireScreen from './screens/ProfileQuestionnaireScreen';
 import RegisterScreen from './screens/RegisterScreen';
 import WelcomeScreen from './screens/WelcomeScreen';
 
@@ -22,6 +23,8 @@ export default function App() {
           <Stack.Screen name="Login" component={LoginScreen} />
           <Stack.Screen name="Register" component={RegisterScreen} />
           <Stack.Screen name="Cadastro" component={RegisterScreen} />
+          <Stack.Screen name="ProfileQuestionnaire" component={ProfileQuestionnaireScreen} />
+          <Stack.Screen name="Questionario" component={ProfileQuestionnaireScreen} />
           <Stack.Screen name="ForgotPassword" component={ForgotPasswordScreen} />
           <Stack.Screen name="EsqueciSenha" component={ForgotPasswordScreen} />
           <Stack.Screen name="MainTabs" component={MainTabs} />

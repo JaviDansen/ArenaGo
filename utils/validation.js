@@ -106,3 +106,52 @@ export function validateLoginForm({ email, password }) {
     errors,
   };
 }
+
+/**
+ * Valida os campos da Etapa 1 do Questionário de Perfil ("Sobre você").
+ * Regras da Task 3:
+ * - Idade: campo numérico e obrigatório;
+ * - Gênero: obrigatório ('Feminino', 'Masculino', 'Outro', 'Prefiro não informar').
+ *   Se 'Outro', o campo adicional 'otherGender' torna-se obrigatório.
+ * - Escolaridade: obrigatório ('Fundamental', 'Médio', 'Superior', 'Pós-graduação', 'Prefiro não informar').
+ *
+ * @param {Object} data
+ * @param {string|number} data.age
+ * @param {string} data.gender
+ * @param {string} [data.otherGender]
+ * @param {string} data.education
+ * @returns {{ isValid: boolean, errors: Object }}
+ */
+export function validateAboutYouStep({ age, gender, otherGender, education }) {
+  const errors = {};
+
+  const trimmedAge = String(age ?? '').trim();
+
+  // Idade: obrigatória e campo numérico
+  if (!trimmedAge) {
+    errors.age = 'A idade é obrigatória.';
+  } else if (!/^\d+$/.test(trimmedAge) || parseInt(trimmedAge, 10) <= 0) {
+    errors.age = 'Informe uma idade válida (apenas números).';
+  }
+
+  // Gênero: obrigatório
+  if (!gender) {
+    errors.gender = 'Selecione uma opção de gênero.';
+  } else if (gender === 'Outro') {
+    const trimmedOther = (otherGender ?? '').trim();
+    if (!trimmedOther) {
+      errors.otherGender = 'Por favor, especifique o seu gênero.';
+    }
+  }
+
+  // Escolaridade: obrigatória
+  if (!education) {
+    errors.education = 'Selecione seu nível de escolaridade.';
+  }
+
+  return {
+    isValid: Object.keys(errors).length === 0,
+    errors,
+  };
+}
+

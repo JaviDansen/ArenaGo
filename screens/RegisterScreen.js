@@ -43,34 +43,16 @@ export default function RegisterScreen({ navigation }) {
     setIsSuccess(true);
 
     // =========================================================================
-    // ESTRUTURA PREPARADA PARA O FLUXO FUTURO:
-    // Cadastro válido -> Criação da conta (backend) -> Questionário de Perfil -> Home
-    //
-    // NOTAS DE ARQUITETURA E REQUISITOS (TASK 2):
-    // 1. Dados validados para criação da conta no perfil:
-    //    const userProfileData = {
-    //      name: name.trim(),
-    //      email: email.trim(),
-    //      password: password,
-    //    };
-    //    * 'confirmPassword' é estritamente uma validação local e NÃO faz parte do perfil.
-    //
-    // 2. Integração com Backend / Autenticação (futuro):
-    //    await authService.register(userProfileData);
-    //
-    // 3. Questionário de Perfil (futuro):
-    //    O Questionário de Perfil ainda não foi implementado nesta task.
-    //    Por especificação, NÃO criamos redirecionamento definitivo direto para a Home
-    //    como substituto do questionário.
-    //
-    // COMPORTAMENTO PROVISÓRIO DESTA TASK:
-    // Exibimos a confirmação de que os dados foram validados localmente com sucesso.
+    // FLUXO DO CADASTRO (TASK 3):
+    // Cadastro válido -> Questionário de Perfil ("Sobre você") -> Próxima etapa
+    // Em vez de encerrar o fluxo com confirmação local, direciona para o Questionário.
     // =========================================================================
-    Alert.alert(
-      'Cadastro validado!',
-      'Suas informações passaram por todas as validações locais.\n\nEstrutura preparada para a criação de conta e direcionamento para o Questionário de Perfil (em desenvolvimento).',
-      [{ text: 'OK' }]
-    );
+    navigation.navigate('ProfileQuestionnaire', {
+      user: {
+        name: name.trim(),
+        email: email.trim(),
+      },
+    });
   }
 
   return (
@@ -212,7 +194,7 @@ export default function RegisterScreen({ navigation }) {
             {/* Card informativo de fluxo posterior */}
             <View style={styles.infoCard}>
               <Text style={styles.infoCardText}>
-                Etapas seguintes: <Text style={styles.infoCardBold}>Cadastro → Questionário de Perfil → Home</Text>. O questionário será estruturado nas próximas tasks.
+                Etapas seguintes: <Text style={styles.infoCardBold}>Cadastro → Questionário de Perfil → Próxima etapa</Text>. Ao validar seus dados, você será direcionado para o questionário.
               </Text>
             </View>
           </View>
