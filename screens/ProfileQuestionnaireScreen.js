@@ -15,9 +15,10 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { validateAboutYouStep } from '../utils/validation';
 
 // =============================================================================
-// DEFINIÇÃO DAS ETAPAS DO QUESTIONÁRIO
-// A estrutura permite adicionar novas etapas de forma modular sem refazer
-// o container, cabeçalho, indicador de progresso ou navegação entre passos.
+// DEFINIÇÃO DAS ETAPAS DO QUESTIONÁRIO (TASK 3)
+// 1. Sobre você (funcional nesta task)
+// 2. Seus jogos (provisório — Task 4)
+// 3. Mercado de games (provisório — Task 5)
 // =============================================================================
 const QUESTIONNAIRE_STEPS = [
   {
@@ -28,19 +29,19 @@ const QUESTIONNAIRE_STEPS = [
     subtitle: 'Preencha suas informações para personalizarmos sua experiência na arena.',
   },
   {
-    id: 'preferences',
+    id: 'your-games',
     stepNumber: 2,
     tag: 'ETAPA 2 DE 3',
-    title: 'Preferências de Jogos',
-    subtitle: 'Categorias e modalidades de seu interesse na BEAST.',
+    title: 'Seus jogos',
+    subtitle: 'Seleção dos seus jogos favoritos (busca e seleção múltipla na Task 4).',
     isProvisional: true,
   },
   {
-    id: 'finish',
+    id: 'games-market',
     stepNumber: 3,
     tag: 'ETAPA 3 DE 3',
-    title: 'Finalização do Perfil',
-    subtitle: 'Revisão final e ativação das configurações do competidor.',
+    title: 'Mercado de games',
+    subtitle: 'Percepção e interesse no mercado profissional de games (Task 5).',
     isProvisional: true,
   },
 ];
@@ -60,13 +61,32 @@ const EDUCATION_OPTIONS = [
   'Prefiro não informar',
 ];
 
+// Estrutura de dados local compartilhada por todas as etapas do questionário
+const INITIAL_QUESTIONNAIRE_DATA = {
+  // Etapa 1 — Sobre você
+  age: '',
+  gender: '',
+  otherGender: null,
+  education: '',
+
+  // Etapa 2 — Seus jogos (estrutura reservada para a Task 4)
+  selectedGames: [],
+
+  // Etapa 3 — Mercado de games (estrutura reservada para a Task 5)
+  marketKnowledge: null,
+  marketInterest: null,
+};
+
 export default function ProfileQuestionnaireScreen({ navigation, route }) {
   const registeredUser = route?.params?.user || null;
 
-  // Controle de etapa atual (0-indexada)
+  // Controle de etapa atual (0-indexada: 0 = Etapa 1, 1 = Etapa 2, 2 = Etapa 3)
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
 
-  // Estado da Etapa 1 — Sobre você
+  // Estado compartilhado em memória pelas etapas do questionário
+  const [questionnaireData, setQuestionnaireData] = useState(INITIAL_QUESTIONNAIRE_DATA);
+
+  // Estados dos campos da Etapa 1 — Sobre você
   const [age, setAge] = useState('');
   const [gender, setGender] = useState('');
   const [otherGender, setOtherGender] = useState('');
@@ -82,11 +102,37 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
     if (currentStepIndex > 0) {
       setCurrentStepIndex((prev) => prev - 1);
     } else {
+      // Retornar da Etapa 1 ao Cadastro, quando necessário
       navigation.goBack();
     }
   }
 
-  // Validação e avanço da Etapa 1
+  // Seleção única de gênero
+  function handleSelectGender(option) {
+    setGender(option);
+    if (errors.gender) {
+      setErrors((prev) => ({ ...prev, gender: null }));
+    }
+
+    if (option !== 'Outro') {
+      // Se o participante trocar "Outro" por outra opção, o campo adicional
+      // deixa de ser exigido e seu valor anterior não deve ser considerado na resposta final.
+      setOtherGender('');
+      if (errors.otherGender) {
+        setErrors((prev) => ({ ...prev, otherGender: null }));
+      }
+    }
+  }
+
+  // Seleção única de escolaridade
+  function handleSelectEducation(option) {
+    setEducation(option);
+    if (errors.education) {
+      setErrors((prev) => ({ ...prev, education: null }));
+    }
+  }
+
+  // Validação e avanço da Etapa 1 para a Etapa 2
   function handleAdvanceStep1() {
     const validation = validateAboutYouStep({
       age,
@@ -101,15 +147,36 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
     }
 
     setErrors({});
+
+    // Se o gênero não for 'Outro', a especificação não é considerada na resposta final
+    const resolvedOtherGender = gender === 'Outro' ? otherGender.trim() : null;
+
+    setQuestionnaireData((prev) => ({
+      ...prev,
+      age: age.trim(),
+      gender,
+      otherGender: resolvedOtherGender,
+      education,
+    }));
+
     setCurrentStepIndex(1);
   }
 
-  // Avanço genérico para as próximas etapas
-  function handleAdvanceNextStep() {
-    if (currentStepIndex < totalSteps - 1) {
-      setCurrentStepIndex((prev) => prev + 1);
+  // Avanço provisório da Etapa 2 para a Etapa 3
+  function handleAdvanceStep2() {
+    setCurrentStepIndex(2);
+  }
+
+  // Finalização provisória do questionário (direcionamento para Home / MainTabs)
+  function handleFinishQuestionnaire() {
+    // Simulação de navegação: direciona para o MainTabs (Início com HomeFlowScreen)
+    // Sem registrar perfil definitivamente completo nem salvar permanentemente.
+    if (navigation.reset) {
+      navigation.reset({
+        index: 0,
+        routes: [{ name: 'MainTabs' }],
+      });
     } else {
-      // Conclusão do questionário (direcionamento para a Home/MainTabs)
       navigation.replace('MainTabs');
     }
   }
@@ -175,7 +242,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
           {/* ================================================================= */}
           {currentStepIndex === 0 && (
             <View style={styles.form}>
-              {/* CAMPO: IDADE */}
+              {/* CAMPO 1 — IDADE */}
               <View style={styles.inputGroup}>
                 <View style={styles.labelRow}>
                   <Text style={styles.label}>Idade</Text>
@@ -187,14 +254,14 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
                   placeholderTextColor="#64748b"
                   value={age}
                   onChangeText={(text) => {
-                    // Mantém apenas dígitos numéricos
+                    // Aceitar somente dígitos numéricos
                     const numericText = text.replace(/[^0-9]/g, '');
                     setAge(numericText);
                     if (errors.age) {
                       setErrors((prev) => ({ ...prev, age: null }));
                     }
                   }}
-                  keyboardType="numeric"
+                  keyboardType="number-pad"
                   maxLength={3}
                 />
                 {errors.age ? (
@@ -202,7 +269,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
                 ) : null}
               </View>
 
-              {/* CAMPO: GÊNERO */}
+              {/* CAMPO 2 — GÊNERO */}
               <View style={styles.inputGroup}>
                 <View style={styles.labelRow}>
                   <Text style={styles.label}>Gênero</Text>
@@ -220,16 +287,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
                           isSelected ? styles.optionCardSelected : null,
                           errors.gender ? styles.optionCardError : null,
                         ]}
-                        onPress={() => {
-                          setGender(option);
-                          if (errors.gender) {
-                            setErrors((prev) => ({ ...prev, gender: null }));
-                          }
-                          // Limpa erro do campo extra caso mude para opção diferente de 'Outro'
-                          if (option !== 'Outro' && errors.otherGender) {
-                            setErrors((prev) => ({ ...prev, otherGender: null }));
-                          }
-                        }}
+                        onPress={() => handleSelectGender(option)}
                       >
                         <View style={styles.optionRadioOuter}>
                           {isSelected && <View style={styles.optionRadioInner} />}
@@ -280,7 +338,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
                 )}
               </View>
 
-              {/* CAMPO: ESCOLARIDADE */}
+              {/* CAMPO 3 — ESCOLARIDADE */}
               <View style={styles.inputGroup}>
                 <View style={styles.labelRow}>
                   <Text style={styles.questionLabel}>
@@ -300,12 +358,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
                           isSelected ? styles.optionCardSelected : null,
                           errors.education ? styles.optionCardError : null,
                         ]}
-                        onPress={() => {
-                          setEducation(option);
-                          if (errors.education) {
-                            setErrors((prev) => ({ ...prev, education: null }));
-                          }
-                        }}
+                        onPress={() => handleSelectEducation(option)}
                       >
                         <View style={styles.optionRadioOuter}>
                           {isSelected && <View style={styles.optionRadioInner} />}
@@ -338,7 +391,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
           )}
 
           {/* ================================================================= */}
-          {/* ETAPA 2 (PROVISÓRIA) — PREFERÊNCIAS */}
+          {/* ETAPA 2 (PROVISÓRIA) — SEUS JOGOS */}
           {/* ================================================================= */}
           {currentStepIndex === 1 && (
             <View style={styles.provisionalContainer}>
@@ -347,36 +400,43 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
               </View>
 
               <Text style={styles.provisionalTitle}>
-                Etapa 2 — Preferências de Jogos
+                Etapa 2 — Seus jogos
               </Text>
               <Text style={styles.provisionalDescription}>
-                A primeira etapa (&ldquo;Sobre você&rdquo;) foi preenchida com sucesso e validada!
-                Esta etapa será implementada nas próximas tasks para personalização de gostos e categorias.
+                Você está na Etapa 2 do questionário. A busca, seleção múltipla e inclusão manual de jogos serão implementadas na Task 4.
               </Text>
 
-              {/* Resumo visual dos dados da Etapa 1 */}
+              {/* Resumo visual dos dados preservados da Etapa 1 */}
               <View style={styles.summaryCard}>
-                <Text style={styles.summaryTitle}>Resumo da Etapa 1:</Text>
+                <Text style={styles.summaryTitle}>Dados preservados da Etapa 1:</Text>
                 <View style={styles.summaryRow}>
                   <Text style={styles.summaryLabel}>Idade:</Text>
-                  <Text style={styles.summaryValue}>{age} anos</Text>
+                  <Text style={styles.summaryValue}>{questionnaireData.age || age} anos</Text>
                 </View>
                 <View style={styles.summaryRow}>
                   <Text style={styles.summaryLabel}>Gênero:</Text>
                   <Text style={styles.summaryValue}>
-                    {gender === 'Outro' ? `Outro (${otherGender})` : gender}
+                    {gender === 'Outro' && otherGender ? `Outro (${otherGender})` : gender}
                   </Text>
                 </View>
                 <View style={styles.summaryRow}>
                   <Text style={styles.summaryLabel}>Escolaridade:</Text>
-                  <Text style={styles.summaryValue}>{education}</Text>
+                  <Text style={styles.summaryValue}>{questionnaireData.education || education}</Text>
                 </View>
+              </View>
+
+              {/* Estrutura prevista para a Task 4 */}
+              <View style={styles.placeholderCard}>
+                <Text style={styles.placeholderCardTitle}>Jogos Selecionados (Estrutura Local)</Text>
+                <Text style={styles.placeholderCardSubtitle}>
+                  Lista em memória: {questionnaireData.selectedGames.length} jogos selecionados
+                </Text>
               </View>
 
               <View style={styles.provisionalActions}>
                 <Pressable
                   style={styles.primaryButton}
-                  onPress={handleAdvanceNextStep}
+                  onPress={handleAdvanceStep2}
                 >
                   <Text style={styles.primaryButtonText}>Avançar para a Etapa 3</Text>
                 </Pressable>
@@ -392,7 +452,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
           )}
 
           {/* ================================================================= */}
-          {/* ETAPA 3 (PROVISÓRIA) — FINALIZAÇÃO */}
+          {/* ETAPA 3 (PROVISÓRIA) — MERCADO DE GAMES */}
           {/* ================================================================= */}
           {currentStepIndex === 2 && (
             <View style={styles.provisionalContainer}>
@@ -401,18 +461,24 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
               </View>
 
               <Text style={styles.provisionalTitle}>
-                Etapa 3 — Conclusão do Questionário
+                Etapa 3 — Mercado de games
               </Text>
               <Text style={styles.provisionalDescription}>
-                Fluxo de etapas estruturado e navegável. Ao finalizar aqui, você será direcionado para o aplicativo principal.
+                Você está na Etapa 3 do questionário. As perguntas obrigatórias sobre conhecimento e interesse no mercado profissional de games serão implementadas na Task 5.
               </Text>
+
+              <View style={styles.infoBox}>
+                <Text style={styles.infoBoxText}>
+                  Esta finalização é uma simulação de navegação. Não registra o perfil como definitivamente completo nem salva dados permanentemente.
+                </Text>
+              </View>
 
               <View style={styles.provisionalActions}>
                 <Pressable
                   style={styles.primaryButton}
-                  onPress={handleAdvanceNextStep}
+                  onPress={handleFinishQuestionnaire}
                 >
-                  <Text style={styles.primaryButtonText}>Concluir questionário</Text>
+                  <Text style={styles.primaryButtonText}>Concluir questionário e ir para o Início</Text>
                 </Pressable>
 
                 <Pressable
@@ -701,7 +767,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#2a2046',
     padding: 14,
-    marginBottom: 20,
+    marginBottom: 16,
     gap: 8,
   },
   summaryTitle: {
@@ -725,6 +791,37 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontSize: 14,
     fontWeight: '600',
+  },
+  placeholderCard: {
+    backgroundColor: '#0c0a17',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#2a2046',
+    padding: 14,
+    marginBottom: 20,
+    gap: 4,
+  },
+  placeholderCardTitle: {
+    color: '#cbd5e1',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  placeholderCardSubtitle: {
+    color: '#64748b',
+    fontSize: 12,
+  },
+  infoBox: {
+    backgroundColor: '#191330',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#34265a',
+    padding: 14,
+    marginBottom: 20,
+  },
+  infoBoxText: {
+    color: '#cbd5e1',
+    fontSize: 13,
+    lineHeight: 18,
   },
   provisionalActions: {
     gap: 12,

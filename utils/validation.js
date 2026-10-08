@@ -127,11 +127,16 @@ export function validateAboutYouStep({ age, gender, otherGender, education }) {
 
   const trimmedAge = String(age ?? '').trim();
 
-  // Idade: obrigatória e campo numérico
+  // Idade: obrigatória e deve ser um número inteiro positivo
   if (!trimmedAge) {
     errors.age = 'A idade é obrigatória.';
-  } else if (!/^\d+$/.test(trimmedAge) || parseInt(trimmedAge, 10) <= 0) {
-    errors.age = 'Informe uma idade válida (apenas números).';
+  } else if (!/^\d+$/.test(trimmedAge)) {
+    errors.age = 'A idade deve conter apenas números.';
+  } else {
+    const parsedAge = parseInt(trimmedAge, 10);
+    if (isNaN(parsedAge) || parsedAge <= 0) {
+      errors.age = 'A idade deve ser um número inteiro positivo.';
+    }
   }
 
   // Gênero: obrigatório
