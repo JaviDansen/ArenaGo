@@ -160,3 +160,25 @@ export function validateAboutYouStep({ age, gender, otherGender, education }) {
   };
 }
 
+/**
+ * Valida a Etapa 2 do Questionário de Perfil ("Seus jogos").
+ * Regras da Task 4:
+ * - O participante deve selecionar pelo menos um jogo para avançar.
+ *
+ * @param {Object} data
+ * @param {Array<string>} data.selectedGames
+ * @returns {{ isValid: boolean, errors: Object }}
+ */
+export function validateYourGamesStep({ selectedGames }) {
+  const errors = {};
+
+  if (!selectedGames || !Array.isArray(selectedGames) || selectedGames.length === 0) {
+    errors.selectedGames = 'É necessário selecionar ao menos um jogo para continuar.';
+  }
+
+  return {
+    isValid: Object.keys(errors).length === 0,
+    errors,
+  };
+}
+

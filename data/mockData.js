@@ -32,3 +32,26 @@ export const mockEvents = {
     experiences: mockExperiences,
   },
 };
+
+export const mockGames = [
+  'Apex Legends',
+  'Call of Duty: Warzone',
+  'Counter-Strike 2',
+  'Cyberpunk 2077',
+  'Dota 2',
+  'EA Sports FC 24',
+  'Elden Ring',
+  'Fortnite',
+  'Free Fire',
+  'Genshin Impact',
+  'Grand Theft Auto V',
+  'League of Legends',
+  'Minecraft',
+  'Overwatch 2',
+  'PUBG: Battlegrounds',
+  'Rainbow Six Siege',
+  'Roblox',
+  'Rocket League',
+  'The Witcher 3',
+  'Valorant',
+];

@@ -12,12 +12,13 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { validateAboutYouStep } from '../utils/validation';
+import { mockGames } from '../data/mockData';
+import { validateAboutYouStep, validateYourGamesStep } from '../utils/validation';
 
 // =============================================================================
-// DEFINIÇÃO DAS ETAPAS DO QUESTIONÁRIO (TASK 3)
-// 1. Sobre você (funcional nesta task)
-// 2. Seus jogos (provisório — Task 4)
+// DEFINIÇÃO DAS ETAPAS DO QUESTIONÁRIO
+// 1. Sobre você (funcional)
+// 2. Seus jogos (funcional — Task 4)
 // 3. Mercado de games (provisório — Task 5)
 // =============================================================================
 const QUESTIONNAIRE_STEPS = [
@@ -33,8 +34,7 @@ const QUESTIONNAIRE_STEPS = [
     stepNumber: 2,
     tag: 'ETAPA 2 DE 3',
     title: 'Seus jogos',
-    subtitle: 'Seleção dos seus jogos favoritos (busca e seleção múltipla na Task 4).',
-    isProvisional: true,
+    subtitle: 'Informe quais jogos você costuma jogar para personalizarmos sua experiência.',
   },
   {
     id: 'games-market',
@@ -92,6 +92,10 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
   const [otherGender, setOtherGender] = useState('');
   const [education, setEducation] = useState('');
   const [errors, setErrors] = useState({});
+
+  // Estados dos campos da Etapa 2 — Seus jogos
+  const [searchQuery, setSearchQuery] = useState('');
+  const [feedbackMessage, setFeedbackMessage] = useState(null);
 
   const totalSteps = QUESTIONNAIRE_STEPS.length;
   const currentStep = QUESTIONNAIRE_STEPS[currentStepIndex];
@@ -162,8 +166,74 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
     setCurrentStepIndex(1);
   }
 
-  // Avanço provisório da Etapa 2 para a Etapa 3
+  // Atualização do texto da busca de jogos
+  function handleSearchChange(text) {
+    setSearchQuery(text);
+    if (feedbackMessage) {
+      setFeedbackMessage(null);
+    }
+  }
+
+  // Adiciona um jogo à lista de selecionados (via sugestão ou inclusão manual)
+  function handleAddGame(gameName) {
+    if (!gameName) return;
+    const trimmed = gameName.trim();
+    if (!trimmed) return;
+
+    // Prevenção de duplicações: normaliza espaços e compara sem distinção de maiúsculas/minúsculas
+    const isAlreadySelected = (questionnaireData.selectedGames || []).some(
+      (g) => g.trim().toLowerCase() === trimmed.toLowerCase()
+    );
+
+    if (isAlreadySelected) {
+      setFeedbackMessage({
+        type: 'warning',
+        text: `"${trimmed}" já está na lista de jogos selecionados.`,
+      });
+      return;
+    }
+
+    setQuestionnaireData((prev) => ({
+      ...prev,
+      selectedGames: [...prev.selectedGames, trimmed],
+    }));
+
+    setSearchQuery('');
+    setFeedbackMessage({
+      type: 'success',
+      text: `"${trimmed}" adicionado aos seus jogos.`,
+    });
+
+    if (errors.selectedGames) {
+      setErrors((prev) => ({ ...prev, selectedGames: null }));
+    }
+  }
+
+  // Remove um jogo da lista de selecionados (permitindo selecioná-lo novamente)
+  function handleRemoveGame(gameToRemove) {
+    setQuestionnaireData((prev) => ({
+      ...prev,
+      selectedGames: (prev.selectedGames || []).filter(
+        (g) => g.trim().toLowerCase() !== gameToRemove.trim().toLowerCase()
+      ),
+    }));
+
+    setFeedbackMessage(null);
+  }
+
+  // Validação e avanço da Etapa 2 para a Etapa 3
   function handleAdvanceStep2() {
+    const validation = validateYourGamesStep({
+      selectedGames: questionnaireData.selectedGames,
+    });
+
+    if (!validation.isValid) {
+      setErrors((prev) => ({ ...prev, ...validation.errors }));
+      return;
+    }
+
+    setErrors({});
+    setFeedbackMessage(null);
     setCurrentStepIndex(2);
   }
 
@@ -180,6 +250,14 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
       navigation.replace('MainTabs');
     }
   }
+
+  const trimmedSearch = searchQuery.trim().toLowerCase();
+  const filteredSuggestions = trimmedSearch
+    ? mockGames.filter((game) => game.toLowerCase().includes(trimmedSearch))
+    : [];
+  const exactMatchExists = trimmedSearch
+    ? mockGames.some((game) => game.toLowerCase() === trimmedSearch)
+    : false;
 
   return (
     <SafeAreaView style={styles.container}>
@@ -391,49 +469,228 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
           )}
 
           {/* ================================================================= */}
-          {/* ETAPA 2 (PROVISÓRIA) — SEUS JOGOS */}
+          {/* ETAPA 2 — SEUS JOGOS (TASK 4) */}
           {/* ================================================================= */}
           {currentStepIndex === 1 && (
-            <View style={styles.provisionalContainer}>
-              <View style={styles.provisionalBadge}>
-                <Text style={styles.provisionalBadgeText}>ETAPA PROVISÓRIA</Text>
+            <View style={styles.form}>
+              {/* CAMPO DE PESQUISA */}
+              <View style={styles.inputGroup}>
+                <View style={styles.labelRow}>
+                  <Text style={styles.label}>Pesquisar jogos</Text>
+                  <Text style={styles.requiredStar}>*</Text>
+                </View>
+                <View style={styles.searchRow}>
+                  <TextInput
+                    style={styles.searchInput}
+                    placeholder="Ex: Minecraft, Valorant..."
+                    placeholderTextColor="#64748b"
+                    value={searchQuery}
+                    onChangeText={handleSearchChange}
+                    onSubmitEditing={() => {
+                      if (searchQuery.trim()) {
+                        handleAddGame(searchQuery);
+                      }
+                    }}
+                    returnKeyType="done"
+                    autoCapitalize="words"
+                    autoCorrect={false}
+                  />
+                  {searchQuery.trim().length > 0 ? (
+                    <Pressable
+                      style={styles.searchAddButton}
+                      onPress={() => handleAddGame(searchQuery)}
+                      accessibilityLabel={`Adicionar ${searchQuery.trim()}`}
+                    >
+                      <Text style={styles.searchAddButtonText}>Adicionar</Text>
+                    </Pressable>
+                  ) : null}
+                </View>
               </View>
 
-              <Text style={styles.provisionalTitle}>
-                Etapa 2 — Seus jogos
-              </Text>
-              <Text style={styles.provisionalDescription}>
-                Você está na Etapa 2 do questionário. A busca, seleção múltipla e inclusão manual de jogos serão implementadas na Task 4.
-              </Text>
-
-              {/* Resumo visual dos dados preservados da Etapa 1 */}
-              <View style={styles.summaryCard}>
-                <Text style={styles.summaryTitle}>Dados preservados da Etapa 1:</Text>
-                <View style={styles.summaryRow}>
-                  <Text style={styles.summaryLabel}>Idade:</Text>
-                  <Text style={styles.summaryValue}>{questionnaireData.age || age} anos</Text>
-                </View>
-                <View style={styles.summaryRow}>
-                  <Text style={styles.summaryLabel}>Gênero:</Text>
-                  <Text style={styles.summaryValue}>
-                    {gender === 'Outro' && otherGender ? `Outro (${otherGender})` : gender}
+              {/* MENSAGEM DE FEEDBACK (AVISO OU SUCESSO) */}
+              {feedbackMessage ? (
+                <View
+                  style={[
+                    styles.feedbackBanner,
+                    feedbackMessage.type === 'warning'
+                      ? styles.feedbackBannerWarning
+                      : styles.feedbackBannerSuccess,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.feedbackText,
+                      feedbackMessage.type === 'warning'
+                        ? styles.feedbackTextWarning
+                        : styles.feedbackTextSuccess,
+                    ]}
+                  >
+                    {feedbackMessage.text}
                   </Text>
                 </View>
-                <View style={styles.summaryRow}>
-                  <Text style={styles.summaryLabel}>Escolaridade:</Text>
-                  <Text style={styles.summaryValue}>{questionnaireData.education || education}</Text>
+              ) : null}
+
+              {/* SUGESTÕES FILTRADAS PELA BUSCA OU POPULARES */}
+              {searchQuery.trim().length > 0 ? (
+                filteredSuggestions.length > 0 ? (
+                  <View style={styles.suggestionsCard}>
+                    <Text style={styles.suggestionsHeader}>SUGESTÕES DE JOGOS</Text>
+                    <View style={styles.suggestionsList}>
+                      {filteredSuggestions.map((game) => {
+                        const isSelected = questionnaireData.selectedGames.some(
+                          (g) => g.trim().toLowerCase() === game.trim().toLowerCase()
+                        );
+                        return (
+                          <Pressable
+                            key={game}
+                            style={[
+                              styles.suggestionItem,
+                              isSelected ? styles.suggestionItemSelected : null,
+                            ]}
+                            onPress={() => handleAddGame(game)}
+                            disabled={isSelected}
+                            accessibilityLabel={`Selecionar ${game}`}
+                          >
+                            <Text
+                              style={[
+                                styles.suggestionGameName,
+                                isSelected ? styles.suggestionGameNameSelected : null,
+                              ]}
+                            >
+                              {game}
+                            </Text>
+                            <View
+                              style={[
+                                styles.suggestionBadge,
+                                isSelected ? styles.suggestionBadgeSelected : null,
+                              ]}
+                            >
+                              <Text
+                                style={[
+                                  styles.suggestionBadgeText,
+                                  isSelected ? styles.suggestionBadgeTextSelected : null,
+                                ]}
+                              >
+                                {isSelected ? '✓ Selecionado' : '+ Selecionar'}
+                              </Text>
+                            </View>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+
+                    {/* INCLUSÃO MANUAL QUANDO NÃO HÁ CORRESPONDÊNCIA EXATA */}
+                    {!exactMatchExists && (
+                      <Pressable
+                        style={styles.manualAddInlineButton}
+                        onPress={() => handleAddGame(searchQuery)}
+                        accessibilityLabel={`Adicionar ${searchQuery.trim()}`}
+                      >
+                        <Text style={styles.manualAddInlineText}>
+                          + Adicionar "{searchQuery.trim()}"
+                        </Text>
+                      </Pressable>
+                    )}
+                  </View>
+                ) : (
+                  <View style={styles.noSuggestionsCard}>
+                    <Text style={styles.noSuggestionsText}>
+                      Nenhum jogo correspondente encontrado no catálogo para "{searchQuery.trim()}".
+                    </Text>
+                    <Pressable
+                      style={styles.manualAddPrimaryButton}
+                      onPress={() => handleAddGame(searchQuery)}
+                      accessibilityLabel={`Adicionar ${searchQuery.trim()}`}
+                    >
+                      <Text style={styles.manualAddPrimaryButtonText}>
+                        + Adicionar "{searchQuery.trim()}"
+                      </Text>
+                    </Pressable>
+                  </View>
+                )
+              ) : (
+                <View style={styles.quickSuggestionsCard}>
+                  <Text style={styles.quickSuggestionsHeader}>Sugestões populares:</Text>
+                  <View style={styles.quickChipsWrapper}>
+                    {mockGames.slice(0, 8).map((game) => {
+                      const isSelected = questionnaireData.selectedGames.some(
+                        (g) => g.trim().toLowerCase() === game.trim().toLowerCase()
+                      );
+                      return (
+                        <Pressable
+                          key={game}
+                          style={[
+                            styles.quickChip,
+                            isSelected ? styles.quickChipSelected : null,
+                          ]}
+                          onPress={() => handleAddGame(game)}
+                          disabled={isSelected}
+                        >
+                          <Text
+                            style={[
+                              styles.quickChipText,
+                              isSelected ? styles.quickChipTextSelected : null,
+                            ]}
+                          >
+                            {isSelected ? `✓ ${game}` : `+ ${game}`}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
                 </View>
+              )}
+
+              {/* LISTA DE JOGOS SELECIONADOS */}
+              <View style={styles.selectedSection}>
+                <View style={styles.selectedHeaderRow}>
+                  <Text style={styles.selectedSectionTitle}>Jogos selecionados</Text>
+                  <View style={styles.counterBadge}>
+                    <Text style={styles.counterBadgeText}>
+                      {questionnaireData.selectedGames.length}
+                    </Text>
+                  </View>
+                </View>
+
+                {questionnaireData.selectedGames.length === 0 ? (
+                  <View style={styles.emptySelectedCard}>
+                    <Text style={styles.emptySelectedIcon}>🎮</Text>
+                    <Text style={styles.emptySelectedTitle}>Nenhum jogo selecionado ainda</Text>
+                    <Text style={styles.emptySelectedSubtitle}>
+                      Busque acima ou toque em uma sugestão para adicionar à sua lista.
+                    </Text>
+                  </View>
+                ) : (
+                  <View style={styles.selectedList}>
+                    {questionnaireData.selectedGames.map((game, index) => (
+                      <View key={`${game}-${index}`} style={styles.selectedGameCard}>
+                        <View style={styles.selectedGameContent}>
+                          <Text style={styles.gameIconBullet}>🎮</Text>
+                          <Text style={styles.selectedGameName}>{game}</Text>
+                        </View>
+                        <Pressable
+                          style={styles.removeGameButton}
+                          onPress={() => handleRemoveGame(game)}
+                          hitSlop={8}
+                          accessibilityLabel={`Remover ${game}`}
+                        >
+                          <Text style={styles.removeGameButtonText}>✕</Text>
+                        </Pressable>
+                      </View>
+                    ))}
+                  </View>
+                )}
+
+                {/* MENSAGEM DE ERRO DE VALIDAÇÃO (CASO TENTE AVANÇAR SEM JOGOS) */}
+                {errors.selectedGames ? (
+                  <View style={styles.stepErrorContainer}>
+                    <Text style={styles.errorText}>{errors.selectedGames}</Text>
+                  </View>
+                ) : null}
               </View>
 
-              {/* Estrutura prevista para a Task 4 */}
-              <View style={styles.placeholderCard}>
-                <Text style={styles.placeholderCardTitle}>Jogos Selecionados (Estrutura Local)</Text>
-                <Text style={styles.placeholderCardSubtitle}>
-                  Lista em memória: {questionnaireData.selectedGames.length} jogos selecionados
-                </Text>
-              </View>
-
-              <View style={styles.provisionalActions}>
+              {/* BOTÕES DE AVANÇO E VOLTA */}
+              <View style={styles.actionsContainer}>
                 <Pressable
                   style={styles.primaryButton}
                   onPress={handleAdvanceStep2}
@@ -466,6 +723,41 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
               <Text style={styles.provisionalDescription}>
                 Você está na Etapa 3 do questionário. As perguntas obrigatórias sobre conhecimento e interesse no mercado profissional de games serão implementadas na Task 5.
               </Text>
+
+              {/* Resumo visual dos dados preservados das Etapas 1 e 2 */}
+              <View style={styles.summaryCard}>
+                <Text style={styles.summaryTitle}>Dados preservados das etapas anteriores:</Text>
+                <View style={styles.summaryRow}>
+                  <Text style={styles.summaryLabel}>Idade:</Text>
+                  <Text style={styles.summaryValue}>{questionnaireData.age || age} anos</Text>
+                </View>
+                <View style={styles.summaryRow}>
+                  <Text style={styles.summaryLabel}>Gênero:</Text>
+                  <Text style={styles.summaryValue}>
+                    {gender === 'Outro' && otherGender ? `Outro (${otherGender})` : gender}
+                  </Text>
+                </View>
+                <View style={styles.summaryRow}>
+                  <Text style={styles.summaryLabel}>Escolaridade:</Text>
+                  <Text style={styles.summaryValue}>{questionnaireData.education || education}</Text>
+                </View>
+                <View style={styles.summaryRow}>
+                  <Text style={styles.summaryLabel}>Jogos selecionados:</Text>
+                  <Text style={styles.summaryValue}>
+                    {questionnaireData.selectedGames.length}{' '}
+                    {questionnaireData.selectedGames.length === 1 ? 'jogo' : 'jogos'}
+                  </Text>
+                </View>
+                {questionnaireData.selectedGames.length > 0 && (
+                  <View style={styles.summaryGamesList}>
+                    {questionnaireData.selectedGames.map((g) => (
+                      <View key={g} style={styles.summaryGameBadge}>
+                        <Text style={styles.summaryGameBadgeText}>{g}</Text>
+                      </View>
+                    ))}
+                  </View>
+                )}
+              </View>
 
               <View style={styles.infoBox}>
                 <Text style={styles.infoBoxText}>
@@ -825,5 +1117,324 @@ const styles = StyleSheet.create({
   },
   provisionalActions: {
     gap: 12,
+  },
+  searchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  searchInput: {
+    flex: 1,
+    backgroundColor: '#141026',
+    borderWidth: 1,
+    borderColor: '#2a2046',
+    borderRadius: 12,
+    height: 52,
+    paddingHorizontal: 16,
+    color: '#ffffff',
+    fontSize: 15,
+  },
+  searchAddButton: {
+    backgroundColor: '#261b47',
+    borderWidth: 1,
+    borderColor: '#7c3aed',
+    height: 52,
+    paddingHorizontal: 18,
+    borderRadius: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  searchAddButtonText: {
+    color: '#c084fc',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  feedbackBanner: {
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderWidth: 1,
+  },
+  feedbackBannerWarning: {
+    backgroundColor: '#2a1a12',
+    borderColor: '#f59e0b',
+  },
+  feedbackBannerSuccess: {
+    backgroundColor: '#0f241a',
+    borderColor: '#10b981',
+  },
+  feedbackText: {
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  feedbackTextWarning: {
+    color: '#fbbf24',
+  },
+  feedbackTextSuccess: {
+    color: '#34d399',
+  },
+  suggestionsCard: {
+    backgroundColor: '#141026',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#2a2046',
+    padding: 12,
+    gap: 8,
+  },
+  suggestionsHeader: {
+    color: '#a78bfa',
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 1,
+    marginBottom: 4,
+    paddingHorizontal: 4,
+  },
+  suggestionsList: {
+    gap: 6,
+  },
+  suggestionItem: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: '#0c0a17',
+    borderWidth: 1,
+    borderColor: '#22193b',
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
+  suggestionItemSelected: {
+    backgroundColor: '#18122c',
+    borderColor: '#382561',
+    opacity: 0.7,
+  },
+  suggestionGameName: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '600',
+    flex: 1,
+  },
+  suggestionGameNameSelected: {
+    color: '#94a3b8',
+  },
+  suggestionBadge: {
+    backgroundColor: '#261b47',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  suggestionBadgeSelected: {
+    backgroundColor: '#1b1433',
+  },
+  suggestionBadgeText: {
+    color: '#c084fc',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  suggestionBadgeTextSelected: {
+    color: '#64748b',
+  },
+  manualAddInlineButton: {
+    marginTop: 6,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    backgroundColor: '#1f1638',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#7c3aed',
+    alignItems: 'center',
+  },
+  manualAddInlineText: {
+    color: '#c084fc',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  noSuggestionsCard: {
+    backgroundColor: '#141026',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#2a2046',
+    padding: 16,
+    alignItems: 'center',
+    gap: 12,
+  },
+  noSuggestionsText: {
+    color: '#94a3b8',
+    fontSize: 13,
+    textAlign: 'center',
+    lineHeight: 18,
+  },
+  manualAddPrimaryButton: {
+    backgroundColor: '#7c3aed',
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 10,
+    width: '100%',
+    alignItems: 'center',
+  },
+  manualAddPrimaryButtonText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  quickSuggestionsCard: {
+    gap: 8,
+  },
+  quickSuggestionsHeader: {
+    color: '#94a3b8',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  quickChipsWrapper: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  quickChip: {
+    backgroundColor: '#141026',
+    borderWidth: 1,
+    borderColor: '#2a2046',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 20,
+  },
+  quickChipSelected: {
+    backgroundColor: '#1e153b',
+    borderColor: '#4c2889',
+    opacity: 0.6,
+  },
+  quickChipText: {
+    color: '#cbd5e1',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  quickChipTextSelected: {
+    color: '#8b5cf6',
+  },
+  selectedSection: {
+    gap: 10,
+    marginTop: 4,
+  },
+  selectedHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  selectedSectionTitle: {
+    color: '#cbd5e1',
+    fontSize: 14,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
+  counterBadge: {
+    backgroundColor: '#261b47',
+    paddingHorizontal: 10,
+    paddingVertical: 2,
+    borderRadius: 10,
+  },
+  counterBadgeText: {
+    color: '#c084fc',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  emptySelectedCard: {
+    backgroundColor: '#141026',
+    borderWidth: 1,
+    borderColor: '#2a2046',
+    borderRadius: 14,
+    padding: 20,
+    alignItems: 'center',
+    gap: 6,
+  },
+  emptySelectedIcon: {
+    fontSize: 28,
+    marginBottom: 4,
+  },
+  emptySelectedTitle: {
+    color: '#cbd5e1',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  emptySelectedSubtitle: {
+    color: '#64748b',
+    fontSize: 12,
+    textAlign: 'center',
+    lineHeight: 16,
+  },
+  selectedList: {
+    gap: 8,
+  },
+  selectedGameCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#141026',
+    borderWidth: 1,
+    borderColor: '#2a2046',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  selectedGameContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+  },
+  gameIconBullet: {
+    fontSize: 16,
+  },
+  selectedGameName: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '600',
+    flex: 1,
+  },
+  removeGameButton: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#25152a',
+    borderWidth: 1,
+    borderColor: '#5c1d35',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  removeGameButtonText: {
+    color: '#f87171',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  stepErrorContainer: {
+    backgroundColor: '#291118',
+    borderWidth: 1,
+    borderColor: '#ef4444',
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    marginTop: 4,
+  },
+  actionsContainer: {
+    gap: 12,
+    marginTop: 8,
+  },
+  summaryGamesList: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 6,
+  },
+  summaryGameBadge: {
+    backgroundColor: '#191330',
+    borderWidth: 1,
+    borderColor: '#34265a',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  summaryGameBadgeText: {
+    color: '#c084fc',
+    fontSize: 12,
+    fontWeight: '600',
   },
 });
