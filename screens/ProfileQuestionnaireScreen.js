@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import {
   KeyboardAvoidingView,
@@ -12,7 +12,9 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import BirthDateInput from '../components/BirthDateInput';
 import { mockGames } from '../data/mockData';
+import { parseBirthDate } from '../utils/birthDate';
 import {
   validateAboutYouStep,
   validateGamesMarketStep,
@@ -79,7 +81,7 @@ export const MARKET_INTEREST_OPTIONS = [
 // Estrutura de dados local compartilhada por todas as etapas do questionário
 const INITIAL_QUESTIONNAIRE_DATA = {
   // Etapa 1 — Sobre você (Task 3)
-  age: '',
+  birthDate: '',
   gender: '',
   otherGender: null,
   education: '',
@@ -102,7 +104,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
   const [questionnaireData, setQuestionnaireData] = useState(INITIAL_QUESTIONNAIRE_DATA);
 
   // Estados dos campos da Etapa 1 — Sobre você
-  const [age, setAge] = useState('');
+  const [birthDateText, setBirthDateText] = useState('');
   const [gender, setGender] = useState('');
   const [otherGender, setOtherGender] = useState('');
   const [education, setEducation] = useState('');
@@ -111,15 +113,35 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
   // Estados dos campos da Etapa 2 — Seus jogos
   const [searchQuery, setSearchQuery] = useState('');
   const [feedbackMessage, setFeedbackMessage] = useState(null);
+  const [finishRequested, setFinishRequested] = useState(false);
 
   const totalSteps = QUESTIONNAIRE_STEPS.length;
   const currentStep = QUESTIONNAIRE_STEPS[currentStepIndex];
   const progressPercent = ((currentStepIndex + 1) / totalSteps) * 100;
 
+  useEffect(() => {
+    if (!finishRequested) return;
+
+    // O efeito lê as respostas após o React aplicar todas as seleções do mesmo lote.
+    setFinishRequested(false);
+    const validation = validateGamesMarketStep(questionnaireData);
+    if (!validation.isValid) {
+      setErrors(validation.errors);
+      return;
+    }
+
+    setErrors({});
+    if (navigation.reset) {
+      navigation.reset({ index: 0, routes: [{ name: 'MainTabs' }] });
+    } else {
+      navigation.replace('MainTabs');
+    }
+  }, [finishRequested, navigation, questionnaireData]);
+
   // Navegação para trás
   function handleBack() {
     if (currentStepIndex > 0) {
-      setCurrentStepIndex((prev) => prev - 1);
+      setCurrentStepIndex((prev) => Math.max(0, prev - 1));
     } else {
       // Retornar da Etapa 1 ao Cadastro, quando necessário
       navigation.goBack();
@@ -154,7 +176,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
   // Validação e avanço da Etapa 1 para a Etapa 2
   function handleAdvanceStep1() {
     const validation = validateAboutYouStep({
-      age,
+      birthDate: birthDateText,
       gender,
       otherGender,
       education,
@@ -172,7 +194,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
 
     setQuestionnaireData((prev) => ({
       ...prev,
-      age: age.trim(),
+      birthDate: parseBirthDate(birthDateText),
       gender,
       otherGender: resolvedOtherGender,
       education,
@@ -284,44 +306,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
 
   // Validação e conclusão do questionário (Etapa 3)
   function handleFinishQuestionnaire() {
-    // 1. Validar as respostas da Etapa 3
-    const validation = validateGamesMarketStep({
-      marketKnowledge: questionnaireData.marketKnowledge,
-      marketInterest: questionnaireData.marketInterest,
-    });
-
-    if (!validation.isValid) {
-      setErrors(validation.errors);
-      return;
-    }
-
-    setErrors({});
-
-    // 2. Manter a consistência dos dados reunidos em questionnaireData
-    const resolvedOtherGender = gender === 'Outro' ? (otherGender ? otherGender.trim() : null) : null;
-    const finalData = {
-      ...questionnaireData,
-      age: age.trim(),
-      gender,
-      otherGender: resolvedOtherGender,
-      education,
-      selectedGames: questionnaireData.selectedGames || [],
-      marketKnowledge: questionnaireData.marketKnowledge,
-      marketInterest: questionnaireData.marketInterest,
-    };
-
-    setQuestionnaireData(finalData);
-
-    // 3. Executar a finalização do questionário
-    // 4. Direcionar o participante ao MainTabs, abrindo a aba Início com o HomeFlowScreen existente
-    if (navigation.reset) {
-      navigation.reset({
-        index: 0,
-        routes: [{ name: 'MainTabs' }],
-      });
-    } else {
-      navigation.replace('MainTabs');
-    }
+    setFinishRequested(true);
   }
 
   const trimmedSearch = searchQuery.trim().toLowerCase();
@@ -393,30 +378,27 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
           {/* ================================================================= */}
           {currentStepIndex === 0 && (
             <View style={styles.form}>
-              {/* CAMPO 1 — IDADE */}
+              {/* CAMPO 1 — DATA DE NASCIMENTO */}
               <View style={styles.inputGroup}>
                 <View style={styles.labelRow}>
-                  <Text style={styles.label}>Idade</Text>
+                  <Text style={styles.label}>Data de nascimento</Text>
                   <Text style={styles.requiredStar}>*</Text>
                 </View>
-                <TextInput
-                  style={[styles.input, errors.age ? styles.inputError : null]}
-                  placeholder="Ex: 22"
+                <BirthDateInput
+                  inputStyle={styles.input}
+                  errorStyle={styles.inputError}
+                  error={Boolean(errors.birthDate)}
                   placeholderTextColor="#64748b"
-                  value={age}
+                  value={birthDateText}
                   onChangeText={(text) => {
-                    // Aceitar somente dígitos numéricos
-                    const numericText = text.replace(/[^0-9]/g, '');
-                    setAge(numericText);
-                    if (errors.age) {
-                      setErrors((prev) => ({ ...prev, age: null }));
+                    setBirthDateText(text);
+                    if (errors.birthDate) {
+                      setErrors((prev) => ({ ...prev, birthDate: null }));
                     }
                   }}
-                  keyboardType="number-pad"
-                  maxLength={3}
                 />
-                {errors.age ? (
-                  <Text style={styles.errorText}>{errors.age}</Text>
+                {errors.birthDate ? (
+                  <Text style={styles.errorText}>{errors.birthDate}</Text>
                 ) : null}
               </View>
 

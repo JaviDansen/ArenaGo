@@ -1,3 +1,5 @@
+import { getTodayCivilDate, parseBirthDate } from './birthDate';
+
 /**
  * Utilitários de validação para fluxos de autenticação (Login e Cadastro).
  */
@@ -110,33 +112,35 @@ export function validateLoginForm({ email, password }) {
 /**
  * Valida os campos da Etapa 1 do Questionário de Perfil ("Sobre você").
  * Regras da Task 3:
- * - Idade: campo numérico e obrigatório;
+ * - Data de nascimento: obrigatória, completa, real e não futura;
  * - Gênero: obrigatório ('Feminino', 'Masculino', 'Outro', 'Prefiro não informar').
  *   Se 'Outro', o campo adicional 'otherGender' torna-se obrigatório.
  * - Escolaridade: obrigatório ('Fundamental', 'Médio', 'Superior', 'Pós-graduação', 'Prefiro não informar').
  *
  * @param {Object} data
- * @param {string|number} data.age
+ * @param {string} data.birthDate Data apresentada em DD/MM/AAAA.
  * @param {string} data.gender
  * @param {string} [data.otherGender]
  * @param {string} data.education
  * @returns {{ isValid: boolean, errors: Object }}
  */
-export function validateAboutYouStep({ age, gender, otherGender, education }) {
+export function validateAboutYouStep(
+  { birthDate, gender, otherGender, education },
+  todayISO = getTodayCivilDate()
+) {
   const errors = {};
 
-  const trimmedAge = String(age ?? '').trim();
+  const trimmedBirthDate = typeof birthDate === 'string' ? birthDate.trim() : '';
 
-  // Idade: obrigatória e deve ser um número inteiro positivo
-  if (!trimmedAge) {
-    errors.age = 'A idade é obrigatória.';
-  } else if (!/^\d+$/.test(trimmedAge)) {
-    errors.age = 'A idade deve conter apenas números.';
-  } else {
-    const parsedAge = parseInt(trimmedAge, 10);
-    if (isNaN(parsedAge) || parsedAge <= 0) {
-      errors.age = 'A idade deve ser um número inteiro positivo.';
-    }
+  if (!trimmedBirthDate) {
+    errors.birthDate = 'A data de nascimento é obrigatória.';
+  } else if (!/^\d{2}\/\d{2}\/\d{4}$/.test(trimmedBirthDate)) {
+    errors.birthDate = 'Informe a data completa no formato DD/MM/AAAA.';
+  } else if (!parseBirthDate(trimmedBirthDate, todayISO)) {
+    const isRealDate = parseBirthDate(trimmedBirthDate, '9999-12-31') !== null;
+    errors.birthDate = isRealDate
+      ? 'A data de nascimento não pode estar no futuro.'
+      : 'Informe uma data de nascimento válida.';
   }
 
   // Gênero: obrigatório
