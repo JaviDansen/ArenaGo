@@ -1,7 +1,7 @@
 import { StatusBar } from 'expo-status-bar';
 import { Pressable, StyleSheet, Text } from 'react-native';
 
-import ScreenContainer from '../components/ScreenContainer';
+import ScreenContainer from '../../components/ScreenContainer';
 
 export default function HomeScreen({ navigation }) {
   return (

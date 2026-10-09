@@ -12,7 +12,7 @@ import {
   View,
 } from 'react-native';
 
-import { validateLoginForm } from '../utils/validation';
+import { validateLoginForm } from '../../utils/validation';
 
 export default function LoginScreen({ navigation }) {
   const [email, setEmail] = useState('');

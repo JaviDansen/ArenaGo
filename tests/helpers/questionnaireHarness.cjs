@@ -127,7 +127,7 @@ function createHarness(relativePath, options = {}) {
     if (name === '@react-native-community/datetimepicker') return nativePicker;
     if (name === '../components/BirthDateInput') return { __esModule: true, default: 'BirthDateInput' };
     if (name === '../utils/birthDate') return birthDate;
-    if (name === '../utils/validation') return validation;
+    if (name === '../utils/validation' || name === '../../utils/validation') return validation;
     if (name === '../data/mockData') return data;
     return require(name);
   }, options.fields || [], options.source);

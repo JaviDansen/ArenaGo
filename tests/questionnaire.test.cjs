@@ -169,11 +169,11 @@ test('fallback finish navigation retains the existing MainTabs destination', () 
 });
 
 test('Welcome, valid registration, questionnaire and provisional Login retain their routes', () => {
-  const welcome = createHarness('screens/WelcomeScreen.js');
+  const welcome = createHarness('screens/auth/WelcomeScreen.js');
   welcome.act(() => welcome.press('Criar minha conta'));
   assert.equal(welcome.navigationCalls[0].name, 'Register');
 
-  const register = createHarness('screens/RegisterScreen.js', { fields: ['handleRegister'] });
+  const register = createHarness('screens/auth/RegisterScreen.js', { fields: ['handleRegister'] });
   for (const [placeholder, value] of [
     ['Como quer ser chamado?', 'Participante'], ['seu.email@exemplo.com', 'teste@example.com'],
     ['Crie uma senha de acesso', 'secret1'], ['Digite a mesma senha novamente', 'secret1'],
@@ -181,7 +181,7 @@ test('Welcome, valid registration, questionnaire and provisional Login retain th
   register.act((c) => c.handleRegister());
   assert.equal(register.navigationCalls[0].name, 'ProfileQuestionnaire');
 
-  const login = createHarness('screens/LoginScreen.js', { fields: ['handleLogin'] });
+  const login = createHarness('screens/auth/LoginScreen.js', { fields: ['handleLogin'] });
   for (const [placeholder, value] of [
     ['seu.email@exemplo.com', 'teste@example.com'], ['Digite sua senha', 'secret1'],
   ]) login.act(() => login.nodes.find((n) => n.type === 'TextInput' && n.props.placeholder === placeholder).props.onChangeText(value));

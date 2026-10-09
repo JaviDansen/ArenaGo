@@ -8,8 +8,8 @@ import {
   View,
 } from 'react-native';
 
-import ScreenContainer from '../components/ScreenContainer';
-import { ParticipationContext } from '../context/ParticipationContext';
+import ScreenContainer from '../../components/ScreenContainer';
+import { ParticipationContext } from '../../context/ParticipationContext';
 
 export default function ActiveArenaScreen({ navigation }) {
   const { participation, setParticipation } = useContext(

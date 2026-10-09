@@ -4,13 +4,13 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { ParticipationProvider } from './context/ParticipationContext';
 import MainTabs from './navigation/MainTabs';
 import EvaluationScreen from './screens/EvaluationScreen';
-import EventConfirmationScreen from './screens/EventConfirmationScreen';
-import EventEntryScreen from './screens/EventEntryScreen';
-import ForgotPasswordScreen from './screens/ForgotPasswordScreen';
-import LoginScreen from './screens/LoginScreen';
+import EventConfirmationScreen from './screens/eventEntry/EventConfirmationScreen';
+import EventEntryScreen from './screens/eventEntry/EventEntryScreen';
+import ForgotPasswordScreen from './screens/auth/ForgotPasswordScreen';
+import LoginScreen from './screens/auth/LoginScreen';
 import ProfileQuestionnaireScreen from './screens/ProfileQuestionnaireScreen';
-import RegisterScreen from './screens/RegisterScreen';
-import WelcomeScreen from './screens/WelcomeScreen';
+import RegisterScreen from './screens/auth/RegisterScreen';
+import WelcomeScreen from './screens/auth/WelcomeScreen';
 
 const Stack = createNativeStackNavigator();
 

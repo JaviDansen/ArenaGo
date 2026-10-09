@@ -1,8 +1,8 @@
 import { useContext } from 'react';
 import { Pressable, StyleSheet, Text } from 'react-native';
 
-import ScreenContainer from '../components/ScreenContainer';
-import { ParticipationContext } from '../context/ParticipationContext';
+import ScreenContainer from '../../components/ScreenContainer';
+import { ParticipationContext } from '../../context/ParticipationContext';
 
 export default function ArenaQueueScreen() {
   const { participation, setParticipation } = useContext(

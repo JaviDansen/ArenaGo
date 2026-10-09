@@ -1,8 +1,8 @@
 import { useContext } from 'react';
 
-import { ParticipationContext } from '../context/ParticipationContext';
-import ActiveArenaScreen from './ActiveArenaScreen';
-import ArenaQueueScreen from './ArenaQueueScreen';
+import { ParticipationContext } from '../../context/ParticipationContext';
+import ActiveArenaScreen from '../arena/ActiveArenaScreen';
+import ArenaQueueScreen from '../arena/ArenaQueueScreen';
 import HomeScreen from './HomeScreen';
 
 export default function HomeFlowScreen({ navigation }) {

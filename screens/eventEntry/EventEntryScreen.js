@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput } from 'react-native';
 
-import ScreenContainer from '../components/ScreenContainer';
-import { mockEvents } from '../data/mockData';
+import ScreenContainer from '../../components/ScreenContainer';
+import { mockEvents } from '../../data/mockData';
 
 export default function EventEntryScreen({ navigation }) {
   const [eventCode, setEventCode] = useState('');

@@ -13,7 +13,7 @@ import {
   View,
 } from 'react-native';
 
-import { validateRegisterForm } from '../utils/validation';
+import { validateRegisterForm } from '../../utils/validation';
 
 export default function RegisterScreen({ navigation }) {
   const [name, setName] = useState('');
