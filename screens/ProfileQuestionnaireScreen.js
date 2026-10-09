@@ -13,13 +13,17 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { mockGames } from '../data/mockData';
-import { validateAboutYouStep, validateYourGamesStep } from '../utils/validation';
+import {
+  validateAboutYouStep,
+  validateGamesMarketStep,
+  validateYourGamesStep,
+} from '../utils/validation';
 
 // =============================================================================
 // DEFINIÇÃO DAS ETAPAS DO QUESTIONÁRIO
-// 1. Sobre você (funcional)
+// 1. Sobre você (funcional — Task 3)
 // 2. Seus jogos (funcional — Task 4)
-// 3. Mercado de games (provisório — Task 5)
+// 3. Mercado de games (funcional — Task 5)
 // =============================================================================
 const QUESTIONNAIRE_STEPS = [
   {
@@ -41,8 +45,7 @@ const QUESTIONNAIRE_STEPS = [
     stepNumber: 3,
     tag: 'ETAPA 3 DE 3',
     title: 'Mercado de games',
-    subtitle: 'Percepção e interesse no mercado profissional de games (Task 5).',
-    isProvisional: true,
+    subtitle: 'Informe seu conhecimento e interesse no mercado profissional de games.',
   },
 ];
 
@@ -61,18 +64,30 @@ const EDUCATION_OPTIONS = [
   'Prefiro não informar',
 ];
 
+export const MARKET_KNOWLEDGE_OPTIONS = [
+  'Sim, conheço.',
+  'Conheço um pouco.',
+  'Não conheço.',
+];
+
+export const MARKET_INTEREST_OPTIONS = [
+  'Sim, tenho interesse.',
+  'Talvez — quero conhecer melhor.',
+  'Não tenho interesse.',
+];
+
 // Estrutura de dados local compartilhada por todas as etapas do questionário
 const INITIAL_QUESTIONNAIRE_DATA = {
-  // Etapa 1 — Sobre você
+  // Etapa 1 — Sobre você (Task 3)
   age: '',
   gender: '',
   otherGender: null,
   education: '',
 
-  // Etapa 2 — Seus jogos (estrutura reservada para a Task 4)
+  // Etapa 2 — Seus jogos (Task 4)
   selectedGames: [],
 
-  // Etapa 3 — Mercado de games (estrutura reservada para a Task 5)
+  // Etapa 3 — Mercado de games (Task 5)
   marketKnowledge: null,
   marketInterest: null,
 };
@@ -245,10 +260,60 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
     setCurrentStepIndex(2);
   }
 
-  // Finalização provisória do questionário (direcionamento para Home / MainTabs)
+  // Seleção única de conhecimento sobre o mercado de games (Etapa 3)
+  function handleSelectMarketKnowledge(option) {
+    setQuestionnaireData((prev) => ({
+      ...prev,
+      marketKnowledge: option,
+    }));
+    if (errors.marketKnowledge) {
+      setErrors((prev) => ({ ...prev, marketKnowledge: null }));
+    }
+  }
+
+  // Seleção única de interesse no mercado profissional de games (Etapa 3)
+  function handleSelectMarketInterest(option) {
+    setQuestionnaireData((prev) => ({
+      ...prev,
+      marketInterest: option,
+    }));
+    if (errors.marketInterest) {
+      setErrors((prev) => ({ ...prev, marketInterest: null }));
+    }
+  }
+
+  // Validação e conclusão do questionário (Etapa 3)
   function handleFinishQuestionnaire() {
-    // Simulação de navegação: direciona para o MainTabs (Início com HomeFlowScreen)
-    // Sem registrar perfil definitivamente completo nem salvar permanentemente.
+    // 1. Validar as respostas da Etapa 3
+    const validation = validateGamesMarketStep({
+      marketKnowledge: questionnaireData.marketKnowledge,
+      marketInterest: questionnaireData.marketInterest,
+    });
+
+    if (!validation.isValid) {
+      setErrors(validation.errors);
+      return;
+    }
+
+    setErrors({});
+
+    // 2. Manter a consistência dos dados reunidos em questionnaireData
+    const resolvedOtherGender = gender === 'Outro' ? (otherGender ? otherGender.trim() : null) : null;
+    const finalData = {
+      ...questionnaireData,
+      age: age.trim(),
+      gender,
+      otherGender: resolvedOtherGender,
+      education,
+      selectedGames: questionnaireData.selectedGames || [],
+      marketKnowledge: questionnaireData.marketKnowledge,
+      marketInterest: questionnaireData.marketInterest,
+    };
+
+    setQuestionnaireData(finalData);
+
+    // 3. Executar a finalização do questionário
+    // 4. Direcionar o participante ao MainTabs, abrindo a aba Início com o HomeFlowScreen existente
     if (navigation.reset) {
       navigation.reset({
         index: 0,
@@ -717,73 +782,112 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
           )}
 
           {/* ================================================================= */}
-          {/* ETAPA 3 (PROVISÓRIA) — MERCADO DE GAMES */}
+          {/* ETAPA 3 — MERCADO DE GAMES (TASK 5) */}
           {/* ================================================================= */}
           {currentStepIndex === 2 && (
-            <View style={styles.provisionalContainer}>
-              <View style={styles.provisionalBadge}>
-                <Text style={styles.provisionalBadgeText}>ETAPA PROVISÓRIA</Text>
-              </View>
-
-              <Text style={styles.provisionalTitle}>
-                Etapa 3 — Mercado de games
-              </Text>
-              <Text style={styles.provisionalDescription}>
-                Você está na Etapa 3 do questionário. As perguntas obrigatórias sobre conhecimento e interesse no mercado profissional de games serão implementadas na Task 5.
-              </Text>
-
-              {/* Resumo visual dos dados preservados das Etapas 1 e 2 */}
-              <View style={styles.summaryCard}>
-                <Text style={styles.summaryTitle}>Dados preservados das etapas anteriores:</Text>
-                <View style={styles.summaryRow}>
-                  <Text style={styles.summaryLabel}>Idade:</Text>
-                  <Text style={styles.summaryValue}>{questionnaireData.age || age} anos</Text>
-                </View>
-                <View style={styles.summaryRow}>
-                  <Text style={styles.summaryLabel}>Gênero:</Text>
-                  <Text style={styles.summaryValue}>
-                    {gender === 'Outro' && otherGender ? `Outro (${otherGender})` : gender}
+            <View style={styles.form}>
+              {/* PERGUNTA 1 — CONHECIMENTO SOBRE O MERCADO DE GAMES */}
+              <View style={styles.inputGroup}>
+                <View style={styles.labelRow}>
+                  <Text style={styles.questionLabel}>
+                    Você já conhece o mercado de games?
                   </Text>
+                  <Text style={styles.requiredStar}>*</Text>
                 </View>
-                <View style={styles.summaryRow}>
-                  <Text style={styles.summaryLabel}>Escolaridade:</Text>
-                  <Text style={styles.summaryValue}>{questionnaireData.education || education}</Text>
+
+                <View style={styles.optionsList}>
+                  {MARKET_KNOWLEDGE_OPTIONS.map((option) => {
+                    const isSelected = questionnaireData.marketKnowledge === option;
+                    return (
+                      <Pressable
+                        key={option}
+                        style={[
+                          styles.optionCard,
+                          isSelected ? styles.optionCardSelected : null,
+                          errors.marketKnowledge ? styles.optionCardError : null,
+                        ]}
+                        onPress={() => handleSelectMarketKnowledge(option)}
+                        accessibilityRole="radio"
+                        accessibilityState={{ selected: isSelected }}
+                      >
+                        <View style={styles.optionRadioOuter}>
+                          {isSelected && <View style={styles.optionRadioInner} />}
+                        </View>
+                        <Text
+                          style={[
+                            styles.optionText,
+                            isSelected ? styles.optionTextSelected : null,
+                          ]}
+                        >
+                          {option}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
                 </View>
-                <View style={styles.summaryRow}>
-                  <Text style={styles.summaryLabel}>Jogos selecionados:</Text>
-                  <Text style={styles.summaryValue}>
-                    {questionnaireData.selectedGames.length}{' '}
-                    {questionnaireData.selectedGames.length === 1 ? 'jogo' : 'jogos'}
+                {errors.marketKnowledge ? (
+                  <Text style={styles.errorText}>{errors.marketKnowledge}</Text>
+                ) : null}
+              </View>
+
+              {/* PERGUNTA 2 — INTERESSE NO MERCADO PROFISSIONAL DE GAMES */}
+              <View style={styles.inputGroup}>
+                <View style={styles.labelRow}>
+                  <Text style={styles.questionLabel}>
+                    Você tem interesse no mercado profissional de games?
                   </Text>
+                  <Text style={styles.requiredStar}>*</Text>
                 </View>
-                {questionnaireData.selectedGames.length > 0 && (
-                  <View style={styles.summaryGamesList}>
-                    {questionnaireData.selectedGames.map((g) => (
-                      <View key={g} style={styles.summaryGameBadge}>
-                        <Text style={styles.summaryGameBadgeText}>{g}</Text>
-                      </View>
-                    ))}
-                  </View>
-                )}
+
+                <View style={styles.optionsList}>
+                  {MARKET_INTEREST_OPTIONS.map((option) => {
+                    const isSelected = questionnaireData.marketInterest === option;
+                    return (
+                      <Pressable
+                        key={option}
+                        style={[
+                          styles.optionCard,
+                          isSelected ? styles.optionCardSelected : null,
+                          errors.marketInterest ? styles.optionCardError : null,
+                        ]}
+                        onPress={() => handleSelectMarketInterest(option)}
+                        accessibilityRole="radio"
+                        accessibilityState={{ selected: isSelected }}
+                      >
+                        <View style={styles.optionRadioOuter}>
+                          {isSelected && <View style={styles.optionRadioInner} />}
+                        </View>
+                        <Text
+                          style={[
+                            styles.optionText,
+                            isSelected ? styles.optionTextSelected : null,
+                          ]}
+                        >
+                          {option}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+                {errors.marketInterest ? (
+                  <Text style={styles.errorText}>{errors.marketInterest}</Text>
+                ) : null}
               </View>
 
-              <View style={styles.infoBox}>
-                <Text style={styles.infoBoxText}>
-                  Esta finalização é uma simulação de navegação. Não registra o perfil como definitivamente completo nem salva dados permanentemente.
-                </Text>
-              </View>
-
-              <View style={styles.provisionalActions}>
+              {/* BOTÕES DE CONCLUSÃO E RETORNO */}
+              <View style={styles.actionsContainer}>
                 <Pressable
                   style={styles.primaryButton}
                   onPress={handleFinishQuestionnaire}
+                  accessibilityLabel="Concluir questionário"
                 >
-                  <Text style={styles.primaryButtonText}>Concluir questionário e ir para o Início</Text>
+                  <Text style={styles.primaryButtonText}>Concluir</Text>
                 </Pressable>
 
                 <Pressable
                   style={styles.secondaryButton}
                   onPress={handleBack}
+                  accessibilityLabel="Voltar para Etapa 2"
                 >
                   <Text style={styles.secondaryButtonText}>← Voltar para Etapa 2</Text>
                 </Pressable>
@@ -1027,105 +1131,7 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '700',
   },
-  provisionalContainer: {
-    backgroundColor: '#141026',
-    borderWidth: 1,
-    borderColor: '#2a2046',
-    borderRadius: 16,
-    padding: 20,
-    marginTop: 8,
-  },
-  provisionalBadge: {
-    alignSelf: 'flex-start',
-    backgroundColor: '#261b47',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 6,
-    marginBottom: 12,
-  },
-  provisionalBadgeText: {
-    color: '#c084fc',
-    fontSize: 11,
-    fontWeight: '800',
-    letterSpacing: 1,
-  },
-  provisionalTitle: {
-    color: '#ffffff',
-    fontSize: 20,
-    fontWeight: '700',
-    marginBottom: 8,
-  },
-  provisionalDescription: {
-    color: '#94a3b8',
-    fontSize: 14,
-    lineHeight: 20,
-    marginBottom: 20,
-  },
-  summaryCard: {
-    backgroundColor: '#0c0a17',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#2a2046',
-    padding: 14,
-    marginBottom: 16,
-    gap: 8,
-  },
-  summaryTitle: {
-    color: '#a78bfa',
-    fontSize: 13,
-    fontWeight: '700',
-    marginBottom: 4,
-    textTransform: 'uppercase',
-    letterSpacing: 0.8,
-  },
-  summaryRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  summaryLabel: {
-    color: '#64748b',
-    fontSize: 14,
-  },
-  summaryValue: {
-    color: '#ffffff',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  placeholderCard: {
-    backgroundColor: '#0c0a17',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#2a2046',
-    padding: 14,
-    marginBottom: 20,
-    gap: 4,
-  },
-  placeholderCardTitle: {
-    color: '#cbd5e1',
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  placeholderCardSubtitle: {
-    color: '#64748b',
-    fontSize: 12,
-  },
-  infoBox: {
-    backgroundColor: '#191330',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#34265a',
-    padding: 14,
-    marginBottom: 20,
-  },
-  infoBoxText: {
-    color: '#cbd5e1',
-    fontSize: 13,
-    lineHeight: 18,
-  },
-  provisionalActions: {
-    gap: 12,
-  },
+
   searchRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1425,24 +1431,5 @@ const styles = StyleSheet.create({
   actionsContainer: {
     gap: 12,
     marginTop: 8,
-  },
-  summaryGamesList: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
-    marginTop: 6,
-  },
-  summaryGameBadge: {
-    backgroundColor: '#191330',
-    borderWidth: 1,
-    borderColor: '#34265a',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 6,
-  },
-  summaryGameBadgeText: {
-    color: '#c084fc',
-    fontSize: 12,
-    fontWeight: '600',
   },
 });

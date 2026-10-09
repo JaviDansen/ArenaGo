@@ -182,3 +182,34 @@ export function validateYourGamesStep({ selectedGames }) {
   };
 }
 
+/**
+ * Valida a Etapa 3 do Questionário de Perfil ("Mercado de games").
+ * Regras da Task 5:
+ * - marketKnowledge: obrigatório ('Sim, conheço.', 'Conheço um pouco.', 'Não conheço.');
+ * - marketInterest: obrigatório ('Sim, tenho interesse.', 'Talvez — quero conhecer melhor.', 'Não tenho interesse.').
+ *
+ * @param {Object} data
+ * @param {string} data.marketKnowledge
+ * @param {string} data.marketInterest
+ * @returns {{ isValid: boolean, errors: Object }}
+ */
+export function validateGamesMarketStep({ marketKnowledge, marketInterest }) {
+  const errors = {};
+
+  const trimmedKnowledge = typeof marketKnowledge === 'string' ? marketKnowledge.trim() : '';
+  if (!trimmedKnowledge) {
+    errors.marketKnowledge = 'Selecione uma opção sobre seu conhecimento do mercado de games.';
+  }
+
+  const trimmedInterest = typeof marketInterest === 'string' ? marketInterest.trim() : '';
+  if (!trimmedInterest) {
+    errors.marketInterest = 'Selecione uma opção sobre seu interesse no mercado profissional de games.';
+  }
+
+  return {
+    isValid: Object.keys(errors).length === 0,
+    errors,
+  };
+}
+
+
