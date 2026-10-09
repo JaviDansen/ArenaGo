@@ -193,10 +193,18 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
       return;
     }
 
-    setQuestionnaireData((prev) => ({
-      ...prev,
-      selectedGames: [...prev.selectedGames, trimmed],
-    }));
+    setQuestionnaireData((prev) => {
+      // Revalida no estado mais recente para impedir duplicações em atualizações agrupadas.
+      const alreadySelected = prev.selectedGames.some(
+        (g) => g.trim().toLowerCase() === trimmed.toLowerCase()
+      );
+      if (alreadySelected) return prev;
+
+      return {
+        ...prev,
+        selectedGames: [...prev.selectedGames, trimmed],
+      };
+    });
 
     setSearchQuery('');
     setFeedbackMessage({
