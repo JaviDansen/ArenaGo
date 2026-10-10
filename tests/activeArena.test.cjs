@@ -63,6 +63,116 @@ function arena(initial) {
   };
 }
 
+function assertPropertiesPreserved(actual, before, changedKeys) {
+  for (const key of Object.keys(before).filter((key) => !changedKeys.includes(key))) {
+    assert.equal(actual[key], before[key], `property changed: ${key}`);
+  }
+}
+
+test('participant already waiting in a queue cannot join another queue', () => {
+  const existingQueue = { experienceId: 'experience-a', position: 4 };
+  const before = participation({
+    activeExperience: null,
+    experienceQueue: existingQueue,
+    customData: { preserved: true },
+  });
+  const h = arena(before);
+
+  h.act((c) => c.handleJoinExperienceQueue(experiences[1]));
+
+  assert.equal(h.participation, before);
+  assert.equal(h.participation.experienceQueue, existingQueue);
+});
+
+test('participant with an active experience cannot join a new queue', () => {
+  const activeExperience = { experienceId: 'experience-a' };
+  const before = participation({
+    activeExperience,
+    experienceQueue: null,
+    customData: { preserved: true },
+  });
+  const h = arena(before);
+
+  h.act((c) => c.handleJoinExperienceQueue(experiences[1]));
+
+  assert.equal(h.participation, before);
+  assert.equal(h.participation.activeExperience, activeExperience);
+  assert.equal(h.participation.experienceQueue, null);
+});
+
+test('simulated call without a queue entry preserves the participation unchanged', () => {
+  for (const experienceQueue of [null, undefined]) {
+    const before = participation({
+      activeExperience: null,
+      experienceQueue,
+      customData: { preserved: true },
+    });
+    const h = arena(before);
+
+    h.act((c) => c.handleSimulateExperienceCall());
+
+    assert.equal(h.participation, before);
+  }
+});
+
+test('simulated call moves the queued experience to active and preserves all other data', () => {
+  const queuedExperience = { experienceId: 'experience-b', position: 6 };
+  const before = participation({
+    activeExperience: null,
+    experienceQueue: queuedExperience,
+    experienceParticipations: { 'experience-a': 2 },
+    customData: { preserved: true },
+  });
+  const h = arena(before);
+
+  h.act((c) => c.handleSimulateExperienceCall());
+
+  assert.notEqual(h.participation, before);
+  assert.equal(h.participation.experienceQueue, null);
+  assert.deepEqual({ ...h.participation.activeExperience }, { experienceId: 'experience-b' });
+  assertPropertiesPreserved(h.participation, before, ['experienceQueue', 'activeExperience']);
+  assert.equal(before.experienceQueue, queuedExperience);
+  assert.equal(before.activeExperience, null);
+});
+
+test('simulated absence without an active experience preserves the participation unchanged', () => {
+  for (const activeExperience of [null, undefined]) {
+    const before = participation({
+      activeExperience,
+      experienceQueue: null,
+      customData: { preserved: true },
+    });
+    const h = arena(before);
+
+    h.act((c) => c.handleSimulateAbsence());
+
+    assert.equal(h.participation, before);
+  }
+});
+
+test('simulated absence returns the active experience to the end of its queue and preserves other data', () => {
+  const activeExperience = { experienceId: 'experience-b' };
+  const before = participation({
+    activeExperience,
+    experienceQueue: null,
+    experienceParticipations: { 'experience-a': 3, 'experience-b': 1 },
+    customData: { preserved: true },
+  });
+  const h = arena(before);
+
+  h.act((c) => c.handleSimulateAbsence());
+
+  assert.notEqual(h.participation, before);
+  assert.equal(h.participation.activeExperience, null);
+  assert.deepEqual({ ...h.participation.experienceQueue }, {
+    experienceId: 'experience-b',
+    position: experiences[1].queueSize + 1,
+  });
+  assertPropertiesPreserved(h.participation, before, ['activeExperience', 'experienceQueue']);
+  assert.equal(before.activeExperience, activeExperience);
+  assert.equal(before.experienceQueue, null);
+});
+
 test('staff check records the first completion and preserves the rest of the participation', () => {
   for (const counters of [{}, undefined]) {
     const before = participation({ experienceParticipations: counters, customData: { answer: 42 } });
