@@ -173,6 +173,83 @@ test('simulated absence returns the active experience to the end of its queue an
   assert.equal(before.experienceQueue, null);
 });
 
+test('requesting Arena exit opens confirmation and cancelling preserves the participation', () => {
+  const before = participation({
+    activeExperience: null,
+    experienceQueue: { experienceId: 'experience-a', position: 4 },
+    experienceParticipations: { 'experience-a': 2 },
+    customData: { preserved: true },
+  });
+  const h = arena(before);
+
+  h.act((c) => c.handleLeaveArena());
+
+  assert.equal(h.alerts.length, 1);
+  const [title, message, buttons] = h.alerts[0];
+  assert.equal(title, 'Deseja sair da Arena?');
+  assert.equal(typeof message, 'string');
+  const cancel = buttons.find((button) => button.style === 'cancel');
+  const confirm = buttons.find((button) => button.style === 'destructive');
+  assert.ok(cancel);
+  assert.ok(confirm);
+  assert.equal(typeof cancel.onPress, 'undefined');
+  cancel.onPress?.();
+  assert.equal(h.participation, before);
+  assert.deepEqual(h.navigationCalls, []);
+});
+
+test('confirming Arena exit while queued finishes participation and clears only the queue state', () => {
+  const experienceQueue = { experienceId: 'experience-b', position: 6 };
+  const counters = { 'experience-a': 3, 'experience-b': 1 };
+  const before = participation({
+    activeExperience: null,
+    experienceQueue,
+    experienceParticipations: counters,
+    customData: { preserved: true },
+  });
+  const h = arena(before);
+
+  h.act((c) => c.handleLeaveArena());
+  h.act(() => h.alerts[0][2].find((button) => button.style === 'destructive').onPress());
+
+  assert.notEqual(h.participation, before);
+  assert.equal(h.participation.status, 'finished');
+  assert.equal(h.participation.experienceQueue, null);
+  assert.equal(h.participation.activeExperience, null);
+  assert.equal(h.participation.experienceParticipations, counters);
+  assertPropertiesPreserved(h.participation, before,
+    ['status', 'experienceQueue', 'activeExperience']);
+  assert.equal(before.status, 'active');
+  assert.equal(before.experienceQueue, experienceQueue);
+  assert.deepEqual(h.navigationCalls, ['Evaluation']);
+});
+
+test('confirming Arena exit during an experience finishes participation and preserves its history', () => {
+  const activeExperience = { experienceId: 'experience-b' };
+  const counters = { 'experience-a': 4, 'experience-b': 2 };
+  const before = participation({
+    activeExperience,
+    experienceQueue: null,
+    experienceParticipations: counters,
+    customData: { preserved: true },
+  });
+  const h = arena(before);
+
+  h.act((c) => c.handleLeaveArena());
+  h.act(() => h.alerts[0][2].find((button) => button.style === 'destructive').onPress());
+
+  assert.notEqual(h.participation, before);
+  assert.equal(h.participation.status, 'finished');
+  assert.equal(h.participation.experienceQueue, null);
+  assert.equal(h.participation.activeExperience, null);
+  assert.equal(h.participation.experienceParticipations, counters);
+  assertPropertiesPreserved(h.participation, before,
+    ['status', 'experienceQueue', 'activeExperience']);
+  assert.equal(before.status, 'active');
+  assert.equal(before.activeExperience, activeExperience);
+  assert.deepEqual(h.navigationCalls, ['Evaluation']);
+});
+
 test('staff check records the first completion and preserves the rest of the participation', () => {
   for (const counters of [{}, undefined]) {
     const before = participation({ experienceParticipations: counters, customData: { answer: 42 } });
