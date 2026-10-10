@@ -8,21 +8,21 @@ export default function EventEntryScreen({ navigation }) {
   const [eventCode, setEventCode] = useState('');
 
   function handleContinue() {
-    const trimmedCode = eventCode.trim();
+    const normalizedCode = eventCode.trim().toUpperCase();
 
-    if (trimmedCode === '') {
+    if (normalizedCode === '') {
       return;
     }
 
-    const event = Object.prototype.hasOwnProperty.call(mockEvents, trimmedCode)
-      ? mockEvents[trimmedCode]
+    const event = Object.prototype.hasOwnProperty.call(mockEvents, normalizedCode)
+      ? mockEvents[normalizedCode]
       : null;
 
     if (!event) {
       return;
     }
 
-    console.log(trimmedCode);
+    console.log(normalizedCode);
     navigation.navigate('EventConfirmation', { event });
   }
 

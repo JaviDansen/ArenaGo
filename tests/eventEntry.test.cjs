@@ -116,27 +116,31 @@ function enteredEvent(h) {
   return structuredClone(h.navigationCalls[0].params.event);
 }
 
-test('FILA code opens confirmation with the queue event', () => {
-  const h = entryScreen();
-  h.changeCode('FILA');
-  h.continue();
-  const event = enteredEvent(h);
-  assert.equal(event.id, 'beast-arena-queue');
-  assert.equal(event.hasArenaQueue, true);
+test('FILA code is case-insensitive and opens the queue event', () => {
+  for (const code of ['FILA', 'fila', 'Fila', 'fIlA']) {
+    const h = entryScreen();
+    h.changeCode(code);
+    h.continue();
+    const event = enteredEvent(h);
+    assert.equal(event.id, 'beast-arena-queue');
+    assert.equal(event.hasArenaQueue, true);
+  }
 });
 
-test('LIVRE code opens confirmation with the direct-entry event', () => {
-  const h = entryScreen();
-  h.changeCode('LIVRE');
-  h.continue();
-  const event = enteredEvent(h);
-  assert.equal(event.id, 'beast-arena-free');
-  assert.equal(event.hasArenaQueue, false);
+test('LIVRE code is case-insensitive and opens the direct-entry event', () => {
+  for (const code of ['LIVRE', 'livre', 'Livre', 'lIvRe']) {
+    const h = entryScreen();
+    h.changeCode(code);
+    h.continue();
+    const event = enteredEvent(h);
+    assert.equal(event.id, 'beast-arena-free');
+    assert.equal(event.hasArenaQueue, false);
+  }
 });
 
-test('event code ignores only whitespace at its outer edges', () => {
+test('event code ignores outer whitespace before normalizing its case', () => {
   const h = entryScreen();
-  h.changeCode(' \tFILA\r\n ');
+  h.changeCode(' \tfIlA\r\n ');
   h.continue();
   assert.equal(enteredEvent(h).id, 'beast-arena-queue');
 });
@@ -150,8 +154,8 @@ test('empty or whitespace-only event code does not navigate', () => {
   }
 });
 
-test('unknown and lower-case event codes do not navigate', () => {
-  for (const code of ['DESCONHECIDO', 'fila', 'livre']) {
+test('unknown event codes do not navigate regardless of case', () => {
+  for (const code of ['DESCONHECIDO', 'desconhecido', 'Desconhecido']) {
     const h = entryScreen();
     h.changeCode(code);
     h.continue();
