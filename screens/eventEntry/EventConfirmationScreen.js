@@ -19,6 +19,7 @@ export default function EventConfirmationScreen({ navigation, route }) {
         experienceQueue: null,
         // Será preenchida quando o participante for chamado para uma experiência.
         activeExperience: null,
+        experienceParticipations: {},
       });
     } else {
       setParticipation({
@@ -27,6 +28,7 @@ export default function EventConfirmationScreen({ navigation, route }) {
         queuePosition: null,
         experienceQueue: null,
         activeExperience: null,
+        experienceParticipations: {},
       });
     }
 

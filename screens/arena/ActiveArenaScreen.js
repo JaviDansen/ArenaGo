@@ -82,14 +82,22 @@ export default function ActiveArenaScreen({ navigation }) {
   }
 
   function handleSimulateStaffCheck() {
-    if (!participation.activeExperience) {
-      return;
-    }
-
     // Botão temporário para desenvolvimento; no fluxo real, o staff/backend confirmará que o participante realizou a experiência.
-    setParticipation({
-      ...participation,
-      activeExperience: null,
+    setParticipation((prev) => {
+      if (!prev?.activeExperience) {
+        return prev;
+      }
+
+      const { experienceId } = prev.activeExperience;
+
+      return {
+        ...prev,
+        experienceParticipations: {
+          ...prev.experienceParticipations,
+          [experienceId]: (prev.experienceParticipations?.[experienceId] ?? 0) + 1,
+        },
+        activeExperience: null,
+      };
     });
   }
 

@@ -186,4 +186,4 @@ function createHarness(relativePath, options = {}) {
   };
 }
 
-module.exports = { createHarness, nodes, textOf };
+module.exports = { createHarness, loadModule, nodes, textOf };
