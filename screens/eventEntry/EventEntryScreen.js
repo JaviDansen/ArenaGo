@@ -14,7 +14,9 @@ export default function EventEntryScreen({ navigation }) {
       return;
     }
 
-    const event = mockEvents[trimmedCode];
+    const event = Object.prototype.hasOwnProperty.call(mockEvents, trimmedCode)
+      ? mockEvents[trimmedCode]
+      : null;
 
     if (!event) {
       return;
