@@ -52,6 +52,7 @@ function evaluationScreen() {
   return {
     events,
     button,
+    get buttons() { return nodes(tree).filter((node) => node.type === 'Pressable'); },
     get stars() {
       return nodes(tree).filter((node) => node.type === 'Pressable' &&
         node.props.accessibilityRole === 'radio');
@@ -60,8 +61,9 @@ function evaluationScreen() {
     press(label) {
       const target = button(label);
       assert.notEqual(target.props.disabled, true);
-      target.props.onPress();
+      const result = target.props.onPress();
       render();
+      return result;
     },
     setRating(value) {
       screen.context.__capture.setRating(value);
@@ -79,16 +81,6 @@ const returnToMain = [
   { type: 'reset', payload: { index: 0, routes: [{ name: 'MainTabs' }] } },
 ];
 
-function expectedSubmission(rating, comment) {
-  return [
-    {
-      type: 'log',
-      args: ['Envio simulado da avaliação (dados não persistidos):', { rating, comment }],
-    },
-    ...returnToMain,
-  ];
-}
-
 test('evaluation starts empty with submission disabled and a guarded submit handler', () => {
   const h = evaluationScreen();
   const submit = h.button('Enviar avaliação');
@@ -97,6 +89,8 @@ test('evaluation starts empty with submission disabled and a guarded submit hand
   assert.equal(submit.props.disabled, true);
   assert.equal(submit.props.accessibilityState.disabled, true);
   assert.equal(typeof submit.props.onPress, 'function');
+  assert.equal(h.buttons.some((button) => textOf(button) === 'Pular avaliação'), false);
+  assert.notEqual(h.button('Avaliar mais tarde').props.disabled, true);
   submit.props.onPress();
   assert.deepEqual(h.events, []);
 });
@@ -128,12 +122,13 @@ test('invalid ratings do not log, clear participation, or navigate', () => {
   }
 });
 
-test('each valid rating logs the simulated payload before clearing and returning to MainTabs', () => {
+test('each valid rating prepares data in memory and returns to MainTabs without logging', () => {
   for (const rating of [1, 2, 3, 4, 5]) {
     const h = evaluationScreen();
     h.press(`${rating} ${rating === 1 ? 'estrela' : 'estrelas'}`);
-    h.press('Enviar avaliação');
-    assert.deepEqual(h.events, expectedSubmission(rating, ''));
+    const evaluation = h.press('Enviar avaliação');
+    assert.deepEqual({ ...evaluation }, { rating, comment: '' });
+    assert.deepEqual(h.events, returnToMain);
   }
 });
 
@@ -148,17 +143,18 @@ test('submission trims comment edges, accepts blank comments, and preserves inte
     const h = evaluationScreen();
     h.press('5 estrelas');
     h.changeComment(comment);
-    h.press('Enviar avaliação');
-    assert.deepEqual(h.events, expectedSubmission(5, expectedComment));
+    const evaluation = h.press('Enviar avaliação');
+    assert.deepEqual({ ...evaluation }, { rating: 5, comment: expectedComment });
+    assert.deepEqual(h.events, returnToMain);
   }
 });
 
-test('skipping returns without logging an evaluation, with or without a rating', () => {
+test('evaluating later only returns home without preparing an evaluation, with or without a rating', () => {
   for (const rating of [0, 3]) {
     const h = evaluationScreen();
     if (rating) h.press('3 estrelas');
     h.changeComment('Comentário não enviado');
-    h.press('Pular avaliação');
+    assert.equal(h.press('Avaliar mais tarde'), undefined);
     assert.deepEqual(h.events, returnToMain);
   }
 });

@@ -9,7 +9,7 @@ export default function EvaluationScreen({ navigation }) {
   const [rating, setRating] = useState(0);
   const [comment, setComment] = useState('');
 
-  function handleSkipEvaluation() {
+  function handleReturnHome() {
     setParticipation(null);
     navigation.reset({
       index: 0,
@@ -22,13 +22,14 @@ export default function EvaluationScreen({ navigation }) {
       return;
     }
 
+    // Simulação sem backend ou persistência: os dados existem apenas em memória.
     const evaluation = {
       rating,
       comment: comment.trim(),
     };
 
-    console.log('Envio simulado da avaliação (dados não persistidos):', evaluation);
-    handleSkipEvaluation();
+    handleReturnHome();
+    return evaluation;
   }
 
   return (
@@ -74,9 +75,15 @@ export default function EvaluationScreen({ navigation }) {
         >
           <Text style={styles.buttonText}>Enviar avaliação</Text>
         </Pressable>
-        {/* Botão temporário para testes; na versão final, as estrelas serão obrigatórias e só o comentário será opcional. */}
-        <Pressable style={styles.button} onPress={handleSkipEvaluation}>
-          <Text style={styles.buttonText}>Pular avaliação</Text>
+        {/* Sem persistência, esta ação apenas retorna à Home e não cria uma pendência recuperável. */}
+        <Pressable
+          style={[styles.button, styles.secondaryButton]}
+          onPress={handleReturnHome}
+          accessibilityRole="button"
+        >
+          <Text style={[styles.buttonText, styles.secondaryButtonText]}>
+            Avaliar mais tarde
+          </Text>
         </Pressable>
       </ScrollView>
     </ScreenContainer>
@@ -134,5 +141,13 @@ const styles = StyleSheet.create({
   },
   buttonDisabled: {
     opacity: 0.4,
+  },
+  secondaryButton: {
+    backgroundColor: '#fff',
+    borderColor: '#767676',
+    borderWidth: 1,
+  },
+  secondaryButtonText: {
+    color: '#333',
   },
 });
