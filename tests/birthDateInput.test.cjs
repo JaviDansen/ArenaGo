@@ -56,6 +56,46 @@ test('iPhone can confirm today without first changing the initial picker value',
   assert.deepEqual(changes, [h.birthDate.formatBirthDate(h.birthDate.getTodayCivilDate())]);
 });
 
+test('iPhone calendar can close without changing the previous date and confirm a new date after reopening', () => {
+  for (const close of ['button', 'request']) {
+    const { h, changes } = input('ios', '29/02/2024');
+    h.act(() => h.press('Abrir calendário de data de nascimento'));
+    assert.equal(h.nodes.find((node) => node.type === 'Modal').props.visible, true);
+    h.act(() => {
+      if (close === 'button') h.press('Fechar calendário');
+      else h.nodes.find((node) => node.type === 'Modal').props.onRequestClose();
+    });
+    assert.deepEqual(changes, []);
+    assert.equal(h.nodes.find((node) => node.type === 'Modal').props.visible, false);
+    assert.equal(h.nodes.find((node) => node.type === 'TextInput').props.value, '29/02/2024');
+
+    h.act(() => h.press('Abrir calendário de data de nascimento'));
+    const picker = h.nodes.find((node) => node.type === 'DateTimePicker');
+    assert.equal(h.birthDate.localDateToCivilDate(picker.props.value), '2024-02-29');
+    h.act(() => picker.props.onValueChange({}, h.birthDate.civilDateToLocalDate('2000-02-29')));
+    h.setProps({ value: changes[0] });
+    h.act(() => h.press('Usar data selecionada'));
+    assert.deepEqual(changes, ['29/02/2000']);
+    assert.equal(h.nodes.find((node) => node.type === 'TextInput').props.value, '29/02/2000');
+    assert.equal(h.nodes.find((node) => node.type === 'Modal').props.visible, false);
+  }
+});
+
+test('Android dismissal preserves the previous date and a later selection updates it', () => {
+  const { h, changes } = input('android', '29/02/2024');
+  h.act(() => h.press('Abrir calendário de data de nascimento'));
+  h.nativePickerCalls[0].onValueChange({ type: 'dismissed' }, undefined);
+  assert.deepEqual(changes, []);
+  assert.equal(h.nodes.find((node) => node.type === 'TextInput').props.value, '29/02/2024');
+  h.act(() => h.press('Abrir calendário de data de nascimento'));
+  const picker = h.nativePickerCalls[1];
+  assert.equal(h.birthDate.localDateToCivilDate(picker.value), '2024-02-29');
+  picker.onValueChange({ type: 'set' }, h.birthDate.civilDateToLocalDate('2000-02-29'));
+  h.setProps({ value: changes[0] });
+  assert.deepEqual(changes, ['29/02/2000']);
+  assert.equal(h.nodes.find((node) => node.type === 'TextInput').props.value, '29/02/2000');
+});
+
 test('web native calendar selection fills display text and tolerates showPicker fallbacks', () => {
   const { h, changes } = input('web', '29/02/2024');
   const picker = h.nodes.find((n) => n.type === 'input');

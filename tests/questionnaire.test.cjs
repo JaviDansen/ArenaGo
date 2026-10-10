@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
-const { createHarness } = require('./helpers/questionnaireHarness.cjs');
+const { createHarness, textOf } = require('./helpers/questionnaireHarness.cjs');
 
 const fields = ['currentStepIndex', 'questionnaireData', 'birthDateText', 'gender', 'otherGender',
   'education', 'errors', 'searchQuery', 'filteredSuggestions', 'handleBack', 'handleSelectGender',
@@ -27,6 +27,97 @@ function ready(options) {
   assert.equal(h.capture.currentStepIndex, 2);
   return h;
 }
+
+function assertErrorVisible(h, field) {
+  const message = h.capture.errors[field];
+  assert.ok(message, `missing error: ${field}`);
+  assert.ok(h.nodes.some((node) => node.type === 'Text' && textOf(node) === message));
+  return message;
+}
+
+function assertMessageRemoved(h, message) {
+  assert.equal(h.nodes.some((node) => node.type === 'Text' && textOf(node) === message), false);
+}
+
+test('empty first step displays required errors and each correction clears only its own error', () => {
+  const h = questionnaire();
+  h.act(() => h.press('Avançar para a próxima etapa'));
+  assert.equal(h.capture.currentStepIndex, 0);
+  assert.deepEqual(h.navigationCalls, []);
+  const dateError = assertErrorVisible(h, 'birthDate');
+  const genderError = assertErrorVisible(h, 'gender');
+  const educationError = assertErrorVisible(h, 'education');
+
+  h.act(() => h.inputBirthDate('29/02/202'));
+  assertMessageRemoved(h, dateError);
+  assertErrorVisible(h, 'gender');
+  assertErrorVisible(h, 'education');
+  h.act(() => h.press('Avançar para a próxima etapa'));
+  assert.equal(h.capture.currentStepIndex, 0);
+  const incompleteError = assertErrorVisible(h, 'birthDate');
+  assert.notEqual(incompleteError, dateError);
+
+  h.act(() => h.inputBirthDate('29/02/2024'));
+  assertMessageRemoved(h, incompleteError);
+  h.act(() => h.press('Masculino'));
+  assertMessageRemoved(h, genderError);
+  assertErrorVisible(h, 'education');
+  h.act(() => h.press('Superior'));
+  assertMessageRemoved(h, educationError);
+  assert.equal(h.capture.currentStepIndex, 0);
+  h.act(() => h.press('Avançar para a próxima etapa'));
+  assert.equal(h.capture.currentStepIndex, 1);
+  assert.deepEqual(Object.keys(h.capture.errors), []);
+  assert.equal(h.capture.questionnaireData.birthDate, '2024-02-29');
+  assert.deepEqual(h.navigationCalls, []);
+});
+
+test('Other gender requires a nonblank description and accepts a corrected retry', () => {
+  const h = questionnaire();
+  h.act(() => h.inputBirthDate('29/02/2024'));
+  h.act(() => h.press('Outro'));
+  h.act(() => h.press('Superior'));
+  const changeDescription = (value) => h.act(() => h.nodes.find((node) =>
+    node.type === 'TextInput' && node.props.placeholder === 'Como você se identifica?'
+  ).props.onChangeText(value));
+  changeDescription('   ');
+  h.act(() => h.press('Avançar para a próxima etapa'));
+  assert.equal(h.capture.currentStepIndex, 0);
+  const error = assertErrorVisible(h, 'otherGender');
+  changeDescription('  Identidade  ');
+  assertMessageRemoved(h, error);
+  h.act(() => h.press('Avançar para a próxima etapa'));
+  assert.equal(h.capture.currentStepIndex, 1);
+  assert.equal(h.capture.questionnaireData.otherGender, 'Identidade');
+  assert.deepEqual(Object.keys(h.capture.errors), []);
+});
+
+test('correcting a missing game clears the error and preserves earlier answers on a return trip', () => {
+  const h = ready();
+  h.act(() => h.press('Voltar para Etapa 2'));
+  for (const game of Array.from(h.capture.questionnaireData.selectedGames)) {
+    h.act(() => h.press(`Remover ${game}`));
+  }
+  const before = structuredClone(h.capture.questionnaireData);
+  h.act(() => h.press('Avançar para a Etapa 3'));
+  assert.equal(h.capture.currentStepIndex, 1);
+  const error = assertErrorVisible(h, 'selectedGames');
+  assert.deepEqual(structuredClone(h.capture.questionnaireData), before);
+  h.act((c) => c.handleSearchChange('Minecraft'));
+  h.act(() => h.press('Selecionar Minecraft'));
+  assertMessageRemoved(h, error);
+  h.act(() => h.press('Avançar para a Etapa 3'));
+  assert.equal(h.capture.currentStepIndex, 2);
+  assert.deepEqual(Object.keys(h.capture.errors), []);
+  h.act(() => h.press('Voltar para Etapa 2'));
+  h.act(() => h.press('Voltar etapa'));
+  assert.equal(h.capture.birthDateText, '29/02/2024');
+  assert.equal(h.capture.gender, 'Outro');
+  assert.equal(h.capture.otherGender, '  Identidade  ');
+  assert.equal(h.capture.education, 'Superior');
+  assert.deepEqual(Array.from(h.capture.questionnaireData.selectedGames), ['Minecraft']);
+  assert.deepEqual(h.navigationCalls, []);
+});
 
 test('empty, incomplete and impossible birth dates block step 1 without erasing answers', () => {
   const h = questionnaire();
