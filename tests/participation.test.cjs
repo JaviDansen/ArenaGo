@@ -38,9 +38,11 @@ function renderEventsScreen(participations) {
     if (name === '../data/mockData') return { mockParticipations: participations };
     return require(name);
   });
-  const rendered = screen.exports.default();
+  const navigationCalls = [];
+  const navigation = { navigate: (name, params) => navigationCalls.push({ name, params: { ...params } }) };
+  const rendered = screen.exports.default({ navigation });
   const list = nodes(rendered).find((node) => node.type === 'FlatList');
-  return { rendered, list };
+  return { rendered, list, navigationCalls };
 }
 
 function renderParticipationCard(props) {
@@ -146,7 +148,18 @@ test('EventsScreen lists participations under Minhas Participações', () => {
   const item = list.props.renderItem({ item: withoutExit });
   assert.equal(item.type, 'ParticipationCard');
   assert.equal(item.props.participation, withoutExit);
-  assert.equal(item.props.onPress, undefined);
+  assert.equal(typeof item.props.onPress, 'function');
+});
+
+test('pressing a participation card opens its details by participation ID', () => {
+  const sameEventLater = Object.freeze({ ...finished, id: 'participation-3' });
+  const { list, navigationCalls } = renderEventsScreen([finished, sameEventLater]);
+  list.props.renderItem({ item: sameEventLater }).props.onPress();
+  list.props.renderItem({ item: finished }).props.onPress();
+  assert.deepEqual(navigationCalls, [
+    { name: 'ParticipationDetails', params: { participationId: 'participation-3' } },
+    { name: 'ParticipationDetails', params: { participationId: 'participation-1' } },
+  ]);
 });
 
 test('EventsScreen shows the empty state message when there are no participations', () => {

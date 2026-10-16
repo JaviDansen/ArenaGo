@@ -99,6 +99,57 @@ export function getStayDurationInMinutes(participation) {
 }
 
 /**
+ * Busca uma participação pelo seu ID (e não pelo nome do evento, que se
+ * repete quando a mesma pessoa participa mais de uma vez do mesmo evento).
+ *
+ * @param {Array<{ id: string }>} participations
+ * @param {string} participationId
+ * @returns {object|null} null quando o ID não existe ou é inválido
+ */
+export function findParticipationById(participations, participationId) {
+  if (!Array.isArray(participations) || typeof participationId !== 'string' || participationId === '') {
+    return null;
+  }
+  return participations.find((participation) => participation?.id === participationId) ?? null;
+}
+
+function getRegisteredTime(value) {
+  if (value === null || value === undefined || value === '') {
+    return { status: 'missing', time: null };
+  }
+  const instant = parseRegisteredInstant(value);
+  return instant ? { status: 'registered', time: instant.time } : { status: 'invalid', time: null };
+}
+
+/**
+ * Horários de entrada e saída (HH:MM, no fuso em que foram registrados) e o
+ * tempo de permanência. Cada horário vem com a situação do registro:
+ * 'registered', 'missing' (não registrado) ou 'invalid'. A saída também é
+ * inválida quando não é posterior à entrada. Nada é estimado.
+ *
+ * @param {{ enteredAt?: string|null, exitedAt?: string|null }} participation
+ * @returns {{
+ *   entry: { status: string, time: string|null },
+ *   exit: { status: string, time: string|null },
+ *   stayDurationInMinutes: number|null,
+ * }}
+ */
+export function getParticipationTimes(participation) {
+  const entry = getRegisteredTime(participation?.enteredAt);
+  let exit = getRegisteredTime(participation?.exitedAt);
+
+  if (entry.status === 'registered' && exit.status === 'registered') {
+    const enteredAt = parseRegisteredInstant(participation.enteredAt);
+    const exitedAt = parseRegisteredInstant(participation.exitedAt);
+    if (exitedAt.timestamp <= enteredAt.timestamp) {
+      exit = { status: 'invalid', time: null };
+    }
+  }
+
+  return { entry, exit, stayDurationInMinutes: getStayDurationInMinutes(participation) };
+}
+
+/**
  * Formata minutos como "1h 42min", "45min" ou "2h".
  *
  * @param {number|null} minutes

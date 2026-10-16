@@ -4,7 +4,7 @@ import ParticipationCard from '../components/ParticipationCard';
 import ScreenContainer from '../components/ScreenContainer';
 import { mockParticipations } from '../data/mockData';
 
-export default function EventsScreen() {
+export default function EventsScreen({ navigation }) {
   // Dados mockados enquanto não há integração com backend.
   const participations = mockParticipations;
 
@@ -14,8 +14,12 @@ export default function EventsScreen() {
       <FlatList
         data={participations}
         keyExtractor={(participation) => participation.id}
-        // A abertura dos Detalhes da Participação será adicionada em uma próxima etapa (via `onPress`).
-        renderItem={({ item }) => <ParticipationCard participation={item} />}
+        renderItem={({ item }) => (
+          <ParticipationCard
+            participation={item}
+            onPress={() => navigation.navigate('ParticipationDetails', { participationId: item.id })}
+          />
+        )}
         ListEmptyComponent={
           <Text style={styles.emptyMessage}>
             Você ainda não possui participações em eventos.
