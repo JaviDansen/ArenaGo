@@ -120,6 +120,9 @@ A análise dos fluxos de autenticação, perfil e questionário presentes no fro
 | **Questionário — Etapa 2: Seus jogos** (`ProfileQuestionnaireScreen.js`) | `selectedGames` (Array de strings) | - Mínimo 1 jogo selecionado.<br>- Sugestões de catálogo (20 jogos do `mockGames`).<br>- Inclusão manual livre digitada pelo usuário.<br>- Deduplicação local case-insensitive `toLowerCase().trim()`. | - Catálogo persistido em tabela `games` (`is_curated = true`).<br>- Jogos manuais persistidos em `games` (`is_curated = false`) com deduplicação case-insensitive via CTE atômica que **reutiliza o ID sem jamais modificar o nome canônico existente**.<br>- Vínculo N:N em `user_games` idempotente. | Disponibilizar endpoint `GET /games` para sugestões e aceitar novos nomes no payload do questionário. |
 | **Questionário — Etapa 3: Mercado de games** (`ProfileQuestionnaireScreen.js`) | `marketKnowledge`<br>`marketInterest` | - `marketKnowledge`: 1 opção ('Sim, conheço.', 'Conheço um pouco.', 'Não conheço.').<br>- `marketInterest`: 1 opção ('Sim, tenho interesse.', 'Talvez — quero conhecer melhor.', 'Não tenho interesse.'). | - Campos obrigatórios persistidos no perfil do usuário.<br>- Integrados ao snapshot imutável em futuras participações de eventos. | Armazenar no perfil e compor a estrutura congelada na participação. |
 | **Consulta do Questionário** | Consulta de estado e respostas | Não existe atualmente chamada de rede. | - Endpoint `GET /profile/questionnaire`.<br>- **Se não preenchido:** retorna `200 OK` com `hasCompleted: false` e campos em `null` (não retorna 404).<br>- **Se preenchido:** retorna `200 OK` com `hasCompleted: true` e todas as respostas. | Permite que o app identifique o estado sem tratar ausência de respostas como erro de rede ou conta inexistente. |
+| **Consulta do Perfil** (`ProfileScreen.js`) | `id`, `name`, `email`, `roles`, `hasCompletedQuestionnaire` | Leitura de contexto em memória. | - Endpoint autenticado `GET /profile`.<br>- Retorna identidade da conta, verificação de e-mail, papéis e estado de conclusão do questionário. | Integração com endpoint autenticado para exibição na aba de Perfil. |
+| **Atualização do Perfil** (`ProfileScreen.js`) | `name` | Edição local do nome. | - Endpoint autenticado `PATCH /profile`.<br>- Atualiza dados cadastrais permitidos do usuário (nome de exibição: 2 a 150 caracteres). | Integração com endpoint autenticado com validação e retorno atualizado. |
+
 
 ---
 
@@ -181,9 +184,9 @@ backend/
 │   │   │   └── roles.module.ts
 │   │   │
 │   │   ├── profile/                     # Perfil Pessoal e Questionário
-│   │   │   ├── dto/                     # UpdateQuestionnaireDto, QuestionnaireResponseDto
+│   │   │   ├── dto/                     # UpdateProfileDto, ProfileResponseDto, UpdateQuestionnaireDto, QuestionnaireResponseDto
 │   │   │   ├── profile.controller.ts    # Endpoints /profile e /profile/questionnaire
-│   │   │   ├── profile.service.ts       # Gravação em lote e consulta de estado pendente/completo
+│   │   │   ├── profile.service.ts       # Gestão cadastral de perfil, gravação em lote e consulta de estado
 │   │   │   └── profile.module.ts
 │   │   │
 │   │   ├── games/                       # Catálogo de Jogos e Sugestões
@@ -529,6 +532,9 @@ Permissões atribuídas a uma conta, com prevenção rigorosa de papéis ativos 
   - `granted_at`: `TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()`
   - `revoked_at`: `TIMESTAMP WITH TIME ZONE NULL`
   - `revoked_by`: `UUID NULL REFERENCES users(id)`
+- **Restrições de Verificação (CHECK Constraints):**
+  - `CONSTRAINT chk_user_roles_role CHECK (role IN ('participante', 'staff', 'admin'))`
+  - `CONSTRAINT chk_user_roles_event CHECK ((role = 'staff' AND event_id IS NOT NULL) OR (role IN ('participante', 'admin') AND event_id IS NULL))`
 - **Restrições de Unicidade & Índices:**
   - `CREATE UNIQUE INDEX idx_user_roles_unique_global ON user_roles (user_id, role) WHERE revoked_at IS NULL AND event_id IS NULL;` (Impede papel global duplicado ativo)
   - `CREATE UNIQUE INDEX idx_user_roles_unique_event ON user_roles (user_id, role, event_id) WHERE revoked_at IS NULL AND event_id IS NOT NULL;` (Impede atribuição duplicada do mesmo papel para o mesmo evento)
@@ -563,6 +569,47 @@ Estrutura para 2FA obrigatório de administradores.
   - `code_hash`: `VARCHAR(64) NOT NULL UNIQUE` (hash SHA-256 do código alfanumérico)
   - `used_at`: `TIMESTAMP WITH TIME ZONE NULL`
   - `created_at`: `TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()`
+
+### 5.12 Contratos Conceituais Futuros: Tabelas de Eventos, Participações e Snapshots
+
+Em estrita conformidade com o escopo delimitado da Task 6.1, as tabelas abaixo **não serão criadas nas migrações SQL iniciais** (pertencem às fases subsequentes de Eventos e Filas). No entanto, seus contratos conceituais e restrições relacionais ficam formalizados para garantir compatibilidade estrutural imediata:
+
+1. **Tabela `participations` (Conceitual Futura):**
+   - **PK:** `id` (`UUID PRIMARY KEY DEFAULT gen_random_uuid()`)
+   - **Colunas:**
+     - `user_id`: `UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT`
+     - `event_id`: `UUID NOT NULL REFERENCES events(id) ON DELETE RESTRICT`
+     - `status`: `VARCHAR(30) NOT NULL` (`'registered'`, `'in_queue'`, `'attending'`, `'completed'`, `'cancelled'`)
+     - `created_at`: `TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()`
+   - **Restrições:** `UNIQUE (user_id, event_id)` (impede que um mesmo usuário crie registros concorrentes de participação no mesmo evento).
+
+2. **Tabela `participation_questionnaire_snapshots` (Conceitual Futura):**
+   - **PK:** `id` (`UUID PRIMARY KEY DEFAULT gen_random_uuid()`)
+   - **Colunas:**
+     - `participation_id`: `UUID NOT NULL UNIQUE REFERENCES participations(id) ON DELETE RESTRICT`
+     - `birth_date`: `DATE NOT NULL` (sem conversão de timezone)
+     - `age_at_event`: `INTEGER NOT NULL` (idade calculada no dia do evento)
+     - `gender`: `VARCHAR(30) NOT NULL`
+     - `education`: `VARCHAR(30) NOT NULL`
+     - `market_knowledge`: `VARCHAR(50) NOT NULL`
+     - `market_interest`: `VARCHAR(50) NOT NULL`
+     - `games_snapshot`: `JSONB NOT NULL` (array imutável com os nomes canônicos dos jogos no instante da entrada)
+     - `created_at`: `TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()`
+   - **Garantia de Imutabilidade Estrita no PostgreSQL:**
+     Para assegurar que dados analíticos de auditoria histórica e relatórios de BI jamais sejam alterados por edição posterior no perfil corrente do usuário, a tabela contará com gatilho de rejeição de mutações:
+     ```sql
+     CREATE OR REPLACE FUNCTION prevent_snapshot_mutation()
+     RETURNS TRIGGER AS $$
+     BEGIN
+       RAISE EXCEPTION 'Snapshots de participação são estritamente imutáveis para integridade histórica.';
+     END;
+     $$ LANGUAGE plpgsql;
+
+     CREATE TRIGGER trg_snapshots_immutable
+     BEFORE UPDATE OR DELETE ON participation_questionnaire_snapshots
+     FOR EACH ROW EXECUTE FUNCTION prevent_snapshot_mutation();
+     ```
+
 
 ---
 
@@ -775,10 +822,18 @@ WHERE session_id IN (SELECT id FROM sessions WHERE user_id = :userId);
 COMMIT;
 ```
 
-**Rate Limiting de Recuperação de Senha:**
-- Limite por conta: máximo de **1 solicitação a cada 2 minutos** e **até 5 por hora** por e-mail normalizado.
-- Limite por rede: teto configurado por endereço IP para prevenir negação de serviço sem penalizar redes universitárias ou corporativas compartilhadas (NAT).
-- Aplicação no Monólito: implementado com `@nestjs/throttler` utilizando chaves em memória (`forgot-pwd:email:${normalizedEmail}` e `forgot-pwd:ip:${ip}`), sem exigir Redis na arquitetura inicial.
+**Rate Limiting de Recuperação de Senha no Ambiente de Implantação:**
+- **Controle Duplo (Por Conta e Por Rede):**
+  1. **Por Conta (E-mail Normalizado):** Chave `forgot_pwd:email:${LOWER(TRIM(email))}`.
+     - Limite de frequência: **1 solicitação a cada 2 minutos** (TTL: 120s, limit: 1).
+     - Teto horário de segurança: **máximo de 5 solicitações por hora** (TTL: 3600s, limit: 5).
+     - Como a chave utiliza o e-mail rigorosamente normalizado antes de qualquer consulta, tentativas de contorno variando maiúsculas ou espaços em branco colidem exatamente no mesmo bucket de restrição.
+  2. **Por Rede (Endereço IP):** Chave `forgot_pwd:ip:${req.ip}`.
+     - Teto de contenção configurado (até 10 requisições a cada 10 minutos) para bloquear ferramentas automatizadas de varredura ou abuso sem penalizar múltiplos participantes legítimos operando sob o mesmo IP compartilhado (redes corporativas, universidades ou Wi-Fi de eventos com CGNAT).
+- **Execução Eficiente no Monólito sem Redis:**
+  - O controle é executado pelo `@nestjs/throttler` através do storage em memória de alta performance embutido no processo Node.js.
+  - Para o modelo de implantação em monólito modular adotado pelo projeto, a solução em memória garante precisão e resposta instantânea sem custos operacionais adicionais ou dependência de serviços externos como Redis. Caso o sistema venha a demandar escalabilidade horizontal multi-instância em fases posteriores, o adapter do Throttler permite migração transparente para um store persistente compartilhado.
+
 
 ### 7.2 Fluxo de Verificação de E-mail
 - **Regra para Participantes:** Contas com perfil comum de participante não exigem verificação prévia de e-mail para utilizar o aplicativo, logar ou preencher o questionário.
@@ -875,10 +930,63 @@ sequenceDiagram
     API-->>Admin: 200 OK { accessToken (15m), refreshToken (30d), user }
 ```
 
-**Recuperação de TOTP Perdido:**
-- Caso o administrador perca o dispositivo e os códigos de backup, a redefinição só pode ser autorizada por **outro Administrador com 2FA ativo** através de:
-  `POST /admin/users/:id/reset-totp` (exigindo justificativa textual obrigatória).
-- A chamada revoga o segredo anterior, apaga códigos de backup remanescentes, revoga todas as sessões ativas da conta-alvo e gera registro circunstanciado em `role_audit_logs`. No próximo login, o usuário será conduzido ao onboarding inicial de TOTP.
+**Detalhamento Técnico das Etapas do Fluxo Administrativo:**
+
+1. **Emissão e Validação do Desafio Temporário (`tempToken`):**
+   - Ao validar as credenciais em `POST /auth/login` para uma conta com papel `admin`, o servidor **não emite o token de acesso administrativo final**.
+   - O backend emite um token provisório assinado via JWT (`tempToken`), com TTL restrito a **5 minutos** e payload com escopo delimitado:
+     ```json
+     {
+       "sub": "b2f6d2b4-7f1e-4c91-9e23-28942b10a911",
+       "scope": "2fa_pending",
+       "purpose": "admin_challenge",
+       "isTotpConfigured": true,
+       "iat": 1792080000,
+       "exp": 1792080300
+     }
+     ```
+   - O interceptor e o guard especializado `TotpChallengeGuard` asseguram que esse token temporário só seja aceito nas rotas de desafio (`/auth/2fa/setup` e `/auth/2fa/verify`), sendo rejeitado com `403 Forbidden` em qualquer endpoint funcional da API.
+
+2. **Configuração Inicial do TOTP e Códigos de Recuperação:**
+   - Se o Admin ainda não tiver o segundo fator ativado (`isTotpConfigured = false`), ele chama `POST /auth/2fa/setup` (Bearer `tempToken`).
+   - O backend gera segredo criptográfico base32, cifra-o com **AES-256-GCM** (usando a chave `TOTP_ENCRYPTION_KEY`) e gera a URL canônica `otpauth://totp/ArenaGo:admin@arenago.com.br?secret=...&issuer=ArenaGo`.
+   - Gera **10 códigos de backup alfanuméricos** de 8 caracteres (`XXXX-XXXX`) de uso único, gravando apenas o hash SHA-256 na tabela `user_backup_codes`.
+   - O registro em `user_totp_credentials` permanece com `is_verified = false`. O Admin deve confirmar o primeiro código gerado no app chamando `POST /auth/2fa/verify`. Somente após a validação matemática bem-sucedida do primeiro código de 6 dígitos, o segredo é marcado como ativo (`is_verified = true`).
+
+3. **Verificação do Segundo Fator e Emissão da Sessão Autorizada:**
+   - Em `POST /auth/2fa/verify`, o Admin envia o código de 6 dígitos do app autenticador ou um dos códigos de backup.
+   - O backend valida a janela de tempo RFC 6238 (tolerância de ±1 passo de 30s) ou verifica a colisão do hash SHA-256 em `user_backup_codes` (marcando `used_at = NOW()` para descarte imediato).
+   - Validação concluída: o backend executa a transação atômica de criação de sessão única (`sessions` e `refresh_tokens`) e emite o Access Token administrativo final contendo as claims de privilégio:
+     ```json
+     {
+       "sub": "b2f6d2b4-7f1e-4c91-9e23-28942b10a911",
+       "sid": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+       "email": "admin@arenago.com.br",
+       "roles": ["admin", "participante"],
+       "admin_2fa_verified": true,
+       "iat": 1792080000,
+       "exp": 1792080900
+     }
+     ```
+
+4. **Renovação e Revogação da Sessão Administrativa:**
+   - **Renovação Segura (`POST /auth/refresh`):** Ao receber requisição de renovação para uma sessão administrativa, o serviço de sessão não confia cegamente nas claims do token anterior: consulta em tempo real a tabela `user_roles` para garantir que o papel `admin` permanece ativo (`revoked_at IS NULL`) e valida se `user_totp_credentials.is_verified = true`. Caso o papel de Admin tenha sido revogado por outro administrador durante o período da sessão, o novo Access Token emitido não recebe a claim `roles: ["admin"]` nem `admin_2fa_verified: true`, rebaixando o acesso imediatamente.
+   - **Revogação da Sessão:** O encerramento voluntário (`POST /auth/logout`) ou administrativo preenche `sessions.revoked_at = NOW()` e invalida os refresh tokens vinculados. Em virtude da checagem em tempo real de `sid` executada pelo `JwtAuthGuard`, a sessão perde a validade no exato milissegundo da revogação.
+
+5. **Recuperação de TOTP Perdido (Autorização Exclusiva por Outro Admin):**
+   - Caso um administrador extravie o dispositivo autenticador e não disponha de códigos de backup, a recuperação técnica depende mandatoriamente de autorização expressa de **outro Administrador com 2FA ativo**.
+   - O administrador executor chama `POST /admin/users/:id/reset-totp` enviando justificativa circunstanciada obrigatória.
+   - A operação executa em transação ACID:
+     1. Deleta/invalida o segredo em `user_totp_credentials` da conta-alvo (`is_verified = false`).
+     2. Deleta todos os códigos de backup remanescentes em `user_backup_codes`.
+     3. Revoga compulsoriamente todas as sessões ativas da conta-alvo (`revocation_reason = 'admin_totp_reset'`).
+     4. Registra evento detalhado na tabela `role_audit_logs` contendo o `actor_id` do administrador que aprovou a redefinição, o `target_user_id` e o texto da justificativa.
+   - No próximo login com senha, o sistema detecta que a conta necessita de novo onboarding de 2FA e emite o desafio para `POST /auth/2fa/setup`.
+
+6. **Bootstrap do Primeiro Admin e Auditoria Fidedigna:**
+   - O primeiro administrador da infraestrutura é provisionado via comando seguro no console do servidor (`npm run cli:promote-admin`).
+   - A auditoria gerada em `role_audit_logs` registra estritamente `actor_id = NULL` e `action = 'CLI_BOOTSTRAP'`. Isso documenta formalmente a origem de infraestrutura da operação, sem imputar falsamente à conta promovida a responsabilidade de ter concedido privilégios a si mesma.
+
 
 ---
 
@@ -920,14 +1028,14 @@ SELECT id FROM games WHERE LOWER(TRIM(name)) = LOWER(TRIM(:trimmedName))
 LIMIT 1;
 ```
 
-**Vínculo com o Usuário em `user_games`:**
-A associação na tabela `user_games` utiliza a chave primária composta `(user_id, game_id)` com inserção idempotente:
-```sql
-INSERT INTO user_games (user_id, game_id)
-VALUES (:userId, :gameId)
-ON CONFLICT (user_id, game_id) DO NOTHING;
-```
-Isso impede categoricamente qualquer duplicidade no catálogo de jogos e na relação entre o usuário e seus jogos selecionados.
+**Garantia de Não-Duplicação e Preservação Canônica sob Concorrência:**
+Mesmo que duas ou mais requisições concorrentes tentem registrar simultaneamente o mesmo jogo com variações de caixa ou espaçamento (ex.: `"Valorant"`, `"valorant"` e `"  VALORANT  "`):
+1. O PostgreSQL avalia o índice único funcional `idx_games_name_lower_unique ON games (LOWER(TRIM(name)))`.
+2. Apenas uma das transações realiza a inserção física da linha. A transação concorrente colide no índice e aciona a cláusula `ON CONFLICT DO NOTHING`, descartando a inserção sem emitir erro de violação e sem alterar nenhuma coluna existente.
+3. A segunda instrução da CTE (`UNION ALL SELECT id FROM games WHERE LOWER(TRIM(name)) = LOWER(TRIM(:trimmedName)) LIMIT 1`) recupera com exatidão o `id` canônico da linha.
+4. **Preservação Canônica Absoluta:** O nome original registrado inicialmente é mantido intacto. Nenhuma cláusula `UPDATE SET name = ...` é executada, eliminando categoricamente o risco de sobrescrita de grafias estabelecidas.
+5. Em seguida, a vinculação em `user_games` aplica `ON CONFLICT (user_id, game_id) DO NOTHING`, garantindo que um participante jamais possua vínculos duplicados com o mesmo jogo.
+
 
 ### 9.3 Snapshots Imutáveis de Participação e Privacidade (LGPD)
 
@@ -1134,15 +1242,102 @@ Efetivação atômica da troca de senha.
   - `400 Bad Request`: Token inválido, expirado ou senha inválida.
 
 ### 10.8 `POST /auth/verify-email/request` e `POST /auth/verify-email/confirm`
-- **Request (`POST /auth/verify-email/request`):** Requer Bearer Token. Despacha token de 24h.
-- **Confirm (`POST /auth/verify-email/confirm`):**
-  - Body: `{ "token": "token_recebido_no_email" }`
-  - Response `200 OK`: `{ "message": "E-mail confirmado com sucesso." }`
+- **Solicitação (`POST /auth/verify-email/request`):**
+  - **Autenticação:** Bearer AccessToken obrigatório.
+  - **Headers:** `Authorization: Bearer <accessToken>`
+  - **Response `200 OK`:**
+    ```json
+    {
+      "message": "E-mail de confirmação enviado com sucesso. Verifique sua caixa de entrada."
+    }
+    ```
+  - **Erros RFC 7807:**
+    - `400 Bad Request` (`title: "E-mail Já Verificado"`): Quando `users.email_verified_at IS NOT NULL`.
+    - `401 Unauthorized`: Sessão inválida ou expirada.
+    - `429 Too Many Requests`: Limite de 1 reenvio a cada 2 minutos.
+- **Confirmação (`POST /auth/verify-email/confirm`):**
+  - **Autenticação:** Nenhuma (Público).
+  - **Request Body:**
+    ```json
+    {
+      "token": "d7b9a4c8e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8"
+    }
+    ```
+  - **Validações:** `token`: string obrigatória com hash válido de 64 caracteres hexadecimais (SHA-256 do token gerado).
+  - **Response `200 OK`:**
+    ```json
+    {
+      "message": "E-mail verificado com sucesso. Sua conta está apta a receber papéis administrativos ou de equipe."
+    }
+    ```
+  - **Erros RFC 7807:**
+    - `400 Bad Request` (`title: "Token Inválido ou Expirado"`): Quando o token não existe, já foi consumido (`verified_at IS NOT NULL`), ou expirou (`expires_at < NOW()`).
 
-### 10.9 `GET /profile/questionnaire`
-Consulta as respostas do questionário da conta logada.
-- **Autenticação:** Bearer Token obrigatório.
-- **Response `200 OK` (Quando JÁ preenchido):**
+### 10.9 `GET /profile`
+Consulta a identidade cadastral da conta autenticada, seus privilégios ativos e o estado do questionário.
+- **Autenticação:** Bearer AccessToken obrigatório (`JwtAuthGuard` + verificação indexada de `sid`).
+- **Headers:** `Authorization: Bearer <accessToken>`
+- **Response `200 OK`:**
+  ```json
+  {
+    "id": "b2f6d2b4-7f1e-4c91-9e23-28942b10a911",
+    "name": "Kaled Silva",
+    "email": "kaled@exemplo.com",
+    "emailVerified": true,
+    "roles": ["participante"],
+    "hasCompletedQuestionnaire": false,
+    "createdAt": "2026-10-15T12:00:00.000Z",
+    "updatedAt": "2026-10-15T12:00:00.000Z"
+  }
+  ```
+- **Erros RFC 7807:**
+  - `401 Unauthorized` (`title: "Sessão Inválida ou Revogada"`): Token expirado ou sessão encerrada por login em outro dispositivo.
+
+### 10.10 `PATCH /profile`
+Atualização cadastral dos dados básicos permitidos do usuário autenticado (como o nome de exibição).
+- **Autenticação:** Bearer AccessToken obrigatório.
+- **Headers:** `Authorization: Bearer <accessToken>`
+- **Request Body:**
+  ```json
+  {
+    "name": "Kaled Trabuksi Silva"
+  }
+  ```
+- **Validações:**
+  - `name`: string obrigatória, mínimo 2 e máximo 150 caracteres, trimmed.
+  - A rota não permite alteração de e-mail (que requer fluxo transacional dedicado com re-verificação para segurança da conta).
+- **Response `200 OK`:**
+  ```json
+  {
+    "message": "Perfil atualizado com sucesso.",
+    "user": {
+      "id": "b2f6d2b4-7f1e-4c91-9e23-28942b10a911",
+      "name": "Kaled Trabuksi Silva",
+      "email": "kaled@exemplo.com",
+      "updatedAt": "2026-10-16T14:30:00.000Z"
+    }
+  }
+  ```
+- **Erros RFC 7807:**
+  - `400 Bad Request` (`title: "Dados Cadastrais Inválidos"`): Nome fora do intervalo de 2 a 150 caracteres (`invalidParams: [{ "name": "name", "reason": "O nome deve ter entre 2 e 150 caracteres." }]`).
+  - `401 Unauthorized`: Sessão inválida ou expirada.
+
+### 10.11 `GET /profile/questionnaire`
+Consulta as respostas do questionário de 3 etapas da conta autenticada.
+- **Autenticação:** Bearer AccessToken obrigatório.
+- **Headers:** `Authorization: Bearer <accessToken>`
+- **Response `200 OK` (Quando o questionário AINDA NÃO foi preenchido / Estado Pendente):**
+  - **Regra Aprovada pela Equipe:** Retorna `200 OK` com `hasCompleted: false` e campos em `null`/vazio. **Em nenhuma circunstância retorna `404 Not Found`**, assegurando que a ausência de questionário não seja tratada como falha de rede ou inexistência da conta.
+  ```json
+  {
+    "hasCompleted": false,
+    "aboutYou": null,
+    "yourGames": [],
+    "gamesMarket": null,
+    "completedAt": null
+  }
+  ```
+- **Response `200 OK` (Quando o questionário JÁ foi preenchido / Concluído):**
   ```json
   {
     "hasCompleted": true,
@@ -1164,20 +1359,13 @@ Consulta as respostas do questionário da conta logada.
     "completedAt": "2026-10-15T18:00:00.000Z"
   }
   ```
-- **Response `200 OK` (Quando AINDA NÃO preenchido / Pendente):**
-  ```json
-  {
-    "hasCompleted": false,
-    "aboutYou": null,
-    "yourGames": [],
-    "gamesMarket": null,
-    "completedAt": null
-  }
-  ```
+- **Erros RFC 7807:**
+  - `401 Unauthorized` (`title: "Não Autorizado"`): Token ausente, inválido ou sessão revogada.
 
-### 10.10 `PUT /profile/questionnaire`
-Salva ou atualiza as respostas do questionário em lote (todas as 3 etapas).
-- **Autenticação:** Bearer Token obrigatório.
+### 10.12 `PUT /profile/questionnaire`
+Salva ou atualiza as respostas completas do questionário em lote (todas as 3 etapas em uma única operação transacional).
+- **Autenticação:** Bearer AccessToken obrigatório.
+- **Headers:** `Authorization: Bearer <accessToken>`
 - **Request Body:**
   ```json
   {
@@ -1185,18 +1373,18 @@ Salva ou atualiza as respostas do questionário em lote (todas as 3 etapas).
     "gender": "Outro",
     "otherGender": "Não-binário",
     "education": "Superior",
-    "selectedGames": ["Valorant", "Meu Jogo Customizado"],
+    "selectedGames": ["Valorant", "Meu Jogo Customizado Indie"],
     "marketKnowledge": "Conheço um pouco.",
     "marketInterest": "Talvez — quero conhecer melhor."
   }
   ```
-- **Validações:**
-  - `birthDate`: formato `YYYY-MM-DD`, calendário civil válido, data passada.
-  - `gender`: um de `['Feminino', 'Masculino', 'Outro', 'Prefiro não informar']`. Se `'Outro'`, `otherGender` obrigatório.
-  - `education`: um de `['Fundamental', 'Médio', 'Superior', 'Pós-graduação', 'Prefiro não informar']`.
-  - `selectedGames`: array de strings não vazias (mínimo 1 jogo).
-  - `marketKnowledge`: uma das 3 opções válidas.
-  - `marketInterest`: uma das 3 opções válidas.
+- **Validações Estritas:**
+  - `birthDate`: formato `YYYY-MM-DD`, calendário civil gregoriano real, data estritamente no passado. Armazenada como tipo SQL `DATE` sem conversão de fuso horário.
+  - `gender`: uma das opções `['Feminino', 'Masculino', 'Outro', 'Prefiro não informar']`. Se `'Outro'`, `otherGender` é obrigatório (1 a 100 caracteres). Se diferente de `'Outro'`, `otherGender` deve ser nulo.
+  - `education`: uma das opções `['Fundamental', 'Médio', 'Superior', 'Pós-graduação', 'Prefiro não informar']`.
+  - `selectedGames`: array com ao menos 1 elemento (strings com 1 a 100 caracteres). Os jogos são inseridos ou vinculados via CTE atômica sem modificar nomes canônicos existentes.
+  - `marketKnowledge`: uma das opções `['Sim, conheço.', 'Conheço um pouco.', 'Não conheço.']`.
+  - `marketInterest`: uma das opções `['Sim, tenho interesse.', 'Talvez — quero conhecer melhor.', 'Não tenho interesse.']`.
 - **Response `200 OK`:**
   ```json
   {
@@ -1205,26 +1393,168 @@ Salva ou atualiza as respostas do questionário em lote (todas as 3 etapas).
     "updatedAt": "2026-10-16T18:05:00.000Z"
   }
   ```
+- **Erros RFC 7807:**
+  - `400 Bad Request` (`title: "Questionário com Dados Inválidos"`): Falha de validação em qualquer campo (`invalidParams`).
+  - `401 Unauthorized`: Sessão inválida ou expirada.
 
-### 10.11 `GET /games`
-Consulta catálogo de jogos para autocompletar na Etapa 2.
-- **Autenticação:** Opcional / Pública ou Bearer Token.
-- **Query Params:** `?query=val&limit=20`
+### 10.13 `GET /games`
+Consulta o catálogo de jogos disponíveis para autocompletar na Etapa 2, com suporte a busca textual case-insensitive e limite configurável.
+- **Autenticação:** Pública ou Bearer AccessToken opcional.
+- **Query Params:**
+  - `query` (opcional): string para busca textual parcial no catálogo (mínimo 1 caractere).
+  - `limit` (opcional): inteiro entre 1 e 50 (padrão: 20).
 - **Response `200 OK`:**
   ```json
   {
     "games": [
-      { "id": "3b29c10a-...", "name": "Valorant", "isCurated": true }
+      {
+        "id": "3b29c10a-7f1e-4c91-9e23-28942b10a911",
+        "name": "Valorant",
+        "isCurated": true
+      },
+      {
+        "id": "8f1a2b3c-4d5e-6f7a-8b9c-0d1e2f3a4b5c",
+        "name": "Counter-Strike 2",
+        "isCurated": true
+      }
+    ],
+    "total": 2
+  }
+  ```
+- **Erros RFC 7807:**
+  - `400 Bad Request` (`title: "Parâmetros de Busca Inválidos"`): Quando `limit` for menor que 1 ou maior que 50.
+
+### 10.14 Endpoints Administrativos e de Segundo Fator (2FA/TOTP)
+
+#### 10.14.1 `POST /auth/2fa/setup`
+Inicia o onboarding de 2FA gerando o segredo base32 cifrado, URL do QR Code e 10 Backup Codes de uso único.
+- **Autenticação:** Bearer `tempToken` (emitido no login para contas com papel `admin` ainda não configuradas).
+- **Headers:** `Authorization: Bearer <tempToken>`
+- **Response `200 OK`:**
+  ```json
+  {
+    "secret": "JBSWY3DPEHPK3PXP",
+    "qrCodeUrl": "otpauth://totp/ArenaGo:admin@arenago.com.br?secret=JBSWY3DPEHPK3PXP&issuer=ArenaGo",
+    "backupCodes": [
+      "A1B2-C3D4",
+      "E5F6-G7H8",
+      "J9K0-L1M2",
+      "N3P4-Q5R6",
+      "S7T8-U9V0",
+      "W1X2-Y3Z4",
+      "B5C6-D7E8",
+      "F9G0-H1J2",
+      "K3L4-M5N6",
+      "P7Q8-R9S0"
     ]
   }
   ```
+- **Erros RFC 7807:**
+  - `401 Unauthorized` / `403 Forbidden` (`title: "Desafio 2FA Inválido"`): Token provisório ausente, expirado (> 5 min) ou com escopo inválido.
 
-### 10.12 Endpoints Administrativos e de 2FA
-- `POST /auth/2fa/setup`: Requer `tempToken` de onboarding. Retorna `{ qrCodeUrl, secret, backupCodes }`.
-- `POST /auth/2fa/verify`: Valida código de 6 dígitos ou backup code contra o `tempToken` e emite a sessão definitiva.
-- `POST /admin/roles/grant`: Concede papel Staff (com `eventId`) ou Admin global para uma conta existente localizada por e-mail verificado.
-- `POST /admin/roles/revoke`: Revoga papel ativo de um usuário com registro de auditoria.
-- `POST /admin/users/:id/reset-totp`: Requer autenticação de **outro Administrador com 2FA ativo** e justificativa no corpo: `{ "reason": "Dispositivo extraviado confirmado presencialmente" }`. Revoga segredos e sessões da conta-alvo.
+#### 10.14.2 `POST /auth/2fa/verify`
+Valida o código TOTP de 6 dígitos ou backup code contra o desafio temporário, ativando as credenciais e emitindo a sessão autorizada de Admin.
+- **Autenticação:** Bearer `tempToken`.
+- **Headers:** `Authorization: Bearer <tempToken>`
+- **Request Body:**
+  ```json
+  {
+    "code": "583921"
+  }
+  ```
+- **Validações:** `code`: string com 6 dígitos numéricos (TOTP RFC 6238) ou 9 caracteres no formato `XXXX-XXXX` (Backup Code).
+- **Response `200 OK`:**
+  ```json
+  {
+    "user": {
+      "id": "b2f6d2b4-7f1e-4c91-9e23-28942b10a911",
+      "name": "Administrador Geral",
+      "email": "admin@arenago.com.br",
+      "emailVerified": true,
+      "roles": ["admin", "participante"]
+    },
+    "accessToken": "eyJhbGciOiJIUzI1NiIsIn...admin_token",
+    "refreshToken": "v1.MR1B_x9kL42...",
+    "expiresIn": 900
+  }
+  ```
+- **Erros RFC 7807:**
+  - `400 Bad Request` (`title: "Código 2FA Inválido ou Já Utilizado"`): Código incorreto, fora do drift permitido de ±30s ou backup code previamente consumido.
+  - `403 Forbidden`: Desafio temporário expirado.
+
+#### 10.14.3 `POST /admin/roles/grant`
+Concede permissão de `staff` (vinculada obrigatoriamente a um `eventId`) ou `admin` (global) para uma conta existente.
+- **Autenticação:** Bearer AccessToken com papel `admin` e `admin_2fa_verified: true`.
+- **Headers:** `Authorization: Bearer <accessToken>`
+- **Request Body:**
+  ```json
+  {
+    "email": "operador@arenago.com.br",
+    "role": "staff",
+    "eventId": "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d",
+    "reason": "Escalação técnica para controle de filas no evento"
+  }
+  ```
+- **Validações:**
+  - `email`: e-mail de conta previamente cadastrada e **com e-mail confirmado** (`email_verified_at IS NOT NULL`). Rejeição imediata se não verificado.
+  - `role`: `'staff'` ou `'admin'`. Se `'staff'`, `eventId` é obrigatório; se `'admin'`, `eventId` deve ser nulo.
+  - `reason`: justificativa textual obrigatória (10 a 500 caracteres).
+- **Response `200 OK`:**
+  ```json
+  {
+    "message": "Papel concedido com sucesso.",
+    "roleAssignmentId": "7f8e9d0a-1b2c-3d4e-5f6a-7b8c9d0e1f2a"
+  }
+  ```
+- **Erros RFC 7807:**
+  - `400 Bad Request` (`title: "Conta Não Elegível"`): E-mail da conta de destino ainda não foi confirmado, ou parâmetros incompatíveis.
+  - `403 Forbidden` (`title: "Acesso Restrito"`): Requisitante sem privilégios de Admin ativo com 2FA.
+  - `404 Not Found` (`title: "Conta Não Encontrada"`): Nenhuma conta localizada para o e-mail informado.
+  - `409 Conflict` (`title: "Papel Já Atribuído"`): Papel já ativo para este usuário (global ou no mesmo evento).
+
+#### 10.14.4 `POST /admin/roles/revoke`
+Revoga papel ativo de um usuário com efeito imediato na requisição seguinte e gravação de auditoria imutável.
+- **Autenticação:** Bearer AccessToken com papel `admin` e `admin_2fa_verified: true`.
+- **Headers:** `Authorization: Bearer <accessToken>`
+- **Request Body:**
+  ```json
+  {
+    "roleAssignmentId": "7f8e9d0a-1b2c-3d4e-5f6a-7b8c9d0e1f2a",
+    "reason": "Fim da escala de operação do evento"
+  }
+  ```
+- **Response `200 OK`:**
+  ```json
+  {
+    "message": "Papel revogado com sucesso. Efeitos aplicados imediatamente."
+  }
+  ```
+- **Erros RFC 7807:**
+  - `403 Forbidden`: Requisitante não autorizado.
+  - `404 Not Found`: Vínculo de papel não encontrado ou já revogado.
+
+#### 10.14.5 `POST /admin/users/:id/reset-totp`
+Procedimento excepcional de recuperação de 2FA de uma conta Admin, autorizado exclusivamente por **outro Administrador com 2FA ativo**.
+- **Autenticação:** Bearer AccessToken com papel `admin` e `admin_2fa_verified: true`. O executor **não pode ser o próprio alvo** (`req.user.id !== req.params.id`).
+- **Headers:** `Authorization: Bearer <accessToken>`
+- **Request Body:**
+  ```json
+  {
+    "reason": "Extravio do aparelho autenticador validado presencialmente pela coordenação técnica."
+  }
+  ```
+- **Validações:** `reason`: string obrigatória com no mínimo 15 caracteres circunstanciando a perda.
+- **Response `200 OK`:**
+  ```json
+  {
+    "message": "Credenciais 2FA redefinidas e sessões revogadas com sucesso. O administrador deverá reconfigurar o TOTP no próximo login."
+  }
+  ```
+- **Erros RFC 7807:**
+  - `400 Bad Request` (`title: "Operação Inválida"`): Tentativa de auto-redefinição (`actor_id === target_user_id`), alvo sem papel Admin, ou justificativa insuficiente.
+  - `403 Forbidden`: Requisitante sem 2FA verificado.
+  - `404 Not Found`: Usuário alvo não encontrado.
+
 
 ---
 
@@ -1333,7 +1663,15 @@ APP_WEB_URL="https://app.arenago.com.br"
 ```
 
 ### 12.3 Configuração Segura de Conexão com o Neon (TLS)
-A conexão com o Neon Serverless Postgres deve assegurar estrita verificação criptográfica do certificado do servidor, eliminando riscos de interceptação (MITM):
+
+A conexão com o Neon Serverless Postgres deve assegurar estrita verificação criptográfica do certificado do servidor em todos os ambientes (inclusive produção), eliminando riscos de interceptação maliciosa (*Man-in-the-Middle* / MITM):
+
+- **Eliminação de `rejectUnauthorized: false`:**
+  A configuração anterior que desabilitava a verificação de certificados foi formalmente corrigida. O backend adota estritamente `rejectUnauthorized: true`.
+- **Cadeia de Confiança de Autoridades Certificadoras (CA):**
+  O Neon utiliza certificados TLS assinados por autoridades certificadoras comerciais e públicas de raiz confiável (Let's Encrypt / Amazon Trust Services). Como o Node.js possui embutido o *trust store* de CAs raiz da Mozilla, a validação da identidade criptográfica do servidor Neon ocorre de forma automática e transparente.
+- **Suporte a CA Customizada (Ambientes Corporativos):**
+  Caso o ambiente de implantação utilize proxies reversos corporativos com inspeção TLS ou redes restritas, o driver suporta a passagem explícita da autoridade certificadora via variável de ambiente `DATABASE_CA_CERT`:
 
 ```typescript
 import { Pool } from 'pg';
@@ -1347,7 +1685,9 @@ export const pool = new Pool({
   connectionTimeoutMillis: 5000,
   ssl: {
     // Verificação estrita de certificado de autoridade certificadora confiável
-    rejectUnauthorized: true
+    rejectUnauthorized: true,
+    // Permite injetar CA raiz customizada caso exigido pelo ambiente
+    ca: process.env.DATABASE_CA_CERT ? process.env.DATABASE_CA_CERT.replace(/\\n/g, '\n') : undefined
   }
 });
 
@@ -1397,6 +1737,9 @@ npm run test:e2e       # Ponta a ponta
 3. **Deduplicação de Jogos via CTE Atômica:** Inserção idempotente com `DO NOTHING` e busca unificada do nome canônico existente, preservando a grafia original do catálogo.
 4. **Provedor de E-mail Transacional:** Adoção do **Resend** pelo SDK limpo e cota gratuita suficiente para suportar as fases iniciais.
 5. **Armazenamento Móvel:** Utilização do `expo-secure-store` para proteção de credenciais no Keychain (iOS) e Keystore (Android).
+6. **Rate Limiting Eficiente no Monólito:** Aplicação de rate limiting duplo (por conta com e-mail normalizado e por IP) via storage em memória do `@nestjs/throttler`, garantindo proteção sem custo operacional ou necessidade prematura de Redis.
+7. **Conexão Segura TLS com Neon:** Adoção mandatória de `rejectUnauthorized: true` com suporte a CA customizada, eliminando vulnerabilidades a ataques MITM em produção.
+
 
 ### 13.3 Pendências Formalmente Delimitadas (Não Bloqueantes para a Task 6.2)
 1. **Domínio de E-mail para Envio:** Definir se a organização configurará registros DNS próprios no Resend antes do lançamento.
