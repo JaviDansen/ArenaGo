@@ -115,6 +115,34 @@ test('stay duration rejects impossible instants without relying on Date rollover
   }), 102);
 });
 
+test('stay duration accepts time zone offsets only up to ±14:00', async () => {
+  const { getStayDurationInMinutes } = await participationModule;
+  assert.equal(getStayDurationInMinutes({
+    enteredAt: '2026-09-29T03:00:00+14:00',
+    exitedAt: '2026-09-28T13:45:00Z',
+  }), 45);
+  assert.equal(getStayDurationInMinutes({
+    enteredAt: '2026-09-28T23:00:00-14:00',
+    exitedAt: '2026-09-29T13:30:00Z',
+  }), 30);
+  assert.equal(getStayDurationInMinutes({
+    enteredAt: '2026-09-28T20:55:00+05:45',
+    exitedAt: '2026-09-28T15:52:00Z',
+  }), 42);
+  for (const offset of ['+14:01', '+14:59', '-14:01', '-14:59', '+15:00', '-15:00', '+13:60']) {
+    assert.equal(
+      getStayDurationInMinutes({ ...finished, enteredAt: `2026-09-28T15:10:00${offset}` }),
+      null,
+      `entrada ${offset}`,
+    );
+    assert.equal(
+      getStayDurationInMinutes({ ...finished, exitedAt: `2026-09-28T16:52:00${offset}` }),
+      null,
+      `saida ${offset}`,
+    );
+  }
+});
+
 test('stay duration is formatted in hours and minutes', async () => {
   const { formatStayDuration } = await participationModule;
   assert.equal(formatStayDuration(45), '45min');

@@ -122,6 +122,24 @@ test('registered times keep the recorded time and never fill missing data', () =
   assert.equal(withoutEntry.stayDurationInMinutes, null);
 });
 
+test('registered times with offsets beyond ±14:00 are invalid', () => {
+  const { getParticipationTimes } = participationUtils;
+  const atLimit = getParticipationTimes({
+    enteredAt: '2026-09-28T15:10:00+14:00',
+    exitedAt: '2026-09-28T16:52:00+14:00',
+  });
+  assert.deepEqual({ ...atLimit.entry }, { status: 'registered', time: '15:10' });
+  assert.deepEqual({ ...atLimit.exit }, { status: 'registered', time: '16:52' });
+  assert.equal(atLimit.stayDurationInMinutes, 102);
+  const beyondLimit = getParticipationTimes({
+    enteredAt: '2026-09-28T15:10:00-14:01',
+    exitedAt: '2026-09-28T16:52:00+14:59',
+  });
+  assert.deepEqual({ ...beyondLimit.entry }, { status: 'invalid', time: null });
+  assert.deepEqual({ ...beyondLimit.exit }, { status: 'invalid', time: null });
+  assert.equal(beyondLimit.stayDurationInMinutes, null);
+});
+
 test('details show the event, date, times and stay of the selected participation', () => {
   const { rendered, texts } = openDetails(participations, 'participation-1');
   assert.equal(rendered.type, 'ScreenContainer');

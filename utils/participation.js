@@ -43,10 +43,17 @@ function parseRegisteredInstant(value) {
 
   let offsetInMinutes = 0;
   if (sign) {
-    if (Number(offsetHour) > 14 || Number(offsetMinute) > 59) {
+    const offsetHourNumber = Number(offsetHour);
+    const offsetMinuteNumber = Number(offsetMinute);
+    // Fusos vão de -14:00 a +14:00: com hora 14, os minutos precisam ser zero.
+    if (
+      offsetHourNumber > 14
+      || offsetMinuteNumber > 59
+      || (offsetHourNumber === 14 && offsetMinuteNumber !== 0)
+    ) {
       return null;
     }
-    offsetInMinutes = (Number(offsetHour) * 60 + Number(offsetMinute)) * (sign === '-' ? -1 : 1);
+    offsetInMinutes = (offsetHourNumber * 60 + offsetMinuteNumber) * (sign === '-' ? -1 : 1);
   }
 
   return {
