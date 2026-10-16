@@ -68,7 +68,7 @@ A revisão partiu de 41 testes e acrescentou **45 testes** ao longo das etapas, 
 |---|---|---|---|
 | **0 — Qualidade local** | Ampliação de testes de autenticação, entrada em eventos, fila externa, Arena, finalização e questionário | **Concluída na revisão automatizada: 86 testes passando**; testes manuais no iPhone continuam recomendados quando aplicáveis | Nenhuma |
 | **1 — Documentação** | README fiel ao aplicativo; planejamento versionado no repositório | README concluído; planejamento atualizado para v0.6 neste repositório | Fase 0 |
-| **2 — Decisões de domínio** | D01–D11 aprovadas/refinadas; esclarecer pendências restantes e fechar glossário/estados | Diretrizes aprovadas; lacunas operacionais resolvidas antes da modelagem final | Discussão com responsáveis pelo evento |
+| **2 — Decisões de domínio** | D01–D11 aprovadas/refinadas; preparar glossário/estados e modelo conceitual | Regras operacionais consolidadas em v0.6; detalhes técnicos continuam pendentes | Discussão com responsáveis pelo evento |
 | **3 — Fundação do backend** | Repositório/estrutura de API, configuração, banco, migrações e testes básicos | API inicializa, conecta ao banco e aplica migrações em ambiente local | Fase 2 para modelagem de domínio; tecnologia escolhida |
 | **4 — Identidade e perfil** | Cadastro, login, sessão, perfil e questionário persistidos | Conta e perfil recuperáveis; permissões e validação no servidor | Fase 3 |
 | **5 — Eventos e participações** | Consulta por código, confirmação, entrada e finalização | IDs persistentes; estados recuperáveis após reiniciar o app | Fase 4 |
@@ -187,14 +187,18 @@ Participação 1 ── 0..1 Avaliação  [D08 aprovada]
 ### Participação e encerramento
 
 ```text
-waiting --[liberação da fila externa]--> active --[finalização voluntária]--> finished
-   |                                    |
-   +--[saída/cancelamento: definir]     +--[encerramento administrativo do evento:
-                                           bloqueia operações nas experiências,
-                                           não impede finalizar ou avaliar]
+waiting --[liberação externa]--> active --[finalização voluntária]--> finished
+   |                                  |                         |
+   +--[saída externa: cancelada]      +--[finalização durante   +-- elegível a avaliar
+                                      |   espera: remove fila]      somente se houve
+                                      +--[finalização após chamada:  conclusão confirmada
+                                          cancela chamada por
+                                          desistência]
+
+active --[limite operacional D07]--> finalizada automaticamente
 ```
 
-`waiting`, `active` e `finished` são nomes usados no frontend, **não um esquema de banco já aprovado**. D03 exige no máximo uma participação corrente por usuário, incluindo espera externa; D02 permite novas participações após finalização. O horário previsto bloqueia novas participações; não finaliza as existentes. O encerramento administrativo tem regra distinta. Expiração, cancelamento e estados técnicos finais ainda serão especificados.
+`waiting`, `active` e `finished` são nomes usados no frontend, **não um esquema de banco aprovado**. D02–D03 definem as regras de reentrada, exclusividade e cancelamento acima. Participação cancelada ao sair da fila externa não é avaliável. Finalização voluntária ou automática de participação ativa não exige experiência concluída, mas avaliação exige ao menos uma conclusão confirmada pelo Staff. O limite oficial bloqueia novas entradas; o limite operacional posterior encerra esperas, chamadas pendentes e participações restantes.
 
 ### Fila de experiência e atendimento
 
@@ -209,7 +213,7 @@ Aguardando na fila --> Chamado --> Concluído
                           +--> Ausência --> [fim da fila, se janela de chamadas aberta; senão encerramento da entrada]
 ```
 
-Uma estação pode estar disponível ou indisponível independentemente da abertura da fila. D05 não exige estados separados de chegada e início. Fechar a fila não significa cancelar atendimentos existentes; **encerrar administrativamente o evento bloqueia operações nas experiências**, com tratamento dos pendentes ainda a decidir.
+Uma estação pode estar disponível ou indisponível independentemente da abertura da fila. D05 não exige estados separados de chegada e início. Durante operação normal não há timeout individual: Staff resolve manualmente a ocorrência pendente antes de nova chamada da estação. Ao fechamento definitivo, D07 cancela chamadas e encerra esperas no limite operacional, sem ausência ou conclusão.
 
 ### Garantias mínimas da API de filas
 
@@ -218,7 +222,7 @@ Uma estação pode estar disponível ou indisponível independentemente da abert
 - Preservar ordem da fila compartilhada e impedir que duas estações chamem a mesma pessoa.
 - Exigir autorização de staff vinculada ao evento em cada chamada, ausência, conclusão e abertura/fechamento de fila.
 - Impedir check duplicado do mesmo atendimento, permitindo repetições legítimas da experiência.
-- Tratar conflitos entre ausência, conclusão, finalização e encerramento administrativo de forma determinística.
+- Tratar conflitos entre ausência, conclusão, finalização voluntária e encerramento automático de forma determinística, preservando a regra de que conclusões canceladas no limite não podem ser confirmadas depois.
 - Recuperar participação, posições, pendências e avaliações após reinício ou falha de rede.
 - Testar concorrência com conexões distintas em PostgreSQL real; mocks não demonstram segurança transacional.
 
@@ -239,21 +243,21 @@ Ainda **não** são endpoints definidos. A lista abaixo indica capacidades neces
 
 **Critério para detalhar endpoints:** estados, papéis, regras de reentrada, unicidade e estações precisam estar definidos. Depois desenhar contratos de request/response, códigos de erro, autenticação e idempotência.
 
-## 9. Registro consolidado de decisões de negócio — D01 a D11 (14/10/2026)
+## 9. Registro consolidado de decisões de negócio — D01 a D11 (16/10/2026)
 
 **Convenção:** *aprovada* = decisão tomada sobre o comportamento do produto; *pendente* = detalhe que não foi decidido; *não implementada* = aprovação não indica existência no código.
 
 | ID | Diretriz aprovada e atualizada | Pontos ainda pendentes |
 |---|---|---|
-| **D01** | Uma fila compartilhada por experiência e várias estações. Staff escolhe estação; cada estação tem disponibilidade operacional **disponível/indisponível**, separada da ocupação por atendimento. Apenas um chamado pendente por estação. Não medir duração de uso da estação no escopo inicial. Problema técnico pode ser resolvido presencialmente e, no app, pelo fluxo existente de ausência; sem transferência ou prioridade especial. | Regras exatas de concorrência, quem alterna disponibilidade e política para mudança de disponibilidade durante chamado; se houver BI de ausências, distinguir que ausência registrada pode representar problema técnico. |
-| **D02** | Reentrada no mesmo evento cria nova participação, sem apagar histórico. | Cancelamento e elegibilidade excepcional. |
-| **D03** | No máximo uma participação corrente por conta em todos os eventos; espera externa também conta. | Estados técnicos e conflitos de encerramento/cancelamento. |
+| **D01** | Uma fila compartilhada por experiência e várias estações. Staff autorizado pelo evento e Admin global alteram disponibilidade. Chamada pendente precisa ser resolvida antes de desativar estação; indisponível não chama, não fecha fila nem altera outras estações. Sem transferência, prioridade especial ou cancelamento técnico específico. Ausência pode ser usada presencialmente para problema técnico e não prova falta real. | Regras transacionais de concorrência e registro no BI. |
+| **D02** | Saída voluntária da fila externa cancela a participação e perde posição; sem avaliação. Pode ingressar novamente se permitido, criando participação nova sem posição anterior. Persistência ainda não implementada. Reentrada no mesmo evento cria nova participação sem apagar histórico. | Nenhuma nova regra de negócio definida. |
+| **D03** | No máximo uma participação corrente por conta, incluindo espera externa. Pode finalizar participação ativa sem experiência concluída. Finalizar durante espera interna remove da fila sem ausência e mantém conclusões anteriores. Finalizar após chamada cancela por desistência e não conta como ausência ou conclusão; estação fica livre se disponível. Avaliação exige pelo menos uma conclusão confirmada pelo Staff, também para avaliação posterior. | Detalhes técnicos de estados e concorrência. |
 | **D04** | Staff autorizado por **evento**, opera todas as experiências daquele evento. **Admin global**, com gestão de eventos, permissões e BI consolidado. Uma conta pode acumular perfis. Admin concede/revoga por busca do e-mail **de conta já existente**; Staff vinculado a eventos, Admin global. | Escopo específico de funções de BI/configuração, níveis de exportação, auditoria detalhada e proteções contra perda dos últimos Admins. |
-| **D05** | Aguardando → chamado → concluído; Staff registra conclusão ou ausência. Ausência devolve participante ao fim da fila **se a janela de chamadas ainda estiver aberta**, senão encerra a entrada pendente. Repetição da experiência permitida com novo atendimento. | Timeouts, conflitos de simultaneidade e registro de ausência para falha técnica (sem significado estatístico necessariamente literal). |
+| **D05** | Staff registra manualmente conclusão ou ausência; sem timeout individual automático em operação normal. Estação aguarda resolução da ocorrência antes de nova chamada. Ausência retorna ao fim da fila enquanto a janela de chamadas estiver aberta; após, não retorna. Desistência voluntária pode cancelar chamada. D07 cancela automaticamente chamadas pendentes no limite final. | Concorrência e tratamento técnico das operações. |
 | **D06** | Desativar fila externa libera todos os `waiting`; novas participações entram `active` enquanto desligada. **Reativar faz somente novas participações aguardarem**; participantes já liberados continuam `active`. | Detalhes transacionais de ativação/desativação concorrentes. |
-| **D07** | Sem controle de lotação pelo app. Encerramento automático no horário oficial fecha definitivamente novas participações/reentradas e novas entradas nas filas; até 1h posterior para chamar quem já aguardava; atendimentos iniciados podem terminar. Eventos **apenas no Brasil** na versão inicial; armazenar instantes em UTC e fuso local do evento (identificador IANA). Admin pode alterar horário oficial **somente antes do fechamento definitivo**, inclusive antecipar/prorrogar; não pode reabrir após o fechamento. | Fuso concreto por localidade, regras de antecipação para horário já passado, precisão de concorrência e telas de comunicação. |
+| **D07** | No horário oficial, bloqueia definitivamente novas participações, reentradas e inscrições em filas. Margem operacional de até 1h para quem já aguardava, sem obrigação de atendimento até o limite; organização pode encerrar antes via D09. No limite, encerra esperas e cancela chamadas pendentes sem ausência/conclusão; não permite chamadas ou confirmações posteriores das ocorrências canceladas. Preserva conclusões anteriores e finaliza automaticamente participações abertas. Brasil na primeira versão; instantes UTC e fuso IANA local. Admin altera horário apenas antes do fechamento, para momento futuro; não há reabertura. | Concorrência entre fechamento/confirmação e fuso concreto por localidade. |
 | **D08** | **Uma avaliação por participação**, nota obrigatória 1–5 e comentário opcional. Primeiro envio até **30 dias após finalização da participação**; após esse prazo a pendência expira. Edição de nota e comentário até **7 dias após primeiro envio**. Entre dias 8–30 após envio, **somente quem ainda não comentou** pode adicionar comentário uma única vez; após 30 dias tudo é definitivo. Edição não reinicia prazo; BI usa a nota mais recente sem duplicar avaliação; nova participação pode gerar nova avaliação. | Tratamento exato de limites de tempo, moderação de texto, políticas excepcionais de correção e implementação de auditoria. |
-| **D09** | Encerramento administrativo **imediato** (bloqueia novas chamadas/entradas e interrompe pendentes sem conclusão) ou **controlado** (até 1h para chamar aguardando, sem estender janela programada; atendimento iniciado pode terminar). Histórico mantido; participante ainda pode finalizar e avaliar. | Motivo obrigatório ou opcional, detalhamento do que interromper e mensagens da interface. |
+| **D09** | Modos imediato e controlado permanecem. Controlado permite até 1h respeitando limite programado anterior. Admin pode antecipar o fim. Justificativa obrigatória; auditar modo, motivo, responsável e horário. No limite, encerrar esperas e chamadas conforme D07. Mensagens automáticas padronizadas no app; sem personalização pelo Admin ou push; justificativa não é mostrada automaticamente. | Nenhuma regra de negócio adicional definida. |
 | **D10** | BI prioritariamente **agregado e estatístico**, sem identificação nominal de participantes. Preservar por prazo indeterminado **dados efetivamente anônimos** de participações, experiências, avaliações e indicadores; manter dados pessoais de contas ativas somente enquanto houver finalidade legítima. Registrar o **snapshot das respostas do questionário em cada nova participação**: eventos antigos permanecem com respostas da época, novas participações usam respostas atualizadas. Na exclusão da conta durante evento: encerrar participação e esperas/chamados pendentes, preservar conclusões, revogar sessões, eliminar credenciais e anonimizar histórico quando aplicável. **Não excluir automaticamente contas inativas** na primeira versão. | Prazos de retenção identificável, bases legais, responsabilidades, definição/validação de anonimização efetiva, política de exclusão e direitos do titular, proteção de pequenos grupos e comentários, permissões e auditoria de exportações. |
 | **D11** | Avisos dentro do aplicativo inicialmente; push posteriormente; servidor é fonte oficial da posição/chamada. | Frequência e mecanismo de atualização, reconexão, apresentação de avisos. |
 
@@ -283,6 +287,11 @@ Ainda **não** são endpoints definidos. A lista abaixo indica capacidades neces
 
 ### 9.3 BI, privacidade e histórico: diretrizes de produto
 
+- Preservar conceitualmente horário de entrada efetiva na Arena (após liberação da fila externa), horários das experiências concluídas, horário real de encerramento no sistema e motivo de finalização (voluntária/automática). Nomes definitivos dos campos ficam para a modelagem do banco.
+- **Indicador A — tempo até última experiência concluída:** intervalo entre a entrada efetiva e a última conclusão confirmada; aplica-se a participações com ao menos uma conclusão, qualquer que seja o modo de encerramento.
+- **Indicador B — tempo até finalização voluntária:** intervalo entre a entrada efetiva e o momento em que a pessoa seleciona “Sair da Arena”; aplica-se somente a encerramentos voluntários.
+- Encerramento automático não usa o horário da limpeza como saída real. Se houve conclusão, usar o tempo até a última conclusão como atividade observada. Sem conclusão nem saída voluntária, duração é indeterminada, nunca zero. Manter métricas e populações separadas; não apresentar intervalo como prova de presença física.
+
 - PostgreSQL armazena participações, atendimentos, perfil e avaliações, sem banco separado obrigatório para BI na primeira versão; indicadores podem ser calculados a partir dos registros persistentes.
 - Admin global analisa eventos e períodos por filtros, incluindo perfil do público (idade/faixa etária, jogos, interesse no mercado), experiências e avaliações, preferindo resultados **agregados**, sem fichas identificáveis e sem exposição nominal por padrão.
 - Snapshot de questionário por **participação** impede que uma atualização posterior reescreva resultados antigos. Como uma mesma pessoa pode participar novamente, a próxima participação usa seu novo perfil.
@@ -292,26 +301,18 @@ Ainda **não** são endpoints definidos. A lista abaixo indica capacidades neces
 
 ### 9.4 Pendências restantes — não preencher por suposição
 
-**Regras de negócio/operacionais ainda a fechar:**
-
-1. Cancelamento voluntário ou excepcional de participação (`waiting`/`active`), expiração e consequências em filas e atendimento.
-2. Regras exatas de timeout de chamada e resolução de conflitos no limite temporal (ausência, conclusão, finalização, desativação de estação e encerramento).
-3. Ajuste de horário do evento para novo horário já transcorrido, configuração de fuso por localidade e confirmação de mensagens aos participantes.
-4. Encerramento administrativo: motivo registrado, política de comunicação, ações pendentes no imediato e limites de auditoria.
-5. Disponibilidade de estação durante atendimento pendente, quem pode alternar o estado e como evitar falsear estatísticas quando ausência representar problema técnico.
-6. Indicadores e filtros finais do BI, nível mínimo de agregação, exportações autorizadas e formato definitivo dos arquivos; evitar identificação indireta.
-7. LGPD: bases legais, controlador/operador, prazos por categoria identificável, direitos de exclusão/acesso, tratamento de comentários e anonimização efetiva.
+**Regras de negócio/operacionais:** as regras centrais D01–D11 estão consolidadas. Permanecem definições detalhadas de BI (indicadores, filtros, agregação, exportações e formatos) e requisitos operacionais da LGPD (bases legais, papéis, prazos, direitos, comentários e anonimização efetiva); não devem ser presumidos.
 
 **Detalhes técnicos e infraestrutura antes da implementação/piloto:**
 
-8. Modelo relacional, IDs, estados, invariantes transacionais, migrações, idempotência e concorrência com PostgreSQL real.
+8. Modelo relacional, IDs, estados e invariantes transacionais, migrações, idempotência e concorrência com PostgreSQL real; preparar a modelagem conceitual em documento separado.
 9. Serviço de e-mail de custo compatível, verificação, recuperação, limites antiabuso e entregabilidade.
 10. Tokens de acesso/refresh, rotação, reutilização, sessões, guarda no iOS/Android, criação/recuperação de TOTP e códigos reserva.
 11. Procedimento de primeiro Admin, auditoria e requisito operacional de pelo menos dois Admins para eventos reais.
 12. Hospedagem de API, disponibilidade e limites Neon, pool/TLS, logs, backups, ambientes e custos reais.
 13. Contratos HTTP, atualização em tempo real, reconexão, tratamento de indisponibilidade e testes de segurança/carga.
 
-**Estado:** as decisões anteriores permanecem válidas, exceto onde explicitamente refinadas acima. Não foi feita implementação de backend ou validação do repositório nesta atualização do planejamento.
+**Estado:** regras aprovadas registradas como decisões de produto, não como funcionalidades implementadas. Esta atualização é exclusivamente documental; não valida implementação de código.
 
 ## 10. Estratégia de testes do backend (futura)
 
@@ -330,19 +331,17 @@ Não confundir os **86 testes locais** com testes de API ou testes de concorrên
 
 **Este arquivo:** decisões, roadmap, arquitetura, modelo de dados e critérios de entrega. Evitar duplicar aqui todas as instruções de execução.
 
-Sugestão de localização no repositório, após revisão: `docs/PLANEJAMENTO_ARENAGO.md`.
+Este planejamento está versionado no repositório em `app/docs/PLANEJAMENTO_v5.md`. A modelagem conceitual do banco será documentada separadamente.
 
 ## 12. Próximas ações propostas — pré-implementação
 
-1. **Fechar somente as pendências ainda abertas** na seção 9.4, separando regras operacionais bloqueantes de definições posteriores do BI/LGPD.
-2. **Consolidar modelo conceitual e invariantes:** identidades e papéis, experiências/estações, fila externa, fila interna compartilhada, participação corrente, atendimentos, histórico, avaliação e estados de encerramento.
+1. **Preparar documento separado de modelagem conceitual do banco**, derivando entidades, relações e invariantes das regras aprovadas, sem confundir o modelo com esquema implementado.
+2. **Detalhar invariantes técnicos e concorrência** para entradas, chamadas, confirmações, cancelamentos e fechamento automático, incluindo execução confiável do fechamento mesmo sem aplicativo aberto.
 3. **Detalhar implementação de autenticação e segurança** conforme a seção 9.2: provedores, segredo TOTP, tokens, rotação/revogação, auditoria, dispositivos e bloqueios de acesso.
 4. **Validar infraestrutura de custo zero:** API, PostgreSQL Neon, pool/TLS, migrações, backup e testes com PostgreSQL real; confirmar cotas antes de implantação pública.
 5. **Iniciar a fundação do backend em incrementos pequenos**, depois de aprovar o modelo mínimo, com testes e integração vertical; não substituir mocks em massa.
 6. **Planejar BI e exportação manual** de resultados autorizados, sem integração Google Drive no escopo atual.
-7. Manter este arquivo local enquanto for instrumento de planejamento; só adicioná-lo ao repositório se houver decisão posterior de versioná-lo.
-
-**Situação atual:** planejamento local atualizado para v0.5; nenhuma implementação de backend ou alteração do repositório foi feita nesta atualização. Hospedagem da API continua pendente; integração direta com Google Drive foi retirada do escopo atual.
+**Situação atual:** planejamento v0.6 versionado no repositório. Esta atualização alterou somente documentação; regras novas não foram declaradas implementadas. Hospedagem da API continua pendente; integração direta com Google Drive está fora do escopo atual.
 
 ### Política de commits
 
@@ -355,9 +354,11 @@ Sugestão de localização no repositório, após revisão: `docs/PLANEJAMENTO_A
 
 ### Histórico de revisão
 
+- **v0.6 — 16/10/2026:** consolidadas regras D01–D03, D05, D07 e D09 para saída e finalização de participações, elegibilidade de avaliação, chamadas sem timeout individual, estações, encerramento definitivo, justificativa e comunicação administrativa. Atualizados estados, modelo conceitual, roadmap, pendências e próximas ações; incluídas regras de duração observada para BI. Planejamento já registrado no repositório. **Somente documentação; sem alteração de código, testes ou arquitetura.**
+
 - **v0.5 — 14/10/2026:** incorporadas decisões posteriores à v0.4: BI agregado e exportação manual sem integração Drive; snapshots históricos do questionário; diretrizes de anonimização e exclusão de contas; restrição inicial a eventos no Brasil; alteração de horário antes do fechamento definitivo; reativação da fila externa apenas para novas participações; prazos e edições de avaliações; operação de estações com dois estados; Admin global, concessões por e-mail cadastrado, primeiro Admin por promoção controlada; confirmação de e-mail para privilegiados, senhas de 8 caracteres, recuperação por link de 30 min com limites, sessões de até 30 dias e access token de 15 min, uma sessão por conta, TOTP Admin e dois Admins antes de eventos reais. Pendências remanescentes separadas de decisões aprovadas. **Sem mudanças no código.**
 
-- **v0.4 — 11/10/2026:** detalhadas D05, D07 e D09: ausência retorna ao fim da fila; fechamento automático definitivo das filas no horário oficial com uma hora exclusiva para atender quem aguardava; encerramento administrativo imediato ou controlado, com até uma hora sem ultrapassar o limite programado. Aprovados três perfis (Ciente, Staff e Admin), conta única com permissões adicionais, concessão/revogação por Admin autorizado, login por e-mail e senha, acesso imediato sem confirmação de e-mail na primeira fase de testes e estratégia de tokens de acesso/renovação. Pendências remanescentes organizadas na seção 9.3.
+- **v0.4 — 11/10/2026 (histórico, regras de D07/D09 posteriormente substituídas pela v0.6):** detalhadas D05, D07 e D09: ausência retorna ao fim da fila; fechamento automático definitivo das filas no horário oficial com uma hora exclusiva para atender quem aguardava; encerramento administrativo imediato ou controlado, com até uma hora sem ultrapassar o limite programado. Aprovados três perfis (Ciente, Staff e Admin), conta única com permissões adicionais, concessão/revogação por Admin autorizado, login por e-mail e senha, acesso imediato sem confirmação de e-mail na primeira fase de testes e estratégia de tokens de acesso/renovação. Pendências remanescentes organizadas na seção 9.3.
 
 - **v0.1 — 10/10/2026:** consolidação inicial das duas auditorias e propostas de roadmap, arquitetura e modelo conceitual.
 - **v0.2 — 10/10/2026:** incorporados 86 testes passando, correções de código de evento, estado das abas Eventos/Perfil, README revisado e commits/push confirmados; fases 0 e README da fase 1 concluídos; próximas ações redirecionadas para decisões de domínio e preparação do backend. **À época, stack, modelo e D01–D11 ainda pendiam de aprovação.**
