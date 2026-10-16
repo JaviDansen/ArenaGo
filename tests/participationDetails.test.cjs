@@ -140,6 +140,55 @@ test('registered times with offsets beyond ±14:00 are invalid', () => {
   assert.equal(beyondLimit.stayDurationInMinutes, null);
 });
 
+test('null or invalid experience occurrences are ignored, valid repetitions kept', () => {
+  const getExperienceOccurrences = (participation) => [...participationUtils.getExperienceOccurrences(participation)];
+  const first = { id: 'occurrence-1', experience: playstation };
+  const repeated = { id: 'occurrence-2', experience: playstation };
+  assert.deepEqual(getExperienceOccurrences({ experiences: [null] }), []);
+  assert.deepEqual(getExperienceOccurrences({
+    experiences: [null, undefined, first, 'PlayStation', 42, {}, { id: '' }, { id: 7 }, repeated, false],
+  }), [first, repeated]);
+  for (const experiences of [undefined, null, {}, 'PlayStation']) {
+    assert.deepEqual(getExperienceOccurrences({ experiences }), [], String(experiences));
+  }
+  assert.deepEqual(getExperienceOccurrences(null), []);
+});
+
+test('details with only null experiences show that none were registered', () => {
+  for (const experiences of [[null], [null, undefined, {}]]) {
+    const onlyInvalid = { ...withRepeatedExperience, experiences };
+    const { texts } = openDetails([onlyInvalid], 'participation-1');
+    assert.equal(texts[0], 'BEAST Arena — Teste');
+    assert.equal(texts.at(-1), 'Nenhuma experiência registrada nesta participação.');
+  }
+});
+
+test('details list valid occurrences among invalid ones, keeping repetitions', () => {
+  const mixed = {
+    ...withRepeatedExperience,
+    experiences: [
+      null,
+      { id: 'participation-1-experience-1', experience: playstation },
+      { experience: simulator },
+      undefined,
+      { id: 'participation-1-experience-2', experience: playstation },
+      { id: 'participation-1-experience-3', experience: null },
+    ],
+  };
+  const { rendered, texts } = openDetails([mixed], 'participation-1');
+  const keys = nodes(rendered).filter((node) => node.type === 'View' && node.key != null).map((node) => node.key);
+  assert.deepEqual(keys, [
+    'participation-1-experience-1',
+    'participation-1-experience-2',
+    'participation-1-experience-3',
+  ]);
+  assert.deepEqual(texts.slice(texts.indexOf('Experiências realizadas') + 1), [
+    'PlayStation',
+    'PlayStation',
+    'Experiência não identificada',
+  ]);
+});
+
 test('details show the event, date, times and stay of the selected participation', () => {
   const { rendered, texts } = openDetails(participations, 'participation-1');
   assert.equal(rendered.type, 'ScreenContainer');

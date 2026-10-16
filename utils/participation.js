@@ -157,6 +157,26 @@ export function getParticipationTimes(participation) {
 }
 
 /**
+ * Ocorrências de experiências válidas da participação: itens nulos ou sem id
+ * próprio são ignorados, sem interromper a exibição. Repetições válidas são
+ * mantidas, pois cada ocorrência tem seu próprio id.
+ *
+ * @param {{ experiences?: Array<{ id: string, experience?: object }|null> }} participation
+ * @returns {Array<{ id: string, experience?: object }>}
+ */
+export function getExperienceOccurrences(participation) {
+  if (!Array.isArray(participation?.experiences)) {
+    return [];
+  }
+  return participation.experiences.filter((occurrence) => (
+    occurrence !== null
+    && typeof occurrence === 'object'
+    && typeof occurrence.id === 'string'
+    && occurrence.id !== ''
+  ));
+}
+
+/**
  * Formata minutos como "1h 42min", "45min" ou "2h".
  *
  * @param {number|null} minutes

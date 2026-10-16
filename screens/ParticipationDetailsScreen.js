@@ -6,6 +6,7 @@ import {
   findParticipationById,
   formatParticipationDate,
   formatStayDuration,
+  getExperienceOccurrences,
   getParticipationTimes,
 } from '../utils/participation';
 
@@ -49,7 +50,7 @@ export default function ParticipationDetailsScreen({ route }) {
   const date = formatParticipationDate(participation.enteredAt);
   const { entry, exit, stayDurationInMinutes } = getParticipationTimes(participation);
   const stayDuration = formatStayDuration(stayDurationInMinutes);
-  const experiences = Array.isArray(participation.experiences) ? participation.experiences : [];
+  const experiences = getExperienceOccurrences(participation);
 
   return (
     <ScreenContainer>
