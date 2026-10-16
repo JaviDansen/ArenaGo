@@ -17,14 +17,13 @@ O aplicativo já contém:
 - Confirmação simulada do staff, que incrementa `experienceParticipations` e libera a entrada em outra experiência.
 - Finalização da participação, limpeza da fila ou experiência ativa e navegação para a avaliação.
 - Avaliação local com estrelas, comentário opcional, envio simulado e opção “Avaliar mais tarde”. Nenhuma avaliação é persistida.
-- Tela Minhas Participações (aba Eventos) com histórico simulado: nome do evento, data e tempo de permanência quando a saída foi registrada, além de estado vazio quando não há participações.
 
 As ações de login, filas, staff, avaliação e os eventos são recursos de desenvolvimento. Não representam integração com serviços de produção.
 
 ## Abas principais
 
 - **Início:** fluxo do participante implementado com simulações locais, incluindo cadastro/login provisórios, questionário de perfil, entrada em eventos, filas, experiências, finalização e avaliação.
-- **Eventos:** `EventsScreen` exibe Minhas Participações, a lista do histórico de participações simuladas (`mockParticipations`). Cada item mostra evento, data e permanência; quando a saída não foi registrada, mostra “Permanência não registrada”. Ainda não há tela de detalhes.
+- **Eventos:** aba ainda em desenvolvimento no frontend. `EventsScreen` atualmente exibe apenas o rótulo da aba; as funcionalidades futuras não estão implementadas.
 - **Perfil:** aba ainda em desenvolvimento no frontend. `ProfileScreen` atualmente exibe apenas o rótulo da aba; as funcionalidades futuras não estão implementadas.
 
 O questionário de perfil citado no fluxo inicial é uma tela própria (`ProfileQuestionnaireScreen`) e já possui interface e validações locais. Ele não representa a aba Perfil, que permanece em desenvolvimento.
@@ -102,7 +101,7 @@ O `ParticipationContext` mantém a participação atual em memória. Não há Co
 
 ## Dados simulados
 
-`data/mockData.js` contém os eventos `FILA` e `LIVRE`, a lista de experiências, sugestões de jogos e o histórico simulado de participações (`mockParticipations`). As posições das filas, chamadas do staff, conclusão de experiências e credenciais são simuladas no cliente. O histórico resumido de experiências usa o objeto local `experienceParticipations` dentro da participação atual.
+`data/mockData.js` contém os eventos `FILA` e `LIVRE`, a lista de experiências e sugestões de jogos. As posições das filas, chamadas do staff, conclusão de experiências e credenciais são simuladas no cliente. O histórico resumido de experiências usa o objeto local `experienceParticipations` dentro da participação atual.
 
 ## Testes automatizados
 

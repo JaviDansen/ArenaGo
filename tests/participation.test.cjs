@@ -65,7 +65,12 @@ const withoutExit = Object.freeze({ ...finished, id: 'participation-2', exitedAt
 test('participation date uses the registered entry date as DD/MM/AAAA', async () => {
   const { formatParticipationDate } = await participationModule;
   assert.equal(formatParticipationDate('2026-09-28T15:10:00-03:00'), '28/09/2026');
+  assert.equal(formatParticipationDate('2026-04-15T12:00:00-03:00'), '15/04/2026');
   assert.equal(formatParticipationDate('2026-07-05T23:50:00-03:00'), '05/07/2026');
+  assert.equal(formatParticipationDate('2026-02-31T12:00:00-03:00'), null);
+  assert.equal(formatParticipationDate('2026-04-31T12:00:00-03:00'), null);
+  assert.equal(formatParticipationDate('2024-02-29T12:00:00-03:00'), '29/02/2024');
+  assert.equal(formatParticipationDate('2025-02-29T12:00:00-03:00'), null);
   for (const value of [null, undefined, '', 'ontem', 20260928]) {
     assert.equal(formatParticipationDate(value), null, String(value));
   }
