@@ -154,6 +154,18 @@ test('null or invalid experience occurrences are ignored, valid repetitions kept
   assert.deepEqual(getExperienceOccurrences(null), []);
 });
 
+test('experience occurrences require an own valid ID', () => {
+  const getExperienceOccurrences = (participation) => [...participationUtils.getExperienceOccurrences(participation)];
+  const inheritedOccurrence = Object.create({ id: 'herdado' });
+  inheritedOccurrence.experience = playstation;
+  const first = { id: 'occurrence-1', experience: playstation };
+  const repeated = { id: 'occurrence-2', experience: playstation };
+
+  assert.deepEqual(getExperienceOccurrences({
+    experiences: [null, undefined, inheritedOccurrence, first, repeated, false],
+  }), [first, repeated]);
+});
+
 test('details with only null experiences show that none were registered', () => {
   for (const experiences of [[null], [null, undefined, {}]]) {
     const onlyInvalid = { ...withRepeatedExperience, experiences };

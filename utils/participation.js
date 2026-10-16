@@ -171,6 +171,7 @@ export function getExperienceOccurrences(participation) {
   return participation.experiences.filter((occurrence) => (
     occurrence !== null
     && typeof occurrence === 'object'
+    && Object.prototype.hasOwnProperty.call(occurrence, 'id')
     && typeof occurrence.id === 'string'
     && occurrence.id !== ''
   ));
