@@ -87,6 +87,32 @@ test('stay duration is only calculated from registered entry and exit', async ()
   assert.equal(getStayDurationInMinutes(null), null);
 });
 
+test('stay duration rejects impossible instants without relying on Date rollover', async () => {
+  const { getStayDurationInMinutes } = await participationModule;
+  const invalidInstants = [
+    '2026-02-31T15:10:00-03:00',
+    '2025-02-29T15:10:00-03:00',
+    '2026-09-28T24:00:00-03:00',
+    '2026-09-28T15:60:00-03:00',
+    '2026-09-28T15:10:60-03:00',
+    '2026-09-28T15:10:00-15:00',
+    '2026-09-28T15:10:00',
+    '2026-09-28',
+  ];
+  for (const instant of invalidInstants) {
+    assert.equal(getStayDurationInMinutes({ ...finished, enteredAt: instant }), null, `entrada ${instant}`);
+    assert.equal(getStayDurationInMinutes({ ...finished, exitedAt: instant }), null, `saida ${instant}`);
+  }
+  assert.equal(getStayDurationInMinutes({
+    enteredAt: '2024-02-29T23:30:00-03:00',
+    exitedAt: '2024-03-01T00:15:00-03:00',
+  }), 45);
+  assert.equal(getStayDurationInMinutes({
+    enteredAt: '2026-09-28T18:10:00Z',
+    exitedAt: '2026-09-28T16:52:00-03:00',
+  }), 102);
+});
+
 test('stay duration is formatted in hours and minutes', async () => {
   const { formatStayDuration } = await participationModule;
   assert.equal(formatStayDuration(45), '45min');
