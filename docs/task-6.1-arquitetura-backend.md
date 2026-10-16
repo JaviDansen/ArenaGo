@@ -1012,7 +1012,7 @@ sequenceDiagram
 ### 9.2 Catálogo de Jogos e Inclusão Manual Sem Duplicidades
 O catálogo inicial contém os 20 jogos curados (`is_curated = true`). Quando um participante envia jogos personalizados na Etapa 2, o backend precisa garantir que grafias variadas não criem registros duplicados e que **o nome canônico existente jamais seja sobrescrito**.
 
-Para assegurar consistência sob inserções concorrentes, utiliza-se a seguinte **Common Table Expression (CTE) atômica e idempotente no PostgreSQL**:
+Para assegurar consistência sob inserções concorrentes, utiliza-se a seguinte **Common Table Expression (CTE) atômica no PostgreSQL com retentativa a nível de aplicação**:
 
 ```sql
 -- Inserção segura que retorna o ID sem jamais modificar o nome original já cadastrado
