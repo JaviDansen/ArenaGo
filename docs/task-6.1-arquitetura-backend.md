@@ -16,12 +16,12 @@ A solução adota **Node.js com TypeScript** sob o framework **NestJS** (adaptad
 
 Principais diretrizes consolidadas nesta revisão técnica:
 1. **Cadastro e Questionário Desacoplados:** O cadastro cria imediatamente uma conta válida e ativa; o questionário de 3 etapas pode permanecer pendente sem impedir o login ou o uso da conta, sendo consultável com status `200 OK` (`hasCompleted: false`).
-2. **Catálogo de Jogos Canônico e Deduplicação Atômica:** Inserção concorrente segura via CTE atômica no PostgreSQL, garantindo que jogos existentes tenham seu ID reutilizado sem jamais sobrescrever sua grafia canônica original.
-3. **Linhagem de Refresh Tokens e Detecção de Reuso:** Rotação de refresh tokens transacional com tabela dedicada para histórico da sessão, detecção imediata de reutilização de tokens antigos, revogação sumária da sessão comprometida e tratamento de concorrência com tolerância a corridas de rede legítimas.
+2. **Catálogo de Jogos Canônico e Deduplicação Concorrente:** Algoritmo multi-instrução determinístico executado sob o nível de isolamento padrão `READ COMMITTED`: tentativa inicial de inserção via `INSERT ... ON CONFLICT DO NOTHING RETURNING id`; se nenhum ID retornar, nova leitura com `SELECT` em comando SQL separado pela chave normalizada `LOWER(TRIM(name))`, acompanhada de política delimitada de retentativas na aplicação para tratar corridas transitórias, preservando categoricamente a grafia canônica original e a integridade de `user_games`.
+3. **Linhagem de Refresh Tokens e Detecção de Reuso Estrita:** Rotação atômica de refresh tokens sob transação ACID (`FOR UPDATE`). O token anterior é marcado como consumido (`consumed_at = NOW()`) e invalidado imediatamente; qualquer tentativa de reuso de token consumido aciona a revogação sumária da sessão inteira (`revocation_reason = 'token_reuse'`). O cliente serializa obrigatoriamente as renovações, e perdas de resposta em trânsito exigem nova autenticação completa, eliminando janelas arbitrárias de tolerância (como 5 segundos) e suposições frágeis de IP/User-Agent.
 4. **Sessão Única por Conta:** Garantida não apenas na lógica da aplicação, mas imposta a nível de banco de dados via índice único condicional no PostgreSQL (`idx_sessions_single_active_per_user`), com controle transacional via `SELECT ... FOR UPDATE` no login e validação por chave primária de sessão (`sid`) em cada requisição protegida.
 5. **Recuperação de Senha Atômica:** Fluxo transacional estrito que consome o token, atualiza o hash Argon2id, invalida tokens anteriores e revoga todas as sessões ativas da conta em uma única transação ACID.
 6. **Conexão Segura TLS:** Configuração rigorosa de conexão com PostgreSQL/Neon com verificação estrita de certificados (`rejectUnauthorized: true`), eliminando vulnerabilidades a ataques Man-in-the-Middle (MITM).
-7. **Autenticação Administrativa e 2FA/TOTP:** Especificação completa do desafio de dois fatores (RFC 6238 e backup codes), onboarding do primeiro Admin com auditoria autêntica de sistema (`CLI_BOOTSTRAP`), e recuperação de credenciais restrita a outro Administrador. Preservada a compatibilidade cumulativa de papéis sem antecipar definições de negócio sobre elegibilidade de eventos.
+7. **Autenticação Administrativa e 2FA/TOTP com Autorização Independente:** Segundo fator obrigatório (RFC 6238 e backup codes) para administração. O primeiro cadastro de TOTF exige autorização de ativação de finalidade específica independente da senha e do `tempToken` de login, emitida por procedimento CLI restrito (`CLI_BOOTSTRAP`) para o primeiro Admin ou por outro Admin com TOTP válido para promoções subsequentes, entregue por canal controlado out-of-band. Nenhuma sessão privilegiada é concedida antes da ativação válida do TOTP.
 8. **Padronização de Erros e Contratos:** Conformidade formal com a **RFC 7807** (`application/problem+json`) e detalhamento completo de payloads de entrada, saída, códigos HTTP e validações.
 
 ---
@@ -117,7 +117,7 @@ A análise dos fluxos de autenticação, perfil e questionário presentes no fro
 | **Login** (`LoginScreen.js`) | `email`<br>`password` | - `email`: obrigatório, formato válido.<br>- `password`: obrigatório. | - Autenticação por e-mail e hash seguro Argon2id.<br>- Criação de sessão única ativa com revogação da anterior sob transação atômica.<br>- Permite login normalmente mesmo com questionário incompleto.<br>- Retorna status do questionário (`hasCompletedQuestionnaire`). | O cliente recebe os tokens e o estado da conta. Se o questionário estiver pendente, o app poderá permitir navegação normal ou sugerir o preenchimento posterior. |
 | **Recuperação de Senha** (`ForgotPasswordScreen.js`) | *Placeholder* (sem campos funcionais) | Apenas aviso visual "Em construção". | - Envio de e-mail com token de 32 bytes criptograficamente seguro (validade 30 min).<br>- Rate limit: 1 a cada 2 min por conta, máx 5/hora por conta, teto por IP.<br>- Resposta opaca sem revelar existência de conta.<br>- Redefinição atômica: consome token, atualiza senha, invalida tokens anteriores e revoga todas as sessões. | Implementação completa dos endpoints `POST /auth/forgot-password` e `POST /auth/reset-password`. |
 | **Questionário — Etapa 1: Sobre você** (`ProfileQuestionnaireScreen.js`) | `birthDate`<br>`gender`<br>`otherGender`<br>`education` | - `birthDate`: máscara DD/MM/AAAA, conversão para civil `YYYY-MM-DD`, rejeita data futura e impossível.<br>- `gender`: 1 opção entre Feminino, Masculino, Outro, Prefiro não informar.<br>- `otherGender`: obrigatório apenas se `gender === 'Outro'`.<br>- `education`: 1 opção entre Fundamental, Médio, Superior, Pós-graduação, Prefiro não informar. | - `birthDate`: armazenar estritamente como tipo SQL `DATE` (sem horas, sem conversão de timezone).<br>- `gender` e `education`: enums padronizados.<br>- `otherGender`: `varchar(100)` anulável. | Preservar a integridade do formato civil de data. Endpoint autenticado `PUT /profile/questionnaire`. |
-| **Questionário — Etapa 2: Seus jogos** (`ProfileQuestionnaireScreen.js`) | `selectedGames` (Array de strings) | - Mínimo 1 jogo selecionado.<br>- Sugestões de catálogo (20 jogos do `mockGames`).<br>- Inclusão manual livre digitada pelo usuário.<br>- Deduplicação local case-insensitive `toLowerCase().trim()`. | - Catálogo persistido em tabela `games` (`is_curated = true`).<br>- Jogos manuais persistidos em `games` (`is_curated = false`) com deduplicação case-insensitive via CTE atômica que **reutiliza o ID sem jamais modificar o nome canônico existente**.<br>- Vínculo N:N em `user_games` idempotente. | Disponibilizar endpoint `GET /games` para sugestões e aceitar novos nomes no payload do questionário. |
+| **Questionário — Etapa 2: Seus jogos** (`ProfileQuestionnaireScreen.js`) | `selectedGames` (Array de strings) | - Mínimo 1 jogo selecionado.<br>- Sugestões de catálogo (20 jogos do `mockGames`).<br>- Inclusão manual livre digitada pelo usuário.<br>- Deduplicação local case-insensitive `toLowerCase().trim()`. | - Catálogo persistido em tabela `games` (`is_curated = true`).<br>- Jogos manuais persistidos em `games` (`is_curated = false`) com deduplicação case-insensitive via algoritmo multi-instrução concorrente em comandos SQL separados que **reutiliza o ID sem jamais modificar o nome canônico existente** sob `READ COMMITTED`.<br>- Vínculo N:N em `user_games` idempotente. | Disponibilizar endpoint `GET /games` para sugestões e aceitar novos nomes no payload do questionário. |
 | **Questionário — Etapa 3: Mercado de games** (`ProfileQuestionnaireScreen.js`) | `marketKnowledge`<br>`marketInterest` | - `marketKnowledge`: 1 opção ('Sim, conheço.', 'Conheço um pouco.', 'Não conheço.').<br>- `marketInterest`: 1 opção ('Sim, tenho interesse.', 'Talvez — quero conhecer melhor.', 'Não tenho interesse.'). | - Campos obrigatórios persistidos no perfil do usuário.<br>- Integrados ao snapshot imutável em futuras participações de eventos. | Armazenar no perfil e compor a estrutura congelada na participação. |
 | **Consulta do Questionário** | Consulta de estado e respostas | Não existe atualmente chamada de rede. | - Endpoint `GET /profile/questionnaire`.<br>- **Se não preenchido:** retorna `200 OK` com `hasCompleted: false` e campos em `null` (não retorna 404).<br>- **Se preenchido:** retorna `200 OK` com `hasCompleted: true` e todas as respostas. | Permite que o app identifique o estado sem tratar ausência de respostas como erro de rede ou conta inexistente. |
 | **Consulta do Perfil** (`ProfileScreen.js`) | `id`, `name`, `email`, `roles`, `hasCompletedQuestionnaire` | Leitura de contexto em memória. | - Endpoint autenticado `GET /profile`.<br>- Retorna identidade da conta, verificação de e-mail, papéis e estado de conclusão do questionário. | Integração com endpoint autenticado para exibição na aba de Perfil. |
@@ -248,6 +248,7 @@ erDiagram
     users ||--o{ email_verification_tokens : "recebe (1:N)"
     users ||--o{ user_roles : "possui papéis únicos ativos (1:N)"
     users ||--o{ role_audit_logs : "é alvo de (1:N)"
+    users ||--o{ totp_activation_tokens : "recebe autorização de setup (1:N)"
     users ||--o| user_totp_credentials : "configura 2FA (1:1)"
     users ||--o{ user_backup_codes : "possui códigos backup (1:N)"
     users ||--o{ user_games : "joga (1:N)"
@@ -376,6 +377,17 @@ erDiagram
         uuid user_id FK
         varchar_64 code_hash UK
         timestamp_tz used_at
+        timestamp_tz created_at
+    }
+
+    totp_activation_tokens {
+        uuid id PK
+        uuid user_id FK
+        varchar_64 token_hash UK
+        uuid issued_by FK
+        timestamp_tz expires_at
+        timestamp_tz used_at
+        timestamp_tz revoked_at
         timestamp_tz created_at
     }
 
@@ -541,26 +553,26 @@ Permissões atribuídas a uma conta, com prevenção rigorosa de papéis ativos 
   - `CREATE INDEX idx_user_roles_active ON user_roles (user_id, role) WHERE revoked_at IS NULL;`
 
 ### 5.10 Tabela `role_audit_logs`
-Trilha de auditoria imutável para concessões e revogações de privilégios.
+Trilha de auditoria imutável para concessões, revogações de privilégios e ciclo de vida de autorizações de ativação administrativa.
 - **PK:** `id` (`uuid`, `gen_random_uuid()`)
 - **Colunas:**
   - `id`: `UUID PRIMARY KEY DEFAULT gen_random_uuid()`
   - `actor_id`: `UUID NULL REFERENCES users(id)` (Quem executou a ação; `NULL` estrito quando disparado pelo sistema/CLI de bootstrap)
-  - `target_user_id`: `UUID NOT NULL REFERENCES users(id)` (Conta que recebeu ou perdeu o papel)
-  - `action`: `VARCHAR(30) NOT NULL` (Valores: `'GRANT'`, `'REVOKE'`, `'CLI_BOOTSTRAP'`)
-  - `role`: `VARCHAR(30) NOT NULL`
+  - `target_user_id`: `UUID NOT NULL REFERENCES users(id)` (Conta que recebeu ou perdeu o papel / recebeu autorização)
+  - `action`: `VARCHAR(35) NOT NULL` (Valores: `'GRANT'`, `'REVOKE'`, `'CLI_BOOTSTRAP'`, `'TOTP_ACTIVATION_ISSUED'`, `'TOTP_ACTIVATION_CONSUMED'`, `'TOTP_ACTIVATION_REVOKED'`)
+  - `role`: `VARCHAR(30) NOT NULL` (ex.: `'admin'`, `'staff'`, ou `'system'` no caso de ciclo de tokens)
   - `event_id`: `UUID NULL`
   - `reason`: `TEXT NULL`
   - `ip_address`: `VARCHAR(45) NULL`
   - `created_at`: `TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()`
 
-### 5.11 Tabelas de Segundo Fator (`user_totp_credentials` e `user_backup_codes`)
-Estrutura para 2FA obrigatório de administradores.
+### 5.11 Tabelas de Segundo Fator e Autorização de Ativação (`user_totp_credentials`, `user_backup_codes` e `totp_activation_tokens`)
+Estrutura para 2FA obrigatório de administradores e gestão segura de ativação de credenciais.
 - **`user_totp_credentials`:**
   - `id`: `UUID PRIMARY KEY DEFAULT gen_random_uuid()`
   - `user_id`: `UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE`
   - `secret_encrypted`: `TEXT NOT NULL` (Segredo base32 cifrado com AES-256-GCM)
-  - `is_verified`: `BOOLEAN NOT NULL DEFAULT false` (marcado como `true` apenas após primeira validação)
+  - `is_verified`: `BOOLEAN NOT NULL DEFAULT false` (marcado como `true` apenas após validação do primeiro código TOTP no onboarding)
   - `created_at`: `TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()`
   - `updated_at`: `TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()`
 - **`user_backup_codes`:**
@@ -569,6 +581,19 @@ Estrutura para 2FA obrigatório de administradores.
   - `code_hash`: `VARCHAR(64) NOT NULL UNIQUE` (hash SHA-256 do código alfanumérico)
   - `used_at`: `TIMESTAMP WITH TIME ZONE NULL`
   - `created_at`: `TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()`
+- **`totp_activation_tokens`:**
+  Autorizações de ativação de finalidade específica para o primeiro setup de TOTP de um Admin. Impede categoricamente que a posse exclusiva de senha ou `tempToken` de login permita a um atacante configurar seu próprio autenticador.
+  - `id`: `UUID PRIMARY KEY DEFAULT gen_random_uuid()`
+  - `user_id`: `UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE`
+  - `token_hash`: `VARCHAR(64) NOT NULL UNIQUE` (hash SHA-256 da autorização criptográfica)
+  - `issued_by`: `UUID NULL REFERENCES users(id)` (`NULL` estrito quando emitida via procedimento CLI de bootstrap)
+  - `expires_at`: `TIMESTAMP WITH TIME ZONE NOT NULL` (validade curta e estrita, ex.: 30 minutos)
+  - `used_at`: `TIMESTAMP WITH TIME ZONE NULL` (marcado no momento do setup; garante uso único)
+  - `revoked_at`: `TIMESTAMP WITH TIME ZONE NULL` (preenchido em caso de cancelamento da promoção ou redefinição)
+  - `created_at`: `TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()`
+  - **Índices & Restrições:**
+    - `CREATE UNIQUE INDEX idx_totp_activation_tokens_hash ON totp_activation_tokens (token_hash);`
+    - `CREATE INDEX idx_totp_activation_tokens_user ON totp_activation_tokens (user_id);`
 
 ### 5.12 Contratos Conceituais Futuros: Tabelas de Eventos, Participações e Snapshots
 
@@ -722,7 +747,7 @@ sequenceDiagram
 
 ### 6.4 Rotação de Refresh Token e Detecção de Reuso
 
-Para proteger contra roubo ou vazamento de credenciais móveis, o sistema adota **rotação estrita de refresh tokens com preservação da linhagem histórica na tabela `refresh_tokens`**:
+Para proteger contra roubo ou vazamento de credenciais móveis, o sistema adota **rotação estrita e atômica de refresh tokens com preservação da linhagem histórica na tabela `refresh_tokens`**:
 
 ```mermaid
 sequenceDiagram
@@ -733,37 +758,127 @@ sequenceDiagram
 
     Client->>API: POST /auth/refresh { refreshToken: "token_atual" }
     API->>API: Calcula token_hash = sha256(token_atual)
-    API->>DB: Inicia Transação
-    API->>DB: SELECT * FROM refresh_tokens WHERE token_hash = :hash FOR UPDATE
+    API->>DB: Inicia Transação ACID (BEGIN)
+    API->>DB: SELECT id, session_id, consumed_at, is_revoked, expires_at FROM refresh_tokens WHERE token_hash = :hash FOR UPDATE
 
-    alt Token NÃO encontrado ou Sessão expirada
+    alt Token NÃO encontrado ou Expirado
         API->>DB: ROLLBACK
-        API-->>Client: 401 Unauthorized ("Credencial de renovação inválida")
-    else Token com consumed_at IS NOT NULL ou is_revoked = true (REUSO DETECTADO)
+        API-->>Client: 401 Unauthorized ("Credencial de renovação inválida ou expirada")
+    else Token com consumed_at IS NOT NULL ou is_revoked = true (REUSO INDEVIDO DETECTADO)
         rect rgb(255, 220, 220)
-        Note over API,DB: Incidente de Segurança: Tentativa de reutilizar token antigo
-        API->>DB: UPDATE sessions SET revoked_at = NOW(), revocation_reason = 'token_reuse' WHERE id = :sessionId
+        Note over API,DB: Incidente de Segurança: Tentativa de reutilizar token consumido
+        API->>DB: UPDATE sessions SET revoked_at = NOW(), revocation_reason = 'token_reuse' WHERE id = :sessionId AND revoked_at IS NULL
         API->>DB: UPDATE refresh_tokens SET is_revoked = true WHERE session_id = :sessionId
         API->>DB: COMMIT
         API-->>Client: 401 Unauthorized ("Sessão revogada por violação de segurança")
         end
     else Token Válido e Ativo (consumed_at IS NULL e is_revoked = false)
-        API->>DB: SELECT revoked_at, expires_at FROM sessions WHERE id = :sessionId FOR UPDATE
-        API->>DB: UPDATE refresh_tokens SET consumed_at = NOW(), is_revoked = true WHERE id = :tokenId
-        API->>API: Gera novo refreshToken criptográfico e calcula novo_hash
-        API->>DB: INSERT INTO refresh_tokens (session_id, token_hash, expires_at) VALUES (:sessionId, :novo_hash, :sessionExpiresAt)
-        API->>DB: UPDATE sessions SET last_activity_at = NOW() WHERE id = :sessionId
-        API->>DB: COMMIT
-        API->>API: Emite novo accessToken (15m com sid da sessão)
-        API-->>Client: 200 OK { accessToken, refreshToken: "novo_token", expiresIn: 900 }
+        API->>DB: SELECT id, user_id, revoked_at, expires_at FROM sessions WHERE id = :sessionId FOR UPDATE
+        alt Sessão revogada ou expirada
+            API->>DB: ROLLBACK
+            API-->>Client: 401 Unauthorized ("Sessão inválida ou expirada")
+        else Sessão ativa
+            API->>DB: UPDATE refresh_tokens SET consumed_at = NOW(), is_revoked = true WHERE id = :tokenId
+            API->>API: Gera novo refreshToken criptográfico (CSPRNG 256 bits) e calcula novo_hash
+            API->>DB: INSERT INTO refresh_tokens (session_id, token_hash, expires_at) VALUES (:sessionId, :novo_hash, :sessionExpiresAt)
+            API->>DB: UPDATE sessions SET last_activity_at = NOW() WHERE id = :sessionId
+            API->>DB: COMMIT
+            API->>API: Emite novo accessToken (15m com sid da sessão)
+            API-->>Client: 200 OK { accessToken, refreshToken: "novo_token", expiresIn: 900 }
+        end
     end
 ```
 
-**Tratamento de Concorrência e Corridas de Rede (Network Races):**
-- **Bloqueio Transacional:** A consulta com `FOR UPDATE` serializa qualquer requisição concorrente no nível da linha do token no banco.
-- **Tolerância a Corridas de Rede Legítimas:** Em redes móveis instáveis, o aplicativo pode disparar duas requisições paralelas quase simultâneas com o mesmo refresh token ao receber múltiplos códigos 401 de endpoints distintos. Para evitar falsos positivos de ataque:
-  1. O cliente HTTP (Axios) implementará um **mecanismo de fila / mutex local**: ao detectar um 401, enfileira chamadas pendentes e realiza apenas uma chamada a `POST /auth/refresh`.
-  2. No servidor, define-se uma janela técnica estrita de carência de **5 segundos**: se uma requisição chegar com um token cujo `consumed_at` ocorreu há menos de 5 segundos a partir do mesmo IP e User-Agent, a requisição não revoga a sessão; em vez disso, retorna com segurança o par de tokens recém-gerado pela primeira requisição da corrida. Passados os 5 segundos, qualquer envio de token consumido caracteriza tentativa de reutilização de credencial vazada e dispara a revogação compulsória da sessão (`revocation_reason = 'token_reuse'`).
+**Fluxo Transacional Detalhado no Banco de Dados:**
+
+A operação de renovação é executada sob uma transação ACID estrita com bloqueio pessimista:
+
+```sql
+BEGIN;
+
+-- 1. Bloqueia a linha do refresh token para serialização imediata
+SELECT id, session_id, consumed_at, is_revoked, expires_at
+FROM refresh_tokens
+WHERE token_hash = :tokenHash
+FOR UPDATE;
+
+-- Se o registro não existir ou expires_at < NOW():
+-- ROLLBACK; -> Retorna 401 Unauthorized ("Credencial inválida ou expirada").
+
+-- Se consumed_at IS NOT NULL OU is_revoked = true:
+-- POLÍTICA DE SEGURANÇA: REUSO INDEVIDO DETECTADO
+-- Revoga compulsoriamente a sessão inteira e invalida todos os tokens da linhagem:
+UPDATE sessions
+SET revoked_at = NOW(), revocation_reason = 'token_reuse'
+WHERE id = :sessionId AND revoked_at IS NULL;
+
+UPDATE refresh_tokens
+SET is_revoked = true
+WHERE session_id = :sessionId;
+
+COMMIT;
+-- -> Retorna 401 Unauthorized ("Sessão revogada por violação de segurança").
+
+-- Se o token for válido e ativo (consumed_at IS NULL e is_revoked = false):
+-- 2. Bloqueia e valida a integridade da sessão associada
+SELECT id, user_id, revoked_at, expires_at
+FROM sessions
+WHERE id = :sessionId
+FOR UPDATE;
+
+-- Se a sessão já estiver revogada ou expires_at < NOW():
+-- ROLLBACK; -> Retorna 401 Unauthorized ("Sessão encerrada ou expirada").
+
+-- 3. Transição atômica de rotação:
+-- Marca o token atual como consumido e revogado (uso único irreversível)
+UPDATE refresh_tokens
+SET consumed_at = NOW(), is_revoked = true
+WHERE id = :tokenId;
+
+-- Insere o novo token na linhagem da sessão
+INSERT INTO refresh_tokens (session_id, token_hash, expires_at)
+VALUES (:sessionId, :novoTokenHash, :sessionExpiresAt);
+
+-- Atualiza last_activity_at sem estender o teto máximo da sessão (expires_at)
+UPDATE sessions
+SET last_activity_at = NOW()
+WHERE id = :sessionId;
+
+COMMIT;
+
+-- Retorna 200 OK { accessToken, refreshToken, expiresIn: 900 }
+```
+
+**Tratamento de Concorrência e Duas Requisições Simultâneas com o Mesmo Token:**
+
+1. **Serialização por Bloqueio de Linha (`FOR UPDATE`):**
+   - Quando duas requisições paralelas (R1 e R2) chegam ao servidor com o **mesmo refresh token**:
+   - Ambas disparam `SELECT ... WHERE token_hash = :tokenHash FOR UPDATE`.
+   - O PostgreSQL concede o lock exclusivo de linha à primeira requisição avaliada (R1). A requisição R2 é colocada em espera no banco de dados.
+   - R1 valida que `consumed_at IS NULL`, realiza a rotação, atualiza a linha para `consumed_at = NOW()`, grava o novo token, comita a transação (`COMMIT`) e libera o lock.
+   - Imediatamente após o desbloqueio, sob o nível de isolamento padrão `READ COMMITTED`, a requisição R2 é acordada e relê a versão mais recente e já comitada da linha bloqueada.
+   - R2 constata que `consumed_at IS NOT NULL` (e `is_revoked = true`).
+   - Consequentemente, R2 entra obrigatoriamente no bloco de **Reuso Indevido Detectado**: aciona a revogação sumária da sessão inteira (`revocation_reason = 'token_reuse'`), revoga os demais tokens, faz `COMMIT` e retorna `401 Unauthorized`.
+   - **Resultado:** Disparos paralelos concorrentes com o mesmo token invalidam irrevogavelmente a sessão.
+
+2. **Serialização Mandatória no Cliente HTTP (Prevenção de Corridas Desnecessárias):**
+   - Para prevenir o encerramento indevido de sessões legítimas provocado por múltiplos códigos 401 simultâneos disparados por requisições paralelas no aplicativo móvel, o cliente HTTP (Axios) **deve serializar compulsoriamente todas as requisições de renovação**.
+   - O interceptor do cliente implementa um semáforo/mutex local com fila de espera:
+     - Ao interceptar o primeiro erro `401 Unauthorized`, adquire o lock e emite **uma única** chamada a `POST /auth/refresh`.
+     - As demais requisições com 401 são retidas na fila de espera.
+     - Após o retorno bem-sucedido de `POST /auth/refresh`, o cliente atualiza o `accessToken` em memória e o novo `refreshToken` no `expo-secure-store`, processando as requisições enfileiradas com a nova credencial e liberando o mutex.
+
+3. **Perda de Resposta em Trânsito (Network Dropout) e Inexistência de Tokens em Texto Claro:**
+   - O backend armazena **estritamente o hash SHA-256** dos tokens (`token_hash`) e jamais persiste os tokens em texto claro no banco de dados.
+   - Caso a transação de rotação seja comitada com sucesso no banco, mas a resposta de rede seja perdida antes de alcançar o aparelho (ex.: queda repentina de conexão de dados móveis):
+     - O backend não armazena o token em texto claro gerado e não tem permissão arquitetural nem capacidade técnica de devolvê-lo posteriormente.
+     - O token anterior já se encontra registrado como consumido (`consumed_at IS NOT NULL`).
+     - Se o cliente tentar retransmitir o token anterior, a tentativa será classificada como reuso indevido e revogará a sessão.
+     - **Regra Determinística de Falha:** Se a resposta da rotação for perdida e o cliente não possuir o novo refresh token, a recuperação se dará pela **exigência de nova autenticação do usuário** (redirecionamento à tela de Login com e-mail e senha).
+
+4. **Eliminação de Heurísticas Frágeis (IP e User-Agent):**
+   - O sistema **não utiliza IP ou User-Agent como critério ou prova de legitimidade** para permitir tolerâncias temporais ou reenvios de tokens consumidos. Em ambientes móveis, o endereço IP transita dinamicamente entre antenas celulares e redes Wi-Fi, enquanto o cabeçalho User-Agent pode ser facilmente forjado.
+   - Fica formalmente extinta qualquer tolerância temporal arbitrária (como janelas de carência de 5 segundos), assegurando um modelo de segurança determinístico e livre de brechas de repetição.
 
 ### 6.5 Armazenamento Seguro no Aplicativo Móvel
 - **Dispositivos Físicos (iOS e Android):**
@@ -890,11 +1005,13 @@ Para garantir que não haja brechas de auto-promoção e manter a fidelidade da 
    - `actor_id`: **`NULL`** (identificando categoricamente a ação como oriunda do sistema/console, **sem imputar falsamente ao usuário a autoria da própria concessão**).
    - `action`: `'CLI_BOOTSTRAP'`.
    - `reason`: Justificativa informada no comando CLI.
-5. **Regra de Continuidade Operacional:** Antes de eventos reais com público, **ao menos dois administradores distintos** deverão estar ativos, com e-mail verificado e 2FA configurado.
+5. Gera uma **autorização de ativação de TOTP** de finalidade específica (`totp_activation_tokens`), de uso único e com validade estrita de 30 minutos, registrando o hash SHA-256 no banco e auditando com `action = 'TOTP_ACTIVATION_ISSUED'` e `actor_id = NULL`.
+6. O token de ativação em texto claro é exibido **exclusivamente na saída protegida do terminal CLI do servidor**, sem ser salvo em texto claro e sem transitar por APIs públicas.
+7. **Regra de Continuidade Operacional:** Antes de eventos reais com público, **ao menos dois administradores distintos** deverão estar ativos, com e-mail verificado e 2FA configurado.
 
 ### 8.4 Autenticação Administrativa de Dois Fatores (2FA via TOTP)
 
-O acesso administrativo exige segundo fator baseado na RFC 6238 (tempo t ± 1 step de 30s, algoritmo SHA-1, código de 6 dígitos):
+O acesso administrativo exige segundo fator baseado na RFC 6238 (tempo t ± 1 step de 30s, algoritmo SHA-1, código de 6 dígitos). O primeiro cadastro de TOTP é blindado contra o uso exclusivo de senhas vazadas através da exigência obrigatória de uma **autorização de ativação independente**:
 
 ```mermaid
 sequenceDiagram
@@ -913,50 +1030,85 @@ sequenceDiagram
     end
 
     alt Admin precisa configurar TOTP pela 1ª vez (isTotpConfigured = false)
-        Admin->>API: POST /auth/2fa/setup (Bearer tempToken)
+        rect rgb(240, 245, 255)
+        Note over Admin,API: Canal Controlado Out-of-Band (CLI bootstrap ou outro Admin com TOTP)
+        Note over Admin: Admin obtém activationToken de uso único
+        end
+        Admin->>API: POST /auth/2fa/setup (Bearer tempToken, { activationToken })
+        API->>DB: Inicia Transação ACID
+        API->>DB: SELECT * FROM totp_activation_tokens WHERE token_hash = sha256(activationToken) AND user_id = :userId FOR UPDATE
+        Note over API,DB: Valida expiração, revogação e uso único
+        API->>DB: UPDATE totp_activation_tokens SET used_at = NOW() WHERE id = :activationId
+        API->>DB: INSERT INTO role_audit_logs (action = 'TOTP_ACTIVATION_CONSUMED', ...)
         API->>API: Gera segredo base32, QR Code e 10 Backup Codes
         API->>DB: Salva segredo cifrado AES-256-GCM (is_verified = false) e hashes dos backup codes
+        API->>DB: COMMIT
         API-->>Admin: 200 OK { qrCodeUrl, secret, backupCodes }
         Admin->>API: POST /auth/2fa/verify (Bearer tempToken, { code: "123456" })
-        API->>API: Valida código TOTP
+        API->>API: Valida código matemático TOTP RFC 6238
         API->>DB: UPDATE user_totp_credentials SET is_verified = true WHERE user_id = :userId
     else Admin já possui TOTP configurado (isTotpConfigured = true)
         Admin->>API: POST /auth/2fa/verify (Bearer tempToken, { code: "123456" ou "XXXX-XXXX" })
+        API->>API: Valida código TOTP de 6 dígitos ou consome Backup Code
     end
 
-    API->>API: Valida código TOTP de 6 dígitos ou consome Backup Code
     API->>DB: Executa transação de criação de sessão autorizada (sessão única)
-    API->>API: Emite tokens finais (claims: 'roles: ["admin"]', 'admin_2fa_verified: true', sid)
+    API->>API: Emite tokens finais autorizados (claims: 'roles: ["admin"]', 'admin_2fa_verified: true', sid)
     API-->>Admin: 200 OK { accessToken (15m), refreshToken (30d), user }
 ```
 
 **Detalhamento Técnico das Etapas do Fluxo Administrativo:**
 
 1. **Emissão e Validação do Desafio Temporário (`tempToken`):**
-   - Ao validar as credenciais em `POST /auth/login` para uma conta com papel `admin`, o servidor **não emite o token de acesso administrativo final**.
-   - O backend emite um token provisório assinado via JWT (`tempToken`), com TTL restrito a **5 minutos** e payload com escopo delimitado:
+   - Ao validar as credenciais em `POST /auth/login` para uma conta com papel `admin`, o servidor **não emite sessão privilegiada nem token administrativo**.
+   - O backend emite apenas um token provisório assinado via JWT (`tempToken`), com TTL restrito a **5 minutos** e payload de escopo delimitado:
      ```json
      {
        "sub": "b2f6d2b4-7f1e-4c91-9e23-28942b10a911",
        "scope": "2fa_pending",
        "purpose": "admin_challenge",
-       "isTotpConfigured": true,
+       "isTotpConfigured": false,
        "iat": 1792080000,
        "exp": 1792080300
      }
      ```
-   - O interceptor e o guard especializado `TotpChallengeGuard` asseguram que esse token temporário só seja aceito nas rotas de desafio (`/auth/2fa/setup` e `/auth/2fa/verify`), sendo rejeitado com `403 Forbidden` em qualquer endpoint funcional da API.
+   - O `TotpChallengeGuard` restringe a aceitação desse token às rotas `/auth/2fa/setup` e `/auth/2fa/verify`.
+   - **Garantia de Segurança:** A resposta de login **jamais inclui a autorização de ativação**. Se um invasor obtiver a senha da conta de um Admin ainda não ativado, o login emitirá apenas o `tempToken`, mas o invasor será bloqueado na tentativa de setup por não possuir a autorização de ativação independente.
 
-2. **Configuração Inicial do TOTP e Códigos de Recuperação:**
-   - Se o Admin ainda não tiver o segundo fator ativado (`isTotpConfigured = false`), ele chama `POST /auth/2fa/setup` (Bearer `tempToken`).
-   - O backend gera segredo criptográfico base32, cifra-o com **AES-256-GCM** (usando a chave `TOTP_ENCRYPTION_KEY`) e gera a URL canônica `otpauth://totp/ArenaGo:admin@arenago.com.br?secret=...&issuer=ArenaGo`.
-   - Gera **10 códigos de backup alfanuméricos** de 8 caracteres (`XXXX-XXXX`) de uso único, gravando apenas o hash SHA-256 na tabela `user_backup_codes`.
-   - O registro em `user_totp_credentials` permanece com `is_verified = false`. O Admin deve confirmar o primeiro código gerado no app chamando `POST /auth/2fa/verify`. Somente após a validação matemática bem-sucedida do primeiro código de 6 dígitos, o segredo é marcado como ativo (`is_verified = true`).
+2. **Autorização de Ativação de Finalidade Específica (`totp_activation_tokens`):**
+   - A configuração inicial de segundo fator depende obrigatoriamente de uma autorização prévia, com as seguintes propriedades invioláveis:
+     - **Vínculo Estrito com a Conta:** Associada ao `user_id` da conta promovida.
+     - **Validade Temporal Restrita:** Expiração curta (30 minutos a partir da emissão).
+     - **Uso Único (Single-Use):** Marcada como consumida atomicamente (`used_at = NOW()`) no primeiro uso.
+     - **Independência da Senha:** Impossível de ser obtida apenas com credenciais de login ou `tempToken`.
+     - **Auditoria Completa:** Emissão, consumo e eventual revogação são registrados na tabela `role_audit_logs`.
+   - **Mecanismos Autorizados de Emissão:**
+     - **Primeiro Administrador:** Emitida via procedimento CLI restrito no console da infraestrutura (`CLI_BOOTSTRAP`), com `actor_id = NULL`.
+     - **Administradores Promovidos Subsequentemente:** Emitida exclusivamente quando outro Administrador autenticado com TOTP válido executa `POST /admin/roles/grant` concedendo o papel `admin`, ou por procedimento operacional restrito e formalmente auditado.
+     - **Recuperação por Perda de Aparelho:** Emitida na resposta da rota administrativa `POST /admin/users/:id/reset-totp`, executada por outro Admin com TOTP verificado.
+   - **Entrega por Canal Controlado:** A autorização de ativação é devolvida na resposta administrativa interna (ou na tela da CLI) para entrega segura out-of-band (ex.: presencialmente, via mensageiro corporativo criptografado ou e-mail corporativo restrito), jamais trafegando pelo fluxo público de login.
 
-3. **Verificação do Segundo Fator e Emissão da Sessão Autorizada:**
-   - Em `POST /auth/2fa/verify`, o Admin envia o código de 6 dígitos do app autenticador ou um dos códigos de backup.
-   - O backend valida a janela de tempo RFC 6238 (tolerância de ±1 passo de 30s) ou verifica a colisão do hash SHA-256 em `user_backup_codes` (marcando `used_at = NOW()` para descarte imediato).
-   - Validação concluída: o backend executa a transação atômica de criação de sessão única (`sessions` e `refresh_tokens`) e emite o Access Token administrativo final contendo as claims de privilégio:
+3. **Configuração Inicial do TOTP (`POST /auth/2fa/setup`):**
+   - O Admin deve apresentar simultaneamente o `tempToken` (via cabeçalho `Authorization: Bearer <tempToken>`) e a `activationToken` (no corpo da requisição).
+   - O backend executa transação ACID:
+     ```sql
+     SELECT id, user_id, expires_at, used_at, revoked_at
+     FROM totp_activation_tokens
+     WHERE token_hash = :hash AND user_id = :userId
+     FOR UPDATE;
+     ```
+   - Caso o token não exista, esteja expirado (`expires_at < NOW()`), já utilizado (`used_at IS NOT NULL`) ou revogado (`revoked_at IS NOT NULL`), a requisição é rejeitada com status `403 Forbidden` (`title: "Autorização de Ativação Inválida ou Expirada"`).
+   - Estando válido, consome o token atomicamente: `UPDATE totp_activation_tokens SET used_at = NOW() WHERE id = :id`.
+   - Registra auditoria: `INSERT INTO role_audit_logs (actor_id, target_user_id, action, role, reason) VALUES (:userId, :userId, 'TOTP_ACTIVATION_CONSUMED', 'admin', 'Ativação do primeiro setup de 2FA');`.
+   - Gera o segredo base32, cifra com **AES-256-GCM** (usando a chave `TOTP_ENCRYPTION_KEY`), salva na tabela `user_totp_credentials` com **`is_verified = false`** e grava os hashes SHA-256 dos 10 códigos de backup na tabela `user_backup_codes`.
+   - Retorna a URL canônica `otpauth://totp/...`, o segredo e a lista de backup codes.
+
+4. **Verificação do Segundo Fator e Emissão da Sessão Autorizada:**
+   - Em `POST /auth/2fa/verify`, o Admin envia o primeiro código de 6 dígitos gerado em seu app autenticador.
+   - O backend valida a assinatura matemática RFC 6238 (tolerância de drift de ±1 passo de 30s).
+   - Somente após validação bem-sucedida do código, o backend atualiza `UPDATE user_totp_credentials SET is_verified = true WHERE user_id = :userId`.
+   - **Garantia de Não-Privilégio Prévio:** Em nenhuma hipótese é emitida sessão privilegiada antes da verificação válida do TOTP.
+   - Executa a transação atômica de criação de sessão única (`sessions` e `refresh_tokens`) e emite o Access Token administrativo final contendo as claims privilegiadas:
      ```json
      {
        "sub": "b2f6d2b4-7f1e-4c91-9e23-28942b10a911",
@@ -969,19 +1121,21 @@ sequenceDiagram
      }
      ```
 
-4. **Renovação e Revogação da Sessão Administrativa:**
+5. **Renovação e Revogação da Sessão Administrativa:**
    - **Renovação Segura (`POST /auth/refresh`):** Ao receber requisição de renovação para uma sessão administrativa, o serviço de sessão não confia cegamente nas claims do token anterior: consulta em tempo real a tabela `user_roles` para garantir que o papel `admin` permanece ativo (`revoked_at IS NULL`) e valida se `user_totp_credentials.is_verified = true`. Caso o papel de Admin tenha sido revogado por outro administrador durante o período da sessão, o novo Access Token emitido não recebe a claim `roles: ["admin"]` nem `admin_2fa_verified: true`, rebaixando o acesso imediatamente.
    - **Revogação da Sessão:** O encerramento voluntário (`POST /auth/logout`) ou administrativo preenche `sessions.revoked_at = NOW()` e invalida os refresh tokens vinculados. Em virtude da checagem em tempo real de `sid` executada pelo `JwtAuthGuard`, a sessão perde a validade no exato milissegundo da revogação.
 
-5. **Recuperação de TOTP Perdido (Autorização Exclusiva por Outro Admin):**
+6. **Recuperação de TOTP Perdido (Autorização Exclusiva por Outro Admin):**
    - Caso um administrador extravie o dispositivo autenticador e não disponha de códigos de backup, a recuperação técnica depende mandatoriamente de autorização expressa de **outro Administrador com 2FA ativo**.
    - O administrador executor chama `POST /admin/users/:id/reset-totp` enviando justificativa circunstanciada obrigatória.
    - A operação executa em transação ACID:
      1. Deleta/invalida o segredo em `user_totp_credentials` da conta-alvo (`is_verified = false`).
      2. Deleta todos os códigos de backup remanescentes em `user_backup_codes`.
      3. Revoga compulsoriamente todas as sessões ativas da conta-alvo (`revocation_reason = 'admin_totp_reset'`).
-     4. Registra evento detalhado na tabela `role_audit_logs` contendo o `actor_id` do administrador que aprovou a redefinição, o `target_user_id` e o texto da justificativa.
-   - No próximo login com senha, o sistema detecta que a conta necessita de novo onboarding de 2FA e emite o desafio para `POST /auth/2fa/setup`.
+     4. Revoga autorizações de ativação anteriores não consumidas (`UPDATE totp_activation_tokens SET revoked_at = NOW() WHERE user_id = :targetUserId AND used_at IS NULL;`).
+     5. Gera uma nova autorização de ativação de TOTP (`totp_activation_tokens`) de uso único para a conta-alvo.
+     6. Registra evento detalhado na tabela `role_audit_logs` contendo o `actor_id` do administrador que aprovou a redefinição, o `target_user_id` e o texto da justificativa.
+   - A nova autorização de ativação é devolvida ao administrador executor para entrega segura out-of-band ao administrador solicitante. No próximo login, o administrador redefinido utiliza essa nova autorização para configurar seu novo dispositivo em `POST /auth/2fa/setup`.
 
 6. **Bootstrap do Primeiro Admin e Auditoria Fidedigna:**
    - O primeiro administrador da infraestrutura é provisionado via comando seguro no console do servidor (`npm run cli:promote-admin`).
@@ -1009,42 +1163,122 @@ sequenceDiagram
   - Em nenhuma hipótese a ausência do questionário deve ser tratada como erro `404 Not Found` ou inexistência da conta.
 - **Envio Completo:** O questionário é enviado em uma única operação atômica através de `PUT /profile/questionnaire`, salvando simultaneamente as 3 etapas.
 
-### 9.2 Catálogo de Jogos e Inclusão Manual Sem Duplicidades
+### 9.2 Catálogo de Jogos e Inclusão Manual Sem Duplicidades sob Concorrência
+
 O catálogo inicial contém os 20 jogos curados (`is_curated = true`). Quando um participante envia jogos personalizados na Etapa 2, o backend precisa garantir que grafias variadas não criem registros duplicados e que **o nome canônico existente jamais seja sobrescrito**.
 
-Para assegurar consistência sob inserções concorrentes, utiliza-se a seguinte **Common Table Expression (CTE) atômica no PostgreSQL com retentativa a nível de aplicação**:
+#### 9.2.1 Algoritmo Executável Multi-Instrução com Resolução Concorrente
 
-```sql
--- Inserção segura que retorna o ID sem jamais modificar o nome original já cadastrado
-WITH inserted_game AS (
-  INSERT INTO games (name, is_curated, created_by_user_id)
-  VALUES (:trimmedName, false, :userId)
-  ON CONFLICT (LOWER(TRIM(name))) DO NOTHING
-  RETURNING id
-)
-SELECT id FROM inserted_game
-UNION ALL
-SELECT id FROM games WHERE LOWER(TRIM(name)) = LOWER(TRIM(:trimmedName))
-LIMIT 1;
+Em cenários concorrentes, uma CTE única (`WITH inserted ... SELECT ...`) **não oferece garantia de visibilidade** sob o PostgreSQL caso a transação concorrente que inseriu o registro comite em instante concorrente à avaliação do comando. Para sanar essa vulnerabilidade de forma determinística, adota-se um **algoritmo multi-instrução executável em comandos SQL separados**, integrado a uma política delimitada de retentativas na aplicação.
+
+```typescript
+/**
+ * Algoritmo de resolução concorrente de jogos.
+ * Garante idempotência, visibilidade transacional sob READ COMMITTED e preservação canônica.
+ */
+async function getOrCreateGameId(
+  db: DatabaseClient,
+  rawName: string,
+  userId: string
+): Promise<string> {
+  const trimmedName = rawName.trim();
+  const normalizedKey = trimmedName.toLowerCase();
+  const MAX_RETRIES = 3;
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    // -------------------------------------------------------------
+    // Instrução 1: Inserção atômica com salvaguarda de unicidade
+    // -------------------------------------------------------------
+    const insertResult = await db.query<{ id: string }>(
+      `INSERT INTO games (name, is_curated, created_by_user_id)
+       VALUES ($1, false, $2)
+       ON CONFLICT (LOWER(TRIM(name))) DO NOTHING
+       RETURNING id;`,
+      [trimmedName, userId]
+    );
+
+    // Se o INSERT retornou um ID, a inserção física ocorreu nesta transação: utilize-o diretamente.
+    if (insertResult.rows.length > 0) {
+      return insertResult.rows[0].id;
+    }
+
+    // -------------------------------------------------------------
+    // Instrução 2: Nova leitura em comando SQL separado (novo snapshot)
+    // -------------------------------------------------------------
+    const selectResult = await db.query<{ id: string }>(
+      `SELECT id FROM games
+       WHERE LOWER(TRIM(name)) = $1
+       LIMIT 1;`,
+      [normalizedKey]
+    );
+
+    // Se a consulta localizou o jogo já existente/comitado pela transação concorrente: utilize-o.
+    if (selectResult.rows.length > 0) {
+      return selectResult.rows[0].id;
+    }
+
+    // -------------------------------------------------------------
+    // Tratamento de Situações Transitórias (Race Conditions com Abort):
+    // Se o INSERT sofreu conflito com uma transação concorrente que abortou (ROLLBACK)
+    // antes do SELECT, o registro não existirá no SELECT subsequente.
+    // -------------------------------------------------------------
+    if (attempt < MAX_RETRIES) {
+      // Breve espera com backoff exponencial e jitter (25ms, 50ms) antes de tentar nova inserção
+      await new Promise((resolve) => setTimeout(resolve, 25 * Math.pow(2, attempt - 1)));
+    }
+  }
+
+  // -------------------------------------------------------------
+  // Falha Exaustiva Delimitada: Resultado explícito RFC 7807
+  // -------------------------------------------------------------
+  throw new InternalServerErrorException({
+    type: "https://arenago.com.br/problems/game-concurrency-failure",
+    title: "Falha de Concorrência ao Cadastrar Jogo",
+    status: 500,
+    detail: `Não foi possível resolver ou registrar o jogo "${trimmedName}" após ${MAX_RETRIES} tentativas concorrentes. Por favor, reenvie a solicitação.`
+  });
+}
 ```
 
-**Garantia de Não-Duplicação e Preservação Canônica sob Concorrência:**
-Mesmo que duas ou mais requisições concorrentes tentem registrar simultaneamente o mesmo jogo com variações de caixa ou espaçamento (ex.: `"Valorant"`, `"valorant"` e `"  VALORANT  "`):
-1. O PostgreSQL avalia o índice único funcional `idx_games_name_lower_unique ON games (LOWER(TRIM(name)))`.
-2. Apenas uma das transações realiza a inserção física da linha. A transação concorrente colide no índice e aciona a cláusula `ON CONFLICT DO NOTHING`, descartando a inserção sem emitir erro de violação e sem alterar nenhuma coluna existente.
-3. A segunda instrução da CTE (`UNION ALL SELECT id FROM games WHERE LOWER(TRIM(name)) = LOWER(TRIM(:trimmedName)) LIMIT 1`) recupera com exatidão o `id` canônico da linha.
-4. **Preservação Canônica Absoluta:** O nome original registrado inicialmente é mantido intacto. Nenhuma cláusula `UPDATE SET name = ...` é executada, eliminando categoricamente o risco de sobrescrita de grafias estabelecidas.
-5. Em seguida, a vinculação em `user_games` aplica `ON CONFLICT (user_id, game_id) DO NOTHING`, garantindo que um participante jamais possua vínculos duplicados com o mesmo jogo.
+#### 9.2.2 Por Que a Nova Leitura Funciona sob `READ COMMITTED`
+
+1. **Renovação de Snapshot por Instrução SQL:**
+   - O PostgreSQL adota como padrão o nível de isolamento de transações `READ COMMITTED`.
+   - Nesse nível, **cada comando SQL individual adquire um snapshot novo e atualizado do banco de dados no momento exato em que começa a ser executado**.
+   - Em abordagens baseadas em uma única CTE (`WITH inserted ... SELECT ...`), todo o bloco da CTE compartilha o mesmo snapshot de visibilidade inicial do comando. Se a transação concorrente estivesse em andamento quando o snapshot da CTE foi fixado, a subinstrução `SELECT` interna não enxergaria a linha recém-comitada.
+   - Ao executar a Instrução 2 (`SELECT ... LIMIT 1`) em um comando SQL separado e independente, o PostgreSQL adquire um **novo snapshot**, tornando imediatamente visível a linha comitada pela transação concorrente que gerou o conflito na Instrução 1.
+
+2. **Tratamento de Falhas Transitórias e Corridas com Abort:**
+   - Se uma transação concorrente T1 bloqueou a linha durante o `INSERT` (Instrução 1) mas em seguida sofreu um `ROLLBACK`, a linha não persistirá no banco.
+   - Nesse caso atípico, a Instrução 2 (`SELECT`) retornará zero linhas.
+   - O algoritmo lida com essa condição através do laço de retentativas delimitado a **3 tentativas**: na iteração seguinte, como a transação T1 abortou, a Instrução 1 tentará novamente o `INSERT` e obterá sucesso imediato na gravação física.
+   - Caso uma corrida concorrente anômala persista além de 3 iterações, a aplicação não trava e não gera dados inconsistentes: devolve explicitamente um erro estruturado **`500 Internal Server Error`** com RFC 7807.
+
+3. **Preservação Canônica Absoluta:**
+   - O nome original cadastrado jamais é alterado: nenhuma cláusula `UPDATE SET name = ...` é executada.
+   - Por exemplo, se o jogo foi originalmente gravado como `"Valorant"`, tentativas posteriores de cadastro com `"valorant"` ou `"  VALORANT  "` colidirão no índice único funcional `idx_games_name_lower_unique ON games (LOWER(TRIM(name)))`, serão descartadas pelo `DO NOTHING`, e a Instrução 2 retornará com exatidão o `id` da grafia canônica `"Valorant"`.
+
+4. **Prevenção de Duplicidade em `user_games`:**
+   - Uma vez resolvido o `gameId` canônico (obtido pela inserção ou pela consulta), a relação do participante é inserida com:
+     ```sql
+     INSERT INTO user_games (user_id, game_id)
+     VALUES (:userId, :gameId)
+     ON CONFLICT (user_id, game_id) DO NOTHING;
+     ```
+   - Isso garante idempotência rigorosa e impede que um mesmo usuário acumule múltiplos vínculos com o mesmo jogo.
 
 
 ### 9.3 Snapshots Imutáveis de Participação e Privacidade (LGPD)
 
 Conforme diretriz aprovada (D10): *"Registrar o snapshot das respostas do questionário em cada nova participação: eventos antigos permanecem com respostas da época, novas participações usam respostas atualizadas."*
 
+A definição estrutural canônica desta tabela e de suas salvaguardas de integridade relacional encontra-se formalizada na **Seção 5.12 (Contratos Conceituais Futuros)**:
+
 ```sql
+-- Definição canônica referenciada a partir da Seção 5.12:
 CREATE TABLE participation_questionnaire_snapshots (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    participation_id UUID NOT NULL UNIQUE,
+    participation_id UUID NOT NULL UNIQUE REFERENCES participations(id) ON DELETE RESTRICT,
     birth_date DATE NOT NULL,
     age_at_event INTEGER NOT NULL,
     gender VARCHAR(30) NOT NULL,
@@ -1054,7 +1288,21 @@ CREATE TABLE participation_questionnaire_snapshots (
     games_snapshot JSONB NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 );
+
+-- Garantia de Imutabilidade Estrita no PostgreSQL (conforme Seção 5.12):
+CREATE OR REPLACE FUNCTION prevent_snapshot_mutation()
+RETURNS TRIGGER AS $$
+BEGIN
+  RAISE EXCEPTION 'Snapshots de participação são estritamente imutáveis para integridade histórica.';
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_snapshots_immutable
+BEFORE UPDATE OR DELETE ON participation_questionnaire_snapshots
+FOR EACH ROW EXECUTE FUNCTION prevent_snapshot_mutation();
 ```
+
+**Delimitação de Escopo:** Em estrita harmonia com a Seção 5.12, as tabelas `participations` e `participation_questionnaire_snapshots` **não serão criadas nas migrações SQL iniciais da Task 6.1**; tratam-se de previsões arquiteturais para as fases subsequentes de Eventos e Filas.
 
 **Imutabilidade:** O snapshot é inserido uma única vez no momento da confirmação de entrada no evento. Atualizações posteriores em `profiles` alteram apenas o perfil corrente do usuário, preservando intacto o histórico analítico de edições anteriores.
 
@@ -1160,8 +1408,9 @@ Autenticação por credenciais com revogação transacional da sessão anterior.
   - `429 Too Many Requests`: Mais de 5 falhas consecutivas em 15 minutos por IP/e-mail.
 
 ### 10.3 `POST /auth/refresh`
-Renovação do token de acesso com rotação estrita e detecção de reuso.
-- **Autenticação:** Nenhuma (Utiliza o refresh token no corpo).
+Renovação atômica do par de credenciais com rotação estrita e detecção imediata de reuso.
+- **Autenticação:** Nenhuma (Credencial de renovação informada no corpo).
+- **Regra de Concorrência:** O cliente HTTP deve serializar as requisições de renovação através de fila/mutex local. Duas requisições simultâneas com o mesmo token acionam o detector de reuso na segunda requisição, revogando a sessão.
 - **Request Body:**
   ```json
   {
@@ -1177,7 +1426,8 @@ Renovação do token de acesso com rotação estrita e detecção de reuso.
   }
   ```
 - **Erros RFC 7807:**
-  - `401 Unauthorized`: Token expirado, sessão revogada ou detecção de reuso.
+  - `401 Unauthorized` (`title: "Credencial de Renovação Inválida ou Expirada"`): Token inexistente, expirado ou sessão já encerrada.
+  - `401 Unauthorized` (`title: "Sessão Revogada por Violação de Segurança"`): Reuso de refresh token consumido detectado, resultando na revogação sumária de todas as credenciais da sessão (`revocation_reason = 'token_reuse'`). Caso a resposta de rede seja perdida em trânsito antes de alcançar o cliente, o usuário deverá realizar nova autenticação completa, pois o backend não persiste tokens em texto claro para devolução posterior.
 
 ### 10.4 `POST /auth/logout`
 Encerramento voluntário da sessão ativa.
@@ -1382,7 +1632,7 @@ Salva ou atualiza as respostas completas do questionário em lote (todas as 3 et
   - `birthDate`: formato `YYYY-MM-DD`, calendário civil gregoriano real, data estritamente no passado. Armazenada como tipo SQL `DATE` sem conversão de fuso horário.
   - `gender`: uma das opções `['Feminino', 'Masculino', 'Outro', 'Prefiro não informar']`. Se `'Outro'`, `otherGender` é obrigatório (1 a 100 caracteres). Se diferente de `'Outro'`, `otherGender` deve ser nulo.
   - `education`: uma das opções `['Fundamental', 'Médio', 'Superior', 'Pós-graduação', 'Prefiro não informar']`.
-  - `selectedGames`: array com ao menos 1 elemento (strings com 1 a 100 caracteres). Os jogos são inseridos ou vinculados via CTE atômica sem modificar nomes canônicos existentes.
+  - `selectedGames`: array com ao menos 1 elemento (strings com 1 a 100 caracteres). Os jogos são inseridos ou vinculados via algoritmo concorrente em SQL separado sem modificar nomes canônicos existentes.
   - `marketKnowledge`: uma das opções `['Sim, conheço.', 'Conheço um pouco.', 'Não conheço.']`.
   - `marketInterest`: uma das opções `['Sim, tenho interesse.', 'Talvez — quero conhecer melhor.', 'Não tenho interesse.']`.
 - **Response `200 OK`:**
@@ -1427,9 +1677,17 @@ Consulta o catálogo de jogos disponíveis para autocompletar na Etapa 2, com su
 ### 10.14 Endpoints Administrativos e de Segundo Fator (2FA/TOTP)
 
 #### 10.14.1 `POST /auth/2fa/setup`
-Inicia o onboarding de 2FA gerando o segredo base32 cifrado, URL do QR Code e 10 Backup Codes de uso único.
+Inicia o onboarding de 2FA gerando o segredo base32 cifrado, URL do QR Code e 10 Backup Codes de uso único. Exige obrigatoriamente a apresentação da autorização de ativação independente.
 - **Autenticação:** Bearer `tempToken` (emitido no login para contas com papel `admin` ainda não configuradas).
 - **Headers:** `Authorization: Bearer <tempToken>`
+- **Request Body:**
+  ```json
+  {
+    "activationToken": "act_sec_9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c..."
+  }
+  ```
+- **Validações:**
+  - `activationToken`: string de uso único obrigatória, emitida exclusivamente via procedimento CLI de bootstrap ou por outro Admin ativo via canal controlado out-of-band.
 - **Response `200 OK`:**
   ```json
   {
@@ -1450,7 +1708,8 @@ Inicia o onboarding de 2FA gerando o segredo base32 cifrado, URL do QR Code e 10
   }
   ```
 - **Erros RFC 7807:**
-  - `401 Unauthorized` / `403 Forbidden` (`title: "Desafio 2FA Inválido"`): Token provisório ausente, expirado (> 5 min) ou com escopo inválido.
+  - `401 Unauthorized` (`title: "Desafio 2FA Inválido"`): Token provisório ausente, expirado (> 5 min) ou com escopo inválido.
+  - `403 Forbidden` (`title: "Autorização de Ativação Inválida"`): `activationToken` ausente, incorreto, já consumido, revogado ou expirado. Impede que a posse exclusiva de senha viabilize a ativação do 2FA.
 
 #### 10.14.2 `POST /auth/2fa/verify`
 Valida o código TOTP de 6 dígitos ou backup code contra o desafio temporário, ativando as credenciais e emitindo a sessão autorizada de Admin.
@@ -1483,7 +1742,7 @@ Valida o código TOTP de 6 dígitos ou backup code contra o desafio temporário,
   - `403 Forbidden`: Desafio temporário expirado.
 
 #### 10.14.3 `POST /admin/roles/grant`
-Concede permissão de `staff` (vinculada obrigatoriamente a um `eventId`) ou `admin` (global) para uma conta existente.
+Concede permissão de `staff` (vinculada obrigatoriamente a um `eventId`) ou `admin` (global) para uma conta existente. Caso promova a `admin`, emite e retorna a autorização de ativação de TOTP para entrega por canal seguro out-of-band.
 - **Autenticação:** Bearer AccessToken com papel `admin` e `admin_2fa_verified: true`.
 - **Headers:** `Authorization: Bearer <accessToken>`
 - **Request Body:**
@@ -1499,11 +1758,20 @@ Concede permissão de `staff` (vinculada obrigatoriamente a um `eventId`) ou `ad
   - `email`: e-mail de conta previamente cadastrada e **com e-mail confirmado** (`email_verified_at IS NOT NULL`). Rejeição imediata se não verificado.
   - `role`: `'staff'` ou `'admin'`. Se `'staff'`, `eventId` é obrigatório; se `'admin'`, `eventId` deve ser nulo.
   - `reason`: justificativa textual obrigatória (10 a 500 caracteres).
-- **Response `200 OK`:**
+- **Response `200 OK` (Quando role = 'staff'):**
   ```json
   {
     "message": "Papel concedido com sucesso.",
     "roleAssignmentId": "7f8e9d0a-1b2c-3d4e-5f6a-7b8c9d0e1f2a"
+  }
+  ```
+- **Response `200 OK` (Quando role = 'admin'):**
+  ```json
+  {
+    "message": "Papel concedido com sucesso. Autorização de ativação de 2FA gerada para entrega controlada.",
+    "roleAssignmentId": "7f8e9d0a-1b2c-3d4e-5f6a-7b8c9d0e1f2a",
+    "activationToken": "act_sec_9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c...",
+    "activationTokenExpiresAt": "2026-10-16T15:00:00.000Z"
   }
   ```
 - **Erros RFC 7807:**
@@ -1534,7 +1802,7 @@ Revoga papel ativo de um usuário com efeito imediato na requisição seguinte e
   - `404 Not Found`: Vínculo de papel não encontrado ou já revogado.
 
 #### 10.14.5 `POST /admin/users/:id/reset-totp`
-Procedimento excepcional de recuperação de 2FA de uma conta Admin, autorizado exclusivamente por **outro Administrador com 2FA ativo**.
+Procedimento excepcional de recuperação de 2FA de uma conta Admin, autorizado exclusivamente por **outro Administrador com 2FA ativo**. Invalida credenciais anteriores, revoga sessões e emite uma nova autorização de ativação de uso único para entrega por canal seguro out-of-band.
 - **Autenticação:** Bearer AccessToken com papel `admin` e `admin_2fa_verified: true`. O executor **não pode ser o próprio alvo** (`req.user.id !== req.params.id`).
 - **Headers:** `Authorization: Bearer <accessToken>`
 - **Request Body:**
@@ -1547,7 +1815,9 @@ Procedimento excepcional de recuperação de 2FA de uma conta Admin, autorizado 
 - **Response `200 OK`:**
   ```json
   {
-    "message": "Credenciais 2FA redefinidas e sessões revogadas com sucesso. O administrador deverá reconfigurar o TOTP no próximo login."
+    "message": "Credenciais 2FA redefinidas e sessões revogadas com sucesso. Entregue a nova autorização de ativação ao administrador por canal controlado.",
+    "activationToken": "act_sec_3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a...",
+    "activationTokenExpiresAt": "2026-10-16T15:00:00.000Z"
   }
   ```
 - **Erros RFC 7807:**
@@ -1726,15 +1996,15 @@ npm run test:e2e       # Ponta a ponta
 3. **ORM & Migrações:** Drizzle ORM com driver `pg` e migrações SQL versionadas via Drizzle Kit.
 4. **Perfis & Permissões:** Três perfis (Participante, Staff por evento, Admin global); permissões cumulativas; Staff e Admin exigem e-mail verificado; revogação com efeitos imediatos verificados no banco.
 5. **Autenticação:** Login por e-mail e senha (mínimo de 8 caracteres, sem obrigatoriedade de maiúsculas/símbolos, bloqueio de senhas comuns).
-6. **Sessões e Linhagem:** Access token de 15 minutos; sessão máxima de 30 dias (renovação não prolonga o teto); exatamente uma sessão ativa por conta garantida por constraint no banco (`idx_sessions_single_active_per_user`); rotação de refresh tokens com histórico para detecção de reuso.
+6. **Sessões e Linhagem:** Access token de 15 minutos; sessão máxima de 30 dias (renovação não prolonga o teto); exatamente uma sessão ativa por conta garantida por constraint no banco (`idx_sessions_single_active_per_user`); rotação atômica de refresh tokens com detecção imediata de reuso e revogação da sessão (`token_reuse`), serialização obrigatória no cliente e descarte de tolerâncias temporais arbitrárias ou heurísticas de IP/User-Agent.
 7. **Recuperação de Senha:** Link com token único válido por 30 minutos; rate limit de 1 a cada 2 min e 5 por hora; execução atômica em transação ACID que revoga todas as sessões; respostas opacas.
-8. **Questionário e Cadastro:** Cadastro cria conta válida de imediato; questionário pode permanecer pendente; `GET /profile/questionnaire` retorna `200 OK` com `hasCompleted: false` quando incompleto; salvamento em lote em `PUT /profile/questionnaire`; jogos deduplicados sem alteração do nome canônico existente.
-9. **Administração & 2FA:** Admin exige 2FA por TOTP (RFC 6238) e backup codes; bootstrap do primeiro Admin via CLI com auditoria atribuída ao sistema (`actor_id = NULL`); recuperação de TOTP autorizada exclusivamente por outro Admin com 2FA ativo.
+8. **Questionário e Cadastro:** Cadastro cria conta válida de imediato; questionário pode permanecer pendente; `GET /profile/questionnaire` retorna `200 OK` com `hasCompleted: false` quando incompleto; salvamento em lote em `PUT /profile/questionnaire`; catálogo de jogos deduplicado com algoritmo concorrente em comandos SQL separados sob `READ COMMITTED` e preservação canônica.
+9. **Administração & 2FA:** Admin exige 2FA por TOTP (RFC 6238) e backup codes; primeiro cadastro de TOTP exige autorização de ativação de finalidade específica independente da senha e do login (entregue out-of-band via CLI bootstrap ou outro Admin ativo); bootstrap do primeiro Admin via CLI com auditoria atribuída ao sistema (`actor_id = NULL`); recuperação de TOTP autorizada exclusivamente por outro Admin com 2FA ativo.
 
 ### 13.2 Decisões Técnicas Propostas pelo Kaled
 1. **Algoritmo de Hash:** Adoção de **Argon2id** (`@node-rs/argon2`) com parâmetros OWASP (64 MB de memória, 3 iterações, 4 threads), com fallback para bcrypt (cost 12) caso haja restrição severa de memória.
 2. **Estratégia de Validação Imediata de Sessão:** Inclusão do `sid` (Session ID) no payload do JWT e checagem indexada na tabela `sessions` (< 1ms), dispensando o custo operacional de manter Redis em infraestrutura gratuita.
-3. **Deduplicação de Jogos via CTE Atômica:** Inserção idempotente com `DO NOTHING` e busca unificada do nome canônico existente, preservando a grafia original do catálogo.
+3. **Deduplicação de Jogos via Algoritmo Multi-Instrução Concorrente:** Inserção com `ON CONFLICT DO NOTHING RETURNING id` seguida de `SELECT` independente sob `READ COMMITTED` e política delimitada de retentativas para tratar corridas transitórias, garantindo visibilidade e preservando a grafia canônica original.
 4. **Provedor de E-mail Transacional:** Adoção do **Resend** pelo SDK limpo e cota gratuita suficiente para suportar as fases iniciais.
 5. **Armazenamento Móvel:** Utilização do `expo-secure-store` para proteção de credenciais no Keychain (iOS) e Keystore (Android).
 6. **Rate Limiting Eficiente no Monólito:** Aplicação de rate limiting duplo (por conta com e-mail normalizado e por IP) via storage em memória do `@nestjs/throttler`, garantindo proteção sem custo operacional ou necessidade prematura de Redis.
