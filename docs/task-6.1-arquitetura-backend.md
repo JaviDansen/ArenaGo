@@ -21,7 +21,7 @@ Principais diretrizes consolidadas nesta revisão técnica:
 4. **Sessão Única por Conta:** Garantida não apenas na lógica da aplicação, mas imposta a nível de banco de dados via índice único condicional no PostgreSQL (`idx_sessions_single_active_per_user`), com controle transacional via `SELECT ... FOR UPDATE` no login e validação por chave primária de sessão (`sid`) em cada requisição protegida.
 5. **Recuperação de Senha Atômica:** Fluxo transacional estrito que consome o token, atualiza o hash Argon2id, invalida tokens anteriores e revoga todas as sessões ativas da conta em uma única transação ACID.
 6. **Conexão Segura TLS:** Configuração rigorosa de conexão com PostgreSQL/Neon com verificação estrita de certificados (`rejectUnauthorized: true`), eliminando vulnerabilidades a ataques Man-in-the-Middle (MITM).
-7. **Autenticação Administrativa e 2FA/TOTP com Autorização Independente:** Segundo fator obrigatório (RFC 6238 e backup codes) para administração. O primeiro cadastro de TOTF exige autorização de ativação de finalidade específica independente da senha e do `tempToken` de login, emitida por procedimento CLI restrito (`CLI_BOOTSTRAP`) para o primeiro Admin ou por outro Admin com TOTP válido para promoções subsequentes, entregue por canal controlado out-of-band. Nenhuma sessão privilegiada é concedida antes da ativação válida do TOTP.
+7. **Autenticação Administrativa e 2FA/TOTP com Autorização Independente:** Segundo fator obrigatório (RFC 6238 e backup codes) para administração. O primeiro cadastro de TOTP exige autorização de ativação de finalidade específica independente da senha e do `tempToken` de login, emitida por procedimento CLI restrito (`CLI_BOOTSTRAP`) para o primeiro Admin ou por outro Admin com TOTP válido para promoções subsequentes, entregue por canal controlado out-of-band. Configurações incompletas por falha de rede podem ser invalidadas e reiniciadas exclusivamente mediante nova autorização independente (via CLI para o primeiro Admin restrita a contas com TOTP pendente; via outro Admin para os demais). Nenhuma sessão privilegiada é concedida antes da ativação válida do TOTP.
 8. **Padronização de Erros e Contratos:** Conformidade formal com a **RFC 7807** (`application/problem+json`) e detalhamento completo de payloads de entrada, saída, códigos HTTP e validações.
 
 ---
@@ -368,6 +368,7 @@ erDiagram
         uuid user_id FK,UK
         text secret_encrypted
         boolean is_verified
+        timestamp_tz verified_at
         timestamp_tz created_at
         timestamp_tz updated_at
     }
@@ -559,7 +560,7 @@ Trilha de auditoria imutável para concessões, revogações de privilégios e c
   - `id`: `UUID PRIMARY KEY DEFAULT gen_random_uuid()`
   - `actor_id`: `UUID NULL REFERENCES users(id)` (Quem executou a ação; `NULL` estrito quando disparado pelo sistema/CLI de bootstrap)
   - `target_user_id`: `UUID NOT NULL REFERENCES users(id)` (Conta que recebeu ou perdeu o papel / recebeu autorização)
-  - `action`: `VARCHAR(35) NOT NULL` (Valores: `'GRANT'`, `'REVOKE'`, `'CLI_BOOTSTRAP'`, `'TOTP_ACTIVATION_ISSUED'`, `'TOTP_ACTIVATION_CONSUMED'`, `'TOTP_ACTIVATION_REVOKED'`)
+  - `action`: `VARCHAR(35) NOT NULL` (Valores: `'GRANT'`, `'REVOKE'`, `'CLI_BOOTSTRAP'`, `'TOTP_ACTIVATION_ISSUED'`, `'TOTP_ACTIVATION_CONSUMED'`, `'TOTP_ACTIVATION_REISSUED'`, `'TOTP_SETUP_ABORTED'`, `'TOTP_ACTIVATION_REVOKED'`)
   - `role`: `VARCHAR(30) NOT NULL` (ex.: `'admin'`, `'staff'`, ou `'system'` no caso de ciclo de tokens)
   - `event_id`: `UUID NULL`
   - `reason`: `TEXT NULL`
@@ -572,7 +573,8 @@ Estrutura para 2FA obrigatório de administradores e gestão segura de ativaçã
   - `id`: `UUID PRIMARY KEY DEFAULT gen_random_uuid()`
   - `user_id`: `UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE`
   - `secret_encrypted`: `TEXT NOT NULL` (Segredo base32 cifrado com AES-256-GCM)
-  - `is_verified`: `BOOLEAN NOT NULL DEFAULT false` (marcado como `true` apenas após validação do primeiro código TOTP no onboarding)
+  - `is_verified`: `BOOLEAN NOT NULL DEFAULT false` (Diferenciação estrita de segurança: `false` indica configuração pendente em onboarding, **sem qualquer privilégio administrativo**; `true` indica TOTP efetivamente ativado após a primeira validação matemática válida do código de 6 dígitos)
+  - `verified_at`: `TIMESTAMP WITH TIME ZONE NULL` (preenchido no exato instante da primeira validação com sucesso do código no app)
   - `created_at`: `TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()`
   - `updated_at`: `TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()`
 - **`user_backup_codes`:**
@@ -582,14 +584,14 @@ Estrutura para 2FA obrigatório de administradores e gestão segura de ativaçã
   - `used_at`: `TIMESTAMP WITH TIME ZONE NULL`
   - `created_at`: `TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()`
 - **`totp_activation_tokens`:**
-  Autorizações de ativação de finalidade específica para o primeiro setup de TOTP de um Admin. Impede categoricamente que a posse exclusiva de senha ou `tempToken` de login permita a um atacante configurar seu próprio autenticador.
+  Autorizações de ativação de finalidade específica para o setup de TOTP de um Admin. Impede categoricamente que a posse exclusiva de senha ou `tempToken` de login permita a um atacante configurar seu próprio autenticador.
   - `id`: `UUID PRIMARY KEY DEFAULT gen_random_uuid()`
   - `user_id`: `UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE`
   - `token_hash`: `VARCHAR(64) NOT NULL UNIQUE` (hash SHA-256 da autorização criptográfica)
   - `issued_by`: `UUID NULL REFERENCES users(id)` (`NULL` estrito quando emitida via procedimento CLI de bootstrap)
   - `expires_at`: `TIMESTAMP WITH TIME ZONE NOT NULL` (validade curta e estrita, ex.: 30 minutos)
   - `used_at`: `TIMESTAMP WITH TIME ZONE NULL` (marcado no momento do setup; garante uso único)
-  - `revoked_at`: `TIMESTAMP WITH TIME ZONE NULL` (preenchido em caso de cancelamento da promoção ou redefinição)
+  - `revoked_at`: `TIMESTAMP WITH TIME ZONE NULL` (preenchido em caso de substituição, reemissão por setup incompleto, cancelamento de promoção ou reset)
   - `created_at`: `TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()`
   - **Índices & Restrições:**
     - `CREATE UNIQUE INDEX idx_totp_activation_tokens_hash ON totp_activation_tokens (token_hash);`
@@ -1007,7 +1009,29 @@ Para garantir que não haja brechas de auto-promoção e manter a fidelidade da 
    - `reason`: Justificativa informada no comando CLI.
 5. Gera uma **autorização de ativação de TOTP** de finalidade específica (`totp_activation_tokens`), de uso único e com validade estrita de 30 minutos, registrando o hash SHA-256 no banco e auditando com `action = 'TOTP_ACTIVATION_ISSUED'` e `actor_id = NULL`.
 6. O token de ativação em texto claro é exibido **exclusivamente na saída protegida do terminal CLI do servidor**, sem ser salvo em texto claro e sem transitar por APIs públicas.
-7. **Regra de Continuidade Operacional:** Antes de eventos reais com público, **ao menos dois administradores distintos** deverão estar ativos, com e-mail verificado e 2FA configurado.
+7. **Recuperação de Bootstrap Incompleto do Primeiro Admin (Setup de TOTP Pendente):**
+   Caso ocorra perda de conexão ou falha de rede antes da validação final do código em `/auth/2fa/verify`, a autorização original terá sido consumida, restando uma credencial com `is_verified = false`. Como ainda não existe outro Admin no sistema para autorizar a recuperação:
+   - O operador executa o comando de reemissão no terminal seguro do servidor:
+     ```bash
+     npm run cli:reissue-bootstrap-activation -- --email admin@arenago.com.br --reason "Setup inicial incompleto por falha de conectividade"
+     ```
+   - **Trava de Segurança Inviolável (Proibição de Bypass para Admin Já Ativado):**
+     O comando CLI consulta atomicamente o banco de dados antes de qualquer alteração:
+     ```sql
+     SELECT c.is_verified
+     FROM user_roles r
+     JOIN users u ON u.id = r.user_id
+     LEFT JOIN user_totp_credentials c ON c.user_id = u.id
+     WHERE u.email = :normalizedEmail AND r.role = 'admin' AND r.revoked_at IS NULL;
+     ```
+     - Se `c.is_verified = true`: o comando CLI **ABORTA IMEDIATAMENTE com erro fatal**, recusando-se a intervir. É terminantemente proibido utilizar o comando CLI para redefinir credenciais de contas que já tenham concluído a ativação do 2FA. Para contas com 2FA já ativado, preservam-se integralmente as regras já aprovadas de recuperação exclusiva entre administradores (Seção 8.4, Passo 7).
+     - Se `c.is_verified = false` (ou inexistente): a CLI constata que se trata de uma configuração pendente e incompleta. Executa então a transação ACID de reinício seguro:
+       1. Descarta o segredo não verificado anterior: `DELETE FROM user_totp_credentials WHERE user_id = :userId AND is_verified = false;`
+       2. Descarta códigos de backup pendentes não utilizados: `DELETE FROM user_backup_codes WHERE user_id = :userId AND used_at IS NULL;`
+       3. Revoga autorizações de ativação anteriores: `UPDATE totp_activation_tokens SET revoked_at = NOW() WHERE user_id = :userId AND revoked_at IS NULL;`
+       4. Gera uma nova autorização de ativação de uso único (30 min) e a exibe no terminal seguro.
+       5. Registra auditoria: `action = 'TOTP_ACTIVATION_REISSUED'`, `actor_id = NULL`.
+8. **Regra de Continuidade Operacional:** Antes de eventos reais com público, **ao menos dois administradores distintos** deverão estar ativos, com e-mail verificado e 2FA configurado.
 
 ### 8.4 Autenticação Administrativa de Dois Fatores (2FA via TOTP)
 
@@ -1044,17 +1068,25 @@ sequenceDiagram
         API->>DB: Salva segredo cifrado AES-256-GCM (is_verified = false) e hashes dos backup codes
         API->>DB: COMMIT
         API-->>Admin: 200 OK { qrCodeUrl, secret, backupCodes }
-        Admin->>API: POST /auth/2fa/verify (Bearer tempToken, { code: "123456" })
-        API->>API: Valida código matemático TOTP RFC 6238
-        API->>DB: UPDATE user_totp_credentials SET is_verified = true WHERE user_id = :userId
+        
+        alt Falha de Rede ANTES da confirmação (segredo perdido)
+            Note over Admin,API: Setup Pendente e Incompleto (is_verified = false)
+            Note over Admin,API: Nova autorização independente necessária (CLI se 1º Admin / outro Admin)
+        else Confirmação bem-sucedida
+            Admin->>API: POST /auth/2fa/verify (Bearer tempToken, { code: "123456" })
+            API->>API: Valida código matemático TOTP RFC 6238
+            API->>DB: UPDATE user_totp_credentials SET is_verified = true, verified_at = NOW() WHERE user_id = :userId
+            API->>DB: Executa transação de criação de sessão autorizada (sessão única)
+            API->>API: Emite tokens finais autorizados (claims: 'roles: ["admin"]', 'admin_2fa_verified: true', sid)
+            API-->>Admin: 200 OK { accessToken (15m), refreshToken (30d), user }
+        end
     else Admin já possui TOTP configurado (isTotpConfigured = true)
         Admin->>API: POST /auth/2fa/verify (Bearer tempToken, { code: "123456" ou "XXXX-XXXX" })
         API->>API: Valida código TOTP de 6 dígitos ou consome Backup Code
+        API->>DB: Executa transação de criação de sessão autorizada (sessão única)
+        API->>API: Emite tokens finais autorizados (claims: 'roles: ["admin"]', 'admin_2fa_verified: true', sid)
+        API-->>Admin: 200 OK { accessToken (15m), refreshToken (30d), user }
     end
-
-    API->>DB: Executa transação de criação de sessão autorizada (sessão única)
-    API->>API: Emite tokens finais autorizados (claims: 'roles: ["admin"]', 'admin_2fa_verified: true', sid)
-    API-->>Admin: 200 OK { accessToken (15m), refreshToken (30d), user }
 ```
 
 **Detalhamento Técnico das Etapas do Fluxo Administrativo:**
@@ -1081,11 +1113,12 @@ sequenceDiagram
      - **Validade Temporal Restrita:** Expiração curta (30 minutos a partir da emissão).
      - **Uso Único (Single-Use):** Marcada como consumida atomicamente (`used_at = NOW()`) no primeiro uso.
      - **Independência da Senha:** Impossível de ser obtida apenas com credenciais de login ou `tempToken`.
-     - **Auditoria Completa:** Emissão, consumo e eventual revogação são registrados na tabela `role_audit_logs`.
+     - **Auditoria Completa:** Emissão, consumo, reemissão e eventual revogação são registrados na tabela `role_audit_logs`.
    - **Mecanismos Autorizados de Emissão:**
      - **Primeiro Administrador:** Emitida via procedimento CLI restrito no console da infraestrutura (`CLI_BOOTSTRAP`), com `actor_id = NULL`.
      - **Administradores Promovidos Subsequentemente:** Emitida exclusivamente quando outro Administrador autenticado com TOTP válido executa `POST /admin/roles/grant` concedendo o papel `admin`, ou por procedimento operacional restrito e formalmente auditado.
-     - **Recuperação por Perda de Aparelho:** Emitida na resposta da rota administrativa `POST /admin/users/:id/reset-totp`, executada por outro Admin com TOTP verificado.
+     - **Recuperação de Setup Incompleto:** Emitida via CLI para o 1º Admin (enquanto `is_verified = false`) ou via `POST /admin/users/:id/reissue-activation` por outro Admin ativo para os demais.
+     - **Recuperação por Perda de Aparelho Ativado:** Emitida na resposta da rota administrativa `POST /admin/users/:id/reset-totp`, executada por outro Admin com TOTP verificado.
    - **Entrega por Canal Controlado:** A autorização de ativação é devolvida na resposta administrativa interna (ou na tela da CLI) para entrega segura out-of-band (ex.: presencialmente, via mensageiro corporativo criptografado ou e-mail corporativo restrito), jamais trafegando pelo fluxo público de login.
 
 3. **Configuração Inicial do TOTP (`POST /auth/2fa/setup`):**
@@ -1103,10 +1136,15 @@ sequenceDiagram
    - Gera o segredo base32, cifra com **AES-256-GCM** (usando a chave `TOTP_ENCRYPTION_KEY`), salva na tabela `user_totp_credentials` com **`is_verified = false`** e grava os hashes SHA-256 dos 10 códigos de backup na tabela `user_backup_codes`.
    - Retorna a URL canônica `otpauth://totp/...`, o segredo e a lista de backup codes.
 
-4. **Verificação do Segundo Fator e Emissão da Sessão Autorizada:**
+4. **Verificação do Segundo Fator e Ativação Definitiva:**
    - Em `POST /auth/2fa/verify`, o Admin envia o primeiro código de 6 dígitos gerado em seu app autenticador.
    - O backend valida a assinatura matemática RFC 6238 (tolerância de drift de ±1 passo de 30s).
-   - Somente após validação bem-sucedida do código, o backend atualiza `UPDATE user_totp_credentials SET is_verified = true WHERE user_id = :userId`.
+   - Somente após validação bem-sucedida do código, o backend atualiza:
+     ```sql
+     UPDATE user_totp_credentials
+     SET is_verified = true, verified_at = NOW(), updated_at = NOW()
+     WHERE user_id = :userId;
+     ```
    - **Garantia de Não-Privilégio Prévio:** Em nenhuma hipótese é emitida sessão privilegiada antes da verificação válida do TOTP.
    - Executa a transação atômica de criação de sessão única (`sessions` e `refresh_tokens`) e emite o Access Token administrativo final contendo as claims privilegiadas:
      ```json
@@ -1121,15 +1159,45 @@ sequenceDiagram
      }
      ```
 
-5. **Renovação e Revogação da Sessão Administrativa:**
+5. **Tratamento de Falhas de Rede e Recuperação de Configuração Inicial Incompleta (Setup Pendente vs Ativado):**
+
+   O sistema diferencia formalmente dois estados de credencial de segundo fator:
+   - **Configuração Pendente (`is_verified = false`):** O segredo cifrado foi gravado em `user_totp_credentials` por uma chamada anterior a `/auth/2fa/setup`, mas o usuário ainda **não confirmou com sucesso o primeiro código**. A conta permanece sem qualquer privilégio administrativo ativo.
+   - **TOTP Efetivamente Ativado (`is_verified = true`):** O código de 6 dígitos gerado pelo aplicativo autenticador foi validado matematicamente com sucesso, preenchendo `verified_at`.
+
+   O comportamento do sistema diante de falhas de conectividade obedece a regras determinísticas:
+
+   - **Cenário A: Falha de rede ANTES da confirmação (durante `POST /auth/2fa/setup`):**
+     - O backend processou a chamada, marcou a autorização como consumida (`used_at = NOW()`), persistiu o segredo com `is_verified = false`, mas o pacote de resposta foi perdido antes de atingir o Admin.
+     - **Inviabilidade de Reenvio de Segredo:** Como os segredos em texto claro e URLs de QR Code são transitórios em memória e jamais persistidos de forma recuperável (apenas a cifra AES-256-GCM reside no banco), e como o backend não pode atestar se a resposta foi interceptada por terceiros, é arquiteturalmente proibido reenviar segredos em texto claro gerados anteriormente.
+     - **Situação da Conta:** O `activationToken` anterior foi consumido (`used_at IS NOT NULL`). A conta permanece com `is_verified = false`. O Admin não possui o segredo para chamar `/auth/2fa/verify`.
+     - **Impossibilidade de Reinício por Senha:** Senha ou `tempToken` de login são categoricamente insuficientes para reiniciar a configuração ou emitir nova autorização de ativação.
+     - **Procedimento Seguro de Reinício:**
+       1. **Primeiro Administrador:** Como ainda não há outro administrador ativo no sistema, o operador da infraestrutura aciona `npm run cli:reissue-bootstrap-activation` no console seguro do servidor. O comando valida atomicamente no banco que `user_totp_credentials.is_verified = false`. Se for `true`, aborta imediatamente com erro fatal (preservando o Requisito 9). Se for `false`, descarta o segredo não confirmado anterior (`DELETE FROM user_totp_credentials WHERE user_id = :id AND is_verified = false`), invalida tokens anteriores (`revoked_at = NOW()`), emite uma nova autorização de ativação (30 min) e registra em auditoria `action = 'TOTP_ACTIVATION_REISSUED'`.
+       2. **Admins Promovidos Posteriormente:** A reemissão depende obrigatoriamente de **outro Administrador com 2FA ativo** chamando `POST /admin/users/:id/reissue-activation` (ou do procedimento operacional restrito de enrollment). O endpoint valida que `is_verified = false` (rejeita com `409 Conflict` se `is_verified = true`), descarta a tentativa pendente anterior e devolve a nova autorização de ativação para entrega por canal seguro out-of-band.
+       3. **Prevenção de Corridas e Ativações Múltiplas:** A invalidação atômica e exclusão física da credencial pendente anterior garante que qualquer tentativa tardia de ativação do segredo órfão falhe imediatamente no banco com erro de chave inexistente.
+
+   - **Cenário B: Falha de rede APÓS a confirmação (durante `POST /auth/2fa/verify`):**
+     - O Admin já cadastrou a chave em seu app autenticador com sucesso e enviou o código de 6 dígitos. O backend validou o código, atualizou `user_totp_credentials SET is_verified = true, verified_at = NOW()`, criou a sessão, mas a resposta contendo `accessToken` e `refreshToken` caiu no trajeto de volta.
+     - **Situação da Conta:** O TOTP já está plenamente ativado (`is_verified = true`). O aplicativo autenticador do Admin já está perfeitamente sincronizado e gerando códigos válidos a cada 30 segundos.
+     - **Procedimento de Recuperação:**
+       - **Não há necessidade de reconfiguração nem de intervenção administrativa ou CLI.**
+       - O Admin simplesmente realiza novo login em `POST /auth/login` com e-mail e senha.
+       - O backend constata que a conta possui papel `admin` e que `is_verified = true`.
+       - Emite um novo `tempToken` de desafio com payload `isTotpConfigured: true`.
+       - O Admin abre seu app autenticador, consulta o código de 6 dígitos corrente e envia para `POST /auth/2fa/verify`.
+       - O backend valida o código e emite uma nova sessão autorizada com o par de tokens (`accessToken` e `refreshToken`).
+
+6. **Renovação e Revogação da Sessão Administrativa:**
    - **Renovação Segura (`POST /auth/refresh`):** Ao receber requisição de renovação para uma sessão administrativa, o serviço de sessão não confia cegamente nas claims do token anterior: consulta em tempo real a tabela `user_roles` para garantir que o papel `admin` permanece ativo (`revoked_at IS NULL`) e valida se `user_totp_credentials.is_verified = true`. Caso o papel de Admin tenha sido revogado por outro administrador durante o período da sessão, o novo Access Token emitido não recebe a claim `roles: ["admin"]` nem `admin_2fa_verified: true`, rebaixando o acesso imediatamente.
    - **Revogação da Sessão:** O encerramento voluntário (`POST /auth/logout`) ou administrativo preenche `sessions.revoked_at = NOW()` e invalida os refresh tokens vinculados. Em virtude da checagem em tempo real de `sid` executada pelo `JwtAuthGuard`, a sessão perde a validade no exato milissegundo da revogação.
 
-6. **Recuperação de TOTP Perdido (Autorização Exclusiva por Outro Admin):**
-   - Caso um administrador extravie o dispositivo autenticador e não disponha de códigos de backup, a recuperação técnica depende mandatoriamente de autorização expressa de **outro Administrador com 2FA ativo**.
+7. **Recuperação de TOTP Perdido para Admin com 2FA Já Ativado (`POST /admin/users/:id/reset-totp`):**
+   - Caso um administrador cujo TOTP já estava ativado (`is_verified = true`) extravie seu dispositivo e não disponha de códigos de backup, a recuperação técnica depende mandatoriamente de autorização expressa de **outro Administrador com 2FA ativo**.
+   - **Proibição Estrita de CLI:** O procedimento CLI de bootstrap é expressamente bloqueado para contas com `is_verified = true`, não podendo ser utilizado como porta dos fundos de recuperação.
    - O administrador executor chama `POST /admin/users/:id/reset-totp` enviando justificativa circunstanciada obrigatória.
    - A operação executa em transação ACID:
-     1. Deleta/invalida o segredo em `user_totp_credentials` da conta-alvo (`is_verified = false`).
+     1. Deleta/invalida o segredo em `user_totp_credentials` da conta-alvo.
      2. Deleta todos os códigos de backup remanescentes em `user_backup_codes`.
      3. Revoga compulsoriamente todas as sessões ativas da conta-alvo (`revocation_reason = 'admin_totp_reset'`).
      4. Revoga autorizações de ativação anteriores não consumidas (`UPDATE totp_activation_tokens SET revoked_at = NOW() WHERE user_id = :targetUserId AND used_at IS NULL;`).
@@ -1137,7 +1205,7 @@ sequenceDiagram
      6. Registra evento detalhado na tabela `role_audit_logs` contendo o `actor_id` do administrador que aprovou a redefinição, o `target_user_id` e o texto da justificativa.
    - A nova autorização de ativação é devolvida ao administrador executor para entrega segura out-of-band ao administrador solicitante. No próximo login, o administrador redefinido utiliza essa nova autorização para configurar seu novo dispositivo em `POST /auth/2fa/setup`.
 
-6. **Bootstrap do Primeiro Admin e Auditoria Fidedigna:**
+8. **Bootstrap Inicial do Primeiro Admin e Auditoria Fidedigna:**
    - O primeiro administrador da infraestrutura é provisionado via comando seguro no console do servidor (`npm run cli:promote-admin`).
    - A auditoria gerada em `role_audit_logs` registra estritamente `actor_id = NULL` e `action = 'CLI_BOOTSTRAP'`. Isso documenta formalmente a origem de infraestrutura da operação, sem imputar falsamente à conta promovida a responsabilidade de ter concedido privilégios a si mesma.
 
@@ -1688,6 +1756,17 @@ Inicia o onboarding de 2FA gerando o segredo base32 cifrado, URL do QR Code e 10
   ```
 - **Validações:**
   - `activationToken`: string de uso único obrigatória, emitida exclusivamente via procedimento CLI de bootstrap ou por outro Admin ativo via canal controlado out-of-band.
+- **Comportamento Transacional e Estado Pendente:**
+  - Valida e consome a autorização atomicamente (`UPDATE totp_activation_tokens SET used_at = NOW() WHERE token_hash = sha256(activationToken) AND used_at IS NULL AND revoked_at IS NULL;`).
+  - Grava o segredo cifrado com AES-256-GCM em `user_totp_credentials` com **`is_verified = false`** e `verified_at = NULL`. A conta permanece **estritamente sem qualquer acesso a rotas administrativas**.
+  - Retorna o segredo em texto claro e o QR Code. O segredo em texto claro e o QR Code residem apenas temporariamente na memória volátil da requisição e **jamais são persistidos de forma recuperável**.
+- **Comportamento em Falha de Rede (Setup Incompleto):**
+  - Caso ocorra interrupção de conectividade antes que a resposta com o segredo atinja o cliente, o Admin não possuirá o segredo para chamar `/auth/2fa/verify`, e o `activationToken` já terá sido consumido.
+  - Por imperativo de segurança (segredo não recuperável e prevenção contra interceptação), o backend **não realiza reenvio de segredos**.
+  - A posse exclusiva de senha ou de novo `tempToken` é **categoricamente insuficiente** para reiniciar o setup ou forçar nova autorização.
+  - O reinício seguro exige **nova autorização independente**, que invalida o segredo pendente órfão:
+    - Para o **1º Admin** (sem outro admin ativo): executado via CLI no console do servidor (`npm run cli:reissue-bootstrap-activation`), exclusivamente enquanto `is_verified = false`.
+    - Para **Admins posteriores**: emitido via `POST /admin/users/:id/reissue-activation` por outro Administrador autenticado com 2FA.
 - **Response `200 OK`:**
   ```json
   {
@@ -1722,6 +1801,10 @@ Valida o código TOTP de 6 dígitos ou backup code contra o desafio temporário,
   }
   ```
 - **Validações:** `code`: string com 6 dígitos numéricos (TOTP RFC 6238) ou 9 caracteres no formato `XXXX-XXXX` (Backup Code).
+- **Ativação Definitiva:** Atualiza atomicamente `user_totp_credentials SET is_verified = true, verified_at = NOW() WHERE user_id = :userId;`. Apenas a partir desse instante a conta passa a ter TOTP ativado e permissão para operar o painel administrativo.
+- **Comportamento em Falha de Rede Após a Confirmação:**
+  - Se a resposta contendo os tokens JWT for perdida após a confirmação no banco, o TOTP **já está ativado** (`is_verified = true`) e o aplicativo autenticador do usuário já possui a chave configurada.
+  - Não há necessidade de reconfiguração ou intervenção de terceiros: o Admin apenas efetua novo login (`POST /auth/login`) com senha e responde ao desafio de 2FA gerado apresentando o código corrente de 6 dígitos em `POST /auth/2fa/verify`.
 - **Response `200 OK`:**
   ```json
   {
@@ -1802,7 +1885,7 @@ Revoga papel ativo de um usuário com efeito imediato na requisição seguinte e
   - `404 Not Found`: Vínculo de papel não encontrado ou já revogado.
 
 #### 10.14.5 `POST /admin/users/:id/reset-totp`
-Procedimento excepcional de recuperação de 2FA de uma conta Admin, autorizado exclusivamente por **outro Administrador com 2FA ativo**. Invalida credenciais anteriores, revoga sessões e emite uma nova autorização de ativação de uso único para entrega por canal seguro out-of-band.
+Procedimento excepcional de recuperação de 2FA de uma conta Admin cujo TOTP já estava ativado (`is_verified = true`), autorizado exclusivamente por **outro Administrador com 2FA ativo**. Invalida credenciais anteriores, revoga sessões e emite uma nova autorização de ativação de uso único para entrega por canal seguro out-of-band.
 - **Autenticação:** Bearer AccessToken com papel `admin` e `admin_2fa_verified: true`. O executor **não pode ser o próprio alvo** (`req.user.id !== req.params.id`).
 - **Headers:** `Authorization: Bearer <accessToken>`
 - **Request Body:**
@@ -1824,6 +1907,41 @@ Procedimento excepcional de recuperação de 2FA de uma conta Admin, autorizado 
   - `400 Bad Request` (`title: "Operação Inválida"`): Tentativa de auto-redefinição (`actor_id === target_user_id`), alvo sem papel Admin, ou justificativa insuficiente.
   - `403 Forbidden`: Requisitante sem 2FA verificado.
   - `404 Not Found`: Usuário alvo não encontrado.
+
+#### 10.14.6 `POST /admin/users/:id/reissue-activation`
+Reemissão controlada de autorização de ativação de TOTP para um Administrador promovido cujo cadastramento inicial esteja **incompleto ou pendente** (`is_verified = false`), decorrente de perda de conectividade antes da confirmação ou expiração do token anterior.
+- **Autenticação:** Bearer AccessToken com papel `admin` e `admin_2fa_verified: true`. O executor **não pode ser o próprio alvo** (`req.user.id !== req.params.id`).
+- **Headers:** `Authorization: Bearer <accessToken>`
+- **Request Body:**
+  ```json
+  {
+    "reason": "Falha de conectividade do administrador durante a exibição inicial do QR Code."
+  }
+  ```
+- **Validações:**
+  - `id`: identificador UUID do usuário com papel `admin`.
+  - `reason`: justificativa circunstanciada obrigatória (10 a 500 caracteres).
+  - **Trava de Segurança Estrita:** O backend verifica atomicamente se o usuário alvo já concluiu a ativação do TOTP (`is_verified = true`). Caso positivo, a requisição é **rejeitada com `409 Conflict`**, impedindo que este endpoint seja utilizado para contornar o procedimento formal de reset de TOTP ativo (`POST /admin/users/:id/reset-totp`).
+- **Comportamento Transacional:**
+  1. Adquire lock pessimista no usuário alvo (`SELECT id FROM users WHERE id = :id FOR UPDATE;`).
+  2. Valida existência de credencial TOTP. Se `is_verified = true`, lança exceção com status 409.
+  3. Deleta registros de configuração pendente órfãos: `DELETE FROM user_totp_credentials WHERE user_id = :id AND is_verified = false;` e `DELETE FROM user_backup_codes WHERE user_id = :id AND EXISTS (SELECT 1 FROM user_totp_credentials WHERE user_id = :id AND is_verified = false);`.
+  4. Revoga autorizações de ativação anteriores: `UPDATE totp_activation_tokens SET revoked_at = NOW() WHERE user_id = :id AND used_at IS NULL AND revoked_at IS NULL;`.
+  5. Emite nova autorização de ativação de finalidade específica (validade de 30 minutos, uso único, hash SHA-256).
+  6. Registra trilha de auditoria em `role_audit_logs` com `action = 'TOTP_ACTIVATION_REISSUED'`, `actor_id = req.user.id`, `target_user_id = :id` e a justificativa fornecida.
+- **Response `200 OK`:**
+  ```json
+  {
+    "message": "Nova autorização de ativação emitida com sucesso para reinício da configuração pendente. Entregue por canal controlado out-of-band.",
+    "activationToken": "act_sec_8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e...",
+    "activationTokenExpiresAt": "2026-10-16T15:30:00.000Z"
+  }
+  ```
+- **Erros RFC 7807:**
+  - `400 Bad Request` (`title: "Operação Inválida"`): Auto-reemissão (`actor_id === target_user_id`), alvo sem papel Admin, ou justificativa insuficiente.
+  - `403 Forbidden` (`title: "Acesso Negado"`): Requisitante sem 2FA verificado.
+  - `404 Not Found` (`title: "Usuário Não Encontrado"`): Usuário inexistente.
+  - `409 Conflict` (`title: "TOTP Já Ativado"`): O usuário alvo já possui 2FA ativado e confirmado (`is_verified = true`). Não é permitido reiniciar via reemissão simples; deve-se utilizar `POST /admin/users/:id/reset-totp`.
 
 
 ---
@@ -1984,6 +2102,10 @@ npm run start:dev
 npm run test           # Unitários
 npm run test:integration # Integração com banco real
 npm run test:e2e       # Ponta a ponta
+
+# Procedimentos Operacionais e de Linha de Comando (CLI)
+npm run cli:promote-admin                 # Provisionamento de bootstrap do 1º Admin (actor_id = NULL)
+npm run cli:reissue-bootstrap-activation  # Reemissão segura de autorização de ativação (exclusivo para 1º Admin com setup pendente)
 ```
 
 ---
@@ -1999,7 +2121,7 @@ npm run test:e2e       # Ponta a ponta
 6. **Sessões e Linhagem:** Access token de 15 minutos; sessão máxima de 30 dias (renovação não prolonga o teto); exatamente uma sessão ativa por conta garantida por constraint no banco (`idx_sessions_single_active_per_user`); rotação atômica de refresh tokens com detecção imediata de reuso e revogação da sessão (`token_reuse`), serialização obrigatória no cliente e descarte de tolerâncias temporais arbitrárias ou heurísticas de IP/User-Agent.
 7. **Recuperação de Senha:** Link com token único válido por 30 minutos; rate limit de 1 a cada 2 min e 5 por hora; execução atômica em transação ACID que revoga todas as sessões; respostas opacas.
 8. **Questionário e Cadastro:** Cadastro cria conta válida de imediato; questionário pode permanecer pendente; `GET /profile/questionnaire` retorna `200 OK` com `hasCompleted: false` quando incompleto; salvamento em lote em `PUT /profile/questionnaire`; catálogo de jogos deduplicado com algoritmo concorrente em comandos SQL separados sob `READ COMMITTED` e preservação canônica.
-9. **Administração & 2FA:** Admin exige 2FA por TOTP (RFC 6238) e backup codes; primeiro cadastro de TOTP exige autorização de ativação de finalidade específica independente da senha e do login (entregue out-of-band via CLI bootstrap ou outro Admin ativo); bootstrap do primeiro Admin via CLI com auditoria atribuída ao sistema (`actor_id = NULL`); recuperação de TOTP autorizada exclusivamente por outro Admin com 2FA ativo.
+9. **Administração & 2FA:** Admin exige 2FA por TOTP (RFC 6238) e backup codes; primeiro cadastro de TOTP exige autorização de ativação de finalidade específica independente da senha e do login (entregue out-of-band via CLI bootstrap ou outro Admin ativo); bootstrap do primeiro Admin via CLI com auditoria atribuída ao sistema (`actor_id = NULL`); diferenciação estrita entre TOTP pendente (`is_verified = false`, sem privilégios) e TOTP ativado (`is_verified = true`); em caso de falha de conectividade ou setup incompleto, segredos e tokens pendentes são invalidados atomicamente e reiniciados sob nova autorização independente (via `cli:reissue-bootstrap-activation` exclusivamente para o 1º Admin enquanto `is_verified = false`, ou via `POST /admin/users/:id/reissue-activation` por outro Admin ativo para posteriores); ativação definitiva somente após código confirmado; proibição absoluta de recuperação emergencial por CLI ou de reinício por simples senha para contas com TOTP já ativado (mantendo a exigência de redefinição formal por outro Admin ativo via `POST /admin/users/:id/reset-totp`).
 
 ### 13.2 Decisões Técnicas Propostas pelo Kaled
 1. **Algoritmo de Hash:** Adoção de **Argon2id** (`@node-rs/argon2`) com parâmetros OWASP (64 MB de memória, 3 iterações, 4 threads), com fallback para bcrypt (cost 12) caso haja restrição severa de memória.
