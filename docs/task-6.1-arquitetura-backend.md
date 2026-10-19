@@ -1016,21 +1016,21 @@ Para garantir que não haja brechas de auto-promoção e manter a fidelidade da 
      npm run cli:reissue-bootstrap-activation -- --email admin@arenago.com.br --reason "Setup inicial incompleto por falha de conectividade"
      ```
    - **Trava de Segurança Inviolável (Proibição de Bypass para Admin Já Ativado):**
-     O comando CLI consulta atomicamente o banco de dados antes de qualquer alteração:
+     O comando CLI executa uma única transação e usa a linha de `users` como ponto comum de serialização com setup, confirmação e reemissão administrativa. A ordem obrigatória de locks em todas essas operações é: `users` → `user_totp_credentials` → `totp_activation_tokens` → `user_backup_codes`. Primeiro resolve o `userId` pelo e-mail normalizado; então executa:
      ```sql
-     SELECT c.is_verified
-     FROM user_roles r
-     JOIN users u ON u.id = r.user_id
-     LEFT JOIN user_totp_credentials c ON c.user_id = u.id
-     WHERE u.email = :normalizedEmail AND r.role = 'admin' AND r.revoked_at IS NULL;
+     BEGIN;
+     SELECT id FROM users WHERE email = :normalizedEmail FOR UPDATE;
+     SELECT role FROM user_roles
+     WHERE user_id = :userId AND role = 'admin' AND revoked_at IS NULL;
+     SELECT id, is_verified FROM user_totp_credentials
+     WHERE user_id = :userId FOR UPDATE;
      ```
-     - Se `c.is_verified = true`: o comando CLI **ABORTA IMEDIATAMENTE com erro fatal**, recusando-se a intervir. É terminantemente proibido utilizar o comando CLI para redefinir credenciais de contas que já tenham concluído a ativação do 2FA. Para contas com 2FA já ativado, preservam-se integralmente as regras já aprovadas de recuperação exclusiva entre administradores (Seção 8.4, Passo 7).
-     - Se `c.is_verified = false` (ou inexistente): a CLI constata que se trata de uma configuração pendente e incompleta. Executa então a transação ACID de reinício seguro:
-       1. Descarta o segredo não verificado anterior: `DELETE FROM user_totp_credentials WHERE user_id = :userId AND is_verified = false;`
-       2. Descarta códigos de backup pendentes não utilizados: `DELETE FROM user_backup_codes WHERE user_id = :userId AND used_at IS NULL;`
-       3. Revoga autorizações de ativação anteriores: `UPDATE totp_activation_tokens SET revoked_at = NOW() WHERE user_id = :userId AND revoked_at IS NULL;`
-       4. Gera uma nova autorização de ativação de uso único (30 min) e a exibe no terminal seguro.
-       5. Registra auditoria: `action = 'TOTP_ACTIVATION_REISSUED'`, `actor_id = NULL`.
+     - Com a linha de `users` bloqueada, chamadas cooperantes para setup, confirmação ou reemissão da mesma conta aguardam. Se a conta não existir, não tiver papel Admin ativo, ou a credencial bloqueada tiver `is_verified = true`, a CLI executa `ROLLBACK` e aborta. A CLI nunca redefine TOTP ativado; para esse caso continua obrigatório outro Admin com TOTP ativo (Seção 8.4, Passo 7).
+     - Se a credencial não existir ou estiver pendente (`is_verified = false`), continua na mesma transação, obedecendo à ordem de locks acima:
+       1. Bloqueia as autorizações existentes por `SELECT id FROM totp_activation_tokens WHERE user_id = :userId ORDER BY id FOR UPDATE` e revoga todas as não revogadas (`revoked_at = NOW()`), inclusive autorizações já consumidas.
+       2. Exclui todos os `user_backup_codes` da conta antes de remover a credencial. O esquema vincula esses códigos à conta, não ao ID da credencial; como a credencial foi revalidada como ausente ou pendente e permanece sob lock, nenhum código de um TOTP ativado é afetado.
+       3. Exclui somente a credencial pendente bloqueada: `DELETE FROM user_totp_credentials WHERE id = :credentialId AND is_verified = false;` (omitir esta instrução se não havia credencial).
+       4. Gera uma nova autorização de ativação de uso único (30 min), registra `TOTP_ACTIVATION_REISSUED` com `actor_id = NULL` e efetua `COMMIT`; só então exibe o token no terminal seguro.
 8. **Regra de Continuidade Operacional:** Antes de eventos reais com público, **ao menos dois administradores distintos** deverão estar ativos, com e-mail verificado e 2FA configurado.
 
 ### 8.4 Autenticação Administrativa de Dois Fatores (2FA via TOTP)
@@ -1060,30 +1060,42 @@ sequenceDiagram
         end
         Admin->>API: POST /auth/2fa/setup (Bearer tempToken, { activationToken })
         API->>DB: Inicia Transação ACID
+        API->>DB: SELECT id FROM users WHERE id = :userId FOR UPDATE
+        API->>DB: SELECT id, is_verified FROM user_totp_credentials WHERE user_id = :userId FOR UPDATE
+        Note over API,DB: Rejeita com 409 se já ativado ou se já existe setup pendente
         API->>DB: SELECT * FROM totp_activation_tokens WHERE token_hash = sha256(activationToken) AND user_id = :userId FOR UPDATE
         Note over API,DB: Valida expiração, revogação e uso único
         API->>DB: UPDATE totp_activation_tokens SET used_at = NOW() WHERE id = :activationId
         API->>DB: INSERT INTO role_audit_logs (action = 'TOTP_ACTIVATION_CONSUMED', ...)
         API->>API: Gera segredo base32, QR Code e 10 Backup Codes
-        API->>DB: Salva segredo cifrado AES-256-GCM (is_verified = false) e hashes dos backup codes
+        API->>DB: Salva segredo cifrado AES-256-GCM (is_verified = false) e hashes dos backup codes; retorna credential.id como setupId
         API->>DB: COMMIT
-        API-->>Admin: 200 OK { qrCodeUrl, secret, backupCodes }
-        
+        API-->>Admin: 200 OK { setupId, qrCodeUrl, secret, backupCodes }
         alt Falha de Rede ANTES da confirmação (segredo perdido)
             Note over Admin,API: Setup Pendente e Incompleto (is_verified = false)
             Note over Admin,API: Nova autorização independente necessária (CLI se 1º Admin / outro Admin)
         else Confirmação bem-sucedida
             Admin->>API: POST /auth/2fa/verify (Bearer tempToken, { code: "123456" })
             API->>API: Valida código matemático TOTP RFC 6238
-            API->>DB: UPDATE user_totp_credentials SET is_verified = true, verified_at = NOW() WHERE user_id = :userId
+            API->>DB: BEGIN
+            API->>DB: SELECT id FROM users WHERE id = :userId FOR UPDATE
+            API->>DB: SELECT id, is_verified FROM user_totp_credentials WHERE id = :setupId AND user_id = :userId FOR UPDATE
+            Note over API,DB: setupId inexistente ou obsoleto retorna 409
+            API->>DB: UPDATE user_totp_credentials SET is_verified = true, verified_at = NOW() WHERE id = :setupId AND user_id = :userId AND is_verified = false
+            API->>DB: Exige exatamente uma linha atualizada; senão ROLLBACK e 409
             API->>DB: Executa transação de criação de sessão autorizada (sessão única)
+            API->>DB: COMMIT
             API->>API: Emite tokens finais autorizados (claims: 'roles: ["admin"]', 'admin_2fa_verified: true', sid)
             API-->>Admin: 200 OK { accessToken (15m), refreshToken (30d), user }
         end
     else Admin já possui TOTP configurado (isTotpConfigured = true)
         Admin->>API: POST /auth/2fa/verify (Bearer tempToken, { code: "123456" ou "XXXX-XXXX" })
+        API->>DB: BEGIN
+        API->>DB: SELECT id FROM users WHERE id = :userId FOR UPDATE
+        API->>DB: SELECT id, is_verified FROM user_totp_credentials WHERE user_id = :userId FOR UPDATE
         API->>API: Valida código TOTP de 6 dígitos ou consome Backup Code
         API->>DB: Executa transação de criação de sessão autorizada (sessão única)
+        API->>DB: COMMIT
         API->>API: Emite tokens finais autorizados (claims: 'roles: ["admin"]', 'admin_2fa_verified: true', sid)
         API-->>Admin: 200 OK { accessToken (15m), refreshToken (30d), user }
     end
@@ -1123,8 +1135,11 @@ sequenceDiagram
 
 3. **Configuração Inicial do TOTP (`POST /auth/2fa/setup`):**
    - O Admin deve apresentar simultaneamente o `tempToken` (via cabeçalho `Authorization: Bearer <tempToken>`) e a `activationToken` (no corpo da requisição).
-   - O backend executa transação ACID:
+   - O backend executa transação ACID e adquire os locks sempre na ordem comum `users` → `user_totp_credentials` → `totp_activation_tokens` → `user_backup_codes`. Primeiro bloqueia a conta e revalida seu papel e estado TOTP; rejeita `409 Conflict` se já houver TOTP ativado ou outro setup pendente. Depois bloqueia e valida a autorização:
      ```sql
+     SELECT id FROM users WHERE id = :userId FOR UPDATE;
+     SELECT id, is_verified FROM user_totp_credentials
+     WHERE user_id = :userId FOR UPDATE;
      SELECT id, user_id, expires_at, used_at, revoked_at
      FROM totp_activation_tokens
      WHERE token_hash = :hash AND user_id = :userId
@@ -1134,17 +1149,19 @@ sequenceDiagram
    - Estando válido, consome o token atomicamente: `UPDATE totp_activation_tokens SET used_at = NOW() WHERE id = :id`.
    - Registra auditoria: `INSERT INTO role_audit_logs (actor_id, target_user_id, action, role, reason) VALUES (:userId, :userId, 'TOTP_ACTIVATION_CONSUMED', 'admin', 'Ativação do primeiro setup de 2FA');`.
    - Gera o segredo base32, cifra com **AES-256-GCM** (usando a chave `TOTP_ENCRYPTION_KEY`), salva na tabela `user_totp_credentials` com **`is_verified = false`** e grava os hashes SHA-256 dos 10 códigos de backup na tabela `user_backup_codes`.
-   - Retorna a URL canônica `otpauth://totp/...`, o segredo e a lista de backup codes.
+   - Retorna a URL canônica `otpauth://totp/...`, o segredo, a lista de backup codes e o ID da credencial como `setupId`. Esse ID identifica exatamente a tentativa pendente e é obrigatório na confirmação.
 
 4. **Verificação do Segundo Fator e Ativação Definitiva:**
-   - Em `POST /auth/2fa/verify`, o Admin envia o primeiro código de 6 dígitos gerado em seu app autenticador.
+   - Na confirmação do setup inicial, `POST /auth/2fa/verify` exige `setupId` recebido na resposta de setup e o primeiro código de 6 dígitos do app autenticador.
+   - O backend abre transação, bloqueia primeiro a linha de `users` (`SELECT id FROM users WHERE id = :userId FOR UPDATE`) e depois a credencial exata (`SELECT id, is_verified FROM user_totp_credentials WHERE id = :setupId AND user_id = :userId FOR UPDATE`). Se a credencial não existir, não corresponder ao setup atual ou já estiver verificada, retorna `409 Conflict`; uma confirmação tardia não pode ativar outra tentativa.
    - O backend valida a assinatura matemática RFC 6238 (tolerância de drift de ±1 passo de 30s).
-   - Somente após validação bem-sucedida do código, o backend atualiza:
+   - Somente após validação bem-sucedida do código, o backend atualiza condicionalmente:
      ```sql
      UPDATE user_totp_credentials
      SET is_verified = true, verified_at = NOW(), updated_at = NOW()
-     WHERE user_id = :userId;
+     WHERE id = :setupId AND user_id = :userId AND is_verified = false;
      ```
+   - A transação exige exatamente uma linha atualizada; caso contrário faz `ROLLBACK` e retorna `409 Conflict`. A criação da sessão administrativa ocorre na mesma transação, após essa validação, e só é comitada junto com a ativação.
    - **Garantia de Não-Privilégio Prévio:** Em nenhuma hipótese é emitida sessão privilegiada antes da verificação válida do TOTP.
    - Executa a transação atômica de criação de sessão única (`sessions` e `refresh_tokens`) e emite o Access Token administrativo final contendo as claims privilegiadas:
      ```json
@@ -1173,9 +1190,9 @@ sequenceDiagram
      - **Situação da Conta:** O `activationToken` anterior foi consumido (`used_at IS NOT NULL`). A conta permanece com `is_verified = false`. O Admin não possui o segredo para chamar `/auth/2fa/verify`.
      - **Impossibilidade de Reinício por Senha:** Senha ou `tempToken` de login são categoricamente insuficientes para reiniciar a configuração ou emitir nova autorização de ativação.
      - **Procedimento Seguro de Reinício:**
-       1. **Primeiro Administrador:** Como ainda não há outro administrador ativo no sistema, o operador da infraestrutura aciona `npm run cli:reissue-bootstrap-activation` no console seguro do servidor. O comando valida atomicamente no banco que `user_totp_credentials.is_verified = false`. Se for `true`, aborta imediatamente com erro fatal (preservando o Requisito 9). Se for `false`, descarta o segredo não confirmado anterior (`DELETE FROM user_totp_credentials WHERE user_id = :id AND is_verified = false`), invalida tokens anteriores (`revoked_at = NOW()`), emite uma nova autorização de ativação (30 min) e registra em auditoria `action = 'TOTP_ACTIVATION_REISSUED'`.
-       2. **Admins Promovidos Posteriormente:** A reemissão depende obrigatoriamente de **outro Administrador com 2FA ativo** chamando `POST /admin/users/:id/reissue-activation` (ou do procedimento operacional restrito de enrollment). O endpoint valida que `is_verified = false` (rejeita com `409 Conflict` se `is_verified = true`), descarta a tentativa pendente anterior e devolve a nova autorização de ativação para entrega por canal seguro out-of-band.
-       3. **Prevenção de Corridas e Ativações Múltiplas:** A invalidação atômica e exclusão física da credencial pendente anterior garante que qualquer tentativa tardia de ativação do segredo órfão falhe imediatamente no banco com erro de chave inexistente.
+       1. **Primeiro Administrador:** O operador aciona `npm run cli:reissue-bootstrap-activation` no console seguro. CLI, endpoint de reemissão, `/auth/2fa/setup` e confirmação inicial `/auth/2fa/verify` usam a mesma transação e ordem de locks: linha `users`, credencial `user_totp_credentials`, autorizações `totp_activation_tokens`, códigos `user_backup_codes`. Após obter o lock de `users`, cada operação relê o papel e estado da credencial. Se `is_verified = true`, a CLI aborta; se pendente ou ausente, apaga primeiro todos os códigos de backup da conta, invalida autorizações anteriores, remove somente a credencial pendente e emite nova autorização de 30 minutos, auditando `TOTP_ACTIVATION_REISSUED`.
+       2. **Admins Promovidos Posteriormente:** A reemissão depende de **outro Administrador com 2FA ativo** chamando `POST /admin/users/:id/reissue-activation`. Usa a mesma ordem de locks e revalida `is_verified` sob o lock; se já ativado, retorna `409 Conflict`. Para setup pendente, apaga códigos de backup antes da credencial, invalida autorizações antigas e emite uma única autorização nova para entrega out-of-band.
+       3. **Confirmação tardia:** A confirmação exige o `setupId` retornado no setup. Se a reemissão venceu a disputa pelo lock, a credencial antiga foi excluída e o `setupId` não corresponde a uma linha; a confirmação retorna `409 Conflict` sem criar sessão.
 
    - **Cenário B: Falha de rede APÓS a confirmação (durante `POST /auth/2fa/verify`):**
      - O Admin já cadastrou a chave em seu app autenticador com sucesso e enviou o código de 6 dígitos. O backend validou o código, atualizou `user_totp_credentials SET is_verified = true, verified_at = NOW()`, criou a sessão, mas a resposta contendo `accessToken` e `refreshToken` caiu no trajeto de volta.
@@ -1188,6 +1205,11 @@ sequenceDiagram
        - O Admin abre seu app autenticador, consulta o código de 6 dígitos corrente e envia para `POST /auth/2fa/verify`.
        - O backend valida o código e emite uma nova sessão autorizada com o par de tokens (`accessToken` e `refreshToken`).
 
+   **Serialização e Resultado dos Cenários Concorrentes:** CLI de bootstrap, reemissão por outro Admin, `/auth/2fa/setup` e `/auth/2fa/verify` adquirem locks na mesma ordem: linha `users` do alvo; linha de `user_totp_credentials` (se existir); linhas de `totp_activation_tokens` em ordem de `id`; por fim, linhas de `user_backup_codes`. Cada operação revalida papel, `is_verified` e identidade do setup somente depois de obter o lock de `users`. Todas as alterações e auditorias pertencem à mesma transação.
+   - **Cenário A — confirmação primeiro:** a confirmação mantém o lock de `users`, valida o `setupId`, marca a credencial como verificada e comita a ativação. A reemissão que aguardava obtém o lock em seguida, relê `is_verified = true`, faz rollback e retorna `409 Conflict`; não emite autorização.
+   - **Cenário B — reemissão primeiro:** a reemissão mantém o lock, revoga autorizações antigas, apaga os códigos de backup e credencial pendentes e emite a nova autorização antes do commit. A confirmação tardia obtém o lock depois, não encontra a credencial correspondente ao `setupId` antigo, faz rollback, retorna `409 Conflict` e não cria sessão.
+   - **Cenário C — duas reemissões:** a segunda espera pelo mesmo lock de `users`. Após a primeira comitar, a segunda revalida o estado, revoga qualquer autorização ainda válida emitida pela primeira e cria outra. Ao final, somente a última autorização permanece não revogada e utilizável; há no máximo uma credencial/setup pendente por conta.
+
 6. **Renovação e Revogação da Sessão Administrativa:**
    - **Renovação Segura (`POST /auth/refresh`):** Ao receber requisição de renovação para uma sessão administrativa, o serviço de sessão não confia cegamente nas claims do token anterior: consulta em tempo real a tabela `user_roles` para garantir que o papel `admin` permanece ativo (`revoked_at IS NULL`) e valida se `user_totp_credentials.is_verified = true`. Caso o papel de Admin tenha sido revogado por outro administrador durante o período da sessão, o novo Access Token emitido não recebe a claim `roles: ["admin"]` nem `admin_2fa_verified: true`, rebaixando o acesso imediatamente.
    - **Revogação da Sessão:** O encerramento voluntário (`POST /auth/logout`) ou administrativo preenche `sessions.revoked_at = NOW()` e invalida os refresh tokens vinculados. Em virtude da checagem em tempo real de `sid` executada pelo `JwtAuthGuard`, a sessão perde a validade no exato milissegundo da revogação.
@@ -1196,7 +1218,7 @@ sequenceDiagram
    - Caso um administrador cujo TOTP já estava ativado (`is_verified = true`) extravie seu dispositivo e não disponha de códigos de backup, a recuperação técnica depende mandatoriamente de autorização expressa de **outro Administrador com 2FA ativo**.
    - **Proibição Estrita de CLI:** O procedimento CLI de bootstrap é expressamente bloqueado para contas com `is_verified = true`, não podendo ser utilizado como porta dos fundos de recuperação.
    - O administrador executor chama `POST /admin/users/:id/reset-totp` enviando justificativa circunstanciada obrigatória.
-   - A operação executa em transação ACID:
+   - A operação executa em transação ACID, bloqueando primeiro `users` e depois `user_totp_credentials`, `totp_activation_tokens` e `user_backup_codes` nessa ordem. Após obter o lock comum, revalida `is_verified = true`; esta rota não é usada para setup pendente:
      1. Deleta/invalida o segredo em `user_totp_credentials` da conta-alvo.
      2. Deleta todos os códigos de backup remanescentes em `user_backup_codes`.
      3. Revoga compulsoriamente todas as sessões ativas da conta-alvo (`revocation_reason = 'admin_totp_reset'`).
@@ -1757,8 +1779,10 @@ Inicia o onboarding de 2FA gerando o segredo base32 cifrado, URL do QR Code e 10
 - **Validações:**
   - `activationToken`: string de uso único obrigatória, emitida exclusivamente via procedimento CLI de bootstrap ou por outro Admin ativo via canal controlado out-of-band.
 - **Comportamento Transacional e Estado Pendente:**
-  - Valida e consome a autorização atomicamente (`UPDATE totp_activation_tokens SET used_at = NOW() WHERE token_hash = sha256(activationToken) AND used_at IS NULL AND revoked_at IS NULL;`).
+  - Na mesma transação, bloqueia primeiro a linha `users`, depois verifica/bloqueia a credencial TOTP, e por último bloqueia a autorização `totp_activation_tokens` (`FOR UPDATE`), seguindo a ordem comum de locks. Rejeita com `409 Conflict` se já houver uma credencial ativada ou outro setup pendente.
+  - Valida a conta e consome a autorização atomicamente (`UPDATE totp_activation_tokens SET used_at = NOW() WHERE token_hash = sha256(activationToken) AND used_at IS NULL AND revoked_at IS NULL;`).
   - Grava o segredo cifrado com AES-256-GCM em `user_totp_credentials` com **`is_verified = false`** e `verified_at = NULL`. A conta permanece **estritamente sem qualquer acesso a rotas administrativas**.
+  - Retorna o ID da nova credencial como `setupId`; a confirmação deve apresentar esse identificador.
   - Retorna o segredo em texto claro e o QR Code. O segredo em texto claro e o QR Code residem apenas temporariamente na memória volátil da requisição e **jamais são persistidos de forma recuperável**.
 - **Comportamento em Falha de Rede (Setup Incompleto):**
   - Caso ocorra interrupção de conectividade antes que a resposta com o segredo atinja o cliente, o Admin não possuirá o segredo para chamar `/auth/2fa/verify`, e o `activationToken` já terá sido consumido.
@@ -1770,6 +1794,7 @@ Inicia o onboarding de 2FA gerando o segredo base32 cifrado, URL do QR Code e 10
 - **Response `200 OK`:**
   ```json
   {
+    "setupId": "d12a34b5-6789-4abc-def0-123456789abc",
     "secret": "JBSWY3DPEHPK3PXP",
     "qrCodeUrl": "otpauth://totp/ArenaGo:admin@arenago.com.br?secret=JBSWY3DPEHPK3PXP&issuer=ArenaGo",
     "backupCodes": [
@@ -1789,6 +1814,7 @@ Inicia o onboarding de 2FA gerando o segredo base32 cifrado, URL do QR Code e 10
 - **Erros RFC 7807:**
   - `401 Unauthorized` (`title: "Desafio 2FA Inválido"`): Token provisório ausente, expirado (> 5 min) ou com escopo inválido.
   - `403 Forbidden` (`title: "Autorização de Ativação Inválida"`): `activationToken` ausente, incorreto, já consumido, revogado ou expirado. Impede que a posse exclusiva de senha viabilize a ativação do 2FA.
+  - `409 Conflict`: TOTP já ativado ou setup pendente existente; o setup pendente deve ser reiniciado pelo fluxo de reemissão autorizado.
 
 #### 10.14.2 `POST /auth/2fa/verify`
 Valida o código TOTP de 6 dígitos ou backup code contra o desafio temporário, ativando as credenciais e emitindo a sessão autorizada de Admin.
@@ -1797,11 +1823,12 @@ Valida o código TOTP de 6 dígitos ou backup code contra o desafio temporário,
 - **Request Body:**
   ```json
   {
-    "code": "583921"
+    "code": "583921",
+    "setupId": "d12a34b5-6789-4abc-def0-123456789abc"
   }
   ```
-- **Validações:** `code`: string com 6 dígitos numéricos (TOTP RFC 6238) ou 9 caracteres no formato `XXXX-XXXX` (Backup Code).
-- **Ativação Definitiva:** Atualiza atomicamente `user_totp_credentials SET is_verified = true, verified_at = NOW() WHERE user_id = :userId;`. Apenas a partir desse instante a conta passa a ter TOTP ativado e permissão para operar o painel administrativo.
+- **Validações:** No primeiro setup, `setupId` é obrigatório e `code` deve ser um TOTP de 6 dígitos RFC 6238; backup code não confirma um autenticador ainda pendente. Em logins posteriores, `setupId` é omitido e `code` pode ser TOTP ou backup code no formato `XXXX-XXXX`.
+- **Ativação Definitiva:** Na transação compartilhada, bloqueia `users` e depois a credencial identificada por `setupId`; atualiza condicionalmente `user_totp_credentials SET is_verified = true, verified_at = NOW() WHERE id = :setupId AND user_id = :userId AND is_verified = false;`. Exige exatamente uma linha atualizada, senão faz rollback e retorna `409 Conflict`. Apenas após a ativação e criação de sessão comitadas a conta pode operar o painel administrativo.
 - **Comportamento em Falha de Rede Após a Confirmação:**
   - Se a resposta contendo os tokens JWT for perdida após a confirmação no banco, o TOTP **já está ativado** (`is_verified = true`) e o aplicativo autenticador do usuário já possui a chave configurada.
   - Não há necessidade de reconfiguração ou intervenção de terceiros: o Admin apenas efetua novo login (`POST /auth/login`) com senha e responde ao desafio de 2FA gerado apresentando o código corrente de 6 dígitos em `POST /auth/2fa/verify`.
@@ -1823,6 +1850,7 @@ Valida o código TOTP de 6 dígitos ou backup code contra o desafio temporário,
 - **Erros RFC 7807:**
   - `400 Bad Request` (`title: "Código 2FA Inválido ou Já Utilizado"`): Código incorreto, fora do drift permitido de ±30s ou backup code previamente consumido.
   - `403 Forbidden`: Desafio temporário expirado.
+  - `409 Conflict` durante a confirmação do setup inicial: `setupId` ausente, obsoleto, já confirmado ou substituído por uma reemissão concorrente. No desafio de login de um TOTP já ativado, `setupId` não é enviado.
 
 #### 10.14.3 `POST /admin/roles/grant`
 Concede permissão de `staff` (vinculada obrigatoriamente a um `eventId`) ou `admin` (global) para uma conta existente. Caso promova a `admin`, emite e retorna a autorização de ativação de TOTP para entrega por canal seguro out-of-band.
@@ -1923,12 +1951,13 @@ Reemissão controlada de autorização de ativação de TOTP para um Administrad
   - `reason`: justificativa circunstanciada obrigatória (10 a 500 caracteres).
   - **Trava de Segurança Estrita:** O backend verifica atomicamente se o usuário alvo já concluiu a ativação do TOTP (`is_verified = true`). Caso positivo, a requisição é **rejeitada com `409 Conflict`**, impedindo que este endpoint seja utilizado para contornar o procedimento formal de reset de TOTP ativo (`POST /admin/users/:id/reset-totp`).
 - **Comportamento Transacional:**
-  1. Adquire lock pessimista no usuário alvo (`SELECT id FROM users WHERE id = :id FOR UPDATE;`).
-  2. Valida existência de credencial TOTP. Se `is_verified = true`, lança exceção com status 409.
-  3. Deleta registros de configuração pendente órfãos: `DELETE FROM user_totp_credentials WHERE user_id = :id AND is_verified = false;` e `DELETE FROM user_backup_codes WHERE user_id = :id AND EXISTS (SELECT 1 FROM user_totp_credentials WHERE user_id = :id AND is_verified = false);`.
-  4. Revoga autorizações de ativação anteriores: `UPDATE totp_activation_tokens SET revoked_at = NOW() WHERE user_id = :id AND used_at IS NULL AND revoked_at IS NULL;`.
-  5. Emite nova autorização de ativação de finalidade específica (validade de 30 minutos, uso único, hash SHA-256).
-  6. Registra trilha de auditoria em `role_audit_logs` com `action = 'TOTP_ACTIVATION_REISSUED'`, `actor_id = req.user.id`, `target_user_id = :id` e a justificativa fornecida.
+  1. Inicia transação e adquire os locks na ordem comum usada também por CLI, setup e confirmação: `users` → `user_totp_credentials` → `totp_activation_tokens` → `user_backup_codes`.
+  2. Bloqueia o usuário alvo (`SELECT id FROM users WHERE id = :id FOR UPDATE;`), confirma novamente que possui papel Admin ativo e então bloqueia a credencial (`SELECT id, is_verified FROM user_totp_credentials WHERE user_id = :id FOR UPDATE;`). Todas as operações que alteram ou confirmam setup devem seguir essa mesma ordem.
+  3. Revalida o estado depois dos locks. Se `is_verified = true`, executa `ROLLBACK` e retorna `409 Conflict`; este endpoint nunca substitui TOTP ativado.
+  4. Bloqueia autorizações existentes em ordem estável (`SELECT id FROM totp_activation_tokens WHERE user_id = :id ORDER BY id FOR UPDATE;`) e revoga todas as autorizações não revogadas (`UPDATE totp_activation_tokens SET revoked_at = NOW() WHERE user_id = :id AND revoked_at IS NULL;`).
+  5. Se a credencial estiver ausente ou pendente, remove **primeiro** todos os códigos de backup da conta (`DELETE FROM user_backup_codes WHERE user_id = :id;`). O esquema relaciona os códigos à conta, e a verificação sob lock assegura que não há TOTP ativado cujos códigos devam ser preservados.
+  6. Remove somente a credencial pendente (`DELETE FROM user_totp_credentials WHERE id = :credentialId AND is_verified = false;`), se existir. Se não houver credencial, não executa essa exclusão.
+  7. Emite uma autorização de ativação de finalidade específica (30 minutos, uso único, hash SHA-256), registra `TOTP_ACTIVATION_REISSUED` com `actor_id = req.user.id`, `target_user_id = :id` e justificativa, e comita a transação. A serialização na linha do usuário garante que reemissões concorrentes se sucedam; cada uma revoga a anterior, deixando somente a última autorização válida.
 - **Response `200 OK`:**
   ```json
   {
