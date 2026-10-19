@@ -1,9 +1,9 @@
-# ArenaGo — Task 6.1: Planejamento e Arquitetura Técnica do Backend
+# ArenaGo — Arquitetura Técnica do Backend: Identidade, Autenticação, Sessões, Perfil e Jogos
 
 **Versão do Documento:** 1.1
 **Data:** 16/10/2026
 **Status:** Especificação técnica consolidada e revisada após auditoria da equipe
-**Branch:** `task-6.1-planejamento-backend` (criada a partir da `develop` atualizada)
+**Origem:** Especificação elaborada na Task 6.1 — Planejamento e Arquitetura do Backend
 **Escopo:** Backend de Usuários, Autenticação, Sessões, Perfil, Questionário e Catálogo de Jogos
 
 ---
@@ -608,7 +608,8 @@ Em estrita conformidade com o escopo delimitado da Task 6.1, as tabelas abaixo *
      - `event_id`: `UUID NOT NULL REFERENCES events(id) ON DELETE RESTRICT`
      - `status`: `VARCHAR(30) NOT NULL` (`'registered'`, `'in_queue'`, `'attending'`, `'completed'`, `'cancelled'`)
      - `created_at`: `TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()`
-   - **Restrições:** `UNIQUE (user_id, event_id)` (impede que um mesmo usuário crie registros concorrentes de participação no mesmo evento).
+   - **Reentradas:** reentradas legítimas no mesmo evento criam novas participações, cada uma com seu próprio identificador `id`, preservando o histórico anterior.
+   - **Exclusividade ativa:** a exclusividade de participação ativa deverá ser garantida pela modelagem específica de eventos e participações. Esta especificação de identidade não define uma constraint definitiva para essa regra.
 
 2. **Tabela `participation_questionnaire_snapshots` (Conceitual Futura):**
    - **PK:** `id` (`UUID PRIMARY KEY DEFAULT gen_random_uuid()`)
