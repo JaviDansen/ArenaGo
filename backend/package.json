@@ -14,6 +14,7 @@
     "lint": "eslint \"src/**/*.ts\" \"test/**/*.ts\"",
     "test": "tsx --test test/unit/*.test.ts",
     "test:integration": "tsx --test test/integration/*.test.ts",
+    "typecheck:test": "tsc --project tsconfig.test.json",
     "db:generate": "drizzle-kit generate",
     "db:check": "drizzle-kit check",
     "db:migrate": "drizzle-kit migrate",
