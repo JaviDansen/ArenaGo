@@ -13,7 +13,7 @@ if (!connectionString) {
 
 const databaseUrl = new URL(connectionString);
 const databaseName = databaseUrl.pathname.replace(/^\//, "");
-if (!["localhost", "127.0.0.1", "::1"].includes(databaseUrl.hostname) || databaseName !== "arenago_events_test") {
+if (!["localhost", "127.0.0.1", "::1", "[::1]"].includes(databaseUrl.hostname) || databaseName !== "arenago_events_test") {
   throw new Error("Os testes de Events só podem usar localhost e o banco descartável arenago_events_test.");
 }
 
@@ -23,6 +23,7 @@ const eventsService = new EventsService(database);
 
 after(async () => pool.end());
 
+// Cobre sucesso, ausência, repetição da leitura e preservação da linha no banco.
 test("EventsService.findById consulta o evento pelo UUID sem alterá-lo", async () => {
   const eventId = randomUUID();
   const accessCode = `E01-${randomUUID().slice(0, 8).toUpperCase()}`;
@@ -52,6 +53,7 @@ test("EventsService.findById consulta o evento pelo UUID sem alterá-lo", async 
     ],
   );
 
+  // UUID e código aleatórios isolam o fixture; o finally remove somente esta linha.
   try {
     const found = await eventsService.findById(eventId);
     assert.ok(found);
