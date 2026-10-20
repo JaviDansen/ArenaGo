@@ -215,5 +215,3 @@ export function validateGamesMarketStep({ marketKnowledge, marketInterest }) {
     errors,
   };
 }
-
-
