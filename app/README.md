@@ -1,66 +1,42 @@
-# ArenaGo
+# ArenaGo — Frontend
 
-ArenaGo é um aplicativo mobile em React Native com Expo para participantes dos eventos BEAST MARAGAMES. O projeto oferece um fluxo local de cadastro, perfil, entrada em eventos, participação na Arena e avaliação. As informações usadas no fluxo atual são simuladas e ficam somente em memória.
+Este diretório contém o aplicativo mobile do ArenaGo, desenvolvido com React Native e Expo. Hoje ele demonstra o fluxo do participante com dados locais; cadastro, login e operações da Arena ainda não chamam uma API.
 
 ## Estado atual
 
-O aplicativo já contém:
-
-- Tela de boas-vindas, cadastro, login e recuperação de senha provisórios.
-- Validação local de cadastro e login. O cadastro exige nome, e-mail válido, senha com pelo menos seis caracteres e confirmação; o login exige e-mail válido e senha preenchida.
-- Questionário de perfil em três etapas: dados pessoais, jogos selecionados e mercado de games.
-- Validação de data de nascimento, incluindo máscara, calendário nativo/web e rejeição de datas incompletas, inválidas ou futuras.
-- Entrada manual em eventos pelos códigos simulados `FILA` e `LIVRE`, sem distinção entre maiúsculas e minúsculas.
-- Confirmação de entrada com participação em `waiting` para eventos com fila externa e `active` para eventos sem fila.
-- Fila externa com posição simulada, liberação, desativação simulada e saída.
-- Filas individuais das experiências, chamada simulada, saída, ausência e bloqueio de filas simultâneas.
-- Confirmação simulada do staff, que incrementa `experienceParticipations` e libera a entrada em outra experiência.
-- Finalização da participação, limpeza da fila ou experiência ativa e navegação para a avaliação.
-- Avaliação local com estrelas, comentário opcional, envio simulado e opção “Avaliar mais tarde”. Nenhuma avaliação é persistida.
-
-As ações de login, filas, staff, avaliação e os eventos são recursos de desenvolvimento. Não representam integração com serviços de produção.
-
-## Abas principais
-
-- **Início:** fluxo do participante implementado com simulações locais, incluindo cadastro/login provisórios, questionário de perfil, entrada em eventos, filas, experiências, finalização e avaliação.
-- **Eventos:** aba ainda em desenvolvimento no frontend. `EventsScreen` atualmente exibe apenas o rótulo da aba; as funcionalidades futuras não estão implementadas.
-- **Perfil:** aba ainda em desenvolvimento no frontend. `ProfileScreen` atualmente exibe apenas o rótulo da aba; as funcionalidades futuras não estão implementadas.
-
-O questionário de perfil citado no fluxo inicial é uma tela própria (`ProfileQuestionnaireScreen`) e já possui interface e validações locais. Ele não representa a aba Perfil, que permanece em desenvolvimento.
+- O cadastro valida os campos no cliente e segue para o questionário de perfil. Não cria uma conta no backend.
+- O login valida e-mail e senha localmente e permite avançar para o aplicativo; não autentica um usuário.
+- O questionário apresenta três etapas: dados pessoais, jogos e informações sobre o mercado de games.
+- A entrada manual aceita os códigos de demonstração `FILA` e `LIVRE`, sem diferenciar maiúsculas de minúsculas. `FILA` inicia uma espera simulada na fila externa; `LIVRE` entra diretamente na Arena.
+- Na Arena, o fluxo local simula filas de experiências, chamada, ausência, confirmação de atendimento e saída.
+- A avaliação permite selecionar de uma a cinco estrelas e escrever um comentário opcional. O resultado não é persistido.
 
 ## Tecnologias
 
-As dependências principais, conforme `package.json`, são:
+Versões declaradas em `package.json`:
 
-- React 19.2.3 e React Native 0.86.3.
-- Expo ~57.0.25.
-- React Navigation 7, com Native Stack e Bottom Tabs.
-- `@react-native-community/datetimepicker` para seleção de data.
-- `react-native-safe-area-context`, `react-native-screens` e `expo-status-bar`.
-- React Native Web e React DOM para execução web.
+- Expo ~57.0.25, React Native 0.86.3 e React 19.2.3.
+- React Navigation 7 para abas e navegação em pilha.
+- `@react-native-community/datetimepicker` 9.1.0 para seleção de data.
+- React Native Web 0.21.x para execução no navegador.
 
 ## Pré-requisitos
 
-- Node.js e npm instalados no Windows.
-- Expo Go em um dispositivo físico, ou um emulador Android/iOS configurado.
-- Para execução web, um navegador compatível.
-
-O projeto não fixa uma versão de Node.js neste momento. A versão do Expo e das demais bibliotecas deve ser obtida do `package.json` e do `package-lock.json`.
+- Node.js e npm instalados.
+- Expo Go em um dispositivo compatível ou um emulador configurado.
+- Para usar o modo web, um navegador compatível.
+- Para executar o alvo iOS em emulador, um ambiente Apple compatível; em outros ambientes, use um dispositivo com Expo Go quando disponível.
 
 ## Instalação e execução
 
-Todos os comandos desta seção devem ser executados na raiz do projeto Expo: `C:\DoJob\ProgramacaoMobile\app`. Se o terminal estiver em `C:\DoJob\ProgramacaoMobile`, entre nessa pasta uma vez com `cd app`; se já estiver em `C:\DoJob\ProgramacaoMobile\app`, não é necessário executar `cd app` novamente.
-
-Na raiz `app`, execute:
+Execute os comandos abaixo nesta pasta (`app/`):
 
 ```powershell
 npm.cmd ci
 npm.cmd start
 ```
 
-O comando `npm.cmd start` abre o servidor do Expo. A partir dele, o projeto pode ser aberto no Expo Go usando o QR Code ou em um emulador.
-
-Também estão disponíveis os scripts:
+Os demais scripts disponíveis em `package.json` são:
 
 ```powershell
 npm.cmd run android
@@ -68,63 +44,55 @@ npm.cmd run ios
 npm.cmd run web
 ```
 
-O script de iOS depende de um ambiente Apple compatível. No Windows, a execução mais direta é pelo Expo Go em um iPhone ou pela versão web.
+## Testes
 
-## Organização do projeto
-
-```text
-app/
-├── App.js                 # Navegação raiz e Provider da participação
-├── navigation/            # Abas principais
-├── context/               # Estado compartilhado da participação
-├── screens/               # Telas de autenticação, perfil, eventos e Arena
-├── components/            # Componentes reutilizáveis, como data de nascimento
-├── data/                  # Eventos, experiências e jogos simulados
-├── utils/                 # Validações e tratamento de datas
-└── tests/                 # Testes automatizados Node.js
-```
-
-O `ParticipationContext` mantém a participação atual em memória. Não há Context de autenticação nem armazenamento local de usuário.
-
-## Fluxo do participante
-
-1. `WelcomeScreen` encaminha para cadastro ou login.
-2. `RegisterScreen` valida os dados localmente e encaminha nome e e-mail ao `ProfileQuestionnaireScreen`. `LoginScreen` possui acesso provisório à `MainTabs` após a validação local.
-3. O questionário coleta dados pessoais, jogos e respostas sobre o mercado de games. Ao concluir, retorna para `MainTabs`.
-4. Na aba Início, o `HomeFlowScreen` escolhe `HomeScreen`, `ArenaQueueScreen` ou `ActiveArenaScreen` conforme o estado da participação.
-5. `EventEntryScreen` recebe `FILA` ou `LIVRE` e abre `EventConfirmationScreen`.
-6. A confirmação cria uma participação. Eventos `FILA` começam em `waiting`, com posição externa simulada; eventos `LIVRE` começam em `active`.
-7. Na Arena, o participante pode entrar em uma fila de experiência. Enquanto estiver em uma fila ou em uma experiência ativa, as demais filas ficam indisponíveis.
-8. A chamada simulada move a experiência para `activeExperience`. O staff simulado registra a conclusão, incrementa o contador da experiência e libera uma nova entrada.
-9. A ausência remove a experiência ativa e coloca o participante no fim simulado da fila correspondente. Sair da Arena marca a participação como `finished`, limpa estados temporários e abre a avaliação.
-10. A avaliação aceita uma nota de uma a cinco estrelas e comentário opcional. O envio e “Avaliar mais tarde” retornam à Home sem criar pendência persistente.
-
-## Dados simulados
-
-`data/mockData.js` contém os eventos `FILA` e `LIVRE`, a lista de experiências e sugestões de jogos. As posições das filas, chamadas do staff, conclusão de experiências e credenciais são simuladas no cliente. O histórico resumido de experiências usa o objeto local `experienceParticipations` dentro da participação atual.
-
-## Testes automatizados
-
-Os testes usam o test runner nativo do Node.js e não exigem dependências adicionais:
+Os testes usam o runner nativo do Node.js. Execute em `app/`:
 
 ```powershell
 npm.cmd test
 ```
 
-Esse comando também deve ser executado dentro de `C:\DoJob\ProgramacaoMobile\app`.
+Na validação mais recente deste README, o comando passou com **95 testes aprovados** e nenhum teste falhou.
 
-A suíte cobre validações, cadastro e login, datas, questionário, entrada e confirmação de eventos, fila externa, seleção da Home, exclusividade de filas, chamadas, ausências, finalização e avaliação. O estado atual do projeto possui 86 testes passando.
+## Organização
 
-## Limitações atuais
+```text
+app/
+├── App.js                  # Navegação raiz e provider de participação
+├── navigation/             # Abas principais
+├── context/                # Estado atual da participação
+├── screens/                # Autenticação, questionário, eventos e Arena
+├── components/             # Componentes reutilizáveis
+├── data/mockData.js        # Eventos, experiências, jogos e histórico simulados
+├── utils/                  # Validações e regras de datas/participação
+└── tests/                  # Testes automatizados
+```
 
-- Não existe backend, API ou autenticação real.
-- Não há banco de dados, armazenamento local ou persistência de participação e avaliação.
-- Eventos, experiências, posições e credenciais são mocks locais.
-- As filas não são compartilhadas entre participantes e não há controle centralizado de capacidade ou ordem.
-- Chamadas, confirmação do staff, ausência e desativação da fila são simulações locais.
-- Não há comunicação em tempo real, notificações ou sincronização entre dispositivos.
-- A opção “Avaliar mais tarde” não registra uma pendência recuperável.
+## Navegação e fluxos atuais
 
-## Próximos passos
+### Início
 
-Antes de transformar as simulações em funcionalidades de produção, será necessário definir o modelo de usuários, eventos, experiências, filas, participações e avaliações; estabelecer autenticação e autorização; escolher a persistência; e definir a sincronização das filas, chamadas e estados da Arena. A integração deve substituir gradualmente os mocks e estados locais por uma API, mantendo as regras de interface já cobertas pelos testes.
+A aba Início renderiza o fluxo da Home conforme a participação mantida em `ParticipationContext`:
+
+1. Sem participação, mostra a Home e permite informar um código de evento.
+2. Uma participação `waiting` mostra a fila externa simulada, com posição local e ações de liberação ou saída.
+3. Uma participação `active` mostra as experiências, suas filas simuladas e ações de chamada, ausência e confirmação de atendimento.
+4. Ao sair da Arena, o fluxo abre a avaliação. Enviar ou escolher “Avaliar mais tarde” retorna à Home.
+
+O formulário de cadastro verifica nome não vazio, formato do e-mail, senha com pelo menos seis caracteres e confirmação igual. O formulário de login verifica formato do e-mail e senha não vazia; essas verificações não confirmam credenciais com um servidor. O questionário de perfil é uma tela própria e não corresponde à aba Perfil.
+
+### Eventos
+
+`EventsScreen` exibe uma lista local de participações de exemplo, definida em `mockParticipations` dentro de `data/mockData.js`. Os cartões mostram evento, data, permanência quando há horários de entrada e saída registrados, experiências e avaliação disponível no mock. A lista não é carregada de uma conta ou API.
+
+### Perfil
+
+`ProfileScreen` atualmente exibe apenas o rótulo “Perfil”. A aba ainda não tem visualização ou edição de perfil.
+
+## Dados e estado local
+
+`data/mockData.js` contém os eventos de demonstração `FILA` e `LIVRE`, experiências, sugestões de jogos e histórico de participações. `ParticipationContext` guarda uma única participação em estado React (`useState`), sem persistência local: recarregar ou encerrar o aplicativo não restaura o estado. Chamadas da fila, posição, atendimento e avaliação são simulações do frontend.
+
+## Limitações e integração com o backend
+
+O repositório também contém uma fundação de backend NestJS/Drizzle/PostgreSQL, descrita em [`../backend/README.md`](../backend/README.md). Ela ainda não expõe endpoints funcionais de domínio, e este frontend não contém chamadas para essa API. Dados de cadastro, login, eventos, filas, experiências, histórico e avaliações não são sincronizados entre dispositivos nem persistidos no servidor. A integração deverá substituir gradualmente os mocks e o estado local quando os contratos e endpoints forem implementados.
