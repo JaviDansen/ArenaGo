@@ -1,7 +1,12 @@
 import { ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import ScreenContainer from '../components/ScreenContainer';
-import { mockParticipations } from '../data/mockData';
+import { mockEvaluations, mockParticipations } from '../data/mockData';
+import {
+  EVALUATION_SITUATIONS,
+  findEvaluationByParticipationId,
+  getEvaluationSituation,
+} from '../utils/evaluation';
 import {
   findParticipationById,
   formatParticipationDate,
@@ -23,6 +28,47 @@ function DetailRow({ label, value, muted }) {
       <Text style={muted ? styles.valueMuted : styles.value}>{value}</Text>
     </View>
   );
+}
+
+// Mensagem da seção Avaliação para cada situação informada nos dados.
+const EVALUATION_MESSAGES = {
+  [EVALUATION_SITUATIONS.PENDING]: 'Esta participação ainda não foi avaliada.',
+  [EVALUATION_SITUATIONS.EXPIRED]: 'O prazo para a primeira avaliação desta participação terminou.',
+  [EVALUATION_SITUATIONS.NOT_FINISHED]: 'A participação ainda não foi finalizada. Não há avaliação disponível.',
+  [EVALUATION_SITUATIONS.NOT_ELIGIBLE]: 'Esta participação não possui avaliação disponível.',
+  [EVALUATION_SITUATIONS.INVALID]: 'Não foi possível exibir a avaliação desta participação.',
+};
+
+function EvaluationSection({ situation, evaluation }) {
+  // Sem informação de avaliação nos dados, a seção não é exibida: não se
+  // presume elegibilidade, prazo ou estado.
+  if (situation === EVALUATION_SITUATIONS.UNAVAILABLE) {
+    return null;
+  }
+
+  if (situation === EVALUATION_SITUATIONS.EVALUATED && evaluation) {
+    return (
+      <>
+        <Text style={styles.sectionTitle}>Avaliação</Text>
+        <DetailRow label="Nota" value={`${evaluation.rating} de 5`} />
+        <Text style={styles.commentLabel}>Comentário</Text>
+        <Text style={evaluation.comment ? styles.comment : styles.infoMuted}>
+          {evaluation.comment ?? 'Sem comentário'}
+        </Text>
+      </>
+    );
+  }
+
+  // Avaliada sem um registro válido de nota: não se exibe nota inventada.
+  const key = situation === EVALUATION_SITUATIONS.EVALUATED ? EVALUATION_SITUATIONS.INVALID : situation;
+  const message = Object.prototype.hasOwnProperty.call(EVALUATION_MESSAGES, key) ? EVALUATION_MESSAGES[key] : null;
+
+  return message ? (
+    <>
+      <Text style={styles.sectionTitle}>Avaliação</Text>
+      <Text style={styles.infoMuted}>{message}</Text>
+    </>
+  ) : null;
 }
 
 function TimeRow({ label, registeredTime }) {
@@ -51,6 +97,8 @@ export default function ParticipationDetailsScreen({ route }) {
   const { entry, exit, stayDurationInMinutes } = getParticipationTimes(participation);
   const stayDuration = formatStayDuration(stayDurationInMinutes);
   const experiences = getExperienceOccurrences(participation);
+  const evaluationSituation = getEvaluationSituation(participation);
+  const evaluation = findEvaluationByParticipationId(mockEvaluations, participation.id);
 
   return (
     <ScreenContainer>
@@ -81,6 +129,8 @@ export default function ParticipationDetailsScreen({ route }) {
         ) : (
           <Text style={styles.infoMuted}>Nenhuma experiência registrada nesta participação.</Text>
         )}
+
+        <EvaluationSection situation={evaluationSituation} evaluation={evaluation} />
       </ScrollView>
     </ScreenContainer>
   );
@@ -136,6 +186,14 @@ const styles = StyleSheet.create({
   },
   experienceName: {
     fontSize: 14,
+  },
+  commentLabel: {
+    fontSize: 14,
+    marginTop: 8,
+  },
+  comment: {
+    fontSize: 14,
+    marginTop: 4,
   },
   message: {
     fontSize: 16,
