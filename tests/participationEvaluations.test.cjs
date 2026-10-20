@@ -140,11 +140,14 @@ test('3. evaluation comment is shown when present and never invented when absent
   assert.deepEqual(evaluationTexts(renderDetails(all, evaluations, evaluatedWithoutComment.id)), [
     'Avaliação',
     'Nota', '3 de 5',
-    'Comentário', 'Sem comentário',
   ]);
   for (const comment of [undefined, null, '', '   ', 42, { text: 'x' }]) {
     const record = { id: 'evaluation-x', participationId: 'participation-x', rating: 4, comment };
     assert.deepEqual({ ...evaluationUtils.findEvaluationByParticipationId([record], 'participation-x') }, { rating: 4, comment: null }, String(comment));
+    const evaluatedWithComment = finished('participation-x', { eligible: true, submitted: true, pending: false });
+    assert.deepEqual(evaluationTexts(renderDetails([evaluatedWithComment], [record], evaluatedWithComment.id)), [
+      'Avaliação', 'Nota', '4 de 5',
+    ], String(comment));
   }
   const withoutCommentProperty = { id: 'evaluation-y', participationId: 'participation-y', rating: 2 };
   assert.equal(evaluationUtils.findEvaluationByParticipationId([withoutCommentProperty], 'participation-y').comment, null);
@@ -216,7 +219,7 @@ test('8. evaluations are associated by their own participationId', () => {
   assert.equal(findEvaluationByParticipationId(duplicated, 'participation-evaluated'), null);
   assert.deepEqual(evaluationTexts(renderDetails(all, duplicated, evaluated.id)), [
     'Avaliação',
-    'Não foi possível exibir a avaliação desta participação.',
+    'Esta participação foi avaliada, mas os detalhes da avaliação estão indisponíveis.',
   ]);
 
   for (const id of [undefined, null, '', 3, {}]) {
@@ -268,7 +271,7 @@ test('9. incomplete or invalid evaluation information never breaks rendering', (
   // Avaliada pela projeção, mas sem registro válido: não exibe nota inventada.
   assert.deepEqual(evaluationTexts(renderDetails([evaluated], [], evaluated.id)), [
     'Avaliação',
-    'Não foi possível exibir a avaliação desta participação.',
+    'Esta participação foi avaliada, mas os detalhes da avaliação estão indisponíveis.',
   ]);
   // Sem informação de avaliação: a seção não aparece e a tela continua renderizando.
   const withoutInfo = { ...base, id: 'sem-informacao' };
@@ -295,7 +298,47 @@ test('10. Eventos navigation is preserved and pending items open their own parti
   ]);
   assert.equal(list.props.renderItem({ item: evaluated }).props.evaluationSituation, SITUATIONS.EVALUATED);
   assert.equal(list.props.renderItem({ item: ongoing }).props.evaluationSituation, SITUATIONS.NOT_FINISHED);
-  assert.equal(list.props.data.length, 4);
+  assert.equal(list.props.data.length, 3);
+});
+
+test('Eventos list and card render identifiable records with incomplete optional fields safely', () => {
+  const missingEvent = { id: 'participation-no-event', event: null, status: 'finished', enteredAt: null, exitedAt: null };
+  const missingName = { id: 'participation-no-name', event: {}, status: 'finished', enteredAt: 'invalid', exitedAt: null };
+  const valid = { ...pending };
+  const invalidIds = [null, undefined, {}, { id: null }, { id: '' }, { id: '   ' }, { id: 7 }];
+  const { list, navigationCalls } = renderEventsScreen([
+    ...invalidIds, missingEvent, missingName, valid, { ...valid },
+  ], evaluations);
+
+  assert.deepEqual(list.props.data.map((item) => item.id), [missingEvent.id, missingName.id, valid.id]);
+  assert.deepEqual(list.props.data.map((item) => list.props.keyExtractor(item)), [missingEvent.id, missingName.id, valid.id]);
+  assert.deepEqual(pendingCards(list).map((card) => card.props.participation.id), [valid.id]);
+  for (const item of list.props.data) {
+    const cardProps = list.props.renderItem({ item }).props;
+    const cardTexts = renderCard(cardProps.participation, cardProps.evaluationSituation);
+    assert.equal(cardTexts[0], item === valid ? event.name : 'Evento indisponível');
+    cardProps.onPress();
+  }
+  assert.deepEqual(navigationCalls.map((call) => call.params.participationId), [missingEvent.id, missingName.id, valid.id]);
+  assert.equal(renderCard(null, SITUATIONS.PENDING).length, 0);
+  assert.equal(renderCard({ event }, SITUATIONS.PENDING).length, 0);
+  assert.deepEqual(renderCard(missingEvent, SITUATIONS.UNAVAILABLE), ['Evento indisponível', 'Permanência não registrada']);
+});
+
+test('submitted projection remains evaluated when its detail record is absent, invalid or ambiguous', () => {
+  const missing = [];
+  const invalidRating = [{ id: 'invalid-rating', participationId: evaluated.id, rating: 6, comment: 'Não exibir' }];
+  const duplicated = [
+    { id: 'first', participationId: evaluated.id, rating: 5, comment: 'Não exibir' },
+    { id: 'second', participationId: evaluated.id, rating: 1, comment: 'Também não exibir' },
+  ];
+  for (const records of [missing, invalidRating, duplicated]) {
+    assert.equal(evaluationUtils.getEvaluationSituation(evaluated), SITUATIONS.EVALUATED);
+    assert.equal(renderCard(evaluated, SITUATIONS.EVALUATED).at(-1), 'Avaliada');
+    assert.deepEqual(evaluationTexts(renderDetails([evaluated], records, evaluated.id)), [
+      'Avaliação', 'Esta participação foi avaliada, mas os detalhes da avaliação estão indisponíveis.',
+    ]);
+  }
 });
 
 test('mocks show every situation consistently and link evaluations by participationId', () => {
@@ -319,6 +362,18 @@ test('mocks show every situation consistently and link evaluations by participat
   for (const participation of participations.filter((item) => evaluationUtils.getEvaluationSituation(item) === SITUATIONS.EVALUATED)) {
     assert.ok(evaluationUtils.findEvaluationByParticipationId(records, participation.id), participation.id);
     assert.equal('rating' in participation || 'comment' in participation, false, participation.id);
+  }
+  for (const participation of participations) {
+    assert.equal(participation.completedServicesCount, participation.experiences.length, participation.id);
+    const evaluation = participation.evaluation;
+    if (!evaluation) continue;
+    assert.equal(participation.status, 'finished', participation.id);
+    assert.equal(evaluation.eligible, participation.completedServicesCount > 0, participation.id);
+    if (!evaluation.eligible) {
+      assert.equal(evaluation.submitted, false, participation.id);
+      assert.equal(evaluation.pending, false, participation.id);
+      assert.equal(evaluationUtils.findEvaluationByParticipationId(records, participation.id), null, participation.id);
+    }
   }
   const comments = records.map((record) => evaluationUtils.findEvaluationByParticipationId(records, record.participationId).comment);
   assert.ok(comments.includes(null));

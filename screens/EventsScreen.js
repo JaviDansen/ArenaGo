@@ -10,7 +10,16 @@ import {
 
 export default function EventsScreen({ navigation }) {
   // Dados mockados enquanto não há integração com backend.
-  const participations = mockParticipations;
+  const seenParticipationIds = new Set();
+  const participations = (Array.isArray(mockParticipations) ? mockParticipations : []).filter((participation) => {
+    const id = participation?.id;
+    if (!participation || !Object.prototype.hasOwnProperty.call(participation, 'id')
+      || typeof id !== 'string' || id.trim() === '' || seenParticipationIds.has(id)) {
+      return false;
+    }
+    seenParticipationIds.add(id);
+    return true;
+  });
   const pendingEvaluations = getPendingEvaluationParticipations(participations);
   const hasParticipations = Array.isArray(participations) && participations.length > 0;
 

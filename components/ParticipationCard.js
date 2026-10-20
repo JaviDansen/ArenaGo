@@ -23,8 +23,16 @@ const EVALUATION_LABELS = {
  * detalhes ainda não existe).
  */
 export default function ParticipationCard({ participation, onPress, evaluationSituation }) {
+  if (!participation || !Object.prototype.hasOwnProperty.call(participation, 'id')
+    || typeof participation.id !== 'string' || participation.id.trim() === '') {
+    return null;
+  }
+
   const date = formatParticipationDate(participation.enteredAt);
   const stayDuration = formatStayDuration(getStayDurationInMinutes(participation));
+  const eventName = typeof participation.event?.name === 'string' && participation.event.name.trim() !== ''
+    ? participation.event.name
+    : 'Evento indisponível';
   const evaluationLabel = Object.prototype.hasOwnProperty.call(EVALUATION_LABELS, evaluationSituation)
     ? EVALUATION_LABELS[evaluationSituation]
     : null;
@@ -36,7 +44,7 @@ export default function ParticipationCard({ participation, onPress, evaluationSi
       disabled={!onPress}
       accessibilityRole={onPress ? 'button' : undefined}
     >
-      <Text style={styles.eventName}>{participation.event.name}</Text>
+      <Text style={styles.eventName}>{eventName}</Text>
       {date ? <Text style={styles.info}>{date}</Text> : null}
       {stayDuration ? (
         <Text style={styles.info}>Permanência: {stayDuration}</Text>

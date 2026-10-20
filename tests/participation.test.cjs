@@ -171,7 +171,8 @@ test('EventsScreen lists participations under Minhas Participações', () => {
   const { rendered, list } = renderEventsScreen(participations);
   assert.equal(rendered.type, 'ScreenContainer');
   assert.ok(nodes(rendered).some((node) => node.type === 'Text' && textOf(node) === 'Minhas Participações'));
-  assert.equal(list.props.data, participations);
+  assert.equal(list.props.data.length, participations.length);
+  assert.ok(list.props.data.every((item, index) => item === participations[index]));
   assert.equal(list.props.keyExtractor(finished), 'participation-1');
   const item = list.props.renderItem({ item: withoutExit });
   assert.equal(item.type, 'ParticipationCard');

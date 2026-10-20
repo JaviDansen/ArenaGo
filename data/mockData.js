@@ -67,6 +67,8 @@ export const mockGames = [
 //   permanência válida e ela não deve ser calculada.
 // - experiences: ocorrências realizadas, cada uma com id próprio. A mesma
 //   experiência pode aparecer mais de uma vez na mesma participação.
+// - completedServicesCount: evidência simulada de conclusões confirmadas pelo
+//   Staff; a elegibilidade continua vindo pronta em evaluation, sem cálculo aqui.
 // - evaluation: situação da avaliação como o backend a informaria
 //   ({ eligible, submitted, pending }); o aplicativo não calcula prazos nem
 //   elegibilidade. Ausente enquanto a participação não foi finalizada.
@@ -79,6 +81,7 @@ export const mockParticipations = [
       location: 'Evento de demonstração',
     },
     status: 'active',
+    completedServicesCount: 1,
     // Participação em andamento: ainda sem saída e sem avaliação disponível.
     enteredAt: '2026-10-18T14:00:00-03:00',
     exitedAt: null,
@@ -97,6 +100,7 @@ export const mockParticipations = [
       location: 'Shopping da Ilha',
     },
     status: 'finished',
+    completedServicesCount: 1,
     // Outra entrada no mesmo evento, ainda dentro do prazo e sem avaliação.
     enteredAt: '2026-09-28T18:10:00-03:00',
     exitedAt: '2026-09-28T19:00:00-03:00',
@@ -116,6 +120,7 @@ export const mockParticipations = [
       location: 'Shopping da Ilha',
     },
     status: 'finished',
+    completedServicesCount: 0,
     // Nova entrada no mesmo evento, finalizada sem experiências realizadas;
     // sem conclusão confirmada pelo Staff, não é elegível para avaliação (D03).
     enteredAt: '2026-09-28T17:30:00-03:00',
@@ -131,6 +136,7 @@ export const mockParticipations = [
       location: 'Shopping da Ilha',
     },
     status: 'finished',
+    completedServicesCount: 3,
     enteredAt: '2026-09-28T15:10:00-03:00',
     exitedAt: '2026-09-28T16:52:00-03:00',
     experiences: [
@@ -157,6 +163,7 @@ export const mockParticipations = [
       location: 'Evento de demonstração',
     },
     status: 'finished',
+    completedServicesCount: 1,
     enteredAt: '2026-08-16T14:00:00-03:00',
     exitedAt: '2026-08-16T14:45:00-03:00',
     experiences: [
@@ -176,6 +183,7 @@ export const mockParticipations = [
       location: 'Evento de demonstração',
     },
     status: 'finished',
+    completedServicesCount: 1,
     enteredAt: '2026-07-05T18:20:00-03:00',
     // Saída não registrada: a participação foi finalizada ao fim do evento.
     exitedAt: null,

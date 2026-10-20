@@ -51,17 +51,21 @@ function EvaluationSection({ situation, evaluation }) {
       <>
         <Text style={styles.sectionTitle}>Avaliação</Text>
         <DetailRow label="Nota" value={`${evaluation.rating} de 5`} />
-        <Text style={styles.commentLabel}>Comentário</Text>
-        <Text style={evaluation.comment ? styles.comment : styles.infoMuted}>
-          {evaluation.comment ?? 'Sem comentário'}
-        </Text>
+        {evaluation.comment ? (
+          <>
+            <Text style={styles.commentLabel}>Comentário</Text>
+            <Text style={styles.comment}>{evaluation.comment}</Text>
+          </>
+        ) : null}
       </>
     );
   }
 
   // Avaliada sem um registro válido de nota: não se exibe nota inventada.
   const key = situation === EVALUATION_SITUATIONS.EVALUATED ? EVALUATION_SITUATIONS.INVALID : situation;
-  const message = Object.prototype.hasOwnProperty.call(EVALUATION_MESSAGES, key) ? EVALUATION_MESSAGES[key] : null;
+  const message = situation === EVALUATION_SITUATIONS.EVALUATED
+    ? 'Esta participação foi avaliada, mas os detalhes da avaliação estão indisponíveis.'
+    : Object.prototype.hasOwnProperty.call(EVALUATION_MESSAGES, key) ? EVALUATION_MESSAGES[key] : null;
 
   return message ? (
     <>
