@@ -1,9 +1,9 @@
 # ArenaGo — Arquitetura Backend unificada e dicionário PostgreSQL
 
-**Versão:** v0.6.14 — revisão do documento efetivamente presente em `docs/`, após conclusão relatada da Task 6.2 (19/10/2026).
-**Fonte funcional prevalente:** `PLANEJAMENTO_ARENAGO.md` (v0.7.8).
-**Estado atual:** fundação NestJS/Drizzle e cinco migrações **implementadas e testadas localmente segundo relatório do Codex**. Nenhum endpoint ou service de negócio está implementado. Neon não foi criada. A Task 6.3A está **pausada por decisão expressa do responsável**.
-**Escopo desta revisão:** documentação; sem modificação ou auditoria direta de `backend/` e sem novas regras de produto.
+**Versão:** v0.6.15 — C-10 e consulta interna de eventos E01.2B (21/10/2026).
+**Fonte funcional prevalente:** `PLANEJAMENTO_ARENAGO.md` (v0.7.9).
+**Estado atual:** fundação NestJS/Drizzle e cinco migrações existentes; função TypeScript de normalização e consultas internas `EventsService.findById()`/`findByAccessCode()` implementadas. Nenhum endpoint HTTP de produto foi criado. Neon não foi criada.
+**Escopo desta revisão:** registrar C-10 e E01.2B; nenhuma migração nova.
 
 > **Legenda de evidência:** **[APROVADO]** = decisão de produto já tomada; **[IMPLEMENTADO/RELATADO]** = execução informada pelo Codex, não verificada independentemente nesta revisão; **[PROPOSTA]** = contrato/lógica de serviço ainda sem implementação; **[PENDENTE]** = decisão/validação futura. O texto do dicionário representa o **desenho-alvo** que guiou a Task 6.2; detalhes exatos do SQL são autoridade do `backend/` e das migrations versionadas, sujeitos a conferência no próprio repositório.
 
@@ -11,10 +11,10 @@
 
 | Item | Situação | Evidência/limite |
 |---|---|---|
-| Estrutura `backend/` | **[IMPLEMENTADO/RELATADO]** NestJS, TS, `pg`, Drizzle, configuração e README | Não foi anexada a este chat para leitura do código-fonte |
+| Estrutura `backend/` | NestJS, TS, `pg`, Drizzle, configuração, README e módulo Events | Código local inspecionado nesta revisão |
 | Modelo de dados | **[IMPLEMENTADO/RELATADO]** 23 tabelas, 5 migrações versionadas | Aplicadas em dois bancos locais novos pelo migrador; reexecução reconheceu o histórico |
 | SQL de regras fundamentais | **[IMPLEMENTADO/RELATADO]** trigger de código de acesso imutável em `0002`; FK circular `ALTER TABLE` em `0004`; cinco checks de perfil | Catálogo reportado: 35 FKs, 104 constraints, 65 índices, 9 parciais |
-| Verificações | `db:check`, build, lint, 1 teste unitário, 21 integrações e smoke NestJS passaram | Testes focados em DDL e restrições; nenhum fluxo funcional HTTP de produto foi testado |
+| E01.2B — normalização/consulta de eventos | Função TypeScript compartilhada, consulta Drizzle por igualdade exata, testes unitários e cenários de integração adicionados | Verificações desta revisão registradas no histórico §24; integração somente com `arenago_events_test` local confirmado |
 | APIs descritas nos capítulos 14–18 | **[PROPOSTA — NÃO IMPLEMENTADA]** | As rotas, DTOs, RFC 7807, Staff/Admin, avaliações e outros fluxos aguardam futura task |
 | Neon, hospedagem, LGPD e piloto | **[NÃO CONFIGURADO / PENDENTE]** | Não usar dados pessoais reais nem declarar prontidão de produção |
 | Commit da Task 6.2 | **[REGISTRADO LOCALMENTE]** | `4c4acbb` está no histórico da branch `develop` |
@@ -121,9 +121,11 @@
 
 `id uuid PK`; `name varchar(180) NOT NULL`; `access_code_normalized varchar(64) NOT NULL`; `timezone varchar(80) NOT NULL`; `starts_at timestamptz NOT NULL`; `official_ends_at timestamptz NOT NULL`; `operational_deadline_at timestamptz NOT NULL` (**prazo originalmente configurado/atualmente programado, antes de antecipação Admin**); `status varchar(20) NOT NULL`; `external_queue_enabled boolean NOT NULL`; `external_last_order bigint NOT NULL DEFAULT 0`; `closure_mode varchar(20) NULL`; `closure_requested_at timestamptz NULL`; `admin_deadline_at timestamptz NULL` (**novo ajuste proposto: prazo antecipado pelo Admin**); `created_at`, `updated_at timestamptz NOT NULL`.
 
-**CHECK:** `status IN ('scheduled','open','closing','closed')`; `starts_at < official_ends_at`; `official_ends_at <= operational_deadline_at <= official_ends_at + interval '1 hour'`; `external_last_order >= 0`; `access_code_normalized = upper(btrim(access_code_normalized))`; fechamento Admin coerente: ou os três campos de fechamento são nulos, ou modo e instantes são preenchidos; se `immediate`, `admin_deadline_at=closure_requested_at`; se `controlled`, `closure_requested_at < admin_deadline_at <= least(closure_requested_at+interval '1 hour', operational_deadline_at)`.
+**CHECK atualmente implementado:** status, horários, contador externo, `access_code_normalized = upper(btrim(access_code_normalized))` e coerência do fechamento Admin. Para código, esse CHECK somente exige a representação compatível com `upper(btrim(...))`; não restringe ASCII, 4–64 caracteres, posição de hífens, nem equivale ao conjunto de whitespace de `String.trim()` do JavaScript.
 
 **Índice:** `UNIQUE(access_code_normalized)` sobre **todo histórico**, sem reutilização. Eventos arquivados não são apagados fisicamente na primeira versão; se exclusão física futura for aprovada, código precisa de *tombstone*/reserva permanente. `timezone` IANA não pode ser validado apenas com `CHECK` simples: validar biblioteca/serviço. Prontidão aprovada: nome/código/horários/fuso/fila externa configurada, ≥1 experiência com estação disponível e ≥1 Staff ativo/verificado do evento, **sem exigir Staff online**.
+
+**C-10 [APROVADO] e normalização:** somente ASCII `A–Z`, `0–9` e hífen; 4–64 caracteres depois de `String.trim()`; hífens apenas entre grupos alfanuméricos, sem começo/final/consecutivos. A pesquisa ignora caixa e whitespace externo reconhecido por JavaScript `String.trim()`. Espaços internos, acentos, símbolos e demais caracteres Unicode não ASCII são inválidos. `backend/src/events/access-code.ts` valida o alfabeto antes de converter para maiúsculas e exporta `normalizeEventAccessCode()`, compartilhada pela consulta atual e pela futura criação. O `UNIQUE` preserva unicidade da chave já normalizada; trigger `0002` protege imutabilidade. O SQL atual não garante sozinho todo o formato aprovado. Uma restrição SQL adicional poderá ser avaliada após auditoria dos dados e exigirá migração incremental; **nenhuma migração foi criada agora**.
 
 **Dois cortes diferentes:** parar **entradas** em `min(official_ends_at, closure_requested_at se existir)`; parar **chamadas e conclusões** em `min(operational_deadline_at, admin_deadline_at se existir)`. Um Admin imediato cancela pendências e finaliza participações; modo controlado deixa apenas serviços de pessoas já na fila até prazo antecipado. Armazenar justificativa e alterações em `audit_logs`, inclusive valores anteriores. `status` persistido não substitui avaliação da hora/prontidão. Abertura automática a partir de `starts_at` somente quando pronto; admitir configuração completada depois do início enquanto ainda antes do corte oficial.
 
@@ -304,7 +306,7 @@ A Neon permanece sem projeto. O banco local foi de teste; esta validação não 
 
 **Sem autorização para implementar agora:** contratos REST dos capítulos 14–18; segurança de sessão/TOTP; validação dinâmica de prontidão, locks cross-table, gerenciamento de filas, fechamento automático e Admin, avaliações, recuperação do Expo e BI. Os testes DB da Task 6.2 são de banco/protocolos mínimos, não equivalem às suítes completas T/EV/ST/AV/AD/OP.
 
-**A detalhar quando o módulo correspondente for retomado:** contas Admin como jogadores (**decisão de produto pendente**), normalização única do código inclusive Unicode, calendário civil de referência para validação de nascimento, retenção da tabela de idempotência e dos IPs/user-agent, catálogo único de DTOs/erros e integração com telas atuais. As correções técnicas de modelo e campos `questionnaire_version_id NOT NULL` já foram executadas segundo relatório.
+**A detalhar quando o módulo correspondente for retomado:** contas Admin como jogadores (**decisão de produto pendente**), calendário civil de referência para validação de nascimento, retenção da tabela de idempotência e dos IPs/user-agent, catálogo único de DTOs/erros e integração com telas atuais. A decisão C-10 e a normalização da consulta estão definidas; criação de eventos deve reutilizar a função existente.
 
 **Antes do piloto real:** política e base legal LGPD, tratamento de menores, expurgo/deleção de snapshots identificáveis, anonimização/BI, retenção/auditoria/backups, dois Admins verificados com TOTP, segurança operacional, e testes E2E/dispositivos/carga. Nenhuma dessas questões é resolvida apenas por DDL.
 
@@ -665,7 +667,7 @@ O servidor registra `questionnaire_version_id`, mantém `profiles` e substitui a
 { "accessCode": " fila " }
 ```
 
-**Validação:** `accessCode` string não vazia; aplicar no servidor a normalização única aprovada (desconsiderar diferenças de maiúsculas/minúsculas e espaços externos), usando o mesmo resultado para a consulta e a unicidade histórica de `events.access_code_normalized`. `trim()` JS não corresponde integralmente a `btrim()` SQL para whitespace Unicode. **[VALIDAR]** alfabeto e limite do código, normalização canônica e testes com Unicode antes de congelar DDL/API. O código literal do exemplo é fictício e não depende de um evento realmente existente.
+**Validação [C-10 APROVADO]:** `accessCode` deve passar por `normalizeEventAccessCode()` no servidor. A função aplica `String.trim()`, exige 4–64 caracteres ASCII `A–Z`/`a–z`/`0–9` com hífens somente entre grupos e retorna maiúsculas. A mesma função deve ser usada na futura criação e na consulta. O SQL `upper(btrim(...))` continua sendo proteção parcial de forma canônica, não substitui essa validação. O código literal do exemplo é fictício e não depende de um evento realmente existente.
 
 **Exemplo de resposta `200 OK` (evento com fila externa habilitada):**
 
@@ -923,7 +925,7 @@ Não usar `404` para ausência de participação. O backend deve refletir o **ef
 | EV23 | Atualização do questionário concorre com ingresso | Snapshot corresponde a uma versão completa, sem mistura de jogos antigos e novos |
 | EV24 | Encerramento automático após uma conclusão | Avaliação pendente elegível na retomada; sem conclusão, não forçar avaliação |
 
-**Testes não executados.** Incluir cenários de diferenças de Unicode na normalização, comportamento no limite de tempo, idempotência após expurgo, conexões diferentes ao PostgreSQL e reconexão real em dispositivos móveis.
+Os testes funcionais de API/Expo deste capítulo seguem não executados. Os casos específicos de normalização C-10 e consulta interna de eventos foram adicionados na E01.2B (§24); permanecem pendentes comportamento de tempo, idempotência após expurgo e reconexão real em dispositivos móveis.
 
 ### 15.14 Pendências pontuais de integração
 
@@ -1507,7 +1509,7 @@ Corpo ilustrativo, UTC para instantes, IANA para horário local de exibição:
 
 Permitir criação antes de cadastrar experiências e conceder Staff é **necessário**: essas entidades dependem da existência do evento. O evento incompleto permanece consultável na interface Admin, mas não aceita participações. `409 ACCESS_CODE_ALREADY_USED` para código já reservado, inclusive por evento encerrado. Não expor a consulta pública como ferramenta de enumeração desnecessária.
 
-**[APROVADO] Código de ingresso imutável:** `accessCode` só pode ser informado na criação do evento e **jamais** alterado depois, inclusive antes da abertura. Seu valor normalizado deve permanecer reservado por todo o histórico dos eventos. `PATCH /admin/events/:eventId` e quaisquer outros comandos rejeitam tentativa de mudar o código; não existe rota de alteração nem tabela adicional de reserva de códigos. O índice `UNIQUE` sobre a forma normalizada do código e a preservação histórica dos eventos protegem a não reutilização. A normalização precisa ser idêntica na API e na persistência; cabe teste de Unicode/espaços externos. Excluir fisicamente o evento para liberar o código é proibido. A regra de exclusão/anônimos de dados pessoais não é uma autorização para apagar registros históricos de eventos.
+**[APROVADO] Código de ingresso imutável:** `accessCode` só pode ser informado na criação do evento e **jamais** alterado depois, inclusive antes da abertura. Seu valor normalizado deve permanecer reservado por todo o histórico dos eventos. `PATCH /admin/events/:eventId` e quaisquer outros comandos rejeitam tentativa de mudar o código; não existe rota de alteração nem tabela adicional de reserva de códigos. O índice `UNIQUE` e a preservação histórica protegem a não reutilização. A função `normalizeEventAccessCode()` é a normalização canônica do backend e deve ser compartilhada pela criação futura e pela consulta. Excluir fisicamente o evento para liberar o código é proibido. A regra de exclusão/anônimos de dados pessoais não é autorização para apagar registros históricos.
 
 ### 18.4 `GET /admin/events/:eventId/readiness` — prontidão de abertura automática
 
@@ -1557,7 +1559,7 @@ Não definir comportamento de exclusão/cancelamento do evento como sinônimo de
 
 - **Criação/edição estrutural:** transação, bloquear `events` e depois `experiences` e `stations` quando aplicável; validar relacionamento, fase/tempo após locks, e auditar somente mudança efetiva. Mudanças de Staff por `user_roles` exigem checagem atualizada e testes para evitar leituras inconsistentes durante uma concessão/revogação simultânea.
 - **Mudança de horário/fechamento Admin:** seguir exclusivamente §17.8–17.10, sem promover uma edição de DTO genérico a atalho para reabrir, ampliar prazo após corte ou mudar fila externa durante fechamento.
-- **Códigos:** mesmo `accessCode` enviado simultaneamente por dois Admins resulta em no máximo um cadastro (`UNIQUE`) e resposta previsível ao outro. `trim`/case devem ser consistentes entre TS e DB; símbolos/Unicode e tamanho máximo final são detalhes de contrato a testar, não inferir normalização Unicode perfeita de `upper(btrim())`.
+- **Códigos:** mesmo `accessCode` enviado simultaneamente por dois Admins resulta em no máximo um cadastro (`UNIQUE`) e resposta previsível ao outro. C-10 define alfabeto ASCII e 4–64 caracteres após `String.trim()`; a função TypeScript valida antes de converter para maiúsculas. `upper(btrim())` não implementa integralmente essas regras; eventual CHECK adicional exige auditoria e migração futura.
 - **Prontidão e ativação:** não persistir `is_ready` como fonte de verdade. `events.status` é observação persistida, mas o aceite efetivo usa tempo, encerramentos, configuração e permissões. Não criar um job cujo atraso autorize entrada após horário oficial.
 - **Idempotência e auditoria:** criação repetida pela mesma chave retorna resultado original sem duplicar evento/estação nem ações auditadas; chaves diferentes e mesmo código violam `UNIQUE`, não geram duas linhas.
 
@@ -1618,7 +1620,7 @@ O modelo foi construído para permitir descarte controlado de informações iden
 
 ## 19. Resolução documental anterior — código de ingresso
 
-A decisão C-10 estabelece código **único, imutável e não reutilizável** desde a criação. Segundo Task 6.2, a migração `0002` incluiu trigger versionado que bloqueia alterações. A regra de normalização consistente entre banco, backend e UI, inclusive whitespace Unicode, ainda deverá ser verificada quando a API de eventos for implementada. A unicidade do histórico depende da preservação dos eventos/códigos arquivados.
+A decisão C-10 estabelece código **único, imutável e não reutilizável** desde a criação. A migração `0002` inclui trigger de imutabilidade e índice único histórico. A regra aprovada de formato/normalização está detalhada no §2.3 e implementada para a consulta interna da E01.2B. A integração do cliente e a validação da criação de eventos continuam trabalho futuro; o CHECK SQL existente oferece proteção parcial e não substitui a função TypeScript. Uma restrição SQL completa poderá exigir migração incremental futura após auditoria dos dados.
 
 ## 20. Regras operacionais aprovadas — alterações estruturais e perda de capacidade
 
@@ -1728,6 +1730,20 @@ A fundação pode ser considerada **concluída segundo o relatório**, sem certi
 
 ### 23.3 Decisão de escopo vigente
 
-O responsável pelo ArenaGo **pausou o desenvolvimento após a fundação do backend**. A Task 6.3A (cadastro/login/refresh/logout/me) foi **proposta, mas não autorizada para execução agora**. Também não estão autorizados: mais endpoints, integração frontend, deploy/Neon ou procedimentos com dados pessoais reais.
+O responsável pelo ArenaGo definiu a E01.2B para normalização e consulta interna de eventos. A Task 6.3A (cadastro/login/refresh/logout/me) segue proposta, sem autorização registrada nesta etapa. Endpoints HTTP, integração frontend, deploy/Neon e procedimentos com dados pessoais reais continuam fora do escopo documentado aqui.
 
-**Estado desta revisão:** consolidar este documento e o Planejamento v0.7.8 em `docs/`, sem implementar endpoints ou alterar o código. Após o commit documental, aguardar nova priorização do responsável.
+**Estado após E01.2B:** função de normalização, consulta interna e testes focados registrados em §24. Este documento e o Planejamento v0.7.9 registram a decisão; endpoints HTTP continuam não implementados. Git será controlado manualmente pelo responsável.
+
+## 24. E01.2B — normalização e consulta de eventos por código
+
+`backend/src/events/access-code.ts` exporta `normalizeEventAccessCode()` e `EventAccessCodeValidationError`. A função remove whitespace externo com `String.trim()`, valida comprimento de 4–64 caracteres e padrão ASCII alfanumérico separado opcionalmente por hífens, então retorna maiúsculas. Validar antes de `toUpperCase()` evita aceitar expansões Unicode como `ß` para `SS`. A mesma função é a autoridade para consulta implementada e criação futura.
+
+`EventsService.findByAccessCode()` normaliza a entrada e usa `eq(events.accessCodeNormalized, normalizedCode)` com Drizzle. Código válido sem evento retorna `null`; entrada malformada lança erro de domínio antes da consulta. O método é interno: não adiciona Controller/rota, não grava no PostgreSQL e não verifica prontidão, horário, participação ou fila. `findById()` permanece disponível.
+
+Os testes unitários cobrem caixa, whitespace ASCII/Unicode externo reconhecido pelo `trim()`, hífens, limites de tamanho, caracteres inválidos, erro tipado e idempotência. O teste PostgreSQL cobre busca exata/lowercase/whitespace, ausência válida, rejeição de entrada inválida, preservação da linha e manutenção de `findById()`. A suíte de integração só pode ser executada quando `EVENTS_TEST_DATABASE_URL` comprovar localhost e o banco descartável `arenago_events_test`.
+
+**Validação desta revisão:** `npm.cmd run build`, `npm.cmd run lint`, `npm.cmd run typecheck:test` e `git diff --check` passaram. `npm.cmd test` não concluiu porque o ambiente lançou `uv_os_get_passwd returned ENOMEM`; portanto, a aprovação dos testes unitários permanece pendente e o comando deve ser reproduzido manualmente no PowerShell. A integração não foi executada: `EVENTS_TEST_DATABASE_URL` não estava configurada para comprovar o banco descartável.
+
+O CHECK existente `access_code_normalized = upper(btrim(access_code_normalized))`, o índice `UNIQUE` e o trigger de imutabilidade são proteções distintas e parciais: não implementam o conjunto de regras de formato C-10. Não reescrever as cinco migrações aplicadas. Uma restrição SQL mais completa poderá ser proposta depois de auditar dados e exigirá migração incremental; nenhuma migração foi criada pela E01.2B.
+
+**Histórico de versão:** v0.6.15 (21/10/2026) registra a decisão C-10 aprovada, a normalização compartilhada e consulta E01.2B, corrige afirmações antigas de pendência, distingue função TypeScript das garantias SQL, registra os resultados/limites das validações e não altera decisões históricas não relacionadas.

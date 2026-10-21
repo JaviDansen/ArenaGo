@@ -68,6 +68,16 @@ test("EventsService.findById consulta o evento pelo UUID sem alterá-lo", async 
     const repeated = await eventsService.findById(eventId);
     assert.deepEqual(repeated, found);
 
+    const byCode = await eventsService.findByAccessCode(accessCode);
+    assert.deepEqual(byCode, found);
+    assert.deepEqual(await eventsService.findByAccessCode(accessCode.toLowerCase()), found);
+    assert.deepEqual(await eventsService.findByAccessCode(`\t ${accessCode.toLowerCase()}\n`), found);
+    assert.equal(await eventsService.findByAccessCode(`MISS-${randomUUID().slice(0, 8)}`), null);
+    await assert.rejects(
+      eventsService.findByAccessCode("BAD"),
+      { name: "EventAccessCodeValidationError" },
+    );
+
     const missing = await eventsService.findById(randomUUID());
     assert.equal(missing, null);
 
