@@ -1,14 +1,14 @@
 import { FlatList, StyleSheet, Text } from 'react-native';
 
-import ParticipationCard from '../components/ParticipationCard';
-import ScreenContainer from '../components/ScreenContainer';
-import { mockParticipations } from '../data/mockData';
+import ParticipationCard from '../../components/ParticipationCard';
+import ScreenContainer from '../../components/ScreenContainer';
+import { mockParticipations } from '../../data/mockData';
 import {
   getEvaluationSituation,
   getPendingEvaluationParticipations,
-} from '../utils/evaluation';
+} from '../../utils/evaluation';
 
-export default function EventsScreen({ navigation }) {
+export default function ParticipationsScreen({ navigation }) {
   // Dados mockados enquanto não há integração com backend.
   const seenParticipationIds = new Set();
   const participations = (Array.isArray(mockParticipations) ? mockParticipations : []).filter((participation) => {

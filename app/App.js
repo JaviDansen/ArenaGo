@@ -3,13 +3,13 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 
 import { ParticipationProvider } from './context/ParticipationContext';
 import MainTabs from './navigation/MainTabs';
-import EvaluationScreen from './screens/EvaluationScreen';
-import EventConfirmationScreen from './screens/eventEntry/EventConfirmationScreen';
-import EventEntryScreen from './screens/eventEntry/EventEntryScreen';
+import EvaluationScreen from './screens/participation/EvaluationScreen';
+import EventConfirmationScreen from './screens/event-entry/EventConfirmationScreen';
+import EventEntryScreen from './screens/event-entry/EventEntryScreen';
 import ForgotPasswordScreen from './screens/auth/ForgotPasswordScreen';
 import LoginScreen from './screens/auth/LoginScreen';
-import ParticipationDetailsScreen from './screens/ParticipationDetailsScreen';
-import ProfileQuestionnaireScreen from './screens/ProfileQuestionnaireScreen';
+import ParticipationDetailsScreen from './screens/participation/ParticipationDetailsScreen';
+import ProfileQuestionnaireScreen from './screens/profile/ProfileQuestionnaireScreen';
 import RegisterScreen from './screens/auth/RegisterScreen';
 import WelcomeScreen from './screens/auth/WelcomeScreen';
 

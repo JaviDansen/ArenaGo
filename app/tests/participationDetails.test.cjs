@@ -36,11 +36,12 @@ function textOf(element) {
 }
 
 function renderDetails(participations, route) {
-  const screen = loadModule('screens/ParticipationDetailsScreen.js', (name) => {
+  const screen = loadModule('screens/participation/ParticipationDetailsScreen.js', (name) => {
     if (name === 'react-native') return reactNative;
-    if (name === '../components/ScreenContainer') return { __esModule: true, default: 'ScreenContainer' };
-    if (name === '../data/mockData') return { mockParticipations: participations };
-    if (name === '../utils/participation') return participationUtils;
+    if (name === '../../components/ScreenContainer') return { __esModule: true, default: 'ScreenContainer' };
+    if (name === '../../data/mockData') return { mockParticipations: participations };
+    if (name === '../../utils/participation') return participationUtils;
+    if (name === '../../utils/evaluation') return loadModule('utils/evaluation.js', require).exports;
     return require(name);
   });
   const rendered = renderTree(screen.exports.default({ route }));
@@ -302,7 +303,7 @@ test('details open from the root stack with a back button to the list', () => {
   });
   const screens = nodes(app.exports.default()).filter((node) => node.type === 'StackScreen');
   const details = screens.find((node) => node.props.name === 'ParticipationDetails');
-  assert.equal(details.props.component, './screens/ParticipationDetailsScreen');
+  assert.equal(details.props.component, './screens/participation/ParticipationDetailsScreen');
   assert.equal(details.props.options.headerShown, true);
   assert.notEqual(details.props.options.headerBackVisible, false);
   assert.equal(details.props.options.title, 'Detalhes da participação');
@@ -319,5 +320,5 @@ test('the bottom tabs keep Início, Eventos and Perfil without a new tab', () =>
   });
   const screens = nodes(tabs.exports.default()).filter((node) => node.type === 'TabScreen');
   assert.deepEqual(screens.map((node) => node.props.name), ['Início', 'Eventos', 'Perfil']);
-  assert.equal(screens[1].props.component, '../screens/EventsScreen');
+  assert.equal(screens[1].props.component, '../screens/participation/ParticipationsScreen');
 });

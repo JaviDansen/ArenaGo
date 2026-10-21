@@ -61,8 +61,8 @@ app/
 ├── App.js                  # Navegação raiz e provider de participação
 ├── navigation/             # Abas principais
 ├── context/                # Estado atual da participação
-├── screens/                # Autenticação, questionário, eventos e Arena
-├── components/             # Componentes reutilizáveis
+├── screens/                # Telas agrupadas por fluxo: auth, arena, event-entry, home, participation e profile
+├── components/             # Componentes reutilizáveis e compartilhados
 ├── data/mockData.js        # Eventos, experiências, jogos e histórico simulados
 ├── utils/                  # Validações e regras de datas/participação
 └── tests/                  # Testes automatizados
@@ -83,11 +83,11 @@ O formulário de cadastro verifica nome não vazio, formato do e-mail, senha com
 
 ### Eventos
 
-`EventsScreen` exibe uma lista local de participações de exemplo, definida em `mockParticipations` dentro de `data/mockData.js`. Os cartões mostram evento, data, permanência quando há horários de entrada e saída registrados, experiências e avaliação disponível no mock. A lista não é carregada de uma conta ou API.
+`ParticipationsScreen`, em `screens/participation/`, exibe uma lista local de participações de exemplo, definida em `data/mockData.js`. Os cartões mostram evento, data, permanência quando há horários de entrada e saída registrados, experiências e avaliação disponível no mock. A lista não é carregada de uma conta ou API.
 
 ### Perfil
 
-`ProfileScreen` atualmente exibe apenas o rótulo “Perfil”. A aba ainda não tem visualização ou edição de perfil.
+`ProfileScreen`, em `screens/profile/`, atualmente exibe apenas o rótulo “Perfil”. A aba ainda não tem visualização ou edição de perfil.
 
 ## Dados e estado local
 

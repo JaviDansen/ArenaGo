@@ -30,12 +30,13 @@ function textOf(element) {
   return textOf(element.props?.children);
 }
 
-function renderEventsScreen(participations) {
-  const screen = loadModule('screens/EventsScreen.js', (name) => {
+function renderParticipationsScreen(participations) {
+  const screen = loadModule('screens/participation/ParticipationsScreen.js', (name) => {
     if (name === 'react-native') return reactNative;
-    if (name === '../components/ParticipationCard') return { __esModule: true, default: 'ParticipationCard' };
-    if (name === '../components/ScreenContainer') return { __esModule: true, default: 'ScreenContainer' };
-    if (name === '../data/mockData') return { mockParticipations: participations };
+    if (name === '../../components/ParticipationCard') return { __esModule: true, default: 'ParticipationCard' };
+    if (name === '../../components/ScreenContainer') return { __esModule: true, default: 'ScreenContainer' };
+    if (name === '../../data/mockData') return { mockParticipations: participations };
+    if (name === '../../utils/evaluation') return loadModule('utils/evaluation.js', require).exports;
     return require(name);
   });
   const navigationCalls = [];
@@ -48,7 +49,7 @@ function renderEventsScreen(participations) {
 function renderParticipationCard(props) {
   const card = loadModule('components/ParticipationCard.js', (name) => {
     if (name === 'react-native') return reactNative;
-    if (name === '../utils/participation') return loadModule('utils/participation.js', require).exports;
+    if (name === '../../utils/evaluation') return loadModule('utils/evaluation.js', require).exports;
     return require(name);
   });
   return card.exports.default(props);
@@ -166,9 +167,9 @@ test('mock participations cover registered and unregistered exits', () => {
   assert.ok(participations.some((item) => item.exitedAt !== null));
 });
 
-test('EventsScreen lists participations under Minhas Participações', () => {
+test('ParticipationsScreen lists participations under Minhas Participações', () => {
   const participations = [finished, withoutExit];
-  const { rendered, list } = renderEventsScreen(participations);
+  const { rendered, list } = renderParticipationsScreen(participations);
   assert.equal(rendered.type, 'ScreenContainer');
   assert.ok(nodes(rendered).some((node) => node.type === 'Text' && textOf(node) === 'Minhas Participações'));
   assert.equal(list.props.data.length, participations.length);
@@ -182,7 +183,7 @@ test('EventsScreen lists participations under Minhas Participações', () => {
 
 test('pressing a participation card opens its details by participation ID', () => {
   const sameEventLater = Object.freeze({ ...finished, id: 'participation-3' });
-  const { list, navigationCalls } = renderEventsScreen([finished, sameEventLater]);
+  const { list, navigationCalls } = renderParticipationsScreen([finished, sameEventLater]);
   list.props.renderItem({ item: sameEventLater }).props.onPress();
   list.props.renderItem({ item: finished }).props.onPress();
   assert.deepEqual(navigationCalls, [
@@ -191,8 +192,8 @@ test('pressing a participation card opens its details by participation ID', () =
   ]);
 });
 
-test('EventsScreen shows the empty state message when there are no participations', () => {
-  const { list } = renderEventsScreen([]);
+test('ParticipationsScreen shows the empty state message when there are no participations', () => {
+  const { list } = renderParticipationsScreen([]);
   assert.deepEqual(list.props.data, []);
   assert.equal(textOf(list.props.ListEmptyComponent), 'Você ainda não possui participações em eventos.');
 });

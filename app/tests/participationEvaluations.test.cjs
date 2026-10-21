@@ -46,17 +46,17 @@ const texts = (element) => nodes(element).filter((node) => node.type === 'Text')
 function requireStub(data) {
   return (name) => {
     if (name === 'react-native') return reactNative;
-    if (name === '../components/ParticipationCard') return { __esModule: true, default: 'ParticipationCard' };
-    if (name === '../components/ScreenContainer') return { __esModule: true, default: 'ScreenContainer' };
-    if (name === '../data/mockData') return data;
-    if (name === '../utils/participation') return participationUtils;
-    if (name === '../utils/evaluation') return evaluationUtils;
+    if (name === '../../components/ParticipationCard') return { __esModule: true, default: 'ParticipationCard' };
+    if (name === '../../components/ScreenContainer') return { __esModule: true, default: 'ScreenContainer' };
+    if (name === '../../data/mockData') return data;
+    if (name === '../../utils/participation') return participationUtils;
+    if (name === '../../utils/evaluation') return evaluationUtils;
     return require(name);
   };
 }
 
-function renderEventsScreen(participations, evaluations) {
-  const screen = loadModule('screens/EventsScreen.js', requireStub({ mockParticipations: participations, mockEvaluations: evaluations }));
+function renderParticipationsScreen(participations, evaluations) {
+  const screen = loadModule('screens/participation/ParticipationsScreen.js', requireStub({ mockParticipations: participations, mockEvaluations: evaluations }));
   const navigationCalls = [];
   const navigation = { navigate: (name, params) => navigationCalls.push({ name, params: { ...params } }) };
   const rendered = screen.exports.default({ navigation });
@@ -70,7 +70,7 @@ function pendingCards(list) {
 
 function renderDetails(participations, evaluations, participationId) {
   const screen = loadModule(
-    'screens/ParticipationDetailsScreen.js',
+    'screens/participation/ParticipationDetailsScreen.js',
     requireStub({ mockParticipations: participations, mockEvaluations: evaluations }),
   );
   return texts(renderTree(screen.exports.default({ route: { params: { participationId } } })));
@@ -196,11 +196,11 @@ test('6. two participations of the same event keep independent situations', () =
 });
 
 test('7. no pending evaluations shows the empty state, and no participations keeps the Task 1 message', () => {
-  const { list } = renderEventsScreen([evaluated, expired, ongoing], evaluations);
+  const { list } = renderParticipationsScreen([evaluated, expired, ongoing], evaluations);
   assert.equal(pendingCards(list).length, 0);
   assert.ok(texts(list.props.ListHeaderComponent).includes('Você não possui avaliações pendentes.'));
 
-  const empty = renderEventsScreen([], []).list;
+  const empty = renderParticipationsScreen([], []).list;
   assert.equal(empty.props.ListHeaderComponent, null);
   assert.equal(textOf(empty.props.ListEmptyComponent), 'Você ainda não possui participações em eventos.');
 });
@@ -285,7 +285,7 @@ test('9. incomplete or invalid evaluation information never breaks rendering', (
 test('10. Eventos navigation is preserved and pending items open their own participation', () => {
   const sameIdAgain = { ...pending };
   const sameEventPending = finished('participation-pending-2', { eligible: true, submitted: false, pending: true });
-  const { list, navigationCalls } = renderEventsScreen([pending, sameIdAgain, sameEventPending, evaluated], evaluations);
+  const { list, navigationCalls } = renderParticipationsScreen([pending, sameIdAgain, sameEventPending, evaluated], evaluations);
 
   const cards = pendingCards(list);
   assert.deepEqual(cards.map((card) => card.props.participation.id), ['participation-pending', 'participation-pending-2']);
@@ -306,7 +306,7 @@ test('Eventos list and card render identifiable records with incomplete optional
   const missingName = { id: 'participation-no-name', event: {}, status: 'finished', enteredAt: 'invalid', exitedAt: null };
   const valid = { ...pending };
   const invalidIds = [null, undefined, {}, { id: null }, { id: '' }, { id: '   ' }, { id: 7 }];
-  const { list, navigationCalls } = renderEventsScreen([
+  const { list, navigationCalls } = renderParticipationsScreen([
     ...invalidIds, missingEvent, missingName, valid, { ...valid },
   ], evaluations);
 
@@ -381,7 +381,7 @@ test('mocks show every situation consistently and link evaluations by participat
 });
 
 test('Eventos history stays separate from the current participation context', () => {
-  for (const file of ['screens/EventsScreen.js', 'screens/ParticipationDetailsScreen.js', 'utils/evaluation.js', 'components/ParticipationCard.js']) {
+  for (const file of ['screens/participation/ParticipationsScreen.js', 'screens/participation/ParticipationDetailsScreen.js', 'utils/evaluation.js', 'components/ParticipationCard.js']) {
     const source = readFileSync(path.join(__dirname, '..', file), 'utf8');
     assert.equal(source.includes('ParticipationContext'), false, file);
   }

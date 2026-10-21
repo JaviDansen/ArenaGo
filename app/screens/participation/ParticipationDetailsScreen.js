@@ -1,19 +1,19 @@
 import { ScrollView, StyleSheet, Text, View } from 'react-native';
 
-import ScreenContainer from '../components/ScreenContainer';
-import { mockEvaluations, mockParticipations } from '../data/mockData';
+import ScreenContainer from '../../components/ScreenContainer';
+import { mockEvaluations, mockParticipations } from '../../data/mockData';
 import {
   EVALUATION_SITUATIONS,
   findEvaluationByParticipationId,
   getEvaluationSituation,
-} from '../utils/evaluation';
+} from '../../utils/evaluation';
 import {
   findParticipationById,
   formatParticipationDate,
   formatStayDuration,
   getExperienceOccurrences,
   getParticipationTimes,
-} from '../utils/participation';
+} from '../../utils/participation';
 
 // Texto exibido quando um horário não foi registrado ou o registro é inválido.
 const TIME_STATUS_LABELS = {
