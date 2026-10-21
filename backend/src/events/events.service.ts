@@ -1,5 +1,5 @@
 import { Inject, Injectable } from "@nestjs/common";
-import { eq } from "drizzle-orm";
+import { and, eq, isNotNull, isNull } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { DRIZZLE_DATABASE } from "../database/database.module";
 import * as schema from "../database/schema";
@@ -7,6 +7,7 @@ import { events } from "../database/schema/events.schema";
 import { normalizeEventAccessCode } from "./access-code";
 import { evaluateEventEntryWindow } from "./event-entry-window";
 import type { EventEntryWindowResult } from "./event-entry-window";
+import { buildEventOperationalCapacityResult } from "./event-operational-capacity";
 
 type EventsDatabase = NodePgDatabase<typeof schema>;
 type Event = typeof events.$inferSelect;
@@ -15,6 +16,11 @@ type Event = typeof events.$inferSelect;
 export type EventEntryWindowLookupResult =
   | { eventExists: false }
   | { eventExists: true; eventId: string; entryWindow: EventEntryWindowResult };
+
+/** Resultado da avaliação de capacidade operacional de um evento. */
+export type EventOperationalCapacityLookupResult =
+  | { eventExists: false }
+  | ({ eventExists: true; eventId: string } & ReturnType<typeof buildEventOperationalCapacityResult>);
 
 /** Fornece consultas de leitura de eventos persistidos no PostgreSQL. */
 @Injectable()
@@ -82,6 +88,56 @@ export class EventsService {
       eventExists: true,
       eventId: event.id,
       entryWindow: evaluateEventEntryWindow(event, at),
+    };
+  }
+
+  /**
+   * Verifica se o evento possui Staff apto e ao menos uma estação disponível.
+   *
+   * @param eventId UUID do evento consultado.
+   * @returns Resultado explícito de inexistência ou os dois critérios e a capacidade combinada.
+   * @remarks Staff revogado, inativo, não verificado ou vinculado a outro evento não conta.
+   * Estação precisa pertencer a uma experiência deste evento, mas pode estar ocupada: disponibilidade
+   * persistida é distinta de chamada pendente. As consultas são leituras independentes, sem snapshot
+   * transacional compartilhado; este resultado informativo não autoriza ingresso nem altera dados.
+   */
+  async evaluateOperationalCapacityByEventId(
+    eventId: string,
+  ): Promise<EventOperationalCapacityLookupResult> {
+    const event = await this.findById(eventId);
+
+    if (!event) {
+      return { eventExists: false };
+    }
+
+    const [staffRows, stationRows] = await Promise.all([
+      this.database
+        .select({ id: schema.userRoles.id })
+        .from(schema.userRoles)
+        .innerJoin(schema.users, eq(schema.userRoles.userId, schema.users.id))
+        .where(and(
+          eq(schema.userRoles.role, "staff"),
+          eq(schema.userRoles.eventId, eventId),
+          isNull(schema.userRoles.revokedAt),
+          eq(schema.users.isActive, true),
+          isNotNull(schema.users.emailVerifiedAt),
+        ))
+        .limit(1),
+      this.database
+        .select({ id: schema.stations.id })
+        .from(schema.stations)
+        .innerJoin(schema.experiences, eq(schema.stations.experienceId, schema.experiences.id))
+        .where(and(
+          eq(schema.experiences.eventId, eventId),
+          eq(schema.stations.availability, "available"),
+        ))
+        .limit(1),
+    ]);
+
+    return {
+      eventExists: true,
+      eventId: event.id,
+      ...buildEventOperationalCapacityResult(staffRows.length > 0, stationRows.length > 0),
     };
   }
 }
