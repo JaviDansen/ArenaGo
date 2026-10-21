@@ -1,6 +1,6 @@
 # ArenaGo — Arquitetura Backend unificada e dicionário PostgreSQL
 
-**Versão:** v0.6.15 — C-10 e consulta interna de eventos E01.2B (21/10/2026).
+**Versão:** v0.6.16 — correção de alinhamento C-14 sobre perda de capacidade (21/10/2026).
 **Fonte funcional prevalente:** `PLANEJAMENTO_ARENAGO.md` (v0.7.9).
 **Estado atual:** fundação NestJS/Drizzle e cinco migrações existentes; função TypeScript de normalização e consultas internas `EventsService.findById()`/`findByAccessCode()` implementadas. Nenhum endpoint HTTP de produto foi criado. Neon não foi criada.
 **Escopo desta revisão:** registrar C-10 e E01.2B; nenhuma migração nova.
@@ -1535,7 +1535,7 @@ Permitir criação antes de cadastrar experiências e conceder Staff é **necess
 
 Prontidão aprovada (§2.3 e Planejamento C-05): nome, código, horários válidos, fuso IANA, fila externa configurada, ≥1 experiência do evento com estação disponível e ≥1 `user_roles` Staff vigente de conta ativa e e-mail verificado, **sem exigir Staff conectado agora**. O usuário deve poder receber orientação clara sobre critérios faltantes, mas os detalhes de configuração ficam **exclusivamente** em resposta Admin. A abertura é automática quando `startsAt` foi alcançado, ainda não ocorreu corte de novos ingressos e o evento está pronto. Se a configuração só ficar pronta depois de `startsAt`, aceitar abertura ainda dentro da janela originalmente válida; se o horário de corte já passou, **não reabrir**. Não é necessário endpoint `POST /admin/events/:id/open`.
 
-**Rechecagem transacional obrigatória:** `POST /events/:eventId/participations` deve avaliar estado, hora efetiva e prontidão sob controle concorrente, mesmo que `GET /readiness` tenha respondido `ready=true` antes. Status persistido atrasado e tarefas de abertura atrasadas **não** liberam inscrições indevidas. O teste de prontidão, por si, não reserva estação ou Staff. **[VALIDAR]** Se todas as estações ficarem indisponíveis ou todos os Staff forem revogados *depois* de uma abertura bem-sucedida, definir na camada operacional se isso suspende automaticamente **novas** participações ou apenas impede novos chamados. A decisão C-05 aprova critérios de abertura, não uma política de auto-fechamento/reabertura por perda posterior de recursos.
+**Rechecagem transacional obrigatória:** `POST /events/:eventId/participations` deve avaliar estado, hora efetiva e prontidão sob controle concorrente, mesmo que `GET /readiness` tenha respondido `ready=true` antes. Status persistido atrasado e tarefas de abertura atrasadas **não** liberam inscrições indevidas. O teste de prontidão, por si, não reserva estação ou Staff. Conforme C-14 e §20.2, se todos os Staff aptos ou todas as estações disponíveis forem perdidos, suspender novas participações sem alterar as existentes, filas ou `events.status`; não encerrar o evento automaticamente. A restauração de capacidade permite novas admissões somente enquanto os cortes temporal e administrativo ainda não as tiverem encerrado. Esta disponibilidade deve ser reavaliada dinamicamente.
 
 ### 18.5 Gestão de experiências e estações — estrutura, não operação física
 
@@ -1747,3 +1747,7 @@ Os testes unitários cobrem caixa, whitespace ASCII/Unicode externo reconhecido 
 O CHECK existente `access_code_normalized = upper(btrim(access_code_normalized))`, o índice `UNIQUE` e o trigger de imutabilidade são proteções distintas e parciais: não implementam o conjunto de regras de formato C-10. Não reescrever as cinco migrações aplicadas. Uma restrição SQL mais completa poderá ser proposta depois de auditar dados e exigirá migração incremental; nenhuma migração foi criada pela E01.2B.
 
 **Histórico de versão:** v0.6.15 (21/10/2026) registra a decisão C-10 aprovada, a normalização compartilhada e consulta E01.2B, corrige afirmações antigas de pendência, distingue função TypeScript das garantias SQL, registra os resultados/limites das validações e não altera decisões históricas não relacionadas.
+
+## 25. Correção documental de C-14 — perda de capacidade após abertura
+
+**v0.6.16 (21/10/2026):** removida da seção 18.4 a marcação histórica `[VALIDAR]` que tratava como indefinido o efeito da perda de Staff/estações após abertura. C-14 e §20 já aprovam bloquear dinamicamente novos ingressos, preservar participações e filas, não alterar o status nem encerrar automaticamente o evento; a restauração só permite novas entradas antes dos cortes. Nenhuma regra de produto nova foi criada.

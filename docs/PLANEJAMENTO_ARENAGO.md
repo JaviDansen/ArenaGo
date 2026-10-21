@@ -3,7 +3,7 @@
 **Versão:** v0.7.9 — atualização da C-10 e registro da E01.2B (21/10/2026)
 **Status funcional:** decisões D01–D11 e C-01–C-14 preservadas; C-10 detalhada e reafirmada conforme aprovação do responsável.
 **Estado da implementação (verificado no repositório):** frontend Expo ainda baseado em simulações nos fluxos de backend; fundação `backend/` NestJS/Drizzle e consulta interna de eventos por UUID/código implementadas; endpoints HTTP de produto não implementados; Neon não criada.
-**Documento técnico complementar:** `ARQUITETURA_BACKEND_ARENAGO.md` (v0.6.15).
+**Documento técnico complementar:** `ARQUITETURA_BACKEND_ARENAGO.md` (v0.6.16).
 
 > **Fonte e limite:** este texto preserva decisões anteriores e registra a decisão C-10 aprovada e a implementação local da E01.2B inspecionada nesta revisão. O serviço de consulta é interno e não cria endpoint HTTP. Isso não implica validação de produção nem autoriza uso de dados pessoais reais.
 
@@ -284,7 +284,7 @@ A especificação da Task 6.1 (v1.1, 16/10/2026) fornece contratos e sugestões 
 ## 11. Organização da documentação e próximo trabalho autorizado
 
 - Este **Planejamento** é a fonte de verdade das **decisões de negócio** (D01–D11 e C-01–C-14), escopo e prioridades.
-- A **Arquitetura Backend v0.6.15** (`ARQUITETURA_BACKEND_ARENAGO.md`) descreve as estruturas, contratos candidatos e resultados técnicos. Os endpoints HTTP seguem propostos e não implementados; a E01.2B adiciona a normalização de código e consulta interna no `EventsService`.
+- A **Arquitetura Backend v0.6.16** (`ARQUITETURA_BACKEND_ARENAGO.md`) descreve as estruturas, contratos candidatos e resultados técnicos. Os endpoints HTTP seguem propostos e não implementados; a E01.2B adiciona a normalização de código e consulta interna no `EventsService`.
 - O `backend/README.md` é a referência operacional de execução local; o README do Expo descreve o aplicativo. Não repetir aqui comandos completos de instalação.
 - Os relatórios experimentais v0.6.11/v0.6.12 e a Task 6.1 são **fontes históricas**, não documentos concorrentes que substituam estas duas fontes canônicas.
 - **Trabalho atual:** revisão da E01.2B e documentação canônica; Git é controlado manualmente pelo responsável. Sem criar Neon, endpoints HTTP ou modificar Expo.

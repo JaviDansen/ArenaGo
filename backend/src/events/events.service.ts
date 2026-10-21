@@ -8,6 +8,11 @@ import { normalizeEventAccessCode } from "./access-code";
 import { evaluateEventEntryWindow } from "./event-entry-window";
 import type { EventEntryWindowResult } from "./event-entry-window";
 import { buildEventOperationalCapacityResult } from "./event-operational-capacity";
+import {
+  buildEventAvailabilityResult,
+  evaluateEventConfigurationReadiness,
+} from "./event-availability";
+import type { EventAvailabilityResult } from "./event-availability";
 
 type EventsDatabase = NodePgDatabase<typeof schema>;
 type Event = typeof events.$inferSelect;
@@ -21,6 +26,8 @@ export type EventEntryWindowLookupResult =
 export type EventOperationalCapacityLookupResult =
   | { eventExists: false }
   | ({ eventExists: true; eventId: string } & ReturnType<typeof buildEventOperationalCapacityResult>);
+
+type EventOperationalCapacity = ReturnType<typeof buildEventOperationalCapacityResult>;
 
 /** Fornece consultas de leitura de eventos persistidos no PostgreSQL. */
 @Injectable()
@@ -110,6 +117,50 @@ export class EventsService {
       return { eventExists: false };
     }
 
+    const capacity = await this.findOperationalCapacity(eventId);
+
+    return {
+      eventExists: true,
+      eventId: event.id,
+      ...capacity,
+    };
+  }
+
+  /**
+   * Consolida existência, prontidão, janela temporal e capacidade para um evento.
+   *
+   * @param eventId UUID do evento.
+   * @param at Instante absoluto de referência para a janela de novos ingressos.
+   * @returns Resultado explícito de inexistência ou todas as verificações e requisitos faltantes.
+   * @remarks `ready` é configuração e capacidade; `withinEntryWindow` é temporal. O indicador
+   * final ainda respeita `closing`/`closed`, mas não autentica o usuário nem reserva vaga. As
+   * leituras de Staff/estação são independentes e não formam snapshot transacional consistente.
+   */
+  async evaluateEventAvailabilityById(
+    eventId: string,
+    at: Date,
+  ): Promise<EventAvailabilityResult> {
+    const event = await this.findById(eventId);
+
+    if (!event) {
+      return { eventExists: false };
+    }
+
+    const operationalCapacity = await this.findOperationalCapacity(eventId);
+    const configuration = evaluateEventConfigurationReadiness(event);
+    const entryWindow = evaluateEventEntryWindow(event, at);
+
+    return buildEventAvailabilityResult({
+      eventId: event.id,
+      eventStatus: event.status,
+      configuration,
+      entryWindow,
+      operationalCapacity,
+    });
+  }
+
+  /** Consulta somente a existência dos dois recursos operacionais para um evento existente. */
+  private async findOperationalCapacity(eventId: string): Promise<EventOperationalCapacity> {
     const [staffRows, stationRows] = await Promise.all([
       this.database
         .select({ id: schema.userRoles.id })
@@ -134,10 +185,6 @@ export class EventsService {
         .limit(1),
     ]);
 
-    return {
-      eventExists: true,
-      eventId: event.id,
-      ...buildEventOperationalCapacityResult(staffRows.length > 0, stationRows.length > 0),
-    };
+    return buildEventOperationalCapacityResult(staffRows.length > 0, stationRows.length > 0);
   }
 }
