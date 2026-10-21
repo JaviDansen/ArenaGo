@@ -1,10 +1,19 @@
 import { Pressable, StyleSheet, Text } from 'react-native';
 
+import { EVALUATION_SITUATIONS } from '../utils/evaluation';
 import {
   formatParticipationDate,
   formatStayDuration,
   getStayDurationInMinutes,
 } from '../utils/participation';
+
+// Indicação exibida no card somente quando a situação da avaliação é conhecida.
+const EVALUATION_LABELS = {
+  [EVALUATION_SITUATIONS.PENDING]: 'Avaliação pendente',
+  [EVALUATION_SITUATIONS.EVALUATED]: 'Avaliada',
+  [EVALUATION_SITUATIONS.EXPIRED]: 'Prazo de avaliação encerrado',
+  [EVALUATION_SITUATIONS.NOT_FINISHED]: 'Em andamento · avaliação indisponível',
+};
 
 /**
  * Item da lista de Minhas Participações.
@@ -13,9 +22,20 @@ import {
  * basta passar `onPress`. Sem `onPress` o item fica desabilitado (a tela de
  * detalhes ainda não existe).
  */
-export default function ParticipationCard({ participation, onPress }) {
+export default function ParticipationCard({ participation, onPress, evaluationSituation }) {
+  if (!participation || !Object.prototype.hasOwnProperty.call(participation, 'id')
+    || typeof participation.id !== 'string' || participation.id.trim() === '') {
+    return null;
+  }
+
   const date = formatParticipationDate(participation.enteredAt);
   const stayDuration = formatStayDuration(getStayDurationInMinutes(participation));
+  const eventName = typeof participation.event?.name === 'string' && participation.event.name.trim() !== ''
+    ? participation.event.name
+    : 'Evento indisponível';
+  const evaluationLabel = Object.prototype.hasOwnProperty.call(EVALUATION_LABELS, evaluationSituation)
+    ? EVALUATION_LABELS[evaluationSituation]
+    : null;
 
   return (
     <Pressable
@@ -24,7 +44,7 @@ export default function ParticipationCard({ participation, onPress }) {
       disabled={!onPress}
       accessibilityRole={onPress ? 'button' : undefined}
     >
-      <Text style={styles.eventName}>{participation.event.name}</Text>
+      <Text style={styles.eventName}>{eventName}</Text>
       {date ? <Text style={styles.info}>{date}</Text> : null}
       {stayDuration ? (
         <Text style={styles.info}>Permanência: {stayDuration}</Text>
@@ -32,6 +52,7 @@ export default function ParticipationCard({ participation, onPress }) {
         // Sem saída registrada não há permanência válida: não estimamos um valor.
         <Text style={styles.infoMuted}>Permanência não registrada</Text>
       )}
+      {evaluationLabel ? <Text style={styles.evaluation}>{evaluationLabel}</Text> : null}
     </Pressable>
   );
 }
@@ -53,6 +74,11 @@ const styles = StyleSheet.create({
   },
   info: {
     fontSize: 14,
+    marginTop: 4,
+  },
+  evaluation: {
+    fontSize: 14,
+    fontWeight: 'bold',
     marginTop: 4,
   },
   infoMuted: {

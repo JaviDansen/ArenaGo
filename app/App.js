@@ -8,6 +8,7 @@ import EventConfirmationScreen from './screens/eventEntry/EventConfirmationScree
 import EventEntryScreen from './screens/eventEntry/EventEntryScreen';
 import ForgotPasswordScreen from './screens/auth/ForgotPasswordScreen';
 import LoginScreen from './screens/auth/LoginScreen';
+import ParticipationDetailsScreen from './screens/ParticipationDetailsScreen';
 import ProfileQuestionnaireScreen from './screens/ProfileQuestionnaireScreen';
 import RegisterScreen from './screens/auth/RegisterScreen';
 import WelcomeScreen from './screens/auth/WelcomeScreen';
@@ -37,6 +38,11 @@ export default function App() {
             name="EventConfirmation"
             component={EventConfirmationScreen}
             options={{ headerShown: true, title: 'Confirmar entrada' }}
+          />
+          <Stack.Screen
+            name="ParticipationDetails"
+            component={ParticipationDetailsScreen}
+            options={{ headerShown: true, title: 'Detalhes da participação' }}
           />
           <Stack.Screen
             name="Evaluation"
