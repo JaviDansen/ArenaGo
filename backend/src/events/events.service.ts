@@ -5,9 +5,16 @@ import { DRIZZLE_DATABASE } from "../database/database.module";
 import * as schema from "../database/schema";
 import { events } from "../database/schema/events.schema";
 import { normalizeEventAccessCode } from "./access-code";
+import { evaluateEventEntryWindow } from "./event-entry-window";
+import type { EventEntryWindowResult } from "./event-entry-window";
 
 type EventsDatabase = NodePgDatabase<typeof schema>;
 type Event = typeof events.$inferSelect;
+
+/** Resultado da avaliação temporal de um evento consultado pelo UUID. */
+export type EventEntryWindowLookupResult =
+  | { eventExists: false }
+  | { eventExists: true; eventId: string; entryWindow: EventEntryWindowResult };
 
 /** Fornece consultas de leitura de eventos persistidos no PostgreSQL. */
 @Injectable()
@@ -50,5 +57,31 @@ export class EventsService {
       .limit(1);
 
     return event ?? null;
+  }
+
+  /**
+   * Consulta um evento e avalia sua janela temporal de novos ingressos.
+   *
+   * @param eventId UUID do evento a consultar.
+   * @param at Instante absoluto de referência, fornecido explicitamente pelo chamador.
+   * @returns Resultado explícito para evento ausente ou janela temporal do evento encontrado.
+   * @remarks É uma leitura informativa: não verifica prontidão, status administrativo nem
+   * reserva vaga. Reutiliza `findById()` e não altera o banco.
+   */
+  async evaluateEntryWindowById(
+    eventId: string,
+    at: Date,
+  ): Promise<EventEntryWindowLookupResult> {
+    const event = await this.findById(eventId);
+
+    if (!event) {
+      return { eventExists: false };
+    }
+
+    return {
+      eventExists: true,
+      eventId: event.id,
+      entryWindow: evaluateEventEntryWindow(event, at),
+    };
   }
 }

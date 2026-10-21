@@ -78,6 +78,29 @@ test("EventsService.findById consulta o evento pelo UUID sem alterá-lo", async 
       { name: "EventAccessCodeValidationError" },
     );
 
+    const temporalStart = await eventsService.evaluateEntryWindowById(
+      eventId,
+      new Date("2030-01-01T12:00:00.000Z"),
+    );
+    assert.equal(temporalStart.eventExists, true);
+    if (temporalStart.eventExists) {
+      assert.equal(temporalStart.entryWindow.withinEntryWindow, true);
+      assert.equal(temporalStart.entryWindow.blockReason, null);
+    }
+    const temporalCutoff = await eventsService.evaluateEntryWindowById(
+      eventId,
+      new Date("2030-01-01T14:00:00.000Z"),
+    );
+    assert.equal(temporalCutoff.eventExists, true);
+    if (temporalCutoff.eventExists) {
+      assert.equal(temporalCutoff.entryWindow.withinEntryWindow, false);
+      assert.equal(temporalCutoff.entryWindow.blockReason, "EVENT_ENTRY_CLOSED");
+    }
+    assert.deepEqual(
+      await eventsService.evaluateEntryWindowById(randomUUID(), new Date("2030-01-01T13:00:00.000Z")),
+      { eventExists: false },
+    );
+
     const missing = await eventsService.findById(randomUUID());
     assert.equal(missing, null);
 
