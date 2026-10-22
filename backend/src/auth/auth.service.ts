@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { isIP } from "node:net";
 import { HttpStatus, Inject, Injectable } from "@nestjs/common";
 import * as argon2 from "argon2";
 import { Pool, PoolClient } from "pg";
@@ -17,8 +16,10 @@ import {
   RefreshResponseDto,
   UserRoleName,
 } from "./auth.types";
+import { sanitizeIpAddress, sanitizeUserAgent } from "./client-metadata.util";
 import { LoginRateLimiterService } from "./login-rate-limiter.service";
 import { evaluatePasswordSecurity } from "./password-policy";
+import { RegistrationRateLimiterService } from "./registration-rate-limiter.service";
 import {
   ACCESS_TOKEN_TTL_SECONDS,
   generateOpaqueRefreshToken,
@@ -39,34 +40,18 @@ const ARGON2_OPTIONS: argon2.HashOptions = {
 // Hash pré-computado para mitigar enumeração por tempo quando o e-mail não existe
 let dummyPasswordHashPromise: Promise<string> | null = null;
 function getDummyPasswordHash(): Promise<string> {
-  if (!dummyPasswordHashPromise) {
-    dummyPasswordHashPromise = argon2.hash(
-      "dummy-arenago-mitigation-secret-password",
-      ARGON2_OPTIONS,
-    );
+  // Narrowing explícito em variável local: a variável de módulo é mutável e não é
+  // estreitada de forma confiável pelo compilador após a atribuição.
+  const cached = dummyPasswordHashPromise;
+  if (cached !== null) {
+    return cached;
   }
-  return dummyPasswordHashPromise;
-}
-
-function sanitizeIpAddress(ip?: string | null): string | null {
-  if (!ip) return null;
-  const trimmed = ip.trim();
-  if (!trimmed) return null;
-  // Remove prefixo IPv4-mapped IPv6 se presente e válido
-  const clean = trimmed.startsWith("::ffff:") ? trimmed.slice(7) : trimmed;
-  if (isIP(clean) !== 0) {
-    return clean;
-  }
-  if (isIP(trimmed) !== 0) {
-    return trimmed;
-  }
-  return null;
-}
-
-function sanitizeUserAgent(ua?: string | null): string | null {
-  if (!ua) return null;
-  const trimmed = ua.trim();
-  return trimmed.length > 0 ? trimmed.slice(0, 255) : null;
+  const created: Promise<string> = argon2.hash(
+    "dummy-arenago-mitigation-secret-password",
+    { ...ARGON2_OPTIONS, raw: false },
+  );
+  dummyPasswordHashPromise = created;
+  return created;
 }
 
 const ROLE_ORDER: Record<UserRoleName, number> = {
@@ -81,12 +66,20 @@ export class AuthService {
     @Inject(POSTGRES_POOL) private readonly pool: Pool,
     @Inject(LoginRateLimiterService)
     private readonly rateLimiter: LoginRateLimiterService,
+    @Inject(RegistrationRateLimiterService)
+    private readonly registrationRateLimiter: RegistrationRateLimiterService,
   ) {}
 
   async register(
     dto: RegisterDto,
     metadata?: ClientMetadata,
   ): Promise<AuthSessionResponseDto> {
+    // Limite aplicado antes de qualquer custo de Argon2 ou acesso ao banco.
+    this.registrationRateLimiter.consume(
+      dto.email,
+      sanitizeIpAddress(metadata?.ipAddress),
+    );
+
     const strength = evaluatePasswordSecurity(dto.password, {
       email: dto.email,
       name: dto.name,

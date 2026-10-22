@@ -18,26 +18,14 @@ import { AuthService } from "./auth.service";
 import type {
   AuthenticatedPrincipal,
   AuthSessionResponseDto,
-  ClientMetadata,
   LoginResponseDto,
   LogoutResponseDto,
   PublicUserDto,
   RefreshResponseDto,
 } from "./auth.types";
+import { extractClientMetadata } from "./client-metadata.util";
 import { CurrentUser, RequireSessionAuth } from "./current-user.decorator";
 import type { AuthenticatedRequest } from "./session-auth.guard";
-
-function extractClientMetadata(req: AuthenticatedRequest): ClientMetadata {
-  const userAgentHeader = req.headers["user-agent"];
-  const userAgent =
-    typeof userAgentHeader === "string" ? userAgentHeader : null;
-  const ipAddress = req.ip ?? req.socket?.remoteAddress ?? null;
-
-  return {
-    ipAddress,
-    userAgent,
-  };
-}
 
 @Controller("auth")
 export class AuthController {

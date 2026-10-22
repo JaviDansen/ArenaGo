@@ -7,8 +7,17 @@ import {
   registerSchema,
   validateDto,
 } from "../../src/auth/auth.dto";
+import {
+  extractClientMetadata,
+  sanitizeIpAddress,
+} from "../../src/auth/client-metadata.util";
 import { LoginRateLimiterService } from "../../src/auth/login-rate-limiter.service";
 import { evaluatePasswordSecurity } from "../../src/auth/password-policy";
+import {
+  REGISTRATION_PER_EMAIL_POLICY,
+  REGISTRATION_PER_IP_POLICY,
+  RegistrationRateLimiterService,
+} from "../../src/auth/registration-rate-limiter.service";
 import {
   ACCESS_TOKEN_TTL_SECONDS,
   generateOpaqueRefreshToken,
@@ -186,6 +195,58 @@ test("Auth Unit Suite: DTOs, política de senhas, tokens e rate limiter", async 
 
     limiter.reset(email, ip);
     assert.doesNotThrow(() => limiter.checkAllowed(email, ip, now + 7_000));
+  });
+
+  await t.test("RegistrationRateLimiterService bloqueia excesso por IP e por e-mail com 429 + Retry-After", () => {
+    const limiter = new RegistrationRateLimiterService();
+    const now = 1_700_000_000_000;
+
+    // 1. Limite por e-mail normalizado (5 tentativas em 15 min)
+    const targetEmail = "repetido@exemplo.com";
+    for (let i = 0; i < REGISTRATION_PER_EMAIL_POLICY.maxHits; i++) {
+      limiter.consume(targetEmail, `198.51.100.${i + 1}`, now + i * 100);
+    }
+
+    assert.throws(
+      () => limiter.consume(targetEmail, "198.51.100.250", now + 1_000),
+      (err: unknown) =>
+        err instanceof ProblemException &&
+        err.getStatus() === 429 &&
+        err.problem.code === "TOO_MANY_REGISTRATION_ATTEMPTS" &&
+        typeof err.responseHeaders["Retry-After"] === "string",
+    );
+
+    // 2. Limite por IP (10 tentativas em 15 min com e-mails distintos)
+    const sharedIp = "203.0.113.55";
+    for (let i = 0; i < REGISTRATION_PER_IP_POLICY.maxHits; i++) {
+      limiter.consume(`usuario-${i}@exemplo.com`, sharedIp, now + i * 100);
+    }
+
+    assert.throws(
+      () => limiter.consume("outro-novo@exemplo.com", sharedIp, now + 2_000),
+      (err: unknown) =>
+        err instanceof ProblemException &&
+        err.getStatus() === 429 &&
+        err.problem.code === "TOO_MANY_REGISTRATION_ATTEMPTS",
+    );
+  });
+
+  await t.test("extractClientMetadata ignora cabeçalhos X-Forwarded-For forjados e sanitiza IP do socket", () => {
+    const fakeReq = {
+      headers: {
+        "user-agent": "ArenaGo-Test-Agent/1.0",
+        "x-forwarded-for": "1.2.3.4, 5.6.7.8",
+        "x-real-ip": "9.9.9.9",
+      },
+      socket: {
+        remoteAddress: "::ffff:127.0.0.1",
+      },
+    } as never;
+
+    const meta = extractClientMetadata(fakeReq);
+    assert.equal(meta.ipAddress, "127.0.0.1");
+    assert.equal(meta.userAgent, "ArenaGo-Test-Agent/1.0");
+    assert.equal(sanitizeIpAddress("not-an-ip-address"), null);
   });
 
   await t.test("loginSchema e refreshSchema rejeitam entradas malformadas", () => {

@@ -12,6 +12,8 @@ import {
   AuthService,
   CurrentUser,
   CurrentUserId,
+  LoginRateLimiterService,
+  RegistrationRateLimiterService,
   RequireSessionAuth,
 } from "../../src/auth";
 import {
@@ -81,12 +83,21 @@ class TestRootModule {}
 let app: INestApplication;
 let baseUrl: string;
 let pool: Pool;
+let loginRateLimiter: LoginRateLimiterService;
+let registrationRateLimiter: RegistrationRateLimiterService;
+
+function resetRateLimiters(): void {
+  loginRateLimiter?.clearAll();
+  registrationRateLimiter?.clearAll();
+}
 
 before(async () => {
   pool = new Pool({ connectionString, max: 10 });
   app = await NestFactory.create(TestRootModule, { logger: false });
   app.setGlobalPrefix("api/v1");
   await app.listen(0, "127.0.0.1");
+  loginRateLimiter = app.get(LoginRateLimiterService);
+  registrationRateLimiter = app.get(RegistrationRateLimiterService);
   const address = app.getHttpServer().address() as AddressInfo;
   baseUrl = `http://127.0.0.1:${address.port}/api/v1`;
 });
@@ -330,12 +341,19 @@ test("K01 Auth & Sessions — Integração HTTP + PostgreSQL Real", async (t) =>
       },
     } as unknown as Pool;
 
-    const directService = new AuthService(brokenPool, {
-      checkAllowed: () => undefined,
-      recordFailure: () => undefined,
-      reset: () => undefined,
-      clearAll: () => undefined,
-    } as never);
+    const directService = new AuthService(
+      brokenPool,
+      {
+        checkAllowed: () => undefined,
+        recordFailure: () => undefined,
+        reset: () => undefined,
+        clearAll: () => undefined,
+      } as never,
+      {
+        consume: () => undefined,
+        clearAll: () => undefined,
+      } as never,
+    );
 
     await assert.rejects(() =>
       directService.register({
@@ -349,13 +367,100 @@ test("K01 Auth & Sessions — Integração HTTP + PostgreSQL Real", async (t) =>
       "SELECT 1 FROM users WHERE lower(btrim(email)) = $1",
       [atomicEmail],
     );
-    assert.equal(checkUser.rowCount, 0);
+      assert.equal( checkUser.rowCount, 0);
+  });
+
+  await t.test("Rate limit no cadastro (POST /api/v1/auth/register): bloqueia excesso com HTTP 429 + Retry-After, ignora X-Forwarded-For forjado e não vaza existência de conta", async () => {
+    resetRateLimiters();
+    const existingEmail = `ratelimit-existing-${randomUUID().slice(0, 8)}@example.test`;
+    const password = `S3nha!RateLimit#${randomUUID().slice(0, 8)}`;
+
+    // 1ª requisição: cria uma conta real
+    const first = await apiRequest("/auth/register", {
+      method: "POST",
+      body: { name: "Conta Existente", email: existingEmail, password },
+    });
+    assert.equal(first.status, 201);
+
+    // Mais 4 tentativas para o mesmo e-mail (normalizado com espaços/maiúsculas) retornam 409 até atingir o limite de 5 por e-mail
+    for (let i = 0; i < 4; i += 1) {
+      const dup = await apiRequest("/auth/register", {
+        method: "POST",
+        body: {
+          name: "Tentativa Repetida",
+          email: `  ${existingEmail.toUpperCase()} `,
+          password: "OutraSenhaValida#99",
+        },
+      });
+      assert.equal(dup.status, 409);
+    }
+
+    // 6ª tentativa para o mesmo e-mail é bloqueada com 429 antes de consultar banco ou executar Argon2
+    const blockedByEmail = await apiRequest<{
+      status: number;
+      code: string;
+      retryAfterSeconds: number;
+    }>("/auth/register", {
+      method: "POST",
+      body: {
+        name: "Tentativa Bloqueada Email",
+        email: existingEmail,
+        password: "OutraSenhaValida#99",
+      },
+    });
+    assert.equal(blockedByEmail.status, 429);
+    assert.equal(blockedByEmail.body.code, "TOO_MANY_REGISTRATION_ATTEMPTS");
+    assert.ok(Number(blockedByEmail.headers.get("retry-after")) >= 1);
+    assert.ok(
+      blockedByEmail.headers.get("content-type")?.includes("application/problem+json"),
+    );
+
+    // Completar até 10 requisições válidas no mesmo IP (foram 5 consumidas acima; mais 5 com e-mails inéditos)
+    for (let i = 0; i < 5; i += 1) {
+      const res = await apiRequest("/auth/register", {
+        method: "POST",
+        headers: {
+          "x-forwarded-for": `203.0.113.${10 + i}`,
+          "x-real-ip": `198.51.100.${10 + i}`,
+        },
+        body: {
+          name: `Usuario IP ${i}`,
+          email: `ip-test-${i}-${randomUUID().slice(0, 8)}@example.test`,
+          password,
+        },
+      });
+      assert.equal(res.status, 201);
+    }
+
+    // 11ª requisição do mesmo IP é bloqueada com 429 mesmo enviando X-Forwarded-For / X-Real-IP forjados e e-mail inédito
+    const blockedByIpNewEmail = await apiRequest<{
+      status: number;
+      code: string;
+      detail: string;
+    }>("/auth/register", {
+      method: "POST",
+      headers: {
+        "x-forwarded-for": "192.0.2.250",
+        "x-real-ip": "192.0.2.251",
+      },
+      body: {
+        name: "Bloqueado Por IP",
+        email: `unseen-${randomUUID().slice(0, 8)}@example.test`,
+        password,
+      },
+    });
+    assert.equal(blockedByIpNewEmail.status, 429);
+    assert.equal(blockedByIpNewEmail.body.code, "TOO_MANY_REGISTRATION_ATTEMPTS");
+    assert.equal(blockedByIpNewEmail.body.detail, blockedByEmail.body.detail);
+
+    resetRateLimiters();
   });
 
   // =========================================================================
   // 2. LOGIN, SESSÃO ÚNICA E ADMIN SEM TOTP (POST /api/v1/auth/login)
   // =========================================================================
   await t.test("Login autentica credenciais válidas, emite JWT de 15min e sessão de 30 dias", async () => {
+    resetRateLimiters();
     const email = `login-${randomUUID().slice(0, 8)}@example.test`;
     const password = `S3nha!Login#${randomUUID().slice(0, 8)}`;
 
@@ -614,6 +719,7 @@ test("K01 Auth & Sessions — Integração HTTP + PostgreSQL Real", async (t) =>
   // 3. RENOVAÇÃO SEGURA (POST /api/v1/auth/refresh)
   // =========================================================================
   await t.test("Refresh rotaciona token opaco, consome o anterior e mantém o prazo absoluto de 30 dias inalterado", async () => {
+    resetRateLimiters();
     const email = `refresh-${randomUUID().slice(0, 8)}@example.test`;
     const password = `S3nha!Refresh#${randomUUID().slice(0, 8)}`;
 
@@ -761,9 +867,13 @@ test("K01 Auth & Sessions — Integração HTTP + PostgreSQL Real", async (t) =>
       reset: () => undefined,
       clearAll: () => undefined,
     } as never;
+    const noOpRegistrationLimiter = {
+      consume: () => undefined,
+      clearAll: () => undefined,
+    } as never;
 
-    const serviceA = new AuthService(poolA, noOpLimiter);
-    const serviceB = new AuthService(poolB, noOpLimiter);
+    const serviceA = new AuthService(poolA, noOpLimiter, noOpRegistrationLimiter);
+    const serviceB = new AuthService(poolB, noOpLimiter, noOpRegistrationLimiter);
 
     try {
       const results = await Promise.allSettled([
@@ -826,6 +936,7 @@ test("K01 Auth & Sessions — Integração HTTP + PostgreSQL Real", async (t) =>
   // 4. GUARDS, /auth/me, LOGOUT E INTERFACE COMPARTILHADA PARA EVENTS
   // =========================================================================
   await t.test("GET /auth/me retorna dados vivos do PostgreSQL (incluindo atualização de papéis e questionário)", async () => {
+    resetRateLimiters();
     const email = `me-${randomUUID().slice(0, 8)}@example.test`;
     const password = `S3nha!MeCheck#${randomUUID().slice(0, 8)}`;
 
