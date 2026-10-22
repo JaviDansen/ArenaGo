@@ -2,6 +2,7 @@ import { Inject, Injectable } from "@nestjs/common";
 import { and, eq, isNotNull, isNull } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { DRIZZLE_DATABASE } from "../database/database.module";
+import type { DatabaseExecutor } from "../database/database-executor";
 import * as schema from "../database/schema";
 import { events } from "../database/schema/events.schema";
 import { normalizeEventAccessCode } from "./access-code";
@@ -139,14 +140,19 @@ export class EventsService {
   async evaluateEventAvailabilityById(
     eventId: string,
     at: Date,
+    executor: DatabaseExecutor = this.database,
   ): Promise<EventAvailabilityResult> {
-    const event = await this.findById(eventId);
+    const [event] = await executor
+      .select()
+      .from(events)
+      .where(eq(events.id, eventId))
+      .limit(1);
 
     if (!event) {
       return { eventExists: false };
     }
 
-    const operationalCapacity = await this.findOperationalCapacity(eventId);
+    const operationalCapacity = await this.findOperationalCapacity(eventId, executor);
     const configuration = evaluateEventConfigurationReadiness(event);
     const entryWindow = evaluateEventEntryWindow(event, at);
 
@@ -160,9 +166,12 @@ export class EventsService {
   }
 
   /** Consulta somente a existência dos dois recursos operacionais para um evento existente. */
-  private async findOperationalCapacity(eventId: string): Promise<EventOperationalCapacity> {
+  private async findOperationalCapacity(
+    eventId: string,
+    executor: DatabaseExecutor = this.database,
+  ): Promise<EventOperationalCapacity> {
     const [staffRows, stationRows] = await Promise.all([
-      this.database
+      executor
         .select({ id: schema.userRoles.id })
         .from(schema.userRoles)
         .innerJoin(schema.users, eq(schema.userRoles.userId, schema.users.id))
@@ -174,7 +183,7 @@ export class EventsService {
           isNotNull(schema.users.emailVerifiedAt),
         ))
         .limit(1),
-      this.database
+      executor
         .select({ id: schema.stations.id })
         .from(schema.stations)
         .innerJoin(schema.experiences, eq(schema.stations.experienceId, schema.experiences.id))

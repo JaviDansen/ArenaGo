@@ -1,13 +1,20 @@
 import { Inject, Injectable } from "@nestjs/common";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { DRIZZLE_DATABASE } from "../database/database.module";
+import type { DatabaseExecutor } from "../database/database-executor";
 import * as schema from "../database/schema";
 import { EventsService } from "../events/events.service";
 import type { JoinEligibilityResult } from "./join-eligibility";
 import { combineJoinEligibility } from "./join-eligibility";
 
 type ParticipationsDatabase = NodePgDatabase<typeof schema>;
+
+/** Resultado da inspeção feita dentro de uma transação e no horário do PostgreSQL. */
+export interface TransactionalJoinEligibilityEvaluation {
+  eligibility: JoinEligibilityResult;
+  evaluatedAt: Date;
+}
 
 /** Consultas informativas sobre pré-requisitos de ingresso, sem criar participação. */
 @Injectable()
@@ -84,5 +91,98 @@ export class ParticipationsService {
       hasSelectedGames: gameRows.length > 0,
       hasCurrentParticipation: currentParticipationRows.length > 0,
     });
+  }
+
+  /**
+   * Avalia pré-condições usando uma transação `READ COMMITTED` e locks na ordem evento → usuário.
+   *
+   * @param userId Identificador interno do participante, fornecido por chamador confiável.
+   * @param eventId UUID do evento a avaliar.
+   * @returns Elegibilidade e instante obtido do relógio PostgreSQL depois dos locks.
+   * @remarks Somente leitura: não cria participação, snapshot, posição FIFO nem idempotência.
+   * Para consistência com alterações do questionário, Kaled deverá travar `users FOR UPDATE`
+   * antes de modificar `profiles` ou `user_games`. A transação, isoladamente, não coordena
+   * escritores de Staff, estações ou eventos que não sigam o lock do evento.
+   */
+  async evaluateJoinEligibilityInTransaction(
+    userId: string,
+    eventId: string,
+  ): Promise<TransactionalJoinEligibilityEvaluation> {
+    return this.database.transaction(async (tx) => {
+      // A ordem é compartilhada com alterações estruturais do evento e futuras atualizações de perfil.
+      await tx
+        .select({ id: schema.events.id })
+        .from(schema.events)
+        .where(eq(schema.events.id, eventId))
+        .for("update")
+        .limit(1);
+
+      const userRows = await tx
+        .select({ id: schema.users.id })
+        .from(schema.users)
+        .where(eq(schema.users.id, userId))
+        .for("update")
+        .limit(1);
+
+      // `now()` seria fixo desde BEGIN; clock_timestamp() observa o relógio após qualquer espera.
+      const clockRows = await tx.execute<{ observedAt: Date }>(
+        sql`SELECT clock_timestamp() AS "observedAt"`,
+      );
+      const evaluatedAt = clockRows.rows[0]?.observedAt;
+      if (!(evaluatedAt instanceof Date)) {
+        throw new Error("PostgreSQL não retornou clock_timestamp() para avaliar o ingresso.");
+      }
+
+      // Passa tx explicitamente: Events não deve escapar para a conexão raiz durante esta leitura.
+      const eventAvailability = await this.eventsService.evaluateEventAvailabilityById(
+        eventId,
+        evaluatedAt,
+        tx satisfies DatabaseExecutor,
+      );
+
+      const [profileRows, gameRows, currentParticipationRows] = await Promise.all([
+        tx
+          .select({
+            completedAt: schema.profiles.completedAt,
+            questionnaireVersionId: schema.questionnaireVersions.id,
+            questionnaireActivatedAt: schema.questionnaireVersions.activatedAt,
+          })
+          .from(schema.profiles)
+          .leftJoin(
+            schema.questionnaireVersions,
+            eq(schema.profiles.questionnaireVersionId, schema.questionnaireVersions.id),
+          )
+          .where(eq(schema.profiles.userId, userId))
+          .limit(1),
+        tx
+          .select({ gameId: schema.userGames.gameId })
+          .from(schema.userGames)
+          .innerJoin(schema.games, eq(schema.userGames.gameId, schema.games.id))
+          .where(eq(schema.userGames.userId, userId))
+          .limit(1),
+        tx
+          .select({ id: schema.participations.id })
+          .from(schema.participations)
+          .where(and(
+            eq(schema.participations.userId, userId),
+            inArray(schema.participations.status, ["waiting", "active"]),
+          ))
+          .limit(1),
+      ]);
+
+      const profile = profileRows[0];
+      const eligibility = combineJoinEligibility({
+        eventAvailability,
+        userExists: userRows.length > 0,
+        hasCompletedQuestionnaire: Boolean(profile?.completedAt),
+        questionnaireVersionValid: Boolean(
+          profile?.questionnaireVersionId && profile.questionnaireActivatedAt,
+        ),
+        hasSelectedGames: gameRows.length > 0,
+        hasCurrentParticipation: currentParticipationRows.length > 0,
+      });
+
+      return { eligibility, evaluatedAt };
+    }, { isolationLevel: "read committed" });
   }
 }
