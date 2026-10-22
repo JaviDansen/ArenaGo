@@ -165,34 +165,36 @@ export class EventsService {
     });
   }
 
-  /** Consulta somente a existência dos dois recursos operacionais para um evento existente. */
+  /**
+   * Consulta somente a existência dos dois recursos operacionais para um evento existente.
+   * @remarks As leituras são sequenciais para também funcionar com executor transacional, que
+   * mantém ambas na mesma conexão PostgreSQL.
+   */
   private async findOperationalCapacity(
     eventId: string,
     executor: DatabaseExecutor = this.database,
   ): Promise<EventOperationalCapacity> {
-    const [staffRows, stationRows] = await Promise.all([
-      executor
-        .select({ id: schema.userRoles.id })
-        .from(schema.userRoles)
-        .innerJoin(schema.users, eq(schema.userRoles.userId, schema.users.id))
-        .where(and(
-          eq(schema.userRoles.role, "staff"),
-          eq(schema.userRoles.eventId, eventId),
-          isNull(schema.userRoles.revokedAt),
-          eq(schema.users.isActive, true),
-          isNotNull(schema.users.emailVerifiedAt),
-        ))
-        .limit(1),
-      executor
-        .select({ id: schema.stations.id })
-        .from(schema.stations)
-        .innerJoin(schema.experiences, eq(schema.stations.experienceId, schema.experiences.id))
-        .where(and(
-          eq(schema.experiences.eventId, eventId),
-          eq(schema.stations.availability, "available"),
-        ))
-        .limit(1),
-    ]);
+    const staffRows = await executor
+      .select({ id: schema.userRoles.id })
+      .from(schema.userRoles)
+      .innerJoin(schema.users, eq(schema.userRoles.userId, schema.users.id))
+      .where(and(
+        eq(schema.userRoles.role, "staff"),
+        eq(schema.userRoles.eventId, eventId),
+        isNull(schema.userRoles.revokedAt),
+        eq(schema.users.isActive, true),
+        isNotNull(schema.users.emailVerifiedAt),
+      ))
+      .limit(1);
+    const stationRows = await executor
+      .select({ id: schema.stations.id })
+      .from(schema.stations)
+      .innerJoin(schema.experiences, eq(schema.stations.experienceId, schema.experiences.id))
+      .where(and(
+        eq(schema.experiences.eventId, eventId),
+        eq(schema.stations.availability, "available"),
+      ))
+      .limit(1);
 
     return buildEventOperationalCapacityResult(staffRows.length > 0, stationRows.length > 0);
   }

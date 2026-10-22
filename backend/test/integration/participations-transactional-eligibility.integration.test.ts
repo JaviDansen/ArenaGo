@@ -32,22 +32,35 @@ const fixturePool = new Pool({ connectionString: testDatabaseUrlValue, max: 3 })
 const database = drizzle(servicePool, { schema });
 const service = new ParticipationsService(database, new EventsService(database));
 const fixtureTime = new Date();
-const created = {
-  users: [] as string[],
-  events: [] as string[],
-  roles: [] as string[],
-  experiences: [] as string[],
-  stations: [] as string[],
-  questionnaireVersions: [] as string[],
-  games: [] as string[],
-  participations: [] as string[],
+type CreatedFixtures = {
+  users: string[];
+  events: string[];
+  roles: string[];
+  experiences: string[];
+  stations: string[];
+  questionnaireVersions: string[];
+  games: string[];
+  participations: string[];
 };
+
+function createFixtureTracker(): CreatedFixtures {
+  return {
+    users: [],
+    events: [],
+    roles: [],
+    experiences: [],
+    stations: [],
+    questionnaireVersions: [],
+    games: [],
+    participations: [],
+  };
+}
 
 after(async () => {
   await Promise.all([servicePool.end(), fixturePool.end()]);
 });
 
-async function createUser(options: { verified?: boolean } = {}): Promise<string> {
+async function createUser(created: CreatedFixtures, options: { verified?: boolean } = {}): Promise<string> {
   const id = randomUUID();
   await fixturePool.query(
     `INSERT INTO users (id, name, email, password_hash, is_active, email_verified_at, created_at, updated_at)
@@ -58,7 +71,10 @@ async function createUser(options: { verified?: boolean } = {}): Promise<string>
   return id;
 }
 
-async function createReadyEvent(options: { startsAt?: Date } = {}): Promise<string> {
+async function createReadyEvent(
+  created: CreatedFixtures,
+  options: { startsAt?: Date } = {},
+): Promise<string> {
   const id = randomUUID();
   const startsAt = options.startsAt ?? new Date(Date.now() - 60_000);
   const officialEndsAt = new Date(Math.max(Date.now() + 10 * 60_000, startsAt.getTime() + 10 * 60_000));
@@ -72,7 +88,7 @@ async function createReadyEvent(options: { startsAt?: Date } = {}): Promise<stri
   );
   created.events.push(id);
 
-  const staffId = await createUser({ verified: true });
+  const staffId = await createUser(created, { verified: true });
   const roleId = randomUUID();
   await fixturePool.query(
     "INSERT INTO user_roles (id, user_id, role, event_id, granted_at) VALUES ($1, $2, 'staff', $3, $4)",
@@ -96,7 +112,7 @@ async function createReadyEvent(options: { startsAt?: Date } = {}): Promise<stri
   return id;
 }
 
-async function createCompleteProfile(userId: string): Promise<void> {
+async function createCompleteProfile(created: CreatedFixtures, userId: string): Promise<void> {
   const versionId = randomUUID();
   await fixturePool.query(
     `INSERT INTO questionnaire_versions (id, version, definition, activated_at, created_at)
@@ -124,14 +140,45 @@ async function createCompleteProfile(userId: string): Promise<void> {
   );
 }
 
-async function waitUntilBlockedByLock(): Promise<void> {
+async function cleanupFixtures(created: CreatedFixtures): Promise<void> {
+  if (created.participations.length) {
+    await fixturePool.query("DELETE FROM participations WHERE id = ANY($1::uuid[])", [created.participations]);
+  }
+  if (created.users.length) {
+    await fixturePool.query("DELETE FROM user_games WHERE user_id = ANY($1::uuid[])", [created.users]);
+    await fixturePool.query("DELETE FROM profiles WHERE user_id = ANY($1::uuid[])", [created.users]);
+  }
+  if (created.stations.length) {
+    await fixturePool.query("DELETE FROM stations WHERE id = ANY($1::uuid[])", [created.stations]);
+  }
+  if (created.experiences.length) {
+    await fixturePool.query("DELETE FROM experiences WHERE id = ANY($1::uuid[])", [created.experiences]);
+  }
+  if (created.roles.length) {
+    await fixturePool.query("DELETE FROM user_roles WHERE id = ANY($1::uuid[])", [created.roles]);
+  }
+  if (created.events.length) {
+    await fixturePool.query("DELETE FROM events WHERE id = ANY($1::uuid[])", [created.events]);
+  }
+  if (created.games.length) {
+    await fixturePool.query("DELETE FROM games WHERE id = ANY($1::uuid[])", [created.games]);
+  }
+  if (created.users.length) {
+    await fixturePool.query("DELETE FROM users WHERE id = ANY($1::uuid[])", [created.users]);
+  }
+  if (created.questionnaireVersions.length) {
+    await fixturePool.query("DELETE FROM questionnaire_versions WHERE id = ANY($1::uuid[])", [created.questionnaireVersions]);
+  }
+}
+
+async function waitUntilBlockedByLock(blockingApplicationName = applicationName): Promise<void> {
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
     const result = await fixturePool.query<{ pid: number }>(
       `SELECT pid FROM pg_stat_activity
        WHERE application_name = $1 AND state = 'active' AND wait_event_type = 'Lock'
        LIMIT 1`,
-      [applicationName],
+      [blockingApplicationName],
     );
     if (result.rows.length > 0) return;
     await new Promise((resolve) => setTimeout(resolve, 25));
@@ -139,16 +186,45 @@ async function waitUntilBlockedByLock(): Promise<void> {
   throw new Error("O PostgreSQL não sinalizou a espera por lock dentro do limite de teste.");
 }
 
+test("o auxiliar usa a transação do chamador e mantém os locks até o callback terminar", async () => {
+  const created = createFixtureTracker();
+  const eventId = await createReadyEvent(created);
+  const userId = await createUser(created);
+  await createCompleteProfile(created, userId);
+  const probeApplicationName = `arena-lock-probe-${randomUUID()}`;
+  const probe = await fixturePool.connect();
+  let blockedQuery: Promise<unknown> | undefined;
+
+  try {
+    await database.transaction(async (tx) => {
+      const evaluation = await service.evaluateJoinEligibilityWithTx(tx, userId, eventId);
+      assert.equal(evaluation.eligibility.eligible, true);
+
+      await probe.query("SELECT set_config('application_name', $1, false)", [probeApplicationName]);
+      blockedQuery = probe.query("SELECT id FROM events WHERE id = $1 FOR UPDATE", [eventId]);
+      await waitUntilBlockedByLock(probeApplicationName);
+      // Chegar aqui prova que o auxiliar retornou sem encerrar a transação do chamador.
+    }, { isolationLevel: "read committed" });
+
+    await blockedQuery;
+  } finally {
+    if (blockedQuery) await blockedQuery.catch(() => undefined);
+    probe.release();
+    await cleanupFixtures(created);
+  }
+});
+
 async function lockRow(client: PoolClient, table: "events" | "users", id: string): Promise<void> {
   await client.query("BEGIN");
   await client.query(`SELECT id FROM ${table} WHERE id = $1 FOR UPDATE`, [id]);
 }
 
 test("ParticipationsService avalia elegibilidade no mesmo tx e após as esperas por locks", async () => {
+  const created = createFixtureTracker();
   try {
-    const eventId = await createReadyEvent();
-    const userId = await createUser();
-    await createCompleteProfile(userId);
+    const eventId = await createReadyEvent(created);
+    const userId = await createUser(created);
+    await createCompleteProfile(created, userId);
 
     const countsBeforeEvaluation = await fixturePool.query(
       `SELECT e.external_last_order::text AS external_last_order,
@@ -181,7 +257,7 @@ test("ParticipationsService avalia elegibilidade no mesmo tx e após as esperas 
     const absentUser = await service.evaluateJoinEligibilityInTransaction(randomUUID(), eventId);
     assert.ok(absentUser.eligibility.blockingReasons.includes("USER_NOT_FOUND"));
 
-    const futureEvent = await createReadyEvent({ startsAt: new Date(Date.now() + 60 * 60_000) });
+    const futureEvent = await createReadyEvent(created, { startsAt: new Date(Date.now() + 60 * 60_000) });
     const notStarted = await service.evaluateJoinEligibilityInTransaction(userId, futureEvent);
     assert.ok(notStarted.eligibility.blockingReasons.includes("EVENT_NOT_STARTED"));
 
@@ -197,7 +273,7 @@ test("ParticipationsService avalia elegibilidade no mesmo tx e após as esperas 
     await fixturePool.query("DELETE FROM participations WHERE id = $1", [currentParticipationId]);
     created.participations.pop();
 
-    const incompleteUserId = await createUser();
+    const incompleteUserId = await createUser(created);
     const incomplete = await service.evaluateJoinEligibilityInTransaction(incompleteUserId, eventId);
     assert.ok(incomplete.eligibility.blockingReasons.includes("PROFILE_INCOMPLETE"));
 
@@ -254,21 +330,6 @@ test("ParticipationsService avalia elegibilidade no mesmo tx e após as esperas 
     assert.equal(persisted.rows[0].user_games, 0);
     assert.equal(persisted.rows[0].closed_events, 1); // Apenas a alteração concorrente de fixture persiste.
   } finally {
-    if (created.participations.length) {
-      await fixturePool.query("DELETE FROM participations WHERE id = ANY($1::uuid[])", [created.participations]);
-    }
-    if (created.users.length) {
-      await fixturePool.query("DELETE FROM user_games WHERE user_id = ANY($1::uuid[])", [created.users]);
-      await fixturePool.query("DELETE FROM profiles WHERE user_id = ANY($1::uuid[])", [created.users]);
-    }
-    if (created.stations.length) await fixturePool.query("DELETE FROM stations WHERE id = ANY($1::uuid[])", [created.stations]);
-    if (created.experiences.length) await fixturePool.query("DELETE FROM experiences WHERE id = ANY($1::uuid[])", [created.experiences]);
-    if (created.roles.length) await fixturePool.query("DELETE FROM user_roles WHERE id = ANY($1::uuid[])", [created.roles]);
-    if (created.events.length) await fixturePool.query("DELETE FROM events WHERE id = ANY($1::uuid[])", [created.events]);
-    if (created.games.length) await fixturePool.query("DELETE FROM games WHERE id = ANY($1::uuid[])", [created.games]);
-    if (created.users.length) await fixturePool.query("DELETE FROM users WHERE id = ANY($1::uuid[])", [created.users]);
-    if (created.questionnaireVersions.length) {
-      await fixturePool.query("DELETE FROM questionnaire_versions WHERE id = ANY($1::uuid[])", [created.questionnaireVersions]);
-    }
+    await cleanupFixtures(created);
   }
 });
