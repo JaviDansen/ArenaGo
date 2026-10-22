@@ -11,7 +11,7 @@ const fields = ['currentStepIndex', 'questionnaireData', 'birthDateText', 'gende
   'handleSelectMarketInterest', 'handleFinishQuestionnaire'];
 
 function questionnaire(options) {
-  return createHarness('screens/ProfileQuestionnaireScreen.js', { fields, ...options });
+  return createHarness('screens/profile/ProfileQuestionnaireScreen.js', { fields, ...options });
 }
 
 function ready(options) {
@@ -138,7 +138,7 @@ test('birth date stores ISO and has no residual age field', () => {
   const h = ready();
   assert.equal(h.capture.questionnaireData.birthDate, '2024-02-29');
   assert.equal(Object.hasOwn(h.capture.questionnaireData, 'age'), false);
-  const source = readFileSync(path.join(__dirname, '../screens/ProfileQuestionnaireScreen.js'), 'utf8');
+  const source = readFileSync(path.join(__dirname, '../screens/profile/ProfileQuestionnaireScreen.js'), 'utf8');
   assert.doesNotMatch(source, /\bage\b|setAge|errors\.age/);
 });
 

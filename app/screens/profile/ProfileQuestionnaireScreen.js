@@ -12,14 +12,14 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import BirthDateInput from '../components/BirthDateInput';
-import { mockGames } from '../data/mockData';
-import { parseBirthDate } from '../utils/birthDate';
+import BirthDateInput from '../../components/BirthDateInput';
+import { mockGames } from '../../data/mockData';
+import { parseBirthDate } from '../../utils/birthDate';
 import {
   validateAboutYouStep,
   validateGamesMarketStep,
   validateYourGamesStep,
-} from '../utils/validation';
+} from '../../utils/validation';
 
 // =============================================================================
 // DEFINIÇÃO DAS ETAPAS DO QUESTIONÁRIO
