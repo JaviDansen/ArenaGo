@@ -1,19 +1,15 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { and, eq, inArray, sql } from "drizzle-orm";
-import type { NodePgDatabase, NodePgTransaction } from "drizzle-orm/node-postgres";
-import type { ExtractTablesWithRelations } from "drizzle-orm";
+import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { DRIZZLE_DATABASE } from "../database/database.module";
-import type { DatabaseExecutor } from "../database/database-executor";
+import type { DatabaseExecutor, DatabaseTransactionExecutor } from "../database/database-executor";
 import * as schema from "../database/schema";
 import { EventsService } from "../events/events.service";
 import type { JoinEligibilityResult } from "./join-eligibility";
 import { combineJoinEligibility } from "./join-eligibility";
 
 type ParticipationsDatabase = NodePgDatabase<typeof schema>;
-type ParticipationsTransaction = NodePgTransaction<
-  typeof schema,
-  ExtractTablesWithRelations<typeof schema>
->;
+type ParticipationsTransaction = DatabaseTransactionExecutor;
 
 /** Resultado da inspeção feita dentro de uma transação e no horário do PostgreSQL. */
 export interface TransactionalJoinEligibilityEvaluation {
