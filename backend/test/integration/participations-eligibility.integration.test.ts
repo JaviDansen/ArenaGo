@@ -60,7 +60,7 @@ async function createVersion(activated = true): Promise<string> {
   await pool.query(
     `INSERT INTO questionnaire_versions (id, version, definition, activated_at, created_at)
      VALUES ($1, $2, '{}'::jsonb, $3, $4)`,
-    [id, `eligibility-${id}`, activated ? at : null, at],
+    [id, `e-${id}`, activated ? at : null, at],
   );
   created.versions.push(id);
   return id;

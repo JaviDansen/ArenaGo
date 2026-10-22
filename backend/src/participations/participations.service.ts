@@ -125,12 +125,18 @@ export class ParticipationsService {
         .limit(1);
 
       // `now()` seria fixo desde BEGIN; clock_timestamp() observa o relógio após qualquer espera.
-      const clockRows = await tx.execute<{ observedAt: Date }>(
-        sql`SELECT clock_timestamp() AS "observedAt"`,
+      // O epoch em double precision e decodificado pelo node-postgres como number.
+      const clockRows = await tx.execute<{ observedAtMs: number }>(
+        sql`SELECT (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::double precision AS "observedAtMs"`,
       );
-      const evaluatedAt = clockRows.rows[0]?.observedAt;
-      if (!(evaluatedAt instanceof Date)) {
-        throw new Error("PostgreSQL não retornou clock_timestamp() para avaliar o ingresso.");
+      const observedAtMs = clockRows.rows[0]?.observedAtMs;
+      if (typeof observedAtMs !== "number" || !Number.isFinite(observedAtMs)) {
+        throw new Error("PostgreSQL não retornou um epoch válido para avaliar o ingresso.");
+      }
+
+      const evaluatedAt = new Date(observedAtMs);
+      if (!Number.isFinite(evaluatedAt.getTime())) {
+        throw new Error("PostgreSQL retornou um epoch fora do intervalo de Date.");
       }
 
       // Passa tx explicitamente: Events não deve escapar para a conexão raiz durante esta leitura.
