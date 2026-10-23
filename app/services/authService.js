@@ -351,13 +351,29 @@ export function createAuthSessionManager(options = {}) {
           (storedRefreshToken && uncertainRefreshTokens.has(storedRefreshToken)) ||
           (!storedRefreshToken && state.sessionStatus === 'uncertain_refresh')
         ) {
+          if (storedRefreshToken) {
+            try {
+              await clearRefreshTokenForEpoch(epochAtStart);
+            } catch {
+              // Ignora erro secundário de limpeza
+            }
+          }
+          emitState({
+            user: null,
+            isAuthenticated: false,
+            isInitializing: false,
+            sessionStatus: 'uncertain_refresh',
+            authNotice:
+              state.authNotice ||
+              'A tentativa anterior de renovar a sessão falhou sem confirmação do servidor. Por segurança, faça login novamente.',
+          });
           const uncertainError = new ApiError({
             kind: 'timeout',
             status: null,
             code: 'UNCERTAIN_REFRESH_OUTCOME',
             title: 'Renovação anterior inconclusiva',
             detail:
-              'A tentativa anterior de renovar a sessão expirou sem confirmação. Por segurança, faça login novamente.',
+              'A tentativa anterior de renovar a sessão expirou ou falhou sem confirmação. Por segurança, faça login novamente.',
             outcomeUnknown: true,
           });
           throw uncertainError;
@@ -379,104 +395,117 @@ export function createAuthSessionManager(options = {}) {
 
         try {
           const response = await client.post(
-          '/auth/refresh',
-          { refreshToken: storedRefreshToken },
-          { auth: false, retryOnUnauthorized: false }
-        );
+            '/auth/refresh',
+            { refreshToken: storedRefreshToken },
+            {
+              auth: false,
+              retryOnUnauthorized: false,
+              outcomeUnknownOnNetworkError: true,
+            }
+          );
 
-        // Se houve logout ou novo login enquanto o refresh estava em trânsito, descarta a resposta antiga.
-        if (sessionEpoch !== epochAtStart) {
-          return null;
-        }
-
-        if (
-          !response ||
-          typeof response.accessToken !== 'string' ||
-          typeof response.refreshToken !== 'string'
-        ) {
-          throw new ApiError({
-            kind: 'http',
-            status: 500,
-            code: 'INVALID_REFRESH_RESPONSE',
-            title: 'Resposta inválida do servidor',
-            detail: 'Não foi possível validar os novos tokens de sessão.',
-          });
-        }
-
-        const persisted = await writeRefreshTokenForEpoch(
-          response.refreshToken,
-          epochAtStart
-        );
-
-        // Se o logout (ou novo login) ocorreu durante a gravação assíncrona no SecureStore,
-        // writeRefreshTokenForEpoch já reconciliou o armazenamento e retornou false:
-        // jamais expor accessToken ou entregar resposta obsoleta às requisições que aguardavam.
-        if (!persisted || sessionEpoch !== epochAtStart) {
-          return null;
-        }
-
-        accessToken = response.accessToken;
-
-        emitState({
-          networkError: null,
-          storageError: null,
-        });
-
-        return {
-          accessToken: response.accessToken,
-          refreshToken: response.refreshToken,
-          expiresIn: response.expiresIn,
-        };
-      } catch (error) {
-        if (sessionEpoch !== epochAtStart) {
-          return null;
-        }
-
-        // Timeout ou queda após envio do refresh: o servidor pode já ter consumido o token antigo.
-        // NUNCA reenviar automaticamente esse refreshToken (evita falso positivo de reuso / loop).
-        if (error?.isTimeout || error?.outcomeUnknown) {
-          uncertainRefreshTokens.add(storedRefreshToken);
-          sessionEpoch += 1;
-          const timeoutEpoch = sessionEpoch;
-          accessToken = null;
-          try {
-            await clearRefreshTokenForEpoch(timeoutEpoch);
-          } catch {
-            // Ignora falha de limpeza
+          // Se houve logout ou novo login enquanto o refresh estava em trânsito, descarta a resposta antiga.
+          if (sessionEpoch !== epochAtStart) {
+            return null;
           }
 
-          if (sessionEpoch === timeoutEpoch) {
-            emitState({
-              user: null,
-              isAuthenticated: false,
-              isInitializing: false,
-              sessionStatus: 'uncertain_refresh',
-              authNotice:
-                'A conexão expirou durante a renovação da sessão e o resultado não pôde ser confirmado. Por segurança, faça login novamente.',
-              networkError: error.detail,
-              storageError: null,
-              adminChallenge: null,
-              postAuthRoute: null,
+          if (
+            !response ||
+            typeof response.accessToken !== 'string' ||
+            typeof response.refreshToken !== 'string'
+          ) {
+            throw new ApiError({
+              kind: 'http',
+              status: 500,
+              code: 'INVALID_REFRESH_RESPONSE',
+              title: 'Resposta inválida do servidor',
+              detail: 'Não foi possível validar os novos tokens de sessão.',
             });
           }
-          throw error;
-        }
 
-        // Erro HTTP 401: refresh inválido, reutilizado, sessão revogada ou expirada após 30 dias.
-        if (error?.status === 401) {
-          await handleSessionInvalidated(error, { targetEpoch: epochAtStart });
-          throw error;
-        }
+          const persisted = await writeRefreshTokenForEpoch(
+            response.refreshToken,
+            epochAtStart
+          );
 
-        // Falha temporária de conectividade (dispositivo sem rede antes de consumir o token):
-        // Não apagar a sessão nem confundir com revogação confirmada.
-        if (error?.isNetworkError) {
+          // Se o logout (ou novo login) ocorreu durante a gravação assíncrona no SecureStore,
+          // writeRefreshTokenForEpoch já reconciliou o armazenamento e retornou false:
+          // jamais expor accessToken ou entregar resposta obsoleta às requisições que aguardavam.
+          if (!persisted || sessionEpoch !== epochAtStart) {
+            return null;
+          }
+
+          accessToken = response.accessToken;
+
           emitState({
-            networkError: error.detail,
+            networkError: null,
             storageError: null,
-            sessionStatus: state.isAuthenticated ? 'authenticated' : 'network_error',
           });
-        }
+
+          return {
+            accessToken: response.accessToken,
+            refreshToken: response.refreshToken,
+            expiresIn: response.expiresIn,
+          };
+        } catch (error) {
+          if (sessionEpoch !== epochAtStart) {
+            return null;
+          }
+
+          // Timeout ou qualquer falha de transporte durante POST /auth/refresh quando não é
+          // possível provar que o servidor não recebeu a requisição:
+          // O servidor pode já ter consumido/rotacionado o refresh token antigo.
+          // NUNCA reenviar automaticamente esse refreshToken (evita falso positivo de reuso e revogação na K01).
+          const isInconclusiveRefreshTransportError =
+            Boolean(error?.isTimeout) ||
+            Boolean(error?.outcomeUnknown) ||
+            Boolean(error?.isNetworkError && error?.cause?.requestNotSent !== true);
+
+          if (isInconclusiveRefreshTransportError) {
+            if (error && typeof error === 'object') {
+              error.outcomeUnknown = true;
+            }
+            uncertainRefreshTokens.add(storedRefreshToken);
+            sessionEpoch += 1;
+            const uncertainEpoch = sessionEpoch;
+            accessToken = null;
+            try {
+              await clearRefreshTokenForEpoch(uncertainEpoch);
+            } catch {
+              // Ignora falha de limpeza
+            }
+
+            if (sessionEpoch === uncertainEpoch) {
+              emitState({
+                user: null,
+                isAuthenticated: false,
+                isInitializing: false,
+                sessionStatus: 'uncertain_refresh',
+                authNotice:
+                  'A conexão falhou ou expirou durante a renovação da sessão e o resultado não pôde ser confirmado. Por segurança, faça login novamente.',
+                networkError: error.detail,
+                storageError: null,
+                adminChallenge: null,
+                postAuthRoute: null,
+              });
+            }
+            throw error;
+          }
+
+          // Erro HTTP 401: refresh inválido, reutilizado, sessão revogada ou expirada após 30 dias.
+          if (error?.status === 401) {
+            await handleSessionInvalidated(error, { targetEpoch: epochAtStart });
+            throw error;
+          }
+
+          // Falha de transporte apenas quando comprovadamente a requisição não chegou a ser enviada:
+          if (error?.isNetworkError) {
+            emitState({
+              networkError: error.detail,
+              storageError: null,
+              sessionStatus: state.isAuthenticated ? 'authenticated' : 'network_error',
+            });
+          }
 
           throw error;
         }
@@ -579,7 +608,11 @@ export function createAuthSessionManager(options = {}) {
 
         const storedRefreshToken = storageRead.token;
 
-        if (!storedRefreshToken && !accessToken) {
+        if (
+          !storedRefreshToken &&
+          !accessToken &&
+          state.sessionStatus !== 'uncertain_refresh'
+        ) {
           emitState({
             user: null,
             isAuthenticated: false,

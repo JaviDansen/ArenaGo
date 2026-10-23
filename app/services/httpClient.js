@@ -267,7 +267,10 @@ export function createHttpClient(config = {}) {
         title: 'Falha de conexão',
         detail:
           'Não foi possível conectar ao servidor. Verifique sua conexão com a internet e tente novamente.',
-        outcomeUnknown: Boolean(networkErr?.outcomeUnknown),
+        outcomeUnknown: Boolean(
+          networkErr?.outcomeUnknown ||
+            (options.outcomeUnknownOnNetworkError && networkErr?.requestNotSent !== true)
+        ),
         cause: networkErr,
       });
     } finally {

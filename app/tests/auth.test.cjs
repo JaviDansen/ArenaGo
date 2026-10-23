@@ -583,17 +583,27 @@ test('startup with valid refresh token rotates token in SecureStore and loads /a
   assert.equal(rig.secureStore.store.get('arenago.auth.refresh_token'), 'stored-refresh-v2');
 });
 
-test('startup network error preserves refreshToken in SecureStore and reports network error', async () => {
+test('startup network error on GET /auth/me preserves rotated refreshToken in SecureStore and reports network error', async () => {
   const rig = createAuthRig(
-    async () => {
-      throw new TypeError('Failed to fetch');
+    async (req) => {
+      if (req.url.endsWith('/api/v1/auth/refresh')) {
+        return jsonResponse(200, {
+          accessToken: 'restored-access-jwt',
+          expiresIn: 900,
+          refreshToken: 'rotated-keep-me-on-offline-startup',
+        });
+      }
+      if (req.url.endsWith('/api/v1/auth/me')) {
+        throw new TypeError('Failed to fetch');
+      }
+      throw new Error(`Unexpected URL: ${req.url}`);
     },
     { initialRefreshToken: 'keep-me-on-offline-startup' }
   );
 
   const result = await rig.manager.restoreSession();
   assert.equal(result.status, 'network_error');
-  assert.equal(rig.secureStore.store.get('arenago.auth.refresh_token'), 'keep-me-on-offline-startup');
+  assert.equal(rig.secureStore.store.get('arenago.auth.refresh_token'), 'rotated-keep-me-on-offline-startup');
   assert.ok(rig.manager.getSnapshot().networkError);
 });
 
@@ -1401,4 +1411,87 @@ test('delayed session invalidation or stale 401 from previous session never clea
   assert.equal(rig.manager.getSnapshot().sessionStatus, 'authenticated');
   assert.equal(rig.manager.getAccessToken(), 'new-session-access-token');
   assert.equal(rig.secureStore.store.get('arenago.auth.refresh_token'), 'new-session-refresh-token');
+});
+
+test('generic network error during POST /auth/refresh after server consumes token treats outcome as inconclusive and never replays the old token', async () => {
+  let refreshCalls = 0;
+  let serverConsumedTokens = new Set();
+  let sessionRevokedByReuse = false;
+
+  const rig = createAuthRig(
+    async (req) => {
+      if (req.url.endsWith('/api/v1/auth/refresh')) {
+        refreshCalls += 1;
+        const incomingToken = req.body.refreshToken;
+
+        if (serverConsumedTokens.has(incomingToken)) {
+          sessionRevokedByReuse = true;
+          return problemResponse(401, {
+            code: 'REFRESH_TOKEN_REUSED',
+            detail: 'Reutilização de refresh token detectada. Sessão revogada.',
+          });
+        }
+
+        // 1 & 2. Simulated backend receives the refresh and marks the token as processed/consumed
+        serverConsumedTokens.add(incomingToken);
+
+        // 3. fetch rejects with a generic network error before delivering the response
+        throw new TypeError('Network request failed');
+      }
+
+      if (req.url.endsWith('/api/v1/events/active')) {
+        return problemResponse(401, {
+          code: 'INVALID_ACCESS_TOKEN',
+          detail: 'Access token expirado.',
+        });
+      }
+
+      throw new Error(`Unexpected URL: ${req.url}`);
+    },
+    { initialRefreshToken: 'refresh-token-consumed-before-drop' }
+  );
+
+  await assert.rejects(
+    () => rig.manager.refreshSession(),
+    (error) =>
+      error.isNetworkError === true &&
+      error.outcomeUnknown === true &&
+      error.kind === 'network'
+  );
+
+  assert.equal(refreshCalls, 1);
+  assert.equal(serverConsumedTokens.has('refresh-token-consumed-before-drop'), true);
+  assert.equal(sessionRevokedByReuse, false);
+
+  // Client must clear the uncertain token from SecureStore, transition to uncertain_refresh (distinct from revoked),
+  // preserve networkError diagnostics, and direct the user to sign in again via authNotice
+  const snapshotAfterDrop = rig.manager.getSnapshot();
+  assert.equal(snapshotAfterDrop.isAuthenticated, false);
+  assert.equal(snapshotAfterDrop.sessionStatus, 'uncertain_refresh');
+  assert.notEqual(snapshotAfterDrop.sessionStatus, 'revoked');
+  assert.ok(snapshotAfterDrop.networkError);
+  assert.ok(snapshotAfterDrop.authNotice);
+  assert.equal(rig.secureStore.store.has('arenago.auth.refresh_token'), false);
+
+  // 4a. Subsequent restoreSession() attempt must not replay the consumed token
+  const restoreAttempt = await rig.manager.restoreSession();
+  assert.equal(restoreAttempt.status, 'uncertain_refresh');
+  assert.equal(refreshCalls, 1, 'must not replay consumed token during restoreSession()');
+  assert.equal(sessionRevokedByReuse, false);
+
+  // 4b. Even if the old token were somehow still present, restoreSession(), refreshSession(), and protected 401 requests must not replay it
+  rig.secureStore.store.set('arenago.auth.refresh_token', 'refresh-token-consumed-before-drop');
+
+  const secondRestoreAttempt = await rig.manager.restoreSession();
+  assert.equal(secondRestoreAttempt.status, 'uncertain_refresh');
+  assert.equal(refreshCalls, 1, 'must block replay of known uncertain token on restoreSession()');
+  assert.equal(rig.secureStore.store.has('arenago.auth.refresh_token'), false);
+
+  rig.secureStore.store.set('arenago.auth.refresh_token', 'refresh-token-consumed-before-drop');
+  await assert.rejects(
+    () => rig.httpClient.get('/events/active', { auth: true }),
+    (error) => error.code === 'UNCERTAIN_REFRESH_OUTCOME'
+  );
+  assert.equal(refreshCalls, 1, 'must not trigger POST /auth/refresh on protected 401 after uncertain refresh failure');
+  assert.equal(sessionRevokedByReuse, false);
 });

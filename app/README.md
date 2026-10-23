@@ -10,7 +10,7 @@ Este diretório contém o aplicativo mobile do ArenaGo, desenvolvido com React N
   - Login real via `POST /api/v1/auth/login`, sem fallback simulado em caso de falha. Contas com questionário pendente (`hasCompletedQuestionnaire: false`) têm acesso permitido à área autenticada e visualizam na `HomeScreen` o atalho para concluir o questionário.
   - Tratamento seguro do desafio administrativo `requires2FA: true` sem conceder sessão autenticada nem armazenar `tempToken` como `accessToken`/`refreshToken`.
   - Armazenamento seguro do `refreshToken` opaco no `expo-secure-store` (iOS/Android) e manutenção do `accessToken` JWT exclusivamente em memória. No alvo `web`, ambos permanecem apenas em memória (sem uso de `localStorage`, `sessionStorage` ou `AsyncStorage`).
-  - Restauração automática de sessão ao reabrir o app (`POST /api/v1/auth/refresh` + `GET /api/v1/auth/me`) e renovação coordenada em modo *single-flight* ao receber `401` por expiração do `accessToken`, evitando reenvio concorrente ou *replay* automático após timeout incerto.
+  - Restauração automática de sessão ao reabrir o app (`POST /api/v1/auth/refresh` + `GET /api/v1/auth/me`) e renovação coordenada em modo *single-flight* ao receber `401` por expiração do `accessToken`, evitando reenvio concorrente ou *replay* automático após falha de transporte inconclusiva ou timeout incerto no refresh.
   - Logout real via `POST /api/v1/auth/logout` com limpeza local imediata e invalidação de respostas antigas em voo (`sessionEpoch`).
 - **Fluxos ainda locais:**
   - O questionário apresenta três etapas: dados pessoais, jogos e informações sobre o mercado de games (integração com backend prevista na K03).
@@ -78,7 +78,7 @@ Os testes usam o runner nativo do Node.js. Execute em `app/`:
 npm.cmd test
 ```
 
-Na validação atual, o comando passa com **150 testes aprovados** e nenhuma falha.
+Na validação atual, o comando passa com **151 testes aprovados** e nenhuma falha.
 
 ## Organização
 
