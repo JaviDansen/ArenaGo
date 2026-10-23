@@ -20,14 +20,7 @@ export default function HomeScreen({ navigation }) {
     setIsLoggingOut(true);
     try {
       await auth.logout();
-      if (navigation?.reset) {
-        navigation.reset({
-          index: 0,
-          routes: [{ name: 'Login' }],
-        });
-      } else {
-        navigation?.navigate?.('Login');
-      }
+      // AuthSessionGate returns to the public navigator when logout updates auth state.
     } finally {
       setIsLoggingOut(false);
     }

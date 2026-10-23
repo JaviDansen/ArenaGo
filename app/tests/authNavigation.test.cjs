@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { loadModule } = require('./helpers/questionnaireHarness.cjs');
+const { createHarness, loadModule, textOf } = require('./helpers/questionnaireHarness.cjs');
 
 function element(type, props = {}) {
   return { type, props };
@@ -95,10 +95,52 @@ test('AuthSessionGate returns to a public route after logout and routes restored
     'Welcome', 'Login', 'Register',
   ]);
 
+  const newLoginTree = adaptNavigationTree(navigationTree(), {
+    isAuthenticated: true,
+    postAuthRoute: 'MainTabs',
+  });
+  assert.equal(navigatorOf(newLoginTree).props.initialRouteName, 'MainTabs');
+  assert.equal(navigatorOf(newLoginTree).props.key, 'auth-MainTabs');
+
   assert.equal(resolveInitialRouteForAuthState({
     isAuthenticated: true,
     sessionStatus: 'authenticated',
     postAuthRoute: 'MainTabs',
     user: { hasCompletedQuestionnaire: false },
   }), 'MainTabs');
+});
+
+test('HomeScreen logout calls auth.logout once and leaves navigation to AuthSessionGate', async () => {
+  let finishLogout;
+  let logoutCalls = 0;
+  const h = createHarness('screens/home/HomeScreen.js', {
+    authContext: {
+      user: { hasCompletedQuestionnaire: true },
+      logout: () => {
+        logoutCalls += 1;
+        return new Promise((resolve) => {
+          finishLogout = resolve;
+        });
+      },
+    },
+  });
+
+  let logoutPromise;
+  h.act(() => {
+    const button = h.nodes.find(
+      (node) => node.type === 'Pressable' && textOf(node) === 'Sair da conta'
+    );
+    assert.ok(button);
+    logoutPromise = button.props.onPress();
+  });
+  assert.equal(logoutCalls, 1);
+  const logoutButton = h.nodes.find(
+    (node) => node.type === 'Pressable' && textOf(node) === 'Saindo...'
+  );
+  assert.ok(logoutButton, 'loading state is shown while logout is pending');
+  assert.equal(logoutButton.props.disabled, true, 'repeat presses are blocked while logging out');
+
+  finishLogout();
+  await logoutPromise;
+  assert.deepEqual(h.navigationCalls, []);
 });
