@@ -404,7 +404,7 @@ test('login succeeds with completed questionnaire and with pending questionnaire
     assert.deepEqual(h.navigationCalls, []);
     assert.equal(rig.manager.getSnapshot().postAuthRoute, 'MainTabs');
 
-    // Verify HomeScreen behavior for questionnaire status
+    // Verifica o comportamento da HomeScreen conforme o estado do questionário.
     const home = createHarness('screens/home/HomeScreen.js', {
       authContext: {
         ...rig.manager.getSnapshot(),
@@ -423,7 +423,7 @@ test('login succeeds with completed questionnaire and with pending questionnaire
 });
 
 test('login handles 401 invalid credentials, network failure, and 429 rate limit without simulated login fallback', async () => {
-  // 401 Invalid credentials
+  // 401: credenciais inválidas
   const rig401 = createAuthRig(async () =>
     problemResponse(401, {
       code: 'INVALID_CREDENTIALS',
@@ -439,7 +439,7 @@ test('login handles 401 invalid credentials, network failure, and 429 rate limit
   assert.equal(rig401.manager.getSnapshot().isAuthenticated, false);
   assert.ok(hasText(h401, 'E-mail ou senha inválidos.'));
 
-  // Network error
+  // Falha de rede
   const rigNet = createAuthRig(async () => {
     throw new TypeError('Network request failed');
   });
@@ -457,7 +457,7 @@ test('login handles 401 invalid credentials, network failure, and 429 rate limit
     )
   );
 
-  // 429 Rate limit
+  // 429: limite de requisições excedido
   const rig429 = createAuthRig(async () =>
     problemResponse(
       429,
@@ -683,7 +683,7 @@ test('refresh timeout prevents automatic replay of the uncertain refreshToken', 
   );
   assert.equal(refreshCalls, 1);
 
-  // Subsequent automatic attempt must NOT send another POST /auth/refresh
+  // Uma tentativa automática posterior NÃO deve enviar outro POST /auth/refresh.
   await assert.rejects(
     () => rig.manager.refreshSession(),
     (error) => error.code === 'UNCERTAIN_REFRESH_OUTCOME'
@@ -717,7 +717,7 @@ test('session revoked by new login (SESSION_REVOKED) or invalid refresh token cl
 });
 
 test('logout revokes session on backend via POST /auth/logout with Bearer accessToken and clears local state; network failure still clears local state with warning', async () => {
-  // 1. Clean server logout (200 OK)
+  // 1. Logout concluído no servidor (200 OK).
   const rigOk = createAuthRig(async (req) => {
     if (req.url.endsWith('/api/v1/auth/login')) {
       return jsonResponse(200, {
@@ -762,7 +762,7 @@ test('logout revokes session on backend via POST /auth/logout with Bearer access
   assert.equal(rigOk.manager.getSnapshot().user, null);
   assert.equal(rigOk.secureStore.store.has('arenago.auth.refresh_token'), false);
 
-  // 2. Network error during logout still clears local credentials and sets honest warning
+  // 2. Uma falha de rede no logout ainda limpa as credenciais locais e informa o resultado real.
   let failLogout = false;
   const rigNet = createAuthRig(async (req) => {
     if (req.url.endsWith('/api/v1/auth/login')) {
@@ -830,11 +830,11 @@ test('stale in-flight refresh response does not restore session after logout (se
   const pendingRefresh = rig.manager.refreshSession();
   await new Promise((resolve) => setTimeout(resolve, 5));
 
-  // User logs out before refresh finishes
+  // O usuário encerra a sessão antes de o refresh terminar.
   await rig.manager.logout();
   assert.equal(rig.manager.getSnapshot().isAuthenticated, false);
 
-  // Now the delayed refresh response arrives
+  // A resposta atrasada do refresh chega neste momento.
   resolveRefresh(
     jsonResponse(200, {
       accessToken: 'stale-access-token',
@@ -965,10 +965,10 @@ test('logout during pending setRefreshToken() prevents rotated token from remain
     await new Promise((resolve) => setTimeout(resolve, 2));
   }
 
-  // User triggers logout while setRefreshToken() is in flight
+  // O usuário inicia o logout enquanto setRefreshToken() está em andamento.
   const logoutPromise = manager.logout();
 
-  // Complete the pending SecureStore write after logout has already started
+  // Conclui a gravação pendente no SecureStore após o início do logout.
   resolveSetItem();
 
   const [refreshResult, logoutResult] = await Promise.all([refreshPromise, logoutPromise]);
@@ -986,7 +986,7 @@ test('token write finishing after logout start is cleaned up even when tokenStor
   let writeEntered = false;
   const rawStore = new Map([['arenago.auth.refresh_token', 'seed-refresh-token']]);
 
-  // Custom unqueued tokenStorage double where setRefreshToken writes only when finishDelayedWrite() is called
+  // Simulação de tokenStorage sem fila: setRefreshToken grava somente quando finishDelayedWrite() é chamado.
   const unqueuedTokenStorage = {
     isPersistent: true,
     async getRefreshToken() {
@@ -1080,7 +1080,7 @@ test('protected request awaiting refresh while logout occurs does not receive st
     await new Promise((resolve) => setTimeout(resolve, 2));
   }
 
-  // Logout occurs while the protected request is waiting for refreshSession()
+  // O logout ocorre enquanto a requisição protegida aguarda refreshSession().
   const logoutPromise = rig.manager.logout();
 
   resolveRefreshHttp(
@@ -1190,23 +1190,23 @@ test('logout followed immediately by a new login preserves the new session crede
     tokenStorage: controlledTokenStorage,
   });
 
-  // 1. Session 1 starts refresh and pauses inside setRefreshToken('session1-rotated-token')
+  // 1. A sessão 1 inicia o refresh e pausa em setRefreshToken('session1-rotated-token').
   const refresh1Promise = manager.refreshSession();
   while (!oldRefreshWriteEntered) {
     await new Promise((resolve) => setTimeout(resolve, 2));
   }
 
-  // 2. User triggers logout AND immediately triggers a new login
+  // 2. O usuário encerra a sessão e inicia outro login imediatamente.
   const logoutPromise = manager.logout();
   const login2Promise = manager.login({
     email: 'novo@example.com',
     password: 'StrongPassword#2026',
   });
 
-  // 3. Unblock the old refresh write from Session 1
+  // 3. Libera a gravação antiga do refresh da sessão 1.
   resolveOldRefreshWrite();
 
-  // Wait until clearRefreshToken from logout is entered (if reached), then unblock it
+  // Aguarda a entrada em clearRefreshToken do logout, se ocorrer, e então a libera.
   await new Promise((resolve) => setTimeout(resolve, 10));
   if (resolveLogoutDelete) {
     resolveLogoutDelete();
@@ -1253,7 +1253,7 @@ test('SecureStore read failure is differentiated from missing token, preserves s
     secureStore: flakySecureStore,
   });
 
-  // 1. Verify explicit differentiation in tokenStorage.readRefreshToken()
+  // 1. Verifica a distinção explícita em tokenStorage.readRefreshToken().
   const failedRead = await tokenStorage.readRefreshToken();
   assert.equal(failedRead.status, 'error');
   assert.equal(failedRead.token, null);
@@ -1289,11 +1289,11 @@ test('SecureStore read failure is differentiated from missing token, preserves s
 
   const manager = createAuthSessionManager({ client, tokenStorage });
 
-  // 2. First restoreSession() fails to read SecureStore:
-  //    - Must NOT presume unauthenticated
-  //    - Must NOT delete existing credentials
-  //    - Must NOT grant authenticated access
-  //    - Must expose recoverable 'storage_error' state
+  // 2. A primeira restoreSession() falha ao ler o SecureStore:
+  //    - Não deve presumir que a sessão está encerrada.
+  //    - Não deve excluir credenciais existentes.
+  //    - Não deve conceder acesso autenticado.
+  //    - Deve expor o estado recuperável 'storage_error'.
   const firstRestore = await manager.restoreSession();
   assert.equal(firstRestore.status, 'storage_error');
   assert.equal(manager.getSnapshot().isAuthenticated, false);
@@ -1304,7 +1304,7 @@ test('SecureStore read failure is differentiated from missing token, preserves s
   assert.equal(deleteCalls, 0);
   assert.equal(rawStore.get('arenago.auth.refresh_token'), 'existing-valid-refresh-token');
 
-  // 3. Second attempt succeeds when SecureStore becomes readable again
+  // 3. A segunda tentativa funciona quando o SecureStore volta a responder.
   shouldFailRead = false;
   const secondRestore = await manager.restoreSession();
   assert.equal(secondRestore.status, 'authenticated');
@@ -1314,7 +1314,7 @@ test('SecureStore read failure is differentiated from missing token, preserves s
   assert.equal(manager.getSnapshot().user.email, 'recuperado@example.com');
   assert.equal(rawStore.get('arenago.auth.refresh_token'), 'recovered-refresh-token');
 
-  // 4. Verify empty state differentiation when credential is removed
+  // 4. Verifica a distinção do estado vazio após a remoção da credencial.
   await tokenStorage.clearRefreshToken();
   const emptyRead = await tokenStorage.readRefreshToken();
   assert.equal(emptyRead.status, 'empty');
@@ -1364,13 +1364,13 @@ test('delayed session invalidation or stale 401 from previous session never clea
     { initialRefreshToken: 'old-session-refresh-token' }
   );
 
-  // Start a protected request during the old session
+  // Inicia uma requisição protegida durante a sessão antiga.
   const staleRequestPromise = rig.httpClient.get('/events/active', { auth: true });
   while (!resolveStaleProtectedRequest) {
     await new Promise((resolve) => setTimeout(resolve, 2));
   }
 
-  // Logout old session and immediately log in as a new session
+  // Encerra a sessão antiga e inicia uma nova sessão imediatamente.
   await rig.manager.logout();
   await rig.manager.login({
     email: 'nova@example.com',
@@ -1380,7 +1380,7 @@ test('delayed session invalidation or stale 401 from previous session never clea
   assert.equal(rig.manager.getSnapshot().isAuthenticated, true);
   assert.equal(rig.secureStore.store.get('arenago.auth.refresh_token'), 'new-session-refresh-token');
 
-  // Now the stale request from the previous session returns 401 SESSION_REVOKED
+  // A requisição antiga retorna 401 SESSION_REVOKED.
   resolveStaleProtectedRequest(
     problemResponse(401, {
       code: 'SESSION_REVOKED',
@@ -1393,7 +1393,7 @@ test('delayed session invalidation or stale 401 from previous session never clea
     (error) => error.status === 401 && error.code === 'SESSION_REVOKED'
   );
 
-  // The new session and its refreshToken in SecureStore must remain intact
+  // A nova sessão e seu refreshToken no SecureStore devem permanecer intactos.
   assert.equal(rig.manager.getSnapshot().isAuthenticated, true);
   assert.equal(rig.manager.getSnapshot().sessionStatus, 'authenticated');
   assert.equal(rig.manager.getAccessToken(), 'new-session-access-token');
@@ -1419,10 +1419,10 @@ test('generic network error during POST /auth/refresh after server consumes toke
           });
         }
 
-        // 1 & 2. Simulated backend receives the refresh and marks the token as processed/consumed
+        // 1 e 2. O backend simulado recebe o refresh e marca o token como processado/consumido.
         serverConsumedTokens.add(incomingToken);
 
-        // 3. fetch rejects with a generic network error before delivering the response
+        // 3. fetch rejeita com um erro de rede genérico antes de entregar a resposta.
         throw new TypeError('Network request failed');
       }
 
@@ -1450,8 +1450,8 @@ test('generic network error during POST /auth/refresh after server consumes toke
   assert.equal(serverConsumedTokens.has('refresh-token-consumed-before-drop'), true);
   assert.equal(sessionRevokedByReuse, false);
 
-  // Client must clear the uncertain token from SecureStore, transition to uncertain_refresh (distinct from revoked),
-  // preserve networkError diagnostics, and direct the user to sign in again via authNotice
+  // O cliente deve limpar do SecureStore o token de resultado incerto e mudar para uncertain_refresh (distinto de revoked),
+  // preservar os detalhes de networkError e orientar novo login por meio de authNotice.
   const snapshotAfterDrop = rig.manager.getSnapshot();
   assert.equal(snapshotAfterDrop.isAuthenticated, false);
   assert.equal(snapshotAfterDrop.sessionStatus, 'uncertain_refresh');
@@ -1460,13 +1460,13 @@ test('generic network error during POST /auth/refresh after server consumes toke
   assert.ok(snapshotAfterDrop.authNotice);
   assert.equal(rig.secureStore.store.has('arenago.auth.refresh_token'), false);
 
-  // 4a. Subsequent restoreSession() attempt must not replay the consumed token
+  // 4a. Uma restoreSession() posterior não deve reenviar o token consumido.
   const restoreAttempt = await rig.manager.restoreSession();
   assert.equal(restoreAttempt.status, 'uncertain_refresh');
   assert.equal(refreshCalls, 1, 'must not replay consumed token during restoreSession()');
   assert.equal(sessionRevokedByReuse, false);
 
-  // 4b. Even if the old token were somehow still present, restoreSession(), refreshSession(), and protected 401 requests must not replay it
+  // 4b. Mesmo que o token antigo ainda exista, restoreSession(), refreshSession() e requisições protegidas com 401 não devem reenviá-lo.
   rig.secureStore.store.set('arenago.auth.refresh_token', 'refresh-token-consumed-before-drop');
 
   const secondRestoreAttempt = await rig.manager.restoreSession();

@@ -1,18 +1,8 @@
-import { cloneElement, isValidElement, useState } from 'react';
+import { useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import { ActivityIndicator, Pressable, SafeAreaView, StyleSheet, Text, View } from 'react-native';
 
 import { AuthProvider, useAuth } from '../../context/AuthContext';
-
-const PROTECTED_ROUTE_NAMES = new Set([
-  'MainTabs',
-  'ProfileQuestionnaire',
-  'Questionario',
-  'EventEntry',
-  'EventConfirmation',
-  'ParticipationDetails',
-  'Evaluation',
-]);
 
 export function resolveInitialRouteForAuthState(authState) {
   if (!authState || !authState.isAuthenticated) {
@@ -32,54 +22,6 @@ export function resolveInitialRouteForAuthState(authState) {
   }
 
   return 'MainTabs';
-}
-
-export function adaptNavigationTree(node, authState) {
-  if (!isValidElement(node)) {
-    return node;
-  }
-
-  const initialRouteName = resolveInitialRouteForAuthState(authState);
-  const navKey = authState?.isAuthenticated
-    ? `auth-${initialRouteName}`
-    : `unauth-${initialRouteName}`;
-
-  // Se for o Stack.Navigator (possui initialRouteName nas props), ajusta a rota inicial e filtra rotas protegidas quando desautenticado
-  if (node.props && typeof node.props.initialRouteName === 'string') {
-    const rawChildren = Array.isArray(node.props.children)
-      ? node.props.children
-      : node.props.children
-      ? [node.props.children]
-      : [];
-
-    const filteredChildren = authState?.isAuthenticated
-      ? rawChildren
-      : rawChildren.filter((child) => {
-          const screenName = child?.props?.name;
-          return !screenName || !PROTECTED_ROUTE_NAMES.has(screenName);
-        });
-
-    return cloneElement(
-      node,
-      {
-        ...node.props,
-        key: navKey,
-        initialRouteName,
-      },
-      ...filteredChildren
-    );
-  }
-
-  if (!node.props || !node.props.children) {
-    return node;
-  }
-
-  const adaptedChildren = Array.isArray(node.props.children)
-    ? node.props.children.map((child) => adaptNavigationTree(child, authState))
-    : adaptNavigationTree(node.props.children, authState);
-
-  // Se o filho adaptado é o Stack.Navigator, este nó é o NavigationContainer; atribuímos key para reconstruir a pilha na troca de estado de sessão
-  return cloneElement(node, node.props, adaptedChildren);
 }
 
 export function AuthSessionCoordinator({ children }) {
@@ -154,7 +96,7 @@ export function AuthSessionCoordinator({ children }) {
     );
   }
 
-  return adaptNavigationTree(children, auth);
+  return children;
 }
 
 export default function AuthSessionGate({

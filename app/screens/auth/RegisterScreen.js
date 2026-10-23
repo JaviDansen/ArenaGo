@@ -70,8 +70,8 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
     setIsSubmitting(true);
 
     try {
-      // AuthSessionGate selects the authenticated stack from the updated session.
-      // This screen belongs to the previous public navigator, so it must not navigate.
+      // AuthSessionGate seleciona a pilha autenticada a partir da sessão atualizada.
+      // Esta tela pertence ao navegador público anterior e não deve navegar.
       await auth.register(payload);
     } catch (error) {
       if (error?.isTimeout) {

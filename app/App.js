@@ -1,9 +1,10 @@
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 
+import { useAuth } from './context/AuthContext';
 import { ParticipationProvider } from './context/ParticipationContext';
 import MainTabs from './navigation/MainTabs';
-import AuthSessionGate from './screens/auth/AuthSessionGate';
+import AuthSessionGate, { resolveInitialRouteForAuthState } from './screens/auth/AuthSessionGate';
 import EvaluationScreen from './screens/participation/EvaluationScreen';
 import EventConfirmationScreen from './screens/event-entry/EventConfirmationScreen';
 import EventEntryScreen from './screens/event-entry/EventEntryScreen';
@@ -16,48 +17,79 @@ import WelcomeScreen from './screens/auth/WelcomeScreen';
 
 const Stack = createNativeStackNavigator();
 
+export function AppNavigation() {
+  const auth = useAuth();
+  const isAuthenticated = Boolean(auth?.isAuthenticated);
+  const initialRouteName = resolveInitialRouteForAuthState(auth);
+  const publicScreens = [
+    { name: 'Welcome', component: WelcomeScreen },
+    { name: 'Login', component: LoginScreen },
+    { name: 'Register', component: RegisterScreen },
+    { name: 'Cadastro', component: RegisterScreen },
+    { name: 'ForgotPassword', component: ForgotPasswordScreen },
+    { name: 'EsqueciSenha', component: ForgotPasswordScreen },
+  ];
+  const appScreens = [
+    { name: 'ProfileQuestionnaire', component: ProfileQuestionnaireScreen },
+    { name: 'Questionario', component: ProfileQuestionnaireScreen },
+    { name: 'MainTabs', component: MainTabs },
+    {
+      name: 'EventEntry',
+      component: EventEntryScreen,
+      options: { headerShown: true, title: 'Entrar em um evento' },
+    },
+    {
+      name: 'EventConfirmation',
+      component: EventConfirmationScreen,
+      options: { headerShown: true, title: 'Confirmar entrada' },
+    },
+    {
+      name: 'ParticipationDetails',
+      component: ParticipationDetailsScreen,
+      options: { headerShown: true, title: 'Detalhes da participação' },
+    },
+    {
+      name: 'Evaluation',
+      component: EvaluationScreen,
+      options: { headerShown: true, headerBackVisible: false, title: 'Avaliação' },
+    },
+  ];
+  const availableScreens = isAuthenticated ? appScreens : publicScreens;
+  const firstScreenIndex = availableScreens.findIndex(
+    (screen) => screen.name === initialRouteName
+  );
+  const orderedScreens =
+    firstScreenIndex > 0
+      ? [
+          availableScreens[firstScreenIndex],
+          ...availableScreens.filter((_, index) => index !== firstScreenIndex),
+        ]
+      : availableScreens;
+
+  return (
+    <ParticipationProvider>
+      <NavigationContainer>
+        <Stack.Navigator
+          screenOptions={{ headerShown: false }}
+        >
+          {orderedScreens.map(({ name, component, options }) => (
+            <Stack.Screen
+              key={name}
+              name={name}
+              component={component}
+              options={options}
+            />
+          ))}
+        </Stack.Navigator>
+      </NavigationContainer>
+    </ParticipationProvider>
+  );
+}
+
 export default function App() {
   return (
     <AuthSessionGate>
-      <ParticipationProvider>
-        <NavigationContainer>
-          <Stack.Navigator initialRouteName="Welcome" screenOptions={{ headerShown: false }}>
-            <Stack.Screen name="Welcome" component={WelcomeScreen} />
-            <Stack.Screen name="Login" component={LoginScreen} />
-            <Stack.Screen name="Register" component={RegisterScreen} />
-            <Stack.Screen name="Cadastro" component={RegisterScreen} />
-            <Stack.Screen name="ProfileQuestionnaire" component={ProfileQuestionnaireScreen} />
-            <Stack.Screen name="Questionario" component={ProfileQuestionnaireScreen} />
-            <Stack.Screen name="ForgotPassword" component={ForgotPasswordScreen} />
-            <Stack.Screen name="EsqueciSenha" component={ForgotPasswordScreen} />
-            <Stack.Screen name="MainTabs" component={MainTabs} />
-            <Stack.Screen
-              name="EventEntry"
-              component={EventEntryScreen}
-              options={{ headerShown: true, title: 'Entrar em um evento' }}
-            />
-            <Stack.Screen
-              name="EventConfirmation"
-              component={EventConfirmationScreen}
-              options={{ headerShown: true, title: 'Confirmar entrada' }}
-            />
-            <Stack.Screen
-              name="ParticipationDetails"
-              component={ParticipationDetailsScreen}
-              options={{ headerShown: true, title: 'Detalhes da participação' }}
-            />
-            <Stack.Screen
-              name="Evaluation"
-              component={EvaluationScreen}
-              options={{
-                headerShown: true,
-                headerBackVisible: false,
-                title: 'Avaliação',
-              }}
-            />
-          </Stack.Navigator>
-        </NavigationContainer>
-      </ParticipationProvider>
+      <AppNavigation />
     </AuthSessionGate>
   );
 }

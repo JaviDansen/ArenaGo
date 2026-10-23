@@ -20,7 +20,7 @@ export default function HomeScreen({ navigation }) {
     setIsLoggingOut(true);
     try {
       await auth.logout();
-      // AuthSessionGate returns to the public navigator when logout updates auth state.
+      // AuthSessionGate retorna ao navegador público quando o logout atualiza a sessão.
     } finally {
       setIsLoggingOut(false);
     }

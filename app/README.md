@@ -12,8 +12,12 @@ Este diretório contém o aplicativo mobile do ArenaGo, desenvolvido com React N
   - Armazenamento seguro do `refreshToken` opaco no `expo-secure-store` (iOS/Android) e manutenção do `accessToken` JWT exclusivamente em memória. No alvo `web`, ambos permanecem apenas em memória (sem uso de `localStorage`, `sessionStorage` ou `AsyncStorage`).
   - Restauração automática de sessão ao reabrir o app (`POST /api/v1/auth/refresh` + `GET /api/v1/auth/me`) e renovação coordenada em modo *single-flight* ao receber `401` por expiração do `accessToken`, evitando reenvio concorrente ou *replay* automático após falha de transporte inconclusiva ou timeout incerto no refresh.
   - Logout real via `POST /api/v1/auth/logout` com limpeza local imediata e invalidação de respostas antigas em voo (`sessionEpoch`).
+- **Navegação de autenticação:**
+  - A navegação é declarativa: enquanto desautenticado, o navegador disponibiliza somente as telas públicas (`Welcome`, `Login`, cadastro e recuperação de senha); enquanto autenticado, disponibiliza somente as telas do aplicativo.
+  - Login e restauração de sessão abrem `MainTabs` automaticamente. Cadastro cria a sessão e abre `ProfileQuestionnaire`; logout retorna à área pública. A remoção da rota anterior impede voltar à tela de Login após autenticar.
+  - O estado de autenticação controla a árvore de rotas sem navegação manual nas telas de login, cadastro ou logout.
 - **Fluxos ainda locais:**
-  - O questionário apresenta três etapas: dados pessoais, jogos e informações sobre o mercado de games (integração com backend prevista na K03).
+  - O questionário apresenta três etapas: dados pessoais, jogos e informações sobre o mercado de games. É um fluxo local e seus dados ainda não são persistidos no backend; a integração e persistência serão feitas em uma task posterior (prevista na K03).
   - A entrada manual aceita os códigos de demonstração `FILA` e `LIVRE`, sem diferenciar maiúsculas de minúsculas. `FILA` inicia uma espera simulada na fila externa; `LIVRE` entra diretamente na Arena.
   - Na Arena, o fluxo local simula filas de experiências, chamada, ausência, confirmação de atendimento e saída.
   - A avaliação permite selecionar de uma a cinco estrelas e escrever um comentário opcional.
@@ -78,7 +82,8 @@ Os testes usam o runner nativo do Node.js. Execute em `app/`:
 npm.cmd test
 ```
 
-Na validação atual, o comando passa com **151 testes aprovados** e nenhuma falha.
+Na validação atual, o comando passa com **155 testes aprovados** e nenhuma falha.
+Também foram reportados **11 testes manuais aprovados em iPhone físico**, cobrindo cadastro, login imediato, logout, restauração da sessão, troca de contas, validações e falhas de conexão.
 
 ## Organização
 
