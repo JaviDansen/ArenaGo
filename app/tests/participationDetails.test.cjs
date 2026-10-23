@@ -292,16 +292,26 @@ test('mocks cover repeated experiences, no experiences and re-entry in the same 
 });
 
 test('details open from the root stack with a back button to the list', () => {
+  const authState = { isAuthenticated: true, sessionStatus: 'authenticated', postAuthRoute: 'MainTabs' };
   const app = loadModule('App.js', (name) => {
     if (name === '@react-navigation/native') return { NavigationContainer: 'NavigationContainer' };
     if (name === '@react-navigation/native-stack') {
       return { createNativeStackNavigator: () => ({ Navigator: 'StackNavigator', Screen: 'StackScreen' }) };
     }
     if (name === './context/ParticipationContext') return { ParticipationProvider: 'ParticipationProvider' };
+    if (name === './context/AuthContext') return { useAuth: () => authState };
+    if (name === './screens/auth/AuthSessionGate') {
+      return {
+        __esModule: true,
+        default: 'AuthSessionGate',
+        resolveInitialRouteForAuthState: () => 'MainTabs',
+      };
+    }
+    if (name === 'react/jsx-runtime') return require('react/jsx-runtime');
     if (name.startsWith('./screens/') || name === './navigation/MainTabs') return { __esModule: true, default: name };
     return require(name);
   });
-  const screens = nodes(app.exports.default()).filter((node) => node.type === 'StackScreen');
+  const screens = nodes(app.exports.AppNavigation()).filter((node) => node.type === 'StackScreen');
   const details = screens.find((node) => node.props.name === 'ParticipationDetails');
   assert.equal(details.props.component, './screens/participation/ParticipationDetailsScreen');
   assert.equal(details.props.options.headerShown, true);

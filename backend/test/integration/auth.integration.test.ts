@@ -399,6 +399,7 @@ test("K01 Auth & Sessions — Integração HTTP + PostgreSQL Real", async (t) =>
     const blockedByEmail = await apiRequest<{
       status: number;
       code: string;
+      detail: string;
       retryAfterSeconds: number;
     }>("/auth/register", {
       method: "POST",

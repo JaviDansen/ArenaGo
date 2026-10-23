@@ -1,12 +1,18 @@
 import { getTodayCivilDate, parseBirthDate } from './birthDate';
 
 /**
- * Utilitários de validação para fluxos de autenticação (Login e Cadastro).
+ * Utilitários de validação para fluxos de autenticação (Login e Cadastro) e Questionário.
  */
+
+export const NAME_MIN_LENGTH = 2;
+export const NAME_MAX_LENGTH = 150;
+export const EMAIL_MAX_LENGTH = 255;
+export const PASSWORD_MIN_LENGTH = 8;
+export const PASSWORD_MAX_LENGTH = 128;
 
 /**
  * Valida o formato de um endereço de e-mail.
- * Requisitos: formato com identificador, '@', domínio e extensão.
+ * Requisitos: formato com identificador, '@', domínio e extensão, até 255 caracteres.
  *
  * @param {string} email
  * @returns {boolean}
@@ -15,20 +21,23 @@ export function isValidEmail(email) {
   if (!email || typeof email !== 'string') {
     return false;
   }
+  const trimmed = email.trim();
+  if (trimmed.length === 0 || trimmed.length > EMAIL_MAX_LENGTH) {
+    return false;
+  }
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  return emailRegex.test(email.trim());
+  return emailRegex.test(trimmed);
 }
 
 /**
- * Valida os campos da tela de Cadastro.
- * Regras da Task 2:
- * - Nome: obrigatório;
- * - E-mail: obrigatório e deve possuir formato válido;
- * - Senha: obrigatória e deve possuir no mínimo 6 caracteres;
+ * Valida os campos da tela de Cadastro (K02 / Contrato K01):
+ * - Nome: obrigatório, entre 2 e 150 caracteres após trim;
+ * - E-mail: obrigatório e deve possuir formato válido (até 255 caracteres);
+ * - Senha: obrigatória e deve possuir entre 8 e 128 caracteres;
  * - Confirmar senha: obrigatório e deve ser igual à Senha.
  *
- * Não são aplicadas regras adicionais de senha (como números, maiúsculas ou símbolos).
- * O campo 'confirmPassword' é estritamente uma validação local e não compõe dados de perfil.
+ * Não são aplicadas regras arbitrárias de composição (símbolos, números ou maiúsculas).
+ * O campo 'confirmPassword' pertence exclusivamente à validação local do frontend.
  *
  * @param {Object} data
  * @param {string} data.name
@@ -40,12 +49,14 @@ export function isValidEmail(email) {
 export function validateRegisterForm({ name, email, password, confirmPassword }) {
   const errors = {};
 
-  const trimmedName = (name || '').trim();
-  const trimmedEmail = (email || '').trim();
+  const trimmedName = typeof name === 'string' ? name.trim() : '';
+  const trimmedEmail = typeof email === 'string' ? email.trim() : '';
 
-  // Nome: obrigatório
+  // Nome: obrigatório, entre 2 e 150 caracteres após trim
   if (!trimmedName) {
     errors.name = 'O nome é obrigatório.';
+  } else if (trimmedName.length < NAME_MIN_LENGTH || trimmedName.length > NAME_MAX_LENGTH) {
+    errors.name = 'O nome deve possuir entre 2 e 150 caracteres.';
   }
 
   // E-mail: obrigatório e formato válido
@@ -55,15 +66,17 @@ export function validateRegisterForm({ name, email, password, confirmPassword })
     errors.email = 'Informe um e-mail com formato válido.';
   }
 
-  // Senha: obrigatória e mínimo de 6 caracteres
-  if (!password) {
+  // Senha: obrigatória, entre 8 e 128 caracteres
+  if (!password || typeof password !== 'string') {
     errors.password = 'A senha é obrigatória.';
-  } else if (password.length < 6) {
-    errors.password = 'A senha deve possuir no mínimo 6 caracteres.';
+  } else if (password.length < PASSWORD_MIN_LENGTH) {
+    errors.password = 'A senha deve possuir no mínimo 8 caracteres.';
+  } else if (password.length > PASSWORD_MAX_LENGTH) {
+    errors.password = 'A senha deve possuir no máximo 128 caracteres.';
   }
 
   // Confirmar senha: obrigatório e igual à senha
-  if (!confirmPassword) {
+  if (!confirmPassword || typeof confirmPassword !== 'string') {
     errors.confirmPassword = 'A confirmação de senha é obrigatória.';
   } else if (confirmPassword !== password) {
     errors.confirmPassword = 'As senhas não coincidem.';
@@ -77,9 +90,8 @@ export function validateRegisterForm({ name, email, password, confirmPassword })
 
 /**
  * Valida os campos da tela de Login.
- * Regras da Task 2:
  * - E-mail: obrigatório e formato válido;
- * - Senha: obrigatória.
+ * - Senha: obrigatória (até 128 caracteres).
  *
  * @param {Object} data
  * @param {string} data.email
@@ -89,7 +101,7 @@ export function validateRegisterForm({ name, email, password, confirmPassword })
 export function validateLoginForm({ email, password }) {
   const errors = {};
 
-  const trimmedEmail = (email || '').trim();
+  const trimmedEmail = typeof email === 'string' ? email.trim() : '';
 
   // E-mail: obrigatório e formato válido
   if (!trimmedEmail) {
@@ -99,8 +111,10 @@ export function validateLoginForm({ email, password }) {
   }
 
   // Senha: obrigatória
-  if (!password) {
+  if (!password || typeof password !== 'string') {
     errors.password = 'A senha é obrigatória.';
+  } else if (password.length > PASSWORD_MAX_LENGTH) {
+    errors.password = 'A senha deve possuir no máximo 128 caracteres.';
   }
 
   return {
