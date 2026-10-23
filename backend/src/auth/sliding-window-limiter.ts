@@ -16,6 +16,8 @@ export interface SlidingWindowPolicy {
   blockMs: number;
 }
 
+const MAX_CLEANUP_INTERVAL_MS = 60_000;
+
 interface WindowEntry {
   hits: number[];
   blockedUntilMs: number | null;
@@ -23,11 +25,14 @@ interface WindowEntry {
 
 export class SlidingWindowLimiter {
   private readonly entries = new Map<string, WindowEntry>();
+  private lastCleanupAtMs: number | null = null;
 
   constructor(private readonly policy: SlidingWindowPolicy) {}
 
   /** Segundos restantes de bloqueio para a chave (0 quando liberada). */
   retryAfterSeconds(key: string, nowMs = Date.now()): number {
+    this.pruneExpiredEntriesIfDue(nowMs);
+
     const entry = this.entries.get(key);
     if (!entry) return 0;
 
@@ -46,6 +51,8 @@ export class SlidingWindowLimiter {
 
   /** Registra uma ocorrência e bloqueia a chave ao atingir o limite da janela. */
   hit(key: string, nowMs = Date.now()): void {
+    this.pruneExpiredEntriesIfDue(nowMs);
+
     const existing = this.entries.get(key) ?? { hits: [], blockedUntilMs: null };
     const hits = existing.hits.filter((ts) => nowMs - ts < this.policy.windowMs);
     hits.push(nowMs);
@@ -60,6 +67,40 @@ export class SlidingWindowLimiter {
 
   clear(): void {
     this.entries.clear();
+  }
+
+  /**
+   * A limpeza oportunista descarta chaves abandonadas sem usar timers.
+   * A varredura ocorre no máximo uma vez por minuto (ou por janela menor) e remove
+   * apenas estado expirado, preservando os contadores e bloqueios ativos.
+   */
+  private pruneExpiredEntriesIfDue(nowMs: number): void {
+    const cleanupIntervalMs = Math.min(this.policy.windowMs, MAX_CLEANUP_INTERVAL_MS);
+    if (
+      this.lastCleanupAtMs !== null &&
+      nowMs - this.lastCleanupAtMs < cleanupIntervalMs
+    ) {
+      return;
+    }
+
+    this.lastCleanupAtMs = nowMs;
+    for (const [key, entry] of this.entries) {
+      if (entry.blockedUntilMs !== null) {
+        if (nowMs >= entry.blockedUntilMs) {
+          this.entries.delete(key);
+        }
+        continue;
+      }
+
+      const activeHits = entry.hits.filter(
+        (hitAtMs) => nowMs - hitAtMs < this.policy.windowMs,
+      );
+      if (activeHits.length === 0) {
+        this.entries.delete(key);
+      } else if (activeHits.length !== entry.hits.length) {
+        this.entries.set(key, { ...entry, hits: activeHits });
+      }
+    }
   }
 }
 

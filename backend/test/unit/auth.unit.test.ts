@@ -18,6 +18,7 @@ import {
   REGISTRATION_PER_IP_POLICY,
   RegistrationRateLimiterService,
 } from "../../src/auth/registration-rate-limiter.service";
+import { SlidingWindowLimiter } from "../../src/auth/sliding-window-limiter";
 import {
   ACCESS_TOKEN_TTL_SECONDS,
   generateOpaqueRefreshToken,
@@ -27,6 +28,10 @@ import {
   verifyAccessToken,
 } from "../../src/auth/token.util";
 import { ProblemException } from "../../src/common/errors/problem.exception";
+
+function limiterEntryCount(limiter: SlidingWindowLimiter): number {
+  return (limiter as unknown as { entries: Map<string, unknown> }).entries.size;
+}
 
 test("Auth Unit Suite: DTOs, política de senhas, tokens e rate limiter", async (t) => {
   await t.test("registerSchema valida e normaliza nome e e-mail corretamente", () => {
@@ -197,6 +202,32 @@ test("Auth Unit Suite: DTOs, política de senhas, tokens e rate limiter", async 
     assert.doesNotThrow(() => limiter.checkAllowed(email, ip, now + 7_000));
   });
 
+  await t.test("a limpeza compartilhada não apaga uma janela ativa de login", () => {
+    const limiter = new LoginRateLimiterService();
+    const start = 1_700_000_000_000;
+    const email = "ativo@exemplo.com";
+    const ip = "192.0.2.20";
+
+    limiter.checkAllowed(email, ip, start);
+    limiter.recordFailure(email, ip, start);
+
+    // Uma conta diferente aciona o sweep depois de um minuto.
+    limiter.checkAllowed("outra@exemplo.com", "192.0.2.21", start + 60_000);
+
+    for (let i = 1; i < 5; i += 1) {
+      limiter.checkAllowed(email, ip, start + 60_000 + i * 1_000);
+      limiter.recordFailure(email, ip, start + 60_000 + i * 1_000);
+    }
+
+    assert.throws(
+      () => limiter.checkAllowed(email, ip, start + 65_000),
+      (err: unknown) =>
+        err instanceof ProblemException &&
+        err.getStatus() === 429 &&
+        err.problem.code === "TOO_MANY_LOGIN_ATTEMPTS",
+    );
+  });
+
   await t.test("RegistrationRateLimiterService bloqueia excesso por IP e por e-mail com 429 + Retry-After", () => {
     const limiter = new RegistrationRateLimiterService();
     const now = 1_700_000_000_000;
@@ -229,6 +260,57 @@ test("Auth Unit Suite: DTOs, política de senhas, tokens e rate limiter", async 
         err.getStatus() === 429 &&
         err.problem.code === "TOO_MANY_REGISTRATION_ATTEMPTS",
     );
+  });
+
+  await t.test("SlidingWindowLimiter expurga chaves expiradas sem revisitar a chave e preserva contadores ativos", () => {
+    const limiter = new SlidingWindowLimiter({
+      windowMs: 1_000,
+      maxHits: 2,
+      blockMs: 1_000,
+    });
+    const start = 1_700_000_000_000;
+
+    limiter.hit("abandoned", start);
+    limiter.hit("active", start + 900);
+
+    // A limpeza é acionada por uma chave diferente após o intervalo de expurgo.
+    assert.equal(limiter.retryAfterSeconds("unrelated", start + 1_000), 0);
+    const entries = (limiter as unknown as { entries: Map<string, unknown> }).entries;
+    assert.equal(entries.has("abandoned"), false);
+    assert.equal(entries.has("active"), true);
+
+    // A ocorrência ainda ativa não foi perdida: a segunda tentativa bloqueia a chave.
+    limiter.hit("active", start + 1_000);
+    assert.ok(limiter.retryAfterSeconds("active", start + 1_001) > 0);
+    assert.equal(limiterEntryCount(limiter), 1);
+  });
+
+  await t.test("SlidingWindowLimiter remove bloqueios expirados e se mantém estável com muitas chaves distintas", () => {
+    const limiter = new SlidingWindowLimiter({
+      windowMs: 1_000,
+      maxHits: 1,
+      blockMs: 1_000,
+    });
+    const start = 1_700_000_000_000;
+
+    for (let i = 0; i < 5_000; i += 1) {
+      limiter.hit(`key-${i}`, start);
+    }
+    assert.equal(limiterEntryCount(limiter), 5_000);
+
+    // O sweep retira os bloqueios expirados mesmo que suas chaves não reapareçam.
+    limiter.hit("fresh-key", start + 1_000);
+    assert.equal(limiterEntryCount(limiter), 1);
+    assert.ok(limiter.retryAfterSeconds("fresh-key", start + 1_001) > 0);
+
+    // Uma nova onda de chaves ativas continua protegida e a limpeza seguinte
+    // remove somente a onda anterior, sem apagar o bloqueio recém-criado.
+    for (let i = 0; i < 5_000; i += 1) {
+      limiter.hit(`next-${i}`, start + 1_000);
+    }
+    limiter.hit("after-next-window", start + 2_000);
+    assert.equal(limiterEntryCount(limiter), 1);
+    assert.ok(limiter.retryAfterSeconds("after-next-window", start + 2_001) > 0);
   });
 
   await t.test("extractClientMetadata ignora cabeçalhos X-Forwarded-For forjados e sanitiza IP do socket", () => {
