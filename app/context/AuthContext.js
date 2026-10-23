@@ -44,6 +44,7 @@ export function AuthProvider({
     sessionStatus: snapshot.sessionStatus,
     authNotice: snapshot.authNotice,
     networkError: snapshot.networkError,
+    storageError: snapshot.storageError,
     adminChallenge: snapshot.adminChallenge,
     postAuthRoute: snapshot.postAuthRoute,
     isPersistentStorage: snapshot.isPersistentStorage,

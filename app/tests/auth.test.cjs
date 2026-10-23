@@ -909,3 +909,496 @@ test('401 session expiration does not clear or mutate ParticipationContext state
   assert.equal(typeof participationModule.ParticipationProvider, 'function');
   assert.deepEqual(capturedParticipation, { id: 'part-1', status: 'active' });
 });
+
+// ============================================================================
+// 4. AUDITORIA K02 — CORRIDA REFRESH vs LOGOUT / NOVO LOGIN E FALHA SECURESTORE
+// ============================================================================
+
+test('logout during pending setRefreshToken() prevents rotated token from remaining in SecureStore or restoring session', async () => {
+  let resolveSetItem;
+  let setItemStarted = false;
+  const rawMap = new Map([['arenago.auth.refresh_token', 'initial-refresh-token']]);
+
+  const customSecureStore = {
+    async getItemAsync(key) {
+      return rawMap.has(key) ? rawMap.get(key) : null;
+    },
+    async setItemAsync(key, value) {
+      setItemStarted = true;
+      await new Promise((resolve) => {
+        resolveSetItem = resolve;
+      });
+      rawMap.set(key, value);
+    },
+    async deleteItemAsync(key) {
+      rawMap.delete(key);
+    },
+  };
+
+  const { createTokenStorage } = loadTokenStorageModule('ios', customSecureStore);
+  const tokenStorage = createTokenStorage({
+    platformOS: 'ios',
+    secureStore: customSecureStore,
+  });
+  const { createAuthSessionManager } = loadAuthServiceModule({
+    tokenStorageModule: { defaultTokenStorage: tokenStorage, createTokenStorage },
+  });
+
+  const client = createHttpClient({
+    baseUrl: 'http://127.0.0.1:3000',
+    fetchImpl: async (url) => {
+      if (url.endsWith('/api/v1/auth/refresh')) {
+        return jsonResponse(200, {
+          accessToken: 'rotated-access-token',
+          expiresIn: 900,
+          refreshToken: 'rotated-refresh-token',
+        });
+      }
+      if (url.endsWith('/api/v1/auth/logout')) {
+        return jsonResponse(200, { message: 'Sessão encerrada com sucesso.' });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    },
+  });
+
+  const manager = createAuthSessionManager({ client, tokenStorage });
+
+  const refreshPromise = manager.refreshSession();
+  while (!setItemStarted) {
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+
+  // User triggers logout while setRefreshToken() is in flight
+  const logoutPromise = manager.logout();
+
+  // Complete the pending SecureStore write after logout has already started
+  resolveSetItem();
+
+  const [refreshResult, logoutResult] = await Promise.all([refreshPromise, logoutPromise]);
+
+  assert.equal(refreshResult, null);
+  assert.equal(logoutResult.localLoggedOut, true);
+  assert.equal(manager.getSnapshot().isAuthenticated, false);
+  assert.equal(manager.getAccessToken(), null);
+  assert.equal(rawMap.has('arenago.auth.refresh_token'), false);
+  assert.equal(await tokenStorage.getRefreshToken(), null);
+});
+
+test('token write finishing after logout start is cleaned up even when tokenStorage has unserialized async write', async () => {
+  let finishDelayedWrite;
+  let writeEntered = false;
+  const rawStore = new Map([['arenago.auth.refresh_token', 'seed-refresh-token']]);
+
+  // Custom unqueued tokenStorage double where setRefreshToken writes only when finishDelayedWrite() is called
+  const unqueuedTokenStorage = {
+    isPersistent: true,
+    async getRefreshToken() {
+      return rawStore.get('arenago.auth.refresh_token') ?? null;
+    },
+    async setRefreshToken(token) {
+      writeEntered = true;
+      await new Promise((resolve) => {
+        finishDelayedWrite = resolve;
+      });
+      rawStore.set('arenago.auth.refresh_token', token);
+    },
+    async clearRefreshToken() {
+      rawStore.delete('arenago.auth.refresh_token');
+    },
+  };
+
+  const { createAuthSessionManager } = loadAuthServiceModule({
+    tokenStorageModule: {
+      defaultTokenStorage: unqueuedTokenStorage,
+      createTokenStorage: () => unqueuedTokenStorage,
+    },
+  });
+
+  const client = createHttpClient({
+    baseUrl: 'http://127.0.0.1:3000',
+    fetchImpl: async (url) => {
+      if (url.endsWith('/api/v1/auth/refresh')) {
+        return jsonResponse(200, {
+          accessToken: 'late-access-token',
+          expiresIn: 900,
+          refreshToken: 'late-refresh-token',
+        });
+      }
+      if (url.endsWith('/api/v1/auth/logout')) {
+        return jsonResponse(200, { message: 'Sessão encerrada com sucesso.' });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    },
+  });
+
+  const manager = createAuthSessionManager({
+    client,
+    tokenStorage: unqueuedTokenStorage,
+  });
+
+  const refreshPromise = manager.refreshSession();
+  while (!writeEntered) {
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+
+  const logoutPromise = manager.logout();
+  finishDelayedWrite();
+
+  const [refreshResult] = await Promise.all([refreshPromise, logoutPromise]);
+
+  assert.equal(refreshResult, null);
+  assert.equal(manager.getSnapshot().isAuthenticated, false);
+  assert.equal(manager.getAccessToken(), null);
+  assert.equal(rawStore.has('arenago.auth.refresh_token'), false);
+});
+
+test('protected request awaiting refresh while logout occurs does not receive stale token and does not retry', async () => {
+  let resolveRefreshHttp;
+  let protectedCallCount = 0;
+
+  const rig = createAuthRig(
+    async (req) => {
+      if (req.url.endsWith('/api/v1/events/active')) {
+        protectedCallCount += 1;
+        return problemResponse(401, {
+          code: 'INVALID_ACCESS_TOKEN',
+          detail: 'Access token expirado.',
+        });
+      }
+      if (req.url.endsWith('/api/v1/auth/refresh')) {
+        return new Promise((resolve) => {
+          resolveRefreshHttp = resolve;
+        });
+      }
+      if (req.url.endsWith('/api/v1/auth/logout')) {
+        return jsonResponse(200, { message: 'Sessão encerrada com sucesso.' });
+      }
+      throw new Error(`Unexpected URL: ${req.url}`);
+    },
+    { initialRefreshToken: 'valid-refresh-before-logout' }
+  );
+
+  const protectedPromise = rig.httpClient.get('/events/active', { auth: true });
+  while (!resolveRefreshHttp) {
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+
+  // Logout occurs while the protected request is waiting for refreshSession()
+  const logoutPromise = rig.manager.logout();
+
+  resolveRefreshHttp(
+    jsonResponse(200, {
+      accessToken: 'obsolete-refreshed-access-token',
+      expiresIn: 900,
+      refreshToken: 'obsolete-refreshed-refresh-token',
+    })
+  );
+
+  await logoutPromise;
+  await assert.rejects(
+    () => protectedPromise,
+    (error) => error.status === 401 && error.code === 'INVALID_ACCESS_TOKEN'
+  );
+
+  assert.equal(protectedCallCount, 1, 'protected request must NOT be retried with obsolete token after logout');
+  assert.equal(rig.manager.getSnapshot().isAuthenticated, false);
+  assert.equal(rig.manager.getSnapshot().sessionStatus, 'unauthenticated');
+  assert.equal(rig.manager.getAccessToken(), null);
+  assert.equal(rig.secureStore.store.has('arenago.auth.refresh_token'), false);
+});
+
+test('logout followed immediately by a new login preserves the new session credentials even when old refresh/cleanup resolves late', async () => {
+  let resolveOldRefreshWrite;
+  let oldRefreshWriteEntered = false;
+  let resolveLogoutDelete;
+  let logoutDeleteEntered = false;
+  const rawStore = new Map([['arenago.auth.refresh_token', 'session1-refresh-token']]);
+
+  const controlledTokenStorage = {
+    isPersistent: true,
+    async getRefreshToken() {
+      return rawStore.get('arenago.auth.refresh_token') ?? null;
+    },
+    async setRefreshToken(token) {
+      if (token === 'session1-rotated-token') {
+        oldRefreshWriteEntered = true;
+        await new Promise((resolve) => {
+          resolveOldRefreshWrite = resolve;
+        });
+      }
+      rawStore.set('arenago.auth.refresh_token', token);
+    },
+    async clearRefreshToken() {
+      if (!logoutDeleteEntered) {
+        logoutDeleteEntered = true;
+        await new Promise((resolve) => {
+          resolveLogoutDelete = resolve;
+        });
+      }
+      rawStore.delete('arenago.auth.refresh_token');
+    },
+  };
+
+  const { createAuthSessionManager } = loadAuthServiceModule({
+    tokenStorageModule: {
+      defaultTokenStorage: controlledTokenStorage,
+      createTokenStorage: () => controlledTokenStorage,
+    },
+  });
+
+  const client = createHttpClient({
+    baseUrl: 'http://127.0.0.1:3000',
+    fetchImpl: async (url) => {
+      if (url.endsWith('/api/v1/auth/refresh')) {
+        return jsonResponse(200, {
+          accessToken: 'session1-rotated-access',
+          expiresIn: 900,
+          refreshToken: 'session1-rotated-token',
+        });
+      }
+      if (url.endsWith('/api/v1/auth/logout')) {
+        return jsonResponse(200, { message: 'Sessão encerrada com sucesso.' });
+      }
+      if (url.endsWith('/api/v1/auth/login')) {
+        return jsonResponse(200, {
+          user: {
+            id: '99999999-9999-4999-8999-999999999999',
+            name: 'Novo Login',
+            email: 'novo@example.com',
+            emailVerified: false,
+            roles: ['participante'],
+            hasCompletedQuestionnaire: true,
+          },
+          accessToken: 'session2-access-token',
+          expiresIn: 900,
+          refreshToken: 'session2-refresh-token',
+        });
+      }
+      if (url.endsWith('/api/v1/auth/me')) {
+        return jsonResponse(200, {
+          id: '99999999-9999-4999-8999-999999999999',
+          name: 'Novo Login',
+          email: 'novo@example.com',
+          emailVerified: false,
+          roles: ['participante'],
+          hasCompletedQuestionnaire: true,
+        });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    },
+  });
+
+  const manager = createAuthSessionManager({
+    client,
+    tokenStorage: controlledTokenStorage,
+  });
+
+  // 1. Session 1 starts refresh and pauses inside setRefreshToken('session1-rotated-token')
+  const refresh1Promise = manager.refreshSession();
+  while (!oldRefreshWriteEntered) {
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+
+  // 2. User triggers logout AND immediately triggers a new login
+  const logoutPromise = manager.logout();
+  const login2Promise = manager.login({
+    email: 'novo@example.com',
+    password: 'StrongPassword#2026',
+  });
+
+  // 3. Unblock the old refresh write from Session 1
+  resolveOldRefreshWrite();
+
+  // Wait until clearRefreshToken from logout is entered (if reached), then unblock it
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  if (resolveLogoutDelete) {
+    resolveLogoutDelete();
+  }
+
+  const [refresh1Result, , login2Result] = await Promise.all([
+    refresh1Promise,
+    logoutPromise,
+    login2Promise,
+  ]);
+
+  assert.equal(refresh1Result, null);
+  assert.equal(login2Result.status, 'authenticated');
+  assert.equal(manager.getSnapshot().isAuthenticated, true);
+  assert.equal(manager.getSnapshot().user.email, 'novo@example.com');
+  assert.equal(manager.getAccessToken(), 'session2-access-token');
+  assert.equal(rawStore.get('arenago.auth.refresh_token'), 'session2-refresh-token');
+});
+
+test('SecureStore read failure is differentiated from missing token, preserves stored credentials, and allows retry recovery', async () => {
+  let shouldFailRead = true;
+  const rawStore = new Map([['arenago.auth.refresh_token', 'existing-valid-refresh-token']]);
+  let deleteCalls = 0;
+
+  const flakySecureStore = {
+    async getItemAsync(key) {
+      if (shouldFailRead) {
+        throw new Error('Keystore temporarily locked');
+      }
+      return rawStore.get(key) ?? null;
+    },
+    async setItemAsync(key, value) {
+      rawStore.set(key, value);
+    },
+    async deleteItemAsync(key) {
+      deleteCalls += 1;
+      rawStore.delete(key);
+    },
+  };
+
+  const { createTokenStorage } = loadTokenStorageModule('ios', flakySecureStore);
+  const tokenStorage = createTokenStorage({
+    platformOS: 'ios',
+    secureStore: flakySecureStore,
+  });
+
+  // 1. Verify explicit differentiation in tokenStorage.readRefreshToken()
+  const failedRead = await tokenStorage.readRefreshToken();
+  assert.equal(failedRead.status, 'error');
+  assert.equal(failedRead.token, null);
+  assert.equal(failedRead.error.isStorageError, true);
+
+  const { createAuthSessionManager } = loadAuthServiceModule({
+    tokenStorageModule: { defaultTokenStorage: tokenStorage, createTokenStorage },
+  });
+
+  const client = createHttpClient({
+    baseUrl: 'http://127.0.0.1:3000',
+    fetchImpl: async (url) => {
+      if (url.endsWith('/api/v1/auth/refresh')) {
+        return jsonResponse(200, {
+          accessToken: 'recovered-access-jwt',
+          expiresIn: 900,
+          refreshToken: 'recovered-refresh-token',
+        });
+      }
+      if (url.endsWith('/api/v1/auth/me')) {
+        return jsonResponse(200, {
+          id: '77777777-7777-4777-8777-777777777777',
+          name: 'Recuperado',
+          email: 'recuperado@example.com',
+          emailVerified: false,
+          roles: ['participante'],
+          hasCompletedQuestionnaire: true,
+        });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    },
+  });
+
+  const manager = createAuthSessionManager({ client, tokenStorage });
+
+  // 2. First restoreSession() fails to read SecureStore:
+  //    - Must NOT presume unauthenticated
+  //    - Must NOT delete existing credentials
+  //    - Must NOT grant authenticated access
+  //    - Must expose recoverable 'storage_error' state
+  const firstRestore = await manager.restoreSession();
+  assert.equal(firstRestore.status, 'storage_error');
+  assert.equal(manager.getSnapshot().isAuthenticated, false);
+  assert.equal(manager.getSnapshot().isInitializing, false);
+  assert.equal(manager.getSnapshot().sessionStatus, 'storage_error');
+  assert.ok(manager.getSnapshot().storageError);
+  assert.equal(manager.getAccessToken(), null);
+  assert.equal(deleteCalls, 0);
+  assert.equal(rawStore.get('arenago.auth.refresh_token'), 'existing-valid-refresh-token');
+
+  // 3. Second attempt succeeds when SecureStore becomes readable again
+  shouldFailRead = false;
+  const secondRestore = await manager.restoreSession();
+  assert.equal(secondRestore.status, 'authenticated');
+  assert.equal(manager.getSnapshot().isAuthenticated, true);
+  assert.equal(manager.getSnapshot().sessionStatus, 'authenticated');
+  assert.equal(manager.getSnapshot().storageError, null);
+  assert.equal(manager.getSnapshot().user.email, 'recuperado@example.com');
+  assert.equal(rawStore.get('arenago.auth.refresh_token'), 'recovered-refresh-token');
+
+  // 4. Verify empty state differentiation when credential is removed
+  await tokenStorage.clearRefreshToken();
+  const emptyRead = await tokenStorage.readRefreshToken();
+  assert.equal(emptyRead.status, 'empty');
+  assert.equal(emptyRead.token, null);
+  assert.equal(emptyRead.error, null);
+});
+
+test('delayed session invalidation or stale 401 from previous session never clears credentials of a newly logged-in session', async () => {
+  let resolveStaleProtectedRequest;
+  const rig = createAuthRig(
+    async (req) => {
+      if (req.url.endsWith('/api/v1/events/active')) {
+        return new Promise((resolve) => {
+          resolveStaleProtectedRequest = resolve;
+        });
+      }
+      if (req.url.endsWith('/api/v1/auth/logout')) {
+        return jsonResponse(200, { message: 'Sessão encerrada com sucesso.' });
+      }
+      if (req.url.endsWith('/api/v1/auth/login')) {
+        return jsonResponse(200, {
+          user: {
+            id: '88888888-8888-4888-8888-888888888888',
+            name: 'Sessão Nova',
+            email: 'nova@example.com',
+            emailVerified: false,
+            roles: ['participante'],
+            hasCompletedQuestionnaire: true,
+          },
+          accessToken: 'new-session-access-token',
+          expiresIn: 900,
+          refreshToken: 'new-session-refresh-token',
+        });
+      }
+      if (req.url.endsWith('/api/v1/auth/me')) {
+        return jsonResponse(200, {
+          id: '88888888-8888-4888-8888-888888888888',
+          name: 'Sessão Nova',
+          email: 'nova@example.com',
+          emailVerified: false,
+          roles: ['participante'],
+          hasCompletedQuestionnaire: true,
+        });
+      }
+      throw new Error(`Unexpected URL: ${req.url}`);
+    },
+    { initialRefreshToken: 'old-session-refresh-token' }
+  );
+
+  // Start a protected request during the old session
+  const staleRequestPromise = rig.httpClient.get('/events/active', { auth: true });
+  while (!resolveStaleProtectedRequest) {
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+
+  // Logout old session and immediately log in as a new session
+  await rig.manager.logout();
+  await rig.manager.login({
+    email: 'nova@example.com',
+    password: 'StrongPassword#2026',
+  });
+
+  assert.equal(rig.manager.getSnapshot().isAuthenticated, true);
+  assert.equal(rig.secureStore.store.get('arenago.auth.refresh_token'), 'new-session-refresh-token');
+
+  // Now the stale request from the previous session returns 401 SESSION_REVOKED
+  resolveStaleProtectedRequest(
+    problemResponse(401, {
+      code: 'SESSION_REVOKED',
+      detail: 'Sessão antiga revogada.',
+    })
+  );
+
+  await assert.rejects(
+    () => staleRequestPromise,
+    (error) => error.status === 401 && error.code === 'SESSION_REVOKED'
+  );
+
+  // The new session and its refreshToken in SecureStore must remain intact
+  assert.equal(rig.manager.getSnapshot().isAuthenticated, true);
+  assert.equal(rig.manager.getSnapshot().sessionStatus, 'authenticated');
+  assert.equal(rig.manager.getAccessToken(), 'new-session-access-token');
+  assert.equal(rig.secureStore.store.get('arenago.auth.refresh_token'), 'new-session-refresh-token');
+});

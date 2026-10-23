@@ -78,7 +78,7 @@ Os testes usam o runner nativo do Node.js. Execute em `app/`:
 npm.cmd test
 ```
 
-Na validação atual, o comando passa com **144 testes aprovados** e nenhuma falha.
+Na validação atual, o comando passa com **150 testes aprovados** e nenhuma falha.
 
 ## Organização
 

@@ -43,9 +43,14 @@ function sanitizePublicUser(rawInput) {
  * Responsabilidades:
  * - Manter `accessToken` exclusivamente em memória.
  * - Persistir `refreshToken` via `tokenStorage` (`SecureStore` no mobile, memória na web).
+ * - Serializar todas as operações de leitura, gravação e remoção de credenciais em fila assíncrona
+ *   coordenada com `sessionEpoch` e estado desejado da geração atual, impedindo que um `refresh`
+ *   em andamento deixe token residual após `logout()` ou que uma limpeza tardia apague credenciais
+ *   de um `login()` posterior.
+ * - Diferenciar explicitamente ausência de credencial (`empty`), credencial legível (`available`)
+ *   e falha de leitura do `SecureStore` (`error` -> `sessionStatus: 'storage_error'`).
  * - Coordenar `refreshSession()` em modo single-flight (apenas 1 refresh simultâneo).
  * - Nunca reenviar automaticamente um refresh token cujo resultado de rede foi incerto (timeout).
- * - Proteger contra condições de corrida pós-logout / pós-login por meio de `sessionEpoch`.
  * - Nunca tocar ou limpar `ParticipationContext`.
  *
  * @param {Object} [options]
@@ -67,6 +72,14 @@ export function createAuthSessionManager(options = {}) {
   let inFlightRestorePromise = null;
   const uncertainRefreshTokens = new Set();
 
+  // Fila assíncrona FIFO para serializar leituras, gravações e limpezas no tokenStorage
+  // sem risco de deadlock (nenhuma operação da fila invoca métodos de rede ou de sessão).
+  let storageQueue = Promise.resolve();
+  let desiredCredentialState = {
+    epoch: 0,
+    refreshToken: null,
+  };
+
   let state = {
     user: null,
     isAuthenticated: false,
@@ -74,10 +87,160 @@ export function createAuthSessionManager(options = {}) {
     sessionStatus: 'initializing',
     authNotice: null,
     networkError: null,
+    storageError: null,
     adminChallenge: null,
     postAuthRoute: null,
     isPersistentStorage: Boolean(tokenStorage.isPersistent),
   };
+
+  function enqueueStorageOp(task) {
+    const run = storageQueue.then(task, task);
+    storageQueue = run.catch(() => {});
+    return run;
+  }
+
+  /**
+   * Lê a credencial armazenada diferenciando explicitamente:
+   * - `status: 'empty'` (nenhuma credencial armazenada)
+   * - `status: 'available'` (credencial existente e legível)
+   * - `status: 'error'` (falha ao consultar o armazenamento seguro)
+   */
+  async function readRefreshTokenState() {
+    try {
+      const stored = await enqueueStorageOp(async () => {
+        if (typeof tokenStorage.getRefreshToken === 'function') {
+          return await tokenStorage.getRefreshToken();
+        }
+        if (typeof tokenStorage.readRefreshToken === 'function') {
+          const result = await tokenStorage.readRefreshToken();
+          if (result?.status === 'error') {
+            throw result.error || new Error('Falha ao consultar armazenamento seguro.');
+          }
+          return result?.token ?? null;
+        }
+        return null;
+      });
+
+      if (typeof stored === 'string' && stored.trim().length > 0) {
+        return {
+          status: 'available',
+          token: stored.trim(),
+          error: null,
+        };
+      }
+
+      return {
+        status: 'empty',
+        token: null,
+        error: null,
+      };
+    } catch (cause) {
+      const storageError =
+        cause instanceof ApiError
+          ? cause
+          : new ApiError({
+              kind: 'storage',
+              status: null,
+              code: cause?.code || 'STORAGE_READ_ERROR',
+              title: 'Falha ao acessar armazenamento seguro',
+              detail:
+                cause?.detail ||
+                cause?.message ||
+                'Não foi possível acessar o armazenamento seguro do dispositivo para verificar sua sessão.',
+              cause,
+            });
+      storageError.isStorageError = true;
+      return {
+        status: 'error',
+        token: null,
+        error: storageError,
+      };
+    }
+  }
+
+  /**
+   * Persiste um `refreshToken` vinculado a `targetEpoch` de forma serializada.
+   * - Verifica `sessionEpoch` antes e depois do `await tokenStorage.setRefreshToken()`.
+   * - Se `logout()` ou invalidação ocorrer durante a gravação (`desiredCredentialState.refreshToken === null`),
+   *   remove imediatamente a credencial gravada para nunca deixar resíduo no `SecureStore`.
+   * - Se um novo `login()` tiver ocorrido nesse intervalo (`desiredCredentialState.epoch > targetEpoch`
+   *   com `refreshToken !== null`), preserva/reafirma a credencial da nova sessão sem apagá-la.
+   */
+  async function writeRefreshTokenForEpoch(refreshToken, targetEpoch) {
+    if (sessionEpoch !== targetEpoch) {
+      return false;
+    }
+
+    desiredCredentialState = {
+      epoch: targetEpoch,
+      refreshToken,
+    };
+
+    return enqueueStorageOp(async () => {
+      if (sessionEpoch !== targetEpoch || desiredCredentialState.epoch !== targetEpoch) {
+        return false;
+      }
+
+      await tokenStorage.setRefreshToken(refreshToken);
+
+      if (sessionEpoch !== targetEpoch) {
+        if (desiredCredentialState.refreshToken === null) {
+          try {
+            await tokenStorage.clearRefreshToken();
+          } catch {
+            // Ignora erro secundário de limpeza
+          }
+        } else if (
+          desiredCredentialState.epoch > targetEpoch &&
+          desiredCredentialState.refreshToken !== refreshToken
+        ) {
+          try {
+            await tokenStorage.setRefreshToken(desiredCredentialState.refreshToken);
+          } catch {
+            // A operação enfileirada da nova sessão também garantirá a escrita
+          }
+        }
+        return false;
+      }
+
+      return true;
+    });
+  }
+
+  /**
+   * Remove o `refreshToken` vinculado ao encerramento/invalidação em `targetEpoch`.
+   * - Se uma sessão posterior (`desiredCredentialState.epoch > targetEpoch` com token válido)
+   *   já tiver sido iniciada antes ou durante a limpeza, NÃO apaga (ou restaura) o token da sessão nova.
+   */
+  async function clearRefreshTokenForEpoch(targetEpoch) {
+    if (targetEpoch >= desiredCredentialState.epoch) {
+      desiredCredentialState = {
+        epoch: targetEpoch,
+        refreshToken: null,
+      };
+    }
+
+    return enqueueStorageOp(async () => {
+      if (
+        desiredCredentialState.epoch > targetEpoch &&
+        desiredCredentialState.refreshToken !== null
+      ) {
+        return false;
+      }
+
+      await tokenStorage.clearRefreshToken();
+
+      if (
+        desiredCredentialState.epoch > targetEpoch &&
+        desiredCredentialState.refreshToken !== null
+      ) {
+        await tokenStorage.setRefreshToken(desiredCredentialState.refreshToken);
+        return false;
+      }
+
+      return true;
+    });
+  }
 
   function emitState(patch) {
     state = Object.freeze({
@@ -108,14 +271,35 @@ export function createAuthSessionManager(options = {}) {
     return accessToken;
   }
 
-  async function handleSessionInvalidated(error) {
+  function getSessionEpoch() {
+    return sessionEpoch;
+  }
+
+  async function handleSessionInvalidated(error, context = {}) {
+    if (
+      context?.requestEpoch !== undefined &&
+      context.requestEpoch !== null &&
+      context.requestEpoch !== sessionEpoch
+    ) {
+      return;
+    }
+    if (context?.targetEpoch !== undefined && context.targetEpoch !== sessionEpoch) {
+      return;
+    }
+
     sessionEpoch += 1;
+    const invalidationEpoch = sessionEpoch;
     accessToken = null;
     inFlightRefreshPromise = null;
+
     try {
-      await tokenStorage.clearRefreshToken();
+      await clearRefreshTokenForEpoch(invalidationEpoch);
     } catch {
       // Ignora erro de limpeza local
+    }
+
+    if (sessionEpoch !== invalidationEpoch) {
+      return;
     }
 
     const nextStatus = error?.code === 'SESSION_EXPIRED' ? 'expired' : 'revoked';
@@ -126,6 +310,7 @@ export function createAuthSessionManager(options = {}) {
       sessionStatus: nextStatus,
       authNotice: resolveInvalidationNotice(error),
       networkError: null,
+      storageError: null,
       adminChallenge: null,
       postAuthRoute: null,
     });
@@ -133,7 +318,7 @@ export function createAuthSessionManager(options = {}) {
 
   /**
    * Renovação coordenada (single-flight) do par de tokens via POST /api/v1/auth/refresh.
-   * Chamadas concorrentes aguardam a mesma Promise.
+   * Chamadas concorrentes dentro da mesma geração de sessão aguardam a mesma Promise.
    */
   function refreshSession() {
     if (inFlightRefreshPromise) {
@@ -142,41 +327,58 @@ export function createAuthSessionManager(options = {}) {
 
     const epochAtStart = sessionEpoch;
 
-    inFlightRefreshPromise = (async () => {
-      const storedRefreshToken = await tokenStorage.getRefreshToken();
-
-      if (
-        (storedRefreshToken && uncertainRefreshTokens.has(storedRefreshToken)) ||
-        (!storedRefreshToken && state.sessionStatus === 'uncertain_refresh')
-      ) {
-        const uncertainError = new ApiError({
-          kind: 'timeout',
-          status: null,
-          code: 'UNCERTAIN_REFRESH_OUTCOME',
-          title: 'Renovação anterior inconclusiva',
-          detail:
-            'A tentativa anterior de renovar a sessão expirou sem confirmação. Por segurança, faça login novamente.',
-          outcomeUnknown: true,
-        });
-        throw uncertainError;
-      }
-
-      if (!storedRefreshToken) {
-        const missingError = new ApiError({
-          kind: 'http',
-          status: 401,
-          code: 'MISSING_REFRESH_TOKEN',
-          title: 'Sessão não encontrada',
-          detail: 'Nenhuma credencial de renovação disponível. Faça login novamente.',
-        });
-        if (sessionEpoch === epochAtStart) {
-          await handleSessionInvalidated(missingError);
-        }
-        throw missingError;
-      }
-
+    const currentRefreshPromise = (async () => {
       try {
-        const response = await client.post(
+        const storageRead = await readRefreshTokenState();
+
+        if (sessionEpoch !== epochAtStart) {
+          return null;
+        }
+
+        if (storageRead.status === 'error') {
+          emitState({
+            isInitializing: false,
+            storageError: storageRead.error.detail,
+            networkError: storageRead.error.detail,
+            sessionStatus: state.isAuthenticated ? 'authenticated' : 'storage_error',
+          });
+          throw storageRead.error;
+        }
+
+        const storedRefreshToken = storageRead.token;
+
+        if (
+          (storedRefreshToken && uncertainRefreshTokens.has(storedRefreshToken)) ||
+          (!storedRefreshToken && state.sessionStatus === 'uncertain_refresh')
+        ) {
+          const uncertainError = new ApiError({
+            kind: 'timeout',
+            status: null,
+            code: 'UNCERTAIN_REFRESH_OUTCOME',
+            title: 'Renovação anterior inconclusiva',
+            detail:
+              'A tentativa anterior de renovar a sessão expirou sem confirmação. Por segurança, faça login novamente.',
+            outcomeUnknown: true,
+          });
+          throw uncertainError;
+        }
+
+        if (!storedRefreshToken) {
+          const missingError = new ApiError({
+            kind: 'http',
+            status: 401,
+            code: 'MISSING_REFRESH_TOKEN',
+            title: 'Sessão não encontrada',
+            detail: 'Nenhuma credencial de renovação disponível. Faça login novamente.',
+          });
+          if (sessionEpoch === epochAtStart) {
+            await handleSessionInvalidated(missingError, { targetEpoch: epochAtStart });
+          }
+          throw missingError;
+        }
+
+        try {
+          const response = await client.post(
           '/auth/refresh',
           { refreshToken: storedRefreshToken },
           { auth: false, retryOnUnauthorized: false }
@@ -201,11 +403,23 @@ export function createAuthSessionManager(options = {}) {
           });
         }
 
+        const persisted = await writeRefreshTokenForEpoch(
+          response.refreshToken,
+          epochAtStart
+        );
+
+        // Se o logout (ou novo login) ocorreu durante a gravação assíncrona no SecureStore,
+        // writeRefreshTokenForEpoch já reconciliou o armazenamento e retornou false:
+        // jamais expor accessToken ou entregar resposta obsoleta às requisições que aguardavam.
+        if (!persisted || sessionEpoch !== epochAtStart) {
+          return null;
+        }
+
         accessToken = response.accessToken;
-        await tokenStorage.setRefreshToken(response.refreshToken);
 
         emitState({
           networkError: null,
+          storageError: null,
         });
 
         return {
@@ -215,7 +429,7 @@ export function createAuthSessionManager(options = {}) {
         };
       } catch (error) {
         if (sessionEpoch !== epochAtStart) {
-          throw error;
+          return null;
         }
 
         // Timeout ou queda após envio do refresh: o servidor pode já ter consumido o token antigo.
@@ -223,30 +437,34 @@ export function createAuthSessionManager(options = {}) {
         if (error?.isTimeout || error?.outcomeUnknown) {
           uncertainRefreshTokens.add(storedRefreshToken);
           sessionEpoch += 1;
+          const timeoutEpoch = sessionEpoch;
           accessToken = null;
           try {
-            await tokenStorage.clearRefreshToken();
+            await clearRefreshTokenForEpoch(timeoutEpoch);
           } catch {
             // Ignora falha de limpeza
           }
 
-          emitState({
-            user: null,
-            isAuthenticated: false,
-            isInitializing: false,
-            sessionStatus: 'uncertain_refresh',
-            authNotice:
-              'A conexão expirou durante a renovação da sessão e o resultado não pôde ser confirmado. Por segurança, faça login novamente.',
-            networkError: error.detail,
-            adminChallenge: null,
-            postAuthRoute: null,
-          });
+          if (sessionEpoch === timeoutEpoch) {
+            emitState({
+              user: null,
+              isAuthenticated: false,
+              isInitializing: false,
+              sessionStatus: 'uncertain_refresh',
+              authNotice:
+                'A conexão expirou durante a renovação da sessão e o resultado não pôde ser confirmado. Por segurança, faça login novamente.',
+              networkError: error.detail,
+              storageError: null,
+              adminChallenge: null,
+              postAuthRoute: null,
+            });
+          }
           throw error;
         }
 
         // Erro HTTP 401: refresh inválido, reutilizado, sessão revogada ou expirada após 30 dias.
         if (error?.status === 401) {
-          await handleSessionInvalidated(error);
+          await handleSessionInvalidated(error, { targetEpoch: epochAtStart });
           throw error;
         }
 
@@ -255,17 +473,22 @@ export function createAuthSessionManager(options = {}) {
         if (error?.isNetworkError) {
           emitState({
             networkError: error.detail,
+            storageError: null,
             sessionStatus: state.isAuthenticated ? 'authenticated' : 'network_error',
           });
         }
 
-        throw error;
+          throw error;
+        }
       } finally {
-        inFlightRefreshPromise = null;
+        if (inFlightRefreshPromise === currentRefreshPromise) {
+          inFlightRefreshPromise = null;
+        }
       }
     })();
 
-    return inFlightRefreshPromise;
+    inFlightRefreshPromise = currentRefreshPromise;
+    return currentRefreshPromise;
   }
 
   /**
@@ -277,6 +500,7 @@ export function createAuthSessionManager(options = {}) {
       auth: true,
       retryOnUnauthorized: options.retryOnUnauthorized ?? true,
       _retriedAfterRefresh: Boolean(options._retriedAfterRefresh),
+      _requestEpoch: epochAtStart,
     });
 
     if (sessionEpoch !== epochAtStart) {
@@ -300,6 +524,7 @@ export function createAuthSessionManager(options = {}) {
       isInitializing: false,
       sessionStatus: 'authenticated',
       networkError: null,
+      storageError: null,
     });
 
     return liveUser;
@@ -307,9 +532,11 @@ export function createAuthSessionManager(options = {}) {
 
   /**
    * Restaura a sessão ao abrir/reabrir o aplicativo de forma coordenada (single-flight).
-   * 1. Verifica existência de refresh token armazenado.
-   * 2. Renova o par de tokens via POST /auth/refresh.
-   * 3. Confirma os dados vivos da conta via GET /auth/me.
+   * 1. Verifica existência e legibilidade do refresh token armazenado.
+   * 2. Se a leitura do `SecureStore` falhar, não apaga credenciais nem presume ausência de sessão:
+   *    expõe estado recuperável `storage_error` permitindo nova tentativa.
+   * 3. Renova o par de tokens via POST /api/v1/auth/refresh.
+   * 4. Confirma os dados vivos da conta via GET /api/v1/auth/me.
    */
   function restoreSession() {
     if (inFlightRestorePromise) {
@@ -318,36 +545,53 @@ export function createAuthSessionManager(options = {}) {
 
     const epochAtStart = sessionEpoch;
 
-    inFlightRestorePromise = (async () => {
-      emitState({
-        isInitializing: true,
-        networkError: null,
-      });
-
-      let storedRefreshToken = null;
+    const currentRestorePromise = (async () => {
       try {
-        storedRefreshToken = await tokenStorage.getRefreshToken();
-      } catch {
-        storedRefreshToken = null;
-      }
-
-      if (sessionEpoch !== epochAtStart) {
-        return { status: 'aborted', user: state.user };
-      }
-
-      if (!storedRefreshToken && !accessToken) {
         emitState({
-          user: null,
-          isAuthenticated: false,
-          isInitializing: false,
-          sessionStatus: 'unauthenticated',
+          isInitializing: true,
           networkError: null,
-          postAuthRoute: null,
+          storageError: null,
         });
-        return { status: 'unauthenticated', user: null };
-      }
 
-      try {
+        const storageRead = await readRefreshTokenState();
+
+        if (sessionEpoch !== epochAtStart) {
+          return { status: 'aborted', user: state.user };
+        }
+
+        if (storageRead.status === 'error') {
+          accessToken = null;
+          emitState({
+            user: null,
+            isAuthenticated: false,
+            isInitializing: false,
+            sessionStatus: 'storage_error',
+            storageError: storageRead.error.detail,
+            networkError: storageRead.error.detail,
+            postAuthRoute: null,
+          });
+          return {
+            status: 'storage_error',
+            user: null,
+            error: storageRead.error,
+          };
+        }
+
+        const storedRefreshToken = storageRead.token;
+
+        if (!storedRefreshToken && !accessToken) {
+          emitState({
+            user: null,
+            isAuthenticated: false,
+            isInitializing: false,
+            sessionStatus: 'unauthenticated',
+            networkError: null,
+            storageError: null,
+            postAuthRoute: null,
+          });
+          return { status: 'unauthenticated', user: null };
+        }
+
         if (!accessToken) {
           const refreshed = await refreshSession();
           if (sessionEpoch !== epochAtStart || !refreshed) {
@@ -371,6 +615,7 @@ export function createAuthSessionManager(options = {}) {
           sessionStatus: 'authenticated',
           authNotice: null,
           networkError: null,
+          storageError: null,
           adminChallenge: null,
           postAuthRoute: 'MainTabs',
         });
@@ -381,8 +626,30 @@ export function createAuthSessionManager(options = {}) {
           nextRoute: 'MainTabs',
         };
       } catch (error) {
-        if (sessionEpoch !== epochAtStart && state.sessionStatus !== 'revoked' && state.sessionStatus !== 'expired' && state.sessionStatus !== 'uncertain_refresh') {
+        if (
+          sessionEpoch !== epochAtStart &&
+          state.sessionStatus !== 'revoked' &&
+          state.sessionStatus !== 'expired' &&
+          state.sessionStatus !== 'uncertain_refresh'
+        ) {
           return { status: 'aborted', user: state.user };
+        }
+
+        if (error?.isStorageError || error?.kind === 'storage') {
+          accessToken = null;
+          emitState({
+            user: null,
+            isAuthenticated: false,
+            isInitializing: false,
+            sessionStatus: 'storage_error',
+            storageError: error.detail,
+            networkError: error.detail,
+          });
+          return {
+            status: 'storage_error',
+            user: null,
+            error,
+          };
         }
 
         // Se foi falha temporária de rede (sem confirmação de 401 ou timeout incerto),
@@ -395,6 +662,7 @@ export function createAuthSessionManager(options = {}) {
             isInitializing: false,
             sessionStatus: 'network_error',
             networkError: error.detail,
+            storageError: null,
           });
           return {
             status: 'network_error',
@@ -413,11 +681,14 @@ export function createAuthSessionManager(options = {}) {
           error,
         };
       } finally {
-        inFlightRestorePromise = null;
+        if (inFlightRestorePromise === currentRestorePromise) {
+          inFlightRestorePromise = null;
+        }
       }
     })();
 
-    return inFlightRestorePromise;
+    inFlightRestorePromise = currentRestorePromise;
+    return currentRestorePromise;
   }
 
   /**
@@ -453,9 +724,24 @@ export function createAuthSessionManager(options = {}) {
 
     sessionEpoch += 1;
     const currentEpoch = sessionEpoch;
-    accessToken = response.accessToken;
+    inFlightRefreshPromise = null;
+    inFlightRestorePromise = null;
     uncertainRefreshTokens.clear();
-    await tokenStorage.setRefreshToken(response.refreshToken);
+
+    const persisted = await writeRefreshTokenForEpoch(
+      response.refreshToken,
+      currentEpoch
+    );
+
+    if (!persisted || sessionEpoch !== currentEpoch) {
+      return {
+        status: 'aborted',
+        user: null,
+        nextRoute: null,
+      };
+    }
+
+    accessToken = response.accessToken;
 
     let confirmedUser = registeredUser;
     emitState({
@@ -465,6 +751,7 @@ export function createAuthSessionManager(options = {}) {
       sessionStatus: 'authenticated',
       authNotice: null,
       networkError: null,
+      storageError: null,
       adminChallenge: null,
       postAuthRoute: 'ProfileQuestionnaire',
     });
@@ -475,6 +762,7 @@ export function createAuthSessionManager(options = {}) {
         auth: true,
         retryOnUnauthorized: false,
         _retriedAfterRefresh: true,
+        _requestEpoch: currentEpoch,
       });
       if (sessionEpoch === currentEpoch && meResponse?.id) {
         confirmedUser = sanitizePublicUser(meResponse);
@@ -482,7 +770,7 @@ export function createAuthSessionManager(options = {}) {
       }
     } catch (meError) {
       if (meError?.status === 401 && sessionEpoch === currentEpoch) {
-        await handleSessionInvalidated(meError);
+        await handleSessionInvalidated(meError, { targetEpoch: currentEpoch });
         throw meError;
       }
     }
@@ -514,8 +802,12 @@ export function createAuthSessionManager(options = {}) {
     // NUNCA armazenar tempToken como accessToken ou refreshToken nem autenticar a sessão.
     if (response && response.requires2FA === true) {
       sessionEpoch += 1;
+      const challengeEpoch = sessionEpoch;
       accessToken = null;
-      await tokenStorage.clearRefreshToken();
+      inFlightRefreshPromise = null;
+      inFlightRestorePromise = null;
+
+      await clearRefreshTokenForEpoch(challengeEpoch);
 
       const challenge = {
         requires2FA: true,
@@ -526,16 +818,19 @@ export function createAuthSessionManager(options = {}) {
             : 'Esta conta administrativa exige confirmação de segundo fator (TOTP) para concluir o acesso.',
       };
 
-      emitState({
-        user: null,
-        isAuthenticated: false,
-        isInitializing: false,
-        sessionStatus: 'admin_2fa_required',
-        authNotice: null,
-        networkError: null,
-        adminChallenge: challenge,
-        postAuthRoute: null,
-      });
+      if (sessionEpoch === challengeEpoch) {
+        emitState({
+          user: null,
+          isAuthenticated: false,
+          isInitializing: false,
+          sessionStatus: 'admin_2fa_required',
+          authNotice: null,
+          networkError: null,
+          storageError: null,
+          adminChallenge: challenge,
+          postAuthRoute: null,
+        });
+      }
 
       return {
         status: 'requires_2fa',
@@ -560,9 +855,24 @@ export function createAuthSessionManager(options = {}) {
 
     sessionEpoch += 1;
     const currentEpoch = sessionEpoch;
-    accessToken = response.accessToken;
+    inFlightRefreshPromise = null;
+    inFlightRestorePromise = null;
     uncertainRefreshTokens.clear();
-    await tokenStorage.setRefreshToken(response.refreshToken);
+
+    const persisted = await writeRefreshTokenForEpoch(
+      response.refreshToken,
+      currentEpoch
+    );
+
+    if (!persisted || sessionEpoch !== currentEpoch) {
+      return {
+        status: 'aborted',
+        user: null,
+        nextRoute: null,
+      };
+    }
+
+    accessToken = response.accessToken;
 
     let confirmedUser = loggedUser;
     emitState({
@@ -572,6 +882,7 @@ export function createAuthSessionManager(options = {}) {
       sessionStatus: 'authenticated',
       authNotice: null,
       networkError: null,
+      storageError: null,
       adminChallenge: null,
       postAuthRoute: 'MainTabs',
     });
@@ -582,6 +893,7 @@ export function createAuthSessionManager(options = {}) {
         auth: true,
         retryOnUnauthorized: false,
         _retriedAfterRefresh: true,
+        _requestEpoch: currentEpoch,
       });
       if (sessionEpoch === currentEpoch && meResponse?.id) {
         confirmedUser = sanitizePublicUser(meResponse);
@@ -589,7 +901,7 @@ export function createAuthSessionManager(options = {}) {
       }
     } catch (meError) {
       if (meError?.status === 401 && sessionEpoch === currentEpoch) {
-        await handleSessionInvalidated(meError);
+        await handleSessionInvalidated(meError, { targetEpoch: currentEpoch });
         throw meError;
       }
     }
@@ -603,17 +915,17 @@ export function createAuthSessionManager(options = {}) {
 
   /**
    * Logout real (POST /api/v1/auth/logout).
-   * - Incrementa `sessionEpoch` imediatamente para impedir que requisições antigas restaurem a sessão.
-   * - Remove refresh token local e limpa access token da memória.
+   * - Incrementa `sessionEpoch` imediatamente para impedir que requisições ou gravações antigas restaurem a sessão.
+   * - Serializa a remoção do refresh token em `storageQueue` coordenada por `sessionEpoch`.
    * - Distingue revogação remota confirmada (`remoteRevoked: true`) de encerramento local sob falha de rede (`remoteRevoked: false`).
    */
   async function logout() {
     sessionEpoch += 1;
+    const logoutEpoch = sessionEpoch;
     const tokenToRevoke = accessToken;
     accessToken = null;
     inFlightRefreshPromise = null;
-
-    await tokenStorage.clearRefreshToken();
+    inFlightRestorePromise = null;
 
     emitState({
       user: null,
@@ -622,9 +934,12 @@ export function createAuthSessionManager(options = {}) {
       sessionStatus: 'unauthenticated',
       authNotice: null,
       networkError: null,
+      storageError: null,
       adminChallenge: null,
       postAuthRoute: null,
     });
+
+    await clearRefreshTokenForEpoch(logoutEpoch);
 
     if (!tokenToRevoke) {
       return {
@@ -640,6 +955,7 @@ export function createAuthSessionManager(options = {}) {
         auth: false,
         accessToken: tokenToRevoke,
         retryOnUnauthorized: false,
+        _requestEpoch: logoutEpoch,
       });
 
       return {
@@ -651,9 +967,11 @@ export function createAuthSessionManager(options = {}) {
     } catch (error) {
       const warning =
         'Sua sessão foi encerrada neste dispositivo, mas não foi possível confirmar a revogação no servidor por falha de comunicação.';
-      emitState({
-        authNotice: warning,
-      });
+      if (sessionEpoch === logoutEpoch) {
+        emitState({
+          authNotice: warning,
+        });
+      }
 
       return {
         localLoggedOut: true,
@@ -669,15 +987,28 @@ export function createAuthSessionManager(options = {}) {
     emitState({
       authNotice: null,
       networkError: null,
+      storageError: null,
       adminChallenge: null,
     });
   }
 
   client.setAuthHandlers({
     getAccessToken,
-    onUnauthorized: async () => {
+    getSessionEpoch,
+    onUnauthorized: async (ctx = {}) => {
+      if (
+        ctx.requestEpoch !== undefined &&
+        ctx.requestEpoch !== null &&
+        ctx.requestEpoch !== sessionEpoch
+      ) {
+        return null;
+      }
+      const epochBeforeRefresh = sessionEpoch;
       const refreshed = await refreshSession();
-      return refreshed?.accessToken ?? null;
+      if (sessionEpoch !== epochBeforeRefresh || !refreshed?.accessToken) {
+        return null;
+      }
+      return refreshed.accessToken;
     },
     onSessionInvalidated: handleSessionInvalidated,
   });
@@ -686,6 +1017,7 @@ export function createAuthSessionManager(options = {}) {
     subscribe,
     getSnapshot,
     getAccessToken,
+    getSessionEpoch,
     register,
     login,
     logout,

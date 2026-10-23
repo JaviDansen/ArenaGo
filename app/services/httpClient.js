@@ -14,6 +14,7 @@ const TERMINAL_SESSION_CODES = new Set([
  * - Respostas HTTP do servidor (`kind === 'http'`, com `status`, `code`, `detail`, `invalidParams`, `fieldErrors`)
  * - Falhas de conectividade (`kind === 'network'`, `isNetworkError === true`)
  * - Timeouts de requisição (`kind === 'timeout'`, `isNetworkError === true`, `isTimeout === true`, `outcomeUnknown === true`)
+ * - Falhas de leitura/escrita no armazenamento local (`kind === 'storage'`, `isStorageError === true`)
  */
 export class ApiError extends Error {
   constructor({
@@ -44,6 +45,7 @@ export class ApiError extends Error {
     this.isNetworkError = kind === 'network' || kind === 'timeout';
     this.isTimeout = kind === 'timeout';
     this.isHttpError = kind === 'http';
+    this.isStorageError = kind === 'storage';
     this.outcomeUnknown = Boolean(outcomeUnknown);
     this.rawBody = rawBody;
     if (cause !== undefined) {
@@ -143,8 +145,9 @@ export function isTerminalSessionError(error) {
  * @param {number} [config.timeoutMs]
  * @param {Function} [config.fetchImpl]
  * @param {() => string | null} [config.getAccessToken]
- * @param {(ctx: { error: ApiError, path: string, method: string }) => Promise<string | null>} [config.onUnauthorized]
- * @param {(error: ApiError) => void} [config.onSessionInvalidated]
+ * @param {() => number | null} [config.getSessionEpoch]
+ * @param {(ctx: { error: ApiError, path: string, method: string, requestEpoch: number | null, requestAccessToken: string | null }) => Promise<string | null>} [config.onUnauthorized]
+ * @param {(error: ApiError, ctx?: { path: string, method: string, requestEpoch: number | null, requestAccessToken: string | null }) => void} [config.onSessionInvalidated]
  */
 export function createHttpClient(config = {}) {
   let baseUrl = resolveApiBaseUrl(config.baseUrl, { env: config.env });
@@ -153,6 +156,7 @@ export function createHttpClient(config = {}) {
 
   let authHandlers = {
     getAccessToken: config.getAccessToken ?? (() => null),
+    getSessionEpoch: config.getSessionEpoch ?? (() => null),
     onUnauthorized: config.onUnauthorized ?? null,
     onSessionInvalidated: config.onSessionInvalidated ?? null,
   };
@@ -192,6 +196,13 @@ export function createHttpClient(config = {}) {
     if (options.body !== undefined) {
       headers['Content-Type'] = 'application/json';
     }
+
+    const requestEpoch =
+      options._requestEpoch !== undefined
+        ? options._requestEpoch
+        : typeof authHandlers.getSessionEpoch === 'function'
+        ? authHandlers.getSessionEpoch()
+        : null;
 
     const explicitToken =
       typeof options.accessToken === 'string' && options.accessToken.trim().length > 0
@@ -305,9 +316,16 @@ export function createHttpClient(config = {}) {
     // - Se o servidor confirmou revogação/expiração definitiva da sessão, notifica e não tenta refresh.
     // - Caso contrário, aciona o refresh single-flight e repete a requisição protegida no máximo 1 vez.
     if (status === 401 && requiresAuth && options.retryOnUnauthorized !== false) {
+      const authContextInfo = {
+        path: normalizedPath,
+        method,
+        requestEpoch,
+        requestAccessToken: resolvedToken,
+      };
+
       if (isTerminalSessionError(apiError)) {
         if (typeof authHandlers.onSessionInvalidated === 'function') {
-          await authHandlers.onSessionInvalidated(apiError);
+          await authHandlers.onSessionInvalidated(apiError, authContextInfo);
         }
         throw apiError;
       }
@@ -317,24 +335,33 @@ export function createHttpClient(config = {}) {
         try {
           refreshedAccessToken = await authHandlers.onUnauthorized({
             error: apiError,
-            path: normalizedPath,
-            method,
+            ...authContextInfo,
           });
         } catch (refreshError) {
           throw refreshError;
         }
 
-        if (typeof refreshedAccessToken === 'string' && refreshedAccessToken.length > 0) {
+        const currentEpochAfterRefresh =
+          typeof authHandlers.getSessionEpoch === 'function'
+            ? authHandlers.getSessionEpoch()
+            : requestEpoch;
+
+        if (
+          typeof refreshedAccessToken === 'string' &&
+          refreshedAccessToken.length > 0 &&
+          (requestEpoch === null || currentEpochAfterRefresh === requestEpoch)
+        ) {
           return request(normalizedPath, {
             ...options,
             accessToken: refreshedAccessToken,
             _retriedAfterRefresh: true,
+            _requestEpoch: currentEpochAfterRefresh,
           });
         }
       }
 
       if (options._retriedAfterRefresh && typeof authHandlers.onSessionInvalidated === 'function') {
-        await authHandlers.onSessionInvalidated(apiError);
+        await authHandlers.onSessionInvalidated(apiError, authContextInfo);
       }
     }
 

@@ -116,19 +116,25 @@ export function AuthSessionCoordinator({ children }) {
     );
   }
 
+  const isStorageFailure = auth.sessionStatus === 'storage_error';
+  const isNetworkFailure = auth.sessionStatus === 'network_error';
+  const recoveryMessage = auth.storageError || auth.networkError;
+
   if (
     !auth.isAuthenticated &&
-    auth.sessionStatus === 'network_error' &&
-    auth.networkError &&
+    (isNetworkFailure || isStorageFailure) &&
+    recoveryMessage &&
     !bypassNetworkRecovery
   ) {
     return (
       <SafeAreaView style={styles.container}>
         <StatusBar style="light" />
         <View style={styles.centerBox}>
-          <Text style={styles.recoveryTag}>CONEXÃO INDISPONÍVEL</Text>
+          <Text style={styles.recoveryTag}>
+            {isStorageFailure ? 'FALHA NA RESTAURAÇÃO' : 'CONEXÃO INDISPONÍVEL'}
+          </Text>
           <Text style={styles.loadingTitle}>Não foi possível verificar sua sessão</Text>
-          <Text style={styles.loadingSubtitle}>{auth.networkError}</Text>
+          <Text style={styles.loadingSubtitle}>{recoveryMessage}</Text>
 
           <View style={styles.recoveryActions}>
             <Pressable
