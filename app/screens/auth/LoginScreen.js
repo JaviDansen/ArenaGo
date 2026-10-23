@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useContext, useRef, useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import {
   KeyboardAvoidingView,
@@ -12,17 +12,36 @@ import {
   View,
 } from 'react-native';
 
+import { AuthContext } from '../../context/AuthContext';
 import { validateLoginForm } from '../../utils/validation';
 
-export default function LoginScreen({ navigation }) {
-  const [email, setEmail] = useState('');
+export default function LoginScreen({ navigation, route, auth: propAuth }) {
+  const contextAuth = typeof useContext === 'function' ? useContext(AuthContext) : null;
+  const auth = propAuth ?? contextAuth;
+
+  const initialEmail =
+    typeof route?.params?.email === 'string' ? route.params.email : '';
+
+  const [email, setEmail] = useState(initialEmail);
   const [password, setPassword] = useState('');
   const [errors, setErrors] = useState({});
   const [authError, setAuthError] = useState('');
+  const [twoFactorNotice, setTwoFactorNotice] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const submittingRef = useRef(false);
 
-  function handleLogin() {
-    // Limpa mensagens de erro prévias
+  const sessionNotice = auth?.authNotice || '';
+
+  async function handleLogin() {
+    if (submittingRef.current || isSubmitting) {
+      return;
+    }
+
     setAuthError('');
+    setTwoFactorNotice('');
+    if (auth && typeof auth.clearNotices === 'function') {
+      auth.clearNotices();
+    }
 
     // Validação local dos campos
     const validation = validateLoginForm({ email, password });
@@ -34,24 +53,90 @@ export default function LoginScreen({ navigation }) {
 
     setErrors({});
 
-    // =========================================================================
-    // ACESSO TEMPORÁRIO PARA DESENVOLVIMENTO (PROVISÓRIO):
-    //
-    // Os campos passaram pela validação local (e-mail obrigatório com formato válido
-    // e senha obrigatória).
-    //
-    // Enquanto o backend e o serviço de autenticação real não estão definidos,
-    // mantemos este redirecionamento provisório para a Home (MainTabs) para
-    // permitir testar e desenvolver as demais telas do aplicativo.
-    //
-    // ESTRUTURA PARA A AUTENTICAÇÃO REAL (FUTURO):
-    // 1. Chamar serviço de autenticação: await authService.login(email.trim(), password);
-    // 2. Se o backend retornar falha de credenciais:
-    //    setAuthError('E-mail ou senha inválidos.');
-    // 3. Se autenticado com sucesso:
-    //    armazenar token/sessão e navegar para 'MainTabs'.
-    // =========================================================================
-    navigation.navigate('MainTabs');
+    if (!auth || typeof auth.login !== 'function') {
+      setAuthError(
+        'Serviço de autenticação indisponível. Verifique a configuração da API e tente novamente.'
+      );
+      return;
+    }
+
+    const payload = {
+      email: email.trim(),
+      password,
+    };
+
+    submittingRef.current = true;
+    setIsSubmitting(true);
+
+    try {
+      const result = await auth.login(payload);
+
+      if (result?.status === 'requires_2fa' || result?.requires2FA === true) {
+        const totpDetail = result.isTotpConfigured
+          ? 'Informe o código do segundo fator (TOTP) para concluir o acesso administrativo.'
+          : 'Esta conta administrativa exige configuração e confirmação do segundo fator (TOTP) antes do acesso.';
+        setTwoFactorNotice(
+          `${result.message || 'Segundo fator obrigatório para conta Admin.'} ${totpDetail}`
+        );
+        return;
+      }
+
+      if ((result?.status === 'authenticated' || result?.requires2FA === false) && result?.user) {
+        // AuthSessionGate seleciona MainTabs quando a sessão autenticada é publicada.
+        return;
+      }
+
+      setAuthError('Não foi possível iniciar uma sessão autenticada válida.');
+    } catch (error) {
+      if (error?.isTimeout) {
+        setAuthError(
+          'O servidor demorou para responder. Verifique sua conexão e tente novamente.'
+        );
+        return;
+      }
+
+      if (error?.isNetworkError) {
+        setAuthError(
+          error.detail ||
+            'Não foi possível conectar ao servidor. Verifique sua conexão com a internet e tente novamente.'
+        );
+        return;
+      }
+
+      const status = error?.status;
+      const code = error?.code;
+
+      if (status === 401 || code === 'INVALID_CREDENTIALS') {
+        setAuthError('E-mail ou senha inválidos.');
+        return;
+      }
+
+      if (status === 400 || code === 'VALIDATION_ERROR') {
+        if (error?.fieldErrors && Object.keys(error.fieldErrors).length > 0) {
+          setErrors(error.fieldErrors);
+        }
+        setAuthError(error?.detail || 'Confira as informações enviadas.');
+        return;
+      }
+
+      if (status === 429 || code === 'TOO_MANY_LOGIN_ATTEMPTS') {
+        const waitHint =
+          typeof error?.retryAfterSeconds === 'number' && error.retryAfterSeconds > 0
+            ? ` Aguarde cerca de ${error.retryAfterSeconds}s antes de tentar novamente.`
+            : '';
+        setAuthError(
+          `${error?.detail || 'Muitas tentativas de login seguidas.'}${waitHint}`
+        );
+        return;
+      }
+
+      setAuthError(
+        error?.detail || 'Ocorreu um erro inesperado ao tentar entrar na sua conta.'
+      );
+    } finally {
+      submittingRef.current = false;
+      setIsSubmitting(false);
+    }
   }
 
   return (
@@ -89,7 +174,20 @@ export default function LoginScreen({ navigation }) {
 
           {/* Formulário */}
           <View style={styles.form}>
-            {/* Mensagem estruturada para retorno de autenticação futura */}
+            {sessionNotice && !authError && !twoFactorNotice ? (
+              <View style={styles.sessionNoticeContainer}>
+                <Text style={styles.sessionNoticeText}>{sessionNotice}</Text>
+              </View>
+            ) : null}
+
+            {twoFactorNotice ? (
+              <View style={styles.twoFactorContainer}>
+                <Text style={styles.twoFactorTitle}>Verificação em duas etapas exigida</Text>
+                <Text style={styles.twoFactorText}>{twoFactorNotice}</Text>
+              </View>
+            ) : null}
+
+            {/* Mensagem estruturada para retorno de autenticação */}
             {authError ? (
               <View style={styles.authErrorContainer}>
                 <Text style={styles.authErrorText}>{authError}</Text>
@@ -103,6 +201,7 @@ export default function LoginScreen({ navigation }) {
                 placeholder="seu.email@exemplo.com"
                 placeholderTextColor="#64748b"
                 value={email}
+                editable={!isSubmitting}
                 onChangeText={(text) => {
                   setEmail(text);
                   if (errors.email) {
@@ -110,6 +209,9 @@ export default function LoginScreen({ navigation }) {
                   }
                   if (authError) {
                     setAuthError('');
+                  }
+                  if (twoFactorNotice) {
+                    setTwoFactorNotice('');
                   }
                 }}
                 keyboardType="email-address"
@@ -128,6 +230,7 @@ export default function LoginScreen({ navigation }) {
                 placeholder="Digite sua senha"
                 placeholderTextColor="#64748b"
                 value={password}
+                editable={!isSubmitting}
                 onChangeText={(text) => {
                   setPassword(text);
                   if (errors.password) {
@@ -135,6 +238,9 @@ export default function LoginScreen({ navigation }) {
                   }
                   if (authError) {
                     setAuthError('');
+                  }
+                  if (twoFactorNotice) {
+                    setTwoFactorNotice('');
                   }
                 }}
                 secureTextEntry
@@ -147,12 +253,20 @@ export default function LoginScreen({ navigation }) {
             <Pressable
               style={styles.forgotPasswordContainer}
               onPress={() => navigation.navigate('ForgotPassword')}
+              disabled={isSubmitting}
             >
               <Text style={styles.forgotPasswordText}>Esqueceu sua senha?</Text>
             </Pressable>
 
-            <Pressable style={styles.primaryButton} onPress={handleLogin}>
-              <Text style={styles.primaryButtonText}>Entrar na conta</Text>
+            <Pressable
+              style={[styles.primaryButton, isSubmitting ? styles.primaryButtonDisabled : null]}
+              onPress={handleLogin}
+              disabled={isSubmitting}
+              accessibilityLabel="Entrar na conta"
+            >
+              <Text style={styles.primaryButtonText}>
+                {isSubmitting ? 'Entrando...' : 'Entrar na conta'}
+              </Text>
             </Pressable>
           </View>
 
@@ -160,6 +274,7 @@ export default function LoginScreen({ navigation }) {
           <Pressable
             style={styles.switchAuthContainer}
             onPress={() => navigation.navigate('Register')}
+            disabled={isSubmitting}
           >
             <Text style={styles.switchAuthText}>
               Ainda não tem cadastro? Crie sua conta
@@ -263,6 +378,41 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     marginTop: 2,
   },
+  sessionNoticeContainer: {
+    backgroundColor: '#1e1b4b',
+    borderWidth: 1,
+    borderColor: '#6366f1',
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    marginBottom: 4,
+  },
+  sessionNoticeText: {
+    color: '#c7d2fe',
+    fontSize: 13,
+    fontWeight: '600',
+    textAlign: 'center',
+    lineHeight: 18,
+  },
+  twoFactorContainer: {
+    backgroundColor: '#2c1f0f',
+    borderWidth: 1,
+    borderColor: '#f59e0b',
+    borderRadius: 12,
+    padding: 14,
+    gap: 6,
+    marginBottom: 4,
+  },
+  twoFactorTitle: {
+    color: '#fcd34d',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  twoFactorText: {
+    color: '#fde68a',
+    fontSize: 13,
+    lineHeight: 18,
+  },
   authErrorContainer: {
     backgroundColor: '#2a121d',
     borderWidth: 1,
@@ -294,6 +444,9 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     marginTop: 8,
+  },
+  primaryButtonDisabled: {
+    opacity: 0.65,
   },
   primaryButtonText: {
     color: '#ffffff',

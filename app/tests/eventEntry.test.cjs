@@ -16,7 +16,7 @@ function entryScreen() {
   let cursor = 0;
   let tree;
   const data = loadModule('data/mockData.js', require).exports;
-  const screen = loadModule('screens/eventEntry/EventEntryScreen.js', (name) => {
+  const screen = loadModule('screens/event-entry/EventEntryScreen.js', (name) => {
     if (name === 'react') return {
       useState(initial) {
         const index = cursor++;
@@ -68,7 +68,7 @@ function confirmationScreen(event, previousParticipation) {
   const contextUpdates = [];
   const navigationCalls = [];
   let tree;
-  const screen = loadModule('screens/eventEntry/EventConfirmationScreen.js', (name) => {
+  const screen = loadModule('screens/event-entry/EventConfirmationScreen.js', (name) => {
     if (name === 'react') return {
       useContext: () => ({
         participation,

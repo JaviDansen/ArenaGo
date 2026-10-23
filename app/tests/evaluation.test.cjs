@@ -11,7 +11,7 @@ function evaluationScreen() {
     ['Pressable', 'ScrollView', 'Text', 'TextInput', 'View'].map((name) => [name, name])
   );
   native.StyleSheet = { create: (styles) => styles };
-  const screen = loadModule('screens/EvaluationScreen.js', (name) => {
+  const screen = loadModule('screens/participation/EvaluationScreen.js', (name) => {
     if (name === 'react') return {
       useContext: () => ({
         setParticipation: (value) => events.push({ type: 'participation', value }),
@@ -25,8 +25,8 @@ function evaluationScreen() {
       },
     };
     if (name === 'react-native') return native;
-    if (name === '../components/ScreenContainer') return { __esModule: true, default: 'ScreenContainer' };
-    if (name === '../context/ParticipationContext') return { ParticipationContext: {} };
+    if (name === '../../components/ScreenContainer') return { __esModule: true, default: 'ScreenContainer' };
+    if (name === '../../context/ParticipationContext') return { ParticipationContext: {} };
     return require(name);
   }, ['setRating']);
   screen.context.console = {

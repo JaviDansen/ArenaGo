@@ -1,7 +1,6 @@
-import { useState } from 'react';
+import { useContext, useRef, useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import {
-  Alert,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -13,20 +12,32 @@ import {
   View,
 } from 'react-native';
 
+import { AuthContext } from '../../context/AuthContext';
 import { validateRegisterForm } from '../../utils/validation';
 
-export default function RegisterScreen({ navigation }) {
+export default function RegisterScreen({ navigation, auth: propAuth }) {
+  const contextAuth = typeof useContext === 'function' ? useContext(AuthContext) : null;
+  const auth = propAuth ?? contextAuth;
+
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [errors, setErrors] = useState({});
-  const [isSuccess, setIsSuccess] = useState(false);
+  const [formError, setFormError] = useState('');
+  const [timeoutNotice, setTimeoutNotice] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const submittingRef = useRef(false);
 
-  function handleRegister() {
-    setIsSuccess(false);
+  async function handleRegister() {
+    if (submittingRef.current || isSubmitting) {
+      return;
+    }
 
-    // Validação local de todos os campos do formulário
+    setFormError('');
+    setTimeoutNotice('');
+
+    // Validação local de todos os campos do formulário (nome 2..150, email válido, senha 8..128, confirmação idêntica)
     const validation = validateRegisterForm({
       name,
       email,
@@ -40,19 +51,86 @@ export default function RegisterScreen({ navigation }) {
     }
 
     setErrors({});
-    setIsSuccess(true);
 
-    // =========================================================================
-    // FLUXO DO CADASTRO (TASK 3):
-    // Cadastro válido -> Questionário de Perfil ("Sobre você") -> Próxima etapa
-    // Em vez de encerrar o fluxo com confirmação local, direciona para o Questionário.
-    // =========================================================================
-    navigation.navigate('ProfileQuestionnaire', {
-      user: {
-        name: name.trim(),
-        email: email.trim(),
-      },
-    });
+    if (!auth || typeof auth.register !== 'function') {
+      setFormError(
+        'Serviço de autenticação indisponível. Verifique a configuração da API e tente novamente.'
+      );
+      return;
+    }
+
+    // Payload estrito do contrato K01: enviar somente name, email e password (jamais confirmPassword)
+    const payload = {
+      name: name.trim(),
+      email: email.trim(),
+      password,
+    };
+
+    submittingRef.current = true;
+    setIsSubmitting(true);
+
+    try {
+      // AuthSessionGate seleciona a pilha autenticada a partir da sessão atualizada.
+      // Esta tela pertence ao navegador público anterior e não deve navegar.
+      await auth.register(payload);
+    } catch (error) {
+      if (error?.isTimeout) {
+        setTimeoutNotice(
+          'O servidor demorou para responder e não foi possível confirmar se o seu cadastro foi concluído. Antes de tentar criar novamente, acesse a tela de Login para verificar se sua conta já foi criada.'
+        );
+        return;
+      }
+
+      if (error?.isNetworkError) {
+        setFormError(
+          error.detail ||
+            'Não foi possível conectar ao servidor. Verifique sua conexão com a internet e tente novamente.'
+        );
+        return;
+      }
+
+      const status = error?.status;
+      const code = error?.code;
+      const detail =
+        error?.detail || 'Não foi possível concluir o cadastro. Verifique os dados informados.';
+
+      if (status === 400 || code === 'VALIDATION_ERROR') {
+        const nextFieldErrors = { ...(error?.fieldErrors || {}) };
+        setErrors(nextFieldErrors);
+        setFormError(detail);
+        return;
+      }
+
+      if (status === 409 || code === 'EMAIL_ALREADY_REGISTERED') {
+        setErrors({
+          email: detail,
+        });
+        setFormError(detail);
+        return;
+      }
+
+      if (status === 422 || code === 'PASSWORD_COMPROMISED_OR_COMMON') {
+        setErrors({
+          password: detail,
+        });
+        setFormError(detail);
+        return;
+      }
+
+      if (status === 429 || code === 'TOO_MANY_REGISTRATION_ATTEMPTS') {
+        const waitHint =
+          typeof error?.retryAfterSeconds === 'number' && error.retryAfterSeconds > 0
+            ? ` Aguarde cerca de ${error.retryAfterSeconds}s antes de tentar novamente.`
+            : '';
+        setFormError(`${detail}${waitHint}`);
+        return;
+      }
+
+      setFormError(detail);
+    } finally {
+      submittingRef.current = false;
+      setIsSubmitting(false);
+    }
   }
 
   return (
@@ -90,13 +168,23 @@ export default function RegisterScreen({ navigation }) {
 
           {/* Formulário - Somente Nome, E-mail, Senha e Confirmar senha */}
           <View style={styles.form}>
-            {/* Mensagem de sucesso da validação local */}
-            {isSuccess ? (
-              <View style={styles.successCard}>
-                <Text style={styles.successTitle}>✓ Dados validados com sucesso</Text>
-                <Text style={styles.successText}>
-                  Todas as validações locais foram atendidas. Próxima etapa do fluxo: criação da conta e Questionário de Perfil.
-                </Text>
+            {timeoutNotice ? (
+              <View style={styles.timeoutCard}>
+                <Text style={styles.timeoutTitle}>Resultado do cadastro não confirmado</Text>
+                <Text style={styles.timeoutText}>{timeoutNotice}</Text>
+                <Pressable
+                  style={styles.timeoutButton}
+                  onPress={() => navigation.navigate('Login', { email: email.trim() })}
+                  accessibilityLabel="Verificar conta no Login"
+                >
+                  <Text style={styles.timeoutButtonText}>Verificar fazendo Login</Text>
+                </Pressable>
+              </View>
+            ) : null}
+
+            {formError ? (
+              <View style={styles.formErrorCard}>
+                <Text style={styles.formErrorText}>{formError}</Text>
               </View>
             ) : null}
 
@@ -107,12 +195,14 @@ export default function RegisterScreen({ navigation }) {
                 placeholder="Como quer ser chamado?"
                 placeholderTextColor="#64748b"
                 value={name}
+                editable={!isSubmitting}
                 onChangeText={(text) => {
                   setName(text);
                   if (errors.name) {
                     setErrors((prev) => ({ ...prev, name: null }));
                   }
-                  if (isSuccess) setIsSuccess(false);
+                  if (formError) setFormError('');
+                  if (timeoutNotice) setTimeoutNotice('');
                 }}
                 autoCapitalize="words"
                 autoCorrect={false}
@@ -129,12 +219,14 @@ export default function RegisterScreen({ navigation }) {
                 placeholder="seu.email@exemplo.com"
                 placeholderTextColor="#64748b"
                 value={email}
+                editable={!isSubmitting}
                 onChangeText={(text) => {
                   setEmail(text);
                   if (errors.email) {
                     setErrors((prev) => ({ ...prev, email: null }));
                   }
-                  if (isSuccess) setIsSuccess(false);
+                  if (formError) setFormError('');
+                  if (timeoutNotice) setTimeoutNotice('');
                 }}
                 keyboardType="email-address"
                 autoCapitalize="none"
@@ -152,12 +244,14 @@ export default function RegisterScreen({ navigation }) {
                 placeholder="Crie uma senha de acesso"
                 placeholderTextColor="#64748b"
                 value={password}
+                editable={!isSubmitting}
                 onChangeText={(text) => {
                   setPassword(text);
                   if (errors.password) {
                     setErrors((prev) => ({ ...prev, password: null }));
                   }
-                  if (isSuccess) setIsSuccess(false);
+                  if (formError) setFormError('');
+                  if (timeoutNotice) setTimeoutNotice('');
                 }}
                 secureTextEntry
               />
@@ -173,12 +267,14 @@ export default function RegisterScreen({ navigation }) {
                 placeholder="Digite a mesma senha novamente"
                 placeholderTextColor="#64748b"
                 value={confirmPassword}
+                editable={!isSubmitting}
                 onChangeText={(text) => {
                   setConfirmPassword(text);
                   if (errors.confirmPassword) {
                     setErrors((prev) => ({ ...prev, confirmPassword: null }));
                   }
-                  if (isSuccess) setIsSuccess(false);
+                  if (formError) setFormError('');
+                  if (timeoutNotice) setTimeoutNotice('');
                 }}
                 secureTextEntry
               />
@@ -187,14 +283,21 @@ export default function RegisterScreen({ navigation }) {
               ) : null}
             </View>
 
-            <Pressable style={styles.primaryButton} onPress={handleRegister}>
-              <Text style={styles.primaryButtonText}>Criar minha conta</Text>
+            <Pressable
+              style={[styles.primaryButton, isSubmitting ? styles.primaryButtonDisabled : null]}
+              onPress={handleRegister}
+              disabled={isSubmitting}
+              accessibilityLabel="Criar minha conta"
+            >
+              <Text style={styles.primaryButtonText}>
+                {isSubmitting ? 'Criando sua conta...' : 'Criar minha conta'}
+              </Text>
             </Pressable>
 
             {/* Card informativo de fluxo posterior */}
             <View style={styles.infoCard}>
               <Text style={styles.infoCardText}>
-                Etapas seguintes: <Text style={styles.infoCardBold}>Cadastro → Questionário de Perfil → Próxima etapa</Text>. Ao validar seus dados, você será direcionado para o questionário.
+                Etapas seguintes: <Text style={styles.infoCardBold}>Cadastro → Questionário de Perfil → Próxima etapa</Text>. Ao criar sua conta, você será direcionado para o questionário.
               </Text>
             </View>
           </View>
@@ -203,6 +306,7 @@ export default function RegisterScreen({ navigation }) {
           <Pressable
             style={styles.switchAuthContainer}
             onPress={() => navigation.navigate('Login')}
+            disabled={isSubmitting}
           >
             <Text style={styles.switchAuthText}>Já possui uma conta? Acesse aqui</Text>
           </Pressable>
@@ -304,24 +408,51 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     marginTop: 2,
   },
-  successCard: {
-    backgroundColor: '#0f291e',
+  formErrorCard: {
+    backgroundColor: '#2a121d',
     borderWidth: 1,
-    borderColor: '#10b981',
+    borderColor: '#ef4444',
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    marginBottom: 4,
+  },
+  formErrorText: {
+    color: '#fca5a5',
+    fontSize: 14,
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+  timeoutCard: {
+    backgroundColor: '#2c1f0f',
+    borderWidth: 1,
+    borderColor: '#f59e0b',
     borderRadius: 12,
     padding: 14,
+    gap: 10,
     marginBottom: 4,
   },
-  successTitle: {
-    color: '#6ee7b7',
+  timeoutTitle: {
+    color: '#fcd34d',
     fontSize: 14,
     fontWeight: '700',
-    marginBottom: 4,
   },
-  successText: {
-    color: '#a7f3d0',
+  timeoutText: {
+    color: '#fde68a',
     fontSize: 13,
     lineHeight: 18,
+  },
+  timeoutButton: {
+    backgroundColor: '#d97706',
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    alignItems: 'center',
+  },
+  timeoutButtonText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '700',
   },
   primaryButton: {
     backgroundColor: '#7c3aed',
@@ -330,6 +461,9 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     marginTop: 8,
+  },
+  primaryButtonDisabled: {
+    opacity: 0.65,
   },
   primaryButtonText: {
     color: '#ffffff',

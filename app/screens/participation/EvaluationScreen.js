@@ -1,8 +1,8 @@
 import { useContext, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
-import ScreenContainer from '../components/ScreenContainer';
-import { ParticipationContext } from '../context/ParticipationContext';
+import ScreenContainer from '../../components/ScreenContainer';
+import { ParticipationContext } from '../../context/ParticipationContext';
 
 export default function EvaluationScreen({ navigation }) {
   const { setParticipation } = useContext(ParticipationContext);

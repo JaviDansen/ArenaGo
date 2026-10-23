@@ -11,7 +11,7 @@ const fields = ['currentStepIndex', 'questionnaireData', 'birthDateText', 'gende
   'handleSelectMarketInterest', 'handleFinishQuestionnaire'];
 
 function questionnaire(options) {
-  return createHarness('screens/ProfileQuestionnaireScreen.js', { fields, ...options });
+  return createHarness('screens/profile/ProfileQuestionnaireScreen.js', { fields, ...options });
 }
 
 function ready(options) {
@@ -138,7 +138,7 @@ test('birth date stores ISO and has no residual age field', () => {
   const h = ready();
   assert.equal(h.capture.questionnaireData.birthDate, '2024-02-29');
   assert.equal(Object.hasOwn(h.capture.questionnaireData, 'age'), false);
-  const source = readFileSync(path.join(__dirname, '../screens/ProfileQuestionnaireScreen.js'), 'utf8');
+  const source = readFileSync(path.join(__dirname, '../screens/profile/ProfileQuestionnaireScreen.js'), 'utf8');
   assert.doesNotMatch(source, /\bage\b|setAge|errors\.age/);
 });
 
@@ -259,23 +259,56 @@ test('fallback finish navigation retains the existing MainTabs destination', () 
   assert.deepEqual(h.navigationCalls, [{ type: 'replace', name: 'MainTabs' }]);
 });
 
-test('Welcome, valid registration, questionnaire and provisional Login retain their routes', () => {
+test('Welcome, valid registration, questionnaire and Login retain their routes', async () => {
   const welcome = createHarness('screens/auth/WelcomeScreen.js');
   welcome.act(() => welcome.press('Criar minha conta'));
   assert.equal(welcome.navigationCalls[0].name, 'Register');
 
-  const register = createHarness('screens/auth/RegisterScreen.js', { fields: ['handleRegister'] });
+  const register = createHarness('screens/auth/RegisterScreen.js', {
+    fields: ['handleRegister'],
+    authContext: {
+      register: async ({ name, email }) => ({
+        user: {
+          id: '11111111-1111-4111-8111-111111111111',
+          name,
+          email,
+          roles: ['participante'],
+          hasCompletedQuestionnaire: false,
+        },
+        accessToken: 'access-token',
+        expiresInSeconds: 900,
+        refreshToken: 'refresh-token',
+      }),
+    },
+  });
   for (const [placeholder, value] of [
     ['Como quer ser chamado?', 'Participante'], ['seu.email@exemplo.com', 'teste@example.com'],
-    ['Crie uma senha de acesso', 'secret1'], ['Digite a mesma senha novamente', 'secret1'],
+    ['Crie uma senha de acesso', 'secret12'], ['Digite a mesma senha novamente', 'secret12'],
   ]) register.act(() => register.nodes.find((n) => n.type === 'TextInput' && n.props.placeholder === placeholder).props.onChangeText(value));
-  register.act((c) => c.handleRegister());
-  assert.equal(register.navigationCalls[0].name, 'ProfileQuestionnaire');
+  await register.actAsync((c) => c.handleRegister());
+  assert.deepEqual(register.navigationCalls, []);
 
-  const login = createHarness('screens/auth/LoginScreen.js', { fields: ['handleLogin'] });
+  const login = createHarness('screens/auth/LoginScreen.js', {
+    fields: ['handleLogin'],
+    authContext: {
+      login: async ({ email }) => ({
+        requires2FA: false,
+        user: {
+          id: '11111111-1111-4111-8111-111111111111',
+          name: 'Participante',
+          email,
+          roles: ['participante'],
+          hasCompletedQuestionnaire: true,
+        },
+        accessToken: 'access-token',
+        expiresInSeconds: 900,
+        refreshToken: 'refresh-token',
+      }),
+    },
+  });
   for (const [placeholder, value] of [
-    ['seu.email@exemplo.com', 'teste@example.com'], ['Digite sua senha', 'secret1'],
+    ['seu.email@exemplo.com', 'teste@example.com'], ['Digite sua senha', 'secret12'],
   ]) login.act(() => login.nodes.find((n) => n.type === 'TextInput' && n.props.placeholder === placeholder).props.onChangeText(value));
-  login.act((c) => c.handleLogin());
-  assert.equal(login.navigationCalls[0].name, 'MainTabs');
+  await login.actAsync((c) => c.handleLogin());
+  assert.deepEqual(login.navigationCalls, []);
 });

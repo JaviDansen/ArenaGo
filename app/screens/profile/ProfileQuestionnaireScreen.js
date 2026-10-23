@@ -12,14 +12,15 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import BirthDateInput from '../components/BirthDateInput';
-import { mockGames } from '../data/mockData';
-import { parseBirthDate } from '../utils/birthDate';
+import { useAuth } from '../../context/AuthContext';
+import BirthDateInput from '../../components/BirthDateInput';
+import { mockGames } from '../../data/mockData';
+import { parseBirthDate } from '../../utils/birthDate';
 import {
   validateAboutYouStep,
   validateGamesMarketStep,
   validateYourGamesStep,
-} from '../utils/validation';
+} from '../../utils/validation';
 
 // =============================================================================
 // DEFINIÇÃO DAS ETAPAS DO QUESTIONÁRIO
@@ -95,7 +96,8 @@ const INITIAL_QUESTIONNAIRE_DATA = {
 };
 
 export default function ProfileQuestionnaireScreen({ navigation, route }) {
-  const registeredUser = route?.params?.user || null;
+  const auth = useAuth();
+  const registeredUser = route?.params?.user || auth?.user || null;
 
   // Controle de etapa atual (0-indexada: 0 = Etapa 1, 1 = Etapa 2, 2 = Etapa 3)
   const [currentStepIndex, setCurrentStepIndex] = useState(0);

@@ -30,7 +30,17 @@ function loadModule(relativePath, requireModule, exposeFields = [], sourceOverri
       '@babel/plugin-transform-modules-commonjs'],
   });
   const module = { exports: {} };
-  const context = { module, exports: module.exports, require: requireModule, Date };
+  const context = {
+    module,
+    exports: module.exports,
+    require: requireModule,
+    Date,
+    URL,
+    AbortController,
+    setTimeout,
+    clearTimeout,
+    process,
+  };
   vm.runInNewContext(code, context, { filename });
   return { exports: module.exports, context };
 }
@@ -47,6 +57,9 @@ function nodes(element) {
   if (element == null || typeof element === 'boolean') return [];
   if (Array.isArray(element)) return element.flatMap(nodes);
   if (typeof element !== 'object' || !element.props) return [];
+  if (typeof element.type === 'function') {
+    return [element, ...nodes(element.type(element.props))];
+  }
   return [element, ...nodes(element.props.children)];
 }
 
@@ -67,8 +80,20 @@ function createHarness(relativePath, options = {}) {
   let capture;
   let tree;
   let props = options.props || {};
+  let authContextValue = options.authContext !== undefined ? options.authContext : null;
+
+  const AuthContextToken = { _defaultValue: null, Provider: 'AuthContextProvider' };
 
   const react = {
+    createContext(defaultValue = null) {
+      return { _defaultValue: defaultValue, Provider: 'ContextProvider' };
+    },
+    useContext(contextObj) {
+      if (contextObj === AuthContextToken) {
+        return authContextValue;
+      }
+      return contextObj?._defaultValue ?? authContextValue;
+    },
     useState(initial) {
       const index = cursor++;
       if (!(index in state)) state[index] = freeze(initial);
@@ -91,7 +116,7 @@ function createHarness(relativePath, options = {}) {
       }
     },
   };
-  const native = Object.fromEntries(['KeyboardAvoidingView', 'Modal', 'Pressable', 'ScrollView',
+  const native = Object.fromEntries(['ActivityIndicator', 'KeyboardAvoidingView', 'Modal', 'Pressable', 'ScrollView',
     'Text', 'TextInput', 'View', 'SafeAreaView'].map((name) => [name, name]));
   native.Platform = { OS: options.platform || 'ios' };
   native.Keyboard = { dismiss() {} };
@@ -125,10 +150,17 @@ function createHarness(relativePath, options = {}) {
     if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView' };
     if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
     if (name === '@react-native-community/datetimepicker') return nativePicker;
-    if (name === '../components/BirthDateInput') return { __esModule: true, default: 'BirthDateInput' };
-    if (name === '../utils/birthDate') return birthDate;
+    if (name === '../components/BirthDateInput' || name === '../../components/BirthDateInput') return { __esModule: true, default: 'BirthDateInput' };
+    if (name === '../components/ScreenContainer' || name === '../../components/ScreenContainer') return { __esModule: true, default: 'ScreenContainer' };
+    if (name === '../context/AuthContext' || name === '../../context/AuthContext') {
+      return {
+        AuthContext: AuthContextToken,
+        useAuth: () => authContextValue,
+      };
+    }
+    if (name === '../utils/birthDate' || name === '../../utils/birthDate') return birthDate;
     if (name === '../utils/validation' || name === '../../utils/validation') return validation;
-    if (name === '../data/mockData') return data;
+    if (name === '../data/mockData' || name === '../../data/mockData') return data;
     return require(name);
   }, options.fields || [], options.source);
 
@@ -170,6 +202,15 @@ function createHarness(relativePath, options = {}) {
     navigationCalls,
     nativePickerCalls,
     act(callback) { callback(capture); flush(); },
+    async actAsync(callback) {
+      await callback(capture);
+      flush();
+    },
+    setAuthContext(nextAuthContext) {
+      authContextValue = nextAuthContext;
+      render();
+      flush();
+    },
     setProps(nextProps) { props = { ...props, ...nextProps }; render(); flush(); },
     inputBirthDate(value) {
       const input = nodes(tree).find((node) => node.type === 'BirthDateInput');
@@ -181,7 +222,7 @@ function createHarness(relativePath, options = {}) {
         (node.props.accessibilityLabel === label || textOf(node) === label));
       assert.ok(button, `missing button: ${label}`);
       assert.notEqual(button.props.disabled, true);
-      button.props.onPress();
+      return button.props.onPress();
     },
   };
 }
