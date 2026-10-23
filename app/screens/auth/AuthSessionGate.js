@@ -34,7 +34,7 @@ export function resolveInitialRouteForAuthState(authState) {
   return 'MainTabs';
 }
 
-function adaptNavigationTree(node, authState) {
+export function adaptNavigationTree(node, authState) {
   if (!isValidElement(node)) {
     return node;
   }
@@ -63,6 +63,7 @@ function adaptNavigationTree(node, authState) {
       node,
       {
         ...node.props,
+        key: navKey,
         initialRouteName,
       },
       ...filteredChildren
@@ -78,16 +79,7 @@ function adaptNavigationTree(node, authState) {
     : adaptNavigationTree(node.props.children, authState);
 
   // Se o filho adaptado é o Stack.Navigator, este nó é o NavigationContainer; atribuímos key para reconstruir a pilha na troca de estado de sessão
-  const isNavContainer =
-    isValidElement(adaptedChildren) &&
-    adaptedChildren.props &&
-    typeof adaptedChildren.props.initialRouteName === 'string';
-
-  return cloneElement(
-    node,
-    isNavContainer ? { ...node.props, key: navKey } : node.props,
-    adaptedChildren
-  );
+  return cloneElement(node, node.props, adaptedChildren);
 }
 
 export function AuthSessionCoordinator({ children }) {

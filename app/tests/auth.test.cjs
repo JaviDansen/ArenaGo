@@ -194,7 +194,7 @@ test('registration button blocks invalid forms (name, email, 6/7-char or >128-ch
   }
 });
 
-test('valid registration sends only { name, email, password } (never confirmPassword), creates session, and navigates immediately to ProfileQuestionnaire', async () => {
+test('valid registration sends only { name, email, password } (never confirmPassword), creates session, and leaves routing to AuthSessionGate', async () => {
   const rig = createAuthRig(async (req) => {
     if (req.url.endsWith('/api/v1/auth/register')) {
       assert.equal(req.method, 'POST');
@@ -252,20 +252,8 @@ test('valid registration sends only { name, email, password } (never confirmPass
   assert.equal(rig.manager.getSnapshot().user.hasCompletedQuestionnaire, false);
   assert.equal(rig.secureStore.store.get('arenago.auth.refresh_token'), 'opaque-refresh-register');
 
-  assert.deepEqual(structuredClone(h.navigationCalls), [{
-    type: 'navigate',
-    name: 'ProfileQuestionnaire',
-    params: {
-      user: {
-        id: '11111111-1111-4111-8111-111111111111',
-        name: 'Ana  Maria',
-        email: 'ana@example.com',
-        emailVerified: false,
-        roles: ['participante'],
-        hasCompletedQuestionnaire: false,
-      },
-    },
-  }]);
+  assert.deepEqual(h.navigationCalls, []);
+  assert.equal(rig.manager.getSnapshot().postAuthRoute, 'ProfileQuestionnaire');
 });
 
 test('registration handles 409 EMAIL_ALREADY_REGISTERED, 422 PASSWORD_COMPROMISED_OR_COMMON, and 429 rate limit without navigating', async () => {
@@ -413,9 +401,8 @@ test('login succeeds with completed questionnaire and with pending questionnaire
       rig.manager.getSnapshot().user.hasCompletedQuestionnaire,
       hasCompletedQuestionnaire
     );
-    assert.deepEqual(h.navigationCalls, [
-      { type: 'navigate', name: 'MainTabs', params: undefined },
-    ]);
+    assert.deepEqual(h.navigationCalls, []);
+    assert.equal(rig.manager.getSnapshot().postAuthRoute, 'MainTabs');
 
     // Verify HomeScreen behavior for questionnaire status
     const home = createHarness('screens/home/HomeScreen.js', {

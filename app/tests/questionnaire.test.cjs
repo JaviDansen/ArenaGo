@@ -286,7 +286,7 @@ test('Welcome, valid registration, questionnaire and Login retain their routes',
     ['Crie uma senha de acesso', 'secret12'], ['Digite a mesma senha novamente', 'secret12'],
   ]) register.act(() => register.nodes.find((n) => n.type === 'TextInput' && n.props.placeholder === placeholder).props.onChangeText(value));
   await register.actAsync((c) => c.handleRegister());
-  assert.equal(register.navigationCalls[0].name, 'ProfileQuestionnaire');
+  assert.deepEqual(register.navigationCalls, []);
 
   const login = createHarness('screens/auth/LoginScreen.js', {
     fields: ['handleLogin'],
@@ -310,5 +310,5 @@ test('Welcome, valid registration, questionnaire and Login retain their routes',
     ['seu.email@exemplo.com', 'teste@example.com'], ['Digite sua senha', 'secret12'],
   ]) login.act(() => login.nodes.find((n) => n.type === 'TextInput' && n.props.placeholder === placeholder).props.onChangeText(value));
   await login.actAsync((c) => c.handleLogin());
-  assert.equal(login.navigationCalls[0].name, 'MainTabs');
+  assert.deepEqual(login.navigationCalls, []);
 });

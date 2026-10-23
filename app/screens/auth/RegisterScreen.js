@@ -70,16 +70,9 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
     setIsSubmitting(true);
 
     try {
-      const result = await auth.register(payload);
-      const registeredUser = result?.user ?? {
-        name: payload.name,
-        email: payload.email.toLowerCase(),
-        hasCompletedQuestionnaire: false,
-      };
-
-      navigation.navigate('ProfileQuestionnaire', {
-        user: registeredUser,
-      });
+      // AuthSessionGate selects the authenticated stack from the updated session.
+      // This screen belongs to the previous public navigator, so it must not navigate.
+      await auth.register(payload);
     } catch (error) {
       if (error?.isTimeout) {
         setTimeoutNotice(

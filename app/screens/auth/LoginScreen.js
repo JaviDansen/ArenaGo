@@ -82,7 +82,7 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
       }
 
       if ((result?.status === 'authenticated' || result?.requires2FA === false) && result?.user) {
-        navigation.navigate('MainTabs');
+        // AuthSessionGate selects MainTabs when the authenticated session is published.
         return;
       }
 
