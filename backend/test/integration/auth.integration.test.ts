@@ -24,13 +24,9 @@ import {
   verifyAccessToken,
 } from "../../src/auth/token.util";
 import { ProblemDetailsExceptionFilter } from "../../src/common/errors/problem-details.filter";
+import { assertSafeTestDatabase } from "./test-db-guard";
 
-const connectionString = process.env.DATABASE_URL;
-if (!connectionString) {
-  throw new Error(
-    "DATABASE_URL local descartável é obrigatório para os testes de integração.",
-  );
-}
+const connectionString = assertSafeTestDatabase(process.env.DATABASE_URL);
 
 /**
  * Controller auxiliar para validar o contrato compartilhado de autenticação

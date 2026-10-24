@@ -16,13 +16,9 @@ import {
   getReferenceCivilTimezone,
   ProfileQuestionnaireService,
 } from "../../src/profile";
+import { assertSafeTestDatabase } from "./test-db-guard";
 
-const connectionString = process.env.DATABASE_URL;
-if (!connectionString) {
-  throw new Error(
-    "DATABASE_URL local descartável é obrigatório para os testes de integração.",
-  );
-}
+const connectionString = assertSafeTestDatabase(process.env.DATABASE_URL);
 
 let app: INestApplication;
 let baseUrl: string;
@@ -1197,7 +1193,14 @@ test("K03 Profile Questionnaire & Games Catalog — Integração HTTP + PostgreS
   // K03-F: Política de publicação de versões do questionário e seed de catálogo
   // ===========================================================================
   await t.test("K03-F.1: Reinicialização da API jamais reativa versão inativa (activated_at = NULL)", async () => {
+    let originalActivatedAt: Date | null = null;
     try {
+      // 0. Ler o valor original de activated_at para restauração exata
+      const origRes = await pool.query<{ activated_at: Date | null }>(
+        `SELECT activated_at FROM questionnaire_versions WHERE version = '1.0.0'`,
+      );
+      originalActivatedAt = origRes.rows[0]?.activated_at ?? new Date();
+
       // 1. Desativar propositalmente a versão 1.0.0
       await pool.query(
         `UPDATE questionnaire_versions SET activated_at = NULL WHERE version = '1.0.0'`,
@@ -1232,9 +1235,10 @@ test("K03 Profile Questionnaire & Games Catalog — Integração HTTP + PostgreS
       assert.equal(saveRes.status, 422);
       assert.equal((saveRes.body as { code?: string }).code, "QUESTIONNAIRE_VERSION_UNAVAILABLE");
     } finally {
-      // Restaurar a versão para os próximos testes
+      // Restaurar exatamente os valores originais da versão 1.0.0
       await pool.query(
-        `UPDATE questionnaire_versions SET activated_at = clock_timestamp() WHERE version = '1.0.0'`,
+        `UPDATE questionnaire_versions SET activated_at = $1 WHERE version = '1.0.0'`,
+        [originalActivatedAt],
       );
     }
   });

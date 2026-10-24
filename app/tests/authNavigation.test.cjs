@@ -316,3 +316,76 @@ test('K05 Auditoria: Restauracao de sessao com questionario pendente direciona p
   const state = router.getInitialState(routerOptions(pendingRestoreTree.names));
   assert.equal(state.routes[state.index].name, 'ProfileQuestionnaire');
 });
+
+test('Adversarial A.1: Usuario com questionario pendente tem acesso estritamente bloqueado a rotas operacionais', () => {
+  const pendingTree = renderStack({
+    isAuthenticated: true,
+    sessionStatus: 'authenticated',
+    user: { id: 'u-pending', name: 'Participante Pendente', hasCompletedQuestionnaire: false },
+  });
+
+  // Apenas ProfileQuestionnaire e alias Questionario devem estar presentes na Stack
+  assert.deepEqual(pendingTree.names, ['ProfileQuestionnaire', 'Questionario']);
+
+  const router = StackRouter(routerOptions(pendingTree.names));
+  const initialState = router.getInitialState(routerOptions(pendingTree.names));
+  assert.equal(initialState.routes[initialState.index].name, 'ProfileQuestionnaire');
+
+  // Tentativas de navegacao direta para qualquer rota operacional devem ser completamente rejeitadas
+  for (const forbiddenRoute of ['MainTabs', 'EventEntry', 'EventConfirmation', 'ParticipationDetails', 'Evaluation']) {
+    const attemptedState = navigate(router, initialState, pendingTree.names, forbiddenRoute);
+    assert.equal(
+      attemptedState,
+      null,
+      `Rota operacional "${forbiddenRoute}" nao deve ser acessivel para usuario com questionario pendente`
+    );
+  }
+});
+
+test('Adversarial A.2: Usuario com questionario concluido tem acesso completo as rotas operacionais', () => {
+  const completedTree = renderStack({
+    isAuthenticated: true,
+    sessionStatus: 'authenticated',
+    user: { id: 'u-completed', name: 'Participante Concluido', hasCompletedQuestionnaire: true },
+  });
+
+  assert.ok(completedTree.names.includes('MainTabs'));
+  assert.ok(completedTree.names.includes('EventEntry'));
+  assert.ok(completedTree.names.includes('EventConfirmation'));
+  assert.ok(completedTree.names.includes('ParticipationDetails'));
+  assert.ok(completedTree.names.includes('Evaluation'));
+
+  const router = StackRouter(routerOptions(completedTree.names));
+  const initialState = router.getInitialState(routerOptions(completedTree.names));
+  assert.equal(initialState.routes[initialState.index].name, 'MainTabs');
+
+  const navEventEntry = navigate(router, initialState, completedTree.names, 'EventEntry');
+  assert.ok(navEventEntry);
+  assert.equal(navEventEntry.routes[navEventEntry.index].name, 'EventEntry');
+});
+
+test('Adversarial A.3: Questionario de perfil preserva acoes para encerrar a sessao via logout', async () => {
+  let logoutCalled = false;
+  const h = createHarness('screens/profile/ProfileQuestionnaireScreen.js', {
+    fields: ['handleBack'],
+    authContext: {
+      isAuthenticated: true,
+      user: { id: 'u-1', hasCompletedQuestionnaire: false },
+      httpClient: {
+        get: () => ({ then: (fn) => { fn({}); return { catch: () => {} }; } }),
+      },
+      logout: () => {
+        logoutCalled = true;
+      },
+    },
+  });
+
+  // Verifica que o botao "Sair da conta" esta presente e acessivel no cabecalho
+  h.act(() => h.press('Sair da conta'));
+  assert.equal(logoutCalled, true, 'Botao de sair no cabecalho deve disparar auth.logout()');
+
+  // Verifica que handleBack na etapa 0 tambem dispara logout quando nao ha tela anterior
+  logoutCalled = false;
+  h.act((c) => c.handleBack());
+  assert.equal(logoutCalled, true, 'handleBack na etapa 0 deve disparar logout para nao reter usuario preso');
+});

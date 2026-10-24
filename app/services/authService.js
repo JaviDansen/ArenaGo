@@ -547,6 +547,11 @@ export function createAuthSessionManager(options = {}) {
       });
     }
 
+    // Proteção contra resposta obsoleta: não reverte questionário concluído
+    if (state.user?.id === liveUser.id && state.user?.hasCompletedQuestionnaire === true) {
+      liveUser.hasCompletedQuestionnaire = true;
+    }
+
     emitState({
       user: liveUser,
       isAuthenticated: true,

@@ -125,17 +125,38 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [saveError, setSaveError] = useState(null);
 
-  // Refs de controle de sincronismo e corrida
+  // Refs de controle de sincronismo, corrida e preservação granular
   const isSubmittingRef = useRef(false);
   const searchRequestIdRef = useRef(0);
-  const hasUserInteractedRef = useRef(false);
+  const editedFieldsRef = useRef(new Set());
+  const userAddedGamesRef = useRef([]);
   const isMountedRef = useRef(true);
+  const authRef = useRef(auth);
+  authRef.current = auth;
+  const currentUserIdRef = useRef(auth?.user?.id);
+  currentUserIdRef.current = auth?.user?.id;
+
+  // Redefine estado se o usuario autenticado mudou (isolamento de sessao)
+  const lastActiveUserRef = useRef(auth?.user?.id);
+  if (lastActiveUserRef.current !== auth?.user?.id) {
+    lastActiveUserRef.current = auth?.user?.id;
+    editedFieldsRef.current.clear();
+    userAddedGamesRef.current = [];
+    setBirthDateText('');
+    setGender('');
+    setOtherGender('');
+    setEducation('');
+    setQuestionnaireData(INITIAL_QUESTIONNAIRE_DATA);
+  }
 
   // Sinônimo para compatibilidade com testes anteriores
   const availableGames = catalogGames;
 
+  const markFieldEdited = (fieldName) => {
+    editedFieldsRef.current.add(fieldName);
+  };
   const markUserInteracted = () => {
-    hasUserInteractedRef.current = true;
+    editedFieldsRef.current.add('general');
   };
 
   const totalSteps = QUESTIONNAIRE_STEPS.length;
@@ -151,6 +172,8 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
     if (!client) {
       return;
     }
+
+    const requestUserId = currentUserId;
 
     // 1. Carrega catálogo do backend (GET /api/v1/games?limit=50)
     setIsCatalogLoading(true);
@@ -173,41 +196,62 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
       });
 
     // 2. Pré-carrega respostas existentes se o usuário estiver autenticado
-    if (isAuthenticated) {
+    if (isAuthenticated && requestUserId) {
       client
         .get('/profile/questionnaire', { auth: true })
         .then((res) => {
           if (!isMountedRef.current || !res || !res.hasCompleted) return;
-          // Proteção contra sobrescrita: se o usuário já editou algo localmente, não sobrescreve
-          if (hasUserInteractedRef.current) return;
+          // ISOLAMENTO DE SESSÃO: descarta se a sessão mudou para outro usuário durante a requisição
+          if (currentUserIdRef.current !== requestUserId || !authRef.current?.isAuthenticated) return;
 
+          // PRESERVAÇÃO GRANULAR POR CAMPO: só aplica valores do backend nos campos NÃO editados pelo usuário
           if (res.aboutYou) {
-            if (res.aboutYou.birthDate) {
+            if (!editedFieldsRef.current.has('birthDate') && res.aboutYou.birthDate) {
               setBirthDateText(formatBirthDate(res.aboutYou.birthDate));
             }
-            if (res.aboutYou.gender) {
+            if (!editedFieldsRef.current.has('gender') && res.aboutYou.gender) {
               setGender(res.aboutYou.gender);
             }
-            if (res.aboutYou.otherGender) {
+            if (!editedFieldsRef.current.has('otherGender') && res.aboutYou.otherGender) {
               setOtherGender(res.aboutYou.otherGender);
             }
-            if (res.aboutYou.education) {
+            if (!editedFieldsRef.current.has('education') && res.aboutYou.education) {
               setEducation(res.aboutYou.education);
             }
           }
-          if (Array.isArray(res.yourGames) && res.yourGames.length > 0) {
-            setQuestionnaireData((prev) => ({
+
+          // NÃO SOBRESCREVE JOGOS ADICIONADOS PELO USUÁRIO ANTES DO GET
+          setQuestionnaireData((prev) => {
+            const currentGames = prev.selectedGames || [];
+            const serverGames = Array.isArray(res.yourGames) ? res.yourGames : [];
+            let merged;
+            if (currentGames.length === 0) {
+              merged = serverGames;
+            } else {
+              const seen = new Set();
+              merged = [];
+              for (const g of [...currentGames, ...serverGames]) {
+                const lower = g.trim().toLowerCase();
+                if (!seen.has(lower)) {
+                  seen.add(lower);
+                  merged.push(g.trim());
+                }
+              }
+            }
+
+            return {
               ...prev,
-              selectedGames: res.yourGames,
-            }));
-          }
-          if (res.gamesMarket) {
-            setQuestionnaireData((prev) => ({
-              ...prev,
-              marketKnowledge: res.gamesMarket.marketKnowledge,
-              marketInterest: res.gamesMarket.marketInterest,
-            }));
-          }
+              selectedGames: merged,
+              marketKnowledge:
+                !editedFieldsRef.current.has('marketKnowledge') && res.gamesMarket?.marketKnowledge
+                  ? res.gamesMarket.marketKnowledge
+                  : prev.marketKnowledge,
+              marketInterest:
+                !editedFieldsRef.current.has('marketInterest') && res.gamesMarket?.marketInterest
+                  ? res.gamesMarket.marketInterest
+                  : prev.marketInterest,
+            };
+          });
         })
         .catch(() => {
           // Silencioso se o usuário for recém-cadastrado e ainda não tiver respostas salvas
@@ -224,13 +268,19 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
     if (currentStepIndex > 0) {
       setCurrentStepIndex((prev) => Math.max(0, prev - 1));
     } else {
-      // Retornar da Etapa 1 ao Cadastro, quando necessário
-      navigation.goBack();
+      if (typeof navigation?.canGoBack === 'function' && navigation.canGoBack()) {
+        navigation.goBack();
+      } else if (auth?.isAuthenticated && typeof auth?.logout === 'function') {
+        auth.logout();
+      } else {
+        navigation.goBack();
+      }
     }
   }
 
   // Seleção única de gênero
   function handleSelectGender(option) {
+    markFieldEdited('gender');
     markUserInteracted();
     setGender(option);
     if (errors.gender) {
@@ -249,6 +299,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
 
   // Seleção única de escolaridade
   function handleSelectEducation(option) {
+    markFieldEdited('education');
     markUserInteracted();
     setEducation(option);
     if (errors.education) {
@@ -294,6 +345,10 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
     }
     setSearchError(null);
 
+    // Invalida imediatamente requisições de busca anteriores
+    searchRequestIdRef.current += 1;
+    const currentRequestId = searchRequestIdRef.current;
+
     const trimmed = text.trim();
     if (!trimmed) {
       setSearchResults([]);
@@ -308,8 +363,6 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
       return;
     }
 
-    searchRequestIdRef.current += 1;
-    const currentRequestId = searchRequestIdRef.current;
     setIsSearching(true);
 
     client
@@ -366,8 +419,10 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
       };
     });
 
+    searchRequestIdRef.current += 1;
     setSearchQuery('');
     setSearchResults([]);
+    setIsSearching(false);
     setFeedbackMessage({
       type: 'success',
       text: `"${trimmed}" adicionado aos seus jogos.`,
@@ -380,6 +435,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
 
   // Remove um jogo da lista de selecionados (permitindo selecioná-lo novamente)
   function handleRemoveGame(gameToRemove) {
+    markFieldEdited('selectedGames');
     markUserInteracted();
     setQuestionnaireData((prev) => ({
       ...prev,
@@ -409,6 +465,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
 
   // Seleção única de conhecimento sobre o mercado de games (Etapa 3)
   function handleSelectMarketKnowledge(option) {
+    markFieldEdited('marketKnowledge');
     markUserInteracted();
     setQuestionnaireData((prev) => ({
       ...prev,
@@ -421,6 +478,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
 
   // Seleção única de interesse no mercado profissional de games (Etapa 3)
   function handleSelectMarketInterest(option) {
+    markFieldEdited('marketInterest');
     markUserInteracted();
     setQuestionnaireData((prev) => ({
       ...prev,
@@ -433,7 +491,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
 
   // Conclusão e persistência do questionário no backend
   function handleFinishQuestionnaire() {
-    if (isSubmittingRef.current) {
+    if (isSubmittingRef.current || isSubmitting) {
       return;
     }
     isSubmittingRef.current = true;
@@ -475,9 +533,17 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
       marketInterest: questionnaireData.marketInterest,
     };
 
+    const submittingUserId = auth?.user?.id;
+
     client
       .put('/profile/questionnaire', payload, { auth: true })
       .then((res) => {
+        if (!isMountedRef.current) return;
+        // Aborta se o usuário foi desautenticado ou mudou durante o PUT
+        if (authRef.current?.user?.id !== submittingUserId || !authRef.current?.isAuthenticated) {
+          return;
+        }
+
         if (typeof auth?.markQuestionnaireCompleted === 'function') {
           auth.markQuestionnaireCompleted();
         }
@@ -494,6 +560,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
         }
       })
       .catch((saveErr) => {
+        if (!isMountedRef.current) return;
         if (saveErr?.fieldErrors) {
           setErrors((prev) => ({ ...prev, ...saveErr.fieldErrors }));
         }
@@ -504,8 +571,10 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
         setSaveError(errorDetail);
       })
       .finally(() => {
-        isSubmittingRef.current = false;
-        setIsSubmitting(false);
+        if (isMountedRef.current) {
+          isSubmittingRef.current = false;
+          setIsSubmitting(false);
+        }
       });
   }, [finishRequested, questionnaireData, auth, navigation]);
 
@@ -513,9 +582,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
   const localMatches = trimmedSearch
     ? catalogGames.filter((game) => game.toLowerCase().includes(trimmedSearch))
     : [];
-  const searchMatches = trimmedSearch
-    ? searchResults.filter((game) => game.toLowerCase().includes(trimmedSearch))
-    : [];
+  const searchMatches = searchResults;
 
   const seenSuggestions = new Set();
   const filteredSuggestions = [];
@@ -553,7 +620,18 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
           </Text>
         </View>
 
-        <View style={styles.headerPlaceholder} />
+        {auth?.isAuthenticated && typeof auth?.logout === 'function' ? (
+          <Pressable
+            style={styles.headerLogoutButton}
+            onPress={() => auth.logout()}
+            hitSlop={8}
+            accessibilityLabel="Sair da conta"
+          >
+            <Text style={styles.headerLogoutButtonText}>Sair</Text>
+          </Pressable>
+        ) : (
+          <View style={styles.headerPlaceholder} />
+        )}
       </View>
 
       {/* Barra visual de progresso */}
@@ -605,6 +683,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
                   placeholderTextColor="#64748b"
                   value={birthDateText}
                   onChangeText={(text) => {
+                    markFieldEdited('birthDate');
                     markUserInteracted();
                     setBirthDateText(text);
                     if (errors.birthDate) {
@@ -672,6 +751,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
                       placeholderTextColor="#64748b"
                       value={otherGender}
                       onChangeText={(text) => {
+                        markFieldEdited('otherGender');
                         markUserInteracted();
                         setOtherGender(text);
                         if (errors.otherGender) {
@@ -1210,6 +1290,19 @@ const styles = StyleSheet.create({
   },
   headerPlaceholder: {
     width: 40,
+  },
+  headerLogoutButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 16,
+    backgroundColor: '#25152a',
+    borderWidth: 1,
+    borderColor: '#5c1d35',
+  },
+  headerLogoutButtonText: {
+    color: '#f87171',
+    fontSize: 12,
+    fontWeight: '700',
   },
   progressContainer: {
     paddingHorizontal: 20,

@@ -920,3 +920,516 @@ test('K05 Auditoria 9: Persistencia e restauracao apos reinicio do app', async (
   assert.equal(restored2.user.hasCompletedQuestionnaire, true);
   assert.equal(session2.getSnapshot().postAuthRoute, 'MainTabs');
 });
+
+test('Adversarial B.1: Pre-carregamento tardio preserva campo editado pelo usuario e carrega campos nao editados', async () => {
+  let resolveProfile;
+  const mockClient = {
+    get: async (url) => {
+      if (url.startsWith('/games')) return { games: [], total: 0 };
+      if (url === '/profile/questionnaire') {
+        return new Promise((resolve) => {
+          resolveProfile = resolve;
+        });
+      }
+      return {};
+    },
+  };
+
+  const h = createHarness('screens/profile/ProfileQuestionnaireScreen.js', {
+    fields,
+    authContext: {
+      isAuthenticated: true,
+      httpClient: mockClient,
+      user: { id: 'user-gran-1' },
+    },
+  });
+
+  // Usuario edita APENAS a data de nascimento
+  h.act(() => h.inputBirthDate('20/10/2002'));
+
+  // Servidor responde com dados antigos para data de nascimento, genero e escolaridade
+  resolveProfile({
+    hasCompleted: true,
+    aboutYou: {
+      birthDate: '1990-01-01',
+      gender: 'Feminino',
+      otherGender: null,
+      education: 'Pós-graduação',
+    },
+    yourGames: [],
+    gamesMarket: {
+      marketKnowledge: 'Sim, conheço.',
+      marketInterest: 'Sim, tenho interesse.',
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  h.act(() => {});
+
+  // Data de nascimento editada pelo usuario FOI PRESERVADA
+  assert.equal(h.capture.birthDateText, '20/10/2002', 'Data editada pelo usuario nao pode ser sobrescrita');
+  // Campos nao editados FORAM CARREGADOS do backend
+  assert.equal(h.capture.gender, 'Feminino', 'Genero nao editado deve ser carregado do backend');
+  assert.equal(h.capture.education, 'Pós-graduação', 'Escolaridade nao editada deve ser carregada do backend');
+  assert.equal(h.capture.questionnaireData.marketKnowledge, 'Sim, conheço.');
+});
+
+test('Adversarial B.2: Pre-carregamento tardio preserva jogos adicionados antes do GET e mescla sem perda', async () => {
+  let resolveProfile;
+  const mockClient = {
+    get: async (url) => {
+      if (url.startsWith('/games')) return { games: [], total: 0 };
+      if (url === '/profile/questionnaire') {
+        return new Promise((resolve) => {
+          resolveProfile = resolve;
+        });
+      }
+      return {};
+    },
+  };
+
+  const h = createHarness('screens/profile/ProfileQuestionnaireScreen.js', {
+    fields,
+    authContext: {
+      isAuthenticated: true,
+      httpClient: mockClient,
+      user: { id: 'user-games-merge' },
+    },
+  });
+
+  h.act(() => h.inputBirthDate('10/10/2000'));
+  h.act((c) => c.handleSelectGender('Masculino'));
+  h.act((c) => c.handleSelectEducation('Superior'));
+  h.act((c) => c.handleAdvanceStep1());
+
+  // Usuario adiciona um jogo localmente ANTES do GET resolver
+  h.act((c) => c.handleAddGame('Meu Jogo Customizado'));
+
+  // Servidor responde tardiamente com jogos cadastrados anteriormente
+  resolveProfile({
+    hasCompleted: true,
+    yourGames: ['Minecraft', 'Fortnite'],
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  h.act(() => {});
+
+  // A lista de jogos selecionados deve conter o jogo adicionado E os jogos do servidor sem perda
+  const games = Array.from(h.capture.questionnaireData.selectedGames);
+  assert.ok(games.includes('Meu Jogo Customizado'), 'Jogo adicionado localmente deve ser preservado');
+  assert.ok(games.includes('Minecraft'), 'Jogos do servidor devem ser incorporados');
+  assert.ok(games.includes('Fortnite'), 'Jogos do servidor devem ser incorporados');
+});
+
+test('Adversarial B.3: Respostas do usuario A jamais sao aplicadas a sessao do usuario B (isolamento de sessao)', async () => {
+  let requestCount = 0;
+  let resolveUserAProfile;
+  let resolveUserBProfile;
+  const mockClient = {
+    get: async (url) => {
+      if (url.startsWith('/games')) return { games: [], total: 0 };
+      if (url === '/profile/questionnaire') {
+        requestCount++;
+        if (requestCount === 1) {
+          return new Promise((resolve) => {
+            resolveUserAProfile = resolve;
+          });
+        }
+        return new Promise((resolve) => {
+          resolveUserBProfile = resolve;
+        });
+      }
+      return {};
+    },
+  };
+
+  // Monta tela com Sessao do Usuario A
+  const h = createHarness('screens/profile/ProfileQuestionnaireScreen.js', {
+    fields,
+    authContext: {
+      isAuthenticated: true,
+      httpClient: mockClient,
+      user: { id: 'user-A' },
+    },
+  });
+
+  // Sessao muda para Usuario B antes do GET do Usuario A terminar
+  h.setAuthContext({
+    isAuthenticated: true,
+    httpClient: mockClient,
+    user: { id: 'user-B' },
+  });
+
+  // Resposta da primeira requisicao (Usuario A) chega tardiamente
+  resolveUserAProfile({
+    hasCompleted: true,
+    aboutYou: {
+      birthDate: '1985-05-20',
+      gender: 'Masculino',
+      otherGender: null,
+      education: 'Fundamental',
+    },
+    yourGames: ['Jogo Exclusivo Usuario A'],
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  h.act(() => {});
+
+  // Os dados da sessao do Usuario A NAO devem vazar para o Usuario B
+  assert.notEqual(h.capture.birthDateText, '20/05/1985', 'Dados do usuario A nao devem ser aplicados a sessao do usuario B');
+  assert.notEqual(h.capture.gender, 'Masculino');
+  assert.notEqual(h.capture.education, 'Fundamental');
+  assert.deepEqual(Array.from(h.capture.questionnaireData.selectedGames), []);
+
+  // Agora responde a requisicao legítima do Usuario B
+  resolveUserBProfile({
+    hasCompleted: true,
+    aboutYou: {
+      birthDate: '2005-12-10',
+      gender: 'Feminino',
+      otherGender: null,
+      education: 'Superior',
+    },
+    yourGames: ['Jogo Legítimo Usuario B'],
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  h.act(() => {});
+
+  assert.equal(h.capture.birthDateText, '10/12/2005');
+  assert.equal(h.capture.gender, 'Feminino');
+  assert.equal(h.capture.education, 'Superior');
+  assert.deepEqual(Array.from(h.capture.questionnaireData.selectedGames), ['Jogo Legítimo Usuario B']);
+});
+
+test('Adversarial B.4: Desmontagem do componente cancela efeitos assincronos e nao provoca erros', async () => {
+  let resolveLateProfile;
+  const mockClient = {
+    get: async (url) => {
+      if (url.startsWith('/games')) return { games: [], total: 0 };
+      if (url === '/profile/questionnaire') {
+        return new Promise((resolve) => {
+          resolveLateProfile = resolve;
+        });
+      }
+      return {};
+    },
+  };
+
+  const h = createHarness('screens/profile/ProfileQuestionnaireScreen.js', {
+    fields,
+    authContext: {
+      isAuthenticated: true,
+      httpClient: mockClient,
+      user: { id: 'user-unmount' },
+    },
+  });
+
+  // Desmonta o componente
+  h.unmount();
+
+  // Resposta assincrona chega apos a desmontagem
+  resolveLateProfile({
+    hasCompleted: true,
+    aboutYou: { birthDate: '1995-01-01', gender: 'Feminino', education: 'Médio' },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  // Nao deve ter lancado nenhum erro
+});
+
+test('Adversarial C.1: Limpeza da busca invalida requisicoes de pesquisa anteriores em voo', async () => {
+  let resolveSearch;
+  const customFields = [...fields, 'searchResults', 'filteredSuggestions', 'isSearching'];
+  const mockClient = {
+    get: async (url) => {
+      if (url.includes('query=Roblox')) {
+        return new Promise((resolve) => {
+          resolveSearch = resolve;
+        });
+      }
+      return { games: [], total: 0 };
+    },
+  };
+
+  const h = createHarness('screens/profile/ProfileQuestionnaireScreen.js', {
+    fields: customFields,
+    authContext: {
+      isAuthenticated: true,
+      httpClient: mockClient,
+      user: { id: 'user-1' },
+    },
+  });
+
+  // Digita Roblox
+  h.act((c) => c.handleSearchChange('Roblox'));
+  assert.equal(h.capture.isSearching, true);
+
+  // Limpa a busca
+  h.act((c) => c.handleSearchChange(''));
+  assert.equal(h.capture.isSearching, false);
+
+  // Resposta da busca por Roblox chega tardiamente apos a limpeza
+  resolveSearch({ games: [{ name: 'Roblox' }], total: 1 });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  h.act(() => {});
+
+  assert.deepEqual(Array.from(h.capture.searchResults), [], 'Resultados de busca anterior devem ser descartados apos limpeza');
+  assert.deepEqual(Array.from(h.capture.filteredSuggestions), [], 'Sugestoes filtradas devem estar vazias');
+});
+
+test('Adversarial C.2: Selecao de jogo invalida requisicoes de pesquisa anteriores em voo', async () => {
+  let resolveSearch;
+  const customFields = [...fields, 'searchResults', 'filteredSuggestions'];
+  const mockClient = {
+    get: async (url) => {
+      if (url.includes('query=Roblox')) {
+        return new Promise((resolve) => {
+          resolveSearch = resolve;
+        });
+      }
+      return { games: [], total: 0 };
+    },
+  };
+
+  const h = createHarness('screens/profile/ProfileQuestionnaireScreen.js', {
+    fields: customFields,
+    authContext: {
+      isAuthenticated: true,
+      httpClient: mockClient,
+      user: { id: 'user-1' },
+    },
+  });
+
+  // Digita busca
+  h.act((c) => c.handleSearchChange('Roblox'));
+
+  // Adiciona outro jogo (acao de selecao/inclusao invalida buscas anteriores)
+  h.act((c) => c.handleAddGame('Minecraft'));
+
+  // Resposta da busca chega apos a selecao
+  resolveSearch({ games: [{ name: 'Roblox' }], total: 1 });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  h.act(() => {});
+
+  assert.deepEqual(Array.from(h.capture.searchResults), [], 'Resultados devem ser esvaziados apos inclusao');
+});
+
+test('Adversarial C.3: Pesquisas concorrentes A e B fora de ordem descartam resposta obsoleta', async () => {
+  let resolveA;
+  let resolveB;
+  const customFields = [...fields, 'searchResults', 'filteredSuggestions'];
+  const mockClient = {
+    get: async (url) => {
+      if (url.includes('query=BuscaA')) {
+        return new Promise((resolve) => {
+          resolveA = resolve;
+        });
+      }
+      if (url.includes('query=BuscaB')) {
+        return new Promise((resolve) => {
+          resolveB = resolve;
+        });
+      }
+      return { games: [], total: 0 };
+    },
+  };
+
+  const h = createHarness('screens/profile/ProfileQuestionnaireScreen.js', {
+    fields: customFields,
+    authContext: {
+      isAuthenticated: true,
+      httpClient: mockClient,
+      user: { id: 'user-1' },
+    },
+  });
+
+  // Usuario pesquisa A, depois pesquisa B
+  h.act((c) => c.handleSearchChange('BuscaA'));
+  h.act((c) => c.handleSearchChange('BuscaB'));
+
+  // Resposta de B chega primeiro (mais rapida)
+  resolveB({ games: [{ name: 'Jogo da Busca B' }], total: 1 });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  h.act(() => {});
+
+  assert.ok(h.capture.filteredSuggestions.includes('Jogo da Busca B'));
+
+  // Resposta de A chega depois (fora de ordem / lenta)
+  resolveA({ games: [{ name: 'Jogo da Busca A' }], total: 1 });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  h.act(() => {});
+
+  // Somente a resposta de B deve ser exibida, a de A deve ser descartada!
+  assert.ok(h.capture.filteredSuggestions.includes('Jogo da Busca B'));
+  assert.equal(
+    h.capture.filteredSuggestions.includes('Jogo da Busca A'),
+    false,
+    'Resposta obsoleta da Busca A nao deve sobrescrever a Busca B'
+  );
+});
+
+test('Adversarial D.1: Conclusao nao e revertida por resposta obsoleta de /auth/me', async () => {
+  const apiConfigModule = loadModule('config/apiConfig.js', require).exports;
+  const httpClientModule = loadModule(
+    'services/httpClient.js',
+    (name) => (name === '../config/apiConfig' ? apiConfigModule : require(name))
+  ).exports;
+  const mockStorage = {
+    getRefreshToken: async () => 'valid-ref-token',
+    setRefreshToken: async () => {},
+    clearRefreshToken: async () => {},
+    isAvailable: async () => true,
+    hasHardwareKeystore: () => true,
+  };
+
+  let meResponsePayload = {
+    id: 'user-me-test',
+    name: 'Test Me',
+    email: 'test@example.com',
+    hasCompletedQuestionnaire: false,
+  };
+
+  const mockClient = {
+    setAuthHandlers: () => {},
+    clearAuthHandlers: () => {},
+    get: async (url) => {
+      if (url === '/auth/me') return { user: meResponsePayload };
+      return {};
+    },
+    post: async () => ({ accessToken: 'a', refreshToken: 'r', expiresInSeconds: 900, user: meResponsePayload }),
+  };
+
+  const authModule = loadModule('services/authService.js', (name) => {
+    if (name === './httpClient') return httpClientModule;
+    if (name === './tokenStorage') return mockStorage;
+    return require(name);
+  });
+
+  const session = authModule.exports.createAuthSessionManager({
+    client: mockClient,
+    tokenStorage: mockStorage,
+  });
+
+  // Simula login inicial
+  await session.restoreSession();
+  assert.equal(session.getSnapshot().user.hasCompletedQuestionnaire, false);
+  assert.equal(session.getSnapshot().postAuthRoute, 'ProfileQuestionnaire');
+
+  // Questionario eh concluido com sucesso
+  session.markQuestionnaireCompleted();
+  assert.equal(session.getSnapshot().user.hasCompletedQuestionnaire, true);
+  assert.equal(session.getSnapshot().postAuthRoute, 'MainTabs');
+
+  // Uma chamada subsequente de /auth/me que ainda retorna hasCompletedQuestionnaire = false
+  // NAO deve reverter o estado concluido
+  await session.fetchCurrentUser();
+  assert.equal(session.getSnapshot().user.hasCompletedQuestionnaire, true, 'fetchCurrentUser nao pode reverter status concluido');
+  assert.equal(session.getSnapshot().postAuthRoute, 'MainTabs');
+});
+
+test('Adversarial D.2: Logout durante PUT em voo cancela navegacao para MainTabs', async () => {
+  let resolvePut;
+  const mockClient = {
+    get: async () => ({ games: [], total: 0 }),
+    put: async () => {
+      return new Promise((resolve) => {
+        resolvePut = resolve;
+      });
+    },
+  };
+
+  const h = createHarness('screens/profile/ProfileQuestionnaireScreen.js', {
+    fields,
+    authContext: {
+      isAuthenticated: true,
+      httpClient: mockClient,
+      user: { id: 'user-logout-in-flight' },
+      markQuestionnaireCompleted: () => {},
+    },
+  });
+
+  h.act(() => h.inputBirthDate('10/10/2000'));
+  h.act((c) => c.handleSelectGender('Masculino'));
+  h.act((c) => c.handleSelectEducation('Superior'));
+  h.act((c) => c.handleAdvanceStep1());
+
+  h.act((c) => c.handleAddGame('Minecraft'));
+  h.act((c) => c.handleAdvanceStep2());
+
+  h.act((c) => {
+    c.handleSelectMarketKnowledge(h.exports.MARKET_KNOWLEDGE_OPTIONS[0]);
+    c.handleSelectMarketInterest(h.exports.MARKET_INTEREST_OPTIONS[0]);
+    c.handleFinishQuestionnaire();
+  });
+
+  // Usuario faz logout enquanto o PUT esta em voo
+  h.setAuthContext(null);
+
+  // PUT conclui com sucesso apos logout
+  resolvePut({ message: 'OK' });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  h.act(() => {});
+
+  // Nao deve navegar para MainTabs pois a sessao foi encerrada
+  assert.equal(h.navigationCalls.length, 0, 'Nao deve navegar para MainTabs apos logout durante PUT');
+});
+
+test('Adversarial E.1: Tentativa de envio em renderizacoes separadas durante PUT pendente bloqueia segunda requisicao', async () => {
+  const customFields = [...fields, 'isSubmitting'];
+  let putCount = 0;
+  let resolvePut;
+  const mockClient = {
+    get: async () => ({ games: [], total: 0 }),
+    put: async () => {
+      putCount += 1;
+      return new Promise((resolve) => {
+        resolvePut = resolve;
+      });
+    },
+  };
+
+  const h = createHarness('screens/profile/ProfileQuestionnaireScreen.js', {
+    fields: customFields,
+    authContext: {
+      isAuthenticated: true,
+      httpClient: mockClient,
+      user: { id: 'user-race-submit' },
+      markQuestionnaireCompleted: () => {},
+    },
+  });
+
+  h.act(() => h.inputBirthDate('10/10/2000'));
+  h.act((c) => c.handleSelectGender('Masculino'));
+  h.act((c) => c.handleSelectEducation('Superior'));
+  h.act((c) => c.handleAdvanceStep1());
+
+  h.act((c) => c.handleAddGame('Minecraft'));
+  h.act((c) => c.handleAdvanceStep2());
+
+  h.act((c) => {
+    c.handleSelectMarketKnowledge(h.exports.MARKET_KNOWLEDGE_OPTIONS[0]);
+    c.handleSelectMarketInterest(h.exports.MARKET_INTEREST_OPTIONS[0]);
+  });
+
+  // 1. Primeiro toque: inicia PUT
+  h.act((c) => c.handleFinishQuestionnaire());
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(putCount, 1, 'Primeira requisicao PUT disparada');
+  assert.equal(h.capture.isSubmitting, true, 'Componente deve estar no estado isSubmitting = true');
+
+  // 2. Segundo toque em uma renderizacao SEPARADA enquanto o primeiro PUT ainda esta em voo
+  h.act((c) => c.handleFinishQuestionnaire());
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  // A trava sincrona e o disabled devem impedir categoricamente um segundo PUT
+  assert.equal(putCount, 1, 'Segundo acionamento em render separada foi completamente ignorado');
+
+  // Finaliza a requisicao pendente
+  resolvePut({ message: 'OK' });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  h.act(() => {});
+
+  assert.equal(putCount, 1, 'Contador permanece 1 apos conclusao');
+  assert.equal(h.navigationCalls.length, 1);
+});

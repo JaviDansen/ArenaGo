@@ -123,6 +123,7 @@ function createHarness(relativePath, options = {}) {
   const state = [];
   const queue = [];
   const effects = [];
+  const cleanups = [];
   const navigationCalls = [];
   let cursor = 0;
   let insideUpdater = false;
@@ -198,12 +199,31 @@ function createHarness(relativePath, options = {}) {
       if (!(index in state)) state[index] = { current: initial };
       return state[index];
     },
+    useCallback(fn, dependencies) {
+      const index = cursor++;
+      const previous = state[index];
+      if (!previous || dependencies.some((value, i) => !Object.is(value, previous.dependencies[i]))) {
+        state[index] = { fn, dependencies };
+        return fn;
+      }
+      return previous.fn;
+    },
+    useMemo(fn, dependencies) {
+      const index = cursor++;
+      const previous = state[index];
+      if (!previous || dependencies.some((value, i) => !Object.is(value, previous.dependencies[i]))) {
+        const val = fn();
+        state[index] = { val, dependencies };
+        return val;
+      }
+      return previous.val;
+    },
     useEffect(callback, dependencies) {
       const index = cursor++;
       const previous = state[index];
       if (!previous || dependencies.some((value, i) => !Object.is(value, previous[i]))) {
         state[index] = dependencies;
-        effects.push(callback);
+        effects.push({ index, callback });
       }
     },
   };
@@ -279,7 +299,14 @@ function createHarness(relativePath, options = {}) {
         } else state[index] = freeze(update);
       }
       render();
-      for (const effect of effects.splice(0)) effect();
+      for (const item of effects.splice(0)) {
+        const { index, callback } = item;
+        if (typeof cleanups[index] === 'function') {
+          cleanups[index]();
+        }
+        const cleanup = callback();
+        cleanups[index] = typeof cleanup === 'function' ? cleanup : null;
+      }
     }
   }
 
@@ -296,6 +323,15 @@ function createHarness(relativePath, options = {}) {
     async actAsync(callback) {
       await callback(capture);
       flush();
+    },
+    unmount() {
+      for (let i = 0; i < cleanups.length; i++) {
+        if (typeof cleanups[i] === 'function') {
+          cleanups[i]();
+          cleanups[i] = null;
+        }
+      }
+      tree = null;
     },
     setAuthContext(nextAuthContext) {
       authContextValue = nextAuthContext;

@@ -4,9 +4,9 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { after, test } from "node:test";
 import { Client, Pool } from "pg";
+import { assertSafeTestDatabase } from "./test-db-guard";
 
-const connectionString = process.env.DATABASE_URL;
-if (!connectionString) throw new Error("DATABASE_URL local descartável é obrigatório para os testes de integração.");
+const connectionString = assertSafeTestDatabase(process.env.DATABASE_URL);
 const pool = new Pool({ connectionString, max: 8 });
 after(async () => pool.end());
 

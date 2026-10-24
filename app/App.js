@@ -54,7 +54,20 @@ export function AppNavigation() {
       options: { headerShown: true, headerBackVisible: false, title: 'Avaliação' },
     },
   ];
-  const availableScreens = isAuthenticated ? appScreens : publicScreens;
+  const isQuestionnairePending =
+    isAuthenticated && auth?.user && auth?.user.hasCompletedQuestionnaire === false;
+
+  const pendingQuestionnaireScreens = [
+    { name: 'ProfileQuestionnaire', component: ProfileQuestionnaireScreen },
+    { name: 'Questionario', component: ProfileQuestionnaireScreen },
+  ];
+
+  const availableScreens = !isAuthenticated
+    ? publicScreens
+    : isQuestionnairePending
+    ? pendingQuestionnaireScreens
+    : appScreens;
+
   const firstScreenIndex = availableScreens.findIndex(
     (screen) => screen.name === initialRouteName
   );
