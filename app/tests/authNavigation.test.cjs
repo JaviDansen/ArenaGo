@@ -117,7 +117,7 @@ test('React Navigation replaces Login with MainTabs immediately when login authe
           isAuthenticated: true,
           sessionStatus: 'authenticated',
           postAuthRoute: 'MainTabs',
-          user: { hasCompletedQuestionnaire: false },
+          user: { hasCompletedQuestionnaire: true },
         };
         return { status: 'authenticated', user: authState.user };
       },
@@ -195,7 +195,7 @@ test('React Navigation switches auth route sets for signup, logout, relogin and 
     isAuthenticated: true,
     sessionStatus: 'authenticated',
     postAuthRoute: 'MainTabs',
-    user: { hasCompletedQuestionnaire: false },
+    user: { hasCompletedQuestionnaire: true },
   });
   const restoredRouter = StackRouter(routerOptions(restoredTree.names));
   state = restoredRouter.getInitialState(routerOptions(restoredTree.names));
@@ -262,4 +262,57 @@ test('HomeScreen logout calls auth.logout once and leaves navigation to AuthSess
   finishLogout();
   await logoutPromise;
   assert.deepEqual(h.navigationCalls, []);
+});
+
+test('K05 Auditoria: Login com questionario pendente direciona para ProfileQuestionnaire', async () => {
+  const publicTree = renderStack({ isAuthenticated: false, sessionStatus: 'unauthenticated' });
+  const publicRouter = StackRouter(routerOptions(publicTree.names));
+  let state = publicRouter.getInitialState(routerOptions(publicTree.names));
+  state = navigate(publicRouter, state, publicTree.names, 'Login');
+
+  const loginScreen = createHarness('screens/auth/LoginScreen.js', {
+    authContext: {
+      clearNotices() {},
+      async login() {
+        authState = {
+          isAuthenticated: true,
+          sessionStatus: 'authenticated',
+          postAuthRoute: 'ProfileQuestionnaire',
+          user: { id: 'u-1', name: 'Pendente', hasCompletedQuestionnaire: false },
+        };
+        return { status: 'authenticated', user: authState.user, nextRoute: 'ProfileQuestionnaire' };
+      },
+    },
+  });
+
+  for (const [placeholder, value] of [
+    ['seu.email@exemplo.com', 'pendente@example.com'],
+    ['Digite sua senha', 'ValidPassword#2026'],
+  ]) {
+    loginScreen.act(() => {
+      loginScreen.nodes.find(
+        (node) => node.type === 'TextInput' && node.props.placeholder === placeholder
+      ).props.onChangeText(value);
+    });
+  }
+  await loginScreen.actAsync(() => loginScreen.press('Entrar na conta'));
+  assert.deepEqual(loginScreen.navigationCalls, []);
+
+  const signedInTree = renderStack(authState);
+  assert.equal(signedInTree.names[0], 'ProfileQuestionnaire', 'Primeira rota da stack deve ser ProfileQuestionnaire');
+  state = routeChange(publicRouter, state, signedInTree.names);
+  assert.deepEqual(state.routes.map((route) => route.name), ['ProfileQuestionnaire']);
+  assert.equal(state.routes[state.index].name, 'ProfileQuestionnaire');
+});
+
+test('K05 Auditoria: Restauracao de sessao com questionario pendente direciona para ProfileQuestionnaire', () => {
+  const pendingRestoreTree = renderStack({
+    isAuthenticated: true,
+    sessionStatus: 'authenticated',
+    user: { id: 'u-2', name: 'Restaurado Pendente', hasCompletedQuestionnaire: false },
+  });
+  assert.equal(pendingRestoreTree.names[0], 'ProfileQuestionnaire');
+  const router = StackRouter(routerOptions(pendingRestoreTree.names));
+  const state = router.getInitialState(routerOptions(pendingRestoreTree.names));
+  assert.equal(state.routes[state.index].name, 'ProfileQuestionnaire');
 });

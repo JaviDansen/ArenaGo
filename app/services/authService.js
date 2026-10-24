@@ -552,7 +552,7 @@ export function createAuthSessionManager(options = {}) {
       isAuthenticated: true,
       isInitializing: false,
       sessionStatus: 'authenticated',
-      postAuthRoute: liveUser.hasCompletedQuestionnaire ? 'MainTabs' : state.postAuthRoute,
+      postAuthRoute: liveUser.hasCompletedQuestionnaire ? 'MainTabs' : 'ProfileQuestionnaire',
       networkError: null,
       storageError: null,
     });
@@ -642,6 +642,8 @@ export function createAuthSessionManager(options = {}) {
           return { status: 'aborted', user: state.user };
         }
 
+        const resolvedRoute = liveUser.hasCompletedQuestionnaire ? 'MainTabs' : 'ProfileQuestionnaire';
+
         emitState({
           user: liveUser,
           isAuthenticated: true,
@@ -651,13 +653,13 @@ export function createAuthSessionManager(options = {}) {
           networkError: null,
           storageError: null,
           adminChallenge: null,
-          postAuthRoute: 'MainTabs',
+          postAuthRoute: resolvedRoute,
         });
 
         return {
           status: 'authenticated',
           user: liveUser,
-          nextRoute: 'MainTabs',
+          nextRoute: resolvedRoute,
         };
       } catch (error) {
         if (
@@ -800,7 +802,8 @@ export function createAuthSessionManager(options = {}) {
       });
       if (sessionEpoch === currentEpoch && meResponse?.id) {
         confirmedUser = sanitizePublicUser(meResponse);
-        emitState({ user: confirmedUser });
+        const resolvedRoute = confirmedUser.hasCompletedQuestionnaire ? 'MainTabs' : 'ProfileQuestionnaire';
+        emitState({ user: confirmedUser, postAuthRoute: resolvedRoute });
       }
     } catch (meError) {
       if (meError?.status === 401 && sessionEpoch === currentEpoch) {
@@ -909,6 +912,7 @@ export function createAuthSessionManager(options = {}) {
     accessToken = response.accessToken;
 
     let confirmedUser = loggedUser;
+    const initialRoute = confirmedUser.hasCompletedQuestionnaire ? 'MainTabs' : 'ProfileQuestionnaire';
     emitState({
       user: confirmedUser,
       isAuthenticated: true,
@@ -918,7 +922,7 @@ export function createAuthSessionManager(options = {}) {
       networkError: null,
       storageError: null,
       adminChallenge: null,
-      postAuthRoute: 'MainTabs',
+      postAuthRoute: initialRoute,
     });
 
     // Confirmar dados atuais da conta em GET /auth/me
@@ -931,7 +935,8 @@ export function createAuthSessionManager(options = {}) {
       });
       if (sessionEpoch === currentEpoch && meResponse?.id) {
         confirmedUser = sanitizePublicUser(meResponse);
-        emitState({ user: confirmedUser });
+        const resolvedRoute = confirmedUser.hasCompletedQuestionnaire ? 'MainTabs' : 'ProfileQuestionnaire';
+        emitState({ user: confirmedUser, postAuthRoute: resolvedRoute });
       }
     } catch (meError) {
       if (meError?.status === 401 && sessionEpoch === currentEpoch) {
@@ -940,10 +945,11 @@ export function createAuthSessionManager(options = {}) {
       }
     }
 
+    const finalRoute = confirmedUser.hasCompletedQuestionnaire ? 'MainTabs' : 'ProfileQuestionnaire';
     return {
       status: 'authenticated',
       user: confirmedUser,
-      nextRoute: 'MainTabs',
+      nextRoute: finalRoute,
     };
   }
 

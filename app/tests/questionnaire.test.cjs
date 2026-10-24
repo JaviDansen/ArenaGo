@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
-const { createHarness, textOf } = require('./helpers/questionnaireHarness.cjs');
+const { createHarness, loadModule, textOf } = require('./helpers/questionnaireHarness.cjs');
 
 const fields = ['currentStepIndex', 'questionnaireData', 'birthDateText', 'gender', 'otherGender',
   'education', 'errors', 'searchQuery', 'filteredSuggestions', 'handleBack', 'handleSelectGender',
@@ -484,4 +484,439 @@ test('K05: handles PUT /profile/questionnaire failure gracefully, displays error
   assert.equal(h.capture.errors.education, 'Erro no campo escolaridade');
   assert.equal(h.capture.questionnaireData.birthDate, '2000-04-10');
   assert.deepEqual(Array.from(h.capture.questionnaireData.selectedGames), ['Minecraft']);
+});
+
+test('K05 Auditoria 1: Login com questionario pendente direciona para ProfileQuestionnaire', async () => {
+  const login = createHarness('screens/auth/LoginScreen.js', {
+    fields: ['handleLogin'],
+    authContext: {
+      login: async ({ email }) => ({
+        requires2FA: false,
+        nextRoute: 'ProfileQuestionnaire',
+        user: {
+          id: 'user-pending-1',
+          name: 'Pendente',
+          email,
+          roles: ['participante'],
+          hasCompletedQuestionnaire: false,
+        },
+        accessToken: 'access-token',
+        expiresInSeconds: 900,
+        refreshToken: 'refresh-token',
+      }),
+    },
+  });
+  for (const [placeholder, value] of [
+    ['seu.email@exemplo.com', 'pendente@example.com'], ['Digite sua senha', 'secret12'],
+  ]) login.act(() => login.nodes.find((n) => n.type === 'TextInput' && n.props.placeholder === placeholder).props.onChangeText(value));
+  await login.actAsync((c) => c.handleLogin());
+  assert.deepEqual(login.navigationCalls, []);
+});
+
+test('K05 Auditoria 2: Restauracao de sessao com questionario pendente direciona para ProfileQuestionnaire', () => {
+  const gateExports = loadModule('screens/auth/AuthSessionGate.js', (name) => {
+    if (name === 'react') return { ...require('react'), useState: (value) => [value, () => {}] };
+    if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
+    if (name === 'react-native') {
+      return Object.fromEntries(
+        ['ActivityIndicator', 'Pressable', 'SafeAreaView', 'StyleSheet', 'Text', 'View'].map(
+          (key) => [key, key === 'StyleSheet' ? { create: (styles) => styles } : key]
+        )
+      );
+    }
+    if (name === '../../context/AuthContext') {
+      return { AuthProvider: 'AuthProvider', useAuth: () => ({}) };
+    }
+    return require(name);
+  }).exports;
+
+  const { resolveInitialRouteForAuthState } = gateExports;
+  const targetRoute = resolveInitialRouteForAuthState({
+    user: { id: 'u1', hasCompletedQuestionnaire: false },
+    isAuthenticated: true,
+  });
+  assert.equal(targetRoute, 'ProfileQuestionnaire');
+});
+
+test('K05 Auditoria 3: Busca de jogo que so existe no backend alem dos 50 iniciais', async () => {
+  const customFields = [...fields, 'searchResults', 'filteredSuggestions'];
+  const mockClient = {
+    get: async (url) => {
+      if (url.includes('query=Cyberpunk')) {
+        return {
+          games: [{ id: 'game-cp77', name: 'Cyberpunk 2077' }],
+          total: 1,
+        };
+      }
+      if (url.startsWith('/games')) {
+        return { games: [{ id: '1', name: 'Minecraft' }], total: 1 };
+      }
+      return { hasCompleted: false };
+    },
+  };
+
+  const h = createHarness('screens/profile/ProfileQuestionnaireScreen.js', {
+    fields: customFields,
+    authContext: {
+      isAuthenticated: true,
+      httpClient: mockClient,
+      user: { id: 'user-1' },
+    },
+  });
+
+  h.act(() => h.inputBirthDate('10/10/2000'));
+  h.act((c) => c.handleSelectGender('Masculino'));
+  h.act((c) => c.handleSelectEducation('Superior'));
+  h.act((c) => c.handleAdvanceStep1());
+
+  // Na Etapa 2, busca jogo inexistente no catalogo inicial
+  h.act((c) => c.handleSearchChange('Cyberpunk'));
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  h.act(() => {});
+
+  assert.ok(h.capture.filteredSuggestions.includes('Cyberpunk 2077'));
+  h.act(() => h.press('Selecionar Cyberpunk 2077'));
+  assert.deepEqual(Array.from(h.capture.questionnaireData.selectedGames), ['Cyberpunk 2077']);
+});
+
+test('K05 Auditoria 4: Mensagem de erro real e visivel na Etapa 3 com acessibilidade', async () => {
+  const customFields = [...fields, 'saveError'];
+  const mockClient = {
+    get: async () => ({ games: [], total: 0 }),
+    put: async () => {
+      const err = new Error('Falha de rede');
+      err.detail = 'Servidor indisponivel temporariamente';
+      throw err;
+    },
+  };
+
+  const h = createHarness('screens/profile/ProfileQuestionnaireScreen.js', {
+    fields: customFields,
+    authContext: {
+      isAuthenticated: true,
+      httpClient: mockClient,
+      user: { id: 'user-1' },
+    },
+  });
+
+  h.act(() => h.inputBirthDate('10/10/2000'));
+  h.act((c) => c.handleSelectGender('Feminino'));
+  h.act((c) => c.handleSelectEducation('Médio'));
+  h.act((c) => c.handleAdvanceStep1());
+
+  h.act((c) => c.handleAddGame('Valorant'));
+  h.act((c) => c.handleAdvanceStep2());
+
+  h.act((c) => {
+    c.handleSelectMarketKnowledge(h.exports.MARKET_KNOWLEDGE_OPTIONS[0]);
+    c.handleSelectMarketInterest(h.exports.MARKET_INTEREST_OPTIONS[0]);
+    c.handleFinishQuestionnaire();
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  h.act(() => {});
+
+  assert.equal(h.capture.saveError, 'Servidor indisponivel temporariamente');
+  const alertNode = h.nodes.find(
+    (n) => n.props?.accessibilityRole === 'alert' && n.props?.accessible === true
+  );
+  assert.ok(alertNode, 'Banner de alerta com acessibilidade deve estar visivel');
+  assert.ok(textOf(alertNode).includes('Servidor indisponivel temporariamente'));
+});
+
+test('K05 Auditoria 5: Dois toques rapidos gerando apenas um PUT (trava sincrona)', async () => {
+  const customFields = [...fields, 'isSubmitting'];
+  let putCount = 0;
+  let resolvePut;
+  const mockClient = {
+    get: async () => ({ games: [], total: 0 }),
+    put: async () => {
+      putCount += 1;
+      return new Promise((resolve) => {
+        resolvePut = resolve;
+      });
+    },
+  };
+
+  const h = createHarness('screens/profile/ProfileQuestionnaireScreen.js', {
+    fields: customFields,
+    authContext: {
+      isAuthenticated: true,
+      httpClient: mockClient,
+      user: { id: 'user-1' },
+      markQuestionnaireCompleted: () => {},
+    },
+  });
+
+  h.act(() => h.inputBirthDate('10/10/2000'));
+  h.act((c) => c.handleSelectGender('Masculino'));
+  h.act((c) => c.handleSelectEducation('Superior'));
+  h.act((c) => c.handleAdvanceStep1());
+
+  h.act((c) => c.handleAddGame('Minecraft'));
+  h.act((c) => c.handleAdvanceStep2());
+
+  h.act((c) => {
+    c.handleSelectMarketKnowledge(h.exports.MARKET_KNOWLEDGE_OPTIONS[0]);
+    c.handleSelectMarketInterest(h.exports.MARKET_INTEREST_OPTIONS[0]);
+  });
+
+  // Dois toques rápidos consecutivos
+  h.act((c) => {
+    c.handleFinishQuestionnaire();
+    c.handleFinishQuestionnaire();
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(putCount, 1, 'Apenas uma requisicao PUT deve ter sido iniciada');
+
+  resolvePut({ message: 'OK' });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  h.act(() => {});
+
+  assert.equal(putCount, 1, 'Requisicao PUT permaneceu unica apos resolucao');
+  assert.equal(h.navigationCalls.length, 1);
+});
+
+test('K05 Auditoria 6: Falha de rede sem perda de dados preenchidos', async () => {
+  const customFields = [...fields, 'saveError'];
+  let shouldFail = true;
+  const mockClient = {
+    get: async () => ({ games: [], total: 0 }),
+    put: async () => {
+      if (shouldFail) {
+        const err = new Error('Network error');
+        err.detail = 'Sem conexao de internet.';
+        throw err;
+      }
+      return { message: 'OK' };
+    },
+  };
+
+  const h = createHarness('screens/profile/ProfileQuestionnaireScreen.js', {
+    fields: customFields,
+    authContext: {
+      isAuthenticated: true,
+      httpClient: mockClient,
+      user: { id: 'user-1' },
+      markQuestionnaireCompleted: () => {},
+    },
+  });
+
+  h.act(() => h.inputBirthDate('15/08/1999'));
+  h.act((c) => c.handleSelectGender('Outro'));
+  h.act(() => h.nodes.find((n) => n.type === 'TextInput' && n.props.placeholder === 'Como você se identifica?').props.onChangeText('Nao-binario'));
+  h.act((c) => c.handleSelectEducation('Pós-graduação'));
+  h.act((c) => c.handleAdvanceStep1());
+
+  h.act((c) => c.handleAddGame('Free Fire'));
+  h.act((c) => c.handleAdvanceStep2());
+
+  h.act((c) => {
+    c.handleSelectMarketKnowledge(h.exports.MARKET_KNOWLEDGE_OPTIONS[1]);
+    c.handleSelectMarketInterest(h.exports.MARKET_INTEREST_OPTIONS[1]);
+    c.handleFinishQuestionnaire();
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  h.act(() => {});
+
+  assert.equal(h.capture.saveError, 'Sem conexao de internet.');
+  assert.equal(h.navigationCalls.length, 0);
+
+  // Todos os dados foram integralmente mantidos
+  assert.equal(h.capture.birthDateText, '15/08/1999');
+  assert.equal(h.capture.gender, 'Outro');
+  assert.equal(h.capture.otherGender, 'Nao-binario');
+  assert.equal(h.capture.education, 'Pós-graduação');
+  assert.deepEqual(Array.from(h.capture.questionnaireData.selectedGames), ['Free Fire']);
+  assert.equal(h.capture.questionnaireData.marketKnowledge, h.exports.MARKET_KNOWLEDGE_OPTIONS[1]);
+  assert.equal(h.capture.questionnaireData.marketInterest, h.exports.MARKET_INTEREST_OPTIONS[1]);
+
+  // Segunda tentativa com sucesso
+  shouldFail = false;
+  h.act((c) => c.handleFinishQuestionnaire());
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  h.act(() => {});
+
+  assert.equal(h.navigationCalls.length, 1);
+  assert.equal(h.navigationCalls[0].payload.routes[0].name, 'MainTabs');
+});
+
+test('K05 Auditoria 7: Impossibilidade de avanco sem persistencia real no backend', () => {
+  const customFields = [...fields, 'saveError'];
+  const h = createHarness('screens/profile/ProfileQuestionnaireScreen.js', {
+    fields: customFields,
+    authContext: null,
+  });
+
+  h.act(() => h.inputBirthDate('10/10/2000'));
+  h.act((c) => c.handleSelectGender('Masculino'));
+  h.act((c) => c.handleSelectEducation('Superior'));
+  h.act((c) => c.handleAdvanceStep1());
+
+  h.act((c) => c.handleAddGame('Minecraft'));
+  h.act((c) => c.handleAdvanceStep2());
+
+  h.act((c) => {
+    c.handleSelectMarketKnowledge(h.exports.MARKET_KNOWLEDGE_OPTIONS[0]);
+    c.handleSelectMarketInterest(h.exports.MARKET_INTEREST_OPTIONS[0]);
+    c.handleFinishQuestionnaire();
+  });
+
+  assert.equal(h.navigationCalls.length, 0, 'Nao deve navegar para MainTabs sem persistencia');
+  assert.ok(h.capture.saveError, 'Deve exibir erro indicando impossibilidade de persistir');
+  assert.equal(h.capture.currentStepIndex, 2);
+});
+
+test('K05 Auditoria 8: Preload tardio sem sobrescrever edicoes do usuario', async () => {
+  let delayedResolve;
+  const mockClient = {
+    get: async (url) => {
+      if (url.startsWith('/games')) {
+        return { games: [], total: 0 };
+      }
+      if (url === '/profile/questionnaire') {
+        return new Promise((resolve) => {
+          delayedResolve = resolve;
+        });
+      }
+      return {};
+    },
+  };
+
+  const h = createHarness('screens/profile/ProfileQuestionnaireScreen.js', {
+    fields,
+    authContext: {
+      isAuthenticated: true,
+      httpClient: mockClient,
+      user: { id: 'user-1' },
+    },
+  });
+
+  // Usuario interage ANTES da resposta tardia chegar
+  h.act(() => h.inputBirthDate('25/12/2000'));
+  h.act((c) => c.handleSelectGender('Feminino'));
+
+  // Servidor responde tardiamente com dados antigos
+  delayedResolve({
+    hasCompleted: true,
+    aboutYou: {
+      birthDate: '1990-01-01',
+      gender: 'Masculino',
+      otherGender: null,
+      education: 'Fundamental',
+    },
+    yourGames: ['Jogo Antigo'],
+    gamesMarket: {
+      marketKnowledge: 'Não conheço.',
+      marketInterest: 'Não tenho interesse.',
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  h.act(() => {});
+
+  // As edicoes do usuario foram preservadas e nao foram sobrescritas!
+  assert.equal(h.capture.birthDateText, '25/12/2000');
+  assert.equal(h.capture.gender, 'Feminino');
+});
+
+test('K05 Auditoria 9: Persistencia e restauracao apos reinicio do app', async () => {
+  const apiConfigModule = loadModule('config/apiConfig.js', require).exports;
+  const httpClientModule = loadModule(
+    'services/httpClient.js',
+    (name) => (name === '../config/apiConfig' ? apiConfigModule : require(name))
+  ).exports;
+  const tokenStorageModule = loadModule('services/tokenStorage.js', (name) => {
+    if (name === 'react-native') return { Platform: { OS: 'ios' } };
+    if (name === 'expo-secure-store') return {
+      getItemAsync: async () => null,
+      setItemAsync: async () => {},
+      deleteItemAsync: async () => {},
+      isAvailableAsync: async () => true,
+    };
+    return require(name);
+  }).exports;
+
+  const authModule = loadModule('services/authService.js', (name) => {
+    if (name === './httpClient') return httpClientModule;
+    if (name === './tokenStorage') return tokenStorageModule;
+    return require(name);
+  });
+  const { createAuthSessionManager } = authModule.exports;
+
+  let storedTokens = null;
+  const mockStorage = {
+    getRefreshToken: async () => storedTokens?.refreshToken || null,
+    setRefreshToken: async (token) => {
+      storedTokens = { ...(storedTokens || {}), refreshToken: token };
+    },
+    clearRefreshToken: async () => {
+      storedTokens = null;
+    },
+    isAvailable: async () => true,
+    hasHardwareKeystore: () => true,
+  };
+
+  let questionnaireSavedOnBackend = false;
+
+  const mockClient = {
+    setAuthHandlers: () => {},
+    clearAuthHandlers: () => {},
+    post: async (url) => {
+      if (url === '/auth/refresh') {
+        return {
+          accessToken: 'new-acc-token',
+          refreshToken: 'new-ref-token',
+          expiresInSeconds: 900,
+          user: {
+            id: 'user-restore-1',
+            name: 'Kaled',
+            email: 'kaled@example.com',
+            hasCompletedQuestionnaire: questionnaireSavedOnBackend,
+          },
+        };
+      }
+      return {};
+    },
+    get: async (url) => {
+      if (url === '/auth/me') {
+        return {
+          user: {
+            id: 'user-restore-1',
+            name: 'Kaled',
+            email: 'kaled@example.com',
+            hasCompletedQuestionnaire: questionnaireSavedOnBackend,
+          },
+        };
+      }
+      return {};
+    },
+  };
+
+  // 1. Simula login inicial com questionario pendente
+  const session1 = createAuthSessionManager({
+    client: mockClient,
+    tokenStorage: mockStorage,
+  });
+
+  await mockStorage.setRefreshToken('valid-ref-token');
+  const restored1 = await session1.restoreSession();
+  assert.equal(restored1.user.hasCompletedQuestionnaire, false);
+  assert.equal(session1.getSnapshot().postAuthRoute, 'ProfileQuestionnaire');
+
+  // 2. Questionario eh salvo no backend
+  questionnaireSavedOnBackend = true;
+  session1.markQuestionnaireCompleted();
+  assert.equal(session1.getSnapshot().postAuthRoute, 'MainTabs');
+
+  // 3. Reinicio completo do app (nova sessao a partir do storage)
+  const session2 = createAuthSessionManager({
+    client: mockClient,
+    tokenStorage: mockStorage,
+  });
+  const restored2 = await session2.restoreSession();
+  assert.equal(restored2.user.hasCompletedQuestionnaire, true);
+  assert.equal(session2.getSnapshot().postAuthRoute, 'MainTabs');
 });

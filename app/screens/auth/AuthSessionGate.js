@@ -17,6 +17,10 @@ export function resolveInitialRouteForAuthState(authState) {
     return 'Welcome';
   }
 
+  if (authState.user && authState.user.hasCompletedQuestionnaire === false) {
+    return 'ProfileQuestionnaire';
+  }
+
   if (authState.postAuthRoute === 'ProfileQuestionnaire') {
     return 'ProfileQuestionnaire';
   }

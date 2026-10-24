@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import {
+  ActivityIndicator,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -14,7 +15,6 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { useAuth } from '../../context/AuthContext';
 import BirthDateInput from '../../components/BirthDateInput';
-import { mockGames } from '../../data/mockData';
 import { formatBirthDate, parseBirthDate } from '../../utils/birthDate';
 import {
   validateAboutYouStep,
@@ -112,157 +112,112 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
   const [education, setEducation] = useState('');
   const [errors, setErrors] = useState({});
 
-  // Estados dos campos da Etapa 2 — Seus jogos
+  // Estados dos campos da Etapa 2 — Seus jogos (conectado ao catálogo real)
   const [searchQuery, setSearchQuery] = useState('');
   const [feedbackMessage, setFeedbackMessage] = useState(null);
+  const [catalogGames, setCatalogGames] = useState([]);
+  const [isCatalogLoading, setIsCatalogLoading] = useState(false);
+  const [catalogError, setCatalogError] = useState(null);
+  const [searchResults, setSearchResults] = useState([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [searchError, setSearchError] = useState(null);
   const [finishRequested, setFinishRequested] = useState(false);
-  const [availableGames, setAvailableGames] = useState(mockGames);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [saveError, setSaveError] = useState(null);
+
+  // Refs de controle de sincronismo e corrida
+  const isSubmittingRef = useRef(false);
+  const searchRequestIdRef = useRef(0);
+  const hasUserInteractedRef = useRef(false);
+  const isMountedRef = useRef(true);
+
+  // Sinônimo para compatibilidade com testes anteriores
+  const availableGames = catalogGames;
+
+  const markUserInteracted = () => {
+    hasUserInteractedRef.current = true;
+  };
 
   const totalSteps = QUESTIONNAIRE_STEPS.length;
   const currentStep = QUESTIONNAIRE_STEPS[currentStepIndex];
   const progressPercent = ((currentStepIndex + 1) / totalSteps) * 100;
 
-  useEffect(() => {
-    let isMounted = true;
-    const client = auth?.httpClient;
-
-    if (client) {
-      // 1. Carrega catálogo do backend (GET /api/v1/games)
-      client
-        .get('/games?limit=50')
-        .then((res) => {
-          if (!isMounted) return;
-          const gameItems = Array.isArray(res?.games) ? res.games : [];
-          const backendNames = gameItems.map((g) => g?.name).filter(Boolean);
-          if (backendNames.length > 0) {
-            setAvailableGames(backendNames);
-          }
-        })
-        .catch(() => {
-          // Mantém mockGames como fallback caso o backend esteja indisponível
-        });
-
-      // 2. Pré-carrega respostas existentes do questionário se o usuário estiver autenticado
-      if (auth?.isAuthenticated) {
-        client
-          .get('/profile/questionnaire', { auth: true })
-          .then((res) => {
-            if (!isMounted || !res || !res.hasCompleted) return;
-            if (res.aboutYou) {
-              if (res.aboutYou.birthDate) {
-                setBirthDateText(formatBirthDate(res.aboutYou.birthDate));
-              }
-              if (res.aboutYou.gender) {
-                setGender(res.aboutYou.gender);
-              }
-              if (res.aboutYou.otherGender) {
-                setOtherGender(res.aboutYou.otherGender);
-              }
-              if (res.aboutYou.education) {
-                setEducation(res.aboutYou.education);
-              }
-            }
-            if (Array.isArray(res.yourGames) && res.yourGames.length > 0) {
-              setQuestionnaireData((prev) => ({
-                ...prev,
-                selectedGames: res.yourGames,
-              }));
-            }
-            if (res.gamesMarket) {
-              setQuestionnaireData((prev) => ({
-                ...prev,
-                marketKnowledge: res.gamesMarket.marketKnowledge,
-                marketInterest: res.gamesMarket.marketInterest,
-              }));
-            }
-          })
-          .catch(() => {
-            // Silencioso se o usuário for recém-cadastrado e ainda não tiver respostas
-          });
-      }
-    }
-
-    return () => {
-      isMounted = false;
-    };
-  }, [auth]);
+  const client = auth?.httpClient;
+  const isAuthenticated = Boolean(auth?.isAuthenticated);
+  const currentUserId = auth?.user?.id;
 
   useEffect(() => {
-    if (!finishRequested) return;
-
-    setFinishRequested(false);
-    const validation = validateGamesMarketStep(questionnaireData);
-    if (!validation.isValid) {
-      setErrors(validation.errors);
+    isMountedRef.current = true;
+    if (!client) {
       return;
     }
 
-    setErrors({});
+    // 1. Carrega catálogo do backend (GET /api/v1/games?limit=50)
+    setIsCatalogLoading(true);
+    setCatalogError(null);
+    client
+      .get('/games?limit=50')
+      .then((res) => {
+        if (!isMountedRef.current) return;
+        const gameItems = Array.isArray(res?.games) ? res.games : [];
+        const backendNames = gameItems
+          .map((g) => (typeof g === 'string' ? g : g?.name))
+          .filter(Boolean);
+        setCatalogGames(backendNames);
+        setIsCatalogLoading(false);
+      })
+      .catch(() => {
+        if (!isMountedRef.current) return;
+        setIsCatalogLoading(false);
+        setCatalogError('Não foi possível carregar o catálogo de jogos do servidor.');
+      });
 
-    const client = auth?.httpClient;
-    if (client && auth?.isAuthenticated) {
-      setIsSubmitting(true);
-      setSaveError(null);
-
-      const payload = {
-        birthDate: questionnaireData.birthDate,
-        gender: questionnaireData.gender,
-        otherGender:
-          questionnaireData.gender === 'Outro'
-            ? (questionnaireData.otherGender || '').trim() || null
-            : null,
-        education: questionnaireData.education,
-        selectedGames: questionnaireData.selectedGames,
-        marketKnowledge: questionnaireData.marketKnowledge,
-        marketInterest: questionnaireData.marketInterest,
-      };
-
+    // 2. Pré-carrega respostas existentes se o usuário estiver autenticado
+    if (isAuthenticated) {
       client
-        .put('/profile/questionnaire', payload, { auth: true })
-        .then(async () => {
-          if (typeof auth.fetchCurrentUser === 'function') {
-            await auth.fetchCurrentUser().catch(() => undefined);
-          }
-          if (typeof auth.markQuestionnaireCompleted === 'function') {
-            auth.markQuestionnaireCompleted();
-          }
+        .get('/profile/questionnaire', { auth: true })
+        .then((res) => {
+          if (!isMountedRef.current || !res || !res.hasCompleted) return;
+          // Proteção contra sobrescrita: se o usuário já editou algo localmente, não sobrescreve
+          if (hasUserInteractedRef.current) return;
 
-          if (navigation.reset) {
-            navigation.reset({ index: 0, routes: [{ name: 'MainTabs' }] });
-          } else if (navigation.replace) {
-            navigation.replace('MainTabs');
-          } else if (navigation.navigate) {
-            navigation.navigate('MainTabs');
+          if (res.aboutYou) {
+            if (res.aboutYou.birthDate) {
+              setBirthDateText(formatBirthDate(res.aboutYou.birthDate));
+            }
+            if (res.aboutYou.gender) {
+              setGender(res.aboutYou.gender);
+            }
+            if (res.aboutYou.otherGender) {
+              setOtherGender(res.aboutYou.otherGender);
+            }
+            if (res.aboutYou.education) {
+              setEducation(res.aboutYou.education);
+            }
+          }
+          if (Array.isArray(res.yourGames) && res.yourGames.length > 0) {
+            setQuestionnaireData((prev) => ({
+              ...prev,
+              selectedGames: res.yourGames,
+            }));
+          }
+          if (res.gamesMarket) {
+            setQuestionnaireData((prev) => ({
+              ...prev,
+              marketKnowledge: res.gamesMarket.marketKnowledge,
+              marketInterest: res.gamesMarket.marketInterest,
+            }));
           }
         })
-        .catch((saveErr) => {
-          if (saveErr?.fieldErrors) {
-            setErrors((prev) => ({ ...prev, ...saveErr.fieldErrors }));
-          }
-          const errorDetail =
-            saveErr?.detail ||
-            saveErr?.message ||
-            'Não foi possível salvar seu perfil. Verifique sua conexão e tente novamente.';
-          setSaveError(errorDetail);
-        })
-        .finally(() => {
-          setIsSubmitting(false);
+        .catch(() => {
+          // Silencioso se o usuário for recém-cadastrado e ainda não tiver respostas salvas
         });
-    } else {
-      if (typeof auth?.markQuestionnaireCompleted === 'function') {
-        auth.markQuestionnaireCompleted();
-      }
-      if (navigation.reset) {
-        navigation.reset({ index: 0, routes: [{ name: 'MainTabs' }] });
-      } else if (navigation.replace) {
-        navigation.replace('MainTabs');
-      } else if (navigation.navigate) {
-        navigation.navigate('MainTabs');
-      }
     }
-  }, [finishRequested, navigation, questionnaireData, auth]);
+
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, [client, isAuthenticated, currentUserId]);
 
   // Navegação para trás
   function handleBack() {
@@ -276,6 +231,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
 
   // Seleção única de gênero
   function handleSelectGender(option) {
+    markUserInteracted();
     setGender(option);
     if (errors.gender) {
       setErrors((prev) => ({ ...prev, gender: null }));
@@ -293,6 +249,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
 
   // Seleção única de escolaridade
   function handleSelectEducation(option) {
+    markUserInteracted();
     setEducation(option);
     if (errors.education) {
       setErrors((prev) => ({ ...prev, education: null }));
@@ -329,12 +286,52 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
     setCurrentStepIndex(1);
   }
 
-  // Atualização do texto da busca de jogos
+  // Atualização do texto da busca de jogos conectada ao backend
   function handleSearchChange(text) {
     setSearchQuery(text);
     if (feedbackMessage) {
       setFeedbackMessage(null);
     }
+    setSearchError(null);
+
+    const trimmed = text.trim();
+    if (!trimmed) {
+      setSearchResults([]);
+      setIsSearching(false);
+      return;
+    }
+
+    const client = auth?.httpClient;
+    if (!client) {
+      setSearchResults([]);
+      setIsSearching(false);
+      return;
+    }
+
+    searchRequestIdRef.current += 1;
+    const currentRequestId = searchRequestIdRef.current;
+    setIsSearching(true);
+
+    client
+      .get(`/games?query=${encodeURIComponent(trimmed)}&limit=20`)
+      .then((res) => {
+        if (!isMountedRef.current || searchRequestIdRef.current !== currentRequestId) {
+          return;
+        }
+        const items = Array.isArray(res?.games) ? res.games : [];
+        const names = items
+          .map((g) => (typeof g === 'string' ? g : g?.name))
+          .filter(Boolean);
+        setSearchResults(names);
+        setIsSearching(false);
+      })
+      .catch(() => {
+        if (!isMountedRef.current || searchRequestIdRef.current !== currentRequestId) {
+          return;
+        }
+        setIsSearching(false);
+        setSearchError('Não foi possível buscar jogos no momento.');
+      });
   }
 
   // Adiciona um jogo à lista de selecionados (via sugestão ou inclusão manual)
@@ -370,6 +367,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
     });
 
     setSearchQuery('');
+    setSearchResults([]);
     setFeedbackMessage({
       type: 'success',
       text: `"${trimmed}" adicionado aos seus jogos.`,
@@ -382,6 +380,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
 
   // Remove um jogo da lista de selecionados (permitindo selecioná-lo novamente)
   function handleRemoveGame(gameToRemove) {
+    markUserInteracted();
     setQuestionnaireData((prev) => ({
       ...prev,
       selectedGames: (prev.selectedGames || []).filter(
@@ -410,6 +409,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
 
   // Seleção única de conhecimento sobre o mercado de games (Etapa 3)
   function handleSelectMarketKnowledge(option) {
+    markUserInteracted();
     setQuestionnaireData((prev) => ({
       ...prev,
       marketKnowledge: option,
@@ -421,6 +421,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
 
   // Seleção única de interesse no mercado profissional de games (Etapa 3)
   function handleSelectMarketInterest(option) {
+    markUserInteracted();
     setQuestionnaireData((prev) => ({
       ...prev,
       marketInterest: option,
@@ -430,17 +431,104 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
     }
   }
 
-  // Validação e conclusão do questionário (Etapa 3)
+  // Conclusão e persistência do questionário no backend
   function handleFinishQuestionnaire() {
+    if (isSubmittingRef.current) {
+      return;
+    }
+    isSubmittingRef.current = true;
     setFinishRequested(true);
   }
 
+  useEffect(() => {
+    if (!finishRequested) return;
+    setFinishRequested(false);
+
+    const validation = validateGamesMarketStep(questionnaireData);
+    if (!validation.isValid) {
+      isSubmittingRef.current = false;
+      setErrors(validation.errors);
+      return;
+    }
+    setErrors({});
+
+    const client = auth?.httpClient;
+    if (!client || !auth?.isAuthenticated) {
+      isSubmittingRef.current = false;
+      setSaveError('Usuário não autenticado ou sessão inválida. Não foi possível salvar o perfil.');
+      return;
+    }
+
+    setIsSubmitting(true);
+    setSaveError(null);
+
+    const payload = {
+      birthDate: questionnaireData.birthDate,
+      gender: questionnaireData.gender,
+      otherGender:
+        questionnaireData.gender === 'Outro'
+          ? (questionnaireData.otherGender || '').trim() || null
+          : null,
+      education: questionnaireData.education,
+      selectedGames: questionnaireData.selectedGames,
+      marketKnowledge: questionnaireData.marketKnowledge,
+      marketInterest: questionnaireData.marketInterest,
+    };
+
+    client
+      .put('/profile/questionnaire', payload, { auth: true })
+      .then((res) => {
+        if (typeof auth?.markQuestionnaireCompleted === 'function') {
+          auth.markQuestionnaireCompleted();
+        }
+        if (typeof auth?.fetchCurrentUser === 'function') {
+          void auth.fetchCurrentUser().catch(() => undefined);
+        }
+
+        if (navigation.reset) {
+          navigation.reset({ index: 0, routes: [{ name: 'MainTabs' }] });
+        } else if (navigation.replace) {
+          navigation.replace('MainTabs');
+        } else if (navigation.navigate) {
+          navigation.navigate('MainTabs');
+        }
+      })
+      .catch((saveErr) => {
+        if (saveErr?.fieldErrors) {
+          setErrors((prev) => ({ ...prev, ...saveErr.fieldErrors }));
+        }
+        const errorDetail =
+          saveErr?.detail ||
+          saveErr?.message ||
+          'Não foi possível salvar seu perfil. Verifique sua conexão e tente novamente.';
+        setSaveError(errorDetail);
+      })
+      .finally(() => {
+        isSubmittingRef.current = false;
+        setIsSubmitting(false);
+      });
+  }, [finishRequested, questionnaireData, auth, navigation]);
+
   const trimmedSearch = searchQuery.trim().toLowerCase();
-  const filteredSuggestions = trimmedSearch
-    ? mockGames.filter((game) => game.toLowerCase().includes(trimmedSearch))
+  const localMatches = trimmedSearch
+    ? catalogGames.filter((game) => game.toLowerCase().includes(trimmedSearch))
     : [];
+  const searchMatches = trimmedSearch
+    ? searchResults.filter((game) => game.toLowerCase().includes(trimmedSearch))
+    : [];
+
+  const seenSuggestions = new Set();
+  const filteredSuggestions = [];
+  for (const g of [...localMatches, ...searchMatches]) {
+    const lower = g.toLowerCase();
+    if (!seenSuggestions.has(lower)) {
+      seenSuggestions.add(lower);
+      filteredSuggestions.push(g);
+    }
+  }
+
   const exactMatchExists = trimmedSearch
-    ? mockGames.some((game) => game.toLowerCase() === trimmedSearch)
+    ? filteredSuggestions.some((game) => game.toLowerCase() === trimmedSearch)
     : false;
 
   return (
@@ -517,6 +605,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
                   placeholderTextColor="#64748b"
                   value={birthDateText}
                   onChangeText={(text) => {
+                    markUserInteracted();
                     setBirthDateText(text);
                     if (errors.birthDate) {
                       setErrors((prev) => ({ ...prev, birthDate: null }));
@@ -583,6 +672,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
                       placeholderTextColor="#64748b"
                       value={otherGender}
                       onChangeText={(text) => {
+                        markUserInteracted();
                         setOtherGender(text);
                         if (errors.otherGender) {
                           setErrors((prev) => ({ ...prev, otherGender: null }));
@@ -716,6 +806,12 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
                 filteredSuggestions.length > 0 ? (
                   <View style={styles.suggestionsCard}>
                     <Text style={styles.suggestionsHeader}>SUGESTÕES DE JOGOS</Text>
+                    {isSearching ? (
+                      <View style={styles.catalogLoadingRow}>
+                        <ActivityIndicator size="small" color="#9d4edd" />
+                        <Text style={styles.catalogLoadingText}>Buscando no catálogo...</Text>
+                      </View>
+                    ) : null}
                     <View style={styles.suggestionsList}>
                       {filteredSuggestions.map((game) => {
                         const isSelected = questionnaireData.selectedGames.some(
@@ -775,52 +871,85 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
                   </View>
                 ) : (
                   <View style={styles.noSuggestionsCard}>
-                    <Text style={styles.noSuggestionsText}>
-                      Nenhum jogo correspondente encontrado no catálogo para "{searchQuery.trim()}".
-                    </Text>
-                    <Pressable
-                      style={styles.manualAddPrimaryButton}
-                      onPress={() => handleAddGame(searchQuery)}
-                      accessibilityLabel={`Adicionar ${searchQuery.trim()}`}
-                    >
-                      <Text style={styles.manualAddPrimaryButtonText}>
-                        + Adicionar "{searchQuery.trim()}"
-                      </Text>
-                    </Pressable>
+                    {isSearching ? (
+                      <View style={styles.catalogLoadingRow}>
+                        <ActivityIndicator size="small" color="#9d4edd" />
+                        <Text style={styles.catalogLoadingText}>Buscando no catálogo...</Text>
+                      </View>
+                    ) : (
+                      <>
+                        <Text style={styles.noSuggestionsText}>
+                          Nenhum jogo correspondente encontrado no catálogo para "{searchQuery.trim()}".
+                        </Text>
+                        <Pressable
+                          style={styles.manualAddPrimaryButton}
+                          onPress={() => handleAddGame(searchQuery)}
+                          accessibilityLabel={`Adicionar ${searchQuery.trim()}`}
+                        >
+                          <Text style={styles.manualAddPrimaryButtonText}>
+                            + Adicionar "{searchQuery.trim()}"
+                          </Text>
+                        </Pressable>
+                      </>
+                    )}
                   </View>
                 )
               ) : (
                 <View style={styles.quickSuggestionsCard}>
-                  <Text style={styles.quickSuggestionsHeader}>Sugestões populares:</Text>
-                  <View style={styles.quickChipsWrapper}>
-                    {mockGames.slice(0, 8).map((game) => {
-                      const isSelected = questionnaireData.selectedGames.some(
-                        (g) => g.trim().toLowerCase() === game.trim().toLowerCase()
-                      );
-                      return (
-                        <Pressable
-                          key={game}
-                          style={[
-                            styles.quickChip,
-                            isSelected ? styles.quickChipSelected : null,
-                          ]}
-                          onPress={() => handleAddGame(game)}
-                          disabled={isSelected}
-                        >
-                          <Text
+                  <Text style={styles.quickSuggestionsHeader}>Sugestões populares do catálogo:</Text>
+                  {isCatalogLoading ? (
+                    <View style={styles.catalogLoadingRow}>
+                      <ActivityIndicator size="small" color="#9d4edd" />
+                      <Text style={styles.catalogLoadingText}>Carregando catálogo...</Text>
+                    </View>
+                  ) : catalogError && catalogGames.length === 0 ? (
+                    <View style={styles.catalogUnavailableContainer}>
+                      <Text style={styles.catalogUnavailableText}>
+                        Catálogo temporariamente indisponível. Você pode adicionar seus jogos digitando o nome no campo de busca acima.
+                      </Text>
+                    </View>
+                  ) : catalogGames.length > 0 ? (
+                    <View style={styles.quickChipsWrapper}>
+                      {catalogGames.slice(0, 8).map((game) => {
+                        const isSelected = questionnaireData.selectedGames.some(
+                          (g) => g.trim().toLowerCase() === game.trim().toLowerCase()
+                        );
+                        return (
+                          <Pressable
+                            key={game}
                             style={[
-                              styles.quickChipText,
-                              isSelected ? styles.quickChipTextSelected : null,
+                              styles.quickChip,
+                              isSelected ? styles.quickChipSelected : null,
                             ]}
+                            onPress={() => handleAddGame(game)}
+                            disabled={isSelected}
+                            accessibilityLabel={`Selecionar ${game}`}
                           >
-                            {isSelected ? `✓ ${game}` : `+ ${game}`}
-                          </Text>
-                        </Pressable>
-                      );
-                    })}
-                  </View>
+                            <Text
+                              style={[
+                                styles.quickChipText,
+                                isSelected ? styles.quickChipTextSelected : null,
+                              ]}
+                            >
+                              {isSelected ? `✓ ${game}` : `+ ${game}`}
+                            </Text>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+                  ) : (
+                    <Text style={styles.noCatalogGamesText}>
+                      Nenhum jogo no catálogo ainda. Digite o nome no campo de busca para adicionar.
+                    </Text>
+                  )}
                 </View>
               )}
+
+              {searchError ? (
+                <View style={styles.searchErrorBanner} accessible={true} accessibilityRole="alert">
+                  <Text style={styles.searchErrorText}>{searchError}</Text>
+                </View>
+              ) : null}
 
               {/* LISTA DE JOGOS SELECIONADOS */}
               <View style={styles.selectedSection}>
@@ -982,20 +1111,46 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
                 ) : null}
               </View>
 
+              {/* MENSAGEM VISÍVEL DE ERRO DE SALVAMENTO (COM ACESSIBILIDADE) */}
+              {saveError ? (
+                <View
+                  style={styles.saveErrorBanner}
+                  accessible={true}
+                  accessibilityRole="alert"
+                  accessibilityLiveRegion="assertive"
+                >
+                  <Text style={styles.saveErrorIcon}>⚠️</Text>
+                  <Text style={styles.saveErrorText}>{saveError}</Text>
+                </View>
+              ) : null}
+
               {/* BOTÕES DE CONCLUSÃO E RETORNO */}
               <View style={styles.actionsContainer}>
                 <Pressable
-                  style={styles.primaryButton}
+                  style={[
+                    styles.primaryButton,
+                    isSubmitting ? styles.buttonDisabled : null,
+                  ]}
                   onPress={handleFinishQuestionnaire}
-                  accessibilityLabel="Concluir questionário"
+                  disabled={isSubmitting}
+                  accessibilityLabel={isSubmitting ? 'Salvando questionário...' : 'Concluir questionário'}
+                  accessibilityState={{ busy: isSubmitting, disabled: isSubmitting }}
                 >
-                  <Text style={styles.primaryButtonText}>Concluir</Text>
+                  {isSubmitting ? (
+                    <View style={styles.submittingContainer}>
+                      <ActivityIndicator size="small" color="#ffffff" />
+                      <Text style={styles.primaryButtonText}>Salvando...</Text>
+                    </View>
+                  ) : (
+                    <Text style={styles.primaryButtonText}>Concluir</Text>
+                  )}
                 </Pressable>
 
                 <Pressable
                   style={styles.secondaryButton}
                   onPress={handleBack}
                   accessibilityLabel="Voltar para Etapa 2"
+                  disabled={isSubmitting}
                 >
                   <Text style={styles.secondaryButtonText}>← Voltar para Etapa 2</Text>
                 </Pressable>
@@ -1539,5 +1694,76 @@ const styles = StyleSheet.create({
   actionsContainer: {
     gap: 12,
     marginTop: 8,
+  },
+  saveErrorBanner: {
+    backgroundColor: '#2a1118',
+    borderColor: '#ef4444',
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginTop: 8,
+  },
+  saveErrorIcon: {
+    fontSize: 20,
+  },
+  saveErrorText: {
+    color: '#fca5a5',
+    fontSize: 14,
+    fontWeight: '600',
+    lineHeight: 20,
+    flex: 1,
+  },
+  buttonDisabled: {
+    opacity: 0.6,
+  },
+  submittingContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+  },
+  searchErrorBanner: {
+    backgroundColor: '#2a1118',
+    borderColor: '#ef4444',
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    marginTop: 6,
+  },
+  searchErrorText: {
+    color: '#fca5a5',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  catalogLoadingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 8,
+  },
+  catalogLoadingText: {
+    color: '#94a3b8',
+    fontSize: 13,
+  },
+  catalogUnavailableContainer: {
+    backgroundColor: '#1a132e',
+    borderColor: '#34265a',
+    borderWidth: 1,
+    borderRadius: 10,
+    padding: 12,
+  },
+  catalogUnavailableText: {
+    color: '#94a3b8',
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  noCatalogGamesText: {
+    color: '#64748b',
+    fontSize: 13,
   },
 });

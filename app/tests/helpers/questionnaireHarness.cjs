@@ -70,6 +70,55 @@ function textOf(element) {
   return textOf(element.props?.children);
 }
 
+function syncResolve(value) {
+  return {
+    then(onFulfilled) {
+      try {
+        const next = onFulfilled ? onFulfilled(value) : value;
+        if (next && typeof next.then === 'function') return next;
+        return syncResolve(next);
+      } catch (err) {
+        return syncReject(err);
+      }
+    },
+    catch() { return this; },
+    finally(onFinally) {
+      try {
+        if (onFinally) onFinally();
+        return this;
+      } catch (err) {
+        return syncReject(err);
+      }
+    },
+  };
+}
+
+function syncReject(reason) {
+  return {
+    then(onFulfilled, onRejected) {
+      if (!onRejected) return this;
+      try {
+        const next = onRejected(reason);
+        if (next && typeof next.then === 'function') return next;
+        return syncResolve(next);
+      } catch (err) {
+        return syncReject(err);
+      }
+    },
+    catch(onRejected) {
+      return this.then(null, onRejected);
+    },
+    finally(onFinally) {
+      try {
+        if (onFinally) onFinally();
+        return this;
+      } catch (err) {
+        return syncReject(err);
+      }
+    },
+  };
+}
+
 function createHarness(relativePath, options = {}) {
   const state = [];
   const queue = [];
@@ -80,7 +129,49 @@ function createHarness(relativePath, options = {}) {
   let capture;
   let tree;
   let props = options.props || {};
-  let authContextValue = options.authContext !== undefined ? options.authContext : null;
+
+  const defaultCatalog = [
+    'Minecraft',
+    'Roblox',
+    'Valorant',
+    'Fortnite',
+    'League of Legends',
+    'Counter-Strike 2',
+    'EA Sports FC 24',
+    'Free Fire',
+  ];
+
+  let authContextValue;
+  if (options.authContext !== undefined) {
+    authContextValue = options.authContext;
+  } else {
+    authContextValue = {
+      isAuthenticated: true,
+      user: { id: 'default-user', name: 'Default User', hasCompletedQuestionnaire: false },
+      httpClient: {
+        get: (url) => {
+          if (url.startsWith('/games')) {
+            const parsedUrl = new URL(url, 'http://localhost');
+            const queryParam = parsedUrl.searchParams.get('query')?.toLowerCase();
+            const filtered = queryParam
+              ? defaultCatalog.filter((g) => g.toLowerCase().includes(queryParam))
+              : defaultCatalog;
+            return syncResolve({
+              games: filtered.map((name, i) => ({ id: `game-${i}`, name })),
+              total: filtered.length,
+            });
+          }
+          if (url === '/profile/questionnaire') {
+            return syncResolve({ hasCompleted: false });
+          }
+          return syncResolve({});
+        },
+        put: (url, payload) => syncResolve({ message: 'OK' }),
+      },
+      fetchCurrentUser: () => syncResolve({ id: 'default-user', hasCompletedQuestionnaire: true }),
+      markQuestionnaireCompleted: () => {},
+    };
+  }
 
   const AuthContextToken = { _defaultValue: null, Provider: 'AuthContextProvider' };
 
