@@ -5,7 +5,7 @@ import { SeedCuratedGamesResult } from "../games/games.types";
 import { ProfileQuestionnaireService } from "../profile/profile-questionnaire.service";
 
 export interface DatabaseSeedResult {
-  questionnaireVersion: { id: string; version: string };
+  questionnaireVersion: { id: string; version: string } | null;
   games: SeedCuratedGamesResult;
 }
 
@@ -39,7 +39,7 @@ if (require.main === module) {
   runDatabaseSeed(pool)
     .then(async (res) => {
       console.log(
-        `Seed concluído com sucesso: questionnaire_version=${res.questionnaireVersion.version} (${res.questionnaireVersion.id}), curatedGames=${res.games.totalCurated} (inseridos=${res.games.insertedCount}).`,
+        `Seed concluído com sucesso: questionnaire_version=${res.questionnaireVersion?.version ?? "unchanged"} (${res.questionnaireVersion?.id ?? "existing"}), curatedGames=${res.games.totalCurated} (inseridos=${res.games.insertedCount}).`,
       );
       await pool.end();
     })

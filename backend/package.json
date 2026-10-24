@@ -46,6 +46,8 @@
   "overrides": {
     "@esbuild-kit/core-utils": {
       "esbuild": "^0.28.2"
-    }
+    },
+    "body-parser": "^2.4.0",
+    "multer": "^2.5.0"
   }
 }

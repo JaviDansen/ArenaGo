@@ -15,7 +15,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '../../context/AuthContext';
 import BirthDateInput from '../../components/BirthDateInput';
 import { mockGames } from '../../data/mockData';
-import { parseBirthDate } from '../../utils/birthDate';
+import { formatBirthDate, parseBirthDate } from '../../utils/birthDate';
 import {
   validateAboutYouStep,
   validateGamesMarketStep,
@@ -116,15 +116,82 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [feedbackMessage, setFeedbackMessage] = useState(null);
   const [finishRequested, setFinishRequested] = useState(false);
+  const [availableGames, setAvailableGames] = useState(mockGames);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [saveError, setSaveError] = useState(null);
 
   const totalSteps = QUESTIONNAIRE_STEPS.length;
   const currentStep = QUESTIONNAIRE_STEPS[currentStepIndex];
   const progressPercent = ((currentStepIndex + 1) / totalSteps) * 100;
 
   useEffect(() => {
+    let isMounted = true;
+    const client = auth?.httpClient;
+
+    if (client) {
+      // 1. Carrega catálogo do backend (GET /api/v1/games)
+      client
+        .get('/games?limit=50')
+        .then((res) => {
+          if (!isMounted) return;
+          const gameItems = Array.isArray(res?.games) ? res.games : [];
+          const backendNames = gameItems.map((g) => g?.name).filter(Boolean);
+          if (backendNames.length > 0) {
+            setAvailableGames(backendNames);
+          }
+        })
+        .catch(() => {
+          // Mantém mockGames como fallback caso o backend esteja indisponível
+        });
+
+      // 2. Pré-carrega respostas existentes do questionário se o usuário estiver autenticado
+      if (auth?.isAuthenticated) {
+        client
+          .get('/profile/questionnaire', { auth: true })
+          .then((res) => {
+            if (!isMounted || !res || !res.hasCompleted) return;
+            if (res.aboutYou) {
+              if (res.aboutYou.birthDate) {
+                setBirthDateText(formatBirthDate(res.aboutYou.birthDate));
+              }
+              if (res.aboutYou.gender) {
+                setGender(res.aboutYou.gender);
+              }
+              if (res.aboutYou.otherGender) {
+                setOtherGender(res.aboutYou.otherGender);
+              }
+              if (res.aboutYou.education) {
+                setEducation(res.aboutYou.education);
+              }
+            }
+            if (Array.isArray(res.yourGames) && res.yourGames.length > 0) {
+              setQuestionnaireData((prev) => ({
+                ...prev,
+                selectedGames: res.yourGames,
+              }));
+            }
+            if (res.gamesMarket) {
+              setQuestionnaireData((prev) => ({
+                ...prev,
+                marketKnowledge: res.gamesMarket.marketKnowledge,
+                marketInterest: res.gamesMarket.marketInterest,
+              }));
+            }
+          })
+          .catch(() => {
+            // Silencioso se o usuário for recém-cadastrado e ainda não tiver respostas
+          });
+      }
+    }
+
+    return () => {
+      isMounted = false;
+    };
+  }, [auth]);
+
+  useEffect(() => {
     if (!finishRequested) return;
 
-    // O efeito lê as respostas após o React aplicar todas as seleções do mesmo lote.
     setFinishRequested(false);
     const validation = validateGamesMarketStep(questionnaireData);
     if (!validation.isValid) {
@@ -133,12 +200,69 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
     }
 
     setErrors({});
-    if (navigation.reset) {
-      navigation.reset({ index: 0, routes: [{ name: 'MainTabs' }] });
+
+    const client = auth?.httpClient;
+    if (client && auth?.isAuthenticated) {
+      setIsSubmitting(true);
+      setSaveError(null);
+
+      const payload = {
+        birthDate: questionnaireData.birthDate,
+        gender: questionnaireData.gender,
+        otherGender:
+          questionnaireData.gender === 'Outro'
+            ? (questionnaireData.otherGender || '').trim() || null
+            : null,
+        education: questionnaireData.education,
+        selectedGames: questionnaireData.selectedGames,
+        marketKnowledge: questionnaireData.marketKnowledge,
+        marketInterest: questionnaireData.marketInterest,
+      };
+
+      client
+        .put('/profile/questionnaire', payload, { auth: true })
+        .then(async () => {
+          if (typeof auth.fetchCurrentUser === 'function') {
+            await auth.fetchCurrentUser().catch(() => undefined);
+          }
+          if (typeof auth.markQuestionnaireCompleted === 'function') {
+            auth.markQuestionnaireCompleted();
+          }
+
+          if (navigation.reset) {
+            navigation.reset({ index: 0, routes: [{ name: 'MainTabs' }] });
+          } else if (navigation.replace) {
+            navigation.replace('MainTabs');
+          } else if (navigation.navigate) {
+            navigation.navigate('MainTabs');
+          }
+        })
+        .catch((saveErr) => {
+          if (saveErr?.fieldErrors) {
+            setErrors((prev) => ({ ...prev, ...saveErr.fieldErrors }));
+          }
+          const errorDetail =
+            saveErr?.detail ||
+            saveErr?.message ||
+            'Não foi possível salvar seu perfil. Verifique sua conexão e tente novamente.';
+          setSaveError(errorDetail);
+        })
+        .finally(() => {
+          setIsSubmitting(false);
+        });
     } else {
-      navigation.replace('MainTabs');
+      if (typeof auth?.markQuestionnaireCompleted === 'function') {
+        auth.markQuestionnaireCompleted();
+      }
+      if (navigation.reset) {
+        navigation.reset({ index: 0, routes: [{ name: 'MainTabs' }] });
+      } else if (navigation.replace) {
+        navigation.replace('MainTabs');
+      } else if (navigation.navigate) {
+        navigation.navigate('MainTabs');
+      }
     }
-  }, [finishRequested, navigation, questionnaireData]);
+  }, [finishRequested, navigation, questionnaireData, auth]);
 
   // Navegação para trás
   function handleBack() {

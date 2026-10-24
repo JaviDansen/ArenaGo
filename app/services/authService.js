@@ -552,6 +552,7 @@ export function createAuthSessionManager(options = {}) {
       isAuthenticated: true,
       isInitializing: false,
       sessionStatus: 'authenticated',
+      postAuthRoute: liveUser.hasCompletedQuestionnaire ? 'MainTabs' : state.postAuthRoute,
       networkError: null,
       storageError: null,
     });
@@ -1046,6 +1047,13 @@ export function createAuthSessionManager(options = {}) {
     onSessionInvalidated: handleSessionInvalidated,
   });
 
+  function markQuestionnaireCompleted() {
+    emitState({
+      user: state.user ? { ...state.user, hasCompletedQuestionnaire: true } : null,
+      postAuthRoute: 'MainTabs',
+    });
+  }
+
   return {
     subscribe,
     getSnapshot,
@@ -1057,6 +1065,7 @@ export function createAuthSessionManager(options = {}) {
     refreshSession,
     restoreSession,
     fetchCurrentUser,
+    markQuestionnaireCompleted,
     clearNotices,
     client,
     tokenStorage,

@@ -51,6 +51,14 @@ Endpoints expostos sob `/api/v1`:
   - **Ordenação estável**: `ORDER BY is_curated DESC, lower(btrim(name)) ASC, name ASC, id ASC`.
   - **Semântica de `total`**: representa a quantidade total de registros no catálogo `games` que satisfazem o filtro `query` (contagem total antes da aplicação de `LIMIT`), enquanto `games` contém até `limit` itens `{ id, name, isCurated }`, sem expor metadados privados de usuários (`created_by_user_id` ou `created_at`).
 - **Seed idempotente (`npm run db:seed`)**: insere de forma idempotente a versão publicada `1.0.0` em `questionnaire_versions` e os 20 jogos curados iniciais definidos em `app/data/mockData.js`. Também é executado automaticamente de forma idempotente na inicialização dos módulos (`OnModuleInit`).
+- **Política de publicação e curadoria (K03-F)**: reinicializações do servidor respeitam versões inativas (`activated_at = NULL`), retornando `422 QUESTIONNAIRE_VERSION_UNAVAILABLE` sem reativá-las inadvertidamente. O seed de catálogo respeita decisões administrativas sobre `is_curated` sem desmarcar jogos customizados promovidos pela administração nem forçar `true` em jogos desmarcados.
+
+## API Cadastral de Perfil (K04)
+
+Endpoints expostos sob `/api/v1/profile`:
+
+- `GET /api/v1/profile`: exige sessão autenticada (`@RequireSessionAuth()`, `SessionAuthGuard`, `@CurrentUserId()`). Retorna os dados cadastrais essenciais do titular autenticado: `{ id, name, email, emailVerified, roles, hasCompletedQuestionnaire, createdAt, updatedAt }`.
+- `PATCH /api/v1/profile`: exige sessão autenticada. Atualiza o nome de exibição (`name` de 2 a 150 caracteres após normalização). Bloqueia a linha do usuário via `users FOR UPDATE` em transação e retorna `{ message: "Perfil atualizado com sucesso.", user }`. Rejeita modificação de e-mail, papéis administrativos ou respostas do questionário (`400 BAD_REQUEST`, RFC 7807).
 
 ## PostgreSQL remoto futuro
 

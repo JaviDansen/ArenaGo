@@ -964,7 +964,7 @@ test("K01 Auth & Sessions — Integração HTTP + PostgreSQL Real", async (t) =>
     );
     const gameId = randomUUID();
     await pool.query(
-      "INSERT INTO games (id, name, is_curated, created_at) VALUES ($1, $2, true, now())",
+      "INSERT INTO games (id, name, is_curated, created_at) VALUES ($1, $2, false, now())",
       [gameId, `Game-${gameId.slice(0, 8)}`],
     );
     await pool.query(

@@ -55,6 +55,7 @@ export function AuthProvider({
     restoreSession: manager.restoreSession,
     fetchCurrentUser: manager.fetchCurrentUser,
     refreshUser: manager.fetchCurrentUser,
+    markQuestionnaireCompleted: manager.markQuestionnaireCompleted,
     clearNotices: manager.clearNotices,
     httpClient: manager.client,
   };

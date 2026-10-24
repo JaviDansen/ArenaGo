@@ -312,3 +312,176 @@ test('Welcome, valid registration, questionnaire and Login retain their routes',
   await login.actAsync((c) => c.handleLogin());
   assert.deepEqual(login.navigationCalls, []);
 });
+
+test('K05: preloads existing profile questionnaire and games catalog from backend', async () => {
+  const customFields = [...fields, 'availableGames'];
+  const mockGamesList = [
+    { id: '1', name: 'Jogo Backend 1', isCurated: true },
+    { id: '2', name: 'Jogo Backend 2', isCurated: false },
+  ];
+  let catalogCalled = false;
+  let profileGetCalled = false;
+
+  const mockClient = {
+    get: async (url) => {
+      if (url.startsWith('/games')) {
+        catalogCalled = true;
+        return { games: mockGamesList, total: 2 };
+      }
+      if (url === '/profile/questionnaire') {
+        profileGetCalled = true;
+        return {
+          hasCompleted: true,
+          aboutYou: {
+            birthDate: '2001-05-15',
+            gender: 'Feminino',
+            otherGender: null,
+            education: 'Pós-graduação',
+          },
+          yourGames: ['Jogo Backend 1'],
+          gamesMarket: {
+            marketKnowledge: 'Sim, conheço.',
+            marketInterest: 'Sim, tenho interesse.',
+          },
+        };
+      }
+      throw new Error(`Unexpected GET: ${url}`);
+    },
+  };
+
+  const h = createHarness('screens/profile/ProfileQuestionnaireScreen.js', {
+    fields: customFields,
+    authContext: {
+      isAuthenticated: true,
+      httpClient: mockClient,
+      user: { id: 'user-1', name: 'Test User' },
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  h.act(() => {});
+
+  assert.equal(catalogCalled, true);
+  assert.equal(profileGetCalled, true);
+  assert.deepEqual(h.capture.availableGames, ['Jogo Backend 1', 'Jogo Backend 2']);
+  assert.equal(h.capture.birthDateText, '15/05/2001');
+  assert.equal(h.capture.gender, 'Feminino');
+  assert.equal(h.capture.education, 'Pós-graduação');
+  assert.deepEqual(h.capture.questionnaireData.selectedGames, ['Jogo Backend 1']);
+  assert.equal(h.capture.questionnaireData.marketKnowledge, 'Sim, conheço.');
+  assert.equal(h.capture.questionnaireData.marketInterest, 'Sim, tenho interesse.');
+});
+
+test('K05: submits questionnaire to PUT /profile/questionnaire, calls fetchCurrentUser and resets navigation to MainTabs', async () => {
+  const customFields = [...fields, 'isSubmitting', 'saveError'];
+  let putPayload = null;
+  let putAuthParam = null;
+  let fetchCurrentUserCalled = false;
+  let markCompletedCalled = false;
+
+  const mockClient = {
+    get: async () => ({ games: [], total: 0 }),
+    put: async (url, payload, options) => {
+      if (url === '/profile/questionnaire') {
+        putPayload = payload;
+        putAuthParam = options?.auth;
+        return { message: 'Perfil salvo com sucesso.' };
+      }
+      throw new Error(`Unexpected PUT: ${url}`);
+    },
+  };
+
+  const authContext = {
+    isAuthenticated: true,
+    httpClient: mockClient,
+    user: { id: 'user-1', name: 'Test User', hasCompletedQuestionnaire: false },
+    fetchCurrentUser: async () => {
+      fetchCurrentUserCalled = true;
+      return { id: 'user-1', hasCompletedQuestionnaire: true };
+    },
+    markQuestionnaireCompleted: () => {
+      markCompletedCalled = true;
+    },
+  };
+
+  const h = createHarness('screens/profile/ProfileQuestionnaireScreen.js', {
+    fields: customFields,
+    authContext,
+  });
+
+  h.act(() => h.inputBirthDate('10/04/2000'));
+  h.act((c) => c.handleSelectGender('Masculino'));
+  h.act((c) => c.handleSelectEducation('Superior'));
+  h.act((c) => c.handleAdvanceStep1());
+
+  h.act((c) => c.handleAddGame('Minecraft'));
+  h.act((c) => c.handleAdvanceStep2());
+
+  h.act((c) => {
+    c.handleSelectMarketKnowledge(h.exports.MARKET_KNOWLEDGE_OPTIONS[0]);
+    c.handleSelectMarketInterest(h.exports.MARKET_INTEREST_OPTIONS[0]);
+    c.handleFinishQuestionnaire();
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  h.act(() => {});
+
+  assert.equal(putPayload.birthDate, '2000-04-10');
+  assert.equal(putPayload.gender, 'Masculino');
+  assert.equal(putPayload.otherGender, null);
+  assert.equal(putPayload.education, 'Superior');
+  assert.deepEqual(Array.from(putPayload.selectedGames), ['Minecraft']);
+  assert.equal(putPayload.marketKnowledge, h.exports.MARKET_KNOWLEDGE_OPTIONS[0]);
+  assert.equal(putPayload.marketInterest, h.exports.MARKET_INTEREST_OPTIONS[0]);
+  assert.equal(putAuthParam, true);
+  assert.equal(fetchCurrentUserCalled, true);
+  assert.equal(markCompletedCalled, true);
+  assert.equal(h.navigationCalls.length, 1);
+  assert.equal(h.navigationCalls[0].payload.routes[0].name, 'MainTabs');
+});
+
+test('K05: handles PUT /profile/questionnaire failure gracefully, displays error banner and preserves form state', async () => {
+  const customFields = [...fields, 'saveError'];
+
+  const mockClient = {
+    get: async () => ({ games: [], total: 0 }),
+    put: async () => {
+      const err = new Error('Falha de conexão com o servidor');
+      err.detail = 'Falha de conexão com o servidor. Tente novamente.';
+      err.fieldErrors = { education: 'Erro no campo escolaridade' };
+      throw err;
+    },
+  };
+
+  const h = createHarness('screens/profile/ProfileQuestionnaireScreen.js', {
+    fields: customFields,
+    authContext: {
+      isAuthenticated: true,
+      httpClient: mockClient,
+      user: { id: 'user-1', name: 'Test User' },
+    },
+  });
+
+  h.act(() => h.inputBirthDate('10/04/2000'));
+  h.act((c) => c.handleSelectGender('Masculino'));
+  h.act((c) => c.handleSelectEducation('Superior'));
+  h.act((c) => c.handleAdvanceStep1());
+
+  h.act((c) => c.handleAddGame('Minecraft'));
+  h.act((c) => c.handleAdvanceStep2());
+
+  h.act((c) => {
+    c.handleSelectMarketKnowledge(h.exports.MARKET_KNOWLEDGE_OPTIONS[0]);
+    c.handleSelectMarketInterest(h.exports.MARKET_INTEREST_OPTIONS[0]);
+    c.handleFinishQuestionnaire();
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  h.act(() => {});
+
+  assert.equal(h.navigationCalls.length, 0);
+  assert.equal(h.capture.saveError, 'Falha de conexão com o servidor. Tente novamente.');
+  assert.equal(h.capture.errors.education, 'Erro no campo escolaridade');
+  assert.equal(h.capture.questionnaireData.birthDate, '2000-04-10');
+  assert.deepEqual(Array.from(h.capture.questionnaireData.selectedGames), ['Minecraft']);
+});

@@ -45,9 +45,10 @@ export class GamesService implements OnModuleInit {
   }
 
   /**
-   * Rotina de seed reproduzível e idempotente para os 20 jogos curados do catálogo inicial.
-   * Preserva nomes canônicos existentes e evita registros duplicados em execuções repetidas
-   * ou concorrentes (unicidade por `lower(btrim(name))`).
+   * Rotina de seed/bootstrap reproduzível e idempotente para os 20 jogos do catálogo inicial.
+   * Insere exclusivamente os jogos que ainda não existirem (ON CONFLICT DO NOTHING).
+   * Não sobrescreve decisões administrativas legítimas sobre `is_curated` (não força `true`
+   * em jogos desmarcados por administradores nem desmarca jogos promovidos pela administração).
    */
   async seedCuratedGames(
     db: Pool | PoolClient = this.pool,
@@ -65,27 +66,8 @@ export class GamesService implements OnModuleInit {
 
       if ((insertRes.rowCount ?? 0) > 0) {
         insertedCount += 1;
-      } else {
-        await db.query(
-          `UPDATE games
-           SET is_curated = true
-           WHERE lower(btrim(name)) = lower(btrim($1)) AND is_curated = false`,
-          [canonicalName],
-        );
       }
     }
-
-    const normalizedCurated = CURATED_GAMES.map((name) =>
-      name.trim().toLowerCase(),
-    );
-
-    await db.query(
-      `UPDATE games
-       SET is_curated = false
-       WHERE is_curated = true
-         AND NOT (lower(btrim(name)) = ANY($1::text[]))`,
-      [normalizedCurated],
-    );
 
     const totalRes = await db.query<{ count: number }>(
       `SELECT COUNT(*)::int AS count

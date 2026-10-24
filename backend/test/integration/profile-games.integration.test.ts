@@ -1192,4 +1192,225 @@ test("K03 Profile Questionnaire & Games Catalog — Integração HTTP + PostgreS
       "Valorant",
     ]);
   });
+
+  // ===========================================================================
+  // K03-F: Política de publicação de versões do questionário e seed de catálogo
+  // ===========================================================================
+  await t.test("K03-F.1: Reinicialização da API jamais reativa versão inativa (activated_at = NULL)", async () => {
+    try {
+      // 1. Desativar propositalmente a versão 1.0.0
+      await pool.query(
+        `UPDATE questionnaire_versions SET activated_at = NULL WHERE version = '1.0.0'`,
+      );
+
+      // 2. Simular reinicialização executando onModuleInit do ProfileQuestionnaireService
+      const questionnaireService = app.get(ProfileQuestionnaireService);
+      await questionnaireService.onModuleInit();
+
+      // 3. Confirmar que a versão permanece inativa
+      const checkInactive = await pool.query<{ activated_at: Date | null }>(
+        `SELECT activated_at FROM questionnaire_versions WHERE version = '1.0.0'`,
+      );
+      assert.equal(checkInactive.rowCount, 1);
+      assert.equal(checkInactive.rows[0].activated_at, null);
+
+      // 4. Salvar questionário sem versão ativa deve retornar 422 QUESTIONNAIRE_VERSION_UNAVAILABLE
+      const user = await registerTestParticipant("sem-versao-ativa");
+      const saveRes = await apiRequest("/profile/questionnaire", {
+        method: "PUT",
+        token: user.accessToken,
+        body: {
+          birthDate: "2000-01-01",
+          gender: "Feminino",
+          education: "Superior",
+          selectedGames: ["Valorant"],
+          marketKnowledge: "Sim, conheço.",
+          marketInterest: "Sim, tenho interesse.",
+        },
+      });
+
+      assert.equal(saveRes.status, 422);
+      assert.equal((saveRes.body as { code?: string }).code, "QUESTIONNAIRE_VERSION_UNAVAILABLE");
+    } finally {
+      // Restaurar a versão para os próximos testes
+      await pool.query(
+        `UPDATE questionnaire_versions SET activated_at = clock_timestamp() WHERE version = '1.0.0'`,
+      );
+    }
+  });
+
+  await t.test("K03-F.2: Seed de catálogo preserva decisões administrativas sobre is_curated", async () => {
+    const gamesService = app.get(GamesService);
+    const customPromotedId = randomUUID();
+    const customPromotedName = `Custom Promovido Admin ${randomUUID().slice(0, 6)}`;
+
+    try {
+      // 1. Desmarcar jogo curado ("Apex Legends")
+      await pool.query(
+        `UPDATE games SET is_curated = false WHERE lower(btrim(name)) = lower('Apex Legends')`,
+      );
+
+      // 2. Inserir jogo customizado promovido pela administração com is_curated = true
+      await pool.query(
+        `INSERT INTO games (id, name, is_curated, created_at) VALUES ($1, $2, true, clock_timestamp()) ON CONFLICT DO NOTHING`,
+        [customPromotedId, customPromotedName],
+      );
+
+      // 3. Executar o seed novamente
+      await gamesService.seedCuratedGames();
+
+      // 4. Verificar que Apex Legends continua is_curated = false (decisão administrativa respeitada)
+      const apexRes = await pool.query<{ is_curated: boolean }>(
+        `SELECT is_curated FROM games WHERE lower(btrim(name)) = lower('Apex Legends')`,
+      );
+      assert.equal(apexRes.rows[0].is_curated, false);
+
+      // 5. Verificar que o jogo promovido continua is_curated = true
+      const customRes = await pool.query<{ is_curated: boolean }>(
+        `SELECT is_curated FROM games WHERE name = $1`,
+        [customPromotedName],
+      );
+      assert.equal(customRes.rows[0].is_curated, true);
+    } finally {
+      // Restaurar Apex Legends para não poluir testes posteriores
+      await pool.query(
+        `UPDATE games SET is_curated = true WHERE lower(btrim(name)) = lower('Apex Legends')`,
+      );
+      await pool.query(`DELETE FROM games WHERE id = $1`, [customPromotedId]);
+    }
+  });
+
+  // ===========================================================================
+  // K04: API Cadastral de Perfil — GET e PATCH /api/v1/profile
+  // ===========================================================================
+  await t.test("K04.1: GET /profile exige autenticação (401 sem token)", async () => {
+    const unauthRes = await apiRequest("/profile");
+    assert.equal(unauthRes.status, 401);
+  });
+
+  await t.test("K04.2: GET /profile retorna dados cadastrais e hasCompletedQuestionnaire", async () => {
+    const user = await registerTestParticipant("k04-get-profile");
+
+    const profileRes = await apiRequest<{
+      id: string;
+      name: string;
+      email: string;
+      emailVerified: boolean;
+      roles: string[];
+      hasCompletedQuestionnaire: boolean;
+      createdAt: string;
+      updatedAt: string;
+    }>("/profile", {
+      token: user.accessToken,
+    });
+
+    assert.equal(profileRes.status, 200);
+    assert.equal(profileRes.body.id, user.userId);
+    assert.equal(profileRes.body.email, user.email);
+    assert.equal(profileRes.body.name, "Participante k04-get-profile");
+    assert.equal(profileRes.body.emailVerified, false);
+    assert.deepEqual(profileRes.body.roles, ["participante"]);
+    assert.equal(profileRes.body.hasCompletedQuestionnaire, false);
+    assert.ok(profileRes.body.createdAt);
+    assert.ok(profileRes.body.updatedAt);
+  });
+
+  await t.test("K04.3: PATCH /profile exige autenticação (401 sem token)", async () => {
+    const unauthPatch = await apiRequest("/profile", {
+      method: "PATCH",
+      body: { name: "Tentativa Não Autenticada" },
+    });
+    assert.equal(unauthPatch.status, 401);
+  });
+
+  await t.test("K04.4: PATCH /profile valida formato de nome e rejeita campos proibidos", async () => {
+    const user = await registerTestParticipant("k04-validations");
+
+    // Rejeita nome muito curto (<2)
+    const shortRes = await apiRequest("/profile", {
+      method: "PATCH",
+      token: user.accessToken,
+      body: { name: "A" },
+    });
+    assert.equal(shortRes.status, 400);
+
+    // Rejeita nome em branco
+    const emptyRes = await apiRequest("/profile", {
+      method: "PATCH",
+      token: user.accessToken,
+      body: { name: "    " },
+    });
+    assert.equal(emptyRes.status, 400);
+
+    // Rejeita alteração de email ou roles
+    const tamperRes = await apiRequest("/profile", {
+      method: "PATCH",
+      token: user.accessToken,
+      body: { name: "Nome Valido", email: "novo@arenago.test" },
+    });
+    assert.equal(tamperRes.status, 400);
+
+    const rolesTamperRes = await apiRequest("/profile", {
+      method: "PATCH",
+      token: user.accessToken,
+      body: { name: "Nome Valido", roles: ["admin"] },
+    });
+    assert.equal(rolesTamperRes.status, 400);
+  });
+
+  await t.test("K04.5: PATCH /profile atualiza nome com sucesso e reflete no banco", async () => {
+    const user = await registerTestParticipant("k04-update-success");
+
+    const updateRes = await apiRequest<{
+      message: string;
+      user: {
+        id: string;
+        name: string;
+        email: string;
+        roles: string[];
+        hasCompletedQuestionnaire: boolean;
+      };
+    }>("/profile", {
+      method: "PATCH",
+      token: user.accessToken,
+      body: { name: "  Kaled Novo Nome  " },
+    });
+
+    assert.equal(updateRes.status, 200);
+    assert.equal(updateRes.body.message, "Perfil atualizado com sucesso.");
+    assert.equal(updateRes.body.user.name, "Kaled Novo Nome");
+    assert.equal(updateRes.body.user.id, user.userId);
+
+    // Confirmar que o GET subsequente reflete o nome atualizado
+    const getRes = await apiRequest<{ name: string }>("/profile", {
+      token: user.accessToken,
+    });
+    assert.equal(getRes.status, 200);
+    assert.equal(getRes.body.name, "Kaled Novo Nome");
+
+    // Confirmar diretamente no banco
+    const dbCheck = await pool.query<{ name: string }>(
+      `SELECT name FROM users WHERE id = $1`,
+      [user.userId],
+    );
+    assert.equal(dbCheck.rows[0].name, "Kaled Novo Nome");
+  });
+
+  await t.test("K04.6: Isolamento de usuários em PATCH /profile", async () => {
+    const userA = await registerTestParticipant("k04-user-a");
+    const userB = await registerTestParticipant("k04-user-b");
+
+    // User A atualiza seu próprio nome
+    await apiRequest("/profile", {
+      method: "PATCH",
+      token: userA.accessToken,
+      body: { name: "Nome Atualizado A" },
+    });
+
+    // Perfil de B deve continuar inalterado
+    const getB = await apiRequest<{ name: string }>("/profile", {
+      token: userB.accessToken,
+    });
+    assert.equal(getB.body.name, "Participante k04-user-b");
+  });
 });

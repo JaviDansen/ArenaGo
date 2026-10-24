@@ -14,6 +14,7 @@ import {
   isValidGregorianCivilDate,
   MARKET_INTEREST_OPTIONS,
   MARKET_KNOWLEDGE_OPTIONS,
+  validateUpdateProfileDto,
   validateUpsertQuestionnaireDto,
 } from "../../src/profile";
 
@@ -217,6 +218,85 @@ test("Profile & Games Unit Suite: DTOs, calendário civil gregoriano e catálogo
         err instanceof ProblemException &&
         err.getStatus() === 400 &&
         err.problem.invalidParams?.some((p) => p.name === "limit"),
+    );
+  });
+
+  await t.test("validateUpdateProfileDto valida name (2..150) e rejeita propriedades não permitidas", () => {
+    const valid = validateUpdateProfileDto({ name: "  Kaled Ferreira  " });
+    assert.deepEqual(valid, { name: "Kaled Ferreira" });
+
+    // Nome válido de 2 caracteres
+    assert.deepEqual(validateUpdateProfileDto({ name: "Bo" }), { name: "Bo" });
+
+    // Nome válido de 150 caracteres
+    const long150 = "A".repeat(150);
+    assert.deepEqual(validateUpdateProfileDto({ name: long150 }), { name: long150 });
+
+    // Rejeita payload inválido
+    assert.throws(
+      () => validateUpdateProfileDto(null),
+      (err: unknown) => err instanceof ProblemException && err.getStatus() === 400,
+    );
+    assert.throws(
+      () => validateUpdateProfileDto("string"),
+      (err: unknown) => err instanceof ProblemException && err.getStatus() === 400,
+    );
+
+    // Rejeita name ausente ou vazio
+    assert.throws(
+      () => validateUpdateProfileDto({}),
+      (err: unknown) =>
+        err instanceof ProblemException &&
+        err.getStatus() === 400 &&
+        err.problem.invalidParams?.some((p) => p.name === "name"),
+    );
+    assert.throws(
+      () => validateUpdateProfileDto({ name: "   " }),
+      (err: unknown) =>
+        err instanceof ProblemException &&
+        err.getStatus() === 400 &&
+        err.problem.invalidParams?.some((p) => p.name === "name"),
+    );
+
+    // Rejeita name < 2 caracteres
+    assert.throws(
+      () => validateUpdateProfileDto({ name: "A" }),
+      (err: unknown) =>
+        err instanceof ProblemException &&
+        err.getStatus() === 400 &&
+        err.problem.invalidParams?.some((p) => p.name === "name"),
+    );
+
+    // Rejeita name > 150 caracteres
+    assert.throws(
+      () => validateUpdateProfileDto({ name: "A".repeat(151) }),
+      (err: unknown) =>
+        err instanceof ProblemException &&
+        err.getStatus() === 400 &&
+        err.problem.invalidParams?.some((p) => p.name === "name"),
+    );
+
+    // Rejeita campos proibidos como email, roles, userId, etc.
+    assert.throws(
+      () => validateUpdateProfileDto({ name: "Kaled", email: "hacker@example.com" }),
+      (err: unknown) =>
+        err instanceof ProblemException &&
+        err.getStatus() === 400 &&
+        err.problem.invalidParams?.some((p) => p.name === "email"),
+    );
+    assert.throws(
+      () => validateUpdateProfileDto({ name: "Kaled", roles: ["admin"] }),
+      (err: unknown) =>
+        err instanceof ProblemException &&
+        err.getStatus() === 400 &&
+        err.problem.invalidParams?.some((p) => p.name === "roles"),
+    );
+    assert.throws(
+      () => validateUpdateProfileDto({ name: "Kaled", userId: "abc" }),
+      (err: unknown) =>
+        err instanceof ProblemException &&
+        err.getStatus() === 400 &&
+        err.problem.invalidParams?.some((p) => p.name === "userId"),
     );
   });
 });

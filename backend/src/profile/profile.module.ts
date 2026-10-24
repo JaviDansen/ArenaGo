@@ -4,11 +4,13 @@ import { DatabaseModule } from "../database/database.module";
 import { GamesModule } from "../games/games.module";
 import { ProfileQuestionnaireController } from "./profile-questionnaire.controller";
 import { ProfileQuestionnaireService } from "./profile-questionnaire.service";
+import { ProfileController } from "./profile.controller";
+import { ProfileService } from "./profile.service";
 
 @Module({
   imports: [DatabaseModule, AuthModule, GamesModule],
-  controllers: [ProfileQuestionnaireController],
-  providers: [ProfileQuestionnaireService],
-  exports: [ProfileQuestionnaireService],
+  controllers: [ProfileController, ProfileQuestionnaireController],
+  providers: [ProfileService, ProfileQuestionnaireService],
+  exports: [ProfileService, ProfileQuestionnaireService],
 })
 export class ProfileModule {}

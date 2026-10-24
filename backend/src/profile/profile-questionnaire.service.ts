@@ -34,16 +34,16 @@ export class ProfileQuestionnaireService implements OnModuleInit {
   /**
    * Garante de maneira idempotente que a versão publicada inicial (`1.0.0`)
    * do questionário exista em `questionnaire_versions` sem sobrescrever
-   * retroativamente definições já publicadas.
+   * retroativamente definições já existentes e sem reativar uma versão
+   * inativada administrativamente (respeitando escolhas de publicação).
    */
   async seedPublishedQuestionnaireVersion(
     db: Pool | PoolClient = this.pool,
-  ): Promise<{ id: string; version: string }> {
+  ): Promise<{ id: string; version: string } | null> {
     const insertRes = await db.query<{ id: string; version: string }>(
       `INSERT INTO questionnaire_versions (id, version, definition, activated_at, created_at)
        VALUES ($1, $2, $3::jsonb, clock_timestamp(), clock_timestamp())
-       ON CONFLICT (version) DO UPDATE
-         SET activated_at = COALESCE(questionnaire_versions.activated_at, EXCLUDED.activated_at)
+       ON CONFLICT (version) DO NOTHING
        RETURNING id, version`,
       [
         randomUUID(),
@@ -52,7 +52,16 @@ export class ProfileQuestionnaireService implements OnModuleInit {
       ],
     );
 
-    return insertRes.rows[0];
+    if ((insertRes.rowCount ?? 0) > 0) {
+      return insertRes.rows[0];
+    }
+
+    // Se já existia, não altera seu activated_at (preserva estado inativo/ativo)
+    const existing = await db.query<{ id: string; version: string }>(
+      `SELECT id, version FROM questionnaire_versions WHERE version = $1`,
+      [DEFAULT_QUESTIONNAIRE_VERSION],
+    );
+    return existing.rows[0] ?? null;
   }
 
   /**
@@ -346,7 +355,9 @@ export class ProfileQuestionnaireService implements OnModuleInit {
 
     if ((anyVersionRes.rows[0]?.count ?? 0) === 0) {
       const seeded = await this.seedPublishedQuestionnaireVersion(client);
-      return seeded.id;
+      if (seeded) {
+        return seeded.id;
+      }
     }
 
     throw new ProblemException({
