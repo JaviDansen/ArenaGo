@@ -1,12 +1,18 @@
 import { Inject, Injectable } from "@nestjs/common";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { DRIZZLE_DATABASE } from "../database/database.module";
 import type { DatabaseExecutor, DatabaseTransactionExecutor } from "../database/database-executor";
 import * as schema from "../database/schema";
 import { EventsService } from "../events/events.service";
 import type { JoinEligibilityResult } from "./join-eligibility";
-import { combineJoinEligibility } from "./join-eligibility";
+import { combineJoinEligibility, recombineJoinEligibilityWithAvailability } from "./join-eligibility";
+import type { JsonValue } from "./join-idempotency";
+import {
+  completeIdempotencyOperationWithTx,
+  reserveJoinIntentWithTx,
+} from "./join-idempotency";
 
 type ParticipationsDatabase = NodePgDatabase<typeof schema>;
 type ParticipationsTransaction = DatabaseTransactionExecutor;
@@ -15,6 +21,26 @@ type ParticipationsTransaction = DatabaseTransactionExecutor;
 export interface TransactionalJoinEligibilityEvaluation {
   eligibility: JoinEligibilityResult;
   evaluatedAt: Date;
+}
+
+export interface CreateParticipationInput {
+  userId: string;
+  eventId: string;
+  idempotencyKey: string;
+  expiresAt: Date;
+}
+
+export type CreateParticipationResult =
+  | { kind: "created"; httpStatus: 201; participationId: string; idempotencyResult: JsonValue | null }
+  | { kind: "replay"; httpStatus: number; participationId: string | null; idempotencyResult: JsonValue | null }
+  | { kind: "request_conflict"; operationId: string }
+  | { kind: "in_progress"; operationId: string }
+  | { kind: "blocked"; eligibility: JoinEligibilityResult };
+
+class JoinEligibilityRollback extends Error {
+  constructor(readonly eligibility: JoinEligibilityResult) {
+    super("Elegibilidade de ingresso não atendida.");
+  }
 }
 
 /** Consultas informativas sobre pré-requisitos de ingresso, sem criar participação. */
@@ -44,7 +70,7 @@ export class ParticipationsService {
     const [eventAvailability, userRows, profileRows, gameRows, currentParticipationRows] = await Promise.all([
       this.eventsService.evaluateEventAvailabilityById(eventId, at),
       this.database
-        .select({ id: schema.users.id })
+        .select({ id: schema.users.id, isActive: schema.users.isActive })
         .from(schema.users)
         .where(eq(schema.users.id, userId))
         .limit(1),
@@ -87,6 +113,7 @@ export class ParticipationsService {
     return combineJoinEligibility({
       eventAvailability,
       userExists: userRows.length > 0,
+      userActive: userRows[0]?.isActive ?? false,
       hasCompletedQuestionnaire,
       questionnaireVersionValid,
       hasSelectedGames: gameRows.length > 0,
@@ -139,7 +166,7 @@ export class ParticipationsService {
       .limit(1);
 
     const userRows = await tx
-      .select({ id: schema.users.id })
+      .select({ id: schema.users.id, isActive: schema.users.isActive })
       .from(schema.users)
       .where(eq(schema.users.id, userId))
       .for("update")
@@ -198,6 +225,7 @@ export class ParticipationsService {
     const eligibility = combineJoinEligibility({
       eventAvailability,
       userExists: userRows.length > 0,
+      userActive: userRows[0]?.isActive ?? false,
       hasCompletedQuestionnaire: Boolean(profile?.completedAt),
       questionnaireVersionValid: Boolean(
         profile?.questionnaireVersionId && profile.questionnaireActivatedAt,
@@ -207,5 +235,152 @@ export class ParticipationsService {
     });
 
     return { eligibility, evaluatedAt };
+  }
+
+  /** Cria participação, snapshot e resposta idempotente em uma única transação READ COMMITTED. */
+  async createParticipation(input: CreateParticipationInput): Promise<CreateParticipationResult> {
+    try {
+      return await this.database.transaction(async (tx): Promise<CreateParticipationResult> => {
+        const reservation = await reserveJoinIntentWithTx(tx, {
+          actorUserId: input.userId,
+          eventId: input.eventId,
+          idempotencyKey: input.idempotencyKey,
+          expiresAt: input.expiresAt,
+        });
+
+        if (reservation.kind === "replay") {
+          return {
+            kind: "replay",
+            httpStatus: reservation.httpStatus,
+            participationId: reservation.resultReference,
+            idempotencyResult: reservation.resultPayload,
+          };
+        }
+        if (reservation.kind === "request_conflict" || reservation.kind === "in_progress") {
+          return reservation;
+        }
+
+        const evaluated = await this.evaluateJoinEligibilityWithTx(tx, input.userId, input.eventId);
+        if (!evaluated.eligibility.eligible) throw new JoinEligibilityRollback(evaluated.eligibility);
+
+        const [profile] = await tx
+          .select({
+            gender: schema.profiles.gender,
+            otherGender: schema.profiles.otherGender,
+            education: schema.profiles.education,
+            marketKnowledge: schema.profiles.marketKnowledge,
+            marketInterest: schema.profiles.marketInterest,
+            questionnaireVersionId: schema.profiles.questionnaireVersionId,
+          })
+          .from(schema.profiles)
+          .where(eq(schema.profiles.userId, input.userId))
+          .limit(1);
+        if (!profile) throw new JoinEligibilityRollback(evaluated.eligibility);
+
+        // Critério estável: nome canônico em collation C e UUID como desempate.
+        const gameRows = await tx
+          .select({ gameId: schema.games.id, name: schema.games.name, isCurated: schema.games.isCurated })
+          .from(schema.userGames)
+          .innerJoin(schema.games, eq(schema.userGames.gameId, schema.games.id))
+          .where(eq(schema.userGames.userId, input.userId))
+          .orderBy(sql`${schema.games.name} COLLATE "C"`, asc(schema.games.id));
+
+        const [decision] = await tx.execute<{ decisionAtMs: number }>(
+          sql`SELECT (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::double precision AS "decisionAtMs"`,
+        ).then((result) => result.rows);
+        const decisionAtMs = decision?.decisionAtMs;
+        if (typeof decisionAtMs !== "number" || !Number.isFinite(decisionAtMs)) {
+          throw new Error("PostgreSQL não retornou o instante decisivo do ingresso.");
+        }
+        const decisionAt = new Date(decisionAtMs);
+        if (!Number.isFinite(decisionAt.getTime())) {
+          throw new Error("PostgreSQL retornou um instante decisivo fora do intervalo de Date.");
+        }
+
+        // Revalida estado e corte oficial após as leituras que podem aguardar locks.
+        const finalAvailability = await this.eventsService.evaluateEventAvailabilityById(
+          input.eventId,
+          decisionAt,
+          tx satisfies DatabaseExecutor,
+        );
+        if (!finalAvailability.eventExists || !finalAvailability.eventAcceptingNewEntries) {
+          throw new JoinEligibilityRollback(
+            recombineJoinEligibilityWithAvailability(evaluated.eligibility, finalAvailability),
+          );
+        }
+
+        const [event] = await tx
+          .select({ externalQueueEnabled: schema.events.externalQueueEnabled })
+          .from(schema.events)
+          .where(eq(schema.events.id, input.eventId))
+          .limit(1);
+        if (!event) throw new JoinEligibilityRollback(evaluated.eligibility);
+
+        let externalQueueOrder: bigint | null = null;
+        if (event.externalQueueEnabled) {
+          const [updatedEvent] = await tx
+            .update(schema.events)
+            .set({ externalLastOrder: sql`${schema.events.externalLastOrder} + 1` })
+            .where(eq(schema.events.id, input.eventId))
+            .returning({ externalLastOrder: schema.events.externalLastOrder });
+          if (!updatedEvent) throw new Error("O evento bloqueado desapareceu durante o ingresso.");
+          externalQueueOrder = updatedEvent.externalLastOrder;
+        }
+
+        const participationId = randomUUID();
+        const status = event.externalQueueEnabled ? "waiting" : "active";
+        await tx.insert(schema.participations).values({
+          id: participationId,
+          userId: input.userId,
+          eventId: input.eventId,
+          status,
+          joinedAt: decisionAt,
+          externalQueueOrder,
+          arenaEnteredAt: event.externalQueueEnabled ? null : decisionAt,
+          finishedAt: null,
+          finishReason: null,
+          currentQueueEntryId: null,
+        });
+
+        const answers: JsonValue = {
+          schemaVersion: 1,
+          gender: profile.gender,
+          otherGender: profile.otherGender,
+          education: profile.education,
+          marketKnowledge: profile.marketKnowledge,
+          marketInterest: profile.marketInterest,
+        };
+        const gamesSnapshot: JsonValue = gameRows.map((game) => ({
+          gameId: game.gameId,
+          name: game.name,
+          isCurated: game.isCurated,
+        }));
+        await tx.insert(schema.participationProfileSnapshots).values({
+          participationId,
+          questionnaireVersionId: profile.questionnaireVersionId,
+          answers,
+          gamesSnapshot,
+          ageBandAtEvent: null,
+          capturedAt: decisionAt,
+        });
+
+        const completed = await completeIdempotencyOperationWithTx(tx, reservation.operationId, {
+          httpStatus: 201,
+          resultReference: participationId,
+          resultPayload: { participationId },
+        });
+        return {
+          kind: "created",
+          httpStatus: completed.httpStatus as 201,
+          participationId,
+          idempotencyResult: completed.resultPayload,
+        };
+      }, { isolationLevel: "read committed" });
+    } catch (error) {
+      if (error instanceof JoinEligibilityRollback) {
+        return { kind: "blocked", eligibility: error.eligibility };
+      }
+      throw error;
+    }
   }
 }

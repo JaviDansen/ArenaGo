@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { EventAvailabilityResult } from "../../src/events/event-availability";
-import { combineJoinEligibility } from "../../src/participations/join-eligibility";
+import {
+  combineJoinEligibility,
+  recombineJoinEligibilityWithAvailability,
+} from "../../src/participations/join-eligibility";
 
 function availableEvent(): Extract<EventAvailabilityResult, { eventExists: true }> {
   return {
@@ -27,6 +30,7 @@ function eligibleFacts() {
   return {
     eventAvailability: availableEvent(),
     userExists: true,
+    userActive: true,
     hasCompletedQuestionnaire: true,
     questionnaireVersionValid: true,
     hasSelectedGames: true,
@@ -96,11 +100,50 @@ test("blocks a user with a current participation", () => {
   assert.deepEqual(result.blockingReasons, ["PARTICIPATION_ALREADY_CURRENT"]);
 });
 
+test("blocks an inactive user without changing the public result shape", () => {
+  const result = combineJoinEligibility({ ...eligibleFacts(), userActive: false });
+  assert.equal(result.eligible, false);
+  assert.deepEqual(result.blockingReasons, ["USER_INACTIVE"]);
+  assert.equal("userActive" in result, false);
+  assert.deepEqual(Object.keys(result.checks), [
+    "eventAcceptingNewEntries",
+    "hasCompletedQuestionnaire",
+    "questionnaireVersionValid",
+    "hasSelectedGames",
+    "hasNoCurrentParticipation",
+  ]);
+});
+
+test("final blocked availability cannot produce an eligible response", () => {
+  const previouslyEligible = combineJoinEligibility(eligibleFacts());
+  const finalAvailability: EventAvailabilityResult = {
+    ...availableEvent(),
+    ready: false,
+    eventAcceptingNewEntries: false,
+    checks: {
+      ...availableEvent().checks,
+      hasAuthorizedStaff: false,
+      hasOperationalCapacity: false,
+    },
+    missing: ["EVENT_HAS_NO_AUTHORIZED_STAFF"],
+  };
+
+  const finalResult = recombineJoinEligibilityWithAvailability(previouslyEligible, finalAvailability);
+  assert.equal(finalResult.eligible, false);
+  assert.equal(finalResult.checks.eventAcceptingNewEntries, false);
+  assert.deepEqual(finalResult.blockingReasons, ["EVENT_NOT_READY"]);
+  assert.equal(finalResult.checks.hasCompletedQuestionnaire, true);
+  assert.equal(finalResult.checks.questionnaireVersionValid, true);
+  assert.equal(finalResult.checks.hasSelectedGames, true);
+  assert.equal(finalResult.checks.hasNoCurrentParticipation, true);
+});
+
 test("preserves multiple independent impediments and explicit event absence", () => {
   const result = combineJoinEligibility({
     ...eligibleFacts(),
     eventAvailability: { eventExists: false },
     userExists: false,
+    userActive: false,
     hasCompletedQuestionnaire: false,
     questionnaireVersionValid: false,
     hasSelectedGames: false,

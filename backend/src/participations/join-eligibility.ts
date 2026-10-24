@@ -7,6 +7,7 @@ export type JoinEligibilityBlockingReason =
   | "EVENT_NOT_READY"
   | "EVENT_REGISTRATION_CLOSED"
   | "USER_NOT_FOUND"
+  | "USER_INACTIVE"
   | "PROFILE_INCOMPLETE"
   | "PARTICIPATION_ALREADY_CURRENT";
 
@@ -14,6 +15,7 @@ export type JoinEligibilityBlockingReason =
 export interface JoinEligibilityFacts {
   eventAvailability: EventAvailabilityResult;
   userExists: boolean;
+  userActive: boolean;
   hasCompletedQuestionnaire: boolean;
   questionnaireVersionValid: boolean;
   hasSelectedGames: boolean;
@@ -74,6 +76,7 @@ export function combineJoinEligibility(facts: JoinEligibilityFacts): JoinEligibi
     && facts.questionnaireVersionValid
     && facts.hasSelectedGames;
   if (!facts.userExists) blockingReasons.add("USER_NOT_FOUND");
+  if (facts.userExists && !facts.userActive) blockingReasons.add("USER_INACTIVE");
   if (!profileComplete) blockingReasons.add("PROFILE_INCOMPLETE");
   if (facts.hasCurrentParticipation) {
     blockingReasons.add("PARTICIPATION_ALREADY_CURRENT");
@@ -92,4 +95,20 @@ export function combineJoinEligibility(facts: JoinEligibilityFacts): JoinEligibi
     },
     blockingReasons: [...blockingReasons],
   };
+}
+
+/** Recalcula a resposta com uma disponibilidade final e conserva os fatos lidos sob lock do usuário. */
+export function recombineJoinEligibilityWithAvailability(
+  eligibility: JoinEligibilityResult,
+  eventAvailability: EventAvailabilityResult,
+): JoinEligibilityResult {
+  return combineJoinEligibility({
+    eventAvailability,
+    userExists: eligibility.userExists,
+    userActive: eligibility.userExists && !eligibility.blockingReasons.includes("USER_INACTIVE"),
+    hasCompletedQuestionnaire: eligibility.checks.hasCompletedQuestionnaire,
+    questionnaireVersionValid: eligibility.checks.questionnaireVersionValid,
+    hasSelectedGames: eligibility.checks.hasSelectedGames,
+    hasCurrentParticipation: !eligibility.checks.hasNoCurrentParticipation,
+  });
 }
