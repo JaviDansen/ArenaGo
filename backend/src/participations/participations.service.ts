@@ -37,6 +37,19 @@ export type CreateParticipationResult =
   | { kind: "in_progress"; operationId: string }
   | { kind: "blocked"; eligibility: JoinEligibilityResult };
 
+export type ParticipationStatus = "waiting" | "active" | "finished" | "canceled";
+
+export interface ParticipationState {
+  id: string;
+  eventId: string;
+  status: ParticipationStatus;
+  joinedAt: Date;
+  arenaEnteredAt: Date | null;
+  finishedAt: Date | null;
+  finishReason: string | null;
+  externalQueue: { position: number; observedAt: Date } | null;
+}
+
 class JoinEligibilityRollback extends Error {
   constructor(readonly eligibility: JoinEligibilityResult) {
     super("Elegibilidade de ingresso não atendida.");
@@ -50,6 +63,89 @@ export class ParticipationsService {
     @Inject(DRIZZLE_DATABASE) private readonly database: ParticipationsDatabase,
     private readonly eventsService: EventsService,
   ) {}
+
+  /** Consulta a única participação corrente do usuário e sua posição externa observada. */
+  async getCurrentParticipation(userId: string): Promise<ParticipationState | null> {
+    return this.findParticipationState(userId);
+  }
+
+  /** Consulta uma participação apenas quando ela pertence ao usuário informado. */
+  async getParticipationById(
+    userId: string,
+    participationId: string,
+  ): Promise<ParticipationState | null> {
+    return this.findParticipationState(userId, participationId);
+  }
+
+  /** Uma única instrução fornece estado, posição e relógio sob o mesmo snapshot READ COMMITTED. */
+  private async findParticipationState(
+    userId: string,
+    participationId?: string,
+  ): Promise<ParticipationState | null> {
+    const selection = {
+      id: schema.participations.id,
+      eventId: schema.participations.eventId,
+      status: schema.participations.status,
+      joinedAt: schema.participations.joinedAt,
+      arenaEnteredAt: schema.participations.arenaEnteredAt,
+      finishedAt: schema.participations.finishedAt,
+      finishReason: schema.participations.finishReason,
+      externalPosition: sql<string | null>`CASE WHEN ${schema.participations.status} = 'waiting' THEN (
+        SELECT COUNT(*)::text
+        FROM participations AS queue_row
+        WHERE queue_row.event_id = ${schema.participations.eventId}
+          AND queue_row.status = 'waiting'
+          AND queue_row.external_queue_order <= ${schema.participations.externalQueueOrder}
+      ) ELSE NULL END`,
+      observedAtMs: sql<number>`(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::double precision`,
+    };
+    const query = this.database.select(selection).from(schema.participations);
+    const [row] = participationId
+      ? await query.where(and(
+        eq(schema.participations.userId, userId),
+        eq(schema.participations.id, participationId),
+      )).limit(1)
+      : await query.where(and(
+        eq(schema.participations.userId, userId),
+        inArray(schema.participations.status, ["waiting", "active"]),
+      )).limit(1);
+
+    if (!row) return null;
+    if (row.status !== "waiting" && row.status !== "active"
+      && row.status !== "finished" && row.status !== "canceled") {
+      throw new Error("A participação persistida possui um estado desconhecido.");
+    }
+
+    let externalQueue: ParticipationState["externalQueue"] = null;
+    if (row.status === "waiting") {
+      if (!row.externalPosition || !/^[1-9]\d*$/.test(row.externalPosition)) {
+        throw new Error("Participação waiting sem posição externa válida no mesmo evento.");
+      }
+      const exactPosition = BigInt(row.externalPosition);
+      if (exactPosition > BigInt(Number.MAX_SAFE_INTEGER)) {
+        throw new Error("A posição externa excede o intervalo seguro do contrato numérico.");
+      }
+      if (!Number.isFinite(row.observedAtMs)) {
+        throw new Error("PostgreSQL não retornou um instante válido para observar a fila externa.");
+      }
+      const observedAt = new Date(row.observedAtMs);
+      if (!Number.isFinite(observedAt.getTime())) {
+        throw new Error("PostgreSQL retornou um instante de fila fora do intervalo de Date.");
+      }
+      externalQueue = { position: Number(exactPosition), observedAt };
+    }
+
+    return {
+      id: row.id,
+      eventId: row.eventId,
+      status: row.status,
+      joinedAt: row.joinedAt,
+      arenaEnteredAt: row.arenaEnteredAt,
+      finishedAt: row.finishedAt,
+      finishReason: row.finishReason,
+      externalQueue,
+    };
+  }
 
   /**
    * Avalia os pré-requisitos de um usuário para ingressar em um evento.
