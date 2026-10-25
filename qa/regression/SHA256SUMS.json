@@ -1,0 +1,97 @@
+{
+  "algorithm": "SHA-256",
+  "referenceCommit": "77381cf00f435f63063ef1d558c932aad5f9c472",
+  "comparison": "Original independent QA package versus organized repository copies; equality is byte-for-byte.",
+  "files": [
+    {
+      "path": "qa/regression/.gitignore",
+      "sourceSha256": "49651f5e00a1ed8d44ea965e657bb7578b5f8d4e227f4988696d762bc7edc33c",
+      "organizedSha256": "49651f5e00a1ed8d44ea965e657bb7578b5f8d4e227f4988696d762bc7edc33c",
+      "identical": true
+    },
+    {
+      "path": "qa/regression/EXECUTION.md",
+      "sourceSha256": "97cde40d23bd2a7ee331621f5c210083f47c792d537310643a60863d3f82fb65",
+      "organizedSha256": "97cde40d23bd2a7ee331621f5c210083f47c792d537310643a60863d3f82fb65",
+      "identical": true
+    },
+    {
+      "path": "qa/regression/README.md",
+      "sourceSha256": "4e85b455bac2c4ae054415b094aa47a9d4c42d515588607b4e4838a7879c61a6",
+      "organizedSha256": "4e85b455bac2c4ae054415b094aa47a9d4c42d515588607b4e4838a7879c61a6",
+      "identical": true
+    },
+    {
+      "path": "qa/regression/helpers/existing-guard.cjs",
+      "sourceSha256": "2041a675822e1d977cff193fcc2db04573ce95d2f35722ed0d56d92c09b7f8ce",
+      "organizedSha256": "2041a675822e1d977cff193fcc2db04573ce95d2f35722ed0d56d92c09b7f8ce",
+      "identical": true
+    },
+    {
+      "path": "qa/regression/helpers/json-reporter.cjs",
+      "sourceSha256": "b1b25a091bf869650e223fd049d6686ed7719770c647fa364dd2efcff694c770",
+      "organizedSha256": "b1b25a091bf869650e223fd049d6686ed7719770c647fa364dd2efcff694c770",
+      "identical": true
+    },
+    {
+      "path": "qa/regression/helpers/react-app.cjs",
+      "sourceSha256": "3e770991a8611b135b57fe0c85aaa2ce8cb838597301ab6d18db0def67cab6eb",
+      "organizedSha256": "3e770991a8611b135b57fe0c85aaa2ce8cb838597301ab6d18db0def67cab6eb",
+      "identical": true
+    },
+    {
+      "path": "qa/regression/helpers/source.cjs",
+      "sourceSha256": "251b46083ce68fd7485dc23190d025c43c9aacc700d76fd4bb3481532985464f",
+      "organizedSha256": "251b46083ce68fd7485dc23190d025c43c9aacc700d76fd4bb3481532985464f",
+      "identical": true
+    },
+    {
+      "path": "qa/regression/package-lock.json",
+      "sourceSha256": "6b369066a250b3fd5b31275f0530ee1ea1ffb750a3787eab84c825e14cf1e7e9",
+      "organizedSha256": "6b369066a250b3fd5b31275f0530ee1ea1ffb750a3787eab84c825e14cf1e7e9",
+      "identical": true
+    },
+    {
+      "path": "qa/regression/package.json",
+      "sourceSha256": "381aefbec3d6a0dbc39bddec69b0fcd5dea9c69785535b20734a9ff2d9af1648",
+      "organizedSha256": "381aefbec3d6a0dbc39bddec69b0fcd5dea9c69785535b20734a9ff2d9af1648",
+      "identical": true
+    },
+    {
+      "path": "qa/regression/run.cjs",
+      "sourceSha256": "f4a37815f0f6d37628bba2397e703d61dfcdc7d9b096c4b0c3af53fa5d796415",
+      "organizedSha256": "f4a37815f0f6d37628bba2397e703d61dfcdc7d9b096c4b0c3af53fa5d796415",
+      "identical": true
+    },
+    {
+      "path": "qa/regression/tests/k03-cleanup.test.cjs",
+      "sourceSha256": "9923eb30df5059a6981545f980c519666cb65669a5a1e15307a58f8c27db502a",
+      "organizedSha256": "9923eb30df5059a6981545f980c519666cb65669a5a1e15307a58f8c27db502a",
+      "identical": true
+    },
+    {
+      "path": "qa/regression/tests/navigation.test.cjs",
+      "sourceSha256": "cea3a2c54ec9bc887f6fd6429affba1f20317fc7088464860bd6373bf61b2e6d",
+      "organizedSha256": "cea3a2c54ec9bc887f6fd6429affba1f20317fc7088464860bd6373bf61b2e6d",
+      "identical": true
+    },
+    {
+      "path": "qa/regression/tests/postgres-guard.test.cjs",
+      "sourceSha256": "6a1d87ef6ef688fdbe7263a47d136480cd86ad0b9acc124f0ff8349415cc56be",
+      "organizedSha256": "6a1d87ef6ef688fdbe7263a47d136480cd86ad0b9acc124f0ff8349415cc56be",
+      "identical": true
+    },
+    {
+      "path": "qa/regression/tests/questionnaire-ui.test.cjs",
+      "sourceSha256": "6dbe8d1e67a0c8d39a28ae808f6fcb8bcea9883fba472373845cf3890a3dc23f",
+      "organizedSha256": "6dbe8d1e67a0c8d39a28ae808f6fcb8bcea9883fba472373845cf3890a3dc23f",
+      "identical": true
+    },
+    {
+      "path": "qa/regression/tests/session-isolation.test.cjs",
+      "sourceSha256": "6f3b204c3db3126d979ee073ce61e1a124fde9fd3cb05f1a81d443fef9d68a87",
+      "organizedSha256": "6f3b204c3db3126d979ee073ce61e1a124fde9fd3cb05f1a81d443fef9d68a87",
+      "identical": true
+    }
+  ]
+}
