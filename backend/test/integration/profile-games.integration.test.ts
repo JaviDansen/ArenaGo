@@ -1195,6 +1195,7 @@ test("K03 Profile Questionnaire & Games Catalog — Integração HTTP + PostgreS
   /* eslint-disable no-unsafe-finally, preserve-caught-error */
   await t.test("K03-F.1: Reinicialização da API jamais reativa versão inativa (activated_at = NULL)", async () => {
     let originalActivatedAt: Date | null = null;
+    let originalReadSuccess = false;
     let primaryError: unknown = null;
     try {
       // 0. Ler o valor original de activated_at para restauração exata
@@ -1202,6 +1203,7 @@ test("K03 Profile Questionnaire & Games Catalog — Integração HTTP + PostgreS
         `SELECT activated_at FROM questionnaire_versions WHERE version = '1.0.0'`,
       );
       originalActivatedAt = origRes.rows[0]?.activated_at ?? null;
+      originalReadSuccess = true;
 
       // 1. Desativar propositalmente a versão 1.0.0
       await pool.query(
@@ -1240,21 +1242,23 @@ test("K03 Profile Questionnaire & Games Catalog — Integração HTTP + PostgreS
       primaryError = err;
       throw err;
     } finally {
-      try {
-        // Restaurar exatamente os valores originais da versão 1.0.0
-        await pool.query(
-          `UPDATE questionnaire_versions SET activated_at = $1 WHERE version = '1.0.0'`,
-          [originalActivatedAt],
-        );
-      } catch (cleanupErr) {
-        if (primaryError) {
-          throw new AggregateError(
-            [primaryError, cleanupErr],
-            `Falha na restauração de K03-F.1: ${(cleanupErr as Error)?.message}`,
-            { cause: primaryError },
+      if (originalReadSuccess) {
+        try {
+          // Restaurar exatamente os valores originais da versão 1.0.0
+          await pool.query(
+            `UPDATE questionnaire_versions SET activated_at = $1 WHERE version = '1.0.0'`,
+            [originalActivatedAt],
           );
+        } catch (cleanupErr) {
+          if (primaryError) {
+            throw new AggregateError(
+              [primaryError, cleanupErr],
+              `Falha na restauração de K03-F.1: ${(cleanupErr as Error)?.message}`,
+              { cause: primaryError },
+            );
+          }
+          throw cleanupErr;
         }
-        throw cleanupErr;
       }
     }
   });
@@ -1264,6 +1268,8 @@ test("K03 Profile Questionnaire & Games Catalog — Integração HTTP + PostgreS
     const customPromotedId = randomUUID();
     const customPromotedName = `Custom Promovido Admin ${randomUUID().slice(0, 6)}`;
     let originalCurated = true;
+    let originalApexReadSuccess = false;
+    let customGameInserted = false;
     let primaryError: unknown = null;
 
     try {
@@ -1272,6 +1278,7 @@ test("K03 Profile Questionnaire & Games Catalog — Integração HTTP + PostgreS
         `SELECT is_curated FROM games WHERE lower(btrim(name)) = lower('Apex Legends')`,
       );
       originalCurated = origApex.rows[0]?.is_curated ?? true;
+      originalApexReadSuccess = true;
 
       // 1. Desmarcar jogo curado ("Apex Legends")
       await pool.query(
@@ -1283,6 +1290,7 @@ test("K03 Profile Questionnaire & Games Catalog — Integração HTTP + PostgreS
         `INSERT INTO games (id, name, is_curated, created_at) VALUES ($1, $2, true, clock_timestamp()) ON CONFLICT DO NOTHING`,
         [customPromotedId, customPromotedName],
       );
+      customGameInserted = true;
 
       // 3. Executar o seed novamente
       await gamesService.seedCuratedGames();
@@ -1303,22 +1311,39 @@ test("K03 Profile Questionnaire & Games Catalog — Integração HTTP + PostgreS
       primaryError = err;
       throw err;
     } finally {
-      try {
-        // Restaurar estado original de Apex Legends e remover fixture inserida
-        await pool.query(
-          `UPDATE games SET is_curated = $1 WHERE lower(btrim(name)) = lower('Apex Legends')`,
-          [originalCurated],
-        );
-        await pool.query(`DELETE FROM games WHERE id = $1`, [customPromotedId]);
-      } catch (cleanupErr) {
+      const cleanupErrors: unknown[] = [];
+      if (originalApexReadSuccess) {
+        try {
+          await pool.query(
+            `UPDATE games SET is_curated = $1 WHERE lower(btrim(name)) = lower('Apex Legends')`,
+            [originalCurated],
+          );
+        } catch (cleanupApexErr) {
+          cleanupErrors.push(cleanupApexErr);
+        }
+      }
+      if (customGameInserted) {
+        try {
+          await pool.query(`DELETE FROM games WHERE id = $1`, [customPromotedId]);
+        } catch (cleanupCustomErr) {
+          cleanupErrors.push(cleanupCustomErr);
+        }
+      }
+      if (cleanupErrors.length > 0) {
         if (primaryError) {
           throw new AggregateError(
-            [primaryError, cleanupErr],
-            `Falha na restauração de K03-F.2: ${(cleanupErr as Error)?.message}`,
+            [primaryError, ...cleanupErrors],
+            `Falha na restauração de K03-F.2: ${(cleanupErrors[0] as Error)?.message}`,
             { cause: primaryError },
           );
         }
-        throw cleanupErr;
+        if (cleanupErrors.length === 1) {
+          throw cleanupErrors[0];
+        }
+        throw new AggregateError(
+          cleanupErrors,
+          "Múltiplas falhas na restauração de K03-F.2",
+        );
       }
     }
   });

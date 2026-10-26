@@ -79,6 +79,78 @@ test("Segurança de banco de dados para testes de integração", async (t) => {
     );
   });
 
+  await t.test("Bloqueia portas não autorizadas na autoridade da URL", () => {
+    assert.throws(
+      () =>
+        assertSafeTestDatabase(
+          "postgresql://postgres:postgres@localhost:8080/arenago_test",
+        ),
+      /porta efetiva "8080" não pertence à allowlist/,
+    );
+    assert.throws(
+      () =>
+        assertSafeTestDatabase(
+          "postgresql://postgres:postgres@127.0.0.1:5433/arenago_test",
+        ),
+      /porta efetiva "5433" não pertence à allowlist/,
+    );
+    assert.throws(
+      () =>
+        assertSafeTestDatabase(
+          "postgresql://postgres:postgres@localhost:443/arenago_test",
+        ),
+      /porta efetiva "443" não pertence à allowlist/,
+    );
+  });
+
+  await t.test("Bloqueia portas não autorizadas ou divergentes via query string", () => {
+    assert.throws(
+      () =>
+        assertSafeTestDatabase(
+          "postgresql://postgres:postgres@localhost:5432/arenago_test?port=8080",
+        ),
+      /Redirecionamento de porta divergente detectado/,
+    );
+    assert.throws(
+      () =>
+        assertSafeTestDatabase(
+          "postgresql://postgres:postgres@localhost:55432/arenago_test?port=5432",
+        ),
+      /Redirecionamento de porta divergente detectado/,
+    );
+    assert.throws(
+      () =>
+        assertSafeTestDatabase(
+          "postgresql://postgres:postgres@localhost/arenago_test?port=443",
+        ),
+      /Redirecionamento de porta divergente detectado/,
+    );
+  });
+
+  await t.test("Bloqueia redirecionamento divergente de host via query string", () => {
+    assert.throws(
+      () =>
+        assertSafeTestDatabase(
+          "postgresql://postgres:postgres@localhost:5432/arenago_test?host=remote.example.com",
+        ),
+      /Redirecionamento de host divergente detectado/,
+    );
+    assert.throws(
+      () =>
+        assertSafeTestDatabase(
+          "postgresql://postgres:postgres@localhost:5432/arenago_test?host=127.0.0.1",
+        ),
+      /Redirecionamento de host divergente detectado/,
+    );
+    assert.throws(
+      () =>
+        assertSafeTestDatabase(
+          "postgresql://postgres:postgres@127.0.0.1:5432/arenago_test?h%6fst=db.neon.tech",
+        ),
+      /Redirecionamento de host divergente detectado/,
+    );
+  });
+
   await t.test("Aprova URLs locais de bancos de teste descartáveis autorizados", () => {
     const valid1 =
       "postgresql://postgres:postgres@localhost:55432/arenago_k03_test";
@@ -91,5 +163,13 @@ test("Segurança de banco de dados para testes de integração", async (t) => {
     const valid3 =
       "postgresql://postgres:postgres@localhost:5432/arenago_test?database=production";
     assert.equal(assertSafeTestDatabase(valid3), valid3);
+
+    const valid4 =
+      "postgresql://postgres:postgres@localhost/arenago_test"; // porta padrão 5432 omitida
+    assert.equal(assertSafeTestDatabase(valid4), valid4);
+
+    const valid5 =
+      "postgresql://postgres:postgres@localhost:5432/arenago_test?port=5432"; // porta idêntica
+    assert.equal(assertSafeTestDatabase(valid5), valid5);
   });
 });
