@@ -1192,14 +1192,16 @@ test("K03 Profile Questionnaire & Games Catalog — Integração HTTP + PostgreS
   // ===========================================================================
   // K03-F: Política de publicação de versões do questionário e seed de catálogo
   // ===========================================================================
+  /* eslint-disable no-unsafe-finally, preserve-caught-error */
   await t.test("K03-F.1: Reinicialização da API jamais reativa versão inativa (activated_at = NULL)", async () => {
     let originalActivatedAt: Date | null = null;
+    let primaryError: unknown = null;
     try {
       // 0. Ler o valor original de activated_at para restauração exata
       const origRes = await pool.query<{ activated_at: Date | null }>(
         `SELECT activated_at FROM questionnaire_versions WHERE version = '1.0.0'`,
       );
-      originalActivatedAt = origRes.rows[0]?.activated_at ?? new Date();
+      originalActivatedAt = origRes.rows[0]?.activated_at ?? null;
 
       // 1. Desativar propositalmente a versão 1.0.0
       await pool.query(
@@ -1234,12 +1236,26 @@ test("K03 Profile Questionnaire & Games Catalog — Integração HTTP + PostgreS
 
       assert.equal(saveRes.status, 422);
       assert.equal((saveRes.body as { code?: string }).code, "QUESTIONNAIRE_VERSION_UNAVAILABLE");
+    } catch (err) {
+      primaryError = err;
+      throw err;
     } finally {
-      // Restaurar exatamente os valores originais da versão 1.0.0
-      await pool.query(
-        `UPDATE questionnaire_versions SET activated_at = $1 WHERE version = '1.0.0'`,
-        [originalActivatedAt],
-      );
+      try {
+        // Restaurar exatamente os valores originais da versão 1.0.0
+        await pool.query(
+          `UPDATE questionnaire_versions SET activated_at = $1 WHERE version = '1.0.0'`,
+          [originalActivatedAt],
+        );
+      } catch (cleanupErr) {
+        if (primaryError) {
+          throw new AggregateError(
+            [primaryError, cleanupErr],
+            `Falha na restauração de K03-F.1: ${(cleanupErr as Error)?.message}`,
+            { cause: primaryError },
+          );
+        }
+        throw cleanupErr;
+      }
     }
   });
 
@@ -1247,8 +1263,16 @@ test("K03 Profile Questionnaire & Games Catalog — Integração HTTP + PostgreS
     const gamesService = app.get(GamesService);
     const customPromotedId = randomUUID();
     const customPromotedName = `Custom Promovido Admin ${randomUUID().slice(0, 6)}`;
+    let originalCurated = true;
+    let primaryError: unknown = null;
 
     try {
+      // 0. Ler o estado original de is_curated para restauração exata
+      const origApex = await pool.query<{ is_curated: boolean }>(
+        `SELECT is_curated FROM games WHERE lower(btrim(name)) = lower('Apex Legends')`,
+      );
+      originalCurated = origApex.rows[0]?.is_curated ?? true;
+
       // 1. Desmarcar jogo curado ("Apex Legends")
       await pool.query(
         `UPDATE games SET is_curated = false WHERE lower(btrim(name)) = lower('Apex Legends')`,
@@ -1275,14 +1299,30 @@ test("K03 Profile Questionnaire & Games Catalog — Integração HTTP + PostgreS
         [customPromotedName],
       );
       assert.equal(customRes.rows[0].is_curated, true);
+    } catch (err) {
+      primaryError = err;
+      throw err;
     } finally {
-      // Restaurar Apex Legends para não poluir testes posteriores
-      await pool.query(
-        `UPDATE games SET is_curated = true WHERE lower(btrim(name)) = lower('Apex Legends')`,
-      );
-      await pool.query(`DELETE FROM games WHERE id = $1`, [customPromotedId]);
+      try {
+        // Restaurar estado original de Apex Legends e remover fixture inserida
+        await pool.query(
+          `UPDATE games SET is_curated = $1 WHERE lower(btrim(name)) = lower('Apex Legends')`,
+          [originalCurated],
+        );
+        await pool.query(`DELETE FROM games WHERE id = $1`, [customPromotedId]);
+      } catch (cleanupErr) {
+        if (primaryError) {
+          throw new AggregateError(
+            [primaryError, cleanupErr],
+            `Falha na restauração de K03-F.2: ${(cleanupErr as Error)?.message}`,
+            { cause: primaryError },
+          );
+        }
+        throw cleanupErr;
+      }
     }
   });
+  /* eslint-enable no-unsafe-finally, preserve-caught-error */
 
   // ===========================================================================
   // K04: API Cadastral de Perfil — GET e PATCH /api/v1/profile

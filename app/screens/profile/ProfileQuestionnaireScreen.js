@@ -124,29 +124,59 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
   const [finishRequested, setFinishRequested] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [saveError, setSaveError] = useState(null);
+  const [hasSavedProfile, setHasSavedProfile] = useState(false);
 
   // Refs de controle de sincronismo, corrida e preservação granular
   const isSubmittingRef = useRef(false);
   const searchRequestIdRef = useRef(0);
+  const catalogRequestIdRef = useRef(0);
   const editedFieldsRef = useRef(new Set());
   const userAddedGamesRef = useRef([]);
+  const userRemovedGamesRef = useRef(new Set());
   const isMountedRef = useRef(true);
   const authRef = useRef(auth);
   authRef.current = auth;
   const currentUserIdRef = useRef(auth?.user?.id);
   currentUserIdRef.current = auth?.user?.id;
 
+  useEffect(() => {
+    if (!hasSavedProfile) return;
+    setHasSavedProfile(false);
+    if (navigation?.reset) {
+      navigation.reset({ index: 0, routes: [{ name: 'MainTabs' }] });
+    } else if (navigation?.replace) {
+      navigation.replace('MainTabs');
+    } else if (navigation?.navigate) {
+      navigation.navigate('MainTabs');
+    }
+  }, [hasSavedProfile, navigation]);
+
   // Redefine estado se o usuario autenticado mudou (isolamento de sessao)
   const lastActiveUserRef = useRef(auth?.user?.id);
   if (lastActiveUserRef.current !== auth?.user?.id) {
     lastActiveUserRef.current = auth?.user?.id;
+    currentUserIdRef.current = auth?.user?.id;
+    searchRequestIdRef.current += 1;
+    catalogRequestIdRef.current += 1;
+    isSubmittingRef.current = false;
     editedFieldsRef.current.clear();
     userAddedGamesRef.current = [];
+    userRemovedGamesRef.current.clear();
+    setCurrentStepIndex(0);
     setBirthDateText('');
     setGender('');
     setOtherGender('');
     setEducation('');
     setQuestionnaireData(INITIAL_QUESTIONNAIRE_DATA);
+    setErrors({});
+    setSaveError(null);
+    setSearchQuery('');
+    setSearchResults([]);
+    setIsSearching(false);
+    setFeedbackMessage(null);
+    setIsSubmitting(false);
+    setFinishRequested(false);
+    setHasSavedProfile(false);
   }
 
   // Sinônimo para compatibilidade com testes anteriores
@@ -178,10 +208,17 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
     // 1. Carrega catálogo do backend (GET /api/v1/games?limit=50)
     setIsCatalogLoading(true);
     setCatalogError(null);
+    const currentCatalogRequestId = ++catalogRequestIdRef.current;
     client
       .get('/games?limit=50')
       .then((res) => {
-        if (!isMountedRef.current) return;
+        if (
+          !isMountedRef.current ||
+          catalogRequestIdRef.current !== currentCatalogRequestId ||
+          currentUserIdRef.current !== requestUserId
+        ) {
+          return;
+        }
         const gameItems = Array.isArray(res?.games) ? res.games : [];
         const backendNames = gameItems
           .map((g) => (typeof g === 'string' ? g : g?.name))
@@ -190,7 +227,13 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
         setIsCatalogLoading(false);
       })
       .catch(() => {
-        if (!isMountedRef.current) return;
+        if (
+          !isMountedRef.current ||
+          catalogRequestIdRef.current !== currentCatalogRequestId ||
+          currentUserIdRef.current !== requestUserId
+        ) {
+          return;
+        }
         setIsCatalogLoading(false);
         setCatalogError('Não foi possível carregar o catálogo de jogos do servidor.');
       });
@@ -220,21 +263,31 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
             }
           }
 
-          // NÃO SOBRESCREVE JOGOS ADICIONADOS PELO USUÁRIO ANTES DO GET
+          // NÃO SOBRESCREVE JOGOS ADICIONADOS PELO USUÁRIO ANTES DO GET E RESPEITA REMOÇÕES
           setQuestionnaireData((prev) => {
             const currentGames = prev.selectedGames || [];
             const serverGames = Array.isArray(res.yourGames) ? res.yourGames : [];
+            const removed = userRemovedGamesRef.current;
+            const filteredServerGames = serverGames.filter(
+              (g) => !removed.has((typeof g === 'string' ? g : g?.name || '').trim().toLowerCase())
+            );
+
             let merged;
             if (currentGames.length === 0) {
-              merged = serverGames;
+              if (editedFieldsRef.current.has('selectedGames')) {
+                merged = [];
+              } else {
+                merged = filteredServerGames;
+              }
             } else {
               const seen = new Set();
               merged = [];
-              for (const g of [...currentGames, ...serverGames]) {
-                const lower = g.trim().toLowerCase();
+              for (const g of [...currentGames, ...filteredServerGames]) {
+                const name = typeof g === 'string' ? g : g?.name || '';
+                const lower = name.trim().toLowerCase();
                 if (!seen.has(lower)) {
                   seen.add(lower);
-                  merged.push(g.trim());
+                  merged.push(name.trim());
                 }
               }
             }
@@ -348,6 +401,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
     // Invalida imediatamente requisições de busca anteriores
     searchRequestIdRef.current += 1;
     const currentRequestId = searchRequestIdRef.current;
+    const searchUserId = auth?.user?.id;
 
     const trimmed = text.trim();
     if (!trimmed) {
@@ -356,9 +410,11 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
       return;
     }
 
+    // Limpa imediatamente resultados de buscas antigas para não ficarem selecionáveis durante a nova busca
+    setSearchResults([]);
+
     const client = auth?.httpClient;
     if (!client) {
-      setSearchResults([]);
       setIsSearching(false);
       return;
     }
@@ -368,7 +424,11 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
     client
       .get(`/games?query=${encodeURIComponent(trimmed)}&limit=20`)
       .then((res) => {
-        if (!isMountedRef.current || searchRequestIdRef.current !== currentRequestId) {
+        if (
+          !isMountedRef.current ||
+          searchRequestIdRef.current !== currentRequestId ||
+          currentUserIdRef.current !== searchUserId
+        ) {
           return;
         }
         const items = Array.isArray(res?.games) ? res.games : [];
@@ -379,7 +439,11 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
         setIsSearching(false);
       })
       .catch(() => {
-        if (!isMountedRef.current || searchRequestIdRef.current !== currentRequestId) {
+        if (
+          !isMountedRef.current ||
+          searchRequestIdRef.current !== currentRequestId ||
+          currentUserIdRef.current !== searchUserId
+        ) {
           return;
         }
         setIsSearching(false);
@@ -392,6 +456,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
     if (!gameName) return;
     const trimmed = gameName.trim();
     if (!trimmed) return;
+    userRemovedGamesRef.current.delete(trimmed.toLowerCase());
 
     // Prevenção de duplicações: normaliza espaços e compara sem distinção de maiúsculas/minúsculas
     const isAlreadySelected = (questionnaireData.selectedGames || []).some(
@@ -437,10 +502,15 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
   function handleRemoveGame(gameToRemove) {
     markFieldEdited('selectedGames');
     markUserInteracted();
+    const lower = gameToRemove.trim().toLowerCase();
+    userRemovedGamesRef.current.add(lower);
+    userAddedGamesRef.current = userAddedGamesRef.current.filter(
+      (g) => g.trim().toLowerCase() !== lower
+    );
     setQuestionnaireData((prev) => ({
       ...prev,
       selectedGames: (prev.selectedGames || []).filter(
-        (g) => g.trim().toLowerCase() !== gameToRemove.trim().toLowerCase()
+        (g) => g.trim().toLowerCase() !== lower
       ),
     }));
 
@@ -551,16 +621,13 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
           void auth.fetchCurrentUser().catch(() => undefined);
         }
 
-        if (navigation.reset) {
-          navigation.reset({ index: 0, routes: [{ name: 'MainTabs' }] });
-        } else if (navigation.replace) {
-          navigation.replace('MainTabs');
-        } else if (navigation.navigate) {
-          navigation.navigate('MainTabs');
-        }
+        setHasSavedProfile(true);
       })
       .catch((saveErr) => {
         if (!isMountedRef.current) return;
+        if (authRef.current?.user?.id !== submittingUserId || !authRef.current?.isAuthenticated) {
+          return;
+        }
         if (saveErr?.fieldErrors) {
           setErrors((prev) => ({ ...prev, ...saveErr.fieldErrors }));
         }
@@ -571,7 +638,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
         setSaveError(errorDetail);
       })
       .finally(() => {
-        if (isMountedRef.current) {
+        if (isMountedRef.current && authRef.current?.user?.id === submittingUserId) {
           isSubmittingRef.current = false;
           setIsSubmitting(false);
         }

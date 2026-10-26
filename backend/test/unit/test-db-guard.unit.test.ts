@@ -46,6 +46,20 @@ test("Segurança de banco de dados para testes de integração", async (t) => {
         ),
       /SEGURANÇA BLOQUEADA/,
     );
+    assert.throws(
+      () =>
+        assertSafeTestDatabase(
+          "postgresql://user:pass@postgres/arenago_test",
+        ),
+      /SEGURANÇA BLOQUEADA/,
+    );
+    assert.throws(
+      () =>
+        assertSafeTestDatabase(
+          "postgresql://user:pass@arenago-local-pg/arenago_test",
+        ),
+      /SEGURANÇA BLOQUEADA/,
+    );
   });
 
   await t.test("Bloqueia banco de dados local que não contém 'test' no nome", () => {
@@ -54,14 +68,14 @@ test("Segurança de banco de dados para testes de integração", async (t) => {
         assertSafeTestDatabase(
           "postgresql://postgres:postgres@localhost:55432/arenago_prod",
         ),
-      /não contém 'test' em seu nome/,
+      /SEGURANÇA BLOQUEADA/,
     );
     assert.throws(
       () =>
         assertSafeTestDatabase(
           "postgresql://postgres:postgres@127.0.0.1:55432/arenago_development",
         ),
-      /não contém 'test' em seu nome/,
+      /SEGURANÇA BLOQUEADA/,
     );
   });
 
@@ -75,7 +89,7 @@ test("Segurança de banco de dados para testes de integração", async (t) => {
     assert.equal(assertSafeTestDatabase(valid2), valid2);
 
     const valid3 =
-      "postgresql://postgres:postgres@postgres:5432/arenago_descartavel";
+      "postgresql://postgres:postgres@localhost:5432/arenago_test?database=production";
     assert.equal(assertSafeTestDatabase(valid3), valid3);
   });
 });
