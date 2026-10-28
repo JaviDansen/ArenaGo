@@ -39,6 +39,7 @@ export function AuthProvider({
     user: snapshot.user,
     accessToken: manager.getAccessToken(),
     getAccessToken: manager.getAccessToken,
+    getSessionEpoch: manager.getSessionEpoch,
     isAuthenticated: snapshot.isAuthenticated,
     isInitializing: snapshot.isInitializing,
     sessionStatus: snapshot.sessionStatus,

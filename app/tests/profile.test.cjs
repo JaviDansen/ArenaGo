@@ -6,47 +6,69 @@ const birthDate = loadModule('utils/birthDate.js', require).exports;
 const { getProfileViewData } = loadModule('utils/profile.js', name =>
   name === './birthDate' ? birthDate : require(name)).exports;
 
-test('Profile displays session identity and clearly marked demo data without fetching or editing', () => {
+test('Profile loads real identity and questionnaire while preserving only demo indicators', async () => {
+  const requests = [];
+  const user = { id: 'A', name: 'Ana Souza', email: 'ana@example.test', hasCompletedQuestionnaire: true };
+  const questionnaire = {
+    hasCompleted: true,
+    aboutYou: { birthDate: '1992-03-04', gender: 'Feminino', education: 'Superior' },
+    yourGames: ['Roblox'],
+    gamesMarket: { marketKnowledge: 'Não conheço.', marketInterest: 'Não tenho interesse.' },
+  };
   const h = createHarness('screens/profile/ProfileScreen.js', {
     authContext: {
-      user: { name: 'Ana Souza', email: 'ana@example.test' },
+      isAuthenticated: true,
+      user: { ...user, name: 'Nome antigo no contexto' },
       httpClient: {
-        get() { assert.fail('Profile must not fetch questionnaire data'); },
+        async get(path, options) {
+          requests.push({ path, options });
+          return path === '/profile' ? user : questionnaire;
+        },
         put() { assert.fail('Profile must not save questionnaire data'); },
       },
     },
   });
+  assert.ok(h.nodes.some(node => textOf(node) === 'Carregando perfil...'));
+  assert.ok(!h.nodes.some(node => node.type === 'Text' && textOf(node) === user.name));
+  await h.actAsync(() => new Promise(resolve => setImmediate(resolve)));
   const texts = h.nodes.filter(node => node.type === 'Text').map(textOf);
   for (const text of [
     'Meu Perfil', 'Ana Souza', 'ana@example.test', '3', 'Participações', '8h', 'Tempo total',
     'Indicadores demonstrativos', 'Dados do questionário',
-    'Dados demonstrativos · não são respostas da sua conta',
-    '22 anos', 'Masculino', 'Ensino Superior', 'Valorant, Minecraft',
-    'Conheço um pouco.', 'Sim, tenho interesse.', 'Em breve',
+    getProfileViewData({ questionnaire }).questionnaireRows[0].value,
+    'Feminino', 'Ensino Superior', 'Roblox', 'Não conheço.', 'Não tenho interesse.',
   ]) assert.ok(texts.includes(text), text);
 
   const edit = h.nodes.find(node => node.type === 'Pressable'
     && textOf(node).includes('EDITAR DADOS DO QUESTIONÁRIO'));
-  assert.equal(edit.props.disabled, true);
-  assert.equal(edit.props.onPress, undefined);
+  assert.equal(edit.props.disabled, false);
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests.map(request => request.path), ['/profile', '/profile/questionnaire']);
+  assert.ok(requests.every(request => request.options.auth === true));
+  assert.ok(!texts.includes('Em breve'));
+  assert.ok(!texts.some(text => text.includes('não são respostas da sua conta')));
   assert.ok(h.nodes.some(node => node.type === 'ScrollView'));
   assert.ok(h.nodes.some(node => node.type === 'SafeAreaView'));
   assert.deepEqual(h.navigationCalls, []);
+  h.act(() => h.press('Editar dados do questionário'));
+  assert.equal(h.navigationCalls[0].name, 'ProfileQuestionnaire');
+  assert.equal(h.navigationCalls[0].params.mode, 'edit');
 });
 
-test('Profile handles missing account data and updates identity when the account changes', () => {
+test('Profile never invents identity or questionnaire data when there is no authenticated session', () => {
   const h = createHarness('screens/profile/ProfileScreen.js', { authContext: null });
   const texts = () => h.nodes.filter(node => node.type === 'Text').map(textOf);
-  assert.ok(texts().includes('Participante'));
-  assert.ok(texts().includes('E-mail não disponível'));
+  assert.ok(texts().includes('3'));
+  assert.ok(texts().includes('8h'));
+  assert.ok(!texts().includes('22 anos'));
   const logout = h.nodes.find(node => node.props.accessibilityLabel === 'Sair da conta');
   assert.equal(logout.props.disabled, true);
   h.setAuthContext({ user: { name: 'Bruno', email: 'bruno@example.test' } });
-  assert.ok(texts().includes('Bruno'));
-  assert.ok(texts().includes('bruno@example.test'));
+  assert.ok(!texts().includes('Bruno'));
+  assert.ok(!texts().includes('bruno@example.test'));
   h.setAuthContext({ user: { name: '  ', email: '  ' } });
-  assert.ok(texts().includes('Participante'));
-  assert.ok(texts().includes('E-mail não disponível'));
+  assert.ok(!texts().includes('Participante'));
+  assert.ok(!texts().includes('E-mail não disponível'));
 });
 
 test('Profile data transformation accepts questionnaire response shape and preserves its inputs', () => {

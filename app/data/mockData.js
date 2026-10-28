@@ -1,22 +1,5 @@
-// Demonstração da aba Perfil. A data de referência mantém a idade do exemplo
-// estável; uma fonte real pode usar a data atual e o mesmo formato de questionário.
-export const mockProfile = {
-  referenceDate: '2026-10-28',
-  statistics: { participationCount: 3, totalHours: 8 },
-  questionnaire: {
-    aboutYou: {
-      birthDate: '2004-01-01',
-      gender: 'Masculino',
-      otherGender: null,
-      education: 'Superior',
-    },
-    yourGames: ['Valorant', 'Minecraft'],
-    gamesMarket: {
-      marketKnowledge: 'Conheço um pouco.',
-      marketInterest: 'Sim, tenho interesse.',
-    },
-  },
-};
+// Apenas os indicadores do Perfil continuam demonstrativos, sem cálculo pelo histórico.
+export const mockProfileStatistics = { participationCount: 3, totalHours: 8 };
 
 export const mockExperiences = [
   {

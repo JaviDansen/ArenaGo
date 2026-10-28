@@ -1,18 +1,94 @@
-import { useContext, useRef, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useContext, useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AuthContext } from '../../context/AuthContext';
-import { mockProfile } from '../../data/mockData';
+import { mockProfileStatistics } from '../../data/mockData';
 import { getProfileViewData } from '../../utils/profile';
 
-export default function ProfileScreen() {
+export default function ProfileScreen({ navigation, route }) {
   const auth = useContext(AuthContext);
+  const client = auth?.httpClient;
+  const userId = auth?.user?.id;
+  const isAuthenticated = Boolean(auth?.isAuthenticated);
+  const sessionEpoch = auth?.getSessionEpoch?.();
+  const authRef = useRef(auth);
+  authRef.current = auth;
+  const reloadRef = useRef(null);
+  const [loaded, setLoaded] = useState(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const logoutPending = useRef(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [logoutError, setLogoutError] = useState('');
-  const profile = getProfileViewData({ ...mockProfile, user: auth?.user });
+  const ownsData = isAuthenticated && loaded?.userId === userId
+    && loaded?.sessionEpoch === sessionEpoch && loaded?.client === client;
+  const account = ownsData ? loaded.account : null;
+  const questionnaire = ownsData ? loaded.questionnaire : null;
+  const profile = getProfileViewData({
+    statistics: mockProfileStatistics, user: account, questionnaire,
+  });
   const canLogout = typeof auth?.logout === 'function';
+  const canEdit = !isLoading && account?.hasCompletedQuestionnaire === true
+    && questionnaire?.hasCompleted === true && auth?.user?.hasCompletedQuestionnaire === true;
+
+  useEffect(() => {
+    let active = true;
+    let pending = false;
+    let requestVersion = 0;
+    const isCurrent = (version) => active && requestVersion === version
+      && authRef.current?.isAuthenticated && authRef.current?.user?.id === userId
+      && authRef.current?.httpClient === client
+      && authRef.current?.getSessionEpoch?.() === sessionEpoch;
+
+    async function loadProfile() {
+      if (pending || !isAuthenticated || !userId || !client) return;
+      pending = true;
+      const version = ++requestVersion;
+      setIsLoading(true);
+      setLoadError('');
+      setLoaded(null);
+      const [identityResult, questionnaireResult] = await Promise.allSettled([
+        Promise.resolve().then(() => client.get('/profile', { auth: true })),
+        Promise.resolve().then(() => client.get('/profile/questionnaire', { auth: true })),
+      ]);
+      if (!isCurrent(version)) return;
+      pending = false;
+      const account = identityResult.status === 'fulfilled' && identityResult.value?.id === userId
+        ? identityResult.value : null;
+      const questionnaire = questionnaireResult.status === 'fulfilled'
+        && typeof questionnaireResult.value?.hasCompleted === 'boolean'
+        ? questionnaireResult.value : null;
+      setLoaded({ userId, sessionEpoch, client, account, questionnaire });
+      setIsLoading(false);
+      if (!account || !questionnaire) {
+        setLoadError('Não foi possível carregar todos os dados do perfil. Verifique sua conexão e tente novamente.');
+      }
+    }
+
+    setLoaded(null);
+    setLoadError('');
+    setIsLoading(isAuthenticated);
+    reloadRef.current = loadProfile;
+    if (navigation?.isFocused?.() !== false) void loadProfile();
+    const unsubscribeFocus = navigation?.addListener?.('focus', loadProfile);
+    const unsubscribeBlur = navigation?.addListener?.('blur', () => {
+      requestVersion += 1;
+      pending = false;
+    });
+    return () => {
+      active = false;
+      reloadRef.current = null;
+      unsubscribeFocus?.();
+      unsubscribeBlur?.();
+    };
+  }, [client, userId, isAuthenticated, sessionEpoch, navigation]);
+
+  function openQuestionnaire() {
+    if (!canEdit) return;
+    navigation?.setParams?.({ questionnaireSaved: undefined });
+    navigation?.navigate('ProfileQuestionnaire', { mode: 'edit' });
+  }
 
   async function handleLogout() {
     if (logoutPending.current || !canLogout) return;
@@ -40,8 +116,10 @@ export default function ProfileScreen() {
             <View style={styles.avatarHead} />
             <View style={styles.avatarBody} />
           </View>
-          <Text style={styles.name}>{profile.name}</Text>
-          <Text style={styles.email}>{profile.email}</Text>
+          {account ? <>
+            <Text style={styles.name}>{profile.name}</Text>
+            <Text style={styles.email}>{profile.email}</Text>
+          </> : null}
         </View>
 
         <Text style={styles.demoNotice}>Indicadores demonstrativos</Text>
@@ -57,8 +135,26 @@ export default function ProfileScreen() {
         </View>
 
         <Text style={styles.sectionTitle}>Dados do questionário</Text>
-        <Text style={styles.demoNotice}>Dados demonstrativos · não são respostas da sua conta</Text>
-        <View style={styles.questionnaireCard}>
+        {route?.params?.questionnaireSaved ? (
+          <Text style={styles.demoNotice} accessibilityLiveRegion="polite">Questionário atualizado com sucesso.</Text>
+        ) : null}
+        {isLoading ? (
+          <View accessibilityLiveRegion="polite">
+            <ActivityIndicator color="#111827" />
+            <Text style={styles.demoNotice}>Carregando perfil...</Text>
+          </View>
+        ) : null}
+        {loadError ? <>
+          <Text style={styles.error} accessibilityRole="alert">{loadError}</Text>
+          <Pressable style={styles.editButton} onPress={() => reloadRef.current?.()}
+            disabled={isLoading} accessibilityRole="button" accessibilityLabel="Tentar carregar perfil novamente">
+            <Text style={styles.editButtonText}>Tentar novamente</Text>
+          </Pressable>
+        </> : null}
+        {questionnaire?.hasCompleted === false ? (
+          <Text style={styles.demoNotice}>Questionário ainda não concluído.</Text>
+        ) : null}
+        {questionnaire?.hasCompleted ? <View style={styles.questionnaireCard}>
           {profile.questionnaireRows.map((row, index) => (
             <View key={row.label} style={[
               styles.dataRow, index > 0 && styles.dataRowBorder,
@@ -67,17 +163,17 @@ export default function ProfileScreen() {
               <Text style={styles.dataValue}>{row.value}</Text>
             </View>
           ))}
-        </View>
+        </View> : null}
 
         <Pressable
           style={styles.editButton}
-          disabled
+          onPress={openQuestionnaire}
+          disabled={!canEdit}
           accessibilityRole="button"
-          accessibilityState={{ disabled: true }}
-          accessibilityLabel="Editar dados do questionário, disponível em breve"
+          accessibilityState={{ disabled: !canEdit }}
+          accessibilityLabel="Editar dados do questionário"
         >
           <Text style={styles.editButtonText}>EDITAR DADOS DO QUESTIONÁRIO</Text>
-          <Text style={styles.comingSoon}>Em breve</Text>
         </Pressable>
 
         {logoutError ? <Text style={styles.error} accessibilityRole="alert">{logoutError}</Text> : null}
@@ -132,7 +228,6 @@ const styles = StyleSheet.create({
     marginTop: 20, padding: 14, gap: 4,
   },
   editButtonText: { color: '#6b7280', fontSize: 13, fontWeight: '600', textAlign: 'center' },
-  comingSoon: { color: '#6b7280', fontSize: 12 },
   logoutButton: { alignItems: 'center', backgroundColor: '#000', borderRadius: 4, marginTop: 24, padding: 14 },
   logoutButtonText: { color: '#fff', fontSize: 15, fontWeight: 'bold' },
   disabledButton: { opacity: 0.6 },

@@ -97,6 +97,9 @@ const INITIAL_QUESTIONNAIRE_DATA = {
 
 export default function ProfileQuestionnaireScreen({ navigation, route }) {
   const auth = useAuth();
+  const isEditMode = route?.params?.mode === 'edit';
+  const canEdit = Boolean(auth?.isAuthenticated && auth?.user?.hasCompletedQuestionnaire === true);
+  const sessionEpoch = auth?.getSessionEpoch?.();
   const registeredUser = route?.params?.user || auth?.user || null;
 
   // Controle de etapa atual (0-indexada: 0 = Etapa 1, 1 = Etapa 2, 2 = Etapa 3)
@@ -125,6 +128,9 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [saveError, setSaveError] = useState(null);
   const [hasSavedProfile, setHasSavedProfile] = useState(false);
+  const [profileLoadStatus, setProfileLoadStatus] = useState('loading');
+  const [profileLoadError, setProfileLoadError] = useState(null);
+  const [profileLoadAttempt, setProfileLoadAttempt] = useState(0);
 
   // Refs de controle de sincronismo, corrida e preservação granular
   const isSubmittingRef = useRef(false);
@@ -139,9 +145,30 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
   const currentUserIdRef = useRef(auth?.user?.id);
   currentUserIdRef.current = auth?.user?.id;
 
+  function returnToProfile(saved = false) {
+    if (!saved && isSubmittingRef.current) return;
+    if (!authRef.current?.isAuthenticated) return;
+    if (authRef.current?.user?.hasCompletedQuestionnaire === false) {
+      navigation?.navigate?.('ProfileQuestionnaire', { mode: undefined });
+      return;
+    }
+    const params = { screen: 'Perfil', params: { questionnaireSaved: saved } };
+    if (typeof navigation?.popTo === 'function') {
+      navigation.popTo('MainTabs', params);
+    } else if (!saved && navigation?.canGoBack?.()) {
+      navigation.goBack();
+    } else {
+      navigation?.navigate?.('MainTabs', params);
+    }
+  }
+
   useEffect(() => {
     if (!hasSavedProfile) return;
     setHasSavedProfile(false);
+    if (isEditMode) {
+      returnToProfile(true);
+      return;
+    }
     if (navigation?.reset) {
       navigation.reset({ index: 0, routes: [{ name: 'MainTabs' }] });
     } else if (navigation?.replace) {
@@ -149,12 +176,21 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
     } else if (navigation?.navigate) {
       navigation.navigate('MainTabs');
     }
-  }, [hasSavedProfile, navigation]);
+  }, [hasSavedProfile, navigation, isEditMode]);
 
   // Redefine estado se o usuario autenticado mudou (isolamento de sessao)
   const lastActiveUserRef = useRef(auth?.user?.id);
-  if (lastActiveUserRef.current !== auth?.user?.id) {
+  const lastSessionEpochRef = useRef(sessionEpoch);
+  const lastAuthenticatedRef = useRef(auth?.isAuthenticated);
+  const lastEditModeRef = useRef(isEditMode);
+  if (lastActiveUserRef.current !== auth?.user?.id
+    || lastSessionEpochRef.current !== sessionEpoch
+    || lastAuthenticatedRef.current !== auth?.isAuthenticated
+    || lastEditModeRef.current !== isEditMode) {
     lastActiveUserRef.current = auth?.user?.id;
+    lastSessionEpochRef.current = sessionEpoch;
+    lastAuthenticatedRef.current = auth?.isAuthenticated;
+    lastEditModeRef.current = isEditMode;
     currentUserIdRef.current = auth?.user?.id;
     searchRequestIdRef.current += 1;
     catalogRequestIdRef.current += 1;
@@ -177,6 +213,8 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
     setIsSubmitting(false);
     setFinishRequested(false);
     setHasSavedProfile(false);
+    setProfileLoadStatus('loading');
+    setProfileLoadError(null);
   }
 
   // Sinônimo para compatibilidade com testes anteriores
@@ -199,11 +237,25 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
 
   useEffect(() => {
     isMountedRef.current = true;
+    let active = true;
+    setProfileLoadStatus('loading');
+    setProfileLoadError(null);
     if (!client) {
-      return;
+      if (isEditMode) {
+        setProfileLoadStatus('error');
+        setProfileLoadError('Não foi possível carregar o questionário. Tente novamente.');
+      }
+      return () => {
+        active = false;
+        isMountedRef.current = false;
+      };
     }
 
     const requestUserId = currentUserId;
+    const isCurrentProfileRequest = () => active && isMountedRef.current
+      && currentUserIdRef.current === requestUserId
+      && authRef.current?.isAuthenticated
+      && authRef.current?.getSessionEpoch?.() === sessionEpoch;
 
     // 1. Carrega catálogo do backend (GET /api/v1/games?limit=50)
     setIsCatalogLoading(true);
@@ -239,13 +291,26 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
       });
 
     // 2. Pré-carrega respostas existentes se o usuário estiver autenticado
-    if (isAuthenticated && requestUserId) {
+    if (isAuthenticated && requestUserId && (!isEditMode || canEdit)) {
       client
         .get('/profile/questionnaire', { auth: true })
         .then((res) => {
-          if (!isMountedRef.current || !res || !res.hasCompleted) return;
-          // ISOLAMENTO DE SESSÃO: descarta se a sessão mudou para outro usuário durante a requisição
-          if (currentUserIdRef.current !== requestUserId || !authRef.current?.isAuthenticated) return;
+          if (!isCurrentProfileRequest()) return;
+          if (isEditMode && (!res?.hasCompleted || !res.aboutYou || !res.gamesMarket
+            || !Array.isArray(res.yourGames))) {
+            throw new Error('Não foi possível carregar as respostas completas do questionário.');
+          }
+          if (!res?.hasCompleted) return;
+          const serverGames = (Array.isArray(res.yourGames) ? res.yourGames : [])
+            .map(game => typeof game === 'string' ? game : game?.name)
+            .filter(game => typeof game === 'string' && game.trim())
+            .map(game => game.trim());
+          if (isEditMode && (!validateAboutYouStep({
+            ...res.aboutYou, birthDate: formatBirthDate(res.aboutYou.birthDate),
+          }).isValid || !validateYourGamesStep({ selectedGames: serverGames }).isValid
+            || !validateGamesMarketStep(res.gamesMarket).isValid)) {
+            throw new Error('Não foi possível carregar as respostas completas do questionário.');
+          }
 
           // PRESERVAÇÃO GRANULAR POR CAMPO: só aplica valores do backend nos campos NÃO editados pelo usuário
           if (res.aboutYou) {
@@ -266,7 +331,6 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
           // NÃO SOBRESCREVE JOGOS ADICIONADOS PELO USUÁRIO ANTES DO GET E RESPEITA REMOÇÕES
           setQuestionnaireData((prev) => {
             const currentGames = prev.selectedGames || [];
-            const serverGames = Array.isArray(res.yourGames) ? res.yourGames : [];
             const removed = userRemovedGamesRef.current;
             const filteredServerGames = serverGames.filter(
               (g) => !removed.has((typeof g === 'string' ? g : g?.name || '').trim().toLowerCase())
@@ -305,22 +369,33 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
                   : prev.marketInterest,
             };
           });
+          setProfileLoadStatus('ready');
         })
         .catch(() => {
-          // Silencioso se o usuário for recém-cadastrado e ainda não tiver respostas salvas
+          if (isEditMode && isCurrentProfileRequest()) {
+            setProfileLoadStatus('error');
+            setProfileLoadError('Não foi possível carregar o questionário. Verifique sua conexão e tente novamente.');
+          }
+          // O cadastro inicial continua permitindo preencher respostas ainda não salvas.
         });
     }
 
     return () => {
+      active = false;
       isMountedRef.current = false;
     };
-  }, [client, isAuthenticated, currentUserId]);
+  }, [client, isAuthenticated, currentUserId, sessionEpoch, isEditMode, canEdit, profileLoadAttempt]);
 
   // Navegação para trás
   function handleBack() {
+    if (isEditMode && isSubmittingRef.current) return;
     if (currentStepIndex > 0) {
       setCurrentStepIndex((prev) => Math.max(0, prev - 1));
     } else {
+      if (isEditMode) {
+        returnToProfile();
+        return;
+      }
       if (typeof navigation?.canGoBack === 'function' && navigation.canGoBack()) {
         navigation.goBack();
       } else if (auth?.isAuthenticated && typeof auth?.logout === 'function') {
@@ -561,6 +636,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
 
   // Conclusão e persistência do questionário no backend
   function handleFinishQuestionnaire() {
+    if (isEditMode && (!canEdit || profileLoadStatus !== 'ready')) return;
     if (isSubmittingRef.current || isSubmitting) {
       return;
     }
@@ -571,6 +647,27 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
   useEffect(() => {
     if (!finishRequested) return;
     setFinishRequested(false);
+
+    if (isEditMode && (!canEdit || profileLoadStatus !== 'ready')) {
+      isSubmittingRef.current = false;
+      return;
+    }
+
+    if (isEditMode) {
+      const aboutValidation = validateAboutYouStep({
+        birthDate: formatBirthDate(questionnaireData.birthDate),
+        gender: questionnaireData.gender,
+        otherGender: questionnaireData.otherGender,
+        education: questionnaireData.education,
+      });
+      const gamesValidation = validateYourGamesStep(questionnaireData);
+      if (!aboutValidation.isValid || !gamesValidation.isValid) {
+        isSubmittingRef.current = false;
+        setErrors({ ...aboutValidation.errors, ...gamesValidation.errors });
+        setCurrentStepIndex(aboutValidation.isValid ? 1 : 0);
+        return;
+      }
+    }
 
     const validation = validateGamesMarketStep(questionnaireData);
     if (!validation.isValid) {
@@ -604,15 +701,16 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
     };
 
     const submittingUserId = auth?.user?.id;
+    const submittingEpoch = auth?.getSessionEpoch?.();
+    const isCurrentSubmission = () => isMountedRef.current
+      && authRef.current?.user?.id === submittingUserId && authRef.current?.isAuthenticated
+      && authRef.current?.httpClient === client
+      && authRef.current?.getSessionEpoch?.() === submittingEpoch;
 
     client
       .put('/profile/questionnaire', payload, { auth: true })
       .then((res) => {
-        if (!isMountedRef.current) return;
-        // Aborta se o usuário foi desautenticado ou mudou durante o PUT
-        if (authRef.current?.user?.id !== submittingUserId || !authRef.current?.isAuthenticated) {
-          return;
-        }
+        if (!isCurrentSubmission()) return;
 
         if (typeof auth?.markQuestionnaireCompleted === 'function') {
           auth.markQuestionnaireCompleted();
@@ -624,10 +722,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
         setHasSavedProfile(true);
       })
       .catch((saveErr) => {
-        if (!isMountedRef.current) return;
-        if (authRef.current?.user?.id !== submittingUserId || !authRef.current?.isAuthenticated) {
-          return;
-        }
+        if (!isCurrentSubmission()) return;
         if (saveErr?.fieldErrors) {
           setErrors((prev) => ({ ...prev, ...saveErr.fieldErrors }));
         }
@@ -638,12 +733,12 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
         setSaveError(errorDetail);
       })
       .finally(() => {
-        if (isMountedRef.current && authRef.current?.user?.id === submittingUserId) {
+        if (isCurrentSubmission()) {
           isSubmittingRef.current = false;
           setIsSubmitting(false);
         }
       });
-  }, [finishRequested, questionnaireData, auth, navigation]);
+  }, [finishRequested, questionnaireData, auth, navigation, isEditMode, canEdit, profileLoadStatus]);
 
   const trimmedSearch = searchQuery.trim().toLowerCase();
   const localMatches = trimmedSearch
@@ -665,6 +760,34 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
     ? filteredSuggestions.some((game) => game.toLowerCase() === trimmedSearch)
     : false;
 
+  if (isEditMode && (!canEdit || profileLoadStatus !== 'ready')) {
+    return (
+      <SafeAreaView style={styles.container}>
+        <StatusBar style="light" />
+        <View style={styles.scrollContent}>
+          <Text style={styles.title}>Editar questionário</Text>
+          {canEdit && profileLoadStatus === 'loading' ? <>
+            <ActivityIndicator color="#a78bfa" />
+            <Text style={styles.subtitle}>Carregando suas respostas...</Text>
+          </> : <>
+            <Text style={styles.errorText} accessibilityRole="alert">
+              {canEdit ? profileLoadError : 'A edição exige uma sessão autenticada com questionário concluído.'}
+            </Text>
+            {canEdit ? <Pressable style={styles.primaryButton}
+              onPress={() => setProfileLoadAttempt(previous => previous + 1)}
+              accessibilityLabel="Tentar carregar questionário novamente">
+              <Text style={styles.primaryButtonText}>Tentar novamente</Text>
+            </Pressable> : null}
+          </>}
+          <Pressable style={styles.secondaryButton} onPress={() => returnToProfile()}
+            accessibilityLabel="Cancelar edição">
+            <Text style={styles.secondaryButtonText}>Cancelar edição</Text>
+          </Pressable>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar style="light" />
@@ -681,13 +804,18 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
         </Pressable>
 
         <View style={styles.headerTitleContainer}>
-          <Text style={styles.headerTitle}>QUESTIONÁRIO DE PERFIL</Text>
+          <Text style={styles.headerTitle}>{isEditMode ? 'EDITAR QUESTIONÁRIO' : 'QUESTIONÁRIO DE PERFIL'}</Text>
           <Text style={styles.headerStepBadge}>
             Etapa {currentStepIndex + 1} de {totalSteps}
           </Text>
         </View>
 
-        {auth?.isAuthenticated && typeof auth?.logout === 'function' ? (
+        {isEditMode ? (
+          <Pressable style={styles.headerLogoutButton} onPress={() => returnToProfile()}
+            disabled={isSubmitting} accessibilityLabel="Cancelar edição">
+            <Text style={styles.headerLogoutButtonText}>Cancelar</Text>
+          </Pressable>
+        ) : auth?.isAuthenticated && typeof auth?.logout === 'function' ? (
           <Pressable
             style={styles.headerLogoutButton}
             onPress={() => auth.logout()}
@@ -1280,7 +1408,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
                   ]}
                   onPress={handleFinishQuestionnaire}
                   disabled={isSubmitting}
-                  accessibilityLabel={isSubmitting ? 'Salvando questionário...' : 'Concluir questionário'}
+                  accessibilityLabel={isSubmitting ? 'Salvando questionário...' : isEditMode ? 'Salvar alterações do questionário' : 'Concluir questionário'}
                   accessibilityState={{ busy: isSubmitting, disabled: isSubmitting }}
                 >
                   {isSubmitting ? (
@@ -1289,7 +1417,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
                       <Text style={styles.primaryButtonText}>Salvando...</Text>
                     </View>
                   ) : (
-                    <Text style={styles.primaryButtonText}>Concluir</Text>
+                    <Text style={styles.primaryButtonText}>{isEditMode ? 'Salvar alterações' : 'Concluir'}</Text>
                   )}
                 </Pressable>
 

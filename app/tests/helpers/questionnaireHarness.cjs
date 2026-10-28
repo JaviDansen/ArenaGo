@@ -125,6 +125,8 @@ function createHarness(relativePath, options = {}) {
   const effects = [];
   const cleanups = [];
   const navigationCalls = [];
+  const navigationListeners = new Map();
+  let focused = options.focused !== false;
   let cursor = 0;
   let insideUpdater = false;
   let capture;
@@ -247,6 +249,13 @@ function createHarness(relativePath, options = {}) {
     DateTimePickerAndroid: { open: (value) => nativePickerCalls.push(value) },
   };
   const navigation = {
+    isFocused() { return focused; },
+    addListener(event, listener) {
+      if (!navigationListeners.has(event)) navigationListeners.set(event, new Set());
+      navigationListeners.get(event).add(listener);
+      return () => navigationListeners.get(event).delete(listener);
+    },
+    popTo(name, params) { navigationCalls.push({ type: 'popTo', name, params }); },
     navigate(name, params) { assert.equal(insideUpdater, false); navigationCalls.push({ type: 'navigate', name, params }); },
     goBack() { assert.equal(insideUpdater, false); navigationCalls.push({ type: 'back' }); },
     replace(name) { assert.equal(insideUpdater, false); navigationCalls.push({ type: 'replace', name }); },
@@ -343,6 +352,11 @@ function createHarness(relativePath, options = {}) {
       flush();
     },
     setProps(nextProps) { props = { ...props, ...nextProps }; render(); flush(); },
+    setFocused(value) {
+      focused = value;
+      for (const listener of navigationListeners.get(value ? 'focus' : 'blur') || []) listener();
+      flush();
+    },
     inputBirthDate(value) {
       const input = nodes(tree).find((node) => node.type === 'BirthDateInput');
       assert.ok(input);
