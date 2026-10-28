@@ -1,5 +1,6 @@
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { useAuth } from './context/AuthContext';
 import { ParticipationProvider } from './context/ParticipationContext';
@@ -101,8 +102,10 @@ export function AppNavigation() {
 
 export default function App() {
   return (
-    <AuthSessionGate>
-      <AppNavigation />
-    </AuthSessionGate>
+    <SafeAreaProvider>
+      <AuthSessionGate>
+        <AppNavigation />
+      </AuthSessionGate>
+    </SafeAreaProvider>
   );
 }

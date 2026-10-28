@@ -12,6 +12,7 @@ function ImportedScreen() {}
 const gateExports = loadModule('screens/auth/AuthSessionGate.js', (name) => {
   if (name === 'react') return { ...require('react'), useState: (value) => [value, () => {}] };
   if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
+  if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView' };
   if (name === 'react-native') {
     return Object.fromEntries(
       ['ActivityIndicator', 'Pressable', 'SafeAreaView', 'StyleSheet', 'Text', 'View'].map(
