@@ -270,6 +270,10 @@ function createHarness(relativePath, options = {}) {
       };
     }
     if (name === '../utils/birthDate' || name === '../../utils/birthDate') return birthDate;
+    if (name === '../../utils/profile') {
+      return loadModule('utils/profile.js', (dependency) =>
+        dependency === './birthDate' ? birthDate : require(dependency)).exports;
+    }
     if (name === '../utils/validation' || name === '../../utils/validation') return validation;
     if (name === '../data/mockData' || name === '../../data/mockData') return data;
     return require(name);

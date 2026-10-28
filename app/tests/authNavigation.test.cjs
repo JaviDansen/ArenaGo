@@ -230,10 +230,10 @@ test('failed authentication leaves the Login route set available and does not pr
   assert.equal(loginErrorTree.names[0], 'Login');
 });
 
-test('HomeScreen logout calls auth.logout once and leaves navigation to AuthSessionGate', async () => {
+test('ProfileScreen logout calls auth.logout once and leaves navigation to AuthSessionGate', async () => {
   let finishLogout;
   let logoutCalls = 0;
-  const h = createHarness('screens/home/HomeScreen.js', {
+  const h = createHarness('screens/profile/ProfileScreen.js', {
     authContext: {
       user: { hasCompletedQuestionnaire: true },
       logout: () => {
@@ -248,10 +248,11 @@ test('HomeScreen logout calls auth.logout once and leaves navigation to AuthSess
   let logoutPromise;
   h.act(() => {
     const button = h.nodes.find(
-      (node) => node.type === 'Pressable' && textOf(node) === 'Sair da conta'
+      (node) => node.type === 'Pressable' && textOf(node) === 'SAIR DA CONTA'
     );
     assert.ok(button);
     logoutPromise = button.props.onPress();
+    button.props.onPress();
   });
   assert.equal(logoutCalls, 1);
   const logoutButton = h.nodes.find(
