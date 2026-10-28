@@ -70,17 +70,111 @@ function textOf(element) {
   return textOf(element.props?.children);
 }
 
+function syncResolve(value) {
+  return {
+    then(onFulfilled) {
+      try {
+        const next = onFulfilled ? onFulfilled(value) : value;
+        if (next && typeof next.then === 'function') return next;
+        return syncResolve(next);
+      } catch (err) {
+        return syncReject(err);
+      }
+    },
+    catch() { return this; },
+    finally(onFinally) {
+      try {
+        if (onFinally) onFinally();
+        return this;
+      } catch (err) {
+        return syncReject(err);
+      }
+    },
+  };
+}
+
+function syncReject(reason) {
+  return {
+    then(onFulfilled, onRejected) {
+      if (!onRejected) return this;
+      try {
+        const next = onRejected(reason);
+        if (next && typeof next.then === 'function') return next;
+        return syncResolve(next);
+      } catch (err) {
+        return syncReject(err);
+      }
+    },
+    catch(onRejected) {
+      return this.then(null, onRejected);
+    },
+    finally(onFinally) {
+      try {
+        if (onFinally) onFinally();
+        return this;
+      } catch (err) {
+        return syncReject(err);
+      }
+    },
+  };
+}
+
 function createHarness(relativePath, options = {}) {
   const state = [];
   const queue = [];
   const effects = [];
+  const cleanups = [];
   const navigationCalls = [];
+  const navigationListeners = new Map();
+  let focused = options.focused !== false;
   let cursor = 0;
   let insideUpdater = false;
   let capture;
   let tree;
   let props = options.props || {};
-  let authContextValue = options.authContext !== undefined ? options.authContext : null;
+
+  const defaultCatalog = [
+    'Minecraft',
+    'Roblox',
+    'Valorant',
+    'Fortnite',
+    'League of Legends',
+    'Counter-Strike 2',
+    'EA Sports FC 24',
+    'Free Fire',
+  ];
+
+  let authContextValue;
+  if (options.authContext !== undefined) {
+    authContextValue = options.authContext;
+  } else {
+    authContextValue = {
+      isAuthenticated: true,
+      user: { id: 'default-user', name: 'Default User', hasCompletedQuestionnaire: false },
+      httpClient: {
+        get: (url) => {
+          if (url.startsWith('/games')) {
+            const parsedUrl = new URL(url, 'http://localhost');
+            const queryParam = parsedUrl.searchParams.get('query')?.toLowerCase();
+            const filtered = queryParam
+              ? defaultCatalog.filter((g) => g.toLowerCase().includes(queryParam))
+              : defaultCatalog;
+            return syncResolve({
+              games: filtered.map((name, i) => ({ id: `game-${i}`, name })),
+              total: filtered.length,
+            });
+          }
+          if (url === '/profile/questionnaire') {
+            return syncResolve({ hasCompleted: false });
+          }
+          return syncResolve({});
+        },
+        put: (url, payload) => syncResolve({ message: 'OK' }),
+      },
+      fetchCurrentUser: () => syncResolve({ id: 'default-user', hasCompletedQuestionnaire: true }),
+      markQuestionnaireCompleted: () => {},
+    };
+  }
 
   const AuthContextToken = { _defaultValue: null, Provider: 'AuthContextProvider' };
 
@@ -107,12 +201,31 @@ function createHarness(relativePath, options = {}) {
       if (!(index in state)) state[index] = { current: initial };
       return state[index];
     },
+    useCallback(fn, dependencies) {
+      const index = cursor++;
+      const previous = state[index];
+      if (!previous || dependencies.some((value, i) => !Object.is(value, previous.dependencies[i]))) {
+        state[index] = { fn, dependencies };
+        return fn;
+      }
+      return previous.fn;
+    },
+    useMemo(fn, dependencies) {
+      const index = cursor++;
+      const previous = state[index];
+      if (!previous || dependencies.some((value, i) => !Object.is(value, previous.dependencies[i]))) {
+        const val = fn();
+        state[index] = { val, dependencies };
+        return val;
+      }
+      return previous.val;
+    },
     useEffect(callback, dependencies) {
       const index = cursor++;
       const previous = state[index];
       if (!previous || dependencies.some((value, i) => !Object.is(value, previous[i]))) {
         state[index] = dependencies;
-        effects.push(callback);
+        effects.push({ index, callback });
       }
     },
   };
@@ -136,6 +249,13 @@ function createHarness(relativePath, options = {}) {
     DateTimePickerAndroid: { open: (value) => nativePickerCalls.push(value) },
   };
   const navigation = {
+    isFocused() { return focused; },
+    addListener(event, listener) {
+      if (!navigationListeners.has(event)) navigationListeners.set(event, new Set());
+      navigationListeners.get(event).add(listener);
+      return () => navigationListeners.get(event).delete(listener);
+    },
+    popTo(name, params) { navigationCalls.push({ type: 'popTo', name, params }); },
     navigate(name, params) { assert.equal(insideUpdater, false); navigationCalls.push({ type: 'navigate', name, params }); },
     goBack() { assert.equal(insideUpdater, false); navigationCalls.push({ type: 'back' }); },
     replace(name) { assert.equal(insideUpdater, false); navigationCalls.push({ type: 'replace', name }); },
@@ -159,6 +279,10 @@ function createHarness(relativePath, options = {}) {
       };
     }
     if (name === '../utils/birthDate' || name === '../../utils/birthDate') return birthDate;
+    if (name === '../../utils/profile') {
+      return loadModule('utils/profile.js', (dependency) =>
+        dependency === './birthDate' ? birthDate : require(dependency)).exports;
+    }
     if (name === '../utils/validation' || name === '../../utils/validation') return validation;
     if (name === '../data/mockData' || name === '../../data/mockData') return data;
     return require(name);
@@ -188,7 +312,14 @@ function createHarness(relativePath, options = {}) {
         } else state[index] = freeze(update);
       }
       render();
-      for (const effect of effects.splice(0)) effect();
+      for (const item of effects.splice(0)) {
+        const { index, callback } = item;
+        if (typeof cleanups[index] === 'function') {
+          cleanups[index]();
+        }
+        const cleanup = callback();
+        cleanups[index] = typeof cleanup === 'function' ? cleanup : null;
+      }
     }
   }
 
@@ -206,12 +337,26 @@ function createHarness(relativePath, options = {}) {
       await callback(capture);
       flush();
     },
+    unmount() {
+      for (let i = 0; i < cleanups.length; i++) {
+        if (typeof cleanups[i] === 'function') {
+          cleanups[i]();
+          cleanups[i] = null;
+        }
+      }
+      tree = null;
+    },
     setAuthContext(nextAuthContext) {
       authContextValue = nextAuthContext;
       render();
       flush();
     },
     setProps(nextProps) { props = { ...props, ...nextProps }; render(); flush(); },
+    setFocused(value) {
+      focused = value;
+      for (const listener of navigationListeners.get(value ? 'focus' : 'blur') || []) listener();
+      flush();
+    },
     inputBirthDate(value) {
       const input = nodes(tree).find((node) => node.type === 'BirthDateInput');
       assert.ok(input);

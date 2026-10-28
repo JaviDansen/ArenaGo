@@ -1,0 +1,33 @@
+# REGISTRO DE REQUISIÇÕES HTTP ANONIMIZADAS (HOMOLOGAÇÃO ANDROID)
+# Data: 2026-10-27
+# Dispositivo: [Preencher modelo do Android]
+# Backend Base URL: http://10.37.5.202:3000/api/v1
+
+# T01 — POST /auth/register
+# Request: POST /api/v1/auth/register
+# Headers: Content-Type: application/json
+# Body: { "name": "Participante Teste A", "email": "teste.a.homolog@example.com", "password": "[REDACTED]" }
+# Response: 201 Created
+# Body: { "user": { "id": "00000000-0000-0000-0000-000000000001", "name": "Participante Teste A", "email": "teste.a.homolog@example.com", "hasCompletedQuestionnaire": false } }
+
+# T02 — GET /auth/me (Login/Restauração com questionário pendente)
+# Request: GET /api/v1/auth/me
+# Headers: Authorization: Bearer [REDACTED_ACCESS_TOKEN]
+# Response: 200 OK
+# Body: { "id": "00000000-0000-0000-0000-000000000001", "hasCompletedQuestionnaire": false }
+
+# T04 — PUT /profile/questionnaire (Conclusão do questionário)
+# Request: PUT /api/v1/profile/questionnaire
+# Headers: Authorization: Bearer [REDACTED_ACCESS_TOKEN], Content-Type: application/json
+# Body: { "birthDate": "2000-01-01", "gender": "Masculino", "otherGender": null, "education": "Superior", "selectedGames": ["Minecraft"], "marketKnowledge": "Sim, conheço.", "marketInterest": "Sim, tenho interesse." }
+# Response: 200 OK
+# Body: { "completedAt": "2026-10-27T12:00:00.000Z" }
+
+# T05 — POST /auth/refresh (Restauração de sessão pós-encerramento)
+# Request: POST /api/v1/auth/refresh
+# Body: { "refreshToken": "[REDACTED_REFRESH_TOKEN]" }
+# Response: 200 OK
+
+# T06 — GET /games (Busca de jogos no catálogo remoto)
+# Request: GET /api/v1/games?query=Zelda&limit=20
+# Response: 200 OK

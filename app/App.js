@@ -1,5 +1,6 @@
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { useAuth } from './context/AuthContext';
 import { ParticipationProvider } from './context/ParticipationContext';
@@ -54,7 +55,20 @@ export function AppNavigation() {
       options: { headerShown: true, headerBackVisible: false, title: 'Avaliação' },
     },
   ];
-  const availableScreens = isAuthenticated ? appScreens : publicScreens;
+  const isQuestionnairePending =
+    isAuthenticated && auth?.user && auth?.user.hasCompletedQuestionnaire === false;
+
+  const pendingQuestionnaireScreens = [
+    { name: 'ProfileQuestionnaire', component: ProfileQuestionnaireScreen },
+    { name: 'Questionario', component: ProfileQuestionnaireScreen },
+  ];
+
+  const availableScreens = !isAuthenticated
+    ? publicScreens
+    : isQuestionnairePending
+    ? pendingQuestionnaireScreens
+    : appScreens;
+
   const firstScreenIndex = availableScreens.findIndex(
     (screen) => screen.name === initialRouteName
   );
@@ -88,8 +102,10 @@ export function AppNavigation() {
 
 export default function App() {
   return (
-    <AuthSessionGate>
-      <AppNavigation />
-    </AuthSessionGate>
+    <SafeAreaProvider>
+      <AuthSessionGate>
+        <AppNavigation />
+      </AuthSessionGate>
+    </SafeAreaProvider>
   );
 }

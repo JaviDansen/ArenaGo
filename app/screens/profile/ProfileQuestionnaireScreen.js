@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import {
+  ActivityIndicator,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -14,8 +15,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { useAuth } from '../../context/AuthContext';
 import BirthDateInput from '../../components/BirthDateInput';
-import { mockGames } from '../../data/mockData';
-import { parseBirthDate } from '../../utils/birthDate';
+import { formatBirthDate, parseBirthDate } from '../../utils/birthDate';
 import {
   validateAboutYouStep,
   validateGamesMarketStep,
@@ -97,6 +97,9 @@ const INITIAL_QUESTIONNAIRE_DATA = {
 
 export default function ProfileQuestionnaireScreen({ navigation, route }) {
   const auth = useAuth();
+  const isEditMode = route?.params?.mode === 'edit';
+  const canEdit = Boolean(auth?.isAuthenticated && auth?.user?.hasCompletedQuestionnaire === true);
+  const sessionEpoch = auth?.getSessionEpoch?.();
   const registeredUser = route?.params?.user || auth?.user || null;
 
   // Controle de etapa atual (0-indexada: 0 = Etapa 1, 1 = Etapa 2, 2 = Etapa 3)
@@ -112,46 +115,301 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
   const [education, setEducation] = useState('');
   const [errors, setErrors] = useState({});
 
-  // Estados dos campos da Etapa 2 — Seus jogos
+  // Estados dos campos da Etapa 2 — Seus jogos (conectado ao catálogo real)
   const [searchQuery, setSearchQuery] = useState('');
   const [feedbackMessage, setFeedbackMessage] = useState(null);
+  const [catalogGames, setCatalogGames] = useState([]);
+  const [isCatalogLoading, setIsCatalogLoading] = useState(false);
+  const [catalogError, setCatalogError] = useState(null);
+  const [searchResults, setSearchResults] = useState([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [searchError, setSearchError] = useState(null);
   const [finishRequested, setFinishRequested] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [saveError, setSaveError] = useState(null);
+  const [hasSavedProfile, setHasSavedProfile] = useState(false);
+  const [profileLoadStatus, setProfileLoadStatus] = useState('loading');
+  const [profileLoadError, setProfileLoadError] = useState(null);
+  const [profileLoadAttempt, setProfileLoadAttempt] = useState(0);
+
+  // Refs de controle de sincronismo, corrida e preservação granular
+  const isSubmittingRef = useRef(false);
+  const searchRequestIdRef = useRef(0);
+  const catalogRequestIdRef = useRef(0);
+  const editedFieldsRef = useRef(new Set());
+  const userAddedGamesRef = useRef([]);
+  const userRemovedGamesRef = useRef(new Set());
+  const isMountedRef = useRef(true);
+  const authRef = useRef(auth);
+  authRef.current = auth;
+  const currentUserIdRef = useRef(auth?.user?.id);
+  currentUserIdRef.current = auth?.user?.id;
+
+  function returnToProfile(saved = false) {
+    if (!saved && isSubmittingRef.current) return;
+    if (!authRef.current?.isAuthenticated) return;
+    if (authRef.current?.user?.hasCompletedQuestionnaire === false) {
+      navigation?.navigate?.('ProfileQuestionnaire', { mode: undefined });
+      return;
+    }
+    const params = { screen: 'Perfil', params: { questionnaireSaved: saved } };
+    if (typeof navigation?.popTo === 'function') {
+      navigation.popTo('MainTabs', params);
+    } else if (!saved && navigation?.canGoBack?.()) {
+      navigation.goBack();
+    } else {
+      navigation?.navigate?.('MainTabs', params);
+    }
+  }
+
+  useEffect(() => {
+    if (!hasSavedProfile) return;
+    setHasSavedProfile(false);
+    if (isEditMode) {
+      returnToProfile(true);
+      return;
+    }
+    if (navigation?.reset) {
+      navigation.reset({ index: 0, routes: [{ name: 'MainTabs' }] });
+    } else if (navigation?.replace) {
+      navigation.replace('MainTabs');
+    } else if (navigation?.navigate) {
+      navigation.navigate('MainTabs');
+    }
+  }, [hasSavedProfile, navigation, isEditMode]);
+
+  // Redefine estado se o usuario autenticado mudou (isolamento de sessao)
+  const lastActiveUserRef = useRef(auth?.user?.id);
+  const lastSessionEpochRef = useRef(sessionEpoch);
+  const lastAuthenticatedRef = useRef(auth?.isAuthenticated);
+  const lastEditModeRef = useRef(isEditMode);
+  if (lastActiveUserRef.current !== auth?.user?.id
+    || lastSessionEpochRef.current !== sessionEpoch
+    || lastAuthenticatedRef.current !== auth?.isAuthenticated
+    || lastEditModeRef.current !== isEditMode) {
+    lastActiveUserRef.current = auth?.user?.id;
+    lastSessionEpochRef.current = sessionEpoch;
+    lastAuthenticatedRef.current = auth?.isAuthenticated;
+    lastEditModeRef.current = isEditMode;
+    currentUserIdRef.current = auth?.user?.id;
+    searchRequestIdRef.current += 1;
+    catalogRequestIdRef.current += 1;
+    isSubmittingRef.current = false;
+    editedFieldsRef.current.clear();
+    userAddedGamesRef.current = [];
+    userRemovedGamesRef.current.clear();
+    setCurrentStepIndex(0);
+    setBirthDateText('');
+    setGender('');
+    setOtherGender('');
+    setEducation('');
+    setQuestionnaireData(INITIAL_QUESTIONNAIRE_DATA);
+    setErrors({});
+    setSaveError(null);
+    setSearchQuery('');
+    setSearchResults([]);
+    setIsSearching(false);
+    setFeedbackMessage(null);
+    setIsSubmitting(false);
+    setFinishRequested(false);
+    setHasSavedProfile(false);
+    setProfileLoadStatus('loading');
+    setProfileLoadError(null);
+  }
+
+  // Sinônimo para compatibilidade com testes anteriores
+  const availableGames = catalogGames;
+
+  const markFieldEdited = (fieldName) => {
+    editedFieldsRef.current.add(fieldName);
+  };
+  const markUserInteracted = () => {
+    editedFieldsRef.current.add('general');
+  };
 
   const totalSteps = QUESTIONNAIRE_STEPS.length;
   const currentStep = QUESTIONNAIRE_STEPS[currentStepIndex];
   const progressPercent = ((currentStepIndex + 1) / totalSteps) * 100;
 
+  const client = auth?.httpClient;
+  const isAuthenticated = Boolean(auth?.isAuthenticated);
+  const currentUserId = auth?.user?.id;
+
   useEffect(() => {
-    if (!finishRequested) return;
-
-    // O efeito lê as respostas após o React aplicar todas as seleções do mesmo lote.
-    setFinishRequested(false);
-    const validation = validateGamesMarketStep(questionnaireData);
-    if (!validation.isValid) {
-      setErrors(validation.errors);
-      return;
+    isMountedRef.current = true;
+    let active = true;
+    setProfileLoadStatus('loading');
+    setProfileLoadError(null);
+    if (!client) {
+      if (isEditMode) {
+        setProfileLoadStatus('error');
+        setProfileLoadError('Não foi possível carregar o questionário. Tente novamente.');
+      }
+      return () => {
+        active = false;
+        isMountedRef.current = false;
+      };
     }
 
-    setErrors({});
-    if (navigation.reset) {
-      navigation.reset({ index: 0, routes: [{ name: 'MainTabs' }] });
-    } else {
-      navigation.replace('MainTabs');
+    const requestUserId = currentUserId;
+    const isCurrentProfileRequest = () => active && isMountedRef.current
+      && currentUserIdRef.current === requestUserId
+      && authRef.current?.isAuthenticated
+      && authRef.current?.getSessionEpoch?.() === sessionEpoch;
+
+    // 1. Carrega catálogo do backend (GET /api/v1/games?limit=50)
+    setIsCatalogLoading(true);
+    setCatalogError(null);
+    const currentCatalogRequestId = ++catalogRequestIdRef.current;
+    client
+      .get('/games?limit=50')
+      .then((res) => {
+        if (
+          !isMountedRef.current ||
+          catalogRequestIdRef.current !== currentCatalogRequestId ||
+          currentUserIdRef.current !== requestUserId
+        ) {
+          return;
+        }
+        const gameItems = Array.isArray(res?.games) ? res.games : [];
+        const backendNames = gameItems
+          .map((g) => (typeof g === 'string' ? g : g?.name))
+          .filter(Boolean);
+        setCatalogGames(backendNames);
+        setIsCatalogLoading(false);
+      })
+      .catch(() => {
+        if (
+          !isMountedRef.current ||
+          catalogRequestIdRef.current !== currentCatalogRequestId ||
+          currentUserIdRef.current !== requestUserId
+        ) {
+          return;
+        }
+        setIsCatalogLoading(false);
+        setCatalogError('Não foi possível carregar o catálogo de jogos do servidor.');
+      });
+
+    // 2. Pré-carrega respostas existentes se o usuário estiver autenticado
+    if (isAuthenticated && requestUserId && (!isEditMode || canEdit)) {
+      client
+        .get('/profile/questionnaire', { auth: true })
+        .then((res) => {
+          if (!isCurrentProfileRequest()) return;
+          if (isEditMode && (!res?.hasCompleted || !res.aboutYou || !res.gamesMarket
+            || !Array.isArray(res.yourGames))) {
+            throw new Error('Não foi possível carregar as respostas completas do questionário.');
+          }
+          if (!res?.hasCompleted) return;
+          const serverGames = (Array.isArray(res.yourGames) ? res.yourGames : [])
+            .map(game => typeof game === 'string' ? game : game?.name)
+            .filter(game => typeof game === 'string' && game.trim())
+            .map(game => game.trim());
+          if (isEditMode && (!validateAboutYouStep({
+            ...res.aboutYou, birthDate: formatBirthDate(res.aboutYou.birthDate),
+          }).isValid || !validateYourGamesStep({ selectedGames: serverGames }).isValid
+            || !validateGamesMarketStep(res.gamesMarket).isValid)) {
+            throw new Error('Não foi possível carregar as respostas completas do questionário.');
+          }
+
+          // PRESERVAÇÃO GRANULAR POR CAMPO: só aplica valores do backend nos campos NÃO editados pelo usuário
+          if (res.aboutYou) {
+            if (!editedFieldsRef.current.has('birthDate') && res.aboutYou.birthDate) {
+              setBirthDateText(formatBirthDate(res.aboutYou.birthDate));
+            }
+            if (!editedFieldsRef.current.has('gender') && res.aboutYou.gender) {
+              setGender(res.aboutYou.gender);
+            }
+            if (!editedFieldsRef.current.has('otherGender') && res.aboutYou.otherGender) {
+              setOtherGender(res.aboutYou.otherGender);
+            }
+            if (!editedFieldsRef.current.has('education') && res.aboutYou.education) {
+              setEducation(res.aboutYou.education);
+            }
+          }
+
+          // NÃO SOBRESCREVE JOGOS ADICIONADOS PELO USUÁRIO ANTES DO GET E RESPEITA REMOÇÕES
+          setQuestionnaireData((prev) => {
+            const currentGames = prev.selectedGames || [];
+            const removed = userRemovedGamesRef.current;
+            const filteredServerGames = serverGames.filter(
+              (g) => !removed.has((typeof g === 'string' ? g : g?.name || '').trim().toLowerCase())
+            );
+
+            let merged;
+            if (currentGames.length === 0) {
+              if (editedFieldsRef.current.has('selectedGames')) {
+                merged = [];
+              } else {
+                merged = filteredServerGames;
+              }
+            } else {
+              const seen = new Set();
+              merged = [];
+              for (const g of [...currentGames, ...filteredServerGames]) {
+                const name = typeof g === 'string' ? g : g?.name || '';
+                const lower = name.trim().toLowerCase();
+                if (!seen.has(lower)) {
+                  seen.add(lower);
+                  merged.push(name.trim());
+                }
+              }
+            }
+
+            return {
+              ...prev,
+              selectedGames: merged,
+              marketKnowledge:
+                !editedFieldsRef.current.has('marketKnowledge') && res.gamesMarket?.marketKnowledge
+                  ? res.gamesMarket.marketKnowledge
+                  : prev.marketKnowledge,
+              marketInterest:
+                !editedFieldsRef.current.has('marketInterest') && res.gamesMarket?.marketInterest
+                  ? res.gamesMarket.marketInterest
+                  : prev.marketInterest,
+            };
+          });
+          setProfileLoadStatus('ready');
+        })
+        .catch(() => {
+          if (isEditMode && isCurrentProfileRequest()) {
+            setProfileLoadStatus('error');
+            setProfileLoadError('Não foi possível carregar o questionário. Verifique sua conexão e tente novamente.');
+          }
+          // O cadastro inicial continua permitindo preencher respostas ainda não salvas.
+        });
     }
-  }, [finishRequested, navigation, questionnaireData]);
+
+    return () => {
+      active = false;
+      isMountedRef.current = false;
+    };
+  }, [client, isAuthenticated, currentUserId, sessionEpoch, isEditMode, canEdit, profileLoadAttempt]);
 
   // Navegação para trás
   function handleBack() {
+    if (isEditMode && isSubmittingRef.current) return;
     if (currentStepIndex > 0) {
       setCurrentStepIndex((prev) => Math.max(0, prev - 1));
     } else {
-      // Retornar da Etapa 1 ao Cadastro, quando necessário
-      navigation.goBack();
+      if (isEditMode) {
+        returnToProfile();
+        return;
+      }
+      if (typeof navigation?.canGoBack === 'function' && navigation.canGoBack()) {
+        navigation.goBack();
+      } else if (auth?.isAuthenticated && typeof auth?.logout === 'function') {
+        auth.logout();
+      } else {
+        navigation.goBack();
+      }
     }
   }
 
   // Seleção única de gênero
   function handleSelectGender(option) {
+    markFieldEdited('gender');
+    markUserInteracted();
     setGender(option);
     if (errors.gender) {
       setErrors((prev) => ({ ...prev, gender: null }));
@@ -169,6 +427,8 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
 
   // Seleção única de escolaridade
   function handleSelectEducation(option) {
+    markFieldEdited('education');
+    markUserInteracted();
     setEducation(option);
     if (errors.education) {
       setErrors((prev) => ({ ...prev, education: null }));
@@ -205,12 +465,65 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
     setCurrentStepIndex(1);
   }
 
-  // Atualização do texto da busca de jogos
+  // Atualização do texto da busca de jogos conectada ao backend
   function handleSearchChange(text) {
     setSearchQuery(text);
     if (feedbackMessage) {
       setFeedbackMessage(null);
     }
+    setSearchError(null);
+
+    // Invalida imediatamente requisições de busca anteriores
+    searchRequestIdRef.current += 1;
+    const currentRequestId = searchRequestIdRef.current;
+    const searchUserId = auth?.user?.id;
+
+    const trimmed = text.trim();
+    if (!trimmed) {
+      setSearchResults([]);
+      setIsSearching(false);
+      return;
+    }
+
+    // Limpa imediatamente resultados de buscas antigas para não ficarem selecionáveis durante a nova busca
+    setSearchResults([]);
+
+    const client = auth?.httpClient;
+    if (!client) {
+      setIsSearching(false);
+      return;
+    }
+
+    setIsSearching(true);
+
+    client
+      .get(`/games?query=${encodeURIComponent(trimmed)}&limit=20`)
+      .then((res) => {
+        if (
+          !isMountedRef.current ||
+          searchRequestIdRef.current !== currentRequestId ||
+          currentUserIdRef.current !== searchUserId
+        ) {
+          return;
+        }
+        const items = Array.isArray(res?.games) ? res.games : [];
+        const names = items
+          .map((g) => (typeof g === 'string' ? g : g?.name))
+          .filter(Boolean);
+        setSearchResults(names);
+        setIsSearching(false);
+      })
+      .catch(() => {
+        if (
+          !isMountedRef.current ||
+          searchRequestIdRef.current !== currentRequestId ||
+          currentUserIdRef.current !== searchUserId
+        ) {
+          return;
+        }
+        setIsSearching(false);
+        setSearchError('Não foi possível buscar jogos no momento.');
+      });
   }
 
   // Adiciona um jogo à lista de selecionados (via sugestão ou inclusão manual)
@@ -218,6 +531,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
     if (!gameName) return;
     const trimmed = gameName.trim();
     if (!trimmed) return;
+    userRemovedGamesRef.current.delete(trimmed.toLowerCase());
 
     // Prevenção de duplicações: normaliza espaços e compara sem distinção de maiúsculas/minúsculas
     const isAlreadySelected = (questionnaireData.selectedGames || []).some(
@@ -245,7 +559,10 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
       };
     });
 
+    searchRequestIdRef.current += 1;
     setSearchQuery('');
+    setSearchResults([]);
+    setIsSearching(false);
     setFeedbackMessage({
       type: 'success',
       text: `"${trimmed}" adicionado aos seus jogos.`,
@@ -258,10 +575,17 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
 
   // Remove um jogo da lista de selecionados (permitindo selecioná-lo novamente)
   function handleRemoveGame(gameToRemove) {
+    markFieldEdited('selectedGames');
+    markUserInteracted();
+    const lower = gameToRemove.trim().toLowerCase();
+    userRemovedGamesRef.current.add(lower);
+    userAddedGamesRef.current = userAddedGamesRef.current.filter(
+      (g) => g.trim().toLowerCase() !== lower
+    );
     setQuestionnaireData((prev) => ({
       ...prev,
       selectedGames: (prev.selectedGames || []).filter(
-        (g) => g.trim().toLowerCase() !== gameToRemove.trim().toLowerCase()
+        (g) => g.trim().toLowerCase() !== lower
       ),
     }));
 
@@ -286,6 +610,8 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
 
   // Seleção única de conhecimento sobre o mercado de games (Etapa 3)
   function handleSelectMarketKnowledge(option) {
+    markFieldEdited('marketKnowledge');
+    markUserInteracted();
     setQuestionnaireData((prev) => ({
       ...prev,
       marketKnowledge: option,
@@ -297,6 +623,8 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
 
   // Seleção única de interesse no mercado profissional de games (Etapa 3)
   function handleSelectMarketInterest(option) {
+    markFieldEdited('marketInterest');
+    markUserInteracted();
     setQuestionnaireData((prev) => ({
       ...prev,
       marketInterest: option,
@@ -306,18 +634,159 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
     }
   }
 
-  // Validação e conclusão do questionário (Etapa 3)
+  // Conclusão e persistência do questionário no backend
   function handleFinishQuestionnaire() {
+    if (isEditMode && (!canEdit || profileLoadStatus !== 'ready')) return;
+    if (isSubmittingRef.current || isSubmitting) {
+      return;
+    }
+    isSubmittingRef.current = true;
     setFinishRequested(true);
   }
 
+  useEffect(() => {
+    if (!finishRequested) return;
+    setFinishRequested(false);
+
+    if (isEditMode && (!canEdit || profileLoadStatus !== 'ready')) {
+      isSubmittingRef.current = false;
+      return;
+    }
+
+    if (isEditMode) {
+      const aboutValidation = validateAboutYouStep({
+        birthDate: formatBirthDate(questionnaireData.birthDate),
+        gender: questionnaireData.gender,
+        otherGender: questionnaireData.otherGender,
+        education: questionnaireData.education,
+      });
+      const gamesValidation = validateYourGamesStep(questionnaireData);
+      if (!aboutValidation.isValid || !gamesValidation.isValid) {
+        isSubmittingRef.current = false;
+        setErrors({ ...aboutValidation.errors, ...gamesValidation.errors });
+        setCurrentStepIndex(aboutValidation.isValid ? 1 : 0);
+        return;
+      }
+    }
+
+    const validation = validateGamesMarketStep(questionnaireData);
+    if (!validation.isValid) {
+      isSubmittingRef.current = false;
+      setErrors(validation.errors);
+      return;
+    }
+    setErrors({});
+
+    const client = auth?.httpClient;
+    if (!client || !auth?.isAuthenticated) {
+      isSubmittingRef.current = false;
+      setSaveError('Usuário não autenticado ou sessão inválida. Não foi possível salvar o perfil.');
+      return;
+    }
+
+    setIsSubmitting(true);
+    setSaveError(null);
+
+    const payload = {
+      birthDate: questionnaireData.birthDate,
+      gender: questionnaireData.gender,
+      otherGender:
+        questionnaireData.gender === 'Outro'
+          ? (questionnaireData.otherGender || '').trim() || null
+          : null,
+      education: questionnaireData.education,
+      selectedGames: questionnaireData.selectedGames,
+      marketKnowledge: questionnaireData.marketKnowledge,
+      marketInterest: questionnaireData.marketInterest,
+    };
+
+    const submittingUserId = auth?.user?.id;
+    const submittingEpoch = auth?.getSessionEpoch?.();
+    const isCurrentSubmission = () => isMountedRef.current
+      && authRef.current?.user?.id === submittingUserId && authRef.current?.isAuthenticated
+      && authRef.current?.httpClient === client
+      && authRef.current?.getSessionEpoch?.() === submittingEpoch;
+
+    client
+      .put('/profile/questionnaire', payload, { auth: true })
+      .then((res) => {
+        if (!isCurrentSubmission()) return;
+
+        if (typeof auth?.markQuestionnaireCompleted === 'function') {
+          auth.markQuestionnaireCompleted();
+        }
+        if (typeof auth?.fetchCurrentUser === 'function') {
+          void auth.fetchCurrentUser().catch(() => undefined);
+        }
+
+        setHasSavedProfile(true);
+      })
+      .catch((saveErr) => {
+        if (!isCurrentSubmission()) return;
+        if (saveErr?.fieldErrors) {
+          setErrors((prev) => ({ ...prev, ...saveErr.fieldErrors }));
+        }
+        const errorDetail =
+          saveErr?.detail ||
+          saveErr?.message ||
+          'Não foi possível salvar seu perfil. Verifique sua conexão e tente novamente.';
+        setSaveError(errorDetail);
+      })
+      .finally(() => {
+        if (isCurrentSubmission()) {
+          isSubmittingRef.current = false;
+          setIsSubmitting(false);
+        }
+      });
+  }, [finishRequested, questionnaireData, auth, navigation, isEditMode, canEdit, profileLoadStatus]);
+
   const trimmedSearch = searchQuery.trim().toLowerCase();
-  const filteredSuggestions = trimmedSearch
-    ? mockGames.filter((game) => game.toLowerCase().includes(trimmedSearch))
+  const localMatches = trimmedSearch
+    ? catalogGames.filter((game) => game.toLowerCase().includes(trimmedSearch))
     : [];
+  const searchMatches = searchResults;
+
+  const seenSuggestions = new Set();
+  const filteredSuggestions = [];
+  for (const g of [...localMatches, ...searchMatches]) {
+    const lower = g.toLowerCase();
+    if (!seenSuggestions.has(lower)) {
+      seenSuggestions.add(lower);
+      filteredSuggestions.push(g);
+    }
+  }
+
   const exactMatchExists = trimmedSearch
-    ? mockGames.some((game) => game.toLowerCase() === trimmedSearch)
+    ? filteredSuggestions.some((game) => game.toLowerCase() === trimmedSearch)
     : false;
+
+  if (isEditMode && (!canEdit || profileLoadStatus !== 'ready')) {
+    return (
+      <SafeAreaView style={styles.container}>
+        <StatusBar style="light" />
+        <View style={styles.scrollContent}>
+          <Text style={styles.title}>Editar questionário</Text>
+          {canEdit && profileLoadStatus === 'loading' ? <>
+            <ActivityIndicator color="#a78bfa" />
+            <Text style={styles.subtitle}>Carregando suas respostas...</Text>
+          </> : <>
+            <Text style={styles.errorText} accessibilityRole="alert">
+              {canEdit ? profileLoadError : 'A edição exige uma sessão autenticada com questionário concluído.'}
+            </Text>
+            {canEdit ? <Pressable style={styles.primaryButton}
+              onPress={() => setProfileLoadAttempt(previous => previous + 1)}
+              accessibilityLabel="Tentar carregar questionário novamente">
+              <Text style={styles.primaryButtonText}>Tentar novamente</Text>
+            </Pressable> : null}
+          </>}
+          <Pressable style={styles.secondaryButton} onPress={() => returnToProfile()}
+            accessibilityLabel="Cancelar edição">
+            <Text style={styles.secondaryButtonText}>Cancelar edição</Text>
+          </Pressable>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.container}>
@@ -335,13 +804,29 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
         </Pressable>
 
         <View style={styles.headerTitleContainer}>
-          <Text style={styles.headerTitle}>QUESTIONÁRIO DE PERFIL</Text>
+          <Text style={styles.headerTitle}>{isEditMode ? 'EDITAR QUESTIONÁRIO' : 'QUESTIONÁRIO DE PERFIL'}</Text>
           <Text style={styles.headerStepBadge}>
             Etapa {currentStepIndex + 1} de {totalSteps}
           </Text>
         </View>
 
-        <View style={styles.headerPlaceholder} />
+        {isEditMode ? (
+          <Pressable style={styles.headerLogoutButton} onPress={() => returnToProfile()}
+            disabled={isSubmitting} accessibilityLabel="Cancelar edição">
+            <Text style={styles.headerLogoutButtonText}>Cancelar</Text>
+          </Pressable>
+        ) : auth?.isAuthenticated && typeof auth?.logout === 'function' ? (
+          <Pressable
+            style={styles.headerLogoutButton}
+            onPress={() => auth.logout()}
+            hitSlop={8}
+            accessibilityLabel="Sair da conta"
+          >
+            <Text style={styles.headerLogoutButtonText}>Sair</Text>
+          </Pressable>
+        ) : (
+          <View style={styles.headerPlaceholder} />
+        )}
       </View>
 
       {/* Barra visual de progresso */}
@@ -393,6 +878,8 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
                   placeholderTextColor="#64748b"
                   value={birthDateText}
                   onChangeText={(text) => {
+                    markFieldEdited('birthDate');
+                    markUserInteracted();
                     setBirthDateText(text);
                     if (errors.birthDate) {
                       setErrors((prev) => ({ ...prev, birthDate: null }));
@@ -459,6 +946,8 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
                       placeholderTextColor="#64748b"
                       value={otherGender}
                       onChangeText={(text) => {
+                        markFieldEdited('otherGender');
+                        markUserInteracted();
                         setOtherGender(text);
                         if (errors.otherGender) {
                           setErrors((prev) => ({ ...prev, otherGender: null }));
@@ -592,6 +1081,12 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
                 filteredSuggestions.length > 0 ? (
                   <View style={styles.suggestionsCard}>
                     <Text style={styles.suggestionsHeader}>SUGESTÕES DE JOGOS</Text>
+                    {isSearching ? (
+                      <View style={styles.catalogLoadingRow}>
+                        <ActivityIndicator size="small" color="#9d4edd" />
+                        <Text style={styles.catalogLoadingText}>Buscando no catálogo...</Text>
+                      </View>
+                    ) : null}
                     <View style={styles.suggestionsList}>
                       {filteredSuggestions.map((game) => {
                         const isSelected = questionnaireData.selectedGames.some(
@@ -651,52 +1146,85 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
                   </View>
                 ) : (
                   <View style={styles.noSuggestionsCard}>
-                    <Text style={styles.noSuggestionsText}>
-                      Nenhum jogo correspondente encontrado no catálogo para "{searchQuery.trim()}".
-                    </Text>
-                    <Pressable
-                      style={styles.manualAddPrimaryButton}
-                      onPress={() => handleAddGame(searchQuery)}
-                      accessibilityLabel={`Adicionar ${searchQuery.trim()}`}
-                    >
-                      <Text style={styles.manualAddPrimaryButtonText}>
-                        + Adicionar "{searchQuery.trim()}"
-                      </Text>
-                    </Pressable>
+                    {isSearching ? (
+                      <View style={styles.catalogLoadingRow}>
+                        <ActivityIndicator size="small" color="#9d4edd" />
+                        <Text style={styles.catalogLoadingText}>Buscando no catálogo...</Text>
+                      </View>
+                    ) : (
+                      <>
+                        <Text style={styles.noSuggestionsText}>
+                          Nenhum jogo correspondente encontrado no catálogo para "{searchQuery.trim()}".
+                        </Text>
+                        <Pressable
+                          style={styles.manualAddPrimaryButton}
+                          onPress={() => handleAddGame(searchQuery)}
+                          accessibilityLabel={`Adicionar ${searchQuery.trim()}`}
+                        >
+                          <Text style={styles.manualAddPrimaryButtonText}>
+                            + Adicionar "{searchQuery.trim()}"
+                          </Text>
+                        </Pressable>
+                      </>
+                    )}
                   </View>
                 )
               ) : (
                 <View style={styles.quickSuggestionsCard}>
-                  <Text style={styles.quickSuggestionsHeader}>Sugestões populares:</Text>
-                  <View style={styles.quickChipsWrapper}>
-                    {mockGames.slice(0, 8).map((game) => {
-                      const isSelected = questionnaireData.selectedGames.some(
-                        (g) => g.trim().toLowerCase() === game.trim().toLowerCase()
-                      );
-                      return (
-                        <Pressable
-                          key={game}
-                          style={[
-                            styles.quickChip,
-                            isSelected ? styles.quickChipSelected : null,
-                          ]}
-                          onPress={() => handleAddGame(game)}
-                          disabled={isSelected}
-                        >
-                          <Text
+                  <Text style={styles.quickSuggestionsHeader}>Sugestões populares do catálogo:</Text>
+                  {isCatalogLoading ? (
+                    <View style={styles.catalogLoadingRow}>
+                      <ActivityIndicator size="small" color="#9d4edd" />
+                      <Text style={styles.catalogLoadingText}>Carregando catálogo...</Text>
+                    </View>
+                  ) : catalogError && catalogGames.length === 0 ? (
+                    <View style={styles.catalogUnavailableContainer}>
+                      <Text style={styles.catalogUnavailableText}>
+                        Catálogo temporariamente indisponível. Você pode adicionar seus jogos digitando o nome no campo de busca acima.
+                      </Text>
+                    </View>
+                  ) : catalogGames.length > 0 ? (
+                    <View style={styles.quickChipsWrapper}>
+                      {catalogGames.slice(0, 8).map((game) => {
+                        const isSelected = questionnaireData.selectedGames.some(
+                          (g) => g.trim().toLowerCase() === game.trim().toLowerCase()
+                        );
+                        return (
+                          <Pressable
+                            key={game}
                             style={[
-                              styles.quickChipText,
-                              isSelected ? styles.quickChipTextSelected : null,
+                              styles.quickChip,
+                              isSelected ? styles.quickChipSelected : null,
                             ]}
+                            onPress={() => handleAddGame(game)}
+                            disabled={isSelected}
+                            accessibilityLabel={`Selecionar ${game}`}
                           >
-                            {isSelected ? `✓ ${game}` : `+ ${game}`}
-                          </Text>
-                        </Pressable>
-                      );
-                    })}
-                  </View>
+                            <Text
+                              style={[
+                                styles.quickChipText,
+                                isSelected ? styles.quickChipTextSelected : null,
+                              ]}
+                            >
+                              {isSelected ? `✓ ${game}` : `+ ${game}`}
+                            </Text>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+                  ) : (
+                    <Text style={styles.noCatalogGamesText}>
+                      Nenhum jogo no catálogo ainda. Digite o nome no campo de busca para adicionar.
+                    </Text>
+                  )}
                 </View>
               )}
+
+              {searchError ? (
+                <View style={styles.searchErrorBanner} accessible={true} accessibilityRole="alert">
+                  <Text style={styles.searchErrorText}>{searchError}</Text>
+                </View>
+              ) : null}
 
               {/* LISTA DE JOGOS SELECIONADOS */}
               <View style={styles.selectedSection}>
@@ -858,20 +1386,46 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
                 ) : null}
               </View>
 
+              {/* MENSAGEM VISÍVEL DE ERRO DE SALVAMENTO (COM ACESSIBILIDADE) */}
+              {saveError ? (
+                <View
+                  style={styles.saveErrorBanner}
+                  accessible={true}
+                  accessibilityRole="alert"
+                  accessibilityLiveRegion="assertive"
+                >
+                  <Text style={styles.saveErrorIcon}>⚠️</Text>
+                  <Text style={styles.saveErrorText}>{saveError}</Text>
+                </View>
+              ) : null}
+
               {/* BOTÕES DE CONCLUSÃO E RETORNO */}
               <View style={styles.actionsContainer}>
                 <Pressable
-                  style={styles.primaryButton}
+                  style={[
+                    styles.primaryButton,
+                    isSubmitting ? styles.buttonDisabled : null,
+                  ]}
                   onPress={handleFinishQuestionnaire}
-                  accessibilityLabel="Concluir questionário"
+                  disabled={isSubmitting}
+                  accessibilityLabel={isSubmitting ? 'Salvando questionário...' : isEditMode ? 'Salvar alterações do questionário' : 'Concluir questionário'}
+                  accessibilityState={{ busy: isSubmitting, disabled: isSubmitting }}
                 >
-                  <Text style={styles.primaryButtonText}>Concluir</Text>
+                  {isSubmitting ? (
+                    <View style={styles.submittingContainer}>
+                      <ActivityIndicator size="small" color="#ffffff" />
+                      <Text style={styles.primaryButtonText}>Salvando...</Text>
+                    </View>
+                  ) : (
+                    <Text style={styles.primaryButtonText}>{isEditMode ? 'Salvar alterações' : 'Concluir'}</Text>
+                  )}
                 </Pressable>
 
                 <Pressable
                   style={styles.secondaryButton}
                   onPress={handleBack}
                   accessibilityLabel="Voltar para Etapa 2"
+                  disabled={isSubmitting}
                 >
                   <Text style={styles.secondaryButtonText}>← Voltar para Etapa 2</Text>
                 </Pressable>
@@ -931,6 +1485,19 @@ const styles = StyleSheet.create({
   },
   headerPlaceholder: {
     width: 40,
+  },
+  headerLogoutButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 16,
+    backgroundColor: '#25152a',
+    borderWidth: 1,
+    borderColor: '#5c1d35',
+  },
+  headerLogoutButtonText: {
+    color: '#f87171',
+    fontSize: 12,
+    fontWeight: '700',
   },
   progressContainer: {
     paddingHorizontal: 20,
@@ -1415,5 +1982,76 @@ const styles = StyleSheet.create({
   actionsContainer: {
     gap: 12,
     marginTop: 8,
+  },
+  saveErrorBanner: {
+    backgroundColor: '#2a1118',
+    borderColor: '#ef4444',
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginTop: 8,
+  },
+  saveErrorIcon: {
+    fontSize: 20,
+  },
+  saveErrorText: {
+    color: '#fca5a5',
+    fontSize: 14,
+    fontWeight: '600',
+    lineHeight: 20,
+    flex: 1,
+  },
+  buttonDisabled: {
+    opacity: 0.6,
+  },
+  submittingContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+  },
+  searchErrorBanner: {
+    backgroundColor: '#2a1118',
+    borderColor: '#ef4444',
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    marginTop: 6,
+  },
+  searchErrorText: {
+    color: '#fca5a5',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  catalogLoadingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 8,
+  },
+  catalogLoadingText: {
+    color: '#94a3b8',
+    fontSize: 13,
+  },
+  catalogUnavailableContainer: {
+    backgroundColor: '#1a132e',
+    borderColor: '#34265a',
+    borderWidth: 1,
+    borderRadius: 10,
+    padding: 12,
+  },
+  catalogUnavailableText: {
+    color: '#94a3b8',
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  noCatalogGamesText: {
+    color: '#64748b',
+    fontSize: 13,
   },
 });

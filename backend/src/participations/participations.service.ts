@@ -90,12 +90,14 @@ export class ParticipationsService {
       arenaEnteredAt: schema.participations.arenaEnteredAt,
       finishedAt: schema.participations.finishedAt,
       finishReason: schema.participations.finishReason,
-      externalPosition: sql<string | null>`CASE WHEN ${schema.participations.status} = 'waiting' THEN (
+      // Referências literais mantêm a correlação com a linha externa: o Drizzle
+      // pode remover o qualificador da tabela ao interpolar colunas nesta seleção.
+      externalPosition: sql<string | null>`CASE WHEN "participations"."status" = 'waiting' THEN (
         SELECT COUNT(*)::text
-        FROM participations AS queue_row
-        WHERE queue_row.event_id = ${schema.participations.eventId}
-          AND queue_row.status = 'waiting'
-          AND queue_row.external_queue_order <= ${schema.participations.externalQueueOrder}
+        FROM "participations" AS queue_row
+        WHERE queue_row."event_id" = "participations"."event_id"
+          AND queue_row."status" = 'waiting'
+          AND queue_row."external_queue_order" <= "participations"."external_queue_order"
       ) ELSE NULL END`,
       observedAtMs: sql<number>`(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::double precision`,
     };

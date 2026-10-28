@@ -1,0 +1,17 @@
+{
+  "name": "arenago-independent-regression-tests",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Isolated regression tests; no database connections or production changes",
+  "scripts": {
+    "test": "node --test --test-concurrency=1 --test-reporter=tap tests/*.test.cjs",
+    "test:report": "node run.cjs",
+    "test:existing-guard": "node --test helpers/existing-guard.cjs"
+  },
+  "devDependencies": {
+    "@react-navigation/core": "7.22.1",
+    "@react-navigation/routers": "7.6.4",
+    "react": "19.2.3",
+    "react-test-renderer": "19.2.3"
+  }
+}

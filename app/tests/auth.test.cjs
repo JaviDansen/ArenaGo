@@ -402,7 +402,10 @@ test('login succeeds with completed questionnaire and with pending questionnaire
       hasCompletedQuestionnaire
     );
     assert.deepEqual(h.navigationCalls, []);
-    assert.equal(rig.manager.getSnapshot().postAuthRoute, 'MainTabs');
+    assert.equal(
+      rig.manager.getSnapshot().postAuthRoute,
+      hasCompletedQuestionnaire ? 'MainTabs' : 'ProfileQuestionnaire'
+    );
 
     // Verifica o comportamento da HomeScreen conforme o estado do questionário.
     const home = createHarness('screens/home/HomeScreen.js', {

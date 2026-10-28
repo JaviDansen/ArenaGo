@@ -547,11 +547,17 @@ export function createAuthSessionManager(options = {}) {
       });
     }
 
+    // Proteção contra resposta obsoleta: não reverte questionário concluído
+    if (state.user?.id === liveUser.id && state.user?.hasCompletedQuestionnaire === true) {
+      liveUser.hasCompletedQuestionnaire = true;
+    }
+
     emitState({
       user: liveUser,
       isAuthenticated: true,
       isInitializing: false,
       sessionStatus: 'authenticated',
+      postAuthRoute: liveUser.hasCompletedQuestionnaire ? 'MainTabs' : 'ProfileQuestionnaire',
       networkError: null,
       storageError: null,
     });
@@ -641,6 +647,8 @@ export function createAuthSessionManager(options = {}) {
           return { status: 'aborted', user: state.user };
         }
 
+        const resolvedRoute = liveUser.hasCompletedQuestionnaire ? 'MainTabs' : 'ProfileQuestionnaire';
+
         emitState({
           user: liveUser,
           isAuthenticated: true,
@@ -650,13 +658,13 @@ export function createAuthSessionManager(options = {}) {
           networkError: null,
           storageError: null,
           adminChallenge: null,
-          postAuthRoute: 'MainTabs',
+          postAuthRoute: resolvedRoute,
         });
 
         return {
           status: 'authenticated',
           user: liveUser,
-          nextRoute: 'MainTabs',
+          nextRoute: resolvedRoute,
         };
       } catch (error) {
         if (
@@ -799,7 +807,8 @@ export function createAuthSessionManager(options = {}) {
       });
       if (sessionEpoch === currentEpoch && meResponse?.id) {
         confirmedUser = sanitizePublicUser(meResponse);
-        emitState({ user: confirmedUser });
+        const resolvedRoute = confirmedUser.hasCompletedQuestionnaire ? 'MainTabs' : 'ProfileQuestionnaire';
+        emitState({ user: confirmedUser, postAuthRoute: resolvedRoute });
       }
     } catch (meError) {
       if (meError?.status === 401 && sessionEpoch === currentEpoch) {
@@ -908,6 +917,7 @@ export function createAuthSessionManager(options = {}) {
     accessToken = response.accessToken;
 
     let confirmedUser = loggedUser;
+    const initialRoute = confirmedUser.hasCompletedQuestionnaire ? 'MainTabs' : 'ProfileQuestionnaire';
     emitState({
       user: confirmedUser,
       isAuthenticated: true,
@@ -917,7 +927,7 @@ export function createAuthSessionManager(options = {}) {
       networkError: null,
       storageError: null,
       adminChallenge: null,
-      postAuthRoute: 'MainTabs',
+      postAuthRoute: initialRoute,
     });
 
     // Confirmar dados atuais da conta em GET /auth/me
@@ -930,7 +940,8 @@ export function createAuthSessionManager(options = {}) {
       });
       if (sessionEpoch === currentEpoch && meResponse?.id) {
         confirmedUser = sanitizePublicUser(meResponse);
-        emitState({ user: confirmedUser });
+        const resolvedRoute = confirmedUser.hasCompletedQuestionnaire ? 'MainTabs' : 'ProfileQuestionnaire';
+        emitState({ user: confirmedUser, postAuthRoute: resolvedRoute });
       }
     } catch (meError) {
       if (meError?.status === 401 && sessionEpoch === currentEpoch) {
@@ -939,10 +950,11 @@ export function createAuthSessionManager(options = {}) {
       }
     }
 
+    const finalRoute = confirmedUser.hasCompletedQuestionnaire ? 'MainTabs' : 'ProfileQuestionnaire';
     return {
       status: 'authenticated',
       user: confirmedUser,
-      nextRoute: 'MainTabs',
+      nextRoute: finalRoute,
     };
   }
 
@@ -1046,6 +1058,13 @@ export function createAuthSessionManager(options = {}) {
     onSessionInvalidated: handleSessionInvalidated,
   });
 
+  function markQuestionnaireCompleted() {
+    emitState({
+      user: state.user ? { ...state.user, hasCompletedQuestionnaire: true } : null,
+      postAuthRoute: 'MainTabs',
+    });
+  }
+
   return {
     subscribe,
     getSnapshot,
@@ -1057,6 +1076,7 @@ export function createAuthSessionManager(options = {}) {
     refreshSession,
     restoreSession,
     fetchCurrentUser,
+    markQuestionnaireCompleted,
     clearNotices,
     client,
     tokenStorage,
