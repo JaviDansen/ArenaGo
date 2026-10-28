@@ -39,6 +39,7 @@ export function AuthProvider({
     user: snapshot.user,
     accessToken: manager.getAccessToken(),
     getAccessToken: manager.getAccessToken,
+    getSessionEpoch: manager.getSessionEpoch,
     isAuthenticated: snapshot.isAuthenticated,
     isInitializing: snapshot.isInitializing,
     sessionStatus: snapshot.sessionStatus,
@@ -55,6 +56,7 @@ export function AuthProvider({
     restoreSession: manager.restoreSession,
     fetchCurrentUser: manager.fetchCurrentUser,
     refreshUser: manager.fetchCurrentUser,
+    markQuestionnaireCompleted: manager.markQuestionnaireCompleted,
     clearNotices: manager.clearNotices,
     httpClient: manager.client,
   };

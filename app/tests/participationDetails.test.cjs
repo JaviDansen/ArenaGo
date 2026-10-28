@@ -294,6 +294,7 @@ test('mocks cover repeated experiences, no experiences and re-entry in the same 
 test('details open from the root stack with a back button to the list', () => {
   const authState = { isAuthenticated: true, sessionStatus: 'authenticated', postAuthRoute: 'MainTabs' };
   const app = loadModule('App.js', (name) => {
+    if (name === 'react-native-safe-area-context') return { SafeAreaProvider: 'SafeAreaProvider' };
     if (name === '@react-navigation/native') return { NavigationContainer: 'NavigationContainer' };
     if (name === '@react-navigation/native-stack') {
       return { createNativeStackNavigator: () => ({ Navigator: 'StackNavigator', Screen: 'StackScreen' }) };

@@ -24,13 +24,9 @@ import {
   verifyAccessToken,
 } from "../../src/auth/token.util";
 import { ProblemDetailsExceptionFilter } from "../../src/common/errors/problem-details.filter";
+import { assertSafeTestDatabase } from "./test-db-guard";
 
-const connectionString = process.env.DATABASE_URL;
-if (!connectionString) {
-  throw new Error(
-    "DATABASE_URL local descartável é obrigatório para os testes de integração.",
-  );
-}
+const connectionString = assertSafeTestDatabase(process.env.DATABASE_URL);
 
 /**
  * Controller auxiliar para validar o contrato compartilhado de autenticação
@@ -964,7 +960,7 @@ test("K01 Auth & Sessions — Integração HTTP + PostgreSQL Real", async (t) =>
     );
     const gameId = randomUUID();
     await pool.query(
-      "INSERT INTO games (id, name, is_curated, created_at) VALUES ($1, $2, true, now())",
+      "INSERT INTO games (id, name, is_curated, created_at) VALUES ($1, $2, false, now())",
       [gameId, `Game-${gameId.slice(0, 8)}`],
     );
     await pool.query(

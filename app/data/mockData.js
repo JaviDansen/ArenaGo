@@ -1,3 +1,6 @@
+// Apenas os indicadores do Perfil continuam demonstrativos, sem cálculo pelo histórico.
+export const mockProfileStatistics = { participationCount: 3, totalHours: 8 };
+
 export const mockExperiences = [
   {
     id: 'playstation',

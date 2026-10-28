@@ -17,6 +17,7 @@
     "db:generate": "drizzle-kit generate",
     "db:check": "drizzle-kit check",
     "db:migrate": "drizzle-kit migrate",
+    "db:seed": "tsx src/database/seed.ts",
     "db:studio": "drizzle-kit studio"
   },
   "dependencies": {
@@ -45,6 +46,8 @@
   "overrides": {
     "@esbuild-kit/core-utils": {
       "esbuild": "^0.28.2"
-    }
+    },
+    "body-parser": "^2.4.0",
+    "multer": "^2.5.0"
   }
 }

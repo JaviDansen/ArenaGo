@@ -12,6 +12,7 @@ function ImportedScreen() {}
 const gateExports = loadModule('screens/auth/AuthSessionGate.js', (name) => {
   if (name === 'react') return { ...require('react'), useState: (value) => [value, () => {}] };
   if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
+  if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView' };
   if (name === 'react-native') {
     return Object.fromEntries(
       ['ActivityIndicator', 'Pressable', 'SafeAreaView', 'StyleSheet', 'Text', 'View'].map(
@@ -117,7 +118,7 @@ test('React Navigation replaces Login with MainTabs immediately when login authe
           isAuthenticated: true,
           sessionStatus: 'authenticated',
           postAuthRoute: 'MainTabs',
-          user: { hasCompletedQuestionnaire: false },
+          user: { hasCompletedQuestionnaire: true },
         };
         return { status: 'authenticated', user: authState.user };
       },
@@ -195,7 +196,7 @@ test('React Navigation switches auth route sets for signup, logout, relogin and 
     isAuthenticated: true,
     sessionStatus: 'authenticated',
     postAuthRoute: 'MainTabs',
-    user: { hasCompletedQuestionnaire: false },
+    user: { hasCompletedQuestionnaire: true },
   });
   const restoredRouter = StackRouter(routerOptions(restoredTree.names));
   state = restoredRouter.getInitialState(routerOptions(restoredTree.names));
@@ -229,10 +230,10 @@ test('failed authentication leaves the Login route set available and does not pr
   assert.equal(loginErrorTree.names[0], 'Login');
 });
 
-test('HomeScreen logout calls auth.logout once and leaves navigation to AuthSessionGate', async () => {
+test('ProfileScreen logout calls auth.logout once and leaves navigation to AuthSessionGate', async () => {
   let finishLogout;
   let logoutCalls = 0;
-  const h = createHarness('screens/home/HomeScreen.js', {
+  const h = createHarness('screens/profile/ProfileScreen.js', {
     authContext: {
       user: { hasCompletedQuestionnaire: true },
       logout: () => {
@@ -247,10 +248,11 @@ test('HomeScreen logout calls auth.logout once and leaves navigation to AuthSess
   let logoutPromise;
   h.act(() => {
     const button = h.nodes.find(
-      (node) => node.type === 'Pressable' && textOf(node) === 'Sair da conta'
+      (node) => node.type === 'Pressable' && textOf(node) === 'SAIR DA CONTA'
     );
     assert.ok(button);
     logoutPromise = button.props.onPress();
+    button.props.onPress();
   });
   assert.equal(logoutCalls, 1);
   const logoutButton = h.nodes.find(
@@ -262,4 +264,130 @@ test('HomeScreen logout calls auth.logout once and leaves navigation to AuthSess
   finishLogout();
   await logoutPromise;
   assert.deepEqual(h.navigationCalls, []);
+});
+
+test('K05 Auditoria: Login com questionario pendente direciona para ProfileQuestionnaire', async () => {
+  const publicTree = renderStack({ isAuthenticated: false, sessionStatus: 'unauthenticated' });
+  const publicRouter = StackRouter(routerOptions(publicTree.names));
+  let state = publicRouter.getInitialState(routerOptions(publicTree.names));
+  state = navigate(publicRouter, state, publicTree.names, 'Login');
+
+  const loginScreen = createHarness('screens/auth/LoginScreen.js', {
+    authContext: {
+      clearNotices() {},
+      async login() {
+        authState = {
+          isAuthenticated: true,
+          sessionStatus: 'authenticated',
+          postAuthRoute: 'ProfileQuestionnaire',
+          user: { id: 'u-1', name: 'Pendente', hasCompletedQuestionnaire: false },
+        };
+        return { status: 'authenticated', user: authState.user, nextRoute: 'ProfileQuestionnaire' };
+      },
+    },
+  });
+
+  for (const [placeholder, value] of [
+    ['seu.email@exemplo.com', 'pendente@example.com'],
+    ['Digite sua senha', 'ValidPassword#2026'],
+  ]) {
+    loginScreen.act(() => {
+      loginScreen.nodes.find(
+        (node) => node.type === 'TextInput' && node.props.placeholder === placeholder
+      ).props.onChangeText(value);
+    });
+  }
+  await loginScreen.actAsync(() => loginScreen.press('Entrar na conta'));
+  assert.deepEqual(loginScreen.navigationCalls, []);
+
+  const signedInTree = renderStack(authState);
+  assert.equal(signedInTree.names[0], 'ProfileQuestionnaire', 'Primeira rota da stack deve ser ProfileQuestionnaire');
+  state = routeChange(publicRouter, state, signedInTree.names);
+  assert.deepEqual(state.routes.map((route) => route.name), ['ProfileQuestionnaire']);
+  assert.equal(state.routes[state.index].name, 'ProfileQuestionnaire');
+});
+
+test('K05 Auditoria: Restauracao de sessao com questionario pendente direciona para ProfileQuestionnaire', () => {
+  const pendingRestoreTree = renderStack({
+    isAuthenticated: true,
+    sessionStatus: 'authenticated',
+    user: { id: 'u-2', name: 'Restaurado Pendente', hasCompletedQuestionnaire: false },
+  });
+  assert.equal(pendingRestoreTree.names[0], 'ProfileQuestionnaire');
+  const router = StackRouter(routerOptions(pendingRestoreTree.names));
+  const state = router.getInitialState(routerOptions(pendingRestoreTree.names));
+  assert.equal(state.routes[state.index].name, 'ProfileQuestionnaire');
+});
+
+test('Adversarial A.1: Usuario com questionario pendente tem acesso estritamente bloqueado a rotas operacionais', () => {
+  const pendingTree = renderStack({
+    isAuthenticated: true,
+    sessionStatus: 'authenticated',
+    user: { id: 'u-pending', name: 'Participante Pendente', hasCompletedQuestionnaire: false },
+  });
+
+  // Apenas ProfileQuestionnaire e alias Questionario devem estar presentes na Stack
+  assert.deepEqual(pendingTree.names, ['ProfileQuestionnaire', 'Questionario']);
+
+  const router = StackRouter(routerOptions(pendingTree.names));
+  const initialState = router.getInitialState(routerOptions(pendingTree.names));
+  assert.equal(initialState.routes[initialState.index].name, 'ProfileQuestionnaire');
+
+  // Tentativas de navegacao direta para qualquer rota operacional devem ser completamente rejeitadas
+  for (const forbiddenRoute of ['MainTabs', 'EventEntry', 'EventConfirmation', 'ParticipationDetails', 'Evaluation']) {
+    const attemptedState = navigate(router, initialState, pendingTree.names, forbiddenRoute);
+    assert.equal(
+      attemptedState,
+      null,
+      `Rota operacional "${forbiddenRoute}" nao deve ser acessivel para usuario com questionario pendente`
+    );
+  }
+});
+
+test('Adversarial A.2: Usuario com questionario concluido tem acesso completo as rotas operacionais', () => {
+  const completedTree = renderStack({
+    isAuthenticated: true,
+    sessionStatus: 'authenticated',
+    user: { id: 'u-completed', name: 'Participante Concluido', hasCompletedQuestionnaire: true },
+  });
+
+  assert.ok(completedTree.names.includes('MainTabs'));
+  assert.ok(completedTree.names.includes('EventEntry'));
+  assert.ok(completedTree.names.includes('EventConfirmation'));
+  assert.ok(completedTree.names.includes('ParticipationDetails'));
+  assert.ok(completedTree.names.includes('Evaluation'));
+
+  const router = StackRouter(routerOptions(completedTree.names));
+  const initialState = router.getInitialState(routerOptions(completedTree.names));
+  assert.equal(initialState.routes[initialState.index].name, 'MainTabs');
+
+  const navEventEntry = navigate(router, initialState, completedTree.names, 'EventEntry');
+  assert.ok(navEventEntry);
+  assert.equal(navEventEntry.routes[navEventEntry.index].name, 'EventEntry');
+});
+
+test('Adversarial A.3: Questionario de perfil preserva acoes para encerrar a sessao via logout', async () => {
+  let logoutCalled = false;
+  const h = createHarness('screens/profile/ProfileQuestionnaireScreen.js', {
+    fields: ['handleBack'],
+    authContext: {
+      isAuthenticated: true,
+      user: { id: 'u-1', hasCompletedQuestionnaire: false },
+      httpClient: {
+        get: () => ({ then: (fn) => { fn({}); return { catch: () => {} }; } }),
+      },
+      logout: () => {
+        logoutCalled = true;
+      },
+    },
+  });
+
+  // Verifica que o botao "Sair da conta" esta presente e acessivel no cabecalho
+  h.act(() => h.press('Sair da conta'));
+  assert.equal(logoutCalled, true, 'Botao de sair no cabecalho deve disparar auth.logout()');
+
+  // Verifica que handleBack na etapa 0 tambem dispara logout quando nao ha tela anterior
+  logoutCalled = false;
+  h.act((c) => c.handleBack());
+  assert.equal(logoutCalled, true, 'handleBack na etapa 0 deve disparar logout para nao reter usuario preso');
 });
