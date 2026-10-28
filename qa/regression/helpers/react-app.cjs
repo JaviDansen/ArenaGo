@@ -51,6 +51,7 @@ const questionnaire = loadJs('app/screens/profile/ProfileQuestionnaireScreen.js'
 const gate = loadJs('app/screens/auth/AuthSessionGate.js', {
   react: React, 'react/jsx-runtime': jsx, 'react-native': native,
   'expo-status-bar': { StatusBar: 'StatusBar' },
+  'react-native-safe-area-context': { SafeAreaView: 'SafeAreaView' },
   '../../context/AuthContext': authContext,
 });
 
@@ -145,6 +146,7 @@ async function mount({ routed = false, catalog = [], deferCatalog = false } = {}
   const Placeholder = ({ route }) => React.createElement('Text', null, route?.name);
   const imports = {
     'react/jsx-runtime': jsx,
+    'react-native-safe-area-context': { SafeAreaProvider: passthrough },
     '@react-navigation/native': { NavigationContainer: Container },
     '@react-navigation/native-stack': {
       createNativeStackNavigator: () => ({ ...stack, Navigator: RecordingNavigator }),
