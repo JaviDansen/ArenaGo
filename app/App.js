@@ -14,6 +14,7 @@ import LoginScreen from './screens/auth/LoginScreen';
 import ParticipationDetailsScreen from './screens/participation/ParticipationDetailsScreen';
 import ProfileQuestionnaireScreen from './screens/profile/ProfileQuestionnaireScreen';
 import RegisterScreen from './screens/auth/RegisterScreen';
+import StaffDemoNavigator from './screens/staff/StaffDemoNavigator';
 import WelcomeScreen from './screens/auth/WelcomeScreen';
 
 const Stack = createNativeStackNavigator();
@@ -54,6 +55,8 @@ export function AppNavigation() {
       component: EvaluationScreen,
       options: { headerShown: true, headerBackVisible: false, title: 'Avaliação' },
     },
+    // Área Staff somente em modo demonstração; não concede permissão Staff real.
+    { name: 'StaffDemo', component: StaffDemoNavigator },
   ];
   const isQuestionnairePending =
     isAuthenticated && auth?.user && auth?.user.hasCompletedQuestionnaire === false;

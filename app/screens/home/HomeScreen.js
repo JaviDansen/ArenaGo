@@ -49,6 +49,14 @@ export default function HomeScreen({ navigation }) {
         <Text style={styles.eventButtonText}>Entrar em um evento</Text>
       </Pressable>
 
+      <Pressable
+        style={styles.staffButton}
+        onPress={() => navigation.navigate('StaffDemo')}
+        accessibilityRole="button"
+      >
+        <Text style={styles.staffButtonText}>Área do Staff (demonstração)</Text>
+      </Pressable>
+
       <StatusBar style="dark" />
     </ScreenContainer>
   );
@@ -109,5 +117,17 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 16,
     fontWeight: 'bold',
+  },
+  staffButton: {
+    alignItems: 'center',
+    backgroundColor: '#f3f4f6',
+    borderRadius: 4,
+    marginTop: 12,
+    padding: 12,
+  },
+  staffButtonText: {
+    color: '#111827',
+    fontSize: 15,
+    fontWeight: '600',
   },
 });
