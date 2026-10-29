@@ -6,6 +6,7 @@ import { DRIZZLE_DATABASE } from "../database/database.module";
 import type { DatabaseExecutor, DatabaseTransactionExecutor } from "../database/database-executor";
 import * as schema from "../database/schema";
 import { EventsService } from "../events/events.service";
+import type { EventAvailabilityResult } from "../events/event-availability";
 import type { JoinEligibilityResult } from "./join-eligibility";
 import { combineJoinEligibility, recombineJoinEligibilityWithAvailability } from "./join-eligibility";
 import type { JsonValue } from "./join-idempotency";
@@ -50,19 +51,107 @@ export interface ParticipationState {
   externalQueue: { position: number; observedAt: Date } | null;
 }
 
+/** Resultado interno de domínio; não representa autorização administrativa nem resposta HTTP. */
+export type SetExternalQueueEnabledResult =
+  | { kind: "event_not_found" }
+  | { kind: "blocked"; availability: EventAvailabilityResult }
+  | { kind: "unchanged"; eventId: string; externalQueueEnabled: boolean; releasedCount: 0 }
+  | {
+      kind: "changed";
+      eventId: string;
+      externalQueueEnabled: boolean;
+      releasedCount: number;
+      changedAt: Date;
+    };
+
 class JoinEligibilityRollback extends Error {
   constructor(readonly eligibility: JoinEligibilityResult) {
     super("Elegibilidade de ingresso não atendida.");
   }
 }
 
-/** Consultas informativas sobre pré-requisitos de ingresso, sem criar participação. */
+/** Consultas, ingresso e liberação externa de participações com os protocolos de locks do domínio. */
 @Injectable()
 export class ParticipationsService {
   constructor(
     @Inject(DRIZZLE_DATABASE) private readonly database: ParticipationsDatabase,
     private readonly eventsService: EventsService,
   ) {}
+
+  /**
+   * Alterna a fila externa e, ao desligá-la, libera todos os waiting atomicamente (D06).
+   *
+   * @remarks Operação interna para chamador confiável. A futura API Admin deve exigir
+   * Admin/TOTP, justificativa e auditoria na mesma transação; este método não expõe rota.
+   * Usa a ordem evento → participações (UUID crescente), sem travar usuários: não lê nem
+   * altera perfis. O lock exclusivo do evento serializa com E03 e demais alternâncias.
+   * Repetições do estado persistido são no-op, inclusive depois do corte; mudanças reais
+   * exigem que o evento ainda aceite ingressos. Nenhum contador ou snapshot é reescrito.
+   */
+  async setExternalQueueEnabled(
+    eventId: string,
+    enabled: boolean,
+  ): Promise<SetExternalQueueEnabledResult> {
+    return this.database.transaction(async (tx): Promise<SetExternalQueueEnabledResult> => {
+      const [event] = await tx
+        .select({ externalQueueEnabled: schema.events.externalQueueEnabled })
+        .from(schema.events)
+        .where(eq(schema.events.id, eventId))
+        .for("update")
+        .limit(1);
+      if (!event) return { kind: "event_not_found" };
+      if (event.externalQueueEnabled === enabled) {
+        return { kind: "unchanged", eventId, externalQueueEnabled: enabled, releasedCount: 0 };
+      }
+
+      if (!enabled) {
+        // Aguarda também eventuais escritores de participação antes de decidir o horário.
+        // O evento já bloqueado impede que E03 acrescente novos waiting neste intervalo.
+        await tx.select({ id: schema.participations.id })
+          .from(schema.participations)
+          .where(and(
+            eq(schema.participations.eventId, eventId),
+            eq(schema.participations.status, "waiting"),
+          ))
+          .orderBy(asc(schema.participations.id))
+          .for("update");
+      }
+
+      const clock = await tx.execute<{ decisionAtMs: number }>(
+        sql`SELECT (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::double precision AS "decisionAtMs"`,
+      );
+      const decisionAtMs = clock.rows[0]?.decisionAtMs;
+      if (typeof decisionAtMs !== "number" || !Number.isFinite(decisionAtMs)) {
+        throw new Error("PostgreSQL não retornou o instante decisivo da alteração da fila externa.");
+      }
+      const changedAt = new Date(decisionAtMs);
+      if (!Number.isFinite(changedAt.getTime())) {
+        throw new Error("PostgreSQL retornou um instante da fila externa fora do intervalo de Date.");
+      }
+
+      // Reutiliza as guardas de E01/E03: prontidão, início, corte oficial e fechamento Admin.
+      const availability = await this.eventsService.evaluateEventAvailabilityById(eventId, changedAt, tx);
+      if (!availability.eventExists || !availability.eventAcceptingNewEntries) {
+        return { kind: "blocked", availability };
+      }
+
+      await tx.update(schema.events)
+        .set({ externalQueueEnabled: enabled, updatedAt: changedAt })
+        .where(eq(schema.events.id, eventId));
+
+      let releasedCount = 0;
+      if (!enabled) {
+        const released = await tx.update(schema.participations)
+          .set({ status: "active", arenaEnteredAt: changedAt })
+          .where(and(
+            eq(schema.participations.eventId, eventId),
+            eq(schema.participations.status, "waiting"),
+          ));
+        releasedCount = released.rowCount ?? 0;
+      }
+      return { kind: "changed", eventId, externalQueueEnabled: enabled, releasedCount, changedAt };
+    }, { isolationLevel: "read committed" });
+  }
 
   /** Consulta a única participação corrente do usuário e sua posição externa observada. */
   async getCurrentParticipation(userId: string): Promise<ParticipationState | null> {

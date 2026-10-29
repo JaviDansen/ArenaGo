@@ -1,0 +1,1119 @@
+diff --git a/backend/src/participations/participations.service.ts b/backend/src/participations/participations.service.ts
+index 97e660b..779bd3a 100644
+--- a/backend/src/participations/participations.service.ts
++++ b/backend/src/participations/participations.service.ts
+@@ -6,6 +6,7 @@ import { DRIZZLE_DATABASE } from "../database/database.module";
+ import type { DatabaseExecutor, DatabaseTransactionExecutor } from "../database/database-executor";
+ import * as schema from "../database/schema";
+ import { EventsService } from "../events/events.service";
++import type { EventAvailabilityResult } from "../events/event-availability";
+ import type { JoinEligibilityResult } from "./join-eligibility";
+ import { combineJoinEligibility, recombineJoinEligibilityWithAvailability } from "./join-eligibility";
+ import type { JsonValue } from "./join-idempotency";
+@@ -50,13 +51,26 @@ export interface ParticipationState {
+   externalQueue: { position: number; observedAt: Date } | null;
+ }
+ 
++/** Resultado interno de domínio; não representa autorização administrativa nem resposta HTTP. */
++export type SetExternalQueueEnabledResult =
++  | { kind: "event_not_found" }
++  | { kind: "blocked"; availability: EventAvailabilityResult }
++  | { kind: "unchanged"; eventId: string; externalQueueEnabled: boolean; releasedCount: 0 }
++  | {
++      kind: "changed";
++      eventId: string;
++      externalQueueEnabled: boolean;
++      releasedCount: number;
++      changedAt: Date;
++    };
++
+ class JoinEligibilityRollback extends Error {
+   constructor(readonly eligibility: JoinEligibilityResult) {
+     super("Elegibilidade de ingresso não atendida.");
+   }
+ }
+ 
+-/** Consultas informativas sobre pré-requisitos de ingresso, sem criar participação. */
++/** Consultas, ingresso e liberação externa de participações com os protocolos de locks do domínio. */
+ @Injectable()
+ export class ParticipationsService {
+   constructor(
+@@ -64,6 +78,81 @@ export class ParticipationsService {
+     private readonly eventsService: EventsService,
+   ) {}
+ 
++  /**
++   * Alterna a fila externa e, ao desligá-la, libera todos os waiting atomicamente (D06).
++   *
++   * @remarks Operação interna para chamador confiável. A futura API Admin deve exigir
++   * Admin/TOTP, justificativa e auditoria na mesma transação; este método não expõe rota.
++   * Usa a ordem evento → participações (UUID crescente), sem travar usuários: não lê nem
++   * altera perfis. O lock exclusivo do evento serializa com E03 e demais alternâncias.
++   * Repetições do estado persistido são no-op, inclusive depois do corte; mudanças reais
++   * exigem que o evento ainda aceite ingressos. Nenhum contador ou snapshot é reescrito.
++   */
++  async setExternalQueueEnabled(
++    eventId: string,
++    enabled: boolean,
++  ): Promise<SetExternalQueueEnabledResult> {
++    return this.database.transaction(async (tx): Promise<SetExternalQueueEnabledResult> => {
++      const [event] = await tx
++        .select({ externalQueueEnabled: schema.events.externalQueueEnabled })
++        .from(schema.events)
++        .where(eq(schema.events.id, eventId))
++        .for("update")
++        .limit(1);
++      if (!event) return { kind: "event_not_found" };
++      if (event.externalQueueEnabled === enabled) {
++        return { kind: "unchanged", eventId, externalQueueEnabled: enabled, releasedCount: 0 };
++      }
++
++      if (!enabled) {
++        // Aguarda também eventuais escritores de participação antes de decidir o horário.
++        // O evento já bloqueado impede que E03 acrescente novos waiting neste intervalo.
++        await tx.select({ id: schema.participations.id })
++          .from(schema.participations)
++          .where(and(
++            eq(schema.participations.eventId, eventId),
++            eq(schema.participations.status, "waiting"),
++          ))
++          .orderBy(asc(schema.participations.id))
++          .for("update");
++      }
++
++      const clock = await tx.execute<{ decisionAtMs: number }>(
++        sql`SELECT (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::double precision AS "decisionAtMs"`,
++      );
++      const decisionAtMs = clock.rows[0]?.decisionAtMs;
++      if (typeof decisionAtMs !== "number" || !Number.isFinite(decisionAtMs)) {
++        throw new Error("PostgreSQL não retornou o instante decisivo da alteração da fila externa.");
++      }
++      const changedAt = new Date(decisionAtMs);
++      if (!Number.isFinite(changedAt.getTime())) {
++        throw new Error("PostgreSQL retornou um instante da fila externa fora do intervalo de Date.");
++      }
++
++      // Reutiliza as guardas de E01/E03: prontidão, início, corte oficial e fechamento Admin.
++      const availability = await this.eventsService.evaluateEventAvailabilityById(eventId, changedAt, tx);
++      if (!availability.eventExists || !availability.eventAcceptingNewEntries) {
++        return { kind: "blocked", availability };
++      }
++
++      await tx.update(schema.events)
++        .set({ externalQueueEnabled: enabled, updatedAt: changedAt })
++        .where(eq(schema.events.id, eventId));
++
++      let releasedCount = 0;
++      if (!enabled) {
++        const released = await tx.update(schema.participations)
++          .set({ status: "active", arenaEnteredAt: changedAt })
++          .where(and(
++            eq(schema.participations.eventId, eventId),
++            eq(schema.participations.status, "waiting"),
++          ));
++        releasedCount = released.rowCount ?? 0;
++      }
++      return { kind: "changed", eventId, externalQueueEnabled: enabled, releasedCount, changedAt };
++    }, { isolationLevel: "read committed" });
++  }
++
+   /** Consulta a única participação corrente do usuário e sua posição externa observada. */
+   async getCurrentParticipation(userId: string): Promise<ParticipationState | null> {
+     return this.findParticipationState(userId);
+@@ -481,4 +570,4 @@ export class ParticipationsService {
+       throw error;
+     }
+   }
+-}
+\ No newline at end of file
++}
+diff --git a/backend/test/unit/external-queue.test.ts b/backend/test/unit/external-queue.test.ts
+new file mode 100644
+index 0000000..3688804
+--- /dev/null
++++ b/backend/test/unit/external-queue.test.ts
+@@ -0,0 +1,147 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { drizzle } from "drizzle-orm/node-postgres";
++import type { Client } from "pg";
++import * as schema from "../../src/database/schema";
++import { buildEventAvailabilityResult, evaluateEventConfigurationReadiness } from "../../src/events/event-availability";
++import { evaluateEventEntryWindow } from "../../src/events/event-entry-window";
++import { buildEventOperationalCapacityResult } from "../../src/events/event-operational-capacity";
++import { EventsService } from "../../src/events/events.service";
++import { ParticipationsService } from "../../src/participations/participations.service";
++
++const eventId = "00000000-0000-4000-8000-000000000001";
++const decisionAt = new Date("2026-10-28T15:00:00Z");
++
++function fixture(options: {
++  enabled?: boolean;
++  exists?: boolean;
++  clock?: number;
++  status?: string;
++  startsAt?: Date;
++  officialEndsAt?: Date;
++  closureRequestedAt?: Date | null;
++  hasStaff?: boolean;
++  hasStation?: boolean;
++  failRelease?: boolean;
++} = {}) {
++  const queries: Array<{ text: string; params: unknown[] }> = [];
++  const client = {
++    async query(config: { text: string }, params: unknown[]) {
++      const query = config.text;
++      queries.push({ text: query, params });
++      if (query.startsWith("select") && query.includes('from "events"')) {
++        return { rows: options.exists === false ? [] : [[options.enabled ?? true]], rowCount: 1 };
++      }
++      if (query.startsWith("SELECT") && query.includes("clock_timestamp()")) {
++        return { rows: [{ decisionAtMs: options.clock ?? decisionAt.getTime() }], rowCount: 1 };
++      }
++      if (query.startsWith('update "participations"')) {
++        if (options.failRelease) throw new Error("falha de persistência da liberação");
++        return { rows: [], rowCount: 3 };
++      }
++      return { rows: [], rowCount: 0 };
++    },
++  };
++  const database = drizzle(client as unknown as Client, { schema });
++  const events = new EventsService(database);
++  events.evaluateEventAvailabilityById = async (id, at, executor) => {
++    assert.equal(id, eventId);
++    assert.equal(at.getTime(), decisionAt.getTime());
++    assert.notEqual(executor, database, "a disponibilidade precisa usar a mesma transação");
++    const event = {
++      name: "E05 unit",
++      accessCodeNormalized: "E05-UNIT",
++      timezone: "America/Sao_Paulo",
++      externalQueueEnabled: options.enabled ?? true,
++      startsAt: options.startsAt ?? new Date("2026-10-28T14:00:00Z"),
++      officialEndsAt: options.officialEndsAt ?? new Date("2026-10-28T16:00:00Z"),
++      operationalDeadlineAt: new Date("2026-10-28T17:00:00Z"),
++      closureRequestedAt: options.closureRequestedAt ?? null,
++      adminDeadlineAt: null,
++    };
++    return buildEventAvailabilityResult({
++      eventId: id,
++      eventStatus: options.status ?? "open",
++      configuration: evaluateEventConfigurationReadiness(event),
++      entryWindow: evaluateEventEntryWindow(event, at),
++      operationalCapacity: buildEventOperationalCapacityResult(
++        options.hasStaff ?? true, options.hasStation ?? true,
++      ),
++    });
++  };
++  return { service: new ParticipationsService(database, events), queries };
++}
++
++test("E05 libera waiting na mesma transação e usa o relógio após todos os locks", async () => {
++  const { service, queries } = fixture();
++  assert.deepEqual(await service.setExternalQueueEnabled(eventId, false), {
++    kind: "changed", eventId, externalQueueEnabled: false, releasedCount: 3, changedAt: decisionAt,
++  });
++  assert.equal(queries[0].text, "begin isolation level read committed");
++  assert.match(queries[1].text, /from "events".*for update/);
++  assert.match(queries[2].text, /from "participations".*order by.*for update/);
++  assert.deepEqual(queries[2].params, [eventId, "waiting"]);
++  assert.match(queries[3].text, /clock_timestamp\(\)/);
++  const writes = queries.filter((q) => q.text.startsWith("update"));
++  assert.equal(writes.length, 2);
++  assert.match(writes[0].text, /^update "events" set "external_queue_enabled" = \$1, "updated_at" = \$2 where/);
++  assert.deepEqual(writes[0].params, [false, decisionAt.toISOString(), eventId]);
++  assert.match(writes[1].text, /^update "participations" set "status" = \$1, "arena_entered_at" = \$2 where/);
++  assert.deepEqual(writes[1].params, ["active", decisionAt.toISOString(), eventId, "waiting"]);
++  assert.equal(queries.at(-1)?.text, "commit");
++});
++
++test("E05 reativação só muda o evento; repetições não escrevem nem consultam novo horário", async () => {
++  const enabling = fixture({ enabled: false });
++  const result = await enabling.service.setExternalQueueEnabled(eventId, true);
++  assert.equal(result.kind, "changed");
++  if (result.kind === "changed") assert.equal(result.releasedCount, 0);
++  assert.equal(enabling.queries.some((q) => q.text.includes('"participations"')), false);
++  for (const enabled of [false, true]) {
++    const repeated = fixture({ enabled, status: "closed" });
++    assert.deepEqual(await repeated.service.setExternalQueueEnabled(eventId, enabled), {
++      kind: "unchanged", eventId, externalQueueEnabled: enabled, releasedCount: 0,
++    });
++    assert.equal(repeated.queries.length, 3); // BEGIN, lock/leitura do evento, COMMIT.
++  }
++});
++
++test("E05 evento ausente não altera dados", async () => {
++  const { service, queries } = fixture({ exists: false });
++  assert.deepEqual(await service.setExternalQueueEnabled(eventId, false), { kind: "event_not_found" });
++  assert.equal(queries.length, 3);
++});
++
++test("E05 início inclusivo permite mudança; cortes exatos, fechamento e falta de prontidão bloqueiam", async () => {
++  const atStart = fixture({ startsAt: decisionAt });
++  assert.equal((await atStart.service.setExternalQueueEnabled(eventId, false)).kind, "changed");
++  const cases = [
++    { startsAt: new Date(decisionAt.getTime() + 1) },
++    { officialEndsAt: decisionAt },
++    { closureRequestedAt: decisionAt },
++    { status: "closing" },
++    { status: "closed" },
++    { hasStaff: false },
++    { hasStation: false },
++  ];
++  for (const options of cases) {
++    for (const enabled of [true, false]) {
++      const { service, queries } = fixture({ ...options, enabled: !enabled });
++      const result = await service.setExternalQueueEnabled(eventId, enabled);
++      assert.equal(result.kind, "blocked", JSON.stringify(options));
++      assert.equal(queries.some((q) => q.text.startsWith("update")), false);
++    }
++  }
++});
++
++test("E05 relógio inválido e falha na liberação abortam a transação", async () => {
++  for (const clock of [NaN, Infinity, 9e15]) {
++    const { service, queries } = fixture({ clock });
++    await assert.rejects(service.setExternalQueueEnabled(eventId, false), /PostgreSQL/);
++    assert.equal(queries.at(-1)?.text, "rollback");
++    assert.equal(queries.some((q) => q.text.startsWith("update")), false);
++  }
++  const failed = fixture({ failRelease: true });
++  await assert.rejects(failed.service.setExternalQueueEnabled(eventId, false));
++  assert.equal(failed.queries.at(-1)?.text, "rollback");
++});
+diff --git a/backend/test/integration/external-queue.integration.test.ts b/backend/test/integration/external-queue.integration.test.ts
+new file mode 100644
+index 0000000..920b48a
+--- /dev/null
++++ b/backend/test/integration/external-queue.integration.test.ts
+@@ -0,0 +1,595 @@
++import assert from "node:assert/strict";
++import { eq, inArray } from "drizzle-orm";
++import { randomUUID } from "node:crypto";
++import { after, test } from "node:test";
++import { drizzle } from "drizzle-orm/node-postgres";
++import { Pool } from "pg";
++import type { DatabaseTransactionExecutor } from "../../src/database/database-executor";
++import * as schema from "../../src/database/schema";
++import { EventsService } from "../../src/events/events.service";
++import { ParticipationsService, type SetExternalQueueEnabledResult } from "../../src/participations/participations.service";
++import { assertSafeTestDatabase } from "./test-db-guard";
++
++// Validar todas as fontes antes de criar qualquer conexão. Não imprimir URLs/credenciais.
++const urls = ["DATABASE_URL", "DATABASE_DIRECT_URL", "EVENTS_TEST_DATABASE_URL"].map((name) => {
++  const value = assertSafeTestDatabase(process.env[name]);
++  const url = new URL(value);
++  if (url.hostname !== "127.0.0.1" || url.port !== "55432" || url.pathname !== "/arenago_events_test") {
++    throw new Error(`${name} deve apontar exatamente a 127.0.0.1:55432/arenago_events_test.`);
++  }
++  return value;
++});
++const appName = `arena-e05-${randomUUID()}`;
++const servicePool = new Pool({ connectionString: urls[2], application_name: appName, max: 6 });
++const fixturePool = new Pool({ connectionString: urls[2], max: 4 });
++const database = drizzle(servicePool, { schema });
++const service = new ParticipationsService(database, new EventsService(database));
++function fixtureIds() {
++  return { users: [] as string[], events: [] as string[], participations: [] as string[], versions: [] as string[], games: [] as string[] };
++}
++type FixtureIds = ReturnType<typeof fixtureIds>;
++const ids = fixtureIds();
++const fixtureScopes = [ids];
++
++after(async () => {
++  const errors: unknown[] = [];
++  try {
++    for (const tracked of fixtureScopes) {
++      try {
++        await cleanupFixtures(tracked);
++      } catch (error) {
++        errors.push(error);
++      }
++    }
++  } catch (error) {
++    errors.push(error);
++  } finally {
++    const closed = await Promise.allSettled([servicePool.end(), fixturePool.end()]);
++    for (const result of closed) if (result.status === "rejected") errors.push(result.reason);
++  }
++  if (errors.length) throw new AggregateError(errors, "Falha na limpeza/encerramento da suíte E05.");
++});
++
++/** Remove apenas o grafo das fixtures indicadas; qualquer falha reverte a limpeza inteira. */
++async function cleanupFixtures(tracked: FixtureIds): Promise<void> {
++  const client = await fixturePool.connect();
++  try {
++    await client.query("BEGIN");
++    const scope = [tracked.events, tracked.participations];
++    const participationScope = "SELECT id FROM participations WHERE event_id=ANY($1::uuid[]) OR id=ANY($2::uuid[])";
++    // Romper a FK circular antes de excluir entradas ou participações.
++    await client.query(`UPDATE participations SET current_queue_entry_id=NULL
++      WHERE (event_id=ANY($1::uuid[]) OR id=ANY($2::uuid[])) AND current_queue_entry_id IS NOT NULL`, scope);
++    await client.query(`DELETE FROM service_sessions s USING queue_entries q
++      WHERE s.queue_entry_id=q.id AND (q.event_id=ANY($1::uuid[]) OR q.participation_id=ANY($2::uuid[]))`, scope);
++    await client.query(`DELETE FROM evaluations WHERE participation_id IN (${participationScope})`, scope);
++    await client.query(`DELETE FROM queue_entries
++      WHERE event_id=ANY($1::uuid[]) OR participation_id=ANY($2::uuid[])`, scope);
++    await client.query(`DELETE FROM participation_profile_snapshots WHERE participation_id IN (${participationScope})`, scope);
++    await client.query(`DELETE FROM participations WHERE event_id=ANY($1::uuid[]) OR id=ANY($2::uuid[])`, scope);
++    await client.query("DELETE FROM idempotency_operations WHERE actor_user_id=ANY($1::uuid[])", [tracked.users]);
++    await client.query("DELETE FROM user_games WHERE user_id=ANY($1::uuid[])", [tracked.users]);
++    await client.query("DELETE FROM profiles WHERE user_id=ANY($1::uuid[])", [tracked.users]);
++    await client.query(`DELETE FROM stations s USING experiences e
++      WHERE s.experience_id=e.id AND e.event_id=ANY($1::uuid[])`, [tracked.events]);
++    await client.query("DELETE FROM experiences WHERE event_id=ANY($1::uuid[])", [tracked.events]);
++    await client.query("DELETE FROM user_roles WHERE event_id=ANY($1::uuid[]) OR user_id=ANY($2::uuid[])", [tracked.events, tracked.users]);
++    await client.query("DELETE FROM audit_logs WHERE event_id=ANY($1::uuid[])", [tracked.events]);
++    await client.query("DELETE FROM events WHERE id=ANY($1::uuid[])", [tracked.events]);
++    await client.query("DELETE FROM games WHERE id=ANY($1::uuid[])", [tracked.games]);
++    await client.query("DELETE FROM users WHERE id=ANY($1::uuid[])", [tracked.users]);
++    await client.query("DELETE FROM questionnaire_versions WHERE id=ANY($1::uuid[])", [tracked.versions]);
++    await client.query("COMMIT");
++  } catch (error) {
++    await client.query("ROLLBACK").catch(() => undefined);
++    throw error;
++  } finally {
++    client.release();
++  }
++}
++
++async function createUser(tracked = ids): Promise<string> {
++  const id = randomUUID();
++  await fixturePool.query(`INSERT INTO users(id,name,email,password_hash,email_verified_at,created_at,updated_at)
++    VALUES($1,'E05 fixture',$2,'placeholder',clock_timestamp(),clock_timestamp(),clock_timestamp())`,
++  [id, `${id}@example.test`]);
++  tracked.users.push(id);
++  return id;
++}
++
++async function createEvent(enabled = true, tracked = ids): Promise<string> {
++  const id = randomUUID();
++  await fixturePool.query(`INSERT INTO events(id,name,access_code_normalized,timezone,starts_at,official_ends_at,
++      operational_deadline_at,status,external_queue_enabled,created_at,updated_at)
++    VALUES($1,'E05 fixture',$2,'America/Sao_Paulo',clock_timestamp()-interval '1 hour',
++      clock_timestamp()+interval '1 hour',clock_timestamp()+interval '90 minutes','open',$3,clock_timestamp(),clock_timestamp())`,
++  [id, `E05-${id.toUpperCase()}`, enabled]);
++  tracked.events.push(id);
++  const staffId = await createUser(tracked);
++  await fixturePool.query("INSERT INTO user_roles(id,user_id,role,event_id,granted_at) VALUES($1,$2,'staff',$3,clock_timestamp())", [randomUUID(), staffId, id]);
++  const experienceId = randomUUID();
++  await fixturePool.query("INSERT INTO experiences(id,event_id,name,created_at,updated_at) VALUES($1,$2,'E05 experience',clock_timestamp(),clock_timestamp())", [experienceId, id]);
++  await fixturePool.query("INSERT INTO stations(id,experience_id,label,availability,created_at,updated_at) VALUES($1,$2,'E05 station','available',clock_timestamp(),clock_timestamp())", [randomUUID(), experienceId]);
++  return id;
++}
++
++async function createParticipant(tracked = ids): Promise<string> {
++  const userId = await createUser(tracked);
++  const versionId = randomUUID();
++  await fixturePool.query("INSERT INTO questionnaire_versions(id,version,definition,activated_at,created_at) VALUES($1,$2,'{}',clock_timestamp(),clock_timestamp())", [versionId, `e05-${versionId.replaceAll("-", "")}`]);
++  tracked.versions.push(versionId);
++  await fixturePool.query(`INSERT INTO profiles(user_id,birth_date,gender,education,market_knowledge,market_interest,
++      questionnaire_version_id,completed_at,created_at,updated_at)
++    VALUES($1,'1990-02-03','Masculino','Superior','Conheço um pouco.','Sim, tenho interesse.',$2,clock_timestamp(),clock_timestamp(),clock_timestamp())`,
++  [userId, versionId]);
++  const gameId = randomUUID();
++  await fixturePool.query("INSERT INTO games(id,name,is_curated,created_at) VALUES($1,$2,false,clock_timestamp())", [gameId, `E05 ${gameId}`]);
++  tracked.games.push(gameId);
++  await fixturePool.query("INSERT INTO user_games(user_id,game_id,created_at) VALUES($1,$2,clock_timestamp())", [userId, gameId]);
++  return userId;
++}
++
++async function join(eventId: string, userId: string, joiningService = service, tracked = ids): Promise<string> {
++  const result = await joiningService.createParticipation({
++    eventId, userId, idempotencyKey: randomUUID(), expiresAt: new Date("2099-01-01T00:00:00Z"),
++  });
++  assert.equal(result.kind, "created");
++  if (result.kind !== "created") throw new Error("O ingresso de fixture foi impedido.");
++  tracked.participations.push(result.participationId);
++  return result.participationId;
++}
++
++async function snapshot(eventId: string) {
++  return (await fixturePool.query(`SELECT to_jsonb(e) AS event,
++    (SELECT coalesce(jsonb_agg(to_jsonb(p) ORDER BY p.id),'[]') FROM participations p WHERE p.event_id=e.id) AS participations,
++    (SELECT coalesce(jsonb_agg(to_jsonb(s) ORDER BY s.participation_id),'[]')
++      FROM participation_profile_snapshots s JOIN participations p ON p.id=s.participation_id WHERE p.event_id=e.id) AS snapshots
++    FROM events e WHERE e.id=$1`, [eventId])).rows[0];
++}
++
++async function waitUntilBlocked(): Promise<void> {
++  const deadline = Date.now() + 5_000;
++  while (Date.now() < deadline) {
++    const result = await fixturePool.query(`SELECT 1 FROM pg_stat_activity
++      WHERE application_name=$1 AND state='active' AND wait_event_type='Lock' LIMIT 1`, [appName]);
++    if (result.rowCount) return;
++    await new Promise((resolve) => setTimeout(resolve, 20));
++  }
++  throw new Error("A operação concorrente não ficou bloqueada no PostgreSQL.");
++}
++
++/** Mantém a transação real aberta após executar o domínio, antes de COMMIT. */
++function holdBeforeCommit() {
++  let signalReached!: () => void;
++  let rejectReached!: (error: unknown) => void;
++  let release!: () => void;
++  const reached = new Promise<void>((resolve, reject) => { signalReached = resolve; rejectReached = reject; });
++  const gate = new Promise<void>((resolve) => { release = resolve; });
++  const heldDatabase = {
++    transaction: <T>(callback: (tx: DatabaseTransactionExecutor) => Promise<T>, config?: Parameters<typeof database.transaction>[1]) =>
++      database.transaction(async (tx) => {
++        try {
++          const result = await callback(tx);
++          signalReached();
++          await gate;
++          return result;
++        } catch (error) {
++          rejectReached(error);
++          throw error;
++        }
++      }, config),
++  } as typeof database;
++  return {
++    service: new ParticipationsService(heldDatabase, new EventsService(database)),
++    reached, release,
++  };
++}
++
++test("E05 libera três waiting, preserva histórico, estados restantes, outro evento e leituras E04", async () => {
++  const eventId = await createEvent();
++  const waitingUsers = [await createParticipant(), await createParticipant(), await createParticipant()];
++  const waitingIds = [];
++  for (const userId of waitingUsers) waitingIds.push(await join(eventId, userId));
++  const unchangedIds = [];
++  for (const status of ["active", "finished", "canceled"]) {
++    const id = await join(eventId, await createParticipant());
++    await fixturePool.query(`UPDATE participations SET status=$2::varchar(20),
++      arena_entered_at=CASE WHEN $2::varchar(20)='active' THEN clock_timestamp() ELSE NULL END,
++      finished_at=CASE WHEN $2::varchar(20)='active' THEN NULL ELSE clock_timestamp() END,
++      finish_reason=CASE WHEN $2::varchar(20)='active' THEN NULL ELSE 'e05_fixture' END WHERE id=$1`, [id, status]);
++    unchangedIds.push(id);
++  }
++  const otherEvent = await createEvent();
++  await join(otherEvent, await createParticipant());
++  const otherBefore = await snapshot(otherEvent);
++  const before = await snapshot(eventId);
++  const beforeClock = await fixturePool.query("SELECT clock_timestamp() AS at");
++  const result = await service.setExternalQueueEnabled(eventId, false);
++  const afterClock = await fixturePool.query("SELECT clock_timestamp() AS at");
++  assert.equal(result.kind, "changed");
++  if (result.kind !== "changed") return;
++  assert.equal(result.releasedCount, 3);
++  assert.ok(result.changedAt.getTime() >= beforeClock.rows[0].at.getTime());
++  assert.ok(result.changedAt.getTime() <= afterClock.rows[0].at.getTime());
++  const afterRelease = await snapshot(eventId);
++  assert.deepEqual(afterRelease.snapshots, before.snapshots);
++  assert.equal(afterRelease.event.external_last_order, before.event.external_last_order);
++  assert.equal(afterRelease.event.external_queue_enabled, false);
++  for (const old of before.participations) {
++    const current = afterRelease.participations.find((p: { id: string }) => p.id === old.id);
++    if (unchangedIds.includes(old.id)) assert.deepEqual(current, old);
++    else {
++      assert.ok(waitingIds.includes(old.id));
++      assert.equal(new Date(current.arena_entered_at).getTime(), result.changedAt.getTime());
++      assert.deepEqual(current, { ...old, status: "active", arena_entered_at: current.arena_entered_at });
++    }
++  }
++  assert.equal(afterRelease.participations.length, before.participations.length);
++  assert.deepEqual(await snapshot(otherEvent), otherBefore);
++  for (let index = 0; index < waitingUsers.length; index++) {
++    const current = await service.getCurrentParticipation(waitingUsers[index]);
++    assert.equal(current?.id, waitingIds[index]);
++    assert.equal(current?.status, "active");
++    assert.equal(current?.externalQueue, null);
++    assert.deepEqual(current?.arenaEnteredAt, result.changedAt);
++    assert.deepEqual(await service.getParticipationById(waitingUsers[index], waitingIds[index]), current);
++  }
++  const domainRecords = await fixturePool.query(`SELECT
++    (SELECT count(*)::int FROM queue_entries WHERE event_id=$1) AS queues,
++    (SELECT count(*)::int FROM service_sessions s JOIN experiences e ON e.id=s.experience_id WHERE e.event_id=$1) AS services,
++    (SELECT count(*)::int FROM evaluations v JOIN participations p ON p.id=v.participation_id WHERE p.event_id=$1) AS evaluations`, [eventId]);
++  assert.deepEqual(domainRecords.rows[0], { queues: 0, services: 0, evaluations: 0 });
++  assert.equal((await service.setExternalQueueEnabled(eventId, false)).kind, "unchanged");
++  assert.deepEqual(await snapshot(eventId), afterRelease);
++});
++
++test("E05 ingresso direto usa E03; religar afeta só próximos ingressos e mantém contador", async () => {
++  const eventId = await createEvent();
++  const oldId = await join(eventId, await createParticipant());
++  await service.setExternalQueueEnabled(eventId, false);
++  const directId = await join(eventId, await createParticipant());
++  const before = await snapshot(eventId);
++  const direct = before.participations.find((p: { id: string }) => p.id === directId);
++  assert.equal(direct.status, "active");
++  assert.equal(direct.external_queue_order, null);
++  assert.equal(direct.arena_entered_at, direct.joined_at);
++  const enabled = await service.setExternalQueueEnabled(eventId, true);
++  assert.equal(enabled.kind, "changed");
++  if (enabled.kind === "changed") assert.equal(enabled.releasedCount, 0);
++  const afterEnable = await snapshot(eventId);
++  assert.deepEqual(afterEnable.participations, before.participations);
++  assert.deepEqual(afterEnable.snapshots, before.snapshots);
++  assert.equal(afterEnable.event.external_last_order, 1);
++  assert.equal((await service.setExternalQueueEnabled(eventId, true)).kind, "unchanged");
++  assert.deepEqual(await snapshot(eventId), afterEnable);
++  const nextId = await join(eventId, await createParticipant());
++  const afterJoin = await snapshot(eventId);
++  const next = afterJoin.participations.find((p: { id: string }) => p.id === nextId);
++  assert.equal(next.status, "waiting");
++  assert.equal(next.arena_entered_at, null);
++  assert.equal(next.external_queue_order, 2);
++  assert.equal(afterJoin.event.external_last_order, 2);
++  const previous = afterJoin.participations.find((p: { id: string }) => p.id === oldId);
++  assert.equal(previous.status, "active");
++  assert.equal(previous.external_queue_order, 1);
++});
++
++test("E05 falha após alterar flag e participantes faz rollback completo", async () => {
++  const eventId = await createEvent();
++  const waitingIds: string[] = [];
++  for (let index = 0; index < 3; index++) waitingIds.push(await join(eventId, await createParticipant()));
++  const before = await snapshot(eventId);
++  assert.ok(before.participations.every((p: { status: string; arena_entered_at: null }) =>
++    p.status === "waiting" && p.arena_entered_at === null));
++  const failingDatabase = {
++    transaction: <T>(callback: (tx: DatabaseTransactionExecutor) => Promise<T>, config?: Parameters<typeof database.transaction>[1]) =>
++      database.transaction(async (tx) => {
++        const result = await callback(tx) as unknown as SetExternalQueueEnabledResult;
++        assert.equal(result.kind, "changed");
++        if (result.kind !== "changed") throw new Error("A fixture de rollback precisa executar a liberação.");
++        assert.equal(result.releasedCount, waitingIds.length);
++        const [insideEvent] = await tx.select({ enabled: schema.events.externalQueueEnabled })
++          .from(schema.events).where(eq(schema.events.id, eventId));
++        assert.equal(insideEvent.enabled, false);
++        const insideParticipations = await tx.select({
++          id: schema.participations.id,
++          status: schema.participations.status,
++          enteredAt: schema.participations.arenaEnteredAt,
++        }).from(schema.participations).where(inArray(schema.participations.id, waitingIds));
++        assert.deepEqual(insideParticipations.map((p) => p.id).sort(), [...waitingIds].sort());
++        for (const participation of insideParticipations) {
++          assert.equal(participation.status, "active");
++          assert.ok(participation.enteredAt instanceof Date);
++          assert.deepEqual(participation.enteredAt, result.changedAt);
++        }
++        // A própria transação vê as duas mutações; a conexão independente ainda vê o estado anterior.
++        assert.deepEqual(await snapshot(eventId), before);
++        throw new Error("falha injetada antes do commit E05");
++      }, config),
++  } as unknown as typeof database;
++  const failingService = new ParticipationsService(failingDatabase, new EventsService(database));
++  await assert.rejects(failingService.setExternalQueueEnabled(eventId, false), /falha injetada/);
++  assert.deepEqual(await snapshot(eventId), before);
++});
++
++test("E05 ingresso concorrente serializa nas duas ordens e não deixa waiting com fila desligada", async () => {
++  for (const joinFirst of [true, false]) {
++    const eventId = await createEvent();
++    const userId = await createParticipant();
++    const held = holdBeforeCommit();
++    const first = joinFirst ? join(eventId, userId, held.service) : held.service.setExternalQueueEnabled(eventId, false);
++    let second: Promise<unknown> | undefined;
++    try {
++      await held.reached;
++      second = joinFirst ? service.setExternalQueueEnabled(eventId, false) : join(eventId, userId);
++      await waitUntilBlocked();
++    } finally {
++      held.release();
++      await Promise.all([first, second]);
++    }
++    const state = await service.getCurrentParticipation(userId);
++    assert.equal(state?.status, "active");
++    assert.equal(state?.externalQueue, null);
++    assert.ok(state?.arenaEnteredAt);
++    const afterJoin = await snapshot(eventId);
++    assert.equal(afterJoin.event.external_queue_enabled, false);
++    assert.equal(afterJoin.participations[0].external_queue_order, joinFirst ? 1 : null);
++  }
++});
++
++test("E05 alternâncias administrativas concorrentes respeitam a ordem serializada e não retrocedem participantes", async () => {
++  for (const firstEnabled of [false, true]) {
++    const eventId = await createEvent(!firstEnabled);
++    await join(eventId, await createParticipant());
++    const held = holdBeforeCommit();
++    const first = held.service.setExternalQueueEnabled(eventId, firstEnabled);
++    let second: ReturnType<ParticipationsService["setExternalQueueEnabled"]> | undefined;
++    try {
++      await held.reached;
++      second = service.setExternalQueueEnabled(eventId, !firstEnabled);
++      await waitUntilBlocked();
++    } finally {
++      held.release();
++      await Promise.all([first, second]);
++    }
++    assert.equal((await first).kind, "changed");
++    assert.equal((await second)?.kind, "changed");
++    const state = await snapshot(eventId);
++    assert.equal(state.event.external_queue_enabled, !firstEnabled);
++    assert.equal(state.participations[0].status, "active");
++  }
++});
++
++test("E05 duas desativações concorrentes liberam uma única vez", async () => {
++  const eventId = await createEvent();
++  await join(eventId, await createParticipant());
++  const held = holdBeforeCommit();
++  const first = held.service.setExternalQueueEnabled(eventId, false);
++  let second: ReturnType<ParticipationsService["setExternalQueueEnabled"]> | undefined;
++  try {
++    await held.reached;
++    second = service.setExternalQueueEnabled(eventId, false);
++    await waitUntilBlocked();
++  } finally {
++    held.release();
++    await Promise.all([first, second]);
++  }
++  const result = await first;
++  assert.equal(result.kind, "changed");
++  assert.equal((await second)?.kind, "unchanged");
++  if (result.kind === "changed") {
++    assert.equal(result.releasedCount, 1);
++    const state = await snapshot(eventId);
++    assert.equal(new Date(state.participations[0].arena_entered_at).getTime(), result.changedAt.getTime());
++  }
++});
++
++test("E05 antes do início, corte oficial/Admin e closing/closed impedem ambas as mudanças e novos ingressos", async () => {
++  for (const guard of ["not_started", "official_cutoff", "admin_cutoff", "closing", "closed"] as const) {
++    for (const enabled of [true, false]) {
++      const eventId = await createEvent(enabled);
++      await join(eventId, await createParticipant());
++      if (guard === "not_started") {
++        await fixturePool.query("UPDATE events SET starts_at=clock_timestamp()+interval '10 minutes' WHERE id=$1", [eventId]);
++      } else if (guard === "official_cutoff") {
++        // Ainda na hora operacional adicional, sem permissão para liberar novas entradas externas.
++        await fixturePool.query(`UPDATE events SET official_ends_at=clock_timestamp()-interval '1 minute',
++          operational_deadline_at=clock_timestamp()+interval '30 minutes' WHERE id=$1`, [eventId]);
++      } else if (guard === "admin_cutoff") {
++        await fixturePool.query(`UPDATE events SET closure_mode='controlled',closure_requested_at=clock_timestamp()-interval '1 minute',
++          admin_deadline_at=clock_timestamp()+interval '10 minutes' WHERE id=$1`, [eventId]);
++      } else {
++        await fixturePool.query("UPDATE events SET status=$2 WHERE id=$1", [eventId, guard]);
++      }
++      const before = await snapshot(eventId);
++      const result = await service.setExternalQueueEnabled(eventId, !enabled);
++      assert.equal(result.kind, "blocked", guard);
++      assert.deepEqual(await snapshot(eventId), before);
++      const newcomer = await createParticipant();
++      const rejectedJoin = await service.createParticipation({
++        userId: newcomer, eventId, idempotencyKey: randomUUID(), expiresAt: new Date("2099-01-01T00:00:00Z"),
++      });
++      assert.equal(rejectedJoin.kind, "blocked");
++      assert.deepEqual(await snapshot(eventId), before);
++    }
++  }
++});
++
++test("E05 revalida fechamento após esperar por lock do evento", async () => {
++  const eventId = await createEvent();
++  await join(eventId, await createParticipant());
++  const locker = await fixturePool.connect();
++  let attempt: ReturnType<ParticipationsService["setExternalQueueEnabled"]> | undefined;
++  try {
++    await locker.query("BEGIN");
++    await locker.query("SELECT id FROM events WHERE id=$1 FOR UPDATE", [eventId]);
++    attempt = service.setExternalQueueEnabled(eventId, false);
++    await waitUntilBlocked();
++    await locker.query("UPDATE events SET status='closing' WHERE id=$1", [eventId]);
++    await locker.query("COMMIT");
++  } finally {
++    await locker.query("ROLLBACK");
++    locker.release();
++    await attempt;
++  }
++  assert.equal((await attempt)?.kind, "blocked");
++  const state = await snapshot(eventId);
++  assert.equal(state.event.external_queue_enabled, true);
++  assert.equal(state.participations[0].status, "waiting");
++  assert.equal(state.participations[0].arena_entered_at, null);
++});
++
++test("E05 relógio decisivo é posterior também à espera por lock de participação", async () => {
++  const eventId = await createEvent();
++  const participationId = await join(eventId, await createParticipant());
++  const before = await snapshot(eventId);
++  const locker = await fixturePool.connect();
++  const availabilityService = new EventsService(database);
++  const evaluateAvailability = availabilityService.evaluateEventAvailabilityById.bind(availabilityService);
++  let decisionAt: Date | undefined;
++  // Observa o instante passado à guarda real, sem substituir a decisão nem alterar o serviço.
++  availabilityService.evaluateEventAvailabilityById = async (...args) => {
++    decisionAt = args[1];
++    return evaluateAvailability(...args);
++  };
++  const observedService = new ParticipationsService(database, availabilityService);
++  let attempt: ReturnType<ParticipationsService["setExternalQueueEnabled"]> | undefined;
++  try {
++    await locker.query("BEGIN");
++    await locker.query("SELECT id FROM participations WHERE id=$1 FOR UPDATE", [participationId]);
++    const blocker = await locker.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
++    // Margem maior que o timeout de observação; uma máquina atrasada falha na precondição, nunca passa sem exercitá-la.
++    await fixturePool.query(`UPDATE events SET official_ends_at=clock_timestamp()+interval '15 seconds',
++      operational_deadline_at=clock_timestamp()+interval '30 minutes' WHERE id=$1`, [eventId]);
++    const scheduled = await snapshot(eventId);
++    attempt = observedService.setExternalQueueEnabled(eventId, false);
++    const deadline = Date.now() + 10_000;
++    let observedBeforeCutoff = false;
++    while (Date.now() < deadline) {
++      const observation = await fixturePool.query<{ before_cutoff: boolean }>(`SELECT clock_timestamp() < e.official_ends_at AS before_cutoff
++        FROM pg_stat_activity a CROSS JOIN events e
++        WHERE a.application_name=$1 AND a.state='active' AND a.wait_event_type='Lock'
++          AND $2::int=ANY(pg_blocking_pids(a.pid)) AND e.id=$3`, [appName, blocker.rows[0].pid, eventId]);
++      if (observation.rowCount) {
++        assert.equal(observation.rows[0].before_cutoff, true, "A espera deve ser observada antes do corte no relógio PostgreSQL.");
++        observedBeforeCutoff = true;
++        break;
++      }
++      await new Promise((resolve) => setTimeout(resolve, 20));
++    }
++    assert.equal(observedBeforeCutoff, true, "Não foi comprovada a espera pela conexão bloqueadora antes do corte.");
++    // Espera calculada pelo corte do banco, mantendo o lock da participação.
++    await fixturePool.query(`SELECT pg_sleep(GREATEST(0, EXTRACT(EPOCH FROM official_ends_at-clock_timestamp()))::double precision)
++      FROM events WHERE id=$1`, [eventId]);
++    const release = await fixturePool.query<{ at: Date; past_cutoff: boolean; still_blocked: boolean }>(`SELECT clock_timestamp() AS at,
++      clock_timestamp() > official_ends_at AS past_cutoff,
++      EXISTS(SELECT 1 FROM pg_stat_activity a WHERE a.application_name=$2 AND a.state='active'
++        AND a.wait_event_type='Lock' AND $3::int=ANY(pg_blocking_pids(a.pid))) AS still_blocked
++      FROM events WHERE id=$1`, [eventId, appName, blocker.rows[0].pid]);
++    assert.equal(release.rows[0].past_cutoff, true);
++    assert.equal(release.rows[0].still_blocked, true);
++    const beforeUnlock = release.rows[0].at;
++    await locker.query("COMMIT");
++    const result = await attempt;
++    assert.equal(result.kind, "blocked");
++    if (result.kind !== "blocked") throw new Error("A liberação após o corte deveria ser bloqueada.");
++    assert.equal(result.availability.eventExists, true);
++    if (!result.availability.eventExists) throw new Error("O evento da fixture deve continuar existindo.");
++    assert.ok(result.availability.missing.includes("EVENT_ENTRY_CLOSED"));
++    assert.ok(decisionAt instanceof Date);
++    assert.ok(decisionAt.getTime() >= beforeUnlock.getTime(), "A decisão deve usar horário posterior à espera.");
++    assert.deepEqual(await snapshot(eventId), scheduled);
++  } finally {
++    try {
++      await locker.query("ROLLBACK");
++    } finally {
++      locker.release();
++      await attempt;
++    }
++  }
++  const state = await snapshot(eventId);
++  assert.equal(state.event.external_queue_enabled, true);
++  assert.equal(state.participations[0].status, "waiting");
++  assert.equal(state.participations[0].arena_entered_at, null);
++  assert.deepEqual(state.participations, before.participations);
++  assert.deepEqual(state.snapshots, before.snapshots);
++});
++
++test("E05 evento inexistente retorna resultado explícito", async () => {
++  assert.deepEqual(await service.setExternalQueueEnabled(randomUUID(), false), { kind: "event_not_found" });
++});
++
++test("E05 cleanup remove dependências operacionais e ponteiro circular sem alterar sentinela externa", async () => {
++  const target = fixtureIds();
++  const sentinel = fixtureIds();
++  // O hook final também tenta estes escopos se a preparação ou alguma asserção falhar.
++  fixtureScopes.push(target, sentinel);
++
++  async function prepareOperationalFixture(tracked: FixtureIds) {
++    const eventId = await createEvent(false, tracked);
++    const userId = await createParticipant(tracked);
++    const participationId = await join(eventId, userId, service, tracked);
++    const resources = await fixturePool.query(`SELECT e.id AS experience_id,s.id AS station_id,r.user_id AS staff_id
++      FROM experiences e JOIN stations s ON s.experience_id=e.id
++      JOIN user_roles r ON r.event_id=e.event_id AND r.role='staff' WHERE e.event_id=$1`, [eventId]);
++    const { experience_id: experienceId, station_id: stationId, staff_id: staffId } = resources.rows[0];
++    const completedQueueId = randomUUID();
++    const pendingQueueId = randomUUID();
++    await fixturePool.query(`INSERT INTO queue_entries(id,participation_id,event_id,experience_id,queue_order,status,entered_at,closed_at,close_reason)
++      VALUES($1,$3,$4,$5,1,'closed',clock_timestamp(),clock_timestamp(),'completed'),
++        ($2,$3,$4,$5,2,'called',clock_timestamp(),NULL,NULL)`,
++    [completedQueueId, pendingQueueId, participationId, eventId, experienceId]);
++    await fixturePool.query(`INSERT INTO service_sessions(id,queue_entry_id,experience_id,station_id,called_by_user_id,called_at,status,resolved_by_user_id,resolved_at)
++      VALUES($1,$3,$5,$6,$7,clock_timestamp(),'completed',$7,clock_timestamp()),
++        ($2,$4,$5,$6,$7,clock_timestamp(),'pending',NULL,NULL)`,
++    [randomUUID(), randomUUID(), completedQueueId, pendingQueueId, experienceId, stationId, staffId]);
++    await fixturePool.query("UPDATE participations SET current_queue_entry_id=$2 WHERE id=$1", [participationId, pendingQueueId]);
++    await fixturePool.query("UPDATE experiences SET last_queue_order=2 WHERE id=$1", [experienceId]);
++    await fixturePool.query(`INSERT INTO evaluations(id,participation_id,rating,submitted_at,updated_at)
++      VALUES($1,$2,5,clock_timestamp(),clock_timestamp())`, [randomUUID(), participationId]);
++    await fixturePool.query(`INSERT INTO audit_logs(id,event_id,origin,category,action,occurred_at)
++      VALUES($1,$2,'system','e05_fixture','cleanup_probe',clock_timestamp())`, [randomUUID(), eventId]);
++    return eventId;
++  }
++
++  async function operationalState(eventId: string) {
++    const event = await snapshot(eventId);
++    const related = await fixturePool.query(`SELECT
++      (SELECT coalesce(jsonb_agg(to_jsonb(q) ORDER BY q.id),'[]') FROM queue_entries q WHERE q.event_id=$1) AS queues,
++      (SELECT coalesce(jsonb_agg(to_jsonb(s) ORDER BY s.id),'[]') FROM service_sessions s
++        JOIN queue_entries q ON q.id=s.queue_entry_id WHERE q.event_id=$1) AS services,
++      (SELECT coalesce(jsonb_agg(to_jsonb(v) ORDER BY v.id),'[]') FROM evaluations v
++        JOIN participations p ON p.id=v.participation_id WHERE p.event_id=$1) AS evaluations,
++      (SELECT coalesce(jsonb_agg(to_jsonb(e) ORDER BY e.id),'[]') FROM experiences e WHERE e.event_id=$1) AS experiences,
++      (SELECT coalesce(jsonb_agg(to_jsonb(s) ORDER BY s.id),'[]') FROM stations s
++        JOIN experiences e ON e.id=s.experience_id WHERE e.event_id=$1) AS stations,
++      (SELECT coalesce(jsonb_agg(to_jsonb(r) ORDER BY r.id),'[]') FROM user_roles r WHERE r.event_id=$1) AS roles,
++      (SELECT coalesce(jsonb_agg(to_jsonb(a) ORDER BY a.id),'[]') FROM audit_logs a WHERE a.event_id=$1) AS audits`, [eventId]);
++    return { event, ...related.rows[0] };
++  }
++
++  const targetEvent = await prepareOperationalFixture(target);
++  const sentinelEvent = await prepareOperationalFixture(sentinel);
++  const targetBefore = await operationalState(targetEvent);
++  const sentinelBefore = await operationalState(sentinelEvent);
++  assert.equal(targetBefore.queues.length, 2);
++  assert.equal(targetBefore.services.length, 2);
++  assert.equal(targetBefore.evaluations.length, 1);
++  assert.ok(targetBefore.event.participations[0].current_queue_entry_id);
++  await cleanupFixtures(target);
++  assert.deepEqual(await operationalState(targetEvent), {
++    event: undefined, queues: [], services: [], evaluations: [], experiences: [], stations: [], roles: [], audits: [],
++  });
++  assert.deepEqual(await operationalState(sentinelEvent), sentinelBefore);
++  const remaining = await fixturePool.query(`SELECT
++    (SELECT count(*)::int FROM users WHERE id=ANY($1::uuid[])) AS users,
++    (SELECT count(*)::int FROM profiles WHERE user_id=ANY($1::uuid[])) AS profiles,
++    (SELECT count(*)::int FROM user_games WHERE user_id=ANY($1::uuid[])) AS user_games,
++    (SELECT count(*)::int FROM idempotency_operations WHERE actor_user_id=ANY($1::uuid[])) AS operations,
++    (SELECT count(*)::int FROM games WHERE id=ANY($2::uuid[])) AS games,
++    (SELECT count(*)::int FROM questionnaire_versions WHERE id=ANY($3::uuid[])) AS versions`,
++  [target.users, target.games, target.versions]);
++  assert.deepEqual(remaining.rows[0], { users: 0, profiles: 0, user_games: 0, operations: 0, games: 0, versions: 0 });
++  const sentinelParticipant = sentinelBefore.event.participations[0];
++  assert.equal((await service.getCurrentParticipation(sentinelParticipant.user_id))?.id, sentinelParticipant.id);
++});
+diff --git a/docs/E05_IMPLEMENTACAO.md b/docs/E05_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..31930c9
+--- /dev/null
++++ b/docs/E05_IMPLEMENTACAO.md
+@@ -0,0 +1,230 @@
++# ArenaGo — entrega E05
++
++Data: 28/10/2026. Branch: `feature/events-participations`. Base inspecionada: `cdb5247`.
++
++## Implementação e contrato interno
++
++`ParticipationsService.setExternalQueueEnabled(eventId: string, enabled: boolean)` retorna
++`Promise<SetExternalQueueEnabledResult>`. O tipo exportado distingue:
++
++| `kind` | Significado e campos adicionais |
++| --- | --- |
++| `event_not_found` | Evento não encontrado; nenhuma escrita. |
++| `blocked` | Nenhuma escrita; `availability` contém o resultado das guardas existentes. |
++| `unchanged` | Estado já persistido; `eventId`, `externalQueueEnabled`, `releasedCount: 0`. |
++| `changed` | Alteração concluída; `eventId`, `externalQueueEnabled`, `releasedCount`, `changedAt`. |
++
++É um contrato interno de domínio, sem controller ou autorização HTTP implícita.
++Nenhuma interface de ingresso/leitura foi alterada. Não foram criadas migrations.
++
++## Transação e ordem de locks
++
++Cada chamada abre uma única transação PostgreSQL `READ COMMITTED`, na conexão Drizzle
++existente. A ordem é:
++
++1. `events FOR UPDATE` no evento solicitado.
++2. Se o evento não existe, retorna `event_not_found`. Se a configuração já corresponde
++   ao pedido, retorna `unchanged`, sem novo relógio, atualização ou efeito de domínio.
++3. Ao desligar, bloqueia as participações desse evento ainda `waiting`, com
++   `FOR UPDATE` em UUID crescente. Não usa `SKIP LOCKED` nem liberação individual FIFO.
++4. Obtém `clock_timestamp()` após os locks e valida o instante retornado. Usa o mesmo
++   padrão de epoch em milissegundos/`Date` da E03.
++5. Reutiliza `EventsService.evaluateEventAvailabilityById()` com o executor da mesma
++   transação: prontidão/capacidade, início inclusivo, corte oficial/Admin exclusivo,
++   estados `closing`/`closed`. A hora operacional residual não estende esse corte.
++6. Atualiza `events.external_queue_enabled` e `updated_at`. Ao desligar, um único
++   UPDATE muda `waiting → active` e preenche `arena_entered_at` com o instante decisivo
++   comum. O predicado inclui o evento e `status = 'waiting'`.
++7. COMMIT publica as duas alterações juntas. Exceções abortam toda a transação.
++
++Não é necessário bloquear usuários, perfis ou questionários nesta operação. A ordem
++evento → participações é compatível com os fluxos que adquirem o lock de evento antes
++de chegar às participações. A consulta de disponibilidade também usa a transação,
++sem recorrer à conexão raiz.
++
++Repetições são no-op inclusive após o corte. Mudanças reais nos dois sentidos exigem
++que o evento ainda aceite ingressos; não reabrem eventos nem executam encerramentos.
++
++## Histórico, E03 e E04
++
++A atualização das participações contém somente `status` e `arena_entered_at`.
++Preserva IDs, `joined_at`, ordens históricas, snapshots, ponteiros e campos de
++finalização. `active`, `finished` e `canceled` ficam intactos, assim como outros eventos.
++O contador `external_last_order` não é zerado ou alterado pela E05.
++
++Reativar modifica somente o evento. Os ingressos seguintes continuam passando pela
++E03: com fila desligada são `active`, com `arena_entered_at` preenchido e sem nova
++ordem externa; após reativar voltam a ser `waiting`, com o contador FIFO continuado.
++Participações liberadas permanecem `active`.
++
++As leituras E04 não foram duplicadas ou modificadas. Após o commit, as consultas
++atual e por ID devolvem `active`, `arenaEnteredAt` preenchido e `externalQueue: null`.
++Não são criados atendimentos, ausências, entradas internas ou avaliações.
++
++## Concorrência e limites
++
++E03 e E05 disputam o mesmo `events FOR UPDATE`. Se E03 confirmar primeiro, o novo
++`waiting` faz parte da liberação. Se E05 confirmar primeiro, E03 lê a fila desligada
++e cria diretamente `active`. Alternâncias administrativas também se serializam;
++uma segunda desativação observa o estado já aplicado e não regrava timestamps.
++
++O relógio só é lido após eventuais esperas pelos locks de evento e participação.
++A decisão usa o tempo do banco; o commit ocorre posteriormente. Os escritores
++futuros de fechamento, capacidade e participações devem respeitar os protocolos
++de locks do projeto. Na sessão original de 28/10/2026, a validação de concorrência
++com PostgreSQL real ficou pendente; os unitários não comprovam essas garantias.
++O histórico posterior e a validação pós-auditoria estão registrados abaixo.
++
++## Arquivos
++
++- Modificado: `backend/src/participations/participations.service.ts` — contrato e operação E05.
++- Criado: `backend/test/unit/external-queue.test.ts` — 5 testes unitários.
++- Criado: `backend/test/integration/external-queue.integration.test.ts` — 10 testes originais e 1 novo teste de cleanup pós-auditoria (11 no arquivo atual).
++- Criado: `docs/E05_IMPLEMENTACAO.md` — este relatório.
++- Gerado: `qa-evidence/e05-changes.diff` — diff completo dos quatro arquivos acima, incluindo arquivos novos.
++
++## Cobertura e validação original — 28/10/2026
++
++| Verificação | Resultado nesta sessão |
++| --- | --- |
++| `npm.cmd run typecheck:test` | Aprovado, incluindo os novos testes de integração. |
++| `npm.cmd test` | 84 testes aprovados: 79 anteriores + 5 novos. |
++| `npm.cmd run lint` | Aprovado. |
++| `npm.cmd run build` | Aprovado. |
++| `git diff --check` e whitespace dos arquivos novos | Aprovados. |
++| `npm.cmd run test:integration` | Não executado: conexão de teste autorizada indisponível. |
++
++O `tsx` inicialmente falhou dentro da sandbox com `uv_os_get_passwd / ENOMEM`.
++A execução autorizada fora da sandbox concluiu os 84 unitários com sucesso.
++Nenhum teste unitário abriu conexão PostgreSQL.
++
++Os 10 testes de integração originais cobrem os 14 cenários solicitados, agrupados:
++liberação de três esperas; preservação de IDs, ingresso, snapshots e FIFO; horário
++de entrada; estados active/finished/canceled intactos; ingresso direto; reativação;
++repetição; rollback após ambas as gravações; ingresso concorrente nas duas ordens;
++alternâncias concorrentes nas duas ordens e dupla desativação; impedimentos temporais
++e administrativos; isolamento entre eventos; leituras E04. Também há casos para
++evento ausente, fechamento durante espera por lock de evento e corte oficial durante
++espera por lock de participação. A sincronização concorrente observa locks reais em
++`pg_stat_activity`, e não presume ordem de execução por sleeps arbitrários.
++
++## Banco e comando pendente
++
++As três variáveis não estavam definidas no ambiente herdado. A inspeção sanitizada
++de `.env` confirmou que `DATABASE_URL` e `DATABASE_DIRECT_URL` disponíveis não apontam
++para o destino autorizado, e `EVENTS_TEST_DATABASE_URL` está ausente. Nenhuma URL ou
++credencial foi exibida e nenhuma conexão real de teste foi aberta.
++
++Antes de executar a integração no PowerShell, configure **nesta sessão do terminal**
++as três variáveis para o banco descartável já preparado
++`127.0.0.1:55432/arenago_events_test`, com suas credenciais locais. Não reutilize as
++URLs atuais de outros ambientes. O arquivo novo valida as três URLs e reutiliza a
++barreira contra redirecionamentos de host/porta/banco antes de criar pools.
++
++Os comandos manuais com preflight das três URLs estão na seção pós-auditoria abaixo.
++
++O script permanece `--test-concurrency=1`. Não foi executada preparação destrutiva,
++migração, reset, TRUNCATE, ou acesso a `arenago_homologacao`, `arenago_dev` ou bancos remotos.
++A limpeza dos testes novos remove somente os UUIDs criados por esse arquivo.
++
++## Revisão pós-auditoria — 29/10/2026
++
++A auditoria independente concluiu **SIM COM RESSALVAS**, sem defeito funcional
++confirmado. Esta revisão trata somente as três lacunas P2 dos testes e as evidências.
++`setExternalQueueEnabled()` e os cinco testes unitários E05 foram preservados.
++O hash Git do serviço permanece `779bd3a327464e7091906bb8323865b2c93e6d84`.
++
++### Correções e eliminação dos falsos positivos
++
++- **Corte durante lock de participação:** identifica a conexão bloqueadora por
++  `pg_backend_pid()` e verifica `pg_blocking_pids()`/`pg_stat_activity`. Na mesma
++  observação, exige `clock_timestamp() < official_ends_at`. O corte usa margem de
++  15 segundos, com até 10 segundos para observar a espera; perder essa precondição
++  causa falha, nunca aprovação ou skip. Mantém o lock até ultrapassar o corte,
++  usando espera calculada pelo horário PostgreSQL, e confirma que a operação ainda
++  está bloqueada. Observa, delegando à guarda real, o instante usado para decidir:
++  deve ser posterior à observação imediatamente anterior ao desbloqueio. Exige
++  evento existente, `blocked` com `EVENT_ENTRY_CLOSED` e snapshot integral intacto.
++  Os intervalos de polling não são usados como prova de sincronização.
++- **Rollback:** cria três waiting e exige resultado `changed` com três liberações.
++  Antes da exceção, consulta pelo próprio `tx` a flag desligada e todos os IDs
++  ativos, com horários preenchidos iguais a `changedAt`. Outra conexão deve ainda
++  observar o snapshot anterior. Só então injeta a falha; depois compara o estado
++  integral ao anterior. Um callback sem mutação ou com resultado `blocked` falha.
++- **Cleanup:** usa transação própria e escopos de eventos, participações e usuários
++  rastreados. Zera `current_queue_entry_id` antes de remover serviços, avaliações,
++  entradas e snapshots; depois remove participações e demais pais na ordem das FKs.
++  Inclui auditoria vinculada aos eventos. Qualquer falha reverte aquele escopo;
++  outros escopos ainda são tentados. O hook agrega erros e aguarda o encerramento
++  de ambos os pools com `Promise.allSettled`, inclusive quando a limpeza falha.
++- **Regressão de cleanup:** acrescenta um único teste com entrada concluída,
++  chamada pendente, dois atendimentos, avaliação, snapshot, auditoria e ponteiro
++  circular. Verifica a remoção do grafo alvo e dos dados próprios de conta/perfil,
++  jogos, versão e idempotência. Compara integralmente o grafo de outro evento
++  sentinela e confirma que sua participação continua consultável. Os dois escopos
++  ficam registrados no hook final mesmo se a preparação ou uma asserção falhar.
++- **Casts SQL:** os casts `$2::varchar(20)` da fixture de estados já estavam no
++  arquivo ao iniciar esta revisão. Foram preservados e incluídos no diff atualizado;
++  o artefato anterior ainda mostrava a versão sem os casts. Nenhuma expectativa
++  foi reduzida.
++
++### Rastreabilidade das execuções
++
++Após a sessão original, o responsável informou **98 testes de integração aprovados,
++incluindo os 10 E05**. Esse resultado anterior não foi reproduzido pela auditoria
++somente de leitura nem por esta revisão. O arquivo agora contém 11 testes; não se
++atribui uma nova contagem aprovada à suíte de integração sem executá-la.
++
++| Verificação executada em 29/10/2026 | Resultado |
++| --- | --- |
++| `npm.cmd test` | 84 aprovados, zero falhas/skips. A primeira tentativa na sandbox falhou em `uv_os_get_passwd / ENOMEM` antes dos testes; a mesma execução fora da sandbox passou. |
++| `npm.cmd run typecheck:test` | Aprovado após corrigir a tipagem explícita do array de IDs no teste de rollback. |
++| `npm.cmd run lint` | Aprovado. |
++| `npm.cmd run build` | Aprovado. |
++| `git diff --check` e inspeção de whitespace dos arquivos da entrega | Aprovados. |
++| Integração PostgreSQL | Não executada: `DATABASE_URL`, `DATABASE_DIRECT_URL` e `EVENTS_TEST_DATABASE_URL` ausentes no processo. Nenhum pool de integração foi aberto. |
++
++Arquivos alterados nesta revisão: teste de integração, este documento e
++`qa-evidence/e05-changes.diff`. O diff é o pacote completo E05 contra `cdb5247`,
++incluindo o serviço e o unitário preexistentes, sem novas alterações nesses dois.
++
++### Execução manual pendente
++
++No PowerShell, configure explicitamente as três variáveis com suas credenciais
++locais para `127.0.0.1:55432/arenago_events_test`. Não reutilize outro destino nem
++conte com fallback de `.env`. O preflight abaixo não abre conexão nem imprime URLs:
++
++```powershell
++Set-Location C:\DoJob\ProgramacaoMobile\backend
++# Configure DATABASE_URL, DATABASE_DIRECT_URL e EVENTS_TEST_DATABASE_URL nesta sessão.
++$preflight = @'
++const { assertSafeTestDatabase } = require("./test/integration/test-db-guard.ts");
++for (const name of ["DATABASE_URL", "DATABASE_DIRECT_URL", "EVENTS_TEST_DATABASE_URL"]) {
++  const url = new URL(assertSafeTestDatabase(process.env[name]));
++  if (url.hostname !== "127.0.0.1" || url.port !== "55432" || url.pathname !== "/arenago_events_test") {
++    throw new Error(`${name}: destino não autorizado.`);
++  }
++}
++console.log("Três URLs validadas para 127.0.0.1:55432/arenago_events_test.");
++'@
++node --import tsx --input-type=commonjs -e $preflight
++if ($LASTEXITCODE -ne 0) { throw 'Preflight rejeitado; integração não iniciada.' }
++npm.cmd run test:integration
++```
++
++Permanece pendente comprovar em PostgreSQL os testes alterados e o novo cleanup.
++O teste temporal leva aproximadamente 15 segundos; atrasos que impeçam observar
++a espera antes do corte geram falha explícita de precondição. Não houve execução
++de migrations, DROP, TRUNCATE, reset, integração em outro banco, commit, push, PR
++ou merge nesta revisão.
++
++## Dependências seguintes
++
++A API Admin depende de autenticação Admin/TOTP, validação de justificativa e auditoria
++atômica. Antes de expor a operação em HTTP, será necessário compor a alteração de
++domínio e a auditoria na mesma transação, seguindo o padrão de executor transacional
++já usado no projeto. O método atual possui a própria transação e não implementa
++esse contrato administrativo completo.
++
++Encerramentos E07/E08/E09/E11, alterações em Auth/perfil e integração do aplicativo
++permanecem fora desta entrega. Não houve commit, push, PR ou merge.
