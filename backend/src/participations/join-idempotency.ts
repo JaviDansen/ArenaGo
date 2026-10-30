@@ -104,7 +104,7 @@ function getPersistedJsonValue(value: unknown): JsonValue | null {
  * @remarks O chamador deve adquirir primeiro os locks de domínio exigidos pela operação; no ingresso,
  * a ordem é `events FOR UPDATE` e depois `users FOR UPDATE`. Este helper não abre conexão nem transação.
  */
-async function reserveIdempotencyOperationWithTx(
+export async function reserveIdempotencyOperationWithTx(
   tx: DatabaseTransactionExecutor,
   input: ReserveIdempotencyOperationInput,
 ): Promise<IdempotencyReservationResult> {
