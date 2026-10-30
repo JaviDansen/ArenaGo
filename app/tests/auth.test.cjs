@@ -1485,3 +1485,247 @@ test('generic network error during POST /auth/refresh after server consumes toke
   assert.equal(refreshCalls, 1, 'must not trigger POST /auth/refresh on protected 401 after uncertain refresh failure');
   assert.equal(sessionRevokedByReuse, false);
 });
+
+
+// ============================================================================
+// 5. UI-02 — INTERFACE VISUAL DE AUTENTICAÇÃO (DESIGN SYSTEM + FLUXOS VISUAIS)
+// ============================================================================
+
+test('UI-02: Welcome, Login, Register and ForgotPassword navigate across all public auth flows', () => {
+  // 1. Welcome -> Register e Welcome -> Login
+  const welcome = createHarness('screens/auth/WelcomeScreen.js');
+  assert.ok(hasText(welcome, 'ArenaGO'));
+  assert.ok(hasText(welcome, 'Viva a experiência ArenaGO.'));
+  const welcomeRoot = welcome.nodes.find((node) => node.type === 'SafeAreaView');
+  assert.equal(welcomeRoot.props.style.backgroundColor, '#0B0B12');
+  const welcomeTitle = welcome.nodes.find(
+    (node) => node.type === 'Text' && textOf(node) === 'Viva a experiência ArenaGO.'
+  );
+  assert.equal(welcomeTitle.props.style.color, '#FFFFFF');
+  assert.equal(welcomeTitle.props.style.fontSize, 28);
+
+  welcome.act(() => welcome.press('Criar minha conta'));
+  welcome.act(() => welcome.press('Já possuo uma conta'));
+  assert.deepEqual(structuredClone(welcome.navigationCalls), [
+    { type: 'navigate', name: 'Register', params: undefined },
+    { type: 'navigate', name: 'Login', params: undefined },
+  ]);
+
+  // 2. Login -> ForgotPassword, Login -> Register e Login -> Voltar
+  const login = createHarness('screens/auth/LoginScreen.js', {
+    props: { route: { params: { email: 'prefilled@example.com' } } },
+  });
+  assert.ok(hasText(login, 'ArenaGO'));
+  assert.equal(login.nodes.find((node) => node.type === 'SafeAreaView').props.style.backgroundColor, '#0B0B12');
+  const prefilledEmailInput = login.nodes.find(
+    (node) => node.type === 'TextInput' && node.props.placeholder === loginInputs.email
+  );
+  assert.equal(prefilledEmailInput.props.value, 'prefilled@example.com');
+
+  login.act(() => login.press('Esqueceu sua senha?'));
+  login.act(() => login.press('Ainda não tem cadastro? Crie sua conta'));
+  login.act(() => login.press('Voltar'));
+  assert.deepEqual(structuredClone(login.navigationCalls), [
+    { type: 'navigate', name: 'ForgotPassword', params: undefined },
+    { type: 'navigate', name: 'Register', params: undefined },
+    { type: 'back' },
+  ]);
+
+  // 3. Register -> Login e Register -> Voltar
+  const register = createHarness('screens/auth/RegisterScreen.js');
+  assert.ok(hasText(register, 'ArenaGO'));
+  assert.equal(register.nodes.find((node) => node.type === 'SafeAreaView').props.style.backgroundColor, '#0B0B12');
+  register.act(() => register.press('Já possui uma conta? Acesse aqui'));
+  register.act(() => register.press('Voltar'));
+  assert.deepEqual(structuredClone(register.navigationCalls), [
+    { type: 'navigate', name: 'Login', params: undefined },
+    { type: 'back' },
+  ]);
+
+  // 4. ForgotPassword -> retorno seguro para Login sem simular envio de e-mail
+  const forgot = createHarness('screens/auth/ForgotPasswordScreen.js');
+  assert.ok(hasText(forgot, 'ArenaGO'));
+  assert.equal(forgot.nodes.find((node) => node.type === 'SafeAreaView').props.style.backgroundColor, '#0B0B12');
+  assert.ok(hasText(forgot, 'EM CONSTRUÇÃO'));
+  assert.ok(hasText(forgot, 'Recuperação por e-mail indisponível nesta versão'));
+  assert.equal(
+    forgot.nodes.some((node) => node.type === 'TextInput'),
+    false,
+    'ForgotPasswordScreen não deve expor input enganoso nem simular disparo de e-mail'
+  );
+
+  forgot.act(() => forgot.press('Voltar para o Login'));
+  forgot.act(() => forgot.press('Voltar'));
+  assert.deepEqual(structuredClone(forgot.navigationCalls), [
+    { type: 'back' },
+    { type: 'back' },
+  ]);
+});
+
+test('UI-02: Login and Register support password visibility toggle and clear field/banner errors on input edit', async () => {
+  // Login: alternância de visibilidade de senha e limpeza de erros ao digitar
+  const login = createHarness('screens/auth/LoginScreen.js', {
+    authContext: {
+      authNotice: 'Sua sessão expirou. Faça login novamente.',
+      clearNotices() {},
+      async login() {
+        const err = new Error('Credenciais inválidas');
+        err.status = 401;
+        err.code = 'INVALID_CREDENTIALS';
+        throw err;
+      },
+    },
+  });
+
+  // Exibe sessionNotice inicialmente
+  assert.ok(hasText(login, 'Sua sessão expirou. Faça login novamente.'));
+
+  // Alterna visibilidade da senha
+  const getLoginPasswordInput = () =>
+    login.nodes.find((n) => n.type === 'TextInput' && n.props.placeholder === loginInputs.password);
+  assert.equal(getLoginPasswordInput().props.secureTextEntry, true);
+
+  login.act(() => login.press('Mostrar senha'));
+  assert.equal(getLoginPasswordInput().props.secureTextEntry, false);
+
+  login.act(() => login.press('Ocultar senha'));
+  assert.equal(getLoginPasswordInput().props.secureTextEntry, true);
+
+  // Provoca erro local e verifica limpeza ao editar
+  await login.actAsync(() => login.press('Entrar na conta'));
+  assert.ok(hasText(login, 'O e-mail é obrigatório.'));
+
+  fillForm(login, loginInputs, { email: 'player@example.com', password: 'wrong-password' });
+  assert.equal(hasText(login, 'O e-mail é obrigatório.'), false);
+
+  // Provoca erro 401 da API e verifica limpeza ao editar a senha
+  await login.actAsync(() => login.press('Entrar na conta'));
+  assert.ok(hasText(login, 'E-mail ou senha inválidos.'));
+
+  login.act(() => {
+    getLoginPasswordInput().props.onChangeText('new-password-attempt');
+  });
+  assert.equal(hasText(login, 'E-mail ou senha inválidos.'), false);
+
+  // Register: alternância independente de senha e confirmação de senha
+  const register = createHarness('screens/auth/RegisterScreen.js', {
+    authContext: { register: async () => {} },
+  });
+  const getRegPassInput = () =>
+    register.nodes.find((n) => n.type === 'TextInput' && n.props.placeholder === registrationInputs.password);
+  const getRegConfirmInput = () =>
+    register.nodes.find(
+      (n) => n.type === 'TextInput' && n.props.placeholder === registrationInputs.confirmPassword
+    );
+
+  assert.equal(getRegPassInput().props.secureTextEntry, true);
+  assert.equal(getRegConfirmInput().props.secureTextEntry, true);
+
+  register.act(() => register.press('Mostrar senha'));
+  assert.equal(getRegPassInput().props.secureTextEntry, false);
+  assert.equal(getRegConfirmInput().props.secureTextEntry, true);
+
+  register.act(() => register.press('Mostrar confirmação de senha'));
+  assert.equal(getRegConfirmInput().props.secureTextEntry, false);
+
+  register.act(() => register.press('Ocultar confirmação de senha'));
+  assert.equal(getRegConfirmInput().props.secureTextEntry, true);
+});
+
+test('UI-02: Login and Register enforce loading state, disable inputs/actions and block duplicate submissions', async () => {
+  // 1. Login: bloqueio de múltiplos envios durante requisição pendente
+  let resolveLogin;
+  let loginCallCount = 0;
+  const login = createHarness('screens/auth/LoginScreen.js', {
+    fields: ['handleLogin'],
+    authContext: {
+      clearNotices() {},
+      login: () => {
+        loginCallCount += 1;
+        return new Promise((resolve) => {
+          resolveLogin = resolve;
+        });
+      },
+    },
+  });
+
+  fillForm(login, loginInputs, {
+    email: 'player@example.com',
+    password: 'StrongPassword#2026',
+  });
+
+  let pendingLoginPromise;
+  login.act((c) => {
+    pendingLoginPromise = c.handleLogin();
+    // Segunda tentativa imediata enquanto a primeira ainda está em andamento
+    c.handleLogin();
+  });
+
+  assert.equal(loginCallCount, 1, 'Login deve disparar apenas uma chamada enquanto submissão está ativa');
+  const loginSubmitPressable = login.nodes.find(
+    (n) => n.type === 'Pressable' && n.props.accessibilityLabel === 'Entrar na conta'
+  );
+  assert.equal(loginSubmitPressable.props.disabled, true);
+  assert.equal(loginSubmitPressable.props.accessibilityState?.busy, true);
+
+  const loginTextInputs = login.nodes.filter((n) => n.type === 'TextInput');
+  assert.equal(loginTextInputs.length, 2);
+  for (const input of loginTextInputs) {
+    assert.equal(input.props.editable, false, 'Campos de Login devem ficar desabilitados durante envio');
+  }
+
+  resolveLogin({
+    status: 'authenticated',
+    user: { id: 'u-1', name: 'Player', hasCompletedQuestionnaire: true },
+  });
+  await login.actAsync(() => pendingLoginPromise);
+  assert.equal(
+    login.nodes.find((n) => n.type === 'Pressable' && n.props.accessibilityLabel === 'Entrar na conta').props.disabled,
+    false
+  );
+
+  // 2. Register: bloqueio de múltiplos envios durante requisição pendente
+  let resolveRegister;
+  let registerCallCount = 0;
+  const register = createHarness('screens/auth/RegisterScreen.js', {
+    fields: ['handleRegister'],
+    authContext: {
+      register: () => {
+        registerCallCount += 1;
+        return new Promise((resolve) => {
+          resolveRegister = resolve;
+        });
+      },
+    },
+  });
+
+  fillForm(register, registrationInputs, validRegistration);
+
+  let pendingRegisterPromise;
+  register.act((c) => {
+    pendingRegisterPromise = c.handleRegister();
+    c.handleRegister();
+  });
+
+  assert.equal(registerCallCount, 1, 'Cadastro deve disparar apenas uma chamada enquanto submissão está ativa');
+  const registerSubmitPressable = register.nodes.find(
+    (n) => n.type === 'Pressable' && n.props.accessibilityLabel === 'Criar minha conta'
+  );
+  assert.equal(registerSubmitPressable.props.disabled, true);
+  assert.equal(registerSubmitPressable.props.accessibilityState?.busy, true);
+
+  const registerTextInputs = register.nodes.filter((n) => n.type === 'TextInput');
+  assert.equal(registerTextInputs.length, 4);
+  for (const input of registerTextInputs) {
+    assert.equal(input.props.editable, false, 'Campos de Cadastro devem ficar desabilitados durante envio');
+  }
+
+  resolveRegister({
+    user: { id: 'u-2', name: 'Participante', hasCompletedQuestionnaire: false },
+  });
+  await register.actAsync(() => pendingRegisterPromise);
+  assert.equal(
+    register.nodes.find((n) => n.type === 'Pressable' && n.props.accessibilityLabel === 'Criar minha conta').props.disabled,
+    false
+  );
+});

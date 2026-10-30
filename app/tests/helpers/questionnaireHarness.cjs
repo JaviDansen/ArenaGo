@@ -264,7 +264,9 @@ function createHarness(relativePath, options = {}) {
     assert.equal(insideUpdater, false);
     navigationCalls.push({ type: 'reset', payload });
   };
-  const screen = loadModule(relativePath, (name) => {
+
+  const internalModules = new Map();
+  function resolveInternalModule(fromRelativePath, name) {
     if (name === 'react') return react;
     if (name === 'react-native') return native;
     if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView' };
@@ -285,12 +287,42 @@ function createHarness(relativePath, options = {}) {
     }
     if (name === '../utils/validation' || name === '../../utils/validation') return validation;
     if (name === '../data/mockData' || name === '../../data/mockData') return data;
+    if (name.startsWith('.')) {
+      const fromDir = path.dirname(path.join(appDirectory, fromRelativePath));
+      let resolvedAbs = path.resolve(fromDir, name);
+      if (!resolvedAbs.endsWith('.js')) {
+        const asFile = `${resolvedAbs}.js`;
+        try {
+          readFileSync(asFile);
+          resolvedAbs = asFile;
+        } catch {
+          resolvedAbs = path.join(resolvedAbs, 'index.js');
+        }
+      }
+      const targetRelative = path.relative(appDirectory, resolvedAbs);
+      if (internalModules.has(targetRelative)) {
+        return internalModules.get(targetRelative);
+      }
+      const loaded = loadModule(targetRelative, (dep) => resolveInternalModule(targetRelative, dep)).exports;
+      internalModules.set(targetRelative, loaded);
+      return loaded;
+    }
     return require(name);
-  }, options.fields || [], options.source);
+  }
+
+  const screen = loadModule(
+    relativePath,
+    (name) => resolveInternalModule(relativePath, name),
+    options.fields || [],
+    options.source
+  );
+
+  let renderedNodes = [];
 
   function render() {
     cursor = 0;
     tree = screen.exports.default({ navigation, route: {}, ...props });
+    renderedNodes = nodes(tree);
     capture = screen.context.__capture;
   }
 
@@ -327,7 +359,7 @@ function createHarness(relativePath, options = {}) {
   flush();
   return {
     get capture() { return capture; },
-    get nodes() { return nodes(tree); },
+    get nodes() { return renderedNodes; },
     exports: screen.exports,
     birthDate,
     navigationCalls,
@@ -345,6 +377,7 @@ function createHarness(relativePath, options = {}) {
         }
       }
       tree = null;
+      renderedNodes = [];
     },
     setAuthContext(nextAuthContext) {
       authContextValue = nextAuthContext;
@@ -358,15 +391,25 @@ function createHarness(relativePath, options = {}) {
       flush();
     },
     inputBirthDate(value) {
-      const input = nodes(tree).find((node) => node.type === 'BirthDateInput');
+      const input = renderedNodes.find((node) => node.type === 'BirthDateInput');
       assert.ok(input);
       input.props.onChangeText(value);
     },
     press(label) {
-      const button = nodes(tree).find((node) => node.type === 'Pressable' &&
+      const button = renderedNodes.find((node) => node.type === 'Pressable' &&
         (node.props.accessibilityLabel === label || textOf(node) === label));
       assert.ok(button, `missing button: ${label}`);
       assert.notEqual(button.props.disabled, true);
+      const wrapper = renderedNodes.find((node) =>
+        typeof node.type === 'function' &&
+        typeof node.props?.onPress === 'function' &&
+        !node.props?.disabled &&
+        !node.props?.loading &&
+        (node.props.accessibilityLabel === label || node.props.title === label || textOf(node) === label)
+      );
+      if (wrapper) {
+        return wrapper.props.onPress();
+      }
       return button.props.onPress();
     },
   };
