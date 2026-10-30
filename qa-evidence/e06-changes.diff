@@ -1,0 +1,1102 @@
+diff --git a/backend/src/events/events.module.ts b/backend/src/events/events.module.ts
+index 7cd5544..e985c3c 100644
+--- a/backend/src/events/events.module.ts
++++ b/backend/src/events/events.module.ts
+@@ -1,11 +1,12 @@
+ import { Module } from "@nestjs/common";
+ import { DatabaseModule } from "../database/database.module";
+ import { EventsService } from "./events.service";
++import { ExperiencesService } from "./experiences.service";
+ 
+ /** Agrupa os serviços de Events e reutiliza o acesso PostgreSQL compartilhado. */
+ @Module({
+   imports: [DatabaseModule],
+-  providers: [EventsService],
+-  exports: [EventsService],
++  providers: [EventsService, ExperiencesService],
++  exports: [EventsService, ExperiencesService],
+ })
+ export class EventsModule {}
+diff --git a/backend/src/events/experiences.service.ts b/backend/src/events/experiences.service.ts
+new file mode 100644
+index 0000000..456e404
+--- /dev/null
++++ b/backend/src/events/experiences.service.ts
+@@ -0,0 +1,112 @@
++import { Inject, Injectable } from "@nestjs/common";
++import { and, eq, sql } from "drizzle-orm";
++import type { NodePgDatabase } from "drizzle-orm/node-postgres";
++import { DRIZZLE_DATABASE } from "../database/database.module";
++import * as schema from "../database/schema";
++import { EventsService } from "./events.service";
++import type { EventExperiencesResult, ExperienceState } from "./experiences.types";
++
++interface ExperienceRow extends Record<string, unknown> {
++  id: string;
++  name: string;
++  queueAcceptingEntries: boolean;
++  waitingCount: string;
++  stationId: string | null;
++  stationLabel: string | null;
++  stationAvailable: boolean | null;
++}
++
++/** Visão operacional interna E06 para participantes ativos; não expõe rota HTTP. */
++@Injectable()
++export class ExperiencesService {
++  constructor(
++    @Inject(DRIZZLE_DATABASE) private readonly database: NodePgDatabase<typeof schema>,
++    private readonly eventsService: EventsService,
++  ) {}
++
++  /**
++   * Consulta experiências do evento para um userId fornecido por chamador confiável.
++   *
++   * @remarks Titularidade, disponibilidade, estações e contagens usam o mesmo snapshot
++   * REPEATABLE READ READ ONLY, sem locks de linha. Não substitui autenticação HTTP.
++   * A observação pode ficar desatualizada após sua obtenção: E07 deve revalidar acesso,
++   * cortes e capacidade dentro da própria mutação transacional. Nenhum FIFO é alterado.
++   */
++  async getEventExperiences(userId: string, eventId: string): Promise<EventExperiencesResult> {
++    return this.database.transaction(async (tx): Promise<EventExperiencesResult> => {
++      const [access] = await tx.select({
++        observedAtMs: sql<number>`(EXTRACT(EPOCH FROM statement_timestamp()) * 1000)::double precision`,
++      }).from(schema.participations).where(and(
++        eq(schema.participations.userId, userId),
++        eq(schema.participations.eventId, eventId),
++        eq(schema.participations.status, "active"),
++      )).limit(1);
++
++      // Não consultar nem divulgar detalhes do evento antes de verificar titularidade.
++      if (!access) return { kind: "access_denied" };
++      const observedAt = new Date(access.observedAtMs);
++      if (!Number.isFinite(access.observedAtMs) || !Number.isFinite(observedAt.getTime())) {
++        throw new Error("PostgreSQL não retornou um instante válido para observar as experiências.");
++      }
++
++      const availability = await this.eventsService.evaluateEventAvailabilityById(eventId, observedAt, tx);
++      if (!availability.eventExists) return { kind: "access_denied" };
++
++      // Agrupar antes de juntar estações evita multiplicar a contagem por estação.
++      // Consultas em número constante, independentemente do total de experiências.
++      const result = await tx.execute<ExperienceRow>(sql`
++        WITH waiting_counts AS (
++          SELECT experience_id, count(*)::text AS waiting_count
++          FROM queue_entries
++          WHERE event_id = ${eventId} AND status = 'waiting'
++          GROUP BY experience_id
++        )
++        SELECT e.id, e.name, e.queue_accepting_entries AS "queueAcceptingEntries",
++          COALESCE(q.waiting_count, '0') AS "waitingCount",
++          s.id AS "stationId", s.label AS "stationLabel",
++          (s.availability = 'available') AS "stationAvailable"
++        FROM experiences e
++        LEFT JOIN waiting_counts q ON q.experience_id = e.id
++        LEFT JOIN stations s ON s.experience_id = e.id
++        WHERE e.event_id = ${eventId}
++        ORDER BY e.id ASC, s.id ASC
++      `);
++
++      const experiences = new Map<string, ExperienceState>();
++      for (const row of result.rows) {
++        let experience = experiences.get(row.id);
++        if (!experience) {
++          if (!/^\d+$/.test(row.waitingCount) || !Number.isSafeInteger(Number(row.waitingCount))) {
++            throw new Error("A contagem da fila interna excede o contrato numérico seguro ou é inválida.");
++          }
++          experience = {
++            id: row.id,
++            name: row.name,
++            acceptingNewQueueEntries: false,
++            waitingCount: Number(row.waitingCount),
++            stations: [],
++          };
++          experiences.set(row.id, experience);
++        }
++        if (row.stationId !== null) {
++          experience.stations.push({
++            id: row.stationId,
++            label: row.stationLabel!,
++            available: row.stationAvailable === true,
++          });
++          if (availability.eventAcceptingNewEntries && row.queueAcceptingEntries && row.stationAvailable) {
++            experience.acceptingNewQueueEntries = true;
++          }
++        }
++      }
++      const states = [...experiences.values()];
++      return {
++        kind: "ok",
++        eventId,
++        observedAt,
++        acceptingNewQueueEntries: states.some((experience) => experience.acceptingNewQueueEntries),
++        experiences: states,
++      };
++    }, { isolationLevel: "repeatable read", accessMode: "read only" });
++  }
++}
+diff --git a/backend/src/events/experiences.types.ts b/backend/src/events/experiences.types.ts
+new file mode 100644
+index 0000000..7ed73fe
+--- /dev/null
++++ b/backend/src/events/experiences.types.ts
+@@ -0,0 +1,30 @@
++/** Disponibilidade configurada; `available` não indica ausência de chamada pendente. */
++export interface ExperienceStationState {
++  id: string;
++  label: string;
++  available: boolean;
++}
++
++export interface ExperienceState {
++  id: string;
++  name: string;
++  acceptingNewQueueEntries: boolean;
++  /** Somente queue_entries waiting; uma fila compartilhada por todas as estações. */
++  waitingCount: number;
++  stations: ExperienceStationState[];
++}
++
++export interface EventExperiencesState {
++  eventId: string;
++  /** Relógio PostgreSQL no início da primeira consulta do snapshot; serializa como ISO 8601. */
++  observedAt: Date;
++  /** Existe ao menos uma experiência apta, respeitadas todas as condições globais. */
++  acceptingNewQueueEntries: boolean;
++  /** Experiências e suas estações são ordenadas por UUID crescente. */
++  experiences: ExperienceState[];
++}
++
++/** Ausência de evento e falta de participação ativa são indistinguíveis para o chamador. */
++export type EventExperiencesResult =
++  | { kind: "access_denied" }
++  | ({ kind: "ok" } & EventExperiencesState);
+diff --git a/backend/test/unit/experiences.test.ts b/backend/test/unit/experiences.test.ts
+new file mode 100644
+index 0000000..9bc2b1c
+--- /dev/null
++++ b/backend/test/unit/experiences.test.ts
+@@ -0,0 +1,176 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { drizzle } from "drizzle-orm/node-postgres";
++import type { Client } from "pg";
++import * as schema from "../../src/database/schema";
++import { buildEventAvailabilityResult, evaluateEventConfigurationReadiness, type EventAvailabilityResult } from "../../src/events/event-availability";
++import { evaluateEventEntryWindow } from "../../src/events/event-entry-window";
++import { buildEventOperationalCapacityResult } from "../../src/events/event-operational-capacity";
++import { EventsService } from "../../src/events/events.service";
++import { ExperiencesService } from "../../src/events/experiences.service";
++
++const eventId = "00000000-0000-4000-8000-000000000001";
++const userId = "00000000-0000-4000-8000-000000000002";
++const observedAt = new Date("2026-10-29T15:00:00Z");
++const baseRow = {
++  id: "experience-a", name: "Just Dance", queueAcceptingEntries: true,
++  waitingCount: "3", stationId: "station-a", stationLabel: "Estação A", stationAvailable: true,
++};
++
++function fixture(options: {
++  access?: boolean;
++  clock?: number;
++  status?: string;
++  startsAt?: Date;
++  officialEndsAt?: Date;
++  closureRequestedAt?: Date | null;
++  staff?: boolean;
++  station?: boolean;
++  rows?: Array<Record<string, unknown>>;
++} = {}) {
++  const queries: Array<{ text: string; params: unknown[] }> = [];
++  let availabilityCalls = 0;
++  let availability: EventAvailabilityResult | undefined;
++  const client = {
++    async query(config: { text: string }, params: unknown[]) {
++      queries.push({ text: config.text, params });
++      if (config.text.startsWith("select") && config.text.includes('from "participations"')) {
++        return { rows: options.access === false ? [] : [[options.clock ?? observedAt.getTime()]] };
++      }
++      if (config.text.includes("WITH waiting_counts")) return { rows: options.rows ?? [baseRow] };
++      return { rows: [] };
++    },
++  };
++  const database = drizzle(client as unknown as Client, { schema });
++  const events = new EventsService(database);
++  events.evaluateEventAvailabilityById = async (id, at, executor) => {
++    availabilityCalls += 1;
++    assert.equal(id, eventId);
++    assert.equal(at.getTime(), observedAt.getTime());
++    assert.ok(executor);
++    assert.notEqual(executor, database);
++    const officialEndsAt = options.officialEndsAt ?? new Date("2026-10-29T16:00:00Z");
++    const event = {
++      name: "E06 unit", accessCodeNormalized: "E06-UNIT", timezone: "America/Sao_Paulo",
++      externalQueueEnabled: false,
++      startsAt: options.startsAt ?? new Date(officialEndsAt.getTime() - 2 * 60 * 60_000),
++      officialEndsAt,
++      operationalDeadlineAt: new Date(officialEndsAt.getTime() + 60 * 60_000),
++      closureRequestedAt: options.closureRequestedAt ?? null, adminDeadlineAt: null,
++    };
++    const configuration = evaluateEventConfigurationReadiness(event);
++    assert.equal(configuration.ready, true, "A fixture deve manter a configuração válida em todos os cenários.");
++    availability = buildEventAvailabilityResult({
++      eventId: id, eventStatus: options.status ?? "open",
++      configuration,
++      entryWindow: evaluateEventEntryWindow(event, at),
++      operationalCapacity: buildEventOperationalCapacityResult(options.staff ?? true, options.station ?? true),
++    });
++    return availability;
++  };
++  return { service: new ExperiencesService(database, events), queries, availabilityCalls: () => availabilityCalls, availability: () => availability };
++}
++
++test("E06 agrupa estações sem multiplicar fila; contrato seguro e transação somente leitura", async () => {
++  const { service, queries, availabilityCalls } = fixture({ rows: [
++    baseRow,
++    { ...baseRow, stationId: "station-b", stationLabel: "Estação B", stationAvailable: false },
++    { ...baseRow, id: "experience-b", name: "VR", stationId: null, stationLabel: null, stationAvailable: null, waitingCount: "0" },
++  ] });
++  assert.deepEqual(await service.getEventExperiences(userId, eventId), {
++    kind: "ok", eventId, observedAt, acceptingNewQueueEntries: true,
++    experiences: [
++      { id: "experience-a", name: "Just Dance", acceptingNewQueueEntries: true, waitingCount: 3,
++        stations: [{ id: "station-a", label: "Estação A", available: true }, { id: "station-b", label: "Estação B", available: false }] },
++      { id: "experience-b", name: "VR", acceptingNewQueueEntries: false, waitingCount: 0, stations: [] },
++    ],
++  });
++  assert.equal(availabilityCalls(), 1);
++  assert.equal(queries[0].text, "begin isolation level repeatable read read only");
++  assert.deepEqual(queries[1].params, [userId, eventId, "active", 1]);
++  assert.match(queries[1].text, /statement_timestamp\(\)/);
++  assert.match(queries[2].text, /status = 'waiting'/);
++  assert.match(queries[2].text, /GROUP BY experience_id/);
++  assert.match(queries[2].text, /ORDER BY e.id ASC, s.id ASC/);
++  assert.deepEqual(queries[2].params, [eventId, eventId]);
++  assert.equal(queries.at(-1)?.text, "commit");
++  assert.equal(queries.some((q) => /\b(update|insert|delete|for update|for share)\b/i.test(q.text)), false);
++});
++
++test("E06 acesso negado é explícito e não consulta dados internos", async () => {
++  const { service, queries, availabilityCalls } = fixture({ access: false });
++  assert.deepEqual(await service.getEventExperiences(userId, eventId), { kind: "access_denied" });
++  assert.equal(availabilityCalls(), 0);
++  assert.equal(queries.length, 3); // BEGIN, titularidade + relógio, COMMIT.
++});
++
++test("E06 cortes exatos, estado administrativo, início e capacidade só bloqueiam novas entradas", async () => {
++  for (const { options, missing } of [
++    { options: { officialEndsAt: observedAt }, missing: "EVENT_ENTRY_CLOSED" },
++    { options: { closureRequestedAt: observedAt }, missing: "EVENT_ENTRY_CLOSED" },
++    { options: { status: "closing" }, missing: "EVENT_ADMIN_CLOSING" },
++    { options: { status: "closed" }, missing: "EVENT_CLOSED" },
++    { options: { startsAt: new Date(observedAt.getTime() + 1) }, missing: "EVENT_NOT_STARTED" },
++    { options: { staff: false }, missing: "EVENT_HAS_NO_AUTHORIZED_STAFF" },
++    { options: { station: false }, missing: "EVENT_HAS_NO_AVAILABLE_STATION" },
++  ]) {
++    const { service, availability } = fixture(options);
++    const result = await service.getEventExperiences(userId, eventId);
++    assert.equal(result.kind, "ok");
++    if (result.kind !== "ok") assert.fail("Participante ativo deve continuar consultando.");
++    assert.equal(result.acceptingNewQueueEntries, false, JSON.stringify(options));
++    assert.equal(result.experiences[0].acceptingNewQueueEntries, false);
++    assert.equal(result.experiences[0].waitingCount, 3);
++    const evaluated = availability();
++    assert.ok(evaluated?.eventExists);
++    assert.deepEqual(evaluated.missing, [missing], "Somente a guarda do cenário pode impedir novas entradas.");
++    if (missing === "EVENT_ENTRY_CLOSED") {
++      assert.equal(evaluated.ready, true);
++      assert.equal(evaluated.withinEntryWindow, false);
++      assert.equal(evaluated.cutoffAt.getTime(), observedAt.getTime());
++    }
++  }
++  const atStart = fixture({ startsAt: observedAt });
++  const result = await atStart.service.getEventExperiences(userId, eventId);
++  assert.ok(result.kind === "ok" && result.acceptingNewQueueEntries);
++  const evaluated = atStart.availability();
++  assert.ok(evaluated?.eventExists);
++  assert.equal(evaluated.withinEntryWindow, true);
++  assert.deepEqual(evaluated.missing, []);
++});
++
++test("E06 fila pausada ou sem estação não bloqueia outra apta; indicador global exige alguma apta", async () => {
++  const blockedRows = [
++    { ...baseRow, queueAcceptingEntries: false },
++    { ...baseRow, id: "experience-b", stationAvailable: false },
++  ];
++  for (const rows of [blockedRows, [...blockedRows, { ...baseRow, id: "experience-c" }], []]) {
++    const { service } = fixture({ rows });
++    const result = await service.getEventExperiences(userId, eventId);
++    assert.ok(result.kind === "ok");
++    assert.equal(result.acceptingNewQueueEntries, rows.length === 3);
++    assert.deepEqual(result.experiences.map((e) => e.acceptingNewQueueEntries), rows.map((_, i) => i === 2));
++  }
++});
++
++test("E06 preserva contagens seguras como number e serializa sem bigint", async () => {
++  const { service } = fixture({ rows: [{ ...baseRow, waitingCount: String(Number.MAX_SAFE_INTEGER) }] });
++  const result = await service.getEventExperiences(userId, eventId);
++  assert.ok(result.kind === "ok");
++  const serialized = JSON.parse(JSON.stringify(result)) as { observedAt: string; experiences: Array<{ waitingCount: number }> };
++  assert.equal(serialized.observedAt, observedAt.toISOString());
++  assert.equal(serialized.experiences[0].waitingCount, Number.MAX_SAFE_INTEGER);
++});
++
++test("E06 rejeita relógio e contagem inválidos, sem devolver informação enganosa", async () => {
++  for (const clock of [NaN, Infinity, 9e15]) {
++    const { service, queries } = fixture({ clock });
++    await assert.rejects(service.getEventExperiences(userId, eventId), /PostgreSQL/);
++    assert.equal(queries.at(-1)?.text, "rollback");
++  }
++  for (const waitingCount of ["-1", "1.5", "9007199254740992", "garbage"]) {
++    const { service, queries } = fixture({ rows: [{ ...baseRow, waitingCount }] });
++    await assert.rejects(service.getEventExperiences(userId, eventId), /contagem/);
++    assert.equal(queries.at(-1)?.text, "rollback");
++  }
++});
+diff --git a/backend/test/integration/experiences.integration.test.ts b/backend/test/integration/experiences.integration.test.ts
+new file mode 100644
+index 0000000..b7839c8
+--- /dev/null
++++ b/backend/test/integration/experiences.integration.test.ts
+@@ -0,0 +1,416 @@
++import assert from "node:assert/strict";
++import { randomUUID } from "node:crypto";
++import { after, test } from "node:test";
++import { drizzle } from "drizzle-orm/node-postgres";
++import { Pool } from "pg";
++import * as schema from "../../src/database/schema";
++import { EventsService } from "../../src/events/events.service";
++import { ExperiencesService } from "../../src/events/experiences.service";
++import type { EventExperiencesResult } from "../../src/events/experiences.types";
++import { assertSafeTestDatabase } from "./test-db-guard";
++
++// Validar as três fontes, incluindo parâmetros de redirecionamento, antes de criar pools.
++// Os imports do backend carregam a configuração existente; a barreira rejeita destinos
++// de desenvolvimento/homologação antes de qualquer conexão. Exigir preflight do processo.
++const urls = ["DATABASE_URL", "DATABASE_DIRECT_URL", "EVENTS_TEST_DATABASE_URL"].map((name) => {
++  const value = assertSafeTestDatabase(process.env[name]);
++  const url = new URL(value);
++  if (url.hostname !== "127.0.0.1" || url.port !== "55432" || url.pathname !== "/arenago_events_test") {
++    throw new Error(`${name} deve apontar exatamente a 127.0.0.1:55432/arenago_events_test.`);
++  }
++  return value;
++});
++const servicePool = new Pool({ connectionString: urls[2], application_name: `arena-e06-${randomUUID()}`, max: 3 });
++const fixturePool = new Pool({ connectionString: urls[2], max: 3 });
++const database = drizzle(servicePool, { schema });
++const service = new ExperiencesService(database, new EventsService(database));
++const ids = { events: [] as string[], users: [] as string[], versions: [] as string[] };
++const personalNames = new Map<string, string>();
++const orders = new Map<string, number>();
++
++after(async () => {
++  const errors: unknown[] = [];
++  try {
++    await cleanup();
++  } catch (error) {
++    errors.push(error);
++  } finally {
++    const closed = await Promise.allSettled([servicePool.end(), fixturePool.end()]);
++    for (const result of closed) if (result.status === "rejected") errors.push(result.reason);
++  }
++  if (errors.length) throw new AggregateError(errors, "Falha na limpeza/encerramento da suíte E06.");
++});
++
++/** Limpeza atômica limitada aos eventos/usuários próprios; nenhuma tabela global é esvaziada. */
++async function cleanup(): Promise<void> {
++  const client = await fixturePool.connect();
++  try {
++    await client.query("BEGIN");
++    await client.query("UPDATE participations SET current_queue_entry_id=NULL WHERE event_id=ANY($1::uuid[]) AND current_queue_entry_id IS NOT NULL", [ids.events]);
++    await client.query("DELETE FROM service_sessions s USING queue_entries q WHERE s.queue_entry_id=q.id AND q.event_id=ANY($1::uuid[])", [ids.events]);
++    await client.query("DELETE FROM queue_entries WHERE event_id=ANY($1::uuid[])", [ids.events]);
++    await client.query("DELETE FROM participation_profile_snapshots s USING participations p WHERE s.participation_id=p.id AND p.event_id=ANY($1::uuid[])", [ids.events]);
++    await client.query("DELETE FROM participations WHERE event_id=ANY($1::uuid[])", [ids.events]);
++    await client.query("DELETE FROM stations s USING experiences e WHERE s.experience_id=e.id AND e.event_id=ANY($1::uuid[])", [ids.events]);
++    await client.query("DELETE FROM experiences WHERE event_id=ANY($1::uuid[])", [ids.events]);
++    await client.query("DELETE FROM user_roles WHERE event_id=ANY($1::uuid[])", [ids.events]);
++    await client.query("DELETE FROM events WHERE id=ANY($1::uuid[])", [ids.events]);
++    await client.query("DELETE FROM users WHERE id=ANY($1::uuid[])", [ids.users]);
++    await client.query("DELETE FROM questionnaire_versions WHERE id=ANY($1::uuid[])", [ids.versions]);
++    await client.query("COMMIT");
++  } catch (error) {
++    await client.query("ROLLBACK").catch(() => undefined);
++    throw error;
++  } finally {
++    client.release();
++  }
++}
++
++async function createUser(name?: string): Promise<string> {
++  const id = randomUUID();
++  const personalName = name ?? `Pessoa privada E06 ${id}`;
++  await fixturePool.query(`INSERT INTO users(id,name,email,password_hash,email_verified_at,created_at,updated_at)
++    VALUES($1,$3,$2,'hash-privado',clock_timestamp(),clock_timestamp(),clock_timestamp())`,
++  [id, `${id}@example.test`, personalName]);
++  ids.users.push(id);
++  personalNames.set(id, personalName);
++  return id;
++}
++
++async function createEvent(): Promise<string> {
++  const id = randomUUID();
++  await fixturePool.query(`INSERT INTO events(id,name,access_code_normalized,timezone,starts_at,official_ends_at,
++    operational_deadline_at,status,external_queue_enabled,external_last_order,created_at,updated_at)
++    VALUES($1,'E06 fixture',$2,'America/Sao_Paulo',clock_timestamp()-interval '1 hour',clock_timestamp()+interval '1 hour',
++      clock_timestamp()+interval '90 minutes','open',true,9007199254741000,clock_timestamp(),clock_timestamp())`,
++  [id, `E06-${id.toUpperCase()}`]);
++  ids.events.push(id);
++  return id;
++}
++
++async function addParticipation(eventId: string, status: "active" | "waiting" | "finished" | "canceled" = "active", name?: string) {
++  const userId = await createUser(name);
++  const id = randomUUID();
++  const terminal = status === "finished" || status === "canceled";
++  await fixturePool.query(`INSERT INTO participations(id,user_id,event_id,status,joined_at,arena_entered_at,finished_at,finish_reason)
++    VALUES($1,$2,$3,$4,clock_timestamp(),CASE WHEN $4::varchar='active' THEN clock_timestamp() END,
++      CASE WHEN $5 THEN clock_timestamp() END,CASE WHEN $5 THEN 'fixture_finished' END)`,
++  [id, userId, eventId, status, terminal]);
++  return { id, userId };
++}
++
++async function createContext(participantName?: string, staffName?: string) {
++  const eventId = await createEvent();
++  const participant = await addParticipation(eventId, "active", participantName);
++  const staffId = await createUser(staffName);
++  const roleId = randomUUID();
++  await fixturePool.query("INSERT INTO user_roles(id,user_id,role,event_id,granted_at) VALUES($1,$2,'staff',$3,clock_timestamp())", [roleId, staffId, eventId]);
++  return { eventId, ...participant, staffId, roleId };
++}
++
++async function addExperience(eventId: string, id = randomUUID(), name = "Just Dance", accepting = true): Promise<string> {
++  await fixturePool.query(`INSERT INTO experiences(id,event_id,name,queue_accepting_entries,last_queue_order,created_at,updated_at)
++    VALUES($1,$2,$3,$4,9007199254741000,clock_timestamp(),clock_timestamp())`, [id, eventId, name, accepting]);
++  return id;
++}
++
++async function addStation(experienceId: string, available = true, id = randomUUID(), label = "Estação"): Promise<string> {
++  await fixturePool.query(`INSERT INTO stations(id,experience_id,label,availability,created_at,updated_at)
++    VALUES($1,$2,$3,$4,clock_timestamp(),clock_timestamp())`, [id, experienceId, label, available ? "available" : "unavailable"]);
++  return id;
++}
++
++async function addEntry(eventId: string, experienceId: string, status: "waiting" | "called" | "closed" = "waiting", name?: string) {
++  const participation = await addParticipation(eventId, "active", name);
++  const id = randomUUID();
++  const order = (orders.get(experienceId) ?? 0) + 1;
++  orders.set(experienceId, order);
++  await fixturePool.query(`INSERT INTO queue_entries(id,participation_id,event_id,experience_id,queue_order,status,entered_at,closed_at,close_reason)
++    VALUES($1,$2,$3,$4,$5,$6,clock_timestamp(),CASE WHEN $6::varchar='closed' THEN clock_timestamp() END,
++      CASE WHEN $6::varchar='closed' THEN 'fixture_completed' END)`, [id, participation.id, eventId, experienceId, order, status]);
++  if (status !== "closed") {
++    await fixturePool.query("UPDATE participations SET current_queue_entry_id=$2 WHERE id=$1", [participation.id, id]);
++  }
++  return { id, participation };
++}
++
++function requireState(result: EventExperiencesResult) {
++  assert.equal(result.kind, "ok");
++  if (result.kind !== "ok") assert.fail("Participante ativo deve ter acesso à consulta.");
++  return result;
++}
++
++async function persistedState(): Promise<string> {
++  // Texto JSON preserva inclusive bigint acima de MAX_SAFE_INTEGER para comparação integral.
++  const result = await fixturePool.query(`SELECT jsonb_build_object(
++    'events',(SELECT jsonb_agg(to_jsonb(e) ORDER BY e.id) FROM events e WHERE e.id=ANY($1::uuid[])),
++    'experiences',(SELECT jsonb_agg(to_jsonb(e) ORDER BY e.id) FROM experiences e WHERE e.event_id=ANY($1::uuid[])),
++    'stations',(SELECT jsonb_agg(to_jsonb(s) ORDER BY s.id) FROM stations s JOIN experiences e ON e.id=s.experience_id WHERE e.event_id=ANY($1::uuid[])),
++    'participations',(SELECT jsonb_agg(to_jsonb(p) ORDER BY p.id) FROM participations p WHERE p.event_id=ANY($1::uuid[])),
++    'queues',(SELECT jsonb_agg(to_jsonb(q) ORDER BY q.id) FROM queue_entries q WHERE q.event_id=ANY($1::uuid[])),
++    'sessions',(SELECT jsonb_agg(to_jsonb(s) ORDER BY s.id) FROM service_sessions s JOIN experiences e ON e.id=s.experience_id WHERE e.event_id=ANY($1::uuid[])),
++    'roles',(SELECT jsonb_agg(to_jsonb(r) ORDER BY r.id) FROM user_roles r WHERE r.event_id=ANY($1::uuid[])),
++    'users',(SELECT jsonb_agg(to_jsonb(u) ORDER BY u.id) FROM users u WHERE u.id=ANY($2::uuid[])),
++    'snapshots',(SELECT jsonb_agg(to_jsonb(s) ORDER BY s.participation_id) FROM participation_profile_snapshots s JOIN participations p ON p.id=s.participation_id WHERE p.event_id=ANY($1::uuid[]))
++  )::text AS state`, [ids.events, ids.users]);
++  return result.rows[0].state as string;
++}
++
++test("E06 somente active do evento solicitado acessa; ausente, waiting e terceiros são indistinguíveis", async () => {
++  const a = await createContext();
++  const b = await createContext();
++  await addStation(await addExperience(a.eventId));
++  const secretExperience = await addExperience(b.eventId, randomUUID(), "Experiência de outro evento");
++  await addStation(secretExperience);
++  assert.equal(requireState(await service.getEventExperiences(a.userId, a.eventId)).experiences.length, 1);
++  const waiting = await addParticipation(a.eventId, "waiting");
++  const finished = await addParticipation(a.eventId, "finished");
++  const canceled = await addParticipation(a.eventId, "canceled");
++  const noParticipation = await createUser();
++  for (const [userId, eventId] of [
++    [waiting.userId, a.eventId], [finished.userId, a.eventId], [canceled.userId, a.eventId],
++    [noParticipation, a.eventId], [randomUUID(), a.eventId], [a.userId, b.eventId], [a.userId, randomUUID()],
++  ]) {
++    assert.deepEqual(await service.getEventExperiences(userId, eventId), { kind: "access_denied" });
++  }
++});
++
++test("E06 múltiplas experiências, fila compartilhada, estados excluídos, ocupação e privacidade", async () => {
++  const a = await createContext("Ana Participante Privada E06", "Bruno Staff Privado E06");
++  // Inserção inversa ao UUID para comprovar que a ordenação não depende da ordem de criação.
++  const experienceIds = [randomUUID(), randomUUID(), randomUUID()].sort();
++  for (const id of [...experienceIds].reverse()) await addExperience(a.eventId, id, "Nome repetido");
++  const stationIds = [randomUUID(), randomUUID()].sort();
++  await addStation(experienceIds[0], true, stationIds[1], "Label repetido");
++  await addStation(experienceIds[0], false, stationIds[0], "Label repetido");
++  const completedStation = await addStation(experienceIds[1]);
++  await addEntry(a.eventId, experienceIds[0], "waiting", "Carla Espera Privada E06");
++  await addEntry(a.eventId, experienceIds[0], "waiting", "Diego Espera Privada E06");
++  const called = await addEntry(a.eventId, experienceIds[0], "called", "Elisa Chamada Privada E06");
++  const completed = await addEntry(a.eventId, experienceIds[1], "closed", "Fabio Concluido Privado E06");
++  await fixturePool.query(`INSERT INTO service_sessions(id,queue_entry_id,experience_id,station_id,called_by_user_id,called_at,status)
++    VALUES($1,$2,$3,$4,$5,clock_timestamp(),'pending')`, [randomUUID(), called.id, experienceIds[0], stationIds[1], a.staffId]);
++  await fixturePool.query(`INSERT INTO service_sessions(id,queue_entry_id,experience_id,station_id,called_by_user_id,called_at,status,resolved_at,resolved_by_user_id)
++    VALUES($1,$2,$3,$4,$5,clock_timestamp(),'completed',clock_timestamp(),$5)`, [randomUUID(), completed.id, experienceIds[1], completedStation, a.staffId]);
++  await addParticipation(a.eventId, "waiting", "Gabriela Externa Privada E06");
++  const versionId = randomUUID();
++  await fixturePool.query("INSERT INTO questionnaire_versions(id,version,definition,activated_at,created_at) VALUES($1,$2,'{}',clock_timestamp(),clock_timestamp())", [versionId, `e06-${versionId}`]);
++  ids.versions.push(versionId);
++  await fixturePool.query(`INSERT INTO participation_profile_snapshots(participation_id,questionnaire_version_id,answers,games_snapshot,captured_at)
++    VALUES($1,$2,'{"private":"resposta privada"}','[]',clock_timestamp())`, [called.participation.id, versionId]);
++  const other = await createContext("Helena Outro Evento Privada E06", "Igor Outro Staff Privado E06");
++  const otherExperience = await addExperience(other.eventId);
++  await addStation(otherExperience);
++  await addEntry(other.eventId, otherExperience, "waiting", "Julia Outra Espera Privada E06");
++
++  const beforeClock = await fixturePool.query("SELECT clock_timestamp() AS at");
++  const before = await persistedState();
++  for (let attempt = 0; attempt < 3; attempt += 1) {
++    const state = requireState(await service.getEventExperiences(a.userId, a.eventId));
++    assert.equal(state.eventId, a.eventId);
++    assert.deepEqual(state.experiences.map((e) => e.id), experienceIds);
++    assert.deepEqual(state.experiences.map((e) => e.name), ["Nome repetido", "Nome repetido", "Nome repetido"]);
++    assert.deepEqual(state.experiences.map((e) => e.waitingCount), [2, 0, 0]);
++    assert.deepEqual(state.experiences.map((e) => e.acceptingNewQueueEntries), [true, true, false]);
++    assert.deepEqual(state.experiences[0].stations.map((s) => s.id), stationIds);
++    assert.deepEqual(state.experiences[0].stations.map((s) => s.label), ["Label repetido", "Label repetido"]);
++    assert.deepEqual(state.experiences[0].stations.map((s) => s.available), [false, true]);
++    assert.equal(state.experiences[1].stations[0].id, completedStation);
++    assert.equal(state.experiences[1].stations[0].label, "Estação");
++    assert.deepEqual(state.experiences[2].stations, []);
++    assert.ok(state.observedAt.getTime() >= (beforeClock.rows[0].at as Date).getTime() - 1);
++    const afterClock = await fixturePool.query("SELECT clock_timestamp() AS at");
++    assert.ok(state.observedAt.getTime() <= (afterClock.rows[0].at as Date).getTime() + 1);
++    assert.deepEqual(Object.keys(state).sort(), ["acceptingNewQueueEntries", "eventId", "experiences", "kind", "observedAt"]);
++    for (const experience of state.experiences) {
++      assert.deepEqual(Object.keys(experience).sort(), ["acceptingNewQueueEntries", "id", "name", "stations", "waitingCount"]);
++      for (const station of experience.stations) assert.deepEqual(Object.keys(station).sort(), ["available", "id", "label"]);
++    }
++    const json = JSON.stringify(state);
++    for (const secret of [a.userId, a.staffId, called.participation.userId, otherExperience, "example.test", "hash-privado", "resposta privada", ...personalNames.values()]) {
++      assert.equal(json.includes(secret), false);
++    }
++  }
++  assert.equal(await persistedState(), before, "Nenhum contador, timestamp, fila ou dado pessoal pode ser alterado.");
++});
++
++test("E06 capacidade individual e fila fechada preservam espera; outra experiência continua apta", async () => {
++  const a = await createContext();
++  const paused = await addExperience(a.eventId, randomUUID(), "Pausada", false);
++  const unavailable = await addExperience(a.eventId, randomUUID(), "Indisponível");
++  const ready = await addExperience(a.eventId, randomUUID(), "Apta");
++  await addStation(paused);
++  await addStation(unavailable, false);
++  await addStation(ready);
++  await addEntry(a.eventId, paused);
++  await addEntry(a.eventId, unavailable);
++  const state = requireState(await service.getEventExperiences(a.userId, a.eventId));
++  assert.equal(state.acceptingNewQueueEntries, true);
++  for (const experience of state.experiences) {
++    assert.equal(experience.acceptingNewQueueEntries, experience.id === ready);
++    assert.equal(experience.waitingCount, experience.id === ready ? 0 : 1);
++  }
++  await fixturePool.query("UPDATE experiences SET queue_accepting_entries=false WHERE id=$1", [ready]);
++  assert.equal(requireState(await service.getEventExperiences(a.userId, a.eventId)).acceptingNewQueueEntries, false);
++});
++
++test("E06 Staff revogado, inativo, não verificado ou de outro evento não habilita entradas", async () => {
++  const a = await createContext();
++  const other = await createContext();
++  await addStation(await addExperience(a.eventId));
++  const experienceId = (requireState(await service.getEventExperiences(a.userId, a.eventId))).experiences[0].id;
++  await addEntry(a.eventId, experienceId);
++  const blockAndCheck = async (sql: string, params: unknown[]) => {
++    await fixturePool.query(sql, params);
++    const state = requireState(await service.getEventExperiences(a.userId, a.eventId));
++    assert.equal(state.acceptingNewQueueEntries, false);
++    assert.equal(state.experiences[0].acceptingNewQueueEntries, false);
++    assert.equal(state.experiences[0].waitingCount, 1);
++  };
++  await blockAndCheck("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE id=$1", [a.roleId]);
++  await fixturePool.query("UPDATE user_roles SET revoked_at=NULL WHERE id=$1", [a.roleId]);
++  await blockAndCheck("UPDATE users SET is_active=false WHERE id=$1", [a.staffId]);
++  await fixturePool.query("UPDATE users SET is_active=true WHERE id=$1", [a.staffId]);
++  await blockAndCheck("UPDATE users SET email_verified_at=NULL WHERE id=$1", [a.staffId]);
++  await fixturePool.query("UPDATE users SET email_verified_at=clock_timestamp() WHERE id=$1", [a.staffId]);
++  await blockAndCheck("UPDATE user_roles SET event_id=$2 WHERE id=$1", [a.roleId, other.eventId]);
++  await fixturePool.query("UPDATE user_roles SET event_id=$2 WHERE id=$1", [a.roleId, a.eventId]);
++  assert.equal(requireState(await service.getEventExperiences(a.userId, a.eventId)).acceptingNewQueueEntries, true);
++});
++
++test("E06 cortes oficial/Admin e estados administrativos mantêm consulta e filas durante margem residual", async () => {
++  const a = await createContext();
++  const experienceId = await addExperience(a.eventId);
++  await addStation(experienceId);
++  await addEntry(a.eventId, experienceId);
++  const events = new EventsService(database);
++  const cases = [
++    { changes: "official_ends_at=statement_timestamp()-interval '10 minutes',operational_deadline_at=statement_timestamp()+interval '20 minutes'", missing: "EVENT_ENTRY_CLOSED", withinEntryWindow: false },
++    { changes: "closure_mode='controlled',closure_requested_at=statement_timestamp()-interval '10 minutes',admin_deadline_at=statement_timestamp()+interval '20 minutes'", missing: "EVENT_ENTRY_CLOSED", withinEntryWindow: false },
++    { changes: "status='closing'", missing: "EVENT_ADMIN_CLOSING", withinEntryWindow: true },
++    { changes: "status='closed'", missing: "EVENT_CLOSED", withinEntryWindow: true },
++  ];
++  for (const { changes, missing, withinEntryWindow } of cases) {
++    // Restaurar todos os campos alterados: nenhum cenário herda o impedimento anterior.
++    await fixturePool.query(`UPDATE events SET status='open',
++      starts_at=statement_timestamp()-interval '1 hour',
++      official_ends_at=statement_timestamp()+interval '1 hour',
++      operational_deadline_at=statement_timestamp()+interval '90 minutes',
++      closure_mode=NULL,closure_requested_at=NULL,admin_deadline_at=NULL WHERE id=$1`, [a.eventId]);
++    const baseline = requireState(await service.getEventExperiences(a.userId, a.eventId));
++    assert.equal(baseline.acceptingNewQueueEntries, true);
++    assert.equal(baseline.experiences[0].acceptingNewQueueEntries, true);
++    assert.equal(baseline.experiences[0].waitingCount, 1);
++    await fixturePool.query(`UPDATE events SET ${changes} WHERE id=$1`, [a.eventId]);
++    const before = await persistedState();
++    const state = requireState(await service.getEventExperiences(a.userId, a.eventId));
++    assert.equal(state.acceptingNewQueueEntries, false);
++    assert.equal(state.experiences[0].acceptingNewQueueEntries, false);
++    assert.equal(state.experiences[0].waitingCount, 1);
++    const availability = await events.evaluateEventAvailabilityById(a.eventId, state.observedAt);
++    assert.ok(availability.eventExists);
++    assert.equal(availability.ready, true, "Configuração, Staff e estação devem continuar aptos.");
++    assert.equal(availability.withinEntryWindow, withinEntryWindow);
++    assert.deepEqual(availability.missing, [missing], "Deve existir somente o impedimento específico do cenário.");
++    const event = await events.findById(a.eventId);
++    assert.ok(event);
++    assert.ok(event.operationalDeadlineAt.getTime() > state.observedAt.getTime(), "A margem operacional ainda está vigente.");
++    if (event.adminDeadlineAt) assert.ok(event.adminDeadlineAt.getTime() > state.observedAt.getTime());
++    assert.equal(availability.cutoffAt.getTime(), (event.closureRequestedAt ?? event.officialEndsAt).getTime());
++    assert.equal(await persistedState(), before);
++  }
++});
++
++test("E06 evento ainda não iniciado, sem estações disponíveis ou sem experiências tem retorno válido", async () => {
++  const a = await createContext();
++  const empty = requireState(await service.getEventExperiences(a.userId, a.eventId));
++  assert.deepEqual(empty.experiences, []);
++  assert.equal(empty.acceptingNewQueueEntries, false);
++  const experienceId = await addExperience(a.eventId);
++  await addStation(experienceId, false);
++  const unavailable = requireState(await service.getEventExperiences(a.userId, a.eventId));
++  assert.equal(unavailable.experiences[0].acceptingNewQueueEntries, false);
++  assert.equal(unavailable.acceptingNewQueueEntries, false);
++  await fixturePool.query("UPDATE stations SET availability='available' WHERE experience_id=$1", [experienceId]);
++  await fixturePool.query("UPDATE events SET starts_at=clock_timestamp()+interval '10 minutes',status='scheduled' WHERE id=$1", [a.eventId]);
++  assert.equal(requireState(await service.getEventExperiences(a.userId, a.eventId)).acceptingNewQueueEntries, false);
++});
++
++test("E06 mudanças de fila e disponibilidade entre consultas são refletidas sem cache", async () => {
++  const a = await createContext();
++  const experienceId = await addExperience(a.eventId);
++  const stationId = await addStation(experienceId);
++  const entry = await addEntry(a.eventId, experienceId);
++  const read = async () => requireState(await service.getEventExperiences(a.userId, a.eventId));
++  assert.equal((await read()).experiences[0].waitingCount, 1);
++  await fixturePool.query("UPDATE queue_entries SET status='called' WHERE id=$1", [entry.id]);
++  assert.equal((await read()).experiences[0].waitingCount, 0);
++  await addEntry(a.eventId, experienceId);
++  await fixturePool.query("UPDATE stations SET availability='unavailable' WHERE id=$1", [stationId]);
++  const unavailable = await read();
++  assert.equal(unavailable.experiences[0].waitingCount, 1);
++  assert.equal(unavailable.acceptingNewQueueEntries, false);
++  await fixturePool.query("UPDATE stations SET availability='available' WHERE id=$1", [stationId]);
++  assert.equal((await read()).acceptingNewQueueEntries, true);
++});
++
++test("E06 snapshot conserva disponibilidade, estações e fila apesar de commit entre as leituras", async () => {
++  const a = await createContext();
++  const experienceId = await addExperience(a.eventId);
++  const stationId = await addStation(experienceId);
++  const entry = await addEntry(a.eventId, experienceId);
++  const events = new EventsService(database);
++  const evaluate = events.evaluateEventAvailabilityById.bind(events);
++  let changed = false;
++  events.evaluateEventAvailabilityById = async (...args) => {
++    const availability = await evaluate(...args);
++    assert.ok(availability.eventExists && availability.eventAcceptingNewEntries);
++    const client = await fixturePool.connect();
++    try {
++      await client.query("BEGIN");
++      await client.query("UPDATE stations SET availability='unavailable' WHERE id=$1", [stationId]);
++      await client.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE id=$1", [a.roleId]);
++      await client.query("UPDATE queue_entries SET status='called' WHERE id=$1", [entry.id]);
++      await client.query("UPDATE experiences SET queue_accepting_entries=false WHERE id=$1", [experienceId]);
++      await client.query("COMMIT");
++      changed = true;
++    } catch (error) {
++      await client.query("ROLLBACK").catch(() => undefined);
++      throw error;
++    } finally {
++      client.release();
++    }
++    return availability;
++  };
++  const consistentService = new ExperiencesService(database, events);
++  const during = requireState(await consistentService.getEventExperiences(a.userId, a.eventId));
++  assert.equal(changed, true);
++  assert.equal(during.acceptingNewQueueEntries, true);
++  assert.equal(during.experiences[0].waitingCount, 1);
++  assert.equal(during.experiences[0].stations[0].available, true);
++  const afterCommit = requireState(await service.getEventExperiences(a.userId, a.eventId));
++  assert.equal(afterCommit.acceptingNewQueueEntries, false);
++  assert.equal(afterCommit.experiences[0].waitingCount, 0);
++  assert.equal(afterCommit.experiences[0].stations[0].available, false);
++});
++
++test("E06 autorização e guardas compartilham snapshot; consulta seguinte observa perda do acesso", async () => {
++  const a = await createContext();
++  const experienceId = await addExperience(a.eventId);
++  await addStation(experienceId);
++  const events = new EventsService(database);
++  const evaluate = events.evaluateEventAvailabilityById.bind(events);
++  let changed = false;
++  events.evaluateEventAvailabilityById = async (...args) => {
++    // O serviço já verificou active. Confirmar em outra conexão antes de ler as guardas.
++    await fixturePool.query("UPDATE participations SET status='finished',finished_at=clock_timestamp(),finish_reason='fixture_finished' WHERE id=$1", [a.id]);
++    await fixturePool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE id=$1", [a.roleId]);
++    changed = true;
++    return evaluate(...args);
++  };
++  const during = requireState(await new ExperiencesService(database, events).getEventExperiences(a.userId, a.eventId));
++  assert.equal(changed, true);
++  assert.equal(during.acceptingNewQueueEntries, true);
++  assert.equal(during.experiences[0].id, experienceId);
++  assert.deepEqual(await service.getEventExperiences(a.userId, a.eventId), { kind: "access_denied" });
++});
+diff --git a/docs/E06_IMPLEMENTACAO.md b/docs/E06_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..9bcb777
+--- /dev/null
++++ b/docs/E06_IMPLEMENTACAO.md
+@@ -0,0 +1,319 @@
++# ArenaGo — entrega E06
++
++Data: 29/10/2026. Branch: `feature/events-participations`. Base: `24ecf02`.
++
++## Resultado e decisões do contrato
++
++A E06 implementa a consulta interna das experiências e estações de um evento para
++um usuário com participação `active` nesse mesmo evento. Mostra a quantidade de
++entradas internas em espera e se cada experiência pode receber novas entradas.
++A consulta continua disponível aos ativos após o corte, inclusive na margem residual.
++
++O contrato usa uma união discriminada por `kind`, consistente com os resultados de
++domínio das E03/E05. O sucesso acrescenta `kind: "ok"` à estrutura sugerida na tarefa;
++a recusa retorna somente `{ kind: "access_denied" }`. Não distingue evento ausente,
++participação inexistente, estado não ativo ou participação em outro evento.
++
++O indicador **global** `acceptingNewQueueEntries` significa que existe pelo menos
++uma experiência apta. Assim, retorna `false` quando todas as filas estão pausadas,
++quando nenhuma experiência tem estação disponível ou quando a coleção está vazia,
++mesmo que as demais condições globais do evento estejam satisfeitas. O indicador
++individual exige também todas as condições globais. Essa semântica explicita a
++diferença entre a configuração de uma fila e sua capacidade de receber entradas.
++
++## Serviço e tipos
++
++`ExperiencesService.getEventExperiences(userId: string, eventId: string)` retorna
++`Promise<EventExperiencesResult>`. O serviço é provider exportado de `EventsModule`,
++que já integra o aplicativo. Não foram criados controller, rota nem guard HTTP.
++O chamador interno deve fornecer um `userId` confiável; o método não autentica tokens.
++
++Tipos exportados de `experiences.types.ts`:
++
++- `ExperienceStationState`: `id`, `label`, `available`.
++- `ExperienceState`: `id`, `name`, `acceptingNewQueueEntries`, `waitingCount`, `stations`.
++- `EventExperiencesState`: `eventId`, `observedAt`, indicador global e `experiences`.
++- `EventExperiencesResult`: sucesso com os dados acima ou recusa sem dados adicionais.
++
++Exemplo de sucesso serializado:
++
++```json
++{
++  "kind": "ok",
++  "eventId": "550e8400-e29b-41d4-a716-446655440101",
++  "observedAt": "2026-10-29T15:00:00.000Z",
++  "acceptingNewQueueEntries": true,
++  "experiences": [
++    {
++      "id": "550e8400-e29b-41d4-a716-446655440301",
++      "name": "Just Dance",
++      "acceptingNewQueueEntries": true,
++      "waitingCount": 3,
++      "stations": [
++        {
++          "id": "550e8400-e29b-41d4-a716-446655440401",
++          "label": "Estação 1",
++          "available": true
++        }
++      ]
++    }
++  ]
++}
++```
++
++`observedAt` é `Date` no serviço e serializa em ISO 8601. `waitingCount` é `number`
++inteiro não negativo e seguro: o SQL retorna a contagem decimal em texto, validada
++antes da conversão. Valores inválidos ou acima de `Number.MAX_SAFE_INTEGER` geram
++erro, sem arredondamento silencioso. Nenhum `bigint` é retornado.
++
++## Contagem, disponibilidade e ordenação
++
++Uma CTE agrupa `queue_entries` por `experience_id`, filtrando simultaneamente o
++evento solicitado e `status = 'waiting'`. A agregação ocorre antes do join de estações,
++evitando multiplicar contagens. Experiências sem entradas têm `waitingCount = 0`.
++Não contam fila externa, participações sem entrada, entradas `called`/`closed` ou
++atendimentos concluídos. Há somente uma contagem por experiência.
++
++`EventsService.evaluateEventAvailabilityById(eventId, observedAt, tx)` é reutilizado
++sem alterações: verifica configuração/prontidão, Staff vigente do evento com conta
++ativa e e-mail verificado, alguma estação disponível no evento, início inclusivo,
++corte oficial/Admin exclusivo e estado administrativo. `closing` e `closed` impedem
++novas entradas. Os prazos operacional e Admin residuais nunca estendem o corte.
++
++Cada experiência aceita novas entradas quando a disponibilidade global permite,
++`queue_accepting_entries = true` e pelo menos uma de suas estações tem
++`availability = 'available'`. A indisponibilidade de uma experiência não bloqueia
++as demais aptas. O serviço não avalia ocupação: uma estação `available` com chamada
++pendente continua sendo apresentada como disponível na configuração. Não há novos
++estados de estação nem alteração em filas, participações ou contadores.
++
++A ordenação é `experiences.id ASC`, seguida de `stations.id ASC`, usando a comparação
++UUID do PostgreSQL. Um `Map` mantém essa ordem ao agrupar as linhas. Nomes/labels
++repetidos não introduzem empates; experiências sem estações retornam `stations: []`.
++
++## Titularidade, privacidade e consistência
++
++A primeira consulta exige simultaneamente `participations.user_id = userId`,
++`event_id = eventId` e `status = 'active'`. Sem esse registro, termina com recusa
++neutra antes de consultar disponibilidade ou estrutura do evento. Participações
++`waiting`, `finished` e `canceled` não autorizam a leitura interna. Não é aceito
++um ID de participação fornecido pelo chamador como substituto de titularidade.
++
++A resposta é construída por seleção explícita de campos operacionais. Não inclui
++nomes/e-mails de participantes, identidades de Staff, listas de fila, snapshots,
++respostas de questionário, tokens ou dados de outros eventos. Os identificadores
++retornados são apenas os do evento, experiências e estações.
++
++Toda a operação usa uma transação PostgreSQL **REPEATABLE READ READ ONLY** na
++mesma conexão Drizzle. A autorização estabelece o snapshot compartilhado também
++pela leitura de evento, Staff, capacidade, experiências, estações e contagens.
++O relógio vem de `statement_timestamp()` nessa primeira consulta, convertido de
++epoch em milissegundos para `Date`, com validação. Não se usa o relógio do aplicativo.
++
++São cinco SELECTs no caminho de sucesso: acesso/relógio, evento, Staff, estação
++global e estrutura/contagens. O número é constante; não há N+1 por experiência.
++Não há locks explícitos de linha nem instruções de gravação. `READ ONLY` também
++impede gravações acidentais no banco pela transação. Locks normais de leitura de
++relação do PostgreSQL continuam existindo.
++
++O snapshot pode ficar desatualizado durante ou após a consulta. Mudanças confirmadas
++depois de seu estabelecimento aparecem na próxima chamada, incluindo perda de
++acesso, revogação de Staff e alterações de fila. O relógio representa o começo da
++observação, não a hora de envio da resposta. Nenhum indicador reserva vaga ou
++autoriza uma mutação futura, e não se promete atualização em tempo real.
++
++## Arquivos da entrega
++
++| Arquivo | Alteração |
++| --- | --- |
++| `backend/src/events/experiences.service.ts` | Novo serviço interno E06. |
++| `backend/src/events/experiences.types.ts` | Novos contratos de domínio. |
++| `backend/src/events/events.module.ts` | Registra e exporta `ExperiencesService`. |
++| `backend/test/unit/experiences.test.ts` | 6 testes unitários novos. |
++| `backend/test/integration/experiences.integration.test.ts` | 9 testes PostgreSQL novos, com cenários agrupados. |
++| `docs/E06_IMPLEMENTACAO.md` | Este relatório. |
++| `qa-evidence/e06-changes.diff` | Diff completo dos seis arquivos acima contra a base, incluindo arquivos novos. |
++
++## Cobertura e validação original — 29/10/2026
++
++| Verificação em 29/10/2026 | Resultado |
++| --- | --- |
++| `npm.cmd run typecheck:test` | Aprovado, incluindo a suíte de integração nova. |
++| `npm.cmd test` | 90 aprovados, zero falhas/skips: 84 anteriores + 6 E06. |
++| `npm.cmd run lint` | Aprovado. |
++| `npm.cmd run build` | Aprovado. |
++| `git diff --check` e whitespace dos arquivos novos | Aprovados. |
++| `npm.cmd run test:integration` | Não executado: variáveis do banco autorizado ausentes. |
++
++A primeira tentativa de `npm.cmd test` na sandbox falhou em
++`uv_os_get_passwd / ENOMEM` antes de executar testes. A mesma execução autorizada
++fora da sandbox concluiu os 90 testes. Os unitários usam cliente PostgreSQL simulado
++e não abrem conexão real. Uma correção de tipagem do resultado SQL foi feita antes
++da aprovação final do typecheck.
++
++Os nove testes de integração agrupam os 19 cenários obrigatórios: titularidade e
++isolamento; todos os estados de participação; múltiplas experiências/estações;
++fila compartilhada; exclusão de `called`, `closed`, espera externa e serviços
++concluídos; estação ocupada ainda configurada como disponível; perda/restauração
++de capacidade; Staff revogado/inativo/não verificado/de outro evento; fila pausada;
++cortes oficial/Admin e margem residual; coleção vazia; consultas sem escritas;
++alterações entre consultas; ordenação com nomes repetidos e inserção inversa;
++contrato com campos permitidos e ausência de dados privados.
++
++Dois desses testes confirmam mudanças por outra conexão entre etapas da consulta:
++um após a guarda de disponibilidade, outro após a autorização. As asserções exigem
++o estado do snapshot antigo e o estado novo na consulta seguinte. Não usam sleeps
++para presumir concorrência. A suíte nova tem UUIDs próprios, limpeza transacional
++limitada às fixtures e encerramento dos dois pools mesmo se a limpeza falhar.
++Não modifica expectativas, fixtures ou scripts das suítes K01/K03/K04/E03/E04/E05.
++
++**Limite da evidência na sessão original:** os nove testes PostgreSQL foram escritos e passaram pelo
++typecheck/lint, mas não foram executados. Portanto, a consistência e o SQL real
++ainda dependem da validação no banco permitido; os unitários não a substituem.
++
++## Segurança do banco e execução manual pendente
++
++O preflight sanitizado confirmou `DATABASE_URL`, `DATABASE_DIRECT_URL` e
++`EVENTS_TEST_DATABASE_URL` ausentes no processo. Os arquivos `.env` e `.env.neon.local`
++têm URLs de destinos não autorizados para esta tarefa. Não foram exibidas URLs ou
++credenciais, abertos pools reais nem acessados esses destinos.
++
++Configure explicitamente as três variáveis na sessão PowerShell com as credenciais
++locais do banco **já preparado** em `127.0.0.1:55432/arenago_events_test`. Não reutilize
++os valores dos arquivos de ambiente. Execute então o preflight abaixo antes dos testes:
++
++```powershell
++Set-Location C:\DoJob\ProgramacaoMobile\backend
++# Configure DATABASE_URL, DATABASE_DIRECT_URL e EVENTS_TEST_DATABASE_URL nesta sessão.
++$preflight = @'
++const { assertSafeTestDatabase } = require("./test/integration/test-db-guard.ts");
++for (const name of ["DATABASE_URL", "DATABASE_DIRECT_URL", "EVENTS_TEST_DATABASE_URL"]) {
++  const url = new URL(assertSafeTestDatabase(process.env[name]));
++  if (url.hostname !== "127.0.0.1" || url.port !== "55432" || url.pathname !== "/arenago_events_test") {
++    throw new Error(`${name}: destino não autorizado.`);
++  }
++}
++console.log("Três URLs validadas para o PostgreSQL de teste autorizado.");
++'@
++node --import tsx --input-type=commonjs -e $preflight
++if ($LASTEXITCODE -ne 0) { throw 'Preflight rejeitado; integração não iniciada.' }
++npm.cmd run test:integration
++```
++
++O preflight não importa a configuração do backend nem carrega `.env`. O teste novo
++também valida as três URLs e rejeita parâmetros de redirecionamento antes de criar
++pools. O script existente mantém `--test-concurrency=1`; não executar as suítes de
++integração em paralelo. Não foram executados DROP, TRUNCATE, reset ou migrations.
++
++## Dependências para E07, E14 e revisão
++
++A E07 deverá revalidar titularidade, estado ativo, experiência do mesmo evento,
++ausência de outra entrada interna corrente, relógio PostgreSQL após eventuais
++esperas, cortes e capacidade dentro de sua própria transação de mutação. Deve
++seguir os protocolos de locks/FIFO/idempotência do projeto; não confiar nos
++indicadores informativos da E06 como autorização definitiva.
++
++Para E14 e validação integrada posterior, permanece pendente executar esta suíte
++e as regressões no PostgreSQL autorizado e validar a composição com as operações
++futuras. Antes de exposição HTTP, será necessário obter o titular de autenticação
++confiável e definir o mapeamento HTTP da recusa neutra. A E06 não implementa essa
++camada, encerramento automático, entrada interna, chamada, confirmação, ausência,
++CRUD, cache, polling, WebSocket ou push. E01–E05 foram preservadas.
++
++O diff completo está em `qa-evidence/e06-changes.diff`; o artefato não inclui a si
++próprio. Não houve commit, push, PR ou merge. Entrega local para revisão técnica e
++auditoria, com a integração PostgreSQL expressamente pendente.
++
++## Revisão pós-auditoria — 29/10/2026
++
++A auditoria retornou **SIM COM RESSALVAS**, sem defeito funcional confirmado no
++serviço. Esta revisão corrige somente os dois achados P2 de cobertura e o registro
++P3 de validação. Foram modificados o unitário E06, a integração E06, este relatório
++e `qa-evidence/e06-changes.diff`. Continuam sendo seis unitários E06 e nove testes
++de integração E06; nenhuma expectativa anterior foi removida ou reduzida.
++
++### Eliminação dos falsos positivos
++
++- **U3 — configuração temporal:** a fixture deriva início e prazo operacional do
++  encerramento oficial do cenário. O início padrão fica duas horas antes, e o prazo
++  operacional uma hora depois; o início explícito do cenário continua preservado.
++  A própria fixture exige prontidão estática válida. U3 exige exatamente um código
++  de impedimento em cada cenário. Nos cortes exatos oficial/Admin, exige também
++  `ready=true`, janela fechada e corte igual ao instante observado. O corte oficial
++  não pode mais passar por configuração inválida. O início inclusivo mantém a
++  aceitação e exige janela aberta e ausência de impedimentos.
++- **I5 — cenários independentes:** antes de cada caso, a fixture restaura estado
++  `open`, início passado, encerramento oficial futuro, prazo operacional válido e
++  todos os campos de fechamento Admin nulos. Confirma então aceitação e uma espera
++  existente. Só depois aplica o impedimento específico. Corte oficial e corte Admin
++  são testados com estado `open`; `closing` e `closed` são testados dentro da janela
++  temporal e sem corte Admin. As guardas devem retornar prontidão válida, o estado
++  temporal esperado e exatamente o código daquele impedimento. O teste verifica
++  os prazos residuais ainda futuros, preserva acesso ativo/contagem e compara o
++  estado persistido integral antes e depois da consulta.
++- **I2 — conteúdo dos campos permitidos:** participantes, Staff, espera externa e
++  usuários do outro evento recebem nomes pessoais distintos e reconhecíveis. Os
++  demais usuários da suíte têm nomes distintos associados ao UUID. O teste exige
++  os nomes operacionais exatos das três experiências e os labels exatos de todas
++  as estações retornadas. Também proíbe no JSON todos os nomes pessoais das fixtures,
++  mantendo as verificações anteriores de IDs, ordem, campos permitidos, contagens,
++  snapshots e isolamento. Substituir `e.name` por um nome de participante ou `s.label`
++  por um nome de Staff viola tanto o valor operacional esperado quanto a proibição
++  do nome pessoal. Não há proibição genérica de nomes próprios.
++
++### Histórico posterior informado pelo responsável
++
++Após a implementação original, o responsável informou os seguintes resultados para
++a versão anterior às correções desta revisão:
++
++| Validação informada pelo responsável | Resultado informado |
++| --- | --- |
++| Testes unitários | 90/90 aprovados. |
++| Integração específica E06 | 9/9 aprovados em `127.0.0.1:55432/arenago_events_test`. |
++| Regressão completa de integração | 108/108 aprovados no PostgreSQL autorizado. |
++| Typecheck, lint e build | Aprovados. |
++
++Esses resultados são atribuídos ao responsável, sem nova execução PostgreSQL pelo
++agente nesta rodada. O registro original de indisponibilidade do banco foi mantido
++acima. As aprovações anteriores não são apresentadas como validação dos testes
++I2/I5 fortalecidos nesta revisão.
++
++### Execuções efetivas desta revisão
++
++| Verificação executada pelo agente em 29/10/2026 | Resultado |
++| --- | --- |
++| `npm.cmd test` | 90 aprovados, zero falhas/skips, incluindo os seis E06 com U3 corrigido. |
++| `npm.cmd run typecheck:test` | Aprovado, incluindo os testes de integração modificados. |
++| `npm.cmd run lint` | Aprovado. |
++| `npm.cmd run build` | Aprovado. |
++| Whitespace, diff completo e correspondência dos arquivos | Aprovados. |
++| Integração específica E06 e regressão PostgreSQL | Não executadas: as três variáveis estão ausentes no processo. |
++
++A primeira tentativa de unitários na sandbox falhou antes dos testes em
++`uv_os_get_passwd / ENOMEM`. A execução autorizada do mesmo comando fora da sandbox
++passou. Não foi usado fallback de `.env` para integrar, nem aberto pool PostgreSQL
++real pelo agente nesta revisão.
++
++`ExperiencesService`, `EventsService`, tipos e registro no módulo foram preservados.
++Os hashes Git dos serviços permanecem, respectivamente,
++`456e404ad6812fbfed5e181e275d7ba848ce1690` e
++`2247d6e52993172ff0199ee9e28c74f8a519fe6c`. Não foram alterados E01–E05, Kaled,
++contrato, autenticação ou migrations; não houve commit, push, PR ou merge.
++
++### Execução manual pendente e riscos restantes
++
++Permanece pendente executar os nove testes E06 com I2/I5 fortalecidos e a regressão
++completa. Configure explicitamente as três variáveis no PowerShell para o mesmo
++destino autorizado e execute o preflight da seção anterior. Depois, no diretório
++`backend`, execute sequencialmente:
++
++```powershell
++npx.cmd tsx --tsconfig tsconfig.test.json --test --test-concurrency=1 test/integration/experiences.integration.test.ts
++if ($LASTEXITCODE -ne 0) { throw 'Integração E06 falhou; revisar antes da regressão completa.' }
++npm.cmd run test:integration
++```
++
++Não atribuir uma nova aprovação PostgreSQL à versão corrigida antes dessa execução.
++Os limites de snapshot, atualização após a observação e revalidação pela E07 seguem
++os já documentados. O diff atualizado contém a entrega E06 completa contra `24ecf02`,
++incluindo os arquivos novos e este histórico; não inclui o próprio artefato.
