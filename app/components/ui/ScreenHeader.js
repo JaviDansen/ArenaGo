@@ -9,16 +9,28 @@ import radii from '../../theme/radii.js';
 import spacing from '../../theme/spacing.js';
 import typography from '../../theme/typography.js';
 
+// Botão de retorno visual 40x40pt + hitSlop de 6pt = 52x52pt de área efetiva de toque (>= 44x44pt)
+export const BACK_BUTTON_HIT_SLOP = { top: 6, bottom: 6, left: 6, right: 6 };
+
 export function ScreenHeader({
   title,
   subtitle,
   onBack,
   rightAction,
   showBack = true,
+  backDisabled = false,
   style,
   testID,
 }) {
   const canGoBack = showBack && typeof onBack === 'function';
+  const isBackDisabled = Boolean(backDisabled);
+
+  function handleBackPress(event) {
+    if (isBackDisabled) return;
+    if (canGoBack) {
+      onBack(event);
+    }
+  }
 
   return (
     <View style={[styles.header, style]} testID={testID}>
@@ -28,12 +40,15 @@ export function ScreenHeader({
           <Pressable
             style={({ pressed }) => [
               styles.backButton,
-              pressed && styles.backButtonPressed,
+              isBackDisabled && styles.backButtonDisabled,
+              pressed && !isBackDisabled && styles.backButtonPressed,
             ]}
-            onPress={onBack}
-            hitSlop={8}
+            onPress={isBackDisabled ? undefined : handleBackPress}
+            disabled={isBackDisabled}
+            hitSlop={BACK_BUTTON_HIT_SLOP}
             accessibilityRole="button"
             accessibilityLabel="Voltar"
+            accessibilityState={{ disabled: isBackDisabled }}
           >
             <Text style={styles.backButtonText}>←</Text>
           </Pressable>
@@ -43,7 +58,7 @@ export function ScreenHeader({
       {/* Título e Subtítulo Central */}
       <View style={styles.centerSlot}>
         {title && (
-          <Text style={styles.title} numberOfLines={1}>
+          <Text style={styles.title} numberOfLines={1} accessibilityRole="header">
             {title}
           </Text>
         )}
@@ -73,6 +88,7 @@ const styles = StyleSheet.create({
   },
   sideSlot: {
     width: 44,
+    minHeight: 44,
     alignItems: 'flex-start',
     justifyContent: 'center',
   },
@@ -93,6 +109,9 @@ const styles = StyleSheet.create({
     borderColor: colors.border.input,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  backButtonDisabled: {
+    opacity: 0.45,
   },
   backButtonPressed: {
     backgroundColor: colors.background.elevated,

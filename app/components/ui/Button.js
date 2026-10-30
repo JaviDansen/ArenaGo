@@ -1,6 +1,7 @@
 /**
  * ArenaGo Design System — Button Component
  * Suporta variantes: primary, secondary, outline, danger, dangerOutline, ghost
+ * Garante área mínima de toque de 44x44pt (C01) e estabilidade dimensional em loading (C03).
  */
 
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
@@ -8,6 +9,41 @@ import colors from '../../theme/colors.js';
 import radii from '../../theme/radii.js';
 import spacing from '../../theme/spacing.js';
 import typography from '../../theme/typography.js';
+
+export const MIN_TOUCH_TARGET = 44;
+
+export const BUTTON_HIT_SLOP_BY_SIZE = {
+  sm: { top: 4, bottom: 4, left: 4, right: 4 }, // 36pt visual + 8pt hitSlop = 44pt efetivo
+  md: { top: 0, bottom: 0, left: 0, right: 0 }, // 44pt visual = 44pt efetivo
+  lg: { top: 0, bottom: 0, left: 0, right: 0 }, // 52pt visual >= 44pt efetivo
+};
+
+export function extractAccessibleText(node) {
+  if (node == null || typeof node === 'boolean') return '';
+  if (typeof node === 'string' || typeof node === 'number') return String(node).trim();
+  if (Array.isArray(node)) {
+    return node
+      .map(extractAccessibleText)
+      .filter(Boolean)
+      .join(' ')
+      .trim();
+  }
+  if (typeof node === 'object') {
+    if (typeof node.props?.accessibilityLabel === 'string' && node.props.accessibilityLabel.trim()) {
+      return node.props.accessibilityLabel.trim();
+    }
+    if (typeof node.props?.title === 'string' && node.props.title.trim()) {
+      return node.props.title.trim();
+    }
+    if (typeof node.props?.label === 'string' && node.props.label.trim()) {
+      return node.props.label.trim();
+    }
+    if (node.props?.children !== undefined) {
+      return extractAccessibleText(node.props.children);
+    }
+  }
+  return '';
+}
 
 export function Button({
   title,
@@ -20,12 +56,14 @@ export function Button({
   leftIcon,
   rightIcon,
   fullWidth = true,
+  hitSlop,
   style,
   textStyle,
   accessibilityLabel,
   testID,
 }) {
-  const isDisabled = disabled || loading;
+  const isDisabled = Boolean(disabled || loading);
+  const resolvedHitSlop = hitSlop ?? (BUTTON_HIT_SLOP_BY_SIZE[size] || BUTTON_HIT_SLOP_BY_SIZE.lg);
 
   const buttonStyles = [
     styles.base,
@@ -50,25 +88,53 @@ export function Button({
     ? colors.semantic.danger
     : colors.text.primary;
 
+  const resolvedLabel =
+    (typeof accessibilityLabel === 'string' && accessibilityLabel.trim()) ||
+    (typeof title === 'string' && title.trim()) ||
+    extractAccessibleText(children) ||
+    'Botão';
+
+  function handlePress(event) {
+    if (isDisabled) return;
+    if (typeof onPress === 'function') {
+      onPress(event);
+    }
+  }
+
+  const renderedContent = title ? (
+    <Text style={labelStyles}>{title}</Text>
+  ) : typeof children === 'string' || typeof children === 'number' ? (
+    <Text style={labelStyles}>{children}</Text>
+  ) : (
+    children
+  );
+
   return (
     <Pressable
-      onPress={isDisabled ? undefined : onPress}
+      onPress={isDisabled ? undefined : handlePress}
+      disabled={isDisabled}
+      hitSlop={resolvedHitSlop}
       style={({ pressed }) => [
         buttonStyles,
         pressed && !isDisabled && (styles[`pressed_${variant}`] || styles.pressed_default),
       ]}
       accessibilityRole="button"
-      accessibilityLabel={accessibilityLabel || (typeof title === 'string' ? title : 'Botão')}
-      accessibilityState={{ disabled: isDisabled, busy: loading }}
+      accessibilityLabel={resolvedLabel}
+      accessibilityState={{ disabled: isDisabled, busy: Boolean(loading) }}
       testID={testID}
     >
-      {loading ? (
-        <ActivityIndicator size="small" color={spinnerColor} />
-      ) : (
-        <View style={styles.contentRow}>
-          {leftIcon && <View style={styles.leftIconContainer}>{leftIcon}</View>}
-          {title ? <Text style={labelStyles}>{title}</Text> : children}
-          {rightIcon && <View style={styles.rightIconContainer}>{rightIcon}</View>}
+      <View
+        style={[styles.contentRow, loading && styles.contentHidden]}
+        accessibilityElementsHidden={Boolean(loading)}
+        importantForAccessibility={loading ? 'no-hide-descendants' : 'auto'}
+      >
+        {leftIcon && <View style={styles.leftIconContainer}>{leftIcon}</View>}
+        {renderedContent}
+        {rightIcon && <View style={styles.rightIconContainer}>{rightIcon}</View>}
+      </View>
+      {loading && (
+        <View style={styles.loadingOverlay} pointerEvents="none">
+          <ActivityIndicator size="small" color={spinnerColor} />
         </View>
       )}
     </Pressable>
@@ -81,12 +147,22 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
+    minWidth: MIN_TOUCH_TARGET,
+    position: 'relative',
   },
   fullWidth: {
     width: '100%',
   },
   contentRow: {
     flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  contentHidden: {
+    opacity: 0,
+  },
+  loadingOverlay: {
+    ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -97,17 +173,20 @@ const styles = StyleSheet.create({
     marginLeft: spacing.sm,
   },
 
-  // Tamanhos
+  // Tamanhos (preservam altura e largura mínimas entre estados normal e loading)
   size_sm: {
     height: 36,
+    minHeight: 36,
     paddingHorizontal: spacing.md,
   },
   size_md: {
     height: 44,
+    minHeight: 44,
     paddingHorizontal: spacing.lg,
   },
   size_lg: {
     height: spacing.layout.buttonHeight,
+    minHeight: spacing.layout.buttonHeight,
     paddingHorizontal: spacing.xl,
   },
 
@@ -152,6 +231,9 @@ const styles = StyleSheet.create({
   },
   pressed_outline: {
     backgroundColor: colors.brand.primaryDim,
+  },
+  pressed_danger: {
+    opacity: 0.85,
   },
   pressed_dangerOutline: {
     backgroundColor: colors.semantic.dangerBg,

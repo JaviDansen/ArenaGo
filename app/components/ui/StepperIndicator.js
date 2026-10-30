@@ -17,14 +17,20 @@ export function StepperIndicator({
   subtitle,
   style,
 }) {
-  const normalizedStep = Math.max(1, Math.min(currentStep, totalSteps));
-  const tagText = stepTag || `ETAPA ${normalizedStep} DE ${totalSteps}`;
+  const safeTotal = Math.max(1, totalSteps);
+  const normalizedStep = Math.max(1, Math.min(currentStep, safeTotal));
+  const tagText = stepTag || `ETAPA ${normalizedStep} DE ${safeTotal}`;
 
   return (
     <View style={[styles.container, style]}>
       {/* Barras de progresso segmentadas */}
-      <View style={styles.barsRow}>
-        {Array.from({ length: totalSteps }, (_, index) => {
+      <View
+        style={styles.barsRow}
+        accessibilityRole="progressbar"
+        accessibilityLabel={tagText}
+        accessibilityValue={{ min: 1, max: safeTotal, now: normalizedStep }}
+      >
+        {Array.from({ length: safeTotal }, (_, index) => {
           const stepNumber = index + 1;
           const isActive = stepNumber <= normalizedStep;
           return (
@@ -43,7 +49,11 @@ export function StepperIndicator({
       <Text style={styles.tag}>{tagText}</Text>
 
       {/* Título da etapa */}
-      {title && <Text style={styles.title}>{title}</Text>}
+      {title && (
+        <Text style={styles.title} accessibilityRole="header">
+          {title}
+        </Text>
+      )}
 
       {/* Subtítulo explicativo */}
       {subtitle && <Text style={styles.subtitle}>{subtitle}</Text>}

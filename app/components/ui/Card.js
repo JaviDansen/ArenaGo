@@ -12,6 +12,7 @@ export function Card({
   children,
   variant = 'default',
   onPress,
+  disabled = false,
   padding = spacing.layout.cardPadding,
   style,
   testID,
@@ -20,25 +21,36 @@ export function Card({
   accessibilityState,
 }) {
   const isClickable = typeof onPress === 'function';
+  const isDisabled = Boolean(disabled);
 
   const cardStyles = [
     styles.base,
     styles[`variant_${variant}`] || styles.variant_default,
+    isClickable && styles.clickableMinTarget,
+    isDisabled && styles.disabled,
     { padding },
     style,
   ];
 
+  function handlePress(event) {
+    if (isDisabled) return;
+    if (isClickable) {
+      onPress(event);
+    }
+  }
+
   if (isClickable) {
     return (
       <Pressable
-        onPress={onPress}
+        onPress={isDisabled ? undefined : handlePress}
+        disabled={isDisabled}
         style={({ pressed }) => [
           cardStyles,
-          pressed && styles.pressed,
+          pressed && !isDisabled && styles.pressed,
         ]}
         accessibilityRole={accessibilityRole || 'button'}
         accessibilityLabel={accessibilityLabel}
-        accessibilityState={accessibilityState}
+        accessibilityState={{ ...accessibilityState, disabled: isDisabled }}
         testID={testID}
       >
         {children}
@@ -57,6 +69,10 @@ const styles = StyleSheet.create({
   base: {
     borderRadius: radii.xl,
     overflow: 'hidden',
+  },
+  clickableMinTarget: {
+    minHeight: 44,
+    minWidth: 44,
   },
   variant_default: {
     backgroundColor: colors.background.surface,
@@ -79,6 +95,9 @@ const styles = StyleSheet.create({
     borderTopColor: colors.border.glass,
     borderWidth: 1,
     borderColor: colors.border.subtle,
+  },
+  disabled: {
+    opacity: 0.45,
   },
   pressed: {
     opacity: 0.85,
