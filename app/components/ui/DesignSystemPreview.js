@@ -1,6 +1,21 @@
 /**
  * ArenaGo Design System — Tela Isolada de Demonstração Visual (UI-01 Preview)
- * Ambiente de showcase isolado fora da navegação principal (não altera telas funcionais).
+ * Ambiente de showcase isolado fora da navegação de produção (não altera telas funcionais).
+ *
+ * ============================================================================
+ * PROCEDIMENTO REPRODUZÍVEL DE EXECUÇÃO EM DESENVOLVIMENTO (C09)
+ * ============================================================================
+ * Para inspecionar interativamente este catálogo no Expo (Web, Android ou iOS)
+ * sem modificar `app/App.js` nem expor a tela na navegação de produção:
+ *
+ * 1. No terminal, substitua temporariamente o alvo de `app/index.js` pelo preview:
+ *    - Em `app/index.js`, troque `import App from './App';` por:
+ *      `import App from './components/ui/DesignSystemPreview';`
+ * 2. Inicie o servidor de desenvolvimento do Expo:
+ *    `npm.cmd --prefix app run web` (ou `npm.cmd --prefix app start` para Expo Go / emuladores)
+ * 3. Ao encerrar a inspeção visual, restaure `app/index.js`:
+ *    `git checkout -- app/index.js`
+ * ============================================================================
  */
 
 import { useState } from 'react';
@@ -25,7 +40,7 @@ export function DesignSystemPreview() {
     setSelectedGames((prev) =>
       prev.includes(game) ? prev.filter((item) => item !== game) : [...prev, game]
     );
-    setLastAction(`Selecionado: ${game}`);
+    setLastAction(`Selecionado/Alternado: ${game}`);
   }
 
   function handleRemoveGame(game) {
@@ -37,9 +52,10 @@ export function DesignSystemPreview() {
     <View style={styles.screen} testID="design-system-preview">
       <ScreenHeader
         title="ArenaGo UI-01 Preview"
-        subtitle="Catálogo Isolado do Design System"
+        subtitle="Catálogo Isolado do Design System (Alvos >= 48x48dp)"
         onBack={() => setLastAction('Voltar pressionado')}
         rightAction={<Badge label="UI-01" variant="brand" size="sm" />}
+        testID="preview-header"
       />
 
       <ScrollView contentContainerStyle={styles.scrollContent}>
@@ -58,9 +74,9 @@ export function DesignSystemPreview() {
           />
         </Card>
 
-        {/* Seção 2: Button Variantes, Tamanhos e Estados */}
+        {/* Seção 2: Button Variantes, Tamanhos, Conteúdo Longo e Estados */}
         <Card variant="default" style={styles.sectionCard}>
-          <Text style={styles.sectionTitle}>2. Button — Variantes & Estados</Text>
+          <Text style={styles.sectionTitle}>2. Button — Variantes, Estados e Alvos &gt;= 48x48dp</Text>
           <View style={styles.stackGap}>
             <Button
               title="Primário (Primary)"
@@ -93,7 +109,7 @@ export function DesignSystemPreview() {
               onPress={() => setLastAction('Botão Ghost')}
             />
             <Button
-              title="Carregando (Loading)"
+              title="Carregando (Loading — Dimensão Estável)"
               variant="primary"
               loading
               onPress={() => setLastAction('Não deve disparar')}
@@ -106,19 +122,24 @@ export function DesignSystemPreview() {
             />
             <View style={styles.rowWrap}>
               <Button
-                title="Pequeno (SM 36pt / 44pt touch)"
+                title="Pequeno (SM >= 48x48dp)"
                 size="sm"
                 fullWidth={false}
                 onPress={() => setLastAction('Botão SM')}
               />
               <Button
-                title="Médio (MD 44pt)"
+                title="Médio (MD >= 48x48dp)"
                 size="md"
                 variant="secondary"
                 fullWidth={false}
                 onPress={() => setLastAction('Botão MD')}
               />
             </View>
+            <Button
+              title="Rótulo longo com expansão vertical automática sem corte para acessibilidade e fontes ampliadas"
+              variant="secondary"
+              onPress={() => setLastAction('Botão Rótulo Longo')}
+            />
             <Button
               variant="outline"
               onPress={() => setLastAction('Botão via children')}
@@ -130,7 +151,7 @@ export function DesignSystemPreview() {
 
         {/* Seção 3: InputField */}
         <Card variant="default" style={styles.sectionCard}>
-          <Text style={styles.sectionTitle}>3. InputField — Estados</Text>
+          <Text style={styles.sectionTitle}>3. InputField — Repouso, Foco, Erro e Disabled</Text>
           <InputField
             label="E-mail do participante"
             required
@@ -156,7 +177,7 @@ export function DesignSystemPreview() {
 
         {/* Seção 4: TagChip */}
         <Card variant="default" style={styles.sectionCard}>
-          <Text style={styles.sectionTitle}>4. TagChip — Seleção & Remoção Isoladas</Text>
+          <Text style={styles.sectionTitle}>4. TagChip — Regiões 48x48dp Independentes Sem Sobreposição</Text>
           <View style={styles.rowWrap}>
             {['Fortnite', 'Valorant', 'Minecraft'].map((game) => {
               const isSelected = selectedGames.includes(game);
@@ -166,10 +187,16 @@ export function DesignSystemPreview() {
                   label={game}
                   selected={isSelected}
                   onPress={() => handleToggleGame(game)}
-                  onRemove={isSelected ? () => handleRemoveGame(game) : undefined}
+                  onRemove={() => handleRemoveGame(game)}
+                  testID={`preview-chip-${game.toLowerCase()}`}
                 />
               );
             })}
+            <TagChip
+              label="Somente Seleção"
+              selected={false}
+              onPress={() => setLastAction('Chip Somente Seleção')}
+            />
             <TagChip
               label="Chip Desabilitado"
               selected
@@ -206,9 +233,9 @@ export function DesignSystemPreview() {
             onPress={() => setLastAction('Card clicável acionado')}
             accessibilityLabel="Card interativo de demonstração"
           >
-            <Text style={styles.cardSampleTitle}>Card Glass Interativo (Clicável)</Text>
+            <Text style={styles.cardSampleTitle}>Card Glass Interativo (Alvo &gt;= 48x48dp)</Text>
             <Text style={styles.cardSampleBody}>
-              Toque para acionar feedback com área mínima de 44pt.
+              Toque para acionar feedback com proteção de dimensões mínimas interativas.
             </Text>
           </Card>
         </View>

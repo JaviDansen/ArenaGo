@@ -1,7 +1,16 @@
 /**
  * ArenaGo Design System — TagChip Component
  * Chip de seleção e remoção rápida (utilizado no catálogo de jogos e filtros).
- * Sem Pressables aninhados (C02) e com área efetiva de toque >= 44x44pt (C01).
+ *
+ * Geometria e Acessibilidade (C05 / C06 / C07):
+ * - Seleção e remoção utilizam Pressables irmãos independentes (sem aninhamento).
+ * - Cada Pressable possui dimensões mínimas próprias de 48x48dp (iOS 44pt / Android 48dp),
+ *   sem sobreposição entre alvos de toque e sem depender exclusivamente de hitSlop.
+ * - A aparência compacta do chip (pílula de 36dp de altura e círculo de remoção de 20x20dp)
+ *   é preservada por elementos decorativos internos (pointerEvents="none") desacoplados
+ *   da caixa interativa de 48x48dp.
+ * - Nota: A geometria final em dispositivo depende de os contêineres ancestrais não
+ *   recortarem (overflow) nem sobreporem o componente.
  */
 
 import { Pressable, StyleSheet, Text, View } from 'react-native';
@@ -10,11 +19,79 @@ import radii from '../../theme/radii.js';
 import spacing from '../../theme/spacing.js';
 import typography from '../../theme/typography.js';
 
-// Chip visual tem minHeight 36pt -> hitSlop vertical de 4pt garante 44pt de área de toque
-export const CHIP_HIT_SLOP = { top: 4, bottom: 4, left: 4, right: 4 };
+export const MIN_TOUCH_TARGET = 48;
+export const CHIP_VISUAL_MIN_HEIGHT = 36;
+export const REMOVE_BADGE_SIZE = 20;
 
-// Controle visual de remoção tem 20x20pt -> hitSlop de 12pt em cada lado garante 44x44pt de área de toque
-export const REMOVE_HIT_SLOP = { top: 12, bottom: 12, left: 12, right: 12 };
+const SURFACE_STYLE_KEYS = new Set([
+  'backgroundColor',
+  'borderColor',
+  'borderTopColor',
+  'borderRightColor',
+  'borderBottomColor',
+  'borderLeftColor',
+  'borderWidth',
+  'borderTopWidth',
+  'borderRightWidth',
+  'borderBottomWidth',
+  'borderLeftWidth',
+  'borderRadius',
+]);
+
+function flattenStyleInput(styleInput) {
+  if (!styleInput) return {};
+  if (typeof StyleSheet.flatten === 'function') {
+    return StyleSheet.flatten(styleInput) || {};
+  }
+  if (Array.isArray(styleInput)) {
+    return Object.assign({}, ...styleInput.map(flattenStyleInput));
+  }
+  if (typeof styleInput === 'object') {
+    return { ...styleInput };
+  }
+  return {};
+}
+
+function partitionChipStyle(styleInput, isInteractive) {
+  const flat = flattenStyleInput(styleInput);
+  const layoutStyle = {};
+  const surfaceStyle = {};
+
+  for (const [key, value] of Object.entries(flat)) {
+    if (SURFACE_STYLE_KEYS.has(key)) {
+      surfaceStyle[key] = value;
+    } else {
+      layoutStyle[key] = value;
+    }
+  }
+
+  if (isInteractive) {
+    const minW = typeof layoutStyle.minWidth === 'number'
+      ? Math.max(layoutStyle.minWidth, MIN_TOUCH_TARGET)
+      : MIN_TOUCH_TARGET;
+    const minH = typeof layoutStyle.minHeight === 'number'
+      ? Math.max(layoutStyle.minHeight, MIN_TOUCH_TARGET)
+      : MIN_TOUCH_TARGET;
+
+    layoutStyle.minWidth = minW;
+    layoutStyle.minHeight = minH;
+
+    if (typeof layoutStyle.width === 'number' && layoutStyle.width < minW) {
+      layoutStyle.width = minW;
+    }
+    if (typeof layoutStyle.height === 'number' && layoutStyle.height < minH) {
+      delete layoutStyle.height;
+    }
+    if (typeof layoutStyle.maxWidth === 'number' && layoutStyle.maxWidth < minW) {
+      layoutStyle.maxWidth = minW;
+    }
+    if (typeof layoutStyle.maxHeight === 'number' && layoutStyle.maxHeight < minH) {
+      layoutStyle.maxHeight = minH;
+    }
+  }
+
+  return { layoutStyle, surfaceStyle };
+}
 
 export function TagChip({
   label,
@@ -29,12 +106,22 @@ export function TagChip({
   const isDisabled = Boolean(disabled);
   const hasSelectHandler = typeof onPress === 'function';
   const hasRemoveHandler = typeof onRemove === 'function';
+  const isInteractive = hasSelectHandler || hasRemoveHandler;
+
+  const { layoutStyle, surfaceStyle } = partitionChipStyle(style, isInteractive);
 
   const containerStyles = [
     styles.base,
-    selected ? styles.selected : styles.unselected,
+    isInteractive ? styles.baseInteractive : styles.baseStatic,
+    layoutStyle,
     isDisabled && styles.disabled,
-    style,
+  ];
+
+  const pillSurfaceStyles = [
+    styles.pillSurface,
+    isInteractive ? styles.pillSurfaceInteractive : styles.pillSurfaceStatic,
+    selected ? styles.selected : styles.unselected,
+    surfaceStyle,
   ];
 
   const labelStyles = [
@@ -44,37 +131,33 @@ export function TagChip({
     textStyle,
   ];
 
-  function handleSelectPress(event) {
-    if (isDisabled) return;
-    if (event && event._tagChipRemoved) return;
-    if (hasSelectHandler) {
-      onPress(label);
-    }
+  function handleSelectPress() {
+    if (isDisabled || !hasSelectHandler) return;
+    onPress(label);
   }
 
-  function handleRemovePress(event) {
-    if (event) {
-      event._tagChipRemoved = true;
-      if (typeof event.stopPropagation === 'function') {
-        event.stopPropagation();
-      }
-    }
-    if (isDisabled) return;
-    if (hasRemoveHandler) {
-      onRemove(label);
-    }
+  function handleRemovePress() {
+    if (isDisabled || !hasRemoveHandler) return;
+    onRemove(label);
   }
 
   return (
     <View style={containerStyles} testID={!hasSelectHandler ? testID : undefined}>
+      {/* Decoração visual compacta da pílula (36dp) desacoplada dos alvos de toque (48dp) */}
+      <View
+        pointerEvents="none"
+        style={pillSurfaceStyles}
+        testID={testID ? `${testID}-surface` : undefined}
+      />
+
       <View style={styles.innerRow}>
         {hasSelectHandler ? (
           <Pressable
             onPress={isDisabled ? undefined : handleSelectPress}
             disabled={isDisabled}
-            hitSlop={CHIP_HIT_SLOP}
             style={({ pressed }) => [
               styles.selectAction,
+              hasRemoveHandler ? styles.selectActionWithRemove : styles.selectActionSolo,
               pressed && !isDisabled && styles.pressed,
             ]}
             accessibilityRole="checkbox"
@@ -85,7 +168,12 @@ export function TagChip({
             <Text style={labelStyles}>{label}</Text>
           </Pressable>
         ) : (
-          <View style={styles.staticLabelContainer}>
+          <View
+            style={[
+              styles.staticLabelContainer,
+              hasRemoveHandler ? styles.selectActionWithRemove : styles.selectActionSolo,
+            ]}
+          >
             <Text style={labelStyles}>{label}</Text>
           </View>
         )}
@@ -94,17 +182,27 @@ export function TagChip({
           <Pressable
             onPress={isDisabled ? undefined : handleRemovePress}
             disabled={isDisabled}
-            hitSlop={REMOVE_HIT_SLOP}
             style={({ pressed }) => [
-              styles.removeButton,
-              pressed && !isDisabled && styles.removeButtonPressed,
+              styles.removeAction,
+              pressed && !isDisabled && styles.pressed,
             ]}
             accessibilityRole="button"
             accessibilityLabel={`Remover ${label}`}
             accessibilityState={{ disabled: isDisabled }}
             testID={testID ? `${testID}-remove` : undefined}
           >
-            <Text style={[styles.removeIcon, isDisabled && styles.textDisabled]}>✕</Text>
+            <View
+              pointerEvents="none"
+              style={styles.removeBadge}
+              testID={testID ? `${testID}-remove-badge` : undefined}
+            >
+              <Text
+                style={[styles.removeIcon, isDisabled && styles.textDisabled]}
+                allowFontScaling={false}
+              >
+                ✕
+              </Text>
+            </View>
           </Pressable>
         )}
       </View>
@@ -114,16 +212,36 @@ export function TagChip({
 
 const styles = StyleSheet.create({
   base: {
-    borderRadius: radii.pill,
-    minHeight: 36,
-    minWidth: 44,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xs,
+    position: 'relative',
     alignSelf: 'flex-start',
     justifyContent: 'center',
+    maxWidth: '100%',
     marginRight: spacing.sm,
     marginBottom: spacing.sm,
+  },
+  baseInteractive: {
+    minHeight: MIN_TOUCH_TARGET,
+    minWidth: MIN_TOUCH_TARGET,
+  },
+  baseStatic: {
+    minHeight: CHIP_VISUAL_MIN_HEIGHT,
+    minWidth: CHIP_VISUAL_MIN_HEIGHT,
+  },
+  pillSurface: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    minHeight: CHIP_VISUAL_MIN_HEIGHT,
+    borderRadius: radii.pill,
     borderWidth: 1,
+  },
+  pillSurfaceInteractive: {
+    top: 6,
+    bottom: 6,
+  },
+  pillSurfaceStatic: {
+    top: 0,
+    bottom: 0,
   },
   innerRow: {
     flexDirection: 'row',
@@ -131,14 +249,27 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   selectAction: {
-    minHeight: 28,
+    minHeight: MIN_TOUCH_TARGET,
+    minWidth: MIN_TOUCH_TARGET,
     justifyContent: 'center',
-    paddingVertical: 2,
+    alignItems: 'center',
+    paddingVertical: spacing.sm,
+    flexShrink: 1,
+  },
+  selectActionSolo: {
+    paddingLeft: spacing.md,
+    paddingRight: spacing.md,
+  },
+  selectActionWithRemove: {
+    paddingLeft: spacing.md,
+    paddingRight: spacing.xs,
   },
   staticLabelContainer: {
-    minHeight: 28,
+    minHeight: CHIP_VISUAL_MIN_HEIGHT,
     justifyContent: 'center',
-    paddingVertical: 2,
+    alignItems: 'center',
+    paddingVertical: spacing.xs,
+    flexShrink: 1,
   },
   unselected: {
     backgroundColor: colors.background.surface,
@@ -157,6 +288,7 @@ const styles = StyleSheet.create({
   text: {
     ...typography.body,
     fontWeight: typography.weights.medium,
+    flexShrink: 1,
   },
   textUnselected: {
     color: colors.text.secondary,
@@ -168,17 +300,20 @@ const styles = StyleSheet.create({
   textDisabled: {
     color: colors.text.disabled,
   },
-  removeButton: {
-    marginLeft: spacing.sm,
-    width: 20,
-    height: 20,
+  removeAction: {
+    minWidth: MIN_TOUCH_TARGET,
+    minHeight: MIN_TOUCH_TARGET,
+    paddingHorizontal: spacing.xs,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  removeBadge: {
+    width: REMOVE_BADGE_SIZE,
+    height: REMOVE_BADGE_SIZE,
     borderRadius: radii.full,
     backgroundColor: 'rgba(255, 255, 255, 0.12)',
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  removeButtonPressed: {
-    backgroundColor: colors.semantic.dangerBg,
   },
   removeIcon: {
     color: colors.text.primary,

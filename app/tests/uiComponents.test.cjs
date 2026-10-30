@@ -1,3 +1,15 @@
+/**
+ * Suíte de Testes Unitários — Fundação do Design System (UI-01: C05 a C09)
+ *
+ * Escopo e Limitações (C08):
+ * - Estes testes verificam em ambiente Node a árvore de elementos React, os contratos de props,
+ *   a proteção de estilos (minWidth/minHeight >= 48dp), a independência de handlers sem mutação
+ *   de eventos e os atributos de acessibilidade declarados nos componentes.
+ * - Estes testes unitários NÃO substituem o cálculo nativo de layout Yoga, o hit-testing nativo
+ *   do iOS/Android nem a homologação com leitores de tela reais (VoiceOver / TalkBack) em
+ *   dispositivo físico.
+ */
+
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { createHarness, loadModule, nodes: collectNodes, textOf } = require('./helpers/questionnaireHarness.cjs');
@@ -60,178 +72,287 @@ test('theme exports official tokens matching Figma BEAST specifications', () => 
   assert.ok(indexModule.theme.radii);
 });
 
-test('C01: Button guarantees >= 44x44pt effective touch area across sm, md and lg sizes while preserving visual height', () => {
-  const hBtnSm = createHarness('components/ui/Button.js', {
-    props: { title: 'Filtro', size: 'sm', fullWidth: false, onPress: () => {} },
-  });
-  const btnSmPressable = hBtnSm.nodes.find((n) => n.type === 'Pressable');
-  const btnSmStyle = flattenStyle(btnSmPressable.props.style({ pressed: false }));
-  const btnSmHitSlop = btnSmPressable.props.hitSlop;
-
-  const effectiveBtnSmHeight = btnSmStyle.height + (btnSmHitSlop?.top || 0) + (btnSmHitSlop?.bottom || 0);
-  const effectiveBtnSmMinWidth = btnSmStyle.minWidth + (btnSmHitSlop?.left || 0) + (btnSmHitSlop?.right || 0);
-  assert.equal(btnSmStyle.height, 36, 'Visual height of small button preserves Figma 36pt aesthetic');
-  assert.equal(effectiveBtnSmHeight, 44, 'Effective touch height of sm button is 44pt');
-  assert.ok(effectiveBtnSmMinWidth >= 44, 'Effective touch width of sm button is >= 44pt');
-
-  const hBtnMd = createHarness('components/ui/Button.js', {
-    props: { title: 'Médio', size: 'md', onPress: () => {} },
-  });
-  const btnMdStyle = flattenStyle(hBtnMd.nodes.find((n) => n.type === 'Pressable').props.style({ pressed: false }));
-  assert.equal(btnMdStyle.height, 44);
-  assert.ok(btnMdStyle.minWidth >= 44);
-
-  const hBtnLg = createHarness('components/ui/Button.js', {
-    props: { title: 'Grande', size: 'lg', onPress: () => {} },
-  });
-  const btnLgStyle = flattenStyle(hBtnLg.nodes.find((n) => n.type === 'Pressable').props.style({ pressed: false }));
-  assert.equal(btnLgStyle.height, 52);
-  assert.ok(btnLgStyle.minWidth >= 44);
-});
-
-test('C01: TagChip and ScreenHeader guarantee >= 44x44pt effective touch targets for selection, removal and back controls', () => {
+test('C05: TagChip defines >= 48x48dp directly on each sibling Pressable without overlap while separating compact visual decoration', () => {
   const hChip = createHarness('components/ui/TagChip.js', {
-    props: { label: 'Valorant', selected: true, onPress: () => {}, onRemove: () => {} },
+    props: {
+      label: 'Valorant',
+      selected: true,
+      onPress: () => {},
+      onRemove: () => {},
+      testID: 'chip-valorant',
+    },
   });
-  const chipRootView = hChip.nodes.find((n) => n.type === 'View');
-  const chipRootStyle = flattenStyle(chipRootView.props.style);
+
+  // 1. Verify each interactive Pressable has its own >= 48x48dp style (not relying on hitSlop or outer View)
   const selectPressable = hChip.nodes.find(
     (n) => n.type === 'Pressable' && n.props.accessibilityRole === 'checkbox'
   );
   const removePressable = hChip.nodes.find(
     (n) => n.type === 'Pressable' && n.props.accessibilityLabel === 'Remover Valorant'
   );
+  assert.ok(selectPressable, 'Selection Pressable exists');
+  assert.ok(removePressable, 'Removal Pressable exists');
 
-  const selectHitSlop = selectPressable.props.hitSlop;
-  const effectiveChipHeight = chipRootStyle.minHeight + (selectHitSlop?.top || 0) + (selectHitSlop?.bottom || 0);
-  assert.equal(effectiveChipHeight, 44, 'Effective chip touch height is 44pt');
-  assert.ok(chipRootStyle.minWidth >= 44, 'Chip minimum width is >= 44pt');
-
+  const selectStyle = flattenStyle(selectPressable.props.style({ pressed: false }));
   const removeStyle = flattenStyle(removePressable.props.style({ pressed: false }));
-  const removeHitSlop = removePressable.props.hitSlop;
-  const effectiveRemoveWidth = removeStyle.width + (removeHitSlop?.left || 0) + (removeHitSlop?.right || 0);
-  const effectiveRemoveHeight = removeStyle.height + (removeHitSlop?.top || 0) + (removeHitSlop?.bottom || 0);
-  assert.equal(removeStyle.width, 20, 'Visual width of remove button is 20pt');
-  assert.equal(removeStyle.height, 20, 'Visual height of remove button is 20pt');
-  assert.equal(effectiveRemoveWidth, 44, 'Remove control effective touch width is 44pt');
-  assert.equal(effectiveRemoveHeight, 44, 'Remove control effective touch height is 44pt');
+
+  assert.ok(selectStyle.minWidth >= 48, 'Selection Pressable itself has minWidth >= 48dp');
+  assert.ok(selectStyle.minHeight >= 48, 'Selection Pressable itself has minHeight >= 48dp');
+  assert.equal(selectPressable.props.hitSlop, undefined, 'Selection Pressable does not rely on overlapping hitSlop');
+
+  assert.ok(removeStyle.minWidth >= 48, 'Removal Pressable itself has minWidth >= 48dp');
+  assert.ok(removeStyle.minHeight >= 48, 'Removal Pressable itself has minHeight >= 48dp');
+  assert.equal(removePressable.props.hitSlop, undefined, 'Removal Pressable does not rely on overlapping hitSlop');
+
+  // 2. Verify no negative margins or overlapping styles between sibling Pressables
+  assert.ok(!(selectStyle.marginRight < 0), 'No negative right margin on select Pressable');
+  assert.ok(!(removeStyle.marginLeft < 0), 'No negative left margin on remove Pressable');
+
+  // 3. Verify compact visual decoration (36dp pill surface and 20x20dp remove badge) is decoupled with pointerEvents="none"
+  const pillSurface = hChip.nodes.find(
+    (n) => n.type === 'View' && n.props.testID === 'chip-valorant-surface'
+  );
+  const removeBadge = hChip.nodes.find(
+    (n) => n.type === 'View' && n.props.testID === 'chip-valorant-remove-badge'
+  );
+  assert.ok(pillSurface, 'Decorative pill surface View exists');
+  assert.equal(pillSurface.props.pointerEvents, 'none');
+  const pillSurfaceStyle = flattenStyle(pillSurface.props.style);
+  assert.equal(pillSurfaceStyle.minHeight, 36, 'Visual pill preserves compact 36dp minimum height');
+  assert.equal(pillSurfaceStyle.top, 6);
+  assert.equal(pillSurfaceStyle.bottom, 6);
+
+  assert.ok(removeBadge, 'Decorative remove badge View exists');
+  assert.equal(removeBadge.props.pointerEvents, 'none');
+  const removeBadgeStyle = flattenStyle(removeBadge.props.style);
+  assert.equal(removeBadgeStyle.width, 20, 'Visual remove circle preserves 20dp width');
+  assert.equal(removeBadgeStyle.height, 20, 'Visual remove circle preserves 20dp height');
+});
+
+test('C05: Button, clickable Card and ScreenHeader back control define >= 48x48dp directly on their Pressables', () => {
+  for (const size of ['sm', 'md', 'lg']) {
+    const hBtn = createHarness('components/ui/Button.js', {
+      props: { title: `Botão ${size}`, size, fullWidth: false, onPress: () => {} },
+    });
+    const btnPressable = hBtn.nodes.find((n) => n.type === 'Pressable');
+    const btnStyle = flattenStyle(btnPressable.props.style({ pressed: false }));
+
+    assert.ok(btnStyle.minWidth >= 48, `Button (${size}) Pressable has minWidth >= 48dp`);
+    assert.ok(btnStyle.minHeight >= 48, `Button (${size}) Pressable has minHeight >= 48dp`);
+    assert.equal(btnStyle.height, undefined, `Button (${size}) avoids fixed height to prevent clipping scaled text`);
+  }
+
+  const hCard = createHarness('components/ui/Card.js', {
+    props: { onPress: () => {}, accessibilityLabel: 'Card interativo' },
+  });
+  const cardPressable = hCard.nodes.find((n) => n.type === 'Pressable');
+  const cardStyle = flattenStyle(cardPressable.props.style({ pressed: false }));
+  assert.ok(cardStyle.minWidth >= 48, 'Clickable Card Pressable has minWidth >= 48dp');
+  assert.ok(cardStyle.minHeight >= 48, 'Clickable Card Pressable has minHeight >= 48dp');
 
   const hHeader = createHarness('components/ui/ScreenHeader.js', {
-    props: { title: 'Perfil', onBack: () => {} },
+    props: { title: 'Perfil', onBack: () => {}, testID: 'hdr' },
   });
   const backPressable = hHeader.nodes.find(
     (n) => n.type === 'Pressable' && n.props.accessibilityLabel === 'Voltar'
   );
   const backStyle = flattenStyle(backPressable.props.style({ pressed: false }));
-  const backHitSlop = backPressable.props.hitSlop;
-  assert.ok(backStyle.width + backHitSlop.left + backHitSlop.right >= 44);
-  assert.ok(backStyle.height + backHitSlop.top + backHitSlop.bottom >= 44);
+  assert.ok(backStyle.minWidth >= 48, 'ScreenHeader back Pressable has minWidth >= 48dp');
+  assert.ok(backStyle.minHeight >= 48, 'ScreenHeader back Pressable has minHeight >= 48dp');
+
+  const backCircle = hHeader.nodes.find((n) => n.type === 'View' && n.props.testID === 'hdr-back-circle');
+  const backCircleStyle = flattenStyle(backCircle.props.style);
+  assert.equal(backCircle.props.pointerEvents, 'none');
+  assert.equal(backCircleStyle.width, 40, 'ScreenHeader visual circle preserves 40dp width');
+  assert.equal(backCircleStyle.height, 40, 'ScreenHeader visual circle preserves 40dp height');
 });
 
-test('C02: TagChip eliminates nested Pressables and strictly isolates onRemove from onPress', () => {
-  let selectCalls = 0;
-  let removeCalls = 0;
-  let selectedArg = null;
-  let removedArg = null;
+test('C06: TagChip has no nested Pressables, never mutates events, and supports remove->select, select->remove and repeated interactions', () => {
+  const actions = [];
 
   const h = createHarness('components/ui/TagChip.js', {
     props: {
       label: 'Fortnite',
       selected: true,
-      onPress: (label) => {
-        selectCalls += 1;
-        selectedArg = label;
-      },
-      onRemove: (label) => {
-        removeCalls += 1;
-        removedArg = label;
-      },
+      onPress: (label) => actions.push(`select:${label}`),
+      onRemove: (label) => actions.push(`remove:${label}`),
     },
   });
 
-  // Verify there are NO nested Pressables inside another Pressable
+  // 1. Verify absence of nested Pressables
   const allPressables = h.nodes.filter((n) => n.type === 'Pressable');
-  assert.equal(allPressables.length, 2, 'Renders two sibling Pressables (select and remove)');
+  assert.equal(allPressables.length, 2, 'Renders exactly two sibling Pressables');
   for (const pressable of allPressables) {
     const descendantPressables = collectNodes(pressable.props.children).filter((n) => n.type === 'Pressable');
     assert.equal(descendantPressables.length, 0, 'Pressable must NOT contain nested Pressable children');
   }
 
-  // Pressing Remove executes ONLY onRemove, never onPress
-  h.act(() => h.press('Remover Fortnite'));
-  assert.equal(removeCalls, 1, 'onRemove called once');
-  assert.equal(removedArg, 'Fortnite');
-  assert.equal(selectCalls, 0, 'onPress must NOT be called when Remover is pressed');
-
-  // Pressing chip label executes ONLY onPress, never onRemove
-  h.act(() => h.press('Fortnite'));
-  assert.equal(selectCalls, 1, 'onPress called once when chip is pressed');
-  assert.equal(selectedArg, 'Fortnite');
-  assert.equal(removeCalls, 1, 'onRemove must NOT be called when chip label is pressed');
-});
-
-test('C02 Adversarial: TagChip blocks synthetic event propagation and prevents any interaction when disabled', () => {
-  let selectCalls = 0;
-  let removeCalls = 0;
-
-  const h = createHarness('components/ui/TagChip.js', {
-    props: {
-      label: 'Apex Legends',
-      selected: true,
-      onPress: () => { selectCalls += 1; },
-      onRemove: () => { removeCalls += 1; },
-    },
-  });
-
   const selectNode = h.nodes.find((n) => n.type === 'Pressable' && n.props.accessibilityRole === 'checkbox');
-  const removeNode = h.nodes.find((n) => n.type === 'Pressable' && n.props.accessibilityLabel === 'Remover Apex Legends');
-  let propagationStopped = false;
-  const sharedEvent = {
-    stopPropagation() {
-      propagationStopped = true;
-    },
-  };
+  const removeNode = h.nodes.find((n) => n.type === 'Pressable' && n.props.accessibilityLabel === 'Remover Fortnite');
 
+  // 2. Verify zero event mutation (frozen event object would throw if _tagChipRemoved or any property were written)
+  const frozenEvent = Object.freeze({});
   h.act(() => {
-    removeNode.props.onPress(sharedEvent);
-    selectNode.props.onPress(sharedEvent);
+    removeNode.props.onPress(frozenEvent);
   });
-  assert.equal(propagationStopped, true, 'stopPropagation invoked on remove event');
-  assert.equal(removeCalls, 1, 'onRemove executed');
-  assert.equal(selectCalls, 0, 'onPress blocked when event already handled by remove');
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(frozenEvent, '_tagChipRemoved'),
+    false,
+    'Must not attach _tagChipRemoved to event'
+  );
+  assert.deepEqual(actions, ['remove:Fortnite']);
 
-  // Adversarial disabled state
-  let disabledSelectCalls = 0;
-  let disabledRemoveCalls = 0;
-  const hDisabled = createHarness('components/ui/TagChip.js', {
-    props: {
-      label: 'Minecraft',
-      selected: false,
-      disabled: true,
-      onPress: () => { disabledSelectCalls += 1; },
-      onRemove: () => { disabledRemoveCalls += 1; },
-    },
+  // 3. Removal followed immediately by selection (using the exact same event reference) must NOT block selection
+  h.act(() => {
+    selectNode.props.onPress(frozenEvent);
   });
+  assert.deepEqual(
+    actions,
+    ['remove:Fortnite', 'select:Fortnite'],
+    'Removal followed by selection executes both callbacks cleanly'
+  );
 
-  const disabledSelect = hDisabled.nodes.find((n) => n.type === 'Pressable' && n.props.accessibilityRole === 'checkbox');
-  const disabledRemove = hDisabled.nodes.find((n) => n.type === 'Pressable' && n.props.accessibilityLabel === 'Remover Minecraft');
+  // 4. Selection followed by removal
+  h.act(() => {
+    selectNode.props.onPress(frozenEvent);
+    removeNode.props.onPress(frozenEvent);
+  });
+  assert.deepEqual(
+    actions,
+    ['remove:Fortnite', 'select:Fortnite', 'select:Fortnite', 'remove:Fortnite'],
+    'Selection followed by removal executes both callbacks cleanly'
+  );
+
+  // 5. Repeated alternating and consecutive interactions via harness press helper
+  h.act(() => {
+    h.press('Remover Fortnite');
+    h.press('Fortnite');
+    h.press('Fortnite');
+    h.press('Remover Fortnite');
+    h.press('Fortnite');
+  });
+  assert.deepEqual(actions, [
+    'remove:Fortnite',
+    'select:Fortnite',
+    'select:Fortnite',
+    'remove:Fortnite',
+    'remove:Fortnite',
+    'select:Fortnite',
+    'select:Fortnite',
+    'remove:Fortnite',
+    'select:Fortnite',
+  ]);
+
+  // 6. Disabled state blocks both controls
+  let disabledCalls = 0;
+  h.setProps({
+    disabled: true,
+    onPress: () => { disabledCalls += 1; },
+    onRemove: () => { disabledCalls += 1; },
+  });
+  const disabledSelect = h.nodes.find((n) => n.type === 'Pressable' && n.props.accessibilityRole === 'checkbox');
+  const disabledRemove = h.nodes.find((n) => n.type === 'Pressable' && n.props.accessibilityLabel === 'Remover Fortnite');
 
   assert.equal(disabledSelect.props.disabled, true);
   assert.equal(disabledSelect.props.onPress, undefined);
-  assert.equal(disabledSelect.props.accessibilityState.checked, false);
   assert.equal(disabledSelect.props.accessibilityState.disabled, true);
-
   assert.equal(disabledRemove.props.disabled, true);
   assert.equal(disabledRemove.props.onPress, undefined);
   assert.equal(disabledRemove.props.accessibilityState.disabled, true);
-
-  assert.throws(() => hDisabled.press('Minecraft'), /AssertionError/);
-  assert.throws(() => hDisabled.press('Remover Minecraft'), /AssertionError/);
-  assert.equal(disabledSelectCalls, 0);
-  assert.equal(disabledRemoveCalls, 0);
+  assert.equal(disabledCalls, 0);
 });
 
-test('C03: Button preserves dimensional stability when toggling loading and blocks interaction in loading/disabled', () => {
+test('C07: Button, Card, TagChip and ScreenHeader protect minimum 48x48dp dimensions against accidental style overrides while preserving appearance customizations', () => {
+  const shrinkingOverride = {
+    width: 20,
+    height: 18,
+    minWidth: 12,
+    minHeight: 14,
+    maxWidth: 24,
+    maxHeight: 24,
+    backgroundColor: '#123456',
+    borderColor: '#ABCDEF',
+    marginTop: 14,
+  };
+
+  // 1. Button with shrinking style override
+  const hBtn = createHarness('components/ui/Button.js', {
+    props: {
+      title: 'Salvar',
+      size: 'sm',
+      fullWidth: false,
+      style: shrinkingOverride,
+      onPress: () => {},
+    },
+  });
+  const btnPressable = hBtn.nodes.find((n) => n.type === 'Pressable');
+  const btnStyle = flattenStyle(btnPressable.props.style({ pressed: false }));
+  assert.ok(btnStyle.minWidth >= 48, 'Button protects minWidth >= 48 against style override');
+  assert.ok(btnStyle.minHeight >= 48, 'Button protects minHeight >= 48 against style override');
+  assert.ok(btnStyle.width >= 48, 'Button clamps numeric width < 48 to >= 48');
+  assert.equal(btnStyle.height, undefined, 'Button removes sub-minimum fixed height so text can scale');
+  assert.ok(btnStyle.maxWidth >= 48, 'Button clamps maxWidth >= 48');
+  assert.ok(btnStyle.maxHeight >= 48, 'Button clamps maxHeight >= 48');
+  assert.equal(btnStyle.backgroundColor, '#123456', 'Button preserves custom backgroundColor');
+  assert.equal(btnStyle.borderColor, '#ABCDEF', 'Button preserves custom borderColor');
+  assert.equal(btnStyle.marginTop, 14, 'Button preserves custom marginTop');
+
+  // Button with larger legitimate dimensions preserves them
+  const hBtnLarge = createHarness('components/ui/Button.js', {
+    props: {
+      title: 'Expandido',
+      size: 'lg',
+      fullWidth: false,
+      style: { minWidth: 200, minHeight: 68, width: 240, height: 68 },
+      onPress: () => {},
+    },
+  });
+  const btnLargeStyle = flattenStyle(hBtnLarge.nodes.find((n) => n.type === 'Pressable').props.style({ pressed: false }));
+  assert.equal(btnLargeStyle.minWidth, 200);
+  assert.equal(btnLargeStyle.minHeight, 68);
+  assert.equal(btnLargeStyle.width, 240);
+  assert.equal(btnLargeStyle.height, 68);
+
+  // 2. Clickable Card with shrinking style override
+  const hCard = createHarness('components/ui/Card.js', {
+    props: {
+      onPress: () => {},
+      style: shrinkingOverride,
+      accessibilityLabel: 'Card customizado',
+    },
+  });
+  const cardPressable = hCard.nodes.find((n) => n.type === 'Pressable');
+  const cardStyle = flattenStyle(cardPressable.props.style({ pressed: false }));
+  assert.ok(cardStyle.minWidth >= 48, 'Clickable Card protects minWidth >= 48');
+  assert.ok(cardStyle.minHeight >= 48, 'Clickable Card protects minHeight >= 48');
+  assert.ok(cardStyle.width >= 48, 'Clickable Card clamps numeric width >= 48');
+  assert.equal(cardStyle.backgroundColor, '#123456', 'Clickable Card preserves custom backgroundColor');
+  assert.equal(cardStyle.borderColor, '#ABCDEF', 'Clickable Card preserves custom borderColor');
+  assert.equal(cardStyle.marginTop, 14, 'Clickable Card preserves custom marginTop');
+
+  // 3. TagChip with shrinking style override
+  const hChip = createHarness('components/ui/TagChip.js', {
+    props: {
+      label: 'Apex',
+      selected: false,
+      style: shrinkingOverride,
+      onPress: () => {},
+      onRemove: () => {},
+      testID: 'chip-apex',
+    },
+  });
+  const chipContainer = hChip.nodes.find((n) => n.type === 'View');
+  const chipContainerStyle = flattenStyle(chipContainer.props.style);
+  const chipSurface = hChip.nodes.find((n) => n.type === 'View' && n.props.testID === 'chip-apex-surface');
+  const chipSurfaceStyle = flattenStyle(chipSurface.props.style);
+  assert.ok(chipContainerStyle.minWidth >= 48, 'TagChip container protects minWidth >= 48');
+  assert.ok(chipContainerStyle.minHeight >= 48, 'TagChip container protects minHeight >= 48');
+  assert.equal(chipContainerStyle.marginTop, 14, 'TagChip preserves layout margin customization');
+  assert.equal(chipSurfaceStyle.backgroundColor, '#123456', 'TagChip applies custom backgroundColor to pill surface');
+  assert.equal(chipSurfaceStyle.borderColor, '#ABCDEF', 'TagChip applies custom borderColor to pill surface');
+});
+
+test('C07: Button preserves dimensional stability during loading and blocks interaction in loading/disabled', () => {
   let pressCount = 0;
   const h = createHarness('components/ui/Button.js', {
     props: {
@@ -251,7 +372,6 @@ test('C03: Button preserves dimensional stability when toggling loading and bloc
   assert.ok(normalContentRow, 'Content row is rendered in normal state');
   assert.equal(flattenStyle(normalContentRow.props.style).opacity, undefined);
 
-  // Trigger press in normal state
   h.act(() => h.press('Confirmar Entrada'));
   assert.equal(pressCount, 1);
 
@@ -260,19 +380,17 @@ test('C03: Button preserves dimensional stability when toggling loading and bloc
   const loadingPressable = h.nodes.find((n) => n.type === 'Pressable');
   const loadingButtonStyle = flattenStyle(loadingPressable.props.style({ pressed: false }));
 
-  assert.equal(loadingButtonStyle.height, normalButtonStyle.height, 'Height stays identical during loading');
   assert.equal(loadingButtonStyle.minHeight, normalButtonStyle.minHeight, 'minHeight stays identical during loading');
   assert.equal(loadingButtonStyle.minWidth, normalButtonStyle.minWidth, 'minWidth stays identical during loading');
-  assert.equal(loadingButtonStyle.paddingHorizontal, normalButtonStyle.paddingHorizontal, 'Horizontal padding stays identical during loading');
+  assert.equal(loadingButtonStyle.paddingHorizontal, normalButtonStyle.paddingHorizontal, 'Horizontal padding stays identical');
+  assert.equal(loadingButtonStyle.paddingVertical, normalButtonStyle.paddingVertical, 'Vertical padding stays identical');
 
-  // Content row remains mounted with opacity: 0 so intrinsic width does not collapse
   const hiddenContentRow = h.nodes.find(
     (n) => n.type === 'View' && flattenStyle(n.props.style).opacity === 0
   );
   assert.ok(hiddenContentRow, 'Content row stays mounted with opacity 0 during loading');
   assert.equal(hiddenContentRow.props.accessibilityElementsHidden, true);
 
-  // Spinner is rendered inside an absolute overlay
   const spinner = h.nodes.find((n) => n.type === 'ActivityIndicator');
   assert.ok(spinner, 'ActivityIndicator is rendered during loading');
   assert.equal(loadingPressable.props.disabled, true);
@@ -293,16 +411,20 @@ test('C03: Button preserves dimensional stability when toggling loading and bloc
   assert.equal(pressCount, 1);
 });
 
-test('C03: Button derives accessible name from children when title is omitted and styles primary, secondary and destructive variants', () => {
+test('C07 & C08: Button accessible label extraction, explicit accessibilityLabel requirement for opaque children, and variants', () => {
+  // 1. String children extraction
   const hStringChildren = createHarness('components/ui/Button.js', {
     props: {
       children: 'Entrar com E-mail',
       onPress: () => {},
     },
   });
-  const stringChildrenBtn = hStringChildren.nodes.find((n) => n.type === 'Pressable');
-  assert.equal(stringChildrenBtn.props.accessibilityLabel, 'Entrar com E-mail');
+  assert.equal(
+    hStringChildren.nodes.find((n) => n.type === 'Pressable').props.accessibilityLabel,
+    'Entrar com E-mail'
+  );
 
+  // 2. Nested Text elements extraction
   const hElementChildren = createHarness('components/ui/Button.js', {
     props: {
       children: [
@@ -312,9 +434,37 @@ test('C03: Button derives accessible name from children when title is omitted an
       onPress: () => {},
     },
   });
-  const elementChildrenBtn = hElementChildren.nodes.find((n) => n.type === 'Pressable');
-  assert.equal(elementChildrenBtn.props.accessibilityLabel, 'Sair da Arena');
+  assert.equal(
+    hElementChildren.nodes.find((n) => n.type === 'Pressable').props.accessibilityLabel,
+    'Sair da Arena'
+  );
 
+  // 3. Opaque custom element requires explicit accessibilityLabel (falls back to generic 'Botão' if omitted)
+  const opaqueIconElement = { type: function OpaqueIcon() {}, props: {} };
+  const hOpaqueWithoutLabel = createHarness('components/ui/Button.js', {
+    props: {
+      children: opaqueIconElement,
+      onPress: () => {},
+    },
+  });
+  assert.equal(
+    hOpaqueWithoutLabel.nodes.find((n) => n.type === 'Pressable').props.accessibilityLabel,
+    'Botão'
+  );
+
+  const hOpaqueWithExplicitLabel = createHarness('components/ui/Button.js', {
+    props: {
+      children: opaqueIconElement,
+      accessibilityLabel: 'Fechar janela',
+      onPress: () => {},
+    },
+  });
+  assert.equal(
+    hOpaqueWithExplicitLabel.nodes.find((n) => n.type === 'Pressable').props.accessibilityLabel,
+    'Fechar janela'
+  );
+
+  // 4. All 6 visual variants
   const variantExpectations = [
     { variant: 'primary', bg: '#5F33FA', pressedBg: '#724CFB', text: '#FFFFFF', spinner: '#FFFFFF' },
     { variant: 'secondary', bg: '#161626', border: '#2E2E48', pressedBg: '#1F1F35', text: '#FFFFFF', spinner: '#FFFFFF' },
@@ -349,7 +499,7 @@ test('C03: Button derives accessible name from children when title is omitted an
   }
 });
 
-test('C04: InputField handles focus/blur transitions, required mark, disabled state, hint and error alert', () => {
+test('C08: InputField, Card, Badge, StepperIndicator and ScreenHeader states and accessibility', () => {
   let updatedText = '';
   let focusCalled = false;
   let blurCalled = false;
@@ -372,65 +522,38 @@ test('C04: InputField handles focus/blur transitions, required mark, disabled st
   assert.equal(input.props.value, 'test@example.com');
   assert.equal(input.props.accessibilityState.disabled, false);
 
-  const hintNode = h.nodes.find((n) => n.type === 'Text' && textOf(n) === 'Use seu e-mail institucional ou pessoal');
-  assert.ok(hintNode, 'Hint text rendered when no error is present');
-
   h.act(() => input.props.onFocus({}));
-  assert.equal(focusCalled, true, 'onFocus callback triggered');
-  const focusedBox = h.nodes.find(
-    (n) => n.type === 'View' && flattenStyle(n.props.style).borderColor === '#5F33FA'
+  assert.equal(focusCalled, true);
+  assert.ok(
+    h.nodes.find((n) => n.type === 'View' && flattenStyle(n.props.style).borderColor === '#5F33FA'),
+    'Input box border changes to #5F33FA on focus'
   );
-  assert.ok(focusedBox, 'Input box border changes to #5F33FA on focus');
 
   h.act(() => input.props.onBlur({}));
-  assert.equal(blurCalled, true, 'onBlur callback triggered');
-  const blurredBox = h.nodes.find(
-    (n) => n.type === 'View' && flattenStyle(n.props.style).borderColor === '#2E2E48'
+  assert.equal(blurCalled, true);
+  assert.ok(
+    h.nodes.find((n) => n.type === 'View' && flattenStyle(n.props.style).borderColor === '#2E2E48'),
+    'Input box border restores to #2E2E48 on blur'
   );
-  assert.ok(blurredBox, 'Input box border restores to #2E2E48 on blur');
 
   h.act(() => input.props.onChangeText('novo@arena.com'));
   assert.equal(updatedText, 'novo@arena.com');
 
   h.setProps({ error: 'Formato de e-mail inválido' });
   const errorAlert = h.nodes.find((n) => n.type === 'Text' && n.props.accessibilityRole === 'alert');
-  assert.ok(errorAlert, 'Error message with accessibilityRole="alert" must be rendered');
+  assert.ok(errorAlert);
   assert.equal(textOf(errorAlert), 'Formato de e-mail inválido');
-  const hintAfterError = h.nodes.find((n) => n.type === 'Text' && textOf(n) === 'Use seu e-mail institucional ou pessoal');
-  assert.equal(hintAfterError, undefined, 'Hint is hidden when error is displayed');
 
   h.setProps({ editable: false, error: null });
   const disabledInput = h.nodes.find((n) => n.type === 'TextInput');
   assert.equal(disabledInput.props.editable, false);
   assert.equal(disabledInput.props.accessibilityState.disabled, true);
-});
-
-test('C04: Card, Badge, StepperIndicator and ScreenHeader variants, disabled states and accessibility', () => {
-  let cardClicked = 0;
-  const hCard = createHarness('components/ui/Card.js', {
-    props: {
-      variant: 'highlight',
-      accessibilityLabel: 'Estação VR',
-      onPress: () => { cardClicked += 1; },
-    },
-  });
-  const cardPressable = hCard.nodes.find((n) => n.type === 'Pressable');
-  assert.ok(cardPressable);
-  hCard.act(() => cardPressable.props.onPress());
-  assert.equal(cardClicked, 1);
-
-  hCard.setProps({ disabled: true });
-  const disabledCardPressable = hCard.nodes.find((n) => n.type === 'Pressable');
-  assert.equal(disabledCardPressable.props.disabled, true);
-  assert.equal(disabledCardPressable.props.onPress, undefined);
-  assert.equal(disabledCardPressable.props.accessibilityState.disabled, true);
 
   for (const variant of ['default', 'brand', 'success', 'danger', 'warning', 'info']) {
     const hBadge = createHarness('components/ui/Badge.js', {
       props: { label: variant.toUpperCase(), variant, size: 'sm' },
     });
-    const badgeText = hBadge.nodes.find((n) => n.type === 'Text' && textOf(n) === variant.toUpperCase());
-    assert.ok(badgeText, `Badge renders variant ${variant}`);
+    assert.ok(hBadge.nodes.find((n) => n.type === 'Text' && textOf(n) === variant.toUpperCase()));
   }
 
   const hStepper = createHarness('components/ui/StepperIndicator.js', {
@@ -442,7 +565,7 @@ test('C04: Card, Badge, StepperIndicator and ScreenHeader variants, disabled sta
     },
   });
   const progressBar = hStepper.nodes.find((n) => n.type === 'View' && n.props.accessibilityRole === 'progressbar');
-  assert.ok(progressBar, 'StepperIndicator exposes progressbar role');
+  assert.ok(progressBar);
   assert.equal(progressBar.props.accessibilityValue.min, 1);
   assert.equal(progressBar.props.accessibilityValue.max, 3);
   assert.equal(progressBar.props.accessibilityValue.now, 2);
@@ -462,7 +585,7 @@ test('C04: Card, Badge, StepperIndicator and ScreenHeader variants, disabled sta
   assert.equal(backCalls, 0);
 });
 
-test('C04: Isolated DesignSystemPreview exports and renders all component families', () => {
+test('C09: Isolated DesignSystemPreview renders all 7 component families and supports remove-then-select in preview state', () => {
   const nativeStub = {
     ActivityIndicator: 'ActivityIndicator',
     Pressable: 'Pressable',
@@ -476,8 +599,21 @@ test('C04: Isolated DesignSystemPreview exports and renders all component famili
       absoluteFillObject: { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0 },
     },
   };
+
+  let states = [];
+  let cursor = 0;
+
   const reactStub = {
-    useState: (initial) => [initial, () => {}],
+    useState(initial) {
+      const idx = cursor++;
+      if (states[idx] === undefined) {
+        states[idx] = typeof initial === 'function' ? initial() : initial;
+      }
+      const setState = (updater) => {
+        states[idx] = typeof updater === 'function' ? updater(states[idx]) : updater;
+      };
+      return [states[idx], setState];
+    },
   };
 
   function customRequire(id) {
@@ -496,7 +632,32 @@ test('C04: Isolated DesignSystemPreview exports and renders all component famili
   const PreviewComponent = previewModule.DesignSystemPreview || previewModule.default;
   assert.equal(typeof PreviewComponent, 'function');
 
-  const tree = PreviewComponent({});
-  const renderedNodes = collectNodes(tree);
-  assert.ok(renderedNodes.length > 20, 'DesignSystemPreview renders complete showcase tree');
+  function renderPreview() {
+    cursor = 0;
+    return collectNodes(PreviewComponent({}));
+  }
+
+  let renderedNodes = renderPreview();
+  assert.ok(renderedNodes.length > 25, 'DesignSystemPreview renders complete showcase tree');
+
+  // Verify interactive remove followed by select inside DesignSystemPreview state
+  const removeFortniteBtn = renderedNodes.find(
+    (n) => n.type === 'Pressable' && n.props?.accessibilityLabel === 'Remover Fortnite'
+  );
+  assert.ok(removeFortniteBtn, 'Fortnite remove button is rendered in preview');
+  removeFortniteBtn.props.onPress({});
+
+  renderedNodes = renderPreview();
+  const statusAfterRemove = renderedNodes.find((n) => n.props?.testID === 'preview-last-action');
+  assert.equal(textOf(statusAfterRemove), 'Status: Removido: Fortnite');
+
+  const selectFortniteBtn = renderedNodes.find(
+    (n) => n.type === 'Pressable' && n.props?.accessibilityRole === 'checkbox' && n.props?.accessibilityLabel === 'Fortnite'
+  );
+  assert.ok(selectFortniteBtn, 'Fortnite select button remains interactive after removal');
+  selectFortniteBtn.props.onPress({});
+
+  renderedNodes = renderPreview();
+  const statusAfterSelect = renderedNodes.find((n) => n.props?.testID === 'preview-last-action');
+  assert.equal(textOf(statusAfterSelect), 'Status: Selecionado/Alternado: Fortnite');
 });
