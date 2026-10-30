@@ -28,6 +28,13 @@ export default function StaffPanelScreen({ navigation }) {
 
   const { entryQueue } = session;
 
+  // Sai da Área Staff: descarta a demonstração e fecha a rota StaffDemo na
+  // pilha do app (o provedor desmonta). A sessão autenticada não é tocada.
+  function handleExitToApp() {
+    leaveEvent();
+    navigation.getParent()?.goBack();
+  }
+
   function handleSwitchEvent() {
     setIsSwitching(false);
     leaveEvent();
@@ -69,6 +76,7 @@ export default function StaffPanelScreen({ navigation }) {
       })}
 
       <StaffButton label="↩ Trocar de evento" variant="secondary" onPress={() => setIsSwitching(true)} />
+      <StaffButton label="Voltar ao aplicativo" variant="secondary" onPress={handleExitToApp} />
 
       <StaffConfirmDialog
         visible={isSwitching}

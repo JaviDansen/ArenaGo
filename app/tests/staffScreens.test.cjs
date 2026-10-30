@@ -254,7 +254,10 @@ test('SV03 Realidade Virtual reproduz o print 05 e ausente vai para o final', as
 test('SV03 ausente após o corte de inscrições não volta à fila', async () => {
   const app = await enterEvent('STAFFVAZIO');
   app.press('Abrir PlayStation, 1 chamado, 0 na fila');
-  app.press('AUSENTE → FINAL DA FILA');
+  assert.ok(!app.hasButton('AUSENTE → FINAL DA FILA'), 'inscrições encerradas: sem promessa de retorno');
+  assert.ok(app.hasText('Inscrições encerradas: “Ausente” libera a estação e o participante não volta à fila'));
+  assert.ok(!app.hasText('“Ausente” volta ao fim da fila'));
+  app.press('AUSENTE (NÃO VOLTA À FILA)');
   assert.ok(app.hasText('NÃO volta para a fila'));
   app.press('MARCAR AUSENTE');
   assert.equal(app.session.experiences[0].queue.length, 0);
@@ -331,4 +334,92 @@ test('fluxo completo: acesso → painel → entrada → painel → estações �
   assert.deepEqual(app.routes, ['StaffAccess']);
   assert.equal(app.session, null);
   assert.ok(!app.requested.some((name) => /ParticipationContext|httpClient|services/.test(name)));
+});
+
+// ---- Correções pós-auditoria (C02–C05) ----
+
+const ACCOUNT_A = { isAuthenticated: true, user: { id: 'conta-a', name: 'Conta A' }, getSessionEpoch: () => 1 };
+const ACCOUNT_B = { isAuthenticated: true, user: { id: 'conta-b', name: 'Conta B' }, getSessionEpoch: () => 2 };
+
+async function enterAs(auth, code = 'STAFFDEMO') {
+  const app = createStaffApp({ auth });
+  app.typeCode(code);
+  await app.pressAsync('ENTRAR NO EVENTO');
+  assert.equal(app.route, 'StaffPanel');
+  return app;
+}
+
+test('C02 troca direta da conta A para B descarta a demonstração na mesma renderização', async () => {
+  const app = await enterAs(ACCOUNT_A);
+  app.press(ENTRY_ACTIVE);
+  confirmDialog(app, 'CONFIRMAR ENTRADA', 'CONFIRMAR');
+  app.press('↩ Painel');
+  app.demo.toggleFailNextAction();
+  app.sync();
+  assert.equal(app.session.entryQueue.waiting.length, 3, 'A alterou a demonstração');
+
+  app.setAuth(ACCOUNT_B); // sem logout prévio
+  assert.equal(app.session, null, 'nada da conta A é exposto para B');
+  assert.equal(app.demo.failNextAction, false, 'erro simulado de A também é descartado');
+  assert.ok(app.hasText('Nenhum evento selecionado'));
+  assert.ok(!app.hasText('BEAST Arena'));
+
+  // B começa do zero: fixture original, sem as alterações de A.
+  app.press('IR PARA A ÁREA DO STAFF');
+  app.typeCode('STAFFDEMO');
+  await app.pressAsync('ENTRAR NO EVENTO');
+  assert.equal(app.session.entryQueue.waiting.length, 4);
+});
+
+test('C02 mesma conta com nova geração de sessão também descarta o estado', async () => {
+  const app = await enterAs(ACCOUNT_A);
+  app.setAuth({ ...ACCOUNT_A, getSessionEpoch: () => 9 });
+  assert.equal(app.session, null);
+});
+
+test('C02 callback antigo disparado após a troca de conta e antes da renderização não altera nada', async () => {
+  const app = await enterAs(ACCOUNT_A);
+  app.press(ENTRY_ACTIVE);
+  app.press('CONFIRMAR ENTRADA');
+  const staleConfirm = app.handlerOf('CONFIRMAR');
+  app.setAuthWithoutRender(ACCOUNT_B);
+  staleConfirm();
+  app.sync();
+  assert.equal(app.session, null);
+  assert.ok(!app.hasText('Entrada de Rafael T. confirmada'));
+});
+
+test('C03 painel oferece "Voltar ao aplicativo" e "Trocar de evento"; sair descarta a demonstração', async () => {
+  const app = await enterEvent();
+  assert.ok(app.hasButton('↩ Trocar de evento'), 'troca de evento preservada');
+  assert.ok(app.hasButton('Voltar ao aplicativo'));
+  app.press('Voltar ao aplicativo');
+  assert.equal(app.exitedToApp, true, 'rota StaffDemo fechada na pilha do app');
+  assert.equal(app.session, null, 'estado descartado');
+  assert.deepEqual(plain(app.navigationCalls.at(-1)), { type: 'parentBack' });
+});
+
+test('C04 dois callbacks seguidos da mesma confirmação consomem só um participante', async () => {
+  const app = await enterEvent();
+  app.press(ENTRY_ACTIVE);
+  app.press('CONFIRMAR ENTRADA');
+  assert.ok(app.hasText('Rafael T. será marcado(a) como dentro da Arena.'));
+  const confirm = app.handlerOf('CONFIRMAR');
+  confirm();
+  confirm(); // sem renderização intermediária
+  app.sync();
+  assert.deepEqual(plain(app.session.entryQueue.waiting.map((item) => item.name)),
+    ['Júlia P.', 'Marcos L.', 'Beatriz N.']);
+  assert.equal(app.session.entryQueue.insideCount, 74);
+  assert.ok(app.hasText('Entrada de Rafael T. confirmada na simulação local.'));
+  assert.ok(!app.hasText('já foi processada'));
+  assert.ok(app.requested.every((name) => !/services\//.test(name)), 'sem backend');
+});
+
+test('C05 com inscrições abertas a ausência continua prometendo o final da fila', async () => {
+  const app = await enterEvent();
+  app.press(VIRTUAL_REALITY);
+  assert.ok(app.hasButton('AUSENTE → FINAL DA FILA'));
+  assert.ok(!app.hasButton('AUSENTE (NÃO VOLTA À FILA)'));
+  assert.ok(app.hasText('“Ausente” volta ao fim da fila'));
 });

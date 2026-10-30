@@ -46,6 +46,8 @@ export default function StaffStationScreen({ navigation, route }) {
   }
 
   const callBlocker = getCallBlocker(session, station.id);
+  // Após o corte de inscrições, ausente não volta à fila (regra vigente).
+  const absentRequeues = session.queueEntriesOpen;
 
   function apply(transition) {
     setDialog(null);
@@ -109,7 +111,7 @@ export default function StaffStationScreen({ navigation, route }) {
           </StaffNotice>
           <StaffButton label="CONCLUIR EXPERIÊNCIA" onPress={() => setDialog({ type: 'complete' })} />
           <StaffButton
-            label="AUSENTE → FINAL DA FILA"
+            label={absentRequeues ? 'AUSENTE → FINAL DA FILA' : 'AUSENTE (NÃO VOLTA À FILA)'}
             variant="secondary"
             onPress={() => setDialog({ type: 'absent' })}
           />
@@ -155,8 +157,9 @@ export default function StaffStationScreen({ navigation, route }) {
       )}
 
       <Text style={styles.footnote}>
-        Chama-se apenas o próximo (sem furar a ordem). “Ausente” volta ao fim da fila; “Remover” é
-        uma ação manual diferente.
+        {absentRequeues
+          ? 'Chama-se apenas o próximo (sem furar a ordem). “Ausente” volta ao fim da fila; “Remover” é uma ação manual diferente.'
+          : 'Chama-se apenas o próximo (sem furar a ordem). Inscrições encerradas: “Ausente” libera a estação e o participante não volta à fila; “Remover” é uma ação manual diferente.'}
       </Text>
 
       <StaffButton label="↩ Painel" variant="secondary" onPress={() => navigation.popTo('StaffPanel')} />
@@ -176,7 +179,7 @@ export default function StaffStationScreen({ navigation, route }) {
       <StaffConfirmDialog
         visible={dialog?.type === 'absent'}
         title="Registrar ausência?"
-        message={session.queueEntriesOpen
+        message={absentRequeues
           ? `${station.call?.name ?? 'O participante'} volta para o final da fila. Ausência não conta como conclusão.`
           : `Novas inscrições já foram encerradas: ${station.call?.name ?? 'o participante'} NÃO volta para a fila.`}
         note="Simulação local: nada é enviado ao servidor."

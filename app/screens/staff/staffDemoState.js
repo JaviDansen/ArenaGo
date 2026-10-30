@@ -95,7 +95,9 @@ export function getCallBlocker(state, stationId) {
   return null;
 }
 
-export function confirmEntry(state) {
+// A confirmação vale só para a entrada exibida no diálogo (entryId): repetir o
+// mesmo callback não consome o participante seguinte.
+export function confirmEntry(state, entryId) {
   const { entryQueue } = state;
   if (!entryQueue.active) {
     return fail(state, 'QUEUE_INACTIVE', 'A fila de acesso está desativada.');
@@ -104,6 +106,10 @@ export function confirmEntry(state) {
     return fail(state, 'QUEUE_EMPTY', 'Não há ninguém aguardando na fila de acesso.');
   }
   const [next, ...waiting] = entryQueue.waiting;
+  if (typeof entryId !== 'string' || next.entryId !== entryId) {
+    return fail(state, 'ENTRY_NOT_NEXT',
+      'Esta confirmação já foi processada ou a fila mudou. Nada foi alterado.');
+  }
   const nextState = {
     ...state,
     entryQueue: { ...entryQueue, waiting, insideCount: entryQueue.insideCount + 1 },

@@ -79,7 +79,7 @@ test('fixture espelha os prints de referência', () => {
 test('confirmar entrada atende o primeiro da fila sem alterar o estado anterior', () => {
   const before = session();
   const snapshot = JSON.stringify(before);
-  const { state: after, result } = state.confirmEntry(before);
+  const { state: after, result } = state.confirmEntry(before, before.entryQueue.waiting[0].entryId);
   assert.equal(result.ok, true);
   assert.equal(result.participant.name, 'Rafael T.');
   assert.match(result.message, /simulação/);
@@ -90,9 +90,24 @@ test('confirmar entrada atende o primeiro da fila sem alterar o estado anterior'
 
 test('confirmar entrada falha com fila vazia ou inativa', () => {
   let current = session();
-  for (let i = 0; i < 4; i++) current = state.confirmEntry(current).state;
-  assert.equal(state.confirmEntry(current).result.code, 'QUEUE_EMPTY');
-  assert.equal(state.confirmEntry(session('STAFFVAZIO')).result.code, 'QUEUE_INACTIVE');
+  for (let i = 0; i < 4; i++) current = state.confirmEntry(current, current.entryQueue.waiting[0].entryId).state;
+  assert.equal(state.confirmEntry(current, 'qualquer').result.code, 'QUEUE_EMPTY');
+  assert.equal(state.confirmEntry(session('STAFFVAZIO'), 'qualquer').result.code, 'QUEUE_INACTIVE');
+});
+
+test('confirmar entrada vale só para o participante exibido e repetir não consome o seguinte', () => {
+  const before = session();
+  const shown = before.entryQueue.waiting[0].entryId;
+  const first = state.confirmEntry(before, shown);
+  assert.equal(first.result.ok, true);
+  const repeated = state.confirmEntry(first.state, shown);
+  assert.equal(repeated.result.ok, false);
+  assert.equal(repeated.result.code, 'ENTRY_NOT_NEXT');
+  assert.equal(repeated.state, first.state, 'estado intacto');
+  assert.deepEqual(names(first.state.entryQueue.waiting), ['Júlia P.', 'Marcos L.', 'Beatriz N.']);
+  for (const id of [undefined, null, '', before.entryQueue.waiting[1].entryId]) {
+    assert.equal(state.confirmEntry(before, id).result.code, 'ENTRY_NOT_NEXT', String(id));
+  }
 });
 
 test('desativar fila libera todos e reativar não recoloca ninguém', () => {

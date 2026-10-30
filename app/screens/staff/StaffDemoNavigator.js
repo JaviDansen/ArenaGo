@@ -1,7 +1,8 @@
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 
+import { useAuth } from '../../context/AuthContext';
 import StaffAccessScreen from './StaffAccessScreen';
-import { StaffDemoProvider } from './StaffDemoContext';
+import { getStaffDemoOwnerKey, StaffDemoProvider } from './StaffDemoContext';
 import StaffEntryControlScreen from './StaffEntryControlScreen';
 import StaffPanelScreen from './StaffPanelScreen';
 import StaffStationScreen from './StaffStationScreen';
@@ -9,11 +10,14 @@ import StaffStationScreen from './StaffStationScreen';
 const Stack = createNativeStackNavigator();
 
 // Pilha própria da Área Staff (demonstração). O provedor fica aqui dentro para
-// que todo o estado simulado seja descartado ao sair da área. O cabeçalho
-// nativo fica oculto porque cada tela desenha o seu, como nos prints.
+// que todo o estado simulado seja descartado ao sair da área. A key amarrada à
+// conta e à geração da sessão remonta o provedor e as telas (diálogos abertos
+// inclusive) se a identidade mudar sem sair da área. O cabeçalho nativo fica
+// oculto porque cada tela desenha o seu, como nos prints.
 export default function StaffDemoNavigator() {
+  const ownerKey = getStaffDemoOwnerKey(useAuth()) ?? 'sem-conta';
   return (
-    <StaffDemoProvider>
+    <StaffDemoProvider key={ownerKey}>
       <Stack.Navigator initialRouteName="StaffAccess" screenOptions={{ headerShown: false }}>
         <Stack.Screen
           name="StaffAccess"

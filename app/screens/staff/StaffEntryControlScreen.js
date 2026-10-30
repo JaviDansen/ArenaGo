@@ -33,9 +33,11 @@ export default function StaffEntryControlScreen({ navigation }) {
   const { entryQueue } = session;
   const next = entryQueue.waiting[0] ?? null;
 
-  function apply(transition) {
+  function apply(transition, ...args) {
     setDialog(null);
-    const result = run(transition);
+    const result = run(transition, ...args);
+    // Repetição da mesma confirmação não sobrescreve o retorno da primeira.
+    if (result.code === 'ENTRY_NOT_NEXT') return;
     setFeedback({ tone: result.ok ? 'success' : 'error', message: result.message });
   }
 
@@ -49,7 +51,7 @@ export default function StaffEntryControlScreen({ navigation }) {
           </View>
           <Pressable
             style={[styles.pill, !entryQueue.active && styles.pillOff]}
-            onPress={entryQueue.active ? () => setDialog('disable') : undefined}
+            onPress={entryQueue.active ? () => setDialog({ type: 'disable' }) : undefined}
             accessibilityRole="button"
             accessibilityLabel="Fila de acesso: Não"
             accessibilityState={{ selected: !entryQueue.active }}
@@ -100,7 +102,11 @@ export default function StaffEntryControlScreen({ navigation }) {
           >
             <Text style={styles.queueName}>{index + 1}. {participant.name}</Text>
             {index === 0 && entryQueue.active ? (
-              <StaffButton label="CONFIRMAR ENTRADA" compact onPress={() => setDialog('confirm')} />
+              <StaffButton
+                label="CONFIRMAR ENTRADA"
+                compact
+                onPress={() => setDialog({ type: 'confirm', participant })}
+              />
             ) : null}
           </View>
         ))
@@ -110,7 +116,7 @@ export default function StaffEntryControlScreen({ navigation }) {
         <StaffButton
           label="DESATIVAR FILA (LIBERA TODOS)"
           variant="danger"
-          onPress={() => setDialog('disable')}
+          onPress={() => setDialog({ type: 'disable' })}
           accessibilityHint="Abre uma confirmação. Na operação real, só Admin poderá executar."
         />
       ) : null}
@@ -124,17 +130,17 @@ export default function StaffEntryControlScreen({ navigation }) {
       <StaffDemoTools failNextAction={failNextAction} onToggleFailure={toggleFailNextAction} />
 
       <StaffConfirmDialog
-        visible={dialog === 'confirm'}
+        visible={dialog?.type === 'confirm'}
         title="Confirmar entrada?"
-        message={next ? `${next.name} será marcado(a) como dentro da Arena.` : ''}
+        message={dialog?.participant ? `${dialog.participant.name} será marcado(a) como dentro da Arena.` : ''}
         note="Simulação local: nada é enviado ao servidor."
         confirmLabel="CONFIRMAR"
-        onConfirm={() => apply(confirmEntry)}
+        onConfirm={() => apply(confirmEntry, dialog?.participant?.entryId)}
         onCancel={() => setDialog(null)}
       />
 
       <StaffConfirmDialog
-        visible={dialog === 'disable'}
+        visible={dialog?.type === 'disable'}
         title="Desativar a fila de acesso?"
         message={`Todos os ${entryQueue.waiting.length} participante(s) aguardando seriam liberados para a Arena.`}
         note="Operação reservada a Admin na futura API. Aqui só a demonstração local muda; nenhum participante real é liberado."

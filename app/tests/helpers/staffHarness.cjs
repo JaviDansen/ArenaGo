@@ -120,7 +120,8 @@ function allTexts(tree) {
 function createStaffApp({ auth, initialRoute = 'StaffAccess', initialParams, latency } = {}) {
   const { react, mount } = createReactMock();
   const cache = new Map();
-  const authValue = auth ?? { isAuthenticated: true, user: { id: 'u-1', name: 'Conta Teste' } };
+  // Conta trocável durante o teste (troca direta A → B, sem logout).
+  let authValue = auth ?? { isAuthenticated: true, user: { id: 'u-1', name: 'Conta Teste' } };
   const requested = [];
 
   function load(relativePath) {
@@ -164,12 +165,14 @@ function createStaffApp({ auth, initialRoute = 'StaffAccess', initialParams, lat
   const provider = mount(context.StaffDemoProvider, { children: null });
   const navigationCalls = [];
   const stack = [];
+  let exitedToApp = false;
 
   function publishContext() {
     context.StaffDemoContext._value = provider.tree.props.value;
   }
 
   function sync() {
+    if (exitedToApp) return;
     for (let i = 0; i < 20; i++) {
       if (provider.instance.dirty) provider.render();
       publishContext();
@@ -203,6 +206,18 @@ function createStaffApp({ auth, initialRoute = 'StaffAccess', initialParams, lat
         if (stack.length > 1) stack.pop().mounted.unmount();
       },
       setOptions(options) { navigationCalls.push({ type: 'setOptions', options }); },
+      // Pilha do app: goBack fecha a rota StaffDemo inteira (telas e provedor).
+      getParent() {
+        return {
+          goBack() {
+            navigationCalls.push({ type: 'parentBack' });
+            exitedToApp = true;
+            if (provider.instance.dirty) provider.render(); // último estado antes de desmontar
+            while (stack.length) stack.pop().mounted.unmount();
+            provider.unmount();
+          },
+        };
+      },
       setParams(params) {
         navigationCalls.push({ type: 'setParams', params });
         const route = stack[stack.length - 1];
@@ -233,6 +248,7 @@ function createStaffApp({ auth, initialRoute = 'StaffAccess', initialParams, lat
   const api = {
     navigationCalls,
     requested,
+    get exitedToApp() { return exitedToApp; },
     get route() { return top().name; },
     get routes() { return stack.map((route) => route.name); },
     get params() { return top().params; },
@@ -271,6 +287,16 @@ function createStaffApp({ auth, initialRoute = 'StaffAccess', initialParams, lat
       return interactiveNodes(top().mounted.tree).nodes.find((node) => node.type === 'TextInput');
     },
     sync,
+    // Troca a conta e re-renderiza (como faria o AuthContext).
+    setAuth(next) { authValue = next; provider.render(); sync(); },
+    // Troca a conta SEM re-renderizar: simula callback antigo disparado antes da nova renderização.
+    setAuthWithoutRender(next) { authValue = next; },
+    // Captura o onPress de um botão para disparar várias vezes sem renderizar entre as chamadas.
+    handlerOf(label) {
+      const button = findPressable(label);
+      assert.ok(button, `botão ausente ou encoberto: ${label}`);
+      return button.props.onPress;
+    },
     unmountTop() { top().mounted.unmount(); },
   };
   return api;

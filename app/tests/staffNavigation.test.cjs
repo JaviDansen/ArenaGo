@@ -48,7 +48,8 @@ test('rota StaffDemo existe só no app autenticado com questionário concluído'
   });
   const staff = signedIn.find((route) => route.name === 'StaffDemo');
   assert.ok(staff, 'StaffDemo disponível');
-  assert.equal(staff.component, StaffDemoNavigator);
+  assert.equal(staff.component, undefined, 'carregamento tardio, sem import no topo do App.js');
+  assert.equal(staff.getComponent(), StaffDemoNavigator);
   for (const name of ['MainTabs', 'EventEntry', 'EventConfirmation', 'ParticipationDetails', 'Evaluation']) {
     assert.ok(signedIn.some((route) => route.name === name), `${name} preservada`);
   }
@@ -78,11 +79,20 @@ test('pilha da Área Staff registra as quatro telas com títulos em português',
     if (name === '@react-navigation/native-stack') {
       return { createNativeStackNavigator: () => ({ Navigator: StackNavigator, Screen: StackScreen }) };
     }
-    if (name === './StaffDemoContext') return { StaffDemoProvider: 'StaffDemoProvider' };
+    if (name === '../../context/AuthContext') {
+      return { useAuth: () => ({ isAuthenticated: true, user: { id: 'u-1' }, getSessionEpoch: () => 7 }) };
+    }
+    if (name === './StaffDemoContext') {
+      return {
+        StaffDemoProvider: 'StaffDemoProvider',
+        getStaffDemoOwnerKey: (auth) => `${auth.user.id}#${auth.getSessionEpoch()}`,
+      };
+    }
     return { __esModule: true, default: ImportedScreen };
   }).exports.default;
   const tree = navigator();
   assert.equal(tree.type, 'StaffDemoProvider', 'estado da demonstração fica dentro da área');
+  assert.equal(tree.key, 'u-1#7', 'provedor remonta quando conta ou geração da sessão mudam');
   const stack = tree.props.children;
   assert.equal(stack.props.initialRouteName, 'StaffAccess');
   for (const screen of [].concat(stack.props.children)) registered.push([screen.props.name, screen.props.options.title]);
