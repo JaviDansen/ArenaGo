@@ -9,9 +9,8 @@ import {
   Text,
   View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { Badge } from '../../components/ui/Badge';
+import { AuthBackground } from '../../components/ui/AuthBackground';
 import { Button, MIN_TOUCH_TARGET } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
 import { InputField } from '../../components/ui/InputField';
@@ -165,7 +164,7 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
   );
 
   return (
-    <SafeAreaView style={styles.container}>
+    <AuthBackground variant="login" testID="login-background">
       <StatusBar style="light" />
 
       <ScreenHeader
@@ -185,17 +184,16 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
-          {/* Cabeçalho textual */}
+          {/* Cabeçalho textual limpo */}
           <View style={styles.heroHeader}>
-            <Badge label="ACESSO" variant="brand" size="sm" style={styles.tagBadge} />
             <Text style={styles.title}>De volta ao jogo.</Text>
             <Text style={styles.subtitle}>
               Informe suas credenciais para entrar na sua conta.
             </Text>
           </View>
 
-          {/* Formulário */}
-          <View style={styles.form}>
+          {/* Superfície de formulário discreta e legível */}
+          <View style={styles.formSurface}>
             {sessionNotice && !authError && !twoFactorNotice ? (
               <Card
                 variant="default"
@@ -219,7 +217,6 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
               </Card>
             ) : null}
 
-            {/* Mensagem estruturada para retorno de autenticação */}
             {authError ? (
               <Card
                 variant="default"
@@ -334,34 +331,27 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
           </Pressable>
         </ScrollView>
       </KeyboardAvoidingView>
-    </SafeAreaView>
+    </AuthBackground>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.background.base,
-  },
   keyboardView: {
     flex: 1,
-    backgroundColor: colors.background.base,
+    backgroundColor: 'transparent',
   },
   scrollView: {
     flex: 1,
-    backgroundColor: colors.background.base,
+    backgroundColor: 'transparent',
   },
   scrollContent: {
     flexGrow: 1,
     paddingHorizontal: spacing.layout.screenPaddingHorizontal,
-    paddingTop: spacing.md,
+    paddingTop: spacing.lg,
     paddingBottom: spacing.xxxl,
   },
   heroHeader: {
     marginBottom: spacing.xl,
-  },
-  tagBadge: {
-    marginBottom: spacing.sm,
   },
   title: {
     ...typography.hero,
@@ -372,7 +362,12 @@ const styles = StyleSheet.create({
     ...typography.bodyLarge,
     color: colors.text.secondary,
   },
-  form: {
+  formSurface: {
+    backgroundColor: 'rgba(22, 22, 38, 0.86)',
+    borderWidth: 1,
+    borderColor: colors.border.subtle,
+    borderRadius: radii.xl,
+    padding: spacing.xl,
     gap: spacing.md,
   },
   fieldContainer: {
@@ -434,7 +429,7 @@ const styles = StyleSheet.create({
   forgotPasswordText: {
     ...typography.body,
     color: colors.brand.primaryLight,
-    fontWeight: typography.weights.bold,
+    fontWeight: typography.weights.semiBold,
   },
   submitButton: {
     marginTop: spacing.xs,
@@ -452,7 +447,7 @@ const styles = StyleSheet.create({
   switchAuthText: {
     ...typography.body,
     color: colors.brand.primaryLight,
-    fontWeight: typography.weights.extraBold,
+    fontWeight: typography.weights.bold,
     textAlign: 'center',
   },
   disabledControl: {

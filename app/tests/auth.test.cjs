@@ -1491,18 +1491,23 @@ test('generic network error during POST /auth/refresh after server consumes toke
 // 5. UI-02 — INTERFACE VISUAL DE AUTENTICAÇÃO (DESIGN SYSTEM + FLUXOS VISUAIS)
 // ============================================================================
 
-test('UI-02: Welcome, Login, Register and ForgotPassword navigate across all public auth flows', () => {
-  // 1. Welcome -> Register e Welcome -> Login
-  const welcome = createHarness('screens/auth/WelcomeScreen.js');
+test('UI-02 & UI-02A: Welcome, Login, Register and ForgotPassword navigate across all public auth flows and apply AuthBackground + sans-serif typography', () => {
+  // 1. Welcome -> Register e Welcome -> Login (no Android para verificar fontFamily: 'sans-serif')
+  const welcome = createHarness('screens/auth/WelcomeScreen.js', { platform: 'android' });
   assert.ok(hasText(welcome, 'ArenaGO'));
   assert.ok(hasText(welcome, 'Viva a experiência ArenaGO.'));
-  const welcomeRoot = welcome.nodes.find((node) => node.type === 'SafeAreaView');
-  assert.equal(welcomeRoot.props.style.backgroundColor, '#0B0B12');
+  const welcomeBg = welcome.nodes.find((node) => node.props?.testID === 'welcome-background');
+  assert.ok(welcomeBg, 'WelcomeScreen renders AuthBackground');
+  const welcomeBackdrop = welcome.nodes.find(
+    (node) => node.props?.testID === 'welcome-background-backdrop'
+  );
+  assert.equal(welcomeBackdrop.props.pointerEvents, 'none');
   const welcomeTitle = welcome.nodes.find(
     (node) => node.type === 'Text' && textOf(node) === 'Viva a experiência ArenaGO.'
   );
   assert.equal(welcomeTitle.props.style.color, '#FFFFFF');
-  assert.equal(welcomeTitle.props.style.fontSize, 28);
+  assert.equal(welcomeTitle.props.style.fontSize, 30);
+  assert.equal(welcomeTitle.props.style.fontFamily, 'sans-serif');
 
   welcome.act(() => welcome.press('Criar minha conta'));
   welcome.act(() => welcome.press('Já possuo uma conta'));
@@ -1513,10 +1518,11 @@ test('UI-02: Welcome, Login, Register and ForgotPassword navigate across all pub
 
   // 2. Login -> ForgotPassword, Login -> Register e Login -> Voltar
   const login = createHarness('screens/auth/LoginScreen.js', {
+    platform: 'android',
     props: { route: { params: { email: 'prefilled@example.com' } } },
   });
   assert.ok(hasText(login, 'ArenaGO'));
-  assert.equal(login.nodes.find((node) => node.type === 'SafeAreaView').props.style.backgroundColor, '#0B0B12');
+  assert.ok(login.nodes.find((node) => node.props?.testID === 'login-background'));
   const prefilledEmailInput = login.nodes.find(
     (node) => node.type === 'TextInput' && node.props.placeholder === loginInputs.email
   );
@@ -1532,9 +1538,9 @@ test('UI-02: Welcome, Login, Register and ForgotPassword navigate across all pub
   ]);
 
   // 3. Register -> Login e Register -> Voltar
-  const register = createHarness('screens/auth/RegisterScreen.js');
+  const register = createHarness('screens/auth/RegisterScreen.js', { platform: 'android' });
   assert.ok(hasText(register, 'ArenaGO'));
-  assert.equal(register.nodes.find((node) => node.type === 'SafeAreaView').props.style.backgroundColor, '#0B0B12');
+  assert.ok(register.nodes.find((node) => node.props?.testID === 'register-background'));
   register.act(() => register.press('Já possui uma conta? Acesse aqui'));
   register.act(() => register.press('Voltar'));
   assert.deepEqual(structuredClone(register.navigationCalls), [
@@ -1543,9 +1549,9 @@ test('UI-02: Welcome, Login, Register and ForgotPassword navigate across all pub
   ]);
 
   // 4. ForgotPassword -> retorno seguro para Login sem simular envio de e-mail
-  const forgot = createHarness('screens/auth/ForgotPasswordScreen.js');
+  const forgot = createHarness('screens/auth/ForgotPasswordScreen.js', { platform: 'android' });
   assert.ok(hasText(forgot, 'ArenaGO'));
-  assert.equal(forgot.nodes.find((node) => node.type === 'SafeAreaView').props.style.backgroundColor, '#0B0B12');
+  assert.ok(forgot.nodes.find((node) => node.props?.testID === 'forgot-password-background'));
   assert.ok(hasText(forgot, 'EM CONSTRUÇÃO'));
   assert.ok(hasText(forgot, 'Recuperação por e-mail indisponível nesta versão'));
   assert.equal(
@@ -1560,6 +1566,38 @@ test('UI-02: Welcome, Login, Register and ForgotPassword navigate across all pub
     { type: 'back' },
     { type: 'back' },
   ]);
+
+  // 5. AuthBackground: verifica variação de intensidade por tela e fallback sem imagem
+  const bgWelcome = createHarness('components/ui/AuthBackground.js', {
+    props: { variant: 'welcome', testID: 'bg-welcome' },
+  });
+  const bgLogin = createHarness('components/ui/AuthBackground.js', {
+    props: { variant: 'login', testID: 'bg-login' },
+  });
+  const bgRegister = createHarness('components/ui/AuthBackground.js', {
+    props: { variant: 'register', testID: 'bg-register' },
+  });
+  const bgFallback = createHarness('components/ui/AuthBackground.js', {
+    props: { variant: 'login', imageSource: null, testID: 'bg-fallback' },
+  });
+
+  const welcomeTopOverlay = bgWelcome.nodes.find((n) => n.props?.testID === 'bg-welcome-overlay-top');
+  const loginTopOverlay = bgLogin.nodes.find((n) => n.props?.testID === 'bg-login-overlay-top');
+  const registerTopOverlay = bgRegister.nodes.find((n) => n.props?.testID === 'bg-register-overlay-top');
+
+  assert.ok(
+    welcomeTopOverlay.props.style[1].opacity < loginTopOverlay.props.style[1].opacity,
+    'Welcome deve ter menor escurecimento superior que Login para evidenciar a arte'
+  );
+  assert.ok(
+    loginTopOverlay.props.style[1].opacity < registerTopOverlay.props.style[1].opacity,
+    'Register deve ter maior escurecimento que Login para priorizar a legibilidade dos campos'
+  );
+  assert.equal(
+    bgFallback.nodes.some((n) => n.type === 'Image'),
+    false,
+    'AuthBackground com imageSource=null deve funcionar normalmente usando o fallback dark'
+  );
 });
 
 test('UI-02: Login and Register support password visibility toggle and clear field/banner errors on input edit', async () => {

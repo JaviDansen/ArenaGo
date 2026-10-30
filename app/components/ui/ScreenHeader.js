@@ -164,6 +164,7 @@ const styles = StyleSheet.create({
     opacity: 0.85,
   },
   backButtonText: {
+    fontFamily: typography.fontFamily,
     color: colors.text.primary,
     fontSize: 18,
     fontWeight: typography.weights.bold,

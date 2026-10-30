@@ -9,9 +9,8 @@ import {
   Text,
   View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { Badge } from '../../components/ui/Badge';
+import { AuthBackground } from '../../components/ui/AuthBackground';
 import { Button, MIN_TOUCH_TARGET } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
 import { InputField } from '../../components/ui/InputField';
@@ -181,7 +180,7 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
   );
 
   return (
-    <SafeAreaView style={styles.container}>
+    <AuthBackground variant="register" testID="register-background">
       <StatusBar style="light" />
 
       <ScreenHeader
@@ -201,17 +200,16 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
-          {/* Cabeçalho textual */}
+          {/* Cabeçalho textual enxuto */}
           <View style={styles.heroHeader}>
-            <Badge label="NOVO REGISTRO" variant="brand" size="sm" style={styles.tagBadge} />
             <Text style={styles.title}>Comece sua jornada.</Text>
             <Text style={styles.subtitle}>
               Preencha suas informações básicas. Seu perfil de jogador será configurado na próxima etapa.
             </Text>
           </View>
 
-          {/* Formulário - Somente Nome, E-mail, Senha e Confirmar senha */}
-          <View style={styles.form}>
+          {/* Superfície de formulário com prioridade total à legibilidade */}
+          <View style={styles.formSurface}>
             {timeoutNotice ? (
               <Card
                 variant="default"
@@ -346,16 +344,9 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
               testID="register-submit-button"
             />
 
-            {/* Card informativo de fluxo posterior */}
-            <Card variant="elevated" padding={spacing.md} style={styles.infoCard}>
-              <Text style={styles.infoCardText}>
-                Etapas seguintes:{' '}
-                <Text style={styles.infoCardBold}>
-                  Cadastro → Questionário de Perfil → Próxima etapa
-                </Text>
-                . Ao criar sua conta, você será direcionado para o questionário.
-              </Text>
-            </Card>
+            <Text style={styles.stepFootnote}>
+              Ao criar sua conta, você seguirá para o questionário rápido de perfil de jogador.
+            </Text>
           </View>
 
           {/* Navegação cruzada para Login */}
@@ -376,22 +367,18 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
           </Pressable>
         </ScrollView>
       </KeyboardAvoidingView>
-    </SafeAreaView>
+    </AuthBackground>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.background.base,
-  },
   keyboardView: {
     flex: 1,
-    backgroundColor: colors.background.base,
+    backgroundColor: 'transparent',
   },
   scrollView: {
     flex: 1,
-    backgroundColor: colors.background.base,
+    backgroundColor: 'transparent',
   },
   scrollContent: {
     flexGrow: 1,
@@ -400,10 +387,7 @@ const styles = StyleSheet.create({
     paddingBottom: spacing.xxxl,
   },
   heroHeader: {
-    marginBottom: spacing.xl,
-  },
-  tagBadge: {
-    marginBottom: spacing.sm,
+    marginBottom: spacing.lg,
   },
   title: {
     ...typography.hero,
@@ -414,7 +398,12 @@ const styles = StyleSheet.create({
     ...typography.bodyLarge,
     color: colors.text.secondary,
   },
-  form: {
+  formSurface: {
+    backgroundColor: 'rgba(22, 22, 38, 0.90)',
+    borderWidth: 1,
+    borderColor: colors.border.subtle,
+    borderRadius: radii.xl,
+    padding: spacing.xl,
     gap: spacing.md,
   },
   fieldContainer: {
@@ -462,16 +451,11 @@ const styles = StyleSheet.create({
   submitButton: {
     marginTop: spacing.xs,
   },
-  infoCard: {
-    marginTop: spacing.xs,
-  },
-  infoCardText: {
-    ...typography.bodySmall,
-    color: colors.text.secondary,
-  },
-  infoCardBold: {
-    color: colors.text.primary,
-    fontWeight: typography.weights.bold,
+  stepFootnote: {
+    ...typography.caption,
+    color: colors.text.muted,
+    textAlign: 'center',
+    marginTop: spacing.xxs,
   },
   switchAuthContainer: {
     marginTop: spacing.xl,
@@ -486,7 +470,7 @@ const styles = StyleSheet.create({
   switchAuthText: {
     ...typography.body,
     color: colors.brand.primaryLight,
-    fontWeight: typography.weights.extraBold,
+    fontWeight: typography.weights.bold,
     textAlign: 'center',
   },
   disabledControl: {

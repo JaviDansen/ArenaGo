@@ -229,7 +229,7 @@ function createHarness(relativePath, options = {}) {
       }
     },
   };
-  const native = Object.fromEntries(['ActivityIndicator', 'KeyboardAvoidingView', 'Modal', 'Pressable', 'ScrollView',
+  const native = Object.fromEntries(['ActivityIndicator', 'Image', 'KeyboardAvoidingView', 'Modal', 'Pressable', 'ScrollView',
     'Text', 'TextInput', 'View', 'SafeAreaView'].map((name) => [name, name]));
   native.Platform = { OS: options.platform || 'ios' };
   native.Keyboard = { dismiss() {} };
@@ -287,6 +287,9 @@ function createHarness(relativePath, options = {}) {
     }
     if (name === '../utils/validation' || name === '../../utils/validation') return validation;
     if (name === '../data/mockData' || name === '../../data/mockData') return data;
+    if (name.startsWith('.') && /\.(jpg|jpeg|png|webp|gif|svg)$/i.test(name)) {
+      return { uri: name };
+    }
     if (name.startsWith('.')) {
       const fromDir = path.dirname(path.join(appDirectory, fromRelativePath));
       let resolvedAbs = path.resolve(fromDir, name);

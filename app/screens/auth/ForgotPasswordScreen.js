@@ -1,7 +1,7 @@
 import { StatusBar } from 'expo-status-bar';
 import { ScrollView, StyleSheet, Text, View } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { AuthBackground } from '../../components/ui/AuthBackground';
 import { Badge } from '../../components/ui/Badge';
 import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
@@ -9,11 +9,11 @@ import { ScreenHeader } from '../../components/ui/ScreenHeader';
 import { colors, spacing, typography } from '../../theme';
 
 // =============================================================================
-// ESTRUTURA PROVISÓRIA (TASK 2 / UI-02.4):
+// ESTRUTURA PROVISÓRIA (TASK 2 / UI-02.4 / UI-02A):
 // A recuperação de senha real depende de integração futura de backend e serviço
-// de mensageria. Esta tela aplica o Design System oficial (UI-01) mantendo
-// explícita a indisponibilidade atual do envio de e-mail, sem simular envio
-// ou exibir confirmação falsa.
+// de mensageria. Esta tela aplica o Design System oficial mantendo explícita
+// a indisponibilidade atual do envio de e-mail, sem simular envio ou exibir
+// confirmação falsa.
 // =============================================================================
 export default function ForgotPasswordScreen({ navigation }) {
   function handleReturnToLogin() {
@@ -25,7 +25,7 @@ export default function ForgotPasswordScreen({ navigation }) {
   }
 
   return (
-    <SafeAreaView style={styles.container}>
+    <AuthBackground variant="forgotPassword" testID="forgot-password-background">
       <StatusBar style="light" />
 
       <ScreenHeader
@@ -40,10 +40,9 @@ export default function ForgotPasswordScreen({ navigation }) {
         showsVerticalScrollIndicator={false}
       >
         <View style={styles.heroHeader}>
-          <Badge label="RECUPERAÇÃO" variant="brand" size="sm" style={styles.tagBadge} />
           <Text style={styles.title}>Recuperar acesso</Text>
           <Text style={styles.subtitle}>
-            Em breve você poderá redefinir sua senha por aqui. O fluxo completo será definido nas próximas etapas do projeto.
+            A redefinição automática de senha estará disponível em uma próxima etapa do projeto.
           </Text>
         </View>
 
@@ -63,11 +62,11 @@ export default function ForgotPasswordScreen({ navigation }) {
             Recuperação por e-mail indisponível nesta versão
           </Text>
           <Text style={styles.cardText}>
-            Esta página servirá para inserção do e-mail cadastrado e envio de instruções de recuperação de conta assim que o serviço de redefinição estiver integrado ao servidor.
+            O envio de instruções de recuperação será habilitado assim que o serviço de redefinição estiver integrado ao servidor.
           </Text>
           <View style={styles.cardDivider} />
           <Text style={styles.cardHint}>
-            Caso precise de suporte imediato durante o evento, procure a equipe de atendimento presencial na ArenaGO.
+            Caso precise de auxílio imediato durante o evento, procure a equipe de atendimento presencial na ArenaGO.
           </Text>
         </Card>
 
@@ -81,18 +80,14 @@ export default function ForgotPasswordScreen({ navigation }) {
           testID="forgot-password-return-button"
         />
       </ScrollView>
-    </SafeAreaView>
+    </AuthBackground>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.background.base,
-  },
   scrollView: {
     flex: 1,
-    backgroundColor: colors.background.base,
+    backgroundColor: 'transparent',
   },
   scrollContent: {
     flexGrow: 1,
@@ -103,24 +98,22 @@ const styles = StyleSheet.create({
   heroHeader: {
     marginBottom: spacing.xl,
   },
-  tagBadge: {
-    marginBottom: spacing.sm,
-  },
   title: {
     ...typography.hero,
     color: colors.text.primary,
-    marginBottom: spacing.sm,
+    marginBottom: spacing.xs,
   },
   subtitle: {
     ...typography.bodyLarge,
     color: colors.text.secondary,
   },
   statusCard: {
+    backgroundColor: 'rgba(22, 22, 38, 0.90)',
     marginBottom: spacing.xxl,
     gap: spacing.md,
   },
   statusBadge: {
-    marginBottom: spacing.xs,
+    marginBottom: spacing.xxs,
   },
   cardTitle: {
     ...typography.titleMedium,
@@ -133,7 +126,7 @@ const styles = StyleSheet.create({
   cardDivider: {
     height: 1,
     backgroundColor: colors.border.subtle,
-    marginVertical: spacing.xs,
+    marginVertical: spacing.xxs,
   },
   cardHint: {
     ...typography.bodySmall,

@@ -96,6 +96,7 @@ const styles = StyleSheet.create({
 
   // Tipografia
   textBase: {
+    fontFamily: typography.fontFamily,
     fontWeight: typography.weights.bold,
     letterSpacing: 0.5,
   },
