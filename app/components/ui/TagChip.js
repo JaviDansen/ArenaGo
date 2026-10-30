@@ -2,15 +2,17 @@
  * ArenaGo Design System — TagChip Component
  * Chip de seleção e remoção rápida (utilizado no catálogo de jogos e filtros).
  *
- * Geometria e Acessibilidade (C05 / C06 / C07):
+ * Geometria e Acessibilidade (C05 / C06 / C07 / C10):
  * - Seleção e remoção utilizam Pressables irmãos independentes (sem aninhamento).
- * - Cada Pressable possui dimensões mínimas próprias de 48x48dp (iOS 44pt / Android 48dp),
- *   sem sobreposição entre alvos de toque e sem depender exclusivamente de hitSlop.
+ * - Cada Pressable declara dimensões mínimas próprias de 48x48dp (MIN_TOUCH_TARGET = 48),
+ *   sem sobreposição de hitSlop e com `flexShrink: 0`.
+ * - Quando seleção e remoção estão presentes simultaneamente, o contêiner preserva
+ *   largura mínima combinada de 96dp (MIN_COMBINED_TOUCH_WIDTH = 96). Quando há apenas
+ *   uma ação interativa, preserva 48dp; quando estático, preserva 36dp.
+ * - Impede que `width`, `minWidth`, `maxWidth` (incluindo percentuais como `'100%'`)
+ *   ou `overflow` personalizados encolham ou recortem as regiões interativas.
  * - A aparência compacta do chip (pílula de 36dp de altura e círculo de remoção de 20x20dp)
- *   é preservada por elementos decorativos internos (pointerEvents="none") desacoplados
- *   da caixa interativa de 48x48dp.
- * - Nota: A geometria final em dispositivo depende de os contêineres ancestrais não
- *   recortarem (overflow) nem sobreporem o componente.
+ *   é preservada por elementos decorativos internos (pointerEvents="none").
  */
 
 import { Pressable, StyleSheet, Text, View } from 'react-native';
@@ -20,6 +22,7 @@ import spacing from '../../theme/spacing.js';
 import typography from '../../theme/typography.js';
 
 export const MIN_TOUCH_TARGET = 48;
+export const MIN_COMBINED_TOUCH_WIDTH = MIN_TOUCH_TARGET * 2; // 96dp para seleção + remoção
 export const CHIP_VISUAL_MIN_HEIGHT = 36;
 export const REMOVE_BADGE_SIZE = 20;
 
@@ -52,7 +55,18 @@ function flattenStyleInput(styleInput) {
   return {};
 }
 
-function partitionChipStyle(styleInput, isInteractive) {
+export function getRequiredMinWidth(hasSelectHandler, hasRemoveHandler) {
+  if (hasSelectHandler && hasRemoveHandler) {
+    return MIN_COMBINED_TOUCH_WIDTH;
+  }
+  if (hasSelectHandler || hasRemoveHandler) {
+    return MIN_TOUCH_TARGET;
+  }
+  return CHIP_VISUAL_MIN_HEIGHT;
+}
+
+function partitionChipStyle(styleInput, hasSelectHandler, hasRemoveHandler) {
+  const isInteractive = Boolean(hasSelectHandler || hasRemoveHandler);
   const flat = flattenStyleInput(styleInput);
   const layoutStyle = {};
   const surfaceStyle = {};
@@ -66,28 +80,33 @@ function partitionChipStyle(styleInput, isInteractive) {
   }
 
   if (isInteractive) {
+    const requiredMinW = getRequiredMinWidth(hasSelectHandler, hasRemoveHandler);
+    const requiredMinH = MIN_TOUCH_TARGET;
+
     const minW = typeof layoutStyle.minWidth === 'number'
-      ? Math.max(layoutStyle.minWidth, MIN_TOUCH_TARGET)
-      : MIN_TOUCH_TARGET;
+      ? Math.max(layoutStyle.minWidth, requiredMinW)
+      : requiredMinW;
     const minH = typeof layoutStyle.minHeight === 'number'
-      ? Math.max(layoutStyle.minHeight, MIN_TOUCH_TARGET)
-      : MIN_TOUCH_TARGET;
+      ? Math.max(layoutStyle.minHeight, requiredMinH)
+      : requiredMinH;
 
     layoutStyle.minWidth = minW;
     layoutStyle.minHeight = minH;
 
-    if (typeof layoutStyle.width === 'number' && layoutStyle.width < minW) {
-      layoutStyle.width = minW;
+    if (layoutStyle.width !== undefined && (typeof layoutStyle.width !== 'number' || layoutStyle.width < minW)) {
+      delete layoutStyle.width;
     }
-    if (typeof layoutStyle.height === 'number' && layoutStyle.height < minH) {
+    if (layoutStyle.maxWidth !== undefined && (typeof layoutStyle.maxWidth !== 'number' || layoutStyle.maxWidth < minW)) {
+      delete layoutStyle.maxWidth;
+    }
+    if (layoutStyle.height !== undefined && (typeof layoutStyle.height !== 'number' || layoutStyle.height < minH)) {
       delete layoutStyle.height;
     }
-    if (typeof layoutStyle.maxWidth === 'number' && layoutStyle.maxWidth < minW) {
-      layoutStyle.maxWidth = minW;
+    if (layoutStyle.maxHeight !== undefined && (typeof layoutStyle.maxHeight !== 'number' || layoutStyle.maxHeight < minH)) {
+      delete layoutStyle.maxHeight;
     }
-    if (typeof layoutStyle.maxHeight === 'number' && layoutStyle.maxHeight < minH) {
-      layoutStyle.maxHeight = minH;
-    }
+
+    layoutStyle.overflow = 'visible';
   }
 
   return { layoutStyle, surfaceStyle };
@@ -107,14 +126,28 @@ export function TagChip({
   const hasSelectHandler = typeof onPress === 'function';
   const hasRemoveHandler = typeof onRemove === 'function';
   const isInteractive = hasSelectHandler || hasRemoveHandler;
+  const isDualAction = hasSelectHandler && hasRemoveHandler;
 
-  const { layoutStyle, surfaceStyle } = partitionChipStyle(style, isInteractive);
+  const { layoutStyle, surfaceStyle } = partitionChipStyle(style, hasSelectHandler, hasRemoveHandler);
 
   const containerStyles = [
     styles.base,
-    isInteractive ? styles.baseInteractive : styles.baseStatic,
+    isDualAction
+      ? styles.baseDualInteractive
+      : isInteractive
+      ? styles.baseSingleInteractive
+      : styles.baseStatic,
     layoutStyle,
     isDisabled && styles.disabled,
+  ];
+
+  const innerRowStyles = [
+    styles.innerRow,
+    isDualAction
+      ? styles.baseDualInteractive
+      : isInteractive
+      ? styles.baseSingleInteractive
+      : styles.baseStatic,
   ];
 
   const pillSurfaceStyles = [
@@ -150,7 +183,7 @@ export function TagChip({
         testID={testID ? `${testID}-surface` : undefined}
       />
 
-      <View style={styles.innerRow}>
+      <View style={innerRowStyles} testID={testID ? `${testID}-row` : undefined}>
         {hasSelectHandler ? (
           <Pressable
             onPress={isDisabled ? undefined : handleSelectPress}
@@ -215,11 +248,16 @@ const styles = StyleSheet.create({
     position: 'relative',
     alignSelf: 'flex-start',
     justifyContent: 'center',
-    maxWidth: '100%',
+    overflow: 'visible',
+    flexShrink: 0,
     marginRight: spacing.sm,
     marginBottom: spacing.sm,
   },
-  baseInteractive: {
+  baseDualInteractive: {
+    minHeight: MIN_TOUCH_TARGET,
+    minWidth: MIN_COMBINED_TOUCH_WIDTH,
+  },
+  baseSingleInteractive: {
     minHeight: MIN_TOUCH_TARGET,
     minWidth: MIN_TOUCH_TARGET,
   },
@@ -247,14 +285,15 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
+    flexShrink: 0,
   },
   selectAction: {
     minHeight: MIN_TOUCH_TARGET,
     minWidth: MIN_TOUCH_TARGET,
+    flexShrink: 0,
     justifyContent: 'center',
     alignItems: 'center',
     paddingVertical: spacing.sm,
-    flexShrink: 1,
   },
   selectActionSolo: {
     paddingLeft: spacing.md,
@@ -269,7 +308,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     paddingVertical: spacing.xs,
-    flexShrink: 1,
   },
   unselected: {
     backgroundColor: colors.background.surface,
@@ -288,7 +326,6 @@ const styles = StyleSheet.create({
   text: {
     ...typography.body,
     fontWeight: typography.weights.medium,
-    flexShrink: 1,
   },
   textUnselected: {
     color: colors.text.secondary,
@@ -303,6 +340,7 @@ const styles = StyleSheet.create({
   removeAction: {
     minWidth: MIN_TOUCH_TARGET,
     minHeight: MIN_TOUCH_TARGET,
+    flexShrink: 0,
     paddingHorizontal: spacing.xs,
     alignItems: 'center',
     justifyContent: 'center',

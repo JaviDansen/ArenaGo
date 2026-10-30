@@ -1,13 +1,13 @@
 /**
- * Suíte de Testes Unitários — Fundação do Design System (UI-01: C05 a C09)
+ * Suíte de Testes Unitários — Fundação do Design System (UI-01: C05 a C11)
  *
- * Escopo e Limitações (C08):
- * - Estes testes verificam em ambiente Node a árvore de elementos React, os contratos de props,
- *   a proteção de estilos (minWidth/minHeight >= 48dp), a independência de handlers sem mutação
- *   de eventos e os atributos de acessibilidade declarados nos componentes.
- * - Estes testes unitários NÃO substituem o cálculo nativo de layout Yoga, o hit-testing nativo
- *   do iOS/Android nem a homologação com leitores de tela reais (VoiceOver / TalkBack) em
- *   dispositivo físico.
+ * Escopo e Limitações (C08 / C11):
+ * - Estes testes verificam em ambiente Node a estrutura da árvore de elementos React, os estilos
+ *   declarados (incluindo minWidth/minHeight >= 48dp nos Pressables e >= 96dp combinados no TagChip
+ *   com seleção e remoção), o bloqueio de overrides restritivos (width, minWidth, maxWidth, overflow),
+ *   a independência de handlers sem mutação de eventos e os atributos de acessibilidade.
+ * - Estes testes unitários avaliam estilos e estrutura declarados; NÃO medem layout nativo Yoga,
+ *   hit-testing nativo do iOS/Android nem comportamento de VoiceOver/TalkBack em dispositivo físico.
  */
 
 const assert = require('node:assert/strict');
@@ -72,7 +72,7 @@ test('theme exports official tokens matching Figma BEAST specifications', () => 
   assert.ok(indexModule.theme.radii);
 });
 
-test('C05: TagChip defines >= 48x48dp directly on each sibling Pressable without overlap while separating compact visual decoration', () => {
+test('C05 & C10: TagChip with selection and removal declares >= 96dp combined container minWidth and >= 48x48dp on each sibling Pressable without overlap', () => {
   const hChip = createHarness('components/ui/TagChip.js', {
     props: {
       label: 'Valorant',
@@ -83,91 +83,226 @@ test('C05: TagChip defines >= 48x48dp directly on each sibling Pressable without
     },
   });
 
-  // 1. Verify each interactive Pressable has its own >= 48x48dp style (not relying on hitSlop or outer View)
+  const outerView = hChip.nodes.find((n) => n.type === 'View');
+  const innerRow = hChip.nodes.find((n) => n.type === 'View' && n.props.testID === 'chip-valorant-row');
   const selectPressable = hChip.nodes.find(
     (n) => n.type === 'Pressable' && n.props.accessibilityRole === 'checkbox'
   );
   const removePressable = hChip.nodes.find(
     (n) => n.type === 'Pressable' && n.props.accessibilityLabel === 'Remover Valorant'
   );
+
+  assert.ok(outerView, 'Outer container View exists');
+  assert.ok(innerRow, 'Inner row View exists');
   assert.ok(selectPressable, 'Selection Pressable exists');
   assert.ok(removePressable, 'Removal Pressable exists');
 
+  const outerStyle = flattenStyle(outerView.props.style);
+  const innerRowStyle = flattenStyle(innerRow.props.style);
   const selectStyle = flattenStyle(selectPressable.props.style({ pressed: false }));
   const removeStyle = flattenStyle(removePressable.props.style({ pressed: false }));
 
-  assert.ok(selectStyle.minWidth >= 48, 'Selection Pressable itself has minWidth >= 48dp');
-  assert.ok(selectStyle.minHeight >= 48, 'Selection Pressable itself has minHeight >= 48dp');
-  assert.equal(selectPressable.props.hitSlop, undefined, 'Selection Pressable does not rely on overlapping hitSlop');
+  // 1. Each Pressable declares >= 48x48dp with flexShrink: 0 and no overlapping hitSlop
+  assert.equal(selectStyle.minWidth, 48, 'Selection Pressable declares minWidth 48dp');
+  assert.equal(selectStyle.minHeight, 48, 'Selection Pressable declares minHeight 48dp');
+  assert.equal(selectStyle.flexShrink, 0, 'Selection Pressable prevents shrinking below 48dp');
+  assert.equal(selectPressable.props.hitSlop, undefined, 'Selection Pressable does not use overlapping hitSlop');
 
-  assert.ok(removeStyle.minWidth >= 48, 'Removal Pressable itself has minWidth >= 48dp');
-  assert.ok(removeStyle.minHeight >= 48, 'Removal Pressable itself has minHeight >= 48dp');
-  assert.equal(removePressable.props.hitSlop, undefined, 'Removal Pressable does not rely on overlapping hitSlop');
+  assert.equal(removeStyle.minWidth, 48, 'Removal Pressable declares minWidth 48dp');
+  assert.equal(removeStyle.minHeight, 48, 'Removal Pressable declares minHeight 48dp');
+  assert.equal(removeStyle.flexShrink, 0, 'Removal Pressable prevents shrinking below 48dp');
+  assert.equal(removePressable.props.hitSlop, undefined, 'Removal Pressable does not use overlapping hitSlop');
 
-  // 2. Verify no negative margins or overlapping styles between sibling Pressables
-  assert.ok(!(selectStyle.marginRight < 0), 'No negative right margin on select Pressable');
-  assert.ok(!(removeStyle.marginLeft < 0), 'No negative left margin on remove Pressable');
+  // 2. Combined container and row minWidth >= sum of both Pressables (96dp), with no maxWidth: '100%' restriction
+  const combinedPressableMinWidth = selectStyle.minWidth + removeStyle.minWidth;
+  assert.equal(combinedPressableMinWidth, 96);
+  assert.ok(
+    outerStyle.minWidth >= combinedPressableMinWidth,
+    `Outer container minWidth (${outerStyle.minWidth}) must accommodate both 48dp Pressables (>= 96dp)`
+  );
+  assert.ok(
+    innerRowStyle.minWidth >= combinedPressableMinWidth,
+    `Inner row minWidth (${innerRowStyle.minWidth}) must accommodate both 48dp Pressables (>= 96dp)`
+  );
+  assert.equal(outerStyle.minHeight, 48);
+  assert.equal(outerStyle.maxWidth, undefined, 'Does not impose maxWidth: 100% that could compress dual actions in narrow parents');
+  assert.equal(outerStyle.overflow, 'visible');
+  assert.equal(outerStyle.flexShrink, 0);
 
-  // 3. Verify compact visual decoration (36dp pill surface and 20x20dp remove badge) is decoupled with pointerEvents="none"
+  // 3. Compact visual decoration remains separated via pointerEvents="none"
   const pillSurface = hChip.nodes.find(
     (n) => n.type === 'View' && n.props.testID === 'chip-valorant-surface'
   );
   const removeBadge = hChip.nodes.find(
     (n) => n.type === 'View' && n.props.testID === 'chip-valorant-remove-badge'
   );
-  assert.ok(pillSurface, 'Decorative pill surface View exists');
   assert.equal(pillSurface.props.pointerEvents, 'none');
   const pillSurfaceStyle = flattenStyle(pillSurface.props.style);
   assert.equal(pillSurfaceStyle.minHeight, 36, 'Visual pill preserves compact 36dp minimum height');
   assert.equal(pillSurfaceStyle.top, 6);
   assert.equal(pillSurfaceStyle.bottom, 6);
 
-  assert.ok(removeBadge, 'Decorative remove badge View exists');
   assert.equal(removeBadge.props.pointerEvents, 'none');
   const removeBadgeStyle = flattenStyle(removeBadge.props.style);
   assert.equal(removeBadgeStyle.width, 20, 'Visual remove circle preserves 20dp width');
   assert.equal(removeBadgeStyle.height, 20, 'Visual remove circle preserves 20dp height');
 });
 
-test('C05: Button, clickable Card and ScreenHeader back control define >= 48x48dp directly on their Pressables', () => {
-  for (const size of ['sm', 'md', 'lg']) {
-    const hBtn = createHarness('components/ui/Button.js', {
-      props: { title: `Botão ${size}`, size, fullWidth: false, onPress: () => {} },
-    });
-    const btnPressable = hBtn.nodes.find((n) => n.type === 'Pressable');
-    const btnStyle = flattenStyle(btnPressable.props.style({ pressed: false }));
-
-    assert.ok(btnStyle.minWidth >= 48, `Button (${size}) Pressable has minWidth >= 48dp`);
-    assert.ok(btnStyle.minHeight >= 48, `Button (${size}) Pressable has minHeight >= 48dp`);
-    assert.equal(btnStyle.height, undefined, `Button (${size}) avoids fixed height to prevent clipping scaled text`);
-  }
-
-  const hCard = createHarness('components/ui/Card.js', {
-    props: { onPress: () => {}, accessibilityLabel: 'Card interativo' },
+test('C10 & C11: TagChip declared geometry adapts across select-only (48dp), remove-only (48dp) and static (36dp) modes without imposing dual-action width', () => {
+  // 1. Select-only TagChip (onPress only)
+  const hSelectOnly = createHarness('components/ui/TagChip.js', {
+    props: {
+      label: 'Solo Select',
+      selected: false,
+      onPress: () => {},
+      testID: 'chip-select-only',
+    },
   });
-  const cardPressable = hCard.nodes.find((n) => n.type === 'Pressable');
-  const cardStyle = flattenStyle(cardPressable.props.style({ pressed: false }));
-  assert.ok(cardStyle.minWidth >= 48, 'Clickable Card Pressable has minWidth >= 48dp');
-  assert.ok(cardStyle.minHeight >= 48, 'Clickable Card Pressable has minHeight >= 48dp');
-
-  const hHeader = createHarness('components/ui/ScreenHeader.js', {
-    props: { title: 'Perfil', onBack: () => {}, testID: 'hdr' },
-  });
-  const backPressable = hHeader.nodes.find(
-    (n) => n.type === 'Pressable' && n.props.accessibilityLabel === 'Voltar'
+  const selectOnlyOuter = flattenStyle(hSelectOnly.nodes.find((n) => n.type === 'View').props.style);
+  const selectOnlyRow = flattenStyle(
+    hSelectOnly.nodes.find((n) => n.type === 'View' && n.props.testID === 'chip-select-only-row').props.style
   );
-  const backStyle = flattenStyle(backPressable.props.style({ pressed: false }));
-  assert.ok(backStyle.minWidth >= 48, 'ScreenHeader back Pressable has minWidth >= 48dp');
-  assert.ok(backStyle.minHeight >= 48, 'ScreenHeader back Pressable has minHeight >= 48dp');
+  const selectOnlyPressables = hSelectOnly.nodes.filter((n) => n.type === 'Pressable');
+  assert.equal(selectOnlyPressables.length, 1, 'Select-only renders exactly 1 Pressable');
+  assert.equal(selectOnlyPressables[0].props.accessibilityRole, 'checkbox');
+  const selectOnlyBtnStyle = flattenStyle(selectOnlyPressables[0].props.style({ pressed: false }));
+  assert.equal(selectOnlyBtnStyle.minWidth, 48);
+  assert.equal(selectOnlyBtnStyle.minHeight, 48);
+  assert.equal(selectOnlyOuter.minWidth, 48, 'Select-only container declares 48dp minWidth without imposing 96dp');
+  assert.equal(selectOnlyRow.minWidth, 48, 'Select-only innerRow declares 48dp minWidth without imposing 96dp');
+  assert.equal(selectOnlyOuter.minHeight, 48);
 
-  const backCircle = hHeader.nodes.find((n) => n.type === 'View' && n.props.testID === 'hdr-back-circle');
-  const backCircleStyle = flattenStyle(backCircle.props.style);
-  assert.equal(backCircle.props.pointerEvents, 'none');
-  assert.equal(backCircleStyle.width, 40, 'ScreenHeader visual circle preserves 40dp width');
-  assert.equal(backCircleStyle.height, 40, 'ScreenHeader visual circle preserves 40dp height');
+  // 2. Remove-only TagChip (onRemove only)
+  const hRemoveOnly = createHarness('components/ui/TagChip.js', {
+    props: {
+      label: 'Solo Remove',
+      onRemove: () => {},
+      testID: 'chip-remove-only',
+    },
+  });
+  const removeOnlyOuter = flattenStyle(hRemoveOnly.nodes.find((n) => n.type === 'View').props.style);
+  const removeOnlyRow = flattenStyle(
+    hRemoveOnly.nodes.find((n) => n.type === 'View' && n.props.testID === 'chip-remove-only-row').props.style
+  );
+  const removeOnlyPressables = hRemoveOnly.nodes.filter((n) => n.type === 'Pressable');
+  assert.equal(removeOnlyPressables.length, 1, 'Remove-only renders exactly 1 Pressable');
+  assert.equal(removeOnlyPressables[0].props.accessibilityRole, 'button');
+  assert.equal(removeOnlyPressables[0].props.accessibilityLabel, 'Remover Solo Remove');
+  const removeOnlyBtnStyle = flattenStyle(removeOnlyPressables[0].props.style({ pressed: false }));
+  assert.equal(removeOnlyBtnStyle.minWidth, 48);
+  assert.equal(removeOnlyBtnStyle.minHeight, 48);
+  assert.equal(removeOnlyBtnStyle.flexShrink, 0);
+  assert.equal(removeOnlyOuter.minWidth, 48, 'Remove-only container declares 48dp minWidth without imposing 96dp');
+  assert.equal(removeOnlyRow.minWidth, 48, 'Remove-only innerRow declares 48dp minWidth without imposing 96dp');
+  assert.equal(removeOnlyOuter.minHeight, 48);
+
+  // 3. Static TagChip (neither onPress nor onRemove)
+  const hStatic = createHarness('components/ui/TagChip.js', {
+    props: {
+      label: 'Estático',
+      selected: false,
+      testID: 'chip-static',
+    },
+  });
+  const staticOuter = flattenStyle(hStatic.nodes.find((n) => n.type === 'View').props.style);
+  const staticSurface = flattenStyle(
+    hStatic.nodes.find((n) => n.type === 'View' && n.props.testID === 'chip-static-surface').props.style
+  );
+  const staticPressables = hStatic.nodes.filter((n) => n.type === 'Pressable');
+  assert.equal(staticPressables.length, 0, 'Static TagChip renders 0 Pressables');
+  assert.equal(staticOuter.minWidth, 36, 'Static TagChip declares compact 36dp minWidth');
+  assert.equal(staticOuter.minHeight, 36, 'Static TagChip declares compact 36dp minHeight');
+  assert.equal(staticSurface.top, 0);
+  assert.equal(staticSurface.bottom, 0);
 });
 
-test('C06: TagChip has no nested Pressables, never mutates events, and supports remove->select, select->remove and repeated interactions', () => {
+test('C10 & C11: TagChip blocks adversarial style overrides (width:20, minWidth:12, maxWidth:24, maxWidth:100%, overflow:hidden) from clipping single or dual actions', () => {
+  const adversarialStyle = {
+    width: 20,
+    height: 18,
+    minWidth: 12,
+    minHeight: 14,
+    maxWidth: 24,
+    maxHeight: 24,
+    overflow: 'hidden',
+    backgroundColor: '#123456',
+    borderColor: '#ABCDEF',
+    marginTop: 14,
+  };
+
+  // 1. Dual-action TagChip under adversarial style must preserve >= 96dp minWidth and eliminate clipping constraints
+  const hDual = createHarness('components/ui/TagChip.js', {
+    props: {
+      label: 'Apex Legends',
+      selected: true,
+      style: adversarialStyle,
+      onPress: () => {},
+      onRemove: () => {},
+      testID: 'chip-dual-adv',
+    },
+  });
+  const dualContainerStyle = flattenStyle(hDual.nodes.find((n) => n.type === 'View').props.style);
+  const dualSurfaceStyle = flattenStyle(
+    hDual.nodes.find((n) => n.type === 'View' && n.props.testID === 'chip-dual-adv-surface').props.style
+  );
+  assert.equal(dualContainerStyle.minWidth, 96, 'Dual-action TagChip enforces minWidth 96dp against minWidth: 12');
+  assert.equal(dualContainerStyle.minHeight, 48, 'Dual-action TagChip enforces minHeight 48dp against minHeight: 14');
+  assert.equal(dualContainerStyle.width, undefined, 'Removes clipping width: 20 on dual-action TagChip');
+  assert.equal(dualContainerStyle.maxWidth, undefined, 'Removes clipping maxWidth: 24 on dual-action TagChip');
+  assert.equal(dualContainerStyle.height, undefined, 'Removes clipping height: 18 on dual-action TagChip');
+  assert.equal(dualContainerStyle.maxHeight, undefined, 'Removes clipping maxHeight: 24 on dual-action TagChip');
+  assert.equal(dualContainerStyle.overflow, 'visible', 'Overrides overflow: hidden with visible');
+  assert.equal(dualContainerStyle.marginTop, 14, 'Preserves legitimate layout margin');
+  assert.equal(dualSurfaceStyle.backgroundColor, '#123456', 'Preserves legitimate custom backgroundColor on pill surface');
+  assert.equal(dualSurfaceStyle.borderColor, '#ABCDEF', 'Preserves legitimate custom borderColor on pill surface');
+
+  // Also test width: 60, maxWidth: 60 (between 48 and 96) and percentage maxWidth: '100%' on dual-action TagChip
+  const hDualMid = createHarness('components/ui/TagChip.js', {
+    props: {
+      label: 'CS2',
+      style: { width: 60, minWidth: 60, maxWidth: '100%', overflow: 'scroll' },
+      onPress: () => {},
+      onRemove: () => {},
+    },
+  });
+  const dualMidStyle = flattenStyle(hDualMid.nodes.find((n) => n.type === 'View').props.style);
+  assert.equal(dualMidStyle.minWidth, 96, 'Enforces 96dp even when custom minWidth is 60dp');
+  assert.equal(dualMidStyle.width, undefined, 'Removes width: 60 because it is smaller than 96dp');
+  assert.equal(dualMidStyle.maxWidth, undefined, 'Removes percentage maxWidth: 100%');
+  assert.equal(dualMidStyle.overflow, 'visible', 'Overrides overflow: scroll with visible');
+
+  // 2. Select-only TagChip under adversarial style preserves >= 48dp minWidth
+  const hSelectAdv = createHarness('components/ui/TagChip.js', {
+    props: {
+      label: 'Valorant',
+      style: adversarialStyle,
+      onPress: () => {},
+    },
+  });
+  const selectAdvStyle = flattenStyle(hSelectAdv.nodes.find((n) => n.type === 'View').props.style);
+  assert.equal(selectAdvStyle.minWidth, 48, 'Select-only TagChip enforces minWidth 48dp');
+  assert.equal(selectAdvStyle.minHeight, 48);
+  assert.equal(selectAdvStyle.width, undefined);
+  assert.equal(selectAdvStyle.maxWidth, undefined);
+  assert.equal(selectAdvStyle.overflow, 'visible');
+
+  // 3. Remove-only TagChip under adversarial style preserves >= 48dp minWidth
+  const hRemoveAdv = createHarness('components/ui/TagChip.js', {
+    props: {
+      label: 'Minecraft',
+      style: adversarialStyle,
+      onRemove: () => {},
+    },
+  });
+  const removeAdvStyle = flattenStyle(hRemoveAdv.nodes.find((n) => n.type === 'View').props.style);
+  assert.equal(removeAdvStyle.minWidth, 48, 'Remove-only TagChip enforces minWidth 48dp');
+  assert.equal(removeAdvStyle.minHeight, 48);
+  assert.equal(removeAdvStyle.width, undefined);
+  assert.equal(removeAdvStyle.maxWidth, undefined);
+  assert.equal(removeAdvStyle.overflow, 'visible');
+});
+
+test('C06 & C11: TagChip has no nested Pressables, never mutates events, and preserves independent actions and disabled state across modes', () => {
   const actions = [];
 
   const h = createHarness('components/ui/TagChip.js', {
@@ -212,19 +347,10 @@ test('C06: TagChip has no nested Pressables, never mutates events, and supports 
     'Removal followed by selection executes both callbacks cleanly'
   );
 
-  // 4. Selection followed by removal
+  // 4. Selection followed by removal and repeated interactions
   h.act(() => {
     selectNode.props.onPress(frozenEvent);
     removeNode.props.onPress(frozenEvent);
-  });
-  assert.deepEqual(
-    actions,
-    ['remove:Fortnite', 'select:Fortnite', 'select:Fortnite', 'remove:Fortnite'],
-    'Selection followed by removal executes both callbacks cleanly'
-  );
-
-  // 5. Repeated alternating and consecutive interactions via harness press helper
-  h.act(() => {
     h.press('Remover Fortnite');
     h.press('Fortnite');
     h.press('Fortnite');
@@ -243,7 +369,7 @@ test('C06: TagChip has no nested Pressables, never mutates events, and supports 
     'select:Fortnite',
   ]);
 
-  // 6. Disabled state blocks both controls
+  // 5. Disabled state blocks both controls in dual-action mode
   let disabledCalls = 0;
   h.setProps({
     disabled: true,
@@ -262,7 +388,45 @@ test('C06: TagChip has no nested Pressables, never mutates events, and supports 
   assert.equal(disabledCalls, 0);
 });
 
-test('C07: Button, Card, TagChip and ScreenHeader protect minimum 48x48dp dimensions against accidental style overrides while preserving appearance customizations', () => {
+test('C05: Button, clickable Card and ScreenHeader back control declare >= 48x48dp style dimensions on their Pressables', () => {
+  for (const size of ['sm', 'md', 'lg']) {
+    const hBtn = createHarness('components/ui/Button.js', {
+      props: { title: `Botão ${size}`, size, fullWidth: false, onPress: () => {} },
+    });
+    const btnPressable = hBtn.nodes.find((n) => n.type === 'Pressable');
+    const btnStyle = flattenStyle(btnPressable.props.style({ pressed: false }));
+
+    assert.ok(btnStyle.minWidth >= 48, `Button (${size}) Pressable declares minWidth >= 48dp`);
+    assert.ok(btnStyle.minHeight >= 48, `Button (${size}) Pressable declares minHeight >= 48dp`);
+    assert.equal(btnStyle.height, undefined, `Button (${size}) avoids fixed height to prevent clipping scaled text`);
+  }
+
+  const hCard = createHarness('components/ui/Card.js', {
+    props: { onPress: () => {}, accessibilityLabel: 'Card interativo' },
+  });
+  const cardPressable = hCard.nodes.find((n) => n.type === 'Pressable');
+  const cardStyle = flattenStyle(cardPressable.props.style({ pressed: false }));
+  assert.ok(cardStyle.minWidth >= 48, 'Clickable Card Pressable declares minWidth >= 48dp');
+  assert.ok(cardStyle.minHeight >= 48, 'Clickable Card Pressable declares minHeight >= 48dp');
+
+  const hHeader = createHarness('components/ui/ScreenHeader.js', {
+    props: { title: 'Perfil', onBack: () => {}, testID: 'hdr' },
+  });
+  const backPressable = hHeader.nodes.find(
+    (n) => n.type === 'Pressable' && n.props.accessibilityLabel === 'Voltar'
+  );
+  const backStyle = flattenStyle(backPressable.props.style({ pressed: false }));
+  assert.ok(backStyle.minWidth >= 48, 'ScreenHeader back Pressable declares minWidth >= 48dp');
+  assert.ok(backStyle.minHeight >= 48, 'ScreenHeader back Pressable declares minHeight >= 48dp');
+
+  const backCircle = hHeader.nodes.find((n) => n.type === 'View' && n.props.testID === 'hdr-back-circle');
+  const backCircleStyle = flattenStyle(backCircle.props.style);
+  assert.equal(backCircle.props.pointerEvents, 'none');
+  assert.equal(backCircleStyle.width, 40, 'ScreenHeader visual circle preserves 40dp width');
+  assert.equal(backCircleStyle.height, 40, 'ScreenHeader visual circle preserves 40dp height');
+});
+
+test('C07: Button and clickable Card protect minimum 48x48dp style dimensions against accidental overrides while preserving appearance customizations', () => {
   const shrinkingOverride = {
     width: 20,
     height: 18,
@@ -329,30 +493,9 @@ test('C07: Button, Card, TagChip and ScreenHeader protect minimum 48x48dp dimens
   assert.equal(cardStyle.backgroundColor, '#123456', 'Clickable Card preserves custom backgroundColor');
   assert.equal(cardStyle.borderColor, '#ABCDEF', 'Clickable Card preserves custom borderColor');
   assert.equal(cardStyle.marginTop, 14, 'Clickable Card preserves custom marginTop');
-
-  // 3. TagChip with shrinking style override
-  const hChip = createHarness('components/ui/TagChip.js', {
-    props: {
-      label: 'Apex',
-      selected: false,
-      style: shrinkingOverride,
-      onPress: () => {},
-      onRemove: () => {},
-      testID: 'chip-apex',
-    },
-  });
-  const chipContainer = hChip.nodes.find((n) => n.type === 'View');
-  const chipContainerStyle = flattenStyle(chipContainer.props.style);
-  const chipSurface = hChip.nodes.find((n) => n.type === 'View' && n.props.testID === 'chip-apex-surface');
-  const chipSurfaceStyle = flattenStyle(chipSurface.props.style);
-  assert.ok(chipContainerStyle.minWidth >= 48, 'TagChip container protects minWidth >= 48');
-  assert.ok(chipContainerStyle.minHeight >= 48, 'TagChip container protects minHeight >= 48');
-  assert.equal(chipContainerStyle.marginTop, 14, 'TagChip preserves layout margin customization');
-  assert.equal(chipSurfaceStyle.backgroundColor, '#123456', 'TagChip applies custom backgroundColor to pill surface');
-  assert.equal(chipSurfaceStyle.borderColor, '#ABCDEF', 'TagChip applies custom borderColor to pill surface');
 });
 
-test('C07: Button preserves dimensional stability during loading and blocks interaction in loading/disabled', () => {
+test('C07: Button preserves style dimensions during loading and blocks interaction in loading/disabled', () => {
   let pressCount = 0;
   const h = createHarness('components/ui/Button.js', {
     props: {
@@ -375,7 +518,7 @@ test('C07: Button preserves dimensional stability during loading and blocks inte
   h.act(() => h.press('Confirmar Entrada'));
   assert.equal(pressCount, 1);
 
-  // Switch to loading=true and verify dimensional stability
+  // Switch to loading=true and verify style stability
   h.setProps({ loading: true });
   const loadingPressable = h.nodes.find((n) => n.type === 'Pressable');
   const loadingButtonStyle = flattenStyle(loadingPressable.props.style({ pressed: false }));
@@ -499,7 +642,7 @@ test('C07 & C08: Button accessible label extraction, explicit accessibilityLabel
   }
 });
 
-test('C08: InputField, Card, Badge, StepperIndicator and ScreenHeader states and accessibility', () => {
+test('C08: InputField, Card, Badge, StepperIndicator and ScreenHeader states and accessibility props', () => {
   let updatedText = '';
   let focusCalled = false;
   let blurCalled = false;
