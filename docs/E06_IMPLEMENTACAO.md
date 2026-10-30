@@ -317,3 +317,26 @@ Não atribuir uma nova aprovação PostgreSQL à versão corrigida antes dessa e
 Os limites de snapshot, atualização após a observação e revalidação pela E07 seguem
 os já documentados. O diff atualizado contém a entrega E06 completa contra `24ecf02`,
 incluindo os arquivos novos e este histórico; não inclui o próprio artefato.
+
+## Encerramento documental — validação final informada pelo responsável
+
+Após as correções U3, I2 e I5, o responsável informou que executou o preflight
+e as integrações da versão corrigida no PostgreSQL autorizado, com os resultados:
+
+| Verificação executada pelo responsável | Resultado informado |
+| --- | --- |
+| Preflight | Aprovado para `127.0.0.1:55432/arenago_events_test`. |
+| Testes específicos da E06 | 9/9 aprovados, zero falhas e zero skips. |
+| Regressão completa de integração | 108/108 aprovados, zero falhas e zero skips. |
+
+Esse registro conclui a pendência de execução PostgreSQL da versão corrigida
+indicada nas seções anteriores, conforme os resultados informados pelo responsável.
+O histórico da sessão original sem PostgreSQL, das validações anteriores e das
+execuções próprias do Codex foi preservado.
+
+O Codex não executou testes nem acessou bancos neste encerramento documental;
+os resultados acima são atribuídos exclusivamente à execução relatada pelo
+responsável. Nesta rodada foram atualizados somente este documento e
+`qa-evidence/e06-changes.diff`, sem alterações em código ou testes e sem commit
+ou push. Permanecem os limites observacionais e as dependências futuras já
+documentados para E07 e E14.

@@ -883,10 +883,10 @@ index 0000000..920b48a
 +});
 diff --git a/docs/E05_IMPLEMENTACAO.md b/docs/E05_IMPLEMENTACAO.md
 new file mode 100644
-index 0000000..31930c9
+index 0000000..3d40f2d
 --- /dev/null
 +++ b/docs/E05_IMPLEMENTACAO.md
-@@ -0,0 +1,230 @@
+@@ -0,0 +1,284 @@
 +# ArenaGo — entrega E05
 +
 +Data: 28/10/2026. Branch: `feature/events-participations`. Base inspecionada: `cdb5247`.
@@ -1117,3 +1117,57 @@ index 0000000..31930c9
 +
 +Encerramentos E07/E08/E09/E11, alterações em Auth/perfil e integração do aplicativo
 +permanecem fora desta entrega. Não houve commit, push, PR ou merge.
++
++## Encerramento documental da E05 — validações posteriores
++
++### Validação PostgreSQL após a auditoria e as correções
++
++Posteriormente à implementação original e à revisão pós-auditoria registradas
++acima, o responsável executou e informou a aprovação dos **11 testes de integração
++da E05** no PostgreSQL local autorizado
++`127.0.0.1:55432/arenago_events_test`, com **zero falhas e zero testes ignorados
++(skips)**. Essa validação inclui os testes corrigidos e o teste adicional de cleanup.
++
++### Encerramento definitivo da entrega E05
++
++Com essa validação posterior informada pelo responsável, fica concluída a pendência
++PostgreSQL da entrega E05 após as correções de auditoria. A implementação já havia
++sido versionada na branch `feature/events-participations` antes deste encerramento
++documental. Os registros originais de integração pendente permanecem como histórico
++das respectivas sessões; não representam uma pendência atual da entrega validada.
++As dependências futuras de autenticação, auditoria administrativa e demais etapas
++continuam sendo as descritas neste relatório.
++
++### Regressão posterior à implementação da E06
++
++Após a implementação da E06, o responsável executou e informou a aprovação da
++regressão completa mais recente no mesmo PostgreSQL autorizado:
++
++| Validação posterior executada pelo responsável | Resultado informado |
++| --- | --- |
++| Regressão completa de integração após a E06 | 108/108 aprovados, zero falhas e zero testes ignorados (skips). |
++| Testes E05 incluídos nessa regressão | 11 testes aprovados. |
++| Testes E06 incluídos nessa regressão | Nove testes aprovados. |
++
++Os 108 testes correspondem à regressão completa do backend, não exclusivamente
++à E05. Conforme a regressão relatada, a E05 permaneceu compatível com as
++funcionalidades anteriores e com a E06 nos cenários exercitados.
++
++A execução de **84 testes unitários** registrada nas sessões anteriores corresponde
++à entrega E05. A suíte atual contém **90 testes unitários** após a inclusão dos
++seis unitários da E06; essa ampliação não altera a contagem histórica da E05.
++
++### Atribuição dos resultados e rastreabilidade
++
++Os resultados PostgreSQL desta seção foram **executados e informados pelo
++responsável**, não pelo Codex nesta rodada. As execuções próprias do Codex nas
++sessões anteriores continuam identificadas nas respectivas tabelas. Neste
++encerramento exclusivamente documental, o Codex não executou testes nem abriu
++conexões com bancos.
++
++Foram atualizados somente `docs/E05_IMPLEMENTACAO.md` e o trecho documental de
++`qa-evidence/e05-changes.diff`. O artefato mantém sua finalidade de evidência E05
++em relação à base original `cdb5247`: seus trechos de código e testes foram
++preservados integralmente, sem incorporar código ou testes da E06. Nenhum arquivo
++da E06 foi alterado. Não houve alteração de código, testes, contratos ou regras de
++negócio, nem execução de migrations, commit, push, PR ou merge nesta rodada.
