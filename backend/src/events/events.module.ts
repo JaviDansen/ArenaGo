@@ -3,11 +3,13 @@ import { DatabaseModule } from "../database/database.module";
 import { EventsService } from "./events.service";
 import { ExperiencesService } from "./experiences.service";
 import { QueueEntryService } from "./queue-entry.service";
+import { QueueStateService } from "./queue-state.service";
+import { QueueWithdrawalService } from "./queue-withdrawal.service";
 
 /** Agrupa os serviços de Events e reutiliza o acesso PostgreSQL compartilhado. */
 @Module({
   imports: [DatabaseModule],
-  providers: [EventsService, ExperiencesService, QueueEntryService],
-  exports: [EventsService, ExperiencesService, QueueEntryService],
+  providers: [EventsService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService],
+  exports: [EventsService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService],
 })
 export class EventsModule {}

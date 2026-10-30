@@ -1,11 +1,15 @@
 # ArenaGo — Planejamento geral do produto
 
 **Versão:** v0.7.10 — desistência voluntária da fila interna, C-15 (30/10/2026)
-**Status funcional:** decisões D01–D11 e C-01–C-14 preservadas; C-15 aprovada pelo responsável, com implementação reservada à E07.3.
+**Status funcional:** decisões D01–D11 e C-01–C-14 preservadas; C-15 implementada como serviço interno E07.3. E07.1, E07.2 e E07.3 aprovadas individualmente; integração APROVADA COM RESSALVAS na auditoria consolidada. Validação PostgreSQL concluída pelo responsável; nenhum defeito funcional bloqueante confirmado. Ver fechamento posterior de 30/10/2026 na seção 12.
 **Estado da implementação (verificado no repositório):** frontend Expo ainda baseado em simulações nos fluxos de backend; fundação `backend/` NestJS/Drizzle e consulta interna de eventos por UUID/código implementadas; endpoints HTTP de produto não implementados; Neon não criada.
 **Documento técnico complementar:** `ARQUITETURA_BACKEND_ARENAGO.md` (v0.6.17).
 
 > **Fonte e limite:** este texto preserva decisões anteriores e o registro da E01.2B e acrescenta a C-15 aprovada após a entrega inicial da E07.1. O complemento de 30/10/2026 é exclusivamente documental: E07.1 implementa ingresso; E07.3 implementará a saída isolada da fila interna. Não cria endpoint HTTP nem implica validação PostgreSQL ou de produção. O retrato de implementação da seção 2 mantém sua data histórica.
+
+**Atualização posterior de implementação (E07.3, 30/10/2026):** o complemento acima e o registro v0.7.10 descrevem a rodada documental original. O serviço interno agora implementado, seus testes locais e as pendências estão em `E07_3_IMPLEMENTACAO.md`; isso não substitui os resultados históricos nem comprova execução PostgreSQL.
+
+**Fechamento posterior (30/10/2026):** as pendências da rodada de implementação acima foram revalidadas posteriormente. O responsável executou 20/20 E07.2, 27/27 E07.3 e 176/176 da regressão PostgreSQL, sem falhas, cancelamentos ou skips. Na auditoria consolidada, o Codex reexecutou 145/145 unitários e typecheck/lint/build com exit 0. Autoria, histórico e dependências futuras constam da seção 12 e dos relatórios E07.2/E07.3; este fechamento não executa testes nem nova auditoria.
 
 ## 1. Objetivo e escopo
 
@@ -164,7 +168,7 @@ Uma estação pode estar disponível ou indisponível independentemente da abert
 | Operação voluntária | Efeito na participação | Efeito na fila/histórico |
 |---|---|---|
 | Sair da fila externa (D02) | A participação `waiting` é cancelada. | Perde a posição externa; eventual reingresso cria outra participação, se permitido. |
-| Abandonar a fila interna (C-15, futura E07.3) | A participação permanece `active`. | Encerra apenas a entrada atual, preserva histórico e libera `current_queue_entry_id`; pode permanecer na Arena sem fila. |
+| Abandonar a fila interna (C-15, serviço interno E07.3) | A participação permanece `active`. | Encerra apenas a entrada atual, preserva histórico e libera `current_queue_entry_id`; pode permanecer na Arena sem fila. |
 | Finalizar a participação (D03) | A participação `active` é finalizada. | Resolve eventual espera/chamada interna e preserva conclusões anteriores. |
 
 A desistência interna deve contemplar tanto `waiting` quanto `called`. Se houver
@@ -183,11 +187,11 @@ estações.
 
 É permitido desistir depois do corte de novos ingressos, enquanto a participação,
 a entrada e os limites operacionais/administrativos ainda permitirem a operação.
-Isso não reabre admissões nem permite reentrar após o corte. A operação futura
-será idempotente e disputará chamada, conclusão, ausência e fechamento sob
+Isso não reabre admissões nem permite reentrar após o corte. A operação interna E07.3
+é idempotente e disputa chamada, conclusão, ausência e fechamento sob
 controle transacional, preservando `queue_entries`, `participations` e
-`service_sessions`. Contrato específico e códigos de motivo ficam para E07.3;
-aprovação de negócio não significa implementação ou definição de rota HTTP.
+`service_sessions`. Contrato técnico interno e motivos estão documentados em
+`E07_3_IMPLEMENTACAO.md`; não congelam códigos públicos nem definem rota HTTP.
 
 ### Garantias mínimas da API de filas
 
@@ -293,7 +297,7 @@ Os itens a seguir refinam D01–D11. **Não** são novas funcionalidades impleme
 | **C-12 — Fila externa no fechamento controlado** | Ao iniciar encerramento administrativo **controlado antecipado**, encerrar imediatamente todas as participações ainda `waiting` na fila externa com motivo administrativo específico, sem avaliação. Manter filas e atendimentos internos preexistentes das participações `active` até o limite controlado; sem admitir novas entradas/inscrições. | Alterar `waiting → finished` de modo atômico com o fechamento, preservar histórico, não confundir com desistência voluntária. Ausência após corte Admin antecipado não reingressa em fila, mesmo antes do horário oficial. |
 | **C-13 — Edições durante o evento [APROVADO]** | Após o **primeiro ingresso/participação criada** no evento (inclusive na espera externa), bloquear alteração dos nomes/identificações de experiências e estações e cadastro de novas experiências; antes desse marco essas operações podem ser realizadas. **Adicionar estações a experiências já existentes durante a operação é permitido**, mantendo a mesma fila da experiência. Não excluir fisicamente experiências ou estações que já tenham sido usadas. A disponibilidade das estações e as concessões/revogações de Staff seguem operacionais durante o evento; horários e encerramentos seguem D07/D09. | Distinguir mutações **estruturais** (bloqueadas quando já houver participação) de ações **operacionais** (estações/Staff/filas). Impedir corrida entre primeiro ingresso e edição estrutural; preservar referências históricas. A regra não cria permissão para mudar o código de ingresso imutável. |
 | **C-14 — Perda de capacidade operacional [APROVADO]** | Se o evento aberto ficar **sem Staff autorizado** ou **sem nenhuma estação disponível**, bloquear **novos ingressos no evento**, mantendo participações, esperas, posições e conclusões existentes. Se uma experiência ficar sem estação disponível, bloquear **novas entradas na fila dessa experiência**, sem afetar outras experiências aptas. Não registrar ausências, cancelar esperas nem encerrar evento automaticamente por essa perda de capacidade. Após restaurar Staff/estação, novas entradas voltam a ser possíveis **somente antes dos cortes oficial e administrativo**. A revogação de Staff por segurança nunca é impedida por ele ser o último. | Calcular elegibilidade dinamicamente no backend, sem falso encerramento e sem nova tabela de prontidão. Respeitar pendência antes de desativar estação; nenhum usuário perde posição por indisponibilidade de recursos. |
-| **C-15 — Desistência voluntária da fila interna [APROVADO em 30/10/2026]** | O titular pode abandonar sua entrada `waiting` ou `called` e continuar com participação `active`, sem fila. Resolver eventual chamada `pending` atomicamente, sem ausência/conclusão; preservar histórico, conclusões anteriores e posições alheias. Nova experiência exige nova intenção/chave/ordem FIFO e todas as guardas de ingresso. Desistência pode ocorrer após o corte de novas entradas enquanto o estado e o prazo operacional permitirem; isso não autoriza reentrada após o corte. | E07.3: contrato específico futuro, idempotência, motivos identificáveis e disputa com Staff/fechamento, sem sobrescrever ocorrência resolvida. Ver seção 7 e arquitetura §16.2; nenhuma rota ou migração definida nesta rodada. |
+| **C-15 — Desistência voluntária da fila interna [APROVADO em 30/10/2026]** | O titular pode abandonar sua entrada `waiting` ou `called` e continuar com participação `active`, sem fila. Resolver eventual chamada `pending` atomicamente, sem ausência/conclusão; preservar histórico, conclusões anteriores e posições alheias. Nova experiência exige nova intenção/chave/ordem FIFO e todas as guardas de ingresso. Desistência pode ocorrer após o corte de novas entradas enquanto o estado e o prazo operacional permitirem; isso não autoriza reentrada após o corte. | Serviço interno E07.3 implementado com tentativa explícita, idempotência e motivos técnicos identificáveis; comandos Staff futuros devem preservar locks/condições de resolução única. PostgreSQL revalidado pelo responsável e E07.3 aprovada na auditoria; integração aprovada com ressalvas, conforme fechamento da seção 12. Expurgo e homologação dos escritores reais permanecem dependências futuras. Ver seção 7 e arquitetura §16.2; sem rota ou migração. |
 
 
 ### 9.3.2 Alinhamento de escopo com a Task 6.1
@@ -308,6 +312,8 @@ A especificação da Task 6.1 (v1.1, 16/10/2026) fornece contratos e sugestões 
 
 **Antes de implementar serviços ou integrar o Expo:** especificar o comportamento de contas Admin como participantes (ainda sem decisão de produto); definir timezone civil de referência para nascimento até hoje, inclusive; catálogo de erros/DTOs e fluxos de autorização; tempo de retenção/expurgo de idempotência e de metadados técnicos; confirmar contratos com as telas reais quando a implementação for retomada. A C-10 e sua normalização no backend foram definidas; a criação de eventos ainda deverá reutilizar a função já implementada. Nenhum desses pontos por si só autoriza endpoints agora.
 
+**Dependências futuras após a auditoria E07.1–E07.3:** definir e validar a política de expurgo/idempotência antes de implementar remoção dos registros; homologar os escritores Staff reais e suas interações com os três serviços quando forem desenvolvidos. Não são defeitos funcionais atuais nem funcionalidades já homologadas; as fixtures SQL não substituem essa validação futura.
+
 **Antes do piloto com dados pessoais reais:** base legal, direitos dos titulares, proteção de crianças e adolescentes, retenção, backups/expurgo, snapshots, segurança de comentários e grupos pequenos, agregados de BI efetivamente anônimos, auditoria de exportações, serviço de e-mail, TOTP de pelo menos dois Admins, TLS/infraestrutura, testes de concorrência e dispositivos físicos. A fundação local não libera operação real.
 
 **Qualidade e manutenção:** investigar as quatro vulnerabilidades moderadas reportadas em dependências de desenvolvimento; não reescrever o histórico das cinco migrações já aplicadas; adicionar migrations incrementais se o esquema evoluir. Confirmar `git status` e histórico de commits antes de publicar qualquer documentação.
@@ -315,12 +321,16 @@ A especificação da Task 6.1 (v1.1, 16/10/2026) fornece contratos e sugestões 
 ## 11. Organização da documentação e próximo trabalho autorizado
 
 - Este **Planejamento** é a fonte de verdade das **decisões de negócio** (D01–D11 e C-01–C-15), escopo e prioridades.
-- A **Arquitetura Backend v0.6.17** (`ARQUITETURA_BACKEND_ARENAGO.md`) descreve as estruturas, contratos candidatos e resultados técnicos. Os endpoints HTTP seguem propostos e não implementados; a C-15 exige contrato futuro específico para a desistência da fila interna, reservado à E07.3.
+- A **Arquitetura Backend v0.6.17** (`ARQUITETURA_BACKEND_ARENAGO.md`) descreve as estruturas, contratos candidatos e resultados técnicos. Os endpoints HTTP seguem propostos e não implementados; a C-15 possui contrato interno específico de desistência na E07.3, sem definir rota pública.
 - O `backend/README.md` é a referência operacional de execução local; o README do Expo descreve o aplicativo. Não repetir aqui comandos completos de instalação.
 - Os relatórios experimentais v0.6.11/v0.6.12 e a Task 6.1 são **fontes históricas**, não documentos concorrentes que substituam estas duas fontes canônicas.
-- **Trabalho atual (30/10/2026):** fechamento da E07.1 antes do commit. A revalidação da versão corrigida foi concluída pelo responsável em `127.0.0.1:55432/arenago_events_test`: **21/21 testes específicos e 129/129 da regressão completa aprovados**, zero falhas, cancelamentos ou testes ignorados. Na rodada corrigida, o Codex aprovou 108/108 unitários, typecheck, lint e build. Um P2 e três P3 da auditoria anterior foram tratados em testes/documentação, sem defeito funcional confirmado no serviço. Preservados os resultados históricos 20/20 e 128/128 e a decisão C-15; E07.2/E07.3 permanecem fora desta entrega. Git é controlado manualmente pelo responsável; sem staging, commit ou push neste fechamento.
+- **Trabalho atual (30/10/2026):** fechamento documental após a auditoria consolidada E07.1–E07.3, com parecer APROVADO COM RESSALVAS para a integração e aprovação individual das três entregas. PostgreSQL concluído pelo responsável; verificações locais reexecutadas pelo Codex na auditoria. Base HEAD `5d7fae1217eb28a4be2610660245a6b8dacc4f7a` e alterações locais anteriores preservadas. Resultados e histórico em `E07_2_IMPLEMENTACAO.md`/`E07_3_IMPLEMENTACAO.md`; E07.1 preservada. Somente documentos e patch cumulativo atualizados, sem código, testes reexecutados, nova auditoria, staging, commit ou push.
 
 ## 12. Registro sintético desta revisão
+
+**Fechamento documental E07.1–E07.3 — registro posterior de 30/10/2026:** o responsável confirmou, no PostgreSQL local autorizado `127.0.0.1:55432/arenago_events_test`, **20/20 E07.2**, **27/27 E07.3** e **176/176 na regressão completa**, zero falhas, cancelamentos ou skips. Na auditoria consolidada anterior a este fechamento, o Codex reexecutou **145/145 unitários**, sem falhas/cancelamentos/skips, exit 0, além de typecheck, lint e build com exit 0. São executores e rodadas distintos: PostgreSQL pertence ao responsável; as verificações locais pertencem ao Codex. A primeira execução E07.3 teve **23/27 aprovados e quatro falhas 42P08**; a correção exclusiva dos casts das fixtures precedeu a revalidação de 27/27. Detalhes e sequência preservados em `E07_3_IMPLEMENTACAO.md`.
+
+**Parecer da auditoria consolidada:** E07.1 aprovada; E07.2 aprovada; E07.3 aprovada; integração **aprovada com ressalvas**, sem defeito funcional bloqueante confirmado. Este registro trata a ressalva documental de ausência das evidências externas finais, sem alterar o parecer nem realizar nova auditoria. Permanecem dependências futuras a política de expurgo/idempotência, antes de remover registros, e a homologação dos escritores Staff reais e suas interações quando forem desenvolvidos. Não são falhas atuais nem homologações já realizadas. Preservados abaixo os resultados históricos e as pendências de suas respectivas rodadas; este fechamento não altera fontes, testes, schemas ou migrations nem executa testes, conexão a banco, staging ou commit.
 
 **Fechamento da E07.1 (30/10/2026)** — o responsável informou revalidação da versão corrigida no PostgreSQL local autorizado `127.0.0.1:55432/arenago_events_test`, com 21/21 testes específicos e 129/129 da regressão completa aprovados, sem falhas, cancelamentos ou testes ignorados. Esses resultados PostgreSQL são do responsável, não do Codex ou do auditor. Na rodada corrigida anterior, o Codex aprovou 108/108 unitários, typecheck, lint e build. A pendência registrada no complemento pós-auditoria abaixo foi concluída; preservados os resultados anteriores e a ausência inicial de execução PostgreSQL pelo Codex. Este fechamento altera somente documentação/evidência, sem código, testes reexecutados, banco, staging ou commit.
 
