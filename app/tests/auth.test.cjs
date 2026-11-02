@@ -1491,6 +1491,44 @@ test('generic network error during POST /auth/refresh after server consumes toke
 // 5. UI-02 — INTERFACE VISUAL DE AUTENTICAÇÃO (DESIGN SYSTEM + FLUXOS VISUAIS)
 // ============================================================================
 
+test('UI-02: AuthBackground keeps decorative layers out of layout with the RN 0.86 StyleSheet API', () => {
+  const child = { type: 'Text', props: { children: 'Conteúdo interativo' } };
+  for (const useSafeArea of [true, false]) {
+    const bg = createHarness('components/ui/AuthBackground.js', {
+      platform: 'android',
+      props: { children: child, useSafeArea, testID: 'bg' },
+    });
+    const root = bg.nodes.find((n) => n.props?.testID === 'bg');
+    const [backdrop, content] = root.props.children;
+    assert.equal(backdrop.props.testID, 'bg-backdrop');
+    assert.equal(backdrop.props.pointerEvents, 'none');
+    assert.equal(content.type, useSafeArea ? 'SafeAreaView' : 'View');
+    assert.equal(content.props.style[0].flex, 1);
+    assert.equal(content.props.children, child);
+
+    for (const id of ['bg-backdrop', 'bg-image', 'bg-overlay-top']) {
+      const layer = bg.nodes.find((n) => n.props?.testID === id);
+      const style = Object.assign({}, ...[layer.props.style].flat());
+      assert.equal(style.position, 'absolute', `${id} must not consume layout height`);
+      for (const edge of ['top', 'bottom', 'left', 'right']) {
+        assert.equal(style[edge], 0, `${id} must fill its parent at ${edge}`);
+      }
+    }
+
+    bg.act(() => bg.nodes.find((n) => n.props?.testID === 'bg-image').props.onError());
+    assert.equal(bg.nodes.some((n) => n.type === 'Image'), false);
+    assert.ok(bg.nodes.includes(child), 'image failure preserves interactive content');
+  }
+
+  for (const fallback of [{ disableImage: true }, { imageSource: null }]) {
+    const bg = createHarness('components/ui/AuthBackground.js', { props: { ...fallback, children: child } });
+    assert.equal(bg.nodes.some((n) => n.type === 'Image'), false);
+    assert.ok(bg.nodes.includes(child));
+  }
+  const welcome = createHarness('screens/auth/WelcomeScreen.js', { platform: 'android' });
+  assert.ok(welcome.nodes.some((n) => n.props?.testID === 'welcome-background-image'));
+});
+
 test('UI-02 & UI-02A: Welcome, Login, Register and ForgotPassword navigate across all public auth flows and apply AuthBackground + sans-serif typography', () => {
   // 1. Welcome -> Register e Welcome -> Login (no Android para verificar fontFamily: 'sans-serif')
   const welcome = createHarness('screens/auth/WelcomeScreen.js', { platform: 'android' });

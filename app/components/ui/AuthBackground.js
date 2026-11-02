@@ -153,7 +153,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.background.base,
   },
   backdropContainer: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: colors.background.canvas,
     overflow: 'hidden',
   },
@@ -176,12 +176,12 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(95, 51, 250, 0.08)',
   },
   backgroundImage: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     width: '100%',
     height: '100%',
   },
   overlayLayer: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
   },
   bottomScrimLayer: {
     position: 'absolute',

@@ -236,7 +236,8 @@ function createHarness(relativePath, options = {}) {
   native.StyleSheet = {
     create: (value) => value,
     flatten: (value) => Array.isArray(value) ? Object.assign({}, ...value) : value,
-    absoluteFillObject: { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0 },
+    // API disponível no React Native 0.86; absoluteFillObject foi removido.
+    absoluteFill: { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0 },
   };
   const birthDate = loadModule('utils/birthDate.js', require).exports;
   const validation = loadModule('utils/validation.js', (name) =>
