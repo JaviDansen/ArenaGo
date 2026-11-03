@@ -1,0 +1,1143 @@
+diff --git a/backend/src/events/events.module.ts b/backend/src/events/events.module.ts
+index 73ca89f79e81d80470f491f18cd5200715abc95b..529d42385a9133a7bd8423f9282787e8e810f8b7 100644
+--- a/backend/src/events/events.module.ts
++++ b/backend/src/events/events.module.ts
+@@ -16,12 +16,14 @@ import { ParticipantQueueIdempotencyPolicy } from "./participant-queue-idempoten
+ import { ExperiencesController } from "./experiences.controller";
+ import { StaffQueriesController } from "./staff-queries.controller";
+ import { StaffQueriesService } from "./staff-queries.service";
++import { StationAvailabilityController } from "./station-availability.controller";
++import { StationAvailabilityService } from "./station-availability.service";
+ 
+ /** Agrupa os serviços de Events e reutiliza o acesso PostgreSQL compartilhado. */
+ @Module({
+   imports: [DatabaseModule, AuthModule],
+-  controllers: [StaffOperationsController, StaffQueriesController, ParticipantQueueController, ExperiencesController],
+-  providers: [EventsService, StaffQueriesService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, StaffIdempotencyPolicy, ParticipantQueueIdempotencyPolicy],
+-  exports: [EventsService, StaffQueriesService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService],
++  controllers: [StaffOperationsController, StaffQueriesController, StationAvailabilityController, ParticipantQueueController, ExperiencesController],
++  providers: [EventsService, StaffQueriesService, StationAvailabilityService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, StaffIdempotencyPolicy, ParticipantQueueIdempotencyPolicy],
++  exports: [EventsService, StaffQueriesService, StationAvailabilityService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService],
+ })
+ export class EventsModule {}
+diff --git a/docs/ARQUITETURA_BACKEND_ARENAGO.md b/docs/ARQUITETURA_BACKEND_ARENAGO.md
+index 381346d4cf97a7c254f48e5af4b43e95ca775a14..ab5d47f8c146f1e2550bd2601e3ca803f5fb2f2a 100644
+--- a/docs/ARQUITETURA_BACKEND_ARENAGO.md
++++ b/docs/ARQUITETURA_BACKEND_ARENAGO.md
+@@ -1177,6 +1177,18 @@ Expor somente informações operacionais necessárias e auditáveis; o método p
+ 
+ ### 16.7 `PATCH /staff/events/:eventId/stations/:stationId/availability`
+ 
++**Implementação E08.5 — 03/11/2026:** rota disponível sob `/api/v1`, por
++`StationAvailabilityController`/`StationAvailabilityService`. Staff vigente do
++evento ou Admin global, com sessão/conta revalidadas após locks e 2FA Admin
++preservado. Usa `events FOR UPDATE` → experiência → estação, `READ COMMITTED`,
++relógio PostgreSQL no UPDATE e auditoria atômica para cada mudança efetiva.
++Repetição é no-op 200, sem Idempotency-Key obrigatório ou novo armazenamento.
++Configuração antes do início e reativação residual são permitidas; não reabrem
++ingressos após corte oficial/Admin. `closed` e prazos definitivos impedem mudanças
++efetivas. O 409 por pending inclui o estado mínimo atual em `station` no RFC 7807;
++recursos ausentes/alheios e falta de concessão recebem 404 neutro. Contrato,
++decisões, testes executados e PostgreSQL pendente em `E08_5_IMPLEMENTACAO.md`.
++
+ **Staff ativo do evento OU Admin global autorizado;** mesma política no guard e serviço. Corpo:
+ 
+ ```json
+diff --git a/backend/src/events/station-availability.controller.ts b/backend/src/events/station-availability.controller.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..333ad779190b4910b91818f9d7c6568f5488ace2
+--- /dev/null
++++ b/backend/src/events/station-availability.controller.ts
+@@ -0,0 +1,44 @@
++import { Body, Controller, HttpCode, HttpStatus, Inject, Param, Patch, Req } from "@nestjs/common";
++import { z } from "zod";
++import { CurrentUser, CurrentUserId, RequireSessionAuth } from "../auth/current-user.decorator";
++import type { AuthenticatedRequest } from "../auth/session-auth.guard";
++import { ProblemException } from "../common/errors/problem.exception";
++import { operationUuid, validateOperationBody, validateOperationParams } from "../common/http/operation-validation";
++import { StationAvailabilityService } from "./station-availability.service";
++
++const paramsSchema = z.object({ eventId: operationUuid, stationId: operationUuid }).strict();
++const bodySchema = z.object({ availability: z.enum(["available", "unavailable"]) }).strict();
++const failures = {
++  access_denied: [404, "RESOURCE_NOT_FOUND", "Recurso não encontrado."],
++  account_inactive: [401, "ACCOUNT_DEACTIVATED", "Esta conta encontra-se desativada."],
++  invalid_session: [401, "INVALID_SESSION", "Sessão inválida."],
++  session_revoked: [401, "SESSION_REVOKED", "A sessão foi revogada."],
++  session_expired: [401, "SESSION_EXPIRED", "A sessão expirou."],
++  admin_2fa_required: [401, "ADMIN_2FA_REQUIRED", "Sessão administrativa exige verificação de segundo fator (TOTP)."],
++  event_operation_ended: [409, "EVENT_OPERATION_ENDED", "O evento não permite esta operação neste instante."],
++  station_has_pending_call: [409, "STATION_HAS_PENDING_CALL", "A estação possui chamada pendente."],
++} as const;
++
++@Controller("staff/events/:eventId/stations/:stationId/availability")
++@RequireSessionAuth()
++export class StationAvailabilityController {
++  constructor(@Inject(StationAvailabilityService) private readonly stations: StationAvailabilityService) {}
++
++  @Patch()
++  @HttpCode(HttpStatus.OK)
++  async set(@CurrentUserId() userId: string, @CurrentUser("sessionId") sessionId: string,
++    @Param() params: unknown, @Body() body: unknown, @Req() request: AuthenticatedRequest) {
++    const ids = validateOperationParams(paramsSchema, params);
++    const desired = validateOperationBody(bodySchema, body, request);
++    const result = await this.stations.setAvailability({ userId, sessionId, ...ids, ...desired });
++    if (result.kind === "changed" || result.kind === "unchanged") return {
++      stationId: result.stationId, availability: result.availability, pendingServiceSessionId: result.pendingServiceSessionId,
++    };
++    const [status, code, detail] = failures[result.kind];
++    throw new ProblemException({ status, code, detail, typeSlug: code.toLowerCase().replaceAll("_", "-"),
++      title: status === 404 ? "Recurso não encontrado" : status === 401 ? "Autenticação obrigatória" : "Conflito operacional",
++      extensions: result.kind === "station_has_pending_call" ? { station: {
++        stationId: result.stationId, availability: result.availability, pendingServiceSessionId: result.pendingServiceSessionId,
++      } } : undefined });
++  }
++}
+diff --git a/backend/src/events/station-availability.service.ts b/backend/src/events/station-availability.service.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..45bdc34460444389c7a851aefdeec943a5736024
+--- /dev/null
++++ b/backend/src/events/station-availability.service.ts
+@@ -0,0 +1,89 @@
++import { Inject, Injectable } from "@nestjs/common";
++import { randomUUID } from "node:crypto";
++import { sql } from "drizzle-orm";
++import type { NodePgDatabase } from "drizzle-orm/node-postgres";
++import { DRIZZLE_DATABASE } from "../database/database.module";
++import type * as schema from "../database/schema";
++import type { SetStationAvailabilityInput, StationAvailabilityResult } from "./station-availability.types";
++
++/** E08.5: configuração e auditoria atômicas; idempotência natural do estado desejado. */
++@Injectable()
++export class StationAvailabilityService {
++  constructor(@Inject(DRIZZLE_DATABASE) private readonly database: NodePgDatabase<typeof schema>) {}
++
++  async setAvailability(input: SetStationAvailabilityInput): Promise<StationAvailabilityResult> {
++    if (input.availability !== "available" && input.availability !== "unavailable") throw new Error("Disponibilidade inválida.");
++    return this.database.transaction(async (tx): Promise<StationAvailabilityResult> => {
++      // Mutex de capacidade compartilhado com ingresso E03 e conflitante com SHARE E07.
++      const event = await tx.execute(sql`SELECT id FROM events WHERE id=${input.eventId} FOR UPDATE`);
++      if (!event.rows.length) return { kind: "access_denied" };
++      const discovery = await tx.execute<{ experienceId: string }>(sql`
++        SELECT s.experience_id AS "experienceId" FROM stations s JOIN experiences x ON x.id=s.experience_id
++        WHERE s.id=${input.stationId} AND x.event_id=${input.eventId}`);
++      if (!discovery.rows.length) return { kind: "access_denied" };
++      const experienceId = discovery.rows[0].experienceId;
++      const experience = await tx.execute(sql`SELECT id FROM experiences WHERE id=${experienceId} AND event_id=${input.eventId} FOR UPDATE`);
++      if (!experience.rows.length) return { kind: "access_denied" };
++      const station = await tx.execute<{ availability: "available" | "unavailable" }>(sql`
++        SELECT availability FROM stations WHERE id=${input.stationId} AND experience_id=${experienceId} FOR UPDATE`);
++      if (!station.rows.length) return { kind: "access_denied" };
++
++      // Ordem conta -> papéis -> sessão, depois dos recursos. Locks retêm autorização até COMMIT.
++      const account = await tx.execute<{ active: boolean; verified: boolean }>(sql`
++        SELECT is_active AS active, email_verified_at IS NOT NULL AS verified FROM users WHERE id=${input.userId} FOR SHARE`);
++      if (!account.rows[0]?.active) return { kind: "account_inactive" };
++      const roles = await tx.execute<{ role: string }>(sql`SELECT role FROM user_roles
++        WHERE user_id=${input.userId} AND revoked_at IS NULL
++          AND ((role='staff' AND event_id=${input.eventId}) OR (role='admin' AND event_id IS NULL))
++        ORDER BY id FOR SHARE`);
++      const admin = roles.rows.some(row => row.role === "admin");
++      if (!admin && !(account.rows[0].verified && roles.rows.some(row => row.role === "staff"))) return { kind: "access_denied" };
++      const session = await tx.execute(sql`SELECT id FROM sessions WHERE id=${input.sessionId} AND user_id=${input.userId} FOR SHARE`);
++      if (!session.rows.length) return { kind: "invalid_session" };
++      // Outra instrução: expressões de tempo de um SELECT com lock podem ser avaliadas antes da espera.
++      const validity = await tx.execute<{ revoked: boolean; expired: boolean; secondFactor: boolean }>(sql`
++        SELECT revoked_at IS NOT NULL AS revoked, expires_at <= clock_timestamp() AS expired,
++          admin_2fa_verified_at IS NOT NULL AS "secondFactor"
++        FROM sessions WHERE id=${input.sessionId} AND user_id=${input.userId}`);
++      const auth = validity.rows[0];
++      if (auth.revoked) return { kind: "session_revoked" };
++      if (auth.expired) return { kind: "session_expired" };
++      if (admin && !auth.secondFactor) return { kind: "admin_2fa_required" };
++
++      const pending = await tx.execute<{ id: string }>(sql`SELECT id FROM service_sessions
++        WHERE station_id=${input.stationId} AND experience_id=${experienceId} AND status='pending'`);
++      const current = { stationId: input.stationId, availability: station.rows[0].availability,
++        pendingServiceSessionId: pending.rows[0]?.id ?? null };
++      if (current.availability === input.availability) return { kind: "unchanged", ...current };
++      if (input.availability === "unavailable" && current.pendingServiceSessionId !== null) {
++        return { kind: "station_has_pending_call", ...current };
++      }
++      // Configuração também é permitida antes do início. Cortes de ingresso não impedem operação residual.
++      // Prazo e sessão são reavaliados no UPDATE decisivo, após todas as esperas.
++      const updated = await tx.execute(sql`WITH decision AS MATERIALIZED (SELECT clock_timestamp() AS at)
++        UPDATE stations s SET availability=${input.availability}, updated_at=d.at
++        FROM events e, experiences x, sessions a, decision d
++        WHERE s.id=${input.stationId} AND s.experience_id=${experienceId} AND x.id=s.experience_id
++          AND x.event_id=${input.eventId} AND e.id=x.event_id AND s.availability=${current.availability}
++          AND e.status <> 'closed' AND d.at < e.operational_deadline_at
++          AND (e.admin_deadline_at IS NULL OR d.at < e.admin_deadline_at)
++          AND a.id=${input.sessionId} AND a.user_id=${input.userId} AND a.revoked_at IS NULL AND d.at < a.expires_at
++        RETURNING s.id`);
++      if (!updated.rows.length) {
++        const expired = await tx.execute<{ expired: boolean }>(sql`SELECT expires_at <= clock_timestamp() AS expired FROM sessions WHERE id=${input.sessionId}`);
++        return { kind: expired.rows[0]?.expired ? "session_expired" : "event_operation_ended" };
++      }
++      // Não existe writer/helper de auditoria no backend: usa diretamente o schema vigente.
++      // Mesmo instante exato do UPDATE, sem perda de microssegundos em Date/JavaScript.
++      const audit = await tx.execute(sql`INSERT INTO audit_logs(id,actor_user_id,event_id,origin,category,action,metadata,occurred_at)
++        SELECT ${randomUUID()},${input.userId},${input.eventId},'user','station','station_availability_changed',
++          jsonb_build_object('stationId',s.id,'experienceId',s.experience_id,
++            'before',jsonb_build_object('availability',${current.availability}::text),
++            'after',jsonb_build_object('availability',${input.availability}::text)),s.updated_at
++        FROM stations s WHERE s.id=${input.stationId} AND s.experience_id=${experienceId} RETURNING id`);
++      if (audit.rows.length !== 1) throw new Error("A alteração da estação exige exatamente um registro de auditoria.");
++      return { kind: "changed", stationId: input.stationId, availability: input.availability,
++        pendingServiceSessionId: current.pendingServiceSessionId };
++    }, { isolationLevel: "read committed" });
++  }
++}
+diff --git a/backend/src/events/station-availability.types.ts b/backend/src/events/station-availability.types.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d949940d67ddb386ede322b33ebd773a91a43fb0
+--- /dev/null
++++ b/backend/src/events/station-availability.types.ts
+@@ -0,0 +1,18 @@
++export type StationAvailability = "available" | "unavailable";
++export interface SetStationAvailabilityInput {
++  userId: string;
++  sessionId: string;
++  eventId: string;
++  stationId: string;
++  availability: StationAvailability;
++}
++export interface StationAvailabilityState {
++  stationId: string;
++  availability: StationAvailability;
++  pendingServiceSessionId: string | null;
++}
++export type StationAvailabilityResult =
++  | ({ kind: "changed" | "unchanged" } & StationAvailabilityState)
++  | ({ kind: "station_has_pending_call" } & StationAvailabilityState)
++  | { kind: "access_denied" | "account_inactive" | "invalid_session" | "session_revoked"
++    | "session_expired" | "admin_2fa_required" | "event_operation_ended" };
+diff --git a/backend/test/integration/station-availability-http.integration.test.ts b/backend/test/integration/station-availability-http.integration.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..18bc34060df263f3bf7c2af0d14db7691a295bd8
+--- /dev/null
++++ b/backend/test/integration/station-availability-http.integration.test.ts
+@@ -0,0 +1,424 @@
++import "reflect-metadata";
++import assert from "node:assert/strict";
++import { randomUUID } from "node:crypto";
++import { devNull } from "node:os";
++import { after, before, test } from "node:test";
++import { Module, type INestApplication } from "@nestjs/common";
++import { APP_FILTER, NestFactory } from "@nestjs/core";
++import { sql } from "drizzle-orm";
++import { PgDialect } from "drizzle-orm/pg-core";
++import type { NodePgDatabase } from "drizzle-orm/node-postgres";
++import { Pool } from "pg";
++import supertest from "supertest";
++import type * as schema from "../../src/database/schema";
++import type { ParticipationsService } from "../../src/participations/participations.service";
++import { assertSafeTestDatabase } from "./test-db-guard";
++
++// Preflight antes dos providers/environment: sem .env, Neon ou fallback implícito.
++const urls = ["DATABASE_URL", "DATABASE_DIRECT_URL", "EVENTS_TEST_DATABASE_URL"].map(name => {
++  const value = assertSafeTestDatabase(process.env[name]), url = new URL(value);
++  if (url.hostname !== "127.0.0.1" || url.port !== "55432" || url.pathname !== "/arenago_events_test"
++    || url.search || url.hash || !url.username) throw new Error(`${name}: destino local explícito obrigatório.`);
++  return value;
++});
++if (urls.some(value => value !== urls[0])) throw new Error("As três URLs explícitas precisam ser idênticas.");
++process.env.DOTENV_CONFIG_PATH = devNull;
++process.env.STAFF_IDEMPOTENCY_TTL_SECONDS = "60";
++process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = "60";
++const pool = new Pool({ connectionString: urls[0], ssl: false, max: 6, connectionTimeoutMillis: 2000,
++  statement_timeout: 10000, lock_timeout: 8000 });
++let app: INestApplication, database: NodePgDatabase<typeof schema>, admissions: ParticipationsService;
++let signAccess: (userId: string, sessionId: string, expired?: boolean) => string;
++const ids = { events: [] as string[], users: [] as string[], versions: [] as string[], games: [] as string[] };
++before(async () => {
++  assert.equal((await pool.query("SELECT current_database() AS name")).rows[0].name,"arenago_events_test");
++  const { EventsModule } = await import("../../src/events/events.module");
++  const { EventsService } = await import("../../src/events/events.service");
++  const { ParticipationsService } = await import("../../src/participations/participations.service");
++  const { DRIZZLE_DATABASE } = await import("../../src/database/database.module");
++  const { ProblemDetailsExceptionFilter } = await import("../../src/common/errors/problem-details.filter");
++  const tokens = await import("../../src/auth/token.util");
++  signAccess = (userId,sessionId,expired) => tokens.signAccessToken({userId,sessionId},expired ? {nowMs:Date.now()-120000,ttlSeconds:1} : undefined);
++  @Module({ imports:[EventsModule], providers:[{provide:APP_FILTER,useClass:ProblemDetailsExceptionFilter}] })
++  class HttpTestModule {}
++  app = await NestFactory.create(HttpTestModule,{logger:false}); app.setGlobalPrefix("api/v1"); await app.listen(0,"127.0.0.1");
++  database = app.get(DRIZZLE_DATABASE);
++  // Dependências explícitas: não modifica DI histórica de ParticipationsModule fora da E08.5.
++  admissions = new ParticipationsService(database, app.get(EventsService));
++});
++after(async () => {
++  const errors: unknown[] = [];
++  try {
++    const client = await pool.connect();
++    try {
++      await client.query("BEGIN");
++      await client.query("DELETE FROM audit_logs WHERE event_id=ANY($1::uuid[])",[ids.events]);
++      await client.query("UPDATE participations SET current_queue_entry_id=NULL WHERE event_id=ANY($1::uuid[])",[ids.events]);
++      await client.query("DELETE FROM service_sessions s USING queue_entries q WHERE s.queue_entry_id=q.id AND q.event_id=ANY($1::uuid[])",[ids.events]);
++      await client.query("DELETE FROM queue_entries WHERE event_id=ANY($1::uuid[])",[ids.events]);
++      await client.query("DELETE FROM participation_profile_snapshots s USING participations p WHERE s.participation_id=p.id AND p.event_id=ANY($1::uuid[])",[ids.events]);
++      await client.query("DELETE FROM participations WHERE event_id=ANY($1::uuid[])",[ids.events]);
++      await client.query("DELETE FROM stations s USING experiences e WHERE s.experience_id=e.id AND e.event_id=ANY($1::uuid[])",[ids.events]);
++      await client.query("DELETE FROM experiences WHERE event_id=ANY($1::uuid[])",[ids.events]);
++      await client.query("DELETE FROM idempotency_operations WHERE actor_user_id=ANY($1::uuid[])",[ids.users]);
++      await client.query("DELETE FROM user_roles WHERE user_id=ANY($1::uuid[])",[ids.users]);
++      await client.query("DELETE FROM sessions WHERE user_id=ANY($1::uuid[])",[ids.users]);
++      await client.query("DELETE FROM user_games WHERE user_id=ANY($1::uuid[])",[ids.users]);
++      await client.query("DELETE FROM profiles WHERE user_id=ANY($1::uuid[])",[ids.users]);
++      await client.query("DELETE FROM events WHERE id=ANY($1::uuid[])",[ids.events]);
++      await client.query("DELETE FROM games WHERE id=ANY($1::uuid[])",[ids.games]);
++      await client.query("DELETE FROM users WHERE id=ANY($1::uuid[])",[ids.users]);
++      await client.query("DELETE FROM questionnaire_versions WHERE id=ANY($1::uuid[])",[ids.versions]);
++      await client.query("COMMIT");
++    } catch(error) { await client.query("ROLLBACK"); throw error; } finally {client.release();}
++  } catch(error) {errors.push(error);}
++  for (const r of await Promise.allSettled([app?.close(),pool.end()])) if(r.status==="rejected") errors.push(r.reason);
++  if(errors.length) throw new AggregateError(errors,"Limpeza E08.5 falhou.");
++});
++async function account() {
++  const userId=randomUUID(),sessionId=randomUUID(); ids.users.push(userId);
++  await pool.query(`INSERT INTO users(id,name,email,password_hash,email_verified_at,created_at,updated_at)
++    VALUES($1,'Pessoa privada E085',$2,'fixture-private-hash',clock_timestamp(),clock_timestamp(),clock_timestamp())`,[userId,`${userId}@example.test`]);
++  await pool.query(`INSERT INTO sessions(id,user_id,expires_at,last_activity_at,created_at)
++    VALUES($1,$2,clock_timestamp()+interval '1 hour',clock_timestamp(),clock_timestamp())`,[sessionId,userId]);
++  return {userId,sessionId,token:signAccess(userId,sessionId)};
++}
++async function grant(userId:string,eventId:string|null) {
++  const id=randomUUID(); await pool.query("INSERT INTO user_roles(id,user_id,role,event_id,granted_at) VALUES($1,$2,$3,$4,clock_timestamp())",[id,userId,eventId ? "staff":"admin",eventId]); return id;
++}
++async function experience(eventId:string) {
++  const id=randomUUID(); await pool.query(`INSERT INTO experiences(id,event_id,name,last_queue_order,created_at,updated_at)
++    VALUES($1,$2,'Experiência E085',9007199254741000,clock_timestamp(),clock_timestamp())`,[id,eventId]);return id;
++}
++async function station(experienceId:string) {
++  const id=randomUUID();await pool.query(`INSERT INTO stations(id,experience_id,label,availability,created_at,updated_at)
++    VALUES($1,$2,'Estação E085','available',clock_timestamp(),clock_timestamp())`,[id,experienceId]);return id;
++}
++async function context():Promise<Context> {
++  const eventId=randomUUID();ids.events.push(eventId);
++  await pool.query(`INSERT INTO events(id,name,access_code_normalized,timezone,starts_at,official_ends_at,operational_deadline_at,status,external_queue_enabled,created_at,updated_at)
++    VALUES($1,'E085 fixture',$2,'America/Sao_Paulo',clock_timestamp()-interval '1 hour',clock_timestamp()+interval '1 hour',clock_timestamp()+interval '90 minutes','open',false,clock_timestamp(),clock_timestamp())`,[eventId,`E085-${eventId.toUpperCase()}`]);
++  const staff=await account(),roleId=await grant(staff.userId,eventId),experienceId=await experience(eventId),stationId=await station(experienceId);
++  return {eventId,experienceId,stationId,staff,roleId};
++}
++interface Context { eventId:string; experienceId:string; stationId:string; staff:Awaited<ReturnType<typeof account>>; roleId:string; }
++async function person(eventId:string) {
++  const auth=await account(),participationId=randomUUID();
++  await pool.query(`INSERT INTO participations(id,user_id,event_id,status,joined_at,arena_entered_at)
++    VALUES($1,$2,$3,'active',clock_timestamp(),clock_timestamp())`,[participationId,auth.userId,eventId]);return {...auth,participationId};
++}
++async function readyEntrant() {
++  const auth=await account(),versionId=randomUUID(),gameId=randomUUID();ids.versions.push(versionId);ids.games.push(gameId);
++  await pool.query("INSERT INTO questionnaire_versions(id,version,definition,activated_at,created_at) VALUES($1,$2,'{}',clock_timestamp(),clock_timestamp())",[versionId,`e85-${versionId}`]);
++  await pool.query(`INSERT INTO profiles(user_id,birth_date,gender,education,market_knowledge,market_interest,questionnaire_version_id,completed_at,created_at,updated_at)
++    VALUES($1,'2000-01-01','Prefiro não informar','Superior','Sim, conheço.','Sim, tenho interesse.',$2,clock_timestamp(),clock_timestamp(),clock_timestamp())`,[auth.userId,versionId]);
++  await pool.query("INSERT INTO games(id,name,is_curated,created_at) VALUES($1,$2,false,clock_timestamp())",[gameId,`E085-${gameId}`]);
++  await pool.query("INSERT INTO user_games(user_id,game_id,created_at) VALUES($1,$2,clock_timestamp())",[auth.userId,gameId]);return auth;
++}
++const path=(c:Context)=>`/api/v1/staff/events/${c.eventId}/stations/${c.stationId}/availability`;
++const patch=(c:Context,availability="unavailable",auth=c.staff)=>supertest(app.getHttpServer()).patch(path(c)).set("Authorization",`Bearer ${auth.token}`).send({availability});
++const queue=(c:Context)=>supertest(app.getHttpServer()).get(`/api/v1/staff/events/${c.eventId}/experiences/${c.experienceId}/queue`).set("Authorization",`Bearer ${c.staff.token}`);
++const post=(c:Context,route:string)=>supertest(app.getHttpServer()).post(`/api/v1/staff/events/${c.eventId}/${route}`).set("Authorization",`Bearer ${c.staff.token}`).set("Idempotency-Key",randomUUID()).send({});
++const call=(c:Context)=>post(c,`experiences/${c.experienceId}/stations/${c.stationId}/call-next`);
++const resolve=(c:Context,sessionId:string,op:"complete"|"absent")=>post(c,`service-sessions/${sessionId}/${op}`);
++const enter=(c:Context,p:Awaited<ReturnType<typeof person>>)=>supertest(app.getHttpServer()).post(`/api/v1/participations/${p.participationId}/queue-entries`).set("Authorization",`Bearer ${p.token}`).set("Idempotency-Key",randomUUID()).send({experienceId:c.experienceId});
++async function waiting(c:Context) {const p=await person(c.eventId),r=await enter(c,p);assert.equal(r.status,201,JSON.stringify(r.body));return {p,id:r.body.queueEntryId as string};}
++async function pending(c:Context) {await waiting(c);const r=await call(c);assert.equal(r.status,201,JSON.stringify(r.body));return r.body.serviceSession.id as string;}
++const admit=(c:Context,a:{userId:string})=>admissions.createParticipation({userId:a.userId,eventId:c.eventId,idempotencyKey:randomUUID(),expiresAt:new Date(Date.now()+60000)});
++function problem(r:supertest.Response,status:number,code:string) {
++  assert.equal(r.status,status,JSON.stringify(r.body));assert.equal(r.body.status,status);assert.equal(r.body.code,code);assert.match(r.headers["content-type"],/application\/problem\+json/);
++  assert.equal(JSON.stringify(r.body).includes("@example.test"),false);
++}
++async function audit(c:Context) {return (await pool.query("SELECT * FROM audit_logs WHERE event_id=$1 ORDER BY occurred_at,id",[c.eventId])).rows;}
++async function state(c:Context,domainOnly=false) {
++  const r=(await pool.query(`SELECT jsonb_build_object(
++    'event',(SELECT to_jsonb(e) FROM events e WHERE e.id=$1),
++    'experiences',(SELECT jsonb_agg(to_jsonb(e) || jsonb_build_object('last_queue_order',e.last_queue_order::text) ORDER BY e.id) FROM experiences e WHERE e.event_id=$1),
++    'stations',(SELECT jsonb_agg(to_jsonb(s) ORDER BY s.id) FROM stations s JOIN experiences e ON e.id=s.experience_id WHERE e.event_id=$1),
++    'people',(SELECT jsonb_agg(to_jsonb(p) ORDER BY p.id) FROM participations p WHERE p.event_id=$1),
++    'queues',(SELECT jsonb_agg(to_jsonb(q) || jsonb_build_object('queue_order',q.queue_order::text) ORDER BY q.id) FROM queue_entries q WHERE q.event_id=$1),
++    'services',(SELECT jsonb_agg(to_jsonb(s) ORDER BY s.id) FROM service_sessions s JOIN experiences e ON e.id=s.experience_id WHERE e.event_id=$1),
++    'audits',(SELECT jsonb_agg(to_jsonb(a) ORDER BY a.id) FROM audit_logs a WHERE a.event_id=$1),
++    'idempotency',(SELECT jsonb_agg(to_jsonb(i) ORDER BY i.id) FROM idempotency_operations i WHERE i.actor_user_id=ANY($2::uuid[]))
++    ) AS value`,[c.eventId,ids.users])).rows[0].value;
++  if(domainOnly) {delete r.stations;delete r.audits;}
++  return r;
++}
++async function blocked(pid:number) {
++  const until=Date.now()+6000;
++  while(Date.now()<until) {
++    if((await pool.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))",[pid])).rows[0].n>0) return;
++    await new Promise(done=>setTimeout(done,20));
++  }
++  throw new Error("Não foi observada espera real pelo lock esperado.");
++}
++/** Mantém a transação real da primeira ação antes do COMMIT e observa a segunda bloqueada. */
++async function ordered<A,B>(first:()=>PromiseLike<A>,second:()=>PromiseLike<B>):Promise<[A,B]> {
++  const original=database.transaction.bind(database) as typeof database.transaction;
++  let ready!:(pid:number)=>void,release!:()=>void;
++  const reached=new Promise<number>(yes=>{ready=yes;}),gate=new Promise<void>(yes=>{release=yes;});
++  database.transaction=(callback,config)=>original(async tx=>{
++    const value=await callback(tx);const pid=(await tx.execute<{pid:number}>(sql`SELECT pg_backend_pid() AS pid`)).rows[0].pid;
++    ready(pid);await gate;return value;
++  },config);
++  let a:Promise<A>|undefined,b:Promise<B>|undefined;
++  try {
++    a=Promise.resolve(first());a.catch(()=>undefined);
++    const pid=await Promise.race([reached,a.then(()=>{throw new Error("Primeira ação não manteve transação.");})]);
++    database.transaction=original;
++    b=Promise.resolve(second());b.catch(()=>undefined);await blocked(pid);release();return await Promise.all([a,b]);
++  } finally {database.transaction=original;release();await Promise.allSettled([a,b]);}
++}
++async function eventWait(c:Context,action:()=>PromiseLike<supertest.Response>,change:(client:import("pg").PoolClient)=>Promise<void>) {
++  const client=await pool.connect();let response:Promise<supertest.Response>|undefined;
++  try {
++    await client.query("BEGIN");await client.query("SELECT id FROM events WHERE id=$1 FOR UPDATE",[c.eventId]);
++    const pid=(await client.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
++    response=Promise.resolve(action());response.catch(()=>undefined);await blocked(pid);await change(client);await client.query("COMMIT");return await response;
++  } finally {await client.query("ROLLBACK");await Promise.allSettled([response]);client.release();}
++}
++
++test("E08.5 PostgreSQL HTTP Staff desativa e registra auditoria exata na mesma transação",async()=>{
++  const c=await context(),extra=await station(c.experienceId),other=(await pool.query("SELECT * FROM stations WHERE id=$1",[extra])).rows;
++  const before=await state(c,true),r=await patch(c);assert.equal(r.status,200);
++  assert.deepEqual(r.body,{stationId:c.stationId,availability:"unavailable",pendingServiceSessionId:null});assert.deepEqual(await state(c,true),before);
++  assert.deepEqual((await pool.query("SELECT * FROM stations WHERE id=$1",[extra])).rows,other);
++  const rows=await audit(c);assert.equal(rows.length,1);const a=rows[0];assert.equal(a.actor_user_id,c.staff.userId);assert.equal(a.event_id,c.eventId);
++  assert.equal(a.origin,"user");assert.equal(a.category,"station");assert.equal(a.action,"station_availability_changed");assert.equal(a.target_user_id,null);assert.equal(a.reason,null);
++  assert.deepEqual(a.metadata,{stationId:c.stationId,experienceId:c.experienceId,before:{availability:"available"},after:{availability:"unavailable"}});
++  const match=(await pool.query("SELECT s.updated_at=a.occurred_at AS same FROM stations s JOIN audit_logs a ON a.id=$2 WHERE s.id=$1",[c.stationId,a.id])).rows[0];assert.equal(match.same,true);
++});
++test("E08.5 PostgreSQL HTTP Admin global opera sem concessão Staff e mantém restrições E08.1/E08.4",async()=>{
++  const c=await context(),admin=await account();await grant(admin.userId,null);await pool.query("UPDATE sessions SET admin_2fa_verified_at=clock_timestamp() WHERE id=$1",[admin.sessionId]);
++  assert.equal((await patch(c,"unavailable",admin)).status,200);assert.equal((await audit(c))[0].actor_user_id,admin.userId);
++  problem(await supertest(app.getHttpServer()).get(`/api/v1/staff/events/${c.eventId}/stations`).set("Authorization",`Bearer ${admin.token}`),404,"RESOURCE_NOT_FOUND");
++  problem(await call({...c,staff:admin}),403,"STAFF_EVENT_FORBIDDEN");
++});
++test("E08.5 PostgreSQL HTTP Admin sem 2FA não altera estação nem audita",async()=>{
++  const c=await context(),admin=await account();await grant(admin.userId,null);const before=await state(c);
++  problem(await patch(c,"unavailable",admin),401,"ADMIN_2FA_REQUIRED");assert.deepEqual(await state(c),before);
++});
++test("E08.5 PostgreSQL HTTP Staff alheio/revogado/não verificado e participante têm recusa neutra",async()=>{
++  const c=await context(),other=await context();
++  for(const mode of ["foreign","revoked","unverified","none"]) {
++    const a=await account();if(mode!=="none") {const role=await grant(a.userId,mode==="foreign"?other.eventId:c.eventId);if(mode==="revoked") await pool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE id=$1",[role]);}
++    if(mode==="unverified") await pool.query("UPDATE users SET email_verified_at=NULL WHERE id=$1",[a.userId]);
++    const before=await state(c);problem(await patch(c,"unavailable",a),404,"RESOURCE_NOT_FOUND");assert.deepEqual(await state(c),before);
++  }
++});
++test("E08.5 PostgreSQL HTTP Bearer ausente/inválido e token expirado não mutam",async()=>{
++  const c=await context(),before=await state(c);problem(await supertest(app.getHttpServer()).patch(path(c)).send({availability:"unavailable"}),401,"MISSING_ACCESS_TOKEN");
++  problem(await patch(c,"unavailable",{...c.staff,token:"invalid"}),401,"INVALID_ACCESS_TOKEN");
++  problem(await patch(c,"unavailable",{...c.staff,token:signAccess(c.staff.userId,c.staff.sessionId,true)}),401,"ACCESS_TOKEN_EXPIRED");assert.deepEqual(await state(c),before);
++});
++test("E08.5 PostgreSQL HTTP conta inativa e sessão revogada/expirada bloqueiam alteração",async()=>{
++  for(const mode of ["inactive","revoked","expired"]) {
++    const c=await context();
++    if(mode==="inactive") await pool.query("UPDATE users SET is_active=false WHERE id=$1",[c.staff.userId]);
++    else if(mode==="revoked") await pool.query("UPDATE sessions SET revoked_at=clock_timestamp() WHERE id=$1",[c.staff.sessionId]);
++    else await pool.query("UPDATE sessions SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",[c.staff.sessionId]);
++    const before=await state(c);problem(await patch(c),401,mode==="inactive"?"ACCOUNT_DEACTIVATED":mode==="revoked"?"SESSION_REVOKED":"SESSION_EXPIRED");assert.deepEqual(await state(c),before);
++  }
++});
++test("E08.5 PostgreSQL HTTP UUIDs validados/normalizados e estação de outro evento não vaza relações",async()=>{
++  const c=await context(),other=await context(),before=await state(c);
++  for(const key of ["eventId","stationId"] as const) problem(await patch({...c,[key]:"bad"}),400,"VALIDATION_ERROR");
++  const a=await patch({...c,stationId:other.stationId}),b=await patch({...c,stationId:randomUUID()});problem(a,404,"RESOURCE_NOT_FOUND");problem(b,404,"RESOURCE_NOT_FOUND");assert.deepEqual(a.body,b.body);
++  problem(await patch({...c,eventId:randomUUID()}),404,"RESOURCE_NOT_FOUND");assert.deepEqual(await state(c),before);
++  const r=await patch({...c,eventId:c.eventId.toUpperCase(),stationId:c.stationId.toUpperCase()});assert.equal(r.status,200);assert.equal(r.body.stationId,c.stationId);
++});
++test("E08.5 PostgreSQL HTTP body ausente/inválido/extra não chega à mutação",async()=>{
++  const c=await context(),before=await state(c);
++  const request=()=>supertest(app.getHttpServer()).patch(path(c)).set("Authorization",`Bearer ${c.staff.token}`);
++  problem(await request(),400,"VALIDATION_ERROR");
++  for(const body of [{},[],{availability:null},{availability:"busy"},{availability:"Available"},{availability:"unavailable",actor:c.staff.userId}]) problem(await request().send(body),400,"VALIDATION_ERROR");
++  problem(await request().type("text/plain").send('{"availability":"available"}'),400,"VALIDATION_ERROR");problem(await request().type("application/json").send("{bad"),400,"BAD_REQUEST");assert.deepEqual(await state(c),before);
++});
++test("E08.5 PostgreSQL HTTP reativação normal restaura capacidade e registra só duas transições",async()=>{
++  const c=await context();assert.equal((await patch(c)).status,200);assert.equal((await queue(c)).body.acceptingNewEntries,false);
++  const before=await state(c,true);assert.equal((await patch(c,"available")).status,200);assert.deepEqual(await state(c,true),before);assert.equal((await queue(c)).body.acceptingNewEntries,true);
++  const rows=await audit(c);assert.equal(rows.length,2);assert.deepEqual(rows[1].metadata.before,{availability:"unavailable"});assert.deepEqual(rows[1].metadata.after,{availability:"available"});
++});
++test("E08.5 PostgreSQL HTTP repetir estado preserva updated_at/auditoria sem header ou TTL",async()=>{
++  const c=await context(),original=await state(c);assert.equal((await patch(c,"available")).status,200);assert.deepEqual(await state(c),original);
++  assert.equal((await patch(c)).status,200);const changed=await state(c);
++  for(let n=0;n<3;n++) assert.equal((await patch(c).set("Idempotency-Key",n?"ignored":"")).status,200);
++  assert.deepEqual(await state(c),changed);assert.equal((await audit(c)).length,1);
++});
++test("E08.5 PostgreSQL HTTP pending gera 409 com estado mínimo sem UPDATE/auditoria",async()=>{
++  const c=await context(),session=await pending(c),before=await state(c),r=await patch(c);problem(r,409,"STATION_HAS_PENDING_CALL");
++  assert.deepEqual(r.body.station,{stationId:c.stationId,availability:"available",pendingServiceSessionId:session});assert.deepEqual(await state(c),before);
++  const same=await patch(c,"available");assert.equal(same.status,200);assert.equal(same.body.pendingServiceSessionId,session);assert.deepEqual(await state(c),before);
++});
++for(const op of ["complete","absent"] as const) test(`E08.5 PostgreSQL HTTP desativação após ${op} preserva histórico terminal`,async()=>{
++  const c=await context(),session=await pending(c);assert.equal((await resolve(c,session,op)).status,200);const before=await state(c,true);
++  assert.equal((await patch(c)).status,200);assert.deepEqual(await state(c,true),before);assert.equal((await audit(c)).length,1);
++});
++test("E08.5 PostgreSQL HTTP última estação bloqueia Arena/fila sem fechar evento ou apagar espera",async()=>{
++  const c=await context();await waiting(c);const p=await person(c.eventId),a=await readyEntrant();
++  const before=await state(c,true);assert.equal((await patch(c)).status,200);assert.deepEqual(await state(c,true),before);
++  const q=await queue(c);assert.equal(q.body.waitingCount,1);assert.equal(q.body.acceptingNewEntries,false);assert.equal(q.body.canCallWaitingEntries,true);
++  problem(await enter(c,p),409,"EVENT_UNAVAILABLE");const admission=await admit(c,a);assert.equal(admission.kind,"blocked");
++  if(admission.kind!=="blocked") assert.fail();assert.ok(admission.eligibility.blockingReasons.includes("EVENT_NOT_READY"));
++  assert.equal((await pool.query("SELECT status FROM events WHERE id=$1",[c.eventId])).rows[0].status,"open");
++  assert.equal((await patch(c,"available")).status,200);assert.equal((await admit(c,a)).kind,"created");assert.equal((await enter(c,p)).status,201);
++});
++test("E08.5 PostgreSQL HTTP perder estação de uma experiência mantém outra apta",async()=>{
++  const c=await context(),experienceId=await experience(c.eventId),stationId=await station(experienceId),p=await person(c.eventId);
++  assert.equal((await patch(c)).status,200);assert.equal((await queue(c)).body.acceptingNewEntries,false);
++  const other={...c,experienceId,stationId};assert.equal((await queue(other)).body.acceptingNewEntries,true);assert.equal((await enter(other,p)).status,201);
++  assert.equal((await pool.query("SELECT availability FROM stations WHERE id=$1",[stationId])).rows[0].availability,"available");
++});
++test("E08.5 PostgreSQL HTTP reativação residual após corte oficial/Admin não reabre ingressos",async()=>{
++  for(const mode of ["official","admin"]) {
++    const c=await context(),p=await person(c.eventId);await waiting(c);assert.equal((await patch(c)).status,200);
++    if(mode==="official") await pool.query("UPDATE events SET official_ends_at=clock_timestamp()-interval '1 minute',operational_deadline_at=clock_timestamp()+interval '30 minutes' WHERE id=$1",[c.eventId]);
++    else await pool.query("UPDATE events SET status='closing',closure_mode='controlled',closure_requested_at=clock_timestamp()-interval '1 minute',admin_deadline_at=clock_timestamp()+interval '20 minutes' WHERE id=$1",[c.eventId]);
++    assert.equal((await patch(c,"available")).status,200);const r=await queue(c);assert.equal(r.body.acceptingNewEntries,false);assert.equal(r.body.canCallWaitingEntries,true);
++    problem(await enter(c,p),409,"EVENT_REGISTRATION_CLOSED");assert.equal((await call(c)).status,201);
++  }
++});
++test("E08.5 PostgreSQL HTTP configuração antes do início é permitida e não antecipa ingressos",async()=>{
++  const c=await context();await pool.query("UPDATE events SET starts_at=clock_timestamp()+interval '10 minutes',status='scheduled' WHERE id=$1",[c.eventId]);
++  assert.equal((await patch(c)).status,200);assert.equal((await patch(c,"available")).status,200);assert.equal((await queue(c)).body.acceptingNewEntries,false);
++});
++test("E08.5 PostgreSQL HTTP closed/prazos operacional/Admin/imediato recusam mudanças; no-op continua 200",async()=>{
++  for(const mode of ["closed","operational","admin","immediate"]) {
++    const c=await context();
++    if(mode==="closed") await pool.query("UPDATE events SET status='closed' WHERE id=$1",[c.eventId]);
++    if(mode==="operational") await pool.query("UPDATE events SET official_ends_at=clock_timestamp()-interval '20 minutes',operational_deadline_at=clock_timestamp()-interval '1 minute' WHERE id=$1",[c.eventId]);
++    if(mode==="admin") await pool.query("UPDATE events SET status='closing',closure_mode='controlled',closure_requested_at=clock_timestamp()-interval '20 minutes',admin_deadline_at=clock_timestamp()-interval '1 minute' WHERE id=$1",[c.eventId]);
++    if(mode==="immediate") await pool.query("UPDATE events SET status='closing',closure_mode='immediate',closure_requested_at=statement_timestamp()-interval '1 minute',admin_deadline_at=statement_timestamp()-interval '1 minute' WHERE id=$1",[c.eventId]);
++    const before=await state(c);problem(await patch(c),409,"EVENT_OPERATION_ENDED");assert.equal((await patch(c,"available")).status,200);assert.deepEqual(await state(c),before);
++    await pool.query("UPDATE stations SET availability='unavailable' WHERE id=$1",[c.stationId]);const unavailable=await state(c);
++    problem(await patch(c,"available"),409,"EVENT_OPERATION_ENDED");assert.deepEqual(await state(c),unavailable);
++  }
++});
++test("E08.5 PostgreSQL HTTP isolamento e contrato não expõem pessoas ou detalhes de auditoria",async()=>{
++  const c=await context(),other=await context(),foreign=await state(other),r=await patch(c);assert.equal(r.status,200);
++  assert.deepEqual(Object.keys(r.body).sort(),["availability","pendingServiceSessionId","stationId"]);
++  for(const secret of [c.staff.userId,c.staff.sessionId,c.eventId,c.experienceId,other.stationId,"Pessoa privada E085","example.test","fixture-private-hash","station_availability_changed"]) assert.equal(JSON.stringify(r.body).includes(secret),false);
++  assert.deepEqual(await state(other),foreign);
++});
++test("E08.5 PostgreSQL concorrente call-next primeiro impede desativação",async()=>{
++  const c=await context();await waiting(c);
++  const [called,disabled]=await ordered(()=>call(c),()=>patch(c));assert.equal(called.status,201);problem(disabled,409,"STATION_HAS_PENDING_CALL");
++  assert.equal((await audit(c)).length,0);const s=(await pool.query("SELECT availability FROM stations WHERE id=$1",[c.stationId])).rows[0];assert.equal(s.availability,"available");
++});
++test("E08.5 PostgreSQL concorrente desativação primeiro bloqueia call-next sem furar FIFO",async()=>{
++  const c=await context(),first=await waiting(c),second=await waiting(c);
++  const [disabled,called]=await ordered(()=>patch(c),()=>call(c));assert.equal(disabled.status,200);problem(called,409,"STATION_UNAVAILABLE");
++  const r=await queue(c);assert.equal(r.body.waitingCount,2);assert.equal(r.body.firstWaitingQueueEntryId,first.id);
++  const entries=(await pool.query("SELECT id,status FROM queue_entries WHERE id=ANY($1::uuid[])",[[first.id,second.id]])).rows;assert.ok(entries.every(row=>row.status==="waiting"));
++});
++for(const op of ["complete","absent"] as const) test(`E08.5 PostgreSQL concorrente ${op} primeiro libera desativação; pending primeiro mantém 409`,async()=>{
++  {
++    const c=await context(),session=await pending(c);
++    const [resolved,disabled]=await ordered(()=>resolve(c,session,op),()=>patch(c));assert.equal(resolved.status,200);assert.equal(disabled.status,200);assert.equal((await audit(c)).length,1);
++    assert.equal((await pool.query("SELECT status FROM service_sessions WHERE id=$1",[session])).rows[0].status,op==="complete"?"completed":"absent");
++  }
++  {
++    const c=await context(),session=await pending(c);
++    const [disabled,resolved]=await ordered(()=>patch(c),()=>resolve(c,session,op));problem(disabled,409,"STATION_HAS_PENDING_CALL");assert.equal(resolved.status,200);assert.equal((await audit(c)).length,0);
++  }
++});
++test("E08.5 PostgreSQL concorrente ingresso interno primeiro é preservado após desativação",async()=>{
++  const c=await context(),p=await person(c.eventId);
++  const [joined,disabled]=await ordered(()=>enter(c,p),()=>patch(c));assert.equal(joined.status,201);assert.equal(disabled.status,200);
++  const r=await queue(c);assert.equal(r.body.waitingCount,1);assert.equal(r.body.firstWaitingQueueEntryId,joined.body.queueEntryId);assert.equal(r.body.acceptingNewEntries,false);
++});
++test("E08.5 PostgreSQL concorrente desativação primeiro impede ingresso interno desatualizado",async()=>{
++  const c=await context(),p=await person(c.eventId);
++  const [disabled,joined]=await ordered(()=>patch(c),()=>enter(c,p));assert.equal(disabled.status,200);problem(joined,409,"EVENT_UNAVAILABLE");
++  assert.equal((await queue(c)).body.waitingCount,0);
++});
++test("E08.5 PostgreSQL concorrente ingresso E03 primeiro mantém participação após perda de capacidade",async()=>{
++  const c=await context(),a=await readyEntrant();
++  const [joined,disabled]=await ordered(()=>admit(c,a),()=>patch(c));assert.equal(joined.kind,"created");assert.equal(disabled.status,200);
++  if(joined.kind!=="created") assert.fail();const p=(await pool.query("SELECT status FROM participations WHERE id=$1",[joined.participationId])).rows[0];assert.equal(p.status,"active");
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM participation_profile_snapshots WHERE participation_id=$1",[joined.participationId])).rows[0].n,1);
++});
++test("E08.5 PostgreSQL concorrente desativação primeiro impede novo ingresso E03",async()=>{
++  const c=await context(),a=await readyEntrant();
++  const [disabled,joined]=await ordered(()=>patch(c),()=>admit(c,a));assert.equal(disabled.status,200);assert.equal(joined.kind,"blocked");
++  if(joined.kind!=="blocked") assert.fail();assert.deepEqual(joined.eligibility.blockingReasons,["EVENT_NOT_READY"]);
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM participations WHERE user_id=$1",[a.userId])).rows[0].n,0);
++});
++test("E08.5 PostgreSQL concorrente dois PATCH iguais geram uma única auditoria",async()=>{
++  const c=await context();const [a,b]=await ordered(()=>patch(c),()=>patch(c));assert.equal(a.status,200);assert.equal(b.status,200);assert.deepEqual(a.body,b.body);assert.equal((await audit(c)).length,1);
++});
++test("E08.5 PostgreSQL concorrente PATCH opostos serializam duas transições reais",async()=>{
++  const c=await context();const [a,b]=await ordered(()=>patch(c),()=>patch(c,"available"));assert.equal(a.status,200);assert.equal(b.status,200);
++  const rows=await audit(c);assert.equal(rows.length,2);assert.deepEqual(rows.map(row=>row.metadata.after.availability),["unavailable","available"]);
++  assert.equal((await queue(c)).body.acceptingNewEntries,true);
++});
++test("E08.5 PostgreSQL concorrente revogação Staff primeiro é revalidada após espera",async()=>{
++  const c=await context(),client=await pool.connect();let response:Promise<supertest.Response>|undefined;
++  try {
++    await client.query("BEGIN");await client.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE id=$1",[c.roleId]);
++    const pid=(await client.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
++    response=Promise.resolve(patch(c));response.catch(()=>undefined);await blocked(pid);await client.query("COMMIT");problem(await response,404,"RESOURCE_NOT_FOUND");assert.equal((await audit(c)).length,0);
++    assert.equal((await pool.query("SELECT availability FROM stations WHERE id=$1",[c.stationId])).rows[0].availability,"available");
++  } finally {await client.query("ROLLBACK");await Promise.allSettled([response]);client.release();}
++});
++test("E08.5 PostgreSQL concorrente PATCH primeiro mantém autorização até commit e revogação seguinte bloqueia",async()=>{
++  const c=await context();const [r]=await ordered(()=>patch(c),()=>pool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE id=$1",[c.roleId]));
++  assert.equal(r.status,200);assert.equal((await audit(c)).length,1);problem(await patch(c,"available"),404,"RESOURCE_NOT_FOUND");assert.equal((await audit(c)).length,1);
++});
++test("E08.5 PostgreSQL concorrente conta/sessão/2FA são revalidadas após espera no evento",async()=>{
++  for(const mode of ["inactive","revoked","expired","2fa","admin-revoked"]) {
++    const c=await context();let adminRole:string|undefined;
++    if(mode==="2fa"||mode==="admin-revoked") {adminRole=await grant(c.staff.userId,null);await pool.query("UPDATE sessions SET admin_2fa_verified_at=clock_timestamp() WHERE id=$1",[c.staff.sessionId]);}
++    if(mode==="admin-revoked") await pool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE id=$1",[c.roleId]);
++    const r=await eventWait(c,()=>patch(c),async()=>{
++      if(mode==="inactive") await pool.query("UPDATE users SET is_active=false WHERE id=$1",[c.staff.userId]);
++      if(mode==="revoked") await pool.query("UPDATE sessions SET revoked_at=clock_timestamp() WHERE id=$1",[c.staff.sessionId]);
++      if(mode==="expired") await pool.query("UPDATE sessions SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",[c.staff.sessionId]);
++      if(mode==="2fa") await pool.query("UPDATE sessions SET admin_2fa_verified_at=NULL WHERE id=$1",[c.staff.sessionId]);
++      if(mode==="admin-revoked") await pool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE id=$1",[adminRole]);
++    });
++    problem(r,mode==="admin-revoked"?404:401,mode==="inactive"?"ACCOUNT_DEACTIVATED":mode==="revoked"?"SESSION_REVOKED":mode==="expired"?"SESSION_EXPIRED":mode==="2fa"?"ADMIN_2FA_REQUIRED":"RESOURCE_NOT_FOUND");
++    assert.equal((await audit(c)).length,0);
++  }
++});
++test("E08.5 PostgreSQL concorrente prazo/status são reavaliados depois do lock",async()=>{
++  for(const mode of ["closed","deadline"]) {
++    const c=await context(),before=await pool.query("SELECT availability,updated_at FROM stations WHERE id=$1",[c.stationId]);
++    const r=await eventWait(c,()=>patch(c),async client=>{
++      if(mode==="closed") await client.query("UPDATE events SET status='closed' WHERE id=$1",[c.eventId]);
++      else await client.query("UPDATE events SET official_ends_at=clock_timestamp()-interval '20 minutes',operational_deadline_at=clock_timestamp()-interval '1 minute' WHERE id=$1",[c.eventId]);
++    });
++    problem(r,409,"EVENT_OPERATION_ENDED");assert.equal((await audit(c)).length,0);
++    assert.deepEqual((await pool.query("SELECT availability,updated_at FROM stations WHERE id=$1",[c.stationId])).rows,before.rows);
++  }
++});
++test("E08.5 PostgreSQL erro real durante auditoria e após INSERT reverte estação e auditoria integralmente",async()=>{
++  const dialect=new PgDialect();
++  for(const phase of ["audit","after-audit"]) {
++    const c=await context(),before=await state(c),original=database.transaction.bind(database) as typeof database.transaction;
++    let reached=false;
++    database.transaction=(callback,config)=>original(async tx=>{
++      const execute=tx.execute.bind(tx);
++      tx.execute=(async (...args:Parameters<typeof tx.execute>)=>{
++        const query=args[0],text=typeof query==="string"?query:dialect.sqlToQuery(query.getSQL()).sql;
++        if(text.includes("INSERT INTO audit_logs")&&phase==="audit") {reached=true;await execute(sql`SELECT 1/0`);}
++        const value=await execute(...args);
++        if(text.includes("INSERT INTO audit_logs")&&phase==="after-audit") {reached=true;await execute(sql`SELECT 1/0`);}
++        return value;
++      }) as typeof tx.execute;
++      return callback(tx);
++    },config);
++    try {problem(await patch(c),500,"INTERNAL_SERVER_ERROR");} finally {database.transaction=original;}
++    assert.equal(reached,true);assert.deepEqual(await state(c),before);assert.equal((await audit(c)).length,0);
++  }
++});
++test("E08.5 PostgreSQL leitura E08.4 vê estado confirmado sem esperar escrita ainda não commitada",async()=>{
++  const c=await context(),original=database.transaction.bind(database) as typeof database.transaction;let reached=false;
++  database.transaction=(callback,config)=>original(async tx=>{
++    const value=await callback(tx);database.transaction=original;
++    const during=await queue(c).timeout({deadline:3000});assert.equal(during.status,200);assert.equal(during.body.acceptingNewEntries,true);reached=true;
++    return value;
++  },config);
++  try {assert.equal((await patch(c)).status,200);} finally {database.transaction=original;}
++  assert.equal(reached,true);assert.equal((await queue(c)).body.acceptingNewEntries,false);assert.equal((await audit(c)).length,1);
++});
+diff --git a/backend/test/unit/station-availability-http.test.ts b/backend/test/unit/station-availability-http.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..41d3d8fcdf029d500a3c46acc3ec86b0e5c86ca1
+--- /dev/null
++++ b/backend/test/unit/station-availability-http.test.ts
+@@ -0,0 +1,102 @@
++import "reflect-metadata";
++import assert from "node:assert/strict";
++import { after, before, test } from "node:test";
++import { Module, type INestApplication } from "@nestjs/common";
++import { NestFactory } from "@nestjs/core";
++import type { Pool } from "pg";
++import supertest from "supertest";
++import { AuthService } from "../../src/auth/auth.service";
++import { SessionAuthGuard } from "../../src/auth/session-auth.guard";
++import { ProblemException } from "../../src/common/errors/problem.exception";
++import { ProblemDetailsExceptionFilter } from "../../src/common/errors/problem-details.filter";
++import { DRIZZLE_DATABASE, POSTGRES_POOL } from "../../src/database/database.module";
++import { EventsModule } from "../../src/events/events.module";
++import { StationAvailabilityController } from "../../src/events/station-availability.controller";
++import { StationAvailabilityService } from "../../src/events/station-availability.service";
++import type { SetStationAvailabilityInput, StationAvailabilityResult } from "../../src/events/station-availability.types";
++
++const id = (n: number) => `abcdef00-0000-4000-8000-${String(n).padStart(12, "0")}`;
++const eventId = id(1), stationId = id(2), userId = id(3), sessionId = id(4);
++const route = `/api/v1/staff/events/${eventId}/stations/${stationId}/availability`;
++const state = { stationId, availability: "unavailable" as const, pendingServiceSessionId: null };
++let result: StationAvailabilityResult, failure: Error | undefined;
++const calls: SetStationAvailabilityInput[] = [];
++@Module({ controllers: [StationAvailabilityController], providers: [SessionAuthGuard,
++  { provide: AuthService, useValue: { authenticateBearerToken: async (token: string) => {
++    if (token !== "unit") throw new ProblemException({ typeSlug: "invalid-access-token", title: "Inválido", status: 401, code: "INVALID_ACCESS_TOKEN", detail: "Token inválido." });
++    return { userId, sessionId, roles: ["staff"] };
++  } } },
++  { provide: StationAvailabilityService, useValue: { setAvailability: async (input: SetStationAvailabilityInput) => {
++    calls.push(input); if (failure) throw failure; return result;
++  } } },
++] })
++class HttpUnitModule {}
++let app: INestApplication;
++before(async () => {
++  app = await NestFactory.create(HttpUnitModule, { logger: false }); app.setGlobalPrefix("api/v1");
++  app.useGlobalFilters(new ProblemDetailsExceptionFilter()); await app.listen(0, "127.0.0.1");
++});
++after(async () => { await app?.close(); });
++const patch = (url = route) => supertest(app.getHttpServer()).patch(url).set("Authorization", "Bearer unit");
++function reset() { calls.length = 0; failure = undefined; result = { kind: "changed", ...state }; }
++function problem(r: supertest.Response, status: number, code: string) {
++  assert.equal(r.status, status); assert.equal(r.body.status, status); assert.equal(r.body.code, code);
++  assert.match(r.headers["content-type"], /application\/problem\+json/);
++}
++test("E08.5 HTTP PATCH 200 usa ator/sessão confiáveis e não exige Idempotency-Key", async () => {
++  reset(); const r = await patch().query({ userId: id(9), sessionId: id(10) }).send({ availability: "unavailable" });
++  assert.equal(r.status, 200); assert.deepEqual(r.body, state);
++  assert.deepEqual(calls, [{ userId, sessionId, eventId, stationId, availability: "unavailable" }]);
++});
++test("E08.5 HTTP reativação/no-op têm mesmo contrato e ignoram header de idempotência", async () => {
++  reset(); result = { kind: "unchanged", ...state, availability: "available", pendingServiceSessionId: id(5) };
++  const r = await patch().set("Idempotency-Key", "").send({ availability: "available" });
++  assert.equal(r.status, 200); assert.deepEqual(r.body, { ...state, availability: "available", pendingServiceSessionId: id(5) });
++  assert.equal(calls[0].availability, "available");
++});
++test("E08.5 HTTP Bearer obrigatório e inválido não chegam ao serviço", async () => {
++  reset(); problem(await supertest(app.getHttpServer()).patch(route).send({ availability: "unavailable" }), 401, "MISSING_ACCESS_TOKEN");
++  problem(await patch().set("Authorization", "Bearer invalid").send({ availability: "unavailable" }), 401, "INVALID_ACCESS_TOKEN"); assert.equal(calls.length, 0);
++});
++test("E08.5 HTTP UUIDs inválidos recebem 400 e maiúsculas são normalizadas", async () => {
++  reset(); for (const value of [eventId,stationId]) problem(await patch(route.replace(value,"bad")).send({ availability: "unavailable" }), 400, "VALIDATION_ERROR");
++  assert.equal(calls.length, 0); assert.equal((await patch(route.replace(eventId,eventId.toUpperCase()).replace(stationId,stationId.toUpperCase())).send({ availability: "unavailable" })).status, 200);
++  assert.equal(calls[0].eventId,eventId); assert.equal(calls[0].stationId,stationId);
++});
++test("E08.5 HTTP body obrigatório estrito só admite dois valores exatos", async () => {
++  reset(); problem(await patch(), 400, "VALIDATION_ERROR");
++  for (const body of [{}, [], { availability: null }, { availability: true }, { availability: "Available" },
++    { availability: "busy" }, { availability: "available", actor: userId }, { availability: "unavailable", reason: "extra" }]) {
++    problem(await patch().send(body), 400, "VALIDATION_ERROR");
++  }
++  problem(await patch().type("text/plain").send('{"availability":"available"}'),400,"VALIDATION_ERROR");
++  problem(await patch().type("application/json").send("{bad"),400,"BAD_REQUEST"); assert.equal(calls.length,0);
++});
++test("E08.5 HTTP nega recursos e autorização com mesmo 404 neutro", async () => {
++  reset(); result = { kind: "access_denied" }; const a = await patch().send({ availability: "unavailable" });
++  const b = await patch(route.replace(eventId,id(9))).send({ availability: "unavailable" });
++  problem(a,404,"RESOURCE_NOT_FOUND"); problem(b,404,"RESOURCE_NOT_FOUND"); assert.deepEqual(a.body,b.body); assert.equal(JSON.stringify(a.body).includes(stationId),false);
++});
++test("E08.5 HTTP conflitos e recusas de sessão após espera usam RFC 7807", async () => {
++  reset(); for (const [kind, code, status] of [
++    ["account_inactive","ACCOUNT_DEACTIVATED",401], ["invalid_session","INVALID_SESSION",401], ["session_revoked","SESSION_REVOKED",401],
++    ["session_expired","SESSION_EXPIRED",401], ["admin_2fa_required","ADMIN_2FA_REQUIRED",401], ["event_operation_ended","EVENT_OPERATION_ENDED",409],
++  ] as const) { result = { kind }; problem(await patch().send({ availability: "unavailable" }),status,code); }
++  result = { kind: "station_has_pending_call", ...state, availability: "available", pendingServiceSessionId: id(5) };
++  const r = await patch().send({ availability: "unavailable" }); problem(r,409,"STATION_HAS_PENDING_CALL");
++  assert.deepEqual(r.body.station,{ ...state,availability:"available",pendingServiceSessionId:id(5) });
++});
++test("E08.5 HTTP filtra propriedades internas e erros privados de auditoria", async () => {
++  reset(); Object.assign(result,{ actorUserId:userId, audit: "PRIVATE" }); assert.deepEqual((await patch().send({ availability: "unavailable" })).body,state);
++  failure = new Error("PRIVATE_SQL_password@example.test"); const r = await patch().send({ availability: "unavailable" });
++  problem(r,500,"INTERNAL_SERVER_ERROR"); assert.equal(JSON.stringify(r.body).includes("PRIVATE"),false); assert.equal(JSON.stringify(r.body).includes("example.test"),false);
++});
++test("E08.5 DI real sob tsx injeta controller/serviço/banco e não abre conexão", async () => {
++  const names = ["STAFF_IDEMPOTENCY_TTL_SECONDS","PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS"], previous = names.map(name => process.env[name]);
++  for (const name of names) process.env[name] = "60";
++  const real = await NestFactory.create(EventsModule,{logger:false});
++  try {
++    const service = real.get(StationAvailabilityService); assert.equal(Reflect.get(real.get(StationAvailabilityController),"stations"),service);
++    assert.equal(Reflect.get(service,"database"),real.get(DRIZZLE_DATABASE)); assert.equal(real.get<Pool>(POSTGRES_POOL).totalCount,0);
++  } finally { await real.close(); names.forEach((name,index) => { if (previous[index] === undefined) delete process.env[name]; else process.env[name] = previous[index]; }); }
++});
+diff --git a/backend/test/unit/station-availability.test.ts b/backend/test/unit/station-availability.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..36c2e4d95d8d03d0708ae31c686c5b3f2995daee
+--- /dev/null
++++ b/backend/test/unit/station-availability.test.ts
+@@ -0,0 +1,112 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { drizzle } from "drizzle-orm/node-postgres";
++import type { Client } from "pg";
++import * as schema from "../../src/database/schema";
++import { StationAvailabilityService } from "../../src/events/station-availability.service";
++import type { SetStationAvailabilityInput } from "../../src/events/station-availability.types";
++
++const input: SetStationAvailabilityInput = { userId: "actor", sessionId: "session", eventId: "event", stationId: "station", availability: "unavailable" };
++function fixture(options: { missing?: "event" | "discovery" | "experience" | "station" | "session";
++  active?: boolean; verified?: boolean; roles?: readonly string[]; revoked?: boolean; expired?: boolean;
++  secondFactor?: boolean; availability?: "available" | "unavailable"; pending?: boolean;
++  ended?: boolean; expiredAtUpdate?: boolean; fail?: "update" | "audit"; auditCount?: number } = {}) {
++  const queries: Array<{ text: string; params: unknown[] }> = [], marker = new Error("E085_PRIVATE_FAILURE");
++  const database = drizzle({ async query(config: { text: string }, params: unknown[]) {
++    const text = config.text; queries.push({ text, params });
++    if (/^(begin|commit|rollback)/.test(text)) return { rows: [] };
++    if (text.includes("SELECT id FROM events")) return { rows: options.missing === "event" ? [] : [{ id: "event" }] };
++    if (text.includes('AS "experienceId"')) return { rows: options.missing === "discovery" ? [] : [{ experienceId: "experience" }] };
++    if (text.includes("SELECT id FROM experiences")) return { rows: options.missing === "experience" ? [] : [{ id: "experience" }] };
++    if (text.includes("SELECT availability FROM stations")) return { rows: options.missing === "station" ? [] : [{ availability: options.availability ?? "available" }] };
++    if (text.includes("FROM users WHERE")) return { rows: [{ active: options.active ?? true, verified: options.verified ?? true }] };
++    if (text.includes("SELECT role FROM user_roles")) return { rows: (options.roles ?? ["staff"]).map(role => ({ role })) };
++    if (text.includes("SELECT id FROM sessions")) return { rows: options.missing === "session" ? [] : [{ id: "session" }] };
++    if (text.includes('AS "secondFactor"')) return { rows: [{ revoked: options.revoked ?? false, expired: options.expired ?? false, secondFactor: options.secondFactor ?? false }] };
++    if (text.includes("SELECT id FROM service_sessions")) return { rows: options.pending ? [{ id: "pending" }] : [] };
++    if (text.includes("UPDATE stations s")) {
++      if (options.fail === "update") throw marker;
++      return { rows: options.ended || options.expiredAtUpdate ? [] : [{ id: "station" }] };
++    }
++    if (text.includes("SELECT expires_at <=")) return { rows: [{ expired: options.expiredAtUpdate ?? false }] };
++    if (text.includes("INSERT INTO audit_logs")) {
++      if (options.fail === "audit") throw marker;
++      return { rows: options.auditCount === 0 ? [] : [{ id: "audit" }] };
++    }
++    throw new Error(`SQL não previsto na fixture E08.5: ${text}`);
++  } } as unknown as Client, { schema });
++  return { service: new StationAvailabilityService(database), queries, marker };
++}
++test("E08.5 desativa estação e audita na mesma transação READ COMMITTED", async () => {
++  const f = fixture(); assert.deepEqual(await f.service.setAvailability(input), {
++    kind: "changed", stationId: "station", availability: "unavailable", pendingServiceSessionId: null });
++  assert.equal(f.queries[0].text, "begin isolation level read committed"); assert.equal(f.queries.at(-1)?.text, "commit");
++  const update = f.queries.findIndex(q => q.text.includes("UPDATE stations s")), audit = f.queries.findIndex(q => q.text.includes("INSERT INTO audit_logs"));
++  assert.ok(update > 0 && audit > update); assert.equal(f.queries.filter(q => q.text.includes("INSERT INTO audit_logs")).length, 1);
++  assert.match(f.queries[audit].text, /'user','station','station_availability_changed'/); assert.match(f.queries[audit].text, /s.updated_at/);
++  assert.ok(f.queries[audit].params.includes(input.userId)); assert.ok(f.queries[audit].params.includes("available")); assert.ok(f.queries[audit].params.includes("unavailable"));
++});
++test("E08.5 ordem evento exclusivo → experiência → estação → conta/papéis/sessão", async () => {
++  const f = fixture(); await f.service.setAvailability(input);
++  const order = ["SELECT id FROM events", 'AS "experienceId"', "SELECT id FROM experiences", "SELECT availability FROM stations", "FROM users WHERE", "SELECT role FROM user_roles", "SELECT id FROM sessions", 'AS "secondFactor"', "SELECT id FROM service_sessions", "UPDATE stations s"];
++  for (let n=1;n<order.length;n++) assert.ok(f.queries.findIndex(q => q.text.includes(order[n-1])) < f.queries.findIndex(q => q.text.includes(order[n])), order[n]);
++  for (const match of [order[0],order[2],order[3]]) assert.match(f.queries.find(q => q.text.includes(match))!.text, /FOR UPDATE/);
++  for (const match of [order[4],order[5],order[6]]) assert.match(f.queries.find(q => q.text.includes(match))!.text, /FOR SHARE/);
++  assert.equal(f.queries.some(q => /SKIP LOCKED|INSERT INTO idempotency|UPDATE experiences|UPDATE events|UPDATE queue_entries|UPDATE participations/.test(q.text)), false);
++});
++test("E08.5 Admin global com 2FA opera sem Staff; papel Staff exige e-mail verificado", async () => {
++  const f = fixture({ roles: ["admin"], secondFactor: true, verified: false }); assert.equal((await f.service.setAvailability(input)).kind, "changed");
++  const auth = f.queries.find(q => q.text.includes("SELECT role FROM user_roles"))!;
++  assert.match(auth.text, /role='staff' AND event_id=/); assert.match(auth.text, /role='admin' AND event_id IS NULL/); assert.match(auth.text, /revoked_at IS NULL/);
++});
++for (const [name, options, kind] of [
++  ["evento ausente", { missing: "event" }, "access_denied"],
++  ["estação ausente/alheia", { missing: "discovery" }, "access_denied"],
++  ["experiência alterada após descoberta", { missing: "experience" }, "access_denied"],
++  ["estação alterada após espera", { missing: "station" }, "access_denied"],
++  ["conta inativa", { active: false }, "account_inactive"],
++  ["Staff revogado/alheio", { roles: [] }, "access_denied"],
++  ["Staff não verificado", { verified: false }, "access_denied"],
++  ["sessão ausente", { missing: "session" }, "invalid_session"],
++  ["sessão revogada", { revoked: true }, "session_revoked"],
++  ["sessão expirada após locks", { expired: true }, "session_expired"],
++  ["Admin sem 2FA mesmo também Staff", { roles: ["admin", "staff"] }, "admin_2fa_required"],
++  ["operação encerrada no UPDATE", { ended: true }, "event_operation_ended"],
++  ["sessão expirada no UPDATE", { expiredAtUpdate: true }, "session_expired"],
++] as const) test(`E08.5 recusa ${name} sem escrita ou auditoria`, async () => {
++  const f = fixture(options); assert.deepEqual(await f.service.setAvailability(input), { kind });
++  assert.equal(f.queries.some(q => q.text.includes("INSERT INTO audit_logs")), false);
++  if (!options || !("ended" in options || "expiredAtUpdate" in options)) assert.equal(f.queries.some(q => q.text.includes("UPDATE stations s")), false);
++});
++test("E08.5 reativação altera somente configuração da estação e audita valores invertidos", async () => {
++  const f = fixture({ availability: "unavailable" }); const r = await f.service.setAvailability({ ...input, availability: "available" });
++  assert.deepEqual(r, { kind: "changed", stationId: "station", availability: "available", pendingServiceSessionId: null });
++  const update = f.queries.find(q => q.text.includes("UPDATE stations s"))!;
++  assert.match(update.text, /clock_timestamp\(\)/); assert.match(update.text, /d.at < e.operational_deadline_at/); assert.match(update.text, /d.at < e.admin_deadline_at/);
++  assert.doesNotMatch(update.text, /official_ends_at|closure_requested_at|queue_accepting_entries/);
++  assert.match(update.text, /d.at < a.expires_at/); assert.match(update.text, /e.status <> 'closed'/);
++});
++test("E08.5 no-op preserva estado inclusive pending e não executa UPDATE nem auditoria", async () => {
++  for (const availability of ["available", "unavailable"] as const) {
++    const f = fixture({ availability, pending: availability === "available", ended: true });
++    const r = await f.service.setAvailability({ ...input, availability });
++    assert.deepEqual(r, { kind: "unchanged", stationId: "station", availability, pendingServiceSessionId: availability === "available" ? "pending" : null });
++    assert.equal(f.queries.some(q => /UPDATE stations|INSERT INTO audit_logs/.test(q.text)), false);
++  }
++});
++test("E08.5 pending bloqueia desativação sem escrita e retorna estado atual mínimo", async () => {
++  const f = fixture({ pending: true }); assert.deepEqual(await f.service.setAvailability(input), {
++    kind: "station_has_pending_call", stationId: "station", availability: "available", pendingServiceSessionId: "pending" });
++  assert.equal(f.queries.some(q => /UPDATE stations|INSERT INTO audit_logs/.test(q.text)), false);
++});
++test("E08.5 falha de UPDATE/auditoria propaga causa e solicita rollback integral", async () => {
++  for (const fail of ["update", "audit"] as const) {
++    const f = fixture({ fail }); await assert.rejects(f.service.setAvailability(input), error => error instanceof Error && error.cause === f.marker);
++    assert.equal(f.queries.at(-1)?.text, "rollback"); assert.equal(f.queries.some(q => q.text === "commit"), false);
++  }
++  const f = fixture({ auditCount: 0 }); await assert.rejects(f.service.setAvailability(input), /exatamente um registro/);
++  assert.equal(f.queries.at(-1)?.text, "rollback");
++});
++test("E08.5 serviço rejeita disponibilidade inválida antes de abrir transação", async () => {
++  const f = fixture(); await assert.rejects(f.service.setAvailability({ ...input, availability: "occupied" as never }), /inválida/); assert.equal(f.queries.length, 0);
++});
+diff --git a/docs/E08_5_IMPLEMENTACAO.md b/docs/E08_5_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..c6e0ed39ddf6472e001de67fa5f5eba02d6c9824
+--- /dev/null
++++ b/docs/E08_5_IMPLEMENTACAO.md
+@@ -0,0 +1,267 @@
++# E08.5 — Alteração de disponibilidade das estações
++
++Implementada em 03/11/2026, branch `feature/events-participations`, sobre
++`acf0e12575ca189d7255382a5bbe0249a62042a3`. Conferidos HEAD, branch, histórico
++recente e `git status --porcelain=v1 --untracked-files=all` antes das edições:
++working tree limpo, sem arquivos não rastreados. A E08.4 está versionada no próprio
++HEAD `acf0e12` (`feat(events): implementar consultas operacionais HTTP do Staff`).
++Nenhuma alteração preexistente foi incorporada. Base de validação anterior informada
++pelo responsável: 260 unitários e 336 testes PostgreSQL aprovados.
++
++## Contrato HTTP
++
++`PATCH /api/v1/staff/events/:eventId/stations/:stationId/availability`, registrado
++em EventsModule por `StationAvailabilityController`, delega a
++`StationAvailabilityService.setAvailability({ userId, sessionId, eventId,
++stationId, availability })`. Não havia serviço dessa mutação no backend.
++
++Exige Bearer válido por `RequireSessionAuth`; ator vem de `CurrentUserId` e sessão
++de `CurrentUser('sessionId')`. Identidades em query/body não escolhem o ator.
++Reutiliza `operationUuid`, `validateOperationParams`, `validateOperationBody`
++e o filtro RFC 7807 existentes. UUIDs são normalizados para minúsculas. Corpo JSON
++obrigatório, objeto estrito contendo somente `availability: 'available' |
++'unavailable'`. Arrays, corpo ausente, valores diferentes, JSON malformado,
++campos extras e Content-Type inadequado são recusados.
++
++Resposta 200 para mudança ou repetição:
++
++```json
++{
++  "stationId": "550e8400-e29b-41d4-a716-446655440401",
++  "availability": "unavailable",
++  "pendingServiceSessionId": null
++}
++```
++
++Repetir `available` com atendimento pending retorna 200 com o ID pendente, sem
++alterar disponibilidade nem resolver atendimento. O controller projeta apenas os
++três campos públicos, sem `kind`, ator, sessão, auditoria, nomes ou dados pessoais.
++
++| HTTP | Código e condição |
++| --- | --- |
++| 400 | `VALIDATION_ERROR` para parâmetros/body; `BAD_REQUEST` para JSON malformado |
++| 401 | Códigos existentes de token/sessão/conta/2FA e revalidação transacional |
++| 404 | `RESOURCE_NOT_FOUND`: evento/estação ausente ou alheio, concessão insuficiente ou Staff não verificado |
++| 409 | `STATION_HAS_PENDING_CALL`: desativação bloqueada; extensão `station` contém somente os três campos operacionais atuais |
++| 409 | `EVENT_OPERATION_ENDED`: mudança efetiva com evento `closed` ou prazo definitivo atingido |
++| 500 | `INTERNAL_SERVER_ERROR` genérico, inclusive falha SQL/auditoria, sem SQL ou dados privados |
++
++## Permissões e revalidação
++
++Staff precisa de concessão `role='staff'`, `event_id` igual ao evento, não revogada,
++conta ativa e e-mail verificado. Admin precisa de concessão global vigente
++`role='admin', event_id IS NULL`, conta ativa e sessão com segundo fator confirmado,
++conforme a política atual de Auth. Admin sem Staff pode alterar disponibilidade
++por D01/§16.7/§18.1, sem adquirir acesso às consultas exclusivas Staff ou às operações
++call-next/complete/absent. Admin também Staff continua sujeito ao 2FA.
++
++Papéis do token/principal não autorizam a mutação. Dentro da transação, após os
++locks dos recursos, são bloqueados conta, concessões elegíveis e sessão, nessa
++ordem, com `FOR SHARE`. Conta e concessões revogadas durante esperas são relidas
++sob READ COMMITTED; os locks retêm a autorização obtida até COMMIT. Outra instrução
++após os locks da sessão verifica revogação, expiração por relógio PostgreSQL e 2FA:
++expressões de um SELECT com lock podem ter sido avaliadas antes da espera.
++A sessão deve pertencer ao ator. Sua expiração é revalidada também no UPDATE.
++O vínculo estação → experiência → evento é conferido antes e depois dos locks;
++ID ausente/alheio não revela a cadeia persistida.
++
++## Locks, tempo e preservação de estado
++
++Transação `READ COMMITTED`, ordem `events FOR UPDATE` → descoberta não bloqueante
++da experiência → `experiences FOR UPDATE` → `stations FOR UPDATE` → conta/papéis/
++sessão. A descoberta não concede acesso nem dispensa a revalidação de vínculos.
++
++O lock exclusivo do evento é necessário para a capacidade C-14. Serializa com o
++ingresso E03, que usa o mesmo lock exclusivo, e conflita com `events FOR SHARE`
++dos serviços E07.1 e E07.4–E07.6. Assim, uma admissão já efetivada é preservada;
++uma admissão posterior deve observar a estação desativada. As ordens existentes
++de experiência/estação/participação/entrada/atendimento não foram alteradas.
++Não há upgrade de SHARE para UPDATE no novo serviço, locks em ordem inversa ou
++SKIP LOCKED. Mudanças em estações diferentes do mesmo evento também são
++serializadas; isso privilegia a consistência da capacidade, com escopo curto.
++
++Após os locks e a autorização, consulta o pending. A desativação com pending
++retorna 409 sem UPDATE ou auditoria. Uma chamada E07.4 não surge entre essa
++verificação e o UPDATE se seguir o protocolo existente: precisa antes do SHARE
++do evento e dos locks de experiência/estação, incompatíveis com o escritor atual.
++Conclusão/ausência já confirmadas permitem desativação; se a desativação observar
++pending primeiro, retorna conflito e a resolução pode prosseguir depois.
++
++O instante decisivo vem de `clock_timestamp()` em CTE MATERIALIZED no UPDATE.
++Mudanças efetivas exigem `status <> 'closed'` e instante anterior aos prazos
++operacional e administrativo, quando existente. Não usa o relógio do aplicativo.
++Não se promete precisão do instante de COMMIT nem ausência absoluta de deadlocks;
++a aprovação PostgreSQL abaixo valida os cenários cobertos pela suíte.
++
++**Decisão temporal:** a disponibilidade é configuração operacional. A §20.1
++permite configurá-la antes da primeira participação; não se exige que o evento
++já tenha começado. A §16.7 permite operação residual: reativação após corte
++oficial ou fechamento controlado pode restaurar uma estação para chamadas de
++waiting preexistentes, até o prazo efetivo. Isso não reabre novas inscrições.
++E03/E07.1/E06 continuam aplicando seus cortes oficial/Admin e critérios de
++prontidão. Após encerramento definitivo, ambas as mudanças efetivas são negadas.
++Repetições autorizadas continuam 200 mesmo após o prazo, pois não mudam estado.
++
++O serviço escreve somente `stations.availability`, `stations.updated_at` e sua
++auditoria. Não muda evento, `queue_accepting_entries`, outras estações, filas,
++participações, ponteiros, ordens bigint, contadores, snapshots ou atendimentos.
++Perder a última estação suspende ingressos dinamicamente pelas guardas existentes,
++sem cancelar pessoas ou fechar artificialmente o evento. Outra experiência apta
++permanece habilitada. Ocupação pending continua distinta de disponibilidade.
++Leituras E08.4 mantêm snapshot somente leitura e observam estado confirmado.
++
++## Auditoria e idempotência
++
++Foi consultado o schema `audit_logs`: não existe helper nem writer de auditoria
++de produção no backend atual. A implementação mínima usa esse schema diretamente,
++sem tabela/migration nova. Cada transição efetiva grava exatamente uma linha:
++
++- `actor_user_id` e `event_id` do contexto autorizado; `origin='user'`.
++- `category='station'`, `action='station_availability_changed'`.
++- `metadata`: `stationId`, `experienceId`, `before: { availability }` e
++  `after: { availability }`; sem dados de participante, tokens ou justificativa
++  inventada. `target_user_id` e `reason` permanecem nulos.
++- `occurred_at` obtido de `stations.updated_at` diretamente no PostgreSQL,
++  preservando o mesmo instante e precisão do UPDATE.
++
++UPDATE e auditoria usam a mesma conexão/transação. Auditoria sem exatamente uma
++linha ou qualquer erro aborta e reverte integralmente a mutação. No-op, conflitos
++e recusas não geram auditoria. Não há trilha fictícia de tentativa como mudança.
++
++**Exceção específica à regra geral da §16.1:** aplica a idempotência natural
++explicitamente prevista na §16.7. O PATCH declara estado desejado; após serializar
++e reautorizar, igualdade com o estado atual retorna 200 sem UPDATE, sem tocar
++updated_at e sem duplicar auditoria. Não exige nem interpreta Idempotency-Key,
++não reserva `idempotency_operations` e não cria TTL. Os TTLs existentes do módulo
++continuam necessários para seus providers de POST, sem política nova nesta rota.
++Repetição após uma transição oposta é uma nova mudança real e deve ser auditada;
++não é replay histórico de intenção. O cliente deve observar o estado atual antes
++de decidir uma nova intenção; retries antigos não possuem garantia de replay.
++
++## Validações executadas pelo Codex
++
++| Verificação | Resultado real |
++| --- | --- |
++| Focados E08.5 com `tsx --tsconfig tsconfig.test.json` | **30/30 aprovados**, zero falhas/cancelamentos/skips |
++| `npm.cmd test` | **290/290 aprovados**: 260 anteriores + 30 novos, zero falhas/cancelamentos/skips |
++| `npm.cmd run typecheck:test` | Aprovado, incluindo a suíte PostgreSQL escrita |
++| `npm.cmd run lint` | Aprovado |
++| `npm.cmd run build` | Aprovado |
++| PostgreSQL E08.5 e regressão real | Não executados pelo Codex; aprovados manualmente pelo responsável em 03/11/2026, conforme registro abaixo |
++
++Dos 30 novos, 21 são de serviço e nove HTTP/DI. Cobrem ordem/escopo dos locks,
++autorização, sessão após esperas, 2FA, mudanças/no-op/pending, tempo decisivo,
++auditoria, rollback, UUIDs/body, RFC 7807, projeções e DI real. O teste DI verifica
++identidade controller → serviço → banco e Pool sem conexões, sem init/listen.
++
++A execução inicial do tsx na sandbox falhou antes dos testes por
++`uv_os_get_passwd / ENOMEM`. As execuções aprovadas ocorreram fora da sandbox,
++com DOTENV_CONFIG_PATH=NUL, URL fictícia sem conexão e TTLs 60 explícitos.
++Não foi lido .env, solicitado segredo nem acessado PostgreSQL real/Neon.
++
++O typecheck inicial encontrou apenas incompatibilidade do array readonly da
++fixture; corrigido o tipo do parâmetro para aceitar a matriz imutável.
++O primeiro focado passou 29/30: a asserção da falha SQL comparava o wrapper com
++o erro original. Conferidos `pg-core/session.js` do Drizzle e os testes E07:
++Drizzle lança `DrizzleQueryError` com o erro original em `cause`. A asserção passou
++a exigir essa identidade exata em `cause`, mantendo a prova de rollback e a
++proibição de COMMIT. Nenhuma expectativa de negócio foi alterada.
++
++Revisão técnica pontual confrontou SQL, autenticação, schema/checks/FKs,
++E03/E07.1/E07.4–E07.6, E08.4 e especificação. Na revisão estática, o tipo Context
++da fixture foi explicitado como IDs string para testar UUID inválido/normalização;
++o código esperado de perda de capacidade segue o catálogo efetivo E08.2
++`EVENT_UNAVAILABLE`. Preservação de queue_order/last_queue_order é comparada em
++texto exato, sem conversão de bigint em number nos snapshots de teste.
++
++## PostgreSQL real — aprovação manual em 03/11/2026
++
++O responsável confirmou a execução e aprovação manual da E08.5 em 03/11/2026:
++
++| Suíte PostgreSQL | Executados | Aprovados | Falhas | Cancelamentos | Ignorados |
++| --- | --- | --- | --- | --- | --- |
++| HTTP E08.5 | 35 | 35 | 0 | 0 | 0 |
++| Regressão completa | 371 | 371 | 0 | 0 | 0 |
++
++Os **35/35 testes HTTP** estão em
++`backend/test/integration/station-availability-http.integration.test.ts` e incluem
++cenários parametrizados de conclusão/ausência. A regressão **371/371** corresponde
++aos 336 testes anteriores e aos 35 novos da E08.5.
++
++Esses resultados são atribuídos exclusivamente à execução manual informada pelo
++responsável. Permanecem os resultados anteriores do Codex: **290/290 unitários**,
++**30/30 focados**, typecheck, lint e build aprovados. A validação PostgreSQL da
++E08.5 está concluída, sem testes de integração pendentes. Não há validação de produção.
++
++Cobrem os 28 grupos solicitados: Staff/Admin, 2FA, conta/sessões, escopo/UUIDs,
++body estrito, transições/no-op, pending/409, resolução e histórico, perda da última
++estação do evento/experiência, restauração e cortes, fim definitivo, isolamento,
++privacidade, auditoria exata/única e rollback. Disputas com call-next, conclusão/
++ausência, ingresso E03 e E07.1, dois PATCH e revogação Staff são verificadas com
++transações reais e conexões independentes, nas duas ordens relevantes.
++
++Helpers retêm a primeira transação real antes do COMMIT e exigem observação por
++`pg_blocking_pids` de que a segunda espera pelos locks. Não dependem somente de
++Promise.all ou sleeps presumindo uma corrida. Fixtures também alteram conta,
++sessão/2FA, concessão e prazo/status durante uma espera já observada no evento.
++Os wrappers sempre restauram o método original e liberam/aguardam as operações
++em finally. Um cenário confirma que E08.4 pode ler o estado confirmado durante
++um UPDATE ainda não commitado, e observa a mudança na leitura seguinte.
++
++A falha intermediária usa erro PostgreSQL real (`SELECT 1/0`) na fase da auditoria
++e após seu INSERT, na mesma transação real. Não substitui resultado de consultas
++por mocks. Exige HTTP 500 genérico e igualdade integral do estado antes/depois,
++inclusive auditoria e updated_at. Snapshots comparam também filas, participações,
++históricos, ordens exatas, contadores e idempotência.
++
++Preflight antes dos providers exige as três URLs idênticas, sem parâmetros,
++exclusivamente `127.0.0.1:55432/arenago_events_test`. Fixtures e limpeza transacional
++limitadas a UUIDs próprios; sem migrations, seed ou reset. O responsável configura
++as credenciais locais sem compartilhá-las. Os comandos abaixo ficam como
++procedimento de reprodução no banco local já preparado:
++
++```powershell
++Set-Location C:\DoJob\ProgramacaoMobile\backend
++$env:NODE_ENV = 'test'
++$env:EVENTS_TEST_DATABASE_URL = 'postgresql://USUARIO:SENHA@127.0.0.1:55432/arenago_events_test'
++$env:DATABASE_URL = $env:EVENTS_TEST_DATABASE_URL
++$env:DATABASE_DIRECT_URL = $env:EVENTS_TEST_DATABASE_URL
++$env:DOTENV_CONFIG_PATH = 'NUL'
++$env:STAFF_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = '60'
++.\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test --test-concurrency=1 test/integration/station-availability-http.integration.test.ts
++if ($LASTEXITCODE -ne 0) { throw 'Investigar E08.5 antes da regressão PostgreSQL.' }
++npm.cmd run test:integration
++if ($LASTEXITCODE -ne 0) { throw 'Investigar falhas da regressão PostgreSQL.' }
++```
++
++## Arquivos e evidência
++
++- `backend/src/events/station-availability.controller.ts`: PATCH, DTO estrito e RFC 7807.
++- `backend/src/events/station-availability.service.ts`: mutação, locks, autorização e auditoria.
++- `backend/src/events/station-availability.types.ts`: contratos internos mínimos.
++- `backend/src/events/events.module.ts`: registra/exporta provider e controller.
++- `backend/test/unit/station-availability.test.ts`: 21 testes de serviço.
++- `backend/test/unit/station-availability-http.test.ts`: nove testes HTTP/DI.
++- `backend/test/integration/station-availability-http.integration.test.ts`: 35 testes PostgreSQL HTTP aprovados manualmente.
++- `docs/ARQUITETURA_BACKEND_ARENAGO.md`: nota local na §16.7.
++- `docs/E08_5_IMPLEMENTACAO.md`: este relatório.
++
++Evidência única: `qa-evidence/e08-5-changes.diff`, completa contra o HEAD inicial
++`acf0e12`, incluindo arquivos novos ainda não rastreados. Validada com git apply
++em cópia isolada da base e comparada aos nove arquivos finais com normalização
++Git de linhas. UTF-8 sem BOM, caminhos relativos; exclui a si própria, outros diffs,
++.env/segredos, dependências, temporários e alterações alheias. Índice e histórico
++preservados; versionamento exclusivamente manual. Nenhuma nova dependência,
++migration, rota Admin duplicada, tela, notificação ou alteração de fila. Sem
++refatoração E07, git add, commit, push, merge, rebase, auditoria geral ou E08.6.
++Validação PostgreSQL concluída conforme execução manual informada pelo responsável;
++não há validação de produção.
++
++Nesta finalização documental, o estado inicial conservava os nove arquivos da
++E08.5 e sua evidência ainda disponíveis para commit manual, sobre o mesmo HEAD
++`acf0e12`. Foram atualizados somente este relatório e a evidência única, preservando
++os outros oito arquivos da task e o histórico de implementação acima. O Codex não
++executou novamente testes, typecheck, lint ou build, nem acessou PostgreSQL ou
++credenciais nesta rodada. O patch atualizado foi aplicado em cópia isolada do
++commit-base e comparado aos nove arquivos finais, sem omissões ou alteração do índice.

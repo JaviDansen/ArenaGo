@@ -1177,6 +1177,18 @@ Expor somente informações operacionais necessárias e auditáveis; o método p
 
 ### 16.7 `PATCH /staff/events/:eventId/stations/:stationId/availability`
 
+**Implementação E08.5 — 03/11/2026:** rota disponível sob `/api/v1`, por
+`StationAvailabilityController`/`StationAvailabilityService`. Staff vigente do
+evento ou Admin global, com sessão/conta revalidadas após locks e 2FA Admin
+preservado. Usa `events FOR UPDATE` → experiência → estação, `READ COMMITTED`,
+relógio PostgreSQL no UPDATE e auditoria atômica para cada mudança efetiva.
+Repetição é no-op 200, sem Idempotency-Key obrigatório ou novo armazenamento.
+Configuração antes do início e reativação residual são permitidas; não reabrem
+ingressos após corte oficial/Admin. `closed` e prazos definitivos impedem mudanças
+efetivas. O 409 por pending inclui o estado mínimo atual em `station` no RFC 7807;
+recursos ausentes/alheios e falta de concessão recebem 404 neutro. Contrato,
+decisões, testes executados e PostgreSQL pendente em `E08_5_IMPLEMENTACAO.md`.
+
 **Staff ativo do evento OU Admin global autorizado;** mesma política no guard e serviço. Corpo:
 
 ```json
