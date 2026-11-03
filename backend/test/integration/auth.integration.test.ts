@@ -29,6 +29,7 @@ import { assertSafeTestDatabase } from "./test-db-guard";
 const connectionString = assertSafeTestDatabase(process.env.DATABASE_URL);
 process.env.STAFF_IDEMPOTENCY_TTL_SECONDS = "60";
 process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = "60";
+process.env.ADMIN_IDEMPOTENCY_TTL_SECONDS = "60";
 
 /**
  * Controller auxiliar para validar o contrato compartilhado de autenticação

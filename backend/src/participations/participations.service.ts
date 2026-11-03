@@ -75,14 +75,14 @@ class JoinEligibilityRollback extends Error {
 export class ParticipationsService {
   constructor(
     @Inject(DRIZZLE_DATABASE) private readonly database: ParticipationsDatabase,
-    private readonly eventsService: EventsService,
+    @Inject(EventsService) private readonly eventsService: EventsService,
   ) {}
 
   /**
    * Alterna a fila externa e, ao desligá-la, libera todos os waiting atomicamente (D06).
    *
-   * @remarks Operação interna para chamador confiável. A futura API Admin deve exigir
-   * Admin/TOTP, justificativa e auditoria na mesma transação; este método não expõe rota.
+   * @remarks Operação interna para chamador confiável. A API E08.6 exige Admin/TOTP,
+   * justificativa e auditoria, compondo WithTx na mesma transação; este método não expõe rota.
    * Usa a ordem evento → participações (UUID crescente), sem travar usuários: não lê nem
    * altera perfis. O lock exclusivo do evento serializa com E03 e demais alternâncias.
    * Repetições do estado persistido são no-op, inclusive depois do corte; mudanças reais
@@ -92,15 +92,29 @@ export class ParticipationsService {
     eventId: string,
     enabled: boolean,
   ): Promise<SetExternalQueueEnabledResult> {
-    return this.database.transaction(async (tx): Promise<SetExternalQueueEnabledResult> => {
+    return this.database.transaction(tx => this.setExternalQueueEnabledWithTx(tx, eventId, enabled),
+      { isolationLevel: "read committed" });
+  }
+
+  /** E08.6: mesma E05 no tx do chamador; callback após locks e antes da decisão/efeitos. */
+  async setExternalQueueEnabledWithTx(
+    tx: ParticipationsTransaction,
+    eventId: string,
+    enabled: boolean,
+    beforeDecision?: (current: boolean | undefined) => Promise<void>,
+  ): Promise<SetExternalQueueEnabledResult> {
       const [event] = await tx
         .select({ externalQueueEnabled: schema.events.externalQueueEnabled })
         .from(schema.events)
         .where(eq(schema.events.id, eventId))
         .for("update")
         .limit(1);
-      if (!event) return { kind: "event_not_found" };
+      if (!event) {
+        await beforeDecision?.(undefined);
+        return { kind: "event_not_found" };
+      }
       if (event.externalQueueEnabled === enabled) {
+        await beforeDecision?.(event.externalQueueEnabled);
         return { kind: "unchanged", eventId, externalQueueEnabled: enabled, releasedCount: 0 };
       }
 
@@ -117,6 +131,7 @@ export class ParticipationsService {
           .for("update");
       }
 
+      await beforeDecision?.(event.externalQueueEnabled);
       const clock = await tx.execute<{ decisionAtMs: number }>(
         sql`SELECT (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::double precision AS "decisionAtMs"`,
       );
@@ -150,7 +165,6 @@ export class ParticipationsService {
         releasedCount = released.rowCount ?? 0;
       }
       return { kind: "changed", eventId, externalQueueEnabled: enabled, releasedCount, changedAt };
-    }, { isolationLevel: "read committed" });
   }
 
   /** Consulta a única participação corrente do usuário e sua posição externa observada. */

@@ -5,6 +5,7 @@ import { AuthModule } from "./auth/auth.module";
 import { ProblemDetailsExceptionFilter } from "./common/errors/problem-details.filter";
 import { DatabaseModule } from "./database/database.module";
 import { EventsModule } from "./events/events.module";
+import { AdminEventsModule } from "./events/admin-events.module";
 import { GamesModule } from "./games/games.module";
 import { ProfileModule } from "./profile/profile.module";
 
@@ -13,6 +14,7 @@ import { ProfileModule } from "./profile/profile.module";
     DatabaseModule,
     AuthModule,
     EventsModule,
+    AdminEventsModule,
     GamesModule,
     ProfileModule,
   ],

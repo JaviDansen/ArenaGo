@@ -1512,6 +1512,19 @@ Quando não houver pendências: `items: []`, **não** `404`. Não retornar pesso
 
 ### 17.10 `PATCH /admin/events/:eventId/external-queue` — ligar/desligar fila externa
 
+**Implementação E08.6 — 03/11/2026:** rota disponível sob `/api/v1`, por
+`AdminEventsModule`, com Admin global, conta/sessão/2FA revalidados na transação.
+Compõe a E05 via `setExternalQueueEnabledWithTx`, preservando o método interno
+existente, para confirmar configuração, liberações, auditoria e idempotência juntas.
+Body estrito, `enabled` booleano, `reason` aparada de 1–500 caracteres sem controles;
+`Idempotency-Key` obrigatória por intenção. Usa TTL técnico próprio e obrigatório
+`ADMIN_IDEMPOTENCY_TTL_SECONDS`, sem fallback; replay enquanto a linha existir,
+inclusive após alteração oposta, continua sujeito à autorização atual. No-op não
+atualiza domínio nem audita, mas conclui a intenção. Resposta 200 sem `kind`:
+`eventId`, `externalQueueEnabled`, `releasedCount` e `changedAt` somente se houve
+mudança na intenção original. Detalhes, limites e PostgreSQL pendente em
+`E08_6_IMPLEMENTACAO.md`.
+
 **Bearer Admin/TOTP + justificativa/auditoria**. Corpo `{ "enabled": false, "reason": "..." }`. Enquanto o evento ainda admite ingressos, **desligar** a fila externa libera atomicamente os participantes `waiting` existentes para `active`; **religar** afeta somente as **novas** participações futuras e não recoloca aqueles já ativos em espera. Depois do corte oficial/Admin, nenhuma alternância pode reabrir ingressos nem liberar fila externa; no fechamento controlado, as esperas externas foram finalizadas conforme §16.13. `409 EVENT_REGISTRATION_CLOSED` para mutação que implicaria reabertura. Usar `events FOR UPDATE` contra novas entradas e auditar transição.
 
 ### 17.11 Erros e cenários de aceitação adicionais — futuros, não executados
