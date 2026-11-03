@@ -7,11 +7,11 @@
  *   posicionado atrás do conteúdo com `pointerEvents="none"`.
  * - Fallback dark automático quando `imageSource={null}`, `disableImage={true}` ou caso
  *   o asset local não esteja disponível ou falhe ao carregar.
- * - Camadas de proteção de contraste configuráveis por variante de tela:
- *   - `welcome`: imagem mais evidente no topo/centro, escurecimento forte na base textual.
- *   - `login`: imagem discreta, maior escurecimento na região do formulário.
- *   - `register`: prioridade máxima à legibilidade, background apenas como ambientação.
- *   - `forgotPassword`: ambientação discreta e uniforme.
+ * - Proteção de contraste no topo (`topStatusScrim`) para garantir legibilidade da StatusBar
+ *   no Android mesmo sobre artes mais claras.
+ * - Transição vertical progressiva na metade inferior (`bottomScrimLayer` com faixas graduais
+ *   suavizadas por curva Hermite/smoothstep), eliminando cortes horizontais bruscos sem exigir
+ *   bibliotecas nativas adicionais.
  * - Compatível com SafeAreaView, KeyboardAvoidingView e ScrollView sem interceptar toques.
  */
 
@@ -26,25 +26,64 @@ export const AUTH_BACKGROUND_ASSET_PATH = 'app/assets/images/auth/auth-backgroun
 export const AUTH_BACKGROUND_PRESETS = {
   welcome: {
     imageOpacity: 0.92,
-    topOverlayOpacity: 0.26,
-    bottomOverlayOpacity: 0.84,
+    topOverlayOpacity: 0.24,
+    bottomOverlayOpacity: 0.92,
+    statusScrimOpacity: 0.48,
   },
   login: {
-    imageOpacity: 0.52,
-    topOverlayOpacity: 0.62,
-    bottomOverlayOpacity: 0.86,
+    imageOpacity: 0.56,
+    topOverlayOpacity: 0.54,
+    bottomOverlayOpacity: 0.9,
+    statusScrimOpacity: 0.36,
   },
   register: {
-    imageOpacity: 0.38,
-    topOverlayOpacity: 0.74,
-    bottomOverlayOpacity: 0.9,
+    imageOpacity: 0.42,
+    topOverlayOpacity: 0.68,
+    bottomOverlayOpacity: 0.92,
+    statusScrimOpacity: 0.32,
   },
   forgotPassword: {
-    imageOpacity: 0.45,
-    topOverlayOpacity: 0.68,
-    bottomOverlayOpacity: 0.88,
+    imageOpacity: 0.5,
+    topOverlayOpacity: 0.6,
+    bottomOverlayOpacity: 0.9,
+    statusScrimOpacity: 0.36,
   },
 };
+
+const BOTTOM_SCRIM_STEP_COUNT = 24;
+const TOP_STATUS_SCRIM_STEP_COUNT = 8;
+
+function createBottomScrimWeights(stepCount) {
+  const weights = [];
+  const fadeZoneRatio = 0.68;
+
+  for (let i = 0; i < stepCount; i += 1) {
+    const t = i / (stepCount - 1);
+    if (t <= fadeZoneRatio) {
+      const u = t / fadeZoneRatio;
+      // Smoothstep (3u^2 - 2u^3): derivada zero no início e no fim da rampa
+      const eased = u * u * (3 - 2 * u);
+      weights.push(Number(eased.toFixed(4)));
+    } else {
+      weights.push(1);
+    }
+  }
+
+  return weights;
+}
+
+function createTopStatusScrimWeights(stepCount) {
+  const weights = [];
+  for (let i = 0; i < stepCount; i += 1) {
+    const u = 1 - i / (stepCount - 1);
+    const eased = u * u * (3 - 2 * u);
+    weights.push(Number(eased.toFixed(4)));
+  }
+  return weights;
+}
+
+export const BOTTOM_SCRIM_WEIGHTS = createBottomScrimWeights(BOTTOM_SCRIM_STEP_COUNT);
+export const TOP_STATUS_SCRIM_WEIGHTS = createTopStatusScrimWeights(TOP_STATUS_SCRIM_STEP_COUNT);
 
 function loadDefaultAuthBackground() {
   try {
@@ -64,7 +103,7 @@ export function resolveAuthBackgroundPreset(variant = 'login', customOverlayOpac
     return {
       ...base,
       topOverlayOpacity: clamped,
-      bottomOverlayOpacity: Math.min(1, clamped + 0.12),
+      bottomOverlayOpacity: Math.min(1, clamped + 0.16),
     };
   }
   return base;
@@ -118,7 +157,7 @@ export function AuthBackground({
           />
         ) : null}
 
-        {/* Camada superior de proteção de contraste */}
+        {/* Camada global de proteção de contraste */}
         <View
           style={[
             styles.overlayLayer,
@@ -128,15 +167,56 @@ export function AuthBackground({
           testID={`${testID}-overlay-top`}
         />
 
-        {/* Camada inferior mais densa para proteger leitura de títulos, inputs e botões */}
+        {/* Proteção suave no topo para garantir contraste consistente da StatusBar (V03) */}
         <View
-          style={[
-            styles.bottomScrimLayer,
-            { backgroundColor: colors.background.base, opacity: preset.bottomOverlayOpacity },
-          ]}
+          style={styles.topStatusScrimLayer}
+          pointerEvents="none"
+          testID={`${testID}-overlay-status`}
+        >
+          {TOP_STATUS_SCRIM_WEIGHTS.map((weight, index) => (
+            <View
+              // eslint-disable-next-line react/no-array-index-key
+              key={`top-scrim-${index}`}
+              style={[
+                styles.scrimBand,
+                {
+                  backgroundColor: colors.background.canvas,
+                  opacity: Number((weight * preset.statusScrimOpacity).toFixed(4)),
+                },
+              ]}
+              pointerEvents="none"
+            />
+          ))}
+        </View>
+
+        {/* Transição gradual inferior sem corte retangular brusco (V01) */}
+        <View
+          style={styles.bottomScrimLayer}
           pointerEvents="none"
           testID={`${testID}-overlay-bottom`}
-        />
+        >
+          {BOTTOM_SCRIM_WEIGHTS.map((weight, index) => (
+            <View
+              // eslint-disable-next-line react/no-array-index-key
+              key={`bottom-scrim-${index}`}
+              style={[
+                styles.scrimBand,
+                {
+                  backgroundColor: colors.background.base,
+                  opacity: Number((weight * preset.bottomOverlayOpacity).toFixed(4)),
+                },
+              ]}
+              pointerEvents="none"
+              testID={
+                index === 0
+                  ? `${testID}-overlay-bottom-start`
+                  : index === BOTTOM_SCRIM_WEIGHTS.length - 1
+                  ? `${testID}-overlay-bottom-end`
+                  : undefined
+              }
+            />
+          ))}
+        </View>
       </View>
 
       {/* Conteúdo interativo respeitando Safe Areas */}
@@ -183,12 +263,24 @@ const styles = StyleSheet.create({
   overlayLayer: {
     ...StyleSheet.absoluteFill,
   },
+  topStatusScrimLayer: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 88,
+    flexDirection: 'column',
+  },
   bottomScrimLayer: {
     position: 'absolute',
     left: 0,
     right: 0,
     bottom: 0,
-    height: '58%',
+    height: '74%',
+    flexDirection: 'column',
+  },
+  scrimBand: {
+    flex: 1,
   },
   safeArea: {
     flex: 1,

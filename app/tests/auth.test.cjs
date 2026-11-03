@@ -1636,6 +1636,32 @@ test('UI-02 & UI-02A: Welcome, Login, Register and ForgotPassword navigate acros
     false,
     'AuthBackground com imageSource=null deve funcionar normalmente usando o fallback dark'
   );
+
+  // 6. V01 & V03: Transição suave no bottomScrimLayer (sem retângulo opaco uniforme) e proteção de StatusBar
+  const bottomScrim = bgWelcome.nodes.find((n) => n.props?.testID === 'bg-welcome-overlay-bottom');
+  const bottomScrimFlatStyle = Object.assign({}, ...[bottomScrim.props.style].flat());
+  assert.equal(
+    bottomScrimFlatStyle.backgroundColor,
+    undefined,
+    'bottomScrimLayer não deve aplicar cor uniforme chapada no contêiner externo (V01)'
+  );
+  const startBand = bgWelcome.nodes.find((n) => n.props?.testID === 'bg-welcome-overlay-bottom-start');
+  const endBand = bgWelcome.nodes.find((n) => n.props?.testID === 'bg-welcome-overlay-bottom-end');
+  assert.equal(startBand.props.style[1].opacity, 0, 'Faixa inicial da transição inferior começa em opacidade 0');
+  assert.ok(
+    endBand.props.style[1].opacity >= 0.85,
+    'Faixa final da transição inferior garante contraste elevado na base textual'
+  );
+  assert.ok(
+    bgWelcome.nodes.some((n) => n.props?.testID === 'bg-welcome-overlay-status'),
+    'AuthBackground inclui proteção superior para contraste da StatusBar no Android (V03)'
+  );
+  for (const screenHarness of [welcome, login, register, forgot]) {
+    const statusBar = screenHarness.nodes.find((n) => n.type === 'StatusBar');
+    assert.equal(statusBar.props.style, 'light');
+    assert.equal(statusBar.props.translucent, true);
+    assert.equal(statusBar.props.backgroundColor, 'transparent');
+  }
 });
 
 test('UI-02: Login and Register support password visibility toggle and clear field/banner errors on input edit', async () => {

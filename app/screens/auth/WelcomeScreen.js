@@ -8,7 +8,7 @@ import { colors, radii, spacing, typography } from '../../theme';
 export default function WelcomeScreen({ navigation }) {
   return (
     <AuthBackground variant="welcome" testID="welcome-background">
-      <StatusBar style="light" />
+      <StatusBar style="light" translucent backgroundColor="transparent" />
 
       <ScrollView
         style={styles.scrollView}
@@ -78,8 +78,8 @@ const styles = StyleSheet.create({
     flexGrow: 1,
     justifyContent: 'space-between',
     paddingHorizontal: spacing.xxl,
-    paddingTop: spacing.lg,
-    paddingBottom: spacing.xxxl,
+    paddingTop: spacing.md,
+    paddingBottom: spacing.xxl,
   },
   header: {
     flexDirection: 'row',
@@ -121,11 +121,11 @@ const styles = StyleSheet.create({
   },
   artworkStage: {
     flex: 1,
-    minHeight: 180,
+    minHeight: 120,
   },
   bottomSection: {
-    gap: spacing.xxl,
-    paddingTop: spacing.xl,
+    gap: spacing.xl,
+    paddingTop: spacing.lg,
   },
   editorialBlock: {
     gap: spacing.sm,
@@ -149,7 +149,7 @@ const styles = StyleSheet.create({
     gap: spacing.md,
   },
   secondaryButton: {
-    backgroundColor: 'rgba(22, 22, 38, 0.88)',
+    backgroundColor: 'rgba(13, 13, 24, 0.84)',
     borderColor: colors.border.input,
   },
 });

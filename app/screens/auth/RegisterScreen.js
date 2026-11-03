@@ -181,7 +181,7 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
 
   return (
     <AuthBackground variant="register" testID="register-background">
-      <StatusBar style="light" />
+      <StatusBar style="light" translucent backgroundColor="transparent" />
 
       <ScreenHeader
         title="ArenaGO"
@@ -200,153 +200,156 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
-          {/* Cabeçalho textual enxuto */}
-          <View style={styles.heroHeader}>
-            <Text style={styles.title}>Comece sua jornada.</Text>
-            <Text style={styles.subtitle}>
-              Preencha suas informações básicas. Seu perfil de jogador será configurado na próxima etapa.
-            </Text>
-          </View>
+          <View style={styles.mainSection}>
+            {/* Cabeçalho textual compacto e hierarquizado */}
+            <View style={styles.heroHeader}>
+              <Text style={styles.kicker}>CRIAR CONTA</Text>
+              <Text style={styles.title}>Comece sua jornada.</Text>
+              <Text style={styles.subtitle}>
+                Preencha suas informações básicas. Seu perfil de jogador será configurado na próxima etapa.
+              </Text>
+            </View>
 
-          {/* Superfície de formulário com prioridade total à legibilidade */}
-          <View style={styles.formSurface}>
-            {timeoutNotice ? (
-              <Card
-                variant="default"
-                padding={spacing.md}
-                style={styles.timeoutCard}
-                testID="register-timeout-notice"
-              >
-                <Text style={styles.timeoutTitle}>Resultado do cadastro não confirmado</Text>
-                <Text style={styles.timeoutText}>{timeoutNotice}</Text>
-                <Button
-                  title="Verificar fazendo Login"
-                  variant="secondary"
-                  size="md"
-                  fullWidth
-                  onPress={() => navigation.navigate('Login', { email: email.trim() })}
-                  accessibilityLabel="Verificar fazendo Login"
-                  style={styles.timeoutButton}
-                  testID="register-timeout-login-button"
-                />
-              </Card>
-            ) : null}
+            {/* Superfície de formulário com contraste refinado sobre os inputs */}
+            <View style={styles.formSurface}>
+              {timeoutNotice ? (
+                <Card
+                  variant="default"
+                  padding={spacing.md}
+                  style={styles.timeoutCard}
+                  testID="register-timeout-notice"
+                >
+                  <Text style={styles.timeoutTitle}>Resultado do cadastro não confirmado</Text>
+                  <Text style={styles.timeoutText}>{timeoutNotice}</Text>
+                  <Button
+                    title="Verificar fazendo Login"
+                    variant="secondary"
+                    size="md"
+                    fullWidth
+                    onPress={() => navigation.navigate('Login', { email: email.trim() })}
+                    accessibilityLabel="Verificar fazendo Login"
+                    style={styles.timeoutButton}
+                    testID="register-timeout-login-button"
+                  />
+                </Card>
+              ) : null}
 
-            {formError ? (
-              <Card
-                variant="default"
-                padding={spacing.md}
-                style={styles.formErrorCard}
-                testID="register-form-error"
-              >
-                <Text style={styles.formErrorText} accessibilityRole="alert">
-                  {formError}
-                </Text>
-              </Card>
-            ) : null}
+              {formError ? (
+                <Card
+                  variant="default"
+                  padding={spacing.md}
+                  style={styles.formErrorCard}
+                  testID="register-form-error"
+                >
+                  <Text style={styles.formErrorText} accessibilityRole="alert">
+                    {formError}
+                  </Text>
+                </Card>
+              ) : null}
 
-            <InputField
-              label="Nome completo"
-              required
-              placeholder="Como quer ser chamado?"
-              value={name}
-              editable={!isSubmitting}
-              error={errors.name}
-              onChangeText={(text) => {
-                setName(text);
-                if (errors.name) {
-                  setErrors((prev) => ({ ...prev, name: null }));
-                }
-                if (formError) setFormError('');
-                if (timeoutNotice) setTimeoutNotice('');
-              }}
-              autoCapitalize="words"
-              autoCorrect={false}
-              containerStyle={styles.fieldContainer}
-              testID="register-name-input"
-            />
+              <InputField
+                label="Nome completo"
+                required
+                placeholder="Como quer ser chamado?"
+                value={name}
+                editable={!isSubmitting}
+                error={errors.name}
+                onChangeText={(text) => {
+                  setName(text);
+                  if (errors.name) {
+                    setErrors((prev) => ({ ...prev, name: null }));
+                  }
+                  if (formError) setFormError('');
+                  if (timeoutNotice) setTimeoutNotice('');
+                }}
+                autoCapitalize="words"
+                autoCorrect={false}
+                containerStyle={styles.fieldContainer}
+                testID="register-name-input"
+              />
 
-            <InputField
-              label="E-mail"
-              required
-              placeholder="seu.email@exemplo.com"
-              value={email}
-              editable={!isSubmitting}
-              error={errors.email}
-              onChangeText={(text) => {
-                setEmail(text);
-                if (errors.email) {
-                  setErrors((prev) => ({ ...prev, email: null }));
-                }
-                if (formError) setFormError('');
-                if (timeoutNotice) setTimeoutNotice('');
-              }}
-              keyboardType="email-address"
-              autoCapitalize="none"
-              autoCorrect={false}
-              containerStyle={styles.fieldContainer}
-              testID="register-email-input"
-            />
+              <InputField
+                label="E-mail"
+                required
+                placeholder="seu.email@exemplo.com"
+                value={email}
+                editable={!isSubmitting}
+                error={errors.email}
+                onChangeText={(text) => {
+                  setEmail(text);
+                  if (errors.email) {
+                    setErrors((prev) => ({ ...prev, email: null }));
+                  }
+                  if (formError) setFormError('');
+                  if (timeoutNotice) setTimeoutNotice('');
+                }}
+                keyboardType="email-address"
+                autoCapitalize="none"
+                autoCorrect={false}
+                containerStyle={styles.fieldContainer}
+                testID="register-email-input"
+              />
 
-            <InputField
-              label="Senha"
-              required
-              placeholder="Crie uma senha de acesso"
-              value={password}
-              editable={!isSubmitting}
-              error={errors.password}
-              hint="Mínimo de 8 caracteres"
-              onChangeText={(text) => {
-                setPassword(text);
-                if (errors.password) {
-                  setErrors((prev) => ({ ...prev, password: null }));
-                }
-                if (formError) setFormError('');
-                if (timeoutNotice) setTimeoutNotice('');
-              }}
-              secureTextEntry={!showPassword}
-              rightIcon={passwordToggle}
-              containerStyle={styles.fieldContainer}
-              testID="register-password-input"
-            />
+              <InputField
+                label="Senha"
+                required
+                placeholder="Crie uma senha de acesso"
+                value={password}
+                editable={!isSubmitting}
+                error={errors.password}
+                hint="Mínimo de 8 caracteres"
+                onChangeText={(text) => {
+                  setPassword(text);
+                  if (errors.password) {
+                    setErrors((prev) => ({ ...prev, password: null }));
+                  }
+                  if (formError) setFormError('');
+                  if (timeoutNotice) setTimeoutNotice('');
+                }}
+                secureTextEntry={!showPassword}
+                rightIcon={passwordToggle}
+                containerStyle={styles.fieldContainer}
+                testID="register-password-input"
+              />
 
-            <InputField
-              label="Confirmar senha"
-              required
-              placeholder="Digite a mesma senha novamente"
-              value={confirmPassword}
-              editable={!isSubmitting}
-              error={errors.confirmPassword}
-              onChangeText={(text) => {
-                setConfirmPassword(text);
-                if (errors.confirmPassword) {
-                  setErrors((prev) => ({ ...prev, confirmPassword: null }));
-                }
-                if (formError) setFormError('');
-                if (timeoutNotice) setTimeoutNotice('');
-              }}
-              secureTextEntry={!showConfirmPassword}
-              rightIcon={confirmPasswordToggle}
-              containerStyle={styles.fieldContainer}
-              testID="register-confirm-password-input"
-            />
+              <InputField
+                label="Confirmar senha"
+                required
+                placeholder="Digite a mesma senha novamente"
+                value={confirmPassword}
+                editable={!isSubmitting}
+                error={errors.confirmPassword}
+                onChangeText={(text) => {
+                  setConfirmPassword(text);
+                  if (errors.confirmPassword) {
+                    setErrors((prev) => ({ ...prev, confirmPassword: null }));
+                  }
+                  if (formError) setFormError('');
+                  if (timeoutNotice) setTimeoutNotice('');
+                }}
+                secureTextEntry={!showConfirmPassword}
+                rightIcon={confirmPasswordToggle}
+                containerStyle={styles.fieldContainer}
+                testID="register-confirm-password-input"
+              />
 
-            <Button
-              title={isSubmitting ? 'Criando sua conta...' : 'Criar minha conta'}
-              variant="primary"
-              size="lg"
-              fullWidth
-              loading={isSubmitting}
-              disabled={isSubmitting}
-              onPress={handleRegister}
-              accessibilityLabel="Criar minha conta"
-              style={styles.submitButton}
-              testID="register-submit-button"
-            />
+              <Button
+                title={isSubmitting ? 'Criando sua conta...' : 'Criar minha conta'}
+                variant="primary"
+                size="lg"
+                fullWidth
+                loading={isSubmitting}
+                disabled={isSubmitting}
+                onPress={handleRegister}
+                accessibilityLabel="Criar minha conta"
+                style={styles.submitButton}
+                testID="register-submit-button"
+              />
 
-            <Text style={styles.stepFootnote}>
-              Ao criar sua conta, você seguirá para o questionário rápido de perfil de jogador.
-            </Text>
+              <Text style={styles.stepFootnote}>
+                Ao criar sua conta, você seguirá para o questionário rápido de perfil de jogador.
+              </Text>
+            </View>
           </View>
 
           {/* Navegação cruzada para Login */}
@@ -382,29 +385,42 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     flexGrow: 1,
+    justifyContent: 'space-between',
     paddingHorizontal: spacing.layout.screenPaddingHorizontal,
-    paddingTop: spacing.md,
-    paddingBottom: spacing.xxxl,
+    paddingTop: spacing.xs,
+    paddingBottom: spacing.xl,
+  },
+  mainSection: {
+    flexGrow: 1,
+    justifyContent: 'center',
   },
   heroHeader: {
-    marginBottom: spacing.lg,
+    marginBottom: spacing.md,
+    gap: spacing.xxs,
+  },
+  kicker: {
+    ...typography.tag,
+    color: colors.brand.primaryLight,
+    marginBottom: spacing.xxs,
   },
   title: {
     ...typography.hero,
+    fontSize: 26,
+    lineHeight: 32,
     color: colors.text.primary,
-    marginBottom: spacing.xs,
   },
   subtitle: {
-    ...typography.bodyLarge,
+    ...typography.body,
     color: colors.text.secondary,
   },
   formSurface: {
-    backgroundColor: 'rgba(22, 22, 38, 0.90)',
+    backgroundColor: 'rgba(11, 11, 18, 0.88)',
     borderWidth: 1,
-    borderColor: colors.border.subtle,
+    borderColor: colors.border.glass,
     borderRadius: radii.xl,
-    padding: spacing.xl,
-    gap: spacing.md,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.lg,
+    gap: spacing.sm + 2,
   },
   fieldContainer: {
     marginBottom: 0,
@@ -449,7 +465,7 @@ const styles = StyleSheet.create({
     marginTop: spacing.xs,
   },
   submitButton: {
-    marginTop: spacing.xs,
+    marginTop: spacing.xxs,
   },
   stepFootnote: {
     ...typography.caption,
@@ -458,12 +474,12 @@ const styles = StyleSheet.create({
     marginTop: spacing.xxs,
   },
   switchAuthContainer: {
-    marginTop: spacing.xl,
+    marginTop: spacing.md,
     minHeight: MIN_TOUCH_TARGET,
     minWidth: MIN_TOUCH_TARGET,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: spacing.sm,
+    paddingVertical: spacing.xs,
     paddingHorizontal: spacing.md,
     borderRadius: radii.lg,
   },

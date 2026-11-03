@@ -165,7 +165,7 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
 
   return (
     <AuthBackground variant="login" testID="login-background">
-      <StatusBar style="light" />
+      <StatusBar style="light" translucent backgroundColor="transparent" />
 
       <ScreenHeader
         title="ArenaGO"
@@ -184,131 +184,134 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
-          {/* Cabeçalho textual limpo */}
-          <View style={styles.heroHeader}>
-            <Text style={styles.title}>De volta ao jogo.</Text>
-            <Text style={styles.subtitle}>
-              Informe suas credenciais para entrar na sua conta.
-            </Text>
-          </View>
+          <View style={styles.mainSection}>
+            {/* Cabeçalho textual com hierarquia clara */}
+            <View style={styles.heroHeader}>
+              <Text style={styles.kicker}>ACESSO À CONTA</Text>
+              <Text style={styles.title}>De volta ao jogo.</Text>
+              <Text style={styles.subtitle}>
+                Informe suas credenciais para entrar na sua conta.
+              </Text>
+            </View>
 
-          {/* Superfície de formulário discreta e legível */}
-          <View style={styles.formSurface}>
-            {sessionNotice && !authError && !twoFactorNotice ? (
-              <Card
-                variant="default"
-                padding={spacing.md}
-                style={styles.sessionNoticeCard}
-                testID="login-session-notice"
+            {/* Superfície de formulário com contraste refinado sobre os inputs */}
+            <View style={styles.formSurface}>
+              {sessionNotice && !authError && !twoFactorNotice ? (
+                <Card
+                  variant="default"
+                  padding={spacing.md}
+                  style={styles.sessionNoticeCard}
+                  testID="login-session-notice"
+                >
+                  <Text style={styles.sessionNoticeText}>{sessionNotice}</Text>
+                </Card>
+              ) : null}
+
+              {twoFactorNotice ? (
+                <Card
+                  variant="default"
+                  padding={spacing.md}
+                  style={styles.twoFactorCard}
+                  testID="login-2fa-notice"
+                >
+                  <Text style={styles.twoFactorTitle}>Verificação em duas etapas exigida</Text>
+                  <Text style={styles.twoFactorText}>{twoFactorNotice}</Text>
+                </Card>
+              ) : null}
+
+              {authError ? (
+                <Card
+                  variant="default"
+                  padding={spacing.md}
+                  style={styles.authErrorCard}
+                  testID="login-auth-error"
+                >
+                  <Text style={styles.authErrorText} accessibilityRole="alert">
+                    {authError}
+                  </Text>
+                </Card>
+              ) : null}
+
+              <InputField
+                label="E-mail"
+                required
+                placeholder="seu.email@exemplo.com"
+                value={email}
+                editable={!isSubmitting}
+                error={errors.email}
+                onChangeText={(text) => {
+                  setEmail(text);
+                  if (errors.email) {
+                    setErrors((prev) => ({ ...prev, email: null }));
+                  }
+                  if (authError) {
+                    setAuthError('');
+                  }
+                  if (twoFactorNotice) {
+                    setTwoFactorNotice('');
+                  }
+                }}
+                keyboardType="email-address"
+                autoCapitalize="none"
+                autoCorrect={false}
+                containerStyle={styles.fieldContainer}
+                testID="login-email-input"
+              />
+
+              <InputField
+                label="Senha"
+                required
+                placeholder="Digite sua senha"
+                value={password}
+                editable={!isSubmitting}
+                error={errors.password}
+                onChangeText={(text) => {
+                  setPassword(text);
+                  if (errors.password) {
+                    setErrors((prev) => ({ ...prev, password: null }));
+                  }
+                  if (authError) {
+                    setAuthError('');
+                  }
+                  if (twoFactorNotice) {
+                    setTwoFactorNotice('');
+                  }
+                }}
+                secureTextEntry={!showPassword}
+                rightIcon={passwordToggle}
+                containerStyle={styles.fieldContainer}
+                testID="login-password-input"
+              />
+
+              <Pressable
+                style={({ pressed }) => [
+                  styles.forgotPasswordContainer,
+                  isSubmitting && styles.disabledControl,
+                  pressed && !isSubmitting && styles.pressedControl,
+                ]}
+                onPress={() => navigation.navigate('ForgotPassword')}
+                disabled={isSubmitting}
+                accessibilityRole="button"
+                accessibilityLabel="Esqueceu sua senha?"
+                accessibilityState={{ disabled: isSubmitting }}
+                testID="login-forgot-password-button"
               >
-                <Text style={styles.sessionNoticeText}>{sessionNotice}</Text>
-              </Card>
-            ) : null}
+                <Text style={styles.forgotPasswordText}>Esqueceu sua senha?</Text>
+              </Pressable>
 
-            {twoFactorNotice ? (
-              <Card
-                variant="default"
-                padding={spacing.md}
-                style={styles.twoFactorCard}
-                testID="login-2fa-notice"
-              >
-                <Text style={styles.twoFactorTitle}>Verificação em duas etapas exigida</Text>
-                <Text style={styles.twoFactorText}>{twoFactorNotice}</Text>
-              </Card>
-            ) : null}
-
-            {authError ? (
-              <Card
-                variant="default"
-                padding={spacing.md}
-                style={styles.authErrorCard}
-                testID="login-auth-error"
-              >
-                <Text style={styles.authErrorText} accessibilityRole="alert">
-                  {authError}
-                </Text>
-              </Card>
-            ) : null}
-
-            <InputField
-              label="E-mail"
-              required
-              placeholder="seu.email@exemplo.com"
-              value={email}
-              editable={!isSubmitting}
-              error={errors.email}
-              onChangeText={(text) => {
-                setEmail(text);
-                if (errors.email) {
-                  setErrors((prev) => ({ ...prev, email: null }));
-                }
-                if (authError) {
-                  setAuthError('');
-                }
-                if (twoFactorNotice) {
-                  setTwoFactorNotice('');
-                }
-              }}
-              keyboardType="email-address"
-              autoCapitalize="none"
-              autoCorrect={false}
-              containerStyle={styles.fieldContainer}
-              testID="login-email-input"
-            />
-
-            <InputField
-              label="Senha"
-              required
-              placeholder="Digite sua senha"
-              value={password}
-              editable={!isSubmitting}
-              error={errors.password}
-              onChangeText={(text) => {
-                setPassword(text);
-                if (errors.password) {
-                  setErrors((prev) => ({ ...prev, password: null }));
-                }
-                if (authError) {
-                  setAuthError('');
-                }
-                if (twoFactorNotice) {
-                  setTwoFactorNotice('');
-                }
-              }}
-              secureTextEntry={!showPassword}
-              rightIcon={passwordToggle}
-              containerStyle={styles.fieldContainer}
-              testID="login-password-input"
-            />
-
-            <Pressable
-              style={({ pressed }) => [
-                styles.forgotPasswordContainer,
-                isSubmitting && styles.disabledControl,
-                pressed && !isSubmitting && styles.pressedControl,
-              ]}
-              onPress={() => navigation.navigate('ForgotPassword')}
-              disabled={isSubmitting}
-              accessibilityRole="button"
-              accessibilityLabel="Esqueceu sua senha?"
-              accessibilityState={{ disabled: isSubmitting }}
-              testID="login-forgot-password-button"
-            >
-              <Text style={styles.forgotPasswordText}>Esqueceu sua senha?</Text>
-            </Pressable>
-
-            <Button
-              title={isSubmitting ? 'Entrando...' : 'Entrar na conta'}
-              variant="primary"
-              size="lg"
-              fullWidth
-              loading={isSubmitting}
-              disabled={isSubmitting}
-              onPress={handleLogin}
-              accessibilityLabel="Entrar na conta"
-              style={styles.submitButton}
-              testID="login-submit-button"
-            />
+              <Button
+                title={isSubmitting ? 'Entrando...' : 'Entrar na conta'}
+                variant="primary"
+                size="lg"
+                fullWidth
+                loading={isSubmitting}
+                disabled={isSubmitting}
+                onPress={handleLogin}
+                accessibilityLabel="Entrar na conta"
+                style={styles.submitButton}
+                testID="login-submit-button"
+              />
+            </View>
           </View>
 
           {/* Navegação cruzada para Cadastro */}
@@ -346,26 +349,37 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     flexGrow: 1,
+    justifyContent: 'space-between',
     paddingHorizontal: spacing.layout.screenPaddingHorizontal,
-    paddingTop: spacing.lg,
-    paddingBottom: spacing.xxxl,
+    paddingTop: spacing.sm,
+    paddingBottom: spacing.xxl,
+  },
+  mainSection: {
+    flexGrow: 1,
+    justifyContent: 'center',
+    paddingVertical: spacing.sm,
   },
   heroHeader: {
-    marginBottom: spacing.xl,
+    marginBottom: spacing.lg,
+    gap: spacing.xxs,
+  },
+  kicker: {
+    ...typography.tag,
+    color: colors.brand.primaryLight,
+    marginBottom: spacing.xxs,
   },
   title: {
     ...typography.hero,
     color: colors.text.primary,
-    marginBottom: spacing.xs,
   },
   subtitle: {
-    ...typography.bodyLarge,
+    ...typography.body,
     color: colors.text.secondary,
   },
   formSurface: {
-    backgroundColor: 'rgba(22, 22, 38, 0.86)',
+    backgroundColor: 'rgba(11, 11, 18, 0.84)',
     borderWidth: 1,
-    borderColor: colors.border.subtle,
+    borderColor: colors.border.glass,
     borderRadius: radii.xl,
     padding: spacing.xl,
     gap: spacing.md,
@@ -432,10 +446,10 @@ const styles = StyleSheet.create({
     fontWeight: typography.weights.semiBold,
   },
   submitButton: {
-    marginTop: spacing.xs,
+    marginTop: spacing.xxs,
   },
   switchAuthContainer: {
-    marginTop: spacing.xxl,
+    marginTop: spacing.lg,
     minHeight: MIN_TOUCH_TARGET,
     minWidth: MIN_TOUCH_TARGET,
     alignItems: 'center',

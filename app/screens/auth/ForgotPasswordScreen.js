@@ -26,7 +26,7 @@ export default function ForgotPasswordScreen({ navigation }) {
 
   return (
     <AuthBackground variant="forgotPassword" testID="forgot-password-background">
-      <StatusBar style="light" />
+      <StatusBar style="light" translucent backgroundColor="transparent" />
 
       <ScreenHeader
         title="ArenaGO"
@@ -39,36 +39,39 @@ export default function ForgotPasswordScreen({ navigation }) {
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
       >
-        <View style={styles.heroHeader}>
-          <Text style={styles.title}>Recuperar acesso</Text>
-          <Text style={styles.subtitle}>
-            A redefinição automática de senha estará disponível em uma próxima etapa do projeto.
-          </Text>
-        </View>
+        <View style={styles.mainSection}>
+          <View style={styles.heroHeader}>
+            <Text style={styles.kicker}>RECUPERAÇÃO DE ACESSO</Text>
+            <Text style={styles.title}>Recuperar acesso</Text>
+            <Text style={styles.subtitle}>
+              A redefinição automática de senha estará disponível em uma próxima etapa do projeto.
+            </Text>
+          </View>
 
-        <Card
-          variant="elevated"
-          padding={spacing.xl}
-          style={styles.statusCard}
-          testID="forgot-password-status-card"
-        >
-          <Badge
-            label="EM CONSTRUÇÃO"
-            variant="warning"
-            size="md"
-            style={styles.statusBadge}
-          />
-          <Text style={styles.cardTitle}>
-            Recuperação por e-mail indisponível nesta versão
-          </Text>
-          <Text style={styles.cardText}>
-            O envio de instruções de recuperação será habilitado assim que o serviço de redefinição estiver integrado ao servidor.
-          </Text>
-          <View style={styles.cardDivider} />
-          <Text style={styles.cardHint}>
-            Caso precise de auxílio imediato durante o evento, procure a equipe de atendimento presencial na ArenaGO.
-          </Text>
-        </Card>
+          <Card
+            variant="elevated"
+            padding={spacing.xl}
+            style={styles.statusCard}
+            testID="forgot-password-status-card"
+          >
+            <Badge
+              label="EM CONSTRUÇÃO"
+              variant="warning"
+              size="md"
+              style={styles.statusBadge}
+            />
+            <Text style={styles.cardTitle}>
+              Recuperação por e-mail indisponível nesta versão
+            </Text>
+            <Text style={styles.cardText}>
+              O envio de instruções de recuperação será habilitado assim que o serviço de redefinição estiver integrado ao servidor.
+            </Text>
+            <View style={styles.cardDivider} />
+            <Text style={styles.cardHint}>
+              Caso precise de auxílio imediato durante o evento, procure a equipe de atendimento presencial na ArenaGO.
+            </Text>
+          </Card>
+        </View>
 
         <Button
           title="Voltar para o Login"
@@ -91,25 +94,36 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     flexGrow: 1,
+    justifyContent: 'space-between',
     paddingHorizontal: spacing.layout.screenPaddingHorizontal,
-    paddingTop: spacing.lg,
-    paddingBottom: spacing.xxxl,
+    paddingTop: spacing.sm,
+    paddingBottom: spacing.xxl,
+  },
+  mainSection: {
+    flexGrow: 1,
+    justifyContent: 'center',
+    paddingVertical: spacing.sm,
   },
   heroHeader: {
-    marginBottom: spacing.xl,
+    marginBottom: spacing.lg,
+    gap: spacing.xxs,
+  },
+  kicker: {
+    ...typography.tag,
+    color: colors.brand.primaryLight,
+    marginBottom: spacing.xxs,
   },
   title: {
     ...typography.hero,
     color: colors.text.primary,
-    marginBottom: spacing.xs,
   },
   subtitle: {
-    ...typography.bodyLarge,
+    ...typography.body,
     color: colors.text.secondary,
   },
   statusCard: {
-    backgroundColor: 'rgba(22, 22, 38, 0.90)',
-    marginBottom: spacing.xxl,
+    backgroundColor: 'rgba(11, 11, 18, 0.86)',
+    borderColor: colors.border.glass,
     gap: spacing.md,
   },
   statusBadge: {

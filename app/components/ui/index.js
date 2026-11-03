@@ -9,5 +9,12 @@ export { Badge } from './Badge.js';
 export { TagChip } from './TagChip.js';
 export { StepperIndicator } from './StepperIndicator.js';
 export { ScreenHeader, BACK_BUTTON_VISUAL_SIZE } from './ScreenHeader.js';
-export { AuthBackground, AUTH_BACKGROUND_PRESETS, AUTH_BACKGROUND_ASSET_PATH, resolveAuthBackgroundPreset } from './AuthBackground.js';
+export {
+  AuthBackground,
+  AUTH_BACKGROUND_PRESETS,
+  AUTH_BACKGROUND_ASSET_PATH,
+  BOTTOM_SCRIM_WEIGHTS,
+  TOP_STATUS_SCRIM_WEIGHTS,
+  resolveAuthBackgroundPreset,
+} from './AuthBackground.js';
 export { DesignSystemPreview } from './DesignSystemPreview.js';
