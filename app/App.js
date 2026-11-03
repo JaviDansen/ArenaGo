@@ -54,6 +54,12 @@ export function AppNavigation() {
       component: EvaluationScreen,
       options: { headerShown: true, headerBackVisible: false, title: 'Avaliação' },
     },
+    // Área Staff somente em modo demonstração; não concede permissão Staff real.
+    // getComponent (React Navigation) só carrega o módulo quando a rota é aberta.
+    {
+      name: 'StaffDemo',
+      getComponent: () => require('./screens/staff/StaffDemoNavigator').default,
+    },
   ];
   const isQuestionnairePending =
     isAuthenticated && auth?.user && auth?.user.hasCompletedQuestionnaire === false;
@@ -86,11 +92,12 @@ export function AppNavigation() {
         <Stack.Navigator
           screenOptions={{ headerShown: false }}
         >
-          {orderedScreens.map(({ name, component, options }) => (
+          {orderedScreens.map(({ name, component, getComponent, options }) => (
             <Stack.Screen
               key={name}
               name={name}
               component={component}
+              getComponent={getComponent}
               options={options}
             />
           ))}
