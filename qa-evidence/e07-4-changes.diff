@@ -1,0 +1,899 @@
+diff --git a/backend/src/events/call-next.service.ts b/backend/src/events/call-next.service.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..9e48cfc20c1c6c2b1f9941db48f4e0adeb20fa5e
+--- /dev/null
++++ b/backend/src/events/call-next.service.ts
+@@ -0,0 +1,143 @@
++import { Inject, Injectable } from "@nestjs/common";
++import { randomUUID } from "node:crypto";
++import { sql } from "drizzle-orm";
++import type { NodePgDatabase } from "drizzle-orm/node-postgres";
++import { DRIZZLE_DATABASE } from "../database/database.module";
++import type * as schema from "../database/schema";
++import { completeIdempotencyOperationWithTx, createRequestFingerprint, reserveIdempotencyOperationWithTx } from "../participations/join-idempotency";
++import type { JsonValue } from "../participations/join-idempotency";
++import type { CalledNext, CallNextBlock, CallNextInput, CallNextResult } from "./call-next.types";
++
++export const CALL_NEXT_OPERATION = "call_next";
++
++export function createCallNextFingerprint(eventId: string, experienceId: string, stationId: string): string {
++  return createRequestFingerprint(CALL_NEXT_OPERATION, { eventId, experienceId, stationId });
++}
++
++export class CallNextIntegrityError extends Error {
++  constructor(detail: string) { super(`Integridade da chamada interna: ${detail}`); this.name = "CallNextIntegrityError"; }
++}
++class CallNextRollback extends Error {
++  constructor(readonly result: CallNextBlock) { super(result.kind); }
++}
++function block(result: CallNextBlock): never { throw new CallNextRollback(result); }
++function ensure(condition: unknown, detail: string): asserts condition {
++  if (!condition) throw new CallNextIntegrityError(detail);
++}
++function instant(ms: number): Date {
++  ensure(typeof ms === "number" && Number.isFinite(ms), "instante PostgreSQL inválido.");
++  const date = new Date(ms); ensure(Number.isFinite(date.getTime()), "instante fora do intervalo de Date."); return date;
++}
++function replay(payload: JsonValue | null, input: CallNextInput): CalledNext {
++  ensure(payload && typeof payload === "object" && !Array.isArray(payload), "replay inválido.");
++  const s = payload.serviceSession;
++  ensure(s && typeof s === "object" && !Array.isArray(s)
++    && typeof s.id === "string" && typeof s.queueEntryId === "string"
++    && s.experienceId === input.experienceId && s.status === "pending"
++    && typeof s.calledAt === "string", "replay de atendimento inválido.");
++  const station = s.station;
++  ensure(station && typeof station === "object" && !Array.isArray(station)
++    && station.id === input.stationId && typeof station.label === "string", "replay de estação inválido.");
++  return { serviceSession: { id: s.id, queueEntryId: s.queueEntryId, experienceId: input.experienceId,
++    station: { id: input.stationId, label: station.label }, status: "pending", calledAt: instant(Date.parse(s.calledAt)) } };
++}
++
++/** E07.4: reserva o primeiro waiting na estação, sem resolver presença ou chamar automaticamente. */
++@Injectable()
++export class CallNextService {
++  constructor(@Inject(DRIZZLE_DATABASE) private readonly database: NodePgDatabase<typeof schema>) {}
++
++  async callNext(input: CallNextInput): Promise<CallNextResult> {
++    if (!input.idempotencyKey.trim() || input.idempotencyKey.length > 128 || !Number.isFinite(input.expiresAt.getTime())) {
++      throw new Error("Chave de idempotência ou expiração inválida.");
++    }
++    try {
++      return await this.database.transaction(async (tx): Promise<CallNextResult> => {
++        const event = await tx.execute(sql`SELECT id FROM events WHERE id=${input.eventId} FOR SHARE`);
++        if (!event.rows.length) block({ kind: "staff_event_forbidden" });
++        const experience = await tx.execute(sql`SELECT id FROM experiences
++          WHERE id=${input.experienceId} AND event_id=${input.eventId} FOR UPDATE`);
++        if (!experience.rows.length) block({ kind: "staff_event_forbidden" });
++        const station = await tx.execute<{ availability: string; label: string }>(sql`SELECT availability, label FROM stations
++          WHERE id=${input.stationId} AND experience_id=${input.experienceId} FOR UPDATE`);
++        if (!station.rows.length) block({ kind: "staff_event_forbidden" });
++        // Mantém conta e concessão válidas até COMMIT, inclusive contra revogação direta.
++        // Admin isolado nunca satisfaz esta consulta; não exige Staff online ou atribuído à estação.
++        const staff = await tx.execute(sql`SELECT r.id FROM users u JOIN user_roles r ON r.user_id=u.id
++          WHERE u.id=${input.staffUserId} AND u.is_active=true AND u.email_verified_at IS NOT NULL
++            AND r.role='staff' AND r.event_id=${input.eventId} AND r.revoked_at IS NULL
++          FOR SHARE OF u, r`);
++        if (!staff.rows.length) block({ kind: "staff_event_forbidden" });
++
++        // Reconhecer retry antes de exigir estação livre/fila/tempo atuais: resposta histórica.
++        // Namespace próprio; nenhum outro comando adquire esta reserva antes do mutex da experiência.
++        const reservation = await reserveIdempotencyOperationWithTx(tx, {
++          actorUserId: input.staffUserId, operation: CALL_NEXT_OPERATION, idempotencyKey: input.idempotencyKey,
++          requestHash: createCallNextFingerprint(input.eventId, input.experienceId, input.stationId), expiresAt: input.expiresAt,
++        });
++        if (reservation.kind === "request_conflict" || reservation.kind === "in_progress") return { kind: reservation.kind };
++        if (reservation.kind === "replay") return { kind: "replay", ...replay(reservation.resultPayload, input) };
++
++        const window = await tx.execute<{ operating: boolean }>(sql`SELECT
++          status <> 'closed' AND starts_at <= clock_timestamp() AND clock_timestamp() < operational_deadline_at
++          AND (admin_deadline_at IS NULL OR clock_timestamp() < admin_deadline_at) AS operating
++          FROM events WHERE id=${input.eventId}`);
++        if (!window.rows[0]?.operating) block({ kind: "event_operation_ended" });
++        ensure(["available", "unavailable"].includes(station.rows[0].availability), "disponibilidade desconhecida.");
++        if (station.rows[0].availability !== "available") block({ kind: "station_unavailable" });
++        const pending = await tx.execute(sql`SELECT id FROM service_sessions WHERE station_id=${input.stationId} AND status='pending'`);
++        if (pending.rows.length) block({ kind: "station_has_pending_call" });
++
++        // Descoberta após o mutex. Não travar queue_entries antes da participação nem furar FIFO.
++        const candidate = await tx.execute<{ id: string; participationId: string }>(sql`SELECT id, participation_id AS "participationId"
++          FROM queue_entries WHERE experience_id=${input.experienceId} AND event_id=${input.eventId} AND status='waiting'
++          ORDER BY queue_order, id LIMIT 1`);
++        const first = candidate.rows[0]; if (!first) block({ kind: "queue_empty" });
++        const person = await tx.execute<{ status: string; currentId: string | null }>(sql`SELECT status, current_queue_entry_id AS "currentId"
++          FROM participations WHERE id=${first.participationId} AND event_id=${input.eventId} FOR UPDATE`);
++        ensure(person.rows.length === 1 && person.rows[0].status === "active" && person.rows[0].currentId === first.id,
++          "primeiro waiting sem participação ativa e ponteiro coerente.");
++        const entry = await tx.execute(sql`SELECT id FROM queue_entries
++          WHERE id=${first.id} AND participation_id=${first.participationId} AND event_id=${input.eventId}
++            AND experience_id=${input.experienceId} AND status='waiting'
++            AND id=(SELECT id FROM queue_entries WHERE experience_id=${input.experienceId}
++              AND event_id=${input.eventId} AND status='waiting' ORDER BY queue_order, id LIMIT 1)
++          FOR UPDATE`);
++        ensure(entry.rows.length === 1, "primeiro waiting mudou fora do protocolo de locks.");
++        const prior = await tx.execute(sql`SELECT id FROM service_sessions WHERE queue_entry_id=${first.id} FOR UPDATE`);
++        ensure(prior.rows.length === 0, "entrada waiting já possui atendimento.");
++
++        // Relógio avaliado no INSERT decisivo depois de TODAS as esperas, sem corte de novos ingressos.
++        const sessionId = randomUUID();
++        const inserted = await tx.execute<{ calledAtMs: number }>(sql`
++          WITH decision AS MATERIALIZED (SELECT clock_timestamp() AS at)
++          INSERT INTO service_sessions(id,queue_entry_id,experience_id,station_id,called_by_user_id,called_at,status)
++          SELECT ${sessionId},q.id,q.experience_id,t.id,${input.staffUserId},d.at,'pending'
++          FROM queue_entries q JOIN participations p ON p.id=q.participation_id AND p.event_id=q.event_id
++          JOIN events e ON e.id=q.event_id JOIN stations t ON t.id=${input.stationId} AND t.experience_id=q.experience_id
++          CROSS JOIN decision d
++          WHERE q.id=${first.id} AND q.event_id=${input.eventId} AND q.experience_id=${input.experienceId}
++            AND q.status='waiting' AND p.status='active' AND p.current_queue_entry_id=q.id AND t.availability='available'
++            AND e.status <> 'closed' AND e.starts_at <= d.at AND d.at < e.operational_deadline_at
++            AND (e.admin_deadline_at IS NULL OR d.at < e.admin_deadline_at)
++          RETURNING (EXTRACT(EPOCH FROM called_at)*1000)::double precision AS "calledAtMs"
++        `);
++        if (!inserted.rows.length) block({ kind: "event_operation_ended" });
++        ensure(inserted.rows.length === 1, "chamada afetou múltiplos atendimentos.");
++        const calledAt = instant(inserted.rows[0].calledAtMs);
++        const called = await tx.execute(sql`UPDATE queue_entries SET status='called'
++          WHERE id=${first.id} AND participation_id=${first.participationId} AND event_id=${input.eventId}
++            AND experience_id=${input.experienceId} AND status='waiting' RETURNING id`);
++        ensure(called.rows.length === 1, "waiting não pôde ser chamada.");
++        const result: CalledNext = { serviceSession: { id: sessionId, queueEntryId: first.id, experienceId: input.experienceId,
++          station: { id: input.stationId, label: station.rows[0].label }, status: "pending", calledAt } };
++        await completeIdempotencyOperationWithTx(tx, reservation.operationId, { httpStatus: 201,
++          resultReference: sessionId, resultPayload: { serviceSession: { ...result.serviceSession, calledAt: calledAt.toISOString() } } });
++        return { kind: "created", ...result };
++      }, { isolationLevel: "read committed" });
++    } catch (error) {
++      if (error instanceof CallNextRollback) return error.result;
++      throw error;
++    }
++  }
++}
+diff --git a/backend/src/events/call-next.types.ts b/backend/src/events/call-next.types.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..85c3f7e7b273b426fe742e29c5ec19e697953455
+--- /dev/null
++++ b/backend/src/events/call-next.types.ts
+@@ -0,0 +1,34 @@
++/** Ator confiável fornecido pelo chamador interno; o serviço revalida Staff no banco. */
++export interface CallNextInput {
++  staffUserId: string;
++  eventId: string;
++  experienceId: string;
++  stationId: string;
++  idempotencyKey: string;
++  /** Expiração explícita; não define uma política nova de retenção. */
++  expiresAt: Date;
++}
++
++export interface CalledNext {
++  serviceSession: {
++    id: string;
++    queueEntryId: string;
++    experienceId: string;
++    station: { id: string; label: string };
++    status: "pending";
++    calledAt: Date;
++  };
++}
++
++export type CallNextBlock = { kind:
++  | "staff_event_forbidden"
++  | "station_unavailable"
++  | "station_has_pending_call"
++  | "queue_empty"
++  | "event_operation_ended"
++};
++
++export type CallNextResult =
++  | ({ kind: "created" | "replay" } & CalledNext)
++  | CallNextBlock
++  | { kind: "request_conflict" | "in_progress" };
+diff --git a/backend/src/events/events.module.ts b/backend/src/events/events.module.ts
+index d1fd09290ffe78cea70bc543613571fc85745e21..9ba6f00074440c183dfd1036b3cf7c2c9454e73e 100644
+--- a/backend/src/events/events.module.ts
++++ b/backend/src/events/events.module.ts
+@@ -5,11 +5,12 @@ import { ExperiencesService } from "./experiences.service";
+ import { QueueEntryService } from "./queue-entry.service";
+ import { QueueStateService } from "./queue-state.service";
+ import { QueueWithdrawalService } from "./queue-withdrawal.service";
++import { CallNextService } from "./call-next.service";
+ 
+ /** Agrupa os serviços de Events e reutiliza o acesso PostgreSQL compartilhado. */
+ @Module({
+   imports: [DatabaseModule],
+-  providers: [EventsService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService],
+-  exports: [EventsService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService],
++  providers: [EventsService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService],
++  exports: [EventsService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService],
+ })
+ export class EventsModule {}
+diff --git a/backend/test/integration/call-next.integration.test.ts b/backend/test/integration/call-next.integration.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..348ec73cf6eeb45faf79084aa6318f42bd78f5a1
+--- /dev/null
++++ b/backend/test/integration/call-next.integration.test.ts
+@@ -0,0 +1,423 @@
++import assert from "node:assert/strict";
++import { randomUUID } from "node:crypto";
++import { devNull } from "node:os";
++import { after, before, test } from "node:test";
++import { sql } from "drizzle-orm";
++import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
++import { Pool, type PoolClient } from "pg";
++import * as schema from "../../src/database/schema";
++import type { DatabaseTransactionExecutor } from "../../src/database/database-executor";
++import type { CallNextService } from "../../src/events/call-next.service";
++import type { CallNextInput, CallNextResult } from "../../src/events/call-next.types";
++import type { QueueEntryService } from "../../src/events/queue-entry.service";
++import type { QueueWithdrawalService } from "../../src/events/queue-withdrawal.service";
++import { assertSafeTestDatabase } from "./test-db-guard";
++
++// Preflight antes de importar configuração/serviços. Nenhum fallback para .env.
++const urls = ["DATABASE_URL", "DATABASE_DIRECT_URL", "EVENTS_TEST_DATABASE_URL"].map(name => {
++  const value = assertSafeTestDatabase(process.env[name]);
++  const u = new URL(value);
++  if (u.hostname !== "127.0.0.1" || u.port !== "55432" || u.pathname !== "/arenago_events_test"
++    || u.search || u.hash || !u.username) throw new Error(`${name}: destino local explícito obrigatório, sem parâmetros.`);
++  return value;
++});
++if (urls.some(value => value !== urls[0])) throw new Error("As três URLs explícitas precisam ser idênticas.");
++process.env.DOTENV_CONFIG_PATH = devNull;
++const config = { connectionString: urls[2], ssl: false, max: 5, connectionTimeoutMillis: 2000, statement_timeout: 10000, lock_timeout: 8000 };
++const servicePool = new Pool(config);
++const fixturePool = new Pool(config);
++const database = drizzle(servicePool, { schema });
++type Database = NodePgDatabase<typeof schema>;
++let makeCall: (db: Database) => CallNextService;
++let makeWithdrawal: (db: Database) => QueueWithdrawalService;
++let caller: CallNextService;
++let joining: QueueEntryService;
++let withdrawal: QueueWithdrawalService;
++const ids = { events: [] as string[], users: [] as string[] };
++const baseOrder = 9007199254741000n;
++
++before(async () => {
++  assert.equal((await fixturePool.query("SELECT current_database() AS name")).rows[0].name, "arenago_events_test");
++  const { CallNextService } = await import("../../src/events/call-next.service");
++  const { QueueEntryService } = await import("../../src/events/queue-entry.service");
++  const { QueueWithdrawalService } = await import("../../src/events/queue-withdrawal.service");
++  const { EventsService } = await import("../../src/events/events.service");
++  makeCall = db => new CallNextService(db); makeWithdrawal = db => new QueueWithdrawalService(db);
++  caller = makeCall(database); withdrawal = makeWithdrawal(database);
++  joining = new QueueEntryService(database, new EventsService(database));
++});
++after(async () => {
++  const errors: unknown[] = [];
++  try {
++    const c = await fixturePool.connect();
++    try {
++      await c.query("BEGIN");
++      await c.query("UPDATE participations SET current_queue_entry_id=NULL WHERE event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM service_sessions s USING queue_entries q WHERE s.queue_entry_id=q.id AND q.event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM queue_entries WHERE event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM participations WHERE event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM stations s USING experiences x WHERE s.experience_id=x.id AND x.event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM experiences WHERE event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM user_roles WHERE user_id=ANY($1::uuid[])", [ids.users]);
++      await c.query("DELETE FROM idempotency_operations WHERE actor_user_id=ANY($1::uuid[])", [ids.users]);
++      await c.query("DELETE FROM events WHERE id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM users WHERE id=ANY($1::uuid[])", [ids.users]);
++      await c.query("COMMIT");
++    } catch (e) { await c.query("ROLLBACK"); throw e; } finally { c.release(); }
++  } catch (e) { errors.push(e); }
++  for (const result of await Promise.allSettled([servicePool.end(), fixturePool.end()])) if (result.status === "rejected") errors.push(result.reason);
++  if (errors.length) throw new AggregateError(errors, "Falha na limpeza E07.4.");
++});
++
++async function user() {
++  const id = randomUUID();
++  await fixturePool.query(`INSERT INTO users(id,name,email,password_hash,email_verified_at,created_at,updated_at)
++    VALUES($1,'E074 privado',$2,'fixture-hash',clock_timestamp(),clock_timestamp(),clock_timestamp())`, [id, `${id}@example.test`]);
++  ids.users.push(id); return id;
++}
++async function staff(userId: string, eventId: string) {
++  await fixturePool.query("INSERT INTO user_roles(id,user_id,role,event_id,granted_at) VALUES($1,$2,'staff',$3,clock_timestamp())", [randomUUID(), userId, eventId]);
++}
++async function experience(eventId: string) {
++  const experienceId = randomUUID();
++  await fixturePool.query(`INSERT INTO experiences(id,event_id,name,last_queue_order,created_at,updated_at)
++    VALUES($1,$2,'E074 experiência',$3,clock_timestamp(),clock_timestamp())`, [experienceId, eventId, baseOrder.toString()]);
++  const stations: string[] = [];
++  for (let n = 1; n <= 2; n++) {
++    const id = randomUUID(); stations.push(id);
++    await fixturePool.query(`INSERT INTO stations(id,experience_id,label,availability,created_at,updated_at)
++      VALUES($1,$2,$3,'available',clock_timestamp(),clock_timestamp())`, [id, experienceId, `Estação ${n}`]);
++  }
++  return { experienceId, stationId: stations[0], secondStationId: stations[1] };
++}
++async function person(eventId: string, experienceId: string) {
++  const userId = await user(), participationId = randomUUID();
++  await fixturePool.query(`INSERT INTO participations(id,user_id,event_id,status,joined_at,arena_entered_at)
++    VALUES($1,$2,$3,'active',clock_timestamp(),clock_timestamp())`, [participationId, userId, eventId]);
++  const result = await joining.joinExperienceQueue({ userId, participationId, experienceId,
++    idempotencyKey: randomUUID(), expiresAt: new Date("2099-01-01") });
++  assert.ok(result.kind === "created");
++  return { userId, participationId, queueEntryId: result.queueEntryId, queueOrder: result.queueOrder };
++}
++async function context(count = 1) {
++  const eventId = randomUUID();
++  await fixturePool.query(`INSERT INTO events(id,name,access_code_normalized,timezone,starts_at,official_ends_at,operational_deadline_at,
++    status,external_queue_enabled,created_at,updated_at) VALUES($1,'E074 fixture',$2,'America/Sao_Paulo',clock_timestamp()-interval '1 hour',
++    clock_timestamp()+interval '1 hour',clock_timestamp()+interval '90 minutes','open',false,clock_timestamp(),clock_timestamp())`, [eventId, `E074-${eventId.toUpperCase()}`]);
++  ids.events.push(eventId);
++  const staffUserId = await user(); await staff(staffUserId, eventId);
++  const x = await experience(eventId), people = [];
++  for (let n = 0; n < count; n++) people.push(await person(eventId, x.experienceId));
++  return { eventId, staffUserId, ...x, people };
++}
++type Context = Awaited<ReturnType<typeof context>>;
++function intent(c: Omit<Context, "people" | "secondStationId">): CallNextInput {
++  return { staffUserId: c.staffUserId, eventId: c.eventId, experienceId: c.experienceId, stationId: c.stationId,
++    idempotencyKey: randomUUID(), expiresAt: new Date("2099-01-01") };
++}
++function withdrawalIntent(p: Context["people"][number]) {
++  return { userId: p.userId, participationId: p.participationId, queueEntryId: p.queueEntryId,
++    idempotencyKey: randomUUID(), expiresAt: new Date("2099-01-01") };
++}
++function created(result: CallNextResult) { assert.ok(result.kind === "created", JSON.stringify(result)); return result.serviceSession; }
++async function state(c: Context) {
++  return (await fixturePool.query(`SELECT jsonb_build_object(
++    'people',(SELECT jsonb_agg(to_jsonb(p) ORDER BY p.id) FROM participations p WHERE p.event_id=$1),
++    'entries',(SELECT jsonb_agg(to_jsonb(q) ORDER BY q.id) FROM queue_entries q WHERE q.event_id=$1),
++    'sessions',(SELECT jsonb_agg(to_jsonb(s) ORDER BY s.id) FROM service_sessions s JOIN queue_entries q ON q.id=s.queue_entry_id WHERE q.event_id=$1),
++    'idempotency',(SELECT jsonb_agg(to_jsonb(i) ORDER BY i.id) FROM idempotency_operations i WHERE i.actor_user_id=$2)
++    )::text AS value`, [c.eventId, c.staffUserId])).rows[0].value as string;
++}
++async function assertPending(c: Context, sessionId: string, entryId: string) {
++  const r = (await fixturePool.query(`SELECT s.status,s.queue_entry_id,s.called_by_user_id,s.resolved_at,
++    q.status AS entry,p.status AS participation,p.current_queue_entry_id,
++    (SELECT count(*)::int FROM idempotency_operations i WHERE i.result_reference=s.id AND i.status='completed') AS intentions
++    FROM service_sessions s JOIN queue_entries q ON q.id=s.queue_entry_id JOIN participations p ON p.id=q.participation_id WHERE s.id=$1`, [sessionId])).rows[0];
++  assert.equal(r.status, "pending"); assert.equal(r.queue_entry_id, entryId); assert.equal(r.called_by_user_id, c.staffUserId);
++  assert.equal(r.resolved_at, null); assert.equal(r.entry, "called"); assert.equal(r.participation, "active");
++  assert.equal(r.current_queue_entry_id, entryId); assert.equal(r.intentions, 1);
++}
++
++/** Retém o escritor real depois de seus efeitos e antes do commit. */
++function held<T>(action: (db: Database) => Promise<T>) {
++  let signal!: (pid: number) => void, reject!: (e: unknown) => void, release!: () => void;
++  const reached = new Promise<number>((yes, no) => { signal = yes; reject = no; });
++  const gate = new Promise<void>(yes => { release = yes; });
++  const db = { transaction: <R>(callback: (tx: DatabaseTransactionExecutor) => Promise<R>, config?: Parameters<Database["transaction"]>[1]) =>
++    database.transaction(async tx => {
++      const result = await callback(tx);
++      signal((await tx.execute<{ pid: number }>(sql`SELECT pg_backend_pid() AS pid`)).rows[0].pid);
++      await gate; return result;
++    }, config) } as Database;
++  const promise = action(db); promise.catch(reject);
++  return { promise, reached, release };
++}
++async function waitBlocked(waiter: number, blocker: number) {
++  const until = Date.now() + 5000;
++  while (Date.now() < until) {
++    const r = await fixturePool.query(`SELECT 1 FROM pg_stat_activity
++      WHERE pid=$1 AND state='active' AND wait_event_type='Lock' AND $2=ANY(pg_blocking_pids(pid))`, [waiter, blocker]);
++    if (r.rowCount) return;
++    await new Promise(yes => setTimeout(yes, 20));
++  }
++  throw new Error("Não foi observada espera real entre os PIDs.");
++}
++async function race<T, U>(first: ReturnType<typeof held<T>>, second: (db: Database) => Promise<U>) {
++  let c: PoolClient | undefined, pending: Promise<U> | undefined;
++  try {
++    const blocker = await first.reached; c = await servicePool.connect();
++    const waiter = (await c.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
++    pending = second(drizzle(c, { schema })); pending.catch(() => undefined);
++    await waitBlocked(waiter, blocker); first.release();
++    return await Promise.all([first.promise, pending]);
++  } finally { first.release(); await Promise.allSettled([first.promise, pending]); c?.release(); }
++}
++
++test("E07.4 FIFO real E07.1, bigint e atomicidade sem alterar contador/ponteiros", async () => {
++  const c = await context(3);
++  const a = created(await caller.callNext(intent(c)));
++  const b = created(await caller.callNext({ ...intent(c), stationId: c.secondStationId }));
++  assert.equal(a.queueEntryId, c.people[0].queueEntryId); assert.equal(b.queueEntryId, c.people[1].queueEntryId);
++  await assertPending(c, a.id, a.queueEntryId); await assertPending(c, b.id, b.queueEntryId);
++  const x = await fixturePool.query("SELECT last_queue_order::text AS value FROM experiences WHERE id=$1", [c.experienceId]);
++  assert.equal(x.rows[0].value, (baseOrder + 3n).toString());
++  const untouched = await fixturePool.query("SELECT status,queue_order::text FROM queue_entries WHERE id=$1", [c.people[2].queueEntryId]);
++  assert.equal(untouched.rows[0].status, "waiting"); assert.equal(untouched.rows[0].queue_order, c.people[2].queueOrder);
++});
++test("E07.4 duas estações concorrentes chamam pessoas distintas em FIFO", async () => {
++  const c = await context(2);
++  const [a, b] = await race(held(db => makeCall(db).callNext(intent(c))), db => makeCall(db).callNext({ ...intent(c), stationId: c.secondStationId }));
++  assert.equal(created(a).queueEntryId, c.people[0].queueEntryId); assert.equal(created(b).queueEntryId, c.people[1].queueEntryId);
++  assert.notEqual(created(a).id, created(b).id);
++});
++test("E07.4 mesma estação concorrente com chaves diferentes só cria um pending", async () => {
++  const c = await context(2);
++  const [a, b] = await race(held(db => makeCall(db).callNext(intent(c))), db => makeCall(db).callNext(intent(c)));
++  created(a); assert.deepEqual(b, { kind: "station_has_pending_call" });
++  assert.equal((await fixturePool.query("SELECT count(*)::int AS n FROM service_sessions WHERE station_id=$1", [c.stationId])).rows[0].n, 1);
++});
++test("E07.4 retry sequencial e concorrente reproduz resposta sem segunda chamada", async () => {
++  const c = await context(2), request = intent(c);
++  const [a, b] = await race(held(db => makeCall(db).callNext(request)), db => makeCall(db).callNext(request));
++  created(a); assert.deepEqual(b, { ...a, kind: "replay" });
++  assert.deepEqual(await caller.callNext(request), b);
++});
++test("E07.4 reserva in_progress existente não cria atendimento", async () => {
++  const c = await context(), request = intent(c);
++  const { createCallNextFingerprint } = await import("../../src/events/call-next.service");
++  await fixturePool.query(`INSERT INTO idempotency_operations(id,actor_user_id,operation,idempotency_key,request_hash,status,created_at,expires_at)
++    VALUES($1,$2,'call_next',$3,$4,'in_progress',clock_timestamp(),$5)`, [randomUUID(), c.staffUserId, request.idempotencyKey,
++    createCallNextFingerprint(c.eventId, c.experienceId, c.stationId), request.expiresAt]);
++  const before = await state(c);
++  assert.deepEqual(await caller.callNext(request), { kind: "in_progress" }); assert.equal(await state(c), before);
++});
++test("E07.4 chave em outra estação/experiência/evento conflita e ator tem namespace próprio", async () => {
++  const c = await context(2), other = await context(), request = intent(c);
++  created(await caller.callNext(request));
++  const x = await experience(c.eventId); await staff(c.staffUserId, other.eventId);
++  for (const changes of [{ stationId: c.secondStationId }, { ...x }, { eventId: other.eventId, experienceId: other.experienceId, stationId: other.stationId }]) {
++    assert.deepEqual(await caller.callNext({ ...request, ...changes }), { kind: "request_conflict" });
++  }
++  const secondStaff = await user(); await staff(secondStaff, c.eventId);
++  const b = created(await caller.callNext({ ...request, staffUserId: secondStaff, stationId: c.secondStationId }));
++  assert.equal(b.queueEntryId, c.people[1].queueEntryId);
++});
++test("E07.4 fila vazia/estação indisponível não deixam reserva e chave pode ser reutilizada", async () => {
++  const c = await context(0), request = intent(c), before = await state(c);
++  assert.deepEqual(await caller.callNext(request), { kind: "queue_empty" }); assert.equal(await state(c), before);
++  await person(c.eventId, c.experienceId);
++  await fixturePool.query("UPDATE stations SET availability='unavailable' WHERE id=$1", [c.stationId]);
++  const waiting = await state(c);
++  assert.deepEqual(await caller.callNext(request), { kind: "station_unavailable" }); assert.equal(await state(c), waiting);
++  await fixturePool.query("UPDATE stations SET availability='available' WHERE id=$1", [c.stationId]);
++  created(await caller.callNext(request));
++});
++test("E07.4 nega Admin isolado, Staff alheio/revogado/inativo/não verificado", async () => {
++  for (const mode of ["admin", "other_event", "revoked", "inactive", "unverified"]) {
++    const c = await context(), before = await state(c);
++    const actor = await user();
++    if (mode === "admin") await fixturePool.query("INSERT INTO user_roles(id,user_id,role,granted_at) VALUES($1,$2,'admin',clock_timestamp())", [randomUUID(), actor]);
++    else {
++      const eventId = mode === "other_event" ? (await context(0)).eventId : c.eventId;
++      await staff(actor, eventId);
++      if (mode === "revoked") await fixturePool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE user_id=$1", [actor]);
++      if (mode === "inactive") await fixturePool.query("UPDATE users SET is_active=false WHERE id=$1", [actor]);
++      if (mode === "unverified") await fixturePool.query("UPDATE users SET email_verified_at=NULL WHERE id=$1", [actor]);
++    }
++    assert.deepEqual(await caller.callNext({ ...intent(c), staffUserId: actor }), { kind: "staff_event_forbidden" });
++    assert.equal(await state(c), before);
++  }
++});
++test("E07.4 Admin também atribuído como Staff pode operar", async () => {
++  const c = await context();
++  await fixturePool.query("INSERT INTO user_roles(id,user_id,role,granted_at) VALUES($1,$2,'admin',clock_timestamp())", [randomUUID(), c.staffUserId]);
++  created(await caller.callNext(intent(c)));
++});
++test("E07.4 revalida vínculos de evento/experiência/estação e IDs inexistentes", async () => {
++  const c = await context(), other = await context(), before = await state(c);
++  for (const changes of [{ eventId: randomUUID() }, { experienceId: randomUUID() }, { stationId: randomUUID() },
++    { experienceId: other.experienceId }, { stationId: other.stationId }]) {
++    assert.deepEqual(await caller.callNext({ ...intent(c), ...changes }), { kind: "staff_event_forbidden" });
++    assert.equal(await state(c), before);
++  }
++});
++test("E07.4 permite espera preexistente após corte oficial e fechamento controlado com fila pausada", async () => {
++  for (const controlled of [false, true]) {
++    const c = await context();
++    await fixturePool.query(`UPDATE events SET official_ends_at=clock_timestamp()-interval '1 minute',
++      operational_deadline_at=clock_timestamp()+interval '30 minutes' WHERE id=$1`, [c.eventId]);
++    if (controlled) await fixturePool.query(`UPDATE events SET status='closing',closure_mode='controlled',
++      closure_requested_at=clock_timestamp()-interval '2 minutes',admin_deadline_at=clock_timestamp()+interval '10 minutes' WHERE id=$1`, [c.eventId]);
++    await fixturePool.query("UPDATE experiences SET queue_accepting_entries=false WHERE id=$1", [c.experienceId]);
++    assert.equal(created(await caller.callNext(intent(c))).queueEntryId, c.people[0].queueEntryId);
++  }
++});
++test("E07.4 bloqueia antes do início, prazo operacional/admin, fechamento imediato e closed", async () => {
++  for (const mode of ["not_started", "operational", "admin", "immediate", "closed"]) {
++    const c = await context();
++    if (mode === "not_started") await fixturePool.query("UPDATE events SET starts_at=clock_timestamp()+interval '10 minutes' WHERE id=$1", [c.eventId]);
++    if (mode === "operational") await fixturePool.query(`UPDATE events SET official_ends_at=clock_timestamp()-interval '2 minutes',
++      operational_deadline_at=clock_timestamp()-interval '1 minute' WHERE id=$1`, [c.eventId]);
++    if (mode === "admin") await fixturePool.query(`UPDATE events SET status='closing',closure_mode='controlled',
++      closure_requested_at=clock_timestamp()-interval '2 minutes',admin_deadline_at=clock_timestamp()-interval '1 minute' WHERE id=$1`, [c.eventId]);
++    if (mode === "immediate") await fixturePool.query(`UPDATE events SET closure_mode='immediate',
++      closure_requested_at=statement_timestamp(),admin_deadline_at=statement_timestamp() WHERE id=$1`, [c.eventId]);
++    if (mode === "closed") await fixturePool.query("UPDATE events SET status='closed' WHERE id=$1", [c.eventId]);
++    const before = await state(c);
++    assert.deepEqual(await caller.callNext(intent(c)), { kind: "event_operation_ended" }); assert.equal(await state(c), before);
++  }
++});
++test("E07.4 replay após desistência/encerramento é histórico, mas exige Staff ainda autorizado", async () => {
++  const c = await context(), request = intent(c), a = await caller.callNext(request); created(a);
++  assert.equal((await withdrawal.withdrawExperienceQueue(withdrawalIntent(c.people[0]))).kind, "withdrawn");
++  await fixturePool.query("UPDATE events SET status='closed' WHERE id=$1", [c.eventId]);
++  await fixturePool.query("UPDATE stations SET availability='unavailable' WHERE id=$1", [c.stationId]);
++  const before = await state(c);
++  assert.deepEqual(await caller.callNext(request), { ...a, kind: "replay" }); assert.equal(await state(c), before);
++  await fixturePool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE user_id=$1", [c.staffUserId]);
++  assert.deepEqual(await caller.callNext(request), { kind: "staff_event_forbidden" });
++});
++
++test("E07.4 chamada vence E07.3: desistência cancela exatamente o pending criado", async () => {
++  const c = await context(), request = intent(c), exit = withdrawalIntent(c.people[0]);
++  const [a, b] = await race(held(db => makeCall(db).callNext(request)), db => makeWithdrawal(db).withdrawExperienceQueue(exit));
++  const session = created(a); assert.ok(b.kind === "withdrawn"); assert.equal(b.serviceSession?.id, session.id);
++  assert.equal(b.serviceSession?.status, "canceled");
++  const next = await joining.joinExperienceQueue({ userId: c.people[0].userId, participationId: c.people[0].participationId,
++    experienceId: c.experienceId, idempotencyKey: randomUUID(), expiresAt: new Date("2099-01-01") });
++  assert.ok(next.kind === "created"); const pending = created(await caller.callNext(intent(c)));
++  assert.equal(pending.queueEntryId, next.queueEntryId);
++  assert.equal((await withdrawal.withdrawExperienceQueue(exit)).kind, "replay");
++  await assertPending(c, pending.id, next.queueEntryId);
++});
++test("E07.4 E07.3 vence: chamada seleciona o próximo waiting sem cancelar outra pessoa", async () => {
++  const c = await context(2);
++  const [a, b] = await race(held(db => makeWithdrawal(db).withdrawExperienceQueue(withdrawalIntent(c.people[0]))), db => makeCall(db).callNext(intent(c)));
++  assert.equal(a.kind, "withdrawn"); const session = created(b); assert.equal(session.queueEntryId, c.people[1].queueEntryId);
++  await assertPending(c, session.id, session.queueEntryId);
++  assert.equal((await fixturePool.query("SELECT count(*)::int AS n FROM service_sessions WHERE queue_entry_id=$1", [c.people[0].queueEntryId])).rows[0].n, 0);
++});
++test("E07.4 experiências distintas operam sem lock exclusivo global do evento", async () => {
++  const c = await context(), x = await experience(c.eventId), p = await person(c.eventId, x.experienceId);
++  const first = held(db => makeCall(db).callNext(intent(c)));
++  let timer: ReturnType<typeof setTimeout> | undefined, pending: Promise<CallNextResult> | undefined;
++  try {
++    await first.reached;
++    pending = caller.callNext({ ...intent(c), ...x });
++    const second = await Promise.race([pending, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Outra experiência bloqueada.")), 3000); })]);
++    assert.equal(created(second).queueEntryId, p.queueEntryId);
++  } finally { clearTimeout(timer); first.release(); await Promise.allSettled([first.promise, pending]); }
++});
++
++/** Escritor estrutural de fixture, sem serviço Admin/disponibilidade novo. */
++async function structuralRace(c: Context, mutation: (client: PoolClient) => Promise<unknown>,
++  check: (pending: Promise<CallNextResult>) => Promise<void> = async () => undefined) {
++  const blocker = await fixturePool.connect(), waiter = await servicePool.connect();
++  let pending: Promise<CallNextResult> | undefined;
++  try {
++    await blocker.query("BEGIN"); await mutation(blocker);
++    const blockerPid = (await blocker.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
++    const waiterPid = (await waiter.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
++    pending = makeCall(drizzle(waiter, { schema })).callNext(intent(c)); pending.catch(() => undefined);
++    await waitBlocked(waiterPid, blockerPid); await check(pending);
++    await blocker.query("COMMIT"); return await pending;
++  } finally { await blocker.query("ROLLBACK"); await Promise.allSettled([pending]); blocker.release(); waiter.release(); }
++}
++test("E07.4 primeiro participante bloqueado é aguardado sem furar FIFO", async () => {
++  const c = await context(2);
++  const result = await structuralRace(c, client => client.query("SELECT id FROM participations WHERE id=$1 FOR UPDATE", [c.people[0].participationId]));
++  assert.equal(created(result).queueEntryId, c.people[0].queueEntryId);
++  assert.equal((await fixturePool.query("SELECT status FROM queue_entries WHERE id=$1", [c.people[1].queueEntryId])).rows[0].status, "waiting");
++});
++test("E07.4 disponibilidade e encerramento são revalidados depois da espera", async () => {
++  const c = await context();
++  assert.deepEqual(await structuralRace(c, client => client.query("UPDATE stations SET availability='unavailable' WHERE id=$1", [c.stationId])), { kind: "station_unavailable" });
++  const d = await context();
++  assert.deepEqual(await structuralRace(d, client => client.query("UPDATE events SET status='closed' WHERE id=$1", [d.eventId])), { kind: "event_operation_ended" });
++});
++test("E07.4 conta e concessão são revalidadas após revogação concorrente", async () => {
++  for (const role of [true, false]) {
++    const c = await context();
++    const result = await structuralRace(c, client => role
++      ? client.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE user_id=$1", [c.staffUserId])
++      : client.query("UPDATE users SET is_active=false WHERE id=$1", [c.staffUserId]));
++    assert.deepEqual(result, { kind: "staff_event_forbidden" });
++  }
++});
++for (const administrative of [false, true]) {
++  test(`E07.4 prazo ${administrative ? "administrativo" : "operacional"} atingido esperando participação impede INSERT`, async () => {
++    const c = await context();
++    if (administrative) await fixturePool.query(`UPDATE events SET closure_mode='controlled',closure_requested_at=clock_timestamp(),
++      admin_deadline_at=clock_timestamp()+interval '1500 milliseconds' WHERE id=$1`, [c.eventId]);
++    else await fixturePool.query(`UPDATE events SET official_ends_at=clock_timestamp()-interval '1 minute',
++      operational_deadline_at=clock_timestamp()+interval '1500 milliseconds' WHERE id=$1`, [c.eventId]);
++    const before = await state(c);
++    const result = await structuralRace(c, client => client.query("SELECT id FROM participations WHERE id=$1 FOR UPDATE", [c.people[0].participationId]), async () => {
++      // Prova de transação iniciada ANTES do corte, e relógio DB depois dele.
++      const column = administrative ? sql`admin_deadline_at` : sql`operational_deadline_at`;
++      const start = await database.execute<{ beforeCut: boolean }>(sql`SELECT EXISTS(SELECT 1 FROM pg_stat_activity a, events e
++        WHERE e.id=${c.eventId} AND a.query LIKE '%FROM participations WHERE id=%' AND a.wait_event_type='Lock'
++          AND a.xact_start < e.${column}) AS "beforeCut"`);
++      assert.equal(start.rows[0].beforeCut, true);
++      const until = Date.now() + 4000;
++      while (true) {
++        const r = await database.execute<{ ended: boolean }>(sql`SELECT clock_timestamp() >= ${column} AS ended FROM events WHERE id=${c.eventId}`);
++        if (r.rows[0].ended) break;
++        assert.ok(Date.now() < until, "Prazo DB não foi atingido."); await new Promise(yes => setTimeout(yes, 20));
++      }
++    });
++    assert.deepEqual(result, { kind: "event_operation_ended" }); assert.equal(await state(c), before);
++  });
++}
++test("E07.4 falhas após INSERT/called/idempotência restauram estado e permitem retry", async () => {
++  for (const stage of ["insert", "entry", "complete"]) {
++    const c = await context(), request = intent(c), before = await state(c);
++    const marker = new Error(`E074_AFTER_${stage}`); let reached = false;
++    const db = { transaction: <T>(callback: (tx: DatabaseTransactionExecutor) => Promise<T>, config?: Parameters<Database["transaction"]>[1]) =>
++      database.transaction(async tx => {
++        const proxy = new Proxy(tx, { get(target, key) {
++          if (key === "execute") return async (query: Parameters<typeof tx.execute>[0]) => {
++            const result = await target.execute(query);
++            if (result.rows.length && ((stage === "insert" && "calledAtMs" in result.rows[0]) || (stage === "entry" && result.rows[0].id === c.people[0].queueEntryId))) {
++              reached = true; throw marker;
++            }
++            return result;
++          };
++          const value = Reflect.get(target, key); return typeof value === "function" ? value.bind(target) : value;
++        } });
++        const result = await callback(proxy);
++        if (stage === "complete") {
++          const row = await tx.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM idempotency_operations
++            WHERE actor_user_id=${c.staffUserId} AND operation='call_next' AND status='completed'`);
++          assert.equal(row.rows[0].n, 1); reached = true; throw marker;
++        }
++        return result;
++      }, config) } as Database;
++    await assert.rejects(makeCall(db).callNext(request), (error: Error) => {
++      let cause: unknown = error; while (cause instanceof Error && cause.cause) cause = cause.cause;
++      assert.equal(cause, marker); return true;
++    });
++    assert.equal(reached, true); assert.equal(await state(c), before);
++    created(await caller.callNext(request));
++  }
++});
+diff --git a/backend/test/unit/call-next.test.ts b/backend/test/unit/call-next.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d098b2b29966f996dbc6e7fa2f6423b99ecb7055
+--- /dev/null
++++ b/backend/test/unit/call-next.test.ts
+@@ -0,0 +1,169 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { drizzle } from "drizzle-orm/node-postgres";
++import type { Client } from "pg";
++import * as schema from "../../src/database/schema";
++import { CALL_NEXT_OPERATION, CallNextIntegrityError, CallNextService, createCallNextFingerprint } from "../../src/events/call-next.service";
++import type { CallNextInput } from "../../src/events/call-next.types";
++import { createRequestFingerprint } from "../../src/participations/join-idempotency";
++
++const input: CallNextInput = { staffUserId: "staff", eventId: "event", experienceId: "experience", stationId: "station",
++  idempotencyKey: "call-intent", expiresAt: new Date("2099-01-01") };
++const at = new Date("2026-11-02T18:00:00Z");
++
++function fixture(options: {
++  missing?: "event" | "experience" | "station" | "staff"; availability?: string; pending?: boolean; empty?: boolean;
++  operating?: boolean; endedAtInsert?: boolean; participantStatus?: string; pointer?: string | null;
++  entryCount?: number; priorSession?: boolean; calledCount?: number; clock?: number;
++  reservation?: "replay" | "conflict" | "in_progress"; invalidReplay?: boolean;
++  fail?: "insert" | "entry" | "complete";
++} = {}) {
++  const queries: Array<{ text: string; params: unknown[] }> = [];
++  const marker = new Error(`E074_${options.fail}`);
++  const payload = { serviceSession: { id: "session", queueEntryId: "entry", experienceId: input.experienceId,
++    station: { id: input.stationId, label: "Estação" }, status: "pending", calledAt: at.toISOString() } };
++  const client = { async query(config: { text: string }, params: unknown[]) {
++    const text = config.text; queries.push({ text, params });
++    if (text.includes("SELECT id FROM events")) return { rows: options.missing === "event" ? [] : [{ id: input.eventId }] };
++    if (text.includes("SELECT id FROM experiences")) return { rows: options.missing === "experience" ? [] : [{ id: input.experienceId }] };
++    if (text.includes("SELECT availability, label")) return { rows: options.missing === "station" ? [] : [{ availability: options.availability ?? "available", label: "Estação" }] };
++    if (text.includes("SELECT r.id FROM users")) return { rows: options.missing === "staff" ? [] : [{ id: "role" }] };
++    if (text.includes('insert into "idempotency_operations"')) return { rows: options.reservation ? [] : [["reservation"]] };
++    if (text.includes('from "idempotency_operations"')) return { rows: [["reservation",
++      options.reservation === "conflict" ? "other" : createCallNextFingerprint(input.eventId, input.experienceId, input.stationId),
++      options.reservation === "in_progress" ? "in_progress" : "completed", 201, "session", options.invalidReplay ? {} : payload]] };
++    if (text.includes("AS operating")) return { rows: [{ operating: options.operating ?? true }] };
++    if (text.includes("WHERE station_id=")) return { rows: options.pending ? [{ id: "occupied" }] : [] };
++    if (text.includes('participation_id AS "participationId"')) return { rows: options.empty ? [] : [{ id: "entry", participationId: "person" }] };
++    if (text.includes('AS "currentId"')) return { rows: [{ status: options.participantStatus ?? "active", currentId: options.pointer === undefined ? "entry" : options.pointer }] };
++    if (text.includes("SELECT id FROM queue_entries")) return { rows: options.entryCount === 0 ? [] : [{ id: "entry" }] };
++    if (text.includes("WHERE queue_entry_id=")) return { rows: options.priorSession ? [{ id: "prior" }] : [] };
++    if (text.includes("INSERT INTO service_sessions")) {
++      if (options.fail === "insert") throw marker;
++      return { rows: options.endedAtInsert ? [] : [{ calledAtMs: options.clock ?? at.getTime() }] };
++    }
++    if (text.includes("UPDATE queue_entries SET")) {
++      if (options.fail === "entry") throw marker;
++      return { rows: options.calledCount === 0 ? [] : [{ id: "entry" }] };
++    }
++    if (text.includes('update "idempotency_operations"')) {
++      if (options.fail === "complete") throw marker;
++      return { rows: [["reservation", 201, "session", payload]] };
++    }
++    return { rows: [] };
++  } };
++  return { service: new CallNextService(drizzle(client as unknown as Client, { schema })), queries, marker };
++}
++
++test("E07.4 fingerprint vincula evento, experiência e estação em namespace próprio", () => {
++  const hash = createCallNextFingerprint("e", "x", "s");
++  assert.equal(hash, createCallNextFingerprint("e", "x", "s"));
++  for (const args of [["other", "x", "s"], ["e", "other", "s"], ["e", "x", "other"]]) {
++    assert.notEqual(hash, createCallNextFingerprint(args[0], args[1], args[2]));
++  }
++  assert.notEqual(hash, createRequestFingerprint("join_experience_queue", { eventId: "e", experienceId: "x", stationId: "s" }));
++  assert.equal(CALL_NEXT_OPERATION, "call_next");
++});
++
++test("E07.4 cria pending e called com autoria e idempotência no mesmo tx", async () => {
++  const { service, queries } = fixture(); const result = await service.callNext(input);
++  assert.ok(result.kind === "created");
++  assert.equal(result.serviceSession.status, "pending"); assert.deepEqual(result.serviceSession.calledAt, at);
++  assert.equal(result.serviceSession.queueEntryId, "entry");
++  assert.deepEqual(result.serviceSession.station, { id: input.stationId, label: "Estação" });
++  assert.equal(queries[0].text, "begin isolation level read committed"); assert.equal(queries.at(-1)?.text, "commit");
++  assert.ok(queries.find(q => q.text.includes("INSERT INTO service_sessions"))?.params.includes(input.staffUserId));
++  assert.equal(queries.some(q => /UPDATE participations|UPDATE stations|last_queue_order\s*=|INSERT INTO queue_entries/i.test(q.text)), false);
++  assert.equal(JSON.stringify(result).includes(input.staffUserId), false);
++});
++
++test("E07.4 locks e revalidação seguem evento → experiência → estação → pessoa → entrada", async () => {
++  const { service, queries } = fixture(); await service.callNext(input);
++  const order = ["SELECT id FROM events", "SELECT id FROM experiences", "SELECT availability, label", "SELECT r.id FROM users",
++    'participation_id AS "participationId"', 'AS "currentId"', "SELECT id FROM queue_entries", "WHERE queue_entry_id=", "INSERT INTO service_sessions", "UPDATE queue_entries SET"];
++  const index = (part: string) => queries.findIndex(q => q.text.includes(part));
++  for (let i = 1; i < order.length; i++) assert.ok(index(order[i-1]) < index(order[i]), order[i]);
++  assert.match(queries[index(order[0])].text, /FOR SHARE/);
++  for (const part of [order[1], order[2], order[5], order[6], order[7]]) assert.match(queries[index(part)].text, /FOR UPDATE/);
++  const select = queries[index(order[6])].text;
++  assert.match(select, /status='waiting'/); assert.match(select, /ORDER BY queue_order, id LIMIT 1/);
++  assert.equal(queries.some(q => q.text.includes("SKIP LOCKED")), false);
++});
++
++test("E07.4 autorização exige conta ativa/verificada e Staff vigente do evento, inclusive em replay", async () => {
++  const { service, queries } = fixture({ reservation: "replay" }); await service.callNext(input);
++  const auth = queries.find(q => q.text.includes("SELECT r.id FROM users"))!;
++  for (const text of ["u.is_active=true", "u.email_verified_at IS NOT NULL", "r.role='staff'", "r.revoked_at IS NULL", "FOR SHARE OF u, r"]) assert.ok(auth.text.includes(text));
++  assert.ok(auth.params.includes(input.eventId)); assert.ok(auth.params.includes(input.staffUserId));
++  assert.doesNotMatch(auth.text, /admin/);
++  const denied = fixture({ missing: "staff", reservation: "replay" });
++  assert.deepEqual(await denied.service.callNext(input), { kind: "staff_event_forbidden" });
++  assert.equal(denied.queries.some(q => q.text.includes('insert into "idempotency_operations"')), false);
++});
++
++test("E07.4 corte decisivo usa clock_timestamp depois das esperas e permite janela residual", async () => {
++  const { service, queries } = fixture(); await service.callNext(input);
++  const decisive = queries.find(q => q.text.includes("INSERT INTO service_sessions"))!.text;
++  for (const text of ["clock_timestamp()", "d.at < e.operational_deadline_at", "d.at < e.admin_deadline_at", "e.status <> 'closed'", "e.starts_at <= d.at", "p.current_queue_entry_id=q.id"]) assert.ok(decisive.includes(text));
++  assert.doesNotMatch(decisive, /official_ends_at|closure_requested_at|queue_accepting_entries/);
++});
++
++for (const [name, options, kind] of [
++  ["evento ausente", { missing: "event" }, "staff_event_forbidden"],
++  ["experiência alheia", { missing: "experience" }, "staff_event_forbidden"],
++  ["estação alheia", { missing: "station" }, "staff_event_forbidden"],
++  ["sem Staff", { missing: "staff" }, "staff_event_forbidden"],
++  ["estação indisponível", { availability: "unavailable" }, "station_unavailable"],
++  ["estação ocupada", { pending: true }, "station_has_pending_call"],
++  ["fila vazia", { empty: true }, "queue_empty"],
++  ["fora da janela", { operating: false }, "event_operation_ended"],
++  ["prazo atingido após locks", { endedAtInsert: true }, "event_operation_ended"],
++] as const) {
++  test(`E07.4 bloqueia ${name} e reverte reserva`, async () => {
++    const { service, queries } = fixture(options);
++    assert.deepEqual(await service.callNext(input), { kind }); assert.equal(queries.at(-1)?.text, "rollback");
++    assert.equal(queries.some(q => q.text.includes("UPDATE queue_entries SET") || q.text.includes('update "idempotency_operations"')), false);
++  });
++}
++
++test("E07.4 replay histórico precede ocupação/tempo/fila e não escreve domínio", async () => {
++  const { service, queries } = fixture({ reservation: "replay", pending: true, operating: false, empty: true, availability: "unavailable" });
++  const result = await service.callNext(input); assert.ok(result.kind === "replay");
++  assert.deepEqual(result.serviceSession.calledAt, at);
++  assert.equal(queries.some(q => q.text.includes("AS operating") || q.text.includes("INSERT INTO service_sessions")), false);
++});
++
++test("E07.4 conflito e in_progress não escrevem domínio", async () => {
++  for (const reservation of ["conflict", "in_progress"] as const) {
++    const { service, queries } = fixture({ reservation });
++    assert.deepEqual(await service.callNext(input), { kind: reservation === "conflict" ? "request_conflict" : "in_progress" });
++    assert.equal(queries.some(q => q.text.includes("INSERT INTO service_sessions")), false);
++  }
++});
++
++test("E07.4 inconsistência de pessoa/entrada/atendimento/replay causa rollback", async () => {
++  for (const options of [{ participantStatus: "finished" }, { pointer: null }, { entryCount: 0 }, { priorSession: true },
++    { calledCount: 0 }, { clock: NaN }, { availability: "unknown" }, { reservation: "replay" as const, invalidReplay: true }]) {
++    const { service, queries } = fixture(options);
++    await assert.rejects(service.callNext(input), CallNextIntegrityError); assert.equal(queries.at(-1)?.text, "rollback");
++  }
++});
++
++test("E07.4 falha nas escritas propaga causa e reverte toda a transação", async () => {
++  for (const fail of ["insert", "entry", "complete"] as const) {
++    const { service, queries, marker } = fixture({ fail });
++    await assert.rejects(service.callNext(input), (error: Error) => {
++      let cause: unknown = error; while (cause instanceof Error && cause.cause) cause = cause.cause;
++      assert.equal(cause, marker); return true;
++    });
++    assert.equal(queries.at(-1)?.text, "rollback");
++  }
++});
++
++test("E07.4 input inválido falha antes de abrir transação", async () => {
++  const { service, queries } = fixture();
++  for (const changes of [{ idempotencyKey: " " }, { idempotencyKey: "x".repeat(129) }, { expiresAt: new Date(NaN) }]) {
++    await assert.rejects(service.callNext({ ...input, ...changes }), /inválida/);
++  }
++  assert.equal(queries.length, 0);
++});
+diff --git a/docs/ARQUITETURA_BACKEND_ARENAGO.md b/docs/ARQUITETURA_BACKEND_ARENAGO.md
+index 12ce89f2efe4d21929948d990eb304deb91cf86f..93c8a97b9810296b71e455c7e62856bbeaa0e8e6 100644
+--- a/docs/ARQUITETURA_BACKEND_ARENAGO.md
++++ b/docs/ARQUITETURA_BACKEND_ARENAGO.md
+@@ -1165,6 +1165,8 @@ O primeiro ID é **somente indicação de leitura**; o endpoint de chamada sempr
+ 
+ **Staff ativo com escopo de evento; `Idempotency-Key` obrigatória; corpo `{}`.** O Staff seleciona a estação que está operando naquele momento. A API não delega ao telefone a seleção de qual participante chamar.
+ 
++**Implementação interna E07.4 (02/11/2026):** `CallNextService.callNext({ staffUserId, eventId, experienceId, stationId, idempotencyKey, expiresAt })`, exportado por `EventsModule`. Conta ativa/verificada e concessão Staff vigente são revalidadas sob locks; Admin isolado não autoriza. Namespace idempotente `call_next`, fingerprint de evento/experiência/estação, replay histórico ainda sujeito à autorização atual. O INSERT decisivo usa `clock_timestamp()` e os prazos operacional/administrativo, permitindo chamadas residuais sem exigir novas inscrições abertas. Contrato HTTP permanece proposto; sem rota ou migration. Validação e comandos PostgreSQL em `docs/E07_4_IMPLEMENTACAO.md`.
++
+ **Transação [PROPOSTA]:** bloquear `events FOR SHARE` → `experiences FOR UPDATE` (mutex por fila) → `stations FOR UPDATE`. Localizar o primeiro candidato FIFO por consulta não bloqueante, então bloquear `participations FOR UPDATE` → `queue_entries FOR UPDATE`, **revalidando** que a entrada continua sendo a primeira elegível da fila e que a participação segue `active`. Todos os comandos conflitantes devem seguir essa mesma ordem de locks. Verificar permissão Staff no instante da operação, estação `available` e **sem chamada pendente**, não haver prazo operacional vencido ou encerramento imediato, e a primeira entrada ser do mesmo evento e participação `active`. Inserir `service_sessions.pending`, alterar a entrada para `called`, e finalizar idempotência no mesmo commit. A constraint parcial em `(station_id) WHERE status='pending'` é a última barreira de integridade. **Não usar `SKIP LOCKED` no primeiro da FIFO** quando isso permitir furar fila.
+ 
+ **Resposta `201 Created`:**
+diff --git a/docs/E07_4_IMPLEMENTACAO.md b/docs/E07_4_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..1cb8239cd454c7a24d33afd001a80bcad9e2b601
+--- /dev/null
++++ b/docs/E07_4_IMPLEMENTACAO.md
+@@ -0,0 +1,68 @@
++# E07.4 — chamada do próximo participante
++
++Implementado em 02/11/2026 sobre `893e6c9`, branch `feature/events-participations`.
++
++`CallNextService.callNext({ staffUserId, eventId, experienceId, stationId,
++idempotencyKey, expiresAt })`, disponível no `EventsModule`, retorna `created`,
++`replay`, conflitos de idempotência ou bloqueios internos descritos nos tipos.
++O ator deve vir de contexto confiável do chamador; a autorização Staff do evento,
++conta ativa e e-mail verificado são conferidos no banco, inclusive para replay.
++Admin sem concessão Staff não opera.
++
++Uma transação READ COMMITTED bloqueia evento (SHARE), experiência (UPDATE),
++estação (UPDATE) e conta/concessão Staff (SHARE). Reconhece a intenção antes
++de exigir estação livre/tempo/fila atuais; reserva nova bloqueada sofre rollback.
++Seleciona o primeiro waiting por queue_order/id sem SKIP LOCKED, bloqueia
++participação e entrada e revalida FIFO, vínculos, estado active e ponteiro.
++Inconsistência interrompe a operação com CallNextIntegrityError, sem furar fila.
++
++O INSERT de service_sessions.pending usa clock_timestamp() após todas as
++esperas, condicionado ao início do evento e aos prazos operacional/administrativo
++exclusivos, com status diferente de closed. Atualiza waiting para called e conclui
++idempotência no mesmo commit. O índice parcial de pending por estação continua
++como barreira final. O corte oficial, fechamento controlado e fila pausada não
++impedem chamar quem já aguardava na janela residual.
++
++Namespace `call_next`; fingerprint inclui evento, experiência e estação, com ator
++na chave única existente. Replay reproduz a resposta histórica, mesmo após
++resolução/encerramento, sem nova chamada. expiresAt não implementa expurgo/TTL.
++Não altera ponteiro, contadores, disponibilidade ou os serviços E07.1–E07.3.
++Sem migration, HTTP, tela, commit, push ou acesso a dados reais/remotos.
++
++## Validação
++
++- Unitários: **164/164 aprovados**, incluindo **19 novos E07.4**; zero falhas/skips.
++- `typecheck:test`, lint e build: aprovados, exit 0.
++- **22 testes PostgreSQL escritos, não executados**: FIFO/bigint, chamadas em
++  duas estações, estação ocupada/indisponível, idempotência, permissões/vínculos,
++  operação residual, cortes após espera, revogação concorrente, experiências
++  independentes, disputa com E07.3 nas duas ordens e rollback após cada escrita.
++  Corridas exigem espera real observada por pg_blocking_pids, não apenas Promise.all.
++
++As três URLs explícitas estavam ausentes. Nenhum .env foi carregado nem conexão
++PostgreSQL aberta. Unitários usam driver simulado; sua aprovação não comprova
++concorrência PostgreSQL. O tsx exigiu execução fora da sandbox devido a
++uv_os_get_passwd/ENOMEM; dotenv ficou desabilitado, sem conexão a banco.
++
++## Execução PostgreSQL pendente
++
++Com o banco local **já preparado**, substitua apenas as credenciais locais abaixo.
++O preflight exige três URLs idênticas, sem parâmetros, exclusivamente para
++`127.0.0.1:55432/arenago_events_test`; desabilita dotenv antes de importar serviços.
++Fixtures e limpeza usam apenas UUIDs criados pela própria suíte. Não executar
++migrations, seed ou reset como parte destes comandos.
++
++```powershell
++Set-Location C:\DoJob\ProgramacaoMobile\backend
++$env:EVENTS_TEST_DATABASE_URL = 'postgresql://USUARIO:SENHA@127.0.0.1:55432/arenago_events_test'
++$env:DATABASE_URL = $env:EVENTS_TEST_DATABASE_URL
++$env:DATABASE_DIRECT_URL = $env:EVENTS_TEST_DATABASE_URL
++$env:DOTENV_CONFIG_PATH = 'NUL'
++.\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test --test-concurrency=1 test/integration/call-next.integration.test.ts
++if ($LASTEXITCODE -ne 0) { throw 'Revisar E07.4 antes da regressão.' }
++npm.cmd run test:integration
++if ($LASTEXITCODE -ne 0) { throw 'Revisar regressão PostgreSQL.' }
++```
++
++Próximo passo: executar as integrações; depois implementar conclusão de atendimento
++(§16.10), mantendo o mesmo protocolo e a resolução única de pending.

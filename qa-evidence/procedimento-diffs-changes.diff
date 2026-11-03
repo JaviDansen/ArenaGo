@@ -1,0 +1,72 @@
+diff --git a/AGENTS.md b/AGENTS.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..5f1155ac705ebe00ac9ecd479620fbddcd983c20
+--- /dev/null
++++ b/AGENTS.md
+@@ -0,0 +1,27 @@
++# Fluxo de entrega e evidências
++
++Estas instruções valem para as próximas tasks deste repositório.
++
++- No início da task, registrar o estado anterior dos arquivos relevantes, incluindo
++  arquivos não rastreados. Usar HEAD como base somente se ele representar esse
++  estado; alterações preexistentes exigem snapshot separado, sem reset/stash do usuário.
++- Após os testes obrigatórios e antes do commit, gerar automaticamente um patch Git
++  real em `qa-evidence/<task>-changes.diff` (exemplo: `e07-7-changes.diff`). Incluir
++  conteúdo completo das diferenças de arquivos novos, modificados ou removidos,
++  incluindo serviços, testes e documentação, somente da task correspondente.
++- Manter formato `diff --git`, caminhos relativos ao repositório, UTF-8 sem BOM e
++  compatibilidade com `git apply`. Não usar uma lista/resumo como substituto do patch.
++- Excluir credenciais, segredos, arquivos `.env` e variantes, dependências instaladas,
++  temporários e os próprios arquivos `.diff` de evidência, evitando recursão.
++- Nunca sobrescrever evidências existentes. Se o nome já existir, usar um sufixo
++  de revisão/data e informar o nome exato. Não modificar código para gerar evidência.
++- Validar a aplicação do patch contra sua base em uma cópia isolada e conferir
++  que o resultado corresponde aos arquivos finais. Não alterar o índice do usuário
++  para gerar patches. Não atribuir alterações a etapas por suposição; informar
++  limites de proveniência quando não existirem snapshots suficientes.
++- Informar o caminho do `.diff` na resposta final. Depois dos testes obrigatórios
++  aprovados e da evidência gerada, realizar commit e push conforme o fluxo vigente,
++  respeitando qualquer bloqueio explícito do usuário ou teste ainda pendente.
++
++Nesta rodada de recuperação de evidências E07.4–E07.6, não fazer commit ou push:
++a aprovação PostgreSQL da E07.6 continua pendente.
+diff --git a/qa-evidence/E07_4_A_E07_6_EVIDENCIAS.md b/qa-evidence/E07_4_A_E07_6_EVIDENCIAS.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..d5ffe829818a414c2156fe3e9c2acb5c529bf3bc
+--- /dev/null
++++ b/qa-evidence/E07_4_A_E07_6_EVIDENCIAS.md
+@@ -0,0 +1,33 @@
++# Evidencias E07.4 a E07.6
++
++Base real: `893e6c9db54d96e04018f9abd6d6413d9b226d20` (`feature/events-participations`).
++Nao existem commits intermediarios dessas tres etapas. A separacao usa os registros
++explicitos de criacao/edicao desta conversa, inclusive os estados intermediarios
++lidos de EventsModule e da arquitetura. Nao foi inferida apenas por nomes de arquivos.
++
++Aplicar os patches nesta ordem:
++
++1. `e07-4-changes.diff`: base 893e6c9 -> E07.4 (chamada).
++2. `e07-5-changes.diff`: resultado da E07.4 -> E07.5 (conclusao).
++3. `e07-6-changes.diff`: resultado da E07.5 -> E07.6, incluindo a correcao pontual
++   de timestamps e da fixture de FK. Representa a versao atual, nao a inicial defeituosa.
++
++Cada patch inclui os cinco arquivos proprios da etapa (servico, tipos, unitarios,
++integracao e documento) e as adicoes registradas no modulo/arquitetura comuns.
++Os 17 arquivos resultantes foram comparados ao working tree, normalizando somente
++CRLF para LF conforme o Git. Os tres git apply --check e as aplicacoes sequenciais
++passaram em repositorio temporario isolado. Indice, HEAD e codigo originais intactos.
++
++| Patch | Arquivos | SHA-256 |
++| --- | --- | --- |
++| `e07-4-changes.diff` | 7 | `66c58fbdaed405e6d11de40fe0de21b77b649a4dcc510aeac9e1c5c6965febc7` |
++| `e07-5-changes.diff` | 7 | `5821352a6ac96f3a339d998afc090af3d7dcdef37d8504e68b02cd2f444e1264` |
++| `e07-6-changes.diff` | 7 | `089dd90306b6bde434e2a4c4bdf1a30439b0a18da924a4e2751a88539364227f` |
++
++Evidencias anteriores preservadas. Sem .env, credenciais reais, dependencias
++instaladas ou temporarios. Os .diff nao incluem a si mesmos nem outras evidencias.
++AGENTS.md registra o procedimento automatico futuro; sua alteracao e esta nota
++pertencem a rodada de evidencias, no patch separado procedimento-diffs-changes.diff.
++
++A aprovacao PostgreSQL da E07.6 segue pendente. Esta rodada nao executa testes
++de produto nem altera resultados anteriores. Sem commit ou push.
