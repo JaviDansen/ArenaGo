@@ -14,12 +14,14 @@ import { StaffIdempotencyPolicy } from "./staff-idempotency.policy";
 import { ParticipantQueueController } from "./participant-queue.controller";
 import { ParticipantQueueIdempotencyPolicy } from "./participant-queue-idempotency.policy";
 import { ExperiencesController } from "./experiences.controller";
+import { StaffQueriesController } from "./staff-queries.controller";
+import { StaffQueriesService } from "./staff-queries.service";
 
 /** Agrupa os serviços de Events e reutiliza o acesso PostgreSQL compartilhado. */
 @Module({
   imports: [DatabaseModule, AuthModule],
-  controllers: [StaffOperationsController, ParticipantQueueController, ExperiencesController],
-  providers: [EventsService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, StaffIdempotencyPolicy, ParticipantQueueIdempotencyPolicy],
-  exports: [EventsService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService],
+  controllers: [StaffOperationsController, StaffQueriesController, ParticipantQueueController, ExperiencesController],
+  providers: [EventsService, StaffQueriesService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, StaffIdempotencyPolicy, ParticipantQueueIdempotencyPolicy],
+  exports: [EventsService, StaffQueriesService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService],
 })
 export class EventsModule {}

@@ -1140,6 +1140,15 @@ abaixo são preservados, sem idempotência, mutações ou limpeza no GET.
 
 ### 16.6 `GET /staff/events/:eventId/stations` — operação por evento
 
+**Implementação E08.4 — 03/11/2026:** rota disponível sob `/api/v1` por
+`StaffQueriesController`/`StaffQueriesService`. Exige Staff vigente do próprio
+evento, conta ativa/verificada e sessão válida; Admin isolado não recebe leitura
+operacional por esta rota. O contrato efetivo acrescenta `pendingCalledAt` (ISO UTC
+ou null) a cada estação, junto de `pendingServiceSessionId`. Autorização e dados
+compartilham snapshot `REPEATABLE READ READ ONLY`; nenhum atendimento é resolvido
+pelo GET, inclusive após o prazo. Detalhes e validação pendente em
+`E08_4_IMPLEMENTACAO.md`. O exemplo histórico abaixo omite o instante.
+
 **Staff ativo e autorizado para `eventId`**, com e-mail verificado e sessão válida. Admin global pode ter rota de administração própria; a consulta Staff por si não deve implicar capacidade automática de concluir chamadas. **Resposta:** experiências/estações do evento com `availability` e, de forma operacional mínima, `pendingServiceSessionId` e instante da chamada. Staff pode selecionar estação no momento da operação; não existe relação permanente Staff↔estação.
 
 ```json
@@ -1181,6 +1190,18 @@ Validar que `stationId` pertence a uma experiência do evento. Na transação, b
 Uma estação disponível porém ocupada não pode receber novo chamado. Desativar estação não fecha fila da experiência nem transfere participantes; nenhuma permissão de mudar `queue_accepting_entries` decorre desta rota.
 
 ### 16.8 `GET /staff/events/:eventId/experiences/:experienceId/queue`
+
+**Implementação E08.4 — 03/11/2026:** rota disponível sob `/api/v1`, com as mesmas
+exigências Staff da §16.6 e recusa neutra 404 para acesso/recurso ausente ou alheio.
+`acceptingNewEntries` reutiliza E06; `canCallWaitingEntries` indica a janela temporal
+operacional da E07.4 (início inclusivo, prazos operacional/Admin exclusivos, estado
+diferente de `closed`). Pode ser true com fila vazia ou estação ocupada/indisponível;
+não exige fila aberta a novos ingressos nem supera a validação da estação no POST.
+Contagem e primeiro ID incluem somente `waiting` do mesmo evento/experiência, na
+ordem PostgreSQL `queue_order, id`, conforme o seletor efetivo da E07.4, sem saltar
+entradas ou converter bigint em number. O GET não limpa histórico após o prazo:
+contagens persistidas podem permanecer, com chamadas bloqueadas. Ver
+`E08_4_IMPLEMENTACAO.md` para consistência, privacidade e testes.
 
 **Staff por evento.** Validar que a experiência pertence ao evento e consultar informações de fila sem mutá-la. Exemplo:
 
