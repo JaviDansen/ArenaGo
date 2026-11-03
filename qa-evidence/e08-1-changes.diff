@@ -478,6 +478,19 @@ index 10a16b4886650c8649fbdbdc23eb2cf285be9c27..e132fcd3b4b990ba504e7342b1828cc7
    exports: [EventsService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService],
  })
  export class EventsModule {}
+diff --git a/backend/src/events/queue-entry.service.ts b/backend/src/events/queue-entry.service.ts
+index 386093cfbd507692d62d476a58e0f641a869dc17..ffa7a0b897b6606df22b757f2523ffc22fc19003 100644
+--- a/backend/src/events/queue-entry.service.ts
++++ b/backend/src/events/queue-entry.service.ts
+@@ -60,7 +60,7 @@ function replayEntry(payload: JsonValue | null, input: JoinExperienceQueueInput)
+ export class QueueEntryService {
+   constructor(
+     @Inject(DRIZZLE_DATABASE) private readonly database: NodePgDatabase<typeof schema>,
+-    private readonly eventsService: EventsService,
++    @Inject(EventsService) private readonly eventsService: EventsService,
+   ) {}
+ 
+   async joinExperienceQueue(input: JoinExperienceQueueInput): Promise<JoinExperienceQueueResult> {
 diff --git a/backend/src/events/staff-idempotency.policy.ts b/backend/src/events/staff-idempotency.policy.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..66b357054d675cbfe0b32d31afdd855bf4391480
@@ -1002,6 +1015,38 @@ index 0000000000000000000000000000000000000000..32215d43c027e67ef084483e7a48d4a9
 +  } finally { completion.complete = original; }
 +  assert.equal((await post(c, "complete", key).send({})).status, 200);
 +});
+diff --git a/backend/test/unit/queue-entry-di.test.ts b/backend/test/unit/queue-entry-di.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..3de848c0172e4082fe3867126b4a8d77a6feee3e
+--- /dev/null
++++ b/backend/test/unit/queue-entry-di.test.ts
+@@ -0,0 +1,26 @@
++import "reflect-metadata";
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { NestFactory } from "@nestjs/core";
++import { DRIZZLE_DATABASE, POSTGRES_POOL } from "../../src/database/database.module";
++import { EventsModule } from "../../src/events/events.module";
++import { EventsService } from "../../src/events/events.service";
++import { QueueEntryService } from "../../src/events/queue-entry.service";
++import type { Pool } from "pg";
++
++test("E08.1 Nest resolve as dependências reais de QueueEntryService sob tsx", async () => {
++  // create instancia os providers reais; sem init/listen, o lifecycle não conecta ao banco.
++  const app = await NestFactory.create(EventsModule, { logger: false });
++  try {
++    const joining = app.get(QueueEntryService);
++    const events = app.get(EventsService);
++    const database = app.get(DRIZZLE_DATABASE);
++    assert.ok(events instanceof EventsService);
++    assert.ok(Reflect.get(joining, "database") === database, "QueueEntryService recebe o banco real");
++    assert.ok(Reflect.get(joining, "eventsService") === events, "QueueEntryService recebe EventsService real");
++    assert.ok(Reflect.get(events, "database") === database, "EventsService recebe o mesmo banco");
++    assert.equal(app.get<Pool>(POSTGRES_POOL).totalCount, 0);
++  } finally {
++    await app.close();
++  }
++});
 diff --git a/backend/test/unit/staff-http.test.ts b/backend/test/unit/staff-http.test.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..1f8116a5f4b9aff4392efc50afddf70906efc7bb
@@ -1162,24 +1207,24 @@ index 0000000000000000000000000000000000000000..1f8116a5f4b9aff4392efc50afddf709
 +  assert.throws(() => validateStaffRequest({}, { headers: { "content-type": "application/json", "idempotency-key": "a\tb" }, rawHeaders: ["Idempotency-Key", "a\tb"] }), ProblemException);
 +});
 diff --git a/docs/ARQUITETURA_BACKEND_ARENAGO.md b/docs/ARQUITETURA_BACKEND_ARENAGO.md
-index 86544c81b6e3b2c5ca61d7cb844400465c19be5a..0f98734e9698061abade06efe004c94c853c18ac 100644
+index 86544c81b6e3b2c5ca61d7cb844400465c19be5a..cd3c39fe97d8cce119369908306a40ca8b9b6d8c 100644
 --- a/docs/ARQUITETURA_BACKEND_ARENAGO.md
 +++ b/docs/ARQUITETURA_BACKEND_ARENAGO.md
 @@ -1163,6 +1163,8 @@ O primeiro ID é **somente indicação de leitura**; o endpoint de chamada sempr
  
  ### 16.9 `POST /staff/events/:eventId/experiences/:experienceId/stations/:stationId/call-next`
  
-+**Camada HTTP E08.1 — 03/11/2026:** as três rotas §16.9–16.11 estão conectadas aos serviços E07.4–E07.6 por `StaffOperationsController`, sob `/api/v1`. Reutilizam `RequireSessionAuth`/`CurrentUserId`, autorização transacional dos serviços e erros RFC 7807. UUIDs canônicos, uma única `Idempotency-Key` opaca não vazia (até 128 caracteres, sem controles) e somente `{}`/corpo ausente. O backend exige `STAFF_IDEMPOTENCY_TTL_SECONDS` inteiro positivo, sem padrão, para gerar `expiresAt`; não há expurgo automático ou perda de replay pelo vencimento enquanto o registro existir. Replay preserva o status original 201/200. Política definitiva de retenção/expurgo continua pendente. Códigos e validação em `docs/E08_1_IMPLEMENTACAO.md`; testes PostgreSQL HTTP desta entrega ainda pendentes.
++**Camada HTTP E08.1 — 03/11/2026:** as três rotas §16.9–16.11 estão conectadas aos serviços E07.4–E07.6 por `StaffOperationsController`, sob `/api/v1`. Reutilizam `RequireSessionAuth`/`CurrentUserId`, autorização transacional dos serviços e erros RFC 7807. UUIDs canônicos, uma única `Idempotency-Key` opaca não vazia (até 128 caracteres, sem controles) e somente `{}`/corpo ausente. O backend exige `STAFF_IDEMPOTENCY_TTL_SECONDS` inteiro positivo, sem padrão, para gerar `expiresAt`; não há expurgo automático ou perda de replay pelo vencimento enquanto o registro existir. Replay preserva o status original 201/200. Política definitiva de retenção/expurgo continua pendente. Códigos e validação em `docs/E08_1_IMPLEMENTACAO.md`; valida??o manual no PostgreSQL local confirmada pelo respons?vel em 03/11/2026: 20/20 HTTP E08.1 e 263/263 na regress?o completa, sem falhas, cancelamentos ou skips.
 +
  **Staff ativo com escopo de evento; `Idempotency-Key` obrigatória; corpo `{}`.** O Staff seleciona a estação que está operando naquele momento. A API não delega ao telefone a seleção de qual participante chamar.
  
  **Implementação interna E07.4 (02/11/2026):** `CallNextService.callNext({ staffUserId, eventId, experienceId, stationId, idempotencyKey, expiresAt })`, exportado por `EventsModule`. Conta ativa/verificada e concessão Staff vigente são revalidadas sob locks; Admin isolado não autoriza. Namespace idempotente `call_next`, fingerprint de evento/experiência/estação, replay histórico ainda sujeito à autorização atual. O INSERT decisivo usa `clock_timestamp()` e os prazos operacional/administrativo, permitindo chamadas residuais sem exigir novas inscrições abertas. Contrato HTTP permanece proposto; sem rota ou migration. Validação e comandos PostgreSQL em `docs/E07_4_IMPLEMENTACAO.md`.
 diff --git a/docs/E08_1_IMPLEMENTACAO.md b/docs/E08_1_IMPLEMENTACAO.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..ea3a26a4e53e80b42e4fa26d7b977342cd843eff
+index 0000000000000000000000000000000000000000..2269aad493b0c957686247ebf2d3282b33182fa9
 --- /dev/null
 +++ b/docs/E08_1_IMPLEMENTACAO.md
-@@ -0,0 +1,106 @@
+@@ -0,0 +1,199 @@
 +# E08.1 — HTTP das operações Staff
 +
 +Implementado sobre `b0b18e14631e2dfebeb26456d42b2ba2a69c762a`, branch
@@ -1202,7 +1247,7 @@ index 0000000000000000000000000000000000000000..ea3a26a4e53e80b42e4fa26d7b977342
 +de CurrentUserId; sessão revogada/expirada e Admin sem segundo fator são barrados
 +pelo mecanismo atual. Staff ativo/verificado, escopo de evento, vínculos, FIFO,
 +prazos e concorrência continuam sendo decididos nos serviços transacionais,
-+sem mudar E07.1–E07.6. Admin isolado não adquire privilégio operacional.
++preservando as regras E07.1–E07.6. Admin isolado não adquire privilégio operacional.
 +
 +UUIDs são validados e normalizados para minúsculas. Header Idempotency-Key único,
 +opaco, não vazio, até 128 caracteres, sem controles; chave não é renormalizada.
@@ -1244,9 +1289,9 @@ index 0000000000000000000000000000000000000000..ea3a26a4e53e80b42e4fa26d7b977342
 +carregar identidades diferentes de HttpException. Além de instanceof, o filtro
 +reconhece getStatus/getResponse e valida o status, reutilizando mensagens públicas
 +genéricas. Isso corrige JSON malformado que retornava 500 no teste HTTP. Nenhuma
-+regra de domínio ou serviço E07 foi alterado.
++regra de domínio foi alterada. A correção de injeção E07.1 está registrada abaixo.
 +
-+## Validação e pendências
++## Histórico — validação inicial e pendências daquela rodada
 +
 +- **214/214 testes aprovados**: 203 anteriores e 11 novos de validação/HTTP com
 +  Supertest, guard real e serviços simulados. Zero falhas/cancelamentos/skips.
@@ -1283,6 +1328,99 @@ index 0000000000000000000000000000000000000000..ea3a26a4e53e80b42e4fa26d7b977342
 +if ($LASTEXITCODE -ne 0) { throw 'Revisar regressão PostgreSQL.' }
 +```
 +
-+Evidência: `qa-evidence/e08-1-changes.diff`, exclusiva contra a base acima.
++Evidência original: `qa-evidence/e08-1-changes.diff`, exclusiva contra a base acima.
 +Sem endpoints de gestão/Admin, telas, migrations, notificações ou refatoração geral.
-+**Sem commit/push até confirmação dos testes PostgreSQL pelo responsável.**
++O bloqueio de commit/push desta rodada vigorou até a confirmação dos testes
++PostgreSQL pelo responsável, registrada na validação final abaixo.
++
++## Correção de injeção de dependência — 2026-11-03
++
++Confirmada a falha de resolução automática sob `tsx`: o Nest instancia
++`QueueEntryService`, resolve `DRIZZLE_DATABASE`, mas não fornece `EventsService`
++ao segundo parâmetro sem token explícito. O teste de regressão
++`test/unit/queue-entry-di.test.ts` falhou antes da correção na comparação com
++`app.get(EventsService)` e passou após adicionar `@Inject(EventsService)`.
++O teste usa `EventsModule`, providers reais, banco Drizzle e Pool reais;
++não inicia o lifecycle de conexão nem executa SQL. Confere a identidade das
++duas dependências de QueueEntryService e do banco recebido por EventsService.
++
++Houve uma alteração pontual na injeção de dependência de E07.1, sem mudança de
++comportamento de negócio: apenas o decorator no construtor. Nenhum outro serviço
++foi modificado nesta correção. Os testes PostgreSQL existentes foram preservados.
++
++Resultados efetivamente executados nesta correção:
++
++- `npm test`: **215/215 aprovados**, incluindo o novo teste de DI; zero skips.
++- `npm run typecheck:test`, `npm run lint` e `npm run build`: aprovados, exit 0.
++- HTTP PostgreSQL E08.1: comando executado, exit 1 no preflight por ausência de
++  `DATABASE_URL`; os 20 cenários não chegaram a executar.
++- `npm run test:integration`: executado, exit 1; os 20 arquivos de integração
++  falharam na carga/preflight pela configuração de banco ausente. Esses 20
++  arquivos não equivalem aos 20 cenários HTTP E08.1, nem aos casos da regressão.
++- A porta TCP `127.0.0.1:55432` responde, mas as três URLs estão ausentes nos
++  escopos processo, usuário e máquina. Nenhum `.env` foi carregado; nenhuma
++  credencial foi presumida. Unitários usaram URL fictícia, sem conexão, e TTL 60.
++- O runner `tsx` exigiu execução fora da sandbox devido a
++  `uv_os_get_passwd`/`ENOMEM`. A primeira versão da asserção de identidade também
++  tentou inspecionar o grafo inteiro de providers e excedeu memória ao falhar;
++  a asserção final usa comparação booleana e reproduziu a falha de DI diretamente.
++
++Ao fim da rodada de correção, continuavam pendentes os 20 cenários HTTP com
++PostgreSQL, a regressão completa e a investigação de falhas independentes após
++os fixtures. Naquela rodada não houve aprovação PostgreSQL, commit ou push.
++Essas pendências de integração foram resolvidas pela validação manual final abaixo.
++
++Proveniência: a árvore já continha a implementação E08.1, incluindo arquivos
++não rastreados e o patch original. O estado anterior desta correção foi copiado
++para `%TEMP%/arenago-e081-before-86191227c0374b64ac07d2486990fe43`, com manifesto,
++HEAD e status. Não foi usado reset, stash ou alteração do índice. A atribuição
++da implementação anterior à E08.1 se apoia no patch existente e no relatório
++anterior; não há snapshot desta sessão anterior à implementação original.
++
++Evidência da correção de DI: `qa-evidence/e08-1-changes-rev-20261103-di.diff`,
++contra `b0b18e14631e2dfebeb26456d42b2ba2a69c762a`, abrangendo os caminhos do
++patch original e esta correção/teste/relatório. O nome foi revisado para preservar
++o `.diff` existente conforme AGENTS.md. A aplicação é verificada em cópia isolada
++da base e o resultado comparado aos arquivos finais; evidências `.diff`, segredos,
++`.env`, dependências e temporários ficam excluídos.
++
++## Validação final manual — 2026-11-03
++
++Resultados confirmados pelo responsável após a correção de DI, no PostgreSQL
++local de testes; a integração não foi reexecutada pela sessão do agente:
++
++| Verificação | Resultado confirmado |
++| --- | --- |
++| HTTP E08.1 + PostgreSQL | **20/20 aprovados** |
++| Regressão PostgreSQL completa | **263/263 aprovados** (243 anteriores + 20 HTTP E08.1) |
++| Unitários | **215/215 aprovados** |
++| Typecheck, lint e build | **Aprovados na última implementação** |
++
++Zero falhas, cancelamentos ou skips nos testes confirmados. O erro inicial
++`Cannot read properties of undefined (reading 'evaluateEventAvailabilityById')`
++afetava os 20 cenários HTTP durante a preparação, antes dos endpoints. A injeção
++explícita `@Inject(EventsService)` e a regressão de DI resolveram essa falha sem
++mudar o comportamento de negócio de E07.1. Os bloqueios de configuração e as
++falhas anteriores permanecem acima como histórico, não como pendências atuais.
++Nenhuma falha independente permanece reportada nos resultados finais confirmados.
++
++A confirmação manual encerra a pendência de integração e autoriza o commit único
++da E08.1 e o push para `origin/feature/events-participations`, com a mensagem
++`feat(events): implementar operações HTTP da equipe Staff`. Não houve validação
++de produção. Retenção/expurgo definitivos continuam fora desta entrega; E08.2
++não foi iniciada.
++
++Evidência final completa: `qa-evidence/e08-1-changes-rev-20261103-final.diff`,
++contra a mesma base `b0b18e14631e2dfebeb26456d42b2ba2a69c762a`, incluindo
++implementação, correção de DI, dependências, testes e documentação final.
++Os dois patches anteriores foram preservados. A nova revisão é aplicada em cópia
++isolada da base e comparada aos arquivos finais, respeitando a normalização de
++linhas do Git. Não inclui arquivos `.diff`, credenciais, `.env`, dependências
++instaladas, temporários ou arquivos de outras etapas.
++
++O estado anterior à finalização foi preservado separadamente em
++`%TEMP%/arenago-e081-final-before-1a89f66107a7444d99c6b4f6fffc51ea`, incluindo
++os arquivos não rastreados, evidências e manifesto de branch/HEAD/status.
++O `AGENTS.md` local recebeu a convenção de mensagens de commit em português,
++com prefixos Conventional Commits e sem reescrever commits existentes; permanece
++ignorado pelo `.gitignore` versionado e fora do patch/commit E08.1.
