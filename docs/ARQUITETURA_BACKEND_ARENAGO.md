@@ -1190,6 +1190,8 @@ O primeiro ID é **somente indicação de leitura**; o endpoint de chamada sempr
 
 **Staff ativo por evento; `Idempotency-Key`; body `{}`.** Resolver o ID → experiência/estação/entrada/participação **sem assumir autorização**, adquirir locks na ordem comum (`events` → `experiences` → `stations` → `participations`/`queue_entries` → `service_sessions`), revalidar Staff, evento, cronologia, `pending` e participação ainda `active` após os locks. Se válida, marcar `service_sessions.status='completed'`, `resolved_at`, `resolved_by_user_id`, encerrar `queue_entries` com `close_reason='completed'` e limpar `participations.current_queue_entry_id`, tudo atomicamente. A estação disponível fica pronta para **outra chamada posterior**, sem autochamada ou marcação automática de presença.
 
+**Implementação interna E07.5 (02/11/2026):** `CompleteService.complete({ staffUserId, eventId, serviceSessionId, idempotencyKey, expiresAt })`, exportado pelo `EventsModule`. Revalida conta ativa/verificada, concessão Staff vigente e vínculos sob o protocolo comum. Namespace `complete_service_session`, fingerprint de evento/sessão e replay histórico sujeito à autorização atual, sem tocar entradas posteriores. O UPDATE decisivo usa `clock_timestamp()` e os prazos operacional/administrativo; `closed_at` copia `resolved_at` diretamente no PostgreSQL. Sem HTTP ou migration; testes e comandos em `docs/E07_5_IMPLEMENTACAO.md`.
+
 **Resposta `200`:**
 
 ```json
