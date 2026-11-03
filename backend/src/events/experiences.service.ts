@@ -21,7 +21,7 @@ interface ExperienceRow extends Record<string, unknown> {
 export class ExperiencesService {
   constructor(
     @Inject(DRIZZLE_DATABASE) private readonly database: NodePgDatabase<typeof schema>,
-    private readonly eventsService: EventsService,
+    @Inject(EventsService) private readonly eventsService: EventsService,
   ) {}
 
   /**

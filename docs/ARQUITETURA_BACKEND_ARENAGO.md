@@ -1006,6 +1006,18 @@ que delimitam E07.1–E07.3 sem HTTP descrevem o histórico anterior a esta atua
 
 ### 16.3 `GET /events/:eventId/experiences` — visão do participante
 
+**Implementação HTTP E08.3 — 03/11/2026:** `ExperiencesController` expõe esta rota
+sob `/api/v1`, reutilizando exclusivamente `ExperiencesService.getEventExperiences`
+da E06. Exige sessão Bearer e participação `active` do titular nesse evento;
+ausência de acesso retorna 404 neutro `RESOURCE_NOT_FOUND`. UUID é validado e
+normalizado. JSON preserva os campos abaixo, sem `kind`; não calcula novamente
+disponibilidade ou contagens, não cria idempotência e não executa mutações.
+O serviço mantém `REPEATABLE READ READ ONLY`; sua única alteração foi declarar
+`@Inject(EventsService)` após falha de DI comprovada sob `tsx`. `available` continua
+expressando configuração, inclusive se a estação estiver ocupada. Testes e
+comandos de integração PostgreSQL manual em `E08_3_IMPLEMENTACAO.md`. Trechos
+anteriores deste capítulo que dizem não haver endpoints são registros históricos.
+
 **Requisitos:** Bearer válido, titular com participação `active` no evento. `200 OK` mesmo durante operação residual para que usuários já presentes vejam o estado; não implica que possam entrar novamente. `eventId` no path deve corresponder à participação atual. Não divulgar nomes, e-mails, escalas de Staff ou identidades na fila.
 
 **Exemplo `200`:**
