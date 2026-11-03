@@ -7,11 +7,12 @@ import { QueueStateService } from "./queue-state.service";
 import { QueueWithdrawalService } from "./queue-withdrawal.service";
 import { CallNextService } from "./call-next.service";
 import { CompleteService } from "./complete.service";
+import { AbsentService } from "./absent.service";
 
 /** Agrupa os serviços de Events e reutiliza o acesso PostgreSQL compartilhado. */
 @Module({
   imports: [DatabaseModule],
-  providers: [EventsService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService],
-  exports: [EventsService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService],
+  providers: [EventsService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService],
+  exports: [EventsService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService],
 })
 export class EventsModule {}
