@@ -49,9 +49,12 @@ export default function StaffStationScreen({ navigation, route }) {
   // Após o corte de inscrições, ausente não volta à fila (regra vigente).
   const absentRequeues = session.queueEntriesOpen;
 
-  function apply(transition) {
+  function apply(transition, ...args) {
     setDialog(null);
-    const result = run(transition, station.id);
+    const result = run(transition, station.id, ...args);
+    // Callback antigo ou repetido (chamado já resolvido ou trocado) não
+    // sobrescreve o retorno da ação válida.
+    if (result.code === 'CALL_CHANGED' || result.code === 'NO_CALL') return;
     setFeedback({ tone: result.ok ? 'success' : 'error', message: result.message });
   }
 
@@ -109,11 +112,14 @@ export default function StaffStationScreen({ navigation, route }) {
               {station.call.name} foi chamado(a). Ao terminar a experiência, confirme a conclusão.
             </Text>
           </StaffNotice>
-          <StaffButton label="CONCLUIR EXPERIÊNCIA" onPress={() => setDialog({ type: 'complete' })} />
+          <StaffButton
+            label="CONCLUIR EXPERIÊNCIA"
+            onPress={() => setDialog({ type: 'complete', call: station.call })}
+          />
           <StaffButton
             label={absentRequeues ? 'AUSENTE → FINAL DA FILA' : 'AUSENTE (NÃO VOLTA À FILA)'}
             variant="secondary"
-            onPress={() => setDialog({ type: 'absent' })}
+            onPress={() => setDialog({ type: 'absent', call: station.call })}
           />
         </>
       ) : null}
@@ -169,10 +175,10 @@ export default function StaffStationScreen({ navigation, route }) {
       <StaffConfirmDialog
         visible={dialog?.type === 'complete'}
         title="Concluir experiência?"
-        message={station.call ? `Confirma que ${station.call.name} concluiu a experiência?` : ''}
+        message={dialog?.call ? `Confirma que ${dialog.call.name} concluiu a experiência?` : ''}
         note="Simulação local: a conclusão não é registrada no servidor."
         confirmLabel="CONCLUIR"
-        onConfirm={() => apply(completeCall)}
+        onConfirm={() => apply(completeCall, dialog?.call?.entryId)}
         onCancel={() => setDialog(null)}
       />
 
@@ -180,12 +186,12 @@ export default function StaffStationScreen({ navigation, route }) {
         visible={dialog?.type === 'absent'}
         title="Registrar ausência?"
         message={absentRequeues
-          ? `${station.call?.name ?? 'O participante'} volta para o final da fila. Ausência não conta como conclusão.`
-          : `Novas inscrições já foram encerradas: ${station.call?.name ?? 'o participante'} NÃO volta para a fila.`}
+          ? `${dialog?.call?.name ?? 'O participante'} volta para o final da fila. Ausência não conta como conclusão.`
+          : `Novas inscrições já foram encerradas: ${dialog?.call?.name ?? 'o participante'} NÃO volta para a fila.`}
         note="Simulação local: nada é enviado ao servidor."
         confirmLabel="MARCAR AUSENTE"
         variant="danger"
-        onConfirm={() => apply(markAbsent)}
+        onConfirm={() => apply(markAbsent, dialog?.call?.entryId)}
         onCancel={() => setDialog(null)}
       />
 

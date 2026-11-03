@@ -177,10 +177,24 @@ export function callNext(state, stationId) {
     { participant: next });
 }
 
-export function completeCall(state, stationId) {
+// Conclusão e ausência valem só para o chamado exibido no diálogo (entryId):
+// um callback antigo não resolve um chamado novo feito depois na mesma estação.
+function findPendingCall(state, stationId, entryId) {
   const found = findStation(state, stationId);
-  if (!found) return fail(state, 'STATION_NOT_FOUND', 'Estação não encontrada.');
-  if (!found.station.call) return fail(state, 'NO_CALL', 'Esta estação não tem chamado pendente.');
+  if (!found) return { error: fail(state, 'STATION_NOT_FOUND', 'Estação não encontrada.') };
+  if (!found.station.call) {
+    return { error: fail(state, 'NO_CALL', 'Esta estação não tem chamado pendente.') };
+  }
+  if (typeof entryId !== 'string' || found.station.call.entryId !== entryId) {
+    return { error: fail(state, 'CALL_CHANGED',
+      'Este chamado já foi resolvido ou mudou. Nada foi alterado.') };
+  }
+  return { found };
+}
+
+export function completeCall(state, stationId, entryId) {
+  const { found, error } = findPendingCall(state, stationId, entryId);
+  if (error) return error;
 
   const participant = found.station.call;
   const nextState = updateStation(state, stationId, (experience) => ({
@@ -193,10 +207,9 @@ export function completeCall(state, stationId) {
 
 // Ausência nunca conta como conclusão. Volta ao final da fila somente
 // enquanto novas inscrições em fila estiverem permitidas (D05 / C-01).
-export function markAbsent(state, stationId) {
-  const found = findStation(state, stationId);
-  if (!found) return fail(state, 'STATION_NOT_FOUND', 'Estação não encontrada.');
-  if (!found.station.call) return fail(state, 'NO_CALL', 'Esta estação não tem chamado pendente.');
+export function markAbsent(state, stationId, entryId) {
+  const { found, error } = findPendingCall(state, stationId, entryId);
+  if (error) return error;
 
   const participant = found.station.call;
   const requeued = state.queueEntriesOpen === true;

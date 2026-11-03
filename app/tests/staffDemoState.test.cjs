@@ -16,6 +16,8 @@ const experience = (current, id) => state.findExperience(current, id);
 // Os módulos rodam em outro contexto vm; normaliza para comparar estruturas.
 const plain = (value) => JSON.parse(JSON.stringify(value));
 const names = (list) => plain(list.map((item) => item.name));
+// entryId do chamado exibido na estação (o que o diálogo carrega).
+const callId = (current, id) => state.findStation(current, id).station.call.entryId;
 
 test('acesso Staff: código vazio ou só com espaços não avança', () => {
   for (const code of ['', '   ', '\t\r\n', undefined, null, 42]) {
@@ -134,7 +136,7 @@ test('chamada segue a fila FIFO única da experiência entre estações', () => 
 
   // vr-1 tem chamado pendente e precisa resolvê-lo antes de chamar.
   assert.equal(state.callNext(current, 'vr-1').result.code, 'CALL_PENDING');
-  current = state.completeCall(current, 'vr-1').state;
+  current = state.completeCall(current, 'vr-1', callId(current, 'vr-1')).state;
   current = state.callNext(current, 'vr-1').state;
   assert.equal(station(current, 'vr-1').call.name, 'Pedro M.');
   assert.notEqual(station(current, 'vr-1').call.participantId, station(current, 'vr-2').call.participantId);
@@ -150,16 +152,17 @@ test('estação indisponível, fila vazia e estação inexistente não chamam', 
 
 test('concluir libera a estação, conta conclusão e não mexe na fila', () => {
   const before = session();
-  const { state: after, result } = state.completeCall(before, 'ps-1');
+  const { state: after, result } = state.completeCall(before, 'ps-1', callId(before, 'ps-1'));
   assert.equal(result.participant.name, 'Ana C.');
   assert.equal(station(after, 'ps-1').call, null);
   assert.equal(experience(after, 'playstation').completedCount, 1);
   assert.deepEqual(plain(experience(after, 'playstation').queue), plain(experience(before, 'playstation').queue));
-  assert.equal(state.completeCall(after, 'ps-1').result.code, 'NO_CALL');
+  assert.equal(state.completeCall(after, 'ps-1', 'qualquer').result.code, 'NO_CALL');
 });
 
 test('ausência volta ao final da fila enquanto inscrições estão abertas e não conta conclusão', () => {
-  const { state: after, result } = state.markAbsent(session(), 'vr-1');
+  const before = session();
+  const { state: after, result } = state.markAbsent(before, 'vr-1', callId(before, 'vr-1'));
   assert.equal(result.requeued, true);
   assert.equal(station(after, 'vr-1').call, null);
   const queue = experience(after, 'virtual-reality').queue;
@@ -170,7 +173,8 @@ test('ausência volta ao final da fila enquanto inscrições estão abertas e n�
 });
 
 test('ausência após o corte de inscrições não devolve à fila', () => {
-  const { state: after, result } = state.markAbsent(session('STAFFVAZIO'), 'ps-1');
+  const closed = session('STAFFVAZIO');
+  const { state: after, result } = state.markAbsent(closed, 'ps-1', callId(closed, 'ps-1'));
   assert.equal(result.ok, true);
   assert.equal(result.requeued, false);
   assert.deepEqual(plain(experience(after, 'playstation').queue), []);
@@ -178,7 +182,27 @@ test('ausência após o corte de inscrições não devolve à fila', () => {
 });
 
 test('ausência sem chamado pendente é recusada', () => {
-  assert.equal(state.markAbsent(session(), 'vr-2').result.code, 'NO_CALL');
+  assert.equal(state.markAbsent(session(), 'vr-2', 'qualquer').result.code, 'NO_CALL');
+});
+
+test('R02 concluir e ausente recusam entryId antigo depois de um novo chamado na mesma estação', () => {
+  let current = session();
+  const oldCall = callId(current, 'ps-1'); // Ana C.
+  current = state.completeCall(current, 'ps-1', oldCall).state;
+  current = state.callNext(current, 'ps-1').state; // Lucas R. chamado na mesma estação
+  assert.equal(state.findStation(current, 'ps-1').station.call.name, 'Lucas R.');
+
+  for (const transition of [state.completeCall, state.markAbsent]) {
+    const { state: after, result } = transition(current, 'ps-1', oldCall);
+    assert.equal(result.ok, false);
+    assert.equal(result.code, 'CALL_CHANGED');
+    assert.equal(after, current, 'estado intacto');
+  }
+  for (const id of [undefined, null, '']) {
+    assert.equal(state.completeCall(current, 'ps-1', id).result.code, 'CALL_CHANGED', String(id));
+    assert.equal(state.markAbsent(current, 'ps-1', id).result.code, 'CALL_CHANGED', String(id));
+  }
+  assert.equal(experience(current, 'playstation').completedCount, 1, 'só a conclusão de Ana contou');
 });
 
 test('resumo da experiência conta fila, chamados e estações disponíveis', () => {

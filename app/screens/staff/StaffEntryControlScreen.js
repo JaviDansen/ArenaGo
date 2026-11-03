@@ -85,6 +85,14 @@ export default function StaffEntryControlScreen({ navigation }) {
         />
       ) : null}
 
+      {!session.queueEntriesOpen ? (
+        <StaffNotice
+          tone="neutral"
+          title="Inscrições encerradas"
+          message="As novas inscrições nas filas das experiências já foram encerradas. Ativar ou desativar a fila de acesso não reabre as inscrições."
+        />
+      ) : null}
+
       <Text style={styles.sectionTitle} accessibilityRole="header">Fila</Text>
 
       {entryQueue.waiting.length === 0 ? (

@@ -423,3 +423,68 @@ test('C05 com inscrições abertas a ausência continua prometendo o final da fi
   assert.ok(!app.hasButton('AUSENTE (NÃO VOLTA À FILA)'));
   assert.ok(app.hasText('“Ausente” volta ao fim da fila'));
 });
+
+// ---- R01–R02 (devolutiva da auditoria de d2fe7a9) ----
+
+test('R02 callback antigo de CONCLUIR não conclui o novo chamado da mesma estação', async () => {
+  const app = await enterEvent();
+  app.press(PLAYSTATION);
+  app.press('CONCLUIR EXPERIÊNCIA');
+  assert.ok(app.hasText('Confirma que Ana C. concluiu a experiência?'));
+  const staleComplete = app.handlerOf('CONCLUIR');
+  app.press('CONCLUIR'); // conclusão válida de Ana
+  app.press('CHAMAR PRÓXIMO'); // Lucas R. chamado na mesma estação ps-1
+  assert.ok(app.hasText('Lucas R. foi chamado(a)'));
+
+  staleComplete(); // callback antigo do diálogo de Ana
+  app.sync();
+  const ps = app.session.experiences[0];
+  assert.equal(ps.stations[0].call.name, 'Lucas R.', 'Lucas continua chamado');
+  assert.equal(ps.completedCount, 1, 'só Ana foi concluída');
+  assert.ok(!app.hasText('Experiência de Lucas R. concluída'));
+});
+
+test('R02 callback antigo de AUSENTE não afeta o novo chamado nem a fila', async () => {
+  const app = await enterEvent();
+  app.press(PLAYSTATION);
+  app.press('AUSENTE → FINAL DA FILA');
+  const staleAbsent = app.handlerOf('MARCAR AUSENTE');
+  app.press('CANCELAR');
+  confirmDialog(app, 'CONCLUIR EXPERIÊNCIA', 'CONCLUIR');
+  app.press('CHAMAR PRÓXIMO');
+
+  staleAbsent();
+  app.sync();
+  const ps = app.session.experiences[0];
+  assert.equal(ps.stations[0].call.name, 'Lucas R.');
+  assert.deepEqual(plain(ps.queue), [], 'ninguém foi devolvido à fila');
+  assert.equal(app.session.absenceSequence, 0);
+});
+
+test('R02 dois callbacks seguidos de CONCLUIR têm efeito uma vez só', async () => {
+  const app = await enterEvent();
+  app.press(VIRTUAL_REALITY);
+  app.press('CONCLUIR EXPERIÊNCIA');
+  const complete = app.handlerOf('CONCLUIR');
+  complete();
+  complete(); // sem renderização intermediária
+  app.sync();
+  const vr = app.session.experiences[1];
+  assert.equal(vr.completedCount, 1);
+  assert.equal(vr.stations[0].call, null);
+  assert.ok(app.hasText('Experiência de Carla M. concluída na simulação local.'));
+});
+
+test('R01 com inscrições encerradas, o controle de entrada avisa que a fila de acesso não as reabre', async () => {
+  const app = await enterEvent('STAFFVAZIO');
+  app.press('Controle de Entrada, fila inativa, 0 aguardando');
+  assert.ok(app.hasText('Ativar ou desativar a fila de acesso não reabre as inscrições.'));
+  app.press('Fila de acesso: Sim');
+  assert.equal(app.session.entryQueue.active, true);
+  assert.equal(app.session.queueEntriesOpen, false, 'reativar não reabre inscrições');
+  assert.ok(app.hasText('Ativar ou desativar a fila de acesso não reabre as inscrições.'));
+
+  const open = await enterEvent();
+  open.press(ENTRY_ACTIVE);
+  assert.ok(!open.hasText('não reabre as inscrições'), 'aviso só aparece com inscrições encerradas');
+});
