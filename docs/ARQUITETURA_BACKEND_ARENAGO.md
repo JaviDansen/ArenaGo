@@ -964,11 +964,23 @@ Os testes funcionais de API/Expo deste capítulo seguem não executados. Os caso
 
 ### 16.2 Matriz de endpoints propostos
 
+**Atualização E08.2 — 03/11/2026:** as rotas de ingresso e consulta do participante
+estão implementadas por `ParticipantQueueController` sobre E07.1/E07.2. A saída
+interna E07.3 recebe a definição técnica
+`POST /participations/:participationId/queue-entries/:queueEntryId/withdraw`, com
+201 no ingresso e 200 na consulta/desistência, inclusive replays. Titularidade
+ausente/alheia produz o mesmo 404. Os POSTs usam TTL próprio obrigatório
+`PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS`, além de `Idempotency-Key`; o GET
+mantém o snapshot somente leitura. Detalhes, erros efetivos e testes PostgreSQL
+pendentes de execução manual em `E08_2_IMPLEMENTACAO.md`. As observações abaixo
+que delimitam E07.1–E07.3 sem HTTP descrevem o histórico anterior a esta atualização.
+
 | Endpoint relativo a `/api/v1` | Acesso | Finalidade | Efeito |
 |---|---|---|---|
 | `GET /events/:eventId/experiences` | Conta com participação `active` no evento | Listar experiências e estações/estatísticas seguras | Leitura |
 | `GET /participations/:id/queue` | Participante titular | Recuperar espera/chamada interna atual | Leitura |
 | `POST /participations/:id/queue-entries` | Participante titular | Entrar em fila interna, inclusive repetir experiência após conclusão | Cria `queue_entries` |
+| `POST /participations/:participationId/queue-entries/:queueEntryId/withdraw` | Participante titular | Desistir da tentativa explícita e permanecer na Arena | Encerra entrada e cancela eventual pending |
 | `GET /staff/events/:eventId/stations` | Staff autorizado no evento (Admin com acesso de gestão conforme regra) | Consultar estações, disponibilidade e pendências | Leitura operacional |
 | `PATCH /staff/events/:eventId/stations/:stationId/availability` | Staff autorizado no evento **ou Admin global** | Marcar estação disponível/indisponível | Atualiza `stations` |
 | `GET /staff/events/:eventId/experiences/:experienceId/queue` | Staff autorizado no evento | Consultar tamanho/primeiro lugar e situação da fila | Leitura operacional |
@@ -1022,6 +1034,13 @@ Os campos `available` expressam configuração manual da estação, **não neces
 
 ### 16.4 `POST /participations/:id/queue-entries` — ingressar na fila interna
 
+**Contrato efetivo E08.2:** delega a E07.1 sem alterar regras transacionais.
+Resposta 201 plana: `{ queueEntryId, participationId, experienceId, status,
+queueOrder, enteredAt }`, com ordem decimal exata e instante ISO UTC, sem `kind`.
+Não retorna posição no POST; a posição dinâmica pertence ao GET da §16.5.
+Essa definição substitui o envelope `queueEntry` e a posição do exemplo histórico
+proposto abaixo. Replays preservam 201. Códigos efetivos em `E08_2_IMPLEMENTACAO.md`.
+
 **Headers:** `Authorization: Bearer <accessToken>` e `Idempotency-Key: <uuid-ou-chave-da-intencao>`.
 
 **Body:**
@@ -1053,6 +1072,12 @@ Os campos `available` expressam configuração manual da estação, **não neces
 **Erros candidatos:** `401` sessão inválida; `404` participação/experiência não encontrada ou não pertencente ao evento; `409 PARTICIPATION_NOT_ACTIVE`, `409 ALREADY_IN_INTERNAL_QUEUE`, `409 EXPERIENCE_QUEUE_CLOSED`, `409 EVENT_REGISTRATION_CLOSED`, `409 IDEMPOTENCY_KEY_REUSED`; `429` limitações de abuso quando aplicáveis. `403` somente se o usuário autenticado tentar ação não autorizada e o contrato de política optar por distinguir de `404` sem vazamento. Timeout: reconsultar `/participations/:id/queue` ou reenviar com **mesma** chave.
 
 ### 16.5 `GET /participations/:id/queue` — fila ou chamada atual
+
+**Atualização HTTP E08.2:** a rota está implementada sobre o serviço abaixo.
+Mapeia `access_denied` para 404 neutro e `ok` para 200 com `participationId`,
+`observedAt` e `currentQueueEntry`, sem expor `kind`. O texto que menciona ausência
+de controller registra a etapa interna E07.2. O snapshot e os exemplos de consulta
+abaixo são preservados, sem idempotência, mutações ou limpeza no GET.
 
 **Contrato HTTP proposto; implementação interna E07.2:** `QueueStateService.getParticipationQueue(userId, participationId)`, sem controller/rota. Retorna `kind='access_denied'` indistinguível para participação ausente/alheia ou `kind='ok'` com `participationId`, `observedAt` e `currentQueueEntry` anulável. Consulta não cria nem remove entradas. Em uma transação `REPEATABLE READ READ ONLY`, duas consultas sem locks de linha verificam titularidade/evento e depois ponteiro, entrada, experiência, atendimento/estação e posição no mesmo snapshot. `observedAt` vem de `statement_timestamp()` na primeira leitura, como na E06. `position` conta as entradas `waiting` da mesma experiência/evento com ordem **menor ou igual** à da entrada atual, incluindo a própria pessoa (posição inicial 1). `called` e `closed` não contam; `queueOrder` continua string decimal exata, inclusive no retorno `called`, e contagens fora do intervalo seguro de number geram falha explícita. Histórico e replay E07.1 não são estado corrente.
 

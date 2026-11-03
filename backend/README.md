@@ -71,6 +71,13 @@ configurado com inteiro positivo, sem padrão. A aplicação valida essa configu
 ao iniciar. Ela define somente `expiresAt`, sem expurgo nem perda de replay enquanto
 o registro existir. Endpoints, códigos e validação local em [E08.1](../docs/E08_1_IMPLEMENTACAO.md).
 
+As rotas de fila interna do participante E08.2 exigem também
+`PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS`, inteiro positivo explícito, sem
+padrão e independente do TTL Staff. Como `EventsModule` instancia ambas as
+políticas, fornecer as duas variáveis ao iniciar a aplicação ou testes desse
+módulo. Comandos, contratos e integração PostgreSQL manual em
+[E08.2](../docs/E08_2_IMPLEMENTACAO.md).
+
 - `npm run build`, `npm run start:dev`, `npm run start:prod`
 - `npm run lint`, `npm test`, `npm run test:integration`
 - `npm run db:generate`, `npm run db:check`, `npm run db:migrate`, `npm run db:seed`

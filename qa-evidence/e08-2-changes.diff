@@ -1,0 +1,1327 @@
+diff --git a/backend/README.md b/backend/README.md
+index 6083ff8c71c9d4b028ce29043ab1ec26a547d00a..2b9d18084e0cc820661a40464d97c42380a7b1fd 100644
+--- a/backend/README.md
++++ b/backend/README.md
+@@ -71,6 +71,13 @@ configurado com inteiro positivo, sem padrão. A aplicação valida essa configu
+ ao iniciar. Ela define somente `expiresAt`, sem expurgo nem perda de replay enquanto
+ o registro existir. Endpoints, códigos e validação local em [E08.1](../docs/E08_1_IMPLEMENTACAO.md).
+ 
++As rotas de fila interna do participante E08.2 exigem também
++`PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS`, inteiro positivo explícito, sem
++padrão e independente do TTL Staff. Como `EventsModule` instancia ambas as
++políticas, fornecer as duas variáveis ao iniciar a aplicação ou testes desse
++módulo. Comandos, contratos e integração PostgreSQL manual em
++[E08.2](../docs/E08_2_IMPLEMENTACAO.md).
++
+ - `npm run build`, `npm run start:dev`, `npm run start:prod`
+ - `npm run lint`, `npm test`, `npm run test:integration`
+ - `npm run db:generate`, `npm run db:check`, `npm run db:migrate`, `npm run db:seed`
+diff --git a/backend/src/common/http/idempotency-ttl.ts b/backend/src/common/http/idempotency-ttl.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..b77eb2bb818b65a9e1b681a915ec685dc2ea2b36
+--- /dev/null
++++ b/backend/src/common/http/idempotency-ttl.ts
+@@ -0,0 +1,10 @@
++/** Configuração técnica explícita; não implementa retenção nem expurgo. */
++export function parseOperationIdempotencyTtl(raw: string | undefined, variable: string): number {
++  const value = raw?.trim();
++  const seconds = Number(value);
++  if (!value || !/^\d+$/.test(value) || !Number.isSafeInteger(seconds) || seconds <= 0
++    || !Number.isSafeInteger(seconds * 1000) || !Number.isFinite(new Date(Date.now() + seconds * 1000).getTime())) {
++    throw new Error(`${variable} é obrigatório e deve conter um inteiro positivo compatível com Date.`);
++  }
++  return seconds * 1000;
++}
+diff --git a/backend/src/common/http/operation-validation.ts b/backend/src/common/http/operation-validation.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..a50020e7925be2460c331f7ddc6abc9713a8f897
+--- /dev/null
++++ b/backend/src/common/http/operation-validation.ts
+@@ -0,0 +1,51 @@
++import { HttpStatus } from "@nestjs/common";
++import { z } from "zod";
++import type { AuthenticatedRequest } from "../../auth/session-auth.guard";
++import { ProblemException } from "../errors/problem.exception";
++
++export const operationUuid = z.uuid().transform(value => value.toLowerCase());
++export const emptyOperationBody = z.object({}).strict();
++type OperationRequest = Pick<AuthenticatedRequest, "headers" | "rawHeaders">;
++
++function invalid(name: string, reason: string): never {
++  throw new ProblemException({ typeSlug: "validation-error", title: "Requisição inválida", status: HttpStatus.BAD_REQUEST,
++    code: "VALIDATION_ERROR", detail: "Confira os parâmetros, o corpo e o cabeçalho Idempotency-Key.", invalidParams: [{ name, reason }] });
++}
++
++export function validateOperationParams<T>(schema: z.ZodType<T>, params: unknown): T {
++  const result = schema.safeParse(params);
++  if (!result.success) invalid("params", "Os identificadores da rota devem ser UUIDs válidos.");
++  return result.data;
++}
++
++/** Validação HTTP compartilhada; não decide regras de domínio ou idempotência persistida. */
++export function validateOperationBody<T>(schema: z.ZodType<T>, body: unknown, request: OperationRequest, allowAbsent = false): T {
++  if (body !== undefined && request.headers["content-type"]?.split(";", 1)[0].trim().toLowerCase() !== "application/json") {
++    invalid("body", "Quando houver corpo, envie JSON com Content-Type application/json.");
++  }
++  if (body === undefined && (request.headers["transfer-encoding"]
++    || (request.headers["content-length"] && request.headers["content-length"] !== "0"))) {
++    invalid("body", "O corpo enviado deve ser JSON válido.");
++  }
++  const value = body === undefined && allowAbsent ? {} : body;
++  if (!value || typeof value !== "object" || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) {
++    invalid("body", "Envie somente o objeto JSON definido para esta operação.");
++  }
++  const result = schema.safeParse(value);
++  if (!result.success) invalid("body", "Confira os campos obrigatórios; propriedades adicionais não são permitidas.");
++  return result.data;
++}
++
++/** Chave opaca original, única, não vazia, até 128 caracteres e sem controles. */
++export function validateOperationIdempotencyKey(request: OperationRequest): string {
++  let occurrences = 0;
++  for (let i = 0; i < request.rawHeaders.length; i += 2) {
++    if (request.rawHeaders[i].toLowerCase() === "idempotency-key") occurrences++;
++  }
++  const key = request.headers["idempotency-key"];
++  if (occurrences !== 1 || typeof key !== "string" || !key.trim() || key.length > 128
++    || [...key].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)) {
++    invalid("Idempotency-Key", "Envie uma única chave não vazia, de até 128 caracteres, sem controles.");
++  }
++  return key;
++}
+diff --git a/backend/src/events/events.module.ts b/backend/src/events/events.module.ts
+index e132fcd3b4b990ba504e7342b1828cc7c917f779..db10e2641cf25939fcba2419ab9a74719979bc45 100644
+--- a/backend/src/events/events.module.ts
++++ b/backend/src/events/events.module.ts
+@@ -11,12 +11,14 @@ import { AbsentService } from "./absent.service";
+ import { AuthModule } from "../auth/auth.module";
+ import { StaffOperationsController } from "./staff-operations.controller";
+ import { StaffIdempotencyPolicy } from "./staff-idempotency.policy";
++import { ParticipantQueueController } from "./participant-queue.controller";
++import { ParticipantQueueIdempotencyPolicy } from "./participant-queue-idempotency.policy";
+ 
+ /** Agrupa os serviços de Events e reutiliza o acesso PostgreSQL compartilhado. */
+ @Module({
+   imports: [DatabaseModule, AuthModule],
+-  controllers: [StaffOperationsController],
+-  providers: [EventsService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, StaffIdempotencyPolicy],
++  controllers: [StaffOperationsController, ParticipantQueueController],
++  providers: [EventsService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, StaffIdempotencyPolicy, ParticipantQueueIdempotencyPolicy],
+   exports: [EventsService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService],
+ })
+ export class EventsModule {}
+diff --git a/backend/src/events/participant-queue-idempotency.policy.ts b/backend/src/events/participant-queue-idempotency.policy.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..6529d63a53a9e198e48c9f1d4c45a83bdbb612ff
+--- /dev/null
++++ b/backend/src/events/participant-queue-idempotency.policy.ts
+@@ -0,0 +1,15 @@
++import { Injectable } from "@nestjs/common";
++import { parseOperationIdempotencyTtl } from "../common/http/idempotency-ttl";
++
++@Injectable()
++export class ParticipantQueueIdempotencyPolicy {
++  private readonly ttlMs = parseOperationIdempotencyTtl(
++    process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS, "PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS",
++  );
++
++  expiresAt(): Date {
++    const result = new Date(Date.now() + this.ttlMs);
++    if (!Number.isFinite(result.getTime())) throw new Error("Expiração de idempotência fora do intervalo de Date.");
++    return result;
++  }
++}
+diff --git a/backend/src/events/participant-queue.controller.ts b/backend/src/events/participant-queue.controller.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..c50d2a94ed3f270f59effd2c0e4d75774d6b8f85
+--- /dev/null
++++ b/backend/src/events/participant-queue.controller.ts
+@@ -0,0 +1,58 @@
++import { Body, Controller, Get, HttpCode, HttpStatus, Inject, Param, Post, Req } from "@nestjs/common";
++import { CurrentUserId, RequireSessionAuth } from "../auth/current-user.decorator";
++import type { AuthenticatedRequest } from "../auth/session-auth.guard";
++import { emptyOperationBody, validateOperationBody, validateOperationIdempotencyKey, validateOperationParams } from "../common/http/operation-validation";
++import { QueueEntryService } from "./queue-entry.service";
++import { QueueStateService } from "./queue-state.service";
++import { QueueWithdrawalService } from "./queue-withdrawal.service";
++import { ParticipantQueueIdempotencyPolicy } from "./participant-queue-idempotency.policy";
++import { participationQueueParamsSchema, queueJoinBodySchema, queueWithdrawalParamsSchema } from "./participant-queue.dto";
++import { rejectParticipantQueueOperation } from "./participant-queue.problem";
++
++@Controller("participations/:participationId")
++@RequireSessionAuth()
++export class ParticipantQueueController {
++  constructor(
++    @Inject(QueueEntryService) private readonly joining: QueueEntryService,
++    @Inject(QueueStateService) private readonly state: QueueStateService,
++    @Inject(QueueWithdrawalService) private readonly withdrawal: QueueWithdrawalService,
++    @Inject(ParticipantQueueIdempotencyPolicy) private readonly idempotency: ParticipantQueueIdempotencyPolicy,
++  ) {}
++
++  @Post("queue-entries")
++  @HttpCode(HttpStatus.CREATED)
++  async join(@CurrentUserId() userId: string, @Param() params: unknown, @Body() body: unknown, @Req() request: AuthenticatedRequest) {
++    const ids = validateOperationParams(participationQueueParamsSchema, params);
++    const input = validateOperationBody(queueJoinBodySchema, body, request);
++    const idempotencyKey = validateOperationIdempotencyKey(request);
++    const result = await this.joining.joinExperienceQueue({ ...ids, ...input, userId, idempotencyKey, expiresAt: this.idempotency.expiresAt() });
++    if (result.kind === "created" || result.kind === "replay") {
++      return { queueEntryId: result.queueEntryId, participationId: result.participationId, experienceId: result.experienceId,
++        status: result.status, queueOrder: result.queueOrder, enteredAt: result.enteredAt };
++    }
++    return rejectParticipantQueueOperation(result.kind);
++  }
++
++  @Get("queue")
++  @HttpCode(HttpStatus.OK)
++  async get(@CurrentUserId() userId: string, @Param() params: unknown) {
++    const { participationId } = validateOperationParams(participationQueueParamsSchema, params);
++    const result = await this.state.getParticipationQueue(userId, participationId);
++    if (result.kind === "ok") return { participationId: result.participationId, observedAt: result.observedAt, currentQueueEntry: result.currentQueueEntry };
++    return rejectParticipantQueueOperation(result.kind);
++  }
++
++  @Post("queue-entries/:queueEntryId/withdraw")
++  @HttpCode(HttpStatus.OK)
++  async withdraw(@CurrentUserId() userId: string, @Param() params: unknown, @Body() body: unknown, @Req() request: AuthenticatedRequest) {
++    const ids = validateOperationParams(queueWithdrawalParamsSchema, params);
++    validateOperationBody(emptyOperationBody, body, request, true);
++    const idempotencyKey = validateOperationIdempotencyKey(request);
++    const result = await this.withdrawal.withdrawExperienceQueue({ ...ids, userId, idempotencyKey, expiresAt: this.idempotency.expiresAt() });
++    if (result.kind === "withdrawn" || result.kind === "replay") {
++      return { participationId: result.participationId, queueEntryId: result.queueEntryId, experienceId: result.experienceId,
++        status: result.status, closedAt: result.closedAt, serviceSession: result.serviceSession };
++    }
++    return rejectParticipantQueueOperation(result.kind);
++  }
++}
+diff --git a/backend/src/events/participant-queue.dto.ts b/backend/src/events/participant-queue.dto.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..a34192ca6161137aadb7aeeeeae88f76b08c27aa
+--- /dev/null
++++ b/backend/src/events/participant-queue.dto.ts
+@@ -0,0 +1,6 @@
++import { z } from "zod";
++import { operationUuid } from "../common/http/operation-validation";
++
++export const participationQueueParamsSchema = z.object({ participationId: operationUuid }).strict();
++export const queueWithdrawalParamsSchema = z.object({ participationId: operationUuid, queueEntryId: operationUuid }).strict();
++export const queueJoinBodySchema = z.object({ experienceId: operationUuid }).strict();
+diff --git a/backend/src/events/participant-queue.problem.ts b/backend/src/events/participant-queue.problem.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..adaa692552797d86ceeffc4f749b0c7814a1a7c5
+--- /dev/null
++++ b/backend/src/events/participant-queue.problem.ts
+@@ -0,0 +1,26 @@
++import { HttpStatus } from "@nestjs/common";
++import { ProblemException } from "../common/errors/problem.exception";
++import type { JoinExperienceQueueResult } from "./queue-entry.types";
++import type { ParticipationQueueResult } from "./queue-state.types";
++import type { WithdrawExperienceQueueResult } from "./queue-withdrawal.types";
++
++type FailureKind = Exclude<(JoinExperienceQueueResult | ParticipationQueueResult | WithdrawExperienceQueueResult)["kind"], "created" | "ok" | "withdrawn" | "replay">;
++const problems: Record<FailureKind, { status: HttpStatus; code: string; detail: string }> = {
++  access_denied: { status: HttpStatus.NOT_FOUND, code: "RESOURCE_NOT_FOUND", detail: "Recurso não encontrado." },
++  participation_not_active: { status: HttpStatus.CONFLICT, code: "PARTICIPATION_NOT_ACTIVE", detail: "A participação não está ativa." },
++  queue_occupied: { status: HttpStatus.CONFLICT, code: "ALREADY_IN_INTERNAL_QUEUE", detail: "A participação já possui uma fila interna atual." },
++  queue_closed: { status: HttpStatus.CONFLICT, code: "EXPERIENCE_QUEUE_CLOSED", detail: "A fila não aceita novas entradas." },
++  experience_unavailable: { status: HttpStatus.CONFLICT, code: "EXPERIENCE_UNAVAILABLE", detail: "A experiência não está disponível para ingresso." },
++  event_closed: { status: HttpStatus.CONFLICT, code: "EVENT_REGISTRATION_CLOSED", detail: "O evento não aceita novas entradas." },
++  event_unavailable: { status: HttpStatus.CONFLICT, code: "EVENT_UNAVAILABLE", detail: "O evento não está disponível para ingresso." },
++  entry_not_current: { status: HttpStatus.CONFLICT, code: "QUEUE_ENTRY_NOT_CURRENT", detail: "A tentativa informada já foi encerrada." },
++  event_ended: { status: HttpStatus.CONFLICT, code: "EVENT_OPERATION_ENDED", detail: "O prazo operacional do evento terminou." },
++  request_conflict: { status: HttpStatus.CONFLICT, code: "IDEMPOTENCY_REQUEST_CONFLICT", detail: "A chave de idempotência já identifica outra intenção." },
++  in_progress: { status: HttpStatus.CONFLICT, code: "IDEMPOTENCY_IN_PROGRESS", detail: "A intenção informada está em processamento." },
++};
++
++export function rejectParticipantQueueOperation(kind: FailureKind): never {
++  const problem = problems[kind];
++  throw new ProblemException({ ...problem, typeSlug: problem.code.toLowerCase().replaceAll("_", "-"),
++    title: problem.status === HttpStatus.NOT_FOUND ? "Recurso não encontrado" : "Conflito operacional" });
++}
+diff --git a/backend/src/events/staff-idempotency.policy.ts b/backend/src/events/staff-idempotency.policy.ts
+index 66b357054d675cbfe0b32d31afdd855bf4391480..a874f649f5c78e84c0d32d4d50e78ed3cc0adcc7 100644
+--- a/backend/src/events/staff-idempotency.policy.ts
++++ b/backend/src/events/staff-idempotency.policy.ts
+@@ -1,14 +1,9 @@
+ import { Injectable } from "@nestjs/common";
++import { parseOperationIdempotencyTtl } from "../common/http/idempotency-ttl";
+ 
+ /** Configuração técnica explícita; não implementa retenção ou expurgo. */
+ export function parseStaffIdempotencyTtl(raw: string | undefined): number {
+-  const value = raw?.trim();
+-  const seconds = Number(value);
+-  if (!value || !/^\d+$/.test(value) || !Number.isSafeInteger(seconds) || seconds <= 0
+-    || !Number.isSafeInteger(seconds * 1000) || !Number.isFinite(new Date(Date.now() + seconds * 1000).getTime())) {
+-    throw new Error("STAFF_IDEMPOTENCY_TTL_SECONDS é obrigatório e deve conter um inteiro positivo compatível com Date.");
+-  }
+-  return seconds * 1000;
++  return parseOperationIdempotencyTtl(raw, "STAFF_IDEMPOTENCY_TTL_SECONDS");
+ }
+ 
+ @Injectable()
+diff --git a/backend/src/events/staff-operation.dto.ts b/backend/src/events/staff-operation.dto.ts
+index f2897b07474fe63abb290da231b88b2d85dda6b7..4c9b6ab970dc2e0c5642e6f92d4d5c7990e73e0f 100644
+--- a/backend/src/events/staff-operation.dto.ts
++++ b/backend/src/events/staff-operation.dto.ts
+@@ -1,45 +1,12 @@
+-import { HttpStatus } from "@nestjs/common";
+ import { z } from "zod";
+ import type { AuthenticatedRequest } from "../auth/session-auth.guard";
+-import { ProblemException } from "../common/errors/problem.exception";
++import { emptyOperationBody, operationUuid, validateOperationBody, validateOperationIdempotencyKey } from "../common/http/operation-validation";
+ 
+-const uuid = z.uuid().transform(value => value.toLowerCase());
+-export const callNextParamsSchema = z.object({ eventId: uuid, experienceId: uuid, stationId: uuid }).strict();
+-export const serviceSessionParamsSchema = z.object({ eventId: uuid, serviceSessionId: uuid }).strict();
++export { validateOperationParams as validateStaffParams } from "../common/http/operation-validation";
++export const callNextParamsSchema = z.object({ eventId: operationUuid, experienceId: operationUuid, stationId: operationUuid }).strict();
++export const serviceSessionParamsSchema = z.object({ eventId: operationUuid, serviceSessionId: operationUuid }).strict();
+ 
+-function invalid(name: string, reason: string): never {
+-  throw new ProblemException({ typeSlug: "validation-error", title: "Requisição inválida", status: HttpStatus.BAD_REQUEST,
+-    code: "VALIDATION_ERROR", detail: "Confira os parâmetros, o corpo e o cabeçalho Idempotency-Key.", invalidParams: [{ name, reason }] });
+-}
+-
+-export function validateStaffParams<T>(schema: z.ZodType<T>, params: unknown): T {
+-  const result = schema.safeParse(params);
+-  if (!result.success) invalid("params", "Os identificadores da rota devem ser UUIDs válidos.");
+-  return result.data;
+-}
+-
+-/** Mesmos limites dos serviços: chave opaca não vazia, até 128 caracteres, sem normalização. */
+ export function validateStaffRequest(body: unknown, request: Pick<AuthenticatedRequest, "headers" | "rawHeaders">): string {
+-  if (body !== undefined && request.headers["content-type"]?.split(";", 1)[0].trim().toLowerCase() !== "application/json") {
+-    invalid("body", "Quando houver corpo, envie um objeto JSON vazio com Content-Type application/json.");
+-  }
+-  if (body === undefined) {
+-    // Sem parser para text/plain/outros tipos não significa corpo vazio.
+-    if (request.headers["transfer-encoding"] || (request.headers["content-length"] && request.headers["content-length"] !== "0")) {
+-      invalid("body", "Envie apenas um objeto JSON vazio ou nenhum corpo.");
+-    }
+-  } else if (!body || typeof body !== "object" || Array.isArray(body)
+-    || Object.getPrototypeOf(body) !== Object.prototype || Object.keys(body).length !== 0) {
+-    invalid("body", "Nenhuma propriedade é permitida; envie apenas {}.");
+-  }
+-  let occurrences = 0;
+-  for (let i = 0; i < request.rawHeaders.length; i += 2) {
+-    if (request.rawHeaders[i].toLowerCase() === "idempotency-key") occurrences++;
+-  }
+-  const key = request.headers["idempotency-key"];
+-  if (occurrences !== 1 || typeof key !== "string" || !key.trim() || key.length > 128
+-    || [...key].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)) {
+-    invalid("Idempotency-Key", "Envie uma única chave não vazia, de até 128 caracteres, sem controles.");
+-  }
+-  return key;
++  validateOperationBody(emptyOperationBody, body, request, true);
++  return validateOperationIdempotencyKey(request);
+ }
+diff --git a/backend/test/integration/auth.integration.test.ts b/backend/test/integration/auth.integration.test.ts
+index 28590264a8229cf20d76282f94d79195157aefbf..5010fb28d3ca9dfbb2c6148dd9507bcc9fa6eddc 100644
+--- a/backend/test/integration/auth.integration.test.ts
++++ b/backend/test/integration/auth.integration.test.ts
+@@ -27,6 +27,8 @@ import { ProblemDetailsExceptionFilter } from "../../src/common/errors/problem-d
+ import { assertSafeTestDatabase } from "./test-db-guard";
+ 
+ const connectionString = assertSafeTestDatabase(process.env.DATABASE_URL);
++process.env.STAFF_IDEMPOTENCY_TTL_SECONDS = "60";
++process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = "60";
+ 
+ /**
+  * Controller auxiliar para validar o contrato compartilhado de autenticação
+diff --git a/backend/test/integration/participant-queue-http.integration.test.ts b/backend/test/integration/participant-queue-http.integration.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..c86f55f70cb38eb8ce2ff67e08c1bed014fc01db
+--- /dev/null
++++ b/backend/test/integration/participant-queue-http.integration.test.ts
+@@ -0,0 +1,381 @@
++import "reflect-metadata";
++import assert from "node:assert/strict";
++import { randomUUID } from "node:crypto";
++import { devNull } from "node:os";
++import { after, before, test } from "node:test";
++import { Module, type INestApplication } from "@nestjs/common";
++import { APP_FILTER, NestFactory } from "@nestjs/core";
++import { sql } from "drizzle-orm";
++import type { NodePgDatabase } from "drizzle-orm/node-postgres";
++import { Pool } from "pg";
++import supertest from "supertest";
++import type * as schema from "../../src/database/schema";
++import type { DatabaseTransactionExecutor } from "../../src/database/database-executor";
++import type { QueueEntryService } from "../../src/events/queue-entry.service";
++import type { QueueWithdrawalService } from "../../src/events/queue-withdrawal.service";
++import { assertSafeTestDatabase } from "./test-db-guard";
++
++// Preflight antes de importar environment/módulos; nunca carrega .env ou aceita banco remoto.
++const urls = ["DATABASE_URL", "DATABASE_DIRECT_URL", "EVENTS_TEST_DATABASE_URL"].map(name => {
++  const value = assertSafeTestDatabase(process.env[name]), u = new URL(value);
++  if (u.hostname !== "127.0.0.1" || u.port !== "55432" || u.pathname !== "/arenago_events_test"
++    || u.search || u.hash || !u.username) throw new Error(`${name}: destino local explícito obrigatório.`);
++  return value;
++});
++if (urls.some(value => value !== urls[0])) throw new Error("As três URLs explícitas precisam ser idênticas.");
++process.env.DOTENV_CONFIG_PATH = devNull;
++process.env.STAFF_IDEMPOTENCY_TTL_SECONDS = "60";
++process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = "60";
++const pool = new Pool({ connectionString: urls[0], ssl: false, max: 5, connectionTimeoutMillis: 2000, statement_timeout: 10000 });
++type Database = NodePgDatabase<typeof schema>;
++let app: INestApplication, database: Database, joining: QueueEntryService, withdrawal: QueueWithdrawalService;
++let makeJoining: (db: Database) => QueueEntryService, makeWithdrawal: (db: Database) => QueueWithdrawalService;
++let signAccess: (userId: string, sessionId: string, expired?: boolean) => string;
++const ids = { events: [] as string[], users: [] as string[] };
++const baseOrder = 9007199254741000n;
++before(async () => {
++  assert.equal((await pool.query("SELECT current_database() AS name")).rows[0].name, "arenago_events_test");
++  const { EventsModule } = await import("../../src/events/events.module");
++  const { EventsService } = await import("../../src/events/events.service");
++  const { ProblemDetailsExceptionFilter } = await import("../../src/common/errors/problem-details.filter");
++  const { QueueEntryService } = await import("../../src/events/queue-entry.service");
++  const { QueueWithdrawalService } = await import("../../src/events/queue-withdrawal.service");
++  const { DRIZZLE_DATABASE } = await import("../../src/database/database.module");
++  const tokens = await import("../../src/auth/token.util");
++  signAccess = (userId, sessionId, expired) => tokens.signAccessToken({ userId, sessionId }, expired ? { nowMs: Date.now()-120000, ttlSeconds: 1 } : undefined);
++  @Module({ imports: [EventsModule], providers: [{ provide: APP_FILTER, useClass: ProblemDetailsExceptionFilter }] })
++  class HttpTestModule {}
++  app = await NestFactory.create(HttpTestModule, { logger: false }); app.setGlobalPrefix("api/v1"); await app.listen(0, "127.0.0.1");
++  database = app.get(DRIZZLE_DATABASE); joining = app.get(QueueEntryService); withdrawal = app.get(QueueWithdrawalService);
++  makeJoining = db => new QueueEntryService(db, new EventsService(db)); makeWithdrawal = db => new QueueWithdrawalService(db);
++});
++after(async () => {
++  const errors: unknown[] = [];
++  try {
++    const c = await pool.connect();
++    try {
++      await c.query("BEGIN");
++      await c.query("UPDATE participations SET current_queue_entry_id=NULL WHERE event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM service_sessions s USING queue_entries q WHERE s.queue_entry_id=q.id AND q.event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM queue_entries WHERE event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM participations WHERE event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM stations s USING experiences x WHERE s.experience_id=x.id AND x.event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM experiences WHERE event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM idempotency_operations WHERE actor_user_id=ANY($1::uuid[])", [ids.users]);
++      await c.query("DELETE FROM user_roles WHERE user_id=ANY($1::uuid[])", [ids.users]);
++      await c.query("DELETE FROM sessions WHERE user_id=ANY($1::uuid[])", [ids.users]);
++      await c.query("DELETE FROM events WHERE id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM users WHERE id=ANY($1::uuid[])", [ids.users]);
++      await c.query("COMMIT");
++    } catch (e) { await c.query("ROLLBACK"); throw e; } finally { c.release(); }
++  } catch (e) { errors.push(e); }
++  for (const r of await Promise.allSettled([app?.close(), pool.end()])) if (r.status === "rejected") errors.push(r.reason);
++  if (errors.length) throw new AggregateError(errors, "Limpeza E08.2 falhou.");
++});
++async function user() {
++  const id = randomUUID();
++  await pool.query(`INSERT INTO users(id,name,email,password_hash,email_verified_at,created_at,updated_at)
++    VALUES($1,'E082 privado',$2,'fixture-hash',clock_timestamp(),clock_timestamp(),clock_timestamp())`, [id, `${id}@example.test`]);
++  ids.users.push(id); return id;
++}
++async function session(userId: string, secondFactor = false) {
++  const sessionId = randomUUID();
++  await pool.query(`INSERT INTO sessions(id,user_id,expires_at,last_activity_at,admin_2fa_verified_at,created_at)
++    VALUES($1,$2,clock_timestamp()+interval '1 hour',clock_timestamp(),CASE WHEN $3 THEN clock_timestamp() END,clock_timestamp())`, [sessionId, userId, secondFactor]);
++  return { sessionId, token: signAccess(userId, sessionId) };
++}
++async function context(count = 1) {
++  const eventId = randomUUID(), experienceId = randomUUID(), stationId = randomUUID();
++  await pool.query(`INSERT INTO events(id,name,access_code_normalized,timezone,starts_at,official_ends_at,operational_deadline_at,status,external_queue_enabled,created_at,updated_at)
++    VALUES($1,'E082 fixture',$2,'America/Sao_Paulo',clock_timestamp()-interval '1 hour',clock_timestamp()+interval '1 hour',clock_timestamp()+interval '90 minutes','open',false,clock_timestamp(),clock_timestamp())`, [eventId, `E082-${eventId.toUpperCase()}`]);
++  ids.events.push(eventId);
++  const staffUserId = await user();
++  await pool.query("INSERT INTO user_roles(id,user_id,role,event_id,granted_at) VALUES($1,$2,'staff',$3,clock_timestamp())", [randomUUID(), staffUserId, eventId]);
++  const staff = await session(staffUserId);
++  await pool.query(`INSERT INTO experiences(id,event_id,name,last_queue_order,created_at,updated_at)
++    VALUES($1,$2,'E082 experiência',$3,clock_timestamp(),clock_timestamp())`, [experienceId, eventId, baseOrder.toString()]);
++  await pool.query(`INSERT INTO stations(id,experience_id,label,availability,created_at,updated_at)
++    VALUES($1,$2,'E082 estação','available',clock_timestamp(),clock_timestamp())`, [stationId, experienceId]);
++  const people = [];
++  for (let n=0;n<count;n++) {
++    const userId = await user(), participationId = randomUUID();
++    await pool.query(`INSERT INTO participations(id,user_id,event_id,status,joined_at,arena_entered_at)
++      VALUES($1,$2,$3,'active',clock_timestamp(),clock_timestamp())`, [participationId, userId, eventId]);
++    people.push({ userId, participationId, ...await session(userId) });
++  }
++  return { eventId, experienceId, stationId, staffUserId, staff, people };
++}
++type Context = Awaited<ReturnType<typeof context>>;
++type Person = Context["people"][number];
++const root = (p: Person) => `/api/v1/participations/${p.participationId}`;
++const join = (c: Context, p = c.people[0], key = randomUUID(), experienceId = c.experienceId) =>
++  supertest(app.getHttpServer()).post(`${root(p)}/queue-entries`).set("Authorization", `Bearer ${p.token}`).set("Idempotency-Key", key).send({ experienceId });
++const get = (p: Person) => supertest(app.getHttpServer()).get(`${root(p)}/queue`).set("Authorization", `Bearer ${p.token}`);
++const withdraw = (p: Person, entryId: string, key = randomUUID()) => supertest(app.getHttpServer()).post(`${root(p)}/queue-entries/${entryId}/withdraw`).set("Authorization", `Bearer ${p.token}`).set("Idempotency-Key", key);
++const call = (c: Context) => supertest(app.getHttpServer()).post(`/api/v1/staff/events/${c.eventId}/experiences/${c.experienceId}/stations/${c.stationId}/call-next`).set("Authorization", `Bearer ${c.staff.token}`).set("Idempotency-Key", randomUUID());
++const resolve = (c: Context, sessionId: string, op: "complete" | "absent") => supertest(app.getHttpServer()).post(`/api/v1/staff/events/${c.eventId}/service-sessions/${sessionId}/${op}`).set("Authorization", `Bearer ${c.staff.token}`).set("Idempotency-Key", randomUUID());
++async function enter(c: Context, p = c.people[0]) { const r = await join(c, p); assert.equal(r.status, 201, JSON.stringify(r.body)); return r.body.queueEntryId as string; }
++async function state(c: Context) {
++  return (await pool.query(`SELECT jsonb_build_object(
++    'event',(SELECT to_jsonb(e) FROM events e WHERE e.id=$1),
++    'accounts',(SELECT jsonb_agg(to_jsonb(u) ORDER BY u.id) FROM users u WHERE u.id=ANY($2::uuid[])),
++    'authSessions',(SELECT jsonb_agg(to_jsonb(s) ORDER BY s.id) FROM sessions s WHERE s.user_id=ANY($2::uuid[])),
++    'people',(SELECT jsonb_agg(to_jsonb(p) ORDER BY p.id) FROM participations p WHERE p.event_id=$1),
++    'entries',(SELECT jsonb_agg(to_jsonb(q) ORDER BY q.id) FROM queue_entries q WHERE q.event_id=$1),
++    'sessions',(SELECT jsonb_agg(to_jsonb(s) ORDER BY s.id) FROM service_sessions s JOIN queue_entries q ON q.id=s.queue_entry_id WHERE q.event_id=$1),
++    'experiences',(SELECT jsonb_agg(to_jsonb(x) ORDER BY x.id) FROM experiences x WHERE x.event_id=$1),
++    'stations',(SELECT jsonb_agg(to_jsonb(t) ORDER BY t.id) FROM stations t JOIN experiences x ON x.id=t.experience_id WHERE x.event_id=$1),
++    'idempotency',(SELECT jsonb_agg(to_jsonb(i) ORDER BY i.id) FROM idempotency_operations i WHERE i.actor_user_id=ANY($2::uuid[])))::text AS value`, [c.eventId, ids.users])).rows[0].value as string;
++}
++function problem(r: supertest.Response, status: number, code?: string) {
++  assert.equal(r.status, status, JSON.stringify(r.body)); assert.match(r.headers["content-type"], /application\/problem\+json/);
++  assert.equal(r.body.status, status); assert.match(r.body.type, /^https:\/\/arenago.com.br\/problems\//);
++  if (code) assert.equal(r.body.code, code);
++  assert.equal(JSON.stringify(r.body).includes("@example.test"), false);
++}
++async function blocked(blockerPid: number, expected: number) {
++  const until = Date.now()+6000;
++  while (Date.now()<until) {
++    const r = await pool.query(`WITH RECURSIVE blocked(pid) AS (
++      SELECT pid FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))
++      UNION SELECT a.pid FROM pg_stat_activity a JOIN blocked b ON b.pid=ANY(pg_blocking_pids(a.pid)))
++      SELECT count(DISTINCT pid)::int AS n FROM blocked`, [blockerPid]);
++    if (r.rows[0].n >= expected) return;
++    await new Promise(yes => setTimeout(yes, 20));
++  }
++  throw new Error("Não foi observado bloqueio HTTP real pelos locks de domínio.");
++}
++async function concurrent(c: Context, actions: Array<() => PromiseLike<supertest.Response>>) {
++  const client = await pool.connect(); const pending: Array<Promise<supertest.Response>> = [];
++  try {
++    await client.query("BEGIN"); await client.query("SELECT id FROM experiences WHERE id=$1 FOR UPDATE", [c.experienceId]);
++    const pid = (await client.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
++    for (const action of actions) { const p = Promise.resolve(action()); p.catch(() => undefined); pending.push(p); }
++    await blocked(pid, actions.length); await client.query("COMMIT"); return await Promise.all(pending);
++  } finally { await client.query("ROLLBACK"); await Promise.allSettled(pending); client.release(); }
++}
++
++test("E08.2 PostgreSQL HTTP ingresso 201 persiste titular, ordem exata e TTL próprio", async () => {
++  const c = await context(), r = await join(c); assert.equal(r.status, 201);
++  assert.equal(r.body.queueOrder, (baseOrder+1n).toString()); assert.equal(r.body.participationId, c.people[0].participationId);
++  assert.match(r.body.enteredAt, /Z$/); assert.equal("position" in r.body, false); assert.equal("kind" in r.body, false);
++  const row = (await pool.query(`SELECT p.status,p.current_queue_entry_id,q.queue_order::text,
++    i.expires_at > i.created_at+interval '50 seconds' AND i.expires_at < i.created_at+interval '70 seconds' AS ttl
++    FROM participations p JOIN queue_entries q ON q.id=p.current_queue_entry_id
++    JOIN idempotency_operations i ON i.actor_user_id=p.user_id AND i.operation='join_experience_queue'
++    WHERE p.id=$1`, [c.people[0].participationId])).rows[0];
++  assert.equal(row.status, "active"); assert.equal(row.current_queue_entry_id, r.body.queueEntryId); assert.equal(row.queue_order, r.body.queueOrder); assert.equal(row.ttl, true);
++});
++test("E08.2 PostgreSQL HTTP autenticação ausente, expirada e revogada bloqueia as três rotas", async () => {
++  const c = await context(), p = c.people[0], entryId = await enter(c);
++  await pool.query("UPDATE sessions SET revoked_at=clock_timestamp(),revocation_reason='test' WHERE id=$1", [p.sessionId]);
++  const before = await state(c);
++  for (const token of [undefined, p.token, signAccess(p.userId, p.sessionId, true)]) {
++    for (const r of [supertest(app.getHttpServer()).post(`${root(p)}/queue-entries`).send({ experienceId: c.experienceId }),
++      supertest(app.getHttpServer()).get(`${root(p)}/queue`), supertest(app.getHttpServer()).post(`${root(p)}/queue-entries/${entryId}/withdraw`)]) {
++      if (token) r.set("Authorization", `Bearer ${token}`); problem(await r, 401);
++    }
++  }
++  assert.equal(await state(c), before);
++});
++test("E08.2 PostgreSQL HTTP inexistência e titularidade alheia são indistinguíveis", async () => {
++  const c = await context(2), entryId = await enter(c, c.people[1]), before = await state(c);
++  const responses: supertest.Response[] = [];
++  for (const participationId of [randomUUID(), c.people[1].participationId]) {
++    const p = { ...c.people[0], participationId };
++    for (const r of [await join(c, p), await get(p), await withdraw(p, entryId)]) { problem(r, 404, "RESOURCE_NOT_FOUND"); responses.push(r); }
++  }
++  for (const r of responses) assert.deepEqual(r.body, responses[0].body);
++  assert.equal(await state(c), before);
++});
++test("E08.2 PostgreSQL HTTP participação não ativa não ingressa e GET não fabrica fila", async () => {
++  for (const status of ["waiting", "finished", "canceled"]) {
++    const c = await context(), p = c.people[0];
++    // O mesmo parâmetro deve ter um único tipo na atribuição e nos CASEs (status é varchar(20)).
++    await pool.query(`UPDATE participations SET status=$2::varchar(20),arena_entered_at=NULL,
++      finished_at=CASE WHEN $2::varchar(20) IN ('finished','canceled') THEN clock_timestamp() END,
++      finish_reason=CASE WHEN $2::varchar(20) IN ('finished','canceled') THEN 'test' END WHERE id=$1`, [p.participationId, status]);
++    const before = await state(c); problem(await join(c), 409, "PARTICIPATION_NOT_ACTIVE");
++    const r = await get(p); assert.equal(r.status, 200); assert.equal(r.body.currentQueueEntry, null); assert.equal(await state(c), before);
++  }
++});
++test("E08.2 PostgreSQL HTTP experiência de outro evento ou ausente tem bloqueio neutro", async () => {
++  const c = await context(), other = await context(), before = await state(c);
++  const a = await join(c, c.people[0], randomUUID(), other.experienceId), b = await join(c, c.people[0], randomUUID(), randomUUID());
++  problem(a, 404, "RESOURCE_NOT_FOUND"); problem(b, 404, "RESOURCE_NOT_FOUND"); assert.deepEqual(a.body, b.body); assert.equal(await state(c), before);
++});
++test("E08.2 PostgreSQL HTTP fila pausada, estação indisponível e prontidão bloqueiam ingresso", async () => {
++  for (const mode of ["paused", "station", "experience", "staff", "readiness"]) {
++    const c = await context();
++    if (mode === "paused") await pool.query("UPDATE experiences SET queue_accepting_entries=false WHERE id=$1", [c.experienceId]);
++    if (mode === "station" || mode === "experience") await pool.query("UPDATE stations SET availability='unavailable' WHERE id=$1", [c.stationId]);
++    if (mode === "experience") {
++      const otherExperience = randomUUID();
++      await pool.query("INSERT INTO experiences(id,event_id,name,created_at,updated_at) VALUES($1,$2,'E082 disponível',clock_timestamp(),clock_timestamp())", [otherExperience, c.eventId]);
++      await pool.query("INSERT INTO stations(id,experience_id,label,availability,created_at,updated_at) VALUES($1,$2,'Outra','available',clock_timestamp(),clock_timestamp())", [randomUUID(), otherExperience]);
++    }
++    if (mode === "staff") await pool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE user_id=$1", [c.staffUserId]);
++    if (mode === "readiness") await pool.query("UPDATE events SET timezone='invalid/timezone' WHERE id=$1", [c.eventId]);
++    const before = await state(c); problem(await join(c), 409, mode === "paused" ? "EXPERIENCE_QUEUE_CLOSED" : mode === "experience" ? "EXPERIENCE_UNAVAILABLE" : "EVENT_UNAVAILABLE");
++    assert.equal(await state(c), before);
++  }
++});
++test("E08.2 PostgreSQL HTTP cortes oficial e administrativo impedem novas entradas", async () => {
++  for (const mode of ["official", "admin"]) {
++    const c = await context();
++    if (mode === "official") await pool.query("UPDATE events SET official_ends_at=clock_timestamp()-interval '1 minute',operational_deadline_at=clock_timestamp()+interval '30 minutes' WHERE id=$1", [c.eventId]);
++    else await pool.query("UPDATE events SET status='closing',closure_mode='controlled',closure_requested_at=clock_timestamp(),admin_deadline_at=clock_timestamp()+interval '20 minutes' WHERE id=$1", [c.eventId]);
++    const before = await state(c); problem(await join(c), 409, "EVENT_REGISTRATION_CLOSED"); assert.equal(await state(c), before);
++  }
++});
++test("E08.2 PostgreSQL HTTP dois ingressos concorrentes mantêm uma única fila interna", async () => {
++  const c = await context(), r = await concurrent(c, [() => join(c), () => join(c)]);
++  assert.deepEqual(r.map(x => x.status).sort(), [201, 409]); problem(r.find(x => x.status === 409)!, 409, "ALREADY_IN_INTERNAL_QUEUE");
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM queue_entries WHERE participation_id=$1", [c.people[0].participationId])).rows[0].n, 1);
++  assert.equal((await pool.query("SELECT last_queue_order::text AS n FROM experiences WHERE id=$1", [c.experienceId])).rows[0].n, (baseOrder+1n).toString());
++});
++test("E08.2 PostgreSQL HTTP retries concorrentes da mesma intenção retornam o mesmo 201", async () => {
++  const c = await context(), key = randomUUID(), r = await concurrent(c, [() => join(c, c.people[0], key), () => join(c, c.people[0], key)]);
++  assert.deepEqual(r.map(x => x.status), [201, 201]); assert.deepEqual(r[0].body, r[1].body);
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM queue_entries WHERE event_id=$1", [c.eventId])).rows[0].n, 1);
++});
++test("E08.2 PostgreSQL HTTP replay persistente não expira e chave de outro payload conflita", async () => {
++  const c = await context(), p = c.people[0], key = randomUUID(), first = await join(c, p, key); assert.equal(first.status, 201);
++  await pool.query("UPDATE idempotency_operations SET expires_at=clock_timestamp()-interval '1 second' WHERE actor_user_id=$1 AND operation='join_experience_queue'", [p.userId]);
++  const otherExperience = randomUUID(), otherStation = randomUUID();
++  await pool.query("INSERT INTO experiences(id,event_id,name,created_at,updated_at) VALUES($1,$2,'E082 outra',clock_timestamp(),clock_timestamp())", [otherExperience, c.eventId]);
++  await pool.query("INSERT INTO stations(id,experience_id,label,availability,created_at,updated_at) VALUES($1,$2,'Outra','available',clock_timestamp(),clock_timestamp())", [otherStation, otherExperience]);
++  const before = await state(c), replay = await join(c, p, key); assert.equal(replay.status, 201); assert.deepEqual(replay.body, first.body);
++  problem(await join(c, p, key, otherExperience), 409, "IDEMPOTENCY_REQUEST_CONFLICT"); assert.equal(await state(c), before);
++});
++test("E08.2 PostgreSQL HTTP posição muda com desistência e chamada sem renumerar ordens", async () => {
++  const c = await context(3), entries: string[] = [];
++  for (const p of c.people) entries.push(await enter(c, p));
++  let r = await get(c.people[2]); assert.equal(r.body.currentQueueEntry.position, 3); const order = r.body.currentQueueEntry.queueOrder;
++  assert.equal((await withdraw(c.people[0], entries[0])).status, 200);
++  r = await get(c.people[2]); assert.equal(r.body.currentQueueEntry.position, 2); assert.equal(r.body.currentQueueEntry.queueOrder, order);
++  const called = await call(c); assert.equal(called.status, 201); assert.equal(called.body.serviceSession.queueEntryId, entries[1]);
++  r = await get(c.people[2]); assert.equal(r.body.currentQueueEntry.position, 1); assert.equal(r.body.currentQueueEntry.queueOrder, order);
++});
++test("E08.2 PostgreSQL HTTP estado called mostra apenas atendimento e estação corretos", async () => {
++  const c = await context(), entry = await enter(c), called = await call(c); assert.equal(called.status, 201);
++  const r = await get(c.people[0]); assert.equal(r.status, 200); assert.match(r.body.observedAt, /Z$/);
++  assert.equal(r.body.currentQueueEntry.id, entry); assert.equal(r.body.currentQueueEntry.status, "called"); assert.equal(r.body.currentQueueEntry.position, null);
++  assert.deepEqual(r.body.currentQueueEntry.serviceSession, { id: called.body.serviceSession.id, status: "pending", calledAt: called.body.serviceSession.calledAt, station: { id: c.stationId, label: "E082 estação" } });
++  assert.equal(JSON.stringify(r.body).includes(c.staffUserId), false); assert.equal(JSON.stringify(r.body).includes("@example.test"), false);
++});
++test("E08.2 PostgreSQL HTTP GET vazio/waiting/called não escreve nem reserva idempotência", async () => {
++  const c = await context();
++  for (const mode of ["empty", "waiting", "called"]) {
++    if (mode === "waiting") await enter(c);
++    if (mode === "called") assert.equal((await call(c)).status, 201);
++    const before = await state(c);
++    for (let n=0;n<2;n++) { const r = await get(c.people[0]); assert.equal(r.status, 200); assert.equal(r.body.currentQueueEntry?.status ?? "empty", mode); }
++    assert.equal(await state(c), before);
++  }
++});
++test("E08.2 PostgreSQL HTTP desistência waiting mantém active e preserva contador/histórico", async () => {
++  const c = await context(), entry = await enter(c), r = await withdraw(c.people[0], entry); assert.equal(r.status, 200);
++  assert.equal(r.body.status, "closed"); assert.equal(r.body.serviceSession, null); assert.match(r.body.closedAt, /Z$/);
++  const row = (await pool.query(`SELECT p.status,p.current_queue_entry_id,q.close_reason,q.queue_order::text,x.last_queue_order::text
++    FROM participations p JOIN queue_entries q ON q.participation_id=p.id JOIN experiences x ON x.id=q.experience_id WHERE q.id=$1`, [entry])).rows[0];
++  assert.equal(row.status, "active"); assert.equal(row.current_queue_entry_id, null); assert.equal(row.close_reason, "participant_queue_withdrawal");
++  assert.equal(row.queue_order, (baseOrder+1n).toString()); assert.equal(row.last_queue_order, row.queue_order);
++  assert.equal((await get(c.people[0])).body.currentQueueEntry, null);
++});
++test("E08.2 PostgreSQL HTTP desistência called cancela pending atomicamente sem conclusão/ausência", async () => {
++  const c = await context(), entry = await enter(c), called = await call(c); assert.equal(called.status, 201);
++  const r = await withdraw(c.people[0], entry).send({}); assert.equal(r.status, 200); assert.equal(r.body.serviceSession.status, "canceled");
++  const row = (await pool.query(`SELECT s.status,s.cancel_reason,s.resolved_by_user_id,(s.resolved_at=q.closed_at) AS same_time,
++    p.status AS participant_status,p.current_queue_entry_id,t.availability FROM service_sessions s
++    JOIN queue_entries q ON q.id=s.queue_entry_id JOIN participations p ON p.id=q.participation_id JOIN stations t ON t.id=s.station_id WHERE s.id=$1`, [called.body.serviceSession.id])).rows[0];
++  assert.equal(row.status, "canceled"); assert.equal(row.cancel_reason, "participant_queue_withdrawal"); assert.equal(row.resolved_by_user_id, c.people[0].userId);
++  assert.equal(row.same_time, true); assert.equal(row.participant_status, "active"); assert.equal(row.current_queue_entry_id, null); assert.equal(row.availability, "available");
++});
++test("E08.2 PostgreSQL HTTP nova tentativa tem outro ID/ordem e replays antigos não a alteram", async () => {
++  const c = await context(), p = c.people[0], joinKey = randomUUID(), leaveKey = randomUUID(), first = await join(c, p, joinKey);
++  assert.equal(first.status, 201); const left = await withdraw(p, first.body.queueEntryId, leaveKey); assert.equal(left.status, 200);
++  const next = await join(c); assert.equal(next.status, 201); assert.notEqual(next.body.queueEntryId, first.body.queueEntryId); assert.equal(next.body.queueOrder, (baseOrder+2n).toString());
++  assert.equal((await call(c)).status, 201);
++  await pool.query("UPDATE idempotency_operations SET expires_at=clock_timestamp()-interval '1 second' WHERE actor_user_id=$1", [p.userId]);
++  const before = await state(c), oldJoin = await join(c, p, joinKey), oldLeave = await withdraw(p, first.body.queueEntryId, leaveKey);
++  assert.equal(oldJoin.status, 201); assert.deepEqual(oldJoin.body, first.body); assert.equal(oldLeave.status, 200); assert.deepEqual(oldLeave.body, left.body);
++  problem(await withdraw(p, first.body.queueEntryId), 409, "QUEUE_ENTRY_NOT_CURRENT");
++  problem(await withdraw(p, next.body.queueEntryId, leaveKey), 409, "IDEMPOTENCY_REQUEST_CONFLICT"); assert.equal(await state(c), before);
++  const current = (await get(p)).body.currentQueueEntry;
++  assert.equal(current.id, next.body.queueEntryId); assert.equal(current.status, "called"); assert.equal(current.serviceSession.status, "pending");
++});
++test("E08.2 PostgreSQL HTTP desistência residual permite corte de ingresso mas respeita fim operacional", async () => {
++  const c = await context(), entry = await enter(c);
++  await pool.query("UPDATE events SET official_ends_at=clock_timestamp()-interval '1 minute',operational_deadline_at=clock_timestamp()+interval '30 minutes' WHERE id=$1", [c.eventId]);
++  assert.equal((await withdraw(c.people[0], entry)).status, 200); problem(await join(c), 409, "EVENT_REGISTRATION_CLOSED");
++  for (const mode of ["operational", "admin"]) {
++    const ended = await context(), current = await enter(ended);
++    if (mode === "operational") await pool.query("UPDATE events SET official_ends_at=clock_timestamp()-interval '2 minutes',operational_deadline_at=clock_timestamp()-interval '1 minute' WHERE id=$1", [ended.eventId]);
++    else await pool.query("UPDATE events SET status='closing',closure_mode='controlled',closure_requested_at=clock_timestamp()-interval '2 minutes',admin_deadline_at=clock_timestamp()-interval '1 minute' WHERE id=$1", [ended.eventId]);
++    const before = await state(ended); problem(await withdraw(ended.people[0], current), 409, "EVENT_OPERATION_ENDED");
++    const projected = await get(ended.people[0]); assert.equal(projected.status, 200); assert.equal(projected.body.currentQueueEntry, null); assert.equal(await state(ended), before);
++  }
++});
++test("E08.2 PostgreSQL HTTP desistência concorrente com chamada Staff preserva resultado terminal", async () => {
++  const c = await context(), entry = await enter(c), r = await concurrent(c, [() => withdraw(c.people[0], entry), () => call(c)]);
++  assert.equal(r[0].status, 200); assert.ok([201,409].includes(r[1].status));
++  if (r[1].status === 409) problem(r[1], 409, "QUEUE_EMPTY");
++  const sessions = (await pool.query("SELECT status FROM service_sessions WHERE queue_entry_id=$1", [entry])).rows;
++  if (r[1].status === 201) { assert.equal(sessions.length, 1); assert.equal(sessions[0].status, "canceled"); } else assert.equal(sessions.length, 0);
++  assert.equal((await get(c.people[0])).body.currentQueueEntry, null);
++});
++test("E08.2 PostgreSQL HTTP desistência concorrente com conclusão/ausência preserva o vencedor", async () => {
++  for (const op of ["complete", "absent"] as const) {
++    const c = await context(), entry = await enter(c), called = await call(c); assert.equal(called.status, 201);
++    const r = await concurrent(c, [() => withdraw(c.people[0], entry), () => resolve(c, called.body.serviceSession.id, op)]);
++    assert.deepEqual(r.map(x => x.status).sort(), [200,409]);
++    const row = (await pool.query("SELECT status FROM service_sessions WHERE id=$1", [called.body.serviceSession.id])).rows[0];
++    assert.equal(row.status, r[0].status === 200 ? "canceled" : op === "complete" ? "completed" : "absent");
++    if (r[0].status === 409) problem(r[0], 409, "QUEUE_ENTRY_NOT_CURRENT"); else problem(r[1], 409, "SERVICE_NOT_PENDING");
++    const current = (await get(c.people[0])).body.currentQueueEntry;
++    if (r[1].status === 200 && op === "absent") { assert.notEqual(current.id, entry); assert.equal(current.status, "waiting"); } else assert.equal(current, null);
++    assert.equal((await pool.query("SELECT status FROM participations WHERE id=$1", [c.people[0].participationId])).rows[0].status, "active");
++  }
++});
++test("E08.2 PostgreSQL HTTP Admin como jogador não precisa de papel Staff", async () => {
++  const c = await context(), p = c.people[0];
++  await pool.query("INSERT INTO user_roles(id,user_id,role,event_id,granted_at) VALUES($1,$2,'admin',NULL,clock_timestamp())", [randomUUID(), p.userId]);
++  // context() já criou a única sessão não revogada permitida para este usuário.
++  problem(await get(p), 401, "ADMIN_2FA_REQUIRED");
++  const verified = await pool.query(`UPDATE sessions SET admin_2fa_verified_at=clock_timestamp()
++    WHERE id=$1 AND user_id=$2 AND revoked_at IS NULL RETURNING id,admin_2fa_verified_at`, [p.sessionId, p.userId]);
++  assert.equal(verified.rowCount, 1); assert.equal(verified.rows[0].id, p.sessionId); assert.ok(verified.rows[0].admin_2fa_verified_at);
++  const entry = await enter(c); assert.equal((await get(p)).status, 200); assert.equal((await withdraw(p, entry)).status, 200);
++});
++test("E08.2 PostgreSQL HTTP erro após escritas de ingresso faz rollback integral e permite retry", async () => {
++  const c = await context(), before = await state(c), key = randomUUID(), original = joining.joinExperienceQueue.bind(joining); let reached = false;
++  const failingDb = { transaction: <T>(callback: (tx: DatabaseTransactionExecutor) => Promise<T>, config?: Parameters<Database["transaction"]>[1]) =>
++    database.transaction(async tx => {
++      await callback(tx);
++      const row = (await tx.execute<{ pointer: string | null }>(sql`SELECT current_queue_entry_id AS pointer FROM participations WHERE id=${c.people[0].participationId}`)).rows[0];
++      assert.ok(row.pointer); reached = true; throw new Error("E082_PRIVATE_ROLLBACK");
++    }, config) } as unknown as Database;
++  joining.joinExperienceQueue = input => makeJoining(failingDb).joinExperienceQueue(input);
++  try { const r = await join(c, c.people[0], key); problem(r, 500, "INTERNAL_SERVER_ERROR"); assert.equal(JSON.stringify(r.body).includes("PRIVATE"), false); assert.equal(reached, true); assert.equal(await state(c), before); }
++  finally { joining.joinExperienceQueue = original; }
++  assert.equal((await join(c, c.people[0], key)).status, 201);
++});
++test("E08.2 PostgreSQL HTTP erro após desistência waiting/called reverte efeitos e idempotência", async () => {
++  for (const called of [false,true]) {
++    const c = await context(), entry = await enter(c); if (called) assert.equal((await call(c)).status, 201);
++    const before = await state(c), key = randomUUID(), original = withdrawal.withdrawExperienceQueue.bind(withdrawal); let reached = false;
++    const failingDb = { transaction: <T>(callback: (tx: DatabaseTransactionExecutor) => Promise<T>, config?: Parameters<Database["transaction"]>[1]) =>
++      database.transaction(async tx => {
++        await callback(tx);
++        const row = (await tx.execute<{ pointer: string | null; status: string; sessionStatus: string | null }>(sql`SELECT p.current_queue_entry_id AS pointer,q.status,s.status AS "sessionStatus"
++          FROM participations p JOIN queue_entries q ON q.participation_id=p.id LEFT JOIN service_sessions s ON s.queue_entry_id=q.id WHERE q.id=${entry}`)).rows[0];
++        assert.equal(row.pointer, null); assert.equal(row.status, "closed"); assert.equal(row.sessionStatus, called ? "canceled" : null);
++        reached = true; throw new Error("E082_PRIVATE_ROLLBACK");
++      }, config) } as unknown as Database;
++    withdrawal.withdrawExperienceQueue = input => makeWithdrawal(failingDb).withdrawExperienceQueue(input);
++    try { const r = await withdraw(c.people[0], entry, key); problem(r, 500, "INTERNAL_SERVER_ERROR"); assert.equal(JSON.stringify(r.body).includes("PRIVATE"), false); assert.equal(reached, true); assert.equal(await state(c), before); }
++    finally { withdrawal.withdrawExperienceQueue = original; }
++    assert.equal((await withdraw(c.people[0], entry, key)).status, 200);
++  }
++});
+diff --git a/backend/test/integration/profile-games.integration.test.ts b/backend/test/integration/profile-games.integration.test.ts
+index 0f3ae5286eb7c2f6c2183eaf4d14f0aea0c5bf4c..30be9651bd2aa95380b9f9abba46eed0ed0e5bb1 100644
+--- a/backend/test/integration/profile-games.integration.test.ts
++++ b/backend/test/integration/profile-games.integration.test.ts
+@@ -19,6 +19,8 @@ import {
+ import { assertSafeTestDatabase } from "./test-db-guard";
+ 
+ const connectionString = assertSafeTestDatabase(process.env.DATABASE_URL);
++process.env.STAFF_IDEMPOTENCY_TTL_SECONDS = "60";
++process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = "60";
+ 
+ let app: INestApplication;
+ let baseUrl: string;
+diff --git a/backend/test/integration/staff-http.integration.test.ts b/backend/test/integration/staff-http.integration.test.ts
+index 32215d43c027e67ef084483e7a48d4a92691e8b1..fa0a85fe631da84ab0d0bb544bde2983d8663249 100644
+--- a/backend/test/integration/staff-http.integration.test.ts
++++ b/backend/test/integration/staff-http.integration.test.ts
+@@ -26,6 +26,7 @@ const urls = ["DATABASE_URL", "DATABASE_DIRECT_URL", "EVENTS_TEST_DATABASE_URL"]
+ if (urls.some(value => value !== urls[0])) throw new Error("As três URLs explícitas precisam ser idênticas.");
+ process.env.DOTENV_CONFIG_PATH = devNull;
+ process.env.STAFF_IDEMPOTENCY_TTL_SECONDS = "60"; // Valor explícito exclusivo desta suíte.
++process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = "60"; // EventsModule também instancia as rotas E08.2.
+ const pool = new Pool({ connectionString: urls[0], ssl: false, max: 5, connectionTimeoutMillis: 2000, statement_timeout: 10000 });
+ type Database = NodePgDatabase<typeof schema>;
+ let app: INestApplication, database: Database, joining: QueueEntryService, caller: CallNextService, completion: CompleteService;
+diff --git a/backend/test/unit/participant-queue-http.test.ts b/backend/test/unit/participant-queue-http.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..9f1fbf263a0d1ce94fd91160fb4cb32a2b2dc45e
+--- /dev/null
++++ b/backend/test/unit/participant-queue-http.test.ts
+@@ -0,0 +1,220 @@
++import "reflect-metadata";
++import assert from "node:assert/strict";
++import { after, before, test } from "node:test";
++import { Module, type INestApplication } from "@nestjs/common";
++import { NestFactory } from "@nestjs/core";
++import type { Pool } from "pg";
++import supertest from "supertest";
++import { AuthService } from "../../src/auth/auth.service";
++import { SessionAuthGuard } from "../../src/auth/session-auth.guard";
++import { ProblemException } from "../../src/common/errors/problem.exception";
++import { ProblemDetailsExceptionFilter } from "../../src/common/errors/problem-details.filter";
++import { parseOperationIdempotencyTtl } from "../../src/common/http/idempotency-ttl";
++import { validateOperationIdempotencyKey } from "../../src/common/http/operation-validation";
++import { DRIZZLE_DATABASE, POSTGRES_POOL } from "../../src/database/database.module";
++import { EventsModule } from "../../src/events/events.module";
++import { EventsService } from "../../src/events/events.service";
++import { ParticipantQueueController } from "../../src/events/participant-queue.controller";
++import { ParticipantQueueIdempotencyPolicy } from "../../src/events/participant-queue-idempotency.policy";
++import { QueueEntryService } from "../../src/events/queue-entry.service";
++import type { JoinExperienceQueueInput, JoinExperienceQueueResult } from "../../src/events/queue-entry.types";
++import { QueueStateIntegrityError, QueueStateService } from "../../src/events/queue-state.service";
++import type { ParticipationQueueResult } from "../../src/events/queue-state.types";
++import { QueueWithdrawalIntegrityError, QueueWithdrawalService } from "../../src/events/queue-withdrawal.service";
++import type { WithdrawExperienceQueueInput, WithdrawExperienceQueueResult } from "../../src/events/queue-withdrawal.types";
++
++const id = (n: number) => `abcdef00-0000-4000-8000-${String(n).padStart(12, "0")}`;
++const participationId = id(1), experienceId = id(2), queueEntryId = id(3), userId = id(4);
++const base = `/api/v1/participations/${participationId}`;
++const joinPath = `${base}/queue-entries`, getPath = `${base}/queue`, withdrawPath = `${joinPath}/${queueEntryId}/withdraw`;
++const at = new Date("2026-11-03T12:00:00.000Z");
++const created: JoinExperienceQueueResult = { kind: "created", participationId, experienceId, queueEntryId, status: "waiting", queueOrder: "9007199254741001", enteredAt: at };
++const waiting: ParticipationQueueResult = { kind: "ok", participationId, observedAt: at, currentQueueEntry: {
++  id: queueEntryId, experienceId, experienceName: "Experiência", queueOrder: "9007199254741001", status: "waiting", position: 2, serviceSession: null,
++} };
++const withdrawn: WithdrawExperienceQueueResult = { kind: "withdrawn", participationId, queueEntryId, experienceId, status: "closed", closedAt: at, serviceSession: null };
++let joinResult: JoinExperienceQueueResult = created, queueResult: ParticipationQueueResult = waiting, withdrawResult: WithdrawExperienceQueueResult = withdrawn;
++let failure: Error | undefined;
++const mutations: Array<JoinExperienceQueueInput | WithdrawExperienceQueueInput> = [];
++const reads: string[][] = [];
++function record<T>(input: JoinExperienceQueueInput | WithdrawExperienceQueueInput, result: T): T {
++  mutations.push(input); if (failure) throw failure; return result;
++}
++@Module({ controllers: [ParticipantQueueController], providers: [ParticipantQueueIdempotencyPolicy, SessionAuthGuard,
++  { provide: AuthService, useValue: { authenticateBearerToken: async (token: string) => {
++    if (!["unit-participant", "unit-admin"].includes(token)) throw new ProblemException({ typeSlug: "invalid-access-token", title: "Inválido", status: 401, code: "INVALID_ACCESS_TOKEN", detail: "Token inválido." });
++    return { userId, sessionId: id(5), roles: token === "unit-admin" ? ["admin"] : [] };
++  } } },
++  { provide: QueueEntryService, useValue: { joinExperienceQueue: async (input: JoinExperienceQueueInput) => record(input, joinResult) } },
++  { provide: QueueStateService, useValue: { getParticipationQueue: async (...input: string[]) => {
++    reads.push(input); if (failure) throw failure; return queueResult;
++  } } },
++  { provide: QueueWithdrawalService, useValue: { withdrawExperienceQueue: async (input: WithdrawExperienceQueueInput) => record(input, withdrawResult) } },
++] })
++class HttpUnitModule {}
++let app: INestApplication;
++const originalParticipantTtl = process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS;
++const originalStaffTtl = process.env.STAFF_IDEMPOTENCY_TTL_SECONDS;
++before(async () => {
++  process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = "60";
++  process.env.STAFF_IDEMPOTENCY_TTL_SECONDS = "90";
++  app = await NestFactory.create(HttpUnitModule, { logger: false }); app.setGlobalPrefix("api/v1");
++  app.useGlobalFilters(new ProblemDetailsExceptionFilter()); await app.listen(0, "127.0.0.1");
++});
++after(async () => {
++  await app?.close();
++  if (originalParticipantTtl === undefined) delete process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS;
++  else process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = originalParticipantTtl;
++  if (originalStaffTtl === undefined) delete process.env.STAFF_IDEMPOTENCY_TTL_SECONDS;
++  else process.env.STAFF_IDEMPOTENCY_TTL_SECONDS = originalStaffTtl;
++});
++const post = (route: string, key = "opaque,intent") => supertest(app.getHttpServer()).post(route).set("Authorization", "Bearer unit-participant").set("Idempotency-Key", key);
++const get = () => supertest(app.getHttpServer()).get(getPath).set("Authorization", "Bearer unit-participant");
++function reset() { mutations.length = 0; reads.length = 0; joinResult = created; queueResult = waiting; withdrawResult = withdrawn; failure = undefined; }
++function problem(r: supertest.Response, status: number, code: string) {
++  assert.equal(r.status, status); assert.match(r.headers["content-type"], /application\/problem\+json/);
++  assert.equal(r.body.code, code); assert.equal(r.body.status, status);
++}
++
++test("E08.2 HTTP ingresso usa ator autenticado, TTL próprio, ordem exata e não inventa posição", async () => {
++  reset(); const start = Date.now(), r = await post(joinPath).send({ experienceId });
++  assert.equal(r.status, 201); const { kind: _kind, ...expected } = created;
++  void _kind;
++  assert.deepEqual(r.body, JSON.parse(JSON.stringify(expected))); assert.equal("position" in r.body, false);
++  assert.equal(mutations.length, 1); assert.equal(mutations[0].userId, userId); assert.equal(mutations[0].idempotencyKey, "opaque,intent");
++  assert.ok(mutations[0].expiresAt.getTime() >= start+60000 && mutations[0].expiresAt.getTime() <= Date.now()+60000);
++});
++test("E08.2 HTTP GET mantém snapshot waiting, chamado e vazio sem mutação ou TTL", async () => {
++  reset(); const policy = app.get(ParticipantQueueIdempotencyPolicy), original = policy.expiresAt;
++  policy.expiresAt = () => { throw new Error("GET não pode calcular TTL"); };
++  try {
++    const called: ParticipationQueueResult = { kind: "ok", participationId, observedAt: at, currentQueueEntry: {
++      id: queueEntryId, experienceId, experienceName: "Experiência", queueOrder: "9007199254741001", status: "called", position: null,
++      serviceSession: { id: id(6), status: "pending", calledAt: at, station: { id: id(7), label: "Estação" } },
++    } };
++    for (const value of [waiting, called, { kind: "ok", participationId, observedAt: at, currentQueueEntry: null }] as const) {
++      queueResult = value; const r = await get(); assert.equal(r.status, 200);
++      const { kind: _kind, ...expected } = value; void _kind; assert.deepEqual(r.body, JSON.parse(JSON.stringify(expected)));
++    }
++    assert.deepEqual(reads, Array(3).fill([userId, participationId])); assert.equal(mutations.length, 0);
++  } finally { policy.expiresAt = original; }
++});
++test("E08.2 HTTP desistência identifica tentativa e serializa cancelamento sem ausência", async () => {
++  reset(); withdrawResult = { ...withdrawn, serviceSession: { id: id(6), status: "canceled", resolvedAt: at } };
++  const r = await post(withdrawPath).send({}); assert.equal(r.status, 200);
++  assert.equal(r.body.queueEntryId, queueEntryId); assert.equal(r.body.serviceSession.status, "canceled"); assert.equal(r.body.closedAt, at.toISOString());
++  assert.equal(r.body.serviceSession.resolvedAt, at.toISOString()); assert.equal("kind" in r.body, false);
++  assert.equal((mutations[0] as WithdrawExperienceQueueInput).queueEntryId, queueEntryId); assert.equal(mutations[0].userId, userId);
++});
++test("E08.2 HTTP replay preserva status original 201/200 e JSON", async () => {
++  reset(); const join = await post(joinPath).send({ experienceId }), withdraw = await post(withdrawPath).send({});
++  joinResult = { ...created, kind: "replay" }; withdrawResult = { ...withdrawn, kind: "replay" };
++  const a = await post(joinPath).send({ experienceId }), b = await post(withdrawPath).send({});
++  assert.equal(a.status, 201); assert.equal(b.status, 200); assert.deepEqual(a.body, join.body); assert.deepEqual(b.body, withdraw.body);
++});
++test("E08.2 HTTP todas as rotas exigem autenticação antes de delegar", async () => {
++  reset();
++  for (const token of [undefined, "invalid"]) {
++    for (const r of [supertest(app.getHttpServer()).post(joinPath).send({ experienceId }), supertest(app.getHttpServer()).get(getPath), supertest(app.getHttpServer()).post(withdrawPath)]) {
++      if (token) r.set("Authorization", `Bearer ${token}`); assert.equal((await r).status, 401);
++    }
++  }
++  assert.equal(mutations.length+reads.length, 0);
++});
++test("E08.2 HTTP não exige Staff nem proíbe Admin autenticado", async () => {
++  reset(); assert.equal((await post(joinPath).set("Authorization", "Bearer unit-admin").send({ experienceId })).status, 201);
++  assert.equal((await get()).status, 200); assert.equal((await post(withdrawPath)).status, 200);
++});
++test("E08.2 HTTP UUIDs de parâmetros e corpo são validados e normalizados", async () => {
++  reset();
++  for (const route of [joinPath.replace(participationId, "bad"), withdrawPath.replace(queueEntryId, "bad"), withdrawPath.replace(participationId, "bad")]) problem(await post(route).send({ experienceId }), 400, "VALIDATION_ERROR");
++  problem(await supertest(app.getHttpServer()).get(getPath.replace(participationId, "bad")).set("Authorization", "Bearer unit-participant"), 400, "VALIDATION_ERROR");
++  problem(await post(joinPath).send({ experienceId: "bad" }), 400, "VALIDATION_ERROR"); assert.equal(mutations.length+reads.length, 0);
++  assert.equal((await post(joinPath.replace(participationId, participationId.toUpperCase())).send({ experienceId: experienceId.toUpperCase() })).status, 201);
++  assert.equal(mutations[0].participationId, participationId); assert.equal((mutations[0] as JoinExperienceQueueInput).experienceId, experienceId);
++});
++test("E08.2 HTTP chave é obrigatória, única, opaca e limitada nos dois POSTs", async () => {
++  reset();
++  for (const route of [joinPath, withdrawPath]) {
++    const body = route === joinPath ? { experienceId } : {};
++    problem(await supertest(app.getHttpServer()).post(route).set("Authorization", "Bearer unit-participant").send(body), 400, "VALIDATION_ERROR");
++    for (const key of ["", " ", "x".repeat(129)]) problem(await post(route, key).send(body), 400, "VALIDATION_ERROR");
++    problem(await post(route).set({ "Idempotency-Key": ["a", "b"] }).send(body), 400, "VALIDATION_ERROR");
++  }
++  assert.equal(mutations.length, 0); assert.equal((await post(joinPath, "x".repeat(128)).send({ experienceId })).status, 201);
++  assert.throws(() => validateOperationIdempotencyKey({ headers: { "idempotency-key": "a\tb" }, rawHeaders: ["Idempotency-Key", "a\tb"] }), ProblemException);
++});
++test("E08.2 HTTP corpo de ingresso exige somente experienceId e rejeita dados forjados", async () => {
++  reset();
++  for (const body of [{}, [], { experienceId, userId }, { experienceId, expiresAt: at.toISOString() }, { experienceId, position: 1 }, { experienceId, queueOrder: "1" }, { experienceId, status: "called" }]) problem(await post(joinPath).send(body), 400, "VALIDATION_ERROR");
++  problem(await post(joinPath).type("json").send("null"), 400, "BAD_REQUEST");
++  problem(await post(joinPath), 400, "VALIDATION_ERROR"); assert.equal(mutations.length, 0);
++});
++test("E08.2 HTTP desistência aceita {} ou corpo ausente e rejeita extras", async () => {
++  reset();
++  for (const body of [[], { queueEntryId }, { userId }, { expiresAt: at.toISOString() }]) problem(await post(withdrawPath).send(body), 400, "VALIDATION_ERROR");
++  assert.equal(mutations.length, 0); assert.equal((await post(withdrawPath)).status, 200); assert.equal((await post(withdrawPath).send({})).status, 200);
++});
++test("E08.2 HTTP POSTs não ignoram texto, formulário ou JSON malformado", async () => {
++  reset();
++  for (const route of [joinPath, withdrawPath]) {
++    problem(await post(route).type("text/plain").send("private"), 400, "VALIDATION_ERROR");
++    problem(await post(route).type("form").send("experienceId=x"), 400, "VALIDATION_ERROR");
++    problem(await post(route).type("json").send("{invalid"), 400, "BAD_REQUEST");
++  }
++  assert.equal(mutations.length, 0);
++});
++test("E08.2 HTTP acesso negado tem resposta neutra idêntica nas três rotas", async () => {
++  reset(); joinResult = queueResult = withdrawResult = { kind: "access_denied" };
++  const responses = [await post(joinPath).send({ experienceId }), await get(), await post(withdrawPath)];
++  for (const r of responses) problem(r, 404, "RESOURCE_NOT_FOUND");
++  assert.deepEqual(responses[0].body, responses[1].body); assert.deepEqual(responses[0].body, responses[2].body);
++});
++test("E08.2 HTTP mapeia todos os bloqueios de ingresso em conflitos RFC 7807", async () => {
++  reset();
++  for (const [kind, code] of [["participation_not_active", "PARTICIPATION_NOT_ACTIVE"], ["queue_occupied", "ALREADY_IN_INTERNAL_QUEUE"],
++    ["queue_closed", "EXPERIENCE_QUEUE_CLOSED"], ["experience_unavailable", "EXPERIENCE_UNAVAILABLE"],
++    ["event_closed", "EVENT_REGISTRATION_CLOSED"], ["event_unavailable", "EVENT_UNAVAILABLE"],
++    ["request_conflict", "IDEMPOTENCY_REQUEST_CONFLICT"], ["in_progress", "IDEMPOTENCY_IN_PROGRESS"]] as const) {
++    joinResult = kind === "event_closed" || kind === "event_unavailable" ? { kind, missing: ["EVENT_ENTRY_CLOSED"] } : { kind };
++    problem(await post(joinPath).send({ experienceId }), 409, code);
++  }
++});
++test("E08.2 HTTP mapeia todos os bloqueios de desistência sem efeitos aparentes", async () => {
++  reset();
++  for (const [kind, code] of [["participation_not_active", "PARTICIPATION_NOT_ACTIVE"], ["entry_not_current", "QUEUE_ENTRY_NOT_CURRENT"],
++    ["event_ended", "EVENT_OPERATION_ENDED"], ["request_conflict", "IDEMPOTENCY_REQUEST_CONFLICT"], ["in_progress", "IDEMPOTENCY_IN_PROGRESS"]] as const) {
++    withdrawResult = { kind }; problem(await post(withdrawPath), 409, code);
++  }
++});
++test("E08.2 HTTP erros SQL/integridade não expõem detalhes, IDs privados ou credenciais", async () => {
++  reset();
++  for (const error of [new Error("PRIVATE_SQL_secret"), new QueueStateIntegrityError("PRIVATE_SQL_secret"), new QueueWithdrawalIntegrityError("PRIVATE_SQL_secret")]) {
++    failure = error;
++    for (const r of [await post(joinPath).send({ experienceId }), await get(), await post(withdrawPath)]) {
++      problem(r, 500, "INTERNAL_SERVER_ERROR"); assert.equal(JSON.stringify(r.body).includes("PRIVATE"), false);
++    }
++  }
++});
++test("E08.2 TTL próprio é obrigatório, positivo e independente da configuração Staff", () => {
++  const variable = "PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS";
++  for (const raw of [undefined, "", " ", "0", "-1", "1.5", "1e3", "NaN", "9007199254740992", "8640000000000"]) assert.throws(() => parseOperationIdempotencyTtl(raw, variable), /PARTICIPANT_QUEUE/);
++  const old = process.env[variable]; delete process.env[variable];
++  try { assert.throws(() => new ParticipantQueueIdempotencyPolicy(), /PARTICIPANT_QUEUE/); }
++  finally { if (old === undefined) delete process.env[variable]; else process.env[variable] = old; }
++  assert.equal(parseOperationIdempotencyTtl("60", variable), 60000);
++});
++test("E08.2 Nest resolve controller, guard e serviços reais sob tsx sem conectar ao banco", async () => {
++  const real = await NestFactory.create(EventsModule, { logger: false });
++  try {
++    const controller = real.get(ParticipantQueueController), database = real.get(DRIZZLE_DATABASE);
++    for (const [name, token] of [["joining", QueueEntryService], ["state", QueueStateService], ["withdrawal", QueueWithdrawalService]] as const) {
++      assert.ok(Reflect.get(controller, name) === real.get(token));
++      assert.ok(Reflect.get(real.get(token), "database") === database);
++    }
++    assert.ok(Reflect.get(real.get(QueueEntryService), "eventsService") === real.get(EventsService));
++    assert.ok(Reflect.get(controller, "idempotency") === real.get(ParticipantQueueIdempotencyPolicy));
++    assert.ok(Reflect.get(real.get(SessionAuthGuard), "authService") === real.get(AuthService));
++    assert.equal(real.get<Pool>(POSTGRES_POOL).totalCount, 0);
++  } finally { await real.close(); }
++});
+diff --git a/backend/test/unit/queue-entry-di.test.ts b/backend/test/unit/queue-entry-di.test.ts
+index 3de848c0172e4082fe3867126b4a8d77a6feee3e..527826135f8e24cb7194afd805f25151a87b1df7 100644
+--- a/backend/test/unit/queue-entry-di.test.ts
++++ b/backend/test/unit/queue-entry-di.test.ts
+@@ -9,6 +9,9 @@ import { QueueEntryService } from "../../src/events/queue-entry.service";
+ import type { Pool } from "pg";
+ 
+ test("E08.1 Nest resolve as dependências reais de QueueEntryService sob tsx", async () => {
++  const variables = ["STAFF_IDEMPOTENCY_TTL_SECONDS", "PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS"];
++  const original = variables.map(name => process.env[name]);
++  for (const name of variables) process.env[name] = "60";
+   // create instancia os providers reais; sem init/listen, o lifecycle não conecta ao banco.
+   const app = await NestFactory.create(EventsModule, { logger: false });
+   try {
+@@ -22,5 +25,8 @@ test("E08.1 Nest resolve as dependências reais de QueueEntryService sob tsx", a
+     assert.equal(app.get<Pool>(POSTGRES_POOL).totalCount, 0);
+   } finally {
+     await app.close();
++    variables.forEach((name, index) => {
++      if (original[index] === undefined) delete process.env[name]; else process.env[name] = original[index];
++    });
+   }
+ });
+diff --git a/docs/ARQUITETURA_BACKEND_ARENAGO.md b/docs/ARQUITETURA_BACKEND_ARENAGO.md
+index cd3c39fe97d8cce119369908306a40ca8b9b6d8c..66fbb8f3848dec6e8d17ddea866028825679d65d 100644
+--- a/docs/ARQUITETURA_BACKEND_ARENAGO.md
++++ b/docs/ARQUITETURA_BACKEND_ARENAGO.md
+@@ -964,11 +964,23 @@ Os testes funcionais de API/Expo deste capítulo seguem não executados. Os caso
+ 
+ ### 16.2 Matriz de endpoints propostos
+ 
++**Atualização E08.2 — 03/11/2026:** as rotas de ingresso e consulta do participante
++estão implementadas por `ParticipantQueueController` sobre E07.1/E07.2. A saída
++interna E07.3 recebe a definição técnica
++`POST /participations/:participationId/queue-entries/:queueEntryId/withdraw`, com
++201 no ingresso e 200 na consulta/desistência, inclusive replays. Titularidade
++ausente/alheia produz o mesmo 404. Os POSTs usam TTL próprio obrigatório
++`PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS`, além de `Idempotency-Key`; o GET
++mantém o snapshot somente leitura. Detalhes, erros efetivos e testes PostgreSQL
++pendentes de execução manual em `E08_2_IMPLEMENTACAO.md`. As observações abaixo
++que delimitam E07.1–E07.3 sem HTTP descrevem o histórico anterior a esta atualização.
++
+ | Endpoint relativo a `/api/v1` | Acesso | Finalidade | Efeito |
+ |---|---|---|---|
+ | `GET /events/:eventId/experiences` | Conta com participação `active` no evento | Listar experiências e estações/estatísticas seguras | Leitura |
+ | `GET /participations/:id/queue` | Participante titular | Recuperar espera/chamada interna atual | Leitura |
+ | `POST /participations/:id/queue-entries` | Participante titular | Entrar em fila interna, inclusive repetir experiência após conclusão | Cria `queue_entries` |
++| `POST /participations/:participationId/queue-entries/:queueEntryId/withdraw` | Participante titular | Desistir da tentativa explícita e permanecer na Arena | Encerra entrada e cancela eventual pending |
+ | `GET /staff/events/:eventId/stations` | Staff autorizado no evento (Admin com acesso de gestão conforme regra) | Consultar estações, disponibilidade e pendências | Leitura operacional |
+ | `PATCH /staff/events/:eventId/stations/:stationId/availability` | Staff autorizado no evento **ou Admin global** | Marcar estação disponível/indisponível | Atualiza `stations` |
+ | `GET /staff/events/:eventId/experiences/:experienceId/queue` | Staff autorizado no evento | Consultar tamanho/primeiro lugar e situação da fila | Leitura operacional |
+@@ -1022,6 +1034,13 @@ Os campos `available` expressam configuração manual da estação, **não neces
+ 
+ ### 16.4 `POST /participations/:id/queue-entries` — ingressar na fila interna
+ 
++**Contrato efetivo E08.2:** delega a E07.1 sem alterar regras transacionais.
++Resposta 201 plana: `{ queueEntryId, participationId, experienceId, status,
++queueOrder, enteredAt }`, com ordem decimal exata e instante ISO UTC, sem `kind`.
++Não retorna posição no POST; a posição dinâmica pertence ao GET da §16.5.
++Essa definição substitui o envelope `queueEntry` e a posição do exemplo histórico
++proposto abaixo. Replays preservam 201. Códigos efetivos em `E08_2_IMPLEMENTACAO.md`.
++
+ **Headers:** `Authorization: Bearer <accessToken>` e `Idempotency-Key: <uuid-ou-chave-da-intencao>`.
+ 
+ **Body:**
+@@ -1054,6 +1073,12 @@ Os campos `available` expressam configuração manual da estação, **não neces
+ 
+ ### 16.5 `GET /participations/:id/queue` — fila ou chamada atual
+ 
++**Atualização HTTP E08.2:** a rota está implementada sobre o serviço abaixo.
++Mapeia `access_denied` para 404 neutro e `ok` para 200 com `participationId`,
++`observedAt` e `currentQueueEntry`, sem expor `kind`. O texto que menciona ausência
++de controller registra a etapa interna E07.2. O snapshot e os exemplos de consulta
++abaixo são preservados, sem idempotência, mutações ou limpeza no GET.
++
+ **Contrato HTTP proposto; implementação interna E07.2:** `QueueStateService.getParticipationQueue(userId, participationId)`, sem controller/rota. Retorna `kind='access_denied'` indistinguível para participação ausente/alheia ou `kind='ok'` com `participationId`, `observedAt` e `currentQueueEntry` anulável. Consulta não cria nem remove entradas. Em uma transação `REPEATABLE READ READ ONLY`, duas consultas sem locks de linha verificam titularidade/evento e depois ponteiro, entrada, experiência, atendimento/estação e posição no mesmo snapshot. `observedAt` vem de `statement_timestamp()` na primeira leitura, como na E06. `position` conta as entradas `waiting` da mesma experiência/evento com ordem **menor ou igual** à da entrada atual, incluindo a própria pessoa (posição inicial 1). `called` e `closed` não contam; `queueOrder` continua string decimal exata, inclusive no retorno `called`, e contagens fora do intervalo seguro de number geram falha explícita. Histórico e replay E07.1 não são estado corrente.
+ 
+ **Projeção de encerramento E07.2:** corte oficial/início controlado de novas inscrições e perda de capacidade C-14 não suprimem espera/chamada preexistente na janela residual. No instante `observedAt`, `events.status='closed'` ou chegada ao menor prazo operacional/administrativo efetivo projeta `currentQueueEntry:null`; no modo imediato, o prazo administrativo coincide com o instante solicitado. Não aguardar o job de limpeza para deixar de apresentar estado operacional vigente e não executar limpeza nesta leitura. Titular externo/terminal sem fila também recebe sucesso com null. Ponteiro ausente com entrada corrente, ponteiro para entrada fechada, vínculos incoerentes ou chamada sem pending válido enquanto operacionalmente vigente geram erro interno de integridade, sem inventar estados. Null não autoriza ingresso nem reativa participação; E04/E06 e as guardas de mutação continuam necessários. Ver `E07_2_IMPLEMENTACAO.md` para o contrato efetivo e limites.
+diff --git a/docs/E08_2_IMPLEMENTACAO.md b/docs/E08_2_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..b807704ba39b3883c0affca358526ded81b2a40f
+--- /dev/null
++++ b/docs/E08_2_IMPLEMENTACAO.md
+@@ -0,0 +1,274 @@
++# E08.2 — HTTP das filas internas dos participantes
++
++Implementação sobre `651d242204388f380e78c7fafadfca42c1e27625`, branch
++`feature/events-participations`, com árvore e índice inicialmente limpos.
++O estado inicial foi registrado em
++`%TEMP%/arenago-e082-before-ee8033ff37f8427c92a974f52d43b64a/snapshot.json`.
++Base de resultados informada pelo responsável: 215 unitários e 263 integrações
++PostgreSQL aprovados até E08.1; esses resultados não validam antecipadamente E08.2.
++
++## Rotas e contratos efetivos
++
++Todas as rotas abaixo são relativas a `/api/v1`, exigem `RequireSessionAuth` e
++obtêm o ator exclusivamente por `CurrentUserId`. Não exigem papel Staff e não
++introduzem proibição para Admin jogar. A regra existente de segundo fator para
++sessões Admin continua valendo. Participação inexistente e de terceiro retornam
++o mesmo 404 `RESOURCE_NOT_FOUND`; UUID não concede acesso. Experiência inexistente
++ou de outro evento no ingresso recebe o mesmo bloqueio neutro do serviço.
++
++| Método e rota | Serviço E07 existente | Sucesso/replay |
++| --- | --- | --- |
++| `POST /participations/:participationId/queue-entries` | `QueueEntryService.joinExperienceQueue` | 201 |
++| `GET /participations/:participationId/queue` | `QueueStateService.getParticipationQueue` | 200 |
++| `POST /participations/:participationId/queue-entries/:queueEntryId/withdraw` | `QueueWithdrawalService.withdrawExperienceQueue` | 200 |
++
++O caminho da desistência é uma definição técnica desta task: o UUID explícito
++identifica a tentativa alvo. Ele evita interpretar retries como saída da fila
++mais recente. Não representa saída da Arena, finalização de participação nem
++cancelamento da fila externa.
++
++### Ingresso
++
++Corpo estrito `{ "experienceId": "UUID" }`, sem propriedades adicionais.
++Resposta plana, seguindo os campos reais de E07.1 e sem o discriminante `kind`:
++
++```json
++{
++  "queueEntryId": "550e8400-e29b-41d4-a716-446655440501",
++  "participationId": "550e8400-e29b-41d4-a716-446655440201",
++  "experienceId": "550e8400-e29b-41d4-a716-446655440301",
++  "status": "waiting",
++  "queueOrder": "9007199254741001",
++  "enteredAt": "2026-11-03T12:00:00.000Z"
++}
++```
++
++`queueOrder` continua decimal exato, inclusive além de `Number.MAX_SAFE_INTEGER`.
++Não há posição no POST: posição dinâmica pertence ao snapshot de consulta.
++Titularidade, participação ativa, vínculos, prontidão, disponibilidade, cortes,
++uma única fila, FIFO e atomicidade são decididos pelo serviço transacional atual.
++
++### Consulta
++
++Retorna somente `participationId`, `observedAt` e `currentQueueEntry`. O estado
++`waiting` contém `id`, `experienceId`, `experienceName`, `queueOrder`, `status`,
++`position` e `serviceSession:null`. O estado `called` tem `position:null` e
++`serviceSession:{ id, status:"pending", calledAt, station:{ id, label } }`.
++Sem fila operacional atual:
++
++```json
++{
++  "participationId": "550e8400-e29b-41d4-a716-446655440201",
++  "observedAt": "2026-11-03T12:00:00.000Z",
++  "currentQueueEntry": null
++}
++```
++
++O controller não calcula posição, não cria idempotência, não calcula TTL nem
++executa limpeza. Preserva as duas leituras no mesmo snapshot
++`REPEATABLE READ READ ONLY` de E07.2 e sua projeção de encerramento definitivo,
++inclusive quando as linhas ainda aguardam limpeza por outro processo.
++
++### Desistência
++
++Aceita `{}` ou corpo ausente. Retorna `participationId`, `queueEntryId`,
++`experienceId`, `status:"closed"`, `closedAt` e `serviceSession` anulável.
++Quando havia chamada, `serviceSession` contém `id`, `status:"canceled"` e
++`resolvedAt`. Datas viram ISO UTC pelo Nest/JSON, sem conversão da ordem em number.
++
++Mantém participação ativa, libera somente seu ponteiro, conserva ordens históricas
++e cancela atomicamente eventual pending, sem ausência/conclusão, reentrada ou
++chamada automática. Corte de novos ingressos não impede por si só a saída residual;
++o prazo operacional/administrativo definitivo continua sendo respeitado por E07.3.
++Replay antigo continua histórico, sem alterar uma tentativa ou atendimento posterior.
++
++## Validação, configuração e erros
++
++UUIDs são validados e normalizados para minúsculas. Cada POST exige um único
++`Idempotency-Key` opaco, não vazio, até 128 caracteres, sem controles; a chave
++original é preservada, sem trim ou renormalização. Corpo deve ser JSON e seguir
++o schema da operação. Texto, formulário, arrays e campos extras são rejeitados;
++nenhum usuário, posição, ordem, estado ou timestamp é aceito do cliente.
++
++`PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS` é obrigatório, inteiro positivo e
++compatível com Date, sem valor padrão. A política é independente de
++`STAFF_IDEMPOTENCY_TTL_SECONDS`; nunca usa o TTL Staff como fallback. A aplicação
++instancia ambas as políticas em `EventsModule`, portanto processos que iniciam
++`AppModule`/`EventsModule` devem fornecer as duas configurações explicitamente.
++O TTL só define `expiresAt` do backend. Não há expurgo, perda de replay após o
++vencimento ou mudança nos namespaces/fingerprints persistidos de E07.1/E07.3.
++Testes fornecem 60 segundos explicitamente, sem definir prazo de produção.
++
++Os validadores HTTP e o parser de TTL da E08.1 foram extraídos para
++`src/common/http/operation-validation.ts` e `idempotency-ttl.ts`. Staff mantém
++os exports anteriores por wrappers. Nenhum serviço transacional E07.1–E07.6
++foi modificado. O controller novo declara todos os tokens com `@Inject`, evitando
++dependência de metadados automáticos sob `tsx`. O filtro RFC 7807 existente
++preserva o tratamento de parsing e de erros internos sem expor SQL ou credenciais.
++
++| HTTP | Códigos efetivos |
++| --- | --- |
++| 400 | `VALIDATION_ERROR`; `BAD_REQUEST` para JSON malformado |
++| 401 | Códigos existentes de autenticação, sessão e segundo fator |
++| 404 | `RESOURCE_NOT_FOUND`, neutro para inexistência/titularidade/vínculos |
++| 409 | `PARTICIPATION_NOT_ACTIVE`, `ALREADY_IN_INTERNAL_QUEUE`, `EXPERIENCE_QUEUE_CLOSED`, `EXPERIENCE_UNAVAILABLE`, `EVENT_REGISTRATION_CLOSED`, `EVENT_UNAVAILABLE`, `QUEUE_ENTRY_NOT_CURRENT`, `EVENT_OPERATION_ENDED`, `IDEMPOTENCY_REQUEST_CONFLICT`, `IDEMPOTENCY_IN_PROGRESS` |
++| 500 | `INTERNAL_SERVER_ERROR`, sem detalhes de integridade ou SQL |
++
++As propostas históricas da arquitetura foram atualizadas para apontar o contrato
++efetivo, incluindo a resposta plana de ingresso sem posição e a rota de desistência.
++Não há dados de outros participantes, Staff, documentos ou e-mails nas respostas.
++
++## Validação efetivamente executada
++
++- **232/232 testes unitários aprovados**, zero falhas, cancelamentos ou skips:
++  215 anteriores e 17 novos em `participant-queue-http.test.ts`.
++- **29/29 testes focados aprovados**: 17 novos, 11 HTTP Staff e 1 DI anterior,
++  executados também com `--tsconfig tsconfig.test.json`.
++- Typecheck (`npm run typecheck:test`), lint (`npm run lint`) e build
++  (`npm run build`) aprovados, exit 0.
++- Os testes simulados cobrem autenticação/ator, UUIDs, corpo/headers, chave opaca,
++  TTL próprio sem fallback, status de replay, todas as variantes de bloqueio,
++  serialização waiting/called/null, erros internos e DI real sob `tsx`.
++- O teste de DI instancia providers reais de `EventsModule` e verifica identidade
++  do controller, serviços, guard e banco. Sem `init/listen` nesse teste, Pool
++  permanece com zero conexões; os demais testes HTTP usam serviços simulados.
++
++Nenhum PostgreSQL foi acessado e nenhuma credencial foi solicitada/configurada.
++Unitários receberam URL fictícia sem conexão, ambas as variáveis de TTL e
++`DOTENV_CONFIG_PATH=NUL`. O runner `tsx` foi executado fora da sandbox devido
++à limitação `uv_os_get_passwd` já constatada no ambiente.
++
++## Integração PostgreSQL — execução manual e nova validação pendente
++
++Foram escritos **22 testes HTTP + PostgreSQL real** em
++`test/integration/participant-queue-http.integration.test.ts`. Na primeira entrega,
++não foram executados pelo agente. Posteriormente, o responsável confirmou
++**20/22 HTTP E08.2** e **283/285 na regressão completa**, com os **263 anteriores
++aprovados**. As mesmas duas falhas apareceram nas duas execuções. A investigação
++e as correções estão registradas abaixo; a repetição PostgreSQL após a correção
++continua pendente de execução manual.
++Cobrem os 20 grupos solicitados: ingresso, autenticação, titularidade, estado,
++vínculos, disponibilidade/prontidão/cortes, concorrência de ingresso e retry,
++replay persistente/conflito, posição mutável, chamada/estação, GET sem mutações,
++desistência waiting/called, permanência active, reentrada legítima, replay antigo
++após nova chamada, disputas com chamada/conclusão/ausência Staff e rollback.
++Incluem Admin autenticado como jogador, saída residual e projeção de fim operacional.
++
++Disputas usam requisições HTTP reais e bloqueios de experiência observados por
++`pg_blocking_pids`; aceitam somente resultados coerentes com o vencedor. Rollback
++injeta uma falha depois das escritas reais dentro da transação de ingresso ou
++desistência waiting/called e confere reversão de domínio e idempotência, seguida
++de retry legítimo. Não substitui PostgreSQL por mock. Fixtures usam somente UUIDs
++próprios; limpeza transacional inclui os dados criados. Sem migrations/seed/reset
++nesta suíte. A primeira execução real revelou dois defeitos de preparação de dados,
++mesmo após a revisão estática inicial; nenhum dos dois chegou aos endpoints.
++
++Revalidação completa pendente: **285 casos** (263 anteriores + 22 novos).
++Suítes HTTP anteriores que
++iniciam `AppModule`/`EventsModule` receberam ambas as configurações de TTL nos
++processos de teste, sem alterar suas asserções de regressão.
++
++Comandos para o responsável, no PostgreSQL local já preparado; substituir apenas
++os placeholders locais, sem colocar credenciais em arquivos versionados:
++
++```powershell
++Set-Location C:\DoJob\ProgramacaoMobile\backend
++$env:NODE_ENV = 'test'
++$env:EVENTS_TEST_DATABASE_URL = 'postgresql://USUARIO:SENHA@127.0.0.1:55432/arenago_events_test'
++$env:DATABASE_URL = $env:EVENTS_TEST_DATABASE_URL
++$env:DATABASE_DIRECT_URL = $env:EVENTS_TEST_DATABASE_URL
++$env:DOTENV_CONFIG_PATH = 'NUL'
++$env:STAFF_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = '60'
++.\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test --test-concurrency=1 test/integration/participant-queue-http.integration.test.ts
++if ($LASTEXITCODE -ne 0) { throw 'Revisar HTTP E08.2 antes da regressão.' }
++npm.cmd run test:integration
++if ($LASTEXITCODE -ne 0) { throw 'Revisar regressão PostgreSQL.' }
++```
++
++Preflight exige as três URLs idênticas, sem parâmetros, exclusivamente no destino
++local indicado; não usa `.env`. Não há declaração de integração integralmente
++aprovada após as correções, nem de validação de produção nesta entrega.
++
++## Investigação das duas falhas reais — 2026-11-03
++
++Diagnóstico baseado nos logs fornecidos pelo responsável, no SQL das linhas
++indicadas e na conferência dos schemas/migrações e do fluxo de autenticação.
++Nenhum PostgreSQL foi acessado pelo agente durante esta investigação.
++
++### 1. Participação não ativa — erro na implementação do teste/fixture
++
++- **Instrução exata anterior:** `await pool.query` do `UPDATE participations`
++  na linha 194, com `status=$2` e duas condições `CASE WHEN $2 IN (...)`.
++  O log registra SQLSTATE **42P08**, `text versus character varying`, posição 34,
++  rotina `variable_coerce_param_hook`. A posição aponta ao parâmetro da atribuição
++  `status=$2`; não é falha de CHECK nem de asserção.
++- **Fase:** preparação de dados. O SQL falha na análise dos tipos, antes de
++  `state(c)`, `join(c)` e `get(p)` desse cenário. Não há resposta HTTP inesperada
++  nem execução do controller/serviço que justifique alteração de produção.
++- **Schema/regra:** `participations.status` é `varchar(20)` em
++  `src/database/schema/participations.schema.ts`; o mesmo parâmetro sem tipo
++  explícito também aparece nas comparações dos CASEs. A dedução conflitante
++  entre esses contextos é comprovada pelo diagnóstico PostgreSQL recebido.
++  `ck_participations_terminal` exige `finished_at`/`finish_reason` para
++  `finished|canceled` e NULL para `waiting|active`; `waiting` exige
++  `arena_entered_at IS NULL`. Os valores pretendidos do fixture respeitam esses
++  checks. O cenário continua coerente com §16.1 da arquitetura: somente active
++  pode ingressar, e a consulta sem fila não deve fabricar uma entrada.
++- **Correção da causa:** declarar `$2::varchar(20)` na atribuição e nos dois
++  CASEs, alinhando todas as ocorrências ao tipo do schema. Permanecem os estados
++  `waiting`, `finished`, `canceled`, a construção dos campos terminais e todas
++  as asserções originais de 409, GET 200/null e ausência de mutações.
++
++### 2. Admin como jogador — erro na implementação do teste/fixture
++
++- **Instrução exata anterior:** `session(p.userId, true)` na linha 343 chama
++  o `INSERT INTO sessions` da linha 83. Antes disso, `context()` já chamou
++  `session(userId)` para a mesma pessoa na linha 104 e guardou seu `sessionId`.
++- **Fase:** preparação do contexto autenticado. O log SQLSTATE **23505** aponta
++  nominalmente `uq_sessions_one_unrevoked_user`, na tabela `sessions`, com
++  duplicidade de `user_id`. O novo INSERT falha antes de `enter(c)`, GET e
++  desistência; não existe falha de asserção de permissão de jogador.
++- **Schema/regra:** `src/database/schema/access.schema.ts` e a migração
++  `0003_credentials_roles.sql` definem o índice único de `user_id` com
++  `revoked_at IS NULL`. A arquitetura (§2, sessões, e protocolo de novo login)
++  determina uma única sessão não revogada. O fixture tentou criar duas sem
++  revogar a anterior. Isso não demonstra defeito na produção nem divergência
++  na intenção de testar Admin como jogador.
++- **Autenticação conferida:** `AuthService.authenticateBearerToken` consulta
++  papéis e segundo fator atuais no banco; Admin com `admin_2fa_verified_at=NULL`
++  recebe `ADMIN_2FA_REQUIRED`. O JWT existente identifica usuário/sessão e não
++  precisa ser trocado para consultar os papéis atuais. Não há nova proibição
++  de jogar nem dispensa do segundo fator.
++- **Correção da causa:** reutilizar a sessão criada por `context()`. Após
++  conceder Admin, acrescentar a asserção de 401 `ADMIN_2FA_REQUIRED`; preparar
++  o estado de segundo fator dessa mesma sessão com UPDATE limitado por
++  `id`, `user_id` e `revoked_at IS NULL`, verificando exatamente uma linha,
++  o mesmo ID e timestamp não nulo. Em seguida executar todas as asserções
++  originais de ingresso/consulta/desistência. A preparação de segundo fator
++  continua sendo fixture, como era no helper anterior; não valida o fluxo TOTP
++  completo nem modifica o código de autenticação.
++
++As duas causas identificadas são de fixture, não de produção ou de especificação.
++Nenhum teste foi removido, expectativa alterada, asserção enfraquecida, constraint
++desabilitada ou PostgreSQL substituído por mock. Mantidos os 22 testes e os três
++estados de participação; a cobertura de segundo fator foi reforçada. A revisão
++altera apenas a suíte PostgreSQL e este relatório; o único patch E08.2 é atualizado
++no mesmo caminho. Não há commit ou push. Após as correções, **232/232 unitários**
++foram novamente aprovados (zero falhas, cancelamentos ou skips); typecheck, lint
++e build também passaram com exit 0. O resultado PostgreSQL após estas alterações
++depende da nova execução manual pelo responsável; não foi presumida aprovação
++dos dois testes corrigidos ou da regressão completa.
++
++## Evidência e limites
++
++Única evidência: `qa-evidence/e08-2-changes.diff`, completa contra a base inicial,
++incluindo arquivos novos ainda não rastreados, código HTTP compartilhado, testes
++e documentação. Aplicação conferida em cópia isolada da base e resultado comparado
++ao estado final com normalização Git de linhas, sem usar ou alterar o índice.
++Exclui `.diff`, `.env`, segredos, dependências instaladas e temporários.
++
++Sem novas dependências, migrations, telas Expo, notificações/WebSocket/polling,
++finalização da participação, saída externa, gestão/Admin ou listagem HTTP E06.
++Próxima task não iniciada. **Sem `git add`, commit ou push**; versionamento e
++mensagem de commit ficam exclusivamente com o responsável após aprovação.

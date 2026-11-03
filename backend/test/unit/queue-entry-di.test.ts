@@ -9,6 +9,9 @@ import { QueueEntryService } from "../../src/events/queue-entry.service";
 import type { Pool } from "pg";
 
 test("E08.1 Nest resolve as dependências reais de QueueEntryService sob tsx", async () => {
+  const variables = ["STAFF_IDEMPOTENCY_TTL_SECONDS", "PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS"];
+  const original = variables.map(name => process.env[name]);
+  for (const name of variables) process.env[name] = "60";
   // create instancia os providers reais; sem init/listen, o lifecycle não conecta ao banco.
   const app = await NestFactory.create(EventsModule, { logger: false });
   try {
@@ -22,5 +25,8 @@ test("E08.1 Nest resolve as dependências reais de QueueEntryService sob tsx", a
     assert.equal(app.get<Pool>(POSTGRES_POOL).totalCount, 0);
   } finally {
     await app.close();
+    variables.forEach((name, index) => {
+      if (original[index] === undefined) delete process.env[name]; else process.env[name] = original[index];
+    });
   }
 });

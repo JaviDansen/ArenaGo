@@ -1,14 +1,9 @@
 import { Injectable } from "@nestjs/common";
+import { parseOperationIdempotencyTtl } from "../common/http/idempotency-ttl";
 
 /** Configuração técnica explícita; não implementa retenção ou expurgo. */
 export function parseStaffIdempotencyTtl(raw: string | undefined): number {
-  const value = raw?.trim();
-  const seconds = Number(value);
-  if (!value || !/^\d+$/.test(value) || !Number.isSafeInteger(seconds) || seconds <= 0
-    || !Number.isSafeInteger(seconds * 1000) || !Number.isFinite(new Date(Date.now() + seconds * 1000).getTime())) {
-    throw new Error("STAFF_IDEMPOTENCY_TTL_SECONDS é obrigatório e deve conter um inteiro positivo compatível com Date.");
-  }
-  return seconds * 1000;
+  return parseOperationIdempotencyTtl(raw, "STAFF_IDEMPOTENCY_TTL_SECONDS");
 }
 
 @Injectable()
