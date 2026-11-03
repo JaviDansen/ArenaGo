@@ -17,7 +17,7 @@ npm.cmd run db:check
 npm.cmd run db:migrate
 npm.cmd run db:seed
 npm.cmd run build
-npm.cmd start:dev
+npm.cmd run start:dev
 ```
 
 `db:generate` cria novas migrações a partir de `src/database/schema`. As migrações versionadas em `drizzle/` são aplicadas pelo migrador oficial `drizzle-kit migrate`, que registra cada arquivo em `drizzle.__drizzle_migrations`.
