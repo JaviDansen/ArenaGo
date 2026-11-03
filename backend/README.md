@@ -66,6 +66,11 @@ Nenhum banco remoto está configurado. Quando a conexão remota for autorizada, 
 
 ## Scripts
 
+As três operações Staff HTTP (§16.9–16.11) exigem `STAFF_IDEMPOTENCY_TTL_SECONDS`
+configurado com inteiro positivo, sem padrão. A aplicação valida essa configuração
+ao iniciar. Ela define somente `expiresAt`, sem expurgo nem perda de replay enquanto
+o registro existir. Endpoints, códigos e validação local em [E08.1](../docs/E08_1_IMPLEMENTACAO.md).
+
 - `npm run build`, `npm run start:dev`, `npm run start:prod`
 - `npm run lint`, `npm test`, `npm run test:integration`
 - `npm run db:generate`, `npm run db:check`, `npm run db:migrate`, `npm run db:seed`

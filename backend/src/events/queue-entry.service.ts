@@ -60,7 +60,7 @@ function replayEntry(payload: JsonValue | null, input: JoinExperienceQueueInput)
 export class QueueEntryService {
   constructor(
     @Inject(DRIZZLE_DATABASE) private readonly database: NodePgDatabase<typeof schema>,
-    private readonly eventsService: EventsService,
+    @Inject(EventsService) private readonly eventsService: EventsService,
   ) {}
 
   async joinExperienceQueue(input: JoinExperienceQueueInput): Promise<JoinExperienceQueueResult> {

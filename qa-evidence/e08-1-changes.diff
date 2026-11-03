@@ -1,0 +1,1288 @@
+diff --git a/backend/README.md b/backend/README.md
+index 0d928b56fe45bef93901f74214628da3ce58898a..6083ff8c71c9d4b028ce29043ab1ec26a547d00a 100644
+--- a/backend/README.md
++++ b/backend/README.md
+@@ -66,6 +66,11 @@ Nenhum banco remoto está configurado. Quando a conexão remota for autorizada,
+ 
+ ## Scripts
+ 
++As três operações Staff HTTP (§16.9–16.11) exigem `STAFF_IDEMPOTENCY_TTL_SECONDS`
++configurado com inteiro positivo, sem padrão. A aplicação valida essa configuração
++ao iniciar. Ela define somente `expiresAt`, sem expurgo nem perda de replay enquanto
++o registro existir. Endpoints, códigos e validação local em [E08.1](../docs/E08_1_IMPLEMENTACAO.md).
++
+ - `npm run build`, `npm run start:dev`, `npm run start:prod`
+ - `npm run lint`, `npm test`, `npm run test:integration`
+ - `npm run db:generate`, `npm run db:check`, `npm run db:migrate`, `npm run db:seed`
+diff --git a/backend/package-lock.json b/backend/package-lock.json
+index 11e9a8caef7b059f997c285a6961c37a565ecb92..ea54d8f7e418ac593ee5f732959c8876684b81b5 100644
+--- a/backend/package-lock.json
++++ b/backend/package-lock.json
+@@ -24,8 +24,10 @@
+         "@nestjs/cli": "12.0.8",
+         "@types/node": "^24.10.1",
+         "@types/pg": "^8.15.6",
++        "@types/supertest": "7.2.1",
+         "drizzle-kit": "^0.31.11",
+         "eslint": "^10.13.0",
++        "supertest": "7.3.1",
+         "tsx": "^4.20.6",
+         "typescript": "6.0.3",
+         "typescript-eslint": "^8.71.2"
+@@ -1918,6 +1920,29 @@
+         "yarn": ">= 1.13.0"
+       }
+     },
++    "node_modules/@noble/hashes": {
++      "version": "1.8.0",
++      "resolved": "https://registry.npmjs.org/@noble/hashes/-/hashes-1.8.0.tgz",
++      "integrity": "sha512-jCs9ldd7NwzpgXDIf6P3+NrHh9/sD6CQdxHyjQI+h/6rDNo88ypBxxz45UDuZHz9r3tNz7N/VInSVoVdtXEI4A==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": "^14.21.3 || >=16"
++      },
++      "funding": {
++        "url": "https://paulmillr.com/funding/"
++      }
++    },
++    "node_modules/@paralleldrive/cuid2": {
++      "version": "2.3.1",
++      "resolved": "https://registry.npmjs.org/@paralleldrive/cuid2/-/cuid2-2.3.1.tgz",
++      "integrity": "sha512-XO7cAxhnTZl0Yggq6jOgjiOHhbgcO4NqFqwSmQpjK3b6TEE6Uj/jfSk6wzYyemh3+I0sHirKSetjQwn5cZktFw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@noble/hashes": "^1.1.5"
++      }
++    },
+     "node_modules/@phc/format": {
+       "version": "1.0.0",
+       "resolved": "https://registry.npmjs.org/@phc/format/-/format-1.0.0.tgz",
+@@ -1969,6 +1994,13 @@
+       "integrity": "sha512-OvjF+z51L3ov0OyAU0duzsYuvO01PH7x4t6DJx+guahgTnBHkhJdG7soQeTSFLWN3efnHyibZ4Z8l2EuWwJN3A==",
+       "license": "MIT"
+     },
++    "node_modules/@types/cookiejar": {
++      "version": "2.1.5",
++      "resolved": "https://registry.npmjs.org/@types/cookiejar/-/cookiejar-2.1.5.tgz",
++      "integrity": "sha512-he+DHOWReW0nghN24E1WUqM0efK4kI9oTqDm6XmK8ZPe2djZ90BSNdGnIyCLzCPw7/pogPlGbzI2wHGGmi4O/Q==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/@types/esrecurse": {
+       "version": "4.3.1",
+       "resolved": "https://registry.npmjs.org/@types/esrecurse/-/esrecurse-4.3.1.tgz",
+@@ -1990,6 +2022,13 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/@types/methods": {
++      "version": "1.1.4",
++      "resolved": "https://registry.npmjs.org/@types/methods/-/methods-1.1.4.tgz",
++      "integrity": "sha512-ymXWVrDiCxTBE3+RIrrP533E70eA+9qu7zdWoHuOmGujkYtzf4HQF96b8nwHLqhuf4ykX61IGRIB38CC6/sImQ==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/@types/node": {
+       "version": "24.19.2",
+       "resolved": "https://registry.npmjs.org/@types/node/-/node-24.19.2.tgz",
+@@ -2012,6 +2051,30 @@
+         "pg-types": "^2.2.0"
+       }
+     },
++    "node_modules/@types/superagent": {
++      "version": "8.1.11",
++      "resolved": "https://registry.npmjs.org/@types/superagent/-/superagent-8.1.11.tgz",
++      "integrity": "sha512-KA7srSW/HENDtOw9DOqaFLgWuMqN9WgjEw62lh9dpvRaZDkhdOkazASd7X7i2eMUYLHa1U37ZttnePsH5zTDHw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@types/cookiejar": "^2.1.5",
++        "@types/methods": "^1.1.4",
++        "@types/node": "*",
++        "form-data": "^4.0.0"
++      }
++    },
++    "node_modules/@types/supertest": {
++      "version": "7.2.1",
++      "resolved": "https://registry.npmjs.org/@types/supertest/-/supertest-7.2.1.tgz",
++      "integrity": "sha512-4CbBvoYVLHL7+yhbYrZET0vsvuyXTC05aRe7dNQkwMzm56auceoy6Yu3K50uZmwfHna1os3CMSgM/3QVkUtPTw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@types/methods": "^1.1.4",
++        "@types/superagent": "^8.1.0"
++      }
++    },
+     "node_modules/@typescript-eslint/eslint-plugin": {
+       "version": "8.72.0",
+       "resolved": "https://registry.npmjs.org/@typescript-eslint/eslint-plugin/-/eslint-plugin-8.72.0.tgz",
+@@ -2362,6 +2425,20 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/asap": {
++      "version": "2.0.6",
++      "resolved": "https://registry.npmjs.org/asap/-/asap-2.0.6.tgz",
++      "integrity": "sha512-BSHWgDSAiKs50o2Re8ppvp3seVHXSRM44cdSsT9FfNEUUZLOGWVCsiWaRPWM1Znn+mqZ1OfVZ3z3DWEzSp7hRA==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/asynckit": {
++      "version": "0.4.0",
++      "resolved": "https://registry.npmjs.org/asynckit/-/asynckit-0.4.0.tgz",
++      "integrity": "sha512-Oei9OH4tRh0YqU3GxhX79dM/mwVgvbZJaSNaRk+bshkj0S5cfHcgYakreBjrHwatXKbz+IoIdYLxrKim2MjW0Q==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/balanced-match": {
+       "version": "4.0.4",
+       "resolved": "https://registry.npmjs.org/balanced-match/-/balanced-match-4.0.4.tgz",
+@@ -2580,6 +2657,19 @@
+         "node": ">= 12"
+       }
+     },
++    "node_modules/combined-stream": {
++      "version": "1.0.8",
++      "resolved": "https://registry.npmjs.org/combined-stream/-/combined-stream-1.0.8.tgz",
++      "integrity": "sha512-FQN4MRfuJeHf7cBbBMJFXhKSDq+2kAArBlmRBvcvFE5BB1HZKXtSFASDhdlz9zOYwxh8lDdnvmMOe/+5cdoEdg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "delayed-stream": "~1.0.0"
++      },
++      "engines": {
++        "node": ">= 0.8"
++      }
++    },
+     "node_modules/commander": {
+       "version": "15.0.0",
+       "resolved": "https://registry.npmjs.org/commander/-/commander-15.0.0.tgz",
+@@ -2604,6 +2694,16 @@
+         "node": ">= 6"
+       }
+     },
++    "node_modules/component-emitter": {
++      "version": "1.3.1",
++      "resolved": "https://registry.npmjs.org/component-emitter/-/component-emitter-1.3.1.tgz",
++      "integrity": "sha512-T0+barUSQRTUQASh8bx02dl+DhF54GtIDY13Y3m9oWTklKbb3Wv974meRpeZ3lp1JpLVECWWNHC4vaG2XHXouQ==",
++      "dev": true,
++      "license": "MIT",
++      "funding": {
++        "url": "https://github.com/sponsors/sindresorhus"
++      }
++    },
+     "node_modules/content-disposition": {
+       "version": "1.1.0",
+       "resolved": "https://registry.npmjs.org/content-disposition/-/content-disposition-1.1.0.tgz",
+@@ -2644,6 +2744,13 @@
+         "node": ">=6.6.0"
+       }
+     },
++    "node_modules/cookiejar": {
++      "version": "2.1.4",
++      "resolved": "https://registry.npmjs.org/cookiejar/-/cookiejar-2.1.4.tgz",
++      "integrity": "sha512-LDx6oHrK+PhzLKJU9j5S7/Y3jM/mUHvD/DeI1WQmJn652iPC5Y4TBzC9l+5OMOXlyTTA+SmVUPm0HQUwpD5Jqw==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/cors": {
+       "version": "2.8.6",
+       "resolved": "https://registry.npmjs.org/cors/-/cors-2.8.6.tgz",
+@@ -2716,6 +2823,16 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/delayed-stream": {
++      "version": "1.0.0",
++      "resolved": "https://registry.npmjs.org/delayed-stream/-/delayed-stream-1.0.0.tgz",
++      "integrity": "sha512-ZySD7Nf91aLB0RxL4KGrKHBXl7Eds1DAmEdcoVawXnLD7SDhpNgtuII2aAkg7a7QS41jxPSZ17p4VdGnMHk3MQ==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=0.4.0"
++      }
++    },
+     "node_modules/depd": {
+       "version": "2.0.0",
+       "resolved": "https://registry.npmjs.org/depd/-/depd-2.0.0.tgz",
+@@ -2725,6 +2842,17 @@
+         "node": ">= 0.8"
+       }
+     },
++    "node_modules/dezalgo": {
++      "version": "1.0.4",
++      "resolved": "https://registry.npmjs.org/dezalgo/-/dezalgo-1.0.4.tgz",
++      "integrity": "sha512-rXSP0bf+5n0Qonsb+SVVfNfIsimO4HEtmnIpPHY8Q1UCzKlQrDMfdobr8nJOOsRgWCyMRqeSBQzmWUMq7zvVig==",
++      "dev": true,
++      "license": "ISC",
++      "dependencies": {
++        "asap": "^2.0.0",
++        "wrappy": "1"
++      }
++    },
+     "node_modules/dotenv": {
+       "version": "16.6.1",
+       "resolved": "https://registry.npmjs.org/dotenv/-/dotenv-16.6.1.tgz",
+@@ -2955,6 +3083,22 @@
+         "node": ">= 0.4"
+       }
+     },
++    "node_modules/es-set-tostringtag": {
++      "version": "2.1.0",
++      "resolved": "https://registry.npmjs.org/es-set-tostringtag/-/es-set-tostringtag-2.1.0.tgz",
++      "integrity": "sha512-j6vWzfrGVfyXxge+O0x5sh6cvxAog0a/4Rdd2K36zCMV5eJ+/+tOAngRO8cODMNWbVRdVlmGZQL2YS3yR8bIUA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "es-errors": "^1.3.0",
++        "get-intrinsic": "^1.2.6",
++        "has-tostringtag": "^1.0.2",
++        "hasown": "^2.0.2"
++      },
++      "engines": {
++        "node": ">= 0.4"
++      }
++    },
+     "node_modules/esbuild": {
+       "version": "0.25.12",
+       "resolved": "https://registry.npmjs.org/esbuild/-/esbuild-0.25.12.tgz",
+@@ -3435,6 +3579,64 @@
+       "dev": true,
+       "license": "ISC"
+     },
++    "node_modules/form-data": {
++      "version": "4.0.6",
++      "resolved": "https://registry.npmjs.org/form-data/-/form-data-4.0.6.tgz",
++      "integrity": "sha512-vKatAh4SlVfgbv+YtmhiRjhEMJsYpsG1Y2rMQtR+SVSbytsSD1YGzDIcrAJmdFec88u/+VoGmxnl+80gL1tRCQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "asynckit": "^0.4.0",
++        "combined-stream": "^1.0.8",
++        "es-set-tostringtag": "^2.1.0",
++        "hasown": "^2.0.4",
++        "mime-types": "^2.1.35"
++      },
++      "engines": {
++        "node": ">= 6"
++      }
++    },
++    "node_modules/form-data/node_modules/mime-db": {
++      "version": "1.52.0",
++      "resolved": "https://registry.npmjs.org/mime-db/-/mime-db-1.52.0.tgz",
++      "integrity": "sha512-sPU4uV7dYlvtWJxwwxHD0PuihVNiE7TyAbQ5SWxDCB9mUYvOgroQOwYQQOKPJ8CIbE+1ETVlOoK1UC2nU3gYvg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 0.6"
++      }
++    },
++    "node_modules/form-data/node_modules/mime-types": {
++      "version": "2.1.35",
++      "resolved": "https://registry.npmjs.org/mime-types/-/mime-types-2.1.35.tgz",
++      "integrity": "sha512-ZDY+bPm5zTTF+YpCrAU9nK0UgICYPT0QtT1NZWFv4s++TNkcgVaT0g6+4R2uI4MjQjzysHB1zxuWL50hzaeXiw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "mime-db": "1.52.0"
++      },
++      "engines": {
++        "node": ">= 0.6"
++      }
++    },
++    "node_modules/formidable": {
++      "version": "3.5.4",
++      "resolved": "https://registry.npmjs.org/formidable/-/formidable-3.5.4.tgz",
++      "integrity": "sha512-YikH+7CUTOtP44ZTnUhR7Ic2UASBPOqmaRkRKxRbywPTe5VxF7RRCck4af9wutiZ/QKM5nME9Bie2fFaPz5Gug==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@paralleldrive/cuid2": "^2.2.2",
++        "dezalgo": "^1.0.4",
++        "once": "^1.4.0"
++      },
++      "engines": {
++        "node": ">=14.0.0"
++      },
++      "funding": {
++        "url": "https://ko-fi.com/tunnckoCore/commissions"
++      }
++    },
+     "node_modules/forwarded": {
+       "version": "0.2.0",
+       "resolved": "https://registry.npmjs.org/forwarded/-/forwarded-0.2.0.tgz",
+@@ -3577,6 +3779,22 @@
+         "url": "https://github.com/sponsors/ljharb"
+       }
+     },
++    "node_modules/has-tostringtag": {
++      "version": "1.0.2",
++      "resolved": "https://registry.npmjs.org/has-tostringtag/-/has-tostringtag-1.0.2.tgz",
++      "integrity": "sha512-NqADB8VjPFLM2V0VvHUewwwsw0ZWBaIdgo+ieHtK3hasLz4qeCRjYcqfB6AQrBggRKppKF8L52/VqdVsO47Dlw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "has-symbols": "^1.0.3"
++      },
++      "engines": {
++        "node": ">= 0.4"
++      },
++      "funding": {
++        "url": "https://github.com/sponsors/ljharb"
++      }
++    },
+     "node_modules/hashery": {
+       "version": "1.5.1",
+       "resolved": "https://registry.npmjs.org/hashery/-/hashery-1.5.1.tgz",
+@@ -3934,6 +4152,29 @@
+         "url": "https://github.com/sponsors/sindresorhus"
+       }
+     },
++    "node_modules/methods": {
++      "version": "1.1.2",
++      "resolved": "https://registry.npmjs.org/methods/-/methods-1.1.2.tgz",
++      "integrity": "sha512-iclAHeNqNm68zFtnZ0e+1L2yUIdvzNoauKU4WBA3VvH/vPFieF7qfRlwUZU+DA9P9bPXIS90ulxoUoCH23sV2w==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 0.6"
++      }
++    },
++    "node_modules/mime": {
++      "version": "2.6.0",
++      "resolved": "https://registry.npmjs.org/mime/-/mime-2.6.0.tgz",
++      "integrity": "sha512-USPkMeET31rOMiarsBNIHZKLGgvKc/LrjofAnBlOttf5ajRvqiRA8QsenbcooctK6d6Ts6aqZXBA+XbkKthiQg==",
++      "dev": true,
++      "license": "MIT",
++      "bin": {
++        "mime": "cli.js"
++      },
++      "engines": {
++        "node": ">=4.0.0"
++      }
++    },
+     "node_modules/mime-db": {
+       "version": "1.54.0",
+       "resolved": "https://registry.npmjs.org/mime-db/-/mime-db-1.54.0.tgz",
+@@ -5022,6 +5263,42 @@
+         "url": "https://github.com/sponsors/Borewit"
+       }
+     },
++    "node_modules/superagent": {
++      "version": "10.4.1",
++      "resolved": "https://registry.npmjs.org/superagent/-/superagent-10.4.1.tgz",
++      "integrity": "sha512-PVMkMrhKrSTtFhUU8jiWuGh/gyRMKiyCTCmm0+qVzRNxlfntmRKJkDhlEXN62x3HIb33sQ4kmL8lcSdccWAchQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "component-emitter": "^1.3.1",
++        "cookiejar": "^2.1.4",
++        "debug": "^4.3.7",
++        "fast-safe-stringify": "^2.1.1",
++        "form-data": "^4.0.5",
++        "formidable": "^3.5.4",
++        "methods": "^1.1.2",
++        "mime": "2.6.0",
++        "qs": "^6.14.1"
++      },
++      "engines": {
++        "node": ">=14.18.0"
++      }
++    },
++    "node_modules/supertest": {
++      "version": "7.3.1",
++      "resolved": "https://registry.npmjs.org/supertest/-/supertest-7.3.1.tgz",
++      "integrity": "sha512-vNaNCFoCR/edDbErQZp5KLNT8R4dSPHX7rlDLoE8hWLAm/878j6ShMbe8HK/E6RwwuhlSXVelXAIg9AxR5WWPw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "cookie-signature": "^1.2.2",
++        "methods": "^1.1.2",
++        "superagent": "^10.3.0"
++      },
++      "engines": {
++        "node": ">=14.18.0"
++      }
++    },
+     "node_modules/tinyglobby": {
+       "version": "0.2.17",
+       "resolved": "https://registry.npmjs.org/tinyglobby/-/tinyglobby-0.2.17.tgz",
+diff --git a/backend/package.json b/backend/package.json
+index f26c70a49d8a8b21e2174083504acd7146918700..1e24cecd648963a492e61512529336506cce5ef9 100644
+--- a/backend/package.json
++++ b/backend/package.json
+@@ -38,8 +38,10 @@
+     "@nestjs/cli": "12.0.8",
+     "@types/node": "^24.10.1",
+     "@types/pg": "^8.15.6",
++    "@types/supertest": "7.2.1",
+     "drizzle-kit": "^0.31.11",
+     "eslint": "^10.13.0",
++    "supertest": "7.3.1",
+     "tsx": "^4.20.6",
+     "typescript": "6.0.3",
+     "typescript-eslint": "^8.71.2"
+diff --git a/backend/src/common/errors/problem-details.filter.ts b/backend/src/common/errors/problem-details.filter.ts
+index 3ed98ab0470fc014ddd86ee6360f92f97bb0dea4..5294bfe8c293d85f8099039ce76f66e79a80638f 100644
+--- a/backend/src/common/errors/problem-details.filter.ts
++++ b/backend/src/common/errors/problem-details.filter.ts
+@@ -14,6 +14,14 @@ interface ExpressLikeResponse {
+   json(body: unknown): void;
+ }
+ 
++// O adapter Nest ESM e o runner TS podem carregar identidades distintas da classe.
++// Reconhecer o contrato da exceção mantém erros de parsing HTTP como 400, sem expor sua mensagem.
++function isNestHttpException(error: unknown): error is Pick<HttpException, "getStatus" | "getResponse"> {
++  return typeof error === "object" && error !== null
++    && "getStatus" in error && typeof error.getStatus === "function"
++    && "getResponse" in error && typeof error.getResponse === "function";
++}
++
+ @Catch()
+ export class ProblemDetailsExceptionFilter implements ExceptionFilter {
+   private readonly logger = new Logger(ProblemDetailsExceptionFilter.name);
+@@ -33,8 +41,10 @@ export class ProblemDetailsExceptionFilter implements ExceptionFilter {
+       return;
+     }
+ 
+-    if (exception instanceof HttpException) {
+-      const status = exception.getStatus();
++    if (exception instanceof HttpException || isNestHttpException(exception)) {
++      const requestedStatus = exception.getStatus();
++      const status = Number.isInteger(requestedStatus) && requestedStatus >= 400 && requestedStatus <= 599
++        ? requestedStatus : HttpStatus.INTERNAL_SERVER_ERROR;
+       const problem = this.mapHttpExceptionToProblem(status);
+       response
+         .status(status)
+diff --git a/backend/src/events/events.module.ts b/backend/src/events/events.module.ts
+index 10a16b4886650c8649fbdbdc23eb2cf285be9c27..e132fcd3b4b990ba504e7342b1828cc7c917f779 100644
+--- a/backend/src/events/events.module.ts
++++ b/backend/src/events/events.module.ts
+@@ -8,11 +8,15 @@ import { QueueWithdrawalService } from "./queue-withdrawal.service";
+ import { CallNextService } from "./call-next.service";
+ import { CompleteService } from "./complete.service";
+ import { AbsentService } from "./absent.service";
++import { AuthModule } from "../auth/auth.module";
++import { StaffOperationsController } from "./staff-operations.controller";
++import { StaffIdempotencyPolicy } from "./staff-idempotency.policy";
+ 
+ /** Agrupa os serviços de Events e reutiliza o acesso PostgreSQL compartilhado. */
+ @Module({
+-  imports: [DatabaseModule],
+-  providers: [EventsService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService],
++  imports: [DatabaseModule, AuthModule],
++  controllers: [StaffOperationsController],
++  providers: [EventsService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, StaffIdempotencyPolicy],
+   exports: [EventsService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService],
+ })
+ export class EventsModule {}
+diff --git a/backend/src/events/staff-idempotency.policy.ts b/backend/src/events/staff-idempotency.policy.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..66b357054d675cbfe0b32d31afdd855bf4391480
+--- /dev/null
++++ b/backend/src/events/staff-idempotency.policy.ts
+@@ -0,0 +1,23 @@
++import { Injectable } from "@nestjs/common";
++
++/** Configuração técnica explícita; não implementa retenção ou expurgo. */
++export function parseStaffIdempotencyTtl(raw: string | undefined): number {
++  const value = raw?.trim();
++  const seconds = Number(value);
++  if (!value || !/^\d+$/.test(value) || !Number.isSafeInteger(seconds) || seconds <= 0
++    || !Number.isSafeInteger(seconds * 1000) || !Number.isFinite(new Date(Date.now() + seconds * 1000).getTime())) {
++    throw new Error("STAFF_IDEMPOTENCY_TTL_SECONDS é obrigatório e deve conter um inteiro positivo compatível com Date.");
++  }
++  return seconds * 1000;
++}
++
++@Injectable()
++export class StaffIdempotencyPolicy {
++  private readonly ttlMs = parseStaffIdempotencyTtl(process.env.STAFF_IDEMPOTENCY_TTL_SECONDS);
++
++  expiresAt(): Date {
++    const result = new Date(Date.now() + this.ttlMs);
++    if (!Number.isFinite(result.getTime())) throw new Error("Expiração de idempotência fora do intervalo de Date.");
++    return result;
++  }
++}
+diff --git a/backend/src/events/staff-operation.dto.ts b/backend/src/events/staff-operation.dto.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..f2897b07474fe63abb290da231b88b2d85dda6b7
+--- /dev/null
++++ b/backend/src/events/staff-operation.dto.ts
+@@ -0,0 +1,45 @@
++import { HttpStatus } from "@nestjs/common";
++import { z } from "zod";
++import type { AuthenticatedRequest } from "../auth/session-auth.guard";
++import { ProblemException } from "../common/errors/problem.exception";
++
++const uuid = z.uuid().transform(value => value.toLowerCase());
++export const callNextParamsSchema = z.object({ eventId: uuid, experienceId: uuid, stationId: uuid }).strict();
++export const serviceSessionParamsSchema = z.object({ eventId: uuid, serviceSessionId: uuid }).strict();
++
++function invalid(name: string, reason: string): never {
++  throw new ProblemException({ typeSlug: "validation-error", title: "Requisição inválida", status: HttpStatus.BAD_REQUEST,
++    code: "VALIDATION_ERROR", detail: "Confira os parâmetros, o corpo e o cabeçalho Idempotency-Key.", invalidParams: [{ name, reason }] });
++}
++
++export function validateStaffParams<T>(schema: z.ZodType<T>, params: unknown): T {
++  const result = schema.safeParse(params);
++  if (!result.success) invalid("params", "Os identificadores da rota devem ser UUIDs válidos.");
++  return result.data;
++}
++
++/** Mesmos limites dos serviços: chave opaca não vazia, até 128 caracteres, sem normalização. */
++export function validateStaffRequest(body: unknown, request: Pick<AuthenticatedRequest, "headers" | "rawHeaders">): string {
++  if (body !== undefined && request.headers["content-type"]?.split(";", 1)[0].trim().toLowerCase() !== "application/json") {
++    invalid("body", "Quando houver corpo, envie um objeto JSON vazio com Content-Type application/json.");
++  }
++  if (body === undefined) {
++    // Sem parser para text/plain/outros tipos não significa corpo vazio.
++    if (request.headers["transfer-encoding"] || (request.headers["content-length"] && request.headers["content-length"] !== "0")) {
++      invalid("body", "Envie apenas um objeto JSON vazio ou nenhum corpo.");
++    }
++  } else if (!body || typeof body !== "object" || Array.isArray(body)
++    || Object.getPrototypeOf(body) !== Object.prototype || Object.keys(body).length !== 0) {
++    invalid("body", "Nenhuma propriedade é permitida; envie apenas {}.");
++  }
++  let occurrences = 0;
++  for (let i = 0; i < request.rawHeaders.length; i += 2) {
++    if (request.rawHeaders[i].toLowerCase() === "idempotency-key") occurrences++;
++  }
++  const key = request.headers["idempotency-key"];
++  if (occurrences !== 1 || typeof key !== "string" || !key.trim() || key.length > 128
++    || [...key].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)) {
++    invalid("Idempotency-Key", "Envie uma única chave não vazia, de até 128 caracteres, sem controles.");
++  }
++  return key;
++}
+diff --git a/backend/src/events/staff-operation.problem.ts b/backend/src/events/staff-operation.problem.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..ead21da17774bdf65a323f1dc563ba64f3ca2f07
+--- /dev/null
++++ b/backend/src/events/staff-operation.problem.ts
+@@ -0,0 +1,38 @@
++import { HttpStatus } from "@nestjs/common";
++import { ProblemException } from "../common/errors/problem.exception";
++import { CallNextIntegrityError } from "./call-next.service";
++import type { CallNextResult } from "./call-next.types";
++import { CompleteServiceIntegrityError } from "./complete.service";
++import type { CompleteServiceResult } from "./complete.types";
++import { AbsentServiceIntegrityError } from "./absent.service";
++import type { AbsentServiceResult } from "./absent.types";
++
++type FailureKind = Exclude<(CallNextResult | CompleteServiceResult | AbsentServiceResult)["kind"], "created" | "completed" | "absent" | "replay">;
++const problems: Record<FailureKind, { status: HttpStatus; code: string; detail: string }> = {
++  staff_event_forbidden: { status: HttpStatus.FORBIDDEN, code: "STAFF_EVENT_FORBIDDEN", detail: "Staff autorizado para este evento é obrigatório." },
++  service_not_found: { status: HttpStatus.NOT_FOUND, code: "SERVICE_NOT_FOUND", detail: "Atendimento não encontrado neste evento." },
++  service_not_pending: { status: HttpStatus.CONFLICT, code: "SERVICE_NOT_PENDING", detail: "O atendimento não está pendente." },
++  station_unavailable: { status: HttpStatus.CONFLICT, code: "STATION_UNAVAILABLE", detail: "A estação está indisponível." },
++  station_has_pending_call: { status: HttpStatus.CONFLICT, code: "STATION_HAS_PENDING_CALL", detail: "A estação já possui chamada pendente." },
++  queue_empty: { status: HttpStatus.CONFLICT, code: "QUEUE_EMPTY", detail: "Não há participante aguardando nesta fila." },
++  event_operation_ended: { status: HttpStatus.CONFLICT, code: "EVENT_OPERATION_ENDED", detail: "O evento não permite esta operação neste instante." },
++  request_conflict: { status: HttpStatus.CONFLICT, code: "IDEMPOTENCY_REQUEST_CONFLICT", detail: "A chave de idempotência já identifica outra intenção." },
++  in_progress: { status: HttpStatus.CONFLICT, code: "IDEMPOTENCY_IN_PROGRESS", detail: "A intenção informada está em processamento." },
++};
++
++export function rejectStaffOperation(kind: FailureKind): never {
++  const problem = problems[kind];
++  throw new ProblemException({ ...problem, typeSlug: problem.code.toLowerCase().replaceAll("_", "-"),
++    title: problem.status === HttpStatus.FORBIDDEN ? "Acesso negado" : problem.status === HttpStatus.NOT_FOUND ? "Recurso não encontrado" : "Conflito operacional" });
++}
++
++/** Erros de integridade reais nunca viram conflito de negócio ou resposta com IDs/SQL. */
++export async function executeStaffOperation<T>(action: () => Promise<T>): Promise<T> {
++  try { return await action(); } catch (error) {
++    if (error instanceof CallNextIntegrityError || error instanceof CompleteServiceIntegrityError || error instanceof AbsentServiceIntegrityError) {
++      throw new ProblemException({ typeSlug: "internal-server-error", title: "Erro interno do servidor", status: HttpStatus.INTERNAL_SERVER_ERROR,
++        code: "INTERNAL_SERVER_ERROR", detail: "Não foi possível processar a operação." });
++    }
++    throw error;
++  }
++}
+diff --git a/backend/src/events/staff-operations.controller.ts b/backend/src/events/staff-operations.controller.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..f4afec9dac5d4817e00f3be550ce6720d1ad35e8
+--- /dev/null
++++ b/backend/src/events/staff-operations.controller.ts
+@@ -0,0 +1,51 @@
++import { Body, Controller, HttpCode, HttpStatus, Inject, Param, Post, Req } from "@nestjs/common";
++import { CurrentUserId, RequireSessionAuth } from "../auth/current-user.decorator";
++import type { AuthenticatedRequest } from "../auth/session-auth.guard";
++import { CallNextService } from "./call-next.service";
++import { CompleteService } from "./complete.service";
++import { AbsentService } from "./absent.service";
++import { StaffIdempotencyPolicy } from "./staff-idempotency.policy";
++import { callNextParamsSchema, serviceSessionParamsSchema, validateStaffParams, validateStaffRequest } from "./staff-operation.dto";
++import { executeStaffOperation, rejectStaffOperation } from "./staff-operation.problem";
++
++@Controller("staff/events")
++@RequireSessionAuth()
++export class StaffOperationsController {
++  constructor(
++    @Inject(CallNextService) private readonly calling: CallNextService,
++    @Inject(CompleteService) private readonly completion: CompleteService,
++    @Inject(AbsentService) private readonly absence: AbsentService,
++    @Inject(StaffIdempotencyPolicy) private readonly idempotency: StaffIdempotencyPolicy,
++  ) {}
++
++  @Post(":eventId/experiences/:experienceId/stations/:stationId/call-next")
++  @HttpCode(HttpStatus.CREATED)
++  async callNext(@CurrentUserId() staffUserId: string, @Param() params: unknown, @Body() body: unknown, @Req() request: AuthenticatedRequest) {
++    const ids = validateStaffParams(callNextParamsSchema, params);
++    const idempotencyKey = validateStaffRequest(body, request);
++    const result = await executeStaffOperation(() => this.calling.callNext({ ...ids, staffUserId, idempotencyKey, expiresAt: this.idempotency.expiresAt() }));
++    if (result.kind === "created" || result.kind === "replay") return { serviceSession: result.serviceSession };
++    return rejectStaffOperation(result.kind);
++  }
++
++  @Post(":eventId/service-sessions/:serviceSessionId/complete")
++  @HttpCode(HttpStatus.OK)
++  async complete(@CurrentUserId() staffUserId: string, @Param() params: unknown, @Body() body: unknown, @Req() request: AuthenticatedRequest) {
++    const ids = validateStaffParams(serviceSessionParamsSchema, params);
++    const idempotencyKey = validateStaffRequest(body, request);
++    const result = await executeStaffOperation(() => this.completion.complete({ ...ids, staffUserId, idempotencyKey, expiresAt: this.idempotency.expiresAt() }));
++    if (result.kind === "completed" || result.kind === "replay") return { serviceSession: result.serviceSession, queueEntry: result.queueEntry, participation: result.participation };
++    return rejectStaffOperation(result.kind);
++  }
++
++  @Post(":eventId/service-sessions/:serviceSessionId/absent")
++  @HttpCode(HttpStatus.OK)
++  async absent(@CurrentUserId() staffUserId: string, @Param() params: unknown, @Body() body: unknown, @Req() request: AuthenticatedRequest) {
++    const ids = validateStaffParams(serviceSessionParamsSchema, params);
++    const idempotencyKey = validateStaffRequest(body, request);
++    const result = await executeStaffOperation(() => this.absence.absent({ ...ids, staffUserId, idempotencyKey, expiresAt: this.idempotency.expiresAt() }));
++    if (result.kind === "absent" || result.kind === "replay") return { serviceSession: result.serviceSession,
++      previousQueueEntry: result.previousQueueEntry, requeued: result.requeued, newQueueEntry: result.newQueueEntry };
++    return rejectStaffOperation(result.kind);
++  }
++}
+diff --git a/backend/test/integration/staff-http.integration.test.ts b/backend/test/integration/staff-http.integration.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..32215d43c027e67ef084483e7a48d4a92691e8b1
+--- /dev/null
++++ b/backend/test/integration/staff-http.integration.test.ts
+@@ -0,0 +1,337 @@
++import "reflect-metadata";
++import assert from "node:assert/strict";
++import { randomUUID } from "node:crypto";
++import { devNull } from "node:os";
++import { after, before, test } from "node:test";
++import { Module, type INestApplication } from "@nestjs/common";
++import { APP_FILTER, NestFactory } from "@nestjs/core";
++import { sql } from "drizzle-orm";
++import type { NodePgDatabase } from "drizzle-orm/node-postgres";
++import { Pool } from "pg";
++import supertest from "supertest";
++import type * as schema from "../../src/database/schema";
++import type { DatabaseTransactionExecutor } from "../../src/database/database-executor";
++import type { QueueEntryService } from "../../src/events/queue-entry.service";
++import type { CallNextService } from "../../src/events/call-next.service";
++import type { CompleteService } from "../../src/events/complete.service";
++import { assertSafeTestDatabase } from "./test-db-guard";
++
++// Preflight antes de importar módulos/configuração; nenhuma URL vem de .env.
++const urls = ["DATABASE_URL", "DATABASE_DIRECT_URL", "EVENTS_TEST_DATABASE_URL"].map(name => {
++  const value = assertSafeTestDatabase(process.env[name]), u = new URL(value);
++  if (u.hostname !== "127.0.0.1" || u.port !== "55432" || u.pathname !== "/arenago_events_test"
++    || u.search || u.hash || !u.username) throw new Error(`${name}: destino local explícito obrigatório.`);
++  return value;
++});
++if (urls.some(value => value !== urls[0])) throw new Error("As três URLs explícitas precisam ser idênticas.");
++process.env.DOTENV_CONFIG_PATH = devNull;
++process.env.STAFF_IDEMPOTENCY_TTL_SECONDS = "60"; // Valor explícito exclusivo desta suíte.
++const pool = new Pool({ connectionString: urls[0], ssl: false, max: 5, connectionTimeoutMillis: 2000, statement_timeout: 10000 });
++type Database = NodePgDatabase<typeof schema>;
++let app: INestApplication, database: Database, joining: QueueEntryService, caller: CallNextService, completion: CompleteService;
++let makeCompletion: (db: Database) => CompleteService;
++let signAccess: (userId: string, sessionId: string, expired?: boolean) => string, signTemp: (userId: string) => string;
++const ids = { events: [] as string[], users: [] as string[] };
++const baseOrder = 9007199254741000n;
++before(async () => {
++  assert.equal((await pool.query("SELECT current_database() AS name")).rows[0].name, "arenago_events_test");
++  const { EventsModule } = await import("../../src/events/events.module");
++  const { ProblemDetailsExceptionFilter } = await import("../../src/common/errors/problem-details.filter");
++  const { QueueEntryService } = await import("../../src/events/queue-entry.service");
++  const { CallNextService } = await import("../../src/events/call-next.service");
++  const { CompleteService } = await import("../../src/events/complete.service");
++  const { DRIZZLE_DATABASE } = await import("../../src/database/database.module");
++  const tokens = await import("../../src/auth/token.util");
++  signAccess = (userId, sessionId, expired) => tokens.signAccessToken({ userId, sessionId }, expired ? { nowMs: Date.now()-120000, ttlSeconds: 1 } : undefined);
++  signTemp = tokens.signTempTwoFactorToken;
++  @Module({ imports: [EventsModule], providers: [{ provide: APP_FILTER, useClass: ProblemDetailsExceptionFilter }] })
++  class HttpTestModule {}
++  app = await NestFactory.create(HttpTestModule, { logger: false }); app.setGlobalPrefix("api/v1"); await app.listen(0, "127.0.0.1");
++  database = app.get(DRIZZLE_DATABASE); joining = app.get(QueueEntryService); caller = app.get(CallNextService); completion = app.get(CompleteService);
++  makeCompletion = db => new CompleteService(db);
++});
++after(async () => {
++  const errors: unknown[] = [];
++  try {
++    const c = await pool.connect();
++    try {
++      await c.query("BEGIN");
++      await c.query("UPDATE participations SET current_queue_entry_id=NULL WHERE event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM service_sessions s USING queue_entries q WHERE s.queue_entry_id=q.id AND q.event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM queue_entries WHERE event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM participations WHERE event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM stations s USING experiences x WHERE s.experience_id=x.id AND x.event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM experiences WHERE event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM idempotency_operations WHERE actor_user_id=ANY($1::uuid[])", [ids.users]);
++      await c.query("DELETE FROM user_roles WHERE user_id=ANY($1::uuid[])", [ids.users]);
++      await c.query("DELETE FROM sessions WHERE user_id=ANY($1::uuid[])", [ids.users]);
++      await c.query("DELETE FROM events WHERE id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM users WHERE id=ANY($1::uuid[])", [ids.users]);
++      await c.query("COMMIT");
++    } catch (e) { await c.query("ROLLBACK"); throw e; } finally { c.release(); }
++  } catch (e) { errors.push(e); }
++  for (const r of await Promise.allSettled([app?.close(), pool.end()])) if (r.status === "rejected") errors.push(r.reason);
++  if (errors.length) throw new AggregateError(errors, "Limpeza E08.1 falhou.");
++});
++async function user() {
++  const id = randomUUID();
++  await pool.query(`INSERT INTO users(id,name,email,password_hash,email_verified_at,created_at,updated_at)
++    VALUES($1,'E081 privado',$2,'fixture-hash',clock_timestamp(),clock_timestamp(),clock_timestamp())`, [id, `${id}@example.test`]);
++  ids.users.push(id); return id;
++}
++async function grant(userId: string, eventId: string | null) {
++  await pool.query("INSERT INTO user_roles(id,user_id,role,event_id,granted_at) VALUES($1,$2,$3,$4,clock_timestamp())", [randomUUID(), userId, eventId ? "staff" : "admin", eventId]);
++}
++async function session(userId: string, secondFactor = false) {
++  const sessionId = randomUUID();
++  await pool.query(`INSERT INTO sessions(id,user_id,expires_at,last_activity_at,admin_2fa_verified_at,created_at)
++    VALUES($1,$2,clock_timestamp()+interval '1 hour',clock_timestamp(),CASE WHEN $3 THEN clock_timestamp() END,clock_timestamp())`, [sessionId, userId, secondFactor]);
++  return { sessionId, token: signAccess(userId, sessionId) };
++}
++async function enter(p: { userId: string; participationId: string }, experienceId: string) {
++  const result = await joining.joinExperienceQueue({ ...p, experienceId, idempotencyKey: randomUUID(), expiresAt: new Date(Date.now()+60000) });
++  assert.ok(result.kind === "created"); return result;
++}
++async function context(pending = false, count = 2) {
++  const eventId = randomUUID(), experienceId = randomUUID(), stationId = randomUUID(), secondStationId = randomUUID();
++  await pool.query(`INSERT INTO events(id,name,access_code_normalized,timezone,starts_at,official_ends_at,operational_deadline_at,status,external_queue_enabled,created_at,updated_at)
++    VALUES($1,'E081 fixture',$2,'America/Sao_Paulo',clock_timestamp()-interval '1 hour',clock_timestamp()+interval '1 hour',clock_timestamp()+interval '90 minutes','open',false,clock_timestamp(),clock_timestamp())`, [eventId, `E081-${eventId.toUpperCase()}`]);
++  ids.events.push(eventId);
++  const staffUserId = await user(); await grant(staffUserId, eventId); const auth = await session(staffUserId);
++  await pool.query(`INSERT INTO experiences(id,event_id,name,last_queue_order,created_at,updated_at)
++    VALUES($1,$2,'E081 experiência',$3,clock_timestamp(),clock_timestamp())`, [experienceId, eventId, baseOrder.toString()]);
++  for (const id of [stationId, secondStationId]) await pool.query(`INSERT INTO stations(id,experience_id,label,availability,created_at,updated_at)
++    VALUES($1,$2,'E081 estação','available',clock_timestamp(),clock_timestamp())`, [id, experienceId]);
++  const people = [];
++  for (let n=0;n<count;n++) {
++    const userId = await user(), participationId = randomUUID();
++    await pool.query(`INSERT INTO participations(id,user_id,event_id,status,joined_at,arena_entered_at)
++      VALUES($1,$2,$3,'active',clock_timestamp(),clock_timestamp())`, [participationId, userId, eventId]);
++    const q = await enter({ userId, participationId }, experienceId); people.push({ userId, participationId, queueEntryId: q.queueEntryId });
++  }
++  let serviceSessionId: string = randomUUID();
++  if (pending) {
++    const r = await caller.callNext({ staffUserId, eventId, experienceId, stationId, idempotencyKey: randomUUID(), expiresAt: new Date(Date.now()+60000) });
++    assert.ok(r.kind === "created"); serviceSessionId = r.serviceSession.id;
++  }
++  return { staffUserId, eventId, experienceId, stationId, secondStationId, people, serviceSessionId, ...auth };
++}
++type Context = Awaited<ReturnType<typeof context>>;
++type Operation = "call-next" | "complete" | "absent";
++function route(c: Context, operation: Operation) {
++  const base = `/api/v1/staff/events/${c.eventId}`;
++  return operation === "call-next" ? `${base}/experiences/${c.experienceId}/stations/${c.stationId}/call-next` : `${base}/service-sessions/${c.serviceSessionId}/${operation}`;
++}
++const post = (c: Context, op: Operation, key: string = randomUUID()) => supertest(app.getHttpServer()).post(route(c, op)).set("Authorization", `Bearer ${c.token}`).set("Idempotency-Key", key);
++async function state(c: Context) {
++  return (await pool.query(`SELECT jsonb_build_object(
++    'people',(SELECT jsonb_agg(to_jsonb(p) ORDER BY p.id) FROM participations p WHERE p.event_id=$1),
++    'entries',(SELECT jsonb_agg(to_jsonb(q) ORDER BY q.id) FROM queue_entries q WHERE q.event_id=$1),
++    'sessions',(SELECT jsonb_agg(to_jsonb(s) ORDER BY s.id) FROM service_sessions s JOIN queue_entries q ON q.id=s.queue_entry_id WHERE q.event_id=$1),
++    'experiences',(SELECT jsonb_agg(to_jsonb(x) ORDER BY x.id) FROM experiences x WHERE x.event_id=$1),
++    'stations',(SELECT jsonb_agg(to_jsonb(t) ORDER BY t.id) FROM stations t JOIN experiences x ON x.id=t.experience_id WHERE x.event_id=$1),
++    'idempotency',(SELECT jsonb_agg(to_jsonb(i) ORDER BY i.id) FROM idempotency_operations i WHERE i.actor_user_id=ANY($2::uuid[])))::text AS value`, [c.eventId, ids.users])).rows[0].value as string;
++}
++function problem(r: supertest.Response, status: number, code?: string) {
++  assert.equal(r.status, status, JSON.stringify(r.body)); assert.match(r.headers["content-type"], /application\/problem\+json/);
++  assert.equal(r.body.status, status); assert.match(r.body.type, /^https:\/\/arenago.com.br\/problems\//);
++  if (code) assert.equal(r.body.code, code);
++  assert.equal(JSON.stringify(r.body).includes("@example.test"), false);
++}
++async function blocked(blockerPid: number, expected: number) {
++  const until = Date.now()+6000;
++  while (Date.now()<until) {
++    const r = await pool.query(`WITH RECURSIVE blocked(pid) AS (
++      SELECT pid FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))
++      UNION SELECT a.pid FROM pg_stat_activity a JOIN blocked b ON b.pid=ANY(pg_blocking_pids(a.pid)))
++      SELECT count(DISTINCT pid)::int AS n FROM blocked`, [blockerPid]);
++    if (r.rows[0].n >= expected) return;
++    await new Promise(yes => setTimeout(yes, 20));
++  }
++  throw new Error("Não foi observado bloqueio HTTP real pelos locks de domínio.");
++}
++async function concurrent(c: Context, actions: Array<() => PromiseLike<supertest.Response>>) {
++  const client = await pool.connect(); const pending: Array<Promise<supertest.Response>> = [];
++  try {
++    await client.query("BEGIN"); await client.query("SELECT id FROM experiences WHERE id=$1 FOR UPDATE", [c.experienceId]);
++    const pid = (await client.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
++    for (const action of actions) { const p = Promise.resolve(action()); p.catch(() => undefined); pending.push(p); }
++    await blocked(pid, actions.length); await client.query("COMMIT"); return await Promise.all(pending);
++  } finally { await client.query("ROLLBACK"); await Promise.allSettled(pending); client.release(); }
++}
++
++test("E08.1 PostgreSQL HTTP sem autenticação não produz alterações", async () => {
++  const c = await context(true), before = await state(c);
++  for (const op of ["call-next", "complete", "absent"] as const) problem(await supertest(app.getHttpServer()).post(route(c, op)).send({}), 401);
++  assert.equal(await state(c), before);
++});
++test("E08.1 PostgreSQL HTTP rejeita token inválido/expirado, tempToken, sessão revogada/expirada e Admin sem 2FA", async () => {
++  const c = await context(true), before = await state(c);
++  for (const token of ["invalid", signAccess(c.staffUserId, c.sessionId, true), signTemp(c.staffUserId)]) problem(await post(c, "complete").set("Authorization", `Bearer ${token}`).send({}), 401);
++  await pool.query("UPDATE sessions SET revoked_at=clock_timestamp() WHERE id=$1", [c.sessionId]);
++  problem(await post(c, "complete").send({}), 401, "SESSION_REVOKED");
++  const other = await user(); await grant(other, null); const auth = await session(other);
++  problem(await post({ ...c, ...auth }, "complete").send({}), 401, "ADMIN_2FA_REQUIRED");
++  const expired = await user(), exp = await session(expired);
++  await pool.query("UPDATE sessions SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [exp.sessionId]);
++  problem(await post({ ...c, ...exp }, "complete").send({}), 401, "SESSION_EXPIRED"); assert.equal(await state(c), before);
++});
++test("E08.1 PostgreSQL HTTP Staff vigente e verificado do evento; Admin isolado não opera", async () => {
++  const c = await context(true), other = await context();
++  for (const mode of ["participant", "other_event", "revoked", "unverified", "admin", "inactive"]) {
++    const actor = await user();
++    if (mode === "admin") await grant(actor, null);
++    else if (mode !== "participant") await grant(actor, mode === "other_event" ? other.eventId : c.eventId);
++    if (mode === "revoked") await pool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE user_id=$1", [actor]);
++    if (mode === "unverified") await pool.query("UPDATE users SET email_verified_at=NULL WHERE id=$1", [actor]);
++    if (mode === "inactive") await pool.query("UPDATE users SET is_active=false WHERE id=$1", [actor]);
++    const auth = await session(actor, mode === "admin"), before = await state(c);
++    for (const op of ["call-next", "complete", "absent"] as const) problem(await post({ ...c, ...auth }, op).send({}), mode === "inactive" ? 401 : 403);
++    assert.equal(await state(c), before);
++  }
++});
++test("E08.1 PostgreSQL HTTP valida todos os UUIDs antes dos serviços", async () => {
++  const c = await context(true), before = await state(c);
++  for (const [op, field] of [["call-next", "eventId"], ["call-next", "experienceId"], ["call-next", "stationId"], ["complete", "serviceSessionId"], ["absent", "serviceSessionId"]] as const) {
++    problem(await post({ ...c, [field]: "invalid" }, op).send({}), 400);
++  }
++  assert.equal(await state(c), before);
++});
++test("E08.1 PostgreSQL HTTP exige header único e válido sem deixar reserva parcial", async () => {
++  const c = await context(true), before = await state(c);
++  for (const op of ["call-next", "complete", "absent"] as const) {
++    problem(await supertest(app.getHttpServer()).post(route(c, op)).set("Authorization", `Bearer ${c.token}`).send({}), 400);
++    for (const key of ["", " ", "x".repeat(129)]) problem(await post(c, op, key).send({}), 400);
++    problem(await post(c, op).set({ "Idempotency-Key": ["a", "b"] }).send({}), 400);
++  }
++  assert.equal(await state(c), before);
++});
++test("E08.1 PostgreSQL HTTP rejeita corpo com ator, expiração, estado, timestamps e ordem", async () => {
++  const c = await context(true), before = await state(c);
++  for (const op of ["call-next", "complete", "absent"] as const) {
++    for (const body of [{ staffUserId: c.staffUserId }, { expiresAt: "2099-01-01" }, { status: "completed" }, { resolvedAt: "2099-01-01" }, { queueOrder: "1" }, []]) problem(await post(c, op).send(body), 400);
++    problem(await post(c, op).type("text/plain").send("forbidden"), 400);
++    problem(await post(c, op).type("application/json").send("{invalid"), 400);
++  }
++  assert.equal(await state(c), before);
++});
++test("E08.1 PostgreSQL HTTP chamada 201 persiste autoria autenticada e JSON mínimo", async () => {
++  const c = await context(), r = await post(c, "call-next").send({}); assert.equal(r.status, 201);
++  assert.deepEqual(Object.keys(r.body), ["serviceSession"]); assert.equal(r.body.serviceSession.queueEntryId, c.people[0].queueEntryId);
++  assert.match(r.body.serviceSession.calledAt, /^\d{4}-\d{2}-\d{2}T.*Z$/); assert.equal(r.body.serviceSession.status, "pending");
++  const s = (await pool.query("SELECT called_by_user_id,status FROM service_sessions WHERE id=$1", [r.body.serviceSession.id])).rows[0];
++  assert.equal(s.called_by_user_id, c.staffUserId); assert.equal(s.status, "pending");
++});
++test("E08.1 PostgreSQL HTTP conclusão 200 mantém active e libera somente o ponteiro", async () => {
++  const c = await context(true), r = await post(c, "complete").send({}); assert.equal(r.status, 200);
++  assert.equal(r.body.serviceSession.status, "completed"); assert.match(r.body.serviceSession.resolvedAt, /Z$/);
++  const s = (await pool.query(`SELECT s.resolved_by_user_id,q.close_reason,(s.resolved_at=q.closed_at) AS same_time,
++    p.status,p.current_queue_entry_id,t.availability FROM service_sessions s JOIN queue_entries q ON q.id=s.queue_entry_id
++    JOIN participations p ON p.id=q.participation_id JOIN stations t ON t.id=s.station_id WHERE s.id=$1`, [c.serviceSessionId])).rows[0];
++  assert.equal(s.resolved_by_user_id, c.staffUserId); assert.equal(s.close_reason, "completed"); assert.equal(s.same_time, true);
++  assert.equal(s.status, "active"); assert.equal(s.current_queue_entry_id, null); assert.equal(s.availability, "available");
++});
++test("E08.1 PostgreSQL HTTP ausência 200 reentra no fim FIFO com bigint decimal", async () => {
++  const c = await context(true, 3), r = await post(c, "absent").send({}); assert.equal(r.status, 200);
++  assert.equal(r.body.requeued, true); assert.equal(r.body.newQueueEntry.queueOrder, (baseOrder+4n).toString()); assert.equal(r.body.newQueueEntry.position, 3);
++  assert.notEqual(r.body.newQueueEntry.id, c.people[0].queueEntryId);
++  assert.equal((await pool.query("SELECT current_queue_entry_id FROM participations WHERE id=$1", [c.people[0].participationId])).rows[0].current_queue_entry_id, r.body.newQueueEntry.id);
++  assert.equal((await pool.query("SELECT status FROM service_sessions WHERE id=$1", [c.serviceSessionId])).rows[0].status, "absent");
++});
++test("E08.1 PostgreSQL HTTP ausência após corte oficial/Admin ou fila pausada não reentra", async () => {
++  for (const mode of ["official", "admin", "paused"]) {
++    const c = await context(true);
++    if (mode === "official") await pool.query(`UPDATE events SET official_ends_at=clock_timestamp()-interval '1 minute',operational_deadline_at=clock_timestamp()+interval '30 minutes' WHERE id=$1`, [c.eventId]);
++    if (mode === "admin") await pool.query(`UPDATE events SET status='closing',closure_mode='controlled',closure_requested_at=clock_timestamp(),admin_deadline_at=clock_timestamp()+interval '20 minutes' WHERE id=$1`, [c.eventId]);
++    if (mode === "paused") await pool.query("UPDATE experiences SET queue_accepting_entries=false WHERE id=$1", [c.experienceId]);
++    const r = await post(c, "absent").send({}); assert.equal(r.status, 200); assert.equal(r.body.requeued, false); assert.equal(r.body.newQueueEntry, null);
++  }
++});
++test("E08.1 PostgreSQL HTTP replay da chamada mantém 201 inclusive após expiresAt vencido", async () => {
++  const c = await context(), key = randomUUID(), a = await post(c, "call-next", key).send({}); assert.equal(a.status, 201);
++  const expiry = (await pool.query(`SELECT expires_at > created_at+interval '50 seconds' AND expires_at < created_at+interval '70 seconds' AS configured
++    FROM idempotency_operations WHERE actor_user_id=$1 AND operation='call_next' AND idempotency_key=$2`, [c.staffUserId, key])).rows[0]; assert.equal(expiry.configured, true);
++  await pool.query("UPDATE idempotency_operations SET expires_at=clock_timestamp()-interval '1 second' WHERE actor_user_id=$1 AND operation='call_next' AND idempotency_key=$2", [c.staffUserId, key]);
++  const before = await state(c), b = await post(c, "call-next", key).send({}); assert.equal(b.status, 201); assert.deepEqual(b.body, a.body); assert.equal(await state(c), before);
++  problem(await post({ ...c, stationId: c.secondStationId }, "call-next", key).send({}), 409, "IDEMPOTENCY_REQUEST_CONFLICT");
++});
++test("E08.1 PostgreSQL HTTP replay de complete/absent não altera tentativas posteriores", async () => {
++  for (const op of ["complete", "absent"] as const) {
++    const c = await context(true), key = randomUUID(), a = await post(c, op, key).send({}); assert.equal(a.status, 200);
++    if (op === "complete") await enter(c.people[0], c.experienceId);
++    assert.equal((await post(c, "call-next").send({})).status, 201);
++    const before = await state(c), b = await post(c, op, key).send({}); assert.equal(b.status, 200); assert.deepEqual(b.body, a.body); assert.equal(await state(c), before);
++  }
++});
++test("E08.1 PostgreSQL HTTP recursos de outro evento não revelam dados ou autorizam operação", async () => {
++  const c = await context(true), other = await context(true), before = await state(c);
++  problem(await post({ ...c, experienceId: other.experienceId, stationId: other.stationId }, "call-next").send({}), 403, "STAFF_EVENT_FORBIDDEN");
++  problem(await post({ ...c, stationId: other.stationId }, "call-next").send({}), 403);
++  for (const op of ["complete", "absent"] as const) for (const serviceSessionId of [other.serviceSessionId, randomUUID()]) problem(await post({ ...c, serviceSessionId }, op).send({}), 404, "SERVICE_NOT_FOUND");
++  assert.equal(await state(c), before);
++});
++test("E08.1 PostgreSQL HTTP conflitos de estação/fila/estado são 409 sem efeito parcial", async () => {
++  const c = await context(true), before = await state(c); problem(await post(c, "call-next").send({}), 409, "STATION_HAS_PENDING_CALL"); assert.equal(await state(c), before);
++  await pool.query("UPDATE stations SET availability='unavailable' WHERE id=$1", [c.secondStationId]);
++  problem(await post({ ...c, stationId: c.secondStationId }, "call-next").send({}), 409, "STATION_UNAVAILABLE");
++  assert.equal((await post(c, "complete").send({})).status, 200); const terminal = await state(c);
++  for (const op of ["complete", "absent"] as const) problem(await post(c, op).send({}), 409, "SERVICE_NOT_PENDING"); assert.equal(await state(c), terminal);
++  const empty = await context(false, 0); problem(await post(empty, "call-next").send({}), 409, "QUEUE_EMPTY");
++});
++test("E08.1 PostgreSQL HTTP prazos operacional/Admin e encerramento bloqueiam as três rotas", async () => {
++  for (const mode of ["operational", "admin", "closed"]) {
++    const c = await context(true);
++    if (mode === "operational") await pool.query(`UPDATE events SET official_ends_at=clock_timestamp()-interval '2 minutes',operational_deadline_at=clock_timestamp()-interval '1 minute' WHERE id=$1`, [c.eventId]);
++    if (mode === "admin") await pool.query(`UPDATE events SET status='closing',closure_mode='controlled',closure_requested_at=clock_timestamp()-interval '2 minutes',admin_deadline_at=clock_timestamp()-interval '1 minute' WHERE id=$1`, [c.eventId]);
++    if (mode === "closed") await pool.query("UPDATE events SET status='closed' WHERE id=$1", [c.eventId]);
++    const before = await state(c); for (const op of ["call-next", "complete", "absent"] as const) problem(await post(c, op).send({}), 409, "EVENT_OPERATION_ENDED"); assert.equal(await state(c), before);
++  }
++});
++test("E08.1 PostgreSQL HTTP concorrente em duas estações respeita o mutex FIFO real", async () => {
++  const c = await context(), r = await concurrent(c, [() => post(c, "call-next").send({}), () => post({ ...c, stationId: c.secondStationId }, "call-next").send({})]);
++  assert.deepEqual(r.map(x => x.status), [201, 201]); assert.deepEqual(new Set(r.map(x => x.body.serviceSession.queueEntryId)), new Set(c.people.map(p => p.queueEntryId)));
++});
++test("E08.1 PostgreSQL HTTP retries concorrentes criam somente um atendimento", async () => {
++  const c = await context(), key = randomUUID(), r = await concurrent(c, [() => post(c, "call-next", key).send({}), () => post(c, "call-next", key).send({})]);
++  assert.deepEqual(r.map(x => x.status), [201, 201]); assert.deepEqual(r[0].body, r[1].body);
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM service_sessions WHERE station_id=$1", [c.stationId])).rows[0].n, 1);
++});
++test("E08.1 PostgreSQL HTTP complete contra absent mantém exatamente um resultado terminal", async () => {
++  const c = await context(true), r = await concurrent(c, [() => post(c, "complete").send({}), () => post(c, "absent").send({})]);
++  assert.deepEqual(r.map(x => x.status).sort(), [200, 409]);
++  const winner = r.find(x => x.status === 200)!.body.serviceSession.status;
++  assert.equal((await pool.query("SELECT status FROM service_sessions WHERE id=$1", [c.serviceSessionId])).rows[0].status, winner);
++});
++test("E08.1 PostgreSQL HTTP revalida prazo depois de esperar experiência", async () => {
++  const c = await context(true), client = await pool.connect(); let pending: Promise<supertest.Response> | undefined;
++  await pool.query(`UPDATE events SET official_ends_at=clock_timestamp()-interval '1 minute',operational_deadline_at=clock_timestamp()+interval '4 seconds' WHERE id=$1`, [c.eventId]);
++  const before = await state(c);
++  try {
++    await client.query("BEGIN"); await client.query("SELECT id FROM experiences WHERE id=$1 FOR UPDATE", [c.experienceId]);
++    const pid = (await client.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
++    pending = Promise.resolve(post(c, "complete").send({})); pending.catch(() => undefined); await blocked(pid, 1);
++    assert.equal((await pool.query(`SELECT EXISTS(SELECT 1 FROM pg_stat_activity a, events e WHERE e.id=$1 AND $2=ANY(pg_blocking_pids(a.pid)) AND a.xact_start<e.operational_deadline_at) AS started`, [c.eventId, pid])).rows[0].started, true);
++    const until = Date.now()+6000;
++    while (!(await pool.query("SELECT clock_timestamp()>=operational_deadline_at AS ended FROM events WHERE id=$1", [c.eventId])).rows[0].ended) {
++      assert.ok(Date.now()<until); await new Promise(yes => setTimeout(yes, 20));
++    }
++    await client.query("COMMIT"); problem(await pending, 409, "EVENT_OPERATION_ENDED"); assert.equal(await state(c), before);
++  } finally { await client.query("ROLLBACK"); await Promise.allSettled([pending]); client.release(); }
++});
++test("E08.1 PostgreSQL HTTP erro após as escritas reais faz rollback e permite retry", async () => {
++  const c = await context(true), before = await state(c), key = randomUUID(), original = completion.complete.bind(completion);
++  let reached = false;
++  const failingDb = { transaction: <T>(callback: (tx: DatabaseTransactionExecutor) => Promise<T>, config?: Parameters<Database["transaction"]>[1]) =>
++    database.transaction(async tx => {
++      await callback(tx);
++      const row = (await tx.execute<{ status: string; pointer: string | null }>(sql`SELECT s.status,p.current_queue_entry_id AS pointer
++        FROM service_sessions s JOIN queue_entries q ON q.id=s.queue_entry_id JOIN participations p ON p.id=q.participation_id WHERE s.id=${c.serviceSessionId}`)).rows[0];
++      assert.equal(row.status, "completed"); assert.equal(row.pointer, null); reached = true; throw new Error("E081_ROLLBACK_PRIVATE");
++    }, config) } as unknown as Database;
++  completion.complete = input => makeCompletion(failingDb).complete(input);
++  try {
++    const r = await post(c, "complete", key).send({}); problem(r, 500, "INTERNAL_SERVER_ERROR");
++    assert.equal(JSON.stringify(r.body).includes("PRIVATE"), false); assert.equal(reached, true); assert.equal(await state(c), before);
++  } finally { completion.complete = original; }
++  assert.equal((await post(c, "complete", key).send({})).status, 200);
++});
+diff --git a/backend/test/unit/staff-http.test.ts b/backend/test/unit/staff-http.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..1f8116a5f4b9aff4392efc50afddf70906efc7bb
+--- /dev/null
++++ b/backend/test/unit/staff-http.test.ts
+@@ -0,0 +1,153 @@
++import "reflect-metadata";
++import assert from "node:assert/strict";
++import { after, before, test } from "node:test";
++import { Module, type INestApplication } from "@nestjs/common";
++import { NestFactory } from "@nestjs/core";
++import supertest from "supertest";
++import { AuthService } from "../../src/auth/auth.service";
++import { SessionAuthGuard } from "../../src/auth/session-auth.guard";
++import { ProblemException } from "../../src/common/errors/problem.exception";
++import { ProblemDetailsExceptionFilter } from "../../src/common/errors/problem-details.filter";
++import { CallNextIntegrityError, CallNextService } from "../../src/events/call-next.service";
++import type { CallNextInput, CallNextResult } from "../../src/events/call-next.types";
++import { CompleteService, CompleteServiceIntegrityError } from "../../src/events/complete.service";
++import type { CompleteServiceInput, CompleteServiceResult } from "../../src/events/complete.types";
++import { AbsentService, AbsentServiceIntegrityError } from "../../src/events/absent.service";
++import type { AbsentServiceInput, AbsentServiceResult } from "../../src/events/absent.types";
++import { StaffOperationsController } from "../../src/events/staff-operations.controller";
++import { parseStaffIdempotencyTtl, StaffIdempotencyPolicy } from "../../src/events/staff-idempotency.policy";
++import { rejectStaffOperation } from "../../src/events/staff-operation.problem";
++import { validateStaffRequest } from "../../src/events/staff-operation.dto";
++
++const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
++const eventId = id(1), experienceId = id(2), stationId = id(3), serviceId = id(4), staffId = id(5);
++const callPath = `/api/v1/staff/events/${eventId}/experiences/${experienceId}/stations/${stationId}/call-next`;
++const completePath = `/api/v1/staff/events/${eventId}/service-sessions/${serviceId}/complete`;
++const absentPath = completePath.replace(/complete$/, "absent");
++const at = new Date("2026-11-03T18:00:00.000Z");
++const called: CallNextResult = { kind: "created", serviceSession: { id: serviceId, queueEntryId: id(6), experienceId,
++  station: { id: stationId, label: "Estação" }, status: "pending", calledAt: at } };
++const completed: CompleteServiceResult = { kind: "completed", serviceSession: { id: serviceId, status: "completed", resolvedAt: at },
++  queueEntry: { status: "closed", closeReason: "completed" }, participation: { status: "active", currentQueueEntryId: null } };
++const absent: AbsentServiceResult = { kind: "absent", serviceSession: { id: serviceId, status: "absent", resolvedAt: at },
++  previousQueueEntry: { id: id(6), status: "closed", closeReason: "absent" }, requeued: true,
++  newQueueEntry: { id: id(7), status: "waiting", queueOrder: "9007199254741003", position: 3 } };
++let callResult: CallNextResult = called, completeResult: CompleteServiceResult = completed, absentResult: AbsentServiceResult = absent, error: Error | undefined;
++const captured: Array<CallNextInput | CompleteServiceInput | AbsentServiceInput> = [];
++function record<T>(input: CallNextInput | CompleteServiceInput | AbsentServiceInput, result: T): T {
++  captured.push(input); if (error) throw error; return result;
++}
++@Module({ controllers: [StaffOperationsController], providers: [StaffIdempotencyPolicy, SessionAuthGuard,
++  { provide: AuthService, useValue: { authenticateBearerToken: async (token: string) => {
++    if (token !== "unit-staff") throw new ProblemException({ typeSlug: "invalid-access-token", title: "Inválido", status: 401, code: "INVALID_ACCESS_TOKEN", detail: "Token inválido." });
++    return { userId: staffId, sessionId: id(8) };
++  } } },
++  { provide: CallNextService, useValue: { callNext: async (input: CallNextInput) => record(input, callResult) } },
++  { provide: CompleteService, useValue: { complete: async (input: CompleteServiceInput) => record(input, completeResult) } },
++  { provide: AbsentService, useValue: { absent: async (input: AbsentServiceInput) => record(input, absentResult) } },
++] })
++class HttpUnitModule {}
++let app: INestApplication;
++const originalTtl = process.env.STAFF_IDEMPOTENCY_TTL_SECONDS;
++before(async () => {
++  process.env.STAFF_IDEMPOTENCY_TTL_SECONDS = "60";
++  app = await NestFactory.create(HttpUnitModule, { logger: false }); app.setGlobalPrefix("api/v1");
++  app.useGlobalFilters(new ProblemDetailsExceptionFilter()); await app.listen(0, "127.0.0.1");
++});
++after(async () => {
++  await app?.close();
++  if (originalTtl === undefined) delete process.env.STAFF_IDEMPOTENCY_TTL_SECONDS; else process.env.STAFF_IDEMPOTENCY_TTL_SECONDS = originalTtl;
++});
++const post = (path: string) => supertest(app.getHttpServer()).post(path).set("Authorization", "Bearer unit-staff").set("Idempotency-Key", "unit-intent");
++function reset() { captured.length = 0; callResult = called; completeResult = completed; absentResult = absent; error = undefined; }
++
++test("E08.1 HTTP delega chamada com ator autenticado, TTL backend e resposta 201 mínima", async () => {
++  reset(); const start = Date.now(); const response = await post(callPath).send({});
++  assert.equal(response.status, 201); assert.deepEqual(response.body, JSON.parse(JSON.stringify({ serviceSession: called.serviceSession })));
++  assert.equal(captured.length, 1); assert.equal(captured[0].staffUserId, staffId); assert.equal(captured[0].eventId, eventId);
++  assert.ok(captured[0].expiresAt.getTime() >= start + 60000 && captured[0].expiresAt.getTime() <= Date.now() + 60000);
++});
++test("E08.1 HTTP complete/absent mantêm 200, ISO UTC, bigint decimal e contrato efetivo", async () => {
++  reset(); const a = await post(completePath).send({}), b = await post(absentPath).send({});
++  assert.equal(a.status, 200); assert.equal(b.status, 200); assert.equal(a.body.serviceSession.resolvedAt, at.toISOString());
++  assert.equal(b.body.newQueueEntry.queueOrder, "9007199254741003"); assert.equal(b.body.requeued, true);
++  assert.equal(a.body.kind, undefined); assert.equal(b.body.kind, undefined); assert.equal(captured.length, 2);
++  absentResult = { ...absent, requeued: false, newQueueEntry: null };
++  const c = await post(absentPath); assert.equal(c.status, 200); assert.equal(c.body.newQueueEntry, null);
++});
++test("E08.1 HTTP replay preserva status original 201/200 e mesmo JSON", async () => {
++  reset();
++  for (const path of [callPath, completePath, absentPath]) {
++    const first = await post(path).send({});
++    callResult = { ...called, kind: "replay" }; completeResult = { ...completed, kind: "replay" }; absentResult = { ...absent, kind: "replay" };
++    const replay = await post(path).send({}); assert.equal(replay.status, first.status); assert.deepEqual(replay.body, first.body);
++    reset();
++  }
++});
++test("E08.1 HTTP exige Bearer antes de chamar qualquer serviço", async () => {
++  reset();
++  for (const path of [callPath, completePath, absentPath]) {
++    assert.equal((await supertest(app.getHttpServer()).post(path).send({})).status, 401);
++    assert.equal((await post(path).set("Authorization", "Bearer invalid").send({})).status, 401);
++  }
++  assert.equal(captured.length, 0);
++});
++test("E08.1 HTTP rejeita UUIDs inválidos em todos os parâmetros", async () => {
++  reset();
++  for (const path of [callPath.replace(eventId, "invalid"), callPath.replace(experienceId, "invalid"), callPath.replace(stationId, "invalid"), completePath.replace(serviceId, "invalid"), absentPath.replace(serviceId, "invalid")]) {
++    const r = await post(path).send({}); assert.equal(r.status, 400); assert.match(r.headers["content-type"], /application\/problem\+json/);
++  }
++  assert.equal(captured.length, 0);
++});
++test("E08.1 HTTP header obrigatório único, chave opaca até 128 caracteres", async () => {
++  reset();
++  for (const path of [callPath, completePath, absentPath]) {
++    for (const key of ["", " ", "x".repeat(129)]) assert.equal((await post(path).set("Idempotency-Key", key).send({})).status, 400);
++    assert.equal((await supertest(app.getHttpServer()).post(path).set("Authorization", "Bearer unit-staff").send({})).status, 400);
++    assert.equal((await post(path).set({ "Idempotency-Key": ["a", "b"] }).send({})).status, 400);
++  }
++  assert.equal(captured.length, 0);
++  assert.equal((await post(callPath).set("Idempotency-Key", "x".repeat(128)).send({})).status, 201);
++});
++test("E08.1 HTTP aceita apenas {} ou ausência de corpo e não ignora corpo text/plain", async () => {
++  reset();
++  for (const body of [[], { staffUserId: staffId }, { expiresAt: at.toISOString() }, { status: "completed" }, { queueOrder: "1" }, { eventId }]) {
++    for (const path of [callPath, completePath, absentPath]) assert.equal((await post(path).send(body)).status, 400);
++  }
++  assert.equal((await post(callPath).type("text/plain").send("forbidden")).status, 400);
++  assert.equal((await post(callPath).type("form").send("&&")).status, 400);
++  assert.equal((await post(callPath).type("application/json").send("{invalid")).status, 400);
++  assert.equal(captured.length, 0); assert.equal((await post(callPath)).status, 201);
++});
++test("E08.1 todos os resultados negativos reais têm RFC 7807 explícito", () => {
++  for (const [kind, status, code] of [
++    ["staff_event_forbidden", 403, "STAFF_EVENT_FORBIDDEN"], ["service_not_found", 404, "SERVICE_NOT_FOUND"],
++    ["service_not_pending", 409, "SERVICE_NOT_PENDING"], ["station_unavailable", 409, "STATION_UNAVAILABLE"],
++    ["station_has_pending_call", 409, "STATION_HAS_PENDING_CALL"], ["queue_empty", 409, "QUEUE_EMPTY"],
++    ["event_operation_ended", 409, "EVENT_OPERATION_ENDED"], ["request_conflict", 409, "IDEMPOTENCY_REQUEST_CONFLICT"], ["in_progress", 409, "IDEMPOTENCY_IN_PROGRESS"],
++  ] as const) {
++    assert.throws(() => rejectStaffOperation(kind), (error: unknown) => {
++      assert.ok(error instanceof ProblemException); assert.equal(error.getStatus(), status); assert.equal(error.problem.code, code); return true;
++    });
++  }
++});
++test("E08.1 HTTP traduz os bloqueios dos três serviços sem expor detalhes internos", async () => {
++  reset(); callResult = { kind: "station_has_pending_call" }; completeResult = { kind: "service_not_found" }; absentResult = { kind: "request_conflict" };
++  assert.equal((await post(callPath).send({})).body.code, "STATION_HAS_PENDING_CALL");
++  assert.equal((await post(completePath).send({})).status, 404); assert.equal((await post(absentPath).send({})).status, 409);
++  for (const [path, failure] of [[callPath, new CallNextIntegrityError("private SQL")], [completePath, new CompleteServiceIntegrityError("private SQL")], [absentPath, new AbsentServiceIntegrityError("private SQL")]] as const) {
++    error = failure; const r = await post(path).send({}); assert.equal(r.status, 500); assert.equal(r.body.code, "INTERNAL_SERVER_ERROR");
++    assert.equal(JSON.stringify(r.body).includes("private"), false);
++  }
++  reset();
++});
++test("E08.1 TTL exige inteiro positivo explícito, sem fallback e sem aceitar overflow", () => {
++  for (const raw of [undefined, "", " ", "0", "-1", "1.5", "1e3", "NaN", "9007199254740992", "8640000000000"]) assert.throws(() => parseStaffIdempotencyTtl(raw), /STAFF_IDEMPOTENCY_TTL_SECONDS/);
++  assert.equal(parseStaffIdempotencyTtl("60"), 60000);
++  const current = process.env.STAFF_IDEMPOTENCY_TTL_SECONDS;
++  delete process.env.STAFF_IDEMPOTENCY_TTL_SECONDS;
++  try { assert.throws(() => new StaffIdempotencyPolicy(), /obrigatório/); } finally { process.env.STAFF_IDEMPOTENCY_TTL_SECONDS = current; }
++});
++test("E08.1 header com controles não chega aos serviços internos", () => {
++  assert.throws(() => validateStaffRequest({}, { headers: { "content-type": "application/json", "idempotency-key": "a\tb" }, rawHeaders: ["Idempotency-Key", "a\tb"] }), ProblemException);
++});
+diff --git a/docs/ARQUITETURA_BACKEND_ARENAGO.md b/docs/ARQUITETURA_BACKEND_ARENAGO.md
+index 86544c81b6e3b2c5ca61d7cb844400465c19be5a..0f98734e9698061abade06efe004c94c853c18ac 100644
+--- a/docs/ARQUITETURA_BACKEND_ARENAGO.md
++++ b/docs/ARQUITETURA_BACKEND_ARENAGO.md
+@@ -1163,6 +1163,8 @@ O primeiro ID é **somente indicação de leitura**; o endpoint de chamada sempr
+ 
+ ### 16.9 `POST /staff/events/:eventId/experiences/:experienceId/stations/:stationId/call-next`
+ 
++**Camada HTTP E08.1 — 03/11/2026:** as três rotas §16.9–16.11 estão conectadas aos serviços E07.4–E07.6 por `StaffOperationsController`, sob `/api/v1`. Reutilizam `RequireSessionAuth`/`CurrentUserId`, autorização transacional dos serviços e erros RFC 7807. UUIDs canônicos, uma única `Idempotency-Key` opaca não vazia (até 128 caracteres, sem controles) e somente `{}`/corpo ausente. O backend exige `STAFF_IDEMPOTENCY_TTL_SECONDS` inteiro positivo, sem padrão, para gerar `expiresAt`; não há expurgo automático ou perda de replay pelo vencimento enquanto o registro existir. Replay preserva o status original 201/200. Política definitiva de retenção/expurgo continua pendente. Códigos e validação em `docs/E08_1_IMPLEMENTACAO.md`; testes PostgreSQL HTTP desta entrega ainda pendentes.
++
+ **Staff ativo com escopo de evento; `Idempotency-Key` obrigatória; corpo `{}`.** O Staff seleciona a estação que está operando naquele momento. A API não delega ao telefone a seleção de qual participante chamar.
+ 
+ **Implementação interna E07.4 (02/11/2026):** `CallNextService.callNext({ staffUserId, eventId, experienceId, stationId, idempotencyKey, expiresAt })`, exportado por `EventsModule`. Conta ativa/verificada e concessão Staff vigente são revalidadas sob locks; Admin isolado não autoriza. Namespace idempotente `call_next`, fingerprint de evento/experiência/estação, replay histórico ainda sujeito à autorização atual. O INSERT decisivo usa `clock_timestamp()` e os prazos operacional/administrativo, permitindo chamadas residuais sem exigir novas inscrições abertas. Contrato HTTP permanece proposto; sem rota ou migration. Validação e comandos PostgreSQL em `docs/E07_4_IMPLEMENTACAO.md`.
+diff --git a/docs/E08_1_IMPLEMENTACAO.md b/docs/E08_1_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..ea3a26a4e53e80b42e4fa26d7b977342cd843eff
+--- /dev/null
++++ b/docs/E08_1_IMPLEMENTACAO.md
+@@ -0,0 +1,106 @@
++# E08.1 — HTTP das operações Staff
++
++Implementado sobre `b0b18e14631e2dfebeb26456d42b2ba2a69c762a`, branch
++`feature/events-participations`. Conferidos os commits separados E07.4–E07.6,
++o commit documental e a ponta remota antes de editar código. Working tree inicial
++limpo; AGENTS.md permanece deliberadamente ignorado conforme .gitignore versionado.
++Base externa informada pelo responsável: 25/25 E07.6 e 243/243 PostgreSQL anteriores.
++
++## Contrato implementado
++
++Todos os caminhos abaixo são relativos a `/api/v1` e usam POST:
++
++| Caminho | Serviço existente | Sucesso/replay |
++| --- | --- | --- |
++| `/staff/events/:eventId/experiences/:experienceId/stations/:stationId/call-next` | CallNextService.callNext | 201 |
++| `/staff/events/:eventId/service-sessions/:serviceSessionId/complete` | CompleteService.complete | 200 |
++| `/staff/events/:eventId/service-sessions/:serviceSessionId/absent` | AbsentService.absent | 200 |
++
++Controller exige sessão Bearer por RequireSessionAuth. O ator vem exclusivamente
++de CurrentUserId; sessão revogada/expirada e Admin sem segundo fator são barrados
++pelo mecanismo atual. Staff ativo/verificado, escopo de evento, vínculos, FIFO,
++prazos e concorrência continuam sendo decididos nos serviços transacionais,
++sem mudar E07.1–E07.6. Admin isolado não adquire privilégio operacional.
++
++UUIDs são validados e normalizados para minúsculas. Header Idempotency-Key único,
++opaco, não vazio, até 128 caracteres, sem controles; chave não é renormalizada.
++Somente objeto JSON vazio com Content-Type application/json ou corpo ausente;
++campos extras, arrays e corpos não JSON são rejeitados. Corpo não pode determinar
++ator, estado, FIFO, timestamps ou expiração. JSON público mantém os contratos
++efetivos dos serviços sem o discriminante interno kind; Date vira ISO UTC e
++queueOrder permanece decimal exato, inclusive além de Number.MAX_SAFE_INTEGER.
++
++### Configuração explícita de idempotência
++
++Por orientação do responsável, `STAFF_IDEMPOTENCY_TTL_SECONDS` é obrigatório,
++sem valor padrão, validado na construção do provider Nest como inteiro positivo
++e representável em Date. expiresAt é gerado pelo backend a cada chamada, sem
++confiar no cliente. TTL não interfere no relógio PostgreSQL das decisões operacionais.
++Nenhum expurgo ou reexecução pelo vencimento foi adicionado; enquanto a linha
++existir, os helpers atuais preservam o replay. Retenção/expurgo definitivos
++continuam pendentes. Testes fornecem TTL 60 explicitamente, sem definir prazo
++de produção. Servidores e suítes antigas que iniciam AppModule também precisam
++da configuração no processo.
++
++### Erros RFC 7807
++
++| HTTP | Códigos da camada Staff |
++| --- | --- |
++| 400 | VALIDATION_ERROR; BAD_REQUEST para JSON malformado |
++| 401 | Códigos existentes de Auth/sessão/2FA |
++| 403 | STAFF_EVENT_FORBIDDEN |
++| 404 | SERVICE_NOT_FOUND |
++| 409 | SERVICE_NOT_PENDING, STATION_UNAVAILABLE, STATION_HAS_PENDING_CALL, QUEUE_EMPTY, EVENT_OPERATION_ENDED, IDEMPOTENCY_REQUEST_CONFLICT, IDEMPOTENCY_IN_PROGRESS |
++| 500 | INTERNAL_SERVER_ERROR, sem detalhes de integridade, SQL ou IDs |
++
++Vínculo errado de experiência/estação em call-next mantém o bloqueio neutro 403
++do serviço. Complete/absent retornam 404 para sessão ausente/de outro evento após
++autorizar Staff; não expõem dados de terceiros. Replay é resposta histórica e
++continua sujeito à autenticação e autorização atuais.
++
++Correção pontual no filtro compartilhado: o adapter Nest ESM e o runner TS podem
++carregar identidades diferentes de HttpException. Além de instanceof, o filtro
++reconhece getStatus/getResponse e valida o status, reutilizando mensagens públicas
++genéricas. Isso corrige JSON malformado que retornava 500 no teste HTTP. Nenhuma
++regra de domínio ou serviço E07 foi alterado.
++
++## Validação e pendências
++
++- **214/214 testes aprovados**: 203 anteriores e 11 novos de validação/HTTP com
++  Supertest, guard real e serviços simulados. Zero falhas/cancelamentos/skips.
++- **11/11 HTTP específicos simulados** aprovados separadamente.
++- Typecheck, lint e build aprovados, exit 0.
++- **20 testes Supertest + PostgreSQL real escritos, não executados**: autenticação,
++  2FA/sessões, permissões, UUIDs/vínculos, headers/corpo, três sucessos, ausência
++  com/sem reentrada, replay após expiresAt vencido, conflitos, rollback real e
++  concorrência HTTP/FIFO/prazo com bloqueios observados via pg_blocking_pids.
++- Regressão PostgreSQL completa pendente (243 anteriores + 20 novos previstos).
++
++As três URLs locais explícitas estavam ausentes. Nenhum .env foi carregado e
++nenhum banco acessado; Supertest executado nesta rodada usa somente loopback e
++serviços simulados. Unitários receberam URL fictícia sem conexão e TTL explícito;
++tsx executado fora da sandbox por sua limitação uv_os_get_passwd conhecida.
++Supertest e tipagens adicionados como devDependencies, com lockfile atualizado.
++
++## Execução manual PostgreSQL
++
++Banco local já preparado; substituir apenas as credenciais locais. Preflight
++exige as três URLs idênticas, sem parâmetros, exclusivamente no destino indicado.
++Fixtures e limpeza usam somente UUIDs próprios. Sem migrations, seed ou reset.
++
++```powershell
++Set-Location C:\DoJob\ProgramacaoMobile\backend
++$env:EVENTS_TEST_DATABASE_URL = 'postgresql://USUARIO:SENHA@127.0.0.1:55432/arenago_events_test'
++$env:DATABASE_URL = $env:EVENTS_TEST_DATABASE_URL
++$env:DATABASE_DIRECT_URL = $env:EVENTS_TEST_DATABASE_URL
++$env:DOTENV_CONFIG_PATH = 'NUL'
++$env:STAFF_IDEMPOTENCY_TTL_SECONDS = '60'
++.\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test --test-concurrency=1 test/integration/staff-http.integration.test.ts
++if ($LASTEXITCODE -ne 0) { throw 'Revisar HTTP E08.1 antes da regressão.' }
++npm.cmd run test:integration
++if ($LASTEXITCODE -ne 0) { throw 'Revisar regressão PostgreSQL.' }
++```
++
++Evidência: `qa-evidence/e08-1-changes.diff`, exclusiva contra a base acima.
++Sem endpoints de gestão/Admin, telas, migrations, notificações ou refatoração geral.
++**Sem commit/push até confirmação dos testes PostgreSQL pelo responsável.**
