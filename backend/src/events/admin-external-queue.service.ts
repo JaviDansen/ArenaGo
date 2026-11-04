@@ -10,6 +10,7 @@ import { completeIdempotencyOperationWithTx, createRequestFingerprint, reserveId
 import type { JsonValue } from "../participations/join-idempotency";
 import { adminExternalQueueBody } from "./admin-external-queue.dto";
 import type { AdminExternalQueueInput, AdminExternalQueueResult, AdminExternalQueueState } from "./admin-external-queue.types";
+import { assertAdminSessionWithTx, authorizeGlobalAdminWithTx } from "./admin-operation-auth";
 
 export const ADMIN_EXTERNAL_QUEUE_OPERATION = "admin_set_external_queue";
 export function externalQueueFingerprint(eventId: string, enabled: boolean, reason: string): string {
@@ -42,26 +43,11 @@ export class AdminExternalQueueService {
   ) {}
 
   private async session(tx: DatabaseTransactionExecutor, input: AdminExternalQueueInput) {
-    const rows = await tx.execute<{ revoked: boolean; expired: boolean; secondFactor: boolean }>(sql`
-      SELECT revoked_at IS NOT NULL AS revoked, expires_at <= clock_timestamp() AS expired,
-        admin_2fa_verified_at IS NOT NULL AS "secondFactor"
-      FROM sessions WHERE id=${input.sessionId} AND user_id=${input.userId}`);
-    const auth = rows.rows[0];
-    if (!auth) block({ kind: "invalid_session" });
-    if (auth.revoked) block({ kind: "session_revoked" });
-    if (auth.expired) block({ kind: "session_expired" });
-    if (!auth.secondFactor) block({ kind: "admin_2fa_required" });
+    await assertAdminSessionWithTx(tx, input, block);
   }
 
   private async authorize(tx: DatabaseTransactionExecutor, input: AdminExternalQueueInput) {
-    const account = await tx.execute<{ active: boolean }>(sql`SELECT is_active AS active FROM users WHERE id=${input.userId} FOR SHARE`);
-    if (!account.rows[0]?.active) block({ kind: "account_inactive" });
-    const role = await tx.execute(sql`SELECT id FROM user_roles WHERE user_id=${input.userId}
-      AND role='admin' AND event_id IS NULL AND revoked_at IS NULL ORDER BY id FOR SHARE`);
-    if (!role.rows.length) block({ kind: "admin_required" });
-    const session = await tx.execute(sql`SELECT id FROM sessions WHERE id=${input.sessionId} AND user_id=${input.userId} FOR SHARE`);
-    if (!session.rows.length) block({ kind: "invalid_session" });
-    await this.session(tx, input);
+    await authorizeGlobalAdminWithTx(tx, input, block);
   }
 
   async setExternalQueue(input: AdminExternalQueueInput): Promise<AdminExternalQueueResult> {

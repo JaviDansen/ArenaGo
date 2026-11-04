@@ -1508,6 +1508,22 @@ Quando não houver pendências: `items: []`, **não** `404`. Não retornar pesso
 
 ### 17.9 `PATCH /admin/events/:eventId/schedule` — alteração do horário oficial antes do corte
 
+**Implementação E08.7 — 03/11/2026:** rota disponível sob `/api/v1` no
+`AdminEventsModule`, com autorização global/conta/sessão/2FA compartilhada com
+E08.6 e revalidada sob locks. Body estrito com os dois horários e reason;
+instantes ISO com fuso explícito e até três casas decimais, normalizados em UTC,
+sem aceitar datas impossíveis ou arredondar precisão adicional. Não exige
+prontidão para alterar programação. `events FOR UPDATE` precede a autorização
+e a reserva durável `admin_update_event_schedule`, usando a política Admin/TTL
+obrigatória já existente, sem novo TTL. Mudança condicionada ao relógio PostgreSQL
+no UPDATE; auditada atomicamente com antes/depois e o mesmo instante persistido.
+Resposta 200 contém somente evento, horários e changedAt em UTC (microssegundos),
+omitido no no-op. No-op autorizado persiste intenção sem UPDATE de evento/auditoria,
+inclusive após corte; replay autorizado conserva a resposta histórica sem reaplicar.
+`400 VALIDATION_ERROR` para novos horários inválidos; `409 EVENT_TIME_CHANGE_CLOSED`
+para mudança efetiva após corte vigente/encerramento. Decisões e resultados reais
+em `E08_7_IMPLEMENTACAO.md`; PostgreSQL permanece sujeito à validação manual.
+
 **Bearer Admin/TOTP + justificativa + auditoria.** Corpo propõe `officialEndsAt` e `operationalDeadlineAt` **juntos**, para preservar a margem opcional de 0–60min de maneira explícita. Não alterar horários **quando** o horário oficial vigente já foi alcançado, nem quando o evento iniciou encerramento Admin, e nunca reabrir evento fechado. Novo `officialEndsAt` deve ser futuro, posterior a `startsAt`; novo `operationalDeadlineAt` entre o novo horário oficial e no máximo 60 minutos depois. Revalidar `clock_timestamp()` após lock, guardar valores antigos/novos em auditoria. `409 EVENT_TIME_CHANGE_CLOSED` se já passou a janela autorizada.
 
 ### 17.10 `PATCH /admin/events/:eventId/external-queue` — ligar/desligar fila externa
