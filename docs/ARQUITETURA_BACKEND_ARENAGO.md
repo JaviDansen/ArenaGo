@@ -1750,6 +1750,41 @@ mudança na intenção original. Detalhes, limites e PostgreSQL pendente em
 
 ## 18. Contratos de integração v0.5 — configuração administrativa de eventos, experiências e estações (19/10/2026)
 
+**Implementação E08.13 — 04/11/2026:** as dez rotas do inventário §18.2 estão
+implementadas em `AdminEventsModule`, com Admin global/conta ativa/sessão/2FA,
+DTOs estritos e RFC 7807. As marcações de proposta abaixo preservam o histórico;
+§20 e o contrato efetivo em `E08_13_IMPLEMENTACAO.md` prevalecem. A listagem usa
+keyset `(createdAt,id)` descendente, limite 1–50, filtros `phase`/`statusStored` e
+cursor base64url canônico. GETs usam snapshot `REPEATABLE READ READ ONLY`, sem
+locks de linha ou escrita, com consultas em número constante.
+
+O PATCH genérico do evento permite somente `name`; `startsAt`, `timezone` e os
+campos das rotas operacionais não são alteráveis por ele. Como política
+conservadora para o ponto antes proposto, o nome do evento também fica bloqueado
+após qualquer participação histórica. PATCH de experiência permite somente
+`name`, e de estação somente `label`. `reason` é opcional e validado quando
+fornecido; não cria exigência de justificativa não prevista nos exemplos mínimos.
+Criação de experiência fixa `queueAcceptingEntries=true`/FIFO zero; criação de
+estação fixa `availability=available`. Não há pausa de fila, DELETE ou reparent.
+
+Prontidão e fases são calculadas no PostgreSQL: `scheduled`, `not_ready`, `open`,
+`closing`, `closed`, com prazo definitivo compartilhado da E08.9. Prontidão é
+configuração/capacidade; aceitação também exige janela temporal e ausência de
+fechamento Admin. Estação available com pending conta como capacidade; Staff
+precisa de concessão vigente no evento e conta ativa/verificada, sem sessão
+conectada. Timezone de entrada é validado/canonicalizado por Intl; a leitura usa
+o catálogo PostgreSQL sem distinguir caixa. Versões/aliases de tzdata dos dois
+runtimes precisam ser compatíveis, conforme limitação registrada no relatório.
+
+As seis mutações reutilizam TTL Admin e idempotência durável, com namespaces
+próprios. Evento → experiência → estação → conta/concessão/sessão precede a
+decisão SQL que revalida prazo/histórico e faz INSERT/UPDATE na mesma CTE.
+Objeto, auditoria e intenção comitam juntos. Nome/label já igual é no-op,
+inclusive após histórico/prazo: conclui somente a intenção, sem UPDATE do objeto
+ou auditoria. Replay exige autorização atual e preserva a resposta histórica.
+PostgreSQL E08.13 permanece pendente de execução manual; resultados locais,
+cobertura e comandos estão no relatório.
+
 **Natureza:** [PROPOSTA TÉCNICA]. As capacidades decorrem das decisões de produto já aprovadas. **Não** são endpoints existentes; o schema de banco já foi aplicado na Task 6.2; as rotas deste capítulo não foram implementadas. Não duplicar controles de papéis, encerramento, horários ou fila externa já definidos nas seções 14–17. Todos os endpoints abaixo usam prefixo `/api/v1` no deployment e respostas de erro `application/problem+json` (RFC 7807, como a Task 6.1). Os nomes de erro são códigos propostos para integração, não enums previamente homologados.
 
 ### 18.1 Autorização, isolamento e responsabilidades
@@ -1963,6 +1998,17 @@ A decisão C-10 estabelece código **único, imutável e não reutilizável** de
 5. **Tempo e capacidade:** o retorno da disponibilidade não reabre evento já encerrado. Verificar horas com relógio autoritativo do DB depois de eventuais esperas por locks.
 
 ### 20.4 Complementos aos contratos administrativos
+
+**Situação E08.13 — 04/11/2026:** `EXISTS(participations)` é revalidado sob lock
+do evento e no comando SQL decisivo para criação de experiência e alterações
+estruturais. Waiting, active, finished e canceled bloqueiam igualmente. Adicionar
+estação à experiência existente continua permitido com histórico enquanto o
+prazo definitivo não chegou e o evento não está closed, inclusive na janela
+residual de fechamento controlado; isso não reabre admissões. E03/E05,
+E07.1–E07.6, disponibilidade E08.5, horários, fila externa, encerramentos e
+avaliações não foram alterados. As corridas reais preparadas para §20 e os
+limites da verificação de concessões Staff estão descritos no relatório E08.13;
+não representam execução ou aprovação PostgreSQL pelo Codex.
 
 | Endpoint já proposto | Alteração de regra |
 |---|---|
