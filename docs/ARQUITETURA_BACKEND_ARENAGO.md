@@ -1463,6 +1463,24 @@ Quando não houver pendências: `items: []`, **não** `404`. Não retornar pesso
 
 ### 17.4 `POST /participations/:participationId/evaluation` — primeiro envio
 
+**Implementação E08.11 — 04/11/2026:** POST/201 e PATCH/200 da §17.6 estão
+implementados sobre a mesma projeção SQL de elegibilidade/permissões da E08.10.
+Somente o titular autenticado, com sessão e segundo fator Admin quando aplicável,
+opera seus recursos; ausência/de terceiro recebe 404 neutro. POST exige finished
+e completed real e respeita `finished_at + 720 hours`, inclusive; intenções novas
+fora do prazo recebem EVALUATION_SUBMISSION_EXPIRED. Uma linha por participação,
+com unicidade existente e idempotência durável no mesmo commit. Microssegundos são
+preservados em SQL. Avaliação enviada é retornada no mesmo contrato público de
+leitura, incluindo permissões; GETs anteriores mantêm suas respostas.
+
+Comentários têm limite técnico de entrada de 2.000 pontos de código Unicode,
+uniforme no POST/PATCH, sem truncamento ou moderação fictícia. Ausente no POST,
+NULL, vazio e somente whitespace normalizam para NULL; conteúdo não vazio é texto
+simples preservado, inclusive espaços externos. No PATCH, ausência mantém o campo;
+NULL/vazio/whitespace representam remoção apenas na janela integral. Rejeitam-se
+NUL e Unicode malformado por incompatibilidade com texto PostgreSQL. O limite é
+técnico e não substitui futuras decisões de moderação/PII ou escape na interface.
+
 **Bearer, titularidade, `Idempotency-Key`**, payload `{ "rating": 5, "comment": "Experiência muito boa" }`. `comment` opcional; `rating` inteiro entre 1 e 5. **[PROPOSTA TÉCNICA]** Limite de tamanho de comentário, sanitização e prevenção contra PII indevida devem ser definidos antes de liberar comentários em produção. Não aceitar nota zerada ou ausência de nota.
 
 **Transação:** bloquear participação do titular; revalidar estado terminal e o horário vigente, consultar ao menos uma sessão `completed`, inserir `evaluations` com `participation_id UNIQUE` e, quando há comentário inicial, preencher `first_comment_at` com horário do envio. Gravar a operação idempotente na mesma transação. Corrida de dois POSTs distintos: apenas um cria a avaliação; o segundo recebe `409 EVALUATION_ALREADY_SUBMITTED`, sem sobrescrever. Reenvio da **mesma intenção/chave** retorna o resultado anterior.
@@ -1491,6 +1509,25 @@ Quando não houver pendências: `items: []`, **não** `404`. Não retornar pesso
 **Bearer/titular**. `200 OK` com `{ "evaluation": null, "eligibility": { ... } }` quando ainda não houve envio (não tratar inexistência como erro), ou com avaliação já registrada e permissões de edição calculadas. `404` se a participação não existir ou não pertencer à conta. Não retornar dados pessoais de terceiros.
 
 ### 17.6 `PATCH /evaluations/:evaluationId` — edição de avaliação
+
+**Contrato efetivo E08.11:** janela integral inclusiva até `submitted_at + 168 hours`;
+depois disso, até `+720 hours` inclusive, somente primeiro comentário não vazio,
+sem campo rating, com histórico `first_comment_at IS NULL`. Inclusão já utilizada
+recebe COMMENT_ALREADY_ADDED; edição não permitida recebe EVALUATION_EDIT_WINDOW_CLOSED.
+`first_comment_at` nunca retorna a NULL. Atualização parcial sob participação e
+avaliação FOR UPDATE preserva campos omitidos; duas inclusões tardias têm um único
+vencedor. No-op material não executa UPDATE na avaliação nem avança updated_at,
+mas conclui a intenção e retorna 200. O relógio decisivo é PostgreSQL após os locks,
+com predicados de mutação e verificação de linhas afetadas.
+
+POST/PATCH usam namespaces estáveis separados `submit_evaluation` e `edit_evaluation`,
+fingerprint de recurso/payload normalizado/presença de campos e ator no índice
+idempotente existente. Conflito é IDEMPOTENCY_KEY_REUSED; in_progress usa o padrão
+atual. Replay autorizado mantém resposta/status históricos, inclusive após TTL e
+prazos, sem reescrever avaliação. TTL explícito próprio:
+`EVALUATION_IDEMPOTENCY_TTL_SECONDS`, sem padrão ou expurgo automático. O instante
+de envio e os prazos nunca reiniciam. Detalhes, limitações e PostgreSQL ainda
+pendente de execução manual em `E08_11_IMPLEMENTACAO.md`.
 
 **Bearer/titular, `Idempotency-Key`**. `rating` e/ou `comment` podem ser informados na janela integral. Depois dessa janela e até 30 dias **após `submitted_at`**, **somente** `{ "comment": "..." }` é permitido se `first_comment_at IS NULL`, exigindo comentário novo e não vazio; proibir qualquer campo `rating` nessa fase (mesmo igual ao anterior). Atualizar `updated_at` sem alterar `submitted_at`.
 

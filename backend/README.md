@@ -66,6 +66,12 @@ Nenhum banco remoto está configurado. Quando a conexão remota for autorizada, 
 
 ## Scripts
 
+Envio/edição de avaliações E08.11 exigem `EVALUATION_IDEMPOTENCY_TTL_SECONDS`
+inteiro positivo explícito, sem padrão e independente dos TTLs Staff, participante
+e Admin. Fornecer também essa variável ao iniciar `AppModule`/`EventsModule` e
+processos de teste. Contratos, política técnica de comentários e comandos de
+validação PostgreSQL manual em [E08.11](../docs/E08_11_IMPLEMENTACAO.md).
+
 As três operações Staff HTTP (§16.9–16.11) exigem `STAFF_IDEMPOTENCY_TTL_SECONDS`
 configurado com inteiro positivo, sem padrão. A aplicação valida essa configuração
 ao iniciar. Ela define somente `expiresAt`, sem expurgo nem perda de replay enquanto

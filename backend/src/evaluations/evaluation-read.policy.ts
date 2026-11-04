@@ -5,7 +5,7 @@ import { isPreciseInstant } from "./evaluation-read.dto";
 export const SYSTEM_FINALIZATION_REASONS = ["admin_immediate", "admin_controlled_external_wait_closed", "automatic_operational_deadline", "automatic_admin_deadline"] as const;
 
 /** Todas as cinco projeções usam os mesmos fatos e comparações no PostgreSQL. */
-export function evaluationReadProjection(selection: SQL, observedAt: string): SQL {
+export function evaluationReadProjection(selection: SQL, observedAt: string | SQL): SQL {
   return sql`WITH scoped AS MATERIALIZED (${selection}), facts AS (
     SELECT p.*,c.n::text AS completed_count,v.id AS evaluation_id,v.rating,v.comment,v.submitted_at,v.updated_at AS evaluation_updated_at,v.first_comment_at
     FROM scoped p LEFT JOIN evaluations v ON v.participation_id=p.id
