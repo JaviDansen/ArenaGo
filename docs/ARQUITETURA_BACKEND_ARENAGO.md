@@ -1488,6 +1488,23 @@ Quando não houver pendências: `items: []`, **não** `404`. Não retornar pesso
 
 ### 17.8 `POST /admin/events/:eventId/close` — encerramento antecipado
 
+**Implementação E08.8 — 03/11/2026:** endpoint `/api/v1` disponível para o
+encerramento inicial imediato/controlado e seus retries idempotentes. Admin
+global/conta/sessão/2FA são revalidados pelo helper transacional compartilhado.
+Body estrito, reason conforme E08.6 e Idempotency-Key obrigatória; controlledUntilAt
+somente no controlado, com a precisão explícita aprovada na E08.7. Usa o TTL Admin
+obrigatório existente e namespace `admin_close_event`, sem expurgo por expires_at.
+Evento, recursos correntes, efeitos, auditoria e intenção são confirmados juntos
+em READ COMMITTED. O imediato publica closed, cancela pending e fecha entradas/
+participações com motivo `admin_immediate`. O controlado publica closing e finaliza
+waiting externas com `admin_controlled_external_wait_closed`, preservando active
+com/sem fila e a operação residual. Instantes decisivos vêm do PostgreSQL após
+locks; respostas e efeitos preservam microssegundos. Segunda intenção distinta
+com encerramento já iniciado recebe `409 EVENT_ALREADY_CLOSED`; a semântica de
+encurtamento continua pendente, sem implementá-la implicitamente. O job definitivo
+por vencimento **não está implementado nesta etapa**, nem o ciclo automático completo.
+Contrato, limites e resultados de validação em `E08_8_IMPLEMENTACAO.md`.
+
 **Bearer Admin global + sessão com TOTP validado, justificativa obrigatória e auditoria.** `Idempotency-Key` recomendado para evitar múltiplos fechamentos por retry. Corpo proposto:
 
 ```json
