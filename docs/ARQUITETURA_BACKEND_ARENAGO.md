@@ -1033,6 +1033,29 @@ Os testes funcionais de API/Expo deste capítulo seguem não executados. Os caso
 
 ### 16.2 Matriz de endpoints propostos
 
+**Implementação E08.14 — 04/11/2026:** implementado
+`PATCH /staff/events/:eventId/experiences/:experienceId/queue`, autorizado por
+decisão expressa do responsável a **Staff vigente e apto do evento ou Admin
+global vigente com 2FA**. Recebe somente `{ acceptingEntries: boolean }`, exige
+`Idempotency-Key` e retorna 200 com `eventId`, `experienceId`,
+`queueAcceptingEntries` e `changedAt` preciso quando houver mudança. Reutiliza TTL
+Staff explícito para essa operação, inclusive quando o ator é Admin; não há nova
+variável. Namespace durável próprio protege contra retry antigo que desfaria uma
+decisão posterior. No-op e replay não atualizam a experiência nem duplicam auditoria.
+
+Pausa altera somente a flag operacional e seu `updated_at`, com auditoria/intenção
+atômicas: preserva FIFO, waiting/called/pending, ponteiros, estações, participações
+e avaliações. Chamadas/resoluções residuais continuam com as regras anteriores;
+ausência durante a pausa não cria nova entrada. Reabrir a flag não supera
+prontidão, capacidade, titularidade ou cortes E07.1/E08.2 e não altera estado do
+evento/fila externa. Histórico não bloqueia configuração; antes do início e na
+janela residual ela é permitida até o prazo definitivo. Mesmo estado é no-op
+também após o corte, mas mudança real é recusada. Regra temporal compartilha o
+prazo efetivo E08.9; locks seguem evento → experiência → conta/papéis/sessão.
+Somente mudanças efetivas geram auditoria. As permissões das outras rotas Staff
+permanecem inalteradas. Contratos, testes e PostgreSQL manual pendente em
+`E08_14_IMPLEMENTACAO.md`.
+
 **Atualização E08.12 — 04/11/2026:** `POST /participations/:participationId/finish`
 agora implementa a saída completa descrita em §15.9. Ela permanece distinta da
 desistência de entrada explícita C-15 da E08.2, que conserva a participação active.
@@ -1059,6 +1082,7 @@ que delimitam E07.1–E07.3 sem HTTP descrevem o histórico anterior a esta atua
 | `GET /staff/events/:eventId/stations` | Staff autorizado no evento (Admin com acesso de gestão conforme regra) | Consultar estações, disponibilidade e pendências | Leitura operacional |
 | `PATCH /staff/events/:eventId/stations/:stationId/availability` | Staff autorizado no evento **ou Admin global** | Marcar estação disponível/indisponível | Atualiza `stations` |
 | `GET /staff/events/:eventId/experiences/:experienceId/queue` | Staff autorizado no evento | Consultar tamanho/primeiro lugar e situação da fila | Leitura operacional |
+| `PATCH /staff/events/:eventId/experiences/:experienceId/queue` | Staff apto do evento ou Admin global com 2FA | Pausar/reabrir novas entradas | Flag operacional, auditoria e intenção durável |
 | `POST /staff/events/:eventId/experiences/:experienceId/stations/:stationId/call-next` | Staff autorizado no evento | Reservar primeiro da FIFO e chamar na estação escolhida | Cria `service_sessions.pending` |
 | `POST /staff/events/:eventId/service-sessions/:serviceSessionId/complete` | Staff autorizado no evento | Confirmar experiência concluída | Resolve `completed` |
 | `POST /staff/events/:eventId/service-sessions/:serviceSessionId/absent` | Staff autorizado no evento | Registrar ausência; eventual nova posição antes do corte | Resolve `absent`, pode criar nova `queue_entry` |
@@ -1797,6 +1821,13 @@ cobertura e comandos estão no relatório.
 
 ### 18.2 Inventário de rotas de configuração (proposta)
 
+**Ownership aprovado na E08.14:** a lacuna histórica sobre controle de entrada
+por experiência, registrada abaixo, foi superada pela decisão do responsável.
+Staff do evento e Admin global podem usar o PATCH operacional de §16.2; isso
+não concede CRUD estrutural a Staff e não altera o PATCH estrutural E08.13.
+O trecho antigo “não implementar automaticamente” permanece como histórico da
+proposta anterior, substituído para essa rota pelo contrato efetivo E08.14.
+
 | Método e rota | Responsabilidade | Observação de compatibilidade |
 |---|---|---|
 | `GET /admin/events` | Listagem paginada e filtros de eventos do Admin | Não substitui consulta participante `/events/lookup` |
@@ -1998,6 +2029,12 @@ A decisão C-10 estabelece código **único, imutável e não reutilizável** de
 5. **Tempo e capacidade:** o retorno da disponibilidade não reabre evento já encerrado. Verificar horas com relógio autoritativo do DB depois de eventuais esperas por locks.
 
 ### 20.4 Complementos aos contratos administrativos
+
+**E08.14:** pausar/reabrir `queue_accepting_entries` é configuração operacional,
+permitida com histórico. A flag não integra a prontidão global C-05/C-14: não
+fecha o evento, não altera a disponibilidade de estações e não cancela pessoas.
+`queueAcceptingEntries` persistido permanece distinto de aceitação efetiva e de
+`canCallWaitingEntries`. Não há fila por estação ou abertura manual do evento.
 
 **Situação E08.13 — 04/11/2026:** `EXISTS(participations)` é revalidado sob lock
 do evento e no comando SQL decisivo para criação de experiência e alterações
