@@ -1505,6 +1505,29 @@ encurtamento continua pendente, sem implementá-la implicitamente. O job definit
 por vencimento **não está implementado nesta etapa**, nem o ciclo automático completo.
 Contrato, limites e resultados de validação em `E08_8_IMPLEMENTACAO.md`.
 
+**Implementação E08.9 — 03/11/2026:** `EventClosureService` regulariza eventos no
+vencimento inclusivo de `LEAST(operational_deadline_at,admin_deadline_at)`; o job
+executa no bootstrap e a cada ciclo periódico, inclusive após reinicialização.
+Uma transação READ COMMITTED por evento obtém locks ordenados de evento,
+experiências, estações, participações, entradas e atendimentos, revalida vínculos
+e usa `clock_timestamp()` após as esperas. Fecha o evento, cancela somente pending,
+fecha entradas waiting/called e finaliza participações waiting/active, limpando
+ponteiros. Motivos: `automatic_operational_deadline` ou `automatic_admin_deadline`.
+Datas terminais automáticas copiam o prazo efetivo em SQL, com microssegundos;
+updated_at do evento registra a execução real. Assim, atraso não amplia os 30 dias
+de avaliação nem representa saída voluntária/presença física até a execução.
+Preserva origem/campos Admin, waiting externas já finalizadas, resultados terminais,
+auditorias, snapshots, avaliações e contadores. Não cria identidade humana,
+auditoria administrativa ou intenção HTTP para o job. Fechado com registros
+correntes incompatíveis gera erro de integridade observável e rollback.
+Descoberta keyset de 100 eventos; o ciclo pode pular apenas o lock do evento
+ocupado (retry no próximo ciclo), nunca pessoas da fila. Não há commits parciais
+por evento. `EVENT_CLOSURE_INTERVAL_MS` aceita inteiro de 1000 a 3600000 (padrão
+30000); testes não iniciam o agendador salvo ativação explícita por
+`EVENT_CLOSURE_JOB_TEST_ENABLED=true` com NODE_ENV=test. Em produção o job fica
+habilitado. Shutdown interrompe o timer e aguarda o evento corrente antes do pool.
+Resultados locais e validação PostgreSQL manual pendente: `E08_9_IMPLEMENTACAO.md`.
+
 **Bearer Admin global + sessão com TOTP validado, justificativa obrigatória e auditoria.** `Idempotency-Key` recomendado para evitar múltiplos fechamentos por retry. Corpo proposto:
 
 ```json

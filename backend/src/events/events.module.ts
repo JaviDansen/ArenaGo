@@ -18,12 +18,15 @@ import { StaffQueriesController } from "./staff-queries.controller";
 import { StaffQueriesService } from "./staff-queries.service";
 import { StationAvailabilityController } from "./station-availability.controller";
 import { StationAvailabilityService } from "./station-availability.service";
+import { EventClosureService } from "./event-closure.service";
+import { EventClosurePolicy } from "./event-closure.policy";
+import { EventClosureScheduler } from "./event-closure.scheduler";
 
 /** Agrupa os serviços de Events e reutiliza o acesso PostgreSQL compartilhado. */
 @Module({
   imports: [DatabaseModule, AuthModule],
   controllers: [StaffOperationsController, StaffQueriesController, StationAvailabilityController, ParticipantQueueController, ExperiencesController],
-  providers: [EventsService, StaffQueriesService, StationAvailabilityService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, StaffIdempotencyPolicy, ParticipantQueueIdempotencyPolicy],
-  exports: [EventsService, StaffQueriesService, StationAvailabilityService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService],
+  providers: [EventsService, StaffQueriesService, StationAvailabilityService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, StaffIdempotencyPolicy, ParticipantQueueIdempotencyPolicy, EventClosureService, EventClosurePolicy, EventClosureScheduler],
+  exports: [EventsService, StaffQueriesService, StationAvailabilityService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, EventClosureService],
 })
 export class EventsModule {}

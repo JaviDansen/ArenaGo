@@ -1,0 +1,1169 @@
+diff --git a/backend/src/events/events.module.ts b/backend/src/events/events.module.ts
+index 529d42385a9133a7bd8423f9282787e8e810f8b7..56941612a33ce1b39ce1ebf606eccbff9642a7e7 100644
+--- a/backend/src/events/events.module.ts
++++ b/backend/src/events/events.module.ts
+@@ -18,12 +18,15 @@ import { StaffQueriesController } from "./staff-queries.controller";
+ import { StaffQueriesService } from "./staff-queries.service";
+ import { StationAvailabilityController } from "./station-availability.controller";
+ import { StationAvailabilityService } from "./station-availability.service";
++import { EventClosureService } from "./event-closure.service";
++import { EventClosurePolicy } from "./event-closure.policy";
++import { EventClosureScheduler } from "./event-closure.scheduler";
+ 
+ /** Agrupa os serviços de Events e reutiliza o acesso PostgreSQL compartilhado. */
+ @Module({
+   imports: [DatabaseModule, AuthModule],
+   controllers: [StaffOperationsController, StaffQueriesController, StationAvailabilityController, ParticipantQueueController, ExperiencesController],
+-  providers: [EventsService, StaffQueriesService, StationAvailabilityService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, StaffIdempotencyPolicy, ParticipantQueueIdempotencyPolicy],
+-  exports: [EventsService, StaffQueriesService, StationAvailabilityService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService],
++  providers: [EventsService, StaffQueriesService, StationAvailabilityService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, StaffIdempotencyPolicy, ParticipantQueueIdempotencyPolicy, EventClosureService, EventClosurePolicy, EventClosureScheduler],
++  exports: [EventsService, StaffQueriesService, StationAvailabilityService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, EventClosureService],
+ })
+ export class EventsModule {}
+diff --git a/docs/ARQUITETURA_BACKEND_ARENAGO.md b/docs/ARQUITETURA_BACKEND_ARENAGO.md
+index 57a6dfeb33131fe7927ffb67c2bd8b3c131dd073..6c752498948b1838e168969fa17cdddcda42fda1 100644
+--- a/docs/ARQUITETURA_BACKEND_ARENAGO.md
++++ b/docs/ARQUITETURA_BACKEND_ARENAGO.md
+@@ -1505,6 +1505,29 @@ encurtamento continua pendente, sem implementá-la implicitamente. O job definit
+ por vencimento **não está implementado nesta etapa**, nem o ciclo automático completo.
+ Contrato, limites e resultados de validação em `E08_8_IMPLEMENTACAO.md`.
+ 
++**Implementação E08.9 — 03/11/2026:** `EventClosureService` regulariza eventos no
++vencimento inclusivo de `LEAST(operational_deadline_at,admin_deadline_at)`; o job
++executa no bootstrap e a cada ciclo periódico, inclusive após reinicialização.
++Uma transação READ COMMITTED por evento obtém locks ordenados de evento,
++experiências, estações, participações, entradas e atendimentos, revalida vínculos
++e usa `clock_timestamp()` após as esperas. Fecha o evento, cancela somente pending,
++fecha entradas waiting/called e finaliza participações waiting/active, limpando
++ponteiros. Motivos: `automatic_operational_deadline` ou `automatic_admin_deadline`.
++Datas terminais automáticas copiam o prazo efetivo em SQL, com microssegundos;
++updated_at do evento registra a execução real. Assim, atraso não amplia os 30 dias
++de avaliação nem representa saída voluntária/presença física até a execução.
++Preserva origem/campos Admin, waiting externas já finalizadas, resultados terminais,
++auditorias, snapshots, avaliações e contadores. Não cria identidade humana,
++auditoria administrativa ou intenção HTTP para o job. Fechado com registros
++correntes incompatíveis gera erro de integridade observável e rollback.
++Descoberta keyset de 100 eventos; o ciclo pode pular apenas o lock do evento
++ocupado (retry no próximo ciclo), nunca pessoas da fila. Não há commits parciais
++por evento. `EVENT_CLOSURE_INTERVAL_MS` aceita inteiro de 1000 a 3600000 (padrão
++30000); testes não iniciam o agendador salvo ativação explícita por
++`EVENT_CLOSURE_JOB_TEST_ENABLED=true` com NODE_ENV=test. Em produção o job fica
++habilitado. Shutdown interrompe o timer e aguarda o evento corrente antes do pool.
++Resultados locais e validação PostgreSQL manual pendente: `E08_9_IMPLEMENTACAO.md`.
++
+ **Bearer Admin global + sessão com TOTP validado, justificativa obrigatória e auditoria.** `Idempotency-Key` recomendado para evitar múltiplos fechamentos por retry. Corpo proposto:
+ 
+ ```json
+diff --git a/backend/src/events/event-closure.policy.ts b/backend/src/events/event-closure.policy.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..8f4c64460e999e9d8116259620ecd5c2d4b3ebad
+--- /dev/null
++++ b/backend/src/events/event-closure.policy.ts
+@@ -0,0 +1,17 @@
++import { Injectable } from "@nestjs/common";
++
++export function eventClosureConfiguration(env: NodeJS.ProcessEnv) {
++  const raw = env.EVENT_CLOSURE_INTERVAL_MS ?? "30000";
++  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw)) || Number(raw) < 1000 || Number(raw) > 3600000) {
++    throw new Error("EVENT_CLOSURE_INTERVAL_MS deve ser inteiro entre 1000 e 3600000.");
++  }
++  if (env.EVENT_CLOSURE_JOB_TEST_ENABLED !== undefined && !["true", "false"].includes(env.EVENT_CLOSURE_JOB_TEST_ENABLED)) {
++    throw new Error("EVENT_CLOSURE_JOB_TEST_ENABLED deve ser true ou false.");
++  }
++  return { intervalMs: Number(raw), enabled: env.NODE_ENV !== "test" || env.EVENT_CLOSURE_JOB_TEST_ENABLED === "true" };
++}
++
++@Injectable()
++export class EventClosurePolicy {
++  readonly configuration = eventClosureConfiguration(process.env);
++}
+diff --git a/backend/src/events/event-closure.scheduler.ts b/backend/src/events/event-closure.scheduler.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..723df659ea3568768d2c115f4bd6dd989547c393
+--- /dev/null
++++ b/backend/src/events/event-closure.scheduler.ts
+@@ -0,0 +1,62 @@
++import { BeforeApplicationShutdown, Inject, Injectable, Logger, OnApplicationBootstrap } from "@nestjs/common";
++import { EventClosureService, EVENT_CLOSURE_PAGE_SIZE } from "./event-closure.service";
++import { EventClosurePolicy } from "./event-closure.policy";
++
++/** setTimeout após cada ciclo: nenhuma sobreposição, inclusive em ciclos lentos. */
++@Injectable()
++export class EventClosureScheduler implements OnApplicationBootstrap, BeforeApplicationShutdown {
++  private readonly logger = new Logger(EventClosureScheduler.name);
++  private timer?: ReturnType<typeof setTimeout>;
++  private inFlight?: Promise<void>;
++  private stopped = false;
++
++  constructor(@Inject(EventClosureService) private readonly closure: EventClosureService,
++    @Inject(EventClosurePolicy) private readonly policy: EventClosurePolicy) {}
++
++  async onApplicationBootstrap(): Promise<void> {
++    if (!this.policy.configuration.enabled) return;
++    await this.runCycle();
++    this.schedule();
++  }
++
++  private schedule(): void {
++    if (this.stopped) return;
++    this.timer = setTimeout(() => {
++      void this.runCycle().then(() => this.schedule());
++    }, this.policy.configuration.intervalMs);
++    this.timer.unref();
++  }
++
++  runCycle(): Promise<void> {
++    if (this.stopped) return Promise.resolve();
++    if (this.inFlight) return this.inFlight;
++    this.inFlight = this.sweep().catch(() => { this.logger.error("EVENT_CLOSURE_CYCLE_FAILED"); })
++      .finally(() => { this.inFlight = undefined; });
++    return this.inFlight;
++  }
++
++  private async sweep(): Promise<void> {
++    let afterId: string | null = null, closed = 0, failed = 0;
++    do {
++      const candidates = await this.closure.findCandidates(afterId);
++      for (const eventId of candidates) {
++        if (this.stopped) return;
++        try { if ((await this.closure.regularizeEvent(eventId, true)).kind === "closed") closed++; }
++        catch (error) {
++          failed++;
++          this.logger.error({ event: error instanceof Error && error.message === "EVENT_CLOSURE_INTEGRITY"
++            ? "EVENT_CLOSURE_INTEGRITY" : "EVENT_CLOSURE_EVENT_FAILED", eventId });
++        }
++      }
++      if (candidates.length < EVENT_CLOSURE_PAGE_SIZE) break;
++      afterId = candidates[candidates.length - 1];
++    } while (!this.stopped);
++    if (closed || failed) this.logger.log({ event: "EVENT_CLOSURE_CYCLE", closed, failed });
++  }
++
++  async beforeApplicationShutdown(): Promise<void> {
++    this.stopped = true;
++    if (this.timer) clearTimeout(this.timer);
++    await this.inFlight;
++  }
++}
+diff --git a/backend/src/events/event-closure.service.ts b/backend/src/events/event-closure.service.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..9c8bbbec4a8dd463558efaa410274a28497d410e
+--- /dev/null
++++ b/backend/src/events/event-closure.service.ts
+@@ -0,0 +1,106 @@
++import { Inject, Injectable } from "@nestjs/common";
++import { sql } from "drizzle-orm";
++import type { NodePgDatabase } from "drizzle-orm/node-postgres";
++import { DRIZZLE_DATABASE } from "../database/database.module";
++import type * as schema from "../database/schema";
++
++export const AUTOMATIC_OPERATIONAL_REASON = "automatic_operational_deadline";
++export const AUTOMATIC_ADMIN_REASON = "automatic_admin_deadline";
++export const EVENT_CLOSURE_PAGE_SIZE = 100;
++
++export type EventClosureResult =
++  | { kind: "unavailable" | "not_due" | "already_closed" }
++  | { kind: "closed"; deadlineAt: string; executedAt: string; people: number; queues: number; services: number };
++
++function ensure(value: unknown): asserts value {
++  if (!value) throw new Error("EVENT_CLOSURE_INTEGRITY");
++}
++
++/** E08.9: uma transação por evento, sem identidade humana ou reserva HTTP. */
++@Injectable()
++export class EventClosureService {
++  constructor(@Inject(DRIZZLE_DATABASE) private readonly database: NodePgDatabase<typeof schema>) {}
++
++  /** Keyset limitado; não mantém todos os eventos/participantes na memória da API. */
++  async findCandidates(afterId: string | null): Promise<string[]> {
++    const result = await this.database.execute<{ id: string }>(sql`
++      SELECT e.id FROM events e WHERE (${afterId}::uuid IS NULL OR e.id > ${afterId}::uuid) AND (
++        (e.status <> 'closed' AND LEAST(e.operational_deadline_at,e.admin_deadline_at) <= clock_timestamp())
++        OR (e.status='closed' AND (
++          EXISTS(SELECT 1 FROM participations p WHERE p.event_id=e.id AND (p.status IN ('waiting','active') OR p.current_queue_entry_id IS NOT NULL))
++          OR EXISTS(SELECT 1 FROM queue_entries q WHERE q.event_id=e.id AND q.status IN ('waiting','called'))
++          OR EXISTS(SELECT 1 FROM service_sessions s JOIN experiences x ON x.id=s.experience_id WHERE x.event_id=e.id AND s.status='pending'))))
++      ORDER BY e.id LIMIT ${EVENT_CLOSURE_PAGE_SIZE}`);
++    return result.rows.map(row => row.id);
++  }
++
++  async regularizeEvent(eventId: string, skipLocked = false): Promise<EventClosureResult> {
++    return this.database.transaction(async tx => {
++      const event = (await tx.execute<{ status: string }>(sql`SELECT status FROM events WHERE id=${eventId}
++        FOR UPDATE ${skipLocked ? sql`SKIP LOCKED` : sql``}`)).rows[0];
++      if (!event) return { kind: "unavailable" };
++      // Somente contagens atravessam a conexão. Os locks continuam integrais por evento.
++      await tx.execute(sql`SELECT count(*) FROM (SELECT id FROM experiences WHERE event_id=${eventId} ORDER BY id FOR UPDATE) locked`);
++      await tx.execute(sql`SELECT count(*) FROM (SELECT s.id FROM stations s JOIN experiences x ON x.id=s.experience_id
++        WHERE x.event_id=${eventId} ORDER BY s.id FOR UPDATE OF s) locked`);
++      const people = (await tx.execute<{ count: number }>(sql`SELECT count(*) FILTER (WHERE status IN ('waiting','active'))::int AS count
++        FROM (SELECT id,status FROM participations WHERE event_id=${eventId} ORDER BY id FOR UPDATE) locked`)).rows[0].count;
++      const queues = (await tx.execute<{ count: number }>(sql`SELECT count(*)::int AS count FROM (SELECT id FROM queue_entries
++        WHERE event_id=${eventId} AND status IN ('waiting','called') ORDER BY id FOR UPDATE) locked`)).rows[0].count;
++      const services = (await tx.execute<{ count: number }>(sql`SELECT count(*)::int AS count FROM (SELECT s.id FROM service_sessions s
++        JOIN experiences x ON x.id=s.experience_id WHERE x.event_id=${eventId} AND s.status='pending' ORDER BY s.id FOR UPDATE OF s) locked`)).rows[0].count;
++
++      const integrity = (await tx.execute<{ valid: boolean; pointers: boolean }>(sql`SELECT
++        NOT EXISTS(SELECT 1 FROM queue_entries q LEFT JOIN participations p ON p.id=q.participation_id AND p.event_id=q.event_id
++          LEFT JOIN experiences x ON x.id=q.experience_id AND x.event_id=q.event_id
++          LEFT JOIN service_sessions s ON s.queue_entry_id=q.id AND s.status='pending'
++          WHERE q.event_id=${eventId} AND q.status IN ('waiting','called') AND
++            (p.id IS NULL OR p.status<>'active' OR p.current_queue_entry_id IS DISTINCT FROM q.id OR x.id IS NULL
++              OR (q.status='called' AND s.id IS NULL) OR (q.status='waiting' AND s.id IS NOT NULL)))
++        AND NOT EXISTS(SELECT 1 FROM participations p LEFT JOIN queue_entries q ON q.id=p.current_queue_entry_id
++          WHERE p.event_id=${eventId} AND p.current_queue_entry_id IS NOT NULL AND
++            (p.status<>'active' OR q.id IS NULL OR q.participation_id<>p.id OR q.event_id<>p.event_id OR q.status NOT IN ('waiting','called')))
++        AND NOT EXISTS(SELECT 1 FROM service_sessions s JOIN experiences x ON x.id=s.experience_id
++          LEFT JOIN queue_entries q ON q.id=s.queue_entry_id LEFT JOIN stations st ON st.id=s.station_id
++          WHERE x.event_id=${eventId} AND s.status='pending' AND
++            (q.id IS NULL OR q.status<>'called' OR q.experience_id<>s.experience_id OR q.event_id<>x.event_id
++              OR st.id IS NULL OR st.experience_id<>s.experience_id)) AS valid,
++        EXISTS(SELECT 1 FROM participations WHERE event_id=${eventId} AND current_queue_entry_id IS NOT NULL) AS pointers`)).rows[0];
++      ensure(integrity?.valid);
++      if (event.status === "closed") {
++        ensure(people === 0 && queues === 0 && services === 0 && !integrity.pointers);
++        return { kind: "already_closed" };
++      }
++
++      // clock_timestamp após TODAS as esperas. Nunca transporta o prazo por Date.
++      const changed = (await tx.execute<{ deadlineAt: string; executedAt: string; reason: string }>(sql`
++        WITH decision AS MATERIALIZED (SELECT clock_timestamp() AS at), changed AS (
++          UPDATE events e SET status='closed',updated_at=d.at FROM decision d
++          WHERE e.id=${eventId} AND e.status<>'closed' AND LEAST(e.operational_deadline_at,e.admin_deadline_at)<=d.at
++          RETURNING LEAST(e.operational_deadline_at,e.admin_deadline_at) AS deadline,e.updated_at,
++            CASE WHEN e.closure_mode IS NULL THEN ${AUTOMATIC_OPERATIONAL_REASON} ELSE ${AUTOMATIC_ADMIN_REASON} END AS reason)
++        SELECT to_char(deadline AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "deadlineAt",
++          to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "executedAt",reason FROM changed`)).rows[0];
++      if (!changed) return { kind: "not_due" };
++
++      const canceled = (await tx.execute<{ count: number }>(sql`WITH canceled AS (
++        UPDATE service_sessions s SET status='canceled',resolved_at=LEAST(e.operational_deadline_at,e.admin_deadline_at),
++          resolved_by_user_id=NULL,cancel_reason=${changed.reason}
++        FROM experiences x,events e WHERE s.experience_id=x.id AND x.event_id=e.id AND e.id=${eventId} AND s.status='pending' RETURNING s.id)
++        SELECT count(*)::int AS count FROM canceled`)).rows[0].count;
++      ensure(canceled === services);
++      const closed = (await tx.execute<{ count: number }>(sql`WITH closed AS (
++        UPDATE queue_entries q SET status='closed',closed_at=LEAST(e.operational_deadline_at,e.admin_deadline_at),close_reason=${changed.reason}
++        FROM events e WHERE q.event_id=e.id AND e.id=${eventId} AND q.status IN ('waiting','called') RETURNING q.id)
++        SELECT count(*)::int AS count FROM closed`)).rows[0].count;
++      ensure(closed === queues);
++      const finished = (await tx.execute<{ count: number }>(sql`WITH finished AS (
++        UPDATE participations p SET status='finished',finished_at=LEAST(e.operational_deadline_at,e.admin_deadline_at),
++          finish_reason=${changed.reason},current_queue_entry_id=NULL
++        FROM events e WHERE p.event_id=e.id AND e.id=${eventId} AND p.status IN ('waiting','active') RETURNING p.id)
++        SELECT count(*)::int AS count FROM finished`)).rows[0].count;
++      ensure(finished === people);
++      return { kind: "closed", deadlineAt: changed.deadlineAt, executedAt: changed.executedAt, people: finished, queues: closed, services: canceled };
++    }, { isolationLevel: "read committed" });
++  }
++}
+diff --git a/backend/test/integration/event-closure-fixture.ts b/backend/test/integration/event-closure-fixture.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..438c37e61461f65864976dfac39253c38e1a0561
+--- /dev/null
++++ b/backend/test/integration/event-closure-fixture.ts
+@@ -0,0 +1,205 @@
++import "reflect-metadata";
++import assert from "node:assert/strict";
++import { randomUUID } from "node:crypto";
++import { devNull } from "node:os";
++import { NestFactory } from "@nestjs/core";
++import type { INestApplication } from "@nestjs/common";
++import { sql } from "drizzle-orm";
++import type { NodePgDatabase } from "drizzle-orm/node-postgres";
++import { Pool, type PoolClient } from "pg";
++import supertest from "supertest";
++import type * as schema from "../../src/database/schema";
++import type { ParticipationsService } from "../../src/participations/participations.service";
++import type { QueueEntryService } from "../../src/events/queue-entry.service";
++import { assertSafeTestDatabase } from "./test-db-guard";
++
++// Guarda executada ANTES de importar AppModule/providers; nunca consulta .env ou banco remoto.
++const urls = ["DATABASE_URL", "DATABASE_DIRECT_URL", "EVENTS_TEST_DATABASE_URL"].map(name => {
++  const value = assertSafeTestDatabase(process.env[name]), url = new URL(value);
++  if (url.hostname !== "127.0.0.1" || url.port !== "55432" || url.pathname !== "/arenago_events_test" || url.search || url.hash || !url.username) throw new Error(`${name}: destino local explícito obrigatório.`);
++  return value;
++});
++if (urls.some(value => value !== urls[0])) throw new Error("As três URLs precisam ser idênticas.");
++if (process.env.NODE_ENV !== "test") throw new Error("NODE_ENV=test obrigatorio.");
++process.env.EVENT_CLOSURE_JOB_TEST_ENABLED = "false";
++process.env.DOTENV_CONFIG_PATH = devNull;
++process.env.STAFF_IDEMPOTENCY_TTL_SECONDS = "60";
++process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = "60";
++process.env.ADMIN_IDEMPOTENCY_TTL_SECONDS = "60";
++const pool = new Pool({ connectionString: urls[0], ssl: false, max: 8, connectionTimeoutMillis: 2000, statement_timeout: 20000, lock_timeout: 16000 });
++let app: INestApplication, database: NodePgDatabase<typeof schema>, participations: ParticipationsService, queues: QueueEntryService;
++let signAccess: (userId: string, sessionId: string, expired?: boolean) => string;
++const operation = "admin_close_event", reason = "Encerramento autorizado pela organização";
++const ids = { events: [] as string[], users: [] as string[], versions: [] as string[], games: [] as string[] };
++export async function setup() {
++  assert.equal((await pool.query("SELECT current_database() AS name")).rows[0].name, "arenago_events_test");
++  const { AppModule } = await import("../../src/app.module"), { DRIZZLE_DATABASE } = await import("../../src/database/database.module");
++  const { ParticipationsService } = await import("../../src/participations/participations.service"), { QueueEntryService } = await import("../../src/events/queue-entry.service");
++  const tokens = await import("../../src/auth/token.util");
++  signAccess = (userId, sessionId, expired) => tokens.signAccessToken({ userId, sessionId }, expired ? { nowMs: Date.now() - 120000, ttlSeconds: 1 } : undefined);
++  app = await NestFactory.create(AppModule, { logger: false }); app.setGlobalPrefix("api/v1"); await app.listen(0, "127.0.0.1");
++  database = app.get(DRIZZLE_DATABASE); participations = app.get(ParticipationsService); queues = app.get(QueueEntryService);
++}
++export async function cleanup() {
++  const errors: unknown[] = [];
++  try {
++    const c = await pool.connect();
++    try {
++      await c.query("BEGIN");
++      await c.query("DELETE FROM audit_logs WHERE event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("UPDATE participations SET current_queue_entry_id=NULL WHERE event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM service_sessions s USING queue_entries q WHERE s.queue_entry_id=q.id AND q.event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM queue_entries WHERE event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM participation_profile_snapshots s USING participations p WHERE s.participation_id=p.id AND p.event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM evaluations v USING participations p WHERE v.participation_id=p.id AND p.event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM participations WHERE event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM stations s USING experiences e WHERE s.experience_id=e.id AND e.event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM experiences WHERE event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM idempotency_operations WHERE actor_user_id=ANY($1::uuid[])", [ids.users]);
++      await c.query("DELETE FROM user_roles WHERE user_id=ANY($1::uuid[])", [ids.users]);
++      await c.query("DELETE FROM sessions WHERE user_id=ANY($1::uuid[])", [ids.users]);
++      await c.query("DELETE FROM user_games WHERE user_id=ANY($1::uuid[])", [ids.users]);
++      await c.query("DELETE FROM profiles WHERE user_id=ANY($1::uuid[])", [ids.users]);
++      await c.query("DELETE FROM events WHERE id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM games WHERE id=ANY($1::uuid[])", [ids.games]);
++      await c.query("DELETE FROM users WHERE id=ANY($1::uuid[])", [ids.users]);
++      await c.query("DELETE FROM questionnaire_versions WHERE id=ANY($1::uuid[])", [ids.versions]); await c.query("COMMIT");
++    } catch (e) { await c.query("ROLLBACK"); throw e; } finally { c.release(); }
++  } catch (e) { errors.push(e); }
++  for (const r of await Promise.allSettled([app?.close(), pool.end()])) if (r.status === "rejected") errors.push(r.reason);
++  if (errors.length) throw new AggregateError(errors, "Limpeza E08.9 falhou.");
++}
++export async function bareEvent() {
++  const id = randomUUID(); ids.events.push(id);
++  await pool.query(`INSERT INTO events(id,name,access_code_normalized,timezone,starts_at,official_ends_at,operational_deadline_at,status,external_queue_enabled,created_at,updated_at)
++    VALUES($1,'E089 vazio',$2,'America/Sao_Paulo',clock_timestamp()-interval '2 hours',clock_timestamp()-interval '1 hour',clock_timestamp()-interval '30 minutes','scheduled',true,clock_timestamp(),clock_timestamp())`, [id, `E089-${id.toUpperCase()}`]);
++  return id;
++}
++async function account() {
++  const userId = randomUUID(), sessionId = randomUUID(); ids.users.push(userId);
++  await pool.query(`INSERT INTO users(id,name,email,password_hash,email_verified_at,created_at,updated_at)
++    VALUES($1,'Pessoa privada E089',$2,'fixture-private-hash',clock_timestamp(),clock_timestamp(),clock_timestamp())`, [userId, `${userId}@example.test`]);
++  await pool.query(`INSERT INTO sessions(id,user_id,expires_at,last_activity_at,created_at)
++    VALUES($1,$2,clock_timestamp()+interval '1 hour',clock_timestamp(),clock_timestamp())`, [sessionId, userId]);
++  return { userId, sessionId, token: signAccess(userId, sessionId) };
++}
++async function grant(userId: string, eventId: string | null) {
++  const roleId = randomUUID(); await pool.query("INSERT INTO user_roles(id,user_id,role,event_id,granted_at) VALUES($1,$2,$3,$4,clock_timestamp())", [roleId, userId, eventId ? "staff" : "admin", eventId]); return roleId;
++}
++async function admin() {
++  const a = await account(), roleId = await grant(a.userId, null); await pool.query("UPDATE sessions SET admin_2fa_verified_at=clock_timestamp() WHERE id=$1", [a.sessionId]); return { ...a, roleId };
++}
++interface Context { eventId: string; experienceId: string; stationId: string; admin: Awaited<ReturnType<typeof admin>>; staff: Awaited<ReturnType<typeof account>> }
++async function context(): Promise<Context> {
++  const eventId = randomUUID(), experienceId = randomUUID(), stationId = randomUUID(); ids.events.push(eventId);
++  await pool.query(`INSERT INTO events(id,name,access_code_normalized,timezone,starts_at,official_ends_at,operational_deadline_at,status,external_queue_enabled,external_last_order,created_at,updated_at)
++    VALUES($1,'E089 fixture',$2,'America/Sao_Paulo',clock_timestamp()-interval '1 hour',clock_timestamp()+interval '1 hour',clock_timestamp()+interval '90 minutes','open',true,9007199254741000,clock_timestamp(),clock_timestamp())`, [eventId, `E089-${eventId.toUpperCase()}`]);
++  const actor = await admin(), staff = await account(); await grant(staff.userId, eventId);
++  await pool.query("INSERT INTO experiences(id,event_id,name,last_queue_order,created_at,updated_at) VALUES($1,$2,'Experiência E089',9007199254741000,clock_timestamp(),clock_timestamp())", [experienceId, eventId]);
++  await pool.query("INSERT INTO stations(id,experience_id,label,availability,created_at,updated_at) VALUES($1,$2,'Estação E089','available',clock_timestamp(),clock_timestamp())", [stationId, experienceId]);
++  return { eventId, experienceId, stationId, admin: actor, staff };
++}
++async function proposal(c: Context, minutes = 120, margin = 30) {
++  const r = (await pool.query("SELECT date_trunc('milliseconds',clock_timestamp()) + $1::int*interval '1 minute' AS at", [minutes])).rows[0].at as Date;
++  return { officialEndsAt: r.toISOString(), operationalDeadlineAt: new Date(r.getTime() + margin * 60000).toISOString(), reason };
++}
++const route = (c: Context) => `/api/v1/admin/events/${c.eventId}/schedule`;
++const patch = (c: Context, body: object, key: string = randomUUID(), actor: { token: string } = c.admin) => supertest(app.getHttpServer()).patch(route(c)).set("Authorization", `Bearer ${actor.token}`).set("Idempotency-Key", key).send(body);
++const external = (c: Context) => supertest(app.getHttpServer()).patch(`/api/v1/admin/events/${c.eventId}/external-queue`).set("Authorization", `Bearer ${c.admin.token}`).set("Idempotency-Key", randomUUID()).send({ enabled: false, reason });
++const station = (c: Context) => supertest(app.getHttpServer()).patch(`/api/v1/staff/events/${c.eventId}/stations/${c.stationId}/availability`).set("Authorization", `Bearer ${c.admin.token}`).send({ availability: "unavailable" });
++async function person(c: Context, status: "waiting" | "active" | "finished" | "canceled" = "active") {
++  const a = await account(), participationId = randomUUID(), terminal = status === "finished" || status === "canceled";
++  const order = status === "waiting" ? (await pool.query("UPDATE events SET external_last_order=external_last_order+1 WHERE id=$1 RETURNING external_last_order::text AS n", [c.eventId])).rows[0].n : null;
++  await pool.query(`INSERT INTO participations(id,user_id,event_id,status,external_queue_order,joined_at,arena_entered_at,finished_at,finish_reason)
++    VALUES($1,$2,$3,$4::varchar(20),$5,clock_timestamp(),CASE WHEN $6::boolean THEN clock_timestamp() END,
++      CASE WHEN $7::boolean THEN clock_timestamp() END,CASE WHEN $7::boolean THEN 'fixture_terminal' END)`, [participationId, a.userId, c.eventId, status, order, status === "active", terminal]);
++  return { ...a, participationId };
++}
++async function readyEntrant() {
++  const a = await account(), version = randomUUID(), game = randomUUID(); ids.versions.push(version); ids.games.push(game);
++  await pool.query("INSERT INTO questionnaire_versions(id,version,definition,activated_at,created_at) VALUES($1,$2,'{}',clock_timestamp(),clock_timestamp())", [version, `e89-${version}`]);
++  await pool.query(`INSERT INTO profiles(user_id,birth_date,gender,education,market_knowledge,market_interest,questionnaire_version_id,completed_at,created_at,updated_at)
++    VALUES($1,'2000-01-01','Prefiro não informar','Superior','Sim, conheço.','Sim, tenho interesse.',$2,clock_timestamp(),clock_timestamp(),clock_timestamp())`, [a.userId, version]);
++  await pool.query("INSERT INTO games(id,name,is_curated,created_at) VALUES($1,$2,false,clock_timestamp())", [game, `E089-${game}`]);
++  await pool.query("INSERT INTO user_games(user_id,game_id,created_at) VALUES($1,$2,clock_timestamp())", [a.userId, game]); return a;
++}
++const admit = (c: Context, a: { userId: string }) => participations.createParticipation({ userId: a.userId, eventId: c.eventId, idempotencyKey: randomUUID(), expiresAt: new Date(Date.now() + 60000) });
++const join = (c: Context, a: { userId: string; participationId: string }) => queues.joinExperienceQueue({ userId: a.userId, participationId: a.participationId, experienceId: c.experienceId, idempotencyKey: randomUUID(), expiresAt: new Date(Date.now() + 60000) });
++const audit = async (c: Context) => (await pool.query("SELECT * FROM audit_logs WHERE event_id=$1 AND action='event_admin_closed' ORDER BY occurred_at,id", [c.eventId])).rows;
++async function state(c: Context) {
++  return (await pool.query(`SELECT jsonb_build_object(
++    'event',(SELECT to_jsonb(e)||jsonb_build_object('external_last_order',e.external_last_order::text) FROM events e WHERE e.id=$1),
++    'people',(SELECT jsonb_agg(to_jsonb(p)||jsonb_build_object('external_queue_order',p.external_queue_order::text) ORDER BY p.id) FROM participations p WHERE p.event_id=$1),
++    'snapshots',(SELECT jsonb_agg(to_jsonb(s) ORDER BY s.participation_id) FROM participation_profile_snapshots s JOIN participations p ON p.id=s.participation_id WHERE p.event_id=$1),
++    'experiences',(SELECT jsonb_agg(to_jsonb(e)||jsonb_build_object('last_queue_order',e.last_queue_order::text) ORDER BY e.id) FROM experiences e WHERE e.event_id=$1),
++    'stations',(SELECT jsonb_agg(to_jsonb(s) ORDER BY s.id) FROM stations s JOIN experiences e ON e.id=s.experience_id WHERE e.event_id=$1),
++    'queues',(SELECT jsonb_agg(to_jsonb(q)||jsonb_build_object('queue_order',q.queue_order::text) ORDER BY q.id) FROM queue_entries q WHERE q.event_id=$1),
++    'services',(SELECT jsonb_agg(to_jsonb(s) ORDER BY s.id) FROM service_sessions s JOIN experiences e ON e.id=s.experience_id WHERE e.event_id=$1),
++    'audits',(SELECT jsonb_agg(to_jsonb(a) ORDER BY a.id) FROM audit_logs a WHERE a.event_id=$1),
++    'idempotency',(SELECT jsonb_agg(to_jsonb(i) ORDER BY i.id) FROM idempotency_operations i WHERE i.actor_user_id=$2 AND i.operation=$3)) AS value`, [c.eventId, c.admin.userId, operation])).rows[0].value;
++}
++async function blocked(pid: number) {
++  const until = Date.now() + 6000;
++  while (Date.now() < until) { if ((await pool.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))", [pid])).rows[0].n > 0) return; await new Promise(done => setTimeout(done, 20)); }
++  throw new Error("Espera real pelo lock não observada.");
++}
++async function ordered<A, B>(first: () => PromiseLike<A>, second: () => PromiseLike<B>, whileBlocked?: (pid: number) => Promise<void>): Promise<[A, B]> {
++  const original = database.transaction.bind(database) as typeof database.transaction; let ready!: (pid: number) => void, release!: () => void;
++  const reached = new Promise<number>(yes => { ready = yes; }), gate = new Promise<void>(yes => { release = yes; });
++  database.transaction = (callback, config) => original(async tx => { const value = await callback(tx); ready((await tx.execute<{ pid: number }>(sql`SELECT pg_backend_pid() AS pid`)).rows[0].pid); await gate; return value; }, config);
++  let a: Promise<A> | undefined, b: Promise<B> | undefined;
++  try {
++    a = Promise.resolve(first()); a.catch(() => undefined); const pid = await Promise.race([reached, a.then(() => { throw new Error("Primeira operação não manteve tx."); })]);
++    database.transaction = original; b = Promise.resolve(second()); b.catch(() => undefined); await blocked(pid); await whileBlocked?.(pid); release(); return await Promise.all([a, b]);
++  } finally { database.transaction = original; release(); await Promise.allSettled([a, b]); }
++}
++async function lockWait(c: Context, request: () => PromiseLike<supertest.Response>, change: (client: PoolClient, pid: number) => Promise<void>, lock: "event" | "role" | "account" | "participation" | "station" = "event") {
++  const client = await pool.connect(); let pending: Promise<supertest.Response> | undefined;
++  try {
++    await client.query("BEGIN");
++    if (lock === "event") await client.query("SELECT id FROM events WHERE id=$1 FOR UPDATE", [c.eventId]);
++    if (lock === "role") await client.query("SELECT id FROM user_roles WHERE id=$1 FOR UPDATE", [c.admin.roleId]);
++    if (lock === "account") await client.query("SELECT id FROM users WHERE id=$1 FOR UPDATE", [c.admin.userId]);
++    if (lock === "participation") await client.query("SELECT id FROM participations WHERE event_id=$1 ORDER BY id FOR UPDATE", [c.eventId]);
++    if (lock === "station") await client.query("SELECT id FROM stations WHERE id=$1 FOR UPDATE", [c.stationId]);
++    const pid = (await client.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
++    pending = Promise.resolve(request()); pending.catch(() => undefined); await blocked(pid); await change(client, pid); await client.query("COMMIT"); return await pending;
++  } finally { await client.query("ROLLBACK"); await Promise.allSettled([pending]); client.release(); }
++}
++async function waitPast(at: string, pid: number) {
++  assert.equal((await pool.query('SELECT clock_timestamp()<$1::timestamptz AS "beforeCut"', [at])).rows[0].beforeCut, true, "Espera precisa começar antes do corte.");
++  const until = Date.now() + 14000; let crossed = false;
++  while (Date.now() < until) { if ((await pool.query("SELECT clock_timestamp()>=$1::timestamptz AS ended", [at])).rows[0].ended) { crossed = true; break; } await new Promise(done => setTimeout(done, 100)); }
++  assert.equal(crossed, true); await blocked(pid);
++}
++
++const closeRoute = (c: Context) => `/api/v1/admin/events/${c.eventId}/close`;
++const immediate = () => ({ mode: "immediate" as const, reason });
++async function controlled(seconds = 1800) {
++  const at = (await pool.query("SELECT date_trunc('milliseconds',clock_timestamp())+$1::int*interval '1 second' AS at", [seconds])).rows[0].at as Date;
++  return { mode: "controlled" as const, reason, controlledUntilAt: at.toISOString() };
++}
++const close = (c: Context, body: object = immediate(), key: string = randomUUID(), actor: { token: string } = c.admin) => supertest(app.getHttpServer()).post(closeRoute(c)).set("Authorization", `Bearer ${actor.token}`).set("Idempotency-Key", key).send(body);
++const call = (c: Context) => supertest(app.getHttpServer()).post(`/api/v1/staff/events/${c.eventId}/experiences/${c.experienceId}/stations/${c.stationId}/call-next`).set("Authorization", `Bearer ${c.staff.token}`).set("Idempotency-Key", randomUUID()).send({});
++const resolve = (c: Context, session: string, action: "complete" | "absent") => supertest(app.getHttpServer()).post(`/api/v1/staff/events/${c.eventId}/service-sessions/${session}/${action}`).set("Authorization", `Bearer ${c.staff.token}`).set("Idempotency-Key", randomUUID()).send({});
++const withdraw = (c: Context, p: Awaited<ReturnType<typeof person>>, entry: string) => supertest(app.getHttpServer()).post(`/api/v1/participations/${p.participationId}/queue-entries/${entry}/withdraw`).set("Authorization", `Bearer ${p.token}`).set("Idempotency-Key", randomUUID()).send({});
++async function queued(c: Context) { const p = await person(c), q = await join(c, p); assert.equal(q.kind, "created"); if (q.kind !== "created") assert.fail(); return { p, entry: q.queueEntryId }; }
++async function called(c: Context) { const q = await queued(c), r = await call(c); assert.equal(r.status, 201, JSON.stringify(r.body)); return { ...q, session: r.body.serviceSession.id as string }; }
++async function rich(c: Context) {
++  const outside = await person(c, "waiting"), idle = await person(c), history = await called(c); assert.equal((await resolve(c, history.session, "complete")).status, 200);
++  const pending = await called(c), waiting = await queued(c); await person(c, "finished"); await person(c, "canceled");
++  const v = randomUUID(); ids.versions.push(v); await pool.query("INSERT INTO questionnaire_versions(id,version,definition,activated_at,created_at) VALUES($1,$2,'{}',clock_timestamp(),clock_timestamp())", [v, `e89-${v}`]);
++  for (const p of [outside, idle]) await pool.query("INSERT INTO participation_profile_snapshots(participation_id,questionnaire_version_id,answers,games_snapshot,captured_at) VALUES($1,$2,'{\"private\":\"E089_PRIVATE\"}','[]',clock_timestamp())", [p.participationId, v]);
++  return { outside, idle, history, pending, waiting };
++}
++async function assertNoOpen(c: Context) {
++  const r = (await pool.query(`SELECT
++    (SELECT count(*)::int FROM participations WHERE event_id=$1 AND (status IN ('waiting','active') OR current_queue_entry_id IS NOT NULL)) AS people,
++    (SELECT count(*)::int FROM queue_entries WHERE event_id=$1 AND status IN ('waiting','called')) AS queues,
++    (SELECT count(*)::int FROM service_sessions s JOIN experiences x ON x.id=s.experience_id WHERE x.event_id=$1 AND s.status='pending') AS pending,
++    (SELECT count(*)::int FROM evaluations v JOIN participations p ON p.id=v.participation_id WHERE p.event_id=$1) AS evaluations`, [c.eventId])).rows[0];
++  assert.deepEqual(r, { people: 0, queues: 0, pending: 0, evaluations: 0 });
++}
++
++export { app, pool, database, account, admin, context, person, readyEntrant, admit, join, audit, state, blocked, ordered, lockWait, waitPast, proposal, patch, external, station, close, immediate, controlled, call, resolve, withdraw, queued, called, rich, assertNoOpen };
++export type { Context };
+diff --git a/backend/test/integration/event-closure.integration.test.ts b/backend/test/integration/event-closure.integration.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..3e7a340af384eb6aa508f826591706cec95e657d
+--- /dev/null
++++ b/backend/test/integration/event-closure.integration.test.ts
+@@ -0,0 +1,240 @@
++import assert from "node:assert/strict";
++import { before, after, test } from "node:test";
++import { randomUUID } from "node:crypto";
++import { sql } from "drizzle-orm";
++import { PgDialect } from "drizzle-orm/pg-core";
++import { drizzle } from "drizzle-orm/node-postgres";
++import type { EventClosureService } from "../../src/events/event-closure.service";
++import type { EventClosureScheduler } from "../../src/events/event-closure.scheduler";
++import * as schema from "../../src/database/schema";
++import { setup, cleanup, app, pool, database, context, person, readyEntrant, admit, join, state, audit, blocked, ordered, waitPast,
++  close, immediate, controlled, call, resolve, withdraw, queued, called, rich, assertNoOpen, proposal, patch, external, station, bareEvent, type Context } from "./event-closure-fixture";
++
++let closure: EventClosureService;
++let Service: typeof import("../../src/events/event-closure.service").EventClosureService;
++let Scheduler: typeof import("../../src/events/event-closure.scheduler").EventClosureScheduler;
++before(async () => {
++  await setup(); Service = (await import("../../src/events/event-closure.service")).EventClosureService;
++  Scheduler = (await import("../../src/events/event-closure.scheduler")).EventClosureScheduler; closure = app.get(Service);
++});
++after(cleanup);
++
++async function deadline(c: Context, seconds = -2, mode: "normal" | "controlled" = "normal") {
++  const r = await pool.query(`WITH d AS (SELECT date_trunc('seconds',clock_timestamp())+$2::int*interval '1 second'+interval '0.123456 second' AS at)
++    UPDATE events e SET starts_at=d.at-interval '1 hour',official_ends_at=d.at,
++      operational_deadline_at=d.at+CASE WHEN $3::boolean THEN interval '30 minutes' ELSE interval '0' END,
++      status=CASE WHEN $3::boolean THEN 'closing' ELSE 'open' END,
++      closure_mode=CASE WHEN $3::boolean THEN 'controlled'::varchar(20) END,
++      closure_requested_at=CASE WHEN $3::boolean THEN d.at-interval '10 minutes' END,
++      admin_deadline_at=CASE WHEN $3::boolean THEN d.at END
++    FROM d WHERE e.id=$1 RETURNING to_char(d.at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at,
++      (clock_timestamp()-d.at+interval '5 minutes')::text AS shift`, [c.eventId, seconds, mode === "controlled"]);
++  const at = r.rows[0].at as string;
++  if (seconds <= 0) {
++    // Envelhece somente a preparação da fixture: nenhuma chamada/conclusão ou
++    // entrada ocorre historicamente depois do limite que o job vai regularizar.
++    const shift = r.rows[0].shift as string;
++    // Mesmo intervalo em todas as linhas mantém a ordem histórica e a igualdade
++    // entre resolved_at e closed_at das operações anteriores.
++    await pool.query(`UPDATE participations SET joined_at=joined_at-$2::interval,
++      arena_entered_at=arena_entered_at-$2::interval,finished_at=finished_at-$2::interval WHERE event_id=$1`, [c.eventId, shift]);
++    await pool.query(`UPDATE queue_entries SET entered_at=entered_at-$2::interval,
++      closed_at=closed_at-$2::interval WHERE event_id=$1`, [c.eventId, shift]);
++    await pool.query(`UPDATE service_sessions s SET called_at=called_at-$2::interval,resolved_at=resolved_at-$2::interval
++      FROM experiences x WHERE s.experience_id=x.id AND x.event_id=$1`, [c.eventId, shift]);
++    await pool.query(`UPDATE participation_profile_snapshots s SET captured_at=captured_at-$2::interval
++      FROM participations p WHERE s.participation_id=p.id AND p.event_id=$1`, [c.eventId, shift]);
++    await pool.query(`UPDATE evaluations v SET submitted_at=v.submitted_at-$2::interval,updated_at=v.updated_at-$2::interval,
++      first_comment_at=v.first_comment_at-$2::interval FROM participations p WHERE v.participation_id=p.id AND p.event_id=$1`, [c.eventId, shift]);
++  }
++  return at;
++}
++async function waitUntil(at: string) {
++  const until = Date.now() + 14000;
++  while (Date.now() < until) { if ((await pool.query("SELECT clock_timestamp()>=$1::timestamptz AS ended", [at])).rows[0].ended) return; await new Promise(done => setTimeout(done, 20)); }
++  assert.fail("Prazo PostgreSQL não alcançado.");
++}
++function sqlState(error: unknown): string | undefined {
++  if (!error || typeof error !== "object") return;
++  if ("code" in error && typeof error.code === "string") return error.code;
++  if ("cause" in error) return sqlState(error.cause);
++}
++function scheduler(): EventClosureScheduler { return new Scheduler(closure, { configuration: { enabled: true, intervalMs: 1000 } }); }
++async function assertExact(c: Context, at: string) {
++  const r = (await pool.query(`SELECT
++    (SELECT status='closed' FROM events WHERE id=$1) AS closed,
++    NOT EXISTS(SELECT 1 FROM participations WHERE event_id=$1 AND finish_reason LIKE 'automatic_%' AND finished_at<>$2::timestamptz) AS people,
++    NOT EXISTS(SELECT 1 FROM queue_entries WHERE event_id=$1 AND close_reason LIKE 'automatic_%' AND closed_at<>$2::timestamptz) AS queues,
++    NOT EXISTS(SELECT 1 FROM service_sessions s JOIN experiences x ON x.id=s.experience_id WHERE x.event_id=$1 AND s.cancel_reason LIKE 'automatic_%'
++      AND (s.resolved_at<>$2::timestamptz OR s.resolved_by_user_id IS NOT NULL)) AS services`, [c.eventId, at])).rows[0];
++  assert.deepEqual(r, { closed: true, people: true, queues: true, services: true });
++}
++
++for (const mode of ["normal", "controlled"] as const) test(`E08.9 PostgreSQL ${mode} encerra todos os correntes no prazo exato sem modificar histórico ou outro evento`, async () => {
++  const c = await context(), other = await context();
++  // Cria histórico real de absent e canceled em operações anteriores ao corte.
++  const canceled = await called(c); assert.equal((await withdraw(c, canceled.p, canceled.entry)).status, 200);
++  const absent = await called(c), absence = await resolve(c, absent.session, "absent"); assert.equal(absence.status, 200); assert.equal(absence.body.requeued, true);
++  assert.equal((await withdraw(c, absent.p, absence.body.newQueueEntry.id)).status, 200);
++  const data = await rich(c); await rich(other);
++  const at = await deadline(c, -2, mode), before = await state(c), otherBefore = await state(other), result = await closure.regularizeEvent(c.eventId);
++  assert.equal(result.kind, "closed"); if (result.kind !== "closed") assert.fail(); assert.equal(result.deadlineAt, at); assert.ok(result.executedAt > at);
++  await assertNoOpen(c); await assertExact(c, at); const after = await state(c);
++  for (const key of ["experiences", "stations", "snapshots", "audits", "idempotency"]) assert.deepEqual(after[key], before[key]);
++  for (const p of before.people) { const next = after.people.find((x: { id: string }) => x.id === p.id); if (["finished", "canceled"].includes(p.status)) assert.deepEqual(next, p);
++    else { assert.equal(next.status, "finished"); assert.equal(next.finish_reason, mode === "normal" ? "automatic_operational_deadline" : "automatic_admin_deadline"); assert.equal(next.current_queue_entry_id, null); assert.equal(next.external_queue_order, p.external_queue_order); } }
++  for (const s of before.services) { const next = after.services.find((x: { id: string }) => x.id === s.id); if (s.status !== "pending") assert.deepEqual(next, s); else { assert.equal(next.status, "canceled"); assert.equal(next.resolved_by_user_id, null); } }
++  for (const q of before.queues) if (q.status === "closed") assert.deepEqual(after.queues.find((x: { id: string }) => x.id === q.id), q);
++  for (const key of ["closure_mode", "closure_requested_at", "admin_deadline_at", "operational_deadline_at", "official_ends_at", "external_last_order"]) assert.deepEqual(after.event[key], before.event[key]);
++  assert.equal(after.services.find((s: { id: string }) => s.id === data.history.session).status, "completed"); assert.deepEqual(await state(other), otherBefore);
++  const closedState = await state(c); assert.deepEqual(await closure.regularizeEvent(c.eventId), { kind: "already_closed" }); assert.deepEqual(await state(c), closedState);
++});
++test("E08.9 PostgreSQL controlado real preserva waiting externas finalizadas e auditoria E08.8", async () => {
++  const c = await context(), data = await rich(c), body = await controlled(2); assert.equal((await close(c, body)).status, 200);
++  const before = await state(c), outside = before.people.find((p: { id: string }) => p.id === data.outside.participationId); await waitUntil(body.controlledUntilAt);
++  assert.equal((await closure.regularizeEvent(c.eventId)).kind, "closed"); const after = await state(c);
++  assert.deepEqual(after.people.find((p: { id: string }) => p.id === outside.id), outside); assert.equal(outside.finish_reason, "admin_controlled_external_wait_closed");
++  assert.deepEqual(after.audits, before.audits); assert.deepEqual(after.idempotency, before.idempotency); await assertNoOpen(c); await assertExact(c, body.controlledUntilAt);
++});
++test("E08.9 PostgreSQL imediato E08.8 concluído permanece byte a byte igual", async () => {
++  const c = await context(); await rich(c); assert.equal((await close(c)).status, 200); const before = await state(c);
++  assert.deepEqual(await closure.regularizeEvent(c.eventId), { kind: "already_closed" }); assert.deepEqual(await state(c), before);
++});
++test("E08.9 PostgreSQL prazo Admin maior que original é rejeitado pelo schema efetivo", async () => {
++  const c = await context(), before = await state(c);
++  await assert.rejects(pool.query(`UPDATE events SET closure_mode='controlled',closure_requested_at=clock_timestamp(),
++    admin_deadline_at=operational_deadline_at+interval '1 second' WHERE id=$1`, [c.eventId]), (e: unknown) => !!e && typeof e === "object" && "code" in e && e.code === "23514");
++  assert.deepEqual(await state(c), before);
++});
++for (const mode of ["normal", "controlled"] as const) test(`E08.9 PostgreSQL ${mode} antes do prazo não altera nada`, async () => {
++  const c = await context(); await rich(c); await deadline(c, 600, mode); const before = await state(c);
++  assert.deepEqual(await closure.regularizeEvent(c.eventId), { kind: "not_due" }); assert.deepEqual(await state(c), before);
++});
++test("E08.9 PostgreSQL instante exato tem comparação inclusiva no banco", async () => {
++  const c = await context(); await person(c); const at = await deadline(c, 0); await waitUntil(at); assert.equal((await closure.regularizeEvent(c.eventId)).kind, "closed"); await assertExact(c, at);
++  assert.equal((await pool.query("SELECT $1::timestamptz <= $1::timestamptz AS inclusive", [at])).rows[0].inclusive, true);
++});
++test("E08.9 PostgreSQL evento futuro sem participantes não é encerrado", async () => {
++  const c = await context(); await pool.query("UPDATE events SET status='scheduled',starts_at=clock_timestamp()+interval '1 hour',official_ends_at=clock_timestamp()+interval '2 hours',operational_deadline_at=clock_timestamp()+interval '150 minutes' WHERE id=$1", [c.eventId]);
++  const before = await state(c); assert.deepEqual(await closure.regularizeEvent(c.eventId), { kind: "not_due" }); assert.deepEqual(await state(c), before);
++});
++for (const resources of ["none", "unavailable", "no-staff"] as const) test(`E08.9 PostgreSQL vencido sem prontidão ${resources} fecha`, async () => {
++  const c = await context();
++  if (resources === "none") { await pool.query("DELETE FROM stations WHERE id=$1", [c.stationId]); await pool.query("DELETE FROM experiences WHERE id=$1", [c.experienceId]); }
++  else if (resources === "unavailable") await pool.query("UPDATE stations SET availability='unavailable' WHERE id=$1", [c.stationId]);
++  else await pool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE event_id=$1", [c.eventId]);
++  const at = await deadline(c); assert.equal((await closure.regularizeEvent(c.eventId)).kind, "closed"); await assertExact(c, at); await assertNoOpen(c);
++});
++test("E08.9 PostgreSQL atraso de 40 dias não amplia os 30 dias de avaliação e preserva avaliação existente", async () => {
++  const c = await context(), evaluated = await called(c); assert.equal((await resolve(c, evaluated.session, "complete")).status, 200);
++  const terminal = evaluated.p;
++  await pool.query("UPDATE participations SET status='finished',finished_at=clock_timestamp(),finish_reason='fixture_terminal' WHERE id=$1", [terminal.participationId]);
++  await pool.query("INSERT INTO evaluations(id,participation_id,rating,comment,submitted_at,updated_at,first_comment_at) VALUES($1,$2,5,'histórico',statement_timestamp(),statement_timestamp(),statement_timestamp())", [randomUUID(), terminal.participationId]);
++  const data = await rich(c), at = await deadline(c, -40 * 86400);
++  const evaluation = (await pool.query("SELECT to_jsonb(v) AS value FROM evaluations v WHERE participation_id=$1", [terminal.participationId])).rows[0].value;
++  assert.equal((await closure.regularizeEvent(c.eventId)).kind, "closed"); await assertExact(c, at);
++  const eligible = (await pool.query(`SELECT p.finished_at+interval '30 days'<clock_timestamp() AS expired,
++    EXISTS(SELECT 1 FROM service_sessions s JOIN queue_entries q ON q.id=s.queue_entry_id WHERE q.participation_id=p.id AND s.status='completed') AS completed
++    FROM participations p WHERE p.id=$1`, [data.history.p.participationId])).rows[0]; assert.deepEqual(eligible, { expired: true, completed: true });
++  assert.deepEqual((await pool.query("SELECT to_jsonb(v) AS value FROM evaluations v WHERE participation_id=$1", [terminal.participationId])).rows[0].value, evaluation);
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM evaluations v JOIN participations p ON p.id=v.participation_id WHERE p.event_id=$1", [c.eventId])).rows[0].n, 1);
++});
++test("E08.9 PostgreSQL inicialização e reinicialização tardias regularizam sem requisição", async () => {
++  const c = await context(); await person(c); await deadline(c); const first = scheduler();
++  try { await first.onApplicationBootstrap(); await assertNoOpen(c); } finally { await first.beforeApplicationShutdown(); }
++  const next = await context(); await person(next); await deadline(next); const restarted = scheduler();
++  try { await restarted.onApplicationBootstrap(); await assertNoOpen(next); const before = await state(c); await restarted.runCycle(); assert.deepEqual(await state(c), before); } finally { await restarted.beforeApplicationShutdown(); }
++});
++test("E08.9 PostgreSQL duas instâncias serializam o mesmo evento sem duplicar efeitos", async () => {
++  const c = await context(); await rich(c); await deadline(c); const other = new Service(drizzle(pool, { schema }));
++  const [a, b] = await ordered(() => closure.regularizeEvent(c.eventId), () => other.regularizeEvent(c.eventId)); assert.equal(a.kind, "closed"); assert.equal(b.kind, "already_closed"); await assertNoOpen(c);
++  const before = await state(c); await Promise.all([closure.regularizeEvent(c.eventId), other.regularizeEvent(c.eventId)]); assert.deepEqual(await state(c), before);
++});
++test("E08.9 PostgreSQL evento bloqueado é pulado no ciclo e outro evento avança independentemente", async () => {
++  const c = await context(), other = await context(); await person(c); await person(other); await deadline(c); await deadline(other); const lock = await pool.connect();
++  try { await lock.query("BEGIN"); await lock.query("SELECT id FROM events WHERE id=$1 FOR UPDATE", [c.eventId]);
++    assert.deepEqual(await closure.regularizeEvent(c.eventId, true), { kind: "unavailable" }); assert.equal((await closure.regularizeEvent(other.eventId, true)).kind, "closed"); await assertNoOpen(other);
++    assert.equal((await state(c)).event.status, "open"); await lock.query("COMMIT"); assert.equal((await closure.regularizeEvent(c.eventId, true)).kind, "closed");
++  } finally { await lock.query("ROLLBACK"); lock.release(); }
++});
++for (const lockName of ["event", "station", "participation"] as const) test(`E08.9 PostgreSQL prazo alcançado durante espera de ${lockName} é revalidado`, async () => {
++  const c = await context(); await person(c); const at = await deadline(c, 4), lock = await pool.connect(); let pending: ReturnType<EventClosureService["regularizeEvent"]> | undefined;
++  try { await lock.query("BEGIN");
++    await lock.query(lockName === "event" ? "SELECT id FROM events WHERE id=$1 FOR UPDATE" : lockName === "station" ? "SELECT id FROM stations WHERE id=$1 FOR UPDATE" : "SELECT id FROM participations WHERE event_id=$1 FOR UPDATE", [lockName === "station" ? c.stationId : c.eventId]);
++    const pid = (await lock.query("SELECT pg_backend_pid() AS pid")).rows[0].pid; pending = closure.regularizeEvent(c.eventId); pending.catch(() => undefined);
++    await blocked(pid); await waitPast(at, pid); await lock.query("COMMIT"); assert.equal((await pending).kind, "closed"); await assertExact(c, at);
++  } finally { await lock.query("ROLLBACK"); await Promise.allSettled([pending]); lock.release(); }
++});
++for (const phase of ["event", "services", "queues", "people"] as const) test(`E08.9 PostgreSQL SQL real após ${phase} reverte integralmente e permite retry`, async () => {
++  const c = await context(); await rich(c); await deadline(c); const before = await state(c), original = database.transaction.bind(database) as typeof database.transaction, dialect = new PgDialect(); let reached = false;
++  database.transaction = (callback, config) => original(async tx => { const execute = tx.execute.bind(tx); tx.execute = (async (...args: Parameters<typeof tx.execute>) => {
++    const q = args[0], text = typeof q === "string" ? q : dialect.sqlToQuery(q.getSQL()).sql, result = await execute(...args);
++    const current = text.includes("WITH decision") ? "event" : text.includes("WITH canceled") ? "services" : text.includes("WITH closed") ? "queues" : text.includes("WITH finished") ? "people" : "";
++    if (current === phase) { assert.ok(result.rows.length > 0); if (phase !== "event") assert.ok(Number((result.rows[0] as { count: number }).count) > 0);
++      const inside = (await execute<{ closed: boolean }>(sql`SELECT status='closed' AS closed FROM events WHERE id=${c.eventId}`)).rows[0]; assert.equal(inside.closed, true);
++      reached = true; await execute(sql`SELECT 1/0`); } return result;
++  }) as typeof tx.execute; return callback(tx); }, config);
++  try { await assert.rejects(closure.regularizeEvent(c.eventId), error => sqlState(error) === "22012"); } finally { database.transaction = original; }
++  assert.equal(reached, true); assert.deepEqual(await state(c), before); assert.equal((await audit(c)).length, 0);
++  assert.equal((await closure.regularizeEvent(c.eventId)).kind, "closed"); await assertNoOpen(c);
++});
++for (const issue of ["pointer", "waiting-called", "closed-current"] as const) test(`E08.9 PostgreSQL inconsistência ${issue} aborta sem sucesso falso`, async () => {
++  const c = await context(), p = await queued(c); await deadline(c);
++  if (issue === "pointer") await pool.query("UPDATE participations SET current_queue_entry_id=NULL WHERE id=$1", [p.p.participationId]);
++  else if (issue === "waiting-called") await pool.query("UPDATE queue_entries SET status='called' WHERE id=$1", [p.entry]);
++  else await pool.query("UPDATE events SET status='closed' WHERE id=$1", [c.eventId]);
++  const before = await state(c); await assert.rejects(closure.regularizeEvent(c.eventId), /EVENT_CLOSURE_INTEGRITY/); assert.deepEqual(await state(c), before);
++});
++test("E08.9 PostgreSQL falha de integridade em um evento não impede ciclo recuperar os demais", async () => {
++  const bad = await context(), good = await context(), p = await queued(bad); await person(good); await deadline(bad); await deadline(good);
++  await pool.query("UPDATE participations SET current_queue_entry_id=NULL WHERE id=$1", [p.p.participationId]); const before = await state(bad), job = scheduler();
++  try { await job.runCycle(); await assertNoOpen(good); assert.deepEqual(await state(bad), before);
++    await pool.query("UPDATE participations SET current_queue_entry_id=$2 WHERE id=$1", [p.p.participationId, p.entry]); await job.runCycle(); await assertNoOpen(bad);
++  } finally { await job.beforeApplicationShutdown(); }
++});
++
++for (const reference of ["experience", "station"] as const) test(`E08.9 PostgreSQL FK rejeita referência cruzada de ${reference} sem desabilitar integridade`, async () => {
++  const c = await context(), other = await context(), p = await called(c), before = await state(c);
++  await assert.rejects(pool.query(reference === "experience" ? "UPDATE queue_entries SET experience_id=$2 WHERE id=$1" : "UPDATE service_sessions SET station_id=$2 WHERE id=$1",
++    [reference === "experience" ? p.entry : p.session, reference === "experience" ? other.experienceId : other.stationId]),
++  (e: unknown) => !!e && typeof e === "object" && "code" in e && e.code === "23503");
++  assert.deepEqual(await state(c), before);
++});
++test("E08.9 PostgreSQL descoberta keyset percorre mais de uma página sem omissões ou duplicações", async () => {
++  const expected = new Set<string>(); for (let i = 0; i < 101; i++) expected.add(await bareEvent());
++  let afterId: string | null = null; const seen = new Set<string>();
++  for (;;) { const ids = await closure.findCandidates(afterId); assert.ok(ids.length <= 100);
++    assert.deepEqual(ids, [...ids].sort()); for (const id of ids) { assert.equal(seen.has(id), false); seen.add(id); if (afterId) assert.ok(id > afterId); }
++    if (ids.length < 100) break; afterId = ids[ids.length - 1];
++  }
++  for (const id of expected) assert.equal(seen.has(id), true);
++});
++
++for (const first of ["job", "operation"] as const) for (const name of ["E03", "E07.1", "E07.4", "E07.5", "E07.6", "E07.3", "E08.5", "E08.6", "E08.7", "E08.8"] as const)
++  test(`E08.9 PostgreSQL ${name} versus job com ${first} primeiro observa lock e preserva vencedor`, async () => {
++    const c = await context(), entrant = name === "E03" ? await readyEntrant() : undefined;
++    const pending = name === "E07.5" || name === "E07.6" ? await called(c) : undefined;
++    const waiting = name === "E07.4" || name === "E07.3" ? await queued(c) : undefined;
++    const idle = name === "E07.1" ? await person(c) : undefined; if (name === "E08.6") await person(c, "waiting");
++    const schedule = name === "E08.7" ? await proposal(c) : undefined;
++    // Operação vencedora valida antes do prazo; seu COMMIT é retido até o prazo.
++    const at = await deadline(c, first === "operation" ? 4 : -2);
++    const operation = async (): Promise<string> => {
++      if (name === "E03") { assert.ok(entrant); return (await admit(c, entrant)).kind; }
++      if (name === "E07.1") { assert.ok(idle); return (await join(c, idle)).kind; }
++      const r = name === "E07.4" ? await call(c) : name === "E07.5" || name === "E07.6" ? await resolve(c, pending!.session, name === "E07.5" ? "complete" : "absent")
++        : name === "E07.3" ? await withdraw(c, waiting!.p, waiting!.entry) : name === "E08.5" ? await station(c) : name === "E08.6" ? await external(c)
++          : name === "E08.7" ? await patch(c, schedule!) : await close(c, immediate());
++      if (r.status >= 400) { assert.equal(r.status, 409, JSON.stringify(r.body)); return r.body.code as string; } return String(r.status);
++    };
++    let code: string, result: Awaited<ReturnType<EventClosureService["regularizeEvent"]>>;
++    if (first === "job") [result, code] = await ordered(() => closure.regularizeEvent(c.eventId), operation);
++    else [code, result] = await ordered(operation, () => closure.regularizeEvent(c.eventId), pid => waitPast(at, pid));
++    const before = { E03: "created", "E07.1": "created", "E07.4": "201", "E07.5": "200", "E07.6": "200", "E07.3": "200", "E08.5": "200", "E08.6": "200", "E08.7": "200", "E08.8": "200" };
++    const after = { E03: "blocked", "E07.1": "participation_not_active", "E07.4": "EVENT_OPERATION_ENDED", "E07.5": "SERVICE_NOT_PENDING", "E07.6": "SERVICE_NOT_PENDING", "E07.3": "PARTICIPATION_NOT_ACTIVE", "E08.5": "EVENT_OPERATION_ENDED", "E08.6": "EVENT_REGISTRATION_CLOSED", "E08.7": "EVENT_TIME_CHANGE_CLOSED", "E08.8": "EVENT_ALREADY_CLOSED" };
++    assert.equal(code, first === "job" ? after[name] : before[name]);
++    // E08.7 move o prazo para o futuro; E08.8 imediato já faz a limpeza.
++    assert.equal(result.kind, first === "operation" && name === "E08.7" ? "not_due" : first === "operation" && name === "E08.8" ? "already_closed" : "closed");
++    if (result.kind !== "not_due") await assertNoOpen(c);
++    if (pending) assert.equal((await state(c)).services.find((s: { id: string }) => s.id === pending.session).status, first === "operation" ? name === "E07.5" ? "completed" : "absent" : "canceled");
++  });
+diff --git a/backend/test/unit/event-closure-scheduler.test.ts b/backend/test/unit/event-closure-scheduler.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..645589df90a3aadefc5be6befe53d0ae37722320
+--- /dev/null
++++ b/backend/test/unit/event-closure-scheduler.test.ts
+@@ -0,0 +1,80 @@
++import "reflect-metadata";
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { Module } from "@nestjs/common";
++import { NestFactory } from "@nestjs/core";
++import { EventClosureService } from "../../src/events/event-closure.service";
++import { EventClosurePolicy, eventClosureConfiguration } from "../../src/events/event-closure.policy";
++import { EventClosureScheduler } from "../../src/events/event-closure.scheduler";
++
++function harness(enabled = true) {
++  const cursors: Array<string | null> = [], attempted: string[] = [], logs: unknown[] = [];
++  let pages = [["a", "b"]], failEvent = "", failDiscovery = false;
++  let held: Promise<void> | undefined;
++  const service = {
++    async findCandidates(cursor: string | null) { cursors.push(cursor); if (failDiscovery) throw new Error("PRIVATE_CREDENTIAL"); return pages.shift() ?? []; },
++    async regularizeEvent(id: string, skip: boolean) { assert.equal(skip, true); attempted.push(id); await held; if (id === failEvent) throw new Error("PRIVATE_PERSON"); return { kind: "closed" as const }; },
++  };
++  const scheduler = new EventClosureScheduler(service as unknown as EventClosureService, { configuration: { enabled, intervalMs: 1000 } });
++  const logger = { error(value: unknown) { logs.push(value); }, log(value: unknown) { logs.push(value); } };
++  Reflect.set(scheduler, "logger", logger);
++  return { scheduler, service, cursors, attempted, logs, pages(value: string[][]) { pages = value; }, fail(id: string) { failEvent = id; },
++    discoveryError(value: boolean) { failDiscovery = value; }, hold(value: Promise<void>) { held = value; } };
++}
++test("E08.9 configuração valida intervalo e habilita produção inclusive com flag de teste false", () => {
++  assert.deepEqual(eventClosureConfiguration({ NODE_ENV: "production", EVENT_CLOSURE_JOB_TEST_ENABLED: "false" }), { enabled: true, intervalMs: 30000 });
++  assert.equal(eventClosureConfiguration({ NODE_ENV: "test" }).enabled, false);
++  assert.equal(eventClosureConfiguration({ NODE_ENV: "test", EVENT_CLOSURE_JOB_TEST_ENABLED: "true" }).enabled, true);
++  for (const value of ["", "0", "999", "3600001", "1.5", "NaN", "1000ms", "-1", " 1000 "]) assert.throws(() => eventClosureConfiguration({ EVENT_CLOSURE_INTERVAL_MS: value }), /INTERVAL/);
++  for (const value of ["1000", "3600000"]) assert.equal(eventClosureConfiguration({ EVENT_CLOSURE_INTERVAL_MS: value }).intervalMs, Number(value));
++  assert.throws(() => eventClosureConfiguration({ EVENT_CLOSURE_JOB_TEST_ENABLED: "yes" }), /TEST_ENABLED/);
++});
++test("E08.9 startup, período e shutdown usam timer sem deixar execução futura", async t => {
++  t.mock.timers.enable({ apis: ["setTimeout"] }); const f = harness();
++  try {
++    await f.scheduler.onApplicationBootstrap(); assert.deepEqual(f.attempted, ["a", "b"]);
++    f.pages([["c"]]); t.mock.timers.tick(1000); await f.scheduler.runCycle(); assert.deepEqual(f.attempted, ["a", "b", "c"]);
++    await f.scheduler.beforeApplicationShutdown(); t.mock.timers.tick(5000); assert.equal(f.cursors.length, 2);
++    await f.scheduler.runCycle(); assert.equal(f.cursors.length, 2);
++  } finally { await f.scheduler.beforeApplicationShutdown(); t.mock.timers.reset(); }
++});
++test("E08.9 ambiente de testes não inicia agendamento implicitamente", async t => {
++  t.mock.timers.enable({ apis: ["setTimeout"] }); const f = harness(false);
++  try { await f.scheduler.onApplicationBootstrap(); t.mock.timers.tick(5000); assert.deepEqual(f.cursors, []); }
++  finally { await f.scheduler.beforeApplicationShutdown(); t.mock.timers.reset(); }
++});
++test("E08.9 ciclos concorrentes compartilham promessa; shutdown espera evento corrente e para os demais", async () => {
++  const f = harness(); let release!: () => void; f.hold(new Promise<void>(yes => { release = yes; }));
++  const a = f.scheduler.runCycle(), b = f.scheduler.runCycle(); assert.equal(a, b);
++  await Promise.resolve(); assert.deepEqual(f.attempted, ["a"]);
++  let stopped = false; const shutdown = f.scheduler.beforeApplicationShutdown().then(() => { stopped = true; });
++  await Promise.resolve(); assert.equal(stopped, false); release(); await Promise.all([a, b, shutdown]);
++  assert.deepEqual(f.attempted, ["a"]); assert.equal(stopped, true);
++});
++test("E08.9 falha individual não impede outros eventos, recuperação ou retry posterior", async () => {
++  const f = harness(); f.fail("a"); await f.scheduler.runCycle(); assert.deepEqual(f.attempted, ["a", "b"]);
++  f.fail(""); f.pages([["a"]]); await f.scheduler.runCycle(); assert.deepEqual(f.attempted, ["a", "b", "a"]);
++  assert.equal(JSON.stringify(f.logs).includes("PRIVATE"), false);
++  assert.ok(f.logs.some(log => typeof log === "object" && log !== null && "event" in log && log.event === "EVENT_CLOSURE_EVENT_FAILED")); await f.scheduler.beforeApplicationShutdown();
++});
++test("E08.9 descoberta falha sem rejeição não observada e próximo ciclo recupera", async () => {
++  const f = harness(); f.discoveryError(true); await f.scheduler.runCycle(); assert.deepEqual(f.attempted, []);
++  f.discoveryError(false); await f.scheduler.runCycle(); assert.deepEqual(f.attempted, ["a", "b"]);
++  assert.deepEqual(f.logs[0], "EVENT_CLOSURE_CYCLE_FAILED"); await f.scheduler.beforeApplicationShutdown();
++});
++test("E08.9 paginação keyset avança após erro sem repetir página infinita", async () => {
++  const f = harness(), first = Array.from({ length: 100 }, (_, i) => `id-${i}`); f.pages([first, ["last"]]); f.fail("id-50");
++  await f.scheduler.runCycle(); assert.deepEqual(f.cursors, [null, "id-99"]); assert.equal(f.attempted.length, 101); await f.scheduler.beforeApplicationShutdown();
++});
++test("E08.9 nova instância recupera eventos após reinicialização", async () => {
++  const first = harness(); await first.scheduler.runCycle(); await first.scheduler.beforeApplicationShutdown();
++  const next = harness(); next.pages([["late-event"]]); await next.scheduler.runCycle(); assert.deepEqual(next.attempted, ["late-event"]); await next.scheduler.beforeApplicationShutdown();
++});
++test("E08.9 ciclo de vida Nest aguarda shutdown antes da liberação do banco", async () => {
++  const f = harness(); const order: string[] = [];
++  @Module({ providers: [{ provide: EventClosureService, useValue: f.service }, { provide: EventClosurePolicy, useValue: { configuration: { enabled: true, intervalMs: 1000 } } },
++    EventClosureScheduler, { provide: "pool-lifecycle", useValue: { onApplicationShutdown() { order.push("pool-ended"); assert.equal(Reflect.get(app.get(EventClosureScheduler), "stopped"), true); } } }] })
++  class LifecycleModule {}
++  const app = await NestFactory.createApplicationContext(LifecycleModule, { logger: false });
++  assert.deepEqual(f.attempted, ["a", "b"]); await app.close(); assert.deepEqual(order, ["pool-ended"]);
++});
+diff --git a/backend/test/unit/event-closure.test.ts b/backend/test/unit/event-closure.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..55af038a59314dd306b36383d1db17bdfb6f0d0b
+--- /dev/null
++++ b/backend/test/unit/event-closure.test.ts
+@@ -0,0 +1,89 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { drizzle } from "drizzle-orm/node-postgres";
++import type { Client } from "pg";
++import * as schema from "../../src/database/schema";
++import { EventClosureService, AUTOMATIC_ADMIN_REASON, AUTOMATIC_OPERATIONAL_REASON } from "../../src/events/event-closure.service";
++
++const deadlineAt = "2026-11-03T15:00:00.123456Z", executedAt = "2026-11-04T15:00:00.987654Z";
++function fixture(options: { missing?: boolean; status?: string; due?: boolean; empty?: boolean; invalid?: boolean; pointers?: boolean;
++  reason?: string; fail?: string; wrong?: string } = {}) {
++  const queries: Array<{ text: string; params: unknown[] }> = [];
++  const count = options.empty ? 0 : 1;
++  const database = drizzle({ async query(config: { text: string }, params: unknown[]) {
++    const text = config.text; queries.push({ text, params });
++    if (/^(begin|commit|rollback)/.test(text)) return { rows: [] };
++    if (text.includes("SELECT e.id FROM events")) return { rows: [{ id: "event-a" }, { id: "event-b" }] };
++    if (text.includes("SELECT status FROM events")) return { rows: options.missing ? [] : [{ status: options.status ?? "open" }] };
++    if (text.includes("AS valid")) return { rows: [{ valid: !options.invalid, pointers: options.pointers ?? false }] };
++    const phase = text.includes("WITH decision") ? "event" : text.includes("WITH canceled") ? "services"
++      : text.includes("WITH closed") ? "queues" : text.includes("WITH finished") ? "people" : undefined;
++    if (phase && options.fail === phase) throw new Error("SQL_FAILURE");
++    if (phase === "event") return { rows: options.due === false ? [] : [{ deadlineAt, executedAt, reason: options.reason ?? AUTOMATIC_OPERATIONAL_REASON }] };
++    if (phase) return { rows: [{ count: options.wrong === phase ? count + 1 : count }] };
++    if (text.includes("FROM (SELECT")) return { rows: [{ count }] };
++    throw new Error(`SQL inesperado ${text}`);
++  } } as unknown as Client, { schema });
++  return { service: new EventClosureService(database), queries };
++}
++
++test("E08.9 regulariza em READ COMMITTED e preserva prazo lógico distinto da execução", async () => {
++  const f = fixture();
++  assert.deepEqual(await f.service.regularizeEvent("event"), { kind: "closed", deadlineAt, executedAt, people: 1, queues: 1, services: 1 });
++  assert.equal(f.queries[0].text, "begin isolation level read committed"); assert.equal(f.queries.at(-1)?.text, "commit");
++  const locks = f.queries.filter(q => q.text.includes("FOR UPDATE")); assert.equal(locks.length, 6);
++  for (const [i, name] of ["events", "experiences", "stations", "participations", "queue_entries", "service_sessions"].entries()) assert.ok(locks[i].text.includes(name));
++  for (const q of locks.slice(1)) { assert.match(q.text, /ORDER BY/); assert.doesNotMatch(q.text, /SKIP LOCKED/); }
++  assert.ok(f.queries.findIndex(q => q.text.includes("AS valid")) < f.queries.findIndex(q => q.text.includes("WITH decision")));
++});
++test("E08.9 cancela sem ator inventado, ausência ou conclusão e fecha somente correntes", async () => {
++  const f = fixture(); await f.service.regularizeEvent("event");
++  const mutations = f.queries.filter(q => /WITH (canceled|closed|finished)/.test(q.text));
++  assert.equal(mutations.length, 3);
++  for (const q of mutations) { assert.match(q.text, /LEAST\(e.operational_deadline_at,e.admin_deadline_at\)/); assert.ok(q.params.includes(AUTOMATIC_OPERATIONAL_REASON)); }
++  assert.match(mutations[0].text, /resolved_by_user_id=NULL/); assert.match(mutations[0].text, /s.status='pending'/);
++  assert.match(mutations[1].text, /q.status IN \('waiting','called'\)/);
++  assert.match(mutations[2].text, /p.status IN \('waiting','active'\)/); assert.match(mutations[2].text, /current_queue_entry_id=NULL/);
++  assert.equal(f.queries.some(q => /INSERT INTO|status='completed'|status='absent'|SET availability|SET closure_mode|last_queue_order=|external_last_order=/.test(q.text)), false);
++});
++test("E08.9 relógio decisivo após locks usa limite inclusivo e LEAST mesmo em dados incoerentes", async () => {
++  const f = fixture({ reason: AUTOMATIC_ADMIN_REASON }); await f.service.regularizeEvent("event");
++  const decision = f.queries.find(q => q.text.includes("WITH decision"))!;
++  assert.match(decision.text, /clock_timestamp\(\)/); assert.match(decision.text, /LEAST\(e.operational_deadline_at,e.admin_deadline_at\)<=d.at/);
++  assert.match(decision.text, /updated_at=d.at/); assert.match(decision.text, /HH24:MI:SS.US/);
++  assert.ok(f.queries.find(q => q.text.includes("WITH finished"))!.params.includes(AUTOMATIC_ADMIN_REASON));
++  assert.ok(AUTOMATIC_ADMIN_REASON.length <= 40 && AUTOMATIC_OPERATIONAL_REASON.length <= 40);
++});
++for (const status of ["open", "scheduled", "closing"]) test(`E08.9 ${status} antes do prazo não muda estado`, async () => {
++  const f = fixture({ due: false, status }); assert.deepEqual(await f.service.regularizeEvent("event"), { kind: "not_due" });
++  assert.equal(f.queries.some(q => /WITH (canceled|closed|finished)/.test(q.text)), false);
++});
++test("E08.9 evento vazio vencido fecha sem Staff, capacidade ou participação", async () => {
++  const f = fixture({ empty: true }); const r = await f.service.regularizeEvent("event");
++  assert.deepEqual(r, { kind: "closed", deadlineAt, executedAt, people: 0, queues: 0, services: 0 });
++  assert.equal(f.queries.some(q => /user_roles|sessions WHERE|availability='available'/.test(q.text)), false);
++});
++test("E08.9 evento fechado íntegro é no-op inclusive para Admin imediato", async () => {
++  const f = fixture({ status: "closed", empty: true }); assert.deepEqual(await f.service.regularizeEvent("event"), { kind: "already_closed" });
++  assert.equal(f.queries.some(q => q.text.includes("WITH decision")), false);
++});
++for (const options of [{ status: "closed" }, { status: "closed", empty: true, pointers: true }, { invalid: true }]) test(`E08.9 integridade não é ocultada ${JSON.stringify(options)}`, async () => {
++  const f = fixture(options); await assert.rejects(f.service.regularizeEvent("event"), /EVENT_CLOSURE_INTEGRITY/);
++  assert.equal(f.queries.at(-1)?.text, "rollback"); assert.equal(f.queries.some(q => q.text.includes("WITH decision")), false);
++});
++test("E08.9 evento ausente/bloqueado não adquire recursos ou produz efeitos", async () => {
++  const f = fixture({ missing: true }); assert.deepEqual(await f.service.regularizeEvent("event", true), { kind: "unavailable" });
++  assert.match(f.queries[1].text, /FOR UPDATE SKIP LOCKED/); assert.equal(f.queries.length, 3);
++});
++for (const phase of ["event", "services", "queues", "people"]) test(`E08.9 erro SQL em ${phase} reverte transação`, async () => {
++  const f = fixture({ fail: phase }); await assert.rejects(f.service.regularizeEvent("event")); assert.equal(f.queries.at(-1)?.text, "rollback");
++  assert.equal(f.queries.some(q => q.text === "commit"), false);
++});
++for (const wrong of ["services", "queues", "people"]) test(`E08.9 contagem ${wrong} divergente aborta todos os efeitos`, async () => {
++  const f = fixture({ wrong }); await assert.rejects(f.service.regularizeEvent("event"), /EVENT_CLOSURE_INTEGRITY/); assert.equal(f.queries.at(-1)?.text, "rollback");
++});
++test("E08.9 descoberta paginada inclui fechado incompatível e limita resposta", async () => {
++  const f = fixture(); assert.deepEqual(await f.service.findCandidates(null), ["event-a", "event-b"]); await f.service.findCandidates("event-b");
++  assert.ok(f.queries[0].params.includes(100)); assert.ok(f.queries[1].params.includes("event-b"));
++  assert.match(f.queries[0].text, /e.status='closed'/); assert.match(f.queries[0].text, /ORDER BY e.id LIMIT/);
++});
+diff --git a/docs/E08_9_IMPLEMENTACAO.md b/docs/E08_9_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..f42cc634ac92a4b785365eea1442d5cf3343829e
+--- /dev/null
++++ b/docs/E08_9_IMPLEMENTACAO.md
+@@ -0,0 +1,266 @@
++# E08.9 — Regularização automática e idempotente de encerramentos
++
++Implementação em 03/11/2026 na branch `feature/events-participations`, base
++`03fd90b17efb9ad475aa23e07b6689e511c63092` (`feat(events): implementar encerramento
++administrativo de eventos`). Antes das edições, branch/HEAD/histórico/índice/working
++tree e arquivos não rastreados conferidos: E08.8 commitada, árvore limpa e índice
++sem alterações. Nenhuma mudança preexistente incorporada. A aprovação manual
++anterior de 530 testes PostgreSQL é a registrada pelo responsável na E08.8.
++
++## Execução interna e regra temporal
++
++EventClosureService integra o EventsModule existente e não expõe endpoint HTTP.
++EventClosureScheduler executa um ciclo no OnApplicationBootstrap e agenda o
++seguinte por setTimeout depois de terminar cada ciclo. Reinicialização repete a
++descoberta dos vencidos, independentemente de requisições de pessoas ou Staff.
++Reutiliza NestJS, Node, Drizzle e o pool atual, sem dependências ou migrations.
++
++O prazo definitivo é `LEAST(events.operational_deadline_at, events.admin_deadline_at)`.
++No PostgreSQL, LEAST ignora o argumento NULL; sem prazo Admin vale o operacional.
++Elegibilidade inclusiva: prazo <= clock_timestamp(), reavaliada depois de todos os
++locks, no próprio UPDATE decisivo. Status scheduled/open/closing defasado não
++prolonga a janela; prontidão, Staff, experiências e capacidade não condicionam o
++encerramento. Antes do prazo, a transação não altera registros.
++
++No normal, preserva os campos de origem administrativa NULL; no controlado,
++preserva closure_mode/closure_requested_at/admin_deadline_at e encerra os active
++restantes, inclusive sem fila. Waiting externas já finalizadas pela E08.8 não são
++reescritas: conservam `admin_controlled_external_wait_closed` e seu timestamp.
++Imediato já fechado e íntegro é no-op. Não há segunda intenção Admin implícita,
++mudança de prazo original, reabertura ou nova regra de admissões.
++
++## Estados, motivos e instantes
++
++Uma transação por evento efetiva todos os efeitos ou nenhum:
++
++| Registro corrente | Efeito definitivo |
++| --- | --- |
++| service_sessions pending | canceled, resolved_by_user_id=NULL |
++| queue_entries waiting/called | closed |
++| participations waiting/active | finished, current_queue_entry_id=NULL |
++| events scheduled/open/closing vencido | closed |
++
++Motivo comum às linhas afetadas: `automatic_operational_deadline` sem origem Admin
++ou `automatic_admin_deadline` com origem Admin. Ambos cabem em varchar(40) e são
++distintos de admin_immediate e de saídas voluntárias. O schema/migration 0004
++permite resolved_by_user_id NULL no cancelamento: nenhum Admin/Staff é inventado.
++
++finished_at, closed_at e resolved_at automáticos recebem o **prazo efetivo**,
++diretamente em SQL. Esse é o instante lógico do fim operacional, não prova de
++permanência física até a execução tardia nem uma saída voluntária. updated_at do
++evento recebe o clock_timestamp real da decisão de execução. O resultado interno
++closed retorna deadlineAt e executedAt separadamente, formatados no PostgreSQL
++em UTC com seis casas; não há passagem por Date ou perda de microssegundos.
++Não promete igualdade entre esse instante e o COMMIT.
++
++Assim, job 40 dias atrasado não reinicia/amplia os 30 dias contados de finished_at
++para primeiro envio de avaliação. Conclusões reais anteriores são preservadas;
++nenhuma conclusão, ausência, avaliação ou contador de conclusão é criado. Não
++implementa endpoint de elegibilidade/avaliação ou navegação do app.
++
++Preserva integralmente participações finished/canceled, entradas closed,
++atendimentos completed/absent/canceled, ordens bigint/FIFO, snapshots, avaliações,
++contadores, flags de fila, disponibilidade, horários originais, auditorias e dados
++de outros eventos. Datas/motivos de registros já terminais não são substituídos.
++
++## Locks, integridade e idempotência
++
++READ COMMITTED, ordem compatível com E08.8:
++events FOR UPDATE → experiências por UUID → estações por UUID → participações
++por UUID → entradas correntes por UUID → atendimentos pending por UUID.
++Joins bloqueiam somente a tabela de recurso indicada por OF. A API recebe
++contagens dos locks, não arrays ilimitados com todas as pessoas do evento.
++As linhas permanecem bloqueadas até o único COMMIT do evento.
++
++Após todas as esperas, revalida: entrada corrente ligada à participação active e
++ponteiro correspondente; experiência/evento coerentes; called com pending;
++waiting sem pending; pending com entrada called e estação da mesma experiência;
++ponteiros somente para entrada corrente da própria participação. FKs compostas
++existentes continuam protegendo referências cruzadas. Divergência de vínculos ou
++de contagens de escritas lança EVENT_CLOSURE_INTEGRITY e reverte tudo.
++
++Evento closed com qualquer pessoa/entrada/pending corrente ou ponteiro indevido
++também lança erro: não declara sucesso falso nem tenta corrigir dados históricos
++incoerentes silenciosamente. A descoberta inclui esses fechados incompatíveis.
++O log contém código operacional e UUID do evento, sem dados pessoais, SQL,
++credenciais ou mensagens arbitrárias de exceção. A causa/dados precisam de
++investigação pontual pelo responsável; falhar nesse evento não impede os demais.
++
++O mutex de evento serializa com E03/E05/E08.5–E08.8 e conflita com SHARE das
++operações E07. Operação que validou e venceu antes do corte mantém seu resultado
++quando confirma; o job reconsulta dados/prazo após esperar. Operações posteriores
++continuam sujeitas às guardas temporais próprias, inclusive se o job atrasar.
++E08.7 que confirmou alteração válida antes do corte pode deslocar o prazo:
++o job aguardando então retorna not_due. Admin imediato vencedor já deixa tudo
++regularizado; o job retorna already_closed.
++
++Reexecução e duas instâncias usam estados persistidos + locks, sem Idempotency-Key,
++TTL ou reserva de usuário. Closed íntegro não emite UPDATE nem muda timestamps.
++Falhas SQL nas quatro fases de escrita revertem evento e todos os efeitos;
++próximo ciclo pode repetir. Não grava audit_logs, pois actor_user_id exige uma
++pessoa real; a auditoria Admin E08.8 permanece intacta. Observabilidade automática
++usa logs operacionais de resultado agregado e falhas, sem conta técnica fictícia.
++
++## Descoberta, configuração e ciclo de vida
++
++Descoberta keyset por UUID, no máximo 100 eventos por consulta, sem OFFSET.
++Processa eventos em transações independentes. Erro individual é registrado e
++o cursor avança; próximo ciclo começa do início e tenta novamente. Eventos
++que vencem atrás do cursor são encontrados no próximo ciclo.
++
++No agendador, somente o lock **do evento** usa FOR UPDATE SKIP LOCKED: evento
++ocupado por outra transação/instância é deixado para o próximo ciclo e os outros
++avançam. Nunca aplica SKIP LOCKED a pessoas/filas nem publica limpeza parcial.
++Chamadas internas diretas podem usar o lock bloqueante para aguardar o evento.
++
++EVENT_CLOSURE_INTERVAL_MS é inteiro decimal de 1000 a 3600000 ms; padrão 30000.
++Valor inválido impede a construção do provider. O período é contado depois de
++terminar o ciclo, sem sobreposição. runCycle concorrente compartilha a promessa
++em andamento. Falhas de descoberta são observadas/logadas e não eliminam os
++ciclos seguintes. O timer usa unref.
++
++Produção/desenvolvimento têm agendamento habilitado. NODE_ENV=test o desabilita
++por padrão, preservando fixtures/suítes anteriores; somente
++EVENT_CLOSURE_JOB_TEST_ENABLED=true habilita automaticamente nesse ambiente.
++A flag aceita true/false e não desabilita produção. Testes próprios também
++constroem explicitamente o scheduler com política habilitada para controlar
++startup/ciclos/shutdown. A fixture PostgreSQL mantém o AppModule com a flag false.
++
++BeforeApplicationShutdown cancela o timer, impede novas páginas/eventos, aguarda
++a transação corrente e só então permite o OnApplicationShutdown do pool.
++main.ts já habilita shutdown hooks. Não há Redis, cron externo ou worker separado.
++
++Limites: uma transação bloqueia todos os recursos de um evento até terminar;
++custo no banco, duração do ciclo e espera crescem com o tamanho do evento.
++Não há SLA de latência garantido ou lote parcial. Consulta de candidatos também
++depende do volume/índices atuais; otimização futura requer evidência operacional.
++Falha persistente de integridade necessita investigação, não tentativas de reparo
++que enfraqueçam constraints. Não houve validação de produção ou auditoria geral E08.
++
++## Testes e resultados reais
++
++| Validação e responsável | Resultado |
++| --- | --- |
++| Unitários específicos E08.9, incluindo agendamento sem banco | 29/29 aprovados (20 serviço + 9 configuração/lifecycle) |
++| Regressão unitária completa npm.cmd test | 419/419 aprovados (390 anteriores + 29 novos) |
++| npm.cmd run typecheck:test | Aprovado, incluindo integração escrita |
++| npm.cmd run lint | Aprovado |
++| npm.cmd run build | Aprovado |
++| PostgreSQL E08.9 — execução manual pelo responsável | 50/50 aprovados, em execução sequencial com guarda anterior à regressão |
++| Regressão PostgreSQL completa — execução manual pelo responsável | 580/580 aprovados; zero falhas, cancelamentos ou testes ignorados |
++
++Zero falhas, cancelamentos ou testes ignorados nas execuções aprovadas. O tsx
++falhou inicialmente ao iniciar na sandbox com uv_os_get_passwd/ENOMEM, antes dos
++testes; unitários foram executados fora dela com DOTENV_CONFIG_PATH=NUL,
++NODE_ENV=test, URL fictícia 127.0.0.1:1/unit_no_connection e três TTLs explícitos de
++60. Não houve acesso a .env, credenciais, Neon ou PostgreSQL real. Na preparação,
++lint identificou um helper problem copiado e sem uso na fixture nova; ele foi
++removido, sem alterar testes anteriores. Checks posteriores aprovados.
++
++Escritos **50 testes PostgreSQL**, inicialmente contados estaticamente pela AST
++TypeScript incluindo matrizes, sem execução pelo Codex. A execução manual posterior
++aprovou os 50/50 específicos e a regressão **580/580 = 530 anteriores + 50 novos**.
++Usam AppModule/serviços e SQL reais, banco local isolado,
++fixtures próprias, limpeza transacional e URLs verificadas antes de importar
++providers. A fixture nova adapta helpers aprovados E08.8; a suíte anterior fica
++intacta. Não substitui PostgreSQL real por mocks.
++
++Cobertura: normal/controlado/imediato; limite inclusivo e microssegundos; antes
++do prazo; futuro vazio; sem Staff/capacidade/experiência; históricos terminais,
++FIFO/bigint/snapshots/avaliações/outro evento; waiting externa preservada; active
++sem fila; cancelamento sem ator humano; idempotência; reinício atrasado; duas
++instâncias; evento ocupado e outro independente; paginação acima de 100;
++falha isolada e recuperação; ponteiro/entrada/pending incoerentes e FKs cruzadas.
++Caso de atraso de 40 dias verifica em SQL que finished_at + 30 dias já venceu.
++Na preparação desses cenários, os timestamps das fixtures são envelhecidos antes
++do snapshot de referência, mantendo ingresso/chamada/conclusão anteriores ao corte
++lógico; não se fabrica conclusão posterior à finalização para testar atraso.
++
++O schema efetivo impede admin_deadline_at maior que operational_deadline_at
++(ck_events_closure_deadline). Não se remove/desabilita essa constraint para
++fabricar dados: o teste real exige SQLSTATE 23514 e ausência de mutações. O
++unitário confere LEAST no SQL decisivo e nas três datas automáticas, que continua
++escolhendo o menor mesmo se dados incoerentes forem apresentados pelo driver.
++O teste de borda real executa no/apos o prazo e verifica timestamps exatos;
++a inclusão da igualdade também é conferida na expressão SQL/contrato unitário,
++sem prometer sincronizar duas leituras de relógio na mesma fração de microssegundo.
++
++Matriz concorrente: dez operações (E03, E07.1, E07.4, E07.5, E07.6, E07.3,
++E08.5, E08.6/E05, E08.7 e E08.8) × duas ordens = 20 casos. Conexões independentes,
++transação vencedora retida antes do COMMIT, espera real observada por
++pg_blocking_pids e estado persistido conferido. Casos separados deixam o prazo
++vencer durante lock de evento/estação/participação e só então liberam o lock.
++Rollback injeta SELECT 1/0 na mesma transação depois de cada escrita real,
++confere SQLSTATE 22012, fase atingida e snapshot integral restaurado; retry fecha.
++Não altera expectativas/status/asserções das suítes anteriores.
++
++Agendamento sem PostgreSQL usa timers controlados e ciclo Nest real com serviço
++simulado: startup, periodicidade, desligamento, ausência de sobreposição,
++espera da execução corrente antes de liberar pool, erro individual/descoberta e
++retomada por nova instância. Sem novo endpoint, HTTP simulado específico não se
++aplica; a regressão completa inclui os HTTP simulados anteriores.
++
++## Validação manual PostgreSQL
++
++O responsável informou a aprovação definitiva da execução manual: 50/50 casos
++E08.9 aprovados em sequência, com guarda de sucesso antes de iniciar a regressão,
++seguida de 580/580 aprovados na regressão PostgreSQL completa. Zero falhas,
++cancelamentos ou testes ignorados nas execuções aprovadas. Os 419/419 unitários,
++29/29 específicos, typecheck, lint e build são os resultados locais anteriores;
++nenhuma suíte foi reexecutada nesta finalização exclusivamente documental.
++
++A primeira tentativa manual foi bloqueada por autenticação PostgreSQL, SQLSTATE
++28P01, com o usuário de exemplo USUARIO ainda na configuração. Credenciais locais
++incorretas impediram essa tentativa de validar a funcionalidade; não se tratou de
++falha funcional da E08.9. Após configurar as credenciais locais corretas, o
++responsável executou com sucesso os específicos e a regressão acima. Não houve
++compartilhamento ou registro das credenciais corretas, nem execução PostgreSQL
++pelo Codex.
++
++Comandos de referência para repetição manual: executar apenas no banco local de
++teste já preparado, substituindo USUARIO:SENHA por credenciais locais corretas
++privadamente. As três URLs precisam ser idênticas e sem query/hash; o guard aceita
++somente 127.0.0.1:55432/arenago_events_test. Sem migrations/seed/reset nesta task.
++
++```powershell
++Set-Location C:\DoJob\ProgramacaoMobile\backend
++$env:NODE_ENV = 'test'
++$env:EVENTS_TEST_DATABASE_URL = 'postgresql://USUARIO:SENHA@127.0.0.1:55432/arenago_events_test'
++$env:DATABASE_URL = $env:EVENTS_TEST_DATABASE_URL
++$env:DATABASE_DIRECT_URL = $env:EVENTS_TEST_DATABASE_URL
++$env:DOTENV_CONFIG_PATH = 'NUL'
++$env:STAFF_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:ADMIN_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:EVENT_CLOSURE_JOB_TEST_ENABLED = 'false'
++$env:EVENT_CLOSURE_INTERVAL_MS = '30000'
++.\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test --test-concurrency=1 test/integration/event-closure.integration.test.ts
++if ($LASTEXITCODE -ne 0) { throw 'Investigar E08.9 antes da regressão PostgreSQL.' }
++npm.cmd run test:integration
++if ($LASTEXITCODE -ne 0) { throw 'Investigar falhas da regressão PostgreSQL.' }
++```
++
++Os 60 segundos são TTLs de fixture, não política de produção. A aprovação manual
++dos 50 novos casos e da regressão completa de 580 está registrada acima.
++
++## Arquivos e evidência única
++
++- backend/src/events/event-closure.service.ts: descoberta e regularização transacional.
++- backend/src/events/event-closure.policy.ts: configuração validada e isolamento de testes.
++- backend/src/events/event-closure.scheduler.ts: startup, timer, recuperação e shutdown.
++- backend/src/events/events.module.ts: registro/exportação dos providers internos.
++- backend/test/unit/event-closure.test.ts: 20 testes de serviço/SQL/rollback.
++- backend/test/unit/event-closure-scheduler.test.ts: nove testes de configuração/lifecycle.
++- backend/test/integration/event-closure-fixture.ts: fixtures reais isoladas/guards/helpers.
++- backend/test/integration/event-closure.integration.test.ts: 50 testes PostgreSQL aprovados manualmente.
++- docs/ARQUITETURA_BACKEND_ARENAGO.md: nota E08.9 diretamente relacionada à §17.8.
++- docs/E08_9_IMPLEMENTACAO.md: este relatório.
++
++Evidência única: qa-evidence/e08-9-changes.diff, completa contra o HEAD inicial
++03fd90b, incluindo oito arquivos novos não rastreados e dois modificados.
++Validada por git apply --check --whitespace=error-all e aplicação real em cópia
++isolada da base; os dez arquivos finais comparados com normalização Git de linhas,
++sem omissões ou divergências. UTF-8 sem BOM, diff --git e caminhos relativos;
++exclui evidência/outros diffs, .env/segredos, dependências, temporários e alterações
++alheias. HEAD e índice preservados; versionamento disponível para revisão manual.
++Sem git add/commit/push/merge/rebase, auditoria geral ou início da E08.10.
