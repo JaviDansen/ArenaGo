@@ -3,9 +3,9 @@ import { sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { DRIZZLE_DATABASE } from "../database/database.module";
 import type * as schema from "../database/schema";
+import { automaticFinalizationReason, effectiveEventDeadline } from "./event-closure.projection";
 
-export const AUTOMATIC_OPERATIONAL_REASON = "automatic_operational_deadline";
-export const AUTOMATIC_ADMIN_REASON = "automatic_admin_deadline";
+export { AUTOMATIC_OPERATIONAL_REASON, AUTOMATIC_ADMIN_REASON } from "./event-closure.projection";
 export const EVENT_CLOSURE_PAGE_SIZE = 100;
 
 export type EventClosureResult =
@@ -25,7 +25,7 @@ export class EventClosureService {
   async findCandidates(afterId: string | null): Promise<string[]> {
     const result = await this.database.execute<{ id: string }>(sql`
       SELECT e.id FROM events e WHERE (${afterId}::uuid IS NULL OR e.id > ${afterId}::uuid) AND (
-        (e.status <> 'closed' AND LEAST(e.operational_deadline_at,e.admin_deadline_at) <= clock_timestamp())
+        (e.status <> 'closed' AND ${effectiveEventDeadline()} <= clock_timestamp())
         OR (e.status='closed' AND (
           EXISTS(SELECT 1 FROM participations p WHERE p.event_id=e.id AND (p.status IN ('waiting','active') OR p.current_queue_entry_id IS NOT NULL))
           OR EXISTS(SELECT 1 FROM queue_entries q WHERE q.event_id=e.id AND q.status IN ('waiting','called'))
@@ -76,26 +76,26 @@ export class EventClosureService {
       const changed = (await tx.execute<{ deadlineAt: string; executedAt: string; reason: string }>(sql`
         WITH decision AS MATERIALIZED (SELECT clock_timestamp() AS at), changed AS (
           UPDATE events e SET status='closed',updated_at=d.at FROM decision d
-          WHERE e.id=${eventId} AND e.status<>'closed' AND LEAST(e.operational_deadline_at,e.admin_deadline_at)<=d.at
-          RETURNING LEAST(e.operational_deadline_at,e.admin_deadline_at) AS deadline,e.updated_at,
-            CASE WHEN e.closure_mode IS NULL THEN ${AUTOMATIC_OPERATIONAL_REASON} ELSE ${AUTOMATIC_ADMIN_REASON} END AS reason)
+          WHERE e.id=${eventId} AND e.status<>'closed' AND ${effectiveEventDeadline()}<=d.at
+          RETURNING ${effectiveEventDeadline()} AS deadline,e.updated_at,
+            ${automaticFinalizationReason()} AS reason)
         SELECT to_char(deadline AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "deadlineAt",
           to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "executedAt",reason FROM changed`)).rows[0];
       if (!changed) return { kind: "not_due" };
 
       const canceled = (await tx.execute<{ count: number }>(sql`WITH canceled AS (
-        UPDATE service_sessions s SET status='canceled',resolved_at=LEAST(e.operational_deadline_at,e.admin_deadline_at),
+        UPDATE service_sessions s SET status='canceled',resolved_at=${effectiveEventDeadline()},
           resolved_by_user_id=NULL,cancel_reason=${changed.reason}
         FROM experiences x,events e WHERE s.experience_id=x.id AND x.event_id=e.id AND e.id=${eventId} AND s.status='pending' RETURNING s.id)
         SELECT count(*)::int AS count FROM canceled`)).rows[0].count;
       ensure(canceled === services);
       const closed = (await tx.execute<{ count: number }>(sql`WITH closed AS (
-        UPDATE queue_entries q SET status='closed',closed_at=LEAST(e.operational_deadline_at,e.admin_deadline_at),close_reason=${changed.reason}
+        UPDATE queue_entries q SET status='closed',closed_at=${effectiveEventDeadline()},close_reason=${changed.reason}
         FROM events e WHERE q.event_id=e.id AND e.id=${eventId} AND q.status IN ('waiting','called') RETURNING q.id)
         SELECT count(*)::int AS count FROM closed`)).rows[0].count;
       ensure(closed === queues);
       const finished = (await tx.execute<{ count: number }>(sql`WITH finished AS (
-        UPDATE participations p SET status='finished',finished_at=LEAST(e.operational_deadline_at,e.admin_deadline_at),
+        UPDATE participations p SET status='finished',finished_at=${effectiveEventDeadline()},
           finish_reason=${changed.reason},current_queue_entry_id=NULL
         FROM events e WHERE p.event_id=e.id AND e.id=${eventId} AND p.status IN ('waiting','active') RETURNING p.id)
         SELECT count(*)::int AS count FROM finished`)).rows[0].count;

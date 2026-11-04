@@ -129,7 +129,9 @@ test("E08.10 PostgreSQL parâmetros e cursor malformados recebem 400 sem consult
   const actor = await account();
   for (const query of [{ limit: "51" }, { cursor: "%%%" }, { limit: ["1", "2"] }, { userId: randomUUID() }]) problem(await get(actor, "/participations/history").query(query), 400, "VALIDATION_ERROR");
   for (const suffix of ["evaluation", "evaluation-eligibility"]) problem(await get(actor, `/participations/not-a-uuid/${suffix}`), 400, "VALIDATION_ERROR");
-  problem(await get(actor, "/participations/current"), 404, "RESOURCE_NOT_FOUND");
+  const current = await get(actor, "/participations/current");
+  assert.equal(current.status, 200);
+  assert.deepEqual(current.body, { participation: null });
 });
 
 for (const mode of ["immediate", "controlled", "automatic-normal", "automatic-admin"] as const) test(`E08.10 PostgreSQL retomada ${mode} preserva motivo, elegibilidade e prazo lógico`, async () => {

@@ -653,10 +653,10 @@ O servidor registra `questionnaire_version_id`, mantém `profiles` e substitui a
 | `POST /events/lookup` | Bearer | `200` resumo do evento identificado | `EventEntryScreen` | [PROPOSTA] |
 | `GET /events/:eventId` | Bearer | `200` detalhes operacionais seguros | `EventConfirmationScreen`/retomada | [PROPOSTA] |
 | `POST /events/:eventId/participations` | Bearer + `Idempotency-Key` | `201` participação recém-criada | confirmação de ingresso | [PROPOSTA] |
-| `GET /participations/current` | Bearer | `200` participação ou `null` | `App.js`, Home e retomada | [PROPOSTA] |
-| `GET /participations/:id` | Bearer, titular | `200` participação atualizada | fila externa/Arena | [PROPOSTA] |
-| `POST /participations/:id/cancel` | Bearer, titular + `Idempotency-Key` | `200` participação cancelada | saída da fila externa | [PROPOSTA] |
-| `POST /participations/:id/finish` | Bearer, titular + `Idempotency-Key` | `200` participação finalizada | botão Sair da Arena | [PROPOSTA] |
+| `GET /participations/current` | Bearer | `200` participação ou `null` | `App.js`, Home e retomada | [IMPLEMENTADO E08.12] |
+| `GET /participations/:id` | Bearer, titular | `200` participação atualizada | fila externa/Arena | [IMPLEMENTADO E08.12] |
+| `POST /participations/:id/cancel` | Bearer, titular + `Idempotency-Key` | `200` participação cancelada | saída da fila externa | [IMPLEMENTADO E08.12] |
+| `POST /participations/:id/finish` | Bearer, titular + `Idempotency-Key` | `200` participação finalizada | botão Sair da Arena | [IMPLEMENTADO E08.12] |
 | `GET /participations/history` | Bearer | `200` histórico paginado do titular | aba Eventos | [PROPOSTA] |
 
 **Detalhe de roteamento NestJS:** registrar/documentar as rotas literais `GET /participations/current` e `GET /participations/history` sem colisão com `GET /participations/:id`; validar `:id` como UUID. Testar resolução das três rotas com Supertest.
@@ -739,6 +739,16 @@ O servidor registra `questionnaire_version_id`, mantém `profiles` e substitui a
 
 ### 15.6 `GET /participations/current` — recuperar a participação da conta
 
+**Implementação E08.12 — 04/11/2026:** `ParticipationLifecycleController` e
+`ParticipationQueryService`, Bearer, identidade autenticada e `200` com envelope
+`participation`. Uma instrução em `REPEATABLE READ READ ONLY` calcula estado,
+posição externa e observação PostgreSQL com seis casas de microssegundos, sem
+escritas ou locks de linha. Se a participação corrente persistida estiver
+logicamente encerrada, retorna `null`. O detalhe por ID fornece a projeção
+terminal, preservando o motivo automático/administrativo. Prazo e motivo
+automático reutilizam `event-closure.projection.ts`, extraído do SQL da E08.9
+sem mudar seu comportamento. Não há limpeza física nem saída voluntária em GET.
+
 **Bearer obrigatório.** Nunca utilizar `currentParticipationId` de armazenamento local como autoridade.
 
 **Resposta `200 OK` quando existe participação corrente:**
@@ -770,6 +780,18 @@ Não usar `404` para ausência de participação. O backend deve refletir o **ef
 
 ### 15.7 `GET /participations/:id` — estado da participação do titular
 
+**Implementação E08.12:** o parâmetro efetivo chama-se `participationId` e exige
+UUID. Retorna os campos de participação de §15.6 para todos os quatro estados,
+com `eventId`; o objeto `event` ampliado abaixo permanece proposta opcional,
+preservando o DTO de participação existente. Inexistência e terceiro têm o mesmo
+`404 RESOURCE_NOT_FOUND`. Rotas literais `current`, `history` e `return-state`
+são registradas antes da rota genérica, com testes HTTP de resolução.
+Na projeção temporal, um terminal já persistido conserva data e motivo; um
+corrente vencido usa o prazo lógico e o motivo da E08.9, nunca `voluntary`.
+Os GETs oficiais E08.10/E08.11 continuam sobre o estado persistido: avaliações
+pendentes e retomada aparecem após a regularização física, sem que este GET
+invente elegibilidade ou execute o job. Detalhes em `E08_12_IMPLEMENTACAO.md`.
+
 **Bearer obrigatório e titularidade obrigatória**, inclusive para histórico de participação terminada. Mantém os campos do item anterior e, quando `active`, devolve `externalQueue=null`. **[PROPOSTA]** incluir `event` público reduzido (`id`, `name`, `status`, `acceptingEntries`) para renderizar a tela sem duplicar consultas.
 
 **Posição externa:** calculada no instante da consulta contando apenas participações `waiting` no mesmo evento cuja ordem esteja à frente ou igual à do usuário; **não** manter posições físicas em massa, pois saídas e liberações alteram o número exibido. Campos `observedAt` explicitam que a posição é uma fotografia. `404` tanto para ID inexistente quanto para ID de terceiro (não revelar a existência), `401` para autenticação inválida.
@@ -777,6 +799,15 @@ Não usar `404` para ausência de participação. O backend deve refletir o **ef
 **Atualização da interface [VALIDAR]:** refetch ao retornar para o app e enquanto estiver aguardando; decidir intervalo/custo e eventual WebSocket em validação de infraestrutura. Não inferir presença ou ausência pela queda de conexão; servidor é fonte de verdade.
 
 ### 15.8 `POST /participations/:id/cancel` — sair voluntariamente da fila externa
+
+**Implementação E08.12:** aceita `{}` ou corpo ausente, rejeita extras e usa
+`cancel_external_participation` na idempotência durável. Resposta `200` conserva
+também `joinedAt`/`arenaEnteredAt` do DTO comum. Uma única decisão PostgreSQL após
+os locks grava `canceled`/`external_wait_withdrawal`/`finishedAt`, preservando
+histórico e posições alheias. Liberação concorrente produz
+`409 PARTICIPATION_NOT_WAITING` com a participação própria atualizada; prazo
+definitivo vencido produz `409 EVENT_OPERATION_ENDED` com projeção terminal.
+Nenhum desses conflitos confirma uma nova reserva idempotente.
 
 **Bearer + titularidade + `Idempotency-Key`.** Somente participação `status='waiting'`. **Sem corpo** (motivo fixo de produto `external_wait_withdrawal`).
 
@@ -800,6 +831,34 @@ Não usar `404` para ausência de participação. O backend deve refletir o **ef
 **Erros:** `409 PARTICIPATION_NOT_WAITING` se já ativa/terminal por outro motivo; `404` titularidade/inexistência; `401` inválido. Uma repetição com **a mesma chave/payload** devolve o resultado original sem criar efeitos. Uma nova tentativa de ingresso depois do cancelamento cria participação **nova**, se o evento ainda aceitar inscrições.
 
 ### 15.9 `POST /participations/:id/finish` — saída voluntária da Arena
+
+**Implementação E08.12:** aceita `{}` ou ausência e usa namespace
+`finish_arena_participation`. Finaliza somente `active`, mesmo sem completed.
+Fecha a entrada interna corrente e cancela apenas seu pending com motivo técnico
+`participation_voluntary_finish`, copiando `finished_at` entre linhas no banco.
+Não altera disponibilidade configurada da estação, não cria ausência/conclusão
+e preserva atendimentos anteriores. A resposta `200` inclui o DTO comum,
+`completedServicesCount` e `evaluationEligibility: { eligible, hasSubmitted }`,
+derivados da política oficial de avaliações. Replay conserva a resposta original.
+
+Reserva/reconhecimento idempotente precede locks de domínio; depois, evento
+`FOR UPDATE` → experiência → estação (se chamada) → participação → entrada →
+atendimento. O lock exclusivo do evento estabiliza a descoberta da fila inclusive
+contra troca de experiência; é uma escolha conservadora que serializa mutações
+do evento durante a transação. Relógio decisório e predicados de prazo ficam no
+UPDATE após todas as esperas. Erros revertem domínio e intenção juntos.
+Encerramento Admin imediato/job que vença preserva seu motivo. Fechamento
+controlado permite a saída dos active antes do prazo residual, sem sobrescrever
+as participações waiting já finalizadas pela E08.8.
+
+Cancelamento e saída reutilizam somente o TTL técnico explícito
+`PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS`, já obrigatório para ações do
+participante; os namespaces e fingerprints são distintos da C-15 e entre si.
+Não há nova variável, fallback, expurgo ou reexecução após TTL. Replay exige
+sessão e titularidade atuais; recurso/intenção diferente gera
+`409 IDEMPOTENCY_KEY_REUSED`, e reserva preexistente em andamento gera
+`409 IDEMPOTENCY_IN_PROGRESS`. Validação PostgreSQL E08.12 permanece manual e
+pendente; comandos e resultados efetivos constam no relatório da task.
 
 **Bearer + titularidade + `Idempotency-Key`.** Somente participação `status='active'`; não exigir nenhuma conclusão Staff, mas isso determina a possibilidade de avaliar posteriormente. **Sem corpo** (motivo `voluntary`).
 
@@ -973,6 +1032,12 @@ Os testes funcionais de API/Expo deste capítulo seguem não executados. Os caso
 11. **Desistência interna C-15:** o titular pode abandonar a entrada `waiting` ou `called` mantendo a participação `active`. Resolver eventual `pending` sem ausência/conclusão, preservar histórico e não transferir posição. A saída isolada usa o serviço interno E07.3, sem HTTP; nova entrada continua sujeita a todos os cortes e guardas de admissão.
 
 ### 16.2 Matriz de endpoints propostos
+
+**Atualização E08.12 — 04/11/2026:** `POST /participations/:participationId/finish`
+agora implementa a saída completa descrita em §15.9. Ela permanece distinta da
+desistência de entrada explícita C-15 da E08.2, que conserva a participação active.
+Nenhum serviço E07.1–E07.6 foi alterado. Conclusão/ausência Staff e desistência
+interna continuam com seus contratos e ordens de locks anteriores.
 
 **Atualização E08.2 — 03/11/2026:** as rotas de ingresso e consulta do participante
 estão implementadas por `ParticipantQueueController` sobre E07.1/E07.2. A saída
