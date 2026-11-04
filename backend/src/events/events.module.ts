@@ -21,12 +21,14 @@ import { StationAvailabilityService } from "./station-availability.service";
 import { EventClosureService } from "./event-closure.service";
 import { EventClosurePolicy } from "./event-closure.policy";
 import { EventClosureScheduler } from "./event-closure.scheduler";
+import { EvaluationReadController } from "../evaluations/evaluation-read.controller";
+import { EvaluationReadService } from "../evaluations/evaluation-read.service";
 
 /** Agrupa os serviços de Events e reutiliza o acesso PostgreSQL compartilhado. */
 @Module({
   imports: [DatabaseModule, AuthModule],
-  controllers: [StaffOperationsController, StaffQueriesController, StationAvailabilityController, ParticipantQueueController, ExperiencesController],
-  providers: [EventsService, StaffQueriesService, StationAvailabilityService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, StaffIdempotencyPolicy, ParticipantQueueIdempotencyPolicy, EventClosureService, EventClosurePolicy, EventClosureScheduler],
-  exports: [EventsService, StaffQueriesService, StationAvailabilityService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, EventClosureService],
+  controllers: [EvaluationReadController, StaffOperationsController, StaffQueriesController, StationAvailabilityController, ParticipantQueueController, ExperiencesController],
+  providers: [EventsService, StaffQueriesService, StationAvailabilityService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, StaffIdempotencyPolicy, ParticipantQueueIdempotencyPolicy, EventClosureService, EventClosurePolicy, EventClosureScheduler, EvaluationReadService],
+  exports: [EventsService, StaffQueriesService, StationAvailabilityService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, EventClosureService, EvaluationReadService],
 })
 export class EventsModule {}

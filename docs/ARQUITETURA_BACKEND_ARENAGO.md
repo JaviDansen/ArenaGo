@@ -827,6 +827,16 @@ Não usar `404` para ausência de participação. O backend deve refletir o **ef
 
 ### 15.10 `GET /participations/history` — histórico do titular
 
+**Implementação E08.10 — 04/11/2026:** `/api/v1/participations/history` retorna
+histórico persistido do titular em REPEATABLE READ READ ONLY, com limite padrão
+20/máximo 50 e keyset joined_at DESC/id DESC. Cursor base64url validado preserva
+UTC com seis casas e UUID, sem converter o valor comparado em Date. Mantém
+reentradas distintas, arenaEnteredAt, motivo real e resumo eligible/submitted/
+pending da mesma política SQL das avaliações; inclui todos os estados persistidos.
+No HEAD inicial, current existe como serviço interno, sem endpoint HTTP; este
+estado é preservado, sem colisão com os novos caminhos literais. Contrato efetivo,
+testes e limitações em `E08_10_IMPLEMENTACAO.md`.
+
 **Bearer obrigatório.** `GET /participations/history?limit=20&cursor=<cursor-opaco>`; `limit` padrão 20, máximo 50 [PROPOSTA]. Ordenar por `joined_at DESC, id DESC` para paginação estável (*keyset*), usando cursor opaco validado no servidor. Retornar apenas participações do próprio titular, inclusive reentradas distintas no mesmo evento. Nunca transformar evento fechado em exclusão do histórico por padrão; o tratamento posterior de LGPD continua prevalecendo.
 
 **Resposta `200 OK` (exemplo):**
@@ -1391,6 +1401,28 @@ Uma participação pode ser avaliada somente se `participations.status='finished
 Esses são **dois relógios independentes**: o prazo inicial começa na finalização da participação; os prazos de edição começam no primeiro envio. **[VALIDAR BORDA SQL]** Definir a implementação de intervalos como comparações precisas em `timestamptz`, e testar o exato instante-limite. No desenho, utilizar `clock_timestamp()` no momento da validação de negócio sob locks; nunca depender do relógio do telefone. `first_comment_at` deve ser preenchido quando um comentário não vazio for enviado pela primeira vez, e **jamais retornar a NULL** mesmo que seja apagado/editado durante a janela integral.
 
 ### 17.2 `GET /participations/:participationId/evaluation-eligibility`
+
+**Implementação E08.10 — 04/11/2026 (§§17.2, 17.3, 17.5 e 17.7):** as quatro
+consultas HTTP de avaliação/retomada, mais o histórico §15.10, estão disponíveis
+com `/api/v1`, sessão vigente e titularidade estrita, sem privilégio transversal
+Staff/Admin. EvaluationReadService reutiliza o guard existente e uma política SQL
+comum: eligible é estrutural (finished e pelo menos um completed); pending exige
+também ausência de avaliação e instante <= finished_at + 720 horas. Reason distingue
+NOT_FINISHED, NO_COMPLETED_SERVICE, EXTERNAL_WAIT_CLOSED, ALREADY_SUBMITTED e
+SUBMISSION_EXPIRED. Datas têm seis casas UTC; cada resposta de domínio usa um
+instante PostgreSQL e snapshot REPEATABLE READ READ ONLY, sem limpeza ou reservas.
+O GET de avaliação retorna evaluation/eligibility; evaluation própria inclui
+id/participationId/rating/comment/submittedAt/updatedAt/editableUntilAt/
+commentAddUntilAt e permissions. Edição integral até submitted_at + 168 horas,
+inclusive; depois, até +720 horas inclusive, somente primeiro comentário se
+first_comment_at IS NULL, independentemente de comment atual. updated_at não
+reinicia nenhuma janela. Permissões são informativas; POST/PATCH futuros devem
+revalidar no momento da mutação e não são implementados nesta etapa.
+Pendências ordenam finished_at DESC/id DESC, sem agrupar reentradas do mesmo
+evento. Retomada informa a última finalização persistida por um dos quatro motivos
+Admin/automáticos E08.8/E08.9, sem janela arbitrária de "recente", consumo de aviso
+ou decisão de navegação. Pending IDs vêm da mesma seleção de pendências.
+Resultados locais e aprovação PostgreSQL ainda pendente: `E08_10_IMPLEMENTACAO.md`.
 
 **Bearer do próprio titular.** Consulta somente; não cria tabela de pendências. `404` quando participação inexiste/não pertence ao titular; `401` sessão inválida. **`200 OK` ilustrativo:**
 
