@@ -57,6 +57,14 @@ export default function HomeScreen({ navigation }) {
         <Text style={styles.staffButtonText}>Área do Staff (demonstração)</Text>
       </Pressable>
 
+      <Pressable
+        style={styles.staffButton}
+        onPress={() => navigation.navigate('AdminDemo')}
+        accessibilityRole="button"
+      >
+        <Text style={styles.staffButtonText}>Área Admin (demonstração)</Text>
+      </Pressable>
+
       <StatusBar style="dark" />
     </ScreenContainer>
   );

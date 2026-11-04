@@ -60,6 +60,11 @@ export function AppNavigation() {
       name: 'StaffDemo',
       getComponent: () => require('./screens/staff/StaffDemoNavigator').default,
     },
+    // Área Admin somente em modo demonstração; não concede permissão Admin nem TOTP.
+    {
+      name: 'AdminDemo',
+      getComponent: () => require('./screens/admin/AdminDemoNavigator').default,
+    },
   ];
   const isQuestionnairePending =
     isAuthenticated && auth?.user && auth?.user.hasCompletedQuestionnaire === false;
