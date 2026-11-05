@@ -107,6 +107,8 @@ test("E08.12 posição inválida ou insegura não vira número impreciso",()=>{
 test("E08.12 consulta reutiliza prazo/motivos E08.9 e faz projeção somente de leitura",()=>{
   const q=new PgDialect().sqlToQuery(participationProjection(uid));
   assert.ok(q.sql.includes('LEAST(e.operational_deadline_at,e.admin_deadline_at)<=d.at'));assert.ok(q.sql.includes("e.status='closed'"));
+  assert.match(q.sql,/e\.closure_mode='immediate' AND e\.status='closed' AND e\.operational_deadline_at>e\.admin_deadline_at THEN 'admin_immediate'/);
+  assert.match(q.sql,/e\.closure_mode='immediate' AND e\.status='closed' THEN \$\d+/);
   assert.ok(q.params.includes("automatic_operational_deadline")&&q.params.includes("automatic_admin_deadline"));
   assert.equal(/FOR UPDATE|INSERT |UPDATE |DELETE /.test(q.sql),false);assert.equal((q.sql.match(/clock_timestamp\(\)/g)||[]).length,1);
 });

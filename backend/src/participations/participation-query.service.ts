@@ -3,7 +3,7 @@ import { sql, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { DRIZZLE_DATABASE } from "../database/database.module";
 import type * as schema from "../database/schema";
-import { automaticFinalizationReason, effectiveEventDeadline } from "../events/event-closure.projection";
+import { AUTOMATIC_OPERATIONAL_REASON, automaticFinalizationReason, effectiveEventDeadline } from "../events/event-closure.projection";
 import { participationView, type ParticipationView } from "./participation-lifecycle.dto";
 
 /** Estado efetivo só de leitura. A finalização física continua sendo responsabilidade de E08.8/E08.9. */
@@ -12,10 +12,11 @@ export function participationProjection(userId: string, participationId?: string
     SELECT p.*,d.at,${effectiveEventDeadline()} AS deadline,
       COALESCE(p.status IN ('waiting','active') AND (e.status='closed' OR ${effectiveEventDeadline()}<=d.at
         OR (p.status='waiting' AND e.closure_mode='controlled' AND e.closure_requested_at<=d.at)),false) AS ended,
-      CASE WHEN e.closure_mode='immediate' AND e.status='closed' THEN 'admin_immediate'
+      CASE WHEN e.closure_mode='immediate' AND e.status='closed' AND e.operational_deadline_at>e.admin_deadline_at THEN 'admin_immediate'
+        WHEN e.closure_mode='immediate' AND e.status='closed' THEN ${AUTOMATIC_OPERATIONAL_REASON}
         WHEN p.status='waiting' AND e.closure_mode='controlled' AND e.closure_requested_at<=d.at THEN 'admin_controlled_external_wait_closed'
         ELSE ${automaticFinalizationReason()} END AS terminal_reason,
-      CASE WHEN e.closure_mode='immediate' AND e.status='closed' THEN e.closure_requested_at
+      CASE WHEN e.closure_mode='immediate' AND e.status='closed' THEN ${effectiveEventDeadline()}
         WHEN p.status='waiting' AND e.closure_mode='controlled' AND e.closure_requested_at<=d.at THEN e.closure_requested_at
         ELSE ${effectiveEventDeadline()} END AS terminal_at
     FROM participations p JOIN events e ON e.id=p.event_id CROSS JOIN observation d

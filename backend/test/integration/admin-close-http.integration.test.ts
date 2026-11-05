@@ -53,6 +53,7 @@ after(async () => {
       await c.query("DELETE FROM service_sessions s USING queue_entries q WHERE s.queue_entry_id=q.id AND q.event_id=ANY($1::uuid[])", [ids.events]);
       await c.query("DELETE FROM queue_entries WHERE event_id=ANY($1::uuid[])", [ids.events]);
       await c.query("DELETE FROM participation_profile_snapshots s USING participations p WHERE s.participation_id=p.id AND p.event_id=ANY($1::uuid[])", [ids.events]);
+      await c.query("DELETE FROM evaluations v USING participations p WHERE v.participation_id=p.id AND p.event_id=ANY($1::uuid[])", [ids.events]);
       await c.query("DELETE FROM participations WHERE event_id=ANY($1::uuid[])", [ids.events]);
       await c.query("DELETE FROM stations s USING experiences e WHERE s.experience_id=e.id AND e.event_id=ANY($1::uuid[])", [ids.events]);
       await c.query("DELETE FROM experiences WHERE event_id=ANY($1::uuid[])", [ids.events]);
@@ -152,6 +153,34 @@ async function ordered<A, B>(first: () => PromiseLike<A>, second: () => PromiseL
     database.transaction = original; b = Promise.resolve(second()); b.catch(() => undefined); await blocked(pid); await whileBlocked?.(pid); release(); return await Promise.all([a, b]);
   } finally { database.transaction = original; release(); await Promise.allSettled([a, b]); }
 }
+async function orderedAfterParticipationLock<A, B>(first: () => PromiseLike<A>, second: () => PromiseLike<B>): Promise<[A, B]> {
+  const original = database.transaction.bind(database) as typeof database.transaction;
+  const dialect = new PgDialect(); let ready!: (pid: number) => void, release!: () => void;
+  const reached = new Promise<number>(yes => { ready = yes; }), gate = new Promise<void>(yes => { release = yes; });
+  database.transaction = (callback, config) => {
+    database.transaction = original;
+    return original(async tx => {
+      const execute = tx.execute.bind(tx); let held = false;
+      tx.execute = (async (...args: Parameters<typeof tx.execute>) => {
+        const query = args[0], text = typeof query === "string" ? query : dialect.sqlToQuery(query.getSQL()).sql;
+        const value = await execute(...args);
+        if (!held && text.includes("FROM participations WHERE id=") && text.includes("FOR UPDATE")) {
+          held = true;
+          ready((await execute<{ pid: number }>(sql`SELECT pg_backend_pid() AS pid`)).rows[0].pid);
+          await gate;
+        }
+        return value;
+      }) as typeof tx.execute;
+      return callback(tx);
+    }, config);
+  };
+  let a: Promise<A> | undefined, b: Promise<B> | undefined;
+  try {
+    a = Promise.resolve(first()); a.catch(() => undefined);
+    const pid = await Promise.race([reached, a.then(() => { throw new Error("Primeira operação não alcançou o lock da participação."); })]);
+    b = Promise.resolve(second()); b.catch(() => undefined); await blocked(pid); release(); return await Promise.all([a, b]);
+  } finally { database.transaction = original; release(); await Promise.allSettled([a, b]); }
+}
 async function lockWait(c: Context, request: () => PromiseLike<supertest.Response>, change: (client: PoolClient, pid: number) => Promise<void>, lock: "event" | "role" | "account" | "participation" | "station" = "event") {
   const client = await pool.connect(); let pending: Promise<supertest.Response> | undefined;
   try {
@@ -179,6 +208,7 @@ async function controlled(seconds = 1800) {
   return { mode: "controlled" as const, reason, controlledUntilAt: at.toISOString() };
 }
 const close = (c: Context, body: object = immediate(), key: string = randomUUID(), actor: { token: string } = c.admin) => supertest(app.getHttpServer()).post(closeRoute(c)).set("Authorization", `Bearer ${actor.token}`).set("Idempotency-Key", key).send(body);
+const read = (actor: { token: string }, path: string) => supertest(app.getHttpServer()).get(`/api/v1${path}`).set("Authorization", `Bearer ${actor.token}`);
 const call = (c: Context) => supertest(app.getHttpServer()).post(`/api/v1/staff/events/${c.eventId}/experiences/${c.experienceId}/stations/${c.stationId}/call-next`).set("Authorization", `Bearer ${c.staff.token}`).set("Idempotency-Key", randomUUID()).send({});
 const resolve = (c: Context, session: string, action: "complete" | "absent") => supertest(app.getHttpServer()).post(`/api/v1/staff/events/${c.eventId}/service-sessions/${session}/${action}`).set("Authorization", `Bearer ${c.staff.token}`).set("Idempotency-Key", randomUUID()).send({});
 const withdraw = (c: Context, p: Awaited<ReturnType<typeof person>>, entry: string) => supertest(app.getHttpServer()).post(`/api/v1/participations/${p.participationId}/queue-entries/${entry}/withdraw`).set("Authorization", `Bearer ${p.token}`).set("Idempotency-Key", randomUUID()).send({});
@@ -215,6 +245,10 @@ test("E08.8 PostgreSQL imediato encerra tudo atomicamente sem alterar completed/
 });
 test("E08.8 PostgreSQL controlado fecha waiting externas e preserva active com/sem fila e pending", async () => {
   const c = await context(), data = await rich(c), before = await state(c), body = await controlled(), r = await close(c, body); assert.equal(r.status, 200); assert.equal(r.body.status, "closing"); assert.equal(r.body.externalWaitingFinalized, 1); assert.equal(Date.parse(r.body.effectiveOperationalDeadlineAt), Date.parse(body.controlledUntilAt));
+  const controlledAt = (await pool.query(`SELECT count(*)::int AS total,
+    count(*) FILTER (WHERE p.finished_at=e.closure_requested_at AND p.finish_reason='admin_controlled_external_wait_closed')::int AS exact
+    FROM participations p JOIN events e ON e.id=p.event_id WHERE p.id=$1`, [data.outside.participationId])).rows[0];
+  assert.deepEqual(controlledAt, { total: 1, exact: 1 });
   const after = await state(c); for (const key of ["queues", "services", "snapshots", "experiences", "stations"]) assert.deepEqual(after[key], before[key]);
   for (const p of before.people) { const next = after.people.find((n: { id: string }) => n.id === p.id); if (p.status !== "waiting") assert.deepEqual(next, p); else { assert.equal(next.status, "finished"); assert.equal(next.finish_reason, "admin_controlled_external_wait_closed"); assert.equal(next.arena_entered_at, null); } }
   assert.equal(after.people.find((p: { id: string }) => p.id === data.idle.participationId).status, "active");
@@ -228,8 +262,114 @@ for (const mode of ["immediate", "controlled"] as const) test(`E08.8 PostgreSQL 
   const c = await context(); await pool.query("UPDATE events SET starts_at=clock_timestamp()+interval '10 minutes',status='scheduled' WHERE id=$1", [c.eventId]); await pool.query("UPDATE stations SET availability='unavailable' WHERE id=$1", [c.stationId]); await pool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE event_id=$1", [c.eventId]);
   const r = await close(c, mode === "immediate" ? immediate() : await controlled()); assert.equal(r.status, 200); assert.equal(r.body.externalWaitingFinalized, 0);
 });
-test("E08.8 PostgreSQL imediato após prazo operacional preserva deadline efetivo mínimo", async () => {
-  const c = await context(); await person(c); await pool.query("UPDATE events SET official_ends_at=clock_timestamp()-interval '20 minutes',operational_deadline_at=clock_timestamp()-interval '10 minutes' WHERE id=$1", [c.eventId]); const r = await close(c); assert.equal(r.status, 200); assert.ok(Date.parse(r.body.effectiveOperationalDeadlineAt) < Date.parse(r.body.newEntriesClosedAt)); await assertNoOpen(c);
+test("E08-EST02 PostgreSQL Admin tardio regulariza no deadline lógico e conserva avaliação, filas e consultas", async () => {
+  const c = await context(), completed = await called(c); assert.equal((await resolve(c, completed.session, "complete")).status, 200);
+  const withoutCompletion = await called(c), prior = await person(c, "finished");
+  const deadline = (await pool.query(`UPDATE events SET official_ends_at=clock_timestamp()-interval '20 minutes',
+    operational_deadline_at=clock_timestamp()-interval '10 minutes' WHERE id=$1
+    RETURNING to_char(operational_deadline_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`, [c.eventId])).rows[0].at as string;
+  const projectedBefore = await read(completed.p, `/participations/${completed.p.participationId}`);
+  assert.equal(projectedBefore.status, 200); assert.equal(projectedBefore.body.participation.finishedAt, deadline);
+  assert.deepEqual((await read(completed.p, "/participations/current")).body, { participation: null });
+  const key = randomUUID(), response = await close(c, immediate(), key);
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+  assert.ok(response.body.effectiveOperationalDeadlineAt < response.body.newEntriesClosedAt);
+  const rows = (await pool.query(`SELECT id,status,to_char(finished_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS finished_at,finish_reason FROM participations WHERE id=ANY($1::uuid[]) ORDER BY id`,
+    [[completed.p.participationId, withoutCompletion.p.participationId, prior.participationId]])).rows;
+  for (const p of rows.filter((item: { id: string }) => item.id !== prior.participationId)) {
+    assert.equal(p.status, "finished"); assert.equal(p.finished_at, deadline); assert.equal(p.finish_reason, "automatic_operational_deadline");
+  }
+  assert.equal(rows.find((p: { id: string }) => p.id === prior.participationId).finish_reason, "fixture_terminal");
+  const effects = (await pool.query(`SELECT
+    (SELECT to_char(resolved_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') FROM service_sessions WHERE queue_entry_id=$1 AND status='canceled') AS service_at,
+    (SELECT to_char(closed_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') FROM queue_entries WHERE participation_id=$2 AND status='closed') AS queue_at`,
+    [withoutCompletion.entry, withoutCompletion.p.participationId])).rows[0];
+  assert.equal(effects.service_at, deadline); assert.equal(effects.queue_at, deadline);
+  const projectedAfter = await read(completed.p, `/participations/${completed.p.participationId}`);
+  assert.equal(projectedAfter.body.participation.finishedAt, projectedBefore.body.participation.finishedAt);
+  assert.equal(projectedAfter.body.participation.finishReason, "automatic_operational_deadline");
+  assert.deepEqual((await read(completed.p, "/participations/current")).body, { participation: null });
+  const eligibility = await read(completed.p, `/participations/${completed.p.participationId}/evaluation-eligibility`);
+  assert.equal(eligibility.status, 200); assert.equal(eligibility.body.eligible, true); assert.equal(eligibility.body.pending, true);
+  assert.equal(eligibility.body.firstSubmissionDeadlineAt, (await pool.query(`SELECT to_char(($1::timestamptz+interval '720 hours') AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`, [deadline])).rows[0].at);
+  const ineligible = await read(withoutCompletion.p, `/participations/${withoutCompletion.p.participationId}/evaluation-eligibility`);
+  assert.equal(ineligible.status, 200); assert.equal(ineligible.body.eligible, false); assert.equal(ineligible.body.reason, "NO_COMPLETED_SERVICE");
+  const history = await read(completed.p, "/participations/history");
+  const historical = history.body.items.find((item: { participationId: string }) => item.participationId === completed.p.participationId);
+  assert.equal(historical.finishedAt, deadline); assert.equal(historical.evaluation.pending, true);
+  await pool.query("UPDATE idempotency_operations SET expires_at=clock_timestamp()-interval '1 hour' WHERE actor_user_id=$1 AND operation=$2 AND idempotency_key=$3", [c.admin.userId, operation, key]);
+  const beforeReplay = await state(c), replayed = await close(c, immediate(), key);
+  assert.equal(replayed.status, 200); assert.deepEqual(replayed.body, response.body); assert.deepEqual(await state(c), beforeReplay); assert.equal((await audit(c)).length, 1);
+});
+
+test("E08-EST02 PostgreSQL job e Admin tardios concorrentes convergem sem depender da ordem dos locks", async () => {
+  const { EventClosureService } = await import("../../src/events/event-closure.service"), closure = app.get(EventClosureService);
+  for (const winner of ["admin", "job"] as const) {
+    const c = await context(), completed = await called(c); assert.equal((await resolve(c, completed.session, "complete")).status, 200);
+    const pending = await called(c);
+    await pool.query("UPDATE events SET official_ends_at=clock_timestamp()-interval '20 minutes',operational_deadline_at=clock_timestamp()-interval '10 minutes' WHERE id=$1", [c.eventId]);
+    const deadline = (await pool.query(`SELECT to_char(operational_deadline_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at FROM events WHERE id=$1`, [c.eventId])).rows[0].at as string;
+    const [first, second] = winner === "admin"
+      ? await ordered(() => close(c), () => closure.regularizeEvent(c.eventId))
+      : await ordered(() => closure.regularizeEvent(c.eventId), () => close(c));
+    if (winner === "admin") {
+      assert.equal((first as supertest.Response).status, 200); assert.equal((first as supertest.Response).body.effectiveOperationalDeadlineAt, deadline);
+      assert.deepEqual(second, { kind: "already_closed" });
+    } else {
+      assert.equal((first as { kind: string; deadlineAt: string }).kind, "closed");
+      assert.equal((first as { deadlineAt: string }).deadlineAt, deadline);
+      problem(second as supertest.Response, 409, "EVENT_ALREADY_CLOSED");
+    }
+    const facts = (await pool.query(`SELECT
+      (SELECT to_char(finished_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') FROM participations WHERE id=$1) AS finished_at,
+      (SELECT finish_reason FROM participations WHERE id=$1) AS finish_reason,
+      (SELECT status FROM service_sessions WHERE queue_entry_id=$2) AS service_status,
+      (SELECT cancel_reason FROM service_sessions WHERE queue_entry_id=$2) AS cancel_reason,
+      (SELECT resolved_by_user_id FROM service_sessions WHERE queue_entry_id=$2) AS resolved_by_user_id,
+      (SELECT to_char(resolved_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') FROM service_sessions WHERE queue_entry_id=$2) AS resolved_at,
+      (SELECT status FROM queue_entries WHERE id=$2) AS queue_status,
+      (SELECT close_reason FROM queue_entries WHERE id=$2) AS close_reason,
+      (SELECT to_char(closed_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') FROM queue_entries WHERE id=$2) AS closed_at`,
+      [completed.p.participationId, pending.entry])).rows[0];
+    assert.equal(facts.finished_at, deadline);
+    assert.equal(facts.finish_reason, "automatic_operational_deadline");
+    assert.equal(facts.service_status, "canceled"); assert.equal(facts.resolved_at, deadline);
+    assert.equal(facts.cancel_reason, "automatic_operational_deadline"); assert.equal(facts.resolved_by_user_id, null);
+    assert.equal(facts.queue_status, "closed"); assert.equal(facts.closed_at, deadline);
+    assert.equal(facts.close_reason, "automatic_operational_deadline");
+    assert.equal((await audit(c)).length, winner === "admin" ? 1 : 0);
+  }
+});
+
+test("E08-EST02 PostgreSQL envio de avaliação concorre com Admin tardio sem deslocar finished_at nem os 720 horas", async () => {
+  for (const winner of ["admin", "evaluation"] as const) {
+    const c = await context(), eligible = await called(c); assert.equal((await resolve(c, eligible.session, "complete")).status, 200);
+    const deadline = (await pool.query(`UPDATE events SET official_ends_at=clock_timestamp()-interval '20 minutes',
+      operational_deadline_at=clock_timestamp()-interval '10 minutes' WHERE id=$1
+      RETURNING to_char(operational_deadline_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`, [c.eventId])).rows[0].at as string;
+    const submit = () => supertest(app.getHttpServer()).post(`/api/v1/participations/${eligible.p.participationId}/evaluation`)
+      .set("Authorization", `Bearer ${eligible.p.token}`).set("Idempotency-Key", randomUUID()).send({ rating: 5 });
+    const [first, second] = winner === "admin"
+      ? await ordered(() => close(c), submit)
+      : await orderedAfterParticipationLock(submit, () => close(c));
+    const adminResult = winner === "admin" ? first as supertest.Response : second as supertest.Response;
+    const evaluationResult = winner === "admin" ? second as supertest.Response : first as supertest.Response;
+    assert.equal(adminResult.status, 200, JSON.stringify(adminResult.body));
+    if (winner === "admin") assert.equal(evaluationResult.status, 201, JSON.stringify(evaluationResult.body));
+    else problem(evaluationResult, 409, "EVALUATION_NOT_ELIGIBLE");
+    const stored = (await pool.query(`SELECT to_char(finished_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS finished_at,finish_reason
+      FROM participations WHERE id=$1`, [eligible.p.participationId])).rows[0];
+    assert.equal(stored.finished_at, deadline); assert.equal(stored.finish_reason, "automatic_operational_deadline");
+    const after = await read(eligible.p, `/participations/${eligible.p.participationId}/evaluation-eligibility`);
+    assert.equal(after.status, 200); assert.equal(after.body.firstSubmissionDeadlineAt,
+      (await pool.query(`SELECT to_char(($1::timestamptz+interval '720 hours') AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`, [deadline])).rows[0].at);
+    assert.equal(after.body.submitted, winner === "admin");
+    const writes = (await pool.query(`SELECT
+      (SELECT count(*)::int FROM evaluations WHERE participation_id=$1) AS evaluations,
+      (SELECT count(*)::int FROM idempotency_operations WHERE actor_user_id=$2 AND operation='submit_evaluation') AS intents`,
+      [eligible.p.participationId, eligible.p.userId])).rows[0];
+    assert.deepEqual(writes, winner === "admin" ? { evaluations: 1, intents: 1 } : { evaluations: 0, intents: 0 });
+  }
 });
 test("E08.8 PostgreSQL prazos controlados passado/igual/agora/além de hora ou limite original são recusados", async () => {
   for (const seconds of [-1, 0, 3601, 7200]) { const c = await context(), before = await state(c); problem(await close(c, await controlled(seconds)), 409, "CLOSURE_DEADLINE_INVALID"); assert.deepEqual(await state(c), before); }

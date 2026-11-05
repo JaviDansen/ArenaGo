@@ -8,6 +8,7 @@ import type * as schema from "../database/schema";
 import { completeIdempotencyOperationWithTx, createRequestFingerprint, reserveIdempotencyOperationWithTx } from "../participations/join-idempotency";
 import type { JsonValue } from "../participations/join-idempotency";
 import { assertAdminSessionWithTx, authorizeGlobalAdminWithTx } from "./admin-operation-auth";
+import { AUTOMATIC_OPERATIONAL_REASON } from "./event-closure.projection";
 import { adminCloseBody, type AdminCloseBody } from "./admin-close.dto";
 import type { AdminCloseInput, AdminCloseResult, AdminCloseState } from "./admin-close.types";
 
@@ -109,18 +110,22 @@ export class AdminCloseService {
         if (row.outcome === "invalid") block({ kind: "closure_deadline_invalid" });
         ensure(row.outcome === "changed" && validInstant(row.at) && validInstant(row.deadline), "UPDATE de encerramento não efetivado.");
         if (immediate) {
-          const canceled = await tx.execute(sql`UPDATE service_sessions s SET status='canceled',resolved_at=e.closure_requested_at,
-            resolved_by_user_id=${input.userId},cancel_reason=${ADMIN_IMMEDIATE_REASON}
+          const canceled = await tx.execute(sql`UPDATE service_sessions s SET status='canceled',resolved_at=LEAST(e.operational_deadline_at,e.admin_deadline_at),
+            resolved_by_user_id=CASE WHEN e.operational_deadline_at<=e.closure_requested_at THEN NULL ELSE ${input.userId}::uuid END,
+            cancel_reason=CASE WHEN e.operational_deadline_at<=e.closure_requested_at THEN ${AUTOMATIC_OPERATIONAL_REASON} ELSE ${ADMIN_IMMEDIATE_REASON} END
             FROM experiences x,events e WHERE s.experience_id=x.id AND x.event_id=e.id AND e.id=${input.eventId} AND s.status='pending' RETURNING s.id`);
           ensure(canceled.rows.length === pending.length, "contagem de pending cancelados divergente.");
-          const closed = await tx.execute(sql`UPDATE queue_entries q SET status='closed',closed_at=e.closure_requested_at,close_reason=${ADMIN_IMMEDIATE_REASON}
+          const closed = await tx.execute(sql`UPDATE queue_entries q SET status='closed',closed_at=LEAST(e.operational_deadline_at,e.admin_deadline_at),
+            close_reason=CASE WHEN e.operational_deadline_at<=e.closure_requested_at THEN ${AUTOMATIC_OPERATIONAL_REASON} ELSE ${ADMIN_IMMEDIATE_REASON} END
             FROM events e WHERE q.event_id=e.id AND e.id=${input.eventId} AND q.status IN ('waiting','called') RETURNING q.id`);
           ensure(closed.rows.length === entries.length, "contagem de entradas encerradas divergente.");
         }
         const finalized = await tx.execute<{ previousStatus: string }>(sql`WITH targets AS MATERIALIZED (
             SELECT id,status FROM participations WHERE event_id=${input.eventId} AND (status='waiting' OR (${immediate}::boolean AND status='active')))
-          UPDATE participations p SET status='finished',finished_at=e.closure_requested_at,
-            finish_reason=${immediate ? ADMIN_IMMEDIATE_REASON : ADMIN_CONTROLLED_EXTERNAL_REASON},current_queue_entry_id=NULL
+          UPDATE participations p SET status='finished',finished_at=CASE WHEN ${immediate}::boolean
+              THEN LEAST(e.operational_deadline_at,e.admin_deadline_at) ELSE e.closure_requested_at END,
+            finish_reason=CASE WHEN ${immediate}::boolean AND e.operational_deadline_at<=e.closure_requested_at THEN ${AUTOMATIC_OPERATIONAL_REASON}
+              ELSE ${immediate ? ADMIN_IMMEDIATE_REASON : ADMIN_CONTROLLED_EXTERNAL_REASON} END,current_queue_entry_id=NULL
           FROM events e,targets t WHERE p.id=t.id AND p.event_id=e.id AND e.id=${input.eventId} RETURNING t.status AS "previousStatus"`);
         ensure(finalized.rows.length === people.filter(p => p.status === "waiting" || (immediate && p.status === "active")).length, "contagem de participações finalizadas divergente.");
         const externalWaitingFinalized = finalized.rows.filter(p => p.previousStatus === "waiting").length;

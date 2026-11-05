@@ -55,12 +55,18 @@ test("E08.8 imediato cancela pendências, fecha filas, finaliza pessoas e audita
   const order = ["SELECT id FROM events", "SELECT id FROM experiences", 'SELECT s.id,s.experience_id', 'SELECT id,status,current_queue_entry_id', 'SELECT id,participation_id', 'SELECT s.id,s.queue_entry_id', "FROM users WHERE", "SELECT id FROM user_roles", "SELECT id FROM sessions", 'insert into "idempotency_operations"', "WITH decision", "UPDATE service_sessions", "UPDATE queue_entries", "WITH targets", "INSERT INTO audit_logs", 'update "idempotency_operations"'];
   for (let n = 1; n < order.length; n++) assert.ok(f.queries.findIndex(q => q.text.includes(order[n - 1])) < f.queries.findIndex(q => q.text.includes(order[n])), order[n]);
   for (const q of f.queries.filter(q => q.text.includes("ORDER BY"))) assert.match(q.text, /FOR (UPDATE|SHARE)/);
-  for (const name of ["UPDATE service_sessions", "UPDATE queue_entries", "WITH targets", "INSERT INTO audit_logs"]) assert.ok(f.queries.find(q => q.text.includes(name))!.text.includes("closure_requested_at"));
+  for (const name of ["UPDATE service_sessions", "UPDATE queue_entries", "WITH targets"]) assert.ok(f.queries.find(q => q.text.includes(name))!.text.includes("LEAST(e.operational_deadline_at,e.admin_deadline_at)"));
+  for (const name of ["UPDATE service_sessions", "UPDATE queue_entries", "WITH targets"]) assert.ok(f.queries.find(q => q.text.includes(name))!.text.includes("e.operational_deadline_at<=e.closure_requested_at"));
+  assert.match(f.queries.find(q => q.text.includes("WITH targets"))!.text,/finished_at=CASE WHEN \$\d+::boolean\s+THEN LEAST\(e\.operational_deadline_at,e\.admin_deadline_at\) ELSE e\.closure_requested_at END/);
+  assert.ok(f.queries.find(q => q.text.includes("INSERT INTO audit_logs"))!.text.includes("e.closure_requested_at"));
   const canceled = f.queries.find(q => q.text.includes("UPDATE service_sessions"))!; assert.match(canceled.text, /status='pending'/); assert.match(canceled.text, /status='canceled'/); assert.ok(canceled.params.includes("admin_immediate"));
   assert.equal(f.queries.some(q => /INSERT INTO evaluations|status='completed'|status='absent'/.test(q.text)), false);
 });
 test("E08.8 controlado finaliza somente waiting externa e preserva operação residual", async () => {
   const f = fixture(), r = await f.service.closeEvent(controlled); assert.deepEqual(r, { kind: "completed", ...state, status: "closing", closureMode: "controlled", effectiveOperationalDeadlineAt: deadline });
+  const finish = f.queries.find(q => q.text.includes("WITH targets"))!;
+  assert.match(finish.text,/THEN LEAST\(e\.operational_deadline_at,e\.admin_deadline_at\) ELSE e\.closure_requested_at END/);
+  assert.ok(finish.params.includes(false)); assert.ok(finish.params.includes("admin_controlled_external_wait_closed"));
   assert.equal(f.queries.some(q => q.text.includes("UPDATE service_sessions") || q.text.includes("UPDATE queue_entries")), false);
   const p = f.queries.find(q => q.text.includes("WITH targets"))!; assert.ok(p.params.includes("admin_controlled_external_wait_closed")); assert.ok(p.params.includes(false));
   assert.equal(f.queries.some(q => /SET availability|SET queue_accepting_entries|last_queue_order=/.test(q.text)), false);
