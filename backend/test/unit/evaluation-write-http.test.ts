@@ -1,3 +1,4 @@
+import type { MutationSession } from "../../src/auth/mutation-session";
 import "reflect-metadata";
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
@@ -26,8 +27,8 @@ const calls:Array<{ mode:string; input:Record<string,unknown> }>=[];
     if(!["participant","admin","staff"].includes(token))throw new ProblemException({status:401,code:"INVALID_ACCESS_TOKEN",typeSlug:"invalid-access-token",title:"Inválido",detail:"Token inválido."});
     return { userId:uid,sessionId:id(4),roles:token==="participant"?[]:[token] };
   } } },
-  { provide:EvaluationWriteService,useValue:{ submit:(input:Record<string,unknown>)=>{calls.push({mode:"submit",input});if(failure)throw failure;return result;},
-    edit:(input:Record<string,unknown>)=>{calls.push({mode:"edit",input});if(failure)throw failure;return result;} } },
+  { provide:EvaluationWriteService,useValue:{ submitAuthenticated:(input:Record<string,unknown>, context: MutationSession) => { authenticatedInput(context, undefined); calls.push({mode:"submit",input});if(failure)throw failure;return result;},
+    editAuthenticated:(input:Record<string,unknown>, context: MutationSession) => { authenticatedInput(context, undefined); calls.push({mode:"edit",input});if(failure)throw failure;return result;} } },
 ] })class HttpModule{}
 let app:INestApplication;
 before(async()=>{app=await NestFactory.create(HttpModule,{logger:false});app.setGlobalPrefix("api/v1");app.useGlobalFilters(new ProblemDetailsExceptionFilter());await app.listen(0,"127.0.0.1");});
@@ -98,3 +99,7 @@ test("E08.11 DI Nest resolve escritas, política e banco reais sob tsx sem conec
     assert.ok(Reflect.get(writes,"database")===real.get(DRIZZLE_DATABASE));assert.equal(real.get<Pool>(POSTGRES_POOL).totalCount,0);
   }finally{await real.close();}
 });
+
+function authenticatedInput<T>(context: MutationSession, result: T): T {
+  assert.deepEqual(context, { userId: uid, sessionId: id(4) }); return result;
+}

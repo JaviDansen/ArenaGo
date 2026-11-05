@@ -1,3 +1,4 @@
+import { mutationSession } from "../auth/mutation-session";
 import { Body, Controller, Get, HttpCode, Inject, Param, Post, Req } from "@nestjs/common";
 import { CurrentUserId, RequireSessionAuth } from "../auth/current-user.decorator";
 import type { AuthenticatedRequest } from "../auth/session-auth.guard";
@@ -42,6 +43,6 @@ export class ParticipationLifecycleController {
   private async mutate(mode:"cancel"|"finish",userId:string,params:unknown,body:unknown,request:AuthenticatedRequest){
     const ids=validateOperationParams(lifecycleParams,params);validateOperationBody(emptyOperationBody,body,request,true);
     const input={...ids,userId,idempotencyKey:validateOperationIdempotencyKey(request),expiresAt:this.policy.expiresAt()};
-    return response(await this.writes[mode](input));
+    return response(await this.writes[mode === "cancel" ? "cancelAuthenticated" : "finishAuthenticated"](input,mutationSession(request,userId)));
   }
 }

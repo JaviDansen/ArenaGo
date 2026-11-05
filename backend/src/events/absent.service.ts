@@ -1,3 +1,4 @@
+import { assertMutationSession, mutationTransaction, revalidateMutationSession, type MutationSession } from "../auth/mutation-session";
 import { Inject, Injectable } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
@@ -61,12 +62,22 @@ function replay(payload: JsonValue | null, input: AbsentServiceInput, queueEntry
 export class AbsentService {
   constructor(@Inject(DRIZZLE_DATABASE) private readonly database: NodePgDatabase<typeof schema>) {}
 
+  /** Contrato interno E07; os controllers usam exclusivamente a entrada autenticada. */
   async absent(input: AbsentServiceInput): Promise<AbsentServiceResult> {
+    return this.execute(input, null);
+  }
+
+  async absentAuthenticated(input: AbsentServiceInput, context: MutationSession): Promise<AbsentServiceResult> {
+    assertMutationSession(context, input.staffUserId);
+    return this.execute(input,  { ...context, staffEventId: input.eventId });
+  }
+
+  private async execute(input: AbsentServiceInput, context: MutationSession | null): Promise<AbsentServiceResult> {
     if (!input.idempotencyKey.trim() || input.idempotencyKey.length > 128 || !Number.isFinite(input.expiresAt.getTime())) {
       throw new Error("Chave de idempotência ou expiração inválida.");
     }
     try {
-      return await this.database.transaction(async (tx): Promise<AbsentServiceResult> => {
+      return await mutationTransaction(this.database, context, async (tx): Promise<AbsentServiceResult> => {
         const lookup = await tx.execute<{ experienceId: string; stationId: string; queueEntryId: string; participationId: string }>(sql`
           SELECT s.experience_id AS "experienceId", s.station_id AS "stationId",
             s.queue_entry_id AS "queueEntryId", q.participation_id AS "participationId"
@@ -96,7 +107,10 @@ export class AbsentService {
         const staff = await tx.execute(sql`SELECT r.id FROM users u JOIN user_roles r ON r.user_id=u.id
           WHERE u.id=${input.staffUserId} AND u.is_active=true AND u.email_verified_at IS NOT NULL
             AND r.role='staff' AND r.event_id=${input.eventId} AND r.revoked_at IS NULL FOR SHARE OF u, r`);
-        if (!staff.rows.length) block({ kind: "staff_event_forbidden" });
+        if (!staff.rows.length) {
+          if (context !== null) await revalidateMutationSession(tx, context);
+          block({ kind: "staff_event_forbidden" });
+        }
         if (!target) block({ kind: "service_not_found" });
         const person = await tx.execute<{ status: string; currentId: string | null }>(sql`
           SELECT status, current_queue_entry_id AS "currentId" FROM participations
@@ -114,6 +128,7 @@ export class AbsentService {
           actorUserId: input.staffUserId, operation: ABSENT_SERVICE_OPERATION, idempotencyKey: input.idempotencyKey,
           requestHash: createAbsentServiceFingerprint(input.eventId, input.serviceSessionId), expiresAt: input.expiresAt,
         });
+        if (context !== null) await revalidateMutationSession(tx, context);
         if (reservation.kind === "request_conflict" || reservation.kind === "in_progress") return { kind: reservation.kind };
         if (reservation.kind === "replay") return { kind: "replay", ...replay(reservation.resultPayload, input, target.queueEntryId) };
         ensure(["pending", "completed", "absent", "canceled"].includes(session.rows[0].status), "estado do atendimento desconhecido.");

@@ -1,3 +1,4 @@
+import type { MutationSession } from "../../src/auth/mutation-session";
 import "reflect-metadata";
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
@@ -28,7 +29,7 @@ const calls:Array<{mode:string;input:unknown}>=[];let result:LifecycleResult={ki
     return {userId:uid,sessionId:id(4),roles:token==="participant"?[]:[token]};
   }}},
   {provide:ParticipationQueryService,useValue:{current:(userId:string)=>{calls.push({mode:"current",input:userId});return found?value:null;},byId:(userId:string,participationId:string)=>{calls.push({mode:"byId",input:{userId,participationId}});return found?value:null;}}},
-  {provide:ParticipationLifecycleService,useValue:{cancel:(input:unknown)=>{calls.push({mode:"cancel",input});if(failure)throw Error("PARTICIPATION_LIFECYCLE_INTERNAL_ERROR");return result;},finish:(input:unknown)=>{calls.push({mode:"finish",input});if(failure)throw Error("PARTICIPATION_LIFECYCLE_INTERNAL_ERROR");return result;}}},
+  {provide:ParticipationLifecycleService,useValue:{cancelAuthenticated:(input:unknown, context: MutationSession) => { authenticatedInput(context, undefined); calls.push({mode:"cancel",input});if(failure)throw Error("PARTICIPATION_LIFECYCLE_INTERNAL_ERROR");return result;},finishAuthenticated:(input:unknown, context: MutationSession) => { authenticatedInput(context, undefined); calls.push({mode:"finish",input});if(failure)throw Error("PARTICIPATION_LIFECYCLE_INTERNAL_ERROR");return result;}}},
   {provide:EvaluationReadService,useValue:{getHistory:()=>({items:[],nextCursor:null}),getReturnState:()=>({recentFinalization:null,pendingEvaluationParticipationIds:[]}),getPending:()=>({items:[]})}},
 ]})class HttpModule{}
 let app:INestApplication;
@@ -91,3 +92,7 @@ test("E08.12 DI Nest resolve serviços reais e reutiliza TTL explícito sem cone
     assert.equal(Reflect.get(writes,"database"),real.get(DRIZZLE_DATABASE));assert.equal(Reflect.get(queries,"database"),real.get(DRIZZLE_DATABASE));assert.equal(real.get<Pool>(POSTGRES_POOL).totalCount,0);
   }finally{await real.close();}
 });
+
+function authenticatedInput<T>(context: MutationSession, result: T): T {
+  assert.deepEqual(context, { userId: uid, sessionId: id(4) }); return result;
+}

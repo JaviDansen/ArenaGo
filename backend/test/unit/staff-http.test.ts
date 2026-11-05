@@ -1,3 +1,4 @@
+import type { MutationSession } from "../../src/auth/mutation-session";
 import "reflect-metadata";
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
@@ -42,9 +43,9 @@ function record<T>(input: CallNextInput | CompleteServiceInput | AbsentServiceIn
     if (token !== "unit-staff") throw new ProblemException({ typeSlug: "invalid-access-token", title: "Inválido", status: 401, code: "INVALID_ACCESS_TOKEN", detail: "Token inválido." });
     return { userId: staffId, sessionId: id(8) };
   } } },
-  { provide: CallNextService, useValue: { callNext: async (input: CallNextInput) => record(input, callResult) } },
-  { provide: CompleteService, useValue: { complete: async (input: CompleteServiceInput) => record(input, completeResult) } },
-  { provide: AbsentService, useValue: { absent: async (input: AbsentServiceInput) => record(input, absentResult) } },
+  { provide: CallNextService, useValue: { callNextAuthenticated: async (input: CallNextInput, context: MutationSession) => authenticatedInput(context, record(input, callResult)) } },
+  { provide: CompleteService, useValue: { completeAuthenticated: async (input: CompleteServiceInput, context: MutationSession) => authenticatedInput(context, record(input, completeResult)) } },
+  { provide: AbsentService, useValue: { absentAuthenticated: async (input: AbsentServiceInput, context: MutationSession) => authenticatedInput(context, record(input, absentResult)) } },
 ] })
 class HttpUnitModule {}
 let app: INestApplication;
@@ -151,3 +152,7 @@ test("E08.1 TTL exige inteiro positivo explícito, sem fallback e sem aceitar ov
 test("E08.1 header com controles não chega aos serviços internos", () => {
   assert.throws(() => validateStaffRequest({}, { headers: { "content-type": "application/json", "idempotency-key": "a\tb" }, rawHeaders: ["Idempotency-Key", "a\tb"] }), ProblemException);
 });
+
+function authenticatedInput<T>(context: MutationSession, result: T): T {
+  assert.deepEqual(context, { userId: staffId, sessionId: id(8) }); return result;
+}

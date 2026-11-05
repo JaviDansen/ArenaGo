@@ -1,3 +1,4 @@
+import { assertMutationSession, mutationTransaction, revalidateMutationSession, type MutationSession } from "../auth/mutation-session";
 import { Inject, Injectable } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
@@ -63,13 +64,23 @@ export class QueueEntryService {
     @Inject(EventsService) private readonly eventsService: EventsService,
   ) {}
 
+  /** Contrato interno E07; os controllers usam exclusivamente a entrada autenticada. */
   async joinExperienceQueue(input: JoinExperienceQueueInput): Promise<JoinExperienceQueueResult> {
+    return this.execute(input, null);
+  }
+
+  async joinExperienceQueueAuthenticated(input: JoinExperienceQueueInput, context: MutationSession): Promise<JoinExperienceQueueResult> {
+    assertMutationSession(context, input.userId);
+    return this.execute(input, context);
+  }
+
+  private async execute(input: JoinExperienceQueueInput, context: MutationSession | null): Promise<JoinExperienceQueueResult> {
     if (!input.idempotencyKey.trim() || input.idempotencyKey.length > 128
       || !Number.isFinite(input.expiresAt.getTime())) {
       throw new Error("Chave de idempotência ou expiração inválida.");
     }
     try {
-      return await this.database.transaction(async (tx): Promise<JoinExperienceQueueResult> => {
+      return await mutationTransaction(this.database, context, async (tx): Promise<JoinExperienceQueueResult> => {
         // Descoberta sem autorização de mutação; titularidade/evento são revalidados sob lock.
         const lookup = await tx.execute<{ eventId: string }>(sql`
           SELECT event_id AS "eventId" FROM participations
@@ -105,6 +116,7 @@ export class QueueEntryService {
           requestHash: createQueueJoinFingerprint(input.participationId, input.experienceId),
           expiresAt: input.expiresAt,
         });
+        if (context !== null) await revalidateMutationSession(tx, context);
         if (reservation.kind === "request_conflict" || reservation.kind === "in_progress") {
           return { kind: reservation.kind };
         }

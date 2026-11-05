@@ -1,3 +1,4 @@
+import type { MutationSession } from "../../src/auth/mutation-session";
 import "reflect-metadata";
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
@@ -45,11 +46,11 @@ function record<T>(input: JoinExperienceQueueInput | WithdrawExperienceQueueInpu
     if (!["unit-participant", "unit-admin"].includes(token)) throw new ProblemException({ typeSlug: "invalid-access-token", title: "Inválido", status: 401, code: "INVALID_ACCESS_TOKEN", detail: "Token inválido." });
     return { userId, sessionId: id(5), roles: token === "unit-admin" ? ["admin"] : [] };
   } } },
-  { provide: QueueEntryService, useValue: { joinExperienceQueue: async (input: JoinExperienceQueueInput) => record(input, joinResult) } },
+  { provide: QueueEntryService, useValue: { joinExperienceQueueAuthenticated: async (input: JoinExperienceQueueInput, context: MutationSession) => authenticatedInput(context, record(input, joinResult)) } },
   { provide: QueueStateService, useValue: { getParticipationQueue: async (...input: string[]) => {
     reads.push(input); if (failure) throw failure; return queueResult;
   } } },
-  { provide: QueueWithdrawalService, useValue: { withdrawExperienceQueue: async (input: WithdrawExperienceQueueInput) => record(input, withdrawResult) } },
+  { provide: QueueWithdrawalService, useValue: { withdrawExperienceQueueAuthenticated: async (input: WithdrawExperienceQueueInput, context: MutationSession) => authenticatedInput(context, record(input, withdrawResult)) } },
 ] })
 class HttpUnitModule {}
 let app: INestApplication;
@@ -218,3 +219,7 @@ test("E08.2 Nest resolve controller, guard e serviços reais sob tsx sem conecta
     assert.equal(real.get<Pool>(POSTGRES_POOL).totalCount, 0);
   } finally { await real.close(); }
 });
+
+function authenticatedInput<T>(context: MutationSession, result: T): T {
+  assert.deepEqual(context, { userId: userId, sessionId: id(5) }); return result;
+}

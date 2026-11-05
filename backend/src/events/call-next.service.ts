@@ -1,3 +1,4 @@
+import { assertMutationSession, mutationTransaction, revalidateMutationSession, type MutationSession } from "../auth/mutation-session";
 import { Inject, Injectable } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
@@ -47,12 +48,22 @@ function replay(payload: JsonValue | null, input: CallNextInput): CalledNext {
 export class CallNextService {
   constructor(@Inject(DRIZZLE_DATABASE) private readonly database: NodePgDatabase<typeof schema>) {}
 
+  /** Contrato interno E07; os controllers usam exclusivamente a entrada autenticada. */
   async callNext(input: CallNextInput): Promise<CallNextResult> {
+    return this.execute(input, null);
+  }
+
+  async callNextAuthenticated(input: CallNextInput, context: MutationSession): Promise<CallNextResult> {
+    assertMutationSession(context, input.staffUserId);
+    return this.execute(input,  { ...context, staffEventId: input.eventId });
+  }
+
+  private async execute(input: CallNextInput, context: MutationSession | null): Promise<CallNextResult> {
     if (!input.idempotencyKey.trim() || input.idempotencyKey.length > 128 || !Number.isFinite(input.expiresAt.getTime())) {
       throw new Error("Chave de idempotência ou expiração inválida.");
     }
     try {
-      return await this.database.transaction(async (tx): Promise<CallNextResult> => {
+      return await mutationTransaction(this.database, context, async (tx): Promise<CallNextResult> => {
         const event = await tx.execute(sql`SELECT id FROM events WHERE id=${input.eventId} FOR SHARE`);
         if (!event.rows.length) block({ kind: "staff_event_forbidden" });
         const experience = await tx.execute(sql`SELECT id FROM experiences
@@ -67,7 +78,10 @@ export class CallNextService {
           WHERE u.id=${input.staffUserId} AND u.is_active=true AND u.email_verified_at IS NOT NULL
             AND r.role='staff' AND r.event_id=${input.eventId} AND r.revoked_at IS NULL
           FOR SHARE OF u, r`);
-        if (!staff.rows.length) block({ kind: "staff_event_forbidden" });
+        if (!staff.rows.length) {
+          if (context !== null) await revalidateMutationSession(tx, context);
+          block({ kind: "staff_event_forbidden" });
+        }
 
         // Reconhecer retry antes de exigir estação livre/fila/tempo atuais: resposta histórica.
         // Namespace próprio; nenhum outro comando adquire esta reserva antes do mutex da experiência.
@@ -75,6 +89,7 @@ export class CallNextService {
           actorUserId: input.staffUserId, operation: CALL_NEXT_OPERATION, idempotencyKey: input.idempotencyKey,
           requestHash: createCallNextFingerprint(input.eventId, input.experienceId, input.stationId), expiresAt: input.expiresAt,
         });
+        if (context !== null) await revalidateMutationSession(tx, context);
         if (reservation.kind === "request_conflict" || reservation.kind === "in_progress") return { kind: reservation.kind };
         if (reservation.kind === "replay") return { kind: "replay", ...replay(reservation.resultPayload, input) };
 

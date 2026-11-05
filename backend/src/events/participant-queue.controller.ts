@@ -1,3 +1,4 @@
+import { mutationSession } from "../auth/mutation-session";
 import { Body, Controller, Get, HttpCode, HttpStatus, Inject, Param, Post, Req } from "@nestjs/common";
 import { CurrentUserId, RequireSessionAuth } from "../auth/current-user.decorator";
 import type { AuthenticatedRequest } from "../auth/session-auth.guard";
@@ -25,7 +26,7 @@ export class ParticipantQueueController {
     const ids = validateOperationParams(participationQueueParamsSchema, params);
     const input = validateOperationBody(queueJoinBodySchema, body, request);
     const idempotencyKey = validateOperationIdempotencyKey(request);
-    const result = await this.joining.joinExperienceQueue({ ...ids, ...input, userId, idempotencyKey, expiresAt: this.idempotency.expiresAt() });
+    const result = await this.joining.joinExperienceQueueAuthenticated({ ...ids, ...input, userId, idempotencyKey, expiresAt: this.idempotency.expiresAt() }, mutationSession(request, userId));
     if (result.kind === "created" || result.kind === "replay") {
       return { queueEntryId: result.queueEntryId, participationId: result.participationId, experienceId: result.experienceId,
         status: result.status, queueOrder: result.queueOrder, enteredAt: result.enteredAt };
@@ -48,7 +49,7 @@ export class ParticipantQueueController {
     const ids = validateOperationParams(queueWithdrawalParamsSchema, params);
     validateOperationBody(emptyOperationBody, body, request, true);
     const idempotencyKey = validateOperationIdempotencyKey(request);
-    const result = await this.withdrawal.withdrawExperienceQueue({ ...ids, userId, idempotencyKey, expiresAt: this.idempotency.expiresAt() });
+    const result = await this.withdrawal.withdrawExperienceQueueAuthenticated({ ...ids, userId, idempotencyKey, expiresAt: this.idempotency.expiresAt() }, mutationSession(request, userId));
     if (result.kind === "withdrawn" || result.kind === "replay") {
       return { participationId: result.participationId, queueEntryId: result.queueEntryId, experienceId: result.experienceId,
         status: result.status, closedAt: result.closedAt, serviceSession: result.serviceSession };

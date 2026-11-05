@@ -1,3 +1,4 @@
+import { assertMutationSession, MutationSessionError, mutationTransaction, revalidateMutationSession, type MutationSession } from "../auth/mutation-session";
 import { Inject, Injectable } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
@@ -28,28 +29,38 @@ export class EvaluationWriteService {
     return sql`SELECT p.id,p.event_id,e.name AS event_name,p.status,p.joined_at,p.arena_entered_at,p.finished_at,p.finish_reason
       FROM participations p JOIN events e ON e.id=p.event_id WHERE p.id=${participationId}::uuid AND p.user_id=${userId}::uuid`;
   }
-  async submit(input: SubmitEvaluationInput): Promise<EvaluationWriteResult> { return this.write("submit", input); }
-  async edit(input: EditEvaluationInput): Promise<EvaluationWriteResult> { return this.write("edit", input); }
-  private async write(mode: "submit" | "edit", input: SubmitEvaluationInput | EditEvaluationInput): Promise<EvaluationWriteResult> {
+  async submit(input: SubmitEvaluationInput): Promise<EvaluationWriteResult> { return this.write("submit", input, null); }
+  async edit(input: EditEvaluationInput): Promise<EvaluationWriteResult> { return this.write("edit", input, null); }
+  submitAuthenticated(input: SubmitEvaluationInput, context: MutationSession): Promise<EvaluationWriteResult> {
+    assertMutationSession(context, input.userId); return this.write("submit", input, context);
+  }
+  editAuthenticated(input: EditEvaluationInput, context: MutationSession): Promise<EvaluationWriteResult> {
+    assertMutationSession(context, input.userId); return this.write("edit", input, context);
+  }
+  private async write(mode: "submit" | "edit", input: SubmitEvaluationInput | EditEvaluationInput, context: MutationSession | null): Promise<EvaluationWriteResult> {
     try {
       const payload = mode === "submit" ? submitEvaluationBody.parse(input.payload) : editEvaluationBody.parse(input.payload);
       ensure(input.idempotencyKey.trim() && input.idempotencyKey.length <= 128 && Number.isFinite(input.expiresAt.getTime()));
       const evaluationId = "evaluationId" in input ? input.evaluationId : undefined;
       const resourceId = "participationId" in input ? input.participationId : input.evaluationId;
-      return await this.database.transaction(async tx => {
+      return await mutationTransaction(this.database, context, async tx => {
         const lookup = mode === "submit" ? sql`SELECT id AS "participationId" FROM participations WHERE id=${resourceId}::uuid AND user_id=${input.userId}::uuid`
           : sql`SELECT p.id AS "participationId" FROM evaluations v JOIN participations p ON p.id=v.participation_id WHERE v.id=${resourceId}::uuid AND p.user_id=${input.userId}::uuid`;
         const found = (await tx.execute<{ participationId: string }>(lookup)).rows[0]; if (!found) block("access_denied");
         const participationId = found.participationId, operation = mode === "submit" ? SUBMIT_EVALUATION_OPERATION : EDIT_EVALUATION_OPERATION;
         const intent = await reserveIdempotencyOperationWithTx(tx, { actorUserId: input.userId, operation, idempotencyKey: input.idempotencyKey,
           requestHash: evaluationWriteFingerprint(operation, resourceId, payload as JsonValue), expiresAt: input.expiresAt });
-        if (intent.kind === "request_conflict" || intent.kind === "in_progress") block(intent.kind);
+        if (intent.kind === "request_conflict" || intent.kind === "in_progress") {
+          if (context !== null) await revalidateMutationSession(tx, context);
+          block(intent.kind);
+        }
         const parent = await tx.execute(sql`SELECT id FROM participations WHERE id=${participationId}::uuid AND user_id=${input.userId}::uuid FOR UPDATE`);
         if (parent.rows.length !== 1) block("access_denied");
         if (mode === "edit") {
           const locked = await tx.execute(sql`SELECT id FROM evaluations WHERE id=${evaluationId}::uuid AND participation_id=${participationId}::uuid FOR UPDATE`);
           if (locked.rows.length !== 1) block("access_denied");
         }
+        if (context !== null) await revalidateMutationSession(tx, context);
         if (intent.kind === "replay") {
           const replay = evaluationWriteResponse.parse(intent.resultPayload);
           ensure(intent.httpStatus === (mode === "submit" ? 201 : 200) && replay.evaluation.participationId === participationId
@@ -78,6 +89,7 @@ export class EvaluationWriteService {
         return { kind: mode === "submit" ? "created" : "updated", evaluation };
       }, { isolationLevel: "read committed" });
     } catch (error) {
+      if (error instanceof MutationSessionError) throw error;
       if (error instanceof WriteRollback) return { kind: error.kind };
       // O filtro HTTP existente registra somente message; causa interna nunca vira resposta ou log.
       throw new Error("EVALUATION_WRITE_INTERNAL_ERROR", { cause: error });

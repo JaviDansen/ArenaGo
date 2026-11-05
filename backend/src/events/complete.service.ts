@@ -1,3 +1,4 @@
+import { assertMutationSession, mutationTransaction, revalidateMutationSession, type MutationSession } from "../auth/mutation-session";
 import { Inject, Injectable } from "@nestjs/common";
 import { sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
@@ -47,12 +48,22 @@ function replay(payload: JsonValue | null, input: CompleteServiceInput): Complet
 export class CompleteService {
   constructor(@Inject(DRIZZLE_DATABASE) private readonly database: NodePgDatabase<typeof schema>) {}
 
+  /** Contrato interno E07; os controllers usam exclusivamente a entrada autenticada. */
   async complete(input: CompleteServiceInput): Promise<CompleteServiceResult> {
+    return this.execute(input, null);
+  }
+
+  async completeAuthenticated(input: CompleteServiceInput, context: MutationSession): Promise<CompleteServiceResult> {
+    assertMutationSession(context, input.staffUserId);
+    return this.execute(input,  { ...context, staffEventId: input.eventId });
+  }
+
+  private async execute(input: CompleteServiceInput, context: MutationSession | null): Promise<CompleteServiceResult> {
     if (!input.idempotencyKey.trim() || input.idempotencyKey.length > 128 || !Number.isFinite(input.expiresAt.getTime())) {
       throw new Error("Chave de idempotência ou expiração inválida.");
     }
     try {
-      return await this.database.transaction(async (tx): Promise<CompleteServiceResult> => {
+      return await mutationTransaction(this.database, context, async (tx): Promise<CompleteServiceResult> => {
         // Descoberta da sessão EXPLÍCITA, sem autorizar mutação ou escolher a sessão atual da pessoa.
         const lookup = await tx.execute<{ experienceId: string; stationId: string; queueEntryId: string; participationId: string }>(sql`
           SELECT s.experience_id AS "experienceId", s.station_id AS "stationId",
@@ -76,7 +87,10 @@ export class CompleteService {
           WHERE u.id=${input.staffUserId} AND u.is_active=true AND u.email_verified_at IS NOT NULL
             AND r.role='staff' AND r.event_id=${input.eventId} AND r.revoked_at IS NULL
           FOR SHARE OF u, r`);
-        if (!staff.rows.length) block({ kind: "staff_event_forbidden" });
+        if (!staff.rows.length) {
+          if (context !== null) await revalidateMutationSession(tx, context);
+          block({ kind: "staff_event_forbidden" });
+        }
         if (!target) block({ kind: "service_not_found" });
         const person = await tx.execute<{ status: string; currentId: string | null }>(sql`
           SELECT status, current_queue_entry_id AS "currentId" FROM participations
@@ -95,6 +109,7 @@ export class CompleteService {
           actorUserId: input.staffUserId, operation: COMPLETE_SERVICE_OPERATION, idempotencyKey: input.idempotencyKey,
           requestHash: createCompleteServiceFingerprint(input.eventId, input.serviceSessionId), expiresAt: input.expiresAt,
         });
+        if (context !== null) await revalidateMutationSession(tx, context);
         if (reservation.kind === "request_conflict" || reservation.kind === "in_progress") return { kind: reservation.kind };
         // Resposta histórica: não exigir ponteiro/estados atuais nem tocar atendimento posterior.
         if (reservation.kind === "replay") return { kind: "replay", ...replay(reservation.resultPayload, input) };

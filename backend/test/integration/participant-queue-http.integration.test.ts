@@ -349,22 +349,22 @@ test("E08.2 PostgreSQL HTTP Admin como jogador não precisa de papel Staff", asy
   const entry = await enter(c); assert.equal((await get(p)).status, 200); assert.equal((await withdraw(p, entry)).status, 200);
 });
 test("E08.2 PostgreSQL HTTP erro após escritas de ingresso faz rollback integral e permite retry", async () => {
-  const c = await context(), before = await state(c), key = randomUUID(), original = joining.joinExperienceQueue.bind(joining); let reached = false;
+  const c = await context(), before = await state(c), key = randomUUID(), original = joining.joinExperienceQueueAuthenticated.bind(joining); let reached = false;
   const failingDb = { transaction: <T>(callback: (tx: DatabaseTransactionExecutor) => Promise<T>, config?: Parameters<Database["transaction"]>[1]) =>
     database.transaction(async tx => {
       await callback(tx);
       const row = (await tx.execute<{ pointer: string | null }>(sql`SELECT current_queue_entry_id AS pointer FROM participations WHERE id=${c.people[0].participationId}`)).rows[0];
       assert.ok(row.pointer); reached = true; throw new Error("E082_PRIVATE_ROLLBACK");
     }, config) } as unknown as Database;
-  joining.joinExperienceQueue = input => makeJoining(failingDb).joinExperienceQueue(input);
+  joining.joinExperienceQueueAuthenticated = (input, context) => makeJoining(failingDb).joinExperienceQueueAuthenticated(input, context);
   try { const r = await join(c, c.people[0], key); problem(r, 500, "INTERNAL_SERVER_ERROR"); assert.equal(JSON.stringify(r.body).includes("PRIVATE"), false); assert.equal(reached, true); assert.equal(await state(c), before); }
-  finally { joining.joinExperienceQueue = original; }
+  finally { joining.joinExperienceQueueAuthenticated = original; }
   assert.equal((await join(c, c.people[0], key)).status, 201);
 });
 test("E08.2 PostgreSQL HTTP erro após desistência waiting/called reverte efeitos e idempotência", async () => {
   for (const called of [false,true]) {
     const c = await context(), entry = await enter(c); if (called) assert.equal((await call(c)).status, 201);
-    const before = await state(c), key = randomUUID(), original = withdrawal.withdrawExperienceQueue.bind(withdrawal); let reached = false;
+    const before = await state(c), key = randomUUID(), original = withdrawal.withdrawExperienceQueueAuthenticated.bind(withdrawal); let reached = false;
     const failingDb = { transaction: <T>(callback: (tx: DatabaseTransactionExecutor) => Promise<T>, config?: Parameters<Database["transaction"]>[1]) =>
       database.transaction(async tx => {
         await callback(tx);
@@ -373,9 +373,9 @@ test("E08.2 PostgreSQL HTTP erro após desistência waiting/called reverte efeit
         assert.equal(row.pointer, null); assert.equal(row.status, "closed"); assert.equal(row.sessionStatus, called ? "canceled" : null);
         reached = true; throw new Error("E082_PRIVATE_ROLLBACK");
       }, config) } as unknown as Database;
-    withdrawal.withdrawExperienceQueue = input => makeWithdrawal(failingDb).withdrawExperienceQueue(input);
+    withdrawal.withdrawExperienceQueueAuthenticated = (input, context) => makeWithdrawal(failingDb).withdrawExperienceQueueAuthenticated(input, context);
     try { const r = await withdraw(c.people[0], entry, key); problem(r, 500, "INTERNAL_SERVER_ERROR"); assert.equal(JSON.stringify(r.body).includes("PRIVATE"), false); assert.equal(reached, true); assert.equal(await state(c), before); }
-    finally { withdrawal.withdrawExperienceQueue = original; }
+    finally { withdrawal.withdrawExperienceQueueAuthenticated = original; }
     assert.equal((await withdraw(c.people[0], entry, key)).status, 200);
   }
 });

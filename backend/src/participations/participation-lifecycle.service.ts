@@ -1,3 +1,4 @@
+import { assertMutationSession, MutationSessionError, mutationTransaction, revalidateMutationSession, type MutationSession } from "../auth/mutation-session";
 import { Inject, Injectable } from "@nestjs/common";
 import { sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
@@ -33,24 +34,33 @@ interface Entry extends Record<string,unknown> { id: string; experienceId: strin
 @Injectable()
 export class ParticipationLifecycleService {
   constructor(@Inject(DRIZZLE_DATABASE) private readonly database: NodePgDatabase<typeof schema>) {}
-  cancel(input: LifecycleInput) { return this.write("cancel",input); }
-  finish(input: LifecycleInput) { return this.write("finish",input); }
+  cancel(input: LifecycleInput) { return this.write("cancel",input,null); }
+  finish(input: LifecycleInput) { return this.write("finish",input,null); }
+  cancelAuthenticated(input: LifecycleInput, context: MutationSession) {
+    assertMutationSession(context, input.userId); return this.write("cancel",input,context);
+  }
+  finishAuthenticated(input: LifecycleInput, context: MutationSession) {
+    assertMutationSession(context, input.userId); return this.write("finish",input,context);
+  }
   private async state(tx: DatabaseTransactionExecutor, input: LifecycleInput, at?: string) {
     const rows=(await tx.execute<ParticipationProjectionRow>(participationProjection(input.userId,input.participationId,
       at?sql`${at}::timestamptz`:sql`clock_timestamp()`))).rows;
     ensure(rows.length===1); return publicParticipation(rows[0]);
   }
-  private async write(mode: "cancel" | "finish", input: LifecycleInput): Promise<LifecycleResult> {
+  private async write(mode: "cancel" | "finish", input: LifecycleInput, context: MutationSession | null): Promise<LifecycleResult> {
     try {
       ensure(input.idempotencyKey.trim() && input.idempotencyKey.length<=128 && Number.isFinite(input.expiresAt.getTime()));
-      return await this.database.transaction(async tx => {
+      return await mutationTransaction(this.database, context, async tx => {
         const target=(await tx.execute<Target>(sql`SELECT event_id AS "eventId" FROM participations
           WHERE id=${input.participationId}::uuid AND user_id=${input.userId}::uuid`)).rows[0];
         if (!target) block("access_denied");
         const intent=await reserveIdempotencyOperationWithTx(tx,{actorUserId:input.userId,
           operation:mode==="cancel"?CANCEL_PARTICIPATION_OPERATION:FINISH_PARTICIPATION_OPERATION,idempotencyKey:input.idempotencyKey,
           requestHash:lifecycleFingerprint(mode,input.userId,input.participationId),expiresAt:input.expiresAt});
-        if(intent.kind==="request_conflict"||intent.kind==="in_progress")block(intent.kind);
+        if(intent.kind==="request_conflict"||intent.kind==="in_progress"){
+          if (context !== null) await revalidateMutationSession(tx, context);
+          block(intent.kind);
+        }
         // Exclusivo no evento: a descoberta da fila fica estável inclusive contra troca de experiência.
         // Mesma ordem de E03/E08.8/E08.9; todo escritor operacional anterior usa FOR SHARE/UPDATE no evento.
         ensure((await tx.execute(sql`SELECT id FROM events WHERE id=${target.eventId}::uuid FOR UPDATE`)).rows.length===1);
@@ -66,6 +76,7 @@ export class ParticipationLifecycleService {
         const person=(await tx.execute<Current>(sql`SELECT status,current_queue_entry_id AS "currentId" FROM participations
           WHERE id=${input.participationId}::uuid AND user_id=${input.userId}::uuid AND event_id=${target.eventId}::uuid FOR UPDATE`)).rows[0];
         if(!person)block("access_denied");
+        if (context !== null) await revalidateMutationSession(tx, context);
         if(intent.kind==="replay"){
           const value=(mode==="finish"?finishedParticipationView:participationView).parse(intent.resultPayload && typeof intent.resultPayload==="object" && !Array.isArray(intent.resultPayload)?intent.resultPayload.participation:undefined);
           ensure(intent.httpStatus===200&&intent.resultReference===input.participationId&&value.id===input.participationId&&value.eventId===target.eventId
@@ -113,6 +124,6 @@ export class ParticipationLifecycleService {
         await completeIdempotencyOperationWithTx(tx,intent.operationId,{httpStatus:200,resultReference:input.participationId,resultPayload:{participation} as unknown as JsonValue});
         return {kind:"changed",participation};
       },{isolationLevel:"read committed"});
-    }catch(error){if(error instanceof LifecycleRollback)return error.result;throw new Error("PARTICIPATION_LIFECYCLE_INTERNAL_ERROR",{cause:error});}
+    }catch(error){if(error instanceof MutationSessionError)throw error;if(error instanceof LifecycleRollback)return error.result;throw new Error("PARTICIPATION_LIFECYCLE_INTERNAL_ERROR",{cause:error});}
   }
 }

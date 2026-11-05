@@ -320,7 +320,7 @@ test("E08.1 PostgreSQL HTTP revalida prazo depois de esperar experiência", asyn
   } finally { await client.query("ROLLBACK"); await Promise.allSettled([pending]); client.release(); }
 });
 test("E08.1 PostgreSQL HTTP erro após as escritas reais faz rollback e permite retry", async () => {
-  const c = await context(true), before = await state(c), key = randomUUID(), original = completion.complete.bind(completion);
+  const c = await context(true), before = await state(c), key = randomUUID(), original = completion.completeAuthenticated.bind(completion);
   let reached = false;
   const failingDb = { transaction: <T>(callback: (tx: DatabaseTransactionExecutor) => Promise<T>, config?: Parameters<Database["transaction"]>[1]) =>
     database.transaction(async tx => {
@@ -329,10 +329,10 @@ test("E08.1 PostgreSQL HTTP erro após as escritas reais faz rollback e permite 
         FROM service_sessions s JOIN queue_entries q ON q.id=s.queue_entry_id JOIN participations p ON p.id=q.participation_id WHERE s.id=${c.serviceSessionId}`)).rows[0];
       assert.equal(row.status, "completed"); assert.equal(row.pointer, null); reached = true; throw new Error("E081_ROLLBACK_PRIVATE");
     }, config) } as unknown as Database;
-  completion.complete = input => makeCompletion(failingDb).complete(input);
+  completion.completeAuthenticated = (input, context) => makeCompletion(failingDb).completeAuthenticated(input, context);
   try {
     const r = await post(c, "complete", key).send({}); problem(r, 500, "INTERNAL_SERVER_ERROR");
     assert.equal(JSON.stringify(r.body).includes("PRIVATE"), false); assert.equal(reached, true); assert.equal(await state(c), before);
-  } finally { completion.complete = original; }
+  } finally { completion.completeAuthenticated = original; }
   assert.equal((await post(c, "complete", key).send({})).status, 200);
 });

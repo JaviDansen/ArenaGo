@@ -1,3 +1,4 @@
+import { mutationSession } from "../auth/mutation-session";
 import { Body, Controller, HttpCode, Inject, Injectable, Param, Patch, Post, Req } from "@nestjs/common";
 import { CurrentUserId, RequireSessionAuth } from "../auth/current-user.decorator";
 import type { AuthenticatedRequest } from "../auth/session-auth.guard";
@@ -32,12 +33,12 @@ export class EvaluationWriteController {
   @HttpCode(201)
   async submit(@CurrentUserId() userId: string, @Param() params: unknown, @Body() body: unknown, @Req() request: AuthenticatedRequest) {
     const { participationId } = validateOperationParams(evaluationParams, params), payload = validateOperationBody(submitEvaluationBody, body, request);
-    return response(await this.writes.submit({ userId, participationId, payload, idempotencyKey: validateOperationIdempotencyKey(request), expiresAt: this.policy.expiresAt() }));
+    return response(await this.writes.submitAuthenticated({ userId, participationId, payload, idempotencyKey: validateOperationIdempotencyKey(request), expiresAt: this.policy.expiresAt() }, mutationSession(request, userId)));
   }
   @Patch("evaluations/:evaluationId")
   @HttpCode(200)
   async edit(@CurrentUserId() userId: string, @Param() params: unknown, @Body() body: unknown, @Req() request: AuthenticatedRequest) {
     const { evaluationId } = validateOperationParams(writeEvaluationParams, params), payload = validateOperationBody(editEvaluationBody, body, request);
-    return response(await this.writes.edit({ userId, evaluationId, payload, idempotencyKey: validateOperationIdempotencyKey(request), expiresAt: this.policy.expiresAt() }));
+    return response(await this.writes.editAuthenticated({ userId, evaluationId, payload, idempotencyKey: validateOperationIdempotencyKey(request), expiresAt: this.policy.expiresAt() }, mutationSession(request, userId)));
   }
 }

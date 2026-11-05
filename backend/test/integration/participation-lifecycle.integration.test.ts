@@ -277,9 +277,10 @@ for(const mode of ["cancel","finish"]as const)for(const phase of ["reserve","par
         ||(phase==='participation'&&text.startsWith('WITH decision AS MATERIALIZED'))||(phase==='queue'&&text.startsWith('UPDATE queue_entries'))||(phase==='session'&&text.startsWith('UPDATE service_sessions')))){
         assert.equal(result.rows.length,1);reached=true;await originalQuery('SELECT 1/0');assert.fail('Falha SQL real deveria abortar a transação.');}return result;
     };return Reflect.get(target,property,target);}});
-    const failing=makeWrites(drizzle(proxy,{schema})),original=writes[mode].bind(writes);writes[mode]=input=>failing[mode](input);
+    const method=mode==='cancel'?'cancelAuthenticated':'finishAuthenticated';
+    const failing=makeWrites(drizzle(proxy,{schema})),original=writes[method].bind(writes);writes[method]=(input,context)=>failing[method](input,context);
     try{problem(await mutate(mode,p,key),500,'INTERNAL_SERVER_ERROR');assert.equal(reached,true);assert.deepEqual(await ownState(c,p),before);}
-    finally{writes[mode]=original;client.release();}
+    finally{writes[method]=original;client.release();}
     assert.equal((await mutate(mode,p,key)).status,200);
   });
 }

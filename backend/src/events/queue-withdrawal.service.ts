@@ -1,3 +1,4 @@
+import { assertMutationSession, mutationTransaction, revalidateMutationSession, type MutationSession } from "../auth/mutation-session";
 import { Inject, Injectable } from "@nestjs/common";
 import { sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
@@ -54,12 +55,22 @@ function replay(payload: JsonValue | null, input: WithdrawExperienceQueueInput):
 export class QueueWithdrawalService {
   constructor(@Inject(DRIZZLE_DATABASE) private readonly database: NodePgDatabase<typeof schema>) {}
 
+  /** Contrato interno E07; os controllers usam exclusivamente a entrada autenticada. */
   async withdrawExperienceQueue(input: WithdrawExperienceQueueInput): Promise<WithdrawExperienceQueueResult> {
+    return this.execute(input, null);
+  }
+
+  async withdrawExperienceQueueAuthenticated(input: WithdrawExperienceQueueInput, context: MutationSession): Promise<WithdrawExperienceQueueResult> {
+    assertMutationSession(context, input.userId);
+    return this.execute(input, context);
+  }
+
+  private async execute(input: WithdrawExperienceQueueInput, context: MutationSession | null): Promise<WithdrawExperienceQueueResult> {
     if (!input.idempotencyKey.trim() || input.idempotencyKey.length > 128 || !Number.isFinite(input.expiresAt.getTime())) {
       throw new Error("Chave de idempotência ou expiração inválida.");
     }
     try {
-      return await this.database.transaction(async (tx): Promise<WithdrawExperienceQueueResult> => {
+      return await mutationTransaction(this.database, context, async (tx): Promise<WithdrawExperienceQueueResult> => {
         // Descoberta não bloqueante da tentativa EXPLÍCITA, com titularidade já filtrada.
         const lookup = await tx.execute<{ eventId: string; experienceId: string; queueEntryId: string }>(sql`
           SELECT p.event_id AS "eventId", q.experience_id AS "experienceId", q.id AS "queueEntryId"
@@ -111,6 +122,7 @@ export class QueueWithdrawalService {
           actorUserId: input.userId, operation: QUEUE_WITHDRAWAL_OPERATION, idempotencyKey: input.idempotencyKey,
           requestHash: createQueueWithdrawalFingerprint(input.participationId, input.queueEntryId), expiresAt: input.expiresAt,
         });
+        if (context !== null) await revalidateMutationSession(tx, context);
         if (reservation.kind === "request_conflict" || reservation.kind === "in_progress") return { kind: reservation.kind };
         if (reservation.kind === "replay") return { kind: "replay", ...replay(reservation.resultPayload, input) };
         if (owned.status !== "active") block({ kind: "participation_not_active" });

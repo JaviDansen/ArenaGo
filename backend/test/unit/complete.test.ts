@@ -1,3 +1,5 @@
+import { sessionScenario, assertSessionRefusal, assertSessionTransaction } from "./mutation-session-scenario";
+import type { MutationSession } from "../../src/auth/mutation-session";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { drizzle } from "drizzle-orm/node-postgres";
@@ -158,3 +160,36 @@ test("E07.5 input inválido falha antes de abrir transação", async () => {
   for (const changes of [{ idempotencyKey: " " }, { idempotencyKey: "x".repeat(129) }, { expiresAt: new Date(NaN) }]) await assert.rejects(service.complete({ ...input, ...changes }), /inválida/);
   assert.equal(queries.length, 0);
 });
+
+// E08-EST01: a entrada HTTP não admite fallback para o contrato interno E07.
+for (const scenario of ["valid", "revoked", "expired", "foreign", "inactive", "admin", "late", "wait", "intent-wait"] as const) {
+  test(`E08-EST01 complete sessão ${scenario}`, async () => {
+    const f = fixture(), auth = sessionScenario(f.service, input.staffUserId, scenario);
+    if (scenario === "valid") {
+      const result = await f.service.completeAuthenticated(input, auth.context);
+      assert.equal(result.kind, "completed");
+      assert.ok(auth.checks() >= 2); assertSessionTransaction(auth.queries, true);
+    } else {
+      const code = scenario === "foreign" ? "INVALID_SESSION" : scenario === "inactive" ? "ACCOUNT_DEACTIVATED"
+        : scenario === "admin" ? "ADMIN_2FA_REQUIRED" : scenario === "late" || scenario === "expired" ? "SESSION_EXPIRED" : "SESSION_REVOKED";
+      await assert.rejects(f.service.completeAuthenticated(input, auth.context), error => assertSessionRefusal(error, code));
+      assertSessionTransaction(auth.queries, false);
+      if (scenario === "late") assert.ok(auth.queries.some(q => q.includes('update "idempotency_operations"')));
+    }
+  });
+}
+for (const context of [undefined, { userId: "other", sessionId: "session" }, { userId: input.staffUserId, sessionId: "" }]) {
+  test(`E08-EST01 complete recusa contexto ausente ou incompatível ${JSON.stringify(context)}`, async () => {
+    const f = fixture();
+    await assert.rejects(async () => f.service.completeAuthenticated(input, context as MutationSession), error => assertSessionRefusal(error, "UNAUTHENTICATED_CONTEXT"));
+    assert.equal(f.queries.length, 0);
+  });
+}
+for (const scenario of ["valid", "revoked", "expired", "late"] as const) {
+  test(`E08-EST01 complete replay exige sessão ${scenario}`, async () => {
+    const f = fixture({ reservation: "replay" }), auth = sessionScenario(f.service, input.staffUserId, scenario);
+    if (scenario === "valid") { assert.equal((await f.service.completeAuthenticated(input, auth.context)).kind, "replay"); assertSessionTransaction(auth.queries, true); }
+    else { await assert.rejects(f.service.completeAuthenticated(input, auth.context), error => assertSessionRefusal(error, scenario === "revoked" ? "SESSION_REVOKED" : "SESSION_EXPIRED")); assertSessionTransaction(auth.queries, false); }
+    assert.equal(auth.queries.some(q => q.includes('update "idempotency_operations"')), false);
+  });
+}

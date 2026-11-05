@@ -1,3 +1,5 @@
+import { sessionScenario, assertSessionRefusal, assertSessionTransaction } from "./mutation-session-scenario";
+import type { MutationSession } from "../../src/auth/mutation-session";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { drizzle } from "drizzle-orm/node-postgres";
@@ -127,4 +129,82 @@ test("E08.11 predicados decisivos usam política de leitura, relógio único e p
   for (const query of [a,b]) { assert.equal(query.sql.match(/clock_timestamp\(\)/g)?.length,1); assert.match(query.sql,/WITH scoped AS MATERIALIZED/); assert.match(query.sql,/s.status='completed'/); }
   assert.match(a.sql,/f.eligible AND f.pending AND NOT f.submitted/); assert.match(b.sql,/c.allowed AND c.changed/);
   assert.match(b.sql,/first_comment_at=COALESCE/); assert.doesNotMatch(b.sql,/SET submitted_at|submitted_at=/); assert.match(b.sql,/IS DISTINCT FROM/);
+});
+
+// E08-EST01: a entrada HTTP não admite fallback para o contrato interno E07.
+for (const scenario of ["valid", "revoked", "expired", "foreign", "inactive", "admin", "late", "wait", "intent-wait"] as const) {
+  test(`E08-EST01 submit sessão ${scenario}`, async () => {
+    const f = fixture("submit"), auth = sessionScenario(f.service, uid, scenario);
+    if (scenario === "valid") {
+      const result = await f.service.submitAuthenticated(post, auth.context);
+      assert.equal(result.kind, "created");
+      assert.ok(auth.checks() >= 2); assertSessionTransaction(auth.queries, true);
+    } else {
+      const code = scenario === "foreign" ? "INVALID_SESSION" : scenario === "inactive" ? "ACCOUNT_DEACTIVATED"
+        : scenario === "admin" ? "ADMIN_2FA_REQUIRED" : scenario === "late" || scenario === "expired" ? "SESSION_EXPIRED" : "SESSION_REVOKED";
+      await assert.rejects(f.service.submitAuthenticated(post, auth.context), error => assertSessionRefusal(error, code));
+      assertSessionTransaction(auth.queries, false);
+      if (scenario === "late") assert.ok(auth.queries.some(q => q.includes('update "idempotency_operations"')));
+    }
+  });
+}
+for (const context of [undefined, { userId: "other", sessionId: "session" }, { userId: uid, sessionId: "" }]) {
+  test(`E08-EST01 submit recusa contexto ausente ou incompatível ${JSON.stringify(context)}`, async () => {
+    const f = fixture("submit");
+    await assert.rejects(async () => f.service.submitAuthenticated(post, context as MutationSession), error => assertSessionRefusal(error, "UNAUTHENTICATED_CONTEXT"));
+    assert.equal(f.queries.length, 0);
+  });
+}
+for (const scenario of ["valid", "revoked", "expired", "late"] as const) {
+  test(`E08-EST01 submit replay exige sessão ${scenario}`, async () => {
+    const f = fixture("submit", { intent: "replay" }), auth = sessionScenario(f.service, uid, scenario);
+    if (scenario === "valid") { assert.equal((await f.service.submitAuthenticated(post, auth.context)).kind, "replay"); assertSessionTransaction(auth.queries, true); }
+    else { await assert.rejects(f.service.submitAuthenticated(post, auth.context), error => assertSessionRefusal(error, scenario === "revoked" ? "SESSION_REVOKED" : "SESSION_EXPIRED")); assertSessionTransaction(auth.queries, false); }
+    assert.equal(auth.queries.some(q => q.includes('update "idempotency_operations"')), false);
+  });
+}
+
+// E08-EST01: a entrada HTTP não admite fallback para o contrato interno E07.
+for (const scenario of ["valid", "revoked", "expired", "foreign", "inactive", "admin", "late", "wait", "intent-wait"] as const) {
+  test(`E08-EST01 edit sessão ${scenario}`, async () => {
+    const f = fixture("edit"), auth = sessionScenario(f.service, uid, scenario);
+    if (scenario === "valid") {
+      const result = await f.service.editAuthenticated(patch, auth.context);
+      assert.equal(result.kind, "updated");
+      assert.ok(auth.checks() >= 2); assertSessionTransaction(auth.queries, true);
+    } else {
+      const code = scenario === "foreign" ? "INVALID_SESSION" : scenario === "inactive" ? "ACCOUNT_DEACTIVATED"
+        : scenario === "admin" ? "ADMIN_2FA_REQUIRED" : scenario === "late" || scenario === "expired" ? "SESSION_EXPIRED" : "SESSION_REVOKED";
+      await assert.rejects(f.service.editAuthenticated(patch, auth.context), error => assertSessionRefusal(error, code));
+      assertSessionTransaction(auth.queries, false);
+      if (scenario === "late") assert.ok(auth.queries.some(q => q.includes('update "idempotency_operations"')));
+    }
+  });
+}
+for (const context of [undefined, { userId: "other", sessionId: "session" }, { userId: uid, sessionId: "" }]) {
+  test(`E08-EST01 edit recusa contexto ausente ou incompatível ${JSON.stringify(context)}`, async () => {
+    const f = fixture("edit");
+    await assert.rejects(async () => f.service.editAuthenticated(patch, context as MutationSession), error => assertSessionRefusal(error, "UNAUTHENTICATED_CONTEXT"));
+    assert.equal(f.queries.length, 0);
+  });
+}
+for (const scenario of ["valid", "revoked", "expired", "late"] as const) {
+  test(`E08-EST01 edit replay exige sessão ${scenario}`, async () => {
+    const f = fixture("edit", { intent: "replay" }), auth = sessionScenario(f.service, uid, scenario);
+    if (scenario === "valid") { assert.equal((await f.service.editAuthenticated(patch, auth.context)).kind, "replay"); assertSessionTransaction(auth.queries, true); }
+    else { await assert.rejects(f.service.editAuthenticated(patch, auth.context), error => assertSessionRefusal(error, scenario === "revoked" ? "SESSION_REVOKED" : "SESSION_EXPIRED")); assertSessionTransaction(auth.queries, false); }
+    assert.equal(auth.queries.some(q => q.includes('update "idempotency_operations"')), false);
+  });
+}
+
+for (const intent of ["conflict", "in_progress"] as const) test(`E08-EST01 submit reserva ${intent} exige autorizacao atual`, async () => {
+  const f = fixture("submit", { intent }), auth = sessionScenario(f.service, uid, "intent-wait");
+  await assert.rejects(f.service.submitAuthenticated(post, auth.context), error => assertSessionRefusal(error, "SESSION_REVOKED"));
+  assertSessionTransaction(auth.queries, false);
+});
+
+for (const intent of ["conflict", "in_progress"] as const) test(`E08-EST01 edit reserva ${intent} exige autorizacao atual`, async () => {
+  const f = fixture("edit", { intent }), auth = sessionScenario(f.service, uid, "intent-wait");
+  await assert.rejects(f.service.editAuthenticated(patch, auth.context), error => assertSessionRefusal(error, "SESSION_REVOKED"));
+  assertSessionTransaction(auth.queries, false);
 });

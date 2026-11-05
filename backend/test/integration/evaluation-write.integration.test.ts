@@ -232,10 +232,10 @@ test(`E08.11 PostgreSQL falha depois da escrita ${phase} ${mode} reverte avalia�
     if(!reached&&((phase==="reserve"&&text.includes('insert into "idempotency_operations"'))||(phase==="complete"&&text.includes('update "idempotency_operations"'))||(phase==="domain"&&text.includes("WITH decision AS MATERIALIZED")))){
       assert.equal(result.rows.length,1);if(phase==="domain")assert.ok(result.rows[0].writtenId);reached=true;
       await originalQuery("SELECT 1/0");assert.fail("A falha SQL real deveria abortar a transação.");}return result;};return Reflect.get(target,property,target);}});
-  const failing=makeWrites(drizzle(proxy,{schema})),originalPost=writes.submit.bind(writes),originalPatch=writes.edit.bind(writes);
-  writes.submit=input=>failing.submit(input);writes.edit=input=>failing.edit(input);
+  const failing=makeWrites(drizzle(proxy,{schema})),originalPost=writes.submitAuthenticated.bind(writes),originalPatch=writes.editAuthenticated.bind(writes);
+  writes.submitAuthenticated=(input,context)=>failing.submitAuthenticated(input,context);writes.editAuthenticated=(input,context)=>failing.editAuthenticated(input,context);
   try{const r=mode==="post"?await submit(p,{rating:5},key):await edit(p,id!,{rating:5},key);problem(r,500,"INTERNAL_SERVER_ERROR");assert.equal(JSON.stringify(r.body).includes("PRIVATE"),false);assert.equal(reached,true);assert.deepEqual(await ownState(c,p),before);}
-  finally{writes.submit=originalPost;writes.edit=originalPatch;client.release();}
+  finally{writes.submitAuthenticated=originalPost;writes.editAuthenticated=originalPatch;client.release();}
   assert.equal((mode==="post"?await submit(p,{rating:5},key):await edit(p,id!,{rating:5},key)).status,mode==="post"?201:200);
 });
 for(const mode of ["post","patch"]as const)test(`E08.11 PostgreSQL snapshot de leitura permanece coerente durante ${mode} concorrente real`,async()=>{
