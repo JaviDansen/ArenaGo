@@ -1,6 +1,6 @@
 # ArenaGo — Frontend
 
-Este diretório contém o aplicativo mobile do ArenaGo, desenvolvido com React Native e Expo. A partir da K02, os fluxos de **Cadastro, Login, Restauração de Sessão, Renovação de Tokens e Logout** estão integrados ao backend real NestJS/PostgreSQL (`/api/v1/auth/*`), enquanto as operações de Arena/Eventos e Questionário ainda utilizam estado local até suas respectivas tasks de integração.
+Este diretório contém o aplicativo mobile do ArenaGo, desenvolvido com React Native e Expo. Cadastro, login, restauração de sessão, renovação de tokens, logout e questionário usam a API NestJS/PostgreSQL. As telas de entrada em eventos, Arena, filas e avaliações ainda utilizam dados ou estado locais, mesmo quando já existem endpoints correspondentes no backend.
 
 ## Estado atual
 
@@ -17,7 +17,7 @@ Este diretório contém o aplicativo mobile do ArenaGo, desenvolvido com React N
   - Login e restauração de sessão abrem `MainTabs` automaticamente. Cadastro cria a sessão e abre `ProfileQuestionnaire`; logout retorna à área pública. A remoção da rota anterior impede voltar à tela de Login após autenticar.
   - O estado de autenticação controla a árvore de rotas sem navegação manual nas telas de login, cadastro ou logout.
 - **Fluxos ainda locais:**
-  - O questionário apresenta três etapas: dados pessoais, jogos e informações sobre o mercado de games. É um fluxo local e seus dados ainda não são persistidos no backend; a integração e persistência serão feitas em uma task posterior (prevista na K03).
+  - O questionário apresenta três etapas: dados pessoais, jogos e informações sobre o mercado de games. `ProfileQuestionnaireScreen` consulta e grava em `/profile/questionnaire`; `ProfileScreen` também consulta o perfil persistido. A navegação e o preenchimento das etapas são estado de interface local.
   - A entrada manual aceita os códigos de demonstração `FILA` e `LIVRE`, sem diferenciar maiúsculas de minúsculas. `FILA` inicia uma espera simulada na fila externa; `LIVRE` entra diretamente na Arena.
   - Na Arena, o fluxo local simula filas de experiências, chamada, ausência, confirmação de atendimento e saída.
   - A avaliação permite selecionar de uma a cinco estrelas e escrever um comentário opcional.

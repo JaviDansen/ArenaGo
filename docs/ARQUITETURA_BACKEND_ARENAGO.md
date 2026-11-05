@@ -11,6 +11,51 @@
 
 > **Legenda de evidência:** **[APROVADO]** = decisão de produto já tomada; **[IMPLEMENTADO/RELATADO]** = execução informada pelo Codex, não verificada independentemente nesta revisão; **[PROPOSTA]** = contrato/lógica de serviço ainda sem implementação; **[PENDENTE]** = decisão/validação futura. O texto do dicionário representa o **desenho-alvo** que guiou a Task 6.2; detalhes exatos do SQL são autoridade do `backend/` e das migrations versionadas, sujeitos a conferência no próprio repositório.
 
+## Consolidação atual — E08-EST05 (05/11/2026)
+
+Os capítulos e resumos datados acima preservam o desenho e o estado que existiam em
+suas revisões originais. Em particular, referências a “nenhum endpoint HTTP” e a
+capítulos 14–18 como proposta não devem ser lidas como inventário do código atual.
+O código em `backend/src/`, as migrations versionadas e os relatórios de cada etapa
+são a autoridade para a implementação entregue.
+
+### Estado efetivamente implementado
+
+O backend NestJS/Drizzle/PostgreSQL possui autenticação, sessões e perfil; catálogo
+de jogos; configuração administrativa de eventos, experiências e estações; leitura
+de experiências; participação corrente, cancelamento e finalização; filas internas
+de participantes; operações e consultas Staff; controle operacional de filas;
+encerramento de eventos; e envio, edição e leitura de avaliações. Os controladores
+em `backend/src/events/`, `backend/src/participations/` e `backend/src/evaluations/`
+expõem esses contratos HTTP e os serviços preservam regras temporais, autorização,
+idempotência e auditoria documentadas nos relatórios E07/E08.
+
+As correções E08-EST01–E08-EST04 consolidaram revalidação de sessão antes do
+commit, sincronização temporal `evaluation-first`, preservação de timestamps no
+catálogo e validação de URL antes da criação de pools. A revalidação final de sessão
+continua necessariamente temporal: uma revogação posterior a essa última consulta e
+anterior ao commit não pode ser eliminada sem outro mecanismo de coordenação. Após
+A04, o responsável confirmou manualmente **1.229/1.229** testes PostgreSQL e a
+regressão unitária registrada foi **992/992**; typecheck, lint e build também foram
+aprovados nessa etapa. Esses resultados são de desenvolvimento/teste, não validação
+de produção.
+
+### Decisões preservadas, contratos pendentes e dependências externas
+
+As decisões de produto e os contratos propostos dos capítulos históricos permanecem
+referência de desenho; eles não implicam que toda rota ali proposta já esteja
+exposta. Ainda faltam a operação administrativa de concessão/revogação de papéis
+Staff/Admin e o fluxo completo de credenciamento TOTP de Admin, ambos dependentes
+da decisão de papéis prevista no planejamento. Também faltam um caminho HTTP público
+de descoberta/consulta de evento por código de acesso e de criação de nova
+participação, para que o ingresso ocorra inteiramente pela API, além da integração
+dos fluxos de eventos e Arena do Expo com os endpoints já existentes.
+
+BI, LGPD/retenção, notificações, infraestrutura de implantação, TLS remoto,
+backups, observabilidade e homologação continuam dependências externas ao escopo
+funcional implementado. Não há configuração de produção nem autorização para
+declarar o sistema pronto para produção.
+
 ## 0. Resumo executivo — o que existe e o que falta
 
 | Item | Situação | Evidência/limite |

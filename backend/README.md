@@ -1,6 +1,20 @@
 # ArenaGo Backend
 
-Fundação NestJS + Express, Drizzle ORM e PostgreSQL, incluindo o módulo de Identidade, Autenticação e Sessões (`K01`) e a API de Questionário de Perfil e Catálogo de Jogos (`K03`).
+API NestJS + Express, Drizzle ORM e PostgreSQL. O repositório inclui os módulos de Identidade, Autenticação e Sessões (`K01`), Questionário de Perfil e Catálogo de Jogos (`K03`) e as entregas posteriores de Eventos (`E07`/`E08`).
+
+## Estado atual do backend
+
+Além dos módulos iniciais, o repositório contém os contratos HTTP implementados de
+Eventos, Participações, filas internas, operações Staff, configuração administrativa,
+encerramento e avaliações. O inventário consolidado, suas decisões temporais e os
+limites de produção estão em [ARQUITETURA_BACKEND_ARENAGO.md](../docs/ARQUITETURA_BACKEND_ARENAGO.md)
+e nos relatórios `docs/E08_*_IMPLEMENTACAO.md`.
+
+Ainda não há controller público para descoberta por código de acesso e criação de
+participação, nem operações administrativas de concessão/revogação de Staff/Admin
+ou o fluxo completo de credenciamento TOTP Admin. A integração dos fluxos de Arena
+do Expo, BI/LGPD/retenção e a infraestrutura de produção também permanecem fora do
+que este README declara como entregue.
 
 ## Requisitos
 

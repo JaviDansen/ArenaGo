@@ -1,0 +1,284 @@
+diff --git a/README.md b/README.md
+index 50da222..0b7f5eb 100644
+--- a/README.md
++++ b/README.md
+@@ -1,14 +1,13 @@
+ # ArenaGo
+ 
+-ArenaGo é um aplicativo mobile para apoiar a participação em eventos de games. A proposta reúne entrada em eventos, acompanhamento de filas e participação em experiências da Arena. O backend em desenvolvimento fornecerá a API e a persistência PostgreSQL necessárias para substituir os dados locais simulados.
++ArenaGo é um aplicativo mobile para apoiar a participação em eventos de games. O repositório contém o frontend Expo e uma API NestJS com persistência PostgreSQL. A integração entre eles é parcial: autenticação e questionário usam a API, enquanto os fluxos de eventos e Arena no aplicativo ainda dependem de dados e estado locais.
+ 
+ ## Estado do desenvolvimento
+ 
+-- **Frontend:** aplicativo React Native com Expo e fluxos de demonstração executados localmente. Cadastro, login, eventos, filas, experiências e avaliações ainda usam validações, estado ou dados simulados no cliente.
+-- **Backend:** fundação NestJS com Drizzle ORM, configuração de conexão PostgreSQL, schemas e migrações versionadas implementados. Os documentos de arquitetura relatam validação local da fundação; isso não representa prontidão de produção.
+-- **Banco:** o schema Drizzle define 23 tabelas e o diretório `backend/drizzle/` contém cinco migrações SQL versionadas.
+-- **APIs e integração:** não há endpoints funcionais de domínio; o app Expo ainda não consome o backend.
+-- **Hospedagem:** não há banco Neon nem ambiente de produção configurados.
++- **Frontend Expo:** cadastro, login, sessão e questionário consultam ou gravam na API real. Entrada por código de demonstração, participação na Arena, filas e avaliações exibidas nas telas ainda usam simulação/estado local; a integração desses fluxos com os endpoints existentes não está concluída.
++- **Backend NestJS:** autenticação e sessão, perfil/questionário, jogos, configuração administrativa de eventos, participações, filas, operação Staff, encerramentos e avaliações têm controllers e serviços implementados. Isso não significa que todo o percurso do participante esteja disponível por HTTP: consulta pública do evento por código e criação de participação ainda não têm controller.
++- **Banco e testes:** Drizzle, migrações SQL e PostgreSQL local de testes. Após a E08-EST04, o responsável confirmou 1.229/1.229 testes PostgreSQL e a regressão unitária passou 992/992. Esses resultados são do ambiente de desenvolvimento/testes.
++- **Dependências abertas:** concessão/revogação de Staff e Admin, conclusão do fluxo Admin TOTP, integração Expo dos eventos, BI, LGPD e infraestrutura de produção. Não há validação de produção declarada.
+ 
+ ## Tecnologias
+ 
+@@ -27,7 +26,7 @@ O frontend também usa React 19.2.3 e React Navigation 7. Para as dependências
+ 
+ ```text
+ app/       Aplicativo mobile Expo, telas, estado local e testes
+-backend/   Fundação da API NestJS, schemas Drizzle e migrações PostgreSQL
++backend/   API NestJS, schemas Drizzle, migrações PostgreSQL e testes
+ docs/      Planejamento do produto e arquitetura técnica
+ ```
+ 
+@@ -47,7 +46,7 @@ O servidor Expo oferece as opções de execução disponíveis no README do app.
+ 
+ ### Backend
+ 
+-O backend requer uma instância PostgreSQL local e `DATABASE_URL` configurada conforme as instruções específicas. Na pasta do backend:
++O backend requer uma instância PostgreSQL local e as variáveis de conexão, tokens e TTLs descritas no [README do backend](backend/README.md). Na pasta do backend:
+ 
+ ```powershell
+ cd C:\DoJob\ProgramacaoMobile\backend
+diff --git a/app/README.md b/app/README.md
+index 72d05be..c7ad4dd 100644
+--- a/app/README.md
++++ b/app/README.md
+@@ -1,6 +1,6 @@
+ # ArenaGo — Frontend
+ 
+-Este diretório contém o aplicativo mobile do ArenaGo, desenvolvido com React Native e Expo. A partir da K02, os fluxos de **Cadastro, Login, Restauração de Sessão, Renovação de Tokens e Logout** estão integrados ao backend real NestJS/PostgreSQL (`/api/v1/auth/*`), enquanto as operações de Arena/Eventos e Questionário ainda utilizam estado local até suas respectivas tasks de integração.
++Este diretório contém o aplicativo mobile do ArenaGo, desenvolvido com React Native e Expo. Cadastro, login, restauração de sessão, renovação de tokens, logout e questionário usam a API NestJS/PostgreSQL. As telas de entrada em eventos, Arena, filas e avaliações ainda utilizam dados ou estado locais, mesmo quando já existem endpoints correspondentes no backend.
+ 
+ ## Estado atual
+ 
+@@ -17,7 +17,7 @@ Este diretório contém o aplicativo mobile do ArenaGo, desenvolvido com React N
+   - Login e restauração de sessão abrem `MainTabs` automaticamente. Cadastro cria a sessão e abre `ProfileQuestionnaire`; logout retorna à área pública. A remoção da rota anterior impede voltar à tela de Login após autenticar.
+   - O estado de autenticação controla a árvore de rotas sem navegação manual nas telas de login, cadastro ou logout.
+ - **Fluxos ainda locais:**
+-  - O questionário apresenta três etapas: dados pessoais, jogos e informações sobre o mercado de games. É um fluxo local e seus dados ainda não são persistidos no backend; a integração e persistência serão feitas em uma task posterior (prevista na K03).
++  - O questionário apresenta três etapas: dados pessoais, jogos e informações sobre o mercado de games. `ProfileQuestionnaireScreen` consulta e grava em `/profile/questionnaire`; `ProfileScreen` também consulta o perfil persistido. A navegação e o preenchimento das etapas são estado de interface local.
+   - A entrada manual aceita os códigos de demonstração `FILA` e `LIVRE`, sem diferenciar maiúsculas de minúsculas. `FILA` inicia uma espera simulada na fila externa; `LIVRE` entra diretamente na Arena.
+   - Na Arena, o fluxo local simula filas de experiências, chamada, ausência, confirmação de atendimento e saída.
+   - A avaliação permite selecionar de uma a cinco estrelas e escrever um comentário opcional.
+diff --git a/backend/README.md b/backend/README.md
+index 61bf5ea..efcf5d9 100644
+--- a/backend/README.md
++++ b/backend/README.md
+@@ -1,6 +1,20 @@
+ # ArenaGo Backend
+ 
+-Fundação NestJS + Express, Drizzle ORM e PostgreSQL, incluindo o módulo de Identidade, Autenticação e Sessões (`K01`) e a API de Questionário de Perfil e Catálogo de Jogos (`K03`).
++API NestJS + Express, Drizzle ORM e PostgreSQL. O repositório inclui os módulos de Identidade, Autenticação e Sessões (`K01`), Questionário de Perfil e Catálogo de Jogos (`K03`) e as entregas posteriores de Eventos (`E07`/`E08`).
++
++## Estado atual do backend
++
++Além dos módulos iniciais, o repositório contém os contratos HTTP implementados de
++Eventos, Participações, filas internas, operações Staff, configuração administrativa,
++encerramento e avaliações. O inventário consolidado, suas decisões temporais e os
++limites de produção estão em [ARQUITETURA_BACKEND_ARENAGO.md](../docs/ARQUITETURA_BACKEND_ARENAGO.md)
++e nos relatórios `docs/E08_*_IMPLEMENTACAO.md`.
++
++Ainda não há controller público para descoberta por código de acesso e criação de
++participação, nem operações administrativas de concessão/revogação de Staff/Admin
++ou o fluxo completo de credenciamento TOTP Admin. A integração dos fluxos de Arena
++do Expo, BI/LGPD/retenção e a infraestrutura de produção também permanecem fora do
++que este README declara como entregue.
+ 
+ ## Requisitos
+ 
+diff --git a/docs/ARQUITETURA_BACKEND_ARENAGO.md b/docs/ARQUITETURA_BACKEND_ARENAGO.md
+index 37cc7b3..3fdbc30 100644
+--- a/docs/ARQUITETURA_BACKEND_ARENAGO.md
++++ b/docs/ARQUITETURA_BACKEND_ARENAGO.md
+@@ -11,6 +11,51 @@
+ 
+ > **Legenda de evidência:** **[APROVADO]** = decisão de produto já tomada; **[IMPLEMENTADO/RELATADO]** = execução informada pelo Codex, não verificada independentemente nesta revisão; **[PROPOSTA]** = contrato/lógica de serviço ainda sem implementação; **[PENDENTE]** = decisão/validação futura. O texto do dicionário representa o **desenho-alvo** que guiou a Task 6.2; detalhes exatos do SQL são autoridade do `backend/` e das migrations versionadas, sujeitos a conferência no próprio repositório.
+ 
++## Consolidação atual — E08-EST05 (05/11/2026)
++
++Os capítulos e resumos datados acima preservam o desenho e o estado que existiam em
++suas revisões originais. Em particular, referências a “nenhum endpoint HTTP” e a
++capítulos 14–18 como proposta não devem ser lidas como inventário do código atual.
++O código em `backend/src/`, as migrations versionadas e os relatórios de cada etapa
++são a autoridade para a implementação entregue.
++
++### Estado efetivamente implementado
++
++O backend NestJS/Drizzle/PostgreSQL possui autenticação, sessões e perfil; catálogo
++de jogos; configuração administrativa de eventos, experiências e estações; leitura
++de experiências; participação corrente, cancelamento e finalização; filas internas
++de participantes; operações e consultas Staff; controle operacional de filas;
++encerramento de eventos; e envio, edição e leitura de avaliações. Os controladores
++em `backend/src/events/`, `backend/src/participations/` e `backend/src/evaluations/`
++expõem esses contratos HTTP e os serviços preservam regras temporais, autorização,
++idempotência e auditoria documentadas nos relatórios E07/E08.
++
++As correções E08-EST01–E08-EST04 consolidaram revalidação de sessão antes do
++commit, sincronização temporal `evaluation-first`, preservação de timestamps no
++catálogo e validação de URL antes da criação de pools. A revalidação final de sessão
++continua necessariamente temporal: uma revogação posterior a essa última consulta e
++anterior ao commit não pode ser eliminada sem outro mecanismo de coordenação. Após
++A04, o responsável confirmou manualmente **1.229/1.229** testes PostgreSQL e a
++regressão unitária registrada foi **992/992**; typecheck, lint e build também foram
++aprovados nessa etapa. Esses resultados são de desenvolvimento/teste, não validação
++de produção.
++
++### Decisões preservadas, contratos pendentes e dependências externas
++
++As decisões de produto e os contratos propostos dos capítulos históricos permanecem
++referência de desenho; eles não implicam que toda rota ali proposta já esteja
++exposta. Ainda faltam a operação administrativa de concessão/revogação de papéis
++Staff/Admin e o fluxo completo de credenciamento TOTP de Admin, ambos dependentes
++da decisão de papéis prevista no planejamento. Também faltam um caminho HTTP público
++de descoberta/consulta de evento por código de acesso e de criação de nova
++participação, para que o ingresso ocorra inteiramente pela API, além da integração
++dos fluxos de eventos e Arena do Expo com os endpoints já existentes.
++
++BI, LGPD/retenção, notificações, infraestrutura de implantação, TLS remoto,
++backups, observabilidade e homologação continuam dependências externas ao escopo
++funcional implementado. Não há configuração de produção nem autorização para
++declarar o sistema pronto para produção.
++
+ ## 0. Resumo executivo — o que existe e o que falta
+ 
+ | Item | Situação | Evidência/limite |
+diff --git a/docs/E08_7_IMPLEMENTACAO.md b/docs/E08_7_IMPLEMENTACAO.md
+index 7453efc..8af06ba 100644
+--- a/docs/E08_7_IMPLEMENTACAO.md
++++ b/docs/E08_7_IMPLEMENTACAO.md
+@@ -182,6 +182,21 @@ executado pelo Codex; a aprovação definitiva dos 51 casos e da regressão comp
+ continua pendente de nova execução manual. Os resultados unitários/focados acima
+ pertencem à implementação anterior e não foram reexecutados nesta correção de SQL.
+ 
++## Atualização retrospectiva de estado — 05/11/2026
++
++Esta seção não reescreve os resultados nem as pendências da rodada original acima.
++Ela registra o estado conhecido após as etapas posteriores: E08.1–E08.14 foram
++implementadas, e as correções de estabilização E08-EST01–E08-EST04 foram concluídas.
++Após a correção A04, o responsável executou manualmente a regressão PostgreSQL e
++confirmou **1.229/1.229 aprovados**, sem falhas, cancelamentos ou ignorados; a
++regressão unitária mais recente registrada foi **992/992 aprovada**, e typecheck,
++lint e build foram aprovados na E08-EST04.
++
++Essa regressão posterior inclui a evolução do produto desde E08.7, mas não é uma
++nova evidência isolada dos 51 casos desta etapa. O PostgreSQL continuou sendo
++executado exclusivamente pelo responsável; não há nesta atualização validação de
++produção nem execução individual contemporânea da suíte E08.7 pelo Codex.
++
+ Escritos **51 testes HTTP/integração PostgreSQL**, com AppModule real, em
+ `backend/test/integration/admin-schedule-http.integration.test.ts`.
+ Total previsto: **462 (411 anteriores + 51 novos)**, sem presumir aprovação.
+diff --git a/docs/E08_EST05_CORRECAO_A05.md b/docs/E08_EST05_CORRECAO_A05.md
+new file mode 100644
+index 0000000..9852458
+--- /dev/null
++++ b/docs/E08_EST05_CORRECAO_A05.md
+@@ -0,0 +1,107 @@
++# E08-EST05 — Correção A05: consolidação documental
++
++**Data da consolidação:** 05/11/2026
++**Base verificada:** `b5980c9645caa6464b09be28dd76781f00458d13` em
++`feature/events-participations`
++**Escopo:** documentação e evidência; nenhum código funcional, teste, schema,
++migration ou dependência foi alterado.
++
++## Diagnóstico
++
++O achado A05 era documental: os documentos de entrada ainda descreviam a fundação
++inicial como se não houvesse endpoints de produto, enquanto os módulos e relatórios
++posteriores já continham a entrega E08. Isso poderia induzir uma integração errada
++do aplicativo e uma avaliação incorreta de prontidão.
++
++| Fonte anterior | Divergência comprovada | Correção documental |
++| --- | --- | --- |
++| `README.md` da raiz | Apresentava o backend como uma API futura e os fluxos do app como inteiramente locais. | Distingue autenticação/questionário já integrados da Arena e dos eventos ainda simulados no Expo; lista o backend efetivamente entregue e as lacunas. |
++| `app/README.md` | Não separava claramente o questionário persistido dos fluxos de Arena ainda locais. | Registra o consumo real de autenticação, sessão e questionário e não atribui integração dos eventos ao aplicativo. |
++| `backend/README.md` | Era centrado em K01/K03, sem uma ponte curta para o estado posterior de Eventos. | Acrescenta inventário de alto nível, referência à arquitetura consolidada e limites que continuam abertos. |
++| `ARQUITETURA_BACKEND_ARENAGO.md` | O resumo histórico ainda afirmava que não havia endpoint de produto. | Mantém os capítulos históricos como registro do desenho e acrescenta consolidação datada, separando contratos originais, código atual e dependências externas. |
++| `E08_7_IMPLEMENTACAO.md` | A pendência original de PostgreSQL continuava sendo a última informação visível. | Mantém integralmente a rodada original e acrescenta atualização retrospectiva, sem transformar a regressão posterior em execução isolada de E08.7. |
++
++## Evidências no código e nos relatórios
++
++O inventário documental foi confrontado com os controladores e módulos reais:
++
++- `backend/src/auth/auth.controller.ts`, `backend/src/profile/` e
++  `backend/src/games/games.controller.ts` expõem identidade, sessão, perfil e
++  catálogo.
++- `backend/src/events/` contém controladores para configuração administrativa,
++  programação/encerramento, filas de participante, operações/consultas Staff,
++  disponibilidade de estações e controle operacional por experiência.
++- `backend/src/participations/participation-lifecycle.controller.ts` expõe consulta
++  da participação corrente, cancelamento e finalização; não substitui um endpoint
++  público de descoberta por código e criação de participação.
++- `backend/src/evaluations/` expõe leitura, elegibilidade, envio e edição de
++  avaliações.
++- `backend/package.json` mantém os comandos de build, lint, testes unitários,
++  integração PostgreSQL, typecheck e migrations; esta tarefa não os executou por
++  ser exclusivamente documental.
++
++Os relatórios E08.1–E08.14 descrevem os contratos da entrega incremental. Os
++relatórios E08-EST01–E08-EST04 registram as correções de estabilização: revalidação
++de sessão nas mutações críticas, sincronização temporal `evaluation-first` e limpeza
++de avaliações, preservação exata de timestamps/NULL no catálogo e proteção das URLs
++de banco antes da criação de pools.
++
++## Estado de validação conhecido
++
++O responsável executou manualmente a validação PostgreSQL da E08-EST04 e informou
++**1.229/1.229 testes aprovados**, sem falhas, cancelamentos ou ignorados. A última
++regressão unitária registrada é **992/992 aprovada**; typecheck, lint e build foram
++aprovados na mesma etapa. O PostgreSQL real foi executado pelo responsável, não pelo
++Codex.
++
++Esses números são consolidação de desenvolvimento/teste. Eles não significam uma
++execução recente individual da E08.7, não comprovam homologação e não declaram
++validação de produção. A limitação temporal da última revalidação de sessão antes do
++commit permanece documentada: uma revogação ocorrida depois dessa verificação e
++antes do commit exigiria mecanismo adicional de coordenação para ser observada.
++
++## Contratos e pendências reais
++
++Permanecem decisões e entregas fora deste escopo:
++
++- definir e implementar concessão/revogação administrativa de papéis Staff/Admin;
++- completar o credenciamento TOTP para Admin;
++- expor descoberta de evento por código de acesso e criação de participação para
++  permitir ingresso apenas pela API;
++- integrar ao Expo os fluxos de eventos, Arena, filas e avaliações hoje locais;
++- especificar e implementar BI, LGPD/retenção e as necessidades de implantação,
++  backups, observabilidade, TLS remoto, segurança e homologação.
++
++Não há ambiente de produção configurado nem evidência para afirmá-lo pronto.
++
++## Alterações desta etapa
++
++Foram atualizados somente documentos de orientação e histórico:
++
++1. `README.md`
++2. `app/README.md`
++3. `backend/README.md`
++4. `docs/ARQUITETURA_BACKEND_ARENAGO.md`
++5. `docs/E08_7_IMPLEMENTACAO.md`
++6. este relatório
++
++Não houve alteração em arquivos de produção, testes, fixtures, schema, migrations,
++dependências ou contratos HTTP.
++
++## Verificações da documentação
++
++- Links locais introduzidos foram verificados contra arquivos existentes.
++- Os comandos documentados foram confrontados com `backend/package.json`.
++- As contagens e o status consolidado foram confrontados com
++  `E08_EST04_CORRECAO_A04.md`; números históricos de E08.7 não foram substituídos.
++- O patch da task é validado separadamente contra a base indicada e não contém
++  credenciais, arquivos `.env`, logs ou artefatos temporários.
++
++## Pendência de versionamento
++
++Resta somente a revisão, o staging, o commit e o push manuais pelo responsável. A
++mensagem sugerida, caso a revisão confirme o escopo, é:
++
++```text
++docs(events): consolidar estado documental da E08
++```

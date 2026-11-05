@@ -182,6 +182,21 @@ executado pelo Codex; a aprovação definitiva dos 51 casos e da regressão comp
 continua pendente de nova execução manual. Os resultados unitários/focados acima
 pertencem à implementação anterior e não foram reexecutados nesta correção de SQL.
 
+## Atualização retrospectiva de estado — 05/11/2026
+
+Esta seção não reescreve os resultados nem as pendências da rodada original acima.
+Ela registra o estado conhecido após as etapas posteriores: E08.1–E08.14 foram
+implementadas, e as correções de estabilização E08-EST01–E08-EST04 foram concluídas.
+Após a correção A04, o responsável executou manualmente a regressão PostgreSQL e
+confirmou **1.229/1.229 aprovados**, sem falhas, cancelamentos ou ignorados; a
+regressão unitária mais recente registrada foi **992/992 aprovada**, e typecheck,
+lint e build foram aprovados na E08-EST04.
+
+Essa regressão posterior inclui a evolução do produto desde E08.7, mas não é uma
+nova evidência isolada dos 51 casos desta etapa. O PostgreSQL continuou sendo
+executado exclusivamente pelo responsável; não há nesta atualização validação de
+produção nem execução individual contemporânea da suíte E08.7 pelo Codex.
+
 Escritos **51 testes HTTP/integração PostgreSQL**, com AppModule real, em
 `backend/test/integration/admin-schedule-http.integration.test.ts`.
 Total previsto: **462 (411 anteriores + 51 novos)**, sem presumir aprovação.
