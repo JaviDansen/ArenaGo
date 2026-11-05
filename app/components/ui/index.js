@@ -13,8 +13,10 @@ export {
   AuthBackground,
   AUTH_BACKGROUND_PRESETS,
   AUTH_BACKGROUND_ASSET_PATH,
+  WELCOME_BACKGROUND_ASSET_PATH,
   BOTTOM_SCRIM_WEIGHTS,
   TOP_STATUS_SCRIM_WEIGHTS,
   resolveAuthBackgroundPreset,
+  resolveDefaultBackgroundForVariant,
 } from './AuthBackground.js';
 export { DesignSystemPreview } from './DesignSystemPreview.js';

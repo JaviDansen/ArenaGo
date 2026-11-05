@@ -22,29 +22,30 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import colors from '../../theme/colors.js';
 
 export const AUTH_BACKGROUND_ASSET_PATH = 'app/assets/images/auth/auth-background.jpg';
+export const WELCOME_BACKGROUND_ASSET_PATH = 'app/assets/images/auth/welcome-background.jpg';
 
 export const AUTH_BACKGROUND_PRESETS = {
   welcome: {
-    imageOpacity: 0.92,
-    topOverlayOpacity: 0.24,
+    imageOpacity: 0.94,
+    topOverlayOpacity: 0.16,
     bottomOverlayOpacity: 0.92,
-    statusScrimOpacity: 0.48,
+    statusScrimOpacity: 0.42,
   },
   login: {
-    imageOpacity: 0.56,
-    topOverlayOpacity: 0.54,
+    imageOpacity: 0.65,
+    topOverlayOpacity: 0.48,
     bottomOverlayOpacity: 0.9,
     statusScrimOpacity: 0.36,
   },
   register: {
-    imageOpacity: 0.42,
-    topOverlayOpacity: 0.68,
+    imageOpacity: 0.52,
+    topOverlayOpacity: 0.62,
     bottomOverlayOpacity: 0.92,
     statusScrimOpacity: 0.32,
   },
   forgotPassword: {
-    imageOpacity: 0.5,
-    topOverlayOpacity: 0.6,
+    imageOpacity: 0.58,
+    topOverlayOpacity: 0.55,
     bottomOverlayOpacity: 0.9,
     statusScrimOpacity: 0.36,
   },
@@ -94,7 +95,25 @@ function loadDefaultAuthBackground() {
   }
 }
 
-const DEFAULT_BACKGROUND_SOURCE = loadDefaultAuthBackground();
+function loadDefaultWelcomeBackground() {
+  try {
+    // eslint-disable-next-line global-require
+    return require('../../assets/images/auth/welcome-background.jpg');
+  } catch {
+    return null;
+  }
+}
+
+const DEFAULT_AUTH_BACKGROUND_SOURCE = loadDefaultAuthBackground();
+const DEFAULT_WELCOME_BACKGROUND_SOURCE = loadDefaultWelcomeBackground() || DEFAULT_AUTH_BACKGROUND_SOURCE;
+const DEFAULT_BACKGROUND_SOURCE = DEFAULT_AUTH_BACKGROUND_SOURCE;
+
+export function resolveDefaultBackgroundForVariant(variant = 'login') {
+  if (variant === 'welcome') {
+    return DEFAULT_WELCOME_BACKGROUND_SOURCE;
+  }
+  return DEFAULT_AUTH_BACKGROUND_SOURCE;
+}
 
 export function resolveAuthBackgroundPreset(variant = 'login', customOverlayOpacity) {
   const base = AUTH_BACKGROUND_PRESETS[variant] || AUTH_BACKGROUND_PRESETS.login;
@@ -123,12 +142,13 @@ export function AuthBackground({
   const [imageLoadFailed, setImageLoadFailed] = useState(false);
 
   const preset = resolveAuthBackgroundPreset(variant, overlayOpacity);
+  const defaultSource = resolveDefaultBackgroundForVariant(variant);
   const resolvedSource =
     disableImage || imageLoadFailed
       ? null
       : imageSource !== undefined
       ? imageSource
-      : DEFAULT_BACKGROUND_SOURCE;
+      : defaultSource;
 
   const ContentWrapper = useSafeArea ? SafeAreaView : View;
 

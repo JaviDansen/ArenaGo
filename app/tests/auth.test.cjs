@@ -1637,6 +1637,13 @@ test('UI-02 & UI-02A: Welcome, Login, Register and ForgotPassword navigate acros
     'AuthBackground com imageSource=null deve funcionar normalmente usando o fallback dark'
   );
 
+  const authBgExports = bgWelcome.exports;
+  assert.equal(typeof authBgExports.resolveDefaultBackgroundForVariant, 'function');
+  assert.equal(authBgExports.WELCOME_BACKGROUND_ASSET_PATH, 'app/assets/images/auth/welcome-background.jpg');
+  assert.equal(authBgExports.AUTH_BACKGROUND_ASSET_PATH, 'app/assets/images/auth/auth-background.jpg');
+  assert.ok(authBgExports.resolveDefaultBackgroundForVariant('welcome'));
+  assert.ok(authBgExports.resolveDefaultBackgroundForVariant('login'));
+
   // 6. V01 & V03: Transição suave no bottomScrimLayer (sem retângulo opaco uniforme) e proteção de StatusBar
   const bottomScrim = bgWelcome.nodes.find((n) => n.props?.testID === 'bg-welcome-overlay-bottom');
   const bottomScrimFlatStyle = Object.assign({}, ...[bottomScrim.props.style].flat());
