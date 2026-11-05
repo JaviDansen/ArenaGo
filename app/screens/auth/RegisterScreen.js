@@ -200,18 +200,17 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
-          <View style={styles.mainSection}>
-            {/* Cabeçalho textual compacto e hierarquizado */}
-            <View style={styles.heroHeader}>
-              <Text style={styles.kicker}>CRIAR CONTA</Text>
-              <Text style={styles.title}>Comece sua jornada.</Text>
-              <Text style={styles.subtitle}>
-                Preencha suas informações básicas. Seu perfil de jogador será configurado na próxima etapa.
-              </Text>
-            </View>
+          {/* Cabeçalho textual compacto e hierarquizado */}
+          <View style={styles.heroHeader}>
+            <Text style={styles.kicker}>CRIAR CONTA</Text>
+            <Text style={styles.title}>Comece sua jornada.</Text>
+            <Text style={styles.subtitle}>
+              Preencha suas informações básicas. Seu perfil de jogador será configurado na próxima etapa.
+            </Text>
+          </View>
 
-            {/* Superfície de formulário com contraste refinado sobre os inputs */}
-            <View style={styles.formSurface}>
+          {/* Superfície de formulário com contraste refinado sobre os inputs */}
+          <View style={styles.formSurface}>
               {timeoutNotice ? (
                 <Card
                   variant="default"
@@ -350,7 +349,6 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
                 Ao criar sua conta, você seguirá para o questionário rápido de perfil de jogador.
               </Text>
             </View>
-          </View>
 
           {/* Navegação cruzada para Login */}
           <Pressable
@@ -388,10 +386,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.layout.screenPaddingHorizontal,
     paddingTop: spacing.xs,
     paddingBottom: spacing.xxxl,
-  },
-  mainSection: {
-    flexGrow: 1,
-    justifyContent: 'center',
   },
   heroHeader: {
     marginBottom: spacing.md,
