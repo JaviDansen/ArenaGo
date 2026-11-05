@@ -1,0 +1,523 @@
+diff --git a/backend/src/auth/first-admin-bootstrap.service.ts b/backend/src/auth/first-admin-bootstrap.service.ts
+new file mode 100644
+index 00000000..66871268
+--- /dev/null
++++ b/backend/src/auth/first-admin-bootstrap.service.ts
+@@ -0,0 +1,83 @@
++import { randomUUID } from "node:crypto";
++import { Inject, Injectable } from "@nestjs/common";
++import { Pool, type PoolClient } from "pg";
++import { POSTGRES_POOL } from "../database/database.module";
++
++export type FirstAdminBootstrapResult =
++  | { kind: "created" }
++  | { kind: "already_bootstrapped" | "account_not_found" | "account_inactive" | "email_unverified" | "invalid_email" };
++
++const BOOTSTRAP_LOCK_NAMESPACE = 1_095_919_439; // 0x4152474f ("ARGO")
++const BOOTSTRAP_LOCK_ID = 1;
++const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
++
++@Injectable()
++export class FirstAdminBootstrapService {
++  constructor(@Inject(POSTGRES_POOL) private readonly pool: Pool) {}
++
++  async bootstrap(input: unknown): Promise<FirstAdminBootstrapResult> {
++    if (typeof input !== "string") return { kind: "invalid_email" };
++    const email = input.trim().toLowerCase();
++    if (email.length > 255 || !emailPattern.test(email)) return { kind: "invalid_email" };
++
++    const client = await this.pool.connect();
++    try {
++      await client.query("BEGIN ISOLATION LEVEL READ COMMITTED");
++      const result = await this.bootstrapInTransaction(client, email);
++      await client.query("COMMIT");
++      return result;
++    } catch (error) {
++      await client.query("ROLLBACK").catch(() => undefined);
++      throw error;
++    } finally {
++      client.release();
++    }
++  }
++
++  private async bootstrapInTransaction(client: PoolClient, email: string): Promise<FirstAdminBootstrapResult> {
++    await client.query(
++      "SELECT pg_advisory_xact_lock($1::integer, $2::integer)",
++      [BOOTSTRAP_LOCK_NAMESPACE, BOOTSTRAP_LOCK_ID],
++    );
++
++    const existingAdmin = await client.query<{ exists: boolean }>(
++      `SELECT EXISTS (
++         SELECT 1 FROM user_roles WHERE role='admin' AND event_id IS NULL
++       ) AS exists`,
++    );
++    if (typeof existingAdmin.rows[0]?.exists !== "boolean") {
++      throw new Error("Estado do bootstrap administrativo indisponível.");
++    }
++    // Conta também papéis históricos revogados: este procedimento é de uso único, sem caminho de recuperação.
++    if (existingAdmin.rows[0].exists) return { kind: "already_bootstrapped" };
++
++    const account = await client.query<{ id: string; active: boolean; verified: boolean }>(
++      `SELECT id, is_active AS active, email_verified_at IS NOT NULL AS verified
++       FROM users WHERE email=$1 FOR UPDATE`, [email],
++    );
++    const user = account.rows[0];
++    if (!user) return { kind: "account_not_found" };
++    if (!user.active) return { kind: "account_inactive" };
++    if (!user.verified) return { kind: "email_unverified" };
++
++    const clock = await client.query<{ at: string }>("SELECT clock_timestamp()::text AS at");
++    const at = clock.rows[0]?.at;
++    if (typeof at !== "string") throw new Error("Relógio PostgreSQL indisponível.");
++
++    const role = await client.query<{ id: string }>(
++      `INSERT INTO user_roles(id,user_id,role,event_id,granted_by,granted_at,revoked_at,revoked_by)
++       VALUES($1::uuid,$2::uuid,'admin',NULL,NULL,$3::timestamptz,NULL,NULL) RETURNING id`,
++      [randomUUID(), user.id, at],
++    );
++    if (role.rowCount !== 1) throw new Error("Concessão Admin não persistida.");
++
++    const audit = await client.query<{ id: string }>(
++      `INSERT INTO audit_logs(id,actor_user_id,target_user_id,event_id,origin,category,action,reason,metadata,occurred_at,redacted_at)
++       VALUES($1::uuid,NULL,$2::uuid,NULL,'cli','identity','first_admin_bootstrapped',NULL,'{"role":"admin"}'::jsonb,$3::timestamptz,NULL)
++       RETURNING id`,
++      [randomUUID(), user.id, at],
++    );
++    if (audit.rowCount !== 1) throw new Error("Auditoria do bootstrap não persistida.");
++    return { kind: "created" };
++  }
++}
+diff --git a/backend/src/auth/bootstrap-first-admin.ts b/backend/src/auth/bootstrap-first-admin.ts
+new file mode 100644
+index 00000000..ddcfbb7e
+--- /dev/null
++++ b/backend/src/auth/bootstrap-first-admin.ts
+@@ -0,0 +1,42 @@
++import { Module, type INestApplicationContext } from "@nestjs/common";
++import { NestFactory } from "@nestjs/core";
++import { DatabaseModule } from "../database/database.module";
++import { FirstAdminBootstrapService } from "./first-admin-bootstrap.service";
++
++@Module({ imports: [DatabaseModule], providers: [FirstAdminBootstrapService] })
++class FirstAdminBootstrapCliModule {}
++
++async function run(): Promise<void> {
++  const args = process.argv.slice(2);
++  if (args.length !== 2 || args[0] !== "--email") {
++    console.error("Uso: tsx src/auth/bootstrap-first-admin.ts --email <conta-existente>");
++    process.exitCode = 2;
++    return;
++  }
++
++  let app: INestApplicationContext | undefined;
++  try {
++    app = await NestFactory.createApplicationContext(FirstAdminBootstrapCliModule, { logger: false });
++    const result = await app.get(FirstAdminBootstrapService).bootstrap(args[1]);
++    const messages = {
++      created: "Primeiro Admin concedido e auditado. Recursos Admin permanecem bloqueados até a configuração legítima do TOTP.",
++      already_bootstrapped: "Bootstrap indisponível: já existe ou existiu um papel Admin global.",
++      account_not_found: "Conta não elegível para bootstrap.",
++      account_inactive: "Conta não elegível para bootstrap.",
++      email_unverified: "Conta não elegível para bootstrap.",
++      invalid_email: "Informe um e-mail válido de uma conta existente.",
++    } satisfies Record<typeof result.kind, string>;
++    if (result.kind === "created") console.log(messages[result.kind]);
++    else {
++      console.error(messages[result.kind]);
++      process.exitCode = 1;
++    }
++  } catch {
++    console.error("Bootstrap falhou; a transação foi revertida quando aplicável. Consulte o estado do banco antes de repetir.");
++    process.exitCode = 1;
++  } finally {
++    if (app) await app.close().catch(() => undefined);
++  }
++}
++
++if (require.main === module) void run();
+diff --git a/backend/test/unit/first-admin-bootstrap.test.ts b/backend/test/unit/first-admin-bootstrap.test.ts
+new file mode 100644
+index 00000000..fab49e64
+--- /dev/null
++++ b/backend/test/unit/first-admin-bootstrap.test.ts
+@@ -0,0 +1,120 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { Module, type INestApplication } from "@nestjs/common";
++import { APP_FILTER, NestFactory } from "@nestjs/core";
++import type { Pool } from "pg";
++import supertest from "supertest";
++import { AuthController } from "../../src/auth/auth.controller";
++import { AuthService } from "../../src/auth/auth.service";
++import { EmailVerificationHttpService } from "../../src/auth/email-verification-http.service";
++import { FirstAdminBootstrapService } from "../../src/auth/first-admin-bootstrap.service";
++import { SessionAuthGuard } from "../../src/auth/session-auth.guard";
++import { ProblemDetailsExceptionFilter } from "../../src/common/errors/problem-details.filter";
++import { POSTGRES_POOL } from "../../src/database/database.module";
++
++const id = "00000000-0000-4000-8000-000000000001";
++const at = "2026-11-05 12:00:00.123456+00";
++type Options = { exists?: boolean; missing?: boolean; inactive?: boolean; unverified?: boolean; fail?: string };
++
++function fixture(options: Options = {}) {
++  const calls: Array<{ text: string; values: unknown[] }> = [];
++  let released = 0;
++  const query = async (text: string, values: unknown[] = []) => {
++    calls.push({ text, values });
++    if (options.fail && text.includes(options.fail)) throw new Error("SQL_FAILURE_PRIVATE");
++    let rows: unknown[] = [];
++    if (text.includes("AS exists")) rows = [{ exists: !!options.exists }];
++    else if (text.includes("FROM users WHERE email=")) rows = options.missing ? [] : [{ id, active: !options.inactive, verified: !options.unverified }];
++    else if (text.includes("clock_timestamp()::text")) rows = [{ at }];
++    else if (text.startsWith("INSERT INTO user_roles")) rows = [{ id: "role-id" }];
++    else if (text.startsWith("INSERT INTO audit_logs")) rows = [{ id: "audit-id" }];
++    return { rows, rowCount: rows.length };
++  };
++  const client = { query, release: () => { released++; } };
++  const pool = { connect: async () => client } as unknown as Pool;
++  return { pool, service: new FirstAdminBootstrapService(pool), calls, released: () => released };
++}
++
++test("T6.1-B1 primeiro Admin e auditoria usam timestamp PostgreSQL na transação serializada", async () => {
++  const f = fixture();
++  assert.deepEqual(await f.service.bootstrap(" Admin@Example.Test "), { kind: "created" });
++  const sql = f.calls.map(call => call.text);
++  assert.equal(sql[0], "BEGIN ISOLATION LEVEL READ COMMITTED");
++  assert.ok(sql[1].includes("pg_advisory_xact_lock"));
++  assert.ok(sql[2].includes("role='admin'") && !sql[2].includes("revoked_at IS NULL"));
++  assert.ok(sql[3].includes("FROM users WHERE email=$1 FOR UPDATE"));
++  assert.ok(sql[4].includes("clock_timestamp()"));
++  const role = f.calls.find(call => call.text.startsWith("INSERT INTO user_roles"))!;
++  assert.deepEqual(role.values.slice(1), [id, at]);
++  assert.match(role.text, /'admin',NULL,NULL/);
++  const audit = f.calls.find(call => call.text.startsWith("INSERT INTO audit_logs"))!;
++  assert.deepEqual(audit.values.slice(1), [id, at]);
++  assert.match(audit.text, /NULL,\$2::uuid,NULL,'cli','identity','first_admin_bootstrapped'/);
++  assert.equal(sql.at(-1), "COMMIT");
++  assert.equal(f.released(), 1);
++  assert.ok(!sql.some(query => /sessions|totp|UPDATE users/.test(query)));
++});
++
++for (const [label, options, kind] of [
++  ["conta inexistente", { missing: true }, "account_not_found"],
++  ["conta inativa", { inactive: true }, "account_inactive"],
++  ["e-mail não verificado", { unverified: true }, "email_unverified"],
++] as const) {
++  test(`T6.1-B1 recusa ${label} sem conceder papel ou auditar`, async () => {
++    const f = fixture(options);
++    assert.deepEqual(await f.service.bootstrap("admin@example.test"), { kind });
++    assert.ok(!f.calls.some(call => /^(INSERT|UPDATE|DELETE)/.test(call.text)));
++    assert.equal(f.calls.at(-1)?.text, "COMMIT");
++  });
++}
++
++test("T6.1-B1 bootstrap repetido não consulta alvo nem altera papéis históricos", async () => {
++  const f = fixture({ exists: true });
++  assert.deepEqual(await f.service.bootstrap("admin@example.test"), { kind: "already_bootstrapped" });
++  assert.ok(!f.calls.some(call => call.text.includes("FROM users") || /^(INSERT|UPDATE|DELETE)/.test(call.text)));
++});
++
++test("T6.1-B1 e-mail inválido não abre conexão", async () => {
++  const f = fixture();
++  assert.deepEqual(await f.service.bootstrap("not-an-email"), { kind: "invalid_email" });
++  assert.equal(f.calls.length, 0);
++});
++
++for (const phase of ["INSERT INTO user_roles", "INSERT INTO audit_logs", "COMMIT"]) {
++  test(`T6.1-B1 erro em ${phase} reverte a transação e libera a conexão`, async () => {
++    const f = fixture({ fail: phase });
++    await assert.rejects(f.service.bootstrap("admin@example.test"), /SQL_FAILURE_PRIVATE/);
++    assert.equal(f.calls.at(-1)?.text, "ROLLBACK");
++    assert.equal(f.released(), 1);
++  });
++}
++
++test("T6.1-B1 Nest resolve o serviço de bootstrap real pelo token POSTGRES_POOL", async () => {
++  const f = fixture();
++  @Module({ providers: [{ provide: POSTGRES_POOL, useValue: f.pool }, FirstAdminBootstrapService] })
++  class BootstrapDiTestModule {}
++  const app = await NestFactory.createApplicationContext(BootstrapDiTestModule, { logger: false });
++  try {
++    const service = app.get(FirstAdminBootstrapService);
++    assert.ok(service instanceof FirstAdminBootstrapService);
++    assert.deepEqual(await service.bootstrap("admin@example.test"), { kind: "created" });
++  }
++  finally { await app.close(); }
++});
++
++test("T6.1-B1 bootstrap não é exposto por rota HTTP", async () => {
++  @Module({ controllers: [AuthController], providers: [
++    { provide: AuthService, useValue: { authenticateBearerToken: async () => ({ userId: id }) } },
++    { provide: EmailVerificationHttpService, useValue: { request: async () => ({}), confirm: async () => ({ verified: false }) } },
++    SessionAuthGuard,
++    { provide: APP_FILTER, useClass: ProblemDetailsExceptionFilter },
++  ] })
++  class AuthHttpTestModule {}
++  const app: INestApplication = await NestFactory.create(AuthHttpTestModule, { logger: false });
++  app.setGlobalPrefix("api/v1");
++  await app.listen(0, "127.0.0.1");
++  try {
++    const response = await supertest(app.getHttpServer()).post("/api/v1/auth/bootstrap-first-admin").send({ email: "admin@example.test" });
++    assert.equal(response.status, 404);
++  } finally { await app.close(); }
++});
+diff --git a/backend/test/integration/first-admin-bootstrap.integration.test.ts b/backend/test/integration/first-admin-bootstrap.integration.test.ts
+new file mode 100644
+index 00000000..e5fbd4db
+--- /dev/null
++++ b/backend/test/integration/first-admin-bootstrap.integration.test.ts
+@@ -0,0 +1,177 @@
++import assert from "node:assert/strict";
++import { randomUUID } from "node:crypto";
++import type { AddressInfo } from "node:net";
++import { after, afterEach, before, beforeEach, test } from "node:test";
++import { Module, type INestApplication } from "@nestjs/common";
++import { APP_FILTER, NestFactory } from "@nestjs/core";
++import { Pool, type QueryResult } from "pg";
++import { AuthController } from "../../src/auth/auth.controller";
++import { AuthService } from "../../src/auth/auth.service";
++import { EmailVerificationHttpService } from "../../src/auth/email-verification-http.service";
++import { FirstAdminBootstrapService } from "../../src/auth/first-admin-bootstrap.service";
++import { LoginRateLimiterService } from "../../src/auth/login-rate-limiter.service";
++import { RegistrationRateLimiterService } from "../../src/auth/registration-rate-limiter.service";
++import { SessionAuthGuard } from "../../src/auth/session-auth.guard";
++import { signAccessToken } from "../../src/auth/token.util";
++import { ProblemDetailsExceptionFilter } from "../../src/common/errors/problem-details.filter";
++import { POSTGRES_POOL } from "../../src/database/database.module";
++import { assertParticipationsReadTestDatabaseUrls } from "./participations-read-db-guard";
++
++const connectionString = assertParticipationsReadTestDatabaseUrls(process.env);
++const applicationName = `b1-bootstrap-${randomUUID()}`;
++const pool = new Pool({ connectionString, application_name: applicationName, max: 8 });
++const userIds: string[] = [];
++const bootstrap = new FirstAdminBootstrapService(pool);
++let app: INestApplication;
++let baseUrl: string;
++let current: { userId: string; email: string; sessionId: string; accessToken: string };
++
++@Module({ controllers: [AuthController], providers: [
++  { provide: POSTGRES_POOL, useValue: pool },
++  LoginRateLimiterService,
++  RegistrationRateLimiterService,
++  AuthService,
++  { provide: EmailVerificationHttpService, useValue: { request: async () => ({}), confirm: async () => ({ verified: false }) } },
++  SessionAuthGuard,
++  { provide: APP_FILTER, useClass: ProblemDetailsExceptionFilter },
++] })
++class FirstAdminAuthIntegrationModule {}
++
++async function account(withSession = false, state: { active?: boolean; verified?: boolean } = {}) {
++  const userId = randomUUID();
++  const email = `${userId}@example.test`;
++  await pool.query(`INSERT INTO users(id,name,email,password_hash,email_verified_at,is_active,created_at,updated_at)
++    VALUES($1,'B1 fixture',$2,'test-placeholder',CASE WHEN $3::boolean THEN clock_timestamp() ELSE NULL END,$4::boolean,clock_timestamp(),clock_timestamp())`,
++  [userId, email, state.verified ?? true, state.active ?? true]);
++  userIds.push(userId);
++  await pool.query(`INSERT INTO user_roles(id,user_id,role,event_id,granted_by,granted_at)
++    VALUES($1,$2,'participante',NULL,NULL,clock_timestamp())`, [randomUUID(), userId]);
++  if (!withSession) return { userId, email };
++  const sessionId = randomUUID();
++  await pool.query(`INSERT INTO sessions(id,user_id,expires_at,last_activity_at,revoked_at,revocation_reason,
++      admin_2fa_verified_at,ip_address,user_agent,created_at)
++    VALUES($1,$2,clock_timestamp()+interval '1 day',clock_timestamp(),NULL,NULL,NULL,NULL,NULL,clock_timestamp())`, [sessionId, userId]);
++  return { userId, email, sessionId, accessToken: signAccessToken({ userId, sessionId }) };
++}
++
++async function waitForBlockedBootstrap(count: number): Promise<void> {
++  const deadline = Date.now() + 8_000;
++  while (Date.now() < deadline) {
++    const blocked = await pool.query<{ count: number }>(`SELECT count(*)::integer AS count FROM pg_stat_activity
++      WHERE application_name=$1 AND wait_event_type='Lock' AND cardinality(pg_blocking_pids(pid))>0`, [applicationName]);
++    if (blocked.rows[0].count >= count) return;
++    await new Promise(resolve => setTimeout(resolve, 20));
++  }
++  throw new Error("Não foi observada a espera simultânea pelo lock global de bootstrap.");
++}
++
++before(async () => {
++  app = await NestFactory.create(FirstAdminAuthIntegrationModule, { logger: false });
++  app.setGlobalPrefix("api/v1");
++  await app.listen(0, "127.0.0.1");
++  const address = app.getHttpServer().address() as AddressInfo;
++  baseUrl = `http://127.0.0.1:${address.port}/api/v1`;
++});
++
++beforeEach(async () => {
++  const created = await account(true);
++  if (!("sessionId" in created)) throw new Error("Fixture de sessão indisponível.");
++  current = created;
++});
++
++afterEach(async () => {
++  if (!userIds.length) return;
++  await pool.query("DELETE FROM audit_logs WHERE target_user_id=ANY($1::uuid[])", [userIds]);
++  await pool.query("DELETE FROM user_roles WHERE user_id=ANY($1::uuid[])", [userIds]);
++  await pool.query("DELETE FROM sessions WHERE user_id=ANY($1::uuid[])", [userIds]);
++  await pool.query("DELETE FROM users WHERE id=ANY($1::uuid[])", [userIds]);
++  userIds.length = 0;
++});
++
++after(async () => {
++  if (app) await app.close();
++  await pool.end();
++});
++
++test("T6.1-B1 PostgreSQL concede primeiro Admin atomicamente, preserva sessão e exige TOTP", async () => {
++  const before = await pool.query("SELECT id,admin_2fa_verified_at,revoked_at FROM sessions WHERE user_id=$1", [current.userId]);
++  const participantAccess = await fetch(`${baseUrl}/auth/me`, { headers: { Authorization: `Bearer ${current.accessToken}` } });
++  assert.equal(participantAccess.status, 200);
++
++  assert.deepEqual(await bootstrap.bootstrap(current.email), { kind: "created" });
++  const granted = await pool.query<{ granted_at: string; audit_at: string }>(`SELECT to_char(r.granted_at,'YYYY-MM-DD HH24:MI:SS.USOF') AS granted_at,
++      to_char(a.occurred_at,'YYYY-MM-DD HH24:MI:SS.USOF') AS audit_at
++    FROM user_roles r JOIN audit_logs a ON a.target_user_id=r.user_id
++    WHERE r.user_id=$1 AND r.role='admin' AND r.event_id IS NULL AND r.granted_by IS NULL
++      AND a.actor_user_id IS NULL AND a.origin='cli' AND a.category='identity' AND a.action='first_admin_bootstrapped'`, [current.userId]);
++  assert.equal(granted.rowCount, 1);
++  assert.equal(granted.rows[0].granted_at, granted.rows[0].audit_at);
++  assert.equal((await pool.query("SELECT 1 FROM user_totp_credentials WHERE user_id=$1", [current.userId])).rowCount, 0);
++  assert.deepEqual((await pool.query("SELECT id,admin_2fa_verified_at,revoked_at FROM sessions WHERE user_id=$1", [current.userId])).rows, before.rows);
++  assert.equal((await pool.query("SELECT count(*)::integer AS n FROM user_roles WHERE user_id=$1", [current.userId])).rows[0].n, 2);
++
++  const adminAccess = await fetch(`${baseUrl}/auth/me`, { headers: { Authorization: `Bearer ${current.accessToken}` } });
++  assert.equal(adminAccess.status, 401);
++  assert.equal((await adminAccess.json() as { code: string }).code, "ADMIN_2FA_REQUIRED");
++  const exposedBootstrap = await fetch(`${baseUrl}/auth/bootstrap-first-admin`, { method: "POST" });
++  assert.equal(exposedBootstrap.status, 404);
++  assert.deepEqual(await bootstrap.bootstrap(current.email), { kind: "already_bootstrapped" });
++});
++
++test("T6.1-B1 PostgreSQL lock global permite somente um bootstrap concorrente", async () => {
++  const second = await account();
++  const blocker = await pool.connect();
++  let attempts: Promise<Awaited<ReturnType<FirstAdminBootstrapService["bootstrap"]>>>[] = [];
++  let completed = false;
++  let results: Awaited<ReturnType<FirstAdminBootstrapService["bootstrap"]>>[] = [];
++  try {
++    await blocker.query("BEGIN");
++    await blocker.query("SELECT pg_advisory_xact_lock(1095919439,1)");
++    attempts = [bootstrap.bootstrap(current.email), bootstrap.bootstrap(second.email)];
++    const joined = Promise.all(attempts);
++    void joined.catch(() => undefined);
++    await waitForBlockedBootstrap(2);
++    await blocker.query("COMMIT");
++    completed = true;
++    results = await joined;
++  } finally {
++    if (!completed) await blocker.query("ROLLBACK").catch(() => undefined);
++    blocker.release();
++    await Promise.allSettled(attempts);
++  }
++  assert.deepEqual(results.map(result => result.kind).sort(), ["already_bootstrapped", "created"]);
++  assert.equal((await pool.query("SELECT count(*)::integer AS n FROM user_roles WHERE user_id=ANY($1::uuid[]) AND role='admin' AND event_id IS NULL", [userIds])).rows[0].n, 1);
++  assert.equal((await pool.query("SELECT count(*)::integer AS n FROM audit_logs WHERE target_user_id=ANY($1::uuid[]) AND action='first_admin_bootstrapped'", [userIds])).rows[0].n, 1);
++});
++
++test("T6.1-B1 PostgreSQL recusa conta ausente, inativa ou sem e-mail confirmado", async () => {
++  const inactive = await account(false, { active: false });
++  const unverified = await account(false, { verified: false });
++  assert.deepEqual(await bootstrap.bootstrap(`${randomUUID()}@example.test`), { kind: "account_not_found" });
++  assert.deepEqual(await bootstrap.bootstrap(inactive.email), { kind: "account_inactive" });
++  assert.deepEqual(await bootstrap.bootstrap(unverified.email), { kind: "email_unverified" });
++  assert.equal((await pool.query("SELECT count(*)::integer AS n FROM user_roles WHERE user_id=ANY($1::uuid[]) AND role='admin'", [userIds])).rows[0].n, 0);
++  assert.equal((await pool.query("SELECT count(*)::integer AS n FROM audit_logs WHERE target_user_id=ANY($1::uuid[]) AND action='first_admin_bootstrapped'", [userIds])).rows[0].n, 0);
++});
++
++test("T6.1-B1 PostgreSQL rollback remove concessão se a auditoria falhar", async () => {
++  const marker = new Error("AUDIT_FAILURE_PRIVATE");
++  const wrappedPool = {
++    query: pool.query.bind(pool),
++    connect: async () => {
++      const client = await pool.connect();
++      const query = client.query.bind(client) as (text: string, values?: unknown[]) => Promise<QueryResult>;
++      return {
++        query: async (text: string, values?: unknown[]) => {
++          const result = await query(text, values);
++          if (text.startsWith("INSERT INTO audit_logs")) throw marker;
++          return result;
++        },
++        release: () => client.release(),
++      };
++    },
++  } as unknown as Pool;
++  await assert.rejects(new FirstAdminBootstrapService(wrappedPool).bootstrap(current.email), error => error === marker);
++  assert.equal((await pool.query("SELECT 1 FROM user_roles WHERE user_id=$1 AND role='admin'", [current.userId])).rowCount, 0);
++  assert.equal((await pool.query("SELECT 1 FROM audit_logs WHERE target_user_id=$1 AND action='first_admin_bootstrapped'", [current.userId])).rowCount, 0);
++});
+diff --git a/docs/T6_1_B1_IMPLEMENTACAO.md b/docs/T6_1_B1_IMPLEMENTACAO.md
+new file mode 100644
+index 00000000..f686327d
+--- /dev/null
++++ b/docs/T6_1_B1_IMPLEMENTACAO.md
+@@ -0,0 +1,71 @@
++# T6.1-B1 — bootstrap restrito do primeiro Admin
++
++## Base e escopo
++
++Base: branch `feature/events-participations`, HEAD `31c78955514451c3a61c7eb6fd887ae98e1fd421`. O índice e o working tree estavam limpos. O planejamento geral aprova o primeiro Admin por comando restrito, sem endpoint público; a arquitetura exige auditoria `origin='cli'`, ator nulo, alvo correspondente e atomicidade.
++
++Esta implementação não altera A1/A2, E07/E08, schemas, migrations, autenticação, nem os fluxos de TOTP. Não adiciona dependências.
++
++## Contrato do comando
++
++O procedimento é `FirstAdminBootstrapService.bootstrap(email)`, acessível pelo entrypoint local `backend/src/auth/bootstrap-first-admin.ts`. A invocação é explícita e aceita somente `--email <conta-existente>`. Ela usa a configuração de banco já existente e deve ser executada pelo responsável na máquina principal, nunca nesta tarefa.
++
++O endereço é normalizado com trim/minúsculas e seleciona uma conta já cadastrada. Somente conta existente, ativa e com `email_verified_at` preenchido pode receber o papel. O resultado do comando não inclui e-mail, UUID, senha, chave, token ou sessão. Erros inesperados são exibidos como mensagem genérica; detalhes do banco não são impressos.
++
++Resultado de sucesso: papel global `admin` em `user_roles`, com `event_id=NULL` e `granted_by=NULL`. Conta inexistente, inativa, não verificada, e-mail inválido ou bootstrap já consumido encerram sem mutação. Qualquer papel Admin global histórico impede nova execução, mesmo revogado; não existe opção de força nem recuperação administrativa por este mecanismo.
++
++## Concorrência e transação
++
++Cada chamada usa `BEGIN ISOLATION LEVEL READ COMMITTED`, adquire um `pg_advisory_xact_lock` com chave namespaced do ArenaGo e verifica a existência global de papel Admin antes de procurar a conta. Assim, execuções concorrentes deste procedimento serializam mesmo quando ainda não há linha Admin para bloquear. Após o lock global, a conta selecionada é bloqueada com `users FOR UPDATE` e seu estado é revalidado.
++
++O papel e a auditoria são gravados na mesma transação, com o mesmo `clock_timestamp()` do PostgreSQL. Erro em SQL, concessão, auditoria ou commit causa tentativa de rollback e liberação da conexão. Se a conexão cair com resultado de commit incerto, verificar o banco antes de repetir; a próxima execução consultará o registro Admin existente.
++
++Auditoria: `origin='cli'`, `actor_user_id=NULL`, `target_user_id` da conta, `event_id=NULL`, `category='identity'`, `action='first_admin_bootstrapped'`, metadado mínimo `{"role":"admin"}`. Não grava e-mail nem dados de autenticação. O papel respeita o check e o índice global de `user_roles` existentes.
++
++O comando não cria nem atualiza sessão, refresh token, credencial TOTP, token de ativação ou `admin_2fa_verified_at`. O login e a guarda atuais continuam exigindo TOTP confirmado antes de aceitar qualquer sessão Admin; o próprio teste PostgreSQL verifica `ADMIN_2FA_REQUIRED` após a concessão. A configuração legítima de TOTP segue pendente da T6.1-B2.
++
++## Interface local e execução manual
++
++Não há controller ou rota HTTP para bootstrap. O entrypoint usa `require.main === module` para executar somente quando chamado diretamente; não há bypass por `NODE_ENV`, senha mestre ou credencial fixa.
++
++Após validação manual e com schema já aplicado, o responsável pode executar:
++
++```powershell
++Set-Location 'C:\Users\Débora Jansen\Desktop\Davi\ArenaGo\backend'
++.\node_modules\.bin\tsx.cmd src/auth/bootstrap-first-admin.ts --email admin@example.com
++```
++
++O e-mail acima é apenas ilustrativo. Confirmar antes que o banco selecionado é o ambiente local pretendido e que a conta já está ativa e verificada. O comando nunca foi executado nesta task.
++
++## Testes preparados
++
++`backend/test/unit/first-admin-bootstrap.test.ts` cobre concessão/auditoria, lock e ordenação, conta inexistente/inativa/não verificada, e-mail inválido, bloqueio de repetição, rollback em falha de gravação/commit, resolução DI real do serviço e ausência de rota HTTP.
++
++`backend/test/integration/first-admin-bootstrap.integration.test.ts` usa a guarda A04 e PostgreSQL local autorizado. Cobre primeiro Admin e auditoria no mesmo instante, execução concorrente de dois candidatos, estados de conta recusados, rollback provocado após inserção real da auditoria, preservação de sessão/papel participante/TOTP e rejeição `ADMIN_2FA_REQUIRED` de uma sessão sem segundo fator. Não reimplementa as suítes E07/E08 nem envia mensagens.
++
++Comandos para o responsável executar manualmente no computador principal:
++
++```powershell
++$env:NODE_ENV = 'test'
++$env:DOTENV_CONFIG_PATH = 'NUL'
++$env:DATABASE_URL = 'postgresql://unit:unit@127.0.0.1:55432/arenago_events_test'
++Set-Location 'C:\Users\Débora Jansen\Desktop\Davi\ArenaGo\backend'
++.\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test test/unit/first-admin-bootstrap.test.ts
++if ($LASTEXITCODE -ne 0) { throw 'Unitários do bootstrap falharam.' }
++# Configurar localmente DATABASE_URL, DATABASE_DIRECT_URL e EVENTS_TEST_DATABASE_URL
++# com a mesma URL autorizada 127.0.0.1:55432/arenago_events_test, sem query/fragmento.
++.\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test --test-concurrency=1 test/integration/first-admin-bootstrap.integration.test.ts
++if ($LASTEXITCODE -ne 0) { throw 'Integração PostgreSQL do bootstrap falhou.' }
++npm.cmd run typecheck:test
++if ($LASTEXITCODE -ne 0) { throw 'Typecheck de testes falhou.' }
++npm.cmd run lint
++if ($LASTEXITCODE -ne 0) { throw 'Lint falhou.' }
++npm.cmd run build
++if ($LASTEXITCODE -ne 0) { throw 'Build falhou.' }
++```
++
++Testes, typecheck, lint e build não executados pelo Codex. Validação manual pendente do responsável.
++
++## Evidência e pendências
++
++Evidência única: `qa-evidence/t6-1-b1-changes.diff`, baseada no HEAD acima e contendo apenas a task. Aplicação isolada e comparação byte a byte concluídas sobre o HEAD-base: 5/5 arquivos reconstruídos sem divergência. Não há pendência de infraestrutura para implementar ou testar no computador principal além de disponibilizar o PostgreSQL autorizado; o comando em si permanece para execução explícita posterior pelo responsável.
