@@ -6,23 +6,9 @@ import { Pool } from "pg";
 import * as schema from "../../src/database/schema";
 import { EventsService } from "../../src/events/events.service";
 import { ParticipationsService } from "../../src/participations/participations.service";
+import { assertParticipationsReadTestDatabaseUrls } from "./participations-read-db-guard";
 
-const databaseUrlValue = process.env.DATABASE_URL;
-const testDatabaseUrlValue = process.env.EVENTS_TEST_DATABASE_URL;
-if (!databaseUrlValue || !testDatabaseUrlValue) {
-  throw new Error("DATABASE_URL e EVENTS_TEST_DATABASE_URL devem apontar ao banco descartável local.");
-}
-const databaseUrl = new URL(databaseUrlValue);
-const testDatabaseUrl = new URL(testDatabaseUrlValue);
-const authorizedTarget = (url: URL) => url.hostname === "127.0.0.1"
-  && url.port === "55432"
-  && url.pathname.replace(/^\//, "") === "arenago_events_test";
-if (!authorizedTarget(databaseUrl) || !authorizedTarget(testDatabaseUrl)
-  || databaseUrl.hostname !== testDatabaseUrl.hostname
-  || databaseUrl.port !== testDatabaseUrl.port
-  || databaseUrl.pathname !== testDatabaseUrl.pathname) {
-  throw new Error("As duas URLs devem apontar exatamente para 127.0.0.1:55432/arenago_events_test.");
-}
+const testDatabaseUrlValue = assertParticipationsReadTestDatabaseUrls(process.env);
 
 const servicePool = new Pool({
   connectionString: testDatabaseUrlValue,

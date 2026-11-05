@@ -1,0 +1,174 @@
+diff --git a/backend/test/integration/participations-read.integration.test.ts b/backend/test/integration/participations-read.integration.test.ts
+index d0e92c1..eaf8965 100644
+--- a/backend/test/integration/participations-read.integration.test.ts
++++ b/backend/test/integration/participations-read.integration.test.ts
+@@ -6,23 +6,9 @@ import { Pool } from "pg";
+ import * as schema from "../../src/database/schema";
+ import { EventsService } from "../../src/events/events.service";
+ import { ParticipationsService } from "../../src/participations/participations.service";
++import { assertParticipationsReadTestDatabaseUrls } from "./participations-read-db-guard";
+ 
+-const databaseUrlValue = process.env.DATABASE_URL;
+-const testDatabaseUrlValue = process.env.EVENTS_TEST_DATABASE_URL;
+-if (!databaseUrlValue || !testDatabaseUrlValue) {
+-  throw new Error("DATABASE_URL e EVENTS_TEST_DATABASE_URL devem apontar ao banco descartável local.");
+-}
+-const databaseUrl = new URL(databaseUrlValue);
+-const testDatabaseUrl = new URL(testDatabaseUrlValue);
+-const authorizedTarget = (url: URL) => url.hostname === "127.0.0.1"
+-  && url.port === "55432"
+-  && url.pathname.replace(/^\//, "") === "arenago_events_test";
+-if (!authorizedTarget(databaseUrl) || !authorizedTarget(testDatabaseUrl)
+-  || databaseUrl.hostname !== testDatabaseUrl.hostname
+-  || databaseUrl.port !== testDatabaseUrl.port
+-  || databaseUrl.pathname !== testDatabaseUrl.pathname) {
+-  throw new Error("As duas URLs devem apontar exatamente para 127.0.0.1:55432/arenago_events_test.");
+-}
++const testDatabaseUrlValue = assertParticipationsReadTestDatabaseUrls(process.env);
+ 
+ const servicePool = new Pool({
+   connectionString: testDatabaseUrlValue,
+diff --git a/backend/test/integration/participations-read-db-guard.ts b/backend/test/integration/participations-read-db-guard.ts
+new file mode 100644
+index 0000000..898bdb9
+--- /dev/null
++++ b/backend/test/integration/participations-read-db-guard.ts
+@@ -0,0 +1,21 @@
++import { assertSafeTestDatabase } from "./test-db-guard";
++
++const names = ["DATABASE_URL", "DATABASE_DIRECT_URL", "EVENTS_TEST_DATABASE_URL"] as const;
++
++/** Validação pura da conexão desta fixture, antes de instanciar qualquer Pool. */
++export function assertParticipationsReadTestDatabaseUrls(env: Record<string, string | undefined>): string {
++  const urls = names.map((name) => {
++    const value = assertSafeTestDatabase(env[name]);
++    const parsed = new URL(value);
++    if (parsed.hostname !== "127.0.0.1" || parsed.port !== "55432"
++      || parsed.pathname !== "/arenago_events_test" || !parsed.username || !parsed.password
++      || value.includes("?") || value.includes("#")) {
++      throw new Error(`${name}: conexão local explícita sem parâmetros ou fragmentos obrigatória.`);
++    }
++    return value;
++  });
++  if (urls.some((value) => value !== urls[0])) {
++    throw new Error("DATABASE_URL, DATABASE_DIRECT_URL e EVENTS_TEST_DATABASE_URL devem ser idênticas.");
++  }
++  return urls[0];
++}
+diff --git a/backend/test/unit/participations-read-db-guard.unit.test.ts b/backend/test/unit/participations-read-db-guard.unit.test.ts
+new file mode 100644
+index 0000000..d22cbad
+--- /dev/null
++++ b/backend/test/unit/participations-read-db-guard.unit.test.ts
+@@ -0,0 +1,55 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { assertParticipationsReadTestDatabaseUrls } from "../integration/participations-read-db-guard";
++
++const allowed = "postgresql://fixture:placeholder@127.0.0.1:55432/arenago_events_test";
++const urls = (value: string | undefined) => ({
++  DATABASE_URL: value,
++  DATABASE_DIRECT_URL: value,
++  EVENTS_TEST_DATABASE_URL: value,
++});
++
++test("E08-EST04 valida as três URLs sem abrir conexão PostgreSQL", async (t) => {
++  await t.test("aceita o destino local com credenciais explícitas", () => {
++    assert.equal(assertParticipationsReadTestDatabaseUrls(urls(allowed)), allowed);
++    assert.equal(assertParticipationsReadTestDatabaseUrls(urls(allowed.replace("postgresql:", "postgres:"))),
++      allowed.replace("postgresql:", "postgres:"));
++  });
++
++  await t.test("rejeita host remoto, porta e banco fora do destino da fixture", () => {
++    for (const value of [
++      allowed.replace("127.0.0.1", "db.example.test"),
++      allowed.replace("55432", "55433"),
++      allowed.replace("arenago_events_test", "arenago_test"),
++      allowed.replace("127.0.0.1", "localhost"),
++    ]) assert.throws(() => assertParticipationsReadTestDatabaseUrls(urls(value)));
++  });
++
++  await t.test("rejeita parâmetros de host e porta, inclusive codificados e com outra caixa", () => {
++    for (const query of ["?host=servidor-remoto", "?h%6fst=servidor-remoto", "?HOST=servidor-remoto",
++      "?port=5432", "?p%6frt=5432", "?PORT=55432", "?host=127.0.0.1"]) {
++      assert.throws(() => assertParticipationsReadTestDatabaseUrls(urls(allowed + query)));
++    }
++  });
++
++  await t.test("rejeita database, dbname, outras queries e fragmentos", () => {
++    for (const suffix of ["?database=outro", "?dbname=outro", "?data%62ase=outro", "?DBNAME=outro",
++      "?application_name=teste", "?", "#fragmento", "#"]) {
++      assert.throws(() => assertParticipationsReadTestDatabaseUrls(urls(allowed + suffix)));
++    }
++  });
++
++  await t.test("rejeita credenciais ausentes, protocolo errado e URLs ausentes", () => {
++    for (const value of [allowed.replace("fixture:placeholder@", "fixture@"),
++      allowed.replace("fixture:placeholder@", ":placeholder@"), allowed.replace("postgresql:", "https:"), undefined]) {
++      assert.throws(() => assertParticipationsReadTestDatabaseUrls(urls(value)));
++    }
++  });
++
++  await t.test("rejeita ausência ou divergência em qualquer uma das três variáveis", () => {
++    for (const name of ["DATABASE_URL", "DATABASE_DIRECT_URL", "EVENTS_TEST_DATABASE_URL"] as const) {
++      assert.throws(() => assertParticipationsReadTestDatabaseUrls({ ...urls(allowed), [name]: undefined }));
++      assert.throws(() => assertParticipationsReadTestDatabaseUrls({ ...urls(allowed), [name]: allowed.replace("postgresql:", "postgres:") }));
++    }
++  });
++});
+diff --git a/docs/E08_EST04_CORRECAO_A04.md b/docs/E08_EST04_CORRECAO_A04.md
+new file mode 100644
+index 0000000..9790a7f
+--- /dev/null
++++ b/docs/E08_EST04_CORRECAO_A04.md
+@@ -0,0 +1,50 @@
++# E08-EST04 — Correção A04: destino PostgreSQL da fixture de leitura
++
++**Base:** `38d6231b672bae0c642f6f7a871935e25a60fc46`, branch `feature/events-participations`, após E08-EST03. Working tree e índice estavam limpos no início.
++
++## Diagnóstico
++
++Em `backend/test/integration/participations-read.integration.test.ts`, a validação anterior examinava somente `hostname`, `port` e `pathname` de `DATABASE_URL` e `EVENTS_TEST_DATABASE_URL`. Ela não consultava `DATABASE_DIRECT_URL`, não exigia credenciais explícitas e não rejeitava query ou fragmento. O driver `pg` usa `pg-connection-string`, que incorpora parâmetros da query à configuração antes de preencher `host` e `port` da autoridade. Assim, `?host=servidor-remoto` ou `?port=outra-porta` podia superar o destino aparente aceito pela fixture. A checagem ocorria antes dos pools, mas era insuficiente.
++
++O helper central `assertSafeTestDatabase()` já valida protocolo, allowlists de host/porta/banco, redirecionamentos divergentes de `host` e `port`, duplicatas desses parâmetros e `database`/`dbname`, inclusive nomes de parâmetro codificados. Sua política geral permite outros bancos locais de teste e algumas queries sem redirecionamento. A fixture de leitura requer um destino mais estrito, portanto o helper central foi reutilizado e recebeu uma camada pura específica da fixture, sem mudar sua política geral.
++
++## Correção
++
++`assertParticipationsReadTestDatabaseUrls()` valida as três variáveis antes de criar `Pool` ou preparar fixtures. Cada URL passa primeiro por `assertSafeTestDatabase()`. Depois exige `127.0.0.1:55432/arenago_events_test`, usuário e senha explícitos e ausência de qualquer query ou fragmento. Por fim exige igualdade textual entre `DATABASE_URL`, `DATABASE_DIRECT_URL` e `EVENTS_TEST_DATABASE_URL`; a URL aprovada é usada nos dois pools. Protocolos PostgreSQL aceitos pelo guard central permanecem `postgresql:` e `postgres:`.
++
++A função pura está em `backend/test/integration/participations-read-db-guard.ts`. O teste unitário a importa sem carregar a suíte de integração ou criar conexões. Exemplos com credenciais fictícias rejeitados: `postgresql://fixture:placeholder@127.0.0.1:55432/arenago_events_test?host=servidor-remoto`, `?port=5432`, `?database=outro`, `?dbname=outro` e `#fragmento`. Também são rejeitados parâmetros codificados, variações de caixa, queries aparentemente inofensivas, portas/bancos distintos, credenciais ausentes e variáveis ausentes ou divergentes.
++
++Não houve alteração em produção NestJS, schema, migrações, contratos HTTP, consultas de negócio, autenticação, Docker, portas autorizadas ou dependências. O guard central não foi enfraquecido. Não foi feita varredura ou mudança geral das demais fixtures; outras utilizações consultadas já chamam o helper central e aplicam suas próprias restrições.
++
++## Validação local
++
++- Testes unitários focados do guard central e da fixture: **21/21 aprovados**, sem PostgreSQL real.
++- Regressão unitária: **992/992 aprovados**, zero falhas, cancelamentos ou ignorados.
++- Typecheck de produção e testes: aprovados.
++- Lint e build: aprovados.
++
++Nesta sessão, `tsx` falhou antes da descoberta dos testes com `uv_os_get_passwd returned ENOMEM`. Um shim temporário de processo para `os.userInfo()` foi usado nas execuções unitárias e removido; não integra o patch. Nenhuma credencial foi lida ou registrada.
++
++## Validação PostgreSQL manual concluída
++
++O responsável executou manualmente os testes no PostgreSQL 18 Linux do contêiner `arenago-e08-pg18`, banco local `arenago_events_test` em `127.0.0.1:55432`. A suíte `participations-read.integration.test.ts` passou **7/7**. A regressão PostgreSQL completa passou **1.229/1.229**, com zero falhas, cancelamentos ou ignorados, código de saída 0 e duração de **572349.5826 ms**. O Codex não executou PostgreSQL. Não houve validação de produção.
++
++Com as três URLs idênticas configuradas apenas na sessão do responsável, sem imprimir ou compartilhar seus valores:
++
++```powershell
++Set-Location C:\DoJob\ProgramacaoMobile\backend
++$env:NODE_ENV = 'test'
++$env:EVENT_CLOSURE_JOB_TEST_ENABLED = 'false'
++$env:STAFF_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:ADMIN_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:EVALUATION_IDEMPOTENCY_TTL_SECONDS = '60'
++npx.cmd tsx --tsconfig tsconfig.test.json --test --test-concurrency=1 test/integration/participations-read.integration.test.ts
++if ($LASTEXITCODE -ne 0) { throw 'Investigar a suíte focada antes da regressão.' }
++npm.cmd run test:integration
++if ($LASTEXITCODE -ne 0) { throw 'Investigar a regressão PostgreSQL.' }
++```
++
++**Limitação:** a prova unitária cobre a validação pura, enquanto a ordem de execução anterior à criação dos pools foi confirmada pela inspeção da fixture. O funcionamento completo com conexão foi aprovado na suíte PostgreSQL manual. O destino autorizado permanece exclusivamente o indicado acima para esta fixture. Nenhum código de produção foi alterado.
++
++**Arquivos da task:** `backend/test/integration/participations-read.integration.test.ts`, `backend/test/integration/participations-read-db-guard.ts`, `backend/test/unit/participations-read-db-guard.unit.test.ts` e este relatório. Evidência única: `qa-evidence/e08-est04-changes.diff`. E08-EST04 aprovada; resta o versionamento manual.
