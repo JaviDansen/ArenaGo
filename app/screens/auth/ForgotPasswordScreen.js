@@ -26,7 +26,7 @@ export default function ForgotPasswordScreen({ navigation }) {
 
   return (
     <AuthBackground variant="forgotPassword" testID="forgot-password-background">
-      <StatusBar style="light" translucent backgroundColor="transparent" />
+      <StatusBar style="light" />
 
       <ScreenHeader
         title="ArenaGO"

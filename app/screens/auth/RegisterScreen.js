@@ -181,7 +181,7 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
 
   return (
     <AuthBackground variant="register" testID="register-background">
-      <StatusBar style="light" translucent backgroundColor="transparent" />
+      <StatusBar style="light" />
 
       <ScreenHeader
         title="ArenaGO"
@@ -385,10 +385,9 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     flexGrow: 1,
-    justifyContent: 'space-between',
     paddingHorizontal: spacing.layout.screenPaddingHorizontal,
     paddingTop: spacing.xs,
-    paddingBottom: spacing.xl,
+    paddingBottom: spacing.xxxl,
   },
   mainSection: {
     flexGrow: 1,

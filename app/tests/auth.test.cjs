@@ -1659,8 +1659,6 @@ test('UI-02 & UI-02A: Welcome, Login, Register and ForgotPassword navigate acros
   for (const screenHarness of [welcome, login, register, forgot]) {
     const statusBar = screenHarness.nodes.find((n) => n.type === 'StatusBar');
     assert.equal(statusBar.props.style, 'light');
-    assert.equal(statusBar.props.translucent, true);
-    assert.equal(statusBar.props.backgroundColor, 'transparent');
   }
 });
 

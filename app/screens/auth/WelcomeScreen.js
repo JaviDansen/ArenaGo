@@ -8,7 +8,7 @@ import { colors, radii, spacing, typography } from '../../theme';
 export default function WelcomeScreen({ navigation }) {
   return (
     <AuthBackground variant="welcome" testID="welcome-background">
-      <StatusBar style="light" translucent backgroundColor="transparent" />
+      <StatusBar style="light" />
 
       <ScrollView
         style={styles.scrollView}

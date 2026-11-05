@@ -165,7 +165,7 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
 
   return (
     <AuthBackground variant="login" testID="login-background">
-      <StatusBar style="light" translucent backgroundColor="transparent" />
+      <StatusBar style="light" />
 
       <ScreenHeader
         title="ArenaGO"
@@ -184,18 +184,17 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
-          <View style={styles.mainSection}>
-            {/* Cabeçalho textual com hierarquia clara */}
-            <View style={styles.heroHeader}>
-              <Text style={styles.kicker}>ACESSO À CONTA</Text>
-              <Text style={styles.title}>De volta ao jogo.</Text>
-              <Text style={styles.subtitle}>
-                Informe suas credenciais para entrar na sua conta.
-              </Text>
-            </View>
+          {/* Cabeçalho textual com hierarquia clara */}
+          <View style={styles.heroHeader}>
+            <Text style={styles.kicker}>ACESSO À CONTA</Text>
+            <Text style={styles.title}>De volta ao jogo.</Text>
+            <Text style={styles.subtitle}>
+              Informe suas credenciais para entrar na sua conta.
+            </Text>
+          </View>
 
-            {/* Superfície de formulário com contraste refinado sobre os inputs */}
-            <View style={styles.formSurface}>
+          {/* Superfície de formulário com contraste refinado sobre os inputs */}
+          <View style={styles.formSurface}>
               {sessionNotice && !authError && !twoFactorNotice ? (
                 <Card
                   variant="default"
@@ -312,26 +311,25 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
                 testID="login-submit-button"
               />
             </View>
-          </View>
 
-          {/* Navegação cruzada para Cadastro */}
-          <Pressable
-            style={({ pressed }) => [
-              styles.switchAuthContainer,
-              isSubmitting && styles.disabledControl,
-              pressed && !isSubmitting && styles.pressedControl,
-            ]}
-            onPress={() => navigation.navigate('Register')}
-            disabled={isSubmitting}
-            accessibilityRole="button"
-            accessibilityLabel="Ainda não tem cadastro? Crie sua conta"
-            accessibilityState={{ disabled: isSubmitting }}
-            testID="login-switch-register-button"
-          >
-            <Text style={styles.switchAuthText}>
-              Ainda não tem cadastro? Crie sua conta
-            </Text>
-          </Pressable>
+            {/* Navegação cruzada para Cadastro */}
+            <Pressable
+              style={({ pressed }) => [
+                styles.switchAuthContainer,
+                isSubmitting && styles.disabledControl,
+                pressed && !isSubmitting && styles.pressedControl,
+              ]}
+              onPress={() => navigation.navigate('Register')}
+              disabled={isSubmitting}
+              accessibilityRole="button"
+              accessibilityLabel="Ainda não tem cadastro? Crie sua conta"
+              accessibilityState={{ disabled: isSubmitting }}
+              testID="login-switch-register-button"
+            >
+              <Text style={styles.switchAuthText}>
+                Ainda não tem cadastro? Crie sua conta
+              </Text>
+            </Pressable>
         </ScrollView>
       </KeyboardAvoidingView>
     </AuthBackground>
@@ -349,15 +347,9 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     flexGrow: 1,
-    justifyContent: 'space-between',
     paddingHorizontal: spacing.layout.screenPaddingHorizontal,
     paddingTop: spacing.sm,
-    paddingBottom: spacing.xxl,
-  },
-  mainSection: {
-    flexGrow: 1,
-    justifyContent: 'center',
-    paddingVertical: spacing.sm,
+    paddingBottom: spacing.xxxl,
   },
   heroHeader: {
     marginBottom: spacing.lg,
