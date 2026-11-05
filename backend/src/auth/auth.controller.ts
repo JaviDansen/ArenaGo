@@ -15,6 +15,8 @@ import {
   validateDto,
 } from "./auth.dto";
 import { AuthService } from "./auth.service";
+import { EmailVerificationHttpService } from "./email-verification-http.service";
+import { emailVerificationConfirmSchema, emailVerificationRequestSchema } from "./email-verification.dto";
 import type {
   AuthenticatedPrincipal,
   AuthSessionResponseDto,
@@ -29,7 +31,10 @@ import type { AuthenticatedRequest } from "./session-auth.guard";
 
 @Controller("auth")
 export class AuthController {
-  constructor(@Inject(AuthService) private readonly authService: AuthService) {}
+  constructor(
+    @Inject(AuthService) private readonly authService: AuthService,
+    @Inject(EmailVerificationHttpService) private readonly emailVerification: EmailVerificationHttpService,
+  ) {}
 
   @Post("register")
   @HttpCode(HttpStatus.CREATED)
@@ -72,5 +77,20 @@ export class AuthController {
     @CurrentUser() principal: AuthenticatedPrincipal,
   ): Promise<LogoutResponseDto> {
     return this.authService.logout(principal);
+  }
+
+  @Post("verify-email/request")
+  @RequireSessionAuth()
+  @HttpCode(HttpStatus.ACCEPTED)
+  requestEmailVerification(@CurrentUser() principal: AuthenticatedPrincipal, @Body() body: unknown) {
+    if (body !== undefined) validateDto(emailVerificationRequestSchema, body);
+    return this.emailVerification.request(principal.userId);
+  }
+
+  @Post("verify-email/confirm")
+  @HttpCode(HttpStatus.OK)
+  confirmEmailVerification(@Body() body: unknown) {
+    const dto = validateDto(emailVerificationConfirmSchema, body);
+    return this.emailVerification.confirm(dto.token);
   }
 }
