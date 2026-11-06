@@ -1,0 +1,1422 @@
+diff --git a/backend/src/auth/auth.module.ts b/backend/src/auth/auth.module.ts
+index 73ba106..8c033a9 100644
+--- a/backend/src/auth/auth.module.ts
++++ b/backend/src/auth/auth.module.ts
+@@ -9,11 +9,14 @@ import { EmailVerificationPolicy } from "./email-verification.policy";
+ import { EmailVerificationService } from "./email-verification.service";
+ import { EMAIL_DELIVERY, readEmailVerificationConfig, RESEND_TRANSPORT, resendFetchTransport, ResendEmailVerificationMailer } from "./email-verification-mailer";
+ import { EmailVerificationHttpService } from "./email-verification-http.service";
++import { TotpActivationController } from "./totp-activation.controller";
++import { TotpActivationService } from "./totp-activation.service";
+ 
+ @Module({
+   imports: [DatabaseModule],
+-  controllers: [AuthController],
++  controllers: [AuthController, TotpActivationController],
+   providers: [
++    TotpActivationService,
+     EmailVerificationPolicy,
+     EmailVerificationService,
+     EmailVerificationHttpService,
+diff --git a/backend/src/auth/issue-first-admin-totp.ts b/backend/src/auth/issue-first-admin-totp.ts
+new file mode 100644
+index 0000000..bf01b29
+--- /dev/null
++++ b/backend/src/auth/issue-first-admin-totp.ts
+@@ -0,0 +1,29 @@
++import { Module, type INestApplicationContext } from "@nestjs/common";
++import { NestFactory } from "@nestjs/core";
++import { DatabaseModule } from "../database/database.module";
++import { TotpActivationService } from "./totp-activation.service";
++
++@Module({ imports: [DatabaseModule], providers: [TotpActivationService] })
++class TotpActivationCliModule {}
++
++async function run(): Promise<void> {
++  const args = process.argv.slice(2);
++  if (args.length !== 2 || args[0] !== "--email" || !process.stdout.isTTY) {
++    console.error("Uso em terminal interativo: tsx src/auth/issue-first-admin-totp.ts --email <conta-bootstrap>. Não redirecione a saída.");
++    process.exitCode = 2;
++    return;
++  }
++  let app: INestApplicationContext | undefined;
++  try {
++    app = await NestFactory.createApplicationContext(TotpActivationCliModule, { logger: false });
++    const result = await app.get(TotpActivationService).issue(args[1]);
++    console.error("SIGILOSO: autorização de uso único, válida por 30 minutos. Não grave logs, screenshots ou histórico; entregue somente ao titular autenticado por senha.");
++    console.log(result.activationToken);
++    console.log(`Expira em: ${result.expiresAt}`);
++  } catch {
++    console.error("Emissão TOTP recusada ou indisponível. Nenhum segredo será exibido; confira a elegibilidade e a configuração local.");
++    process.exitCode = 1;
++  } finally { if (app) await app.close().catch(() => undefined); }
++}
++
++if (require.main === module) void run();
+diff --git a/backend/src/auth/totp-activation.controller.ts b/backend/src/auth/totp-activation.controller.ts
+new file mode 100644
+index 0000000..a914207
+--- /dev/null
++++ b/backend/src/auth/totp-activation.controller.ts
+@@ -0,0 +1,28 @@
++import { Body, Controller, Header, HttpCode, Inject, Post } from "@nestjs/common";
++import { z } from "zod";
++import { validateDto } from "./auth.dto";
++import { TotpActivationService, type ActivationConfirmed } from "./totp-activation.service";
++
++const setupSchema = z.object({
++  tempToken: z.string().min(1).max(2048),
++  activationToken: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
++}).strict();
++// Códigos em texto malformados passam pelo limite transacional, antes de serem recusados.
++const confirmSchema = setupSchema.extend({ code: z.string().max(128) }).strict();
++
++@Controller("auth/2fa")
++export class TotpActivationController {
++  constructor(@Inject(TotpActivationService) private readonly activation: TotpActivationService) {}
++
++  @Post("setup")
++  @HttpCode(200)
++  @Header("Cache-Control", "no-store")
++  @Header("Pragma", "no-cache")
++  setup(@Body() body: unknown) { return this.activation.setup(validateDto(setupSchema, body)); }
++
++  @Post("confirm")
++  @HttpCode(200)
++  @Header("Cache-Control", "no-store")
++  @Header("Pragma", "no-cache")
++  confirm(@Body() body: unknown): Promise<ActivationConfirmed> { return this.activation.confirm(validateDto(confirmSchema, body)); }
++}
+diff --git a/backend/src/auth/totp-activation.crypto.ts b/backend/src/auth/totp-activation.crypto.ts
+new file mode 100644
+index 0000000..30932a5
+--- /dev/null
++++ b/backend/src/auth/totp-activation.crypto.ts
+@@ -0,0 +1,123 @@
++import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
++
++export interface TotpKeys { encryption: Buffer; recovery: Buffer }
++const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
++
++export function readTotpKeys(env: Record<string, string | undefined>): TotpKeys {
++  const read = (name: string): Buffer => {
++    const raw = env[name];
++    if (!raw || !/^[A-Za-z0-9+/]{43}=$/.test(raw)) throw new Error("Configuração TOTP indisponível.");
++    const key = Buffer.from(raw, "base64");
++    if (key.length !== 32 || key.toString("base64") !== raw) throw new Error("Configuração TOTP indisponível.");
++    return key;
++  };
++  const encryption = read("TOTP_ENCRYPTION_KEY");
++  const recovery = read("TOTP_RECOVERY_HMAC_KEY");
++  if (timingSafeEqual(encryption, recovery)) throw new Error("Chaves TOTP devem ser independentes.");
++  for (const jwt of [env.JWT_SECRET, env.JWT_TEMP_SECRET]) {
++    if (!jwt) continue;
++    for (const encoding of ["utf8", "base64"] as const) {
++      const candidate = Buffer.from(jwt, encoding);
++      if ([encryption, recovery].some(key => candidate.length === key.length && timingSafeEqual(candidate, key))) {
++        throw new Error("Chaves TOTP devem ser independentes.");
++      }
++    }
++  }
++  return { encryption, recovery };
++}
++
++export function generateTotpSecret(): string {
++  let bits = 0;
++  let value = 0;
++  let encoded = "";
++  for (const byte of randomBytes(20)) {
++    value = (value << 8) | byte;
++    bits += 8;
++    while (bits >= 5) {
++      bits -= 5;
++      encoded += alphabet[(value >>> bits) & 31];
++    }
++    value &= (1 << bits) - 1;
++  }
++  return encoded;
++}
++
++function decodeSecret(secret: string): Buffer {
++  if (!/^[A-Z2-7]{32}$/.test(secret)) throw new Error("Credencial TOTP inválida.");
++  let bits = 0;
++  let value = 0;
++  const bytes: number[] = [];
++  for (const char of secret) {
++    value = (value << 5) | alphabet.indexOf(char);
++    bits += 5;
++    if (bits >= 8) {
++      bits -= 8;
++      bytes.push((value >>> bits) & 255);
++    }
++    value &= (1 << bits) - 1;
++  }
++  return Buffer.from(bytes);
++}
++
++/** RFC 6238 / RFC 4226, SHA-1, 30 segundos, seis dígitos. */
++export function totpCode(secret: string, nowMs: number): string {
++  if (!Number.isFinite(nowMs) || nowMs < 0) throw new Error("Relógio TOTP inválido.");
++  const counter = Buffer.alloc(8);
++  counter.writeBigUInt64BE(BigInt(Math.floor(nowMs / 30_000)));
++  const digest = createHmac("sha1", decodeSecret(secret)).update(counter).digest();
++  const offset = digest[digest.length - 1] & 15;
++  return ((digest.readUInt32BE(offset) & 0x7fffffff) % 1_000_000).toString().padStart(6, "0");
++}
++
++export function verifyTotpCode(secret: string, code: string, nowMs: number): boolean {
++  if (!/^[0-9]{6}$/.test(code)) return false;
++  let matches = false;
++  for (const offset of [-30_000, 0, 30_000]) {
++    if (nowMs + offset < 0) continue;
++    const equal = timingSafeEqual(Buffer.from(code), Buffer.from(totpCode(secret, nowMs + offset)));
++    matches = equal || matches;
++  }
++  return matches;
++}
++
++export function encryptTotpSecret(secret: string, key: Buffer, userId: string, authorizationId: string): string {
++  decodeSecret(secret);
++  const iv = randomBytes(12);
++  const cipher = createCipheriv("aes-256-gcm", key, iv);
++  cipher.setAAD(Buffer.from(`arenago:totp:v1:${userId}:${authorizationId}`));
++  const encrypted = Buffer.concat([cipher.update(secret, "utf8"), cipher.final()]);
++  return ["v1", iv.toString("base64url"), cipher.getAuthTag().toString("base64url"), encrypted.toString("base64url")].join(".");
++}
++
++export function decryptTotpSecret(envelope: string, key: Buffer, userId: string, authorizationId: string): string {
++  if (!/^v1\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}$/.test(envelope)) {
++    throw new Error("Credencial TOTP inválida.");
++  }
++  const [, iv, tag, ciphertext] = envelope.split(".");
++  const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(iv, "base64url"));
++  decipher.setAAD(Buffer.from(`arenago:totp:v1:${userId}:${authorizationId}`));
++  decipher.setAuthTag(Buffer.from(tag, "base64url"));
++  const secret = Buffer.concat([decipher.update(Buffer.from(ciphertext, "base64url")), decipher.final()]).toString("utf8");
++  decodeSecret(secret);
++  return secret;
++}
++
++export function totpUri(secret: string, email: string): string {
++  const query = new URLSearchParams({ secret, issuer: "ArenaGo", algorithm: "SHA1", digits: "6", period: "30" });
++  return `otpauth://totp/${encodeURIComponent(`ArenaGo:${email}`)}?${query}`;
++}
++
++export function hashActivationToken(raw: string): string {
++  return createHash("sha256").update(raw, "utf8").digest("hex");
++}
++
++export function recoveryCodeHash(raw: string, userId: string, key: Buffer): string {
++  return createHmac("sha256", key).update(`arenago:recovery:v1:${userId}:${raw}`).digest("hex");
++}
++
++export function generateRecoveryCodes(userId: string, key: Buffer): Array<{ raw: string; hash: string }> {
++  return Array.from({ length: 10 }, () => {
++    const raw = randomBytes(16).toString("hex");
++    return { raw, hash: recoveryCodeHash(raw, userId, key) };
++  });
++}
+diff --git a/backend/src/auth/totp-activation.service.ts b/backend/src/auth/totp-activation.service.ts
+new file mode 100644
+index 0000000..7fc80b6
+--- /dev/null
++++ b/backend/src/auth/totp-activation.service.ts
+@@ -0,0 +1,210 @@
++import { randomBytes, randomUUID } from "node:crypto";
++import { Inject, Injectable } from "@nestjs/common";
++import { Pool, type PoolClient } from "pg";
++import { POSTGRES_POOL } from "../database/database.module";
++import { environment } from "../config/environment";
++import { ProblemException } from "../common/errors/problem.exception";
++import { verifyTotpChallenge } from "./totp-challenge";
++import {
++  decryptTotpSecret, encryptTotpSecret, generateRecoveryCodes, generateTotpSecret,
++  hashActivationToken, readTotpKeys, totpUri, verifyTotpCode, type TotpKeys,
++} from "./totp-activation.crypto";
++
++export interface TotpActivationInput { tempToken: string; activationToken: string }
++export interface ActivationConfirmed { activated: true; recoveryCodes: string[] }
++interface Account { id: string; email: string; active: boolean; verified: boolean }
++interface Credential { id: string; secret_encrypted: string; is_verified: boolean }
++interface Authorization { id: string; expires_at: Date }
++
++function problem(status: number, code: string): ProblemException {
++  return new ProblemException({ status, code, typeSlug: "totp-activation", title: "Ativação TOTP",
++    detail: "Não foi possível concluir a operação de ativação TOTP.",
++    ...(status === 429 ? { headers: { "Retry-After": "900" } } : {}),
++  });
++}
++
++@Injectable()
++export class TotpActivationService {
++  constructor(@Inject(POSTGRES_POOL) private readonly pool: Pool) {}
++
++  private keys(): TotpKeys {
++    try { return readTotpKeys({ ...process.env, JWT_SECRET: environment.JWT_SECRET, JWT_TEMP_SECRET: environment.JWT_TEMP_SECRET }); }
++    catch { throw problem(503, "TOTP_CONFIGURATION_UNAVAILABLE"); }
++  }
++
++  /** Emissão restrita: nenhum controller expõe este método. */
++  async issue(email: string): Promise<{ activationToken: string; expiresAt: string }> {
++    if (typeof email !== "string" || email.length > 255 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
++      throw problem(400, "VALIDATION_ERROR");
++    }
++    this.keys();
++    return this.transaction(async client => {
++      const user = await this.lockAccount(client, "email", email.trim().toLowerCase());
++      await this.lockBootstrapRole(client, user.id);
++      const credential = await this.lockCredential(client, user.id);
++      await this.requireInitialActivation(client, user.id, credential);
++      await client.query("UPDATE totp_activation_tokens SET revoked_at=clock_timestamp() WHERE user_id=$1 AND used_at IS NULL AND revoked_at IS NULL", [user.id]);
++      // A autorização nova invalida também o segredo pendente vinculado à anterior.
++      await client.query("DELETE FROM user_totp_credentials WHERE user_id=$1 AND is_verified=false", [user.id]);
++      const raw = randomBytes(32).toString("base64url");
++      const result = await client.query<{ expires_at: Date }>(`INSERT INTO totp_activation_tokens
++        (id,user_id,token_hash,issued_by,expires_at,used_at,revoked_at,created_at)
++        VALUES($1,$2,$3,NULL,clock_timestamp()+interval '30 minutes',NULL,NULL,clock_timestamp()) RETURNING expires_at`,
++      [randomUUID(), user.id, hashActivationToken(raw)]);
++      if (result.rowCount !== 1) throw new Error("Autorização não persistida.");
++      await this.audit(client, user.id, "totp_initial_authorization_issued", "cli");
++      return { activationToken: raw, expiresAt: new Date(result.rows[0].expires_at).toISOString() };
++    });
++  }
++
++  async setup(input: TotpActivationInput): Promise<{ secret: string; otpauthUri: string }> {
++    const claims = this.challenge(input.tempToken, Date.now());
++    const keys = this.keys();
++    return this.transaction(async client => {
++      const user = await this.lockAccount(client, "id", claims.sub);
++      await this.lockBootstrapRole(client, user.id);
++      const credential = await this.lockCredential(client, user.id);
++      await this.requireInitialActivation(client, user.id, credential);
++      const authorization = await this.lockAuthorization(client, user.id, input.activationToken);
++      await this.checkTime(client, input.tempToken, authorization);
++      await this.limit(client, user.id, "totp_initial_setup");
++      let secret: string;
++      if (credential) {
++        secret = this.decrypt(credential, keys, user.id, authorization.id);
++      } else {
++        secret = generateTotpSecret();
++        await client.query(`INSERT INTO user_totp_credentials(id,user_id,secret_encrypted,is_verified,verified_at,created_at,updated_at)
++          VALUES($1,$2,$3,false,NULL,clock_timestamp(),clock_timestamp())`,
++        [randomUUID(), user.id, encryptTotpSecret(secret, keys.encryption, user.id, authorization.id)]);
++      }
++      await this.audit(client, user.id, "totp_initial_setup", "user");
++      await this.checkTime(client, input.tempToken, authorization);
++      return { secret, otpauthUri: totpUri(secret, user.email) };
++    });
++  }
++
++  async confirm(input: TotpActivationInput & { code: string }): Promise<ActivationConfirmed> {
++    const claims = this.challenge(input.tempToken, Date.now());
++    const keys = this.keys();
++    const result = await this.transaction<ActivationConfirmed | { error: ProblemException }>(async client => {
++      const user = await this.lockAccount(client, "id", claims.sub);
++      await this.lockBootstrapRole(client, user.id);
++      const credential = await this.lockCredential(client, user.id);
++      await this.requireInitialActivation(client, user.id, credential);
++      const authorization = await this.lockAuthorization(client, user.id, input.activationToken);
++      const now = await this.checkTime(client, input.tempToken, authorization);
++      if (!credential) throw problem(409, "TOTP_SETUP_REQUIRED");
++      await this.limit(client, user.id, "totp_initial_code_rejected");
++      const secret = this.decrypt(credential, keys, user.id, authorization.id);
++      if (!verifyTotpCode(secret, input.code, now)) {
++        // Persistir a falha antes de responder 400: rollback não pode zerar o limite.
++        await this.audit(client, user.id, "totp_initial_code_rejected", "user");
++        return { error: problem(400, "TOTP_CODE_INVALID") };
++      }
++      const backups = await client.query("SELECT 1 FROM user_backup_codes WHERE user_id=$1 LIMIT 1", [user.id]);
++      if (backups.rowCount) throw problem(409, "TOTP_ALREADY_ACTIVATED");
++      const codes = generateRecoveryCodes(user.id, keys.recovery);
++      await client.query("UPDATE user_totp_credentials SET is_verified=true,verified_at=clock_timestamp(),updated_at=clock_timestamp() WHERE id=$1", [credential.id]);
++      await client.query("UPDATE totp_activation_tokens SET used_at=clock_timestamp() WHERE id=$1", [authorization.id]);
++      for (const code of codes) {
++        await client.query("INSERT INTO user_backup_codes(id,user_id,code_hash,used_at,created_at) VALUES($1,$2,$3,NULL,clock_timestamp())",
++          [randomUUID(), user.id, code.hash]);
++      }
++      await this.audit(client, user.id, "totp_initial_activated", "user");
++      await this.checkTime(client, input.tempToken, authorization);
++      return { activated: true as const, recoveryCodes: codes.map(code => code.raw) };
++    });
++    if ("error" in result) throw result.error;
++    return result;
++  }
++
++  private challenge(token: string, now: number) {
++    const claims = verifyTotpChallenge(token, now);
++    if (!claims) throw problem(401, "TOTP_CHALLENGE_INVALID");
++    return claims;
++  }
++
++  private async lockAccount(client: PoolClient, by: "email" | "id", value: string): Promise<Account> {
++    // A coluna vem somente da união interna acima, nunca de input HTTP.
++    const result = await client.query<Account>(`SELECT id,email,is_active AS active,email_verified_at IS NOT NULL AS verified
++      FROM users WHERE ${by}=$1 FOR UPDATE`, [value]);
++    const user = result.rows[0];
++    if (!user || !user.active || !user.verified) throw problem(403, "TOTP_ACTIVATION_FORBIDDEN");
++    return user;
++  }
++
++  private async lockBootstrapRole(client: PoolClient, userId: string): Promise<void> {
++    const role = await client.query(`SELECT r.id FROM user_roles r WHERE r.user_id=$1 AND r.role='admin'
++      AND r.event_id IS NULL AND r.revoked_at IS NULL AND r.granted_by IS NULL
++      AND EXISTS(SELECT 1 FROM audit_logs a WHERE a.target_user_id=r.user_id AND a.actor_user_id IS NULL
++        AND a.origin='cli' AND a.category='identity' AND a.action='first_admin_bootstrapped'
++        AND a.event_id IS NULL AND a.occurred_at=r.granted_at)
++      FOR UPDATE OF r`, [userId]);
++    if (role.rowCount !== 1) throw problem(403, "TOTP_ACTIVATION_FORBIDDEN");
++  }
++
++  private async lockCredential(client: PoolClient, userId: string): Promise<Credential | undefined> {
++    const result = await client.query<Credential>("SELECT id,secret_encrypted,is_verified FROM user_totp_credentials WHERE user_id=$1 FOR UPDATE", [userId]);
++    return result.rows[0];
++  }
++
++  private async requireInitialActivation(client: PoolClient, userId: string, credential: Credential | undefined): Promise<void> {
++    if (credential?.is_verified) throw problem(409, "TOTP_ALREADY_ACTIVATED");
++    const history = await client.query("SELECT 1 FROM audit_logs WHERE target_user_id=$1 AND action='totp_initial_activated' AND category='identity' LIMIT 1", [userId]);
++    if (history.rowCount) throw problem(409, "TOTP_ALREADY_ACTIVATED");
++  }
++
++  private async lockAuthorization(client: PoolClient, userId: string, raw: string): Promise<Authorization> {
++    if (typeof raw !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(raw)) throw problem(403, "TOTP_AUTHORIZATION_INVALID");
++    const result = await client.query<Authorization>(`SELECT id,expires_at FROM totp_activation_tokens
++      WHERE user_id=$1 AND token_hash=$2 AND issued_by IS NULL AND used_at IS NULL AND revoked_at IS NULL FOR UPDATE`,
++    [userId, hashActivationToken(raw)]);
++    if (result.rowCount !== 1) throw problem(403, "TOTP_AUTHORIZATION_INVALID");
++    return result.rows[0];
++  }
++
++  private async checkTime(client: PoolClient, token: string, authorization: Authorization): Promise<number> {
++    const result = await client.query<{ now: Date }>("SELECT clock_timestamp() AS now");
++    const now = new Date(result.rows[0].now).getTime();
++    if (!Number.isFinite(now)) throw new Error("Relógio indisponível.");
++    this.challenge(token, now);
++    const expiresAt = new Date(authorization.expires_at).getTime();
++    if (!Number.isFinite(expiresAt) || expiresAt <= now) throw problem(403, "TOTP_AUTHORIZATION_INVALID");
++    return now;
++  }
++
++  private async limit(client: PoolClient, userId: string, action: string): Promise<void> {
++    const result = await client.query<{ count: number }>(`SELECT count(*)::integer AS count FROM audit_logs
++      WHERE target_user_id=$1 AND category='identity' AND action=$2 AND occurred_at>clock_timestamp()-interval '15 minutes'`, [userId, action]);
++    if (result.rows[0].count >= 5) throw problem(429, "TOTP_ACTIVATION_RATE_LIMITED");
++  }
++
++  private decrypt(credential: Credential, keys: TotpKeys, userId: string, authorizationId: string): string {
++    try { return decryptTotpSecret(credential.secret_encrypted, keys.encryption, userId, authorizationId); }
++    catch { throw problem(503, "TOTP_CONFIGURATION_UNAVAILABLE"); }
++  }
++
++  private async audit(client: PoolClient, userId: string, action: string, origin: "cli" | "user"): Promise<void> {
++    const result = await client.query(`INSERT INTO audit_logs
++      (id,actor_user_id,target_user_id,event_id,origin,category,action,metadata,occurred_at)
++      VALUES($1,$2,$3,NULL,$4,'identity',$5,'{}'::jsonb,clock_timestamp())`,
++    [randomUUID(), origin === "cli" ? null : userId, userId, origin, action]);
++    if (result.rowCount !== 1) throw new Error("Auditoria não persistida.");
++  }
++
++  private async transaction<T>(work: (client: PoolClient) => Promise<T>): Promise<T> {
++    let client: PoolClient | undefined;
++    try {
++      client = await this.pool.connect();
++      await client.query("BEGIN ISOLATION LEVEL READ COMMITTED");
++      const result = await work(client);
++      await client.query("COMMIT");
++      return result;
++    } catch (error) {
++      if (client) await client.query("ROLLBACK").catch(() => undefined);
++      if (error instanceof ProblemException) throw error;
++      // O filtro global registra mensagens de erros inesperados: não encaminhar detalhes SQL/segredos.
++      throw problem(500, "INTERNAL_SERVER_ERROR");
++    } finally { client?.release(); }
++  }
++}
+diff --git a/backend/src/auth/totp-challenge.ts b/backend/src/auth/totp-challenge.ts
+new file mode 100644
+index 0000000..4f16b19
+--- /dev/null
++++ b/backend/src/auth/totp-challenge.ts
+@@ -0,0 +1,27 @@
++import { createHmac, timingSafeEqual } from "node:crypto";
++import { environment } from "../config/environment";
++import type { TempTwoFactorTokenClaims } from "./token.util";
++
++const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
++
++/** Consome somente o desafio de senha emitido pelo login; nunca um Bearer de sessão. */
++export function verifyTotpChallenge(token: string, nowMs: number, secret = environment.JWT_TEMP_SECRET): TempTwoFactorTokenClaims | null {
++  if (typeof token !== "string" || token.length > 2048) return null;
++  const parts = token.split(".");
++  if (parts.length !== 3 || parts.some(part => !/^[A-Za-z0-9_-]+$/.test(part))) return null;
++  const [headerPart, payloadPart, signature] = parts;
++  const expected = createHmac("sha256", secret).update(`${headerPart}.${payloadPart}`).digest("base64url");
++  if (signature.length !== expected.length || !timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return null;
++  try {
++    const header = JSON.parse(Buffer.from(headerPart, "base64url").toString("utf8"));
++    const candidate = JSON.parse(Buffer.from(payloadPart, "base64url").toString("utf8"));
++    if (!header || header.alg !== "HS256" || header.typ !== "JWT" || !candidate || candidate.type !== "2fa_challenge") return null;
++    const now = Math.floor(nowMs / 1000);
++    if (typeof candidate.sub !== "string" || !uuid.test(candidate.sub)
++      || typeof candidate.jti !== "string" || !uuid.test(candidate.jti)
++      || !Number.isSafeInteger(candidate.iat) || !Number.isSafeInteger(candidate.exp)
++      || candidate.exp <= candidate.iat || candidate.exp - candidate.iat > 300
++      || candidate.iat > now || now >= candidate.exp || "sid" in candidate) return null;
++    return { sub: candidate.sub, jti: candidate.jti, type: "2fa_challenge", iat: candidate.iat, exp: candidate.exp };
++  } catch { return null; }
++}
+diff --git a/backend/test/integration/totp-activation.integration.test.ts b/backend/test/integration/totp-activation.integration.test.ts
+new file mode 100644
+index 0000000..31cd180
+--- /dev/null
++++ b/backend/test/integration/totp-activation.integration.test.ts
+@@ -0,0 +1,443 @@
++import assert from "node:assert/strict";
++import { randomBytes, randomUUID } from "node:crypto";
++import type { AddressInfo } from "node:net";
++import { after, afterEach, before, beforeEach, test } from "node:test";
++import { Module, type INestApplication } from "@nestjs/common";
++import { APP_FILTER, NestFactory } from "@nestjs/core";
++import * as argon2 from "argon2";
++import { Pool, type QueryResult } from "pg";
++import { AuthController } from "../../src/auth/auth.controller";
++import { AuthService } from "../../src/auth/auth.service";
++import { EmailVerificationHttpService } from "../../src/auth/email-verification-http.service";
++import { FirstAdminBootstrapService } from "../../src/auth/first-admin-bootstrap.service";
++import { LoginRateLimiterService } from "../../src/auth/login-rate-limiter.service";
++import { RegistrationRateLimiterService } from "../../src/auth/registration-rate-limiter.service";
++import { SessionAuthGuard } from "../../src/auth/session-auth.guard";
++import { signAccessToken, signTempTwoFactorToken } from "../../src/auth/token.util";
++import { TotpActivationController } from "../../src/auth/totp-activation.controller";
++import { TotpActivationService } from "../../src/auth/totp-activation.service";
++import { hashActivationToken, readTotpKeys, recoveryCodeHash, totpCode } from "../../src/auth/totp-activation.crypto";
++import { POSTGRES_POOL } from "../../src/database/database.module";
++import { ProblemDetailsExceptionFilter } from "../../src/common/errors/problem-details.filter";
++import { ProblemException } from "../../src/common/errors/problem.exception";
++import { assertFirstAdminBootstrapTestDatabaseUrls } from "./first-admin-bootstrap-db-guard";
++
++// Mesma guarda exclusiva da B1, antes de criar qualquer pool. Sem seeds ou limpeza global.
++const connectionString = assertFirstAdminBootstrapTestDatabaseUrls(process.env);
++process.env.TOTP_ENCRYPTION_KEY = Buffer.alloc(32, 11).toString("base64");
++process.env.TOTP_RECOVERY_HMAC_KEY = Buffer.alloc(32, 22).toString("base64");
++const keys = readTotpKeys(process.env);
++const applicationName = `b2-${randomUUID()}`;
++const pool = new Pool({ connectionString, application_name: applicationName, max: 12 });
++const bootstrap = new FirstAdminBootstrapService(pool);
++const activation = new TotpActivationService(pool);
++const userIds: string[] = [];
++let app: INestApplication;
++let baseUrl: string;
++let passwordHash: string;
++const password = "B2-fixture-only-passphrase";
++let current: { id: string; email: string; tempToken: string };
++
++@Module({ controllers: [AuthController, TotpActivationController], providers: [
++  { provide: POSTGRES_POOL, useValue: pool }, { provide: TotpActivationService, useValue: activation },
++  AuthService, LoginRateLimiterService, RegistrationRateLimiterService, SessionAuthGuard,
++  { provide: EmailVerificationHttpService, useValue: { request: async () => ({}), confirm: async () => ({ verified: false }) } },
++  { provide: APP_FILTER, useClass: ProblemDetailsExceptionFilter },
++] })
++class TotpIntegrationModule {}
++
++async function account() {
++  const id = randomUUID();
++  const email = `${id}@example.test`;
++  await pool.query(`INSERT INTO users(id,name,email,password_hash,email_verified_at,is_active,created_at,updated_at)
++    VALUES($1,'B2 fixture',$2,$3,clock_timestamp(),true,clock_timestamp(),clock_timestamp())`, [id, email, passwordHash]);
++  userIds.push(id);
++  await pool.query("INSERT INTO user_roles(id,user_id,role,event_id,granted_at) VALUES($1,$2,'participante',NULL,clock_timestamp())", [randomUUID(), id]);
++  return { id, email };
++}
++
++async function post(path: string, body: unknown) {
++  const response = await fetch(`${baseUrl}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
++  return { status: response.status, headers: response.headers, body: await response.json() as Record<string, unknown> };
++}
++
++async function prepare() {
++  const authorization = await activation.issue(current.email);
++  const input = { tempToken: current.tempToken, activationToken: authorization.activationToken };
++  const response = await post("/auth/2fa/setup", input);
++  assert.equal(response.status, 200);
++  assert.equal(typeof response.body.secret, "string");
++  return { input, secret: response.body.secret as string, authorization };
++}
++
++async function codeNow(secret: string) {
++  const result = await pool.query<{ now: Date }>("SELECT clock_timestamp() AS now");
++  return totpCode(secret, new Date(result.rows[0].now).getTime());
++}
++
++async function pendingState() {
++  const credential = await pool.query("SELECT is_verified,verified_at FROM user_totp_credentials WHERE user_id=$1", [current.id]);
++  const tokens = await pool.query("SELECT used_at FROM totp_activation_tokens WHERE user_id=$1 AND revoked_at IS NULL", [current.id]);
++  assert.deepEqual(credential.rows, [{ is_verified: false, verified_at: null }]);
++  assert.deepEqual(tokens.rows, [{ used_at: null }]);
++  assert.equal((await pool.query("SELECT 1 FROM user_backup_codes WHERE user_id=$1", [current.id])).rowCount, 0);
++  assert.equal((await pool.query("SELECT 1 FROM audit_logs WHERE target_user_id=$1 AND action='totp_initial_activated'", [current.id])).rowCount, 0);
++}
++
++before(async () => {
++  assert.equal((await pool.query("SELECT current_database() AS name")).rows[0].name, "arenago_bootstrap_test");
++  assert.equal((await pool.query("SELECT count(*)::integer AS n FROM user_roles WHERE role='admin' AND event_id IS NULL")).rows[0].n, 0,
++    "Banco dedicado contém Admin histórico; não apagar registros. Preparar banco exclusivo vazio manualmente.");
++  passwordHash = await argon2.hash(password);
++  app = await NestFactory.create(TotpIntegrationModule, { logger: false });
++  app.setGlobalPrefix("api/v1");
++  await app.listen(0, "127.0.0.1");
++  baseUrl = `http://127.0.0.1:${(app.getHttpServer().address() as AddressInfo).port}/api/v1`;
++});
++
++beforeEach(async () => {
++  const user = await account();
++  assert.deepEqual(await bootstrap.bootstrap(user.email), { kind: "created" });
++  const login = await post("/auth/login", { email: user.email, password });
++  assert.equal(login.status, 200);
++  assert.equal(login.body.requires2FA, true);
++  assert.equal(login.body.isTotpConfigured, false);
++  assert.equal(typeof login.body.tempToken, "string");
++  current = { ...user, tempToken: login.body.tempToken as string };
++});
++
++afterEach(async () => {
++  if (!userIds.length) return;
++  await pool.query("DELETE FROM user_backup_codes WHERE user_id=ANY($1::uuid[])", [userIds]);
++  await pool.query("DELETE FROM totp_activation_tokens WHERE user_id=ANY($1::uuid[])", [userIds]);
++  await pool.query("DELETE FROM user_totp_credentials WHERE user_id=ANY($1::uuid[])", [userIds]);
++  await pool.query("DELETE FROM audit_logs WHERE target_user_id=ANY($1::uuid[]) OR actor_user_id=ANY($1::uuid[])", [userIds]);
++  await pool.query("DELETE FROM user_roles WHERE user_id=ANY($1::uuid[])", [userIds]);
++  await pool.query("DELETE FROM refresh_tokens WHERE session_id IN (SELECT id FROM sessions WHERE user_id=ANY($1::uuid[]))", [userIds]);
++  await pool.query("DELETE FROM sessions WHERE user_id=ANY($1::uuid[])", [userIds]);
++  await pool.query("DELETE FROM users WHERE id=ANY($1::uuid[])", [userIds]);
++  userIds.length = 0;
++});
++after(async () => { if (app) await app.close(); await pool.end(); });
++
++test("B2 PostgreSQL fluxo HTTP real ativa uma vez, cifra segredo e conserva ausência de sessão", async () => {
++  const { input, secret, authorization } = await prepare();
++  const token = (await pool.query("SELECT token_hash,issued_by,extract(epoch FROM(expires_at-created_at)) AS ttl FROM totp_activation_tokens WHERE user_id=$1", [current.id])).rows[0];
++  assert.equal(token.token_hash, hashActivationToken(input.activationToken));
++  assert.equal(token.issued_by, null);
++  assert.ok(Math.abs(Number(token.ttl) - 1800) < 1);
++  assert.ok(Date.parse(authorization.expiresAt) > Date.now());
++  const encrypted = (await pool.query("SELECT secret_encrypted FROM user_totp_credentials WHERE user_id=$1", [current.id])).rows[0].secret_encrypted as string;
++  assert.match(encrypted, /^v1\./);
++  assert.equal(encrypted.includes(secret), false);
++  await pendingState();
++  const response = await post("/auth/2fa/confirm", { ...input, code: await codeNow(secret) });
++  assert.equal(response.status, 200);
++  assert.equal(response.headers.get("cache-control"), "no-store");
++  assert.deepEqual(Object.keys(response.body).sort(), ["activated", "recoveryCodes"]);
++  const codes = response.body.recoveryCodes as string[];
++  assert.equal(codes.length, 10);
++  const stored = await pool.query("SELECT code_hash,used_at FROM user_backup_codes WHERE user_id=$1", [current.id]);
++  assert.deepEqual(stored.rows.map(row => row.code_hash).sort(), codes.map(code => recoveryCodeHash(code, current.id, keys.recovery)).sort());
++  assert.ok(stored.rows.every(row => row.used_at === null));
++  assert.equal((await pool.query("SELECT is_verified FROM user_totp_credentials WHERE user_id=$1", [current.id])).rows[0].is_verified, true);
++  assert.equal((await pool.query("SELECT 1 FROM totp_activation_tokens WHERE user_id=$1 AND used_at IS NOT NULL", [current.id])).rowCount, 1);
++  assert.equal((await pool.query("SELECT 1 FROM sessions WHERE user_id=$1", [current.id])).rowCount, 0);
++  const audit = JSON.stringify((await pool.query("SELECT * FROM audit_logs WHERE target_user_id=$1", [current.id])).rows);
++  for (const sensitive of [secret, input.activationToken, input.tempToken, ...codes]) assert.equal(audit.includes(sensitive), false);
++  const login = await post("/auth/login", { email: current.email, password });
++  assert.equal(login.body.isTotpConfigured, true);
++  assert.equal(login.body.requires2FA, true);
++  assert.equal("accessToken" in login.body, false);
++  assert.equal("refreshToken" in login.body, false);
++  const me = await fetch(`${baseUrl}/auth/me`, { headers: { Authorization: `Bearer ${current.tempToken}` } });
++  assert.equal(me.status, 401);
++  assert.equal((await post("/auth/2fa/confirm", { ...input, code: await codeNow(secret) })).status, 409);
++  assert.equal((await post("/auth/2fa/setup", input)).status, 409);
++  await assert.rejects(activation.issue(current.email), error => error instanceof ProblemException && error.problem.code === "TOTP_ALREADY_ACTIVATED");
++  assert.equal((await pool.query("SELECT 1 FROM user_backup_codes WHERE user_id=$1", [current.id])).rowCount, 10);
++});
++
++test("B2 PostgreSQL setup repetido mantém segredo e nova emissão invalida a pendência anterior", async () => {
++  const first = await prepare();
++  assert.equal((await post("/auth/2fa/setup", first.input)).body.secret, first.secret);
++  const second = await activation.issue(current.email);
++  assert.equal((await post("/auth/2fa/setup", first.input)).status, 403);
++  assert.equal((await pool.query("SELECT 1 FROM user_totp_credentials WHERE user_id=$1", [current.id])).rowCount, 0);
++  const setup = await post("/auth/2fa/setup", { ...first.input, activationToken: second.activationToken });
++  assert.equal(setup.status, 200);
++  assert.notEqual(setup.body.secret, first.secret);
++  assert.equal((await pool.query("SELECT 1 FROM totp_activation_tokens WHERE user_id=$1 AND revoked_at IS NOT NULL", [current.id])).rowCount, 1);
++});
++
++test("B2 PostgreSQL ativação não promove nem modifica sessão preexistente", async () => {
++  const f = await prepare();
++  const sessionId = randomUUID();
++  await pool.query(`INSERT INTO sessions(id,user_id,expires_at,last_activity_at,admin_2fa_verified_at,created_at)
++    VALUES($1,$2,clock_timestamp()+interval '1 day',clock_timestamp(),NULL,clock_timestamp())`, [sessionId, current.id]);
++  const snapshot = await pool.query("SELECT * FROM sessions WHERE id=$1", [sessionId]);
++  assert.equal((await post("/auth/2fa/confirm", { ...f.input, code: await codeNow(f.secret) })).status, 200);
++  assert.deepEqual((await pool.query("SELECT * FROM sessions WHERE id=$1", [sessionId])).rows, snapshot.rows);
++  assert.equal((await pool.query("SELECT 1 FROM refresh_tokens WHERE session_id=$1", [sessionId])).rowCount, 0);
++  const access = signAccessToken({ userId: current.id, sessionId });
++  const me = await fetch(`${baseUrl}/auth/me`, { headers: { Authorization: `Bearer ${access}` } });
++  assert.equal(me.status, 401);
++  assert.equal((await me.json() as { code: string }).code, "ADMIN_2FA_REQUIRED");
++});
++
++for (const state of ["expired", "revoked", "consumed", "other-user"] as const) {
++  test(`B2 PostgreSQL autorização ${state} é rejeitada sem ativação`, async () => {
++    const f = await prepare();
++    if (state === "other-user") {
++      const other = await account();
++      await pool.query("UPDATE totp_activation_tokens SET user_id=$1 WHERE token_hash=$2", [other.id, hashActivationToken(f.input.activationToken)]);
++    } else {
++      const changes = { expired: "expires_at=clock_timestamp()-interval '1 second'", revoked: "revoked_at=clock_timestamp()", consumed: "used_at=clock_timestamp()" };
++      await pool.query(`UPDATE totp_activation_tokens SET ${changes[state]} WHERE user_id=$1`, [current.id]);
++    }
++    const response = await post("/auth/2fa/confirm", { ...f.input, code: await codeNow(f.secret) });
++    assert.equal(response.status, 403);
++    assert.equal(response.body.code, "TOTP_AUTHORIZATION_INVALID");
++    assert.equal((await pool.query("SELECT is_verified FROM user_totp_credentials WHERE user_id=$1", [current.id])).rows[0].is_verified, false);
++    assert.equal((await pool.query("SELECT 1 FROM user_backup_codes WHERE user_id=$1", [current.id])).rowCount, 0);
++  });
++}
++
++for (const state of ["expired", "forged", "access"] as const) {
++  test(`B2 PostgreSQL desafio ${state} não configura credencial`, async () => {
++    const authorization = await activation.issue(current.email);
++    const token = state === "expired" ? signTempTwoFactorToken(current.id, { nowMs: Date.now() - 301_000 })
++      : state === "access" ? signAccessToken({ userId: current.id, sessionId: randomUUID() })
++        : signTempTwoFactorToken(current.id, { secret: "wrong-secret-for-test-only-at-least-32-chars" });
++    const response = await post("/auth/2fa/setup", { tempToken: token, activationToken: authorization.activationToken });
++    assert.equal(response.status, 401);
++    assert.equal((await pool.query("SELECT 1 FROM user_totp_credentials WHERE user_id=$1", [current.id])).rowCount, 0);
++  });
++}
++
++for (const state of ["inactive", "unverified", "revoked-role"] as const) {
++  test(`B2 PostgreSQL estado ${state} é revalidado depois do setup`, async () => {
++    const f = await prepare();
++    if (state === "revoked-role") await pool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE user_id=$1 AND role='admin'", [current.id]);
++    else await pool.query(`UPDATE users SET ${state === "inactive" ? "is_active=false" : "email_verified_at=NULL"} WHERE id=$1`, [current.id]);
++    const response = await post("/auth/2fa/confirm", { ...f.input, code: await codeNow(f.secret) });
++    assert.equal(response.status, 403);
++    await pendingState();
++    await assert.rejects(activation.issue(current.email), error => error instanceof ProblemException && error.problem.code === "TOTP_ACTIVATION_FORBIDDEN");
++  });
++}
++
++test("B2 PostgreSQL Admin sem proveniência B1 não recebe autorização", async () => {
++  const other = await account();
++  await pool.query("INSERT INTO user_roles(id,user_id,role,event_id,granted_by,granted_at) VALUES($1,$2,'admin',NULL,NULL,clock_timestamp())", [randomUUID(), other.id]);
++  await assert.rejects(activation.issue(other.email), error => error instanceof ProblemException && error.problem.code === "TOTP_ACTIVATION_FORBIDDEN");
++  assert.equal((await pool.query("SELECT 1 FROM totp_activation_tokens WHERE user_id=$1", [other.id])).rowCount, 0);
++});
++
++test("B2 PostgreSQL cinco erros inclusive malformados limitam tentativas e reemissão não zera contador", async () => {
++  const f = await prepare();
++  const clock = (await pool.query<{ now: Date }>("SELECT clock_timestamp() AS now")).rows[0].now;
++  const nearby = new Set([-60_000, -30_000, 0, 30_000, 60_000].map(offset => totpCode(f.secret, new Date(clock).getTime() + offset)));
++  const wrong = Array.from({ length: 6 }, (_, i) => i.toString().padStart(6, "0")).find(code => !nearby.has(code));
++  assert.ok(wrong);
++  assert.equal((await post("/auth/2fa/confirm", { ...f.input, code: wrong })).status, 400);
++  for (let i = 0; i < 4; i++) assert.equal((await post("/auth/2fa/confirm", { ...f.input, code: "invalid" })).status, 400);
++  assert.equal((await pool.query("SELECT 1 FROM audit_logs WHERE target_user_id=$1 AND action='totp_initial_code_rejected'", [current.id])).rowCount, 5);
++  const limited = await post("/auth/2fa/confirm", { ...f.input, code: await codeNow(f.secret) });
++  assert.equal(limited.status, 429);
++  assert.equal(limited.headers.get("retry-after"), "900");
++  await pendingState();
++  const again = await prepare();
++  const restarted = new TotpActivationService(pool);
++  await assert.rejects(restarted.confirm({ ...again.input, code: await codeNow(again.secret) }), error => error instanceof ProblemException && error.problem.code === "TOTP_ACTIVATION_RATE_LIMITED");
++});
++
++test("B2 PostgreSQL limite de setup impede rotações/revelações ilimitadas", async () => {
++  const f = await prepare();
++  for (let i = 0; i < 4; i++) assert.equal((await post("/auth/2fa/setup", f.input)).status, 200);
++  assert.equal((await post("/auth/2fa/setup", f.input)).status, 429);
++  assert.equal((await post("/auth/2fa/confirm", { ...f.input, code: await codeNow(f.secret) })).status, 200);
++});
++
++test("B2 PostgreSQL confirmação sem setup não consome autorização", async () => {
++  const authorization = await activation.issue(current.email);
++  const response = await post("/auth/2fa/confirm", { tempToken: current.tempToken, activationToken: authorization.activationToken, code: "123456" });
++  assert.equal(response.status, 409);
++  assert.equal(response.body.code, "TOTP_SETUP_REQUIRED");
++  assert.equal((await pool.query("SELECT used_at FROM totp_activation_tokens WHERE user_id=$1", [current.id])).rows[0].used_at, null);
++});
++
++async function waitForLocks(count: number) {
++  const deadline = Date.now() + 8_000;
++  while (Date.now() < deadline) {
++    const blocked = await pool.query("SELECT count(*)::integer AS n FROM pg_stat_activity WHERE application_name=$1 AND wait_event_type='Lock' AND cardinality(pg_blocking_pids(pid))>0", [applicationName]);
++    if (blocked.rows[0].n >= count) return;
++    await new Promise(resolve => setTimeout(resolve, 20));
++  }
++  throw new Error("Concorrência real não observada.");
++}
++
++test("B2 PostgreSQL confirmações simultâneas publicam somente um conjunto de códigos", async () => {
++  const f = await prepare();
++  const blocker = await pool.connect();
++  let attempts: Array<Promise<Awaited<ReturnType<TotpActivationService["confirm"]>>>> = [];
++  try {
++    await blocker.query("BEGIN");
++    await blocker.query("SELECT id FROM users WHERE id=$1 FOR UPDATE", [current.id]);
++    const input = { ...f.input, code: await codeNow(f.secret) };
++    attempts = [activation.confirm(input), activation.confirm(input)];
++    const all = Promise.allSettled(attempts);
++    await waitForLocks(2);
++    await blocker.query("COMMIT");
++    const results = await all;
++    assert.equal(results.filter(result => result.status === "fulfilled").length, 1);
++    const rejected = results.find(result => result.status === "rejected");
++    assert.ok(rejected?.status === "rejected" && rejected.reason instanceof ProblemException && rejected.reason.problem.code === "TOTP_ALREADY_ACTIVATED");
++    assert.equal((await pool.query("SELECT 1 FROM user_backup_codes WHERE user_id=$1", [current.id])).rowCount, 10);
++    assert.equal((await pool.query("SELECT 1 FROM audit_logs WHERE target_user_id=$1 AND action='totp_initial_activated'", [current.id])).rowCount, 1);
++  } finally {
++    await blocker.query("ROLLBACK").catch(() => undefined);
++    blocker.release();
++    await Promise.allSettled(attempts);
++  }
++});
++
++test("B2 PostgreSQL emissões concorrentes deixam uma única autorização vigente", async () => {
++  const issued = await Promise.all([activation.issue(current.email), activation.issue(current.email)]);
++  assert.notEqual(issued[0].activationToken, issued[1].activationToken);
++  const rows = await pool.query("SELECT token_hash,revoked_at FROM totp_activation_tokens WHERE user_id=$1", [current.id]);
++  assert.equal(rows.rowCount, 2);
++  assert.equal(rows.rows.filter(row => row.revoked_at === null).length, 1);
++});
++
++test("B2 PostgreSQL desafio que expira aguardando conta não confirma", async () => {
++  const f = await prepare();
++  const blocker = await pool.connect();
++  let attempt: Promise<unknown> | undefined;
++  try {
++    await blocker.query("BEGIN");
++    await blocker.query("SELECT id FROM users WHERE id=$1 FOR UPDATE", [current.id]);
++    const tempToken = signTempTwoFactorToken(current.id, { ttlSeconds: 3 });
++    attempt = activation.confirm({ ...f.input, tempToken, code: await codeNow(f.secret) });
++    const result = Promise.allSettled([attempt]);
++    await waitForLocks(1);
++    await blocker.query("SELECT pg_sleep(3.1)");
++    await blocker.query("COMMIT");
++    const [outcome] = await result;
++    assert.ok(outcome.status === "rejected" && outcome.reason instanceof ProblemException && outcome.reason.problem.code === "TOTP_CHALLENGE_INVALID");
++    await pendingState();
++  } finally {
++    await blocker.query("ROLLBACK").catch(() => undefined);
++    blocker.release();
++    if (attempt) await Promise.allSettled([attempt]);
++  }
++});
++
++test("B2 PostgreSQL autorização expirada após escritas reais provoca rollback antes do COMMIT", async () => {
++  const f = await prepare();
++  await pool.query("UPDATE totp_activation_tokens SET expires_at=clock_timestamp()+interval '3 seconds' WHERE user_id=$1", [current.id]);
++  let reachedAudit = false;
++  const wrapped = { connect: async () => {
++    const client = await pool.connect();
++    const query = client.query.bind(client) as (text: string, values?: unknown[]) => Promise<QueryResult>;
++    return { release: () => client.release(), query: async (text: string, values?: unknown[]) => {
++      const result = await query(text, values);
++      if (text.startsWith("INSERT INTO audit_logs")) { reachedAudit = true; await query("SELECT pg_sleep(3.1)"); }
++      return result;
++    } };
++  } } as unknown as Pool;
++  await assert.rejects(new TotpActivationService(wrapped).confirm({ ...f.input, code: await codeNow(f.secret) }),
++    error => error instanceof ProblemException && error.problem.code === "TOTP_AUTHORIZATION_INVALID");
++  assert.equal(reachedAudit, true);
++  await pendingState();
++});
++
++test("B2 PostgreSQL falha de auditoria da reemissão conserva autorização e segredo anteriores", async () => {
++  const f = await prepare();
++  let injected = false;
++  const wrapped = { connect: async () => {
++    const client = await pool.connect();
++    const query = client.query.bind(client) as (text: string, values?: unknown[]) => Promise<QueryResult>;
++    return { release: () => client.release(), query: async (text: string, values?: unknown[]) => {
++      const result = await query(text, values);
++      if (text.startsWith("INSERT INTO audit_logs")) { injected = true; throw new Error("ISSUE_AUDIT_PRIVATE"); }
++      return result;
++    } };
++  } } as unknown as Pool;
++  await assert.rejects(new TotpActivationService(wrapped).issue(current.email), error => error instanceof ProblemException && error.getStatus() === 500);
++  assert.equal(injected, true);
++  assert.equal((await post("/auth/2fa/setup", f.input)).body.secret, f.secret);
++  assert.equal((await pool.query("SELECT 1 FROM totp_activation_tokens WHERE user_id=$1", [current.id])).rowCount, 1);
++});
++
++for (const mutation of ["expiry", "role", "account"] as const) {
++  test(`B2 PostgreSQL revalida ${mutation} após espera em lock`, async () => {
++    const f = await prepare();
++    const blocker = await pool.connect();
++    let attempt: Promise<unknown> | undefined;
++    try {
++      await blocker.query("BEGIN");
++      await blocker.query("SELECT id FROM users WHERE id=$1 FOR UPDATE", [current.id]);
++      attempt = activation.confirm({ ...f.input, code: await codeNow(f.secret) });
++      const result = Promise.allSettled([attempt]);
++      await waitForLocks(1);
++      if (mutation === "expiry") await blocker.query("UPDATE totp_activation_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE user_id=$1", [current.id]);
++      else if (mutation === "role") await blocker.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE user_id=$1 AND role='admin'", [current.id]);
++      else await blocker.query("UPDATE users SET is_active=false WHERE id=$1", [current.id]);
++      await blocker.query("COMMIT");
++      const [outcome] = await result;
++      assert.equal(outcome.status, "rejected");
++      if (outcome.status === "rejected") assert.ok(outcome.reason instanceof ProblemException && outcome.reason.getStatus() === 403);
++      await pendingState();
++    } finally {
++      await blocker.query("ROLLBACK").catch(() => undefined);
++      blocker.release();
++      if (attempt) await Promise.allSettled([attempt]);
++    }
++  });
++}
++
++for (const phase of ["UPDATE user_totp_credentials", "UPDATE totp_activation_tokens", "INSERT INTO user_backup_codes", "INSERT INTO audit_logs"]) {
++  test(`B2 PostgreSQL erro após SQL real ${phase} reverte tudo e permite retry`, async () => {
++    const f = await prepare();
++    let injected = false;
++    const wrapped = { connect: async () => {
++      const client = await pool.connect();
++      const query = client.query.bind(client) as (text: string, values?: unknown[]) => Promise<QueryResult>;
++      return { release: () => client.release(), query: async (text: string, values?: unknown[]) => {
++        const result = await query(text, values);
++        if (text.startsWith(phase)) { injected = true; throw new Error("PRIVATE_SQL_FAILURE"); }
++        return result;
++      } };
++    } } as unknown as Pool;
++    const failing = new TotpActivationService(wrapped);
++    const original = activation.confirm.bind(activation);
++    activation.confirm = input => failing.confirm(input);
++    try {
++      const response = await post("/auth/2fa/confirm", { ...f.input, code: await codeNow(f.secret) });
++      assert.equal(response.status, 500);
++      assert.equal(response.body.code, "INTERNAL_SERVER_ERROR");
++      assert.equal(JSON.stringify(response.body).includes("PRIVATE_SQL_FAILURE"), false);
++    } finally { activation.confirm = original; }
++    assert.equal(injected, true);
++    await pendingState();
++    assert.equal((await post("/auth/2fa/confirm", { ...f.input, code: await codeNow(f.secret) })).status, 200);
++  });
++}
++
++for (const state of ["missing", "wrong", "tampered"] as const) {
++  test(`B2 PostgreSQL configuração ${state} não expõe nem ativa segredo`, async () => {
++    const f = await prepare();
++    const original = process.env.TOTP_ENCRYPTION_KEY;
++    try {
++      if (state === "missing") delete process.env.TOTP_ENCRYPTION_KEY;
++      else if (state === "wrong") process.env.TOTP_ENCRYPTION_KEY = randomBytes(32).toString("base64");
++      else await pool.query("UPDATE user_totp_credentials SET secret_encrypted='corrupted' WHERE user_id=$1", [current.id]);
++      const response = await post("/auth/2fa/confirm", { ...f.input, code: await codeNow(f.secret) });
++      assert.equal(response.status, 503);
++      assert.equal(response.body.code, "TOTP_CONFIGURATION_UNAVAILABLE");
++      assert.equal("secret" in response.body, false);
++      await pendingState();
++    } finally { process.env.TOTP_ENCRYPTION_KEY = original; }
++  });
++}
+diff --git a/backend/test/unit/totp-activation-crypto.test.ts b/backend/test/unit/totp-activation-crypto.test.ts
+new file mode 100644
+index 0000000..0fbbe07
+--- /dev/null
++++ b/backend/test/unit/totp-activation-crypto.test.ts
+@@ -0,0 +1,99 @@
++import assert from "node:assert/strict";
++import { createHmac, randomUUID } from "node:crypto";
++import { test } from "node:test";
++import { decryptTotpSecret, encryptTotpSecret, generateRecoveryCodes, generateTotpSecret, hashActivationToken,
++  readTotpKeys, recoveryCodeHash, totpCode, totpUri, verifyTotpCode } from "../../src/auth/totp-activation.crypto";
++import { verifyTotpChallenge } from "../../src/auth/totp-challenge";
++import { signAccessToken, signTempTwoFactorToken, verifyAccessToken } from "../../src/auth/token.util";
++
++const fixtureKeys = { TOTP_ENCRYPTION_KEY: Buffer.alloc(32, 11).toString("base64"), TOTP_RECOVERY_HMAC_KEY: Buffer.alloc(32, 22).toString("base64") };
++const keys = readTotpKeys(fixtureKeys);
++const secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"; // RFC: 12345678901234567890
++
++for (const [seconds, expected] of [[59, "287082"], [1111111109, "081804"], [1111111111, "050471"],
++  [1234567890, "005924"], [2000000000, "279037"], [20000000000, "353130"]] as const) {
++  test(`B2 RFC 6238 SHA-1 em ${seconds}, redução para seis dígitos`, () => assert.equal(totpCode(secret, seconds * 1000), expected));
++}
++
++test("B2 aceita janela de um passo e rejeita código malformado e fora da janela", () => {
++  const now = 1_700_000_000_000;
++  for (const offset of [-30_000, 0, 30_000]) assert.equal(verifyTotpCode(secret, totpCode(secret, now + offset), now), true);
++  assert.equal(verifyTotpCode(secret, totpCode(secret, now + 90_000), now), false);
++  for (const bad of ["", "12345", "1234567", "abcdef", " 287082", "１２３４５６"]) assert.equal(verifyTotpCode(secret, bad, now), false);
++});
++
++test("B2 segredo aleatório e URI interoperável não confundem caracteres do e-mail", () => {
++  const first = generateTotpSecret();
++  assert.match(first, /^[A-Z2-7]{32}$/);
++  assert.notEqual(first, generateTotpSecret());
++  const uri = new URL(totpUri(first, "admin+teste@example.test"));
++  assert.equal(uri.protocol, "otpauth:");
++  assert.equal(decodeURIComponent(uri.pathname), "/ArenaGo:admin+teste@example.test");
++  assert.equal(uri.searchParams.get("secret"), first);
++  assert.equal(uri.searchParams.get("algorithm"), "SHA1");
++  assert.equal(uri.searchParams.get("digits"), "6");
++  assert.equal(uri.searchParams.get("period"), "30");
++});
++
++test("B2 AES-GCM autentica segredo, conta e autorização, com nonce independente", () => {
++  const encrypted = encryptTotpSecret(secret, keys.encryption, "u1", "a1");
++  assert.equal(encrypted.includes(secret), false);
++  assert.notEqual(encrypted, encryptTotpSecret(secret, keys.encryption, "u1", "a1"));
++  assert.equal(decryptTotpSecret(encrypted, keys.encryption, "u1", "a1"), secret);
++  assert.throws(() => decryptTotpSecret(encrypted, keys.encryption, "u2", "a1"));
++  assert.throws(() => decryptTotpSecret(encrypted, keys.encryption, "u1", "a2"));
++  assert.throws(() => decryptTotpSecret(encrypted, Buffer.alloc(32, 33), "u1", "a1"));
++  const parts = encrypted.split(".");
++  parts[3] = (parts[3][0] === "A" ? "B" : "A") + parts[3].slice(1);
++  assert.throws(() => decryptTotpSecret(parts.join("."), keys.encryption, "u1", "a1"));
++  assert.throws(() => decryptTotpSecret(secret, keys.encryption, "u1", "a1"));
++});
++
++for (const [label, changes] of [
++  ["ausente", { TOTP_ENCRYPTION_KEY: undefined }],
++  ["curta", { TOTP_ENCRYPTION_KEY: "a" }],
++  ["chaves iguais", { TOTP_RECOVERY_HMAC_KEY: fixtureKeys.TOTP_ENCRYPTION_KEY }],
++  ["JWT reutilizado", { JWT_SECRET: fixtureKeys.TOTP_ENCRYPTION_KEY }],
++  ["JWT temporário reutilizado", { JWT_TEMP_SECRET: Buffer.alloc(32, 22).toString("utf8") }],
++] as const) {
++  test(`B2 configuração insegura: ${label}`, () => assert.throws(() => readTotpKeys({ ...fixtureKeys, ...changes })));
++}
++
++test("B2 dez códigos de recuperação possuem 128 bits, hashes HMAC e vínculo à conta", () => {
++  const codes = generateRecoveryCodes("user1", keys.recovery);
++  assert.equal(codes.length, 10);
++  assert.equal(new Set(codes.map(code => code.raw)).size, 10);
++  for (const code of codes) {
++    assert.match(code.raw, /^[a-f0-9]{32}$/);
++    assert.match(code.hash, /^[a-f0-9]{64}$/);
++    assert.equal(code.hash, recoveryCodeHash(code.raw, "user1", keys.recovery));
++    assert.notEqual(code.hash, recoveryCodeHash(code.raw, "user2", keys.recovery));
++    assert.notEqual(code.hash, hashActivationToken(code.raw));
++  }
++});
++
++test("B2 desafio aceita somente JWT temporário recente e não autentica Bearer", () => {
++  const id = randomUUID();
++  const now = 1_700_000_000_000;
++  const token = signTempTwoFactorToken(id, { nowMs: now });
++  assert.equal(verifyTotpChallenge(token, now)?.sub, id);
++  assert.equal(verifyTotpChallenge(token, now + 300_000), null);
++  assert.equal(verifyTotpChallenge(token, now - 1000), null);
++  assert.equal(verifyTotpChallenge(token.slice(0, -5) + "wrong", now), null);
++  assert.equal(verifyTotpChallenge(signTempTwoFactorToken(id, { nowMs: now, ttlSeconds: 301 }), now), null);
++  assert.equal(verifyTotpChallenge(signAccessToken({ userId: id, sessionId: randomUUID() }, { nowMs: now }), now), null);
++  assert.equal(verifyAccessToken(token, { nowMs: now }).valid, false);
++});
++
++test("B2 rejeita claims, finalidade e algoritmo inválidos mesmo com assinatura válida", () => {
++  const key = "test-only-temporary-signing-key-at-least-32";
++  const now = 1_700_000_000;
++  const base = { sub: randomUUID(), jti: randomUUID(), type: "2fa_challenge", iat: now, exp: now + 300 };
++  for (const claims of [{ ...base, type: "access" }, { ...base, sid: randomUUID() }, { ...base, exp: now }, { ...base, sub: "invalid" }, { ...base, iat: 1.5 }]) {
++    const input = `${Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url")}.${Buffer.from(JSON.stringify(claims)).toString("base64url")}`;
++    const token = `${input}.${createHmac("sha256", key).update(input).digest("base64url")}`;
++    assert.equal(verifyTotpChallenge(token, now * 1000, key), null);
++  }
++  const input = `${Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url")}.${Buffer.from(JSON.stringify(base)).toString("base64url")}`;
++  assert.equal(verifyTotpChallenge(`${input}.${createHmac("sha256", key).update(input).digest("base64url")}`, now * 1000, key), null);
++});
+diff --git a/backend/test/unit/totp-activation-http.test.ts b/backend/test/unit/totp-activation-http.test.ts
+new file mode 100644
+index 0000000..bd8f242
+--- /dev/null
++++ b/backend/test/unit/totp-activation-http.test.ts
+@@ -0,0 +1,80 @@
++import assert from "node:assert/strict";
++import { after, before, test } from "node:test";
++import { Module, type INestApplication } from "@nestjs/common";
++import { APP_FILTER, NestFactory } from "@nestjs/core";
++import supertest from "supertest";
++import { TotpActivationController } from "../../src/auth/totp-activation.controller";
++import { TotpActivationService } from "../../src/auth/totp-activation.service";
++import { ProblemException } from "../../src/common/errors/problem.exception";
++import { ProblemDetailsExceptionFilter } from "../../src/common/errors/problem-details.filter";
++
++let failure: ProblemException | undefined;
++let calls = 0;
++const handler = (result: unknown) => { calls++; if (failure) throw failure; return result; };
++@Module({ controllers: [TotpActivationController], providers: [
++  { provide: TotpActivationService, useValue: {
++    setup: () => handler({ secret: "test-only-secret", otpauthUri: "otpauth://totp/test" }),
++    confirm: () => handler({ activated: true, recoveryCodes: ["test-only-recovery"] }),
++  } },
++  { provide: APP_FILTER, useClass: ProblemDetailsExceptionFilter },
++] })
++class ActivationHttpTestModule {}
++let app: INestApplication;
++const input = { tempToken: "temporary-challenge", activationToken: "a".repeat(43) };
++
++before(async () => {
++  app = await NestFactory.create(ActivationHttpTestModule, { logger: false });
++  app.setGlobalPrefix("api/v1");
++  await app.init();
++});
++after(async () => { if (app) await app.close(); });
++
++for (const path of ["setup", "confirm"]) {
++  test(`B2 HTTP ${path}: resposta sem cache e sem tokens de sessão`, async () => {
++    const response = await supertest(app.getHttpServer()).post(`/api/v1/auth/2fa/${path}`)
++      .send({ ...input, ...(path === "confirm" ? { code: "123456" } : {}) });
++    assert.equal(response.status, 200);
++    assert.equal(response.headers["cache-control"], "no-store");
++    assert.equal("accessToken" in response.body, false);
++    assert.equal("refreshToken" in response.body, false);
++    assert.equal("admin_2fa_verified_at" in response.body, false);
++  });
++}
++
++for (const body of [{}, { ...input, userId: "other" }, { ...input, activationToken: "bad" }, { ...input, tempToken: "" }]) {
++  test(`B2 HTTP rejeita DTO inválido ${JSON.stringify(Object.keys(body))}`, async () => {
++    const previous = calls;
++    const response = await supertest(app.getHttpServer()).post("/api/v1/auth/2fa/setup").send(body);
++    assert.equal(response.status, 400);
++    assert.equal(response.body.code, "VALIDATION_ERROR");
++    assert.equal(calls, previous);
++  });
++}
++
++test("B2 HTTP Bearer sozinho não substitui as duas provas no corpo", async () => {
++  const response = await supertest(app.getHttpServer()).post("/api/v1/auth/2fa/setup").set("Authorization", "Bearer temporary-challenge").send({});
++  assert.equal(response.status, 400);
++});
++
++for (const [status, code] of [[401, "TOTP_CHALLENGE_INVALID"], [403, "TOTP_AUTHORIZATION_INVALID"],
++  [409, "TOTP_ALREADY_ACTIVATED"], [429, "TOTP_ACTIVATION_RATE_LIMITED"], [503, "TOTP_CONFIGURATION_UNAVAILABLE"], [500, "INTERNAL_SERVER_ERROR"]] as const) {
++  test(`B2 HTTP preserva problema ${status}/${code} sem resposta sensível`, async () => {
++    failure = new ProblemException({ status, code, title: "Ativação TOTP", detail: "Operação recusada.", typeSlug: "totp-activation",
++      ...(status === 429 ? { headers: { "Retry-After": "900" } } : {}),
++    });
++    try {
++      const response = await supertest(app.getHttpServer()).post("/api/v1/auth/2fa/confirm").send({ ...input, code: "123456" });
++      assert.equal(response.status, status);
++      assert.equal(response.body.code, code);
++      assert.match(response.headers["content-type"], /application\/problem\+json/);
++      if (status === 429) assert.equal(response.headers["retry-after"], "900");
++      for (const name of ["secret", "recoveryCodes", "activationToken", "tempToken"]) assert.equal(name in response.body, false);
++    } finally { failure = undefined; }
++  });
++}
++
++test("B2 HTTP não expõe emissão de autorização ou login TOTP definitivo", async () => {
++  for (const path of ["issue", "activate-token", "login", "reset"]) {
++    assert.equal((await supertest(app.getHttpServer()).post(`/api/v1/auth/2fa/${path}`).send(input)).status, 404);
++  }
++});
+diff --git a/backend/test/unit/totp-activation-service.test.ts b/backend/test/unit/totp-activation-service.test.ts
+new file mode 100644
+index 0000000..c0c9971
+--- /dev/null
++++ b/backend/test/unit/totp-activation-service.test.ts
+@@ -0,0 +1,93 @@
++import assert from "node:assert/strict";
++import { randomUUID } from "node:crypto";
++import { test } from "node:test";
++import type { Pool } from "pg";
++import { ProblemException } from "../../src/common/errors/problem.exception";
++import { TotpActivationService } from "../../src/auth/totp-activation.service";
++import { encryptTotpSecret, readTotpKeys, totpCode } from "../../src/auth/totp-activation.crypto";
++import { signTempTwoFactorToken } from "../../src/auth/token.util";
++
++process.env.TOTP_ENCRYPTION_KEY = Buffer.alloc(32, 11).toString("base64");
++process.env.TOTP_RECOVERY_HMAC_KEY = Buffer.alloc(32, 22).toString("base64");
++const keys = readTotpKeys(process.env);
++const secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
++const isCode = (code: string) => (error: unknown) => error instanceof ProblemException && error.problem.code === code;
++
++function fixture(options: { fail?: string; count?: number; role?: boolean; verified?: boolean; credential?: boolean; expired?: boolean } = {}) {
++  const id = randomUUID();
++  const authorization = randomUUID();
++  const now = Date.now();
++  const calls: Array<{ text: string; values: unknown[] }> = [];
++  let released = false;
++  const query = async (text: string, values: unknown[] = []) => {
++    calls.push({ text, values });
++    if (options.fail && text.startsWith(options.fail)) throw new Error("PRIVATE_DATABASE_SECRET");
++    let rows: unknown[] = [];
++    if (text.includes("FROM users")) rows = [{ id, email: "bootstrap@example.test", active: true, verified: true }];
++    else if (text.includes("FROM user_roles r")) rows = options.role === false ? [] : [{ id: randomUUID() }];
++    else if (text.includes("FROM user_totp_credentials")) rows = options.credential === false ? [] : [{ id: randomUUID(), is_verified: options.verified ?? false, secret_encrypted: encryptTotpSecret(secret, keys.encryption, id, authorization) }];
++    else if (text.includes("FROM totp_activation_tokens")) rows = [{ id: authorization, expires_at: new Date(now + (options.expired ? -1 : 1800_000)) }];
++    else if (text.includes("SELECT clock_timestamp()")) rows = [{ now: new Date(now) }];
++    else if (text.includes("count(*)")) rows = [{ count: options.count ?? 0 }];
++    else if (text.startsWith("INSERT INTO totp_activation_tokens")) rows = [{ expires_at: new Date(now + 1800_000) }];
++    return { rows, rowCount: /^(INSERT|UPDATE|DELETE)/.test(text) ? 1 : rows.length };
++  };
++  const pool = { connect: async () => ({ query, release: () => { released = true; } }) } as unknown as Pool;
++  return { service: new TotpActivationService(pool), calls, released: () => released,
++    input: { tempToken: signTempTwoFactorToken(id, { nowMs: now }), activationToken: "a".repeat(43), code: totpCode(secret, now) } };
++}
++
++test("B2 confirmação grava credencial, autorização, dez hashes e auditoria antes do COMMIT", async () => {
++  const f = fixture();
++  const response = await f.service.confirm(f.input);
++  assert.equal(response.activated, true);
++  assert.equal(response.recoveryCodes.length, 10);
++  assert.equal(f.calls.filter(call => call.text.startsWith("INSERT INTO user_backup_codes")).length, 10);
++  assert.ok(f.calls.some(call => call.text.startsWith("UPDATE user_totp_credentials")));
++  assert.ok(f.calls.some(call => call.text.startsWith("UPDATE totp_activation_tokens")));
++  assert.ok(f.calls.some(call => call.values.includes("totp_initial_activated")));
++  assert.equal(f.calls.at(-1)?.text, "COMMIT");
++  assert.ok(!f.calls.some(call => /sessions|refresh_tokens/.test(call.text)));
++  const stored = JSON.stringify(f.calls);
++  for (const raw of response.recoveryCodes) assert.equal(stored.includes(raw), false);
++  assert.equal(stored.includes(secret), false);
++  assert.equal(f.released(), true);
++});
++
++test("B2 tentativa inválida persiste auditoria e COMMIT antes do erro", async () => {
++  const f = fixture();
++  await assert.rejects(f.service.confirm({ ...f.input, code: "invalid" }), isCode("TOTP_CODE_INVALID"));
++  assert.ok(f.calls.some(call => call.values.includes("totp_initial_code_rejected")));
++  assert.equal(f.calls.at(-1)?.text, "COMMIT");
++  assert.ok(!f.calls.some(call => call.text.startsWith("UPDATE")));
++});
++
++for (const phase of ["UPDATE user_totp_credentials", "UPDATE totp_activation_tokens", "INSERT INTO user_backup_codes", "INSERT INTO audit_logs", "COMMIT"]) {
++  test(`B2 falha em ${phase}: rollback, erro seguro e liberação`, async () => {
++    const f = fixture({ fail: phase });
++    await assert.rejects(f.service.confirm(f.input), error => isCode("INTERNAL_SERVER_ERROR")(error) && !JSON.stringify(error).includes("PRIVATE_DATABASE_SECRET"));
++    assert.equal(f.calls.at(-1)?.text, "ROLLBACK");
++    assert.equal(f.released(), true);
++  });
++}
++
++for (const [options, code] of [
++  [{ count: 5 }, "TOTP_ACTIVATION_RATE_LIMITED"], [{ role: false }, "TOTP_ACTIVATION_FORBIDDEN"],
++  [{ verified: true }, "TOTP_ALREADY_ACTIVATED"], [{ credential: false }, "TOTP_SETUP_REQUIRED"],
++  [{ expired: true }, "TOTP_AUTHORIZATION_INVALID"],
++] as const) {
++  test(`B2 rejeição ${code} não gera códigos`, async () => {
++    const f = fixture(options);
++    await assert.rejects(f.service.confirm(f.input), isCode(code));
++    assert.ok(!f.calls.some(call => call.text.startsWith("INSERT INTO user_backup_codes")));
++  });
++}
++
++test("B2 emissão CLI revoga autorizações anteriores, remove apenas pendência e audita sem token", async () => {
++  const f = fixture();
++  const response = await f.service.issue("bootstrap@example.test");
++  assert.match(response.activationToken, /^[A-Za-z0-9_-]{43}$/);
++  assert.ok(f.calls.some(call => call.text.includes("SET revoked_at=clock_timestamp()")));
++  assert.ok(f.calls.some(call => call.text.includes("DELETE FROM user_totp_credentials") && call.text.includes("is_verified=false")));
++  assert.equal(JSON.stringify(f.calls).includes(response.activationToken), false);
++});
+diff --git a/docs/T6_1_B2_IMPLEMENTACAO.md b/docs/T6_1_B2_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..0a48e1c
+--- /dev/null
++++ b/docs/T6_1_B2_IMPLEMENTACAO.md
+@@ -0,0 +1,210 @@
++# T6.1-B2 — ativação inicial segura do TOTP do primeiro Admin
++
++## Base, escopo e situação
++
++Branch `feature/events-participations`; base inicial `6db9a7d6d327ad12edd07682d4c901253eff8aa7`. O preflight encontrou índice e working tree limpos, com o fechamento e as correções da B1 versionados. A base histórica B1 não é a base desta evidência.
++
++Implementação restrita à emissão CLI da autorização e à configuração/confirmação inicial do TOTP. Mantidos AuthService, AuthController, token.util, o bootstrap B1, A1/A2, E07/E08, schema, migrações e dependências. O único arquivo existente alterado é `auth.module.ts`, para registrar o novo controller e serviço.
++
++As validações abaixo foram executadas manualmente pelo responsável. A revisão desta entrega pelo Codex é estática. Não há homologação ou declaração de prontidão de produção.
++
++Referências de contrato: `PLANEJAMENTO_ARENAGO.md` §9.2, `ARQUITETURA_BACKEND_ARENAGO.md` §§2.2/4/14.4 e prompt aprovado da B2. A arquitetura citava rotas candidatas de verificação; esta entrega reserva `/confirm` para ativação inicial e não implementa `/verify` como login definitivo.
++
++## Contrato CLI e elegibilidade
++
++`TotpActivationService.issue(email)` é exposto somente pelo entrypoint `src/auth/issue-first-admin-totp.ts`. Não existe endpoint para emissão. A CLI aceita exclusivamente `--email <conta-bootstrap>` e recusa saída não interativa (`stdout.isTTY`), para impedir redirecionamento acidental do token.
++
++Após as validações manuais e configuração segura do ambiente pelo responsável:
++
++```powershell
++Set-Location 'C:\DoJob\ProgramacaoMobile\backend'
++$bootstrapEmail = Read-Host 'E-mail da conta promovida pelo bootstrap B1'
++.\node_modules\.bin\tsx.cmd src/auth/issue-first-admin-totp.ts --email $bootstrapEmail
++if ($LASTEXITCODE -ne 0) { throw 'Emissão não concluída. Conferir elegibilidade e configuração.' }
++```
++
++Este comando **não foi executado pelo Codex**. O operador precisa de acesso autorizado ao ambiente e ao banco; não há autenticação administrativa alternativa na CLI. Não usar captura de terminal, transcript, redirecionamento, log ou screenshot. A CLI mostra o token apenas na emissão, após COMMIT, e sua expiração; exibe aviso de sigilo. Entregar a autorização somente ao titular, que também precisa autenticar-se por senha.
++
++A conta deve estar ativa, ter e-mail confirmado e papel Admin global vigente. A elegibilidade exige `granted_by IS NULL` e auditoria `first_admin_bootstrapped`, com `origin='cli'`, ator/evento nulos, mesmo alvo e `occurred_at = granted_at` do papel. A comparação é feita no PostgreSQL, preservando microssegundos. Ser Admin, ou ter `granted_by=NULL` isoladamente, não basta.
++
++Credencial já verificada ou histórico `totp_initial_activated` bloqueiam a emissão. A CLI não recupera outra conta nem redefine TOTP confirmado. Nova emissão revoga autorizações anteriores não consumidas e remove somente a credencial pendente da própria conta, na mesma transação. Não apaga códigos de recuperação.
++
++Token: 32 bytes aleatórios (256 bits), base64url, 43 caracteres; somente SHA-256 hexadecimal persistido. Expira em 30 minutos pelo relógio do PostgreSQL, `issued_by=NULL`. A confirmação consome uma vez. A emissão é auditada sem token, e-mail ou segredo nos metadados.
++
++## Contrato HTTP
++
++As rotas recebem as duas provas no corpo JSON. `tempToken` é o desafio retornado pelo login Admin após a senha correta, com `type='2fa_challenge'`, assinatura HS256 com `JWT_TEMP_SECRET`, `typ='JWT'`, UUIDs de conta/jti, `iat` não futuro e duração máxima de cinco minutos. Access token, token falsificado, expirado ou de outro tipo são recusados. Não há identidade fornecida separadamente pelo cliente.
++
++| Rota | Corpo estrito | Resposta 200 |
++|---|---|---|
++| `POST /api/v1/auth/2fa/setup` | `{ tempToken, activationToken }` | `{ secret, otpauthUri }` |
++| `POST /api/v1/auth/2fa/confirm` | `{ tempToken, activationToken, code }` | `{ activated: true, recoveryCodes: [...] }` |
++
++`code` é texto. Códigos malformados em texto de até 128 caracteres entram no controle transacional de tentativas e recebem erro. Campos adicionais, identidade no corpo, tipos incorretos e limites de tamanho são recusados como DTO inválido. O desafio no cabeçalho Bearer não substitui as provas no corpo e continua rejeitado nas APIs comuns pelo verificador de access token existente.
++
++As respostas têm `Cache-Control: no-store` e `Pragma: no-cache`. A confirmação não retorna segredo ou URI, nem accessToken, refreshToken ou sessão. Nenhuma operação atualiza `admin_2fa_verified_at`. Depois de ativado, novo login continua devolvendo desafio 2FA, agora com `isTotpConfigured=true`; o login definitivo com TOTP pertence a outra task.
++
++| Status | Código | Condição |
++|---|---|---|
++| 400 | `VALIDATION_ERROR` | Corpo inválido |
++| 400 | `TOTP_CODE_INVALID` | Código incorreto/malformado com duas provas válidas; tentativa persistida |
++| 401 | `TOTP_CHALLENGE_INVALID` | Desafio inválido, tipo incorreto, expirado ou fora do prazo de autenticação recente |
++| 403 | `TOTP_ACTIVATION_FORBIDDEN` | Conta/papel/proveniência inelegíveis |
++| 403 | `TOTP_AUTHORIZATION_INVALID` | Autorização ausente, expirada, revogada, consumida ou de outra conta |
++| 409 | `TOTP_SETUP_REQUIRED` | Ainda não existe credencial pendente |
++| 409 | `TOTP_ALREADY_ACTIVATED` | Credencial confirmada, histórico de ativação ou códigos preexistentes ao confirmar |
++| 429 | `TOTP_ACTIVATION_RATE_LIMITED` | Limite atingido; `Retry-After: 900` |
++| 503 | `TOTP_CONFIGURATION_UNAVAILABLE` | Chaves ausentes/inválidas ou falha de autenticação da cifra |
++| 500 | `INTERNAL_SERVER_ERROR` | Falha inesperada de persistência, com rollback quando possível |
++
++Erros seguem o filtro RFC 7807 existente. O serviço converte falhas inesperadas em problema genérico, sem encaminhar mensagens SQL ao logger global. Não incluir corpos dessas rotas em logs de proxy/APM. HTTPS e armazenamento seguro do cliente são requisitos operacionais.
++
++## Criptografia e configuração
++
++TOTP: segredo aleatório de 160 bits em Base32, HMAC-SHA-1, período de 30 segundos e seis dígitos. A janela aceita o passo anterior, o atual e o seguinte (±1 passo). Comparação em tempo constante; não há janela adaptativa. A URI contém issuer `ArenaGo`, identidade codificada no label e parâmetros explícitos `algorithm=SHA1`, `digits=6`, `period=30`.
++
++Implementação com `node:crypto`, sem dependência nova. Referências: [RFC 6238](https://www.rfc-editor.org/rfc/rfc6238) e [RFC 4226](https://www.rfc-editor.org/rfc/rfc4226). Os testes usam os vetores SHA-1 do RFC 6238 reduzidos a seis dígitos.
++
++Segredo persistido em envelope `v1.iv.tag.ciphertext`, usando AES-256-GCM, nonce aleatório de 12 bytes e tag de 16 bytes. AAD inclui versão, UUID da conta e UUID da autorização. Copiar a cifra para outra conta/autorização, alterar conteúdo ou usar outra chave impede a abertura. Setup repetido com a mesma autorização devolve o mesmo segredo pendente, sujeito ao limite; não troca o segredo silenciosamente. Reemitir a autorização pela CLI reinicia apenas a pendência.
++
++Configurações obrigatórias para operações B2:
++
++- `TOTP_ENCRYPTION_KEY`: 32 bytes aleatórios, base64 canônico.
++- `TOTP_RECOVERY_HMAC_KEY`: outros 32 bytes aleatórios, base64 canônico.
++- `JWT_TEMP_SECRET` e `JWT_SECRET`: configuração Auth existente; manter valores explícitos, fortes e independentes no ambiente real.
++
++As duas chaves TOTP devem ser diferentes entre si e não podem reutilizar os segredos JWT, em bytes UTF-8 ou base64. Não existem defaults para as chaves TOTP. A validação ocorre ao chamar B2, para não interromper os módulos anteriores quando B2 ainda não estiver configurada. Nenhuma chave reside no banco ou no repositório.
++
++O responsável pode gerar as duas chaves **uma única vez**, em uma sessão local sem gravação/transcript:
++
++```powershell
++function New-B2SecretKey {
++  $bytes = New-Object byte[] 32
++  $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
++  try { $rng.GetBytes($bytes); return [Convert]::ToBase64String($bytes) }
++  finally { $rng.Dispose() }
++}
++$env:TOTP_ENCRYPTION_KEY = New-B2SecretKey
++$env:TOTP_RECOVERY_HMAC_KEY = New-B2SecretKey
++```
++
++Não imprimir as variáveis. Guardá-las em cofre de segredos fora do banco/repositório e disponibilizar os mesmos valores à API e à CLI. Não gerar novamente ao reiniciar. A perda/troca da chave AES impede abrir os segredos existentes; a perda/troca da chave HMAC invalida a verificação futura dos códigos. Rotação e recuperação de chaves não foram implementadas nesta etapa.
++
++Códigos de recuperação: dez códigos aleatórios de 16 bytes cada (128 bits), apresentados em hexadecimal somente na resposta de confirmação após COMMIT. O banco guarda HMAC-SHA-256 com namespace/versão/UUID da conta e `used_at=NULL`. O helper `recoveryCodeHash` permite à futura autenticação reproduzir o hash; o consumo único ainda precisa de operação transacional futura. Não existe rota para reler códigos nem reapresentação após retry.
++
++## Transações, limites e concorrência
++
++As três operações usam `READ COMMITTED` e ordem de locks `users → papel Admin → user_totp_credentials → totp_activation_tokens → user_backup_codes`. O papel é bloqueado para impedir revogação concorrente durante a mutação; o lock de conta serializa emissão, setup e confirmação mesmo quando não há credencial. Não há lock global novo.
++
++Após locks, a validade do desafio e da autorização é reavaliada com `clock_timestamp()`. Na confirmação, credencial verificada, consumo do token, dez hashes e auditoria são persistidos atomicamente. Há nova verificação temporal após a última escrita e antes de COMMIT. Erros nessa fase revertem todas as escritas. Falha de conexão com resultado de COMMIT incerto exige consultar o estado antes de tentar novamente; não há promessa de recuperar os códigos de uma resposta perdida.
++
++O relógio pode avançar entre a última verificação e o COMMIT; não se afirma atomicidade entre tempo de parede e confirmação do commit. Conta e papel permanecem protegidos pelos locks até terminar a transação. Manter relógios de aplicação/PostgreSQL sincronizados; uma divergência pode rejeitar desafios por segurança.
++
++Proteção contra força bruta: cinco códigos rejeitados por conta em janela móvel de 15 minutos. A quinta tentativa inválida é persistida; as seguintes recebem 429, mesmo com código correto, até sair da janela. A auditoria de falha é confirmada antes de responder 400. Reemissão CLI ou reinício do serviço não apagam o contador. Há limite independente de cinco setups por conta em 15 minutos. As contagens usam `audit_logs`, sob lock da conta, e o índice existente por alvo/tempo. Não expurgar esses registros durante a janela de proteção.
++
++Auditorias sem payload sensível: `totp_initial_authorization_issued` (CLI, ator nulo), `totp_initial_setup`, `totp_initial_code_rejected`, `totp_initial_activated` (usuário como ator). Metadados vazios. Uma segunda confirmação encontra a credencial/histórico confirmado e não gera outro conjunto de códigos.
++
++## Testes preparados e execução manual
++
++Contagem estática preparada: **44 testes unitários/HTTP simulados** e **32 testes PostgreSQL B2**. Esses números são inventário de casos, não resultados de execução.
++
++### Validação manual e correção TS4053
++
++Em 06/11/2026, o responsável informou **44/44 testes focados aprovados**, zero falhas e código de saída 0. A regressão unitária completa aprovou **1.101/1.101** testes. A integração PostgreSQL B2, no banco dedicado `arenago_bootstrap_test`, aprovou **32/32** testes; a compatibilidade PostgreSQL B1 no mesmo banco aprovou **4/4**. A regressão PostgreSQL compartilhada, no banco `arenago_events_test` e excluindo B1/B2, aprovou **1.255/1.255**, sem falhas. Typecheck de produção, typecheck de testes, ESLint e build NestJS também foram aprovados pelo responsável.
++
++O typecheck de testes falhou em `src/auth/totp-activation.controller.ts:27:3` com **TS4053**: o retorno público inferido de `confirm` dependia de `ActivationConfirmed`, interface não exportada pelo serviço. A correção exporta essa interface e importa o tipo no controller, declarando explicitamente `Promise<ActivationConfirmed>`. Não há alteração no corpo da operação, no contrato HTTP ou nas regras de segurança.
++
++O typecheck de testes foi aprovado após a correção TS4053. O total consolidado informado foi de **2.392 testes aprovados, zero falhas**, contando a regressão unitária de 1.101 como cobertura dos 44 focados, sem duplicá-los. O CLI real de autorização TOTP não foi executado; sua emissão continua sendo um procedimento operacional manual separado. O login administrativo definitivo após o desafio TOTP não faz parte desta task.
++
++- Criptografia/desafio: 17 casos, incluindo vetores RFC, janela, Base32/URI, nonce, adulteração/AAD/chaves, HMAC e tipo/assinatura/expiração do JWT.
++- Serviço: 13 casos de gravação, recusa, limite, auditoria da falha, rollback em cada fase/COMMIT, liberação de conexão e não emissão de sessão.
++- HTTP simulado: 14 casos de DTO, cabeçalhos, status RFC 7807, Bearer insuficiente, ausência de endpoints de emissão/reset/login definitivo.
++- PostgreSQL: 32 casos com login por senha real, bootstrap B1 real, HTTP, hashes/cifras, reemissão, proveniência, revogação, preservação de sessão sem segundo fator, expiração durante espera e após escritas, concorrência de confirmações/emissões, limites persistentes, SQL real seguido de falha/rollback/retry e configuração inválida. Não substitui PostgreSQL por mocks.
++
++Os testes usam apenas chaves/segredos fictícios. Não enviam e-mails. A suíte PostgreSQL importa a guarda exclusiva da B1 antes de criar pools; exige três URLs idênticas e `127.0.0.1:55432/arenago_bootstrap_test`. Antes de qualquer fixture, confere o banco e exige zero Admins históricos. A limpeza elimina apenas UUIDs criados pela própria suíte, incluindo seus tokens/códigos/auditorias. Nenhuma limpeza alcança `arenago_events_test` ou seus quatro Admins históricos.
++
++O schema já preparado para a B1 é suficiente. Não há migração nova. Se for necessário preparar um banco dedicado vazio, seguir o procedimento manual de criação com `template0` e migrações em `T6_1_B1_IMPLEMENTACAO.md`; não copiar dados do banco compartilhado. Não executar B1/B2 em paralelo nem junto das integrações compartilhadas com uma única URL. `npm run test:integration` inclui ambas e não deve ser usado indiscriminadamente.
++
++### Unitários e verificações locais — somente responsável
++
++```powershell
++Set-Location 'C:\DoJob\ProgramacaoMobile\backend'
++$env:NODE_ENV = 'test'
++$env:DOTENV_CONFIG_PATH = 'NUL'
++$env:DATABASE_URL = 'postgresql://unit:unit@127.0.0.1:55432/arenago_events_test'
++$env:DATABASE_DIRECT_URL = $env:DATABASE_URL
++$env:EVENTS_TEST_DATABASE_URL = $env:DATABASE_URL
++.\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test test/unit/totp-activation-crypto.test.ts test/unit/totp-activation-service.test.ts test/unit/totp-activation-http.test.ts
++if ($LASTEXITCODE -ne 0) { throw 'Testes focados B2 falharam.' }
++npm.cmd test
++if ($LASTEXITCODE -ne 0) { throw 'Regressão unitária falhou.' }
++.\node_modules\.bin\tsc.cmd --project tsconfig.json --noEmit --incremental false
++if ($LASTEXITCODE -ne 0) { throw 'Typecheck de produção falhou.' }
++npm.cmd run typecheck:test
++if ($LASTEXITCODE -ne 0) { throw 'Typecheck de testes falhou.' }
++npm.cmd run lint
++if ($LASTEXITCODE -ne 0) { throw 'Lint falhou.' }
++npm.cmd run build
++if ($LASTEXITCODE -ne 0) { throw 'Build falhou.' }
++```
++
++### PostgreSQL dedicado e compartilhado — somente responsável
++
++Configurar localmente as URLs sem exibir credenciais. A função abaixo aceita somente os dois destinos de teste conhecidos; as suítes conservam suas próprias guardas mais específicas:
++
++```powershell
++function Set-B2TestDatabase {
++  param([ValidateSet('arenago_bootstrap_test','arenago_events_test')][string]$Database)
++  $secretUrl = Read-Host "URL PostgreSQL local de 127.0.0.1:55432/$Database" -AsSecureString
++  $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secretUrl)
++  try { $value = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) }
++  finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr); $secretUrl.Dispose() }
++  $parsed = $null
++  if (-not [uri]::TryCreate($value,[UriKind]::Absolute,[ref]$parsed)) { throw 'URL inválida.' }
++  if ($parsed.Scheme -notin @('postgresql','postgres') -or $parsed.Host -ne '127.0.0.1' -or $parsed.Port -ne 55432 -or $parsed.AbsolutePath -cne "/$Database" -or $value.Contains('?') -or $value.Contains('#') -or $parsed.UserInfo -notmatch '^[^:]+:.+$') { throw 'Destino não autorizado.' }
++  $env:DATABASE_URL = $value
++  $env:DATABASE_DIRECT_URL = $value
++  $env:EVENTS_TEST_DATABASE_URL = $value
++}
++Set-Location 'C:\DoJob\ProgramacaoMobile\backend'
++$env:NODE_ENV = 'test'
++$env:DOTENV_CONFIG_PATH = 'NUL'
++Set-B2TestDatabase 'arenago_bootstrap_test'
++.\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test --test-concurrency=1 test/integration/totp-activation.integration.test.ts
++if ($LASTEXITCODE -ne 0) { throw 'Integração B2 falhou. Investigar antes de prosseguir.' }
++# Compatibilidade B1 no mesmo banco dedicado, serialmente e após a limpeza da B2:
++.\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test --test-concurrency=1 test/integration/first-admin-bootstrap.integration.test.ts
++if ($LASTEXITCODE -ne 0) { throw 'Integração B1 falhou.' }
++
++Set-B2TestDatabase 'arenago_events_test'
++$sharedFiles = @(Get-ChildItem test/integration -Filter '*.test.ts' -File |
++  Where-Object { $_.Name -notin @('first-admin-bootstrap.integration.test.ts','totp-activation.integration.test.ts') } |
++  Sort-Object Name | ForEach-Object { $_.FullName })
++if ($sharedFiles.Count -eq 0) { throw 'Nenhuma suíte compartilhada encontrada.' }
++& .\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test --test-concurrency=1 $sharedFiles
++if ($LASTEXITCODE -ne 0) { throw 'Regressão PostgreSQL compartilhada falhou.' }
++```
++
++Nenhum comando acima foi executado pelo Codex. A separação obrigatória permanece: `arenago_bootstrap_test` para B1/B2 e `arenago_events_test` para as demais integrações. Se uma fixture falhar e deixar registros, investigar os UUIDs da própria execução ou recriar manualmente somente o banco dedicado conforme procedimento B1; não apagar Admins históricos para obter aprovação.
++
++## Inventário e evidência
++
++1. `backend/src/auth/auth.module.ts` — registro do controller e serviço.
++2. `backend/src/auth/totp-activation.controller.ts` — dois contratos HTTP estritos.
++3. `backend/src/auth/totp-activation.service.ts` — emissão, setup, confirmação, locks e auditoria.
++4. `backend/src/auth/totp-activation.crypto.ts` — TOTP, cifra, configuração e hashes.
++5. `backend/src/auth/totp-challenge.ts` — verificação estrita do desafio existente.
++6. `backend/src/auth/issue-first-admin-totp.ts` — CLI restrita.
++7. `backend/test/unit/totp-activation-crypto.test.ts`.
++8. `backend/test/unit/totp-activation-service.test.ts`.
++9. `backend/test/unit/totp-activation-http.test.ts`.
++10. `backend/test/integration/totp-activation.integration.test.ts`.
++11. `docs/T6_1_B2_IMPLEMENTACAO.md`.
++
++Evidência única: `qa-evidence/t6-1-b2-changes.diff`, contra a base inicial desta task; contém esses 11 arquivos e exclui a própria evidência, credenciais, `.env`, logs e outras tasks. Verificação estática concluída: aplicação limpa em cópia isolada da base, comparação byte a byte de 11/11 arquivos, inventário completo e UTF-8 sem BOM. HEAD e índice preservados. Essa verificação do patch não executa nem substitui testes, typecheck, lint ou build.
++
++## Limites e pendências
++
++Não há login administrativo definitivo, emissão de sessão privilegiada, consumo de códigos de recuperação, reset por outro Admin, gestão geral de permissões, frontend/QR visual ou envio de e-mail. O CLI real de autorização não foi executado. A B1 permanece de uso único. Não foi iniciada outra task.
++
++Riscos residuais: segurança da máquina/terminal do operador e entrega da autorização; manutenção e backup das chaves; janela curta de exposição do segredo no cliente; resposta de confirmação perdida após COMMIT (sem nova entrega de códigos); política futura de retenção das auditorias e proteção de tráfego no perímetro. Esses pontos não autorizam bypass, reset emergencial ou recuperação de TOTP pela CLI. Preservar pelo menos dois Admins verificados com TOTP antes de operação real, conforme planejamento; a gestão correspondente permanece em etapa própria.

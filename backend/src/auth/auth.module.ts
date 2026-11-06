@@ -9,11 +9,14 @@ import { EmailVerificationPolicy } from "./email-verification.policy";
 import { EmailVerificationService } from "./email-verification.service";
 import { EMAIL_DELIVERY, readEmailVerificationConfig, RESEND_TRANSPORT, resendFetchTransport, ResendEmailVerificationMailer } from "./email-verification-mailer";
 import { EmailVerificationHttpService } from "./email-verification-http.service";
+import { TotpActivationController } from "./totp-activation.controller";
+import { TotpActivationService } from "./totp-activation.service";
 
 @Module({
   imports: [DatabaseModule],
-  controllers: [AuthController],
+  controllers: [AuthController, TotpActivationController],
   providers: [
+    TotpActivationService,
     EmailVerificationPolicy,
     EmailVerificationService,
     EmailVerificationHttpService,
