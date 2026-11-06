@@ -145,6 +145,86 @@ async function apiRequest<T = Record<string, unknown>>(
   };
 }
 
+interface C15FixtureCleanup {
+  email: string;
+  userId: string | null;
+  adminRoleId: string;
+  totpCredentialId: string;
+}
+
+async function cleanupC15Fixture(fixture: C15FixtureCleanup): Promise<void> {
+  let fixtureUserId = fixture.userId;
+  if (fixtureUserId === null) {
+    const userByFixtureEmail = await pool.query<{ id: string }>(
+      "SELECT id FROM users WHERE email=$1",
+      [fixture.email],
+    );
+    if ((userByFixtureEmail.rowCount ?? 0) > 1) {
+      throw new Error("C15 cleanup encontrou mais de uma conta para o e-mail único da fixture.");
+    }
+    fixtureUserId = userByFixtureEmail.rows[0]?.id ?? null;
+  }
+
+  const sessionIds = fixtureUserId === null ? [] : (await pool.query<{ id: string }>(
+    "SELECT id FROM sessions WHERE user_id=$1",
+    [fixtureUserId],
+  )).rows.map(row => row.id);
+  const refreshTokenIds = fixtureUserId === null ? [] : (await pool.query<{ id: string }>(
+    `SELECT rt.id FROM refresh_tokens rt
+     JOIN sessions s ON s.id=rt.session_id
+     WHERE s.user_id=$1`,
+    [fixtureUserId],
+  )).rows.map(row => row.id);
+  const challengeIds = fixtureUserId === null ? [] : (await pool.query<{ jti: string }>(
+    "SELECT jti FROM admin_2fa_challenges WHERE user_id=$1",
+    [fixtureUserId],
+  )).rows.map(row => row.jti);
+  const auditIds = fixtureUserId === null ? [] : (await pool.query<{ id: string }>(
+    "SELECT id FROM audit_logs WHERE actor_user_id=$1 OR target_user_id=$1",
+    [fixtureUserId],
+  )).rows.map(row => row.id);
+  const roleIds = new Set<string>([fixture.adminRoleId]);
+  if (fixtureUserId !== null) {
+    const roles = await pool.query<{ id: string }>(
+      "SELECT id FROM user_roles WHERE user_id=$1",
+      [fixtureUserId],
+    );
+    for (const role of roles.rows) roleIds.add(role.id);
+  }
+  const credentialIds = new Set<string>([fixture.totpCredentialId]);
+  if (fixtureUserId !== null) {
+    const credentials = await pool.query<{ id: string }>(
+      "SELECT id FROM user_totp_credentials WHERE user_id=$1",
+      [fixtureUserId],
+    );
+    for (const credential of credentials.rows) credentialIds.add(credential.id);
+  }
+
+  if (refreshTokenIds.length > 0) {
+    await pool.query("DELETE FROM refresh_tokens WHERE id=ANY($1::uuid[])", [refreshTokenIds]);
+  }
+  if (sessionIds.length > 0) {
+    await pool.query("DELETE FROM sessions WHERE id=ANY($1::uuid[])", [sessionIds]);
+  }
+  if (challengeIds.length > 0) {
+    await pool.query("DELETE FROM admin_2fa_challenges WHERE jti=ANY($1::uuid[])", [challengeIds]);
+  }
+  if (auditIds.length > 0) {
+    await pool.query("DELETE FROM audit_logs WHERE id=ANY($1::uuid[])", [auditIds]);
+  }
+  const credentialIdList = [...credentialIds];
+  if (credentialIdList.length > 0) {
+    await pool.query("DELETE FROM user_totp_credentials WHERE id=ANY($1::uuid[])", [credentialIdList]);
+  }
+  const roleIdList = [...roleIds];
+  if (roleIdList.length > 0) {
+    await pool.query("DELETE FROM user_roles WHERE id=ANY($1::uuid[])", [roleIdList]);
+  }
+  if (fixtureUserId !== null) {
+    await pool.query("DELETE FROM users WHERE id=$1", [fixtureUserId]);
+  }
+}
+
 test("K01 Auth & Sessions — Integração HTTP + PostgreSQL Real", async (t) => {
   // =========================================================================
   // 1. CADASTRO REAL (POST /api/v1/auth/register)
@@ -654,65 +734,99 @@ test("K01 Auth & Sessions — Integração HTTP + PostgreSQL Real", async (t) =>
     assert.deepEqual(statuses, [200, 401]);
   });
 
-  await t.test("C15: Login de conta Admin retorna requires2FA=true + tempToken, não cria sessão ativa e bloqueia tempToken como Bearer", async () => {
+  await t.test("C15: Login Admin retorna desafio sem revogar sessão anterior e bloqueia ambos os tokens sem 2FA", async () => {
     const email = `admin-${randomUUID().slice(0, 8)}@example.test`;
     const password = `S3nha!AdminForte#${randomUUID().slice(0, 8)}`;
+    const adminRoleId = randomUUID();
+    const totpCredentialId = randomUUID();
+    let cleanupUserId: string | null = null;
+    let testFailed = false;
+    let testFailure: unknown;
+    let cleanupFailed = false;
+    let cleanupFailure: unknown;
+    try {
+      const reg = await apiRequest<{ user: { id: string }; accessToken: string }>("/auth/register", {
+        method: "POST",
+        body: { name: "Admin User", email, password },
+      });
+      if (typeof reg.body?.user?.id === "string") cleanupUserId = reg.body.user.id;
+      assert.equal(reg.status, 201);
+      const adminUserId = reg.body.user.id;
+      cleanupUserId = adminUserId;
 
-    const reg = await apiRequest<{ user: { id: string } }>("/auth/register", {
-      method: "POST",
-      body: { name: "Admin User", email, password },
-    });
-    assert.equal(reg.status, 201);
-    const adminUserId = reg.body.user.id;
+      // Conceder papel admin no banco e configurar credencial TOTP verificada
+      await pool.query(
+        `INSERT INTO user_roles (id, user_id, role, event_id, granted_at)
+         VALUES ($1, $2, 'admin', NULL, now())`,
+        [adminRoleId, adminUserId],
+      );
+      await pool.query(
+        `INSERT INTO user_totp_credentials (id, user_id, secret_encrypted, is_verified, verified_at, created_at, updated_at)
+         VALUES ($1, $2, 'encrypted-secret-placeholder', true, now(), now(), now())`,
+        [totpCredentialId, adminUserId],
+      );
 
-    // Conceder papel admin no banco e configurar credencial TOTP verificada
-    await pool.query(
-      `INSERT INTO user_roles (id, user_id, role, event_id, granted_at)
-       VALUES ($1, $2, 'admin', NULL, now())`,
-      [randomUUID(), adminUserId],
-    );
-    await pool.query(
-      `INSERT INTO user_totp_credentials (id, user_id, secret_encrypted, is_verified, verified_at, created_at, updated_at)
-       VALUES ($1, $2, 'encrypted-secret-placeholder', true, now(), now(), now())`,
-      [randomUUID(), adminUserId],
-    );
+      const adminLogin = await apiRequest<{
+        requires2FA: boolean;
+        isTotpConfigured: boolean;
+        tempToken: string;
+        message: string;
+        accessToken?: string;
+        refreshToken?: string;
+      }>("/auth/login", {
+        method: "POST",
+        body: { email, password },
+      });
 
-    const adminLogin = await apiRequest<{
-      requires2FA: boolean;
-      isTotpConfigured: boolean;
-      tempToken: string;
-      message: string;
-      accessToken?: string;
-      refreshToken?: string;
-    }>("/auth/login", {
-      method: "POST",
-      body: { email, password },
-    });
+      assert.equal(adminLogin.status, 200);
+      assert.equal(adminLogin.body.requires2FA, true);
+      assert.equal(adminLogin.body.isTotpConfigured, true);
+      assert.ok(typeof adminLogin.body.tempToken === "string" && adminLogin.body.tempToken.length > 20);
+      assert.equal(adminLogin.body.accessToken, undefined);
+      assert.equal(adminLogin.body.refreshToken, undefined);
 
-    assert.equal(adminLogin.status, 200);
-    assert.equal(adminLogin.body.requires2FA, true);
-    assert.equal(adminLogin.body.isTotpConfigured, true);
-    assert.ok(typeof adminLogin.body.tempToken === "string" && adminLogin.body.tempToken.length > 20);
-    assert.equal(adminLogin.body.accessToken, undefined);
-    assert.equal(adminLogin.body.refreshToken, undefined);
+      // A sessão de participante permanece registrada até o segundo fator; como
+      // a conta agora tem papel Admin, ela não pode autenticar rotas protegidas.
+      const activeSessions = await pool.query<{ n: number }>(
+        "SELECT count(*)::int AS n FROM sessions WHERE user_id = $1 AND revoked_at IS NULL",
+        [adminUserId],
+      );
+      assert.equal(activeSessions.rows[0].n, 1);
 
-    // Nenhuma sessão ativa para o Admin antes do TOTP
-    const activeSessions = await pool.query<{ n: number }>(
-      "SELECT count(*)::int AS n FROM sessions WHERE user_id = $1 AND revoked_at IS NULL",
-      [adminUserId],
-    );
-    assert.equal(activeSessions.rows[0].n, 0);
+      const oldSessionResponse = await apiRequest("/auth/me", { token: reg.body.accessToken });
+      assert.equal(oldSessionResponse.status, 401);
 
-    // tempToken jamais pode ser usado como accessToken normal em /auth/me ou rotas protegidas
-    const meWithTemp = await apiRequest("/auth/me", {
-      token: adminLogin.body.tempToken,
-    });
-    assert.equal(meWithTemp.status, 401);
+      // tempToken jamais pode ser usado como accessToken normal em /auth/me ou rotas protegidas
+      const meWithTemp = await apiRequest("/auth/me", {
+        token: adminLogin.body.tempToken,
+      });
+      assert.equal(meWithTemp.status, 401);
 
-    const probeWithTemp = await apiRequest("/events-auth-probe/me-id", {
-      token: adminLogin.body.tempToken,
-    });
-    assert.equal(probeWithTemp.status, 401);
+      const probeWithTemp = await apiRequest("/events-auth-probe/me-id", {
+        token: adminLogin.body.tempToken,
+      });
+      assert.equal(probeWithTemp.status, 401);
+    } catch (error) {
+      testFailed = true;
+      testFailure = error;
+    } finally {
+      try {
+        await cleanupC15Fixture({ email, userId: cleanupUserId, adminRoleId, totpCredentialId });
+      } catch (error) {
+        cleanupFailed = true;
+        cleanupFailure = error;
+      }
+    }
+
+    if (testFailed && cleanupFailed) {
+      throw new AggregateError(
+        [testFailure, cleanupFailure],
+        "C15 e a limpeza da fixture falharam.",
+        { cause: testFailure },
+      );
+    }
+    if (testFailed) throw testFailure;
+    if (cleanupFailed) throw cleanupFailure;
   });
 
   // =========================================================================

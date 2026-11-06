@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import {
   boolean,
+  bigint,
   char,
   check,
   foreignKey,
@@ -127,11 +128,33 @@ export const userTotpCredentials = pgTable(
     verifiedAt: instant("verified_at"),
     createdAt: instant("created_at").notNull(),
     updatedAt: instant("updated_at").notNull(),
+    lastTotpCounter: bigint("last_totp_counter", { mode: "number" }),
   },
   (table) => [
     unique("uq_user_totp_credentials_user").on(table.userId),
     check("ck_user_totp_verified", sql`(${table.isVerified} = false AND ${table.verifiedAt} IS NULL) OR (${table.isVerified} = true AND ${table.verifiedAt} IS NOT NULL)`),
     foreignKey({ name: "fk_user_totp_credentials_user", columns: [table.userId], foreignColumns: [users.id] }),
+  ],
+);
+
+/** Estado de uso único dos desafios temporários emitidos após senha Admin correta. */
+export const adminTwoFactorChallenges = pgTable(
+  "admin_2fa_challenges",
+  {
+    jti: uuid("jti").primaryKey(),
+    userId: uuid("user_id").notNull(),
+    issuedAt: instant("issued_at").notNull(),
+    expiresAt: instant("expires_at").notNull(),
+    consumedAt: instant("consumed_at"),
+    invalidatedAt: instant("invalidated_at"),
+    createdAt: instant("created_at").notNull(),
+  },
+  (table) => [
+    check("ck_admin_2fa_challenges_expiration", sql`${table.expiresAt} > ${table.issuedAt} AND ${table.expiresAt} <= ${table.issuedAt} + interval '5 minutes'`),
+    check("ck_admin_2fa_challenges_terminal", sql`NOT (${table.consumedAt} IS NOT NULL AND ${table.invalidatedAt} IS NOT NULL)`),
+    index("ix_admin_2fa_challenges_user_created").on(table.userId, table.createdAt),
+    index("ix_admin_2fa_challenges_expires").on(table.expiresAt),
+    foreignKey({ name: "fk_admin_2fa_challenges_user", columns: [table.userId], foreignColumns: [users.id] }),
   ],
 );
 

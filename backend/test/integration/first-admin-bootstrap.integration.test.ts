@@ -105,6 +105,7 @@ afterEach(async () => {
   if (!userIds.length) return;
   await pool.query("DELETE FROM audit_logs WHERE target_user_id=ANY($1::uuid[])", [userIds]);
   await pool.query("DELETE FROM user_roles WHERE user_id=ANY($1::uuid[])", [userIds]);
+  await pool.query("DELETE FROM admin_2fa_challenges WHERE user_id=ANY($1::uuid[])", [userIds]);
   await pool.query("DELETE FROM sessions WHERE user_id=ANY($1::uuid[])", [userIds]);
   await pool.query("DELETE FROM users WHERE id=ANY($1::uuid[])", [userIds]);
   userIds.length = 0;

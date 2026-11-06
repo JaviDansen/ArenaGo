@@ -1,0 +1,1997 @@
+diff --git a/backend/drizzle/meta/_journal.json b/backend/drizzle/meta/_journal.json
+index 8c0d24e..f18fb77 100644
+--- a/backend/drizzle/meta/_journal.json
++++ b/backend/drizzle/meta/_journal.json
+@@ -36,6 +36,13 @@
+       "when": 1792459206746,
+       "tag": "0005_idempotency",
+       "breakpoints": true
++    },
++    {
++      "idx": 5,
++      "version": "7",
++      "when": 1794000000000,
++      "tag": "0006_admin_2fa_login",
++      "breakpoints": true
+     }
+   ]
+-}
+\ No newline at end of file
++}
+diff --git a/backend/src/auth/auth.controller.ts b/backend/src/auth/auth.controller.ts
+index add9e4c..786fb99 100644
+--- a/backend/src/auth/auth.controller.ts
++++ b/backend/src/auth/auth.controller.ts
+@@ -2,6 +2,7 @@ import {
+   Body,
+   Controller,
+   Get,
++  Header,
+   HttpCode,
+   HttpStatus,
+   Inject,
+@@ -12,6 +13,7 @@ import {
+   loginSchema,
+   refreshSchema,
+   registerSchema,
++  twoFactorVerifySchema,
+   validateDto,
+ } from "./auth.dto";
+ import { AuthService } from "./auth.service";
+@@ -37,6 +39,8 @@ export class AuthController {
+   ) {}
+ 
+   @Post("register")
++  @Header("Cache-Control", "no-store")
++  @Header("Pragma", "no-cache")
+   @HttpCode(HttpStatus.CREATED)
+   async register(
+     @Body() body: unknown,
+@@ -47,6 +51,8 @@ export class AuthController {
+   }
+ 
+   @Post("login")
++  @Header("Cache-Control", "no-store")
++  @Header("Pragma", "no-cache")
+   @HttpCode(HttpStatus.OK)
+   async login(
+     @Body() body: unknown,
+@@ -56,7 +62,21 @@ export class AuthController {
+     return this.authService.login(dto, extractClientMetadata(req));
+   }
+ 
++  @Post("2fa/verify")
++  @Header("Cache-Control", "no-store")
++  @Header("Pragma", "no-cache")
++  @HttpCode(HttpStatus.OK)
++  async verifyTwoFactor(
++    @Body() body: unknown,
++    @Req() req: AuthenticatedRequest,
++  ): Promise<AuthSessionResponseDto> {
++    const dto = validateDto(twoFactorVerifySchema, body);
++    return this.authService.verifyTwoFactor(dto, extractClientMetadata(req));
++  }
++
+   @Post("refresh")
++  @Header("Cache-Control", "no-store")
++  @Header("Pragma", "no-cache")
+   @HttpCode(HttpStatus.OK)
+   async refresh(@Body() body: unknown): Promise<RefreshResponseDto> {
+     const dto = validateDto(refreshSchema, body);
+diff --git a/backend/src/auth/auth.dto.ts b/backend/src/auth/auth.dto.ts
+index 2138d0b..c2cd0e0 100644
+--- a/backend/src/auth/auth.dto.ts
++++ b/backend/src/auth/auth.dto.ts
+@@ -58,9 +58,24 @@ export const refreshSchema = z
+   })
+   .strict();
+ 
++export const twoFactorVerifySchema = z
++  .object({
++    tempToken: z
++      .string({ error: "O desafio temporário é obrigatório e deve ser texto." })
++      .min(1)
++      .max(2_048),
++    code: z
++      .string({ error: "O código do segundo fator é obrigatório e deve ser texto." })
++      .refine((value) => /^[0-9]{6}$/.test(value) || /^[a-f0-9]{32}$/.test(value), {
++        message: "Informe um código TOTP de seis dígitos ou um código de recuperação válido.",
++      }),
++  })
++  .strict();
++
+ export type RegisterDto = z.infer<typeof registerSchema>;
+ export type LoginDto = z.infer<typeof loginSchema>;
+ export type RefreshDto = z.infer<typeof refreshSchema>;
++export type TwoFactorVerifyDto = z.infer<typeof twoFactorVerifySchema>;
+ 
+ export function validateDto<T>(schema: z.ZodType<T>, payload: unknown): T {
+   if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+diff --git a/backend/src/auth/auth.service.ts b/backend/src/auth/auth.service.ts
+index 6403fe4..8194cef 100644
+--- a/backend/src/auth/auth.service.ts
++++ b/backend/src/auth/auth.service.ts
+@@ -1,10 +1,10 @@
+-import { randomUUID } from "node:crypto";
++import { randomUUID, timingSafeEqual } from "node:crypto";
+ import { HttpStatus, Inject, Injectable } from "@nestjs/common";
+ import * as argon2 from "argon2";
+ import { Pool, PoolClient } from "pg";
+ import { ProblemException } from "../common/errors/problem.exception";
+ import { POSTGRES_POOL } from "../database/database.module";
+-import { LoginDto, RefreshDto, RegisterDto } from "./auth.dto";
++import { LoginDto, RefreshDto, RegisterDto, type TwoFactorVerifyDto } from "./auth.dto";
+ import {
+   AdminTwoFactorChallengeResponseDto,
+   AuthenticatedPrincipal,
+@@ -29,6 +29,10 @@ import {
+   signTempTwoFactorToken,
+   verifyAccessToken,
+ } from "./token.util";
++import { environment } from "../config/environment";
++import { decryptTotpSecret, readTotpKeys, recoveryCodeHash } from "./totp-activation.crypto";
++import { verifyTotpChallenge, verifyTotpChallengeSignature } from "./totp-challenge";
++import { isRecoveryCodeFormat, matchingTotpCounter, readRecoveryHmacKey } from "./admin-two-factor.crypto";
+ 
+ const ARGON2_OPTIONS: argon2.HashOptions = {
+   type: argon2.argon2id,
+@@ -257,22 +261,21 @@ export class AuthService {
+       );
+       const now = new Date(clockResult.rows[0].now);
+ 
+-      const accountState = await this.loadAccountRolesAndQuestionnaire(
+-        client,
+-        lockedUser.id,
++      await client.query(
++        `SELECT id FROM user_roles WHERE user_id=$1 AND revoked_at IS NULL FOR UPDATE`,
++        [lockedUser.id],
+       );
+-
+-      // Revogar qualquer sessão anterior não revogada (inclusive expirada) antes de nova emissão ou desafio 2FA
+-      await this.revokeActiveSessionsForUser(
+-        client,
+-        lockedUser.id,
+-        now,
+-        "replaced_by_new_login",
++      const accountState = await this.loadAccountRolesAndQuestionnaire(client, lockedUser.id);
++      const adminRole = await client.query<{ id: string }>(
++        `SELECT id FROM user_roles
++         WHERE user_id = $1 AND role = 'admin' AND event_id IS NULL AND revoked_at IS NULL
++         FOR UPDATE`,
++        [lockedUser.id],
+       );
+ 
+       // Comportamento transitório seguro para contas Admin (Seção 10 da K01 e Seção 14.4 da Arquitetura):
+       // O login apenas com senha NUNCA emite sessão privilegiada nem refresh token para Admin.
+-      if (accountState.roles.includes("admin")) {
++      if ((adminRole.rowCount ?? 0) > 0) {
+         const totpResult = await client.query<{ is_verified: boolean }>(
+           `SELECT is_verified
+            FROM user_totp_credentials
+@@ -284,9 +287,6 @@ export class AuthService {
+         const isTotpConfigured =
+           (totpResult.rowCount ?? 0) > 0 && totpResult.rows[0].is_verified === true;
+ 
+-        await client.query("COMMIT");
+-        this.rateLimiter.reset(dto.email, ipAddress);
+-
+         const tempToken = signTempTwoFactorToken(lockedUser.id, {
+           nowMs: now.getTime(),
+         });
+@@ -297,9 +297,37 @@ export class AuthService {
+           tempToken,
+           message: "Informe o segundo fator para concluir o acesso.",
+         };
++
++        const challengeClaims = verifyTotpChallenge(tempToken, now.getTime());
++        if (!challengeClaims) throw new Error("Desafio 2FA recém-emitido inválido.");
++        await client.query(
++          `UPDATE admin_2fa_challenges
++           SET invalidated_at = clock_timestamp()
++           WHERE user_id = $1 AND consumed_at IS NULL AND invalidated_at IS NULL`,
++          [lockedUser.id],
++        );
++        const insertedChallenge = await client.query(
++          `INSERT INTO admin_2fa_challenges
++           (jti, user_id, issued_at, expires_at, consumed_at, invalidated_at, created_at)
++           VALUES ($1, $2, to_timestamp($3), to_timestamp($4), NULL, NULL, clock_timestamp())`,
++          [challengeClaims.jti, lockedUser.id, challengeClaims.iat, challengeClaims.exp],
++        );
++        if (insertedChallenge.rowCount !== 1) throw new Error("Desafio 2FA não persistido.");
++        await this.recordAdminTwoFactorChallengeIssued(client, lockedUser.id);
++        await client.query("COMMIT");
++        this.rateLimiter.reset(dto.email, ipAddress);
+         return adminChallenge;
+       }
+ 
++      // Participantes/Staff mantêm o login existente. Admin só revoga a sessão
++      // anterior depois que comprovar o segundo fator em verifyTwoFactor().
++      await this.revokeActiveSessionsForUser(
++        client,
++        lockedUser.id,
++        now,
++        "replaced_by_new_login",
++      );
++
+       const sessionId = randomUUID();
+       const expiresAt = new Date(now.getTime() + SESSION_ABSOLUTE_TTL_MS);
+       const userAgent = sanitizeUserAgent(metadata?.userAgent);
+@@ -346,6 +374,339 @@ export class AuthService {
+     }
+   }
+ 
++  /** Conclui o login Admin somente após consumir um desafio persistido e um segundo fator. */
++  async verifyTwoFactor(
++    dto: TwoFactorVerifyDto,
++    metadata?: ClientMetadata,
++  ): Promise<AuthSessionResponseDto> {
++    const initialClaims = verifyTotpChallengeSignature(dto.tempToken);
++    if (!initialClaims) throw this.buildInvalidAdminTwoFactorException();
++
++    const recoveryAttempt = isRecoveryCodeFormat(dto.code);
++    let encryptionKey: Buffer | null = null;
++    let recoveryKey: Buffer | null;
++    try {
++      const keyEnvironment = {
++        ...process.env,
++        JWT_SECRET: environment.JWT_SECRET,
++        JWT_TEMP_SECRET: environment.JWT_TEMP_SECRET,
++      };
++      recoveryKey = recoveryAttempt ? readRecoveryHmacKey(keyEnvironment) : null;
++      if (!recoveryAttempt) {
++        const keys = readTotpKeys(keyEnvironment);
++        encryptionKey = keys.encryption;
++      }
++    } catch {
++      throw new ProblemException({
++        typeSlug: "totp-configuration-unavailable",
++        title: "Segundo fator indisponível",
++        status: HttpStatus.SERVICE_UNAVAILABLE,
++        code: "TOTP_CONFIGURATION_UNAVAILABLE",
++        detail: "Não foi possível concluir a autenticação de segundo fator.",
++      });
++    }
++
++    const client = await this.pool.connect();
++    let failure: ProblemException | null = null;
++    let response: AuthSessionResponseDto | null = null;
++    const ipAddress = sanitizeIpAddress(metadata?.ipAddress);
++    const userAgent = sanitizeUserAgent(metadata?.userAgent);
++
++    try {
++      await client.query("BEGIN ISOLATION LEVEL READ COMMITTED");
++      const userResult = await client.query<{
++        id: string;
++        name: string;
++        email: string;
++        email_verified_at: Date | null;
++        is_active: boolean;
++      }>(
++        `SELECT id,name,email,email_verified_at,is_active
++         FROM users WHERE id=$1 FOR UPDATE`,
++        [initialClaims.sub],
++      );
++      const user = userResult.rows[0];
++      if (!user || !user.is_active || user.email_verified_at === null) {
++        throw this.buildInvalidAdminTwoFactorException();
++      }
++
++      const roleResult = await client.query<{ id: string }>(
++        `SELECT id FROM user_roles
++         WHERE user_id=$1 AND role='admin' AND event_id IS NULL AND revoked_at IS NULL
++         FOR UPDATE`,
++        [user.id],
++      );
++      if (roleResult.rowCount !== 1) throw this.buildInvalidAdminTwoFactorException();
++
++      const challengeResult = await client.query<{
++        user_id: string;
++        issued_at: Date;
++        expires_at: Date;
++        consumed_at: Date | null;
++        invalidated_at: Date | null;
++      }>(
++        `SELECT user_id,issued_at,expires_at,consumed_at,invalidated_at
++         FROM admin_2fa_challenges WHERE jti=$1 AND user_id=$2 FOR UPDATE`,
++        [initialClaims.jti, user.id],
++      );
++      const clockResult = await client.query<{ now: Date }>(
++        "SELECT clock_timestamp() AS now",
++      );
++      let now = new Date(clockResult.rows[0].now);
++      const challenge = challengeResult.rows[0];
++      const persistedChallengeMatches = Boolean(
++        challenge &&
++          challenge.user_id === user.id &&
++          Math.floor(new Date(challenge.issued_at).getTime() / 1_000) === initialClaims.iat &&
++          Math.floor(new Date(challenge.expires_at).getTime() / 1_000) === initialClaims.exp,
++      );
++      const databaseClaims = verifyTotpChallenge(dto.tempToken, now.getTime());
++      const attempts = await client.query<{ count: number }>(
++        `SELECT count(*)::integer AS count FROM audit_logs
++         WHERE target_user_id=$1 AND category='identity'
++           AND action='admin_2fa_login_rejected'
++           AND occurred_at > clock_timestamp()-interval '15 minutes'`,
++        [user.id],
++      );
++      if ((attempts.rows[0]?.count ?? 0) >= 5) {
++        throw new ProblemException({
++          typeSlug: "admin-2fa-rate-limited",
++          title: "Muitas tentativas de segundo fator",
++          status: HttpStatus.TOO_MANY_REQUESTS,
++          code: "ADMIN_2FA_RATE_LIMITED",
++          detail: "Muitas tentativas malsucedidas. Aguarde antes de tentar novamente.",
++          headers: { "Retry-After": "900" },
++        });
++      }
++
++      if (
++        !persistedChallengeMatches || !databaseClaims ||
++        !challenge || challenge.consumed_at !== null || challenge.invalidated_at !== null ||
++        now.getTime() >= new Date(challenge.expires_at).getTime()
++      ) {
++        await this.recordAdminTwoFactorFailure(client, user.id);
++        await client.query("COMMIT");
++        failure = this.buildInvalidAdminTwoFactorException();
++      } else {
++        const credentialResult = await client.query<{
++          id: string;
++          secret_encrypted: string;
++          is_verified: boolean;
++          last_totp_counter: string | number | null;
++        }>(
++          `SELECT id,secret_encrypted,is_verified,last_totp_counter
++           FROM user_totp_credentials WHERE user_id=$1 FOR UPDATE`,
++          [user.id],
++        );
++        const credential = credentialResult.rows[0];
++        if (!credential?.is_verified) {
++          throw new ProblemException({
++            typeSlug: "admin-totp-not-configured",
++            title: "TOTP não configurado",
++            status: HttpStatus.CONFLICT,
++            code: "ADMIN_TOTP_NOT_CONFIGURED",
++            detail: "A conta administrativa ainda não possui segundo fator ativo.",
++          });
++        }
++
++        let secret: string | null = null;
++        if (!recoveryAttempt) {
++          const authorizations = await client.query<{
++            id: string;
++            expires_at: Date;
++            used_at: Date;
++            revoked_at: Date | null;
++          }>(
++            `SELECT id,expires_at,used_at,revoked_at FROM totp_activation_tokens
++             WHERE user_id=$1 AND issued_by IS NULL AND used_at IS NOT NULL
++             ORDER BY used_at,id`,
++            [user.id],
++          );
++          const activationAudit = await client.query(
++            `SELECT 1 FROM audit_logs
++             WHERE target_user_id=$1 AND actor_user_id=$1 AND category='identity'
++               AND action='totp_initial_activated' AND origin='user' LIMIT 2`,
++            [user.id],
++          );
++          const originalAuthorization = authorizations.rows[0];
++          if (
++            authorizations.rowCount !== 1 || activationAudit.rowCount !== 1 ||
++            !originalAuthorization || originalAuthorization.revoked_at !== null ||
++            new Date(originalAuthorization.used_at).getTime() > new Date(originalAuthorization.expires_at).getTime() ||
++            encryptionKey === null
++          ) {
++            throw new ProblemException({
++              typeSlug: "totp-configuration-unavailable",
++              title: "Segundo fator indisponível",
++              status: HttpStatus.SERVICE_UNAVAILABLE,
++              code: "TOTP_CONFIGURATION_UNAVAILABLE",
++              detail: "Não foi possível concluir a autenticação de segundo fator.",
++            });
++          }
++
++          try {
++            secret = decryptTotpSecret(
++              credential.secret_encrypted,
++              encryptionKey,
++              user.id,
++              originalAuthorization.id,
++            );
++          } catch {
++            throw new ProblemException({
++              typeSlug: "totp-configuration-unavailable",
++              title: "Segundo fator indisponível",
++              status: HttpStatus.SERVICE_UNAVAILABLE,
++              code: "TOTP_CONFIGURATION_UNAVAILABLE",
++              detail: "Não foi possível concluir a autenticação de segundo fator.",
++            });
++          }
++        }
++
++        let acceptedTotpCounter: number | null = null;
++        let acceptedRecoveryCodeId: string | null = null;
++        let lastAcceptedCounter: number | null = null;
++        if (!recoveryAttempt && /^[0-9]{6}$/.test(dto.code)) {
++          lastAcceptedCounter = credential.last_totp_counter === null
++            ? null
++            : Number(credential.last_totp_counter);
++          if (lastAcceptedCounter !== null && (!Number.isSafeInteger(lastAcceptedCounter) || lastAcceptedCounter < 0)) {
++            throw new ProblemException({
++              typeSlug: "totp-configuration-unavailable",
++              title: "Segundo fator indisponível",
++              status: HttpStatus.SERVICE_UNAVAILABLE,
++              code: "TOTP_CONFIGURATION_UNAVAILABLE",
++              detail: "Não foi possível concluir a autenticação de segundo fator.",
++            });
++          }
++          acceptedTotpCounter = matchingTotpCounter(
++            secret as string,
++            dto.code,
++            now.getTime(),
++            lastAcceptedCounter,
++          );
++        } else if (recoveryAttempt && isRecoveryCodeFormat(dto.code) && recoveryKey !== null) {
++          const wantedHash = Buffer.from(
++            recoveryCodeHash(dto.code, user.id, recoveryKey),
++            "hex",
++          );
++          const recoveryRows = await client.query<{ id: string; code_hash: string; used_at: Date | null }>(
++            `SELECT id,code_hash,used_at FROM user_backup_codes
++             WHERE user_id=$1 FOR UPDATE`,
++            [user.id],
++          );
++          for (const recovery of recoveryRows.rows) {
++            const candidate = Buffer.from(recovery.code_hash, "hex");
++            if (candidate.length === wantedHash.length && timingSafeEqual(candidate, wantedHash)) {
++              acceptedRecoveryCodeId = recovery.used_at === null ? recovery.id : null;
++            }
++          }
++        }
++
++        // Revalidar tempo após leituras/crypto e imediatamente antes das escritas decisivas.
++        const finalClockResult = await client.query<{ now: Date }>(
++          "SELECT clock_timestamp() AS now",
++        );
++        now = new Date(finalClockResult.rows[0].now);
++        if (
++          !verifyTotpChallenge(dto.tempToken, now.getTime()) ||
++          now.getTime() >= new Date(challenge.expires_at).getTime()
++        ) {
++          acceptedTotpCounter = null;
++          acceptedRecoveryCodeId = null;
++        } else if (acceptedTotpCounter !== null) {
++          acceptedTotpCounter = matchingTotpCounter(
++            secret as string,
++            dto.code,
++            now.getTime(),
++            lastAcceptedCounter,
++          );
++        }
++
++        if (acceptedTotpCounter === null && acceptedRecoveryCodeId === null) {
++          await this.recordAdminTwoFactorFailure(client, user.id);
++          await client.query("COMMIT");
++          failure = this.buildInvalidAdminTwoFactorException();
++        } else {
++          if (acceptedTotpCounter !== null) {
++            const updated = await client.query(
++              `UPDATE user_totp_credentials
++               SET last_totp_counter=$2,updated_at=$3
++               WHERE id=$1 AND (last_totp_counter IS NULL OR last_totp_counter < $2)`,
++              [credential.id, acceptedTotpCounter, now],
++            );
++            if (updated.rowCount !== 1) throw this.buildInvalidAdminTwoFactorException();
++          } else if (acceptedRecoveryCodeId !== null) {
++            const consumedRecovery = await client.query(
++              `UPDATE user_backup_codes SET used_at=$2
++               WHERE id=$1 AND user_id=$3 AND used_at IS NULL`,
++              [acceptedRecoveryCodeId, now, user.id],
++            );
++            if (consumedRecovery.rowCount !== 1) throw this.buildInvalidAdminTwoFactorException();
++          }
++
++          const consumedChallenge = await client.query(
++            `UPDATE admin_2fa_challenges SET consumed_at=$2
++             WHERE jti=$1 AND user_id=$3 AND consumed_at IS NULL AND invalidated_at IS NULL`,
++            [initialClaims.jti, now, user.id],
++          );
++          if (consumedChallenge.rowCount !== 1) throw this.buildInvalidAdminTwoFactorException();
++
++          await this.revokeActiveSessionsForUser(
++            client,
++            user.id,
++            now,
++            "replaced_by_new_login",
++          );
++          const sessionId = randomUUID();
++          const expiresAt = new Date(now.getTime() + SESSION_ABSOLUTE_TTL_MS);
++          await client.query(
++            `INSERT INTO sessions
++             (id,user_id,expires_at,last_activity_at,revoked_at,revocation_reason,admin_2fa_verified_at,ip_address,user_agent,created_at)
++             VALUES($1,$2,$3,$4,NULL,NULL,$4,$5,$6,$4)`,
++            [sessionId, user.id, expiresAt, now, ipAddress, userAgent],
++          );
++          const { rawToken: refreshToken, tokenHash } = generateOpaqueRefreshToken();
++          await client.query(
++            `INSERT INTO refresh_tokens
++             (id,session_id,token_hash,consumed_at,is_revoked,expires_at,created_at)
++             VALUES($1,$2,$3,NULL,false,$4,$5)`,
++            [randomUUID(), sessionId, tokenHash, expiresAt, now],
++          );
++          await this.recordAdminTwoFactorSuccess(client, user.id);
++          const accountState = await this.loadAccountRolesAndQuestionnaire(client, user.id);
++          await client.query("COMMIT");
++
++          const accessToken = signAccessToken(
++            { userId: user.id, sessionId },
++            { nowMs: now.getTime() },
++          );
++          response = {
++            user: {
++              id: user.id,
++              name: user.name,
++              email: user.email,
++              emailVerified: true,
++              roles: accountState.roles,
++              hasCompletedQuestionnaire: accountState.hasCompletedQuestionnaire,
++            },
++            accessToken,
++            refreshToken,
++            expiresIn: ACCESS_TOKEN_TTL_SECONDS,
++          };
++        }
++      }
++    } catch (error) {
++      await client.query("ROLLBACK").catch(() => undefined);
++      throw error;
++    } finally {
++      client.release();
++    }
++
++    if (failure) throw failure;
++    if (!response) throw new Error("A autenticação 2FA não produziu resultado.");
++    return response;
++  }
++
+   async refresh(dto: RefreshDto): Promise<RefreshResponseDto> {
+     const tokenHash = hashRefreshToken(dto.refreshToken);
+ 
+@@ -782,6 +1143,55 @@ export class AuthService {
+     };
+   }
+ 
++  private buildInvalidAdminTwoFactorException(): ProblemException {
++    return new ProblemException({
++      typeSlug: "admin-2fa-invalid",
++      title: "Segundo fator inválido",
++      status: HttpStatus.UNAUTHORIZED,
++      code: "ADMIN_2FA_INVALID",
++      detail: "Não foi possível concluir a autenticação administrativa.",
++    });
++  }
++
++  private async recordAdminTwoFactorFailure(
++    client: PoolClient,
++    userId: string,
++  ): Promise<void> {
++    const result = await client.query(
++      `INSERT INTO audit_logs
++       (id,actor_user_id,target_user_id,event_id,origin,category,action,metadata,occurred_at)
++       VALUES($1,$2,$2,NULL,'user','identity','admin_2fa_login_rejected','{}'::jsonb,clock_timestamp())`,
++      [randomUUID(), userId],
++    );
++    if (result.rowCount !== 1) throw new Error("Falha de auditoria do segundo fator.");
++  }
++
++  private async recordAdminTwoFactorChallengeIssued(
++    client: PoolClient,
++    userId: string,
++  ): Promise<void> {
++    const result = await client.query(
++      `INSERT INTO audit_logs
++       (id,actor_user_id,target_user_id,event_id,origin,category,action,metadata,occurred_at)
++       VALUES($1,$2,$2,NULL,'user','identity','admin_2fa_challenge_issued','{}'::jsonb,clock_timestamp())`,
++      [randomUUID(), userId],
++    );
++    if (result.rowCount !== 1) throw new Error("Auditoria de desafio 2FA não persistida.");
++  }
++
++  private async recordAdminTwoFactorSuccess(
++    client: PoolClient,
++    userId: string,
++  ): Promise<void> {
++    const result = await client.query(
++      `INSERT INTO audit_logs
++       (id,actor_user_id,target_user_id,event_id,origin,category,action,metadata,occurred_at)
++       VALUES($1,$2,$2,NULL,'user','identity','admin_2fa_login_succeeded','{}'::jsonb,clock_timestamp())`,
++      [randomUUID(), userId],
++    );
++    if (result.rowCount !== 1) throw new Error("Falha de auditoria do login administrativo.");
++  }
++
+   private async loadAccountRolesAndQuestionnaire(
+     db: Pool | PoolClient,
+     userId: string,
+diff --git a/backend/src/auth/totp-challenge.ts b/backend/src/auth/totp-challenge.ts
+index 4f16b19..7bc3713 100644
+--- a/backend/src/auth/totp-challenge.ts
++++ b/backend/src/auth/totp-challenge.ts
+@@ -4,8 +4,8 @@ import type { TempTwoFactorTokenClaims } from "./token.util";
+ 
+ const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+ 
+-/** Consome somente o desafio de senha emitido pelo login; nunca um Bearer de sessão. */
+-export function verifyTotpChallenge(token: string, nowMs: number, secret = environment.JWT_TEMP_SECRET): TempTwoFactorTokenClaims | null {
++/** Verifica assinatura e formato sem decidir validade temporal; usado antes de consultar o relógio do banco. */
++export function verifyTotpChallengeSignature(token: string, secret = environment.JWT_TEMP_SECRET): TempTwoFactorTokenClaims | null {
+   if (typeof token !== "string" || token.length > 2048) return null;
+   const parts = token.split(".");
+   if (parts.length !== 3 || parts.some(part => !/^[A-Za-z0-9_-]+$/.test(part))) return null;
+@@ -16,12 +16,21 @@ export function verifyTotpChallenge(token: string, nowMs: number, secret = envir
+     const header = JSON.parse(Buffer.from(headerPart, "base64url").toString("utf8"));
+     const candidate = JSON.parse(Buffer.from(payloadPart, "base64url").toString("utf8"));
+     if (!header || header.alg !== "HS256" || header.typ !== "JWT" || !candidate || candidate.type !== "2fa_challenge") return null;
+-    const now = Math.floor(nowMs / 1000);
+     if (typeof candidate.sub !== "string" || !uuid.test(candidate.sub)
+       || typeof candidate.jti !== "string" || !uuid.test(candidate.jti)
+       || !Number.isSafeInteger(candidate.iat) || !Number.isSafeInteger(candidate.exp)
+       || candidate.exp <= candidate.iat || candidate.exp - candidate.iat > 300
+-      || candidate.iat > now || now >= candidate.exp || "sid" in candidate) return null;
++      || "sid" in candidate) return null;
+     return { sub: candidate.sub, jti: candidate.jti, type: "2fa_challenge", iat: candidate.iat, exp: candidate.exp };
+   } catch { return null; }
+ }
++
++/** Consome somente o desafio de senha emitido pelo login; nunca um Bearer de sessão. */
++export function verifyTotpChallenge(token: string, nowMs: number, secret = environment.JWT_TEMP_SECRET): TempTwoFactorTokenClaims | null {
++  if (!Number.isFinite(nowMs)) return null;
++  const claims = verifyTotpChallengeSignature(token, secret);
++  if (!claims) return null;
++  const now = Math.floor(nowMs / 1000);
++  if (claims.iat > now || now >= claims.exp) return null;
++  return claims;
++}
+diff --git a/backend/src/database/schema/access.schema.ts b/backend/src/database/schema/access.schema.ts
+index e20bd8f..2b4646f 100644
+--- a/backend/src/database/schema/access.schema.ts
++++ b/backend/src/database/schema/access.schema.ts
+@@ -1,6 +1,7 @@
+ import { sql } from "drizzle-orm";
+ import {
+   boolean,
++  bigint,
+   char,
+   check,
+   foreignKey,
+@@ -127,6 +128,7 @@ export const userTotpCredentials = pgTable(
+     verifiedAt: instant("verified_at"),
+     createdAt: instant("created_at").notNull(),
+     updatedAt: instant("updated_at").notNull(),
++    lastTotpCounter: bigint("last_totp_counter", { mode: "number" }),
+   },
+   (table) => [
+     unique("uq_user_totp_credentials_user").on(table.userId),
+@@ -135,6 +137,27 @@ export const userTotpCredentials = pgTable(
+   ],
+ );
+ 
++/** Estado de uso único dos desafios temporários emitidos após senha Admin correta. */
++export const adminTwoFactorChallenges = pgTable(
++  "admin_2fa_challenges",
++  {
++    jti: uuid("jti").primaryKey(),
++    userId: uuid("user_id").notNull(),
++    issuedAt: instant("issued_at").notNull(),
++    expiresAt: instant("expires_at").notNull(),
++    consumedAt: instant("consumed_at"),
++    invalidatedAt: instant("invalidated_at"),
++    createdAt: instant("created_at").notNull(),
++  },
++  (table) => [
++    check("ck_admin_2fa_challenges_expiration", sql`${table.expiresAt} > ${table.issuedAt} AND ${table.expiresAt} <= ${table.issuedAt} + interval '5 minutes'`),
++    check("ck_admin_2fa_challenges_terminal", sql`NOT (${table.consumedAt} IS NOT NULL AND ${table.invalidatedAt} IS NOT NULL)`),
++    index("ix_admin_2fa_challenges_user_created").on(table.userId, table.createdAt),
++    index("ix_admin_2fa_challenges_expires").on(table.expiresAt),
++    foreignKey({ name: "fk_admin_2fa_challenges_user", columns: [table.userId], foreignColumns: [users.id] }),
++  ],
++);
++
+ export const userBackupCodes = pgTable(
+   "user_backup_codes",
+   {
+diff --git a/backend/test/integration/auth.integration.test.ts b/backend/test/integration/auth.integration.test.ts
+index 49bdf82..06d57ce 100644
+--- a/backend/test/integration/auth.integration.test.ts
++++ b/backend/test/integration/auth.integration.test.ts
+@@ -145,6 +145,86 @@ async function apiRequest<T = Record<string, unknown>>(
+   };
+ }
+ 
++interface C15FixtureCleanup {
++  email: string;
++  userId: string | null;
++  adminRoleId: string;
++  totpCredentialId: string;
++}
++
++async function cleanupC15Fixture(fixture: C15FixtureCleanup): Promise<void> {
++  let fixtureUserId = fixture.userId;
++  if (fixtureUserId === null) {
++    const userByFixtureEmail = await pool.query<{ id: string }>(
++      "SELECT id FROM users WHERE email=$1",
++      [fixture.email],
++    );
++    if ((userByFixtureEmail.rowCount ?? 0) > 1) {
++      throw new Error("C15 cleanup encontrou mais de uma conta para o e-mail único da fixture.");
++    }
++    fixtureUserId = userByFixtureEmail.rows[0]?.id ?? null;
++  }
++
++  const sessionIds = fixtureUserId === null ? [] : (await pool.query<{ id: string }>(
++    "SELECT id FROM sessions WHERE user_id=$1",
++    [fixtureUserId],
++  )).rows.map(row => row.id);
++  const refreshTokenIds = fixtureUserId === null ? [] : (await pool.query<{ id: string }>(
++    `SELECT rt.id FROM refresh_tokens rt
++     JOIN sessions s ON s.id=rt.session_id
++     WHERE s.user_id=$1`,
++    [fixtureUserId],
++  )).rows.map(row => row.id);
++  const challengeIds = fixtureUserId === null ? [] : (await pool.query<{ jti: string }>(
++    "SELECT jti FROM admin_2fa_challenges WHERE user_id=$1",
++    [fixtureUserId],
++  )).rows.map(row => row.jti);
++  const auditIds = fixtureUserId === null ? [] : (await pool.query<{ id: string }>(
++    "SELECT id FROM audit_logs WHERE actor_user_id=$1 OR target_user_id=$1",
++    [fixtureUserId],
++  )).rows.map(row => row.id);
++  const roleIds = new Set<string>([fixture.adminRoleId]);
++  if (fixtureUserId !== null) {
++    const roles = await pool.query<{ id: string }>(
++      "SELECT id FROM user_roles WHERE user_id=$1",
++      [fixtureUserId],
++    );
++    for (const role of roles.rows) roleIds.add(role.id);
++  }
++  const credentialIds = new Set<string>([fixture.totpCredentialId]);
++  if (fixtureUserId !== null) {
++    const credentials = await pool.query<{ id: string }>(
++      "SELECT id FROM user_totp_credentials WHERE user_id=$1",
++      [fixtureUserId],
++    );
++    for (const credential of credentials.rows) credentialIds.add(credential.id);
++  }
++
++  if (refreshTokenIds.length > 0) {
++    await pool.query("DELETE FROM refresh_tokens WHERE id=ANY($1::uuid[])", [refreshTokenIds]);
++  }
++  if (sessionIds.length > 0) {
++    await pool.query("DELETE FROM sessions WHERE id=ANY($1::uuid[])", [sessionIds]);
++  }
++  if (challengeIds.length > 0) {
++    await pool.query("DELETE FROM admin_2fa_challenges WHERE jti=ANY($1::uuid[])", [challengeIds]);
++  }
++  if (auditIds.length > 0) {
++    await pool.query("DELETE FROM audit_logs WHERE id=ANY($1::uuid[])", [auditIds]);
++  }
++  const credentialIdList = [...credentialIds];
++  if (credentialIdList.length > 0) {
++    await pool.query("DELETE FROM user_totp_credentials WHERE id=ANY($1::uuid[])", [credentialIdList]);
++  }
++  const roleIdList = [...roleIds];
++  if (roleIdList.length > 0) {
++    await pool.query("DELETE FROM user_roles WHERE id=ANY($1::uuid[])", [roleIdList]);
++  }
++  if (fixtureUserId !== null) {
++    await pool.query("DELETE FROM users WHERE id=$1", [fixtureUserId]);
++  }
++}
++
+ test("K01 Auth & Sessions — Integração HTTP + PostgreSQL Real", async (t) => {
+   // =========================================================================
+   // 1. CADASTRO REAL (POST /api/v1/auth/register)
+@@ -654,65 +734,99 @@ test("K01 Auth & Sessions — Integração HTTP + PostgreSQL Real", async (t) =>
+     assert.deepEqual(statuses, [200, 401]);
+   });
+ 
+-  await t.test("C15: Login de conta Admin retorna requires2FA=true + tempToken, não cria sessão ativa e bloqueia tempToken como Bearer", async () => {
++  await t.test("C15: Login Admin retorna desafio sem revogar sessão anterior e bloqueia ambos os tokens sem 2FA", async () => {
+     const email = `admin-${randomUUID().slice(0, 8)}@example.test`;
+     const password = `S3nha!AdminForte#${randomUUID().slice(0, 8)}`;
++    const adminRoleId = randomUUID();
++    const totpCredentialId = randomUUID();
++    let cleanupUserId: string | null = null;
++    let testFailed = false;
++    let testFailure: unknown;
++    let cleanupFailed = false;
++    let cleanupFailure: unknown;
++    try {
++      const reg = await apiRequest<{ user: { id: string }; accessToken: string }>("/auth/register", {
++        method: "POST",
++        body: { name: "Admin User", email, password },
++      });
++      if (typeof reg.body?.user?.id === "string") cleanupUserId = reg.body.user.id;
++      assert.equal(reg.status, 201);
++      const adminUserId = reg.body.user.id;
++      cleanupUserId = adminUserId;
++
++      // Conceder papel admin no banco e configurar credencial TOTP verificada
++      await pool.query(
++        `INSERT INTO user_roles (id, user_id, role, event_id, granted_at)
++         VALUES ($1, $2, 'admin', NULL, now())`,
++        [adminRoleId, adminUserId],
++      );
++      await pool.query(
++        `INSERT INTO user_totp_credentials (id, user_id, secret_encrypted, is_verified, verified_at, created_at, updated_at)
++         VALUES ($1, $2, 'encrypted-secret-placeholder', true, now(), now(), now())`,
++        [totpCredentialId, adminUserId],
++      );
+ 
+-    const reg = await apiRequest<{ user: { id: string } }>("/auth/register", {
+-      method: "POST",
+-      body: { name: "Admin User", email, password },
+-    });
+-    assert.equal(reg.status, 201);
+-    const adminUserId = reg.body.user.id;
+-
+-    // Conceder papel admin no banco e configurar credencial TOTP verificada
+-    await pool.query(
+-      `INSERT INTO user_roles (id, user_id, role, event_id, granted_at)
+-       VALUES ($1, $2, 'admin', NULL, now())`,
+-      [randomUUID(), adminUserId],
+-    );
+-    await pool.query(
+-      `INSERT INTO user_totp_credentials (id, user_id, secret_encrypted, is_verified, verified_at, created_at, updated_at)
+-       VALUES ($1, $2, 'encrypted-secret-placeholder', true, now(), now(), now())`,
+-      [randomUUID(), adminUserId],
+-    );
++      const adminLogin = await apiRequest<{
++        requires2FA: boolean;
++        isTotpConfigured: boolean;
++        tempToken: string;
++        message: string;
++        accessToken?: string;
++        refreshToken?: string;
++      }>("/auth/login", {
++        method: "POST",
++        body: { email, password },
++      });
+ 
+-    const adminLogin = await apiRequest<{
+-      requires2FA: boolean;
+-      isTotpConfigured: boolean;
+-      tempToken: string;
+-      message: string;
+-      accessToken?: string;
+-      refreshToken?: string;
+-    }>("/auth/login", {
+-      method: "POST",
+-      body: { email, password },
+-    });
++      assert.equal(adminLogin.status, 200);
++      assert.equal(adminLogin.body.requires2FA, true);
++      assert.equal(adminLogin.body.isTotpConfigured, true);
++      assert.ok(typeof adminLogin.body.tempToken === "string" && adminLogin.body.tempToken.length > 20);
++      assert.equal(adminLogin.body.accessToken, undefined);
++      assert.equal(adminLogin.body.refreshToken, undefined);
++
++      // A sessão de participante permanece registrada até o segundo fator; como
++      // a conta agora tem papel Admin, ela não pode autenticar rotas protegidas.
++      const activeSessions = await pool.query<{ n: number }>(
++        "SELECT count(*)::int AS n FROM sessions WHERE user_id = $1 AND revoked_at IS NULL",
++        [adminUserId],
++      );
++      assert.equal(activeSessions.rows[0].n, 1);
+ 
+-    assert.equal(adminLogin.status, 200);
+-    assert.equal(adminLogin.body.requires2FA, true);
+-    assert.equal(adminLogin.body.isTotpConfigured, true);
+-    assert.ok(typeof adminLogin.body.tempToken === "string" && adminLogin.body.tempToken.length > 20);
+-    assert.equal(adminLogin.body.accessToken, undefined);
+-    assert.equal(adminLogin.body.refreshToken, undefined);
++      const oldSessionResponse = await apiRequest("/auth/me", { token: reg.body.accessToken });
++      assert.equal(oldSessionResponse.status, 401);
+ 
+-    // Nenhuma sessão ativa para o Admin antes do TOTP
+-    const activeSessions = await pool.query<{ n: number }>(
+-      "SELECT count(*)::int AS n FROM sessions WHERE user_id = $1 AND revoked_at IS NULL",
+-      [adminUserId],
+-    );
+-    assert.equal(activeSessions.rows[0].n, 0);
++      // tempToken jamais pode ser usado como accessToken normal em /auth/me ou rotas protegidas
++      const meWithTemp = await apiRequest("/auth/me", {
++        token: adminLogin.body.tempToken,
++      });
++      assert.equal(meWithTemp.status, 401);
+ 
+-    // tempToken jamais pode ser usado como accessToken normal em /auth/me ou rotas protegidas
+-    const meWithTemp = await apiRequest("/auth/me", {
+-      token: adminLogin.body.tempToken,
+-    });
+-    assert.equal(meWithTemp.status, 401);
++      const probeWithTemp = await apiRequest("/events-auth-probe/me-id", {
++        token: adminLogin.body.tempToken,
++      });
++      assert.equal(probeWithTemp.status, 401);
++    } catch (error) {
++      testFailed = true;
++      testFailure = error;
++    } finally {
++      try {
++        await cleanupC15Fixture({ email, userId: cleanupUserId, adminRoleId, totpCredentialId });
++      } catch (error) {
++        cleanupFailed = true;
++        cleanupFailure = error;
++      }
++    }
+ 
+-    const probeWithTemp = await apiRequest("/events-auth-probe/me-id", {
+-      token: adminLogin.body.tempToken,
+-    });
+-    assert.equal(probeWithTemp.status, 401);
++    if (testFailed && cleanupFailed) {
++      throw new AggregateError(
++        [testFailure, cleanupFailure],
++        "C15 e a limpeza da fixture falharam.",
++        { cause: testFailure },
++      );
++    }
++    if (testFailed) throw testFailure;
++    if (cleanupFailed) throw cleanupFailure;
+   });
+ 
+   // =========================================================================
+diff --git a/backend/test/integration/first-admin-bootstrap.integration.test.ts b/backend/test/integration/first-admin-bootstrap.integration.test.ts
+index 666655d..21700af 100644
+--- a/backend/test/integration/first-admin-bootstrap.integration.test.ts
++++ b/backend/test/integration/first-admin-bootstrap.integration.test.ts
+@@ -105,6 +105,7 @@ afterEach(async () => {
+   if (!userIds.length) return;
+   await pool.query("DELETE FROM audit_logs WHERE target_user_id=ANY($1::uuid[])", [userIds]);
+   await pool.query("DELETE FROM user_roles WHERE user_id=ANY($1::uuid[])", [userIds]);
++  await pool.query("DELETE FROM admin_2fa_challenges WHERE user_id=ANY($1::uuid[])", [userIds]);
+   await pool.query("DELETE FROM sessions WHERE user_id=ANY($1::uuid[])", [userIds]);
+   await pool.query("DELETE FROM users WHERE id=ANY($1::uuid[])", [userIds]);
+   userIds.length = 0;
+diff --git a/backend/test/integration/totp-activation.integration.test.ts b/backend/test/integration/totp-activation.integration.test.ts
+index 31cd180..45ab3f1 100644
+--- a/backend/test/integration/totp-activation.integration.test.ts
++++ b/backend/test/integration/totp-activation.integration.test.ts
+@@ -113,6 +113,7 @@ afterEach(async () => {
+   await pool.query("DELETE FROM user_totp_credentials WHERE user_id=ANY($1::uuid[])", [userIds]);
+   await pool.query("DELETE FROM audit_logs WHERE target_user_id=ANY($1::uuid[]) OR actor_user_id=ANY($1::uuid[])", [userIds]);
+   await pool.query("DELETE FROM user_roles WHERE user_id=ANY($1::uuid[])", [userIds]);
++  await pool.query("DELETE FROM admin_2fa_challenges WHERE user_id=ANY($1::uuid[])", [userIds]);
+   await pool.query("DELETE FROM refresh_tokens WHERE session_id IN (SELECT id FROM sessions WHERE user_id=ANY($1::uuid[]))", [userIds]);
+   await pool.query("DELETE FROM sessions WHERE user_id=ANY($1::uuid[])", [userIds]);
+   await pool.query("DELETE FROM users WHERE id=ANY($1::uuid[])", [userIds]);
+diff --git a/backend/test/unit/schema.test.ts b/backend/test/unit/schema.test.ts
+index 4157226..da7f141 100644
+--- a/backend/test/unit/schema.test.ts
++++ b/backend/test/unit/schema.test.ts
+@@ -3,16 +3,17 @@ import { test } from "node:test";
+ import { getTableName } from "drizzle-orm";
+ import * as schema from "../../src/database/schema";
+ 
+-test("schema exporta as 23 tabelas do dicionário v0.6.12 uma única vez", () => {
++test("schema exporta as 24 tabelas do dicionário v0.6.12 uma única vez", () => {
+   const tables = Object.values(schema);
+   const names = tables.map((table) => getTableName(table));
+-  assert.equal(names.length, 23);
+-  assert.equal(new Set(names).size, 23);
++  assert.equal(names.length, 24);
++  assert.equal(new Set(names).size, 24);
++  assert.equal(getTableName(schema.adminTwoFactorChallenges), "admin_2fa_challenges");
+   assert.deepEqual(new Set(names), new Set([
+     "users", "questionnaire_versions", "profiles", "games", "user_games",
+     "sessions", "refresh_tokens", "password_reset_tokens", "email_verification_tokens",
+     "user_roles", "user_totp_credentials", "user_backup_codes", "totp_activation_tokens", "audit_logs",
+     "events", "experiences", "stations", "participations", "queue_entries", "service_sessions",
+-    "evaluations", "participation_profile_snapshots", "idempotency_operations",
++    "evaluations", "participation_profile_snapshots", "idempotency_operations", "admin_2fa_challenges",
+   ]));
+ });
+diff --git a/docs/ARQUITETURA_BACKEND_ARENAGO.md b/docs/ARQUITETURA_BACKEND_ARENAGO.md
+index 3fdbc30..702273b 100644
+--- a/docs/ARQUITETURA_BACKEND_ARENAGO.md
++++ b/docs/ARQUITETURA_BACKEND_ARENAGO.md
+@@ -465,7 +465,7 @@ As seções 14–18 são **especificações técnicas candidatas**. Exemplos JSO
+ 
+ Não retornar sessão privilegiada nem refresh token definitivo antes do TOTP. `tempToken` não serve para chamar as APIs comuns. A aprovação da possibilidade de um Admin atuar como participante **continua pendente**, não presumir comportamento na UI nem permissão pelo tipo de conta.
+ 
+-**Erros:** `401` credenciais inválidas sem revelar se e-mail existe; `429` excesso de tentativas. **Regra aprovada:** login novo revoga sessão anterior; isso não apaga participação em evento, posição ou conclusões.
++**Erros:** `401` credenciais inválidas sem revelar se e-mail existe; `429` excesso de tentativas. **Regra aprovada:** login novo concluído revoga sessão anterior; para Admin, a conclusão ocorre somente após segundo fator válido. A emissão do desafio após senha correta não emite sessão nem revoga a anterior. Para Participante/Staff, o login continua concluído após senha válida. Revogar sessão não apaga participação em evento, posição ou conclusões.
+ 
+ ### 14.5 `GET /auth/me` e recuperação de estado
+ 
+diff --git a/backend/drizzle/0006_admin_2fa_login.sql b/backend/drizzle/0006_admin_2fa_login.sql
+new file mode 100644
+index 0000000..b0e3da0
+--- /dev/null
++++ b/backend/drizzle/0006_admin_2fa_login.sql
+@@ -0,0 +1,22 @@
++ALTER TABLE "user_totp_credentials"
++  ADD COLUMN "last_totp_counter" bigint;
++--> statement-breakpoint
++CREATE TABLE "admin_2fa_challenges" (
++	"jti" uuid PRIMARY KEY NOT NULL,
++	"user_id" uuid NOT NULL,
++	"issued_at" timestamp with time zone NOT NULL,
++	"expires_at" timestamp with time zone NOT NULL,
++	"consumed_at" timestamp with time zone,
++	"invalidated_at" timestamp with time zone,
++	"created_at" timestamp with time zone NOT NULL
++);
++--> statement-breakpoint
++ALTER TABLE "admin_2fa_challenges" ADD CONSTRAINT "ck_admin_2fa_challenges_expiration" CHECK ("expires_at" > "issued_at" AND "expires_at" <= "issued_at" + interval '5 minutes');
++--> statement-breakpoint
++ALTER TABLE "admin_2fa_challenges" ADD CONSTRAINT "ck_admin_2fa_challenges_terminal" CHECK (NOT ("consumed_at" IS NOT NULL AND "invalidated_at" IS NOT NULL));
++--> statement-breakpoint
++ALTER TABLE "admin_2fa_challenges" ADD CONSTRAINT "fk_admin_2fa_challenges_user" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE no action ON UPDATE no action;
++--> statement-breakpoint
++CREATE INDEX "ix_admin_2fa_challenges_user_created" ON "admin_2fa_challenges" USING btree ("user_id","created_at");
++--> statement-breakpoint
++CREATE INDEX "ix_admin_2fa_challenges_expires" ON "admin_2fa_challenges" USING btree ("expires_at");
+diff --git a/backend/src/auth/admin-two-factor.crypto.ts b/backend/src/auth/admin-two-factor.crypto.ts
+new file mode 100644
+index 0000000..36eb92f
+--- /dev/null
++++ b/backend/src/auth/admin-two-factor.crypto.ts
+@@ -0,0 +1,68 @@
++import { timingSafeEqual } from "node:crypto";
++import { totpCode } from "./totp-activation.crypto";
++
++/**
++ * Resolve o contador TOTP aceito usando o relógio do banco informado pelo
++ * chamador. Só retorna passos ainda não usados nesta credencial.
++ */
++export function matchingTotpCounter(
++  secret: string,
++  code: string,
++  nowMs: number,
++  lastAcceptedCounter: number | null,
++): number | null {
++  if (!/^[0-9]{6}$/.test(code) || !Number.isFinite(nowMs) || nowMs < 0) {
++    return null;
++  }
++  if (lastAcceptedCounter !== null && (!Number.isSafeInteger(lastAcceptedCounter) || lastAcceptedCounter < 0)) {
++    return null;
++  }
++
++  const currentCounter = Math.floor(nowMs / 30_000);
++  let matchedCounter: number | null = null;
++  for (const counter of [currentCounter - 1, currentCounter, currentCounter + 1]) {
++    if (counter < 0 || (lastAcceptedCounter !== null && counter <= lastAcceptedCounter)) {
++      continue;
++    }
++    const expected = Buffer.from(totpCode(secret, counter * 30_000), "ascii");
++    const supplied = Buffer.from(code, "ascii");
++    if (timingSafeEqual(supplied, expected)) {
++      matchedCounter = matchedCounter === null ? counter : Math.max(matchedCounter, counter);
++    }
++  }
++  return matchedCounter;
++}
++
++export function isRecoveryCodeFormat(code: string): boolean {
++  return /^[a-f0-9]{32}$/.test(code);
++}
++
++/** Recovery code precisa da chave HMAC, sem depender da abertura do segredo AES. */
++export function readRecoveryHmacKey(env: Record<string, string | undefined>): Buffer {
++  const raw = env.TOTP_RECOVERY_HMAC_KEY;
++  if (!raw || !/^[A-Za-z0-9+/]{43}=$/.test(raw)) {
++    throw new Error("Configuração de recovery indisponível.");
++  }
++  const key = Buffer.from(raw, "base64");
++  if (key.length !== 32 || key.toString("base64") !== raw) {
++    throw new Error("Configuração de recovery indisponível.");
++  }
++  const assertIndependent = (candidate: Buffer): void => {
++    if (candidate.length === key.length && timingSafeEqual(candidate, key)) {
++      throw new Error("Chave HMAC de recovery deve ser independente.");
++    }
++  };
++  for (const jwt of [env.JWT_SECRET, env.JWT_TEMP_SECRET]) {
++    if (!jwt) continue;
++    assertIndependent(Buffer.from(jwt, "utf8"));
++    assertIndependent(Buffer.from(jwt, "base64"));
++  }
++  const encryptionRaw = env.TOTP_ENCRYPTION_KEY;
++  if (encryptionRaw && /^[A-Za-z0-9+/]{43}=$/.test(encryptionRaw)) {
++    const encryption = Buffer.from(encryptionRaw, "base64");
++    if (encryption.length === 32 && encryption.toString("base64") === encryptionRaw) {
++      assertIndependent(encryption);
++    }
++  }
++  return key;
++}
+diff --git a/backend/test/integration/admin-two-factor-login.integration.test.ts b/backend/test/integration/admin-two-factor-login.integration.test.ts
+new file mode 100644
+index 0000000..9a7516d
+--- /dev/null
++++ b/backend/test/integration/admin-two-factor-login.integration.test.ts
+@@ -0,0 +1,528 @@
++import assert from "node:assert/strict";
++import { randomBytes, randomUUID } from "node:crypto";
++import type { AddressInfo } from "node:net";
++import { after, afterEach, before, test } from "node:test";
++import { Module, type INestApplication } from "@nestjs/common";
++import { APP_FILTER, NestFactory } from "@nestjs/core";
++import * as argon2 from "argon2";
++import { Pool } from "pg";
++import { AuthController } from "../../src/auth/auth.controller";
++import { AuthService } from "../../src/auth/auth.service";
++import { EmailVerificationHttpService } from "../../src/auth/email-verification-http.service";
++import { LoginRateLimiterService } from "../../src/auth/login-rate-limiter.service";
++import { RegistrationRateLimiterService } from "../../src/auth/registration-rate-limiter.service";
++import { SessionAuthGuard } from "../../src/auth/session-auth.guard";
++import {
++  encryptTotpSecret,
++  generateRecoveryCodes,
++  generateTotpSecret,
++  hashActivationToken,
++  readTotpKeys,
++  recoveryCodeHash,
++  totpCode,
++} from "../../src/auth/totp-activation.crypto";
++import {
++  ACCESS_TOKEN_TTL_SECONDS,
++  generateOpaqueRefreshToken,
++  SESSION_ABSOLUTE_TTL_MS,
++  signAccessToken,
++  signTempTwoFactorToken,
++} from "../../src/auth/token.util";
++import { POSTGRES_POOL } from "../../src/database/database.module";
++import { ProblemDetailsExceptionFilter } from "../../src/common/errors/problem-details.filter";
++import { assertFirstAdminBootstrapTestDatabaseUrls } from "./first-admin-bootstrap-db-guard";
++
++// A guarda B1 exige três URLs idênticas para 127.0.0.1:55432/arenago_bootstrap_test.
++const connectionString = assertFirstAdminBootstrapTestDatabaseUrls(process.env);
++process.env.TOTP_ENCRYPTION_KEY = Buffer.alloc(32, 31).toString("base64");
++process.env.TOTP_RECOVERY_HMAC_KEY = Buffer.alloc(32, 47).toString("base64");
++const keys = readTotpKeys(process.env);
++const pool = new Pool({ connectionString, application_name: `t61c-${randomUUID()}`, max: 12 });
++const fixtureUsers: string[] = [];
++const fixtureEvents: string[] = [];
++const password = "T6.1-C-fixture-only-password";
++let passwordHash: string;
++let app: INestApplication;
++let baseUrl: string;
++
++@Module({
++  controllers: [AuthController],
++  providers: [
++    { provide: POSTGRES_POOL, useValue: pool },
++    AuthService,
++    LoginRateLimiterService,
++    RegistrationRateLimiterService,
++    SessionAuthGuard,
++    { provide: EmailVerificationHttpService, useValue: { request: async () => ({}), confirm: async () => ({ verified: false }) } },
++    { provide: APP_FILTER, useClass: ProblemDetailsExceptionFilter },
++  ],
++})
++class AdminTwoFactorIntegrationModule {}
++
++interface AccountFixture { id: string; email: string; secret: string; recoveryCode: string }
++interface Reply { status: number; headers: Headers; body: Record<string, unknown> }
++
++async function account(options?: { active?: boolean; verified?: boolean; totp?: boolean }): Promise<AccountFixture> {
++  const id = randomUUID();
++  const email = `${id}@example.test`;
++  const authorizationId = randomUUID();
++  const secret = generateTotpSecret();
++  const activationToken = randomBytes(32).toString("base64url");
++  const now = new Date();
++  await pool.query(
++    `INSERT INTO users(id,name,email,password_hash,email_verified_at,is_active,created_at,updated_at)
++     VALUES($1,'Admin C fixture',$2,$3,$4,$5,clock_timestamp(),clock_timestamp())`,
++    [id, email, passwordHash, options?.verified === false ? null : now, options?.active === false ? false : true],
++  );
++  fixtureUsers.push(id);
++  await pool.query(
++    `INSERT INTO user_roles(id,user_id,role,event_id,granted_at)
++     VALUES($1,$2,'admin',NULL,clock_timestamp())`,
++    [randomUUID(), id],
++  );
++  await pool.query(
++    `INSERT INTO totp_activation_tokens(id,user_id,token_hash,issued_by,expires_at,used_at,revoked_at,created_at)
++     VALUES($1,$2,$3,NULL,clock_timestamp()+interval '1 day',clock_timestamp(),NULL,clock_timestamp())`,
++    [authorizationId, id, hashActivationToken(activationToken)],
++  );
++  await pool.query(
++    `INSERT INTO audit_logs(id,actor_user_id,target_user_id,event_id,origin,category,action,metadata,occurred_at)
++     VALUES($1,$2,$2,NULL,'user','identity','totp_initial_activated','{}'::jsonb,clock_timestamp())`,
++    [randomUUID(), id],
++  );
++  if (options?.totp !== false) {
++    await pool.query(
++      `INSERT INTO user_totp_credentials(id,user_id,secret_encrypted,is_verified,verified_at,created_at,updated_at)
++       VALUES($1,$2,$3,true,clock_timestamp(),clock_timestamp(),clock_timestamp())`,
++      [randomUUID(), id, encryptTotpSecret(secret, keys.encryption, id, authorizationId)],
++    );
++    const recovery = generateRecoveryCodes(id, keys.recovery);
++    for (const code of recovery) {
++      await pool.query(
++        `INSERT INTO user_backup_codes(id,user_id,code_hash,used_at,created_at)
++         VALUES($1,$2,$3,NULL,clock_timestamp())`,
++        [randomUUID(), id, code.hash],
++      );
++    }
++    return { id, email, secret, recoveryCode: recovery[0].raw };
++  }
++  return { id, email, secret, recoveryCode: "" };
++}
++
++async function request(path: string, body: unknown, method = "POST"): Promise<Reply> {
++  const response = await fetch(`${baseUrl}${path}`, {
++    method,
++    headers: { "Content-Type": "application/json" },
++    ...(method === "GET" ? {} : { body: JSON.stringify(body) }),
++  });
++  return { status: response.status, headers: response.headers, body: await response.json() as Record<string, unknown> };
++}
++
++async function challenge(fixture: AccountFixture, configured = true): Promise<string> {
++  const login = await request("/auth/login", { email: fixture.email, password });
++  assert.equal(login.status, 200);
++  assert.equal(login.body.requires2FA, true);
++  assert.equal(login.body.isTotpConfigured, configured);
++  return login.body.tempToken as string;
++}
++
++async function currentCode(secret: string): Promise<string> {
++  const result = await pool.query<{ now: Date }>("SELECT clock_timestamp() AS now");
++  return totpCode(secret, new Date(result.rows[0].now).getTime());
++}
++
++async function installFailureTrigger(kind: "audit" | "refresh" | "commit", userId: string): Promise<() => Promise<void>> {
++  const suffix = randomUUID().replaceAll("-", "");
++  const functionName = `t6c_fail_${suffix}`;
++  const triggerName = `t6c_trigger_${suffix}`;
++  let table: string;
++  let condition: string;
++  if (kind === "audit") {
++    table = "audit_logs";
++    condition = `NEW.target_user_id = '${userId}' AND NEW.action = 'admin_2fa_login_succeeded'`;
++  } else if (kind === "refresh") {
++    table = "refresh_tokens";
++    condition = `EXISTS (SELECT 1 FROM sessions s WHERE s.id = NEW.session_id AND s.user_id = '${userId}')`;
++  } else {
++    table = "sessions";
++    condition = `NEW.user_id = '${userId}'`;
++  }
++  await pool.query(`CREATE FUNCTION public.${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$
++    BEGIN IF ${condition} THEN RAISE EXCEPTION 'T6.1-C injected database failure' USING ERRCODE='P0001'; END IF; RETURN NEW; END $$`);
++  if (kind === "commit") {
++    await pool.query(`CREATE CONSTRAINT TRIGGER ${triggerName} AFTER INSERT ON ${table}
++      DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.${functionName}()`);
++  } else {
++    await pool.query(`CREATE TRIGGER ${triggerName} AFTER INSERT ON ${table}
++      FOR EACH ROW EXECUTE FUNCTION public.${functionName}()`);
++  }
++  return async () => {
++    await pool.query(`DROP TRIGGER IF EXISTS ${triggerName} ON ${table}`);
++    await pool.query(`DROP FUNCTION IF EXISTS public.${functionName}()`);
++  };
++}
++
++async function cleanFixture(id: string): Promise<void> {
++  await pool.query("DELETE FROM refresh_tokens WHERE session_id IN (SELECT id FROM sessions WHERE user_id=$1)", [id]);
++  await pool.query("DELETE FROM sessions WHERE user_id=$1", [id]);
++  await pool.query("DELETE FROM admin_2fa_challenges WHERE user_id=$1", [id]);
++  await pool.query("DELETE FROM user_backup_codes WHERE user_id=$1", [id]);
++  await pool.query("DELETE FROM user_totp_credentials WHERE user_id=$1", [id]);
++  await pool.query("DELETE FROM totp_activation_tokens WHERE user_id=$1", [id]);
++  await pool.query("DELETE FROM audit_logs WHERE target_user_id=$1 OR actor_user_id=$1", [id]);
++  await pool.query("DELETE FROM user_roles WHERE user_id=$1", [id]);
++  await pool.query("DELETE FROM users WHERE id=$1", [id]);
++}
++
++async function staffAccount(): Promise<{ id: string; email: string }> {
++  const id = randomUUID();
++  const eventId = randomUUID();
++  const email = `${id}@example.test`;
++  fixtureUsers.push(id);
++  fixtureEvents.push(eventId);
++  await pool.query(`INSERT INTO users(id,name,email,password_hash,email_verified_at,is_active,created_at,updated_at)
++    VALUES($1,'Staff C fixture',$2,$3,clock_timestamp(),true,clock_timestamp(),clock_timestamp())`, [id, email, passwordHash]);
++  await pool.query(`INSERT INTO events(id,name,access_code_normalized,timezone,starts_at,official_ends_at,operational_deadline_at,status,external_queue_enabled,created_at,updated_at)
++    VALUES($1,'Staff C fixture',$2,'America/Sao_Paulo',clock_timestamp()+interval '1 day',clock_timestamp()+interval '2 days',clock_timestamp()+interval '2 days 30 minutes','scheduled',false,clock_timestamp(),clock_timestamp())`, [eventId, `C${randomUUID().replaceAll('-', '').slice(0, 12).toUpperCase()}`]);
++  await pool.query("INSERT INTO user_roles(id,user_id,role,event_id,granted_at) VALUES($1,$2,'staff',$3,clock_timestamp())", [randomUUID(), id, eventId]);
++  return { id, email };
++}
++
++before(async () => {
++  const destination = await pool.query<{ name: string }>("SELECT current_database() AS name");
++  assert.equal(destination.rows[0].name, "arenago_bootstrap_test", "T6.1-C exige o banco dedicado; nenhum fixture será criado em outro destino.");
++  passwordHash = await argon2.hash(password);
++  app = await NestFactory.create(AdminTwoFactorIntegrationModule, { logger: false });
++  app.setGlobalPrefix("api/v1");
++  await app.listen(0, "127.0.0.1");
++  baseUrl = `http://127.0.0.1:${(app.getHttpServer().address() as AddressInfo).port}/api/v1`;
++});
++
++afterEach(async () => {
++  for (const id of fixtureUsers.splice(0)) await cleanFixture(id);
++  for (const id of fixtureEvents.splice(0)) await pool.query("DELETE FROM events WHERE id=$1", [id]);
++});
++
++after(async () => {
++  if (app) await app.close();
++  await pool.end();
++});
++
++test("T6.1-C PostgreSQL login Admin exige TOTP ou recovery code e emite sessão atômica", async (t) => {
++  await t.test("primeiro login Admin sem desafios anteriores persiste exatamente o novo desafio", async () => {
++    const fixture = await account();
++    const before = await pool.query<{ count: number }>(
++      "SELECT count(*)::int AS count FROM admin_2fa_challenges WHERE user_id=$1",
++      [fixture.id],
++    );
++    assert.equal(before.rows[0].count, 0);
++
++    const tempToken = await challenge(fixture);
++    const claims = JSON.parse(Buffer.from(tempToken.split(".")[1], "base64url").toString("utf8")) as { jti: string };
++    const persisted = await pool.query<{ jti: string; consumed_at: Date | null; invalidated_at: Date | null }>(
++      "SELECT jti,consumed_at,invalidated_at FROM admin_2fa_challenges WHERE user_id=$1",
++      [fixture.id],
++    );
++    assert.equal(persisted.rowCount, 1);
++    assert.equal(persisted.rows[0].jti, claims.jti);
++    assert.equal(persisted.rows[0].consumed_at, null);
++    assert.equal(persisted.rows[0].invalidated_at, null);
++    const sessions = await pool.query("SELECT id FROM sessions WHERE user_id=$1", [fixture.id]);
++    assert.equal(sessions.rowCount, 0);
++  });
++
++  await t.test("TOTP válido cria uma única sessão verificada e o endpoint não armazena resposta", async () => {
++    const fixture = await account();
++    const beforeCounts = await pool.query<{ participations: number; entries: number }>(
++      `SELECT (SELECT count(*)::int FROM participations WHERE user_id=$1) AS participations,
++              (SELECT count(*)::int FROM queue_entries qe JOIN participations p ON p.id=qe.participation_id WHERE p.user_id=$1) AS entries`, [fixture.id]);
++    const tempToken = await challenge(fixture);
++    const result = await request("/auth/2fa/verify", { tempToken, code: await currentCode(fixture.secret) });
++    assert.equal(result.status, 200);
++    assert.equal(result.headers.get("cache-control"), "no-store");
++    assert.equal(result.headers.get("pragma"), "no-cache");
++    assert.equal(result.body.expiresIn, ACCESS_TOKEN_TTL_SECONDS);
++    assert.equal("recoveryCodes" in result.body, false);
++    const sessions = await pool.query<{ admin_2fa_verified_at: Date | null; n: number }>(
++      `SELECT admin_2fa_verified_at,(SELECT count(*)::int FROM sessions WHERE user_id=$1 AND revoked_at IS NULL) AS n
++       FROM sessions WHERE user_id=$1 AND revoked_at IS NULL`, [fixture.id]);
++    assert.equal(sessions.rowCount, 1);
++    assert.ok(sessions.rows[0].admin_2fa_verified_at instanceof Date);
++    assert.equal(sessions.rows[0].n, 1);
++    const afterCounts = await pool.query<{ participations: number; entries: number }>(
++      `SELECT (SELECT count(*)::int FROM participations WHERE user_id=$1) AS participations,
++              (SELECT count(*)::int FROM queue_entries qe JOIN participations p ON p.id=qe.participation_id WHERE p.user_id=$1) AS entries`, [fixture.id]);
++    assert.deepEqual(afterCounts.rows[0], beforeCounts.rows[0]);
++    const me = await fetch(`${baseUrl}/auth/me`, { headers: { Authorization: `Bearer ${result.body.accessToken as string}` } });
++    assert.equal(me.status, 200);
++  });
++
++  await t.test("recovery code é consumido junto à sessão e não pode ser reapresentado", async () => {
++    const fixture = await account();
++    const first = await request("/auth/2fa/verify", { tempToken: await challenge(fixture), code: fixture.recoveryCode });
++    assert.equal(first.status, 200);
++    const used = await pool.query("SELECT used_at FROM user_backup_codes WHERE user_id=$1 AND code_hash=$2", [fixture.id, recoveryCodeHash(fixture.recoveryCode, fixture.id, keys.recovery)]);
++    assert.ok(used.rows[0].used_at instanceof Date);
++    const second = await request("/auth/2fa/verify", { tempToken: await challenge(fixture), code: fixture.recoveryCode });
++    assert.equal(second.status, 401);
++    assert.equal(second.body.code, "ADMIN_2FA_INVALID");
++  });
++
++  await t.test("código incorreto registra tentativa persistente e não cria sessão", async () => {
++    const fixture = await account();
++    const valid = new Set([-30_000, 0, 30_000].map(offset => totpCode(fixture.secret, Date.now() + offset)));
++    let wrong = "000000";
++    while (valid.has(wrong)) wrong = String((Number(wrong) + 1) % 1_000_000).padStart(6, "0");
++    const tempToken = await challenge(fixture);
++    for (let attempt = 0; attempt < 5; attempt += 1) {
++      const result = await request("/auth/2fa/verify", { tempToken, code: wrong });
++      assert.equal(result.status, 401);
++      assert.equal(result.body.code, "ADMIN_2FA_INVALID");
++    }
++    const rateLimited = await request("/auth/2fa/verify", { tempToken, code: await currentCode(fixture.secret) });
++    assert.equal(rateLimited.status, 429);
++    assert.equal((await pool.query("SELECT 1 FROM sessions WHERE user_id=$1 AND revoked_at IS NULL", [fixture.id])).rowCount, 0);
++    assert.equal((await pool.query("SELECT count(*)::int AS n FROM audit_logs WHERE target_user_id=$1 AND action='admin_2fa_login_rejected'", [fixture.id])).rows[0].n, 5);
++  });
++
++  await t.test("recovery code concorrente só cria uma sessão e só um consumo", async () => {
++    const fixture = await account();
++    const tempToken = await challenge(fixture);
++    const body = { tempToken, code: fixture.recoveryCode };
++    const outcomes = await Promise.all([request("/auth/2fa/verify", body), request("/auth/2fa/verify", body)]);
++    assert.deepEqual(outcomes.map(item => item.status).sort(), [200, 401]);
++    assert.equal((await pool.query("SELECT count(*)::int AS n FROM sessions WHERE user_id=$1 AND revoked_at IS NULL", [fixture.id])).rows[0].n, 1);
++    assert.equal((await pool.query("SELECT count(*)::int AS n FROM user_backup_codes WHERE user_id=$1 AND used_at IS NOT NULL", [fixture.id])).rows[0].n, 1);
++  });
++
++  await t.test("desafio expirado, adulterado e invalidado por nova senha não autentica", async () => {
++    const fixture = await account();
++    const issuedAtResult = await pool.query<{ now: Date }>("SELECT clock_timestamp() AS now");
++    const issuedAt = new Date(issuedAtResult.rows[0].now.getTime() - 10 * 60_000);
++    const expired = signTempTwoFactorToken(fixture.id, { nowMs: issuedAt.getTime() });
++    const claims = JSON.parse(Buffer.from(expired.split(".")[1], "base64url").toString("utf8")) as {
++      sub: string; type: string; jti: string; iat: number; exp: number;
++    };
++    assert.equal(claims.sub, fixture.id);
++    assert.equal(claims.type, "2fa_challenge");
++    assert.ok(claims.exp * 1_000 <= issuedAtResult.rows[0].now.getTime());
++    await pool.query(
++      `INSERT INTO admin_2fa_challenges(jti,user_id,issued_at,expires_at,consumed_at,invalidated_at,created_at)
++       VALUES($1,$2,$3,$4,NULL,NULL,clock_timestamp())`,
++      [claims.jti, fixture.id, new Date(claims.iat * 1_000), new Date(claims.exp * 1_000)],
++    );
++    const expiredResult = await request("/auth/2fa/verify", {
++      tempToken: expired,
++      code: await currentCode(fixture.secret),
++    });
++    assert.equal(expiredResult.status, 401);
++    assert.equal((await pool.query("SELECT count(*)::int AS n FROM sessions WHERE user_id=$1", [fixture.id])).rows[0].n, 0);
++    assert.equal((await pool.query("SELECT count(*)::int AS n FROM user_backup_codes WHERE user_id=$1 AND used_at IS NOT NULL", [fixture.id])).rows[0].n, 0);
++    const previous = await challenge(fixture);
++    const latest = await challenge(fixture);
++    assert.notEqual(previous, latest);
++    assert.equal((await request("/auth/2fa/verify", { tempToken: previous, code: await currentCode(fixture.secret) })).status, 401);
++    const parts = latest.split(".");
++    const tampered = `${parts[0]}.${parts[1]}.${"A".repeat(parts[2].length)}`;
++    assert.equal((await request("/auth/2fa/verify", { tempToken: tampered, code: await currentCode(fixture.secret) })).status, 401);
++  });
++
++  await t.test("segredo adulterado, chave AES incorreta e referência de autorização ambígua são rejeitados", async () => {
++    const tampered = await account();
++    await pool.query("UPDATE user_totp_credentials SET secret_encrypted='v1.invalid' WHERE user_id=$1", [tampered.id]);
++    const tamperedResult = await request("/auth/2fa/verify", { tempToken: await challenge(tampered), code: await currentCode(tampered.secret) });
++    assert.equal(tamperedResult.status, 503);
++    assert.equal(tamperedResult.body.code, "TOTP_CONFIGURATION_UNAVAILABLE");
++
++    const wrongKey = await account();
++    const wrongKeyToken = await challenge(wrongKey);
++    const originalKey = process.env.TOTP_ENCRYPTION_KEY;
++    try {
++      process.env.TOTP_ENCRYPTION_KEY = Buffer.alloc(32, 99).toString("base64");
++      const result = await request("/auth/2fa/verify", { tempToken: wrongKeyToken, code: await currentCode(wrongKey.secret) });
++      assert.equal(result.status, 503);
++      assert.equal(result.body.code, "TOTP_CONFIGURATION_UNAVAILABLE");
++    } finally {
++      process.env.TOTP_ENCRYPTION_KEY = originalKey;
++    }
++
++    const ambiguous = await account();
++    await pool.query(`INSERT INTO totp_activation_tokens(id,user_id,token_hash,issued_by,expires_at,used_at,revoked_at,created_at)
++      VALUES($1,$2,$3,NULL,clock_timestamp()+interval '1 day',clock_timestamp(),NULL,clock_timestamp())`,
++    [randomUUID(), ambiguous.id, hashActivationToken(randomBytes(32).toString("base64url"))]);
++    const result = await request("/auth/2fa/verify", { tempToken: await challenge(ambiguous), code: await currentCode(ambiguous.secret) });
++    assert.equal(result.status, 503);
++    assert.equal(result.body.code, "TOTP_CONFIGURATION_UNAVAILABLE");
++
++    const recoveryOnly = await account();
++    const recoveryChallenge = await challenge(recoveryOnly);
++    const configuredEncryptionKey = process.env.TOTP_ENCRYPTION_KEY;
++    try {
++      delete process.env.TOTP_ENCRYPTION_KEY;
++      const recovered = await request("/auth/2fa/verify", { tempToken: recoveryChallenge, code: recoveryOnly.recoveryCode });
++      assert.equal(recovered.status, 200);
++    } finally {
++      process.env.TOTP_ENCRYPTION_KEY = configuredEncryptionKey;
++    }
++  });
++
++  await t.test("falha SQL após escritas de sessão/auditoria reverte fator e permite retry", async () => {
++    const fixture = await account();
++    const tempToken = await challenge(fixture);
++    const code = await currentCode(fixture.secret);
++    const removeRefreshFailure = await installFailureTrigger("refresh", fixture.id);
++    try {
++      const failedInsert = await request("/auth/2fa/verify", { tempToken, code });
++      assert.equal(failedInsert.status, 500);
++    } finally {
++      await removeRefreshFailure();
++    }
++    assert.equal((await pool.query("SELECT consumed_at FROM admin_2fa_challenges WHERE user_id=$1", [fixture.id])).rows[0].consumed_at, null);
++    assert.equal((await pool.query("SELECT last_totp_counter FROM user_totp_credentials WHERE user_id=$1", [fixture.id])).rows[0].last_totp_counter, null);
++    assert.equal((await pool.query("SELECT 1 FROM sessions WHERE user_id=$1 AND revoked_at IS NULL", [fixture.id])).rowCount, 0);
++
++    const removeAuditFailure = await installFailureTrigger("audit", fixture.id);
++    try {
++      const failedAudit = await request("/auth/2fa/verify", { tempToken, code });
++      assert.equal(failedAudit.status, 500);
++    } finally {
++      await removeAuditFailure();
++    }
++    assert.equal((await pool.query("SELECT consumed_at FROM admin_2fa_challenges WHERE user_id=$1", [fixture.id])).rows[0].consumed_at, null);
++    assert.equal((await pool.query("SELECT last_totp_counter FROM user_totp_credentials WHERE user_id=$1", [fixture.id])).rows[0].last_totp_counter, null);
++    assert.equal((await pool.query("SELECT 1 FROM sessions WHERE user_id=$1 AND revoked_at IS NULL", [fixture.id])).rowCount, 0);
++    assert.equal((await request("/auth/2fa/verify", { tempToken, code })).status, 200);
++  });
++
++  await t.test("erro deferred no COMMIT não devolve tokens nem persiste efeitos", async () => {
++    const fixture = await account();
++    const tempToken = await challenge(fixture);
++    const recoveryCode = fixture.recoveryCode;
++    const removeFailure = await installFailureTrigger("commit", fixture.id);
++    let result: Reply;
++    try {
++      result = await request("/auth/2fa/verify", { tempToken, code: recoveryCode });
++      assert.equal(result.status, 500);
++      assert.equal("accessToken" in result.body, false);
++      assert.equal("refreshToken" in result.body, false);
++    } finally {
++      await removeFailure();
++    }
++    assert.equal((await pool.query("SELECT consumed_at FROM admin_2fa_challenges WHERE user_id=$1", [fixture.id])).rows[0].consumed_at, null);
++    assert.equal((await pool.query("SELECT used_at FROM user_backup_codes WHERE user_id=$1 AND code_hash=$2", [fixture.id, recoveryCodeHash(recoveryCode, fixture.id, keys.recovery)])).rows[0].used_at, null);
++    assert.equal((await pool.query("SELECT 1 FROM sessions WHERE user_id=$1 AND revoked_at IS NULL", [fixture.id])).rowCount, 0);
++  });
++
++  await t.test("mesmo passo TOTP e mesmo desafio não podem concluir dois logins", async () => {
++    const fixture = await account();
++    const tempToken = await challenge(fixture);
++    const code = await currentCode(fixture.secret);
++    const [first, second] = await Promise.all([
++      request("/auth/2fa/verify", { tempToken, code }),
++      request("/auth/2fa/verify", { tempToken, code }),
++    ]);
++    assert.deepEqual([first.status, second.status].sort(), [200, 401]);
++    assert.equal((await pool.query("SELECT count(*)::int AS n FROM sessions WHERE user_id=$1 AND revoked_at IS NULL", [fixture.id])).rows[0].n, 1);
++    const latest = await challenge(fixture);
++    const replay = await request("/auth/2fa/verify", { tempToken: latest, code });
++    assert.equal(replay.status, 401);
++    assert.equal((await pool.query("SELECT count(*)::int AS n FROM sessions WHERE user_id=$1 AND revoked_at IS NULL", [fixture.id])).rows[0].n, 1);
++  });
++
++  await t.test("sessão anterior permanece até o segundo fator e é então revogada com seu refresh", async () => {
++    const fixture = await account();
++    const sessionId = randomUUID();
++    const { tokenHash } = generateOpaqueRefreshToken();
++    const clock = await pool.query<{ now: Date }>("SELECT clock_timestamp() AS now");
++    const now = new Date(clock.rows[0].now);
++    await pool.query(`INSERT INTO sessions(id,user_id,expires_at,last_activity_at,revoked_at,revocation_reason,admin_2fa_verified_at,ip_address,user_agent,created_at)
++      VALUES($1,$2,$3,$4,NULL,NULL,$4,NULL,NULL,$4)`, [sessionId, fixture.id, new Date(now.getTime() + SESSION_ABSOLUTE_TTL_MS), now]);
++    await pool.query(`INSERT INTO refresh_tokens(id,session_id,token_hash,consumed_at,is_revoked,expires_at,created_at)
++      VALUES($1,$2,$3,NULL,false,$4,$5)`, [randomUUID(), sessionId, tokenHash, new Date(now.getTime() + SESSION_ABSOLUTE_TTL_MS), now]);
++    const oldAccess = signAccessToken({ userId: fixture.id, sessionId }, { nowMs: now.getTime() });
++    const tempToken = await challenge(fixture);
++    const stillActive = await pool.query("SELECT revoked_at FROM sessions WHERE id=$1", [sessionId]);
++    assert.equal(stillActive.rows[0].revoked_at, null);
++    assert.equal((await fetch(`${baseUrl}/auth/me`, { headers: { Authorization: `Bearer ${oldAccess}` } })).status, 200);
++    const verified = await request("/auth/2fa/verify", { tempToken, code: await currentCode(fixture.secret) });
++    assert.equal(verified.status, 200);
++    assert.equal((await fetch(`${baseUrl}/auth/me`, { headers: { Authorization: `Bearer ${oldAccess}` } })).status, 401);
++    assert.equal((await pool.query("SELECT revoked_at FROM sessions WHERE id=$1", [sessionId])).rows[0].revoked_at instanceof Date, true);
++    assert.equal((await pool.query("SELECT is_revoked FROM refresh_tokens WHERE session_id=$1", [sessionId])).rows[0].is_revoked, true);
++  });
++
++  await t.test("duas solicitações de login concorrentes deixam somente o desafio mais recente utilizável", async () => {
++    const fixture = await account();
++    const [a, b] = await Promise.all([
++      request("/auth/login", { email: fixture.email, password }),
++      request("/auth/login", { email: fixture.email, password }),
++    ]);
++    assert.equal(a.status, 200);
++    assert.equal(b.status, 200);
++    const valid = await pool.query<{ jti: string }>("SELECT jti FROM admin_2fa_challenges WHERE user_id=$1 AND invalidated_at IS NULL AND consumed_at IS NULL", [fixture.id]);
++    assert.equal(valid.rowCount, 1);
++    const tokens = [a.body.tempToken as string, b.body.tempToken as string];
++    const activeToken = tokens.find(token => JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString("utf8")).jti === valid.rows[0].jti);
++    assert.ok(activeToken);
++    const success = await request("/auth/2fa/verify", { tempToken: activeToken, code: await currentCode(fixture.secret) });
++    assert.equal(success.status, 200);
++  });
++
++  await t.test("Admin sem TOTP ativo, conta inativa, e-mail não verificado ou papel revogado não recebe sessão", async () => {
++    const unconfigured = await account({ totp: false });
++    const unconfiguredChallenge = await challenge(unconfigured, false);
++    const notConfigured = await request("/auth/2fa/verify", { tempToken: unconfiguredChallenge, code: "000000" });
++    assert.equal(notConfigured.status, 409);
++    assert.equal(notConfigured.body.code, "ADMIN_TOTP_NOT_CONFIGURED");
++
++    const inactive = await account({ active: false });
++    const inactiveLogin = await request("/auth/login", { email: inactive.email, password });
++    assert.equal(inactiveLogin.status, 401);
++
++    const unverified = await account({ verified: false });
++    const unverifiedLogin = await request("/auth/login", { email: unverified.email, password });
++    assert.equal(unverifiedLogin.status, 200);
++    assert.equal((await request("/auth/2fa/verify", { tempToken: unverifiedLogin.body.tempToken, code: await currentCode(unverified.secret) })).status, 401);
++
++    const revoked = await account();
++    const revokedChallenge = await challenge(revoked);
++    await pool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE user_id=$1 AND role='admin'", [revoked.id]);
++    assert.equal((await request("/auth/2fa/verify", { tempToken: revokedChallenge, code: await currentCode(revoked.secret) })).status, 401);
++  });
++
++  await t.test("DTO rejeita identidade de cliente; login participante mantém fluxo sem TOTP", async () => {
++    const fixture = await account();
++    const token = await challenge(fixture);
++    const injected = await request("/auth/2fa/verify", { tempToken: token, code: "123456", userId: fixture.id });
++    assert.equal(injected.status, 400);
++    const participantId = randomUUID();
++    const participantEmail = `${participantId}@example.test`;
++    await pool.query(`INSERT INTO users(id,name,email,password_hash,email_verified_at,is_active,created_at,updated_at)
++      VALUES($1,'Participante C',$2,$3,clock_timestamp(),true,clock_timestamp(),clock_timestamp())`, [participantId, participantEmail, passwordHash]);
++    fixtureUsers.push(participantId);
++    await pool.query("INSERT INTO user_roles(id,user_id,role,event_id,granted_at) VALUES($1,$2,'participante',NULL,clock_timestamp())", [randomUUID(), participantId]);
++    const participant = await request("/auth/login", { email: participantEmail, password });
++    assert.equal(participant.status, 200);
++    assert.equal(participant.body.requires2FA, undefined);
++    assert.equal(typeof participant.body.accessToken, "string");
++
++    const staff = await staffAccount();
++    const staffLogin = await request("/auth/login", { email: staff.email, password });
++    assert.equal(staffLogin.status, 200);
++    assert.equal(staffLogin.body.requires2FA, undefined);
++    assert.equal(typeof staffLogin.body.accessToken, "string");
++  });
++
++  await t.test("refresh e logout preservam os contratos da sessão emitida após TOTP", async () => {
++    const fixture = await account();
++    const login = await request("/auth/2fa/verify", { tempToken: await challenge(fixture), code: await currentCode(fixture.secret) });
++    assert.equal(login.status, 200);
++    const refreshed = await request("/auth/refresh", { refreshToken: login.body.refreshToken });
++    assert.equal(refreshed.status, 200);
++    const me = await fetch(`${baseUrl}/auth/me`, { headers: { Authorization: `Bearer ${refreshed.body.accessToken as string}` } });
++    assert.equal(me.status, 200);
++    const logout = await fetch(`${baseUrl}/auth/logout`, { method: "POST", headers: { Authorization: `Bearer ${refreshed.body.accessToken as string}` } });
++    assert.equal(logout.status, 200);
++    assert.equal((await pool.query("SELECT revoked_at FROM sessions WHERE user_id=$1 ORDER BY created_at DESC LIMIT 1", [fixture.id])).rows[0].revoked_at instanceof Date, true);
++  });
++});
+diff --git a/backend/test/unit/admin-two-factor.unit.test.ts b/backend/test/unit/admin-two-factor.unit.test.ts
+new file mode 100644
+index 0000000..dcceaa5
+--- /dev/null
++++ b/backend/test/unit/admin-two-factor.unit.test.ts
+@@ -0,0 +1,106 @@
++import assert from "node:assert/strict";
++import { randomUUID } from "node:crypto";
++import type { AddressInfo } from "node:net";
++import { test } from "node:test";
++import { Module } from "@nestjs/common";
++import { APP_FILTER, NestFactory } from "@nestjs/core";
++import { AuthController } from "../../src/auth/auth.controller";
++import { AuthService } from "../../src/auth/auth.service";
++import { EmailVerificationHttpService } from "../../src/auth/email-verification-http.service";
++import { SessionAuthGuard } from "../../src/auth/session-auth.guard";
++import { ProblemDetailsExceptionFilter } from "../../src/common/errors/problem-details.filter";
++import { twoFactorVerifySchema, validateDto } from "../../src/auth/auth.dto";
++import { isRecoveryCodeFormat, matchingTotpCounter } from "../../src/auth/admin-two-factor.crypto";
++import { generateTotpSecret, totpCode } from "../../src/auth/totp-activation.crypto";
++import { ProblemException } from "../../src/common/errors/problem.exception";
++
++test("T6.1-C: valida contrato e uso único dos fatores administrativos", async (t) => {
++  await t.test("DTO aceita somente desafio e código TOTP ou recovery code no formato B2", () => {
++    const tempToken = "x".repeat(100);
++    assert.deepEqual(validateDto(twoFactorVerifySchema, { tempToken, code: "000001" }), {
++      tempToken,
++      code: "000001",
++    });
++    assert.equal(validateDto(twoFactorVerifySchema, { tempToken, code: "a".repeat(32) }).code, "a".repeat(32));
++
++    for (const body of [
++      { tempToken, code: "12345" },
++      { tempToken, code: "1234567" },
++      { tempToken, code: "A".repeat(32) },
++      { tempToken, code: "a".repeat(33) },
++      { tempToken, code: 123456 },
++      { tempToken, code: "123456", userId: randomUUID() },
++      { tempToken, code: "123456", role: "admin" },
++    ]) {
++      assert.throws(() => validateDto(twoFactorVerifySchema, body),
++        (error: unknown) => error instanceof ProblemException && error.getStatus() === 400);
++    }
++  });
++
++  await t.test("TOTP respeita janela RFC 6238 e não aceita contador já consumido", () => {
++    const secret = generateTotpSecret();
++    const nowMs = 1_800_000_000_000;
++    const current = Math.floor(nowMs / 30_000);
++    const code = totpCode(secret, nowMs);
++    assert.equal(matchingTotpCounter(secret, code, nowMs, null), current);
++    assert.equal(matchingTotpCounter(secret, code, nowMs, current), null);
++
++    const previousStep = nowMs - 30_000;
++    const previousCode = totpCode(secret, previousStep);
++    assert.equal(matchingTotpCounter(secret, previousCode, nowMs, null), current - 1);
++    assert.equal(matchingTotpCounter(secret, previousCode, nowMs, current - 1), null);
++    assert.equal(matchingTotpCounter(secret, "abcdef", nowMs, null), null);
++  });
++
++  await t.test("formato de recovery code corresponde aos 16 bytes hexadecimais da B2", () => {
++    assert.equal(isRecoveryCodeFormat("a1".repeat(16)), true);
++    assert.equal(isRecoveryCodeFormat("A1".repeat(16)), false);
++    assert.equal(isRecoveryCodeFormat("a1".repeat(15)), false);
++    assert.equal(isRecoveryCodeFormat("a1".repeat(17)), false);
++  });
++});
++
++test("T6.1-C HTTP simulado: rota estrita delega o desafio e marca a resposta como não armazenável", async () => {
++  let received: unknown;
++  @Module({
++    controllers: [AuthController],
++    providers: [
++      { provide: AuthService, useValue: { verifyTwoFactor: async (dto: unknown) => {
++        received = dto;
++        return { user: { id: randomUUID(), name: "Admin", email: "admin@example.test", emailVerified: true, roles: ["admin"], hasCompletedQuestionnaire: false }, accessToken: "access-test", refreshToken: "refresh-test", expiresIn: 900 };
++      } } },
++      { provide: EmailVerificationHttpService, useValue: { request: async () => ({}), confirm: async () => ({ verified: false }) } },
++      SessionAuthGuard,
++      { provide: APP_FILTER, useClass: ProblemDetailsExceptionFilter },
++    ],
++  })
++  class SimulatedAuthModule {}
++
++  const app = await NestFactory.create(SimulatedAuthModule, { logger: false });
++  app.setGlobalPrefix("api/v1");
++  await app.listen(0, "127.0.0.1");
++  try {
++    const address = app.getHttpServer().address() as AddressInfo;
++    const endpoint = `http://127.0.0.1:${address.port}/api/v1/auth/2fa/verify`;
++    const response = await fetch(endpoint, {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ tempToken: "temporary-test-token", code: "001234" }),
++    });
++    assert.equal(response.status, 200);
++    assert.equal(response.headers.get("cache-control"), "no-store");
++    assert.equal(response.headers.get("pragma"), "no-cache");
++    assert.deepEqual(received, { tempToken: "temporary-test-token", code: "001234" });
++    const invalid = await fetch(endpoint, {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ tempToken: "temporary-test-token", code: "001234", userId: randomUUID() }),
++    });
++    assert.equal(invalid.status, 400);
++    assert.equal(invalid.headers.get("content-type")?.includes("application/problem+json"), true);
++    const problem = await invalid.json() as { code?: string };
++    assert.equal(problem.code, "VALIDATION_ERROR");
++  } finally {
++    await app.close();
++  }
++});
+diff --git a/docs/T6_1_C_IMPLEMENTACAO.md b/docs/T6_1_C_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..2fa4794
+--- /dev/null
++++ b/docs/T6_1_C_IMPLEMENTACAO.md
+@@ -0,0 +1,237 @@
++# T6.1-C — Conclusão do login administrativo com TOTP
++
++**Estado:** implementação concluída e aprovada nas validações manuais informadas pelo responsável. Não representa validação de produção ou homologação.
++**Branch/base inicial:** `feature/events-participations` / `7fa5e40d4d50ca9faabca9e94fe8335e553d304f`.
++**B2:** já estava commitada na base. Índice e working tree estavam limpos antes da task.
++
++## Contrato HTTP
++
++`POST /api/v1/auth/2fa/verify` é público e recebe estritamente:
++
++```json
++{ "tempToken": "...", "code": "..." }
++```
++
++`code` é string e aceita exatamente seis dígitos TOTP ou um recovery code hexadecimal minúsculo de 32 caracteres, no formato emitido pela B2. O schema é estrito: não aceita `userId`, e-mail, papel, sessão ou propriedades adicionais. O endpoint retorna o `AuthSessionResponseDto` existente somente após o commit, com projeção pública da conta, access token de 15 minutos, refresh token opaco e `expiresIn: 900`. Segredos, códigos, hashes e campos internos nunca são serializados. Login, verificação, cadastro e refresh retornam `Cache-Control: no-store` e `Pragma: no-cache`.
++
++O desafio é assinado com o segredo temporário existente, tem `type='2fa_challenge'`, UUID de conta e `jti`, duração máxima de cinco minutos e não contém `sid`. A assinatura/formato são verificados antes do acesso ao banco; a validade temporal decisiva é revalidada com `clock_timestamp()` dentro da transação PostgreSQL. A linha persistida do desafio precisa corresponder ao mesmo titular, `jti`, `iat` e `exp`. O mesmo `jti` não pode ser consumido duas vezes; cada novo login Admin invalida os desafios anteriores ainda abertos. O verificador comum de Bearer continua aceitando somente tokens `type='access'`.
++
++Erros RFC 7807: `400 VALIDATION_ERROR`, `401 ADMIN_2FA_INVALID`, `409 ADMIN_TOTP_NOT_CONFIGURED`, `429 ADMIN_2FA_RATE_LIMITED` com `Retry-After: 900`, e `503 TOTP_CONFIGURATION_UNAVAILABLE` para configuração ou estado histórico inconsistente. Respostas de desafio/código inválidos são genéricas.
++
++## Fatores, estado e segurança
++
++- TOTP mantém RFC 6238/SHA-1, passo de 30 segundos, seis dígitos e janela ±1 passo. O instante PostgreSQL é usado na validação. `last_totp_counter` guarda o maior passo aceito na própria credencial; sob lock, um passo igual ou anterior não pode ser reutilizado.
++- Para abrir o segredo AES-256-GCM, a consulta exige exatamente uma autorização inicial consumida (`totp_activation_tokens`, `issued_by IS NULL`) e exatamente um registro `totp_initial_activated`. Ambiguidade, revogação do token ou uso posterior à expiração é rejeitado. O AAD original da B2 (`userId` + `authorizationId`) e a autenticação da cifra são preservados; segredo claro não é persistido.
++- Recovery code usa `recoveryCodeHash` HMAC-SHA-256 da B2, incluindo titular e chave. Os hashes são comparados em tempo constante; o código é marcado `used_at` na mesma transação da sessão. Essa via depende da chave HMAC, não da abertura do segredo AES; TOTP exige a chave AES e a autorização original. Código incorreto, utilizado ou pertencente a outra conta não cria sessão e produz a mesma resposta pública.
++- Falhas de segundo fator são registradas em `audit_logs` sem códigos ou tokens. A conta é bloqueada antes de contar tentativas; cinco rejeições nos últimos 15 minutos bloqueiam tentativas seguintes durante a janela, inclusive após reinício do processo.
++- A ordem de locks começa por `users`, papéis Admin ativos, credencial TOTP, desafio e, para recovery, códigos; depois bloqueia/revoga sessões anteriores e seus refresh tokens. O estado de conta ativa, e-mail confirmado e Admin global é revalidado sob locks. Staff ou participante sem Admin continua no fluxo de login atual sem TOTP.
++- Antes do segundo fator, senha correta de Admin produz apenas desafio: não emite sessão/refresh nem revoga sessão anterior. Após fator aceito, desafio, contador/código, revogação da sessão anterior (inclusive expirada), sessão nova com `admin_2fa_verified_at` PostgreSQL, hash de refresh e auditoria de sucesso são efetivados atomicamente. Access/refresh tokens só são devolvidos depois de `COMMIT`; falha de commit não devolve tokens.
++- Refresh, logout e autorização Admin continuam usando os controles existentes. A validação de papel vigente permanece no backend; claims JWT não são fonte suficiente de autorização. A autenticação não altera participações, filas ou histórico.
++
++## Persistência e migration
++
++Migration `backend/drizzle/0006_admin_2fa_login.sql`, registrada no journal Drizzle e coerente com `backend/src/database/schema/access.schema.ts`:
++
++1. adiciona `user_totp_credentials.last_totp_counter bigint NULL`, inicialmente vazio para credenciais da B2;
++2. cria `admin_2fa_challenges`, com `jti` como PK, titular, emissão/expiração, consumo/invalidação, FK para `users`, índices por titular/criação e expiração e checks temporais/terminais.
++
++Não há dependência nova nem alteração de setup/confirm da B2. O responsável aplicou manualmente a migration 0006 em `arenago_bootstrap_test` e `arenago_events_test`; o Codex não executou migrations. Não copiar nem reconstruir dados entre os bancos.
++
++## Cobertura implementada e correções
++
++- `backend/test/unit/admin-two-factor.unit.test.ts`: contrato estrito, formato e janela TOTP/replay, formato de recovery code e HTTP local simulado com status RFC 7807 e cabeçalhos.
++- `backend/test/unit/schema.test.ts`: confere 24 tabelas, presença explícita de `admin_2fa_challenges`, os 23 nomes anteriores e ausência de duplicações.
++- `backend/test/integration/admin-two-factor-login.integration.test.ts`: PostgreSQL real/HTTP Nest para TOTP e recovery, código inválido/reutilizado, limite persistente, desafio expirado/adulterado/invalidado/concorrente, concorrência de TOTP/recovery/logins, chave/cifra/referência de autorização, conta/papel, Staff/participante, sessão/refresh/logout, rollback após falhas SQL/auditoria/COMMIT, primeiro login Admin sem desafios prévios (desafio persistido e nenhuma sessão antes do segundo fator) e ausência de mutação de participação/fila.
++- Compatibilidade: as fixtures de limpeza B1 e B2 removem somente os desafios dos próprios titulares, agora necessários pela FK. O teste histórico de login Admin foi alinhado ao contrato: a sessão anterior permanece até o segundo fator; se ela não tinha verificação Admin, o guard continua negando acesso.
++
++## Validação manual — responsável
++
++As validações abaixo foram executadas manualmente pelo responsável. O Codex não executou testes, lint, typecheck, build, migrations, seeds, SQL ou comandos PostgreSQL nesta consolidação.
++
++Usar a chave local existente `TOTP_ENCRYPTION_KEY` e `TOTP_RECOVERY_HMAC_KEY` da B2, sem imprimi-las, rotacioná-las ou incluí-las em arquivos. O guard da integração B1 usado pela suíte C valida `NODE_ENV=test`, as três URLs idênticas, credenciais explícitas e exatamente `127.0.0.1:55432/arenago_bootstrap_test`; a suíte ainda confirma `current_database()` antes de criar fixtures. A suíte não exige banco vazio nem apaga Admins históricos.
++
++Exemplo de preparação segura em PowerShell; executar em sessão local sem transcript e carregar as chaves do cofre local sem eco:
++
++```powershell
++Set-Location 'C:\DoJob\ProgramacaoMobile\backend'
++$env:NODE_ENV = 'test'
++$env:DOTENV_CONFIG_PATH = 'NUL'
++# Carregar do cofre local, sem imprimir ou salvar os valores:
++# TOTP_ENCRYPTION_KEY, TOTP_RECOVERY_HMAC_KEY, JWT_SECRET, JWT_TEMP_SECRET
++
++function Set-C-TestDatabase {
++  param([ValidateSet('arenago_bootstrap_test','arenago_events_test')][string]$Database)
++  $secure = Read-Host "URL PostgreSQL local para $Database" -AsSecureString
++  $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
++  try { $value = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
++  finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr); $secure.Dispose() }
++  $parsed = $null
++  if (-not [uri]::TryCreate($value,[UriKind]::Absolute,[ref]$parsed) -or
++      $parsed.Scheme -notin @('postgresql','postgres') -or
++      $parsed.Host -cne '127.0.0.1' -or $parsed.Port -ne 55432 -or
++      $parsed.AbsolutePath -cne "/$Database" -or $value.Contains('?') -or
++      $value.Contains('#') -or -not $parsed.UserInfo) { throw 'Destino PostgreSQL não autorizado.' }
++  $env:DATABASE_URL = $value
++  $env:DATABASE_DIRECT_URL = $value
++  $env:EVENTS_TEST_DATABASE_URL = $value
++  $parts = [uri]::UnescapeDataString($parsed.UserInfo)
++  $separator = $parts.IndexOf(':')
++  if ($separator -le 0 -or $separator -eq ($parts.Length - 1)) { throw 'Credenciais explícitas obrigatórias.' }
++  $env:PGHOST = $parsed.Host
++  $env:PGPORT = [string]$parsed.Port
++  $env:PGDATABASE = $Database
++  $env:PGUSER = $parts.Substring(0,$separator)
++  $env:PGPASSWORD = $parts.Substring($separator + 1)
++}
++
++function Invoke-C-TestQuery {
++  param([Parameter(Mandatory)][string]$Query)
++  if (Get-Command psql -ErrorAction SilentlyContinue) {
++    $result = & psql -X -v ON_ERROR_STOP=1 -Atqc $Query
++  } else {
++    # Fallback para o cliente instalado no contêiner local, sem imprimir URL ou senha.
++    $result = & docker exec arenago-e08-pg18 psql -X -U $env:PGUSER -d $env:PGDATABASE -v ON_ERROR_STOP=1 -Atqc $Query
++  }
++  if ($LASTEXITCODE -ne 0) { throw 'Não foi possível confirmar o destino PostgreSQL.' }
++  return $result
++}
++function Confirm-C-TestDatabase {
++  param([ValidateSet('arenago_bootstrap_test','arenago_events_test')][string]$Database)
++  if ($env:DATABASE_URL -cne $env:DATABASE_DIRECT_URL -or $env:DATABASE_URL -cne $env:EVENTS_TEST_DATABASE_URL) {
++    throw 'As três URLs PostgreSQL devem ser idênticas.'
++  }
++  $parsed = $null
++  if (-not [uri]::TryCreate($env:DATABASE_URL,[UriKind]::Absolute,[ref]$parsed) -or
++      $parsed.Host -cne '127.0.0.1' -or $parsed.Port -ne 55432 -or
++      $parsed.AbsolutePath -cne "/$Database" -or $parsed.Query -or $parsed.Fragment) {
++    throw 'Host, porta publicada ou banco da URL não correspondem ao destino de teste.'
++  }
++  $actual = Invoke-C-TestQuery 'SELECT current_database()'
++  if ($actual -cne $Database) { throw 'O banco conectado não corresponde ao destino autorizado.' }
++}
++function Confirm-C-Schema {
++  $ready = Invoke-C-TestQuery "SELECT (EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='user_totp_credentials' AND column_name='last_totp_counter') AND EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='admin_2fa_challenges'))::int"
++  if ($ready -cne '1') { throw 'Migration T6.1-C não está presente no banco esperado.' }
++}
++
++# Confirmar o destino antes de cada migration. Não reutilizar o banco dedicado para a regressão compartilhada:
++Set-C-TestDatabase 'arenago_bootstrap_test'
++Confirm-C-TestDatabase 'arenago_bootstrap_test'
++if ((Read-Host 'Digite arenago_bootstrap_test para autorizar esta migration') -cne 'arenago_bootstrap_test') { throw 'Migration cancelada.' }
++npm.cmd run db:migrate
++if ($LASTEXITCODE -ne 0) { throw 'Migration falhou no banco dedicado.' }
++Confirm-C-Schema
++Set-C-TestDatabase 'arenago_events_test'
++Confirm-C-TestDatabase 'arenago_events_test'
++if ((Read-Host 'Digite arenago_events_test para autorizar esta migration') -cne 'arenago_events_test') { throw 'Migration cancelada.' }
++npm.cmd run db:migrate
++if ($LASTEXITCODE -ne 0) { throw 'Migration falhou no banco compartilhado.' }
++Confirm-C-Schema
++```
++
++Ambiente reproduzível para regressão unitária e inicialização dos módulos HTTP/DI. Definir no processo PowerShell antes de iniciar os comandos; estes valores são exclusivos de teste e não alteram configuração de produção:
++
++```powershell
++$env:NODE_ENV = 'test'
++$env:DOTENV_CONFIG_PATH = 'NUL'
++$env:STAFF_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:ADMIN_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:EVALUATION_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:EVENT_CLOSURE_JOB_TEST_ENABLED = 'false'
++# Opcional; o padrão do código é 30000 ms. Só definir ao testar o intervalo do scheduler.
++# $env:EVENT_CLOSURE_INTERVAL_MS = '30000'
++$env:EMAIL_VERIFICATION_TTL_SECONDS = '86400'
++$env:EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS = '120'
++$env:EMAIL_VERIFICATION_MAX_PER_HOUR = '5'
++```
++
++A política de verificação de e-mail usa esses três valores como padrões quando as variáveis não estão definidas. Para a regressão normal, mantenha `RESEND_API_KEY`, `RESEND_FROM` e `EMAIL_VERIFICATION_CONFIRMATION_URL` ausentes: assim o módulo não ativa configuração de envio externo. Os testes unitários específicos do mailer usam valores fictícios internos às fixtures. Não copie chaves de produção, não habilite envio externo para a regressão e não registre valores secretos.
++
++
++Unitários focados e verificações locais:
++
++```powershell
++Set-Location 'C:\DoJob\ProgramacaoMobile\backend'
++$env:NODE_ENV = 'test'
++$env:DOTENV_CONFIG_PATH = 'NUL'
++.\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test test/unit/admin-two-factor.unit.test.ts test/unit/auth.unit.test.ts test/unit/totp-activation-crypto.test.ts test/unit/totp-activation-service.test.ts test/unit/totp-activation-http.test.ts
++if ($LASTEXITCODE -ne 0) { throw 'Unitários focados falharam.' }
++npm.cmd test
++if ($LASTEXITCODE -ne 0) { throw 'Regressão unitária falhou.' }
++.\node_modules\.bin\tsc.cmd --project tsconfig.json --noEmit --incremental false
++if ($LASTEXITCODE -ne 0) { throw 'Typecheck de produção falhou.' }
++npm.cmd run typecheck:test
++if ($LASTEXITCODE -ne 0) { throw 'Typecheck de testes falhou.' }
++npm.cmd run lint
++if ($LASTEXITCODE -ne 0) { throw 'Lint falhou.' }
++npm.cmd run build
++if ($LASTEXITCODE -ne 0) { throw 'Build falhou.' }
++```
++
++Integrações dedicadas/compartilhadas, sempre serializadas; não usar `npm run test:integration` com apenas um banco configurado:
++
++```powershell
++Set-Location 'C:\DoJob\ProgramacaoMobile\backend'
++$env:NODE_ENV = 'test'
++$env:DOTENV_CONFIG_PATH = 'NUL'
++Set-C-TestDatabase 'arenago_bootstrap_test'
++Confirm-C-TestDatabase 'arenago_bootstrap_test'
++& .\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test --test-concurrency=1 test/integration/admin-two-factor-login.integration.test.ts
++if ($LASTEXITCODE -ne 0) { throw 'Integração PostgreSQL C falhou.' }
++& .\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test --test-concurrency=1 test/integration/totp-activation.integration.test.ts
++if ($LASTEXITCODE -ne 0) { throw 'Compatibilidade PostgreSQL B2 falhou.' }
++& .\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test --test-concurrency=1 test/integration/first-admin-bootstrap.integration.test.ts
++if ($LASTEXITCODE -ne 0) { throw 'Compatibilidade PostgreSQL B1 falhou.' }
++
++Set-C-TestDatabase 'arenago_events_test'
++Confirm-C-TestDatabase 'arenago_events_test'
++$excluded = @('admin-two-factor-login.integration.test.ts','totp-activation.integration.test.ts','first-admin-bootstrap.integration.test.ts')
++$shared = @(Get-ChildItem test/integration -Filter '*.test.ts' -File |
++  Where-Object { $_.Name -notin $excluded } | Sort-Object Name | ForEach-Object { $_.FullName })
++if ($shared.Count -eq 0) { throw 'Nenhuma suíte compartilhada encontrada.' }
++& .\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test --test-concurrency=1 $shared
++if ($LASTEXITCODE -ne 0) { throw 'Regressão PostgreSQL compartilhada falhou.' }
++```
++
++Não executar `DROP`, `TRUNCATE` ou limpeza global. As fixtures removem apenas IDs que criaram. Não executar B1/B2/C em paralelo nem apontar as três URLs a bancos diferentes.
++
++## Retomada: correção da fixture de desafio expirado
++
++Na primeira integração PostgreSQL executada manualmente pelo responsável, 14 cenários passaram e um cenário falhou; o teste agrupador também foi contabilizado como reprovado (código de saída 1). A falha foi `23514` na constraint `ck_admin_2fa_challenges_expiration`, durante a preparação do cenário “desafio expirado, adulterado e invalidado por nova senha”: a fixture alterava `expires_at` para antes do horário atual e mantinha `issued_at` original, violando `expires_at > issued_at` antes da chamada HTTP.
++
++A fixture foi corrigida sem mudança de produção ou da migration 0006. Agora cria um JWT de desafio legítimo com `signTempTwoFactorToken`, usando emissão suficientemente antiga para que o token já esteja expirado. Persiste `jti`, `iat` e `exp` convertidos diretamente das claims assinadas, mantendo `expires_at > issued_at` e o limite máximo de cinco minutos da constraint. A chamada `/auth/2fa/verify` retorna 401; o cenário verifica que nenhuma sessão foi criada nem recovery code consumido. O responsável confirmou a aprovação final da integração C com 16/16. Os subcenários de assinatura adulterada e invalidação por novo login foram preservados. Não há sleeps nem alteração de relógio global.
++
++A migration 0006 foi aplicada manualmente pelo responsável nos bancos `arenago_bootstrap_test` e `arenago_events_test`. Na verificação daquela etapa, os seis Admins históricos então existentes foram preservados. Posteriormente, a investigação de C15 identificou um sétimo Admin persistido pela fixture sem cleanup; nenhuma limpeza desse registro foi autorizada. A validação posterior da fixture confirmou sete Admins antes e depois, sem qualquer registro Admin adicionado, removido ou modificado nessa execução. O Codex não acessou o banco.
++
++## Correção da fixture C15 e preservação do banco compartilhado
++
++A fixture C15 de `backend/test/integration/auth.integration.test.ts` registra os IDs do usuário, papel Admin e credencial TOTP criados pelo cenário; recupera dependências geradas pelo cadastro/login estritamente pelo ID do usuário recém-criado; e executa a limpeza em `finally`. A ordem respeita as FKs: refresh tokens antes das sessões, depois desafios, auditorias, credencial TOTP, papéis e conta. As exclusões usam IDs, sem filtros globais por papel ou padrão de e-mail. Se o teste e a limpeza falham, um `AggregateError` inclui ambos e define `cause` para o erro original; falhas isoladas são propagadas sem encapsulamento.
++
++A validação PostgreSQL Auth após essa correção passou 20/20. A comparação manual confirmou sete Admins antes e depois e nenhum registro Admin modificado, adicionado ou removido. O sétimo Admin antigo permanece no banco de teste; sua remoção não foi solicitada nem autorizada. A fixture não altera registros históricos.
++
++A validação ESLint também identificou quatro erros no tratamento de exceções da C15. A implementação foi ajustada para capturar separadamente as falhas do teste e da limpeza, sem lançar dentro do `finally`; ESLint foi aprovado na validação manual informada. As asserções e a limpeza restrita por IDs foram preservadas.
++
++## Validações finais confirmadas pelo responsável
++
++As validações abaixo foram executadas manualmente pelo responsável. O Codex não executou testes, lint, typecheck, build, migrations, seeds, SQL ou comandos PostgreSQL nesta consolidação.
++
++- Testes unitários: **1.106/1.106 aprovados**.
++- Integração PostgreSQL T6.1-C: **16/16 aprovados**.
++- Compatibilidade PostgreSQL B2: **32/32 aprovados**.
++- Compatibilidade PostgreSQL B1: **4/4 aprovados**.
++- Regressão PostgreSQL compartilhada: **1.255/1.255 aprovados**.
++- Integração Auth após a correção da fixture C15: **20/20 aprovados**.
++- ESLint, typecheck de produção, typecheck de testes e build: **aprovados**.
++
++## Configuração operacional e limites
++
++Não há emissão/rotação de chaves nesta task. TOTP exige as mesmas chaves independentes da B2: `TOTP_ENCRYPTION_KEY` AES-256 e `TOTP_RECOVERY_HMAC_KEY` HMAC-SHA-256, ambas base64 canônico com 32 bytes, distintas de `JWT_SECRET`/`JWT_TEMP_SECRET`. Recovery code exige a chave HMAC válida e independente; não depende da chave AES. Ausência, divergência ou perda impede a autenticação correspondente; não há fallback.
++
++Não implementa reset TOTP, regeneração de recovery codes, CLI emergencial, concessão/revogação de papéis, interface Expo, e-mail, BI, deploy ou configuração de produção. Não foi executado CLI real, produção ou homologação. A retenção/expurgo futuro de desafios e auditorias e a rotação/recuperação de chaves continuam decisões operacionais pendentes. A aplicação da migration e as validações desta implementação foram concluídas manualmente pelo responsável, conforme os resultados acima. Revisão e validação de produção não foram realizadas; não declarar prontidão produtiva.
++
++## Inventário e evidência
++
++Arquivos da task: `backend/src/auth/auth.controller.ts`, `auth.dto.ts`, `auth.service.ts`, `admin-two-factor.crypto.ts`, `totp-challenge.ts`, `backend/src/database/schema/access.schema.ts`, `backend/drizzle/0006_admin_2fa_login.sql`, `backend/drizzle/meta/_journal.json`, `backend/test/unit/admin-two-factor.unit.test.ts`, `backend/test/integration/admin-two-factor-login.integration.test.ts`, `backend/test/integration/auth.integration.test.ts`, `backend/test/integration/first-admin-bootstrap.integration.test.ts`, `backend/test/integration/totp-activation.integration.test.ts`, `backend/test/unit/schema.test.ts`, `docs/ARQUITETURA_BACKEND_ARENAGO.md` e este relatório.
++
++Evidência única: `qa-evidence/t6-1-c-changes.diff`, baseada no HEAD inicial `7fa5e40d4d50ca9faabca9e94fe8335e553d304f`, contendo todos os arquivos acima e excluindo a própria evidência, segredos, `.env`, logs, dependências e outras tasks. Patch aplicado sem erros em cópia isolada da base; os 16 arquivos da task foram comparados byte a byte após normalização da quebra de linha de checkout Windows. Nenhuma validação executável foi realizada pelo Codex.

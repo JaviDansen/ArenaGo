@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Header,
   HttpCode,
   HttpStatus,
   Inject,
@@ -12,6 +13,7 @@ import {
   loginSchema,
   refreshSchema,
   registerSchema,
+  twoFactorVerifySchema,
   validateDto,
 } from "./auth.dto";
 import { AuthService } from "./auth.service";
@@ -37,6 +39,8 @@ export class AuthController {
   ) {}
 
   @Post("register")
+  @Header("Cache-Control", "no-store")
+  @Header("Pragma", "no-cache")
   @HttpCode(HttpStatus.CREATED)
   async register(
     @Body() body: unknown,
@@ -47,6 +51,8 @@ export class AuthController {
   }
 
   @Post("login")
+  @Header("Cache-Control", "no-store")
+  @Header("Pragma", "no-cache")
   @HttpCode(HttpStatus.OK)
   async login(
     @Body() body: unknown,
@@ -56,7 +62,21 @@ export class AuthController {
     return this.authService.login(dto, extractClientMetadata(req));
   }
 
+  @Post("2fa/verify")
+  @Header("Cache-Control", "no-store")
+  @Header("Pragma", "no-cache")
+  @HttpCode(HttpStatus.OK)
+  async verifyTwoFactor(
+    @Body() body: unknown,
+    @Req() req: AuthenticatedRequest,
+  ): Promise<AuthSessionResponseDto> {
+    const dto = validateDto(twoFactorVerifySchema, body);
+    return this.authService.verifyTwoFactor(dto, extractClientMetadata(req));
+  }
+
   @Post("refresh")
+  @Header("Cache-Control", "no-store")
+  @Header("Pragma", "no-cache")
   @HttpCode(HttpStatus.OK)
   async refresh(@Body() body: unknown): Promise<RefreshResponseDto> {
     const dto = validateDto(refreshSchema, body);

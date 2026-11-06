@@ -465,7 +465,7 @@ As seções 14–18 são **especificações técnicas candidatas**. Exemplos JSO
 
 Não retornar sessão privilegiada nem refresh token definitivo antes do TOTP. `tempToken` não serve para chamar as APIs comuns. A aprovação da possibilidade de um Admin atuar como participante **continua pendente**, não presumir comportamento na UI nem permissão pelo tipo de conta.
 
-**Erros:** `401` credenciais inválidas sem revelar se e-mail existe; `429` excesso de tentativas. **Regra aprovada:** login novo revoga sessão anterior; isso não apaga participação em evento, posição ou conclusões.
+**Erros:** `401` credenciais inválidas sem revelar se e-mail existe; `429` excesso de tentativas. **Regra aprovada:** login novo concluído revoga sessão anterior; para Admin, a conclusão ocorre somente após segundo fator válido. A emissão do desafio após senha correta não emite sessão nem revoga a anterior. Para Participante/Staff, o login continua concluído após senha válida. Revogar sessão não apaga participação em evento, posição ou conclusões.
 
 ### 14.5 `GET /auth/me` e recuperação de estado
 

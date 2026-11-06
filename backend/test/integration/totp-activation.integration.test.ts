@@ -113,6 +113,7 @@ afterEach(async () => {
   await pool.query("DELETE FROM user_totp_credentials WHERE user_id=ANY($1::uuid[])", [userIds]);
   await pool.query("DELETE FROM audit_logs WHERE target_user_id=ANY($1::uuid[]) OR actor_user_id=ANY($1::uuid[])", [userIds]);
   await pool.query("DELETE FROM user_roles WHERE user_id=ANY($1::uuid[])", [userIds]);
+  await pool.query("DELETE FROM admin_2fa_challenges WHERE user_id=ANY($1::uuid[])", [userIds]);
   await pool.query("DELETE FROM refresh_tokens WHERE session_id IN (SELECT id FROM sessions WHERE user_id=ANY($1::uuid[]))", [userIds]);
   await pool.query("DELETE FROM sessions WHERE user_id=ANY($1::uuid[])", [userIds]);
   await pool.query("DELETE FROM users WHERE id=ANY($1::uuid[])", [userIds]);
