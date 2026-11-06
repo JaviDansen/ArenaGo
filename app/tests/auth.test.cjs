@@ -1639,8 +1639,8 @@ test('UI-02 & UI-02A: Welcome, Login, Register and ForgotPassword navigate acros
 
   const authBgExports = bgWelcome.exports;
   assert.equal(typeof authBgExports.resolveDefaultBackgroundForVariant, 'function');
-  assert.equal(authBgExports.WELCOME_BACKGROUND_ASSET_PATH, 'app/assets/images/auth/welcome-background.jpg');
-  assert.equal(authBgExports.AUTH_BACKGROUND_ASSET_PATH, 'app/assets/images/auth/auth-background.jpg');
+  assert.equal(authBgExports.WELCOME_BACKGROUND_ASSET_PATH, 'app/assets/images/auth/welcome-background.png');
+  assert.equal(authBgExports.AUTH_BACKGROUND_ASSET_PATH, 'app/assets/images/auth/shared-background.png');
   assert.ok(authBgExports.resolveDefaultBackgroundForVariant('welcome'));
   assert.ok(authBgExports.resolveDefaultBackgroundForVariant('login'));
 

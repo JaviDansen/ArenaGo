@@ -3,7 +3,7 @@ import { ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { AuthBackground } from '../../components/ui/AuthBackground';
 import { Button } from '../../components/ui/Button';
-import { colors, radii, spacing, typography } from '../../theme';
+import { colors, spacing, typography } from '../../theme';
 
 export default function WelcomeScreen({ navigation }) {
   return (
@@ -16,17 +16,7 @@ export default function WelcomeScreen({ navigation }) {
         showsVerticalScrollIndicator={false}
         bounces={false}
       >
-        {/* Marca oficial ArenaGO no topo */}
-        <View style={styles.header}>
-          <View style={styles.brandLockup}>
-            <View style={styles.brandMark}>
-              <View style={styles.brandMarkInner} />
-            </View>
-            <Text style={styles.brandWordmark} accessibilityRole="header">
-              Arena<Text style={styles.brandWordmarkAccent}>GO</Text>
-            </Text>
-          </View>
-        </View>
+        <View style={styles.header} />
 
         {/* Área central livre para valorizar a composição artística de fundo */}
         <View style={styles.artworkStage} pointerEvents="none" />
@@ -86,38 +76,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingVertical: spacing.sm,
-  },
-  brandLockup: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-  },
-  brandMark: {
-    width: 22,
-    height: 22,
-    borderRadius: radii.sm,
-    backgroundColor: colors.brand.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  brandMarkInner: {
-    width: 8,
-    height: 8,
-    borderRadius: radii.xs,
-    backgroundColor: colors.text.primary,
-  },
-  brandWordmark: {
-    fontFamily: typography.fontFamily,
-    fontSize: typography.sizes.titleMedium,
-    lineHeight: typography.lineHeights.titleMedium,
-    fontWeight: typography.weights.extraBold,
-    color: colors.text.primary,
-    letterSpacing: 0.4,
-  },
-  brandWordmarkAccent: {
-    fontFamily: typography.fontFamily,
-    color: colors.brand.primaryLight,
-    fontWeight: typography.weights.extraBold,
   },
   artworkStage: {
     flex: 1,

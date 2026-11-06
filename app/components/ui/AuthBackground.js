@@ -1,9 +1,9 @@
 /**
  * ArenaGo Design System — AuthBackground Component (UI-02A)
  *
- * Contêiner visual reutilizável para as telas públicas de autenticação:
+ * Contêiner visual reutilizável para autenticação e telas do participante:
  * - Fundo base dark (#05050A / #0B0B12) com ambientação roxa controlada.
- * - Suporte ao asset vertical `app/assets/images/auth/auth-background.jpg` (1440x3200, cover)
+ * - Suporte ao asset compartilhado vertical `app/assets/images/auth/shared-background.png` (941x1672, cover)
  *   posicionado atrás do conteúdo com `pointerEvents="none"`.
  * - Fallback dark automático quando `imageSource={null}`, `disableImage={true}` ou caso
  *   o asset local não esteja disponível ou falhe ao carregar.
@@ -21,8 +21,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import colors from '../../theme/colors.js';
 
-export const AUTH_BACKGROUND_ASSET_PATH = 'app/assets/images/auth/auth-background.jpg';
-export const WELCOME_BACKGROUND_ASSET_PATH = 'app/assets/images/auth/welcome-background.jpg';
+export const AUTH_BACKGROUND_ASSET_PATH = 'app/assets/images/auth/shared-background.png';
+export const WELCOME_BACKGROUND_ASSET_PATH = 'app/assets/images/auth/welcome-background.png';
 
 export const AUTH_BACKGROUND_PRESETS = {
   welcome: {
@@ -89,7 +89,7 @@ export const TOP_STATUS_SCRIM_WEIGHTS = createTopStatusScrimWeights(TOP_STATUS_S
 function loadDefaultAuthBackground() {
   try {
     // eslint-disable-next-line global-require
-    return require('../../assets/images/auth/auth-background.jpg');
+    return require('../../assets/images/auth/shared-background.png');
   } catch {
     return null;
   }
@@ -98,7 +98,7 @@ function loadDefaultAuthBackground() {
 function loadDefaultWelcomeBackground() {
   try {
     // eslint-disable-next-line global-require
-    return require('../../assets/images/auth/welcome-background.jpg');
+    return require('../../assets/images/auth/welcome-background.png');
   } catch {
     return null;
   }
@@ -133,6 +133,7 @@ export function AuthBackground({
   variant = 'login',
   imageSource,
   disableImage = false,
+  showAmbientGlow = true,
   overlayOpacity,
   useSafeArea = true,
   style,
@@ -163,8 +164,12 @@ export function AuthBackground({
         testID={`${testID}-backdrop`}
       >
         {/* Ambientação dark base / fallback */}
-        <View style={styles.ambientTopGlow} pointerEvents="none" />
-        <View style={styles.ambientBottomGlow} pointerEvents="none" />
+        {showAmbientGlow ? (
+          <>
+            <View style={styles.ambientTopGlow} pointerEvents="none" />
+            <View style={styles.ambientBottomGlow} pointerEvents="none" />
+          </>
+        ) : null}
 
         {resolvedSource ? (
           <Image

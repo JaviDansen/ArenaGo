@@ -11,9 +11,9 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { useAuth } from '../../context/AuthContext';
+import { AuthBackground } from '../../components/ui/AuthBackground';
 import BirthDateInput from '../../components/BirthDateInput';
 import { formatBirthDate, parseBirthDate } from '../../utils/birthDate';
 import {
@@ -762,9 +762,12 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
 
   if (isEditMode && (!canEdit || profileLoadStatus !== 'ready')) {
     return (
-      <SafeAreaView style={styles.container}>
+      <AuthBackground
+        variant="login"
+        showAmbientGlow={false}
+        testID="questionnaire-background"
+      >
         <StatusBar style="light" />
-        <View style={styles.ambientGlowTop} pointerEvents="none" />
         <View style={styles.scrollContent}>
           <View style={styles.editStatusCard}>
             <View style={styles.tagBadge}>
@@ -790,15 +793,17 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
             </Pressable>
           </View>
         </View>
-      </SafeAreaView>
+      </AuthBackground>
     );
   }
 
   return (
-    <SafeAreaView style={styles.container}>
+    <AuthBackground
+      variant="login"
+      showAmbientGlow={false}
+      testID="questionnaire-background"
+    >
       <StatusBar style="light" />
-      <View style={styles.ambientGlowTop} pointerEvents="none" />
-      <View style={styles.ambientGlowBottom} pointerEvents="none" />
 
       {/* Top Header com botão voltar e marca */}
       <View style={styles.header}>
@@ -1456,33 +1461,11 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
           )}
         </ScrollView>
       </KeyboardAvoidingView>
-    </SafeAreaView>
+    </AuthBackground>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#05050A',
-  },
-  ambientGlowTop: {
-    position: 'absolute',
-    top: -120,
-    right: -80,
-    width: 280,
-    height: 280,
-    borderRadius: 140,
-    backgroundColor: 'rgba(95, 51, 250, 0.22)',
-  },
-  ambientGlowBottom: {
-    position: 'absolute',
-    bottom: -140,
-    left: -100,
-    width: 300,
-    height: 300,
-    borderRadius: 150,
-    backgroundColor: 'rgba(124, 77, 255, 0.14)',
-  },
   keyboardView: {
     flex: 1,
   },

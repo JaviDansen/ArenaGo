@@ -383,6 +383,7 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     flexGrow: 1,
+    justifyContent: 'flex-end',
     paddingHorizontal: spacing.layout.screenPaddingHorizontal,
     paddingTop: spacing.xs,
     paddingBottom: spacing.xxxl,
