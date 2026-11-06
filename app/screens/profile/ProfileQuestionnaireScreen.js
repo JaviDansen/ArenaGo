@@ -764,25 +764,31 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
     return (
       <SafeAreaView style={styles.container}>
         <StatusBar style="light" />
+        <View style={styles.ambientGlowTop} pointerEvents="none" />
         <View style={styles.scrollContent}>
-          <Text style={styles.title}>Editar questionário</Text>
-          {canEdit && profileLoadStatus === 'loading' ? <>
-            <ActivityIndicator color="#a78bfa" />
-            <Text style={styles.subtitle}>Carregando suas respostas...</Text>
-          </> : <>
-            <Text style={styles.errorText} accessibilityRole="alert">
-              {canEdit ? profileLoadError : 'A edição exige uma sessão autenticada com questionário concluído.'}
-            </Text>
-            {canEdit ? <Pressable style={styles.primaryButton}
-              onPress={() => setProfileLoadAttempt(previous => previous + 1)}
-              accessibilityLabel="Tentar carregar questionário novamente">
-              <Text style={styles.primaryButtonText}>Tentar novamente</Text>
-            </Pressable> : null}
-          </>}
-          <Pressable style={styles.secondaryButton} onPress={() => returnToProfile()}
-            accessibilityLabel="Cancelar edição">
-            <Text style={styles.secondaryButtonText}>Cancelar edição</Text>
-          </Pressable>
+          <View style={styles.editStatusCard}>
+            <View style={styles.tagBadge}>
+              <Text style={styles.tag}>PERFIL DO PARTICIPANTE</Text>
+            </View>
+            <Text style={styles.title}>Editar questionário</Text>
+            {canEdit && profileLoadStatus === 'loading' ? <>
+              <ActivityIndicator color="#A78BFA" />
+              <Text style={styles.subtitle}>Carregando suas respostas...</Text>
+            </> : <>
+              <Text style={styles.errorText} accessibilityRole="alert">
+                {canEdit ? profileLoadError : 'A edição exige uma sessão autenticada com questionário concluído.'}
+              </Text>
+              {canEdit ? <Pressable style={styles.primaryButton}
+                onPress={() => setProfileLoadAttempt(previous => previous + 1)}
+                accessibilityLabel="Tentar carregar questionário novamente">
+                <Text style={styles.primaryButtonText}>Tentar novamente</Text>
+              </Pressable> : null}
+            </>}
+            <Pressable style={styles.secondaryButton} onPress={() => returnToProfile()}
+              accessibilityLabel="Cancelar edição">
+              <Text style={styles.secondaryButtonText}>Cancelar edição</Text>
+            </Pressable>
+          </View>
         </View>
       </SafeAreaView>
     );
@@ -791,6 +797,8 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar style="light" />
+      <View style={styles.ambientGlowTop} pointerEvents="none" />
+      <View style={styles.ambientGlowBottom} pointerEvents="none" />
 
       {/* Top Header com botão voltar e marca */}
       <View style={styles.header}>
@@ -829,21 +837,29 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
         )}
       </View>
 
-      {/* Barra visual de progresso */}
+      {/* Indicador de progresso em 3 segmentos (Design System StepperIndicator) */}
       <View style={styles.progressContainer}>
+        <View style={styles.stepsSegments}>
+          {QUESTIONNAIRE_STEPS.map((step, idx) => {
+            const isCompleted = idx < currentStepIndex;
+            const isCurrent = idx === currentStepIndex;
+            return (
+              <View
+                key={step.id}
+                style={[
+                  styles.segmentBar,
+                  isCompleted
+                    ? styles.segmentBarCompleted
+                    : isCurrent
+                    ? styles.segmentBarActive
+                    : styles.segmentBarInactive,
+                ]}
+              />
+            );
+          })}
+        </View>
         <View style={styles.progressTrack}>
           <View style={[styles.progressFill, { width: `${progressPercent}%` }]} />
-        </View>
-        <View style={styles.stepsSegments}>
-          {QUESTIONNAIRE_STEPS.map((step, idx) => (
-            <View
-              key={step.id}
-              style={[
-                styles.segmentDot,
-                idx <= currentStepIndex ? styles.segmentDotActive : styles.segmentDotInactive,
-              ]}
-            />
-          ))}
         </View>
       </View>
 
@@ -854,11 +870,17 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
         <ScrollView
           contentContainerStyle={styles.scrollContent}
           keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="none"
+          showsVerticalScrollIndicator={false}
         >
           {/* Cabeçalho da Etapa Atual */}
-          <Text style={styles.tag}>{currentStep.tag}</Text>
-          <Text style={styles.title}>{currentStep.title}</Text>
-          <Text style={styles.subtitle}>{currentStep.subtitle}</Text>
+          <View style={styles.stepHeaderSection}>
+            <View style={styles.tagBadge}>
+              <Text style={styles.tag}>{currentStep.tag}</Text>
+            </View>
+            <Text style={styles.title}>{currentStep.title}</Text>
+            <Text style={styles.subtitle}>{currentStep.subtitle}</Text>
+          </View>
 
           {/* ================================================================= */}
           {/* ETAPA 1 — SOBRE VOCÊ */}
@@ -1441,7 +1463,25 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0c0a17',
+    backgroundColor: '#05050A',
+  },
+  ambientGlowTop: {
+    position: 'absolute',
+    top: -120,
+    right: -80,
+    width: 280,
+    height: 280,
+    borderRadius: 140,
+    backgroundColor: 'rgba(95, 51, 250, 0.22)',
+  },
+  ambientGlowBottom: {
+    position: 'absolute',
+    bottom: -140,
+    left: -100,
+    width: 300,
+    height: 300,
+    borderRadius: 150,
+    backgroundColor: 'rgba(124, 77, 255, 0.14)',
   },
   keyboardView: {
     flex: 1,
@@ -1452,110 +1492,149 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingHorizontal: 20,
     paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#2A2444',
+    backgroundColor: 'rgba(11, 11, 18, 0.85)',
   },
   backButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#191330',
+    width: 48,
+    height: 48,
+    minWidth: 48,
+    minHeight: 48,
+    borderRadius: 12,
+    backgroundColor: '#1B1730',
     borderWidth: 1,
-    borderColor: '#34265a',
+    borderColor: '#3D3466',
     justifyContent: 'center',
     alignItems: 'center',
   },
   backButtonText: {
-    color: '#ffffff',
+    color: '#FFFFFF',
     fontSize: 18,
     fontWeight: '700',
   },
   headerTitleContainer: {
     alignItems: 'center',
+    flex: 1,
+    paddingHorizontal: 8,
   },
   headerTitle: {
-    color: '#ffffff',
-    fontSize: 13,
+    color: '#FFFFFF',
+    fontSize: 12,
     fontWeight: '700',
     letterSpacing: 1.2,
   },
   headerStepBadge: {
-    color: '#a78bfa',
+    color: '#A78BFA',
     fontSize: 12,
-    fontWeight: '600',
+    fontWeight: '700',
     marginTop: 2,
   },
   headerPlaceholder: {
-    width: 40,
+    width: 48,
   },
   headerLogoutButton: {
-    paddingHorizontal: 12,
+    minHeight: 40,
+    paddingHorizontal: 14,
     paddingVertical: 8,
-    borderRadius: 16,
-    backgroundColor: '#25152a',
+    borderRadius: 9999,
+    backgroundColor: 'rgba(239, 68, 68, 0.14)',
     borderWidth: 1,
-    borderColor: '#5c1d35',
+    borderColor: 'rgba(239, 68, 68, 0.45)',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   headerLogoutButtonText: {
-    color: '#f87171',
+    color: '#FCA5A5',
     fontSize: 12,
     fontWeight: '700',
   },
   progressContainer: {
     paddingHorizontal: 20,
-    paddingBottom: 12,
+    paddingTop: 14,
+    paddingBottom: 10,
+    gap: 8,
+  },
+  stepsSegments: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  segmentBar: {
+    flex: 1,
+    height: 6,
+    borderRadius: 9999,
+  },
+  segmentBarCompleted: {
+    backgroundColor: '#5F33FA',
+  },
+  segmentBarActive: {
+    backgroundColor: '#A78BFA',
+  },
+  segmentBarInactive: {
+    backgroundColor: '#231E3D',
   },
   progressTrack: {
-    height: 6,
-    backgroundColor: '#191330',
-    borderRadius: 3,
+    height: 3,
+    backgroundColor: '#131122',
+    borderRadius: 9999,
     overflow: 'hidden',
   },
   progressFill: {
     height: '100%',
-    backgroundColor: '#7c3aed',
-    borderRadius: 3,
-  },
-  stepsSegments: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: 6,
-    paddingHorizontal: 2,
-  },
-  segmentDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-  },
-  segmentDotActive: {
-    backgroundColor: '#a78bfa',
-  },
-  segmentDotInactive: {
-    backgroundColor: '#2a2046',
+    backgroundColor: '#7C4DFF',
+    borderRadius: 9999,
   },
   scrollContent: {
-    paddingHorizontal: 24,
+    paddingHorizontal: 20,
     paddingTop: 16,
-    paddingBottom: 40,
+    paddingBottom: 96,
+  },
+  stepHeaderSection: {
+    marginBottom: 20,
+  },
+  tagBadge: {
+    alignSelf: 'flex-start',
+    backgroundColor: 'rgba(95, 51, 250, 0.2)',
+    borderWidth: 1,
+    borderColor: '#5F33FA',
+    borderRadius: 9999,
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    marginBottom: 10,
   },
   tag: {
-    color: '#a78bfa',
-    fontSize: 12,
+    color: '#A78BFA',
+    fontSize: 11,
     fontWeight: '800',
-    letterSpacing: 1.2,
-    marginBottom: 6,
+    letterSpacing: 1.1,
   },
   title: {
-    color: '#ffffff',
-    fontSize: 26,
+    color: '#FFFFFF',
+    fontSize: 28,
     fontWeight: '800',
+    letterSpacing: -0.4,
     marginBottom: 8,
   },
   subtitle: {
-    color: '#94a3b8',
-    fontSize: 14,
-    lineHeight: 20,
-    marginBottom: 24,
+    color: '#B5B0C8',
+    fontSize: 15,
+    lineHeight: 22,
+  },
+  editStatusCard: {
+    backgroundColor: '#131122',
+    borderWidth: 1,
+    borderColor: '#2A2444',
+    borderRadius: 16,
+    padding: 20,
+    gap: 14,
   },
   form: {
+    backgroundColor: '#131122',
+    borderWidth: 1,
+    borderColor: '#2A2444',
+    borderRadius: 16,
+    padding: 20,
     gap: 20,
   },
   inputGroup: {
@@ -1567,38 +1646,39 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   label: {
-    color: '#cbd5e1',
+    color: '#FFFFFF',
     fontSize: 14,
     fontWeight: '600',
   },
   questionLabel: {
-    color: '#cbd5e1',
+    color: '#FFFFFF',
     fontSize: 14,
     fontWeight: '600',
     lineHeight: 20,
     flex: 1,
   },
   requiredStar: {
-    color: '#f87171',
+    color: '#EF4444',
     fontSize: 14,
     fontWeight: '700',
   },
   input: {
-    backgroundColor: '#141026',
+    backgroundColor: '#231E3D',
     borderWidth: 1,
-    borderColor: '#2a2046',
+    borderColor: '#3D3466',
     borderRadius: 12,
+    minHeight: 52,
     height: 52,
     paddingHorizontal: 16,
-    color: '#ffffff',
+    color: '#FFFFFF',
     fontSize: 15,
   },
   inputError: {
-    borderColor: '#ef4444',
+    borderColor: '#EF4444',
   },
   errorText: {
-    color: '#f87171',
-    fontSize: 12,
+    color: '#FCA5A5',
+    fontSize: 13,
     fontWeight: '600',
     marginTop: 2,
   },
@@ -1609,28 +1689,29 @@ const styles = StyleSheet.create({
   optionCard: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#141026',
+    backgroundColor: '#1B1730',
     borderWidth: 1,
-    borderColor: '#2a2046',
+    borderColor: '#2A2444',
     borderRadius: 12,
+    minHeight: 52,
     paddingHorizontal: 16,
     paddingVertical: 14,
     gap: 12,
   },
   optionCardSelected: {
-    backgroundColor: '#1f1638',
-    borderColor: '#7c3aed',
+    backgroundColor: '#231E3D',
+    borderColor: '#5F33FA',
     borderWidth: 1.5,
   },
   optionCardError: {
-    borderColor: '#ef4444',
+    borderColor: '#EF4444',
   },
   optionRadioOuter: {
     width: 20,
     height: 20,
     borderRadius: 10,
     borderWidth: 2,
-    borderColor: '#64748b',
+    borderColor: '#787191',
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -1638,49 +1719,55 @@ const styles = StyleSheet.create({
     width: 10,
     height: 10,
     borderRadius: 5,
-    backgroundColor: '#a78bfa',
+    backgroundColor: '#A78BFA',
   },
   optionText: {
-    color: '#94a3b8',
+    color: '#B5B0C8',
     fontSize: 15,
     fontWeight: '500',
     flex: 1,
   },
   optionTextSelected: {
-    color: '#ffffff',
+    color: '#FFFFFF',
     fontWeight: '700',
   },
   conditionalInputContainer: {
     marginTop: 10,
-    paddingLeft: 4,
+    padding: 12,
+    borderRadius: 12,
+    backgroundColor: '#1B1730',
+    borderWidth: 1,
+    borderColor: '#3D3466',
     gap: 8,
   },
   primaryButton: {
-    backgroundColor: '#7c3aed',
+    backgroundColor: '#5F33FA',
+    minHeight: 52,
     height: 52,
-    borderRadius: 14,
+    borderRadius: 12,
     justifyContent: 'center',
     alignItems: 'center',
-    marginTop: 12,
+    marginTop: 8,
   },
   primaryButtonText: {
-    color: '#ffffff',
+    color: '#FFFFFF',
     fontSize: 16,
     fontWeight: '700',
   },
   secondaryButton: {
-    backgroundColor: '#191330',
+    backgroundColor: '#1B1730',
     borderWidth: 1,
-    borderColor: '#34265a',
+    borderColor: '#3D3466',
+    minHeight: 52,
     height: 52,
-    borderRadius: 14,
+    borderRadius: 12,
     justifyContent: 'center',
     alignItems: 'center',
   },
   secondaryButtonText: {
-    color: '#e2d9f3',
+    color: '#FFFFFF',
     fontSize: 15,
-    fontWeight: '700',
+    fontWeight: '600',
   },
 
   searchRow: {
@@ -1690,19 +1777,21 @@ const styles = StyleSheet.create({
   },
   searchInput: {
     flex: 1,
-    backgroundColor: '#141026',
+    backgroundColor: '#231E3D',
     borderWidth: 1,
-    borderColor: '#2a2046',
+    borderColor: '#3D3466',
     borderRadius: 12,
+    minHeight: 52,
     height: 52,
     paddingHorizontal: 16,
-    color: '#ffffff',
+    color: '#FFFFFF',
     fontSize: 15,
   },
   searchAddButton: {
-    backgroundColor: '#261b47',
+    backgroundColor: 'rgba(95, 51, 250, 0.22)',
     borderWidth: 1,
-    borderColor: '#7c3aed',
+    borderColor: '#7C4DFF',
+    minHeight: 52,
     height: 52,
     paddingHorizontal: 18,
     borderRadius: 12,
@@ -1710,44 +1799,44 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   searchAddButtonText: {
-    color: '#c084fc',
+    color: '#A78BFA',
     fontSize: 14,
     fontWeight: '700',
   },
   feedbackBanner: {
-    borderRadius: 10,
+    borderRadius: 12,
     paddingHorizontal: 14,
-    paddingVertical: 10,
+    paddingVertical: 12,
     borderWidth: 1,
   },
   feedbackBannerWarning: {
-    backgroundColor: '#2a1a12',
-    borderColor: '#f59e0b',
+    backgroundColor: 'rgba(245, 158, 11, 0.14)',
+    borderColor: '#F59E0B',
   },
   feedbackBannerSuccess: {
-    backgroundColor: '#0f241a',
-    borderColor: '#10b981',
+    backgroundColor: 'rgba(16, 185, 129, 0.14)',
+    borderColor: '#10B981',
   },
   feedbackText: {
     fontSize: 13,
     fontWeight: '600',
   },
   feedbackTextWarning: {
-    color: '#fbbf24',
+    color: '#FBBF24',
   },
   feedbackTextSuccess: {
-    color: '#34d399',
+    color: '#34D399',
   },
   suggestionsCard: {
-    backgroundColor: '#141026',
+    backgroundColor: '#1B1730',
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: '#2a2046',
+    borderColor: '#3D3466',
     padding: 12,
     gap: 8,
   },
   suggestionsHeader: {
-    color: '#a78bfa',
+    color: '#A78BFA',
     fontSize: 11,
     fontWeight: '800',
     letterSpacing: 1,
@@ -1761,92 +1850,100 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    backgroundColor: '#0c0a17',
+    backgroundColor: '#131122',
     borderWidth: 1,
-    borderColor: '#22193b',
+    borderColor: '#2A2444',
     borderRadius: 10,
+    minHeight: 48,
     paddingHorizontal: 14,
     paddingVertical: 10,
   },
   suggestionItemSelected: {
-    backgroundColor: '#18122c',
-    borderColor: '#382561',
-    opacity: 0.7,
+    backgroundColor: '#1B1730',
+    borderColor: '#3D3466',
+    opacity: 0.72,
   },
   suggestionGameName: {
-    color: '#ffffff',
+    color: '#FFFFFF',
     fontSize: 14,
     fontWeight: '600',
     flex: 1,
   },
   suggestionGameNameSelected: {
-    color: '#94a3b8',
+    color: '#B5B0C8',
   },
   suggestionBadge: {
-    backgroundColor: '#261b47',
+    backgroundColor: 'rgba(95, 51, 250, 0.24)',
+    borderWidth: 1,
+    borderColor: '#5F33FA',
     paddingHorizontal: 10,
     paddingVertical: 4,
-    borderRadius: 6,
+    borderRadius: 9999,
   },
   suggestionBadgeSelected: {
-    backgroundColor: '#1b1433',
+    backgroundColor: '#231E3D',
+    borderColor: '#3D3466',
   },
   suggestionBadgeText: {
-    color: '#c084fc',
+    color: '#A78BFA',
     fontSize: 12,
     fontWeight: '700',
   },
   suggestionBadgeTextSelected: {
-    color: '#64748b',
+    color: '#787191',
   },
   manualAddInlineButton: {
     marginTop: 6,
+    minHeight: 48,
     paddingVertical: 10,
     paddingHorizontal: 12,
-    backgroundColor: '#1f1638',
-    borderRadius: 8,
+    backgroundColor: '#231E3D',
+    borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#7c3aed',
+    borderColor: '#5F33FA',
+    justifyContent: 'center',
     alignItems: 'center',
   },
   manualAddInlineText: {
-    color: '#c084fc',
+    color: '#A78BFA',
     fontSize: 13,
     fontWeight: '700',
   },
   noSuggestionsCard: {
-    backgroundColor: '#141026',
+    backgroundColor: '#1B1730',
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: '#2a2046',
+    borderColor: '#2A2444',
     padding: 16,
     alignItems: 'center',
     gap: 12,
   },
   noSuggestionsText: {
-    color: '#94a3b8',
+    color: '#B5B0C8',
     fontSize: 13,
     textAlign: 'center',
     lineHeight: 18,
   },
   manualAddPrimaryButton: {
-    backgroundColor: '#7c3aed',
+    backgroundColor: '#5F33FA',
+    minHeight: 48,
     paddingHorizontal: 20,
     paddingVertical: 12,
     borderRadius: 10,
     width: '100%',
+    justifyContent: 'center',
     alignItems: 'center',
   },
   manualAddPrimaryButtonText: {
-    color: '#ffffff',
+    color: '#FFFFFF',
     fontSize: 14,
     fontWeight: '700',
   },
   quickSuggestionsCard: {
-    gap: 8,
+    gap: 10,
   },
   quickSuggestionsHeader: {
-    color: '#94a3b8',
+    color: '#B5B0C8',
     fontSize: 13,
     fontWeight: '600',
   },
@@ -1856,25 +1953,27 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   quickChip: {
-    backgroundColor: '#141026',
+    backgroundColor: '#1B1730',
     borderWidth: 1,
-    borderColor: '#2a2046',
-    paddingHorizontal: 12,
+    borderColor: '#3D3466',
+    minHeight: 40,
+    paddingHorizontal: 14,
     paddingVertical: 8,
-    borderRadius: 20,
+    borderRadius: 9999,
+    justifyContent: 'center',
   },
   quickChipSelected: {
-    backgroundColor: '#1e153b',
-    borderColor: '#4c2889',
-    opacity: 0.6,
+    backgroundColor: 'rgba(95, 51, 250, 0.2)',
+    borderColor: '#5F33FA',
+    opacity: 0.75,
   },
   quickChipText: {
-    color: '#cbd5e1',
+    color: '#FFFFFF',
     fontSize: 13,
     fontWeight: '600',
   },
   quickChipTextSelected: {
-    color: '#8b5cf6',
+    color: '#A78BFA',
   },
   selectedSection: {
     gap: 10,
@@ -1886,26 +1985,28 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
   },
   selectedSectionTitle: {
-    color: '#cbd5e1',
+    color: '#FFFFFF',
     fontSize: 14,
     fontWeight: '700',
-    letterSpacing: 0.5,
+    letterSpacing: 0.3,
   },
   counterBadge: {
-    backgroundColor: '#261b47',
+    backgroundColor: 'rgba(95, 51, 250, 0.25)',
+    borderWidth: 1,
+    borderColor: '#5F33FA',
     paddingHorizontal: 10,
     paddingVertical: 2,
-    borderRadius: 10,
+    borderRadius: 9999,
   },
   counterBadgeText: {
-    color: '#c084fc',
+    color: '#A78BFA',
     fontSize: 12,
     fontWeight: '800',
   },
   emptySelectedCard: {
-    backgroundColor: '#141026',
+    backgroundColor: '#1B1730',
     borderWidth: 1,
-    borderColor: '#2a2046',
+    borderColor: '#2A2444',
     borderRadius: 14,
     padding: 20,
     alignItems: 'center',
@@ -1916,15 +2017,15 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   emptySelectedTitle: {
-    color: '#cbd5e1',
+    color: '#FFFFFF',
     fontSize: 14,
     fontWeight: '700',
   },
   emptySelectedSubtitle: {
-    color: '#64748b',
-    fontSize: 12,
+    color: '#787191',
+    fontSize: 13,
     textAlign: 'center',
-    lineHeight: 16,
+    lineHeight: 18,
   },
   selectedList: {
     gap: 8,
@@ -1933,12 +2034,12 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: '#141026',
+    backgroundColor: '#1B1730',
     borderWidth: 1,
-    borderColor: '#2a2046',
+    borderColor: '#3D3466',
     borderRadius: 12,
     paddingHorizontal: 14,
-    paddingVertical: 12,
+    paddingVertical: 10,
   },
   selectedGameContent: {
     flexDirection: 'row',
@@ -1950,30 +2051,30 @@ const styles = StyleSheet.create({
     fontSize: 16,
   },
   selectedGameName: {
-    color: '#ffffff',
+    color: '#FFFFFF',
     fontSize: 14,
     fontWeight: '600',
     flex: 1,
   },
   removeGameButton: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: '#25152a',
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(239, 68, 68, 0.14)',
     borderWidth: 1,
-    borderColor: '#5c1d35',
+    borderColor: 'rgba(239, 68, 68, 0.45)',
     justifyContent: 'center',
     alignItems: 'center',
   },
   removeGameButtonText: {
-    color: '#f87171',
+    color: '#FCA5A5',
     fontSize: 13,
     fontWeight: '800',
   },
   stepErrorContainer: {
-    backgroundColor: '#291118',
+    backgroundColor: 'rgba(239, 68, 68, 0.14)',
     borderWidth: 1,
-    borderColor: '#ef4444',
+    borderColor: '#EF4444',
     borderRadius: 10,
     paddingHorizontal: 14,
     paddingVertical: 10,
@@ -1984,8 +2085,8 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   saveErrorBanner: {
-    backgroundColor: '#2a1118',
-    borderColor: '#ef4444',
+    backgroundColor: 'rgba(239, 68, 68, 0.14)',
+    borderColor: '#EF4444',
     borderWidth: 1,
     borderRadius: 12,
     paddingHorizontal: 16,
@@ -1999,7 +2100,7 @@ const styles = StyleSheet.create({
     fontSize: 20,
   },
   saveErrorText: {
-    color: '#fca5a5',
+    color: '#FCA5A5',
     fontSize: 14,
     fontWeight: '600',
     lineHeight: 20,
@@ -2015,8 +2116,8 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   searchErrorBanner: {
-    backgroundColor: '#2a1118',
-    borderColor: '#ef4444',
+    backgroundColor: 'rgba(239, 68, 68, 0.14)',
+    borderColor: '#EF4444',
     borderWidth: 1,
     borderRadius: 10,
     paddingHorizontal: 14,
@@ -2024,7 +2125,7 @@ const styles = StyleSheet.create({
     marginTop: 6,
   },
   searchErrorText: {
-    color: '#fca5a5',
+    color: '#FCA5A5',
     fontSize: 13,
     fontWeight: '600',
   },
@@ -2035,23 +2136,23 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
   },
   catalogLoadingText: {
-    color: '#94a3b8',
+    color: '#B5B0C8',
     fontSize: 13,
   },
   catalogUnavailableContainer: {
-    backgroundColor: '#1a132e',
-    borderColor: '#34265a',
+    backgroundColor: '#1B1730',
+    borderColor: '#3D3466',
     borderWidth: 1,
     borderRadius: 10,
     padding: 12,
   },
   catalogUnavailableText: {
-    color: '#94a3b8',
+    color: '#B5B0C8',
     fontSize: 13,
     lineHeight: 18,
   },
   noCatalogGamesText: {
-    color: '#64748b',
+    color: '#787191',
     fontSize: 13,
   },
 });

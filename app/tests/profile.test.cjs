@@ -136,3 +136,94 @@ test('Home has no logout and preserves event entry and pending questionnaire nav
   assert.equal(h.navigationCalls[1].name, 'ProfileQuestionnaire');
   assert.equal(h.navigationCalls[1].params.user.id, 'user-1');
 });
+
+test('UI-04: HomeScreen renders dark design system background, empty/finished/active participation states, loading/error states, and quick tab navigation', () => {
+  let retryCalls = 0;
+  const h = createHarness('screens/home/HomeScreen.js', {
+    authContext: {
+      isAuthenticated: true,
+      sessionStatus: 'loading',
+      authError: { detail: 'Falha temporária ao sincronizar sessão.' },
+      user: { id: 'user-1', name: 'Kaled Barreto', hasCompletedQuestionnaire: true },
+      participation: null,
+      fetchCurrentUser() { retryCalls += 1; },
+    },
+  });
+
+  // 1. Saudação com primeiro nome, StatusBar light e estados de loading/erro
+  const statusBar = h.nodes.find((n) => n.type === 'StatusBar');
+  assert.equal(statusBar?.props?.style, 'light');
+  assert.ok(h.nodes.some((n) => n.type === 'Text' && textOf(n).includes('Olá, Kaled!')));
+  assert.ok(h.nodes.some((n) => n.props?.testID === 'home-loading-card'));
+  assert.ok(h.nodes.some((n) => n.props?.testID === 'home-error-banner' && n.props?.accessibilityRole === 'alert'));
+  assert.ok(h.nodes.some((n) => n.props?.testID === 'home-empty-participation-card'));
+
+  h.press('Tentar sincronizar dados novamente');
+  assert.equal(retryCalls, 1);
+
+  // 2. Navegação rápida para as abas Eventos e Perfil
+  h.press('Ir para aba Eventos');
+  assert.equal(h.navigationCalls.at(-1)?.name, 'Eventos');
+  h.press('Ir para aba Perfil');
+  assert.equal(h.navigationCalls.at(-1)?.name, 'Perfil');
+
+  // 3. Estado de participação concluída
+  h.setAuthContext({
+    isAuthenticated: true,
+    sessionStatus: 'authenticated',
+    user: { id: 'user-1', name: 'Kaled Barreto', hasCompletedQuestionnaire: true },
+    participation: { id: 'part-1', eventName: 'Arena VR 2026', status: 'finished' },
+  });
+  assert.ok(h.nodes.some((n) => n.props?.testID === 'home-finished-participation-card'));
+  assert.ok(h.nodes.some((n) => n.type === 'Text' && textOf(n).includes('Arena VR 2026')));
+
+  // 4. Estado de participação ativa
+  h.setAuthContext({
+    isAuthenticated: true,
+    sessionStatus: 'authenticated',
+    user: { id: 'user-1', name: 'Kaled Barreto', hasCompletedQuestionnaire: true },
+    participation: { id: 'part-2', eventName: 'Simulador F1', status: 'active' },
+  });
+  assert.ok(h.nodes.some((n) => n.props?.testID === 'home-active-participation-card'));
+  assert.ok(h.nodes.some((n) => n.type === 'Text' && textOf(n).includes('Simulador F1')));
+});
+
+test('UI-04: MainTabs configures dark tab bar, hides Início native header, and distinguishes active/inactive TabBarIcon', () => {
+  const tabs = loadModule('navigation/MainTabs.js', (name) => {
+    if (name === '@react-navigation/bottom-tabs') {
+      return { createBottomTabNavigator: () => ({ Navigator: 'TabNavigator', Screen: 'TabScreen' }) };
+    }
+    if (name === 'react-native') {
+      return { StyleSheet: { create: (value) => value }, Text: 'Text', View: 'View' };
+    }
+    if (name === '../theme') {
+      return loadModule('theme/index.js', (id) =>
+        id.startsWith('./') ? loadModule(`theme/${id.slice(2)}`, require).exports : require(id)
+      ).exports;
+    }
+    if (name.startsWith('../screens/')) return { __esModule: true, default: name };
+    return require(name);
+  });
+
+  const tree = tabs.exports.default();
+  assert.equal(tree.type, 'TabNavigator');
+  assert.equal(tree.props.screenOptions.tabBarStyle.backgroundColor, '#0B0B12');
+  assert.equal(tree.props.screenOptions.tabBarActiveTintColor, '#8A68FF');
+  assert.equal(tree.props.screenOptions.tabBarInactiveTintColor, '#6C6C8A');
+
+  const screens = tree.props.children;
+  assert.equal(screens[0].props.name, 'Início');
+  assert.equal(screens[0].props.options.headerShown, false);
+  assert.equal(screens[1].props.name, 'Eventos');
+  assert.equal(screens[2].props.name, 'Perfil');
+
+  const activeIcon = screens[0].props.options.tabBarIcon({ focused: true });
+  const inactiveIcon = screens[0].props.options.tabBarIcon({ focused: false });
+  assert.equal(activeIcon.props.focused, true);
+  assert.equal(inactiveIcon.props.focused, false);
+
+  const renderedActive = tabs.exports.TabBarIcon({ focused: true, symbol: '⚡' });
+  const renderedInactive = tabs.exports.TabBarIcon({ focused: false, symbol: '⚡' });
+  assert.ok(Array.isArray(renderedActive.props.style) && renderedActive.props.style[1] != null);
+  assert.equal(renderedInactive.props.style[1], null);
+});

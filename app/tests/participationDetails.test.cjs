@@ -326,6 +326,14 @@ test('the bottom tabs keep Início, Eventos and Perfil without a new tab', () =>
     if (name === '@react-navigation/bottom-tabs') {
       return { createBottomTabNavigator: () => ({ Navigator: 'TabNavigator', Screen: 'TabScreen' }) };
     }
+    if (name === 'react-native') {
+      return { StyleSheet: { create: (value) => value }, Text: 'Text', View: 'View' };
+    }
+    if (name === '../theme') {
+      return loadModule('theme/index.js', (id) =>
+        id.startsWith('./') ? loadModule(`theme/${id.slice(2)}`, require).exports : require(id)
+      ).exports;
+    }
     if (name.startsWith('../screens/')) return { __esModule: true, default: name };
     return require(name);
   });
