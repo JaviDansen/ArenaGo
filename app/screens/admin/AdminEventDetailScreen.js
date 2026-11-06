@@ -25,6 +25,7 @@ const ACTION_LABELS = {
   SCHEDULE: 'Alteração de horários',
   EXTERNAL_QUEUE: 'Fila externa',
   CLOSE: 'Encerramento antecipado',
+  CONTROLLED_DEADLINE: 'Prazo do encerramento controlado',
 };
 
 const ownParam = (params, key) =>
@@ -146,6 +147,13 @@ export default function AdminEventDetailScreen({ navigation, route }) {
               message="A finalização automática das participações abertas no limite operacional (D07) não é simulada aqui; os números acima não foram alterados pelo relógio."
             />
           ) : null}
+        {Object.prototype.hasOwnProperty.call(event, 'controlledDeadlineFinalized') ? (
+          <AdminNotice
+            tone="info"
+            title="Prazo do encerramento controlado alcançado"
+            message={`${event.controlledDeadlineFinalized} participação(ões) ainda aberta(s) foram finalizadas no prazo (simulado); as já finalizadas foram preservadas. O encerramento de filas internas e chamadas não é simulado nesta demonstração.`}
+          />
+        ) : null}
         <Text style={styles.muted}>Filas internas, chamadas e estações não são modeladas no ADM01.</Text>
       </AdminCard>
 

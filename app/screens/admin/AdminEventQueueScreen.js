@@ -12,6 +12,7 @@ import { adminColors } from './components/adminTheme';
 import { useAdminDemo } from './AdminDemoContext';
 import { waitAdminDemoLatency } from './adminDemoLatency';
 import { findEvent, getExternalQueueAvailability, setExternalQueue } from './adminDemoState';
+import { useAdminConfirmation } from './useAdminConfirmation';
 
 const ownParam = (params, key) =>
   (params != null && Object.prototype.hasOwnProperty.call(params, key) ? params[key] : undefined);
@@ -25,7 +26,7 @@ export default function AdminEventQueueScreen({ navigation, route }) {
   const [reason, setReason] = useState('');
   const [errors, setErrors] = useState({});
   const [message, setMessage] = useState(null);
-  const [confirming, setConfirming] = useState(false);
+  const confirmation = useAdminConfirmation();
   const [saving, setSaving] = useState(false);
   // Alvo fixado ao abrir a tela: a ação nunca inverte de novo por um clique repetido.
   const [target] = useState(() => (event ? !event.externalQueueEnabled : null));
@@ -49,12 +50,15 @@ export default function AdminEventQueueScreen({ navigation, route }) {
     ? 'Habilitar vale apenas para as próximas participações. Quem já está ativo na Arena não volta para a fila externa.'
     : `Desabilitar libera agora os ${event.participants.externalWaiting} participante(s) que aguardam na fila externa para dentro da Arena (simulado). Não muda o horário de inscrições.`;
 
-  async function handleConfirm() {
-    setConfirming(false);
+  // Executa no máximo uma vez por confirmação válida, com o snapshot revisado.
+  async function handleConfirm(token) {
+    const snapshot = confirmation.claim(token);
+    if (!snapshot) return;
     setSaving(true);
     await waitAdminDemoLatency();
     if (!mountedRef.current) return;
-    const result = run(setExternalQueue, event.id, { enabled: target, reason });
+    const result = run(setExternalQueue, snapshot.eventId, snapshot.input);
+    confirmation.release();
     setSaving(false);
     setErrors(result.errors ?? {});
     setMessage({ tone: result.ok ? 'success' : 'error', text: result.message });
@@ -104,17 +108,17 @@ export default function AdminEventQueueScreen({ navigation, route }) {
       ) : null}
 
       {availability.allowed && !done ? (
-        <AdminButton label={saving ? 'SALVANDO...' : actionLabel} loading={saving} onPress={() => setConfirming(true)} />
+        <AdminButton label={saving ? 'SALVANDO...' : actionLabel} loading={saving} onPress={() => confirmation.open({ eventId: event.id, input: { enabled: target, reason } })} />
       ) : null}
       <AdminButton label={done ? 'Voltar ao evento' : 'Cancelar'} variant="secondary" disabled={saving} onPress={() => navigation.goBack()} />
 
       <AdminConfirmDialog
-        visible={confirming}
+        visible={confirmation.visible}
         title={target ? 'Habilitar a fila externa?' : 'Desabilitar a fila externa?'}
         message={effect}
         confirmLabel={actionLabel}
-        onConfirm={handleConfirm}
-        onCancel={() => setConfirming(false)}
+        onConfirm={() => handleConfirm(confirmation.pending)}
+        onCancel={confirmation.cancel}
       />
     </AdminScreen>
   );

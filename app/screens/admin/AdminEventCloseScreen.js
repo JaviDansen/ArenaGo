@@ -14,6 +14,7 @@ import { useAdminDemo } from './AdminDemoContext';
 import { waitAdminDemoLatency } from './adminDemoLatency';
 import { closeEvent, findEvent, getCloseAvailability } from './adminDemoState';
 import { formatInstantWithZone } from './adminTime';
+import { useAdminConfirmation } from './useAdminConfirmation';
 
 const ownParam = (params, key) =>
   (params != null && Object.prototype.hasOwnProperty.call(params, key) ? params[key] : undefined);
@@ -39,7 +40,7 @@ export default function AdminEventCloseScreen({ navigation, route }) {
   const [reason, setReason] = useState('');
   const [errors, setErrors] = useState({});
   const [message, setMessage] = useState(null);
-  const [confirming, setConfirming] = useState(false);
+  const confirmation = useAdminConfirmation();
   const [saving, setSaving] = useState(false);
   const mountedRef = useRef(true);
 
@@ -63,6 +64,7 @@ export default function AdminEventCloseScreen({ navigation, route }) {
   }
 
   function handleReview() {
+    if (saving) return;
     if (!mode) {
       setErrors({ mode: 'Escolha o modo de encerramento.' });
       return;
@@ -71,15 +73,18 @@ export default function AdminEventCloseScreen({ navigation, route }) {
       setErrors({ mode: availability.controlledBlocked });
       return;
     }
-    setConfirming(true);
+    confirmation.open({ eventId: event.id, input: { mode, controlledMinutes: minutes, reason } });
   }
 
-  async function handleConfirm() {
-    setConfirming(false);
+  // Executa no máximo uma vez por confirmação válida, com o snapshot revisado.
+  async function handleConfirm(token) {
+    const snapshot = confirmation.claim(token);
+    if (!snapshot) return;
     setSaving(true);
     await waitAdminDemoLatency();
     if (!mountedRef.current) return;
-    const result = run(closeEvent, event.id, { mode, controlledMinutes: minutes, reason });
+    const result = run(closeEvent, snapshot.eventId, snapshot.input);
+    confirmation.release();
     setSaving(false);
     setErrors(result.errors ?? {});
     setMessage({ tone: result.ok ? 'success' : 'error', text: result.message });
@@ -112,6 +117,7 @@ export default function AdminEventCloseScreen({ navigation, route }) {
             value={mode}
             onChange={(value) => { setMode(value); clearFeedback(); }}
             error={errors.mode}
+            disabled={saving}
           />
           {mode ? <AdminNotice tone="warning" title="Efeitos" message={EFFECTS[mode]} /> : null}
           {mode === 'controlled' && availability.controlledBlocked ? (
@@ -151,14 +157,14 @@ export default function AdminEventCloseScreen({ navigation, route }) {
       <AdminButton label={done ? 'Voltar ao evento' : 'Cancelar'} variant="secondary" disabled={saving} onPress={() => navigation.goBack()} />
 
       <AdminConfirmDialog
-        visible={confirming}
-        title={mode === 'immediate' ? 'Encerrar imediatamente?' : 'Iniciar encerramento controlado?'}
-        message={mode ? EFFECTS[mode] : ''}
+        visible={confirmation.visible}
+        title={confirmation.snapshot?.input.mode === 'immediate' ? 'Encerrar imediatamente?' : 'Iniciar encerramento controlado?'}
+        message={confirmation.snapshot ? EFFECTS[confirmation.snapshot.input.mode] : ''}
         note="Esta ação é simulada e não pode ser desfeita nesta demonstração."
         confirmLabel="ENCERRAR EVENTO"
         variant="danger"
-        onConfirm={handleConfirm}
-        onCancel={() => setConfirming(false)}
+        onConfirm={() => handleConfirm(confirmation.pending)}
+        onCancel={confirmation.cancel}
       />
     </AdminScreen>
   );

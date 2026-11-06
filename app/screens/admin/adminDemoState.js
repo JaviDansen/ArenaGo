@@ -51,11 +51,41 @@ export function createAdminDemoSession() {
   };
 }
 
+// Prazo do encerramento controlado alcançado: finaliza (simulado) as
+// participações ainda abertas representadas nos contadores, preservando as já
+// finalizadas. Idempotente: depois disso o status armazenado é "closed" e o
+// evento não é processado de novo. Filas internas/chamadas não são modeladas.
+function finalizeControlledDeadline(event, now) {
+  if (own(event, 'closureMode') !== 'controlled' || own(event, 'statusStored') === 'closed') return event;
+  const deadline = toMs(own(event, 'adminDeadlineAt'));
+  if (deadline === null || toMs(now) < deadline) return event;
+  const participants = { ...event.participants };
+  const finalized = participants.externalWaiting + participants.active;
+  participants.finished += finalized;
+  participants.externalWaiting = 0;
+  participants.active = 0;
+  return {
+    ...event,
+    statusStored: 'closed',
+    participants,
+    controlledDeadlineFinalized: finalized,
+    audit: [...event.audit, {
+      action: 'CONTROLLED_DEADLINE',
+      at: event.adminDeadlineAt,
+      reason: `Prazo do encerramento controlado alcançado: ${finalized} participação(ões) aberta(s) finalizada(s) (simulado).`,
+      before: { statusStored: event.statusStored },
+      after: { statusStored: 'closed' },
+    }],
+  };
+}
+
 export function advanceClock(state, minutes) {
   if (!Number.isInteger(minutes) || minutes <= 0) {
     return fail(state, 'INVALID_CLOCK_STEP', 'Passo de relógio inválido.');
   }
-  return ok({ ...state, clockNow: addMinutes(state.clockNow, minutes) }, 'CLOCK_ADVANCED',
+  const clockNow = addMinutes(state.clockNow, minutes);
+  const events = state.events.map((event) => finalizeControlledDeadline(event, clockNow));
+  return ok({ ...state, clockNow, events }, 'CLOCK_ADVANCED',
     `Relógio da demonstração avançado em ${minutes} min.`);
 }
 
@@ -152,6 +182,9 @@ export function getEffectivePhase(event, now) {
   const nowMs = toMs(now);
   if (own(event, 'statusStored') === 'closed') return 'closed';
   if (nowMs >= toMs(getOperationalCutAt(event))) return 'closed';
+  // Encerramento administrativo é irreversível: nem o relógio de teste
+  // reiniciado para antes do pedido faz o evento voltar a aceitar entradas.
+  if (own(event, 'closureMode')) return 'closing';
   if (nowMs >= toMs(getEntriesCutAt(event))) return 'closing';
   if (nowMs >= toMs(own(event, 'startsAt')) && getReadiness(event).ready) return 'open';
   return 'scheduled';

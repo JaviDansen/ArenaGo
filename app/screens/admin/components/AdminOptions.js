@@ -4,7 +4,7 @@ import AdminButton from './AdminButton';
 import { adminColors } from './adminTheme';
 
 // Grupo de opções de escolha única (fuso, filtros, fila externa, modo).
-export default function AdminOptions({ label, hint, options, value, onChange, error }) {
+export default function AdminOptions({ label, hint, options, value, onChange, error, disabled = false }) {
   return (
     <View style={styles.wrapper} accessibilityRole="radiogroup" accessibilityLabel={label}>
       {label ? <Text style={styles.label}>{label}</Text> : null}
@@ -18,6 +18,7 @@ export default function AdminOptions({ label, hint, options, value, onChange, er
               label={option.label}
               accessibilityLabel={option.accessibilityLabel ?? option.label}
               selected={value === option.value}
+              disabled={disabled}
               onPress={() => onChange(option.value)}
             />
           </View>

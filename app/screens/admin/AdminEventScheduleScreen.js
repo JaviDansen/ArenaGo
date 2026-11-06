@@ -15,6 +15,7 @@ import { useAdminDemo } from './AdminDemoContext';
 import { waitAdminDemoLatency } from './adminDemoLatency';
 import { changeSchedule, findEvent, getScheduleChangeAvailability } from './adminDemoState';
 import { formatInstantWithZone, maskDateInput, maskTimeInput, splitInstant } from './adminTime';
+import { useAdminConfirmation } from './useAdminConfirmation';
 
 const ownParam = (params, key) =>
   (params != null && Object.prototype.hasOwnProperty.call(params, key) ? params[key] : undefined);
@@ -36,7 +37,7 @@ export default function AdminEventScheduleScreen({ navigation, route }) {
   }));
   const [errors, setErrors] = useState({});
   const [message, setMessage] = useState(null);
-  const [confirming, setConfirming] = useState(false);
+  const confirmation = useAdminConfirmation();
   const [saving, setSaving] = useState(false);
   const mountedRef = useRef(true);
 
@@ -60,12 +61,15 @@ export default function AdminEventScheduleScreen({ navigation, route }) {
     if (message && !done) setMessage(null);
   }
 
-  async function handleConfirm() {
-    setConfirming(false);
+  // Executa no máximo uma vez por confirmação válida, com o snapshot revisado.
+  async function handleConfirm(token) {
+    const snapshot = confirmation.claim(token);
+    if (!snapshot) return;
     setSaving(true);
     await waitAdminDemoLatency();
     if (!mountedRef.current) return;
-    const result = run(changeSchedule, event.id, form);
+    const result = run(changeSchedule, snapshot.eventId, snapshot.input);
+    confirmation.release();
     setSaving(false);
     setErrors(result.errors ?? {});
     setMessage({ tone: result.ok ? 'success' : 'error', text: result.message });
@@ -155,19 +159,19 @@ export default function AdminEventScheduleScreen({ navigation, route }) {
         <AdminButton
           label={saving ? 'SALVANDO...' : 'SALVAR HORÁRIOS'}
           loading={saving}
-          onPress={() => setConfirming(true)}
+          onPress={() => confirmation.open({ eventId: event.id, input: { ...form } })}
         />
       ) : null}
       <AdminButton label={done ? 'Voltar ao evento' : 'Cancelar'} variant="secondary" disabled={saving} onPress={() => navigation.goBack()} />
 
       <AdminConfirmDialog
-        visible={confirming}
+        visible={confirmation.visible}
         title="Alterar os horários?"
         message="O encerramento oficial e o limite operacional serão atualizados juntos."
         note="Depois que o horário oficial for alcançado não será possível alterar nem reabrir o evento."
         confirmLabel="ALTERAR HORÁRIOS"
-        onConfirm={handleConfirm}
-        onCancel={() => setConfirming(false)}
+        onConfirm={() => handleConfirm(confirmation.pending)}
+        onCancel={confirmation.cancel}
       />
     </AdminScreen>
   );

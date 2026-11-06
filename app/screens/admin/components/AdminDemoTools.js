@@ -7,7 +7,7 @@ import { adminColors, adminSpacing } from './adminTheme';
 
 // Ferramentas exclusivas da demonstração: relógio de teste controlado (as
 // fases dependem dele) e erro simulado na próxima ação.
-export default function AdminDemoTools({ showFailure = true }) {
+export default function AdminDemoTools({ showFailure = true, disabled = false }) {
   const { session, failNextAction, advanceClock, resetClock, toggleFailNextAction } = useAdminDemo();
   if (!session) return null;
 
@@ -22,13 +22,13 @@ export default function AdminDemoTools({ showFailure = true }) {
       </Text>
       <View style={styles.row}>
         <View style={styles.item}>
-          <AdminButton compact variant="secondary" label="+15 min" accessibilityLabel="Avançar relógio 15 minutos" onPress={() => advanceClock(15)} />
+          <AdminButton compact variant="secondary" label="+15 min" accessibilityLabel="Avançar relógio 15 minutos" disabled={disabled} onPress={() => advanceClock(15)} />
         </View>
         <View style={styles.item}>
-          <AdminButton compact variant="secondary" label="+1 h" accessibilityLabel="Avançar relógio 1 hora" onPress={() => advanceClock(60)} />
+          <AdminButton compact variant="secondary" label="+1 h" accessibilityLabel="Avançar relógio 1 hora" disabled={disabled} onPress={() => advanceClock(60)} />
         </View>
         <View style={styles.item}>
-          <AdminButton compact variant="secondary" label="Reiniciar relógio" onPress={resetClock} />
+          <AdminButton compact variant="secondary" label="Reiniciar relógio" disabled={disabled} onPress={resetClock} />
         </View>
       </View>
       {showFailure ? (
@@ -42,6 +42,7 @@ export default function AdminDemoTools({ showFailure = true }) {
             compact
             variant="secondary"
             label={failNextAction ? 'Cancelar erro simulado' : 'Simular erro na próxima ação'}
+            disabled={disabled}
             onPress={toggleFailNextAction}
           />
         </>

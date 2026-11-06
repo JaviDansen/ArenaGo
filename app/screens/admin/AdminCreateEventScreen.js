@@ -17,6 +17,7 @@ import { waitAdminDemoLatency } from './adminDemoLatency';
 import { createEvent, validateEventDraft } from './adminDemoState';
 import MarginShortcuts from './components/MarginShortcuts';
 import { formatInstantWithZone, formatUtcOffset, maskDateInput, maskTimeInput, minutesBetween } from './adminTime';
+import { useAdminConfirmation } from './useAdminConfirmation';
 
 const EMPTY_DRAFT = {
   name: '',
@@ -50,7 +51,7 @@ export default function AdminCreateEventScreen({ navigation }) {
   const [draft, setDraft] = useState(EMPTY_DRAFT);
   const [errors, setErrors] = useState({});
   const [formError, setFormError] = useState('');
-  const [confirming, setConfirming] = useState(null);
+  const confirmation = useAdminConfirmation();
   const [saving, setSaving] = useState(false);
   const mountedRef = useRef(true);
 
@@ -95,15 +96,19 @@ export default function AdminCreateEventScreen({ navigation }) {
     }
     setErrors({});
     setFormError('');
-    setConfirming(validation.payload);
+    // Snapshot único: o diálogo mostra e a criação grava exatamente este rascunho.
+    confirmation.open({ draft: { ...draft }, payload: validation.payload });
   }
 
-  async function handleConfirm() {
-    setConfirming(null);
+  // Executa no máximo uma vez por confirmação válida, com o snapshot revisado.
+  async function handleConfirm(token) {
+    const snapshot = confirmation.claim(token);
+    if (!snapshot) return;
     setSaving(true);
     await waitAdminDemoLatency();
     if (!mountedRef.current) return;
-    const result = run(createEvent, draft);
+    const result = run(createEvent, snapshot.draft);
+    confirmation.release();
     setSaving(false);
     if (!result.ok) {
       if (result.errors) setErrors(result.errors);
@@ -148,6 +153,7 @@ export default function AdminCreateEventScreen({ navigation }) {
         value={draft.timezone}
         onChange={(value) => update('timezone', value)}
         error={errors.timezone}
+        disabled={saving}
       />
 
       <AdminField
@@ -237,6 +243,7 @@ export default function AdminCreateEventScreen({ navigation }) {
         value={draft.externalQueueEnabled}
         onChange={(value) => update('externalQueueEnabled', value)}
         error={errors.externalQueueEnabled}
+        disabled={saving}
       />
 
       <AdminField
@@ -264,18 +271,18 @@ export default function AdminCreateEventScreen({ navigation }) {
       />
       <AdminButton label="Cancelar" variant="secondary" onPress={() => navigation.goBack()} disabled={saving} />
 
-      <AdminDemoTools />
+      <AdminDemoTools disabled={saving} />
 
       <AdminConfirmDialog
-        visible={Boolean(confirming)}
+        visible={confirmation.visible}
         title="Criar este evento na demonstração?"
-        message={confirming
-          ? `${confirming.name} · código ${confirming.accessCode}\nInício: ${formatInstantWithZone(confirming.startsAt, confirming.timezone)}\nFila externa: ${confirming.externalQueueEnabled ? 'habilitada' : 'desabilitada'}`
+        message={confirmation.snapshot
+          ? `${confirmation.snapshot.payload.name} · código ${confirmation.snapshot.payload.accessCode}\nInício: ${formatInstantWithZone(confirmation.snapshot.payload.startsAt, confirmation.snapshot.payload.timezone)}\nFila externa: ${confirmation.snapshot.payload.externalQueueEnabled ? 'habilitada' : 'desabilitada'}`
           : ''}
         note="O código não poderá ser alterado depois. Nada será enviado ao servidor."
         confirmLabel="CRIAR EVENTO"
-        onConfirm={handleConfirm}
-        onCancel={() => setConfirming(null)}
+        onConfirm={() => handleConfirm(confirmation.pending)}
+        onCancel={confirmation.cancel}
       />
     </AdminScreen>
   );
