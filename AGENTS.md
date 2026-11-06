@@ -1,101 +1,216 @@
-# ArenaGo — instruções permanentes do Codex
+# ArenaGo — Atualização das instruções permanentes do Codex
 
-Estas regras valem para todo o repositório e substituem procedimentos históricos incompatíveis. Não aplicar patches antigos automaticamente.
+## Objetivo
 
-## Escopo e revisão
+Atualizar exclusivamente o arquivo `AGENTS.md` da raiz do repositório para estabelecer uma nova política permanente de seleção de modelos e execução controlada de validações.
 
-- Implementar somente a task solicitada, criar testes e realizar revisão técnica pontual. Não iniciar outras tasks automaticamente.
-- Registrar o estado inicial, incluindo arquivos não rastreados; preservar alterações preexistentes, código fora do escopo e documentos históricos.
-- Não executar auditoria geral com subetapas pendentes. Auditorias completas somente quando expressamente solicitadas pelo responsável.
-- Seguir as decisões de produto aprovadas e consultar a documentação correspondente antes de modificar contratos ou regras de negócio.
-- Não executar refatorações preventivas ou ampliar o escopo sem autorização.
+Preservar as regras existentes de escopo, segurança, Git, evidências, documentação e integridade do banco de dados, exceto pelos trechos que precisam ser substituídos pela nova política.
 
-## Testes e validações — execução exclusivamente manual
+**Não executar testes durante a alteração deste documento.**
 
-**REGRA OBRIGATÓRIA: O Codex está proibido de executar testes, typecheck, lint e build. Todas essas validações serão executadas manualmente pelo responsável pelo ArenaGo.**
+## 1. Seleção inteligente de modelos
 
-### O Codex NÃO deve executar:
+Adicionar uma seção permanente chamada:
 
-- Testes unitários, focados ou completos.
+`## Seleção de modelos e níveis de raciocínio`
+
+Antes de iniciar cada tarefa, recomendar a combinação mais econômica que ofereça capacidade adequada ao risco.
+
+Referências:
+
+- GPT-6 Luna: inspeções simples, documentação, pequenas alterações e tarefas mecânicas.
+- GPT-6.1 Terra: bugs delimitados, interfaces e alterações intermediárias.
+- GPT-6.1 Sol: funcionalidades completas, integração entre módulos e refatorações complexas.
+- GPT-6 Astra: revisões críticas, arquitetura, segurança e concorrência.
+
+Níveis de raciocínio:
+
+- Low: tarefas mecânicas.
+- Medium: operações rotineiras.
+- High: múltiplas dependências ou riscos.
+- Extra High: investigação profunda de problemas especialmente difíceis.
+
+Essas classificações são heurísticas, não garantias absolutas de desempenho.
+
+A recomendação deve considerar complexidade, risco de regressão, segurança, escopo, custos e possibilidade de retrabalho.
+
+Não recomendar automaticamente o modelo mais poderoso.
+
+O Codex não pode trocar o modelo por conta própria nem afirmar que verificou sua seleção se não houver mecanismo confiável para isso.
+
+A escolha final do modelo pertence ao responsável.
+
+## 2. Política permanente de execução de validações
+
+Substituir a proibição absoluta de testes, lint, typecheck e build pela seguinte política.
+
+### Executor padrão de validações
+
+**GPT-6 Luna com raciocínio Medium será o modelo designado para executar validações automatizadas rotineiras no ArenaGo.**
+
+Quando outro modelo estiver realizando uma implementação ou revisão, ele deverá preparar as instruções de validação, mas não executar as verificações.
+
+O responsável selecionará manualmente Luna Medium para a etapa de execução.
+
+Se a seleção do modelo não estiver confirmada pelo responsável, não iniciar testes com base apenas em suposições.
+
+### Validações permitidas com Luna Medium
+
+Permitir:
+
+- Testes unitários.
 - Testes HTTP simulados.
-- Testes de integração.
-- Testes PostgreSQL reais.
-- Testes E2E.
-- Regressões automatizadas.
-- Typecheck de produção ou testes.
-- Lint.
-- Build.
-- Benchmarks ou testes de desempenho.
-- Migrações, seeds ou resets de banco para validação.
-- Comandos equivalentes por `npm`, `npx`, `tsx`, `tsc`, Jest, Node Test Runner ou outras ferramentas.
+- Testes focados.
+- Regressões unitárias.
+- Typecheck de produção.
+- Typecheck de testes.
+- ESLint.
+- Build local não destinado a distribuição.
+- Verificações estáticas Git.
 
-Essa proibição também se aplica a execuções indiretas, scripts que acionem verificações automaticamente e tentativas de contornar a regra utilizando outros comandos.
+Antes da execução:
 
-### Responsabilidades do Codex
+1. Inspecionar os comandos e scripts envolvidos.
+2. Confirmar que não executam migrations, seeds, limpeza de banco, scripts destrutivos ou operações externas inesperadas.
+3. Confirmar o diretório de trabalho e a branch.
+4. Preservar alterações não commitadas.
+5. Configurar ambiente de testes isolado.
+6. Não imprimir segredos nem URLs com credenciais.
 
-- Implementar o código solicitado.
-- Criar e atualizar os testes automatizados necessários.
-- Inspecionar estaticamente os arquivos modificados.
-- Revisar contratos, tipos, queries, schemas e compatibilidade com os módulos existentes.
-- Preparar comandos PowerShell exatos para o responsável executar as validações.
-- Documentar quais testes foram criados e quais permanecem pendentes.
-- Corrigir falhas somente após receber os resultados da execução manual e investigar sua causa.
+É proibido executar testes indiretamente por comandos aparentemente inofensivos para contornar as restrições.
 
-São permitidas verificações estáticas leves, como `git status`, `git diff`, `git diff --check` e `git apply --check`, incluindo a validação da evidência em cópia isolada.
+### Integrações PostgreSQL
 
-### Responsabilidades do responsável
+Integrações que utilizam PostgreSQL real exigem autorização explícita do responsável para cada campanha de validação.
 
-Somente o responsável executará:
+Antes de executar:
 
-- Testes unitários e HTTP simulados.
-- Testes PostgreSQL e de integração.
-- Regressões completas.
-- Typecheck.
-- Lint.
-- Build.
-- Outras validações que exijam executar código ou scripts do projeto.
+1. Identificar o banco dedicado autorizado.
+2. Confirmar `NODE_ENV=test`.
+3. Confirmar a identidade das URLs exigidas.
+4. Confirmar host, porta e nome exato do banco.
+5. Confirmar `current_database()`.
+6. Verificar a presença das migrations necessárias, sem executá-las automaticamente.
+7. Confirmar que as fixtures não realizarão limpeza global.
+8. Preservar registros preexistentes, inclusive Admins históricos.
+9. Registrar snapshots quando a validação envolver dados históricos importantes.
 
-O Codex deve fornecer os comandos e aguardar os resultados informados pelo responsável.
+Não usar banco de produção, homologação ou banco compartilhado sem autorização específica.
 
-### Tratamento de falhas
+Não executar migrations, seeds, `DROP`, `TRUNCATE`, resets ou exclusões abrangentes.
 
-- Antes de corrigir falhas, identificar instrução, fase e causa real, confrontando código, fixture, schema e especificação.
-- Corrigir a causa comprovada; não alterar expectativas apenas para aprovar, remover testes, enfraquecer asserções, desabilitar constraints/autenticação ou substituir PostgreSQL real por mocks.
-- Após uma correção, preparar os comandos necessários para nova validação manual.
-- Não executar testes para confirmar a própria correção.
+Se qualquer confirmação falhar, interromper a execução.
 
-### Relatórios
+## 3. Responsabilidades por tipo de tarefa
 
-- Criar `docs/<TASK>_IMPLEMENTACAO.md` com contrato, decisões, alterações, testes preparados e pendências.
-- Enquanto não houver resultados manuais, registrar explicitamente:
+### Implementação
 
-  **"Testes, typecheck, lint e build não executados pelo Codex. Validação manual pendente do responsável."**
+O modelo selecionado para implementar deve:
 
-- Quando o responsável informar resultados, registrar as contagens efetivas, distinguindo execução manual de validação por inspeção estática.
-- Nunca inventar resultados, afirmar aprovação de testes não executados ou declarar prontidão de produção sem evidência.
-- Uma implementação não deve ser considerada tecnicamente aprovada antes das validações manuais exigidas.
+- Desenvolver exclusivamente a task.
+- Criar testes necessários.
+- Revisar estaticamente os arquivos.
+- Preservar contratos e decisões existentes.
+- Informar quais validações são necessárias.
+- Não executar testes quando não estiver designado para a etapa de validação.
 
-## Evidência única por task
+### Validação
 
-- Gerar em `qa-evidence/<TASK>-changes.diff` um patch Git completo da task, incluindo arquivos novos ainda não rastreados, modificados e removidos, antes do commit manual. Preservar convenções de nomenclatura já estabelecidas para tarefas existentes.
-- Após correções, atualizar esse mesmo arquivo. Não criar sufixos `rev`, `final`, `fix` ou timestamps. Preservar evidências históricas de outras tasks.
-- Usar `diff --git`, caminhos relativos, UTF-8 sem BOM e compatibilidade com `git apply`.
-- Excluir segredos, `.env` e variantes, dependências instaladas, temporários, outros `.diff` e alterações alheias à task.
-- Validar a aplicação sobre a base correta em cópia isolada e comparar com os arquivos finais, sem alterar o índice.
-- Não gerar diff para simples configuração, salvo necessidade e autorização explícitas.
-- Não modificar a própria evidência de modo que os espaços necessários à aplicação do patch sejam perdidos.
+Luna Medium deve:
 
-## Git e comunicação
+- Executar somente os comandos autorizados.
+- Registrar comandos, resultados e códigos de saída.
+- Informar contagem de testes aprovados, falhos e ignorados.
+- Identificar falhas sem modificar expectativas para forçar aprovação.
+- Não corrigir automaticamente bugs complexos fora da tarefa.
+- Não modificar migrations ou regras de negócio durante a validação.
+- Não fazer commits ou push.
 
-- Não executar `git add`, `git commit`, `git push`, `git merge`, `git rebase` ou `git reset`, nem alterar o histórico. Todo versionamento é manual, feito pelo responsável.
-- Mensagens de commit usam Conventional Commits, com descrição em português.
-- Ao concluir, informar alterações, testes preparados, validações não executadas, pendências e caminho da evidência aplicável.
-- Deixar os arquivos disponíveis para revisão e versionamento manual.
-- Economizar tokens com leituras direcionadas, evitando execuções desnecessárias, logs extensos e investigações fora do escopo, sem comprometer a qualidade da implementação.
+Se um teste falhar, apresentar o diagnóstico inicial e indicar se a correção exige outro modelo.
 
-## Prioridade destas instruções
+### Revisão crítica
 
-- Estas regras prevalecem sobre prompts anteriores, relatórios históricos e instruções de tarefas que solicitem execução de testes pelo Codex.
-- Nenhum comando de validação deve ser executado pelo Codex por iniciativa própria.
-- Caso uma tarefa solicite execução de testes, typecheck, lint ou build, o Codex deve **preparar os comandos para execução manual**, sem executá-los.
-- Qualquer exceção a essa política exige autorização explícita e específica do responsável antes da execução.
+Para segurança, autenticação, permissões, concorrência, idempotência, transações ou integridade de dados, recomendar GPT-6.1 Sol ou GPT-6 Astra, com nível High ou Extra High conforme a dificuldade.
+
+Essa revisão deve analisar contratos, código, invariantes, transações e testes preparados.
+
+O uso de um modelo mais poderoso não autoriza mudanças adicionais de escopo.
+
+Quando a revisão terminar, retornar a Luna Medium para executar as validações necessárias.
+
+## 4. Política de escalonamento
+
+Se Luna Medium identificar:
+
+- Deadlocks.
+- Condições de corrida.
+- Falhas de autorização.
+- Inconsistência transacional.
+- Corrupção ou perda potencial de dados.
+- Contradições arquiteturais.
+- Falhas persistentes sem causa evidente.
+
+Deverá interromper correções especulativas e recomendar uma investigação com Sol ou Astra.
+
+Não gastar recursos repetindo testes sem uma hipótese técnica justificável.
+
+## 5. Relatórios e evidências
+
+Preservar a obrigação de gerar:
+
+- `docs/<TASK>_IMPLEMENTACAO.md`
+- `qa-evidence/<TASK>-changes.diff`
+
+Os relatórios devem diferenciar:
+
+- Validações não executadas.
+- Validações executadas pelo Codex com autorização.
+- Validações executadas manualmente pelo responsável.
+- Inspeções estáticas.
+
+Nunca inventar resultados ou declarar testes aprovados sem execução comprovada.
+
+Manter a política de evidência única por task e de patches compatíveis com `git apply`.
+
+## 6. Git e segurança
+
+Manter proibidos:
+
+- `git add`.
+- `git commit`.
+- `git push`.
+- `git reset`.
+- `git merge`.
+- `git rebase`.
+- Alterações automáticas do histórico.
+
+Os commits permanecem sob responsabilidade do usuário, utilizando o VSCode.
+
+Preservar todas as restrições existentes sobre operações destrutivas, bancos, migrations e dados sensíveis.
+
+## 7. Prioridade das instruções
+
+A nova política substitui exclusivamente a antiga proibição absoluta de execução de testes, lint, typecheck e build.
+
+As demais restrições do `AGENTS.md` continuam válidas.
+
+Prompts específicos podem restringir ainda mais as operações permitidas.
+
+Nenhuma instrução pode ampliar permissões sobre bancos, produção, operações destrutivas ou publicação sem autorização explícita do responsável.
+
+## 8. Execução desta atualização
+
+Nesta solicitação:
+
+1. Modificar somente o `AGENTS.md` da raiz.
+2. Preservar o conteúdo existente que não conflite com a nova política.
+3. Eliminar contradições entre seções antigas e novas.
+4. Não modificar `app/AGENTS.md` nem outros arquivos.
+5. Não executar testes, lint, typecheck, build ou banco.
+6. Não fazer staging, commit ou push.
+7. Executar apenas inspeção estática e `git diff --check`.
+8. Apresentar o diff e um resumo das regras alteradas.
+
+Não gerar evidência de task para esta simples atualização de configuração.
+
+Aguardar revisão do responsável.
