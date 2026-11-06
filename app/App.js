@@ -37,12 +37,12 @@ export function AppNavigation() {
     {
       name: 'EventEntry',
       component: EventEntryScreen,
-      options: { headerShown: true, title: 'Entrar em um evento' },
+      options: { headerShown: false, title: 'Entrar em um evento' },
     },
     {
       name: 'EventConfirmation',
       component: EventConfirmationScreen,
-      options: { headerShown: true, title: 'Confirmar entrada' },
+      options: { headerShown: false, title: 'Confirmar entrada' },
     },
     {
       name: 'ParticipationDetails',
