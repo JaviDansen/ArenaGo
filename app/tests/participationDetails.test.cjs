@@ -329,6 +329,9 @@ test('the bottom tabs keep Início, Eventos and Perfil without a new tab', () =>
     if (name === 'react-native') {
       return { StyleSheet: { create: (value) => value }, Text: 'Text', View: 'View' };
     }
+    if (name === 'react-native-safe-area-context') {
+      return { useSafeAreaInsets: () => ({ bottom: 0, top: 0, left: 0, right: 0 }) };
+    }
     if (name === '../theme') {
       return loadModule('theme/index.js', (id) =>
         id.startsWith('./') ? loadModule(`theme/${id.slice(2)}`, require).exports : require(id)

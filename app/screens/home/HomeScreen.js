@@ -1,5 +1,5 @@
 import { StatusBar } from 'expo-status-bar';
-import { useContext } from 'react';
+import { useContext, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -9,7 +9,6 @@ import {
   View,
   useWindowDimensions,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AuthBackground, Badge, Button, Card } from '../../components/ui';
 import { AuthContext } from '../../context/AuthContext';
@@ -20,6 +19,9 @@ export default function HomeScreen({ navigation, route }) {
   const auth = typeof useContext === 'function' ? useContext(AuthContext) : null;
   const participationContext =
     typeof useContext === 'function' ? useContext(ParticipationContext) : null;
+
+  const [isRetrying, setIsRetrying] = useState(false);
+  const [retryError, setRetryError] = useState(null);
 
   const windowDims =
     typeof useWindowDimensions === 'function'
@@ -38,288 +40,312 @@ export default function HomeScreen({ navigation, route }) {
       : null;
 
   const isLoading =
-    auth?.sessionStatus === 'loading' ||
-    auth?.sessionStatus === 'restoring' ||
+    isRetrying ||
+    Boolean(auth?.isInitializing) ||
     route?.params?.isLoading === true;
 
   const errorMessage =
+    retryError ||
+    auth?.networkError ||
+    auth?.storageError ||
     route?.params?.error ||
-    auth?.authError?.detail ||
-    auth?.authError?.message ||
     null;
 
   const rawName = typeof auth?.user?.name === 'string' ? auth.user.name.trim() : '';
   const firstName = rawName ? rawName.split(/\s+/)[0] : '';
 
+  const eventName =
+    rawParticipation?.event?.name ||
+    rawParticipation?.eventName ||
+    'Arena';
+
   const headerBadgeProps = isLoading
     ? { label: 'SINCRONIZANDO', variant: 'info' }
     : errorMessage
     ? { label: 'ATENÇÃO', variant: 'danger' }
-    : hasPendingQuestionnaire
-    ? { label: 'PERFIL PENDENTE', variant: 'warning' }
+    : rawParticipation?.status === 'finished'
+    ? { label: 'CONCLUÍDO', variant: 'success' }
     : rawParticipation?.status === 'active'
     ? { label: 'ARENA ATIVA', variant: 'success' }
     : rawParticipation?.status === 'waiting'
     ? { label: 'NA FILA', variant: 'brand' }
     : { label: 'ONLINE', variant: 'brand' };
 
+  async function handleRetry() {
+    if (isRetrying) return;
+    setRetryError(null);
+    setIsRetrying(true);
+    try {
+      if (typeof auth?.fetchCurrentUser === 'function') {
+        await auth.fetchCurrentUser();
+      } else if (typeof auth?.restoreSession === 'function') {
+        await auth.restoreSession();
+      }
+    } catch (err) {
+      setRetryError(
+        err?.detail ||
+        err?.message ||
+        'Não foi possível restabelecer a conexão com o servidor. Tente novamente.'
+      );
+    } finally {
+      setIsRetrying(false);
+    }
+  }
+
   return (
-    <AuthBackground dimmed testID="home-background">
+    <AuthBackground
+      variant="login"
+      overlayOpacity={0.65}
+      useSafeArea
+      testID="home-background"
+    >
       <StatusBar style="light" />
-      <SafeAreaView style={styles.safeArea}>
-        <ScrollView
-          contentContainerStyle={[
-            styles.scrollContent,
-            isSmallScreen && styles.scrollContentSmall,
-          ]}
-          showsVerticalScrollIndicator={false}
-        >
-          {/* Cabeçalho da marca e saudação do participante */}
-          <View style={styles.topBar}>
-            <View style={styles.brandRow}>
-              <Text style={styles.brandArena}>Arena</Text>
-              <Text style={styles.brandGo}>GO</Text>
-            </View>
-            <Badge
-              label={headerBadgeProps.label}
-              variant={headerBadgeProps.variant}
-            />
+      <ScrollView
+        contentContainerStyle={[
+          styles.scrollContent,
+          isSmallScreen && styles.scrollContentSmall,
+        ]}
+        showsVerticalScrollIndicator={false}
+      >
+        {/* Cabeçalho da marca e saudação do participante */}
+        <View style={styles.topBar}>
+          <View style={styles.brandRow}>
+            <Text style={styles.brandArena}>Arena</Text>
+            <Text style={styles.brandGo}>GO</Text>
           </View>
+          <Badge
+            label={headerBadgeProps.label}
+            variant={headerBadgeProps.variant}
+          />
+        </View>
 
-          <View style={styles.greetingSection}>
-            <Text style={[styles.welcome, isSmallScreen && styles.welcomeSmall]}>
-              {firstName ? `Olá, ${firstName}!` : 'Bem-vindo ao ArenaGo!'}
-            </Text>
-            <Text style={styles.description}>
-              Acompanhe suas experiências, entre em filas virtuais e gerencie sua participação na arena.
-            </Text>
-          </View>
+        <View style={styles.greetingSection}>
+          <Text style={[styles.welcome, isSmallScreen && styles.welcomeSmall]}>
+            {firstName ? `Olá, ${firstName}!` : 'Bem-vindo ao ArenaGo!'}
+          </Text>
+          <Text style={styles.description}>
+            Acompanhe suas experiências, entre em filas virtuais e gerencie sua participação na arena.
+          </Text>
+        </View>
 
-          {/* Estado de carregamento */}
-          {isLoading ? (
-            <Card
-              variant="elevated"
-              style={styles.stateCard}
-              testID="home-loading-card"
-            >
-              <View style={styles.loadingRow}>
-                <ActivityIndicator size="small" color={colors.brand.primaryLight} />
-                <Text style={styles.loadingText}>
-                  Sincronizando informações da sua conta...
-                </Text>
-              </View>
-            </Card>
-          ) : null}
-
-          {/* Estado de erro */}
-          {errorMessage ? (
-            <View
-              style={styles.errorBanner}
-              accessible
-              accessibilityRole="alert"
-              testID="home-error-banner"
-            >
-              <View style={styles.errorHeaderRow}>
-                <Badge label="ERRO DE COMUNICAÇÃO" variant="danger" />
-              </View>
-              <Text style={styles.errorBannerText}>{errorMessage}</Text>
-              {typeof auth?.fetchCurrentUser === 'function' ? (
-                <Pressable
-                  style={styles.retryButton}
-                  onPress={() => auth.fetchCurrentUser()}
-                  accessibilityRole="button"
-                  accessibilityLabel="Tentar sincronizar dados novamente"
-                >
-                  <Text style={styles.retryButtonText}>Tentar novamente</Text>
-                </Pressable>
-              ) : null}
-            </View>
-          ) : null}
-
-          {/* Alerta de questionário pendente */}
-          {hasPendingQuestionnaire ? (
-            <View
-              style={styles.questionnaireBanner}
-              testID="home-pending-questionnaire-banner"
-            >
-              <View style={styles.bannerBadgeRow}>
-                <Badge label="PERFIL INCOMPLETO" variant="warning" />
-              </View>
-              <Text style={styles.questionnaireBannerTitle}>
-                Seu questionário de perfil ainda está pendente.
-              </Text>
-              <Text style={styles.questionnaireBannerText}>
-                Conclua o questionário para personalizar sua experiência na Arena.
-              </Text>
-              <Button
-                title="Completar questionário de perfil"
-                variant="secondary"
-                onPress={() =>
-                  navigation.navigate('ProfileQuestionnaire', {
-                    user: auth.user,
-                  })
-                }
-                style={styles.questionnaireButton}
-              />
-            </View>
-          ) : null}
-
-          {/* Card principal de entrada em evento */}
+        {/* Estado de carregamento */}
+        {isLoading ? (
           <Card
-            variant="highlighted"
-            style={styles.heroCard}
-            testID="home-event-entry-card"
+            variant="elevated"
+            style={styles.stateCard}
+            testID="home-loading-card"
           >
-            <View style={styles.heroTopRow}>
-              <Badge label="ACESSO À ARENA" variant="brand" />
-              <Text style={styles.heroTagMono}>CHECK-IN</Text>
+            <View style={styles.loadingRow}>
+              <ActivityIndicator size="small" color={colors.brand.primaryLight} />
+              <Text style={styles.loadingText}>
+                Sincronizando informações da sua conta...
+              </Text>
             </View>
-            <Text style={styles.heroTitle}>Pronto para jogar?</Text>
-            <Text style={styles.heroDescription}>
-              Informe o código disponibilizado na estação do evento para entrar na fila virtual e acompanhar sua chamada.
+          </Card>
+        ) : null}
+
+        {/* Estado de erro */}
+        {errorMessage ? (
+          <View
+            style={styles.errorBanner}
+            accessible
+            accessibilityRole="alert"
+            testID="home-error-banner"
+          >
+            <View style={styles.errorHeaderRow}>
+              <Badge label="ERRO DE COMUNICAÇÃO" variant="danger" />
+            </View>
+            <Text style={styles.errorBannerText}>{errorMessage}</Text>
+            <Pressable
+              style={[styles.retryButton, isRetrying && styles.buttonDisabled]}
+              onPress={handleRetry}
+              disabled={isRetrying}
+              accessibilityRole="button"
+              accessibilityLabel="Tentar sincronizar dados novamente"
+            >
+              {isRetrying ? (
+                <ActivityIndicator size="small" color={colors.text.primary} />
+              ) : (
+                <Text style={styles.retryButtonText}>Tentar novamente</Text>
+              )}
+            </Pressable>
+          </View>
+        ) : null}
+
+        {/* Alerta de questionário pendente (preservado para compatibilidade) */}
+        {hasPendingQuestionnaire ? (
+          <View
+            style={styles.questionnaireBanner}
+            testID="home-pending-questionnaire-banner"
+          >
+            <View style={styles.bannerBadgeRow}>
+              <Badge label="PERFIL INCOMPLETO" variant="warning" />
+            </View>
+            <Text style={styles.questionnaireBannerTitle}>
+              Seu questionário de perfil ainda está pendente.
+            </Text>
+            <Text style={styles.questionnaireBannerText}>
+              Conclua o questionário para personalizar sua experiência na Arena.
             </Text>
             <Button
-              title="Entrar em um evento"
-              variant="primary"
-              onPress={() => navigation.navigate('EventEntry')}
-              style={styles.eventButton}
+              title="Completar questionário de perfil"
+              variant="secondary"
+              onPress={() =>
+                navigation.navigate('ProfileQuestionnaire', {
+                  user: auth.user,
+                })
+              }
+              style={styles.questionnaireButton}
             />
-          </Card>
-
-          {/* Seção de estado atual de participação */}
-          <View style={styles.sectionBlock}>
-            <Text style={styles.sectionLabel}>STATUS DE PARTICIPAÇÃO</Text>
-
-            {!rawParticipation ? (
-              <Card
-                variant="default"
-                style={styles.participationCard}
-                testID="home-empty-participation-card"
-              >
-                <View style={styles.participationHeaderRow}>
-                  <Badge label="SEM FILA ATIVA" variant="default" />
-                </View>
-                <Text style={styles.participationTitle}>
-                  Nenhuma participação ativa no momento
-                </Text>
-                <Text style={styles.participationSubtitle}>
-                  Você ainda não está aguardando em nenhuma fila nem em atendimento em uma arena. Use o botão acima quando estiver em um evento.
-                </Text>
-                <Pressable
-                  style={styles.inlineActionButton}
-                  onPress={() => navigation.navigate('Eventos')}
-                  accessibilityRole="button"
-                  accessibilityLabel="Consultar histórico de eventos"
-                >
-                  <Text style={styles.inlineActionText}>
-                    Consultar histórico na aba Eventos →
-                  </Text>
-                </Pressable>
-              </Card>
-            ) : rawParticipation.status === 'finished' ? (
-              <Card
-                variant="elevated"
-                style={styles.participationCard}
-                testID="home-finished-participation-card"
-              >
-                <View style={styles.participationHeaderRow}>
-                  <Badge label="PARTICIPAÇÃO CONCLUÍDA" variant="success" />
-                </View>
-                <Text style={styles.participationTitle}>
-                  {rawParticipation.eventName || 'Última participação finalizada'}
-                </Text>
-                <Text style={styles.participationSubtitle}>
-                  Sua participação anterior na arena foi encerrada. Você pode conferir o histórico completo na aba Eventos ou ingressar em uma nova experiência.
-                </Text>
-                <Pressable
-                  style={styles.inlineActionButton}
-                  onPress={() => navigation.navigate('Eventos')}
-                  accessibilityRole="button"
-                  accessibilityLabel="Ver histórico de participações"
-                >
-                  <Text style={styles.inlineActionText}>
-                    Ver histórico de participações →
-                  </Text>
-                </Pressable>
-              </Card>
-            ) : (
-              <Card
-                variant="highlighted"
-                style={styles.participationCard}
-                testID="home-active-participation-card"
-              >
-                <View style={styles.participationHeaderRow}>
-                  <Badge
-                    label={
-                      rawParticipation.status === 'active'
-                        ? 'EM ATENDIMENTO'
-                        : 'AGUARDANDO NA FILA'
-                    }
-                    variant={
-                      rawParticipation.status === 'active' ? 'success' : 'brand'
-                    }
-                  />
-                </View>
-                <Text style={styles.participationTitle}>
-                  {rawParticipation.eventName || 'Participação em andamento'}
-                </Text>
-                <Text style={styles.participationSubtitle}>
-                  {rawParticipation.status === 'active'
-                    ? 'Sua sessão na arena está ativa no momento.'
-                    : 'Você está posicionado na fila virtual deste evento.'}
-                </Text>
-              </Card>
-            )}
           </View>
+        ) : null}
 
-          {/* Atalhos rápidos para as abas da navegação inferior */}
-          <View style={styles.sectionBlock}>
-            <Text style={styles.sectionLabel}>NAVEGAÇÃO RÁPIDA</Text>
-            <View
-              style={[
-                styles.shortcutsGrid,
-                isSmallScreen && styles.shortcutsGridSmall,
-              ]}
+        {/* Card principal de entrada em evento */}
+        <Card
+          variant="highlighted"
+          style={styles.heroCard}
+          testID="home-event-entry-card"
+        >
+          <View style={styles.heroTopRow}>
+            <Badge label="ACESSO À ARENA" variant="brand" />
+            <Text style={styles.heroTagMono}>CHECK-IN</Text>
+          </View>
+          <Text style={styles.heroTitle}>Pronto para jogar?</Text>
+          <Text style={styles.heroDescription}>
+            Informe o código disponibilizado na estação do evento para entrar na fila virtual e acompanhar sua chamada.
+          </Text>
+          <Button
+            title="Entrar em um evento"
+            variant="primary"
+            onPress={() => navigation.navigate('EventEntry')}
+            style={styles.eventButton}
+          />
+        </Card>
+
+        {/* Seção de estado atual de participação */}
+        <View style={styles.sectionBlock}>
+          <Text style={styles.sectionLabel}>STATUS DE PARTICIPAÇÃO</Text>
+
+          {!rawParticipation ? (
+            <Card
+              variant="default"
+              style={styles.participationCard}
+              testID="home-empty-participation-card"
             >
-              <Card
-                variant="elevated"
-                style={styles.shortcutCard}
+              <View style={styles.participationHeaderRow}>
+                <Badge label="SEM FILA ATIVA" variant="default" />
+              </View>
+              <Text style={styles.participationTitle}>
+                Nenhuma participação ativa no momento
+              </Text>
+              <Text style={styles.participationSubtitle}>
+                Você não está aguardando em nenhuma fila nem em atendimento em uma arena. Use o botão acima quando estiver em um evento.
+              </Text>
+              <Pressable
+                style={styles.inlineActionButton}
                 onPress={() => navigation.navigate('Eventos')}
-                accessibilityLabel="Ir para aba Eventos"
+                accessibilityRole="button"
+                accessibilityLabel="Consultar histórico de eventos"
               >
-                <Text style={styles.shortcutIcon}>🎮</Text>
-                <Text style={styles.shortcutTitle}>Eventos</Text>
-                <Text style={styles.shortcutSubtitle}>
-                  Histórico de sessões e avaliações
+                <Text style={styles.inlineActionText}>
+                  Consultar histórico na aba Eventos →
                 </Text>
-              </Card>
+              </Pressable>
+            </Card>
+          ) : rawParticipation.status === 'finished' ? (
+            <Card
+              variant="elevated"
+              style={styles.participationCard}
+              testID="home-finished-participation-card"
+            >
+              <View style={styles.participationHeaderRow}>
+                <Badge label="PARTICIPAÇÃO CONCLUÍDA" variant="success" />
+              </View>
+              <Text style={styles.participationTitle}>{eventName}</Text>
+              <Text style={styles.participationSubtitle}>
+                Sua participação anterior na arena foi encerrada. Você pode conferir o histórico completo na aba Eventos ou ingressar em uma nova experiência.
+              </Text>
+              <Pressable
+                style={styles.inlineActionButton}
+                onPress={() => navigation.navigate('Eventos')}
+                accessibilityRole="button"
+                accessibilityLabel="Ver histórico de participações"
+              >
+                <Text style={styles.inlineActionText}>
+                  Ver histórico de participações →
+                </Text>
+              </Pressable>
+            </Card>
+          ) : (
+            <Card
+              variant="highlighted"
+              style={styles.participationCard}
+              testID="home-active-participation-card"
+            >
+              <View style={styles.participationHeaderRow}>
+                <Badge
+                  label={
+                    rawParticipation.status === 'active'
+                      ? 'EM ATENDIMENTO'
+                      : 'AGUARDANDO NA FILA'
+                  }
+                  variant={
+                    rawParticipation.status === 'active' ? 'success' : 'brand'
+                  }
+                />
+              </View>
+              <Text style={styles.participationTitle}>{eventName}</Text>
+              <Text style={styles.participationSubtitle}>
+                {rawParticipation.status === 'active'
+                  ? 'Sua sessão na arena está ativa no momento.'
+                  : 'Você está posicionado na fila virtual deste evento.'}
+              </Text>
+            </Card>
+          )}
+        </View>
 
-              <Card
-                variant="elevated"
-                style={styles.shortcutCard}
-                onPress={() => navigation.navigate('Perfil')}
-                accessibilityLabel="Ir para aba Perfil"
-              >
-                <Text style={styles.shortcutIcon}>👤</Text>
-                <Text style={styles.shortcutTitle}>Meu Perfil</Text>
-                <Text style={styles.shortcutSubtitle}>
-                  {hasPendingQuestionnaire
-                    ? 'Questionário pendente'
-                    : 'Dados e jogos favoritos'}
-                </Text>
-              </Card>
-            </View>
+        {/* Atalhos rápidos para as abas da navegação inferior */}
+        <View style={styles.sectionBlock}>
+          <Text style={styles.sectionLabel}>NAVEGAÇÃO RÁPIDA</Text>
+          <View
+            style={[
+              styles.shortcutsGrid,
+              isSmallScreen && styles.shortcutsGridSmall,
+            ]}
+          >
+            <Card
+              variant="elevated"
+              style={styles.shortcutCard}
+              onPress={() => navigation.navigate('Eventos')}
+              accessibilityLabel="Ir para aba Eventos"
+            >
+              <Text style={styles.shortcutIcon}>🎮</Text>
+              <Text style={styles.shortcutTitle}>Eventos</Text>
+              <Text style={styles.shortcutSubtitle}>
+                Histórico de sessões e avaliações
+              </Text>
+            </Card>
+
+            <Card
+              variant="elevated"
+              style={styles.shortcutCard}
+              onPress={() => navigation.navigate('Perfil')}
+              accessibilityLabel="Ir para aba Perfil"
+            >
+              <Text style={styles.shortcutIcon}>👤</Text>
+              <Text style={styles.shortcutTitle}>Meu Perfil</Text>
+              <Text style={styles.shortcutSubtitle}>
+                Dados e jogos favoritos
+              </Text>
+            </Card>
           </View>
-        </ScrollView>
-      </SafeAreaView>
+        </View>
+      </ScrollView>
     </AuthBackground>
   );
 }
 
 const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-  },
   scrollContent: {
     paddingHorizontal: spacing.xl,
     paddingTop: spacing.md,
@@ -417,6 +443,9 @@ const styles = StyleSheet.create({
     ...typography.caption,
     color: colors.text.primary,
     fontWeight: typography.weights.bold,
+  },
+  buttonDisabled: {
+    opacity: 0.6,
   },
   questionnaireBanner: {
     backgroundColor: colors.semantic.warningBg,

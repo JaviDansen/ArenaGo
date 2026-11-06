@@ -270,7 +270,7 @@ function createHarness(relativePath, options = {}) {
   function resolveInternalModule(fromRelativePath, name) {
     if (name === 'react') return react;
     if (name === 'react-native') return native;
-    if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView' };
+    if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView', useSafeAreaInsets: () => ({ bottom: 0, top: 0, left: 0, right: 0 }) };
     if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
     if (name === '@react-native-community/datetimepicker') return nativePicker;
     if (name === '../components/BirthDateInput' || name === '../../components/BirthDateInput') return { __esModule: true, default: 'BirthDateInput' };

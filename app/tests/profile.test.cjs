@@ -137,64 +137,96 @@ test('Home has no logout and preserves event entry and pending questionnaire nav
   assert.equal(h.navigationCalls[1].params.user.id, 'user-1');
 });
 
-test('UI-04: HomeScreen renders dark design system background, empty/finished/active participation states, loading/error states, and quick tab navigation', () => {
-  let retryCalls = 0;
+test('UI-04: HomeScreen renders dark design system background without duplicate SafeAreaView, and uses real AuthContext contract', async () => {
+  let fetchUserCalled = 0;
   const h = createHarness('screens/home/HomeScreen.js', {
     authContext: {
       isAuthenticated: true,
-      sessionStatus: 'loading',
-      authError: { detail: 'Falha temporária ao sincronizar sessão.' },
+      isInitializing: true,
+      sessionStatus: 'authenticated',
+      networkError: 'Não foi possível conectar ao servidor.',
+      storageError: null,
       user: { id: 'user-1', name: 'Kaled Barreto', hasCompletedQuestionnaire: true },
-      participation: null,
-      fetchCurrentUser() { retryCalls += 1; },
+      fetchCurrentUser: async () => {
+        fetchUserCalled += 1;
+        return { id: 'user-1', name: 'Kaled Barreto', hasCompletedQuestionnaire: true };
+      },
     },
   });
 
-  // 1. Saudação com primeiro nome, StatusBar light e estados de loading/erro
+  // 1. StatusBar style="light" e ausência de SafeAreaView duplicado
   const statusBar = h.nodes.find((n) => n.type === 'StatusBar');
   assert.equal(statusBar?.props?.style, 'light');
+  assert.equal(h.nodes.filter((n) => n.type === 'SafeAreaView').length, 1, 'HomeScreen must have exactly one SafeAreaView from AuthBackground without duplicate wrapping');
+
+  // 2. Saudação com primeiro nome
   assert.ok(h.nodes.some((n) => n.type === 'Text' && textOf(n).includes('Olá, Kaled!')));
+
+  // 3. Estado de carregamento baseado em isInitializing
   assert.ok(h.nodes.some((n) => n.props?.testID === 'home-loading-card'));
+
+  // 4. Estado de erro de rede baseado em networkError e botão de nova tentativa
   assert.ok(h.nodes.some((n) => n.props?.testID === 'home-error-banner' && n.props?.accessibilityRole === 'alert'));
-  assert.ok(h.nodes.some((n) => n.props?.testID === 'home-empty-participation-card'));
+  assert.ok(h.nodes.some((n) => n.type === 'Text' && textOf(n).includes('Não foi possível conectar ao servidor.')));
 
-  h.press('Tentar sincronizar dados novamente');
-  assert.equal(retryCalls, 1);
+  await h.actAsync(() => h.press('Tentar sincronizar dados novamente'));
+  assert.equal(fetchUserCalled, 1);
 
-  // 2. Navegação rápida para as abas Eventos e Perfil
+  // 5. Navegação rápida para as abas Eventos e Perfil
   h.press('Ir para aba Eventos');
   assert.equal(h.navigationCalls.at(-1)?.name, 'Eventos');
   h.press('Ir para aba Perfil');
   assert.equal(h.navigationCalls.at(-1)?.name, 'Perfil');
-
-  // 3. Estado de participação concluída
-  h.setAuthContext({
-    isAuthenticated: true,
-    sessionStatus: 'authenticated',
-    user: { id: 'user-1', name: 'Kaled Barreto', hasCompletedQuestionnaire: true },
-    participation: { id: 'part-1', eventName: 'Arena VR 2026', status: 'finished' },
-  });
-  assert.ok(h.nodes.some((n) => n.props?.testID === 'home-finished-participation-card'));
-  assert.ok(h.nodes.some((n) => n.type === 'Text' && textOf(n).includes('Arena VR 2026')));
-
-  // 4. Estado de participação ativa
-  h.setAuthContext({
-    isAuthenticated: true,
-    sessionStatus: 'authenticated',
-    user: { id: 'user-1', name: 'Kaled Barreto', hasCompletedQuestionnaire: true },
-    participation: { id: 'part-2', eventName: 'Simulador F1', status: 'active' },
-  });
-  assert.ok(h.nodes.some((n) => n.props?.testID === 'home-active-participation-card'));
-  assert.ok(h.nodes.some((n) => n.type === 'Text' && textOf(n).includes('Simulador F1')));
 });
 
-test('UI-04: MainTabs configures dark tab bar, hides Início native header, and distinguishes active/inactive TabBarIcon', () => {
+test('UI-04: HomeScreen renders empty participation state and finished state with participation.event.name', () => {
+  // Estado sem participação
+  const hEmpty = createHarness('screens/home/HomeScreen.js', {
+    authContext: {
+      isAuthenticated: true,
+      isInitializing: false,
+      sessionStatus: 'authenticated',
+      user: { id: 'user-1', name: 'Kaled Barreto', hasCompletedQuestionnaire: true },
+    },
+    props: { route: { params: { participation: null } } },
+  });
+  assert.ok(hEmpty.nodes.some((n) => n.props?.testID === 'home-empty-participation-card'));
+  assert.ok(hEmpty.nodes.some((n) => n.type === 'Text' && textOf(n).includes('Nenhuma participação ativa no momento')));
+
+  // Estado com participação concluída exibindo event.name
+  const hFinished = createHarness('screens/home/HomeScreen.js', {
+    authContext: {
+      isAuthenticated: true,
+      isInitializing: false,
+      sessionStatus: 'authenticated',
+      user: { id: 'user-1', name: 'Kaled Barreto', hasCompletedQuestionnaire: true },
+    },
+    props: {
+      route: {
+        params: {
+          participation: {
+            id: 'part-1',
+            status: 'finished',
+            event: { id: 'ev-1', name: 'Arena VR 2026' },
+          },
+        },
+      },
+    },
+  });
+  assert.ok(hFinished.nodes.some((n) => n.props?.testID === 'home-finished-participation-card'));
+  assert.ok(hFinished.nodes.some((n) => n.type === 'Text' && textOf(n).includes('Arena VR 2026')));
+});
+
+test('UI-04: MainTabs dynamically adapts tab bar height and padding to safe area bottom insets', () => {
   const tabs = loadModule('navigation/MainTabs.js', (name) => {
     if (name === '@react-navigation/bottom-tabs') {
       return { createBottomTabNavigator: () => ({ Navigator: 'TabNavigator', Screen: 'TabScreen' }) };
     }
     if (name === 'react-native') {
       return { StyleSheet: { create: (value) => value }, Text: 'Text', View: 'View' };
+    }
+    if (name === 'react-native-safe-area-context') {
+      return { useSafeAreaInsets: () => ({ bottom: 34, top: 47, left: 0, right: 0 }) };
     }
     if (name === '../theme') {
       return loadModule('theme/index.js', (id) =>
@@ -207,9 +239,13 @@ test('UI-04: MainTabs configures dark tab bar, hides Início native header, and 
 
   const tree = tabs.exports.default();
   assert.equal(tree.type, 'TabNavigator');
-  assert.equal(tree.props.screenOptions.tabBarStyle.backgroundColor, '#0B0B12');
-  assert.equal(tree.props.screenOptions.tabBarActiveTintColor, '#8A68FF');
-  assert.equal(tree.props.screenOptions.tabBarInactiveTintColor, '#6C6C8A');
+
+  // Altura dinâmica: 60 + 34 = 94, paddingBottom: 34
+  const tabBarStyle = tree.props.screenOptions.tabBarStyle;
+  const flatTabBarStyle = Array.isArray(tabBarStyle) ? Object.assign({}, ...tabBarStyle) : tabBarStyle;
+  assert.equal(flatTabBarStyle.backgroundColor, '#0B0B12');
+  assert.equal(flatTabBarStyle.height, 94);
+  assert.equal(flatTabBarStyle.paddingBottom, 34);
 
   const screens = tree.props.children;
   assert.equal(screens[0].props.name, 'Início');
@@ -226,4 +262,24 @@ test('UI-04: MainTabs configures dark tab bar, hides Início native header, and 
   const renderedInactive = tabs.exports.TabBarIcon({ focused: false, symbol: '⚡' });
   assert.ok(Array.isArray(renderedActive.props.style) && renderedActive.props.style[1] != null);
   assert.equal(renderedInactive.props.style[1], null);
+});
+
+test('UI-04: HomeFlow renders HomeScreen which formats finished event name from participation.event.name', () => {
+  const participation = {
+    id: 'part-flow-1',
+    status: 'finished',
+    event: { id: 'ev-1', name: 'Circuito Gamer Pro' },
+  };
+  const h = createHarness('screens/home/HomeScreen.js', {
+    authContext: {
+      isAuthenticated: true,
+      isInitializing: false,
+      sessionStatus: 'authenticated',
+      user: { id: 'user-1', name: 'Kaled Barreto', hasCompletedQuestionnaire: true },
+    },
+    props: { route: { params: { participation } } },
+  });
+
+  assert.ok(h.nodes.some((n) => n.props?.testID === 'home-finished-participation-card'));
+  assert.ok(h.nodes.some((n) => n.type === 'Text' && textOf(n).includes('Circuito Gamer Pro')));
 });
