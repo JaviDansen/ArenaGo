@@ -8,6 +8,7 @@ import { EventsModule } from "./events/events.module";
 import { AdminEventsModule } from "./events/admin-events.module";
 import { GamesModule } from "./games/games.module";
 import { ProfileModule } from "./profile/profile.module";
+import { AdminRoleManagementModule } from "./auth/admin-role-management.module";
 
 @Module({
   imports: [
@@ -17,6 +18,7 @@ import { ProfileModule } from "./profile/profile.module";
     AdminEventsModule,
     GamesModule,
     ProfileModule,
+    AdminRoleManagementModule,
   ],
   providers: [
     {
