@@ -172,11 +172,10 @@ test('UI-04: HomeScreen renders dark design system background without duplicate 
   await h.actAsync(() => h.press('Tentar sincronizar dados novamente'));
   assert.equal(fetchUserCalled, 1);
 
-  // 5. Navegação rápida para as abas Eventos e Perfil
-  h.press('Ir para aba Eventos');
-  assert.equal(h.navigationCalls.at(-1)?.name, 'Eventos');
-  h.press('Ir para aba Perfil');
-  assert.equal(h.navigationCalls.at(-1)?.name, 'Perfil');
+  // 5. Navegação rápida removida da Home (funcionalidades cobertas pela barra inferior)
+  assert.equal(h.nodes.some((n) => n.type === 'Text' && textOf(n).includes('NAVEGAÇÃO RÁPIDA')), false);
+  assert.equal(h.nodes.some((n) => n.props?.accessibilityLabel === 'Ir para aba Eventos'), false);
+  assert.equal(h.nodes.some((n) => n.props?.accessibilityLabel === 'Ir para aba Perfil'), false);
 });
 
 test('UI-04: HomeScreen renders empty participation state and finished state with participation.event.name', () => {
@@ -258,6 +257,15 @@ test('UI-04: MainTabs dynamically adapts tab bar height and padding to safe area
   assert.equal(activeIcon.props.focused, true);
   assert.equal(inactiveIcon.props.focused, false);
 
+  // Ícones profissionais sem emojis para as 3 abas
+  const homeActive = tabs.exports.TabBarIcon({ focused: true, name: 'home' });
+  const eventsActive = tabs.exports.TabBarIcon({ focused: true, name: 'events' });
+  const profileActive = tabs.exports.TabBarIcon({ focused: true, name: 'profile' });
+  assert.ok(Array.isArray(homeActive.props.style) && homeActive.props.style[1] != null);
+  assert.ok(Array.isArray(eventsActive.props.style) && eventsActive.props.style[1] != null);
+  assert.ok(Array.isArray(profileActive.props.style) && profileActive.props.style[1] != null);
+
+  // Fallback de compatibilidade
   const renderedActive = tabs.exports.TabBarIcon({ focused: true, symbol: '⚡' });
   const renderedInactive = tabs.exports.TabBarIcon({ focused: false, symbol: '⚡' });
   assert.ok(Array.isArray(renderedActive.props.style) && renderedActive.props.style[1] != null);

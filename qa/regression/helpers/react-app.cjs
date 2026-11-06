@@ -45,6 +45,7 @@ const questionnaire = loadJs('app/screens/profile/ProfileQuestionnaireScreen.js'
   'expo-status-bar': { StatusBar: 'StatusBar' },
   'react-native-safe-area-context': { SafeAreaView: 'SafeAreaView' },
   '../../context/AuthContext': authContext,
+  '../../components/ui/AuthBackground': { AuthBackground: 'AuthBackground' },
   '../../components/BirthDateInput': { __esModule: true, default: 'BirthDateInput' },
   '../../utils/birthDate': birthDate, '../../utils/validation': validation,
 });

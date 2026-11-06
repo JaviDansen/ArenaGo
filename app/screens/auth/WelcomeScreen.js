@@ -16,7 +16,11 @@ export default function WelcomeScreen({ navigation }) {
         showsVerticalScrollIndicator={false}
         bounces={false}
       >
-        <View style={styles.header} />
+        <View style={styles.header}>
+          <Text style={styles.srOnly} accessibilityRole="header">
+            ArenaGO
+          </Text>
+        </View>
 
         {/* Área central livre para valorizar a composição artística de fundo */}
         <View style={styles.artworkStage} pointerEvents="none" />
@@ -70,6 +74,13 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.xxl,
     paddingTop: spacing.md,
     paddingBottom: spacing.xxl,
+  },
+  srOnly: {
+    position: 'absolute',
+    width: 1,
+    height: 1,
+    opacity: 0,
+    overflow: 'hidden',
   },
   header: {
     flexDirection: 'row',

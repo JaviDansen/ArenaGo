@@ -9,12 +9,104 @@ import { colors, radii, spacing, typography } from '../theme';
 
 const Tab = createBottomTabNavigator();
 
-export function TabBarIcon({ focused, symbol }) {
+/**
+ * Ícone profissional de Casa (Home) desenhado com Views nativas.
+ * Mesma espessura (1.8dp), proporção e bounding box (20x20dp) dos demais ícones.
+ */
+export function HomeIcon({ focused, color }) {
+  return (
+    <View style={iconStyles.container} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
+      <View style={[iconStyles.homeRoof, { borderColor: color }]} />
+      <View
+        style={[
+          iconStyles.homeBody,
+          {
+            borderColor: color,
+            backgroundColor: focused ? `${color}18` : 'transparent',
+          },
+        ]}
+      >
+        <View style={[iconStyles.homeDoor, { backgroundColor: color }]} />
+      </View>
+    </View>
+  );
+}
+
+/**
+ * Ícone profissional de Calendário / Eventos desenhado com Views nativas.
+ * Mesma espessura (1.8dp), proporção e bounding box (20x20dp).
+ */
+export function EventsIcon({ focused, color }) {
+  return (
+    <View style={iconStyles.container} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
+      <View style={[iconStyles.calendarPin, { left: 4.5, backgroundColor: color }]} />
+      <View style={[iconStyles.calendarPin, { right: 4.5, backgroundColor: color }]} />
+      <View
+        style={[
+          iconStyles.calendarBody,
+          {
+            borderColor: color,
+            backgroundColor: focused ? `${color}18` : 'transparent',
+          },
+        ]}
+      >
+        <View style={[iconStyles.calendarHeaderLine, { backgroundColor: color }]} />
+        <View style={iconStyles.calendarGridRow}>
+          <View style={[iconStyles.calendarDot, { backgroundColor: color }]} />
+          <View style={[iconStyles.calendarDot, { backgroundColor: color }]} />
+        </View>
+      </View>
+    </View>
+  );
+}
+
+/**
+ * Ícone profissional de Usuário (Perfil) desenhado com Views nativas.
+ * Mesma espessura (1.8dp), proporção e bounding box (20x20dp).
+ */
+export function ProfileIcon({ focused, color }) {
+  return (
+    <View style={iconStyles.container} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
+      <View
+        style={[
+          iconStyles.profileHead,
+          {
+            borderColor: color,
+            backgroundColor: focused ? color : 'transparent',
+          },
+        ]}
+      />
+      <View
+        style={[
+          iconStyles.profileTorso,
+          {
+            borderColor: color,
+            backgroundColor: focused ? `${color}18` : 'transparent',
+          },
+        ]}
+      />
+    </View>
+  );
+}
+
+export function TabBarIcon({ focused, name, symbol }) {
+  const activeColor = colors.brand.primaryLight;
+  const inactiveColor = colors.text.muted;
+  const color = focused ? activeColor : inactiveColor;
+
   return (
     <View style={[styles.iconPill, focused ? styles.iconPillActive : null]}>
-      <Text style={[styles.iconSymbol, focused ? styles.iconSymbolActive : null]}>
-        {symbol}
-      </Text>
+      {name === 'home' ? (
+        <HomeIcon focused={focused} color={color} />
+      ) : name === 'events' ? (
+        <EventsIcon focused={focused} color={color} />
+      ) : name === 'profile' ? (
+        <ProfileIcon focused={focused} color={color} />
+      ) : (
+        <Text style={[styles.iconSymbol, focused ? styles.iconSymbolActive : null]}>
+          {symbol}
+        </Text>
+      )}
     </View>
   );
 }
@@ -62,7 +154,7 @@ export default function MainTabs() {
         options={{
           headerShown: false,
           tabBarAccessibilityLabel: 'Aba Início',
-          tabBarIcon: ({ focused }) => <TabBarIcon focused={focused} symbol="⚡" />,
+          tabBarIcon: ({ focused }) => <TabBarIcon focused={focused} name="home" symbol="⚡" />,
         }}
       />
       <Tab.Screen
@@ -71,7 +163,7 @@ export default function MainTabs() {
         options={{
           title: 'Eventos',
           tabBarAccessibilityLabel: 'Aba Eventos',
-          tabBarIcon: ({ focused }) => <TabBarIcon focused={focused} symbol="🎮" />,
+          tabBarIcon: ({ focused }) => <TabBarIcon focused={focused} name="events" symbol="🎮" />,
         }}
       />
       <Tab.Screen
@@ -80,12 +172,105 @@ export default function MainTabs() {
         options={{
           title: 'Perfil',
           tabBarAccessibilityLabel: 'Aba Perfil',
-          tabBarIcon: ({ focused }) => <TabBarIcon focused={focused} symbol="👤" />,
+          tabBarIcon: ({ focused }) => <TabBarIcon focused={focused} name="profile" symbol="👤" />,
         }}
       />
     </Tab.Navigator>
   );
 }
+
+const iconStyles = StyleSheet.create({
+  container: {
+    width: 20,
+    height: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  homeRoof: {
+    width: 10,
+    height: 10,
+    borderTopWidth: 1.8,
+    borderLeftWidth: 1.8,
+    transform: [{ rotate: '45deg' }],
+    position: 'absolute',
+    top: 2,
+  },
+  homeBody: {
+    width: 13,
+    height: 9,
+    borderLeftWidth: 1.8,
+    borderRightWidth: 1.8,
+    borderBottomWidth: 1.8,
+    borderBottomLeftRadius: 2,
+    borderBottomRightRadius: 2,
+    position: 'absolute',
+    bottom: 2,
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+  },
+  homeDoor: {
+    width: 3.5,
+    height: 4.5,
+    borderTopLeftRadius: 1.5,
+    borderTopRightRadius: 1.5,
+  },
+  calendarPin: {
+    position: 'absolute',
+    top: 1,
+    width: 2,
+    height: 3.5,
+    borderRadius: 1,
+    zIndex: 2,
+  },
+  calendarBody: {
+    width: 16,
+    height: 14.5,
+    borderWidth: 1.8,
+    borderRadius: 3,
+    position: 'absolute',
+    bottom: 2,
+    paddingTop: 3.5,
+    alignItems: 'center',
+    overflow: 'hidden',
+  },
+  calendarHeaderLine: {
+    width: '100%',
+    height: 1.5,
+    position: 'absolute',
+    top: 3,
+  },
+  calendarGridRow: {
+    flexDirection: 'row',
+    gap: 3,
+    marginTop: 2.5,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  calendarDot: {
+    width: 2.2,
+    height: 2.2,
+    borderRadius: 1,
+  },
+  profileHead: {
+    width: 7.5,
+    height: 7.5,
+    borderRadius: 4,
+    borderWidth: 1.8,
+    position: 'absolute',
+    top: 2,
+  },
+  profileTorso: {
+    width: 15,
+    height: 7,
+    borderTopLeftRadius: 7.5,
+    borderTopRightRadius: 7.5,
+    borderBottomLeftRadius: 2,
+    borderBottomRightRadius: 2,
+    borderWidth: 1.8,
+    position: 'absolute',
+    bottom: 2,
+  },
+});
 
 const styles = StyleSheet.create({
   headerStyle: {
@@ -125,11 +310,11 @@ const styles = StyleSheet.create({
   },
   iconPill: {
     minWidth: 44,
-    height: 26,
+    height: 28,
     borderRadius: radii.full,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: spacing.sm,
+    paddingHorizontal: spacing.xs,
     backgroundColor: 'transparent',
   },
   iconPillActive: {

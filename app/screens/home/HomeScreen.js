@@ -303,43 +303,6 @@ export default function HomeScreen({ navigation, route }) {
             </Card>
           )}
         </View>
-
-        {/* Atalhos rápidos para as abas da navegação inferior */}
-        <View style={styles.sectionBlock}>
-          <Text style={styles.sectionLabel}>NAVEGAÇÃO RÁPIDA</Text>
-          <View
-            style={[
-              styles.shortcutsGrid,
-              isSmallScreen && styles.shortcutsGridSmall,
-            ]}
-          >
-            <Card
-              variant="elevated"
-              style={styles.shortcutCard}
-              onPress={() => navigation.navigate('Eventos')}
-              accessibilityLabel="Ir para aba Eventos"
-            >
-              <Text style={styles.shortcutIcon}>🎮</Text>
-              <Text style={styles.shortcutTitle}>Eventos</Text>
-              <Text style={styles.shortcutSubtitle}>
-                Histórico de sessões e avaliações
-              </Text>
-            </Card>
-
-            <Card
-              variant="elevated"
-              style={styles.shortcutCard}
-              onPress={() => navigation.navigate('Perfil')}
-              accessibilityLabel="Ir para aba Perfil"
-            >
-              <Text style={styles.shortcutIcon}>👤</Text>
-              <Text style={styles.shortcutTitle}>Meu Perfil</Text>
-              <Text style={styles.shortcutSubtitle}>
-                Dados e jogos favoritos
-              </Text>
-            </Card>
-          </View>
-        </View>
       </ScrollView>
     </AuthBackground>
   );
@@ -355,7 +318,7 @@ const styles = StyleSheet.create({
   scrollContentSmall: {
     paddingHorizontal: spacing.md,
     paddingTop: spacing.sm,
-    paddingBottom: spacing.xl,
+    paddingBottom: spacing.xxl,
     gap: spacing.md,
   },
   topBar: {
@@ -531,29 +494,5 @@ const styles = StyleSheet.create({
     ...typography.body,
     color: colors.brand.primaryLight,
     fontWeight: typography.weights.bold,
-  },
-  shortcutsGrid: {
-    flexDirection: 'row',
-    gap: spacing.md,
-  },
-  shortcutsGridSmall: {
-    flexDirection: 'column',
-  },
-  shortcutCard: {
-    flex: 1,
-    gap: 6,
-  },
-  shortcutIcon: {
-    fontSize: 22,
-    marginBottom: 2,
-  },
-  shortcutTitle: {
-    ...typography.bodyLarge,
-    color: colors.text.primary,
-    fontWeight: typography.weights.bold,
-  },
-  shortcutSubtitle: {
-    ...typography.caption,
-    color: colors.text.secondary,
-  },
+  }
 });
