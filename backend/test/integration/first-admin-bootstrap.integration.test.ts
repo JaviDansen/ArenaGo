@@ -15,9 +15,9 @@ import { SessionAuthGuard } from "../../src/auth/session-auth.guard";
 import { signAccessToken } from "../../src/auth/token.util";
 import { ProblemDetailsExceptionFilter } from "../../src/common/errors/problem-details.filter";
 import { POSTGRES_POOL } from "../../src/database/database.module";
-import { assertParticipationsReadTestDatabaseUrls } from "./participations-read-db-guard";
+import { assertFirstAdminBootstrapTestDatabaseUrls } from "./first-admin-bootstrap-db-guard";
 
-const connectionString = assertParticipationsReadTestDatabaseUrls(process.env);
+const connectionString = assertFirstAdminBootstrapTestDatabaseUrls(process.env);
 const applicationName = `b1-bootstrap-${randomUUID()}`;
 const pool = new Pool({ connectionString, application_name: applicationName, max: 8 });
 const userIds: string[] = [];
@@ -66,6 +66,16 @@ async function waitForBlockedBootstrap(count: number): Promise<void> {
 }
 
 before(async () => {
+  const database = await pool.query<{ name: string }>("SELECT current_database() AS name");
+  if (database.rows[0]?.name !== "arenago_bootstrap_test") {
+    throw new Error("[SEGURANÇA BLOQUEADA] A integração B1 conectou a um banco diferente do dedicado.");
+  }
+  const historicalAdmins = await pool.query<{ count: number }>(`SELECT count(*)::integer AS count FROM user_roles
+    WHERE role='admin' AND event_id IS NULL`);
+  if (historicalAdmins.rows[0]?.count !== 0) {
+    throw new Error("[SEGURANÇA BLOQUEADA] O banco dedicado já contém Admin global histórico; use um banco novo, sem apagar registros.");
+  }
+
   app = await NestFactory.create(FirstAdminAuthIntegrationModule, { logger: false });
   app.setGlobalPrefix("api/v1");
   await app.listen(0, "127.0.0.1");
@@ -75,8 +85,20 @@ before(async () => {
 
 beforeEach(async () => {
   const created = await account(true);
-  if (!("sessionId" in created)) throw new Error("Fixture de sessão indisponível.");
-  current = created;
+
+  if (
+    typeof created.sessionId !== "string" ||
+    typeof created.accessToken !== "string"
+  ) {
+    throw new Error("Fixture de sessão indisponível.");
+  }
+
+  current = {
+    userId: created.userId,
+    email: created.email,
+    sessionId: created.sessionId,
+    accessToken: created.accessToken,
+  };
 });
 
 afterEach(async () => {
@@ -123,7 +145,7 @@ test("T6.1-B1 PostgreSQL lock global permite somente um bootstrap concorrente", 
   const blocker = await pool.connect();
   let attempts: Promise<Awaited<ReturnType<FirstAdminBootstrapService["bootstrap"]>>>[] = [];
   let completed = false;
-  let results: Awaited<ReturnType<FirstAdminBootstrapService["bootstrap"]>>[] = [];
+  let results: Awaited<ReturnType<FirstAdminBootstrapService["bootstrap"]>>[];
   try {
     await blocker.query("BEGIN");
     await blocker.query("SELECT pg_advisory_xact_lock(1095919439,1)");

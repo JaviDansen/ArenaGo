@@ -2,7 +2,7 @@
 
 ## Base e escopo
 
-Base: branch `feature/events-participations`, HEAD `31c78955514451c3a61c7eb6fd887ae98e1fd421`. O índice e o working tree estavam limpos. O planejamento geral aprova o primeiro Admin por comando restrito, sem endpoint público; a arquitetura exige auditoria `origin='cli'`, ator nulo, alvo correspondente e atomicidade.
+Base histórica da implementação: `31c78955514451c3a61c7eb6fd887ae98e1fd421`. O planejamento geral aprova o primeiro Admin por comando restrito, sem endpoint público; a arquitetura exige auditoria `origin='cli'`, ator nulo, alvo correspondente e atomicidade.
 
 Esta implementação não altera A1/A2, E07/E08, schemas, migrations, autenticação, nem os fluxos de TOTP. Não adiciona dependências.
 
@@ -41,21 +41,96 @@ O e-mail acima é apenas ilustrativo. Confirmar antes que o banco selecionado é
 
 `backend/test/unit/first-admin-bootstrap.test.ts` cobre concessão/auditoria, lock e ordenação, conta inexistente/inativa/não verificada, e-mail inválido, bloqueio de repetição, rollback em falha de gravação/commit, resolução DI real do serviço e ausência de rota HTTP.
 
-`backend/test/integration/first-admin-bootstrap.integration.test.ts` usa a guarda A04 e PostgreSQL local autorizado. Cobre primeiro Admin e auditoria no mesmo instante, execução concorrente de dois candidatos, estados de conta recusados, rollback provocado após inserção real da auditoria, preservação de sessão/papel participante/TOTP e rejeição `ADMIN_2FA_REQUIRED` de uma sessão sem segundo fator. Não reimplementa as suítes E07/E08 nem envia mensagens.
+`backend/test/integration/first-admin-bootstrap.integration.test.ts` usa guarda exclusiva e PostgreSQL local dedicado. Cobre primeiro Admin e auditoria no mesmo instante, execução concorrente de dois candidatos, estados de conta recusados, rollback provocado após inserção real da auditoria, preservação de sessão/papel participante/TOTP e rejeição `ADMIN_2FA_REQUIRED` de uma sessão sem segundo fator. Não reimplementa as suítes E07/E08 nem envia mensagens. Antes de criar a API ou qualquer fixture, confere `current_database()` e exige zero papéis Admin globais históricos, inclusive revogados. Caso contrário, falha explicitamente e não apaga registros.
+
+`backend/test/integration/first-admin-bootstrap-db-guard.ts` exige `NODE_ENV=test`, três URLs textualmente idênticas, credenciais explícitas e destino exato `127.0.0.1:55432/arenago_bootstrap_test`, sem query ou fragmento. Ela é independente da guarda central e não amplia a allowlist das outras suítes. `backend/test/unit/first-admin-bootstrap-db-guard.test.ts` prepara provas de aceitação e rejeição de destinos ou configurações divergentes.
+
+## Falhas observadas e isolamento PostgreSQL
+
+Na primeira execução manual, a suíte B1 falhou **4/4**: o serviço retornou `already_bootstrapped`. A investigação somente leitura do responsável encontrou no banco compartilhado `arenago_events_test` quatro papéis Admin globais históricos, quatro não revogados e zero revogados. A consulta do serviço considera qualquer Admin global histórico, como exige o contrato de bootstrap único. Logo, o defeito estava no isolamento da fixture, que apontava para um banco já utilizado. Nenhum desses registros foi alterado; o serviço de produção permanece correto e não foi modificado.
+
+O responsável deve criar `arenago_bootstrap_test` vazio no mesmo contêiner PostgreSQL Docker, aplicar somente as migrações versionadas para obter o schema e executar exclusivamente a suíte B1 nele. Não copiar dados, restaurar dump, aplicar seed ou reutilizar `arenago_events_test`. Os comandos abaixo são **para execução manual pelo responsável**. Conferir o nome do contêiner e a role local antes; nenhum deles foi executado pelo Codex.
+
+```powershell
+Set-Location 'C:\DoJob\ProgramacaoMobile\backend'
+$container = 'arenago-e08-pg18'
+$role = 'arenago'
+$existing = docker exec $container psql -U $role -d postgres -X -tA -v ON_ERROR_STOP=1 -c "SELECT 1 FROM pg_database WHERE datname='arenago_bootstrap_test'"
+if ($LASTEXITCODE -ne 0) { throw 'Não foi possível verificar o catálogo de bancos.' }
+if ([string]$existing -ne '') { throw 'O banco dedicado já existe. Investigue antes de reutilizá-lo.' }
+docker exec $container psql -U $role -d postgres -X -v ON_ERROR_STOP=1 -c 'CREATE DATABASE arenago_bootstrap_test OWNER arenago TEMPLATE template0'
+if ($LASTEXITCODE -ne 0) { throw 'Criação do banco dedicado falhou.' }
+
+# Informar localmente a URL com credenciais próprias, sem exibi-la no terminal ou gravá-la.
+$secretUrl = Read-Host 'URL postgresql://USUARIO:SENHA@127.0.0.1:55432/arenago_bootstrap_test' -AsSecureString
+$bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secretUrl)
+try { $bootstrapUrl = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) }
+finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+$parsed = [uri]$bootstrapUrl
+if ($parsed.Scheme -notin @('postgresql','postgres') -or $parsed.Host -ne '127.0.0.1' -or $parsed.Port -ne 55432 -or $parsed.AbsolutePath -cne '/arenago_bootstrap_test' -or $parsed.Query -or $parsed.Fragment -or $bootstrapUrl.Contains('?') -or $bootstrapUrl.Contains('#') -or -not $parsed.UserInfo.Contains(':')) { throw 'URL do banco dedicado inválida.' }
+$env:NODE_ENV = 'test'
+$env:DOTENV_CONFIG_PATH = 'NUL'
+$env:DATABASE_URL = $bootstrapUrl
+$env:DATABASE_DIRECT_URL = $bootstrapUrl
+$env:EVENTS_TEST_DATABASE_URL = $bootstrapUrl
+npm.cmd run db:migrate
+if ($LASTEXITCODE -ne 0) { throw 'Migrações do banco dedicado falharam.' }
+```
+
+Depois de preparar o schema, executar **somente** a integração B1. A guarda da suíte faz a verificação de banco vazio antes de qualquer fixture; a limpeza `afterEach` remove apenas os usuários criados pela própria suíte. A B1 não integra a regressão que aponta para `arenago_events_test`.
+
+```powershell
+Set-Location 'C:\DoJob\ProgramacaoMobile\backend'
+.\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test --test-concurrency=1 test/integration/first-admin-bootstrap.integration.test.ts
+if ($LASTEXITCODE -ne 0) { throw 'Integração PostgreSQL B1 falhou; não reutilizar o banco sem investigar.' }
+```
+
+Após inspecionar o resultado e confirmar que o nome é **somente** `arenago_bootstrap_test`, o responsável pode remover manualmente o banco descartável. O comando usa conexão ao banco `postgres`, não ao compartilhado. Não executar `DROP`, `TRUNCATE` ou `DELETE` em `arenago_events_test`.
+
+```powershell
+$container = 'arenago-e08-pg18'
+$role = 'arenago'
+$confirmation = Read-Host 'Para remover apenas o banco dedicado, digite arenago_bootstrap_test'
+if ($confirmation -cne 'arenago_bootstrap_test') { throw 'Limpeza cancelada.' }
+docker exec $container psql -U $role -d postgres -X -v ON_ERROR_STOP=1 -c 'DROP DATABASE arenago_bootstrap_test'
+if ($LASTEXITCODE -ne 0) { throw 'Remoção manual do banco dedicado falhou.' }
+Remove-Item Env:DATABASE_URL,Env:DATABASE_DIRECT_URL,Env:EVENTS_TEST_DATABASE_URL -ErrorAction SilentlyContinue
+Remove-Variable bootstrapUrl,secretUrl -ErrorAction SilentlyContinue
+```
+
+## Validações manuais concluídas
+
+O responsável executou manualmente, sem compartilhar credenciais:
+
+- Guarda de segurança do banco dedicado: **13/13 aprovados**.
+- Integração PostgreSQL B1 em `arenago_bootstrap_test`: **4/4 aprovados**.
+- Regressão PostgreSQL compartilhada em `arenago_events_test`, excluindo somente `first-admin-bootstrap.integration.test.ts`: **1.255/1.255 aprovados**, código de saída 0.
+- Testes unitários completos: **1.057/1.057 aprovados**.
+- Typecheck de testes, ESLint e build NestJS: aprovados.
+
+Total informado: **2.316 testes aprovados**, sem falhas. A B1 exige exclusivamente o banco dedicado `arenago_bootstrap_test`; as demais integrações continuam usando `arenago_events_test`. O comando genérico `npm run test:integration` inclui a B1 e não deve ser executado indiscriminadamente com apenas um banco configurado.
+
+Para repetir manualmente a regressão compartilhada, mantendo execução serial e excluindo apenas a B1:
+
+```powershell
+Set-Location 'C:\DoJob\ProgramacaoMobile\backend'
+$integrationFiles = Get-ChildItem test/integration -Filter '*.integration.test.ts' |
+  Where-Object { $_.Name -ne 'first-admin-bootstrap.integration.test.ts' } |
+  ForEach-Object { $_.FullName }
+& .\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test --test-concurrency=1 $integrationFiles
+if ($LASTEXITCODE -ne 0) { throw 'Regressão PostgreSQL compartilhada falhou.' }
+```
 
 Comandos para o responsável executar manualmente no computador principal:
 
 ```powershell
 $env:NODE_ENV = 'test'
 $env:DOTENV_CONFIG_PATH = 'NUL'
-$env:DATABASE_URL = 'postgresql://unit:unit@127.0.0.1:55432/arenago_events_test'
-Set-Location 'C:\Users\Débora Jansen\Desktop\Davi\ArenaGo\backend'
+Set-Location 'C:\DoJob\ProgramacaoMobile\backend'
 .\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test test/unit/first-admin-bootstrap.test.ts
 if ($LASTEXITCODE -ne 0) { throw 'Unitários do bootstrap falharam.' }
-# Configurar localmente DATABASE_URL, DATABASE_DIRECT_URL e EVENTS_TEST_DATABASE_URL
-# com a mesma URL autorizada 127.0.0.1:55432/arenago_events_test, sem query/fragmento.
-.\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test --test-concurrency=1 test/integration/first-admin-bootstrap.integration.test.ts
-if ($LASTEXITCODE -ne 0) { throw 'Integração PostgreSQL do bootstrap falhou.' }
+.\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test test/unit/first-admin-bootstrap-db-guard.test.ts
+if ($LASTEXITCODE -ne 0) { throw 'Unitários da guarda B1 falharam.' }
 npm.cmd run typecheck:test
 if ($LASTEXITCODE -ne 0) { throw 'Typecheck de testes falhou.' }
 npm.cmd run lint
@@ -64,8 +139,8 @@ npm.cmd run build
 if ($LASTEXITCODE -ne 0) { throw 'Build falhou.' }
 ```
 
-Testes, typecheck, lint e build não executados pelo Codex. Validação manual pendente do responsável.
+Na implementação anterior, o responsável corrigiu localmente TS2322 na atribuição a `current` e `no-useless-assignment` na variável `results`; essas alterações foram preservadas. Após o isolamento, a guarda, a integração B1 e a regressão compartilhada passaram conforme os resultados acima. O Codex não executou testes, typecheck, lint, build, migrations ou comandos PostgreSQL nesta consolidação.
 
 ## Evidência e pendências
 
-Evidência única: `qa-evidence/t6-1-b1-changes.diff`, baseada no HEAD acima e contendo apenas a task. Aplicação isolada e comparação byte a byte concluídas sobre o HEAD-base: 5/5 arquivos reconstruídos sem divergência. Não há pendência de infraestrutura para implementar ou testar no computador principal além de disponibilizar o PostgreSQL autorizado; o comando em si permanece para execução explícita posterior pelo responsável.
+Evidência única: `qa-evidence/t6-1-b1-changes.diff`, baseada no HEAD inicial da B1 `31c78955514451c3a61c7eb6fd887ae98e1fd421` e contendo a implementação original, as correções de fixture/guarda e este fechamento documental. A aplicação isolada e a comparação byte a byte devem ser repetidas após esta atualização; não há pendência de validação da B1. O banco compartilhado e seus quatro Admins históricos permanecem intactos.
