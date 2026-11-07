@@ -39,6 +39,7 @@ export default function EvaluationScreen({ navigation }) {
         keyboardShouldPersistTaps="handled"
       >
         <Text style={styles.title}>Participação Finalizada</Text>
+        <Text>Modo demonstração: esta avaliação não será enviada ao servidor.</Text>
         <Text style={styles.message}>Obrigado por participar!</Text>
         <Text style={styles.message}>Como foi sua experiência?</Text>
         <View style={styles.stars}>

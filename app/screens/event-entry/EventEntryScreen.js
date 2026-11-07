@@ -31,6 +31,7 @@ export default function EventEntryScreen({ navigation }) {
       <Text style={styles.description}>
         Escaneie o QR Code do evento ou digite o código de acesso.
       </Text>
+      <Text>Modo demonstração: a entrada por código ainda não é registrada no servidor.</Text>
       <TextInput
         placeholder="Código do evento"
         style={styles.input}

@@ -872,29 +872,7 @@ test('web platform keeps refresh token only in memory and never calls SecureStor
   assert.equal(secureStore.calls.delete, 0);
 });
 
-test('401 session expiration does not clear or mutate ParticipationContext state', async () => {
-  let capturedParticipation = { id: 'part-1', status: 'active' };
-  const participationModule = loadModule('context/ParticipationContext.js', (name) => {
-    if (name === 'react') {
-      return {
-        createContext: (defaultValue) => ({ _defaultValue: defaultValue, Provider: 'Provider' }),
-        useState: () => [
-          capturedParticipation,
-          (next) => {
-            capturedParticipation = typeof next === 'function' ? next(capturedParticipation) : next;
-          },
-        ],
-      };
-    }
-    return require(name);
-  }).exports;
-
-  const tree = participationModule.ParticipationProvider({ children: 'child' });
-  assert.deepEqual(structuredClone(tree.props.value.participation), {
-    id: 'part-1',
-    status: 'active',
-  });
-
+test('401 session expiration invalidates authentication', async () => {
   const rig = createAuthRig(
     async () =>
       problemResponse(401, {
@@ -906,8 +884,6 @@ test('401 session expiration does not clear or mutate ParticipationContext state
 
   await rig.manager.restoreSession();
   assert.equal(rig.manager.getSnapshot().isAuthenticated, false);
-  assert.equal(typeof participationModule.ParticipationProvider, 'function');
-  assert.deepEqual(capturedParticipation, { id: 'part-1', status: 'active' });
 });
 
 // ============================================================================

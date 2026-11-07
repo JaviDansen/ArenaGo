@@ -42,6 +42,7 @@ export default function EventConfirmationScreen({ navigation, route }) {
   return (
     <ScreenContainer>
       <Text style={styles.title}>Evento encontrado</Text>
+      <Text>Demonstração: esta entrada não será registrada no servidor.</Text>
       <Text style={styles.eventName}>{event.name}</Text>
       <Text style={styles.location}>{event.location}</Text>
       <Pressable style={styles.button} onPress={handleConfirmEntry}>

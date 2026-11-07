@@ -1,15 +1,39 @@
 import { useContext } from 'react';
+import { Pressable, Text } from 'react-native';
 
+import ScreenContainer from '../../components/ScreenContainer';
 import { ParticipationContext } from '../../context/ParticipationContext';
 import ActiveArenaScreen from '../arena/ActiveArenaScreen';
 import ArenaQueueScreen from '../arena/ArenaQueueScreen';
 import HomeScreen from './HomeScreen';
 
 export default function HomeFlowScreen({ navigation }) {
-  const { participation } = useContext(ParticipationContext);
+  const { participation, status, error, returnState, refreshParticipation } = useContext(ParticipationContext);
+
+  if (status === 'loading') {
+    return <ScreenContainer><Text>Carregando sua participação...</Text></ScreenContainer>;
+  }
+
+  if (status === 'error') {
+    const message = error === 'authorization' ? 'Não foi possível autorizar a consulta da participação.' :
+      error === 'network' ? 'Não foi possível conectar ao servidor para consultar sua participação.' :
+      'Não foi possível consultar sua participação agora.';
+    return <ScreenContainer><Text>{message}</Text><Pressable onPress={refreshParticipation}><Text>Tentar novamente</Text></Pressable></ScreenContainer>;
+  }
+
+  if (participation?.source === 'server') {
+    return (
+      <ScreenContainer>
+        <Text>{participation.status === 'waiting' ? 'Você está na fila externa.' : 'Sua participação na Arena está ativa.'}</Text>
+        {participation.status === 'waiting' ? <Text>Sua posição: {participation.externalQueue.position}º</Text> : null}
+        <Text>Evento: {participation.eventId}</Text>
+        <Pressable onPress={refreshParticipation}><Text>Atualizar participação</Text></Pressable>
+      </ScreenContainer>
+    );
+  }
 
   if (!participation) {
-    return <HomeScreen navigation={navigation} />;
+    return <HomeScreen navigation={navigation} returnState={returnState} />;
   }
 
   if (participation.status === 'waiting') {
