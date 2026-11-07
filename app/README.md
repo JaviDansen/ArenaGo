@@ -26,10 +26,10 @@ Este diretório contém o aplicativo mobile do ArenaGo, desenvolvido com React N
 
 Versões declaradas em `package.json`:
 
-- Expo ~57.0.25, React Native 0.86.3 e React 19.2.3.
-- `expo-secure-store` ~57.0.4 para armazenamento seguro do `refreshToken` em dispositivos móveis.
+- Expo ~58.0.23, React Native 0.88.1 e React 19.3.0.
+- `expo-secure-store` ~58.0.2 para armazenamento seguro do `refreshToken` em dispositivos móveis.
 - React Navigation 7 para abas e navegação em pilha.
-- `@react-native-community/datetimepicker` 9.1.0 para seleção de data.
+- `@react-native-community/datetimepicker` 9.2.1 para seleção de data.
 - React Native Web 0.21.x para execução no navegador.
 
 ## Pré-requisitos
@@ -99,8 +99,7 @@ Os testes usam o runner nativo do Node.js. Execute em `app/`:
 npm.cmd test
 ```
 
-Na validação local desta etapa, o comando passou com **208 testes aprovados** e nenhuma falha.
-Também foram reportados **11 testes manuais aprovados em iPhone físico**, cobrindo cadastro, login imediato, logout, restauração da sessão, troca de contas, validações e falhas de conexão.
+Após a migração para o SDK 58, o comando passou com **208 testes aprovados** e nenhuma falha. Os **11 testes manuais em iPhone físico** reportados anteriormente pertencem à validação anterior; a execução física com o Expo Go 58 ainda está pendente.
 
 ## Organização
 
