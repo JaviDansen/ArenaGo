@@ -9,12 +9,14 @@ import { AdminEventsModule } from "./events/admin-events.module";
 import { GamesModule } from "./games/games.module";
 import { ProfileModule } from "./profile/profile.module";
 import { AdminRoleManagementModule } from "./auth/admin-role-management.module";
+import { ParticipationsModule } from "./participations/participations.module";
 
 @Module({
   imports: [
     DatabaseModule,
     AuthModule,
     EventsModule,
+    ParticipationsModule,
     AdminEventsModule,
     GamesModule,
     ProfileModule,

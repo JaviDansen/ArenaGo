@@ -1,0 +1,695 @@
+diff --git a/backend/src/app.module.ts b/backend/src/app.module.ts
+index dbfca60..983117c 100644
+--- a/backend/src/app.module.ts
++++ b/backend/src/app.module.ts
+@@ -9,12 +9,14 @@ import { AdminEventsModule } from "./events/admin-events.module";
+ import { GamesModule } from "./games/games.module";
+ import { ProfileModule } from "./profile/profile.module";
+ import { AdminRoleManagementModule } from "./auth/admin-role-management.module";
++import { ParticipationsModule } from "./participations/participations.module";
+ 
+ @Module({
+   imports: [
+     DatabaseModule,
+     AuthModule,
+     EventsModule,
++    ParticipationsModule,
+     AdminEventsModule,
+     GamesModule,
+     ProfileModule,
+diff --git a/backend/src/participations/participations.module.ts b/backend/src/participations/participations.module.ts
+index 412bf99..05ac49f 100644
+--- a/backend/src/participations/participations.module.ts
++++ b/backend/src/participations/participations.module.ts
+@@ -1,12 +1,16 @@
+ import { Module } from "@nestjs/common";
+ import { DatabaseModule } from "../database/database.module";
+ import { EventsModule } from "../events/events.module";
++import { AuthModule } from "../auth/auth.module";
++import { ParticipantQueueIdempotencyPolicy } from "../events/participant-queue-idempotency.policy";
++import { ParticipantAdmissionController } from "./participant-admission.controller";
+ import { ParticipationsService } from "./participations.service";
+ 
+ /** Prepara as consultas de participação e reutiliza Events e a conexão Drizzle compartilhada. */
+ @Module({
+-  imports: [DatabaseModule, EventsModule],
+-  providers: [ParticipationsService],
++  imports: [DatabaseModule, EventsModule, AuthModule],
++  controllers: [ParticipantAdmissionController],
++  providers: [ParticipationsService, ParticipantQueueIdempotencyPolicy],
+   exports: [ParticipationsService],
+ })
+ export class ParticipationsModule {}
+diff --git a/backend/src/participations/participant-admission.controller.ts b/backend/src/participations/participant-admission.controller.ts
+new file mode 100644
+index 0000000..be3db57
+--- /dev/null
++++ b/backend/src/participations/participant-admission.controller.ts
+@@ -0,0 +1,90 @@
++import { Body, Controller, HttpCode, HttpStatus, Inject, Post, Req } from "@nestjs/common";
++import { z } from "zod";
++import { CurrentUserId, RequireSessionAuth } from "../auth/current-user.decorator";
++import type { AuthenticatedRequest } from "../auth/session-auth.guard";
++import { ProblemException } from "../common/errors/problem.exception";
++import { operationUuid, validateOperationBody, validateOperationIdempotencyKey } from "../common/http/operation-validation";
++import { EventAccessCodeValidationError, normalizeEventAccessCode } from "../events/access-code";
++import { ParticipantQueueIdempotencyPolicy } from "../events/participant-queue-idempotency.policy";
++import { EventsService } from "../events/events.service";
++import type { JoinEligibilityBlockingReason, JoinEligibilityResult } from "./join-eligibility";
++import { ParticipationsService, type CreateParticipationResult } from "./participations.service";
++
++const lookupBody = z.object({ accessCode: z.string() }).strict();
++const joinBody = z.object({ eventId: operationUuid }).strict();
++
++function problem(status: HttpStatus, code: string, detail: string): never {
++  throw new ProblemException({
++    status, code, typeSlug: code.toLowerCase().replaceAll("_", "-"),
++    title: status === HttpStatus.NOT_FOUND ? "Evento não encontrado" : "Ingresso indisponível", detail,
++  });
++}
++
++const priority: JoinEligibilityBlockingReason[] = [
++  "EVENT_NOT_FOUND", "USER_NOT_FOUND", "USER_INACTIVE", "PARTICIPATION_ALREADY_CURRENT",
++  "PROFILE_INCOMPLETE", "EVENT_NOT_STARTED", "EVENT_REGISTRATION_CLOSED", "EVENT_NOT_READY",
++];
++
++function blocked(eligibility: JoinEligibilityResult): never {
++  const reason = priority.find(value => eligibility.blockingReasons.includes(value)) ?? "EVENT_NOT_READY";
++  const status = reason === "EVENT_NOT_FOUND" ? HttpStatus.NOT_FOUND
++    : reason === "USER_NOT_FOUND" ? HttpStatus.UNAUTHORIZED
++    : reason === "USER_INACTIVE" ? HttpStatus.FORBIDDEN
++    : reason === "PROFILE_INCOMPLETE" ? HttpStatus.UNPROCESSABLE_ENTITY : HttpStatus.CONFLICT;
++  problem(status, reason, "Os requisitos atuais não permitem ingressar neste evento.");
++}
++
++function joinResponse(result: CreateParticipationResult): { participationId: string } {
++  if (result.kind === "blocked") blocked(result.eligibility);
++  if (result.kind === "request_conflict") problem(HttpStatus.CONFLICT, "IDEMPOTENCY_KEY_REUSED", "Esta chave já foi usada para outro ingresso.");
++  if (result.kind === "in_progress") problem(HttpStatus.CONFLICT, "IDEMPOTENCY_IN_PROGRESS", "A operação com esta chave ainda está em andamento.");
++  if (result.kind === "replay" && (result.httpStatus !== HttpStatus.CREATED ||
++    result.idempotencyResult === null || typeof result.idempotencyResult !== "object" ||
++    Array.isArray(result.idempotencyResult) || result.idempotencyResult.participationId !== result.participationId)) {
++    throw new Error("Resposta idempotente de ingresso inconsistente.");
++  }
++  if (!result.participationId) throw new Error("Ingresso concluído sem identificador de participação.");
++  return { participationId: result.participationId };
++}
++
++@Controller()
++@RequireSessionAuth()
++export class ParticipantAdmissionController {
++  constructor(
++    @Inject(EventsService) private readonly events: EventsService,
++    @Inject(ParticipationsService) private readonly participations: ParticipationsService,
++    @Inject(ParticipantQueueIdempotencyPolicy) private readonly policy: ParticipantQueueIdempotencyPolicy,
++  ) {}
++
++  @Post("events/lookup")
++  @HttpCode(HttpStatus.OK)
++  async lookup(@CurrentUserId() userId: string, @Body() body: unknown, @Req() request: AuthenticatedRequest) {
++    const { accessCode } = validateOperationBody(lookupBody, body, request);
++    let normalized: string;
++    try { normalized = normalizeEventAccessCode(accessCode); }
++    catch (error) {
++      if (!(error instanceof EventAccessCodeValidationError)) throw error;
++      problem(HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", error.message);
++    }
++    const event = await this.events.findByAccessCode(normalized);
++    if (!event) problem(HttpStatus.NOT_FOUND, "EVENT_NOT_FOUND", "Evento não encontrado para este código.");
++    const eligibility = await this.participations.evaluateJoinEligibility(userId, event.id, new Date());
++    return {
++      event: { id: event.id, name: event.name, timezone: event.timezone,
++        startsAt: event.startsAt, officialEndsAt: event.officialEndsAt,
++        operationalDeadlineAt: event.operationalDeadlineAt, externalQueueEnabled: event.externalQueueEnabled },
++      eligibility: { eligible: eligibility.eligible, blockingReasons: eligibility.blockingReasons },
++    };
++  }
++
++  @Post("participations")
++  @HttpCode(HttpStatus.CREATED)
++  async join(@CurrentUserId() userId: string, @Body() body: unknown, @Req() request: AuthenticatedRequest) {
++    const { eventId } = validateOperationBody(joinBody, body, request);
++    const idempotencyKey = validateOperationIdempotencyKey(request);
++    const result = await this.participations.createParticipation({
++      userId, eventId, idempotencyKey, expiresAt: this.policy.expiresAt(),
++    });
++    return joinResponse(result);
++  }
++}
+diff --git a/backend/test/integration/participant-admission-db-guard.ts b/backend/test/integration/participant-admission-db-guard.ts
+new file mode 100644
+index 0000000..9e3f9f0
+--- /dev/null
++++ b/backend/test/integration/participant-admission-db-guard.ts
+@@ -0,0 +1,22 @@
++const names = ["DATABASE_URL", "DATABASE_DIRECT_URL", "EVENTS_TEST_DATABASE_URL"] as const;
++
++/** A Etapa 3 usa somente um banco descartável próprio; nunca aceita os bancos históricos. */
++export function assertParticipantAdmissionTestDatabaseUrls(env: Record<string, string | undefined>): string {
++  if (env.NODE_ENV !== "test") throw new Error("[SEGURANÇA BLOQUEADA] NODE_ENV=test é obrigatório.");
++  const urls = names.map(name => {
++    const value = env[name];
++    if (!value || value.trim() !== value) throw new Error(`[SEGURANÇA BLOQUEADA] ${name} explícita é obrigatória.`);
++    let parsed: URL;
++    try { parsed = new URL(value); }
++    catch { throw new Error(`[SEGURANÇA BLOQUEADA] ${name} inválida.`); }
++    if ((parsed.protocol !== "postgresql:" && parsed.protocol !== "postgres:")
++      || parsed.hostname !== "127.0.0.1" || parsed.port !== "55432"
++      || parsed.pathname !== "/arenago_admission_test" || !parsed.username || !parsed.password
++      || parsed.search || parsed.hash) {
++      throw new Error(`[SEGURANÇA BLOQUEADA] ${name} exige 127.0.0.1:55432/arenago_admission_test, credenciais explícitas e nenhum redirecionamento.`);
++    }
++    return value;
++  });
++  if (urls.some(value => value !== urls[0])) throw new Error("[SEGURANÇA BLOQUEADA] As três URLs devem ser idênticas.");
++  return urls[0];
++}
+diff --git a/backend/test/integration/participant-admission-http.integration.test.ts b/backend/test/integration/participant-admission-http.integration.test.ts
+new file mode 100644
+index 0000000..cadcb01
+--- /dev/null
++++ b/backend/test/integration/participant-admission-http.integration.test.ts
+@@ -0,0 +1,235 @@
++import "reflect-metadata";
++import assert from "node:assert/strict";
++import { randomUUID } from "node:crypto";
++import { devNull } from "node:os";
++import { after, before, test } from "node:test";
++import type { INestApplication } from "@nestjs/common";
++import { NestFactory } from "@nestjs/core";
++import type { NodePgDatabase } from "drizzle-orm/node-postgres";
++import { Pool } from "pg";
++import supertest from "supertest";
++import * as schema from "../../src/database/schema";
++import type { DatabaseTransactionExecutor } from "../../src/database/database-executor";
++import { assertParticipantAdmissionTestDatabaseUrls } from "./participant-admission-db-guard";
++
++// A guarda é avaliada antes de importar a aplicação, abrir conexão ou carregar .env.
++const connectionString = assertParticipantAdmissionTestDatabaseUrls(process.env);
++process.env.DOTENV_CONFIG_PATH = devNull;
++process.env.STAFF_IDEMPOTENCY_TTL_SECONDS = "60";
++process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = "60";
++process.env.ADMIN_IDEMPOTENCY_TTL_SECONDS = "60";
++process.env.EVALUATION_IDEMPOTENCY_TTL_SECONDS = "60";
++process.env.EVENT_CLOSURE_JOB_TEST_ENABLED = "false";
++
++const pool = new Pool({ connectionString, ssl: false, max: 8, connectionTimeoutMillis: 2000, statement_timeout: 10000 });
++const users: string[] = [], events: string[] = [], versions: string[] = [], games: string[] = [];
++let app: INestApplication;
++let database: NodePgDatabase<typeof schema>;
++let admissionService: import("../../src/participations/participations.service").ParticipationsService;
++let eventsService: import("../../src/events/events.service").EventsService;
++let signAccess: (userId: string, sessionId: string) => string;
++
++interface Actor { userId: string; sessionId: string; token: string }
++interface Fixture { eventId: string; code: string; actor: Actor }
++
++before(async () => {
++  const destination = await pool.query<{ name: string }>("SELECT current_database() AS name");
++  assert.equal(destination.rows[0]?.name, "arenago_admission_test");
++  const historical = await pool.query<{ users: string; events: string }>(
++    "SELECT (SELECT count(*) FROM users)::text AS users, (SELECT count(*) FROM events)::text AS events",
++  );
++  if (historical.rows[0]?.users !== "0" || historical.rows[0]?.events !== "0") {
++    throw new Error("[SEGURANÇA BLOQUEADA] Banco dedicado contém usuários ou eventos preexistentes.");
++  }
++  const [{ AppModule }, { DRIZZLE_DATABASE }, { ParticipationsService }, { EventsService }, token] = await Promise.all([
++    import("../../src/app.module"), import("../../src/database/database.module"),
++    import("../../src/participations/participations.service"), import("../../src/events/events.service"),
++    import("../../src/auth/token.util"),
++  ]);
++  signAccess = (userId, sessionId) => token.signAccessToken({ userId, sessionId });
++  app = await NestFactory.create(AppModule, { logger: false });
++  app.setGlobalPrefix("api/v1"); await app.listen(0, "127.0.0.1");
++  database = app.get(DRIZZLE_DATABASE); admissionService = app.get(ParticipationsService); eventsService = app.get(EventsService);
++});
++
++after(async () => {
++  const errors: unknown[] = [];
++  if (events.length || users.length || versions.length || games.length) {
++    try {
++      const client = await pool.connect();
++      try {
++        await client.query("BEGIN");
++        await client.query(`DELETE FROM participation_profile_snapshots s USING participations p
++          WHERE s.participation_id=p.id AND (p.event_id=ANY($1::uuid[]) OR p.user_id=ANY($2::uuid[]))`, [events, users]);
++        await client.query("DELETE FROM participations WHERE event_id=ANY($1::uuid[]) OR user_id=ANY($2::uuid[])", [events, users]);
++        await client.query("DELETE FROM idempotency_operations WHERE actor_user_id=ANY($1::uuid[])", [users]);
++        await client.query("DELETE FROM user_games WHERE user_id=ANY($1::uuid[])", [users]);
++        await client.query("DELETE FROM profiles WHERE user_id=ANY($1::uuid[])", [users]);
++        await client.query("DELETE FROM stations WHERE experience_id IN (SELECT id FROM experiences WHERE event_id=ANY($1::uuid[]))", [events]);
++        await client.query("DELETE FROM experiences WHERE event_id=ANY($1::uuid[])", [events]);
++        await client.query("DELETE FROM user_roles WHERE user_id=ANY($1::uuid[])", [users]);
++        await client.query("DELETE FROM sessions WHERE user_id=ANY($1::uuid[])", [users]);
++        await client.query("DELETE FROM events WHERE id=ANY($1::uuid[])", [events]);
++        await client.query("DELETE FROM games WHERE id=ANY($1::uuid[])", [games]);
++        await client.query("DELETE FROM users WHERE id=ANY($1::uuid[])", [users]);
++        await client.query("DELETE FROM questionnaire_versions WHERE id=ANY($1::uuid[])", [versions]);
++        await client.query("COMMIT");
++      } catch (error) { await client.query("ROLLBACK"); throw error; }
++      finally { client.release(); }
++    } catch (error) { errors.push(error); }
++  }
++  for (const item of await Promise.allSettled([app?.close(), pool.end()]))
++    if (item.status === "rejected") errors.push(item.reason);
++  if (errors.length) throw new AggregateError(errors, "Limpeza da fixture Etapa 3 falhou.");
++});
++
++async function actor(complete = true): Promise<Actor> {
++  const userId = randomUUID(), sessionId = randomUUID();
++  await pool.query(`INSERT INTO users(id,name,email,password_hash,email_verified_at,created_at,updated_at)
++    VALUES($1,'Admission fixture',$2,'fixture-hash',clock_timestamp(),clock_timestamp(),clock_timestamp())`,
++  [userId, `${userId}@example.test`]); users.push(userId);
++  await pool.query(`INSERT INTO sessions(id,user_id,expires_at,last_activity_at,created_at)
++    VALUES($1,$2,clock_timestamp()+interval '1 hour',clock_timestamp(),clock_timestamp())`, [sessionId, userId]);
++  if (complete) {
++    const versionId = randomUUID(), gameId = randomUUID(); versions.push(versionId); games.push(gameId);
++    await pool.query("INSERT INTO questionnaire_versions(id,version,definition,activated_at,created_at) VALUES($1,$2,'{}'::jsonb,clock_timestamp(),clock_timestamp())",
++      [versionId, `admission-${versionId.slice(0, 8)}`]);
++    await pool.query(`INSERT INTO profiles(user_id,birth_date,gender,education,market_knowledge,market_interest,questionnaire_version_id,completed_at,created_at,updated_at)
++      VALUES($1,'1990-01-01','Masculino','Superior','Conheço um pouco.','Sim, tenho interesse.',$2,clock_timestamp(),clock_timestamp(),clock_timestamp())`, [userId, versionId]);
++    await pool.query("INSERT INTO games(id,name,is_curated,created_at) VALUES($1,$2,false,clock_timestamp())", [gameId, `Admission ${gameId}`]);
++    await pool.query("INSERT INTO user_games(user_id,game_id,created_at) VALUES($1,$2,clock_timestamp())", [userId, gameId]);
++  }
++  return { userId, sessionId, token: signAccess(userId, sessionId) };
++}
++async function fixture(externalQueueEnabled = false, complete = true): Promise<Fixture> {
++  const eventId = randomUUID(), code = `AD-${eventId.slice(0, 12).toUpperCase()}`;
++  await pool.query(`INSERT INTO events(id,name,access_code_normalized,timezone,starts_at,official_ends_at,operational_deadline_at,status,external_queue_enabled,created_at,updated_at)
++    VALUES($1,'Admission fixture',$2,'America/Sao_Paulo',clock_timestamp()-interval '1 hour',clock_timestamp()+interval '1 hour',clock_timestamp()+interval '90 minutes','open',$3,clock_timestamp(),clock_timestamp())`,
++  [eventId, code, externalQueueEnabled]); events.push(eventId);
++  const staff = await actor(false), person = await actor(complete);
++  await pool.query("INSERT INTO user_roles(id,user_id,role,event_id,granted_at) VALUES($1,$2,'staff',$3,clock_timestamp())", [randomUUID(), staff.userId, eventId]);
++  const experienceId = randomUUID();
++  await pool.query("INSERT INTO experiences(id,event_id,name,created_at,updated_at) VALUES($1,$2,'Admission experience',clock_timestamp(),clock_timestamp())", [experienceId, eventId]);
++  await pool.query("INSERT INTO stations(id,experience_id,label,availability,created_at,updated_at) VALUES($1,$2,'Admission station','available',clock_timestamp(),clock_timestamp())", [randomUUID(), experienceId]);
++  return { eventId, code, actor: person };
++}
++const lookup = (f: Fixture) => supertest(app.getHttpServer()).post("/api/v1/events/lookup")
++  .set("Authorization", `Bearer ${f.actor.token}`).send({ accessCode: ` ${f.code.toLowerCase()} ` });
++const join = (f: Fixture, key = randomUUID()) => supertest(app.getHttpServer()).post("/api/v1/participations")
++  .set("Authorization", `Bearer ${f.actor.token}`).set("Idempotency-Key", key).send({ eventId: f.eventId });
++function problem(response: supertest.Response, status: number, code: string) {
++  assert.equal(response.status, status, JSON.stringify(response.body));
++  assert.match(response.headers["content-type"], /application\/problem\+json/); assert.equal(response.body.code, code);
++}
++async function counts(f: Fixture) {
++  const response = await pool.query<{ participations: string; snapshots: string; operations: string }>(`
++    SELECT (SELECT count(*) FROM participations WHERE user_id=$1)::text AS participations,
++      (SELECT count(*) FROM participation_profile_snapshots s JOIN participations p ON p.id=s.participation_id WHERE p.user_id=$1)::text AS snapshots,
++      (SELECT count(*) FROM idempotency_operations WHERE actor_user_id=$1 AND operation='join')::text AS operations`, [f.actor.userId]);
++  return response.rows[0];
++}
++
++test("Etapa 3 PostgreSQL lookup exato é informativo e não escreve", async () => {
++  const f = await fixture(); const response = await lookup(f);
++  assert.equal(response.status, 200); assert.equal(response.body.event.id, f.eventId);
++  assert.equal(response.body.event.name, "Admission fixture"); assert.equal(response.body.eligibility.eligible, true);
++  assert.deepEqual(await counts(f), { participations: "0", snapshots: "0", operations: "0" });
++  problem(await supertest(app.getHttpServer()).post("/api/v1/events/lookup")
++    .set("Authorization", `Bearer ${f.actor.token}`).send({ accessCode: "AD-UNKNOWN" }), 404, "EVENT_NOT_FOUND");
++});
++test("Etapa 3 PostgreSQL ingresso ativo cria participação, snapshot e reserva concluída", async () => {
++  const f = await fixture(); const response = await join(f);
++  assert.equal(response.status, 201); assert.match(response.body.participationId, /^[0-9a-f-]{36}$/);
++  assert.deepEqual(await counts(f), { participations: "1", snapshots: "1", operations: "1" });
++  const row = await pool.query("SELECT status,arena_entered_at FROM participations WHERE id=$1", [response.body.participationId]);
++  assert.equal(row.rows[0].status, "active"); assert.ok(row.rows[0].arena_entered_at);
++});
++test("Etapa 3 PostgreSQL fila externa inicia waiting sem entrada de fila interna", async () => {
++  const f = await fixture(true); const response = await join(f);
++  assert.equal(response.status, 201);
++  const row = await pool.query(`SELECT p.status,p.external_queue_order::text AS position,p.arena_entered_at,
++    (SELECT count(*)::int FROM queue_entries q WHERE q.participation_id=p.id) AS queue_entries
++    FROM participations p WHERE p.id=$1`, [response.body.participationId]);
++  assert.equal(row.rows[0].status, "waiting"); assert.equal(row.rows[0].position, "1");
++  assert.equal(row.rows[0].arena_entered_at, null); assert.equal(row.rows[0].queue_entries, 0);
++});
++test("Etapa 3 PostgreSQL replay e concorrência mesma chave persistem uma única operação", async () => {
++  const f = await fixture(), key = randomUUID();
++  const [first, second] = await Promise.all([join(f, key), join(f, key)]);
++  assert.equal(first.status, 201); assert.equal(second.status, 201); assert.deepEqual(first.body, second.body);
++  assert.deepEqual((await join(f, key)).body, first.body);
++  assert.deepEqual(await counts(f), { participations: "1", snapshots: "1", operations: "1" });
++  const operation = await pool.query("SELECT status,http_status,result_reference,result_payload FROM idempotency_operations WHERE actor_user_id=$1 AND operation='join'", [f.actor.userId]);
++  assert.equal(operation.rows[0].status, "completed"); assert.equal(operation.rows[0].http_status, 201);
++  assert.equal(operation.rows[0].result_reference, first.body.participationId);
++  assert.deepEqual(operation.rows[0].result_payload, first.body);
++});
++test("Etapa 3 PostgreSQL chave reutilizada para outro evento conflita sem criar nova participação", async () => {
++  const first = await fixture(), second = await fixture(); const key = randomUUID();
++  assert.equal((await join(first, key)).status, 201);
++  const response = await supertest(app.getHttpServer()).post("/api/v1/participations")
++    .set("Authorization", `Bearer ${first.actor.token}`).set("Idempotency-Key", key).send({ eventId: second.eventId });
++  problem(response, 409, "IDEMPOTENCY_KEY_REUSED");
++  assert.deepEqual(await counts(first), { participations: "1", snapshots: "1", operations: "1" });
++});
++test("Etapa 3 PostgreSQL perfil incompleto é bloqueado e reserva sofre rollback", async () => {
++  const f = await fixture(false, false);
++  assert.equal((await lookup(f)).body.eligibility.eligible, false);
++  problem(await join(f), 422, "PROFILE_INCOMPLETE");
++  assert.deepEqual(await counts(f), { participations: "0", snapshots: "0", operations: "0" });
++});
++test("Etapa 3 PostgreSQL janela e disponibilidade bloqueiam ingresso sem escrita", async () => {
++  const future = await fixture();
++  await pool.query(`WITH clock AS (SELECT clock_timestamp() AS t)
++    UPDATE events SET starts_at=clock.t+interval '1 hour',
++    official_ends_at=clock.t+interval '2 hours',operational_deadline_at=clock.t+interval '3 hours'
++    FROM clock WHERE events.id=$1`, [future.eventId]);
++  problem(await join(future), 409, "EVENT_NOT_STARTED");
++  assert.deepEqual(await counts(future), { participations: "0", snapshots: "0", operations: "0" });
++  const unavailable = await fixture();
++  await pool.query("UPDATE stations SET availability='unavailable' WHERE experience_id IN (SELECT id FROM experiences WHERE event_id=$1)", [unavailable.eventId]);
++  problem(await join(unavailable), 409, "EVENT_NOT_READY");
++  assert.deepEqual(await counts(unavailable), { participations: "0", snapshots: "0", operations: "0" });
++});
++test("Etapa 3 PostgreSQL participação corrente bloqueia nova chave sem criar operação", async () => {
++  const f = await fixture(); assert.equal((await join(f)).status, 201);
++  problem(await join(f), 409, "PARTICIPATION_ALREADY_CURRENT");
++  assert.deepEqual(await counts(f), { participations: "1", snapshots: "1", operations: "1" });
++});
++test("Etapa 3 PostgreSQL sessão ausente e identidade arbitrária não escrevem", async () => {
++  const f = await fixture();
++  problem(await supertest(app.getHttpServer()).post("/api/v1/participations")
++    .set("Idempotency-Key", randomUUID()).send({ eventId: f.eventId }), 401, "MISSING_ACCESS_TOKEN");
++  problem(await supertest(app.getHttpServer()).post("/api/v1/participations")
++    .set("Authorization", `Bearer ${f.actor.token}`).set("Idempotency-Key", randomUUID())
++    .send({ eventId: f.eventId, userId: randomUUID() }), 400, "VALIDATION_ERROR");
++  await pool.query("UPDATE sessions SET revoked_at=clock_timestamp(),revocation_reason='test' WHERE id=$1", [f.actor.sessionId]);
++  problem(await join(f), 401, "SESSION_REVOKED");
++  assert.deepEqual(await counts(f), { participations: "0", snapshots: "0", operations: "0" });
++});
++test("Etapa 3 PostgreSQL falha após escritas reais causa rollback e permite retry", async () => {
++  const f = await fixture(), key = randomUUID();
++  const { ParticipationsService } = await import("../../src/participations/participations.service");
++  const original = admissionService.createParticipation;
++  const instrumentedDatabase = { transaction: <T>(
++    callback: (tx: DatabaseTransactionExecutor) => Promise<T>,
++    config?: Parameters<typeof database.transaction>[1],
++  ) => database.transaction(async tx => callback(new Proxy(tx, {
++    get(target, property) {
++      if (property === "update") return (table: unknown) => {
++        if (table === schema.idempotencyOperations) throw new Error("falha injetada após participação e snapshot");
++        return (target as unknown as { update: (value: unknown) => unknown }).update(table);
++      };
++      const value: unknown = Reflect.get(target, property, target);
++      return typeof value === "function" ? value.bind(target) : value;
++    },
++  }) as DatabaseTransactionExecutor), config) } as unknown as typeof database;
++  const injected = new ParticipationsService(instrumentedDatabase, eventsService);
++  admissionService.createParticipation = input => injected.createParticipation(input);
++  try {
++    const failed = await join(f, key); assert.equal(failed.status, 500);
++    assert.deepEqual(await counts(f), { participations: "0", snapshots: "0", operations: "0" });
++  } finally { admissionService.createParticipation = original; }
++  const retried = await join(f, key); assert.equal(retried.status, 201);
++  assert.deepEqual(await counts(f), { participations: "1", snapshots: "1", operations: "1" });
++});
+diff --git a/backend/test/unit/participant-admission-db-guard.test.ts b/backend/test/unit/participant-admission-db-guard.test.ts
+new file mode 100644
+index 0000000..00234d4
+--- /dev/null
++++ b/backend/test/unit/participant-admission-db-guard.test.ts
+@@ -0,0 +1,18 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { assertParticipantAdmissionTestDatabaseUrls } from "../integration/participant-admission-db-guard";
++
++const url = "postgresql://fixture:placeholder@127.0.0.1:55432/arenago_admission_test";
++const env = { NODE_ENV: "test", DATABASE_URL: url, DATABASE_DIRECT_URL: url, EVENTS_TEST_DATABASE_URL: url };
++test("Etapa 3 guarda aceita apenas as três URLs idênticas do banco dedicado", () => {
++  assert.equal(assertParticipantAdmissionTestDatabaseUrls(env), url);
++  for (const candidate of [
++    { ...env, NODE_ENV: "development" },
++    { ...env, DATABASE_DIRECT_URL: undefined },
++    { ...env, EVENTS_TEST_DATABASE_URL: url.replace("127.0.0.1", "localhost") },
++    { ...env, DATABASE_URL: url.replace("55432", "5432") },
++    { ...env, DATABASE_URL: url.replace("arenago_admission_test", "arenago_events_test") },
++    { ...env, DATABASE_URL: url.replace("127.0.0.1", "example.test") },
++    { ...env, DATABASE_URL: `${url}?host=example.test` },
++  ]) assert.throws(() => assertParticipantAdmissionTestDatabaseUrls(candidate), /SEGURANÇA BLOQUEADA/);
++});
+diff --git a/backend/test/unit/participant-admission-http.test.ts b/backend/test/unit/participant-admission-http.test.ts
+new file mode 100644
+index 0000000..f893c5c
+--- /dev/null
++++ b/backend/test/unit/participant-admission-http.test.ts
+@@ -0,0 +1,160 @@
++import "reflect-metadata";
++import assert from "node:assert/strict";
++import { after, before, test } from "node:test";
++import { Module, type INestApplication } from "@nestjs/common";
++import { NestFactory } from "@nestjs/core";
++import supertest from "supertest";
++import { AuthService } from "../../src/auth/auth.service";
++import { SessionAuthGuard } from "../../src/auth/session-auth.guard";
++import { ProblemDetailsExceptionFilter } from "../../src/common/errors/problem-details.filter";
++import { ProblemException } from "../../src/common/errors/problem.exception";
++import { EventsService } from "../../src/events/events.service";
++import { ParticipantQueueIdempotencyPolicy } from "../../src/events/participant-queue-idempotency.policy";
++import type { JoinEligibilityResult } from "../../src/participations/join-eligibility";
++import { ParticipantAdmissionController } from "../../src/participations/participant-admission.controller";
++import { ParticipationsService, type CreateParticipationInput, type CreateParticipationResult } from "../../src/participations/participations.service";
++
++const userId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
++const eventId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
++const participationId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
++const startsAt = new Date("2026-11-07T12:00:00.000Z");
++const event = { id: eventId, name: "Arena Teste", timezone: "America/Sao_Paulo", startsAt,
++  officialEndsAt: new Date("2026-11-07T18:00:00.000Z"), operationalDeadlineAt: new Date("2026-11-07T19:00:00.000Z"),
++  externalQueueEnabled: true, accessCodeNormalized: "ARENA-2026", secret: "never-expose" };
++const eligible: JoinEligibilityResult = { eligible: true, eventExists: true, userExists: true,
++  checks: { eventAcceptingNewEntries: true, hasCompletedQuestionnaire: true, questionnaireVersionValid: true,
++    hasSelectedGames: true, hasNoCurrentParticipation: true }, blockingReasons: [] };
++const created: CreateParticipationResult = { kind: "created", httpStatus: 201, participationId,
++  idempotencyResult: { participationId } };
++let foundEvent: typeof event | null = event;
++let eligibility: JoinEligibilityResult = eligible;
++let result: CreateParticipationResult = created;
++let infrastructureError: Error | undefined;
++const codes: string[] = [];
++const eligibilityCalls: Array<{ userId: string; eventId: string; at: Date }> = [];
++const joins: CreateParticipationInput[] = [];
++
++@Module({ controllers: [ParticipantAdmissionController], providers: [
++  SessionAuthGuard, ParticipantQueueIdempotencyPolicy,
++  { provide: AuthService, useValue: { authenticateBearerToken: async (token: string) => {
++    if (token !== "participant" && token !== "other") throw new ProblemException({
++      status: 401, code: "INVALID_ACCESS_TOKEN", typeSlug: "invalid-access-token", title: "Token inválido", detail: "Token inválido.",
++    });
++    return { userId: token === "participant" ? userId : "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
++      sessionId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", roles: [] };
++  } } },
++  { provide: EventsService, useValue: { findByAccessCode: async (code: string) => {
++    codes.push(code); if (infrastructureError) throw infrastructureError; return foundEvent;
++  } } },
++  { provide: ParticipationsService, useValue: {
++    evaluateJoinEligibility: async (actor: string, target: string, at: Date) => {
++      eligibilityCalls.push({ userId: actor, eventId: target, at }); return eligibility;
++    },
++    createParticipation: async (input: CreateParticipationInput) => {
++      joins.push(input); if (infrastructureError) throw infrastructureError; return result;
++    },
++  } },
++] })
++class HttpTestModule {}
++
++let app: INestApplication;
++const oldTtl = process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS;
++before(async () => {
++  process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = "60";
++  app = await NestFactory.create(HttpTestModule, { logger: false });
++  app.setGlobalPrefix("api/v1"); app.useGlobalFilters(new ProblemDetailsExceptionFilter());
++  await app.listen(0, "127.0.0.1");
++});
++after(async () => {
++  await app?.close();
++  if (oldTtl === undefined) delete process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS;
++  else process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = oldTtl;
++});
++function reset() { foundEvent = event; eligibility = eligible; result = created; infrastructureError = undefined;
++  codes.length = 0; eligibilityCalls.length = 0; joins.length = 0; }
++const lookup = (token = "participant") => supertest(app.getHttpServer()).post("/api/v1/events/lookup").set("Authorization", `Bearer ${token}`);
++const join = (key = "opaque-key", token = "participant") => supertest(app.getHttpServer()).post("/api/v1/participations")
++  .set("Authorization", `Bearer ${token}`).set("Idempotency-Key", key);
++function problem(response: supertest.Response, status: number, code: string) {
++  assert.equal(response.status, status); assert.match(response.headers["content-type"], /application\/problem\+json/);
++  assert.equal(response.body.status, status); assert.equal(response.body.code, code);
++}
++
++test("Etapa 3 HTTP lookup normaliza código, usa identidade autenticada e expõe somente campos seguros", async () => {
++  reset(); const response = await lookup().send({ accessCode: "  arena-2026  " });
++  assert.equal(response.status, 200); assert.deepEqual(codes, ["ARENA-2026"]);
++  assert.equal(eligibilityCalls.length, 1); assert.equal(eligibilityCalls[0].userId, userId);
++  assert.equal(eligibilityCalls[0].eventId, eventId); assert.ok(eligibilityCalls[0].at instanceof Date);
++  assert.deepEqual(response.body, { event: { id: eventId, name: event.name, timezone: event.timezone,
++    startsAt: startsAt.toISOString(), officialEndsAt: event.officialEndsAt.toISOString(),
++    operationalDeadlineAt: event.operationalDeadlineAt.toISOString(), externalQueueEnabled: true },
++    eligibility: { eligible: true, blockingReasons: [] } });
++  assert.equal(joins.length, 0);
++});
++test("Etapa 3 HTTP lookup devolve impedimentos informativos sem reservar ingresso", async () => {
++  reset(); eligibility = { ...eligible, eligible: false, blockingReasons: ["EVENT_NOT_STARTED", "PROFILE_INCOMPLETE"] };
++  const response = await lookup().send({ accessCode: "ARENA-2026" });
++  assert.equal(response.status, 200); assert.deepEqual(response.body.eligibility,
++    { eligible: false, blockingReasons: ["EVENT_NOT_STARTED", "PROFILE_INCOMPLETE"] }); assert.equal(joins.length, 0);
++});
++test("Etapa 3 HTTP lookup rejeita código inválido, desconhecido e campos extras", async () => {
++  reset(); problem(await lookup().send({ accessCode: "BAD" }), 400, "VALIDATION_ERROR");
++  problem(await lookup().send({ accessCode: "ARENA-2026", userId }), 400, "VALIDATION_ERROR");
++  assert.equal(codes.length, 0); foundEvent = null;
++  problem(await lookup().send({ accessCode: "ARENA-2026" }), 404, "EVENT_NOT_FOUND");
++  assert.equal(eligibilityCalls.length, 0);
++});
++test("Etapa 3 HTTP ambas as rotas exigem sessão antes de consultar ou escrever", async () => {
++  reset();
++  for (const request of [
++    supertest(app.getHttpServer()).post("/api/v1/events/lookup").send({ accessCode: "ARENA-2026" }),
++    supertest(app.getHttpServer()).post("/api/v1/participations").set("Idempotency-Key", "x").send({ eventId }),
++  ]) problem(await request, 401, "MISSING_ACCESS_TOKEN");
++  problem(await lookup("invalid").send({ accessCode: "ARENA-2026" }), 401, "INVALID_ACCESS_TOKEN");
++  assert.equal(codes.length + joins.length, 0);
++});
++test("Etapa 3 HTTP ingresso usa identidade da sessão, UUID normalizado e TTL validado", async () => {
++  reset(); const start = Date.now(); const response = await join("opaque-key").send({ eventId: eventId.toUpperCase() });
++  assert.equal(response.status, 201); assert.deepEqual(response.body, { participationId });
++  assert.equal(joins.length, 1); assert.equal(joins[0].userId, userId); assert.equal(joins[0].eventId, eventId);
++  assert.equal(joins[0].idempotencyKey, "opaque-key");
++  assert.ok(joins[0].expiresAt.getTime() >= start + 60000 && joins[0].expiresAt.getTime() <= Date.now() + 60000);
++});
++test("Etapa 3 HTTP ingresso preserva replay e rejeita conflito e operação em andamento", async () => {
++  reset(); result = { kind: "replay", httpStatus: 201, participationId, idempotencyResult: { participationId } };
++  const response = await join().send({ eventId }); assert.equal(response.status, 201);
++  assert.deepEqual(response.body, { participationId });
++  result = { kind: "request_conflict", operationId: participationId };
++  problem(await join().send({ eventId }), 409, "IDEMPOTENCY_KEY_REUSED");
++  result = { kind: "in_progress", operationId: participationId };
++  problem(await join().send({ eventId }), 409, "IDEMPOTENCY_IN_PROGRESS");
++});
++test("Etapa 3 HTTP ingresso traduz impedimentos de domínio sem reescrever suas regras", async () => {
++  reset();
++  for (const [reason, status] of [["EVENT_NOT_FOUND", 404], ["EVENT_NOT_STARTED", 409],
++    ["EVENT_REGISTRATION_CLOSED", 409], ["EVENT_NOT_READY", 409], ["PROFILE_INCOMPLETE", 422],
++    ["PARTICIPATION_ALREADY_CURRENT", 409], ["USER_INACTIVE", 403]] as const) {
++    result = { kind: "blocked", eligibility: { ...eligible, eligible: false, blockingReasons: [reason] } };
++    problem(await join().send({ eventId }), status, reason);
++  }
++});
++test("Etapa 3 HTTP valida corpo, UUID e chave sem aceitar identidade arbitrária", async () => {
++  reset();
++  for (const body of [{ eventId: "bad" }, { eventId, userId }, { eventId, status: "active" }, {}])
++    problem(await join().send(body), 400, "VALIDATION_ERROR");
++  problem(await supertest(app.getHttpServer()).post("/api/v1/participations")
++    .set("Authorization", "Bearer participant").send({ eventId }), 400, "VALIDATION_ERROR");
++  for (const key of ["", " ", "x".repeat(129)]) problem(await join(key).send({ eventId }), 400, "VALIDATION_ERROR");
++  problem(await join().set({ "Idempotency-Key": ["a", "b"] }).send({ eventId }), 400, "VALIDATION_ERROR");
++  assert.equal(joins.length, 0);
++});
++test("Etapa 3 HTTP troca de conta não reaproveita identidade nem chave da sessão anterior", async () => {
++  reset(); await join("same-key").send({ eventId }); await join("same-key", "other").send({ eventId });
++  assert.equal(joins.length, 2); assert.notEqual(joins[0].userId, joins[1].userId);
++});
++test("Etapa 3 HTTP falha de infraestrutura é 500 RFC 7807 sem afirmar criação", async () => {
++  reset(); infrastructureError = new Error("falha simulada");
++  const response = await join().send({ eventId });
++  assert.equal(response.status, 500); assert.match(response.headers["content-type"], /application\/problem\+json/);
++  assert.equal("participationId" in response.body, false);
++});
+diff --git a/docs/EXPO_BACKEND_ETAPA3_IMPLEMENTACAO.md b/docs/EXPO_BACKEND_ETAPA3_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..b794c7b
+--- /dev/null
++++ b/docs/EXPO_BACKEND_ETAPA3_IMPLEMENTACAO.md
+@@ -0,0 +1,92 @@
++# ArenaGo — Integração Expo ↔ Backend, Etapa 3
++
++## Escopo e estado
++
++Foram preparados dois contratos HTTP autenticados para o ingresso real. A interface Expo e os fluxos demonstrativos permanecem para a Etapa 4. O código de autenticação, os serviços de domínio, o schema e as dependências não foram alterados. A execução local automatizada e a validação PostgreSQL ainda estão pendentes; este relatório não afirma que os endpoints foram homologados em dispositivo ou produção.
++
++## Contratos definitivos
++
++| Rota | Requisição | Resposta de sucesso |
++| --- | --- | --- |
++| `POST /api/v1/events/lookup` | `Authorization: Bearer <accessToken>`, JSON `{ "accessCode": "BEAST-2026" }` | HTTP 200, `{ "event": { "id", "name", "timezone", "startsAt", "officialEndsAt", "operationalDeadlineAt", "externalQueueEnabled" }, "eligibility": { "eligible", "blockingReasons" } }` |
++| `POST /api/v1/participations` | Bearer, `Idempotency-Key: <chave>`, JSON `{ "eventId": "<UUID>" }` | HTTP 201, `{ "participationId": "<UUID>" }` |
++
++A chave idempotente segue o validador HTTP existente: valor opaco, não vazio, até 128 caracteres, sem caracteres de controle, em um único cabeçalho. UUID é o formato recomendado para o cliente, mas a API aceita outras chaves opacas válidas. O corpo de ambas as rotas é estrito; `userId` e campos adicionais são recusados. O participante é identificado somente pelo Bearer validado pelo `SessionAuthGuard`.
++
++Exemplo de consulta bem-sucedida:
++
++```json
++{
++  "event": {
++    "id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
++    "name": "Arena Exemplo",
++    "timezone": "America/Sao_Paulo",
++    "startsAt": "2026-11-07T12:00:00.000Z",
++    "officialEndsAt": "2026-11-07T18:00:00.000Z",
++    "operationalDeadlineAt": "2026-11-07T19:00:00.000Z",
++    "externalQueueEnabled": true
++  },
++  "eligibility": { "eligible": true, "blockingReasons": [] }
++}
++```
++
++O código é validado e normalizado por `normalizeEventAccessCode`; `EventsService.findByAccessCode` consulta por igualdade exata da coluna canônica. A resposta expõe apenas os campos necessários para confirmar o evento. Não há campo de localização no schema atual. `ParticipationsService.evaluateJoinEligibility` informa impedimentos sem escrever ou reservar uma vaga. O resultado pode mudar entre consulta e ingresso.
++
++O ingresso chama `ParticipationsService.createParticipation`, que revalida elegibilidade, janela e disponibilidade dentro de uma transação PostgreSQL `READ COMMITTED`, na ordem de locks evento → usuário. A criação de participação, snapshot do perfil e conclusão da operação idempotente compartilham a transação. A fila externa inicia `waiting` quando habilitada; caso contrário, a participação inicia `active`. A rota retorna o identificador mínimo, sem fabricar posição na fila interna.
++
++A expiração usa `ParticipantQueueIdempotencyPolicy`, já validada pelo backend, configurada por `PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS`. Essa política evita uma segunda variável de TTL para operações do participante. Um replay concluído da mesma chave e do mesmo `eventId` devolve o HTTP 201 e o mesmo corpo. O serviço persiste a referência e o payload mínimo; a camada HTTP verifica sua consistência antes de responder. Chave igual com outro `eventId` retorna conflito; uma operação persistida em andamento retorna conflito específico. Não foi criado endpoint de criação por código: o cliente consulta o código e envia o UUID retornado.
++
++## Erros
++
++Todos os erros HTTP utilizam `application/problem+json` no formato RFC 7807, com `status`, `code`, `title`, `detail` e `type`. A falha inesperada de infraestrutura é convertida pelo filtro global em HTTP 500 `INTERNAL_SERVER_ERROR` sem expor detalhes internos.
++
++| Condição | HTTP | `code` |
++| --- | ---: | --- |
++| Bearer ausente ou inválido | 401 | `MISSING_ACCESS_TOKEN` ou código de autenticação existente |
++| JSON, código, UUID ou chave inválidos | 400 | `VALIDATION_ERROR` |
++| Código ou evento inexistente | 404 | `EVENT_NOT_FOUND` |
++| Conta inativa | 403 | `USER_INACTIVE` |
++| Questionário, versão ou jogos incompletos | 422 | `PROFILE_INCOMPLETE` |
++| Evento não iniciado, indisponível, encerrado ou participação corrente | 409 | motivo de domínio `EVENT_NOT_STARTED`, `EVENT_NOT_READY`, `EVENT_REGISTRATION_CLOSED` ou `PARTICIPATION_ALREADY_CURRENT` |
++| Chave reutilizada com outro pedido | 409 | `IDEMPOTENCY_KEY_REUSED` |
++| Operação idempotente ainda em andamento | 409 | `IDEMPOTENCY_IN_PROGRESS` |
++
++Na consulta por código, elegibilidade desfavorável ainda produz HTTP 200 com `eligible: false` e todos os motivos. A tentativa definitiva de ingresso usa uma prioridade estável para escolher um único problema HTTP, preservando os motivos calculados pelo domínio. A validação da sessão ocorre na entrada HTTP; o serviço de ingresso existente não recebe um contexto adicional de revalidação transacional da sessão. Essa janela temporal é uma limitação preexistente a considerar em revisão de segurança futura, sem alterar o serviço nesta etapa.
++
++## Arquivos da etapa
++
++- `backend/src/participations/participant-admission.controller.ts`: rotas, validação e tradução dos resultados do domínio.
++- `backend/src/participations/participations.module.ts` e `backend/src/app.module.ts`: registro das rotas e dependências.
++- `backend/test/unit/participant-admission-http.test.ts`: contratos HTTP simulados, autenticação, erros, payload e replay.
++- `backend/test/unit/participant-admission-db-guard.test.ts`: validação estática da guarda do banco dedicado.
++- `backend/test/integration/participant-admission-db-guard.ts`: guarda restrita às três URLs idênticas de `arenago_admission_test`.
++- `backend/test/integration/participant-admission-http.integration.test.ts`: cenários PostgreSQL reais preparados para leitura, estados inicial `waiting`/`active`, concorrência, replay, rollback, autenticação e isolamento da fixture.
++- Este relatório e `qa-evidence/expo-backend-etapa3-changes.diff`.
++
++## Validação e segurança PostgreSQL
++
++Foram preparados 10 cenários PostgreSQL. **Nenhum foi executado pelo Codex**. A suíte exige um banco descartável exclusivo `arenago_admission_test` em `127.0.0.1:55432`, com schema atualizado, sem copiar dados de `arenago_events_test` ou de qualquer outro banco. A criação do banco, a aplicação manual das migrações e a execução da suíte dependem de autorização e preparação do responsável. Nenhuma credencial deve ser registrada no repositório. A guarda exige `NODE_ENV=test`, `DATABASE_URL`, `DATABASE_DIRECT_URL` e `EVENTS_TEST_DATABASE_URL` idênticas, protocolo PostgreSQL, usuário e senha explícitos, sem query ou fragmento. Antes de escrever, a suíte confere `current_database()` e exige zero usuários e eventos preexistentes. O cleanup limita as exclusões aos identificadores gerados pela própria suíte.
++
++Após a preparação aprovada, o responsável pode definir as três URLs na sessão PowerShell, sem gravá-las em arquivo, e executar em `backend/`:
++
++```powershell
++$env:NODE_ENV = 'test'
++# Definir as três URLs idênticas do banco dedicado na sessão, sem imprimi-las no terminal.
++node.exe --import tsx --test --test-concurrency=1 test/integration/participant-admission-http.integration.test.ts
++```
++
++Conferir antes que as migrações necessárias já estejam aplicadas e que as demais variáveis de teste obrigatórias da configuração local estejam presentes. Não executar a suíte genérica `test:integration` com apenas esse banco: há outras suítes com guardas e bancos distintos. A regressão global PostgreSQL deverá ser planejada separadamente pelo responsável. Os bancos históricos `arenago_events_test`, `arenago_bootstrap_test`, `arenago_roles_test` e o banco remoto `arenago_dev` não são destinos desta suíte.
++
++## Validações locais e próxima etapa
++
++### Resultados locais desta campanha
++
++Executados sem conectar a bancos: os 11 testes específicos (10 HTTP simulados e um teste da guarda), **11/11 aprovados**, zero falhas, zero skips, exit code 0. A regressão unitária completa cobriu 62 arquivos e aprovou **1.145/1.145**, sem falhas ou skips, exit code 0. Os 11 testes focados também estão incluídos nessa regressão e não devem ser somados novamente ao total.
++
++Typecheck de produção (`tsc --noEmit --incremental false --project tsconfig.json`): aprovado, exit code 0. Typecheck de testes (`tsc --project tsconfig.test.json`): aprovado, exit code 0. ESLint (`npm run lint`): aprovado, exit code 0. Build NestJS: aprovado, exit code 0; foi direcionado a uma pasta temporária, com `deleteOutDir` desativado na configuração temporária, para preservar `backend/dist` e evitar interferir em eventual servidor local.
++
++A primeira tentativa do runner `tsx` falhou antes de carregar os casos com `uv_os_get_passwd returned ENOMEM`, durante a consulta de identidade do sistema. A reexecução usou um preload temporário limitado ao processo do teste para fornecer a identidade usada pelo diretório de cache do `tsx`; não alterou arquivos do projeto. O teste HTTP também exige que o módulo de configuração valide `DATABASE_URL`; foi usada uma URL fictícia em `127.0.0.1:1`, sem conexão possível, e as URLs `DATABASE_DIRECT_URL` e `EVENTS_TEST_DATABASE_URL` foram removidas do ambiente do processo. Nenhuma variável ou credencial de `.env` foi lida ou modificada.
++
++A integração PostgreSQL continua pendente e deve ser executada somente pelo responsável no banco dedicado aprovado, após sua preparação manual. A suíte preparada contém 10 cenários; os resultados desta campanha não a validam.
++
++Na Etapa 4, a tela Expo poderá consultar o código, exibir nome e horários reais, tratar os motivos de elegibilidade e solicitar confirmação. O cliente deverá gerar uma `Idempotency-Key` por intenção de ingresso, reutilizá-la nos retries da mesma intenção e obter o `eventId` do lookup. Após HTTP 201, deverá atualizar `GET /participations/current`/estado de retorno. Erros RFC 7807 e falhas de rede devem preservar a possibilidade de repetir a mesma intenção com a mesma chave. A validação no iPhone físico permanece pendente.
