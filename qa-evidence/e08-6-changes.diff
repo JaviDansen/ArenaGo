@@ -1,0 +1,1282 @@
+diff --git a/backend/src/app.module.ts b/backend/src/app.module.ts
+index c1d0c9991228f4ca3c5861d40263fce8a9c6bcf5..36a950ca464bbf1a1d09b3a80a0f5b613274f1a7 100644
+--- a/backend/src/app.module.ts
++++ b/backend/src/app.module.ts
+@@ -5,6 +5,7 @@ import { AuthModule } from "./auth/auth.module";
+ import { ProblemDetailsExceptionFilter } from "./common/errors/problem-details.filter";
+ import { DatabaseModule } from "./database/database.module";
+ import { EventsModule } from "./events/events.module";
++import { AdminEventsModule } from "./events/admin-events.module";
+ import { GamesModule } from "./games/games.module";
+ import { ProfileModule } from "./profile/profile.module";
+ 
+@@ -13,6 +14,7 @@ import { ProfileModule } from "./profile/profile.module";
+     DatabaseModule,
+     AuthModule,
+     EventsModule,
++    AdminEventsModule,
+     GamesModule,
+     ProfileModule,
+   ],
+@@ -23,4 +25,4 @@ import { ProfileModule } from "./profile/profile.module";
+     },
+   ],
+ })
+-export class AppModule {}
+\ No newline at end of file
++export class AppModule {}
+diff --git a/backend/src/participations/participations.service.ts b/backend/src/participations/participations.service.ts
+index 779bd3a327464e7091906bb8323865b2c93e6d84..c1b8b84e7e4bc78a3a12bc6ad2a476f77279b9ce 100644
+--- a/backend/src/participations/participations.service.ts
++++ b/backend/src/participations/participations.service.ts
+@@ -75,14 +75,14 @@ class JoinEligibilityRollback extends Error {
+ export class ParticipationsService {
+   constructor(
+     @Inject(DRIZZLE_DATABASE) private readonly database: ParticipationsDatabase,
+-    private readonly eventsService: EventsService,
++    @Inject(EventsService) private readonly eventsService: EventsService,
+   ) {}
+ 
+   /**
+    * Alterna a fila externa e, ao desligá-la, libera todos os waiting atomicamente (D06).
+    *
+-   * @remarks Operação interna para chamador confiável. A futura API Admin deve exigir
+-   * Admin/TOTP, justificativa e auditoria na mesma transação; este método não expõe rota.
++   * @remarks Operação interna para chamador confiável. A API E08.6 exige Admin/TOTP,
++   * justificativa e auditoria, compondo WithTx na mesma transação; este método não expõe rota.
+    * Usa a ordem evento → participações (UUID crescente), sem travar usuários: não lê nem
+    * altera perfis. O lock exclusivo do evento serializa com E03 e demais alternâncias.
+    * Repetições do estado persistido são no-op, inclusive depois do corte; mudanças reais
+@@ -92,15 +92,29 @@ export class ParticipationsService {
+     eventId: string,
+     enabled: boolean,
+   ): Promise<SetExternalQueueEnabledResult> {
+-    return this.database.transaction(async (tx): Promise<SetExternalQueueEnabledResult> => {
++    return this.database.transaction(tx => this.setExternalQueueEnabledWithTx(tx, eventId, enabled),
++      { isolationLevel: "read committed" });
++  }
++
++  /** E08.6: mesma E05 no tx do chamador; callback após locks e antes da decisão/efeitos. */
++  async setExternalQueueEnabledWithTx(
++    tx: ParticipationsTransaction,
++    eventId: string,
++    enabled: boolean,
++    beforeDecision?: (current: boolean | undefined) => Promise<void>,
++  ): Promise<SetExternalQueueEnabledResult> {
+       const [event] = await tx
+         .select({ externalQueueEnabled: schema.events.externalQueueEnabled })
+         .from(schema.events)
+         .where(eq(schema.events.id, eventId))
+         .for("update")
+         .limit(1);
+-      if (!event) return { kind: "event_not_found" };
++      if (!event) {
++        await beforeDecision?.(undefined);
++        return { kind: "event_not_found" };
++      }
+       if (event.externalQueueEnabled === enabled) {
++        await beforeDecision?.(event.externalQueueEnabled);
+         return { kind: "unchanged", eventId, externalQueueEnabled: enabled, releasedCount: 0 };
+       }
+ 
+@@ -117,6 +131,7 @@ export class ParticipationsService {
+           .for("update");
+       }
+ 
++      await beforeDecision?.(event.externalQueueEnabled);
+       const clock = await tx.execute<{ decisionAtMs: number }>(
+         sql`SELECT (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::double precision AS "decisionAtMs"`,
+       );
+@@ -150,7 +165,6 @@ export class ParticipationsService {
+         releasedCount = released.rowCount ?? 0;
+       }
+       return { kind: "changed", eventId, externalQueueEnabled: enabled, releasedCount, changedAt };
+-    }, { isolationLevel: "read committed" });
+   }
+ 
+   /** Consulta a única participação corrente do usuário e sua posição externa observada. */
+diff --git a/backend/test/integration/auth.integration.test.ts b/backend/test/integration/auth.integration.test.ts
+index 5010fb28d3ca9dfbb2c6148dd9507bcc9fa6eddc..49bdf82da1b5e348849df77ce008b3e95ac8eb3b 100644
+--- a/backend/test/integration/auth.integration.test.ts
++++ b/backend/test/integration/auth.integration.test.ts
+@@ -29,6 +29,7 @@ import { assertSafeTestDatabase } from "./test-db-guard";
+ const connectionString = assertSafeTestDatabase(process.env.DATABASE_URL);
+ process.env.STAFF_IDEMPOTENCY_TTL_SECONDS = "60";
+ process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = "60";
++process.env.ADMIN_IDEMPOTENCY_TTL_SECONDS = "60";
+ 
+ /**
+  * Controller auxiliar para validar o contrato compartilhado de autenticação
+diff --git a/backend/test/integration/profile-games.integration.test.ts b/backend/test/integration/profile-games.integration.test.ts
+index 30be9651bd2aa95380b9f9abba46eed0ed0e5bb1..99e5952155be9f0bd0df181d8736123c84b67a99 100644
+--- a/backend/test/integration/profile-games.integration.test.ts
++++ b/backend/test/integration/profile-games.integration.test.ts
+@@ -21,6 +21,7 @@ import { assertSafeTestDatabase } from "./test-db-guard";
+ const connectionString = assertSafeTestDatabase(process.env.DATABASE_URL);
+ process.env.STAFF_IDEMPOTENCY_TTL_SECONDS = "60";
+ process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = "60";
++process.env.ADMIN_IDEMPOTENCY_TTL_SECONDS = "60";
+ 
+ let app: INestApplication;
+ let baseUrl: string;
+diff --git a/docs/ARQUITETURA_BACKEND_ARENAGO.md b/docs/ARQUITETURA_BACKEND_ARENAGO.md
+index ab5d47f8c146f1e2550bd2601e3ca803f5fb2f2a..ad453d73a44afaf3b6bd78a4eb840a614c27d0da 100644
+--- a/docs/ARQUITETURA_BACKEND_ARENAGO.md
++++ b/docs/ARQUITETURA_BACKEND_ARENAGO.md
+@@ -1512,6 +1512,19 @@ Quando não houver pendências: `items: []`, **não** `404`. Não retornar pesso
+ 
+ ### 17.10 `PATCH /admin/events/:eventId/external-queue` — ligar/desligar fila externa
+ 
++**Implementação E08.6 — 03/11/2026:** rota disponível sob `/api/v1`, por
++`AdminEventsModule`, com Admin global, conta/sessão/2FA revalidados na transação.
++Compõe a E05 via `setExternalQueueEnabledWithTx`, preservando o método interno
++existente, para confirmar configuração, liberações, auditoria e idempotência juntas.
++Body estrito, `enabled` booleano, `reason` aparada de 1–500 caracteres sem controles;
++`Idempotency-Key` obrigatória por intenção. Usa TTL técnico próprio e obrigatório
++`ADMIN_IDEMPOTENCY_TTL_SECONDS`, sem fallback; replay enquanto a linha existir,
++inclusive após alteração oposta, continua sujeito à autorização atual. No-op não
++atualiza domínio nem audita, mas conclui a intenção. Resposta 200 sem `kind`:
++`eventId`, `externalQueueEnabled`, `releasedCount` e `changedAt` somente se houve
++mudança na intenção original. Detalhes, limites e PostgreSQL pendente em
++`E08_6_IMPLEMENTACAO.md`.
++
+ **Bearer Admin/TOTP + justificativa/auditoria**. Corpo `{ "enabled": false, "reason": "..." }`. Enquanto o evento ainda admite ingressos, **desligar** a fila externa libera atomicamente os participantes `waiting` existentes para `active`; **religar** afeta somente as **novas** participações futuras e não recoloca aqueles já ativos em espera. Depois do corte oficial/Admin, nenhuma alternância pode reabrir ingressos nem liberar fila externa; no fechamento controlado, as esperas externas foram finalizadas conforme §16.13. `409 EVENT_REGISTRATION_CLOSED` para mutação que implicaria reabertura. Usar `events FOR UPDATE` contra novas entradas e auditar transição.
+ 
+ ### 17.11 Erros e cenários de aceitação adicionais — futuros, não executados
+diff --git a/backend/src/events/admin-events.module.ts b/backend/src/events/admin-events.module.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..8d76fb2af8ae062350df77e370670e3ced6c8719
+--- /dev/null
++++ b/backend/src/events/admin-events.module.ts
+@@ -0,0 +1,15 @@
++import { Module } from "@nestjs/common";
++import { AuthModule } from "../auth/auth.module";
++import { DatabaseModule } from "../database/database.module";
++import { ParticipationsModule } from "../participations/participations.module";
++import { AdminExternalQueueController } from "./admin-external-queue.controller";
++import { AdminExternalQueueService } from "./admin-external-queue.service";
++import { AdminIdempotencyPolicy } from "./admin-idempotency.policy";
++
++@Module({
++  imports: [DatabaseModule, AuthModule, ParticipationsModule],
++  controllers: [AdminExternalQueueController],
++  providers: [AdminExternalQueueService, AdminIdempotencyPolicy],
++  exports: [AdminExternalQueueService],
++})
++export class AdminEventsModule {}
+diff --git a/backend/src/events/admin-external-queue.controller.ts b/backend/src/events/admin-external-queue.controller.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..ac0ee6fe7b292d98f913eaec7be43d9f0d54791c
+--- /dev/null
++++ b/backend/src/events/admin-external-queue.controller.ts
+@@ -0,0 +1,45 @@
++import { Body, Controller, HttpCode, HttpStatus, Inject, Param, Patch, Req } from "@nestjs/common";
++import { CurrentUser, CurrentUserId, RequireSessionAuth } from "../auth/current-user.decorator";
++import type { AuthenticatedRequest } from "../auth/session-auth.guard";
++import { ProblemException } from "../common/errors/problem.exception";
++import { validateOperationBody, validateOperationIdempotencyKey, validateOperationParams } from "../common/http/operation-validation";
++import { AdminExternalQueueService } from "./admin-external-queue.service";
++import { AdminIdempotencyPolicy } from "./admin-idempotency.policy";
++import { adminExternalQueueBody, adminExternalQueueParams } from "./admin-external-queue.dto";
++
++const failures = {
++  resource_not_found: [404, "RESOURCE_NOT_FOUND", "Recurso não encontrado."],
++  admin_required: [403, "ADMIN_REQUIRED", "Admin global autorizado é obrigatório."],
++  account_inactive: [401, "ACCOUNT_DEACTIVATED", "Esta conta encontra-se desativada."],
++  invalid_session: [401, "INVALID_SESSION", "Sessão inválida."],
++  session_revoked: [401, "SESSION_REVOKED", "A sessão foi revogada."],
++  session_expired: [401, "SESSION_EXPIRED", "A sessão expirou."],
++  admin_2fa_required: [401, "ADMIN_2FA_REQUIRED", "Sessão administrativa exige segundo fator (TOTP)."],
++  event_closed: [409, "EVENT_REGISTRATION_CLOSED", "O evento não permite alterar a fila externa neste instante."],
++  event_unavailable: [409, "EVENT_UNAVAILABLE", "O evento não está disponível para esta operação."],
++  request_conflict: [409, "IDEMPOTENCY_KEY_REUSED", "A chave de idempotência já identifica outra intenção."],
++  in_progress: [409, "IDEMPOTENCY_IN_PROGRESS", "A intenção informada está em processamento."],
++} as const;
++
++@Controller("admin/events/:eventId/external-queue")
++@RequireSessionAuth()
++export class AdminExternalQueueController {
++  constructor(@Inject(AdminExternalQueueService) private readonly queue: AdminExternalQueueService,
++    @Inject(AdminIdempotencyPolicy) private readonly idempotency: AdminIdempotencyPolicy) {}
++
++  @Patch()
++  @HttpCode(HttpStatus.OK)
++  async set(@CurrentUserId() userId: string, @CurrentUser("sessionId") sessionId: string,
++    @Param() params: unknown, @Body() body: unknown, @Req() request: AuthenticatedRequest) {
++    const ids = validateOperationParams(adminExternalQueueParams, params);
++    const change = validateOperationBody(adminExternalQueueBody, body, request);
++    const idempotencyKey = validateOperationIdempotencyKey(request);
++    const result = await this.queue.setExternalQueue({ userId, sessionId, ...ids, ...change, idempotencyKey, expiresAt: this.idempotency.expiresAt() });
++    if (result.kind === "completed" || result.kind === "replay") return { eventId: result.eventId,
++      externalQueueEnabled: result.externalQueueEnabled, releasedCount: result.releasedCount,
++      ...(result.changedAt ? { changedAt: result.changedAt } : {}) };
++    const [status, code, detail] = failures[result.kind];
++    throw new ProblemException({ status, code, detail, typeSlug: code.toLowerCase().replaceAll("_", "-"),
++      title: status === 401 ? "Autenticação obrigatória" : status === 403 ? "Acesso negado" : status === 404 ? "Recurso não encontrado" : "Conflito operacional" });
++  }
++}
+diff --git a/backend/src/events/admin-external-queue.dto.ts b/backend/src/events/admin-external-queue.dto.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..b3d43d6edebb34092c1a6c5d91ba8321bde24dd3
+--- /dev/null
++++ b/backend/src/events/admin-external-queue.dto.ts
+@@ -0,0 +1,8 @@
++import { z } from "zod";
++import { operationUuid } from "../common/http/operation-validation";
++
++export const adminExternalQueueParams = z.object({ eventId: operationUuid }).strict();
++export const adminExternalQueueBody = z.object({
++  enabled: z.boolean(),
++  reason: z.string().trim().min(1).max(500).refine(value => [...value].every(char => char.charCodeAt(0) >= 32 && char.charCodeAt(0) !== 127)),
++}).strict();
+diff --git a/backend/src/events/admin-external-queue.service.ts b/backend/src/events/admin-external-queue.service.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..497c8826b5e08369bb73c7ebcf9fa0aaa0c44593
+--- /dev/null
++++ b/backend/src/events/admin-external-queue.service.ts
+@@ -0,0 +1,122 @@
++import { Inject, Injectable } from "@nestjs/common";
++import { randomUUID } from "node:crypto";
++import { sql } from "drizzle-orm";
++import type { NodePgDatabase } from "drizzle-orm/node-postgres";
++import { DRIZZLE_DATABASE } from "../database/database.module";
++import type { DatabaseTransactionExecutor } from "../database/database-executor";
++import type * as schema from "../database/schema";
++import { ParticipationsService } from "../participations/participations.service";
++import { completeIdempotencyOperationWithTx, createRequestFingerprint, reserveIdempotencyOperationWithTx } from "../participations/join-idempotency";
++import type { JsonValue } from "../participations/join-idempotency";
++import { adminExternalQueueBody } from "./admin-external-queue.dto";
++import type { AdminExternalQueueInput, AdminExternalQueueResult, AdminExternalQueueState } from "./admin-external-queue.types";
++
++export const ADMIN_EXTERNAL_QUEUE_OPERATION = "admin_set_external_queue";
++export function externalQueueFingerprint(eventId: string, enabled: boolean, reason: string): string {
++  return createRequestFingerprint(ADMIN_EXTERNAL_QUEUE_OPERATION, { eventId, enabled, reason });
++}
++class ExternalQueueRollback extends Error {
++  constructor(readonly result: AdminExternalQueueResult) { super(result.kind); }
++}
++function block(result: AdminExternalQueueResult): never { throw new ExternalQueueRollback(result); }
++function replay(payload: JsonValue | null, input: AdminExternalQueueInput): AdminExternalQueueState {
++  if (!payload || typeof payload !== "object" || Array.isArray(payload)
++    || payload.eventId !== input.eventId || payload.externalQueueEnabled !== input.enabled
++    || typeof payload.releasedCount !== "number" || !Number.isSafeInteger(payload.releasedCount) || payload.releasedCount < 0) {
++    throw new Error("Resposta administrativa idempotente inválida.");
++  }
++  const state: AdminExternalQueueState = { eventId: input.eventId, externalQueueEnabled: input.enabled, releasedCount: payload.releasedCount };
++  if (payload.changedAt !== undefined) {
++    if (typeof payload.changedAt !== "string" || !Number.isFinite(Date.parse(payload.changedAt))) throw new Error("Instante administrativo de replay inválido.");
++    state.changedAt = new Date(payload.changedAt);
++  } else if (state.releasedCount !== 0) throw new Error("No-op administrativo com liberações inválidas.");
++  return state;
++}
++
++/** E08.6: compõe a E05, auditoria e replay durável em uma única transação. */
++@Injectable()
++export class AdminExternalQueueService {
++  constructor(
++    @Inject(DRIZZLE_DATABASE) private readonly database: NodePgDatabase<typeof schema>,
++    @Inject(ParticipationsService) private readonly participations: ParticipationsService,
++  ) {}
++
++  private async session(tx: DatabaseTransactionExecutor, input: AdminExternalQueueInput) {
++    const rows = await tx.execute<{ revoked: boolean; expired: boolean; secondFactor: boolean }>(sql`
++      SELECT revoked_at IS NOT NULL AS revoked, expires_at <= clock_timestamp() AS expired,
++        admin_2fa_verified_at IS NOT NULL AS "secondFactor"
++      FROM sessions WHERE id=${input.sessionId} AND user_id=${input.userId}`);
++    const auth = rows.rows[0];
++    if (!auth) block({ kind: "invalid_session" });
++    if (auth.revoked) block({ kind: "session_revoked" });
++    if (auth.expired) block({ kind: "session_expired" });
++    if (!auth.secondFactor) block({ kind: "admin_2fa_required" });
++  }
++
++  private async authorize(tx: DatabaseTransactionExecutor, input: AdminExternalQueueInput) {
++    const account = await tx.execute<{ active: boolean }>(sql`SELECT is_active AS active FROM users WHERE id=${input.userId} FOR SHARE`);
++    if (!account.rows[0]?.active) block({ kind: "account_inactive" });
++    const role = await tx.execute(sql`SELECT id FROM user_roles WHERE user_id=${input.userId}
++      AND role='admin' AND event_id IS NULL AND revoked_at IS NULL ORDER BY id FOR SHARE`);
++    if (!role.rows.length) block({ kind: "admin_required" });
++    const session = await tx.execute(sql`SELECT id FROM sessions WHERE id=${input.sessionId} AND user_id=${input.userId} FOR SHARE`);
++    if (!session.rows.length) block({ kind: "invalid_session" });
++    await this.session(tx, input);
++  }
++
++  async setExternalQueue(input: AdminExternalQueueInput): Promise<AdminExternalQueueResult> {
++    const body = adminExternalQueueBody.parse({ enabled: input.enabled, reason: input.reason });
++    input = { ...input, ...body };
++    if (!input.idempotencyKey.trim() || input.idempotencyKey.length > 128 || !Number.isFinite(input.expiresAt.getTime())) throw new Error("Idempotência administrativa inválida.");
++    try {
++      return await this.database.transaction(async (tx): Promise<AdminExternalQueueResult> => {
++        let before: boolean | undefined, reservationId: string | undefined;
++        const result = await this.participations.setExternalQueueEnabledWithTx(tx, input.eventId, input.enabled, async current => {
++          // E05 já obteve evento e, ao desligar, participações waiting antes desta autorização.
++          // Inclusive no-op/replay e evento ausente exigem a autorização global atual.
++          await this.authorize(tx, input);
++          if (current === undefined) return;
++          before = current;
++          const reservation = await reserveIdempotencyOperationWithTx(tx, { actorUserId: input.userId,
++            operation: ADMIN_EXTERNAL_QUEUE_OPERATION, idempotencyKey: input.idempotencyKey,
++            requestHash: externalQueueFingerprint(input.eventId, input.enabled, input.reason), expiresAt: input.expiresAt });
++          // Relógio novo após eventual espera no índice UNIQUE da reserva.
++          await this.session(tx, input);
++          if (reservation.kind === "request_conflict" || reservation.kind === "in_progress") block({ kind: reservation.kind });
++          if (reservation.kind === "replay") {
++            if (reservation.httpStatus !== 200) throw new Error("Status administrativo de replay inválido.");
++            block({ kind: "replay", ...replay(reservation.resultPayload, input) });
++          }
++          reservationId = reservation.operationId;
++        });
++        if (result.kind === "event_not_found") block({ kind: "resource_not_found" });
++        if (result.kind === "blocked") {
++          const closed = result.availability.eventExists && result.availability.missing.some(code =>
++            ["EVENT_NOT_STARTED", "EVENT_ENTRY_CLOSED", "EVENT_ADMIN_CLOSING", "EVENT_CLOSED"].includes(code));
++          block({ kind: closed ? "event_closed" : "event_unavailable" });
++        }
++        if (!reservationId || before === undefined) throw new Error("Reserva administrativa ausente.");
++        await this.session(tx, input);
++        if (!Number.isSafeInteger(result.releasedCount) || result.releasedCount < 0) throw new Error("Contagem administrativa inválida.");
++        const state: AdminExternalQueueState = { eventId: result.eventId, externalQueueEnabled: result.externalQueueEnabled,
++          releasedCount: result.releasedCount, ...(result.kind === "changed" ? { changedAt: result.changedAt } : {}) };
++        if (result.kind === "changed") {
++          const audit = await tx.execute(sql`INSERT INTO audit_logs(id,actor_user_id,event_id,origin,category,action,reason,metadata,occurred_at)
++            SELECT ${randomUUID()},${input.userId},e.id,'user','event','external_queue_enabled_changed',${input.reason},
++              jsonb_build_object('before',jsonb_build_object('externalQueueEnabled',${before}::boolean),
++                'after',jsonb_build_object('externalQueueEnabled',e.external_queue_enabled),
++                'releasedCount',${result.releasedCount}::bigint),e.updated_at
++            FROM events e WHERE e.id=${input.eventId} RETURNING id`);
++          if (audit.rows.length !== 1) throw new Error("Alteração da fila externa exige exatamente uma auditoria.");
++        }
++        await completeIdempotencyOperationWithTx(tx, reservationId, { httpStatus: 200, resultReference: input.eventId,
++          resultPayload: { eventId: state.eventId, externalQueueEnabled: state.externalQueueEnabled, releasedCount: state.releasedCount,
++            ...(state.changedAt ? { changedAt: state.changedAt.toISOString() } : {}) } });
++        return { kind: "completed", ...state };
++      }, { isolationLevel: "read committed" });
++    } catch (error) {
++      if (error instanceof ExternalQueueRollback) return error.result;
++      throw error;
++    }
++  }
++}
+diff --git a/backend/src/events/admin-external-queue.types.ts b/backend/src/events/admin-external-queue.types.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..611569fd6e5cd5ed5ab788f119d0801a822ed391
+--- /dev/null
++++ b/backend/src/events/admin-external-queue.types.ts
+@@ -0,0 +1,20 @@
++export interface AdminExternalQueueInput {
++  userId: string;
++  sessionId: string;
++  eventId: string;
++  enabled: boolean;
++  reason: string;
++  idempotencyKey: string;
++  expiresAt: Date;
++}
++export interface AdminExternalQueueState {
++  eventId: string;
++  externalQueueEnabled: boolean;
++  releasedCount: number;
++  changedAt?: Date;
++}
++export type AdminExternalQueueResult =
++  | ({ kind: "completed" | "replay" } & AdminExternalQueueState)
++  | { kind: "resource_not_found" | "admin_required" | "account_inactive" | "invalid_session"
++    | "session_revoked" | "session_expired" | "admin_2fa_required" | "event_closed"
++    | "event_unavailable" | "request_conflict" | "in_progress" };
+diff --git a/backend/src/events/admin-idempotency.policy.ts b/backend/src/events/admin-idempotency.policy.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..2d8b7a05c3f5fc9d3b49b5107ad909209b29f9f9
+--- /dev/null
++++ b/backend/src/events/admin-idempotency.policy.ts
+@@ -0,0 +1,14 @@
++import { Injectable } from "@nestjs/common";
++import { parseOperationIdempotencyTtl } from "../common/http/idempotency-ttl";
++
++/** Prazo técnico explícito; não apaga reservas nem invalida replay pelo vencimento. */
++@Injectable()
++export class AdminIdempotencyPolicy {
++  private readonly ttlMs = parseOperationIdempotencyTtl(process.env.ADMIN_IDEMPOTENCY_TTL_SECONDS, "ADMIN_IDEMPOTENCY_TTL_SECONDS");
++
++  expiresAt(): Date {
++    const result = new Date(Date.now() + this.ttlMs);
++    if (!Number.isFinite(result.getTime())) throw new Error("Expiração administrativa fora do intervalo de Date.");
++    return result;
++  }
++}
+diff --git a/backend/test/integration/admin-external-queue-http.integration.test.ts b/backend/test/integration/admin-external-queue-http.integration.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..967f54f3474d6c2f7c2361afed859f0a78977000
+--- /dev/null
++++ b/backend/test/integration/admin-external-queue-http.integration.test.ts
+@@ -0,0 +1,364 @@
++import "reflect-metadata";
++import assert from "node:assert/strict";
++import { randomUUID } from "node:crypto";
++import { devNull } from "node:os";
++import { after, before, test } from "node:test";
++import { NestFactory } from "@nestjs/core";
++import type { INestApplication } from "@nestjs/common";
++import { sql } from "drizzle-orm";
++import { PgDialect } from "drizzle-orm/pg-core";
++import type { NodePgDatabase } from "drizzle-orm/node-postgres";
++import { Pool } from "pg";
++import type { PoolClient } from "pg";
++import supertest from "supertest";
++import type * as schema from "../../src/database/schema";
++import type { ParticipationsService } from "../../src/participations/participations.service";
++import { assertSafeTestDatabase } from "./test-db-guard";
++
++// Barreira ANTES de importar AppModule/providers. Não usa .env ou banco remoto.
++const urls=["DATABASE_URL","DATABASE_DIRECT_URL","EVENTS_TEST_DATABASE_URL"].map(name=>{
++  const value=assertSafeTestDatabase(process.env[name]),url=new URL(value);
++  if(url.hostname!=="127.0.0.1"||url.port!=="55432"||url.pathname!=="/arenago_events_test"||url.search||url.hash||!url.username)throw new Error(`${name}: destino local explícito obrigatório.`);
++  return value;
++});
++if(urls.some(value=>value!==urls[0]))throw new Error("As três URLs explícitas precisam ser idênticas.");
++process.env.DOTENV_CONFIG_PATH=devNull;
++process.env.STAFF_IDEMPOTENCY_TTL_SECONDS="60";
++process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS="60";
++process.env.ADMIN_IDEMPOTENCY_TTL_SECONDS="60";
++const pool=new Pool({connectionString:urls[0],ssl:false,max:6,connectionTimeoutMillis:2000,statement_timeout:15000,lock_timeout:12000});
++let app:INestApplication,database:NodePgDatabase<typeof schema>,participations:ParticipationsService;
++let signAccess:(userId:string,sessionId:string,expired?:boolean)=>string;
++let fingerprint:(eventId:string,enabled:boolean,reason:string)=>string;
++const operation="admin_set_external_queue",reason="Acesso direto autorizado pela organização";
++const ids={events:[]as string[],users:[]as string[],versions:[]as string[],games:[]as string[]};
++before(async()=>{
++  assert.equal((await pool.query("SELECT current_database() AS name")).rows[0].name,"arenago_events_test");
++  const {AppModule}=await import("../../src/app.module");
++  const {DRIZZLE_DATABASE}=await import("../../src/database/database.module");
++  const {ParticipationsService}=await import("../../src/participations/participations.service");
++  const {externalQueueFingerprint}=await import("../../src/events/admin-external-queue.service");fingerprint=externalQueueFingerprint;
++  const tokens=await import("../../src/auth/token.util");
++  signAccess=(userId,sessionId,expired)=>tokens.signAccessToken({userId,sessionId},expired?{nowMs:Date.now()-120000,ttlSeconds:1}:undefined);
++  app=await NestFactory.create(AppModule,{logger:false});app.setGlobalPrefix("api/v1");await app.listen(0,"127.0.0.1");
++  database=app.get(DRIZZLE_DATABASE);participations=app.get(ParticipationsService);
++});
++after(async()=>{
++  const errors:unknown[]=[];
++  try{
++    const c=await pool.connect();try{
++      await c.query("BEGIN");
++      await c.query("DELETE FROM audit_logs WHERE event_id=ANY($1::uuid[])",[ids.events]);
++      await c.query("UPDATE participations SET current_queue_entry_id=NULL WHERE event_id=ANY($1::uuid[])",[ids.events]);
++      await c.query("DELETE FROM service_sessions s USING queue_entries q WHERE s.queue_entry_id=q.id AND q.event_id=ANY($1::uuid[])",[ids.events]);
++      await c.query("DELETE FROM queue_entries WHERE event_id=ANY($1::uuid[])",[ids.events]);
++      await c.query("DELETE FROM participation_profile_snapshots s USING participations p WHERE s.participation_id=p.id AND p.event_id=ANY($1::uuid[])",[ids.events]);
++      await c.query("DELETE FROM participations WHERE event_id=ANY($1::uuid[])",[ids.events]);
++      await c.query("DELETE FROM stations s USING experiences e WHERE s.experience_id=e.id AND e.event_id=ANY($1::uuid[])",[ids.events]);
++      await c.query("DELETE FROM experiences WHERE event_id=ANY($1::uuid[])",[ids.events]);
++      await c.query("DELETE FROM idempotency_operations WHERE actor_user_id=ANY($1::uuid[])",[ids.users]);
++      await c.query("DELETE FROM user_roles WHERE user_id=ANY($1::uuid[])",[ids.users]);
++      await c.query("DELETE FROM sessions WHERE user_id=ANY($1::uuid[])",[ids.users]);
++      await c.query("DELETE FROM user_games WHERE user_id=ANY($1::uuid[])",[ids.users]);
++      await c.query("DELETE FROM profiles WHERE user_id=ANY($1::uuid[])",[ids.users]);
++      await c.query("DELETE FROM events WHERE id=ANY($1::uuid[])",[ids.events]);
++      await c.query("DELETE FROM games WHERE id=ANY($1::uuid[])",[ids.games]);
++      await c.query("DELETE FROM users WHERE id=ANY($1::uuid[])",[ids.users]);
++      await c.query("DELETE FROM questionnaire_versions WHERE id=ANY($1::uuid[])",[ids.versions]);await c.query("COMMIT");
++    }catch(error){await c.query("ROLLBACK");throw error;}finally{c.release();}
++  }catch(error){errors.push(error);}
++  for(const r of await Promise.allSettled([app?.close(),pool.end()]))if(r.status==="rejected")errors.push(r.reason);
++  if(errors.length)throw new AggregateError(errors,"Limpeza E08.6 falhou.");
++});
++async function account(){
++  const userId=randomUUID(),sessionId=randomUUID();ids.users.push(userId);
++  await pool.query(`INSERT INTO users(id,name,email,password_hash,email_verified_at,created_at,updated_at)
++    VALUES($1,'Pessoa privada E086',$2,'fixture-private-hash',clock_timestamp(),clock_timestamp(),clock_timestamp())`,[userId,`${userId}@example.test`]);
++  await pool.query(`INSERT INTO sessions(id,user_id,expires_at,last_activity_at,created_at)
++    VALUES($1,$2,clock_timestamp()+interval '1 hour',clock_timestamp(),clock_timestamp())`,[sessionId,userId]);return{userId,sessionId,token:signAccess(userId,sessionId)};
++}
++async function grant(userId:string,eventId:string|null){const id=randomUUID();await pool.query("INSERT INTO user_roles(id,user_id,role,event_id,granted_at) VALUES($1,$2,$3,$4,clock_timestamp())",[id,userId,eventId?"staff":"admin",eventId]);return id;}
++async function admin(){const a=await account(),roleId=await grant(a.userId,null);await pool.query("UPDATE sessions SET admin_2fa_verified_at=clock_timestamp() WHERE id=$1",[a.sessionId]);return{...a,roleId};}
++interface Context{eventId:string;experienceId:string;stationId:string;admin:Awaited<ReturnType<typeof admin>>;staff:Awaited<ReturnType<typeof account>>;}
++async function context(enabled=true):Promise<Context>{
++  const eventId=randomUUID(),experienceId=randomUUID(),stationId=randomUUID();ids.events.push(eventId);
++  await pool.query(`INSERT INTO events(id,name,access_code_normalized,timezone,starts_at,official_ends_at,operational_deadline_at,status,external_queue_enabled,external_last_order,created_at,updated_at)
++    VALUES($1,'E086 fixture',$2,'America/Sao_Paulo',clock_timestamp()-interval '1 hour',clock_timestamp()+interval '1 hour',clock_timestamp()+interval '90 minutes','open',$3,9007199254741000,clock_timestamp(),clock_timestamp())`,[eventId,`E086-${eventId.toUpperCase()}`,enabled]);
++  const actor=await admin(),staff=await account();await grant(staff.userId,eventId);
++  await pool.query("INSERT INTO experiences(id,event_id,name,last_queue_order,created_at,updated_at) VALUES($1,$2,'Experiência E086',9007199254741000,clock_timestamp(),clock_timestamp())",[experienceId,eventId]);
++  await pool.query("INSERT INTO stations(id,experience_id,label,availability,created_at,updated_at) VALUES($1,$2,'Estação E086','available',clock_timestamp(),clock_timestamp())",[stationId,experienceId]);
++  return{eventId,experienceId,stationId,admin:actor,staff};
++}
++async function person(c:Context,status:"waiting"|"active"|"finished"|"canceled"="waiting"){
++  const a=await account(),participationId=randomUUID(),terminal=status==="finished"||status==="canceled";
++  const order=status==="waiting"?(await pool.query("UPDATE events SET external_last_order=external_last_order+1 WHERE id=$1 RETURNING external_last_order::text AS n",[c.eventId])).rows[0].n:null;
++  await pool.query(`INSERT INTO participations(id,user_id,event_id,status,external_queue_order,joined_at,arena_entered_at,finished_at,finish_reason)
++    VALUES($1,$2,$3,$4::varchar(20),$5,clock_timestamp(),CASE WHEN $6::boolean THEN clock_timestamp() END,
++      CASE WHEN $7::boolean THEN clock_timestamp() END,CASE WHEN $7::boolean THEN 'fixture_terminal' END)`,[participationId,a.userId,c.eventId,status,order,status==="active",terminal]);
++  return{...a,participationId};
++}
++async function snapshotProfile(participationId:string){
++  const versionId=randomUUID();ids.versions.push(versionId);
++  await pool.query("INSERT INTO questionnaire_versions(id,version,definition,activated_at,created_at) VALUES($1,$2,'{}',clock_timestamp(),clock_timestamp())",[versionId,`e86-${versionId}`]);
++  await pool.query(`INSERT INTO participation_profile_snapshots(participation_id,questionnaire_version_id,answers,games_snapshot,captured_at)
++    VALUES($1,$2,'{"private":"E086_PRIVATE_PROFILE"}','[]',clock_timestamp())`,[participationId,versionId]);
++}
++async function readyEntrant(){
++  const a=await account(),versionId=randomUUID(),gameId=randomUUID();ids.versions.push(versionId);ids.games.push(gameId);
++  await pool.query("INSERT INTO questionnaire_versions(id,version,definition,activated_at,created_at) VALUES($1,$2,'{}',clock_timestamp(),clock_timestamp())",[versionId,`e86-${versionId}`]);
++  await pool.query(`INSERT INTO profiles(user_id,birth_date,gender,education,market_knowledge,market_interest,questionnaire_version_id,completed_at,created_at,updated_at)
++    VALUES($1,'2000-01-01','Prefiro não informar','Superior','Sim, conheço.','Sim, tenho interesse.',$2,clock_timestamp(),clock_timestamp(),clock_timestamp())`,[a.userId,versionId]);
++  await pool.query("INSERT INTO games(id,name,is_curated,created_at) VALUES($1,$2,false,clock_timestamp())",[gameId,`E086-${gameId}`]);
++  await pool.query("INSERT INTO user_games(user_id,game_id,created_at) VALUES($1,$2,clock_timestamp())",[a.userId,gameId]);return a;
++}
++const route=(c:Context)=>`/api/v1/admin/events/${c.eventId}/external-queue`;
++const patch=(c:Context,enabled=false,key:string=randomUUID(),actor:{token:string}=c.admin,justification=reason)=>supertest(app.getHttpServer()).patch(route(c)).set("Authorization",`Bearer ${actor.token}`).set("Idempotency-Key",key).send({enabled,reason:justification});
++const admit=(c:Context,a:{userId:string})=>participations.createParticipation({userId:a.userId,eventId:c.eventId,idempotencyKey:randomUUID(),expiresAt:new Date(Date.now()+60000)});
++async function audit(c:Context){return(await pool.query("SELECT * FROM audit_logs WHERE event_id=$1 ORDER BY occurred_at,id",[c.eventId])).rows;}
++async function state(c:Context){return(await pool.query(`SELECT jsonb_build_object(
++  'event',(SELECT to_jsonb(e)||jsonb_build_object('external_last_order',e.external_last_order::text) FROM events e WHERE e.id=$1),
++  'people',(SELECT jsonb_agg(to_jsonb(p)||jsonb_build_object('external_queue_order',p.external_queue_order::text) ORDER BY p.id) FROM participations p WHERE p.event_id=$1),
++  'snapshots',(SELECT jsonb_agg(to_jsonb(s) ORDER BY s.participation_id) FROM participation_profile_snapshots s JOIN participations p ON p.id=s.participation_id WHERE p.event_id=$1),
++  'experiences',(SELECT jsonb_agg(to_jsonb(e)||jsonb_build_object('last_queue_order',e.last_queue_order::text) ORDER BY e.id) FROM experiences e WHERE e.event_id=$1),
++  'stations',(SELECT jsonb_agg(to_jsonb(s) ORDER BY s.id) FROM stations s JOIN experiences e ON e.id=s.experience_id WHERE e.event_id=$1),
++  'queues',(SELECT jsonb_agg(to_jsonb(q)||jsonb_build_object('queue_order',q.queue_order::text) ORDER BY q.id) FROM queue_entries q WHERE q.event_id=$1),
++  'services',(SELECT jsonb_agg(to_jsonb(s) ORDER BY s.id) FROM service_sessions s JOIN experiences e ON e.id=s.experience_id WHERE e.event_id=$1),
++  'audits',(SELECT jsonb_agg(to_jsonb(a) ORDER BY a.id) FROM audit_logs a WHERE a.event_id=$1),
++  'idempotency',(SELECT jsonb_agg(to_jsonb(i) ORDER BY i.id) FROM idempotency_operations i WHERE i.actor_user_id IN
++    (SELECT p.user_id FROM participations p WHERE p.event_id=$1 UNION SELECT $2::uuid UNION SELECT $3::uuid))) AS value`,[c.eventId,c.admin.userId,c.staff.userId])).rows[0].value;}
++function problem(r:supertest.Response,status:number,code:string){assert.equal(r.status,status,JSON.stringify(r.body));assert.equal(r.body.status,status);assert.equal(r.body.code,code);assert.match(r.headers["content-type"],/application\/problem\+json/);assert.equal(JSON.stringify(r.body).includes("@example.test"),false);}
++async function blocked(pid:number){const until=Date.now()+6000;while(Date.now()<until){if((await pool.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))",[pid])).rows[0].n>0)return;await new Promise(done=>setTimeout(done,20));}throw new Error("Não foi observada espera real pelo lock esperado.");}
++async function ordered<A,B>(first:()=>PromiseLike<A>,second:()=>PromiseLike<B>):Promise<[A,B]>{
++  const original=database.transaction.bind(database)as typeof database.transaction;let ready!:(pid:number)=>void,release!:()=>void;
++  const reached=new Promise<number>(yes=>{ready=yes;}),gate=new Promise<void>(yes=>{release=yes;});
++  database.transaction=(callback,config)=>original(async tx=>{const value=await callback(tx);ready((await tx.execute<{pid:number}>(sql`SELECT pg_backend_pid() AS pid`)).rows[0].pid);await gate;return value;},config);
++  let a:Promise<A>|undefined,b:Promise<B>|undefined;
++  try{a=Promise.resolve(first());a.catch(()=>undefined);const pid=await Promise.race([reached,a.then(()=>{throw new Error("Primeira operação não manteve tx.");})]);database.transaction=original;b=Promise.resolve(second());b.catch(()=>undefined);await blocked(pid);release();return await Promise.all([a,b]);}
++  finally{database.transaction=original;release();await Promise.allSettled([a,b]);}
++}
++async function lockWait(c:Context,participationId:string|undefined,request:()=>PromiseLike<supertest.Response>,change:(client:PoolClient,pid:number)=>Promise<void>){
++  const client=await pool.connect();let pending:Promise<supertest.Response>|undefined;
++  try{await client.query("BEGIN");if(participationId)await client.query("SELECT id FROM participations WHERE id=$1 FOR UPDATE",[participationId]);else await client.query("SELECT id FROM events WHERE id=$1 FOR UPDATE",[c.eventId]);
++    const pid=(await client.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;pending=Promise.resolve(request());pending.catch(()=>undefined);await blocked(pid);await change(client,pid);await client.query("COMMIT");return await pending;
++  }finally{await client.query("ROLLBACK");await Promise.allSettled([pending]);client.release();}
++}
++async function waitPastCutoff(c:Context,pid:number){
++  assert.equal((await pool.query('SELECT clock_timestamp()<official_ends_at AS "beforeCut" FROM events WHERE id=$1',[c.eventId])).rows[0].beforeCut,true,"A espera precisa ser observada antes do corte real.");
++  const until=Date.now()+12000;let crossed=false;
++  while(Date.now()<until){if((await pool.query("SELECT clock_timestamp()>=official_ends_at AS ended FROM events WHERE id=$1",[c.eventId])).rows[0].ended){crossed=true;break;}await new Promise(done=>setTimeout(done,100));}
++  assert.equal(crossed,true);await blocked(pid);
++}
++
++test("E08.6 PostgreSQL HTTP desliga e libera waiting com auditoria e instante comuns",async()=>{
++  const c=await context(),people=[await person(c),await person(c),await person(c)];for(const p of people)await snapshotProfile(p.participationId);
++  const before=await state(c),r=await patch(c);assert.equal(r.status,200);assert.equal(r.body.releasedCount,3);assert.equal(r.body.externalQueueEnabled,false);assert.match(r.body.changedAt,/Z$/);
++  const after=await state(c);assert.deepEqual(after.snapshots,before.snapshots);assert.equal(after.event.external_last_order,before.event.external_last_order);
++  for(const p of after.people){const old=before.people.find((row:{id:string})=>row.id===p.id);assert.deepEqual({...p,status:old.status,arena_entered_at:old.arena_entered_at},old);assert.equal(p.status,"active");assert.equal(Date.parse(p.arena_entered_at),Date.parse(r.body.changedAt));}
++  const rows=await audit(c);assert.equal(rows.length,1);assert.equal(rows[0].actor_user_id,c.admin.userId);assert.equal(rows[0].event_id,c.eventId);assert.equal(rows[0].reason,reason);
++  assert.equal(rows[0].origin,"user");assert.equal(rows[0].category,"event");assert.equal(rows[0].action,"external_queue_enabled_changed");assert.deepEqual(rows[0].metadata,{before:{externalQueueEnabled:true},after:{externalQueueEnabled:false},releasedCount:3});
++  assert.equal((await pool.query("SELECT e.updated_at=a.occurred_at AS same FROM events e JOIN audit_logs a ON a.id=$2 WHERE e.id=$1",[c.eventId,rows[0].id])).rows[0].same,true);
++});
++test("E08.6 PostgreSQL HTTP preserva active/finished/canceled e dados de outros eventos",async()=>{
++  const c=await context(),other=await context();await person(c);for(const status of ["active","finished","canceled"]as const)await person(c,status);await person(other);
++  const before=await state(c),foreign=await state(other);assert.equal((await patch(c)).status,200);const after=await state(c);
++  for(const p of before.people.filter((p:{status:string})=>p.status!=="waiting"))assert.deepEqual(after.people.find((row:{id:string})=>row.id===p.id),p);
++  assert.deepEqual(await state(other),foreign);
++});
++test("E08.6 PostgreSQL HTTP não altera fila interna, atendimento ou recursos",async()=>{
++  const c=await context(),p=await person(c,"active");await person(c);
++  const joined=await supertest(app.getHttpServer()).post(`/api/v1/participations/${p.participationId}/queue-entries`).set("Authorization",`Bearer ${p.token}`).set("Idempotency-Key",randomUUID()).send({experienceId:c.experienceId});assert.equal(joined.status,201);
++  const called=await supertest(app.getHttpServer()).post(`/api/v1/staff/events/${c.eventId}/experiences/${c.experienceId}/stations/${c.stationId}/call-next`).set("Authorization",`Bearer ${c.staff.token}`).set("Idempotency-Key",randomUUID()).send({});assert.equal(called.status,201);
++  const before=await state(c);assert.equal((await patch(c)).status,200);const after=await state(c);
++  for(const key of ["queues","services","experiences","stations"])assert.deepEqual(after[key],before[key]);
++});
++test("E08.6 PostgreSQL HTTP reativação só afeta ingressos futuros e não reinicia FIFO",async()=>{
++  const c=await context(),old=await person(c);assert.equal((await patch(c)).status,200);
++  const direct=await readyEntrant(),first=await admit(c,direct);assert.equal(first.kind,"created");if(first.kind!=="created")assert.fail();
++  const before=await state(c);assert.equal((await patch(c,true)).status,200);const next=await admit(c,await readyEntrant());assert.equal(next.kind,"created");if(next.kind!=="created")assert.fail();
++  const after=await state(c);assert.equal(after.people.find((p:{id:string})=>p.id===old.participationId).status,"active");assert.equal(after.people.find((p:{id:string})=>p.id===first.participationId).status,"active");
++  const added=after.people.find((p:{id:string})=>p.id===next.participationId);assert.equal(added.status,"waiting");assert.equal(BigInt(added.external_queue_order),BigInt(before.event.external_last_order)+1n);
++});
++test("E08.6 PostgreSQL HTTP no-op não atualiza timestamps nem audita e omite changedAt",async()=>{
++  for(const enabled of [false,true]){const c=await context(enabled);await person(c);const before=await state(c),r=await patch(c,enabled);assert.equal(r.status,200);assert.deepEqual(r.body,{eventId:c.eventId,externalQueueEnabled:enabled,releasedCount:0});
++    const after=await state(c);delete before.idempotency;delete after.idempotency;assert.deepEqual(after,before);assert.equal((await audit(c)).length,0);}
++});
++test("E08.6 PostgreSQL HTTP exige Bearer e rejeita token inválido/expirado",async()=>{
++  const c=await context(),before=await state(c);problem(await supertest(app.getHttpServer()).patch(route(c)).send({enabled:false,reason}),401,"MISSING_ACCESS_TOKEN");
++  problem(await patch(c,false,randomUUID(),{token:"bad"}),401,"INVALID_ACCESS_TOKEN");problem(await patch(c,false,randomUUID(),{token:signAccess(c.admin.userId,c.admin.sessionId,true)}),401,"ACCESS_TOKEN_EXPIRED");assert.deepEqual(await state(c),before);
++});
++test("E08.6 PostgreSQL HTTP Staff isolado, participante e Admin revogado são recusados",async()=>{
++  const c=await context(),a=await admin(),outsider=await account();await pool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE id=$1",[a.roleId]);const before=await state(c);
++  for(const actor of [c.staff,a,outsider])problem(await patch(c,false,randomUUID(),actor),403,"ADMIN_REQUIRED");assert.deepEqual(await state(c),before);
++});
++test("E08.6 PostgreSQL HTTP segundo fator Admin obrigatório mesmo com concessão Staff",async()=>{
++  const c=await context();await grant(c.admin.userId,c.eventId);await pool.query("UPDATE sessions SET admin_2fa_verified_at=NULL WHERE id=$1",[c.admin.sessionId]);const before=await state(c);
++  problem(await patch(c),401,"ADMIN_2FA_REQUIRED");assert.deepEqual(await state(c),before);
++});
++test("E08.6 PostgreSQL HTTP conta inativa e sessão revogada/expirada não produzem efeitos",async()=>{
++  for(const mode of ["inactive","revoked","expired"]){const c=await context();
++    if(mode==="inactive")await pool.query("UPDATE users SET is_active=false WHERE id=$1",[c.admin.userId]);
++    else if(mode==="revoked")await pool.query("UPDATE sessions SET revoked_at=clock_timestamp() WHERE id=$1",[c.admin.sessionId]);
++    else await pool.query("UPDATE sessions SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",[c.admin.sessionId]);
++    const before=await state(c);problem(await patch(c),401,mode==="inactive"?"ACCOUNT_DEACTIVATED":mode==="revoked"?"SESSION_REVOKED":"SESSION_EXPIRED");assert.deepEqual(await state(c),before);}
++});
++test("E08.6 PostgreSQL HTTP valida UUID e recusa evento ausente sem dados privados",async()=>{
++  const c=await context(),before=await state(c);problem(await patch({...c,eventId:"bad"}),400,"VALIDATION_ERROR");problem(await patch({...c,eventId:randomUUID()}),404,"RESOURCE_NOT_FOUND");assert.deepEqual(await state(c),before);
++  const r=await patch({...c,eventId:c.eventId.toUpperCase()});assert.equal(r.status,200);assert.equal(r.body.eventId,c.eventId);
++});
++test("E08.6 PostgreSQL HTTP body/reason estritos e chave única obrigatória",async()=>{
++  const c=await context(),before=await state(c),request=()=>supertest(app.getHttpServer()).patch(route(c)).set("Authorization",`Bearer ${c.admin.token}`).set("Idempotency-Key",randomUUID());
++  problem(await request(),400,"VALIDATION_ERROR");
++  for(const body of [{},[],{enabled:false},{enabled:"false",reason},{enabled:false,reason:" "},{enabled:false,reason:"x".repeat(501)},{enabled:false,reason:"bad\u0000reason"},{enabled:false,reason,userId:c.admin.userId}])problem(await request().send(body),400,"VALIDATION_ERROR");
++  problem(await request().type("text/plain").send(JSON.stringify({enabled:false,reason})),400,"VALIDATION_ERROR");problem(await request().type("application/json").send("{bad"),400,"BAD_REQUEST");
++  problem(await supertest(app.getHttpServer()).patch(route(c)).set("Authorization",`Bearer ${c.admin.token}`).send({enabled:false,reason}),400,"VALIDATION_ERROR");
++  for(const key of [""," ","x".repeat(129)])problem(await patch(c,false,key),400,"VALIDATION_ERROR");
++  problem(await request().set({"Idempotency-Key":["a","b"]}).send({enabled:false,reason}),400,"VALIDATION_ERROR");assert.deepEqual(await state(c),before);
++});
++test("E08.6 PostgreSQL HTTP reason normalizada e resposta não expõem pessoas/perfis/auditoria",async()=>{
++  const c=await context(),p=await person(c);await snapshotProfile(p.participationId);const r=await patch(c,false,randomUUID(),c.admin,`  ${reason}  `);assert.equal(r.status,200);
++  assert.deepEqual(Object.keys(r.body).sort(),["changedAt","eventId","externalQueueEnabled","releasedCount"]);assert.equal((await audit(c))[0].reason,reason);
++  for(const secret of [reason,c.admin.userId,c.admin.sessionId,p.userId,p.participationId,"Pessoa privada E086","E086_PRIVATE_PROFILE","example.test","fixture-private-hash"])assert.equal(JSON.stringify(r.body).includes(secret),false);
++});
++test("E08.6 PostgreSQL HTTP mudanças após cortes ou antes do início não liberam waiting",async()=>{
++  for(const mode of ["future","official","controlled","closed","immediate"]){for(const enabled of [false,true]){
++    const c=await context(!enabled);await person(c);
++    if(mode==="future")await pool.query("UPDATE events SET starts_at=clock_timestamp()+interval '10 minutes',status='scheduled' WHERE id=$1",[c.eventId]);
++    if(mode==="official")await pool.query("UPDATE events SET official_ends_at=clock_timestamp()-interval '1 minute',operational_deadline_at=clock_timestamp()+interval '30 minutes' WHERE id=$1",[c.eventId]);
++    if(mode==="controlled")await pool.query("UPDATE events SET status='closing',closure_mode='controlled',closure_requested_at=clock_timestamp()-interval '1 minute',admin_deadline_at=clock_timestamp()+interval '20 minutes' WHERE id=$1",[c.eventId]);
++    if(mode==="closed")await pool.query("UPDATE events SET status='closed' WHERE id=$1",[c.eventId]);
++    if(mode==="immediate")await pool.query("UPDATE events SET status='closing',closure_mode='immediate',closure_requested_at=statement_timestamp()-interval '1 minute',admin_deadline_at=statement_timestamp()-interval '1 minute' WHERE id=$1",[c.eventId]);
++    const before=await state(c);problem(await patch(c,enabled),409,"EVENT_REGISTRATION_CLOSED");assert.deepEqual(await state(c),before);
++  }}
++});
++test("E08.6 PostgreSQL HTTP falta de prontidão bloqueia mudança e não mantém reserva parcial",async()=>{
++  const c=await context();await person(c);await pool.query("UPDATE stations SET availability='unavailable' WHERE id=$1",[c.stationId]);const before=await state(c);problem(await patch(c),409,"EVENT_UNAVAILABLE");assert.deepEqual(await state(c),before);
++});
++test("E08.6 PostgreSQL HTTP no-op após encerramento continua permitido sem liberações",async()=>{
++  const c=await context(false);await person(c);await pool.query("UPDATE events SET status='closed' WHERE id=$1",[c.eventId]);const r=await patch(c);assert.equal(r.status,200);assert.equal(r.body.releasedCount,0);assert.equal((await audit(c)).length,0);assert.equal((await state(c)).people[0].status,"waiting");
++});
++test("E08.6 PostgreSQL HTTP retry reproduz resultado, contagem e instante sem nova auditoria",async()=>{
++  const c=await context(),key=randomUUID();await person(c);await person(c);const first=await patch(c,false,key),before=await state(c),retry=await patch(c,false,key);assert.equal(first.status,200);assert.equal(retry.status,200);assert.deepEqual(retry.body,first.body);assert.equal(retry.body.releasedCount,2);assert.deepEqual(await state(c),before);assert.equal((await audit(c)).length,1);
++});
++test("E08.6 PostgreSQL HTTP retry antigo após intenção oposta não desliga nem libera novas esperas",async()=>{
++  const c=await context(),key=randomUUID();await person(c);const first=await patch(c,false,key);assert.equal(first.status,200);assert.equal((await patch(c,true)).status,200);
++  const entrant=await readyEntrant(),joined=await admit(c,entrant);assert.equal(joined.kind,"created");if(joined.kind!=="created")assert.fail();
++  const before=await state(c),retry=await patch(c,false,key);assert.equal(retry.status,200);assert.deepEqual(retry.body,first.body);assert.deepEqual(await state(c),before);
++  assert.equal((await state(c)).people.find((p:{id:string})=>p.id===joined.participationId).status,"waiting");assert.equal((await audit(c)).length,2);
++});
++test("E08.6 PostgreSQL HTTP retry de no-op antigo não reaplica estado após mudança oposta",async()=>{
++  const c=await context(),key=randomUUID(),first=await patch(c,true,key);assert.equal(first.status,200);assert.equal(first.body.changedAt,undefined);
++  assert.equal((await patch(c)).status,200);const before=await state(c),retry=await patch(c,true,key);assert.deepEqual(retry.body,first.body);assert.deepEqual(await state(c),before);assert.equal((await state(c)).event.external_queue_enabled,false);
++});
++test("E08.6 PostgreSQL HTTP reutilizar chave com estado ou justificativa distintos gera conflito",async()=>{
++  const c=await context(),key=randomUUID();assert.equal((await patch(c,false,key)).status,200);const before=await state(c);
++  problem(await patch(c,true,key),409,"IDEMPOTENCY_KEY_REUSED");problem(await patch(c,false,key,c.admin,"Outra justificativa"),409,"IDEMPOTENCY_KEY_REUSED");assert.deepEqual(await state(c),before);
++});
++test("E08.6 PostgreSQL HTTP chave do mesmo ator não pode identificar outro evento",async()=>{
++  const c=await context(),other=await context(),key=randomUUID();assert.equal((await patch(c,false,key)).status,200);
++  const target={...other,admin:c.admin},before=await state(target);problem(await patch(target,false,key),409,"IDEMPOTENCY_KEY_REUSED");assert.deepEqual(await state(target),before);assert.equal((await audit(other)).length,0);
++});
++test("E08.6 PostgreSQL HTTP namespace de idempotência distingue atores Admin",async()=>{
++  const c=await context(),second=await admin(),key=randomUUID();assert.equal((await patch(c,false,key)).status,200);assert.equal((await patch(c,true,key,second)).status,200);
++  const rows=await audit(c);assert.equal(rows.length,2);assert.deepEqual(new Set(rows.map(row=>row.actor_user_id)),new Set([c.admin.userId,second.userId]));
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM idempotency_operations WHERE operation=$1 AND idempotency_key=$2 AND actor_user_id=ANY($3::uuid[])",[operation,key,[c.admin.userId,second.userId]])).rows[0].n,2);
++});
++test("E08.6 PostgreSQL HTTP expires_at vencido não elimina replay ou permite reexecução",async()=>{
++  const c=await context(),key=randomUUID(),first=await patch(c,false,key);assert.equal(first.status,200);await pool.query("UPDATE idempotency_operations SET expires_at=clock_timestamp()-interval '1 hour' WHERE actor_user_id=$1 AND operation=$2 AND idempotency_key=$3",[c.admin.userId,operation,key]);
++  assert.equal((await patch(c,true)).status,200);const before=await state(c);const retry=await patch(c,false,key);assert.equal(retry.status,200);assert.deepEqual(retry.body,first.body);assert.deepEqual(await state(c),before);
++});
++test("E08.6 PostgreSQL HTTP replay continua sujeito a autorização e sessão atuais",async()=>{
++  for(const mode of ["role","session"]){const c=await context(),key=randomUUID();assert.equal((await patch(c,false,key)).status,200);
++    if(mode==="role")await pool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE id=$1",[c.admin.roleId]);else await pool.query("UPDATE sessions SET revoked_at=clock_timestamp() WHERE id=$1",[c.admin.sessionId]);
++    const before=await state(c);problem(await patch(c,false,key),mode==="role"?403:401,mode==="role"?"ADMIN_REQUIRED":"SESSION_REVOKED");assert.deepEqual(await state(c),before);}
++});
++test("E08.6 PostgreSQL HTTP intenção in_progress persistida não é executada nem auditada",async()=>{
++  const c=await context(),key=randomUUID();await pool.query(`INSERT INTO idempotency_operations(id,actor_user_id,operation,idempotency_key,request_hash,status,created_at,expires_at)
++    VALUES($1,$2,$3,$4,$5,'in_progress',clock_timestamp(),clock_timestamp()+interval '1 hour')`,[randomUUID(),c.admin.userId,operation,key,fingerprint(c.eventId,false,reason)]);
++  const before=await state(c);problem(await patch(c,false,key),409,"IDEMPOTENCY_IN_PROGRESS");assert.deepEqual(await state(c),before);
++});
++test("E08.6 PostgreSQL HTTP normalização de reason conserva intenção e limites válidos são aceitos",async()=>{
++  const c=await context(),key=randomUUID(),first=await patch(c,false,key,c.admin,` ${reason} `);assert.equal(first.status,200);assert.deepEqual((await patch(c,false,key)).body,first.body);assert.equal((await audit(c)).length,1);
++  for(const text of ["x","x".repeat(500)]){const other=await context();assert.equal((await patch(other,false,randomUUID(),other.admin,text)).status,200);assert.equal((await audit(other))[0].reason,text);}
++});
++test("E08.6 PostgreSQL HTTP recusa não consome chave: nova tentativa válida pode executar",async()=>{
++  const c=await context(),key=randomUUID();await person(c);await pool.query("UPDATE stations SET availability='unavailable' WHERE id=$1",[c.stationId]);problem(await patch(c,false,key),409,"EVENT_UNAVAILABLE");
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM idempotency_operations WHERE actor_user_id=$1 AND operation=$2",[c.admin.userId,operation])).rows[0].n,0);
++  await pool.query("UPDATE stations SET availability='available' WHERE id=$1",[c.stationId]);assert.equal((await patch(c,false,key)).body.releasedCount,1);assert.equal((await audit(c)).length,1);
++});
++test("E08.6 PostgreSQL concorrente ingresso E03 primeiro integra a liberação externa",async()=>{
++  const c=await context(),a=await readyEntrant();const[joined,changed]=await ordered(()=>admit(c,a),()=>patch(c));assert.equal(joined.kind,"created");assert.equal(changed.status,200);assert.equal(changed.body.releasedCount,1);
++  if(joined.kind!=="created")assert.fail();const row=(await pool.query("SELECT status,external_queue_order::text AS n,arena_entered_at FROM participations WHERE id=$1",[joined.participationId])).rows[0];assert.equal(row.status,"active");assert.ok(BigInt(row.n)>BigInt(Number.MAX_SAFE_INTEGER));assert.equal(row.arena_entered_at.toISOString(),changed.body.changedAt);
++});
++test("E08.6 PostgreSQL concorrente desativação primeiro faz E03 ingressar diretamente active",async()=>{
++  const c=await context(),a=await readyEntrant(),before=(await state(c)).event.external_last_order;
++  const[changed,joined]=await ordered(()=>patch(c),()=>admit(c,a));assert.equal(changed.status,200);assert.equal(changed.body.releasedCount,0);assert.equal(joined.kind,"created");if(joined.kind!=="created")assert.fail();
++  const row=(await pool.query("SELECT status,external_queue_order,arena_entered_at FROM participations WHERE id=$1",[joined.participationId])).rows[0];assert.equal(row.status,"active");assert.equal(row.external_queue_order,null);assert.ok(row.arena_entered_at);assert.equal((await state(c)).event.external_last_order,before);
++});
++test("E08.6 PostgreSQL concorrente mesma intenção retorna mesmo resultado e uma auditoria",async()=>{
++  const c=await context(),key=randomUUID();await person(c);await person(c);const[a,b]=await ordered(()=>patch(c,false,key),()=>patch(c,false,key));assert.equal(a.status,200);assert.equal(b.status,200);assert.deepEqual(a.body,b.body);assert.equal(b.body.releasedCount,2);assert.equal((await audit(c)).length,1);
++});
++test("E08.6 PostgreSQL concorrente intenções iguais distintas preservam no-op da segunda",async()=>{
++  const c=await context();await person(c);const[a,b]=await ordered(()=>patch(c),()=>patch(c));assert.equal(a.status,200);assert.equal(b.status,200);assert.equal(a.body.releasedCount,1);assert.equal(b.body.releasedCount,0);assert.equal(b.body.changedAt,undefined);assert.equal((await audit(c)).length,1);
++});
++for(const first of [false,true])test(`E08.6 PostgreSQL concorrente alternâncias opostas com ${first} primeiro serializam`,async()=>{
++  const c=await context(!first),p=await person(c);const[a,b]=await ordered(()=>patch(c,first),()=>patch(c,!first));assert.equal(a.status,200);assert.equal(b.status,200);assert.equal((await state(c)).event.external_queue_enabled,!first);assert.equal((await audit(c)).length,2);
++  assert.equal((await pool.query("SELECT status FROM participations WHERE id=$1",[p.participationId])).rows[0].status,"active");assert.equal(a.body.releasedCount+b.body.releasedCount,1);
++});
++test("E08.6 PostgreSQL concorrente fechamento antes do PATCH bloqueia alteração/liberação",async()=>{
++  const c=await context();await person(c);const before=await state(c),r=await lockWait(c,undefined,()=>patch(c),async client=>{
++    await client.query("UPDATE events SET status='closing',closure_mode='controlled',closure_requested_at=clock_timestamp()-interval '1 minute',admin_deadline_at=clock_timestamp()+interval '20 minutes' WHERE id=$1",[c.eventId]);
++  });problem(r,409,"EVENT_REGISTRATION_CLOSED");const after=await state(c);assert.deepEqual(after.people,before.people);assert.equal(after.event.external_queue_enabled,true);assert.equal(after.idempotency,null);assert.equal((await audit(c)).length,0);
++});
++test("E08.6 PostgreSQL concorrente PATCH antes do fechamento confirma e retry não reabre",async()=>{
++  const c=await context(),key=randomUUID();await person(c);const[r]=await ordered(()=>patch(c,false,key),()=>pool.query("UPDATE events SET status='closed' WHERE id=$1",[c.eventId]));assert.equal(r.status,200);
++  problem(await patch(c,true),409,"EVENT_REGISTRATION_CLOSED");const before=await state(c),retry=await patch(c,false,key);assert.deepEqual(retry.body,r.body);assert.deepEqual(await state(c),before);assert.equal((await audit(c)).length,1);
++});
++test("E08.6 PostgreSQL concorrente autorização/sessão/2FA são revalidadas após espera de waiting",async()=>{
++  for(const mode of ["inactive","role","revoked","expired","2fa"]){const c=await context(),p=await person(c),before=await state(c);
++    const r=await lockWait(c,p.participationId,()=>patch(c),async()=>{
++      if(mode==="inactive")await pool.query("UPDATE users SET is_active=false WHERE id=$1",[c.admin.userId]);
++      if(mode==="role")await pool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE id=$1",[c.admin.roleId]);
++      if(mode==="revoked")await pool.query("UPDATE sessions SET revoked_at=clock_timestamp() WHERE id=$1",[c.admin.sessionId]);
++      if(mode==="expired")await pool.query("UPDATE sessions SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",[c.admin.sessionId]);
++      if(mode==="2fa")await pool.query("UPDATE sessions SET admin_2fa_verified_at=NULL WHERE id=$1",[c.admin.sessionId]);
++    });problem(r,mode==="role"?403:401,mode==="inactive"?"ACCOUNT_DEACTIVATED":mode==="role"?"ADMIN_REQUIRED":mode==="revoked"?"SESSION_REVOKED":mode==="expired"?"SESSION_EXPIRED":"ADMIN_2FA_REQUIRED");assert.deepEqual(await state(c),before);}
++});
++test("E08.6 PostgreSQL concorrente revogação Admin primeiro prevalece após lock da concessão",async()=>{
++  const c=await context(),client=await pool.connect();let response:Promise<supertest.Response>|undefined;
++  try{await client.query("BEGIN");await client.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE id=$1",[c.admin.roleId]);const pid=(await client.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
++    response=Promise.resolve(patch(c));response.catch(()=>undefined);await blocked(pid);await client.query("COMMIT");problem(await response,403,"ADMIN_REQUIRED");assert.equal((await audit(c)).length,0);
++  }finally{await client.query("ROLLBACK");await Promise.allSettled([response]);client.release();}
++});
++test("E08.6 PostgreSQL concorrente PATCH primeiro conserva concessão até commit",async()=>{
++  const c=await context(),key=randomUUID();const[r]=await ordered(()=>patch(c,false,key),()=>pool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE id=$1",[c.admin.roleId]));assert.equal(r.status,200);assert.equal((await audit(c)).length,1);problem(await patch(c,false,key),403,"ADMIN_REQUIRED");
++});
++for(const lock of ["event","participation"]as const)test(`E08.6 PostgreSQL corte temporal real durante espera de ${lock} não libera waiting`,async()=>{
++  const c=await context(),p=await person(c);
++  await pool.query("UPDATE events SET official_ends_at=clock_timestamp()+interval '10 seconds',operational_deadline_at=clock_timestamp()+interval '30 minutes' WHERE id=$1",[c.eventId]);const before=await state(c);
++  const r=await lockWait(c,lock==="event"?undefined:p.participationId,()=>patch(c),async(_client,pid)=>waitPastCutoff(c,pid));problem(r,409,"EVENT_REGISTRATION_CLOSED");assert.deepEqual(await state(c),before);
++});
++test("E08.6 PostgreSQL falhas reais de E05/auditoria/conclusão revertem todos os efeitos",async()=>{
++  const dialect=new PgDialect();
++  for(const phase of ["e05","audit","after-audit","after-completion"]){
++    const c=await context();await person(c);await person(c);const before=await state(c),original=database.transaction.bind(database)as typeof database.transaction,domain=participations.setExternalQueueEnabledWithTx.bind(participations);let reached=false;
++    if(phase==="e05")participations.setExternalQueueEnabledWithTx=async(...args)=>{
++      const value=await domain(...args);assert.equal(value.kind,"changed");if(value.kind!=="changed")assert.fail();assert.equal(value.releasedCount,2);
++      const rows=(await args[0].execute<{active:boolean}>(sql`SELECT bool_and(status='active') AS active FROM participations WHERE event_id=${c.eventId}`)).rows;assert.equal(rows[0].active,true);reached=true;await args[0].execute(sql`SELECT 1/0`);return value;
++    };
++    database.transaction=(callback,config)=>original(async tx=>{
++      const execute=tx.execute.bind(tx);
++      tx.execute=(async(...args:Parameters<typeof tx.execute>)=>{
++        const query=args[0],text=typeof query==="string"?query:dialect.sqlToQuery(query.getSQL()).sql;
++        if(text.includes("INSERT INTO audit_logs")&&phase==="audit"){reached=true;await execute(sql`SELECT 1/0`);}
++        const value=await execute(...args);if(text.includes("INSERT INTO audit_logs")&&phase==="after-audit"){reached=true;await execute(sql`SELECT 1/0`);}return value;
++      })as typeof tx.execute;
++      const value=await callback(tx);
++      if(phase==="after-completion"){
++        const persisted=(await execute<{status:string}>(sql`SELECT status FROM idempotency_operations WHERE actor_user_id=${c.admin.userId} AND operation=${operation}`)).rows;assert.equal(persisted.length,1);assert.equal(persisted[0].status,"completed");reached=true;await execute(sql`SELECT 1/0`);
++      }
++      return value;
++    },config);
++    try{problem(await patch(c),500,"INTERNAL_SERVER_ERROR");}finally{database.transaction=original;participations.setExternalQueueEnabledWithTx=domain;}
++    assert.equal(reached,true);assert.deepEqual(await state(c),before);assert.equal((await audit(c)).length,0);
++  }
++});
+diff --git a/backend/test/unit/admin-external-queue-http.test.ts b/backend/test/unit/admin-external-queue-http.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..8a7c2e6f231d90ce263e730fabb0d5c6c04f0848
+--- /dev/null
++++ b/backend/test/unit/admin-external-queue-http.test.ts
+@@ -0,0 +1,104 @@
++import "reflect-metadata";
++import assert from "node:assert/strict";
++import { after, before, test } from "node:test";
++import { Module, type INestApplication } from "@nestjs/common";
++import { NestFactory } from "@nestjs/core";
++import type { Pool } from "pg";
++import supertest from "supertest";
++import { AuthService } from "../../src/auth/auth.service";
++import { SessionAuthGuard } from "../../src/auth/session-auth.guard";
++import { ProblemException } from "../../src/common/errors/problem.exception";
++import { ProblemDetailsExceptionFilter } from "../../src/common/errors/problem-details.filter";
++import { DRIZZLE_DATABASE, POSTGRES_POOL } from "../../src/database/database.module";
++import { ParticipationsService } from "../../src/participations/participations.service";
++import { EventsService } from "../../src/events/events.service";
++import { AdminEventsModule } from "../../src/events/admin-events.module";
++import { AdminExternalQueueController } from "../../src/events/admin-external-queue.controller";
++import { AdminExternalQueueService } from "../../src/events/admin-external-queue.service";
++import { AdminIdempotencyPolicy } from "../../src/events/admin-idempotency.policy";
++import type { AdminExternalQueueInput, AdminExternalQueueResult } from "../../src/events/admin-external-queue.types";
++
++const id=(n:number)=>`abcdef00-0000-4000-8000-${String(n).padStart(12,"0")}`;
++const eventId=id(1),userId=id(2),sessionId=id(3),at=new Date("2026-11-03T15:00:00Z");
++const route=`/api/v1/admin/events/${eventId}/external-queue`,body={enabled:false,reason:"Operação autorizada"};
++const state={eventId,externalQueueEnabled:false,releasedCount:3,changedAt:at};
++let result:AdminExternalQueueResult,failure:Error|undefined;
++const calls:AdminExternalQueueInput[]=[];
++@Module({controllers:[AdminExternalQueueController],providers:[SessionAuthGuard,AdminIdempotencyPolicy,
++  {provide:AuthService,useValue:{authenticateBearerToken:async(token:string)=>{
++    if(token!=="unit-admin")throw new ProblemException({typeSlug:"invalid-access-token",title:"Inválido",status:401,code:"INVALID_ACCESS_TOKEN",detail:"Token inválido."});
++    return {userId,sessionId,roles:["admin"]};
++  }}},
++  {provide:AdminExternalQueueService,useValue:{setExternalQueue:async(input:AdminExternalQueueInput)=>{calls.push(input);if(failure)throw failure;return result;}}},
++]})
++class HttpUnitModule{}
++let app:INestApplication;
++const variables=["ADMIN_IDEMPOTENCY_TTL_SECONDS","STAFF_IDEMPOTENCY_TTL_SECONDS","PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS"];
++const previous=variables.map(name=>process.env[name]);
++before(async()=>{
++  for(const name of variables)process.env[name]="60";
++  app=await NestFactory.create(HttpUnitModule,{logger:false});app.setGlobalPrefix("api/v1");app.useGlobalFilters(new ProblemDetailsExceptionFilter());await app.listen(0,"127.0.0.1");
++});
++after(async()=>{await app?.close();variables.forEach((name,n)=>{if(previous[n]===undefined)delete process.env[name];else process.env[name]=previous[n];});});
++const patch=(url=route)=>supertest(app.getHttpServer()).patch(url).set("Authorization","Bearer unit-admin").set("Idempotency-Key","  opaque key  ");
++function reset(){calls.length=0;failure=undefined;result={kind:"completed",...state};}
++function problem(r:supertest.Response,status:number,code:string){assert.equal(r.status,status);assert.equal(r.body.status,status);assert.equal(r.body.code,code);assert.match(r.headers["content-type"],/application\/problem\+json/);}
++test("E08.6 HTTP delega identidade confiável e TTL Admin explícito; projeta 200 sem kind",async()=>{
++  reset();const before=Date.now(),r=await patch().query({userId:id(9),sessionId:id(10)}).send({...body,reason:"  Operação autorizada  "});
++  assert.equal(r.status,200);assert.deepEqual(r.body,JSON.parse(JSON.stringify(state)));assert.equal(calls.length,1);
++  const input=calls[0];assert.equal(input.userId,userId);assert.equal(input.sessionId,sessionId);assert.equal(input.eventId,eventId);assert.equal(input.reason,body.reason);
++  assert.equal(input.enabled,false);assert.equal(input.idempotencyKey,"opaque key"); // HTTP remove whitespace externo do valor do header.
++  assert.ok(input.expiresAt.getTime()>=before+60000&&input.expiresAt.getTime()<=Date.now()+60000);
++});
++test("E08.6 HTTP no-op omite changedAt e replay preserva resposta histórica",async()=>{
++  reset();result={kind:"completed",eventId,externalQueueEnabled:false,releasedCount:0};const noOp=await patch().send(body);assert.equal(noOp.status,200);assert.deepEqual(noOp.body,{eventId,externalQueueEnabled:false,releasedCount:0});
++  result={kind:"replay",...state};assert.deepEqual((await patch().send(body)).body,JSON.parse(JSON.stringify(state)));
++});
++test("E08.6 HTTP Bearer obrigatório e inválido não chegam ao serviço",async()=>{
++  reset();problem(await supertest(app.getHttpServer()).patch(route).send(body),401,"MISSING_ACCESS_TOKEN");problem(await patch().set("Authorization","Bearer invalid").send(body),401,"INVALID_ACCESS_TOKEN");assert.equal(calls.length,0);
++});
++test("E08.6 HTTP UUID inválido recebe 400; maiúsculas são normalizadas",async()=>{
++  reset();problem(await patch(route.replace(eventId,"bad")).send(body),400,"VALIDATION_ERROR");assert.equal(calls.length,0);
++  assert.equal((await patch(route.replace(eventId,eventId.toUpperCase())).send(body)).status,200);assert.equal(calls[0].eventId,eventId);
++});
++test("E08.6 HTTP body/reason estritos e enabled booleano obrigatório",async()=>{
++  reset();problem(await patch(),400,"VALIDATION_ERROR");
++  for(const value of [{},[],{enabled:false},{...body,enabled:"false"},{...body,reason:null},{...body,reason:" "},
++    {...body,reason:"x".repeat(501)},{...body,reason:"bad\u0000reason"},{...body,userId},{...body,expiresAt:"2099-01-01"}])problem(await patch().send(value),400,"VALIDATION_ERROR");
++  problem(await patch().type("text/plain").send(JSON.stringify(body)),400,"VALIDATION_ERROR");problem(await patch().type("application/json").send("{bad"),400,"BAD_REQUEST");assert.equal(calls.length,0);
++});
++test("E08.6 HTTP exige uma única Idempotency-Key opaca válida",async()=>{
++  reset();problem(await supertest(app.getHttpServer()).patch(route).set("Authorization","Bearer unit-admin").send(body),400,"VALIDATION_ERROR");
++  for(const key of [""," ","x".repeat(129)])problem(await patch().set("Idempotency-Key",key).send(body),400,"VALIDATION_ERROR");
++  problem(await patch().set({"Idempotency-Key":["a","b"]}).send(body),400,"VALIDATION_ERROR");assert.equal(calls.length,0);
++});
++test("E08.6 HTTP mapeia recusas atuais e conflitos administrativos RFC 7807",async()=>{
++  reset();for(const [kind,status,code]of[
++    ["resource_not_found",404,"RESOURCE_NOT_FOUND"],["admin_required",403,"ADMIN_REQUIRED"],["account_inactive",401,"ACCOUNT_DEACTIVATED"],
++    ["invalid_session",401,"INVALID_SESSION"],["session_revoked",401,"SESSION_REVOKED"],["session_expired",401,"SESSION_EXPIRED"],
++    ["admin_2fa_required",401,"ADMIN_2FA_REQUIRED"],["event_closed",409,"EVENT_REGISTRATION_CLOSED"],["event_unavailable",409,"EVENT_UNAVAILABLE"],
++    ["request_conflict",409,"IDEMPOTENCY_KEY_REUSED"],["in_progress",409,"IDEMPOTENCY_IN_PROGRESS"],
++  ]as const){result={kind};const r=await patch().send(body);problem(r,status,code);assert.equal(JSON.stringify(r.body).includes(eventId),false);}
++});
++test("E08.6 HTTP filtra propriedades internas e erros SQL/auditoria privados",async()=>{
++  reset();Object.assign(result,{actor:userId,reason:"PRIVATE",audit:"PRIVATE"});assert.deepEqual((await patch().send(body)).body,JSON.parse(JSON.stringify(state)));
++  failure=new Error("PRIVATE_SQL_secret@example.test");const r=await patch().send(body);problem(r,500,"INTERNAL_SERVER_ERROR");assert.equal(JSON.stringify(r.body).includes("PRIVATE"),false);assert.equal(JSON.stringify(r.body).includes("example.test"),false);
++});
++test("E08.6 TTL Admin é obrigatório e independente dos TTLs Staff/participante",()=>{
++  const original=process.env.ADMIN_IDEMPOTENCY_TTL_SECONDS;
++  try{
++    for(const value of [undefined,""," ","0","-1","1.5","1e3","NaN","9007199254740992","8640000000000"]){
++      if(value===undefined)delete process.env.ADMIN_IDEMPOTENCY_TTL_SECONDS;else process.env.ADMIN_IDEMPOTENCY_TTL_SECONDS=value;
++      assert.throws(()=>new AdminIdempotencyPolicy(),/ADMIN_IDEMPOTENCY_TTL_SECONDS/);
++    }
++  }finally{if(original===undefined)delete process.env.ADMIN_IDEMPOTENCY_TTL_SECONDS;else process.env.ADMIN_IDEMPOTENCY_TTL_SECONDS=original;}
++});
++test("E08.6 DI real sob tsx liga controller, orquestrador, E05 e EventsService ao mesmo banco",async()=>{
++  const real=await NestFactory.create(AdminEventsModule,{logger:false});
++  try{
++    const service=real.get(AdminExternalQueueService),e05=real.get(ParticipationsService),events=real.get(EventsService),database=real.get(DRIZZLE_DATABASE);
++    assert.equal(Reflect.get(real.get(AdminExternalQueueController),"queue"),service);assert.equal(Reflect.get(service,"participations"),e05);
++    assert.equal(Reflect.get(service,"database"),database);assert.equal(Reflect.get(e05,"database"),database);assert.equal(Reflect.get(e05,"eventsService"),events);
++    assert.equal(Reflect.get(events,"database"),database);assert.equal(real.get<Pool>(POSTGRES_POOL).totalCount,0);
++  }finally{await real.close();}
++});
+diff --git a/backend/test/unit/admin-external-queue.test.ts b/backend/test/unit/admin-external-queue.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..c0e7868591ceec7feb721472b62c51029bc93d7e
+--- /dev/null
++++ b/backend/test/unit/admin-external-queue.test.ts
+@@ -0,0 +1,132 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { drizzle } from "drizzle-orm/node-postgres";
++import type { Client } from "pg";
++import * as schema from "../../src/database/schema";
++import { ParticipationsService } from "../../src/participations/participations.service";
++import { EventsService } from "../../src/events/events.service";
++import { buildEventAvailabilityResult, evaluateEventConfigurationReadiness } from "../../src/events/event-availability";
++import { evaluateEventEntryWindow } from "../../src/events/event-entry-window";
++import { buildEventOperationalCapacityResult } from "../../src/events/event-operational-capacity";
++import { ADMIN_EXTERNAL_QUEUE_OPERATION, AdminExternalQueueService, externalQueueFingerprint } from "../../src/events/admin-external-queue.service";
++import type { AdminExternalQueueInput } from "../../src/events/admin-external-queue.types";
++
++const at = new Date("2026-11-03T15:00:00Z");
++const input: AdminExternalQueueInput = { userId: "admin", sessionId: "session", eventId: "event", enabled: false,
++  reason: "Operação autorizada", idempotencyKey: "intent", expiresAt: new Date("2099-01-01") };
++function fixture(options: { enabled?: boolean; absent?: boolean; active?: boolean; admin?: boolean; missingSession?: boolean;
++  revoked?: boolean; expiredAtCheck?: number; secondFactor?: boolean; status?: string; capacity?: boolean;
++  officialEndsAt?: Date; reservation?: "replay" | "request_conflict" | "in_progress";
++  payload?: object | null; fail?: "event" | "release" | "audit" | "complete"; auditCount?: number } = {}) {
++  const queries: Array<{ text: string; params: unknown[] }> = [], marker = new Error("E086_PRIVATE_FAILURE");
++  let sessionChecks = 0;
++  const database = drizzle({ async query(config: { text: string }, params: unknown[]) {
++    const text = config.text; queries.push({ text, params });
++    if (/^(begin|commit|rollback)/.test(text)) return { rows: [] };
++    if (text.startsWith("select") && text.includes('from "events"')) return { rows: options.absent ? [] : [[options.enabled ?? true]] };
++    if (text.startsWith("select") && text.includes('from "participations"')) return { rows: [] };
++    if (text.includes("FROM users WHERE")) return { rows: [{ active: options.active ?? true }] };
++    if (text.includes("SELECT id FROM user_roles")) return { rows: options.admin === false ? [] : [{ id: "role" }] };
++    if (text.includes("SELECT id FROM sessions")) return { rows: options.missingSession ? [] : [{ id: "session" }] };
++    if (text.includes('AS "secondFactor"')) return { rows: [{ revoked: options.revoked ?? false,
++      expired: ++sessionChecks >= (options.expiredAtCheck ?? Infinity), secondFactor: options.secondFactor ?? true }] };
++    if (text.includes('insert into "idempotency_operations"')) return { rows: options.reservation ? [] : [["reservation"]] };
++    if (text.includes('from "idempotency_operations"')) return { rows: [["reservation",
++      options.reservation === "request_conflict" ? "different" : externalQueueFingerprint(input.eventId, input.enabled, input.reason),
++      options.reservation === "in_progress" ? "in_progress" : "completed", 200, input.eventId,
++      options.payload === undefined ? { eventId: input.eventId, externalQueueEnabled: false, releasedCount: 3, changedAt: at.toISOString() } : options.payload]] };
++    if (text.includes('AS "decisionAtMs"')) return { rows: [{ decisionAtMs: at.getTime() }] };
++    if (text.startsWith('update "events"')) { if (options.fail === "event") throw marker; return { rows: [], rowCount: 1 }; }
++    if (text.startsWith('update "participations"')) { if (options.fail === "release") throw marker; return { rows: [], rowCount: 3 }; }
++    if (text.includes("INSERT INTO audit_logs")) { if (options.fail === "audit") throw marker; return { rows: options.auditCount === 0 ? [] : [{ id: "audit" }] }; }
++    if (text.startsWith('update "idempotency_operations"')) { if (options.fail === "complete") throw marker; return { rows: [["reservation", 200, input.eventId, {}]] }; }
++    throw new Error(`SQL não previsto E08.6: ${text}`);
++  } } as unknown as Client, { schema });
++  const events = new EventsService(database);
++  events.evaluateEventAvailabilityById = async (eventId, observed, tx) => {
++    assert.equal(eventId, input.eventId); assert.deepEqual(observed, at); assert.ok(tx && tx !== database);
++    const officialEndsAt=options.officialEndsAt??new Date("2026-11-03T16:00:00Z");
++    const event = { name: "E086", accessCodeNormalized: "E086-UNIT", timezone: "America/Sao_Paulo", externalQueueEnabled: options.enabled ?? true,
++      startsAt: new Date("2026-11-03T14:00:00Z"), officialEndsAt,
++      operationalDeadlineAt: new Date(officialEndsAt.getTime()+60*60_000), closureRequestedAt: null, adminDeadlineAt: null };
++    const configuration=evaluateEventConfigurationReadiness(event);assert.equal(configuration.ready,true,"A fixture deve isolar o corte sem invalidar a configuração.");
++    return buildEventAvailabilityResult({ eventId, eventStatus: options.status ?? "open", configuration,
++      entryWindow: evaluateEventEntryWindow(event, observed), operationalCapacity: buildEventOperationalCapacityResult(true, options.capacity ?? true) });
++  };
++  return { service: new AdminExternalQueueService(database, new ParticipationsService(database, events)), queries, marker };
++}
++test("E08.6 compõe E05 real, auditoria e idempotência em um único tx READ COMMITTED", async () => {
++  const f = fixture(); assert.deepEqual(await f.service.setExternalQueue(input), { kind: "completed", eventId: input.eventId,
++    externalQueueEnabled: false, releasedCount: 3, changedAt: at });
++  assert.equal(f.queries.filter(q => q.text.startsWith("begin")).length, 1); assert.equal(f.queries[0].text,"begin isolation level read committed");
++  const order = ['from "events"','from "participations"',"FROM users WHERE","SELECT id FROM user_roles","SELECT id FROM sessions",
++    'insert into "idempotency_operations"','AS "decisionAtMs"','update "events"','update "participations"',"INSERT INTO audit_logs",'update "idempotency_operations"'];
++  for(let n=1;n<order.length;n++) assert.ok(f.queries.findIndex(q=>q.text.includes(order[n-1])) < f.queries.findIndex(q=>q.text.includes(order[n])),order[n]);
++  assert.match(f.queries.find(q=>q.text.includes('from "events"'))!.text,/for update/);
++  assert.match(f.queries.find(q=>q.text.includes('from "participations"'))!.text,/order by.*for update/);
++  assert.equal(f.queries.at(-1)?.text,"commit");
++  const audit=f.queries.find(q=>q.text.includes("INSERT INTO audit_logs"))!;
++  assert.match(audit.text,/'user','event','external_queue_enabled_changed'/);assert.match(audit.text,/e.updated_at/);assert.ok(audit.params.includes(input.reason));
++});
++test("E08.6 fingerprint inclui evento, estado e justificativa em namespace próprio",()=>{
++  const hash=externalQueueFingerprint("e",false,"reason");assert.equal(ADMIN_EXTERNAL_QUEUE_OPERATION,"admin_set_external_queue");
++  for(const value of [externalQueueFingerprint("other",false,"reason"),externalQueueFingerprint("e",true,"reason"),externalQueueFingerprint("e",false,"other")]) assert.notEqual(hash,value);
++});
++test("E08.6 religa sem liberar participações e no-op não atualiza domínio nem audita",async()=>{
++  const enabling=fixture({enabled:false});assert.equal((await enabling.service.setExternalQueue({...input,enabled:true})).kind,"completed");
++  assert.equal(enabling.queries.some(q=>q.text.startsWith('update "participations"')),false);
++  const same=fixture({enabled:false,status:"closed"}),r=await same.service.setExternalQueue(input);
++  assert.deepEqual(r,{kind:"completed",eventId:input.eventId,externalQueueEnabled:false,releasedCount:0});
++  assert.equal(same.queries.some(q=>/^(update "events"|update "participations"|.*INSERT INTO audit_logs)/.test(q.text)),false);
++  assert.ok(same.queries.some(q=>q.text.startsWith('update "idempotency_operations"')));
++});
++test("E08.6 retry histórico não executa E05 após intenção oposta ou fechamento",async()=>{
++  const f=fixture({reservation:"replay",status:"closed"}),r=await f.service.setExternalQueue(input);
++  assert.deepEqual(r,{kind:"replay",eventId:input.eventId,externalQueueEnabled:false,releasedCount:3,changedAt:at});
++  assert.equal(f.queries.some(q=>q.text.includes('AS "decisionAtMs"')||q.text.startsWith("update")||q.text.includes("INSERT INTO audit_logs")),false);
++  assert.equal(f.queries.at(-1)?.text,"rollback");
++});
++test("E08.6 retry de no-op antigo preserva ausência de changedAt e não muda estado posterior",async()=>{
++  const f=fixture({reservation:"replay",payload:{eventId:input.eventId,externalQueueEnabled:false,releasedCount:0}});
++  assert.deepEqual(await f.service.setExternalQueue(input),{kind:"replay",eventId:input.eventId,externalQueueEnabled:false,releasedCount:0});
++  assert.equal(f.queries.some(q=>q.text.startsWith("update")),false);
++});
++for(const [name,options,kind] of [
++  ["conta inativa",{active:false},"account_inactive"], ["Staff ou Admin revogado",{admin:false},"admin_required"],
++  ["sessão ausente",{missingSession:true},"invalid_session"], ["sessão revogada",{revoked:true},"session_revoked"],
++  ["sessão expirada após locks",{expiredAtCheck:1},"session_expired"], ["Admin sem 2FA",{secondFactor:false},"admin_2fa_required"],
++  ["sessão expirada após reserva",{expiredAtCheck:2},"session_expired"], ["sessão expirada após efeitos E05",{expiredAtCheck:3},"session_expired"],
++  ["chave conflitante",{reservation:"request_conflict"},"request_conflict"], ["intenção em andamento",{reservation:"in_progress"},"in_progress"],
++  ["evento ausente",{absent:true},"resource_not_found"], ["corte oficial",{officialEndsAt:at},"event_closed"],
++  ["fechamento Admin",{status:"closing"},"event_closed"], ["falta de prontidão",{capacity:false},"event_unavailable"],
++] as const) test(`E08.6 ${name} não confirma domínio, reserva ou auditoria`,async()=>{
++  const f=fixture(options);assert.deepEqual(await f.service.setExternalQueue(input),{kind});
++  assert.equal(f.queries.some(q=>q.text.includes("INSERT INTO audit_logs")||q.text.startsWith('update "idempotency_operations"')),false);
++  assert.equal(f.queries.at(-1)?.text,"rollback");
++});
++test("E08.6 autorização exige Admin global no banco e sessão própria com locks retidos",async()=>{
++  const f=fixture();await f.service.setExternalQueue(input);
++  const role=f.queries.find(q=>q.text.includes("SELECT id FROM user_roles"))!;
++  for(const part of ["role='admin'","event_id IS NULL","revoked_at IS NULL","FOR SHARE"])assert.ok(role.text.includes(part));
++  const session=f.queries.find(q=>q.text.includes("SELECT id FROM sessions"))!;assert.deepEqual(session.params,[input.sessionId,input.userId]);
++  assert.match(session.text,/FOR SHARE/);assert.equal(f.queries.filter(q=>q.text.includes('AS "secondFactor"')).length,3);
++});
++test("E08.6 falhas de evento/liberação/auditoria/conclusão revertem a transação e preservam causa",async()=>{
++  for(const fail of ["event","release","audit","complete"] as const){
++    const f=fixture({fail});await assert.rejects(f.service.setExternalQueue(input),error=>error instanceof Error&&error.cause===f.marker);
++    assert.equal(f.queries.at(-1)?.text,"rollback");assert.equal(f.queries.some(q=>q.text==="commit"),false);
++  }
++  const f=fixture({auditCount:0});await assert.rejects(f.service.setExternalQueue(input),/exatamente uma auditoria/);assert.equal(f.queries.at(-1)?.text,"rollback");
++});
++test("E08.6 replay malformado não fabrica resposta válida nem executa mutação",async()=>{
++  for(const payload of [null,{}, {eventId:"other",externalQueueEnabled:false,releasedCount:0},
++    {eventId:input.eventId,externalQueueEnabled:false,releasedCount:1},
++    {eventId:input.eventId,externalQueueEnabled:false,releasedCount:0,changedAt:"bad"}]){
++    const f=fixture({reservation:"replay",payload});await assert.rejects(f.service.setExternalQueue(input),/inválid/);assert.equal(f.queries.at(-1)?.text,"rollback");
++  }
++});
++test("E08.6 input interno inválido é recusado antes da transação",async()=>{
++  for(const patch of [{reason:" "},{reason:"x".repeat(501)},{idempotencyKey:""},{expiresAt:new Date(NaN)}]){
++    const f=fixture();await assert.rejects(f.service.setExternalQueue({...input,...patch}));assert.equal(f.queries.length,0);
++  }
++});
+diff --git a/docs/E08_6_IMPLEMENTACAO.md b/docs/E08_6_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..10babcaea9165bf1f0f7970cdbdac4d3d2712490
+--- /dev/null
++++ b/docs/E08_6_IMPLEMENTACAO.md
+@@ -0,0 +1,253 @@
++# E08.6 — Controle HTTP da fila externa pelo Admin
++
++Implementação em 03/11/2026, branch `feature/events-participations`, sobre
++`db29b6bf6a54feab667edb8a36c21eb22c89157c`. Antes das edições, conferidos HEAD,
++branch, histórico e `git status --porcelain=v1 --untracked-files=all`: working tree
++limpo, sem arquivos não rastreados. A E08.5 está versionada em `db29b6b`
++(`feat(events): implementar controle de disponibilidade das estações`). Nenhuma
++alteração preexistente incorporada; não foi exigido nem executado push.
++Base anterior confirmada pelo responsável: 290 unitários e 371 PostgreSQL aprovados.
++
++## Contrato e autenticação
++
++`PATCH /api/v1/admin/events/:eventId/external-queue`, registrado por
++`AdminExternalQueueController` no novo `AdminEventsModule`, importado em AppModule.
++O módulo importa ParticipationsModule/EventsModule, DatabaseModule e AuthModule,
++sem dependência circular entre Events e Participations.
++
++Exige Bearer válido por `RequireSessionAuth`; ator vem de `CurrentUserId`, sessão
++de `CurrentUser('sessionId')`. UUID validado/normalizado com os componentes HTTP
++existentes. Body JSON estrito:
++
++```json
++{
++  "enabled": false,
++  "reason": "Acesso direto à Arena autorizado pela organização"
++}
++```
++
++`enabled` é booleano, sem coerção. `reason` é string obrigatória, aparada nos extremos,
++de 1 a 500 caracteres após trim, sem controles ASCII 0–31/127. A justificativa
++normalizada é usada na auditoria e no fingerprint; conteúdo do cliente não determina
++ator, data, contagem, autorização ou expiração. Arrays, campos extras, corpo ausente,
++Content-Type inadequado e JSON malformado são recusados. Idempotency-Key única,
++opaca, não vazia, até 128 caracteres e sem controles, pelo validador compartilhado.
++
++Sucesso 200, inclusive no-op e replay, sem `kind`:
++
++```json
++{
++  "eventId": "550e8400-e29b-41d4-a716-446655440101",
++  "externalQueueEnabled": false,
++  "releasedCount": 3,
++  "changedAt": "2026-11-03T15:00:00.000Z"
++}
++```
++
++No-op retorna `releasedCount: 0` e omite `changedAt`. Replay conserva a resposta
++original, inclusive contagem e presença/ausência de changedAt; pode representar um
++estado histórico se outra intenção já modificou o evento. Não expõe lista de
++participantes, perfis, dados pessoais, justificativa, auditoria, sessão ou SQL.
++O controller seleciona explicitamente os campos públicos.
++
++| HTTP | Código efetivo |
++| --- | --- |
++| 400 | `VALIDATION_ERROR` para UUID/body/reason/chave; `BAD_REQUEST` para JSON malformado |
++| 401 | Códigos atuais de token, conta e sessão; `ADMIN_2FA_REQUIRED`, inclusive após esperas |
++| 403 | `ADMIN_REQUIRED`: sem concessão Admin global vigente, inclusive Staff isolado |
++| 404 | `RESOURCE_NOT_FOUND` para evento ausente, após autorizar Admin |
++| 409 | `EVENT_REGISTRATION_CLOSED`: início ainda não atingido, corte oficial/Admin ou estado closing/closed impedindo mudança |
++| 409 | `EVENT_UNAVAILABLE`: prontidão/capacidade insuficiente |
++| 409 | `IDEMPOTENCY_KEY_REUSED` para chave do mesmo ator/operação com payload/evento diferente; `IDEMPOTENCY_IN_PROGRESS` para intenção em andamento |
++| 500 | `INTERNAL_SERVER_ERROR` genérico, incluindo integridade de replay, SQL/auditoria e persistência |
++
++O código de conflito de chave segue o contrato administrativo §18.1. Os POSTs
++Staff/participante mantêm seus códigos existentes. Não foi alterado o filtro
++RFC 7807, a política de autenticação ou as permissões de outras rotas.
++
++## Composição mínima da E05 e autorização
++
++`ParticipationsService.setExternalQueueEnabled(eventId, enabled)` mantém assinatura,
++resultados e transação própria READ COMMITTED. Seu corpo foi extraído para
++`setExternalQueueEnabledWithTx(tx, eventId, enabled, beforeDecision?)`, que usa o
++executor do chamador, sem abrir/confirmar transação interna. O callback opcional
++ocorre após os locks, antes da decisão/efeitos; também é chamado para no-op e evento
++ausente. Sem callback, a sequência SQL original E05 é mantida. Acrescentado
++`@Inject(EventsService)` ao provider E05 para sua nova composição real sob tsx,
++verificada pelo teste de identidade das dependências.
++
++`AdminExternalQueueService` abre uma única transação e chama a E05 WithTx. Ordem:
++evento FOR UPDATE → waiting do próprio evento FOR UPDATE em UUID crescente ao
++desligar → conta → concessão Admin global → sessão, com FOR SHARE nesses três
++últimos. A autorização exige conta ativa, `role='admin', event_id IS NULL,
++revoked_at IS NULL`, sessão do ator não revogada/expirada e segundo fator confirmado.
++Papéis/identidades fornecidos no body, query ou principal não substituem a consulta.
++E-mail verificado continua sendo exigência Staff, sem inventar nova regra Admin
++além da autenticação vigente e do segundo fator.
++
++A autorização ocorre depois de esperas em evento/participações e é mantida por
++locks até COMMIT. A validade temporal da sessão é lida em nova instrução após seu
++lock, reavaliada após a reserva idempotente (que pode esperar no índice UNIQUE)
++e após a E05, antes de auditar/concluir. Admin ausente/revogado e sessão inválida
++bloqueiam também no-op/replay. Para evento ausente, a autorização global ainda é
++verificada antes de responder 404, sem reservar intenção.
++
++Depois dessa composição, a E05 original obtém clock_timestamp PostgreSQL após
++todas as esperas e aplica `EventsService.evaluateEventAvailabilityById` no mesmo
++tx. Preservados prontidão, início inclusivo, corte oficial/Admin exclusivo e estado
++administrativo. Janela residual não permite alternar a fila externa; difere da
++reativação operacional de estação E08.5. Repetição autorizada continua no-op após
++o corte, sem liberar waiting tardio nem reabrir ingressos.
++
++Desligar atualiza flag/timestamp do evento e libera somente waiting para active,
++preenchendo arena_entered_at com o instante comum E05. Preserva IDs, ordens bigint,
++contadores, snapshots e histórico. Religar afeta ingressos futuros, sem recolocar
++ativos em espera ou reiniciar FIFO. Filas internas, atendimentos, experiências e
++estações não são alterados. E03 disputa o mesmo lock exclusivo do evento; E04
++continua lendo estado confirmado sem nova implementação de consultas.
++
++## Auditoria e idempotência durável
++
++Cada mudança efetiva grava uma linha em `audit_logs` na mesma conexão/transação:
++ator, evento, `origin='user'`, `category='event'`,
++`action='external_queue_enabled_changed'`, reason normalizada, metadata com
++`before/after.externalQueueEnabled` e `releasedCount`. O instante vem de
++`events.updated_at`, igual ao instante persistido pela E05. Exige exatamente uma
++linha; falha reverte flag, liberações, auditoria e idempotência integralmente.
++Não há auditoria de mudança para no-op, replay, recusa ou falha.
++
++Idempotência natural isolada não atende esta rota: um retry antigo poderia desfazer
++uma intenção oposta e liberar pessoas novas. A rota exige intenção durável, pelo
++helper existente `idempotency_operations`, namespace `admin_set_external_queue`.
++Chave única por ator/operação/chave opaca; fingerprint SHA-256 canônico inclui
++evento, enabled e reason normalizada. Justificativa não é armazenada em texto no
++payload idempotente, somente na auditoria obrigatória; o hash vincula o pedido.
++
++Reserva, resposta 200, E05 e auditoria confirmam juntas. No-op também conclui sua
++intenção, para nunca se transformar em uma mudança tardia após outra alternância.
++Replay é reconhecido no callback antes de qualquer mutação E05 e devolvido após
++rollback desse caminho de consulta/conflito da reserva, sem nova auditoria ou
++efeitos duráveis da tentativa de INSERT ON CONFLICT.
++Recusas/conflitos ou falhas revertem reservas parciais. Resultado de replay é
++validado e projetado sem propriedades extras. A contagem deve ser inteira segura.
++
++**Configuração nova obrigatória:** `ADMIN_IDEMPOTENCY_TTL_SECONDS`, inteiro positivo
++compatível com Date, sem valor padrão e sem fallback para TTL Staff/participante.
++`AdminIdempotencyPolicy` gera expiresAt no backend; não altera relógio de negócio.
++AppModule passa a exigir esse valor ao inicializar o módulo Admin. Fixtures de
++auth e profile-games que iniciam AppModule receberam somente essa configuração
++explícita. Suítes que iniciam EventsModule sem Admin permanecem independentes.
++O valor 60 usado pelos testes é exclusivo de fixture, não define TTL de produção.
++
++Não há expurgo nem invalidação automática por expires_at. Enquanto a linha existir,
++o helper preserva o replay mesmo vencido. Política definitiva de retenção/expurgo
++continua sem implementação; esta entrega não autoriza apagar uma intenção vencida
++e reexecutá-la. Nenhum campo, tabela, migration ou dependência nova foi criado.
++
++## Validações executadas pelo Codex
++
++| Verificação | Resultado real |
++| --- | --- |
++| E05 existente após extração | **5/5 aprovados**, sem alterar seus testes |
++| Focados E08.6 + E05, com tsconfig.test | **38/38 aprovados**: 33 novos + cinco E05 |
++| Regressão unitária `npm.cmd test` | **323/323 aprovados**: 290 anteriores + 33 novos; zero falhas/cancelamentos/skips |
++| Typecheck `npm.cmd run typecheck:test` | Aprovado, incluindo a nova suíte PostgreSQL |
++| Lint `npm.cmd run lint` | Aprovado |
++| Build `npm.cmd run build` | Aprovado |
++| PostgreSQL HTTP E08.6 | **40/40 aprovados manualmente pelo responsável em 03/11/2026** |
++| Regressão PostgreSQL completa | **411/411 aprovados manualmente pelo responsável em 03/11/2026** |
++
++São 23 testes novos de orquestração com E05 real/driver simulado e dez de HTTP/DI/
++configuração. DI real sob tsx verifica controller → orquestrador → E05 → EventsService
++no mesmo banco e Pool sem conexões, sem init/listen nesse teste.
++
++A primeira execução E05 na sandbox falhou antes dos testes por
++`uv_os_get_passwd / ENOMEM` do tsx. Execuções aprovadas fora da sandbox, com
++DOTENV_CONFIG_PATH=NUL, URL fictícia sem conexão e três TTLs explícitos. Nenhum
++.env, credencial, Neon ou PostgreSQL real foi acessado. Não houve falha funcional
++nos focados/typecheck/lint/build. A revisão técnica foi restrita à E08.6,
++confrontando E05, locks, schema, helpers idempotentes, Auth e fixtures. A fixture
++unitária do corte deriva o prazo operacional do encerramento oficial e exige
++prontidão estática válida, isolando o impedimento temporal sem configuração inválida.
++O teste de namespace exige os dois atores exatos, sem depender da ordem entre
++auditorias que eventualmente compartilhem o mesmo milissegundo.
++
++## PostgreSQL — validação manual concluída
++
++Foram aprovados manualmente em 03/11/2026 os **40 testes HTTP PostgreSQL** em
++`backend/test/integration/admin-external-queue-http.integration.test.ts`, iniciando
++AppModule real, e os **411 testes da regressão PostgreSQL completa** (371 anteriores
+++ 40 novos). Houve zero falhas, cancelamentos ou testes ignorados. Inclui quatro casos gerados pelas matrizes de alternância
++oposta e corte temporal durante locks de evento/participação.
++
++Cobertura: autenticação/Admin/2FA/sessão; UUID/body/reason/chave; liberação e
++preservação de active/finished/canceled, snapshots, ordens e outros eventos;
++filas internas/atendimentos; reativação e ingresso E03/FIFO; cortes e prontidão;
++no-op; replay após intenção oposta, no-op histórico, expiração técnica, perda de
++autorização, conflitos por evento/payload/ator e in_progress; auditoria e rollback.
++
++Concorrência usa transações PostgreSQL reais e conexões independentes. Helpers
++mantêm a primeira operação antes do COMMIT e exigem pg_blocking_pids para observar
++a segunda bloqueada; depois liberam e verificam resultados. Testam E03 nas duas
++ordens, alterações iguais/opostas, fechamento, revogação e mudanças de sessão/2FA
++durante espera. Encerramento é alteração exclusiva de fixture, sem nova rota.
++Os testes de corte configuram margem de dez segundos, exigem bloqueio observado
++antes do corte, aguardam o relógio PostgreSQL ultrapassá-lo e confirmam a espera
++ainda ativa antes de liberar o lock. Polling não é a prova de sincronização.
++
++Falhas intermediárias usam erro PostgreSQL real (`SELECT 1/0`) após efeitos E05,
++na auditoria, após auditoria e após conclusão idempotente, dentro do mesmo tx.
++Asserções confirmam liberações/estado completed antes da falha nas fases relevantes
++e comparam o estado integral depois do rollback. Não substituem SQL/resultados
++por mocks. Wrappers são restaurados e operações liberadas/aguardadas em finally.
++Snapshots preservam ordens bigint como texto exato, sem arredondamento numérico.
++
++Preflight antes dos providers exige as três URLs idênticas, sem parâmetros,
++exclusivamente `127.0.0.1:55432/arenago_events_test`. Limpeza transacional restrita
++aos UUIDs próprios. Sem migrations, seed ou reset. Com banco local já preparado,
++o responsável configura suas credenciais sem compartilhá-las:
++
++```powershell
++Set-Location C:\DoJob\ProgramacaoMobile\backend
++$env:NODE_ENV = 'test'
++$env:EVENTS_TEST_DATABASE_URL = 'postgresql://USUARIO:SENHA@127.0.0.1:55432/arenago_events_test'
++$env:DATABASE_URL = $env:EVENTS_TEST_DATABASE_URL
++$env:DATABASE_DIRECT_URL = $env:EVENTS_TEST_DATABASE_URL
++$env:DOTENV_CONFIG_PATH = 'NUL'
++$env:STAFF_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:ADMIN_IDEMPOTENCY_TTL_SECONDS = '60'
++.\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test --test-concurrency=1 test/integration/admin-external-queue-http.integration.test.ts
++if ($LASTEXITCODE -ne 0) { throw 'Investigar E08.6 antes da regressão PostgreSQL.' }
++npm.cmd run test:integration
++if ($LASTEXITCODE -ne 0) { throw 'Investigar falhas da regressão PostgreSQL.' }
++```
++
++## Arquivos e evidência
++
++- `backend/src/app.module.ts`: importa o módulo Admin.
++- `backend/src/events/admin-events.module.ts`: providers/controller e composição de módulos.
++- `backend/src/events/admin-external-queue.controller.ts`: PATCH e respostas RFC 7807.
++- `backend/src/events/admin-external-queue.dto.ts`: UUID e body/reason estritos.
++- `backend/src/events/admin-external-queue.service.ts`: autorização, E05, auditoria e idempotência.
++- `backend/src/events/admin-external-queue.types.ts`: contratos internos e públicos mínimos.
++- `backend/src/events/admin-idempotency.policy.ts`: configuração técnica própria obrigatória.
++- `backend/src/participations/participations.service.ts`: extração WithTx/callback e DI explícita.
++- `backend/test/unit/admin-external-queue.test.ts`: 23 testes de orquestração.
++- `backend/test/unit/admin-external-queue-http.test.ts`: dez testes HTTP/DI/configuração.
++- `backend/test/integration/admin-external-queue-http.integration.test.ts`: 40 testes HTTP PostgreSQL aprovados manualmente.
++- `backend/test/integration/auth.integration.test.ts`: somente TTL Admin na inicialização.
++- `backend/test/integration/profile-games.integration.test.ts`: somente TTL Admin na inicialização.
++- `docs/ARQUITETURA_BACKEND_ARENAGO.md`: nota local na §17.10.
++- `docs/E08_6_IMPLEMENTACAO.md`: este relatório.
++
++Evidência única: `qa-evidence/e08-6-changes.diff`, completa contra o HEAD inicial
++`db29b6b`, incluindo os arquivos novos ainda não rastreados. Aplicação validada com
++git apply em cópia isolada da base e conteúdo comparado aos 15 arquivos finais com
++normalização Git de linhas. UTF-8 sem BOM, caminhos relativos; sem a própria
++evidência, outros diffs, .env/segredos, dependências, temporários ou mudanças alheias.
++Índice/HEAD preservados. Sem git add, commit, push, merge ou rebase. Sem outras
++rotas Admin, controle da fila de experiência, encerramento, avaliações, telas,
++notificações, auditoria geral ou início de E08.7. A validação manual PostgreSQL
++foi concluída; não há validação de produção. Arquivos disponíveis para
++revisão/versionamento manual.

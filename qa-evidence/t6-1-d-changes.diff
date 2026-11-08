@@ -1,0 +1,1803 @@
+diff --git a/backend/src/app.module.ts b/backend/src/app.module.ts
+index 36a950c..dbfca60 100644
+--- a/backend/src/app.module.ts
++++ b/backend/src/app.module.ts
+@@ -8,6 +8,7 @@ import { EventsModule } from "./events/events.module";
+ import { AdminEventsModule } from "./events/admin-events.module";
+ import { GamesModule } from "./games/games.module";
+ import { ProfileModule } from "./profile/profile.module";
++import { AdminRoleManagementModule } from "./auth/admin-role-management.module";
+ 
+ @Module({
+   imports: [
+@@ -17,6 +18,7 @@ import { ProfileModule } from "./profile/profile.module";
+     AdminEventsModule,
+     GamesModule,
+     ProfileModule,
++    AdminRoleManagementModule,
+   ],
+   providers: [
+     {
+diff --git a/backend/src/auth/admin-role-management.controller.ts b/backend/src/auth/admin-role-management.controller.ts
+new file mode 100644
+index 0000000..c591b2b
+--- /dev/null
++++ b/backend/src/auth/admin-role-management.controller.ts
+@@ -0,0 +1,37 @@
++import { Body, Controller, HttpCode, Inject, Post, Req } from "@nestjs/common";
++import { CurrentUser, CurrentUserId, RequireSessionAuth } from "./current-user.decorator";
++import type { AuthenticatedRequest } from "./session-auth.guard";
++import { validateOperationBody, validateOperationIdempotencyKey } from "../common/http/operation-validation";
++import { AdminIdempotencyPolicy } from "../events/admin-idempotency.policy";
++import { grantAdminRoleBody, revokeAdminRoleBody } from "./admin-role-management.dto";
++import { executeAdminRoleManagement } from "./admin-role-management.problem";
++import { AdminRoleManagementService } from "./admin-role-management.service";
++
++@Controller("admin/roles")
++@RequireSessionAuth()
++export class AdminRoleManagementController {
++  constructor(
++    @Inject(AdminRoleManagementService) private readonly roles: AdminRoleManagementService,
++    @Inject(AdminIdempotencyPolicy) private readonly idempotency: AdminIdempotencyPolicy,
++  ) {}
++
++  @Post("grant")
++  @HttpCode(201)
++  grant(@CurrentUserId() userId: string, @CurrentUser("sessionId") sessionId: string,
++    @Body() body: unknown, @Req() request: AuthenticatedRequest) {
++    const payload = validateOperationBody(grantAdminRoleBody, body, request);
++    const idempotencyKey = validateOperationIdempotencyKey(request);
++    return executeAdminRoleManagement(() => this.roles.grant({ userId, sessionId, body: payload, idempotencyKey,
++      expiresAt: this.idempotency.expiresAt() }));
++  }
++
++  @Post("revoke")
++  @HttpCode(200)
++  revoke(@CurrentUserId() userId: string, @CurrentUser("sessionId") sessionId: string,
++    @Body() body: unknown, @Req() request: AuthenticatedRequest) {
++    const payload = validateOperationBody(revokeAdminRoleBody, body, request);
++    const idempotencyKey = validateOperationIdempotencyKey(request);
++    return executeAdminRoleManagement(() => this.roles.revoke({ userId, sessionId, grantId: payload.grantId,
++      idempotencyKey, expiresAt: this.idempotency.expiresAt() }));
++  }
++}
+diff --git a/backend/src/auth/admin-role-management.dto.ts b/backend/src/auth/admin-role-management.dto.ts
+new file mode 100644
+index 0000000..759679c
+--- /dev/null
++++ b/backend/src/auth/admin-role-management.dto.ts
+@@ -0,0 +1,28 @@
++import { z } from "zod";
++import { normalizeEmail } from "./auth.dto";
++import { operationUuid } from "../common/http/operation-validation";
++
++const email = z.string().transform(normalizeEmail).refine(value =>
++  value.length > 0 && value.length <= 255 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value),
++"Informe um e-mail válido de até 255 caracteres.");
++
++export const grantAdminRoleBody = z.discriminatedUnion("role", [
++  z.object({ role: z.literal("admin"), email, eventId: z.null().optional() }).strict(),
++  z.object({ role: z.literal("staff"), email, eventId: operationUuid }).strict(),
++]);
++
++export const revokeAdminRoleBody = z.object({ grantId: operationUuid }).strict();
++
++export const managedRoleView = z.object({
++  id: operationUuid,
++  userId: operationUuid,
++  role: z.enum(["admin", "staff"]),
++  eventId: operationUuid.nullable(),
++  grantedAt: z.string().datetime({ offset: true }),
++  revokedAt: z.string().datetime({ offset: true }).nullable(),
++}).strict();
++
++export const managedRoleResponse = z.object({ grant: managedRoleView }).strict();
++
++export type GrantAdminRoleBody = z.infer<typeof grantAdminRoleBody>;
++export type RevokeAdminRoleBody = z.infer<typeof revokeAdminRoleBody>;
+diff --git a/backend/src/auth/admin-role-management.module.ts b/backend/src/auth/admin-role-management.module.ts
+new file mode 100644
+index 0000000..d4e1ae3
+--- /dev/null
++++ b/backend/src/auth/admin-role-management.module.ts
+@@ -0,0 +1,13 @@
++import { Module } from "@nestjs/common";
++import { AuthModule } from "./auth.module";
++import { DatabaseModule } from "../database/database.module";
++import { AdminIdempotencyPolicy } from "../events/admin-idempotency.policy";
++import { AdminRoleManagementController } from "./admin-role-management.controller";
++import { AdminRoleManagementService } from "./admin-role-management.service";
++
++@Module({
++  imports: [DatabaseModule, AuthModule],
++  controllers: [AdminRoleManagementController],
++  providers: [AdminIdempotencyPolicy, AdminRoleManagementService],
++})
++export class AdminRoleManagementModule {}
+diff --git a/backend/src/auth/admin-role-management.problem.ts b/backend/src/auth/admin-role-management.problem.ts
+new file mode 100644
+index 0000000..0e465fa
+--- /dev/null
++++ b/backend/src/auth/admin-role-management.problem.ts
+@@ -0,0 +1,46 @@
++import { ProblemException } from "../common/errors/problem.exception";
++import type { AdminAuthFailure } from "../events/admin-operation-auth";
++
++export type AdminRoleManagementFailure = AdminAuthFailure | "actor_email_unverified" | "event_not_found"
++  | "target_not_found" | "target_ineligible" | "role_already_granted" | "role_not_found"
++  | "last_admin" | "request_conflict" | "in_progress";
++
++export class AdminRoleManagementError extends Error {
++  constructor(readonly kind: AdminRoleManagementFailure) { super(kind); }
++}
++
++export function failAdminRoleManagement(kind: AdminRoleManagementFailure): never {
++  throw new AdminRoleManagementError(kind);
++}
++
++const errors: Record<AdminRoleManagementFailure, [number, string]> = {
++  account_inactive: [401, "ACCOUNT_DEACTIVATED"],
++  admin_required: [403, "ADMIN_REQUIRED"],
++  invalid_session: [401, "INVALID_SESSION"],
++  session_revoked: [401, "SESSION_REVOKED"],
++  session_expired: [401, "SESSION_EXPIRED"],
++  admin_2fa_required: [401, "ADMIN_2FA_REQUIRED"],
++  actor_email_unverified: [403, "ADMIN_EMAIL_UNVERIFIED"],
++  event_not_found: [404, "RESOURCE_NOT_FOUND"],
++  target_not_found: [404, "RESOURCE_NOT_FOUND"],
++  target_ineligible: [422, "ROLE_TARGET_INELIGIBLE"],
++  role_already_granted: [409, "ROLE_ALREADY_GRANTED"],
++  role_not_found: [404, "RESOURCE_NOT_FOUND"],
++  last_admin: [409, "LAST_ADMIN_REQUIRED"],
++  request_conflict: [409, "IDEMPOTENCY_KEY_REUSED"],
++  in_progress: [409, "IDEMPOTENCY_IN_PROGRESS"],
++};
++
++export async function executeAdminRoleManagement<T>(action: () => Promise<T>): Promise<T> {
++  try { return await action(); }
++  catch (error) {
++    if (error instanceof AdminRoleManagementError) {
++      const [status, code] = errors[error.kind];
++      throw new ProblemException({ status, code, typeSlug: code.toLowerCase().replaceAll("_", "-"),
++        title: status === 404 ? "Recurso não encontrado" : status === 401 ? "Autenticação obrigatória"
++          : status === 403 ? "Acesso negado" : status === 422 ? "Destinatário não elegível" : "Conflito de permissões",
++        detail: status === 404 ? "Recurso não encontrado." : "A operação de permissões não pode ser aplicada ao estado atual." });
++    }
++    throw new Error("ADMIN_ROLE_MANAGEMENT_INTERNAL_ERROR", { cause: error });
++  }
++}
+diff --git a/backend/src/auth/admin-role-management.service.ts b/backend/src/auth/admin-role-management.service.ts
+new file mode 100644
+index 0000000..01c5e40
+--- /dev/null
++++ b/backend/src/auth/admin-role-management.service.ts
+@@ -0,0 +1,203 @@
++import { Inject, Injectable } from "@nestjs/common";
++import { randomUUID } from "node:crypto";
++import { sql } from "drizzle-orm";
++import type { NodePgDatabase } from "drizzle-orm/node-postgres";
++import { DRIZZLE_DATABASE } from "../database/database.module";
++import type * as schema from "../database/schema";
++import type { DatabaseTransactionExecutor } from "../database/database-executor";
++import { completeIdempotencyOperationWithTx, createRequestFingerprint, reserveIdempotencyOperationWithTx, type JsonValue } from "../participations/join-idempotency";
++import { assertAdminSessionWithTx, authorizeGlobalAdminWithTx } from "../events/admin-operation-auth";
++import { managedRoleResponse, type GrantAdminRoleBody } from "./admin-role-management.dto";
++import { failAdminRoleManagement } from "./admin-role-management.problem";
++
++const ROLE_MANAGEMENT_LOCK_CLASS = 0x41524e47;
++const ROLE_MANAGEMENT_LOCK_ID = 0x524f4c45;
++const GRANT_OPERATION = "admin_grant_role";
++const REVOKE_OPERATION = "admin_revoke_role";
++
++export function shouldBlockLastAdminRevocation(targetIsViable: boolean, otherViableAdmins: number): boolean {
++  return targetIsViable && otherViableAdmins === 0;
++}
++
++export interface AdminRoleActor { userId: string; sessionId: string }
++export interface AdminRoleMutationInput extends AdminRoleActor {
++  body: GrantAdminRoleBody;
++  idempotencyKey: string;
++  expiresAt: Date;
++}
++export interface AdminRoleRevokeInput extends AdminRoleActor {
++  grantId: string;
++  idempotencyKey: string;
++  expiresAt: Date;
++}
++
++function ensure(value: unknown): asserts value { if (!value) throw new Error("ADMIN_ROLE_MANAGEMENT_INTEGRITY"); }
++
++function fingerprint(operation: string, value: JsonValue): string {
++  return createRequestFingerprint(operation, value);
++}
++
++async function roleMutationMutex(tx: DatabaseTransactionExecutor): Promise<void> {
++  await tx.execute(sql`SELECT pg_advisory_xact_lock(${ROLE_MANAGEMENT_LOCK_CLASS}::integer, ${ROLE_MANAGEMENT_LOCK_ID}::integer)`);
++}
++
++async function authorizeActor(tx: DatabaseTransactionExecutor, actor: AdminRoleActor): Promise<void> {
++  await authorizeGlobalAdminWithTx(tx, actor, result => failAdminRoleManagement(result.kind));
++  const verified = await tx.execute<{ verified: boolean }>(sql`SELECT email_verified_at IS NOT NULL AS verified
++    FROM users WHERE id=${actor.userId}::uuid`);
++  if (!verified.rows[0]?.verified) failAdminRoleManagement("actor_email_unverified");
++}
++
++function replayBody(value: JsonValue | null, reference: string | null) {
++  const parsed = managedRoleResponse.parse(value);
++  ensure(parsed.grant.id === reference);
++  return parsed;
++}
++
++function iso(value: string): string {
++  const date = new Date(value);
++  ensure(Number.isFinite(date.getTime()));
++  return date.toISOString();
++}
++
++@Injectable()
++export class AdminRoleManagementService {
++  constructor(
++    @Inject(DRIZZLE_DATABASE) private readonly database: NodePgDatabase<typeof schema>,
++  ) {}
++
++  async grant(input: AdminRoleMutationInput) {
++    ensure(input.idempotencyKey.trim() && input.idempotencyKey.length <= 128 && Number.isFinite(input.expiresAt.getTime()));
++    const requested = input.body;
++    const eventId = requested.role === "staff" ? requested.eventId : null;
++    return this.database.transaction(async tx => {
++      let eventExists = true;
++      if (eventId) eventExists = (await tx.execute(sql`SELECT id FROM events WHERE id=${eventId}::uuid FOR UPDATE`)).rows.length === 1;
++      await roleMutationMutex(tx);
++      await authorizeActor(tx, input);
++      if (!eventExists) failAdminRoleManagement("event_not_found");
++
++      const intent = await reserveIdempotencyOperationWithTx(tx, {
++        actorUserId: input.userId, operation: GRANT_OPERATION, idempotencyKey: input.idempotencyKey,
++        requestHash: fingerprint(GRANT_OPERATION, { role: requested.role, email: requested.email, eventId }),
++        expiresAt: input.expiresAt,
++      });
++      await assertAdminSessionWithTx(tx, input, result => failAdminRoleManagement(result.kind));
++      if (intent.kind === "request_conflict" || intent.kind === "in_progress") failAdminRoleManagement(intent.kind);
++      if (intent.kind === "replay") return replayBody(intent.resultPayload, intent.resultReference);
++
++      const target = (await tx.execute<{ id: string; active: boolean; verified: boolean }>(sql`
++        SELECT id, is_active AS active, email_verified_at IS NOT NULL AS verified
++        FROM users WHERE lower(btrim(email))=${requested.email} FOR UPDATE`)).rows[0];
++      if (!target) failAdminRoleManagement("target_not_found");
++      if (!target.active || !target.verified) failAdminRoleManagement("target_ineligible");
++
++      const active = await tx.execute(sql`SELECT id FROM user_roles WHERE user_id=${target.id}::uuid
++        AND role=${requested.role} AND event_id IS NOT DISTINCT FROM ${eventId}::uuid AND revoked_at IS NULL FOR UPDATE`);
++      if (active.rows.length) failAdminRoleManagement("role_already_granted");
++
++      const grantId = randomUUID();
++      const inserted = await tx.execute<{ id: string; userId: string; role: "admin" | "staff"; eventId: string | null; grantedAt: string; auditCount: number }>(sql`
++        WITH decision AS MATERIALIZED (SELECT clock_timestamp() AS at),
++        granted AS (
++          INSERT INTO user_roles(id,user_id,role,event_id,granted_by,granted_at,revoked_at,revoked_by)
++          SELECT ${grantId}::uuid,${target.id}::uuid,${requested.role}::varchar(20),${eventId}::uuid,${input.userId}::uuid,d.at,NULL,NULL
++          FROM decision d ON CONFLICT DO NOTHING
++          RETURNING id,user_id,role,event_id,granted_at
++        ), audited AS (
++          INSERT INTO audit_logs(id,actor_user_id,target_user_id,event_id,origin,category,action,metadata,occurred_at)
++          SELECT ${randomUUID()}::uuid,${input.userId}::uuid,g.user_id,g.event_id,'user','identity','admin_role_granted',
++            jsonb_build_object('grantId',g.id,'role',g.role),g.granted_at FROM granted g RETURNING id
++        )
++        SELECT g.id,g.user_id AS "userId",g.role,g.event_id AS "eventId",
++          to_char(g.granted_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "grantedAt",
++          (SELECT count(*)::integer FROM audited) AS "auditCount" FROM granted g`);
++      const row = inserted.rows[0];
++      if (!row) failAdminRoleManagement("role_already_granted");
++      ensure(row.auditCount === 1);
++      const body = managedRoleResponse.parse({ grant: { id: row.id, userId: row.userId, role: row.role,
++        eventId: row.eventId, grantedAt: iso(row.grantedAt), revokedAt: null } });
++      await completeIdempotencyOperationWithTx(tx, intent.operationId, {
++        httpStatus: 201, resultReference: row.id, resultPayload: body as unknown as JsonValue,
++      });
++      await assertAdminSessionWithTx(tx, input, result => failAdminRoleManagement(result.kind));
++      return body;
++    }, { isolationLevel: "read committed" });
++  }
++
++  async revoke(input: AdminRoleRevokeInput) {
++    ensure(input.idempotencyKey.trim() && input.idempotencyKey.length <= 128 && Number.isFinite(input.expiresAt.getTime()));
++    return this.database.transaction(async tx => {
++      // Leitura de descoberta apenas escolhe o lock de evento; todos os campos são revalidados depois.
++      const discovered = (await tx.execute<{ userId: string; role: string; eventId: string | null }>(sql`SELECT user_id AS "userId",role,event_id AS "eventId"
++        FROM user_roles WHERE id=${input.grantId}::uuid`)).rows[0];
++      let eventExists = true;
++      if (discovered?.role === "staff" && discovered.eventId) {
++        eventExists = (await tx.execute(sql`SELECT id FROM events WHERE id=${discovered.eventId}::uuid FOR UPDATE`)).rows.length === 1;
++      }
++      await roleMutationMutex(tx);
++      await authorizeActor(tx, input);
++
++      const intent = await reserveIdempotencyOperationWithTx(tx, {
++        actorUserId: input.userId, operation: REVOKE_OPERATION, idempotencyKey: input.idempotencyKey,
++        requestHash: fingerprint(REVOKE_OPERATION, { grantId: input.grantId }), expiresAt: input.expiresAt,
++      });
++      await assertAdminSessionWithTx(tx, input, result => failAdminRoleManagement(result.kind));
++      if (intent.kind === "request_conflict" || intent.kind === "in_progress") failAdminRoleManagement(intent.kind);
++      if (intent.kind === "replay") return replayBody(intent.resultPayload, intent.resultReference);
++
++      if (!discovered || (discovered.role !== "admin" && discovered.role !== "staff")) failAdminRoleManagement("role_not_found");
++      if (!eventExists) failAdminRoleManagement("event_not_found");
++      const target = (await tx.execute<{ active: boolean; verified: boolean }>(sql`SELECT is_active AS active,
++        email_verified_at IS NOT NULL AS verified FROM users WHERE id=${discovered.userId}::uuid FOR UPDATE`)).rows[0];
++      if (!target) throw new Error("ADMIN_ROLE_TARGET_INTEGRITY");
++      const grant = (await tx.execute<{ id: string; userId: string; role: "admin" | "staff"; eventId: string | null; revoked: boolean }>(sql`
++        SELECT id,user_id AS "userId",role,event_id AS "eventId",revoked_at IS NOT NULL AS revoked
++        FROM user_roles WHERE id=${input.grantId}::uuid FOR UPDATE`)).rows[0];
++      if (!grant || grant.userId !== discovered.userId || grant.role !== discovered.role || grant.eventId !== discovered.eventId || grant.revoked) {
++        failAdminRoleManagement("role_not_found");
++      }
++      const credential = (await tx.execute<{ verified: boolean }>(sql`SELECT is_verified AS verified FROM user_totp_credentials
++        WHERE user_id=${grant.userId}::uuid`)).rows[0];
++      const targetIsViable = target.active && target.verified && credential?.verified === true;
++
++      if (grant.role === "admin" && targetIsViable) {
++        const otherAdmins = await tx.execute<{ count: number }>(sql`SELECT count(*)::integer AS count
++          FROM user_roles r JOIN users u ON u.id=r.user_id JOIN user_totp_credentials t ON t.user_id=u.id
++          WHERE r.role='admin' AND r.event_id IS NULL AND r.revoked_at IS NULL AND r.user_id<>${grant.userId}::uuid
++            AND u.is_active AND u.email_verified_at IS NOT NULL AND t.is_verified`);
++        if (shouldBlockLastAdminRevocation(targetIsViable, otherAdmins.rows[0]?.count ?? 0)) failAdminRoleManagement("last_admin");
++      }
++
++      await assertAdminSessionWithTx(tx, input, result => failAdminRoleManagement(result.kind));
++      const changed = await tx.execute<{ id: string; userId: string; role: "admin" | "staff"; eventId: string | null; revokedAt: string; auditCount: number }>(sql`
++        WITH decision AS MATERIALIZED (SELECT clock_timestamp() AS at),
++        revoked AS (
++          UPDATE user_roles r SET revoked_at=d.at,revoked_by=${input.userId}::uuid FROM decision d
++          WHERE r.id=${grant.id}::uuid AND r.user_id=${grant.userId}::uuid AND r.role=${grant.role}
++            AND r.event_id IS NOT DISTINCT FROM ${grant.eventId}::uuid AND r.revoked_at IS NULL
++          RETURNING r.id,r.user_id,r.role,r.event_id,r.granted_at,r.revoked_at
++        ), audited AS (
++          INSERT INTO audit_logs(id,actor_user_id,target_user_id,event_id,origin,category,action,metadata,occurred_at)
++          SELECT ${randomUUID()}::uuid,${input.userId}::uuid,r.user_id,r.event_id,'user','identity','admin_role_revoked',
++            jsonb_build_object('grantId',r.id,'role',r.role),r.revoked_at FROM revoked r RETURNING id
++        )
++        SELECT r.id,r.user_id AS "userId",r.role,r.event_id AS "eventId",
++          to_char(r.revoked_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "revokedAt",
++          (SELECT count(*)::integer FROM audited) AS "auditCount" FROM revoked r`);
++      const row = changed.rows[0];
++      if (!row) failAdminRoleManagement("role_not_found");
++      ensure(row.auditCount === 1);
++      const original = (await tx.execute<{ grantedAt: string }>(sql`SELECT to_char(granted_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "grantedAt"
++        FROM user_roles WHERE id=${row.id}::uuid`)).rows[0];
++      ensure(original);
++      const body = managedRoleResponse.parse({ grant: { id: row.id, userId: row.userId, role: row.role,
++        eventId: row.eventId, grantedAt: iso(original.grantedAt), revokedAt: iso(row.revokedAt) } });
++      await completeIdempotencyOperationWithTx(tx, intent.operationId, {
++        httpStatus: 200, resultReference: row.id, resultPayload: body as unknown as JsonValue,
++      });
++      await assertAdminSessionWithTx(tx, input, result => failAdminRoleManagement(result.kind));
++      return body;
++    }, { isolationLevel: "read committed" });
++  }
++}
+diff --git a/backend/test/integration/admin-role-management-db-guard.ts b/backend/test/integration/admin-role-management-db-guard.ts
+new file mode 100644
+index 0000000..ee76ed8
+--- /dev/null
++++ b/backend/test/integration/admin-role-management-db-guard.ts
+@@ -0,0 +1,21 @@
++const names = ["DATABASE_URL", "DATABASE_DIRECT_URL", "EVENTS_TEST_DATABASE_URL"] as const;
++
++/** Guarda exclusiva das integrações T6.1-D: nunca aceita o banco compartilhado. */
++export function assertAdminRoleManagementTestDatabaseUrls(env: Record<string, string | undefined>): string {
++  if (env.NODE_ENV !== "test") throw new Error("[SEGURANÇA BLOQUEADA] A integração T6.1-D exige NODE_ENV=test.");
++  const urls = names.map(name => {
++    const value = env[name];
++    if (!value || value.trim() !== value) throw new Error(`[SEGURANÇA BLOQUEADA] ${name} explícita é obrigatória.`);
++    let parsed: URL;
++    try { parsed = new URL(value); }
++    catch { throw new Error(`[SEGURANÇA BLOQUEADA] ${name} inválida.`); }
++    if ((parsed.protocol !== "postgresql:" && parsed.protocol !== "postgres:") || parsed.hostname !== "127.0.0.1"
++      || parsed.port !== "55432" || parsed.pathname !== "/arenago_roles_test" || !parsed.username || !parsed.password
++      || value.includes("?") || value.includes("#")) {
++      throw new Error(`[SEGURANÇA BLOQUEADA] ${name} exige 127.0.0.1:55432/arenago_roles_test e credenciais explícitas, sem query ou fragmento.`);
++    }
++    return value;
++  });
++  if (urls.some(value => value !== urls[0])) throw new Error("[SEGURANÇA BLOQUEADA] As três URLs devem ser idênticas.");
++  return urls[0];
++}
+diff --git a/backend/test/integration/admin-role-management.integration.test.ts b/backend/test/integration/admin-role-management.integration.test.ts
+new file mode 100644
+index 0000000..8f52d08
+--- /dev/null
++++ b/backend/test/integration/admin-role-management.integration.test.ts
+@@ -0,0 +1,739 @@
++import assert from "node:assert/strict";
++import { randomUUID } from "node:crypto";
++import { devNull } from "node:os";
++import { after, afterEach, before, test } from "node:test";
++import { NestFactory } from "@nestjs/core";
++import type { INestApplication } from "@nestjs/common";
++import { Pool } from "pg";
++import { sql, type SQL } from "drizzle-orm";
++import { PgDialect } from "drizzle-orm/pg-core";
++import type { NodePgDatabase } from "drizzle-orm/node-postgres";
++import supertest from "supertest";
++import type * as schema from "../../src/database/schema";
++import { assertAdminRoleManagementTestDatabaseUrls } from "./admin-role-management-db-guard";
++
++// A guarda é avaliada antes de importar o módulo da aplicação e de abrir escritas.
++const connectionString = assertAdminRoleManagementTestDatabaseUrls(process.env);
++process.env.DOTENV_CONFIG_PATH = devNull;
++process.env.STAFF_IDEMPOTENCY_TTL_SECONDS = "60";
++process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = "60";
++process.env.ADMIN_IDEMPOTENCY_TTL_SECONDS = "60";
++process.env.EVALUATION_IDEMPOTENCY_TTL_SECONDS = "60";
++process.env.EVENT_CLOSURE_JOB_TEST_ENABLED = "false";
++
++const pool = new Pool({ connectionString, application_name: `t61d-roles-${randomUUID()}`, max: 8 });
++const ownedUsers = new Set<string>(), ownedEvents = new Set<string>(), ownedExperiences = new Set<string>();
++const ownedVersions = new Set<string>(), ownedGames = new Set<string>();
++let app: INestApplication;
++let signAccessToken: (claims: { userId: string; sessionId: string }) => string;
++let participationWriter: import("../../src/participations/participations.service").ParticipationsService;
++
++interface Account { id: string; email: string; sessionId: string; token: string; adminRoleId?: string; staffRoleIds: string[] }
++interface AccountOptions { active?: boolean; verified?: boolean; admin?: boolean; admin2fa?: boolean; staffEventId?: string; totp?: boolean }
++
++async function account(options: AccountOptions = {}): Promise<Account> {
++  const id = randomUUID(), email = `${id}@example.test`, sessionId = randomUUID();
++  await pool.query(`INSERT INTO users(id,name,email,password_hash,email_verified_at,is_active,created_at,updated_at)
++    VALUES($1,'T6.1-D fixture',$2,'fixture-only',CASE WHEN $3::boolean THEN clock_timestamp() ELSE NULL END,$4::boolean,clock_timestamp(),clock_timestamp())`,
++  [id, email, options.verified !== false, options.active !== false]);
++  ownedUsers.add(id);
++  await pool.query(`INSERT INTO user_roles(id,user_id,role,event_id,granted_by,granted_at)
++    VALUES($1,$2,'participante',NULL,NULL,clock_timestamp())`, [randomUUID(), id]);
++  let adminRoleId: string | undefined;
++  if (options.admin) {
++    adminRoleId = randomUUID();
++    await pool.query(`INSERT INTO user_roles(id,user_id,role,event_id,granted_by,granted_at)
++      VALUES($1,$2,'admin',NULL,NULL,clock_timestamp())`, [adminRoleId, id]);
++    if (options.totp !== false) await pool.query(`INSERT INTO user_totp_credentials(id,user_id,secret_encrypted,is_verified,verified_at,created_at,updated_at)
++      VALUES($1,$2,'integration-fixture-placeholder',true,clock_timestamp(),clock_timestamp(),clock_timestamp())`, [randomUUID(), id]);
++  }
++  const staffRoleIds: string[] = [];
++  if (options.staffEventId) {
++    const roleId = randomUUID(); staffRoleIds.push(roleId);
++    await pool.query(`INSERT INTO user_roles(id,user_id,role,event_id,granted_by,granted_at)
++      VALUES($1,$2,'staff',$3,NULL,clock_timestamp())`, [roleId, id, options.staffEventId]);
++  }
++  await pool.query(`INSERT INTO sessions(id,user_id,expires_at,last_activity_at,revoked_at,revocation_reason,admin_2fa_verified_at,created_at)
++    VALUES($1,$2,CASE WHEN $3::boolean THEN clock_timestamp()-interval '1 minute' ELSE clock_timestamp()+interval '1 day' END,
++      clock_timestamp(),NULL,NULL,CASE WHEN $4::boolean THEN clock_timestamp() ELSE NULL END,clock_timestamp())`,
++  [sessionId, id, false, options.admin === true && options.admin2fa !== false]);
++  return { id, email, sessionId, token: signAccessToken({ userId: id, sessionId }), adminRoleId, staffRoleIds };
++}
++
++async function event(status = "scheduled"): Promise<string> {
++  const id = randomUUID(), code = `D-${randomUUID().replaceAll("-", "").slice(0, 12).toUpperCase()}`;
++  await pool.query(`INSERT INTO events(id,name,access_code_normalized,timezone,starts_at,official_ends_at,operational_deadline_at,status,
++    external_queue_enabled,external_last_order,created_at,updated_at)
++    VALUES($1,'T6.1-D fixture',$2,'America/Sao_Paulo',clock_timestamp()-interval '1 hour',clock_timestamp()+interval '4 hours',
++    clock_timestamp()+interval '4 hours 30 minutes',$3,true,0,clock_timestamp(),clock_timestamp())`, [id, code, status]);
++  ownedEvents.add(id); return id;
++}
++
++async function waitingQueue(eventId: string, userId: string): Promise<{ experienceId: string; participationId: string; queueEntryId: string }> {
++  const experienceId = randomUUID(), participationId = randomUUID(), queueEntryId = randomUUID();
++  await pool.query(`INSERT INTO experiences(id,event_id,name,queue_accepting_entries,last_queue_order,created_at,updated_at)
++    VALUES($1,$2,'T6.1-D fixture',true,1,clock_timestamp(),clock_timestamp())`, [experienceId, eventId]);
++  ownedExperiences.add(experienceId);
++  await pool.query(`INSERT INTO participations(id,user_id,event_id,status,joined_at,external_queue_order,arena_entered_at,finished_at,finish_reason,current_queue_entry_id)
++    VALUES($1,$2,$3,'active',clock_timestamp(),1,clock_timestamp(),NULL,NULL,NULL)`, [participationId, userId, eventId]);
++  await pool.query(`INSERT INTO queue_entries(id,participation_id,event_id,experience_id,queue_order,status,entered_at,closed_at,close_reason)
++    VALUES($1,$2,$3,$4,1,'waiting',clock_timestamp(),NULL,NULL)`, [queueEntryId, participationId, eventId, experienceId]);
++  await pool.query("UPDATE participations SET current_queue_entry_id=$2 WHERE id=$1", [participationId, queueEntryId]);
++  return { experienceId, participationId, queueEntryId };
++}
++
++function send(actor: Account | undefined, path: string, body: object, key: string = randomUUID()) {
++  const request = supertest(app.getHttpServer()).post(`/api/v1${path}`).set("Idempotency-Key", key).send(body);
++  if (actor) request.set("Authorization", `Bearer ${actor.token}`);
++  return request;
++}
++function grant(actor: Account, body: object, key?: string) { return send(actor, "/admin/roles/grant", body, key); }
++function revoke(actor: Account, grantId: string, key?: string) { return send(actor, "/admin/roles/revoke", { grantId }, key); }
++function problem(response: { status: number; body: Record<string, unknown> }, status: number, code: string) {
++  assert.equal(response.status, status, JSON.stringify(response.body)); assert.equal(response.body.code, code);
++}
++
++async function simultaneousRoleRequests<T>(start: () => [Promise<T>, Promise<T>]): Promise<[T, T]> {
++  const client = await pool.connect();
++  let transactionOpen = false;
++  let pending: [Promise<T>, Promise<T>] | undefined;
++  try {
++    await client.query("BEGIN"); transactionOpen = true;
++    // Mesmo advisory transaction lock usado pelo serviço: ambas as requisições devem chegar até ele.
++    await client.query("SELECT pg_advisory_xact_lock($1::integer,$2::integer)", [0x41524e47, 0x524f4c45]);
++    const blocker = (await client.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0].pid;
++    pending = start();
++    const deadline = Date.now() + 8_000;
++    let observed = false;
++    while (Date.now() < deadline) {
++      const blocked = await pool.query<{ count: number }>(`SELECT count(DISTINCT pid)::int AS count FROM pg_stat_activity
++        WHERE state='active' AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid))`, [blocker]);
++      if (blocked.rows[0].count === 2) { observed = true; break; }
++      if (blocked.rows[0].count > 2) throw new Error("Mais de duas requisições aguardaram o mutex da fixture.");
++      await new Promise(resolve => setTimeout(resolve, 20));
++    }
++    assert.equal(observed, true, "As duas requisições não aguardaram simultaneamente o mutex de papéis.");
++    await client.query("COMMIT"); transactionOpen = false;
++    return await Promise.all(pending);
++  } catch (error) {
++    if (transactionOpen) await client.query("ROLLBACK").catch(rollbackError => { throw new AggregateError([error, rollbackError], "Rollback da sincronização idempotente falhou."); });
++    throw error;
++  } finally { client.release(); if (pending) await Promise.allSettled(pending); }
++}
++
++before(async () => {
++  const dbName = await pool.query<{ name: string }>("SELECT current_database() AS name");
++  if (dbName.rows[0]?.name !== "arenago_roles_test") throw new Error("[SEGURANÇA BLOQUEADA] Banco de destino incorreto.");
++  const required = await pool.query<{ ready: boolean }>(`SELECT bool_and(to_regclass('public.' || name) IS NOT NULL) AS ready
++    FROM unnest(ARRAY['users','user_roles','sessions','refresh_tokens','user_totp_credentials','user_backup_codes',
++      'totp_activation_tokens','email_verification_tokens','password_reset_tokens','admin_2fa_challenges','audit_logs',
++      'idempotency_operations','events','experiences','stations','participations','queue_entries','service_sessions',
++      'evaluations','participation_profile_snapshots','profiles','questionnaire_versions','games','user_games']) AS required(name)`);
++  if (!required.rows[0]?.ready) throw new Error("[SEGURANÇA BLOQUEADA] Schema/migrations da autenticação e idempotência ausentes.");
++  const historicalAdmins = await pool.query<{ count: number }>("SELECT count(*)::int AS count FROM user_roles WHERE role='admin'");
++  if (historicalAdmins.rows[0]?.count !== 0) throw new Error("[SEGURANÇA BLOQUEADA] A prova do último Admin exige banco dedicado sem Admins preexistentes; nenhum registro será removido.");
++  const { AppModule } = await import("../../src/app.module");
++  const token = await import("../../src/auth/token.util"); signAccessToken = token.signAccessToken;
++  app = await NestFactory.create(AppModule, { logger: false });
++  app.setGlobalPrefix("api/v1"); await app.listen(0, "127.0.0.1");
++  const { ParticipationsService } = await import("../../src/participations/participations.service");
++  participationWriter = app.get(ParticipationsService);
++});
++
++afterEach(async () => {
++  const users = [...ownedUsers], events = [...ownedEvents];
++  if (!users.length && !events.length) return;
++  const client = await pool.connect();
++  let transactionOpen = false;
++  try {
++    await client.query("BEGIN"); transactionOpen = true;
++    await client.query(`DELETE FROM audit_logs WHERE actor_user_id=ANY($1::uuid[]) OR target_user_id=ANY($1::uuid[]) OR event_id=ANY($2::uuid[])`, [users, events]);
++    await client.query("DELETE FROM idempotency_operations WHERE actor_user_id=ANY($1::uuid[])", [users]);
++    await client.query("UPDATE participations SET current_queue_entry_id=NULL WHERE event_id=ANY($1::uuid[])", [events]);
++    await client.query("DELETE FROM service_sessions s USING queue_entries q WHERE s.queue_entry_id=q.id AND q.event_id=ANY($1::uuid[])", [events]);
++    await client.query("DELETE FROM queue_entries WHERE event_id=ANY($1::uuid[])", [events]);
++    await client.query("DELETE FROM evaluations v USING participations p WHERE v.participation_id=p.id AND p.event_id=ANY($1::uuid[])", [events]);
++    await client.query("DELETE FROM participation_profile_snapshots s USING participations p WHERE s.participation_id=p.id AND p.event_id=ANY($1::uuid[])", [events]);
++    await client.query("DELETE FROM participations WHERE event_id=ANY($1::uuid[])", [events]);
++    await client.query("DELETE FROM stations s USING experiences x WHERE s.experience_id=x.id AND x.event_id=ANY($1::uuid[])", [events]);
++    await client.query("DELETE FROM experiences WHERE event_id=ANY($1::uuid[])", [events]);
++    await client.query("DELETE FROM user_roles WHERE user_id=ANY($1::uuid[]) OR granted_by=ANY($1::uuid[])", [users]);
++    await client.query("DELETE FROM refresh_tokens WHERE session_id IN (SELECT id FROM sessions WHERE user_id=ANY($1::uuid[]))", [users]);
++    await client.query("DELETE FROM user_backup_codes WHERE user_id=ANY($1::uuid[])", [users]);
++    await client.query("DELETE FROM user_totp_credentials WHERE user_id=ANY($1::uuid[])", [users]);
++    await client.query("DELETE FROM totp_activation_tokens WHERE user_id=ANY($1::uuid[]) OR issued_by=ANY($1::uuid[])", [users]);
++    await client.query("DELETE FROM admin_2fa_challenges WHERE user_id=ANY($1::uuid[])", [users]);
++    await client.query("DELETE FROM email_verification_tokens WHERE user_id=ANY($1::uuid[])", [users]);
++    await client.query("DELETE FROM password_reset_tokens WHERE user_id=ANY($1::uuid[])", [users]);
++    await client.query("DELETE FROM sessions WHERE user_id=ANY($1::uuid[])", [users]);
++    await client.query("DELETE FROM user_games WHERE user_id=ANY($1::uuid[])", [users]);
++    await client.query("DELETE FROM profiles WHERE user_id=ANY($1::uuid[])", [users]);
++    await client.query("DELETE FROM events WHERE id=ANY($1::uuid[])", [events]);
++    await client.query("DELETE FROM games WHERE id=ANY($1::uuid[])", [[...ownedGames]]);
++    await client.query("DELETE FROM questionnaire_versions WHERE id=ANY($1::uuid[])", [[...ownedVersions]]);
++    await client.query("DELETE FROM users WHERE id=ANY($1::uuid[])", [users]);
++    await client.query("COMMIT"); transactionOpen = false;
++    ownedUsers.clear(); ownedEvents.clear(); ownedExperiences.clear(); ownedVersions.clear(); ownedGames.clear();
++  } catch (error) {
++    if (transactionOpen) await client.query("ROLLBACK").catch(cleanupError => { throw new AggregateError([error, cleanupError], "Rollback da limpeza falhou."); });
++    throw error;
++  } finally { client.release(); }
++});
++
++after(async () => {
++  const errors: unknown[] = [];
++  try { await app?.close(); } catch (error) { errors.push(error); }
++  try { await pool.end(); } catch (error) { errors.push(error); }
++  if (errors.length) throw new AggregateError(errors, "Encerramento da integração T6.1-D falhou.");
++});
++
++test("T6.1-D PostgreSQL concede Admin global com email normalizado sem remover papel participante", async () => {
++  const admin = await account({ admin: true }), target = await account();
++  const sessionsBefore = (await pool.query("SELECT * FROM sessions WHERE user_id=$1 ORDER BY id", [target.id])).rows;
++  const response = await grant(admin, { role: "admin", email: ` ${target.email.toUpperCase()} ` });
++  assert.equal(response.status, 201, JSON.stringify(response.body));
++  assert.equal(response.body.grant.role, "admin"); assert.equal(response.body.grant.eventId, null);
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM user_roles WHERE user_id=$1 AND role='participante' AND revoked_at IS NULL", [target.id])).rows[0].n, 1);
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM user_totp_credentials WHERE user_id=$1", [target.id])).rows[0].n, 0);
++  assert.deepEqual((await pool.query("SELECT * FROM sessions WHERE user_id=$1 ORDER BY id", [target.id])).rows, sessionsBefore);
++});
++
++test("T6.1-D PostgreSQL concede Staff ao evento e registra autor e instante na mesma operação", async () => {
++  const admin = await account({ admin: true }), target = await account(), eventId = await event();
++  const response = await grant(admin, { role: "staff", email: target.email, eventId });
++  assert.equal(response.status, 201, JSON.stringify(response.body));
++  const stored = await pool.query(`SELECT r.granted_by=r2.user_id AS actor_ok,r.granted_at=a.occurred_at AS same_time,
++      a.target_user_id=r.user_id AND a.event_id=r.event_id AS target_ok,a.action,a.metadata
++    FROM user_roles r JOIN user_roles r2 ON r2.user_id=$2 AND r2.role='admin' AND r2.revoked_at IS NULL
++    JOIN audit_logs a ON a.actor_user_id=r.granted_by AND a.target_user_id=r.user_id AND a.event_id=r.event_id AND a.action='admin_role_granted'
++    WHERE r.id=$1`, [response.body.grant.id, admin.id]);
++  assert.equal(stored.rowCount, 1); assert.equal(stored.rows[0].actor_ok, true); assert.equal(stored.rows[0].same_time, true); assert.equal(stored.rows[0].target_ok, true);
++  assert.deepEqual(stored.rows[0].metadata, { grantId: response.body.grant.id, role: "staff" });
++});
++
++test("T6.1-D PostgreSQL recusa destinatário inexistente", async () => {
++  problem(await grant(await account({ admin: true }), { role: "admin", email: `${randomUUID()}@example.test` }), 404, "RESOURCE_NOT_FOUND");
++});
++test("T6.1-D PostgreSQL recusa conta destinatária inativa", async () => {
++  const admin = await account({ admin: true }), target = await account({ active: false });
++  problem(await grant(admin, { role: "admin", email: target.email }), 422, "ROLE_TARGET_INELIGIBLE");
++});
++test("T6.1-D PostgreSQL recusa e-mail destinatário não verificado", async () => {
++  const admin = await account({ admin: true }), target = await account({ verified: false });
++  problem(await grant(admin, { role: "staff", email: target.email, eventId: await event() }), 422, "ROLE_TARGET_INELIGIBLE");
++});
++test("T6.1-D PostgreSQL recusa evento inexistente sem gravar concessão", async () => {
++  const admin = await account({ admin: true }), target = await account(), eventId = randomUUID();
++  problem(await grant(admin, { role: "staff", email: target.email, eventId }), 404, "RESOURCE_NOT_FOUND");
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM user_roles WHERE user_id=$1 AND role='staff'", [target.id])).rows[0].n, 0);
++});
++test("T6.1-D PostgreSQL rejeita payload, escopo e campos extras inválidos", async () => {
++  const admin = await account({ admin: true }), eventId = await event();
++  for (const body of [{ role: "admin", email: "person@example.test", eventId }, { role: "staff", email: "person@example.test" },
++    { role: "participante", email: "person@example.test" }, { role: "staff", email: "person@example.test", eventId, grantedBy: admin.id }]) {
++    assert.equal((await grant(admin, body)).status, 400);
++  }
++});
++test("T6.1-D PostgreSQL exige Admin global e recusa Staff", async () => {
++  const eventId = await event(), staff = await account({ staffEventId: eventId }), target = await account();
++  problem(await grant(staff, { role: "admin", email: target.email }), 403, "ADMIN_REQUIRED");
++});
++test("T6.1-D PostgreSQL exige autenticação", async () => {
++  problem(await send(undefined, "/admin/roles/grant", { role: "admin", email: "person@example.test" }), 401, "MISSING_ACCESS_TOKEN");
++});
++test("T6.1-D PostgreSQL exige segundo fator persistido na sessão Admin", async () => {
++  const admin = await account({ admin: true, admin2fa: false }), target = await account();
++  problem(await grant(admin, { role: "admin", email: target.email }), 401, "ADMIN_2FA_REQUIRED");
++});
++test("T6.1-D PostgreSQL revalida sessão revogada", async () => {
++  const admin = await account({ admin: true }), target = await account();
++  await pool.query("UPDATE sessions SET revoked_at=clock_timestamp() WHERE id=$1", [admin.sessionId]);
++  problem(await grant(admin, { role: "admin", email: target.email }), 401, "SESSION_REVOKED");
++});
++test("T6.1-D PostgreSQL revalida sessão expirada", async () => {
++  const admin = await account({ admin: true }), target = await account();
++  await pool.query("UPDATE sessions SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [admin.sessionId]);
++  problem(await grant(admin, { role: "admin", email: target.email }), 401, "SESSION_EXPIRED");
++});
++test("T6.1-D PostgreSQL revalida conta Admin inativa", async () => {
++  const admin = await account({ admin: true }), target = await account();
++  await pool.query("UPDATE users SET is_active=false WHERE id=$1", [admin.id]);
++  problem(await grant(admin, { role: "admin", email: target.email }), 401, "ACCOUNT_DEACTIVATED");
++});
++test("T6.1-D PostgreSQL revalida e-mail do ator Admin", async () => {
++  const admin = await account({ admin: true }), target = await account();
++  await pool.query("UPDATE users SET email_verified_at=NULL WHERE id=$1", [admin.id]);
++  problem(await grant(admin, { role: "admin", email: target.email }), 403, "ADMIN_EMAIL_UNVERIFIED");
++});
++test("T6.1-D PostgreSQL evita concessão duplicada", async () => {
++  const admin = await account({ admin: true }), target = await account();
++  const body = { role: "admin", email: target.email };
++  assert.equal((await grant(admin, body)).status, 201); problem(await grant(admin, body), 409, "ROLE_ALREADY_GRANTED");
++});
++test("T6.1-D PostgreSQL replay não duplica papel nem auditoria", async () => {
++  const admin = await account({ admin: true }), target = await account(), key = randomUUID(), body = { role: "admin", email: target.email };
++  const first = await grant(admin, body, key), second = await grant(admin, body, key);
++  assert.equal(first.status, 201); assert.deepEqual(second.body, first.body);
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM user_roles WHERE user_id=$1 AND role='admin' AND revoked_at IS NULL", [target.id])).rows[0].n, 1);
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM audit_logs WHERE action='admin_role_granted' AND target_user_id=$1", [target.id])).rows[0].n, 1);
++});
++test("T6.1-D PostgreSQL concessões simultâneas com a mesma chave têm um único efeito", async () => {
++  const admin = await account({ admin: true }), target = await account(), key = randomUUID();
++  const body = { role: "admin", email: target.email };
++  const responses = await simultaneousRoleRequests(() => [
++    Promise.resolve(grant(admin, body, key).timeout({ response: 12_000, deadline: 20_000 })),
++    Promise.resolve(grant(admin, body, key).timeout({ response: 12_000, deadline: 20_000 })),
++  ]);
++  for (const response of responses) assert.equal(response.status, 201, JSON.stringify(response.body));
++  assert.deepEqual(responses[0].body, responses[1].body);
++  const grantId = responses[0].body.grant.id;
++  assert.equal((await pool.query(`SELECT count(*)::int AS n FROM user_roles
++    WHERE user_id=$1 AND role='admin' AND event_id IS NULL AND revoked_at IS NULL AND id=$2`, [target.id, grantId])).rows[0].n, 1);
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM user_roles WHERE user_id=$1 AND role='admin'", [target.id])).rows[0].n, 1);
++  const audits = await pool.query<{ n: number; linked: boolean }>(`SELECT count(*)::int AS n,
++    bool_and(metadata->>'grantId'=$2) AS linked FROM audit_logs
++    WHERE action='admin_role_granted' AND target_user_id=$1`, [target.id, grantId]);
++  assert.equal(audits.rows[0].n, 1); assert.equal(audits.rows[0].linked, true);
++  const intents = await pool.query<{ n: number; completed: boolean }>(`SELECT count(*)::int AS n,
++    bool_and(status='completed' AND result_reference=$3) AS completed FROM idempotency_operations
++    WHERE actor_user_id=$1 AND operation='admin_grant_role' AND idempotency_key=$2`, [admin.id, key, grantId]);
++  assert.equal(intents.rows[0].n, 1); assert.equal(intents.rows[0].completed, true);
++});
++
++test("T6.1-D PostgreSQL falha após SQL atômico de concessão/auditoria faz rollback integral e permite retry", async () => {
++  const admin = await account({ admin: true }), target = await account(), key = randomUUID();
++  const { DRIZZLE_DATABASE } = await import("../../src/database/database.module");
++  const { AdminRoleManagementService } = await import("../../src/auth/admin-role-management.service");
++  const database = app.get(DRIZZLE_DATABASE) as NodePgDatabase<typeof schema>;
++  const transaction = database.transaction.bind(database);
++  const faulted = new Proxy(database, {
++    get(targetDatabase, property, receiver) {
++      if (property === "transaction") {
++        return (work: (tx: unknown) => Promise<unknown>, config?: unknown) => transaction(async tx => {
++          const wrapped = new Proxy(tx, {
++            get(targetTx, txProperty, txReceiver) {
++              if (txProperty === "execute") return async (statement: SQL) => {
++                const result = await targetTx.execute(statement);
++                if (new PgDialect().sqlToQuery(statement).sql.includes("admin_role_granted")) {
++                  throw new Error("injected failure after role and audit SQL");
++                }
++                return result;
++              };
++              const value = Reflect.get(targetTx, txProperty, txReceiver);
++              return typeof value === "function" ? value.bind(targetTx) : value;
++            },
++          });
++          return work(wrapped);
++        }, config as never);
++      }
++      const value = Reflect.get(targetDatabase, property, receiver);
++      return typeof value === "function" ? value.bind(targetDatabase) : value;
++    },
++  }) as unknown as NodePgDatabase<typeof schema>;
++  const service = new AdminRoleManagementService(faulted);
++  await assert.rejects(service.grant({ userId: admin.id, sessionId: admin.sessionId,
++    body: { role: "admin", email: target.email }, idempotencyKey: key, expiresAt: new Date(Date.now() + 60_000) }),
++  /injected failure/);
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM user_roles WHERE user_id=$1 AND role='admin'", [target.id])).rows[0].n, 0);
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM audit_logs WHERE action='admin_role_granted' AND target_user_id=$1", [target.id])).rows[0].n, 0);
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM idempotency_operations WHERE actor_user_id=$1 AND idempotency_key=$2", [admin.id, key])).rows[0].n, 0);
++  assert.equal((await grant(admin, { role: "admin", email: target.email }, key)).status, 201);
++});
++
++test("T6.1-D PostgreSQL resposta incerta após COMMIT é recuperada pelo replay idempotente", async () => {
++  const admin = await account({ admin: true }), target = await account(), key = randomUUID();
++  const { DRIZZLE_DATABASE } = await import("../../src/database/database.module");
++  const { AdminRoleManagementService } = await import("../../src/auth/admin-role-management.service");
++  const database = app.get(DRIZZLE_DATABASE) as NodePgDatabase<typeof schema>;
++  const committedThenLost = new Proxy(database, {
++    get(targetDatabase, property, receiver) {
++      if (property === "transaction") {
++        const run = Reflect.get(targetDatabase, property, targetDatabase).bind(targetDatabase) as (...args: unknown[]) => Promise<unknown>;
++        return (...args: unknown[]) => run(...args).then(() => { throw new Error("injected lost COMMIT acknowledgement"); });
++      }
++      const value = Reflect.get(targetDatabase, property, receiver);
++      return typeof value === "function" ? value.bind(targetDatabase) : value;
++    },
++  }) as unknown as NodePgDatabase<typeof schema>;
++  const service = new AdminRoleManagementService(committedThenLost);
++  await assert.rejects(service.grant({ userId: admin.id, sessionId: admin.sessionId,
++    body: { role: "admin", email: target.email }, idempotencyKey: key, expiresAt: new Date(Date.now() + 60_000) }), /lost COMMIT acknowledgement/);
++  const stored = await pool.query(`SELECT r.id,a.id AS audit_id,i.id AS intent_id FROM user_roles r
++    JOIN audit_logs a ON a.action='admin_role_granted' AND a.target_user_id=r.user_id
++    JOIN idempotency_operations i ON i.actor_user_id=$2 AND i.operation='admin_grant_role' AND i.idempotency_key=$3
++    WHERE r.user_id=$1 AND r.role='admin' AND r.revoked_at IS NULL`, [target.id, admin.id, key]);
++  assert.equal(stored.rowCount, 1);
++  const replay = await grant(admin, { role: "admin", email: target.email }, key);
++  assert.equal(replay.status, 201); assert.equal(replay.body.grant.id, stored.rows[0].id);
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM audit_logs WHERE action='admin_role_granted' AND target_user_id=$1", [target.id])).rows[0].n, 1);
++});
++
++test("T6.1-D PostgreSQL falha no limite transacional antes de COMMIT reverte todas as escritas", async () => {
++  const admin = await account({ admin: true }), target = await account(), key = randomUUID();
++  const { DRIZZLE_DATABASE } = await import("../../src/database/database.module");
++  const { AdminRoleManagementService } = await import("../../src/auth/admin-role-management.service");
++  const database = app.get(DRIZZLE_DATABASE) as NodePgDatabase<typeof schema>;
++  const transaction = database.transaction.bind(database);
++  const failingBeforeCommit = new Proxy(database, {
++    get(databaseTarget, property, receiver) {
++      if (property === "transaction") return (work: (tx: unknown) => Promise<unknown>, config?: unknown) => transaction(async tx => {
++        await work(tx);
++        throw new Error("injected failure before COMMIT");
++      }, config as never);
++      const value = Reflect.get(databaseTarget, property, receiver);
++      return typeof value === "function" ? value.bind(databaseTarget) : value;
++    },
++  }) as unknown as NodePgDatabase<typeof schema>;
++  const service = new AdminRoleManagementService(failingBeforeCommit);
++  await assert.rejects(service.grant({ userId: admin.id, sessionId: admin.sessionId, body: { role: "admin", email: target.email },
++    idempotencyKey: key, expiresAt: new Date(Date.now() + 60_000) }), /failure before COMMIT/);
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM user_roles WHERE user_id=$1 AND role='admin'", [target.id])).rows[0].n, 0);
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM audit_logs WHERE target_user_id=$1", [target.id])).rows[0].n, 0);
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM idempotency_operations WHERE actor_user_id=$1 AND idempotency_key=$2", [admin.id, key])).rows[0].n, 0);
++  assert.equal((await grant(admin, { role: "admin", email: target.email }, key)).status, 201);
++});
++
++for (const operation of ["grant", "revoke"] as const) {
++  for (const fault of ["audit", "sql-after-write"] as const) {
++    test(`T6.1-D PostgreSQL ${operation}: erro PostgreSQL real em ${fault} reverte papel, auditoria e intenção e permite retry`, async () => {
++      const admin = await account({ admin: true }), target = await account(), eventId = await event(), key = randomUUID();
++      const body = { role: "staff" as const, email: target.email, eventId };
++      const previous = operation === "revoke" ? await grant(admin, body) : undefined;
++      if (previous) assert.equal(previous.status, 201);
++      const { DRIZZLE_DATABASE } = await import("../../src/database/database.module");
++      const { AdminRoleManagementService } = await import("../../src/auth/admin-role-management.service");
++      const database = app.get(DRIZZLE_DATABASE) as NodePgDatabase<typeof schema>;
++      const transaction = database.transaction.bind(database);
++      const instrumented = new Proxy(database, {
++        get(databaseTarget, property, receiver) {
++          if (property === "transaction") return (work: (tx: unknown) => Promise<unknown>, config?: unknown) => transaction(async tx => {
++            const wrapped = new Proxy(tx, {
++              get(txTarget, txProperty, txReceiver) {
++                if (txProperty === "execute") return async (statement: SQL) => {
++                  const query = new PgDialect().sqlToQuery(statement);
++                  const action = operation === "grant" ? "admin_role_granted" : "admin_role_revoked";
++                  if (!query.sql.includes(action)) return txTarget.execute(statement);
++                  if (fault === "audit") {
++                    // Mantém o CTE real de papel e seus parâmetros; apenas o id obrigatório da auditoria vira NULL.
++                    // O INSERT/UPDATE de papel alimenta a auditoria, cuja constraint provoca 23502 e rollback.
++                    const invalidAudit = query.sql.replace(/(INSERT INTO audit_logs[\s\S]*?SELECT )\$\d+::uuid/, "$1NULL::uuid");
++                    assert.notEqual(invalidAudit, query.sql, "A instrumentação deve interceptar o INSERT de auditoria real.");
++                    const chunks = invalidAudit.split(/(\$\d+)/).map(chunk => /^\$\d+$/.test(chunk)
++                      ? sql`${query.params[Number(chunk.slice(1)) - 1]}` : sql.raw(chunk));
++                    return txTarget.execute(sql.join(chunks, sql.raw("")));
++                  }
++                  const result = await txTarget.execute(statement);
++                  await txTarget.execute(sql`SELECT 1 / 0`);
++                  return result;
++                };
++                const value = Reflect.get(txTarget, txProperty, txReceiver);
++                return typeof value === "function" ? value.bind(txTarget) : value;
++              },
++            });
++            return work(wrapped);
++          }, config as never);
++          const value = Reflect.get(databaseTarget, property, receiver);
++          return typeof value === "function" ? value.bind(databaseTarget) : value;
++        },
++      }) as unknown as NodePgDatabase<typeof schema>;
++      const service = new AdminRoleManagementService(instrumented);
++      const actorInput = { userId: admin.id, sessionId: admin.sessionId, idempotencyKey: key, expiresAt: new Date(Date.now() + 60_000) };
++      const mutation = operation === "grant" ? service.grant({ ...actorInput, body }) : service.revoke({ ...actorInput, grantId: previous!.body.grant.id });
++      await assert.rejects(mutation, (error: unknown) => {
++        let current = error;
++        while (current && typeof current === "object") {
++          if ("code" in current && current.code === (fault === "audit" ? "23502" : "22012")) return true;
++          current = "cause" in current ? current.cause : undefined;
++        }
++        return false;
++      });
++      const roles = await pool.query("SELECT revoked_at FROM user_roles WHERE user_id=$1 AND role='staff' AND event_id=$2", [target.id, eventId]);
++      assert.equal(roles.rowCount, operation === "grant" ? 0 : 1);
++      if (operation === "revoke") assert.equal(roles.rows[0].revoked_at, null);
++      const action = operation === "grant" ? "admin_role_granted" : "admin_role_revoked";
++      assert.equal((await pool.query("SELECT count(*)::int AS n FROM audit_logs WHERE action=$1 AND target_user_id=$2", [action, target.id])).rows[0].n, 0);
++      assert.equal((await pool.query("SELECT count(*)::int AS n FROM idempotency_operations WHERE actor_user_id=$1 AND idempotency_key=$2", [admin.id, key])).rows[0].n, 0);
++      const retry = operation === "grant" ? await grant(admin, body, key) : await revoke(admin, previous!.body.grant.id, key);
++      assert.equal(retry.status, operation === "grant" ? 201 : 200);
++      assert.equal((await pool.query("SELECT count(*)::int AS n FROM audit_logs WHERE action=$1 AND target_user_id=$2", [action, target.id])).rows[0].n, 1);
++    });
++  }
++}
++test("T6.1-D PostgreSQL conflito de chave idempotente não aplica outra operação", async () => {
++  const admin = await account({ admin: true }), first = await account(), second = await account(), key = randomUUID();
++  assert.equal((await grant(admin, { role: "admin", email: first.email }, key)).status, 201);
++  problem(await grant(admin, { role: "admin", email: second.email }, key), 409, "IDEMPOTENCY_KEY_REUSED");
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM user_roles WHERE user_id=$1 AND role='admin' AND revoked_at IS NULL", [second.id])).rows[0].n, 0);
++});
++test("T6.1-D PostgreSQL serializa concessões concorrentes iguais", async () => {
++  const admin = await account({ admin: true }), target = await account(), body = { role: "admin", email: target.email };
++  const responses = await Promise.all([grant(admin, body), grant(admin, body)]);
++  assert.equal(responses.filter(response => response.status === 201).length, 1);
++  assert.equal(responses.filter(response => response.status === 409).length, 1);
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM user_roles WHERE user_id=$1 AND role='admin' AND revoked_at IS NULL", [target.id])).rows[0].n, 1);
++});
++test("T6.1-D PostgreSQL revoga Staff logicamente, audita e preserva sessão", async () => {
++  const admin = await account({ admin: true }), target = await account(), eventId = await event();
++  const created = await grant(admin, { role: "staff", email: target.email, eventId }); assert.equal(created.status, 201);
++  const response = await revoke(admin, created.body.grant.id); assert.equal(response.status, 200, JSON.stringify(response.body));
++  const row = await pool.query(`SELECT r.revoked_at IS NOT NULL AS revoked,r.revoked_by=$2 AS actor_ok,
++      a.occurred_at=r.revoked_at AS audit_time,a.target_user_id=r.user_id AS target_ok
++    FROM user_roles r JOIN audit_logs a ON a.action='admin_role_revoked' AND a.actor_user_id=$2 AND a.target_user_id=r.user_id AND a.event_id=r.event_id
++    WHERE r.id=$1`, [created.body.grant.id, admin.id]);
++  assert.equal(row.rowCount, 1); assert.equal(row.rows[0].revoked, true); assert.equal(row.rows[0].actor_ok, true);
++  assert.equal(row.rows[0].audit_time, true); assert.equal(row.rows[0].target_ok, true);
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM sessions WHERE user_id=$1", [target.id])).rows[0].n, 1);
++});
++test("T6.1-D PostgreSQL replay de revogação não duplica auditoria", async () => {
++  const admin = await account({ admin: true }), target = await account(), eventId = await event();
++  const created = await grant(admin, { role: "staff", email: target.email, eventId }); const key = randomUUID();
++  const first = await revoke(admin, created.body.grant.id, key), second = await revoke(admin, created.body.grant.id, key);
++  assert.equal(first.status, 200); assert.deepEqual(second.body, first.body);
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM audit_logs WHERE action='admin_role_revoked' AND target_user_id=$1", [target.id])).rows[0].n, 1);
++});
++test("T6.1-D PostgreSQL revogações simultâneas com a mesma chave têm um único efeito", async () => {
++  const admin = await account({ admin: true }), target = await account(), key = randomUUID();
++  const created = await grant(admin, { role: "admin", email: target.email });
++  assert.equal(created.status, 201, JSON.stringify(created.body));
++  const grantId = created.body.grant.id;
++  const responses = await simultaneousRoleRequests(() => [
++    Promise.resolve(revoke(admin, grantId, key).timeout({ response: 12_000, deadline: 20_000 })),
++    Promise.resolve(revoke(admin, grantId, key).timeout({ response: 12_000, deadline: 20_000 })),
++  ]);
++  for (const response of responses) assert.equal(response.status, 200, JSON.stringify(response.body));
++  assert.deepEqual(responses[0].body, responses[1].body);
++  assert.equal(responses[0].body.grant.id, grantId);
++  assert.notEqual(responses[0].body.grant.revokedAt, null);
++  assert.equal((await pool.query(`SELECT count(*)::int AS n FROM user_roles
++    WHERE id=$1 AND user_id=$2 AND role='admin' AND event_id IS NULL AND revoked_at IS NOT NULL`, [grantId, target.id])).rows[0].n, 1);
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM user_roles WHERE user_id=$1 AND role='admin'", [target.id])).rows[0].n, 1);
++  const audits = await pool.query<{ n: number; linked: boolean }>(`SELECT count(*)::int AS n,
++    bool_and(metadata->>'grantId'=$2) AS linked FROM audit_logs
++    WHERE action='admin_role_revoked' AND target_user_id=$1`, [target.id, grantId]);
++  assert.equal(audits.rows[0].n, 1); assert.equal(audits.rows[0].linked, true);
++  const intents = await pool.query<{ n: number; completed: boolean }>(`SELECT count(*)::int AS n,
++    bool_and(status='completed' AND result_reference=$3) AS completed FROM idempotency_operations
++    WHERE actor_user_id=$1 AND operation='admin_revoke_role' AND idempotency_key=$2`, [admin.id, key, grantId]);
++  assert.equal(intents.rows[0].n, 1); assert.equal(intents.rows[0].completed, true);
++});
++test("T6.1-D PostgreSQL revogação repetida com nova chave não duplica efeitos", async () => {
++  const admin = await account({ admin: true }), target = await account(), created = await grant(admin, { role: "admin", email: target.email });
++  await pool.query("INSERT INTO user_totp_credentials(id,user_id,secret_encrypted,is_verified,verified_at,created_at,updated_at) VALUES($1,$2,'fixture',true,clock_timestamp(),clock_timestamp(),clock_timestamp())", [randomUUID(), target.id]);
++  assert.equal((await revoke(admin, created.body.grant.id)).status, 200);
++  problem(await revoke(admin, created.body.grant.id), 404, "RESOURCE_NOT_FOUND");
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM audit_logs WHERE action='admin_role_revoked' AND target_user_id=$1", [target.id])).rows[0].n, 1);
++});
++test("T6.1-D PostgreSQL não revoga papel participante", async () => {
++  const admin = await account({ admin: true }), target = await account();
++  const participantRole = await pool.query<{ id: string }>("SELECT id FROM user_roles WHERE user_id=$1 AND role='participante'", [target.id]);
++  problem(await revoke(admin, participantRole.rows[0].id), 404, "RESOURCE_NOT_FOUND");
++  assert.equal((await pool.query("SELECT revoked_at FROM user_roles WHERE id=$1", [participantRole.rows[0].id])).rows[0].revoked_at, null);
++});
++test("T6.1-D PostgreSQL recusa concessão ausente", async () => {
++  problem(await revoke(await account({ admin: true }), randomUUID()), 404, "RESOURCE_NOT_FOUND");
++});
++test("T6.1-D PostgreSQL protege a revogação do último Admin com TOTP", async () => {
++  const admin = await account({ admin: true });
++  problem(await revoke(admin, admin.adminRoleId!), 409, "LAST_ADMIN_REQUIRED");
++  assert.equal((await pool.query("SELECT revoked_at FROM user_roles WHERE id=$1", [admin.adminRoleId])).rows[0].revoked_at, null);
++});
++test("T6.1-D PostgreSQL permite autorrevogação quando outro Admin viável permanece", async () => {
++  const admin = await account({ admin: true }), second = await account({ admin: true });
++  assert.equal((await revoke(admin, admin.adminRoleId!)).status, 200);
++  assert.equal((await pool.query("SELECT revoked_at IS NOT NULL AS revoked FROM user_roles WHERE id=$1", [admin.adminRoleId])).rows[0].revoked, true);
++  assert.equal((await pool.query("SELECT revoked_at FROM user_roles WHERE id=$1", [second.adminRoleId])).rows[0].revoked_at, null);
++});
++test("T6.1-D PostgreSQL revogações concorrentes de Admin não removem a última autoridade viável", async () => {
++  const first = await account({ admin: true }), second = await account({ admin: true });
++  const responses = await Promise.all([revoke(first, first.adminRoleId!), revoke(second, second.adminRoleId!)]);
++  assert.equal(responses.filter(response => response.status === 200).length, 1);
++  assert.equal(responses.filter(response => response.status === 409).length, 1);
++  problem(responses.find(response => response.status === 409)!, 409, "LAST_ADMIN_REQUIRED");
++  assert.equal((await pool.query(`SELECT count(*)::int AS n FROM user_roles r JOIN users u ON u.id=r.user_id
++    JOIN user_totp_credentials t ON t.user_id=u.id WHERE r.role='admin' AND r.event_id IS NULL AND r.revoked_at IS NULL
++      AND u.is_active AND u.email_verified_at IS NOT NULL AND t.is_verified`)).rows[0].n, 1);
++});
++test("T6.1-D PostgreSQL permite revogar Admin já sem TOTP sem retirar o último Admin viável", async () => {
++  const admin = await account({ admin: true }), target = await account({ admin: true, totp: false });
++  assert.equal((await revoke(admin, target.adminRoleId!)).status, 200);
++});
++test("T6.1-D PostgreSQL efeito da revogação Admin é imediato no endpoint protegido", async () => {
++  const admin = await account({ admin: true }), second = await account({ admin: true }), target = await account();
++  assert.equal((await revoke(admin, admin.adminRoleId!)).status, 200);
++  problem(await grant(admin, { role: "admin", email: target.email }), 403, "ADMIN_REQUIRED");
++  assert.equal((await pool.query("SELECT revoked_at FROM user_roles WHERE id=$1", [second.adminRoleId])).rows[0].revoked_at, null);
++});
++test("T6.1-D PostgreSQL permite revogar o último Staff sem encerrar evento", async () => {
++  const admin = await account({ admin: true }), eventId = await event("open"), staff = await account();
++  const experienceId = randomUUID(); ownedExperiences.add(experienceId);
++  await pool.query("INSERT INTO experiences(id,event_id,name,created_at,updated_at) VALUES($1,$2,'Prontidão T6.1-D',clock_timestamp(),clock_timestamp())", [experienceId, eventId]);
++  await pool.query("INSERT INTO stations(id,experience_id,label,availability,created_at,updated_at) VALUES($1,$2,'Estação T6.1-D','available',clock_timestamp(),clock_timestamp())", [randomUUID(), experienceId]);
++  const { EventsService } = await import("../../src/events/events.service");
++  const eventsService = app.get(EventsService);
++  const created = await grant(admin, { role: "staff", email: staff.email, eventId });
++  const ready = await eventsService.evaluateEventAvailabilityById(eventId, new Date());
++  assert.ok(ready.eventExists); assert.equal(ready.eventAcceptingNewEntries, true);
++  assert.equal((await revoke(admin, created.body.grant.id)).status, 200);
++  assert.equal((await pool.query("SELECT status FROM events WHERE id=$1", [eventId])).rows[0].status, "open");
++  const unavailable = await eventsService.evaluateEventAvailabilityById(eventId, new Date());
++  assert.ok(unavailable.eventExists); assert.equal(unavailable.eventAcceptingNewEntries, false);
++  assert.deepEqual(unavailable.missing, ["EVENT_HAS_NO_AUTHORIZED_STAFF"]);
++  const admission = await participationWriter.createParticipation({ userId: staff.id, eventId,
++    idempotencyKey: randomUUID(), expiresAt: new Date(Date.now() + 60_000) });
++  assert.equal(admission.kind, "blocked");
++  if (admission.kind !== "blocked") assert.fail("Nenhuma admissão é permitida sem Staff apto.");
++  assert.ok(admission.eligibility.blockingReasons.includes("EVENT_NOT_READY"));
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM participations WHERE event_id=$1", [eventId])).rows[0].n, 0);
++  assert.equal((await grant(admin, { role: "staff", email: staff.email, eventId })).status, 201);
++  const restored = await eventsService.evaluateEventAvailabilityById(eventId, new Date());
++  assert.ok(restored.eventExists); assert.equal(restored.eventAcceptingNewEntries, true);
++});
++test("T6.1-D PostgreSQL revogar Staff preserva participação e entrada waiting", async () => {
++  const admin = await account({ admin: true }), staff = await account(), eventId = await event("open");
++  const queue = await waitingQueue(eventId, staff.id);
++  const created = await grant(admin, { role: "staff", email: staff.email, eventId });
++  assert.equal((await revoke(admin, created.body.grant.id)).status, 200);
++  const state = await pool.query(`SELECT p.status AS participation_status,p.current_queue_entry_id=q.id AS pointer_ok,
++      q.status AS queue_status,q.event_id=p.event_id AS event_ok FROM participations p JOIN queue_entries q ON q.id=$2
++    WHERE p.id=$1`, [queue.participationId, queue.queueEntryId]);
++  assert.deepEqual(state.rows[0], { participation_status: "active", pointer_ok: true, queue_status: "waiting", event_ok: true });
++});
++
++async function prepareStaffAdmissionRace() {
++  const admin = await account({ admin: true }), staff = await account(), entrant = await account(), eventId = await event("open");
++  const experienceId = randomUUID(), stationId = randomUUID(), versionId = randomUUID(), gameId = randomUUID();
++  ownedExperiences.add(experienceId); ownedVersions.add(versionId); ownedGames.add(gameId);
++  await pool.query("INSERT INTO experiences(id,event_id,name,created_at,updated_at) VALUES($1,$2,'Concor. T6.1-D',clock_timestamp(),clock_timestamp())", [experienceId, eventId]);
++  await pool.query("INSERT INTO stations(id,experience_id,label,availability,created_at,updated_at) VALUES($1,$2,'Estação T6.1-D','available',clock_timestamp(),clock_timestamp())", [stationId, experienceId]);
++  await pool.query("INSERT INTO questionnaire_versions(id,version,definition,activated_at,created_at) VALUES($1,$2,'{}',clock_timestamp(),clock_timestamp())", [versionId, `d-${versionId}`]);
++  await pool.query(`INSERT INTO profiles(user_id,birth_date,gender,education,market_knowledge,market_interest,questionnaire_version_id,completed_at,created_at,updated_at)
++    VALUES($1,'2000-01-01','Prefiro não informar','Superior','Sim, conheço.','Sim, tenho interesse.',$2,clock_timestamp(),clock_timestamp(),clock_timestamp())`, [entrant.id, versionId]);
++  await pool.query("INSERT INTO games(id,name,is_curated,created_at) VALUES($1,$2,false,clock_timestamp())", [gameId, `T61D-${gameId}`]);
++  await pool.query("INSERT INTO user_games(user_id,game_id,created_at) VALUES($1,$2,clock_timestamp())", [entrant.id, gameId]);
++  const created = await grant(admin, { role: "staff", email: staff.email, eventId });
++  assert.equal(created.status, 201, JSON.stringify(created.body));
++  return { admin, entrant, eventId, grantId: created.body.grant.id as string };
++}
++
++async function waitForEventLockWaiter(blockerPid: number): Promise<number> {
++  const deadline = Date.now() + 8_000;
++  while (Date.now() < deadline) {
++    const blocked = await pool.query<{ pid: number }>(`SELECT pid FROM pg_stat_activity
++      WHERE state='active' AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid))`, [blockerPid]);
++    if (blocked.rows.length === 1) return blocked.rows[0].pid;
++    if (blocked.rows.length > 1) throw new Error("Mais de uma transação aguardou o mesmo bloqueador na prova de ordem.");
++    await new Promise(resolve => setTimeout(resolve, 20));
++  }
++  throw new Error("A ordem de espera pelo lock do evento não foi observada no prazo.");
++}
++
++async function orderedStaffAdmissionRace(first: "revoke" | "admission") {
++  const { admin, entrant, eventId, grantId } = await prepareStaffAdmissionRace();
++  const client = await pool.connect();
++  let transactionOpen = false;
++  const pending: Promise<unknown>[] = [];
++  try {
++    await client.query("BEGIN"); transactionOpen = true;
++    await client.query("SELECT id FROM events WHERE id=$1 FOR UPDATE", [eventId]);
++    const blocker = (await client.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0].pid;
++    const startAdmission = () => {
++      const joining = participationWriter.createParticipation({ userId: entrant.id, eventId,
++        idempotencyKey: randomUUID(), expiresAt: new Date(Date.now() + 60_000) });
++      pending.push(joining); joining.catch(() => undefined);
++      return joining;
++    };
++    const startRevocation = () => {
++      const revoking = Promise.resolve(revoke(admin, grantId).timeout({ response: 12_000, deadline: 20_000 }));
++      pending.push(revoking); revoking.catch(() => undefined);
++      return revoking;
++    };
++    let joining: ReturnType<typeof startAdmission>;
++    let revoking: ReturnType<typeof startRevocation>;
++    if (first === "revoke") {
++      revoking = startRevocation();
++      const revokePid = await waitForEventLockWaiter(blocker);
++      joining = startAdmission();
++      const admissionPid = await waitForEventLockWaiter(revokePid);
++      assert.notEqual(admissionPid, blocker);
++    } else {
++      joining = startAdmission();
++      const admissionPid = await waitForEventLockWaiter(blocker);
++      revoking = startRevocation();
++      const revokePid = await waitForEventLockWaiter(admissionPid);
++      assert.notEqual(revokePid, blocker);
++    }
++    await client.query("COMMIT"); transactionOpen = false;
++    const [admission, response] = await Promise.all([joining, revoking]);
++    assert.equal(response.status, 200, JSON.stringify(response.body));
++    assert.equal((await pool.query("SELECT revoked_at IS NOT NULL AS revoked FROM user_roles WHERE id=$1", [grantId])).rows[0].revoked, true);
++    return { admission, entrant, eventId, grantId };
++  } catch (error) {
++    if (transactionOpen) await client.query("ROLLBACK").catch(rollbackError => { throw new AggregateError([error, rollbackError], "Rollback da fixture concorrente falhou."); });
++    throw error;
++  } finally { client.release(); await Promise.allSettled(pending); }
++}
++
++test("T6.1-D PostgreSQL revogação Staff confirmada primeiro bloqueia admissão posterior", async () => {
++  const { admission, entrant, eventId } = await orderedStaffAdmissionRace("revoke");
++  assert.equal(admission.kind, "blocked");
++  if (admission.kind !== "blocked") assert.fail("A admissão posterior à revogação não pode ser criada.");
++  assert.ok(admission.eligibility.blockingReasons.includes("EVENT_NOT_READY"));
++  const { EventsService } = await import("../../src/events/events.service");
++  const availability = await app.get(EventsService).evaluateEventAvailabilityById(eventId, new Date());
++  if (!availability.eventExists) assert.fail("O evento da fixture deve existir ao verificar a causa da indisponibilidade.");
++  assert.deepEqual(availability.missing, ["EVENT_HAS_NO_AUTHORIZED_STAFF"]);
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM participations WHERE user_id=$1 AND event_id=$2", [entrant.id, eventId])).rows[0].n, 0);
++});
++
++test("T6.1-D PostgreSQL ingresso decidido primeiro é preservado após revogação Staff", async () => {
++  const { admission, entrant, eventId, grantId } = await orderedStaffAdmissionRace("admission");
++  assert.equal(admission.kind, "created");
++  if (admission.kind !== "created") assert.fail("A admissão anterior à revogação deve ser criada.");
++  const persisted = await pool.query<{ count: number; ordered: boolean }>(`SELECT count(*)::int AS count,
++    bool_and(p.joined_at <= r.revoked_at) AS ordered FROM participations p CROSS JOIN user_roles r
++    WHERE p.id=$1 AND p.user_id=$2 AND p.event_id=$3 AND r.id=$4`,
++  [admission.participationId, entrant.id, eventId, grantId]);
++  assert.equal(persisted.rows[0].count, 1);
++  assert.equal(persisted.rows[0].ordered, true);
++});
++test("T6.1-D PostgreSQL revogação Staff tem efeito imediato nas consultas Staff", async () => {
++  const admin = await account({ admin: true }), eventId = await event("open"), staff = await account();
++  const created = await grant(admin, { role: "staff", email: staff.email, eventId });
++  assert.equal((await supertest(app.getHttpServer()).get(`/api/v1/staff/events/${eventId}/stations`).set("Authorization", `Bearer ${staff.token}`)).status, 200);
++  assert.equal((await revoke(admin, created.body.grant.id)).status, 200);
++  const denied = await supertest(app.getHttpServer()).get(`/api/v1/staff/events/${eventId}/stations`).set("Authorization", `Bearer ${staff.token}`);
++  problem(denied, 404, "RESOURCE_NOT_FOUND");
++});
++test("T6.1-D PostgreSQL Staff posterior não reabre evento encerrado", async () => {
++  const admin = await account({ admin: true }), target = await account(), eventId = await event("closed");
++  const response = await grant(admin, { role: "staff", email: target.email, eventId });
++  assert.equal(response.status, 201); assert.equal((await pool.query("SELECT status FROM events WHERE id=$1", [eventId])).rows[0].status, "closed");
++});
++test("T6.1-D PostgreSQL duas revogações concorrentes da mesma concessão têm um único efeito", async () => {
++  const admin = await account({ admin: true }), second = await account({ admin: true }), target = await account(), eventId = await event();
++  const created = await grant(admin, { role: "staff", email: target.email, eventId });
++  const responses = await Promise.all([revoke(admin, created.body.grant.id), revoke(second, created.body.grant.id)]);
++  assert.equal(responses.filter(response => response.status === 200).length, 1);
++  assert.equal(responses.filter(response => response.status === 404).length, 1);
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM audit_logs WHERE action='admin_role_revoked' AND target_user_id=$1", [target.id])).rows[0].n, 1);
++});
++test("T6.1-D PostgreSQL concessão concorrente com revogação mantém histórico único e estado válido", async () => {
++  const admin = await account({ admin: true }), target = await account(), eventId = await event();
++  const created = await grant(admin, { role: "staff", email: target.email, eventId });
++  const key = randomUUID(), body = { role: "staff", email: target.email, eventId };
++  const responses = await Promise.all([revoke(admin, created.body.grant.id), grant(admin, body, key)]);
++  assert.equal(responses[0].status, 200);
++  if (responses[1].status === 409) {
++    problem(responses[1], 409, "ROLE_ALREADY_GRANTED");
++    assert.equal((await grant(admin, body, key)).status, 201);
++  } else assert.equal(responses[1].status, 201);
++  const roles = await pool.query("SELECT revoked_at FROM user_roles WHERE user_id=$1 AND role='staff' AND event_id=$2 ORDER BY granted_at", [target.id, eventId]);
++  assert.equal(roles.rowCount, 2); assert.notEqual(roles.rows[0].revoked_at, null); assert.equal(roles.rows[1].revoked_at, null);
++});
++test("T6.1-D PostgreSQL revogar Staff preserva papel participante e os demais escopos Staff", async () => {
++  const admin = await account({ admin: true }), target = await account(), firstEvent = await event(), secondEvent = await event();
++  const first = await grant(admin, { role: "staff", email: target.email, eventId: firstEvent });
++  assert.equal((await grant(admin, { role: "staff", email: target.email, eventId: secondEvent })).status, 201);
++  assert.equal((await revoke(admin, first.body.grant.id)).status, 200);
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM user_roles WHERE user_id=$1 AND revoked_at IS NULL AND (role='participante' OR (role='staff' AND event_id=$2))", [target.id, secondEvent])).rows[0].n, 2);
++});
+diff --git a/backend/test/unit/admin-role-management-db-guard.test.ts b/backend/test/unit/admin-role-management-db-guard.test.ts
+new file mode 100644
+index 0000000..0147084
+--- /dev/null
++++ b/backend/test/unit/admin-role-management-db-guard.test.ts
+@@ -0,0 +1,52 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { assertAdminRoleManagementTestDatabaseUrls } from "../integration/admin-role-management-db-guard";
++
++function env(database = "arenago_roles_test") {
++  const url = `postgresql://fixture:fixture@127.0.0.1:55432/${database}`;
++  return { NODE_ENV: "test", DATABASE_URL: url, DATABASE_DIRECT_URL: url, EVENTS_TEST_DATABASE_URL: url };
++}
++
++test("T6.1-D guarda aceita exclusivamente as três URLs iguais do PostgreSQL dedicado", () => {
++  assert.equal(assertAdminRoleManagementTestDatabaseUrls(env()),
++    "postgresql://fixture:fixture@127.0.0.1:55432/arenago_roles_test");
++});
++
++test("T6.1-D guarda bloqueia banco compartilhado, host/porta remotos, query e fragmento", () => {
++  for (const invalid of ["arenago_events_test", "arenago_bootstrap_test", "other_db"]) {
++    assert.throws(() => assertAdminRoleManagementTestDatabaseUrls(env(invalid)), /SEGURANÇA BLOQUEADA/);
++  }
++  for (const change of [
++    (url: string) => url.replace("127.0.0.1", "localhost"),
++    (url: string) => url.replace("55432", "5432"),
++    (url: string) => `${url}?sslmode=disable`,
++    (url: string) => `${url}#fragment`,
++  ]) {
++    const value = env(), changed = change(value.DATABASE_URL!);
++    value.DATABASE_URL = changed; value.DATABASE_DIRECT_URL = changed; value.EVENTS_TEST_DATABASE_URL = changed;
++    assert.throws(() => assertAdminRoleManagementTestDatabaseUrls(value), /SEGURANÇA BLOQUEADA/);
++  }
++  const mismatched = env(); mismatched.DATABASE_DIRECT_URL = mismatched.DATABASE_URL.replace("fixture:fixture", "other:fixture");
++  assert.throws(() => assertAdminRoleManagementTestDatabaseUrls(mismatched), /URLs devem ser idênticas/);
++});
++
++test("T6.1-D guarda exige NODE_ENV=test e todas as URLs explícitas", () => {
++  for (const name of ["NODE_ENV", "DATABASE_URL", "DATABASE_DIRECT_URL", "EVENTS_TEST_DATABASE_URL"] as const) {
++    const value: Record<string, string | undefined> = env(); delete value[name];
++    assert.throws(() => assertAdminRoleManagementTestDatabaseUrls(value), /SEGURANÇA BLOQUEADA/);
++  }
++  assert.throws(() => assertAdminRoleManagementTestDatabaseUrls({ ...env(), NODE_ENV: "production" }), /SEGURANÇA BLOQUEADA/);
++});
++
++test("T6.1-D guarda recusa credenciais ausentes, espaços e caminhos codificados", () => {
++  for (const change of [
++    (url: string) => url.replace("fixture:fixture@", ""),
++    (url: string) => url.replace("fixture:fixture@", "fixture@"),
++    (url: string) => ` ${url}`,
++    (url: string) => url.replace("arenago_roles_test", "%61renago_roles_test"),
++  ]) {
++    const url = change(env().DATABASE_URL);
++    assert.throws(() => assertAdminRoleManagementTestDatabaseUrls({ NODE_ENV: "test", DATABASE_URL: url,
++      DATABASE_DIRECT_URL: url, EVENTS_TEST_DATABASE_URL: url }), /SEGURANÇA BLOQUEADA/);
++  }
++});
+diff --git a/backend/test/unit/admin-role-management-http.test.ts b/backend/test/unit/admin-role-management-http.test.ts
+new file mode 100644
+index 0000000..a4d864d
+--- /dev/null
++++ b/backend/test/unit/admin-role-management-http.test.ts
+@@ -0,0 +1,138 @@
++import "reflect-metadata";
++import assert from "node:assert/strict";
++import { after, before, test } from "node:test";
++import { Module, type INestApplication } from "@nestjs/common";
++import { NestFactory } from "@nestjs/core";
++import supertest from "supertest";
++import { AuthService } from "../../src/auth/auth.service";
++import { SessionAuthGuard } from "../../src/auth/session-auth.guard";
++import { AdminRoleManagementController } from "../../src/auth/admin-role-management.controller";
++import { AdminRoleManagementService, type AdminRoleMutationInput, type AdminRoleRevokeInput } from "../../src/auth/admin-role-management.service";
++import { AdminRoleManagementError, executeAdminRoleManagement } from "../../src/auth/admin-role-management.problem";
++import { AdminIdempotencyPolicy } from "../../src/events/admin-idempotency.policy";
++import { ProblemException } from "../../src/common/errors/problem.exception";
++import { ProblemDetailsExceptionFilter } from "../../src/common/errors/problem-details.filter";
++
++const id = (n: number) => `abcdef00-0000-4000-8000-${String(n).padStart(12, "0")}`;
++const userId = id(1), sessionId = id(2), grantId = id(3), targetId = id(4);
++const routes = ["/api/v1/admin/roles/grant", "/api/v1/admin/roles/revoke"];
++const bodies = [{ role: "admin", email: "target@example.test" }, { grantId }];
++const view = { id: grantId, userId: targetId, role: "admin" as const, eventId: null,
++  grantedAt: "2026-11-06T12:00:00.000Z", revokedAt: null as string | null };
++let result = { grant: { ...view } }, failure: Error | undefined;
++const grants: AdminRoleMutationInput[] = [], revocations: AdminRoleRevokeInput[] = [];
++@Module({ controllers: [AdminRoleManagementController], providers: [SessionAuthGuard, AdminIdempotencyPolicy,
++  { provide: AuthService, useValue: { authenticateBearerToken: async (token: string) => {
++    if (token !== "unit-admin") throw new ProblemException({ typeSlug: "invalid-access-token", title: "Token inválido",
++      status: 401, code: "INVALID_ACCESS_TOKEN", detail: "Token inválido." });
++    return { userId, sessionId, roles: ["admin"] };
++  } } },
++  { provide: AdminRoleManagementService, useValue: {
++    grant: async (input: AdminRoleMutationInput) => { grants.push(input); if (failure) throw failure; return result; },
++    revoke: async (input: AdminRoleRevokeInput) => { revocations.push(input); if (failure) throw failure; return result; },
++  } },
++] })
++class HttpUnitModule {}
++let app: INestApplication;
++const previousTtl = process.env.ADMIN_IDEMPOTENCY_TTL_SECONDS;
++before(async () => {
++  process.env.ADMIN_IDEMPOTENCY_TTL_SECONDS = "60";
++  app = await NestFactory.create(HttpUnitModule, { logger: false });
++  app.setGlobalPrefix("api/v1"); app.useGlobalFilters(new ProblemDetailsExceptionFilter()); await app.listen(0, "127.0.0.1");
++});
++after(async () => {
++  try { await app?.close(); }
++  finally { if (previousTtl === undefined) delete process.env.ADMIN_IDEMPOTENCY_TTL_SECONDS; else process.env.ADMIN_IDEMPOTENCY_TTL_SECONDS = previousTtl; }
++});
++function reset() { grants.length = 0; revocations.length = 0; failure = undefined; result = { grant: { ...view } }; }
++function post(route = routes[0]) { return supertest(app.getHttpServer()).post(route).set("Authorization", "Bearer unit-admin").set("Idempotency-Key", "opaque"); }
++function problem(response: supertest.Response, status: number, code: string) {
++  assert.equal(response.status, status); assert.equal(response.body.status, status); assert.equal(response.body.code, code);
++  assert.match(response.headers["content-type"], /application\/problem\+json/);
++}
++
++test("T6.1-D HTTP concede Admin com identidade da sessão, e-mail normalizado e TTL compartilhado", async () => {
++  reset(); const now = Date.now();
++  const response = await post().query({ userId: id(8), sessionId: id(9) }).send({ role: "admin", email: "  TARGET@Example.Test " });
++  assert.equal(response.status, 201); assert.deepEqual(response.body, result); assert.equal(grants.length, 1);
++  assert.deepEqual({ ...grants[0], expiresAt: undefined }, { userId, sessionId, body: bodies[0], idempotencyKey: "opaque", expiresAt: undefined });
++  assert.ok(grants[0].expiresAt.getTime() >= now + 60_000 && grants[0].expiresAt.getTime() <= Date.now() + 60_000);
++});
++
++test("T6.1-D HTTP revoga concessão por UUID normalizado usando o ator autenticado", async () => {
++  reset(); result = { grant: { ...view, revokedAt: view.grantedAt } };
++  const response = await post(routes[1]).query({ userId: id(8) }).send({ grantId: grantId.toUpperCase() });
++  assert.equal(response.status, 200); assert.deepEqual(response.body, result); assert.equal(revocations.length, 1);
++  assert.deepEqual({ ...revocations[0], expiresAt: undefined }, { userId, sessionId, grantId, idempotencyKey: "opaque", expiresAt: undefined });
++});
++
++test("T6.1-D HTTP exige Bearer válido nas duas rotas antes do serviço", async () => {
++  reset();
++  for (const [index, route] of routes.entries()) {
++    problem(await supertest(app.getHttpServer()).post(route).send(bodies[index]), 401, "MISSING_ACCESS_TOKEN");
++    problem(await post(route).set("Authorization", "Bearer invalid").send(bodies[index]), 401, "INVALID_ACCESS_TOKEN");
++  }
++  assert.equal(grants.length + revocations.length, 0);
++});
++
++test("T6.1-D HTTP rejeita corpo extra, escopo inválido e conteúdo fora de JSON antes do serviço", async () => {
++  reset();
++  for (const [index, route] of routes.entries()) {
++    for (const body of [{}, [], { ...bodies[index], userId }, { ...bodies[index], expiresAt: view.grantedAt }]) {
++      problem(await post(route).send(body), 400, "VALIDATION_ERROR");
++    }
++    problem(await post(route).type("text/plain").send(JSON.stringify(bodies[index])), 400, "VALIDATION_ERROR");
++    problem(await post(route).type("application/json").send("{invalid"), 400, "BAD_REQUEST");
++  }
++  for (const body of [{ role: "staff", email: "target@example.test" }, { role: "admin", email: "target@example.test", eventId: id(9) }]) {
++    problem(await post().send(body), 400, "VALIDATION_ERROR");
++  }
++  problem(await post(routes[1]).send({ grantId: "invalid" }), 400, "VALIDATION_ERROR");
++  assert.equal(grants.length + revocations.length, 0);
++});
++
++test("T6.1-D HTTP exige uma única chave idempotente válida em ambas as mutações", async () => {
++  reset();
++  for (const [index, route] of routes.entries()) {
++    problem(await supertest(app.getHttpServer()).post(route).set("Authorization", "Bearer unit-admin").send(bodies[index]), 400, "VALIDATION_ERROR");
++    for (const key of ["", " ", "x".repeat(129)]) problem(await post(route).set("Idempotency-Key", key).send(bodies[index]), 400, "VALIDATION_ERROR");
++    problem(await post(route).set({ "Idempotency-Key": ["a", "b"] }).send(bodies[index]), 400, "VALIDATION_ERROR");
++  }
++  assert.equal(grants.length + revocations.length, 0);
++});
++
++test("T6.1-D HTTP traduz autorização, duplicidade, último Admin e idempotência em RFC 7807", async () => {
++  reset();
++  for (const [kind, status, code] of [
++    ["account_inactive", 401, "ACCOUNT_DEACTIVATED"], ["admin_required", 403, "ADMIN_REQUIRED"],
++    ["invalid_session", 401, "INVALID_SESSION"], ["session_revoked", 401, "SESSION_REVOKED"],
++    ["session_expired", 401, "SESSION_EXPIRED"], ["admin_2fa_required", 401, "ADMIN_2FA_REQUIRED"],
++    ["actor_email_unverified", 403, "ADMIN_EMAIL_UNVERIFIED"], ["event_not_found", 404, "RESOURCE_NOT_FOUND"],
++    ["target_not_found", 404, "RESOURCE_NOT_FOUND"], ["target_ineligible", 422, "ROLE_TARGET_INELIGIBLE"],
++    ["role_already_granted", 409, "ROLE_ALREADY_GRANTED"], ["role_not_found", 404, "RESOURCE_NOT_FOUND"],
++    ["last_admin", 409, "LAST_ADMIN_REQUIRED"], ["request_conflict", 409, "IDEMPOTENCY_KEY_REUSED"], ["in_progress", 409, "IDEMPOTENCY_IN_PROGRESS"],
++  ] as const) {
++    failure = new AdminRoleManagementError(kind);
++    for (const [index, route] of routes.entries()) problem(await post(route).send(bodies[index]), status, code);
++  }
++});
++
++test("T6.1-D HTTP preserva resposta histórica de replay e não expõe detalhes de erro interno", async () => {
++  reset(); const first = await post().send(bodies[0]), replay = await post().send(bodies[0]);
++  assert.equal(replay.status, 201); assert.deepEqual(replay.body, first.body);
++  assert.deepEqual(Object.keys(replay.body.grant).sort(), ["id", "userId", "role", "eventId", "grantedAt", "revokedAt"].sort());
++  failure = new Error("PRIVATE_SQL_secret@example.test");
++  for (const [index, route] of routes.entries()) {
++    const response = await post(route).send(bodies[index]); problem(response, 500, "INTERNAL_SERVER_ERROR");
++    assert.equal(JSON.stringify(response.body).includes("PRIVATE"), false); assert.equal(JSON.stringify(response.body).includes("example.test"), false);
++  }
++});
++
++test("T6.1-D tradução de erro desconhecido preserva cause inclusive para valores não Error", async () => {
++  for (const original of [new Error("internal"), "unknown failure", null]) {
++    await assert.rejects(executeAdminRoleManagement(async () => { throw original; }), (error: unknown) => {
++      assert.ok(error instanceof Error); assert.equal(error.message, "ADMIN_ROLE_MANAGEMENT_INTERNAL_ERROR");
++      assert.equal(error.cause, original); return true;
++    });
++  }
++});
+diff --git a/backend/test/unit/admin-role-management-service.test.ts b/backend/test/unit/admin-role-management-service.test.ts
+new file mode 100644
+index 0000000..2250535
+--- /dev/null
++++ b/backend/test/unit/admin-role-management-service.test.ts
+@@ -0,0 +1,162 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import type { SQL } from "drizzle-orm";
++import { PgDialect } from "drizzle-orm/pg-core";
++import type { NodePgDatabase } from "drizzle-orm/node-postgres";
++import type * as schema from "../../src/database/schema";
++import type { DatabaseTransactionExecutor } from "../../src/database/database-executor";
++import { AdminRoleManagementService } from "../../src/auth/admin-role-management.service";
++import { AdminRoleManagementError } from "../../src/auth/admin-role-management.problem";
++import { createRequestFingerprint } from "../../src/participations/join-idempotency";
++
++const id = (n: number) => `abcdef00-0000-4000-8000-${String(n).padStart(12, "0")}`;
++const actor = { userId: id(1), sessionId: id(2) }, targetId = id(3), grantId = id(4), eventId = id(5);
++const at = "2026-11-06T12:00:00.123Z", expiresAt = new Date("2026-11-06T12:01:00Z");
++const session = { revoked: false, expired: false, secondFactor: true };
++const grantView = { id: grantId, userId: targetId, role: "staff" as const, eventId, grantedAt: at, revokedAt: null };
++type Step = { match: RegExp; rows: Record<string, unknown>[] };
++const step = (match: RegExp, ...rows: Record<string, unknown>[]): Step => ({ match, rows });
++const sessionStep = () => step(/SELECT revoked_at IS NOT NULL/, session);
++function authorization(): Step[] {
++  return [step(/is_active AS active.*FOR SHARE/s, { active: true }), step(/FROM user_roles.*FOR SHARE/s, { id: id(6) }),
++    step(/FROM sessions.*FOR SHARE/s, { id: actor.sessionId }), sessionStep(), step(/email_verified_at IS NOT NULL AS verified/, { verified: true })];
++}
++
++/** Double somente unitário: verifica decisões e chamadas. Rollback físico é coberto na suíte PostgreSQL. */
++function fixture(steps: Step[], existing?: Record<string, unknown>) {
++  const pending = [...steps], queries: string[] = [], transitions: string[] = [];
++  const reservations: Record<string, unknown>[] = [], completions: Record<string, unknown>[] = [];
++  const tx = {
++    execute: async (statement: SQL) => {
++      const query = new PgDialect().sqlToQuery(statement).sql; queries.push(query);
++      const expected = pending.shift(); assert.ok(expected, `SQL inesperado: ${query}`); assert.match(query, expected.match);
++      return { rows: expected.rows };
++    },
++    insert: () => ({ values: (value: Record<string, unknown>) => {
++      reservations.push(value);
++      return { onConflictDoNothing: () => ({ returning: async () => existing ? [] : [{ id: id(9) }] }) };
++    } }),
++    select: () => ({ from: () => ({ where: () => ({ limit: async () => existing ? [existing] : [] }) }) }),
++    update: () => ({ set: (value: Record<string, unknown>) => {
++      completions.push(value);
++      return { where: () => ({ returning: async () => [{ id: id(9), ...value }] }) };
++    } }),
++  } as unknown as DatabaseTransactionExecutor;
++  const database = { transaction: async (work: (executor: DatabaseTransactionExecutor) => Promise<unknown>, config: unknown) => {
++    assert.deepEqual(config, { isolationLevel: "read committed" }); transitions.push("begin");
++    try { const value = await work(tx); transitions.push("commit"); return value; }
++    catch (error) { transitions.push("rollback"); throw error; }
++  } } as unknown as NodePgDatabase<typeof schema>;
++  return { service: new AdminRoleManagementService(database), queries, reservations, completions, transitions,
++    done: () => assert.equal(pending.length, 0, "Todas as revalidações previstas devem ocorrer.") };
++}
++const grantInput = { ...actor, body: { role: "staff" as const, email: "target@example.test", eventId }, idempotencyKey: "unit-key", expiresAt };
++const revokeInput = { ...actor, grantId, idempotencyKey: "unit-revoke", expiresAt };
++function grantPrefix(): Step[] { return [step(/FROM events.*FOR UPDATE/s, { id: eventId }), step(/pg_advisory_xact_lock/), ...authorization(), sessionStep()]; }
++function revokePrefix(role = "staff"): Step[] {
++  return [step(/SELECT user_id AS/, { userId: targetId, role, eventId: role === "staff" ? eventId : null }),
++    ...(role === "staff" ? [step(/FROM events.*FOR UPDATE/s, { id: eventId })] : []),
++    step(/pg_advisory_xact_lock/), ...authorization(), sessionStep()];
++}
++function grantRows(): Step[] { return [step(/lower\(btrim\(email\)\)/, { id: targetId, active: true, verified: true }), step(/FROM user_roles.*FOR UPDATE/s)]; }
++function revokeTarget(role = "staff", revoked = false): Step[] {
++  return [step(/FROM users.*FOR UPDATE/s, { active: true, verified: true }),
++    step(/FROM user_roles.*FOR UPDATE/s, { id: grantId, userId: targetId, role, eventId: role === "staff" ? eventId : null, revoked })];
++}
++function denied(kind: string) { return (error: unknown) => error instanceof AdminRoleManagementError && error.kind === kind; }
++
++test("T6.1-D serviço concede Staff com lock do evento, fingerprint e resposta idempotente mínima", async () => {
++  const f = fixture([...grantPrefix(), ...grantRows(), step(/WITH decision.*admin_role_granted/s,
++    { ...grantView, grantedAt: at, auditCount: 1 }), sessionStep()]);
++  assert.deepEqual(await f.service.grant(grantInput), { grant: grantView }); f.done();
++  assert.equal(f.reservations[0].actorUserId, actor.userId);
++  assert.equal(f.reservations[0].requestHash, createRequestFingerprint("admin_grant_role", { role: "staff", email: grantInput.body.email, eventId }));
++  assert.deepEqual(f.completions[0].resultPayload, { grant: grantView }); assert.equal(f.completions[0].httpStatus, 201);
++  assert.deepEqual(f.transitions, ["begin", "commit"]);
++});
++
++test("T6.1-D serviço exige autorização persistida antes de reservar ou modificar papéis", async () => {
++  const auth = authorization();
++  for (const [index, rows, kind] of [
++    [0, [{ active: false }], "account_inactive"], [1, [], "admin_required"], [2, [], "invalid_session"],
++    [3, [{ ...session, revoked: true }], "session_revoked"], [3, [{ ...session, expired: true }], "session_expired"],
++    [3, [{ ...session, secondFactor: false }], "admin_2fa_required"], [4, [{ verified: false }], "actor_email_unverified"],
++  ] as const) {
++    const prefix = auth.slice(0, index + 1).map(s => ({ ...s })); prefix[index] = { ...prefix[index], rows: [...rows] };
++    const f = fixture([step(/FROM events.*FOR UPDATE/s, { id: eventId }), step(/pg_advisory_xact_lock/), ...prefix]);
++    await assert.rejects(f.service.grant(grantInput), denied(kind)); f.done();
++    assert.equal(f.reservations.length, 0); assert.equal(f.completions.length, 0); assert.deepEqual(f.transitions, ["begin", "rollback"]);
++  }
++});
++
++test("T6.1-D serviço recusa destinatário ausente, inativo ou não verificado antes da escrita", async () => {
++  for (const rows of [[], [{ id: targetId, active: false, verified: true }], [{ id: targetId, active: true, verified: false }]]) {
++    const f = fixture([...grantPrefix(), { match: /lower\(btrim\(email\)\)/, rows }]);
++    await assert.rejects(f.service.grant(grantInput), denied(rows.length ? "target_ineligible" : "target_not_found"));
++    f.done(); assert.equal(f.completions.length, 0); assert.equal(f.queries.some(q => q.includes("admin_role_granted")), false);
++  }
++});
++
++test("T6.1-D serviço recusa duplicidade sem executar concessão nem auditoria", async () => {
++  const rows = grantRows(); rows[1] = step(/FROM user_roles.*FOR UPDATE/s, { id: grantId });
++  const f = fixture([...grantPrefix(), ...rows]);
++  await assert.rejects(f.service.grant(grantInput), denied("role_already_granted")); f.done(); assert.equal(f.completions.length, 0);
++});
++
++test("T6.1-D serviço reproduz concessão sem consultar ou alterar o destinatário novamente", async () => {
++  const hash = createRequestFingerprint("admin_grant_role", { role: "staff", email: grantInput.body.email, eventId });
++  const f = fixture(grantPrefix(), { id: id(9), requestHash: hash, status: "completed", httpStatus: 201,
++    resultReference: grantId, resultPayload: { grant: grantView } });
++  assert.deepEqual(await f.service.grant(grantInput), { grant: grantView }); f.done(); assert.equal(f.completions.length, 0);
++});
++
++test("T6.1-D serviço impede conflito e reserva em andamento sem efeitos de domínio", async () => {
++  for (const conflict of [false, true]) {
++    const f = fixture(grantPrefix(), { id: id(9), requestHash: conflict ? "0".repeat(64)
++      : createRequestFingerprint("admin_grant_role", { role: "staff", email: grantInput.body.email, eventId }), status: "in_progress" });
++    await assert.rejects(f.service.grant(grantInput), denied(conflict ? "request_conflict" : "in_progress")); f.done();
++    assert.equal(f.completions.length, 0); assert.deepEqual(f.transitions, ["begin", "rollback"]);
++  }
++});
++
++test("T6.1-D serviço revalida sessão após a escrita e propaga expiração para rollback", async () => {
++  const f = fixture([...grantPrefix(), ...grantRows(), step(/admin_role_granted/, { ...grantView, auditCount: 1 }),
++    step(/SELECT revoked_at IS NOT NULL/, { ...session, expired: true })]);
++  await assert.rejects(f.service.grant(grantInput), denied("session_expired")); f.done();
++  assert.equal(f.completions.length, 1); assert.deepEqual(f.transitions, ["begin", "rollback"]);
++});
++
++test("T6.1-D serviço revoga Staff logicamente e persiste somente resposta mínima", async () => {
++  const f = fixture([...revokePrefix(), ...revokeTarget(), step(/FROM user_totp_credentials/), sessionStep(),
++    step(/admin_role_revoked/, { ...grantView, revokedAt: at, auditCount: 1 }), step(/SELECT to_char\(granted_at/, { grantedAt: at }), sessionStep()]);
++  const body = { grant: { ...grantView, revokedAt: at } };
++  assert.deepEqual(await f.service.revoke(revokeInput), body); f.done();
++  assert.equal(f.completions[0].httpStatus, 200); assert.deepEqual(f.completions[0].resultPayload, body);
++  assert.equal(f.queries.some(q => /DELETE|UPDATE sessions/.test(q)), false);
++});
++
++test("T6.1-D serviço não repete revogação com chave nova nem audita concessão já revogada", async () => {
++  const f = fixture([...revokePrefix(), ...revokeTarget("staff", true)]);
++  await assert.rejects(f.service.revoke(revokeInput), denied("role_not_found")); f.done(); assert.equal(f.completions.length, 0);
++});
++
++test("T6.1-D serviço reproduz revogação com mesma chave sem segunda auditoria", async () => {
++  const body = { grant: { ...grantView, revokedAt: at } };
++  const f = fixture(revokePrefix(), { id: id(9), requestHash: createRequestFingerprint("admin_revoke_role", { grantId }),
++    status: "completed", httpStatus: 200, resultReference: grantId, resultPayload: body });
++  assert.deepEqual(await f.service.revoke(revokeInput), body); f.done(); assert.equal(f.completions.length, 0);
++});
++
++test("T6.1-D serviço bloqueia último Admin viável antes da revogação", async () => {
++  const f = fixture([...revokePrefix("admin"), ...revokeTarget("admin"), step(/FROM user_totp_credentials/, { verified: true }),
++    step(/SELECT count\(\*\)/, { count: 0 })]);
++  await assert.rejects(f.service.revoke(revokeInput), denied("last_admin")); f.done(); assert.equal(f.completions.length, 0);
++});
++
++test("T6.1-D serviço permite revogação Admin quando outra autoridade viável permanece", async () => {
++  const view = { ...grantView, role: "admin", eventId: null, revokedAt: at };
++  const f = fixture([...revokePrefix("admin"), ...revokeTarget("admin"), step(/FROM user_totp_credentials/, { verified: true }),
++    step(/SELECT count\(\*\)/, { count: 1 }), sessionStep(), step(/admin_role_revoked/, { ...view, auditCount: 1 }),
++    step(/SELECT to_char\(granted_at/, { grantedAt: at }), sessionStep()]);
++  assert.deepEqual(await f.service.revoke(revokeInput), { grant: view }); f.done(); assert.deepEqual(f.transitions, ["begin", "commit"]);
++});
+diff --git a/backend/test/unit/admin-role-management.test.ts b/backend/test/unit/admin-role-management.test.ts
+new file mode 100644
+index 0000000..e126c63
+--- /dev/null
++++ b/backend/test/unit/admin-role-management.test.ts
+@@ -0,0 +1,44 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { grantAdminRoleBody, managedRoleResponse, revokeAdminRoleBody } from "../../src/auth/admin-role-management.dto";
++import { shouldBlockLastAdminRevocation } from "../../src/auth/admin-role-management.service";
++
++const uuid = "abcdef00-0000-4000-8000-000000000001";
++
++test("T6.1-D DTO concede Admin global ou Staff com evento e normaliza e-mail", () => {
++  assert.deepEqual(grantAdminRoleBody.parse({ role: "admin", email: "  USER@Example.Test " }),
++    { role: "admin", email: "user@example.test" });
++  assert.deepEqual(grantAdminRoleBody.parse({ role: "admin", email: "user@example.test", eventId: null }),
++    { role: "admin", email: "user@example.test", eventId: null });
++  assert.deepEqual(grantAdminRoleBody.parse({ role: "staff", email: " STAFF@Example.Test ", eventId: uuid }),
++    { role: "staff", email: "staff@example.test", eventId: uuid });
++});
++
++test("T6.1-D DTO estrito recusa escopos, papéis, identificadores e propriedades extras inválidos", () => {
++  for (const body of [
++    { role: "admin", email: "a@example.test", eventId: uuid },
++    { role: "staff", email: "a@example.test" },
++    { role: "participante", email: "a@example.test" },
++    { role: "staff", email: "a@example.test", eventId: "invalid" },
++    { role: "admin", email: "invalid" },
++    { role: "admin", email: "a@example.test", userId: uuid },
++  ]) assert.equal(grantAdminRoleBody.safeParse(body).success, false);
++  for (const body of [{}, { grantId: "invalid" }, { grantId: uuid, role: "admin" }]) {
++    assert.equal(revokeAdminRoleBody.safeParse(body).success, false);
++  }
++});
++
++test("T6.1-D resposta administrativa contém somente dados mínimos da concessão", () => {
++  const value = { grant: { id: uuid, userId: uuid, role: "staff", eventId: uuid,
++    grantedAt: "2026-11-06T12:00:00.000Z", revokedAt: null } };
++  assert.deepEqual(managedRoleResponse.parse(value), value);
++  for (const extra of [{ password: "secret" }, { email: "person@example.test" }, { secret: "totp" }, { recoveryCodes: ["code"] }]) {
++    assert.equal(managedRoleResponse.safeParse({ grant: { ...value.grant, ...extra } }).success, false);
++  }
++});
++
++test("T6.1-D impede somente a revogação que removeria o último Admin viável", () => {
++  assert.equal(shouldBlockLastAdminRevocation(true, 0), true);
++  assert.equal(shouldBlockLastAdminRevocation(true, 1), false);
++  assert.equal(shouldBlockLastAdminRevocation(false, 0), false);
++});
+diff --git a/docs/T6_1_D_IMPLEMENTACAO.md b/docs/T6_1_D_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..3cff08d
+--- /dev/null
++++ b/docs/T6_1_D_IMPLEMENTACAO.md
+@@ -0,0 +1,228 @@
++# T6.1-D — Gestão segura de permissões Admin/Staff
++
++**Base da task:** `5ce2a5d755d7b632152486ee9e9d6f078f0120f7`
++**Branch:** `feature/events-participations`
++**Estado:** implementação preparada; testes, typecheck, lint e build aguardam execução manual. Não declarar a etapa aprovada nem pronta para produção.
++
++No preflight original, a C estava commitada nesse HEAD, a branch era a indicada acima e índice/working tree estavam limpos. Na retomada, as alterações D existentes foram preservadas; havia uma atualização local independente de `AGENTS.md`, mantida fora do escopo e da evidência. HEAD e índice permanecem intactos.
++
++## Objetivo e escopo
++
++Implementar concessão e revogação HTTP de papéis administrativos, reutilizando `user_roles`, a autenticação existente, `audit_logs` e `idempotency_operations`. O papel `participante` continua independente; uma conta pode acumular papéis. Nenhuma migration foi necessária: constraints, índices e tabelas já existem.
++
++Rotas, sob o prefixo global `/api/v1`:
++
++| Método e rota | Contrato | Sucesso |
++|---|---|---|
++| `POST /admin/roles/grant` | `{ "role": "admin", "email": "..." }` com `eventId` ausente ou `null`; ou `{ "role": "staff", "email": "...", "eventId": "UUID" }` | `201 { grant: { id, userId, role, eventId, grantedAt, revokedAt: null } }` |
++| `POST /admin/roles/revoke` | `{ "grantId": "UUID" }` | `200 { grant: { id, userId, role, eventId, grantedAt, revokedAt } }` |
++
++Os DTOs são estritos, validam UUIDs, rejeitam campos extras e normalizam e-mail com trim e minúsculas, conforme `normalizeEmail` da autenticação. Admin é global (`event_id IS NULL`); Staff sempre recebe um evento existente. A concessão não cria conta, não exige ou cria uma sessão para o destinatário e exige conta ativa e e-mail verificado. Não é permitido administrar o papel `participante` pela rota de revogação.
++
++As respostas contêm somente identificadores, papel, escopo e instantes da concessão/revogação. Não retornam e-mail, credenciais, tokens, segredo TOTP, códigos de recuperação nem dados pessoais adicionais.
++
++## Autorização e respostas de erro
++
++As rotas reutilizam `RequireSessionAuth`/`SessionAuthGuard` e ainda revalidam dentro da transação:
++
++- sessão pertencente ao ator, não revogada, vigente e com `admin_2fa_verified_at` persistido;
++- conta Admin ativa, e-mail verificado e papel Admin global vigente;
++- ator, concessão e escopo sob locks até o commit.
++
++Claims do access token, sozinhas, não autorizam a mutação. Staff, participante e não autenticado não podem conceder/revogar. Principais erros RFC 7807: 400 `VALIDATION_ERROR`; 401 para token/sessão/2FA/conta; 403 `ADMIN_REQUIRED` ou `ADMIN_EMAIL_UNVERIFIED`; 404 `RESOURCE_NOT_FOUND`; 409 para duplicidade, último Admin, chave idempotente reutilizada ou requisição em andamento; 422 `ROLE_TARGET_INELIGIBLE`.
++
++## Política de concessão, revogação e idempotência
++
++- Concessão cria uma nova linha histórica `user_roles`, mantendo concessões revogadas anteriores. O índice único parcial continua sendo a última barreira contra duas concessões ativas do mesmo papel e escopo.
++- `granted_by` e `revoked_by` recebem o Admin autenticado. Horários são obtidos no PostgreSQL; concessão/revogação e auditoria usam o mesmo instante do banco.
++- Revogação é lógica (`revoked_at`), preserva a linha e não apaga sessões, participações, filas ou avaliações. Uma segunda chamada com a mesma chave idempotente reproduz a resposta sem nova auditoria; com nova chave, uma concessão já revogada recebe 404 sem efeito adicional.
++- Ambas as mutações exigem uma única chave `Idempotency-Key` válida e usam `ADMIN_IDEMPOTENCY_TTL_SECONDS` e a tabela compartilhada `idempotency_operations`. Reserva, mudança de papel, auditoria e resposta mínima persistida pertencem à mesma transação. O TTL não apaga registros nem invalida replay por conta própria.
++- O replay continua exigindo autorização atual. Depois de autorrevogar seu papel, o ator não consegue usar a mesma chave para contornar a perda de permissão; recebe `ADMIN_REQUIRED` nas próximas operações.
++- A rota não registra tentativas rejeitadas: não foi encontrada uma política aprovada que justifique auditoria adicional para recusas.
++
++## Decisões sobre Admins
++
++Autorrevogação é permitida somente se permanecer outro Admin viável. A operação bloqueia a revogação do último Admin cuja conta esteja ativa, e-mail verificado e credencial TOTP verificada. Se o destinatário já não for viável, revogá-lo não reduz o número de Admins viáveis e não é impedido por essa regra.
++
++O planejamento permite um Admin durante desenvolvimento e exige pelo menos dois Admins ativos, verificados e com TOTP antes de eventos reais. Não existe no schema nem na configuração atual uma distinção aprovada entre ambiente de desenvolvimento e operação real. Por isso esta implementação preserva a operação de desenvolvimento com um Admin, mas só consegue impedir a remoção do último Admin viável; o mínimo de dois antes de evento real permanece requisito operacional a verificar pelo responsável, não uma condição inferida do estado do banco. A verificação do conjunto é serializada por lock transacional comum às mutações de papéis.
++
++## Locks, transação e concorrência
++
++Todas as mudanças de papéis passam por um advisory transaction lock comum, adquirido dentro da transação e sem tabela/migration nova. Isso serializa concessões e revogações concorrentes, inclusive a contagem do último Admin, e permite revalidar a autorização depois de qualquer espera.
++
++Para Staff, a ordem começa por `events FOR UPDATE` e depois pelo lock comum de papéis. O evento é obtido por leitura de descoberta somente na revogação; o grant ou revogação e o vínculo ao evento são revalidados depois. Essa ordem coordena a mutação com ingresso, estação e outros escritores de capacidade que bloqueiam o evento primeiro. A autorização bloqueia a conta, a concessão Admin global e a sessão do ator com `FOR SHARE`, e verifica o marcador de segundo fator persistido na sessão. A concessão bloqueia a conta destinatária e consulta a linha de papel ativo com `FOR UPDATE`; a revogação bloqueia a conta e a linha de papel destinatárias com `FOR UPDATE`, mas apenas lê o indicador de verificação da credencial TOTP destinatária, sem lock explícito nessa linha. A credencial TOTP do ator não é consultada nem bloqueada por esta operação. Papéis globais Admin não têm lock de evento.
++
++Concessão/revogação e auditoria são escritas atomicamente; qualquer erro reverte também a reserva idempotente. A integração injeta uma falha após o SQL real que contém a alteração e a auditoria e valida rollback/retry. Outro caso simula perda da confirmação depois do commit e verifica recuperação pelo replay idempotente. Dois cenários preparados coordenam o serviço de admissão PostgreSQL real com a revogação Staff: um exige bloqueio do ingresso quando a revogação obtém primeiro o lock do evento; o outro exige ingresso criado e preservado quando a admissão obtém primeiro esse lock. Ambos observam a relação entre os bloqueadores por `pg_blocking_pids` antes de liberar a transação da fixture. Esses testes ainda não foram executados.
++
++Não é prometido efeito retroativo sobre uma operação que já tenha obtido autorização antes da revogação. A revogação confirmada passa a ser considerada nas próximas consultas/ações: o Auth guard carrega papéis atuais, consultas Staff e serviços operacionais conferem concessões atuais. A implementação não revoga sessões nem transforma perda de Staff em encerramento de evento. A última revalidação temporal da sessão ocorre antes do retorno do callback transacional; permanece uma janela entre essa leitura e o COMMIT, conforme a limitação já documentada na A01. O lock comum serializa todas as mutações de papéis e pode limitar vazão; não foi realizado benchmark nem teste de falha física da conexão durante COMMIT.
++
++## Regras operacionais de Staff
++
++Revogar o último Staff é permitido, mesmo se o evento ficar sem capacidade. A operação não altera status, prontidão, estações, participações, entradas de fila ou histórico. A falta de Staff passa a suspender dinamicamente novas admissões segundo o mecanismo existente. Uma nova concessão não altera `events.status` e não reabre evento encerrado. Grants a Staff exigem evento existente, mas não fazem mutação estrutural ou temporal do evento.
++
++## Onboarding de novos Admins — bloqueio arquitetural conhecido
++
++Conceder o papel Admin **não** ativa TOTP. A concessão não cria sessão nem altera `user_totp_credentials`. O Auth guard continua recusando sessões Admin sem segundo fator.
++
++A ativação B2/TOTP disponível no repositório é exclusiva do primeiro Admin: `TotpActivationService.issue/setup/confirm` exige a proveniência do bootstrap inicial (`granted_by IS NULL` e auditoria de primeiro Admin). Não há contrato aprovado para um Admin existente autorizar a configuração inicial de outro Admin, e o endpoint público de ativação não foi definido. Portanto um novo destinatário Admin sem TOTP fica sem capacidade de usar as rotas administrativas e não consegue concluir onboarding pelos fluxos atuais. Esta task não amplia B2, não reutiliza o CLI excepcional, não cria token de ativação nem bypass. Um fluxo seguro de onboarding para Admin promovido precisa de especificação e etapa própria antes de tornar novas concessões Admin operacionalmente utilizáveis. Reset TOTP e recuperação de códigos permanecem fora de escopo.
++
++## Auditoria
++
++As operações efetivas escrevem `audit_logs` na mesma transação:
++
++- ações `admin_role_granted` e `admin_role_revoked`, categoria `identity`, origem `user`;
++- ator e destinatário em `actor_user_id` e `target_user_id`;
++- `event_id` preenchido apenas para Staff;
++- metadados mínimos `{ grantId, role }`, sem e-mail, token, segredo, código ou payload completo.
++
++Em concessão, `granted_at` coincide com `occurred_at`; na revogação, `revoked_at` coincide com `occurred_at`. Uma falha na escrita/auditoria aborta a transação.
++
++## Migrations e dados de teste
++
++Não foi criada migration. A implementação utiliza schema existente: `user_roles`, `users`, `events`, `sessions`, `user_totp_credentials`, `audit_logs` e `idempotency_operations`.
++
++As integrações da T6.1-D usam exclusivamente **`arenago_roles_test`**, banco descartável exclusivo desta suíte. `arenago_bootstrap_test` permanece reservado a B1/B2/C; `arenago_events_test` mantém as demais integrações e os sete Admins históricos. Nenhum desses registros é alterado pela D. A guarda `admin-role-management-db-guard.ts` exige `NODE_ENV=test`, três URLs idênticas, host `127.0.0.1`, porta publicada `55432`, nome exato `arenago_roles_test`, credenciais explícitas e ausência de query/fragmento. Antes das fixtures, a suíte confirma `current_database()`, todas as tabelas utilizadas (incluindo o marcador `admin_2fa_challenges` da migration 0006) e ausência de qualquer concessão Admin histórica no banco D; se falhar, bloqueia sem apagar registros.
++
++As fixtures usam UUIDs próprios e removem somente contas, eventos e dependências criados pelo cenário, em ordem de FK. O hook `afterEach` executa a limpeza também em caso de falha do teste; o Node Test Runner registra separadamente o erro do cenário e do hook. Se o rollback da limpeza também falhar, ambos os erros de cleanup são preservados em `AggregateError`. Não há limpeza global. O bloqueio de Admins preexistentes é necessário para que a prova do último Admin não dependa de dados anteriores nem revogue autoridades alheias.
++
++Na retomada foram corrigidas, por inspeção estática, expectativas das fixtures: a concessão preserva exatamente a sessão já criada para o alvo; duas autorrevogações deixam um sucesso e um `409 LAST_ADMIN_REQUIRED`; a disputa grant/revoke aceita as duas ordens serializáveis e exige retry válido quando o grant chega primeiro. Também foi corrigido o caso de URLs divergentes para exercitar a comparação de URLs sem ser interrompido antes pela allowlist. Não houve alteração funcional adicional no serviço já implementado.
++
++Se `arenago_roles_test` ainda não existir, o responsável cria somente esse banco vazio no contêiner local autorizado, sem copiar dados. O exemplo abaixo é **manual**, exige uma conta local com permissão de criação e solicita a senha interativamente; não contém credenciais. Se o banco já existir, não o recriar nem remover: a criação falha e a situação deve ser inspecionada.
++
++```powershell
++$dbAdministrator = Read-Host 'Papel PostgreSQL local autorizado a criar o banco dedicado'
++if ($dbAdministrator -notmatch '^[a-zA-Z_][a-zA-Z0-9_]*$') { throw 'Papel inválido.' }
++if ((Read-Host 'Digite arenago_roles_test para autorizar a criação') -cne 'arenago_roles_test') { throw 'Criação cancelada.' }
++docker exec -it arenago-e08-pg18 psql -X -W -U $dbAdministrator -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE arenago_roles_test WITH TEMPLATE template0 ENCODING ''UTF8'''
++if ($LASTEXITCODE -ne 0) { throw 'Criação não concluída; não remover nem sobrescrever bancos existentes.' }
++```
++
++Aplicar manualmente as migrations existentes até `0006_admin_2fa_login` no banco novo, sem seed e somente após confirmar o destino no bloco seguinte. Nenhuma migration nova foi criada. A porta `55432` pertence ao host; o `psql` dentro do contêiner usa a conexão interna e não deve comparar `current_setting('port')` com `55432`. Não executar `DROP`, `TRUNCATE` ou limpeza de dados preexistentes.
++
++### Preparação e comandos PowerShell — somente responsável
++
++O helper abaixo recebe a URL por prompt seguro, valida rigorosamente o destino e compartilha a mesma URL entre os três nomes exigidos. Não imprimir nem gravar a URL em arquivo/transcript. A senha é tratada em memória durante a sessão local.
++
++```powershell
++function Set-T61DTestDatabase {
++  if ($env:NODE_ENV -cne 'test') { throw 'NODE_ENV=test obrigatório.' }
++  $secureUrl = Read-Host 'URL local PostgreSQL 127.0.0.1:55432/arenago_roles_test' -AsSecureString
++  $urlBuffer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureUrl)
++  try { $connectionUrl = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($urlBuffer) }
++  finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($urlBuffer); $secureUrl.Dispose() }
++  $parsedUrl = $null
++  if (-not [uri]::TryCreate($connectionUrl,[UriKind]::Absolute,[ref]$parsedUrl)) { throw 'URL inválida.' }
++  if ($parsedUrl.Scheme -notin @('postgres','postgresql') -or $parsedUrl.Host -cne '127.0.0.1' -or
++      $parsedUrl.Port -ne 55432 -or $parsedUrl.AbsolutePath -cne '/arenago_roles_test' -or
++      $connectionUrl.Contains('?') -or $connectionUrl.Contains('#') -or $parsedUrl.UserInfo -notmatch '^[^:]+:.+$') {
++    throw 'Destino fora da allowlist dedicada T6.1-D.'
++  }
++  $env:DATABASE_URL = $connectionUrl
++  $env:DATABASE_DIRECT_URL = $connectionUrl
++  $env:EVENTS_TEST_DATABASE_URL = $connectionUrl
++}
++
++function Confirm-T61DTestDatabase {
++  if ($env:NODE_ENV -cne 'test' -or -not $env:DATABASE_URL -or
++      $env:DATABASE_URL -cne $env:DATABASE_DIRECT_URL -or $env:DATABASE_URL -cne $env:EVENTS_TEST_DATABASE_URL) {
++    throw 'NODE_ENV=test e três URLs idênticas são obrigatórios.'
++  }
++  $url = [uri]$env:DATABASE_URL
++  if ($url.Scheme -notin @('postgres','postgresql') -or $url.Host -cne '127.0.0.1' -or $url.Port -ne 55432 -or
++      $url.AbsolutePath -cne '/arenago_roles_test' -or $env:DATABASE_URL.Contains('?') -or $env:DATABASE_URL.Contains('#') -or
++      $url.UserInfo -notmatch '^[^:]+:.+$') { throw 'Destino não autorizado para D.' }
++  $databaseRole = [uri]::UnescapeDataString($url.UserInfo.Split(':',2)[0])
++  docker exec -it arenago-e08-pg18 psql -X -W -U $databaseRole -d arenago_roles_test -v ON_ERROR_STOP=1 -c "SELECT current_database(), 1 / ((current_database() = 'arenago_roles_test')::integer) AS target_ok"
++  if ($LASTEXITCODE -ne 0) { throw 'Conferência do banco conectado falhou.' }
++}
++
++Set-Location 'C:\DoJob\ProgramacaoMobile\backend'
++$env:NODE_ENV = 'test'
++$env:DOTENV_CONFIG_PATH = 'NUL'
++Set-T61DTestDatabase
++Confirm-T61DTestDatabase
++# Somente para preparar o banco novo e vazio; confirmar novamente antes de cada migration:
++if ((Read-Host 'Digite arenago_roles_test para aplicar migrations existentes') -cne 'arenago_roles_test') { throw 'Migration cancelada.' }
++npm.cmd run db:migrate
++if ($LASTEXITCODE -ne 0) { throw 'Migration falhou; interromper e investigar.' }
++```
++
++As validações abaixo aguardam execução manual ou campanha autorizada conforme `AGENTS.md`; não executar migrations novamente como parte dos testes. Configurar chaves locais de teste pelos procedimentos existentes, sem copiar ou imprimir segredos. Não habilitar envio externo de e-mail; manter `RESEND_API_KEY`, `RESEND_FROM` e `EMAIL_VERIFICATION_CONFIRMATION_URL` ausentes na sessão de teste.
++
++```powershell
++Set-Location 'C:\DoJob\ProgramacaoMobile\backend'
++$env:NODE_ENV = 'test'
++$env:DOTENV_CONFIG_PATH = 'NUL'
++$env:STAFF_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:ADMIN_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:EVALUATION_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:EVENT_CLOSURE_JOB_TEST_ENABLED = 'false'
++$env:EMAIL_VERIFICATION_TTL_SECONDS = '86400'
++$env:EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS = '120'
++$env:EMAIL_VERIFICATION_MAX_PER_HOUR = '5'
++
++$unitFiles = Get-ChildItem test/unit -Filter 'admin-role-management*.test.ts' | Sort-Object Name | ForEach-Object { $_.FullName }
++& .\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test $unitFiles
++if ($LASTEXITCODE -ne 0) { throw 'Unitários T6.1-D falharam.' }
++Confirm-T61DTestDatabase
++& .\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test --test-concurrency=1 test/integration/admin-role-management.integration.test.ts
++if ($LASTEXITCODE -ne 0) { throw 'Integração PostgreSQL T6.1-D falhou; investigar antes de continuar.' }
++
++npm.cmd test
++if ($LASTEXITCODE -ne 0) { throw 'Regressão unitária falhou.' }
++& .\node_modules\.bin\tsc.cmd --project tsconfig.json --noEmit --incremental false
++if ($LASTEXITCODE -ne 0) { throw 'Typecheck de produção falhou.' }
++npm.cmd run typecheck:test
++if ($LASTEXITCODE -ne 0) { throw 'Typecheck de testes falhou.' }
++npm.cmd run lint
++if ($LASTEXITCODE -ne 0) { throw 'Lint falhou.' }
++npm.cmd run build
++if ($LASTEXITCODE -ne 0) { throw 'Build falhou.' }
++```
++
++Os blocos apenas preparam comandos; não foram executados pelo Codex. O comando genérico `npm run test:integration` reúne suítes de bancos diferentes e não deve ser usado com uma única URL. B1/B2/C continuam no banco `arenago_bootstrap_test` e seguem os comandos próprios de seus relatórios. Para a regressão compartilhada, configurar e conferir `arenago_events_test` pelo procedimento existente e excluir somente as quatro suítes dedicadas:
++
++```powershell
++# Somente após configurar e conferir as três URLs de arenago_events_test:
++$dedicated = @('first-admin-bootstrap.integration.test.ts','totp-activation.integration.test.ts',
++  'admin-two-factor-login.integration.test.ts','admin-role-management.integration.test.ts')
++$integrationFiles = Get-ChildItem test/integration -Filter '*.integration.test.ts' |
++  Where-Object { $_.Name -notin $dedicated } | Sort-Object Name | ForEach-Object { $_.FullName }
++& .\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test --test-concurrency=1 $integrationFiles
++if ($LASTEXITCODE -ne 0) { throw 'Regressão compartilhada falhou.' }
++```
++
++## Testes preparados e limitações
++
++Foram preparados **28 casos unitários/HTTP simulados**: 4 de DTO/política, 4 da guarda de banco, 12 do serviço e 8 HTTP. Cobrem autorização persistida, identidade confiável, normalização, escopo estrito, respostas mínimas, RFC 7807, duplicidade, replay/conflito idempotente, revogação repetida, última revalidação da sessão e proteção do último Admin. Os doubles unitários verificam decisões e chamadas, sem pretender provar rollback físico.
++
++A suíte real contém **46 cenários PostgreSQL preparados**, incluindo quatro casos gerados pelo produto grant/revoke × falha de auditoria/SQL. Cobre concessões/revogações, auth/2FA/sessões, idempotência, auditoria, duplicidade e concorrência, Admins, último Staff, suspensão/restauração da prontidão, efeito imediato de revogação e preservação de participação/fila. Os dois cenários Staff × ingresso exigem resultados diferentes conforme a ordem observada do lock do evento. Dois casos adicionais enviam grant ou revoke simultâneos com o mesmo payload e a mesma chave idempotente: uma transação da fixture segura o advisory lock de papéis até observar as duas requisições aguardando, então o libera. Esses casos exigem respostas coerentes, uma única mudança de papel, uma única auditoria e uma única operação idempotente. Essas contagens são do código preparado e não de execução aprovada.
++
++Uma falha injetada depois da instrução SQL real de concessão/auditoria verifica rollback de papel, auditoria e idempotência; outra simula confirmação de commit perdida e valida recuperação por replay. Há também uma interrupção injetada no callback depois de todas as escritas e antes da tentativa de COMMIT, exigindo rollback e retry; isso não representa falha física do comando COMMIT. Para grant e revoke, a instrumentação também executa falhas PostgreSQL reais: no CTE de mutação, troca somente o UUID obrigatório da auditoria por NULL (23502), preservando os parâmetros e a dependência da escrita de papel; no segundo caso, executa divisão por zero (22012) depois da escrita real. Ambos exigem rollback integral e retry com a mesma chave. Não há triggers temporárias nem alteração de constraints. A concorrência de admissão usa o serviço interno existente porque a API pública de ingresso ainda não foi implementada conforme o inventário arquitetural. Os dois cenários preparados verificam a coordenação transacional pelo lock do evento, não a existência de uma rota HTTP de ingresso.
++
++**Validações manuais informadas pelo responsável:** regressão unitária do backend, 1.134/1.134 aprovados; typecheck de produção aprovado. O typecheck de testes foi executado e apontou três erros TS2345/TS2339 em `admin-role-management.integration.test.ts`; as correções locais ajustam o tipo do helper de chave idempotente e estreitam explicitamente o resultado de disponibilidade. O typecheck de testes ainda não foi repetido após essas alterações. Não foram informados resultados de lint ou build nesta rodada.
++
++Na primeira execução manual da integração PostgreSQL T6.1-D, os **46 cenários falharam com `ERR_INVALID_URL`**. O helper combinava `supertest(app.getHttpServer())`, que já fornece a origem HTTP local, com uma URL absoluta que repetia a mesma origem; por exemplo, `http://127.0.0.1:62581http://127.0.0.1:62581/api/v1/admin/roles/grant`. A falha ocorreu na montagem da URL da requisição, antes da validação do comportamento dos endpoints, e não constitui evidência de defeito de produção. A correção usa caminhos relativos com o prefixo `/api/v1`; a integração PostgreSQL precisa ser reexecutada manualmente.
++
++O Codex não executou testes nem typecheck. A integração PostgreSQL T6.1-D permanece pendente de validação manual; a preparação e execução da campanha exigem o banco dedicado `arenago_roles_test`. Também permanece pendente a especificação do onboarding seguro de novos Admins. Não declarar homologação ou prontidão de produção.
++
++## Inventário da task
++
++1. `backend/src/app.module.ts` — registra `AdminRoleManagementModule`.
++2. `backend/src/auth/admin-role-management.module.ts`.
++3. `backend/src/auth/admin-role-management.controller.ts`.
++4. `backend/src/auth/admin-role-management.dto.ts`.
++5. `backend/src/auth/admin-role-management.problem.ts`.
++6. `backend/src/auth/admin-role-management.service.ts`.
++7. `backend/test/unit/admin-role-management.test.ts`.
++8. `backend/test/unit/admin-role-management-db-guard.test.ts`.
++9. `backend/test/integration/admin-role-management-db-guard.ts`.
++10. `backend/test/integration/admin-role-management.integration.test.ts`.
++11. `backend/test/unit/admin-role-management-service.test.ts`.
++12. `backend/test/unit/admin-role-management-http.test.ts`.
++13. Este relatório.
++
++Evidência única da task: `qa-evidence/t6-1-d-changes.diff`, com base no HEAD inicial acima. O patch inclui os 13 arquivos do inventário e exclui a própria evidência. A aplicação e a comparação byte a byte são verificadas em árvore isolada. A alteração local preexistente de `AGENTS.md` é preservada e fica fora da evidência da D. Nenhuma migration ou arquivo de outras tasks faz parte do escopo.
++
++Inspeções estáticas da entrega: contratos e fluxos revisados, `git diff --check`, inventário fechado do patch, UTF-8 sem BOM, `git apply --check --whitespace=error-all` sobre uma cópia da base e reprodução byte a byte dos 13 arquivos. O patch não contém credenciais reais, `.env`, logs, dependências ou temporários; as URLs `fixture:fixture` dos unitários são exclusivamente valores fictícios para exercitar a guarda. Não houve staging, commit ou push.

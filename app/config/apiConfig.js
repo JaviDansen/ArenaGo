@@ -14,9 +14,11 @@ export const API_PREFIX = '/api/v1';
 export const DEFAULT_LOCAL_API_ORIGIN = 'http://127.0.0.1:3000';
 export const DEFAULT_HTTP_TIMEOUT_MS = 15000;
 
-function readEnvBaseUrl(env = typeof process !== 'undefined' ? process.env : undefined) {
-  if (!env) return null;
-  const candidate = env.EXPO_PUBLIC_API_BASE_URL || env.EXPO_PUBLIC_API_URL || '';
+function readEnvBaseUrl(env) {
+  // Expo only inlines EXPO_PUBLIC_* references written directly on process.env.
+  const candidate = env
+    ? env.EXPO_PUBLIC_API_BASE_URL || env.EXPO_PUBLIC_API_URL
+    : process.env.EXPO_PUBLIC_API_BASE_URL || process.env.EXPO_PUBLIC_API_URL;
   const trimmed = typeof candidate === 'string' ? candidate.trim() : '';
   return trimmed.length > 0 ? trimmed : null;
 }
@@ -35,7 +37,7 @@ function isLocalhostOrigin(urlString) {
  * @returns {string}
  */
 export function resolveApiBaseUrl(overrideBaseUrl, options = {}) {
-  const env = options.env ?? (typeof process !== 'undefined' ? process.env : undefined);
+  const env = options.env;
   const raw =
     (typeof overrideBaseUrl === 'string' && overrideBaseUrl.trim().length > 0
       ? overrideBaseUrl.trim()
@@ -43,13 +45,28 @@ export function resolveApiBaseUrl(overrideBaseUrl, options = {}) {
     readEnvBaseUrl(env) ||
     DEFAULT_LOCAL_API_ORIGIN;
 
-  if (!/^https?:\/\/[^/\s]+/i.test(raw)) {
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    // Keep a configuration error distinct from the client's network errors.
+  }
+  if (
+    !parsed ||
+    !['http:', 'https:'].includes(parsed.protocol) ||
+    !parsed.hostname ||
+    parsed.username ||
+    parsed.password ||
+    parsed.search ||
+    parsed.hash ||
+    /\s/.test(raw)
+  ) {
     throw new Error(
-      `URL base da API inválida ("${raw}"). Configure EXPO_PUBLIC_API_BASE_URL com http:// ou https://.`
+      'URL base da API inválida. Configure EXPO_PUBLIC_API_BASE_URL com uma URL http:// ou https:// sem credenciais, consulta ou fragmento.'
     );
   }
 
-  const nodeEnv = env?.NODE_ENV || 'development';
+  const nodeEnv = env?.NODE_ENV || process.env.NODE_ENV || 'development';
   if (nodeEnv === 'production' && raw.toLowerCase().startsWith('http://') && !isLocalhostOrigin(raw)) {
     throw new Error('Em produção, a URL da API deve utilizar HTTPS.');
   }

@@ -1,0 +1,1479 @@
+diff --git a/backend/src/events/event-closure.projection.ts b/backend/src/events/event-closure.projection.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..556ca3d168a537f40373bd5492cc88d3cd163239
+--- /dev/null
++++ b/backend/src/events/event-closure.projection.ts
+@@ -0,0 +1,12 @@
++import { sql, type SQL } from "drizzle-orm";
++
++export const AUTOMATIC_OPERATIONAL_REASON = "automatic_operational_deadline";
++export const AUTOMATIC_ADMIN_REASON = "automatic_admin_deadline";
++
++/** SQL interno compartilhado com o regularizador E08.9; aliases nunca vêm do HTTP. */
++export function effectiveEventDeadline(event: SQL = sql`e`): SQL {
++  return sql`LEAST(${event}.operational_deadline_at,${event}.admin_deadline_at)`;
++}
++export function automaticFinalizationReason(event: SQL = sql`e`): SQL {
++  return sql`CASE WHEN ${event}.closure_mode IS NULL THEN ${AUTOMATIC_OPERATIONAL_REASON} ELSE ${AUTOMATIC_ADMIN_REASON} END`;
++}
+diff --git a/backend/src/events/event-closure.service.ts b/backend/src/events/event-closure.service.ts
+index 9c8bbbec4a8dd463558efaa410274a28497d410e..8a0551572ddf4b458494e0001dca4690974e2d83 100644
+--- a/backend/src/events/event-closure.service.ts
++++ b/backend/src/events/event-closure.service.ts
+@@ -3,9 +3,9 @@ import { sql } from "drizzle-orm";
+ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
+ import { DRIZZLE_DATABASE } from "../database/database.module";
+ import type * as schema from "../database/schema";
++import { automaticFinalizationReason, effectiveEventDeadline } from "./event-closure.projection";
+ 
+-export const AUTOMATIC_OPERATIONAL_REASON = "automatic_operational_deadline";
+-export const AUTOMATIC_ADMIN_REASON = "automatic_admin_deadline";
++export { AUTOMATIC_OPERATIONAL_REASON, AUTOMATIC_ADMIN_REASON } from "./event-closure.projection";
+ export const EVENT_CLOSURE_PAGE_SIZE = 100;
+ 
+ export type EventClosureResult =
+@@ -25,7 +25,7 @@ export class EventClosureService {
+   async findCandidates(afterId: string | null): Promise<string[]> {
+     const result = await this.database.execute<{ id: string }>(sql`
+       SELECT e.id FROM events e WHERE (${afterId}::uuid IS NULL OR e.id > ${afterId}::uuid) AND (
+-        (e.status <> 'closed' AND LEAST(e.operational_deadline_at,e.admin_deadline_at) <= clock_timestamp())
++        (e.status <> 'closed' AND ${effectiveEventDeadline()} <= clock_timestamp())
+         OR (e.status='closed' AND (
+           EXISTS(SELECT 1 FROM participations p WHERE p.event_id=e.id AND (p.status IN ('waiting','active') OR p.current_queue_entry_id IS NOT NULL))
+           OR EXISTS(SELECT 1 FROM queue_entries q WHERE q.event_id=e.id AND q.status IN ('waiting','called'))
+@@ -76,26 +76,26 @@ export class EventClosureService {
+       const changed = (await tx.execute<{ deadlineAt: string; executedAt: string; reason: string }>(sql`
+         WITH decision AS MATERIALIZED (SELECT clock_timestamp() AS at), changed AS (
+           UPDATE events e SET status='closed',updated_at=d.at FROM decision d
+-          WHERE e.id=${eventId} AND e.status<>'closed' AND LEAST(e.operational_deadline_at,e.admin_deadline_at)<=d.at
+-          RETURNING LEAST(e.operational_deadline_at,e.admin_deadline_at) AS deadline,e.updated_at,
+-            CASE WHEN e.closure_mode IS NULL THEN ${AUTOMATIC_OPERATIONAL_REASON} ELSE ${AUTOMATIC_ADMIN_REASON} END AS reason)
++          WHERE e.id=${eventId} AND e.status<>'closed' AND ${effectiveEventDeadline()}<=d.at
++          RETURNING ${effectiveEventDeadline()} AS deadline,e.updated_at,
++            ${automaticFinalizationReason()} AS reason)
+         SELECT to_char(deadline AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "deadlineAt",
+           to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "executedAt",reason FROM changed`)).rows[0];
+       if (!changed) return { kind: "not_due" };
+ 
+       const canceled = (await tx.execute<{ count: number }>(sql`WITH canceled AS (
+-        UPDATE service_sessions s SET status='canceled',resolved_at=LEAST(e.operational_deadline_at,e.admin_deadline_at),
++        UPDATE service_sessions s SET status='canceled',resolved_at=${effectiveEventDeadline()},
+           resolved_by_user_id=NULL,cancel_reason=${changed.reason}
+         FROM experiences x,events e WHERE s.experience_id=x.id AND x.event_id=e.id AND e.id=${eventId} AND s.status='pending' RETURNING s.id)
+         SELECT count(*)::int AS count FROM canceled`)).rows[0].count;
+       ensure(canceled === services);
+       const closed = (await tx.execute<{ count: number }>(sql`WITH closed AS (
+-        UPDATE queue_entries q SET status='closed',closed_at=LEAST(e.operational_deadline_at,e.admin_deadline_at),close_reason=${changed.reason}
++        UPDATE queue_entries q SET status='closed',closed_at=${effectiveEventDeadline()},close_reason=${changed.reason}
+         FROM events e WHERE q.event_id=e.id AND e.id=${eventId} AND q.status IN ('waiting','called') RETURNING q.id)
+         SELECT count(*)::int AS count FROM closed`)).rows[0].count;
+       ensure(closed === queues);
+       const finished = (await tx.execute<{ count: number }>(sql`WITH finished AS (
+-        UPDATE participations p SET status='finished',finished_at=LEAST(e.operational_deadline_at,e.admin_deadline_at),
++        UPDATE participations p SET status='finished',finished_at=${effectiveEventDeadline()},
+           finish_reason=${changed.reason},current_queue_entry_id=NULL
+         FROM events e WHERE p.event_id=e.id AND e.id=${eventId} AND p.status IN ('waiting','active') RETURNING p.id)
+         SELECT count(*)::int AS count FROM finished`)).rows[0].count;
+diff --git a/backend/src/events/events.module.ts b/backend/src/events/events.module.ts
+index 0e71e1edb6e8a1aac3d5af799cb4deed84cbe237..293581bd1320150aeff2ec965e437a5aeddbc423 100644
+--- a/backend/src/events/events.module.ts
++++ b/backend/src/events/events.module.ts
+@@ -25,12 +25,15 @@ import { EvaluationReadController } from "../evaluations/evaluation-read.control
+ import { EvaluationReadService } from "../evaluations/evaluation-read.service";
+ import { EvaluationWriteController, EvaluationWriteIdempotencyPolicy } from "../evaluations/evaluation-write.controller";
+ import { EvaluationWriteService } from "../evaluations/evaluation-write.service";
++import { ParticipationLifecycleController } from "../participations/participation-lifecycle.controller";
++import { ParticipationLifecycleService } from "../participations/participation-lifecycle.service";
++import { ParticipationQueryService } from "../participations/participation-query.service";
+ 
+ /** Agrupa os serviços de Events e reutiliza o acesso PostgreSQL compartilhado. */
+ @Module({
+   imports: [DatabaseModule, AuthModule],
+-  controllers: [EvaluationWriteController, EvaluationReadController, StaffOperationsController, StaffQueriesController, StationAvailabilityController, ParticipantQueueController, ExperiencesController],
+-  providers: [EventsService, StaffQueriesService, StationAvailabilityService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, StaffIdempotencyPolicy, ParticipantQueueIdempotencyPolicy, EventClosureService, EventClosurePolicy, EventClosureScheduler, EvaluationReadService, EvaluationWriteService, EvaluationWriteIdempotencyPolicy],
+-  exports: [EventsService, StaffQueriesService, StationAvailabilityService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, EventClosureService, EvaluationReadService, EvaluationWriteService],
++  controllers: [EvaluationWriteController, EvaluationReadController, ParticipationLifecycleController, StaffOperationsController, StaffQueriesController, StationAvailabilityController, ParticipantQueueController, ExperiencesController],
++  providers: [EventsService, StaffQueriesService, StationAvailabilityService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, StaffIdempotencyPolicy, ParticipantQueueIdempotencyPolicy, EventClosureService, EventClosurePolicy, EventClosureScheduler, EvaluationReadService, EvaluationWriteService, EvaluationWriteIdempotencyPolicy, ParticipationLifecycleService, ParticipationQueryService],
++  exports: [EventsService, StaffQueriesService, StationAvailabilityService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, EventClosureService, EvaluationReadService, EvaluationWriteService, ParticipationLifecycleService, ParticipationQueryService],
+ })
+ export class EventsModule {}
+diff --git a/backend/src/participations/participation-lifecycle.controller.ts b/backend/src/participations/participation-lifecycle.controller.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..7b0564a874727de87e9e4ea319af48a652a65658
+--- /dev/null
++++ b/backend/src/participations/participation-lifecycle.controller.ts
+@@ -0,0 +1,47 @@
++import { Body, Controller, Get, HttpCode, Inject, Param, Post, Req } from "@nestjs/common";
++import { CurrentUserId, RequireSessionAuth } from "../auth/current-user.decorator";
++import type { AuthenticatedRequest } from "../auth/session-auth.guard";
++import { ProblemException } from "../common/errors/problem.exception";
++import { emptyOperationBody, validateOperationBody, validateOperationIdempotencyKey, validateOperationParams } from "../common/http/operation-validation";
++import { ParticipantQueueIdempotencyPolicy } from "../events/participant-queue-idempotency.policy";
++import { lifecycleParams } from "./participation-lifecycle.dto";
++import { ParticipationQueryService } from "./participation-query.service";
++import { ParticipationLifecycleService, type LifecycleFailure, type LifecycleResult } from "./participation-lifecycle.service";
++
++function missing(): never { throw new ProblemException({status:404,code:"RESOURCE_NOT_FOUND",typeSlug:"resource-not-found",title:"Recurso não encontrado",detail:"Recurso não encontrado."}); }
++function response(result: LifecycleResult){
++  if(result.kind==="changed"||result.kind==="replay")return {participation:result.participation};
++  if(result.kind==="access_denied")missing();
++  const codes:Record<Exclude<LifecycleFailure,"access_denied">,string>={not_waiting:"PARTICIPATION_NOT_WAITING",not_active:"PARTICIPATION_NOT_ACTIVE",
++    event_ended:"EVENT_OPERATION_ENDED",request_conflict:"IDEMPOTENCY_KEY_REUSED",in_progress:"IDEMPOTENCY_IN_PROGRESS"};
++  const code=codes[result.kind];
++  throw new ProblemException({status:409,code,typeSlug:code.toLowerCase().replaceAll("_","-"),title:"Conflito de participação",
++    detail:"A operação não pode ser aplicada ao estado atual da participação.",extensions:result.participation?{participation:result.participation}:undefined});
++}
++@Controller("participations")
++@RequireSessionAuth()
++export class ParticipationLifecycleController {
++  constructor(@Inject(ParticipationQueryService) private readonly queries:ParticipationQueryService,
++    @Inject(ParticipationLifecycleService) private readonly writes:ParticipationLifecycleService,
++    @Inject(ParticipantQueueIdempotencyPolicy) private readonly policy:ParticipantQueueIdempotencyPolicy){}
++  @Get("current")
++  @HttpCode(200)
++  async current(@CurrentUserId() userId:string){return {participation:await this.queries.current(userId)};}
++  @Get(":participationId")
++  @HttpCode(200)
++  async byId(@CurrentUserId() userId:string,@Param() params:unknown){
++    const {participationId}=validateOperationParams(lifecycleParams,params),participation=await this.queries.byId(userId,participationId);
++    if(!participation)missing();return {participation};
++  }
++  @Post(":participationId/cancel")
++  @HttpCode(200)
++  async cancel(@CurrentUserId() userId:string,@Param() params:unknown,@Body() body:unknown,@Req() request:AuthenticatedRequest){return this.mutate("cancel",userId,params,body,request);}
++  @Post(":participationId/finish")
++  @HttpCode(200)
++  async finish(@CurrentUserId() userId:string,@Param() params:unknown,@Body() body:unknown,@Req() request:AuthenticatedRequest){return this.mutate("finish",userId,params,body,request);}
++  private async mutate(mode:"cancel"|"finish",userId:string,params:unknown,body:unknown,request:AuthenticatedRequest){
++    const ids=validateOperationParams(lifecycleParams,params);validateOperationBody(emptyOperationBody,body,request,true);
++    const input={...ids,userId,idempotencyKey:validateOperationIdempotencyKey(request),expiresAt:this.policy.expiresAt()};
++    return response(await this.writes[mode](input));
++  }
++}
+diff --git a/backend/src/participations/participation-lifecycle.dto.ts b/backend/src/participations/participation-lifecycle.dto.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..7bd7fd5ed17e094896b7f52d3d62c7fe318f008f
+--- /dev/null
++++ b/backend/src/participations/participation-lifecycle.dto.ts
+@@ -0,0 +1,18 @@
++import { z } from "zod";
++import { operationUuid } from "../common/http/operation-validation";
++import { isPreciseInstant } from "../evaluations/evaluation-read.dto";
++
++const instant = z.custom<string>(isPreciseInstant);
++export const lifecycleParams = z.object({ participationId: operationUuid }).strict();
++export const participationView = z.object({
++  id: operationUuid, eventId: operationUuid,
++  status: z.enum(["waiting", "active", "finished", "canceled"]),
++  joinedAt: instant, arenaEnteredAt: instant.nullable(), finishedAt: instant.nullable(), finishReason: z.string().nullable(),
++  externalQueue: z.object({ position: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), observedAt: instant }).strict().nullable(),
++}).strict();
++export const finishedParticipationView = participationView.extend({
++  completedServicesCount: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
++  evaluationEligibility: z.object({ eligible: z.boolean(), hasSubmitted: z.boolean() }).strict(),
++}).strict();
++export type ParticipationView = z.infer<typeof participationView>;
++export type FinishedParticipationView = z.infer<typeof finishedParticipationView>;
+diff --git a/backend/src/participations/participation-lifecycle.service.ts b/backend/src/participations/participation-lifecycle.service.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..25249dbc257b4a52e6ae40c357caa236af1fe1a0
+--- /dev/null
++++ b/backend/src/participations/participation-lifecycle.service.ts
+@@ -0,0 +1,118 @@
++import { Inject, Injectable } from "@nestjs/common";
++import { sql } from "drizzle-orm";
++import type { NodePgDatabase } from "drizzle-orm/node-postgres";
++import { DRIZZLE_DATABASE } from "../database/database.module";
++import type { DatabaseTransactionExecutor } from "../database/database-executor";
++import type * as schema from "../database/schema";
++import { effectiveEventDeadline } from "../events/event-closure.projection";
++import { completedCount, eligibility, evaluationReadProjection, type EvaluationReadRow } from "../evaluations/evaluation-read.policy";
++import { isPreciseInstant } from "../evaluations/evaluation-read.dto";
++import { completeIdempotencyOperationWithTx, createRequestFingerprint, reserveIdempotencyOperationWithTx, type JsonValue } from "./join-idempotency";
++import { finishedParticipationView, participationView, type FinishedParticipationView, type ParticipationView } from "./participation-lifecycle.dto";
++import { participationProjection, publicParticipation, type ParticipationProjectionRow } from "./participation-query.service";
++
++export const CANCEL_PARTICIPATION_OPERATION = "cancel_external_participation";
++export const FINISH_PARTICIPATION_OPERATION = "finish_arena_participation";
++export const VOLUNTARY_QUEUE_REASON = "participation_voluntary_finish";
++export interface LifecycleInput { userId: string; participationId: string; idempotencyKey: string; expiresAt: Date }
++export type LifecycleFailure = "access_denied" | "not_waiting" | "not_active" | "event_ended" | "request_conflict" | "in_progress";
++export type LifecycleResult = { kind: "changed" | "replay"; participation: ParticipationView | FinishedParticipationView }
++  | { kind: LifecycleFailure; participation?: ParticipationView };
++export function lifecycleFingerprint(mode: "cancel" | "finish", userId: string, participationId: string) {
++  return createRequestFingerprint(mode==="cancel" ? CANCEL_PARTICIPATION_OPERATION : FINISH_PARTICIPATION_OPERATION,
++    { version: 1, userId, participationId, payload: {} });
++}
++class LifecycleRollback extends Error { constructor(readonly result: LifecycleResult) { super(result.kind); } }
++function block(kind: LifecycleFailure, participation?: ParticipationView): never { throw new LifecycleRollback({kind,...(participation?{participation}:{})}); }
++function ensure(value: unknown): asserts value { if (!value) throw new Error("PARTICIPATION_LIFECYCLE_INTEGRITY"); }
++interface Target extends Record<string,unknown> { eventId: string }
++interface Current extends Record<string,unknown> { status: string; currentId: string | null }
++interface Entry extends Record<string,unknown> { id: string; experienceId: string; status: string; sessionId: string | null; sessionStatus: string | null; stationId: string | null }
++
++/** E08.12: sai de toda a participação; não substitui a desistência isolada C-15. */
++@Injectable()
++export class ParticipationLifecycleService {
++  constructor(@Inject(DRIZZLE_DATABASE) private readonly database: NodePgDatabase<typeof schema>) {}
++  cancel(input: LifecycleInput) { return this.write("cancel",input); }
++  finish(input: LifecycleInput) { return this.write("finish",input); }
++  private async state(tx: DatabaseTransactionExecutor, input: LifecycleInput, at?: string) {
++    const rows=(await tx.execute<ParticipationProjectionRow>(participationProjection(input.userId,input.participationId,
++      at?sql`${at}::timestamptz`:sql`clock_timestamp()`))).rows;
++    ensure(rows.length===1); return publicParticipation(rows[0]);
++  }
++  private async write(mode: "cancel" | "finish", input: LifecycleInput): Promise<LifecycleResult> {
++    try {
++      ensure(input.idempotencyKey.trim() && input.idempotencyKey.length<=128 && Number.isFinite(input.expiresAt.getTime()));
++      return await this.database.transaction(async tx => {
++        const target=(await tx.execute<Target>(sql`SELECT event_id AS "eventId" FROM participations
++          WHERE id=${input.participationId}::uuid AND user_id=${input.userId}::uuid`)).rows[0];
++        if (!target) block("access_denied");
++        const intent=await reserveIdempotencyOperationWithTx(tx,{actorUserId:input.userId,
++          operation:mode==="cancel"?CANCEL_PARTICIPATION_OPERATION:FINISH_PARTICIPATION_OPERATION,idempotencyKey:input.idempotencyKey,
++          requestHash:lifecycleFingerprint(mode,input.userId,input.participationId),expiresAt:input.expiresAt});
++        if(intent.kind==="request_conflict"||intent.kind==="in_progress")block(intent.kind);
++        // Exclusivo no evento: a descoberta da fila fica estável inclusive contra troca de experiência.
++        // Mesma ordem de E03/E08.8/E08.9; todo escritor operacional anterior usa FOR SHARE/UPDATE no evento.
++        ensure((await tx.execute(sql`SELECT id FROM events WHERE id=${target.eventId}::uuid FOR UPDATE`)).rows.length===1);
++        const entry=(await tx.execute<Entry>(sql`SELECT q.id,q.experience_id AS "experienceId",q.status,
++          s.id AS "sessionId",s.status AS "sessionStatus",s.station_id AS "stationId"
++          FROM participations p JOIN queue_entries q ON q.id=p.current_queue_entry_id AND q.participation_id=p.id AND q.event_id=p.event_id
++          LEFT JOIN service_sessions s ON s.queue_entry_id=q.id AND s.experience_id=q.experience_id
++          WHERE p.id=${input.participationId}::uuid AND p.user_id=${input.userId}::uuid AND p.event_id=${target.eventId}::uuid`)).rows[0];
++        if(entry){
++          ensure((await tx.execute(sql`SELECT id FROM experiences WHERE id=${entry.experienceId}::uuid AND event_id=${target.eventId}::uuid FOR UPDATE`)).rows.length===1);
++          if(entry.stationId)ensure((await tx.execute(sql`SELECT id FROM stations WHERE id=${entry.stationId}::uuid AND experience_id=${entry.experienceId}::uuid FOR UPDATE`)).rows.length===1);
++        }
++        const person=(await tx.execute<Current>(sql`SELECT status,current_queue_entry_id AS "currentId" FROM participations
++          WHERE id=${input.participationId}::uuid AND user_id=${input.userId}::uuid AND event_id=${target.eventId}::uuid FOR UPDATE`)).rows[0];
++        if(!person)block("access_denied");
++        if(intent.kind==="replay"){
++          const value=(mode==="finish"?finishedParticipationView:participationView).parse(intent.resultPayload && typeof intent.resultPayload==="object" && !Array.isArray(intent.resultPayload)?intent.resultPayload.participation:undefined);
++          ensure(intent.httpStatus===200&&intent.resultReference===input.participationId&&value.id===input.participationId&&value.eventId===target.eventId
++            &&value.status===(mode==="cancel"?"canceled":"finished")&&value.finishReason===(mode==="cancel"?"external_wait_withdrawal":"voluntary"));
++          return {kind:"replay",participation:value};
++        }
++        if(person.status!==(mode==="cancel"?"waiting":"active"))block(mode==="cancel"?"not_waiting":"not_active",await this.state(tx,input));
++        const open=(await tx.execute<{id:string}>(sql`SELECT id FROM queue_entries WHERE participation_id=${input.participationId}::uuid
++          AND status IN ('waiting','called') ORDER BY id FOR UPDATE`)).rows;
++        ensure(entry?person.currentId===entry.id&&open.length===1&&open[0].id===entry.id:person.currentId===null&&open.length===0);
++        if(entry){
++          ensure(mode==="finish"&&(entry.status==="waiting"||entry.status==="called"));
++          const sessions=(await tx.execute(sql`SELECT id FROM service_sessions WHERE queue_entry_id=${entry.id}::uuid FOR UPDATE`)).rows;
++          ensure(entry.status==="waiting"?sessions.length===0:entry.sessionStatus==="pending"&&entry.sessionId&&entry.stationId&&sessions.length===1);
++        }
++        // Um relógio, após todas as esperas, no próprio UPDATE decisivo. Nenhuma guarda de novo ingresso.
++        const changed=(await tx.execute<{at:string}>(sql`WITH decision AS MATERIALIZED (SELECT clock_timestamp() AS at)
++          UPDATE participations p SET status=${mode==="cancel"?"canceled":"finished"}::varchar(20),finished_at=d.at,
++            finish_reason=${mode==="cancel"?"external_wait_withdrawal":"voluntary"}::varchar(40),current_queue_entry_id=NULL
++          FROM events e,decision d WHERE p.id=${input.participationId}::uuid AND p.user_id=${input.userId}::uuid
++            AND p.event_id=e.id AND e.id=${target.eventId}::uuid AND p.status=${mode==="cancel"?"waiting":"active"}::varchar(20)
++            AND e.status<>'closed' AND d.at<${effectiveEventDeadline()}
++            AND (NOT ${mode==="cancel"}::boolean OR e.closure_mode IS DISTINCT FROM 'controlled' OR e.closure_requested_at>d.at)
++          RETURNING to_char(p.finished_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`)).rows;
++        if(!changed.length)block("event_ended",await this.state(tx,input));
++        ensure(changed.length===1);const row=changed[0];
++        ensure(isPreciseInstant(row.at));
++        if(entry){
++          ensure((await tx.execute(sql`UPDATE queue_entries q SET status='closed',closed_at=p.finished_at,close_reason=${VOLUNTARY_QUEUE_REASON}
++            FROM participations p WHERE q.id=${entry.id}::uuid AND q.participation_id=p.id AND p.id=${input.participationId}::uuid
++              AND q.event_id=p.event_id AND q.experience_id=${entry.experienceId}::uuid AND q.status=${entry.status}::varchar(20) RETURNING q.id`)).rows.length===1);
++          if(entry.sessionId)ensure((await tx.execute(sql`UPDATE service_sessions s SET status='canceled',resolved_at=p.finished_at,
++            resolved_by_user_id=${input.userId}::uuid,cancel_reason=${VOLUNTARY_QUEUE_REASON}
++            FROM participations p WHERE p.id=${input.participationId}::uuid AND s.id=${entry.sessionId}::uuid
++              AND s.queue_entry_id=${entry.id}::uuid AND s.experience_id=${entry.experienceId}::uuid
++              AND s.station_id=${entry.stationId}::uuid AND s.status='pending' RETURNING s.id`)).rows.length===1);
++        }
++        let participation: ParticipationView | FinishedParticipationView=await this.state(tx,input,row.at);
++        if(mode==="finish"){
++          const projection=evaluationReadProjection(sql`SELECT p.id,p.event_id,e.name AS event_name,p.status,p.joined_at,p.arena_entered_at,p.finished_at,p.finish_reason
++            FROM participations p JOIN events e ON e.id=p.event_id WHERE p.id=${input.participationId}::uuid AND p.user_id=${input.userId}::uuid`,row.at);
++          const facts=(await tx.execute<EvaluationReadRow>(projection)).rows;ensure(facts.length===1);const info=eligibility(facts[0]);
++          participation={...participation,completedServicesCount:completedCount(facts[0].completedCount),evaluationEligibility:{eligible:info.eligible,hasSubmitted:info.submitted}};
++        }
++        await completeIdempotencyOperationWithTx(tx,intent.operationId,{httpStatus:200,resultReference:input.participationId,resultPayload:{participation} as unknown as JsonValue});
++        return {kind:"changed",participation};
++      },{isolationLevel:"read committed"});
++    }catch(error){if(error instanceof LifecycleRollback)return error.result;throw new Error("PARTICIPATION_LIFECYCLE_INTERNAL_ERROR",{cause:error});}
++  }
++}
+diff --git a/backend/src/participations/participation-query.service.ts b/backend/src/participations/participation-query.service.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..36cfc0919744673101454266821b75ed2e3164c8
+--- /dev/null
++++ b/backend/src/participations/participation-query.service.ts
+@@ -0,0 +1,62 @@
++import { Inject, Injectable } from "@nestjs/common";
++import { sql, type SQL } from "drizzle-orm";
++import type { NodePgDatabase } from "drizzle-orm/node-postgres";
++import { DRIZZLE_DATABASE } from "../database/database.module";
++import type * as schema from "../database/schema";
++import { automaticFinalizationReason, effectiveEventDeadline } from "../events/event-closure.projection";
++import { participationView, type ParticipationView } from "./participation-lifecycle.dto";
++
++/** Estado efetivo só de leitura. A finalização física continua sendo responsabilidade de E08.8/E08.9. */
++export function participationProjection(userId: string, participationId?: string, at: SQL = sql`clock_timestamp()`): SQL {
++  return sql`WITH observation AS MATERIALIZED (SELECT ${at} AS at), scoped AS MATERIALIZED (
++    SELECT p.*,d.at,${effectiveEventDeadline()} AS deadline,
++      COALESCE(p.status IN ('waiting','active') AND (e.status='closed' OR ${effectiveEventDeadline()}<=d.at
++        OR (p.status='waiting' AND e.closure_mode='controlled' AND e.closure_requested_at<=d.at)),false) AS ended,
++      CASE WHEN e.closure_mode='immediate' AND e.status='closed' THEN 'admin_immediate'
++        WHEN p.status='waiting' AND e.closure_mode='controlled' AND e.closure_requested_at<=d.at THEN 'admin_controlled_external_wait_closed'
++        ELSE ${automaticFinalizationReason()} END AS terminal_reason,
++      CASE WHEN e.closure_mode='immediate' AND e.status='closed' THEN e.closure_requested_at
++        WHEN p.status='waiting' AND e.closure_mode='controlled' AND e.closure_requested_at<=d.at THEN e.closure_requested_at
++        ELSE ${effectiveEventDeadline()} END AS terminal_at
++    FROM participations p JOIN events e ON e.id=p.event_id CROSS JOIN observation d
++    WHERE p.user_id=${userId}::uuid AND ${participationId ? sql`p.id=${participationId}::uuid` : sql`p.status IN ('waiting','active')`}
++  ) SELECT id,event_id AS "eventId",CASE WHEN ended THEN 'finished' ELSE status END AS status,
++    to_char(joined_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "joinedAt",
++    to_char(arena_entered_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "arenaEnteredAt",
++    to_char((CASE WHEN ended THEN terminal_at ELSE finished_at END) AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "finishedAt",
++    CASE WHEN ended THEN terminal_reason ELSE finish_reason END AS "finishReason",
++    CASE WHEN status='waiting' AND NOT ended THEN (SELECT count(*)::text FROM participations q
++      WHERE q.event_id=scoped.event_id AND q.status='waiting' AND q.external_queue_order<=scoped.external_queue_order) END AS position,
++    to_char(at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "observedAt"
++    FROM scoped`;
++}
++export interface ParticipationProjectionRow extends Record<string, unknown> {
++  id: string; eventId: string; status: string; joinedAt: string; arenaEnteredAt: string | null;
++  finishedAt: string | null; finishReason: string | null; position: string | null; observedAt: string;
++}
++export function publicParticipation(row: ParticipationProjectionRow): ParticipationView {
++  if (row.status === "waiting" && (!row.position || !/^[1-9]\d*$/.test(row.position) || BigInt(row.position)>BigInt(Number.MAX_SAFE_INTEGER))) {
++    throw new Error("PARTICIPATION_POSITION_INTEGRITY");
++  }
++  const value = participationView.parse({ id: row.id, eventId: row.eventId, status: row.status, joinedAt: row.joinedAt,
++    arenaEnteredAt: row.arenaEnteredAt, finishedAt: row.finishedAt, finishReason: row.finishReason,
++    externalQueue: row.status === "waiting" ? { position: Number(row.position), observedAt: row.observedAt } : null });
++  if ((value.status === "waiting" || value.status === "active") ? value.finishedAt !== null || value.finishReason !== null
++    : value.finishedAt === null || value.finishReason === null) throw new Error("PARTICIPATION_TERMINAL_INTEGRITY");
++  return value;
++}
++@Injectable()
++export class ParticipationQueryService {
++  constructor(@Inject(DRIZZLE_DATABASE) private readonly database: NodePgDatabase<typeof schema>) {}
++  private read(userId: string, participationId?: string) {
++    return this.database.transaction(async tx => {
++      const rows = (await tx.execute<ParticipationProjectionRow>(participationProjection(userId, participationId))).rows;
++      if (rows.length>1) throw new Error("PARTICIPATION_CURRENT_INTEGRITY");
++      const row=rows[0]; if (!row) return null;
++      const value=publicParticipation(row);
++      return !participationId && value.status!=="waiting" && value.status!=="active" ? null : value;
++    }, { isolationLevel: "repeatable read", accessMode: "read only" });
++  }
++  current(userId: string) { return this.read(userId); }
++  byId(userId: string, participationId: string) { return this.read(userId,participationId); }
++}
+diff --git a/backend/test/integration/evaluation-read.integration.test.ts b/backend/test/integration/evaluation-read.integration.test.ts
+index 6f4121dfcb36fb06a2180d9f455c556a021bc1cd..02090cbff75cadaf79766dde5f2fbbab5ce332ea 100644
+--- a/backend/test/integration/evaluation-read.integration.test.ts
++++ b/backend/test/integration/evaluation-read.integration.test.ts
+@@ -129,7 +129,9 @@ test("E08.10 PostgreSQL parâmetros e cursor malformados recebem 400 sem consult
+   const actor = await account();
+   for (const query of [{ limit: "51" }, { cursor: "%%%" }, { limit: ["1", "2"] }, { userId: randomUUID() }]) problem(await get(actor, "/participations/history").query(query), 400, "VALIDATION_ERROR");
+   for (const suffix of ["evaluation", "evaluation-eligibility"]) problem(await get(actor, `/participations/not-a-uuid/${suffix}`), 400, "VALIDATION_ERROR");
+-  problem(await get(actor, "/participations/current"), 404, "RESOURCE_NOT_FOUND");
++  const current = await get(actor, "/participations/current");
++  assert.equal(current.status, 200);
++  assert.deepEqual(current.body, { participation: null });
+ });
+ 
+ for (const mode of ["immediate", "controlled", "automatic-normal", "automatic-admin"] as const) test(`E08.10 PostgreSQL retomada ${mode} preserva motivo, elegibilidade e prazo lógico`, async () => {
+diff --git a/backend/test/integration/participation-lifecycle.integration.test.ts b/backend/test/integration/participation-lifecycle.integration.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..bd6052bf9a55a90d11aa8a148b9dfb844801a25c
+--- /dev/null
++++ b/backend/test/integration/participation-lifecycle.integration.test.ts
+@@ -0,0 +1,321 @@
++import assert from "node:assert/strict";
++import { randomUUID } from "node:crypto";
++import { after, before, test } from "node:test";
++import { sql } from "drizzle-orm";
++import { PgDialect } from "drizzle-orm/pg-core";
++import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
++import type { QueryConfig, QueryResult } from "pg";
++import supertest from "supertest";
++import * as schema from "../../src/database/schema";
++import type { ParticipationLifecycleService } from "../../src/participations/participation-lifecycle.service";
++import type { ParticipationProjectionRow } from "../../src/participations/participation-query.service";
++import { setup, cleanup, app, pool, database, context, account, person, readyEntrant, admit, queued, called, join, call, resolve, withdraw,
++  external, station, state, close, controlled, ordered, lockWait, waitPast } from "./event-closure-fixture";
++import { participant, service, ownState, get, problem, expire, type Actor } from "./evaluation-read-fixture";
++
++let writes:ParticipationLifecycleService,makeWrites:(db:NodePgDatabase<typeof schema>)=>ParticipationLifecycleService;
++let participationProjection:typeof import("../../src/participations/participation-query.service").participationProjection;
++let publicParticipation:typeof import("../../src/participations/participation-query.service").publicParticipation;
++let fingerprint:typeof import("../../src/participations/participation-lifecycle.service").lifecycleFingerprint;
++before(async()=>{
++  process.env.EVALUATION_IDEMPOTENCY_TTL_SECONDS="60";await setup();
++  const module=await import("../../src/participations/participation-lifecycle.service");writes=app.get(module.ParticipationLifecycleService);
++  makeWrites=db=>new module.ParticipationLifecycleService(db);fingerprint=module.lifecycleFingerprint;
++  const queries=await import("../../src/participations/participation-query.service");participationProjection=queries.participationProjection;publicParticipation=queries.publicParticipation;
++});
++after(cleanup);
++type Person=Actor&{participationId:string};
++const mutate=(mode:"cancel"|"finish",p:Person,key:string=randomUUID(),body?:object,actor:Actor=p)=>{
++  const r=supertest(app.getHttpServer()).post(`/api/v1/participations/${p.participationId}/${mode}`).set('Authorization',`Bearer ${actor.token}`).set('Idempotency-Key',key);
++  return body===undefined?r:r.send(body);
++};
++const detail=(p:Person,actor:Actor=p)=>get(actor,`/participations/${p.participationId}`);
++async function persisted(p:Person){return (await pool.query(`SELECT id,status,current_queue_entry_id,finish_reason,
++  to_char(finished_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS finished FROM participations WHERE id=$1`,[p.participationId])).rows[0];}
++async function intents(p:Person){return (await pool.query("SELECT * FROM idempotency_operations WHERE actor_user_id=$1 ORDER BY id",[p.userId])).rows;}
++async function closure(){return app.get((await import("../../src/events/event-closure.service")).EventClosureService);}
++
++test("E08.12 PostgreSQL current ausente é 200/null e não impede pending/return-state",async()=>{
++  const c=await context(),actor=await account(),p=await participant(c,{actor});await service(c,p.participationId);const before=await ownState(c,p);
++  assert.deepEqual((await get(actor,'/participations/current')).body,{participation:null});
++  assert.equal((await get(actor,'/evaluations/pending')).body.items[0].participationId,p.participationId);
++  assert.ok((await get(actor,'/participations/return-state')).body.pendingEvaluationParticipationIds.includes(p.participationId));
++  assert.deepEqual(await ownState(c,p),before);
++});
++for(const status of ["waiting","active","finished","canceled"]as const)test(`E08.12 PostgreSQL detalhe ${status} preserva histórico, privacidade e microssegundos`,async()=>{
++  const c=await context(),p=await person(c,status),before=await ownState(c,p),r=await detail(p);assert.equal(r.status,200,JSON.stringify(r.body));
++  assert.equal(r.body.participation.id,p.participationId);assert.equal(r.body.participation.status,status);assert.match(r.body.participation.joinedAt,/\.\d{6}Z$/);
++  if(status==='waiting')assert.equal(r.body.participation.externalQueue.position,1);else assert.equal(r.body.participation.externalQueue,null);
++  if(status==='finished'||status==='canceled')assert.equal(r.body.participation.finishReason,'fixture_terminal');
++  assert.equal(JSON.stringify(r.body).includes(p.userId),false);assert.equal(JSON.stringify(r.body).includes('@example.test'),false);assert.deepEqual(await ownState(c,p),before);
++  const current=await get(p,'/participations/current');assert.equal(current.status,200);assert.equal(current.body.participation?.id,status==='waiting'||status==='active'?p.participationId:undefined);
++});
++test("E08.12 PostgreSQL posição externa deriva de ordens bigint e muda após cancelamento",async()=>{
++  const c=await context(),a=await person(c,'waiting'),b=await person(c,'waiting'),p=await person(c,'waiting'),before=await persisted(p);
++  assert.equal((await detail(p)).body.participation.externalQueue.position,3);assert.equal((await mutate('cancel',a)).status,200);
++  assert.equal((await detail(p)).body.participation.externalQueue.position,2);assert.equal((await detail(b)).body.participation.externalQueue.position,1);
++  assert.deepEqual(await persisted(p),before);
++});
++test("E08.12 PostgreSQL fila externa desligada libera a mesma participação e não recoloca ao reativar",async()=>{
++  const c=await context(),p=await person(c,'waiting');assert.equal((await external(c)).status,200);
++  const r=await get(p,'/participations/current');assert.equal(r.status,200);assert.equal(r.body.participation.status,'active');assert.equal(r.body.participation.id,p.participationId);assert.equal(r.body.participation.externalQueue,null);
++  assert.equal((await supertest(app.getHttpServer()).patch(`/api/v1/admin/events/${c.eventId}/external-queue`).set('Authorization',`Bearer ${c.admin.token}`).set('Idempotency-Key',randomUUID()).send({enabled:true,reason:'Reativar fila externa'})).status,200);assert.equal((await detail(p)).body.participation.status,'active');
++});
++for(const kind of ["operational","administrative"]as const)for(const offset of [-1,0,1])test(`E08.12 PostgreSQL projeção ${kind} no corte ${offset} microssegundo sem escrita`,async()=>{
++  const c=await context(),p=await person(c);
++  if(kind==='operational')await expire(c);
++  else await pool.query(`UPDATE events SET status='closing',closure_mode='controlled',closure_requested_at=clock_timestamp()-interval '1 minute',admin_deadline_at=clock_timestamp() WHERE id=$1`,[c.eventId]);
++  const before=await ownState(c,p),at=sql`(SELECT LEAST(operational_deadline_at,admin_deadline_at)+${offset}::int*interval '1 microsecond' FROM events WHERE id=${c.eventId}::uuid)`;
++  const rows=(await database.transaction(tx=>tx.execute<ParticipationProjectionRow>(participationProjection(p.userId,p.participationId,at)),{isolationLevel:'repeatable read',accessMode:'read only'})).rows;
++  const result=publicParticipation(rows[0]);assert.equal(result.status,offset<0?'active':'finished');
++  if(offset>=0)assert.equal(result.finishReason,kind==='operational'?'automatic_operational_deadline':'automatic_admin_deadline');
++  assert.deepEqual(await ownState(c,p),before);assert.equal((await persisted(p)).status,'active');
++});
++for(const kind of ["operational","administrative"]as const)test(`E08.12 PostgreSQL current não finge atividade ${kind} antes do job; detalhe coincide após regularização`,async()=>{
++  const c=await context(),p=await person(c);await service(c,p.participationId);
++  if(kind==='operational')await expire(c);else await pool.query(`UPDATE events SET status='closing',closure_mode='controlled',closure_requested_at=clock_timestamp()-interval '1 minute',admin_deadline_at=clock_timestamp() WHERE id=$1`,[c.eventId]);
++  const before=await ownState(c,p),r=await detail(p);assert.deepEqual((await get(p,'/participations/current')).body,{participation:null});assert.equal(r.body.participation.status,'finished');
++  assert.notEqual(r.body.participation.finishReason,'voluntary');assert.deepEqual(await ownState(c,p),before);
++  // Os GETs oficiais de avaliação continuam dependendo de finished persistido, não criam limpeza.
++  assert.equal((await get(p,'/evaluations/pending')).body.items.length,0);assert.equal((await get(p,'/participations/return-state')).body.recentFinalization,null);
++  assert.equal((await (await closure()).regularizeEvent(c.eventId)).kind,'closed');assert.deepEqual((await detail(p)).body,r.body);
++  const pending=await get(p,'/evaluations/pending');assert.equal(pending.body.items[0].participationId,p.participationId);
++  assert.equal((await get(p,'/participations/return-state')).body.recentFinalization.finishReason,r.body.participation.finishReason);
++  const history=await get(p,'/participations/history');assert.equal(history.body.items[0].status,'finished');assert.equal(history.body.items[0].finishReason,r.body.participation.finishReason);
++});
++for(const mode of ["current","detail","cancel","finish"]as const)test(`E08.12 PostgreSQL ${mode} autenticação real, revogação e titularidade estrita`,async()=>{
++  const c=await context(),p=await person(c,mode==='cancel'?'waiting':'active'),other=await account();
++  const request=()=>mode==='current'?get(p,'/participations/current'):mode==='detail'?detail(p):mutate(mode,p);
++  problem(await request().unset('Authorization'),401,'MISSING_ACCESS_TOKEN');
++  if(mode!=='current'){
++    const a=mode==='detail'?await detail(p,other):await mutate(mode,p,randomUUID(),{},other),missing={...p,participationId:randomUUID()};
++    const b=mode==='detail'?await detail(missing,other):await mutate(mode,missing,randomUUID(),{},other);problem(a,404,'RESOURCE_NOT_FOUND');assert.deepEqual(a.body,b.body);
++  }else assert.deepEqual((await get(other,'/participations/current')).body,{participation:null});
++  await pool.query("UPDATE sessions SET revoked_at=clock_timestamp(),revocation_reason='fixture' WHERE id=$1",[p.sessionId]);
++  problem(await request(),401,'SESSION_REVOKED');assert.equal((await intents(p)).length,0);
++});
++for(const role of ["staff","admin"]as const)test(`E08.12 PostgreSQL ${role} próprio sem acesso especial a terceiros`,async()=>{
++  const c=await context(),actor=role==='admin'?c.admin:c.staff,p=await participant(c,{actor,status:'active'}),foreign=await person(c),before=await ownState(c,foreign);
++  assert.equal((await detail(p)).status,200);problem(await detail(foreign,actor),404,'RESOURCE_NOT_FOUND');
++  for(const mode of ["cancel","finish"]as const)problem(await mutate(mode,foreign,randomUUID(),{},actor),404,'RESOURCE_NOT_FOUND');
++  if(role==='admin'){await pool.query("UPDATE sessions SET admin_2fa_verified_at=NULL WHERE id=$1",[actor.sessionId]);problem(await mutate('finish',p),401,'ADMIN_2FA_REQUIRED');await pool.query("UPDATE sessions SET admin_2fa_verified_at=clock_timestamp() WHERE id=$1",[actor.sessionId]);}
++  assert.equal((await mutate('finish',p)).status,200);assert.deepEqual(await ownState(c,foreign),before);
++});
++test("E08.12 PostgreSQL roteamento literal current/history/return-state permanece funcional",async()=>{
++  const c=await context(),p=await person(c);for(const route of ['/participations/current','/participations/history','/participations/return-state'])assert.equal((await get(p,route)).status,200);
++  problem(await get(p,'/participations/not-a-uuid'),400,'VALIDATION_ERROR');
++});
++for(const mode of ["cancel","finish"]as const){
++  for(const body of [undefined,{}])test(`E08.12 PostgreSQL ${mode} corpo ${body===undefined?'ausente':'vazio'} encerra apenas o titular`,async()=>{
++    const c=await context(),p=await person(c,mode==='cancel'?'waiting':'active'),other=await person(c,'waiting'),before=await ownState(c,other),r=await mutate(mode,p,randomUUID(),body);
++    assert.equal(r.status,200,JSON.stringify(r.body));assert.equal(r.body.participation.status,mode==='cancel'?'canceled':'finished');assert.equal(r.body.participation.finishReason,mode==='cancel'?'external_wait_withdrawal':'voluntary');
++    assert.match(r.body.participation.finishedAt,/\.\d{6}Z$/);assert.equal((await persisted(p)).finished,r.body.participation.finishedAt);assert.equal((await persisted(p)).current_queue_entry_id,null);
++    assert.equal((await intents(p)).length,1);assert.deepEqual(await ownState(c,other),before);
++  });
++  test(`E08.12 PostgreSQL ${mode} rejeita payload/chave/UUID inválidos sem efeitos`,async()=>{
++    const c=await context(),p=await person(c,mode==='cancel'?'waiting':'active'),before=await ownState(c,p);
++    for(const body of [{userId:p.userId},{status:'finished'},{reason:'forged'},[],{finishedAt:'forged'}])problem(await mutate(mode,p,randomUUID(),body),400,'VALIDATION_ERROR');
++    problem(await mutate(mode,p).unset('Idempotency-Key'),400,'VALIDATION_ERROR');problem(await mutate(mode,{...p,participationId:'invalid'}),400,'VALIDATION_ERROR');assert.deepEqual(await ownState(c,p),before);
++  });
++  for(const status of ["waiting","active","finished","canceled"]as const)test(`E08.12 PostgreSQL ${mode} valida estado ${status} sob lock`,async()=>{
++    const c=await context(),p=await person(c,status),before=await ownState(c,p),r=await mutate(mode,p);
++    if(status===(mode==='cancel'?'waiting':'active'))assert.equal(r.status,200);else{problem(r,409,mode==='cancel'?'PARTICIPATION_NOT_WAITING':'PARTICIPATION_NOT_ACTIVE');assert.equal(r.body.participation.status,status);assert.deepEqual(await ownState(c,p),before);}
++  });
++  test(`E08.12 PostgreSQL ${mode} replay durável após TTL/prazo e nova chave não sobrescreve`,async()=>{
++    const c=await context(),p=await person(c,mode==='cancel'?'waiting':'active'),key=randomUUID(),a=await mutate(mode,p,key);assert.equal(a.status,200);
++    await pool.query("UPDATE idempotency_operations SET expires_at=clock_timestamp()-interval '1 hour' WHERE actor_user_id=$1",[p.userId]);await expire(c);
++    const before=await ownState(c,p),r=await mutate(mode,p,key,{});assert.equal(r.status,200);assert.deepEqual(r.body,a.body);assert.deepEqual(await ownState(c,p),before);
++    problem(await mutate(mode,p),409,mode==='cancel'?'PARTICIPATION_NOT_WAITING':'PARTICIPATION_NOT_ACTIVE');assert.deepEqual(await ownState(c,p),before);
++  });
++  for(const same of [false,true])test(`E08.12 PostgreSQL ${mode} concorrente chave ${same?'igual':'distinta'} tem uma única mutação`,async()=>{
++    const c=await context(),p=await person(c,mode==='cancel'?'waiting':'active'),key=randomUUID();
++    const [a,b]=await ordered(()=>mutate(mode,p,key),()=>mutate(mode,p,same?key:randomUUID()));assert.equal(a.status,200);
++    if(same){assert.equal(b.status,200);assert.deepEqual(a.body,b.body);}else problem(b,409,mode==='cancel'?'PARTICIPATION_NOT_WAITING':'PARTICIPATION_NOT_ACTIVE');
++    assert.equal((await intents(p)).length,1);assert.equal((await persisted(p)).finished,a.body.participation.finishedAt);
++  });
++  test(`E08.12 PostgreSQL ${mode} replay revalida dono atual sem divulgar resposta antiga`,async()=>{
++    const c=await context(),p=await person(c,mode==='cancel'?'waiting':'active'),key=randomUUID();assert.equal((await mutate(mode,p,key)).status,200);const other=await account();
++    await pool.query('UPDATE participations SET user_id=$2 WHERE id=$1',[p.participationId,other.userId]);const before=await intents(p);problem(await mutate(mode,p,key),404,'RESOURCE_NOT_FOUND');assert.deepEqual(await intents(p),before);
++  });
++  test(`E08.12 PostgreSQL ${mode} recusa encerramento lógico vencido sem limpeza ou intenção`,async()=>{
++    const c=await context(),p=await person(c,mode==='cancel'?'waiting':'active');await expire(c);const before=await ownState(c,p),r=await mutate(mode,p);
++    problem(r,409,'EVENT_OPERATION_ENDED');assert.equal(r.body.participation.finishReason,'automatic_operational_deadline');assert.deepEqual(await ownState(c,p),before);
++  });
++}
++for(const first of ["release","cancel"]as const)test(`E08.12 PostgreSQL cancelamento externo concorre com liberação; vence ${first}`,async()=>{
++  const c=await context(),p=await person(c,'waiting');
++  const [a,b]=await ordered(()=>first==='release'?external(c):mutate('cancel',p),()=>first==='release'?mutate('cancel',p):external(c));assert.equal(a.status,200);
++  if(first==='release'){problem(b,409,'PARTICIPATION_NOT_WAITING');assert.equal(b.body.participation.status,'active');}else assert.equal(b.status,200);
++  assert.equal((await persisted(p)).status,first==='release'?'active':'canceled');
++});
++for(const kind of ["idle","waiting","called"]as const)test(`E08.12 PostgreSQL saída ${kind} não fabrica ausência/conclusão e mantém FKs`,async()=>{
++  const c=await context(),fixture=kind==='idle'?{p:await person(c),entry:undefined,session:undefined}:kind==='waiting'?{...await queued(c),session:undefined}:await called(c),p=fixture.p;
++  const before=await state(c),r=await mutate('finish',p);assert.equal(r.status,200,JSON.stringify(r.body));assert.equal(r.body.participation.completedServicesCount,0);assert.equal(r.body.participation.evaluationEligibility.eligible,false);
++  const after=await state(c);assert.equal(after.queues?.length??0,before.queues?.length??0);assert.equal(after.services?.length??0,before.services?.length??0);
++  if(fixture.entry){const q=(await pool.query("SELECT status,close_reason,to_char(closed_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS at FROM queue_entries WHERE id=$1",[fixture.entry])).rows[0];assert.equal(q.status,'closed');assert.equal(q.close_reason,'participation_voluntary_finish');assert.equal(q.at,r.body.participation.finishedAt);}
++  if(fixture.session){const s=(await pool.query("SELECT status,cancel_reason,to_char(resolved_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS at FROM service_sessions WHERE id=$1",[fixture.session])).rows[0];assert.equal(s.status,'canceled');assert.equal(s.cancel_reason,'participation_voluntary_finish');assert.equal(s.at,r.body.participation.finishedAt);}
++  assert.equal((await persisted(p)).current_queue_entry_id,null);assert.equal((await get(p,`/participations/${p.participationId}/evaluation-eligibility`)).body.eligible,false);
++  assert.equal((await pool.query(`SELECT count(*)::int AS n FROM participations p JOIN queue_entries q ON q.id=p.current_queue_entry_id WHERE p.id=$1`,[p.participationId])).rows[0].n,0);
++});
++test("E08.12 PostgreSQL saída cancela pending, conserva estação available e permite próxima chamada",async()=>{
++  const c=await context(),a=await called(c),b=await queued(c),before=await state(c);
++  const rejected=await station(c);problem(rejected,409,'STATION_HAS_PENDING_CALL');
++  assert.equal(rejected.body.station.availability,'available');assert.equal(rejected.body.station.pendingServiceSessionId,a.session);
++  assert.deepEqual(await state(c),before);
++
++  const finished=await mutate('finish',a.p);assert.equal(finished.status,200,JSON.stringify(finished.body));
++  const p=await persisted(a.p);assert.equal(p.status,'finished');assert.equal(p.finish_reason,'voluntary');assert.equal(p.current_queue_entry_id,null);assert.equal(p.finished,finished.body.participation.finishedAt);
++  const resolved=(await pool.query(`SELECT q.status AS "entryStatus",q.close_reason,s.status AS "sessionStatus",s.cancel_reason,s.resolved_by_user_id,
++    to_char(q.closed_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "closedAt",
++    to_char(s.resolved_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "resolvedAt"
++    FROM queue_entries q JOIN service_sessions s ON s.queue_entry_id=q.id WHERE q.id=$1 AND s.id=$2`,[a.entry,a.session])).rows[0];
++  assert.deepEqual(resolved,{entryStatus:'closed',close_reason:'participation_voluntary_finish',sessionStatus:'canceled',cancel_reason:'participation_voluntary_finish',resolved_by_user_id:a.p.userId,closedAt:p.finished,resolvedAt:p.finished});
++  assert.equal((await pool.query("SELECT availability FROM stations WHERE id=$1",[c.stationId])).rows[0].availability,'available');
++
++  const next=await call(c);assert.equal(next.status,201,JSON.stringify(next.body));assert.notEqual(next.body.serviceSession.id,a.session);
++  const pending=(await pool.query(`SELECT s.status,q.participation_id FROM service_sessions s JOIN queue_entries q ON q.id=s.queue_entry_id
++    WHERE s.id=$1 AND s.station_id=$2`,[next.body.serviceSession.id,c.stationId])).rows[0];
++  assert.deepEqual(pending,{status:'pending',participation_id:b.p.participationId});assert.equal((await persisted(b.p)).status,'active');
++  assert.equal((await pool.query("SELECT availability FROM stations WHERE id=$1",[c.stationId])).rows[0].availability,'available');
++});
++test("E08.12 PostgreSQL saída waiting conserva estação unavailable sem pending",async()=>{
++  const c=await context(),a=await queued(c),b=await queued(c);
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM service_sessions WHERE station_id=$1",[c.stationId])).rows[0].n,0);
++  assert.equal((await pool.query("SELECT status FROM queue_entries WHERE id=$1",[a.entry])).rows[0].status,'waiting');
++  const disabled=await station(c);assert.equal(disabled.status,200,JSON.stringify(disabled.body));assert.equal(disabled.body.availability,'unavailable');assert.equal(disabled.body.pendingServiceSessionId,null);
++
++  const finished=await mutate('finish',a.p);assert.equal(finished.status,200,JSON.stringify(finished.body));
++  const p=await persisted(a.p);assert.equal(p.status,'finished');assert.equal(p.finish_reason,'voluntary');assert.equal(p.current_queue_entry_id,null);assert.equal(p.finished,finished.body.participation.finishedAt);
++  const entry=(await pool.query(`SELECT status,close_reason,to_char(closed_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at
++    FROM queue_entries WHERE id=$1`,[a.entry])).rows[0];
++  assert.deepEqual(entry,{status:'closed',close_reason:'participation_voluntary_finish',at:p.finished});
++  assert.equal((await pool.query("SELECT availability FROM stations WHERE id=$1",[c.stationId])).rows[0].availability,'unavailable');
++  problem(await call(c),409,'STATION_UNAVAILABLE');
++  assert.equal((await pool.query("SELECT availability FROM stations WHERE id=$1",[c.stationId])).rows[0].availability,'unavailable');
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM service_sessions WHERE station_id=$1",[c.stationId])).rows[0].n,0);
++  assert.equal((await persisted(b.p)).status,'active');assert.equal((await persisted(b.p)).current_queue_entry_id,b.entry);
++  assert.equal((await pool.query("SELECT status FROM queue_entries WHERE id=$1",[b.entry])).rows[0].status,'waiting');
++});
++test("E08.12 PostgreSQL saída preserva completed, snapshot e integra histórico/pending/POST avaliação",async()=>{
++  const c=await context(),a=await called(c);assert.equal((await resolve(c,a.session,'complete')).status,200);
++  const old=(await pool.query('SELECT to_jsonb(s) AS value FROM service_sessions s WHERE id=$1',[a.session])).rows[0].value;
++  const q=await join(c,a.p);assert.equal(q.kind,'created');const r=await mutate('finish',a.p);assert.equal(r.status,200);assert.equal(r.body.participation.completedServicesCount,1);assert.equal(r.body.participation.evaluationEligibility.eligible,true);
++  assert.deepEqual((await pool.query('SELECT to_jsonb(s) AS value FROM service_sessions s WHERE id=$1',[a.session])).rows[0].value,old);
++  const history=await get(a.p,'/participations/history');assert.equal(history.body.items.length,1);assert.equal(history.body.items[0].evaluation.pending,true);
++  assert.equal((await get(a.p,'/evaluations/pending')).body.items[0].participationId,a.p.participationId);
++  const post=await supertest(app.getHttpServer()).post(`/api/v1/participations/${a.p.participationId}/evaluation`).set('Authorization',`Bearer ${a.p.token}`).set('Idempotency-Key',randomUUID()).send({rating:5});assert.equal(post.status,201,JSON.stringify(post.body));
++  assert.equal((await get(a.p,'/evaluations/pending')).body.items.length,0);
++});
++for(const action of ["complete","absent"]as const)for(const first of ["staff","finish"]as const)test(`E08.12 PostgreSQL saída versus ${action}; vence ${first}`,async()=>{
++  const c=await context(),a=await called(c);
++  const [one,two]=await ordered(()=>first==='staff'?resolve(c,a.session,action):mutate('finish',a.p),()=>first==='staff'?mutate('finish',a.p):resolve(c,a.session,action));assert.equal(one.status,200);
++  if(first==='staff')assert.equal(two.status,200,JSON.stringify(two.body));else problem(two,409,'SERVICE_NOT_PENDING');
++  const s=(await pool.query('SELECT status FROM service_sessions WHERE id=$1',[a.session])).rows[0];assert.equal(s.status,first==='staff'?(action==='complete'?'completed':'absent'):'canceled');
++  const p=await persisted(a.p);assert.equal(p.status,'finished');assert.equal(p.finish_reason,'voluntary');assert.equal(p.current_queue_entry_id,null);
++  assert.equal((await get(a.p,`/participations/${a.p.participationId}/evaluation-eligibility`)).body.eligible,first==='staff'&&action==='complete');
++});
++for(const first of ["call","finish"]as const)test(`E08.12 PostgreSQL saída versus chamada Staff; vence ${first}`,async()=>{
++  const c=await context(),a=await queued(c);const [one,two]=await ordered(()=>first==='call'?call(c):mutate('finish',a.p),()=>first==='call'?mutate('finish',a.p):call(c));
++  assert.equal(one.status,first==='call'?201:200);if(first==='call')assert.equal(two.status,200);else problem(two,409,'QUEUE_EMPTY');
++  const sessions=(await pool.query('SELECT status FROM service_sessions WHERE queue_entry_id=$1',[a.entry])).rows;assert.equal(sessions.length,first==='call'?1:0);if(sessions.length)assert.equal(sessions[0].status,'canceled');
++  assert.equal((await persisted(a.p)).status,'finished');
++});
++for(const first of ["withdraw","finish"]as const)test(`E08.12 PostgreSQL C-15 e saída completa são distintas; vence ${first}`,async()=>{
++  const c=await context(),a=await called(c),[one,two]=await ordered(()=>first==='withdraw'?withdraw(c,a.p,a.entry):mutate('finish',a.p),()=>first==='withdraw'?mutate('finish',a.p):withdraw(c,a.p,a.entry));
++  assert.equal(one.status,200);if(first==='withdraw')assert.equal(two.status,200);else problem(two,409,'PARTICIPATION_NOT_ACTIVE');
++  const q=(await pool.query('SELECT close_reason FROM queue_entries WHERE id=$1',[a.entry])).rows[0];assert.equal(q.close_reason,first==='withdraw'?'participant_queue_withdrawal':'participation_voluntary_finish');assert.equal((await persisted(a.p)).finish_reason,'voluntary');
++});
++for(const mode of ["immediate","controlled"]as const)for(const first of ["admin","finish"]as const)test(`E08.12 PostgreSQL saída versus Admin ${mode}; vence ${first}`,async()=>{
++  const c=await context(),a=await called(c),body=mode==='controlled'?await controlled():undefined;
++  const [one,two]=await ordered(()=>first==='admin'?close(c,body):mutate('finish',a.p),()=>first==='admin'?mutate('finish',a.p):close(c,body));assert.equal(one.status,200);
++  if(first==='admin'&&mode==='immediate'){problem(two,409,'PARTICIPATION_NOT_ACTIVE');assert.equal(two.body.participation.finishReason,'admin_immediate');}else assert.equal(two.status,200,JSON.stringify(two.body));
++  assert.equal((await persisted(a.p)).finish_reason,first==='admin'&&mode==='immediate'?'admin_immediate':'voluntary');
++});
++test("E08.12 PostgreSQL job vence e saída não sobrescreve motivo automático",async()=>{
++  const c=await context(),a=await called(c);await expire(c);const job=await closure();
++  const [one,two]=await ordered(()=>job.regularizeEvent(c.eventId),()=>mutate('finish',a.p));assert.equal(one.kind,'closed');problem(two,409,'PARTICIPATION_NOT_ACTIVE');
++  assert.equal(two.body.participation.finishReason,'automatic_operational_deadline');assert.equal((await intents(a.p)).filter(i=>i.operation==='finish_arena_participation').length,0);
++});
++test("E08.12 PostgreSQL saída vence antes do corte; job aguardando preserva motivo voluntário",async()=>{
++  const c=await context(),a=await called(c),at=(await pool.query(`UPDATE events SET official_ends_at=clock_timestamp()-interval '1 minute',operational_deadline_at=clock_timestamp()+interval '5 seconds' WHERE id=$1
++    RETURNING to_char(operational_deadline_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`,[c.eventId])).rows[0].at,job=await closure();
++  const [one,two]=await ordered(()=>mutate('finish',a.p),()=>job.regularizeEvent(c.eventId),pid=>waitPast(at,pid));assert.equal(one.status,200);assert.equal(two.kind,'closed');assert.equal((await persisted(a.p)).finish_reason,'voluntary');
++});
++for(const mode of ["cancel","finish"]as const)test(`E08.12 PostgreSQL ${mode} decide após espera que cruza prazo definitivo`,async()=>{
++  const c=await context(),p=await person(c,mode==='cancel'?'waiting':'active');
++  const at=(await pool.query(`UPDATE events SET official_ends_at=clock_timestamp()-interval '1 minute',operational_deadline_at=clock_timestamp()+interval '5 seconds' WHERE id=$1
++    RETURNING to_char(operational_deadline_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`,[c.eventId])).rows[0].at;
++  const before=await ownState(c,p),r=await lockWait(c,()=>mutate(mode,p),async(_client,pid)=>{await waitPast(at,pid);});problem(r,409,'EVENT_OPERATION_ENDED');assert.notEqual(r.body.participation.finishReason,'voluntary');assert.deepEqual(await ownState(c,p),before);
++});
++for(const mode of ["cancel","finish"]as const)test(`E08.12 PostgreSQL reentrada após ${mode} tem novo ID e snapshot próprio`,async()=>{
++  const c=await context(),actor=await readyEntrant(),first=await admit(c,actor);assert.equal(first.kind,'created');if(first.kind!=='created')assert.fail();
++  const p={...actor,participationId:first.participationId};if(mode==='finish')assert.equal((await external(c)).status,200);
++  const snapshot=(await pool.query('SELECT to_jsonb(s) AS value FROM participation_profile_snapshots s WHERE participation_id=$1',[p.participationId])).rows[0].value;
++  const key=randomUUID(),a=await mutate(mode,p,key);assert.equal(a.status,200);const next=await admit(c,actor);assert.equal(next.kind,'created');if(next.kind!=='created')assert.fail();assert.notEqual(next.participationId,p.participationId);
++  assert.equal((await get(actor,'/participations/current')).body.participation.id,next.participationId);assert.deepEqual((await mutate(mode,p,key)).body,a.body);
++  assert.equal((await get(actor,'/participations/history')).body.items.length,2);assert.deepEqual((await pool.query('SELECT to_jsonb(s) AS value FROM participation_profile_snapshots s WHERE participation_id=$1',[p.participationId])).rows[0].value,snapshot);
++  problem(await mutate(mode,{...actor,participationId:next.participationId},key),409,'IDEMPOTENCY_KEY_REUSED');
++});
++test("E08.12 PostgreSQL namespaces cancel/finish e atores distintos não compartilham intenção",async()=>{
++  const c=await context(),p=await person(c,'waiting'),other=await person(c,'waiting'),key=randomUUID();assert.equal((await mutate('cancel',p,key)).status,200);assert.equal((await mutate('cancel',other,key)).status,200);
++  const next=await participant(c,{actor:p,status:'active'});assert.equal((await mutate('finish',next,key)).status,200);assert.equal((await intents(p)).length,2);
++});
++for(const mode of ["cancel","finish"]as const)test(`E08.12 PostgreSQL ${mode} intenção in_progress preexistente não executa domínio`,async()=>{
++  const c=await context(),p=await person(c,mode==='cancel'?'waiting':'active'),key=randomUUID();
++  await pool.query(`INSERT INTO idempotency_operations(id,actor_user_id,operation,idempotency_key,request_hash,status,created_at,expires_at)
++    VALUES($1,$2,$3,$4,$5,'in_progress',clock_timestamp(),clock_timestamp()+interval '1 minute')`,[randomUUID(),p.userId,mode==='cancel'?'cancel_external_participation':'finish_arena_participation',key,fingerprint(mode,p.userId,p.participationId)]);
++  const before=await ownState(c,p);problem(await mutate(mode,p,key),409,'IDEMPOTENCY_IN_PROGRESS');assert.deepEqual(await ownState(c,p),before);
++});
++for(const mode of ["cancel","finish"]as const)for(const phase of ["reserve","participation","queue","session","complete"]as const){
++  if(mode==='cancel'&&(phase==='queue'||phase==='session'))continue;
++  test(`E08.12 PostgreSQL falha SQL após escrita real ${mode}/${phase} reverte tudo e aceita retry`,async()=>{
++    const c=await context(),p=mode==='cancel'?await person(c,'waiting'):(await called(c)).p,key=randomUUID(),before=await ownState(c,p),client=await pool.connect();
++    const originalQuery=client.query.bind(client) as (config:string|QueryConfig,params?:unknown[])=>Promise<QueryResult>;let reached=false;
++    const proxy=new Proxy(client,{get(target,property){if(property==='query')return async(config:string|QueryConfig,params?:unknown[])=>{
++      const result=await originalQuery(config,params),text=typeof config==='string'?config:config.text;
++      if(!reached&&((phase==='reserve'&&text.includes('insert into "idempotency_operations"'))||(phase==='complete'&&text.includes('update "idempotency_operations"'))
++        ||(phase==='participation'&&text.startsWith('WITH decision AS MATERIALIZED'))||(phase==='queue'&&text.startsWith('UPDATE queue_entries'))||(phase==='session'&&text.startsWith('UPDATE service_sessions')))){
++        assert.equal(result.rows.length,1);reached=true;await originalQuery('SELECT 1/0');assert.fail('Falha SQL real deveria abortar a transação.');}return result;
++    };return Reflect.get(target,property,target);}});
++    const failing=makeWrites(drizzle(proxy,{schema})),original=writes[mode].bind(writes);writes[mode]=input=>failing[mode](input);
++    try{problem(await mutate(mode,p,key),500,'INTERNAL_SERVER_ERROR');assert.equal(reached,true);assert.deepEqual(await ownState(c,p),before);}
++    finally{writes[mode]=original;client.release();}
++    assert.equal((await mutate(mode,p,key)).status,200);
++  });
++}
++test("E08.12 PostgreSQL snapshot de posição permanece coerente durante cancelamento concorrente",async()=>{
++  const c=await context(),a=await person(c,'waiting'),b=await person(c,'waiting'),p=await person(c,'waiting'),original=database.transaction.bind(database) as typeof database.transaction,dialect=new PgDialect();
++  let ready!:()=>void,release!:()=>void,readerPid=0,writerPid=0;const reached=new Promise<void>(yes=>{ready=yes;}),gate=new Promise<void>(yes=>{release=yes;});
++  database.transaction=(callback,config)=>original(async tx=>{
++    if(config?.isolationLevel==='read committed')writerPid=(await tx.execute<{pid:number}>(sql`SELECT pg_backend_pid() AS pid`)).rows[0].pid;
++    const execute=tx.execute.bind(tx);tx.execute=(async(...args:Parameters<typeof tx.execute>)=>{const q=args[0],text=typeof q==='string'?q:dialect.sqlToQuery(q.getSQL()).sql,result=await execute(...args);
++      if(config?.accessMode==='read only'&&text.startsWith('WITH observation')){readerPid=(await execute<{pid:number}>(sql`SELECT pg_backend_pid() AS pid`)).rows[0].pid;ready();await gate;}return result;}) as typeof tx.execute;return callback(tx);
++  },config);
++  const pending=detail(p).then(r=>r);pending.catch(()=>undefined);
++  try{await Promise.race([reached,pending.then(()=>{throw Error('Leitura não reteve snapshot.');})]);assert.equal((await mutate('cancel',a)).status,200);assert.ok(readerPid>0&&writerPid>0);assert.notEqual(readerPid,writerPid);
++    release();const r=await pending;assert.equal(r.body.participation.externalQueue.position,3);database.transaction=original;assert.equal((await detail(p)).body.participation.externalQueue.position,2);assert.equal((await detail(b)).body.participation.externalQueue.position,1);
++  }finally{database.transaction=original;release();await Promise.allSettled([pending]);}
++});
++test("E08.12 PostgreSQL GETs não bloqueiam estação/participação e não criam efeitos",async()=>{
++  const c=await context(),a=await called(c),client=await pool.connect(),before=await ownState(c,a.p);let pending:Promise<supertest.Response>|undefined;
++  try{await client.query('BEGIN');await client.query('SELECT id FROM participations WHERE id=$1 FOR UPDATE',[a.p.participationId]);await client.query('SELECT id FROM stations WHERE id=$1 FOR UPDATE',[c.stationId]);
++    pending=detail(a.p).then(r=>r);const r=await Promise.race([pending,new Promise<never>((_yes,no)=>setTimeout(()=>no(Error('GET aguardou lock exclusivo indevidamente.')),2000))]);assert.equal(r.status,200);
++  }finally{await client.query('ROLLBACK');client.release();await Promise.allSettled([pending]);}
++  assert.deepEqual(await ownState(c,a.p),before);
++});
++test("E08.12 PostgreSQL saída isola outra conta/evento e não altera concluídos alheios",async()=>{
++  const c=await context(),a=await called(c),other=await context(),foreign=await called(other),before=await ownState(other,foreign.p);
++  assert.equal((await mutate('finish',a.p)).status,200);assert.deepEqual(await ownState(other,foreign.p),before);
++});
++for(const mode of ["cancel","finish"]as const)test(`E08.12 PostgreSQL ${mode} continua permitido após corte de novos ingressos antes do prazo definitivo`,async()=>{
++  const c=await context(),p=await person(c,mode==='cancel'?'waiting':'active');
++  await pool.query("UPDATE events SET official_ends_at=clock_timestamp()-interval '1 minute',operational_deadline_at=clock_timestamp()+interval '10 minutes' WHERE id=$1",[c.eventId]);
++  assert.equal((await mutate(mode,p)).status,200);
++});
++test("E08.12 PostgreSQL waiting residual de fechamento controlado é projetado como encerrado e não vira cancelamento voluntário",async()=>{
++  const c=await context(),p=await person(c,'waiting');
++  await pool.query("UPDATE events SET status='closing',closure_mode='controlled',closure_requested_at=clock_timestamp(),admin_deadline_at=clock_timestamp()+interval '10 minutes' WHERE id=$1",[c.eventId]);
++  const before=await ownState(c,p),r=await detail(p);assert.equal(r.body.participation.finishReason,'admin_controlled_external_wait_closed');assert.equal(r.body.participation.externalQueue,null);
++  assert.deepEqual((await get(p,'/participations/current')).body,{participation:null});const canceled=await mutate('cancel',p);problem(canceled,409,'EVENT_OPERATION_ENDED');assert.equal(canceled.body.participation.finishReason,'admin_controlled_external_wait_closed');
++  assert.deepEqual(await ownState(c,p),before);
++});
+diff --git a/backend/test/unit/participation-lifecycle-http.test.ts b/backend/test/unit/participation-lifecycle-http.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..aee4e25b0d91c9293ba589ea7dba92f98ab9d691
+--- /dev/null
++++ b/backend/test/unit/participation-lifecycle-http.test.ts
+@@ -0,0 +1,93 @@
++import "reflect-metadata";
++import assert from "node:assert/strict";
++import { after, before, test } from "node:test";
++import { Module, type INestApplication } from "@nestjs/common";
++import { NestFactory } from "@nestjs/core";
++import type { Pool } from "pg";
++import supertest from "supertest";
++import { AuthService } from "../../src/auth/auth.service";
++import { SessionAuthGuard } from "../../src/auth/session-auth.guard";
++import { ProblemException } from "../../src/common/errors/problem.exception";
++import { ProblemDetailsExceptionFilter } from "../../src/common/errors/problem-details.filter";
++import { DRIZZLE_DATABASE, POSTGRES_POOL } from "../../src/database/database.module";
++import { EventsModule } from "../../src/events/events.module";
++import { ParticipantQueueIdempotencyPolicy } from "../../src/events/participant-queue-idempotency.policy";
++import { EvaluationReadController } from "../../src/evaluations/evaluation-read.controller";
++import { EvaluationReadService } from "../../src/evaluations/evaluation-read.service";
++import { ParticipationLifecycleController } from "../../src/participations/participation-lifecycle.controller";
++import { ParticipationLifecycleService, type LifecycleResult, type LifecycleFailure } from "../../src/participations/participation-lifecycle.service";
++import { ParticipationQueryService } from "../../src/participations/participation-query.service";
++
++const id=(n:number)=>`abcdef00-0000-4000-8000-${String(n).padStart(12,"0")}`,uid=id(1),pid=id(2),at="2026-11-04T15:00:00.123456Z";
++const value={id:pid,eventId:id(3),status:"active" as const,joinedAt:at,arenaEnteredAt:at,finishedAt:null,finishReason:null,externalQueue:null};
++const calls:Array<{mode:string;input:unknown}>=[];let result:LifecycleResult={kind:"changed",participation:value},found=true,failure=false;
++@Module({controllers:[EvaluationReadController,ParticipationLifecycleController],providers:[SessionAuthGuard,ParticipantQueueIdempotencyPolicy,
++  {provide:AuthService,useValue:{async authenticateBearerToken(token:string){
++    if(token==="admin-no-2fa")throw new ProblemException({status:401,code:"ADMIN_2FA_REQUIRED",typeSlug:"admin-2fa-required",title:"2FA",detail:"Segundo fator obrigatório."});
++    if(!["participant","staff","admin"].includes(token))throw new ProblemException({status:401,code:"SESSION_REVOKED",typeSlug:"session-revoked",title:"Sessão inválida",detail:"Sessão inválida."});
++    return {userId:uid,sessionId:id(4),roles:token==="participant"?[]:[token]};
++  }}},
++  {provide:ParticipationQueryService,useValue:{current:(userId:string)=>{calls.push({mode:"current",input:userId});return found?value:null;},byId:(userId:string,participationId:string)=>{calls.push({mode:"byId",input:{userId,participationId}});return found?value:null;}}},
++  {provide:ParticipationLifecycleService,useValue:{cancel:(input:unknown)=>{calls.push({mode:"cancel",input});if(failure)throw Error("PARTICIPATION_LIFECYCLE_INTERNAL_ERROR");return result;},finish:(input:unknown)=>{calls.push({mode:"finish",input});if(failure)throw Error("PARTICIPATION_LIFECYCLE_INTERNAL_ERROR");return result;}}},
++  {provide:EvaluationReadService,useValue:{getHistory:()=>({items:[],nextCursor:null}),getReturnState:()=>({recentFinalization:null,pendingEvaluationParticipationIds:[]}),getPending:()=>({items:[]})}},
++]})class HttpModule{}
++let app:INestApplication;
++before(async()=>{app=await NestFactory.create(HttpModule,{logger:false});app.setGlobalPrefix("api/v1");app.useGlobalFilters(new ProblemDetailsExceptionFilter());await app.listen(0,"127.0.0.1");});
++after(async()=>{await app?.close();});
++function request(mode:"current"|"byId"|"cancel"|"finish",token="participant",resource=pid){
++  const r=mode==="current"?supertest(app.getHttpServer()).get('/api/v1/participations/current'):mode==="byId"?supertest(app.getHttpServer()).get(`/api/v1/participations/${resource}`):supertest(app.getHttpServer()).post(`/api/v1/participations/${resource}/${mode}`);
++  return r.set("Authorization",`Bearer ${token}`).set("Idempotency-Key","opaque,key");
++}
++function reset(){calls.length=0;result={kind:"changed",participation:value};found=true;failure=false;}
++function problem(r:supertest.Response,status:number,code:string){assert.equal(r.status,status);assert.equal(r.body.code,code);assert.match(r.headers['content-type'],/application\/problem\+json/);}
++for(const mode of ["current","byId","cancel","finish"]as const){
++  test(`E08.12 HTTP ${mode} exige Bearer/sessão e 2FA existente`,async()=>{
++    reset();problem(await request(mode).unset('Authorization'),401,"MISSING_ACCESS_TOKEN");problem(await request(mode,"revoked"),401,"SESSION_REVOKED");problem(await request(mode,"admin-no-2fa"),401,"ADMIN_2FA_REQUIRED");assert.equal(calls.length,0);
++  });
++  test(`E08.12 HTTP ${mode} usa somente o ator autenticado e resposta pública`,async()=>{
++    reset();const r=await request(mode).query({userId:id(99)}).send(mode==="cancel"||mode==="finish"?{}:undefined);assert.equal(r.status,200);assert.deepEqual(r.body,{participation:value});
++    const arg=calls[0].input;assert.equal(typeof arg==="string"?arg:(arg as {userId:string}).userId,uid);
++    if(mode==="cancel"||mode==="finish"){const i=arg as {idempotencyKey:string;expiresAt:Date};assert.equal(i.idempotencyKey,"opaque,key");assert.ok(i.expiresAt.getTime()>Date.now());}
++  });
++}
++test("E08.12 HTTP ausência current é 200/null; detalhe ausente é 404 indistinguível",async()=>{
++  reset();found=false;const current=await request("current");assert.equal(current.status,200);assert.deepEqual(current.body,{participation:null});
++  const a=await request("byId"),b=await request("byId","participant",id(99));problem(a,404,"RESOURCE_NOT_FOUND");assert.deepEqual(a.body,b.body);
++});
++test("E08.12 HTTP rotas literais current/history/return-state não colidem com UUID",async()=>{
++  reset();for(const route of ["history","return-state"]){const r=await supertest(app.getHttpServer()).get(`/api/v1/participations/${route}`).set('Authorization','Bearer participant');assert.equal(r.status,200);assert.equal(calls.length,0);}
++  assert.equal((await request("current")).status,200);assert.equal(calls[0].mode,"current");
++});
++for(const mode of ["byId","cancel","finish"]as const)test(`E08.12 HTTP ${mode} UUID inválido não chega ao serviço`,async()=>{
++  reset();problem(await request(mode,"participant","invalid").send(mode==="byId"?undefined:{}),400,"VALIDATION_ERROR");assert.equal(calls.length,0);
++});
++for(const mode of ["cancel","finish"]as const){
++  test(`E08.12 HTTP ${mode} aceita {} e ausência, replay preserva corpo histórico`,async()=>{
++    reset();result={kind:"replay",participation:value};for(const body of [undefined,{}]){const r=await request(mode).send(body);assert.equal(r.status,200);assert.deepEqual(r.body,{participation:value});}
++  });
++  test(`E08.12 HTTP ${mode} rejeita campos extras, corpo inadequado e chave inválida`,async()=>{
++    reset();for(const body of [{userId:uid},{status:"finished"},{finishedAt:at},{reason:"forged"},[],{participationId:pid}])problem(await request(mode).send(body),400,"VALIDATION_ERROR");
++    problem(await request(mode).type('text/plain').send('x'),400,"VALIDATION_ERROR");problem(await request(mode).type('json').send('{invalid'),400,"BAD_REQUEST");
++    for(const key of [""," ","x".repeat(129)])problem(await request(mode).set('Idempotency-Key',key).send({}),400,"VALIDATION_ERROR");
++    problem(await request(mode).unset('Idempotency-Key').send({}),400,"VALIDATION_ERROR");problem(await request(mode).set({'Idempotency-Key':['a','b']}).send({}),400,"VALIDATION_ERROR");assert.equal(calls.length,0);
++  });
++  test(`E08.12 HTTP ${mode} falha interna não expõe estado ou SQL`,async()=>{
++    reset();failure=true;problem(await request(mode).send({}),500,"INTERNAL_SERVER_ERROR");
++  });
++}
++for(const [kind,code]of Object.entries({access_denied:"RESOURCE_NOT_FOUND",not_waiting:"PARTICIPATION_NOT_WAITING",not_active:"PARTICIPATION_NOT_ACTIVE",event_ended:"EVENT_OPERATION_ENDED",request_conflict:"IDEMPOTENCY_KEY_REUSED",in_progress:"IDEMPOTENCY_IN_PROGRESS"}))test(`E08.12 HTTP mapeia ${kind}`,async()=>{
++  reset();result={kind:kind as LifecycleFailure};for(const mode of ["cancel","finish"]as const)problem(await request(mode).send({}),kind==="access_denied"?404:409,code);
++});
++test("E08.12 HTTP conflito de estado traz somente a participação própria atualizada",async()=>{
++  reset();result={kind:"not_waiting",participation:value};const r=await request("cancel").send({});problem(r,409,"PARTICIPATION_NOT_WAITING");assert.deepEqual(r.body.participation,value);
++});
++test("E08.12 HTTP Staff/Admin agem como participantes próprios sem prerrogativa adicional",async()=>{
++  reset();for(const actor of ["staff","admin"])for(const mode of ["current","byId","cancel","finish"]as const)assert.equal((await request(mode,actor).send(mode==="cancel"||mode==="finish"?{}:undefined)).status,200);
++});
++test("E08.12 DI Nest resolve serviços reais e reutiliza TTL explícito sem conectar",async()=>{
++  const real=await NestFactory.create(EventsModule,{logger:false});try{
++    const controller=real.get(ParticipationLifecycleController),queries=real.get(ParticipationQueryService),writes=real.get(ParticipationLifecycleService);
++    assert.equal(Reflect.get(controller,"queries"),queries);assert.equal(Reflect.get(controller,"writes"),writes);assert.equal(Reflect.get(controller,"policy"),real.get(ParticipantQueueIdempotencyPolicy));
++    assert.equal(Reflect.get(writes,"database"),real.get(DRIZZLE_DATABASE));assert.equal(Reflect.get(queries,"database"),real.get(DRIZZLE_DATABASE));assert.equal(real.get<Pool>(POSTGRES_POOL).totalCount,0);
++  }finally{await real.close();}
++});
+diff --git a/backend/test/unit/participation-lifecycle.test.ts b/backend/test/unit/participation-lifecycle.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..14ea90e07a95863eadba1166df0fd169582ade74
+--- /dev/null
++++ b/backend/test/unit/participation-lifecycle.test.ts
+@@ -0,0 +1,119 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { drizzle } from "drizzle-orm/node-postgres";
++import { PgDialect } from "drizzle-orm/pg-core";
++import type { Client } from "pg";
++import * as schema from "../../src/database/schema";
++import { ParticipationLifecycleService, lifecycleFingerprint, VOLUNTARY_QUEUE_REASON } from "../../src/participations/participation-lifecycle.service";
++import { ParticipationQueryService, participationProjection, publicParticipation, type ParticipationProjectionRow } from "../../src/participations/participation-query.service";
++
++const id=(n:number)=>`abcdef00-0000-4000-8000-${String(n).padStart(12,"0")}`;
++const pid=id(1),uid=id(2),eventId=id(3),qid=id(4),xid=id(5),sid=id(6),stationId=id(7),at="2026-11-04T15:00:00.123456Z";
++const input={userId:uid,participationId:pid,idempotencyKey:"opaque,key",expiresAt:new Date("2099-01-01")};
++function projection(status="active"):ParticipationProjectionRow {
++  return {id:pid,eventId,status,joinedAt:at,arenaEnteredAt:status==="waiting"?null:at,
++    finishedAt:["finished","canceled"].includes(status)?at:null,finishReason:status==="finished"?"voluntary":status==="canceled"?"external_wait_withdrawal":null,
++    position:status==="waiting"?"3":null,observedAt:at};
++}
++type Options={access?:boolean;owner?:boolean;status?:string;entry?:"waiting"|"called";intent?:"replay"|"conflict"|"in_progress";fail?:string;ended?:boolean;badReplay?:boolean;brokenPointer?:boolean;completed?:number};
++function fixture(mode:"cancel"|"finish",options:Options={}){
++  const queries:Array<{text:string;params:unknown[]}>=[];let changed=false;
++  const terminal=mode==="cancel"?"canceled":"finished";
++  const value={...publicParticipation(projection(terminal)),...(mode==="finish"?{completedServicesCount:options.completed??2,evaluationEligibility:{eligible:(options.completed??2)>0,hasSubmitted:false}}:{})};
++  const entry=options.entry?{id:qid,experienceId:xid,status:options.entry,sessionId:options.entry==="called"?sid:null,sessionStatus:options.entry==="called"?"pending":null,stationId:options.entry==="called"?stationId:null}:undefined;
++  const db=drizzle({async query(config:{text:string},params:unknown[]=[]){
++    const text=config.text;queries.push({text,params});
++    if(/^(begin|commit|rollback)/.test(text))return {rows:[]};
++    if(text.startsWith('SELECT event_id AS'))return {rows:options.access===false?[]:[{eventId}]};
++    if(text.includes('insert into "idempotency_operations"')){if(options.fail==="reserve")throw Error("PRIVATE");return {rows:options.intent?[]:[["intent"]]};}
++    if(text.includes('from "idempotency_operations"'))return {rows:[["intent",options.intent==="conflict"?"different":lifecycleFingerprint(mode,uid,pid),options.intent==="in_progress"?"in_progress":"completed",200,pid,options.badReplay?{}:{participation:value}]]};
++    if(text.startsWith('SELECT id FROM events'))return {rows:[{id:eventId}]};
++    if(text.startsWith('SELECT q.id,q.experience_id'))return {rows:entry?[entry]:[]};
++    if(text.startsWith('SELECT id FROM experiences')||text.startsWith('SELECT id FROM stations'))return {rows:[{id:"resource"}]};
++    if(text.startsWith('SELECT status,current_queue_entry_id'))return {rows:options.owner===false?[]:[{status:options.status??(mode==="cancel"?"waiting":"active"),currentId:options.brokenPointer?qid:entry?qid:null}]};
++    if(text.startsWith('SELECT id FROM queue_entries'))return {rows:entry?[{id:qid}]:[]};
++    if(text.startsWith('SELECT id FROM service_sessions'))return {rows:entry?.sessionId?[{id:sid}]:[]};
++    if(text.startsWith('WITH decision AS MATERIALIZED')){if(options.fail==="domain")throw Error("PRIVATE");changed=!options.ended;return {rows:changed?[{at}]:[]};}
++    if(text.startsWith('UPDATE queue_entries')){if(options.fail==="queue")throw Error("PRIVATE");return {rows:[{id:qid}]};}
++    if(text.startsWith('UPDATE service_sessions')){if(options.fail==="session")throw Error("PRIVATE");return {rows:[{id:sid}]};}
++    if(text.startsWith('WITH observation')){if(options.fail==="response")throw Error("PRIVATE");return {rows:[{...projection(changed?terminal:options.ended?"finished":options.status??"active"),...(options.ended?{finishReason:"automatic_operational_deadline"}:{})}]};}
++    if(text.startsWith('WITH scoped'))return {rows:[{participationId:pid,status:"finished",joinedAt:at,finishedAt:at,deadlineAt:at,completedCount:String(options.completed??2),eligible:(options.completed??2)>0,submitted:false,pending:true,reason:null}]};
++    if(text.includes('update "idempotency_operations"')){if(options.fail==="complete")throw Error("PRIVATE");return {rows:[["intent",200,pid,{participation:value}]]};}
++    throw Error('Unexpected SQL: '+text);
++  }} as unknown as Client,{schema});
++  return {service:new ParticipationLifecycleService(db),queries,value};
++}
++for(const mode of ["cancel","finish"]as const){
++  test(`E08.12 ${mode} reserva, bloqueia evento/participação e conclui no mesmo READ COMMITTED`,async()=>{
++    const f=fixture(mode),r=await f.service[mode](input);assert.deepEqual(r,{kind:"changed",participation:f.value});
++    assert.equal(f.queries[0].text,'begin isolation level read committed');assert.equal(f.queries.at(-1)?.text,'commit');
++    const reserve=f.queries.findIndex(q=>q.text.includes('insert into "idempotency_operations"')),event=f.queries.findIndex(q=>q.text.startsWith('SELECT id FROM events')),parent=f.queries.findIndex(q=>q.text.startsWith('SELECT status,current_queue_entry_id'));
++    assert.ok(reserve>1&&event>reserve&&parent>event);
++    const decisive=f.queries.find(q=>q.text.startsWith('WITH decision'))!;assert.equal((decisive.text.match(/clock_timestamp\(\)/g)||[]).length,1);
++    assert.ok(decisive.text.includes('d.at<LEAST(e.operational_deadline_at,e.admin_deadline_at)'));
++    assert.ok(f.queries.some(q=>q.text.includes('update "idempotency_operations"')));
++  });
++  test(`E08.12 ${mode} inexistência não reserva, titularidade atual é revalidada`,async()=>{
++    const f=fixture(mode,{access:false});assert.deepEqual(await f.service[mode](input),{kind:"access_denied"});assert.equal(f.queries.some(q=>q.text.includes('idempotency_operations')),false);
++    const lost=fixture(mode,{owner:false,intent:"replay"});assert.deepEqual(await lost.service[mode](input),{kind:"access_denied"});assert.equal(lost.queries.at(-1)?.text,'rollback');
++  });
++  for(const intent of ["replay","conflict","in_progress"]as const)test(`E08.12 ${mode} intenção ${intent} não repete mutações`,async()=>{
++    const f=fixture(mode,{intent}),r=await f.service[mode](input);assert.equal(r.kind,intent==="conflict"?"request_conflict":intent);
++    assert.equal(f.queries.some(q=>q.text.startsWith('WITH decision')||q.text.startsWith('UPDATE ')||q.text.includes('update "idempotency_operations"')),false);
++    if(r.kind==="replay")assert.deepEqual(r.participation,f.value);
++  });
++  test(`E08.12 ${mode} replay corrompido reverte sem divulgar dados`,async()=>{
++    const f=fixture(mode,{intent:"replay",badReplay:true});await assert.rejects(f.service[mode](input),{message:"PARTICIPATION_LIFECYCLE_INTERNAL_ERROR"});assert.equal(f.queries.at(-1)?.text,'rollback');
++  });
++  for(const fail of ["reserve","domain","response","complete"])test(`E08.12 ${mode} falha ${fail} reverte intenção e domínio`,async()=>{
++    const f=fixture(mode,{fail});await assert.rejects(f.service[mode](input),{message:"PARTICIPATION_LIFECYCLE_INTERNAL_ERROR"});assert.equal(f.queries.at(-1)?.text,'rollback');
++  });
++  test(`E08.12 ${mode} estado concorrente e prazo vencido preservam estado efetivo`,async()=>{
++    const f=fixture(mode,{status:mode==="cancel"?"active":"finished"}),r=await f.service[mode](input);assert.equal(r.kind,mode==="cancel"?"not_waiting":"not_active");assert.equal(f.queries.some(q=>q.text.startsWith('WITH decision')),false);
++    const ended=fixture(mode,{ended:true}),denied=await ended.service[mode](input);assert.equal(denied.kind,"event_ended");assert.equal(denied.participation?.finishReason,"automatic_operational_deadline");assert.equal(ended.queries.at(-1)?.text,'rollback');
++  });
++}
++for(const entry of ["waiting","called"]as const)test(`E08.12 saída resolve ${entry} preservando ordem e tempos PostgreSQL`,async()=>{
++  const f=fixture("finish",{entry});assert.equal((await f.service.finish(input)).kind,"changed");
++  const texts=f.queries.map(q=>q.text),experience=texts.findIndex(s=>s.startsWith('SELECT id FROM experiences')),station=texts.findIndex(s=>s.startsWith('SELECT id FROM stations')),person=texts.findIndex(s=>s.startsWith('SELECT status,current_queue_entry_id')),queue=texts.findIndex(s=>s.startsWith('SELECT id FROM queue_entries'));
++  assert.ok(experience<person&&person<queue);if(entry==="called")assert.ok(experience<station&&station<person);
++  const close=f.queries.find(q=>q.text.startsWith('UPDATE queue_entries'))!;assert.ok(close.text.includes('closed_at=p.finished_at'));assert.ok(close.params.includes(VOLUNTARY_QUEUE_REASON));
++  assert.equal(texts.some(s=>s.startsWith('UPDATE service_sessions')),entry==="called");assert.equal(texts.some(s=>s.startsWith('UPDATE stations')),false);
++  if(entry==="called")assert.ok(texts.find(s=>s.startsWith('UPDATE service_sessions'))!.includes("s.status='pending'"));
++});
++for(const fail of ["queue","session"]as const)test(`E08.12 falha após ${fail} faz rollback integral da saída`,async()=>{
++  const f=fixture("finish",{entry:"called",fail});await assert.rejects(f.service.finish(input),{message:"PARTICIPATION_LIFECYCLE_INTERNAL_ERROR"});assert.equal(f.queries.at(-1)?.text,'rollback');
++});
++test("E08.12 ponteiro divergente falha sem fabricar saída",async()=>{
++  const f=fixture("finish",{brokenPointer:true});await assert.rejects(f.service.finish(input),{message:"PARTICIPATION_LIFECYCLE_INTERNAL_ERROR"});assert.equal(f.queries.some(q=>q.text.startsWith('WITH decision')),false);
++});
++test("E08.12 saída sem completed é permitida e não elegível",async()=>{
++  const f=fixture("finish",{completed:0}),r=await f.service.finish(input);assert.equal(r.kind,"changed");assert.deepEqual(r.participation,f.value);assert.equal(f.queries.some(q=>q.text.startsWith('UPDATE queue_entries')||q.text.startsWith('UPDATE service_sessions')),false);
++});
++test("E08.12 fingerprint distingue ator, recurso e as duas intenções",()=>{
++  const a=lifecycleFingerprint("cancel",uid,pid);assert.equal(a,lifecycleFingerprint("cancel",uid,pid));
++  for(const b of [lifecycleFingerprint("finish",uid,pid),lifecycleFingerprint("cancel",id(9),pid),lifecycleFingerprint("cancel",uid,id(9))])assert.notEqual(a,b);
++});
++for(const status of ["waiting","active","finished","canceled"]as const)test(`E08.12 projeção pública ${status} valida posição e microssegundos`,()=>{
++  const value=publicParticipation(projection(status));assert.equal(value.status,status);assert.equal(value.joinedAt,at);assert.equal(value.externalQueue?.position,status==="waiting"?3:undefined);
++  assert.equal(Object.hasOwn(value,"userId"),false);
++});
++test("E08.12 posição inválida ou insegura não vira número impreciso",()=>{
++  for(const position of [null,"0","-1","1.5","9007199254740992"])assert.throws(()=>publicParticipation({...projection("waiting"),position}));
++  assert.throws(()=>publicParticipation({...projection("active"),finishedAt:at}));
++});
++test("E08.12 consulta reutiliza prazo/motivos E08.9 e faz projeção somente de leitura",()=>{
++  const q=new PgDialect().sqlToQuery(participationProjection(uid));
++  assert.ok(q.sql.includes('LEAST(e.operational_deadline_at,e.admin_deadline_at)<=d.at'));assert.ok(q.sql.includes("e.status='closed'"));
++  assert.ok(q.params.includes("automatic_operational_deadline")&&q.params.includes("automatic_admin_deadline"));
++  assert.equal(/FOR UPDATE|INSERT |UPDATE |DELETE /.test(q.sql),false);assert.equal((q.sql.match(/clock_timestamp\(\)/g)||[]).length,1);
++});
++for(const status of ["waiting","active","finished"]as const)test(`E08.12 current ${status} em snapshot readonly sem N+1`,async()=>{
++  const queries:string[]=[];const db=drizzle({async query(config:{text:string}){queries.push(config.text);return {rows:config.text.startsWith('WITH observation')?[projection(status)]:[]};}}as unknown as Client,{schema});
++  const service=new ParticipationQueryService(db),r=await service.current(uid);assert.equal(r?.status,status==="finished"?undefined:status);
++  assert.equal(queries[0],'begin isolation level repeatable read read only');assert.equal(queries.length,3);assert.equal(queries.at(-1),'commit');
++});
++test("E08.12 consulta por ID não seleciona terceiros e ausência é null",async()=>{
++  const queries:Array<{text:string;params:unknown[]}>=[];const db=drizzle({async query(config:{text:string},params:unknown[]){queries.push({text:config.text,params});return {rows:[]};}}as unknown as Client,{schema});
++  assert.equal(await new ParticipationQueryService(db).byId(uid,pid),null);assert.ok(queries[1].params.includes(uid)&&queries[1].params.includes(pid));
++});
+diff --git a/docs/ARQUITETURA_BACKEND_ARENAGO.md b/docs/ARQUITETURA_BACKEND_ARENAGO.md
+index 568c222d31ee3db55b45d72134085a0b4f072968..a6eb04d187d670935b1f576116769c2508fce0ff 100644
+--- a/docs/ARQUITETURA_BACKEND_ARENAGO.md
++++ b/docs/ARQUITETURA_BACKEND_ARENAGO.md
+@@ -653,10 +653,10 @@ O servidor registra `questionnaire_version_id`, mantém `profiles` e substitui a
+ | `POST /events/lookup` | Bearer | `200` resumo do evento identificado | `EventEntryScreen` | [PROPOSTA] |
+ | `GET /events/:eventId` | Bearer | `200` detalhes operacionais seguros | `EventConfirmationScreen`/retomada | [PROPOSTA] |
+ | `POST /events/:eventId/participations` | Bearer + `Idempotency-Key` | `201` participação recém-criada | confirmação de ingresso | [PROPOSTA] |
+-| `GET /participations/current` | Bearer | `200` participação ou `null` | `App.js`, Home e retomada | [PROPOSTA] |
+-| `GET /participations/:id` | Bearer, titular | `200` participação atualizada | fila externa/Arena | [PROPOSTA] |
+-| `POST /participations/:id/cancel` | Bearer, titular + `Idempotency-Key` | `200` participação cancelada | saída da fila externa | [PROPOSTA] |
+-| `POST /participations/:id/finish` | Bearer, titular + `Idempotency-Key` | `200` participação finalizada | botão Sair da Arena | [PROPOSTA] |
++| `GET /participations/current` | Bearer | `200` participação ou `null` | `App.js`, Home e retomada | [IMPLEMENTADO E08.12] |
++| `GET /participations/:id` | Bearer, titular | `200` participação atualizada | fila externa/Arena | [IMPLEMENTADO E08.12] |
++| `POST /participations/:id/cancel` | Bearer, titular + `Idempotency-Key` | `200` participação cancelada | saída da fila externa | [IMPLEMENTADO E08.12] |
++| `POST /participations/:id/finish` | Bearer, titular + `Idempotency-Key` | `200` participação finalizada | botão Sair da Arena | [IMPLEMENTADO E08.12] |
+ | `GET /participations/history` | Bearer | `200` histórico paginado do titular | aba Eventos | [PROPOSTA] |
+ 
+ **Detalhe de roteamento NestJS:** registrar/documentar as rotas literais `GET /participations/current` e `GET /participations/history` sem colisão com `GET /participations/:id`; validar `:id` como UUID. Testar resolução das três rotas com Supertest.
+@@ -739,6 +739,16 @@ O servidor registra `questionnaire_version_id`, mantém `profiles` e substitui a
+ 
+ ### 15.6 `GET /participations/current` — recuperar a participação da conta
+ 
++**Implementação E08.12 — 04/11/2026:** `ParticipationLifecycleController` e
++`ParticipationQueryService`, Bearer, identidade autenticada e `200` com envelope
++`participation`. Uma instrução em `REPEATABLE READ READ ONLY` calcula estado,
++posição externa e observação PostgreSQL com seis casas de microssegundos, sem
++escritas ou locks de linha. Se a participação corrente persistida estiver
++logicamente encerrada, retorna `null`. O detalhe por ID fornece a projeção
++terminal, preservando o motivo automático/administrativo. Prazo e motivo
++automático reutilizam `event-closure.projection.ts`, extraído do SQL da E08.9
++sem mudar seu comportamento. Não há limpeza física nem saída voluntária em GET.
++
+ **Bearer obrigatório.** Nunca utilizar `currentParticipationId` de armazenamento local como autoridade.
+ 
+ **Resposta `200 OK` quando existe participação corrente:**
+@@ -770,6 +780,18 @@ Não usar `404` para ausência de participação. O backend deve refletir o **ef
+ 
+ ### 15.7 `GET /participations/:id` — estado da participação do titular
+ 
++**Implementação E08.12:** o parâmetro efetivo chama-se `participationId` e exige
++UUID. Retorna os campos de participação de §15.6 para todos os quatro estados,
++com `eventId`; o objeto `event` ampliado abaixo permanece proposta opcional,
++preservando o DTO de participação existente. Inexistência e terceiro têm o mesmo
++`404 RESOURCE_NOT_FOUND`. Rotas literais `current`, `history` e `return-state`
++são registradas antes da rota genérica, com testes HTTP de resolução.
++Na projeção temporal, um terminal já persistido conserva data e motivo; um
++corrente vencido usa o prazo lógico e o motivo da E08.9, nunca `voluntary`.
++Os GETs oficiais E08.10/E08.11 continuam sobre o estado persistido: avaliações
++pendentes e retomada aparecem após a regularização física, sem que este GET
++invente elegibilidade ou execute o job. Detalhes em `E08_12_IMPLEMENTACAO.md`.
++
+ **Bearer obrigatório e titularidade obrigatória**, inclusive para histórico de participação terminada. Mantém os campos do item anterior e, quando `active`, devolve `externalQueue=null`. **[PROPOSTA]** incluir `event` público reduzido (`id`, `name`, `status`, `acceptingEntries`) para renderizar a tela sem duplicar consultas.
+ 
+ **Posição externa:** calculada no instante da consulta contando apenas participações `waiting` no mesmo evento cuja ordem esteja à frente ou igual à do usuário; **não** manter posições físicas em massa, pois saídas e liberações alteram o número exibido. Campos `observedAt` explicitam que a posição é uma fotografia. `404` tanto para ID inexistente quanto para ID de terceiro (não revelar a existência), `401` para autenticação inválida.
+@@ -778,6 +800,15 @@ Não usar `404` para ausência de participação. O backend deve refletir o **ef
+ 
+ ### 15.8 `POST /participations/:id/cancel` — sair voluntariamente da fila externa
+ 
++**Implementação E08.12:** aceita `{}` ou corpo ausente, rejeita extras e usa
++`cancel_external_participation` na idempotência durável. Resposta `200` conserva
++também `joinedAt`/`arenaEnteredAt` do DTO comum. Uma única decisão PostgreSQL após
++os locks grava `canceled`/`external_wait_withdrawal`/`finishedAt`, preservando
++histórico e posições alheias. Liberação concorrente produz
++`409 PARTICIPATION_NOT_WAITING` com a participação própria atualizada; prazo
++definitivo vencido produz `409 EVENT_OPERATION_ENDED` com projeção terminal.
++Nenhum desses conflitos confirma uma nova reserva idempotente.
++
+ **Bearer + titularidade + `Idempotency-Key`.** Somente participação `status='waiting'`. **Sem corpo** (motivo fixo de produto `external_wait_withdrawal`).
+ 
+ **Efeito atômico:** `waiting → canceled`; `finishedAt` (instante terminal) preenchido; `finishReason='external_wait_withdrawal'`; eliminar sua presença da posição calculada e preservar a linha histórica. Não gerar avaliação; não converter em ausência de Staff; não cancelar/alterar a participação de outros usuários. Se houve liberação simultânea para `active`, não executar desistência externa sobre `active`: responder conflito e estado atualizado, oferecendo ao usuário o fluxo adequado de saída da Arena.
+@@ -801,6 +832,34 @@ Não usar `404` para ausência de participação. O backend deve refletir o **ef
+ 
+ ### 15.9 `POST /participations/:id/finish` — saída voluntária da Arena
+ 
++**Implementação E08.12:** aceita `{}` ou ausência e usa namespace
++`finish_arena_participation`. Finaliza somente `active`, mesmo sem completed.
++Fecha a entrada interna corrente e cancela apenas seu pending com motivo técnico
++`participation_voluntary_finish`, copiando `finished_at` entre linhas no banco.
++Não altera disponibilidade configurada da estação, não cria ausência/conclusão
++e preserva atendimentos anteriores. A resposta `200` inclui o DTO comum,
++`completedServicesCount` e `evaluationEligibility: { eligible, hasSubmitted }`,
++derivados da política oficial de avaliações. Replay conserva a resposta original.
++
++Reserva/reconhecimento idempotente precede locks de domínio; depois, evento
++`FOR UPDATE` → experiência → estação (se chamada) → participação → entrada →
++atendimento. O lock exclusivo do evento estabiliza a descoberta da fila inclusive
++contra troca de experiência; é uma escolha conservadora que serializa mutações
++do evento durante a transação. Relógio decisório e predicados de prazo ficam no
++UPDATE após todas as esperas. Erros revertem domínio e intenção juntos.
++Encerramento Admin imediato/job que vença preserva seu motivo. Fechamento
++controlado permite a saída dos active antes do prazo residual, sem sobrescrever
++as participações waiting já finalizadas pela E08.8.
++
++Cancelamento e saída reutilizam somente o TTL técnico explícito
++`PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS`, já obrigatório para ações do
++participante; os namespaces e fingerprints são distintos da C-15 e entre si.
++Não há nova variável, fallback, expurgo ou reexecução após TTL. Replay exige
++sessão e titularidade atuais; recurso/intenção diferente gera
++`409 IDEMPOTENCY_KEY_REUSED`, e reserva preexistente em andamento gera
++`409 IDEMPOTENCY_IN_PROGRESS`. Validação PostgreSQL E08.12 permanece manual e
++pendente; comandos e resultados efetivos constam no relatório da task.
++
+ **Bearer + titularidade + `Idempotency-Key`.** Somente participação `status='active'`; não exigir nenhuma conclusão Staff, mas isso determina a possibilidade de avaliar posteriormente. **Sem corpo** (motivo `voluntary`).
+ 
+ **Efeito atômico:** `active → finished`, `finishedAt` e `finishReason='voluntary'`; se houver entrada na fila interna `waiting`, encerrá-la com motivo apropriado sem ausência; se a entrada estiver `called` e existir atendimento `pending`, cancelá-lo por desistência e liberar a estação se disponível; preservar todas as `service_sessions` já `completed` do titular. Competição entre Staff concluir e usuário finalizar: serializar locks em ordem aprovada; se Staff concluir primeiro, conclusão permanece; se saída vencer, atendimento pendente torna-se `canceled` e não pode ser concluído tardiamente.
+@@ -974,6 +1033,12 @@ Os testes funcionais de API/Expo deste capítulo seguem não executados. Os caso
+ 
+ ### 16.2 Matriz de endpoints propostos
+ 
++**Atualização E08.12 — 04/11/2026:** `POST /participations/:participationId/finish`
++agora implementa a saída completa descrita em §15.9. Ela permanece distinta da
++desistência de entrada explícita C-15 da E08.2, que conserva a participação active.
++Nenhum serviço E07.1–E07.6 foi alterado. Conclusão/ausência Staff e desistência
++interna continuam com seus contratos e ordens de locks anteriores.
++
+ **Atualização E08.2 — 03/11/2026:** as rotas de ingresso e consulta do participante
+ estão implementadas por `ParticipantQueueController` sobre E07.1/E07.2. A saída
+ interna E07.3 recebe a definição técnica
+diff --git a/docs/E08_12_IMPLEMENTACAO.md b/docs/E08_12_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..70bca3ec85c1a93bf03191ba9c01d7cd4302bfe3
+--- /dev/null
++++ b/docs/E08_12_IMPLEMENTACAO.md
+@@ -0,0 +1,420 @@
++# E08.12 — Consultas, cancelamento externo e saída voluntária da Arena
++
++## Preparação e escopo
++
++Implementação conjunta das quatro rotas em 04/11/2026, branch
++`feature/events-participations`, sobre o HEAD inicial
++`d1d1bb1ede5ef466a90facd0ef582189a9747aaf`
++(`feat(events): implementar envio e edição de avaliações`). E08.11 commitada;
++working tree, índice e lista de arquivos não rastreados inicialmente limpos.
++Snapshot inicial registrado em `%TEMP%/arenago-e0812-before-Fb0Yan/snapshot.json`.
++Nenhuma alteração preexistente incorporada.
++
++Consultados os contratos §§15.1, 15.6–15.9 e 16 da arquitetura, D03/D06/C-15 do
++planejamento, relatórios E08.2/E08.9/E08.10/E08.11 e serviços, schema e helpers
++transacionais correspondentes. As quatro rotas não existiam. As consultas
++internas E05 já existentes permanecem intactas, preservando seus chamadores e
++tipos `Date`; o novo contrato HTTP tem projeção temporal e precisão próprias.
++Não há migrações, novas dependências ou alterações nos serviços E07.1–E07.6.
++
++Base anterior informada pelo responsável: **517 unitários** e **752 PostgreSQL**
++aprovados até E08.11. Esses resultados não aprovam antecipadamente a E08.12.
++
++## Contratos HTTP efetivos
++
++Prefixo `/api/v1`, Bearer e sessão válida em todas as rotas. Ator exclusivamente
++de `CurrentUserId`; UUID, corpo ou query string não conferem acesso a terceiros.
++Staff/Admin usam somente suas próprias participações, com a exigência de 2FA
++Admin já existente. Não há autorização administrativa implícita.
++
++| Método e rota | Sucesso | Resultado |
++| --- | --- | --- |
++| `GET /participations/current` | 200 | `{ participation: objeto ou null }` |
++| `GET /participations/:participationId` | 200 | `{ participation: objeto }`, inclusive histórico |
++| `POST /participations/:participationId/cancel` | 200, inclusive replay | Participação `canceled` |
++| `POST /participations/:participationId/finish` | 200, inclusive replay | Participação `finished` e projeção de avaliação |
++
++DTO público comum: `id`, `eventId`, `status`, `joinedAt`, `arenaEnteredAt`,
++`finishedAt`, `finishReason` e `externalQueue`. A fila é
++`{ position: número inteiro positivo seguro, observedAt: instante UTC }` somente
++para espera externa efetiva; nos demais estados é `null`. Datas preservam seis
++casas de microssegundos, formatadas pelo PostgreSQL, sem passagem por `Date`.
++O objeto ampliado `event` da proposta opcional da §15.7 não foi acrescentado:
++mantém-se o DTO de participação existente, identificando o evento por `eventId`.
++Não se expõem autor, perfis, questionários, tokens ou a lista de participantes.
++
++Os POSTs exigem `Idempotency-Key` única no cabeçalho, não vazia, até 128 caracteres
++e sem controles. Aceitam `{}` ou corpo ausente. UUID inválido, propriedades extras,
++identidade/motivo/timestamp fornecidos pelo cliente, JSON inválido e tipos de
++conteúdo inadequados seguem os validadores/filtro existentes. Query strings não
++fornecem identidade ou campos de mutação. `current` é registrado antes do caminho
++genérico; `history`/`return-state` da E08.10 são registrados antes deste controller.
++
++| Condição | HTTP / código |
++| --- | --- |
++| Nenhuma participação corrente efetiva | `200 { participation: null }` |
++| ID inexistente ou de terceiro | Mesmo `404 RESOURCE_NOT_FOUND` |
++| Token/sessão inválidos, revogados ou 2FA exigido | `401`, códigos existentes da autenticação |
++| Entrada ou cabeçalho inválido | `400 VALIDATION_ERROR`; JSON malformado segue `BAD_REQUEST` |
++| Cancelamento sobre estado diferente de waiting | `409 PARTICIPATION_NOT_WAITING` |
++| Saída sobre estado diferente de active | `409 PARTICIPATION_NOT_ACTIVE` |
++| Corte definitivo ou fechamento lógico já atingido | `409 EVENT_OPERATION_ENDED` |
++| Mesma chave com outro recurso/intenção | `409 IDEMPOTENCY_KEY_REUSED` |
++| Intenção persistida em andamento | `409 IDEMPOTENCY_IN_PROGRESS` |
++| Integridade/falha SQL inesperada | `500 INTERNAL_SERVER_ERROR` |
++
++Conflitos de estado/prazo incluem somente a participação própria atualizada na
++extensão `participation` do problema RFC 7807. Não alteram seu estado nem
++confirmam uma nova intenção. Mensagem interna constante
++`PARTICIPATION_LIFECYCLE_INTERNAL_ERROR`, com causa interna preservada, evita
++exposição de SQL/dados pelo filtro HTTP existente.
++
++## Consultas, posição e encerramento lógico
++
++`ParticipationQueryService` usa uma instrução SQL dentro de
++`REPEATABLE READ READ ONLY`. Participação, posição externa e relógio são observados
++no mesmo snapshot, sem N+1, reserva idempotente, locks de linha ou limpeza.
++A posição conta as participações `waiting` do mesmo evento com ordem menor ou
++igual à do titular, diretamente em PostgreSQL. Ordem histórica `bigint` não é
++convertida para número JavaScript; somente a contagem validada pode ser retornada.
++Cancelamento/liberação aparece no próximo snapshot sem atualizar posições em massa.
++
++O instante vem de uma única CTE materializada com `clock_timestamp()`. O prazo
++definitivo é `LEAST(operational_deadline_at, admin_deadline_at)`; o argumento Admin
++nulo não elimina o prazo operacional. A E08.12 extraiu esse SQL e a escolha de
++motivo automático de `EventClosureService` para `event-closure.projection.ts` e
++fez o próprio regularizador reutilizá-los. A E08.9 conserva os mesmos predicados,
++motivos, timestamps, locks e efeitos; não há segunda regra de prazo.
++
++Se o prazo já foi atingido, ou o evento já está fechado, uma linha corrente
++persistida é projetada como `finished`, com instante lógico e motivo original
++automático/administrativo, nunca `voluntary`. `current` retorna `null` e o detalhe
++por ID retorna esse terminal efetivo. Waiting residual de fechamento controlado
++usa `closure_requested_at` e `admin_controlled_external_wait_closed`, como E08.8.
++Um terminal já persistido mantém integralmente seu timestamp e motivo.
++
++Uma revisão pontual identificou a propagação de `NULL` no predicado de espera
++quando não existe fechamento Admin. A expressão foi corrigida com `COALESCE`
++antes da entrega; sem isso, a posição poderia ficar ausente. Nenhum teste
++PostgreSQL foi executado pelo Codex para alegar aprovação dessa expressão.
++
++**Limite preservado de integração:** os cinco GETs e as escritas de avaliações
++E08.10/E08.11 continuam usando o estado persistido e a política oficial existente.
++Antes do job regularizar uma participação apenas logicamente encerrada, `current`
++já é `null`, mas histórico/pendência/retomada de avaliação aguardam a finalização
++física. Depois dela, data/motivo coincidem com o detalhe projetado e a avaliação
++depende das conclusões reais. Esta task não fabrica pendência, não executa o job
++durante GET e não muda o contrato de elegibilidade das avaliações.
++
++## Cancelamento externo, saída completa e C-15
++
++| Ação | Estado e efeito |
++| --- | --- |
++| Cancelar espera externa | `waiting → canceled`, `external_wait_withdrawal`, perde a posição |
++| Desistir só da fila interna C-15 | Mantém `active`, encerra apenas a tentativa explícita |
++| Sair da Arena | `active → finished`, `voluntary`, resolve eventual fila/chamada corrente |
++
++Cancelamento externo grava `finished_at` no instante decisório PostgreSQL, conserva
++o histórico e não cria avaliação, sessão ausente ou efeito em outra participação.
++Uma liberação concorrente para active prevalece quando vencer: o cancelamento
++recebe conflito com o estado atualizado. Fechamento lógico controlado de waiting
++também impede convertê-la em cancelamento voluntário.
++
++Saída da Arena não exige conclusão anterior. Sem fila interna, finaliza sem criar
++entrada ou atendimento. Com waiting, fecha a entrada corrente e limpa o ponteiro.
++Com called/pending, fecha a entrada, cancela somente esse pending, registra o
++titular como resolvedor e limpa o ponteiro. Motivo técnico de entrada/atendimento:
++`participation_voluntary_finish`, distinto da desistência interna C-15.
++
++Todas as datas relacionadas são copiadas de `participations.finished_at` dentro
++do PostgreSQL. Não se criam ausência ou conclusão artificiais. Conclusões, seus
++responsáveis/timestamps e snapshots anteriores ficam intactos. A estação é
++liberada pela ausência de pending; sua configuração `available/unavailable` não
++é alterada. Não há campo de ocupação inventado nem liberação forçada de estação
++indisponível.
++
++Além do DTO comum, finish responde `completedServicesCount` e
++`evaluationEligibility: { eligible, hasSubmitted }`, calculados por
++`evaluationReadProjection`/`eligibility` oficiais, no mesmo tx e instante.
++Com completed real, a participação finalizada pode aparecer em pending e receber
++POST de avaliação; sem completed, a saída é válida e a avaliação não é elegível.
++Nova entrada legítima passa por E03, usa outro `participationId` e snapshot próprio.
++
++## Transação, locks e concorrência
++
++As mutações usam `READ COMMITTED` e a seguinte ordem:
++
++1. Descobrir a participação filtrada pelo titular, sem lock exclusivo.
++2. Reservar/reconhecer a intenção durável.
++3. Bloquear evento `FOR UPDATE` e descobrir a fila corrente sob esse lock.
++4. Bloquear experiência e, se houver chamada, estação `FOR UPDATE`.
++5. Bloquear participação, revalidar titularidade e reconhecer eventual replay.
++6. Bloquear entradas e atendimento; verificar ponteiro, vínculos e estados.
++7. Capturar `clock_timestamp()` no UPDATE decisivo, depois de todas as esperas;
++   revalidar prazo/estado e verificar linhas afetadas.
++8. Resolver fila/pending, projetar resposta e concluir intenção no mesmo commit.
++
++O lock exclusivo do evento segue a ordem usada por E03 e encerramentos Admin/job.
++Ele estabiliza a descoberta inclusive se outra operação antes da espera trocar
++a experiência corrente. Evita adquirir lock de experiência depois de participação
++e evita tratar uma tentativa antiga como fila atual. Os escritores E07 preservam
++seus locks de evento antes dos demais recursos.
++
++**Limitação técnica:** essa estratégia conservadora serializa as mutações do
++evento durante a curta transação de saída/cancelamento, incluindo outras pessoas.
++Não há alegação de teste de carga ou otimização de throughput. GETs permanecem
++MVCC sem locks de linha.
++
++Se Staff concluir primeiro, sua conclusão permanece e a saída usa a fila atual
++revalidada. Se ausência reencaminhar primeiro, a saída resolve a nova entrada.
++Se a saída vencer, o pending fica canceled e complete/absent posteriores recebem
++conflito. Disputas com chamada e C-15 seguem a mesma ordem, sem perda de ponteiro.
++Admin imediato/job que vença mantém seu motivo; controlled deixa os active sair
++voluntariamente antes do prazo residual, conservando os waiting já finalizados.
++Depois do corte definitivo não há nova mutação voluntária, mesmo após espera.
++
++Não se exigem guardas de novo ingresso para sair: após o corte oficial, a saída
++continua permitida até o corte definitivo. Qualquer falha intermediária reverte
++participação, fila, sessão e intenção; não existe commit parcial de `in_progress`.
++
++## Idempotência e TTL
++
++Namespaces estáveis e distintos: `cancel_external_participation` e
++`finish_arena_participation`. Fingerprint contém operação, versão semântica,
++ator, recurso e payload vazio normalizado; o ator também compõe a chave única
++existente. Corpo ausente e `{}` representam a mesma intenção.
++
++Mesma chave/intenção retorna exatamente o corpo histórico e status 200. TTL
++vencido e prazo encerrado não reexecutam a intenção persistida nem mudam seu
++resultado. Replay exige autenticação e titularidade atuais, sem exigir estado
++corrente novamente. Outra chave sobre participação já terminal recebe conflito;
++outra participação com a mesma chave/namespace conflita. Atores distintos e os
++dois namespaces não compartilham resultados. Não há expurgo/retenção novos.
++
++Reutilizado **somente o TTL técnico explícito**
++`PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS`, já obrigatório para ações do
++participante. Essa configuração não carrega semântica de domínio: namespaces e
++fingerprints de cancelamento/saída são próprios, separados de ingresso e C-15.
++Não foi necessária nova variável nem fallback silencioso. `Date.now()` continua
++restrito a calcular `expiresAt` técnico, sem decidir prazos do negócio.
++
++## Arquivos e reuso
++
++| Arquivo | Alteração |
++| --- | --- |
++| `backend/src/participations/participation-lifecycle.controller.ts` | Quatro rotas, validação e problemas RFC 7807 |
++| `backend/src/participations/participation-lifecycle.dto.ts` | DTO público estrito e validação de replay |
++| `backend/src/participations/participation-query.service.ts` | Snapshot/posição e projeção temporal sem escrita |
++| `backend/src/participations/participation-lifecycle.service.ts` | Cancelamento e saída atômicos, locks e idempotência |
++| `backend/src/events/event-closure.projection.ts` | Prazo e motivo SQL compartilhados |
++| `backend/src/events/event-closure.service.ts` | Reuso mecânico das mesmas expressões da E08.9 |
++| `backend/src/events/events.module.ts` | Registro, exportação e ordem dos controllers |
++| `backend/test/unit/participation-lifecycle.test.ts` | 39 testes de DTO/projeção, transação, erros e idempotência |
++| `backend/test/unit/participation-lifecycle-http.test.ts` | 28 testes HTTP simulados, autenticação, roteamento e DI |
++| `backend/test/integration/participation-lifecycle.integration.test.ts` | 89 testes PostgreSQL reais para execução manual |
++| `backend/test/integration/evaluation-read.integration.test.ts` | Compatibilidade pontual da asserção current da E08.10 com o contrato E08.12 |
++| `docs/ARQUITETURA_BACKEND_ARENAGO.md` | Atualizações pontuais de §15 e §16.2 |
++| `docs/E08_12_IMPLEMENTACAO.md` | Este relatório |
++
++Reutilizados guard/session auth, `CurrentUserId`, validadores HTTP, política de
++TTL existente, helpers de reserva/conclusão duráveis, política oficial de
++avaliações e fixtures PostgreSQL existentes. Não há implementação duplicada de
++elegibilidade ou substituição dos testes PostgreSQL por mocks. A única atualização
++de expectativa de uma etapa anterior é a asserção current da E08.10 descrita abaixo,
++necessária para compatibilidade com o contrato implementado na E08.12.
++
++## Validação executada pelo Codex
++
++| Verificação | Resultado |
++| --- | --- |
++| Específicos unitários e HTTP simulados | **67/67 aprovados**: 39 + 28 |
++| Regressão unitária completa | **584/584 aprovados**, 0 falhas, cancelamentos ou skips |
++| `npm.cmd run typecheck:test` | Aprovado, incluindo os novos testes PostgreSQL sem executá-los |
++| `npm.cmd run lint` | Aprovado |
++| `npm.cmd run build` | Aprovado |
++
++Foram adicionados 67 unitários à base de 517. Os checks foram repetidos após a
++correção do predicado SQL nulo; ajustes anteriores de tipagem dos doubles não
++mudaram as asserções. Os testes unitários/HTTP simulados usam doubles e URL local
++inoperante, com `.env` desativado. Nenhum PostgreSQL real foi executado pelo Codex.
++
++Os **67 específicos**, **584 unitários**, typecheck, lint e build foram novamente
++executados e aprovados após a correção do cenário de disponibilidade descrita
++abaixo. Nesta correção, somente o teste de integração, este relatório e a evidência
++foram atualizados; serviços de produção e fixtures compartilhadas foram preservados.
++
++### Primeira execução PostgreSQL e correção do cenário E08.5
++
++O responsável informou a primeira execução manual focada: **89 executados,
++88 aprovados e 1 falha**. A regressão completa de **841 testes não foi executada**,
++pois a guarda interrompeu o fluxo após a falha focada.
++
++O cenário original era `E08.12 PostgreSQL saída cancela pending e conserva
++disponibilidade real false`. A instrução que falhou foi a asserção
++`assert.equal((await station(c)).status,200)`, então na linha 161 do arquivo
++`backend/test/integration/participation-lifecycle.integration.test.ts`.
++`called(c)` já havia criado um atendimento pending naquela estação. A chamada
++`station(c)` tenta desativá-la pela API E08.5; o POST de saída voluntária ainda
++não havia sido executado quando a asserção falhou.
++
++**Classificação: erro na preparação/implementação do teste.**
++`StationAvailabilityService.setAvailability` consulta o pending da estação e,
++antes do UPDATE, retorna `station_has_pending_call` ao solicitar unavailable.
++`StationAvailabilityController` traduz esse resultado em
++**409 `STATION_HAS_PENDING_CALL`**, conforme a regra aprovada E08.5. O HTTP 409
++observado estava correto; a expectativa de desativação bem-sucedida naquele
++estado contrariava o contrato. Não houve evidência de defeito na saída voluntária
++nesse cenário nem necessidade de alterar produção, schema ou constraints.
++
++Os dois casos de disponibilidade foram estruturados como dois testes explícitos,
++mantendo a contagem **89** e reforçando as asserções:
++
++- **Available com pending:** cria called/pending e outra pessoa elegível waiting;
++  confirma que tentar desativar retorna `STATION_HAS_PENDING_CALL`, sem alterar
++  o estado. Exige HTTP 200 da saída, participação finished/voluntary sem ponteiro,
++  entrada closed e sessão canceled com o mesmo timestamp, motivo e resolvedor
++  esperados. Confirma disponibilidade available e uma próxima chamada HTTP 201
++  para a outra pessoa, com novo pending.
++- **Unavailable sem pending:** cria duas pessoas waiting, confirma inexistência
++  de sessões e desativa legitimamente a estação pela API, exigindo HTTP 200.
++  Exige HTTP 200 da saída da primeira pessoa, finalização e fechamento de sua
++  entrada no mesmo instante. Confirma disponibilidade unavailable, recusa da
++  próxima chamada com `STATION_UNAVAILABLE`, nenhuma sessão criada e preservação
++  da entrada waiting e do ponteiro da outra pessoa.
++
++Nenhuma saída passou a aceitar conflito como sucesso. A regra E08.5, os serviços
++de produção, as fixtures compartilhadas e os demais cenários não foram alterados.
++
++### Segunda execução PostgreSQL e compatibilidade do contrato E08.10
++
++Após a correção da preparação do cenário de disponibilidade, o responsável
++confirmou **89/89 específicos E08.12 aprovados**. A correção anterior foi, portanto,
++validada manualmente. Na mesma rodada, a regressão completa executou **841 testes**,
++com **840 aprovados e 1 falha**, sem cancelamentos ou testes ignorados; os
++específicos também não tiveram cancelamentos ou ignorados.
++
++A falha ocorreu na verificação do resultado em
++`backend/test/integration/evaluation-read.integration.test.ts`, teste
++`E08.10 PostgreSQL parâmetros e cursor malformados recebem 400 sem consultar outra identidade`.
++A instrução antiga na linha 132 era
++`problem(await get(actor, "/participations/current"), 404, "RESOURCE_NOT_FOUND")`.
++A conta criada por `account()` não possuía participação corrente. O endpoint
++retornou corretamente HTTP **200** e corpo **`{ "participation": null }`**.
++
++**Classificação: divergência entre o teste histórico e a especificação atual.**
++Na E08.10 a rota ainda não tinha controller HTTP; o 404 era coerente com aquela
++etapa. A E08.12 implementou oficialmente a rota, cujo contrato aprovado exige
++200/null para ausência de participação corrente. A resposta de produção e a
++preparação da conta estavam corretas; a asserção antiga ficou incompatível.
++
++Correção pontual: a mesma requisição agora exige `current.status === 200` e
++`assert.deepEqual(current.body, { participation: null })`. O teste não foi removido
++e suas asserções de cursor inválido, parâmetros malformados, UUID, autenticação e
++titularidade foram preservadas, assim como todos os demais testes. Não houve
++mudança de regra de negócio, código de produção ou fixture compartilhada.
++Documentos e evidências históricos E08.10/E08.11 permanecem intactos.
++
++Após essa atualização de compatibilidade, foram executados pelo Codex **104/104
++específicos unitários/HTTP simulados** das E08.10 e E08.12 (37 + 67),
++**584/584 unitários** na regressão, typecheck, lint e build, todos aprovados.
++Nenhum teste PostgreSQL real foi executado pelo Codex nesta correção.
++
++### PostgreSQL: aprovação manual definitiva
++
++Após as duas correções documentadas acima, o responsável confirmou a execução
++final no PostgreSQL local `arenago_events_test`:
++
++| Suíte | Executados | Aprovados | Falhas | Cancelamentos | Ignorados |
++| --- | --- | --- | --- | --- | --- |
++| E08.10 + E08.12 focados | 158 | **158** | 0 | 0 | 0 |
++| Regressão PostgreSQL completa | 841 | **841** | 0 | 0 | 0 |
++
++Os **89 testes novos E08.12** foram preservados; o total **841 = 752 anteriores +
++89 novos**, inicialmente previsto por contagem estática, foi confirmado na
++execução real. O resultado final resolve as duas falhas anteriores: preparação
++incompatível com E08.5 e expectativa histórica de 404 da E08.10. A asserção
++compatibilizada exige o contrato correto HTTP 200 com `{ participation: null }`.
++Não resta pendência de validação PostgreSQL da E08.12.
++
++Permanecem aprovadas as verificações locais anteriores: **584/584 unitários**,
++**104/104 específicos unitários/HTTP simulados**, typecheck, lint e build.
++Nesta finalização, somente o relatório e a evidência foram atualizados; nenhum
++teste foi reexecutado. Os resultados PostgreSQL foram fornecidos pelo responsável,
++não executados pelo Codex. Credenciais reais não foram solicitadas, acessadas ou
++registradas, e nenhuma validação de produção é declarada.
++
++A suíte cobre as quatro rotas, autenticação/revogação/2FA, titularidade,
++UUID/corpo/chave, privacidade e estados; posição bigint e liberação externa;
++projeção no limite e ±1 microssegundo, encerramento atrasado e ausência de efeitos
++nos GETs; saída idle/waiting/called, estação disponível/indisponível, completed,
++avaliação e reentrada; chaves/TTL/replay/conflitos e isolamento entre contas/eventos.
++
++Concorrências usam transações/conexões independentes, locks reais e
++`pg_blocking_pids`: liberação versus cancelamento, chamada, complete, absent,
++C-15, Admin imediato/controlado, job e outras saídas. Há casos de espera que
++cruza o prazo, snapshots de posição mantidos durante cancelamento e GET que não
++aguarda locks exclusivos. As fronteiras SQL usam a mesma projeção com expressão
++de relógio interna; não há relógio enviado por HTTP.
++
++Oito casos provocam `SELECT 1/0` na conexão PostgreSQL **depois** da escrita real
++de reserva, participação, fila, sessão ou conclusão da intenção, conforme a
++operação; verificam rollback integral e retry com a mesma chave. O proxy apenas
++introduz a falha após o SQL nativo, sem substituir consultas por respostas falsas.
++As fixtures compartilhadas e todas as demais expectativas dos testes anteriores
++à E08.12 permanecem intactas; somente a asserção current acima foi compatibilizada.
++
++### Comandos PowerShell de referência para o responsável
++
++As execuções acima já foram aprovadas. Os comandos são preservados para
++reprodução futura, sem exigência de nova execução nesta finalização.
++Usar somente o banco local descartável já preparado com o schema atual.
++As guardas exigem três URLs idênticas, `NODE_ENV=test`, `127.0.0.1:55432` e banco
++`arenago_events_test`, sem redirecionamentos. Todos os quatro TTLs obrigatórios
++estão explícitos. O exemplo contém placeholders; preencher valores somente na
++sessão local do responsável, sem compartilhá-los ou gravá-los no repositório.
++
++```powershell
++Set-Location C:\DoJob\ProgramacaoMobile\backend
++$env:NODE_ENV = 'test'
++$env:EVENTS_TEST_DATABASE_URL = 'postgresql://USUARIO:SENHA@127.0.0.1:55432/arenago_events_test'
++$env:DATABASE_URL = $env:EVENTS_TEST_DATABASE_URL
++$env:DATABASE_DIRECT_URL = $env:EVENTS_TEST_DATABASE_URL
++$env:DOTENV_CONFIG_PATH = 'NUL'
++$env:STAFF_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:ADMIN_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:EVALUATION_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:EVENT_CLOSURE_JOB_TEST_ENABLED = 'false'
++$env:EVENT_CLOSURE_INTERVAL_MS = '30000'
++
++# Focado E08.12: 89 testes, aprovados na segunda execução manual.
++.\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test --test-concurrency=1 test/integration/participation-lifecycle.integration.test.ts
++if ($LASTEXITCODE -ne 0) { throw 'Falha na integração PostgreSQL E08.12' }
++
++# Compatibilidade E08.10: asserção current corrigida e aprovada na execução final.
++.\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test --test-concurrency=1 test/integration/evaluation-read.integration.test.ts
++if ($LASTEXITCODE -ne 0) { throw 'Falha na compatibilidade PostgreSQL E08.10' }
++
++# Regressão completa: 841 testes aprovados na execução manual final.
++npm.cmd run test:integration
++if ($LASTEXITCODE -ne 0) { throw 'Falha na regressão PostgreSQL completa' }
++```
++
++## Evidência e pendências
++
++Evidência única: `qa-evidence/e08-12-changes.diff`, patch completo dos **13 arquivos**
++da tabela, incluindo nove novos, contra o HEAD inicial `d1d1bb1`. UTF-8 sem BOM,
++caminhos relativos e cabeçalhos `diff --git`. Aplicação verificada com
++`git apply --check` e `git apply` em cópia isolada da base, seguida de comparação
++integral dos 13 arquivos finais, normalizando somente CRLF/LF conforme o Git.
++Nenhuma omissão/divergência; HEAD e índice preservados. Excluídos outros `.diff`,
++`.env`, credenciais, dependências instaladas, temporários e alterações alheias.
++Evidências históricas e documentos de tasks anteriores não foram alterados.
++
++Não há pendências de validação da E08.12. Resta apenas o versionamento manual
++pelo responsável; HEAD e índice foram preservados nesta finalização documental.
++Sugestão sem execução: `feat(events): implementar consultas e saídas de participação`.
++
++Não houve add, commit, push, merge ou rebase. E08.13 não foi iniciada. CRUD Admin
++estrutural, telas Expo, notificações, BI/exportações e auditoria geral da E08
++permanecem fora desta entrega.

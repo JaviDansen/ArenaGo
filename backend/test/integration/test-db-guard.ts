@@ -1,22 +1,34 @@
+
 import { URL } from "node:url";
 
 const ALLOWED_PROTOCOLS = new Set(["postgresql:", "postgres:"]);
 const ALLOWED_HOSTS = new Set(["localhost", "127.0.0.1"]);
 const ALLOWED_PORTS = new Set(["5432", "55432"]);
-const ALLOWED_DATABASES = new Set(["arenago_test", "arenago_k03_test"]);
+
+const ALLOWED_DATABASES = new Set([
+  "arenago_test",
+  "arenago_k03_test",
+  "arenago_events_test",
+]);
 
 /**
- * Barreira explícita de segurança contra execução em bancos remotos/compartilhados.
- * Reconhece apenas conexões locais comprovadas (localhost / 127.0.0.1), portas autorizadas (5432 / 55432)
- * e bancos de teste descartáveis autorizados (arenago_test / arenago_k03_test).
+ * Barreira de segurança contra execução de testes em bancos
+ * remotos, de desenvolvimento ou de homologação.
  *
- * Valida rigorosamente:
- * 1. Protocolo suportado (postgresql: ou postgres:).
- * 2. Host da autoridade e parâmetros de query (impedindo redirecionamento para host remoto ou socket).
- * 3. Porta da autoridade e parâmetros de query (impedindo redirecionamento para portas não autorizadas ou divergentes).
- * 4. Nome do banco de dados (impedindo bancos com indicadores de produção ou backup).
+ * Permite somente bancos descartáveis explicitamente
+ * autorizados em servidores PostgreSQL locais.
+ *
+ * Regras:
+ * 1. Protocolo PostgreSQL obrigatório.
+ * 2. Host limitado a localhost ou 127.0.0.1.
+ * 3. Portas limitadas a 5432 e 55432.
+ * 4. Banco limitado à lista de testes autorizados.
+ * 5. arenago_events_test permitido somente na porta 55432.
+ * 6. Redirecionamentos de host, porta ou banco bloqueados.
  */
-export function assertSafeTestDatabase(urlStr: string | undefined): string {
+export function assertSafeTestDatabase(
+  urlStr: string | undefined,
+): string {
   if (!urlStr || typeof urlStr !== "string" || !urlStr.trim()) {
     throw new Error(
       "DATABASE_URL local descartável é obrigatório para os testes de integração.",
@@ -24,49 +36,61 @@ export function assertSafeTestDatabase(urlStr: string | undefined): string {
   }
 
   let parsed: URL;
+
   try {
     parsed = new URL(urlStr);
   } catch {
-    throw new Error(`DATABASE_URL inválido: ${urlStr}`);
+    throw new Error("DATABASE_URL inválida.");
   }
 
+  // 1. Validar protocolo.
   if (!ALLOWED_PROTOCOLS.has(parsed.protocol)) {
     throw new Error(
-      `[SEGURANÇA BLOQUEADA] Protocolo "${parsed.protocol}" inválido. Apenas conexões PostgreSQL ("postgresql:" ou "postgres:") são permitidas.`,
+      `[SEGURANÇA BLOQUEADA] Protocolo "${parsed.protocol}" inválido. Apenas conexões PostgreSQL são permitidas.`,
     );
   }
 
-  // Verificar se há redirecionamento de host ou porta via parâmetros de busca (ex: ?host=..., ?port=..., ?h%6fst=...)
-  // Em drivers pg (pg-connection-string), o último parâmetro host/port decodificado prevalece sobre a autoridade.
+  // 2. Ler parâmetros que podem alterar o destino da conexão.
   let queryHost: string | null = null;
   let queryPort: string | null = null;
 
-  if (parsed.search) {
-    const rawQuery = parsed.search.replace(/^\?/, "");
-    const pairs = rawQuery.split("&");
-    for (const pair of pairs) {
-      const [rawKey, rawVal] = pair.split("=");
-      try {
-        const decodedKey = decodeURIComponent(rawKey || "").trim().toLowerCase();
-        if (decodedKey === "host") {
-          queryHost = decodeURIComponent(rawVal || "").trim().toLowerCase();
-        } else if (decodedKey === "port") {
-          queryPort = decodeURIComponent(rawVal || "").trim().toLowerCase();
-        }
-      } catch {
-        throw new Error("[SEGURANÇA BLOQUEADA] Parâmetros de query malformados.");
+  for (const [rawKey, rawValue] of parsed.searchParams) {
+    const key = rawKey.trim().toLowerCase();
+    const value = rawValue.trim().toLowerCase();
+
+    // O banco deve ser definido exclusivamente no caminho da URL.
+    if (key === "database" || key === "dbname") {
+      throw new Error(
+        "[SEGURANÇA BLOQUEADA] Redirecionamento de banco pela URL não permitido.",
+      );
+    }
+
+    if (key === "host") {
+      if (queryHost !== null) {
+        throw new Error(
+          "[SEGURANÇA BLOQUEADA] Parâmetro host duplicado.",
+        );
       }
+
+      queryHost = value;
+    }
+
+    if (key === "port") {
+      if (queryPort !== null) {
+        throw new Error(
+          "[SEGURANÇA BLOQUEADA] Parâmetro port duplicado.",
+        );
+      }
+
+      queryPort = value;
     }
   }
 
+  // 3. Identificar o destino informado na autoridade da URL.
   const authorityHost = parsed.hostname.toLowerCase();
   const authorityPort = parsed.port || "5432";
 
-  // Host e porta efetivamente interpretados pelo driver pg
-  const effectiveHost = queryHost !== null ? queryHost : authorityHost;
-  const effectivePort = queryPort !== null ? queryPort : authorityPort;
-
-  // Rejeitar redirecionamento divergente entre autoridade e parâmetros de query
+  // 4. Rejeitar parâmetros que tentem alterar host ou porta.
   if (queryHost !== null && queryHost !== authorityHost) {
     throw new Error(
       `[SEGURANÇA BLOQUEADA] Redirecionamento de host divergente detectado na query URL ("${authorityHost}" -> "${queryHost}").`,
@@ -79,7 +103,10 @@ export function assertSafeTestDatabase(urlStr: string | undefined): string {
     );
   }
 
-  // Bloqueio categórico contra hosts remotos, nuvem ou socket Unix não atestado
+  const effectiveHost = queryHost ?? authorityHost;
+  const effectivePort = queryPort ?? authorityPort;
+
+  // 5. Bloquear servidores remotos ou compartilhados.
   if (
     effectiveHost.includes("neon.tech") ||
     effectiveHost.includes("aws.neon.tech") ||
@@ -89,7 +116,7 @@ export function assertSafeTestDatabase(urlStr: string | undefined): string {
     effectiveHost.startsWith("/")
   ) {
     throw new Error(
-      `[SEGURANÇA BLOQUEADA] Execução de testes de integração rejeitada contra host compartilhado/remoto "${effectiveHost}". Os testes devem rodar exclusivamente contra um PostgreSQL local descartável.`,
+      `[SEGURANÇA BLOQUEADA] Execução de testes de integração rejeitada contra host compartilhado/remoto "${effectiveHost}".`,
     );
   }
 
@@ -99,16 +126,19 @@ export function assertSafeTestDatabase(urlStr: string | undefined): string {
     );
   }
 
-  // Validar se a porta efetiva pertence à allowlist de portas locais de teste autorizadas
+  // 6. Validar porta.
   if (!ALLOWED_PORTS.has(effectivePort)) {
     throw new Error(
-      `[SEGURANÇA BLOQUEADA] A porta efetiva "${effectivePort}" não pertence à allowlist de portas autorizadas para testes locais descartáveis (portas permitidas: 5432, 55432).`,
+      `[SEGURANÇA BLOQUEADA] A porta efetiva "${effectivePort}" não pertence à allowlist de portas autorizadas para testes locais descartáveis.`,
     );
   }
 
-  const databaseName = parsed.pathname.replace(/^\//, "").toLowerCase();
+  // 7. Identificar o banco solicitado.
+  const databaseName = parsed.pathname
+    .replace(/^\//, "")
+    .toLowerCase();
 
-  // Rejeitar nomes com indicadores de produção ou backup
+  // Bloquear nomes associados a produção ou backups.
   if (
     databaseName.includes("prod") ||
     databaseName.includes("production") ||
@@ -120,9 +150,20 @@ export function assertSafeTestDatabase(urlStr: string | undefined): string {
     );
   }
 
+  // 8. Exigir banco de testes explicitamente autorizado.
   if (!ALLOWED_DATABASES.has(databaseName)) {
     throw new Error(
       `[SEGURANÇA BLOQUEADA] O banco "${databaseName}" não está na lista de bancos descartáveis de teste autorizados (${Array.from(ALLOWED_DATABASES).join(", ")}).`,
+    );
+  }
+
+  // 9. Restringir o banco dos eventos ao PostgreSQL local na porta 55432.
+  if (
+    databaseName === "arenago_events_test" &&
+    effectivePort !== "55432"
+  ) {
+    throw new Error(
+      "[SEGURANÇA BLOQUEADA] arenago_events_test exige a porta 55432.",
     );
   }
 

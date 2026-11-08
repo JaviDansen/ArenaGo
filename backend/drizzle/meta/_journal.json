@@ -36,6 +36,13 @@
       "when": 1792459206746,
       "tag": "0005_idempotency",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1794000000000,
+      "tag": "0006_admin_2fa_login",
+      "breakpoints": true
     }
   ]
 }

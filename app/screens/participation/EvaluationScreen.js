@@ -4,12 +4,14 @@ import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-
 import ScreenContainer from '../../components/ScreenContainer';
 import { ParticipationContext } from '../../context/ParticipationContext';
 
-export default function EvaluationScreen({ navigation }) {
+export default function EvaluationScreen({ navigation, real = false, onSubmit, onLater,
+  submitting = false, error = null, pendingIntent = false, onRetry }) {
   const { setParticipation } = useContext(ParticipationContext);
   const [rating, setRating] = useState(0);
   const [comment, setComment] = useState('');
 
   function handleReturnHome() {
+    if (real) { onLater?.(); return; }
     setParticipation(null);
     navigation.reset({
       index: 0,
@@ -22,12 +24,11 @@ export default function EvaluationScreen({ navigation }) {
       return;
     }
 
-    // Simulação sem backend ou persistência: os dados existem apenas em memória.
     const evaluation = {
       rating,
       comment: comment.trim(),
     };
-
+    if (real) return onSubmit?.(evaluation);
     handleReturnHome();
     return evaluation;
   }
@@ -39,6 +40,9 @@ export default function EvaluationScreen({ navigation }) {
         keyboardShouldPersistTaps="handled"
       >
         <Text style={styles.title}>Participação Finalizada</Text>
+        {real ? <Text>Esta avaliação será enviada ao ArenaGo.</Text>
+          : <Text>Modo demonstração: esta avaliação não será enviada ao servidor.</Text>}
+        {error ? <Text style={styles.error} accessibilityRole="alert">{error}</Text> : null}
         <Text style={styles.message}>Obrigado por participar!</Text>
         <Text style={styles.message}>Como foi sua experiência?</Text>
         <View style={styles.stars}>
@@ -67,18 +71,23 @@ export default function EvaluationScreen({ navigation }) {
           multiline
         />
         <Pressable
-          style={[styles.button, rating === 0 && styles.buttonDisabled]}
+          style={[styles.button, (rating === 0 || submitting || pendingIntent) && styles.buttonDisabled]}
           onPress={handleSubmitEvaluation}
-          disabled={rating === 0}
+          disabled={rating === 0 || submitting || pendingIntent}
           accessibilityRole="button"
-          accessibilityState={{ disabled: rating === 0 }}
+          accessibilityState={{ disabled: rating === 0 || submitting || pendingIntent }}
         >
-          <Text style={styles.buttonText}>Enviar avaliação</Text>
+          <Text style={styles.buttonText}>{submitting ? 'Enviando...' : 'Enviar avaliação'}</Text>
         </Pressable>
-        {/* Sem persistência, esta ação apenas retorna à Home e não cria uma pendência recuperável. */}
+        {real && pendingIntent ? (
+          <Pressable style={styles.button} onPress={onRetry} disabled={submitting} accessibilityRole="button">
+            <Text style={styles.buttonText}>Conferir tentativa anterior</Text>
+          </Pressable>
+        ) : null}
         <Pressable
           style={[styles.button, styles.secondaryButton]}
           onPress={handleReturnHome}
+          disabled={submitting}
           accessibilityRole="button"
         >
           <Text style={[styles.buttonText, styles.secondaryButtonText]}>
@@ -150,4 +159,5 @@ const styles = StyleSheet.create({
   secondaryButtonText: {
     color: '#333',
   },
+  error: { color: '#9b1c1c', marginTop: 16 },
 });

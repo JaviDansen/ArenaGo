@@ -1,0 +1,1826 @@
+diff --git a/backend/src/events/admin-configuration-query.service.ts b/backend/src/events/admin-configuration-query.service.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..063a0585e706a68e17e241360182075591b8cb35
+--- /dev/null
++++ b/backend/src/events/admin-configuration-query.service.ts
+@@ -0,0 +1,50 @@
++import { Inject, Injectable } from "@nestjs/common";
++import { sql } from "drizzle-orm";
++import type { NodePgDatabase } from "drizzle-orm/node-postgres";
++import { DRIZZLE_DATABASE } from "../database/database.module";
++import type { DatabaseTransactionExecutor } from "../database/database-executor";
++import type * as schema from "../database/schema";
++import { configurationEventViewSchema,configurationExperienceViewSchema,configurationStationViewSchema,encodeConfigurationCursor,type ConfigurationPage } from "./admin-configuration.dto";
++import { configurationEventView,configurationProjection,experienceSelection,readinessView,stationSelection,type ConfigurationRow } from "./admin-configuration.projection";
++import { failConfiguration } from "./admin-configuration.problem";
++
++export interface ConfigurationActor {userId:string;sessionId:string}
++export async function authorizeConfigurationRead(tx:DatabaseTransactionExecutor,actor:ConfigurationActor){
++  const row=(await tx.execute<{active:boolean;admin:boolean;valid:boolean;revoked:boolean;expired:boolean;secondFactor:boolean}>(sql`
++    SELECT u.is_active AS active,EXISTS(SELECT 1 FROM user_roles r WHERE r.user_id=u.id AND r.role='admin' AND r.event_id IS NULL AND r.revoked_at IS NULL) AS admin,
++      s.id IS NOT NULL AS valid,s.revoked_at IS NOT NULL AS revoked,s.expires_at<=clock_timestamp() AS expired,s.admin_2fa_verified_at IS NOT NULL AS "secondFactor"
++    FROM users u LEFT JOIN sessions s ON s.id=${actor.sessionId}::uuid AND s.user_id=u.id WHERE u.id=${actor.userId}::uuid`)).rows[0];
++  if(!row?.active)failConfiguration('account_inactive');if(!row.admin)failConfiguration('admin_required');if(!row.valid)failConfiguration('invalid_session');
++  if(row.revoked)failConfiguration('session_revoked');if(row.expired)failConfiguration('session_expired');if(!row.secondFactor)failConfiguration('admin_2fa_required');
++}
++@Injectable()
++export class AdminConfigurationQueryService {
++  constructor(@Inject(DRIZZLE_DATABASE) private readonly database:NodePgDatabase<typeof schema>){}
++  private snapshot<T>(actor:ConfigurationActor,read:(tx:DatabaseTransactionExecutor)=>Promise<T>){return this.database.transaction(async tx=>{
++    await authorizeConfigurationRead(tx,actor);return read(tx);
++  },{isolationLevel:'repeatable read',accessMode:'read only'});}
++  events(actor:ConfigurationActor,page:ConfigurationPage){return this.snapshot(actor,async tx=>{
++    const after=page.cursor?sql`(e.created_at,e.id)<(${page.cursor.createdAt}::timestamptz,${page.cursor.id}::uuid)`:sql`true`;
++    const query=configurationProjection(sql`${after} AND ${page.statusStored?sql`e.status=${page.statusStored}::varchar(20)`:sql`true`}`);
++    const rows=(await tx.execute<ConfigurationRow>(sql`SELECT * FROM (${query}) p WHERE ${page.phase?sql`p."effectivePhase"=${page.phase}::text`:sql`true`}
++      ORDER BY "createdAt" DESC,id DESC LIMIT ${page.limit+1}`)).rows,visible=rows.slice(0,page.limit),last=visible.at(-1);
++    return {items:visible.map(r=>configurationEventViewSchema.parse(configurationEventView(r))),nextCursor:rows.length>page.limit&&last?encodeConfigurationCursor(last.createdAt,last.id):null};
++  });}
++  event(actor:ConfigurationActor,eventId:string){return this.snapshot(actor,async tx=>{
++    const row=(await tx.execute<ConfigurationRow>(configurationProjection(sql`e.id=${eventId}::uuid`))).rows[0];if(!row)failConfiguration('resource_not_found');
++    return {event:configurationEventViewSchema.parse(configurationEventView(row))};
++  });}
++  readiness(actor:ConfigurationActor,eventId:string){return this.snapshot(actor,async tx=>{
++    const row=(await tx.execute<ConfigurationRow>(configurationProjection(sql`e.id=${eventId}::uuid`))).rows[0];if(!row)failConfiguration('resource_not_found');
++    // Parse do DTO fechado também verifica instantes antes de formar a visão reduzida.
++    configurationEventViewSchema.parse(configurationEventView(row));
++    return {eventId:row.id,statusStored:row.statusStored,effectivePhase:row.effectivePhase,...readinessView(row),acceptingNewParticipations:row.acceptingNewParticipations,observedAt:row.observedAt};
++  });}
++  experiences(actor:ConfigurationActor,eventId:string){return this.snapshot(actor,async tx=>{
++    if(!(await tx.execute(sql`SELECT id FROM events WHERE id=${eventId}::uuid`)).rows.length)failConfiguration('resource_not_found');
++    const experiences=(await tx.execute(sql`${experienceSelection} WHERE event_id=${eventId}::uuid ORDER BY id`)).rows.map(r=>configurationExperienceViewSchema.parse(r));
++    const stations=(await tx.execute(sql`${stationSelection} JOIN experiences x ON x.id=s.experience_id WHERE x.event_id=${eventId}::uuid ORDER BY s.id`)).rows.map(r=>configurationStationViewSchema.parse(r));
++    const grouped=new Map<string,typeof stations>();for(const s of stations){const group=grouped.get(s.experienceId)??[];group.push(s);grouped.set(s.experienceId,group);}
++    return {eventId,items:experiences.map(x=>({...x,stations:grouped.get(x.id)??[]}))};
++  });}
++}
+diff --git a/backend/src/events/admin-configuration.controller.ts b/backend/src/events/admin-configuration.controller.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..522e28c0f3dbcd0826974005211ecf26e8216a67
+--- /dev/null
++++ b/backend/src/events/admin-configuration.controller.ts
+@@ -0,0 +1,57 @@
++import { Body,Controller,Get,HttpCode,Inject,Param,Patch,Post,Query,Req } from "@nestjs/common";
++import { CurrentUserId,RequireSessionAuth } from "../auth/current-user.decorator";
++import { CurrentUser } from "../auth/current-user.decorator";
++import type { AuthenticatedRequest } from "../auth/session-auth.guard";
++import { ProblemException } from "../common/errors/problem.exception";
++import { validateOperationBody,validateOperationIdempotencyKey,validateOperationParams } from "../common/http/operation-validation";
++import { configurationBodies,configurationEventParams,configurationExperienceParams,configurationStationParams,configurationQuery,type ConfigOperation } from "./admin-configuration.dto";
++import { AdminConfigurationQueryService } from "./admin-configuration-query.service";
++import { AdminConfigurationService } from "./admin-configuration.service";
++import { executeConfiguration } from "./admin-configuration.problem";
++import { AdminIdempotencyPolicy } from "./admin-idempotency.policy";
++
++@Controller('admin/events')
++@RequireSessionAuth()
++export class AdminConfigurationController {
++  constructor(@Inject(AdminConfigurationQueryService) private readonly queries:AdminConfigurationQueryService,
++    @Inject(AdminConfigurationService) private readonly writes:AdminConfigurationService,@Inject(AdminIdempotencyPolicy) private readonly policy:AdminIdempotencyPolicy){}
++  @Get()
++  @HttpCode(200)
++  list(@CurrentUserId() userId:string,@CurrentUser('sessionId') sessionId:string,@Query() query:unknown){
++    const parsed=configurationQuery.safeParse(query);if(!parsed.success)throw new ProblemException({status:400,code:'VALIDATION_ERROR',typeSlug:'validation-error',title:'Requisição inválida',detail:'Confira filtros e cursor.'});
++    return executeConfiguration(()=>this.queries.events({userId,sessionId},parsed.data));
++  }
++  @Post()
++  @HttpCode(201)
++  create(@CurrentUserId() userId:string,@CurrentUser('sessionId') sessionId:string,@Body() body:unknown,@Req() request:AuthenticatedRequest){return this.mutate('create_event',userId,sessionId,{},body,request);}
++  @Get(':eventId/readiness')
++  @HttpCode(200)
++  readiness(@CurrentUserId() userId:string,@CurrentUser('sessionId') sessionId:string,@Param() params:unknown){const {eventId}=validateOperationParams(configurationEventParams,params);return executeConfiguration(()=>this.queries.readiness({userId,sessionId},eventId));}
++  @Get(':eventId/experiences')
++  @HttpCode(200)
++  experiences(@CurrentUserId() userId:string,@CurrentUser('sessionId') sessionId:string,@Param() params:unknown){const {eventId}=validateOperationParams(configurationEventParams,params);return executeConfiguration(()=>this.queries.experiences({userId,sessionId},eventId));}
++  @Get(':eventId')
++  @HttpCode(200)
++  event(@CurrentUserId() userId:string,@CurrentUser('sessionId') sessionId:string,@Param() params:unknown){const {eventId}=validateOperationParams(configurationEventParams,params);return executeConfiguration(()=>this.queries.event({userId,sessionId},eventId));}
++  @Patch(':eventId')
++  @HttpCode(200)
++  update(@CurrentUserId() userId:string,@CurrentUser('sessionId') sessionId:string,@Param() params:unknown,@Body() body:unknown,@Req() request:AuthenticatedRequest){return this.mutate('update_event',userId,sessionId,params,body,request);}
++  @Post(':eventId/experiences')
++  @HttpCode(201)
++  createExperience(@CurrentUserId() userId:string,@CurrentUser('sessionId') sessionId:string,@Param() params:unknown,@Body() body:unknown,@Req() request:AuthenticatedRequest){return this.mutate('create_experience',userId,sessionId,params,body,request);}
++  @Patch(':eventId/experiences/:experienceId')
++  @HttpCode(200)
++  updateExperience(@CurrentUserId() userId:string,@CurrentUser('sessionId') sessionId:string,@Param() params:unknown,@Body() body:unknown,@Req() request:AuthenticatedRequest){return this.mutate('update_experience',userId,sessionId,params,body,request);}
++  @Post(':eventId/experiences/:experienceId/stations')
++  @HttpCode(201)
++  createStation(@CurrentUserId() userId:string,@CurrentUser('sessionId') sessionId:string,@Param() params:unknown,@Body() body:unknown,@Req() request:AuthenticatedRequest){return this.mutate('create_station',userId,sessionId,params,body,request);}
++  @Patch(':eventId/experiences/:experienceId/stations/:stationId')
++  @HttpCode(200)
++  updateStation(@CurrentUserId() userId:string,@CurrentUser('sessionId') sessionId:string,@Param() params:unknown,@Body() body:unknown,@Req() request:AuthenticatedRequest){return this.mutate('update_station',userId,sessionId,params,body,request);}
++  private mutate(operation:ConfigOperation,userId:string,sessionId:string,params:unknown,body:unknown,request:AuthenticatedRequest){
++    const ids=operation==='create_event'?{}:validateOperationParams(operation==='update_station'?configurationStationParams:
++      operation==='create_station'||operation==='update_experience'?configurationExperienceParams:configurationEventParams,params);
++    const payload=validateOperationBody<unknown>(configurationBodies[operation],body,request),idempotencyKey=validateOperationIdempotencyKey(request);
++    return executeConfiguration(async()=>{const result=await this.writes.mutate({operation,userId,sessionId,...ids,payload,idempotencyKey,expiresAt:this.policy.expiresAt()});return result.body;});
++  }
++}
+diff --git a/backend/src/events/admin-configuration.dto.ts b/backend/src/events/admin-configuration.dto.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d50bd23e4b289d08a34346b5b698a737ad592c06
+--- /dev/null
++++ b/backend/src/events/admin-configuration.dto.ts
+@@ -0,0 +1,57 @@
++import { z } from "zod";
++import { operationUuid } from "../common/http/operation-validation";
++import { isPreciseInstant } from "../evaluations/evaluation-read.dto";
++import { normalizeEventAccessCode } from "./access-code";
++import { normalizeScheduleInstant } from "./admin-schedule.dto";
++import { adminExternalQueueBody } from "./admin-external-queue.dto";
++
++export function configurationName(limit: number) {
++  return z.string().trim().refine(value => {
++    const chars=Array.from(value);
++    return chars.length>0&&chars.length<=limit&&chars.every(c=>c.charCodeAt(0)>=32&&c.charCodeAt(0)!==127
++      &&!(c.length===1&&c.charCodeAt(0)>=0xd800&&c.charCodeAt(0)<=0xdfff));
++  },"Identificação inválida.");
++}
++export const configurationTimezone=z.string().trim().min(1).max(80).refine(value=>{
++  if(/^[+-]/.test(value))return false;
++  try{new Intl.DateTimeFormat('en',{timeZone:value}).format(0);return true;}catch{return false;}
++},"Fuso IANA inválido.").transform(value=>new Intl.DateTimeFormat('en',{timeZone:value}).resolvedOptions().timeZone);
++const instant=z.string().transform((value,ctx)=>{
++  const normalized=normalizeScheduleInstant(value);
++  if(!normalized){ctx.addIssue({code:'custom',message:'Instante absoluto com fuso explícito obrigatório.'});return z.NEVER;}return normalized;
++});
++const code=z.string().transform((value,ctx)=>{
++  try{return normalizeEventAccessCode(value);}catch{ctx.addIssue({code:'custom',message:'Código de ingresso inválido.'});return z.NEVER;}
++});
++const reason=adminExternalQueueBody.shape.reason.optional();
++export const createEventBody=z.object({name:configurationName(180),accessCode:code,timezone:configurationTimezone,
++  startsAt:instant,officialEndsAt:instant,operationalDeadlineAt:instant,externalQueueEnabled:z.boolean(),reason}).strict()
++  .refine(v=>Date.parse(v.startsAt)<Date.parse(v.officialEndsAt)&&Date.parse(v.operationalDeadlineAt)>=Date.parse(v.officialEndsAt)
++    &&Date.parse(v.operationalDeadlineAt)-Date.parse(v.officialEndsAt)<=3_600_000,"Horários inválidos.");
++export const updateEventBody=z.object({name:configurationName(180),reason}).strict();
++export const experienceBody=z.object({name:configurationName(160),reason}).strict();
++export const stationBody=z.object({label:configurationName(120),reason}).strict();
++export const configurationBodies={create_event:createEventBody,update_event:updateEventBody,create_experience:experienceBody,
++  update_experience:experienceBody,create_station:stationBody,update_station:stationBody};
++export type ConfigOperation=keyof typeof configurationBodies;
++export const configurationEventParams=z.object({eventId:operationUuid}).strict();
++export const configurationExperienceParams=configurationEventParams.extend({experienceId:operationUuid}).strict();
++export const configurationStationParams=configurationExperienceParams.extend({stationId:operationUuid}).strict();
++export const effectivePhase=z.enum(['scheduled','not_ready','open','closing','closed']);
++const cursorValue=z.object({v:z.literal(1),createdAt:z.custom<string>(isPreciseInstant),id:operationUuid}).strict();
++export function encodeConfigurationCursor(createdAt:string,id:string){return Buffer.from(JSON.stringify(cursorValue.parse({v:1,createdAt,id}))).toString('base64url');}
++function decodeCursor(value:string){
++  try{if(!/^[A-Za-z0-9_-]{1,512}$/.test(value))return;const raw=Buffer.from(value,'base64url');if(raw.toString('base64url')!==value)return;
++    return cursorValue.parse(JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(raw)));}catch{return;}
++}
++export const configurationQuery=z.object({limit:z.string().regex(/^[1-9]\d?$/).transform(Number).pipe(z.number().max(50)).optional().default(20),
++  cursor:z.string().transform((value,ctx)=>{const cursor=decodeCursor(value);if(!cursor){ctx.addIssue({code:'custom',message:'Cursor inválido.'});return z.NEVER;}return cursor;}).optional(),
++  phase:effectivePhase.optional(),statusStored:z.enum(['scheduled','open','closing','closed']).optional()}).strict();
++export type ConfigurationPage=z.infer<typeof configurationQuery>;
++const precise=z.custom<string>(isPreciseInstant);
++const checks=z.object({nameAndAccessCode:z.boolean(),validScheduleAndTimezone:z.boolean(),externalQueueConfigured:z.boolean(),hasExperienceWithAvailableStation:z.boolean(),hasVerifiedActiveStaff:z.boolean()}).strict();
++export const configurationEventViewSchema=z.object({id:operationUuid,name:z.string(),accessCode:z.string(),timezone:z.string(),startsAt:precise,officialEndsAt:precise,operationalDeadlineAt:precise,
++  statusStored:z.enum(['scheduled','open','closing','closed']),closureMode:z.enum(['immediate','controlled']).nullable(),closureRequestedAt:precise.nullable(),adminDeadlineAt:precise.nullable(),
++  externalQueueEnabled:z.boolean(),effectivePhase,readiness:z.object({ready:z.boolean(),missing:z.array(z.string()),checks}).strict(),acceptingNewParticipations:z.boolean(),createdAt:precise,updatedAt:precise}).strict();
++export const configurationExperienceViewSchema=z.object({id:operationUuid,eventId:operationUuid,name:z.string(),queueAcceptingEntries:z.boolean(),lastQueueOrder:z.string().regex(/^(0|[1-9]\d*)$/),createdAt:precise,updatedAt:precise}).strict();
++export const configurationStationViewSchema=z.object({id:operationUuid,experienceId:operationUuid,label:z.string(),availability:z.enum(['available','unavailable']),pendingServiceSessionId:operationUuid.nullable(),createdAt:precise,updatedAt:precise}).strict();
+diff --git a/backend/src/events/admin-configuration.mutation.ts b/backend/src/events/admin-configuration.mutation.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..25a7b5c474f2fc56f320124ef87d65eb5c4cd833
+--- /dev/null
++++ b/backend/src/events/admin-configuration.mutation.ts
+@@ -0,0 +1,23 @@
++import { sql, type SQL } from "drizzle-orm";
++import type { ConfigOperation } from "./admin-configuration.dto";
++import { effectiveEventDeadline } from "./event-closure.projection";
++
++/** Todos os predicados temporais/históricos e o efeito usam o mesmo relógio após os locks. */
++export function configurationMutation(operation:Exclude<ConfigOperation,'create_event'>,eventId:string,id:string,experienceId:string|undefined,body:Record<string,string|boolean|undefined>):SQL{
++  const allowed=sql`NOT f.ended AND (${operation==='create_station'}::boolean OR NOT f.history)`;
++  let write:SQL;
++  if(operation==='create_experience')write=sql`INSERT INTO experiences(id,event_id,name,queue_accepting_entries,last_queue_order,created_at,updated_at)
++    SELECT ${id}::uuid,${eventId}::uuid,${body.name}::varchar(160),true,0,f.at,f.at FROM facts f WHERE ${allowed} RETURNING id`;
++  else if(operation==='create_station')write=sql`INSERT INTO stations(id,experience_id,label,availability,created_at,updated_at)
++    SELECT ${id}::uuid,${experienceId}::uuid,${body.label}::varchar(120),'available',f.at,f.at FROM facts f WHERE ${allowed} RETURNING id`;
++  else if(operation==='update_event')write=sql`UPDATE events e SET name=${body.name}::varchar(180),updated_at=f.at FROM facts f WHERE e.id=${id}::uuid AND ${allowed} RETURNING e.id`;
++  else if(operation==='update_experience')write=sql`UPDATE experiences x SET name=${body.name}::varchar(160),updated_at=f.at FROM facts f
++    WHERE x.id=${id}::uuid AND x.event_id=${eventId}::uuid AND ${allowed} RETURNING x.id`;
++  else write=sql`UPDATE stations s SET label=${body.label}::varchar(120),updated_at=f.at FROM facts f
++    WHERE s.id=${id}::uuid AND s.experience_id=${experienceId}::uuid AND ${allowed} RETURNING s.id`;
++  return sql`WITH decision AS MATERIALIZED (SELECT clock_timestamp() AS at),facts AS MATERIALIZED (
++    SELECT d.at,(e.status='closed' OR ${effectiveEventDeadline()}<=d.at) AS ended,
++      EXISTS(SELECT 1 FROM participations p WHERE p.event_id=e.id) AS history FROM events e CROSS JOIN decision d WHERE e.id=${eventId}::uuid
++  ),written AS (${write}) SELECT f.ended,f.history,to_char(f.at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at,w.id AS "writtenId"
++    FROM facts f LEFT JOIN written w ON true`;
++}
+diff --git a/backend/src/events/admin-configuration.problem.ts b/backend/src/events/admin-configuration.problem.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..9e2dd8e28efca7d3d20c331ef36d22bf5f85717c
+--- /dev/null
++++ b/backend/src/events/admin-configuration.problem.ts
+@@ -0,0 +1,17 @@
++import { ProblemException } from "../common/errors/problem.exception";
++import type { AdminAuthFailure } from "./admin-operation-auth";
++
++export type ConfigurationFailure=AdminAuthFailure|'resource_not_found'|'configuration_locked'|'event_ended'|'access_code_used'|'request_conflict'|'in_progress';
++export class AdminConfigurationError extends Error { constructor(readonly kind:ConfigurationFailure){super(kind);} }
++export function failConfiguration(kind:ConfigurationFailure):never{throw new AdminConfigurationError(kind);}
++const errors:Record<ConfigurationFailure,[number,string]>={account_inactive:[401,'ACCOUNT_DEACTIVATED'],admin_required:[403,'ADMIN_REQUIRED'],invalid_session:[401,'INVALID_SESSION'],
++  session_revoked:[401,'SESSION_REVOKED'],session_expired:[401,'SESSION_EXPIRED'],admin_2fa_required:[401,'ADMIN_2FA_REQUIRED'],resource_not_found:[404,'RESOURCE_NOT_FOUND'],
++  configuration_locked:[409,'EVENT_CONFIGURATION_LOCKED'],event_ended:[409,'EVENT_OPERATION_ENDED'],access_code_used:[409,'ACCESS_CODE_ALREADY_USED'],request_conflict:[409,'IDEMPOTENCY_KEY_REUSED'],in_progress:[409,'IDEMPOTENCY_IN_PROGRESS']};
++export async function executeConfiguration<T>(action:()=>Promise<T>):Promise<T>{
++  try{return await action();}catch(error){
++    if(error instanceof AdminConfigurationError){const [status,code]=errors[error.kind];throw new ProblemException({status,code,typeSlug:code.toLowerCase().replaceAll('_','-'),
++      title:status===404?'Recurso não encontrado':status===401?'Autenticação obrigatória':status===403?'Acesso negado':'Conflito de configuração',
++      detail:status===404?'Recurso não encontrado.':'A operação administrativa não pode ser aplicada ao estado atual.'});}
++    throw new Error('ADMIN_CONFIGURATION_INTERNAL_ERROR',{cause:error});
++  }
++}
+diff --git a/backend/src/events/admin-configuration.projection.ts b/backend/src/events/admin-configuration.projection.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..9a4dcb28c34989f5e0f80d7fd74bcc4ff6020d46
+--- /dev/null
++++ b/backend/src/events/admin-configuration.projection.ts
+@@ -0,0 +1,60 @@
++import { sql, type SQL } from "drizzle-orm";
++import { effectiveEventDeadline } from "./event-closure.projection";
++const trimCharacters="\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff";
++
++/** Prontidão e fase em um único snapshot PostgreSQL; não materializa estado ou ocupação. */
++export function configurationProjection(condition:SQL=sql`true`,clock:SQL=sql`clock_timestamp()`):SQL{
++  return sql`WITH observation AS MATERIALIZED (SELECT ${clock} AS at), checks AS (
++    SELECT e.*,d.at,
++      (length(btrim(e.name,${trimCharacters}))>0 AND length(e.access_code_normalized) BETWEEN 4 AND 64
++        AND (e.access_code_normalized COLLATE "C") ~ '^[A-Z0-9]+(-[A-Z0-9]+)*$') AS "nameAndAccessCode",
++      (e.starts_at<e.official_ends_at AND e.official_ends_at<=e.operational_deadline_at
++        AND e.operational_deadline_at<=e.official_ends_at+interval '1 hour'
++        AND EXISTS(SELECT 1 FROM pg_timezone_names tz WHERE lower(tz.name)=lower(e.timezone))) AS "validScheduleAndTimezone",
++      (e.external_queue_enabled IS NOT NULL) AS "externalQueueConfigured",
++      EXISTS(SELECT 1 FROM experiences x JOIN stations s ON s.experience_id=x.id WHERE x.event_id=e.id AND s.availability='available') AS "hasExperienceWithAvailableStation",
++      EXISTS(SELECT 1 FROM user_roles r JOIN users u ON u.id=r.user_id WHERE r.event_id=e.id AND r.role='staff'
++        AND r.revoked_at IS NULL AND u.is_active AND u.email_verified_at IS NOT NULL) AS "hasVerifiedActiveStaff"
++    FROM events e CROSS JOIN observation d WHERE ${condition}
++  ), readiness AS (SELECT c.*,("nameAndAccessCode" AND "validScheduleAndTimezone" AND "externalQueueConfigured"
++    AND "hasExperienceWithAvailableStation" AND "hasVerifiedActiveStaff") AS ready FROM checks c),
++  projected AS (SELECT e.*,
++    CASE WHEN e.status='closed' OR ${effectiveEventDeadline()}<=e.at THEN 'closed'
++      WHEN e.status='closing' OR e.closure_requested_at IS NOT NULL OR e.official_ends_at<=e.at THEN 'closing'
++      WHEN e.at<e.starts_at THEN 'scheduled' WHEN NOT e.ready THEN 'not_ready' ELSE 'open' END AS phase,
++    (e.ready AND e.status NOT IN ('closing','closed') AND e.closure_requested_at IS NULL AND e.starts_at<=e.at AND e.at<e.official_ends_at) AS accepting
++    FROM readiness e)
++  SELECT id,name,access_code_normalized AS "accessCode",timezone,status AS "statusStored",phase AS "effectivePhase",external_queue_enabled AS "externalQueueEnabled",
++    closure_mode AS "closureMode",
++    to_char(starts_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "startsAt",
++    to_char(official_ends_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "officialEndsAt",
++    to_char(operational_deadline_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "operationalDeadlineAt",
++    to_char(closure_requested_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "closureRequestedAt",
++    to_char(admin_deadline_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "adminDeadlineAt",
++    to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "createdAt",
++    to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "updatedAt",
++    to_char(at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "observedAt",
++    ready,"nameAndAccessCode","validScheduleAndTimezone","externalQueueConfigured","hasExperienceWithAvailableStation","hasVerifiedActiveStaff",
++    accepting AS "acceptingNewParticipations" FROM projected`;
++}
++export interface ConfigurationRow extends Record<string,unknown>{id:string;name:string;accessCode:string;timezone:string;statusStored:string;effectivePhase:string;
++  startsAt:string;officialEndsAt:string;operationalDeadlineAt:string;closureMode:string|null;closureRequestedAt:string|null;adminDeadlineAt:string|null;
++  externalQueueEnabled:boolean;createdAt:string;updatedAt:string;observedAt:string;ready:boolean;acceptingNewParticipations:boolean;
++  nameAndAccessCode:boolean;validScheduleAndTimezone:boolean;externalQueueConfigured:boolean;hasExperienceWithAvailableStation:boolean;hasVerifiedActiveStaff:boolean;}
++export function readinessView(row:ConfigurationRow){
++  const checks={nameAndAccessCode:row.nameAndAccessCode,validScheduleAndTimezone:row.validScheduleAndTimezone,externalQueueConfigured:row.externalQueueConfigured,
++    hasExperienceWithAvailableStation:row.hasExperienceWithAvailableStation,hasVerifiedActiveStaff:row.hasVerifiedActiveStaff};
++  const missing=[...(!checks.nameAndAccessCode?['EVENT_NAME_OR_ACCESS_CODE_INVALID']:[]),...(!checks.validScheduleAndTimezone?['EVENT_SCHEDULE_INVALID']:[]),
++    ...(!checks.externalQueueConfigured?['EVENT_EXTERNAL_QUEUE_NOT_CONFIGURED']:[]),...(!checks.hasExperienceWithAvailableStation?['EXPERIENCE_WITH_AVAILABLE_STATION']:[]),...(!checks.hasVerifiedActiveStaff?['VERIFIED_ACTIVE_STAFF']:[])];
++  return {ready:row.ready,missing,checks};
++}
++export function configurationEventView(row:ConfigurationRow){
++  return {id:row.id,name:row.name,accessCode:row.accessCode,timezone:row.timezone,startsAt:row.startsAt,officialEndsAt:row.officialEndsAt,operationalDeadlineAt:row.operationalDeadlineAt,
++    statusStored:row.statusStored,closureMode:row.closureMode,closureRequestedAt:row.closureRequestedAt,adminDeadlineAt:row.adminDeadlineAt,externalQueueEnabled:row.externalQueueEnabled,
++    effectivePhase:row.effectivePhase,readiness:readinessView(row),acceptingNewParticipations:row.acceptingNewParticipations,createdAt:row.createdAt,updatedAt:row.updatedAt};
++}
++export const experienceSelection=sql`SELECT id,event_id AS "eventId",name,queue_accepting_entries AS "queueAcceptingEntries",last_queue_order::text AS "lastQueueOrder",
++  to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "createdAt",to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "updatedAt" FROM experiences`;
++export const stationSelection=sql`SELECT s.id,s.experience_id AS "experienceId",s.label,s.availability,
++  (SELECT p.id FROM service_sessions p WHERE p.station_id=s.id AND p.status='pending') AS "pendingServiceSessionId",
++  to_char(s.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "createdAt",to_char(s.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "updatedAt" FROM stations s`;
+diff --git a/backend/src/events/admin-configuration.service.ts b/backend/src/events/admin-configuration.service.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..97e03f6b7eb1dc2581a6c75101c8753cd328f1ec
+--- /dev/null
++++ b/backend/src/events/admin-configuration.service.ts
+@@ -0,0 +1,103 @@
++import { Inject, Injectable } from "@nestjs/common";
++import { randomUUID } from "node:crypto";
++import { sql } from "drizzle-orm";
++import type { NodePgDatabase } from "drizzle-orm/node-postgres";
++import { DRIZZLE_DATABASE } from "../database/database.module";
++import type * as schema from "../database/schema";
++import { completeIdempotencyOperationWithTx,createRequestFingerprint,reserveIdempotencyOperationWithTx,type JsonValue } from "../participations/join-idempotency";
++import { configurationBodies,configurationEventViewSchema,configurationExperienceViewSchema,configurationStationViewSchema,type ConfigOperation } from "./admin-configuration.dto";
++import { configurationEventView,configurationProjection,experienceSelection,stationSelection,type ConfigurationRow } from "./admin-configuration.projection";
++import { assertAdminSessionWithTx,authorizeGlobalAdminWithTx } from "./admin-operation-auth";
++import { AdminConfigurationError,failConfiguration } from "./admin-configuration.problem";
++import { configurationMutation } from "./admin-configuration.mutation";
++
++export const CONFIGURATION_OPERATIONS:Record<ConfigOperation,string>={create_event:'admin_create_event',update_event:'admin_update_event_metadata',create_experience:'admin_create_experience',update_experience:'admin_update_experience',create_station:'admin_create_station',update_station:'admin_update_station'};
++export interface ConfigurationInput {operation:ConfigOperation;userId:string;sessionId:string;eventId?:string;experienceId?:string;stationId?:string;payload:unknown;idempotencyKey:string;expiresAt:Date}
++export function configurationFingerprint(input:Pick<ConfigurationInput,'operation'|'eventId'|'experienceId'|'stationId'|'payload'>){
++  const payload=configurationBodies[input.operation].parse(input.payload);
++  return createRequestFingerprint(CONFIGURATION_OPERATIONS[input.operation],{v:1,eventId:input.eventId??null,experienceId:input.experienceId??null,stationId:input.stationId??null,...payload,reason:payload.reason??null});
++}
++function ensure(value:unknown):asserts value{if(!value)throw new Error('ADMIN_CONFIGURATION_INTEGRITY');}
++function decodeBody(operation:ConfigOperation,payload:JsonValue|null){
++  ensure(payload&&typeof payload==='object'&&!Array.isArray(payload));
++  if(operation.endsWith('event')){ensure(Object.keys(payload).length===1);return {event:configurationEventViewSchema.parse(payload.event)};}
++  if(operation.endsWith('experience')){ensure(Object.keys(payload).length===1);return {experience:configurationExperienceViewSchema.parse(payload.experience)};}
++  ensure(Object.keys(payload).length===1);return {station:configurationStationViewSchema.parse(payload.station)};
++}
++@Injectable()
++export class AdminConfigurationService {
++  constructor(@Inject(DRIZZLE_DATABASE) private readonly database:NodePgDatabase<typeof schema>){}
++  async mutate(input:ConfigurationInput){
++    try{
++      const payload=configurationBodies[input.operation].parse(input.payload),body=payload as Record<string,string|boolean|undefined>,operation=CONFIGURATION_OPERATIONS[input.operation];
++      ensure(input.idempotencyKey.trim()&&input.idempotencyKey.length<=128&&Number.isFinite(input.expiresAt.getTime()));
++      const creating=input.operation.startsWith('create_'),entity=input.operation.split('_')[1],httpStatus=creating?201:200;
++      return await this.database.transaction(async tx=>{
++        // Ordem existente dos comandos Admin: evento -> experiência/estação -> conta/concessão/sessão.
++        let eventId=input.eventId;let id=entity==='event'?eventId:entity==='experience'?input.experienceId:input.stationId;
++        if(input.operation==='create_event'){eventId=randomUUID();id=eventId;}
++        if(input.operation!=='create_event'){
++          ensure(eventId);
++          const event=(await tx.execute(sql`SELECT id FROM events WHERE id=${eventId}::uuid FOR UPDATE`)).rows[0];
++          if(entity!=='event'&&input.experienceId){if(!(await tx.execute(sql`SELECT id FROM experiences WHERE id=${input.experienceId}::uuid AND event_id=${eventId}::uuid FOR UPDATE`)).rows.length) {
++            await authorizeGlobalAdminWithTx(tx,input,r=>failConfiguration(r.kind));failConfiguration('resource_not_found');}}
++          if(entity==='station'&&input.stationId){if(!(await tx.execute(sql`SELECT s.id FROM stations s JOIN experiences x ON x.id=s.experience_id WHERE s.id=${input.stationId}::uuid
++            AND s.experience_id=${input.experienceId}::uuid AND x.event_id=${eventId}::uuid FOR UPDATE OF s`)).rows.length){await authorizeGlobalAdminWithTx(tx,input,r=>failConfiguration(r.kind));failConfiguration('resource_not_found');}}
++          await authorizeGlobalAdminWithTx(tx,input,r=>failConfiguration(r.kind));if(!event)failConfiguration('resource_not_found');
++        }else await authorizeGlobalAdminWithTx(tx,input,r=>failConfiguration(r.kind));
++        const intent=await reserveIdempotencyOperationWithTx(tx,{actorUserId:input.userId,operation,idempotencyKey:input.idempotencyKey,requestHash:configurationFingerprint(input),expiresAt:input.expiresAt});
++        await assertAdminSessionWithTx(tx,input,r=>failConfiguration(r.kind));
++        if(intent.kind==='request_conflict'||intent.kind==='in_progress')failConfiguration(intent.kind);
++        if(intent.kind==='replay'){
++          const result=decodeBody(input.operation,intent.resultPayload);ensure(intent.httpStatus===httpStatus);
++          const resource='event'in result?result.event:'experience'in result?result.experience:result.station;
++          ensure(resource&&resource.id===intent.resultReference&&(creating||resource.id===id));
++          if(result.experience)ensure(result.experience.eventId===eventId);
++          if(result.station)ensure(result.station.experienceId===input.experienceId);
++          return {kind:'replay' as const,body:result,httpStatus};
++        }
++        let changed=false,at:string|undefined,before:JsonValue=null;
++        if(input.operation==='create_event'){
++          const row=(await tx.execute<{id:string;at:string}>(sql`WITH decision AS MATERIALIZED (SELECT clock_timestamp() AS at)
++            INSERT INTO events(id,name,access_code_normalized,timezone,starts_at,official_ends_at,operational_deadline_at,status,external_queue_enabled,external_last_order,created_at,updated_at)
++            SELECT ${eventId}::uuid,${body.name}::varchar(180),${body.accessCode}::varchar(64),${body.timezone}::varchar(80),${body.startsAt}::timestamptz,${body.officialEndsAt}::timestamptz,
++              ${body.operationalDeadlineAt}::timestamptz,'scheduled',${body.externalQueueEnabled}::boolean,0,d.at,d.at FROM decision d
++            ON CONFLICT (access_code_normalized) DO NOTHING RETURNING id,to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`)).rows[0];
++          if(!row)failConfiguration('access_code_used');at=row.at;changed=true;
++        }else{
++          ensure(eventId);
++          const previous=entity==='event'?(await tx.execute<{value:string}>(sql`SELECT name AS value FROM events WHERE id=${eventId}::uuid`)).rows[0]
++            :!creating?entity==='experience'?(await tx.execute<{value:string}>(sql`SELECT name AS value FROM experiences WHERE id=${id}::uuid AND event_id=${eventId}::uuid`)).rows[0]
++              :(await tx.execute<{value:string}>(sql`SELECT label AS value FROM stations WHERE id=${id}::uuid AND experience_id=${input.experienceId}::uuid`)).rows[0]:undefined;
++          if(!creating)ensure(previous);
++          const same=!creating&&previous!.value===(entity==='station'?body.label:body.name);
++          if(!same){
++            if(creating)id=randomUUID();else before={ [entity==='station'?'label':'name']:previous!.value };
++            ensure(id);
++            const rows=(await tx.execute<{ended:boolean;history:boolean;at:string;writtenId:string|null}>(configurationMutation(input.operation,eventId,id,input.experienceId,body))).rows;
++            ensure(rows.length===1);const decision=rows[0];if(decision.ended)failConfiguration('event_ended');
++            if(decision.history&&input.operation!=='create_station')failConfiguration('configuration_locked');
++            ensure(decision.writtenId===id);at=decision.at;changed=true;
++          }
++        }
++        ensure(eventId&&id);
++        await assertAdminSessionWithTx(tx,input,r=>failConfiguration(r.kind));
++        let result:ReturnType<typeof decodeBody>;
++        if(entity==='event'){
++          const row=(await tx.execute<ConfigurationRow>(configurationProjection(sql`e.id=${eventId}::uuid`,at?sql`${at}::timestamptz`:sql`clock_timestamp()`))).rows[0];ensure(row);
++          result={event:configurationEventViewSchema.parse(configurationEventView(row))};
++        }else if(entity==='experience')result={experience:configurationExperienceViewSchema.parse((await tx.execute(sql`${experienceSelection} WHERE id=${id}::uuid AND event_id=${eventId}::uuid`)).rows[0])};
++        else result={station:configurationStationViewSchema.parse((await tx.execute(sql`${stationSelection} WHERE s.id=${id}::uuid AND s.experience_id=${input.experienceId}::uuid`)).rows[0])};
++        if(changed){
++          const after={ [entity==='station'?'label':'name']:entity==='station'?body.label!:body.name! };
++          ensure((await tx.execute(sql`INSERT INTO audit_logs(id,actor_user_id,event_id,origin,category,action,reason,metadata,occurred_at)
++            VALUES(${randomUUID()}::uuid,${input.userId}::uuid,${eventId}::uuid,'user','event',${operation}::varchar(80),${body.reason??null}::text,
++              ${JSON.stringify({objectId:id,entity,before,after})}::jsonb,${at}::timestamptz) RETURNING id`)).rows.length===1);
++        }
++        await completeIdempotencyOperationWithTx(tx,intent.operationId,{httpStatus,resultReference:id,resultPayload:result as unknown as JsonValue});
++        await assertAdminSessionWithTx(tx,input,r=>failConfiguration(r.kind));
++        return {kind:creating?'created' as const:changed?'changed' as const:'unchanged' as const,body:result,httpStatus};
++      },{isolationLevel:'read committed'});
++    }catch(error){if(error instanceof AdminConfigurationError)throw error;throw new Error('ADMIN_CONFIGURATION_INTERNAL_ERROR',{cause:error});}
++  }
++}
+diff --git a/backend/src/events/admin-events.module.ts b/backend/src/events/admin-events.module.ts
+index 9a8b0994a3468d6ae904db15f153a04109f0962f..5e80adc890756934aaad610898f0c2500b0787df 100644
+--- a/backend/src/events/admin-events.module.ts
++++ b/backend/src/events/admin-events.module.ts
+@@ -9,11 +9,14 @@ import { AdminScheduleController } from "./admin-schedule.controller";
+ import { AdminScheduleService } from "./admin-schedule.service";
+ import { AdminCloseController } from "./admin-close.controller";
+ import { AdminCloseService } from "./admin-close.service";
++import { AdminConfigurationController } from "./admin-configuration.controller";
++import { AdminConfigurationService } from "./admin-configuration.service";
++import { AdminConfigurationQueryService } from "./admin-configuration-query.service";
+ 
+ @Module({
+   imports: [DatabaseModule, AuthModule, ParticipationsModule],
+-  controllers: [AdminExternalQueueController, AdminScheduleController, AdminCloseController],
+-  providers: [AdminExternalQueueService, AdminScheduleService, AdminCloseService, AdminIdempotencyPolicy],
+-  exports: [AdminExternalQueueService, AdminScheduleService, AdminCloseService],
++  controllers: [AdminExternalQueueController, AdminScheduleController, AdminCloseController, AdminConfigurationController],
++  providers: [AdminExternalQueueService, AdminScheduleService, AdminCloseService, AdminIdempotencyPolicy, AdminConfigurationService, AdminConfigurationQueryService],
++  exports: [AdminExternalQueueService, AdminScheduleService, AdminCloseService, AdminConfigurationService, AdminConfigurationQueryService],
+ })
+ export class AdminEventsModule {}
+diff --git a/backend/test/integration/admin-configuration.integration.test.ts b/backend/test/integration/admin-configuration.integration.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..a7b629a441b0c128383437eb4b404ca7daa906d8
+--- /dev/null
++++ b/backend/test/integration/admin-configuration.integration.test.ts
+@@ -0,0 +1,336 @@
++import assert from "node:assert/strict";
++import { randomUUID } from "node:crypto";
++import { after, before, test } from "node:test";
++import { sql } from "drizzle-orm";
++import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
++import { PgDialect } from "drizzle-orm/pg-core";
++import type { QueryConfig, QueryResult } from "pg";
++import supertest from "supertest";
++import * as schema from "../../src/database/schema";
++import type { AdminConfigurationService } from "../../src/events/admin-configuration.service";
++import { setup, cleanup, app, pool, database, admin, context, person, readyEntrant, admit, state, ordered, lockWait,
++  close, controlled, patch, proposal, station, called, resolve, type Context } from "./event-closure-fixture";
++import { problem } from "./evaluation-read-fixture";
++
++type Actor={userId:string;sessionId:string;token:string};
++type Kind="list"|"create_event"|"get_event"|"update_event"|"readiness"|"list_experiences"|"create_experience"|"update_experience"|"create_station"|"update_station";
++const mutations=["create_event","update_event","create_experience","update_experience","create_station","update_station"]as const;
++const allRoutes=["list","create_event","get_event","update_event","readiness","list_experiences","create_experience","update_experience","create_station","update_station"]as const;
++const createdIds=new Set<string>(),createdCodes=new Set<string>();
++let writes:AdminConfigurationService,makeWrites:(db:NodePgDatabase<typeof schema>)=>AdminConfigurationService;
++let operations:typeof import("../../src/events/admin-configuration.service").CONFIGURATION_OPERATIONS;
++let fingerprint:typeof import("../../src/events/admin-configuration.service").configurationFingerprint;
++before(async()=>{
++  process.env.EVALUATION_IDEMPOTENCY_TTL_SECONDS="60";await setup();
++  const module=await import("../../src/events/admin-configuration.service");writes=app.get(module.AdminConfigurationService);makeWrites=db=>new module.AdminConfigurationService(db);operations=module.CONFIGURATION_OPERATIONS;fingerprint=module.configurationFingerprint;
++});
++after(async()=>{
++  const errors:unknown[]=[];
++  try{
++    const client=await pool.connect();try{
++      await client.query('BEGIN');
++      const found=(await client.query('SELECT id FROM events WHERE access_code_normalized=ANY($1::text[])',[Array.from(createdCodes)])).rows;
++      for(const row of found)createdIds.add(row.id);const ids=Array.from(createdIds);
++      await client.query('DELETE FROM audit_logs WHERE event_id=ANY($1::uuid[])',[ids]);
++      await client.query('UPDATE participations SET current_queue_entry_id=NULL WHERE event_id=ANY($1::uuid[])',[ids]);
++      await client.query('DELETE FROM service_sessions s USING queue_entries q WHERE s.queue_entry_id=q.id AND q.event_id=ANY($1::uuid[])',[ids]);
++      await client.query('DELETE FROM queue_entries WHERE event_id=ANY($1::uuid[])',[ids]);
++      await client.query('DELETE FROM evaluations v USING participations p WHERE v.participation_id=p.id AND p.event_id=ANY($1::uuid[])',[ids]);
++      await client.query('DELETE FROM participation_profile_snapshots s USING participations p WHERE s.participation_id=p.id AND p.event_id=ANY($1::uuid[])',[ids]);
++      await client.query('DELETE FROM participations WHERE event_id=ANY($1::uuid[])',[ids]);
++      await client.query('DELETE FROM stations s USING experiences x WHERE s.experience_id=x.id AND x.event_id=ANY($1::uuid[])',[ids]);
++      await client.query('DELETE FROM experiences WHERE event_id=ANY($1::uuid[])',[ids]);
++      await client.query('DELETE FROM user_roles WHERE event_id=ANY($1::uuid[])',[ids]);
++      await client.query('DELETE FROM events WHERE id=ANY($1::uuid[])',[ids]);await client.query('COMMIT');
++    }catch(error){await client.query('ROLLBACK');throw error;}finally{client.release();}
++  }catch(error){errors.push(error);}
++  try{await cleanup();}catch(error){errors.push(error);}if(errors.length)throw new AggregateError(errors,'Limpeza E08.13 falhou.');
++});
++function draft(overrides:Record<string,unknown>={}){
++  const code=`E813-${randomUUID()}`.toUpperCase();createdCodes.add(code);
++  return {name:'Evento E08.13',accessCode:code,timezone:'America/Sao_Paulo',startsAt:new Date(Date.now()+7200000).toISOString(),
++    officialEndsAt:new Date(Date.now()+10800000).toISOString(),operationalDeadlineAt:new Date(Date.now()+12600000).toISOString(),externalQueueEnabled:true,...overrides};
++}
++function body(kind:Kind){return kind==='create_event'?draft():kind==='create_station'||kind==='update_station'?{label:'Estação E08.13'}:{name:'Configuração E08.13'};}
++function request(kind:Kind,c:Context,actor:Actor=c.admin,payload:object=body(kind),key:string=randomUUID()){
++  const base=`/api/v1/admin/events`,event=`${base}/${c.eventId}`,experience=`${event}/experiences/${c.experienceId}`,stationRoute=`${experience}/stations/${c.stationId}`;
++  const route=kind==='list'||kind==='create_event'?base:kind==='get_event'||kind==='update_event'?event:kind==='readiness'?`${event}/readiness`:
++    kind==='list_experiences'||kind==='create_experience'?`${event}/experiences`:kind==='update_experience'?experience:kind==='create_station'?`${experience}/stations`:stationRoute;
++  const read=kind==='list'||kind==='get_event'||kind==='readiness'||kind==='list_experiences';
++  const r=read?supertest(app.getHttpServer()).get(route):kind.startsWith('create_')?supertest(app.getHttpServer()).post(route):supertest(app.getHttpServer()).patch(route);
++  r.set('Authorization',`Bearer ${actor.token}`);if(!read)r.set('Idempotency-Key',key).send(payload);return r;
++}
++async function create(actor:Actor,payload:object=draft(),key:string=randomUUID()){
++  const r=await supertest(app.getHttpServer()).post('/api/v1/admin/events').set('Authorization',`Bearer ${actor.token}`).set('Idempotency-Key',key).send(payload);
++  if(r.body.event?.id)createdIds.add(r.body.event.id);return r;
++}
++async function event(c:Context){return request('get_event',c);}
++async function eventAudits(eventId:string){return (await pool.query('SELECT * FROM audit_logs WHERE event_id=$1 ORDER BY id',[eventId])).rows;}
++async function actorIntents(actor:Actor,key?:string){return (await pool.query('SELECT * FROM idempotency_operations WHERE actor_user_id=$1 AND ($2::text IS NULL OR idempotency_key=$2::text) ORDER BY id',[actor.userId,key??null])).rows;}
++async function ready(c:Context){const r=await request('readiness',c);assert.equal(r.status,200,JSON.stringify(r.body));return r.body;}
++async function assertUnchanged(c:Context,before:unknown){assert.deepEqual(await state(c),before);}
++
++for(const kind of allRoutes)test(`E08.13 PostgreSQL ${kind} exige autenticação, Admin global e 2FA`,async()=>{
++  const c=await context(),payload=body(kind),before=await state(c);
++  problem(await request(kind,c,c.admin,payload).unset('Authorization'),401,'MISSING_ACCESS_TOKEN');
++  problem(await request(kind,c,c.staff,payload),403,'ADMIN_REQUIRED');
++  await pool.query('UPDATE sessions SET admin_2fa_verified_at=NULL WHERE id=$1',[c.admin.sessionId]);problem(await request(kind,c,c.admin,payload),401,'ADMIN_2FA_REQUIRED');
++  await pool.query('UPDATE sessions SET admin_2fa_verified_at=clock_timestamp(),revoked_at=clock_timestamp(),revocation_reason=\'fixture\' WHERE id=$1',[c.admin.sessionId]);
++  problem(await request(kind,c,c.admin,payload),401,'SESSION_REVOKED');await assertUnchanged(c,before);
++});
++for(const kind of allRoutes)test(`E08.13 PostgreSQL ${kind} respeita conta e concessão Admin atuais`,async()=>{
++  const c=await context(),payload=body(kind);await pool.query('UPDATE users SET is_active=false WHERE id=$1',[c.admin.userId]);
++  problem(await request(kind,c,c.admin,payload),401,'ACCOUNT_DEACTIVATED');await pool.query('UPDATE users SET is_active=true WHERE id=$1',[c.admin.userId]);
++  await pool.query('UPDATE user_roles SET revoked_at=clock_timestamp() WHERE id=$1',[c.admin.roleId]);problem(await request(kind,c,c.admin,payload),403,'ADMIN_REQUIRED');
++});
++test('E08.13 PostgreSQL cadastro incompleto scheduled preserva defaults, código canônico e auditoria',async()=>{
++  const actor=await admin(),payload=draft(),code=payload.accessCode,r=await create(actor,{...payload,accessCode:` ${code.toLowerCase()} `});assert.equal(r.status,201,JSON.stringify(r.body));
++  const value=r.body.event;assert.equal(value.name,payload.name);assert.equal(value.accessCode,code);assert.equal(value.statusStored,'scheduled');assert.equal(value.effectivePhase,'scheduled');assert.equal(value.externalQueueEnabled,true);assert.equal(value.readiness.ready,false);assert.equal(value.acceptingNewParticipations,false);
++  const row=(await pool.query('SELECT external_last_order::text AS counter,closure_mode,closure_requested_at,admin_deadline_at FROM events WHERE id=$1',[value.id])).rows[0];
++  assert.deepEqual(row,{counter:'0',closure_mode:null,closure_requested_at:null,admin_deadline_at:null});assert.equal((await eventAudits(value.id)).length,1);assert.equal((await actorIntents(actor)).length,1);
++  for(const field of ['startsAt','officialEndsAt','operationalDeadlineAt','createdAt','updatedAt'])assert.match(value[field],/\.\d{6}Z$/);
++});
++for(const [name,invalid]of [
++  ['empty-name',{name:' '}],['unicode-code',{accessCode:'ARENA-ß'}],['short-code',{accessCode:'abc'}],['bad-timezone',{timezone:'Not/AZone'}],
++  ['local-date',{startsAt:'2026-11-05T10:00:00'}],['invalid-date',{startsAt:'2026-02-30T10:00:00Z'}],['missing-queue',{externalQueueEnabled:undefined}],
++  ['forged-status',{status:'open'}],['forged-id',{id:randomUUID()}],['forged-counter',{externalLastOrder:10}],
++]as const)test(`E08.13 PostgreSQL cadastro rejeita ${name} sem evento/intenção`,async()=>{
++  const actor=await admin(),payload=draft(invalid),before=await actorIntents(actor),r=await create(actor,payload);problem(r,400,'VALIDATION_ERROR');assert.deepEqual(await actorIntents(actor),before);
++  assert.equal((await pool.query('SELECT count(*)::int AS n FROM events WHERE access_code_normalized=$1',[payload.accessCode])).rows[0].n,0);
++});
++for(const type of ['reversed','deadline-before-end','margin-over-60']as const)test(`E08.13 PostgreSQL cadastro rejeita intervalo ${type}`,async()=>{
++  const actor=await admin(),payload=draft(),end=Date.now()+10800000;
++  if(type==='reversed')payload.startsAt=new Date(end+1).toISOString();
++  if(type==='deadline-before-end')payload.operationalDeadlineAt=new Date(end-1000).toISOString();
++  if(type==='margin-over-60')payload.operationalDeadlineAt=new Date(end+3601000).toISOString();
++  problem(await create(actor,payload),400,'VALIDATION_ERROR');assert.equal((await actorIntents(actor)).length,0);
++});
++test('E08.13 PostgreSQL código único permanece reservado após encerramento',async()=>{
++  const actor=await admin(),payload=draft(),a=await create(actor,payload);assert.equal(a.status,201);await pool.query("UPDATE events SET status='closed' WHERE id=$1",[a.body.event.id]);
++  problem(await create(actor,{...payload,accessCode:payload.accessCode.toLowerCase()}),409,'ACCESS_CODE_ALREADY_USED');assert.equal((await actorIntents(actor)).length,1);
++});
++test('E08.13 PostgreSQL dois Admins e códigos concorrentes não criam duplicatas',async()=>{
++  const a=await admin(),b=await admin(),payload=draft(),[one,two]=await ordered(()=>create(a,payload),()=>create(b,payload));assert.equal(one.status,201);problem(two,409,'ACCESS_CODE_ALREADY_USED');
++  assert.equal((await pool.query('SELECT count(*)::int AS n FROM events WHERE access_code_normalized=$1',[payload.accessCode])).rows[0].n,1);
++});
++for(const kind of ['get_event','readiness','list_experiences','update_event','create_experience','update_experience','create_station','update_station']as const)test(`E08.13 PostgreSQL ${kind} valida UUID e recurso ausente`,async()=>{
++  const c=await context();problem(await request(kind,{...c,eventId:'invalid'}),400,'VALIDATION_ERROR');problem(await request(kind,{...c,eventId:randomUUID()}),404,'RESOURCE_NOT_FOUND');
++});
++for(const kind of ['update_experience','create_station','update_station']as const)test(`E08.13 PostgreSQL ${kind} rejeita pertencimento de outro evento`,async()=>{
++  const c=await context(),other=await context(),before=await state(c),foreign=await state(other);
++  problem(await request(kind,{...c,experienceId:other.experienceId,stationId:other.stationId}),404,'RESOURCE_NOT_FOUND');await assertUnchanged(c,before);await assertUnchanged(other,foreign);
++  if(kind==='update_station')problem(await request(kind,{...c,stationId:other.stationId}),404,'RESOURCE_NOT_FOUND');
++});
++for(const kind of mutations)test(`E08.13 PostgreSQL ${kind} exige chave e corpo estritos`,async()=>{
++  const c=await context(),payload=body(kind),before=await state(c),intentsBefore=await actorIntents(c.admin);
++  problem(await request(kind,c,c.admin,payload).unset('Idempotency-Key'),400,'VALIDATION_ERROR');problem(await request(kind,c,c.admin,{...payload,userId:c.admin.userId}),400,'VALIDATION_ERROR');
++  problem(await request(kind,c,c.admin,payload,'x'.repeat(129)),400,'VALIDATION_ERROR');problem(await request(kind,c,c.admin,{...payload,reason:' '}),400,'VALIDATION_ERROR');
++  await assertUnchanged(c,before);assert.deepEqual(await actorIntents(c.admin),intentsBefore);
++});
++for(const key of ['accessCode','officialEndsAt','operationalDeadlineAt','externalQueueEnabled','status','closureMode','closureRequestedAt','adminDeadlineAt','externalLastOrder','startsAt','timezone']as const)test(`E08.13 PostgreSQL PATCH genérico não altera ${key}`,async()=>{
++  const c=await context(),before=await state(c);problem(await request('update_event',c,c.admin,{name:'Novo nome',[key]:'forged'}),400,'VALIDATION_ERROR');await assertUnchanged(c,before);
++});
++test('E08.13 PostgreSQL experiência e estação nascem com vínculos e contadores corretos',async()=>{
++  const c=await context(),x=await request('create_experience',c,c.admin,{name:'Experiência nova'});assert.equal(x.status,201,JSON.stringify(x.body));assert.equal(x.body.experience.eventId,c.eventId);assert.equal(x.body.experience.lastQueueOrder,'0');assert.equal(x.body.experience.queueAcceptingEntries,true);
++  const s=await request('create_station',{...c,experienceId:x.body.experience.id},c.admin,{label:'Estação nova'});assert.equal(s.status,201);assert.equal(s.body.station.experienceId,x.body.experience.id);assert.equal(s.body.station.availability,'available');assert.equal(s.body.station.pendingServiceSessionId,null);
++  const read=await request('list_experiences',c);assert.equal(read.status,200);const item=read.body.items.find((value:{id:string})=>value.id===x.body.experience.id);assert.equal(item.stations[0].id,s.body.station.id);
++});
++for(const kind of ['create_experience','update_experience','create_station','update_station']as const)for(const field of ['eventId','experienceId','availability','queueAcceptingEntries','lastQueueOrder']as const)test(`E08.13 PostgreSQL ${kind} não aceita campo interno ${field}`,async()=>{
++  const c=await context(),before=await state(c);problem(await request(kind,c,c.admin,{...body(kind),[field]:'forged'}),400,'VALIDATION_ERROR');await assertUnchanged(c,before);
++});
++for(const status of ['waiting','active','finished','canceled']as const)for(const kind of ['update_event','create_experience','update_experience','update_station']as const)test(`E08.13 PostgreSQL histórico ${status} bloqueia ${kind}`,async()=>{
++  const c=await context();await person(c,status);const before=await state(c);problem(await request(kind,c),409,'EVENT_CONFIGURATION_LOCKED');await assertUnchanged(c,before);
++});
++for(const status of ['waiting','active','finished','canceled']as const)test(`E08.13 PostgreSQL adicionar estação após histórico ${status} preserva filas e serviços`,async()=>{
++  const c=await context();await person(c,status);const before=await state(c),r=await request('create_station',c);assert.equal(r.status,201,JSON.stringify(r.body));
++  const after=await state(c);assert.deepEqual(after.people,before.people);assert.deepEqual(after.queues,before.queues);assert.deepEqual(after.services,before.services);assert.deepEqual(after.experiences,before.experiences);assert.equal(after.stations.length,before.stations.length+1);
++});
++for(const kind of ['update_event','update_experience','update_station']as const)test(`E08.13 PostgreSQL ${kind} no-op após histórico não faz UPDATE nem auditoria`,async()=>{
++  const c=await context();await person(c,'finished');const before=await state(c),payload=kind==='update_event'?{name:(await event(c)).body.event.name}:kind==='update_experience'?{name:(await pool.query('SELECT name FROM experiences WHERE id=$1',[c.experienceId])).rows[0].name}:{label:(await pool.query('SELECT label FROM stations WHERE id=$1',[c.stationId])).rows[0].label};
++  const table=kind==='update_event'?'events':kind==='update_experience'?'experiences':'stations',id=kind==='update_event'?c.eventId:kind==='update_experience'?c.experienceId:c.stationId;
++  const version=(await pool.query(`SELECT xmin::text AS version FROM ${table} WHERE id=$1`,[id])).rows[0].version;
++  const key=randomUUID(),r=await request(kind,c,c.admin,payload,key);assert.equal(r.status,200,JSON.stringify(r.body));await assertUnchanged(c,before);assert.equal((await actorIntents(c.admin,key)).length,1);
++  assert.equal((await pool.query(`SELECT xmin::text AS version FROM ${table} WHERE id=$1`,[id])).rows[0].version,version);
++});
++test('E08.13 PostgreSQL prontidão dinâmica válida não depende da conexão Staff e não grava estado',async()=>{
++  const c=await context();await pool.query("UPDATE events SET status='scheduled' WHERE id=$1",[c.eventId]);
++  await pool.query("UPDATE sessions SET revoked_at=clock_timestamp(),revocation_reason='fixture' WHERE id=$1",[c.staff.sessionId]);const before=await state(c),r=await ready(c);
++  assert.equal(r.ready,true);assert.deepEqual(r.missing,[]);assert.deepEqual(r.checks,{nameAndAccessCode:true,validScheduleAndTimezone:true,externalQueueConfigured:true,hasExperienceWithAvailableStation:true,hasVerifiedActiveStaff:true});
++  assert.equal(r.effectivePhase,'open');assert.equal(r.statusStored,'scheduled');assert.equal(r.acceptingNewParticipations,true);assert.match(r.observedAt,/\.\d{6}Z$/);await assertUnchanged(c,before);
++});
++for(const defect of ['blank-name','invalid-code','invalid-timezone','unavailable-station','staff-inactive','staff-unverified','staff-revoked']as const)test(`E08.13 PostgreSQL prontidão identifica critério ${defect}`,async()=>{
++  let c=await context();
++  if(defect==='blank-name')await pool.query("UPDATE events SET name=' ' WHERE id=$1",[c.eventId]);
++  if(defect==='invalid-code'){
++    // Legado permitido pelo CHECK antigo, mas rejeitado por C-10. Não violar o trigger de imutabilidade por UPDATE.
++    const eventId=randomUUID(),experienceId=randomUUID(),stationId=randomUUID(),code=`BAD__${randomUUID().toUpperCase()}`;createdIds.add(eventId);
++    await pool.query(`INSERT INTO events(id,name,access_code_normalized,timezone,starts_at,official_ends_at,operational_deadline_at,status,external_queue_enabled,created_at,updated_at)
++      SELECT $1,name,$2,timezone,starts_at,official_ends_at,operational_deadline_at,status,external_queue_enabled,created_at,updated_at FROM events WHERE id=$3`,[eventId,code,c.eventId]);
++    await pool.query(`INSERT INTO experiences(id,event_id,name,queue_accepting_entries,created_at,updated_at)
++      SELECT $1,$2,name,queue_accepting_entries,created_at,updated_at FROM experiences WHERE id=$3`,[experienceId,eventId,c.experienceId]);
++    await pool.query(`INSERT INTO stations(id,experience_id,label,availability,created_at,updated_at)
++      SELECT $1,$2,label,availability,created_at,updated_at FROM stations WHERE id=$3`,[stationId,experienceId,c.stationId]);
++    await pool.query("INSERT INTO user_roles(id,user_id,role,event_id,granted_at) VALUES($1,$2,'staff',$3,clock_timestamp())",[randomUUID(),c.staff.userId,eventId]);
++    c={...c,eventId,experienceId,stationId};
++  }
++  if(defect==='invalid-timezone')await pool.query("UPDATE events SET timezone='Invalid/Zone' WHERE id=$1",[c.eventId]);
++  if(defect==='unavailable-station')assert.equal((await station(c)).status,200);
++  if(defect==='staff-inactive')await pool.query('UPDATE users SET is_active=false WHERE id=$1',[c.staff.userId]);
++  if(defect==='staff-unverified')await pool.query('UPDATE users SET email_verified_at=NULL WHERE id=$1',[c.staff.userId]);
++  if(defect==='staff-revoked')await pool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE user_id=$1 AND role='staff' AND event_id=$2",[c.staff.userId,c.eventId]);
++  const before=await state(c),r=await ready(c);assert.equal(r.ready,false);assert.equal(r.acceptingNewParticipations,false);assert.equal(r.effectivePhase,'not_ready');assert.ok(r.missing.length>0);
++  const key=defect==='blank-name'||defect==='invalid-code'?'nameAndAccessCode':defect==='invalid-timezone'?'validScheduleAndTimezone':defect==='unavailable-station'?'hasExperienceWithAvailableStation':'hasVerifiedActiveStaff';
++  assert.equal(r.checks[key],false);
++  if(defect==='invalid-code')for(const [criterion,satisfied]of Object.entries(r.checks))if(criterion!=='nameAndAccessCode')assert.equal(satisfied,true);
++  await assertUnchanged(c,before);
++});
++test('E08.13 PostgreSQL fila externa false continua sendo configuração explícita válida',async()=>{
++  const actor=await admin(),r=await create(actor,draft({externalQueueEnabled:false}));assert.equal(r.status,201);assert.equal(r.body.event.externalQueueEnabled,false);assert.equal(r.body.event.readiness.checks.externalQueueConfigured,true);
++});
++test('E08.13 PostgreSQL perda e recuperação de capacidade não fecha evento nem cancela pessoas',async()=>{
++  const c=await context(),p=await person(c),before=(await state(c)).people;assert.equal((await station(c)).status,200);assert.equal((await ready(c)).ready,false);assert.deepEqual((await state(c)).people,before);
++  const recovered=await supertest(app.getHttpServer()).patch(`/api/v1/staff/events/${c.eventId}/stations/${c.stationId}/availability`).set('Authorization',`Bearer ${c.admin.token}`).send({availability:'available'});assert.equal(recovered.status,200);
++  assert.equal((await ready(c)).ready,true);assert.equal((await event(c)).body.event.statusStored,'open');assert.deepEqual((await state(c)).people,before);assert.equal((await pool.query('SELECT status FROM participations WHERE id=$1',[p.participationId])).rows[0].status,'active');
++  await pool.query("UPDATE events SET official_ends_at=clock_timestamp()-interval '1 minute',operational_deadline_at=clock_timestamp() WHERE id=$1",[c.eventId]);const expired=await ready(c);assert.equal(expired.ready,true);assert.equal(expired.effectivePhase,'closed');assert.equal(expired.acceptingNewParticipations,false);
++});
++test('E08.13 PostgreSQL listagem pagina deterministamente com cursor e filtros estritos',async()=>{
++  const c=await context(),a=await create(c.admin),b=await create(c.admin);assert.equal(a.status,201);assert.equal(b.status,201);const sought=new Set([a.body.event.id,b.body.event.id]),seen=new Set<string>();let cursor:string|undefined;
++  for(let page=0;page<500;page++){
++    const r=await request('list',c).query({limit:'1',...(cursor?{cursor}:{})});assert.equal(r.status,200);assert.ok(r.body.items.length<=1);
++    for(const item of r.body.items){assert.equal(seen.has(item.id),false);seen.add(item.id);sought.delete(item.id);}
++    if(!r.body.nextCursor)break;assert.notEqual(r.body.nextCursor,cursor);cursor=r.body.nextCursor;
++  }
++  assert.equal(sought.size,0);
++  const filtered=await request('list',c).query({limit:'50',phase:'scheduled',statusStored:'scheduled'});assert.equal(filtered.status,200);for(const item of filtered.body.items){assert.equal(item.effectivePhase,'scheduled');assert.equal(item.statusStored,'scheduled');}
++  for(const query of [{limit:'0'},{limit:'51'},{cursor:'%%%'},{phase:'forged'},{statusStored:'forged'},{userId:c.admin.userId},{limit:['1','2']}])problem(await request('list',c).query(query),400,'VALIDATION_ERROR');
++});
++test('E08.13 PostgreSQL consultas não expõem pessoas/auditoria e mostram pending derivado',async()=>{
++  const c=await context(),a=await called(c),before=await state(c);
++  for(const kind of ['get_event','readiness','list_experiences','list']as const){const r=await request(kind,c);assert.equal(r.status,200);const serialized=JSON.stringify(r.body);for(const secret of [a.p.userId,c.staff.userId,c.admin.userId,'@example.test','fixture-private-hash','birthDate','passwordHash','sessionId'])assert.equal(serialized.includes(secret),false);}
++  const list=await request('list_experiences',c),stationValue=list.body.items.find((x:{id:string})=>x.id===c.experienceId).stations.find((s:{id:string})=>s.id===c.stationId);assert.equal(stationValue.pendingServiceSessionId,a.session);assert.equal(stationValue.availability,'available');await assertUnchanged(c,before);
++});
++for(const kind of mutations)test(`E08.13 PostgreSQL ${kind} replay histórico após TTL não duplica objeto/auditoria`,async()=>{
++  const c=await context(),payload=body(kind),key=randomUUID(),one=await request(kind,c,c.admin,payload,key);assert.equal(one.status,kind.startsWith('create_')?201:200,JSON.stringify(one.body));if(one.body.event?.id&&kind==='create_event')createdIds.add(one.body.event.id);
++  await pool.query("UPDATE idempotency_operations SET expires_at=clock_timestamp()-interval '1 hour' WHERE actor_user_id=$1 AND idempotency_key=$2",[c.admin.userId,key]);
++  const eventId=kind==='create_event'?one.body.event.id:c.eventId,beforeAudits=await eventAudits(eventId),beforeIntents=await actorIntents(c.admin,key),before=await state(c),two=await request(kind,c,c.admin,payload,key);
++  assert.equal(two.status,one.status);assert.deepEqual(two.body,one.body);assert.deepEqual(await eventAudits(eventId),beforeAudits);assert.deepEqual(await actorIntents(c.admin,key),beforeIntents);await assertUnchanged(c,before);
++  const changed=kind==='create_station'||kind==='update_station'?{...payload,label:'Outra identificação'}:{...payload,name:'Outra identificação'};problem(await request(kind,c,c.admin,changed,key),409,'IDEMPOTENCY_KEY_REUSED');
++});
++test('E08.13 PostgreSQL Admins diferentes não compartilham chave e mesma chave não troca de recurso',async()=>{
++  const c=await context(),other=await context(),actor=await admin(),key=randomUUID();assert.equal((await request('update_event',c,c.admin,{name:'Nome A'},key)).status,200);assert.equal((await request('update_event',c,actor,{name:'Nome B'},key)).status,200);
++  problem(await request('update_event',other,c.admin,{name:'Nome A'},key),409,'IDEMPOTENCY_KEY_REUSED');assert.equal((await actorIntents(c.admin,key)).length,1);assert.equal((await actorIntents(actor,key)).length,1);
++});
++for(const kind of ['create_experience','update_event','update_experience','update_station']as const)for(const first of ['configuration','admission']as const)test(`E08.13 PostgreSQL ${kind} concorre com primeiro ingresso; vence ${first}`,async()=>{
++  const c=await context(),entrant=await readyEntrant();
++  if(first==='configuration'){const [one,two]=await ordered(()=>request(kind,c),()=>admit(c,entrant));assert.equal(one.status,kind==='create_experience'?201:200);assert.equal(two.kind,'created');}
++  else{const [one,two]=await ordered(()=>admit(c,entrant),()=>request(kind,c));assert.equal(one.kind,'created');problem(two,409,'EVENT_CONFIGURATION_LOCKED');}
++  assert.equal((await pool.query('SELECT count(*)::int AS n FROM participations WHERE event_id=$1',[c.eventId])).rows[0].n,1);
++});
++for(const first of ['station','admission']as const)test(`E08.13 PostgreSQL adição de estação versus ingresso preserva estrutura, vence ${first}`,async()=>{
++  const c=await context(),entrant=await readyEntrant();
++  if(first==='station'){const [one,two]=await ordered(()=>request('create_station',c),()=>admit(c,entrant));assert.equal(one.status,201);assert.equal(two.kind,'created');}
++  else{const [one,two]=await ordered(()=>admit(c,entrant),()=>request('create_station',c));assert.equal(one.kind,'created');assert.equal(two.status,201);}
++  assert.equal((await pool.query('SELECT count(*)::int AS n FROM stations WHERE experience_id=$1',[c.experienceId])).rows[0].n,2);
++});
++for(const first of ['schedule','name']as const)test(`E08.13 PostgreSQL edição genérica versus E08.7 não perde horários, vence ${first}`,async()=>{
++  const c=await context(),schedule=await proposal(c),[one,two]=await ordered(()=>first==='schedule'?patch(c,schedule):request('update_event',c,c.admin,{name:'Nome concorrente'}),()=>first==='schedule'?request('update_event',c,c.admin,{name:'Nome concorrente'}):patch(c,schedule));assert.equal(one.status,200);assert.equal(two.status,200);
++  const read=(await event(c)).body.event;assert.equal(read.name,'Nome concorrente');assert.equal(Date.parse(read.officialEndsAt),Date.parse(schedule.officialEndsAt));assert.equal(Date.parse(read.operationalDeadlineAt),Date.parse(schedule.operationalDeadlineAt));
++});
++for(const first of ['close','station']as const)test(`E08.13 PostgreSQL encerramento imediato versus configuração, vence ${first}`,async()=>{
++  const c=await context(),[one,two]=await ordered(()=>first==='close'?close(c):request('create_station',c),()=>first==='close'?request('create_station',c):close(c));assert.equal(one.status,first==='close'?200:201);
++  if(first==='close')problem(two,409,'EVENT_OPERATION_ENDED');else assert.equal(two.status,200);assert.equal((await event(c)).body.event.effectivePhase,'closed');
++});
++test('E08.13 PostgreSQL fechamento controlado permite adicionar estação antes do corte sem reabrir evento',async()=>{
++  const c=await context(),p=await person(c);assert.equal((await close(c,await controlled())).status,200);const before=await state(c),r=await request('create_station',c);assert.equal(r.status,201);const read=(await event(c)).body.event;assert.equal(read.effectivePhase,'closing');assert.equal(read.acceptingNewParticipations,false);assert.deepEqual((await state(c)).people,before.people);assert.equal((await pool.query('SELECT status FROM participations WHERE id=$1',[p.participationId])).rows[0].status,'active');
++});
++test('E08.13 PostgreSQL job E08.9 vencido bloqueia configuração e preserva motivo automático',async()=>{
++  const c=await context(),p=await person(c);await pool.query("UPDATE events SET official_ends_at=clock_timestamp()-interval '1 minute',operational_deadline_at=clock_timestamp() WHERE id=$1",[c.eventId]);
++  const job=app.get((await import('../../src/events/event-closure.service')).EventClosureService),[one,two]=await ordered(()=>job.regularizeEvent(c.eventId),()=>request('create_station',c));assert.equal(one.kind,'closed');problem(two,409,'EVENT_OPERATION_ENDED');assert.equal((await pool.query('SELECT finish_reason FROM participations WHERE id=$1',[p.participationId])).rows[0].finish_reason,'automatic_operational_deadline');
++});
++test('E08.13 PostgreSQL perda de capacidade E08.5 serializa novo ingresso sem encerrar participantes',async()=>{
++  const c=await context(),existing=await person(c),entrant=await readyEntrant(),before=(await state(c)).people;
++  const [disabled,admission]=await ordered(()=>station(c),()=>admit(c,entrant));assert.equal(disabled.status,200);assert.equal(admission.kind,'blocked');assert.deepEqual((await state(c)).people,before);
++  assert.equal((await ready(c)).ready,false);assert.equal((await pool.query('SELECT status FROM participations WHERE id=$1',[existing.participationId])).rows[0].status,'active');
++  const recovered=await supertest(app.getHttpServer()).patch(`/api/v1/staff/events/${c.eventId}/stations/${c.stationId}/availability`).set('Authorization',`Bearer ${c.admin.token}`).send({availability:'available'});assert.equal(recovered.status,200);
++  assert.equal((await admit(c,entrant)).kind,'created');assert.equal((await event(c)).body.event.statusStored,'open');
++});
++for(const grant of [false,true])test(`E08.13 PostgreSQL concessão vigente grant=${grant} e ingresso usam ordem de evento compatível`,async()=>{
++  const c=await context(),entrant=await readyEntrant();
++  if(grant)await pool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE user_id=$1 AND role='staff' AND event_id=$2",[c.staff.userId,c.eventId]);
++  const change=()=>database.transaction(async tx=>{
++    await tx.execute(sql`SELECT id FROM events WHERE id=${c.eventId}::uuid FOR UPDATE`);
++    const changed=await tx.execute(sql`UPDATE user_roles SET revoked_at=${grant?sql`NULL`:sql`clock_timestamp()`}
++      WHERE user_id=${c.staff.userId}::uuid AND event_id=${c.eventId}::uuid AND role='staff' RETURNING id`);assert.equal(changed.rows.length,1);return true;
++  },{isolationLevel:'read committed'});
++  const [one,two]=await ordered(change,()=>admit(c,entrant));assert.equal(one,true);assert.equal(two.kind,grant?'created':'blocked');assert.equal((await ready(c)).ready,grant);
++});
++for(const loss of ['role','session','account']as const)test(`E08.13 PostgreSQL autorização ${loss} perdida durante espera impede mutação`,async()=>{
++  const c=await context(),before=await state(c),r=await lockWait(c,()=>request('update_event',c),async client=>{
++    if(loss==='role')await client.query('UPDATE user_roles SET revoked_at=clock_timestamp() WHERE id=$1',[c.admin.roleId]);
++    if(loss==='session')await client.query("UPDATE sessions SET revoked_at=clock_timestamp(),revocation_reason='fixture' WHERE id=$1",[c.admin.sessionId]);
++    if(loss==='account')await client.query('UPDATE users SET is_active=false WHERE id=$1',[c.admin.userId]);
++  });
++  problem(r,loss==='role'?403:401,loss==='role'?'ADMIN_REQUIRED':loss==='session'?'SESSION_REVOKED':'ACCOUNT_DEACTIVATED');await assertUnchanged(c,before);
++});
++for(const kind of mutations)for(const phase of ['reserve','object','audit','complete']as const)test(`E08.13 PostgreSQL falha SQL real após ${kind}/${phase} reverte objeto, auditoria e intenção`,async()=>{
++  const c=await context(),payload=body(kind),key=randomUUID(),before=await state(c),beforeIntents=await actorIntents(c.admin),client=await pool.connect();
++  const table=kind.includes('experience')?'experiences':kind.includes('station')?'stations':'events',objectWrite=new RegExp(`\\b(?:INSERT\\s+INTO|UPDATE)\\s+"?${table}"?\\b`,'i');
++  const originalQuery=client.query.bind(client) as (config:string|QueryConfig,params?:unknown[])=>Promise<QueryResult>;let reached=false;
++  const proxy=new Proxy(client,{get(target,property){if(property==='query')return async(config:string|QueryConfig,params?:unknown[])=>{
++    const result=await originalQuery(config,params),text=typeof config==='string'?config:config.text;
++    if(!reached&&((phase==='reserve'&&/insert into "idempotency_operations"/i.test(text))||(phase==='complete'&&/update "idempotency_operations"/i.test(text))
++      ||(phase==='audit'&&/\bINSERT\s+INTO\s+"?audit_logs"?\b/i.test(text))||(phase==='object'&&objectWrite.test(text)))){
++      assert.ok(result.rowCount===1||result.rows.length===1);
++      if(phase==='object')assert.ok(result.rows[0]&&(result.rows[0].writtenId??result.rows[0].id));
++      reached=true;await originalQuery('SELECT 1/0');assert.fail('A falha PostgreSQL deveria abortar a transação.');
++    }return result;
++  };return Reflect.get(target,property,target);}});
++  const failing=makeWrites(drizzle(proxy,{schema})),original=writes.mutate.bind(writes);writes.mutate=input=>failing.mutate(input);
++  try{
++    problem(await request(kind,c,c.admin,payload,key),500,'INTERNAL_SERVER_ERROR');assert.equal(reached,true);await assertUnchanged(c,before);assert.deepEqual(await actorIntents(c.admin),beforeIntents);
++    if(kind==='create_event')assert.equal((await pool.query('SELECT count(*)::int AS n FROM events WHERE access_code_normalized=$1',[(payload as {accessCode:string}).accessCode])).rows[0].n,0);
++  }finally{writes.mutate=original;client.release();}
++  const retry=await request(kind,c,c.admin,payload,key);assert.equal(retry.status,kind.startsWith('create_')?201:200,JSON.stringify(retry.body));if(kind==='create_event')createdIds.add(retry.body.event.id);
++});
++test('E08.13 PostgreSQL snapshot readiness é coerente durante alteração concorrente de disponibilidade',async()=>{
++  const c=await context(),original=database.transaction.bind(database) as typeof database.transaction,dialect=new PgDialect();let readySignal!:()=>void,release!:()=>void,readerPid=0,writerPid=0;
++  const availability=app.get((await import('../../src/events/station-availability.service')).StationAvailabilityService);assert.equal(Reflect.get(availability,'database'),database);
++  const reached=new Promise<void>(yes=>{readySignal=yes;}),gate=new Promise<void>(yes=>{release=yes;});
++  database.transaction=(callback,config)=>original(async tx=>{
++    if(config?.isolationLevel==='read committed')writerPid=(await tx.execute<{pid:number}>(sql`SELECT pg_backend_pid() AS pid`)).rows[0].pid;
++    const execute=tx.execute.bind(tx);tx.execute=(async(...args:Parameters<typeof tx.execute>)=>{
++      const query=args[0],text=typeof query==='string'?query:dialect.sqlToQuery(query.getSQL()).sql,result=await execute(...args);
++      if(config?.accessMode==='read only'&&text.includes('WITH observation')){readerPid=(await execute<{pid:number}>(sql`SELECT pg_backend_pid() AS pid`)).rows[0].pid;readySignal();await gate;}return result;
++    })as typeof tx.execute;return callback(tx);
++  },config);
++  const pending=request('readiness',c).then(r=>r);pending.catch(()=>undefined);
++  try{await Promise.race([reached,pending.then(()=>{throw Error('Leitura não manteve snapshot.');})]);assert.equal((await station(c)).status,200);assert.ok(readerPid>0&&writerPid>0);assert.notEqual(readerPid,writerPid);
++    release();const old=await pending;assert.equal(old.status,200);assert.equal(old.body.ready,true);database.transaction=original;assert.equal((await ready(c)).ready,false);
++  }finally{database.transaction=original;release();await Promise.allSettled([pending]);}
++});
++test('E08.13 PostgreSQL configuração de outro evento não altera filas, serviços e avaliação existentes',async()=>{
++  const c=await context(),other=await context(),a=await called(other);assert.equal((await resolve(other,a.session,'complete')).status,200);
++  await pool.query("UPDATE participations SET status='finished',finished_at=clock_timestamp(),finish_reason='voluntary' WHERE id=$1",[a.p.participationId]);
++  await pool.query("INSERT INTO evaluations(id,participation_id,rating,submitted_at,updated_at) VALUES($1,$2,5,clock_timestamp(),clock_timestamp())",[randomUUID(),a.p.participationId]);
++  const before=await state(other),evaluation=(await pool.query('SELECT to_jsonb(v) AS value FROM evaluations v WHERE participation_id=$1',[a.p.participationId])).rows[0].value;
++  assert.equal((await request('update_event',c)).status,200);assert.equal((await request('create_experience',c)).status,201);assert.equal((await request('create_station',c)).status,201);
++  await assertUnchanged(other,before);assert.deepEqual((await pool.query('SELECT to_jsonb(v) AS value FROM evaluations v WHERE participation_id=$1',[a.p.participationId])).rows[0].value,evaluation);
++});
++for(const kind of mutations)test(`E08.13 PostgreSQL ${kind} in_progress durável segue conflito sem reexecutar`,async()=>{
++  const c=await context(),payload=body(kind),key=randomUUID(),input={operation:kind,payload,
++    ...(kind==='create_event'?{}:{eventId:c.eventId}),...(kind==='update_experience'||kind==='create_station'||kind==='update_station'?{experienceId:c.experienceId}:{}),...(kind==='update_station'?{stationId:c.stationId}:{})};
++  await pool.query(`INSERT INTO idempotency_operations(id,actor_user_id,operation,idempotency_key,request_hash,status,created_at,expires_at)
++    VALUES($1,$2,$3,$4,$5,'in_progress',clock_timestamp(),clock_timestamp()-interval '1 hour')`,[randomUUID(),c.admin.userId,operations[kind],key,fingerprint(input)]);
++  const before=await state(c),intentsBefore=await actorIntents(c.admin);problem(await request(kind,c,c.admin,payload,key),409,'IDEMPOTENCY_IN_PROGRESS');await assertUnchanged(c,before);assert.deepEqual(await actorIntents(c.admin),intentsBefore);
++});
++for(const kind of mutations)test(`E08.13 PostgreSQL ${kind} retry concorrente da mesma chave devolve uma resposta e auditoria`,async()=>{
++  const c=await context(),payload=body(kind),key=randomUUID(),beforeAudits=(await eventAudits(c.eventId)).length;
++  const [one,two]=await ordered(()=>request(kind,c,c.admin,payload,key),()=>request(kind,c,c.admin,payload,key));assert.equal(one.status,kind.startsWith('create_')?201:200);assert.equal(two.status,one.status);assert.deepEqual(two.body,one.body);
++  const eventId=kind==='create_event'?one.body.event.id:c.eventId;if(kind==='create_event')createdIds.add(eventId);
++  assert.equal((await eventAudits(eventId)).length,kind==='create_event'?1:beforeAudits+1);assert.equal((await actorIntents(c.admin,key)).length,1);
++});
++test('E08.13 PostgreSQL replay após fechamento exige autorização atual e não cria outra estação',async()=>{
++  const c=await context(),key=randomUUID(),payload={label:'Estação histórica'},one=await request('create_station',c,c.admin,payload,key);assert.equal(one.status,201);
++  assert.equal((await close(c)).status,200);const before=await state(c),intentBefore=await actorIntents(c.admin,key),two=await request('create_station',c,c.admin,payload,key);assert.equal(two.status,201);assert.deepEqual(two.body,one.body);await assertUnchanged(c,before);
++  problem(await request('create_station',c,c.admin,payload),409,'EVENT_OPERATION_ENDED');await pool.query('UPDATE user_roles SET revoked_at=clock_timestamp() WHERE id=$1',[c.admin.roleId]);problem(await request('create_station',c,c.admin,payload,key),403,'ADMIN_REQUIRED');assert.deepEqual(await actorIntents(c.admin,key),intentBefore);
++});
+diff --git a/backend/test/unit/admin-configuration-http.test.ts b/backend/test/unit/admin-configuration-http.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..a73cce9fded9d02bef26ef0775a2b2d2abf1765a
+--- /dev/null
++++ b/backend/test/unit/admin-configuration-http.test.ts
+@@ -0,0 +1,228 @@
++import "reflect-metadata";
++import assert from "node:assert/strict";
++import { after, before, test } from "node:test";
++import { Module, type INestApplication } from "@nestjs/common";
++import { NestFactory } from "@nestjs/core";
++import type { Pool } from "pg";
++import supertest from "supertest";
++import { AuthService } from "../../src/auth/auth.service";
++import { SessionAuthGuard } from "../../src/auth/session-auth.guard";
++import { ProblemException } from "../../src/common/errors/problem.exception";
++import { ProblemDetailsExceptionFilter } from "../../src/common/errors/problem-details.filter";
++import { DRIZZLE_DATABASE, POSTGRES_POOL } from "../../src/database/database.module";
++import { AdminEventsModule } from "../../src/events/admin-events.module";
++import { AdminIdempotencyPolicy } from "../../src/events/admin-idempotency.policy";
++import { AdminConfigurationController } from "../../src/events/admin-configuration.controller";
++import { AdminConfigurationService } from "../../src/events/admin-configuration.service";
++import { AdminConfigurationQueryService } from "../../src/events/admin-configuration-query.service";
++import { AdminConfigurationError } from "../../src/events/admin-configuration.problem";
++import { AdminScheduleController } from "../../src/events/admin-schedule.controller";
++import { AdminScheduleService } from "../../src/events/admin-schedule.service";
++import { AdminExternalQueueController } from "../../src/events/admin-external-queue.controller";
++import { AdminExternalQueueService } from "../../src/events/admin-external-queue.service";
++import { AdminCloseController } from "../../src/events/admin-close.controller";
++import { AdminCloseService } from "../../src/events/admin-close.service";
++
++const id = (n: number) => `abcdef00-0000-4000-8000-${String(n).padStart(12, "0")}`;
++const eventId = id(1), experienceId = id(2), stationId = id(3), userId = id(4), sessionId = id(5), staffId = id(6);
++const at = "2026-11-05T15:00:00.123456Z";
++const event = { id: eventId, name: "Evento", accessCode: "EVENT-01", statusStored: "scheduled", effectivePhase: "scheduled" };
++const experience = { id: experienceId, eventId, name: "Experiência", queueAcceptingEntries: true, lastQueueOrder: "0" };
++const station = { id: stationId, experienceId, label: "Estação", availability: "available" };
++const createBody = { name: "Evento", accessCode: "EVENT-01", timezone: "America/Sao_Paulo", startsAt: "2026-11-05T17:00:00.000Z",
++  officialEndsAt: "2026-11-05T23:00:00.000Z", operationalDeadlineAt: "2026-11-06T00:00:00.000Z", externalQueueEnabled: true };
++type Actor = { userId: string; sessionId: string };
++type Call = { method: string; actor: Actor; input?: unknown };
++type MutationInput = Actor & { operation: string; eventId?: string; experienceId?: string; stationId?: string; payload: Record<string, unknown>; idempotencyKey: string; expiresAt: Date };
++const calls: Call[] = [], oldCalls: string[] = [];
++let failure: Error | undefined;
++let result: { kind: "created" | "changed" | "unchanged" | "replay"; body: object; httpStatus: 200 | 201 };
++let readResult: object;
++
++const readiness = { eventId, statusStored: "scheduled", effectivePhase: "scheduled", ready: false, missing: ["VERIFIED_ACTIVE_STAFF"],
++  checks: { nameAndAccessCode: true, validScheduleAndTimezone: true, externalQueueConfigured: true, hasExperienceWithAvailableStation: true, hasVerifiedActiveStaff: false }, acceptingNewParticipations: false };
++type Route = { name: string; method: "get" | "post" | "patch"; path: string; body?: object; operation?: string; response: object; status: 200 | 201 };
++const routes: Route[] = [
++  { name: "list", method: "get", path: "/admin/events", response: { items: [event], nextCursor: null }, status: 200 },
++  { name: "create event", method: "post", path: "/admin/events", body: createBody, operation: "create_event", response: { event }, status: 201 },
++  { name: "get event", method: "get", path: `/admin/events/${eventId}`, response: { event }, status: 200 },
++  { name: "update event", method: "patch", path: `/admin/events/${eventId}`, body: { name: "Evento" }, operation: "update_event", response: { event }, status: 200 },
++  { name: "readiness", method: "get", path: `/admin/events/${eventId}/readiness`, response: readiness, status: 200 },
++  { name: "experiences", method: "get", path: `/admin/events/${eventId}/experiences`, response: { items: [{ ...experience, stations: [station] }] }, status: 200 },
++  { name: "create experience", method: "post", path: `/admin/events/${eventId}/experiences`, body: { name: "Experiência" }, operation: "create_experience", response: { experience }, status: 201 },
++  { name: "update experience", method: "patch", path: `/admin/events/${eventId}/experiences/${experienceId}`, body: { name: "Experiência" }, operation: "update_experience", response: { experience }, status: 200 },
++  { name: "create station", method: "post", path: `/admin/events/${eventId}/experiences/${experienceId}/stations`, body: { label: "Estação" }, operation: "create_station", response: { station }, status: 201 },
++  { name: "update station", method: "patch", path: `/admin/events/${eventId}/experiences/${experienceId}/stations/${stationId}`, body: { label: "Estação" }, operation: "update_station", response: { station }, status: 200 },
++];
++function record(method: string, actor: Actor, input?: unknown) {
++  calls.push({ method, actor, input });
++  if (actor.userId === staffId) throw new AdminConfigurationError("admin_required");
++  if (failure) throw failure;
++}
++@Module({ controllers: [AdminConfigurationController, AdminScheduleController, AdminExternalQueueController, AdminCloseController], providers: [
++  SessionAuthGuard, AdminIdempotencyPolicy,
++  { provide: AuthService, useValue: { async authenticateBearerToken(token: string) {
++    if (token === "no-2fa") throw new ProblemException({ status: 401, code: "ADMIN_2FA_REQUIRED", typeSlug: "admin-2fa-required", title: "2FA obrigatório", detail: "Segundo fator obrigatório." });
++    if (token === "revoked") throw new ProblemException({ status: 401, code: "SESSION_REVOKED", typeSlug: "session-revoked", title: "Sessão revogada", detail: "Sessão revogada." });
++    if (token !== "unit-admin" && token !== "staff") throw new ProblemException({ status: 401, code: "INVALID_ACCESS_TOKEN", typeSlug: "invalid-access-token", title: "Token inválido", detail: "Token inválido." });
++    return { userId: token === "staff" ? staffId : userId, sessionId, roles: token === "staff" ? ["staff"] : ["admin"] };
++  } } },
++  { provide: AdminConfigurationService, useValue: { async mutate(input: MutationInput) { record("mutate", { userId: input.userId, sessionId: input.sessionId }, input); return result; } } },
++  { provide: AdminConfigurationQueryService, useValue: {
++    events: async (actor: Actor, query: unknown) => { record("events", actor, query); return readResult; },
++    event: async (actor: Actor, target: string) => { record("event", actor, target); return readResult; },
++    readiness: async (actor: Actor, target: string) => { record("readiness", actor, target); return readResult; },
++    experiences: async (actor: Actor, target: string) => { record("experiences", actor, target); return readResult; },
++  } },
++  { provide: AdminScheduleService, useValue: { async updateSchedule() { oldCalls.push("schedule"); return { kind: "completed", eventId, officialEndsAt: createBody.officialEndsAt, operationalDeadlineAt: createBody.operationalDeadlineAt, changedAt: at }; } } },
++  { provide: AdminExternalQueueService, useValue: { async setExternalQueue() { oldCalls.push("external-queue"); return { kind: "completed", eventId, externalQueueEnabled: false, releasedCount: 0, changedAt: at }; } } },
++  { provide: AdminCloseService, useValue: { async closeEvent() { oldCalls.push("close"); return { kind: "completed", eventId, status: "closed", closureMode: "immediate", newEntriesClosedAt: at, effectiveOperationalDeadlineAt: at, externalWaitingFinalized: 0 }; } } },
++] }) class HttpModule {}
++
++let app: INestApplication;
++const variables = ["ADMIN_IDEMPOTENCY_TTL_SECONDS", "STAFF_IDEMPOTENCY_TTL_SECONDS", "PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS", "EVALUATION_IDEMPOTENCY_TTL_SECONDS"];
++const previous = variables.map(name => process.env[name]);
++before(async () => {
++  variables.forEach(name => { process.env[name] = "60"; });
++  app = await NestFactory.create(HttpModule, { logger: false }); app.setGlobalPrefix("api/v1"); app.useGlobalFilters(new ProblemDetailsExceptionFilter()); await app.listen(0, "127.0.0.1");
++});
++after(async () => { await app?.close(); variables.forEach((name, i) => { if (previous[i] === undefined) delete process.env[name]; else process.env[name] = previous[i]; }); });
++function reset(route: Route = routes[0]) {
++  calls.length = 0; oldCalls.length = 0; failure = undefined; readResult = route.response;
++  result = { kind: route.status === 201 ? "created" : "changed", body: route.response, httpStatus: route.status };
++}
++function request(route: Route, path = route.path, token = "unit-admin") {
++  return supertest(app.getHttpServer())[route.method](`/api/v1${path}`).set("Authorization", `Bearer ${token}`).set("Idempotency-Key", "opaque,key");
++}
++function problem(r: supertest.Response, status: number, code: string) {
++  assert.equal(r.status, status, JSON.stringify(r.body)); assert.equal(r.body.status, status); assert.equal(r.body.code, code); assert.match(r.headers["content-type"], /application\/problem\+json/);
++}
++
++for (const route of routes) {
++  test(`E08.13 HTTP ${route.name} responde contrato e usa exclusivamente ator/sessão autenticados`, async () => {
++    reset(route); const start = Date.now();
++    const req = request(route); if (route.method === "get") req.unset("Idempotency-Key"); else req.query({ userId: id(90), sessionId: id(91) });
++    const r = await req.send(route.body); assert.equal(r.status, route.status, JSON.stringify(r.body)); assert.deepEqual(r.body, route.response); assert.equal(calls.length, 1);
++    assert.deepEqual(calls[0].actor, { userId, sessionId }); assert.equal(oldCalls.length, 0);
++    if (route.operation) {
++      const input = calls[0].input as MutationInput; assert.equal(calls[0].method, "mutate"); assert.equal(input.operation, route.operation);
++      assert.equal(input.idempotencyKey, "opaque,key"); assert.ok(input.expiresAt.getTime() >= start + 60000 && input.expiresAt.getTime() <= Date.now() + 60000);
++      assert.equal(input.eventId, route.path.includes(eventId) ? eventId : undefined);
++      assert.equal(input.experienceId, route.path.includes(experienceId) ? experienceId : undefined); assert.equal(input.stationId, route.path.includes(stationId) ? stationId : undefined);
++    } else assert.notEqual(calls[0].method, "mutate");
++  });
++  test(`E08.13 HTTP ${route.name} exige Bearer/sessão e 2FA; Staff isolado não administra`, async () => {
++    reset(route); problem(await request(route).unset("Authorization").send(route.body), 401, "MISSING_ACCESS_TOKEN");
++    problem(await request(route, route.path, "revoked").send(route.body), 401, "SESSION_REVOKED");
++    problem(await request(route, route.path, "no-2fa").send(route.body), 401, "ADMIN_2FA_REQUIRED"); assert.equal(calls.length, 0);
++    problem(await request(route, route.path, "staff").send(route.body), 403, "ADMIN_REQUIRED"); assert.equal(calls[0].actor.userId, staffId);
++  });
++  if (route.path.includes(eventId)) test(`E08.13 HTTP ${route.name} valida UUIDs de toda a cadeia antes do serviço`, async () => {
++    reset(route);
++    for (const target of [eventId, experienceId, stationId].filter(target => route.path.includes(target))) {
++      problem(await request(route, route.path.replace(target, "invalid")).send(route.body), 400, "VALIDATION_ERROR");
++    }
++    assert.equal(calls.length, 0);
++    assert.equal((await request(route, route.path.replaceAll(eventId, eventId.toUpperCase()).replaceAll(experienceId, experienceId.toUpperCase()).replaceAll(stationId, stationId.toUpperCase())).send(route.body)).status, route.status);
++    if (route.operation) assert.equal((calls[0].input as MutationInput).eventId, eventId); else assert.equal(calls[0].input, eventId);
++  });
++}
++
++for (const route of routes.filter(route => route.operation)) {
++  test(`E08.13 HTTP ${route.name} exige corpo estrito e Idempotency-Key única`, async () => {
++    reset(route);
++    for (const body of [undefined, null, {}, [], { ...route.body, userId }, { ...route.body, sessionId }, { ...route.body, expiresAt: at }, { ...route.body, id: id(99) }, { ...route.body, createdAt: at }]) {
++      const invalid = request(route);
++      if (body === null) invalid.type("json").send("null"); else invalid.send(body);
++      problem(await invalid, 400, body === null ? "BAD_REQUEST" : "VALIDATION_ERROR");
++    }
++    problem(await request(route).type("text/plain").send(JSON.stringify(route.body)), 400, "VALIDATION_ERROR"); problem(await request(route).type("json").send("{bad"), 400, "BAD_REQUEST");
++    problem(await request(route).unset("Idempotency-Key").send(route.body), 400, "VALIDATION_ERROR");
++    for (const key of ["", " ", "x".repeat(129)]) problem(await request(route).set("Idempotency-Key", key).send(route.body), 400, "VALIDATION_ERROR");
++    problem(await request(route).set({ "Idempotency-Key": ["a", "b"] }).send(route.body), 400, "VALIDATION_ERROR"); assert.equal(calls.length, 0);
++  });
++  test(`E08.13 HTTP ${route.name} replay conserva corpo/status históricos e no-op responde 200`, async () => {
++    reset(route); result = { kind: "replay", body: route.response, httpStatus: route.status };
++    const r = await request(route).send(route.body); assert.equal(r.status, route.status); assert.deepEqual(r.body, route.response);
++    if (route.method === "patch") { result = { kind: "unchanged", body: route.response, httpStatus: 200 }; const unchanged = await request(route).send(route.body); assert.equal(unchanged.status, 200); assert.deepEqual(unchanged.body, route.response); }
++  });
++}
++
++test("E08.13 HTTP cadastro normaliza código canônico e instantes sem completar recursos", async () => {
++  const route = routes[1]; reset(route);
++  const r = await request(route).send({ ...createBody, name: " Evento ", accessCode: "  event-01  ", startsAt: "2026-11-05T14:00:00-03:00", reason: " Preparação " });
++  assert.equal(r.status, 201, JSON.stringify(r.body)); const input = calls[0].input as MutationInput;
++  assert.equal(input.payload.name, "Evento"); assert.equal(input.payload.accessCode, "EVENT-01"); assert.equal(input.payload.startsAt, createBody.startsAt); assert.equal(input.payload.reason, "Preparação");
++  assert.equal(Object.hasOwn(input.payload, "experiences"), false); assert.equal(Object.hasOwn(input.payload, "staff"), false);
++});
++test("E08.13 HTTP cadastro rejeita código, timezone, datas, margem e configurações inválidas", async () => {
++  const route = routes[1]; reset(route);
++  for (const value of [{ name: " " }, { name: "x".repeat(181) }, { accessCode: "ABC" }, { accessCode: "A--BC" }, { accessCode: "ß-test" }, { accessCode: "x".repeat(65) },
++    { timezone: "Mars/Olympus" }, { externalQueueEnabled: "true" }, { startsAt: "2026-02-30T17:00:00Z" }, { startsAt: "2026-11-05T17:00:00" }, { startsAt: "2026-11-05T17:00:00.1234Z" },
++    { startsAt: createBody.officialEndsAt }, { operationalDeadlineAt: "2026-11-05T22:00:00.000Z" }, { operationalDeadlineAt: "2026-11-06T00:00:00.001Z" }]) {
++    problem(await request(route).send({ ...createBody, ...value }), 400, "VALIDATION_ERROR");
++  }
++  assert.equal(calls.length, 0);
++});
++test("E08.13 HTTP PATCH evento não contorna código, horários, fechamento ou fila externa", async () => {
++  const route = routes[3]; reset(route);
++  for (const key of ["accessCode", "timezone", "startsAt", "officialEndsAt", "operationalDeadlineAt", "externalQueueEnabled", "status", "closureMode", "closureRequestedAt", "adminDeadlineAt", "externalLastOrder", "updatedAt", "audit"]) {
++    problem(await request(route).send({ ...route.body, [key]: "forged" }), 400, "VALIDATION_ERROR");
++  }
++  assert.equal(calls.length, 0);
++});
++test("E08.13 HTTP justificativa opcional rejeita branco, controles e excesso em todas as mutações", async () => {
++  reset();
++  for (const route of routes.filter(route => route.operation)) {
++    for (const reason of [" ", "x\u0000y", "x".repeat(501)]) problem(await request(route).send({ ...route.body, reason }), 400, "VALIDATION_ERROR");
++  }
++  assert.equal(calls.length, 0);
++});
++for (const route of [routes[6], routes[7], routes[8], routes[9]]) test(`E08.13 HTTP ${route.name} protege vínculo, FIFO e disponibilidade operacional`, async () => {
++  reset(route);
++  for (const key of ["eventId", "experienceId", "stationId", "queueAcceptingEntries", "lastQueueOrder", "queueOrder", "availability", "currentServiceId", "status"]) {
++    problem(await request(route).send({ ...route.body, [key]: "forged" }), 400, "VALIDATION_ERROR");
++  }
++  const field = route.name.includes("station") ? "label" : "name", limit = field === "label" ? 120 : 160;
++  for (const value of [" ", "x".repeat(limit + 1), null, 10]) problem(await request(route).send({ [field]: value }), 400, "VALIDATION_ERROR");
++  assert.equal(calls.length, 0);
++});
++test("E08.13 HTTP lista valida filtros/cursor estritamente e entrega paginação normalizada", async () => {
++  const route = routes[0]; reset(route);
++  for (const query of [{ userId }, { limit: "0" }, { limit: "51" }, { limit: "1.5" }, { limit: ["1", "2"] }, { cursor: "%%%" }, { cursor: "e30" }, { phase: "invalid" }, { statusStored: "invalid" }]) {
++    problem(await request(route).query(query), 400, "VALIDATION_ERROR");
++  }
++  assert.equal(calls.length, 0);
++  const cursor = Buffer.from(JSON.stringify({ v: 1, createdAt: at, id: eventId })).toString("base64url");
++  const r = await request(route).query({ limit: "2", phase: "open", statusStored: "scheduled", cursor }); assert.equal(r.status, 200);
++  assert.deepEqual(calls[0].actor, { userId, sessionId }); assert.equal((calls[0].input as { limit: number }).limit, 2);
++  assert.deepEqual((calls[0].input as { cursor: unknown }).cursor, { v: 1, createdAt: at, id: eventId });
++});
++test("E08.13 HTTP rotas antigas schedule/external-queue/close mantêm seus controllers", async () => {
++  reset();
++  const base = `/api/v1/admin/events/${eventId}`;
++  const schedule = await supertest(app.getHttpServer()).patch(`${base}/schedule`).set("Authorization", "Bearer unit-admin").set("Idempotency-Key", "schedule").send({ officialEndsAt: createBody.officialEndsAt, operationalDeadlineAt: createBody.operationalDeadlineAt, reason: "Alteração autorizada" });
++  const queue = await supertest(app.getHttpServer()).patch(`${base}/external-queue`).set("Authorization", "Bearer unit-admin").set("Idempotency-Key", "queue").send({ enabled: false, reason: "Operação autorizada" });
++  const closed = await supertest(app.getHttpServer()).post(`${base}/close`).set("Authorization", "Bearer unit-admin").set("Idempotency-Key", "close").send({ mode: "immediate", reason: "Encerramento autorizado" });
++  assert.equal(schedule.status, 200); assert.equal(queue.status, 200); assert.equal(closed.status, 200); assert.deepEqual(oldCalls, ["schedule", "external-queue", "close"]); assert.equal(calls.length, 0);
++});
++test("E08.13 HTTP falhas atuais usam RFC 7807 sem expor payload ou SQL", async () => {
++  const route = routes[3]; reset(route);
++  for (const [kind, status, code] of [
++    ["resource_not_found", 404, "RESOURCE_NOT_FOUND"], ["admin_required", 403, "ADMIN_REQUIRED"], ["account_inactive", 401, "ACCOUNT_DEACTIVATED"],
++    ["invalid_session", 401, "INVALID_SESSION"], ["session_revoked", 401, "SESSION_REVOKED"], ["session_expired", 401, "SESSION_EXPIRED"], ["admin_2fa_required", 401, "ADMIN_2FA_REQUIRED"],
++    ["access_code_used", 409, "ACCESS_CODE_ALREADY_USED"], ["configuration_locked", 409, "EVENT_CONFIGURATION_LOCKED"], ["event_ended", 409, "EVENT_OPERATION_ENDED"], ["request_conflict", 409, "IDEMPOTENCY_KEY_REUSED"], ["in_progress", 409, "IDEMPOTENCY_IN_PROGRESS"],
++  ] as const) {
++    failure = new AdminConfigurationError(kind); problem(await request(route).send(route.body), status, code);
++  }
++  failure = new Error("PRIVATE_SQL_secret@example.test"); const r = await request(route).send(route.body); problem(r, 500, "INTERNAL_SERVER_ERROR");
++  assert.equal(JSON.stringify(r.body).includes("PRIVATE"), false); assert.equal(JSON.stringify(r.body).includes("example.test"), false);
++});
++test("E08.13 DI real resolve controller, consultas, mutações e TTL Admin sem conexão", async () => {
++  const real = await NestFactory.create(AdminEventsModule, { logger: false });
++  try {
++    const controller = real.get(AdminConfigurationController), reads = real.get(AdminConfigurationQueryService), writes = real.get(AdminConfigurationService);
++    const dependencies = Object.values(controller); assert.ok(dependencies.includes(reads)); assert.ok(dependencies.includes(writes)); assert.ok(dependencies.includes(real.get(AdminIdempotencyPolicy)));
++    assert.equal(Reflect.get(reads, "database"), real.get(DRIZZLE_DATABASE)); assert.equal(Reflect.get(writes, "database"), real.get(DRIZZLE_DATABASE)); assert.equal(real.get<Pool>(POSTGRES_POOL).totalCount, 0);
++  } finally { await real.close(); }
++});
+diff --git a/backend/test/unit/admin-configuration.test.ts b/backend/test/unit/admin-configuration.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..99a9f0f547320583a1d5177822f3698fa81278d8
+--- /dev/null
++++ b/backend/test/unit/admin-configuration.test.ts
+@@ -0,0 +1,357 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { PgDialect } from "drizzle-orm/pg-core";
++import { sql } from "drizzle-orm";
++import { drizzle } from "drizzle-orm/node-postgres";
++import type { Client } from "pg";
++import * as schema from "../../src/database/schema";
++import {
++  configurationBodies, configurationEventParams, configurationExperienceParams, configurationName,
++  configurationQuery, configurationStationParams, configurationTimezone, createEventBody,
++  encodeConfigurationCursor, experienceBody, stationBody, updateEventBody,
++} from "../../src/events/admin-configuration.dto";
++import {
++  configurationEventView, configurationProjection, readinessView, type ConfigurationRow,
++} from "../../src/events/admin-configuration.projection";
++import { AdminConfigurationQueryService } from "../../src/events/admin-configuration-query.service";
++import { AdminConfigurationService, configurationFingerprint, CONFIGURATION_OPERATIONS, type ConfigurationInput } from "../../src/events/admin-configuration.service";
++import { configurationMutation } from "../../src/events/admin-configuration.mutation";
++
++const id=(n:number)=>`abcdef00-0000-4000-8000-${String(n).padStart(12,"0")}`;
++const eventId=id(1),experienceId=id(2),stationId=id(3),userId=id(4),sessionId=id(5);
++const at="2026-11-04T15:00:00.123456Z";
++const eventPayload={name:"Arena de testes",accessCode:"ARENA-TEST",timezone:"America/Sao_Paulo",
++  startsAt:"2026-11-05T17:00:00.000Z",officialEndsAt:"2026-11-05T23:00:00.000Z",
++  operationalDeadlineAt:"2026-11-05T23:30:00.000Z",externalQueueEnabled:true};
++function eventRow(overrides:Partial<ConfigurationRow>={}):ConfigurationRow{
++  return {id:eventId,name:"Arena de testes",accessCode:"ARENA-TEST",timezone:"America/Sao_Paulo",statusStored:"scheduled",effectivePhase:"open",
++    startsAt:at,officialEndsAt:at,operationalDeadlineAt:at,closureMode:null,closureRequestedAt:null,adminDeadlineAt:null,externalQueueEnabled:true,
++    createdAt:at,updatedAt:at,observedAt:at,ready:true,acceptingNewParticipations:true,nameAndAccessCode:true,validScheduleAndTimezone:true,
++    externalQueueConfigured:true,hasExperienceWithAvailableStation:true,hasVerifiedActiveStaff:true,...overrides};
++}
++
++test("E08.13 cadastro normaliza código, nome e timestamps pelo contrato compartilhado",()=>{
++  const value=createEventBody.parse({...eventPayload,name:"  Arena de testes  ",accessCode:" \t arena-test \n",startsAt:"2026-11-05T14:00:00-03:00"});
++  assert.equal(value.name,"Arena de testes");assert.equal(value.accessCode,"ARENA-TEST");assert.equal(value.startsAt,eventPayload.startsAt);
++  assert.equal(Object.hasOwn(value,"reason"),false);assert.equal(value.externalQueueEnabled,true);
++});
++for(const margin of [0,60])test(`E08.13 margem operacional de ${margin} minutos é explícita e aceita`,()=>{
++  const value=createEventBody.parse({...eventPayload,operationalDeadlineAt:new Date(Date.parse(eventPayload.officialEndsAt)+margin*60_000).toISOString()});
++  assert.equal(Date.parse(value.operationalDeadlineAt)-Date.parse(value.officialEndsAt),margin*60_000);
++});
++test("E08.13 horários impossíveis, ambíguos ou silenciosamente arredondados são rejeitados",()=>{
++  for(const startsAt of ["2026-02-29T00:00:00Z","2026-11-05","2026-11-05T17:00:00","2026-11-05T17:00:00-00:00",
++    "2026-11-05T17:00:00.1234Z","2026-11-05T24:00:00Z","2026-11-05T17:00:00+24:00"]){
++    assert.equal(createEventBody.safeParse({...eventPayload,startsAt}).success,false,startsAt);
++  }
++  for(const patch of [{startsAt:eventPayload.officialEndsAt},{startsAt:"2026-11-06T00:00:00Z"},
++    {operationalDeadlineAt:"2026-11-05T22:59:59.999Z"},{operationalDeadlineAt:"2026-11-06T00:00:00.001Z"}]){
++    assert.equal(createEventBody.safeParse({...eventPayload,...patch}).success,false);
++  }
++});
++test("E08.13 cadastro exige configuração explícita e recusa controles internos",()=>{
++  for(const field of Object.keys(eventPayload)){
++    const value:Record<string,unknown>={...eventPayload};delete value[field];assert.equal(createEventBody.safeParse(value).success,false,field);
++  }
++  for(const extra of [{id:eventId},{status:"open"},{externalLastOrder:1},{closureMode:"controlled"},{createdAt:at},{isReady:true},{userId}]){
++    assert.equal(createEventBody.safeParse({...eventPayload,...extra}).success,false);
++  }
++  assert.equal(createEventBody.safeParse({...eventPayload,externalQueueEnabled:false}).success,true);
++  assert.equal(createEventBody.safeParse({...eventPayload,externalQueueEnabled:"false"}).success,false);
++});
++test("E08.13 criação compartilha o alfabeto ASCII canônico e não aceita expansão Unicode",()=>{
++  for(const accessCode of ["A", "-ARENA", "ARENA-", "ARENA--TEST", "ARENA TEST", "ARENÁ", "STRAßE", "A".repeat(65)]){
++    assert.equal(createEventBody.safeParse({...eventPayload,accessCode}).success,false,accessCode);
++  }
++  for(const accessCode of ["AB12", "a".repeat(64), " arena-2026 "])assert.equal(createEventBody.safeParse({...eventPayload,accessCode}).success,true);
++});
++test("E08.13 fuso IANA válido é aceito; offset fixo ou nome inventado é rejeitado",()=>{
++  for(const zone of ["America/Sao_Paulo","UTC","Europe/Lisbon"])assert.equal(configurationTimezone.safeParse(zone).success,true,zone);
++  for(const zone of ["","Mars/Olympus","+01:00","-03:00","x".repeat(81)])assert.equal(configurationTimezone.safeParse(zone).success,false,zone);
++});
++for(const [label,limit]of [["evento",180],["experiência",160],["estação",120]]as const)test(`E08.13 nome de ${label} respeita tamanho Unicode sem truncar`,()=>{
++  const schema=configurationName(limit),value="😀".repeat(limit);assert.equal(schema.parse(` ${value} `),value);
++  for(const name of [" ","😀".repeat(limit+1),"ab\0cd","ab\ncd","ab\u007fcd","ab\ud800cd"])assert.equal(schema.safeParse(name).success,false);
++});
++test("E08.13 PATCH genérico do evento só permite nome e justificativa opcional",()=>{
++  assert.deepEqual(updateEventBody.parse({name:"  Nome  "}),{name:"Nome"});
++  for(const field of ["accessCode","startsAt","officialEndsAt","operationalDeadlineAt","timezone","externalQueueEnabled","status","closureMode",
++    "closureRequestedAt","adminDeadlineAt","externalLastOrder","id","createdAt","updatedAt"]){
++    assert.equal(updateEventBody.safeParse({name:"Nome",[field]:"forged"}).success,false,field);
++  }
++  for(const body of [{},{reason:"Motivo"},null,[]])assert.equal(updateEventBody.safeParse(body).success,false);
++});
++test("E08.13 experiências e estações não aceitam reparent, FIFO ou alteração operacional",()=>{
++  assert.deepEqual(experienceBody.parse({name:"Experiência"}),{name:"Experiência"});assert.deepEqual(stationBody.parse({label:"Estação"}),{label:"Estação"});
++  for(const extra of [{eventId},{experienceId},{stationId},{lastQueueOrder:"0"},{queueAcceptingEntries:false},{availability:"unavailable"},{currentServiceSessionId:id(6)}]){
++    assert.equal(experienceBody.safeParse({name:"Experiência",...extra}).success,false);
++    assert.equal(stationBody.safeParse({label:"Estação",...extra}).success,false);
++  }
++});
++test("E08.13 justificativa opcional é validada uniformemente em todas as operações",()=>{
++  for(const [operation,schema]of Object.entries(configurationBodies)){
++    const body=operation==="create_event"?eventPayload:operation.includes("station")?{label:"Estação"}:{name:"Nome"};
++    assert.equal(schema.safeParse(body).success,true);
++    assert.equal(schema.safeParse({...body,reason:"  Configuração autorizada  "}).success,true);
++    for(const reason of [null," ","x".repeat(501),"secret\0value",false])assert.equal(schema.safeParse({...body,reason}).success,false);
++  }
++});
++test("E08.13 parâmetros aninhados validam todos os UUIDs e rejeitam IDs extras",()=>{
++  assert.deepEqual(configurationEventParams.parse({eventId}),{eventId});
++  assert.deepEqual(configurationExperienceParams.parse({eventId,experienceId}),{eventId,experienceId});
++  assert.deepEqual(configurationStationParams.parse({eventId,experienceId,stationId}),{eventId,experienceId,stationId});
++  for(const field of ["eventId","experienceId","stationId"])assert.equal(configurationStationParams.safeParse({eventId,experienceId,stationId,[field]:"invalid"}).success,false);
++  assert.equal(configurationEventParams.safeParse({eventId,userId}).success,false);
++});
++test("E08.13 paginação keyset preserva microssegundos, UUID e defaults",()=>{
++  assert.deepEqual(configurationQuery.parse({}),{limit:20});
++  const cursor=encodeConfigurationCursor(at,eventId),parsed=configurationQuery.parse({limit:"50",cursor,phase:"open",statusStored:"scheduled"});
++  assert.deepEqual(parsed,{limit:50,cursor:{v:1,createdAt:at,id:eventId},phase:"open",statusStored:"scheduled"});
++});
++test("E08.13 cursores, filtros e limites inválidos não alteram o escopo administrativo",()=>{
++  const encode=(value:unknown)=>Buffer.from(JSON.stringify(value)).toString('base64url');
++  for(const query of [{limit:"0"},{limit:"51"},{limit:"1e1"},{limit:["1","2"]},{cursor:"%%%"},{cursor:"x".repeat(513)},
++    {cursor:encode({v:2,createdAt:at,id:eventId})},{cursor:encode({v:1,createdAt:at,id:eventId,userId})},
++    {cursor:encode({v:1,createdAt:"2026-11-04T15:00:00.123Z",id:eventId})},{cursor:encode({v:1,createdAt:at,id:"invalid"})},
++    {cursor:encodeConfigurationCursor(at,eventId)+"="},{phase:"reopened"},{statusStored:"not_ready"},{userId},{eventId}]){
++    assert.equal(configurationQuery.safeParse(query).success,false);
++  }
++});
++test("E08.13 projeção de prontidão mantém capacidade separada de ocupação e sessão Staff",()=>{
++  const statement=new PgDialect().sqlToQuery(configurationProjection());
++  assert.equal((statement.sql.match(/clock_timestamp\(\)/g)||[]).length,1);
++  assert.ok(statement.sql.includes("s.availability='available'"));assert.ok(statement.sql.includes("r.revoked_at IS NULL AND u.is_active AND u.email_verified_at IS NOT NULL"));
++  assert.equal(statement.sql.includes("service_sessions"),false);assert.equal(statement.sql.includes("FROM sessions"),false);
++  assert.equal(/INSERT |UPDATE |DELETE |FOR UPDATE|FOR SHARE/.test(statement.sql),false);
++});
++test("E08.13 fase efetiva respeita prazo compartilhado, corte e estado Admin sem abrir artificialmente",()=>{
++  const statement=new PgDialect().sqlToQuery(configurationProjection(sql`e.id=${eventId}`,sql`${at}::timestamptz`));
++  for(const expected of ["LEAST(e.operational_deadline_at,e.admin_deadline_at)<=e.at","e.status='closed'","e.official_ends_at<=e.at",
++    "e.closure_requested_at IS NULL","e.starts_at<=e.at AND e.at<e.official_ends_at"]){assert.ok(statement.sql.includes(expected),expected);}
++  assert.equal(statement.sql.includes("clock_timestamp()"),false);assert.ok(statement.params.includes(eventId)&&statement.params.includes(at));
++});
++for(const [field,missing]of [["nameAndAccessCode","EVENT_NAME_OR_ACCESS_CODE_INVALID"],["validScheduleAndTimezone","EVENT_SCHEDULE_INVALID"],
++  ["externalQueueConfigured","EVENT_EXTERNAL_QUEUE_NOT_CONFIGURED"],["hasExperienceWithAvailableStation","EXPERIENCE_WITH_AVAILABLE_STATION"],
++  ["hasVerifiedActiveStaff","VERIFIED_ACTIVE_STAFF"]]as const)test(`E08.13 prontidão explicita o critério ausente ${field}`,()=>{
++  const value=readinessView(eventRow({[field]:false,ready:false}));assert.equal(value.ready,false);assert.deepEqual(value.missing,[missing]);assert.equal(value.checks[field],false);
++});
++test("E08.13 DTO administrativo omite campos internos e dados pessoais da projeção",()=>{
++  const value=configurationEventView({...eventRow(),userId,email:"private@example.test",externalLastOrder:"999999999999999999",passwordHash:"PRIVATE",profile:{secret:true}});
++  assert.equal(value.createdAt,at);assert.equal(value.updatedAt,at);assert.equal(value.readiness.ready,true);assert.deepEqual(value.readiness.missing,[]);
++  for(const field of ["userId","email","passwordHash","profile","externalLastOrder","observedAt"])assert.equal(Object.hasOwn(value,field),false,field);
++  assert.equal(JSON.stringify(value).includes("PRIVATE"),false);
++});
++
++const actor={userId,sessionId};
++const experience={id:experienceId,eventId,name:"Experiência",queueAcceptingEntries:true,lastQueueOrder:"9007199254740993",createdAt:at,updatedAt:at};
++const station={id:stationId,experienceId,label:"Estação",availability:"available",pendingServiceSessionId:null,createdAt:at,updatedAt:at};
++type ReadOptions={active?:boolean;admin?:boolean;valid?:boolean;revoked?:boolean;expired?:boolean;secondFactor?:boolean;
++  absent?:boolean;events?:ConfigurationRow[];experiences?:typeof experience[];stations?:typeof station[]};
++function readFixture(options:ReadOptions={}){
++  const queries:Array<{text:string;params:unknown[]}>=[];
++  const database=drizzle({async query(config:{text:string},params:unknown[]=[]){
++    const text=config.text;queries.push({text,params});
++    if(/^(begin|commit|rollback)/.test(text))return {rows:[]};
++    if(text.includes('SELECT u.is_active AS active'))return {rows:[{active:options.active??true,admin:options.admin??true,valid:options.valid??true,
++      revoked:options.revoked??false,expired:options.expired??false,secondFactor:options.secondFactor??true}]};
++    if(text.startsWith('SELECT id FROM events'))return {rows:options.absent?[]:[{id:eventId}]};
++    if(text.startsWith('WITH observation')||text.startsWith('SELECT * FROM (WITH observation'))return {rows:options.absent?[]:options.events??[eventRow()]};
++    if(text.startsWith('SELECT id,event_id'))return {rows:options.experiences??[experience]};
++    if(text.startsWith('SELECT s.id,s.experience_id'))return {rows:options.stations??[station]};
++    throw Error('SQL unitário inesperado: '+text);
++  }}as unknown as Client,{schema});
++  return {service:new AdminConfigurationQueryService(database),queries};
++}
++for(const [option,kind]of [["active","account_inactive"],["admin","admin_required"],["valid","invalid_session"],
++  ["revoked","session_revoked"],["expired","session_expired"],["secondFactor","admin_2fa_required"]]as const)test(`E08.13 GET revalida ${kind} sem consultar eventos`,async()=>{
++  const f=readFixture({[option]:option==='revoked'||option==='expired'});
++  await assert.rejects(f.service.events(actor,configurationQuery.parse({})),{kind});
++  assert.equal(f.queries.length,3);assert.equal(f.queries[0].text,'begin isolation level repeatable read read only');assert.equal(f.queries.at(-1)?.text,'rollback');
++  assert.equal(f.queries.some(q=>q.text.startsWith('WITH observation')||q.text.startsWith('SELECT * FROM')),false);
++});
++test("E08.13 listagem keyset usa ordenação estável, filtros e um snapshot sem N+1",async()=>{
++  const rows=[eventRow({id:id(10)}),eventRow({id:id(9)}),eventRow({id:id(8)})],f=readFixture({events:rows});
++  const cursor=encodeConfigurationCursor(at,id(11)),page=configurationQuery.parse({limit:"2",cursor,statusStored:"scheduled",phase:"open"});
++  const result=await f.service.events(actor,page);assert.equal(result.items.length,2);assert.deepEqual(result.items.map(r=>r.id),[id(10),id(9)]);
++  assert.equal(result.nextCursor,encodeConfigurationCursor(at,id(9)));assert.equal(f.queries.length,4);
++  const query=f.queries[2];for(const p of [at,id(11),'scheduled','open',3])assert.ok(query.params.includes(p));
++  assert.ok(query.text.includes('(e.created_at,e.id)<'));assert.ok(query.text.includes('ORDER BY "createdAt" DESC,id DESC'));
++  assert.equal(f.queries.some(q=>/FOR UPDATE|FOR SHARE|INSERT |UPDATE |DELETE /.test(q.text)),false);assert.equal(f.queries.at(-1)?.text,'commit');
++});
++test("E08.13 página final vazia não inventa cursor ou eventos",async()=>{
++  const f=readFixture({events:[]});assert.deepEqual(await f.service.events(actor,configurationQuery.parse({})),{items:[],nextCursor:null});
++});
++for(const mode of ["event","readiness","experiences"]as const)test(`E08.13 GET ${mode} inexistente falha sem detalhes de outro evento`,async()=>{
++  const f=readFixture({absent:true});await assert.rejects(f.service[mode](actor,eventId),{kind:'resource_not_found'});assert.equal(f.queries.at(-1)?.text,'rollback');
++});
++test("E08.13 readiness é visão reduzida do mesmo snapshot e não publica configuração pessoal",async()=>{
++  const f=readFixture({events:[eventRow({ready:false,hasVerifiedActiveStaff:false,acceptingNewParticipations:false,effectivePhase:'not_ready'})]});
++  const result=await f.service.readiness(actor,eventId);assert.equal(result.eventId,eventId);assert.equal(result.ready,false);assert.deepEqual(result.missing,['VERIFIED_ACTIVE_STAFF']);assert.equal(result.observedAt,at);
++  assert.equal(Object.hasOwn(result,'accessCode'),false);assert.equal(f.queries.length,4);
++});
++test("E08.13 experiências e estações são agrupadas em consultas constantes preservando bigint",async()=>{
++  const second={...experience,id:id(20),name:'Outra'},otherStation={...station,id:id(21),experienceId:second.id};
++  const f=readFixture({experiences:[experience,second],stations:[otherStation,station]}),r=await f.service.experiences(actor,eventId);
++  assert.equal(r.eventId,eventId);assert.equal(r.items.length,2);assert.equal(r.items[0].lastQueueOrder,'9007199254740993');
++  assert.deepEqual(r.items[0].stations,[station]);assert.deepEqual(r.items[1].stations,[otherStation]);assert.equal(f.queries.length,6);
++  assert.equal(f.queries.filter(q=>q.text.includes('FROM stations')).length,1);assert.equal(f.queries.at(-1)?.text,'commit');
++});
++test("E08.13 fingerprint normaliza intenção e distingue operação, recursos e justificativa",()=>{
++  const value={operation:'create_event' as const,payload:eventPayload},base=configurationFingerprint(value);
++  assert.equal(base,configurationFingerprint({...value,payload:{...eventPayload,accessCode:'  arena-test  ',startsAt:'2026-11-05T14:00:00-03:00'}}));
++  assert.equal(base,configurationFingerprint({...value,payload:{...eventPayload,reason:undefined}}));
++  assert.notEqual(base,configurationFingerprint({...value,payload:{...eventPayload,reason:'Cadastro autorizado'}}));
++  const edit={operation:'update_event' as const,eventId,payload:{name:'Nome'}};
++  assert.notEqual(configurationFingerprint(edit),configurationFingerprint({...edit,eventId:id(30)}));
++  assert.notEqual(configurationFingerprint(edit),configurationFingerprint({operation:'update_experience',eventId,experienceId,payload:{name:'Nome'}}));
++  assert.equal(new Set(Object.values(CONFIGURATION_OPERATIONS)).size,6);
++});
++
++const operations=Object.keys(configurationBodies) as Array<keyof typeof configurationBodies>;
++function writeInput(operation:keyof typeof configurationBodies):ConfigurationInput{
++  return {operation,userId,sessionId,...(operation==='create_event'?{}:{eventId}),
++    ...(operation==='update_experience'||operation.includes('station')?{experienceId}:{}),...(operation==='update_station'?{stationId}:{}),
++    payload:operation==='create_event'?eventPayload:operation.includes('station')?{label:'Estação nova'}:{name:'Nome novo'},idempotencyKey:'intent',expiresAt:new Date('2099-01-01')};
++}
++type WriteOptions={absent?:boolean;experienceAbsent?:boolean;stationAbsent?:boolean;active?:boolean;admin?:boolean;session?:boolean;
++  revoked?:boolean;secondFactor?:boolean;expiredAt?:number;same?:boolean;ended?:boolean;history?:boolean;codeUsed?:boolean;
++  reservation?:'replay'|'request_conflict'|'in_progress';badReplay?:boolean;replayStatus?:number;wrongReference?:boolean;
++  fail?:'reserve'|'object'|'response'|'audit'|'complete';auditCount?:number;badWrittenId?:boolean};
++function writeFixture(operation:keyof typeof configurationBodies='update_event',options:WriteOptions={}){
++  const input=writeInput(operation),queries:Array<{text:string;params:unknown[]}>=[];
++  const creating=operation.startsWith('create_'),entity=operation.split('_')[1],httpStatus=creating?201:200;
++  let currentId=entity==='event'?eventId:entity==='experience'?experienceId:stationId,sessionChecks=0;
++  const eventValue=()=>configurationEventView(eventRow({id:currentId,name:operation==='create_event'?eventPayload.name:'Nome novo',
++    ...(operation==='create_event'?{statusStored:'scheduled',effectivePhase:'scheduled',ready:false,acceptingNewParticipations:false,
++      hasExperienceWithAvailableStation:false,hasVerifiedActiveStaff:false}:{})}));
++  const resultBody=()=>entity==='event'?{event:eventValue()}:entity==='experience'?{experience:{...experience,id:currentId,name:'Nome novo',lastQueueOrder:creating?'0':experience.lastQueueOrder}}
++    :{station:{...station,id:currentId,label:'Estação nova'}};
++  const database=drizzle({async query(config:{text:string},params:unknown[]=[]){
++    const text=config.text;queries.push({text,params});
++    if(/^(begin|commit|rollback)/.test(text))return {rows:[]};
++    if(text.startsWith('SELECT id FROM events'))return {rows:options.absent?[]:[{id:eventId}]};
++    if(text.startsWith('SELECT id FROM experiences'))return {rows:options.experienceAbsent?[]:[{id:experienceId}]};
++    if(text.startsWith('SELECT s.id FROM stations s JOIN'))return {rows:options.stationAbsent?[]:[{id:stationId}]};
++    if(text.includes('SELECT is_active AS active FROM users'))return {rows:[{active:options.active??true}]};
++    if(text.includes('SELECT id FROM user_roles'))return {rows:options.admin===false?[]:[{id:id(6)}]};
++    if(text.includes('SELECT id FROM sessions'))return {rows:options.session===false?[]:[{id:sessionId}]};
++    if(text.includes('AS "secondFactor"'))return {rows:[{revoked:options.revoked??false,expired:++sessionChecks>=(options.expiredAt??Infinity),secondFactor:options.secondFactor??true}]};
++    if(text.includes('insert into "idempotency_operations"')){if(options.fail==='reserve')throw Error('PRIVATE_CONFIGURATION_SQL');return {rows:options.reservation?[]:[['reservation']]};}
++    if(text.includes('from "idempotency_operations"'))return {rows:[['reservation',options.reservation==='request_conflict'?'other':configurationFingerprint(input),
++      options.reservation==='in_progress'?'in_progress':'completed',options.replayStatus??httpStatus,options.wrongReference?id(99):currentId,options.badReplay?{}:resultBody()]]};
++    if(text.startsWith('SELECT name AS value')||text.startsWith('SELECT label AS value'))return {rows:[{value:options.same?(entity==='station'?'Estação nova':'Nome novo'):'Nome anterior'}]};
++    if(text.startsWith('WITH decision AS MATERIALIZED')){
++      if(options.fail==='object')throw Error('PRIVATE_CONFIGURATION_SQL');
++      if(operation==='create_event'){
++        if(options.codeUsed)return {rows:[]};currentId=params[0] as string;return {rows:[{id:currentId,at}]};
++      }
++      if(creating)currentId=params.find(value=>typeof value==='string'&&/^[a-f0-9-]{36}$/.test(value)&&![eventId,experienceId,stationId].includes(value)) as string;
++      return {rows:[{ended:options.ended??false,history:options.history??false,at,
++        writtenId:options.ended||(options.history&&operation!=='create_station')?null:options.badWrittenId?id(99):currentId}]};
++    }
++    if(text.startsWith('WITH observation')){if(options.fail==='response')throw Error('PRIVATE_CONFIGURATION_SQL');return {rows:[eventRow({id:currentId,name:operation==='create_event'?eventPayload.name:'Nome novo',
++      ...(operation==='create_event'?{statusStored:'scheduled',effectivePhase:'scheduled',ready:false,acceptingNewParticipations:false,hasExperienceWithAvailableStation:false,hasVerifiedActiveStaff:false}:{})})]};}
++    if(text.startsWith('SELECT id,event_id')){if(options.fail==='response')throw Error('PRIVATE_CONFIGURATION_SQL');return {rows:[{...experience,id:currentId,name:'Nome novo',lastQueueOrder:creating?'0':experience.lastQueueOrder}]};}
++    if(text.startsWith('SELECT s.id,s.experience_id')){if(options.fail==='response')throw Error('PRIVATE_CONFIGURATION_SQL');return {rows:[{...station,id:currentId,label:'Estação nova'}]};}
++    if(text.startsWith('INSERT INTO audit_logs')){if(options.fail==='audit')throw Error('PRIVATE_CONFIGURATION_SQL');return {rows:options.auditCount===0?[]:[{id:id(8)}]};}
++    if(text.includes('update "idempotency_operations"')){if(options.fail==='complete')throw Error('PRIVATE_CONFIGURATION_SQL');return {rows:[['reservation',httpStatus,currentId,resultBody()]]};}
++    throw Error('SQL unitário inesperado: '+text);
++  }}as unknown as Client,{schema});
++  return {input,queries,service:new AdminConfigurationService(database),resultBody};
++}
++for(const operation of operations){
++  test(`E08.13 ${operation} efetiva objeto, auditoria e intenção no mesmo READ COMMITTED`,async()=>{
++    const f=writeFixture(operation),result=await f.service.mutate(f.input);assert.equal(result.httpStatus,operation.startsWith('create_')?201:200);
++    assert.equal(result.kind,operation.startsWith('create_')?'created':'changed');assert.deepEqual(result.body,f.resultBody());
++    assert.equal(f.queries[0].text,'begin isolation level read committed');assert.equal(f.queries.at(-1)?.text,'commit');
++    const effect=f.queries.findIndex(q=>q.text.startsWith('WITH decision')),audit=f.queries.findIndex(q=>q.text.startsWith('INSERT INTO audit_logs')),complete=f.queries.findIndex(q=>q.text.includes('update "idempotency_operations"'));
++    assert.ok(effect>0&&audit>effect&&complete>audit);assert.equal(f.queries.filter(q=>q.text.startsWith('INSERT INTO audit_logs')).length,1);
++    assert.equal(f.queries.filter(q=>q.text.includes('AS "secondFactor"')).length,4);
++    const mutation=f.queries[effect];assert.equal((mutation.text.match(/clock_timestamp\(\)/g)||[]).length,1);
++    const auditQuery=f.queries[audit];assert.ok(auditQuery.params.includes(CONFIGURATION_OPERATIONS[operation]));assert.ok(auditQuery.params.includes(at));
++    if(operation==='create_event'){assert.ok(mutation.text.includes("'scheduled'"));assert.ok(mutation.text.includes('ON CONFLICT (access_code_normalized) DO NOTHING'));}
++    if(operation==='create_experience')assert.ok(mutation.text.includes('true,0,f.at,f.at'));
++    if(operation==='create_station')assert.ok(mutation.text.includes("'available',f.at,f.at"));
++  });
++  test(`E08.13 ${operation} replay histórico não repete objeto nem auditoria`,async()=>{
++    const f=writeFixture(operation,{reservation:'replay'}),result=await f.service.mutate(f.input);
++    assert.equal(result.kind,'replay');assert.deepEqual(result.body,f.resultBody());assert.equal(result.httpStatus,operation.startsWith('create_')?201:200);
++    assert.equal(f.queries.some(q=>q.text.startsWith('WITH decision')||q.text.startsWith('INSERT INTO audit_logs')||q.text.includes('update "idempotency_operations"')),false);
++    assert.equal(f.queries.at(-1)?.text,'commit');
++  });
++}
++test("E08.13 locks estruturais seguem evento, experiência, estação, conta, concessão e sessão",async()=>{
++  const f=writeFixture('update_station');await f.service.mutate(f.input);
++  const ordered=['SELECT id FROM events','SELECT id FROM experiences','SELECT s.id FROM stations s JOIN','SELECT is_active AS active FROM users','SELECT id FROM user_roles','SELECT id FROM sessions','insert into "idempotency_operations"','WITH decision'];
++  for(let i=1;i<ordered.length;i++)assert.ok(f.queries.findIndex(q=>q.text.includes(ordered[i-1]))<f.queries.findIndex(q=>q.text.includes(ordered[i])),ordered[i]);
++  for(const query of f.queries.filter(q=>ordered.slice(0,3).some(text=>q.text.includes(text))))assert.ok(query.text.includes('FOR UPDATE'));
++  const role=f.queries.find(q=>q.text.includes('SELECT id FROM user_roles'))!;assert.ok(role.text.includes("event_id IS NULL AND revoked_at IS NULL"));
++});
++for(const [option,kind]of [["active","account_inactive"],["admin","admin_required"],["session","invalid_session"],
++  ["revoked","session_revoked"],["secondFactor","admin_2fa_required"]]as const)test(`E08.13 mutação sem ${option} válido retorna ${kind} sem reservar intenção`,async()=>{
++  const f=writeFixture('update_event',{[option]:option==='revoked'});await assert.rejects(f.service.mutate(f.input),{kind});
++  assert.equal(f.queries.some(q=>q.text.includes('idempotency_operations')),false);assert.equal(f.queries.at(-1)?.text,'rollback');
++});
++for(const expiredAt of [2,3,4])test(`E08.13 sessão expirada na revalidação ${expiredAt} reverte todas as escritas`,async()=>{
++  const f=writeFixture('update_event',{expiredAt});await assert.rejects(f.service.mutate(f.input),{kind:'session_expired'});assert.equal(f.queries.at(-1)?.text,'rollback');
++});
++for(const operation of ['update_event','update_experience','update_station']as const)test(`E08.13 ${operation} no-op autorizado não faz UPDATE nem auditoria mesmo com histórico`,async()=>{
++  const f=writeFixture(operation,{same:true,history:true,ended:true}),r=await f.service.mutate(f.input);assert.equal(r.kind,'unchanged');
++  assert.equal(f.queries.some(q=>q.text.startsWith('WITH decision')||q.text.startsWith('INSERT INTO audit_logs')),false);
++  assert.ok(f.queries.some(q=>q.text.includes('update "idempotency_operations"')));
++});
++for(const operation of ['update_event','create_experience','update_experience','update_station']as const)test(`E08.13 ${operation} bloqueia qualquer histórico sem alterar objeto ou auditoria`,async()=>{
++  const f=writeFixture(operation,{history:true});await assert.rejects(f.service.mutate(f.input),{kind:'configuration_locked'});
++  assert.equal(f.queries.some(q=>q.text.startsWith('INSERT INTO audit_logs')||q.text.includes('update "idempotency_operations"')),false);assert.equal(f.queries.at(-1)?.text,'rollback');
++});
++test("E08.13 estação adicional continua permitida em experiência existente com histórico",async()=>{
++  const f=writeFixture('create_station',{history:true});assert.equal((await f.service.mutate(f.input)).kind,'created');
++});
++for(const operation of operations.filter(op=>op!=='create_event'))test(`E08.13 ${operation} não produz efeito depois do corte definitivo`,async()=>{
++  const f=writeFixture(operation,{ended:true});await assert.rejects(f.service.mutate(f.input),{kind:'event_ended'});assert.equal(f.queries.at(-1)?.text,'rollback');
++});
++test("E08.13 código já reservado conflita sem duplicar objeto, auditoria ou intenção concluída",async()=>{
++  const f=writeFixture('create_event',{codeUsed:true});await assert.rejects(f.service.mutate(f.input),{kind:'access_code_used'});
++  assert.equal(f.queries.some(q=>q.text.startsWith('INSERT INTO audit_logs')||q.text.includes('update "idempotency_operations"')),false);assert.equal(f.queries.at(-1)?.text,'rollback');
++});
++for(const reservation of ['request_conflict','in_progress']as const)test(`E08.13 intenção ${reservation} não executa nova configuração`,async()=>{
++  const f=writeFixture('update_event',{reservation});await assert.rejects(f.service.mutate(f.input),{kind:reservation});assert.equal(f.queries.some(q=>q.text.startsWith('WITH decision')),false);assert.equal(f.queries.at(-1)?.text,'rollback');
++});
++test("E08.13 replay corrompido, status ou referência divergentes falham sem expor payload",async()=>{
++  for(const options of [{badReplay:true},{replayStatus:201},{wrongReference:true}]){
++    const f=writeFixture('update_event',{reservation:'replay',...options});await assert.rejects(f.service.mutate(f.input),{message:'ADMIN_CONFIGURATION_INTERNAL_ERROR'});assert.equal(f.queries.at(-1)?.text,'rollback');
++  }
++});
++test("E08.13 TTL técnico vencido conserva replay histórico sem novo efeito ou auditoria",async()=>{
++  const f=writeFixture('update_event',{reservation:'replay'}),expiredInput={...f.input,expiresAt:new Date('2000-01-01')};
++  const r=await f.service.mutate(expiredInput);assert.equal(r.kind,'replay');assert.deepEqual(r.body,f.resultBody());assert.equal(r.httpStatus,200);
++  assert.equal(f.queries.some(q=>q.text.startsWith('WITH decision')||q.text.startsWith('INSERT INTO audit_logs')||q.text.includes('update "idempotency_operations"')),false);
++});
++test("E08.13 recursos ausentes ou fora da cadeia não reservam intenção e exigem Admin atual",async()=>{
++  for(const options of [{absent:true},{experienceAbsent:true},{stationAbsent:true}]){
++    const f=writeFixture('update_station',options);await assert.rejects(f.service.mutate(f.input),{kind:'resource_not_found'});assert.equal(f.queries.some(q=>q.text.includes('idempotency_operations')),false);
++  }
++  const denied=writeFixture('update_event',{absent:true,admin:false});await assert.rejects(denied.service.mutate(denied.input),{kind:'admin_required'});
++});
++for(const fail of ['reserve','object','response','audit','complete']as const)test(`E08.13 falha ${fail} reverte intenção, objeto e auditoria`,async()=>{
++  const f=writeFixture('update_event',{fail});await assert.rejects(f.service.mutate(f.input),{message:'ADMIN_CONFIGURATION_INTERNAL_ERROR'});assert.equal(f.queries.at(-1)?.text,'rollback');
++});
++test("E08.13 contagem de escrita ou auditoria divergente impede commit parcial",async()=>{
++  for(const options of [{badWrittenId:true},{auditCount:0}]){
++    const f=writeFixture('update_event',options);await assert.rejects(f.service.mutate(f.input),{message:'ADMIN_CONFIGURATION_INTERNAL_ERROR'});assert.equal(f.queries.at(-1)?.text,'rollback');
++  }
++});
++test("E08.13 payload, chave e expiração inválidos são rejeitados antes da transação",async()=>{
++  for(const patch of [{payload:{name:'Nome',accessCode:'FORGED'}},{idempotencyKey:''},{idempotencyKey:'x'.repeat(129)},{expiresAt:new Date(NaN)}]){
++    const f=writeFixture('update_event');await assert.rejects(f.service.mutate({...f.input,...patch}),{message:'ADMIN_CONFIGURATION_INTERNAL_ERROR'});assert.equal(f.queries.length,0);
++  }
++});
++test("E08.13 SQL decisório não confunde histórico atual com qualquer participação e copia o mesmo relógio",()=>{
++  for(const operation of ['create_experience','create_station','update_event','update_experience','update_station']as const){
++    const q=new PgDialect().sqlToQuery(configurationMutation(operation,eventId,stationId,experienceId,{name:'Nome',label:'Estação'}));
++    assert.equal((q.sql.match(/clock_timestamp\(\)/g)||[]).length,1);assert.ok(q.sql.includes('EXISTS(SELECT 1 FROM participations p WHERE p.event_id=e.id)'));
++    assert.equal(q.sql.includes("p.status IN ('waiting','active')"),false);assert.ok(q.sql.includes('NOT f.ended'));
++    assert.ok(q.sql.includes('LEAST(e.operational_deadline_at,e.admin_deadline_at)<=d.at'));
++    assert.ok(q.sql.includes('f.at'));assert.ok(q.sql.includes('LEFT JOIN written'));
++  }
++});
+diff --git a/docs/ARQUITETURA_BACKEND_ARENAGO.md b/docs/ARQUITETURA_BACKEND_ARENAGO.md
+index a6eb04d187d670935b1f576116769c2508fce0ff..4e485c9e12bdc389d54244540fc5b3a587c006c9 100644
+--- a/docs/ARQUITETURA_BACKEND_ARENAGO.md
++++ b/docs/ARQUITETURA_BACKEND_ARENAGO.md
+@@ -1750,6 +1750,41 @@ mudança na intenção original. Detalhes, limites e PostgreSQL pendente em
+ 
+ ## 18. Contratos de integração v0.5 — configuração administrativa de eventos, experiências e estações (19/10/2026)
+ 
++**Implementação E08.13 — 04/11/2026:** as dez rotas do inventário §18.2 estão
++implementadas em `AdminEventsModule`, com Admin global/conta ativa/sessão/2FA,
++DTOs estritos e RFC 7807. As marcações de proposta abaixo preservam o histórico;
++§20 e o contrato efetivo em `E08_13_IMPLEMENTACAO.md` prevalecem. A listagem usa
++keyset `(createdAt,id)` descendente, limite 1–50, filtros `phase`/`statusStored` e
++cursor base64url canônico. GETs usam snapshot `REPEATABLE READ READ ONLY`, sem
++locks de linha ou escrita, com consultas em número constante.
++
++O PATCH genérico do evento permite somente `name`; `startsAt`, `timezone` e os
++campos das rotas operacionais não são alteráveis por ele. Como política
++conservadora para o ponto antes proposto, o nome do evento também fica bloqueado
++após qualquer participação histórica. PATCH de experiência permite somente
++`name`, e de estação somente `label`. `reason` é opcional e validado quando
++fornecido; não cria exigência de justificativa não prevista nos exemplos mínimos.
++Criação de experiência fixa `queueAcceptingEntries=true`/FIFO zero; criação de
++estação fixa `availability=available`. Não há pausa de fila, DELETE ou reparent.
++
++Prontidão e fases são calculadas no PostgreSQL: `scheduled`, `not_ready`, `open`,
++`closing`, `closed`, com prazo definitivo compartilhado da E08.9. Prontidão é
++configuração/capacidade; aceitação também exige janela temporal e ausência de
++fechamento Admin. Estação available com pending conta como capacidade; Staff
++precisa de concessão vigente no evento e conta ativa/verificada, sem sessão
++conectada. Timezone de entrada é validado/canonicalizado por Intl; a leitura usa
++o catálogo PostgreSQL sem distinguir caixa. Versões/aliases de tzdata dos dois
++runtimes precisam ser compatíveis, conforme limitação registrada no relatório.
++
++As seis mutações reutilizam TTL Admin e idempotência durável, com namespaces
++próprios. Evento → experiência → estação → conta/concessão/sessão precede a
++decisão SQL que revalida prazo/histórico e faz INSERT/UPDATE na mesma CTE.
++Objeto, auditoria e intenção comitam juntos. Nome/label já igual é no-op,
++inclusive após histórico/prazo: conclui somente a intenção, sem UPDATE do objeto
++ou auditoria. Replay exige autorização atual e preserva a resposta histórica.
++PostgreSQL E08.13 permanece pendente de execução manual; resultados locais,
++cobertura e comandos estão no relatório.
++
+ **Natureza:** [PROPOSTA TÉCNICA]. As capacidades decorrem das decisões de produto já aprovadas. **Não** são endpoints existentes; o schema de banco já foi aplicado na Task 6.2; as rotas deste capítulo não foram implementadas. Não duplicar controles de papéis, encerramento, horários ou fila externa já definidos nas seções 14–17. Todos os endpoints abaixo usam prefixo `/api/v1` no deployment e respostas de erro `application/problem+json` (RFC 7807, como a Task 6.1). Os nomes de erro são códigos propostos para integração, não enums previamente homologados.
+ 
+ ### 18.1 Autorização, isolamento e responsabilidades
+@@ -1964,6 +1999,17 @@ A decisão C-10 estabelece código **único, imutável e não reutilizável** de
+ 
+ ### 20.4 Complementos aos contratos administrativos
+ 
++**Situação E08.13 — 04/11/2026:** `EXISTS(participations)` é revalidado sob lock
++do evento e no comando SQL decisivo para criação de experiência e alterações
++estruturais. Waiting, active, finished e canceled bloqueiam igualmente. Adicionar
++estação à experiência existente continua permitido com histórico enquanto o
++prazo definitivo não chegou e o evento não está closed, inclusive na janela
++residual de fechamento controlado; isso não reabre admissões. E03/E05,
++E07.1–E07.6, disponibilidade E08.5, horários, fila externa, encerramentos e
++avaliações não foram alterados. As corridas reais preparadas para §20 e os
++limites da verificação de concessões Staff estão descritos no relatório E08.13;
++não representam execução ou aprovação PostgreSQL pelo Codex.
++
+ | Endpoint já proposto | Alteração de regra |
+ |---|---|
+ | `POST /admin/events/:eventId/experiences` | Negar se `EXISTS(participations)`; inclusive histórico cancelado |
+diff --git a/docs/E08_13_IMPLEMENTACAO.md b/docs/E08_13_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..e3e6a5790d45568e65803692f4533fed9d1ab42d
+--- /dev/null
++++ b/docs/E08_13_IMPLEMENTACAO.md
+@@ -0,0 +1,386 @@
++# E08.13 — Configuração administrativa de eventos, experiências e estações
++
++## Base, retomada e escopo
++
++Entrega única na branch `feature/events-participations`, sobre
++`00f89c96e594bbedbb68a462de968da9adff9656`
++(`feat(events): implementar consultas e saídas de participação`). Antes das edições,
++conferidos branch, HEAD, índice, working tree e arquivos não rastreados: E08.12
++commitada e árvore limpa. Snapshot inicial em
++`%TEMP%/arenago-e0813-before-TOFfRq/snapshot.json`.
++
++A retomada solicitada pelo responsável preservou integralmente a implementação
++e os testes já existentes. A tentativa anterior de regressão unitária foi recusada
++antes da execução porque a revisão automática não conseguiu concluir por limite
++de uso; não houve classificação da ação como insegura. Após a retomada, o mesmo
++fluxo autorizado passou pela revisão e a regressão foi executada, sem alterar
++políticas de segurança ou contornar a aprovação.
++
++Consultados AGENTS.md, arquitetura §§14–18/20, planejamento D01–D11 e
++C-05/C-10/C-13/C-14, relatórios E08.1–E08.12, schema/migrações e serviços/helpers
++correspondentes. A seção 20 prevalece sobre as propostas antigas da seção 18.
++As dez rotas ainda não existiam. Reutilizados `AdminEventsModule`, autenticação,
++TTL Admin, helpers de autorização, reserva/conclusão duráveis e auditoria.
++
++Base anterior informada pelo responsável: **584 unitários** e **841 PostgreSQL**
++aprovados. Esses resultados não aprovam antecipadamente esta implementação.
++Não há schema/migrações/dependências novos ou alterações de regras dos serviços
++E03/E05, E07.1–E07.6 e E08.1–E08.12. Nenhum teste histórico precisou ser alterado.
++
++## Dez contratos HTTP efetivos
++
++Todas as rotas usam `/api/v1`, Bearer, conta ativa, sessão vigente, Admin global
++vigente e 2FA Admin existente. Staff isolado não tem acesso ao CRUD. IDs da rota
++são UUIDs validados e normalizados; identidade/sessão vêm exclusivamente do
++principal autenticado. Todos os POST/PATCH exigem `Idempotency-Key` válida.
++
++| Método e rota | Entrada | Sucesso / envelope |
++| --- | --- | --- |
++| `GET /admin/events` | Query paginada estrita | 200 `{ items, nextCursor }` |
++| `POST /admin/events` | Configuração completa abaixo | 201 `{ event }` |
++| `GET /admin/events/:eventId` | UUID | 200 `{ event }` |
++| `PATCH /admin/events/:eventId` | `{ name, reason? }` | 200 `{ event }` |
++| `GET /admin/events/:eventId/readiness` | UUID | 200 critérios/fase/aceitação |
++| `GET /admin/events/:eventId/experiences` | UUID | 200 `{ eventId, items }` |
++| `POST /admin/events/:eventId/experiences` | `{ name, reason? }` | 201 `{ experience }` |
++| `PATCH /admin/events/:eventId/experiences/:experienceId` | `{ name, reason? }` | 200 `{ experience }` |
++| `POST /admin/events/:eventId/experiences/:experienceId/stations` | `{ label, reason? }` | 201 `{ station }` |
++| `PATCH /admin/events/:eventId/experiences/:experienceId/stations/:stationId` | `{ label, reason? }` | 200 `{ station }` |
++
++O payload mínimo de criação do evento é:
++
++```json
++{
++  "name": "ArenaGo — Dia 1",
++  "accessCode": "ARENA-D1",
++  "timezone": "America/Sao_Paulo",
++  "startsAt": "2026-11-05T17:00:00.000Z",
++  "officialEndsAt": "2026-11-05T23:00:00.000Z",
++  "operationalDeadlineAt": "2026-11-05T23:30:00.000Z",
++  "externalQueueEnabled": true
++}
++```
++
++`reason` é opcional em todas as seis mutações. Quando informado, usa a validação
++administrativa existente: texto não vazio após trim, até 500 caracteres, sem
++controles. Quando ausente, auditoria recebe NULL, permitido pelo schema; não é
++inventada uma justificativa humana. Isso preserva os exemplos mínimos `{name}`
++e `{label}` da arquitetura, sem impor uma regra de produto adicional.
++
++Nomes e labels são aparados nas extremidades, não vazios e limitados a 180/160/120
++pontos de código Unicode, respectivamente. Controles, NUL e surrogates isolados
++são rejeitados. Código passa por `normalizeEventAccessCode()` C-10: ASCII, 4–64,
++grupos alfanuméricos separados por hífen e forma canônica maiúscula. Fuso é IANA
++válido pelo Intl e é canonicalizado, inclusive quando digitado com outra caixa.
++
++Instantes de entrada reutilizam `normalizeScheduleInstant()` da E08.7: RFC 3339
++absoluto, com fuso explícito, calendário válido e até três casas decimais. Ausência
++de fuso, `-00:00`, datas impossíveis ou precisão maior são rejeitados, sem
++arredondamento silencioso. Intervalos exigem `startsAt < officialEndsAt`,
++`officialEndsAt <= operationalDeadlineAt <= officialEndsAt + 60 minutos`.
++A margem não é acrescentada automaticamente. Datas de saída e decisão mantêm
++seis casas de microssegundos formatadas no PostgreSQL.
++
++Todos os DTOs são estritos. IDs do corpo, reparent, status, closure, counters,
++relógios internos, disponibilidade em PATCH estrutural e campos arbitrários são
++rejeitados. JSON malformado/primitivo é rejeitado pelo parser/filtro existente.
++
++## Respostas, paginação e privacidade
++
++`event` contém `id`, `name`, `accessCode`, `timezone`, três horários originais,
++`statusStored`, `closureMode`, `closureRequestedAt`, `adminDeadlineAt`,
++`externalQueueEnabled`, `effectivePhase`, `readiness`,
++`acceptingNewParticipations`, `createdAt` e `updatedAt`.
++`readiness` contém `ready`, `missing` e os cinco `checks` descritos adiante.
++
++`experience` contém `id`, `eventId`, `name`, `queueAcceptingEntries`,
++`lastQueueOrder` como string decimal exata, `createdAt` e `updatedAt`.
++`station` contém `id`, `experienceId`, `label`, `availability`,
++`pendingServiceSessionId` derivado, `createdAt` e `updatedAt`.
++GET experiências acrescenta `stations` a cada experiência; associações são
++agrupadas em memória após consultas constantes, sem consulta por item.
++
++Listagem aceita somente `limit` (1–50, padrão 20), `cursor`, `phase` e
++`statusStored`. Usa keyset `(created_at,id)` descendente, desempate por UUID,
++limite+1 e cursor base64url canônico com versão, timestamp preciso e UUID.
++Reutiliza o padrão E08.10 sem offset, perdas de precisão ou consultas N+1.
++Filtros e cursor inválidos são rejeitados; cursor não é autorização nem reserva.
++
++GETs usam `REPEATABLE READ READ ONLY`, autorização SQL no mesmo snapshot e
++consultas em número constante, sem `FOR SHARE`/`FOR UPDATE`, escrita, auditoria
++ou intenção idempotente. A autorização de leitura usa os mesmos critérios dos
++helpers Admin, com SELECT sem locks para respeitar READ ONLY. Prontidão pode
++mudar após a resposta; os escritores existentes continuam responsáveis por
++suas revalidações transacionais.
++
++DTOs fechados não expõem participantes, nomes de contas, e-mails, perfis,
++questionários, tokens, concessões nominais ou auditorias detalhadas. Pendência
++de estação é somente o ID da sessão persistida, sem nome/identidade do jogador;
++não cria coluna redundante de ocupação nem resolve atendimento em GET.
++
++## Criação, imutabilidade e decisões estruturais
++
++Evento nasce `scheduled`, fechamento Admin NULL, contador externo zero e horários
++exatamente solicitados. Pode existir sem experiência, estação ou Staff; nessa
++situação não está pronto para novas participações. `UNIQUE(access_code_normalized)`
++resolve cadastros concorrentes, com `ON CONFLICT` específico desse código:
++um cadastra, outro recebe `ACCESS_CODE_ALREADY_USED`, sem auditoria/intenção órfãs.
++O trigger de imutabilidade e a reserva histórica do código permanecem intactos.
++Não há DELETE ou mecanismo para reaproveitar códigos de eventos encerrados.
++
++Como decisão conservadora para o ponto proposto da §18.6, PATCH de evento altera
++**somente name**, e mudança real é bloqueada após qualquer participação histórica.
++Não permite `startsAt`, `timezone`, código, horários de corte, fila externa,
++estado/fechamento, counters ou metadados internos. As rotas operacionais E08.5,
++E08.6, E08.7 e E08.8 seguem exclusivas e não foram duplicadas.
++
++Criação de experiência e mudanças de experiência.name/station.label usam
++`EXISTS(participations WHERE event_id=...)`, sem filtro de status. Waiting,
++active, finished e canceled bloqueiam igualmente; reentrada e fila desligada
++não liberam edição. A experiência nasce no evento, `queueAcceptingEntries=true`
++e contador zero; o PATCH não implementa pausa operacional da fila ainda não
++especificada. IDs e relacionamentos são imutáveis.
++
++Nova estação nasce available, valor inicial técnico congelado da proposta,
++sem Staff fixo ou fila própria. Adicioná-la à experiência existente é permitido
++com histórico, enquanto o evento não estiver closed e o prazo definitivo não
++tiver sido atingido. Isso inclui a janela residual de fechamento controlado,
++sem reabrir admissões. FIFO, participações, serviços e avaliações são preservados.
++
++Nome/label já igual após normalização é **no-op**: mesmo após histórico ou prazo,
++não executa UPDATE do objeto, não muda `updated_at` e não cria auditoria. Exige
++autorização e chave, e conclui somente a intenção com a resposta pública. Não é
++um atalho para mudança real depois do bloqueio; essa escolha segue o padrão
++dos comandos Admin anteriores.
++
++## Prontidão e fase efetiva
++
++`configurationProjection` calcula no PostgreSQL, sem `is_ready` persistido:
++
++| Critério | Predicado |
++| --- | --- |
++| `nameAndAccessCode` | Nome não vazio com trim equivalente ao JS; código ASCII canônico e comprimento válido |
++| `validScheduleAndTimezone` | Intervalos válidos e timezone no catálogo PostgreSQL, comparação sem distinguir caixa |
++| `externalQueueConfigured` | Booleano explícito, inclusive false |
++| `hasExperienceWithAvailableStation` | Experiência do evento com estação available, mesmo que tenha pending |
++| `hasVerifiedActiveStaff` | Concessão Staff do evento não revogada, conta ativa e e-mail verificado, sem exigir sessão conectada |
++
++`missing` usa `EVENT_NAME_OR_ACCESS_CODE_INVALID`, `EVENT_SCHEDULE_INVALID`,
++`EVENT_EXTERNAL_QUEUE_NOT_CONFIGURED`, `EXPERIENCE_WITH_AVAILABLE_STATION` e
++`VERIFIED_ACTIVE_STAFF`. Estes indicadores administrativos não substituem os
++códigos públicos de bloqueio E03/E07 nem expõem pessoas ao participante.
++
++Fases, nesta precedência: closed se estado closed ou prazo definitivo vencido;
++closing se fechamento Admin, estado closing ou corte oficial já alcançado;
++scheduled se início futuro; not_ready se faltam critérios; open no restante.
++Estado persistido scheduled atrasado não impede abertura efetiva quando pronto,
++nem permite operar após corte. O prazo definitivo reutiliza
++`effectiveEventDeadline()` da E08.9; aceitação exige prontidão, início inclusivo,
++corte oficial exclusivo e ausência de fechamento Admin.
++
++Perder a última estação/Staff suspende admissões, sem fechar evento ou cancelar
++participantes. Recuperar recursos não supera nenhum corte. GET não abre evento,
++não executa o job e não grava estado observado.
++
++**Limitação de catálogo:** entradas novas são validadas/canonicalizadas pelo Intl
++do Node, e a leitura valida o catálogo de timezones PostgreSQL. Não é declarada
++equivalência universal entre aliases/versões de tzdata dos runtimes. Manter
++catálogos compatíveis no ambiente; legado com fuso desconhecido no PostgreSQL
++fica sem prontidão. Não foram feitas correções em massa ou migrações de legado.
++
++## Locks, autorização, idempotência e auditoria
++
++Mutações usam `READ COMMITTED`. Em objetos existentes: evento `FOR UPDATE` →
++experiência → estação, quando aplicável → conta → concessão Admin global → sessão,
++com os helpers existentes. A cadeia estação/experiência/evento é revalidada no
++banco; recurso ausente ou de outro pai recebe 404 neutro. Cadastro de evento,
++sem linha anterior para bloquear, autentica/bloqueia o ator e usa a unicidade do
++código. Não há nova ordem de locks nos escritores antigos.
++
++Após locks e reserva, a sessão é revalidada. A CTE decisiva materializa um único
++`clock_timestamp()`, reavalia prazo definitivo e qualquer histórico, e faz o
++INSERT/UPDATE condicionado no mesmo comando. Verifica `writtenId`/linha afetada.
++Datas dos objetos e auditoria usam esse instante, sem `Date` entre writes.
++Sessão é checada novamente antes da conclusão/commit, revertendo efeitos se
++expirar. Papel/conta/sessão bloqueados permanecem protegidos até o commit.
++
++As seis operações têm namespaces próprios: `admin_create_event`,
++`admin_update_event_metadata`, `admin_create_experience`,
++`admin_update_experience`, `admin_create_station` e `admin_update_station`.
++Fingerprint contém versão, operação, recurso/cadeia e payload normalizado,
++incluindo justificativa opcional; ator integra a chave única existente.
++`ADMIN_IDEMPOTENCY_TTL_SECONDS` é reutilizado, sem nova variável ou fallback.
++
++Mesma intenção devolve corpo/status históricos, inclusive após TTL ou fechamento,
++sem nova mutação/auditoria. Outra intenção/recurso com a mesma chave conflita;
++Admins distintos não compartilham respostas. Replay exige autorização atual e
++valida DTO fechado, referência, status e pertencimento. `in_progress` persistido
++segue o conflito existente; não há expurgo ou reexecução por TTL.
++
++Mudança efetiva gera uma auditoria na mesma transação, com ator, evento, ação,
++objeto, antes/depois mínimo, reason opcional e instante. Replay e no-op não geram
++auditoria nova. Falhas revertem objeto, auditoria e reserva juntos. Erros internos
++têm mensagem constante `ADMIN_CONFIGURATION_INTERNAL_ERROR`, com causa interna
++preservada; o filtro não divulga SQL ou conteúdo privado.
++
++## Erros RFC 7807
++
++| Situação | HTTP / código |
++| --- | --- |
++| Entrada/UUID/filtros/chave inválidos | 400 `VALIDATION_ERROR` |
++| Parsing JSON inválido/primitivo | 400 `BAD_REQUEST`, pelo filtro existente |
++| Sessão/2FA inválidos | 401 códigos existentes, incluindo `ADMIN_2FA_REQUIRED` |
++| Conta inativa | 401 `ACCOUNT_DEACTIVATED`, compatível com Admin anterior |
++| Sem Admin global vigente | 403 `ADMIN_REQUIRED` |
++| Objeto inexistente ou cadeia de outro evento | 404 `RESOURCE_NOT_FOUND` |
++| Histórico bloqueia mudança estrutural | 409 `EVENT_CONFIGURATION_LOCKED` |
++| Evento definitivamente encerrado | 409 `EVENT_OPERATION_ENDED` |
++| Código já reservado | 409 `ACCESS_CODE_ALREADY_USED` |
++| Outra intenção na mesma chave | 409 `IDEMPOTENCY_KEY_REUSED` |
++| Intenção persistida em andamento | 409 `IDEMPOTENCY_IN_PROGRESS` |
++| Integridade/falha interna | 500 `INTERNAL_SERVER_ERROR` |
++
++## Arquivos da entrega
++
++| Arquivo | Responsabilidade |
++| --- | --- |
++| `backend/src/events/admin-configuration.controller.ts` | Dez rotas e composição HTTP |
++| `backend/src/events/admin-configuration.dto.ts` | Entradas, cursores e DTOs de resposta/replay |
++| `backend/src/events/admin-configuration-query.service.ts` | Consultas/autorização em snapshot readonly |
++| `backend/src/events/admin-configuration.projection.ts` | SQL de prontidão/fase e projeções públicas |
++| `backend/src/events/admin-configuration.service.ts` | Transação, idempotência, mutações e auditoria |
++| `backend/src/events/admin-configuration.mutation.ts` | CTE decisiva de histórico/prazo/escrita |
++| `backend/src/events/admin-configuration.problem.ts` | Erros estáveis e sanitização |
++| `backend/src/events/admin-events.module.ts` | Registro e exportação sem duplicar rotas antigas |
++| `backend/test/unit/admin-configuration.test.ts` | 86 testes de DTO, consultas e serviço |
++| `backend/test/unit/admin-configuration-http.test.ts` | 52 HTTP simulados e DI real sem conexão |
++| `backend/test/integration/admin-configuration.integration.test.ts` | 188 testes PostgreSQL incluídos na regressão aprovada |
++| `docs/ARQUITETURA_BACKEND_ARENAGO.md` | Atualizações pontuais de §§18/20 |
++| `docs/E08_13_IMPLEMENTACAO.md` | Este relatório |
++
++## Validações efetivamente executadas
++
++| Verificação | Resultado |
++| --- | --- |
++| Específicos de DTO/consulta/serviço | 86/86 aprovados antes da interrupção, preservados e incluídos na regressão final |
++| HTTP simulados específicos | 52/52 aprovados antes da interrupção, preservados e incluídos na regressão final |
++| Regressão unitária completa na retomada | **722/722 aprovados**, 0 falhas, cancelamentos ou skips |
++| Typecheck produção/testes (`typecheck:test`) | Aprovado |
++| Lint | Aprovado |
++| Build | Aprovado |
++
++Os **138 novos unitários/HTTP simulados** somam-se aos 584 anteriores. Testes
++unitários usam doubles próprios e URL local inoperante, com dotenv desativado;
++DI real verificou zero conexões. Não foi executado PostgreSQL real pelo Codex.
++
++### Revisão pontual da preparação PostgreSQL
++
++Na retomada, uma preparação ainda não executada tentou alterar um código de
++evento para testar prontidão inválida. A migração `0002_events_base.sql` contém
++`tr_events_access_code_immutable`, que rejeitaria esse UPDATE com 23514 antes
++de alcançar a consulta alvo. Classificação: erro de fixture na preparação, não
++defeito funcional confirmado por execução PostgreSQL.
++
++Corrigida somente essa preparação local: INSERT de um evento legado cujo código
++inválido C-10 ainda satisfaz o CHECK histórico `upper(btrim(...))`, com experiência,
++estação e Staff próprios. O trigger não é desabilitado ou alterado. A asserção
++continua exigindo o critério de código falso e foi reforçada para exigir os
++outros quatro critérios verdadeiros. Recursos entram na limpeza local da suíte.
++Contagem permanece 188; nenhuma fixture compartilhada ou teste aprovado anterior
++foi modificado. Typecheck/lint foram repetidos após esse ajuste; a produção e os
++unitários já aprovados não mudaram.
++
++### PostgreSQL: aprovação manual definitiva
++
++O responsável confirmou a execução manual da regressão PostgreSQL completa:
++
++| Executados | Aprovados | Falhas | Cancelamentos | Ignorados |
++| --- | --- | --- | --- | --- |
++| **1.029** | **1.029** | **0** | **0** | **0** |
++
++A regressão aprovada contempla todos os **188 testes novos E08.13** e os
++**841 anteriores**. A contagem inicialmente prevista por análise estática foi
++confirmada na execução real. O resumo da execução isolada dos 188 testes não
++foi fornecido separadamente; não se declara uma execução focada independente.
++A aprovação dos 188 está comprovada pela sua inclusão na regressão completa.
++
++Permanecem registrados os resultados locais anteriores: **86/86 específicos de
++serviço**, **52/52 HTTP simulados**, **722/722 unitários**, typecheck, lint e build
++aprovados. Não há pendências de validação da E08.13.
++
++PostgreSQL foi executado exclusivamente pelo responsável, não pelo Codex.
++Nesta finalização, somente o relatório e a evidência foram atualizados; nenhum
++teste foi reexecutado. Não foram solicitadas/acessadas credenciais ou alterados
++arquivos `.env`, schema, migrações e dependências. Não se declara validação de
++produção.
++
++A suíte cobre as dez rotas, auth/2FA/revogação, código/cadastro incompleto,
++validações, histórico em quatro estados, cadeias, no-op com `xmin`, defaults,
++paginação, privacidade, prontidão/capacidade, replay/TTL/chaves/atores e isolamento.
++Concorrências usam conexões/transações independentes, locks reais e
++`pg_blocking_pids`, incluindo E03, disponibilidade E08.5, horários E08.7,
++Admin E08.8 e job E08.9. Snapshot de readiness é mantido durante mudança real
++de disponibilidade. Há **24 falhas SQL reais preparadas**: seis mutações ×
++reserva/objeto/auditoria/conclusão; o SQL original é executado e validado antes
++de `SELECT 1/0` na mesma conexão. Estado e retry são verificados após rollback.
++
++**Limite da cobertura de concessões:** não foram encontrados controllers reais
++grant/revoke de papéis neste checkout. Não foi criado um endpoint substituto.
++Os testes de perda/recuperação do último Staff usam SQL transacional real sob
++lock de evento, exercitando prontidão/ingresso e as tabelas existentes; não
++alegam homologação de endpoints grant/revoke ausentes. Auth/Roles e protocolos
++dos escritores existentes foram preservados. Nenhuma auditoria geral foi feita.
++
++### Comandos PowerShell de referência para o responsável
++
++Comandos preservados para reprodução futura; a regressão já está aprovada e
++nenhuma nova execução é exigida nesta finalização documental.
++Usar somente banco local descartável já preparado com as migrações do projeto.
++As guardas existentes exigem URLs idênticas, `NODE_ENV=test`,
++`127.0.0.1:55432/arenago_events_test`, sem redirecionamentos. Os quatro TTLs estão
++explícitos; substituir placeholders somente na sessão local, sem compartilhá-los
++ou salvá-los no repositório. A suíte limpa também eventos criados pela nova API,
++sem modificar as fixtures compartilhadas.
++
++```powershell
++Set-Location C:\DoJob\ProgramacaoMobile\backend
++$env:NODE_ENV = 'test'
++$env:EVENTS_TEST_DATABASE_URL = 'postgresql://USUARIO:SENHA@127.0.0.1:55432/arenago_events_test'
++$env:DATABASE_URL = $env:EVENTS_TEST_DATABASE_URL
++$env:DATABASE_DIRECT_URL = $env:EVENTS_TEST_DATABASE_URL
++$env:DOTENV_CONFIG_PATH = 'NUL'
++$env:STAFF_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:ADMIN_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:EVALUATION_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:EVENT_CLOSURE_JOB_TEST_ENABLED = 'false'
++$env:EVENT_CLOSURE_INTERVAL_MS = '30000'
++
++# Focado: 188 testes; resumo de execução isolada não fornecido.
++# Todos estão incluídos na regressão aprovada; não executados pelo Codex.
++.\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test --test-concurrency=1 test/integration/admin-configuration.integration.test.ts
++if ($LASTEXITCODE -ne 0) { throw 'Falha na integração PostgreSQL E08.13' }
++
++# Regressão: 1.029/1.029 aprovados manualmente pelo responsável.
++npm.cmd run test:integration
++if ($LASTEXITCODE -ne 0) { throw 'Falha na regressão PostgreSQL completa' }
++```
++
++## Evidência e pendências
++
++Evidência única: `qa-evidence/e08-13-changes.diff`, patch completo dos **13 arquivos**
++da tabela, incluindo onze novos, contra o HEAD inicial `00f89c9`. UTF-8 sem BOM,
++caminhos relativos e cabeçalhos `diff --git`; exclui outros `.diff`, `.env`,
++credenciais, dependências instaladas, temporários e mudanças de outras tasks.
++Aplicação verificada com `git apply --check` e `git apply` em cópia isolada da base,
++seguida de comparação integral dos 13 arquivos finais, normalizando apenas
++CRLF/LF conforme Git. Nenhuma omissão/divergência; índice/HEAD e evidências
++históricas preservados.
++
++Não há pendências de validação da E08.13. Restam apenas commit e push manuais
++pelo responsável; HEAD e índice foram preservados nesta finalização.
++Sugestão sem execução: `feat(events): implementar configuração administrativa da Arena`.
++
++Sem add, commit, push, merge ou rebase. E08.14 não iniciada. Não houve auditoria
++geral, implantação, telas Expo, BI/exportações, notificações, CRUD de pessoas,
++arquivamento/DELETE ou funcionalidade fora dos dez contratos.

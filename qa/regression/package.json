@@ -11,7 +11,7 @@
   "devDependencies": {
     "@react-navigation/core": "7.22.1",
     "@react-navigation/routers": "7.6.4",
-    "react": "19.2.3",
-    "react-test-renderer": "19.2.3"
+    "react": "19.3.0",
+    "react-test-renderer": "19.3.0"
   }
 }

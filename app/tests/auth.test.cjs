@@ -153,6 +153,7 @@ function createAuthRig(fetchHandler, options = {}) {
   const manager = createAuthSessionManager({
     client,
     tokenStorage,
+    now: options.now,
   });
 
   return { manager, httpClient: client, tokenStorage, secureStore, requests };
@@ -522,6 +523,441 @@ test('Admin login with requires2FA: true does not grant authenticated access or 
 });
 
 // ============================================================================
+// Login Admin: confirmação real de segundo fator, com rede e SecureStore simulados.
+const adminUser = {
+  id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', name: 'Admin de teste', email: 'admin@example.test',
+  emailVerified: true, roles: ['participante', 'admin'], hasCompletedQuestionnaire: true,
+};
+const adminSession = { user: adminUser, accessToken: 'admin-access-after-2fa',
+  refreshToken: 'admin-refresh-after-2fa', expiresIn: 900 };
+const adminChallengeBody = { requires2FA: true, isTotpConfigured: true,
+  tempToken: 'temporary-challenge-only-in-memory', message: 'Informe o segundo fator para concluir o acesso.' };
+
+function adminRig(verify = async () => jsonResponse(200, adminSession), options = {}) {
+  return createAuthRig(async (request, init) => {
+    if (request.url.endsWith('/auth/login')) return jsonResponse(200, { ...adminChallengeBody, ...options.challenge });
+    if (request.url.endsWith('/auth/2fa/verify')) return verify(request, init);
+    if (request.url.endsWith('/auth/me')) return jsonResponse(200, adminUser);
+    throw new Error('Unexpected request in the Admin fixture');
+  }, options);
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+async function beginAdminChallenge(rig) {
+  return rig.manager.login({ email: adminUser.email, password: 'ValidPassword#2026' });
+}
+
+test('TOTP: Participante e Staff continuam autenticando apenas pelo contrato de senha', async () => {
+  for (const roles of [['participante'], ['participante', 'staff']]) {
+    const user = { ...adminUser, roles };
+    const rig = createAuthRig(async (request) => request.url.endsWith('/auth/login')
+      ? jsonResponse(200, { ...adminSession, user }) : jsonResponse(200, user));
+    assert.equal((await beginAdminChallenge(rig)).status, 'authenticated');
+    assert.equal(rig.manager.getSnapshot().adminChallenge, null);
+    assert.equal(rig.requests.some((request) => request.url.endsWith('/auth/2fa/verify')), false);
+  }
+});
+
+test('TOTP: AuthContext disponibiliza verificação e cancelamento sem expor o token temporário', async () => {
+  const rig = adminRig();
+  await beginAdminChallenge(rig);
+  const module = loadModule('context/AuthContext.js', (name) => {
+    if (name === 'react') return {
+      createContext: () => ({ Provider: 'Provider' }), useContext: () => null,
+      useRef: (value) => ({ current: value }), useEffect() {},
+      useState: (initial) => [typeof initial === 'function' ? initial() : initial, () => {}],
+    };
+    if (name === '../services/authService') return { createAuthSessionManager: () => rig.manager };
+    if (name === '../services/httpClient') return { httpClient: rig.httpClient };
+    if (name === '../services/tokenStorage') return { defaultTokenStorage: rig.tokenStorage };
+    return require(name);
+  }).exports;
+  const value = module.AuthProvider({ sessionManager: rig.manager, autoRestore: false }).props.value;
+  assert.equal(value.verifyAdminTwoFactor, rig.manager.verifyAdminTwoFactor);
+  assert.equal(value.cancelAdminTwoFactor, rig.manager.cancelAdminTwoFactor);
+  assert.equal('tempToken' in value.adminChallenge, false);
+  value.cancelAdminTwoFactor();
+});
+
+test('TOTP: código válido confirma pelo endpoint correto e publica sessão pelo fluxo existente', async () => {
+  const rig = adminRig(async (request) => {
+    assert.deepEqual(request.body, { tempToken: adminChallengeBody.tempToken, code: '012345' });
+    assert.equal(request.headers.Authorization, undefined);
+    assert.equal(rig.manager.getSnapshot().isAuthenticated, false);
+    assert.equal(rig.manager.getAccessToken(), null);
+    assert.equal(rig.secureStore.store.size, 0);
+    return jsonResponse(200, adminSession);
+  });
+  await beginAdminChallenge(rig);
+  assert.equal(JSON.stringify(rig.manager.getSnapshot()).includes(adminChallengeBody.tempToken), false);
+  const result = await rig.manager.verifyAdminTwoFactor('012345');
+  assert.equal(result.status, 'authenticated');
+  assert.equal(result.nextRoute, 'MainTabs');
+  assert.equal(rig.manager.getSnapshot().user.id, adminUser.id);
+  assert.equal(rig.manager.getSnapshot().adminChallenge, null);
+  assert.equal(rig.manager.getAccessToken(), adminSession.accessToken);
+  assert.equal(await rig.tokenStorage.getRefreshToken(), adminSession.refreshToken);
+  assert.equal(rig.requests.filter((request) => request.url.endsWith('/auth/login')).length, 1);
+  await assert.rejects(rig.manager.verifyAdminTwoFactor('012345'), (error) => error.code === 'ADMIN_2FA_CHALLENGE_EXPIRED');
+  assert.equal(rig.requests.filter((request) => request.url.endsWith('/auth/2fa/verify')).length, 1);
+});
+
+test('TOTP: código inválido não autentica e permite informar outro código no mesmo desafio', async () => {
+  let attempts = 0;
+  const rig = adminRig(async () => ++attempts === 1
+    ? problemResponse(401, { code: 'ADMIN_2FA_INVALID', detail: 'Segundo fator inválido.' })
+    : jsonResponse(200, adminSession));
+  await beginAdminChallenge(rig);
+  await assert.rejects(rig.manager.verifyAdminTwoFactor('111111'), (error) => error.status === 401);
+  assert.equal(rig.manager.getSnapshot().isAuthenticated, false);
+  assert.equal(rig.manager.getAccessToken(), null);
+  assert.equal(rig.secureStore.store.size, 0);
+  assert.equal(rig.manager.getSnapshot().adminChallenge.isTotpConfigured, true);
+  assert.equal((await rig.manager.verifyAdminTwoFactor('012345')).status, 'authenticated');
+  assert.equal(rig.requests[1].body.tempToken, rig.requests[2].body.tempToken);
+});
+
+test('TOTP: formato inválido e desafio expirado são recusados antes da rede', async () => {
+  let time = 1_000_000;
+  const rig = adminRig(undefined, { now: () => time });
+  await beginAdminChallenge(rig);
+  await assert.rejects(rig.manager.verifyAdminTwoFactor('123'), (error) => error.code === 'VALIDATION_ERROR');
+  time += 300_000;
+  await assert.rejects(rig.manager.verifyAdminTwoFactor('012345'), (error) => error.code === 'ADMIN_2FA_CHALLENGE_EXPIRED');
+  assert.equal(rig.requests.length, 1);
+  assert.equal(rig.manager.getSnapshot().adminChallenge, null);
+  assert.equal(rig.manager.getSnapshot().isAuthenticated, false);
+});
+
+test('TOTP: cancelamento, logout e invalidação eliminam o desafio sem persistir seu token', async () => {
+  for (const terminate of [
+    (manager) => manager.cancelAdminTwoFactor(),
+    (manager) => manager.logout(),
+    (manager) => manager.client.get('/protected', { auth: true }),
+  ]) {
+    const rig = createAuthRig(async (request) => request.url.endsWith('/auth/login')
+      ? jsonResponse(200, adminChallengeBody)
+      : problemResponse(401, { code: 'SESSION_REVOKED', detail: 'Sessão revogada.' }));
+    await beginAdminChallenge(rig);
+    try { await terminate(rig.manager); } catch (error) { assert.equal(error.code, 'SESSION_REVOKED'); }
+    await assert.rejects(rig.manager.verifyAdminTwoFactor('012345'), (error) => error.code === 'ADMIN_2FA_CHALLENGE_EXPIRED');
+    assert.equal(rig.manager.getSnapshot().adminChallenge, null);
+    assert.equal(rig.manager.getSnapshot().isAuthenticated, false);
+    assert.equal(rig.secureStore.store.size, 0);
+    assert.equal(rig.requests.some((request) => request.url.endsWith('/auth/2fa/verify')), false);
+  }
+});
+
+test('TOTP: confirmações concorrentes compartilham uma única requisição e sessão', async () => {
+  const entered = deferred(), response = deferred();
+  const rig = adminRig(() => { entered.resolve(); return response.promise; });
+  await beginAdminChallenge(rig);
+  const first = rig.manager.verifyAdminTwoFactor('012345');
+  const second = rig.manager.verifyAdminTwoFactor('012345');
+  assert.equal(first, second);
+  await entered.promise;
+  assert.equal(rig.requests.filter((request) => request.url.endsWith('/auth/2fa/verify')).length, 1);
+  response.resolve(jsonResponse(200, adminSession));
+  assert.equal((await first).status, 'authenticated');
+  assert.equal((await second).status, 'authenticated');
+  assert.equal(rig.secureStore.calls.set, 1);
+});
+
+test('TOTP: cancelamento e logout durante confirmação descartam a resposta atrasada', async () => {
+  for (const terminate of [(manager) => manager.cancelAdminTwoFactor(), (manager) => manager.logout()]) {
+    const entered = deferred(), response = deferred();
+    const rig = adminRig(() => { entered.resolve(); return response.promise; });
+    await beginAdminChallenge(rig);
+    const pending = rig.manager.verifyAdminTwoFactor('012345');
+    await entered.promise;
+    await terminate(rig.manager);
+    response.resolve(jsonResponse(200, adminSession));
+    assert.equal((await pending).status, 'aborted');
+    assert.equal(rig.manager.getSnapshot().isAuthenticated, false);
+    assert.equal(rig.manager.getSnapshot().adminChallenge, null);
+    assert.equal(rig.secureStore.calls.set, 0);
+  }
+});
+
+test('TOTP: novo login de outra conta vence uma confirmação antiga sem contaminar tokens', async () => {
+  const entered = deferred(), response = deferred();
+  const otherUser = { ...adminUser, id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', roles: ['participante'] };
+  const rig = createAuthRig(async (request) => {
+    if (request.url.endsWith('/auth/login')) return jsonResponse(200, request.body.email === adminUser.email
+      ? adminChallengeBody : { ...adminSession, user: otherUser, accessToken: 'other-access', refreshToken: 'other-refresh' });
+    if (request.url.endsWith('/auth/2fa/verify')) { entered.resolve(); return response.promise; }
+    if (request.url.endsWith('/auth/me')) return jsonResponse(200, otherUser);
+    throw new Error('Unexpected request');
+  });
+  await beginAdminChallenge(rig);
+  const old = rig.manager.verifyAdminTwoFactor('012345');
+  await entered.promise;
+  await rig.manager.login({ email: 'other@example.test', password: 'ValidPassword#2026' });
+  response.resolve(jsonResponse(200, adminSession));
+  assert.equal((await old).status, 'aborted');
+  assert.equal(rig.manager.getSnapshot().user.id, otherUser.id);
+  assert.equal(rig.manager.getAccessToken(), 'other-access');
+  assert.equal(await rig.tokenStorage.getRefreshToken(), 'other-refresh');
+  assert.equal(rig.manager.getSnapshot().adminChallenge, null);
+});
+
+test('TOTP: novo login substitui o token temporário e respostas de senha antigas são descartadas', async () => {
+  const entered = deferred(), oldLogin = deferred();
+  let calls = 0;
+  const rig = createAuthRig(async (request) => {
+    if (request.url.endsWith('/auth/login')) {
+      calls++;
+      if (calls === 1) { entered.resolve(); return oldLogin.promise; }
+      return jsonResponse(200, { ...adminChallengeBody, tempToken: 'new-private-challenge' });
+    }
+    if (request.url.endsWith('/auth/2fa/verify')) {
+      assert.equal(request.body.tempToken, 'new-private-challenge');
+      return jsonResponse(200, adminSession);
+    }
+    return jsonResponse(200, adminUser);
+  });
+  const old = beginAdminChallenge(rig);
+  await entered.promise;
+  await beginAdminChallenge(rig);
+  oldLogin.resolve(jsonResponse(200, adminChallengeBody));
+  assert.equal((await old).status, 'aborted');
+  assert.equal((await rig.manager.verifyAdminTwoFactor('012345')).status, 'authenticated');
+});
+
+test('TOTP: rede e timeout não repetem confirmação incerta e exigem novo login', async () => {
+  for (const timeout of [false, true]) {
+    const rig = adminRig(async (request, init) => {
+      if (!timeout) throw new Error('Connection lost');
+      return new Promise((resolve, reject) => {
+        init.signal.addEventListener('abort', () => reject(Object.assign(new Error('Timeout'), { name: 'AbortError' })), { once: true });
+      });
+    }, { timeoutMs: 20 });
+    await beginAdminChallenge(rig);
+    await assert.rejects(rig.manager.verifyAdminTwoFactor('012345'), (error) => error.isNetworkError && (!timeout || error.isTimeout));
+    assert.equal(rig.manager.getSnapshot().adminChallenge, null);
+    assert.equal(rig.manager.getSnapshot().isAuthenticated, false);
+    await assert.rejects(rig.manager.verifyAdminTwoFactor('012345'), (error) => error.code === 'ADMIN_2FA_CHALLENGE_EXPIRED');
+    assert.equal(rig.requests.filter((request) => request.url.endsWith('/auth/2fa/verify')).length, 1);
+  }
+});
+
+test('TOTP: respostas 503 e 429 mantêm suas políticas sem emitir sessão', async () => {
+  for (const status of [503, 429]) {
+    const rig = adminRig(async () => problemResponse(status, {
+      code: status === 503 ? 'TOTP_CONFIGURATION_UNAVAILABLE' : 'ADMIN_2FA_RATE_LIMITED',
+    }, status === 429 ? { 'Retry-After': '900' } : {}));
+    await beginAdminChallenge(rig);
+    await assert.rejects(rig.manager.verifyAdminTwoFactor('012345'), (error) => error.status === status);
+    assert.equal(Boolean(rig.manager.getSnapshot().adminChallenge), status === 503);
+    assert.equal(rig.manager.getSnapshot().isAuthenticated, false);
+    assert.equal(rig.secureStore.calls.set, 0);
+    rig.manager.cancelAdminTwoFactor();
+  }
+});
+
+test('TOTP: resposta incompleta e falha do SecureStore não publicam sessão', async () => {
+  for (const storageFailure of [false, true]) {
+    const rig = adminRig(async () => jsonResponse(200, storageFailure ? adminSession : { user: adminUser }));
+    await beginAdminChallenge(rig);
+    if (storageFailure) rig.secureStore.setItemAsync = async () => { throw new Error('Keystore unavailable'); };
+    await assert.rejects(rig.manager.verifyAdminTwoFactor('012345'));
+    assert.equal(rig.manager.getSnapshot().adminChallenge, null);
+    assert.equal(rig.manager.getSnapshot().isAuthenticated, false);
+    assert.equal(rig.manager.getAccessToken(), null);
+    assert.equal(rig.secureStore.store.size, 0);
+  }
+});
+
+test('TOTP: restauração e refresh não usam o desafio temporário como credencial', async () => {
+  const rig = adminRig();
+  await beginAdminChallenge(rig);
+  assert.equal((await rig.manager.restoreSession()).status, 'admin_2fa_required');
+  assert.equal(await rig.manager.refreshSession(), null);
+  assert.equal(rig.requests.length, 1);
+  rig.manager.cancelAdminTwoFactor();
+});
+
+test('TOTP: sessão confirmada usa a restauração e a renovação já existentes', async () => {
+  const rig = adminRig();
+  await beginAdminChallenge(rig);
+  await rig.manager.verifyAdminTwoFactor('012345');
+  const restored = createAuthRig(async (request) => {
+    if (request.url.endsWith('/auth/refresh')) {
+      assert.equal(request.body.refreshToken, adminSession.refreshToken);
+      return jsonResponse(200, { accessToken: 'restored-admin-access',
+        refreshToken: 'rotated-admin-refresh', expiresIn: 900 });
+    }
+    assert.ok(request.url.endsWith('/auth/me'));
+    assert.equal(request.headers.Authorization, 'Bearer restored-admin-access');
+    return jsonResponse(200, adminUser);
+  }, { initialRefreshToken: await rig.tokenStorage.getRefreshToken() });
+  await restored.manager.restoreSession();
+  assert.equal(restored.manager.getSnapshot().isAuthenticated, true);
+  assert.equal(restored.manager.getSnapshot().user.id, adminUser.id);
+  assert.equal(restored.manager.getSnapshot().adminChallenge, null);
+  assert.equal(await restored.tokenStorage.getRefreshToken(), 'rotated-admin-refresh');
+});
+
+test('TOTP: cancelamento ou logout durante gravação do refresh removem a credencial atrasada', async () => {
+  for (const terminate of [(manager) => manager.logout(), (manager) => manager.cancelAdminTwoFactor()]) {
+    const entered = deferred(), release = deferred();
+    const rig = adminRig();
+    await beginAdminChallenge(rig);
+    const originalWrite = rig.secureStore.setItemAsync;
+    rig.secureStore.setItemAsync = async (...args) => {
+      entered.resolve();
+      await release.promise;
+      return originalWrite(...args);
+    };
+    const confirmation = rig.manager.verifyAdminTwoFactor('012345');
+    await entered.promise;
+    const terminated = terminate(rig.manager);
+    release.resolve();
+    assert.equal((await confirmation).status, 'aborted');
+    await terminated;
+    assert.equal(rig.manager.getSnapshot().isAuthenticated, false);
+    assert.equal(rig.manager.getAccessToken(), null);
+    assert.equal(rig.secureStore.store.size, 0);
+  }
+});
+
+test('TOTP: cancelamento durante login descarta o desafio que chegar depois', async () => {
+  const entered = deferred(), response = deferred();
+  const rig = createAuthRig(() => { entered.resolve(); return response.promise; });
+  const pending = beginAdminChallenge(rig);
+  await entered.promise;
+  rig.manager.cancelAdminTwoFactor();
+  response.resolve(jsonResponse(200, adminChallengeBody));
+  assert.equal((await pending).status, 'aborted');
+  assert.equal(rig.manager.getSnapshot().adminChallenge, null);
+});
+
+test('TOTP: desafio sem tempToken é recusado e não autentica', async () => {
+  const rig = adminRig(undefined, { challenge: { tempToken: undefined } });
+  await assert.rejects(beginAdminChallenge(rig), (error) => error.code === 'INVALID_LOGIN_RESPONSE');
+  assert.equal(rig.manager.getSnapshot().adminChallenge, null);
+  assert.equal(rig.manager.getSnapshot().isAuthenticated, false);
+  assert.equal(rig.secureStore.calls.set, 0);
+});
+
+test('TOTP: resposta de confirmação recebida após o prazo local não restaura a sessão', async () => {
+  let time = 1_000_000;
+  const entered = deferred(), response = deferred();
+  const rig = adminRig(() => { entered.resolve(); return response.promise; }, { now: () => time });
+  await beginAdminChallenge(rig);
+  const pending = rig.manager.verifyAdminTwoFactor('012345');
+  await entered.promise;
+  time += 300_000;
+  response.resolve(jsonResponse(200, adminSession));
+  assert.equal((await pending).status, 'aborted');
+  assert.equal(rig.manager.getSnapshot().adminChallenge, null);
+  assert.equal(rig.secureStore.calls.set, 0);
+});
+
+test('TOTP UI: campo numérico, loading e cancelamento preservam a navegação e evitam duplo toque', async () => {
+  const entered = deferred(), response = deferred();
+  const rig = adminRig(() => { entered.resolve(); return response.promise; });
+  const h = createHarness('screens/auth/LoginScreen.js', { authContext: rig.manager });
+  fillForm(h, loginInputs, { email: adminUser.email, password: 'ValidPassword#2026' });
+  await h.actAsync(() => h.press('Entrar na conta'));
+  const input = h.nodes.find((node) => node.type === 'TextInput' && node.props.accessibilityLabel === 'Código TOTP');
+  assert.ok(input);
+  assert.equal(input.props.keyboardType, 'number-pad');
+  assert.equal(input.props.maxLength, 6);
+  assert.equal(h.nodes.some((node) => node.props?.placeholder === loginInputs.password), false);
+  h.act(() => input.props.onChangeText('01a2345'));
+  let pending;
+  h.act(() => {
+    const button = h.nodes.find((node) => node.props?.accessibilityLabel === 'Verificar código');
+    pending = button.props.onPress();
+    button.props.onPress();
+  });
+  await entered.promise;
+  assert.equal(rig.requests[1].body.code, '012345');
+  assert.ok(hasText(h, 'Verificando...'));
+  assert.equal(h.nodes.find((node) => node.props?.accessibilityLabel === 'Verificar código').props.disabled, true);
+  h.act(() => h.press('Cancelar verificação'));
+  response.resolve(jsonResponse(200, adminSession));
+  await h.actAsync(() => pending);
+  assert.equal(rig.manager.getSnapshot().isAuthenticated, false);
+  assert.equal(h.nodes.some((node) => node.props?.accessibilityLabel === 'Código TOTP'), false);
+  assert.ok(h.nodes.some((node) => node.props?.placeholder === loginInputs.password));
+  assert.deepEqual(h.navigationCalls, []);
+});
+
+test('TOTP UI: código válido conclui, código inválido informa erro e não reenvia senha', async () => {
+  for (const accepted of [false, true]) {
+    const rig = adminRig(async () => accepted ? jsonResponse(200, adminSession)
+      : problemResponse(401, { code: 'ADMIN_2FA_INVALID' }));
+    const h = createHarness('screens/auth/LoginScreen.js', { authContext: rig.manager });
+    fillForm(h, loginInputs, { email: adminUser.email, password: 'ValidPassword#2026' });
+    await h.actAsync(() => h.press('Entrar na conta'));
+    h.act(() => h.nodes.find((node) => node.props?.accessibilityLabel === 'Código TOTP').props.onChangeText('012345'));
+    await h.actAsync(() => h.press('Verificar código'));
+    assert.equal(rig.manager.getSnapshot().isAuthenticated, accepted);
+    assert.equal(rig.requests.filter((request) => request.url.endsWith('/auth/login')).length, 1);
+    assert.equal(Object.hasOwn(rig.requests[1].body, 'password'), false);
+    assert.equal(Object.hasOwn(rig.requests[1].body, 'email'), false);
+    if (!accepted) {
+      assert.ok(hasText(h, 'Código inválido ou desafio expirado. Tente um código atual ou cancele e entre novamente.'));
+      assert.equal(h.nodes.find((node) => node.props?.accessibilityLabel === 'Código TOTP').props.value, '');
+    }
+    assert.deepEqual(h.navigationCalls, []);
+    h.unmount();
+  }
+});
+
+test('TOTP UI: Admin sem configuração recebe orientação e nenhum atalho de autenticação', async () => {
+  const rig = adminRig(undefined, { challenge: { isTotpConfigured: false } });
+  const h = createHarness('screens/auth/LoginScreen.js', { authContext: rig.manager });
+  fillForm(h, loginInputs, { email: adminUser.email, password: 'ValidPassword#2026' });
+  await h.actAsync(() => h.press('Entrar na conta'));
+  assert.equal(h.nodes.some((node) => node.props?.accessibilityLabel === 'Código TOTP'), false);
+  assert.equal(h.nodes.some((node) => node.props?.accessibilityLabel === 'Verificar código'), false);
+  assert.ok(h.nodes.some((node) => node.type === 'Text' && textOf(node).includes('procedimento administrativo existente')));
+  await assert.rejects(rig.manager.verifyAdminTwoFactor('012345'), (error) => error.code === 'ADMIN_TOTP_NOT_CONFIGURED');
+  assert.equal(rig.manager.getSnapshot().isAuthenticated, false);
+  assert.equal(rig.requests.length, 1);
+  h.unmount();
+  assert.equal(rig.manager.getSnapshot().adminChallenge, null);
+});
+
+test('TOTP UI: expiração e falha de rede retornam ao login com orientação segura', async () => {
+  for (const expired of [true, false]) {
+    let time = 1_000_000;
+    const rig = adminRig(async () => { throw new Error('Connection lost'); }, { now: () => time });
+    const h = createHarness('screens/auth/LoginScreen.js', { authContext: rig.manager });
+    fillForm(h, loginInputs, { email: adminUser.email, password: 'ValidPassword#2026' });
+    await h.actAsync(() => h.press('Entrar na conta'));
+    h.act(() => h.nodes.find((node) => node.props?.accessibilityLabel === 'Código TOTP').props.onChangeText('012345'));
+    if (expired) time += 300_000;
+    await h.actAsync(() => h.press('Verificar código'));
+    assert.equal(h.nodes.some((node) => node.props?.accessibilityLabel === 'Código TOTP'), false);
+    assert.equal(rig.manager.getSnapshot().isAuthenticated, false);
+    const text = h.nodes.filter((node) => node.type === 'Text').map(textOf).join(' ');
+    assert.match(text, expired ? /expirou ou foi cancelada/ : /entre novamente por segurança/);
+    h.unmount();
+  }
+});
+
+test('TOTP UI: sair da tela cancela o desafio e permite um novo login ao voltar', async () => {
+  const rig = adminRig();
+  const h = createHarness('screens/auth/LoginScreen.js', { authContext: rig.manager });
+  fillForm(h, loginInputs, { email: adminUser.email, password: 'ValidPassword#2026' });
+  await h.actAsync(() => h.press('Entrar na conta'));
+  h.setFocused(false);
+  assert.equal(rig.manager.getSnapshot().adminChallenge, null);
+  h.setFocused(true);
+  assert.ok(h.nodes.some((node) => node.props?.placeholder === loginInputs.password));
+  assert.equal(h.nodes.find((node) => node.props?.accessibilityLabel === 'Entrar na conta').props.disabled, false);
+  h.unmount();
+});
+
 // 3. AUTH CONTEXT, RESTAURAÇÃO, SINGLE-FLIGHT REFRESH, LOGOUT E SEGURANÇA
 // ============================================================================
 
@@ -872,29 +1308,7 @@ test('web platform keeps refresh token only in memory and never calls SecureStor
   assert.equal(secureStore.calls.delete, 0);
 });
 
-test('401 session expiration does not clear or mutate ParticipationContext state', async () => {
-  let capturedParticipation = { id: 'part-1', status: 'active' };
-  const participationModule = loadModule('context/ParticipationContext.js', (name) => {
-    if (name === 'react') {
-      return {
-        createContext: (defaultValue) => ({ _defaultValue: defaultValue, Provider: 'Provider' }),
-        useState: () => [
-          capturedParticipation,
-          (next) => {
-            capturedParticipation = typeof next === 'function' ? next(capturedParticipation) : next;
-          },
-        ],
-      };
-    }
-    return require(name);
-  }).exports;
-
-  const tree = participationModule.ParticipationProvider({ children: 'child' });
-  assert.deepEqual(structuredClone(tree.props.value.participation), {
-    id: 'part-1',
-    status: 'active',
-  });
-
+test('401 session expiration invalidates authentication', async () => {
   const rig = createAuthRig(
     async () =>
       problemResponse(401, {
@@ -906,8 +1320,6 @@ test('401 session expiration does not clear or mutate ParticipationContext state
 
   await rig.manager.restoreSession();
   assert.equal(rig.manager.getSnapshot().isAuthenticated, false);
-  assert.equal(typeof participationModule.ParticipationProvider, 'function');
-  assert.deepEqual(capturedParticipation, { id: 'part-1', status: 'active' });
 });
 
 // ============================================================================

@@ -1,0 +1,1166 @@
+diff --git a/backend/README.md b/backend/README.md
+index 2b9d18084e0cc820661a40464d97c42380a7b1fd..61bf5ea6feec020a665d1841531d52e3f809ce56 100644
+--- a/backend/README.md
++++ b/backend/README.md
+@@ -66,6 +66,12 @@ Nenhum banco remoto está configurado. Quando a conexão remota for autorizada,
+ 
+ ## Scripts
+ 
++Envio/edição de avaliações E08.11 exigem `EVALUATION_IDEMPOTENCY_TTL_SECONDS`
++inteiro positivo explícito, sem padrão e independente dos TTLs Staff, participante
++e Admin. Fornecer também essa variável ao iniciar `AppModule`/`EventsModule` e
++processos de teste. Contratos, política técnica de comentários e comandos de
++validação PostgreSQL manual em [E08.11](../docs/E08_11_IMPLEMENTACAO.md).
++
+ As três operações Staff HTTP (§16.9–16.11) exigem `STAFF_IDEMPOTENCY_TTL_SECONDS`
+ configurado com inteiro positivo, sem padrão. A aplicação valida essa configuração
+ ao iniciar. Ela define somente `expiresAt`, sem expurgo nem perda de replay enquanto
+diff --git a/backend/src/evaluations/evaluation-read.policy.ts b/backend/src/evaluations/evaluation-read.policy.ts
+index 0484b1a5dbbb075dfe92fe22287c8a83cf8dc14c..182b0ea1021d25ce688f1d881849281f74a98788 100644
+--- a/backend/src/evaluations/evaluation-read.policy.ts
++++ b/backend/src/evaluations/evaluation-read.policy.ts
+@@ -5,7 +5,7 @@ import { isPreciseInstant } from "./evaluation-read.dto";
+ export const SYSTEM_FINALIZATION_REASONS = ["admin_immediate", "admin_controlled_external_wait_closed", "automatic_operational_deadline", "automatic_admin_deadline"] as const;
+ 
+ /** Todas as cinco projeções usam os mesmos fatos e comparações no PostgreSQL. */
+-export function evaluationReadProjection(selection: SQL, observedAt: string): SQL {
++export function evaluationReadProjection(selection: SQL, observedAt: string | SQL): SQL {
+   return sql`WITH scoped AS MATERIALIZED (${selection}), facts AS (
+     SELECT p.*,c.n::text AS completed_count,v.id AS evaluation_id,v.rating,v.comment,v.submitted_at,v.updated_at AS evaluation_updated_at,v.first_comment_at
+     FROM scoped p LEFT JOIN evaluations v ON v.participation_id=p.id
+diff --git a/backend/src/evaluations/evaluation-write.controller.ts b/backend/src/evaluations/evaluation-write.controller.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..83752c86da8e313d85da50961cea04b8edc75844
+--- /dev/null
++++ b/backend/src/evaluations/evaluation-write.controller.ts
+@@ -0,0 +1,43 @@
++import { Body, Controller, HttpCode, Inject, Injectable, Param, Patch, Post, Req } from "@nestjs/common";
++import { CurrentUserId, RequireSessionAuth } from "../auth/current-user.decorator";
++import type { AuthenticatedRequest } from "../auth/session-auth.guard";
++import { ProblemException } from "../common/errors/problem.exception";
++import { parseOperationIdempotencyTtl } from "../common/http/idempotency-ttl";
++import { validateOperationBody, validateOperationIdempotencyKey, validateOperationParams } from "../common/http/operation-validation";
++import { evaluationParams } from "./evaluation-read.dto";
++import { editEvaluationBody, submitEvaluationBody, writeEvaluationParams } from "./evaluation-write.dto";
++import { EvaluationWriteService } from "./evaluation-write.service";
++import type { EvaluationWriteFailure, EvaluationWriteResult } from "./evaluation-write.types";
++
++@Injectable()
++export class EvaluationWriteIdempotencyPolicy {
++  private readonly ttl = parseOperationIdempotencyTtl(process.env.EVALUATION_IDEMPOTENCY_TTL_SECONDS, "EVALUATION_IDEMPOTENCY_TTL_SECONDS");
++  expiresAt() { const value = new Date(Date.now() + this.ttl); if (!Number.isFinite(value.getTime())) throw new Error("EVALUATION_TTL_INVALID"); return value; }
++}
++const codes: Record<EvaluationWriteFailure, string> = { access_denied: "RESOURCE_NOT_FOUND", not_eligible: "EVALUATION_NOT_ELIGIBLE",
++  submission_expired: "EVALUATION_SUBMISSION_EXPIRED", already_submitted: "EVALUATION_ALREADY_SUBMITTED", edit_window_closed: "EVALUATION_EDIT_WINDOW_CLOSED",
++  comment_already_added: "COMMENT_ALREADY_ADDED", request_conflict: "IDEMPOTENCY_KEY_REUSED", in_progress: "IDEMPOTENCY_IN_PROGRESS" };
++function response(result: EvaluationWriteResult) {
++  if ("evaluation" in result) return { evaluation: result.evaluation };
++  const status = result.kind === "access_denied" ? 404 : 409, code = codes[result.kind];
++  throw new ProblemException({ status, code, typeSlug: code.toLowerCase().replaceAll("_", "-"),
++    title: status === 404 ? "Recurso não encontrado" : "Conflito de avaliação", detail: status === 404 ? "Recurso não encontrado." : "A intenção não pode ser aplicada ao estado atual da avaliação." });
++}
++@Controller()
++@RequireSessionAuth()
++export class EvaluationWriteController {
++  constructor(@Inject(EvaluationWriteService) private readonly writes: EvaluationWriteService,
++    @Inject(EvaluationWriteIdempotencyPolicy) private readonly policy: EvaluationWriteIdempotencyPolicy) {}
++  @Post("participations/:participationId/evaluation")
++  @HttpCode(201)
++  async submit(@CurrentUserId() userId: string, @Param() params: unknown, @Body() body: unknown, @Req() request: AuthenticatedRequest) {
++    const { participationId } = validateOperationParams(evaluationParams, params), payload = validateOperationBody(submitEvaluationBody, body, request);
++    return response(await this.writes.submit({ userId, participationId, payload, idempotencyKey: validateOperationIdempotencyKey(request), expiresAt: this.policy.expiresAt() }));
++  }
++  @Patch("evaluations/:evaluationId")
++  @HttpCode(200)
++  async edit(@CurrentUserId() userId: string, @Param() params: unknown, @Body() body: unknown, @Req() request: AuthenticatedRequest) {
++    const { evaluationId } = validateOperationParams(writeEvaluationParams, params), payload = validateOperationBody(editEvaluationBody, body, request);
++    return response(await this.writes.edit({ userId, evaluationId, payload, idempotencyKey: validateOperationIdempotencyKey(request), expiresAt: this.policy.expiresAt() }));
++  }
++}
+diff --git a/backend/src/evaluations/evaluation-write.dto.ts b/backend/src/evaluations/evaluation-write.dto.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..cc6f3d8905b87be66fd92cddfb9453d6c5c2ef76
+--- /dev/null
++++ b/backend/src/evaluations/evaluation-write.dto.ts
+@@ -0,0 +1,28 @@
++import { z } from "zod";
++import { operationUuid } from "../common/http/operation-validation";
++import { isPreciseInstant } from "./evaluation-read.dto";
++
++export const EVALUATION_COMMENT_LIMIT = 2000;
++const comment = z.string().superRefine((value, ctx) => {
++  const characters = Array.from(value);
++  if (characters.length > EVALUATION_COMMENT_LIMIT || value.includes("\0")
++    || characters.some(c => c.length === 1 && c.charCodeAt(0) >= 0xd800 && c.charCodeAt(0) <= 0xdfff)) {
++    ctx.addIssue({ code: "custom", message: "Comentário inválido ou acima do limite técnico." });
++  }
++}).transform(value => value.trim() === "" ? null : value).nullable();
++export const submitEvaluationBody = z.object({ rating: z.number().int().min(1).max(5), comment: comment.optional() }).strict()
++  .transform(value => ({ rating: value.rating, comment: value.comment ?? null }));
++export const editEvaluationBody = z.object({ rating: z.number().int().min(1).max(5).optional(), comment: comment.optional() }).strict()
++  .refine(value => value.rating !== undefined || value.comment !== undefined, "Informe nota ou comentário.")
++  .transform(value => ({ ...(value.rating !== undefined ? { rating: value.rating } : {}),
++    ...(value.comment !== undefined ? { comment: value.comment } : {}) }));
++export type SubmitEvaluationBody = z.infer<typeof submitEvaluationBody>;
++export type EditEvaluationBody = z.infer<typeof editEvaluationBody>;
++export const writeEvaluationParams = z.object({ evaluationId: operationUuid }).strict();
++const instant = z.custom<string>(isPreciseInstant);
++/** Valida replay histórico sem expor payload interno corrompido. */
++export const evaluationWriteResponse = z.object({ evaluation: z.object({
++  id: operationUuid, participationId: operationUuid, rating: z.number().int().min(1).max(5), comment: z.string().nullable(),
++  submittedAt: instant, updatedAt: instant, editableUntilAt: instant, commentAddUntilAt: instant,
++  permissions: z.object({ canEditRating: z.boolean(), canEditComment: z.boolean(), canAddFirstComment: z.boolean() }).strict(),
++}).strict() }).strict();
+diff --git a/backend/src/evaluations/evaluation-write.policy.ts b/backend/src/evaluations/evaluation-write.policy.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..a7ef4872c5ac866420914c12259da10e9017431b
+--- /dev/null
++++ b/backend/src/evaluations/evaluation-write.policy.ts
+@@ -0,0 +1,38 @@
++import { sql, type SQL } from "drizzle-orm";
++import { evaluationReadProjection, type EvaluationReadRow } from "./evaluation-read.policy";
++import type { EditEvaluationBody, SubmitEvaluationBody } from "./evaluation-write.dto";
++
++export interface EvaluationDecisionRow extends EvaluationReadRow {
++  decisionAt: string; writtenId: string | null; allowed: boolean; changed: boolean; commentWindow: boolean; submissionOpen: boolean | null;
++}
++/** O relógio alternativo é interno, para verificar bordas SQL em testes; HTTP nunca o fornece. */
++export function submissionStatement(selection: SQL, evaluationId: string, body: SubmitEvaluationBody, clock: SQL = sql`clock_timestamp()`): SQL {
++  return sql`WITH decision AS MATERIALIZED (SELECT ${clock} AS at),
++    facts AS MATERIALIZED (${evaluationReadProjection(selection, sql`(SELECT at FROM decision)`)}),
++    written AS (INSERT INTO evaluations(id,participation_id,rating,comment,submitted_at,updated_at,first_comment_at)
++      SELECT ${evaluationId}::uuid,f."participationId",${body.rating}::smallint,${body.comment}::text,d.at,d.at,
++        CASE WHEN ${body.comment}::text IS NOT NULL THEN d.at END
++      FROM facts f CROSS JOIN decision d WHERE f.eligible AND f.pending AND NOT f.submitted RETURNING id)
++    SELECT f.*,w.id AS "writtenId",(d.at<=f."deadlineAt"::timestamptz) AS "submissionOpen",
++      to_char(d.at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "decisionAt"
++    FROM facts f CROSS JOIN decision d LEFT JOIN written w ON true`;
++}
++export function editStatement(selection: SQL, evaluationId: string, body: EditEvaluationBody, clock: SQL = sql`clock_timestamp()`): SQL {
++  const rating = body.rating !== undefined, comment = Object.hasOwn(body, "comment");
++  return sql`WITH decision AS MATERIALIZED (SELECT ${clock} AS at),
++    facts AS MATERIALIZED (${evaluationReadProjection(selection, sql`(SELECT at FROM decision)`)}),
++    plan AS MATERIALIZED (SELECT f.*,v.id,
++      CASE WHEN ${rating}::boolean THEN ${body.rating ?? null}::smallint ELSE v.rating END AS next_rating,
++      CASE WHEN ${comment}::boolean THEN ${body.comment ?? null}::text ELSE v.comment END AS next_comment,
++      (f."editFull" OR (f."addComment" AND NOT ${rating}::boolean AND ${comment}::boolean
++        AND ${body.comment ?? null}::text IS NOT NULL AND v.comment IS NULL)) AS allowed,
++      (d.at>f."editableUntilAt"::timestamptz AND d.at<=f."commentAddUntilAt"::timestamptz) AS "commentWindow"
++      FROM facts f JOIN evaluations v ON v.id=${evaluationId}::uuid AND v.participation_id=f."participationId" CROSS JOIN decision d),
++    changes AS MATERIALIZED (SELECT p.*,(v.rating IS DISTINCT FROM p.next_rating OR v.comment IS DISTINCT FROM p.next_comment) AS changed
++      FROM plan p JOIN evaluations v ON v.id=p.id),
++    written AS (UPDATE evaluations v SET rating=c.next_rating,comment=c.next_comment,updated_at=d.at,
++      first_comment_at=COALESCE(v.first_comment_at,CASE WHEN ${comment}::boolean AND c.next_comment IS NOT NULL THEN d.at END)
++      FROM changes c CROSS JOIN decision d WHERE v.id=c.id AND v.participation_id=c."participationId" AND c.allowed AND c.changed RETURNING v.id)
++    SELECT c.*,w.id AS "writtenId",to_char(d.at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "decisionAt"
++    FROM changes c CROSS JOIN decision d LEFT JOIN written w ON true`;
++}
+diff --git a/backend/src/evaluations/evaluation-write.service.ts b/backend/src/evaluations/evaluation-write.service.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..e740357c8116e50b9a5deaf95c627213213340c7
+--- /dev/null
++++ b/backend/src/evaluations/evaluation-write.service.ts
+@@ -0,0 +1,90 @@
++import { Inject, Injectable } from "@nestjs/common";
++import { randomUUID } from "node:crypto";
++import { sql } from "drizzle-orm";
++import type { NodePgDatabase } from "drizzle-orm/node-postgres";
++import { DRIZZLE_DATABASE } from "../database/database.module";
++import type { DatabaseTransactionExecutor } from "../database/database-executor";
++import type * as schema from "../database/schema";
++import { completeIdempotencyOperationWithTx, createRequestFingerprint, reserveIdempotencyOperationWithTx, type JsonValue } from "../participations/join-idempotency";
++import { evaluationReadProjection, ownEvaluation, type EvaluationReadRow } from "./evaluation-read.policy";
++import { isPreciseInstant } from "./evaluation-read.dto";
++import { editEvaluationBody, evaluationWriteResponse, submitEvaluationBody } from "./evaluation-write.dto";
++import { editStatement, submissionStatement, type EvaluationDecisionRow } from "./evaluation-write.policy";
++import type { EditEvaluationInput, EvaluationWriteFailure, EvaluationWriteResult, SubmitEvaluationInput } from "./evaluation-write.types";
++
++export const SUBMIT_EVALUATION_OPERATION = "submit_evaluation";
++export const EDIT_EVALUATION_OPERATION = "edit_evaluation";
++export function evaluationWriteFingerprint(operation: string, resourceId: string, payload: JsonValue): string {
++  return createRequestFingerprint(operation, { version: 1, resourceId, payload });
++}
++class WriteRollback extends Error { constructor(readonly kind: EvaluationWriteFailure) { super(kind); } }
++function block(kind: EvaluationWriteFailure): never { throw new WriteRollback(kind); }
++function ensure(value: unknown): asserts value { if (!value) throw new Error("EVALUATION_WRITE_INTEGRITY"); }
++
++@Injectable()
++export class EvaluationWriteService {
++  constructor(@Inject(DRIZZLE_DATABASE) private readonly database: NodePgDatabase<typeof schema>) {}
++  private selection(userId: string, participationId: string) {
++    return sql`SELECT p.id,p.event_id,e.name AS event_name,p.status,p.joined_at,p.arena_entered_at,p.finished_at,p.finish_reason
++      FROM participations p JOIN events e ON e.id=p.event_id WHERE p.id=${participationId}::uuid AND p.user_id=${userId}::uuid`;
++  }
++  async submit(input: SubmitEvaluationInput): Promise<EvaluationWriteResult> { return this.write("submit", input); }
++  async edit(input: EditEvaluationInput): Promise<EvaluationWriteResult> { return this.write("edit", input); }
++  private async write(mode: "submit" | "edit", input: SubmitEvaluationInput | EditEvaluationInput): Promise<EvaluationWriteResult> {
++    try {
++      const payload = mode === "submit" ? submitEvaluationBody.parse(input.payload) : editEvaluationBody.parse(input.payload);
++      ensure(input.idempotencyKey.trim() && input.idempotencyKey.length <= 128 && Number.isFinite(input.expiresAt.getTime()));
++      const evaluationId = "evaluationId" in input ? input.evaluationId : undefined;
++      const resourceId = "participationId" in input ? input.participationId : input.evaluationId;
++      return await this.database.transaction(async tx => {
++        const lookup = mode === "submit" ? sql`SELECT id AS "participationId" FROM participations WHERE id=${resourceId}::uuid AND user_id=${input.userId}::uuid`
++          : sql`SELECT p.id AS "participationId" FROM evaluations v JOIN participations p ON p.id=v.participation_id WHERE v.id=${resourceId}::uuid AND p.user_id=${input.userId}::uuid`;
++        const found = (await tx.execute<{ participationId: string }>(lookup)).rows[0]; if (!found) block("access_denied");
++        const participationId = found.participationId, operation = mode === "submit" ? SUBMIT_EVALUATION_OPERATION : EDIT_EVALUATION_OPERATION;
++        const intent = await reserveIdempotencyOperationWithTx(tx, { actorUserId: input.userId, operation, idempotencyKey: input.idempotencyKey,
++          requestHash: evaluationWriteFingerprint(operation, resourceId, payload as JsonValue), expiresAt: input.expiresAt });
++        if (intent.kind === "request_conflict" || intent.kind === "in_progress") block(intent.kind);
++        const parent = await tx.execute(sql`SELECT id FROM participations WHERE id=${participationId}::uuid AND user_id=${input.userId}::uuid FOR UPDATE`);
++        if (parent.rows.length !== 1) block("access_denied");
++        if (mode === "edit") {
++          const locked = await tx.execute(sql`SELECT id FROM evaluations WHERE id=${evaluationId}::uuid AND participation_id=${participationId}::uuid FOR UPDATE`);
++          if (locked.rows.length !== 1) block("access_denied");
++        }
++        if (intent.kind === "replay") {
++          const replay = evaluationWriteResponse.parse(intent.resultPayload);
++          ensure(intent.httpStatus === (mode === "submit" ? 201 : 200) && replay.evaluation.participationId === participationId
++            && intent.resultReference === replay.evaluation.id && (mode === "submit" || replay.evaluation.id === evaluationId));
++          return { kind: "replay", evaluation: replay.evaluation };
++        }
++        const selection = this.selection(input.userId, participationId);
++        const decision = (await tx.execute<EvaluationDecisionRow>(mode === "submit"
++          ? submissionStatement(selection, randomUUID(), submitEvaluationBody.parse(payload))
++          : editStatement(selection, evaluationId!, editEvaluationBody.parse(payload)))).rows;
++        ensure(decision.length === 1 && isPreciseInstant(decision[0].decisionAt)); const row = decision[0];
++        if (mode === "submit") {
++          if (!row.eligible) block("not_eligible"); if (!row.submissionOpen) block("submission_expired");
++          if (row.submitted) block("already_submitted"); ensure(row.pending && row.writtenId);
++        } else {
++          if (!row.allowed) {
++            if (row.commentWindow && payload.rating === undefined && Object.hasOwn(payload, "comment") && payload.comment !== null && !row.addComment) block("comment_already_added");
++            block("edit_window_closed");
++          }
++          ensure(row.changed ? row.writtenId === evaluationId : row.writtenId === null);
++        }
++        const evaluation = await this.response(tx, selection, row.decisionAt);
++        ensure(mode === "submit" ? evaluation.id === row.writtenId : evaluation.id === evaluationId);
++        await completeIdempotencyOperationWithTx(tx, intent.operationId, { httpStatus: mode === "submit" ? 201 : 200,
++          resultReference: evaluation.id, resultPayload: { evaluation } as unknown as JsonValue });
++        return { kind: mode === "submit" ? "created" : "updated", evaluation };
++      }, { isolationLevel: "read committed" });
++    } catch (error) {
++      if (error instanceof WriteRollback) return { kind: error.kind };
++      // O filtro HTTP existente registra somente message; causa interna nunca vira resposta ou log.
++      throw new Error("EVALUATION_WRITE_INTERNAL_ERROR", { cause: error });
++    }
++  }
++  private async response(tx: DatabaseTransactionExecutor, selection: ReturnType<EvaluationWriteService["selection"]>, at: string) {
++    const rows = (await tx.execute<EvaluationReadRow>(evaluationReadProjection(selection, at))).rows;
++    ensure(rows.length === 1); const value = ownEvaluation(rows[0]); ensure(value); return value;
++  }
++}
+diff --git a/backend/src/evaluations/evaluation-write.types.ts b/backend/src/evaluations/evaluation-write.types.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..16eb24596846df352195df296161d98782316b2b
+--- /dev/null
++++ b/backend/src/evaluations/evaluation-write.types.ts
+@@ -0,0 +1,9 @@
++import type { OwnEvaluation } from "./evaluation-read.types";
++import type { EditEvaluationBody, SubmitEvaluationBody } from "./evaluation-write.dto";
++
++export interface EvaluationWriteIntent { userId: string; idempotencyKey: string; expiresAt: Date }
++export type SubmitEvaluationInput = EvaluationWriteIntent & { participationId: string; payload: SubmitEvaluationBody };
++export type EditEvaluationInput = EvaluationWriteIntent & { evaluationId: string; payload: EditEvaluationBody };
++export type EvaluationWriteFailure = "access_denied" | "not_eligible" | "submission_expired" | "already_submitted"
++  | "edit_window_closed" | "comment_already_added" | "request_conflict" | "in_progress";
++export type EvaluationWriteResult = { kind: "created" | "updated" | "replay"; evaluation: OwnEvaluation } | { kind: EvaluationWriteFailure };
+diff --git a/backend/src/events/events.module.ts b/backend/src/events/events.module.ts
+index d6be72e50e0c60646034fbde6bbf71e75dec523e..0e71e1edb6e8a1aac3d5af799cb4deed84cbe237 100644
+--- a/backend/src/events/events.module.ts
++++ b/backend/src/events/events.module.ts
+@@ -23,12 +23,14 @@ import { EventClosurePolicy } from "./event-closure.policy";
+ import { EventClosureScheduler } from "./event-closure.scheduler";
+ import { EvaluationReadController } from "../evaluations/evaluation-read.controller";
+ import { EvaluationReadService } from "../evaluations/evaluation-read.service";
++import { EvaluationWriteController, EvaluationWriteIdempotencyPolicy } from "../evaluations/evaluation-write.controller";
++import { EvaluationWriteService } from "../evaluations/evaluation-write.service";
+ 
+ /** Agrupa os serviços de Events e reutiliza o acesso PostgreSQL compartilhado. */
+ @Module({
+   imports: [DatabaseModule, AuthModule],
+-  controllers: [EvaluationReadController, StaffOperationsController, StaffQueriesController, StationAvailabilityController, ParticipantQueueController, ExperiencesController],
+-  providers: [EventsService, StaffQueriesService, StationAvailabilityService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, StaffIdempotencyPolicy, ParticipantQueueIdempotencyPolicy, EventClosureService, EventClosurePolicy, EventClosureScheduler, EvaluationReadService],
+-  exports: [EventsService, StaffQueriesService, StationAvailabilityService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, EventClosureService, EvaluationReadService],
++  controllers: [EvaluationWriteController, EvaluationReadController, StaffOperationsController, StaffQueriesController, StationAvailabilityController, ParticipantQueueController, ExperiencesController],
++  providers: [EventsService, StaffQueriesService, StationAvailabilityService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, StaffIdempotencyPolicy, ParticipantQueueIdempotencyPolicy, EventClosureService, EventClosurePolicy, EventClosureScheduler, EvaluationReadService, EvaluationWriteService, EvaluationWriteIdempotencyPolicy],
++  exports: [EventsService, StaffQueriesService, StationAvailabilityService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, EventClosureService, EvaluationReadService, EvaluationWriteService],
+ })
+ export class EventsModule {}
+diff --git a/backend/test/integration/evaluation-write.integration.test.ts b/backend/test/integration/evaluation-write.integration.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..8da9c81a532419b28c6fe507ab440c64fc241c97
+--- /dev/null
++++ b/backend/test/integration/evaluation-write.integration.test.ts
+@@ -0,0 +1,278 @@
++import assert from "node:assert/strict";
++import { randomUUID } from "node:crypto";
++import { after, before, test } from "node:test";
++import { sql } from "drizzle-orm";
++import { PgDialect } from "drizzle-orm/pg-core";
++import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
++import type { QueryConfig, QueryResult } from "pg";
++import supertest from "supertest";
++import * as schema from "../../src/database/schema";
++import type { EvaluationWriteService } from "../../src/evaluations/evaluation-write.service";
++import { submissionStatement, editStatement, type EvaluationDecisionRow } from "../../src/evaluations/evaluation-write.policy";
++import { submitEvaluationBody, editEvaluationBody } from "../../src/evaluations/evaluation-write.dto";
++import { setup, cleanup, app, pool, database, context, account, participant, service, evaluation, expire, ownState, routes, get, problem,
++  person, close, controlled, type Actor } from "./evaluation-read-fixture";
++import { ordered, blocked } from "./event-closure-fixture";
++
++let writes: EvaluationWriteService, makeWrites: (db: NodePgDatabase<typeof schema>) => EvaluationWriteService;
++let fingerprint: typeof import("../../src/evaluations/evaluation-write.service").evaluationWriteFingerprint;
++before(async () => {
++  process.env.EVALUATION_IDEMPOTENCY_TTL_SECONDS = "60"; await setup();
++  const module = await import("../../src/evaluations/evaluation-write.service"); writes = app.get(module.EvaluationWriteService);
++  makeWrites = db => new module.EvaluationWriteService(db); fingerprint = module.evaluationWriteFingerprint;
++});
++after(cleanup);
++const submit = (p: Actor & { participationId: string }, body: object = { rating: 5 }, key: string = randomUUID(), actor: Actor = p) =>
++  supertest(app.getHttpServer()).post(`/api/v1/participations/${p.participationId}/evaluation`).set("Authorization", `Bearer ${actor.token}`).set("Idempotency-Key", key).send(body);
++const edit = (actor: Actor, id: string, body: object = { rating: 5 }, key: string = randomUUID()) =>
++  supertest(app.getHttpServer()).patch(`/api/v1/evaluations/${id}`).set("Authorization", `Bearer ${actor.token}`).set("Idempotency-Key", key).send(body);
++const selection = (userId: string, participationId: string) => sql`SELECT p.id,p.event_id,e.name AS event_name,p.status,p.joined_at,p.arena_entered_at,p.finished_at,p.finish_reason
++  FROM participations p JOIN events e ON e.id=p.event_id WHERE p.id=${participationId}::uuid AND p.user_id=${userId}::uuid`;
++async function eligible() { const c = await context(), p = await participant(c); await service(c, p.participationId); return { c, p }; }
++async function stored(id: string) {
++  return (await pool.query(`SELECT id,participation_id,rating,comment,
++    to_char(submitted_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS submitted,
++    to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS updated,
++    to_char(first_comment_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS first FROM evaluations WHERE id=$1`, [id])).rows[0];
++}
++for (const rating of [1,2,3,4,5]) test(`E08.11 PostgreSQL POST nota ${rating}, instantes consistentes e avaliação única`, async () => {
++  const {p}=await eligible(),r=await submit(p,{rating});assert.equal(r.status,201,JSON.stringify(r.body));const v=await stored(r.body.evaluation.id);
++  assert.equal(v.rating,rating);assert.equal(v.comment,null);assert.equal(v.first,null);assert.equal(v.submitted,v.updated);assert.equal(v.submitted,r.body.evaluation.submittedAt);
++  assert.match(v.submitted,/\.\d{6}Z$/);assert.equal(r.body.evaluation.participationId,p.participationId);
++});
++for (const body of [{}, {rating:0},{rating:6},{rating:1.5},{rating:"5"},{rating:null},{rating:true},{rating:5,userId:"forged"},{rating:5,permissions:{}},{rating:5,submittedAt:"forged"}])
++test(`E08.11 PostgreSQL POST rejeita payload ${JSON.stringify(body)} sem intenção ou avaliação`,async()=>{
++  const {c,p}=await eligible(),before=await ownState(c,p);problem(await submit(p,body),400,"VALIDATION_ERROR");assert.deepEqual(await ownState(c,p),before);
++});
++for(const comment of [null,""," \t\n","Unicode 😀 e\u0301","  texto preservado  ","😀".repeat(2000)])
++test(`E08.11 PostgreSQL POST comentário categoria ${comment===null?"null":comment.length}`,async()=>{
++  const {p}=await eligible(),r=await submit(p,{rating:4,comment});assert.equal(r.status,201,JSON.stringify(r.body));const expected=comment===null||comment.trim()===""?null:comment,v=await stored(r.body.evaluation.id);
++  assert.equal(v.comment,expected);assert.equal(v.first,expected===null?null:v.submitted);assert.equal(r.body.evaluation.comment,expected);
++});
++for(const [name,comment] of [["unicode","😀".repeat(2001)],["spaces"," ".repeat(2001)],["NUL","\0"],["surrogate","\ud800"]] as const)
++test(`E08.11 PostgreSQL comentário inválido ${name} não trunca nem grava`,async()=>{
++  const {c,p}=await eligible(),before=await ownState(c,p);problem(await submit(p,{rating:4,comment}),400,"VALIDATION_ERROR");assert.deepEqual(await ownState(c,p),before);
++  const id=await evaluation(p.participationId);const previous=await ownState(c,p);problem(await edit(p,id,{comment}),400,"VALIDATION_ERROR");assert.deepEqual(await ownState(c,p),previous);
++});
++for(const status of ["waiting","active","finished","canceled"]as const)for(const completions of [0,1,3])
++test(`E08.11 PostgreSQL POST elegibilidade ${status} com ${completions} conclusões reais`,async()=>{
++  const c=await context(),p=await participant(c,{status});for(let n=0;n<completions;n++)await service(c,p.participationId);
++  await service(c,p.participationId,"absent");await service(c,p.participationId,"canceled");
++  const before=await ownState(c,p),r=await submit(p);
++  if(status==="finished"&&completions>0)assert.equal(r.status,201,JSON.stringify(r.body));else{problem(r,409,"EVALUATION_NOT_ELIGIBLE");assert.deepEqual(await ownState(c,p),before);}
++});
++for(const reason of ["voluntary","admin_immediate","admin_controlled_external_wait_closed","automatic_operational_deadline","automatic_admin_deadline"])
++for(const completed of [false,true])test(`E08.11 PostgreSQL finalização ${reason} exige completed=${completed}`,async()=>{
++  const c=await context(),p=await participant(c,{reason});if(completed)await service(c,p.participationId);const r=await submit(p);
++  if(completed)assert.equal(r.status,201,JSON.stringify(r.body));else problem(r,409,"EVALUATION_NOT_ELIGIBLE");
++});
++for(const offset of [-1,0,1])test(`E08.11 PostgreSQL INSERT decisivo no corte inicial ${offset} microssegundo`,async()=>{
++  const c=await context(),p=await participant(c,{days:31});await service(c,p.participationId);
++  const at=(await pool.query(`UPDATE participations SET finished_at=clock_timestamp()-interval '720 hours' WHERE id=$1
++    RETURNING to_char((finished_at+interval '720 hours'+$2::int*interval '1 microsecond') AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`,[p.participationId,offset])).rows[0].at as string;
++  const id=randomUUID(),result=await database.transaction(async tx=>{await tx.execute(sql`SELECT id FROM participations WHERE id=${p.participationId} FOR UPDATE`);
++    return tx.execute<EvaluationDecisionRow>(submissionStatement(selection(p.userId,p.participationId),id,{rating:5,comment:null},sql`${at}::timestamptz`));},{isolationLevel:"read committed"});
++  assert.equal(result.rows.length,1);assert.equal(result.rows[0].decisionAt,at);assert.equal(result.rows[0].pending,offset<=0);assert.equal(result.rows[0].writtenId,offset<=0?id:null);
++  if(offset<=0){const v=await stored(id);assert.equal(v.submitted,at);assert.equal(v.updated,at);}else assert.equal(await stored(id),undefined);
++});
++test("E08.11 PostgreSQL POST após prazo retorna código específico sem consumir intenção",async()=>{
++  const c=await context(),p=await participant(c,{days:31});await service(c,p.participationId);const before=await ownState(c,p);
++  problem(await submit(p),409,"EVALUATION_SUBMISSION_EXPIRED");assert.deepEqual(await ownState(c,p),before);
++});
++test("E08.11 PostgreSQL reentrada no mesmo evento produz avaliações distintas por participação",async()=>{
++  const c=await context(),actor=await account(),a=await participant(c,{actor}),b=await participant(c,{actor});await service(c,a.participationId);await service(c,b.participationId);
++  const x=await submit(a),y=await submit(b);assert.equal(x.status,201);assert.equal(y.status,201);assert.notEqual(x.body.evaluation.id,y.body.evaluation.id);
++  const h=await get(actor,"/participations/history");assert.equal(h.body.items.length,2);assert.ok(h.body.items.every((p:{evaluation:{submitted:boolean}})=>p.evaluation.submitted));
++});
++test("E08.11 PostgreSQL POST duplicado distinto é conflito e mesmo payload normalizado é replay",async()=>{
++  const {c,p}=await eligible(),key=randomUUID(),a=await submit(p,{rating:5},key);assert.equal(a.status,201);
++  const before=await ownState(c,p),b=await submit(p,{rating:5,comment:" "},key);assert.equal(b.status,201);assert.deepEqual(b.body,a.body);
++  problem(await submit(p,{rating:5}),409,"EVALUATION_ALREADY_SUBMITTED");problem(await submit(p,{rating:4},key),409,"IDEMPOTENCY_KEY_REUSED");assert.deepEqual(await ownState(c,p),before);
++});
++test("E08.11 PostgreSQL chaves distinguem recurso e ator sem compartilhar respostas",async()=>{
++  const {c,p}=await eligible(),other=await participant(c),again=await participant(c,{actor:p});await service(c,other.participationId);await service(c,again.participationId);
++  const key=randomUUID(),a=await submit(p,{rating:5},key);assert.equal(a.status,201);
++  problem(await submit(again,{rating:5},key),409,"IDEMPOTENCY_KEY_REUSED");const b=await submit(other,{rating:5},key);assert.equal(b.status,201);assert.notEqual(a.body.evaluation.id,b.body.evaluation.id);
++});
++for(const sameKey of [false,true])test(`E08.11 PostgreSQL POST concorrente sameKey=${sameKey} cria uma linha e uma intenção concluída`,async()=>{
++  const {p}=await eligible(),key=randomUUID();const [a,b]=await ordered(()=>submit(p,{rating:5},key),()=>submit(p,{rating:5},sameKey?key:randomUUID()));
++  assert.equal(a.status,201);if(sameKey){assert.equal(b.status,201);assert.deepEqual(a.body,b.body);}else problem(b,409,"EVALUATION_ALREADY_SUBMITTED");
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM evaluations WHERE participation_id=$1",[p.participationId])).rows[0].n,1);
++  assert.equal((await pool.query("SELECT count(*)::int AS n FROM idempotency_operations WHERE actor_user_id=$1 AND operation='submit_evaluation' AND status='completed'",[p.userId])).rows[0].n,1);
++});
++test("E08.11 PostgreSQL POST replay após TTL e fim de envio não muda dados",async()=>{
++  const {c,p}=await eligible(),key=randomUUID(),a=await submit(p,{rating:5},key);assert.equal(a.status,201);
++  await pool.query("UPDATE participations SET finished_at=clock_timestamp()-interval '40 days' WHERE id=$1",[p.participationId]);
++  await pool.query("UPDATE idempotency_operations SET expires_at=clock_timestamp()-interval '1 second' WHERE actor_user_id=$1",[p.userId]);
++  const before=await ownState(c,p),b=await submit(p,{rating:5},key);assert.equal(b.status,201);assert.deepEqual(b.body,a.body);assert.deepEqual(await ownState(c,p),before);
++  problem(await submit(p,{rating:5}),409,"EVALUATION_SUBMISSION_EXPIRED");assert.deepEqual(await ownState(c,p),before);
++});
++for(const [name,body] of [["rating",{rating:2}],["comment",{comment:"Comentário novo"}],["both",{rating:3,comment:"Ambos"}],
++  ["null",{comment:null}],["empty",{comment:""}],["spaces",{comment:" \t"}]] as const)
++test(`E08.11 PostgreSQL PATCH integral ${name} mantém envio e histórico de comentário`,async()=>{
++  const {p}=await eligible(),a=await submit(p,{rating:5,comment:"Original"});assert.equal(a.status,201);const id=a.body.evaluation.id,before=await stored(id),r=await edit(p,id,body);assert.equal(r.status,200,JSON.stringify(r.body));
++  const after=await stored(id);assert.equal(after.submitted,before.submitted);assert.equal(after.first,before.first);
++  assert.equal(after.rating,"rating"in body?body.rating:before.rating);assert.equal(after.comment,"comment"in body?(body.comment===null||body.comment?.trim()===""?null:body.comment):before.comment);
++  assert.equal(r.body.evaluation.submittedAt,before.submitted);assert.equal(r.body.evaluation.editableUntilAt,a.body.evaluation.editableUntilAt);
++});
++test("E08.11 PostgreSQL PATCH sem mudança material não escreve avaliação nem avança updated_at",async()=>{
++  const {p}=await eligible(),a=await submit(p,{rating:4});const id=a.body.evaluation.id;
++  const before=(await pool.query("SELECT xmin::text AS version FROM evaluations WHERE id=$1",[id])).rows[0].version,old=await stored(id);
++  const r=await edit(p,id,{rating:4,comment:" "});assert.equal(r.status,200);assert.equal((await stored(id)).updated,old.updated);
++  assert.equal((await pool.query("SELECT xmin::text AS version FROM evaluations WHERE id=$1",[id])).rows[0].version,before);
++});
++for(const window of ["full","comment"]as const)for(const offset of [-1,0,1])
++test(`E08.11 PostgreSQL UPDATE decisivo ${window} ${offset} microssegundo`,async()=>{
++  const c=await context(),p=await participant(c,{days:40});await service(c,p.participationId);const id=await evaluation(p.participationId,{days:35});
++  await pool.query("UPDATE evaluations SET updated_at=submitted_at WHERE id=$1",[id]);
++  const at=(await pool.query(`SELECT to_char((submitted_at+CASE WHEN $2::boolean THEN interval '168 hours' ELSE interval '720 hours' END
++    +$3::int*interval '1 microsecond') AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at FROM evaluations WHERE id=$1`,[id,window==="full",offset])).rows[0].at as string;
++  const body=window==="full"?{rating:5}:{comment:"Tardio"},before=await stored(id);
++  const result=await database.transaction(async tx=>{await tx.execute(sql`SELECT id FROM participations WHERE id=${p.participationId} FOR UPDATE`);await tx.execute(sql`SELECT id FROM evaluations WHERE id=${id} FOR UPDATE`);
++    return tx.execute<EvaluationDecisionRow>(editStatement(selection(p.userId,p.participationId),id,body,sql`${at}::timestamptz`));},{isolationLevel:"read committed"});
++  assert.equal(result.rows[0].allowed,offset<=0);assert.equal(result.rows[0].writtenId,offset<=0?id:null);const after=await stored(id);assert.equal(after.submitted,before.submitted);
++  assert.equal(after.updated,offset<=0?at:before.updated);if(window==="comment")assert.equal(after.first,offset<=0?at:null);
++});
++test("E08.11 PostgreSQL após 168 horas só primeiro comentário é permitido",async()=>{
++  const c=await context(),p=await participant(c,{days:20});await service(c,p.participationId);const id=await evaluation(p.participationId,{days:8});
++  const before=await ownState(c,p);for(const body of [{rating:4},{rating:4,comment:"Novo"},{comment:null},{comment:""},{comment:" "}])problem(await edit(p,id,body),409,"EVALUATION_EDIT_WINDOW_CLOSED");
++  assert.deepEqual(await ownState(c,p),before);const r=await edit(p,id,{comment:"  Primeiro 😀  "});assert.equal(r.status,200,JSON.stringify(r.body));const v=await stored(id);
++  assert.equal(v.comment,"  Primeiro 😀  ");assert.equal(v.first,v.updated);problem(await edit(p,id,{comment:"Segundo"}),409,"COMMENT_ALREADY_ADDED");
++  assert.deepEqual((await get(p,routes(p.participationId)[2])).body.evaluation.permissions,{canEditRating:false,canEditComment:false,canAddFirstComment:false});
++});
++for(const previous of [null,"Comentário anterior"])test(`E08.11 PostgreSQL histórico de comentário usado bloqueia inclusão tardia atual=${previous===null?"null":"texto"}`,async()=>{
++  const c=await context(),p=await participant(c,{days:20});await service(c,p.participationId);const id=await evaluation(p.participationId,{days:8,usedComment:true,comment:previous}),before=await ownState(c,p);
++  problem(await edit(p,id,{comment:"Outro"}),409,"COMMENT_ALREADY_ADDED");assert.deepEqual(await ownState(c,p),before);
++});
++test("E08.11 PostgreSQL remover comentário na semana inicial nunca restaura first_comment_at",async()=>{
++  const {p}=await eligible(),a=await submit(p,{rating:4,comment:"Primeiro"}),id=a.body.evaluation.id,first=(await stored(id)).first;
++  assert.equal((await edit(p,id,{comment:null})).status,200);assert.equal((await stored(id)).first,first);
++  await pool.query("UPDATE evaluations SET submitted_at=submitted_at-interval '8 days',updated_at=updated_at-interval '8 days',first_comment_at=first_comment_at-interval '8 days' WHERE id=$1",[id]);
++  problem(await edit(p,id,{comment:"Tardio"}),409,"COMMENT_ALREADY_ADDED");
++});
++test("E08.11 PostgreSQL PATCH definitivo não muda valores e retry histórico sobrevive ao vencimento",async()=>{
++  const {c,p}=await eligible(),a=await submit(p,{rating:4}),id=a.body.evaluation.id,key=randomUUID(),changed=await edit(p,id,{rating:5},key);assert.equal(changed.status,200);
++  await pool.query("UPDATE evaluations SET submitted_at=submitted_at-interval '31 days',updated_at=updated_at-interval '31 days' WHERE id=$1",[id]);
++  await pool.query("UPDATE idempotency_operations SET expires_at=clock_timestamp()-interval '1 second' WHERE actor_user_id=$1",[p.userId]);
++  const before=await ownState(c,p);problem(await edit(p,id,{rating:3}),409,"EVALUATION_EDIT_WINDOW_CLOSED");const replay=await edit(p,id,{rating:5},key);assert.equal(replay.status,200);assert.deepEqual(replay.body,changed.body);assert.deepEqual(await ownState(c,p),before);
++});
++test("E08.11 PostgreSQL PATCHs concorrentes parciais não perdem campos nem reiniciam prazos",async()=>{
++  const {p}=await eligible(),first=await submit(p,{rating:1}),id=first.body.evaluation.id;
++  const [a,b]=await ordered(()=>edit(p,id,{rating:2}),()=>edit(p,id,{comment:"Complemento"}));assert.equal(a.status,200);assert.equal(b.status,200);const v=await stored(id);
++  assert.equal(v.rating,2);assert.equal(v.comment,"Complemento");assert.equal(v.submitted,first.body.evaluation.submittedAt);
++});
++for(const sameKey of [false,true])test(`E08.11 PostgreSQL inclusão tardia concorrente sameKey=${sameKey}`,async()=>{
++  const c=await context(),p=await participant(c,{days:20});await service(c,p.participationId);const id=await evaluation(p.participationId,{days:8}),key=randomUUID();
++  const [a,b]=await ordered(()=>edit(p,id,{comment:"Primeiro"},key),()=>edit(p,id,{comment:"Primeiro"},sameKey?key:randomUUID()));assert.equal(a.status,200);
++  if(sameKey){assert.equal(b.status,200);assert.deepEqual(a.body,b.body);}else problem(b,409,"COMMENT_ALREADY_ADDED");const v=await stored(id);assert.equal(v.comment,"Primeiro");assert.equal(v.first,v.updated);
++});
++test("E08.11 PostgreSQL PATCH conflito diferencia recurso e ausência de campo; namespaces são distintos",async()=>{
++  const {c,p}=await eligible(),key=randomUUID(),a=await submit(p,{rating:5},key),id=a.body.evaluation.id;
++  assert.equal((await edit(p,id,{rating:4},key)).status,200);problem(await edit(p,id,{rating:4,comment:null},key),409,"IDEMPOTENCY_KEY_REUSED");
++  const other=await participant(c,{actor:p});await service(c,other.participationId);const b=await submit(other);assert.equal(b.status,201);
++  problem(await edit(p,b.body.evaluation.id,{rating:4},key),409,"IDEMPOTENCY_KEY_REUSED");
++});
++for(const operation of ["submit_evaluation","edit_evaluation"])test(`E08.11 PostgreSQL intenção in_progress ${operation} não executa escrita`,async()=>{
++  const {c,p}=await eligible(),key=randomUUID(),id=operation==="edit_evaluation"?await evaluation(p.participationId):p.participationId;
++  const payload=operation==="submit_evaluation"?submitEvaluationBody.parse({rating:5}):editEvaluationBody.parse({rating:5});
++  await pool.query(`INSERT INTO idempotency_operations(id,actor_user_id,operation,idempotency_key,request_hash,status,created_at,expires_at)
++    VALUES($1,$2,$3,$4,$5,'in_progress',clock_timestamp(),clock_timestamp()+interval '1 minute')`,[randomUUID(),p.userId,operation,key,fingerprint(operation,id,payload)]);
++  const before=await ownState(c,p);problem(operation==="submit_evaluation"?await submit(p,{rating:5},key):await edit(p,id,{rating:5},key),409,"IDEMPOTENCY_IN_PROGRESS");assert.deepEqual(await ownState(c,p),before);
++});
++for(const mode of ["post","patch"]as const)test(`E08.11 PostgreSQL ${mode} autenticação real, sessão revogada e 404 indistinguível`,async()=>{
++  const {c,p}=await eligible(),id=await evaluation(p.participationId),other=await account(),before=await ownState(c,p);
++  const req=mode==="post"?submit(p):edit(p,id);problem(await req.unset("Authorization"),401,"MISSING_ACCESS_TOKEN");
++  const a=mode==="post"?await submit(p,{rating:5},randomUUID(),other):await edit(other,id),b=mode==="post"?await submit({...p,participationId:randomUUID()},{rating:5},randomUUID(),other):await edit(other,randomUUID());
++  problem(a,404,"RESOURCE_NOT_FOUND");problem(b,404,"RESOURCE_NOT_FOUND");assert.deepEqual(a.body,b.body);
++  await pool.query("UPDATE sessions SET revoked_at=clock_timestamp(),revocation_reason='fixture' WHERE id=$1",[p.sessionId]);
++  problem(mode==="post"?await submit(p):await edit(p,id),401,"SESSION_REVOKED");
++  const after=await ownState(c,p);assert.deepEqual(after.evaluations,before.evaluations);assert.deepEqual(after.intents,before.intents);
++});
++for(const role of ["staff","admin"]as const)test(`E08.11 PostgreSQL ${role} só avalia participação própria e respeita 2FA`,async()=>{
++  const c=await context(),actor=role==="admin"?c.admin:c.staff,p=await participant(c,{actor}),foreign=await participant(c);await service(c,p.participationId);await service(c,foreign.participationId);
++  const foreignId=await evaluation(foreign.participationId),foreignBefore=await ownState(c,foreign);
++  if(role==="admin"){await pool.query("UPDATE sessions SET admin_2fa_verified_at=NULL WHERE id=$1",[actor.sessionId]);problem(await submit(p),401,"ADMIN_2FA_REQUIRED");await pool.query("UPDATE sessions SET admin_2fa_verified_at=clock_timestamp() WHERE id=$1",[actor.sessionId]);}
++  const a=await submit(p);assert.equal(a.status,201,JSON.stringify(a.body));assert.equal((await edit(p,a.body.evaluation.id,{comment:"Próprio"})).status,200);
++  problem(await submit(foreign,{rating:5},randomUUID(),actor),404,"RESOURCE_NOT_FOUND");
++  problem(await edit(actor,foreignId,{rating:1}),404,"RESOURCE_NOT_FOUND");assert.deepEqual(await ownState(c,foreign),foreignBefore);
++});
++for(const mode of ["post","patch"]as const)test(`E08.11 PostgreSQL replay ${mode} revalida autorização atual sem vazar histórico`,async()=>{
++  const {p}=await eligible(),key=randomUUID(),a=await submit(p,{rating:5},key),id=a.body.evaluation.id;
++  if(mode==="patch")assert.equal((await edit(p,id,{comment:"Privado"},key)).status,200);const other=await account();
++  await pool.query("UPDATE participations SET user_id=$2 WHERE id=$1",[p.participationId,other.userId]);
++  const r=mode==="post"?await submit(p,{rating:5},key):await edit(p,id,{comment:"Privado"},key);problem(r,404,"RESOURCE_NOT_FOUND");assert.equal(JSON.stringify(r.body).includes("Privado"),false);
++});
++test("E08.11 PostgreSQL cinco GETs oficiais refletem POST/PATCH sem duplicação ou efeito de leitura",async()=>{
++  const {c,p}=await eligible();assert.equal((await get(p,"/evaluations/pending")).body.items.some((x:{participationId:string})=>x.participationId===p.participationId),true);
++  const a=await submit(p,{rating:5}),id=a.body.evaluation.id;assert.equal(a.status,201);const expected=await ownState(c,p);
++  for(const route of routes(p.participationId)){const r=await get(p,route);assert.equal(r.status,200);if(route.endsWith("evaluation-eligibility")){assert.equal(r.body.submitted,true);assert.equal(r.body.pending,false);}else if(route==="/evaluations/pending")assert.equal(r.body.items.some((x:{participationId:string})=>x.participationId===p.participationId),false);
++    else if(route.endsWith("/evaluation"))assert.deepEqual(r.body.evaluation,a.body.evaluation);else if(route==="/participations/history"){assert.equal(r.body.items.length,1);assert.equal(r.body.items[0].evaluation.submitted,true);}else assert.equal(r.body.pendingEvaluationParticipationIds.includes(p.participationId),false);}
++  assert.deepEqual(await ownState(c,p),expected);const b=await edit(p,id,{rating:3,comment:"Atual"});assert.equal(b.status,200);assert.deepEqual((await get(p,routes(p.participationId)[2])).body.evaluation,b.body.evaluation);assert.equal(b.body.evaluation.submittedAt,a.body.evaluation.submittedAt);
++  for(const secret of [p.userId,c.staff.userId,c.admin.userId,"@example.test","fixture-private-hash","firstCommentAt"]){assert.equal(JSON.stringify(b.body).includes(secret),false);}
++});
++for(const mode of ["manual","automatic"]as const)test(`E08.11 PostgreSQL finalização ${mode} real concorrente libera elegibilidade após lock`,async()=>{
++  const c=await context(),p=await participant(c,{status:"active"});await service(c,p.participationId);
++  if(mode==="automatic")await expire(c);const closure=app.get((await import("../../src/events/event-closure.service")).EventClosureService);
++  const [first,second]=await ordered(()=>mode==="manual"?close(c).then(r=>{assert.equal(r.status,200);return r.status;}):closure.regularizeEvent(c.eventId).then(r=>{assert.equal(r.kind,"closed");return 200;}),()=>submit(p));
++  assert.equal(first,200);assert.equal(second.status,201,JSON.stringify(second.body));
++});
++test("E08.11 PostgreSQL fechamento controlado externo sem completed não autoriza avaliação",async()=>{
++  const c=await context(),p=await person(c,"waiting");assert.equal((await close(c,await controlled())).status,200);problem(await submit(p),409,"EVALUATION_NOT_ELIGIBLE");
++});
++test("E08.11 PostgreSQL job atrasado não estende prazo de envio",async()=>{
++  const c=await context(),p=await participant(c,{status:"active",days:40});await service(c,p.participationId);await expire(c,40);
++  const closure=app.get((await import("../../src/events/event-closure.service")).EventClosureService);assert.equal((await closure.regularizeEvent(c.eventId)).kind,"closed");problem(await submit(p),409,"EVALUATION_SUBMISSION_EXPIRED");
++});
++for(const phase of ["reserve","domain","complete"]as const)for(const mode of ["post","patch"]as const)
++test(`E08.11 PostgreSQL falha depois da escrita ${phase} ${mode} reverte avaliação e intenção`,async()=>{
++  const {c,p}=await eligible(),id=mode==="patch"?await evaluation(p.participationId):undefined,key=randomUUID(),before=await ownState(c,p),client=await pool.connect();
++  const originalQuery=client.query.bind(client) as (config:string|QueryConfig,params?:unknown[])=>Promise<QueryResult>;
++  let reached=false;const proxy=new Proxy(client,{get(target,property){if(property==="query")return async(config:string|QueryConfig,params?:unknown[])=>{
++    const result=await originalQuery(config,params),text=typeof config==="string"?config:config.text;
++    if(!reached&&((phase==="reserve"&&text.includes('insert into "idempotency_operations"'))||(phase==="complete"&&text.includes('update "idempotency_operations"'))||(phase==="domain"&&text.includes("WITH decision AS MATERIALIZED")))){
++      assert.equal(result.rows.length,1);if(phase==="domain")assert.ok(result.rows[0].writtenId);reached=true;
++      await originalQuery("SELECT 1/0");assert.fail("A falha SQL real deveria abortar a transação.");}return result;};return Reflect.get(target,property,target);}});
++  const failing=makeWrites(drizzle(proxy,{schema})),originalPost=writes.submit.bind(writes),originalPatch=writes.edit.bind(writes);
++  writes.submit=input=>failing.submit(input);writes.edit=input=>failing.edit(input);
++  try{const r=mode==="post"?await submit(p,{rating:5},key):await edit(p,id!,{rating:5},key);problem(r,500,"INTERNAL_SERVER_ERROR");assert.equal(JSON.stringify(r.body).includes("PRIVATE"),false);assert.equal(reached,true);assert.deepEqual(await ownState(c,p),before);}
++  finally{writes.submit=originalPost;writes.edit=originalPatch;client.release();}
++  assert.equal((mode==="post"?await submit(p,{rating:5},key):await edit(p,id!,{rating:5},key)).status,mode==="post"?201:200);
++});
++for(const mode of ["post","patch"]as const)test(`E08.11 PostgreSQL snapshot de leitura permanece coerente durante ${mode} concorrente real`,async()=>{
++  const {p}=await eligible();let id:string|undefined;if(mode==="patch"){const a=await submit(p,{rating:4,comment:"Antes"});id=a.body.evaluation.id;}
++  const original=database.transaction.bind(database) as typeof database.transaction,dialect=new PgDialect();let ready!:()=>void,release!:()=>void,readerPid=0,writerPid=0;
++  const reached=new Promise<void>(yes=>{ready=yes;}),gate=new Promise<void>(yes=>{release=yes;});
++  database.transaction=(callback,config)=>original(async tx=>{if(config?.isolationLevel==="read committed")writerPid=(await tx.execute<{pid:number}>(sql`SELECT pg_backend_pid() AS pid`)).rows[0].pid;
++    const execute=tx.execute.bind(tx);tx.execute=(async(...args:Parameters<typeof tx.execute>)=>{const q=args[0],text=typeof q==="string"?q:dialect.sqlToQuery(q.getSQL()).sql,result=await execute(...args);
++      if(text.includes("SELECT to_char(clock_timestamp()")){readerPid=(await execute<{pid:number}>(sql`SELECT pg_backend_pid() AS pid`)).rows[0].pid;ready();await gate;}return result;}) as typeof tx.execute;return callback(tx);},config);
++  const pending=get(p,routes(p.participationId)[2]).then(r=>r);pending.catch(()=>undefined);
++  try{await Promise.race([reached,pending.then(()=>{throw new Error("Snapshot não foi retido");})]);const changed=mode==="post"?await submit(p,{rating:5}):await edit(p,id!,{comment:"Depois"});assert.equal(changed.status,mode==="post"?201:200,JSON.stringify(changed.body));
++    assert.ok(readerPid>0&&writerPid>0);assert.notEqual(readerPid,writerPid);release();const r=await pending;assert.equal(r.status,200);if(mode==="post"){assert.equal(r.body.evaluation,null);assert.equal(r.body.eligibility.pending,true);}else assert.equal(r.body.evaluation.comment,"Antes");
++    database.transaction=original;const after=await get(p,routes(p.participationId)[2]);if(mode==="post"){assert.equal(after.body.eligibility.submitted,true);assert.equal(after.body.eligibility.pending,false);}else assert.equal(after.body.evaluation.comment,"Depois");
++  }finally{database.transaction=original;release();await Promise.allSettled([pending]);}
++});
++test("E08.11 PostgreSQL prazo de edição é revalidado depois da espera real pela participação",async()=>{
++  const {p}=await eligible(),id=await evaluation(p.participationId),client=await pool.connect();let pending:Promise<supertest.Response>|undefined;
++  await pool.query("UPDATE evaluations SET submitted_at=clock_timestamp()-interval '720 hours'+interval '5 seconds' WHERE id=$1",[id]);
++  try{await client.query("BEGIN");await client.query("SELECT id FROM participations WHERE id=$1 FOR UPDATE",[p.participationId]);const pid=(await client.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
++    pending=edit(p,id,{comment:"Atrasado"}).then(r=>r);pending.catch(()=>undefined);await blocked(pid);
++    assert.equal((await pool.query("SELECT clock_timestamp()<submitted_at+interval '720 hours' AS before_cut FROM evaluations WHERE id=$1",[id])).rows[0].before_cut,true);
++    const until=Date.now()+12000;
++    while(!(await pool.query("SELECT clock_timestamp()>submitted_at+interval '720 hours' AS ended FROM evaluations WHERE id=$1",[id])).rows[0].ended){assert.ok(Date.now()<until);await new Promise(done=>setTimeout(done,25));}
++    await client.query("COMMIT");problem(await pending,409,"EVALUATION_EDIT_WINDOW_CLOSED");assert.equal((await stored(id)).comment,null);
++  }finally{await client.query("ROLLBACK");await Promise.allSettled([pending]);client.release();}
++});
++test("E08.11 PostgreSQL envio cruza prazo enquanto aguarda lock e reverte a reserva",async()=>{
++  const {c,p}=await eligible(),client=await pool.connect();let pending:Promise<supertest.Response>|undefined;
++  await pool.query("UPDATE participations SET finished_at=clock_timestamp()-interval '720 hours'+interval '5 seconds' WHERE id=$1",[p.participationId]);const before=await ownState(c,p);
++  try{await client.query("BEGIN");await client.query("SELECT id FROM participations WHERE id=$1 FOR UPDATE",[p.participationId]);const pid=(await client.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
++    pending=submit(p).then(r=>r);pending.catch(()=>undefined);await blocked(pid);
++    assert.equal((await pool.query("SELECT clock_timestamp()<finished_at+interval '720 hours' AS before_cut FROM participations WHERE id=$1",[p.participationId])).rows[0].before_cut,true);
++    const until=Date.now()+12000;while(!(await pool.query("SELECT clock_timestamp()>finished_at+interval '720 hours' AS ended FROM participations WHERE id=$1",[p.participationId])).rows[0].ended){assert.ok(Date.now()<until);await new Promise(done=>setTimeout(done,25));}
++    await client.query("COMMIT");problem(await pending,409,"EVALUATION_SUBMISSION_EXPIRED");assert.deepEqual(await ownState(c,p),before);
++  }finally{await client.query("ROLLBACK");await Promise.allSettled([pending]);client.release();}
++});
++test("E08.11 PostgreSQL escritas do titular não alteram conta ou evento terceiros",async()=>{
++  const {p}=await eligible(),other=await eligible(),before=await ownState(other.c,other.p),a=await submit(p,{rating:5,comment:"Próprio"});assert.equal(a.status,201);
++  assert.equal((await edit(p,a.body.evaluation.id,{rating:3})).status,200);assert.deepEqual(await ownState(other.c,other.p),before);
++});
+diff --git a/backend/test/unit/evaluation-write-http.test.ts b/backend/test/unit/evaluation-write-http.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..5c93fae3161f090c4de62fc2b6c50c2ff1e23eea
+--- /dev/null
++++ b/backend/test/unit/evaluation-write-http.test.ts
+@@ -0,0 +1,100 @@
++import "reflect-metadata";
++import assert from "node:assert/strict";
++import { after, before, test } from "node:test";
++import { Module, type INestApplication } from "@nestjs/common";
++import { NestFactory } from "@nestjs/core";
++import type { Pool } from "pg";
++import supertest from "supertest";
++import { AuthService } from "../../src/auth/auth.service";
++import { SessionAuthGuard } from "../../src/auth/session-auth.guard";
++import { ProblemException } from "../../src/common/errors/problem.exception";
++import { ProblemDetailsExceptionFilter } from "../../src/common/errors/problem-details.filter";
++import { EventsModule } from "../../src/events/events.module";
++import { DRIZZLE_DATABASE, POSTGRES_POOL } from "../../src/database/database.module";
++import { EvaluationWriteController, EvaluationWriteIdempotencyPolicy } from "../../src/evaluations/evaluation-write.controller";
++import { EvaluationWriteService } from "../../src/evaluations/evaluation-write.service";
++import type { EvaluationWriteFailure, EvaluationWriteResult } from "../../src/evaluations/evaluation-write.types";
++
++const id=(n:number)=>`abcdef00-0000-4000-8000-${String(n).padStart(12,"0")}`, uid=id(1),pid=id(2),eid=id(3),at="2026-11-04T15:00:00.123456Z";
++const value={ id:eid,participationId:pid,rating:5,comment:null,submittedAt:at,updatedAt:at,editableUntilAt:at,commentAddUntilAt:at,
++  permissions:{ canEditRating:true,canEditComment:true,canAddFirstComment:false } };
++let result:EvaluationWriteResult={ kind:"created",evaluation:value },failure:Error|undefined;
++const calls:Array<{ mode:string; input:Record<string,unknown> }>=[];
++@Module({ controllers:[EvaluationWriteController],providers:[EvaluationWriteIdempotencyPolicy,SessionAuthGuard,
++  { provide:AuthService,useValue:{ async authenticateBearerToken(token:string) {
++    if(token==="admin-no-2fa")throw new ProblemException({status:401,code:"ADMIN_2FA_REQUIRED",typeSlug:"admin-2fa-required",title:"2FA",detail:"Segundo fator obrigatório."});
++    if(!["participant","admin","staff"].includes(token))throw new ProblemException({status:401,code:"INVALID_ACCESS_TOKEN",typeSlug:"invalid-access-token",title:"Inválido",detail:"Token inválido."});
++    return { userId:uid,sessionId:id(4),roles:token==="participant"?[]:[token] };
++  } } },
++  { provide:EvaluationWriteService,useValue:{ submit:(input:Record<string,unknown>)=>{calls.push({mode:"submit",input});if(failure)throw failure;return result;},
++    edit:(input:Record<string,unknown>)=>{calls.push({mode:"edit",input});if(failure)throw failure;return result;} } },
++] })class HttpModule{}
++let app:INestApplication;
++before(async()=>{app=await NestFactory.create(HttpModule,{logger:false});app.setGlobalPrefix("api/v1");app.useGlobalFilters(new ProblemDetailsExceptionFilter());await app.listen(0,"127.0.0.1");});
++after(async()=>{await app?.close();});
++function request(mode:"submit"|"edit",token="participant",key="opaque,key"){
++  const r=mode==="submit"?supertest(app.getHttpServer()).post(`/api/v1/participations/${pid}/evaluation`):supertest(app.getHttpServer()).patch(`/api/v1/evaluations/${eid}`);
++  return r.set("Authorization",`Bearer ${token}`).set("Idempotency-Key",key);
++}
++function reset(){calls.length=0;failure=undefined;result={kind:"created",evaluation:value};}
++function problem(r:supertest.Response,status:number,code:string){assert.equal(r.status,status);assert.equal(r.body.code,code);assert.equal(r.body.status,status);assert.match(r.headers["content-type"],/application\/problem\+json/);}
++for(const mode of ["submit","edit"]as const){
++  test(`E08.11 HTTP ${mode} responde contrato e usa somente ator autenticado`,async()=>{
++    reset();const start=Date.now(),r=await request(mode).query({userId:id(99)}).send({rating:5,comment:" "});
++    assert.equal(r.status,mode==="submit"?201:200);assert.deepEqual(r.body,{evaluation:value});assert.equal(calls[0].input.userId,uid);
++    assert.equal(calls[0].input.idempotencyKey,"opaque,key");assert.deepEqual(calls[0].input.payload,{rating:5,comment:null});
++    const expires=calls[0].input.expiresAt as Date;assert.ok(expires.getTime()>=start+60000&&expires.getTime()<=Date.now()+60000);
++  });
++  test(`E08.11 HTTP ${mode} replay mantém status original e resposta histórica`,async()=>{
++    reset();result={kind:"replay",evaluation:value};const r=await request(mode).send({rating:5});assert.equal(r.status,mode==="submit"?201:200);assert.deepEqual(r.body,{evaluation:value});
++  });
++  test(`E08.11 HTTP ${mode} exige sessão e respeita segundo fator Admin`,async()=>{
++    reset();problem(await request(mode).unset("Authorization").send({rating:5}),401,"MISSING_ACCESS_TOKEN");
++    problem(await request(mode,"bad").send({rating:5}),401,"INVALID_ACCESS_TOKEN");problem(await request(mode,"admin-no-2fa").send({rating:5}),401,"ADMIN_2FA_REQUIRED");assert.equal(calls.length,0);
++    for(const token of ["admin","staff"])assert.equal((await request(mode,token).send({rating:5})).status,mode==="submit"?201:200);
++  });
++  test(`E08.11 HTTP ${mode} rejeita UUID e normaliza recurso`,async()=>{
++    reset();const route=mode==="submit"?`/api/v1/participations/bad/evaluation`:`/api/v1/evaluations/bad`;
++    const r=mode==="submit"?supertest(app.getHttpServer()).post(route):supertest(app.getHttpServer()).patch(route);
++    problem(await r.set("Authorization","Bearer participant").set("Idempotency-Key","key").send({rating:5}),400,"VALIDATION_ERROR");assert.equal(calls.length,0);
++    const normal=mode==="submit"?supertest(app.getHttpServer()).post(`/api/v1/participations/${pid.toUpperCase()}/evaluation`):supertest(app.getHttpServer()).patch(`/api/v1/evaluations/${eid.toUpperCase()}`);
++    await normal.set("Authorization","Bearer participant").set("Idempotency-Key","key").send({rating:5});assert.equal(calls[0].input[mode==="submit"?"participationId":"evaluationId"],mode==="submit"?pid:eid);
++  });
++  test(`E08.11 HTTP ${mode} valida chave única sem renormalizar`,async()=>{
++    reset();for(const key of [""," ","x".repeat(129)])problem(await request(mode,"participant",key).send({rating:5}),400,"VALIDATION_ERROR");
++    problem(await request(mode).unset("Idempotency-Key").send({rating:5}),400,"VALIDATION_ERROR");
++    problem(await request(mode).set({"Idempotency-Key":["a","b"]}).send({rating:5}),400,"VALIDATION_ERROR");assert.equal(calls.length,0);
++    assert.equal((await request(mode,"participant","x".repeat(128)).send({rating:5})).status,mode==="submit"?201:200);
++  });
++  test(`E08.11 HTTP ${mode} rejeita campos controlados pelo servidor e conteúdo inválido`,async()=>{
++    reset();for(const body of [[],{}, {rating:5,userId:uid},{rating:5,permissions:{}},{rating:5,submittedAt:at},{rating:5,comment:"😀".repeat(2001)},{rating:0},{rating:1.5}]){
++      problem(await request(mode).send(body),400,"VALIDATION_ERROR");
++    }
++    problem(await request(mode).type("text/plain").send("private"),400,"VALIDATION_ERROR");problem(await request(mode).type("json").send("{invalid"),400,"BAD_REQUEST");assert.equal(calls.length,0);
++  });
++  test(`E08.11 HTTP ${mode} falha inesperada preserva RFC 7807 sem informações privadas`,async()=>{
++    reset();failure=new Error("EVALUATION_WRITE_INTERNAL_ERROR");const r=await request(mode).send({rating:5,comment:"PRIVATE"});problem(r,500,"INTERNAL_SERVER_ERROR");assert.equal(JSON.stringify(r.body).includes("PRIVATE"),false);
++  });
++}
++for(const [kind,code]of Object.entries({access_denied:"RESOURCE_NOT_FOUND",not_eligible:"EVALUATION_NOT_ELIGIBLE",submission_expired:"EVALUATION_SUBMISSION_EXPIRED",
++  already_submitted:"EVALUATION_ALREADY_SUBMITTED",edit_window_closed:"EVALUATION_EDIT_WINDOW_CLOSED",comment_already_added:"COMMENT_ALREADY_ADDED",request_conflict:"IDEMPOTENCY_KEY_REUSED",in_progress:"IDEMPOTENCY_IN_PROGRESS"})){
++  test(`E08.11 HTTP mapeia ${kind} sem refletir nota/comentário`,async()=>{
++    reset();result={kind:kind as EvaluationWriteFailure};for(const mode of ["submit","edit"]as const)problem(await request(mode).send({rating:5}),kind==="access_denied"?404:409,code);
++  });
++}
++test("E08.11 HTTP PATCH mantém ausência de campos e aceita remoção explícita",async()=>{
++  reset();assert.equal((await request("edit").send({comment:null})).status,200);assert.deepEqual(calls[0].input.payload,{comment:null});
++  assert.equal((await request("edit").send({rating:4})).status,200);assert.deepEqual(calls[1].input.payload,{rating:4});
++});
++test("E08.11 TTL de avaliação é explícito e não usa fallback de Staff/Admin",()=>{
++  const name="EVALUATION_IDEMPOTENCY_TTL_SECONDS",old=process.env[name];
++  try{for(const raw of [undefined,"","0","-1","1.5","1e3","8640000000000"]){if(raw===undefined)delete process.env[name];else process.env[name]=raw;assert.throws(()=>new EvaluationWriteIdempotencyPolicy(),/EVALUATION_IDEMPOTENCY/);}}
++  finally{if(old===undefined)delete process.env[name];else process.env[name]=old;}
++});
++test("E08.11 DI Nest resolve escritas, política e banco reais sob tsx sem conectar",async()=>{
++  const real=await NestFactory.create(EventsModule,{logger:false});try{
++    const controller=real.get(EvaluationWriteController),writes=real.get(EvaluationWriteService);
++    assert.ok(Reflect.get(controller,"writes")===writes);assert.ok(Reflect.get(controller,"policy")===real.get(EvaluationWriteIdempotencyPolicy));
++    assert.ok(Reflect.get(writes,"database")===real.get(DRIZZLE_DATABASE));assert.equal(real.get<Pool>(POSTGRES_POOL).totalCount,0);
++  }finally{await real.close();}
++});
+diff --git a/backend/test/unit/evaluation-write.test.ts b/backend/test/unit/evaluation-write.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d4eddbbb88ec046a9bfff2915a1c779a3d1fae27
+--- /dev/null
++++ b/backend/test/unit/evaluation-write.test.ts
+@@ -0,0 +1,130 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { drizzle } from "drizzle-orm/node-postgres";
++import { PgDialect } from "drizzle-orm/pg-core";
++import { sql } from "drizzle-orm";
++import type { Client } from "pg";
++import * as schema from "../../src/database/schema";
++import { editEvaluationBody, submitEvaluationBody } from "../../src/evaluations/evaluation-write.dto";
++import { EDIT_EVALUATION_OPERATION, evaluationWriteFingerprint, EvaluationWriteService, SUBMIT_EVALUATION_OPERATION } from "../../src/evaluations/evaluation-write.service";
++import { editStatement, submissionStatement } from "../../src/evaluations/evaluation-write.policy";
++import type { EvaluationDecisionRow } from "../../src/evaluations/evaluation-write.policy";
++
++const id = (n: number) => `abcdef00-0000-4000-8000-${String(n).padStart(12, "0")}`;
++const at = "2026-11-04T15:00:00.123456Z", pid = id(1), uid = id(2), eid = id(3);
++const expiresAt = new Date("2099-01-01"), base = { userId: uid, idempotencyKey: "opaque,key", expiresAt };
++const post = { ...base, participationId: pid, payload: { rating: 5, comment: null } };
++const patch = { ...base, evaluationId: eid, payload: { rating: 4 } };
++function row(): EvaluationDecisionRow {
++  return { participationId: pid, eventId: id(4), eventName: "Evento", status: "finished", joinedAt: at, arenaEnteredAt: at,
++    finishedAt: at, finishReason: "automatic_operational_deadline", completedCount: "2", eligible: true, submitted: false, pending: true,
++    deadlineAt: at, reason: null, evaluationId: eid, rating: 5, comment: null, submittedAt: at, updatedAt: at,
++    editableUntilAt: "2026-11-11T15:00:00.123456Z", commentAddUntilAt: "2026-12-04T15:00:00.123456Z",
++    editFull: true, addComment: false, writtenId: eid, allowed: true, changed: true, commentWindow: false, decisionAt: at, submissionOpen: true };
++}
++function fixture(mode: "submit" | "edit" = "submit", options: { access?: boolean; revalidated?: boolean; evaluation?: boolean;
++  intent?: "replay" | "conflict" | "in_progress"; decision?: Partial<EvaluationDecisionRow>; fail?: string; malformedReplay?: boolean } = {}) {
++  const queries: Array<{ text: string; params: unknown[] }> = [];
++  let evaluationId = eid;
++  const evaluation = { id: eid, participationId: pid, rating: 5, comment: null, submittedAt: at, updatedAt: at,
++    editableUntilAt: row().editableUntilAt, commentAddUntilAt: row().commentAddUntilAt,
++    permissions: { canEditRating: true, canEditComment: true, canAddFirstComment: false } };
++  const operation = mode === "submit" ? SUBMIT_EVALUATION_OPERATION : EDIT_EVALUATION_OPERATION;
++  const resource = mode === "submit" ? pid : eid, payload = mode === "submit" ? post.payload : patch.payload;
++  const database = drizzle({ async query(config: { text: string }, params: unknown[] = []) {
++    const text = config.text; queries.push({ text, params });
++    if (/^(begin|commit|rollback)/.test(text)) return { rows: [] };
++    if (text.includes('AS "participationId"') && !text.includes("WITH")) return { rows: options.access === false ? [] : [{ participationId: pid }] };
++    if (text.includes('insert into "idempotency_operations"')) { if (options.fail === "reserve") throw new Error("PRIVATE_COMMENT"); return { rows: options.intent ? [] : [["intent"]] }; }
++    if (text.includes('from "idempotency_operations"')) return { rows: [["intent", options.intent === "conflict" ? "different" : evaluationWriteFingerprint(operation, resource, payload),
++      options.intent === "in_progress" ? "in_progress" : "completed", mode === "submit" ? 201 : 200, eid, options.malformedReplay ? {} : { evaluation }]] };
++    if (text.includes("SELECT id FROM participations")) return { rows: options.revalidated === false ? [] : [{ id: pid }] };
++    if (text.includes("SELECT id FROM evaluations")) return { rows: options.evaluation === false ? [] : [{ id: eid }] };
++    if (text.includes("WITH decision AS MATERIALIZED")) {
++      if (options.fail === "decision") throw new Error("PRIVATE_COMMENT");
++      if (mode === "submit") evaluationId = params.find(p => typeof p === "string" && /^[a-f0-9-]{36}$/.test(p) && ![uid,pid].includes(p)) as string;
++      return { rows: [{ ...row(), writtenId: evaluationId, ...options.decision }] };
++    }
++    if (text.includes("WITH scoped")) { if (options.fail === "response") throw new Error("PRIVATE_COMMENT"); return { rows: [{ ...row(), evaluationId }] }; }
++    if (text.includes('update "idempotency_operations"')) {
++      if (options.fail === "complete") throw new Error("PRIVATE_COMMENT"); return { rows: [["intent", mode === "submit" ? 201 : 200, evaluationId, { evaluation: { ...evaluation, id: evaluationId } }]] };
++    }
++    throw new Error("Unexpected SQL");
++  } } as unknown as Client, { schema });
++  return { service: new EvaluationWriteService(database), queries, evaluation };
++}
++for (const rating of [1,2,3,4,5]) test(`E08.11 POST aceita nota ${rating}`, () => { assert.equal(submitEvaluationBody.parse({ rating }).rating, rating); });
++test("E08.11 nota estrita rejeita ausente, fracionária, booleana, string e limites", () => {
++  for (const rating of [undefined,null,true,"5",0,6,2.5,NaN,Infinity]) assert.equal(submitEvaluationBody.safeParse({ rating }).success, false);
++});
++test("E08.11 comentários ausente, NULL, vazio e whitespace normalizam sem confundir PATCH ausente", () => {
++  for (const comment of [undefined,null,""," \t\n\u00a0"]) assert.deepEqual(submitEvaluationBody.parse({ rating: 4, comment }), { rating: 4, comment: null });
++  assert.deepEqual(editEvaluationBody.parse({ rating: 4 }), { rating: 4 }); assert.deepEqual(editEvaluationBody.parse({ comment: " " }), { comment: null });
++  assert.deepEqual(editEvaluationBody.parse({ rating: undefined, comment: null }), { comment: null });
++  assert.equal(editEvaluationBody.safeParse({}).success, false);
++});
++test("E08.11 limite conta Unicode, preserva conteúdo e rejeita excesso sem truncar", () => {
++  const text = "😀".repeat(2000); assert.equal(submitEvaluationBody.parse({ rating: 5, comment: text }).comment, text);
++  const raw = "  <script>texto</script> e\u0301\n "; assert.equal(editEvaluationBody.parse({ comment: raw }).comment, raw);
++  for (const comment of ["😀".repeat(2001)," ".repeat(2001),"\0","\ud800",42,{},[]]) {
++    assert.equal(submitEvaluationBody.safeParse({ rating: 5, comment }).success, false); assert.equal(editEvaluationBody.safeParse({ comment }).success, false);
++  }
++});
++test("E08.11 schemas recusam IDs, permissions, horários e extras sem normalização destrutiva", () => {
++  for (const extra of [{ userId: uid },{ submittedAt: at },{ permissions: {} },{ firstCommentAt: at },{ state: "finished" }]) {
++    assert.equal(submitEvaluationBody.safeParse({ rating: 4, ...extra }).success, false); assert.equal(editEvaluationBody.safeParse({ rating: 4, ...extra }).success, false);
++  }
++});
++test("E08.11 fingerprint separa recurso, namespace e presença dos campos no PATCH", () => {
++  const fingerprint = (operation: string, resource: string, payload: object) => evaluationWriteFingerprint(operation, resource, payload as { rating?: number; comment?: null });
++  const a = fingerprint(SUBMIT_EVALUATION_OPERATION,pid,submitEvaluationBody.parse({ rating: 5 }));
++  assert.equal(a,fingerprint(SUBMIT_EVALUATION_OPERATION,pid,submitEvaluationBody.parse({ comment: " ", rating: 5 })));
++  for (const value of [fingerprint(EDIT_EVALUATION_OPERATION,pid,{ rating: 5 }), fingerprint(SUBMIT_EVALUATION_OPERATION,id(9),{ rating: 5, comment: null })]) assert.notEqual(value,a);
++  assert.notEqual(fingerprint(EDIT_EVALUATION_OPERATION,eid,{ rating: 4 }),fingerprint(EDIT_EVALUATION_OPERATION,eid,{ rating: 4, comment: null }));
++});
++for (const mode of ["submit", "edit"] as const) {
++  test(`E08.11 ${mode} autoriza antes da reserva e usa locks e READ COMMITTED`, async () => {
++    const f = fixture(mode), result = mode === "submit" ? await f.service.submit(post) : await f.service.edit(patch);
++    assert.equal(result.kind,mode === "submit" ? "created" : "updated"); assert.equal(f.queries[0].text,"begin isolation level read committed");
++    const reserve = f.queries.findIndex(q=>q.text.includes('insert into "idempotency_operations"')), parent = f.queries.findIndex(q=>q.text.includes("SELECT id FROM participations"));
++    assert.ok(reserve>1 && parent>reserve); if (mode === "edit") assert.ok(f.queries.findIndex(q=>q.text.includes("SELECT id FROM evaluations"))>parent);
++    assert.equal(f.queries.at(-1)?.text,"commit"); assert.equal(JSON.stringify(result).includes("first_comment_at"),false);
++    const completed=f.queries.find(q=>q.text.includes('update "idempotency_operations"'))!; assert.ok(completed.params.includes(mode === "submit" ? 201 : 200));
++  });
++  test(`E08.11 ${mode} sem acesso não reserva e perda de titularidade aborta antes do replay`, async () => {
++    const f=fixture(mode,{ access:false }); assert.deepEqual(mode==="submit"?await f.service.submit(post):await f.service.edit(patch),{ kind:"access_denied" });
++    assert.equal(f.queries.some(q=>q.text.includes('idempotency_operations')),false);
++    const lost=fixture(mode,{ intent:"replay", revalidated:false }); assert.deepEqual(mode==="submit"?await lost.service.submit(post):await lost.service.edit(patch),{ kind:"access_denied" });
++    assert.equal(lost.queries.at(-1)?.text,"rollback");
++  });
++  for (const intent of ["replay","conflict","in_progress"] as const) test(`E08.11 ${mode} intenção ${intent} não escreve avaliação nem conclui de novo`, async () => {
++    const f=fixture(mode,{ intent }), result=mode==="submit"?await f.service.submit(post):await f.service.edit(patch);
++    assert.equal(result.kind,intent==="conflict"?"request_conflict":intent);
++    assert.equal(f.queries.some(q=>q.text.includes("WITH decision")||q.text.includes('update "idempotency_operations"')),false);
++    if ("evaluation" in result) assert.deepEqual(result.evaluation,f.evaluation);
++  });
++  test(`E08.11 ${mode} replay corrompido falha sem refletir dados`, async () => {
++    const f=fixture(mode,{ intent:"replay", malformedReplay:true }); await assert.rejects(mode==="submit"?f.service.submit(post):f.service.edit(patch),{ message:"EVALUATION_WRITE_INTERNAL_ERROR" });
++    assert.equal(f.queries.at(-1)?.text,"rollback");
++  });
++  for (const fail of ["reserve","decision","response","complete"]) test(`E08.11 ${mode} falha ${fail} faz rollback e não propaga comentário`, async () => {
++    const f=fixture(mode,{ fail }); await assert.rejects(mode==="submit"?f.service.submit(post):f.service.edit(patch),{ message:"EVALUATION_WRITE_INTERNAL_ERROR" }); assert.equal(f.queries.at(-1)?.text,"rollback");
++  });
++}
++for (const [decision,kind] of [[{ eligible:false },"not_eligible"],[{ submitted:true },"already_submitted"],[{ pending:false,submissionOpen:false },"submission_expired"]] as const) test(`E08.11 POST ${kind} reverte intenção reservada`, async () => {
++  const f=fixture("submit",{ decision:{ ...decision,writtenId:null } }); assert.deepEqual(await f.service.submit(post),{ kind }); assert.equal(f.queries.at(-1)?.text,"rollback");
++});
++test("E08.11 PATCH no-op não exige UPDATE e preserva updatedAt na resposta", async () => {
++  const f=fixture("edit",{ decision:{ changed:false,writtenId:null } }), r=await f.service.edit(patch); assert.ok("evaluation" in r); assert.equal(r.evaluation.updatedAt,at);
++});
++test("E08.11 PATCH distingue comentário tardio já usado e janela fechada", async () => {
++  const closed=fixture("edit",{ decision:{ allowed:false,commentWindow:false,writtenId:null } }); assert.deepEqual(await closed.service.edit(patch),{ kind:"edit_window_closed" });
++  const used=fixture("edit",{ decision:{ allowed:false,commentWindow:true,addComment:false,writtenId:null } });
++  assert.deepEqual(await used.service.edit({ ...patch,payload:{ comment:"Novo" } }),{ kind:"comment_already_added" });
++});
++test("E08.11 predicados decisivos usam política de leitura, relógio único e preservam histórico", () => {
++  const dialect=new PgDialect(), selection=sql`SELECT 1`, a=dialect.sqlToQuery(submissionStatement(selection,eid,post.payload)), b=dialect.sqlToQuery(editStatement(selection,eid,{ comment:null }));
++  for (const query of [a,b]) { assert.equal(query.sql.match(/clock_timestamp\(\)/g)?.length,1); assert.match(query.sql,/WITH scoped AS MATERIALIZED/); assert.match(query.sql,/s.status='completed'/); }
++  assert.match(a.sql,/f.eligible AND f.pending AND NOT f.submitted/); assert.match(b.sql,/c.allowed AND c.changed/);
++  assert.match(b.sql,/first_comment_at=COALESCE/); assert.doesNotMatch(b.sql,/SET submitted_at|submitted_at=/); assert.match(b.sql,/IS DISTINCT FROM/);
++});
+diff --git a/docs/ARQUITETURA_BACKEND_ARENAGO.md b/docs/ARQUITETURA_BACKEND_ARENAGO.md
+index 37c5b864dea1b5b1e925076462b79783516e9d50..568c222d31ee3db55b45d72134085a0b4f072968 100644
+--- a/docs/ARQUITETURA_BACKEND_ARENAGO.md
++++ b/docs/ARQUITETURA_BACKEND_ARENAGO.md
+@@ -1463,6 +1463,24 @@ Quando não houver pendências: `items: []`, **não** `404`. Não retornar pesso
+ 
+ ### 17.4 `POST /participations/:participationId/evaluation` — primeiro envio
+ 
++**Implementação E08.11 — 04/11/2026:** POST/201 e PATCH/200 da §17.6 estão
++implementados sobre a mesma projeção SQL de elegibilidade/permissões da E08.10.
++Somente o titular autenticado, com sessão e segundo fator Admin quando aplicável,
++opera seus recursos; ausência/de terceiro recebe 404 neutro. POST exige finished
++e completed real e respeita `finished_at + 720 hours`, inclusive; intenções novas
++fora do prazo recebem EVALUATION_SUBMISSION_EXPIRED. Uma linha por participação,
++com unicidade existente e idempotência durável no mesmo commit. Microssegundos são
++preservados em SQL. Avaliação enviada é retornada no mesmo contrato público de
++leitura, incluindo permissões; GETs anteriores mantêm suas respostas.
++
++Comentários têm limite técnico de entrada de 2.000 pontos de código Unicode,
++uniforme no POST/PATCH, sem truncamento ou moderação fictícia. Ausente no POST,
++NULL, vazio e somente whitespace normalizam para NULL; conteúdo não vazio é texto
++simples preservado, inclusive espaços externos. No PATCH, ausência mantém o campo;
++NULL/vazio/whitespace representam remoção apenas na janela integral. Rejeitam-se
++NUL e Unicode malformado por incompatibilidade com texto PostgreSQL. O limite é
++técnico e não substitui futuras decisões de moderação/PII ou escape na interface.
++
+ **Bearer, titularidade, `Idempotency-Key`**, payload `{ "rating": 5, "comment": "Experiência muito boa" }`. `comment` opcional; `rating` inteiro entre 1 e 5. **[PROPOSTA TÉCNICA]** Limite de tamanho de comentário, sanitização e prevenção contra PII indevida devem ser definidos antes de liberar comentários em produção. Não aceitar nota zerada ou ausência de nota.
+ 
+ **Transação:** bloquear participação do titular; revalidar estado terminal e o horário vigente, consultar ao menos uma sessão `completed`, inserir `evaluations` com `participation_id UNIQUE` e, quando há comentário inicial, preencher `first_comment_at` com horário do envio. Gravar a operação idempotente na mesma transação. Corrida de dois POSTs distintos: apenas um cria a avaliação; o segundo recebe `409 EVALUATION_ALREADY_SUBMITTED`, sem sobrescrever. Reenvio da **mesma intenção/chave** retorna o resultado anterior.
+@@ -1492,6 +1510,25 @@ Quando não houver pendências: `items: []`, **não** `404`. Não retornar pesso
+ 
+ ### 17.6 `PATCH /evaluations/:evaluationId` — edição de avaliação
+ 
++**Contrato efetivo E08.11:** janela integral inclusiva até `submitted_at + 168 hours`;
++depois disso, até `+720 hours` inclusive, somente primeiro comentário não vazio,
++sem campo rating, com histórico `first_comment_at IS NULL`. Inclusão já utilizada
++recebe COMMENT_ALREADY_ADDED; edição não permitida recebe EVALUATION_EDIT_WINDOW_CLOSED.
++`first_comment_at` nunca retorna a NULL. Atualização parcial sob participação e
++avaliação FOR UPDATE preserva campos omitidos; duas inclusões tardias têm um único
++vencedor. No-op material não executa UPDATE na avaliação nem avança updated_at,
++mas conclui a intenção e retorna 200. O relógio decisivo é PostgreSQL após os locks,
++com predicados de mutação e verificação de linhas afetadas.
++
++POST/PATCH usam namespaces estáveis separados `submit_evaluation` e `edit_evaluation`,
++fingerprint de recurso/payload normalizado/presença de campos e ator no índice
++idempotente existente. Conflito é IDEMPOTENCY_KEY_REUSED; in_progress usa o padrão
++atual. Replay autorizado mantém resposta/status históricos, inclusive após TTL e
++prazos, sem reescrever avaliação. TTL explícito próprio:
++`EVALUATION_IDEMPOTENCY_TTL_SECONDS`, sem padrão ou expurgo automático. O instante
++de envio e os prazos nunca reiniciam. Detalhes, limitações e PostgreSQL ainda
++pendente de execução manual em `E08_11_IMPLEMENTACAO.md`.
++
+ **Bearer/titular, `Idempotency-Key`**. `rating` e/ou `comment` podem ser informados na janela integral. Depois dessa janela e até 30 dias **após `submitted_at`**, **somente** `{ "comment": "..." }` é permitido se `first_comment_at IS NULL`, exigindo comentário novo e não vazio; proibir qualquer campo `rating` nessa fase (mesmo igual ao anterior). Atualizar `updated_at` sem alterar `submitted_at`.
+ 
+ **Locks sugeridos:** primeiro localizar `participation_id` por consulta sem lock, depois `participations FOR UPDATE` e `evaluations FOR UPDATE`, revalidando titularidade, prazo e `first_comment_at`; atualizar com predicados condicionais, evitando que duas inclusões tardias sejam aceitas. Para `PATCH` repetido com mesma chave, devolver o mesmo resultado; para nova intenção fora da janela, `409 EVALUATION_EDIT_WINDOW_CLOSED` / `409 COMMENT_ALREADY_ADDED`.
+diff --git a/docs/E08_11_IMPLEMENTACAO.md b/docs/E08_11_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..eed6346c788790e6b26274d2264551c659c72a38
+--- /dev/null
++++ b/docs/E08_11_IMPLEMENTACAO.md
+@@ -0,0 +1,289 @@
++# E08.11 — Envio e edição de avaliações
++
++## Estado e escopo
++
++Implementação de POST e PATCH entregue conjuntamente na branch
++`feature/events-participations`. Base inicial da evidência:
++`4f130953ee1f5dc00cf6118c0e0383b17786c91e`, com a E08.10 já versionada,
++working tree limpo, índice sem alterações e nenhum arquivo não rastreado.
++Verificações e implementação realizadas em 04/11/2026.
++
++O backend reutiliza o contrato de leitura da E08.10 e a infraestrutura durável
++de idempotência existente. Não há migrações, novas dependências, tabelas ou
++alterações nos serviços de produção E07.1–E07.6 e nas finalizações E08.8/E08.9.
++A configuração de `EventsModule` registra os novos providers com injeção explícita.
++
++## Contratos HTTP
++
++Ambas as rotas usam o prefixo `/api/v1`, Bearer, sessão válida, identidade
++autenticada, titularidade atual e `Idempotency-Key` válida de até 128 caracteres.
++Staff e Admin não recebem acesso às avaliações de terceiros. Admin participante
++segue a mesma titularidade e a verificação de 2FA já existente.
++
++| Operação | Payload | Sucesso, inclusive replay |
++| --- | --- | --- |
++| `POST /participations/:participationId/evaluation` | `{"rating":5,"comment":"Experiência muito boa"}` | `201 Created` |
++| `PATCH /evaluations/:evaluationId` | `{"rating":4}`, `{"comment":"Texto atualizado"}` ou ambos | `200 OK` |
++
++DTOs estritos: nota inteira de 1 a 5, obrigatória no POST; ao menos um campo no
++PATCH. Campos extras, identidade, permissões, estados e timestamps fornecidos
++pelo cliente são rejeitados. Parâmetros de rota são UUIDs válidos; query strings
++não fornecem identidade ou campos da intenção e são ignoradas.
++
++A resposta é `{"evaluation":{...}}`, com exatamente o contrato `OwnEvaluation`
++da E08.10: `id`, `participationId`, `rating`, `comment`, `submittedAt`, `updatedAt`,
++`editableUntilAt`, `commentAddUntilAt` e `permissions` (`canEditRating`,
++`canEditComment`, `canAddFirstComment`). Datas públicas preservam seis casas de
++microssegundos em UTC. Não são expostos autor, perfil, sessão, intenção interna
++ou `first_comment_at`.
++
++| Falha | HTTP / código |
++| --- | --- |
++| Entrada, UUID ou chave inválida | `400 VALIDATION_ERROR`, conforme validação compartilhada |
++| Sessão ausente, inválida, revogada ou 2FA exigido | `401`, conforme autenticação existente |
++| Participação/avaliação ausente ou de terceiro | `404 RESOURCE_NOT_FOUND` indistinguível |
++| Participação não elegível | `409 EVALUATION_NOT_ELIGIBLE` |
++| Prazo do primeiro envio encerrado | `409 EVALUATION_SUBMISSION_EXPIRED` |
++| Outra intenção já enviou a avaliação | `409 EVALUATION_ALREADY_SUBMITTED` |
++| Edição não permitida na janela atual | `409 EVALUATION_EDIT_WINDOW_CLOSED` |
++| Primeiro comentário tardio já utilizado | `409 COMMENT_ALREADY_ADDED` |
++| Mesma chave com intenção diferente | `409 IDEMPOTENCY_KEY_REUSED` |
++| Intenção durável preexistente em andamento | `409 IDEMPOTENCY_IN_PROGRESS` |
++| Falha interna | `500`, pelo filtro RFC 7807 existente |
++
++## Comentários e limite técnico
++
++| Entrada | POST | PATCH |
++| --- | --- | --- |
++| Ausente | Grava `NULL` | Preserva o valor atual |
++| `null`, `""` ou somente espaços/brancos | Grava `NULL` | Solicita remoção, permitida apenas na janela integral |
++| Texto não vazio | Preserva integralmente | Substitui/adiciona conforme a janela |
++
++O limite técnico de entrada é **2.000 pontos de código Unicode**, contado com
++`Array.from`, uniformemente nas duas rotas. Emojis fora do BMP contam como um
++ponto; caracteres combinantes contam separadamente. Não é contagem de grafemas.
++Entradas acima do limite são rejeitadas, inclusive quando contêm apenas espaços.
++NUL e surrogates isolados são rejeitados porque não representam texto UTF-8
++armazenável pelo PostgreSQL. Não há truncamento silencioso.
++
++Texto não vazio conserva espaços nas extremidades, acentos e conteúdo fornecido,
++inclusive marcação como texto simples. Futuras interfaces devem escapar o texto
++na exibição. Este limite de entrada não define a futura política de moderação,
++que continua pendente de produto; não há detecção de PII ou moderação automática.
++
++Comentários não entram em logs, auditorias ou mensagens de erro. Falhas internas
++recebem mensagem constante `EVALUATION_WRITE_INTERNAL_ERROR`, com causa mantida
++internamente; o filtro existente registra somente a mensagem, sem a causa.
++A resposta própria, persistida para replay, contém o comentário por contrato.
++
++## Elegibilidade e prazos exatos
++
++O primeiro envio exige participação `finished` e ao menos uma sessão
++`service_sessions.completed` real. Sessões ausentes/canceladas não contam;
++participações `waiting`, `active` ou `canceled` não são elegíveis. Finalização
++administrativa ou automática não dispensa a conclusão real.
++
++O envio é permitido até `finished_at + interval '720 hours'`, inclusive.
++Uma nova intenção após o prazo retorna `EVALUATION_SUBMISSION_EXPIRED`, mesmo
++se já existir avaliação; dentro do prazo, a duplicidade retorna
++`EVALUATION_ALREADY_SUBMITTED`. Replay histórico mantém a resposta original.
++`UNIQUE(participation_id)` continua garantindo uma avaliação por participação.
++Uma reentrada com outro `participationId` pode ter sua própria avaliação.
++
++| Janela após `submitted_at` | Alterações permitidas |
++| --- | --- |
++| Até 168 horas, inclusive | Nota, comentário, ambos ou remoção explícita |
++| Mais de 168 até 720 horas, inclusive | Somente primeiro comentário não vazio; nenhum campo `rating`, nem com o valor atual; `first_comment_at IS NULL` e comentário atual nulo |
++| Mais de 720 horas | Nenhuma nova alteração |
++
++O primeiro envio usa o mesmo instante para `submitted_at` e `updated_at`, e para
++`first_comment_at` quando houver comentário não vazio. Edições jamais alteram
++`submitted_at` ou reiniciam prazos. `first_comment_at` é histórico: uma remoção
++na primeira semana não o apaga e não libera nova inclusão tardia.
++
++Uma edição permitida sem mudança material retorna `200` e conclui sua intenção,
++sem executar UPDATE da avaliação ou alterar `updated_at`. Uma tentativa proibida
++não se torna válida por repetir o valor atual.
++
++## Transação, relógio e concorrência
++
++As duas operações usam `READ COMMITTED`. A sequência é: descoberta filtrada pelo
++titular sem lock exclusivo; reserva/reconhecimento da intenção; participação
++`FOR UPDATE`; avaliação `FOR UPDATE` no PATCH; revalidação do vínculo e da
++titularidade; replay autorizado ou decisão/escrita; conclusão da intenção com a
++resposta pública na mesma transação.
++
++A reserva precede os locks de domínio em ambas as operações, evitando inversão
++quando a mesma chave disputa recursos diferentes. Não são adquiridos locks de
++evento/experiência em ordem inversa às finalizações. O lock da participação
++serializa POSTs e PATCHs concorrentes, incluindo patches parciais distintos sem
++perda de campos e duas inclusões tardias com apenas um vencedor.
++
++A decisão captura **um `clock_timestamp()` PostgreSQL**, em CTE materializada,
++depois das esperas relevantes. INSERT/UPDATE condicionais usam esse mesmo
++instante e verificam o identificador afetado; falhas revertem domínio e intenção.
++A resposta é consultada dentro da transação com o mesmo instante decisório.
++Nenhum prazo de negócio usa `Date`, arredondamento a milissegundos ou horário
++recebido por HTTP. `Date.now()` é usado apenas para metadados técnicos do TTL.
++
++Elegibilidade, permissões e intervalos vêm da mesma `evaluationReadProjection`
++oficial. Sua única alteração foi ampliar o argumento interno de observação de
++`string` para `string | SQL`, permitindo referenciar o relógio da CTE sem duplicar
++a política. Chamadores de leitura e respostas anteriores permanecem iguais.
++
++## Idempotência e configuração
++
++Namespaces estáveis: `submit_evaluation` e `edit_evaluation`. O fingerprint
++inclui operação, versão semântica, recurso e payload normalizado; o ator integra
++a chave única da infraestrutura existente. POST ausente/nulo/vazio/branco tem a
++mesma intenção. PATCH ausente e remoção explícita são intenções diferentes;
++campos omitidos não são preenchidos artificialmente.
++
++Mesma chave/recurso/payload devolve exatamente a resposta histórica e o status
++original. Outra intenção ou recurso no mesmo namespace gera conflito. Atores
++diferentes não compartilham resultados; POST e PATCH têm namespaces distintos.
++`in_progress` persistido segue o conflito existente. TTL vencido não apaga a
++intenção nem permite reexecução. Replay exige titularidade atual, mas não reabre
++as regras temporais nem altera linha, timestamps ou intenção concluída.
++
++**Nova configuração obrigatória:** `EVALUATION_IDEMPOTENCY_TTL_SECONDS`, inteiro
++positivo explícito, sem valor padrão ou fallback dos TTLs Staff, participante e
++Admin. Ela é validada na inicialização de `EventsModule`/`AppModule`; fornecer os
++quatro TTLs também nos processos de teste anteriores que iniciam esses módulos.
++Não há expurgo ou nova política de retenção. `backend/README.md` documenta a
++variável; arquivos `.env` não foram lidos nem alterados nesta task.
++
++## Compatibilidade e arquivos
++
++Os cinco GETs da E08.10 permanecem o contrato oficial: elegibilidade, pendências,
++avaliação própria, histórico e retomada. Após POST, a avaliação aparece, a
++pendência desaparece, `submitted=true` e `pending=false`; o histórico conserva uma
++linha por participação. Após PATCH, GET mostra valores atuais e permissões sem
++reiniciar prazos. Leituras não escrevem dados ou versões.
++
++| Arquivos da task | Finalidade |
++| --- | --- |
++| `backend/src/evaluations/evaluation-write.controller.ts` | Rotas, erros e política explícita de TTL |
++| `backend/src/evaluations/evaluation-write.dto.ts` | Validação estrita, normalização e resposta histórica |
++| `backend/src/evaluations/evaluation-write.types.ts` | Entradas e resultados internos |
++| `backend/src/evaluations/evaluation-write.policy.ts` | SQL decisório e mutações condicionais |
++| `backend/src/evaluations/evaluation-write.service.ts` | Transação, locks, autorização e idempotência |
++| `backend/src/evaluations/evaluation-read.policy.ts` | Reuso do instante SQL, sem segunda política |
++| `backend/src/events/events.module.ts` | Registro dos novos componentes |
++| `backend/test/unit/evaluation-write.test.ts` | DTOs, SQL, transação e idempotência |
++| `backend/test/unit/evaluation-write-http.test.ts` | Contrato HTTP simulado, autenticação e DI |
++| `backend/test/integration/evaluation-write.integration.test.ts` | PostgreSQL real preparado para execução manual |
++| `backend/README.md` | Configuração obrigatória |
++| `docs/ARQUITETURA_BACKEND_ARENAGO.md` | Atualizações pontuais de §§17.4 e 17.6 |
++| `docs/E08_11_IMPLEMENTACAO.md` | Este relatório |
++
++## Validações efetivamente executadas pelo Codex
++
++| Verificação | Resultado |
++| --- | --- |
++| Unitários específicos, incluindo HTTP simulado | **61/61 aprovados**: 36 de DTO/serviço/SQL e 25 HTTP |
++| Regressão unitária completa (`npm.cmd test`) | **517/517 aprovados**, 0 falhas, cancelamentos ou skips |
++| `npm.cmd run typecheck:test` | Aprovado, incluindo código e testes PostgreSQL sem executá-los |
++| `npm.cmd run lint` | Aprovado |
++| `npm.cmd run build` | Aprovado |
++
++Foram adicionados **61 testes unitários**, sobre a base de 456. Os testes usam
++doubles apenas nas suítes unitárias/HTTP simuladas. Sua URL de banco apontou
++para porta local inoperante, com `.env` desativado; não houve conexão PostgreSQL.
++O lint detectou inicialmente a necessidade de preservar a causa da exceção;
++a correção manteve a causa interna e a mensagem externa constante. As validações
++acima foram aprovadas após essa correção. Uma invocação adicional com o nome
++inexistente `typecheck` foi corrigida para o script real `typecheck:test`.
++
++### PostgreSQL real: aprovação manual definitiva
++
++Em 04/11/2026, o responsável confirmou a execução manual no PostgreSQL local:
++
++| Suíte | Executados | Aprovados | Falhas | Cancelamentos | Ignorados |
++| --- | --- | --- | --- | --- | --- |
++| E08.11 | 103 | **103** | 0 | 0 | 0 |
++| Regressão PostgreSQL completa | 752 | **752** | 0 | 0 | 0 |
++
++Os 103 testes novos somam-se aos 649 anteriores. A contagem, inicialmente
++prevista por análise estática, foi confirmada pela execução manual. Permanecem
++registradas as aprovações anteriores do Codex: **517/517 unitários**, **61/61
++específicos**, typecheck, lint e build.
++
++A primeira tentativa foi bloqueada antes de validar as funcionalidades por
++recusa de autenticação do usuário local `admin`, SQLSTATE **28P01**. Tratou-se
++de um problema de ambiente, sem resultado de validação funcional nessa tentativa.
++O responsável restabeleceu a conexão com o usuário local `arenago`, sem alterar
++o banco, e executou ambas as suítes com sucesso. Não foi necessária alteração
++de código ou testes para resolver esse bloqueio.
++
++Nesta finalização, o Codex atualizou somente a documentação e a evidência;
++nenhum teste foi reexecutado, nenhuma credencial real foi acessada ou registrada
++e nenhuma validação de produção é declarada. Os resultados PostgreSQL acima
++foram fornecidos pelo responsável, não executados pelo Codex.
++
++A suíte cobre payloads, matrizes de elegibilidade/conclusões/finalizações,
++duplicidade, reentrada, replay/TTL/conflitos, janelas, comentário histórico,
++no-op com `xmin`, autenticação/titularidade/2FA e isolamento de conta/evento.
++Inclui os cinco GETs, snapshots concorrentes, finalizações E08.8/E08.9 com locks
++reais, processamento automático atrasado e decisão após espera que cruza prazo.
++Usa as fixtures existentes sem modificá-las.
++
++As fronteiras de ±1 microssegundo executam os mesmos INSERT/UPDATE de produção
++com uma expressão SQL de relógio interna ao helper; esse parâmetro não existe na
++API ou no serviço. Os testes de espera usam o relógio real do banco. Concorrência
++usa conexões/transações independentes e `pg_blocking_pids`. Falhas após reserva,
++escrita de domínio e conclusão de intenção provocam `SELECT 1/0` na mesma conexão
++PostgreSQL, **depois da escrita real**, e verificam rollback integral e retry.
++Não substituem o banco por mocks.
++
++### Comandos PowerShell de referência para o responsável
++
++Usar banco local descartável já preparado com o schema do projeto. O exemplo
++contém somente placeholders; credenciais reais ficam na sessão do responsável.
++As fixtures validam as três URLs idênticas, `NODE_ENV=test`, host `127.0.0.1`,
++porta `55432`, banco `arenago_events_test` e ausência de redirecionamentos.
++As guardas permanecem ativas; não usar banco remoto ou de produção.
++
++```powershell
++Set-Location C:\DoJob\ProgramacaoMobile\backend
++$env:NODE_ENV = 'test'
++$env:EVENTS_TEST_DATABASE_URL = 'postgresql://USUARIO:SENHA@127.0.0.1:55432/arenago_events_test'
++$env:DATABASE_URL = $env:EVENTS_TEST_DATABASE_URL
++$env:DATABASE_DIRECT_URL = $env:EVENTS_TEST_DATABASE_URL
++$env:DOTENV_CONFIG_PATH = 'NUL'
++$env:STAFF_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:ADMIN_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:EVALUATION_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:EVENT_CLOSURE_JOB_TEST_ENABLED = 'false'
++$env:EVENT_CLOSURE_INTERVAL_MS = '30000'
++
++# Focado: 103 testes, aprovados na execução manual confirmada.
++.\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test --test-concurrency=1 test/integration/evaluation-write.integration.test.ts
++if ($LASTEXITCODE -ne 0) { throw 'Falha na validação PostgreSQL E08.11' }
++
++# Regressão completa: 752 testes, aprovados na execução manual confirmada.
++npm.cmd run test:integration
++if ($LASTEXITCODE -ne 0) { throw 'Falha na regressão PostgreSQL completa' }
++```
++
++## Evidência e pendências
++
++Evidência única: `qa-evidence/e08-11-changes.diff`, patch completo dos 13 arquivos
++listados, contra o HEAD inicial acima, incluindo os nove arquivos novos. UTF-8
++sem BOM, caminhos relativos e cabeçalhos `diff --git`. Aplicação validada com
++`git apply --check` e `git apply` em cópia isolada da base, seguida de comparação
++integral dos 13 arquivos finais, normalizando apenas CRLF/LF conforme o Git.
++Nenhuma omissão ou divergência; índice e HEAD preservados. O patch exclui a si
++próprio, outros `.diff`, `.env`, credenciais, dependências instaladas, temporários
++e alterações de outras tasks. Evidências anteriores foram preservadas.
++
++Não há pendências de validação da E08.11. Resta somente o commit manual pelo
++responsável; nenhum comando de versionamento foi executado nesta finalização.
++Sugestão de mensagem, sem executá-la:
++`feat(events): implementar envio e edição de avaliações`.
++
++Permanecem fora do escopo: controller de `GET /participations/current`, CRUD
++Admin estrutural, finalização voluntária, telas Expo, BI/exportações, moderação
++automatizada e histórico completo de versões. Não houve auditoria geral da E08,
++início da E08.12 ou execução de add, commit, push, merge ou rebase.

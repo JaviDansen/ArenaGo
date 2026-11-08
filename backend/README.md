@@ -1,6 +1,20 @@
 # ArenaGo Backend
 
-Fundação NestJS + Express, Drizzle ORM e PostgreSQL, incluindo o módulo de Identidade, Autenticação e Sessões (`K01`) e a API de Questionário de Perfil e Catálogo de Jogos (`K03`).
+API NestJS + Express, Drizzle ORM e PostgreSQL. O repositório inclui os módulos de Identidade, Autenticação e Sessões (`K01`), Questionário de Perfil e Catálogo de Jogos (`K03`) e as entregas posteriores de Eventos (`E07`/`E08`).
+
+## Estado atual do backend
+
+Além dos módulos iniciais, o repositório contém os contratos HTTP implementados de
+Eventos, Participações, filas internas, operações Staff, configuração administrativa,
+encerramento e avaliações. O inventário consolidado, suas decisões temporais e os
+limites de produção estão em [ARQUITETURA_BACKEND_ARENAGO.md](../docs/ARQUITETURA_BACKEND_ARENAGO.md)
+e nos relatórios `docs/E08_*_IMPLEMENTACAO.md`.
+
+Ainda não há controller público para descoberta por código de acesso e criação de
+participação, nem operações administrativas de concessão/revogação de Staff/Admin
+ou o fluxo completo de credenciamento TOTP Admin. A integração dos fluxos de Arena
+do Expo, BI/LGPD/retenção e a infraestrutura de produção também permanecem fora do
+que este README declara como entregue.
 
 ## Requisitos
 
@@ -65,6 +79,24 @@ Endpoints expostos sob `/api/v1/profile`:
 Nenhum banco remoto está configurado. Quando a conexão remota for autorizada, guarde URLs e certificados fora do Git. A API usa `DATABASE_URL`; para Drizzle Kit, `DATABASE_DIRECT_URL` tem precedência e deve apontar para conexão direta quando o provedor usar pooler. Use TLS com verificação completa do certificado (`sslmode=verify-full`), nunca desative `rejectUnauthorized`. `DATABASE_CA_CERT` pode conter uma CA customizada aprovada pelo ambiente.
 
 ## Scripts
+
+Envio/edição de avaliações E08.11 exigem `EVALUATION_IDEMPOTENCY_TTL_SECONDS`
+inteiro positivo explícito, sem padrão e independente dos TTLs Staff, participante
+e Admin. Fornecer também essa variável ao iniciar `AppModule`/`EventsModule` e
+processos de teste. Contratos, política técnica de comentários e comandos de
+validação PostgreSQL manual em [E08.11](../docs/E08_11_IMPLEMENTACAO.md).
+
+As três operações Staff HTTP (§16.9–16.11) exigem `STAFF_IDEMPOTENCY_TTL_SECONDS`
+configurado com inteiro positivo, sem padrão. A aplicação valida essa configuração
+ao iniciar. Ela define somente `expiresAt`, sem expurgo nem perda de replay enquanto
+o registro existir. Endpoints, códigos e validação local em [E08.1](../docs/E08_1_IMPLEMENTACAO.md).
+
+As rotas de fila interna do participante E08.2 exigem também
+`PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS`, inteiro positivo explícito, sem
+padrão e independente do TTL Staff. Como `EventsModule` instancia ambas as
+políticas, fornecer as duas variáveis ao iniciar a aplicação ou testes desse
+módulo. Comandos, contratos e integração PostgreSQL manual em
+[E08.2](../docs/E08_2_IMPLEMENTACAO.md).
 
 - `npm run build`, `npm run start:dev`, `npm run start:prod`
 - `npm run lint`, `npm test`, `npm run test:integration`

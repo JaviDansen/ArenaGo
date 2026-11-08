@@ -70,6 +70,10 @@ export function createAuthSessionManager(options = {}) {
   let accessToken = null;
   let inFlightRefreshPromise = null;
   let inFlightRestorePromise = null;
+  let inFlightTwoFactorPromise = null;
+  let privateAdminChallenge = null;
+  let challengeTimer = null;
+  const now = options.now ?? Date.now;
   const uncertainRefreshTokens = new Set();
 
   // Fila assíncrona FIFO para serializar leituras, gravações e limpezas no tokenStorage
@@ -275,6 +279,31 @@ export function createAuthSessionManager(options = {}) {
     return sessionEpoch;
   }
 
+  function clearAdminChallenge({ resetFlight = true } = {}) {
+    privateAdminChallenge = null;
+    if (resetFlight) inFlightTwoFactorPromise = null;
+    if (challengeTimer !== null) clearTimeout(challengeTimer);
+    challengeTimer = null;
+  }
+
+  function cancelAdminTwoFactor(reason = 'cancelled') {
+    if (!privateAdminChallenge && !state.adminChallenge &&
+        !['authenticating', 'admin_2fa_verifying'].includes(state.sessionStatus)) return Promise.resolve();
+    sessionEpoch += 1;
+    const cancellationEpoch = sessionEpoch;
+    clearAdminChallenge();
+    accessToken = null;
+    emitState({ user: null, isAuthenticated: false, isInitializing: false,
+      sessionStatus: 'unauthenticated', adminChallenge: null, postAuthRoute: null,
+      authNotice: reason === 'expired' ? 'A verificação expirou. Entre novamente para obter outro desafio.' : null,
+      networkError: null, storageError: null });
+    // Atualiza imediatamente a intenção de armazenamento, inclusive se uma gravação estiver pausada.
+    return clearRefreshTokenForEpoch(cancellationEpoch).catch(() => {
+      if (sessionEpoch === cancellationEpoch) emitState({ sessionStatus: 'storage_error',
+        storageError: 'Não foi possível limpar as credenciais locais. Tente encerrar a sessão novamente.' });
+    });
+  }
+
   async function handleSessionInvalidated(error, context = {}) {
     if (
       context?.requestEpoch !== undefined &&
@@ -289,6 +318,7 @@ export function createAuthSessionManager(options = {}) {
 
     sessionEpoch += 1;
     const invalidationEpoch = sessionEpoch;
+    clearAdminChallenge();
     accessToken = null;
     inFlightRefreshPromise = null;
 
@@ -321,6 +351,7 @@ export function createAuthSessionManager(options = {}) {
    * Chamadas concorrentes dentro da mesma geração de sessão aguardam a mesma Promise.
    */
   function refreshSession() {
+    if (privateAdminChallenge || state.adminChallenge || state.sessionStatus === 'authenticating') return Promise.resolve(null);
     if (inFlightRefreshPromise) {
       return inFlightRefreshPromise;
     }
@@ -574,6 +605,9 @@ export function createAuthSessionManager(options = {}) {
    * 4. Confirma os dados vivos da conta via GET /api/v1/auth/me.
    */
   function restoreSession() {
+    if (privateAdminChallenge || state.adminChallenge || state.sessionStatus === 'authenticating') {
+      return Promise.resolve({ status: state.sessionStatus, user: null });
+    }
     if (inFlightRestorePromise) {
       return inFlightRestorePromise;
     }
@@ -737,6 +771,7 @@ export function createAuthSessionManager(options = {}) {
    * Envia estritamente { name, email, password } — jamais envia confirmPassword.
    */
   async function register(input) {
+    if (privateAdminChallenge || state.adminChallenge || state.sessionStatus === 'authenticating') cancelAdminTwoFactor();
     const payload = {
       name: typeof input?.name === 'string' ? input.name.trim() : '',
       email: typeof input?.email === 'string' ? input.email.trim() : '',
@@ -830,37 +865,70 @@ export function createAuthSessionManager(options = {}) {
    * Trata tanto sessões de Participante/Staff quanto o desafio `requires2FA: true` de Admin.
    */
   async function login(input) {
+    // Invalida a tentativa anterior antes de qualquer await, inclusive verificações 2FA em trânsito.
+    sessionEpoch += 1;
+    const currentEpoch = sessionEpoch;
+    const startedAt = now();
+    clearAdminChallenge();
+    accessToken = null;
+    inFlightRefreshPromise = null;
+    inFlightRestorePromise = null;
+    emitState({ user: null, isAuthenticated: false, isInitializing: false,
+      sessionStatus: 'authenticating', adminChallenge: null, postAuthRoute: null,
+      authNotice: null, networkError: null, storageError: null });
     const payload = {
       email: typeof input?.email === 'string' ? input.email.trim() : '',
       password: typeof input?.password === 'string' ? input.password : '',
     };
 
-    const response = await client.post('/auth/login', payload, {
-      auth: false,
-      retryOnUnauthorized: false,
-    });
+    let response;
+    try {
+      await clearRefreshTokenForEpoch(currentEpoch);
+      if (sessionEpoch !== currentEpoch) return { status: 'aborted' };
+      response = await client.post('/auth/login', payload, {
+        auth: false,
+        retryOnUnauthorized: false,
+      });
+    } catch (error) {
+      if (sessionEpoch !== currentEpoch) return { status: 'aborted' };
+      emitState({ sessionStatus: 'unauthenticated' });
+      throw error;
+    }
+    if (sessionEpoch !== currentEpoch) return { status: 'aborted' };
 
     // Caso Admin: backend retorna { requires2FA: true, isTotpConfigured, tempToken, message }.
     // NUNCA armazenar tempToken como accessToken ou refreshToken nem autenticar a sessão.
     if (response && response.requires2FA === true) {
-      sessionEpoch += 1;
-      const challengeEpoch = sessionEpoch;
-      accessToken = null;
-      inFlightRefreshPromise = null;
-      inFlightRestorePromise = null;
-
-      await clearRefreshTokenForEpoch(challengeEpoch);
+      if (typeof response.tempToken !== 'string' || !response.tempToken.trim() ||
+          response.tempToken.length > 2048 || typeof response.isTotpConfigured !== 'boolean') {
+        emitState({ sessionStatus: 'unauthenticated' });
+        throw new ApiError({ code: 'INVALID_LOGIN_RESPONSE',
+          detail: 'O servidor não retornou um desafio válido. Entre novamente.' });
+      }
+      // O backend emite desafios de cinco minutos. A margem cobre o arredondamento do JWT;
+      // o prazo começa antes da requisição, sem confiar em claims não verificadas no cliente.
+      const expiresAt = startedAt + 299_000;
+      if (now() >= expiresAt) {
+        cancelAdminTwoFactor('expired');
+        throw new ApiError({ code: 'ADMIN_2FA_CHALLENGE_EXPIRED', detail: 'A verificação expirou. Entre novamente.' });
+      }
+      privateAdminChallenge = { tempToken: response.tempToken, epoch: currentEpoch, expiresAt };
 
       const challenge = {
         requires2FA: true,
-        isTotpConfigured: Boolean(response.isTotpConfigured),
+        isTotpConfigured: response.isTotpConfigured,
+        expiresAt,
         message:
           typeof response.message === 'string' && response.message.trim().length > 0
             ? response.message
             : 'Esta conta administrativa exige confirmação de segundo fator (TOTP) para concluir o acesso.',
       };
 
-      if (sessionEpoch === challengeEpoch) {
+      challengeTimer = setTimeout(() => {
+        if (privateAdminChallenge?.epoch === currentEpoch) cancelAdminTwoFactor('expired');
+      }, Math.max(0, expiresAt - now()));
+      challengeTimer?.unref?.();
+      if (sessionEpoch === currentEpoch) {
         emitState({
           user: null,
           isAuthenticated: false,
@@ -880,12 +948,18 @@ export function createAuthSessionManager(options = {}) {
       };
     }
 
+    return completeLogin(response, currentEpoch);
+  }
+
+  // Um único caminho publica sessões de senha (Participante/Staff) e de segundo fator (Admin).
+  async function completeLogin(response, currentEpoch) {
     const loggedUser = sanitizePublicUser(response?.user);
     if (
-      !loggedUser ||
+      !loggedUser?.id ||
       typeof response?.accessToken !== 'string' ||
-      typeof response?.refreshToken !== 'string'
+      !response.accessToken || typeof response?.refreshToken !== 'string' || !response.refreshToken
     ) {
+      if (sessionEpoch === currentEpoch) emitState({ sessionStatus: 'unauthenticated' });
       throw new ApiError({
         kind: 'http',
         status: 500,
@@ -895,8 +969,8 @@ export function createAuthSessionManager(options = {}) {
       });
     }
 
-    sessionEpoch += 1;
-    const currentEpoch = sessionEpoch;
+    if (sessionEpoch !== currentEpoch) return { status: 'aborted', user: null, nextRoute: null };
+    clearAdminChallenge({ resetFlight: false });
     inFlightRefreshPromise = null;
     inFlightRestorePromise = null;
     uncertainRefreshTokens.clear();
@@ -951,11 +1025,68 @@ export function createAuthSessionManager(options = {}) {
     }
 
     const finalRoute = confirmedUser.hasCompletedQuestionnaire ? 'MainTabs' : 'ProfileQuestionnaire';
+    if (sessionEpoch !== currentEpoch) return { status: 'aborted', user: null, nextRoute: null };
     return {
       status: 'authenticated',
       user: confirmedUser,
       nextRoute: finalRoute,
     };
+  }
+
+  function verifyAdminTwoFactor(code) {
+    if (inFlightTwoFactorPromise) return inFlightTwoFactorPromise;
+    const challenge = privateAdminChallenge;
+    const epochAtStart = sessionEpoch;
+    if (!challenge || challenge.epoch !== epochAtStart || now() >= challenge.expiresAt) {
+      cancelAdminTwoFactor('expired');
+      return Promise.reject(new ApiError({ code: 'ADMIN_2FA_CHALLENGE_EXPIRED',
+        detail: 'A verificação expirou ou foi cancelada. Entre novamente.' }));
+    }
+    if (!state.adminChallenge?.isTotpConfigured) {
+      return Promise.reject(new ApiError({ status: 409, code: 'ADMIN_TOTP_NOT_CONFIGURED',
+        detail: 'Configure o TOTP pelo procedimento administrativo antes de entrar.' }));
+    }
+    if (typeof code !== 'string' || !/^(?:[0-9]{6}|[a-f0-9]{32})$/.test(code)) {
+      return Promise.reject(new ApiError({ status: 400, code: 'VALIDATION_ERROR',
+        detail: 'Informe um código TOTP de seis dígitos ou um código de recuperação válido.' }));
+    }
+    const pending = (async () => {
+      emitState({ sessionStatus: 'admin_2fa_verifying' });
+      try {
+        const response = await client.post('/auth/2fa/verify', { tempToken: challenge.tempToken, code }, {
+          auth: false, retryOnUnauthorized: false, outcomeUnknownOnNetworkError: true,
+        });
+        if (sessionEpoch !== epochAtStart || privateAdminChallenge !== challenge) return { status: 'aborted' };
+        if (now() >= challenge.expiresAt) {
+          cancelAdminTwoFactor('expired');
+          return { status: 'aborted' };
+        }
+        // O servidor consumiu o desafio. A resposta passa pelo mesmo armazenamento e publicação do login.
+        return await completeLogin(response, epochAtStart);
+      } catch (error) {
+        if (sessionEpoch !== epochAtStart) return { status: 'aborted' };
+        const uncertain = error?.isNetworkError || error?.isTimeout || !Number.isInteger(error?.status) ||
+          (error?.status >= 500 && error?.status !== 503) ||
+          error?.code === 'INVALID_LOGIN_RESPONSE' || !privateAdminChallenge;
+        if (uncertain || error?.status === 429 || now() >= challenge.expiresAt) {
+          // Não repete automaticamente uma confirmação que pode ter consumido o desafio.
+          const cleanup = cancelAdminTwoFactor(now() >= challenge.expiresAt ? 'expired' : 'cancelled');
+          const cleanupEpoch = sessionEpoch;
+          await cleanup;
+          if (sessionEpoch !== cleanupEpoch) return { status: 'aborted' };
+        } else if (error?.code === 'ADMIN_TOTP_NOT_CONFIGURED') {
+          emitState({ sessionStatus: 'admin_2fa_required',
+            adminChallenge: { ...state.adminChallenge, isTotpConfigured: false } });
+        } else {
+          emitState({ sessionStatus: 'admin_2fa_required' });
+        }
+        throw error;
+      } finally {
+        if (inFlightTwoFactorPromise === pending) inFlightTwoFactorPromise = null;
+      }
+    })();
+    inFlightTwoFactorPromise = pending;
+    return pending;
   }
 
   /**
@@ -967,6 +1098,7 @@ export function createAuthSessionManager(options = {}) {
   async function logout() {
     sessionEpoch += 1;
     const logoutEpoch = sessionEpoch;
+    clearAdminChallenge();
     const tokenToRevoke = accessToken;
     accessToken = null;
     inFlightRefreshPromise = null;
@@ -1033,7 +1165,6 @@ export function createAuthSessionManager(options = {}) {
       authNotice: null,
       networkError: null,
       storageError: null,
-      adminChallenge: null,
     });
   }
 
@@ -1072,6 +1203,8 @@ export function createAuthSessionManager(options = {}) {
     getSessionEpoch,
     register,
     login,
+    verifyAdminTwoFactor,
+    cancelAdminTwoFactor,
     logout,
     refreshSession,
     restoreSession,

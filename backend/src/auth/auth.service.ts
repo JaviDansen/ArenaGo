@@ -1,10 +1,10 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { HttpStatus, Inject, Injectable } from "@nestjs/common";
 import * as argon2 from "argon2";
 import { Pool, PoolClient } from "pg";
 import { ProblemException } from "../common/errors/problem.exception";
 import { POSTGRES_POOL } from "../database/database.module";
-import { LoginDto, RefreshDto, RegisterDto } from "./auth.dto";
+import { LoginDto, RefreshDto, RegisterDto, type TwoFactorVerifyDto } from "./auth.dto";
 import {
   AdminTwoFactorChallengeResponseDto,
   AuthenticatedPrincipal,
@@ -29,6 +29,10 @@ import {
   signTempTwoFactorToken,
   verifyAccessToken,
 } from "./token.util";
+import { environment } from "../config/environment";
+import { decryptTotpSecret, readTotpKeys, recoveryCodeHash } from "./totp-activation.crypto";
+import { verifyTotpChallenge, verifyTotpChallengeSignature } from "./totp-challenge";
+import { isRecoveryCodeFormat, matchingTotpCounter, readRecoveryHmacKey } from "./admin-two-factor.crypto";
 
 const ARGON2_OPTIONS: argon2.HashOptions = {
   type: argon2.argon2id,
@@ -257,22 +261,21 @@ export class AuthService {
       );
       const now = new Date(clockResult.rows[0].now);
 
-      const accountState = await this.loadAccountRolesAndQuestionnaire(
-        client,
-        lockedUser.id,
+      await client.query(
+        `SELECT id FROM user_roles WHERE user_id=$1 AND revoked_at IS NULL FOR UPDATE`,
+        [lockedUser.id],
       );
-
-      // Revogar qualquer sessão anterior não revogada (inclusive expirada) antes de nova emissão ou desafio 2FA
-      await this.revokeActiveSessionsForUser(
-        client,
-        lockedUser.id,
-        now,
-        "replaced_by_new_login",
+      const accountState = await this.loadAccountRolesAndQuestionnaire(client, lockedUser.id);
+      const adminRole = await client.query<{ id: string }>(
+        `SELECT id FROM user_roles
+         WHERE user_id = $1 AND role = 'admin' AND event_id IS NULL AND revoked_at IS NULL
+         FOR UPDATE`,
+        [lockedUser.id],
       );
 
       // Comportamento transitório seguro para contas Admin (Seção 10 da K01 e Seção 14.4 da Arquitetura):
       // O login apenas com senha NUNCA emite sessão privilegiada nem refresh token para Admin.
-      if (accountState.roles.includes("admin")) {
+      if ((adminRole.rowCount ?? 0) > 0) {
         const totpResult = await client.query<{ is_verified: boolean }>(
           `SELECT is_verified
            FROM user_totp_credentials
@@ -284,9 +287,6 @@ export class AuthService {
         const isTotpConfigured =
           (totpResult.rowCount ?? 0) > 0 && totpResult.rows[0].is_verified === true;
 
-        await client.query("COMMIT");
-        this.rateLimiter.reset(dto.email, ipAddress);
-
         const tempToken = signTempTwoFactorToken(lockedUser.id, {
           nowMs: now.getTime(),
         });
@@ -297,8 +297,36 @@ export class AuthService {
           tempToken,
           message: "Informe o segundo fator para concluir o acesso.",
         };
+
+        const challengeClaims = verifyTotpChallenge(tempToken, now.getTime());
+        if (!challengeClaims) throw new Error("Desafio 2FA recém-emitido inválido.");
+        await client.query(
+          `UPDATE admin_2fa_challenges
+           SET invalidated_at = clock_timestamp()
+           WHERE user_id = $1 AND consumed_at IS NULL AND invalidated_at IS NULL`,
+          [lockedUser.id],
+        );
+        const insertedChallenge = await client.query(
+          `INSERT INTO admin_2fa_challenges
+           (jti, user_id, issued_at, expires_at, consumed_at, invalidated_at, created_at)
+           VALUES ($1, $2, to_timestamp($3), to_timestamp($4), NULL, NULL, clock_timestamp())`,
+          [challengeClaims.jti, lockedUser.id, challengeClaims.iat, challengeClaims.exp],
+        );
+        if (insertedChallenge.rowCount !== 1) throw new Error("Desafio 2FA não persistido.");
+        await this.recordAdminTwoFactorChallengeIssued(client, lockedUser.id);
+        await client.query("COMMIT");
+        this.rateLimiter.reset(dto.email, ipAddress);
         return adminChallenge;
       }
+
+      // Participantes/Staff mantêm o login existente. Admin só revoga a sessão
+      // anterior depois que comprovar o segundo fator em verifyTwoFactor().
+      await this.revokeActiveSessionsForUser(
+        client,
+        lockedUser.id,
+        now,
+        "replaced_by_new_login",
+      );
 
       const sessionId = randomUUID();
       const expiresAt = new Date(now.getTime() + SESSION_ABSOLUTE_TTL_MS);
@@ -344,6 +372,339 @@ export class AuthService {
     } finally {
       client.release();
     }
+  }
+
+  /** Conclui o login Admin somente após consumir um desafio persistido e um segundo fator. */
+  async verifyTwoFactor(
+    dto: TwoFactorVerifyDto,
+    metadata?: ClientMetadata,
+  ): Promise<AuthSessionResponseDto> {
+    const initialClaims = verifyTotpChallengeSignature(dto.tempToken);
+    if (!initialClaims) throw this.buildInvalidAdminTwoFactorException();
+
+    const recoveryAttempt = isRecoveryCodeFormat(dto.code);
+    let encryptionKey: Buffer | null = null;
+    let recoveryKey: Buffer | null;
+    try {
+      const keyEnvironment = {
+        ...process.env,
+        JWT_SECRET: environment.JWT_SECRET,
+        JWT_TEMP_SECRET: environment.JWT_TEMP_SECRET,
+      };
+      recoveryKey = recoveryAttempt ? readRecoveryHmacKey(keyEnvironment) : null;
+      if (!recoveryAttempt) {
+        const keys = readTotpKeys(keyEnvironment);
+        encryptionKey = keys.encryption;
+      }
+    } catch {
+      throw new ProblemException({
+        typeSlug: "totp-configuration-unavailable",
+        title: "Segundo fator indisponível",
+        status: HttpStatus.SERVICE_UNAVAILABLE,
+        code: "TOTP_CONFIGURATION_UNAVAILABLE",
+        detail: "Não foi possível concluir a autenticação de segundo fator.",
+      });
+    }
+
+    const client = await this.pool.connect();
+    let failure: ProblemException | null = null;
+    let response: AuthSessionResponseDto | null = null;
+    const ipAddress = sanitizeIpAddress(metadata?.ipAddress);
+    const userAgent = sanitizeUserAgent(metadata?.userAgent);
+
+    try {
+      await client.query("BEGIN ISOLATION LEVEL READ COMMITTED");
+      const userResult = await client.query<{
+        id: string;
+        name: string;
+        email: string;
+        email_verified_at: Date | null;
+        is_active: boolean;
+      }>(
+        `SELECT id,name,email,email_verified_at,is_active
+         FROM users WHERE id=$1 FOR UPDATE`,
+        [initialClaims.sub],
+      );
+      const user = userResult.rows[0];
+      if (!user || !user.is_active || user.email_verified_at === null) {
+        throw this.buildInvalidAdminTwoFactorException();
+      }
+
+      const roleResult = await client.query<{ id: string }>(
+        `SELECT id FROM user_roles
+         WHERE user_id=$1 AND role='admin' AND event_id IS NULL AND revoked_at IS NULL
+         FOR UPDATE`,
+        [user.id],
+      );
+      if (roleResult.rowCount !== 1) throw this.buildInvalidAdminTwoFactorException();
+
+      const challengeResult = await client.query<{
+        user_id: string;
+        issued_at: Date;
+        expires_at: Date;
+        consumed_at: Date | null;
+        invalidated_at: Date | null;
+      }>(
+        `SELECT user_id,issued_at,expires_at,consumed_at,invalidated_at
+         FROM admin_2fa_challenges WHERE jti=$1 AND user_id=$2 FOR UPDATE`,
+        [initialClaims.jti, user.id],
+      );
+      const clockResult = await client.query<{ now: Date }>(
+        "SELECT clock_timestamp() AS now",
+      );
+      let now = new Date(clockResult.rows[0].now);
+      const challenge = challengeResult.rows[0];
+      const persistedChallengeMatches = Boolean(
+        challenge &&
+          challenge.user_id === user.id &&
+          Math.floor(new Date(challenge.issued_at).getTime() / 1_000) === initialClaims.iat &&
+          Math.floor(new Date(challenge.expires_at).getTime() / 1_000) === initialClaims.exp,
+      );
+      const databaseClaims = verifyTotpChallenge(dto.tempToken, now.getTime());
+      const attempts = await client.query<{ count: number }>(
+        `SELECT count(*)::integer AS count FROM audit_logs
+         WHERE target_user_id=$1 AND category='identity'
+           AND action='admin_2fa_login_rejected'
+           AND occurred_at > clock_timestamp()-interval '15 minutes'`,
+        [user.id],
+      );
+      if ((attempts.rows[0]?.count ?? 0) >= 5) {
+        throw new ProblemException({
+          typeSlug: "admin-2fa-rate-limited",
+          title: "Muitas tentativas de segundo fator",
+          status: HttpStatus.TOO_MANY_REQUESTS,
+          code: "ADMIN_2FA_RATE_LIMITED",
+          detail: "Muitas tentativas malsucedidas. Aguarde antes de tentar novamente.",
+          headers: { "Retry-After": "900" },
+        });
+      }
+
+      if (
+        !persistedChallengeMatches || !databaseClaims ||
+        !challenge || challenge.consumed_at !== null || challenge.invalidated_at !== null ||
+        now.getTime() >= new Date(challenge.expires_at).getTime()
+      ) {
+        await this.recordAdminTwoFactorFailure(client, user.id);
+        await client.query("COMMIT");
+        failure = this.buildInvalidAdminTwoFactorException();
+      } else {
+        const credentialResult = await client.query<{
+          id: string;
+          secret_encrypted: string;
+          is_verified: boolean;
+          last_totp_counter: string | number | null;
+        }>(
+          `SELECT id,secret_encrypted,is_verified,last_totp_counter
+           FROM user_totp_credentials WHERE user_id=$1 FOR UPDATE`,
+          [user.id],
+        );
+        const credential = credentialResult.rows[0];
+        if (!credential?.is_verified) {
+          throw new ProblemException({
+            typeSlug: "admin-totp-not-configured",
+            title: "TOTP não configurado",
+            status: HttpStatus.CONFLICT,
+            code: "ADMIN_TOTP_NOT_CONFIGURED",
+            detail: "A conta administrativa ainda não possui segundo fator ativo.",
+          });
+        }
+
+        let secret: string | null = null;
+        if (!recoveryAttempt) {
+          const authorizations = await client.query<{
+            id: string;
+            expires_at: Date;
+            used_at: Date;
+            revoked_at: Date | null;
+          }>(
+            `SELECT id,expires_at,used_at,revoked_at FROM totp_activation_tokens
+             WHERE user_id=$1 AND issued_by IS NULL AND used_at IS NOT NULL
+             ORDER BY used_at,id`,
+            [user.id],
+          );
+          const activationAudit = await client.query(
+            `SELECT 1 FROM audit_logs
+             WHERE target_user_id=$1 AND actor_user_id=$1 AND category='identity'
+               AND action='totp_initial_activated' AND origin='user' LIMIT 2`,
+            [user.id],
+          );
+          const originalAuthorization = authorizations.rows[0];
+          if (
+            authorizations.rowCount !== 1 || activationAudit.rowCount !== 1 ||
+            !originalAuthorization || originalAuthorization.revoked_at !== null ||
+            new Date(originalAuthorization.used_at).getTime() > new Date(originalAuthorization.expires_at).getTime() ||
+            encryptionKey === null
+          ) {
+            throw new ProblemException({
+              typeSlug: "totp-configuration-unavailable",
+              title: "Segundo fator indisponível",
+              status: HttpStatus.SERVICE_UNAVAILABLE,
+              code: "TOTP_CONFIGURATION_UNAVAILABLE",
+              detail: "Não foi possível concluir a autenticação de segundo fator.",
+            });
+          }
+
+          try {
+            secret = decryptTotpSecret(
+              credential.secret_encrypted,
+              encryptionKey,
+              user.id,
+              originalAuthorization.id,
+            );
+          } catch {
+            throw new ProblemException({
+              typeSlug: "totp-configuration-unavailable",
+              title: "Segundo fator indisponível",
+              status: HttpStatus.SERVICE_UNAVAILABLE,
+              code: "TOTP_CONFIGURATION_UNAVAILABLE",
+              detail: "Não foi possível concluir a autenticação de segundo fator.",
+            });
+          }
+        }
+
+        let acceptedTotpCounter: number | null = null;
+        let acceptedRecoveryCodeId: string | null = null;
+        let lastAcceptedCounter: number | null = null;
+        if (!recoveryAttempt && /^[0-9]{6}$/.test(dto.code)) {
+          lastAcceptedCounter = credential.last_totp_counter === null
+            ? null
+            : Number(credential.last_totp_counter);
+          if (lastAcceptedCounter !== null && (!Number.isSafeInteger(lastAcceptedCounter) || lastAcceptedCounter < 0)) {
+            throw new ProblemException({
+              typeSlug: "totp-configuration-unavailable",
+              title: "Segundo fator indisponível",
+              status: HttpStatus.SERVICE_UNAVAILABLE,
+              code: "TOTP_CONFIGURATION_UNAVAILABLE",
+              detail: "Não foi possível concluir a autenticação de segundo fator.",
+            });
+          }
+          acceptedTotpCounter = matchingTotpCounter(
+            secret as string,
+            dto.code,
+            now.getTime(),
+            lastAcceptedCounter,
+          );
+        } else if (recoveryAttempt && isRecoveryCodeFormat(dto.code) && recoveryKey !== null) {
+          const wantedHash = Buffer.from(
+            recoveryCodeHash(dto.code, user.id, recoveryKey),
+            "hex",
+          );
+          const recoveryRows = await client.query<{ id: string; code_hash: string; used_at: Date | null }>(
+            `SELECT id,code_hash,used_at FROM user_backup_codes
+             WHERE user_id=$1 FOR UPDATE`,
+            [user.id],
+          );
+          for (const recovery of recoveryRows.rows) {
+            const candidate = Buffer.from(recovery.code_hash, "hex");
+            if (candidate.length === wantedHash.length && timingSafeEqual(candidate, wantedHash)) {
+              acceptedRecoveryCodeId = recovery.used_at === null ? recovery.id : null;
+            }
+          }
+        }
+
+        // Revalidar tempo após leituras/crypto e imediatamente antes das escritas decisivas.
+        const finalClockResult = await client.query<{ now: Date }>(
+          "SELECT clock_timestamp() AS now",
+        );
+        now = new Date(finalClockResult.rows[0].now);
+        if (
+          !verifyTotpChallenge(dto.tempToken, now.getTime()) ||
+          now.getTime() >= new Date(challenge.expires_at).getTime()
+        ) {
+          acceptedTotpCounter = null;
+          acceptedRecoveryCodeId = null;
+        } else if (acceptedTotpCounter !== null) {
+          acceptedTotpCounter = matchingTotpCounter(
+            secret as string,
+            dto.code,
+            now.getTime(),
+            lastAcceptedCounter,
+          );
+        }
+
+        if (acceptedTotpCounter === null && acceptedRecoveryCodeId === null) {
+          await this.recordAdminTwoFactorFailure(client, user.id);
+          await client.query("COMMIT");
+          failure = this.buildInvalidAdminTwoFactorException();
+        } else {
+          if (acceptedTotpCounter !== null) {
+            const updated = await client.query(
+              `UPDATE user_totp_credentials
+               SET last_totp_counter=$2,updated_at=$3
+               WHERE id=$1 AND (last_totp_counter IS NULL OR last_totp_counter < $2)`,
+              [credential.id, acceptedTotpCounter, now],
+            );
+            if (updated.rowCount !== 1) throw this.buildInvalidAdminTwoFactorException();
+          } else if (acceptedRecoveryCodeId !== null) {
+            const consumedRecovery = await client.query(
+              `UPDATE user_backup_codes SET used_at=$2
+               WHERE id=$1 AND user_id=$3 AND used_at IS NULL`,
+              [acceptedRecoveryCodeId, now, user.id],
+            );
+            if (consumedRecovery.rowCount !== 1) throw this.buildInvalidAdminTwoFactorException();
+          }
+
+          const consumedChallenge = await client.query(
+            `UPDATE admin_2fa_challenges SET consumed_at=$2
+             WHERE jti=$1 AND user_id=$3 AND consumed_at IS NULL AND invalidated_at IS NULL`,
+            [initialClaims.jti, now, user.id],
+          );
+          if (consumedChallenge.rowCount !== 1) throw this.buildInvalidAdminTwoFactorException();
+
+          await this.revokeActiveSessionsForUser(
+            client,
+            user.id,
+            now,
+            "replaced_by_new_login",
+          );
+          const sessionId = randomUUID();
+          const expiresAt = new Date(now.getTime() + SESSION_ABSOLUTE_TTL_MS);
+          await client.query(
+            `INSERT INTO sessions
+             (id,user_id,expires_at,last_activity_at,revoked_at,revocation_reason,admin_2fa_verified_at,ip_address,user_agent,created_at)
+             VALUES($1,$2,$3,$4,NULL,NULL,$4,$5,$6,$4)`,
+            [sessionId, user.id, expiresAt, now, ipAddress, userAgent],
+          );
+          const { rawToken: refreshToken, tokenHash } = generateOpaqueRefreshToken();
+          await client.query(
+            `INSERT INTO refresh_tokens
+             (id,session_id,token_hash,consumed_at,is_revoked,expires_at,created_at)
+             VALUES($1,$2,$3,NULL,false,$4,$5)`,
+            [randomUUID(), sessionId, tokenHash, expiresAt, now],
+          );
+          await this.recordAdminTwoFactorSuccess(client, user.id);
+          const accountState = await this.loadAccountRolesAndQuestionnaire(client, user.id);
+          await client.query("COMMIT");
+
+          const accessToken = signAccessToken(
+            { userId: user.id, sessionId },
+            { nowMs: now.getTime() },
+          );
+          response = {
+            user: {
+              id: user.id,
+              name: user.name,
+              email: user.email,
+              emailVerified: true,
+              roles: accountState.roles,
+              hasCompletedQuestionnaire: accountState.hasCompletedQuestionnaire,
+            },
+            accessToken,
+            refreshToken,
+            expiresIn: ACCESS_TOKEN_TTL_SECONDS,
+          };
+        }
+      }
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+
+    if (failure) throw failure;
+    if (!response) throw new Error("A autenticação 2FA não produziu resultado.");
+    return response;
   }
 
   async refresh(dto: RefreshDto): Promise<RefreshResponseDto> {
@@ -780,6 +1141,55 @@ export class AuthService {
         ? new Date(row.admin_2fa_verified_at)
         : null,
     };
+  }
+
+  private buildInvalidAdminTwoFactorException(): ProblemException {
+    return new ProblemException({
+      typeSlug: "admin-2fa-invalid",
+      title: "Segundo fator inválido",
+      status: HttpStatus.UNAUTHORIZED,
+      code: "ADMIN_2FA_INVALID",
+      detail: "Não foi possível concluir a autenticação administrativa.",
+    });
+  }
+
+  private async recordAdminTwoFactorFailure(
+    client: PoolClient,
+    userId: string,
+  ): Promise<void> {
+    const result = await client.query(
+      `INSERT INTO audit_logs
+       (id,actor_user_id,target_user_id,event_id,origin,category,action,metadata,occurred_at)
+       VALUES($1,$2,$2,NULL,'user','identity','admin_2fa_login_rejected','{}'::jsonb,clock_timestamp())`,
+      [randomUUID(), userId],
+    );
+    if (result.rowCount !== 1) throw new Error("Falha de auditoria do segundo fator.");
+  }
+
+  private async recordAdminTwoFactorChallengeIssued(
+    client: PoolClient,
+    userId: string,
+  ): Promise<void> {
+    const result = await client.query(
+      `INSERT INTO audit_logs
+       (id,actor_user_id,target_user_id,event_id,origin,category,action,metadata,occurred_at)
+       VALUES($1,$2,$2,NULL,'user','identity','admin_2fa_challenge_issued','{}'::jsonb,clock_timestamp())`,
+      [randomUUID(), userId],
+    );
+    if (result.rowCount !== 1) throw new Error("Auditoria de desafio 2FA não persistida.");
+  }
+
+  private async recordAdminTwoFactorSuccess(
+    client: PoolClient,
+    userId: string,
+  ): Promise<void> {
+    const result = await client.query(
+      `INSERT INTO audit_logs
+       (id,actor_user_id,target_user_id,event_id,origin,category,action,metadata,occurred_at)
+       VALUES($1,$2,$2,NULL,'user','identity','admin_2fa_login_succeeded','{}'::jsonb,clock_timestamp())`,
+      [randomUUID(), userId],
+    );
+    if (result.rowCount !== 1) throw new Error("Falha de auditoria do login administrativo.");
   }
 
   private async loadAccountRolesAndQuestionnaire(

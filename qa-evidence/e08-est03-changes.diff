@@ -1,0 +1,295 @@
+diff --git a/backend/test/integration/profile-games.integration.test.ts b/backend/test/integration/profile-games.integration.test.ts
+index f1504af..dc3e275 100644
+--- a/backend/test/integration/profile-games.integration.test.ts
++++ b/backend/test/integration/profile-games.integration.test.ts
+@@ -29,6 +29,11 @@ let pool: Pool;
+ let loginRateLimiter: LoginRateLimiterService;
+ let registrationRateLimiter: RegistrationRateLimiterService;
+ 
++const restoreQuestionnaireActivationSql = `UPDATE questionnaire_versions AS qv
++  SET activated_at = saved.activated_at::timestamptz
++  FROM unnest($1::uuid[], $2::text[]) AS saved(id, activated_at)
++  WHERE qv.id = saved.id`;
++
+ function resetRateLimiters(): void {
+   loginRateLimiter?.clearAll();
+   registrationRateLimiter?.clearAll();
+@@ -1197,13 +1202,13 @@ test("K03 Profile Questionnaire & Games Catalog — Integração HTTP + PostgreS
+   // ===========================================================================
+   /* eslint-disable no-unsafe-finally, preserve-caught-error */
+   await t.test("K03-F.1: Reinicialização da API jamais reativa versão inativa (activated_at = NULL)", async () => {
+-    let originalVersions: { id: string; version: string; activated_at: Date | null }[] = [];
++    let originalVersions: { id: string; version: string; activated_at: string | null }[] = [];
+     let originalReadSuccess = false;
+     let primaryError: unknown = null;
+     try {
+       // 0. O endpoint usa qualquer versão ativa; salvar o catálogo inteiro para isolar o caso.
+-      const origRes = await pool.query<{ id: string; version: string; activated_at: Date | null }>(
+-        `SELECT id, version, activated_at FROM questionnaire_versions ORDER BY id FOR UPDATE`,
++      const origRes = await pool.query<{ id: string; version: string; activated_at: string | null }>(
++        `SELECT id, version, activated_at::text AS activated_at FROM questionnaire_versions ORDER BY id FOR UPDATE`,
+       );
+       originalVersions = origRes.rows;
+       originalReadSuccess = true;
+@@ -1252,10 +1257,7 @@ test("K03 Profile Questionnaire & Games Catalog — Integração HTTP + PostgreS
+         try {
+           // Restaurar exatamente os timestamps originais de todas as versões.
+           await pool.query(
+-            `UPDATE questionnaire_versions AS qv
+-             SET activated_at = saved.activated_at
+-             FROM unnest($1::uuid[], $2::timestamptz[]) AS saved(id, activated_at)
+-             WHERE qv.id = saved.id`,
++            restoreQuestionnaireActivationSql,
+             [originalVersions.map((version) => version.id), originalVersions.map((version) => version.activated_at)],
+           );
+         } catch (cleanupErr) {
+@@ -1272,6 +1274,55 @@ test("K03 Profile Questionnaire & Games Catalog — Integração HTTP + PostgreS
+     }
+   });
+ 
++  await t.test("K03-F.1: restauração conserva microssegundos, NULL e versões alheias", async () => {
++    const client = await pool.connect();
++    const activeId = randomUUID(), inactiveId = randomUUID(), unrelatedId = randomUUID();
++    try {
++      await client.query("BEGIN");
++      const fixtures: [string, string | null][] = [
++        [activeId, "2026-10-20 10:30:45.123456+00"],
++        [inactiveId, null],
++        [unrelatedId, "2026-10-20 07:30:45.654321-03"],
++      ];
++      for (const [id, activatedAt] of fixtures) {
++        await client.query(
++          `INSERT INTO questionnaire_versions(id,version,definition,activated_at,created_at)
++           VALUES($1::uuid,$2::varchar(40),'{}'::jsonb,$3::timestamptz,clock_timestamp())`,
++          [id, `k03-f1-${id.slice(0, 30)}`, activatedAt],
++        );
++      }
++      const ids = [activeId, inactiveId];
++      const snapshot = (await client.query<{ id: string; activated_at: string | null; created_at: string }>(
++        `SELECT id,activated_at::text AS activated_at,created_at::text AS created_at
++         FROM questionnaire_versions WHERE id=ANY($1::uuid[]) ORDER BY id FOR UPDATE`, [ids],
++      )).rows;
++      assert.equal(snapshot.length, 2);
++      assert.match(snapshot.find((row) => row.id === activeId)?.activated_at ?? "", /\.123456/);
++      assert.equal(snapshot.find((row) => row.id === inactiveId)?.activated_at, null);
++      const unrelatedBefore = (await client.query<{ activated_at: string; created_at: string }>(
++        `SELECT activated_at::text AS activated_at,created_at::text AS created_at
++         FROM questionnaire_versions WHERE id=$1::uuid`, [unrelatedId],
++      )).rows[0];
++      await client.query("UPDATE questionnaire_versions SET activated_at=NULL WHERE id=ANY($1::uuid[])", [ids]);
++      await client.query(restoreQuestionnaireActivationSql, [snapshot.map((row) => row.id), snapshot.map((row) => row.activated_at)]);
++      const restored = (await client.query<{ id: string; activated_at: string | null; created_at: string }>(
++        `SELECT id,activated_at::text AS activated_at,created_at::text AS created_at
++         FROM questionnaire_versions WHERE id=ANY($1::uuid[]) ORDER BY id`, [ids],
++      )).rows;
++      assert.deepEqual(restored, snapshot);
++      assert.equal((await client.query<{ exact: boolean }>(
++        "SELECT activated_at=$2::timestamptz AS exact FROM questionnaire_versions WHERE id=$1::uuid",
++        [activeId, fixtures[0][1]],
++      )).rows[0].exact, true);
++      assert.deepEqual((await client.query<{ activated_at: string; created_at: string }>(
++        `SELECT activated_at::text AS activated_at,created_at::text AS created_at
++         FROM questionnaire_versions WHERE id=$1::uuid`, [unrelatedId],
++      )).rows[0], unrelatedBefore);
++    } finally {
++      try { await client.query("ROLLBACK"); } finally { client.release(); }
++    }
++  });
++
+   await t.test("K03-F.2: Seed de catálogo preserva decisões administrativas sobre is_curated", async () => {
+     const gamesService = app.get(GamesService);
+     const customPromotedId = randomUUID();
+diff --git a/backend/test/unit/k03-cleanup.unit.test.ts b/backend/test/unit/k03-cleanup.unit.test.ts
+index ebabc8f..7197cbb 100644
+--- a/backend/test/unit/k03-cleanup.unit.test.ts
++++ b/backend/test/unit/k03-cleanup.unit.test.ts
+@@ -9,7 +9,7 @@ interface QueryCall {
+ interface MockQueryRow {
+   id?: string;
+   version?: string;
+-  activated_at?: Date | null;
++  activated_at?: string | null;
+   is_curated?: boolean;
+ }
+ 
+@@ -24,8 +24,8 @@ function createMockPool(options?: {
+   failReadF2?: boolean;
+   failCleanupApexF2?: boolean;
+   failCleanupCustomF2?: boolean;
+-  initialActivatedAt?: Date | null;
+-  initialVersions?: { id: string; version: string; activated_at: Date | null }[];
++  initialActivatedAt?: string | null;
++  initialVersions?: { id: string; version: string; activated_at: string | null }[];
+   initialCurated?: boolean;
+ }) {
+   const calls: QueryCall[] = [];
+@@ -35,7 +35,7 @@ function createMockPool(options?: {
+     query: async (sql: string, params: unknown[] = []): Promise<MockQueryResult> => {
+       calls.push({ sql: sql.trim(), params });
+ 
+-      if (sql.includes("SELECT id, version, activated_at FROM questionnaire_versions")) {
++      if (sql.includes("SELECT id, version, activated_at::text AS activated_at FROM questionnaire_versions")) {
+         if (options?.failReadF1) {
+           throw new Error("Simulated F1 initial read failure");
+         }
+@@ -98,7 +98,7 @@ test("Robustez do cleanup de testes de integração K03-F", async (t) => {
+     try {
+       try {
+         const origRes = await pool.query(
+-          "SELECT id, version, activated_at FROM questionnaire_versions ORDER BY id FOR UPDATE",
++          "SELECT id, version, activated_at::text AS activated_at FROM questionnaire_versions ORDER BY id FOR UPDATE",
+         );
+         originalVersions = origRes.rows;
+         originalReadSuccess = true;
+@@ -108,7 +108,7 @@ test("Robustez do cleanup de testes de integração K03-F", async (t) => {
+       } finally {
+         if (originalReadSuccess) {
+           await pool.query(
+-            "UPDATE questionnaire_versions AS qv SET activated_at = saved.activated_at FROM unnest($1::uuid[], $2::timestamptz[]) AS saved(id, activated_at) WHERE qv.id = saved.id",
++            "UPDATE questionnaire_versions AS qv SET activated_at = saved.activated_at::timestamptz FROM unnest($1::uuid[], $2::text[]) AS saved(id, activated_at) WHERE qv.id = saved.id",
+             [originalVersions.map((version) => version.id), originalVersions.map((version) => version.activated_at)],
+           );
+         }
+@@ -130,30 +130,62 @@ test("Robustez do cleanup de testes de integração K03-F", async (t) => {
+ 
+   await t.test("K03-F.1: Restaura o timestamp original de cada versão do catálogo", async () => {
+     const originalVersions = [
+-      { id: "version-active", version: "1.0.0", activated_at: new Date("2024-05-10T12:00:00Z") },
++      { id: "version-active", version: "1.0.0", activated_at: "2024-05-10 12:00:00.123456+00" },
+       { id: "version-inactive", version: "2.0.0", activated_at: null },
++      { id: "version-other-active", version: "3.0.0", activated_at: "2024-05-10 09:00:00.654321-03" },
+     ];
+     const pool = createMockPool({ initialVersions: originalVersions });
+     const snapshot = await pool.query(
+-      "SELECT id, version, activated_at FROM questionnaire_versions ORDER BY id FOR UPDATE",
++      "SELECT id, version, activated_at::text AS activated_at FROM questionnaire_versions ORDER BY id FOR UPDATE",
+     );
+     await pool.query(
+-      "UPDATE questionnaire_versions AS qv SET activated_at = saved.activated_at FROM unnest($1::uuid[], $2::timestamptz[]) AS saved(id, activated_at) WHERE qv.id = saved.id",
++      "UPDATE questionnaire_versions AS qv SET activated_at = saved.activated_at::timestamptz FROM unnest($1::uuid[], $2::text[]) AS saved(id, activated_at) WHERE qv.id = saved.id",
+       [snapshot.rows.map((version) => version.id), snapshot.rows.map((version) => version.activated_at)],
+     );
+ 
+     const restore = pool.calls[1];
+     assert.ok(restore.sql.includes("UPDATE questionnaire_versions AS qv"));
++    assert.match(snapshot.rows[0].activated_at ?? "", /\.123456/);
++    assert.match(restore.sql, /saved\.activated_at::timestamptz/);
++    assert.match(restore.sql, /\$2::text\[\]/);
+     assert.deepEqual(restore.params, [
+       originalVersions.map((version) => version.id),
+       originalVersions.map((version) => version.activated_at),
+     ]);
+   });
+ 
++  await t.test("K03-F.1: Restaura no finally após falha do cenário sem ocultá-la", async () => {
++    const originalTimestamp = "2024-05-10 12:00:00.123456+00";
++    const pool = createMockPool({ initialActivatedAt: originalTimestamp });
++    let originalVersions: MockQueryRow[] = [];
++    let caughtError: unknown;
++    const primaryError = new Error("Falha do cenário K03-F.1");
++    try {
++      try {
++        originalVersions = (await pool.query(
++          "SELECT id, version, activated_at::text AS activated_at FROM questionnaire_versions ORDER BY id FOR UPDATE",
++        )).rows;
++        throw primaryError;
++      } finally {
++        if (originalVersions.length) {
++          await pool.query(
++            "UPDATE questionnaire_versions AS qv SET activated_at = saved.activated_at::timestamptz FROM unnest($1::uuid[], $2::text[]) AS saved(id, activated_at) WHERE qv.id = saved.id",
++            [originalVersions.map((version) => version.id), originalVersions.map((version) => version.activated_at)],
++          );
++        }
++      }
++    } catch (error) {
++      caughtError = error;
++    }
++    assert.equal(caughtError, primaryError);
++    assert.equal(pool.calls.length, 2);
++    assert.deepEqual(pool.calls[1].params, [["version-id"], [originalTimestamp]]);
++  });
++
+   await t.test("K03-F.1: Preserva falha primária via AggregateError se cleanup falhar", async () => {
+-    const originalDate = new Date("2024-05-10T12:00:00Z");
++    const originalTimestamp = "2024-05-10 12:00:00.123456+00";
+     const pool = createMockPool({
+-      initialActivatedAt: originalDate,
++      initialActivatedAt: originalTimestamp,
+       failCleanupF1: true,
+     });
+     let originalVersions: MockQueryRow[] = [];
+@@ -164,7 +196,7 @@ test("Robustez do cleanup de testes de integração K03-F", async (t) => {
+     try {
+       try {
+         const origRes = await pool.query(
+-          "SELECT id, version, activated_at FROM questionnaire_versions ORDER BY id FOR UPDATE",
++          "SELECT id, version, activated_at::text AS activated_at FROM questionnaire_versions ORDER BY id FOR UPDATE",
+         );
+         originalVersions = origRes.rows;
+         originalReadSuccess = true;
+@@ -178,7 +210,7 @@ test("Robustez do cleanup de testes de integração K03-F", async (t) => {
+         if (originalReadSuccess) {
+           try {
+             await pool.query(
+-              "UPDATE questionnaire_versions AS qv SET activated_at = saved.activated_at FROM unnest($1::uuid[], $2::timestamptz[]) AS saved(id, activated_at) WHERE qv.id = saved.id",
++              "UPDATE questionnaire_versions AS qv SET activated_at = saved.activated_at::timestamptz FROM unnest($1::uuid[], $2::text[]) AS saved(id, activated_at) WHERE qv.id = saved.id",
+               [originalVersions.map((version) => version.id), originalVersions.map((version) => version.activated_at)],
+             );
+           } catch (cleanupErr) {
+diff --git a/docs/E08_EST03_CORRECAO_A03.md b/docs/E08_EST03_CORRECAO_A03.md
+new file mode 100644
+index 0000000..6bde814
+--- /dev/null
++++ b/docs/E08_EST03_CORRECAO_A03.md
+@@ -0,0 +1,51 @@
++# E08-EST03 — Correção A03: precisão da restauração K03-F.1
++
++**Base:** `ca05db54723d0c2050b8feab56640f62695d273f`, branch `feature/events-participations`, com E08-EST02 commitada. Working tree e índice estavam limpos no início.
++
++## Diagnóstico
++
++Na fixture histórica K03-F.1 de `backend/test/integration/profile-games.integration.test.ts`, a captura `SELECT id, version, activated_at FROM questionnaire_versions` retornava `activated_at` como `Date | null` pelo driver `pg`. O bloco `finally` enviava esses objetos ao `unnest($2::timestamptz[])` para restaurar cada versão por ID. Como `Date` mantém apenas milissegundos, um instante PostgreSQL como `.123456` podia voltar como `.123000`. A perda ocorria na leitura da fixture, antes da restauração; não foi identificada mudança de regra de produção.
++
++O contrato K03-F.1 continua exigindo que `onModuleInit()` não reative versões inativas e que o PUT do questionário responda HTTP 422 `QUESTIONNAIRE_VERSION_UNAVAILABLE` quando nenhuma versão está ativa. A preparação ainda desativa temporariamente todas as versões ativas e a restauração continua no `finally`, inclusive diante de falha do cenário. O tratamento que agrega falha primária e falha de cleanup foi preservado.
++
++## Correção e cobertura
++
++- A captura agora usa `activated_at::text AS activated_at`, com tipo `string | null`. Nenhum timestamp capturado passa por `Date`.
++- A restauração usa arrays de IDs `uuid[]` e valores `text[]`, com `saved.activated_at::timestamptz` no PostgreSQL. O cast conserva microssegundos e interpreta corretamente o fuso do texto; `NULL` continua `NULL`. Somente `activated_at` das versões identificadas pelo ID é atualizado.
++- O teste unitário K03-F verifica texto de seis casas, múltiplas versões ativas e inativas, os parâmetros e casts da restauração, execução do `finally` após erro e preservação de ambos os erros quando o cleanup também falha.
++- Um novo cenário PostgreSQL usa três versões descartáveis identificadas por UUID numa transação com rollback: uma ativa com `.123456`, uma inativa e uma terceira versão alheia com `.654321` e deslocamento `-03`. Desativa e restaura somente as duas primeiras, compara `activated_at::text` e `created_at::text` antes/depois diretamente no banco, confirma a igualdade do instante com cast `::timestamptz` e verifica que a terceira versão não mudou. Não depende dos timestamps existentes no catálogo.
++
++Não foram alterados código NestJS de produção, schema, migrações, dependências, autenticação ou contrato HTTP. O cenário funcional K03-F.1 mantém suas asserções HTTP 422 e código de erro.
++
++## Validação local
++
++- Unitários K03-F: **8/8 aprovados**.
++- Regressão unitária: **985/985 aprovados**, sem falhas, cancelamentos ou ignorados.
++- Typecheck de produção e de testes: aprovados.
++- Lint e build: aprovados.
++
++O `tsx` desta sessão apresentou `uv_os_get_passwd returned ENOMEM` antes da descoberta dos testes. Um shim temporário de processo para `os.userInfo()` permitiu as execuções; foi removido e não integra a evidência. A instalação local também estava sem `supertest` e seus tipos; `npm ci --ignore-scripts` restaurou as dependências do lockfile, sem alterar manifesto ou lockfile.
++
++## Validação PostgreSQL manual concluída
++
++O responsável executou os testes no PostgreSQL 18 Linux em Docker, banco local `arenago_events_test` na porta `55432`. A suíte `profile-games.integration.test.ts` passou **24/24**, incluindo o cenário HTTP histórico K03-F.1 e a nova prova de restauração. Esta confirmou no PostgreSQL a preservação dos seis dígitos de microssegundos, de `NULL` e de uma versão não relacionada. A regressão PostgreSQL completa passou **1.229/1.229**, com zero falhas, cancelamentos ou ignorados, código de saída 0 e duração de 580429.5331 ms. O Codex não executou PostgreSQL. Não houve validação de produção.
++
++Com as três URLs idênticas já configuradas localmente pelo responsável para `arenago_events_test` em `127.0.0.1:55432`, sem compartilhá-las:
++
++```powershell
++Set-Location C:\DoJob\ProgramacaoMobile\backend
++$env:NODE_ENV = 'test'
++$env:EVENT_CLOSURE_JOB_TEST_ENABLED = 'false'
++$env:STAFF_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:ADMIN_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:EVALUATION_IDEMPOTENCY_TTL_SECONDS = '60'
++npx.cmd tsx --tsconfig tsconfig.test.json --test --test-concurrency=1 test/integration/profile-games.integration.test.ts
++if ($LASTEXITCODE -ne 0) { throw 'Investigar K03-F antes da regressão.' }
++npm.cmd run test:integration
++if ($LASTEXITCODE -ne 0) { throw 'Investigar a regressão PostgreSQL.' }
++```
++
++Limitação: a fixture histórica ainda isola o catálogo global durante seu cenário; nenhuma outra fixture ou tabela foi modificada. Os unitários verificam o caminho do texto até o cast SQL, e a comparação exata de `activated_at::text` foi confirmada na execução PostgreSQL manual. Não houve alteração de código de produção.
++
++**Arquivos da task:** `backend/test/integration/profile-games.integration.test.ts`, `backend/test/unit/k03-cleanup.unit.test.ts` e este relatório. Evidência única: `qa-evidence/e08-est03-changes.diff`. A E08-EST03 está aprovada e resta o versionamento manual.

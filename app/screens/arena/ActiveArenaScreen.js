@@ -136,6 +136,7 @@ export default function ActiveArenaScreen({ navigation }) {
       {/* As experiências variam por evento; a rolagem acomoda listas maiores. */}
       <ScrollView>
         <Text style={styles.eventName}>BEAST Arena</Text>
+        <Text>Modo demonstração: ações não são enviadas ao servidor.</Text>
         <Text style={styles.title}>Arena ativa</Text>
         <Text style={styles.message}>Sua participação na Arena está ativa.</Text>
         {participation.activeExperience && (

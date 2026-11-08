@@ -1,0 +1,987 @@
+diff --git a/backend/src/auth/auth.module.ts b/backend/src/auth/auth.module.ts
+index 0ce1f44..fbee057 100644
+--- a/backend/src/auth/auth.module.ts
++++ b/backend/src/auth/auth.module.ts
+@@ -5,17 +5,22 @@ import { AuthService } from "./auth.service";
+ import { LoginRateLimiterService } from "./login-rate-limiter.service";
+ import { RegistrationRateLimiterService } from "./registration-rate-limiter.service";
+ import { SessionAuthGuard } from "./session-auth.guard";
++import { EmailVerificationPolicy } from "./email-verification.policy";
++import { EmailVerificationService } from "./email-verification.service";
+ 
+ @Module({
+   imports: [DatabaseModule],
+   controllers: [AuthController],
+   providers: [
++    EmailVerificationPolicy,
++    EmailVerificationService,
+     AuthService,
+     LoginRateLimiterService,
+     RegistrationRateLimiterService,
+     SessionAuthGuard,
+   ],
+   exports: [
++    EmailVerificationService,
+     AuthService,
+     LoginRateLimiterService,
+     RegistrationRateLimiterService,
+diff --git a/backend/src/auth/email-verification.policy.ts b/backend/src/auth/email-verification.policy.ts
+new file mode 100644
+index 0000000..ec19011
+--- /dev/null
++++ b/backend/src/auth/email-verification.policy.ts
+@@ -0,0 +1,30 @@
++import { Injectable } from "@nestjs/common";
++
++export interface EmailVerificationLimits {
++  readonly ttlSeconds: number;
++  readonly cooldownSeconds: number;
++  readonly maxPerHour: number;
++}
++
++/** Limite técnico do inteiro SQL; erros nunca reproduzem o valor recebido. */
++export function parseEmailVerificationLimits(env: Record<string, string | undefined>): EmailVerificationLimits {
++  function positive(name: string, fallback: number): number {
++    const raw = env[name];
++    if (raw === undefined) return fallback;
++    const value = Number(raw);
++    if (!/^[0-9]+$/.test(raw) || !Number.isSafeInteger(value) || value < 1 || value > 2_147_483_647) {
++      throw new Error(`${name} deve ser um inteiro positivo de até 2147483647.`);
++    }
++    return value;
++  }
++  return Object.freeze({
++    ttlSeconds: positive("EMAIL_VERIFICATION_TTL_SECONDS", 86_400),
++    cooldownSeconds: positive("EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS", 120),
++    maxPerHour: positive("EMAIL_VERIFICATION_MAX_PER_HOUR", 5),
++  });
++}
++
++@Injectable()
++export class EmailVerificationPolicy {
++  readonly limits = parseEmailVerificationLimits(process.env);
++}
+diff --git a/backend/src/auth/email-verification.service.ts b/backend/src/auth/email-verification.service.ts
+new file mode 100644
+index 0000000..7b9c6d9
+--- /dev/null
++++ b/backend/src/auth/email-verification.service.ts
+@@ -0,0 +1,132 @@
++import { createHash, randomBytes, randomUUID } from "node:crypto";
++import { Inject, Injectable } from "@nestjs/common";
++import { Pool, type PoolClient } from "pg";
++import { POSTGRES_POOL } from "../database/database.module";
++import { EmailVerificationPolicy } from "./email-verification.policy";
++
++export type IssueEmailVerificationResult =
++  | { kind: "issued"; token: string; email: string; expiresAt: string }
++  | { kind: "account_unavailable" | "already_verified" | "cooldown" | "rate_limited" };
++export type ConfirmEmailVerificationResult = { kind: "verified" | "invalid_token" };
++
++export function generateEmailVerificationToken(): string {
++  return randomBytes(32).toString("base64url");
++}
++export function hashEmailVerificationToken(token: string): string {
++  return createHash("sha256").update(token, "utf8").digest("hex");
++}
++export function isEmailVerificationToken(token: unknown): token is string {
++  return typeof token === "string" && /^[A-Za-z0-9_-]{43}$/.test(token)
++    && Buffer.from(token, "base64url").toString("base64url") === token;
++}
++const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
++
++/** Núcleo interno: nenhum endpoint, entrega de mensagem, sessão ou concessão. */
++@Injectable()
++export class EmailVerificationService {
++  constructor(
++    @Inject(POSTGRES_POOL) private readonly pool: Pool,
++    @Inject(EmailVerificationPolicy) private readonly policy: EmailVerificationPolicy,
++  ) {}
++
++  private async transaction<T>(operation: (client: PoolClient) => Promise<T>): Promise<T> {
++    const client = await this.pool.connect();
++    try {
++      await client.query("BEGIN ISOLATION LEVEL READ COMMITTED");
++      const result = await operation(client);
++      await client.query("COMMIT");
++      return result;
++    } catch (error) {
++      await client.query("ROLLBACK").catch(() => undefined);
++      throw error;
++    } finally {
++      client.release();
++    }
++  }
++
++  /** Usuário primeiro, tokens ordenados depois; relógio somente após todas as esperas. */
++  private async lockAccount(client: PoolClient, userId: string) {
++    const user = (await client.query<{ email: string; active: boolean; verified: boolean }>(
++      `SELECT email, is_active AS active, email_verified_at IS NOT NULL AS verified
++       FROM users WHERE id=$1::uuid FOR UPDATE`, [userId],
++    )).rows[0];
++    if (user) await client.query(
++      "SELECT id FROM email_verification_tokens WHERE user_id=$1::uuid ORDER BY id FOR UPDATE", [userId],
++    );
++    return user;
++  }
++
++  /** Token bruto só sai após COMMIT, para o futuro distribuidor interno confiável. */
++  async issue(userId: string): Promise<IssueEmailVerificationResult> {
++    if (typeof userId !== "string" || !uuid.test(userId)) return { kind: "account_unavailable" };
++    return this.transaction(async client => {
++      const user = await this.lockAccount(client, userId);
++      if (!user?.active) return { kind: "account_unavailable" };
++      if (user.verified) return { kind: "already_verified" };
++      const { ttlSeconds, cooldownSeconds, maxPerHour } = this.policy.limits;
++      const decision = (await client.query<{ at: string; cooldown: boolean; limited: boolean }>(
++        `WITH decision AS MATERIALIZED (SELECT clock_timestamp() AS at)
++         SELECT d.at::text AS at,
++           EXISTS(SELECT 1 FROM email_verification_tokens t WHERE t.user_id=$1::uuid
++             AND t.created_at > d.at - $2::integer * interval '1 second') AS cooldown,
++           (SELECT count(*) FROM email_verification_tokens t WHERE t.user_id=$1::uuid
++             AND t.created_at > d.at - interval '1 hour') >= $3::integer AS limited
++         FROM decision d`, [userId, cooldownSeconds, maxPerHour],
++      )).rows[0];
++      if (!decision) throw new Error("Decisão de emissão indisponível.");
++      if (decision.cooldown) return { kind: "cooldown" };
++      if (decision.limited) return { kind: "rate_limited" };
++      await this.invalidate(client, userId, decision.at);
++      const token = generateEmailVerificationToken();
++      const inserted = await client.query<{ expiresAt: string }>(
++        `INSERT INTO email_verification_tokens(id,user_id,email,token_hash,expires_at,created_at)
++         VALUES($1::uuid,$2::uuid,$3,$4,$5::timestamptz + $6::integer * interval '1 second',$5::timestamptz)
++         RETURNING expires_at::text AS "expiresAt"`,
++        [randomUUID(), userId, user.email, hashEmailVerificationToken(token), decision.at, ttlSeconds],
++      );
++      if (inserted.rowCount !== 1) throw new Error("Emissão de verificação não persistida.");
++      return { kind: "issued", token, email: user.email, expiresAt: inserted.rows[0].expiresAt };
++    });
++  }
++
++  async confirm(token: unknown): Promise<ConfirmEmailVerificationResult> {
++    if (!isEmailVerificationToken(token)) return { kind: "invalid_token" };
++    const hash = hashEmailVerificationToken(token);
++    // Descoberta sem lock: identidade, endereço e validade são reavaliados dentro da transação.
++    const target = (await this.pool.query<{ userId: string }>(
++      'SELECT user_id AS "userId" FROM email_verification_tokens WHERE token_hash=$1', [hash],
++    )).rows[0];
++    if (!target) return { kind: "invalid_token" };
++    return this.transaction(async client => {
++      const user = await this.lockAccount(client, target.userId);
++      if (!user?.active || user.verified) return { kind: "invalid_token" };
++      const consumed = await client.query<{ at: string }>(
++        `WITH decision AS MATERIALIZED (SELECT clock_timestamp() AS at)
++         UPDATE email_verification_tokens t SET verified_at=d.at
++         FROM users u, decision d
++         WHERE t.token_hash=$1 AND t.user_id=$2::uuid AND u.id=t.user_id
++           AND t.email=u.email AND u.is_active AND u.email_verified_at IS NULL
++           AND t.verified_at IS NULL AND t.expires_at>d.at
++         RETURNING t.verified_at::text AS at`, [hash, target.userId],
++      );
++      if (!consumed.rowCount) return { kind: "invalid_token" };
++      if (consumed.rowCount !== 1) throw new Error("Consumo de verificação inconsistente.");
++      const at = consumed.rows[0].at;
++      const updated = await client.query(
++        `UPDATE users SET email_verified_at=$2::timestamptz, updated_at=$2::timestamptz
++         WHERE id=$1::uuid AND is_active AND email_verified_at IS NULL RETURNING id`, [target.userId, at],
++      );
++      if (updated.rowCount !== 1) throw new Error("Confirmação de verificação não persistida.");
++      await this.invalidate(client, target.userId, at);
++      return { kind: "verified" };
++    });
++  }
++
++  /** Expiração antecipada preserva created_at para a janela móvel; não finge consumo. */
++  private async invalidate(client: PoolClient, userId: string, at: string): Promise<void> {
++    await client.query(
++      `UPDATE email_verification_tokens SET expires_at=$2::timestamptz
++       WHERE user_id=$1::uuid AND verified_at IS NULL AND expires_at>$2::timestamptz`, [userId, at],
++    );
++  }
++}
+diff --git a/backend/test/integration/email-verification.integration.test.ts b/backend/test/integration/email-verification.integration.test.ts
+new file mode 100644
+index 0000000..e206dd4
+--- /dev/null
++++ b/backend/test/integration/email-verification.integration.test.ts
+@@ -0,0 +1,327 @@
++import assert from "node:assert/strict";
++import { createHash, randomUUID } from "node:crypto";
++import { after, test } from "node:test";
++import { Pool, type PoolClient } from "pg";
++import { EmailVerificationService, generateEmailVerificationToken } from "../../src/auth/email-verification.service";
++import { EmailVerificationPolicy, parseEmailVerificationLimits } from "../../src/auth/email-verification.policy";
++import { assertParticipationsReadTestDatabaseUrls } from "./participations-read-db-guard";
++
++// A04: valida as três URLs, credenciais presentes, host/porta/banco exatos e ausência
++// de query/fragmentos ANTES de qualquer Pool. Nunca lê/imprime credenciais.
++const url = assertParticipationsReadTestDatabaseUrls(process.env);
++const applicationName = `a1-email-${randomUUID()}`;
++const pool = new Pool({ connectionString: url, application_name: applicationName, max: 8 });
++const fixturePool = new Pool({ connectionString: url, max: 4 });
++const users: string[] = [];
++const policy = { limits: parseEmailVerificationLimits({}) } as EmailVerificationPolicy;
++const service = new EmailVerificationService(pool, policy);
++const hash = (value: string) => createHash("sha256").update(value).digest("hex");
++
++after(async () => {
++  try {
++    await fixturePool.query("DELETE FROM email_verification_tokens WHERE user_id=ANY($1::uuid[])", [users]);
++    await fixturePool.query("DELETE FROM refresh_tokens WHERE session_id IN (SELECT id FROM sessions WHERE user_id=ANY($1::uuid[]))", [users]);
++    await fixturePool.query("DELETE FROM sessions WHERE user_id=ANY($1::uuid[])", [users]);
++    await fixturePool.query("DELETE FROM user_roles WHERE user_id=ANY($1::uuid[])", [users]);
++    await fixturePool.query("DELETE FROM users WHERE id=ANY($1::uuid[])", [users]);
++  } finally {
++    await Promise.all([pool.end(), fixturePool.end()]);
++  }
++});
++async function account() {
++  const id = randomUUID();
++  await fixturePool.query(`INSERT INTO users(id,name,email,password_hash,is_active,created_at,updated_at)
++    VALUES($1,'A1 fixture',$2,'test-placeholder',true,clock_timestamp(),clock_timestamp())`, [id, `${id}@example.test`]);
++  users.push(id);
++  return id;
++}
++async function issued(userId: string, instance = service) {
++  const result = await instance.issue(userId);
++  assert.equal(result.kind, "issued");
++  if (result.kind !== "issued") throw Error("Emissão esperada");
++  return result;
++}
++async function age(userId: string, seconds = 121) {
++  await fixturePool.query(`UPDATE email_verification_tokens SET created_at=clock_timestamp()-$2::integer*interval '1 second'
++    WHERE user_id=$1`, [userId, seconds]);
++}
++async function seedToken(userId: string, options: { age?: number; expires?: number; used?: boolean; email?: string } = {}) {
++  const token = generateEmailVerificationToken();
++  await fixturePool.query(`INSERT INTO email_verification_tokens(id,user_id,email,token_hash,created_at,expires_at,verified_at)
++    SELECT $1,u.id,COALESCE($3::text,u.email),$4,clock_timestamp()-$5::integer*interval '1 second',
++      clock_timestamp()+$6::integer*interval '1 second',CASE WHEN $7::boolean THEN clock_timestamp() ELSE NULL END
++    FROM users u WHERE u.id=$2`,
++  [randomUUID(), userId, options.email ?? null, hash(token), options.age ?? 121, options.expires ?? 86400, options.used ?? false]);
++  return token;
++}
++async function snapshot(userId: string) {
++  return (await fixturePool.query(`SELECT to_jsonb(u) AS account,
++    (SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM email_verification_tokens t WHERE user_id=u.id) AS tokens,
++    (SELECT jsonb_agg(to_jsonb(s) ORDER BY id) FROM sessions s WHERE user_id=u.id) AS sessions,
++    (SELECT jsonb_agg(to_jsonb(r) ORDER BY id) FROM user_roles r WHERE user_id=u.id) AS roles,
++    (SELECT jsonb_agg(to_jsonb(r) ORDER BY r.id) FROM refresh_tokens r JOIN sessions s ON s.id=r.session_id WHERE s.user_id=u.id) AS refresh
++    FROM users u WHERE id=$1`, [userId])).rows[0];
++}
++function intercept(afterQuery: (client: PoolClient, sql: string) => Promise<void>) {
++  const wrapped = {
++    query: pool.query.bind(pool),
++    connect: async () => {
++      const client = await pool.connect();
++      return {
++        query: async (sql: string, values?: unknown[]) => {
++          const result = await client.query(sql, values);
++          await afterQuery(client, sql);
++          return result;
++        },
++        release: () => client.release(),
++      };
++    },
++  } as unknown as Pool;
++  return new EmailVerificationService(wrapped, policy);
++}
++async function waitBlocked(count: number) {
++  const deadline = Date.now() + 8000;
++  while (Date.now() < deadline) {
++    const n = (await fixturePool.query(`SELECT count(*)::integer AS n FROM pg_stat_activity
++      WHERE application_name=$1 AND wait_event_type='Lock' AND cardinality(pg_blocking_pids(pid))>0`, [applicationName])).rows[0].n;
++    if (n >= count) return;
++    await new Promise(resolve => setTimeout(resolve, 20));
++  }
++  throw Error("Sobreposição real de transações não foi observada.");
++}
++async function competing<T>(userId: string, first: () => Promise<T>, second: () => Promise<T>) {
++  const blocker = await fixturePool.connect();
++  let running: Promise<T>[] = [];
++  try {
++    await blocker.query("BEGIN");
++    await blocker.query("SELECT id FROM users WHERE id=$1 FOR UPDATE", [userId]);
++    running = [first(), second()];
++    // Handlers instalados antes de aguardar locks para evitar rejeições sem tratamento.
++    const joined = Promise.all(running);
++    void joined.catch(() => undefined);
++    await waitBlocked(2);
++    await blocker.query("COMMIT");
++    return await joined;
++  } finally {
++    await blocker.query("ROLLBACK");
++    blocker.release();
++    await Promise.allSettled(running);
++  }
++}
++
++test("T6.1-A1 PostgreSQL emissão guarda hash, expira em 24h e preserva conta", async () => {
++  const id = await account(), before = await snapshot(id), result = await issued(id);
++  const rows = (await fixturePool.query(`SELECT token_hash,email,verified_at,
++    expires_at-created_at=interval '24 hours' AS exact FROM email_verification_tokens WHERE user_id=$1`, [id])).rows;
++  assert.equal(rows.length, 1);
++  assert.equal(rows[0].token_hash, hash(result.token));
++  assert.equal(rows[0].email, result.email);
++  assert.equal(rows[0].verified_at, null);
++  assert.equal(rows[0].exact, true);
++  assert.deepEqual((await snapshot(id)).account, before.account);
++  assert.ok(!JSON.stringify(await snapshot(id)).includes(result.token));
++});
++test("T6.1-A1 PostgreSQL TTL customizado usa relógio do banco", async () => {
++  const id = await account();
++  await issued(id, new EmailVerificationService(pool, { limits: { ttlSeconds: 600, cooldownSeconds: 120, maxPerHour: 5 } }));
++  assert.equal((await fixturePool.query("SELECT expires_at-created_at=interval '600 seconds' AS exact FROM email_verification_tokens WHERE user_id=$1", [id])).rows[0].exact, true);
++});
++test("T6.1-A1 PostgreSQL cooldown recusa sem invalidar token vigente", async () => {
++  const id = await account(), old = await issued(id), before = await snapshot(id);
++  assert.deepEqual(await service.issue(id), { kind: "cooldown" });
++  assert.deepEqual(await snapshot(id), before);
++  assert.deepEqual(await service.confirm(old.token), { kind: "verified" });
++});
++test("T6.1-A1 PostgreSQL reemissão após cooldown invalida anterior sem apagar histórico", async () => {
++  const id = await account(), old = await issued(id);
++  await age(id);
++  const fresh = await issued(id);
++  assert.deepEqual(await service.confirm(old.token), { kind: "invalid_token" });
++  const rows = (await fixturePool.query("SELECT verified_at,expires_at<=clock_timestamp() AS expired FROM email_verification_tokens WHERE token_hash=$1", [hash(old.token)])).rows;
++  assert.equal(rows[0].expired, true);
++  assert.equal(rows[0].verified_at, null);
++  assert.equal((await snapshot(id)).tokens.length, 2);
++  assert.deepEqual(await service.confirm(fresh.token), { kind: "verified" });
++});
++test("T6.1-A1 PostgreSQL sexta emissão conta anteriores substituídos", async () => {
++  const id = await account();
++  for (let i = 0; i < 5; i++) { await issued(id); await age(id); }
++  const before = await snapshot(id);
++  assert.equal(before.tokens.length, 5);
++  assert.deepEqual(await service.issue(id), { kind: "rate_limited" });
++  assert.deepEqual(await snapshot(id), before);
++});
++test("T6.1-A1 PostgreSQL janela móvel inclui consumidos e expirados", async () => {
++  const id = await account();
++  for (let i = 0; i < 5; i++) await seedToken(id, { used: i % 2 === 0, expires: i % 2 ? -1 : 86400 });
++  assert.deepEqual(await service.issue(id), { kind: "rate_limited" });
++  await age(id, 3601);
++  await issued(id);
++  assert.equal((await snapshot(id)).tokens.length, 6);
++});
++test("T6.1-A1 PostgreSQL duas emissões simultâneas serializam e emitem uma vez", async () => {
++  const id = await account();
++  const results = await competing(id, () => service.issue(id), () => service.issue(id));
++  assert.deepEqual(results.map(r => r.kind).sort(), ["cooldown", "issued"]);
++  assert.equal((await snapshot(id)).tokens.length, 1);
++});
++test("T6.1-A1 PostgreSQL concorrência na quinta emissão não ultrapassa limite", async () => {
++  const id = await account();
++  for (let i = 0; i < 4; i++) await seedToken(id);
++  const results = await competing(id, () => service.issue(id), () => service.issue(id));
++  assert.deepEqual(results.map(r => r.kind).sort(), ["cooldown", "issued"]);
++  assert.equal((await snapshot(id)).tokens.length, 5);
++  await age(id);
++  assert.deepEqual(await service.issue(id), { kind: "rate_limited" });
++});
++test("T6.1-A1 PostgreSQL confirmação é única, mantém microssegundos e invalida demais", async () => {
++  const id = await account(), token = await seedToken(id), other = await seedToken(id);
++  assert.deepEqual(await service.confirm(token), { kind: "verified" });
++  const exact = (await fixturePool.query(`SELECT u.email_verified_at=t.verified_at AS exact
++    FROM users u JOIN email_verification_tokens t ON t.user_id=u.id WHERE t.token_hash=$1`, [hash(token)])).rows[0];
++  assert.equal(exact.exact, true);
++  const before = await snapshot(id);
++  assert.deepEqual(await service.confirm(token), { kind: "invalid_token" });
++  assert.deepEqual(await service.confirm(other), { kind: "invalid_token" });
++  assert.deepEqual(await snapshot(id), before);
++  assert.ok(before.tokens.find((t: { token_hash: string; verified_at: string | null }) => t.token_hash === hash(other)).verified_at === null);
++});
++test("T6.1-A1 PostgreSQL confirmações simultâneas consomem uma vez", async () => {
++  const id = await account(), token = (await issued(id)).token;
++  const results = await competing(id, () => service.confirm(token), () => service.confirm(token));
++  assert.deepEqual(results.map(r => r.kind).sort(), ["invalid_token", "verified"]);
++});
++for (const first of ["issue", "confirm"] as const) {
++  test(`T6.1-A1 PostgreSQL ${first} primeiro versus concorrente preserva ordem de commit`, async () => {
++    const id = await account(), token = await seedToken(id);
++    let entered!: () => void, resume!: () => void;
++    const reached = new Promise<void>(resolve => { entered = resolve; });
++    const gate = new Promise<void>(resolve => { resume = resolve; });
++    const marker = first === "issue" ? "INSERT INTO email_verification_tokens" : "UPDATE users";
++    const instrumented = intercept(async (_client, sql) => {
++      if (sql.startsWith(marker)) { entered(); await gate; }
++    });
++    const one = first === "issue" ? instrumented.issue(id) : instrumented.confirm(token);
++    void one.catch(() => undefined);
++    let two: Promise<unknown> | undefined;
++    try {
++      await Promise.race([reached, one.then(() => { throw Error("Ponto de sincronização não atingido."); })]);
++      two = first === "issue" ? service.confirm(token) : service.issue(id);
++      void two.catch(() => undefined);
++      await waitBlocked(1);
++      resume();
++      const a = await one, b = await two;
++      assert.equal(a.kind, first === "issue" ? "issued" : "verified");
++      assert.deepEqual(b, { kind: first === "issue" ? "invalid_token" : "already_verified" });
++      const state = await snapshot(id);
++      assert.equal(state.account.email_verified_at !== null, first === "confirm");
++      assert.equal(state.tokens.length, first === "issue" ? 2 : 1);
++    } finally {
++      resume();
++      await Promise.allSettled(two ? [one, two] : [one]);
++    }
++  });
++}
++for (const defect of ["expired", "used", "old-email", "inactive"] as const) {
++  test(`T6.1-A1 PostgreSQL token ${defect} não confirma nem altera estado`, async () => {
++    const id = await account();
++    const token = await seedToken(id, { expires: defect === "expired" ? -1 : 86400, used: defect === "used" });
++    if (defect === "old-email") await fixturePool.query("UPDATE users SET email=$2 WHERE id=$1", [id, `new-${id}@example.test`]);
++    if (defect === "inactive") await fixturePool.query("UPDATE users SET is_active=false WHERE id=$1", [id]);
++    const before = await snapshot(id);
++    assert.deepEqual(await service.confirm(token), { kind: "invalid_token" });
++    assert.deepEqual(await snapshot(id), before);
++  });
++}
++test("T6.1-A1 PostgreSQL token malformado/inexistente e conta inexistente", async () => {
++  assert.deepEqual(await service.confirm("invalid"), { kind: "invalid_token" });
++  assert.deepEqual(await service.confirm(generateEmailVerificationToken()), { kind: "invalid_token" });
++  assert.deepEqual(await service.issue(randomUUID()), { kind: "account_unavailable" });
++});
++test("T6.1-A1 PostgreSQL conta inativa/verificada não recebe token", async () => {
++  const id = await account();
++  await fixturePool.query("UPDATE users SET is_active=false WHERE id=$1", [id]);
++  assert.deepEqual(await service.issue(id), { kind: "account_unavailable" });
++  await fixturePool.query("UPDATE users SET is_active=true,email_verified_at=clock_timestamp() WHERE id=$1", [id]);
++  assert.deepEqual(await service.issue(id), { kind: "already_verified" });
++  assert.equal((await snapshot(id)).tokens, null);
++});
++test("T6.1-A1 PostgreSQL isolamento: lock de outra conta não bloqueia emissão", async () => {
++  const a = await account(), b = await account(), blocker = await fixturePool.connect();
++  try {
++    await blocker.query("BEGIN");
++    await blocker.query("SELECT id FROM users WHERE id=$1 FOR UPDATE", [a]);
++    const boundedPool = new Pool({ connectionString: url, statement_timeout: 1500 });
++    try { await issued(b, new EmailVerificationService(boundedPool, policy)); }
++    finally { await boundedPool.end(); }
++    assert.equal((await snapshot(a)).tokens, null);
++  } finally { await blocker.query("ROLLBACK"); blocker.release(); }
++});
++
++test("T6.1-A1 PostgreSQL confirmação revalida expiração depois de aguardar token", async () => {
++  const id = await account(), token = await seedToken(id), blocker = await fixturePool.connect();
++  let pending: ReturnType<typeof service.confirm> | undefined;
++  try {
++    await blocker.query("BEGIN");
++    await blocker.query("UPDATE email_verification_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE token_hash=$1", [hash(token)]);
++    pending = service.confirm(token);
++    void pending.catch(() => undefined);
++    await waitBlocked(1);
++    await blocker.query("COMMIT");
++    assert.deepEqual(await pending, { kind: "invalid_token" });
++    assert.equal((await snapshot(id)).account.email_verified_at, null);
++  } finally {
++    await blocker.query("ROLLBACK"); blocker.release();
++    if (pending) await Promise.allSettled([pending]);
++  }
++});
++
++test("T6.1-A1 PostgreSQL emissão revalida inatividade depois de aguardar usuário", async () => {
++  const id = await account(), blocker = await fixturePool.connect();
++  let pending: ReturnType<typeof service.issue> | undefined;
++  try {
++    await blocker.query("BEGIN");
++    await blocker.query("UPDATE users SET is_active=false WHERE id=$1", [id]);
++    pending = service.issue(id);
++    void pending.catch(() => undefined);
++    await waitBlocked(1);
++    await blocker.query("COMMIT");
++    assert.deepEqual(await pending, { kind: "account_unavailable" });
++    assert.equal((await snapshot(id)).tokens, null);
++  } finally {
++    await blocker.query("ROLLBACK"); blocker.release();
++    if (pending) await Promise.allSettled([pending]);
++  }
++});
++for (const phase of ["INSERT INTO email_verification_tokens", "UPDATE users", "UPDATE email_verification_tokens SET expires_at"]) {
++  test(`T6.1-A1 PostgreSQL falha SQL real após ${phase} reverte tudo e permite retry`, async () => {
++    const id = await account(), token = await seedToken(id), before = await snapshot(id);
++    let injected = false;
++    const failing = intercept(async (client, sql) => {
++      if (sql.startsWith(phase)) { injected = true; await client.query("SELECT 1/0"); }
++    });
++    const operation = phase.startsWith("INSERT") ? failing.issue(id) : failing.confirm(token);
++    await assert.rejects(operation, (error: unknown) => {
++      assert.equal((error as { code: string }).code, "22012");
++      return true;
++    });
++    assert.equal(injected, true);
++    assert.deepEqual(await snapshot(id), before);
++    if (phase.startsWith("INSERT")) await issued(id);
++    else assert.deepEqual(await service.confirm(token), { kind: "verified" });
++  });
++}
++test("T6.1-A1 PostgreSQL emissão e confirmação preservam sessões, refresh e papéis", async () => {
++  const id = await account(), sid = randomUUID();
++  await fixturePool.query("INSERT INTO user_roles(id,user_id,role,granted_at) VALUES($1,$2,'participante',clock_timestamp())", [randomUUID(), id]);
++  await fixturePool.query(`INSERT INTO sessions(id,user_id,expires_at,last_activity_at,created_at)
++    VALUES($1,$2,clock_timestamp()+interval '1 day',clock_timestamp(),clock_timestamp())`, [sid, id]);
++  await fixturePool.query(`INSERT INTO refresh_tokens(id,session_id,token_hash,expires_at,created_at)
++    VALUES($1,$2,$3,clock_timestamp()+interval '1 day',clock_timestamp())`, [randomUUID(), sid, hash(randomUUID())]);
++  const before = await snapshot(id), result = await issued(id);
++  assert.deepEqual(await service.confirm(result.token), { kind: "verified" });
++  const afterState = await snapshot(id);
++  for (const key of ["sessions", "roles", "refresh"]) assert.deepEqual(afterState[key], before[key]);
++  assert.equal(afterState.roles.length, 1);
++  assert.equal(afterState.roles[0].role, "participante");
++});
+diff --git a/backend/test/unit/email-verification.test.ts b/backend/test/unit/email-verification.test.ts
+new file mode 100644
+index 0000000..09c1d37
+--- /dev/null
++++ b/backend/test/unit/email-verification.test.ts
+@@ -0,0 +1,203 @@
++import assert from "node:assert/strict";
++import { createHash } from "node:crypto";
++import { test } from "node:test";
++import type { Pool } from "pg";
++import { Module } from "@nestjs/common";
++import { NestFactory } from "@nestjs/core";
++import { POSTGRES_POOL } from "../../src/database/database.module";
++import { EmailVerificationPolicy, parseEmailVerificationLimits } from "../../src/auth/email-verification.policy";
++import { EmailVerificationService, generateEmailVerificationToken, hashEmailVerificationToken, isEmailVerificationToken } from "../../src/auth/email-verification.service";
++
++const userId = "00000000-0000-4000-8000-000000000001";
++const at = "2026-11-05 12:00:00.123456+00";
++type Options = { missing?: boolean; inactive?: boolean; verified?: boolean; cooldown?: boolean; limited?: boolean;
++  unknown?: boolean; invalid?: boolean; fail?: string; zeroUpdate?: boolean; zeroInsert?: boolean };
++function fixture(options: Options = {}, limits = parseEmailVerificationLimits({})) {
++  const calls: { text: string; values: unknown[] }[] = [];
++  let released = 0;
++  const query = async (text: string, values: unknown[] = []) => {
++    calls.push({ text, values });
++    if (options.fail && text.includes(options.fail)) throw new Error("SQL_FAILURE");
++    let rows: unknown[] = [];
++    if (text.startsWith("SELECT user_id")) rows = options.unknown ? [] : [{ userId }];
++    else if (text.startsWith("SELECT email,")) rows = options.missing ? [] : [{ email: "person@example.test", active: !options.inactive, verified: !!options.verified }];
++    else if (text.includes("AS cooldown")) rows = [{ at, cooldown: !!options.cooldown, limited: !!options.limited }];
++    else if (text.startsWith("INSERT INTO")) rows = options.zeroInsert ? [] : [{ expiresAt: "2026-11-06 12:00:00.123456+00" }];
++    else if (text.includes("RETURNING t.verified_at")) rows = options.invalid ? [] : [{ at }];
++    else if (text.startsWith("UPDATE users")) rows = options.zeroUpdate ? [] : [{ id: userId }];
++    return { rows, rowCount: rows.length };
++  };
++  const client = { query, release: () => { released++; } };
++  const pool = { query, connect: async () => client } as unknown as Pool;
++  const service = new EmailVerificationService(pool, { limits } as EmailVerificationPolicy);
++  return { service, calls, released: () => released };
++}
++
++test("T6.1-A1 defaults e configuração central validada", () => {
++  assert.deepEqual(parseEmailVerificationLimits({}), { ttlSeconds: 86400, cooldownSeconds: 120, maxPerHour: 5 });
++  assert.deepEqual(parseEmailVerificationLimits({ EMAIL_VERIFICATION_TTL_SECONDS: "60", EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS: "10", EMAIL_VERIFICATION_MAX_PER_HOUR: "2" }),
++    { ttlSeconds: 60, cooldownSeconds: 10, maxPerHour: 2 });
++  assert.ok(Object.isFrozen(parseEmailVerificationLimits({})));
++});
++for (const name of ["EMAIL_VERIFICATION_TTL_SECONDS", "EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS", "EMAIL_VERIFICATION_MAX_PER_HOUR"]) {
++  test(`T6.1-A1 rejeita configuração inválida: ${name}`, () => {
++    for (const raw of ["", " ", "0", "-1", "1.2", "NaN", "Infinity", "1e2", "2147483648", "secret-value"]) {
++      assert.throws(() => parseEmailVerificationLimits({ [name]: raw }), error => {
++        assert.ok(error instanceof Error);
++        assert.ok(error.message.startsWith(name));
++        assert.ok(!error.message.includes("secret-value"));
++        return true;
++      });
++    }
++  });
++}
++test("T6.1-A1 token canônico de 32 bytes e hash SHA256", () => {
++  const tokens = new Set(Array.from({ length: 100 }, generateEmailVerificationToken));
++  assert.equal(tokens.size, 100);
++  for (const token of tokens) {
++    assert.ok(isEmailVerificationToken(token));
++    assert.equal(Buffer.from(token, "base64url").length, 32);
++    assert.equal(hashEmailVerificationToken(token), createHash("sha256").update(token).digest("hex"));
++    assert.match(hashEmailVerificationToken(token), /^[0-9a-f]{64}$/);
++  }
++});
++test("T6.1-A1 primeira emissão persiste só hash e entrega token após COMMIT", async () => {
++  const f = fixture(), result = await f.service.issue(userId);
++  assert.equal(result.kind, "issued");
++  if (result.kind !== "issued") throw Error("emissão esperada");
++  const insert = f.calls.find(q => q.text.startsWith("INSERT INTO"))!;
++  assert.equal(insert.values[3], hashEmailVerificationToken(result.token));
++  assert.equal(insert.values[4], at);
++  assert.equal(insert.values[5], 86400);
++  assert.equal(result.email, "person@example.test");
++  assert.equal(f.calls.at(-1)?.text, "COMMIT");
++  assert.equal(f.released(), 1);
++  assert.ok(!JSON.stringify(f.calls).includes(result.token));
++  assert.ok(f.calls.some(q => q.text.includes("FROM users") && q.text.includes("FOR UPDATE")));
++  assert.ok(f.calls.some(q => q.text.includes("ORDER BY id FOR UPDATE")));
++  assert.ok(!f.calls.some(q => /sessions|user_roles|refresh_tokens|audit_logs|UPDATE users/.test(q.text)));
++});
++test("T6.1-A1 TTL customizado e limites são parâmetros internos SQL", async () => {
++  const f = fixture({}, { ttlSeconds: 900, cooldownSeconds: 30, maxPerHour: 2 });
++  await f.service.issue(userId);
++  assert.deepEqual(f.calls.find(q => q.text.includes("AS cooldown"))?.values, [userId, 30, 2]);
++  assert.equal(f.calls.find(q => q.text.startsWith("INSERT INTO"))?.values[5], 900);
++});
++for (const [label, options, expected] of [
++  ["conta ausente", { missing: true }, "account_unavailable"],
++  ["conta inativa", { inactive: true }, "account_unavailable"],
++  ["conta verificada", { verified: true }, "already_verified"],
++  ["reemissão antes de dois minutos", { cooldown: true }, "cooldown"],
++  ["sexta emissão na hora", { limited: true }, "rate_limited"],
++] as const) {
++  test(`T6.1-A1 emissão recusa ${label} sem mutações`, async () => {
++    const f = fixture(options);
++    assert.deepEqual(await f.service.issue(userId), { kind: expected });
++    assert.ok(!f.calls.some(q => /^(UPDATE|INSERT|DELETE)/.test(q.text)));
++    assert.equal(f.released(), 1);
++  });
++}
++test("T6.1-A1 UUID inválido não consulta banco", async () => {
++  const f = fixture();
++  assert.deepEqual(await f.service.issue("invalid"), { kind: "account_unavailable" });
++  assert.equal(f.calls.length, 0);
++});
++test("T6.1-A1 reemissão permitida invalida antes de inserir, preservando histórico", async () => {
++  const f = fixture();
++  assert.equal((await f.service.issue(userId)).kind, "issued");
++  const invalidation = f.calls.findIndex(q => q.text.startsWith("UPDATE email_verification_tokens"));
++  const insertion = f.calls.findIndex(q => q.text.startsWith("INSERT INTO"));
++  assert.ok(invalidation > 0 && invalidation < insertion);
++  assert.deepEqual(f.calls[invalidation].values, [userId, at]);
++  assert.ok(!f.calls[invalidation].text.includes("SET verified_at"));
++  assert.ok(!f.calls.some(q => /DELETE FROM/.test(q.text)));
++});
++test("T6.1-A1 janela móvel conta todas as emissões e permite quando saem da janela", async () => {
++  const f = fixture();
++  assert.equal((await f.service.issue(userId)).kind, "issued");
++  const decision = f.calls.find(q => q.text.includes("AS cooldown"))!.text;
++  assert.ok(decision.includes("clock_timestamp()"));
++  assert.ok(decision.includes("interval '1 hour'"));
++  assert.ok(!decision.includes("verified_at") && !decision.includes("expires_at"));
++});
++test("T6.1-A1 confirmação válida preserva microssegundos e não altera sessões/papéis", async () => {
++  const f = fixture(), token = generateEmailVerificationToken();
++  assert.deepEqual(await f.service.confirm(token), { kind: "verified" });
++  assert.equal(f.calls[0].values[0], hashEmailVerificationToken(token));
++  const consume = f.calls.find(q => q.text.includes("RETURNING t.verified_at"))!;
++  for (const predicate of ["t.email=u.email", "u.is_active", "t.verified_at IS NULL", "t.expires_at>d.at", "u.email_verified_at IS NULL"]) assert.ok(consume.text.includes(predicate));
++  assert.deepEqual(f.calls.find(q => q.text.startsWith("UPDATE users"))?.values, [userId, at]);
++  assert.equal(f.calls.at(-1)?.text, "COMMIT");
++  assert.ok(!JSON.stringify(f.calls).includes(token));
++  assert.ok(!f.calls.some(q => /sessions|user_roles|refresh_tokens|audit_logs/.test(q.text)));
++});
++test("T6.1-A1 token malformado é recusado antes do banco", async () => {
++  const f = fixture();
++  for (const value of [null, undefined, 2, {}, "", "a".repeat(42), "a".repeat(44), "=".repeat(43), "A".repeat(42) + "B", " " + generateEmailVerificationToken()]) {
++    assert.deepEqual(await f.service.confirm(value), { kind: "invalid_token" });
++  }
++  assert.equal(f.calls.length, 0);
++});
++test("T6.1-A1 token inexistente não abre transação", async () => {
++  const f = fixture({ unknown: true });
++  assert.deepEqual(await f.service.confirm(generateEmailVerificationToken()), { kind: "invalid_token" });
++  assert.equal(f.calls.length, 1);
++});
++for (const options of [{ missing: true }, { inactive: true }, { verified: true }]) {
++  test(`T6.1-A1 confirmação revalida conta ${JSON.stringify(options)} após lock`, async () => {
++    const f = fixture(options);
++    assert.deepEqual(await f.service.confirm(generateEmailVerificationToken()), { kind: "invalid_token" });
++    assert.ok(!f.calls.some(q => /^(UPDATE|INSERT|DELETE)|RETURNING t.verified_at/.test(q.text)));
++  });
++}
++test("T6.1-A1 token expirado/usado/substituído ou endereço antigo não verifica conta", async () => {
++  const f = fixture({ invalid: true });
++  assert.deepEqual(await f.service.confirm(generateEmailVerificationToken()), { kind: "invalid_token" });
++  assert.ok(!f.calls.some(q => q.text.startsWith("UPDATE users")));
++});
++for (const phase of ["UPDATE email_verification_tokens", "INSERT INTO", "COMMIT"]) {
++  test(`T6.1-A1 emissão falha em ${phase}: rollback e nenhum token retornado`, async () => {
++    const f = fixture({ fail: phase });
++    await assert.rejects(f.service.issue(userId), /SQL_FAILURE/);
++    assert.equal(f.calls.at(-1)?.text, "ROLLBACK");
++    assert.equal(f.released(), 1);
++  });
++}
++for (const phase of ["RETURNING t.verified_at", "UPDATE users", "UPDATE email_verification_tokens SET expires_at", "COMMIT"]) {
++  test(`T6.1-A1 confirmação falha em ${phase}: rollback e release`, async () => {
++    const f = fixture({ fail: phase });
++    await assert.rejects(f.service.confirm(generateEmailVerificationToken()), /SQL_FAILURE/);
++    assert.equal(f.calls.at(-1)?.text, "ROLLBACK");
++    assert.equal(f.released(), 1);
++  });
++}
++test("T6.1-A1 contagens inesperadas causam rollback", async () => {
++  const issuing = fixture({ zeroInsert: true }), confirming = fixture({ zeroUpdate: true });
++  await assert.rejects(issuing.service.issue(userId), /não persistida/);
++  await assert.rejects(confirming.service.confirm(generateEmailVerificationToken()), /não persistida/);
++  assert.equal(issuing.calls.at(-1)?.text, "ROLLBACK");
++  assert.equal(confirming.calls.at(-1)?.text, "ROLLBACK");
++});
++test("T6.1-A1 operações não escrevem logs", async t => {
++  const logs: unknown[][] = [];
++  for (const method of ["log", "info", "warn", "error", "debug"] as const) t.mock.method(console, method, (...args: unknown[]) => { logs.push(args); });
++  const f = fixture();
++  await f.service.issue(userId);
++  await f.service.confirm(generateEmailVerificationToken());
++  await fixture({ invalid: true }).service.confirm(generateEmailVerificationToken());
++  assert.deepEqual(logs, []);
++});
++
++test("T6.1-A1 Nest resolve banco e política por DI explícita sem conexão", async () => {
++  @Module({ providers: [
++    { provide: POSTGRES_POOL, useValue: { connect: () => { throw Error("Conexão indevida"); } } },
++    EmailVerificationPolicy, EmailVerificationService,
++  ] })
++  class TestModule {}
++  const app = await NestFactory.createApplicationContext(TestModule, { logger: false });
++  try {
++    assert.ok(app.get(EmailVerificationService) instanceof EmailVerificationService);
++    assert.ok(app.get(EmailVerificationPolicy).limits.ttlSeconds > 0);
++    assert.deepEqual(await app.get(EmailVerificationService).confirm("invalid"), { kind: "invalid_token" });
++  } finally { await app.close(); }
++});
+diff --git a/docs/T6_1_A1_IMPLEMENTACAO.md b/docs/T6_1_A1_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..4bd59c8
+--- /dev/null
++++ b/docs/T6_1_A1_IMPLEMENTACAO.md
+@@ -0,0 +1,238 @@
++# T6.1-A1 — Núcleo interno de verificação de e-mail
++
++## Estado e base
++
++Implementação e validação PostgreSQL manual **aprovadas**.
++Base original da implementação: `57ff480478b79c42fe4a2cdc6a96a7018516abcf`.
++Base da evidência final: `f48ba31ca9027378aee61dcd51eada3adb6a28ad`,
++branch `feature/events-participations`, após o commit independente do `AGENTS.md`.
++Índice e histórico preservados.
++
++Esta etapa disponibiliza apenas um serviço interno no AuthModule. O usuário final
++**ainda não dispõe de verificação de e-mail**: não há endpoints, envio de mensagens
++ou mudanças no Expo. Cadastro/login existentes continuam permitindo participantes
++sem verificação. Verificar e-mail não concede Staff/Admin nem substitui TOTP.
++
++## Contrato interno
++
++`EmailVerificationService`, exportado pelo `AuthModule`, recebe o pool existente
++por `POSTGRES_POOL` e a política por injeção explícita compatível com Nest/tsx.
++
++| Método | Entrada | Resultado |
++| --- | --- | --- |
++| `issue(userId)` | UUID da conta selecionada pelo chamador interno confiável | `issued` com `token`, `email` atual e `expiresAt` em texto PostgreSQL; ou `account_unavailable`, `already_verified`, `cooldown`, `rate_limited` |
++| `confirm(token)` | Apenas o token opaco; não aceita identidade, e-mail ou horário | `verified` ou `invalid_token` |
++
++Conta inexistente/inativa não recebe token. Conta já verificada retorna
++`already_verified`, sem inserir ou invalidar registros. Na confirmação, formato
++inválido, hash inexistente, conta ausente/inativa/já verificada, e-mail antigo,
++token expirado, consumido ou substituído recebem o mesmo resultado
++`invalid_token`. Falhas de infraestrutura provocam rollback e são propagadas,
++sem converter erro SQL em sucesso ou recusa funcional.
++
++O token bruto só é entregue ao chamador interno após COMMIT. Não é resposta HTTP.
++As APIs futuras devem autenticar/autorizar a solicitação e definir respostas
++públicas que não exponham a existência ou o estado de outra conta.
++
++## Políticas aprovadas e configuração
++
++Configuração central em `email-verification.policy.ts`, lida do ambiente ao criar
++o provider, com valores padrão que mantêm os módulos existentes operacionais:
++
++| Variável | Padrão |
++| --- | --- |
++| `EMAIL_VERIFICATION_TTL_SECONDS` | `86400` (24 horas) |
++| `EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS` | `120` (2 minutos) |
++| `EMAIL_VERIFICATION_MAX_PER_HOUR` | `5` |
++
++Somente inteiros decimais positivos até 2147483647, limite técnico do inteiro SQL.
++Vazio, whitespace, sinal negativo, zero, decimal, notação exponencial, infinito e
++valores fora do intervalo são rejeitados sem reproduzir o valor recebido no erro.
++A política é imutável após inicialização e não usa parâmetros enviados pelo cliente.
++Instâncias do serviço devem usar a mesma configuração.
++
++As decisões temporais usam `clock_timestamp()` no PostgreSQL após os locks.
++Cooldown bloqueia quando existe emissão com `created_at > decisão - cooldown`.
++A janela móvel conta **todas** as emissões com
++`created_at > decisão - interval '1 hour'`, incluindo a primeira, substituídas,
++consumidas e expiradas. No limite exato, uma emissão antiga sai da janela.
++Se cooldown e limite horário forem atingidos juntos, o resultado é `cooldown`.
++Quando o cooldown termina, o limite por hora continua sendo aplicado.
++
++A política futura de recuperação de senha foi aprovada com TTL de **30 minutos**;
++não há implementação de recuperação nesta etapa.
++
++## Diagnóstico do schema e retenção
++
++Conferidos `access.schema.ts` e `0003_credentials_roles.sql`.
++`email_verification_tokens` já tem UUID, usuário, e-mail, hash único, criação,
++expiração e `verified_at`. Não foi necessária alteração de schema ou migration.
++
++Substituição antecipa `expires_at` para o instante da decisão apenas em tokens
++não consumidos cuja validade ainda está aberta. `verified_at` permanece NULL
++nesses registros: não se registra falsamente uma confirmação. Na confirmação,
++`verified_at` marca exclusivamente o consumo do token apresentado.
++
++Nenhum token é apagado. `created_at` permanece intacto e sustenta a contagem,
++inclusive quando todos os tokens recentes foram invalidados. Um expurgo futuro
++deve preservar pelo menos os registros necessários à maior janela configurada
++(cooldown e uma hora) e a política de retenção ainda a definir. A invalidação por
++expiração antecipada não distingue historicamente “substituído” de “expirado”;
++essa distinção não é necessária para o contrato interno seguro.
++
++## Transações, concorrência e relógio
++
++Cada operação abre uma transação READ COMMITTED em uma conexão do pool:
++
++1. Na confirmação, localizar o usuário pelo hash sem lock, apenas para descoberta.
++2. Bloquear a conta com `users FOR UPDATE`.
++3. Bloquear os tokens daquela conta por ID em ordem determinística, `FOR UPDATE`.
++4. Revalidar conta/endereço/token/limites e consultar o relógio após as esperas.
++5. Gravar os efeitos e efetivar COMMIT; qualquer falha causa ROLLBACK e release.
++
++A ordem usuário → tokens é compatível com o AuthService, que inicia seus
++bloqueios pela conta. Não há lock global nem aquisição de eventos, sessões ou
++papéis. Contas diferentes podem prosseguir independentemente.
++
++Na emissão, a decisão PostgreSQL é transportada como texto timestamptz, preservando
++microssegundos; expiração é calculada no INSERT por intervalo SQL. Na confirmação,
++o UPDATE decisivo exige hash/conta/endereço atual, conta ativa não verificada,
++token não consumido e `expires_at > clock_timestamp()`. O instante retornado é
++copiado exatamente para `email_verified_at` e `updated_at`, e outros tokens
++utilizáveis são invalidados na mesma transação.
++
++Emissão concorrente à confirmação tem duas ordens legítimas: se reemissão comitar
++primeiro, o token antigo é recusado; se confirmação comitar primeiro, nova emissão
++retorna `already_verified`. Duas confirmações não consomem duas vezes. O mutex de
++usuário também serializa limites de emissões concorrentes.
++
++A validade corresponde ao instante decisivo após locks, não à recepção HTTP futura
++nem ao instante físico do COMMIT. Nenhuma tolerância de expiração é adicionada.
++Escritores futuros de e-mail e expurgo devem respeitar a ordem de locks e a retenção.
++
++## Proteção e limites
++
++- Token aleatório nativo Node.js de 32 bytes (256 bits), base64url canônico de 43
++  caracteres; validação de tipo, tamanho, alfabeto e representação canônica.
++- Persistência exclusiva de SHA-256 hexadecimal; sem JWT ou segredo compartilhado.
++- Token bruto não é parâmetro SQL, não é gravado em logs/auditoria e não é retornado
++  por nenhum controller. Não há serviço de envio fictício.
++- Sessões, refresh tokens, concessões e regras E07/E08 permanecem intactos.
++- O pool é compartilhado; o serviço não encerra o pool nem abre outro banco.
++- Não existe expurgo, garantia de entrega, provedor, interface pública ou proteção
++  completa contra abuso distribuído nesta etapa. A tabela não tem índice por
++  usuário/criação; avaliar desempenho e retenção antes de produção, sem migração
++  preventiva aqui.
++- Se o COMMIT tiver resultado desconhecido por perda de conexão, não se promete
++  reentrega do mesmo token bruto; uma nova solicitação deve respeitar os limites.
++
++## Cobertura e resultados
++
++| Verificação executada pelo Codex | Resultado |
++| --- | --- |
++| Unitários focados, tsconfig.test | **32/32 aprovados** |
++| Regressão unitária `npm.cmd test` | **1024/1024 aprovados**, 992 anteriores + 32 novos |
++| Typecheck produção: `tsc --project tsconfig.build.json --noEmit --incremental false` | Aprovado |
++| Typecheck testes: `npm.cmd run typecheck:test` | Aprovado |
++| `npm.cmd run lint` | Aprovado |
++| `npm.cmd run build` | Aprovado |
++| PostgreSQL específico | **25/25 aprovados manualmente pelo responsável**, zero falhas, cancelados ou ignorados; exit code 0 |
++| Regressão PostgreSQL completa | **1.254/1.254 aprovados manualmente pelo responsável**, zero falhas, cancelados ou ignorados; exit code 0; 612334.9898 ms |
++
++Zero falhas, cancelamentos ou ignorados nas execuções locais aprovadas.
++A primeira tentativa de tsx na sandbox falhou antes dos testes com
++`uv_os_get_passwd/ENOMEM`; execução autorizada fora da sandbox passou, com
++`DOTENV_CONFIG_PATH=NUL` e URL fictícia sem banco real.
++
++Os unitários, typechecks, lint e build acima foram executados pelo Codex durante a
++implementação original, antes da política atual do `AGENTS.md`. Não foram
++reexecutados nesta consolidação e não são execuções manuais do responsável. O
++PostgreSQL real foi executado exclusivamente pelo responsável. Esses resultados
++validam o ambiente de desenvolvimento/testes; não constituem homologação ou
++prontidão de produção.
++
++Os unitários cobrem política, formato/hash, respostas internas, parâmetros SQL,
++retenção, ordem de escrita, falhas/rollback/release, não exposição em logs e DI
++real do Nest sem conexão. Os testes de SQL simulado não certificam semântica,
++concorrência ou integridade PostgreSQL; essas provas pertencem à suíte abaixo.
++
++## Matriz PostgreSQL aprovada — 25 testes
++
++`backend/test/integration/email-verification.integration.test.ts` utiliza serviços
++reais e conexões independentes. Reutiliza a guarda A04 antes de criar pools:
++três URLs idênticas, credenciais presentes, sem query/fragmento e exclusivamente
++`127.0.0.1:55432/arenago_events_test`. Não executa seed ou migrations.
++
++Cobertura: emissão/hash/TTL padrão e customizado; cooldown; substituição sem
++exclusão; sexta emissão; janela móvel com usados/expirados; duas emissões
++simultâneas e disputa da quinta; confirmação/precisão/consumo único; duas
++confirmações simultâneas; reemissão versus confirmação nas duas ordens; token
++expirado/usado/endereço antigo/conta inativa; formato e conta/token inexistentes;
++conta já verificada; isolamento entre usuários; expiração e inatividade alteradas
++durante espera por lock; três falhas SQL reais após escritas com rollback integral
++e retry; preservação de sessões, refresh e papéis.
++
++A sobreposição é comprovada por `pg_stat_activity` e `pg_blocking_pids`, com
++timeout, antes de liberar o bloqueio. A instrumentação de falha executa primeiro
++o SQL real do serviço e depois `SELECT 1/0` na mesma transação. Não há mocks de
++resultado PostgreSQL. A limpeza afeta somente UUIDs criados pela própria suíte.
++Fixtures temporais envelhecem somente seus próprios registros para testar limites
++sem aguardar horas.
++
++Resultado definitivo da regressão: **1.254/1.254 aprovados**, correspondendo aos
++1.229 testes anteriores mais os 25 testes novos desta etapa. A execução manual
++terminou com exit code 0, sem falhas, cancelamentos ou ignorados.
++
++## Comandos PowerShell para o responsável
++
++As três URLs devem estar configuradas localmente pelo responsável para o banco
++autorizado, sem compartilhar ou registrar credenciais:
++
++```powershell
++Set-Location C:\DoJob\ProgramacaoMobile\backend
++$env:NODE_ENV = 'test'
++$env:DOTENV_CONFIG_PATH = 'NUL'
++$env:EVENT_CLOSURE_JOB_TEST_ENABLED = 'false'
++$env:STAFF_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:ADMIN_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:EVALUATION_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:EMAIL_VERIFICATION_TTL_SECONDS = '86400'
++$env:EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS = '120'
++$env:EMAIL_VERIFICATION_MAX_PER_HOUR = '5'
++foreach ($name in @('DATABASE_URL','DATABASE_DIRECT_URL','EVENTS_TEST_DATABASE_URL')) {
++  if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
++    throw "$name precisa estar configurada localmente."
++  }
++}
++.\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test --test-concurrency=1 test/integration/email-verification.integration.test.ts
++if ($LASTEXITCODE -ne 0) { throw 'Integração focada falhou; investigar antes da regressão.' }
++# Somente após aprovação focada:
++npm.cmd run test:integration
++if ($LASTEXITCODE -ne 0) { throw 'Regressão PostgreSQL falhou; preservar saída para investigação.' }
++```
++
++## Inventário e evidência
++
++1. `backend/src/auth/auth.module.ts`
++2. `backend/src/auth/email-verification.policy.ts`
++3. `backend/src/auth/email-verification.service.ts`
++4. `backend/test/unit/email-verification.test.ts`
++5. `backend/test/integration/email-verification.integration.test.ts`
++6. `docs/T6_1_A1_IMPLEMENTACAO.md`
++
++Evidência única: `qa-evidence/t6-1-a1-changes.diff`, contendo os seis arquivos,
++sem incluir a própria evidência. Aplicação validada em cópia isolada da base final e
++comparação byte a byte dos **6/6 arquivos**, sem divergências. Sem alterações externas ao escopo,
++schema, dependências, histórico ou índice.
++
++## Pendências e T6.1-A2
++
++A T6.1-A1 não possui pendências de validação. A T6.1-A2 deverá definir os contratos
++HTTP, entrega real, política de erro/retry do distribuidor, proteção de respostas/logs e
++limites de abuso na borda. Retenção e desempenho precisam de avaliação antes de
++produção. Nenhuma decisão adicional de produto foi necessária para este núcleo.
++Não houve implementação de recuperação, bootstrap, TOTP ou papéis nesta etapa.
++
++Sugestão para versionamento manual após aprovação:
++`feat(auth): implementar núcleo de verificação de e-mail`.

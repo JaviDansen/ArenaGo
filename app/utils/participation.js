@@ -3,7 +3,7 @@
  */
 
 // Instante registrado em ISO 8601 com fuso explícito, ex.: 2026-09-28T15:10:00-03:00.
-const REGISTERED_INSTANT = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?(?:Z|([+-])(\d{2}):(\d{2}))$/;
+const REGISTERED_INSTANT = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,6})?)?(?:Z|([+-])(\d{2}):(\d{2}))$/;
 
 function isValidCalendarDate(year, month, day) {
   const isLeapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);

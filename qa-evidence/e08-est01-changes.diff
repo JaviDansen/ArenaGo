@@ -1,0 +1,1923 @@
+diff --git a/backend/src/evaluations/evaluation-write.controller.ts b/backend/src/evaluations/evaluation-write.controller.ts
+index 83752c86da8e313d85da50961cea04b8edc75844..d6fd5b18c3213289535b17a27666ed017fa33c86 100644
+--- a/backend/src/evaluations/evaluation-write.controller.ts
++++ b/backend/src/evaluations/evaluation-write.controller.ts
+@@ -1,3 +1,4 @@
++import { mutationSession } from "../auth/mutation-session";
+ import { Body, Controller, HttpCode, Inject, Injectable, Param, Patch, Post, Req } from "@nestjs/common";
+ import { CurrentUserId, RequireSessionAuth } from "../auth/current-user.decorator";
+ import type { AuthenticatedRequest } from "../auth/session-auth.guard";
+@@ -32,12 +33,12 @@ export class EvaluationWriteController {
+   @HttpCode(201)
+   async submit(@CurrentUserId() userId: string, @Param() params: unknown, @Body() body: unknown, @Req() request: AuthenticatedRequest) {
+     const { participationId } = validateOperationParams(evaluationParams, params), payload = validateOperationBody(submitEvaluationBody, body, request);
+-    return response(await this.writes.submit({ userId, participationId, payload, idempotencyKey: validateOperationIdempotencyKey(request), expiresAt: this.policy.expiresAt() }));
++    return response(await this.writes.submitAuthenticated({ userId, participationId, payload, idempotencyKey: validateOperationIdempotencyKey(request), expiresAt: this.policy.expiresAt() }, mutationSession(request, userId)));
+   }
+   @Patch("evaluations/:evaluationId")
+   @HttpCode(200)
+   async edit(@CurrentUserId() userId: string, @Param() params: unknown, @Body() body: unknown, @Req() request: AuthenticatedRequest) {
+     const { evaluationId } = validateOperationParams(writeEvaluationParams, params), payload = validateOperationBody(editEvaluationBody, body, request);
+-    return response(await this.writes.edit({ userId, evaluationId, payload, idempotencyKey: validateOperationIdempotencyKey(request), expiresAt: this.policy.expiresAt() }));
++    return response(await this.writes.editAuthenticated({ userId, evaluationId, payload, idempotencyKey: validateOperationIdempotencyKey(request), expiresAt: this.policy.expiresAt() }, mutationSession(request, userId)));
+   }
+ }
+diff --git a/backend/src/evaluations/evaluation-write.service.ts b/backend/src/evaluations/evaluation-write.service.ts
+index e740357c8116e50b9a5deaf95c627213213340c7..8e9e0d314499d016d76baa8faa2438fdcbefe03e 100644
+--- a/backend/src/evaluations/evaluation-write.service.ts
++++ b/backend/src/evaluations/evaluation-write.service.ts
+@@ -1,3 +1,4 @@
++import { assertMutationSession, MutationSessionError, mutationTransaction, revalidateMutationSession, type MutationSession } from "../auth/mutation-session";
+ import { Inject, Injectable } from "@nestjs/common";
+ import { randomUUID } from "node:crypto";
+ import { sql } from "drizzle-orm";
+@@ -28,28 +29,38 @@ export class EvaluationWriteService {
+     return sql`SELECT p.id,p.event_id,e.name AS event_name,p.status,p.joined_at,p.arena_entered_at,p.finished_at,p.finish_reason
+       FROM participations p JOIN events e ON e.id=p.event_id WHERE p.id=${participationId}::uuid AND p.user_id=${userId}::uuid`;
+   }
+-  async submit(input: SubmitEvaluationInput): Promise<EvaluationWriteResult> { return this.write("submit", input); }
+-  async edit(input: EditEvaluationInput): Promise<EvaluationWriteResult> { return this.write("edit", input); }
+-  private async write(mode: "submit" | "edit", input: SubmitEvaluationInput | EditEvaluationInput): Promise<EvaluationWriteResult> {
++  async submit(input: SubmitEvaluationInput): Promise<EvaluationWriteResult> { return this.write("submit", input, null); }
++  async edit(input: EditEvaluationInput): Promise<EvaluationWriteResult> { return this.write("edit", input, null); }
++  submitAuthenticated(input: SubmitEvaluationInput, context: MutationSession): Promise<EvaluationWriteResult> {
++    assertMutationSession(context, input.userId); return this.write("submit", input, context);
++  }
++  editAuthenticated(input: EditEvaluationInput, context: MutationSession): Promise<EvaluationWriteResult> {
++    assertMutationSession(context, input.userId); return this.write("edit", input, context);
++  }
++  private async write(mode: "submit" | "edit", input: SubmitEvaluationInput | EditEvaluationInput, context: MutationSession | null): Promise<EvaluationWriteResult> {
+     try {
+       const payload = mode === "submit" ? submitEvaluationBody.parse(input.payload) : editEvaluationBody.parse(input.payload);
+       ensure(input.idempotencyKey.trim() && input.idempotencyKey.length <= 128 && Number.isFinite(input.expiresAt.getTime()));
+       const evaluationId = "evaluationId" in input ? input.evaluationId : undefined;
+       const resourceId = "participationId" in input ? input.participationId : input.evaluationId;
+-      return await this.database.transaction(async tx => {
++      return await mutationTransaction(this.database, context, async tx => {
+         const lookup = mode === "submit" ? sql`SELECT id AS "participationId" FROM participations WHERE id=${resourceId}::uuid AND user_id=${input.userId}::uuid`
+           : sql`SELECT p.id AS "participationId" FROM evaluations v JOIN participations p ON p.id=v.participation_id WHERE v.id=${resourceId}::uuid AND p.user_id=${input.userId}::uuid`;
+         const found = (await tx.execute<{ participationId: string }>(lookup)).rows[0]; if (!found) block("access_denied");
+         const participationId = found.participationId, operation = mode === "submit" ? SUBMIT_EVALUATION_OPERATION : EDIT_EVALUATION_OPERATION;
+         const intent = await reserveIdempotencyOperationWithTx(tx, { actorUserId: input.userId, operation, idempotencyKey: input.idempotencyKey,
+           requestHash: evaluationWriteFingerprint(operation, resourceId, payload as JsonValue), expiresAt: input.expiresAt });
+-        if (intent.kind === "request_conflict" || intent.kind === "in_progress") block(intent.kind);
++        if (intent.kind === "request_conflict" || intent.kind === "in_progress") {
++          if (context !== null) await revalidateMutationSession(tx, context);
++          block(intent.kind);
++        }
+         const parent = await tx.execute(sql`SELECT id FROM participations WHERE id=${participationId}::uuid AND user_id=${input.userId}::uuid FOR UPDATE`);
+         if (parent.rows.length !== 1) block("access_denied");
+         if (mode === "edit") {
+           const locked = await tx.execute(sql`SELECT id FROM evaluations WHERE id=${evaluationId}::uuid AND participation_id=${participationId}::uuid FOR UPDATE`);
+           if (locked.rows.length !== 1) block("access_denied");
+         }
++        if (context !== null) await revalidateMutationSession(tx, context);
+         if (intent.kind === "replay") {
+           const replay = evaluationWriteResponse.parse(intent.resultPayload);
+           ensure(intent.httpStatus === (mode === "submit" ? 201 : 200) && replay.evaluation.participationId === participationId
+@@ -78,6 +89,7 @@ export class EvaluationWriteService {
+         return { kind: mode === "submit" ? "created" : "updated", evaluation };
+       }, { isolationLevel: "read committed" });
+     } catch (error) {
++      if (error instanceof MutationSessionError) throw error;
+       if (error instanceof WriteRollback) return { kind: error.kind };
+       // O filtro HTTP existente registra somente message; causa interna nunca vira resposta ou log.
+       throw new Error("EVALUATION_WRITE_INTERNAL_ERROR", { cause: error });
+diff --git a/backend/src/events/absent.service.ts b/backend/src/events/absent.service.ts
+index f9f5eb5b6e047501adcd5670ac136756f7874d9f..3a1a4715754ee60041747483994b3f02112b4a49 100644
+--- a/backend/src/events/absent.service.ts
++++ b/backend/src/events/absent.service.ts
+@@ -1,3 +1,4 @@
++import { assertMutationSession, mutationTransaction, revalidateMutationSession, type MutationSession } from "../auth/mutation-session";
+ import { Inject, Injectable } from "@nestjs/common";
+ import { randomUUID } from "node:crypto";
+ import { sql } from "drizzle-orm";
+@@ -61,12 +62,22 @@ function replay(payload: JsonValue | null, input: AbsentServiceInput, queueEntry
+ export class AbsentService {
+   constructor(@Inject(DRIZZLE_DATABASE) private readonly database: NodePgDatabase<typeof schema>) {}
+ 
++  /** Contrato interno E07; os controllers usam exclusivamente a entrada autenticada. */
+   async absent(input: AbsentServiceInput): Promise<AbsentServiceResult> {
++    return this.execute(input, null);
++  }
++
++  async absentAuthenticated(input: AbsentServiceInput, context: MutationSession): Promise<AbsentServiceResult> {
++    assertMutationSession(context, input.staffUserId);
++    return this.execute(input,  { ...context, staffEventId: input.eventId });
++  }
++
++  private async execute(input: AbsentServiceInput, context: MutationSession | null): Promise<AbsentServiceResult> {
+     if (!input.idempotencyKey.trim() || input.idempotencyKey.length > 128 || !Number.isFinite(input.expiresAt.getTime())) {
+       throw new Error("Chave de idempotência ou expiração inválida.");
+     }
+     try {
+-      return await this.database.transaction(async (tx): Promise<AbsentServiceResult> => {
++      return await mutationTransaction(this.database, context, async (tx): Promise<AbsentServiceResult> => {
+         const lookup = await tx.execute<{ experienceId: string; stationId: string; queueEntryId: string; participationId: string }>(sql`
+           SELECT s.experience_id AS "experienceId", s.station_id AS "stationId",
+             s.queue_entry_id AS "queueEntryId", q.participation_id AS "participationId"
+@@ -96,7 +107,10 @@ export class AbsentService {
+         const staff = await tx.execute(sql`SELECT r.id FROM users u JOIN user_roles r ON r.user_id=u.id
+           WHERE u.id=${input.staffUserId} AND u.is_active=true AND u.email_verified_at IS NOT NULL
+             AND r.role='staff' AND r.event_id=${input.eventId} AND r.revoked_at IS NULL FOR SHARE OF u, r`);
+-        if (!staff.rows.length) block({ kind: "staff_event_forbidden" });
++        if (!staff.rows.length) {
++          if (context !== null) await revalidateMutationSession(tx, context);
++          block({ kind: "staff_event_forbidden" });
++        }
+         if (!target) block({ kind: "service_not_found" });
+         const person = await tx.execute<{ status: string; currentId: string | null }>(sql`
+           SELECT status, current_queue_entry_id AS "currentId" FROM participations
+@@ -114,6 +128,7 @@ export class AbsentService {
+           actorUserId: input.staffUserId, operation: ABSENT_SERVICE_OPERATION, idempotencyKey: input.idempotencyKey,
+           requestHash: createAbsentServiceFingerprint(input.eventId, input.serviceSessionId), expiresAt: input.expiresAt,
+         });
++        if (context !== null) await revalidateMutationSession(tx, context);
+         if (reservation.kind === "request_conflict" || reservation.kind === "in_progress") return { kind: reservation.kind };
+         if (reservation.kind === "replay") return { kind: "replay", ...replay(reservation.resultPayload, input, target.queueEntryId) };
+         ensure(["pending", "completed", "absent", "canceled"].includes(session.rows[0].status), "estado do atendimento desconhecido.");
+diff --git a/backend/src/events/call-next.service.ts b/backend/src/events/call-next.service.ts
+index 9e48cfc20c1c6c2b1f9941db48f4e0adeb20fa5e..dee0fd9d3a7b93ac23f602f8b4ce7f55ffc0c1a7 100644
+--- a/backend/src/events/call-next.service.ts
++++ b/backend/src/events/call-next.service.ts
+@@ -1,3 +1,4 @@
++import { assertMutationSession, mutationTransaction, revalidateMutationSession, type MutationSession } from "../auth/mutation-session";
+ import { Inject, Injectable } from "@nestjs/common";
+ import { randomUUID } from "node:crypto";
+ import { sql } from "drizzle-orm";
+@@ -47,12 +48,22 @@ function replay(payload: JsonValue | null, input: CallNextInput): CalledNext {
+ export class CallNextService {
+   constructor(@Inject(DRIZZLE_DATABASE) private readonly database: NodePgDatabase<typeof schema>) {}
+ 
++  /** Contrato interno E07; os controllers usam exclusivamente a entrada autenticada. */
+   async callNext(input: CallNextInput): Promise<CallNextResult> {
++    return this.execute(input, null);
++  }
++
++  async callNextAuthenticated(input: CallNextInput, context: MutationSession): Promise<CallNextResult> {
++    assertMutationSession(context, input.staffUserId);
++    return this.execute(input,  { ...context, staffEventId: input.eventId });
++  }
++
++  private async execute(input: CallNextInput, context: MutationSession | null): Promise<CallNextResult> {
+     if (!input.idempotencyKey.trim() || input.idempotencyKey.length > 128 || !Number.isFinite(input.expiresAt.getTime())) {
+       throw new Error("Chave de idempotência ou expiração inválida.");
+     }
+     try {
+-      return await this.database.transaction(async (tx): Promise<CallNextResult> => {
++      return await mutationTransaction(this.database, context, async (tx): Promise<CallNextResult> => {
+         const event = await tx.execute(sql`SELECT id FROM events WHERE id=${input.eventId} FOR SHARE`);
+         if (!event.rows.length) block({ kind: "staff_event_forbidden" });
+         const experience = await tx.execute(sql`SELECT id FROM experiences
+@@ -67,7 +78,10 @@ export class CallNextService {
+           WHERE u.id=${input.staffUserId} AND u.is_active=true AND u.email_verified_at IS NOT NULL
+             AND r.role='staff' AND r.event_id=${input.eventId} AND r.revoked_at IS NULL
+           FOR SHARE OF u, r`);
+-        if (!staff.rows.length) block({ kind: "staff_event_forbidden" });
++        if (!staff.rows.length) {
++          if (context !== null) await revalidateMutationSession(tx, context);
++          block({ kind: "staff_event_forbidden" });
++        }
+ 
+         // Reconhecer retry antes de exigir estação livre/fila/tempo atuais: resposta histórica.
+         // Namespace próprio; nenhum outro comando adquire esta reserva antes do mutex da experiência.
+@@ -75,6 +89,7 @@ export class CallNextService {
+           actorUserId: input.staffUserId, operation: CALL_NEXT_OPERATION, idempotencyKey: input.idempotencyKey,
+           requestHash: createCallNextFingerprint(input.eventId, input.experienceId, input.stationId), expiresAt: input.expiresAt,
+         });
++        if (context !== null) await revalidateMutationSession(tx, context);
+         if (reservation.kind === "request_conflict" || reservation.kind === "in_progress") return { kind: reservation.kind };
+         if (reservation.kind === "replay") return { kind: "replay", ...replay(reservation.resultPayload, input) };
+ 
+diff --git a/backend/src/events/complete.service.ts b/backend/src/events/complete.service.ts
+index 3490365b6e54963705901de7e45a47df07379f5d..6a525e68bc08ee9a4fd308b19de3413b26eca757 100644
+--- a/backend/src/events/complete.service.ts
++++ b/backend/src/events/complete.service.ts
+@@ -1,3 +1,4 @@
++import { assertMutationSession, mutationTransaction, revalidateMutationSession, type MutationSession } from "../auth/mutation-session";
+ import { Inject, Injectable } from "@nestjs/common";
+ import { sql } from "drizzle-orm";
+ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
+@@ -47,12 +48,22 @@ function replay(payload: JsonValue | null, input: CompleteServiceInput): Complet
+ export class CompleteService {
+   constructor(@Inject(DRIZZLE_DATABASE) private readonly database: NodePgDatabase<typeof schema>) {}
+ 
++  /** Contrato interno E07; os controllers usam exclusivamente a entrada autenticada. */
+   async complete(input: CompleteServiceInput): Promise<CompleteServiceResult> {
++    return this.execute(input, null);
++  }
++
++  async completeAuthenticated(input: CompleteServiceInput, context: MutationSession): Promise<CompleteServiceResult> {
++    assertMutationSession(context, input.staffUserId);
++    return this.execute(input,  { ...context, staffEventId: input.eventId });
++  }
++
++  private async execute(input: CompleteServiceInput, context: MutationSession | null): Promise<CompleteServiceResult> {
+     if (!input.idempotencyKey.trim() || input.idempotencyKey.length > 128 || !Number.isFinite(input.expiresAt.getTime())) {
+       throw new Error("Chave de idempotência ou expiração inválida.");
+     }
+     try {
+-      return await this.database.transaction(async (tx): Promise<CompleteServiceResult> => {
++      return await mutationTransaction(this.database, context, async (tx): Promise<CompleteServiceResult> => {
+         // Descoberta da sessão EXPLÍCITA, sem autorizar mutação ou escolher a sessão atual da pessoa.
+         const lookup = await tx.execute<{ experienceId: string; stationId: string; queueEntryId: string; participationId: string }>(sql`
+           SELECT s.experience_id AS "experienceId", s.station_id AS "stationId",
+@@ -76,7 +87,10 @@ export class CompleteService {
+           WHERE u.id=${input.staffUserId} AND u.is_active=true AND u.email_verified_at IS NOT NULL
+             AND r.role='staff' AND r.event_id=${input.eventId} AND r.revoked_at IS NULL
+           FOR SHARE OF u, r`);
+-        if (!staff.rows.length) block({ kind: "staff_event_forbidden" });
++        if (!staff.rows.length) {
++          if (context !== null) await revalidateMutationSession(tx, context);
++          block({ kind: "staff_event_forbidden" });
++        }
+         if (!target) block({ kind: "service_not_found" });
+         const person = await tx.execute<{ status: string; currentId: string | null }>(sql`
+           SELECT status, current_queue_entry_id AS "currentId" FROM participations
+@@ -95,6 +109,7 @@ export class CompleteService {
+           actorUserId: input.staffUserId, operation: COMPLETE_SERVICE_OPERATION, idempotencyKey: input.idempotencyKey,
+           requestHash: createCompleteServiceFingerprint(input.eventId, input.serviceSessionId), expiresAt: input.expiresAt,
+         });
++        if (context !== null) await revalidateMutationSession(tx, context);
+         if (reservation.kind === "request_conflict" || reservation.kind === "in_progress") return { kind: reservation.kind };
+         // Resposta histórica: não exigir ponteiro/estados atuais nem tocar atendimento posterior.
+         if (reservation.kind === "replay") return { kind: "replay", ...replay(reservation.resultPayload, input) };
+diff --git a/backend/src/events/participant-queue.controller.ts b/backend/src/events/participant-queue.controller.ts
+index c50d2a94ed3f270f59effd2c0e4d75774d6b8f85..b793af016ae440fbb75f62ecefdeb3d263702138 100644
+--- a/backend/src/events/participant-queue.controller.ts
++++ b/backend/src/events/participant-queue.controller.ts
+@@ -1,3 +1,4 @@
++import { mutationSession } from "../auth/mutation-session";
+ import { Body, Controller, Get, HttpCode, HttpStatus, Inject, Param, Post, Req } from "@nestjs/common";
+ import { CurrentUserId, RequireSessionAuth } from "../auth/current-user.decorator";
+ import type { AuthenticatedRequest } from "../auth/session-auth.guard";
+@@ -25,7 +26,7 @@ export class ParticipantQueueController {
+     const ids = validateOperationParams(participationQueueParamsSchema, params);
+     const input = validateOperationBody(queueJoinBodySchema, body, request);
+     const idempotencyKey = validateOperationIdempotencyKey(request);
+-    const result = await this.joining.joinExperienceQueue({ ...ids, ...input, userId, idempotencyKey, expiresAt: this.idempotency.expiresAt() });
++    const result = await this.joining.joinExperienceQueueAuthenticated({ ...ids, ...input, userId, idempotencyKey, expiresAt: this.idempotency.expiresAt() }, mutationSession(request, userId));
+     if (result.kind === "created" || result.kind === "replay") {
+       return { queueEntryId: result.queueEntryId, participationId: result.participationId, experienceId: result.experienceId,
+         status: result.status, queueOrder: result.queueOrder, enteredAt: result.enteredAt };
+@@ -48,7 +49,7 @@ export class ParticipantQueueController {
+     const ids = validateOperationParams(queueWithdrawalParamsSchema, params);
+     validateOperationBody(emptyOperationBody, body, request, true);
+     const idempotencyKey = validateOperationIdempotencyKey(request);
+-    const result = await this.withdrawal.withdrawExperienceQueue({ ...ids, userId, idempotencyKey, expiresAt: this.idempotency.expiresAt() });
++    const result = await this.withdrawal.withdrawExperienceQueueAuthenticated({ ...ids, userId, idempotencyKey, expiresAt: this.idempotency.expiresAt() }, mutationSession(request, userId));
+     if (result.kind === "withdrawn" || result.kind === "replay") {
+       return { participationId: result.participationId, queueEntryId: result.queueEntryId, experienceId: result.experienceId,
+         status: result.status, closedAt: result.closedAt, serviceSession: result.serviceSession };
+diff --git a/backend/src/events/queue-entry.service.ts b/backend/src/events/queue-entry.service.ts
+index ffa7a0b897b6606df22b757f2523ffc22fc19003..10e2530f290cff6199cf93b3d0c79b1b10365153 100644
+--- a/backend/src/events/queue-entry.service.ts
++++ b/backend/src/events/queue-entry.service.ts
+@@ -1,3 +1,4 @@
++import { assertMutationSession, mutationTransaction, revalidateMutationSession, type MutationSession } from "../auth/mutation-session";
+ import { Inject, Injectable } from "@nestjs/common";
+ import { randomUUID } from "node:crypto";
+ import { sql } from "drizzle-orm";
+@@ -63,13 +64,23 @@ export class QueueEntryService {
+     @Inject(EventsService) private readonly eventsService: EventsService,
+   ) {}
+ 
++  /** Contrato interno E07; os controllers usam exclusivamente a entrada autenticada. */
+   async joinExperienceQueue(input: JoinExperienceQueueInput): Promise<JoinExperienceQueueResult> {
++    return this.execute(input, null);
++  }
++
++  async joinExperienceQueueAuthenticated(input: JoinExperienceQueueInput, context: MutationSession): Promise<JoinExperienceQueueResult> {
++    assertMutationSession(context, input.userId);
++    return this.execute(input, context);
++  }
++
++  private async execute(input: JoinExperienceQueueInput, context: MutationSession | null): Promise<JoinExperienceQueueResult> {
+     if (!input.idempotencyKey.trim() || input.idempotencyKey.length > 128
+       || !Number.isFinite(input.expiresAt.getTime())) {
+       throw new Error("Chave de idempotência ou expiração inválida.");
+     }
+     try {
+-      return await this.database.transaction(async (tx): Promise<JoinExperienceQueueResult> => {
++      return await mutationTransaction(this.database, context, async (tx): Promise<JoinExperienceQueueResult> => {
+         // Descoberta sem autorização de mutação; titularidade/evento são revalidados sob lock.
+         const lookup = await tx.execute<{ eventId: string }>(sql`
+           SELECT event_id AS "eventId" FROM participations
+@@ -105,6 +116,7 @@ export class QueueEntryService {
+           requestHash: createQueueJoinFingerprint(input.participationId, input.experienceId),
+           expiresAt: input.expiresAt,
+         });
++        if (context !== null) await revalidateMutationSession(tx, context);
+         if (reservation.kind === "request_conflict" || reservation.kind === "in_progress") {
+           return { kind: reservation.kind };
+         }
+diff --git a/backend/src/events/queue-withdrawal.service.ts b/backend/src/events/queue-withdrawal.service.ts
+index 3fd558988a5855acde8346c577cdca5ae9e00f3d..45584bf2a49d8c330a39617d07340fbb76ad34c7 100644
+--- a/backend/src/events/queue-withdrawal.service.ts
++++ b/backend/src/events/queue-withdrawal.service.ts
+@@ -1,3 +1,4 @@
++import { assertMutationSession, mutationTransaction, revalidateMutationSession, type MutationSession } from "../auth/mutation-session";
+ import { Inject, Injectable } from "@nestjs/common";
+ import { sql } from "drizzle-orm";
+ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
+@@ -54,12 +55,22 @@ function replay(payload: JsonValue | null, input: WithdrawExperienceQueueInput):
+ export class QueueWithdrawalService {
+   constructor(@Inject(DRIZZLE_DATABASE) private readonly database: NodePgDatabase<typeof schema>) {}
+ 
++  /** Contrato interno E07; os controllers usam exclusivamente a entrada autenticada. */
+   async withdrawExperienceQueue(input: WithdrawExperienceQueueInput): Promise<WithdrawExperienceQueueResult> {
++    return this.execute(input, null);
++  }
++
++  async withdrawExperienceQueueAuthenticated(input: WithdrawExperienceQueueInput, context: MutationSession): Promise<WithdrawExperienceQueueResult> {
++    assertMutationSession(context, input.userId);
++    return this.execute(input, context);
++  }
++
++  private async execute(input: WithdrawExperienceQueueInput, context: MutationSession | null): Promise<WithdrawExperienceQueueResult> {
+     if (!input.idempotencyKey.trim() || input.idempotencyKey.length > 128 || !Number.isFinite(input.expiresAt.getTime())) {
+       throw new Error("Chave de idempotência ou expiração inválida.");
+     }
+     try {
+-      return await this.database.transaction(async (tx): Promise<WithdrawExperienceQueueResult> => {
++      return await mutationTransaction(this.database, context, async (tx): Promise<WithdrawExperienceQueueResult> => {
+         // Descoberta não bloqueante da tentativa EXPLÍCITA, com titularidade já filtrada.
+         const lookup = await tx.execute<{ eventId: string; experienceId: string; queueEntryId: string }>(sql`
+           SELECT p.event_id AS "eventId", q.experience_id AS "experienceId", q.id AS "queueEntryId"
+@@ -111,6 +122,7 @@ export class QueueWithdrawalService {
+           actorUserId: input.userId, operation: QUEUE_WITHDRAWAL_OPERATION, idempotencyKey: input.idempotencyKey,
+           requestHash: createQueueWithdrawalFingerprint(input.participationId, input.queueEntryId), expiresAt: input.expiresAt,
+         });
++        if (context !== null) await revalidateMutationSession(tx, context);
+         if (reservation.kind === "request_conflict" || reservation.kind === "in_progress") return { kind: reservation.kind };
+         if (reservation.kind === "replay") return { kind: "replay", ...replay(reservation.resultPayload, input) };
+         if (owned.status !== "active") block({ kind: "participation_not_active" });
+diff --git a/backend/src/events/staff-operations.controller.ts b/backend/src/events/staff-operations.controller.ts
+index f4afec9dac5d4817e00f3be550ce6720d1ad35e8..04c9893c8939415021c508b55df47c45ea20c78c 100644
+--- a/backend/src/events/staff-operations.controller.ts
++++ b/backend/src/events/staff-operations.controller.ts
+@@ -1,3 +1,4 @@
++import { mutationSession } from "../auth/mutation-session";
+ import { Body, Controller, HttpCode, HttpStatus, Inject, Param, Post, Req } from "@nestjs/common";
+ import { CurrentUserId, RequireSessionAuth } from "../auth/current-user.decorator";
+ import type { AuthenticatedRequest } from "../auth/session-auth.guard";
+@@ -23,7 +24,7 @@ export class StaffOperationsController {
+   async callNext(@CurrentUserId() staffUserId: string, @Param() params: unknown, @Body() body: unknown, @Req() request: AuthenticatedRequest) {
+     const ids = validateStaffParams(callNextParamsSchema, params);
+     const idempotencyKey = validateStaffRequest(body, request);
+-    const result = await executeStaffOperation(() => this.calling.callNext({ ...ids, staffUserId, idempotencyKey, expiresAt: this.idempotency.expiresAt() }));
++    const result = await executeStaffOperation(() => this.calling.callNextAuthenticated({ ...ids, staffUserId, idempotencyKey, expiresAt: this.idempotency.expiresAt() }, mutationSession(request, staffUserId)));
+     if (result.kind === "created" || result.kind === "replay") return { serviceSession: result.serviceSession };
+     return rejectStaffOperation(result.kind);
+   }
+@@ -33,7 +34,7 @@ export class StaffOperationsController {
+   async complete(@CurrentUserId() staffUserId: string, @Param() params: unknown, @Body() body: unknown, @Req() request: AuthenticatedRequest) {
+     const ids = validateStaffParams(serviceSessionParamsSchema, params);
+     const idempotencyKey = validateStaffRequest(body, request);
+-    const result = await executeStaffOperation(() => this.completion.complete({ ...ids, staffUserId, idempotencyKey, expiresAt: this.idempotency.expiresAt() }));
++    const result = await executeStaffOperation(() => this.completion.completeAuthenticated({ ...ids, staffUserId, idempotencyKey, expiresAt: this.idempotency.expiresAt() }, mutationSession(request, staffUserId)));
+     if (result.kind === "completed" || result.kind === "replay") return { serviceSession: result.serviceSession, queueEntry: result.queueEntry, participation: result.participation };
+     return rejectStaffOperation(result.kind);
+   }
+@@ -43,7 +44,7 @@ export class StaffOperationsController {
+   async absent(@CurrentUserId() staffUserId: string, @Param() params: unknown, @Body() body: unknown, @Req() request: AuthenticatedRequest) {
+     const ids = validateStaffParams(serviceSessionParamsSchema, params);
+     const idempotencyKey = validateStaffRequest(body, request);
+-    const result = await executeStaffOperation(() => this.absence.absent({ ...ids, staffUserId, idempotencyKey, expiresAt: this.idempotency.expiresAt() }));
++    const result = await executeStaffOperation(() => this.absence.absentAuthenticated({ ...ids, staffUserId, idempotencyKey, expiresAt: this.idempotency.expiresAt() }, mutationSession(request, staffUserId)));
+     if (result.kind === "absent" || result.kind === "replay") return { serviceSession: result.serviceSession,
+       previousQueueEntry: result.previousQueueEntry, requeued: result.requeued, newQueueEntry: result.newQueueEntry };
+     return rejectStaffOperation(result.kind);
+diff --git a/backend/src/participations/participation-lifecycle.controller.ts b/backend/src/participations/participation-lifecycle.controller.ts
+index 7b0564a874727de87e9e4ea319af48a652a65658..1ef3b69dfc792437b93784e5155b749aa685cb51 100644
+--- a/backend/src/participations/participation-lifecycle.controller.ts
++++ b/backend/src/participations/participation-lifecycle.controller.ts
+@@ -1,3 +1,4 @@
++import { mutationSession } from "../auth/mutation-session";
+ import { Body, Controller, Get, HttpCode, Inject, Param, Post, Req } from "@nestjs/common";
+ import { CurrentUserId, RequireSessionAuth } from "../auth/current-user.decorator";
+ import type { AuthenticatedRequest } from "../auth/session-auth.guard";
+@@ -42,6 +43,6 @@ export class ParticipationLifecycleController {
+   private async mutate(mode:"cancel"|"finish",userId:string,params:unknown,body:unknown,request:AuthenticatedRequest){
+     const ids=validateOperationParams(lifecycleParams,params);validateOperationBody(emptyOperationBody,body,request,true);
+     const input={...ids,userId,idempotencyKey:validateOperationIdempotencyKey(request),expiresAt:this.policy.expiresAt()};
+-    return response(await this.writes[mode](input));
++    return response(await this.writes[mode === "cancel" ? "cancelAuthenticated" : "finishAuthenticated"](input,mutationSession(request,userId)));
+   }
+ }
+diff --git a/backend/src/participations/participation-lifecycle.service.ts b/backend/src/participations/participation-lifecycle.service.ts
+index 25249dbc257b4a52e6ae40c357caa236af1fe1a0..a54000b5bc0b48005f41b6a3e6c5fd034e4ea381 100644
+--- a/backend/src/participations/participation-lifecycle.service.ts
++++ b/backend/src/participations/participation-lifecycle.service.ts
+@@ -1,3 +1,4 @@
++import { assertMutationSession, MutationSessionError, mutationTransaction, revalidateMutationSession, type MutationSession } from "../auth/mutation-session";
+ import { Inject, Injectable } from "@nestjs/common";
+ import { sql } from "drizzle-orm";
+ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
+@@ -33,24 +34,33 @@ interface Entry extends Record<string,unknown> { id: string; experienceId: strin
+ @Injectable()
+ export class ParticipationLifecycleService {
+   constructor(@Inject(DRIZZLE_DATABASE) private readonly database: NodePgDatabase<typeof schema>) {}
+-  cancel(input: LifecycleInput) { return this.write("cancel",input); }
+-  finish(input: LifecycleInput) { return this.write("finish",input); }
++  cancel(input: LifecycleInput) { return this.write("cancel",input,null); }
++  finish(input: LifecycleInput) { return this.write("finish",input,null); }
++  cancelAuthenticated(input: LifecycleInput, context: MutationSession) {
++    assertMutationSession(context, input.userId); return this.write("cancel",input,context);
++  }
++  finishAuthenticated(input: LifecycleInput, context: MutationSession) {
++    assertMutationSession(context, input.userId); return this.write("finish",input,context);
++  }
+   private async state(tx: DatabaseTransactionExecutor, input: LifecycleInput, at?: string) {
+     const rows=(await tx.execute<ParticipationProjectionRow>(participationProjection(input.userId,input.participationId,
+       at?sql`${at}::timestamptz`:sql`clock_timestamp()`))).rows;
+     ensure(rows.length===1); return publicParticipation(rows[0]);
+   }
+-  private async write(mode: "cancel" | "finish", input: LifecycleInput): Promise<LifecycleResult> {
++  private async write(mode: "cancel" | "finish", input: LifecycleInput, context: MutationSession | null): Promise<LifecycleResult> {
+     try {
+       ensure(input.idempotencyKey.trim() && input.idempotencyKey.length<=128 && Number.isFinite(input.expiresAt.getTime()));
+-      return await this.database.transaction(async tx => {
++      return await mutationTransaction(this.database, context, async tx => {
+         const target=(await tx.execute<Target>(sql`SELECT event_id AS "eventId" FROM participations
+           WHERE id=${input.participationId}::uuid AND user_id=${input.userId}::uuid`)).rows[0];
+         if (!target) block("access_denied");
+         const intent=await reserveIdempotencyOperationWithTx(tx,{actorUserId:input.userId,
+           operation:mode==="cancel"?CANCEL_PARTICIPATION_OPERATION:FINISH_PARTICIPATION_OPERATION,idempotencyKey:input.idempotencyKey,
+           requestHash:lifecycleFingerprint(mode,input.userId,input.participationId),expiresAt:input.expiresAt});
+-        if(intent.kind==="request_conflict"||intent.kind==="in_progress")block(intent.kind);
++        if(intent.kind==="request_conflict"||intent.kind==="in_progress"){
++          if (context !== null) await revalidateMutationSession(tx, context);
++          block(intent.kind);
++        }
+         // Exclusivo no evento: a descoberta da fila fica estável inclusive contra troca de experiência.
+         // Mesma ordem de E03/E08.8/E08.9; todo escritor operacional anterior usa FOR SHARE/UPDATE no evento.
+         ensure((await tx.execute(sql`SELECT id FROM events WHERE id=${target.eventId}::uuid FOR UPDATE`)).rows.length===1);
+@@ -66,6 +76,7 @@ export class ParticipationLifecycleService {
+         const person=(await tx.execute<Current>(sql`SELECT status,current_queue_entry_id AS "currentId" FROM participations
+           WHERE id=${input.participationId}::uuid AND user_id=${input.userId}::uuid AND event_id=${target.eventId}::uuid FOR UPDATE`)).rows[0];
+         if(!person)block("access_denied");
++        if (context !== null) await revalidateMutationSession(tx, context);
+         if(intent.kind==="replay"){
+           const value=(mode==="finish"?finishedParticipationView:participationView).parse(intent.resultPayload && typeof intent.resultPayload==="object" && !Array.isArray(intent.resultPayload)?intent.resultPayload.participation:undefined);
+           ensure(intent.httpStatus===200&&intent.resultReference===input.participationId&&value.id===input.participationId&&value.eventId===target.eventId
+@@ -113,6 +124,6 @@ export class ParticipationLifecycleService {
+         await completeIdempotencyOperationWithTx(tx,intent.operationId,{httpStatus:200,resultReference:input.participationId,resultPayload:{participation} as unknown as JsonValue});
+         return {kind:"changed",participation};
+       },{isolationLevel:"read committed"});
+-    }catch(error){if(error instanceof LifecycleRollback)return error.result;throw new Error("PARTICIPATION_LIFECYCLE_INTERNAL_ERROR",{cause:error});}
++    }catch(error){if(error instanceof MutationSessionError)throw error;if(error instanceof LifecycleRollback)return error.result;throw new Error("PARTICIPATION_LIFECYCLE_INTERNAL_ERROR",{cause:error});}
+   }
+ }
+diff --git a/backend/test/integration/evaluation-write.integration.test.ts b/backend/test/integration/evaluation-write.integration.test.ts
+index 8da9c81a532419b28c6fe507ab440c64fc241c97..227788e2b0dac1bb0a7bd4c30b7c95b39190e908 100644
+--- a/backend/test/integration/evaluation-write.integration.test.ts
++++ b/backend/test/integration/evaluation-write.integration.test.ts
+@@ -232,10 +232,10 @@ test(`E08.11 PostgreSQL falha depois da escrita ${phase} ${mode} reverte avalia
+     if(!reached&&((phase==="reserve"&&text.includes('insert into "idempotency_operations"'))||(phase==="complete"&&text.includes('update "idempotency_operations"'))||(phase==="domain"&&text.includes("WITH decision AS MATERIALIZED")))){
+       assert.equal(result.rows.length,1);if(phase==="domain")assert.ok(result.rows[0].writtenId);reached=true;
+       await originalQuery("SELECT 1/0");assert.fail("A falha SQL real deveria abortar a transação.");}return result;};return Reflect.get(target,property,target);}});
+-  const failing=makeWrites(drizzle(proxy,{schema})),originalPost=writes.submit.bind(writes),originalPatch=writes.edit.bind(writes);
+-  writes.submit=input=>failing.submit(input);writes.edit=input=>failing.edit(input);
++  const failing=makeWrites(drizzle(proxy,{schema})),originalPost=writes.submitAuthenticated.bind(writes),originalPatch=writes.editAuthenticated.bind(writes);
++  writes.submitAuthenticated=(input,context)=>failing.submitAuthenticated(input,context);writes.editAuthenticated=(input,context)=>failing.editAuthenticated(input,context);
+   try{const r=mode==="post"?await submit(p,{rating:5},key):await edit(p,id!,{rating:5},key);problem(r,500,"INTERNAL_SERVER_ERROR");assert.equal(JSON.stringify(r.body).includes("PRIVATE"),false);assert.equal(reached,true);assert.deepEqual(await ownState(c,p),before);}
+-  finally{writes.submit=originalPost;writes.edit=originalPatch;client.release();}
++  finally{writes.submitAuthenticated=originalPost;writes.editAuthenticated=originalPatch;client.release();}
+   assert.equal((mode==="post"?await submit(p,{rating:5},key):await edit(p,id!,{rating:5},key)).status,mode==="post"?201:200);
+ });
+ for(const mode of ["post","patch"]as const)test(`E08.11 PostgreSQL snapshot de leitura permanece coerente durante ${mode} concorrente real`,async()=>{
+diff --git a/backend/test/integration/participant-queue-http.integration.test.ts b/backend/test/integration/participant-queue-http.integration.test.ts
+index c86f55f70cb38eb8ce2ff67e08c1bed014fc01db..50e284b2ca7023fd9eebf3f046e1d91e01b80024 100644
+--- a/backend/test/integration/participant-queue-http.integration.test.ts
++++ b/backend/test/integration/participant-queue-http.integration.test.ts
+@@ -349,22 +349,22 @@ test("E08.2 PostgreSQL HTTP Admin como jogador não precisa de papel Staff", asy
+   const entry = await enter(c); assert.equal((await get(p)).status, 200); assert.equal((await withdraw(p, entry)).status, 200);
+ });
+ test("E08.2 PostgreSQL HTTP erro após escritas de ingresso faz rollback integral e permite retry", async () => {
+-  const c = await context(), before = await state(c), key = randomUUID(), original = joining.joinExperienceQueue.bind(joining); let reached = false;
++  const c = await context(), before = await state(c), key = randomUUID(), original = joining.joinExperienceQueueAuthenticated.bind(joining); let reached = false;
+   const failingDb = { transaction: <T>(callback: (tx: DatabaseTransactionExecutor) => Promise<T>, config?: Parameters<Database["transaction"]>[1]) =>
+     database.transaction(async tx => {
+       await callback(tx);
+       const row = (await tx.execute<{ pointer: string | null }>(sql`SELECT current_queue_entry_id AS pointer FROM participations WHERE id=${c.people[0].participationId}`)).rows[0];
+       assert.ok(row.pointer); reached = true; throw new Error("E082_PRIVATE_ROLLBACK");
+     }, config) } as unknown as Database;
+-  joining.joinExperienceQueue = input => makeJoining(failingDb).joinExperienceQueue(input);
++  joining.joinExperienceQueueAuthenticated = (input, context) => makeJoining(failingDb).joinExperienceQueueAuthenticated(input, context);
+   try { const r = await join(c, c.people[0], key); problem(r, 500, "INTERNAL_SERVER_ERROR"); assert.equal(JSON.stringify(r.body).includes("PRIVATE"), false); assert.equal(reached, true); assert.equal(await state(c), before); }
+-  finally { joining.joinExperienceQueue = original; }
++  finally { joining.joinExperienceQueueAuthenticated = original; }
+   assert.equal((await join(c, c.people[0], key)).status, 201);
+ });
+ test("E08.2 PostgreSQL HTTP erro após desistência waiting/called reverte efeitos e idempotência", async () => {
+   for (const called of [false,true]) {
+     const c = await context(), entry = await enter(c); if (called) assert.equal((await call(c)).status, 201);
+-    const before = await state(c), key = randomUUID(), original = withdrawal.withdrawExperienceQueue.bind(withdrawal); let reached = false;
++    const before = await state(c), key = randomUUID(), original = withdrawal.withdrawExperienceQueueAuthenticated.bind(withdrawal); let reached = false;
+     const failingDb = { transaction: <T>(callback: (tx: DatabaseTransactionExecutor) => Promise<T>, config?: Parameters<Database["transaction"]>[1]) =>
+       database.transaction(async tx => {
+         await callback(tx);
+@@ -373,9 +373,9 @@ test("E08.2 PostgreSQL HTTP erro após desistência waiting/called reverte efeit
+         assert.equal(row.pointer, null); assert.equal(row.status, "closed"); assert.equal(row.sessionStatus, called ? "canceled" : null);
+         reached = true; throw new Error("E082_PRIVATE_ROLLBACK");
+       }, config) } as unknown as Database;
+-    withdrawal.withdrawExperienceQueue = input => makeWithdrawal(failingDb).withdrawExperienceQueue(input);
++    withdrawal.withdrawExperienceQueueAuthenticated = (input, context) => makeWithdrawal(failingDb).withdrawExperienceQueueAuthenticated(input, context);
+     try { const r = await withdraw(c.people[0], entry, key); problem(r, 500, "INTERNAL_SERVER_ERROR"); assert.equal(JSON.stringify(r.body).includes("PRIVATE"), false); assert.equal(reached, true); assert.equal(await state(c), before); }
+-    finally { withdrawal.withdrawExperienceQueue = original; }
++    finally { withdrawal.withdrawExperienceQueueAuthenticated = original; }
+     assert.equal((await withdraw(c.people[0], entry, key)).status, 200);
+   }
+ });
+diff --git a/backend/test/integration/participation-lifecycle.integration.test.ts b/backend/test/integration/participation-lifecycle.integration.test.ts
+index bd6052bf9a55a90d11aa8a148b9dfb844801a25c..1fe6196f05f35742b826e15dceae9db0a0663c8e 100644
+--- a/backend/test/integration/participation-lifecycle.integration.test.ts
++++ b/backend/test/integration/participation-lifecycle.integration.test.ts
+@@ -277,9 +277,10 @@ for(const mode of ["cancel","finish"]as const)for(const phase of ["reserve","par
+         ||(phase==='participation'&&text.startsWith('WITH decision AS MATERIALIZED'))||(phase==='queue'&&text.startsWith('UPDATE queue_entries'))||(phase==='session'&&text.startsWith('UPDATE service_sessions')))){
+         assert.equal(result.rows.length,1);reached=true;await originalQuery('SELECT 1/0');assert.fail('Falha SQL real deveria abortar a transação.');}return result;
+     };return Reflect.get(target,property,target);}});
+-    const failing=makeWrites(drizzle(proxy,{schema})),original=writes[mode].bind(writes);writes[mode]=input=>failing[mode](input);
++    const method=mode==='cancel'?'cancelAuthenticated':'finishAuthenticated';
++    const failing=makeWrites(drizzle(proxy,{schema})),original=writes[method].bind(writes);writes[method]=(input,context)=>failing[method](input,context);
+     try{problem(await mutate(mode,p,key),500,'INTERNAL_SERVER_ERROR');assert.equal(reached,true);assert.deepEqual(await ownState(c,p),before);}
+-    finally{writes[mode]=original;client.release();}
++    finally{writes[method]=original;client.release();}
+     assert.equal((await mutate(mode,p,key)).status,200);
+   });
+ }
+diff --git a/backend/test/integration/staff-http.integration.test.ts b/backend/test/integration/staff-http.integration.test.ts
+index fa0a85fe631da84ab0d0bb544bde2983d8663249..00acbb3f702fb1ac0e196aa286c6d1cfaae02bc9 100644
+--- a/backend/test/integration/staff-http.integration.test.ts
++++ b/backend/test/integration/staff-http.integration.test.ts
+@@ -320,7 +320,7 @@ test("E08.1 PostgreSQL HTTP revalida prazo depois de esperar experiência", asyn
+   } finally { await client.query("ROLLBACK"); await Promise.allSettled([pending]); client.release(); }
+ });
+ test("E08.1 PostgreSQL HTTP erro após as escritas reais faz rollback e permite retry", async () => {
+-  const c = await context(true), before = await state(c), key = randomUUID(), original = completion.complete.bind(completion);
++  const c = await context(true), before = await state(c), key = randomUUID(), original = completion.completeAuthenticated.bind(completion);
+   let reached = false;
+   const failingDb = { transaction: <T>(callback: (tx: DatabaseTransactionExecutor) => Promise<T>, config?: Parameters<Database["transaction"]>[1]) =>
+     database.transaction(async tx => {
+@@ -329,10 +329,10 @@ test("E08.1 PostgreSQL HTTP erro após as escritas reais faz rollback e permite
+         FROM service_sessions s JOIN queue_entries q ON q.id=s.queue_entry_id JOIN participations p ON p.id=q.participation_id WHERE s.id=${c.serviceSessionId}`)).rows[0];
+       assert.equal(row.status, "completed"); assert.equal(row.pointer, null); reached = true; throw new Error("E081_ROLLBACK_PRIVATE");
+     }, config) } as unknown as Database;
+-  completion.complete = input => makeCompletion(failingDb).complete(input);
++  completion.completeAuthenticated = (input, context) => makeCompletion(failingDb).completeAuthenticated(input, context);
+   try {
+     const r = await post(c, "complete", key).send({}); problem(r, 500, "INTERNAL_SERVER_ERROR");
+     assert.equal(JSON.stringify(r.body).includes("PRIVATE"), false); assert.equal(reached, true); assert.equal(await state(c), before);
+-  } finally { completion.complete = original; }
++  } finally { completion.completeAuthenticated = original; }
+   assert.equal((await post(c, "complete", key).send({})).status, 200);
+ });
+diff --git a/backend/test/unit/absent.test.ts b/backend/test/unit/absent.test.ts
+index db5e189c7dce9085c72065125e061f9066bc44f0..a5a000f7e5c9800122125f56774fd32aad44c31f 100644
+--- a/backend/test/unit/absent.test.ts
++++ b/backend/test/unit/absent.test.ts
+@@ -1,3 +1,5 @@
++import { sessionScenario, assertSessionRefusal, assertSessionTransaction } from "./mutation-session-scenario";
++import type { MutationSession } from "../../src/auth/mutation-session";
+ import assert from "node:assert/strict";
+ import { test } from "node:test";
+ import { drizzle } from "drizzle-orm/node-postgres";
+@@ -198,3 +200,36 @@ test("E07.6 input inválido não abre transação e contrato não expõe dados p
+   for (const changes of [{ idempotencyKey: " " }, { idempotencyKey: "x".repeat(129) }, { expiresAt: new Date(NaN) }]) await assert.rejects(service.absent({ ...input, ...changes }), /inválida/);
+   assert.equal(queries.length, 0); assert.equal(JSON.stringify(await service.absent(input)).includes(input.staffUserId), false);
+ });
++
++// E08-EST01: a entrada HTTP não admite fallback para o contrato interno E07.
++for (const scenario of ["valid", "revoked", "expired", "foreign", "inactive", "admin", "late", "wait", "intent-wait"] as const) {
++  test(`E08-EST01 absent sessão ${scenario}`, async () => {
++    const f = fixture(), auth = sessionScenario(f.service, input.staffUserId, scenario);
++    if (scenario === "valid") {
++      const result = await f.service.absentAuthenticated(input, auth.context);
++      assert.equal(result.kind, "absent");
++      assert.ok(auth.checks() >= 2); assertSessionTransaction(auth.queries, true);
++    } else {
++      const code = scenario === "foreign" ? "INVALID_SESSION" : scenario === "inactive" ? "ACCOUNT_DEACTIVATED"
++        : scenario === "admin" ? "ADMIN_2FA_REQUIRED" : scenario === "late" || scenario === "expired" ? "SESSION_EXPIRED" : "SESSION_REVOKED";
++      await assert.rejects(f.service.absentAuthenticated(input, auth.context), error => assertSessionRefusal(error, code));
++      assertSessionTransaction(auth.queries, false);
++      if (scenario === "late") assert.ok(auth.queries.some(q => q.includes('update "idempotency_operations"')));
++    }
++  });
++}
++for (const context of [undefined, { userId: "other", sessionId: "session" }, { userId: input.staffUserId, sessionId: "" }]) {
++  test(`E08-EST01 absent recusa contexto ausente ou incompatível ${JSON.stringify(context)}`, async () => {
++    const f = fixture();
++    await assert.rejects(async () => f.service.absentAuthenticated(input, context as MutationSession), error => assertSessionRefusal(error, "UNAUTHENTICATED_CONTEXT"));
++    assert.equal(f.queries.length, 0);
++  });
++}
++for (const scenario of ["valid", "revoked", "expired", "late"] as const) {
++  test(`E08-EST01 absent replay exige sessão ${scenario}`, async () => {
++    const f = fixture({ reservation: "replay" }), auth = sessionScenario(f.service, input.staffUserId, scenario);
++    if (scenario === "valid") { assert.equal((await f.service.absentAuthenticated(input, auth.context)).kind, "replay"); assertSessionTransaction(auth.queries, true); }
++    else { await assert.rejects(f.service.absentAuthenticated(input, auth.context), error => assertSessionRefusal(error, scenario === "revoked" ? "SESSION_REVOKED" : "SESSION_EXPIRED")); assertSessionTransaction(auth.queries, false); }
++    assert.equal(auth.queries.some(q => q.includes('update "idempotency_operations"')), false);
++  });
++}
+diff --git a/backend/test/unit/call-next.test.ts b/backend/test/unit/call-next.test.ts
+index d098b2b29966f996dbc6e7fa2f6423b99ecb7055..292973ff0f605669ddb84c0892e81517d670c334 100644
+--- a/backend/test/unit/call-next.test.ts
++++ b/backend/test/unit/call-next.test.ts
+@@ -1,3 +1,5 @@
++import { sessionScenario, assertSessionRefusal, assertSessionTransaction } from "./mutation-session-scenario";
++import type { MutationSession } from "../../src/auth/mutation-session";
+ import assert from "node:assert/strict";
+ import { test } from "node:test";
+ import { drizzle } from "drizzle-orm/node-postgres";
+@@ -167,3 +169,36 @@ test("E07.4 input inválido falha antes de abrir transação", async () => {
+   }
+   assert.equal(queries.length, 0);
+ });
++
++// E08-EST01: a entrada HTTP não admite fallback para o contrato interno E07.
++for (const scenario of ["valid", "revoked", "expired", "foreign", "inactive", "admin", "late", "wait", "intent-wait"] as const) {
++  test(`E08-EST01 callNext sessão ${scenario}`, async () => {
++    const f = fixture(), auth = sessionScenario(f.service, input.staffUserId, scenario);
++    if (scenario === "valid") {
++      const result = await f.service.callNextAuthenticated(input, auth.context);
++      assert.equal(result.kind, "created");
++      assert.ok(auth.checks() >= 2); assertSessionTransaction(auth.queries, true);
++    } else {
++      const code = scenario === "foreign" ? "INVALID_SESSION" : scenario === "inactive" ? "ACCOUNT_DEACTIVATED"
++        : scenario === "admin" ? "ADMIN_2FA_REQUIRED" : scenario === "late" || scenario === "expired" ? "SESSION_EXPIRED" : "SESSION_REVOKED";
++      await assert.rejects(f.service.callNextAuthenticated(input, auth.context), error => assertSessionRefusal(error, code));
++      assertSessionTransaction(auth.queries, false);
++      if (scenario === "late") assert.ok(auth.queries.some(q => q.includes('update "idempotency_operations"')));
++    }
++  });
++}
++for (const context of [undefined, { userId: "other", sessionId: "session" }, { userId: input.staffUserId, sessionId: "" }]) {
++  test(`E08-EST01 callNext recusa contexto ausente ou incompatível ${JSON.stringify(context)}`, async () => {
++    const f = fixture();
++    await assert.rejects(async () => f.service.callNextAuthenticated(input, context as MutationSession), error => assertSessionRefusal(error, "UNAUTHENTICATED_CONTEXT"));
++    assert.equal(f.queries.length, 0);
++  });
++}
++for (const scenario of ["valid", "revoked", "expired", "late"] as const) {
++  test(`E08-EST01 callNext replay exige sessão ${scenario}`, async () => {
++    const f = fixture({ reservation: "replay" }), auth = sessionScenario(f.service, input.staffUserId, scenario);
++    if (scenario === "valid") { assert.equal((await f.service.callNextAuthenticated(input, auth.context)).kind, "replay"); assertSessionTransaction(auth.queries, true); }
++    else { await assert.rejects(f.service.callNextAuthenticated(input, auth.context), error => assertSessionRefusal(error, scenario === "revoked" ? "SESSION_REVOKED" : "SESSION_EXPIRED")); assertSessionTransaction(auth.queries, false); }
++    assert.equal(auth.queries.some(q => q.includes('update "idempotency_operations"')), false);
++  });
++}
+diff --git a/backend/test/unit/complete.test.ts b/backend/test/unit/complete.test.ts
+index b66851932510ee3dc15c0cb16733567c09c88799..171f9d95d63462a19532111f60aad6466297924d 100644
+--- a/backend/test/unit/complete.test.ts
++++ b/backend/test/unit/complete.test.ts
+@@ -1,3 +1,5 @@
++import { sessionScenario, assertSessionRefusal, assertSessionTransaction } from "./mutation-session-scenario";
++import type { MutationSession } from "../../src/auth/mutation-session";
+ import assert from "node:assert/strict";
+ import { test } from "node:test";
+ import { drizzle } from "drizzle-orm/node-postgres";
+@@ -158,3 +160,36 @@ test("E07.5 input inválido falha antes de abrir transação", async () => {
+   for (const changes of [{ idempotencyKey: " " }, { idempotencyKey: "x".repeat(129) }, { expiresAt: new Date(NaN) }]) await assert.rejects(service.complete({ ...input, ...changes }), /inválida/);
+   assert.equal(queries.length, 0);
+ });
++
++// E08-EST01: a entrada HTTP não admite fallback para o contrato interno E07.
++for (const scenario of ["valid", "revoked", "expired", "foreign", "inactive", "admin", "late", "wait", "intent-wait"] as const) {
++  test(`E08-EST01 complete sessão ${scenario}`, async () => {
++    const f = fixture(), auth = sessionScenario(f.service, input.staffUserId, scenario);
++    if (scenario === "valid") {
++      const result = await f.service.completeAuthenticated(input, auth.context);
++      assert.equal(result.kind, "completed");
++      assert.ok(auth.checks() >= 2); assertSessionTransaction(auth.queries, true);
++    } else {
++      const code = scenario === "foreign" ? "INVALID_SESSION" : scenario === "inactive" ? "ACCOUNT_DEACTIVATED"
++        : scenario === "admin" ? "ADMIN_2FA_REQUIRED" : scenario === "late" || scenario === "expired" ? "SESSION_EXPIRED" : "SESSION_REVOKED";
++      await assert.rejects(f.service.completeAuthenticated(input, auth.context), error => assertSessionRefusal(error, code));
++      assertSessionTransaction(auth.queries, false);
++      if (scenario === "late") assert.ok(auth.queries.some(q => q.includes('update "idempotency_operations"')));
++    }
++  });
++}
++for (const context of [undefined, { userId: "other", sessionId: "session" }, { userId: input.staffUserId, sessionId: "" }]) {
++  test(`E08-EST01 complete recusa contexto ausente ou incompatível ${JSON.stringify(context)}`, async () => {
++    const f = fixture();
++    await assert.rejects(async () => f.service.completeAuthenticated(input, context as MutationSession), error => assertSessionRefusal(error, "UNAUTHENTICATED_CONTEXT"));
++    assert.equal(f.queries.length, 0);
++  });
++}
++for (const scenario of ["valid", "revoked", "expired", "late"] as const) {
++  test(`E08-EST01 complete replay exige sessão ${scenario}`, async () => {
++    const f = fixture({ reservation: "replay" }), auth = sessionScenario(f.service, input.staffUserId, scenario);
++    if (scenario === "valid") { assert.equal((await f.service.completeAuthenticated(input, auth.context)).kind, "replay"); assertSessionTransaction(auth.queries, true); }
++    else { await assert.rejects(f.service.completeAuthenticated(input, auth.context), error => assertSessionRefusal(error, scenario === "revoked" ? "SESSION_REVOKED" : "SESSION_EXPIRED")); assertSessionTransaction(auth.queries, false); }
++    assert.equal(auth.queries.some(q => q.includes('update "idempotency_operations"')), false);
++  });
++}
+diff --git a/backend/test/unit/evaluation-write-http.test.ts b/backend/test/unit/evaluation-write-http.test.ts
+index 5c93fae3161f090c4de62fc2b6c50c2ff1e23eea..2280097a99e6af4b97f4bf78e61decf41b371a5b 100644
+--- a/backend/test/unit/evaluation-write-http.test.ts
++++ b/backend/test/unit/evaluation-write-http.test.ts
+@@ -1,3 +1,4 @@
++import type { MutationSession } from "../../src/auth/mutation-session";
+ import "reflect-metadata";
+ import assert from "node:assert/strict";
+ import { after, before, test } from "node:test";
+@@ -26,8 +27,8 @@ const calls:Array<{ mode:string; input:Record<string,unknown> }>=[];
+     if(!["participant","admin","staff"].includes(token))throw new ProblemException({status:401,code:"INVALID_ACCESS_TOKEN",typeSlug:"invalid-access-token",title:"Inválido",detail:"Token inválido."});
+     return { userId:uid,sessionId:id(4),roles:token==="participant"?[]:[token] };
+   } } },
+-  { provide:EvaluationWriteService,useValue:{ submit:(input:Record<string,unknown>)=>{calls.push({mode:"submit",input});if(failure)throw failure;return result;},
+-    edit:(input:Record<string,unknown>)=>{calls.push({mode:"edit",input});if(failure)throw failure;return result;} } },
++  { provide:EvaluationWriteService,useValue:{ submitAuthenticated:(input:Record<string,unknown>, context: MutationSession) => { authenticatedInput(context, undefined); calls.push({mode:"submit",input});if(failure)throw failure;return result;},
++    editAuthenticated:(input:Record<string,unknown>, context: MutationSession) => { authenticatedInput(context, undefined); calls.push({mode:"edit",input});if(failure)throw failure;return result;} } },
+ ] })class HttpModule{}
+ let app:INestApplication;
+ before(async()=>{app=await NestFactory.create(HttpModule,{logger:false});app.setGlobalPrefix("api/v1");app.useGlobalFilters(new ProblemDetailsExceptionFilter());await app.listen(0,"127.0.0.1");});
+@@ -98,3 +99,7 @@ test("E08.11 DI Nest resolve escritas, política e banco reais sob tsx sem conec
+     assert.ok(Reflect.get(writes,"database")===real.get(DRIZZLE_DATABASE));assert.equal(real.get<Pool>(POSTGRES_POOL).totalCount,0);
+   }finally{await real.close();}
+ });
++
++function authenticatedInput<T>(context: MutationSession, result: T): T {
++  assert.deepEqual(context, { userId: uid, sessionId: id(4) }); return result;
++}
+diff --git a/backend/test/unit/evaluation-write.test.ts b/backend/test/unit/evaluation-write.test.ts
+index d4eddbbb88ec046a9bfff2915a1c779a3d1fae27..75a15158c28a9597aa2245836584bf0491cb7993 100644
+--- a/backend/test/unit/evaluation-write.test.ts
++++ b/backend/test/unit/evaluation-write.test.ts
+@@ -1,3 +1,5 @@
++import { sessionScenario, assertSessionRefusal, assertSessionTransaction } from "./mutation-session-scenario";
++import type { MutationSession } from "../../src/auth/mutation-session";
+ import assert from "node:assert/strict";
+ import { test } from "node:test";
+ import { drizzle } from "drizzle-orm/node-postgres";
+@@ -128,3 +130,81 @@ test("E08.11 predicados decisivos usam política de leitura, relógio único e p
+   assert.match(a.sql,/f.eligible AND f.pending AND NOT f.submitted/); assert.match(b.sql,/c.allowed AND c.changed/);
+   assert.match(b.sql,/first_comment_at=COALESCE/); assert.doesNotMatch(b.sql,/SET submitted_at|submitted_at=/); assert.match(b.sql,/IS DISTINCT FROM/);
+ });
++
++// E08-EST01: a entrada HTTP não admite fallback para o contrato interno E07.
++for (const scenario of ["valid", "revoked", "expired", "foreign", "inactive", "admin", "late", "wait", "intent-wait"] as const) {
++  test(`E08-EST01 submit sessão ${scenario}`, async () => {
++    const f = fixture("submit"), auth = sessionScenario(f.service, uid, scenario);
++    if (scenario === "valid") {
++      const result = await f.service.submitAuthenticated(post, auth.context);
++      assert.equal(result.kind, "created");
++      assert.ok(auth.checks() >= 2); assertSessionTransaction(auth.queries, true);
++    } else {
++      const code = scenario === "foreign" ? "INVALID_SESSION" : scenario === "inactive" ? "ACCOUNT_DEACTIVATED"
++        : scenario === "admin" ? "ADMIN_2FA_REQUIRED" : scenario === "late" || scenario === "expired" ? "SESSION_EXPIRED" : "SESSION_REVOKED";
++      await assert.rejects(f.service.submitAuthenticated(post, auth.context), error => assertSessionRefusal(error, code));
++      assertSessionTransaction(auth.queries, false);
++      if (scenario === "late") assert.ok(auth.queries.some(q => q.includes('update "idempotency_operations"')));
++    }
++  });
++}
++for (const context of [undefined, { userId: "other", sessionId: "session" }, { userId: uid, sessionId: "" }]) {
++  test(`E08-EST01 submit recusa contexto ausente ou incompatível ${JSON.stringify(context)}`, async () => {
++    const f = fixture("submit");
++    await assert.rejects(async () => f.service.submitAuthenticated(post, context as MutationSession), error => assertSessionRefusal(error, "UNAUTHENTICATED_CONTEXT"));
++    assert.equal(f.queries.length, 0);
++  });
++}
++for (const scenario of ["valid", "revoked", "expired", "late"] as const) {
++  test(`E08-EST01 submit replay exige sessão ${scenario}`, async () => {
++    const f = fixture("submit", { intent: "replay" }), auth = sessionScenario(f.service, uid, scenario);
++    if (scenario === "valid") { assert.equal((await f.service.submitAuthenticated(post, auth.context)).kind, "replay"); assertSessionTransaction(auth.queries, true); }
++    else { await assert.rejects(f.service.submitAuthenticated(post, auth.context), error => assertSessionRefusal(error, scenario === "revoked" ? "SESSION_REVOKED" : "SESSION_EXPIRED")); assertSessionTransaction(auth.queries, false); }
++    assert.equal(auth.queries.some(q => q.includes('update "idempotency_operations"')), false);
++  });
++}
++
++// E08-EST01: a entrada HTTP não admite fallback para o contrato interno E07.
++for (const scenario of ["valid", "revoked", "expired", "foreign", "inactive", "admin", "late", "wait", "intent-wait"] as const) {
++  test(`E08-EST01 edit sessão ${scenario}`, async () => {
++    const f = fixture("edit"), auth = sessionScenario(f.service, uid, scenario);
++    if (scenario === "valid") {
++      const result = await f.service.editAuthenticated(patch, auth.context);
++      assert.equal(result.kind, "updated");
++      assert.ok(auth.checks() >= 2); assertSessionTransaction(auth.queries, true);
++    } else {
++      const code = scenario === "foreign" ? "INVALID_SESSION" : scenario === "inactive" ? "ACCOUNT_DEACTIVATED"
++        : scenario === "admin" ? "ADMIN_2FA_REQUIRED" : scenario === "late" || scenario === "expired" ? "SESSION_EXPIRED" : "SESSION_REVOKED";
++      await assert.rejects(f.service.editAuthenticated(patch, auth.context), error => assertSessionRefusal(error, code));
++      assertSessionTransaction(auth.queries, false);
++      if (scenario === "late") assert.ok(auth.queries.some(q => q.includes('update "idempotency_operations"')));
++    }
++  });
++}
++for (const context of [undefined, { userId: "other", sessionId: "session" }, { userId: uid, sessionId: "" }]) {
++  test(`E08-EST01 edit recusa contexto ausente ou incompatível ${JSON.stringify(context)}`, async () => {
++    const f = fixture("edit");
++    await assert.rejects(async () => f.service.editAuthenticated(patch, context as MutationSession), error => assertSessionRefusal(error, "UNAUTHENTICATED_CONTEXT"));
++    assert.equal(f.queries.length, 0);
++  });
++}
++for (const scenario of ["valid", "revoked", "expired", "late"] as const) {
++  test(`E08-EST01 edit replay exige sessão ${scenario}`, async () => {
++    const f = fixture("edit", { intent: "replay" }), auth = sessionScenario(f.service, uid, scenario);
++    if (scenario === "valid") { assert.equal((await f.service.editAuthenticated(patch, auth.context)).kind, "replay"); assertSessionTransaction(auth.queries, true); }
++    else { await assert.rejects(f.service.editAuthenticated(patch, auth.context), error => assertSessionRefusal(error, scenario === "revoked" ? "SESSION_REVOKED" : "SESSION_EXPIRED")); assertSessionTransaction(auth.queries, false); }
++    assert.equal(auth.queries.some(q => q.includes('update "idempotency_operations"')), false);
++  });
++}
++
++for (const intent of ["conflict", "in_progress"] as const) test(`E08-EST01 submit reserva ${intent} exige autorizacao atual`, async () => {
++  const f = fixture("submit", { intent }), auth = sessionScenario(f.service, uid, "intent-wait");
++  await assert.rejects(f.service.submitAuthenticated(post, auth.context), error => assertSessionRefusal(error, "SESSION_REVOKED"));
++  assertSessionTransaction(auth.queries, false);
++});
++
++for (const intent of ["conflict", "in_progress"] as const) test(`E08-EST01 edit reserva ${intent} exige autorizacao atual`, async () => {
++  const f = fixture("edit", { intent }), auth = sessionScenario(f.service, uid, "intent-wait");
++  await assert.rejects(f.service.editAuthenticated(patch, auth.context), error => assertSessionRefusal(error, "SESSION_REVOKED"));
++  assertSessionTransaction(auth.queries, false);
++});
+diff --git a/backend/test/unit/participant-queue-http.test.ts b/backend/test/unit/participant-queue-http.test.ts
+index 9f1fbf263a0d1ce94fd91160fb4cb32a2b2dc45e..41b96b67c762589db62662efccef7250ec0228da 100644
+--- a/backend/test/unit/participant-queue-http.test.ts
++++ b/backend/test/unit/participant-queue-http.test.ts
+@@ -1,3 +1,4 @@
++import type { MutationSession } from "../../src/auth/mutation-session";
+ import "reflect-metadata";
+ import assert from "node:assert/strict";
+ import { after, before, test } from "node:test";
+@@ -45,11 +46,11 @@ function record<T>(input: JoinExperienceQueueInput | WithdrawExperienceQueueInpu
+     if (!["unit-participant", "unit-admin"].includes(token)) throw new ProblemException({ typeSlug: "invalid-access-token", title: "Inválido", status: 401, code: "INVALID_ACCESS_TOKEN", detail: "Token inválido." });
+     return { userId, sessionId: id(5), roles: token === "unit-admin" ? ["admin"] : [] };
+   } } },
+-  { provide: QueueEntryService, useValue: { joinExperienceQueue: async (input: JoinExperienceQueueInput) => record(input, joinResult) } },
++  { provide: QueueEntryService, useValue: { joinExperienceQueueAuthenticated: async (input: JoinExperienceQueueInput, context: MutationSession) => authenticatedInput(context, record(input, joinResult)) } },
+   { provide: QueueStateService, useValue: { getParticipationQueue: async (...input: string[]) => {
+     reads.push(input); if (failure) throw failure; return queueResult;
+   } } },
+-  { provide: QueueWithdrawalService, useValue: { withdrawExperienceQueue: async (input: WithdrawExperienceQueueInput) => record(input, withdrawResult) } },
++  { provide: QueueWithdrawalService, useValue: { withdrawExperienceQueueAuthenticated: async (input: WithdrawExperienceQueueInput, context: MutationSession) => authenticatedInput(context, record(input, withdrawResult)) } },
+ ] })
+ class HttpUnitModule {}
+ let app: INestApplication;
+@@ -218,3 +219,7 @@ test("E08.2 Nest resolve controller, guard e serviços reais sob tsx sem conecta
+     assert.equal(real.get<Pool>(POSTGRES_POOL).totalCount, 0);
+   } finally { await real.close(); }
+ });
++
++function authenticatedInput<T>(context: MutationSession, result: T): T {
++  assert.deepEqual(context, { userId: userId, sessionId: id(5) }); return result;
++}
+diff --git a/backend/test/unit/participation-lifecycle-http.test.ts b/backend/test/unit/participation-lifecycle-http.test.ts
+index aee4e25b0d91c9293ba589ea7dba92f98ab9d691..b17eb86b539dc889819104d3e4de636d15d56b5f 100644
+--- a/backend/test/unit/participation-lifecycle-http.test.ts
++++ b/backend/test/unit/participation-lifecycle-http.test.ts
+@@ -1,3 +1,4 @@
++import type { MutationSession } from "../../src/auth/mutation-session";
+ import "reflect-metadata";
+ import assert from "node:assert/strict";
+ import { after, before, test } from "node:test";
+@@ -28,7 +29,7 @@ const calls:Array<{mode:string;input:unknown}>=[];let result:LifecycleResult={ki
+     return {userId:uid,sessionId:id(4),roles:token==="participant"?[]:[token]};
+   }}},
+   {provide:ParticipationQueryService,useValue:{current:(userId:string)=>{calls.push({mode:"current",input:userId});return found?value:null;},byId:(userId:string,participationId:string)=>{calls.push({mode:"byId",input:{userId,participationId}});return found?value:null;}}},
+-  {provide:ParticipationLifecycleService,useValue:{cancel:(input:unknown)=>{calls.push({mode:"cancel",input});if(failure)throw Error("PARTICIPATION_LIFECYCLE_INTERNAL_ERROR");return result;},finish:(input:unknown)=>{calls.push({mode:"finish",input});if(failure)throw Error("PARTICIPATION_LIFECYCLE_INTERNAL_ERROR");return result;}}},
++  {provide:ParticipationLifecycleService,useValue:{cancelAuthenticated:(input:unknown, context: MutationSession) => { authenticatedInput(context, undefined); calls.push({mode:"cancel",input});if(failure)throw Error("PARTICIPATION_LIFECYCLE_INTERNAL_ERROR");return result;},finishAuthenticated:(input:unknown, context: MutationSession) => { authenticatedInput(context, undefined); calls.push({mode:"finish",input});if(failure)throw Error("PARTICIPATION_LIFECYCLE_INTERNAL_ERROR");return result;}}},
+   {provide:EvaluationReadService,useValue:{getHistory:()=>({items:[],nextCursor:null}),getReturnState:()=>({recentFinalization:null,pendingEvaluationParticipationIds:[]}),getPending:()=>({items:[]})}},
+ ]})class HttpModule{}
+ let app:INestApplication;
+@@ -91,3 +92,7 @@ test("E08.12 DI Nest resolve serviços reais e reutiliza TTL explícito sem cone
+     assert.equal(Reflect.get(writes,"database"),real.get(DRIZZLE_DATABASE));assert.equal(Reflect.get(queries,"database"),real.get(DRIZZLE_DATABASE));assert.equal(real.get<Pool>(POSTGRES_POOL).totalCount,0);
+   }finally{await real.close();}
+ });
++
++function authenticatedInput<T>(context: MutationSession, result: T): T {
++  assert.deepEqual(context, { userId: uid, sessionId: id(4) }); return result;
++}
+diff --git a/backend/test/unit/participation-lifecycle.test.ts b/backend/test/unit/participation-lifecycle.test.ts
+index 14ea90e07a95863eadba1166df0fd169582ade74..e2e9e2af90ba873615a7824bc4e9fc8893c272e1 100644
+--- a/backend/test/unit/participation-lifecycle.test.ts
++++ b/backend/test/unit/participation-lifecycle.test.ts
+@@ -1,3 +1,5 @@
++import { sessionScenario, assertSessionRefusal, assertSessionTransaction } from "./mutation-session-scenario";
++import type { MutationSession } from "../../src/auth/mutation-session";
+ import assert from "node:assert/strict";
+ import { test } from "node:test";
+ import { drizzle } from "drizzle-orm/node-postgres";
+@@ -117,3 +119,81 @@ test("E08.12 consulta por ID não seleciona terceiros e ausência é null",async
+   const queries:Array<{text:string;params:unknown[]}>=[];const db=drizzle({async query(config:{text:string},params:unknown[]){queries.push({text:config.text,params});return {rows:[]};}}as unknown as Client,{schema});
+   assert.equal(await new ParticipationQueryService(db).byId(uid,pid),null);assert.ok(queries[1].params.includes(uid)&&queries[1].params.includes(pid));
+ });
++
++// E08-EST01: a entrada HTTP não admite fallback para o contrato interno E07.
++for (const scenario of ["valid", "revoked", "expired", "foreign", "inactive", "admin", "late", "wait", "intent-wait"] as const) {
++  test(`E08-EST01 cancel sessão ${scenario}`, async () => {
++    const f = fixture("cancel"), auth = sessionScenario(f.service, uid, scenario);
++    if (scenario === "valid") {
++      const result = await f.service.cancelAuthenticated(input, auth.context);
++      assert.equal(result.kind, "changed");
++      assert.ok(auth.checks() >= 2); assertSessionTransaction(auth.queries, true);
++    } else {
++      const code = scenario === "foreign" ? "INVALID_SESSION" : scenario === "inactive" ? "ACCOUNT_DEACTIVATED"
++        : scenario === "admin" ? "ADMIN_2FA_REQUIRED" : scenario === "late" || scenario === "expired" ? "SESSION_EXPIRED" : "SESSION_REVOKED";
++      await assert.rejects(f.service.cancelAuthenticated(input, auth.context), error => assertSessionRefusal(error, code));
++      assertSessionTransaction(auth.queries, false);
++      if (scenario === "late") assert.ok(auth.queries.some(q => q.includes('update "idempotency_operations"')));
++    }
++  });
++}
++for (const context of [undefined, { userId: "other", sessionId: "session" }, { userId: uid, sessionId: "" }]) {
++  test(`E08-EST01 cancel recusa contexto ausente ou incompatível ${JSON.stringify(context)}`, async () => {
++    const f = fixture("cancel");
++    await assert.rejects(async () => f.service.cancelAuthenticated(input, context as MutationSession), error => assertSessionRefusal(error, "UNAUTHENTICATED_CONTEXT"));
++    assert.equal(f.queries.length, 0);
++  });
++}
++for (const scenario of ["valid", "revoked", "expired", "late"] as const) {
++  test(`E08-EST01 cancel replay exige sessão ${scenario}`, async () => {
++    const f = fixture("cancel", { intent: "replay" }), auth = sessionScenario(f.service, uid, scenario);
++    if (scenario === "valid") { assert.equal((await f.service.cancelAuthenticated(input, auth.context)).kind, "replay"); assertSessionTransaction(auth.queries, true); }
++    else { await assert.rejects(f.service.cancelAuthenticated(input, auth.context), error => assertSessionRefusal(error, scenario === "revoked" ? "SESSION_REVOKED" : "SESSION_EXPIRED")); assertSessionTransaction(auth.queries, false); }
++    assert.equal(auth.queries.some(q => q.includes('update "idempotency_operations"')), false);
++  });
++}
++
++// E08-EST01: a entrada HTTP não admite fallback para o contrato interno E07.
++for (const scenario of ["valid", "revoked", "expired", "foreign", "inactive", "admin", "late", "wait", "intent-wait"] as const) {
++  test(`E08-EST01 finish sessão ${scenario}`, async () => {
++    const f = fixture("finish"), auth = sessionScenario(f.service, uid, scenario);
++    if (scenario === "valid") {
++      const result = await f.service.finishAuthenticated(input, auth.context);
++      assert.equal(result.kind, "changed");
++      assert.ok(auth.checks() >= 2); assertSessionTransaction(auth.queries, true);
++    } else {
++      const code = scenario === "foreign" ? "INVALID_SESSION" : scenario === "inactive" ? "ACCOUNT_DEACTIVATED"
++        : scenario === "admin" ? "ADMIN_2FA_REQUIRED" : scenario === "late" || scenario === "expired" ? "SESSION_EXPIRED" : "SESSION_REVOKED";
++      await assert.rejects(f.service.finishAuthenticated(input, auth.context), error => assertSessionRefusal(error, code));
++      assertSessionTransaction(auth.queries, false);
++      if (scenario === "late") assert.ok(auth.queries.some(q => q.includes('update "idempotency_operations"')));
++    }
++  });
++}
++for (const context of [undefined, { userId: "other", sessionId: "session" }, { userId: uid, sessionId: "" }]) {
++  test(`E08-EST01 finish recusa contexto ausente ou incompatível ${JSON.stringify(context)}`, async () => {
++    const f = fixture("finish");
++    await assert.rejects(async () => f.service.finishAuthenticated(input, context as MutationSession), error => assertSessionRefusal(error, "UNAUTHENTICATED_CONTEXT"));
++    assert.equal(f.queries.length, 0);
++  });
++}
++for (const scenario of ["valid", "revoked", "expired", "late"] as const) {
++  test(`E08-EST01 finish replay exige sessão ${scenario}`, async () => {
++    const f = fixture("finish", { intent: "replay" }), auth = sessionScenario(f.service, uid, scenario);
++    if (scenario === "valid") { assert.equal((await f.service.finishAuthenticated(input, auth.context)).kind, "replay"); assertSessionTransaction(auth.queries, true); }
++    else { await assert.rejects(f.service.finishAuthenticated(input, auth.context), error => assertSessionRefusal(error, scenario === "revoked" ? "SESSION_REVOKED" : "SESSION_EXPIRED")); assertSessionTransaction(auth.queries, false); }
++    assert.equal(auth.queries.some(q => q.includes('update "idempotency_operations"')), false);
++  });
++}
++
++for (const intent of ["conflict", "in_progress"] as const) test(`E08-EST01 cancel reserva ${intent} exige autorizacao atual`, async () => {
++  const f = fixture("cancel", { intent }), auth = sessionScenario(f.service, uid, "intent-wait");
++  await assert.rejects(f.service.cancelAuthenticated(input, auth.context), error => assertSessionRefusal(error, "SESSION_REVOKED"));
++  assertSessionTransaction(auth.queries, false);
++});
++
++for (const intent of ["conflict", "in_progress"] as const) test(`E08-EST01 finish reserva ${intent} exige autorizacao atual`, async () => {
++  const f = fixture("finish", { intent }), auth = sessionScenario(f.service, uid, "intent-wait");
++  await assert.rejects(f.service.finishAuthenticated(input, auth.context), error => assertSessionRefusal(error, "SESSION_REVOKED"));
++  assertSessionTransaction(auth.queries, false);
++});
+diff --git a/backend/test/unit/queue-entry.test.ts b/backend/test/unit/queue-entry.test.ts
+index 3d9906e873fe6125a1e4ad411eaa7bbeb4047218..06093e32cdcf87f74643ccf070d3e17397625c1c 100644
+--- a/backend/test/unit/queue-entry.test.ts
++++ b/backend/test/unit/queue-entry.test.ts
+@@ -1,3 +1,5 @@
++import { sessionScenario, assertSessionRefusal, assertSessionTransaction } from "./mutation-session-scenario";
++import type { MutationSession } from "../../src/auth/mutation-session";
+ import assert from "node:assert/strict";
+ import { test } from "node:test";
+ import { drizzle } from "drizzle-orm/node-postgres";
+@@ -163,3 +165,36 @@ test("E07.1 rejeita chave/expiração inválidas antes de abrir transação", as
+   }
+   assert.equal(queries.length, 0);
+ });
++
++// E08-EST01: a entrada HTTP não admite fallback para o contrato interno E07.
++for (const scenario of ["valid", "revoked", "expired", "foreign", "inactive", "admin", "late", "wait", "intent-wait"] as const) {
++  test(`E08-EST01 joinExperienceQueue sessão ${scenario}`, async () => {
++    const f = fixture(), auth = sessionScenario(f.service, input.userId, scenario);
++    if (scenario === "valid") {
++      const result = await f.service.joinExperienceQueueAuthenticated(input, auth.context);
++      assert.equal(result.kind, "created");
++      assert.ok(auth.checks() >= 2); assertSessionTransaction(auth.queries, true);
++    } else {
++      const code = scenario === "foreign" ? "INVALID_SESSION" : scenario === "inactive" ? "ACCOUNT_DEACTIVATED"
++        : scenario === "admin" ? "ADMIN_2FA_REQUIRED" : scenario === "late" || scenario === "expired" ? "SESSION_EXPIRED" : "SESSION_REVOKED";
++      await assert.rejects(f.service.joinExperienceQueueAuthenticated(input, auth.context), error => assertSessionRefusal(error, code));
++      assertSessionTransaction(auth.queries, false);
++      if (scenario === "late") assert.ok(auth.queries.some(q => q.includes('update "idempotency_operations"')));
++    }
++  });
++}
++for (const context of [undefined, { userId: "other", sessionId: "session" }, { userId: input.userId, sessionId: "" }]) {
++  test(`E08-EST01 joinExperienceQueue recusa contexto ausente ou incompatível ${JSON.stringify(context)}`, async () => {
++    const f = fixture();
++    await assert.rejects(async () => f.service.joinExperienceQueueAuthenticated(input, context as MutationSession), error => assertSessionRefusal(error, "UNAUTHENTICATED_CONTEXT"));
++    assert.equal(f.queries.length, 0);
++  });
++}
++for (const scenario of ["valid", "revoked", "expired", "late"] as const) {
++  test(`E08-EST01 joinExperienceQueue replay exige sessão ${scenario}`, async () => {
++    const f = fixture({ reservation: "replay" }), auth = sessionScenario(f.service, input.userId, scenario);
++    if (scenario === "valid") { assert.equal((await f.service.joinExperienceQueueAuthenticated(input, auth.context)).kind, "replay"); assertSessionTransaction(auth.queries, true); }
++    else { await assert.rejects(f.service.joinExperienceQueueAuthenticated(input, auth.context), error => assertSessionRefusal(error, scenario === "revoked" ? "SESSION_REVOKED" : "SESSION_EXPIRED")); assertSessionTransaction(auth.queries, false); }
++    assert.equal(auth.queries.some(q => q.includes('update "idempotency_operations"')), false);
++  });
++}
+diff --git a/backend/test/unit/queue-withdrawal.test.ts b/backend/test/unit/queue-withdrawal.test.ts
+index c138e42a28b1fad52ad577342d84b65abc2077db..f2e21c63e03366ebd7d5da4450382eebb2cfe747 100644
+--- a/backend/test/unit/queue-withdrawal.test.ts
++++ b/backend/test/unit/queue-withdrawal.test.ts
+@@ -1,3 +1,5 @@
++import { sessionScenario, assertSessionRefusal, assertSessionTransaction } from "./mutation-session-scenario";
++import type { MutationSession } from "../../src/auth/mutation-session";
+ import assert from "node:assert/strict";
+ import { test } from "node:test";
+ import { drizzle } from "drizzle-orm/node-postgres";
+@@ -202,3 +204,36 @@ test("E07.3 input inválido falha antes da transação e respostas não expõem
+   assert.deepEqual(Object.keys(result).sort(), ["closedAt", "experienceId", "kind", "participationId", "queueEntryId", "serviceSession", "status"]);
+   assert.equal(QUEUE_WITHDRAWAL_OPERATION, "withdraw_experience_queue");
+ });
++
++// E08-EST01: a entrada HTTP não admite fallback para o contrato interno E07.
++for (const scenario of ["valid", "revoked", "expired", "foreign", "inactive", "admin", "late", "wait", "intent-wait"] as const) {
++  test(`E08-EST01 withdrawExperienceQueue sessão ${scenario}`, async () => {
++    const f = fixture(), auth = sessionScenario(f.service, input.userId, scenario);
++    if (scenario === "valid") {
++      const result = await f.service.withdrawExperienceQueueAuthenticated(input, auth.context);
++      assert.equal(result.kind, "withdrawn");
++      assert.ok(auth.checks() >= 2); assertSessionTransaction(auth.queries, true);
++    } else {
++      const code = scenario === "foreign" ? "INVALID_SESSION" : scenario === "inactive" ? "ACCOUNT_DEACTIVATED"
++        : scenario === "admin" ? "ADMIN_2FA_REQUIRED" : scenario === "late" || scenario === "expired" ? "SESSION_EXPIRED" : "SESSION_REVOKED";
++      await assert.rejects(f.service.withdrawExperienceQueueAuthenticated(input, auth.context), error => assertSessionRefusal(error, code));
++      assertSessionTransaction(auth.queries, false);
++      if (scenario === "late") assert.ok(auth.queries.some(q => q.includes('update "idempotency_operations"')));
++    }
++  });
++}
++for (const context of [undefined, { userId: "other", sessionId: "session" }, { userId: input.userId, sessionId: "" }]) {
++  test(`E08-EST01 withdrawExperienceQueue recusa contexto ausente ou incompatível ${JSON.stringify(context)}`, async () => {
++    const f = fixture();
++    await assert.rejects(async () => f.service.withdrawExperienceQueueAuthenticated(input, context as MutationSession), error => assertSessionRefusal(error, "UNAUTHENTICATED_CONTEXT"));
++    assert.equal(f.queries.length, 0);
++  });
++}
++for (const scenario of ["valid", "revoked", "expired", "late"] as const) {
++  test(`E08-EST01 withdrawExperienceQueue replay exige sessão ${scenario}`, async () => {
++    const f = fixture({ reservation: "replay" }), auth = sessionScenario(f.service, input.userId, scenario);
++    if (scenario === "valid") { assert.equal((await f.service.withdrawExperienceQueueAuthenticated(input, auth.context)).kind, "replay"); assertSessionTransaction(auth.queries, true); }
++    else { await assert.rejects(f.service.withdrawExperienceQueueAuthenticated(input, auth.context), error => assertSessionRefusal(error, scenario === "revoked" ? "SESSION_REVOKED" : "SESSION_EXPIRED")); assertSessionTransaction(auth.queries, false); }
++    assert.equal(auth.queries.some(q => q.includes('update "idempotency_operations"')), false);
++  });
++}
+diff --git a/backend/test/unit/staff-http.test.ts b/backend/test/unit/staff-http.test.ts
+index 1f8116a5f4b9aff4392efc50afddf70906efc7bb..6f0a338253a9ab066a5a675a968cb9626377bd98 100644
+--- a/backend/test/unit/staff-http.test.ts
++++ b/backend/test/unit/staff-http.test.ts
+@@ -1,3 +1,4 @@
++import type { MutationSession } from "../../src/auth/mutation-session";
+ import "reflect-metadata";
+ import assert from "node:assert/strict";
+ import { after, before, test } from "node:test";
+@@ -42,9 +43,9 @@ function record<T>(input: CallNextInput | CompleteServiceInput | AbsentServiceIn
+     if (token !== "unit-staff") throw new ProblemException({ typeSlug: "invalid-access-token", title: "Inválido", status: 401, code: "INVALID_ACCESS_TOKEN", detail: "Token inválido." });
+     return { userId: staffId, sessionId: id(8) };
+   } } },
+-  { provide: CallNextService, useValue: { callNext: async (input: CallNextInput) => record(input, callResult) } },
+-  { provide: CompleteService, useValue: { complete: async (input: CompleteServiceInput) => record(input, completeResult) } },
+-  { provide: AbsentService, useValue: { absent: async (input: AbsentServiceInput) => record(input, absentResult) } },
++  { provide: CallNextService, useValue: { callNextAuthenticated: async (input: CallNextInput, context: MutationSession) => authenticatedInput(context, record(input, callResult)) } },
++  { provide: CompleteService, useValue: { completeAuthenticated: async (input: CompleteServiceInput, context: MutationSession) => authenticatedInput(context, record(input, completeResult)) } },
++  { provide: AbsentService, useValue: { absentAuthenticated: async (input: AbsentServiceInput, context: MutationSession) => authenticatedInput(context, record(input, absentResult)) } },
+ ] })
+ class HttpUnitModule {}
+ let app: INestApplication;
+@@ -151,3 +152,7 @@ test("E08.1 TTL exige inteiro positivo explícito, sem fallback e sem aceitar ov
+ test("E08.1 header com controles não chega aos serviços internos", () => {
+   assert.throws(() => validateStaffRequest({}, { headers: { "content-type": "application/json", "idempotency-key": "a\tb" }, rawHeaders: ["Idempotency-Key", "a\tb"] }), ProblemException);
+ });
++
++function authenticatedInput<T>(context: MutationSession, result: T): T {
++  assert.deepEqual(context, { userId: staffId, sessionId: id(8) }); return result;
++}
+diff --git a/backend/src/auth/mutation-session.ts b/backend/src/auth/mutation-session.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..ccca647e0c14a05f952482be555b29d892e850f5
+--- /dev/null
++++ b/backend/src/auth/mutation-session.ts
+@@ -0,0 +1,65 @@
++import { sql } from "drizzle-orm";
++import type { NodePgDatabase } from "drizzle-orm/node-postgres";
++import type { DatabaseTransactionExecutor } from "../database/database-executor";
++import type * as schema from "../database/schema";
++import { ProblemException } from "../common/errors/problem.exception";
++import { AUTHENTICATED_PRINCIPAL_KEY, type AuthenticatedRequest } from "./session-auth.guard";
++
++export interface MutationSession { userId: string; sessionId: string; staffEventId?: string }
++export class MutationSessionError extends ProblemException {}
++function reject(code: string, detail: string): never {
++  throw new MutationSessionError({ status: 401, code, typeSlug: code.toLowerCase().replaceAll("_", "-"),
++    title: "Autenticação obrigatória", detail });
++}
++export function assertMutationSession(context: MutationSession, userId: string): void {
++  if (!context?.userId || !context.sessionId || context.userId !== userId) {
++    reject("UNAUTHENTICATED_CONTEXT", "Contexto de sessão autenticada não encontrado na requisição.");
++  }
++}
++/** Somente o principal instalado pelo guard; nunca headers, query, body ou request.user. */
++export function mutationSession(request: AuthenticatedRequest, userId: string): MutationSession {
++  const principal = request[AUTHENTICATED_PRINCIPAL_KEY];
++  const context = { userId: principal?.userId ?? "", sessionId: principal?.sessionId ?? "" };
++  assertMutationSession(context, userId);
++  return context;
++}
++
++/** Recursos de domínio / reserva existentes precedem conta -> concessões -> sessão.
++ * SELECT de tempo separado: uma expressão no SELECT FOR SHARE pode preceder a espera.
++ */
++export async function revalidateMutationSession(tx: DatabaseTransactionExecutor, context: MutationSession): Promise<void> {
++  assertMutationSession(context, context?.userId);
++  await tx.execute(sql`SELECT id FROM users WHERE id=${context.userId}::uuid FOR SHARE`);
++  await tx.execute(sql`SELECT id FROM user_roles WHERE user_id=${context.userId}::uuid AND revoked_at IS NULL ORDER BY id FOR SHARE`);
++  await tx.execute(sql`SELECT id FROM sessions WHERE id=${context.sessionId}::uuid AND user_id=${context.userId}::uuid FOR SHARE`);
++  const row = (await tx.execute<{ revoked: boolean; expired: boolean; active: boolean; secondFactor: boolean; admin: boolean; staff: boolean }>(sql`
++    SELECT s.revoked_at IS NOT NULL AS revoked, s.expires_at <= clock_timestamp() AS expired,
++      u.is_active AS active, s.admin_2fa_verified_at IS NOT NULL AS "secondFactor",
++      EXISTS(SELECT 1 FROM user_roles r WHERE r.user_id=u.id AND r.role='admin' AND r.event_id IS NULL AND r.revoked_at IS NULL) AS admin,
++      (u.email_verified_at IS NOT NULL AND EXISTS(SELECT 1 FROM user_roles r WHERE r.user_id=u.id AND r.role='staff'
++        AND r.event_id=${context.staffEventId ?? null}::uuid AND r.revoked_at IS NULL)) AS staff
++    FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id=${context.sessionId}::uuid AND s.user_id=${context.userId}::uuid
++  `)).rows[0];
++  if (!row) reject("INVALID_SESSION", "A sessão associada ao token não foi encontrada.");
++  if (row.revoked) reject("SESSION_REVOKED", "Esta sessão foi revogada. Faça login novamente.");
++  if (row.expired) reject("SESSION_EXPIRED", "O prazo da sessão expirou. Faça login novamente.");
++  if (!row.active) reject("ACCOUNT_DEACTIVATED", "Esta conta encontra-se desativada.");
++  if (row.admin && !row.secondFactor) reject("ADMIN_2FA_REQUIRED", "Sessão administrativa exige verificação de segundo fator (TOTP).");
++  if (context.staffEventId && !row.staff) {
++    throw new ProblemException({ status: 403, code: "STAFF_EVENT_FORBIDDEN", typeSlug: "staff-event-forbidden",
++      title: "Acesso negado", detail: "Staff autorizado para este evento é obrigatório." });
++  }
++}
++
++/** null é reservado aos contratos internos existentes, nunca aos métodos HTTP autenticados.
++ * A última consulta precede o retorno do callback/COMMIT. Expiração posterior a essa
++ * consulta não é observável atomicamente com COMMIT; nenhum prazo de tolerância é criado.
++ */
++export function mutationTransaction<T>(database: NodePgDatabase<typeof schema>, context: MutationSession | null,
++  operation: (tx: DatabaseTransactionExecutor) => Promise<T>, config: { isolationLevel: "read committed" }): Promise<T> {
++  return database.transaction(async tx => {
++    const result = await operation(tx);
++    if (context !== null) await revalidateMutationSession(tx, context);
++    return result;
++  }, config);
++}
+diff --git a/backend/test/integration/mutation-session.integration.test.ts b/backend/test/integration/mutation-session.integration.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..cb13a67cc4bbd82ad06a2eecf5099076ce70fceb
+--- /dev/null
++++ b/backend/test/integration/mutation-session.integration.test.ts
+@@ -0,0 +1,181 @@
++import assert from "node:assert/strict";
++import { randomUUID } from "node:crypto";
++import { after, before, test } from "node:test";
++import { sql } from "drizzle-orm";
++import { PgDialect } from "drizzle-orm/pg-core";
++import supertest from "supertest";
++import { setup, cleanup, app, pool, database, context, person, queued, called, state, blocked, type Context } from "./event-closure-fixture";
++import { participant, service, evaluation, problem, type Actor } from "./evaluation-read-fixture";
++
++// A guarda do fixture exige as três URLs locais explícitas antes de importar AppModule.
++before(async () => { process.env.EVALUATION_IDEMPOTENCY_TTL_SECONDS = "60"; await setup(); });
++after(cleanup);
++const operations = ["call-next", "complete", "absent", "join", "withdraw", "submit", "edit", "cancel", "finish"] as const;
++type Operation = typeof operations[number];
++interface Fixture { c: Context; actor: Actor; participationId: string; path: string; body: object; status: number; operation: string; edit: boolean }
++const namespaces: Record<Operation, string> = { "call-next": "call_next", complete: "complete_service_session", absent: "absent_service_session",
++  join: "join_experience_queue", withdraw: "withdraw_experience_queue", submit: "submit_evaluation", edit: "edit_evaluation",
++  cancel: "cancel_external_participation", finish: "finish_arena_participation" };
++async function fixture(operation: Operation): Promise<Fixture> {
++  const c = await context();
++  let actor: Actor, participationId: string, path: string, body: object = {};
++  if (operation === "call-next") {
++    const a = await queued(c); actor = c.staff; participationId = a.p.participationId;
++    path = `/staff/events/${c.eventId}/experiences/${c.experienceId}/stations/${c.stationId}/call-next`;
++  } else if (operation === "complete" || operation === "absent") {
++    const a = await called(c); actor = c.staff; participationId = a.p.participationId;
++    path = `/staff/events/${c.eventId}/service-sessions/${a.session}/${operation}`;
++  } else if (operation === "submit" || operation === "edit") {
++    const p = await participant(c); await service(c, p.participationId); actor = p; participationId = p.participationId;
++    path = operation === "submit" ? `/participations/${p.participationId}/evaluation` : `/evaluations/${await evaluation(p.participationId)}`;
++    body = { rating: 5 };
++  } else {
++    const a = operation === "withdraw" || operation === "finish" ? await called(c) : null;
++    const p = a?.p ?? await person(c, operation === "cancel" ? "waiting" : "active");
++    actor = p; participationId = p.participationId;
++    path = `/participations/${participationId}/${operation === "join" ? "queue-entries" : operation === "withdraw" ? `queue-entries/${a!.entry}/withdraw` : operation}`;
++    if (operation === "join") body = { experienceId: c.experienceId };
++  }
++  return { c, actor, participationId, path, body, status: operation === "call-next" || operation === "join" || operation === "submit" ? 201 : 200,
++    operation: namespaces[operation], edit: operation === "edit" };
++}
++const request = (f: Fixture, key: string) => (f.edit ? supertest(app.getHttpServer()).patch(`/api/v1${f.path}`)
++  : supertest(app.getHttpServer()).post(`/api/v1${f.path}`)).set("Authorization", `Bearer ${f.actor.token}`).set("Idempotency-Key", key).send(f.body);
++const logout = (actor: Actor) => supertest(app.getHttpServer()).post("/api/v1/auth/logout").set("Authorization", `Bearer ${actor.token}`).send({});
++async function snapshot(f: Fixture) {
++  return { domain: await state(f.c), extra: (await pool.query(`SELECT jsonb_build_object(
++    'evaluations',(SELECT jsonb_agg(to_jsonb(v) ORDER BY v.id) FROM evaluations v JOIN participations p ON p.id=v.participation_id WHERE p.event_id=$1),
++    'intents',(SELECT jsonb_agg(to_jsonb(i) ORDER BY i.id) FROM idempotency_operations i WHERE i.actor_user_id=$2)) AS value`,
++  [f.c.eventId, f.actor.userId])).rows[0].value };
++}
++async function expiry(actor: Actor) {
++  return (await pool.query(`UPDATE sessions SET expires_at=clock_timestamp()+interval '4 seconds' WHERE id=$1
++    RETURNING to_char(expires_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`, [actor.sessionId])).rows[0].at as string;
++}
++async function expired(at: string, blocker: number) {
++  const until = Date.now() + 10000;
++  while (Date.now() < until) {
++    if ((await pool.query("SELECT clock_timestamp()>=$1::timestamptz AS expired", [at])).rows[0].expired) { await blocked(blocker); return; }
++    await new Promise(done => setTimeout(done, 25));
++  }
++  throw Error("O relógio PostgreSQL não atingiu a expiração.");
++}
++async function waiting(f: Fixture, operation: Operation, key: string, action: (pid: number) => Promise<void>) {
++  const client = await pool.connect(); let pending: Promise<supertest.Response> | undefined;
++  try {
++    await client.query("BEGIN");
++    if (operation === "submit" || operation === "edit") await client.query("SELECT id FROM participations WHERE id=$1 FOR UPDATE", [f.participationId]);
++    else await client.query("SELECT id FROM events WHERE id=$1 FOR UPDATE", [f.c.eventId]);
++    const pid = (await client.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
++    pending = Promise.resolve(request(f, key)); pending.catch(() => undefined);
++    await blocked(pid); await action(pid); await client.query("COMMIT"); return await pending;
++  } finally { await client.query("ROLLBACK"); await Promise.allSettled([pending]); client.release(); }
++}
++async function revoke(actor: Actor) {
++  // Revogador SQL concorrente real. Diferente de logout: não toma users FOR UPDATE.
++  await pool.query("UPDATE sessions SET revoked_at=clock_timestamp(),revocation_reason='est01_test' WHERE id=$1", [actor.sessionId]);
++}
++for (const operation of operations) {
++  for (const invalidation of ["inactive", "second-factor"] as const) {
++    test(`E08-EST01 PostgreSQL ${operation} revalida ${invalidation} após espera`, async () => {
++      const f = await fixture(operation);
++      if (invalidation === "second-factor") {
++        await pool.query("INSERT INTO user_roles(id,user_id,role,granted_at) VALUES($1,$2,'admin',clock_timestamp())", [randomUUID(), f.actor.userId]);
++        await pool.query("UPDATE sessions SET admin_2fa_verified_at=clock_timestamp() WHERE id=$1", [f.actor.sessionId]);
++      }
++      const before = await snapshot(f);
++      const r = await waiting(f, operation, randomUUID(), async () => {
++        if (invalidation === "inactive") await pool.query("UPDATE users SET is_active=false WHERE id=$1", [f.actor.userId]);
++        else await pool.query("UPDATE sessions SET admin_2fa_verified_at=NULL WHERE id=$1", [f.actor.sessionId]);
++      });
++      problem(r, 401, invalidation === "inactive" ? "ACCOUNT_DEACTIVATED" : "ADMIN_2FA_REQUIRED");
++      assert.deepEqual(await snapshot(f), before);
++    });
++  }
++  test(`E08-EST01 PostgreSQL ${operation} sucesso e replay válidos preservam contratos`, async () => {
++    const f = await fixture(operation), key = randomUUID(), a = await request(f, key);
++    assert.equal(a.status, f.status, JSON.stringify(a.body)); const before = await snapshot(f), b = await request(f, key);
++    assert.equal(b.status, f.status, JSON.stringify(b.body)); assert.deepEqual(b.body, a.body); assert.deepEqual(await snapshot(f), before);
++  });
++  for (const invalidation of ["revoke", "expire"] as const) {
++    test(`E08-EST01 PostgreSQL ${operation} ${invalidation} durante lock de domínio recusa sem efeitos`, async () => {
++      const f = await fixture(operation), before = await snapshot(f), at = invalidation === "expire" ? await expiry(f.actor) : null;
++      const r = await waiting(f, operation, randomUUID(), async pid => { if (at) await expired(at, pid); else await revoke(f.actor); });
++      problem(r, 401, at ? "SESSION_EXPIRED" : "SESSION_REVOKED"); assert.deepEqual(await snapshot(f), before);
++    });
++    test(`E08-EST01 PostgreSQL ${operation} replay com ${invalidation} durante lock não devolve histórico`, async () => {
++      const f = await fixture(operation), key = randomUUID(); assert.equal((await request(f, key)).status, f.status);
++      const before = await snapshot(f), at = invalidation === "expire" ? await expiry(f.actor) : null;
++      const r = await waiting(f, operation, key, async pid => { if (at) await expired(at, pid); else await revoke(f.actor); });
++      problem(r, 401, at ? "SESSION_EXPIRED" : "SESSION_REVOKED"); assert.deepEqual(await snapshot(f), before);
++    });
++  }
++  test(`E08-EST01 PostgreSQL ${operation} expiração na reserva idempotente não consome intenção`, async () => {
++    const f = await fixture(operation), key = randomUUID(), before = await snapshot(f), client = await pool.connect();
++    let pending: Promise<supertest.Response> | undefined;
++    try {
++      await client.query("BEGIN");
++      await client.query(`INSERT INTO idempotency_operations(id,actor_user_id,operation,idempotency_key,request_hash,status,created_at,expires_at)
++        VALUES($1,$2,$3,$4,$5,'in_progress',clock_timestamp(),clock_timestamp()+interval '1 hour')`, [randomUUID(), f.actor.userId, f.operation, key, "0".repeat(64)]);
++      const pid = (await client.query("SELECT pg_backend_pid() AS pid")).rows[0].pid, at = await expiry(f.actor);
++      pending = Promise.resolve(request(f, key)); pending.catch(() => undefined); await blocked(pid); await expired(at, pid);
++      await client.query("ROLLBACK"); problem(await pending, 401, "SESSION_EXPIRED"); assert.deepEqual(await snapshot(f), before);
++      await pool.query("UPDATE sessions SET expires_at=clock_timestamp()+interval '1 hour' WHERE id=$1", [f.actor.sessionId]);
++      assert.equal((await request(f, key)).status, f.status, "A tentativa recusada não pode inutilizar a chave.");
++    } finally { await client.query("ROLLBACK"); await Promise.allSettled([pending]); client.release(); }
++  });
++  test(`E08-EST01 PostgreSQL ${operation} mutação protegida confirma antes do logout concorrente`, async () => {
++    const f = await fixture(operation), original = database.transaction.bind(database) as typeof database.transaction;
++    let reached!: (pid: number) => void, release!: () => void;
++    const ready = new Promise<number>(yes => { reached = yes; }), gate = new Promise<void>(yes => { release = yes; });
++    let a: Promise<supertest.Response> | undefined, b: Promise<supertest.Response> | undefined;
++    database.transaction = (callback, config) => original(async tx => { const result = await callback(tx);
++      reached((await tx.execute<{ pid: number }>(sql`SELECT pg_backend_pid() AS pid`)).rows[0].pid); await gate; return result; }, config);
++    try {
++      a = Promise.resolve(request(f, randomUUID())); a.catch(() => undefined);
++      const pid = await Promise.race([ready, a.then(() => { throw Error("Transação não retida."); })]);
++      database.transaction = original; b = Promise.resolve(logout(f.actor)); b.catch(() => undefined); await blocked(pid); release();
++      assert.equal((await a).status, f.status); assert.equal((await b).status, 200);
++      problem(await request(f, randomUUID()), 401, "SESSION_REVOKED");
++    } finally { database.transaction = original; release(); await Promise.allSettled([a, b]); }
++  });
++  test(`E08-EST01 PostgreSQL ${operation} expiração após conclusão da intenção faz rollback integral`, async () => {
++    const f = await fixture(operation), before = await snapshot(f), original = database.transaction.bind(database) as typeof database.transaction;
++    const client = await pool.connect(), dialect = new PgDialect(), advisory = 8081501;
++    let pending: Promise<supertest.Response> | undefined;
++    try {
++      await client.query("BEGIN"); await client.query("SELECT pg_advisory_xact_lock($1)", [advisory]);
++      const pid = (await client.query("SELECT pg_backend_pid() AS pid")).rows[0].pid, at = await expiry(f.actor);
++      // Não simula resultados: todas as consultas/escritas continuam no PostgreSQL real.
++      // A segunda aquisição da conta inicia a revalidação final, após concluir a intenção.
++      database.transaction = (callback, config) => original(async tx => {
++        const execute = tx.execute.bind(tx); let accountChecks = 0;
++        tx.execute = (async (...args: Parameters<typeof tx.execute>) => {
++          const query = args[0], text = typeof query === "string" ? query : dialect.sqlToQuery(query.getSQL()).sql;
++          if (text.startsWith("SELECT id FROM users WHERE") && ++accountChecks === 2) await execute(sql`SELECT pg_advisory_xact_lock(${advisory})`);
++          return execute(...args);
++        }) as typeof tx.execute;
++        return callback(tx);
++      }, config);
++      pending = Promise.resolve(request(f, randomUUID())); pending.catch(() => undefined);
++      await blocked(pid); await expired(at, pid); await client.query("COMMIT");
++      problem(await pending, 401, "SESSION_EXPIRED"); assert.deepEqual(await snapshot(f), before);
++    } finally { database.transaction = original; await client.query("ROLLBACK"); await Promise.allSettled([pending]); client.release(); }
++  });
++}
++for (const operation of ["call-next", "complete", "absent", "join", "withdraw"] as const) {
++  test(`E08-EST01 PostgreSQL ${operation} logout confirma antes de liberar domínio`, async () => {
++    const f = await fixture(operation), before = await snapshot(f);
++    const r = await waiting(f, operation, randomUUID(), async () => { assert.equal((await logout(f.actor)).status, 200); });
++    problem(r, 401, "SESSION_REVOKED"); assert.deepEqual(await snapshot(f), before);
++  });
++}
++for (const operation of ["call-next", "complete", "absent"] as const) {
++  test(`E08-EST01 PostgreSQL ${operation} concessão revogada não autoriza`, async () => {
++    const f = await fixture(operation), before = await snapshot(f);
++    const r = await waiting(f, operation, randomUUID(), async () => {
++      await pool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE user_id=$1 AND event_id=$2 AND role='staff'", [f.actor.userId, f.c.eventId]);
++    });
++    problem(r, 403, "STAFF_EVENT_FORBIDDEN"); assert.deepEqual(await snapshot(f), before);
++  });
++}
+diff --git a/backend/test/unit/mutation-session-http.test.ts b/backend/test/unit/mutation-session-http.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..747cdaa2c623ebbf07ac0d644ee4aa003e64f813
+--- /dev/null
++++ b/backend/test/unit/mutation-session-http.test.ts
+@@ -0,0 +1,76 @@
++import "reflect-metadata";
++import assert from "node:assert/strict";
++import { after, before, test } from "node:test";
++import { Module, type INestApplication } from "@nestjs/common";
++import { NestFactory } from "@nestjs/core";
++import supertest from "supertest";
++import { AuthService } from "../../src/auth/auth.service";
++import { SessionAuthGuard } from "../../src/auth/session-auth.guard";
++import { MutationSessionError, type MutationSession } from "../../src/auth/mutation-session";
++import { ProblemDetailsExceptionFilter } from "../../src/common/errors/problem-details.filter";
++import { StaffOperationsController } from "../../src/events/staff-operations.controller";
++import { ParticipantQueueController } from "../../src/events/participant-queue.controller";
++import { EvaluationWriteController, EvaluationWriteIdempotencyPolicy } from "../../src/evaluations/evaluation-write.controller";
++import { ParticipationLifecycleController } from "../../src/participations/participation-lifecycle.controller";
++import { StaffIdempotencyPolicy } from "../../src/events/staff-idempotency.policy";
++import { ParticipantQueueIdempotencyPolicy } from "../../src/events/participant-queue-idempotency.policy";
++import { CallNextService } from "../../src/events/call-next.service";
++import { CompleteService } from "../../src/events/complete.service";
++import { AbsentService } from "../../src/events/absent.service";
++import { QueueEntryService } from "../../src/events/queue-entry.service";
++import { QueueWithdrawalService } from "../../src/events/queue-withdrawal.service";
++import { QueueStateService } from "../../src/events/queue-state.service";
++import { EvaluationWriteService } from "../../src/evaluations/evaluation-write.service";
++import { ParticipationLifecycleService } from "../../src/participations/participation-lifecycle.service";
++import { ParticipationQueryService } from "../../src/participations/participation-query.service";
++
++const id = "abcdef00-0000-4000-8000-000000000001", sid = "abcdef00-0000-4000-8000-000000000002";
++let calls = 0, mode = "valid", app: INestApplication;
++function invoke(input: { userId?: string; staffUserId?: string }, context: MutationSession) {
++  calls++;
++  assert.deepEqual(context, { userId: id, sessionId: sid }); assert.equal(input.userId ?? input.staffUserId, id);
++  if (mode === "revoked" || mode === "expired") {
++    const code = mode === "revoked" ? "SESSION_REVOKED" : "SESSION_EXPIRED";
++    throw new MutationSessionError({ status: 401, code, typeSlug: code.toLowerCase().replaceAll("_", "-"), title: "Sessão inválida", detail: "Sessão inválida." });
++  }
++  return { kind: "replay", serviceSession: { id }, evaluation: { id }, participation: { id }, queueEntryId: id,
++    participationId: id, experienceId: id, status: "waiting", queueOrder: "1", enteredAt: new Date(), closedAt: new Date() };
++}
++@Module({ controllers: [StaffOperationsController, ParticipantQueueController, EvaluationWriteController, ParticipationLifecycleController],
++  providers: [SessionAuthGuard, StaffIdempotencyPolicy, ParticipantQueueIdempotencyPolicy, EvaluationWriteIdempotencyPolicy,
++    { provide: AuthService, useValue: { authenticateBearerToken: async () => mode === "no-principal" ? undefined : { userId: id, sessionId: mode === "no-session" ? undefined : sid } } },
++    { provide: CallNextService, useValue: { callNextAuthenticated: invoke } }, { provide: CompleteService, useValue: { completeAuthenticated: invoke } },
++    { provide: AbsentService, useValue: { absentAuthenticated: invoke } }, { provide: QueueEntryService, useValue: { joinExperienceQueueAuthenticated: invoke } },
++    { provide: QueueWithdrawalService, useValue: { withdrawExperienceQueueAuthenticated: invoke } }, { provide: QueueStateService, useValue: {} },
++    { provide: EvaluationWriteService, useValue: { submitAuthenticated: invoke, editAuthenticated: invoke } },
++    { provide: ParticipationLifecycleService, useValue: { cancelAuthenticated: invoke, finishAuthenticated: invoke } },
++    { provide: ParticipationQueryService, useValue: {} },
++  ] }) class HttpModule {}
++before(async () => { app = await NestFactory.create(HttpModule, { logger: false }); app.setGlobalPrefix("api/v1");
++  app.useGlobalFilters(new ProblemDetailsExceptionFilter()); await app.listen(0, "127.0.0.1"); });
++after(async () => { await app?.close(); });
++const routes = [
++  ["post", `/staff/events/${id}/experiences/${id}/stations/${id}/call-next`, {}, 201],
++  ["post", `/staff/events/${id}/service-sessions/${id}/complete`, {}, 200],
++  ["post", `/staff/events/${id}/service-sessions/${id}/absent`, {}, 200],
++  ["post", `/participations/${id}/queue-entries`, { experienceId: id }, 201],
++  ["post", `/participations/${id}/queue-entries/${id}/withdraw`, {}, 200],
++  ["post", `/participations/${id}/evaluation`, { rating: 5 }, 201],
++  ["patch", `/evaluations/${id}`, { rating: 5 }, 200],
++  ["post", `/participations/${id}/cancel`, {}, 200], ["post", `/participations/${id}/finish`, {}, 200],
++] as const;
++for (const [method, path, body, status] of routes) for (const scenario of ["valid", "body-session", "no-session", "no-principal", "revoked", "expired"] as const) {
++  test(`E08-EST01 HTTP ${path} ${scenario}`, async () => {
++    calls = 0; mode = scenario;
++    const r = await supertest(app.getHttpServer())[method](`/api/v1${path}`).set("Authorization", "Bearer simulated")
++      .set("Idempotency-Key", "same-intent").set("X-Session-Id", "forged")
++      .query({ sessionId: "forged", userId: "forged" }).send(scenario === "body-session" ? { ...body, sessionId: sid } : body);
++    assert.equal(r.status, scenario === "valid" ? status : scenario === "body-session" ? 400 : 401, JSON.stringify(r.body));
++    assert.equal(calls, ["valid", "revoked", "expired"].includes(scenario) ? 1 : 0);
++    if (scenario !== "valid") {
++      assert.match(r.headers["content-type"], /application\/problem\+json/);
++      assert.equal(r.body.code, scenario === "body-session" ? "VALIDATION_ERROR" : scenario === "revoked" ? "SESSION_REVOKED"
++        : scenario === "expired" ? "SESSION_EXPIRED" : "UNAUTHENTICATED_CONTEXT");
++    }
++  });
++}
+diff --git a/backend/test/unit/mutation-session-scenario.ts b/backend/test/unit/mutation-session-scenario.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..75b3b40ed16c1e78cde33ca276c58494deafa736
+--- /dev/null
++++ b/backend/test/unit/mutation-session-scenario.ts
+@@ -0,0 +1,35 @@
++import assert from "node:assert/strict";
++import type { MutationSession } from "../../src/auth/mutation-session";
++
++export type SessionScenario = "valid" | "revoked" | "expired" | "foreign" | "inactive" | "admin" | "late" | "wait" | "intent-wait";
++/** Simulação unitária do relógio/locks: não constitui evidência de concorrência PostgreSQL. */
++export function sessionScenario(service: object, userId: string, scenario: SessionScenario = "valid") {
++  const database = Reflect.get(service, "database") as { $client: { query: (config: { text: string }, params: unknown[]) => Promise<unknown> } };
++  const client = database.$client, original = client.query.bind(client), queries: string[] = [];
++  let checks = 0, invalidated = false;
++  client.query = async (config, params) => {
++    const text = config.text; queries.push(text);
++    if (text.includes("SELECT s.revoked_at IS NOT NULL AS revoked")) {
++      checks++;
++      return { rows: scenario === "foreign" ? [] : [{ revoked: scenario === "revoked" || invalidated,
++        expired: scenario === "expired" || scenario === "late" && checks > 1,
++        active: scenario !== "inactive", admin: scenario === "admin", secondFactor: false, staff: true }] };
++    }
++    if (/SELECT id FROM (users|user_roles|sessions) WHERE/.test(text)) return { rows: [{ id: "auth-lock" }] };
++    const result = await original(config, params);
++    if (scenario === "wait" && /FOR (UPDATE|SHARE)/.test(text)) invalidated = true;
++    if (scenario === "intent-wait" && text.includes('insert into "idempotency_operations"')) invalidated = true;
++    return result;
++  };
++  const context: MutationSession = { userId, sessionId: "00000000-0000-4000-8000-000000000099" };
++  return { context, queries, checks: () => checks };
++}
++export function assertSessionRefusal(error: unknown, code: string): boolean {
++  assert.equal(Reflect.get(error as object, "problem").code, code); return true;
++}
++export function assertSessionTransaction(queries: string[], committed: boolean) {
++  assert.equal(queries.at(-1), committed ? "commit" : "rollback");
++  if (committed) assert.match(queries.at(-2)!, /SELECT s.revoked_at IS NOT NULL AS revoked/);
++  const locks = ["SELECT id FROM users WHERE", "SELECT id FROM user_roles WHERE", "SELECT id FROM sessions WHERE"];
++  for (let i = 1; i < locks.length; i++) assert.ok(queries.findIndex(q => q.includes(locks[i-1])) < queries.findIndex(q => q.includes(locks[i])));
++}
+diff --git a/docs/E08_EST01_CORRECAO_A01.md b/docs/E08_EST01_CORRECAO_A01.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..6899644c0a7e72071f065846acbd9a432935f1ec
+--- /dev/null
++++ b/docs/E08_EST01_CORRECAO_A01.md
+@@ -0,0 +1,427 @@
++# E08-EST01 — Revalidação de sessão nas mutações HTTP críticas
++
++## Estado inicial e escopo
++
++Implementação em 04/11/2026, branch `feature/events-participations`, sobre o HEAD
++inicial `75011639bb7f3f156b94bf98d5b63b92b65b1d8b`. A E08.14 estava commitada
++(`feat(events): implementar controle operacional da fila por experiência`).
++Índice e working tree inicialmente limpos, sem arquivos não rastreados.
++
++A base de validação informada pelo responsável era 777 unitários e 1.128
++PostgreSQL aprovados, além de typecheck/lint/build. Essa aprovação não abrangia
++antecipadamente a E08-EST01. A validação final foi executada manualmente pelo
++responsável: **98/98 novos testes PostgreSQL**, **234/234 nas quatro suítes
++históricas corrigidas** e **1.226/1.226 na regressão PostgreSQL completa**,
++todos aprovados, sem falhas, cancelamentos ou ignorados, código de saída 0 e
++duração total de 673630.0193 ms. A01 está corrigida e validada em PostgreSQL real.
++
++Escopo exclusivo A01. Não foram corrigidos A02–A05, modificados contratos de
++fechamento, relatórios históricos E08.1–E08.14, schema, migrações, dependências,
++configuração de ambiente ou serviços de Identidade/Permissões. Nenhuma nova
++funcionalidade ou etapa foi iniciada. Sem commit, staging ou push.
++
++## Diagnóstico e contratos preservados
++
++O guard validava o Bearer/sessão antes do controller. Os nove caminhos enviavam
++somente o ator para serviços que podiam aguardar locks e confirmar alterações
++ou devolver replay sem consultar novamente a sessão usada na requisição. A
++constatação original é estática; os cenários concorrentes foram posteriormente
++cobertos pelos 98 testes novos aprovados manualmente. As quatro suítes históricas
++de rollback adaptadas e a regressão completa também foram aprovadas manualmente.
++
++Foram consultados planejamento, arquitetura, relatórios E08.1/2/5/11/12/13/14,
++guard e autenticação, contratos de papéis/TOTP, schema `access.schema.ts` e
++migrações `0003_credentials_roles.sql`/`0005_idempotency.sql`, além dos serviços
++operacionais e helpers de idempotência existentes.
++
++Todas as rotas são relativas a `/api/v1`. Sucesso e replay mantêm status e DTOs:
++
++| Método e caminho | Entrada autenticada do serviço | HTTP |
++| --- | --- | --- |
++| POST `/staff/events/:eventId/experiences/:experienceId/stations/:stationId/call-next` | `CallNextService.callNextAuthenticated` | 201 |
++| POST `/staff/events/:eventId/service-sessions/:serviceSessionId/complete` | `CompleteService.completeAuthenticated` | 200 |
++| POST `/staff/events/:eventId/service-sessions/:serviceSessionId/absent` | `AbsentService.absentAuthenticated` | 200 |
++| POST `/participations/:participationId/queue-entries` | `QueueEntryService.joinExperienceQueueAuthenticated` | 201 |
++| POST `/participations/:participationId/queue-entries/:queueEntryId/withdraw` | `QueueWithdrawalService.withdrawExperienceQueueAuthenticated` | 200 |
++| POST `/participations/:participationId/evaluation` | `EvaluationWriteService.submitAuthenticated` | 201 |
++| PATCH `/evaluations/:evaluationId` | `EvaluationWriteService.editAuthenticated` | 200 |
++| POST `/participations/:participationId/cancel` | `ParticipationLifecycleService.cancelAuthenticated` | 200 |
++| POST `/participations/:participationId/finish` | `ParticipationLifecycleService.finishAuthenticated` | 200 |
++
++FIFO, contadores, reentrada após ausência, desistência isolada, titularidade,
++finalizações, histórico, elegibilidade/janelas de avaliação, disponibilidade,
++pausa, cortes e encerramentos conservam suas decisões de negócio anteriores.
++
++## Contexto autenticado e fronteira com os contratos internos
++
++`auth/mutation-session.ts` centraliza extração, erros, revalidação e conclusão
++transacional. `mutationSession(request, userId)` lê exclusivamente `authPrincipal`,
++instalado por `SessionAuthGuard`. Não usa `request.user` como fallback nem aceita
++sessão escolhida pelo cliente em corpo, query ou cabeçalhos arbitrários. A sessão
++e o usuário precisam estar presentes; o ator do contexto precisa coincidir com
++o ator da operação. SQL exige `sessions.id` **e** `sessions.user_id` correspondentes.
++
++Os nove métodos `*Authenticated` exigem contexto também em runtime, antes de
++abrir transação. Contexto ausente/incompatível não chama um método interno como
++alternativa. Os controllers foram migrados exclusivamente para essas entradas.
++
++Os métodos internos anteriores continuam disponíveis para chamadas confiáveis
++do servidor e preparação dos testes históricos; não constituem endpoints nem
++autenticam requisições. Passam `null` explicitamente à implementação privada,
++preservando os contratos internos preexistentes. A entrada HTTP nunca passa
++`null` e nunca usa esse caminho. Essa separação evita transformar fixtures E07
++em clientes HTTP ou exigir sessões artificiais para operações internas.
++
++## Revalidação, locks e ponto de autorização
++
++As transações continuam `READ COMMITTED`. O helper adquire, nesta ordem:
++
++1. Conta do ator, `users FOR SHARE`.
++2. Concessões vigentes do ator, ordenadas por ID, `user_roles FOR SHARE`.
++3. Sessão própria, `sessions FOR SHARE`.
++4. **Nova instrução SQL**, após os locks, para conferir existência, pertencimento,
++   revogação, expiração por `clock_timestamp()`, conta ativa e TOTP para quem tem
++   papel Admin global atual. Para operações Staff, exige também concessão Staff
++   vigente no evento e e-mail verificado. Admin isolado não substitui Staff.
++
++Não se usa `transaction_timestamp()` nem Date/relógio JavaScript para decidir a
++validade da sessão. A consulta temporal separada evita que uma expressão de
++`SELECT FOR SHARE` seja avaliada antes de sua espera.
++
++Mapeamento dos locks anteriores, mantidos sem reordenar recursos de domínio:
++
++| Caminho | Sequência relevante e primeira revalidação nova |
++| --- | --- |
++| call-next | evento SHARE → experiência UPDATE → estação UPDATE → conta/concessão Staff SHARE existente → reserva → nova conta/concessões/sessão; depois participação → entrada → atendimento |
++| complete/absent | descoberta → evento SHARE → experiência/estação UPDATE (testemunha disponível em absent) → conta/concessão Staff SHARE existente → participação/entrada/atendimento UPDATE → reserva → nova autorização |
++| join | descoberta → evento SHARE → experiência UPDATE → estação SHARE → participação UPDATE → reserva → nova autorização; depois entrada aberta e testemunha Staff/capacidade anteriores |
++| withdraw | descoberta → evento SHARE → experiência UPDATE → estação quando chamada → participação/entrada/atendimento UPDATE → reserva → nova autorização |
++| submit/edit | descoberta própria → reserva → participação UPDATE → avaliação UPDATE no PATCH → nova autorização |
++| cancel/finish | descoberta própria → reserva → evento UPDATE → experiência/estação quando existentes → participação UPDATE → nova autorização; depois entradas/atendimentos UPDATE |
++| logout/login/refresh | conta UPDATE → sessão UPDATE; refresh também bloqueia seus tokens, sem adquirir recursos de eventos/filas |
++
++As reservas de avaliação/ciclo permanecem antes do domínio para preservar o
++protocolo de idempotência existente. Sua FK adquire implicitamente proteção de
++chave na conta: isso pode impedir que **logout**, que solicita `users FOR UPDATE`,
++confirme enquanto a operação espera um recurso de domínio. Não se afirma que
++logout possa sempre vencer esses quatro caminhos. Os testes distinguem logout
++real, revogação SQL concorrente da sessão e expiração temporal.
++
++Staff sem conta/concessão elegível também passa pela revalidação antes da recusa,
++para distinguir conta desativada/sessão inválida de falta de autorização Staff.
++Conflito de chave e `in_progress` em avaliação/ciclo são revalidados antes de
++retornar o conflito, mesmo sem prosseguir para os locks de domínio.
++
++Depois de todas as escritas e da conclusão da intenção, `mutationTransaction`
++reexecuta o helper **antes de devolver o callback ao Drizzle**, inclusive para
++replay. Logo, uma expiração durante esperas posteriores à primeira checagem
++provoca rollback de domínio e idempotência. A resposta HTTP só é devolvida após
++a transação terminar. Erros de sessão não são convertidos em erro interno pelos
++wrappers de avaliações/ciclo.
++
++O ponto final de autorização temporal é a última consulta de validade no
++PostgreSQL. Os locks de conta/concessões existentes/sessão são retidos até o
++COMMIT. Uma revogação confirmada antes da aquisição/revalidação é observada;
++se a mutação obtém a proteção primeiro, o revogador incompatível aguarda e pode
++confirmar depois dela. Logout legítimo não é impedido permanentemente.
++
++**Limite temporal explícito:** não existe checagem atomicamente simultânea ao
++COMMIT. Expiração estritamente posterior à última consulta e anterior ao COMMIT
++não é detectável por este protocolo. Não se promete validade em cada instante
++do envio da resposta nem se acrescenta tolerância ao prazo. A passagem do tempo
++durante esperas anteriores à última checagem é detectada, mesmo com locks já
++retidos. A revisão estática não identificou inversão incompatível com os
++escritores atuais; não equivale a prova de ausência de deadlocks sob toda carga.
++Futuros escritores de concessão devem respeitar o mutex/ordem de conta e evento
++já previstos, inclusive para inserções de novos papéis; não são implementados aqui.
++
++## Idempotência e erros
++
++Namespaces, fingerprints, armazenamento, quatro políticas de TTL e regras de
++replay histórico foram preservados. TTL vencido não autoriza reexecutar intenção
++concluída. O replay exige sessão/conta/autorização atuais antes de retornar e na
++checagem final. Não se transforma revogação em cancelamento de participação,
++perda de posição ou ausência.
++
++Recusa de segurança lança erro dentro da transação, desfazendo reserva nova,
++eventuais alterações de domínio e conclusão da intenção. Intenções históricas
++permanecem intactas. Nenhuma auditoria de sucesso deve sobreviver a rollback.
++Uma tentativa futura válida pode reutilizar a chave de uma tentativa revertida.
++
++| HTTP | Código RFC 7807 existente |
++| --- | --- |
++| 401 | `UNAUTHENTICATED_CONTEXT`, `INVALID_SESSION`, `SESSION_REVOKED`, `SESSION_EXPIRED`, `ACCOUNT_DEACTIVATED`, `ADMIN_2FA_REQUIRED` |
++| 403 | `STAFF_EVENT_FORBIDDEN` quando falta Staff vigente/verificado no evento |
++
++Demais erros de token, validação, titularidade, negócio e idempotência conservam
++os contratos anteriores. Não são expostos IDs de sessão, SQL ou dados privados
++nos DTOs públicos.
++
++## Testes e resultados executados pelo Codex
++
++| Validação local final | Resultado |
++| --- | --- |
++| Serviços específicos + HTTP simulados (12 arquivos) | **457/457 aprovados** |
++| Regressão unitária completa (`npm.cmd test`) | **984/984 aprovados** |
++| Typecheck produção (`npx.cmd tsc --noEmit`) | Aprovado |
++| Typecheck produção/testes (`npm.cmd run typecheck:test`) | Aprovado |
++| Lint (`npm.cmd run lint`) | Aprovado |
++| Build (`npm.cmd run build`) | Aprovado |
++
++Nas duas execuções finais de testes: zero falhas, cancelamentos e ignorados.
++Foram adicionados **206 testes locais**: 144 casos de serviço (16 por mutação),
++oito casos adicionais de conflito/in_progress em avaliação/ciclo, e 54 HTTP
++simulados (seis por rota). Testes anteriores foram preservados; os quatro
++adaptadores HTTP históricos foram atualizados para as entradas autenticadas e
++agora também conferem o contexto propagado. Nenhuma expectativa histórica foi
++relaxada ou removida.
++
++Cobertura nova: sessão válida, revogada, expirada, estrangeira, contexto
++ausente/incompatível, conta inativa, Admin sem TOTP, invalidação após espera de
++domínio/reserva, recusa final depois da conclusão da intenção, rollback e replay
++com sessão inválida. HTTP verifica contexto exclusivo do guard, ignora tentativa
++de selecionar sessão por query/header e rejeita `sessionId` no corpo estrito.
++Mocks locais não comprovam concorrência PostgreSQL.
++
++Execução local com dotenv desativado, quatro TTLs explícitos e URL fictícia de
++unitários sem conexão. A tentativa inicial de `npx` foi bloqueada pela política
++PowerShell para arquivos `.ps1`; utilizado `npx.cmd`, sem alterar a política.
++O sandbox também impediu a consulta de usuário do `tsx`
++(`uv_os_get_passwd`, `ENOMEM`) antes dos testes; a execução autorizada fora do
++sandbox funcionou. A primeira seleção sem os quatro TTLs explícitos terminou
++com falha de inicialização de três arquivos HTTP; a configuração de teste foi
++corrigida, sem ler credenciais, e as execuções finais acima passaram.
++
++## Investigação da regressão histórica após A01
++
++O responsável forneceu `%TEMP%\arenago-est01-regressao-final.log`. O log completo
++foi inspecionado, sem acessar PostgreSQL ou credenciais. Resultado real:
++**1.226 executados, 1.209 aprovados, 17 falhas, zero cancelamentos/ignorados**.
++Há exatamente 17 registros na seção `failing tests`, distribuídos em quatro
++arquivos. Nenhuma falha adicional de inicialização aparece nesse resumo.
++
++Todos falham na **verificação da resposta HTTP 500**, antes de alcançar as
++asserções seguintes de `reached`, rollback e retry. A preparação não é a causa.
++O quadro identifica todos os casos; o status esperado continua sendo **500**:
++
++| Arquivo de integração | Teste/caso reprovado | HTTP observado | Asserção antes do ajuste |
++| --- | --- | --- | --- |
++| `evaluation-write.integration.test.ts` | E08.11 falha depois da escrita `reserve post` | 201 | linha 237, `problem(r,500,...)` |
++| mesmo | E08.11 falha depois da escrita `reserve patch` | 200 | linha 237 |
++| mesmo | E08.11 falha depois da escrita `domain post` | 201 | linha 237 |
++| mesmo | E08.11 falha depois da escrita `domain patch` | 200 | linha 237 |
++| mesmo | E08.11 falha depois da escrita `complete post` | 201 | linha 237 |
++| mesmo | E08.11 falha depois da escrita `complete patch` | 200 | linha 237 |
++| `participant-queue-http.integration.test.ts` | E08.2 erro após escritas de ingresso faz rollback integral e permite retry | 201 | linha 360, `problem(r,500,...)` |
++| mesmo | E08.2 erro após desistência waiting/called reverte efeitos e idempotência | 200 | linha 377, `problem(r,500,...)` |
++| `participation-lifecycle.integration.test.ts` | E08.12 falha SQL após escrita real `cancel/reserve` | 200 | linha 281, `problem(await mutate(...),500,...)` |
++| mesmo | E08.12 falha SQL após escrita real `cancel/participation` | 200 | linha 281 |
++| mesmo | E08.12 falha SQL após escrita real `cancel/complete` | 200 | linha 281 |
++| mesmo | E08.12 falha SQL após escrita real `finish/reserve` | 200 | linha 281 |
++| mesmo | E08.12 falha SQL após escrita real `finish/participation` | 200 | linha 281 |
++| mesmo | E08.12 falha SQL após escrita real `finish/queue` | 200 | linha 281 |
++| mesmo | E08.12 falha SQL após escrita real `finish/session` | 200 | linha 281 |
++| mesmo | E08.12 falha SQL após escrita real `finish/complete` | 200 | linha 281 |
++| `staff-http.integration.test.ts` | E08.1 erro após as escritas reais faz rollback e permite retry | 200 | linha 334, `problem(r,500,...)` |
++
++O teste de desistência contém duas variantes sequenciais (`waiting` e `called`).
++O erro em `waiting` interrompeu o teste antes de `called`; ambas as variantes
++foram preservadas. São 17 testes contabilizados, não 18 testes novos.
++
++### Causa e instrução de injeção em cada grupo
++
++- **E08.11, seis casos:** o proxy de `client.query` executa primeiro
++  `await originalQuery(config,params)`. Após INSERT da reserva, CTE decisiva
++  de INSERT/UPDATE da avaliação ou UPDATE da intenção, exige uma linha retornada
++  (e `writtenId` na fase domain) e executa **`SELECT 1/0` no mesmo cliente real**.
++  Entretanto, o teste substituía `writes.submit`/`writes.edit`, enquanto o
++  controller chama `submitAuthenticated`/`editAuthenticated`. O proxy não era
++  utilizado pela requisição HTTP.
++- **E08.12, oito casos:** o mesmo mecanismo de SQL real seguido de `SELECT 1/0`
++  intercepta reserva, UPDATE de participação, fila, atendimento ou conclusão
++  da intenção. O teste substituía `writes[mode]` (`cancel`/`finish`), mas o
++  controller escolhe `cancelAuthenticated`/`finishAuthenticated`. As oito
++  combinações do quadro não alcançavam o cliente instrumentado.
++- **E08.2, dois testes:** `failingDb.transaction` executa o callback real e
++  consulta seus efeitos ainda dentro da transação: ponteiro preenchido após
++  ingresso; ponteiro nulo/entrada closed e atendimento canceled, quando chamado,
++  após desistência. Só então provoca a exceção `E082_PRIVATE_ROLLBACK`. Esse
++  mecanismo é uma **exceção JavaScript após SQL real**, não divisão por zero.
++  Os testes substituíam `joinExperienceQueue`/`withdrawExperienceQueue`, enquanto
++  o HTTP chama suas versões `Authenticated`; o wrapper não era executado.
++- **E08.1, um teste:** o wrapper transacional consulta atendimento completed e
++  ponteiro nulo após o callback real, depois lança `E081_ROLLBACK_PRIVATE`.
++  Também é exceção após SQL real. O teste substituía `completion.complete`, mas
++  o HTTP executa `completeAuthenticated`; o wrapper ficava fora do caminho.
++
++Nos sete pontos de entrada afetados, os métodos autenticados chamam diretamente
++a implementação privada (`execute`/`write`), sem delegar ao método interno antigo.
++Antes da A01 os controllers chamavam os métodos que os testes substituíam;
++depois da A01 passaram a ignorar essas substituições. A inspeção dos caminhos
++de chamada comprova por que a injeção não era acionada. O log anterior não contém
++uma medição de `reached=false`: a asserção HTTP falhava antes dessa verificação.
++
++As respostas do log contêm os resultados reais das escritas (IDs/instantes de
++avaliações e filas, participação finalizada/cancelada e atendimento completed).
++Os serviços só produzem esses resultados após suas escritas; os controllers
++aguardam a transação. Conferido também o executor instalado do Drizzle:
++`node-postgres/session.js`, linhas 180–193, executa callback, depois COMMIT;
++em exceção executa ROLLBACK e relança. Assim, o sucesso observado corresponde
++à execução normal do banco original, sem a falha artificial esperada. Não foi
++feita uma nova consulta ao banco pelo Codex para inspecionar aqueles registros.
++
++**Classificação dos 17 casos:** erro na instrumentação dos testes, introduzido
++pela adaptação incompleta ao novo caminho HTTP A01. Não é uma divergência de
++regra funcional e não há evidência nesses erros de uma exceção SQL capturada
++indevidamente ou de um COMMIT após falha transacional efetivamente disparada.
++Foi uma omissão da implementação inicial A01 ao migrar os controllers sem
++migrar estas instrumentações históricas.
++
++### Efeito de `mutationTransaction()` e correção mínima
++
++`mutationTransaction()` chama **o `database.transaction` recebido**, usa o mesmo
++executor para domínio e revalidação e não abre outra conexão, confirma
++antecipadamente ou suprime exceções. No wrapper de E08.1/E08.2, o callback inclui
++a checagem final A01, mas a falha posterior ainda ocorre antes do COMMIT do
++Drizzle. Nos proxies de E08.11/E08.12, uma falha SQL rejeita o callback usando o
++mesmo cliente. Não foi necessário alterar esse helper ou qualquer código de produção.
++
++A correção altera somente os pontos substituídos e restaurados nos quatro
++arquivos de integração. Cada wrapper intercepta o método **autenticado atual**
++e encaminha **`input` e `context` sem substituir a sessão**, para a instância
++com banco instrumentado. `finally` restaura o mesmo método autenticado antes
++do retry. Foram preservados integralmente SQL real, momentos de injeção,
++exceções, expectativa 500, sigilo da resposta, `reached=true`, comparação de
++rollback e retry válido com a mesma chave. Não foram criados mocks PostgreSQL,
++testes adicionais ou alteradas asserções para aceitar sucesso.
++
++Após a correção das instrumentações, o Codex repetiu os testes locais:
++**457/457 específicos/HTTP simulados**, **984/984 unitários**, typecheck de
++produção e testes, lint e build aprovados. Zero falhas, cancelamentos ou
++ignorados nessas execuções. Os quatro arquivos de integração foram incluídos
++no typecheck e lint; sua execução PostgreSQL corrigida permanece manual.
++
++## PostgreSQL — validação manual final aprovada
++
++`backend/test/integration/mutation-session.integration.test.ts`: **98 testes
++novos**, aprovados manualmente pelo responsável (**98/98**). Na entrega inicial
++nenhum histórico havia sido modificado; nesta correção foram adaptados **17
++testes históricos em quatro arquivos**, sem adicionar/remover testes. Total
++esperado da regressão permanece **1.128 + 98 = 1.226**. PostgreSQL não foi
++executado pelo Codex; foi executado manualmente pelo responsável com aprovação
++integral final.
++
++- Dez testes por operação, total 90: sucesso/replay válido; conta inativa e
++  perda de TOTP após espera; revogação e expiração durante lock de domínio;
++  revogação e expiração em replay bloqueado; expiração na reserva idempotente
++  com tentativa válida posterior; mutação protegida antes do logout; expiração
++  final após concluir a intenção com rollback integral.
++- Cinco operações com logout real confirmado antes da liberação do domínio:
++  call-next, complete, absent, join e withdraw.
++- Três operações Staff com concessão revogada enquanto aguardam o domínio.
++
++Usa conexões/transações independentes e `pg_blocking_pids`. A expiração aguarda
++uma condição observada do relógio PostgreSQL, não um atraso arbitrário como
++prova de sincronização. Na checagem tardia, a instrumentação acrescenta uma
++espera real por advisory lock no mesmo executor, após concluir a intenção e
++antes da última revalidação; não substitui consultas ou resultados do banco.
++
++Os snapshots comparam evento, participações, filas, contadores, estações,
++atendimentos, snapshots de perfil, avaliações, auditoria e intenções do ator.
++Alterações deliberadas da fixture de autenticação (revogação, expiração, conta,
++papéis) são verificadas pela recusa e não confundidas com efeitos de domínio.
++Fixtures próprias são limpas pelo helper existente; não dependem de resíduos
++de outras suítes nem limpam/reconstroem todo o banco.
++
++Comandos PowerShell para o responsável, **apenas depois de configurar localmente
++as três URLs idênticas do banco de testes**. Não compartilhar os valores:
++
++```powershell
++Set-Location C:\DoJob\ProgramacaoMobile\backend
++$env:NODE_ENV = 'test'
++$env:DOTENV_CONFIG_PATH = 'NUL'
++$env:EVENT_CLOSURE_JOB_TEST_ENABLED = 'false'
++$env:STAFF_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:ADMIN_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:EVALUATION_IDEMPOTENCY_TTL_SECONDS = '60'
++
++# DATABASE_URL, DATABASE_DIRECT_URL e EVENTS_TEST_DATABASE_URL já configuradas
++# pelo responsável: 127.0.0.1:55432/arenago_events_test, sem query ou fragmento.
++foreach ($name in @('DATABASE_URL','DATABASE_DIRECT_URL','EVENTS_TEST_DATABASE_URL')) {
++  if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
++    throw "$name precisa estar configurada localmente."
++  }
++}
++
++npx.cmd tsx --tsconfig tsconfig.test.json --test --test-concurrency=1 test/integration/staff-http.integration.test.ts test/integration/participant-queue-http.integration.test.ts test/integration/evaluation-write.integration.test.ts test/integration/participation-lifecycle.integration.test.ts
++if ($LASTEXITCODE -ne 0) { throw 'Suítes históricas falharam; investigar antes da regressão.' }
++
++# Esperados 234 testes nas quatro suítes: 20 + 22 + 103 + 89.
++# Executar a regressão somente depois da aprovação focada pelo responsável.
++npm.cmd run test:integration
++if ($LASTEXITCODE -ne 0) { throw 'Regressão PostgreSQL falhou; preservar os logs para investigação.' }
++```
++
++O fixture valida banco/host/porta/URLs antes de importar a aplicação. A guarda
++histórica A04 e as fixtures K03 de A03 não foram alteradas nesta task.
++
++### Execuções históricas e aprovação definitiva
++
++O bloco de PowerShell acima foi mantido como registro do procedimento manual,
++não como pendência. As quatro suítes históricas foram aprovadas com **234/234**:
++20 E08.1, 22 E08.2, 103 E08.11 e 89 E08.12. A primeira regressão completa
++registrou 17 falhas de instrumentação; após a correção limitada aos testes, a
++regressão final aprovou **1.226/1.226**, sem falhas, cancelamentos ou ignorados,
++com código de saída 0. Esse resultado inclui os 98 cenários novos A01 já
++aprovados, sem inventar uma nova execução isolada.
++
++As validações locais já registradas permanecem: **984/984 unitários**,
++**457/457 específicos e HTTP simulados**, typecheck de produção e testes, lint
++e build aprovados. Não houve validação de produção.
++
++## Limitação temporal documentada
++
++O ponto final de autorização é a última consulta de sessão/concessões no
++PostgreSQL, imediatamente antes de o callback transacional retornar ao Drizzle.
++Expiração ou revogação confirmada antes dela é observada e pode provocar rollback
++integral. Uma expiração estritamente posterior a essa consulta e anterior ao
++COMMIT não é detectável atomicamente pelo protocolo atual. Não foi criada janela
++de tolerância, nem prometida validade até o envio da resposta. Essa limitação
++continua documentada apesar da aprovação dos cenários reais de espera/rollback.
++
++## Inventário e evidência
++
++**31 arquivos de implementação, testes e documentação**, além do único patch:
++
++- Novo: `backend/src/auth/mutation-session.ts`.
++- Serviços: `backend/src/events/{call-next,complete,absent,queue-entry,queue-withdrawal}.service.ts`,
++  `backend/src/evaluations/evaluation-write.service.ts` e
++  `backend/src/participations/participation-lifecycle.service.ts`.
++- Controllers: `backend/src/events/{staff-operations,participant-queue}.controller.ts`,
++  `backend/src/evaluations/evaluation-write.controller.ts` e
++  `backend/src/participations/participation-lifecycle.controller.ts`.
++- Unitários existentes, com casos novos:
++  `backend/test/unit/{call-next,complete,absent,queue-entry,queue-withdrawal,evaluation-write,participation-lifecycle}.test.ts`.
++- Adaptadores HTTP históricos:
++  `backend/test/unit/{staff-http,participant-queue-http,evaluation-write-http,participation-lifecycle-http}.test.ts`.
++- Novos: `backend/test/unit/mutation-session-scenario.ts`,
++  `backend/test/unit/mutation-session-http.test.ts` e
++  `backend/test/integration/mutation-session.integration.test.ts`.
++- Instrumentações PostgreSQL históricas corrigidas:
++  `backend/test/integration/{staff-http,participant-queue-http,evaluation-write,participation-lifecycle}.integration.test.ts`.
++- Este relatório: `docs/E08_EST01_CORRECAO_A01.md`.
++
++Evidência única: `qa-evidence/e08-est01-changes.diff`, base
++`75011639bb7f3f156b94bf98d5b63b92b65b1d8b`. Patch completo UTF-8 sem BOM, com
++arquivos novos, sem incluir o próprio diff, credenciais, `.env`, dependências,
++temporários ou mudanças de outras tasks. Validação por `git apply --check` e
++aplicação em cópia isolada da base, seguida de comparação integral dos **31/31
++arquivos** e do conjunto de caminhos alterados. HEAD e índice preservados.
++
++Não há pendência de validação para A01. Restam somente revisão, staging, commit e
++push manuais. Sem validação de produção. A02–A05 e demais etapas permanecem fora
++desta correção.
++
++Mensagem sugerida, sem executar commit:
++`fix(events): revalidar sessões nas mutações críticas`.

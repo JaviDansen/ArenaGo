@@ -314,7 +314,7 @@ test('details open from the root stack with a back button to the list', () => {
   });
   const screens = nodes(app.exports.AppNavigation()).filter((node) => node.type === 'StackScreen');
   const details = screens.find((node) => node.props.name === 'ParticipationDetails');
-  assert.equal(details.props.component, './screens/participation/ParticipationDetailsScreen');
+  assert.equal(details.props.component, './screens/participation/ParticipationRealDetailsScreen');
   assert.equal(details.props.options.headerShown, true);
   assert.notEqual(details.props.options.headerBackVisible, false);
   assert.equal(details.props.options.title, 'Detalhes da participação');
@@ -331,5 +331,5 @@ test('the bottom tabs keep Início, Eventos and Perfil without a new tab', () =>
   });
   const screens = nodes(tabs.exports.default()).filter((node) => node.type === 'TabScreen');
   assert.deepEqual(screens.map((node) => node.props.name), ['Início', 'Eventos', 'Perfil']);
-  assert.equal(screens[1].props.component, '../screens/participation/ParticipationsScreen');
+  assert.equal(screens[1].props.component, '../screens/participation/ParticipationsRealScreen');
 });

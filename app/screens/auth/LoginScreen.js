@@ -1,4 +1,4 @@
-import { useContext, useRef, useState } from 'react';
+import { useContext, useEffect, useRef, useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import {
   KeyboardAvoidingView,
@@ -26,11 +26,89 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
   const [password, setPassword] = useState('');
   const [errors, setErrors] = useState({});
   const [authError, setAuthError] = useState('');
-  const [twoFactorNotice, setTwoFactorNotice] = useState('');
+  const [twoFactorCode, setTwoFactorCode] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const submittingRef = useRef(false);
+  const submissionSequence = useRef(0);
+  const snapshot = typeof auth?.getSnapshot === 'function' ? auth.getSnapshot() : auth;
+  const challenge = snapshot?.adminChallenge;
+  const twoFactorNotice = challenge
+    ? `${challenge.message} ${challenge.isTotpConfigured
+      ? 'Informe o código do segundo fator (TOTP) para concluir o acesso administrativo.'
+      : 'Solicite a configuração do TOTP pelo procedimento administrativo existente. A ativação exige autorização específica e não está disponível nesta tela.'}`
+    : '';
 
-  const sessionNotice = auth?.authNotice || '';
+  const sessionNotice = snapshot?.authNotice || '';
+
+  useEffect(() => {
+    const cancel = () => {
+      submissionSequence.current += 1;
+      submittingRef.current = false;
+      auth?.cancelAdminTwoFactor?.();
+    };
+    const unsubscribe = navigation.addListener?.('blur', () => {
+      cancel();
+      setIsSubmitting(false);
+      setTwoFactorCode('');
+      setPassword('');
+      setAuthError('');
+    });
+    return () => { unsubscribe?.(); cancel(); };
+  }, [auth?.cancelAdminTwoFactor, navigation]);
+
+  function handleCancelTwoFactor() {
+    submissionSequence.current += 1;
+    auth?.cancelAdminTwoFactor?.();
+    submittingRef.current = false;
+    setIsSubmitting(false);
+    setTwoFactorCode('');
+    setAuthError('');
+    setPassword('');
+  }
+
+  async function handleVerifyTwoFactor() {
+    if (submittingRef.current || isSubmitting || !challenge?.isTotpConfigured) return;
+    if (!/^[0-9]{6}$/.test(twoFactorCode)) {
+      setAuthError('Informe o código TOTP de seis dígitos.');
+      return;
+    }
+    if (typeof auth?.verifyAdminTwoFactor !== 'function') {
+      setAuthError('Serviço de segundo fator indisponível. Entre novamente.');
+      return;
+    }
+    const sequence = ++submissionSequence.current;
+    submittingRef.current = true;
+    setIsSubmitting(true);
+    setAuthError('');
+    try {
+      await auth.verifyAdminTwoFactor(twoFactorCode);
+      // A sessão publicada pelo gerenciador aciona o AuthSessionGate existente.
+    } catch (error) {
+      if (sequence !== submissionSequence.current) return;
+      if (error?.isNetworkError || error?.isTimeout) {
+        setAuthError('A conexão falhou durante a confirmação. O resultado pode ter sido processado; entre novamente por segurança.');
+      } else if (error?.code === 'ADMIN_2FA_CHALLENGE_EXPIRED') {
+        setAuthError('A verificação expirou ou foi cancelada. Entre novamente.');
+      } else if (error?.status === 401) {
+        setAuthError('Código inválido ou desafio expirado. Tente um código atual ou cancele e entre novamente.');
+      } else if (error?.status === 429) {
+        const wait = error.retryAfterSeconds > 0 ? ` Aguarde cerca de ${error.retryAfterSeconds}s.` : '';
+        setAuthError(`Muitas tentativas de segundo fator. Entre novamente após aguardar.${wait}`);
+      } else if (error?.code === 'ADMIN_TOTP_NOT_CONFIGURED') {
+        setAuthError('Configure o TOTP pelo procedimento administrativo antes de entrar.');
+      } else if (error?.status === 503) {
+        setAuthError('A verificação de segundo fator está indisponível. Tente mais tarde ou procure a organização.');
+      } else {
+        setAuthError('Não foi possível concluir a verificação. Tente novamente ou entre novamente.');
+      }
+    } finally {
+      if (sequence === submissionSequence.current) {
+        submittingRef.current = false;
+        setIsSubmitting(false);
+        setTwoFactorCode('');
+      }
+    }
+  }
 
   async function handleLogin() {
     if (submittingRef.current || isSubmitting) {
@@ -38,7 +116,6 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
     }
 
     setAuthError('');
-    setTwoFactorNotice('');
     if (auth && typeof auth.clearNotices === 'function') {
       auth.clearNotices();
     }
@@ -67,19 +144,19 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
 
     submittingRef.current = true;
     setIsSubmitting(true);
+    const sequence = ++submissionSequence.current;
 
     try {
       const result = await auth.login(payload);
+      if (sequence !== submissionSequence.current) return;
 
       if (result?.status === 'requires_2fa' || result?.requires2FA === true) {
-        const totpDetail = result.isTotpConfigured
-          ? 'Informe o código do segundo fator (TOTP) para concluir o acesso administrativo.'
-          : 'Esta conta administrativa exige configuração e confirmação do segundo fator (TOTP) antes do acesso.';
-        setTwoFactorNotice(
-          `${result.message || 'Segundo fator obrigatório para conta Admin.'} ${totpDetail}`
-        );
+        setPassword('');
+        setTwoFactorCode('');
         return;
       }
+
+      if (result?.status === 'aborted') return;
 
       if ((result?.status === 'authenticated' || result?.requires2FA === false) && result?.user) {
         // AuthSessionGate seleciona MainTabs quando a sessão autenticada é publicada.
@@ -88,6 +165,7 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
 
       setAuthError('Não foi possível iniciar uma sessão autenticada válida.');
     } catch (error) {
+      if (sequence !== submissionSequence.current) return;
       if (error?.isTimeout) {
         setAuthError(
           'O servidor demorou para responder. Verifique sua conexão e tente novamente.'
@@ -134,8 +212,10 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
         error?.detail || 'Ocorreu um erro inesperado ao tentar entrar na sua conta.'
       );
     } finally {
-      submittingRef.current = false;
-      setIsSubmitting(false);
+      if (sequence === submissionSequence.current) {
+        submittingRef.current = false;
+        setIsSubmitting(false);
+      }
     }
   }
 
@@ -147,7 +227,7 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
       <View style={styles.header}>
         <Pressable
           style={styles.backButton}
-          onPress={() => navigation.goBack()}
+          onPress={() => { handleCancelTwoFactor(); if (!challenge) navigation.goBack(); }}
           hitSlop={8}
           accessibilityLabel="Voltar"
         >
@@ -169,7 +249,7 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
           <Text style={styles.tag}>ACESSO</Text>
           <Text style={styles.title}>De volta ao jogo.</Text>
           <Text style={styles.subtitle}>
-            Informe suas credenciais para entrar na sua conta.
+            {challenge ? 'Confirme o segundo fator para concluir seu acesso.' : 'Informe suas credenciais para entrar na sua conta.'}
           </Text>
 
           {/* Formulário */}
@@ -194,6 +274,30 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
               </View>
             ) : null}
 
+            {challenge ? (
+              <>
+                {challenge.isTotpConfigured ? (
+                  <>
+                    <View style={styles.inputGroup}>
+                      <Text style={styles.label}>Código TOTP</Text>
+                      <TextInput style={styles.input} placeholder="Código de seis dígitos"
+                        placeholderTextColor="#64748b" value={twoFactorCode}
+                        onChangeText={(text) => { setTwoFactorCode(text.replace(/\D/g, '').slice(0, 6)); setAuthError(''); }}
+                        keyboardType="number-pad" maxLength={6} autoCorrect={false}
+                        textContentType="oneTimeCode" editable={!isSubmitting} accessibilityLabel="Código TOTP" />
+                    </View>
+                    <Pressable style={[styles.primaryButton, isSubmitting ? styles.primaryButtonDisabled : null]}
+                      onPress={handleVerifyTwoFactor} disabled={isSubmitting} accessibilityLabel="Verificar código">
+                      <Text style={styles.primaryButtonText}>{isSubmitting ? 'Verificando...' : 'Verificar código'}</Text>
+                    </Pressable>
+                  </>
+                ) : null}
+                <Pressable onPress={handleCancelTwoFactor} accessibilityLabel="Cancelar verificação">
+                  <Text style={styles.forgotPasswordText}>Cancelar verificação</Text>
+                </Pressable>
+              </>
+            ) : (
+              <>
             <View style={styles.inputGroup}>
               <Text style={styles.label}>E-mail</Text>
               <TextInput
@@ -209,9 +313,6 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
                   }
                   if (authError) {
                     setAuthError('');
-                  }
-                  if (twoFactorNotice) {
-                    setTwoFactorNotice('');
                   }
                 }}
                 keyboardType="email-address"
@@ -239,9 +340,6 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
                   if (authError) {
                     setAuthError('');
                   }
-                  if (twoFactorNotice) {
-                    setTwoFactorNotice('');
-                  }
                 }}
                 secureTextEntry
               />
@@ -268,10 +366,12 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
                 {isSubmitting ? 'Entrando...' : 'Entrar na conta'}
               </Text>
             </Pressable>
+              </>
+            )}
           </View>
 
           {/* Navegação cruzada para Cadastro */}
-          <Pressable
+          {!challenge ? <Pressable
             style={styles.switchAuthContainer}
             onPress={() => navigation.navigate('Register')}
             disabled={isSubmitting}
@@ -279,7 +379,7 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
             <Text style={styles.switchAuthText}>
               Ainda não tem cadastro? Crie sua conta
             </Text>
-          </Pressable>
+          </Pressable> : null}
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>

@@ -5,7 +5,7 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import ScreenContainer from '../../components/ScreenContainer';
 import { AuthContext } from '../../context/AuthContext';
 
-export default function HomeScreen({ navigation }) {
+export default function HomeScreen({ navigation, returnState }) {
   const auth = typeof useContext === 'function' ? useContext(AuthContext) : null;
 
   const hasPendingQuestionnaire =
@@ -18,6 +18,11 @@ export default function HomeScreen({ navigation }) {
       <Text style={styles.description}>
         Participe das experiências e eventos da BEAST MARAGAMES.
       </Text>
+
+      {returnState?.recentFinalization ? <Text>Sua participação recente foi encerrada.</Text> : null}
+      {returnState?.pendingEvaluationParticipationIds?.length > 0 ? (
+        <Text>Você possui {returnState.pendingEvaluationParticipationIds.length} avaliação(ões) pendente(s).</Text>
+      ) : null}
 
       {hasPendingQuestionnaire ? (
         <View style={styles.questionnaireBanner}>

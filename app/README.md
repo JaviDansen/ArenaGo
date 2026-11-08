@@ -1,6 +1,6 @@
 # ArenaGo — Frontend
 
-Este diretório contém o aplicativo mobile do ArenaGo, desenvolvido com React Native e Expo. A partir da K02, os fluxos de **Cadastro, Login, Restauração de Sessão, Renovação de Tokens e Logout** estão integrados ao backend real NestJS/PostgreSQL (`/api/v1/auth/*`), enquanto as operações de Arena/Eventos e Questionário ainda utilizam estado local até suas respectivas tasks de integração.
+Este diretório contém o aplicativo mobile do ArenaGo, desenvolvido com React Native e Expo. Cadastro, login, restauração de sessão, renovação de tokens, logout e questionário usam a API NestJS/PostgreSQL. As telas de entrada em eventos, Arena, filas e avaliações ainda utilizam dados ou estado locais, mesmo quando já existem endpoints correspondentes no backend.
 
 ## Estado atual
 
@@ -17,7 +17,7 @@ Este diretório contém o aplicativo mobile do ArenaGo, desenvolvido com React N
   - Login e restauração de sessão abrem `MainTabs` automaticamente. Cadastro cria a sessão e abre `ProfileQuestionnaire`; logout retorna à área pública. A remoção da rota anterior impede voltar à tela de Login após autenticar.
   - O estado de autenticação controla a árvore de rotas sem navegação manual nas telas de login, cadastro ou logout.
 - **Fluxos ainda locais:**
-  - O questionário apresenta três etapas: dados pessoais, jogos e informações sobre o mercado de games. É um fluxo local e seus dados ainda não são persistidos no backend; a integração e persistência serão feitas em uma task posterior (prevista na K03).
+  - O questionário apresenta três etapas: dados pessoais, jogos e informações sobre o mercado de games. `ProfileQuestionnaireScreen` consulta e grava em `/profile/questionnaire`; `ProfileScreen` também consulta o perfil persistido. A navegação e o preenchimento das etapas são estado de interface local.
   - A entrada manual aceita os códigos de demonstração `FILA` e `LIVRE`, sem diferenciar maiúsculas de minúsculas. `FILA` inicia uma espera simulada na fila externa; `LIVRE` entra diretamente na Arena.
   - Na Arena, o fluxo local simula filas de experiências, chamada, ausência, confirmação de atendimento e saída.
   - A avaliação permite selecionar de uma a cinco estrelas e escrever um comentário opcional.
@@ -26,10 +26,10 @@ Este diretório contém o aplicativo mobile do ArenaGo, desenvolvido com React N
 
 Versões declaradas em `package.json`:
 
-- Expo ~57.0.25, React Native 0.86.3 e React 19.2.3.
-- `expo-secure-store` ~57.0.4 para armazenamento seguro do `refreshToken` em dispositivos móveis.
+- Expo ~58.0.23, React Native 0.88.1 e React 19.3.0.
+- `expo-secure-store` ~58.0.2 para armazenamento seguro do `refreshToken` em dispositivos móveis.
 - React Navigation 7 para abas e navegação em pilha.
-- `@react-native-community/datetimepicker` 9.1.0 para seleção de data.
+- `@react-native-community/datetimepicker` 9.2.1 para seleção de data.
 - React Native Web 0.21.x para execução no navegador.
 
 ## Pré-requisitos
@@ -41,7 +41,7 @@ Versões declaradas em `package.json`:
 
 ## Configuração da URL da API (`EXPO_PUBLIC_API_BASE_URL`)
 
-O cliente HTTP compartilhado (`config/apiConfig.js` e `services/httpClient.js`) lê `EXPO_PUBLIC_API_BASE_URL` (ou `EXPO_PUBLIC_API_URL`) e acrescenta automaticamente `/api/v1` quando omitido. Consulte `app/.env.example`:
+O cliente HTTP compartilhado (`config/apiConfig.js` e `services/httpClient.js`) lê `EXPO_PUBLIC_API_BASE_URL` (ou o alias existente `EXPO_PUBLIC_API_URL`) por acesso estático compatível com o Expo e acrescenta automaticamente `/api/v1` quando omitido. Sem configuração, mantém o padrão `http://127.0.0.1:3000/api/v1`, útil apenas quando o app e a API compartilham o mesmo host. Consulte `app/.env.example`:
 
 - **Web ou simulador iOS local (padrão em desenvolvimento):**
   ```env
@@ -56,6 +56,23 @@ O cliente HTTP compartilhado (`config/apiConfig.js` e `services/httpClient.js`) 
   ```env
   EXPO_PUBLIC_API_BASE_URL=http://192.168.x.x:3000
   ```
+
+Para testar em celular físico, configure o IP LAN real do computador em `app/.env.local` (ignorado pelo Git), conecte computador e celular à mesma rede e permita a porta 3000 no firewall. No backend, `API_BIND_HOST` deve ser `0.0.0.0` para aceitar conexões da rede; o padrão `127.0.0.1` aceita somente conexões locais. No emulador Android, use `10.0.2.2`; no navegador no mesmo computador, use `127.0.0.1`. Reinicie ou recarregue completamente o app no Expo Go após alterar a variável. Nunca coloque senhas ou tokens em `EXPO_PUBLIC_*`.
+
+Em dois terminais PowerShell, após preparar manualmente o backend local conforme `backend/README.md`:
+
+```powershell
+Set-Location C:\DoJob\ProgramacaoMobile\backend
+$env:API_BIND_HOST = '0.0.0.0' # somente para o teste em celular físico na LAN
+npm.cmd run start:dev
+```
+
+```powershell
+Set-Location C:\DoJob\ProgramacaoMobile\app
+npm.cmd start
+```
+
+O Expo Go precisa alcançar tanto o servidor Expo quanto o endereço da API informado no `.env.local`. A execução automatizada local não comprova conectividade com um aparelho físico.
 
 ## Instalação e execução
 
@@ -82,8 +99,7 @@ Os testes usam o runner nativo do Node.js. Execute em `app/`:
 npm.cmd test
 ```
 
-Na validação atual, o comando passa com **155 testes aprovados** e nenhuma falha.
-Também foram reportados **11 testes manuais aprovados em iPhone físico**, cobrindo cadastro, login imediato, logout, restauração da sessão, troca de contas, validações e falhas de conexão.
+Após a migração para o SDK 58, o comando passou com **208 testes aprovados** e nenhuma falha. Os **11 testes manuais em iPhone físico** reportados anteriormente pertencem à validação anterior; a execução física com o Expo Go 58 ainda está pendente.
 
 ## Organização
 

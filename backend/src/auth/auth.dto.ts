@@ -58,9 +58,24 @@ export const refreshSchema = z
   })
   .strict();
 
+export const twoFactorVerifySchema = z
+  .object({
+    tempToken: z
+      .string({ error: "O desafio temporário é obrigatório e deve ser texto." })
+      .min(1)
+      .max(2_048),
+    code: z
+      .string({ error: "O código do segundo fator é obrigatório e deve ser texto." })
+      .refine((value) => /^[0-9]{6}$/.test(value) || /^[a-f0-9]{32}$/.test(value), {
+        message: "Informe um código TOTP de seis dígitos ou um código de recuperação válido.",
+      }),
+  })
+  .strict();
+
 export type RegisterDto = z.infer<typeof registerSchema>;
 export type LoginDto = z.infer<typeof loginSchema>;
 export type RefreshDto = z.infer<typeof refreshSchema>;
+export type TwoFactorVerifyDto = z.infer<typeof twoFactorVerifySchema>;
 
 export function validateDto<T>(schema: z.ZodType<T>, payload: unknown): T {
   if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {

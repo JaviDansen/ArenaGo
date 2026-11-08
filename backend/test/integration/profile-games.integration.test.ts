@@ -19,12 +19,20 @@ import {
 import { assertSafeTestDatabase } from "./test-db-guard";
 
 const connectionString = assertSafeTestDatabase(process.env.DATABASE_URL);
+process.env.STAFF_IDEMPOTENCY_TTL_SECONDS = "60";
+process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = "60";
+process.env.ADMIN_IDEMPOTENCY_TTL_SECONDS = "60";
 
 let app: INestApplication;
 let baseUrl: string;
 let pool: Pool;
 let loginRateLimiter: LoginRateLimiterService;
 let registrationRateLimiter: RegistrationRateLimiterService;
+
+const restoreQuestionnaireActivationSql = `UPDATE questionnaire_versions AS qv
+  SET activated_at = saved.activated_at::timestamptz
+  FROM unnest($1::uuid[], $2::text[]) AS saved(id, activated_at)
+  WHERE qv.id = saved.id`;
 
 function resetRateLimiters(): void {
   loginRateLimiter?.clearAll();
@@ -1050,9 +1058,9 @@ test("K03 Profile Questionnaire & Games Catalog — Integração HTTP + PostgreS
        )
        VALUES (
          $1, 'Evento Teste Snapshot K03', $2, 'America/Sao_Paulo',
-         clock_timestamp() - interval '1 hour',
-         clock_timestamp() + interval '2 hours',
-         clock_timestamp() + interval '3 hours',
+         statement_timestamp() - interval '1 hour',
+         statement_timestamp() + interval '2 hours',
+         statement_timestamp() + interval '3 hours',
          'open', false, 0, clock_timestamp(), clock_timestamp()
        )`,
       [eventId, accessCode],
@@ -1194,20 +1202,21 @@ test("K03 Profile Questionnaire & Games Catalog — Integração HTTP + PostgreS
   // ===========================================================================
   /* eslint-disable no-unsafe-finally, preserve-caught-error */
   await t.test("K03-F.1: Reinicialização da API jamais reativa versão inativa (activated_at = NULL)", async () => {
-    let originalActivatedAt: Date | null = null;
+    let originalVersions: { id: string; version: string; activated_at: string | null }[] = [];
     let originalReadSuccess = false;
     let primaryError: unknown = null;
     try {
-      // 0. Ler o valor original de activated_at para restauração exata
-      const origRes = await pool.query<{ activated_at: Date | null }>(
-        `SELECT activated_at FROM questionnaire_versions WHERE version = '1.0.0'`,
+      // 0. O endpoint usa qualquer versão ativa; salvar o catálogo inteiro para isolar o caso.
+      const origRes = await pool.query<{ id: string; version: string; activated_at: string | null }>(
+        `SELECT id, version, activated_at::text AS activated_at FROM questionnaire_versions ORDER BY id FOR UPDATE`,
       );
-      originalActivatedAt = origRes.rows[0]?.activated_at ?? null;
+      originalVersions = origRes.rows;
       originalReadSuccess = true;
+      assert.ok(originalVersions.some((version) => version.version === "1.0.0"));
 
-      // 1. Desativar propositalmente a versão 1.0.0
+      // 1. Desativar todas as versões para que 422 não dependa de estado residual do banco.
       await pool.query(
-        `UPDATE questionnaire_versions SET activated_at = NULL WHERE version = '1.0.0'`,
+        `UPDATE questionnaire_versions SET activated_at = NULL WHERE activated_at IS NOT NULL`,
       );
 
       // 2. Simular reinicialização executando onModuleInit do ProfileQuestionnaireService
@@ -1220,6 +1229,8 @@ test("K03 Profile Questionnaire & Games Catalog — Integração HTTP + PostgreS
       );
       assert.equal(checkInactive.rowCount, 1);
       assert.equal(checkInactive.rows[0].activated_at, null);
+      const activeVersions = await pool.query(`SELECT id FROM questionnaire_versions WHERE activated_at IS NOT NULL`);
+      assert.equal(activeVersions.rowCount, 0, "A fixture deve deixar o catálogo sem versões ativas");
 
       // 4. Salvar questionário sem versão ativa deve retornar 422 QUESTIONNAIRE_VERSION_UNAVAILABLE
       const user = await registerTestParticipant("sem-versao-ativa");
@@ -1244,10 +1255,10 @@ test("K03 Profile Questionnaire & Games Catalog — Integração HTTP + PostgreS
     } finally {
       if (originalReadSuccess) {
         try {
-          // Restaurar exatamente os valores originais da versão 1.0.0
+          // Restaurar exatamente os timestamps originais de todas as versões.
           await pool.query(
-            `UPDATE questionnaire_versions SET activated_at = $1 WHERE version = '1.0.0'`,
-            [originalActivatedAt],
+            restoreQuestionnaireActivationSql,
+            [originalVersions.map((version) => version.id), originalVersions.map((version) => version.activated_at)],
           );
         } catch (cleanupErr) {
           if (primaryError) {
@@ -1260,6 +1271,55 @@ test("K03 Profile Questionnaire & Games Catalog — Integração HTTP + PostgreS
           throw cleanupErr;
         }
       }
+    }
+  });
+
+  await t.test("K03-F.1: restauração conserva microssegundos, NULL e versões alheias", async () => {
+    const client = await pool.connect();
+    const activeId = randomUUID(), inactiveId = randomUUID(), unrelatedId = randomUUID();
+    try {
+      await client.query("BEGIN");
+      const fixtures: [string, string | null][] = [
+        [activeId, "2026-10-20 10:30:45.123456+00"],
+        [inactiveId, null],
+        [unrelatedId, "2026-10-20 07:30:45.654321-03"],
+      ];
+      for (const [id, activatedAt] of fixtures) {
+        await client.query(
+          `INSERT INTO questionnaire_versions(id,version,definition,activated_at,created_at)
+           VALUES($1::uuid,$2::varchar(40),'{}'::jsonb,$3::timestamptz,clock_timestamp())`,
+          [id, `k03-f1-${id.slice(0, 30)}`, activatedAt],
+        );
+      }
+      const ids = [activeId, inactiveId];
+      const snapshot = (await client.query<{ id: string; activated_at: string | null; created_at: string }>(
+        `SELECT id,activated_at::text AS activated_at,created_at::text AS created_at
+         FROM questionnaire_versions WHERE id=ANY($1::uuid[]) ORDER BY id FOR UPDATE`, [ids],
+      )).rows;
+      assert.equal(snapshot.length, 2);
+      assert.match(snapshot.find((row) => row.id === activeId)?.activated_at ?? "", /\.123456/);
+      assert.equal(snapshot.find((row) => row.id === inactiveId)?.activated_at, null);
+      const unrelatedBefore = (await client.query<{ activated_at: string; created_at: string }>(
+        `SELECT activated_at::text AS activated_at,created_at::text AS created_at
+         FROM questionnaire_versions WHERE id=$1::uuid`, [unrelatedId],
+      )).rows[0];
+      await client.query("UPDATE questionnaire_versions SET activated_at=NULL WHERE id=ANY($1::uuid[])", [ids]);
+      await client.query(restoreQuestionnaireActivationSql, [snapshot.map((row) => row.id), snapshot.map((row) => row.activated_at)]);
+      const restored = (await client.query<{ id: string; activated_at: string | null; created_at: string }>(
+        `SELECT id,activated_at::text AS activated_at,created_at::text AS created_at
+         FROM questionnaire_versions WHERE id=ANY($1::uuid[]) ORDER BY id`, [ids],
+      )).rows;
+      assert.deepEqual(restored, snapshot);
+      assert.equal((await client.query<{ exact: boolean }>(
+        "SELECT activated_at=$2::timestamptz AS exact FROM questionnaire_versions WHERE id=$1::uuid",
+        [activeId, fixtures[0][1]],
+      )).rows[0].exact, true);
+      assert.deepEqual((await client.query<{ activated_at: string; created_at: string }>(
+        `SELECT activated_at::text AS activated_at,created_at::text AS created_at
+         FROM questionnaire_versions WHERE id=$1::uuid`, [unrelatedId],
+      )).rows[0], unrelatedBefore);
+    } finally {
+      try { await client.query("ROLLBACK"); } finally { client.release(); }
     }
   });
 

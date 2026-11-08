@@ -60,6 +60,7 @@ export default function ParticipationsScreen({ navigation }) {
   return (
     <ScreenContainer>
       <Text style={styles.title}>Minhas Participações</Text>
+      <Text>Histórico de demonstração, ainda não conectado ao servidor.</Text>
       <FlatList
         data={participations}
         keyExtractor={(participation) => participation.id}

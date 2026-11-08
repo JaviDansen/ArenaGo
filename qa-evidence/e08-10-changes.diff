@@ -1,0 +1,1152 @@
+diff --git a/backend/src/evaluations/evaluation-read.controller.ts b/backend/src/evaluations/evaluation-read.controller.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..12dd6310aacab539ca8d4dbc3c57ba5d40e10bba
+--- /dev/null
++++ b/backend/src/evaluations/evaluation-read.controller.ts
+@@ -0,0 +1,49 @@
++import { Controller, Get, HttpCode, HttpStatus, Inject, Param, Query } from "@nestjs/common";
++import { CurrentUserId, RequireSessionAuth } from "../auth/current-user.decorator";
++import { ProblemException } from "../common/errors/problem.exception";
++import { validateOperationParams } from "../common/http/operation-validation";
++import { evaluationParams, historyQuery } from "./evaluation-read.dto";
++import { EvaluationReadService } from "./evaluation-read.service";
++
++function required<T>(value: T | null): T {
++  if (value === null) throw new ProblemException({ typeSlug: "resource-not-found", title: "Recurso não encontrado", status: HttpStatus.NOT_FOUND,
++    code: "RESOURCE_NOT_FOUND", detail: "Recurso não encontrado." });
++  return value;
++}
++/** Caminhos literais declarados antes dos parametrizados; nenhuma rota genérica :id. */
++@Controller()
++@RequireSessionAuth()
++export class EvaluationReadController {
++  constructor(@Inject(EvaluationReadService) private readonly reads: EvaluationReadService) {}
++
++  @Get("participations/history")
++  @HttpCode(HttpStatus.OK)
++  history(@CurrentUserId() userId: string, @Query() query: unknown) {
++    const parsed = historyQuery.safeParse(query);
++    if (!parsed.success) throw new ProblemException({ typeSlug: "validation-error", title: "Requisição inválida", status: HttpStatus.BAD_REQUEST,
++      code: "VALIDATION_ERROR", detail: "Confira limit e cursor do histórico." });
++    return this.reads.getHistory(userId, parsed.data);
++  }
++
++  @Get("participations/return-state")
++  @HttpCode(HttpStatus.OK)
++  returnState(@CurrentUserId() userId: string) { return this.reads.getReturnState(userId); }
++
++  @Get("evaluations/pending")
++  @HttpCode(HttpStatus.OK)
++  pending(@CurrentUserId() userId: string) { return this.reads.getPending(userId); }
++
++  @Get("participations/:participationId/evaluation-eligibility")
++  @HttpCode(HttpStatus.OK)
++  async eligibility(@CurrentUserId() userId: string, @Param() params: unknown) {
++    const { participationId } = validateOperationParams(evaluationParams, params);
++    return required(await this.reads.getEligibility(userId, participationId));
++  }
++
++  @Get("participations/:participationId/evaluation")
++  @HttpCode(HttpStatus.OK)
++  async evaluation(@CurrentUserId() userId: string, @Param() params: unknown) {
++    const { participationId } = validateOperationParams(evaluationParams, params);
++    return required(await this.reads.getEvaluation(userId, participationId));
++  }
++}
+diff --git a/backend/src/evaluations/evaluation-read.dto.ts b/backend/src/evaluations/evaluation-read.dto.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..ae6c1259fb62e7f9597e03bcee35013aecad903f
+--- /dev/null
++++ b/backend/src/evaluations/evaluation-read.dto.ts
+@@ -0,0 +1,34 @@
++import { z } from "zod";
++import { operationUuid } from "../common/http/operation-validation";
++
++export const evaluationParams = z.object({ participationId: operationUuid }).strict();
++
++/** Date somente valida calendário/milissegundos; o cursor preserva a string com seis casas. */
++export function isPreciseInstant(value: unknown): value is string {
++  if (typeof value !== "string" || !/^(?!0000)\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(value)) return false;
++  const instant = new Date(value);
++  return Number.isFinite(instant.getTime()) && instant.toISOString().slice(0, 23) === value.slice(0, 23);
++}
++const cursorValue = z.object({ v: z.literal(1), joinedAt: z.custom<string>(isPreciseInstant), id: operationUuid }).strict();
++export type HistoryCursor = z.infer<typeof cursorValue>;
++export function encodeHistoryCursor(joinedAt: string, id: string): string {
++  return Buffer.from(JSON.stringify(cursorValue.parse({ v: 1, joinedAt, id })), "utf8").toString("base64url");
++}
++function decodeCursor(raw: string): HistoryCursor | undefined {
++  try {
++    if (!/^[A-Za-z0-9_-]+$/.test(raw) || raw.length > 512) return;
++    const bytes = Buffer.from(raw, "base64url");
++    if (bytes.toString("base64url") !== raw) return;
++    const parsed = cursorValue.safeParse(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)));
++    if (parsed.success) return parsed.data;
++  } catch { /* Apenas cursor inválido; nenhum dado arbitrário é refletido no erro. */ }
++}
++export const historyQuery = z.object({
++  limit: z.string().regex(/^[1-9]\d?$/).transform(Number).pipe(z.number().max(50)).optional().default(20),
++  cursor: z.string().transform((value, ctx) => {
++    const decoded = decodeCursor(value);
++    if (!decoded) { ctx.addIssue({ code: "custom", message: "Cursor inválido." }); return z.NEVER; }
++    return decoded;
++  }).optional(),
++}).strict();
++export type HistoryPage = z.infer<typeof historyQuery>;
+diff --git a/backend/src/evaluations/evaluation-read.policy.ts b/backend/src/evaluations/evaluation-read.policy.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..0484b1a5dbbb075dfe92fe22287c8a83cf8dc14c
+--- /dev/null
++++ b/backend/src/evaluations/evaluation-read.policy.ts
+@@ -0,0 +1,63 @@
++import { sql, type SQL } from "drizzle-orm";
++import type { EvaluationEligibility, OwnEvaluation, ParticipationStatus, EligibilityReason } from "./evaluation-read.types";
++import { isPreciseInstant } from "./evaluation-read.dto";
++
++export const SYSTEM_FINALIZATION_REASONS = ["admin_immediate", "admin_controlled_external_wait_closed", "automatic_operational_deadline", "automatic_admin_deadline"] as const;
++
++/** Todas as cinco projeções usam os mesmos fatos e comparações no PostgreSQL. */
++export function evaluationReadProjection(selection: SQL, observedAt: string): SQL {
++  return sql`WITH scoped AS MATERIALIZED (${selection}), facts AS (
++    SELECT p.*,c.n::text AS completed_count,v.id AS evaluation_id,v.rating,v.comment,v.submitted_at,v.updated_at AS evaluation_updated_at,v.first_comment_at
++    FROM scoped p LEFT JOIN evaluations v ON v.participation_id=p.id
++    CROSS JOIN LATERAL (SELECT count(*) AS n FROM queue_entries q JOIN service_sessions s ON s.queue_entry_id=q.id AND s.experience_id=q.experience_id
++      WHERE q.participation_id=p.id AND q.event_id=p.event_id AND s.status='completed') c
++  ), policy AS (
++    SELECT f.*,status='finished' AND completed_count::bigint>0 AS eligible,evaluation_id IS NOT NULL AS submitted,
++      CASE WHEN status='finished' THEN finished_at+interval '720 hours' END AS deadline,
++      COALESCE(${observedAt}::timestamptz>=submitted_at AND ${observedAt}::timestamptz<=submitted_at+interval '168 hours',false) AS edit_full,
++      COALESCE(${observedAt}::timestamptz>submitted_at+interval '168 hours' AND ${observedAt}::timestamptz<=submitted_at+interval '720 hours'
++        AND first_comment_at IS NULL,false) AS add_comment
++    FROM facts f
++  ) SELECT id AS "participationId",event_id AS "eventId",event_name AS "eventName",status,
++    to_char(joined_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "joinedAt",
++    to_char(arena_entered_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "arenaEnteredAt",
++    to_char(finished_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "finishedAt",finish_reason AS "finishReason",
++    completed_count AS "completedCount",eligible,submitted,
++    COALESCE(eligible AND NOT submitted AND ${observedAt}::timestamptz<=deadline,false) AS pending,
++    to_char(deadline AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "deadlineAt",
++    CASE WHEN status<>'finished' THEN 'NOT_FINISHED'
++      WHEN completed_count::bigint=0 THEN CASE WHEN finish_reason='admin_controlled_external_wait_closed' THEN 'EXTERNAL_WAIT_CLOSED' ELSE 'NO_COMPLETED_SERVICE' END
++      WHEN submitted THEN 'ALREADY_SUBMITTED' WHEN ${observedAt}::timestamptz>deadline THEN 'SUBMISSION_EXPIRED' END AS reason,
++    evaluation_id AS "evaluationId",rating,comment,
++    to_char(submitted_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "submittedAt",
++    to_char(evaluation_updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "updatedAt",
++    to_char((submitted_at+interval '168 hours') AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "editableUntilAt",
++    to_char((submitted_at+interval '720 hours') AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "commentAddUntilAt",
++    edit_full AS "editFull",add_comment AS "addComment" FROM policy`;
++}
++export interface EvaluationReadRow extends Record<string, unknown> {
++  participationId: string; eventId: string; eventName: string; status: ParticipationStatus;
++  joinedAt: string; arenaEnteredAt: string | null; finishedAt: string | null; finishReason: string | null;
++  completedCount: string; eligible: boolean; submitted: boolean; pending: boolean; deadlineAt: string | null; reason: EligibilityReason | null;
++  evaluationId: string | null; rating: number | null; comment: string | null; submittedAt: string | null; updatedAt: string | null;
++  editableUntilAt: string | null; commentAddUntilAt: string | null; editFull: boolean; addComment: boolean;
++}
++export function ensureRead(value: unknown): asserts value { if (!value) throw new Error("EVALUATION_READ_INTEGRITY"); }
++export function completedCount(raw: string): number {
++  ensureRead(typeof raw === "string" && /^(0|[1-9]\d*)$/.test(raw));
++  const value = Number(raw); ensureRead(Number.isSafeInteger(value)); return value;
++}
++export function eligibility(row: EvaluationReadRow): EvaluationEligibility {
++  ensureRead(["waiting", "active", "finished", "canceled"].includes(row.status) && isPreciseInstant(row.joinedAt));
++  ensureRead(row.status !== "finished" || (isPreciseInstant(row.finishedAt) && isPreciseInstant(row.deadlineAt)));
++  return { participationId: row.participationId, participationStatus: row.status, completedServicesCount: completedCount(row.completedCount),
++    eligible: row.eligible, submitted: row.submitted, pending: row.pending, firstSubmissionDeadlineAt: row.deadlineAt, reason: row.reason };
++}
++export function ownEvaluation(row: EvaluationReadRow): OwnEvaluation | null {
++  if (row.evaluationId === null) return null;
++  ensureRead(Number.isInteger(row.rating) && row.rating! >= 1 && row.rating! <= 5 && (row.comment === null || typeof row.comment === "string")
++    && isPreciseInstant(row.submittedAt) && isPreciseInstant(row.updatedAt) && isPreciseInstant(row.editableUntilAt) && isPreciseInstant(row.commentAddUntilAt));
++  return { id: row.evaluationId, participationId: row.participationId, rating: row.rating!, comment: row.comment,
++    submittedAt: row.submittedAt, updatedAt: row.updatedAt, editableUntilAt: row.editableUntilAt, commentAddUntilAt: row.commentAddUntilAt,
++    permissions: { canEditRating: row.editFull, canEditComment: row.editFull || row.addComment, canAddFirstComment: row.addComment } };
++}
+diff --git a/backend/src/evaluations/evaluation-read.service.ts b/backend/src/evaluations/evaluation-read.service.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..1d5a6e76b5e44abbe6a52cdcc6cbf1a5d979c87c
+--- /dev/null
++++ b/backend/src/evaluations/evaluation-read.service.ts
+@@ -0,0 +1,79 @@
++import { Inject, Injectable } from "@nestjs/common";
++import { sql, type SQL } from "drizzle-orm";
++import type { NodePgDatabase } from "drizzle-orm/node-postgres";
++import { DRIZZLE_DATABASE } from "../database/database.module";
++import type { DatabaseTransactionExecutor } from "../database/database-executor";
++import type * as schema from "../database/schema";
++import { encodeHistoryCursor, isPreciseInstant, type HistoryPage } from "./evaluation-read.dto";
++import { evaluationReadProjection, eligibility, ownEvaluation, ensureRead, SYSTEM_FINALIZATION_REASONS, type EvaluationReadRow } from "./evaluation-read.policy";
++import type { PendingEvaluation, ParticipationHistoryItem, ParticipationReturnState } from "./evaluation-read.types";
++
++@Injectable()
++export class EvaluationReadService {
++  constructor(@Inject(DRIZZLE_DATABASE) private readonly database: NodePgDatabase<typeof schema>) {}
++
++  private async snapshot<T>(read: (tx: DatabaseTransactionExecutor, at: string) => Promise<T>): Promise<T> {
++    return this.database.transaction(async tx => {
++      const row = (await tx.execute<{ at: string }>(sql`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`)).rows[0];
++      ensureRead(row && isPreciseInstant(row.at)); return read(tx, row.at);
++    }, { isolationLevel: "repeatable read", accessMode: "read only" });
++  }
++  private selection(userId: string, condition: SQL = sql`true`, tail: SQL = sql``): SQL {
++    return sql`SELECT p.id,p.event_id,e.name AS event_name,p.status,p.joined_at,p.arena_entered_at,p.finished_at,p.finish_reason
++      FROM participations p JOIN events e ON e.id=p.event_id WHERE p.user_id=${userId} AND ${condition} ${tail}`;
++  }
++  private async one(tx: DatabaseTransactionExecutor, at: string, userId: string, participationId: string) {
++    const result = await tx.execute<EvaluationReadRow>(evaluationReadProjection(this.selection(userId, sql`p.id=${participationId}`), at));
++    ensureRead(result.rows.length <= 1); return result.rows[0];
++  }
++  async getEligibility(userId: string, participationId: string) {
++    return this.snapshot(async (tx, at) => { const row = await this.one(tx, at, userId, participationId); return row ? eligibility(row) : null; });
++  }
++  async getEvaluation(userId: string, participationId: string) {
++    return this.snapshot(async (tx, at) => {
++      const row = await this.one(tx, at, userId, participationId);
++      return row ? { evaluation: ownEvaluation(row), eligibility: eligibility(row) } : null;
++    });
++  }
++  private async pending(tx: DatabaseTransactionExecutor, at: string, userId: string): Promise<PendingEvaluation[]> {
++    const query = evaluationReadProjection(this.selection(userId, sql`p.status='finished' AND p.finished_at+interval '720 hours'>=${at}::timestamptz
++      AND NOT EXISTS(SELECT 1 FROM evaluations v WHERE v.participation_id=p.id)`), at);
++    const result = await tx.execute<EvaluationReadRow>(sql`SELECT * FROM (${query}) projected WHERE pending ORDER BY "finishedAt" DESC,"participationId" DESC`);
++    return result.rows.map(row => {
++      const info = eligibility(row); ensureRead(info.pending && row.finishedAt !== null && info.firstSubmissionDeadlineAt !== null);
++      return { participationId: row.participationId, event: { id: row.eventId, name: row.eventName }, finishedAt: row.finishedAt,
++        firstSubmissionDeadlineAt: info.firstSubmissionDeadlineAt, completedServicesCount: info.completedServicesCount };
++    });
++  }
++  async getPending(userId: string) { return this.snapshot(async (tx, at) => ({ items: await this.pending(tx, at, userId) })); }
++
++  async getHistory(userId: string, page: HistoryPage) {
++    return this.snapshot(async (tx, at) => {
++      const cursor = page.cursor, after = cursor ? sql`(p.joined_at,p.id)<(${cursor.joinedAt}::timestamptz,${cursor.id}::uuid)` : sql`true`;
++      const query = evaluationReadProjection(this.selection(userId, after, sql`ORDER BY p.joined_at DESC,p.id DESC LIMIT ${page.limit + 1}`), at);
++      const rows = (await tx.execute<EvaluationReadRow>(sql`SELECT * FROM (${query}) projected ORDER BY "joinedAt" DESC,"participationId" DESC`)).rows;
++      const visible = rows.slice(0, page.limit);
++      const items: ParticipationHistoryItem[] = visible.map(row => {
++        const info = eligibility(row);
++        return { participationId: row.participationId, event: { id: row.eventId, name: row.eventName }, status: row.status,
++          joinedAt: row.joinedAt, arenaEnteredAt: row.arenaEnteredAt, finishedAt: row.finishedAt, finishReason: row.finishReason,
++          completedServicesCount: info.completedServicesCount, evaluation: { eligible: info.eligible, submitted: info.submitted, pending: info.pending } };
++      });
++      const last = visible.at(-1);
++      return { items, nextCursor: rows.length > page.limit && last ? encodeHistoryCursor(last.joinedAt, last.participationId) : null };
++    });
++  }
++  async getReturnState(userId: string): Promise<ParticipationReturnState> {
++    return this.snapshot(async (tx, at) => {
++      const pending = await this.pending(tx, at, userId);
++      const row = (await tx.execute<{ participationId: string; eventId: string; finishReason: string; finishedAt: string }>(sql`
++        SELECT id AS "participationId",event_id AS "eventId",finish_reason AS "finishReason",
++          to_char(finished_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "finishedAt"
++        FROM participations WHERE user_id=${userId} AND status='finished' AND finish_reason IN (${sql.join(SYSTEM_FINALIZATION_REASONS.map(reason => sql`${reason}`), sql`,`)})
++        ORDER BY finished_at DESC,id DESC LIMIT 1`)).rows[0];
++      if (row) ensureRead(isPreciseInstant(row.finishedAt));
++      return { recentFinalization: row ? { participationId: row.participationId, eventId: row.eventId, finishReason: row.finishReason, finishedAt: row.finishedAt } : null,
++        pendingEvaluationParticipationIds: pending.map(item => item.participationId) };
++    });
++  }
++}
+diff --git a/backend/src/evaluations/evaluation-read.types.ts b/backend/src/evaluations/evaluation-read.types.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..1cac53d5b5d1be436cdba87921e8eedcbf461e19
+--- /dev/null
++++ b/backend/src/evaluations/evaluation-read.types.ts
+@@ -0,0 +1,34 @@
++export type ParticipationStatus = "waiting" | "active" | "finished" | "canceled";
++export type EligibilityReason = "NOT_FINISHED" | "NO_COMPLETED_SERVICE" | "EXTERNAL_WAIT_CLOSED" | "ALREADY_SUBMITTED" | "SUBMISSION_EXPIRED";
++export interface EvaluationEligibility {
++  participationId: string;
++  participationStatus: ParticipationStatus;
++  completedServicesCount: number;
++  eligible: boolean;
++  submitted: boolean;
++  pending: boolean;
++  firstSubmissionDeadlineAt: string | null;
++  reason: EligibilityReason | null;
++}
++export interface PendingEvaluation {
++  participationId: string;
++  event: { id: string; name: string };
++  finishedAt: string;
++  firstSubmissionDeadlineAt: string;
++  completedServicesCount: number;
++}
++export interface OwnEvaluation {
++  id: string; participationId: string; rating: number; comment: string | null;
++  submittedAt: string; updatedAt: string; editableUntilAt: string; commentAddUntilAt: string;
++  permissions: { canEditRating: boolean; canEditComment: boolean; canAddFirstComment: boolean };
++}
++export interface ParticipationHistoryItem {
++  participationId: string; event: { id: string; name: string }; status: ParticipationStatus;
++  joinedAt: string; arenaEnteredAt: string | null; finishedAt: string | null; finishReason: string | null;
++  completedServicesCount: number;
++  evaluation: Pick<EvaluationEligibility, "eligible" | "submitted" | "pending">;
++}
++export interface ParticipationReturnState {
++  recentFinalization: { participationId: string; eventId: string; finishReason: string; finishedAt: string } | null;
++  pendingEvaluationParticipationIds: string[];
++}
+diff --git a/backend/src/events/events.module.ts b/backend/src/events/events.module.ts
+index 56941612a33ce1b39ce1ebf606eccbff9642a7e7..d6be72e50e0c60646034fbde6bbf71e75dec523e 100644
+--- a/backend/src/events/events.module.ts
++++ b/backend/src/events/events.module.ts
+@@ -21,12 +21,14 @@ import { StationAvailabilityService } from "./station-availability.service";
+ import { EventClosureService } from "./event-closure.service";
+ import { EventClosurePolicy } from "./event-closure.policy";
+ import { EventClosureScheduler } from "./event-closure.scheduler";
++import { EvaluationReadController } from "../evaluations/evaluation-read.controller";
++import { EvaluationReadService } from "../evaluations/evaluation-read.service";
+ 
+ /** Agrupa os serviços de Events e reutiliza o acesso PostgreSQL compartilhado. */
+ @Module({
+   imports: [DatabaseModule, AuthModule],
+-  controllers: [StaffOperationsController, StaffQueriesController, StationAvailabilityController, ParticipantQueueController, ExperiencesController],
+-  providers: [EventsService, StaffQueriesService, StationAvailabilityService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, StaffIdempotencyPolicy, ParticipantQueueIdempotencyPolicy, EventClosureService, EventClosurePolicy, EventClosureScheduler],
+-  exports: [EventsService, StaffQueriesService, StationAvailabilityService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, EventClosureService],
++  controllers: [EvaluationReadController, StaffOperationsController, StaffQueriesController, StationAvailabilityController, ParticipantQueueController, ExperiencesController],
++  providers: [EventsService, StaffQueriesService, StationAvailabilityService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, StaffIdempotencyPolicy, ParticipantQueueIdempotencyPolicy, EventClosureService, EventClosurePolicy, EventClosureScheduler, EvaluationReadService],
++  exports: [EventsService, StaffQueriesService, StationAvailabilityService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, EventClosureService, EvaluationReadService],
+ })
+ export class EventsModule {}
+diff --git a/backend/test/integration/evaluation-read-fixture.ts b/backend/test/integration/evaluation-read-fixture.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..f64c493a3a5a6a67d73223503580f8de601373fa
+--- /dev/null
++++ b/backend/test/integration/evaluation-read-fixture.ts
+@@ -0,0 +1,61 @@
++import assert from "node:assert/strict";
++import { randomUUID } from "node:crypto";
++import supertest from "supertest";
++import { app, pool, account, type Context } from "./event-closure-fixture";
++export { setup, cleanup, app, pool, database, account, context, person, rich, state, close, controlled, immediate } from "./event-closure-fixture";
++export type { Context } from "./event-closure-fixture";
++export type Actor = Awaited<ReturnType<typeof account>>;
++export const routes = (id: string) => [`/participations/${id}/evaluation-eligibility`, "/evaluations/pending", `/participations/${id}/evaluation`, "/participations/history", "/participations/return-state"];
++export const get = (actor: Actor, route: string) => supertest(app.getHttpServer()).get(`/api/v1${route}`).set("Authorization", `Bearer ${actor.token}`);
++export function problem(response: supertest.Response, status: number, code: string) {
++  assert.equal(response.status, status, JSON.stringify(response.body)); assert.equal(response.body.code, code); assert.equal(response.body.status, status);
++  assert.match(response.headers["content-type"], /application\/problem\+json/);
++}
++export async function participant(c: Context, options: { actor?: Actor; status?: "waiting" | "active" | "finished" | "canceled"; days?: number; reason?: string } = {}) {
++  const actor = options.actor ?? await account(), id = randomUUID(), status = options.status ?? "finished", terminal = status === "finished" || status === "canceled";
++  const result = await pool.query(`WITH t AS (SELECT clock_timestamp()-$5::int*interval '24 hours' AS at)
++    INSERT INTO participations(id,user_id,event_id,status,joined_at,arena_entered_at,finished_at,finish_reason)
++    SELECT $1,$2,$3,$4::varchar(20),t.at-interval '40 minutes',CASE WHEN $4::varchar(20) IN ('active','finished') THEN t.at-interval '35 minutes' END,
++      CASE WHEN $6::boolean THEN t.at END,CASE WHEN $6::boolean THEN $7::varchar(40) END FROM t RETURNING id`,
++  [id, actor.userId, c.eventId, status, options.days ?? 0, terminal, options.reason ?? "voluntary"]);
++  assert.equal(result.rowCount, 1); return { ...actor, participationId: id };
++}
++export async function service(c: Context, participationId: string, status: "completed" | "absent" | "canceled" | "pending" = "completed") {
++  const entryId = randomUUID(), sessionId = randomUUID(), pending = status === "pending";
++  const order = (await pool.query("UPDATE experiences SET last_queue_order=last_queue_order+1 WHERE id=$1 RETURNING last_queue_order::text AS n", [c.experienceId])).rows[0].n;
++  await pool.query(`INSERT INTO queue_entries(id,participation_id,event_id,experience_id,queue_order,status,entered_at,closed_at,close_reason)
++    SELECT $1,p.id,p.event_id,$3,$4::bigint,CASE WHEN $5::boolean THEN 'called' ELSE 'closed' END,p.joined_at+interval '10 minutes',
++      CASE WHEN NOT $5::boolean THEN p.joined_at+interval '12 minutes' END,CASE WHEN NOT $5::boolean THEN $6::varchar(40) END
++    FROM participations p WHERE p.id=$2`, [entryId, participationId, c.experienceId, order, pending, status]);
++  await pool.query(`INSERT INTO service_sessions(id,queue_entry_id,experience_id,station_id,called_by_user_id,called_at,status,resolved_at,resolved_by_user_id,cancel_reason)
++    SELECT $1,$2,$3,$4,$5,p.joined_at+interval '11 minutes',$6::varchar(20),
++      CASE WHEN NOT $7::boolean THEN p.joined_at+interval '12 minutes' END,CASE WHEN NOT $7::boolean THEN $5::uuid END,
++      CASE WHEN $6::varchar(20)='canceled' THEN 'fixture_canceled' END FROM participations p WHERE p.id=$8`,
++  [sessionId, entryId, c.experienceId, c.stationId, c.staff.userId, status, pending, participationId]);
++  if (pending) await pool.query("UPDATE participations SET current_queue_entry_id=$2 WHERE id=$1 AND status='active'", [participationId, entryId]);
++  return { entryId, sessionId };
++}
++export async function evaluation(participationId: string, options: { days?: number; usedComment?: boolean; comment?: string | null } = {}) {
++  const id = randomUUID(), comment = options.comment ?? null;
++  await pool.query(`INSERT INTO evaluations(id,participation_id,rating,comment,submitted_at,updated_at,first_comment_at)
++    VALUES($1,$2,4,$3,clock_timestamp()-$4::int*interval '24 hours',clock_timestamp(),
++      CASE WHEN $5::boolean THEN clock_timestamp()-$4::int*interval '24 hours' END)`,
++  [id, participationId, comment, options.days ?? 0, options.usedComment ?? comment !== null]);
++  return id;
++}
++export async function expire(c: Context, days = 0) {
++  return (await pool.query(`WITH t AS (SELECT clock_timestamp()-$2::int*interval '24 hours'-interval '1 second' AS at)
++    UPDATE events e SET starts_at=t.at-interval '2 hours',official_ends_at=t.at-interval '30 minutes',operational_deadline_at=t.at
++    FROM t WHERE e.id=$1 RETURNING to_char(t.at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`, [c.eventId, days])).rows[0].at as string;
++}
++export async function ownState(c: Context, actor: Actor) {
++  const r = (await pool.query(`SELECT jsonb_build_object(
++    'participations',(SELECT jsonb_agg(to_jsonb(p) ORDER BY p.id) FROM participations p WHERE p.user_id=$1),
++    'evaluations',(SELECT jsonb_agg(to_jsonb(v) ORDER BY v.id) FROM evaluations v JOIN participations p ON p.id=v.participation_id WHERE p.user_id=$1),
++    'queues',(SELECT jsonb_agg(to_jsonb(q)||jsonb_build_object('queue_order',q.queue_order::text) ORDER BY q.id) FROM queue_entries q JOIN participations p ON p.id=q.participation_id WHERE p.user_id=$1),
++    'services',(SELECT jsonb_agg(to_jsonb(s) ORDER BY s.id) FROM service_sessions s JOIN queue_entries q ON q.id=s.queue_entry_id JOIN participations p ON p.id=q.participation_id WHERE p.user_id=$1),
++    'sessions',(SELECT jsonb_agg(to_jsonb(s) ORDER BY s.id) FROM sessions s WHERE s.user_id=$1),
++    'intents',(SELECT jsonb_agg(to_jsonb(i) ORDER BY i.id) FROM idempotency_operations i WHERE i.actor_user_id=$1),
++    'event',(SELECT to_jsonb(e)||jsonb_build_object('external_last_order',e.external_last_order::text) FROM events e WHERE e.id=$2)) AS value`, [actor.userId, c.eventId])).rows[0].value;
++  return r;
++}
+diff --git a/backend/test/integration/evaluation-read.integration.test.ts b/backend/test/integration/evaluation-read.integration.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..6f4121dfcb36fb06a2180d9f455c556a021bc1cd
+--- /dev/null
++++ b/backend/test/integration/evaluation-read.integration.test.ts
+@@ -0,0 +1,241 @@
++import assert from "node:assert/strict";
++import { randomUUID } from "node:crypto";
++import { before, after, test } from "node:test";
++import { sql } from "drizzle-orm";
++import { PgDialect } from "drizzle-orm/pg-core";
++import supertest from "supertest";
++import type { EventClosureService } from "../../src/events/event-closure.service";
++import type { EvaluationReadRow } from "../../src/evaluations/evaluation-read.policy";
++import { setup, cleanup, app, pool, database, context, account, participant, service, evaluation, expire, ownState, routes, get, problem,
++  person, rich, close, controlled } from "./evaluation-read-fixture";
++
++let closure: EventClosureService;
++let projection: typeof import("../../src/evaluations/evaluation-read.policy").evaluationReadProjection;
++before(async () => {
++  await setup();
++  closure = app.get((await import("../../src/events/event-closure.service")).EventClosureService);
++  projection = (await import("../../src/evaluations/evaluation-read.policy")).evaluationReadProjection;
++});
++after(cleanup);
++
++for (const status of ["waiting", "active", "finished", "canceled"] as const) for (const completed of [0, 2])
++  test(`E08.10 PostgreSQL elegibilidade ${status} com ${completed} completed reais`, async () => {
++    const c = await context(), p = await participant(c, { status });
++    for (let n = 0; n < completed; n++) await service(c, p.participationId);
++    // Outros terminais nunca contam como conclusão; pending só é corrente em active.
++    await service(c, p.participationId, "absent"); await service(c, p.participationId, "canceled"); if (status === "active") await service(c, p.participationId, "pending");
++    const r = await get(p, routes(p.participationId)[0]); assert.equal(r.status, 200);
++    assert.equal(r.body.participationId, p.participationId); assert.equal(r.body.participationStatus, status); assert.equal(r.body.completedServicesCount, completed);
++    assert.equal(r.body.eligible, status === "finished" && completed > 0); assert.equal(r.body.pending, status === "finished" && completed > 0);
++    assert.equal(r.body.submitted, false); assert.equal(r.body.reason, status !== "finished" ? "NOT_FINISHED" : completed ? null : "NO_COMPLETED_SERVICE");
++    assert.equal(r.body.firstSubmissionDeadlineAt === null, status !== "finished");
++    const own = await get(p, routes(p.participationId)[2]); assert.equal(own.status, 200); assert.equal(own.body.evaluation, null); assert.deepEqual(own.body.eligibility, r.body);
++  });
++
++for (const role of ["participant", "staff", "admin"] as const) for (const endpoint of ["evaluation-eligibility", "evaluation"])
++  test(`E08.10 PostgreSQL ${role} não consulta participação alheia em ${endpoint}`, async () => {
++    const c = await context(), p = await participant(c), actor = role === "admin" ? c.admin : role === "staff" ? c.staff : await account(); await service(c, p.participationId); await evaluation(p.participationId);
++    const a = await get(actor, `/participations/${p.participationId}/${endpoint}`), b = await get(actor, `/participations/${randomUUID()}/${endpoint}`);
++    problem(a, 404, "RESOURCE_NOT_FOUND"); problem(b, 404, "RESOURCE_NOT_FOUND"); assert.deepEqual(a.body, b.body);
++  });
++for (const endpoint of [0, 1, 2, 3, 4]) for (const state of ["missing", "revoked", "expired", "inactive", "admin-2fa"] as const)
++  test(`E08.10 PostgreSQL rota ${endpoint} recusa sessão ${state}`, async () => {
++    const c = await context(), actor = state === "admin-2fa" ? c.admin : await account(), p = await participant(c, { actor });
++    if (state === "revoked") await pool.query("UPDATE sessions SET revoked_at=clock_timestamp() WHERE id=$1", [actor.sessionId]);
++    if (state === "expired") await pool.query("UPDATE sessions SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [actor.sessionId]);
++    if (state === "inactive") await pool.query("UPDATE users SET is_active=false WHERE id=$1", [actor.userId]);
++    if (state === "admin-2fa") await pool.query("UPDATE sessions SET admin_2fa_verified_at=NULL WHERE id=$1", [actor.sessionId]);
++    const route = routes(p.participationId)[endpoint], before = await ownState(c, actor);
++    const r = state === "missing" ? await supertest(app.getHttpServer()).get(`/api/v1${route}`) : await get(actor, route);
++    problem(r, 401, state === "missing" ? "MISSING_ACCESS_TOKEN" : state === "revoked" ? "SESSION_REVOKED" : state === "expired" ? "SESSION_EXPIRED" : state === "inactive" ? "ACCOUNT_DEACTIVATED" : "ADMIN_2FA_REQUIRED");
++    assert.deepEqual(await ownState(c, actor), before);
++  });
++test("E08.10 PostgreSQL Admin participante acessa apenas os próprios registros com 2FA válido", async () => {
++  const c = await context(), p = await participant(c, { actor: c.admin }); await service(c, p.participationId); await evaluation(p.participationId);
++  for (const route of routes(p.participationId)) assert.equal((await get(c.admin, route)).status, 200);
++});
++test("E08.10 PostgreSQL pendências separam reentradas, excluem expiradas/submetidas e ordenam por fim/UUID", async () => {
++  const c = await context(), actor = await account(), a = await participant(c, { actor, days: 1 }), b = await participant(c, { actor, days: 1 }), expired = await participant(c, { actor, days: 31 }), submitted = await participant(c, { actor });
++  const noService = await participant(c, { actor, days: 1 });
++  for (const p of [a, b, expired, submitted]) await service(c, p.participationId); await evaluation(submitted.participationId);
++  await pool.query(`WITH t AS MATERIALIZED (SELECT date_trunc('seconds',clock_timestamp()-interval '24 hours')+interval '0.123456 second' AS at)
++    UPDATE participations SET finished_at=t.at FROM t WHERE id=ANY($1::uuid[])`, [[a.participationId, b.participationId]]);
++  const r = await get(actor, "/evaluations/pending"); assert.equal(r.status, 200); assert.deepEqual(r.body.items.map((p: { participationId: string }) => p.participationId), [a.participationId, b.participationId].sort().reverse());
++  for (const item of r.body.items) { assert.deepEqual(item.event, { id: c.eventId, name: "E089 fixture" }); assert.equal(item.completedServicesCount, 1); assert.match(item.finishedAt, /\.123456Z$/); }
++  const r2 = await get(actor, "/participations/return-state"); assert.deepEqual(r2.body.pendingEvaluationParticipationIds, r.body.items.map((p: { participationId: string }) => p.participationId));
++  const old = await get(expired, routes(expired.participationId)[0]); assert.equal(old.body.eligible, true); assert.equal(old.body.pending, false); assert.equal(old.body.reason, "SUBMISSION_EXPIRED");
++  const history = await get(actor, "/participations/history"); assert.equal(history.status, 200);
++  assert.equal(history.body.items.find((p: { participationId: string }) => p.participationId === expired.participationId).evaluation.pending, false);
++  const empty = history.body.items.find((p: { participationId: string }) => p.participationId === noService.participationId); assert.equal(empty.completedServicesCount, 0); assert.equal(empty.evaluation.eligible, false);
++});
++test("E08.10 PostgreSQL titular sem participações recebe listas vazias e retorno neutro", async () => {
++  const actor = await account(); const pending = await get(actor, "/evaluations/pending"), history = await get(actor, "/participations/history"), returned = await get(actor, "/participations/return-state");
++  for (const response of [pending, history, returned]) assert.equal(response.status, 200);
++  assert.deepEqual(pending.body, { items: [] }); assert.deepEqual(history.body, { items: [], nextCursor: null });
++  assert.deepEqual(returned.body, { recentFinalization: null, pendingEvaluationParticipationIds: [] });
++});
++test("E08.10 PostgreSQL relógios independentes e updated_at recente não reinicia janela de edição", async () => {
++  const c = await context(), p = await participant(c, { days: 35 }); await service(c, p.participationId); const eid = await evaluation(p.participationId, { days: 10 });
++  const r = await get(p, routes(p.participationId)[2]); assert.equal(r.status, 200); assert.equal(r.body.eligibility.reason, "ALREADY_SUBMITTED"); assert.equal(r.body.eligibility.pending, false);
++  assert.deepEqual(r.body.evaluation.permissions, { canEditRating: false, canEditComment: true, canAddFirstComment: true });
++  assert.equal(r.body.evaluation.id, eid); assert.equal(r.body.evaluation.rating, 4); assert.equal(r.body.evaluation.comment, null);
++  assert.deepEqual((await get(p, "/participations/history")).body.items[0].evaluation, { eligible: true, submitted: true, pending: false });
++});
++
++// Fronteiras exatas usam o MESMO fragmento SQL de produção com instantes derivados
++// no PostgreSQL. Não tenta sincronizar relógios físicos na mesma fração de microssegundo.
++for (const [window, offset, expected] of [
++  ["first", "-1 microsecond", true], ["first", "0 microseconds", true], ["first", "1 microsecond", false],
++  ["full", "-1 microsecond", true], ["full", "0 microseconds", true], ["full", "1 microsecond", false],
++  ["comment", "-1 microsecond", true], ["comment", "0 microseconds", true], ["comment", "1 microsecond", false],
++] as const) test(`E08.10 PostgreSQL fronteira ${window} offset ${offset}`, async () => {
++  const c = await context(), p = await participant(c); await service(c, p.participationId);
++  if (window !== "first") await evaluation(p.participationId);
++  const at = (await pool.query(window === "first" ? `SELECT to_char((finished_at+interval '720 hours'+$2::interval) AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at FROM participations WHERE id=$1`
++    : `SELECT to_char((submitted_at+CASE WHEN $3::boolean THEN interval '168 hours' ELSE interval '720 hours' END+$2::interval) AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at FROM evaluations WHERE participation_id=$1`,
++  window === "first" ? [p.participationId, offset] : [p.participationId, offset, window === "full"])).rows[0].at as string;
++  const result = await database.transaction(tx => tx.execute<EvaluationReadRow>(projection(sql`SELECT p.id,p.event_id,e.name AS event_name,p.status,p.joined_at,p.arena_entered_at,p.finished_at,p.finish_reason
++    FROM participations p JOIN events e ON e.id=p.event_id WHERE p.user_id=${p.userId} AND p.id=${p.participationId}`, at)), { isolationLevel: "repeatable read", accessMode: "read only" });
++  assert.equal(result.rows.length, 1); const row = result.rows[0];
++  assert.equal(window === "first" ? row.pending : window === "full" ? row.editFull : row.addComment, expected);
++  if (window === "first") assert.equal(row.reason, expected ? null : "SUBMISSION_EXPIRED");
++  if (window === "full") assert.equal(row.addComment, !expected);
++});
++test("E08.10 PostgreSQL first_comment_at usado impede inclusão tardia mesmo com comment NULL", async () => {
++  const c = await context(), p = await participant(c, { days: 20 }); await service(c, p.participationId); await evaluation(p.participationId, { days: 8, usedComment: true });
++  const r = await get(p, routes(p.participationId)[2]); assert.equal(r.body.evaluation.comment, null); assert.deepEqual(r.body.evaluation.permissions, { canEditRating: false, canEditComment: false, canAddFirstComment: false });
++});
++test("E08.10 PostgreSQL histórico keyset separa microssegundos, desempata UUID e preserva reentradas", async () => {
++  const c = await context(), actor = await account(), list = [];
++  for (let i = 0; i < 5; i++) list.push(await participant(c, { actor, status: i === 4 ? "active" : i === 3 ? "canceled" : "finished" }));
++  for (const [i, p] of list.entries()) await pool.query("UPDATE participations SET joined_at='2026-11-01T15:00:00.100000Z'::timestamptz+$2::int*interval '1 microsecond' WHERE id=$1", [p.participationId, i < 2 ? 1 : 2]);
++  const expected = (await pool.query("SELECT id FROM participations WHERE user_id=$1 ORDER BY joined_at DESC,id DESC", [actor.userId])).rows.map(p => p.id);
++  const seen: string[] = []; let cursor: string | null = null;
++  do { const r = await get(actor, "/participations/history").query({ limit: 2, ...(cursor ? { cursor } : {}) }); assert.equal(r.status, 200);
++    for (const item of r.body.items) { seen.push(item.participationId); assert.equal(item.event.id, c.eventId); assert.match(item.joinedAt, /\.10000[12]Z$/); }
++    cursor = r.body.nextCursor as string | null;
++  } while (cursor);
++  assert.deepEqual(seen, expected); assert.equal(new Set(seen).size, 5);
++});
++test("E08.10 PostgreSQL histórico padrão 20, máximo 50 e inserção concorrente não duplica página seguinte", async () => {
++  const c = await context(), actor = await account(); for (let i = 0; i < 23; i++) await participant(c, { actor });
++  const first = await get(actor, "/participations/history"); assert.equal(first.body.items.length, 20); assert.ok(first.body.nextCursor);
++  await participant(c, { actor }); const next = await get(actor, "/participations/history").query({ cursor: first.body.nextCursor });
++  assert.equal(next.body.items.length, 3); assert.equal(next.body.nextCursor, null);
++  const seen = [...first.body.items, ...next.body.items].map((p: { participationId: string }) => p.participationId); assert.equal(new Set(seen).size, 23);
++  assert.equal((await get(actor, "/participations/history").query({ limit: 50 })).body.items.length, 24);
++});
++test("E08.10 PostgreSQL parâmetros e cursor malformados recebem 400 sem consultar outra identidade", async () => {
++  const actor = await account();
++  for (const query of [{ limit: "51" }, { cursor: "%%%" }, { limit: ["1", "2"] }, { userId: randomUUID() }]) problem(await get(actor, "/participations/history").query(query), 400, "VALIDATION_ERROR");
++  for (const suffix of ["evaluation", "evaluation-eligibility"]) problem(await get(actor, `/participations/not-a-uuid/${suffix}`), 400, "VALIDATION_ERROR");
++  problem(await get(actor, "/participations/current"), 404, "RESOURCE_NOT_FOUND");
++});
++
++for (const mode of ["immediate", "controlled", "automatic-normal", "automatic-admin"] as const) test(`E08.10 PostgreSQL retomada ${mode} preserva motivo, elegibilidade e prazo lógico`, async () => {
++  const c = await context(), p = await participant(c, { status: "active" }); await service(c, p.participationId); const outside = await person(c, "waiting");
++  if (mode === "immediate") assert.equal((await close(c)).status, 200);
++  else if (mode === "controlled" || mode === "automatic-admin") {
++    const body = await controlled(mode === "controlled" ? 1800 : 2); assert.equal((await close(c, body)).status, 200);
++    if (mode === "automatic-admin") {
++      const until = Date.now() + 6000; while (Date.now() < until && !(await pool.query("SELECT clock_timestamp()>=$1::timestamptz AS ended", [body.controlledUntilAt])).rows[0].ended) await new Promise(done => setTimeout(done, 20));
++      assert.equal((await closure.regularizeEvent(c.eventId)).kind, "closed");
++    }
++  } else { await expire(c); assert.equal((await closure.regularizeEvent(c.eventId)).kind, "closed"); }
++  const r = await get(mode === "controlled" ? outside : p, "/participations/return-state"); assert.equal(r.status, 200);
++  const reason = mode === "immediate" ? "admin_immediate" : mode === "controlled" ? "admin_controlled_external_wait_closed" : mode === "automatic-normal" ? "automatic_operational_deadline" : "automatic_admin_deadline";
++  assert.equal(r.body.recentFinalization.finishReason, reason);
++  assert.deepEqual(r.body.pendingEvaluationParticipationIds, mode === "controlled" ? [] : [p.participationId]);
++  const eligibility = await get(outside, routes(outside.participationId)[0]); assert.equal(eligibility.body.eligible, false); assert.equal(eligibility.body.pending, false);
++  assert.equal(eligibility.body.reason, mode === "controlled" || mode === "automatic-admin" ? "EXTERNAL_WAIT_CLOSED" : "NO_COMPLETED_SERVICE");
++  const h = await get(mode === "controlled" ? outside : p, "/participations/history"); assert.equal(h.body.items[0].finishReason, reason);
++});
++test("E08.10 PostgreSQL job 40 dias atrasado não cria nova janela de avaliação", async () => {
++  const c = await context(), p = await participant(c, { status: "active", days: 40 }); await service(c, p.participationId); const at = await expire(c, 40); await closure.regularizeEvent(c.eventId);
++  const r = await get(p, routes(p.participationId)[0]); assert.equal(r.body.eligible, true); assert.equal(r.body.pending, false); assert.equal(r.body.reason, "SUBMISSION_EXPIRED");
++  const returned = await get(p, "/participations/return-state"); assert.equal(returned.body.recentFinalization.finishedAt, at); assert.deepEqual(returned.body.pendingEvaluationParticipationIds, []);
++});
++test("E08.10 PostgreSQL GET após prazo não executa limpeza, reserva ou finalização artificial", async () => {
++  const c = await context(), p = await participant(c, { status: "active" }); await service(c, p.participationId, "pending"); await expire(c);
++  const before = await ownState(c, p);
++  const info = await get(p, routes(p.participationId)[0]); assert.equal(info.body.participationStatus, "active"); assert.equal(info.body.reason, "NOT_FINISHED"); assert.equal(info.body.pending, false);
++  assert.deepEqual((await get(p, "/participations/return-state")).body, { recentFinalization: null, pendingEvaluationParticipationIds: [] });
++  assert.equal((await get(p, "/participations/history")).body.items[0].status, "active"); assert.deepEqual(await ownState(c, p), before);
++});
++test("E08.10 PostgreSQL recent significa última finalização de sistema, sem janela fixa ou consumo", async () => {
++  const c = await context(), actor = await account(), old = await participant(c, { actor, days: 200, reason: "automatic_operational_deadline" });
++  await participant(c, { actor, days: 1, reason: "voluntary" }); const first = await get(actor, "/participations/return-state"), repeat = await get(actor, "/participations/return-state");
++  assert.equal(first.body.recentFinalization.participationId, old.participationId); assert.deepEqual(first.body, repeat.body); assert.deepEqual(first.body.pendingEvaluationParticipationIds, []);
++});
++test("E08.10 PostgreSQL leituras repetidas são read only sem qualquer alteração ou reserva", async () => {
++  const c = await context(), p = await participant(c); await service(c, p.participationId); await evaluation(p.participationId, { comment: "Comentário próprio" });
++  const before = await ownState(c, p), original = database.transaction.bind(database) as typeof database.transaction; let snapshots = 0;
++  database.transaction = (callback, config) => original(async tx => {
++    assert.deepEqual(config, { isolationLevel: "repeatable read", accessMode: "read only" });
++    assert.equal((await tx.execute<{ transaction_read_only: string }>(sql`SHOW transaction_read_only`)).rows[0].transaction_read_only, "on"); snapshots++; return callback(tx);
++  }, config);
++  try { for (let i = 0; i < 2; i++) for (const route of routes(p.participationId)) assert.equal((await get(p, route)).status, 200); }
++  finally { database.transaction = original; }
++  assert.equal(snapshots, 10); assert.deepEqual(await ownState(c, p), before);
++});
++test("E08.10 PostgreSQL privacidade não carrega questionário/snapshot/pessoas ou auditoria nas projeções", async () => {
++  const c = await context(), data = await rich(c); assert.equal((await close(c)).status, 200); const owner = data.outside;
++  for (const route of routes(owner.participationId)) { const r = await get(owner, route); assert.equal(r.status, 200); const text = JSON.stringify(r.body);
++    for (const secret of ["E088_PRIVATE", "E089_PRIVATE", "@example.test", "fixture-private-hash", c.admin.userId, c.staff.userId]) assert.equal(text.includes(secret), false);
++  }
++});
++
++for (const kind of ["evaluation", "return", "history"] as const) test(`E08.10 PostgreSQL snapshot ${kind} não mistura commit concorrente com relações anteriores`, async () => {
++  const c = await context(), p = await participant(c, { status: kind === "evaluation" ? "finished" : "active" }); await service(c, p.participationId);
++  const eid = kind === "evaluation" ? await evaluation(p.participationId, { comment: "Antes" }) : undefined;
++  const original = database.transaction.bind(database) as typeof database.transaction, dialect = new PgDialect(); let ready!: () => void, release!: () => void, readerPid = 0, writerPid = 0;
++  const reached = new Promise<void>(yes => { ready = yes; }), gate = new Promise<void>(yes => { release = yes; });
++  database.transaction = (callback, config) => original(async tx => {
++    if (config?.isolationLevel === "read committed") writerPid = (await tx.execute<{ pid: number }>(sql`SELECT pg_backend_pid() AS pid`)).rows[0].pid;
++    const execute = tx.execute.bind(tx); tx.execute = (async (...args: Parameters<typeof tx.execute>) => {
++    const q = args[0], text = typeof q === "string" ? q : dialect.sqlToQuery(q.getSQL()).sql, result = await execute(...args);
++    if (text.includes("SELECT to_char(clock_timestamp()")) { readerPid = (await execute<{ pid: number }>(sql`SELECT pg_backend_pid() AS pid`)).rows[0].pid; ready(); await gate; } return result;
++  }) as typeof tx.execute; return callback(tx); }, config);
++  const pending = get(p, kind === "evaluation" ? routes(p.participationId)[2] : kind === "history" ? "/participations/history" : "/participations/return-state").then(r => r); pending.catch(() => undefined);
++  try {
++    await Promise.race([reached, pending.then(() => { throw new Error("Snapshot não foi retido."); })]);
++    if (kind === "evaluation") {
++      const writer = await pool.connect();
++      try {
++        await writer.query("BEGIN"); writerPid = (await writer.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
++        await writer.query("UPDATE evaluations SET comment='Depois',updated_at=clock_timestamp() WHERE id=$1", [eid]); await writer.query("COMMIT");
++      } catch (error) { await writer.query("ROLLBACK"); throw error; } finally { writer.release(); }
++    } else { const closed = await close(c); assert.equal(closed.status, 200, JSON.stringify(closed.body)); }
++    assert.ok(readerPid > 0 && writerPid > 0); assert.notEqual(readerPid, writerPid);
++    release(); const r = await pending; assert.equal(r.status, 200);
++    if (kind === "evaluation") assert.equal(r.body.evaluation.comment, "Antes"); else if (kind === "history") { assert.equal(r.body.items[0].status, "active"); assert.equal(r.body.items[0].finishReason, null); }
++    else { assert.equal(r.body.recentFinalization, null); assert.deepEqual(r.body.pendingEvaluationParticipationIds, []); }
++    database.transaction = original;
++    const next = await get(p, kind === "evaluation" ? routes(p.participationId)[2] : kind === "history" ? "/participations/history" : "/participations/return-state");
++    if (kind === "evaluation") assert.equal(next.body.evaluation.comment, "Depois"); else if (kind === "history") assert.equal(next.body.items[0].finishReason, "admin_immediate");
++    else { assert.equal(next.body.recentFinalization.finishReason, "admin_immediate"); assert.deepEqual(next.body.pendingEvaluationParticipationIds, [p.participationId]); }
++  } finally { database.transaction = original; release(); await Promise.allSettled([pending]); }
++});
++test("E08.10 PostgreSQL snapshot preserva contagem anterior a complete E07.5 real concorrente", async () => {
++  const c = await context(), p = await participant(c, { status: "active" }), session = await service(c, p.participationId, "pending");
++  const original = database.transaction.bind(database) as typeof database.transaction, dialect = new PgDialect();
++  let ready!: () => void, release!: () => void, readerPid = 0, writerPid = 0;
++  const reached = new Promise<void>(yes => { ready = yes; }), gate = new Promise<void>(yes => { release = yes; });
++  database.transaction = (callback, config) => original(async tx => {
++    if (config?.isolationLevel === "read committed") writerPid = (await tx.execute<{ pid: number }>(sql`SELECT pg_backend_pid() AS pid`)).rows[0].pid;
++    const execute = tx.execute.bind(tx); tx.execute = (async (...args: Parameters<typeof tx.execute>) => {
++      const q = args[0], text = typeof q === "string" ? q : dialect.sqlToQuery(q.getSQL()).sql, result = await execute(...args);
++      if (text.includes("SELECT to_char(clock_timestamp()")) { readerPid = (await execute<{ pid: number }>(sql`SELECT pg_backend_pid() AS pid`)).rows[0].pid; ready(); await gate; }
++      return result;
++    }) as typeof tx.execute; return callback(tx);
++  }, config);
++  const pending = get(p, "/participations/history").then(r => r); pending.catch(() => undefined);
++  try {
++    await Promise.race([reached, pending.then(() => { throw new Error("Snapshot não foi retido."); })]);
++    const completed = await supertest(app.getHttpServer()).post(`/api/v1/staff/events/${c.eventId}/service-sessions/${session.sessionId}/complete`)
++      .set("Authorization", `Bearer ${c.staff.token}`).set("Idempotency-Key", randomUUID()).send({});
++    assert.equal(completed.status, 200, JSON.stringify(completed.body)); assert.ok(readerPid > 0 && writerPid > 0); assert.notEqual(readerPid, writerPid);
++    release(); const response = await pending; assert.equal(response.status, 200); assert.equal(response.body.items[0].completedServicesCount, 0);
++    database.transaction = original; assert.equal((await get(p, "/participations/history")).body.items[0].completedServicesCount, 1);
++  } finally { database.transaction = original; release(); await Promise.allSettled([pending]); }
++});
+diff --git a/backend/test/unit/evaluation-read-http.test.ts b/backend/test/unit/evaluation-read-http.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..1b6194cc846d495c258e671f272097f445551eff
+--- /dev/null
++++ b/backend/test/unit/evaluation-read-http.test.ts
+@@ -0,0 +1,74 @@
++import "reflect-metadata";
++import assert from "node:assert/strict";
++import { after, before, test } from "node:test";
++import { Module, type INestApplication } from "@nestjs/common";
++import { NestFactory } from "@nestjs/core";
++import supertest from "supertest";
++import type { Pool } from "pg";
++import { AuthService } from "../../src/auth/auth.service";
++import { SessionAuthGuard } from "../../src/auth/session-auth.guard";
++import { ProblemException } from "../../src/common/errors/problem.exception";
++import { ProblemDetailsExceptionFilter } from "../../src/common/errors/problem-details.filter";
++import { EvaluationReadController } from "../../src/evaluations/evaluation-read.controller";
++import { EvaluationReadService } from "../../src/evaluations/evaluation-read.service";
++import { encodeHistoryCursor } from "../../src/evaluations/evaluation-read.dto";
++import { EventsModule } from "../../src/events/events.module";
++import { DRIZZLE_DATABASE, POSTGRES_POOL } from "../../src/database/database.module";
++
++const id = (n: number) => `abcdef00-0000-4000-8000-${String(n).padStart(12, "0")}`, userId = id(1), pid = id(2), at = "2026-11-03T15:00:00.123456Z";
++const eligibility = { participationId: pid, participationStatus: "finished", completedServicesCount: 2, eligible: true, submitted: false, pending: true, firstSubmissionDeadlineAt: at, reason: null };
++const routes = [`/participations/${pid}/evaluation-eligibility`, "/evaluations/pending", `/participations/${pid}/evaluation`, "/participations/history", "/participations/return-state"];
++const calls: unknown[][] = []; let missing = false, failure: Error | undefined;
++const responses = [eligibility, { items: [] }, { evaluation: null, eligibility }, { items: [], nextCursor: null }, { recentFinalization: null, pendingEvaluationParticipationIds: [] }];
++function read(index: number, ...args: unknown[]) { calls.push([index, ...args]); if (failure) throw failure; return missing && (index === 0 || index === 2) ? null : responses[index]; }
++@Module({ controllers: [EvaluationReadController], providers: [SessionAuthGuard,
++  { provide: AuthService, useValue: { async authenticateBearerToken(token: string) {
++    if (token === "admin-no-2fa") throw new ProblemException({ typeSlug: "admin-2fa-required", title: "2FA", status: 401, code: "ADMIN_2FA_REQUIRED", detail: "2FA obrigatório." });
++    if (!["participant", "admin", "staff"].includes(token)) throw new ProblemException({ typeSlug: "invalid-access-token", title: "Inválido", status: 401, code: "INVALID_ACCESS_TOKEN", detail: "Token inválido." });
++    return { userId, sessionId: id(3), roles: token === "participant" ? [] : [token] };
++  } } },
++  { provide: EvaluationReadService, useValue: { getEligibility: (...args: unknown[]) => read(0, ...args), getPending: (...args: unknown[]) => read(1, ...args),
++    getEvaluation: (...args: unknown[]) => read(2, ...args), getHistory: (...args: unknown[]) => read(3, ...args), getReturnState: (...args: unknown[]) => read(4, ...args) } },
++] }) class HttpModule {}
++let app: INestApplication;
++before(async () => { app = await NestFactory.create(HttpModule, { logger: false }); app.setGlobalPrefix("api/v1"); app.useGlobalFilters(new ProblemDetailsExceptionFilter()); await app.listen(0, "127.0.0.1"); });
++after(async () => { await app?.close(); });
++const get = (route: string, token = "participant") => supertest(app.getHttpServer()).get(`/api/v1${route}`).set("Authorization", `Bearer ${token}`);
++function reset() { missing = false; failure = undefined; calls.length = 0; }
++function problem(r: supertest.Response, status: number, code: string) { assert.equal(r.status, status); assert.equal(r.body.code, code); assert.equal(r.body.status, status); assert.match(r.headers["content-type"], /application\/problem\+json/); }
++for (const [index, route] of routes.entries()) test(`E08.10 HTTP ${route} contrato JSON e identidade confiável`, async () => {
++  reset(); const r = await get(route); assert.equal(r.status, 200); assert.deepEqual(r.body, responses[index]); assert.equal(calls[0][1], userId);
++});
++for (const route of routes) test(`E08.10 HTTP ${route} exige sessão antes de consultar`, async () => {
++  reset(); problem(await supertest(app.getHttpServer()).get(`/api/v1${route}`), 401, "MISSING_ACCESS_TOKEN"); problem(await get(route, "invalid"), 401, "INVALID_ACCESS_TOKEN");
++  problem(await get(route, "admin-no-2fa"), 401, "ADMIN_2FA_REQUIRED"); assert.equal(calls.length, 0);
++});
++test("E08.10 HTTP UUIDs inválidos recebem 400, maiúsculas normalizam e 404 é neutro", async () => {
++  reset(); for (const index of [0, 2]) { problem(await get(routes[index].replace(pid, "bad")), 400, "VALIDATION_ERROR"); assert.equal(calls.length, 0); }
++  assert.equal((await get(routes[0].replace(pid, pid.toUpperCase()))).status, 200); assert.equal(calls[0][2], pid);
++  missing = true; const absent = await get(routes[0].replace(pid, id(99))), foreign = await get(routes[0]); problem(absent, 404, "RESOURCE_NOT_FOUND"); assert.deepEqual(absent.body, foreign.body);
++  problem(await get(routes[2]), 404, "RESOURCE_NOT_FOUND");
++});
++test("E08.10 HTTP Admin e Staff usam a própria identidade e query não concede titularidade", async () => {
++  reset(); for (const token of ["admin", "staff", "participant"]) { assert.equal((await get(routes[0], token).query({ userId: id(99), actor: id(9) }).set("Idempotency-Key", "")).status, 200); }
++  for (const call of calls) assert.equal(call[1], userId);
++  problem(await get(routes[3]).query({ userId: id(99) }), 400, "VALIDATION_ERROR");
++});
++test("E08.10 HTTP paginação valida somente parâmetros escalares limitados e cursor opaco", async () => {
++  reset(); for (const query of [{ limit: "0" }, { limit: "51" }, { limit: "20.1" }, { limit: ["1", "2"] }, { cursor: "bad" }, { cursor: "" }, { other: "x" }]) problem(await get(routes[3]).query(query), 400, "VALIDATION_ERROR");
++  assert.equal(calls.length, 0); const cursor = encodeHistoryCursor(at, pid); assert.equal((await get(routes[3]).query({ limit: 50, cursor })).status, 200);
++  assert.deepEqual(calls[0], [3, userId, { limit: 50, cursor: { v: 1, joinedAt: at, id: pid } }]);
++});
++test("E08.10 HTTP literais history/return-state não viram UUID e current não é interceptado", async () => {
++  reset(); assert.equal((await get(routes[3])).status, 200); assert.equal((await get(routes[4])).status, 200);
++  problem(await get("/participations/current"), 404, "RESOURCE_NOT_FOUND"); assert.equal(calls.length, 2);
++});
++test("E08.10 HTTP erro interno não expõe SQL, credenciais ou dados pessoais", async () => {
++  reset(); failure = new Error("PRIVATE_SQL_password@example.test"); for (const route of routes) { const r = await get(route); problem(r, 500, "INTERNAL_SERVER_ERROR"); assert.equal(JSON.stringify(r.body).includes("PRIVATE"), false); }
++});
++test("E08.10 DI real resolve controller e serviço no mesmo banco sem abrir conexão", async () => {
++  const real = await NestFactory.create(EventsModule, { logger: false }); try {
++    assert.equal(Reflect.get(real.get(EvaluationReadController), "reads"), real.get(EvaluationReadService)); assert.equal(Reflect.get(real.get(EvaluationReadService), "database"), real.get(DRIZZLE_DATABASE));
++    assert.equal(real.get<Pool>(POSTGRES_POOL).totalCount, 0);
++  } finally { await real.close(); }
++});
+diff --git a/backend/test/unit/evaluation-read.test.ts b/backend/test/unit/evaluation-read.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..e4c4a5fe3bfc7cd75a310c1beb77e50e411a8910
+--- /dev/null
++++ b/backend/test/unit/evaluation-read.test.ts
+@@ -0,0 +1,107 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { drizzle } from "drizzle-orm/node-postgres";
++import { sql } from "drizzle-orm";
++import { PgDialect } from "drizzle-orm/pg-core";
++import type { Client } from "pg";
++import * as schema from "../../src/database/schema";
++import { EvaluationReadService } from "../../src/evaluations/evaluation-read.service";
++import { completedCount, evaluationReadProjection, type EvaluationReadRow } from "../../src/evaluations/evaluation-read.policy";
++import { encodeHistoryCursor, historyQuery, isPreciseInstant } from "../../src/evaluations/evaluation-read.dto";
++
++const id = (n: number) => `abcdef00-0000-4000-8000-${String(n).padStart(12, "0")}`;
++const at = "2026-11-03T15:00:00.123456Z", joined = "2026-11-01T15:00:00.123456Z";
++function row(n = 1): EvaluationReadRow {
++  return { participationId: id(n), eventId: id(100), eventName: "Evento", status: "finished", joinedAt: joined, arenaEnteredAt: joined,
++    finishedAt: at, finishReason: "automatic_operational_deadline", completedCount: "2", eligible: true, submitted: false, pending: true,
++    deadlineAt: "2026-12-03T15:00:00.123456Z", reason: null, evaluationId: null, rating: null, comment: null, submittedAt: null, updatedAt: null,
++    editableUntilAt: null, commentAddUntilAt: null, editFull: false, addComment: false, privateQuestionnaire: "PRIVATE" };
++}
++function fixture(rows: EvaluationReadRow[] = [row()], options: { clock?: string; fail?: boolean } = {}) {
++  const queries: Array<{ text: string; params: unknown[] }> = [];
++  const database = drizzle({ async query(config: { text: string }, params: unknown[]) {
++    const text = config.text; queries.push({ text, params });
++    if (/^(begin|commit|rollback)/.test(text)) return { rows: [] };
++    if (text.includes("SELECT to_char(clock_timestamp()")) return { rows: [{ at: options.clock ?? at }] };
++    if (options.fail) throw new Error("PRIVATE_SQL");
++    if (text.includes("WITH scoped")) return { rows };
++    if (text.includes("FROM participations WHERE user_id=")) return { rows: [{ participationId: id(1), eventId: id(100), finishReason: "automatic_operational_deadline", finishedAt: at, private: "PRIVATE" }] };
++    throw new Error(`SQL inesperado ${text}`);
++  } } as unknown as Client, { schema });
++  return { service: new EvaluationReadService(database), queries };
++}
++test("E08.10 cursor preserva microssegundos sem converter valor keyset para Date", () => {
++  const first = encodeHistoryCursor("2026-11-03T15:00:00.100001Z", id(1)), next = encodeHistoryCursor("2026-11-03T15:00:00.100002Z", id(1));
++  assert.notEqual(first, next); assert.deepEqual(historyQuery.parse({ cursor: first }), { limit: 20, cursor: { v: 1, joinedAt: "2026-11-03T15:00:00.100001Z", id: id(1) } });
++  assert.equal(historyQuery.parse({ limit: "50" }).limit, 50);
++});
++test("E08.10 paginação rejeita formatos, excesso, duplicatas e cursores não canônicos", () => {
++  for (const query of [{ limit: "0" }, { limit: "51" }, { limit: "-1" }, { limit: "1.5" }, { limit: "01" }, { limit: ["1", "2"] }, { cursor: ["a", "b"] }, { userId: id(9) }]) assert.equal(historyQuery.safeParse(query).success, false);
++  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
++  for (const cursor of ["", "%%%", "x".repeat(513), "e30=", encode({ v: 2, id: id(1), joinedAt: joined }), encode({ v: 1, id: "bad", joinedAt: joined }),
++    encode({ v: 1, id: id(1), joinedAt: "2026-02-30T00:00:00.000000Z" }), encode({ v: 1, id: id(1), joinedAt: joined, userId: id(9) }), Buffer.from([255]).toString("base64url")]) assert.equal(historyQuery.safeParse({ cursor }).success, false);
++});
++test("E08.10 instante exige calendário UTC canônico e seis casas", () => {
++  for (const value of [at, "0001-01-01T00:00:00.000001Z", "9999-12-31T23:59:59.999999Z"]) assert.equal(isPreciseInstant(value), true);
++  for (const value of [null, "0000-01-01T00:00:00.000000Z", "2026-02-29T00:00:00.000000Z", "2026-11-03T24:00:00.000000Z", at.replace("Z", "+00:00"), at.replace("123456", "123")]) assert.equal(isPreciseInstant(value), false);
++});
++test("E08.10 política central usa apenas completed e dois relógios inclusivos distintos", () => {
++  const query = new PgDialect().sqlToQuery(evaluationReadProjection(sql`SELECT 1`, at));
++  for (const expected of ["s.status='completed'", "status='finished' AND completed_count::bigint>0", "finished_at+interval '720 hours'", "submitted_at+interval '168 hours'", "submitted_at+interval '720 hours'", "first_comment_at IS NULL", "'SUBMISSION_EXPIRED'", "'ALREADY_SUBMITTED'", "'EXTERNAL_WAIT_CLOSED'"]) assert.ok(query.sql.includes(expected), expected);
++  assert.equal(query.sql.includes("evaluation_updated_at+interval"), false); assert.equal(query.params.filter(value => value === at).length, 6);
++});
++test("E08.10 contagens só admitem inteiros decimais numericamente seguros", () => {
++  assert.equal(completedCount("0"), 0); assert.equal(completedCount(String(Number.MAX_SAFE_INTEGER)), Number.MAX_SAFE_INTEGER);
++  for (const value of ["-1", "1.1", "1e3", "01", "9007199254740992", "", "NaN"]) assert.throws(() => completedCount(value), /INTEGRITY/);
++});
++test("E08.10 elegibilidade projeta campos fechados e respeita titularidade na consulta SQL", async () => {
++  const f = fixture(), result = await f.service.getEligibility(id(5), id(1)); assert.deepEqual(result, {
++    participationId: id(1), participationStatus: "finished", completedServicesCount: 2, eligible: true, submitted: false, pending: true,
++    firstSubmissionDeadlineAt: "2026-12-03T15:00:00.123456Z", reason: null });
++  const query = f.queries.find(q => q.text.includes("WITH scoped"))!; assert.ok(query.params.includes(id(5))); assert.ok(query.params.includes(id(1))); assert.match(query.text, /WHERE p.user_id=.+AND p.id=/s);
++  assert.equal(JSON.stringify(result).includes("PRIVATE"), false);
++});
++for (const method of ["getEligibility", "getEvaluation"] as const) test(`E08.10 ${method} nega acesso neutro sem participação visível`, async () => {
++  assert.equal(await fixture([]).service[method](id(5), id(9)), null);
++});
++test("E08.10 avaliação ausente retorna null junto da mesma elegibilidade", async () => {
++  const f = fixture(), result = await f.service.getEvaluation(id(5), id(1)); assert.ok(result); assert.equal(result.evaluation, null); assert.equal(result.eligibility.pending, true);
++});
++for (const [full, add] of [[true, false], [false, true], [false, false]]) test(`E08.10 permissões próprias full=${full} add=${add} não expõem campos internos`, async () => {
++  const data = { ...row(), evaluationId: id(7), rating: 5, comment: null, submittedAt: at, updatedAt: at, editableUntilAt: at, commentAddUntilAt: at,
++    editFull: full, addComment: add, submitted: true, pending: false, reason: "ALREADY_SUBMITTED" as const };
++  const result = await fixture([data]).service.getEvaluation(id(5), id(1)); assert.ok(result?.evaluation);
++  assert.deepEqual(result.evaluation.permissions, { canEditRating: full, canEditComment: full || add, canAddFirstComment: add });
++  assert.equal(JSON.stringify(result).includes("PRIVATE"), false); assert.equal("firstCommentAt" in result.evaluation, false);
++});
++test("E08.10 histórico pagina antes das agregações, com lookahead e cursor do último item visível", async () => {
++  const a = { ...row(2), joinedAt: "2026-11-01T15:00:00.100002Z" }, b = { ...row(1), joinedAt: "2026-11-01T15:00:00.100001Z" }, f = fixture([a, b]);
++  const page = historyQuery.parse({ limit: "1", cursor: encodeHistoryCursor(joined, id(9)) }), result = await f.service.getHistory(id(5), page);
++  assert.equal(result.items.length, 1); assert.equal(result.items[0].participationId, id(2)); assert.ok(result.nextCursor);
++  assert.equal(historyQuery.parse({ cursor: result.nextCursor }).cursor?.joinedAt, a.joinedAt);
++  const query = f.queries.find(q => q.text.includes("WITH scoped"))!; assert.ok(query.params.includes(2)); assert.ok(query.params.includes(joined)); assert.match(query.text, /\(p.joined_at,p.id\)</);
++  assert.ok(query.text.indexOf("LIMIT") < query.text.indexOf("LATERAL")); assert.equal(JSON.stringify(result).includes("PRIVATE"), false);
++});
++test("E08.10 histórico e pendências vazios têm 200 informativo sem cursores artificiais", async () => {
++  const f = fixture([]); assert.deepEqual(await f.service.getHistory(id(5), { limit: 20 }), { items: [], nextCursor: null }); assert.deepEqual(await f.service.getPending(id(5)), { items: [] });
++});
++test("E08.10 pending e return-state usam a mesma seleção e recent não depende de janela inventada", async () => {
++  const f = fixture(), pending = await f.service.getPending(id(5)), returned = await f.service.getReturnState(id(5));
++  assert.deepEqual(returned.pendingEvaluationParticipationIds, pending.items.map(p => p.participationId)); assert.equal(returned.recentFinalization?.finishReason, "automatic_operational_deadline");
++  const recent = f.queries.find(q => q.text.includes("FROM participations WHERE user_id="))!;
++  assert.match(recent.text, /ORDER BY finished_at DESC,id DESC LIMIT 1/); assert.doesNotMatch(recent.text, /interval|updated_at|acknowledg/); assert.equal(JSON.stringify(returned).includes("PRIVATE"), false);
++});
++for (const method of ["eligibility", "evaluation", "pending", "history", "return"] as const) test(`E08.10 ${method} é read-only, um relógio DB e snapshot único sem N+1`, async () => {
++  const f = fixture();
++  if (method === "eligibility") await f.service.getEligibility(id(5), id(1)); else if (method === "evaluation") await f.service.getEvaluation(id(5), id(1));
++  else if (method === "pending") await f.service.getPending(id(5)); else if (method === "history") await f.service.getHistory(id(5), { limit: 20 }); else await f.service.getReturnState(id(5));
++  assert.equal(f.queries[0].text, "begin isolation level repeatable read read only"); assert.equal(f.queries.at(-1)?.text, "commit");
++  assert.equal(f.queries.filter(q => q.text.includes("clock_timestamp()")).length, 1); assert.equal(f.queries.length, method === "return" ? 5 : 4);
++  for (const query of f.queries) assert.doesNotMatch(query.text, /\b(INSERT|UPDATE|DELETE|FOR SHARE|FOR UPDATE)\b|profiles|snapshots|user_roles|audit_logs/i);
++});
++test("E08.10 falha SQL ou fato inválido aborta snapshot sem fabricar resposta", async () => {
++  const badClock = fixture([], { clock: "bad" }); await assert.rejects(badClock.service.getPending(id(5)), /INTEGRITY/); assert.equal(badClock.queries.at(-1)?.text, "rollback");
++  const badCount = fixture([{ ...row(), completedCount: "9007199254740992" }]); await assert.rejects(badCount.service.getEligibility(id(5), id(1)), /INTEGRITY/);
++  const badRating = fixture([{ ...row(), evaluationId: id(7), rating: 0 }]); await assert.rejects(badRating.service.getEvaluation(id(5), id(1)), /INTEGRITY/);
++  const failure = fixture([], { fail: true }); await assert.rejects(failure.service.getPending(id(5))); assert.equal(failure.queries.at(-1)?.text, "rollback");
++});
+diff --git a/docs/ARQUITETURA_BACKEND_ARENAGO.md b/docs/ARQUITETURA_BACKEND_ARENAGO.md
+index 6c752498948b1838e168969fa17cdddcda42fda1..37c5b864dea1b5b1e925076462b79783516e9d50 100644
+--- a/docs/ARQUITETURA_BACKEND_ARENAGO.md
++++ b/docs/ARQUITETURA_BACKEND_ARENAGO.md
+@@ -827,6 +827,16 @@ Não usar `404` para ausência de participação. O backend deve refletir o **ef
+ 
+ ### 15.10 `GET /participations/history` — histórico do titular
+ 
++**Implementação E08.10 — 04/11/2026:** `/api/v1/participations/history` retorna
++histórico persistido do titular em REPEATABLE READ READ ONLY, com limite padrão
++20/máximo 50 e keyset joined_at DESC/id DESC. Cursor base64url validado preserva
++UTC com seis casas e UUID, sem converter o valor comparado em Date. Mantém
++reentradas distintas, arenaEnteredAt, motivo real e resumo eligible/submitted/
++pending da mesma política SQL das avaliações; inclui todos os estados persistidos.
++No HEAD inicial, current existe como serviço interno, sem endpoint HTTP; este
++estado é preservado, sem colisão com os novos caminhos literais. Contrato efetivo,
++testes e limitações em `E08_10_IMPLEMENTACAO.md`.
++
+ **Bearer obrigatório.** `GET /participations/history?limit=20&cursor=<cursor-opaco>`; `limit` padrão 20, máximo 50 [PROPOSTA]. Ordenar por `joined_at DESC, id DESC` para paginação estável (*keyset*), usando cursor opaco validado no servidor. Retornar apenas participações do próprio titular, inclusive reentradas distintas no mesmo evento. Nunca transformar evento fechado em exclusão do histórico por padrão; o tratamento posterior de LGPD continua prevalecendo.
+ 
+ **Resposta `200 OK` (exemplo):**
+@@ -1392,6 +1402,28 @@ Esses são **dois relógios independentes**: o prazo inicial começa na finaliza
+ 
+ ### 17.2 `GET /participations/:participationId/evaluation-eligibility`
+ 
++**Implementação E08.10 — 04/11/2026 (§§17.2, 17.3, 17.5 e 17.7):** as quatro
++consultas HTTP de avaliação/retomada, mais o histórico §15.10, estão disponíveis
++com `/api/v1`, sessão vigente e titularidade estrita, sem privilégio transversal
++Staff/Admin. EvaluationReadService reutiliza o guard existente e uma política SQL
++comum: eligible é estrutural (finished e pelo menos um completed); pending exige
++também ausência de avaliação e instante <= finished_at + 720 horas. Reason distingue
++NOT_FINISHED, NO_COMPLETED_SERVICE, EXTERNAL_WAIT_CLOSED, ALREADY_SUBMITTED e
++SUBMISSION_EXPIRED. Datas têm seis casas UTC; cada resposta de domínio usa um
++instante PostgreSQL e snapshot REPEATABLE READ READ ONLY, sem limpeza ou reservas.
++O GET de avaliação retorna evaluation/eligibility; evaluation própria inclui
++id/participationId/rating/comment/submittedAt/updatedAt/editableUntilAt/
++commentAddUntilAt e permissions. Edição integral até submitted_at + 168 horas,
++inclusive; depois, até +720 horas inclusive, somente primeiro comentário se
++first_comment_at IS NULL, independentemente de comment atual. updated_at não
++reinicia nenhuma janela. Permissões são informativas; POST/PATCH futuros devem
++revalidar no momento da mutação e não são implementados nesta etapa.
++Pendências ordenam finished_at DESC/id DESC, sem agrupar reentradas do mesmo
++evento. Retomada informa a última finalização persistida por um dos quatro motivos
++Admin/automáticos E08.8/E08.9, sem janela arbitrária de "recente", consumo de aviso
++ou decisão de navegação. Pending IDs vêm da mesma seleção de pendências.
++Resultados locais e aprovação PostgreSQL ainda pendente: `E08_10_IMPLEMENTACAO.md`.
++
+ **Bearer do próprio titular.** Consulta somente; não cria tabela de pendências. `404` quando participação inexiste/não pertence ao titular; `401` sessão inválida. **`200 OK` ilustrativo:**
+ 
+ ```json
+diff --git a/docs/E08_10_IMPLEMENTACAO.md b/docs/E08_10_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..1f954cc5b503bfc9bf934d1f9bc1782727954a1d
+--- /dev/null
++++ b/docs/E08_10_IMPLEMENTACAO.md
+@@ -0,0 +1,278 @@
++# E08.10 — Consultas de avaliações, histórico e retomada
++
++Implementação em 04/11/2026, branch `feature/events-participations`, base
++`199b8f3085372e1c97da211627656f20d8e2cc58` (`feat(events): implementar encerramento
++automático de eventos`). Antes de editar, conferidos branch, HEAD, histórico,
++índice, working tree e arquivos não rastreados: E08.9 commitada, árvore limpa e
++índice sem alterações. Nenhuma alteração preexistente incorporada. Base PostgreSQL
++anterior de 580/580 aprovada manualmente pelo responsável; não é execução do Codex.
++
++## Rotas e respostas efetivas
++
++As cinco rotas abaixo usam prefixo `/api/v1`, GET/200, RequireSessionAuth e
++CurrentUserId existentes. EvaluationReadController/Service são registrados no
++EventsModule existente, que já integra AuthModule e o banco compartilhado.
++Não havia endpoints de avaliações ou histórico a duplicar. ParticipationsService
++mantém seus métodos internos getCurrentParticipation/getParticipationById intactos.
++
++| Rota | Resposta |
++| --- | --- |
++| /participations/:participationId/evaluation-eligibility | Projeção plana de elegibilidade |
++| /evaluations/pending | { items: [...] } |
++| /participations/:participationId/evaluation | { evaluation: objeto próprio ou null, eligibility: projeção } |
++| /participations/history?limit=20&cursor=... | { items: [...], nextCursor: string ou null } |
++| /participations/return-state | { recentFinalization: objeto ou null, pendingEvaluationParticipationIds: [...] } |
++
++Elegibilidade possui exatamente participationId, participationStatus,
++completedServicesCount, eligible, submitted, pending, firstSubmissionDeadlineAt
++e reason. completedServicesCount conta somente service_sessions completed
++ligados via queue_entries àquela participação/evento/experiência. Não conta pending,
++absent ou canceled; reentradas no mesmo evento têm IDs e contagens independentes.
++
++eligible é **estrutural**: status finished e pelo menos um completed real.
++submitted reflete existência de avaliação. pending exige eligible, não submitted
++e prazo inicial ainda válido. Assim, eligible pode continuar true depois da
++expiração ou submissão, mas pending nunca é true nesses casos.
++firstSubmissionDeadlineAt é finished_at + 30 dias para status finished, inclusive
++se não houver conclusão; é null nos outros estados.
++
++Prioridade de reason, calculada pela mesma política em todas as projeções:
++
++1. NOT_FINISHED para waiting/active/canceled.
++2. Sem completed: EXTERNAL_WAIT_CLOSED para admin_controlled_external_wait_closed,
++   ou NO_COMPLETED_SERVICE nos demais motivos.
++3. ALREADY_SUBMITTED se a participação estruturalmente elegível já tem avaliação.
++4. SUBMISSION_EXPIRED se o prazo inicial terminou sem avaliação.
++5. null para participação elegível com pendência válida.
++
++Pendências retornam participationId, event { id, name }, finishedAt,
++firstSubmissionDeadlineAt e completedServicesCount. Somente linhas do titular
++finished, com completed, sem avaliação e dentro do prazo inicial. Ordenação:
++finished_at DESC e UUID DESC. Lista vazia é 200 com items: [], sem tabela nova.
++
++Avaliação existente retorna somente id, participationId, rating, comment,
++submittedAt, updatedAt, editableUntilAt, commentAddUntilAt e permissions:
++canEditRating, canEditComment e canAddFirstComment. Durante edição integral,
++rating/comment podem ser alterados; canAddFirstComment=false identifica que não
++está na janela restrita. Nesta última, canEditRating=false,
++canEditComment=true/canAddFirstComment=true indicam somente inclusão de primeiro
++comentário, sem editar/apagar comentário anterior ou alterar nota.
++Após o prazo, ou se a inclusão tardia já foi usada, as permissões são false.
++first_comment_at não é exposto; comment atual NULL não restaura a permissão.
++Sem avaliação, evaluation:null e a mesma elegibilidade são retornadas com 200.
++POST/PATCH não foram implementados; GET não autoriza mutação futura sem revalidação.
++
++Histórico retorna por item participationId, event { id, name }, status, joinedAt,
++arenaEnteredAt, finishedAt, finishReason, completedServicesCount e evaluation
++{ eligible, submitted, pending }. Mantém waiting/active/finished/canceled como
++persistidos e preserva motivos Admin/automáticos; não inventa saída voluntária.
++Vazio: items: [], nextCursor:null. Avaliação expirada não aparece como pendente.
++
++Retomada retorna recentFinalization com participationId, eventId, finishReason e
++finishedAt, ou null. "Recent" significa a **última finalização de sistema persistida**,
++ordenada por finished_at DESC/id DESC, com um dos motivos:
++admin_immediate, admin_controlled_external_wait_closed,
++automatic_operational_deadline ou automatic_admin_deadline. Não há janela fixa,
++acknowledgment, filtro por leitura anterior ou tabela de notificações. Pode retornar
++finalização antiga mesmo havendo saída voluntária mais nova. A leitura não consome
++o aviso. IDs de pendências são derivados da mesma seleção do endpoint pending,
++com a mesma ordem e snapshot; sem completed não cria avaliação pendente.
++O Expo decidirá apresentação/navegação junto de current e pending.
++
++## Política temporal e precisão
++
++Cada resposta de domínio abre REPEATABLE READ READ ONLY, captura uma vez
++clock_timestamp PostgreSQL em UTC com seis casas e usa esse mesmo instante em
++todas as comparações/consultas da resposta. A autenticação mantém sua verificação
++temporal anterior e independente. Não usa relógio JavaScript nas regras de domínio.
++
++As durações são 30 × 24 horas (720 horas) e 7 × 24 horas (168 horas), em instantes
++UTC, sem depender do fuso da sessão SQL ou de transições de horário de verão:
++
++| Regra | Borda efetiva |
++| --- | --- |
++| Primeiro envio | observado <= finished_at + 720 horas |
++| Edição integral | submitted_at <= observado <= submitted_at + 168 horas |
++| Primeiro comentário tardio | +168 horas < observado <= +720 horas, first_comment_at NULL |
++| Janela totalmente vencida | observado > submitted_at + 720 horas |
++
++Os dois relógios são independentes: primeiro envio parte de finished_at; edição
++parte de submitted_at. updated_at nunca reinicia os prazos. Um GET no último
++instante permitido é informativo; POST/PATCH futuros precisarão verificar seu
++próprio instante transacional. Todos os timestamps da resposta são formatados
++diretamente em SQL, mantendo microssegundos.
++
++Datas retroativas do job E08.9 continuam sendo o prazo lógico original, sem
++estender avaliação pelo atraso da execução. Antes da regularização persistida,
++histórico pode ainda mostrar active; GET não fecha registros nem simula finished
++para torná-los elegíveis. Retomada mostra apenas finalizações já persistidas.
++
++## Paginação, segurança e consistência
++
++Histórico: limit decimal escalar de 1 a 50, padrão 20. Rejeita arrays, valores
++fracionários, parâmetros extras e cursor inválido com 400 VALIDATION_ERROR.
++Cursor base64url sem padding, até 512 caracteres, JSON estrito versão 1 com
++joinedAt UTC de seis casas e UUID. Valida UTF-8, representação base64url,
++calendário e campos. Date é usado somente para validar calendário/milissegundos;
++o valor completo nunca é convertido para o predicado SQL. Cursor não é segredo
++nem autorização: mesmo uma posição fabricada continua filtrada pelo user_id real.
++
++Keyset `(joined_at,id) < (cursor.joinedAt::timestamptz,cursor.id::uuid)`, ambos
++DESC. Busca limit+1, retorna limit e gera cursor do último item visível somente
++quando há continuação. Agregações ocorrem depois da página limitada. Não usa
++OFFSET ou consultas por item. Inserções posteriores ao cursor não duplicam a
++página seguinte. Cada página é um snapshot próprio; não promete congelar o histórico
++entre requisições caso registros sejam corrigidos/excluídos legitimamente.
++
++Todos os SELECTs de domínio filtram user_id do principal confiável. Participação
++inexistente e de terceiro têm o mesmo 404 RESOURCE_NOT_FOUND nas duas rotas por ID.
++UUIDs são normalizados pelos validadores existentes. Staff/Admin não obtêm acesso
++transversal. Admin participante usa seus próprios IDs e continua exigindo sessão
++com 2FA pelo AuthService real. Query/body/header não trocam o titular; no histórico,
++parâmetros extras são rejeitados, nas outras consultas não viram identidade.
++Nenhuma rota exige Idempotency-Key, perfil completo ou concessão Staff para ler.
++
++Consultas de domínio leem somente participations, events, queue_entries,
++service_sessions e evaluations. Não adicionam leitura de questionários, snapshots,
++perfis, pessoas ou auditorias. O guard mantém as consultas de autenticação anteriores.
++Projeções fechadas não retornam principal, user_id, perfis, credenciais, primeira
++data de comentário, atores Staff/Admin ou auditoria. Falhas usam o filtro RFC 7807
++existente, sem SQL/detalhes privados na resposta; erro inesperado é 500
++INTERNAL_SERVER_ERROR. Contagens fora do intervalo inteiro seguro geram erro,
++sem conversão silenciosa.
++
++EvaluationReadPolicy centraliza fatos/condições de todas as rotas, sem repetir
++regras em controladores. A contagem lateral faz parte de uma única instrução SQL,
++não é N+1 de conexões. Return-state usa pending e depois a última finalização
++no mesmo snapshot. Não há locks de linha ou escrita/reserva/limpeza em GET.
++Permissões, contagens, avaliação e participação nunca misturam commits posteriores
++à abertura do snapshot; a próxima requisição enxerga os novos commits.
++
++No HEAD inicial, `/participations/current` não possuía controller HTTP, embora o
++serviço interno exista. Continua retornando o 404 anterior, sem ser capturado como
++UUID. As cinco rotas desta entrega são explícitas, com history/return-state literais
++declarados antes das rotas parametrizadas e sem rota genérica `:participationId`.
++Rotas E08.2 de queue/withdraw e demais endpoints anteriores permanecem intactos.
++
++**Pendência explícita para o inventário das próximas subetapas:** falta o controller
++HTTP de `GET /api/v1/participations/current`. A existência do método interno
++`ParticipationsService.getCurrentParticipation` não equivale à exposição dessa rota.
++Registrar essa lacuna como aberta no inventário futuro; ela não integra as cinco
++rotas aprovadas da E08.10 e não foi implementada nesta finalização documental.
++
++Limites: pending e seus IDs retornam a lista completa do titular nos 30 dias,
++conforme contrato sem paginação; custo depende desse volume. Não adiciona limite
++silencioso ou retenção. Conta/admin/perfis/sessão continuam sob política existente.
++Nenhum endpoint de envio/edição, finalização voluntária, UI, aviso consumível,
++mudança no job, dependência ou migration foi criado. Não há nova decisão de
++produto além das comparações e da semântica de "recente" solicitadas nesta task.
++
++## Testes e resultados reais
++
++| Validação | Resultado e execução |
++| --- | --- |
++| Unitários específicos de consulta/cursor/política | 21/21 aprovados |
++| HTTP simulados e DI real E08.10 | 16/16 aprovados |
++| Específicos combinados sob tsconfig.test | 37/37 aprovados |
++| Regressão unitária completa npm.cmd test | 456/456 aprovados: 419 anteriores + 37 novos |
++| npm.cmd run typecheck:test | Aprovado, incluindo integração escrita |
++| npm.cmd run lint | Aprovado |
++| npm.cmd run build | Aprovado |
++| PostgreSQL real E08.10 | 69/69 aprovados manualmente pelo responsável |
++| Regressão PostgreSQL completa | 649/649 aprovados manualmente pelo responsável |
++
++Em 04/11/2026, o responsável confirmou os resultados definitivos da validação
++manual no PostgreSQL local: **69 testes E08.10 executados e aprovados** e
++**649 testes da regressão completa executados e aprovados**, com **zero falhas,
++cancelamentos ou ignorados** em ambas as suítes. A aprovação é atribuída ao
++responsável, sem execução PostgreSQL pelo Codex.
++
++Os resultados de **456/456 unitários**, **37/37 específicos**, typecheck, lint e
++build foram obtidos anteriormente pelo Codex e permanecem registrados, sem
++reexecução nesta rodada exclusivamente documental. Código, testes, schema,
++dependências, contratos, decisões e limitações foram preservados. Não há validação
++PostgreSQL pendente na E08.10 nem declaração de validação de produção.
++
++Zero falhas, cancelamentos ou testes ignorados nas execuções aprovadas. O tsx foi
++executado fora da sandbox devido à limitação uv_os_get_passwd/ENOMEM conhecida,
++com NODE_ENV=test, DOTENV_CONFIG_PATH=NUL, URL fictícia
++127.0.0.1:1/unit_no_connection e os três TTLs explícitos de 60 segundos.
++Não acessou .env, credenciais, Neon ou PostgreSQL real.
++
++Na implementação inicial, foram escritos **69 testes PostgreSQL**, contando
++matrizes estaticamente pela AST, sem executar a suíte pelo Codex nem presumir
++aprovação. A execução manual posterior confirmou os **649 = 580 anteriores + 69
++novos** aprovados. Reutilizam guard, setup/cleanup e helpers da E08.9, com um
++arquivo auxiliar novo para os fatos de avaliação; nenhum teste anterior foi alterado.
++Fixtures usam SQL/constraints/FKs reais, IDs próprios e limpeza transacional do
++helper existente, incluindo avaliações. Agendador E08.9 permanece explicitamente
++inativo no AppModule de teste; regularização própria é invocada quando o cenário exige.
++
++Cobrem os cinco contratos, estados e contagens, submissão/expiração, titularidade
++inclusive Staff/Admin, sessão/2FA, reentradas, ordenação/cursores/microssegundos,
++limites padrão/máximo, inserção entre páginas, leitura repetida sem qualquer escrita,
++privacidade, motivos reais E08.8/E08.9 e atraso de 40 dias. Fronteiras de primeiro
++envio, edição integral e comentário têm -1, 0 e +1 microssegundo usando instantes
++derivados no PostgreSQL e o mesmo fragmento SQL da produção; não há mock de banco
++nem tentativa de sincronizar relógios físicos no mesmo microssegundo.
++
++Testes concorrentes retêm o leitor após estabelecer snapshot, confirmam outro
++transaction/client com PID diferente e verificam que a resposta mantém relações
++anteriores; a próxima leitura mostra o novo commit. Inclui fechamento E08.8 e
++complete E07.5 reais concorrentes via HTTP, preservando o estado/contagem anterior
++no snapshot e a mudança na requisição seguinte. Leituras repetidas verificam transaction_read_only=on e
++comparam participações, avaliações, filas, serviços, sessões, intenções e evento.
++
++## Reprodução da validação PostgreSQL manual aprovada
++
++Para reproduzir no banco local de teste já preparado, substituir USUARIO:SENHA somente
++por credenciais locais corretas, privadamente; não enviar esses valores ao Codex.
++As três URLs devem ser idênticas, sem query/hash, para
++127.0.0.1:55432/arenago_events_test. Nenhum reset/seed/migration nesta task.
++
++```powershell
++Set-Location C:\DoJob\ProgramacaoMobile\backend
++$env:NODE_ENV = 'test'
++$env:EVENTS_TEST_DATABASE_URL = 'postgresql://USUARIO:SENHA@127.0.0.1:55432/arenago_events_test'
++$env:DATABASE_URL = $env:EVENTS_TEST_DATABASE_URL
++$env:DATABASE_DIRECT_URL = $env:EVENTS_TEST_DATABASE_URL
++$env:DOTENV_CONFIG_PATH = 'NUL'
++$env:STAFF_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:ADMIN_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:EVENT_CLOSURE_JOB_TEST_ENABLED = 'false'
++$env:EVENT_CLOSURE_INTERVAL_MS = '30000'
++.\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test --test-concurrency=1 test/integration/evaluation-read.integration.test.ts
++if ($LASTEXITCODE -ne 0) { throw 'Investigar E08.10 antes da regressão PostgreSQL.' }
++npm.cmd run test:integration
++if ($LASTEXITCODE -ne 0) { throw 'Investigar falhas da regressão PostgreSQL.' }
++```
++
++60 segundos são TTLs de fixture e não política de produção. Os comandos são
++mantidos para reprodução: os **69/69 novos** e a **regressão de 649/649** já foram
++aprovados manualmente pelo responsável. Nenhum teste foi reexecutado nesta
++consolidação documental; a aprovação não representa validação de produção.
++
++## Arquivos e evidência única
++
++- backend/src/evaluations/evaluation-read.types.ts: contratos públicos.
++- backend/src/evaluations/evaluation-read.dto.ts: parâmetros e cursor preciso.
++- backend/src/evaluations/evaluation-read.policy.ts: projeção SQL/política compartilhada.
++- backend/src/evaluations/evaluation-read.service.ts: consultas/snapshots/keyset.
++- backend/src/evaluations/evaluation-read.controller.ts: cinco rotas autenticadas.
++- backend/src/events/events.module.ts: registro dos providers/controller.
++- backend/test/unit/evaluation-read.test.ts: 21 testes de serviço/política/cursor.
++- backend/test/unit/evaluation-read-http.test.ts: 16 HTTP simulados/DI.
++- backend/test/integration/evaluation-read-fixture.ts: fatos/fixtures reais específicos.
++- backend/test/integration/evaluation-read.integration.test.ts: 69 PostgreSQL aprovados manualmente.
++- docs/ARQUITETURA_BACKEND_ARENAGO.md: notas diretamente afetadas nas §§15.10/17.2.
++- docs/E08_10_IMPLEMENTACAO.md: este relatório.
++
++Evidência única: qa-evidence/e08-10-changes.diff, completa contra o HEAD inicial
++199b8f3, com dez arquivos novos não rastreados e dois modificados. Git apply --check
++--whitespace=error-all e aplicação efetiva em cópia isolada da base; doze arquivos
++finais comparados com normalização Git de linhas, sem omissões ou divergências.
++UTF-8 sem BOM, diff --git e caminhos relativos. Exclui a própria evidência/outros
++diffs, .env/segredos, dependências, temporários e alterações alheias. HEAD/índice
++preservados; revisão e versionamento permanecem manuais. Sem git add/commit/push/
++merge/rebase, auditoria geral E08 ou início de outra task. Sem validação de produção.

@@ -1,0 +1,422 @@
+diff --git a/backend/src/events/admin-close.service.ts b/backend/src/events/admin-close.service.ts
+index b573970..a237dab 100644
+--- a/backend/src/events/admin-close.service.ts
++++ b/backend/src/events/admin-close.service.ts
+@@ -8,6 +8,7 @@ import type * as schema from "../database/schema";
+ import { completeIdempotencyOperationWithTx, createRequestFingerprint, reserveIdempotencyOperationWithTx } from "../participations/join-idempotency";
+ import type { JsonValue } from "../participations/join-idempotency";
+ import { assertAdminSessionWithTx, authorizeGlobalAdminWithTx } from "./admin-operation-auth";
++import { AUTOMATIC_OPERATIONAL_REASON } from "./event-closure.projection";
+ import { adminCloseBody, type AdminCloseBody } from "./admin-close.dto";
+ import type { AdminCloseInput, AdminCloseResult, AdminCloseState } from "./admin-close.types";
+ 
+@@ -109,18 +110,22 @@ export class AdminCloseService {
+         if (row.outcome === "invalid") block({ kind: "closure_deadline_invalid" });
+         ensure(row.outcome === "changed" && validInstant(row.at) && validInstant(row.deadline), "UPDATE de encerramento não efetivado.");
+         if (immediate) {
+-          const canceled = await tx.execute(sql`UPDATE service_sessions s SET status='canceled',resolved_at=e.closure_requested_at,
+-            resolved_by_user_id=${input.userId},cancel_reason=${ADMIN_IMMEDIATE_REASON}
++          const canceled = await tx.execute(sql`UPDATE service_sessions s SET status='canceled',resolved_at=LEAST(e.operational_deadline_at,e.admin_deadline_at),
++            resolved_by_user_id=CASE WHEN e.operational_deadline_at<=e.closure_requested_at THEN NULL ELSE ${input.userId}::uuid END,
++            cancel_reason=CASE WHEN e.operational_deadline_at<=e.closure_requested_at THEN ${AUTOMATIC_OPERATIONAL_REASON} ELSE ${ADMIN_IMMEDIATE_REASON} END
+             FROM experiences x,events e WHERE s.experience_id=x.id AND x.event_id=e.id AND e.id=${input.eventId} AND s.status='pending' RETURNING s.id`);
+           ensure(canceled.rows.length === pending.length, "contagem de pending cancelados divergente.");
+-          const closed = await tx.execute(sql`UPDATE queue_entries q SET status='closed',closed_at=e.closure_requested_at,close_reason=${ADMIN_IMMEDIATE_REASON}
++          const closed = await tx.execute(sql`UPDATE queue_entries q SET status='closed',closed_at=LEAST(e.operational_deadline_at,e.admin_deadline_at),
++            close_reason=CASE WHEN e.operational_deadline_at<=e.closure_requested_at THEN ${AUTOMATIC_OPERATIONAL_REASON} ELSE ${ADMIN_IMMEDIATE_REASON} END
+             FROM events e WHERE q.event_id=e.id AND e.id=${input.eventId} AND q.status IN ('waiting','called') RETURNING q.id`);
+           ensure(closed.rows.length === entries.length, "contagem de entradas encerradas divergente.");
+         }
+         const finalized = await tx.execute<{ previousStatus: string }>(sql`WITH targets AS MATERIALIZED (
+             SELECT id,status FROM participations WHERE event_id=${input.eventId} AND (status='waiting' OR (${immediate}::boolean AND status='active')))
+-          UPDATE participations p SET status='finished',finished_at=e.closure_requested_at,
+-            finish_reason=${immediate ? ADMIN_IMMEDIATE_REASON : ADMIN_CONTROLLED_EXTERNAL_REASON},current_queue_entry_id=NULL
++          UPDATE participations p SET status='finished',finished_at=CASE WHEN ${immediate}::boolean
++              THEN LEAST(e.operational_deadline_at,e.admin_deadline_at) ELSE e.closure_requested_at END,
++            finish_reason=CASE WHEN ${immediate}::boolean AND e.operational_deadline_at<=e.closure_requested_at THEN ${AUTOMATIC_OPERATIONAL_REASON}
++              ELSE ${immediate ? ADMIN_IMMEDIATE_REASON : ADMIN_CONTROLLED_EXTERNAL_REASON} END,current_queue_entry_id=NULL
+           FROM events e,targets t WHERE p.id=t.id AND p.event_id=e.id AND e.id=${input.eventId} RETURNING t.status AS "previousStatus"`);
+         ensure(finalized.rows.length === people.filter(p => p.status === "waiting" || (immediate && p.status === "active")).length, "contagem de participações finalizadas divergente.");
+         const externalWaitingFinalized = finalized.rows.filter(p => p.previousStatus === "waiting").length;
+diff --git a/backend/src/participations/participation-query.service.ts b/backend/src/participations/participation-query.service.ts
+index 36cfc09..66a7068 100644
+--- a/backend/src/participations/participation-query.service.ts
++++ b/backend/src/participations/participation-query.service.ts
+@@ -3,7 +3,7 @@ import { sql, type SQL } from "drizzle-orm";
+ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
+ import { DRIZZLE_DATABASE } from "../database/database.module";
+ import type * as schema from "../database/schema";
+-import { automaticFinalizationReason, effectiveEventDeadline } from "../events/event-closure.projection";
++import { AUTOMATIC_OPERATIONAL_REASON, automaticFinalizationReason, effectiveEventDeadline } from "../events/event-closure.projection";
+ import { participationView, type ParticipationView } from "./participation-lifecycle.dto";
+ 
+ /** Estado efetivo só de leitura. A finalização física continua sendo responsabilidade de E08.8/E08.9. */
+@@ -12,10 +12,11 @@ export function participationProjection(userId: string, participationId?: string
+     SELECT p.*,d.at,${effectiveEventDeadline()} AS deadline,
+       COALESCE(p.status IN ('waiting','active') AND (e.status='closed' OR ${effectiveEventDeadline()}<=d.at
+         OR (p.status='waiting' AND e.closure_mode='controlled' AND e.closure_requested_at<=d.at)),false) AS ended,
+-      CASE WHEN e.closure_mode='immediate' AND e.status='closed' THEN 'admin_immediate'
++      CASE WHEN e.closure_mode='immediate' AND e.status='closed' AND e.operational_deadline_at>e.admin_deadline_at THEN 'admin_immediate'
++        WHEN e.closure_mode='immediate' AND e.status='closed' THEN ${AUTOMATIC_OPERATIONAL_REASON}
+         WHEN p.status='waiting' AND e.closure_mode='controlled' AND e.closure_requested_at<=d.at THEN 'admin_controlled_external_wait_closed'
+         ELSE ${automaticFinalizationReason()} END AS terminal_reason,
+-      CASE WHEN e.closure_mode='immediate' AND e.status='closed' THEN e.closure_requested_at
++      CASE WHEN e.closure_mode='immediate' AND e.status='closed' THEN ${effectiveEventDeadline()}
+         WHEN p.status='waiting' AND e.closure_mode='controlled' AND e.closure_requested_at<=d.at THEN e.closure_requested_at
+         ELSE ${effectiveEventDeadline()} END AS terminal_at
+     FROM participations p JOIN events e ON e.id=p.event_id CROSS JOIN observation d
+diff --git a/backend/test/integration/admin-close-http.integration.test.ts b/backend/test/integration/admin-close-http.integration.test.ts
+index 4a00937..d191a2c 100644
+--- a/backend/test/integration/admin-close-http.integration.test.ts
++++ b/backend/test/integration/admin-close-http.integration.test.ts
+@@ -53,6 +53,7 @@ after(async () => {
+       await c.query("DELETE FROM service_sessions s USING queue_entries q WHERE s.queue_entry_id=q.id AND q.event_id=ANY($1::uuid[])", [ids.events]);
+       await c.query("DELETE FROM queue_entries WHERE event_id=ANY($1::uuid[])", [ids.events]);
+       await c.query("DELETE FROM participation_profile_snapshots s USING participations p WHERE s.participation_id=p.id AND p.event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM evaluations v USING participations p WHERE v.participation_id=p.id AND p.event_id=ANY($1::uuid[])", [ids.events]);
+       await c.query("DELETE FROM participations WHERE event_id=ANY($1::uuid[])", [ids.events]);
+       await c.query("DELETE FROM stations s USING experiences e WHERE s.experience_id=e.id AND e.event_id=ANY($1::uuid[])", [ids.events]);
+       await c.query("DELETE FROM experiences WHERE event_id=ANY($1::uuid[])", [ids.events]);
+@@ -152,6 +153,34 @@ async function ordered<A, B>(first: () => PromiseLike<A>, second: () => PromiseL
+     database.transaction = original; b = Promise.resolve(second()); b.catch(() => undefined); await blocked(pid); await whileBlocked?.(pid); release(); return await Promise.all([a, b]);
+   } finally { database.transaction = original; release(); await Promise.allSettled([a, b]); }
+ }
++async function orderedAfterParticipationLock<A, B>(first: () => PromiseLike<A>, second: () => PromiseLike<B>): Promise<[A, B]> {
++  const original = database.transaction.bind(database) as typeof database.transaction;
++  const dialect = new PgDialect(); let ready!: (pid: number) => void, release!: () => void;
++  const reached = new Promise<number>(yes => { ready = yes; }), gate = new Promise<void>(yes => { release = yes; });
++  database.transaction = (callback, config) => {
++    database.transaction = original;
++    return original(async tx => {
++      const execute = tx.execute.bind(tx); let held = false;
++      tx.execute = (async (...args: Parameters<typeof tx.execute>) => {
++        const query = args[0], text = typeof query === "string" ? query : dialect.sqlToQuery(query.getSQL()).sql;
++        const value = await execute(...args);
++        if (!held && text.includes("FROM participations WHERE id=") && text.includes("FOR UPDATE")) {
++          held = true;
++          ready((await execute<{ pid: number }>(sql`SELECT pg_backend_pid() AS pid`)).rows[0].pid);
++          await gate;
++        }
++        return value;
++      }) as typeof tx.execute;
++      return callback(tx);
++    }, config);
++  };
++  let a: Promise<A> | undefined, b: Promise<B> | undefined;
++  try {
++    a = Promise.resolve(first()); a.catch(() => undefined);
++    const pid = await Promise.race([reached, a.then(() => { throw new Error("Primeira operação não alcançou o lock da participação."); })]);
++    b = Promise.resolve(second()); b.catch(() => undefined); await blocked(pid); release(); return await Promise.all([a, b]);
++  } finally { database.transaction = original; release(); await Promise.allSettled([a, b]); }
++}
+ async function lockWait(c: Context, request: () => PromiseLike<supertest.Response>, change: (client: PoolClient, pid: number) => Promise<void>, lock: "event" | "role" | "account" | "participation" | "station" = "event") {
+   const client = await pool.connect(); let pending: Promise<supertest.Response> | undefined;
+   try {
+@@ -179,6 +208,7 @@ async function controlled(seconds = 1800) {
+   return { mode: "controlled" as const, reason, controlledUntilAt: at.toISOString() };
+ }
+ const close = (c: Context, body: object = immediate(), key: string = randomUUID(), actor: { token: string } = c.admin) => supertest(app.getHttpServer()).post(closeRoute(c)).set("Authorization", `Bearer ${actor.token}`).set("Idempotency-Key", key).send(body);
++const read = (actor: { token: string }, path: string) => supertest(app.getHttpServer()).get(`/api/v1${path}`).set("Authorization", `Bearer ${actor.token}`);
+ const call = (c: Context) => supertest(app.getHttpServer()).post(`/api/v1/staff/events/${c.eventId}/experiences/${c.experienceId}/stations/${c.stationId}/call-next`).set("Authorization", `Bearer ${c.staff.token}`).set("Idempotency-Key", randomUUID()).send({});
+ const resolve = (c: Context, session: string, action: "complete" | "absent") => supertest(app.getHttpServer()).post(`/api/v1/staff/events/${c.eventId}/service-sessions/${session}/${action}`).set("Authorization", `Bearer ${c.staff.token}`).set("Idempotency-Key", randomUUID()).send({});
+ const withdraw = (c: Context, p: Awaited<ReturnType<typeof person>>, entry: string) => supertest(app.getHttpServer()).post(`/api/v1/participations/${p.participationId}/queue-entries/${entry}/withdraw`).set("Authorization", `Bearer ${p.token}`).set("Idempotency-Key", randomUUID()).send({});
+@@ -215,6 +245,10 @@ test("E08.8 PostgreSQL imediato encerra tudo atomicamente sem alterar completed/
+ });
+ test("E08.8 PostgreSQL controlado fecha waiting externas e preserva active com/sem fila e pending", async () => {
+   const c = await context(), data = await rich(c), before = await state(c), body = await controlled(), r = await close(c, body); assert.equal(r.status, 200); assert.equal(r.body.status, "closing"); assert.equal(r.body.externalWaitingFinalized, 1); assert.equal(Date.parse(r.body.effectiveOperationalDeadlineAt), Date.parse(body.controlledUntilAt));
++  const controlledAt = (await pool.query(`SELECT count(*)::int AS total,
++    count(*) FILTER (WHERE p.finished_at=e.closure_requested_at AND p.finish_reason='admin_controlled_external_wait_closed')::int AS exact
++    FROM participations p JOIN events e ON e.id=p.event_id WHERE p.id=$1`, [data.outside.participationId])).rows[0];
++  assert.deepEqual(controlledAt, { total: 1, exact: 1 });
+   const after = await state(c); for (const key of ["queues", "services", "snapshots", "experiences", "stations"]) assert.deepEqual(after[key], before[key]);
+   for (const p of before.people) { const next = after.people.find((n: { id: string }) => n.id === p.id); if (p.status !== "waiting") assert.deepEqual(next, p); else { assert.equal(next.status, "finished"); assert.equal(next.finish_reason, "admin_controlled_external_wait_closed"); assert.equal(next.arena_entered_at, null); } }
+   assert.equal(after.people.find((p: { id: string }) => p.id === data.idle.participationId).status, "active");
+@@ -228,8 +262,114 @@ for (const mode of ["immediate", "controlled"] as const) test(`E08.8 PostgreSQL
+   const c = await context(); await pool.query("UPDATE events SET starts_at=clock_timestamp()+interval '10 minutes',status='scheduled' WHERE id=$1", [c.eventId]); await pool.query("UPDATE stations SET availability='unavailable' WHERE id=$1", [c.stationId]); await pool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE event_id=$1", [c.eventId]);
+   const r = await close(c, mode === "immediate" ? immediate() : await controlled()); assert.equal(r.status, 200); assert.equal(r.body.externalWaitingFinalized, 0);
+ });
+-test("E08.8 PostgreSQL imediato após prazo operacional preserva deadline efetivo mínimo", async () => {
+-  const c = await context(); await person(c); await pool.query("UPDATE events SET official_ends_at=clock_timestamp()-interval '20 minutes',operational_deadline_at=clock_timestamp()-interval '10 minutes' WHERE id=$1", [c.eventId]); const r = await close(c); assert.equal(r.status, 200); assert.ok(Date.parse(r.body.effectiveOperationalDeadlineAt) < Date.parse(r.body.newEntriesClosedAt)); await assertNoOpen(c);
++test("E08-EST02 PostgreSQL Admin tardio regulariza no deadline lógico e conserva avaliação, filas e consultas", async () => {
++  const c = await context(), completed = await called(c); assert.equal((await resolve(c, completed.session, "complete")).status, 200);
++  const withoutCompletion = await called(c), prior = await person(c, "finished");
++  const deadline = (await pool.query(`UPDATE events SET official_ends_at=clock_timestamp()-interval '20 minutes',
++    operational_deadline_at=clock_timestamp()-interval '10 minutes' WHERE id=$1
++    RETURNING to_char(operational_deadline_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`, [c.eventId])).rows[0].at as string;
++  const projectedBefore = await read(completed.p, `/participations/${completed.p.participationId}`);
++  assert.equal(projectedBefore.status, 200); assert.equal(projectedBefore.body.participation.finishedAt, deadline);
++  assert.deepEqual((await read(completed.p, "/participations/current")).body, { participation: null });
++  const key = randomUUID(), response = await close(c, immediate(), key);
++  assert.equal(response.status, 200, JSON.stringify(response.body));
++  assert.ok(response.body.effectiveOperationalDeadlineAt < response.body.newEntriesClosedAt);
++  const rows = (await pool.query(`SELECT id,status,to_char(finished_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS finished_at,finish_reason FROM participations WHERE id=ANY($1::uuid[]) ORDER BY id`,
++    [[completed.p.participationId, withoutCompletion.p.participationId, prior.participationId]])).rows;
++  for (const p of rows.filter((item: { id: string }) => item.id !== prior.participationId)) {
++    assert.equal(p.status, "finished"); assert.equal(p.finished_at, deadline); assert.equal(p.finish_reason, "automatic_operational_deadline");
++  }
++  assert.equal(rows.find((p: { id: string }) => p.id === prior.participationId).finish_reason, "fixture_terminal");
++  const effects = (await pool.query(`SELECT
++    (SELECT to_char(resolved_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') FROM service_sessions WHERE queue_entry_id=$1 AND status='canceled') AS service_at,
++    (SELECT to_char(closed_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') FROM queue_entries WHERE participation_id=$2 AND status='closed') AS queue_at`,
++    [withoutCompletion.entry, withoutCompletion.p.participationId])).rows[0];
++  assert.equal(effects.service_at, deadline); assert.equal(effects.queue_at, deadline);
++  const projectedAfter = await read(completed.p, `/participations/${completed.p.participationId}`);
++  assert.equal(projectedAfter.body.participation.finishedAt, projectedBefore.body.participation.finishedAt);
++  assert.equal(projectedAfter.body.participation.finishReason, "automatic_operational_deadline");
++  assert.deepEqual((await read(completed.p, "/participations/current")).body, { participation: null });
++  const eligibility = await read(completed.p, `/participations/${completed.p.participationId}/evaluation-eligibility`);
++  assert.equal(eligibility.status, 200); assert.equal(eligibility.body.eligible, true); assert.equal(eligibility.body.pending, true);
++  assert.equal(eligibility.body.firstSubmissionDeadlineAt, (await pool.query(`SELECT to_char(($1::timestamptz+interval '720 hours') AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`, [deadline])).rows[0].at);
++  const ineligible = await read(withoutCompletion.p, `/participations/${withoutCompletion.p.participationId}/evaluation-eligibility`);
++  assert.equal(ineligible.status, 200); assert.equal(ineligible.body.eligible, false); assert.equal(ineligible.body.reason, "NO_COMPLETED_SERVICE");
++  const history = await read(completed.p, "/participations/history");
++  const historical = history.body.items.find((item: { participationId: string }) => item.participationId === completed.p.participationId);
++  assert.equal(historical.finishedAt, deadline); assert.equal(historical.evaluation.pending, true);
++  await pool.query("UPDATE idempotency_operations SET expires_at=clock_timestamp()-interval '1 hour' WHERE actor_user_id=$1 AND operation=$2 AND idempotency_key=$3", [c.admin.userId, operation, key]);
++  const beforeReplay = await state(c), replayed = await close(c, immediate(), key);
++  assert.equal(replayed.status, 200); assert.deepEqual(replayed.body, response.body); assert.deepEqual(await state(c), beforeReplay); assert.equal((await audit(c)).length, 1);
++});
++
++test("E08-EST02 PostgreSQL job e Admin tardios concorrentes convergem sem depender da ordem dos locks", async () => {
++  const { EventClosureService } = await import("../../src/events/event-closure.service"), closure = app.get(EventClosureService);
++  for (const winner of ["admin", "job"] as const) {
++    const c = await context(), completed = await called(c); assert.equal((await resolve(c, completed.session, "complete")).status, 200);
++    const pending = await called(c);
++    await pool.query("UPDATE events SET official_ends_at=clock_timestamp()-interval '20 minutes',operational_deadline_at=clock_timestamp()-interval '10 minutes' WHERE id=$1", [c.eventId]);
++    const deadline = (await pool.query(`SELECT to_char(operational_deadline_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at FROM events WHERE id=$1`, [c.eventId])).rows[0].at as string;
++    const [first, second] = winner === "admin"
++      ? await ordered(() => close(c), () => closure.regularizeEvent(c.eventId))
++      : await ordered(() => closure.regularizeEvent(c.eventId), () => close(c));
++    if (winner === "admin") {
++      assert.equal((first as supertest.Response).status, 200); assert.equal((first as supertest.Response).body.effectiveOperationalDeadlineAt, deadline);
++      assert.deepEqual(second, { kind: "already_closed" });
++    } else {
++      assert.equal((first as { kind: string; deadlineAt: string }).kind, "closed");
++      assert.equal((first as { deadlineAt: string }).deadlineAt, deadline);
++      problem(second as supertest.Response, 409, "EVENT_ALREADY_CLOSED");
++    }
++    const facts = (await pool.query(`SELECT
++      (SELECT to_char(finished_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') FROM participations WHERE id=$1) AS finished_at,
++      (SELECT finish_reason FROM participations WHERE id=$1) AS finish_reason,
++      (SELECT status FROM service_sessions WHERE queue_entry_id=$2) AS service_status,
++      (SELECT cancel_reason FROM service_sessions WHERE queue_entry_id=$2) AS cancel_reason,
++      (SELECT resolved_by_user_id FROM service_sessions WHERE queue_entry_id=$2) AS resolved_by_user_id,
++      (SELECT to_char(resolved_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') FROM service_sessions WHERE queue_entry_id=$2) AS resolved_at,
++      (SELECT status FROM queue_entries WHERE id=$2) AS queue_status,
++      (SELECT close_reason FROM queue_entries WHERE id=$2) AS close_reason,
++      (SELECT to_char(closed_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') FROM queue_entries WHERE id=$2) AS closed_at`,
++      [completed.p.participationId, pending.entry])).rows[0];
++    assert.equal(facts.finished_at, deadline);
++    assert.equal(facts.finish_reason, "automatic_operational_deadline");
++    assert.equal(facts.service_status, "canceled"); assert.equal(facts.resolved_at, deadline);
++    assert.equal(facts.cancel_reason, "automatic_operational_deadline"); assert.equal(facts.resolved_by_user_id, null);
++    assert.equal(facts.queue_status, "closed"); assert.equal(facts.closed_at, deadline);
++    assert.equal(facts.close_reason, "automatic_operational_deadline");
++    assert.equal((await audit(c)).length, winner === "admin" ? 1 : 0);
++  }
++});
++
++test("E08-EST02 PostgreSQL envio de avaliação concorre com Admin tardio sem deslocar finished_at nem os 720 horas", async () => {
++  for (const winner of ["admin", "evaluation"] as const) {
++    const c = await context(), eligible = await called(c); assert.equal((await resolve(c, eligible.session, "complete")).status, 200);
++    const deadline = (await pool.query(`UPDATE events SET official_ends_at=clock_timestamp()-interval '20 minutes',
++      operational_deadline_at=clock_timestamp()-interval '10 minutes' WHERE id=$1
++      RETURNING to_char(operational_deadline_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`, [c.eventId])).rows[0].at as string;
++    const submit = () => supertest(app.getHttpServer()).post(`/api/v1/participations/${eligible.p.participationId}/evaluation`)
++      .set("Authorization", `Bearer ${eligible.p.token}`).set("Idempotency-Key", randomUUID()).send({ rating: 5 });
++    const [first, second] = winner === "admin"
++      ? await ordered(() => close(c), submit)
++      : await orderedAfterParticipationLock(submit, () => close(c));
++    const adminResult = winner === "admin" ? first as supertest.Response : second as supertest.Response;
++    const evaluationResult = winner === "admin" ? second as supertest.Response : first as supertest.Response;
++    assert.equal(adminResult.status, 200, JSON.stringify(adminResult.body));
++    if (winner === "admin") assert.equal(evaluationResult.status, 201, JSON.stringify(evaluationResult.body));
++    else problem(evaluationResult, 409, "EVALUATION_NOT_ELIGIBLE");
++    const stored = (await pool.query(`SELECT to_char(finished_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS finished_at,finish_reason
++      FROM participations WHERE id=$1`, [eligible.p.participationId])).rows[0];
++    assert.equal(stored.finished_at, deadline); assert.equal(stored.finish_reason, "automatic_operational_deadline");
++    const after = await read(eligible.p, `/participations/${eligible.p.participationId}/evaluation-eligibility`);
++    assert.equal(after.status, 200); assert.equal(after.body.firstSubmissionDeadlineAt,
++      (await pool.query(`SELECT to_char(($1::timestamptz+interval '720 hours') AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`, [deadline])).rows[0].at);
++    assert.equal(after.body.submitted, winner === "admin");
++    const writes = (await pool.query(`SELECT
++      (SELECT count(*)::int FROM evaluations WHERE participation_id=$1) AS evaluations,
++      (SELECT count(*)::int FROM idempotency_operations WHERE actor_user_id=$2 AND operation='submit_evaluation') AS intents`,
++      [eligible.p.participationId, eligible.p.userId])).rows[0];
++    assert.deepEqual(writes, winner === "admin" ? { evaluations: 1, intents: 1 } : { evaluations: 0, intents: 0 });
++  }
+ });
+ test("E08.8 PostgreSQL prazos controlados passado/igual/agora/além de hora ou limite original são recusados", async () => {
+   for (const seconds of [-1, 0, 3601, 7200]) { const c = await context(), before = await state(c); problem(await close(c, await controlled(seconds)), 409, "CLOSURE_DEADLINE_INVALID"); assert.deepEqual(await state(c), before); }
+diff --git a/backend/test/unit/admin-close.test.ts b/backend/test/unit/admin-close.test.ts
+index b32a93b..39505da 100644
+--- a/backend/test/unit/admin-close.test.ts
++++ b/backend/test/unit/admin-close.test.ts
+@@ -55,12 +55,18 @@ test("E08.8 imediato cancela pendências, fecha filas, finaliza pessoas e audita
+   const order = ["SELECT id FROM events", "SELECT id FROM experiences", 'SELECT s.id,s.experience_id', 'SELECT id,status,current_queue_entry_id', 'SELECT id,participation_id', 'SELECT s.id,s.queue_entry_id', "FROM users WHERE", "SELECT id FROM user_roles", "SELECT id FROM sessions", 'insert into "idempotency_operations"', "WITH decision", "UPDATE service_sessions", "UPDATE queue_entries", "WITH targets", "INSERT INTO audit_logs", 'update "idempotency_operations"'];
+   for (let n = 1; n < order.length; n++) assert.ok(f.queries.findIndex(q => q.text.includes(order[n - 1])) < f.queries.findIndex(q => q.text.includes(order[n])), order[n]);
+   for (const q of f.queries.filter(q => q.text.includes("ORDER BY"))) assert.match(q.text, /FOR (UPDATE|SHARE)/);
+-  for (const name of ["UPDATE service_sessions", "UPDATE queue_entries", "WITH targets", "INSERT INTO audit_logs"]) assert.ok(f.queries.find(q => q.text.includes(name))!.text.includes("closure_requested_at"));
++  for (const name of ["UPDATE service_sessions", "UPDATE queue_entries", "WITH targets"]) assert.ok(f.queries.find(q => q.text.includes(name))!.text.includes("LEAST(e.operational_deadline_at,e.admin_deadline_at)"));
++  for (const name of ["UPDATE service_sessions", "UPDATE queue_entries", "WITH targets"]) assert.ok(f.queries.find(q => q.text.includes(name))!.text.includes("e.operational_deadline_at<=e.closure_requested_at"));
++  assert.match(f.queries.find(q => q.text.includes("WITH targets"))!.text,/finished_at=CASE WHEN \$\d+::boolean\s+THEN LEAST\(e\.operational_deadline_at,e\.admin_deadline_at\) ELSE e\.closure_requested_at END/);
++  assert.ok(f.queries.find(q => q.text.includes("INSERT INTO audit_logs"))!.text.includes("e.closure_requested_at"));
+   const canceled = f.queries.find(q => q.text.includes("UPDATE service_sessions"))!; assert.match(canceled.text, /status='pending'/); assert.match(canceled.text, /status='canceled'/); assert.ok(canceled.params.includes("admin_immediate"));
+   assert.equal(f.queries.some(q => /INSERT INTO evaluations|status='completed'|status='absent'/.test(q.text)), false);
+ });
+ test("E08.8 controlado finaliza somente waiting externa e preserva operação residual", async () => {
+   const f = fixture(), r = await f.service.closeEvent(controlled); assert.deepEqual(r, { kind: "completed", ...state, status: "closing", closureMode: "controlled", effectiveOperationalDeadlineAt: deadline });
++  const finish = f.queries.find(q => q.text.includes("WITH targets"))!;
++  assert.match(finish.text,/THEN LEAST\(e\.operational_deadline_at,e\.admin_deadline_at\) ELSE e\.closure_requested_at END/);
++  assert.ok(finish.params.includes(false)); assert.ok(finish.params.includes("admin_controlled_external_wait_closed"));
+   assert.equal(f.queries.some(q => q.text.includes("UPDATE service_sessions") || q.text.includes("UPDATE queue_entries")), false);
+   const p = f.queries.find(q => q.text.includes("WITH targets"))!; assert.ok(p.params.includes("admin_controlled_external_wait_closed")); assert.ok(p.params.includes(false));
+   assert.equal(f.queries.some(q => /SET availability|SET queue_accepting_entries|last_queue_order=/.test(q.text)), false);
+diff --git a/backend/test/unit/participation-lifecycle.test.ts b/backend/test/unit/participation-lifecycle.test.ts
+index e2e9e2a..ba887df 100644
+--- a/backend/test/unit/participation-lifecycle.test.ts
++++ b/backend/test/unit/participation-lifecycle.test.ts
+@@ -107,6 +107,8 @@ test("E08.12 posição inválida ou insegura não vira número impreciso",()=>{
+ test("E08.12 consulta reutiliza prazo/motivos E08.9 e faz projeção somente de leitura",()=>{
+   const q=new PgDialect().sqlToQuery(participationProjection(uid));
+   assert.ok(q.sql.includes('LEAST(e.operational_deadline_at,e.admin_deadline_at)<=d.at'));assert.ok(q.sql.includes("e.status='closed'"));
++  assert.match(q.sql,/e\.closure_mode='immediate' AND e\.status='closed' AND e\.operational_deadline_at>e\.admin_deadline_at THEN 'admin_immediate'/);
++  assert.match(q.sql,/e\.closure_mode='immediate' AND e\.status='closed' THEN \$\d+/);
+   assert.ok(q.params.includes("automatic_operational_deadline")&&q.params.includes("automatic_admin_deadline"));
+   assert.equal(/FOR UPDATE|INSERT |UPDATE |DELETE /.test(q.sql),false);assert.equal((q.sql.match(/clock_timestamp\(\)/g)||[]).length,1);
+ });
+diff --git a/docs/E08_EST02_CORRECAO_A02.md b/docs/E08_EST02_CORRECAO_A02.md
+new file mode 100644
+index 0000000..02a1b51
+--- /dev/null
++++ b/docs/E08_EST02_CORRECAO_A02.md
+@@ -0,0 +1,129 @@
++# E08-EST02 — Correção A02: preservação do fechamento lógico tardio
++
++**Achado:** A02 — P1, fechamento imediato administrativo posterior ao deadline podia deslocar a finalização persistida e, com isso, ampliar a janela inicial de avaliação.
++
++**Base da task:** `1d8dc64ca4839271b5476521ef96c733b3e9c47b`, HEAD sincronizado com `origin/feature/events-participations` no início da execução. A E08-EST01 estava commitada. Nenhuma alteração preexistente foi encontrada.
++
++## Diagnóstico e decisão contratual
++
++A E08.8 documenta que `POST /api/v1/admin/events/:eventId/close` aceita modo imediato mesmo após o prazo operacional original. A resposta mantém dois instantes distintos:
++`newEntriesClosedAt`, corte administrativo real, e `effectiveOperationalDeadlineAt = LEAST(operational_deadline_at, admin_deadline_at)`. A E08.9, por sua vez, finaliza filas, atendimentos pendentes e participações no deadline efetivo, com precisão PostgreSQL de microssegundos. A E08.10–E08.12 derivam a elegibilidade e os 720 horas iniciais de `participations.finished_at`.
++
++A falha era real no caminho de produção: o fechamento imediato tardio gravava corretamente o corte Admin no evento, mas copiava `closure_requested_at` para `service_sessions.resolved_at`, `queue_entries.closed_at` e `participations.finished_at`. Quando o job estava atrasado, essa gravação substituía o instante lógico já projetado pela E08.10/E08.12 e podia estender a janela de avaliação. A ordem de execução Admin/job também determinava qual motivo e timestamp persistido prevaleciam.
++
++**Decisão:** manter o comportamento público aprovado da E08.8: aceitar o fechamento imediato tardio e fechar novas entradas no momento administrativo da requisição. Para efeitos terminais de domínio, usar o deadline efetivo PostgreSQL (`LEAST(operational_deadline_at, admin_deadline_at)`). Se o prazo operacional já foi atingido quando a requisição é decidida, regularizar com a semântica automática operacional: motivo `automatic_operational_deadline` e `resolved_by_user_id=NULL`. Antes do prazo, preservar `admin_immediate` e o Admin como resolvedor. Não recusar a operação nem criar uma nova resposta HTTP. A comparação usa `operational_deadline_at <= closure_requested_at` no PostgreSQL, sem arredondamento/tolerância.
++
++`closure_requested_at`, `events.updated_at`, `audit_logs.occurred_at` e
++`newEntriesClosedAt` continuam registrando a ação Admin no seu horário real. `admin_deadline_at` conserva seu papel no cálculo do prazo efetivo. Auditoria e resposta não são retrodatadas. Assim, Admin-first e job-first convergem em motivo e timestamp para as filas, atendimentos e participações, enquanto status/metadata de fechamento e auditoria de ação Admin podem legitimamente diferir.
++
++## Alterações
++
++- `backend/src/events/admin-close.service.ts`: efeitos do modo imediato usam `LEAST(e.operational_deadline_at,e.admin_deadline_at)` para `resolved_at`, `closed_at` e `finished_at` somente no imediato. `participations.finished_at` usa `CASE`: deadline efetivo no imediato e `closure_requested_at` no controlado. Os motivos e `resolved_by_user_id` automáticos também se aplicam somente ao imediato tardio. Locks, auditoria, resposta e intenção idempotente permanecem preservados.
++- `backend/src/participations/participation-query.service.ts`: a projeção de uma participação em evento imediatamente fechado usa o mesmo deadline efetivo. Uma leitura antes da regularização física e a leitura após a execução do Admin apresentam o mesmo `finishedAt` lógico.
++- `backend/test/unit/admin-close.test.ts`: as asserções SQL distinguem o timestamp efetivo do imediato e `closure_requested_at` do controlado; a auditoria continua ligada ao horário da requisição.
++- `backend/test/unit/participation-lifecycle.test.ts`: confirma a expressão compartilhada de deadline na projeção imediata.
++- `backend/test/integration/admin-close-http.integration.test.ts`: o teste histórico de fechamento tardio foi aprofundado; o teste de fechamento controlado agora confirma `finished_at = closure_requested_at`; três cenários PostgreSQL novos exercitam deadline atrasado, consultas/avaliação/replay, corrida real Admin/job nas duas ordens e corrida de envio de avaliação com Admin tardio. A ordem evaluation-first usa barreira no lock real da participação, e a limpeza remove avaliações das fixtures antes das participações.
++
++Não foram alterados rotas, DTOs públicos, schema, migrações, dependências ou outros serviços de produção. A arquitetura não foi alterada: a decisão decorre dos contratos existentes na arquitetura §17.8 e dos relatórios E08.8–E08.12.
++
++## Efeitos, concorrência e garantias preservadas
++
++- Um atendimento `completed` anterior permanece intacto e é a condição de elegibilidade; finalizar sem atendimento concluído continua sem oferecer avaliação.
++- Uma participação ainda aberta recebe `admin_immediate` quando o Admin decide antes do deadline e `automatic_operational_deadline` quando o deadline operacional já foi atingido; o timestamp terminal converge ao deadline efetivo. Registros já terminais não são reescritos.
++- Filas `waiting/called` e atendimentos `pending` são fechados/cancelados atomicamente com o mesmo deadline efetivo e o motivo correspondente à decisão temporal. O `resolved_by_user_id` fica nulo no caminho automático tardio. Histórico, ponteiros, contadores, serviços concluídos, snapshots e outras filas permanecem preservados.
++- A projeção E08.12 do fechamento imediato usa o deadline efetivo, evitando uma mudança de `finishedAt` entre a visão lógica anterior e o estado fisicamente regularizado.
++- Os 720 horas para o primeiro envio continuam inclusivos e começam em `finished_at`; por consequência, a requisição Admin tardia não prolonga a elegibilidade. As regras de 168/720 horas para edição/comentário não foram alteradas.
++- O evento continua sendo o primeiro lock. Admin e job usam, depois dele, a ordem evento → experiências → estações → participações → entradas → atendimentos. Escritores E07 e ciclo E08.12 que tomam `events FOR SHARE/UPDATE` são serializados pelo lock do evento; a escrita de avaliação toma participação e avaliação, mas não solicita depois o lock do evento. Não foi introduzida nova inversão de locks.
++- A cobertura existente exercita Admin contra operações Staff/participação, avaliação contra fechamento Admin/job, duas intenções Admin e job contra operações de participação. Os três cenários A02 cobrem as duas ordens de confirmação Admin/job e a concorrência Admin/avaliação usando transações PostgreSQL independentes e espera real observada por `pg_blocking_pids`.
++- Revalidação A01 de conta, concessão, sessão e 2FA permanece no mesmo caminho transacional. A autorização atual ainda precede replay; replay autorizado retorna a resposta histórica sem repetir os efeitos. Uma nova intenção após o job ter fechado o evento continua recebendo `409 EVENT_ALREADY_CLOSED`. Reserva, efeitos, auditoria e conclusão idempotente continuam no mesmo commit/rollback.
++
++## Cobertura PostgreSQL e validação manual
++
++Foram preparados **3 cenários PostgreSQL A02** no arquivo `admin-close-http.integration.test.ts`. O primeiro substituiu e aprofundou o teste histórico de fechamento imediato após o prazo, sem alterar sua expectativa HTTP 200; os outros dois são testes concorrentes adicionais. O cenário tardio cobre: leitura lógica antes/depois, precisão de seis casas, participação com atendimento concluído, participação sem conclusão, estados/motivos e timestamps de fila/atendimento, histórico, elegibilidade e deadline de 720 horas, ausência de avaliação para quem não teve serviço concluído e replay após expiração técnica. O segundo cenário concorrente executa Admin-first e job-first em transações independentes. O terceiro verifica a corrida Admin tardio/envio de avaliação e o mesmo prazo persistido em ambas as ordens.
++
++A contagem final comprovada é **70 testes focados**: a base E08.8 tinha 68, o teste histórico foi substituído por um dos três cenários A02 e somente os dois concorrentes aumentaram o total (`68 - 1 + 3 = 70`). Pelo mesmo motivo, a regressão passou de 1.226 para **1.228**, e não para as previsões anteriores de 71 e 1.229. Nenhum teste foi removido ou modificado para ajustar números; a diferença decorre exclusivamente de ter contado inicialmente o cenário histórico substituído como se permanecesse adicional.
++
++### Primeira execução PostgreSQL focada e correções do teste
++
++Na primeira execução manual, o runner contabilizou 71 itens: **69 testes aprovados**, o cenário `evaluation-first` reprovado e a falha adicional do hook `after` durante a limpeza. A falha do hook apareceu como item adicional; corrigida a FK, a suíte revelou sua contagem estável de 70 testes registrados. Esses resultados são intermediários e foram preservados como histórico, sem representar a aprovação final.
++
++No cenário `evaluation-first`, o helper genérico `ordered()` só anunciava e suspendia a primeira transação depois que todo o callback transacional retornava com sucesso. O POST de avaliação, porém, toma `participations FOR UPDATE`, observa corretamente que a participação persistida ainda está `active`, decide `EVALUATION_NOT_ELIGIBLE` e desfaz a transação antes desse ponto. Por isso a mensagem `Primeira operação não manteve tx.` era uma falha da instrumentação, não evidência de ausência de transação nem defeito de produção. A ordem que falhou foi **avaliação primeiro**; Admin-first alcançava a barreira antiga porque o fechamento concluía seu callback antes de ser retido.
++
++A expectativa `409 EVALUATION_NOT_ELIGIBLE` foi preservada. O contrato E08.11 exige participação fisicamente `finished` para o envio, e a E08.12 registra que, antes da regularização física, histórico/pendência/retomada da avaliação ainda aguardam o job ou fechamento que persista o estado terminal. A correção usa uma barreira específica logo após o `FOR UPDATE` real da participação na transação da avaliação. Em seguida inicia o fechamento Admin em outra conexão/transação, confirma por `pg_blocking_pids` que ele aguarda aquele lock e só então libera a avaliação. Assim, a ordem é determinística sem `Promise.all`, atraso arbitrário ou interceptação de método fora do caminho HTTP: evaluation-first retorna 409, o Admin regulariza depois; Admin-first continua submetendo a avaliação após o commit do fechamento. Em ambas as ordens, `finished_at` e as 720 horas permanecem ancorados no deadline operacional, e a unicidade continua impedindo avaliações duplicadas.
++
++O hook de limpeza removia snapshots e depois tentava apagar `participations`, mas não removia antes as `evaluations` criadas pelo novo cenário Admin-first. O PostgreSQL recusou a exclusão com `fk_evaluations_participation` e reverteu a transação inteira de limpeza. Foi incluída a exclusão de avaliações por `participation_id`, limitada às participações cujos `event_id` pertencem a `ids.events`, antes da exclusão dessas participações. A consulta é idempotente, respeita a FK e não alcança fixtures de outras suítes. Como o rollback do hook pode ter preservado todos os registros daquela execução, resíduos anteriores são **possíveis**, mas não foram consultados nem removidos pelo Codex. Os UUIDs aleatórios daquela execução não existem mais em memória; qualquer saneamento deve ser precedido por inspeção manual e limitado aos eventos identificados pelo responsável, sem limpeza ampla. A nova execução limpa integralmente apenas as fixtures que ela própria registra.
++
++### Aprovação PostgreSQL definitiva
++
++Após as correções de sincronização e limpeza, o responsável aprovou manualmente:
++
++- suíte focada E08-EST02: **70/70**;
++- `database.integration.test.ts` no PostgreSQL 18 Linux em Docker: **22/22**, incluindo V12;
++- regressão PostgreSQL completa: **1.228/1.228**, zero falhas, cancelamentos ou ignorados, código de saída 0 e duração de 627374.5094 ms.
++
++A primeira regressão no PostgreSQL 18 nativo do Windows contabilizou 1.226 aprovações em 1.228 testes. O caso V12 falhou porque a política de integridade de código do Windows bloqueou o carregamento de `plpgsql.dll` (evento 3077); a segunda falha contabilizada correspondia ao agrupamento da suíte. Foi um bloqueio ambiental, não uma falha funcional da A02 ou das migrações. Sem desativar a segurança do Windows, o responsável instalou WSL 2 e Docker Desktop e executou um PostgreSQL 18 Linux isolado no contêiner `arenago-e08-pg18`, banco `arenago_events_test`, endereço local `127.0.0.1:55432` e volume persistente `arenago_e08_pg18_data`, com o serviço PostgreSQL Windows temporariamente parado. Após aplicar as migrações, V12 e toda a regressão passaram. Nenhuma credencial foi registrada.
++
++O Codex não executou PostgreSQL. A validação manual confirma tanto a barreira determinística de `evaluation-first` quanto a limpeza das avaliações antes das participações. Não houve alteração adicional de produção depois da implementação A02.
++
++Comandos PowerShell para o responsável, após configurar localmente e sem compartilhar as três URLs idênticas de `arenago_events_test`:
++
++```powershell
++Set-Location C:\DoJob\ProgramacaoMobile\backend
++$env:NODE_ENV = 'test'
++$env:DOTENV_CONFIG_PATH = 'NUL'
++$env:EVENT_CLOSURE_JOB_TEST_ENABLED = 'false'
++$env:STAFF_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:ADMIN_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:EVALUATION_IDEMPOTENCY_TTL_SECONDS = '60'
++
++# DATABASE_URL, DATABASE_DIRECT_URL e EVENTS_TEST_DATABASE_URL devem estar
++# configuradas pelo responsável, idênticas e apontando para o banco local aprovado.
++foreach ($name in @('DATABASE_URL','DATABASE_DIRECT_URL','EVENTS_TEST_DATABASE_URL')) {
++  if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
++    throw "$name precisa estar configurada localmente."
++  }
++}
++
++npx.cmd tsx --tsconfig tsconfig.test.json --test --test-concurrency=1 test/integration/admin-close-http.integration.test.ts
++if ($LASTEXITCODE -ne 0) { throw 'Investigar a suíte focada E08.8/A02 antes da regressão.' }
++
++# Regressão PostgreSQL comprovada: 1.228 testes; executar somente após a suíte focada.
++npm.cmd run test:integration
++if ($LASTEXITCODE -ne 0) { throw 'Investigar falhas antes de considerar A02 validada.' }
++```
++
++## Validações locais do Codex
++
++- Testes unitários específicos (`admin-close.test.ts` e `participation-lifecycle.test.ts`): **100/100 aprovados**.
++- Regressão unitária final: **984/984 aprovados**, zero falhas/cancelamentos/ignorados.
++- A tentativa inicial usou `npm.cmd test -- --test-concurrency=1 --test-timeout=30000` com shim temporário de `os.userInfo()`, mas sem `STAFF_IDEMPOTENCY_TTL_SECONDS`, `PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS`, `ADMIN_IDEMPOTENCY_TTL_SECONDS` e `EVALUATION_IDEMPOTENCY_TTL_SECONDS`. Os 13 arquivos listados abaixo inicializam policies Nest reais; `parseOperationIdempotencyTtl` lança erro de configuração quando a variável requerida está ausente, e o `NestFactory` aborta a criação do módulo. A ausência das variáveis foi confirmada após `dotenv/config`; não houve falha de asserção de A02. Com os quatro TTLs de teste definidos, `admin-close-http.test.ts` passou 8/8 e a regressão completa passou 984/984. A diferença 851 vs. 984 ocorreu porque o runner contou os arquivos que abortaram como falhas de arquivo, sem contabilizar seus casos internos.
++- Os 13 arquivos foram: `admin-close-http`, `admin-external-queue-http`, `admin-schedule-http`, `evaluation-read-http`, `evaluation-write-http`, `experience-queue-control-http`, `experiences-http`, `mutation-session-http`, `participant-queue-http`, `participation-lifecycle-http`, `queue-entry-di`, `staff-queries-http` e `station-availability-http` (sufixo `.test.ts`).
++- Typecheck de produção (`tsc --project tsconfig.json --noEmit`): aprovado.
++- Typecheck de produção e testes (`tsc --project tsconfig.test.json`): aprovado.
++- Lint: aprovado.
++- Build: aprovado.
++- PostgreSQL real executado exclusivamente pelo responsável: **70/70** na suíte focada, **22/22** na suíte de banco em Docker e **1.228/1.228** na regressão completa. Não houve validação de produção.
++
++Sem shim, o Node v24.15.0/tsx falhou antes da descoberta dos testes com `uv_os_get_passwd returned ENOMEM`. O shim temporário forneceu o objeto completo esperado por `os.userInfo()` e foi usado tanto na tentativa inicial quanto na regressão final. A evidência mostra que o shim não causou as 13 falhas: com o mesmo shim e os quatro TTLs configurados, a regressão passou 984/984. O shim foi removido e não integra o patch.
++
++Comando da regressão unitária final (não conecta ao PostgreSQL):
++
++```powershell
++Set-Location C:\DoJob\ProgramacaoMobile\backend
++$env:NODE_ENV = 'test'
++$env:EVENT_CLOSURE_JOB_TEST_ENABLED = 'false'
++$env:STAFF_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:ADMIN_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:EVALUATION_IDEMPOTENCY_TTL_SECONDS = '60'
++npm.cmd test -- --test-concurrency=1
++```
++
++## Limitações e estado
++
++Não foram adicionadas novas regras, rotas ou respostas públicas. A precisão do COMMIT permanece sujeita ao protocolo A01 documentado: revogação/expiração posterior à última revalidação da sessão e anterior ao COMMIT não é atomicamente detectável. A latência e contenção dos locks do evento continuam proporcionais ao volume de registros, conforme limitação E08.8. A corrida real Admin/job, a sincronização Admin/avaliação, a limpeza e a regressão foram confirmadas pelo responsável no PostgreSQL local isolado.
++
++**Arquivos de implementação/testes/documentação:** os cinco arquivos de código listados em “Alterações” e este relatório (6 arquivos). Evidência única: `qa-evidence/e08-est02-changes.diff`, patch completo relativo à base inicial acima, sem incluir a si próprio. Não foi executado `git add`, commit, push, merge, rebase ou reset.
++
++**Estado final:** A02 corrigida e validada integralmente em PostgreSQL real; E08-EST02 pronta para revisão e versionamento manual.

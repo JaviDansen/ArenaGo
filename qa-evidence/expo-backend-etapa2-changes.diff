@@ -1,0 +1,604 @@
+diff --git a/app/context/ParticipationContext.js b/app/context/ParticipationContext.js
+index 5d5de15..eed223d 100644
+--- a/app/context/ParticipationContext.js
++++ b/app/context/ParticipationContext.js
+@@ -1,13 +1,45 @@
+-import { createContext, useState } from 'react';
++import { createContext, useEffect, useRef, useState } from 'react';
++import { useAuth } from './AuthContext';
++import { createParticipationStore } from '../services/participationService';
+ 
+-export const ParticipationContext = createContext();
++export const ParticipationContext = createContext(null);
+ 
+ export function ParticipationProvider({ children }) {
+-  const [participation, setParticipation] = useState(null);
++  const auth = useAuth();
++  const authRef = useRef(auth);
++  authRef.current = auth;
++  const storeRef = useRef(null);
++  if (!storeRef.current) {
++    storeRef.current = createParticipationStore({
++      client: { get: (...args) => authRef.current.httpClient.get(...args) },
++      getIdentity: () => {
++        const value = authRef.current;
++        return value?.isAuthenticated && value.user?.id && typeof value.getSessionEpoch === 'function'
++          ? { userId: value.user.id, epoch: value.getSessionEpoch() } : null;
++      },
++    });
++  }
++  const store = storeRef.current;
++  const [snapshot, setSnapshot] = useState(store.getSnapshot());
++  const userId = auth?.isAuthenticated ? auth.user?.id : null;
++  const epoch = userId && typeof auth.getSessionEpoch === 'function' ? auth.getSessionEpoch() : null;
+ 
+-  return (
+-    <ParticipationContext.Provider value={{ participation, setParticipation }}>
+-      {children}
+-    </ParticipationContext.Provider>
+-  );
++  useEffect(() => store.subscribe(setSnapshot), [store]);
++  useEffect(() => {
++    store.setIdentity(userId && epoch !== null ? { userId, epoch } : null);
++    if (userId && epoch !== null) void store.refresh();
++    return () => store.setIdentity(null);
++  }, [store, userId, epoch]);
++
++  const current = userId && snapshot.userId === userId && snapshot.epoch === epoch;
++  const participation = current ? (snapshot.participation ? { ...snapshot.participation, source: 'server' } : snapshot.demoParticipation) : null;
++  const value = {
++    participation,
++    returnState: current ? snapshot.returnState : null,
++    status: current ? snapshot.status : userId ? 'loading' : 'idle',
++    error: current ? snapshot.error : null,
++    refreshParticipation: store.refresh,
++    setParticipation: store.setDemoParticipation,
++  };
++  return <ParticipationContext.Provider value={value}>{children}</ParticipationContext.Provider>;
+ }
+diff --git a/app/screens/arena/ActiveArenaScreen.js b/app/screens/arena/ActiveArenaScreen.js
+index 0f616e7..6fcf41c 100644
+--- a/app/screens/arena/ActiveArenaScreen.js
++++ b/app/screens/arena/ActiveArenaScreen.js
+@@ -136,6 +136,7 @@ export default function ActiveArenaScreen({ navigation }) {
+       {/* As experiências variam por evento; a rolagem acomoda listas maiores. */}
+       <ScrollView>
+         <Text style={styles.eventName}>BEAST Arena</Text>
++        <Text>Modo demonstração: ações não são enviadas ao servidor.</Text>
+         <Text style={styles.title}>Arena ativa</Text>
+         <Text style={styles.message}>Sua participação na Arena está ativa.</Text>
+         {participation.activeExperience && (
+diff --git a/app/screens/arena/ArenaQueueScreen.js b/app/screens/arena/ArenaQueueScreen.js
+index 5d6e2a8..029e64e 100644
+--- a/app/screens/arena/ArenaQueueScreen.js
++++ b/app/screens/arena/ArenaQueueScreen.js
+@@ -32,6 +32,7 @@ export default function ArenaQueueScreen() {
+   return (
+     <ScreenContainer>
+       <Text style={styles.eventName}>BEAST Arena</Text>
++      <Text>Modo demonstração: ações não são enviadas ao servidor.</Text>
+       <Text style={styles.title}>Você está na fila</Text>
+       <Text style={styles.positionLabel}>Sua posição:</Text>
+       <Text style={styles.position}>{participation.queuePosition}º</Text>
+diff --git a/app/screens/event-entry/EventConfirmationScreen.js b/app/screens/event-entry/EventConfirmationScreen.js
+index f969a97..0ef130c 100644
+--- a/app/screens/event-entry/EventConfirmationScreen.js
++++ b/app/screens/event-entry/EventConfirmationScreen.js
+@@ -42,6 +42,7 @@ export default function EventConfirmationScreen({ navigation, route }) {
+   return (
+     <ScreenContainer>
+       <Text style={styles.title}>Evento encontrado</Text>
++      <Text>Demonstração: esta entrada não será registrada no servidor.</Text>
+       <Text style={styles.eventName}>{event.name}</Text>
+       <Text style={styles.location}>{event.location}</Text>
+       <Pressable style={styles.button} onPress={handleConfirmEntry}>
+diff --git a/app/screens/event-entry/EventEntryScreen.js b/app/screens/event-entry/EventEntryScreen.js
+index 4aab9f8..8910b93 100644
+--- a/app/screens/event-entry/EventEntryScreen.js
++++ b/app/screens/event-entry/EventEntryScreen.js
+@@ -31,6 +31,7 @@ export default function EventEntryScreen({ navigation }) {
+       <Text style={styles.description}>
+         Escaneie o QR Code do evento ou digite o código de acesso.
+       </Text>
++      <Text>Modo demonstração: a entrada por código ainda não é registrada no servidor.</Text>
+       <TextInput
+         placeholder="Código do evento"
+         style={styles.input}
+diff --git a/app/screens/home/HomeFlowScreen.js b/app/screens/home/HomeFlowScreen.js
+index 6edda63..9f768f4 100644
+--- a/app/screens/home/HomeFlowScreen.js
++++ b/app/screens/home/HomeFlowScreen.js
+@@ -1,15 +1,39 @@
+ import { useContext } from 'react';
++import { Pressable, Text } from 'react-native';
+ 
++import ScreenContainer from '../../components/ScreenContainer';
+ import { ParticipationContext } from '../../context/ParticipationContext';
+ import ActiveArenaScreen from '../arena/ActiveArenaScreen';
+ import ArenaQueueScreen from '../arena/ArenaQueueScreen';
+ import HomeScreen from './HomeScreen';
+ 
+ export default function HomeFlowScreen({ navigation }) {
+-  const { participation } = useContext(ParticipationContext);
++  const { participation, status, error, returnState, refreshParticipation } = useContext(ParticipationContext);
++
++  if (status === 'loading') {
++    return <ScreenContainer><Text>Carregando sua participação...</Text></ScreenContainer>;
++  }
++
++  if (status === 'error') {
++    const message = error === 'authorization' ? 'Não foi possível autorizar a consulta da participação.' :
++      error === 'network' ? 'Não foi possível conectar ao servidor para consultar sua participação.' :
++      'Não foi possível consultar sua participação agora.';
++    return <ScreenContainer><Text>{message}</Text><Pressable onPress={refreshParticipation}><Text>Tentar novamente</Text></Pressable></ScreenContainer>;
++  }
++
++  if (participation?.source === 'server') {
++    return (
++      <ScreenContainer>
++        <Text>{participation.status === 'waiting' ? 'Você está na fila externa.' : 'Sua participação na Arena está ativa.'}</Text>
++        {participation.status === 'waiting' ? <Text>Sua posição: {participation.externalQueue.position}º</Text> : null}
++        <Text>Evento: {participation.eventId}</Text>
++        <Pressable onPress={refreshParticipation}><Text>Atualizar participação</Text></Pressable>
++      </ScreenContainer>
++    );
++  }
+ 
+   if (!participation) {
+-    return <HomeScreen navigation={navigation} />;
++    return <HomeScreen navigation={navigation} returnState={returnState} />;
+   }
+ 
+   if (participation.status === 'waiting') {
+diff --git a/app/screens/home/HomeScreen.js b/app/screens/home/HomeScreen.js
+index b2fa3d7..d4e6f7d 100644
+--- a/app/screens/home/HomeScreen.js
++++ b/app/screens/home/HomeScreen.js
+@@ -5,7 +5,7 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
+ import ScreenContainer from '../../components/ScreenContainer';
+ import { AuthContext } from '../../context/AuthContext';
+ 
+-export default function HomeScreen({ navigation }) {
++export default function HomeScreen({ navigation, returnState }) {
+   const auth = typeof useContext === 'function' ? useContext(AuthContext) : null;
+ 
+   const hasPendingQuestionnaire =
+@@ -19,6 +19,11 @@ export default function HomeScreen({ navigation }) {
+         Participe das experiências e eventos da BEAST MARAGAMES.
+       </Text>
+ 
++      {returnState?.recentFinalization ? <Text>Sua participação recente foi encerrada.</Text> : null}
++      {returnState?.pendingEvaluationParticipationIds?.length > 0 ? (
++        <Text>Você possui {returnState.pendingEvaluationParticipationIds.length} avaliação(ões) pendente(s).</Text>
++      ) : null}
++
+       {hasPendingQuestionnaire ? (
+         <View style={styles.questionnaireBanner}>
+           <Text style={styles.questionnaireBannerTitle}>
+diff --git a/app/screens/participation/EvaluationScreen.js b/app/screens/participation/EvaluationScreen.js
+index 868e40a..bbe6438 100644
+--- a/app/screens/participation/EvaluationScreen.js
++++ b/app/screens/participation/EvaluationScreen.js
+@@ -39,6 +39,7 @@ export default function EvaluationScreen({ navigation }) {
+         keyboardShouldPersistTaps="handled"
+       >
+         <Text style={styles.title}>Participação Finalizada</Text>
++        <Text>Modo demonstração: esta avaliação não será enviada ao servidor.</Text>
+         <Text style={styles.message}>Obrigado por participar!</Text>
+         <Text style={styles.message}>Como foi sua experiência?</Text>
+         <View style={styles.stars}>
+diff --git a/app/screens/participation/ParticipationsScreen.js b/app/screens/participation/ParticipationsScreen.js
+index 8c5fd1d..77cedce 100644
+--- a/app/screens/participation/ParticipationsScreen.js
++++ b/app/screens/participation/ParticipationsScreen.js
+@@ -60,6 +60,7 @@ export default function ParticipationsScreen({ navigation }) {
+   return (
+     <ScreenContainer>
+       <Text style={styles.title}>Minhas Participações</Text>
++      <Text>Histórico de demonstração, ainda não conectado ao servidor.</Text>
+       <FlatList
+         data={participations}
+         keyExtractor={(participation) => participation.id}
+diff --git a/app/tests/auth.test.cjs b/app/tests/auth.test.cjs
+index 7945262..b889cb9 100644
+--- a/app/tests/auth.test.cjs
++++ b/app/tests/auth.test.cjs
+@@ -872,29 +872,7 @@ test('web platform keeps refresh token only in memory and never calls SecureStor
+   assert.equal(secureStore.calls.delete, 0);
+ });
+ 
+-test('401 session expiration does not clear or mutate ParticipationContext state', async () => {
+-  let capturedParticipation = { id: 'part-1', status: 'active' };
+-  const participationModule = loadModule('context/ParticipationContext.js', (name) => {
+-    if (name === 'react') {
+-      return {
+-        createContext: (defaultValue) => ({ _defaultValue: defaultValue, Provider: 'Provider' }),
+-        useState: () => [
+-          capturedParticipation,
+-          (next) => {
+-            capturedParticipation = typeof next === 'function' ? next(capturedParticipation) : next;
+-          },
+-        ],
+-      };
+-    }
+-    return require(name);
+-  }).exports;
+-
+-  const tree = participationModule.ParticipationProvider({ children: 'child' });
+-  assert.deepEqual(structuredClone(tree.props.value.participation), {
+-    id: 'part-1',
+-    status: 'active',
+-  });
+-
++test('401 session expiration invalidates authentication', async () => {
+   const rig = createAuthRig(
+     async () =>
+       problemResponse(401, {
+@@ -906,8 +884,6 @@ test('401 session expiration does not clear or mutate ParticipationContext state
+ 
+   await rig.manager.restoreSession();
+   assert.equal(rig.manager.getSnapshot().isAuthenticated, false);
+-  assert.equal(typeof participationModule.ParticipationProvider, 'function');
+-  assert.deepEqual(capturedParticipation, { id: 'part-1', status: 'active' });
+ });
+ 
+ // ============================================================================
+diff --git a/app/tests/homeFlow.test.cjs b/app/tests/homeFlow.test.cjs
+index bd7a0f3..4a569c4 100644
+--- a/app/tests/homeFlow.test.cjs
++++ b/app/tests/homeFlow.test.cjs
+@@ -2,16 +2,19 @@ const assert = require('node:assert/strict');
+ const test = require('node:test');
+ const { loadModule } = require('./helpers/questionnaireHarness.cjs');
+ 
+-function renderHomeFlow(participation) {
++function renderHomeFlow(participation, extra = {}) {
+   let contextWrites = 0;
+   const navigation = { navigate() {} };
+   const screen = loadModule('screens/home/HomeFlowScreen.js', (name) => {
+     if (name === 'react') return {
+       useContext: () => ({
+         participation,
++        ...extra,
+         setParticipation() { contextWrites += 1; },
+       }),
+     };
++    if (name === 'react-native') return { Pressable: 'Pressable', Text: 'Text' };
++    if (name === '../../components/ScreenContainer') return { __esModule: true, default: 'ScreenContainer' };
+     if (name === '../../context/ParticipationContext') return { ParticipationContext: {} };
+     if (name === '../arena/ActiveArenaScreen') {
+       return { __esModule: true, default: 'ActiveArenaScreen' };
+@@ -38,6 +41,20 @@ test('HomeFlow renders HomeScreen when there is no participation', () => {
+   assert.equal(result.rendered.props.navigation, result.navigation);
+ });
+ 
++test('HomeFlow shows a real participation without routing to simulated Arena screens', () => {
++  const result = renderHomeFlow({ source: 'server', status: 'waiting', eventId: 'event-a', externalQueue: { position: 2 } }, { status: 'ready' });
++  assert.equal(result.rendered.type, 'ScreenContainer');
++  assert.equal(result.contextWrites, 0);
++});
++
++test('HomeFlow keeps loading and error states out of simulated navigation', () => {
++  for (const status of ['loading', 'error']) {
++    const result = renderHomeFlow(null, { status, error: 'network', refreshParticipation() {} });
++    assert.equal(result.rendered.type, 'ScreenContainer');
++    assert.equal(result.contextWrites, 0);
++  }
++});
++
+ test('HomeFlow renders ArenaQueueScreen for a waiting participation', () => {
+   const participation = Object.freeze({ id: 'participation-1', status: 'waiting' });
+   const result = renderHomeFlow(participation);
+diff --git a/app/services/participationService.js b/app/services/participationService.js
+new file mode 100644
+index 0000000..8742c6c
+--- /dev/null
++++ b/app/services/participationService.js
+@@ -0,0 +1,61 @@
++import { httpClient } from './httpClient';
++
++const empty = () => ({ userId: null, epoch: null, status: 'idle', participation: null, returnState: null, demoParticipation: null, error: null });
++
++export function createParticipationStore({ client = httpClient, getIdentity }) {
++  let state = empty();
++  let generation = 0;
++  const listeners = new Set();
++  const publish = (next) => { state = next; listeners.forEach((listener) => listener(state)); };
++  const matches = (identity) => {
++    const current = getIdentity();
++    return Boolean(identity && current && identity.userId === current.userId && identity.epoch === current.epoch &&
++      state.userId === identity.userId && state.epoch === identity.epoch);
++  };
++
++  function setIdentity(identity) {
++    generation += 1;
++    if (!identity) { publish(empty()); return; }
++    publish({ ...empty(), ...identity, status: 'loading' });
++  }
++
++  async function refresh() {
++    const identity = state.userId === null ? null : { userId: state.userId, epoch: state.epoch };
++    if (!matches(identity)) return;
++    const requestGeneration = ++generation;
++    publish({ ...state, status: 'loading', error: null, participation: null, returnState: null, demoParticipation: null });
++    try {
++      const [current, returned] = await Promise.all([
++        client.get('/participations/current', { auth: true }),
++        client.get('/participations/return-state', { auth: true }),
++      ]);
++      if (requestGeneration !== generation || !matches(identity)) return;
++      const participation = current?.participation;
++      if (!current || !Object.prototype.hasOwnProperty.call(current, 'participation') ||
++          (participation !== null && (!participation || typeof participation.id !== 'string' ||
++            typeof participation.eventId !== 'string' || !['waiting', 'active'].includes(participation.status) ||
++            (participation.status === 'waiting' && (!Number.isSafeInteger(participation.externalQueue?.position) || participation.externalQueue.position < 1))))) {
++        throw new Error('Resposta inválida de participação.');
++      }
++      if (!returned || !Array.isArray(returned.pendingEvaluationParticipationIds) ||
++          !returned.pendingEvaluationParticipationIds.every((id) => typeof id === 'string') ||
++          !Object.prototype.hasOwnProperty.call(returned, 'recentFinalization')) {
++        throw new Error('Resposta inválida de estado de retorno.');
++      }
++      publish({ ...state, status: 'ready', participation, returnState: returned, demoParticipation: null, error: null });
++    } catch (error) {
++      if (requestGeneration !== generation || !matches(identity)) return;
++      publish({ ...state, status: 'error', participation: null, returnState: null, demoParticipation: null,
++        error: error?.status === 401 || error?.status === 403 ? 'authorization' : error?.isNetworkError ? 'network' : 'unavailable' });
++    }
++  }
++
++  function setDemoParticipation(update) {
++    const identity = state.userId === null ? null : { userId: state.userId, epoch: state.epoch };
++    if (!matches(identity) || state.status !== 'ready' || state.participation) return;
++    const next = typeof update === 'function' ? update(state.demoParticipation) : update;
++    publish({ ...state, demoParticipation: next ? { ...next, source: 'demo' } : null });
++  }
++
++  return { getSnapshot: () => state, subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); }, setIdentity, refresh, setDemoParticipation };
++}
+diff --git a/app/tests/participationProvider.test.cjs b/app/tests/participationProvider.test.cjs
+new file mode 100644
+index 0000000..2bffd40
+--- /dev/null
++++ b/app/tests/participationProvider.test.cjs
+@@ -0,0 +1,74 @@
++const assert = require('node:assert/strict');
++const test = require('node:test');
++const { loadModule } = require('./helpers/questionnaireHarness.cjs');
++
++const { createParticipationStore } = loadModule('services/participationService.js', (name) =>
++  name === './httpClient' ? { httpClient: {} } : require(name)).exports;
++
++function providerRig() {
++  let auth = null;
++  let epoch = 0;
++  let cursor = 0;
++  const hooks = [], pending = [];
++  const react = {
++    createContext: () => ({ Provider: 'Provider' }),
++    useRef(value) { const i = cursor++; return hooks[i] ||= { current: value }; },
++    useState(value) { const i = cursor++; if (!(i in hooks)) hooks[i] = value; return [hooks[i], (next) => { hooks[i] = next; }]; },
++    useEffect(fn, deps) {
++      const i = cursor++, previous = hooks[i];
++      if (!previous || deps.some((value, j) => !Object.is(value, previous.deps[j]))) {
++        hooks[i] = { deps, cleanup: previous?.cleanup };
++        pending.push(() => { hooks[i].cleanup?.(); hooks[i].cleanup = fn(); });
++      }
++    },
++  };
++  const module = loadModule('context/ParticipationContext.js', (name) => {
++    if (name === 'react') return react;
++    if (name === './AuthContext') return { useAuth: () => auth };
++    if (name === '../services/participationService') return { createParticipationStore };
++    return require(name);
++  }).exports;
++  const render = () => { cursor = 0; return module.ParticipationProvider({ children: null }).props.value; };
++  return {
++    render,
++    effects() { while (pending.length) pending.shift()(); },
++    authenticate(userId, client) {
++      epoch += 1;
++      auth = { isAuthenticated: true, user: { id: userId }, httpClient: client, getSessionEpoch: () => epoch };
++    },
++    logout() { epoch += 1; auth = { isAuthenticated: false, getSessionEpoch: () => epoch }; },
++  };
++}
++
++test('provider restores participation after session restoration and hides it immediately on logout', async () => {
++  const r = providerRig();
++  const participation = { id: 'p-a', eventId: 'e-a', status: 'active', externalQueue: null };
++  const client = { get: async (path) => path.endsWith('/current') ? { participation } : { recentFinalization: null, pendingEvaluationParticipationIds: [] } };
++  r.render(); r.effects();
++  r.authenticate('a', client);
++  assert.equal(r.render().status, 'loading');
++  r.effects();
++  await new Promise((resolve) => setImmediate(resolve));
++  const ready = r.render();
++  assert.equal(ready.participation.id, 'p-a');
++  assert.equal(ready.participation.source, 'server');
++  r.logout();
++  assert.equal(r.render().participation, null);
++  r.effects();
++  assert.equal(r.render().status, 'idle');
++});
++
++test('provider masks the previous account before the identity-change effect runs', async () => {
++  const r = providerRig();
++  const client = { get: async (path) => path.endsWith('/current')
++    ? { participation: { id: 'old', eventId: 'event', status: 'active', externalQueue: null } }
++    : { recentFinalization: null, pendingEvaluationParticipationIds: [] } };
++  r.authenticate('a', client); r.render(); r.effects();
++  await new Promise((resolve) => setImmediate(resolve));
++  assert.equal(r.render().participation.id, 'old');
++  r.authenticate('b', client);
++  const switched = r.render();
++  assert.equal(switched.participation, null);
++  assert.equal(switched.returnState, null);
++  assert.equal(switched.status, 'loading');
++});
+diff --git a/app/tests/participationService.test.cjs b/app/tests/participationService.test.cjs
+new file mode 100644
+index 0000000..1a2b73c
+--- /dev/null
++++ b/app/tests/participationService.test.cjs
+@@ -0,0 +1,118 @@
++const assert = require('node:assert/strict');
++const test = require('node:test');
++const { loadModule } = require('./helpers/questionnaireHarness.cjs');
++
++const { createParticipationStore } = loadModule('services/participationService.js', (name) =>
++  name === './httpClient' ? { httpClient: {} } : require(name)).exports;
++const identityA = { userId: 'user-a', epoch: 1 };
++const identityB = { userId: 'user-b', epoch: 2 };
++const active = { id: 'p-1', eventId: 'e-1', status: 'active', externalQueue: null };
++const waiting = { id: 'p-2', eventId: 'e-2', status: 'waiting', externalQueue: { position: 3, observedAt: '2026-01-01T00:00:00.000000Z' } };
++const returned = { recentFinalization: null, pendingEvaluationParticipationIds: [] };
++function deferred() {
++  let resolve, reject;
++  const promise = new Promise((ok, fail) => { resolve = ok; reject = fail; });
++  return { promise, resolve, reject };
++}
++function rig(handler) {
++  let identity = identityA;
++  const calls = [];
++  const store = createParticipationStore({
++    getIdentity: () => identity,
++    client: { get(path, options) { calls.push({ path, options }); return handler(path); } },
++  });
++  return { store, calls, identity(value) { identity = value; } };
++}
++
++test('loads absence and return state using authenticated backend contracts', async () => {
++  const r = rig((path) => Promise.resolve(path.endsWith('/current') ? { participation: null } : returned));
++  r.store.setIdentity(identityA);
++  await r.store.refresh();
++  assert.equal(r.store.getSnapshot().status, 'ready');
++  assert.equal(r.store.getSnapshot().participation, null);
++  assert.equal(r.store.getSnapshot().returnState, returned);
++  assert.deepEqual(r.calls.map((c) => [c.path, c.options.auth]), [
++    ['/participations/current', true], ['/participations/return-state', true],
++  ]);
++});
++
++test('restores active and waiting participation with real queue position', async () => {
++  for (const participation of [active, waiting]) {
++    const r = rig((path) => Promise.resolve(path.endsWith('/current') ? { participation } : returned));
++    r.store.setIdentity(identityA);
++    await r.store.refresh();
++    assert.equal(r.store.getSnapshot().participation, participation);
++    assert.equal(r.store.getSnapshot().status, 'ready');
++  }
++});
++
++test('logout invalidates a delayed response and clears all state', async () => {
++  const first = deferred(), second = deferred();
++  const r = rig((path) => path.endsWith('/current') ? first.promise : second.promise);
++  r.store.setIdentity(identityA);
++  const pending = r.store.refresh();
++  r.identity(null);
++  r.store.setIdentity(null);
++  first.resolve({ participation: active }); second.resolve(returned);
++  await pending;
++  assert.equal(r.store.getSnapshot().status, 'idle');
++  assert.equal(r.store.getSnapshot().participation, null);
++  assert.equal(r.store.getSnapshot().returnState, null);
++});
++
++test('epoch change rejects late results even before the provider cleanup', async () => {
++  const first = deferred(), second = deferred();
++  const r = rig((path) => path.endsWith('/current') ? first.promise : second.promise);
++  r.store.setIdentity(identityA);
++  const pending = r.store.refresh();
++  r.identity({ userId: 'user-a', epoch: 2 });
++  first.resolve({ participation: active }); second.resolve(returned);
++  await pending;
++  assert.equal(r.store.getSnapshot().participation, null);
++});
++
++test('switching users prevents previous responses from replacing the new account', async () => {
++  const first = deferred(), second = deferred();
++  let old = true;
++  const r = rig((path) => old ? (path.endsWith('/current') ? first.promise : second.promise)
++    : Promise.resolve(path.endsWith('/current') ? { participation: waiting } : returned));
++  r.store.setIdentity(identityA);
++  const pending = r.store.refresh();
++  old = false; r.identity(identityB); r.store.setIdentity(identityB);
++  await r.store.refresh();
++  first.resolve({ participation: active }); second.resolve(returned);
++  await pending;
++  assert.equal(r.store.getSnapshot().userId, 'user-b');
++  assert.equal(r.store.getSnapshot().participation, waiting);
++});
++
++test('401 and network errors clear data and allow retry', async () => {
++  for (const [failure, expected] of [[{ status: 401 }, 'authorization'], [{ isNetworkError: true }, 'network']]) {
++    let fail = true;
++    const r = rig((path) => fail ? Promise.reject(failure) : Promise.resolve(path.endsWith('/current') ? { participation: active } : returned));
++    r.store.setIdentity(identityA);
++    await r.store.refresh();
++    assert.equal(r.store.getSnapshot().error, expected);
++    assert.equal(r.store.getSnapshot().participation, null);
++    fail = false;
++    await r.store.refresh();
++    assert.equal(r.store.getSnapshot().participation, active);
++  }
++});
++
++test('real participation cannot be overwritten by a simulated entry', async () => {
++  const r = rig((path) => Promise.resolve(path.endsWith('/current') ? { participation: active } : returned));
++  r.store.setIdentity(identityA);
++  await r.store.refresh();
++  r.store.setDemoParticipation({ status: 'waiting' });
++  assert.equal(r.store.getSnapshot().participation, active);
++  assert.equal(r.store.getSnapshot().demoParticipation, null);
++});
++
++test('malformed server data is not treated as absence', async () => {
++  const r = rig((path) => Promise.resolve(path.endsWith('/current') ? {} : returned));
++  r.store.setIdentity(identityA);
++  await r.store.refresh();
++  assert.equal(r.store.getSnapshot().status, 'error');
++  assert.equal(r.store.getSnapshot().error, 'unavailable');
++});
+diff --git a/docs/EXPO_BACKEND_ETAPA2_IMPLEMENTACAO.md b/docs/EXPO_BACKEND_ETAPA2_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..9554d0b
+--- /dev/null
++++ b/docs/EXPO_BACKEND_ETAPA2_IMPLEMENTACAO.md
+@@ -0,0 +1,36 @@
++# Expo ↔ Backend — Etapa 2: participação corrente
++
++## Escopo e contratos
++
++Branch `feature/events-participations`, base `526ed2d260968c4a65a4df3b377bc17c346ee333`. O app consulta com autenticação e o cliente HTTP já existente:
++
++- `GET /api/v1/participations/current`: `{ participation: null }` ou participação corrente com `id`, `eventId`, `status`, datas e `externalQueue`. Para espera, `externalQueue.position` é exibida. O contrato não inclui nome do evento ou experiências.
++- `GET /api/v1/participations/return-state`: `recentFinalization` e `pendingEvaluationParticipationIds`. A tela inicial sinaliza finalização recente e quantidade de avaliações pendentes quando não há participação corrente.
++
++O serviço conserva os dois resultados em memória somente para a identidade e geração da sessão autenticada. O provedor aciona a consulta depois da restauração ou do login, mascara dados de outra identidade durante a renderização e descarta respostas antigas após logout, mudança de conta, nova geração ou outra consulta. O cliente existente continua responsável por access token, refresh e RFC 7807. Carregamento, erro de rede, autorização e erro de resposta têm tratamento explícito com nova tentativa; erro não é interpretado como ausência de participação.
++
++A participação real é apresentada em modo somente leitura, com atualização manual. As telas de Arena e ingresso por código existentes continuam simuladas, identificadas como demonstração, e não substituem uma participação real. O histórico e a avaliação simulados também estão identificados. Nenhuma operação de ingresso ou mutação foi integrada nesta etapa.
++
++## Arquivos
++
++- `app/services/participationService.js` e `app/context/ParticipationContext.js`: consultas e isolamento por sessão.
++- `app/screens/home/HomeFlowScreen.js` e `HomeScreen.js`: carregamento, erros, participação real e estado de retorno.
++- `app/screens/event-entry/EventEntryScreen.js`, `EventConfirmationScreen.js`, `app/screens/arena/ActiveArenaScreen.js`, `ArenaQueueScreen.js`, `app/screens/participation/ParticipationsScreen.js` e `EvaluationScreen.js`: identificação das simulações existentes.
++- `app/tests/participationService.test.cjs`, `participationProvider.test.cjs`, `homeFlow.test.cjs` e `auth.test.cjs`: contratos, isolamento, recuperação e navegação. O teste histórico que afirmava que o contexto não era limpo na expiração foi atualizado para refletir o novo requisito; testes novos verificam a limpeza e o descarte de respostas atrasadas.
++
++## Validações executadas pelo Codex
++
++- `node.exe --test tests/participationService.test.cjs tests/homeFlow.test.cjs tests/auth.test.cjs`: 39/39 aprovados.
++- `node.exe --test tests/participationProvider.test.cjs`: inicialmente 1/2; o teste detectou uso do cliente anterior à autenticação. Após a correção, 2/2 aprovados.
++- `npm.cmd test`: 220/220 aprovados, sem falhas, cancelamentos ou skips. Após a inclusão de um aviso textual na avaliação, `node.exe --test tests/evaluation.test.cjs` passou 6/6.
++- `expo install --check`: consulta online bloqueada com `EACCES`; em `EXPO_OFFLINE=1`, não apontou divergências, mas informou que a validação offline é limitada.
++- `expo export --platform ios` com `EXPO_OFFLINE=1`: bundle iOS gerado com sucesso, 920 módulos; diretório temporário removido.
++- Não há script ou configuração de typecheck em `app/`. Nenhum PostgreSQL, SQL ou migration foi executado.
++
++## Validação manual pendente no Expo Go
++
++1. Com o backend local já preparado pelo responsável, use em `app/.env.local` uma URL pública para o IP LAN do computador; mantenha segredos no ambiente privado do backend. Inicie o backend com `API_BIND_HOST=0.0.0.0` quando necessário e `npm.cmd run start:dev`. Em `app/`, execute `npm.cmd start`.
++2. No iPhone com Expo Go 58, entre com uma conta sem participação corrente e confira a tela inicial; com uma conta que já tenha participação real ativa ou em espera, confira o estado e, se houver, a posição. Esta tarefa não cria participação por código.
++3. Feche e reabra o app para verificar a restauração. Faça logout e entre com outra conta para conferir que nenhum dado anterior aparece. Teste indisponibilidade do backend e nova tentativa, sem alterar registros ou executar limpeza de banco.
++
++O teste físico posterior a estas alterações ainda não foi realizado. A experiência real não disponibiliza ações de fila ou saída nesta etapa. Consultas dos dois endpoints são independentes e podem refletir instantes distintos; não há atualização automática em tempo real. Histórico real, nomes dos eventos e ingresso por código permanecem para próximas etapas.

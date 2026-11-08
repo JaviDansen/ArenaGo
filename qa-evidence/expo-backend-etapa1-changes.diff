@@ -1,0 +1,221 @@
+diff --git a/app/README.md b/app/README.md
+index c7ad4dd..e5fa2e5 100644
+--- a/app/README.md
++++ b/app/README.md
+@@ -41,7 +41,7 @@ Versões declaradas em `package.json`:
+ 
+ ## Configuração da URL da API (`EXPO_PUBLIC_API_BASE_URL`)
+ 
+-O cliente HTTP compartilhado (`config/apiConfig.js` e `services/httpClient.js`) lê `EXPO_PUBLIC_API_BASE_URL` (ou `EXPO_PUBLIC_API_URL`) e acrescenta automaticamente `/api/v1` quando omitido. Consulte `app/.env.example`:
++O cliente HTTP compartilhado (`config/apiConfig.js` e `services/httpClient.js`) lê `EXPO_PUBLIC_API_BASE_URL` (ou o alias existente `EXPO_PUBLIC_API_URL`) por acesso estático compatível com o Expo e acrescenta automaticamente `/api/v1` quando omitido. Sem configuração, mantém o padrão `http://127.0.0.1:3000/api/v1`, útil apenas quando o app e a API compartilham o mesmo host. Consulte `app/.env.example`:
+ 
+ - **Web ou simulador iOS local (padrão em desenvolvimento):**
+   ```env
+@@ -57,6 +57,23 @@ O cliente HTTP compartilhado (`config/apiConfig.js` e `services/httpClient.js`)
+   EXPO_PUBLIC_API_BASE_URL=http://192.168.x.x:3000
+   ```
+ 
++Para testar em celular físico, configure o IP LAN real do computador em `app/.env.local` (ignorado pelo Git), conecte computador e celular à mesma rede e permita a porta 3000 no firewall. No backend, `API_BIND_HOST` deve ser `0.0.0.0` para aceitar conexões da rede; o padrão `127.0.0.1` aceita somente conexões locais. No emulador Android, use `10.0.2.2`; no navegador no mesmo computador, use `127.0.0.1`. Reinicie ou recarregue completamente o app no Expo Go após alterar a variável. Nunca coloque senhas ou tokens em `EXPO_PUBLIC_*`.
++
++Em dois terminais PowerShell, após preparar manualmente o backend local conforme `backend/README.md`:
++
++```powershell
++Set-Location C:\DoJob\ProgramacaoMobile\backend
++$env:API_BIND_HOST = '0.0.0.0' # somente para o teste em celular físico na LAN
++npm.cmd run start:dev
++```
++
++```powershell
++Set-Location C:\DoJob\ProgramacaoMobile\app
++npm.cmd start
++```
++
++O Expo Go precisa alcançar tanto o servidor Expo quanto o endereço da API informado no `.env.local`. A execução automatizada local não comprova conectividade com um aparelho físico.
++
+ ## Instalação e execução
+ 
+ Execute os comandos abaixo nesta pasta (`app/`):
+@@ -82,7 +99,7 @@ Os testes usam o runner nativo do Node.js. Execute em `app/`:
+ npm.cmd test
+ ```
+ 
+-Na validação atual, o comando passa com **155 testes aprovados** e nenhuma falha.
++Na validação local desta etapa, o comando passou com **208 testes aprovados** e nenhuma falha.
+ Também foram reportados **11 testes manuais aprovados em iPhone físico**, cobrindo cadastro, login imediato, logout, restauração da sessão, troca de contas, validações e falhas de conexão.
+ 
+ ## Organização
+diff --git a/app/config/apiConfig.js b/app/config/apiConfig.js
+index d30a948..aed8235 100644
+--- a/app/config/apiConfig.js
++++ b/app/config/apiConfig.js
+@@ -14,9 +14,11 @@ export const API_PREFIX = '/api/v1';
+ export const DEFAULT_LOCAL_API_ORIGIN = 'http://127.0.0.1:3000';
+ export const DEFAULT_HTTP_TIMEOUT_MS = 15000;
+ 
+-function readEnvBaseUrl(env = typeof process !== 'undefined' ? process.env : undefined) {
+-  if (!env) return null;
+-  const candidate = env.EXPO_PUBLIC_API_BASE_URL || env.EXPO_PUBLIC_API_URL || '';
++function readEnvBaseUrl(env) {
++  // Expo only inlines EXPO_PUBLIC_* references written directly on process.env.
++  const candidate = env
++    ? env.EXPO_PUBLIC_API_BASE_URL || env.EXPO_PUBLIC_API_URL
++    : process.env.EXPO_PUBLIC_API_BASE_URL || process.env.EXPO_PUBLIC_API_URL;
+   const trimmed = typeof candidate === 'string' ? candidate.trim() : '';
+   return trimmed.length > 0 ? trimmed : null;
+ }
+@@ -35,7 +37,7 @@ function isLocalhostOrigin(urlString) {
+  * @returns {string}
+  */
+ export function resolveApiBaseUrl(overrideBaseUrl, options = {}) {
+-  const env = options.env ?? (typeof process !== 'undefined' ? process.env : undefined);
++  const env = options.env;
+   const raw =
+     (typeof overrideBaseUrl === 'string' && overrideBaseUrl.trim().length > 0
+       ? overrideBaseUrl.trim()
+@@ -43,13 +45,28 @@ export function resolveApiBaseUrl(overrideBaseUrl, options = {}) {
+     readEnvBaseUrl(env) ||
+     DEFAULT_LOCAL_API_ORIGIN;
+ 
+-  if (!/^https?:\/\/[^/\s]+/i.test(raw)) {
++  let parsed;
++  try {
++    parsed = new URL(raw);
++  } catch {
++    // Keep a configuration error distinct from the client's network errors.
++  }
++  if (
++    !parsed ||
++    !['http:', 'https:'].includes(parsed.protocol) ||
++    !parsed.hostname ||
++    parsed.username ||
++    parsed.password ||
++    parsed.search ||
++    parsed.hash ||
++    /\s/.test(raw)
++  ) {
+     throw new Error(
+-      `URL base da API inválida ("${raw}"). Configure EXPO_PUBLIC_API_BASE_URL com http:// ou https://.`
++      'URL base da API inválida. Configure EXPO_PUBLIC_API_BASE_URL com uma URL http:// ou https:// sem credenciais, consulta ou fragmento.'
+     );
+   }
+ 
+-  const nodeEnv = env?.NODE_ENV || 'development';
++  const nodeEnv = env?.NODE_ENV || process.env.NODE_ENV || 'development';
+   if (nodeEnv === 'production' && raw.toLowerCase().startsWith('http://') && !isLocalhostOrigin(raw)) {
+     throw new Error('Em produção, a URL da API deve utilizar HTTPS.');
+   }
+diff --git a/app/tests/apiConfig.test.cjs b/app/tests/apiConfig.test.cjs
+new file mode 100644
+index 0000000..8a24070
+--- /dev/null
++++ b/app/tests/apiConfig.test.cjs
+@@ -0,0 +1,84 @@
++const assert = require('node:assert/strict');
++const { readFileSync } = require('node:fs');
++const path = require('node:path');
++const test = require('node:test');
++const { loadModule } = require('./helpers/questionnaireHarness.cjs');
++
++const { resolveApiBaseUrl } = loadModule('config/apiConfig.js', require).exports;
++const { createHttpClient } = loadModule(
++  'services/httpClient.js',
++  (name) => name === '../config/apiConfig'
++    ? { resolveApiBaseUrl, DEFAULT_HTTP_TIMEOUT_MS: 15000 }
++    : require(name)
++).exports;
++
++test('Expo environment variable is referenced with static process.env dot notation', () => {
++  const source = readFileSync(path.join(__dirname, '../config/apiConfig.js'), 'utf8');
++  assert.match(source, /process\.env\.EXPO_PUBLIC_API_BASE_URL/);
++  assert.match(source, /process\.env\.EXPO_PUBLIC_API_URL/);
++});
++
++test('reads the Expo variable and keeps the legacy alias when a test environment is injected', () => {
++  assert.equal(resolveApiBaseUrl(undefined, {
++    env: { EXPO_PUBLIC_API_BASE_URL: ' http://10.0.2.2:3000/ ' },
++  }), 'http://10.0.2.2:3000/api/v1');
++  assert.equal(resolveApiBaseUrl(undefined, {
++    env: { EXPO_PUBLIC_API_URL: 'http://192.168.1.15:3000' },
++  }), 'http://192.168.1.15:3000/api/v1');
++});
++
++test('reads EXPO_PUBLIC_API_BASE_URL from process.env without an injected environment', () => {
++  const original = process.env.EXPO_PUBLIC_API_BASE_URL;
++  try {
++    process.env.EXPO_PUBLIC_API_BASE_URL = 'http://10.0.2.2:3000';
++    assert.equal(resolveApiBaseUrl(), 'http://10.0.2.2:3000/api/v1');
++  } finally {
++    if (original === undefined) delete process.env.EXPO_PUBLIC_API_BASE_URL;
++    else process.env.EXPO_PUBLIC_API_BASE_URL = original;
++  }
++});
++
++test('explicit base URL wins and /api/v1 is appended exactly once', () => {
++  assert.equal(resolveApiBaseUrl('https://api.example.test/api/v1/', {
++    env: { EXPO_PUBLIC_API_BASE_URL: 'http://10.0.2.2:3000' },
++  }), 'https://api.example.test/api/v1');
++  assert.equal(resolveApiBaseUrl('https://api.example.test', { env: {} }),
++    'https://api.example.test/api/v1');
++  assert.equal(resolveApiBaseUrl(undefined, { env: {} }),
++    'http://127.0.0.1:3000/api/v1');
++});
++
++test('rejects malformed or unsafe configured URLs with an actionable configuration error', () => {
++  for (const value of [
++    'localhost:3000', 'ftp://api.example.test', 'http://example.test:bad',
++    'http://user:pass@example.test', 'https://api.example.test?token=abc',
++    'https://api.example.test/#fragment',
++  ]) {
++    assert.throws(() => resolveApiBaseUrl(undefined, {
++      env: { EXPO_PUBLIC_API_BASE_URL: value },
++    }), /URL base da API inválida.*EXPO_PUBLIC_API_BASE_URL/);
++  }
++});
++
++test('rejects non-local plain HTTP in production', () => {
++  assert.throws(() => resolveApiBaseUrl(undefined, {
++    env: { NODE_ENV: 'production', EXPO_PUBLIC_API_BASE_URL: 'http://api.example.test' },
++  }), /HTTPS/);
++});
++
++test('HTTP client sends relative and prefixed paths to the same single /api/v1 prefix', async () => {
++  const urls = [];
++  const client = createHttpClient({
++    baseUrl: 'http://127.0.0.1:3000/api/v1/',
++    fetchImpl: async (url) => {
++      urls.push(url);
++      return { ok: true, status: 204 };
++    },
++  });
++  await client.get('/auth/me');
++  await client.get('/api/v1/auth/me');
++  assert.deepEqual(urls, [
++    'http://127.0.0.1:3000/api/v1/auth/me',
++    'http://127.0.0.1:3000/api/v1/auth/me',
++  ]);
++});
+diff --git a/docs/EXPO_BACKEND_ETAPA1_IMPLEMENTACAO.md b/docs/EXPO_BACKEND_ETAPA1_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..9d199eb
+--- /dev/null
++++ b/docs/EXPO_BACKEND_ETAPA1_IMPLEMENTACAO.md
+@@ -0,0 +1,19 @@
++# Expo ↔ Backend — Etapa 1: configuração HTTP
++
++## Escopo
++
++Na branch `feature/events-participations`, base `c3494e0868ea7e3ce0d56fe0cc7ff257b9ba8028`, a leitura de `EXPO_PUBLIC_API_BASE_URL` e do alias `EXPO_PUBLIC_API_URL` passou a usar referências estáticas `process.env.*`, conforme o mecanismo de substituição do Expo. A injeção de ambiente usada nos testes, o override explícito, o fallback local e a adição única de `/api/v1` foram preservados.
++
++URLs malformadas, com credenciais, consulta ou fragmento agora produzem erro de configuração explícito. A restrição existente de HTTPS para origem não local em produção permanece. O cliente HTTP, o armazenamento de tokens, o refresh de sessão, a autenticação e as telas não foram modificados.
++
++## Validação local
++
++- `node.exe --test tests/apiConfig.test.cjs`: 7/7 aprovados, exit code 0.
++- `npm.cmd test` em `app/`: 208/208 aprovados, exit code 0.
++- `git diff --check`: sem erros.
++
++Não foram executados testes PostgreSQL, migrations, SQL ou conexão real com celular. A configuração manual de host, URL e comandos para Expo Go está em `app/README.md`.
++
++## Pendências
++
++Validar manualmente cadastro, login, restauração de sessão e logout no Expo Go com backend local alcançável. A integração da branch visual e os endpoints de ingresso permanecem fora desta etapa.

@@ -6,33 +6,49 @@ interface QueryCall {
   params: unknown[];
 }
 
+interface MockQueryRow {
+  id?: string;
+  version?: string;
+  activated_at?: string | null;
+  is_curated?: boolean;
+}
+
+interface MockQueryResult {
+  rowCount: number;
+  rows: MockQueryRow[];
+}
+
 function createMockPool(options?: {
   failReadF1?: boolean;
   failCleanupF1?: boolean;
   failReadF2?: boolean;
   failCleanupApexF2?: boolean;
   failCleanupCustomF2?: boolean;
-  initialActivatedAt?: Date | null;
+  initialActivatedAt?: string | null;
+  initialVersions?: { id: string; version: string; activated_at: string | null }[];
   initialCurated?: boolean;
 }) {
   const calls: QueryCall[] = [];
 
   const pool = {
     calls,
-    query: async (sql: string, params: unknown[] = []) => {
+    query: async (sql: string, params: unknown[] = []): Promise<MockQueryResult> => {
       calls.push({ sql: sql.trim(), params });
 
-      if (sql.includes("SELECT activated_at FROM questionnaire_versions")) {
+      if (sql.includes("SELECT id, version, activated_at::text AS activated_at FROM questionnaire_versions")) {
         if (options?.failReadF1) {
           throw new Error("Simulated F1 initial read failure");
         }
+        if (options?.initialVersions) {
+          return { rowCount: options.initialVersions.length, rows: options.initialVersions };
+        }
         return {
           rowCount: 1,
-          rows: [{ activated_at: options?.initialActivatedAt ?? null }],
+          rows: [{ id: "version-id", version: "1.0.0", activated_at: options?.initialActivatedAt ?? null }],
         };
       }
 
-      if (sql.includes("UPDATE questionnaire_versions SET activated_at = $1")) {
+      if (sql.includes("UPDATE questionnaire_versions AS qv")) {
         if (options?.failCleanupF1) {
           throw new Error("Simulated F1 cleanup restore failure");
         }
@@ -74,7 +90,7 @@ test("Robustez do cleanup de testes de integração K03-F", async (t) => {
   /* eslint-disable no-unsafe-finally, preserve-caught-error */
   await t.test("K03-F.1: Nunca tenta restaurar quando a leitura inicial falha", async () => {
     const pool = createMockPool({ failReadF1: true });
-    let originalActivatedAt: Date | null = null;
+    let originalVersions: MockQueryRow[] = [];
     let originalReadSuccess = false;
     let primaryError: unknown = null;
 
@@ -82,9 +98,9 @@ test("Robustez do cleanup de testes de integração K03-F", async (t) => {
     try {
       try {
         const origRes = await pool.query(
-          "SELECT activated_at FROM questionnaire_versions WHERE version = '1.0.0'",
+          "SELECT id, version, activated_at::text AS activated_at FROM questionnaire_versions ORDER BY id FOR UPDATE",
         );
-        originalActivatedAt = origRes.rows[0]?.activated_at ?? null;
+        originalVersions = origRes.rows;
         originalReadSuccess = true;
       } catch (err) {
         primaryError = err;
@@ -92,8 +108,8 @@ test("Robustez do cleanup de testes de integração K03-F", async (t) => {
       } finally {
         if (originalReadSuccess) {
           await pool.query(
-            "UPDATE questionnaire_versions SET activated_at = $1 WHERE version = '1.0.0'",
-            [originalActivatedAt],
+            "UPDATE questionnaire_versions AS qv SET activated_at = saved.activated_at::timestamptz FROM unnest($1::uuid[], $2::text[]) AS saved(id, activated_at) WHERE qv.id = saved.id",
+            [originalVersions.map((version) => version.id), originalVersions.map((version) => version.activated_at)],
           );
         }
       }
@@ -107,18 +123,72 @@ test("Robustez do cleanup de testes de integração K03-F", async (t) => {
     assert.equal(originalReadSuccess, false);
     // Verificar que UPDATE não foi chamado
     const updateCalls = pool.calls.filter((c) =>
-      c.sql.includes("UPDATE questionnaire_versions SET activated_at = $1"),
+      c.sql.includes("UPDATE questionnaire_versions AS qv"),
     );
     assert.equal(updateCalls.length, 0);
   });
 
+  await t.test("K03-F.1: Restaura o timestamp original de cada versão do catálogo", async () => {
+    const originalVersions = [
+      { id: "version-active", version: "1.0.0", activated_at: "2024-05-10 12:00:00.123456+00" },
+      { id: "version-inactive", version: "2.0.0", activated_at: null },
+      { id: "version-other-active", version: "3.0.0", activated_at: "2024-05-10 09:00:00.654321-03" },
+    ];
+    const pool = createMockPool({ initialVersions: originalVersions });
+    const snapshot = await pool.query(
+      "SELECT id, version, activated_at::text AS activated_at FROM questionnaire_versions ORDER BY id FOR UPDATE",
+    );
+    await pool.query(
+      "UPDATE questionnaire_versions AS qv SET activated_at = saved.activated_at::timestamptz FROM unnest($1::uuid[], $2::text[]) AS saved(id, activated_at) WHERE qv.id = saved.id",
+      [snapshot.rows.map((version) => version.id), snapshot.rows.map((version) => version.activated_at)],
+    );
+
+    const restore = pool.calls[1];
+    assert.ok(restore.sql.includes("UPDATE questionnaire_versions AS qv"));
+    assert.match(snapshot.rows[0].activated_at ?? "", /\.123456/);
+    assert.match(restore.sql, /saved\.activated_at::timestamptz/);
+    assert.match(restore.sql, /\$2::text\[\]/);
+    assert.deepEqual(restore.params, [
+      originalVersions.map((version) => version.id),
+      originalVersions.map((version) => version.activated_at),
+    ]);
+  });
+
+  await t.test("K03-F.1: Restaura no finally após falha do cenário sem ocultá-la", async () => {
+    const originalTimestamp = "2024-05-10 12:00:00.123456+00";
+    const pool = createMockPool({ initialActivatedAt: originalTimestamp });
+    let originalVersions: MockQueryRow[] = [];
+    let caughtError: unknown;
+    const primaryError = new Error("Falha do cenário K03-F.1");
+    try {
+      try {
+        originalVersions = (await pool.query(
+          "SELECT id, version, activated_at::text AS activated_at FROM questionnaire_versions ORDER BY id FOR UPDATE",
+        )).rows;
+        throw primaryError;
+      } finally {
+        if (originalVersions.length) {
+          await pool.query(
+            "UPDATE questionnaire_versions AS qv SET activated_at = saved.activated_at::timestamptz FROM unnest($1::uuid[], $2::text[]) AS saved(id, activated_at) WHERE qv.id = saved.id",
+            [originalVersions.map((version) => version.id), originalVersions.map((version) => version.activated_at)],
+          );
+        }
+      }
+    } catch (error) {
+      caughtError = error;
+    }
+    assert.equal(caughtError, primaryError);
+    assert.equal(pool.calls.length, 2);
+    assert.deepEqual(pool.calls[1].params, [["version-id"], [originalTimestamp]]);
+  });
+
   await t.test("K03-F.1: Preserva falha primária via AggregateError se cleanup falhar", async () => {
-    const originalDate = new Date("2024-05-10T12:00:00Z");
+    const originalTimestamp = "2024-05-10 12:00:00.123456+00";
     const pool = createMockPool({
-      initialActivatedAt: originalDate,
+      initialActivatedAt: originalTimestamp,
       failCleanupF1: true,
     });
-    let originalActivatedAt: Date | null = null;
+    let originalVersions: MockQueryRow[] = [];
     let originalReadSuccess = false;
     let primaryError: unknown = null;
 
@@ -126,9 +196,9 @@ test("Robustez do cleanup de testes de integração K03-F", async (t) => {
     try {
       try {
         const origRes = await pool.query(
-          "SELECT activated_at FROM questionnaire_versions WHERE version = '1.0.0'",
+          "SELECT id, version, activated_at::text AS activated_at FROM questionnaire_versions ORDER BY id FOR UPDATE",
         );
-        originalActivatedAt = origRes.rows[0]?.activated_at ?? null;
+        originalVersions = origRes.rows;
         originalReadSuccess = true;
 
         // Simular falha durante o corpo do teste
@@ -140,8 +210,8 @@ test("Robustez do cleanup de testes de integração K03-F", async (t) => {
         if (originalReadSuccess) {
           try {
             await pool.query(
-              "UPDATE questionnaire_versions SET activated_at = $1 WHERE version = '1.0.0'",
-              [originalActivatedAt],
+              "UPDATE questionnaire_versions AS qv SET activated_at = saved.activated_at::timestamptz FROM unnest($1::uuid[], $2::text[]) AS saved(id, activated_at) WHERE qv.id = saved.id",
+              [originalVersions.map((version) => version.id), originalVersions.map((version) => version.activated_at)],
             );
           } catch (cleanupErr) {
             if (primaryError) {

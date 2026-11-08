@@ -1,7 +1,7 @@
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 
 import HomeFlowScreen from '../screens/home/HomeFlowScreen';
-import ParticipationsScreen from '../screens/participation/ParticipationsScreen';
+import ParticipationsScreen from '../screens/participation/ParticipationsRealScreen';
 import ProfileScreen from '../screens/profile/ProfileScreen';
 
 const Tab = createBottomTabNavigator();

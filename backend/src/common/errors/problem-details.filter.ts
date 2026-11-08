@@ -14,6 +14,14 @@ interface ExpressLikeResponse {
   json(body: unknown): void;
 }
 
+// O adapter Nest ESM e o runner TS podem carregar identidades distintas da classe.
+// Reconhecer o contrato da exceção mantém erros de parsing HTTP como 400, sem expor sua mensagem.
+function isNestHttpException(error: unknown): error is Pick<HttpException, "getStatus" | "getResponse"> {
+  return typeof error === "object" && error !== null
+    && "getStatus" in error && typeof error.getStatus === "function"
+    && "getResponse" in error && typeof error.getResponse === "function";
+}
+
 @Catch()
 export class ProblemDetailsExceptionFilter implements ExceptionFilter {
   private readonly logger = new Logger(ProblemDetailsExceptionFilter.name);
@@ -33,8 +41,10 @@ export class ProblemDetailsExceptionFilter implements ExceptionFilter {
       return;
     }
 
-    if (exception instanceof HttpException) {
-      const status = exception.getStatus();
+    if (exception instanceof HttpException || isNestHttpException(exception)) {
+      const requestedStatus = exception.getStatus();
+      const status = Number.isInteger(requestedStatus) && requestedStatus >= 400 && requestedStatus <= 599
+        ? requestedStatus : HttpStatus.INTERNAL_SERVER_ERROR;
       const problem = this.mapHttpExceptionToProblem(status);
       response
         .status(status)

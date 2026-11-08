@@ -1,20 +1,69 @@
 # ArenaGo — Arquitetura Backend unificada e dicionário PostgreSQL
 
-**Versão:** v0.6.14 — revisão do documento efetivamente presente em `docs/`, após conclusão relatada da Task 6.2 (19/10/2026).
-**Fonte funcional prevalente:** `PLANEJAMENTO_ARENAGO.md` (v0.7.8).
-**Estado atual:** fundação NestJS/Drizzle e cinco migrações **implementadas e testadas localmente segundo relatório do Codex**. Nenhum endpoint ou service de negócio está implementado. Neon não foi criada. A Task 6.3A está **pausada por decisão expressa do responsável**.
-**Escopo desta revisão:** documentação; sem modificação ou auditoria direta de `backend/` e sem novas regras de produto.
+**Versão:** v0.6.17 — desistência voluntária da fila interna, C-15; contrato futuro E07.3 (30/10/2026).
+**Fonte funcional prevalente:** `PLANEJAMENTO_ARENAGO.md` (v0.7.10).
+**Estado atual:** fundação NestJS/Drizzle e cinco migrações existentes; função TypeScript de normalização e consultas internas `EventsService.findById()`/`findByAccessCode()` implementadas. Nenhum endpoint HTTP de produto foi criado. Neon não foi criada.
+**Escopo desta revisão (30/10/2026):** complemento documental C-15 após a entrega inicial da E07.1, com saída isolada da fila interna reservada à E07.3. Preservados os registros históricos; nenhum código, teste ou migração alterado.
+
+**Atualização posterior de implementação (E07.3, 30/10/2026):** o escopo acima e a seção 26 registram a rodada documental original. A §16.2 passa a descrever o serviço interno implementado nesta etapa; resultados locais e testes PostgreSQL ainda pendentes estão em `E07_3_IMPLEMENTACAO.md`. Não há endpoint novo nem revisão consolidada antecipada.
+
+**Fechamento posterior — 30/10/2026:** a auditoria consolidada aprovou E07.1, E07.2 e E07.3 individualmente e a integração COM RESSALVAS, sem defeito funcional bloqueante confirmado. Posteriormente às pendências históricas acima, o responsável confirmou 20/20 E07.2, 27/27 E07.3 e 176/176 da regressão PostgreSQL local, sem falhas/cancelamentos/skips. O Codex reexecutou 145/145 unitários, typecheck, lint e build na auditoria, com exit 0. Autoria e sequência 23/27 → casts 42P08 → 27/27 estão nos registros finais de `E07_2_IMPLEMENTACAO.md` e `E07_3_IMPLEMENTACAO.md`. Este fechamento é documental; não executa nova auditoria nem altera contratos.
 
 > **Legenda de evidência:** **[APROVADO]** = decisão de produto já tomada; **[IMPLEMENTADO/RELATADO]** = execução informada pelo Codex, não verificada independentemente nesta revisão; **[PROPOSTA]** = contrato/lógica de serviço ainda sem implementação; **[PENDENTE]** = decisão/validação futura. O texto do dicionário representa o **desenho-alvo** que guiou a Task 6.2; detalhes exatos do SQL são autoridade do `backend/` e das migrations versionadas, sujeitos a conferência no próprio repositório.
+
+## Consolidação atual — E08-EST05 (05/11/2026)
+
+Os capítulos e resumos datados acima preservam o desenho e o estado que existiam em
+suas revisões originais. Em particular, referências a “nenhum endpoint HTTP” e a
+capítulos 14–18 como proposta não devem ser lidas como inventário do código atual.
+O código em `backend/src/`, as migrations versionadas e os relatórios de cada etapa
+são a autoridade para a implementação entregue.
+
+### Estado efetivamente implementado
+
+O backend NestJS/Drizzle/PostgreSQL possui autenticação, sessões e perfil; catálogo
+de jogos; configuração administrativa de eventos, experiências e estações; leitura
+de experiências; participação corrente, cancelamento e finalização; filas internas
+de participantes; operações e consultas Staff; controle operacional de filas;
+encerramento de eventos; e envio, edição e leitura de avaliações. Os controladores
+em `backend/src/events/`, `backend/src/participations/` e `backend/src/evaluations/`
+expõem esses contratos HTTP e os serviços preservam regras temporais, autorização,
+idempotência e auditoria documentadas nos relatórios E07/E08.
+
+As correções E08-EST01–E08-EST04 consolidaram revalidação de sessão antes do
+commit, sincronização temporal `evaluation-first`, preservação de timestamps no
+catálogo e validação de URL antes da criação de pools. A revalidação final de sessão
+continua necessariamente temporal: uma revogação posterior a essa última consulta e
+anterior ao commit não pode ser eliminada sem outro mecanismo de coordenação. Após
+A04, o responsável confirmou manualmente **1.229/1.229** testes PostgreSQL e a
+regressão unitária registrada foi **992/992**; typecheck, lint e build também foram
+aprovados nessa etapa. Esses resultados são de desenvolvimento/teste, não validação
+de produção.
+
+### Decisões preservadas, contratos pendentes e dependências externas
+
+As decisões de produto e os contratos propostos dos capítulos históricos permanecem
+referência de desenho; eles não implicam que toda rota ali proposta já esteja
+exposta. Ainda faltam a operação administrativa de concessão/revogação de papéis
+Staff/Admin e o fluxo completo de credenciamento TOTP de Admin, ambos dependentes
+da decisão de papéis prevista no planejamento. Também faltam um caminho HTTP público
+de descoberta/consulta de evento por código de acesso e de criação de nova
+participação, para que o ingresso ocorra inteiramente pela API, além da integração
+dos fluxos de eventos e Arena do Expo com os endpoints já existentes.
+
+BI, LGPD/retenção, notificações, infraestrutura de implantação, TLS remoto,
+backups, observabilidade e homologação continuam dependências externas ao escopo
+funcional implementado. Não há configuração de produção nem autorização para
+declarar o sistema pronto para produção.
 
 ## 0. Resumo executivo — o que existe e o que falta
 
 | Item | Situação | Evidência/limite |
 |---|---|---|
-| Estrutura `backend/` | **[IMPLEMENTADO/RELATADO]** NestJS, TS, `pg`, Drizzle, configuração e README | Não foi anexada a este chat para leitura do código-fonte |
+| Estrutura `backend/` | NestJS, TS, `pg`, Drizzle, configuração, README e módulo Events | Código local inspecionado nesta revisão |
 | Modelo de dados | **[IMPLEMENTADO/RELATADO]** 23 tabelas, 5 migrações versionadas | Aplicadas em dois bancos locais novos pelo migrador; reexecução reconheceu o histórico |
 | SQL de regras fundamentais | **[IMPLEMENTADO/RELATADO]** trigger de código de acesso imutável em `0002`; FK circular `ALTER TABLE` em `0004`; cinco checks de perfil | Catálogo reportado: 35 FKs, 104 constraints, 65 índices, 9 parciais |
-| Verificações | `db:check`, build, lint, 1 teste unitário, 21 integrações e smoke NestJS passaram | Testes focados em DDL e restrições; nenhum fluxo funcional HTTP de produto foi testado |
+| E01.2B — normalização/consulta de eventos | Função TypeScript compartilhada, consulta Drizzle por igualdade exata, testes unitários e cenários de integração adicionados | Verificações desta revisão registradas no histórico §24; integração somente com `arenago_events_test` local confirmado |
 | APIs descritas nos capítulos 14–18 | **[PROPOSTA — NÃO IMPLEMENTADA]** | As rotas, DTOs, RFC 7807, Staff/Admin, avaliações e outros fluxos aguardam futura task |
 | Neon, hospedagem, LGPD e piloto | **[NÃO CONFIGURADO / PENDENTE]** | Não usar dados pessoais reais nem declarar prontidão de produção |
 | Commit da Task 6.2 | **[REGISTRADO LOCALMENTE]** | `4c4acbb` está no histórico da branch `develop` |
@@ -121,9 +170,11 @@
 
 `id uuid PK`; `name varchar(180) NOT NULL`; `access_code_normalized varchar(64) NOT NULL`; `timezone varchar(80) NOT NULL`; `starts_at timestamptz NOT NULL`; `official_ends_at timestamptz NOT NULL`; `operational_deadline_at timestamptz NOT NULL` (**prazo originalmente configurado/atualmente programado, antes de antecipação Admin**); `status varchar(20) NOT NULL`; `external_queue_enabled boolean NOT NULL`; `external_last_order bigint NOT NULL DEFAULT 0`; `closure_mode varchar(20) NULL`; `closure_requested_at timestamptz NULL`; `admin_deadline_at timestamptz NULL` (**novo ajuste proposto: prazo antecipado pelo Admin**); `created_at`, `updated_at timestamptz NOT NULL`.
 
-**CHECK:** `status IN ('scheduled','open','closing','closed')`; `starts_at < official_ends_at`; `official_ends_at <= operational_deadline_at <= official_ends_at + interval '1 hour'`; `external_last_order >= 0`; `access_code_normalized = upper(btrim(access_code_normalized))`; fechamento Admin coerente: ou os três campos de fechamento são nulos, ou modo e instantes são preenchidos; se `immediate`, `admin_deadline_at=closure_requested_at`; se `controlled`, `closure_requested_at < admin_deadline_at <= least(closure_requested_at+interval '1 hour', operational_deadline_at)`.
+**CHECK atualmente implementado:** status, horários, contador externo, `access_code_normalized = upper(btrim(access_code_normalized))` e coerência do fechamento Admin. Para código, esse CHECK somente exige a representação compatível com `upper(btrim(...))`; não restringe ASCII, 4–64 caracteres, posição de hífens, nem equivale ao conjunto de whitespace de `String.trim()` do JavaScript.
 
 **Índice:** `UNIQUE(access_code_normalized)` sobre **todo histórico**, sem reutilização. Eventos arquivados não são apagados fisicamente na primeira versão; se exclusão física futura for aprovada, código precisa de *tombstone*/reserva permanente. `timezone` IANA não pode ser validado apenas com `CHECK` simples: validar biblioteca/serviço. Prontidão aprovada: nome/código/horários/fuso/fila externa configurada, ≥1 experiência com estação disponível e ≥1 Staff ativo/verificado do evento, **sem exigir Staff online**.
+
+**C-10 [APROVADO] e normalização:** somente ASCII `A–Z`, `0–9` e hífen; 4–64 caracteres depois de `String.trim()`; hífens apenas entre grupos alfanuméricos, sem começo/final/consecutivos. A pesquisa ignora caixa e whitespace externo reconhecido por JavaScript `String.trim()`. Espaços internos, acentos, símbolos e demais caracteres Unicode não ASCII são inválidos. `backend/src/events/access-code.ts` valida o alfabeto antes de converter para maiúsculas e exporta `normalizeEventAccessCode()`, compartilhada pela consulta atual e pela futura criação. O `UNIQUE` preserva unicidade da chave já normalizada; trigger `0002` protege imutabilidade. O SQL atual não garante sozinho todo o formato aprovado. Uma restrição SQL adicional poderá ser avaliada após auditoria dos dados e exigirá migração incremental; **nenhuma migração foi criada agora**.
 
 **Dois cortes diferentes:** parar **entradas** em `min(official_ends_at, closure_requested_at se existir)`; parar **chamadas e conclusões** em `min(operational_deadline_at, admin_deadline_at se existir)`. Um Admin imediato cancela pendências e finaliza participações; modo controlado deixa apenas serviços de pessoas já na fila até prazo antecipado. Armazenar justificativa e alterações em `audit_logs`, inclusive valores anteriores. `status` persistido não substitui avaliação da hora/prontidão. Abertura automática a partir de `starts_at` somente quando pronto; admitir configuração completada depois do início enquanto ainda antes do corte oficial.
 
@@ -209,7 +260,7 @@
 |---|---|---|
 | Ingresso + snapshot | `events FOR UPDATE` → `users FOR UPDATE` → `profiles`/`user_games` consistentes → `participations`/snapshot | Checar relógio e prontidão, criar participação e snapshot ou nenhum; unicidade global por usuário |
 | Atualizar questionário | `users FOR UPDATE` → `profiles` → `user_games` | Previne snapshot híbrido, sempre com read do conjunto após user lock |
-| Ingressar/sair fila interna | `events FOR SHARE` → `experiences FOR UPDATE` → `participations FOR UPDATE` → `queue_entries` | Incrementar ordem por experiência, atualizar ponteiro/status e evitar múltiplas filas |
+| Ingressar/sair fila interna | `events FOR SHARE` → `experiences FOR UPDATE` → `participations FOR UPDATE` → `queue_entries`; se chamada, incluir `stations FOR UPDATE` antes de participação e `service_sessions` depois da entrada | Incrementar ordem somente no ingresso; desistência C-15 encerra a entrada e limpa o ponteiro sem finalizar a participação; ver §16.2 para chamada pendente |
 | Chamar próximo na estação | `events FOR SHARE` → `experiences FOR UPDATE` → `stations FOR UPDATE` → `participations`/`queue_entries FOR UPDATE` | FIFO estrito, reservar uma pessoa para uma estação; duas estações chamam pessoas distintas |
 | Concluir/ausência/desistência | `events FOR SHARE` → `experiences FOR UPDATE` → `stations FOR UPDATE` quando chamada → `participations`/`queue_entries` → `service_sessions` | Um único resultado terminal; ausência reentra no fim **somente antes** do corte efetivo de novas entradas (oficial ou Admin) |
 | Encerramento Admin | `events FOR UPDATE` → avançar nos registros por lotes sob locks compatíveis | Bloqueio lógico efetivo imediatamente no commit; limpeza idempotente sem falsos completados |
@@ -304,7 +355,7 @@ A Neon permanece sem projeto. O banco local foi de teste; esta validação não 
 
 **Sem autorização para implementar agora:** contratos REST dos capítulos 14–18; segurança de sessão/TOTP; validação dinâmica de prontidão, locks cross-table, gerenciamento de filas, fechamento automático e Admin, avaliações, recuperação do Expo e BI. Os testes DB da Task 6.2 são de banco/protocolos mínimos, não equivalem às suítes completas T/EV/ST/AV/AD/OP.
 
-**A detalhar quando o módulo correspondente for retomado:** contas Admin como jogadores (**decisão de produto pendente**), normalização única do código inclusive Unicode, calendário civil de referência para validação de nascimento, retenção da tabela de idempotência e dos IPs/user-agent, catálogo único de DTOs/erros e integração com telas atuais. As correções técnicas de modelo e campos `questionnaire_version_id NOT NULL` já foram executadas segundo relatório.
+**A detalhar quando o módulo correspondente for retomado:** contas Admin como jogadores (**decisão de produto pendente**), calendário civil de referência para validação de nascimento, retenção da tabela de idempotência e dos IPs/user-agent, catálogo único de DTOs/erros e integração com telas atuais. A decisão C-10 e a normalização da consulta estão definidas; criação de eventos deve reutilizar a função existente.
 
 **Antes do piloto real:** política e base legal LGPD, tratamento de menores, expurgo/deleção de snapshots identificáveis, anonimização/BI, retenção/auditoria/backups, dois Admins verificados com TOTP, segurança operacional, e testes E2E/dispositivos/carga. Nenhuma dessas questões é resolvida apenas por DDL.
 
@@ -414,7 +465,7 @@ As seções 14–18 são **especificações técnicas candidatas**. Exemplos JSO
 
 Não retornar sessão privilegiada nem refresh token definitivo antes do TOTP. `tempToken` não serve para chamar as APIs comuns. A aprovação da possibilidade de um Admin atuar como participante **continua pendente**, não presumir comportamento na UI nem permissão pelo tipo de conta.
 
-**Erros:** `401` credenciais inválidas sem revelar se e-mail existe; `429` excesso de tentativas. **Regra aprovada:** login novo revoga sessão anterior; isso não apaga participação em evento, posição ou conclusões.
+**Erros:** `401` credenciais inválidas sem revelar se e-mail existe; `429` excesso de tentativas. **Regra aprovada:** login novo concluído revoga sessão anterior; para Admin, a conclusão ocorre somente após segundo fator válido. A emissão do desafio após senha correta não emite sessão nem revoga a anterior. Para Participante/Staff, o login continua concluído após senha válida. Revogar sessão não apaga participação em evento, posição ou conclusões.
 
 ### 14.5 `GET /auth/me` e recuperação de estado
 
@@ -647,10 +698,10 @@ O servidor registra `questionnaire_version_id`, mantém `profiles` e substitui a
 | `POST /events/lookup` | Bearer | `200` resumo do evento identificado | `EventEntryScreen` | [PROPOSTA] |
 | `GET /events/:eventId` | Bearer | `200` detalhes operacionais seguros | `EventConfirmationScreen`/retomada | [PROPOSTA] |
 | `POST /events/:eventId/participations` | Bearer + `Idempotency-Key` | `201` participação recém-criada | confirmação de ingresso | [PROPOSTA] |
-| `GET /participations/current` | Bearer | `200` participação ou `null` | `App.js`, Home e retomada | [PROPOSTA] |
-| `GET /participations/:id` | Bearer, titular | `200` participação atualizada | fila externa/Arena | [PROPOSTA] |
-| `POST /participations/:id/cancel` | Bearer, titular + `Idempotency-Key` | `200` participação cancelada | saída da fila externa | [PROPOSTA] |
-| `POST /participations/:id/finish` | Bearer, titular + `Idempotency-Key` | `200` participação finalizada | botão Sair da Arena | [PROPOSTA] |
+| `GET /participations/current` | Bearer | `200` participação ou `null` | `App.js`, Home e retomada | [IMPLEMENTADO E08.12] |
+| `GET /participations/:id` | Bearer, titular | `200` participação atualizada | fila externa/Arena | [IMPLEMENTADO E08.12] |
+| `POST /participations/:id/cancel` | Bearer, titular + `Idempotency-Key` | `200` participação cancelada | saída da fila externa | [IMPLEMENTADO E08.12] |
+| `POST /participations/:id/finish` | Bearer, titular + `Idempotency-Key` | `200` participação finalizada | botão Sair da Arena | [IMPLEMENTADO E08.12] |
 | `GET /participations/history` | Bearer | `200` histórico paginado do titular | aba Eventos | [PROPOSTA] |
 
 **Detalhe de roteamento NestJS:** registrar/documentar as rotas literais `GET /participations/current` e `GET /participations/history` sem colisão com `GET /participations/:id`; validar `:id` como UUID. Testar resolução das três rotas com Supertest.
@@ -665,7 +716,7 @@ O servidor registra `questionnaire_version_id`, mantém `profiles` e substitui a
 { "accessCode": " fila " }
 ```
 
-**Validação:** `accessCode` string não vazia; aplicar no servidor a normalização única aprovada (desconsiderar diferenças de maiúsculas/minúsculas e espaços externos), usando o mesmo resultado para a consulta e a unicidade histórica de `events.access_code_normalized`. `trim()` JS não corresponde integralmente a `btrim()` SQL para whitespace Unicode. **[VALIDAR]** alfabeto e limite do código, normalização canônica e testes com Unicode antes de congelar DDL/API. O código literal do exemplo é fictício e não depende de um evento realmente existente.
+**Validação [C-10 APROVADO]:** `accessCode` deve passar por `normalizeEventAccessCode()` no servidor. A função aplica `String.trim()`, exige 4–64 caracteres ASCII `A–Z`/`a–z`/`0–9` com hífens somente entre grupos e retorna maiúsculas. A mesma função deve ser usada na futura criação e na consulta. O SQL `upper(btrim(...))` continua sendo proteção parcial de forma canônica, não substitui essa validação. O código literal do exemplo é fictício e não depende de um evento realmente existente.
 
 **Exemplo de resposta `200 OK` (evento com fila externa habilitada):**
 
@@ -733,6 +784,16 @@ O servidor registra `questionnaire_version_id`, mantém `profiles` e substitui a
 
 ### 15.6 `GET /participations/current` — recuperar a participação da conta
 
+**Implementação E08.12 — 04/11/2026:** `ParticipationLifecycleController` e
+`ParticipationQueryService`, Bearer, identidade autenticada e `200` com envelope
+`participation`. Uma instrução em `REPEATABLE READ READ ONLY` calcula estado,
+posição externa e observação PostgreSQL com seis casas de microssegundos, sem
+escritas ou locks de linha. Se a participação corrente persistida estiver
+logicamente encerrada, retorna `null`. O detalhe por ID fornece a projeção
+terminal, preservando o motivo automático/administrativo. Prazo e motivo
+automático reutilizam `event-closure.projection.ts`, extraído do SQL da E08.9
+sem mudar seu comportamento. Não há limpeza física nem saída voluntária em GET.
+
 **Bearer obrigatório.** Nunca utilizar `currentParticipationId` de armazenamento local como autoridade.
 
 **Resposta `200 OK` quando existe participação corrente:**
@@ -764,6 +825,18 @@ Não usar `404` para ausência de participação. O backend deve refletir o **ef
 
 ### 15.7 `GET /participations/:id` — estado da participação do titular
 
+**Implementação E08.12:** o parâmetro efetivo chama-se `participationId` e exige
+UUID. Retorna os campos de participação de §15.6 para todos os quatro estados,
+com `eventId`; o objeto `event` ampliado abaixo permanece proposta opcional,
+preservando o DTO de participação existente. Inexistência e terceiro têm o mesmo
+`404 RESOURCE_NOT_FOUND`. Rotas literais `current`, `history` e `return-state`
+são registradas antes da rota genérica, com testes HTTP de resolução.
+Na projeção temporal, um terminal já persistido conserva data e motivo; um
+corrente vencido usa o prazo lógico e o motivo da E08.9, nunca `voluntary`.
+Os GETs oficiais E08.10/E08.11 continuam sobre o estado persistido: avaliações
+pendentes e retomada aparecem após a regularização física, sem que este GET
+invente elegibilidade ou execute o job. Detalhes em `E08_12_IMPLEMENTACAO.md`.
+
 **Bearer obrigatório e titularidade obrigatória**, inclusive para histórico de participação terminada. Mantém os campos do item anterior e, quando `active`, devolve `externalQueue=null`. **[PROPOSTA]** incluir `event` público reduzido (`id`, `name`, `status`, `acceptingEntries`) para renderizar a tela sem duplicar consultas.
 
 **Posição externa:** calculada no instante da consulta contando apenas participações `waiting` no mesmo evento cuja ordem esteja à frente ou igual à do usuário; **não** manter posições físicas em massa, pois saídas e liberações alteram o número exibido. Campos `observedAt` explicitam que a posição é uma fotografia. `404` tanto para ID inexistente quanto para ID de terceiro (não revelar a existência), `401` para autenticação inválida.
@@ -771,6 +844,15 @@ Não usar `404` para ausência de participação. O backend deve refletir o **ef
 **Atualização da interface [VALIDAR]:** refetch ao retornar para o app e enquanto estiver aguardando; decidir intervalo/custo e eventual WebSocket em validação de infraestrutura. Não inferir presença ou ausência pela queda de conexão; servidor é fonte de verdade.
 
 ### 15.8 `POST /participations/:id/cancel` — sair voluntariamente da fila externa
+
+**Implementação E08.12:** aceita `{}` ou corpo ausente, rejeita extras e usa
+`cancel_external_participation` na idempotência durável. Resposta `200` conserva
+também `joinedAt`/`arenaEnteredAt` do DTO comum. Uma única decisão PostgreSQL após
+os locks grava `canceled`/`external_wait_withdrawal`/`finishedAt`, preservando
+histórico e posições alheias. Liberação concorrente produz
+`409 PARTICIPATION_NOT_WAITING` com a participação própria atualizada; prazo
+definitivo vencido produz `409 EVENT_OPERATION_ENDED` com projeção terminal.
+Nenhum desses conflitos confirma uma nova reserva idempotente.
 
 **Bearer + titularidade + `Idempotency-Key`.** Somente participação `status='waiting'`. **Sem corpo** (motivo fixo de produto `external_wait_withdrawal`).
 
@@ -794,6 +876,34 @@ Não usar `404` para ausência de participação. O backend deve refletir o **ef
 **Erros:** `409 PARTICIPATION_NOT_WAITING` se já ativa/terminal por outro motivo; `404` titularidade/inexistência; `401` inválido. Uma repetição com **a mesma chave/payload** devolve o resultado original sem criar efeitos. Uma nova tentativa de ingresso depois do cancelamento cria participação **nova**, se o evento ainda aceitar inscrições.
 
 ### 15.9 `POST /participations/:id/finish` — saída voluntária da Arena
+
+**Implementação E08.12:** aceita `{}` ou ausência e usa namespace
+`finish_arena_participation`. Finaliza somente `active`, mesmo sem completed.
+Fecha a entrada interna corrente e cancela apenas seu pending com motivo técnico
+`participation_voluntary_finish`, copiando `finished_at` entre linhas no banco.
+Não altera disponibilidade configurada da estação, não cria ausência/conclusão
+e preserva atendimentos anteriores. A resposta `200` inclui o DTO comum,
+`completedServicesCount` e `evaluationEligibility: { eligible, hasSubmitted }`,
+derivados da política oficial de avaliações. Replay conserva a resposta original.
+
+Reserva/reconhecimento idempotente precede locks de domínio; depois, evento
+`FOR UPDATE` → experiência → estação (se chamada) → participação → entrada →
+atendimento. O lock exclusivo do evento estabiliza a descoberta da fila inclusive
+contra troca de experiência; é uma escolha conservadora que serializa mutações
+do evento durante a transação. Relógio decisório e predicados de prazo ficam no
+UPDATE após todas as esperas. Erros revertem domínio e intenção juntos.
+Encerramento Admin imediato/job que vença preserva seu motivo. Fechamento
+controlado permite a saída dos active antes do prazo residual, sem sobrescrever
+as participações waiting já finalizadas pela E08.8.
+
+Cancelamento e saída reutilizam somente o TTL técnico explícito
+`PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS`, já obrigatório para ações do
+participante; os namespaces e fingerprints são distintos da C-15 e entre si.
+Não há nova variável, fallback, expurgo ou reexecução após TTL. Replay exige
+sessão e titularidade atuais; recurso/intenção diferente gera
+`409 IDEMPOTENCY_KEY_REUSED`, e reserva preexistente em andamento gera
+`409 IDEMPOTENCY_IN_PROGRESS`. Validação PostgreSQL E08.12 permanece manual e
+pendente; comandos e resultados efetivos constam no relatório da task.
 
 **Bearer + titularidade + `Idempotency-Key`.** Somente participação `status='active'`; não exigir nenhuma conclusão Staff, mas isso determina a possibilidade de avaliar posteriormente. **Sem corpo** (motivo `voluntary`).
 
@@ -820,6 +930,16 @@ Não usar `404` para ausência de participação. O backend deve refletir o **ef
 **Erros:** `409 PARTICIPATION_NOT_ACTIVE` se continua em fila externa ou já foi finalizada por outro motivo; `404` titularidade/inexistência; `401` token inválido. Se um encerramento automático/administrativo ganhou a disputa, retornar estado terminal efetivo sem sobrescrever `finishReason`, evitando transformar fechamento automático em saída voluntária. Reenvio da mesma intenção usa idempotência.
 
 ### 15.10 `GET /participations/history` — histórico do titular
+
+**Implementação E08.10 — 04/11/2026:** `/api/v1/participations/history` retorna
+histórico persistido do titular em REPEATABLE READ READ ONLY, com limite padrão
+20/máximo 50 e keyset joined_at DESC/id DESC. Cursor base64url validado preserva
+UTC com seis casas e UUID, sem converter o valor comparado em Date. Mantém
+reentradas distintas, arenaEnteredAt, motivo real e resumo eligible/submitted/
+pending da mesma política SQL das avaliações; inclui todos os estados persistidos.
+No HEAD inicial, current existe como serviço interno, sem endpoint HTTP; este
+estado é preservado, sem colisão com os novos caminhos literais. Contrato efetivo,
+testes e limitações em `E08_10_IMPLEMENTACAO.md`.
 
 **Bearer obrigatório.** `GET /participations/history?limit=20&cursor=<cursor-opaco>`; `limit` padrão 20, máximo 50 [PROPOSTA]. Ordenar por `joined_at DESC, id DESC` para paginação estável (*keyset*), usando cursor opaco validado no servidor. Retornar apenas participações do próprio titular, inclusive reentradas distintas no mesmo evento. Nunca transformar evento fechado em exclusão do histórico por padrão; o tratamento posterior de LGPD continua prevalecendo.
 
@@ -923,7 +1043,7 @@ Não usar `404` para ausência de participação. O backend deve refletir o **ef
 | EV23 | Atualização do questionário concorre com ingresso | Snapshot corresponde a uma versão completa, sem mistura de jogos antigos e novos |
 | EV24 | Encerramento automático após uma conclusão | Avaliação pendente elegível na retomada; sem conclusão, não forçar avaliação |
 
-**Testes não executados.** Incluir cenários de diferenças de Unicode na normalização, comportamento no limite de tempo, idempotência após expurgo, conexões diferentes ao PostgreSQL e reconexão real em dispositivos móveis.
+Os testes funcionais de API/Expo deste capítulo seguem não executados. Os casos específicos de normalização C-10 e consulta interna de eventos foram adicionados na E01.2B (§24); permanecem pendentes comportamento de tempo, idempotência após expurgo e reconexão real em dispositivos móveis.
 
 ### 15.14 Pendências pontuais de integração
 
@@ -954,24 +1074,93 @@ Não usar `404` para ausência de participação. O backend deve refletir o **ef
 8. **Corte definitivo:** ao chegar a `min(events.operational_deadline_at, events.admin_deadline_at quando existir)`, não há novas chamadas ou resoluções manuais; pendências são canceladas, entradas encerradas e participações finalizadas automaticamente. Encerramento Admin imediato tem efeito no instante próprio, conforme D09.
 9. **Segurança e privacidade:** `queueEntryId`, `serviceSessionId`, `stationId` e IDs difíceis de adivinhar **não** substituem validação de titularidade/papel e coerência de `eventId`/`experienceId`. A API pública nunca expõe a lista nominal dos demais participantes.
 10. **Idempotência:** operações mutantes usam `Idempotency-Key` por intenção (exceto se uma política específica de ação idempotente for posteriormente justificada). Uma tentativa nova de entrar novamente na mesma fila usa chave nova. `idempotency_operations` persiste efeito/resposta no mesmo commit; token de refresh não usa esse mecanismo.
+11. **Desistência interna C-15:** o titular pode abandonar a entrada `waiting` ou `called` mantendo a participação `active`. Resolver eventual `pending` sem ausência/conclusão, preservar histórico e não transferir posição. A saída isolada usa o serviço interno E07.3, sem HTTP; nova entrada continua sujeita a todos os cortes e guardas de admissão.
 
 ### 16.2 Matriz de endpoints propostos
+
+**Implementação E08.14 — 04/11/2026:** implementado
+`PATCH /staff/events/:eventId/experiences/:experienceId/queue`, autorizado por
+decisão expressa do responsável a **Staff vigente e apto do evento ou Admin
+global vigente com 2FA**. Recebe somente `{ acceptingEntries: boolean }`, exige
+`Idempotency-Key` e retorna 200 com `eventId`, `experienceId`,
+`queueAcceptingEntries` e `changedAt` preciso quando houver mudança. Reutiliza TTL
+Staff explícito para essa operação, inclusive quando o ator é Admin; não há nova
+variável. Namespace durável próprio protege contra retry antigo que desfaria uma
+decisão posterior. No-op e replay não atualizam a experiência nem duplicam auditoria.
+
+Pausa altera somente a flag operacional e seu `updated_at`, com auditoria/intenção
+atômicas: preserva FIFO, waiting/called/pending, ponteiros, estações, participações
+e avaliações. Chamadas/resoluções residuais continuam com as regras anteriores;
+ausência durante a pausa não cria nova entrada. Reabrir a flag não supera
+prontidão, capacidade, titularidade ou cortes E07.1/E08.2 e não altera estado do
+evento/fila externa. Histórico não bloqueia configuração; antes do início e na
+janela residual ela é permitida até o prazo definitivo. Mesmo estado é no-op
+também após o corte, mas mudança real é recusada. Regra temporal compartilha o
+prazo efetivo E08.9; locks seguem evento → experiência → conta/papéis/sessão.
+Somente mudanças efetivas geram auditoria. As permissões das outras rotas Staff
+permanecem inalteradas. Contratos, testes e PostgreSQL manual pendente em
+`E08_14_IMPLEMENTACAO.md`.
+
+**Atualização E08.12 — 04/11/2026:** `POST /participations/:participationId/finish`
+agora implementa a saída completa descrita em §15.9. Ela permanece distinta da
+desistência de entrada explícita C-15 da E08.2, que conserva a participação active.
+Nenhum serviço E07.1–E07.6 foi alterado. Conclusão/ausência Staff e desistência
+interna continuam com seus contratos e ordens de locks anteriores.
+
+**Atualização E08.2 — 03/11/2026:** as rotas de ingresso e consulta do participante
+estão implementadas por `ParticipantQueueController` sobre E07.1/E07.2. A saída
+interna E07.3 recebe a definição técnica
+`POST /participations/:participationId/queue-entries/:queueEntryId/withdraw`, com
+201 no ingresso e 200 na consulta/desistência, inclusive replays. Titularidade
+ausente/alheia produz o mesmo 404. Os POSTs usam TTL próprio obrigatório
+`PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS`, além de `Idempotency-Key`; o GET
+mantém o snapshot somente leitura. Detalhes, erros efetivos e testes PostgreSQL
+pendentes de execução manual em `E08_2_IMPLEMENTACAO.md`. As observações abaixo
+que delimitam E07.1–E07.3 sem HTTP descrevem o histórico anterior a esta atualização.
 
 | Endpoint relativo a `/api/v1` | Acesso | Finalidade | Efeito |
 |---|---|---|---|
 | `GET /events/:eventId/experiences` | Conta com participação `active` no evento | Listar experiências e estações/estatísticas seguras | Leitura |
 | `GET /participations/:id/queue` | Participante titular | Recuperar espera/chamada interna atual | Leitura |
 | `POST /participations/:id/queue-entries` | Participante titular | Entrar em fila interna, inclusive repetir experiência após conclusão | Cria `queue_entries` |
+| `POST /participations/:participationId/queue-entries/:queueEntryId/withdraw` | Participante titular | Desistir da tentativa explícita e permanecer na Arena | Encerra entrada e cancela eventual pending |
 | `GET /staff/events/:eventId/stations` | Staff autorizado no evento (Admin com acesso de gestão conforme regra) | Consultar estações, disponibilidade e pendências | Leitura operacional |
 | `PATCH /staff/events/:eventId/stations/:stationId/availability` | Staff autorizado no evento **ou Admin global** | Marcar estação disponível/indisponível | Atualiza `stations` |
 | `GET /staff/events/:eventId/experiences/:experienceId/queue` | Staff autorizado no evento | Consultar tamanho/primeiro lugar e situação da fila | Leitura operacional |
+| `PATCH /staff/events/:eventId/experiences/:experienceId/queue` | Staff apto do evento ou Admin global com 2FA | Pausar/reabrir novas entradas | Flag operacional, auditoria e intenção durável |
 | `POST /staff/events/:eventId/experiences/:experienceId/stations/:stationId/call-next` | Staff autorizado no evento | Reservar primeiro da FIFO e chamar na estação escolhida | Cria `service_sessions.pending` |
 | `POST /staff/events/:eventId/service-sessions/:serviceSessionId/complete` | Staff autorizado no evento | Confirmar experiência concluída | Resolve `completed` |
 | `POST /staff/events/:eventId/service-sessions/:serviceSessionId/absent` | Staff autorizado no evento | Registrar ausência; eventual nova posição antes do corte | Resolve `absent`, pode criar nova `queue_entry` |
 
-**Delimitação:** não será criada, por pressuposição, uma rota separada para “sair apenas da fila interna e continuar na Arena”, pois D03 aprova a **finalização voluntária da participação** durante espera/chamada e não necessariamente o abandono isolado de uma tentativa. O endpoint já definido `POST /participations/:id/finish` continua sendo a forma aprovada de sair da Arena, inclusive durante espera interna. A alteração manual de `experiences.queue_accepting_entries` e a desativação da fila externa são capacidades de gestão a detalhar no contrato de Admin, não permissões extras de Staff por inferência.
+**Delimitação atualizada — C-15 aprovada em 30/10/2026:** o participante pode sair apenas da fila interna e continuar com participação `active` na Arena. Esta decisão substitui a delimitação anterior que excluía a saída isolada. A E07.3 implementa o contrato **interno** `QueueWithdrawalService.withdrawExperienceQueue({ userId, participationId, queueEntryId, idempotencyKey, expiresAt })`; a matriz acima não define seu método ou caminho HTTP. O contrato já proposto `POST /participations/:id/finish` continua destinado à finalização da participação; saída externa, finalização e desistência interna têm efeitos distintos. A alteração manual de `experiences.queue_accepting_entries` e a desativação da fila externa continuam sendo capacidades de gestão a detalhar no contrato de Admin, não permissões extras de Staff por inferência.
+
+#### Requisitos da desistência interna — E07.3
+
+- **Escopo e acesso:** validar titularidade, participação `active` e vínculo entre evento, experiência, entrada e eventual atendimento dentro da transação. O contrato deve identificar a tentativa alvo e vincular a idempotência a essa intenção; retry antigo não pode atingir uma entrada posterior. Não apagar histórico nem finalizar/cancelar a participação.
+- **Entrada `waiting`:** encerrar a entrada com instante e motivo identificável de desistência voluntária e liberar `participations.current_queue_entry_id` correspondente, atomicamente. Não renumerar `queue_order`, decrementar `last_queue_order` nem mudar a posição relativa de outros participantes.
+- **Entrada `called`:** se houver `service_sessions.pending`, resolver a chamada e encerrar a entrada no mesmo commit da limpeza do ponteiro, sem ausência ou conclusão. A estação deixa de estar ocupada por esse atendimento e pode receber novas chamadas se sua disponibilidade configurada e as regras operacionais permitirem. Não marcar estação `available` automaticamente nem criar chamada seguinte automática.
+- **Concorrência:** usar `READ COMMITTED` e o protocolo comum de locks: `events FOR SHARE` → `experiences FOR UPDATE` → `stations FOR UPDATE` quando houver chamada → `participations FOR UPDATE` → `queue_entries FOR UPDATE` → `service_sessions FOR UPDATE` quando existir. Leituras preliminares para descobrir IDs não autorizam a operação; revalidar relações, titularidade, estados e a necessidade de lock da estação após as esperas, mantendo essa ordem. Disputar chamada Staff, conclusão, ausência e fechamento pelo mesmo protocolo. Transições condicionadas ao estado corrente não podem sobrescrever `completed`, `absent`, `canceled` ou entrada já encerrada. Se outra operação vencer, preservar seu resultado. O contrato interno E07.3 retorna `entry_not_current` para tentativa encerrada e `participation_not_active` para participação já terminal; códigos públicos/HTTP não estão congelados.
+- **Cronologia:** usar relógio PostgreSQL atual após eventuais esperas. O corte de **novos ingressos** não impede, por si só, desistência de entrada existente: ela pode ocorrer após esse corte enquanto participação/entrada e prazo operacional/administrativo ainda permitirem. Fechamento definitivo não é contornado e participação terminal não é reativada. Sair da fila nunca autoriza nova entrada após o corte.
+- **Depois da saída:** o titular pode permanecer na Arena sem fila ou solicitar ingresso em outra experiência antes dos cortes e sob todas as guardas de admissão. Cada novo ingresso é outra intenção, com nova chave e nova ordem, sem transferência FIFO. Permanece uma fila por experiência compartilhada entre suas estações, sem filas ou transferência por estação.
+- **Atomicidade e idempotência:** reutilizar o mecanismo existente; reservar/concluir a intenção e persistir resultado junto com os efeitos em `queue_entries`, `participations` e `service_sessions`, com rollback integral em falha. Retry retorna o resultado original sem novo cancelamento ou alteração de ocorrência posterior. Preservar todas as conclusões anteriores.
+
+**Conferência do schema atual, sem alteração:** `backend/src/database/schema/participations.schema.ts` e `backend/drizzle/0004_event_operations.sql` permitem somente `waiting|called|closed` em `queue_entries` e `pending|completed|absent|canceled` em `service_sessions`. Portanto, o encerramento da entrada usa `closed`; a resolução por desistência de um atendimento ainda `pending` usa `canceled`, sem estado persistido novo. `closed` exige `closed_at` e `close_reason`; `canceled` exige `resolved_at` e `cancel_reason`, respeitando os demais checks e FKs. `close_reason` e `cancel_reason` são `varchar(40)` sem enum ou CHECK de lista de motivos. A E07.3 escolhe tecnicamente `participant_queue_withdrawal` para ambos os motivos e registra o titular em `resolved_by_user_id`; não é catálogo público ou nova decisão de produto. O timestamp do fechamento vem de `clock_timestamp()` no UPDATE decisivo e é copiado diretamente para a resolução do pending. Motivos/resultados HTTP continuam fora de escopo; detalhes em `E07_3_IMPLEMENTACAO.md`. Nenhuma migration foi criada.
+
+**Implementação e limite — fechamento posterior de 30/10/2026:** E07.1 implementa ingresso, E07.2 consulta interna e E07.3 saída interna. O registro histórico C-15 foi inicialmente documental; os contratos internos atuais são descritos em seus relatórios de implementação, sem endpoints. A auditoria consolidada aprovou as três entregas individualmente e a integração com ressalvas, sem defeito funcional bloqueante confirmado. Permanecem dependências futuras definir/validar a política de expurgo/idempotência antes de remover registros e homologar os escritores Staff reais e suas interações quando forem desenvolvidos. Não são falhas atuais nem funcionalidades já homologadas. Os serviços Staff/finalização/fechamento futuros precisam usar os mesmos locks e transições condicionadas ao estado atual; a E07.3 não implementa esses comandos. Nenhuma nova auditoria ou mudança de contrato ocorre neste fechamento documental.
 
 ### 16.3 `GET /events/:eventId/experiences` — visão do participante
+
+**Implementação HTTP E08.3 — 03/11/2026:** `ExperiencesController` expõe esta rota
+sob `/api/v1`, reutilizando exclusivamente `ExperiencesService.getEventExperiences`
+da E06. Exige sessão Bearer e participação `active` do titular nesse evento;
+ausência de acesso retorna 404 neutro `RESOURCE_NOT_FOUND`. UUID é validado e
+normalizado. JSON preserva os campos abaixo, sem `kind`; não calcula novamente
+disponibilidade ou contagens, não cria idempotência e não executa mutações.
+O serviço mantém `REPEATABLE READ READ ONLY`; sua única alteração foi declarar
+`@Inject(EventsService)` após falha de DI comprovada sob `tsx`. `available` continua
+expressando configuração, inclusive se a estação estiver ocupada. Testes e
+comandos de integração PostgreSQL manual em `E08_3_IMPLEMENTACAO.md`. Trechos
+anteriores deste capítulo que dizem não haver endpoints são registros históricos.
 
 **Requisitos:** Bearer válido, titular com participação `active` no evento. `200 OK` mesmo durante operação residual para que usuários já presentes vejam o estado; não implica que possam entrar novamente. `eventId` no path deve corresponder à participação atual. Não divulgar nomes, e-mails, escalas de Staff ou identidades na fila.
 
@@ -1001,6 +1190,13 @@ Os campos `available` expressam configuração manual da estação, **não neces
 
 ### 16.4 `POST /participations/:id/queue-entries` — ingressar na fila interna
 
+**Contrato efetivo E08.2:** delega a E07.1 sem alterar regras transacionais.
+Resposta 201 plana: `{ queueEntryId, participationId, experienceId, status,
+queueOrder, enteredAt }`, com ordem decimal exata e instante ISO UTC, sem `kind`.
+Não retorna posição no POST; a posição dinâmica pertence ao GET da §16.5.
+Essa definição substitui o envelope `queueEntry` e a posição do exemplo histórico
+proposto abaixo. Replays preservam 201. Códigos efetivos em `E08_2_IMPLEMENTACAO.md`.
+
 **Headers:** `Authorization: Bearer <accessToken>` e `Idempotency-Key: <uuid-ou-chave-da-intencao>`.
 
 **Body:**
@@ -1009,7 +1205,7 @@ Os campos `available` expressam configuração manual da estação, **não neces
 { "experienceId": "550e8400-e29b-41d4-a716-446655440301" }
 ```
 
-**Transação [PROPOSTA]:** resolver e bloquear `events` (`FOR SHARE`), `experiences` (`FOR UPDATE`) e `participations` (`FOR UPDATE`) na ordem declarada na §4, revalidando após as esperas. Validar titularidade, `status='active'`, experiência do mesmo evento, `queue_accepting_entries=true`, inexistência de outra entrada interna atual, e que **ambos** os cortes (oficial e administrativo) ainda permitem entradas. Incrementar `experiences.last_queue_order` e inserir uma entrada `queue_entries.status='waiting'`, atualizando `participations.current_queue_entry_id`; efetivar tudo, com a idempotência, no mesmo commit. `queue_order` jamais virá do telefone. Não exigir estação instantaneamente disponível para **entrar** em fila aberta: disponibilidade é para **chamar**, e o participante deve receber situação clara quando estações estiverem indisponíveis.
+**Transação [PROPOSTA]:** resolver e bloquear `events` (`FOR SHARE`), `experiences` (`FOR UPDATE`) e `participations` (`FOR UPDATE`) na ordem declarada na §4, revalidando após as esperas e protegendo as testemunhas de capacidade conforme o protocolo da E07.1. Validar titularidade, `status='active'`, experiência do mesmo evento, `queue_accepting_entries=true`, inexistência de outra entrada interna atual, prontidão/Staff autorizado e que **ambos** os cortes (oficial e administrativo) ainda permitem entradas. **C-14 exige ao menos uma estação da experiência configurada como `available` para admitir novas entradas. Isso não exige estação desocupada: ela pode estar `available` e possuir `service_sessions.pending`.** A perda de todas as estações operacionalmente disponíveis bloqueia novos ingressos nessa experiência, preservando entradas existentes e sem afetar outras experiências aptas. Restaurar capacidade não reabre inscrições após os cortes. Essas regras seguem C-14, §20.2 e a visão informativa E06, que não substitui a revalidação na mutação. Incrementar `experiences.last_queue_order` e inserir uma entrada `queue_entries.status='waiting'`, atualizando `participations.current_queue_entry_id`; efetivar tudo, com a idempotência, no mesmo commit. `queue_order` jamais virá do telefone. A desistência interna C-15 permanece reservada à E07.3 e não é implementada por esse ingresso.
 
 **Resposta `201 Created`:**
 
@@ -1033,7 +1229,15 @@ Os campos `available` expressam configuração manual da estação, **não neces
 
 ### 16.5 `GET /participations/:id/queue` — fila ou chamada atual
 
-**Bearer + titular.** Consulta não cria nem remove entradas. O backend deve computar `position` pelo número de entradas `waiting` à frente da mesma experiência (e ordem), sempre que `status='waiting'`. Entrada `called` deixa de ocupar posição na espera; o participante verá a estação escolhida. O histórico é consultado pelas participações/atendimentos, não por esta rota de estado corrente.
+**Atualização HTTP E08.2:** a rota está implementada sobre o serviço abaixo.
+Mapeia `access_denied` para 404 neutro e `ok` para 200 com `participationId`,
+`observedAt` e `currentQueueEntry`, sem expor `kind`. O texto que menciona ausência
+de controller registra a etapa interna E07.2. O snapshot e os exemplos de consulta
+abaixo são preservados, sem idempotência, mutações ou limpeza no GET.
+
+**Contrato HTTP proposto; implementação interna E07.2:** `QueueStateService.getParticipationQueue(userId, participationId)`, sem controller/rota. Retorna `kind='access_denied'` indistinguível para participação ausente/alheia ou `kind='ok'` com `participationId`, `observedAt` e `currentQueueEntry` anulável. Consulta não cria nem remove entradas. Em uma transação `REPEATABLE READ READ ONLY`, duas consultas sem locks de linha verificam titularidade/evento e depois ponteiro, entrada, experiência, atendimento/estação e posição no mesmo snapshot. `observedAt` vem de `statement_timestamp()` na primeira leitura, como na E06. `position` conta as entradas `waiting` da mesma experiência/evento com ordem **menor ou igual** à da entrada atual, incluindo a própria pessoa (posição inicial 1). `called` e `closed` não contam; `queueOrder` continua string decimal exata, inclusive no retorno `called`, e contagens fora do intervalo seguro de number geram falha explícita. Histórico e replay E07.1 não são estado corrente.
+
+**Projeção de encerramento E07.2:** corte oficial/início controlado de novas inscrições e perda de capacidade C-14 não suprimem espera/chamada preexistente na janela residual. No instante `observedAt`, `events.status='closed'` ou chegada ao menor prazo operacional/administrativo efetivo projeta `currentQueueEntry:null`; no modo imediato, o prazo administrativo coincide com o instante solicitado. Não aguardar o job de limpeza para deixar de apresentar estado operacional vigente e não executar limpeza nesta leitura. Titular externo/terminal sem fila também recebe sucesso com null. Ponteiro ausente com entrada corrente, ponteiro para entrada fechada, vínculos incoerentes ou chamada sem pending válido enquanto operacionalmente vigente geram erro interno de integridade, sem inventar estados. Null não autoriza ingresso nem reativa participação; E04/E06 e as guardas de mutação continuam necessários. Ver `E07_2_IMPLEMENTACAO.md` para o contrato efetivo e limites.
 
 **Resposta em espera:**
 
@@ -1064,6 +1268,7 @@ Os campos `available` expressam configuração manual da estação, **não neces
     "experienceId": "550e8400-e29b-41d4-a716-446655440301",
     "experienceName": "Just Dance",
     "status": "called",
+    "queueOrder": "24",
     "position": null,
     "serviceSession": {
       "id": "550e8400-e29b-41d4-a716-446655440601",
@@ -1078,6 +1283,15 @@ Os campos `available` expressam configuração manual da estação, **não neces
 **Sem fila interna atual:** `200 OK` com `currentQueueEntry:null`; não retornar `404`, pois a participação existe. Se a participação tiver terminado por tempo/Admin, resposta deve representar seu estado efetivo; `GET /participations/current` e histórico/avaliações seguem sendo necessários para a navegação pós-fechamento. **Não prometer polling em tempo real nem push nesta fase**; o intervalo de consulta e eventual WebSocket ficam para testes do piloto. Queda de rede ou app em segundo plano não registra ausência.
 
 ### 16.6 `GET /staff/events/:eventId/stations` — operação por evento
+
+**Implementação E08.4 — 03/11/2026:** rota disponível sob `/api/v1` por
+`StaffQueriesController`/`StaffQueriesService`. Exige Staff vigente do próprio
+evento, conta ativa/verificada e sessão válida; Admin isolado não recebe leitura
+operacional por esta rota. O contrato efetivo acrescenta `pendingCalledAt` (ISO UTC
+ou null) a cada estação, junto de `pendingServiceSessionId`. Autorização e dados
+compartilham snapshot `REPEATABLE READ READ ONLY`; nenhum atendimento é resolvido
+pelo GET, inclusive após o prazo. Detalhes e validação pendente em
+`E08_4_IMPLEMENTACAO.md`. O exemplo histórico abaixo omite o instante.
 
 **Staff ativo e autorizado para `eventId`**, com e-mail verificado e sessão válida. Admin global pode ter rota de administração própria; a consulta Staff por si não deve implicar capacidade automática de concluir chamadas. **Resposta:** experiências/estações do evento com `availability` e, de forma operacional mínima, `pendingServiceSessionId` e instante da chamada. Staff pode selecionar estação no momento da operação; não existe relação permanente Staff↔estação.
 
@@ -1107,6 +1321,18 @@ Expor somente informações operacionais necessárias e auditáveis; o método p
 
 ### 16.7 `PATCH /staff/events/:eventId/stations/:stationId/availability`
 
+**Implementação E08.5 — 03/11/2026:** rota disponível sob `/api/v1`, por
+`StationAvailabilityController`/`StationAvailabilityService`. Staff vigente do
+evento ou Admin global, com sessão/conta revalidadas após locks e 2FA Admin
+preservado. Usa `events FOR UPDATE` → experiência → estação, `READ COMMITTED`,
+relógio PostgreSQL no UPDATE e auditoria atômica para cada mudança efetiva.
+Repetição é no-op 200, sem Idempotency-Key obrigatório ou novo armazenamento.
+Configuração antes do início e reativação residual são permitidas; não reabrem
+ingressos após corte oficial/Admin. `closed` e prazos definitivos impedem mudanças
+efetivas. O 409 por pending inclui o estado mínimo atual em `station` no RFC 7807;
+recursos ausentes/alheios e falta de concessão recebem 404 neutro. Contrato,
+decisões, testes executados e PostgreSQL pendente em `E08_5_IMPLEMENTACAO.md`.
+
 **Staff ativo do evento OU Admin global autorizado;** mesma política no guard e serviço. Corpo:
 
 ```json
@@ -1120,6 +1346,18 @@ Validar que `stationId` pertence a uma experiência do evento. Na transação, b
 Uma estação disponível porém ocupada não pode receber novo chamado. Desativar estação não fecha fila da experiência nem transfere participantes; nenhuma permissão de mudar `queue_accepting_entries` decorre desta rota.
 
 ### 16.8 `GET /staff/events/:eventId/experiences/:experienceId/queue`
+
+**Implementação E08.4 — 03/11/2026:** rota disponível sob `/api/v1`, com as mesmas
+exigências Staff da §16.6 e recusa neutra 404 para acesso/recurso ausente ou alheio.
+`acceptingNewEntries` reutiliza E06; `canCallWaitingEntries` indica a janela temporal
+operacional da E07.4 (início inclusivo, prazos operacional/Admin exclusivos, estado
+diferente de `closed`). Pode ser true com fila vazia ou estação ocupada/indisponível;
+não exige fila aberta a novos ingressos nem supera a validação da estação no POST.
+Contagem e primeiro ID incluem somente `waiting` do mesmo evento/experiência, na
+ordem PostgreSQL `queue_order, id`, conforme o seletor efetivo da E07.4, sem saltar
+entradas ou converter bigint em number. O GET não limpa histórico após o prazo:
+contagens persistidas podem permanecer, com chamadas bloqueadas. Ver
+`E08_4_IMPLEMENTACAO.md` para consistência, privacidade e testes.
 
 **Staff por evento.** Validar que a experiência pertence ao evento e consultar informações de fila sem mutá-la. Exemplo:
 
@@ -1139,7 +1377,11 @@ O primeiro ID é **somente indicação de leitura**; o endpoint de chamada sempr
 
 ### 16.9 `POST /staff/events/:eventId/experiences/:experienceId/stations/:stationId/call-next`
 
+**Camada HTTP E08.1 — 03/11/2026:** as três rotas §16.9–16.11 estão conectadas aos serviços E07.4–E07.6 por `StaffOperationsController`, sob `/api/v1`. Reutilizam `RequireSessionAuth`/`CurrentUserId`, autorização transacional dos serviços e erros RFC 7807. UUIDs canônicos, uma única `Idempotency-Key` opaca não vazia (até 128 caracteres, sem controles) e somente `{}`/corpo ausente. O backend exige `STAFF_IDEMPOTENCY_TTL_SECONDS` inteiro positivo, sem padrão, para gerar `expiresAt`; não há expurgo automático ou perda de replay pelo vencimento enquanto o registro existir. Replay preserva o status original 201/200. Política definitiva de retenção/expurgo continua pendente. Códigos e validação em `docs/E08_1_IMPLEMENTACAO.md`; valida??o manual no PostgreSQL local confirmada pelo respons?vel em 03/11/2026: 20/20 HTTP E08.1 e 263/263 na regress?o completa, sem falhas, cancelamentos ou skips.
+
 **Staff ativo com escopo de evento; `Idempotency-Key` obrigatória; corpo `{}`.** O Staff seleciona a estação que está operando naquele momento. A API não delega ao telefone a seleção de qual participante chamar.
+
+**Implementação interna E07.4 (02/11/2026):** `CallNextService.callNext({ staffUserId, eventId, experienceId, stationId, idempotencyKey, expiresAt })`, exportado por `EventsModule`. Conta ativa/verificada e concessão Staff vigente são revalidadas sob locks; Admin isolado não autoriza. Namespace idempotente `call_next`, fingerprint de evento/experiência/estação, replay histórico ainda sujeito à autorização atual. O INSERT decisivo usa `clock_timestamp()` e os prazos operacional/administrativo, permitindo chamadas residuais sem exigir novas inscrições abertas. Contrato HTTP permanece proposto; sem rota ou migration. Validação e comandos PostgreSQL em `docs/E07_4_IMPLEMENTACAO.md`.
 
 **Transação [PROPOSTA]:** bloquear `events FOR SHARE` → `experiences FOR UPDATE` (mutex por fila) → `stations FOR UPDATE`. Localizar o primeiro candidato FIFO por consulta não bloqueante, então bloquear `participations FOR UPDATE` → `queue_entries FOR UPDATE`, **revalidando** que a entrada continua sendo a primeira elegível da fila e que a participação segue `active`. Todos os comandos conflitantes devem seguir essa mesma ordem de locks. Verificar permissão Staff no instante da operação, estação `available` e **sem chamada pendente**, não haver prazo operacional vencido ou encerramento imediato, e a primeira entrada ser do mesmo evento e participação `active`. Inserir `service_sessions.pending`, alterar a entrada para `called`, e finalizar idempotência no mesmo commit. A constraint parcial em `(station_id) WHERE status='pending'` é a última barreira de integridade. **Não usar `SKIP LOCKED` no primeiro da FIFO** quando isso permitir furar fila.
 
@@ -1164,6 +1406,8 @@ O primeiro ID é **somente indicação de leitura**; o endpoint de chamada sempr
 
 **Staff ativo por evento; `Idempotency-Key`; body `{}`.** Resolver o ID → experiência/estação/entrada/participação **sem assumir autorização**, adquirir locks na ordem comum (`events` → `experiences` → `stations` → `participations`/`queue_entries` → `service_sessions`), revalidar Staff, evento, cronologia, `pending` e participação ainda `active` após os locks. Se válida, marcar `service_sessions.status='completed'`, `resolved_at`, `resolved_by_user_id`, encerrar `queue_entries` com `close_reason='completed'` e limpar `participations.current_queue_entry_id`, tudo atomicamente. A estação disponível fica pronta para **outra chamada posterior**, sem autochamada ou marcação automática de presença.
 
+**Implementação interna E07.5 (02/11/2026):** `CompleteService.complete({ staffUserId, eventId, serviceSessionId, idempotencyKey, expiresAt })`, exportado pelo `EventsModule`. Revalida conta ativa/verificada, concessão Staff vigente e vínculos sob o protocolo comum. Namespace `complete_service_session`, fingerprint de evento/sessão e replay histórico sujeito à autorização atual, sem tocar entradas posteriores. O UPDATE decisivo usa `clock_timestamp()` e os prazos operacional/administrativo; `closed_at` copia `resolved_at` diretamente no PostgreSQL. Sem HTTP ou migration; testes e comandos em `docs/E07_5_IMPLEMENTACAO.md`.
+
 **Resposta `200`:**
 
 ```json
@@ -1183,6 +1427,8 @@ O primeiro ID é **somente indicação de leitura**; o endpoint de chamada sempr
 ### 16.11 `POST /staff/events/:eventId/service-sessions/:serviceSessionId/absent`
 
 **Staff ativo por evento; `Idempotency-Key`; body `{}`.** Usar o mesmo conjunto e ordem de locks de `complete`. Registrar **manualmente** `service_sessions.status='absent'`, `resolved_at`, `resolved_by_user_id`; fechar a entrada original com `close_reason='absent'`, sem contar conclusão.
+
+**Implementação interna E07.6 (03/11/2026):** `AbsentService.absent({ staffUserId, eventId, serviceSessionId, idempotencyKey, expiresAt })`, exportado pelo `EventsModule`. Mantém o protocolo E07.3–E07.5 e revalida autorização/vínculos. Namespace `absent_service_session`, fingerprint de evento/sessão. UPDATE de ausência e INSERT de reentrada usam relógios PostgreSQL atuais separados; o INSERT com incremento FIFO condicionado revalida corte oficial/Admin, fila aberta e condições de admissão da E07.1 (prontidão existente e testemunha de estação disponível na experiência). Sem reentrada, limpa somente o ponteiro original; replay não toca tentativas posteriores. Sem HTTP ou migration; validação e comandos em `docs/E07_6_IMPLEMENTACAO.md`.
 
 **Se o evento ainda aceita novas entradas internas** (`clock_timestamp() < official_ends_at` **e** antes de fechamento Admin e fila da experiência aberta): alocar **nova** posição no final da mesma fila, criando outra `queue_entries.waiting` e substituindo `participations.current_queue_entry_id` na mesma transação. A entrada antiga continua no histórico. Não se faz reabertura da antiga entrada nem alteração em massa das posições dos demais.
 
@@ -1290,6 +1536,28 @@ Esses são **dois relógios independentes**: o prazo inicial começa na finaliza
 
 ### 17.2 `GET /participations/:participationId/evaluation-eligibility`
 
+**Implementação E08.10 — 04/11/2026 (§§17.2, 17.3, 17.5 e 17.7):** as quatro
+consultas HTTP de avaliação/retomada, mais o histórico §15.10, estão disponíveis
+com `/api/v1`, sessão vigente e titularidade estrita, sem privilégio transversal
+Staff/Admin. EvaluationReadService reutiliza o guard existente e uma política SQL
+comum: eligible é estrutural (finished e pelo menos um completed); pending exige
+também ausência de avaliação e instante <= finished_at + 720 horas. Reason distingue
+NOT_FINISHED, NO_COMPLETED_SERVICE, EXTERNAL_WAIT_CLOSED, ALREADY_SUBMITTED e
+SUBMISSION_EXPIRED. Datas têm seis casas UTC; cada resposta de domínio usa um
+instante PostgreSQL e snapshot REPEATABLE READ READ ONLY, sem limpeza ou reservas.
+O GET de avaliação retorna evaluation/eligibility; evaluation própria inclui
+id/participationId/rating/comment/submittedAt/updatedAt/editableUntilAt/
+commentAddUntilAt e permissions. Edição integral até submitted_at + 168 horas,
+inclusive; depois, até +720 horas inclusive, somente primeiro comentário se
+first_comment_at IS NULL, independentemente de comment atual. updated_at não
+reinicia nenhuma janela. Permissões são informativas; POST/PATCH futuros devem
+revalidar no momento da mutação e não são implementados nesta etapa.
+Pendências ordenam finished_at DESC/id DESC, sem agrupar reentradas do mesmo
+evento. Retomada informa a última finalização persistida por um dos quatro motivos
+Admin/automáticos E08.8/E08.9, sem janela arbitrária de "recente", consumo de aviso
+ou decisão de navegação. Pending IDs vêm da mesma seleção de pendências.
+Resultados locais e aprovação PostgreSQL ainda pendente: `E08_10_IMPLEMENTACAO.md`.
+
 **Bearer do próprio titular.** Consulta somente; não cria tabela de pendências. `404` quando participação inexiste/não pertence ao titular; `401` sessão inválida. **`200 OK` ilustrativo:**
 
 ```json
@@ -1329,6 +1597,24 @@ Quando não houver pendências: `items: []`, **não** `404`. Não retornar pesso
 
 ### 17.4 `POST /participations/:participationId/evaluation` — primeiro envio
 
+**Implementação E08.11 — 04/11/2026:** POST/201 e PATCH/200 da §17.6 estão
+implementados sobre a mesma projeção SQL de elegibilidade/permissões da E08.10.
+Somente o titular autenticado, com sessão e segundo fator Admin quando aplicável,
+opera seus recursos; ausência/de terceiro recebe 404 neutro. POST exige finished
+e completed real e respeita `finished_at + 720 hours`, inclusive; intenções novas
+fora do prazo recebem EVALUATION_SUBMISSION_EXPIRED. Uma linha por participação,
+com unicidade existente e idempotência durável no mesmo commit. Microssegundos são
+preservados em SQL. Avaliação enviada é retornada no mesmo contrato público de
+leitura, incluindo permissões; GETs anteriores mantêm suas respostas.
+
+Comentários têm limite técnico de entrada de 2.000 pontos de código Unicode,
+uniforme no POST/PATCH, sem truncamento ou moderação fictícia. Ausente no POST,
+NULL, vazio e somente whitespace normalizam para NULL; conteúdo não vazio é texto
+simples preservado, inclusive espaços externos. No PATCH, ausência mantém o campo;
+NULL/vazio/whitespace representam remoção apenas na janela integral. Rejeitam-se
+NUL e Unicode malformado por incompatibilidade com texto PostgreSQL. O limite é
+técnico e não substitui futuras decisões de moderação/PII ou escape na interface.
+
 **Bearer, titularidade, `Idempotency-Key`**, payload `{ "rating": 5, "comment": "Experiência muito boa" }`. `comment` opcional; `rating` inteiro entre 1 e 5. **[PROPOSTA TÉCNICA]** Limite de tamanho de comentário, sanitização e prevenção contra PII indevida devem ser definidos antes de liberar comentários em produção. Não aceitar nota zerada ou ausência de nota.
 
 **Transação:** bloquear participação do titular; revalidar estado terminal e o horário vigente, consultar ao menos uma sessão `completed`, inserir `evaluations` com `participation_id UNIQUE` e, quando há comentário inicial, preencher `first_comment_at` com horário do envio. Gravar a operação idempotente na mesma transação. Corrida de dois POSTs distintos: apenas um cria a avaliação; o segundo recebe `409 EVALUATION_ALREADY_SUBMITTED`, sem sobrescrever. Reenvio da **mesma intenção/chave** retorna o resultado anterior.
@@ -1358,6 +1644,25 @@ Quando não houver pendências: `items: []`, **não** `404`. Não retornar pesso
 
 ### 17.6 `PATCH /evaluations/:evaluationId` — edição de avaliação
 
+**Contrato efetivo E08.11:** janela integral inclusiva até `submitted_at + 168 hours`;
+depois disso, até `+720 hours` inclusive, somente primeiro comentário não vazio,
+sem campo rating, com histórico `first_comment_at IS NULL`. Inclusão já utilizada
+recebe COMMENT_ALREADY_ADDED; edição não permitida recebe EVALUATION_EDIT_WINDOW_CLOSED.
+`first_comment_at` nunca retorna a NULL. Atualização parcial sob participação e
+avaliação FOR UPDATE preserva campos omitidos; duas inclusões tardias têm um único
+vencedor. No-op material não executa UPDATE na avaliação nem avança updated_at,
+mas conclui a intenção e retorna 200. O relógio decisivo é PostgreSQL após os locks,
+com predicados de mutação e verificação de linhas afetadas.
+
+POST/PATCH usam namespaces estáveis separados `submit_evaluation` e `edit_evaluation`,
+fingerprint de recurso/payload normalizado/presença de campos e ator no índice
+idempotente existente. Conflito é IDEMPOTENCY_KEY_REUSED; in_progress usa o padrão
+atual. Replay autorizado mantém resposta/status históricos, inclusive após TTL e
+prazos, sem reescrever avaliação. TTL explícito próprio:
+`EVALUATION_IDEMPOTENCY_TTL_SECONDS`, sem padrão ou expurgo automático. O instante
+de envio e os prazos nunca reiniciam. Detalhes, limitações e PostgreSQL ainda
+pendente de execução manual em `E08_11_IMPLEMENTACAO.md`.
+
 **Bearer/titular, `Idempotency-Key`**. `rating` e/ou `comment` podem ser informados na janela integral. Depois dessa janela e até 30 dias **após `submitted_at`**, **somente** `{ "comment": "..." }` é permitido se `first_comment_at IS NULL`, exigindo comentário novo e não vazio; proibir qualquer campo `rating` nessa fase (mesmo igual ao anterior). Atualizar `updated_at` sem alterar `submitted_at`.
 
 **Locks sugeridos:** primeiro localizar `participation_id` por consulta sem lock, depois `participations FOR UPDATE` e `evaluations FOR UPDATE`, revalidando titularidade, prazo e `first_comment_at`; atualizar com predicados condicionais, evitando que duas inclusões tardias sejam aceitas. Para `PATCH` repetido com mesma chave, devolver o mesmo resultado; para nova intenção fora da janela, `409 EVALUATION_EDIT_WINDOW_CLOSED` / `409 COMMENT_ALREADY_ADDED`.
@@ -1386,6 +1691,46 @@ Quando não houver pendências: `items: []`, **não** `404`. Não retornar pesso
 
 ### 17.8 `POST /admin/events/:eventId/close` — encerramento antecipado
 
+**Implementação E08.8 — 03/11/2026:** endpoint `/api/v1` disponível para o
+encerramento inicial imediato/controlado e seus retries idempotentes. Admin
+global/conta/sessão/2FA são revalidados pelo helper transacional compartilhado.
+Body estrito, reason conforme E08.6 e Idempotency-Key obrigatória; controlledUntilAt
+somente no controlado, com a precisão explícita aprovada na E08.7. Usa o TTL Admin
+obrigatório existente e namespace `admin_close_event`, sem expurgo por expires_at.
+Evento, recursos correntes, efeitos, auditoria e intenção são confirmados juntos
+em READ COMMITTED. O imediato publica closed, cancela pending e fecha entradas/
+participações com motivo `admin_immediate`. O controlado publica closing e finaliza
+waiting externas com `admin_controlled_external_wait_closed`, preservando active
+com/sem fila e a operação residual. Instantes decisivos vêm do PostgreSQL após
+locks; respostas e efeitos preservam microssegundos. Segunda intenção distinta
+com encerramento já iniciado recebe `409 EVENT_ALREADY_CLOSED`; a semântica de
+encurtamento continua pendente, sem implementá-la implicitamente. O job definitivo
+por vencimento **não está implementado nesta etapa**, nem o ciclo automático completo.
+Contrato, limites e resultados de validação em `E08_8_IMPLEMENTACAO.md`.
+
+**Implementação E08.9 — 03/11/2026:** `EventClosureService` regulariza eventos no
+vencimento inclusivo de `LEAST(operational_deadline_at,admin_deadline_at)`; o job
+executa no bootstrap e a cada ciclo periódico, inclusive após reinicialização.
+Uma transação READ COMMITTED por evento obtém locks ordenados de evento,
+experiências, estações, participações, entradas e atendimentos, revalida vínculos
+e usa `clock_timestamp()` após as esperas. Fecha o evento, cancela somente pending,
+fecha entradas waiting/called e finaliza participações waiting/active, limpando
+ponteiros. Motivos: `automatic_operational_deadline` ou `automatic_admin_deadline`.
+Datas terminais automáticas copiam o prazo efetivo em SQL, com microssegundos;
+updated_at do evento registra a execução real. Assim, atraso não amplia os 30 dias
+de avaliação nem representa saída voluntária/presença física até a execução.
+Preserva origem/campos Admin, waiting externas já finalizadas, resultados terminais,
+auditorias, snapshots, avaliações e contadores. Não cria identidade humana,
+auditoria administrativa ou intenção HTTP para o job. Fechado com registros
+correntes incompatíveis gera erro de integridade observável e rollback.
+Descoberta keyset de 100 eventos; o ciclo pode pular apenas o lock do evento
+ocupado (retry no próximo ciclo), nunca pessoas da fila. Não há commits parciais
+por evento. `EVENT_CLOSURE_INTERVAL_MS` aceita inteiro de 1000 a 3600000 (padrão
+30000); testes não iniciam o agendador salvo ativação explícita por
+`EVENT_CLOSURE_JOB_TEST_ENABLED=true` com NODE_ENV=test. Em produção o job fica
+habilitado. Shutdown interrompe o timer e aguarda o evento corrente antes do pool.
+Resultados locais e validação PostgreSQL manual pendente: `E08_9_IMPLEMENTACAO.md`.
+
 **Bearer Admin global + sessão com TOTP validado, justificativa obrigatória e auditoria.** `Idempotency-Key` recomendado para evitar múltiplos fechamentos por retry. Corpo proposto:
 
 ```json
@@ -1406,9 +1751,38 @@ Quando não houver pendências: `items: []`, **não** `404`. Não retornar pesso
 
 ### 17.9 `PATCH /admin/events/:eventId/schedule` — alteração do horário oficial antes do corte
 
+**Implementação E08.7 — 03/11/2026:** rota disponível sob `/api/v1` no
+`AdminEventsModule`, com autorização global/conta/sessão/2FA compartilhada com
+E08.6 e revalidada sob locks. Body estrito com os dois horários e reason;
+instantes ISO com fuso explícito e até três casas decimais, normalizados em UTC,
+sem aceitar datas impossíveis ou arredondar precisão adicional. Não exige
+prontidão para alterar programação. `events FOR UPDATE` precede a autorização
+e a reserva durável `admin_update_event_schedule`, usando a política Admin/TTL
+obrigatória já existente, sem novo TTL. Mudança condicionada ao relógio PostgreSQL
+no UPDATE; auditada atomicamente com antes/depois e o mesmo instante persistido.
+Resposta 200 contém somente evento, horários e changedAt em UTC (microssegundos),
+omitido no no-op. No-op autorizado persiste intenção sem UPDATE de evento/auditoria,
+inclusive após corte; replay autorizado conserva a resposta histórica sem reaplicar.
+`400 VALIDATION_ERROR` para novos horários inválidos; `409 EVENT_TIME_CHANGE_CLOSED`
+para mudança efetiva após corte vigente/encerramento. Decisões e resultados reais
+em `E08_7_IMPLEMENTACAO.md`; PostgreSQL permanece sujeito à validação manual.
+
 **Bearer Admin/TOTP + justificativa + auditoria.** Corpo propõe `officialEndsAt` e `operationalDeadlineAt` **juntos**, para preservar a margem opcional de 0–60min de maneira explícita. Não alterar horários **quando** o horário oficial vigente já foi alcançado, nem quando o evento iniciou encerramento Admin, e nunca reabrir evento fechado. Novo `officialEndsAt` deve ser futuro, posterior a `startsAt`; novo `operationalDeadlineAt` entre o novo horário oficial e no máximo 60 minutos depois. Revalidar `clock_timestamp()` após lock, guardar valores antigos/novos em auditoria. `409 EVENT_TIME_CHANGE_CLOSED` se já passou a janela autorizada.
 
 ### 17.10 `PATCH /admin/events/:eventId/external-queue` — ligar/desligar fila externa
+
+**Implementação E08.6 — 03/11/2026:** rota disponível sob `/api/v1`, por
+`AdminEventsModule`, com Admin global, conta/sessão/2FA revalidados na transação.
+Compõe a E05 via `setExternalQueueEnabledWithTx`, preservando o método interno
+existente, para confirmar configuração, liberações, auditoria e idempotência juntas.
+Body estrito, `enabled` booleano, `reason` aparada de 1–500 caracteres sem controles;
+`Idempotency-Key` obrigatória por intenção. Usa TTL técnico próprio e obrigatório
+`ADMIN_IDEMPOTENCY_TTL_SECONDS`, sem fallback; replay enquanto a linha existir,
+inclusive após alteração oposta, continua sujeito à autorização atual. No-op não
+atualiza domínio nem audita, mas conclui a intenção. Resposta 200 sem `kind`:
+`eventId`, `externalQueueEnabled`, `releasedCount` e `changedAt` somente se houve
+mudança na intenção original. Detalhes, limites e PostgreSQL pendente em
+`E08_6_IMPLEMENTACAO.md`.
 
 **Bearer Admin/TOTP + justificativa/auditoria**. Corpo `{ "enabled": false, "reason": "..." }`. Enquanto o evento ainda admite ingressos, **desligar** a fila externa libera atomicamente os participantes `waiting` existentes para `active`; **religar** afeta somente as **novas** participações futuras e não recoloca aqueles já ativos em espera. Depois do corte oficial/Admin, nenhuma alternância pode reabrir ingressos nem liberar fila externa; no fechamento controlado, as esperas externas foram finalizadas conforme §16.13. `409 EVENT_REGISTRATION_CLOSED` para mutação que implicaria reabertura. Usar `events FOR UPDATE` contra novas entradas e auditar transição.
 
@@ -1445,6 +1819,41 @@ Quando não houver pendências: `items: []`, **não** `404`. Não retornar pesso
 
 ## 18. Contratos de integração v0.5 — configuração administrativa de eventos, experiências e estações (19/10/2026)
 
+**Implementação E08.13 — 04/11/2026:** as dez rotas do inventário §18.2 estão
+implementadas em `AdminEventsModule`, com Admin global/conta ativa/sessão/2FA,
+DTOs estritos e RFC 7807. As marcações de proposta abaixo preservam o histórico;
+§20 e o contrato efetivo em `E08_13_IMPLEMENTACAO.md` prevalecem. A listagem usa
+keyset `(createdAt,id)` descendente, limite 1–50, filtros `phase`/`statusStored` e
+cursor base64url canônico. GETs usam snapshot `REPEATABLE READ READ ONLY`, sem
+locks de linha ou escrita, com consultas em número constante.
+
+O PATCH genérico do evento permite somente `name`; `startsAt`, `timezone` e os
+campos das rotas operacionais não são alteráveis por ele. Como política
+conservadora para o ponto antes proposto, o nome do evento também fica bloqueado
+após qualquer participação histórica. PATCH de experiência permite somente
+`name`, e de estação somente `label`. `reason` é opcional e validado quando
+fornecido; não cria exigência de justificativa não prevista nos exemplos mínimos.
+Criação de experiência fixa `queueAcceptingEntries=true`/FIFO zero; criação de
+estação fixa `availability=available`. Não há pausa de fila, DELETE ou reparent.
+
+Prontidão e fases são calculadas no PostgreSQL: `scheduled`, `not_ready`, `open`,
+`closing`, `closed`, com prazo definitivo compartilhado da E08.9. Prontidão é
+configuração/capacidade; aceitação também exige janela temporal e ausência de
+fechamento Admin. Estação available com pending conta como capacidade; Staff
+precisa de concessão vigente no evento e conta ativa/verificada, sem sessão
+conectada. Timezone de entrada é validado/canonicalizado por Intl; a leitura usa
+o catálogo PostgreSQL sem distinguir caixa. Versões/aliases de tzdata dos dois
+runtimes precisam ser compatíveis, conforme limitação registrada no relatório.
+
+As seis mutações reutilizam TTL Admin e idempotência durável, com namespaces
+próprios. Evento → experiência → estação → conta/concessão/sessão precede a
+decisão SQL que revalida prazo/histórico e faz INSERT/UPDATE na mesma CTE.
+Objeto, auditoria e intenção comitam juntos. Nome/label já igual é no-op,
+inclusive após histórico/prazo: conclui somente a intenção, sem UPDATE do objeto
+ou auditoria. Replay exige autorização atual e preserva a resposta histórica.
+PostgreSQL E08.13 permanece pendente de execução manual; resultados locais,
+cobertura e comandos estão no relatório.
+
 **Natureza:** [PROPOSTA TÉCNICA]. As capacidades decorrem das decisões de produto já aprovadas. **Não** são endpoints existentes; o schema de banco já foi aplicado na Task 6.2; as rotas deste capítulo não foram implementadas. Não duplicar controles de papéis, encerramento, horários ou fila externa já definidos nas seções 14–17. Todos os endpoints abaixo usam prefixo `/api/v1` no deployment e respostas de erro `application/problem+json` (RFC 7807, como a Task 6.1). Os nomes de erro são códigos propostos para integração, não enums previamente homologados.
 
 ### 18.1 Autorização, isolamento e responsabilidades
@@ -1456,6 +1865,13 @@ Quando não houver pendências: `items: []`, **não** `404`. Não retornar pesso
 - Idempotência durável (mesma chave + mesmo ator + rota/operação + hash de payload) em criação e mutações críticas. Reuso da mesma chave com payload diferente deve ser `409 IDEMPOTENCY_KEY_REUSED`; nunca criar duas experiências ao repetir a mesma requisição.
 
 ### 18.2 Inventário de rotas de configuração (proposta)
+
+**Ownership aprovado na E08.14:** a lacuna histórica sobre controle de entrada
+por experiência, registrada abaixo, foi superada pela decisão do responsável.
+Staff do evento e Admin global podem usar o PATCH operacional de §16.2; isso
+não concede CRUD estrutural a Staff e não altera o PATCH estrutural E08.13.
+O trecho antigo “não implementar automaticamente” permanece como histórico da
+proposta anterior, substituído para essa rota pelo contrato efetivo E08.14.
 
 | Método e rota | Responsabilidade | Observação de compatibilidade |
 |---|---|---|
@@ -1507,7 +1923,7 @@ Corpo ilustrativo, UTC para instantes, IANA para horário local de exibição:
 
 Permitir criação antes de cadastrar experiências e conceder Staff é **necessário**: essas entidades dependem da existência do evento. O evento incompleto permanece consultável na interface Admin, mas não aceita participações. `409 ACCESS_CODE_ALREADY_USED` para código já reservado, inclusive por evento encerrado. Não expor a consulta pública como ferramenta de enumeração desnecessária.
 
-**[APROVADO] Código de ingresso imutável:** `accessCode` só pode ser informado na criação do evento e **jamais** alterado depois, inclusive antes da abertura. Seu valor normalizado deve permanecer reservado por todo o histórico dos eventos. `PATCH /admin/events/:eventId` e quaisquer outros comandos rejeitam tentativa de mudar o código; não existe rota de alteração nem tabela adicional de reserva de códigos. O índice `UNIQUE` sobre a forma normalizada do código e a preservação histórica dos eventos protegem a não reutilização. A normalização precisa ser idêntica na API e na persistência; cabe teste de Unicode/espaços externos. Excluir fisicamente o evento para liberar o código é proibido. A regra de exclusão/anônimos de dados pessoais não é uma autorização para apagar registros históricos de eventos.
+**[APROVADO] Código de ingresso imutável:** `accessCode` só pode ser informado na criação do evento e **jamais** alterado depois, inclusive antes da abertura. Seu valor normalizado deve permanecer reservado por todo o histórico dos eventos. `PATCH /admin/events/:eventId` e quaisquer outros comandos rejeitam tentativa de mudar o código; não existe rota de alteração nem tabela adicional de reserva de códigos. O índice `UNIQUE` e a preservação histórica protegem a não reutilização. A função `normalizeEventAccessCode()` é a normalização canônica do backend e deve ser compartilhada pela criação futura e pela consulta. Excluir fisicamente o evento para liberar o código é proibido. A regra de exclusão/anônimos de dados pessoais não é autorização para apagar registros históricos.
 
 ### 18.4 `GET /admin/events/:eventId/readiness` — prontidão de abertura automática
 
@@ -1533,7 +1949,7 @@ Permitir criação antes de cadastrar experiências e conceder Staff é **necess
 
 Prontidão aprovada (§2.3 e Planejamento C-05): nome, código, horários válidos, fuso IANA, fila externa configurada, ≥1 experiência do evento com estação disponível e ≥1 `user_roles` Staff vigente de conta ativa e e-mail verificado, **sem exigir Staff conectado agora**. O usuário deve poder receber orientação clara sobre critérios faltantes, mas os detalhes de configuração ficam **exclusivamente** em resposta Admin. A abertura é automática quando `startsAt` foi alcançado, ainda não ocorreu corte de novos ingressos e o evento está pronto. Se a configuração só ficar pronta depois de `startsAt`, aceitar abertura ainda dentro da janela originalmente válida; se o horário de corte já passou, **não reabrir**. Não é necessário endpoint `POST /admin/events/:id/open`.
 
-**Rechecagem transacional obrigatória:** `POST /events/:eventId/participations` deve avaliar estado, hora efetiva e prontidão sob controle concorrente, mesmo que `GET /readiness` tenha respondido `ready=true` antes. Status persistido atrasado e tarefas de abertura atrasadas **não** liberam inscrições indevidas. O teste de prontidão, por si, não reserva estação ou Staff. **[VALIDAR]** Se todas as estações ficarem indisponíveis ou todos os Staff forem revogados *depois* de uma abertura bem-sucedida, definir na camada operacional se isso suspende automaticamente **novas** participações ou apenas impede novos chamados. A decisão C-05 aprova critérios de abertura, não uma política de auto-fechamento/reabertura por perda posterior de recursos.
+**Rechecagem transacional obrigatória:** `POST /events/:eventId/participations` deve avaliar estado, hora efetiva e prontidão sob controle concorrente, mesmo que `GET /readiness` tenha respondido `ready=true` antes. Status persistido atrasado e tarefas de abertura atrasadas **não** liberam inscrições indevidas. O teste de prontidão, por si, não reserva estação ou Staff. Conforme C-14 e §20.2, se todos os Staff aptos ou todas as estações disponíveis forem perdidos, suspender novas participações sem alterar as existentes, filas ou `events.status`; não encerrar o evento automaticamente. A restauração de capacidade permite novas admissões somente enquanto os cortes temporal e administrativo ainda não as tiverem encerrado. Esta disponibilidade deve ser reavaliada dinamicamente.
 
 ### 18.5 Gestão de experiências e estações — estrutura, não operação física
 
@@ -1557,7 +1973,7 @@ Não definir comportamento de exclusão/cancelamento do evento como sinônimo de
 
 - **Criação/edição estrutural:** transação, bloquear `events` e depois `experiences` e `stations` quando aplicável; validar relacionamento, fase/tempo após locks, e auditar somente mudança efetiva. Mudanças de Staff por `user_roles` exigem checagem atualizada e testes para evitar leituras inconsistentes durante uma concessão/revogação simultânea.
 - **Mudança de horário/fechamento Admin:** seguir exclusivamente §17.8–17.10, sem promover uma edição de DTO genérico a atalho para reabrir, ampliar prazo após corte ou mudar fila externa durante fechamento.
-- **Códigos:** mesmo `accessCode` enviado simultaneamente por dois Admins resulta em no máximo um cadastro (`UNIQUE`) e resposta previsível ao outro. `trim`/case devem ser consistentes entre TS e DB; símbolos/Unicode e tamanho máximo final são detalhes de contrato a testar, não inferir normalização Unicode perfeita de `upper(btrim())`.
+- **Códigos:** mesmo `accessCode` enviado simultaneamente por dois Admins resulta em no máximo um cadastro (`UNIQUE`) e resposta previsível ao outro. C-10 define alfabeto ASCII e 4–64 caracteres após `String.trim()`; a função TypeScript valida antes de converter para maiúsculas. `upper(btrim())` não implementa integralmente essas regras; eventual CHECK adicional exige auditoria e migração futura.
 - **Prontidão e ativação:** não persistir `is_ready` como fonte de verdade. `events.status` é observação persistida, mas o aceite efetivo usa tempo, encerramentos, configuração e permissões. Não criar um job cujo atraso autorize entrada após horário oficial.
 - **Idempotência e auditoria:** criação repetida pela mesma chave retorna resultado original sem duplicar evento/estação nem ações auditadas; chaves diferentes e mesmo código violam `UNIQUE`, não geram duas linhas.
 
@@ -1618,7 +2034,7 @@ O modelo foi construído para permitir descarte controlado de informações iden
 
 ## 19. Resolução documental anterior — código de ingresso
 
-A decisão C-10 estabelece código **único, imutável e não reutilizável** desde a criação. Segundo Task 6.2, a migração `0002` incluiu trigger versionado que bloqueia alterações. A regra de normalização consistente entre banco, backend e UI, inclusive whitespace Unicode, ainda deverá ser verificada quando a API de eventos for implementada. A unicidade do histórico depende da preservação dos eventos/códigos arquivados.
+A decisão C-10 estabelece código **único, imutável e não reutilizável** desde a criação. A migração `0002` inclui trigger de imutabilidade e índice único histórico. A regra aprovada de formato/normalização está detalhada no §2.3 e implementada para a consulta interna da E01.2B. A integração do cliente e a validação da criação de eventos continuam trabalho futuro; o CHECK SQL existente oferece proteção parcial e não substitui a função TypeScript. Uma restrição SQL completa poderá exigir migração incremental futura após auditoria dos dados.
 
 ## 20. Regras operacionais aprovadas — alterações estruturais e perda de capacidade
 
@@ -1658,6 +2074,23 @@ A decisão C-10 estabelece código **único, imutável e não reutilizável** de
 5. **Tempo e capacidade:** o retorno da disponibilidade não reabre evento já encerrado. Verificar horas com relógio autoritativo do DB depois de eventuais esperas por locks.
 
 ### 20.4 Complementos aos contratos administrativos
+
+**E08.14:** pausar/reabrir `queue_accepting_entries` é configuração operacional,
+permitida com histórico. A flag não integra a prontidão global C-05/C-14: não
+fecha o evento, não altera a disponibilidade de estações e não cancela pessoas.
+`queueAcceptingEntries` persistido permanece distinto de aceitação efetiva e de
+`canCallWaitingEntries`. Não há fila por estação ou abertura manual do evento.
+
+**Situação E08.13 — 04/11/2026:** `EXISTS(participations)` é revalidado sob lock
+do evento e no comando SQL decisivo para criação de experiência e alterações
+estruturais. Waiting, active, finished e canceled bloqueiam igualmente. Adicionar
+estação à experiência existente continua permitido com histórico enquanto o
+prazo definitivo não chegou e o evento não está closed, inclusive na janela
+residual de fechamento controlado; isso não reabre admissões. E03/E05,
+E07.1–E07.6, disponibilidade E08.5, horários, fila externa, encerramentos e
+avaliações não foram alterados. As corridas reais preparadas para §20 e os
+limites da verificação de concessões Staff estão descritos no relatório E08.13;
+não representam execução ou aprovação PostgreSQL pelo Codex.
 
 | Endpoint já proposto | Alteração de regra |
 |---|---|
@@ -1728,6 +2161,28 @@ A fundação pode ser considerada **concluída segundo o relatório**, sem certi
 
 ### 23.3 Decisão de escopo vigente
 
-O responsável pelo ArenaGo **pausou o desenvolvimento após a fundação do backend**. A Task 6.3A (cadastro/login/refresh/logout/me) foi **proposta, mas não autorizada para execução agora**. Também não estão autorizados: mais endpoints, integração frontend, deploy/Neon ou procedimentos com dados pessoais reais.
+O responsável pelo ArenaGo definiu a E01.2B para normalização e consulta interna de eventos. A Task 6.3A (cadastro/login/refresh/logout/me) segue proposta, sem autorização registrada nesta etapa. Endpoints HTTP, integração frontend, deploy/Neon e procedimentos com dados pessoais reais continuam fora do escopo documentado aqui.
 
-**Estado desta revisão:** consolidar este documento e o Planejamento v0.7.8 em `docs/`, sem implementar endpoints ou alterar o código. Após o commit documental, aguardar nova priorização do responsável.
+**Estado após E01.2B:** função de normalização, consulta interna e testes focados registrados em §24. Este documento e o Planejamento v0.7.9 registram a decisão; endpoints HTTP continuam não implementados. Git será controlado manualmente pelo responsável.
+
+## 24. E01.2B — normalização e consulta de eventos por código
+
+`backend/src/events/access-code.ts` exporta `normalizeEventAccessCode()` e `EventAccessCodeValidationError`. A função remove whitespace externo com `String.trim()`, valida comprimento de 4–64 caracteres e padrão ASCII alfanumérico separado opcionalmente por hífens, então retorna maiúsculas. Validar antes de `toUpperCase()` evita aceitar expansões Unicode como `ß` para `SS`. A mesma função é a autoridade para consulta implementada e criação futura.
+
+`EventsService.findByAccessCode()` normaliza a entrada e usa `eq(events.accessCodeNormalized, normalizedCode)` com Drizzle. Código válido sem evento retorna `null`; entrada malformada lança erro de domínio antes da consulta. O método é interno: não adiciona Controller/rota, não grava no PostgreSQL e não verifica prontidão, horário, participação ou fila. `findById()` permanece disponível.
+
+Os testes unitários cobrem caixa, whitespace ASCII/Unicode externo reconhecido pelo `trim()`, hífens, limites de tamanho, caracteres inválidos, erro tipado e idempotência. O teste PostgreSQL cobre busca exata/lowercase/whitespace, ausência válida, rejeição de entrada inválida, preservação da linha e manutenção de `findById()`. A suíte de integração só pode ser executada quando `EVENTS_TEST_DATABASE_URL` comprovar localhost e o banco descartável `arenago_events_test`.
+
+**Validação desta revisão:** `npm.cmd run build`, `npm.cmd run lint`, `npm.cmd run typecheck:test` e `git diff --check` passaram. `npm.cmd test` não concluiu porque o ambiente lançou `uv_os_get_passwd returned ENOMEM`; portanto, a aprovação dos testes unitários permanece pendente e o comando deve ser reproduzido manualmente no PowerShell. A integração não foi executada: `EVENTS_TEST_DATABASE_URL` não estava configurada para comprovar o banco descartável.
+
+O CHECK existente `access_code_normalized = upper(btrim(access_code_normalized))`, o índice `UNIQUE` e o trigger de imutabilidade são proteções distintas e parciais: não implementam o conjunto de regras de formato C-10. Não reescrever as cinco migrações aplicadas. Uma restrição SQL mais completa poderá ser proposta depois de auditar dados e exigirá migração incremental; nenhuma migração foi criada pela E01.2B.
+
+**Histórico de versão:** v0.6.15 (21/10/2026) registra a decisão C-10 aprovada, a normalização compartilhada e consulta E01.2B, corrige afirmações antigas de pendência, distingue função TypeScript das garantias SQL, registra os resultados/limites das validações e não altera decisões históricas não relacionadas.
+
+## 25. Correção documental de C-14 — perda de capacidade após abertura
+
+**v0.6.16 (21/10/2026):** removida da seção 18.4 a marcação histórica `[VALIDAR]` que tratava como indefinido o efeito da perda de Staff/estações após abertura. C-14 e §20 já aprovam bloquear dinamicamente novos ingressos, preservar participações e filas, não alterar o status nem encerrar automaticamente o evento; a restauração só permite novas entradas antes dos cortes. Nenhuma regra de produto nova foi criada.
+
+## 26. Complemento C-15 — desistência interna sem finalizar participação
+
+**v0.6.17 (30/10/2026):** decisão de negócio aprovada pelo responsável após a entrega inicial da E07.1. Corrigida a delimitação da §16.2: titular pode abandonar a fila interna, inclusive após chamada, e continuar com participação `active`. Registrados requisitos de locks, resolução atômica de `pending` sem ausência/conclusão, idempotência, preservação de histórico/FIFO e distinção entre corte de ingressos e prazo da saída. Conferidos estados e campos de motivo no schema/migração existentes; nenhum código novo de motivo ou rota HTTP foi arbitrado. Operação reservada à E07.3, sem implementar E07.2/E07.3, alterar código/testes, criar migrations, executar testes ou conectar a bancos nesta rodada.

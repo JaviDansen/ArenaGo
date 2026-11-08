@@ -1,3 +1,4 @@
+
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
@@ -7,11 +8,12 @@ import { ParticipationProvider } from './context/ParticipationContext';
 import MainTabs from './navigation/MainTabs';
 import AuthSessionGate, { resolveInitialRouteForAuthState } from './screens/auth/AuthSessionGate';
 import EvaluationScreen from './screens/participation/EvaluationScreen';
+import RealEvaluationScreen from './screens/participation/RealEvaluationScreen';
 import EventConfirmationScreen from './screens/event-entry/EventConfirmationScreen';
 import EventEntryScreen from './screens/event-entry/EventEntryScreen';
 import ForgotPasswordScreen from './screens/auth/ForgotPasswordScreen';
 import LoginScreen from './screens/auth/LoginScreen';
-import ParticipationDetailsScreen from './screens/participation/ParticipationDetailsScreen';
+import ParticipationDetailsScreen from './screens/participation/ParticipationRealDetailsScreen';
 import ProfileQuestionnaireScreen from './screens/profile/ProfileQuestionnaireScreen';
 import RegisterScreen from './screens/auth/RegisterScreen';
 import WelcomeScreen from './screens/auth/WelcomeScreen';
@@ -22,6 +24,7 @@ export function AppNavigation() {
   const auth = useAuth();
   const isAuthenticated = Boolean(auth?.isAuthenticated);
   const initialRouteName = resolveInitialRouteForAuthState(auth);
+
   const publicScreens = [
     { name: 'Welcome', component: WelcomeScreen },
     { name: 'Login', component: LoginScreen },
@@ -30,6 +33,7 @@ export function AppNavigation() {
     { name: 'ForgotPassword', component: ForgotPasswordScreen },
     { name: 'EsqueciSenha', component: ForgotPasswordScreen },
   ];
+
   const appScreens = [
     { name: 'ProfileQuestionnaire', component: ProfileQuestionnaireScreen },
     { name: 'Questionario', component: ProfileQuestionnaireScreen },
@@ -37,32 +41,60 @@ export function AppNavigation() {
     {
       name: 'EventEntry',
       component: EventEntryScreen,
-      options: { headerShown: true, title: 'Entrar em um evento' },
+      options: {
+        headerShown: true,
+        title: 'Entrar em um evento',
+      },
     },
     {
       name: 'EventConfirmation',
       component: EventConfirmationScreen,
-      options: { headerShown: true, title: 'Confirmar entrada' },
+      options: {
+        headerShown: true,
+        title: 'Confirmar entrada',
+      },
     },
     {
       name: 'ParticipationDetails',
       component: ParticipationDetailsScreen,
-      options: { headerShown: true, title: 'Detalhes da participação' },
+      options: {
+        headerShown: true,
+        title: 'Detalhes da participação',
+      },
     },
     {
       name: 'Evaluation',
       component: EvaluationScreen,
-      options: { headerShown: true, headerBackVisible: false, title: 'Avaliação' },
+      options: {
+        headerShown: true,
+        headerBackVisible: false,
+        title: 'Avaliação',
+      },
     },
-    // Área Staff somente em modo demonstração; não concede permissão Staff real.
-    // getComponent (React Navigation) só carrega o módulo quando a rota é aberta.
+
+    // Área Staff somente em modo de demonstração.
+    // Não concede permissão Staff real.
     {
       name: 'StaffDemo',
-      getComponent: () => require('./screens/staff/StaffDemoNavigator').default,
+      getComponent: () =>
+        require('./screens/staff/StaffDemoNavigator').default,
+    },
+
+    // Avaliação real de uma participação finalizada.
+    {
+      name: 'RealEvaluation',
+      component: RealEvaluationScreen,
+      options: {
+        headerShown: true,
+        title: 'Avaliar evento',
+      },
     },
   ];
+
   const isQuestionnairePending =
-    isAuthenticated && auth?.user && auth?.user.hasCompletedQuestionnaire === false;
+    isAuthenticated &&
+    auth?.user &&
+    auth.user.hasCompletedQuestionnaire === false;
 
   const pendingQuestionnaireScreens = [
     { name: 'ProfileQuestionnaire', component: ProfileQuestionnaireScreen },
@@ -72,12 +104,13 @@ export function AppNavigation() {
   const availableScreens = !isAuthenticated
     ? publicScreens
     : isQuestionnairePending
-    ? pendingQuestionnaireScreens
-    : appScreens;
+      ? pendingQuestionnaireScreens
+      : appScreens;
 
   const firstScreenIndex = availableScreens.findIndex(
     (screen) => screen.name === initialRouteName
   );
+
   const orderedScreens =
     firstScreenIndex > 0
       ? [
@@ -89,9 +122,7 @@ export function AppNavigation() {
   return (
     <ParticipationProvider>
       <NavigationContainer>
-        <Stack.Navigator
-          screenOptions={{ headerShown: false }}
-        >
+        <Stack.Navigator screenOptions={{ headerShown: false }}>
           {orderedScreens.map(({ name, component, getComponent, options }) => (
             <Stack.Screen
               key={name}

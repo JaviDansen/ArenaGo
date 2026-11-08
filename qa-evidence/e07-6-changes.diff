@@ -1,0 +1,1062 @@
+diff --git a/backend/src/events/absent.service.ts b/backend/src/events/absent.service.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..f9f5eb5b6e047501adcd5670ac136756f7874d9f
+--- /dev/null
++++ b/backend/src/events/absent.service.ts
+@@ -0,0 +1,195 @@
++import { Inject, Injectable } from "@nestjs/common";
++import { randomUUID } from "node:crypto";
++import { sql } from "drizzle-orm";
++import type { NodePgDatabase } from "drizzle-orm/node-postgres";
++import { DRIZZLE_DATABASE } from "../database/database.module";
++import type * as schema from "../database/schema";
++import { completeIdempotencyOperationWithTx, createRequestFingerprint, reserveIdempotencyOperationWithTx } from "../participations/join-idempotency";
++import type { JsonValue } from "../participations/join-idempotency";
++import { evaluateEventConfigurationReadiness } from "./event-availability";
++import type { EventConfigurationReadinessInput } from "./event-availability";
++import type { AbsentServiceBlock, AbsentServiceInput, AbsentServiceResult, RegisteredAbsence } from "./absent.types";
++
++type EventReadinessRow = Omit<EventConfigurationReadinessInput, "startsAt" | "officialEndsAt" | "operationalDeadlineAt">
++  & { startsAtMs: number; officialEndsAtMs: number; operationalDeadlineAtMs: number }
++  & Record<string, unknown>;
++
++export const ABSENT_SERVICE_OPERATION = "absent_service_session";
++export function createAbsentServiceFingerprint(eventId: string, serviceSessionId: string): string {
++  return createRequestFingerprint(ABSENT_SERVICE_OPERATION, { eventId, serviceSessionId });
++}
++export class AbsentServiceIntegrityError extends Error {
++  constructor(detail: string) { super(`Integridade da ausência interna: ${detail}`); this.name = "AbsentServiceIntegrityError"; }
++}
++class AbsentRollback extends Error {
++  constructor(readonly result: AbsentServiceBlock) { super(result.kind); }
++}
++function block(result: AbsentServiceBlock): never { throw new AbsentRollback(result); }
++function ensure(condition: unknown, detail: string): asserts condition {
++  if (!condition) throw new AbsentServiceIntegrityError(detail);
++}
++function instant(ms: number): Date {
++  ensure(typeof ms === "number" && Number.isFinite(ms), "instante PostgreSQL inválido.");
++  const date = new Date(ms); ensure(Number.isFinite(date.getTime()), "instante fora do intervalo de Date."); return date;
++}
++function position(value: string): number {
++  ensure(/^[1-9]\d*$/.test(value) && Number.isSafeInteger(Number(value)), "posição inválida."); return Number(value);
++}
++function replay(payload: JsonValue | null, input: AbsentServiceInput, queueEntryId: string): RegisteredAbsence {
++  ensure(payload && typeof payload === "object" && !Array.isArray(payload), "replay inválido.");
++  const s = payload.serviceSession, q = payload.previousQueueEntry;
++  ensure(s && typeof s === "object" && !Array.isArray(s) && s.id === input.serviceSessionId
++    && s.status === "absent" && typeof s.resolvedAt === "string", "replay de atendimento inválido.");
++  ensure(q && typeof q === "object" && !Array.isArray(q) && q.id === queueEntryId
++    && q.status === "closed" && q.closeReason === "absent", "replay de entrada inválido.");
++  const common = { serviceSession: { id: input.serviceSessionId, status: "absent" as const, resolvedAt: instant(Date.parse(s.resolvedAt)) },
++    previousQueueEntry: { id: queueEntryId, status: "closed" as const, closeReason: "absent" as const } };
++  if (payload.requeued === false) {
++    ensure(payload.newQueueEntry === null, "replay sem reentrada incoerente.");
++    return { ...common, requeued: false, newQueueEntry: null };
++  }
++  const n = payload.newQueueEntry;
++  ensure(payload.requeued === true && n && typeof n === "object" && !Array.isArray(n)
++    && typeof n.id === "string" && n.id !== queueEntryId && n.status === "waiting"
++    && typeof n.queueOrder === "string" && /^[1-9]\d*$/.test(n.queueOrder)
++    && typeof n.position === "number" && Number.isSafeInteger(n.position) && n.position > 0, "replay de reentrada inválido.");
++  return { ...common, requeued: true, newQueueEntry: { id: n.id, status: "waiting", queueOrder: n.queueOrder, position: n.position } };
++}
++
++/** E07.6: ausência por ação explícita do Staff; nunca timeout/desconexão ou conclusão. */
++@Injectable()
++export class AbsentService {
++  constructor(@Inject(DRIZZLE_DATABASE) private readonly database: NodePgDatabase<typeof schema>) {}
++
++  async absent(input: AbsentServiceInput): Promise<AbsentServiceResult> {
++    if (!input.idempotencyKey.trim() || input.idempotencyKey.length > 128 || !Number.isFinite(input.expiresAt.getTime())) {
++      throw new Error("Chave de idempotência ou expiração inválida.");
++    }
++    try {
++      return await this.database.transaction(async (tx): Promise<AbsentServiceResult> => {
++        const lookup = await tx.execute<{ experienceId: string; stationId: string; queueEntryId: string; participationId: string }>(sql`
++          SELECT s.experience_id AS "experienceId", s.station_id AS "stationId",
++            s.queue_entry_id AS "queueEntryId", q.participation_id AS "participationId"
++          FROM service_sessions s JOIN queue_entries q ON q.id=s.queue_entry_id
++          WHERE s.id=${input.serviceSessionId} AND q.event_id=${input.eventId}`);
++        const target = lookup.rows[0];
++        const event = await tx.execute<EventReadinessRow>(sql`
++          SELECT id, name, access_code_normalized AS "accessCodeNormalized", timezone,
++            (EXTRACT(EPOCH FROM starts_at)*1000)::double precision AS "startsAtMs",
++            (EXTRACT(EPOCH FROM official_ends_at)*1000)::double precision AS "officialEndsAtMs",
++            (EXTRACT(EPOCH FROM operational_deadline_at)*1000)::double precision AS "operationalDeadlineAtMs",
++            external_queue_enabled AS "externalQueueEnabled" FROM events WHERE id=${input.eventId} FOR SHARE`);
++        if (!event.rows.length) block({ kind: "staff_event_forbidden" });
++        let hasAvailableStation = false;
++        if (target) {
++          const experience = await tx.execute(sql`SELECT id FROM experiences
++            WHERE id=${target.experienceId} AND event_id=${input.eventId} FOR UPDATE`);
++          ensure(experience.rows.length === 1, "experiência do atendimento incoerente.");
++          const station = await tx.execute(sql`SELECT id FROM stations
++            WHERE id=${target.stationId} AND experience_id=${target.experienceId} FOR UPDATE`);
++          ensure(station.rows.length === 1, "estação do atendimento incoerente.");
++          // Testemunha C-14 da mesma experiência, antes da participação. Disponível pode estar ocupada.
++          const witness = await tx.execute(sql`SELECT id FROM stations WHERE experience_id=${target.experienceId}
++            AND availability='available' ORDER BY id LIMIT 1 FOR SHARE`);
++          hasAvailableStation = witness.rows.length > 0;
++        }
++        const staff = await tx.execute(sql`SELECT r.id FROM users u JOIN user_roles r ON r.user_id=u.id
++          WHERE u.id=${input.staffUserId} AND u.is_active=true AND u.email_verified_at IS NOT NULL
++            AND r.role='staff' AND r.event_id=${input.eventId} AND r.revoked_at IS NULL FOR SHARE OF u, r`);
++        if (!staff.rows.length) block({ kind: "staff_event_forbidden" });
++        if (!target) block({ kind: "service_not_found" });
++        const person = await tx.execute<{ status: string; currentId: string | null }>(sql`
++          SELECT status, current_queue_entry_id AS "currentId" FROM participations
++          WHERE id=${target.participationId} AND event_id=${input.eventId} FOR UPDATE`);
++        ensure(person.rows.length === 1, "participação do atendimento incoerente.");
++        const entry = await tx.execute<{ status: string }>(sql`SELECT status FROM queue_entries
++          WHERE id=${target.queueEntryId} AND participation_id=${target.participationId}
++            AND event_id=${input.eventId} AND experience_id=${target.experienceId} FOR UPDATE`);
++        ensure(entry.rows.length === 1, "entrada mudou de vínculo após descoberta.");
++        const session = await tx.execute<{ status: string }>(sql`SELECT status FROM service_sessions
++          WHERE id=${input.serviceSessionId} AND queue_entry_id=${target.queueEntryId}
++            AND experience_id=${target.experienceId} AND station_id=${target.stationId} FOR UPDATE`);
++        ensure(session.rows.length === 1, "atendimento mudou de vínculo após descoberta.");
++        const reservation = await reserveIdempotencyOperationWithTx(tx, {
++          actorUserId: input.staffUserId, operation: ABSENT_SERVICE_OPERATION, idempotencyKey: input.idempotencyKey,
++          requestHash: createAbsentServiceFingerprint(input.eventId, input.serviceSessionId), expiresAt: input.expiresAt,
++        });
++        if (reservation.kind === "request_conflict" || reservation.kind === "in_progress") return { kind: reservation.kind };
++        if (reservation.kind === "replay") return { kind: "replay", ...replay(reservation.resultPayload, input, target.queueEntryId) };
++        ensure(["pending", "completed", "absent", "canceled"].includes(session.rows[0].status), "estado do atendimento desconhecido.");
++        if (session.rows[0].status !== "pending") block({ kind: "service_not_pending" });
++        ensure(person.rows[0].status === "active" && person.rows[0].currentId === target.queueEntryId
++          && entry.rows[0].status === "called", "pending sem participação ativa e entrada called corrente.");
++
++        const resolved = await tx.execute<{ resolvedAtMs: number }>(sql`
++          WITH decision AS MATERIALIZED (SELECT clock_timestamp() AS at)
++          UPDATE service_sessions s SET status='absent', resolved_at=d.at, resolved_by_user_id=${input.staffUserId}
++          FROM queue_entries q, participations p, events e, decision d
++          WHERE s.id=${input.serviceSessionId} AND s.queue_entry_id=${target.queueEntryId}
++            AND s.experience_id=${target.experienceId} AND s.station_id=${target.stationId} AND s.status='pending'
++            AND q.id=s.queue_entry_id AND q.experience_id=s.experience_id AND q.event_id=${input.eventId} AND q.status='called'
++            AND p.id=q.participation_id AND p.id=${target.participationId} AND p.event_id=q.event_id
++            AND p.status='active' AND p.current_queue_entry_id=q.id AND e.id=q.event_id
++            AND e.status <> 'closed' AND e.starts_at <= d.at AND d.at < e.operational_deadline_at
++            AND (e.admin_deadline_at IS NULL OR d.at < e.admin_deadline_at)
++          RETURNING (EXTRACT(EPOCH FROM s.resolved_at)*1000)::double precision AS "resolvedAtMs"`);
++        if (!resolved.rows.length) block({ kind: "event_operation_ended" });
++        ensure(resolved.rows.length === 1, "ausência afetou múltiplos atendimentos.");
++        const resolvedAt = instant(resolved.rows[0].resolvedAtMs);
++        const closed = await tx.execute(sql`UPDATE queue_entries q SET status='closed', closed_at=s.resolved_at, close_reason='absent'
++          FROM service_sessions s WHERE q.id=${target.queueEntryId} AND q.participation_id=${target.participationId}
++            AND q.event_id=${input.eventId} AND q.experience_id=${target.experienceId} AND q.status='called'
++            AND s.id=${input.serviceSessionId} AND s.queue_entry_id=q.id AND s.status='absent' RETURNING q.id`);
++        ensure(closed.rows.length === 1, "entrada called não pôde ser encerrada.");
++
++        // Mesmas condições de prontidão/capacidade da E07.1, com testemunhas protegidas.
++        // Novo relógio no INSERT: cruzar o corte após resolver ausência nunca cria nova entrada.
++        // SQL bruto do Drizzle retorna timestamptz como string, sem o decoder do schema.
++        // Como na E07.2, ler epoch numérico e converter/validar explicitamente antes do helper.
++        const eventRow = event.rows[0];
++        const ready = evaluateEventConfigurationReadiness({ ...eventRow,
++          startsAt: instant(eventRow.startsAtMs), officialEndsAt: instant(eventRow.officialEndsAtMs),
++          operationalDeadlineAt: instant(eventRow.operationalDeadlineAtMs),
++        }).ready && hasAvailableStation;
++        const newId = randomUUID();
++        const reentry = await tx.execute<{ queueOrder: string }>(sql`
++          WITH decision AS MATERIALIZED (SELECT clock_timestamp() AS at), assigned AS (
++            UPDATE experiences x SET last_queue_order=x.last_queue_order+1 FROM events e, decision d
++            WHERE x.id=${target.experienceId} AND x.event_id=${input.eventId} AND e.id=x.event_id
++              AND ${ready} AND x.queue_accepting_entries=true AND e.status NOT IN ('closing','closed')
++              AND e.starts_at <= d.at AND d.at < e.official_ends_at
++              AND (e.closure_requested_at IS NULL OR d.at < e.closure_requested_at)
++              AND d.at < e.operational_deadline_at AND (e.admin_deadline_at IS NULL OR d.at < e.admin_deadline_at)
++            RETURNING x.last_queue_order, d.at
++          )
++          INSERT INTO queue_entries(id,participation_id,event_id,experience_id,queue_order,status,entered_at)
++          SELECT ${newId},${target.participationId},${input.eventId},${target.experienceId},a.last_queue_order,'waiting',a.at
++          FROM assigned a RETURNING queue_order::text AS "queueOrder"`);
++        ensure(reentry.rows.length <= 1, "reentrada afetou múltiplas entradas.");
++        let newQueueEntry: Extract<RegisteredAbsence, { requeued: true }>["newQueueEntry"] | null = null;
++        if (reentry.rows.length) {
++          const order = reentry.rows[0].queueOrder;
++          ensure(typeof order === "string" && /^[1-9]\d*$/.test(order), "ordem FIFO inválida.");
++          const count = await tx.execute<{ count: string }>(sql`SELECT count(*)::text AS count FROM queue_entries
++            WHERE experience_id=${target.experienceId} AND event_id=${input.eventId} AND status='waiting' AND queue_order <= ${order}::bigint`);
++          ensure(count.rows.length === 1, "contagem de posição ausente.");
++          newQueueEntry = { id: newId, status: "waiting", queueOrder: order, position: position(count.rows[0].count) };
++        }
++        const pointed = await tx.execute(sql`UPDATE participations SET current_queue_entry_id=${newQueueEntry?.id ?? null}
++          WHERE id=${target.participationId} AND event_id=${input.eventId} AND status='active'
++            AND current_queue_entry_id=${target.queueEntryId} RETURNING id`);
++        ensure(pointed.rows.length === 1, "ponteiro não pôde ser atualizado.");
++        const common = { serviceSession: { id: input.serviceSessionId, status: "absent" as const, resolvedAt },
++          previousQueueEntry: { id: target.queueEntryId, status: "closed" as const, closeReason: "absent" as const } };
++        const result: RegisteredAbsence = newQueueEntry ? { ...common, requeued: true, newQueueEntry }
++          : { ...common, requeued: false, newQueueEntry: null };
++        await completeIdempotencyOperationWithTx(tx, reservation.operationId, { httpStatus: 200, resultReference: input.serviceSessionId,
++          resultPayload: { ...result, serviceSession: { ...result.serviceSession, resolvedAt: resolvedAt.toISOString() } } });
++        return { kind: "absent", ...result };
++      }, { isolationLevel: "read committed" });
++    } catch (error) {
++      if (error instanceof AbsentRollback) return error.result;
++      throw error;
++    }
++  }
++}
+diff --git a/backend/src/events/absent.types.ts b/backend/src/events/absent.types.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..17b3ae9e4dc1e5eed7fcff978ceb26745c934aa9
+--- /dev/null
++++ b/backend/src/events/absent.types.ts
+@@ -0,0 +1,29 @@
++/** Ator do contexto confiável do chamador, com autorização revalidada no banco. */
++export interface AbsentServiceInput {
++  staffUserId: string;
++  eventId: string;
++  serviceSessionId: string;
++  idempotencyKey: string;
++  /** Expiração explícita, sem definir uma política nova de retenção. */
++  expiresAt: Date;
++}
++
++export type RegisteredAbsence = {
++  serviceSession: { id: string; status: "absent"; resolvedAt: Date };
++  previousQueueEntry: { id: string; status: "closed"; closeReason: "absent" };
++} & (
++  | { requeued: false; newQueueEntry: null }
++  | { requeued: true; newQueueEntry: { id: string; status: "waiting"; queueOrder: string; position: number } }
++);
++
++export type AbsentServiceBlock = { kind:
++  | "staff_event_forbidden"
++  | "service_not_found"
++  | "service_not_pending"
++  | "event_operation_ended"
++};
++
++export type AbsentServiceResult =
++  | ({ kind: "absent" | "replay" } & RegisteredAbsence)
++  | AbsentServiceBlock
++  | { kind: "request_conflict" | "in_progress" };
+diff --git a/backend/src/events/events.module.ts b/backend/src/events/events.module.ts
+index 048587dab8e919abde8daf17994c1a2a90b9d277..10a16b4886650c8649fbdbdc23eb2cf285be9c27 100644
+--- a/backend/src/events/events.module.ts
++++ b/backend/src/events/events.module.ts
+@@ -7,11 +7,12 @@ import { QueueStateService } from "./queue-state.service";
+ import { QueueWithdrawalService } from "./queue-withdrawal.service";
+ import { CallNextService } from "./call-next.service";
+ import { CompleteService } from "./complete.service";
++import { AbsentService } from "./absent.service";
+ 
+ /** Agrupa os serviços de Events e reutiliza o acesso PostgreSQL compartilhado. */
+ @Module({
+   imports: [DatabaseModule],
+-  providers: [EventsService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService],
+-  exports: [EventsService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService],
++  providers: [EventsService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService],
++  exports: [EventsService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService],
+ })
+ export class EventsModule {}
+diff --git a/backend/test/integration/absent.integration.test.ts b/backend/test/integration/absent.integration.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..c12b7f9f6e973eb6550718d1938e15c9e755285e
+--- /dev/null
++++ b/backend/test/integration/absent.integration.test.ts
+@@ -0,0 +1,482 @@
++import assert from "node:assert/strict";
++import { randomUUID } from "node:crypto";
++import { devNull } from "node:os";
++import { after, before, test } from "node:test";
++import { sql } from "drizzle-orm";
++import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
++import { Pool, type PoolClient } from "pg";
++import * as schema from "../../src/database/schema";
++import type { DatabaseTransactionExecutor } from "../../src/database/database-executor";
++import type { CompleteService } from "../../src/events/complete.service";
++import type { AbsentService } from "../../src/events/absent.service";
++import type { AbsentServiceInput, AbsentServiceResult } from "../../src/events/absent.types";
++import type { CallNextService } from "../../src/events/call-next.service";
++import type { QueueEntryService } from "../../src/events/queue-entry.service";
++import type { QueueWithdrawalService } from "../../src/events/queue-withdrawal.service";
++import { assertSafeTestDatabase } from "./test-db-guard";
++
++// Mesmo preflight E07.4/E07.5, antes de configuração/serviços. Nunca carregar arquivos .env.
++const urls = ["DATABASE_URL", "DATABASE_DIRECT_URL", "EVENTS_TEST_DATABASE_URL"].map(name => {
++  const value = assertSafeTestDatabase(process.env[name]), u = new URL(value);
++  if (u.hostname !== "127.0.0.1" || u.port !== "55432" || u.pathname !== "/arenago_events_test"
++    || u.search || u.hash || !u.username) throw new Error(`${name}: destino local explícito obrigatório, sem parâmetros.`);
++  return value;
++});
++if (urls.some(value => value !== urls[0])) throw new Error("As três URLs explícitas precisam ser idênticas.");
++process.env.DOTENV_CONFIG_PATH = devNull;
++const config = { connectionString: urls[2], ssl: false, max: 5, connectionTimeoutMillis: 2000, statement_timeout: 10000, lock_timeout: 8000 };
++const servicePool = new Pool(config), fixturePool = new Pool(config);
++const database = drizzle(servicePool, { schema });
++type Database = NodePgDatabase<typeof schema>;
++let makeAbsent: (db: Database) => AbsentService;
++let absence: AbsentService;
++let makeComplete: (db: Database) => CompleteService;
++let makeCall: (db: Database) => CallNextService;
++let makeWithdrawal: (db: Database) => QueueWithdrawalService;
++let completion: CompleteService, caller: CallNextService, joining: QueueEntryService;
++const ids = { events: [] as string[], users: [] as string[] };
++const baseOrder = 9007199254741000n;
++
++before(async () => {
++  assert.equal((await fixturePool.query("SELECT current_database() AS name")).rows[0].name, "arenago_events_test");
++  const { AbsentService } = await import("../../src/events/absent.service");
++  makeAbsent = db => new AbsentService(db); absence = makeAbsent(database);
++  const { CompleteService } = await import("../../src/events/complete.service");
++  const { CallNextService } = await import("../../src/events/call-next.service");
++  const { QueueEntryService } = await import("../../src/events/queue-entry.service");
++  const { QueueWithdrawalService } = await import("../../src/events/queue-withdrawal.service");
++  const { EventsService } = await import("../../src/events/events.service");
++  makeComplete = db => new CompleteService(db); makeCall = db => new CallNextService(db);
++  makeWithdrawal = db => new QueueWithdrawalService(db);
++  completion = makeComplete(database); caller = makeCall(database);
++  joining = new QueueEntryService(database, new EventsService(database));
++});
++after(async () => {
++  const errors: unknown[] = [];
++  try {
++    const c = await fixturePool.connect();
++    try {
++      await c.query("BEGIN");
++      await c.query("UPDATE participations SET current_queue_entry_id=NULL WHERE event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM service_sessions s USING queue_entries q WHERE s.queue_entry_id=q.id AND q.event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM queue_entries WHERE event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM participations WHERE event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM stations s USING experiences x WHERE s.experience_id=x.id AND x.event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM experiences WHERE event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM user_roles WHERE user_id=ANY($1::uuid[])", [ids.users]);
++      await c.query("DELETE FROM idempotency_operations WHERE actor_user_id=ANY($1::uuid[])", [ids.users]);
++      await c.query("DELETE FROM events WHERE id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM users WHERE id=ANY($1::uuid[])", [ids.users]);
++      await c.query("COMMIT");
++    } catch (e) { await c.query("ROLLBACK"); throw e; } finally { c.release(); }
++  } catch (e) { errors.push(e); }
++  for (const result of await Promise.allSettled([servicePool.end(), fixturePool.end()])) if (result.status === "rejected") errors.push(result.reason);
++  if (errors.length) throw new AggregateError(errors, "Falha na limpeza E07.6.");
++});
++async function user() {
++  const id = randomUUID();
++  await fixturePool.query(`INSERT INTO users(id,name,email,password_hash,email_verified_at,created_at,updated_at)
++    VALUES($1,'E076 privado',$2,'fixture-hash',clock_timestamp(),clock_timestamp(),clock_timestamp())`, [id, `${id}@example.test`]);
++  ids.users.push(id); return id;
++}
++async function staff(userId: string, eventId: string) {
++  await fixturePool.query("INSERT INTO user_roles(id,user_id,role,event_id,granted_at) VALUES($1,$2,'staff',$3,clock_timestamp())", [randomUUID(), userId, eventId]);
++}
++async function enter(p: { userId: string; participationId: string }, experienceId: string) {
++  const result = await joining.joinExperienceQueue({ ...p, experienceId, idempotencyKey: randomUUID(), expiresAt: new Date("2099-01-01") });
++  assert.ok(result.kind === "created"); return result;
++}
++async function person(eventId: string, experienceId: string) {
++  const userId = await user(), participationId = randomUUID();
++  await fixturePool.query(`INSERT INTO participations(id,user_id,event_id,status,joined_at,arena_entered_at)
++    VALUES($1,$2,$3,'active',clock_timestamp(),clock_timestamp())`, [participationId, userId, eventId]);
++  const entry = await enter({ userId, participationId }, experienceId);
++  return { userId, participationId, queueEntryId: entry.queueEntryId, queueOrder: entry.queueOrder };
++}
++async function context(count = 1) {
++  const eventId = randomUUID();
++  await fixturePool.query(`INSERT INTO events(id,name,access_code_normalized,timezone,starts_at,official_ends_at,operational_deadline_at,
++    status,external_queue_enabled,created_at,updated_at) VALUES($1,'E076 fixture',$2,'America/Sao_Paulo',clock_timestamp()-interval '1 hour',
++    clock_timestamp()+interval '1 hour',clock_timestamp()+interval '90 minutes','open',false,clock_timestamp(),clock_timestamp())`, [eventId, `E076-${eventId.toUpperCase()}`]);
++  ids.events.push(eventId);
++  const staffUserId = await user(); await staff(staffUserId, eventId);
++  const experienceId = randomUUID(), stationId = randomUUID();
++  await fixturePool.query(`INSERT INTO experiences(id,event_id,name,last_queue_order,created_at,updated_at)
++    VALUES($1,$2,'E076 experiência',$3,clock_timestamp(),clock_timestamp())`, [experienceId, eventId, baseOrder.toString()]);
++  await fixturePool.query(`INSERT INTO stations(id,experience_id,label,availability,created_at,updated_at)
++    VALUES($1,$2,'E076 estação','available',clock_timestamp(),clock_timestamp())`, [stationId, experienceId]);
++  const people = [];
++  for (let n = 0; n < count; n++) people.push(await person(eventId, experienceId));
++  const c = { eventId, staffUserId, experienceId, stationId, people };
++  return { ...c, serviceSessionId: (await call(c)).id };
++}
++type Context = Awaited<ReturnType<typeof context>>;
++async function call(c: { eventId: string; staffUserId: string; experienceId: string; stationId: string }, service = caller) {
++  const result = await service.callNext({ ...c, idempotencyKey: randomUUID(), expiresAt: new Date("2099-01-01") });
++  assert.ok(result.kind === "created", JSON.stringify(result)); return result.serviceSession;
++}
++function intent(c: Pick<Context, "eventId" | "staffUserId" | "serviceSessionId">): AbsentServiceInput {
++  return { eventId: c.eventId, staffUserId: c.staffUserId, serviceSessionId: c.serviceSessionId,
++    idempotencyKey: randomUUID(), expiresAt: new Date("2099-01-01") };
++}
++function exit(c: Context) {
++  const p = c.people[0]; return { userId: p.userId, participationId: p.participationId, queueEntryId: p.queueEntryId,
++    idempotencyKey: randomUUID(), expiresAt: new Date("2099-01-01") };
++}
++function absent(result: AbsentServiceResult) { assert.ok(result.kind === "absent", JSON.stringify(result)); return result; }
++async function state(c: Context) {
++  return (await fixturePool.query(`SELECT jsonb_build_object(
++    'people',(SELECT jsonb_agg(to_jsonb(p) ORDER BY p.id) FROM participations p WHERE p.event_id=$1),
++    'entries',(SELECT jsonb_agg(to_jsonb(q) ORDER BY q.id) FROM queue_entries q WHERE q.event_id=$1),
++    'sessions',(SELECT jsonb_agg(to_jsonb(s) ORDER BY s.id) FROM service_sessions s JOIN queue_entries q ON q.id=s.queue_entry_id WHERE q.event_id=$1),
++    'stations',(SELECT jsonb_agg(to_jsonb(t) ORDER BY t.id) FROM stations t JOIN experiences x ON x.id=t.experience_id WHERE x.event_id=$1),
++    'experiences',(SELECT jsonb_agg(to_jsonb(x) ORDER BY x.id) FROM experiences x WHERE x.event_id=$1),
++    'idempotency',(SELECT jsonb_agg(to_jsonb(i) ORDER BY i.id) FROM idempotency_operations i WHERE i.actor_user_id=$2)
++    )::text AS value`, [c.eventId, c.staffUserId])).rows[0].value as string;
++}
++/** Barreira após os efeitos do escritor real, antes do commit. */
++function held<T>(action: (db: Database) => Promise<T>) {
++  let signal!: (pid: number) => void, reject!: (e: unknown) => void, release!: () => void;
++  const reached = new Promise<number>((yes, no) => { signal = yes; reject = no; });
++  const gate = new Promise<void>(yes => { release = yes; });
++  const db = { transaction: <R>(callback: (tx: DatabaseTransactionExecutor) => Promise<R>, config?: Parameters<Database["transaction"]>[1]) =>
++    database.transaction(async tx => {
++      const result = await callback(tx);
++      signal((await tx.execute<{ pid: number }>(sql`SELECT pg_backend_pid() AS pid`)).rows[0].pid);
++      await gate; return result;
++    }, config) } as Database;
++  const promise = action(db); promise.catch(reject); return { promise, reached, release };
++}
++async function waitBlocked(waiter: number, blocker: number) {
++  const until = Date.now() + 5000;
++  while (Date.now() < until) {
++    const r = await fixturePool.query(`SELECT 1 FROM pg_stat_activity
++      WHERE pid=$1 AND state='active' AND wait_event_type='Lock' AND $2=ANY(pg_blocking_pids(pid))`, [waiter, blocker]);
++    if (r.rowCount) return;
++    await new Promise(yes => setTimeout(yes, 20));
++  }
++  throw new Error("Não foi observada espera real entre os PIDs.");
++}
++async function race<T, U>(first: ReturnType<typeof held<T>>, second: (db: Database) => Promise<U>) {
++  let c: PoolClient | undefined, pending: Promise<U> | undefined;
++  try {
++    const blocker = await first.reached; c = await servicePool.connect();
++    const waiter = (await c.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
++    pending = second(drizzle(c, { schema })); pending.catch(() => undefined);
++    await waitBlocked(waiter, blocker); first.release(); return await Promise.all([first.promise, pending]);
++  } finally { first.release(); await Promise.allSettled([first.promise, pending]); c?.release(); }
++}
++async function structuralRace(c: Context, mutation: (client: PoolClient) => Promise<unknown>,
++  check: (waiterPid: number) => Promise<void> = async () => undefined) {
++  const blocker = await fixturePool.connect(), waiter = await servicePool.connect();
++  let pending: Promise<AbsentServiceResult> | undefined;
++  try {
++    await blocker.query("BEGIN"); await mutation(blocker);
++    const blockerPid = (await blocker.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
++    const waiterPid = (await waiter.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
++    pending = makeAbsent(drizzle(waiter, { schema })).absent(intent(c)); pending.catch(() => undefined);
++    await waitBlocked(waiterPid, blockerPid); await check(waiterPid);
++    await blocker.query("COMMIT"); return await pending;
++  } finally { await blocker.query("ROLLBACK"); await Promise.allSettled([pending]); blocker.release(); waiter.release(); }
++}
++
++async function assertAbsence(c: Context, request: AbsentServiceInput, result: ReturnType<typeof absent>) {
++  const row = (await fixturePool.query(`SELECT s.status,s.resolved_by_user_id,s.cancel_reason,q.status AS entry,q.close_reason,
++    q.queue_order::text,(q.closed_at=s.resolved_at) AS same_time,p.status AS participation,p.current_queue_entry_id,
++    x.last_queue_order::text,(SELECT count(*)::int FROM service_sessions WHERE station_id=s.station_id AND status='pending') AS pending,
++    (SELECT count(*)::int FROM idempotency_operations i WHERE i.actor_user_id=$2 AND i.operation='absent_service_session'
++      AND i.idempotency_key=$3 AND i.status='completed' AND i.result_reference=s.id) AS intentions
++    FROM service_sessions s JOIN queue_entries q ON q.id=s.queue_entry_id JOIN participations p ON p.id=q.participation_id
++    JOIN experiences x ON x.id=q.experience_id WHERE s.id=$1`, [c.serviceSessionId, request.staffUserId, request.idempotencyKey])).rows[0];
++  assert.equal(row.status, "absent"); assert.equal(row.resolved_by_user_id, request.staffUserId); assert.equal(row.cancel_reason, null);
++  assert.equal(row.entry, "closed"); assert.equal(row.close_reason, "absent"); assert.equal(row.same_time, true);
++  assert.equal(row.queue_order, c.people[0].queueOrder); assert.equal(row.participation, "active"); assert.equal(row.pending, 0); assert.equal(row.intentions, 1);
++  assert.equal(row.current_queue_entry_id, result.newQueueEntry?.id ?? null);
++  assert.equal(row.last_queue_order, (baseOrder + BigInt(c.people.length) + (result.requeued ? 1n : 0n)).toString());
++  if (result.requeued) {
++    const fresh = (await fixturePool.query("SELECT status,queue_order::text,experience_id,participation_id FROM queue_entries WHERE id=$1", [result.newQueueEntry.id])).rows[0];
++    assert.equal(fresh.status, "waiting"); assert.equal(fresh.queue_order, result.newQueueEntry.queueOrder);
++    assert.equal(fresh.experience_id, c.experienceId); assert.equal(fresh.participation_id, c.people[0].participationId);
++    assert.notEqual(result.newQueueEntry.id, c.people[0].queueEntryId);
++  }
++}
++test("E07.6 ausência normal reentra no fim FIFO com ID novo, ponteiro e timestamp exatos", async () => {
++  const c = await context(3), request = intent(c), result = absent(await absence.absent(request));
++  assert.ok(result.requeued); assert.equal(result.newQueueEntry.queueOrder, (baseOrder + 4n).toString());
++  assert.equal(result.newQueueEntry.position, 3); await assertAbsence(c, request, result);
++  const { QueueStateService } = await import("../../src/events/queue-state.service");
++  const state = await new QueueStateService(database).getParticipationQueue(c.people[0].userId, c.people[0].participationId);
++  assert.ok(state.kind === "ok" && state.currentQueueEntry?.status === "waiting");
++  assert.equal(state.currentQueueEntry.id, result.newQueueEntry.id); assert.equal(state.currentQueueEntry.position, 3);
++  assert.equal((await fixturePool.query("SELECT availability FROM stations WHERE id=$1", [c.stationId])).rows[0].availability, "available");
++});
++test("E07.6 corte oficial/Admin e fila pausada resolvem absent sem reentrada nem incremento", async () => {
++  for (const mode of ["official", "admin", "paused"]) {
++    const c = await context(2);
++    if (mode === "official") await fixturePool.query(`UPDATE events SET official_ends_at=clock_timestamp()-interval '1 minute',operational_deadline_at=clock_timestamp()+interval '30 minutes' WHERE id=$1`, [c.eventId]);
++    if (mode === "admin") await fixturePool.query(`UPDATE events SET status='closing',closure_mode='controlled',closure_requested_at=clock_timestamp()-interval '1 minute',admin_deadline_at=clock_timestamp()+interval '20 minutes' WHERE id=$1`, [c.eventId]);
++    if (mode === "paused") await fixturePool.query("UPDATE experiences SET queue_accepting_entries=false WHERE id=$1", [c.experienceId]);
++    const request = intent(c), result = absent(await absence.absent(request));
++    assert.equal(result.requeued, false); assert.equal(result.newQueueEntry, null); await assertAbsence(c, request, result);
++  }
++});
++test("E07.6 configuração sem prontidão ou experiência sem estação disponível impedem só reentrada", async () => {
++  for (const mode of ["name", "station"]) {
++    const c = await context();
++    if (mode === "name") await fixturePool.query("UPDATE events SET name='' WHERE id=$1", [c.eventId]);
++    else await fixturePool.query("UPDATE stations SET availability='unavailable' WHERE id=$1", [c.stationId]);
++    const request = intent(c), result = absent(await absence.absent(request)); assert.equal(result.requeued, false); await assertAbsence(c, request, result);
++    if (mode === "station") assert.equal((await fixturePool.query("SELECT availability FROM stations WHERE id=$1", [c.stationId])).rows[0].availability, "unavailable");
++  }
++});
++test("E07.6 outra estação disponível na mesma experiência permite reentrada sem alterar estação original", async () => {
++  const c = await context(), station = randomUUID();
++  await fixturePool.query("UPDATE stations SET availability='unavailable' WHERE id=$1", [c.stationId]);
++  await fixturePool.query(`INSERT INTO stations(id,experience_id,label,availability,created_at,updated_at)
++    VALUES($1,$2,'Testemunha','available',clock_timestamp(),clock_timestamp())`, [station, c.experienceId]);
++  const request = intent(c), result = absent(await absence.absent(request)); assert.equal(result.requeued, true); await assertAbsence(c, request, result);
++  assert.equal((await fixturePool.query("SELECT availability FROM stations WHERE id=$1", [c.stationId])).rows[0].availability, "unavailable");
++});
++test("E07.6 retries sequenciais/concorrentes geram exatamente uma nova entrada", async () => {
++  const c = await context(2), request = intent(c);
++  const [a, b] = await race(held(db => makeAbsent(db).absent(request)), db => makeAbsent(db).absent(request));
++  const result = absent(a); assert.deepEqual(b, { ...a, kind: "replay" }); assert.deepEqual(await absence.absent(request), b);
++  await assertAbsence(c, request, result);
++  assert.equal((await fixturePool.query("SELECT count(*)::int AS n FROM queue_entries WHERE participation_id=$1", [c.people[0].participationId])).rows[0].n, 2);
++});
++test("E07.6 duas intenções concorrentes sobre a mesma sessão só resolvem uma vez", async () => {
++  const c = await context(), request = intent(c), other = intent(c);
++  const [a, b] = await race(held(db => makeAbsent(db).absent(request)), db => makeAbsent(db).absent(other));
++  await assertAbsence(c, request, absent(a)); assert.deepEqual(b, { kind: "service_not_pending" });
++  assert.equal((await fixturePool.query("SELECT count(*)::int AS n FROM idempotency_operations WHERE actor_user_id=$1 AND idempotency_key=$2", [c.staffUserId, other.idempotencyKey])).rows[0].n, 0);
++});
++test("E07.6 replay antigo não afeta reentrada já chamada nem cria nova tentativa", async () => {
++  const c = await context(), request = intent(c), result = absent(await absence.absent(request)); assert.ok(result.requeued);
++  const next = await call(c); assert.equal(next.queueEntryId, result.newQueueEntry.id);
++  const before = await state(c);
++  assert.deepEqual(await absence.absent(request), { ...result, kind: "replay" }); assert.equal(await state(c), before);
++  assert.deepEqual(await absence.absent(intent(c)), { kind: "service_not_pending" });
++  assert.deepEqual(await absence.absent({ ...request, serviceSessionId: next.id }), { kind: "request_conflict" }); assert.equal(await state(c), before);
++});
++test("E07.6 replay sem reentrada persiste mesmo após encerramento e exige autorização atual", async () => {
++  const c = await context(), request = intent(c);
++  await fixturePool.query("UPDATE experiences SET queue_accepting_entries=false WHERE id=$1", [c.experienceId]);
++  const result = absent(await absence.absent(request)); assert.equal(result.requeued, false);
++  await fixturePool.query("UPDATE events SET status='closed' WHERE id=$1", [c.eventId]);
++  await fixturePool.query("UPDATE participations SET status='finished',finished_at=clock_timestamp(),finish_reason='fixture' WHERE id=$1", [c.people[0].participationId]);
++  const before = await state(c);
++  assert.deepEqual(await absence.absent(request), { ...result, kind: "replay" }); assert.equal(await state(c), before);
++  await fixturePool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE user_id=$1", [c.staffUserId]);
++  assert.deepEqual(await absence.absent(request), { kind: "staff_event_forbidden" });
++});
++test("E07.6 nega Admin isolado e Staff alheio/revogado/inativo/não verificado", async () => {
++  const c = await context(), other = await context();
++  for (const mode of ["admin", "other_event", "revoked", "inactive", "unverified"]) {
++    const actor = await user();
++    if (mode === "admin") await fixturePool.query("INSERT INTO user_roles(id,user_id,role,granted_at) VALUES($1,$2,'admin',clock_timestamp())", [randomUUID(), actor]);
++    else {
++      await staff(actor, mode === "other_event" ? other.eventId : c.eventId);
++      if (mode === "revoked") await fixturePool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE user_id=$1", [actor]);
++      if (mode === "inactive") await fixturePool.query("UPDATE users SET is_active=false WHERE id=$1", [actor]);
++      if (mode === "unverified") await fixturePool.query("UPDATE users SET email_verified_at=NULL WHERE id=$1", [actor]);
++    }
++    const before = await state(c);
++    assert.deepEqual(await absence.absent({ ...intent(c), staffUserId: actor }), { kind: "staff_event_forbidden" }); assert.equal(await state(c), before);
++    assert.equal((await fixturePool.query("SELECT count(*)::int AS n FROM idempotency_operations WHERE actor_user_id=$1", [actor])).rows[0].n, 0);
++  }
++  await fixturePool.query("INSERT INTO user_roles(id,user_id,role,granted_at) VALUES($1,$2,'admin',clock_timestamp())", [randomUUID(), c.staffUserId]);
++  absent(await absence.absent(intent(c)));
++});
++test("E07.6 sessões ausentes/alheias e evento ausente são bloqueados sem escrita", async () => {
++  const c = await context(), other = await context(), before = await state(c);
++  for (const serviceSessionId of [randomUUID(), other.serviceSessionId]) assert.deepEqual(await absence.absent({ ...intent(c), serviceSessionId }), { kind: "service_not_found" });
++  assert.deepEqual(await absence.absent({ ...intent(c), eventId: randomUUID() }), { kind: "staff_event_forbidden" }); assert.equal(await state(c), before);
++});
++test("E07.6 pending com vínculos/ponteiro/estados incoerentes falha sem efeito", async () => {
++  const { AbsentServiceIntegrityError } = await import("../../src/events/absent.service");
++  for (const mode of ["entry", "pointer", "person", "experience"]) {
++    const c = await context();
++    if (mode === "entry") await fixturePool.query("UPDATE queue_entries SET status='waiting' WHERE id=$1", [c.people[0].queueEntryId]);
++    if (mode === "pointer") await fixturePool.query("UPDATE participations SET current_queue_entry_id=NULL WHERE id=$1", [c.people[0].participationId]);
++    if (mode === "person") await fixturePool.query("UPDATE participations SET status='finished',finished_at=clock_timestamp(),finish_reason='fixture' WHERE id=$1", [c.people[0].participationId]);
++    if (mode === "experience") {
++      // Estação existente e livre de outra experiência: isola a FK sem disputar o unique de pending.
++      const other = await context(), foreignStationId = randomUUID();
++      await fixturePool.query(`INSERT INTO stations(id,experience_id,label,availability,created_at,updated_at)
++        VALUES($1,$2,'FK isolada','available',clock_timestamp(),clock_timestamp())`, [foreignStationId, other.experienceId]);
++      assert.equal((await fixturePool.query("SELECT count(*)::int AS n FROM service_sessions WHERE station_id=$1 AND status='pending'", [foreignStationId])).rows[0].n, 0);
++      await assert.rejects(fixturePool.query("UPDATE service_sessions SET station_id=$2 WHERE id=$1", [c.serviceSessionId, foreignStationId]),
++        { code: "23503", constraint: "fk_service_sessions_station_experience" });
++    }
++    const before = await state(c);
++    if (mode !== "experience") await assert.rejects(absence.absent(intent(c)), AbsentServiceIntegrityError);
++    assert.equal(await state(c), before);
++  }
++});
++test("E07.6 prazo operacional/Admin, imediato, closed e antes do início não registram ausência", async () => {
++  for (const mode of ["operational", "admin", "immediate", "closed", "not_started"]) {
++    const c = await context();
++    if (mode === "operational") await fixturePool.query(`UPDATE events SET official_ends_at=clock_timestamp()-interval '2 minutes',operational_deadline_at=clock_timestamp()-interval '1 minute' WHERE id=$1`, [c.eventId]);
++    if (mode === "admin") await fixturePool.query(`UPDATE events SET status='closing',closure_mode='controlled',closure_requested_at=clock_timestamp()-interval '2 minutes',admin_deadline_at=clock_timestamp()-interval '1 minute' WHERE id=$1`, [c.eventId]);
++    if (mode === "immediate") await fixturePool.query("UPDATE events SET closure_mode='immediate',closure_requested_at=statement_timestamp(),admin_deadline_at=statement_timestamp() WHERE id=$1", [c.eventId]);
++    if (mode === "closed") await fixturePool.query("UPDATE events SET status='closed' WHERE id=$1", [c.eventId]);
++    if (mode === "not_started") await fixturePool.query("UPDATE events SET starts_at=clock_timestamp()+interval '10 minutes' WHERE id=$1", [c.eventId]);
++    const before = await state(c); assert.deepEqual(await absence.absent(intent(c)), { kind: "event_operation_ended" }); assert.equal(await state(c), before);
++  }
++});
++for (const administrative of [false, true]) {
++  test(`E07.6 prazo ${administrative ? "administrativo" : "operacional"} vencido durante lock impede ausência`, async () => {
++    const c = await context();
++    if (administrative) await fixturePool.query(`UPDATE events SET closure_mode='controlled',closure_requested_at=clock_timestamp(),admin_deadline_at=clock_timestamp()+interval '2 seconds' WHERE id=$1`, [c.eventId]);
++    else await fixturePool.query(`UPDATE events SET official_ends_at=clock_timestamp()-interval '1 minute',operational_deadline_at=clock_timestamp()+interval '2 seconds' WHERE id=$1`, [c.eventId]);
++    const before = await state(c), column = administrative ? "admin_deadline_at" : "operational_deadline_at";
++    const result = await structuralRace(c, client => client.query("SELECT id FROM service_sessions WHERE id=$1 FOR UPDATE", [c.serviceSessionId]), async pid => {
++      assert.equal((await fixturePool.query(`SELECT a.xact_start < e.${column} AS before_cut FROM pg_stat_activity a, events e WHERE a.pid=$1 AND e.id=$2`, [pid, c.eventId])).rows[0].before_cut, true);
++      const until = Date.now()+4000;
++      while (!(await fixturePool.query(`SELECT clock_timestamp() >= ${column} AS ended FROM events WHERE id=$1`, [c.eventId])).rows[0].ended) {
++        assert.ok(Date.now()<until); await new Promise(yes => setTimeout(yes, 20));
++      }
++    });
++    assert.deepEqual(result, { kind: "event_operation_ended" }); assert.equal(await state(c), before);
++  });
++}
++test("E07.6 corte oficial entre resolver ausência e INSERT impede reentrada tardia", async () => {
++  const c = await context(), request = intent(c);
++  await fixturePool.query(`UPDATE events SET official_ends_at=clock_timestamp()+interval '2 seconds',operational_deadline_at=clock_timestamp()+interval '30 minutes' WHERE id=$1`, [c.eventId]);
++  let signal!: () => void, reject!: (error: unknown) => void, release!: () => void;
++  const reached = new Promise<void>((yes, no) => { signal=yes; reject=no; }), gate = new Promise<void>(yes => { release=yes; });
++  const db = { transaction: <T>(callback: (tx: DatabaseTransactionExecutor) => Promise<T>, config?: Parameters<Database["transaction"]>[1]) =>
++    database.transaction(tx => callback(new Proxy(tx, { get(target, key) {
++      if (key === "execute") return async (query: Parameters<typeof tx.execute>[0]) => {
++        const result = await target.execute(query);
++        if (result.rows.some(row => row.id === c.people[0].queueEntryId)) {
++          assert.equal((await target.execute<{ beforeCut: boolean }>(sql`SELECT clock_timestamp()<official_ends_at AS "beforeCut" FROM events WHERE id=${c.eventId}`)).rows[0].beforeCut, true);
++          signal(); await gate;
++        }
++        return result;
++      };
++      const value = Reflect.get(target, key); return typeof value === "function" ? value.bind(target) : value;
++    } })), config) } as Database;
++  const pending = makeAbsent(db).absent(request); pending.catch(reject);
++  try {
++    await reached; const until = Date.now()+4000;
++    while (!(await fixturePool.query("SELECT clock_timestamp()>=official_ends_at AS ended FROM events WHERE id=$1", [c.eventId])).rows[0].ended) {
++      assert.ok(Date.now()<until); await new Promise(yes => setTimeout(yes, 20));
++    }
++    release(); const result = absent(await pending); assert.equal(result.requeued, false); await assertAbsence(c, request, result);
++  } finally { release(); await Promise.allSettled([pending]); }
++});
++test("E07.6 ausência vence conclusão E07.5 e preserva nova waiting", async () => {
++  const c = await context(), request = intent(c);
++  const [a, b] = await race(held(db => makeAbsent(db).absent(request)), db => makeComplete(db).complete(intent(c)));
++  await assertAbsence(c, request, absent(a)); assert.deepEqual(b, { kind: "service_not_pending" });
++});
++test("E07.6 conclusão E07.5 vence e não pode ser substituída por absent", async () => {
++  const c = await context();
++  const [a, b] = await race(held(db => makeComplete(db).complete(intent(c))), db => makeAbsent(db).absent(intent(c)));
++  assert.equal(a.kind, "completed"); assert.deepEqual(b, { kind: "service_not_pending" });
++  assert.equal((await fixturePool.query("SELECT count(*)::int AS n FROM queue_entries WHERE participation_id=$1", [c.people[0].participationId])).rows[0].n, 1);
++});
++test("E07.6 ausência vence E07.3 antiga sem cancelar a nova entrada", async () => {
++  const c = await context(), request = intent(c);
++  const [a, b] = await race(held(db => makeAbsent(db).absent(request)), db => makeWithdrawal(db).withdrawExperienceQueue(exit(c)));
++  await assertAbsence(c, request, absent(a)); assert.deepEqual(b, { kind: "entry_not_current" });
++});
++test("E07.6 E07.3 vence e canceled não vira absent", async () => {
++  const c = await context();
++  const [a, b] = await race(held(db => makeWithdrawal(db).withdrawExperienceQueue(exit(c))), db => makeAbsent(db).absent(intent(c)));
++  assert.equal(a.kind, "withdrawn"); assert.deepEqual(b, { kind: "service_not_pending" });
++  assert.equal((await fixturePool.query("SELECT status FROM service_sessions WHERE id=$1", [c.serviceSessionId])).rows[0].status, "canceled");
++});
++test("E07.6 ausência libera estação para E07.4 concorrente respeitando o próximo FIFO", async () => {
++  const c = await context(2), request = intent(c);
++  const [a, b] = await race(held(db => makeAbsent(db).absent(request)), db => call(c, makeCall(db)));
++  assert.ok(absent(a).requeued); assert.equal(b.queueEntryId, c.people[1].queueEntryId);
++  assert.equal((await fixturePool.query("SELECT status FROM service_sessions WHERE id=$1", [b.id])).rows[0].status, "pending");
++});
++test("E07.6 E07.4 em outra estação vence mutex e ausência reentra atrás de quem ainda aguarda", async () => {
++  const c = await context(3), stationId = randomUUID();
++  await fixturePool.query(`INSERT INTO stations(id,experience_id,label,availability,created_at,updated_at)
++    VALUES($1,$2,'Segunda','available',clock_timestamp(),clock_timestamp())`, [stationId, c.experienceId]);
++  const request = intent(c);
++  const [a, b] = await race(held(db => call({ ...c, stationId }, makeCall(db))), db => makeAbsent(db).absent(request));
++  assert.equal(a.queueEntryId, c.people[1].queueEntryId); const result = absent(b); assert.ok(result.requeued);
++  assert.equal(result.newQueueEntry.position, 2); await assertAbsence(c, request, result);
++});
++test("E07.6 preserva conclusões anteriores e nunca conta absent como completed", async () => {
++  const c = await context(); assert.equal((await completion.complete(intent(c))).kind, "completed");
++  const previous = (await fixturePool.query("SELECT to_jsonb(s)::text AS value FROM service_sessions s WHERE id=$1", [c.serviceSessionId])).rows[0].value;
++  const fresh = await enter(c.people[0], c.experienceId), next = await call(c);
++  assert.equal(next.queueEntryId, fresh.queueEntryId);
++  absent(await absence.absent({ ...intent(c), serviceSessionId: next.id }));
++  assert.equal((await fixturePool.query("SELECT to_jsonb(s)::text AS value FROM service_sessions s WHERE id=$1", [c.serviceSessionId])).rows[0].value, previous);
++  assert.equal((await fixturePool.query("SELECT count(*)::int AS n FROM service_sessions s JOIN queue_entries q ON q.id=s.queue_entry_id WHERE q.participation_id=$1 AND s.status='completed'", [c.people[0].participationId])).rows[0].n, 1);
++});
++test("E07.6 reserva in_progress e fingerprint em outro evento não escrevem domínio", async () => {
++  const c = await context(), other = await context(), request = intent(c);
++  await staff(c.staffUserId, other.eventId); absent(await absence.absent(request));
++  assert.deepEqual(await absence.absent({ ...request, eventId: other.eventId, serviceSessionId: other.serviceSessionId }), { kind: "request_conflict" });
++  const { createAbsentServiceFingerprint } = await import("../../src/events/absent.service");
++  const progress = intent(other);
++  await fixturePool.query(`INSERT INTO idempotency_operations(id,actor_user_id,operation,idempotency_key,request_hash,status,created_at,expires_at)
++    VALUES($1,$2,'absent_service_session',$3,$4,'in_progress',clock_timestamp(),$5)`, [randomUUID(), other.staffUserId, progress.idempotencyKey,
++    createAbsentServiceFingerprint(other.eventId, other.serviceSessionId), progress.expiresAt]);
++  const before = await state(other); assert.deepEqual(await absence.absent(progress), { kind: "in_progress" }); assert.equal(await state(other), before);
++});
++test("E07.6 encerramento/revogação concorrentes são revalidados após esperar locks", async () => {
++  for (const mode of ["closed", "revoked", "inactive"]) {
++    const c = await context();
++    const result = await structuralRace(c, client => mode === "closed" ? client.query("UPDATE events SET status='closed' WHERE id=$1", [c.eventId])
++      : mode === "revoked" ? client.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE user_id=$1", [c.staffUserId])
++        : client.query("UPDATE users SET is_active=false WHERE id=$1", [c.staffUserId]));
++    assert.deepEqual(result, { kind: mode === "closed" ? "event_operation_ended" : "staff_event_forbidden" });
++    assert.equal((await fixturePool.query("SELECT status FROM service_sessions WHERE id=$1", [c.serviceSessionId])).rows[0].status, "pending");
++  }
++});
++test("E07.6 falhas após cada escrita revertem ausência, contador, nova fila, ponteiro e idempotência", async () => {
++  for (const stage of ["resolve", "close", "insert", "pointer", "complete"]) {
++    const c = await context(), request = intent(c), before = await state(c), marker = new Error(`E076_AFTER_${stage}`);
++    let reached = false;
++    const db = { transaction: <T>(callback: (tx: DatabaseTransactionExecutor) => Promise<T>, config?: Parameters<Database["transaction"]>[1]) =>
++      database.transaction(async tx => {
++        const verify = async () => {
++          const r = (await tx.execute<{ status: string; entry: string; pointer: string | null; entries: number; last: string }>(sql`
++            SELECT s.status,q.status AS entry,p.current_queue_entry_id AS pointer,x.last_queue_order::text AS last,
++              (SELECT count(*)::int FROM queue_entries WHERE participation_id=p.id) AS entries
++            FROM service_sessions s JOIN queue_entries q ON q.id=s.queue_entry_id JOIN participations p ON p.id=q.participation_id
++            JOIN experiences x ON x.id=q.experience_id WHERE s.id=${c.serviceSessionId}`)).rows[0];
++          const inserted = ["insert", "pointer", "complete"].includes(stage);
++          assert.equal(r.status, "absent"); assert.equal(r.entry, stage === "resolve" ? "called" : "closed");
++          assert.equal(r.entries, inserted ? 2 : 1); assert.equal(r.last, (baseOrder+(inserted ? 2n : 1n)).toString());
++          if (["pointer", "complete"].includes(stage)) { assert.ok(r.pointer); assert.notEqual(r.pointer, c.people[0].queueEntryId); }
++          else assert.equal(r.pointer, c.people[0].queueEntryId);
++          reached=true; throw marker;
++        };
++        const proxy = new Proxy(tx, { get(target, key) {
++          if (key === "execute") return async (query: Parameters<typeof tx.execute>[0]) => {
++            const result = await target.execute(query);
++            if (result.rows.length && ((stage === "resolve" && "resolvedAtMs" in result.rows[0])
++              || (stage === "close" && result.rows[0].id === c.people[0].queueEntryId)
++              || (stage === "insert" && "queueOrder" in result.rows[0])
++              || (stage === "pointer" && result.rows[0].id === c.people[0].participationId))) await verify();
++            return result;
++          };
++          const value = Reflect.get(target, key); return typeof value === "function" ? value.bind(target) : value;
++        } });
++        const result = await callback(proxy);
++        if (stage === "complete") {
++          assert.equal((await tx.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM idempotency_operations
++            WHERE actor_user_id=${c.staffUserId} AND operation='absent_service_session' AND status='completed'`)).rows[0].n, 1);
++          await verify();
++        }
++        return result;
++      }, config) } as Database;
++    await assert.rejects(makeAbsent(db).absent(request), (error: Error) => {
++      let cause: unknown = error; while (cause instanceof Error && cause.cause) cause=cause.cause;
++      assert.equal(cause, marker); return true;
++    });
++    assert.equal(reached, true); assert.equal(await state(c), before);
++    await assertAbsence(c, request, absent(await absence.absent(request)));
++  }
++});
++
+diff --git a/backend/test/unit/absent.test.ts b/backend/test/unit/absent.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..db5e189c7dce9085c72065125e061f9066bc44f0
+--- /dev/null
++++ b/backend/test/unit/absent.test.ts
+@@ -0,0 +1,200 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { drizzle } from "drizzle-orm/node-postgres";
++import type { Client } from "pg";
++import * as schema from "../../src/database/schema";
++import { ABSENT_SERVICE_OPERATION, AbsentService, AbsentServiceIntegrityError, createAbsentServiceFingerprint } from "../../src/events/absent.service";
++import type { AbsentServiceInput } from "../../src/events/absent.types";
++import { createRequestFingerprint } from "../../src/participations/join-idempotency";
++
++const input: AbsentServiceInput = { staffUserId: "staff", eventId: "event", serviceSessionId: "session",
++  idempotencyKey: "absent-intent", expiresAt: new Date("2099-01-01") };
++const at = new Date("2026-11-03T18:00:00Z");
++const order = "9007199254741003";
++const payload = { serviceSession: { id: input.serviceSessionId, status: "absent", resolvedAt: at.toISOString() },
++  previousQueueEntry: { id: "entry", status: "closed", closeReason: "absent" }, requeued: true,
++  newQueueEntry: { id: "new-entry", status: "waiting", queueOrder: order, position: 3 } };
++function fixture(options: {
++  missing?: "target" | "event" | "experience" | "station" | "staff" | "person" | "entry" | "session";
++  status?: string; participantStatus?: string; pointer?: string | null; entryStatus?: string;
++  ended?: boolean; clock?: number; closeCount?: number; pointerCount?: number;
++  requeue?: boolean; noStation?: boolean; notReady?: boolean; queueOrder?: string; count?: string;
++  eventTimes?: { startsAtMs?: unknown; officialEndsAtMs?: unknown; operationalDeadlineAtMs?: unknown };
++  reservation?: "replay" | "conflict" | "in_progress"; replayPayload?: unknown;
++  fail?: "resolve" | "close" | "insert" | "pointer" | "complete";
++} = {}) {
++  const queries: Array<{ text: string; params: unknown[] }> = [], marker = new Error(`E076_${options.fail}`);
++  const client = { async query(config: { text: string }, params: unknown[]) {
++    const text = config.text; queries.push({ text, params });
++    if (text.includes('SELECT s.experience_id AS "experienceId"')) return { rows: options.missing === "target" ? [] : [{ experienceId: "experience", stationId: "station", queueEntryId: "entry", participationId: "person" }] };
++    if (text.includes("FROM events WHERE id=")) return { rows: options.missing === "event" ? [] : [{ id: input.eventId,
++      name: options.notReady ? "" : "ArenaGo", accessCodeNormalized: "ARENA", timezone: "America/Sao_Paulo", externalQueueEnabled: false,
++      startsAtMs: at.getTime()-3600000, officialEndsAtMs: at.getTime()+3600000, operationalDeadlineAtMs: at.getTime()+5400000,
++      ...options.eventTimes }] };
++    if (text.includes("SELECT id FROM experiences")) return { rows: options.missing === "experience" ? [] : [{ id: "experience" }] };
++    if (text.includes("AND availability='available'")) return { rows: options.noStation ? [] : [{ id: "station" }] };
++    if (text.includes("SELECT id FROM stations")) return { rows: options.missing === "station" ? [] : [{ id: "station" }] };
++    if (text.includes("SELECT r.id FROM users")) return { rows: options.missing === "staff" ? [] : [{ id: "role" }] };
++    if (text.includes('AS "currentId"')) return { rows: options.missing === "person" ? [] : [{ status: options.participantStatus ?? "active", currentId: options.pointer === undefined ? "entry" : options.pointer }] };
++    if (text.includes("SELECT status FROM queue_entries")) return { rows: options.missing === "entry" ? [] : [{ status: options.entryStatus ?? "called" }] };
++    if (text.includes("SELECT status FROM service_sessions")) return { rows: options.missing === "session" ? [] : [{ status: options.status ?? "pending" }] };
++    if (text.includes('insert into "idempotency_operations"')) return { rows: options.reservation ? [] : [["reservation"]] };
++    if (text.includes('from "idempotency_operations"')) return { rows: [["reservation",
++      options.reservation === "conflict" ? "other" : createAbsentServiceFingerprint(input.eventId, input.serviceSessionId),
++      options.reservation === "in_progress" ? "in_progress" : "completed", 200, input.serviceSessionId, options.replayPayload ?? payload]] };
++    if (text.includes("UPDATE service_sessions s SET")) {
++      if (options.fail === "resolve") throw marker;
++      return { rows: options.ended ? [] : [{ resolvedAtMs: options.clock ?? at.getTime() }] };
++    }
++    if (text.includes("UPDATE queue_entries q SET")) {
++      if (options.fail === "close") throw marker;
++      return { rows: options.closeCount === 0 ? [] : [{ id: "entry" }] };
++    }
++    if (text.includes("INSERT INTO queue_entries")) {
++      if (options.fail === "insert") throw marker;
++      return { rows: options.requeue === false || options.noStation || options.notReady ? [] : [{ queueOrder: options.queueOrder ?? order }] };
++    }
++    if (text.includes("SELECT count(*)::text AS count")) return { rows: [{ count: options.count ?? "3" }] };
++    if (text.includes("UPDATE participations SET")) {
++      if (options.fail === "pointer") throw marker;
++      return { rows: options.pointerCount === 0 ? [] : [{ id: "person" }] };
++    }
++    if (text.includes('update "idempotency_operations"')) {
++      if (options.fail === "complete") throw marker;
++      return { rows: [["reservation", 200, input.serviceSessionId, payload]] };
++    }
++    return { rows: [] };
++  } };
++  return { service: new AbsentService(drizzle(client as unknown as Client, { schema })), queries, marker };
++}
++test("E07.6 fingerprint fixa evento/sessão em namespace separado da conclusão", () => {
++  const hash = createAbsentServiceFingerprint("e", "s");
++  assert.equal(hash, createAbsentServiceFingerprint("e", "s"));
++  assert.notEqual(hash, createAbsentServiceFingerprint("other", "s")); assert.notEqual(hash, createAbsentServiceFingerprint("e", "other"));
++  assert.notEqual(hash, createRequestFingerprint("complete_service_session", { eventId: "e", serviceSessionId: "s" }));
++  assert.equal(ABSENT_SERVICE_OPERATION, "absent_service_session");
++});
++test("E07.6 registra absent e nova waiting no mesmo tx, com ordem bigint exata e novo ID", async () => {
++  const { service, queries } = fixture(); const result = await service.absent(input);
++  assert.ok(result.kind === "absent" && result.requeued);
++  assert.deepEqual(result.serviceSession, { id: input.serviceSessionId, status: "absent", resolvedAt: at });
++  assert.deepEqual(result.previousQueueEntry, payload.previousQueueEntry);
++  assert.equal(result.newQueueEntry.queueOrder, order); assert.equal(result.newQueueEntry.position, 3);
++  assert.notEqual(result.newQueueEntry.id, "entry");
++  assert.ok(queries.find(q => q.text.includes("UPDATE participations SET"))?.params.includes(result.newQueueEntry.id));
++  assert.equal(queries[0].text, "begin isolation level read committed"); assert.equal(queries.at(-1)?.text, "commit");
++  assert.equal(queries.some(q => /UPDATE stations|status='completed'|SET status='finished'/.test(q.text)), false);
++});
++test("E07.6 corte/fila pausada não reentram e liberam somente o ponteiro original", async () => {
++  const { service, queries } = fixture({ requeue: false }); const result = await service.absent(input);
++  assert.ok(result.kind === "absent" && !result.requeued); assert.equal(result.newQueueEntry, null);
++  const pointer = queries.find(q => q.text.includes("UPDATE participations SET"))!;
++  assert.ok(pointer.params.includes(null)); assert.ok(pointer.params.includes("entry"));
++  assert.equal(queries.some(q => q.text.includes("SELECT count(*)")), false);
++});
++test("E07.6 ordem de locks comum inclui testemunha disponível antes de pessoa/entrada/sessão", async () => {
++  const { service, queries } = fixture(); await service.absent(input);
++  const order = ['SELECT s.experience_id AS "experienceId"', "FROM events WHERE id=", "SELECT id FROM experiences", "SELECT id FROM stations\n",
++    "AND availability='available'", "SELECT r.id FROM users", 'AS "currentId"', "SELECT status FROM queue_entries", "SELECT status FROM service_sessions", 'insert into "idempotency_operations"', "UPDATE service_sessions s SET"];
++  const index = (p: string) => queries.findIndex(q => q.text.includes(p));
++  for (let n=1;n<order.length;n++) assert.ok(index(order[n-1]) < index(order[n]), order[n]);
++  assert.doesNotMatch(queries[1].text, /FOR UPDATE|FOR SHARE|current_queue_entry_id/);
++  for (const p of [order[2], order[3], order[6], order[7], order[8]]) assert.match(queries[index(p)].text, /FOR UPDATE/);
++  for (const p of [order[1], order[4], order[5]]) assert.match(queries[index(p)].text, /FOR SHARE/);
++});
++test("E07.6 Staff ativo/verificado e escopo vigente são obrigatórios inclusive no replay", async () => {
++  const { service, queries } = fixture({ reservation: "replay" }); await service.absent(input);
++  const auth = queries.find(q => q.text.includes("SELECT r.id FROM users"))!;
++  for (const p of ["u.is_active=true", "u.email_verified_at IS NOT NULL", "r.role='staff'", "r.revoked_at IS NULL", "FOR SHARE OF u, r"]) assert.ok(auth.text.includes(p));
++  assert.ok(auth.params.includes(input.eventId)); assert.doesNotMatch(auth.text, /admin/);
++  assert.deepEqual(await fixture({ missing: "staff", reservation: "replay" }).service.absent(input), { kind: "staff_event_forbidden" });
++});
++test("E07.6 relógios decisivos distintos para resolução residual e INSERT condicionado de reentrada", async () => {
++  const { service, queries } = fixture(); await service.absent(input);
++  const resolve = queries.find(q => q.text.includes("UPDATE service_sessions s SET"))!.text;
++  for (const p of ["clock_timestamp()", "d.at < e.operational_deadline_at", "d.at < e.admin_deadline_at", "s.status='pending'", "q.status='called'"]) assert.ok(resolve.includes(p));
++  assert.doesNotMatch(resolve, /official_ends_at|closure_requested_at|queue_accepting_entries|availability/);
++  const insert = queries.find(q => q.text.includes("INSERT INTO queue_entries"))!.text;
++  for (const p of ["clock_timestamp()", "x.queue_accepting_entries=true", "e.status NOT IN ('closing','closed')", "d.at < e.official_ends_at", "d.at < e.closure_requested_at", "x.last_queue_order+1", "FROM assigned a"]) assert.ok(insert.includes(p));
++  assert.match(queries.find(q => q.text.includes("UPDATE queue_entries q SET"))!.text, /closed_at=s.resolved_at/);
++});
++test("E07.6 prontidão/configuração e estação disponível da experiência condicionam só reentrada", async () => {
++  for (const options of [{ notReady: true }, { noStation: true }]) {
++    const { service, queries } = fixture(options); const result = await service.absent(input);
++    assert.ok(result.kind === "absent" && !result.requeued);
++    assert.ok(queries.find(q => q.text.includes("INSERT INTO queue_entries"))!.params.includes(false));
++  }
++});
++test("E07.6 converte epoch PostgreSQL para prontidão e rejeita horários brutos inválidos com rollback", async () => {
++  const { service, queries } = fixture(); assert.ok((await service.absent(input)).kind === "absent");
++  const query = queries.find(q => q.text.includes("FROM events WHERE id="))!.text;
++  for (const field of ["starts_at", "official_ends_at", "operational_deadline_at"]) {
++    assert.ok(query.includes(`(EXTRACT(EPOCH FROM ${field})*1000)::double precision`));
++  }
++  for (const eventTimes of [{ startsAtMs: "2026-11-03 17:00:00+00" }, { startsAtMs: NaN },
++    { officialEndsAtMs: Infinity }, { operationalDeadlineAtMs: 1e20 }]) {
++    const f = fixture({ eventTimes }); await assert.rejects(f.service.absent(input), AbsentServiceIntegrityError);
++    assert.equal(f.queries.at(-1)?.text, "rollback");
++    assert.equal(f.queries.some(q => q.text.includes("INSERT INTO queue_entries") || q.text.includes('update "idempotency_operations"')), false);
++  }
++});
++for (const [name, options, kind] of [
++  ["evento ausente", { missing: "event" }, "staff_event_forbidden"], ["sem Staff", { missing: "staff" }, "staff_event_forbidden"],
++  ["sessão ausente/alheia", { missing: "target" }, "service_not_found"],
++  ["completed", { status: "completed" }, "service_not_pending"], ["absent", { status: "absent" }, "service_not_pending"],
++  ["canceled", { status: "canceled" }, "service_not_pending"], ["prazo vencido", { ended: true }, "event_operation_ended"],
++] as const) {
++  test(`E07.6 bloqueia ${name} e reverte reserva`, async () => {
++    const { service, queries } = fixture(options); assert.deepEqual(await service.absent(input), { kind });
++    assert.equal(queries.at(-1)?.text, "rollback");
++    assert.equal(queries.some(q => q.text.includes("UPDATE queue_entries") || q.text.includes("INSERT INTO queue_entries") || q.text.includes('update "idempotency_operations"')), false);
++  });
++}
++test("E07.6 replay histórico com/sem reentrada ignora estado e ponteiro posteriores", async () => {
++  for (const requeued of [false, true]) {
++    const replayPayload = requeued ? payload : { ...payload, requeued: false, newQueueEntry: null };
++    const { service, queries } = fixture({ reservation: "replay", replayPayload, status: "absent", participantStatus: "finished", pointer: "later", entryStatus: "closed", ended: true });
++    const result = await service.absent(input); assert.equal(result.kind, "replay");
++    assert.deepEqual(result, { kind: "replay", ...replayPayload, serviceSession: { ...payload.serviceSession, resolvedAt: at } });
++    assert.equal(queries.some(q => q.text.includes("WITH decision") || q.text.includes("UPDATE participations")), false);
++  }
++});
++test("E07.6 conflito/in_progress não escrevem domínio", async () => {
++  for (const reservation of ["conflict", "in_progress"] as const) {
++    const { service, queries } = fixture({ reservation });
++    assert.deepEqual(await service.absent(input), { kind: reservation === "conflict" ? "request_conflict" : "in_progress" });
++    assert.equal(queries.some(q => q.text.includes("WITH decision")), false);
++  }
++});
++test("E07.6 inconsistência de vínculos/estados/linhas/ordem/posição faz rollback", async () => {
++  for (const options of [{ missing: "experience" }, { missing: "station" }, { missing: "person" }, { missing: "entry" }, { missing: "session" },
++    { status: "unknown" }, { participantStatus: "finished" }, { pointer: null }, { entryStatus: "waiting" }, { closeCount: 0 }, { pointerCount: 0 },
++    { clock: NaN }, { queueOrder: "0" }, { count: "0" }, { count: "9007199254740992" }] as const) {
++    const { service, queries } = fixture(options);
++    await assert.rejects(service.absent(input), AbsentServiceIntegrityError); assert.equal(queries.at(-1)?.text, "rollback");
++  }
++});
++test("E07.6 replay malformado não fabrica resultado válido", async () => {
++  for (const replayPayload of [{}, { ...payload, serviceSession: { ...payload.serviceSession, id: "other" } },
++    { ...payload, previousQueueEntry: { ...payload.previousQueueEntry, id: "other" } },
++    { ...payload, serviceSession: { ...payload.serviceSession, resolvedAt: "invalid" } },
++    { ...payload, newQueueEntry: { ...payload.newQueueEntry, id: "entry" } },
++    { ...payload, newQueueEntry: { ...payload.newQueueEntry, position: 0 } }, { ...payload, requeued: false }]) {
++    await assert.rejects(fixture({ reservation: "replay", replayPayload }).service.absent(input), AbsentServiceIntegrityError);
++  }
++});
++test("E07.6 falha em cada escrita propaga causa e solicita rollback", async () => {
++  for (const fail of ["resolve", "close", "insert", "pointer", "complete"] as const) {
++    const { service, queries, marker } = fixture({ fail });
++    await assert.rejects(service.absent(input), (error: Error) => {
++      let cause: unknown = error; while (cause instanceof Error && cause.cause) cause = cause.cause;
++      assert.equal(cause, marker); return true;
++    });
++    assert.equal(queries.at(-1)?.text, "rollback");
++  }
++});
++test("E07.6 input inválido não abre transação e contrato não expõe dados pessoais", async () => {
++  const { service, queries } = fixture();
++  for (const changes of [{ idempotencyKey: " " }, { idempotencyKey: "x".repeat(129) }, { expiresAt: new Date(NaN) }]) await assert.rejects(service.absent({ ...input, ...changes }), /inválida/);
++  assert.equal(queries.length, 0); assert.equal(JSON.stringify(await service.absent(input)).includes(input.staffUserId), false);
++});
+diff --git a/docs/ARQUITETURA_BACKEND_ARENAGO.md b/docs/ARQUITETURA_BACKEND_ARENAGO.md
+index 4a58572c13dd26d0de49a83dceaa9c9c17907334..86544c81b6e3b2c5ca61d7cb844400465c19be5a 100644
+--- a/docs/ARQUITETURA_BACKEND_ARENAGO.md
++++ b/docs/ARQUITETURA_BACKEND_ARENAGO.md
+@@ -1212,6 +1212,8 @@ O primeiro ID é **somente indicação de leitura**; o endpoint de chamada sempr
+ 
+ **Staff ativo por evento; `Idempotency-Key`; body `{}`.** Usar o mesmo conjunto e ordem de locks de `complete`. Registrar **manualmente** `service_sessions.status='absent'`, `resolved_at`, `resolved_by_user_id`; fechar a entrada original com `close_reason='absent'`, sem contar conclusão.
+ 
++**Implementação interna E07.6 (03/11/2026):** `AbsentService.absent({ staffUserId, eventId, serviceSessionId, idempotencyKey, expiresAt })`, exportado pelo `EventsModule`. Mantém o protocolo E07.3–E07.5 e revalida autorização/vínculos. Namespace `absent_service_session`, fingerprint de evento/sessão. UPDATE de ausência e INSERT de reentrada usam relógios PostgreSQL atuais separados; o INSERT com incremento FIFO condicionado revalida corte oficial/Admin, fila aberta e condições de admissão da E07.1 (prontidão existente e testemunha de estação disponível na experiência). Sem reentrada, limpa somente o ponteiro original; replay não toca tentativas posteriores. Sem HTTP ou migration; validação e comandos em `docs/E07_6_IMPLEMENTACAO.md`.
++
+ **Se o evento ainda aceita novas entradas internas** (`clock_timestamp() < official_ends_at` **e** antes de fechamento Admin e fila da experiência aberta): alocar **nova** posição no final da mesma fila, criando outra `queue_entries.waiting` e substituindo `participations.current_queue_entry_id` na mesma transação. A entrada antiga continua no histórico. Não se faz reabertura da antiga entrada nem alteração em massa das posições dos demais.
+ 
+ **Se o corte oficial/Admin já ocorreu, mesmo existindo janela operacional residual:** resolver a ausência **sem reentrada**; `participations.status` continua `active` até sua finalização voluntária ou limite operacional, e `current_queue_entry_id=null`. Não forçar ausência extra nem concluir experiência. Se o limite operacional definitivo já foi alcançado, não registrar ausência tardiamente: a chamada pendente é cancelada pelo encerramento.
+diff --git a/docs/E07_6_IMPLEMENTACAO.md b/docs/E07_6_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..585242e149c2ba1ba3eab639425edbf43101f91b
+--- /dev/null
++++ b/docs/E07_6_IMPLEMENTACAO.md
+@@ -0,0 +1,94 @@
++# E07.6 — registro manual de ausência
++
++Implementação interna em 03/11/2026, branch `feature/events-participations`.
++Base informada pelo responsável: E07.5 com 20/20 PostgreSQL e regressão 218/218
++aprovados; esses resultados não são reexecuções desta entrega.
++
++`AbsentService.absent({ staffUserId, eventId, serviceSessionId, idempotencyKey,
++expiresAt })`, exportado pelo `EventsModule`. Exige ator confiável do chamador,
++conta ativa/verificada e Staff vigente do evento, inclusive em replay; Admin
++isolado não opera. Não há timeout ou gatilho de ausência por desconexão.
++
++READ COMMITTED e protocolo comum: descoberta não bloqueante da sessão explícita,
++evento SHARE, experiência UPDATE, estação UPDATE, testemunha de estação disponível
++da mesma experiência SHARE (C-14/E07.1), conta/concessão Staff SHARE, participação,
++entrada e sessão UPDATE. Revalida todos os vínculos/estados/ponteiro após esperas.
++Terminal retorna `service_not_pending`; recurso ausente/alheio retorna
++`service_not_found` ao Staff autorizado; inconsistência de pending provoca rollback.
++
++Uma transação registra absent com autoria/horário, fecha a entrada original com
++motivo absent e timestamp copiado diretamente de resolved_at, opcionalmente cria
++nova waiting e atualiza somente o ponteiro correspondente, concluindo idempotência.
++Preserva participação active, conclusões anteriores, disponibilidade e ordens alheias.
++
++O UPDATE de ausência usa clock_timestamp() e exige instante anterior aos prazos
++operacional/administrativo efetivos. O INSERT da nova entrada usa outro relógio
++atual no próprio comando, com incremento de last_queue_order condicionado no
++mesmo CTE: início alcançado, antes do corte oficial/Admin, status não closing/closed,
++fila aberta, prontidão estática existente e estação disponível na experiência.
++A concessão Staff já está protegida. Não exige estação livre para reentrar.
++Assim, corte/fila pausada/perda de condições de ingresso não impedem ausência
++residual, mas não geram nova entrada nem consomem ordem FIFO. Se o corte ocorrer
++entre a resolução e o INSERT, não há reentrada tardia. O commit pode suceder a
++decisão temporal, como nos serviços existentes.
++
++Nova tentativa recebe UUID/ordem próprios e posição waiting observada no tx;
++bigint é retornado como decimal exato. Namespace `absent_service_session`, fingerprint
++de evento/sessão e ator na chave única existente. Replay histórico com/sem reentrada
++não resolve novamente nem altera entradas/chamadas posteriores. expiresAt não
++implementa expurgo. E07.1–E07.5 preservadas; apenas provider/export adicionado no
++módulo comum. Sem HTTP, telas, migrations, commit, push ou merge.
++
++## Validação inicial pelo Codex
++
++- **202/202 unitários aprovados**, incluindo **20 novos E07.6**, zero falhas/skips.
++- `typecheck:test`, lint e build aprovados, exit 0.
++- **25 testes PostgreSQL escritos, não executados**: reentrada FIFO/bigint/ponteiro,
++  cortes/fila pausada/capacidade, permissões/vínculos, retries, disputas reais com
++  E07.3–E07.5 nas duas ordens, liberação de estação, conclusões preservadas e
++  rollback após resolver/fechar/inserir/apontar/concluir idempotência. Barreiras
++  verificam bloqueio real por pg_blocking_pids; teste adicional cruza o corte
++  entre a resolução e o INSERT, com relógio do PostgreSQL.
++
++As três URLs explícitas estavam ausentes. Nenhum banco foi acessado ou .env
++carregado, incluindo .env.neon.local. Unitários usaram driver simulado, dotenv
++desabilitado e URL fictícia sem conexão; tsx fora da sandbox pela limitação
++uv_os_get_passwd conhecida. Corridas PostgreSQL permanecem pendentes.
++
++## Execução manual
++
++Usar banco local de testes já preparado e substituir as credenciais locais abaixo.
++O preflight exige três URLs idênticas, sem parâmetros, no destino indicado.
++Fixtures/limpeza se limitam aos UUIDs próprios. Sem migrations, seed ou reset.
++
++```powershell
++Set-Location C:\DoJob\ProgramacaoMobile\backend
++$env:EVENTS_TEST_DATABASE_URL = 'postgresql://USUARIO:SENHA@127.0.0.1:55432/arenago_events_test'
++$env:DATABASE_URL = $env:EVENTS_TEST_DATABASE_URL
++$env:DATABASE_DIRECT_URL = $env:EVENTS_TEST_DATABASE_URL
++$env:DOTENV_CONFIG_PATH = 'NUL'
++.\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test --test-concurrency=1 test/integration/absent.integration.test.ts
++if ($LASTEXITCODE -ne 0) { throw 'Revisar E07.6 antes da regressão.' }
++npm.cmd run test:integration
++if ($LASTEXITCODE -ne 0) { throw 'Revisar regressão PostgreSQL.' }
++```
++
++## Correção pontual — 03/11/2026
++
++O responsável informou 7/25 PostgreSQL aprovados e 18 falhas: 17 TypeErrors na
++prontidão e uma colisão unique na fixture destinada a testar FK.
++
++O driver Drizzle instalado mantém timestamptz como string em SQL bruto; a tipagem
++Date não executava conversão. AbsentService agora lê os três horários como epoch
++double precision e os converte com instant(), conforme E07.2, antes do helper de
++prontidão. Unitários passam a simular esse retorno e cobrem valores inválidos.
++Helper compartilhado, locks e os dois clock_timestamp() decisivos preservados.
++
++A fixture agora cria estação livre de outra experiência, confirma ausência de
++pending e exige 23503 da constraint fk_service_sessions_station_experience.
++Não aceita 23505 nem altera constraints. Permanecem 25 testes PostgreSQL.
++
++Nesta correção: **203/203 unitários aprovados**, typecheck, lint e build exit 0.
++Reexecução dos 25 PostgreSQL e regressão completa **pendentes**: as três URLs
++locais explícitas continuam ausentes. Nenhum .env ou banco acessado; comandos
++acima permanecem válidos. Sem commit/push ou alterações em E07.1–E07.5.

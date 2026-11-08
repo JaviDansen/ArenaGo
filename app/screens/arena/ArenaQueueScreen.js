@@ -32,6 +32,7 @@ export default function ArenaQueueScreen() {
   return (
     <ScreenContainer>
       <Text style={styles.eventName}>BEAST Arena</Text>
+      <Text>Modo demonstração: ações não são enviadas ao servidor.</Text>
       <Text style={styles.title}>Você está na fila</Text>
       <Text style={styles.positionLabel}>Sua posição:</Text>
       <Text style={styles.position}>{participation.queuePosition}º</Text>

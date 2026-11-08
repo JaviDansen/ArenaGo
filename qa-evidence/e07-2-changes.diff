@@ -1,0 +1,1053 @@
+diff --git a/backend/src/events/events.module.ts b/backend/src/events/events.module.ts
+index 6e9cc20..f8fce7e 100644
+--- a/backend/src/events/events.module.ts
++++ b/backend/src/events/events.module.ts
+@@ -3,11 +3,12 @@ import { DatabaseModule } from "../database/database.module";
+ import { EventsService } from "./events.service";
+ import { ExperiencesService } from "./experiences.service";
+ import { QueueEntryService } from "./queue-entry.service";
++import { QueueStateService } from "./queue-state.service";
+ 
+ /** Agrupa os serviços de Events e reutiliza o acesso PostgreSQL compartilhado. */
+ @Module({
+   imports: [DatabaseModule],
+-  providers: [EventsService, ExperiencesService, QueueEntryService],
+-  exports: [EventsService, ExperiencesService, QueueEntryService],
++  providers: [EventsService, ExperiencesService, QueueEntryService, QueueStateService],
++  exports: [EventsService, ExperiencesService, QueueEntryService, QueueStateService],
+ })
+ export class EventsModule {}
+diff --git a/docs/ARQUITETURA_BACKEND_ARENAGO.md b/docs/ARQUITETURA_BACKEND_ARENAGO.md
+index d5c591a..b49bb82 100644
+--- a/docs/ARQUITETURA_BACKEND_ARENAGO.md
++++ b/docs/ARQUITETURA_BACKEND_ARENAGO.md
+@@ -986,7 +986,7 @@ Os testes funcionais de API/Expo deste capítulo seguem não executados. Os caso
+ 
+ **Conferência do schema atual, sem alteração:** `backend/src/database/schema/participations.schema.ts` e `backend/drizzle/0004_event_operations.sql` permitem somente `waiting|called|closed` em `queue_entries` e `pending|completed|absent|canceled` em `service_sessions`. Portanto, o encerramento da entrada usa o estado existente `closed`; a resolução por desistência de um atendimento ainda `pending` usa o estado existente `canceled`, sem inventar estado `withdrawn` ou equivalente. `closed` exige `closed_at` e `close_reason`; `canceled` exige `resolved_at` e `cancel_reason`, respeitando os demais checks e FKs. `close_reason` e `cancel_reason` são `varchar(40)` sem enum ou CHECK de lista de motivos. Isso oferece campos para identificar a desistência, mas **não significa que um código de motivo específico já tenha sido definido ou implementado**: os valores concretos, autoria da resolução, resultados/erros e contrato ficam para E07.3. Nenhuma migration foi criada ou presumida necessária neste complemento.
+ 
+-**Limite da entrega:** E07.1 continua implementando somente ingresso, E07.2 permanece consulta futura e a saída será E07.3. Este registro de negócio/requisitos não altera serviços, tipos ou testes nem valida a futura operação no PostgreSQL.
++**Limite do complemento C-15:** E07.1 continua implementando somente ingresso e a saída será E07.3. A consulta E07.2, futura naquele complemento documental, agora possui implementação interna descrita na §16.5. O registro C-15 de negócio/requisitos não implementa nem valida a futura operação de saída no PostgreSQL.
+ 
+ ### 16.3 `GET /events/:eventId/experiences` — visão do participante
+ 
+@@ -1050,7 +1050,9 @@ Os campos `available` expressam configuração manual da estação, **não neces
+ 
+ ### 16.5 `GET /participations/:id/queue` — fila ou chamada atual
+ 
+-**Bearer + titular.** Consulta não cria nem remove entradas. O backend deve computar `position` pelo número de entradas `waiting` à frente da mesma experiência (e ordem), sempre que `status='waiting'`. Entrada `called` deixa de ocupar posição na espera; o participante verá a estação escolhida. O histórico é consultado pelas participações/atendimentos, não por esta rota de estado corrente.
++**Contrato HTTP proposto; implementação interna E07.2:** `QueueStateService.getParticipationQueue(userId, participationId)`, sem controller/rota. Retorna `kind='access_denied'` indistinguível para participação ausente/alheia ou `kind='ok'` com `participationId`, `observedAt` e `currentQueueEntry` anulável. Consulta não cria nem remove entradas. Em uma transação `REPEATABLE READ READ ONLY`, duas consultas sem locks de linha verificam titularidade/evento e depois ponteiro, entrada, experiência, atendimento/estação e posição no mesmo snapshot. `observedAt` vem de `statement_timestamp()` na primeira leitura, como na E06. `position` conta as entradas `waiting` da mesma experiência/evento com ordem **menor ou igual** à da entrada atual, incluindo a própria pessoa (posição inicial 1). `called` e `closed` não contam; `queueOrder` continua string decimal exata, inclusive no retorno `called`, e contagens fora do intervalo seguro de number geram falha explícita. Histórico e replay E07.1 não são estado corrente.
++
++**Projeção de encerramento E07.2:** corte oficial/início controlado de novas inscrições e perda de capacidade C-14 não suprimem espera/chamada preexistente na janela residual. No instante `observedAt`, `events.status='closed'` ou chegada ao menor prazo operacional/administrativo efetivo projeta `currentQueueEntry:null`; no modo imediato, o prazo administrativo coincide com o instante solicitado. Não aguardar o job de limpeza para deixar de apresentar estado operacional vigente e não executar limpeza nesta leitura. Titular externo/terminal sem fila também recebe sucesso com null. Ponteiro ausente com entrada corrente, ponteiro para entrada fechada, vínculos incoerentes ou chamada sem pending válido enquanto operacionalmente vigente geram erro interno de integridade, sem inventar estados. Null não autoriza ingresso nem reativa participação; E04/E06 e as guardas de mutação continuam necessários. Ver `E07_2_IMPLEMENTACAO.md` para o contrato efetivo e limites.
+ 
+ **Resposta em espera:**
+ 
+@@ -1081,6 +1083,7 @@ Os campos `available` expressam configuração manual da estação, **não neces
+     "experienceId": "550e8400-e29b-41d4-a716-446655440301",
+     "experienceName": "Just Dance",
+     "status": "called",
++    "queueOrder": "24",
+     "position": null,
+     "serviceSession": {
+       "id": "550e8400-e29b-41d4-a716-446655440601",
+diff --git a/docs/PLANEJAMENTO_ARENAGO.md b/docs/PLANEJAMENTO_ARENAGO.md
+index 22191a5..3d64dba 100644
+--- a/docs/PLANEJAMENTO_ARENAGO.md
++++ b/docs/PLANEJAMENTO_ARENAGO.md
+@@ -318,7 +318,7 @@ A especificação da Task 6.1 (v1.1, 16/10/2026) fornece contratos e sugestões
+ - A **Arquitetura Backend v0.6.17** (`ARQUITETURA_BACKEND_ARENAGO.md`) descreve as estruturas, contratos candidatos e resultados técnicos. Os endpoints HTTP seguem propostos e não implementados; a C-15 exige contrato futuro específico para a desistência da fila interna, reservado à E07.3.
+ - O `backend/README.md` é a referência operacional de execução local; o README do Expo descreve o aplicativo. Não repetir aqui comandos completos de instalação.
+ - Os relatórios experimentais v0.6.11/v0.6.12 e a Task 6.1 são **fontes históricas**, não documentos concorrentes que substituam estas duas fontes canônicas.
+-- **Trabalho atual (30/10/2026):** fechamento da E07.1 antes do commit. A revalidação da versão corrigida foi concluída pelo responsável em `127.0.0.1:55432/arenago_events_test`: **21/21 testes específicos e 129/129 da regressão completa aprovados**, zero falhas, cancelamentos ou testes ignorados. Na rodada corrigida, o Codex aprovou 108/108 unitários, typecheck, lint e build. Um P2 e três P3 da auditoria anterior foram tratados em testes/documentação, sem defeito funcional confirmado no serviço. Preservados os resultados históricos 20/20 e 128/128 e a decisão C-15; E07.2/E07.3 permanecem fora desta entrega. Git é controlado manualmente pelo responsável; sem staging, commit ou push neste fechamento.
++- **Trabalho atual (30/10/2026):** implementação interna da E07.2 sobre o HEAD `5d7fae1217eb28a4be2610660245a6b8dacc4f7a`, posterior ao commit da E07.1. Consulta de fila/posição por titular com snapshot somente leitura, sem endpoint HTTP. C-14 não apaga entradas existentes e C-15 continua reservada à saída futura E07.3. Validações e eventual pendência PostgreSQL constam de `E07_2_IMPLEMENTACAO.md`. A revisão técnica consolidada E07.1–E07.3 ocorrerá somente após implementar E07.3, por decisão do responsável; esta rodada não realiza auditoria independente nem commit/push automático. Resultados e fechamento anteriores da E07.1 permanecem no histórico abaixo.
+ 
+ ## 12. Registro sintético desta revisão
+ 
+diff --git a/backend/src/events/queue-state.service.ts b/backend/src/events/queue-state.service.ts
+new file mode 100644
+index 0000000..7998535
+--- /dev/null
++++ b/backend/src/events/queue-state.service.ts
+@@ -0,0 +1,157 @@
++import { Inject, Injectable } from "@nestjs/common";
++import { sql } from "drizzle-orm";
++import type { NodePgDatabase } from "drizzle-orm/node-postgres";
++import { DRIZZLE_DATABASE } from "../database/database.module";
++import type * as schema from "../database/schema";
++import type { ParticipationQueueResult } from "./queue-state.types";
++
++interface AccessRow extends Record<string, unknown> {
++  id: string;
++  eventId: string;
++  participationStatus: string;
++  currentId: string | null;
++  loadedEventId: string | null;
++  eventStatus: string;
++  operationalDeadlineMs: number;
++  closureMode: string | null;
++  closureRequestedMs: number | null;
++  adminDeadlineMs: number | null;
++  observedAtMs: number;
++}
++
++interface QueueRow extends Record<string, unknown> {
++  currentCount: string;
++  id: string | null;
++  experienceId: string | null;
++  loadedExperienceId: string | null;
++  experienceName: string | null;
++  status: string | null;
++  queueOrder: string | null;
++  position: string | null;
++  sessionId: string | null;
++  sessionExperienceId: string | null;
++  sessionStatus: string | null;
++  calledAtMs: number | null;
++  stationId: string | null;
++  stationExperienceId: string | null;
++  stationLabel: string | null;
++}
++
++/** Erro interno; não inventar estado válido nem divulgar identificadores em inconsistência. */
++export class QueueStateIntegrityError extends Error {
++  constructor(detail: string) { super(`Integridade da fila interna: ${detail}`); this.name = "QueueStateIntegrityError"; }
++}
++
++function ensure(condition: unknown, detail: string): asserts condition {
++  if (!condition) throw new QueueStateIntegrityError(detail);
++}
++
++function instant(ms: number, field: string): Date {
++  ensure(typeof ms === "number" && Number.isFinite(ms), `${field} inválido.`);
++  const date = new Date(ms);
++  ensure(Number.isFinite(date.getTime()), `${field} fora do intervalo de Date.`);
++  return date;
++}
++
++function count(value: string, positive: boolean): number {
++  ensure(typeof value === "string" && /^(0|[1-9]\d*)$/.test(value), "contagem decimal inválida.");
++  const exact = BigInt(value);
++  ensure(exact <= BigInt(Number.MAX_SAFE_INTEGER) && (!positive || exact > 0n), "contagem fora do intervalo seguro.");
++  return Number(exact);
++}
++
++/** E07.2: duas leituras no mesmo snapshot; sem locks de linha, limpeza ou mutações. */
++@Injectable()
++export class QueueStateService {
++  constructor(@Inject(DRIZZLE_DATABASE) private readonly database: NodePgDatabase<typeof schema>) {}
++
++  /** UUIDs e userId fornecidos por chamador confiável; não substitui autenticação HTTP. */
++  async getParticipationQueue(userId: string, participationId: string): Promise<ParticipationQueueResult> {
++    return this.database.transaction(async (tx): Promise<ParticipationQueueResult> => {
++      const access = await tx.execute<AccessRow>(sql`
++        SELECT p.id, p.event_id AS "eventId", p.status AS "participationStatus",
++          p.current_queue_entry_id AS "currentId", e.id AS "loadedEventId", e.status AS "eventStatus",
++          (EXTRACT(EPOCH FROM e.operational_deadline_at)*1000)::double precision AS "operationalDeadlineMs",
++          e.closure_mode AS "closureMode",
++          (EXTRACT(EPOCH FROM e.closure_requested_at)*1000)::double precision AS "closureRequestedMs",
++          (EXTRACT(EPOCH FROM e.admin_deadline_at)*1000)::double precision AS "adminDeadlineMs",
++          (EXTRACT(EPOCH FROM statement_timestamp())*1000)::double precision AS "observedAtMs"
++        FROM participations p LEFT JOIN events e ON e.id=p.event_id
++        WHERE p.id=${participationId} AND p.user_id=${userId}
++      `);
++      if (!access.rows.length) return { kind: "access_denied" };
++      ensure(access.rows.length === 1, "participação duplicada.");
++      const owner = access.rows[0];
++      ensure(owner.loadedEventId === owner.eventId && owner.loadedEventId !== null, "evento incoerente.");
++      ensure(["waiting", "active", "finished", "canceled"].includes(owner.participationStatus), "estado da participação desconhecido.");
++      ensure(["scheduled", "open", "closing", "closed"].includes(owner.eventStatus), "estado do evento desconhecido.");
++      const observedAt = instant(owner.observedAtMs, "observedAt");
++      let deadline = instant(owner.operationalDeadlineMs, "prazo operacional").getTime();
++      if (owner.closureMode === null) {
++        ensure(owner.closureRequestedMs === null && owner.adminDeadlineMs === null, "fechamento administrativo incompleto.");
++      } else {
++        ensure(owner.closureMode === "immediate" || owner.closureMode === "controlled", "modo administrativo desconhecido.");
++        ensure(owner.closureRequestedMs !== null && owner.adminDeadlineMs !== null, "fechamento administrativo incompleto.");
++        const requested = instant(owner.closureRequestedMs, "instante administrativo").getTime();
++        const adminDeadline = instant(owner.adminDeadlineMs, "prazo administrativo").getTime();
++        ensure(owner.closureMode === "immediate" ? requested === adminDeadline : requested < adminDeadline,
++          "prazo administrativo incoerente.");
++        deadline = Math.min(deadline, adminDeadline);
++      }
++      const ended = owner.eventStatus === "closed" || observedAt.getTime() >= deadline;
++
++      const result = await tx.execute<QueueRow>(sql`
++        SELECT q.id, q.experience_id AS "experienceId", x.id AS "loadedExperienceId", x.name AS "experienceName",
++          q.status, q.queue_order::text AS "queueOrder",
++          (SELECT count(*)::text FROM queue_entries c
++            WHERE c.participation_id=p.id AND c.status IN ('waiting','called')) AS "currentCount",
++          CASE WHEN q.status='waiting' THEN (SELECT count(*)::text FROM queue_entries w
++            WHERE w.event_id=p.event_id AND w.experience_id=q.experience_id
++              AND w.status='waiting' AND w.queue_order <= q.queue_order) END AS position,
++          s.id AS "sessionId", s.experience_id AS "sessionExperienceId", s.status AS "sessionStatus",
++          (EXTRACT(EPOCH FROM s.called_at)*1000)::double precision AS "calledAtMs",
++          t.id AS "stationId", t.experience_id AS "stationExperienceId", t.label AS "stationLabel"
++        FROM participations p
++        LEFT JOIN queue_entries q ON q.id=p.current_queue_entry_id AND q.participation_id=p.id AND q.event_id=p.event_id
++        LEFT JOIN experiences x ON x.id=q.experience_id AND x.event_id=q.event_id
++        LEFT JOIN service_sessions s ON s.queue_entry_id=q.id
++        LEFT JOIN stations t ON t.id=s.station_id
++        WHERE p.id=${participationId} AND p.user_id=${userId} AND p.event_id=${owner.eventId}
++      `);
++      ensure(result.rows.length === 1, "participação mudou dentro do snapshot ou atendimento duplicado.");
++      const row = result.rows[0];
++      const currentCount = count(row.currentCount, false);
++      const empty: ParticipationQueueResult = { kind: "ok", participationId: owner.id, observedAt, currentQueueEntry: null };
++      if (owner.currentId === null) {
++        ensure(row.id === null && currentCount === 0, "entrada corrente sem ponteiro.");
++        return empty;
++      }
++      ensure(row.id === owner.currentId && currentCount === 1, "ponteiro não corresponde à entrada corrente.");
++      ensure(row.status === "waiting" || row.status === "called", "ponteiro para entrada encerrada ou desconhecida.");
++      ensure(row.experienceId !== null && row.loadedExperienceId === row.experienceId
++        && typeof row.experienceName === "string", "experiência incoerente.");
++      ensure(typeof row.queueOrder === "string" && /^[1-9]\d*$/.test(row.queueOrder), "ordem histórica inválida.");
++      if (row.sessionId !== null) {
++        ensure(row.sessionExperienceId === row.experienceId && row.stationId !== null
++          && row.stationExperienceId === row.experienceId && typeof row.stationLabel === "string", "atendimento/estação incoerente.");
++      }
++      // Projeção no instante observedAt: fechamento lógico prevalece sobre limpeza atrasada.
++      // Não encerrar linhas, resolver atendimentos ou alterar participação nesta consulta.
++      if (ended) return empty;
++      ensure(owner.participationStatus === "active", "participação não ativa com entrada corrente.");
++      const entry = { id: row.id, experienceId: row.experienceId, experienceName: row.experienceName, queueOrder: row.queueOrder };
++      if (row.status === "waiting") {
++        ensure(row.sessionId === null, "entrada waiting já possui atendimento.");
++        ensure(row.position !== null, "posição ausente.");
++        return { kind: "ok", participationId: owner.id, observedAt,
++          currentQueueEntry: { ...entry, status: "waiting", position: count(row.position, true), serviceSession: null } };
++      }
++      ensure(row.position === null && row.sessionId !== null && row.sessionStatus === "pending"
++        && row.calledAtMs !== null && row.stationId !== null && row.stationLabel !== null, "chamada sem atendimento pending válido.");
++      return { kind: "ok", participationId: owner.id, observedAt,
++        currentQueueEntry: { ...entry, status: "called", position: null,
++          serviceSession: { id: row.sessionId, status: "pending", calledAt: instant(row.calledAtMs, "calledAt"),
++            station: { id: row.stationId, label: row.stationLabel } } } };
++    }, { isolationLevel: "repeatable read", accessMode: "read only" });
++  }
++}
+diff --git a/backend/src/events/queue-state.types.ts b/backend/src/events/queue-state.types.ts
+new file mode 100644
+index 0000000..885b8bc
+--- /dev/null
++++ b/backend/src/events/queue-state.types.ts
+@@ -0,0 +1,31 @@
++interface QueueEntryIdentity {
++  id: string;
++  experienceId: string;
++  experienceName: string;
++  /** Ordem histórica exata, não a posição dinâmica. */
++  queueOrder: string;
++}
++
++export type CurrentParticipationQueueEntry =
++  | (QueueEntryIdentity & { status: "waiting"; position: number; serviceSession: null })
++  | (QueueEntryIdentity & {
++      status: "called";
++      position: null;
++      serviceSession: {
++        id: string;
++        status: "pending";
++        calledAt: Date;
++        station: { id: string; label: string };
++      };
++    });
++
++export type ParticipationQueueResult =
++  | { kind: "access_denied" }
++  | {
++      kind: "ok";
++      participationId: string;
++      /** Instante PostgreSQL da primeira consulta do snapshot, serializável como ISO 8601. */
++      observedAt: Date;
++      /** Sem fila ou projeção após encerramento operacional efetivo; nunca replay histórico. */
++      currentQueueEntry: CurrentParticipationQueueEntry | null;
++    };
+diff --git a/backend/test/unit/queue-state.test.ts b/backend/test/unit/queue-state.test.ts
+new file mode 100644
+index 0000000..d14f5c6
+--- /dev/null
++++ b/backend/test/unit/queue-state.test.ts
+@@ -0,0 +1,184 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { drizzle } from "drizzle-orm/node-postgres";
++import type { Client } from "pg";
++import * as schema from "../../src/database/schema";
++import { QueueStateIntegrityError, QueueStateService } from "../../src/events/queue-state.service";
++
++const at = new Date("2026-10-30T15:00:00Z");
++const owner = {
++  id: "participation", eventId: "event", loadedEventId: "event", participationStatus: "active", currentId: "entry",
++  eventStatus: "open", operationalDeadlineMs: at.getTime()+3600_000,
++  closureMode: null, closureRequestedMs: null, adminDeadlineMs: null, observedAtMs: at.getTime(),
++};
++const waiting = {
++  currentCount: "1", id: "entry", experienceId: "experience", loadedExperienceId: "experience", experienceName: "Just Dance",
++  status: "waiting", queueOrder: "9007199254741001", position: "3",
++  sessionId: null, sessionExperienceId: null, sessionStatus: null, calledAtMs: null,
++  stationId: null, stationExperienceId: null, stationLabel: null,
++};
++const called = { ...waiting, status: "called", position: null,
++  sessionId: "session", sessionExperienceId: "experience", sessionStatus: "pending", calledAtMs: at.getTime()-1000,
++  stationId: "station", stationExperienceId: "experience", stationLabel: "Estação 2" };
++const empty = { ...waiting, id: null, experienceId: null, loadedExperienceId: null, experienceName: null,
++  currentCount: "0", queueOrder: null, status: null, position: null };
++
++function fixture(access: Record<string, unknown> | false = {}, row: Record<string, unknown> = {}, duplicate = false) {
++  const queries: Array<{ text: string; params: unknown[] }> = [];
++  const client = {
++    async query(config: { text: string }, params: unknown[]) {
++      queries.push({ text: config.text, params });
++      if (config.text.includes("statement_timestamp()")) return { rows: access === false ? [] : [{ ...owner, ...access }] };
++      if (config.text.includes('AS "currentCount"')) return { rows: duplicate ? [{ ...waiting, ...row }, { ...waiting, ...row }] : [{ ...waiting, ...row }] };
++      return { rows: [] };
++    },
++  };
++  return { service: new QueueStateService(drizzle(client as unknown as Client, { schema })), queries };
++}
++async function query(access: Record<string, unknown> = {}, row: Record<string, unknown> = {}) {
++  return fixture(access, row).service.getParticipationQueue("user", "participation");
++}
++
++test("E07.2 acesso ausente/alheio é neutro e não consulta fila", async () => {
++  const { service, queries } = fixture(false);
++  assert.deepEqual(await service.getParticipationQueue("other", "missing"), { kind: "access_denied" });
++  assert.equal(queries.length, 3); assert.equal(queries.at(-1)?.text, "commit");
++  assert.deepEqual(queries[1].params, ["missing", "other"]);
++  assert.equal(queries.some(q => q.text.includes("FROM queue_entries")), false);
++});
++
++test("E07.2 waiting tem contrato exato, posição positiva e ordem bigint sem perda", async () => {
++  const result = await query();
++  assert.deepEqual(result, { kind: "ok", participationId: "participation", observedAt: at,
++    currentQueueEntry: { id: "entry", experienceId: "experience", experienceName: "Just Dance",
++      status: "waiting", queueOrder: waiting.queueOrder, position: 3, serviceSession: null } });
++  assert.equal(JSON.parse(JSON.stringify(result)).observedAt, at.toISOString());
++});
++
++test("E07.2 called apresenta somente atendimento pending e estação escolhida", async () => {
++  assert.deepEqual(await query({}, called), { kind: "ok", participationId: "participation", observedAt: at,
++    currentQueueEntry: { id: "entry", experienceId: "experience", experienceName: "Just Dance", queueOrder: waiting.queueOrder,
++      status: "called", position: null, serviceSession: { id: "session", status: "pending",
++        calledAt: new Date(called.calledAtMs), station: { id: "station", label: "Estação 2" } } } });
++});
++
++test("E07.2 titular ativo, externo ou terminal sem entrada corrente recebe null", async () => {
++  for (const participationStatus of ["active", "waiting", "finished", "canceled"]) {
++    assert.deepEqual(await query({ participationStatus, currentId: null }, empty),
++      { kind: "ok", participationId: "participation", observedAt: at, currentQueueEntry: null });
++  }
++});
++
++test("E07.2 posição SQL conta somente waiting da mesma experiência/evento até a própria ordem", async () => {
++  const { service, queries } = fixture(); await service.getParticipationQueue("user", "participation");
++  const sql = queries[2].text;
++  assert.match(sql, /w.event_id=p.event_id AND w.experience_id=q.experience_id/);
++  assert.match(sql, /w.status='waiting' AND w.queue_order <= q.queue_order/);
++  assert.match(sql, /q.id=p.current_queue_entry_id AND q.participation_id=p.id AND q.event_id=p.event_id/);
++  assert.doesNotMatch(sql, /ORDER BY.*DESC|external_queue_order/i);
++});
++
++test("E07.2 contagem máxima segura continua number e ordem permanece string", async () => {
++  const result = await query({}, { position: String(Number.MAX_SAFE_INTEGER), queueOrder: "9223372036854775807" });
++  assert.ok(result.kind === "ok" && result.currentQueueEntry?.status === "waiting");
++  assert.equal(result.currentQueueEntry.position, Number.MAX_SAFE_INTEGER);
++  assert.equal(result.currentQueueEntry.queueOrder, "9223372036854775807");
++});
++
++test("E07.2 rejeita posição zero, negativa, malformada ou insegura", async () => {
++  for (const position of ["0", "-1", "01", "1.5", "9007199254740992", "NaN", null]) {
++    await assert.rejects(query({}, { position }), QueueStateIntegrityError);
++  }
++});
++
++test("E07.2 rejeita ordens históricas inválidas sem conversão silenciosa", async () => {
++  for (const queueOrder of ["0", "-1", "1.5", " 1", "01", null, 9007199254741000]) {
++    await assert.rejects(query({}, { queueOrder }), QueueStateIntegrityError);
++  }
++});
++
++test("E07.2 relógio e prazos inválidos são falhas explícitas", async () => {
++  for (const value of [NaN, Infinity, 9e15, null]) {
++    await assert.rejects(query({ observedAtMs: value }), QueueStateIntegrityError);
++    await assert.rejects(query({ operationalDeadlineMs: value }), QueueStateIntegrityError);
++  }
++});
++
++test("E07.2 evento ausente, estados desconhecidos ou fechamento incoerente falham", async () => {
++  for (const changes of [{ loadedEventId: null }, { loadedEventId: "other" }, { eventStatus: "unknown" },
++    { participationStatus: "unknown" }, { adminDeadlineMs: at.getTime() },
++    { closureMode: "controlled" }, { closureMode: "other" },
++    { closureMode: "immediate", closureRequestedMs: at.getTime(), adminDeadlineMs: at.getTime()+1 }]) {
++    await assert.rejects(query(changes), QueueStateIntegrityError);
++  }
++});
++
++test("E07.2 ponteiro ausente/quebrado, entrada fechada ou multiplicidade não viram estado válido", async () => {
++  await assert.rejects(query({ currentId: null }), QueueStateIntegrityError);
++  for (const changes of [{ id: null }, { id: "other" }, { status: "closed", currentCount: "0" },
++    { status: "unknown" }, { currentCount: "2" }, { currentCount: "9007199254740992" }]) {
++    await assert.rejects(query({}, changes), QueueStateIntegrityError);
++  }
++  await assert.rejects(fixture({}, {}, true).service.getParticipationQueue("user", "participation"), QueueStateIntegrityError);
++});
++
++test("E07.2 vínculos de experiência, atendimento e estação são verificados", async () => {
++  for (const changes of [{ loadedExperienceId: null }, { loadedExperienceId: "other" }, { experienceName: null }]) {
++    await assert.rejects(query({}, changes), QueueStateIntegrityError);
++  }
++  for (const changes of [{ sessionExperienceId: "other" }, { stationExperienceId: "other" }, { stationId: null }, { stationLabel: null }]) {
++    await assert.rejects(query({}, { ...called, ...changes }), QueueStateIntegrityError);
++  }
++});
++
++test("E07.2 called exige pending, estação e horário válidos; waiting não pode ter atendimento", async () => {
++  for (const changes of [{ sessionId: null }, { sessionStatus: "completed" }, { sessionStatus: "absent" },
++    { sessionStatus: "canceled" }, { calledAtMs: NaN }, { calledAtMs: null }, { position: "1" }]) {
++    await assert.rejects(query({}, { ...called, ...changes }), QueueStateIntegrityError);
++  }
++  await assert.rejects(query({}, { ...called, status: "waiting", position: "1" }), QueueStateIntegrityError);
++});
++
++test("E07.2 participação não ativa com fila vigente é incoerente", async () => {
++  for (const participationStatus of ["waiting", "finished", "canceled"]) {
++    await assert.rejects(query({ participationStatus }), QueueStateIntegrityError);
++  }
++});
++
++test("E07.2 corte de novos ingressos e indisponibilidade não removem espera/chamada residual", async () => {
++  for (const row of [waiting, called]) {
++    const result = await query({ eventStatus: "closing", closureMode: "controlled",
++      closureRequestedMs: at.getTime()-60_000, adminDeadlineMs: at.getTime()+60_000,
++      officialEndsAt: at, available: false, staff: false }, row);
++    assert.ok(result.kind === "ok"); assert.equal(result.currentQueueEntry?.status, row.status);
++  }
++});
++
++test("E07.2 prazo definitivo inclusivo e fechamento imediato projetam null sem limpar linhas", async () => {
++  for (const access of [{ operationalDeadlineMs: at.getTime() }, { eventStatus: "closed" },
++    { closureMode: "controlled", closureRequestedMs: at.getTime()-60_000, adminDeadlineMs: at.getTime() },
++    { closureMode: "immediate", closureRequestedMs: at.getTime(), adminDeadlineMs: at.getTime() }]) {
++    for (const row of [waiting, called]) {
++      const result = await query(access, row); assert.ok(result.kind === "ok"); assert.equal(result.currentQueueEntry, null);
++    }
++  }
++});
++
++test("E07.2 lista fechada de campos não expõe dados extras privados", async () => {
++  const result = await query({ email: "private", userId: "private", profile: "private" },
++    { ...called, calledByUserId: "private", passwordHash: "private", games: "private", answers: "private" });
++  assert.equal(JSON.stringify(result).includes("private"), false);
++  assert.ok(result.kind === "ok"); assert.deepEqual(Object.keys(result).sort(), ["currentQueueEntry", "kind", "observedAt", "participationId"]);
++});
++
++test("E07.2 usa duas leituras na mesma transação READ ONLY; integridade aborta sem escrita", async () => {
++  for (const invalid of [false, true]) {
++    const { service, queries } = fixture({}, invalid ? { currentCount: "2" } : {});
++    if (invalid) await assert.rejects(service.getParticipationQueue("user", "participation"), QueueStateIntegrityError);
++    else await service.getParticipationQueue("user", "participation");
++    assert.equal(queries[0].text, "begin isolation level repeatable read read only");
++    assert.equal(queries.length, 4); assert.equal(queries.at(-1)?.text, invalid ? "rollback" : "commit");
++    assert.deepEqual(queries[2].params, ["participation", "user", "event"]);
++    assert.equal(queries.some(q => /\b(insert|update|delete|for share|for update)\b/i.test(q.text)), false);
++  }
++});
+diff --git a/backend/test/integration/queue-state.integration.test.ts b/backend/test/integration/queue-state.integration.test.ts
+new file mode 100644
+index 0000000..8f1ed23
+--- /dev/null
++++ b/backend/test/integration/queue-state.integration.test.ts
+@@ -0,0 +1,378 @@
++import assert from "node:assert/strict";
++import { randomUUID } from "node:crypto";
++import { devNull } from "node:os";
++import { after, before, test } from "node:test";
++import { sql } from "drizzle-orm";
++import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
++import { Pool, type PoolClient } from "pg";
++import * as schema from "../../src/database/schema";
++import type { DatabaseTransactionExecutor } from "../../src/database/database-executor";
++import type { QueueStateService } from "../../src/events/queue-state.service";
++import type { QueueEntryService } from "../../src/events/queue-entry.service";
++import { assertSafeTestDatabase } from "./test-db-guard";
++
++// Antes de importar qualquer serviço/configuração. Sem fallback .env ou URL de outro banco.
++const urls = ["DATABASE_URL", "DATABASE_DIRECT_URL", "EVENTS_TEST_DATABASE_URL"].map(name => {
++  const value = assertSafeTestDatabase(process.env[name]);
++  const url = new URL(value);
++  if (url.hostname !== "127.0.0.1" || url.port !== "55432" || url.pathname !== "/arenago_events_test"
++    || url.search || url.hash || !url.username) throw new Error(`${name}: destino local explícito obrigatório, sem parâmetros.`);
++  return value;
++});
++if (urls.some(url => url !== urls[0])) throw new Error("As três URLs explícitas precisam ser idênticas.");
++process.env.DOTENV_CONFIG_PATH = devNull;
++const servicePool = new Pool({ connectionString: urls[2], ssl: false, max: 4, connectionTimeoutMillis: 2000, statement_timeout: 8000, lock_timeout: 5000 });
++const fixturePool = new Pool({ connectionString: urls[2], ssl: false, max: 4, connectionTimeoutMillis: 2000, statement_timeout: 8000, lock_timeout: 5000 });
++const database = drizzle(servicePool, { schema });
++let service: QueueStateService;
++let joinService: QueueEntryService;
++let makeService: (db: NodePgDatabase<typeof schema>) => QueueStateService;
++const ids = { events: [] as string[], users: [] as string[] };
++const privateNames: string[] = [];
++const baseOrder = 9007199254741000n;
++
++before(async () => {
++  assert.equal((await fixturePool.query("SELECT current_database() AS name")).rows[0].name, "arenago_events_test");
++  const { QueueStateService } = await import("../../src/events/queue-state.service");
++  const { QueueEntryService } = await import("../../src/events/queue-entry.service");
++  const { EventsService } = await import("../../src/events/events.service");
++  makeService = db => new QueueStateService(db);
++  service = makeService(database); joinService = new QueueEntryService(database, new EventsService(database));
++});
++
++after(async () => {
++  const errors: unknown[] = [];
++  try {
++    if (ids.events.length || ids.users.length) {
++      const c = await fixturePool.connect();
++      try {
++        await c.query("BEGIN");
++        await c.query("UPDATE participations SET current_queue_entry_id=NULL WHERE event_id=ANY($1::uuid[])", [ids.events]);
++        await c.query("DELETE FROM service_sessions s USING queue_entries q WHERE s.queue_entry_id=q.id AND q.event_id=ANY($1::uuid[])", [ids.events]);
++        await c.query("DELETE FROM queue_entries WHERE event_id=ANY($1::uuid[])", [ids.events]);
++        await c.query("DELETE FROM participations WHERE event_id=ANY($1::uuid[])", [ids.events]);
++        await c.query("DELETE FROM stations s USING experiences e WHERE s.experience_id=e.id AND e.event_id=ANY($1::uuid[])", [ids.events]);
++        await c.query("DELETE FROM experiences WHERE event_id=ANY($1::uuid[])", [ids.events]);
++        await c.query("DELETE FROM user_roles WHERE event_id=ANY($1::uuid[])", [ids.events]);
++        await c.query("DELETE FROM idempotency_operations WHERE actor_user_id=ANY($1::uuid[])", [ids.users]);
++        await c.query("DELETE FROM events WHERE id=ANY($1::uuid[])", [ids.events]);
++        await c.query("DELETE FROM users WHERE id=ANY($1::uuid[])", [ids.users]);
++        await c.query("COMMIT");
++      } catch (error) { await c.query("ROLLBACK").catch(() => undefined); errors.push(error); }
++      finally { c.release(); }
++    }
++  } catch (error) { errors.push(error); }
++  const closed = await Promise.allSettled([servicePool.end(), fixturePool.end()]);
++  for (const result of closed) if (result.status === "rejected") errors.push(result.reason);
++  if (errors.length) throw new AggregateError(errors, "Limpeza E07.2 falhou.");
++});
++
++async function user() {
++  const id = randomUUID(); const name = `Nome privado E072 ${id}`; privateNames.push(name);
++  await fixturePool.query(`INSERT INTO users(id,name,email,password_hash,email_verified_at,created_at,updated_at)
++    VALUES($1,$2,$3,'private-password-hash',clock_timestamp(),clock_timestamp(),clock_timestamp())`, [id, name, `${id}@example.test`]);
++  ids.users.push(id); return id;
++}
++async function participant(eventId: string, status = "active") {
++  const userId = await user(); const participationId = randomUUID(); const terminal = status === "finished" || status === "canceled";
++  await fixturePool.query(`INSERT INTO participations(id,user_id,event_id,status,joined_at,arena_entered_at,finished_at,finish_reason)
++    VALUES($1,$2,$3,$4,clock_timestamp(),CASE WHEN $4::varchar='active' THEN clock_timestamp() END,
++      CASE WHEN $5 THEN clock_timestamp() END,CASE WHEN $5 THEN 'fixture_terminal' END)`,
++  [participationId, userId, eventId, status, terminal]);
++  return { userId, participationId, eventId };
++}
++type Person = Awaited<ReturnType<typeof participant>>;
++async function experience(eventId: string) {
++  const id = randomUUID();
++  await fixturePool.query(`INSERT INTO experiences(id,event_id,name,last_queue_order,created_at,updated_at)
++    VALUES($1,$2,'E072 Just Dance',$3,clock_timestamp(),clock_timestamp())`, [id, eventId, baseOrder.toString()]);
++  return id;
++}
++async function station(experienceId: string, label = "E072 Estação 1") {
++  const id = randomUUID();
++  await fixturePool.query(`INSERT INTO stations(id,experience_id,label,availability,created_at,updated_at)
++    VALUES($1,$2,$3,'available',clock_timestamp(),clock_timestamp())`, [id, experienceId, label]);
++  return id;
++}
++async function context() {
++  const eventId = randomUUID();
++  await fixturePool.query(`INSERT INTO events(id,name,access_code_normalized,timezone,starts_at,official_ends_at,
++    operational_deadline_at,status,external_queue_enabled,created_at,updated_at)
++    VALUES($1,'E072 fixture',$2,'America/Sao_Paulo',clock_timestamp()-interval '1 hour',
++      clock_timestamp()+interval '1 hour',clock_timestamp()+interval '90 minutes','open',false,clock_timestamp(),clock_timestamp())`,
++  [eventId, `E072-${eventId.toUpperCase()}`]);
++  ids.events.push(eventId);
++  const p = await participant(eventId); const staffId = await user(); const roleId = randomUUID();
++  await fixturePool.query("INSERT INTO user_roles(id,user_id,role,event_id,granted_at) VALUES($1,$2,'staff',$3,clock_timestamp())", [roleId, staffId, eventId]);
++  const experienceId = await experience(eventId);
++  const stationIds = [await station(experienceId), await station(experienceId, "E072 Estação 2")];
++  return { ...p, staffId, roleId, experienceId, stationIds };
++}
++async function enqueue(p: Person, experienceId: string) {
++  const result = await joinService.joinExperienceQueue({ ...p, experienceId, idempotencyKey: randomUUID(), expiresAt: new Date("2099-01-01") });
++  assert.equal(result.kind, "created"); if (result.kind !== "created") assert.fail();
++  return result;
++}
++async function state(p: Person, reader = service) {
++  const result = await reader.getParticipationQueue(p.userId, p.participationId);
++  assert.equal(result.kind, "ok"); if (result.kind !== "ok") assert.fail(); return result;
++}
++async function waitingState(p: Person) {
++  const result = await state(p); assert.equal(result.currentQueueEntry?.status, "waiting");
++  if (result.currentQueueEntry?.status !== "waiting") assert.fail(); return result.currentQueueEntry;
++}
++
++/** Preparação de fixtures, não implementação dos comandos E08/E07.3. */
++async function fixtureMutation(p: Person, experienceId: string, stationId: string | null, action: (c: PoolClient) => Promise<void>) {
++  const c = await fixturePool.connect();
++  try {
++    await c.query("BEGIN"); await c.query("SELECT id FROM events WHERE id=$1 FOR SHARE", [p.eventId]);
++    await c.query("SELECT id FROM experiences WHERE id=$1 FOR UPDATE", [experienceId]);
++    if (stationId) await c.query("SELECT id FROM stations WHERE id=$1 FOR UPDATE", [stationId]);
++    await c.query("SELECT id FROM participations WHERE id=$1 FOR UPDATE", [p.participationId]);
++    await action(c); await c.query("COMMIT");
++  } catch (error) { await c.query("ROLLBACK"); throw error; }
++  finally { c.release(); }
++}
++async function call(p: Person, experienceId: string, entryId: string, stationId: string, staffId: string) {
++  const sessionId = randomUUID();
++  await fixtureMutation(p, experienceId, stationId, async c => {
++    await c.query("UPDATE queue_entries SET status='called' WHERE id=$1", [entryId]);
++    await c.query(`INSERT INTO service_sessions(id,queue_entry_id,experience_id,station_id,called_by_user_id,called_at,status)
++      VALUES($1,$2,$3,$4,$5,clock_timestamp(),'pending')`, [sessionId, entryId, experienceId, stationId, staffId]);
++  });
++  return sessionId;
++}
++async function close(p: Person, experienceId: string, entryId: string, stationId: string | null = null) {
++  await fixtureMutation(p, experienceId, stationId, async c => {
++    await c.query("SELECT id FROM queue_entries WHERE id=$1 FOR UPDATE", [entryId]);
++    await c.query("UPDATE service_sessions SET status='canceled',resolved_at=clock_timestamp(),cancel_reason='fixture_withdrawal' WHERE queue_entry_id=$1 AND status='pending'", [entryId]);
++    await c.query("UPDATE queue_entries SET status='closed',closed_at=clock_timestamp(),close_reason='fixture_withdrawal' WHERE id=$1", [entryId]);
++    await c.query("UPDATE participations SET current_queue_entry_id=NULL WHERE id=$1", [p.participationId]);
++  });
++}
++async function snapshot() {
++  const result = await fixturePool.query(`SELECT jsonb_build_object(
++    'events',(SELECT jsonb_agg(to_jsonb(e) ORDER BY e.id) FROM events e WHERE e.id=ANY($1::uuid[])),
++    'experiences',(SELECT jsonb_agg(to_jsonb(e) ORDER BY e.id) FROM experiences e WHERE e.event_id=ANY($1::uuid[])),
++    'stations',(SELECT jsonb_agg(to_jsonb(s) ORDER BY s.id) FROM stations s JOIN experiences e ON e.id=s.experience_id WHERE e.event_id=ANY($1::uuid[])),
++    'participations',(SELECT jsonb_agg(to_jsonb(p) ORDER BY p.id) FROM participations p WHERE p.event_id=ANY($1::uuid[])),
++    'queues',(SELECT jsonb_agg(to_jsonb(q) ORDER BY q.id) FROM queue_entries q WHERE q.event_id=ANY($1::uuid[])),
++    'sessions',(SELECT jsonb_agg(to_jsonb(s) ORDER BY s.id) FROM service_sessions s JOIN queue_entries q ON q.id=s.queue_entry_id WHERE q.event_id=ANY($1::uuid[])),
++    'roles',(SELECT jsonb_agg(to_jsonb(r) ORDER BY r.id) FROM user_roles r WHERE r.event_id=ANY($1::uuid[])),
++    'users',(SELECT jsonb_agg(to_jsonb(u) ORDER BY u.id) FROM users u WHERE u.id=ANY($2::uuid[])),
++    'idempotency',(SELECT jsonb_agg(to_jsonb(i) ORDER BY i.id) FROM idempotency_operations i WHERE i.actor_user_id=ANY($2::uuid[]))
++    )::text AS state`, [ids.events, ids.users]);
++  return result.rows[0].state as string;
++}
++
++/** Pausa determinística após a primeira leitura REAL, sem trocar executor nem snapshot. */
++function pauseAfterAccess() {
++  let signal!: (pid: number) => void; let reject!: (error: unknown) => void; let release!: () => void;
++  const reached = new Promise<number>((yes,no) => { signal=yes; reject=no; });
++  const gate = new Promise<void>(yes => { release=yes; });
++  const db = {
++    transaction: <T>(callback: (tx: DatabaseTransactionExecutor) => Promise<T>, config?: Parameters<typeof database.transaction>[1]) =>
++      database.transaction(async tx => {
++        let paused = false;
++        const proxy = new Proxy(tx, { get(target, key) {
++          if (key === "execute") return async (query: Parameters<typeof tx.execute>[0]) => {
++            const result = await target.execute(query);
++            if (result.rows.some(row => "observedAtMs" in row)) {
++              assert.equal(paused, false, "A barreira deve ser atingida uma única vez."); paused = true;
++              const pid = await target.execute<{ pid: number }>(sql`SELECT pg_backend_pid() AS pid`);
++              signal(pid.rows[0].pid); await gate;
++            }
++            return result;
++          };
++          const value = Reflect.get(target, key); return typeof value === "function" ? value.bind(target) : value;
++        } });
++        try {
++          const result = await callback(proxy);
++          if (!paused) reject(new Error("A primeira leitura não alcançou a barreira de snapshot."));
++          return result;
++        } catch (error) { reject(error); throw error; }
++      }, config),
++  } as typeof database;
++  return { service: makeService(db), reached, release };
++}
++
++test("E07.2 ativa sem fila retorna null e relógio PostgreSQL", async () => {
++  const c = await context();
++  const before = (await fixturePool.query("SELECT clock_timestamp() AS at")).rows[0].at as Date;
++  const result = await state(c);
++  const after = (await fixturePool.query("SELECT clock_timestamp() AS at")).rows[0].at as Date;
++  assert.equal(result.currentQueueEntry, null);
++  assert.ok(result.observedAt >= before && result.observedAt <= after);
++});
++
++test("E07.2 observa ingresso real E07.1 na posição 1 sem converter bigint em number", async () => {
++  const c = await context(); const entry = await enqueue(c, c.experienceId); const result = await waitingState(c);
++  assert.equal(result.id, entry.queueEntryId); assert.equal(result.position, 1);
++  assert.equal(result.queueOrder, (baseOrder+1n).toString()); assert.equal(result.experienceName, "E072 Just Dance");
++});
++
++test("E07.2 três participantes aguardam em posições 1, 2 e 3", async () => {
++  const c = await context(); const people = [c, await participant(c.eventId), await participant(c.eventId)];
++  for (const p of people) await enqueue(p, c.experienceId);
++  for (let i=0;i<people.length;i++) assert.equal((await waitingState(people[i])).position, i+1);
++});
++
++test("E07.2 encerrar alguém à frente reduz posição sem renumerar ordens", async () => {
++  const c = await context(); const p = await participant(c.eventId);
++  const first = await enqueue(c, c.experienceId); const second = await enqueue(p, c.experienceId);
++  assert.equal((await waitingState(p)).position, 2); await close(c, c.experienceId, first.queueEntryId);
++  const result = await waitingState(p); assert.equal(result.position, 1); assert.equal(result.queueOrder, second.queueOrder);
++  const order = await fixturePool.query("SELECT queue_order::text FROM queue_entries WHERE id=$1", [first.queueEntryId]);
++  assert.equal(order.rows[0].queue_order, first.queueOrder);
++});
++
++test("E07.2 called não conta como waiting, mas mantém atendimento pending", async () => {
++  const c = await context(); const p = await participant(c.eventId);
++  const first = await enqueue(c, c.experienceId); await enqueue(p, c.experienceId);
++  await call(c, c.experienceId, first.queueEntryId, c.stationIds[0], c.staffId);
++  assert.equal((await waitingState(p)).position, 1); assert.equal((await state(c)).currentQueueEntry?.status, "called");
++});
++
++test("E07.2 experiências têm posições independentes", async () => {
++  const c = await context(); const other = await experience(c.eventId); await station(other);
++  await enqueue(c, c.experienceId);
++  const p = await participant(c.eventId); await enqueue(p, other);
++  assert.equal((await waitingState(p)).position, 1); assert.equal((await waitingState(c)).position, 1);
++});
++
++test("E07.2 estações múltiplas e estação adicionada compartilham a mesma posição", async () => {
++  const c = await context(); const p = await participant(c.eventId);
++  await enqueue(c, c.experienceId); const entry = await enqueue(p, c.experienceId);
++  await station(c.experienceId, "E072 Estação 3");
++  const result = await waitingState(p); assert.equal(result.position, 2); assert.equal(result.queueOrder, entry.queueOrder);
++});
++
++test("E07.2 called aponta para estação e atendimento corretos, com horário real", async () => {
++  const c = await context(); const entry = await enqueue(c, c.experienceId);
++  const sessionId = await call(c, c.experienceId, entry.queueEntryId, c.stationIds[1], c.staffId);
++  const result = (await state(c)).currentQueueEntry; assert.ok(result?.status === "called");
++  assert.deepEqual(result.serviceSession.station, { id: c.stationIds[1], label: "E072 Estação 2" });
++  assert.equal(result.position, null); assert.equal(result.serviceSession.id, sessionId); assert.equal(result.queueOrder, entry.queueOrder);
++  const row = await fixturePool.query("SELECT called_at FROM service_sessions WHERE id=$1", [sessionId]);
++  assert.deepEqual(result.serviceSession.calledAt, row.rows[0].called_at);
++});
++
++test("E07.2 indisponibilidade de estação/Staff não apaga chamada ou espera existente", async () => {
++  const c = await context(); const entry = await enqueue(c, c.experienceId); const p = await participant(c.eventId); await enqueue(p, c.experienceId);
++  await call(c, c.experienceId, entry.queueEntryId, c.stationIds[1], c.staffId);
++  await fixturePool.query("UPDATE stations SET availability='unavailable' WHERE experience_id=$1", [c.experienceId]);
++  await fixturePool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE id=$1", [c.roleId]);
++  assert.equal((await state(c)).currentQueueEntry?.status, "called"); assert.equal((await waitingState(p)).position, 1);
++});
++
++test("E07.2 titular externo, finished ou canceled sem fila continua com sucesso neutro", async () => {
++  const c = await context();
++  for (const status of ["waiting", "finished", "canceled"]) assert.equal((await state(await participant(c.eventId, status))).currentQueueEntry, null);
++});
++
++test("E07.2 histórico fechado não é fila atual e leitura é compatível com futura E07.3", async () => {
++  for (const wasCalled of [false, true]) {
++    const c = await context(); const entry = await enqueue(c, c.experienceId);
++    if (wasCalled) await call(c, c.experienceId, entry.queueEntryId, c.stationIds[0], c.staffId);
++    await close(c, c.experienceId, entry.queueEntryId, wasCalled ? c.stationIds[0] : null);
++    assert.equal((await state(c)).currentQueueEntry, null);
++    const next = await enqueue(c, c.experienceId); assert.equal((await waitingState(c)).id, next.queueEntryId);
++  }
++});
++
++test("E07.2 participação inexistente e alheia são indistinguíveis", async () => {
++  const c = await context(); await enqueue(c, c.experienceId); const other = await participant(c.eventId);
++  assert.deepEqual(await service.getParticipationQueue(other.userId, c.participationId), { kind: "access_denied" });
++  assert.deepEqual(await service.getParticipationQueue(other.userId, randomUUID()), { kind: "access_denied" });
++});
++
++test("E07.2 chamada concorrente confirma sem bloquear leitura, que conserva snapshot anterior", async () => {
++  const c = await context(); const entry = await enqueue(c, c.experienceId);
++  const held = pauseAfterAccess(); const pending = state(c, held.service); pending.catch(() => undefined);
++  let expectedSession!: string;
++  try {
++    const readerPid = await held.reached;
++    // call usa outro cliente real e precisa COMITAR enquanto a leitura está pausada.
++    const writer = await fixturePool.connect();
++    try { assert.notEqual((await writer.query("SELECT pg_backend_pid() AS pid")).rows[0].pid, readerPid); }
++    finally { writer.release(); }
++    expectedSession = await call(c, c.experienceId, entry.queueEntryId, c.stationIds[1], c.staffId);
++  } finally { held.release(); }
++  const old = (await pending).currentQueueEntry; assert.ok(old?.status === "waiting"); assert.equal(old.position, 1);
++  const fresh = (await state(c)).currentQueueEntry; assert.ok(fresh?.status === "called"); assert.equal(fresh.serviceSession.id, expectedSession);
++});
++
++test("E07.2 limpeza do ponteiro entre etapas não produz estado híbrido; nova consulta observa null", async () => {
++  const c = await context(); const entry = await enqueue(c, c.experienceId);
++  const held = pauseAfterAccess(); const pending = state(c, held.service); pending.catch(() => undefined);
++  try { await held.reached; await close(c, c.experienceId, entry.queueEntryId); }
++  finally { held.release(); }
++  assert.equal((await pending).currentQueueEntry?.status, "waiting"); assert.equal((await state(c)).currentQueueEntry, null);
++});
++
++test("E07.2 corte oficial mantém waiting e called na margem operacional", async () => {
++  const c = await context(); const entry = await enqueue(c, c.experienceId); const p = await participant(c.eventId); await enqueue(p, c.experienceId);
++  await call(c, c.experienceId, entry.queueEntryId, c.stationIds[0], c.staffId);
++  await fixturePool.query("UPDATE events SET official_ends_at=clock_timestamp()-interval '10 minutes',operational_deadline_at=clock_timestamp()+interval '20 minutes' WHERE id=$1", [c.eventId]);
++  assert.equal((await state(c)).currentQueueEntry?.status, "called"); assert.equal((await waitingState(p)).position, 1);
++});
++
++test("E07.2 fechamento controlado mantém consulta até seu prazo residual", async () => {
++  const c = await context(); const entry = await enqueue(c, c.experienceId);
++  await fixturePool.query(`UPDATE events SET status='closing',closure_mode='controlled',closure_requested_at=clock_timestamp()-interval '1 minute',
++    admin_deadline_at=clock_timestamp()+interval '20 minutes' WHERE id=$1`, [c.eventId]);
++  assert.equal((await waitingState(c)).id, entry.queueEntryId);
++});
++
++test("E07.2 encerramento efetivo projeta null mesmo com job atrasado, sem limpar nada", async () => {
++  for (const mode of ["operational", "closed", "immediate", "controlled"]) {
++    const c = await context(); const entry = await enqueue(c, c.experienceId); const p = await participant(c.eventId); await enqueue(p, c.experienceId);
++    await call(c, c.experienceId, entry.queueEntryId, c.stationIds[1], c.staffId);
++    if (mode === "operational") await fixturePool.query(`UPDATE events SET official_ends_at=clock_timestamp()-interval '20 minutes',
++      operational_deadline_at=clock_timestamp()-interval '1 minute' WHERE id=$1`, [c.eventId]);
++    if (mode === "closed") await fixturePool.query("UPDATE events SET status='closed' WHERE id=$1", [c.eventId]);
++    if (mode === "immediate") await fixturePool.query(`UPDATE events SET closure_mode='immediate',
++      closure_requested_at=statement_timestamp()-interval '1 minute',admin_deadline_at=statement_timestamp()-interval '1 minute' WHERE id=$1`, [c.eventId]);
++    if (mode === "controlled") await fixturePool.query(`UPDATE events SET status='closing',closure_mode='controlled',
++      closure_requested_at=clock_timestamp()-interval '20 minutes',admin_deadline_at=clock_timestamp()-interval '1 minute' WHERE id=$1`, [c.eventId]);
++    const before = await snapshot(); assert.equal((await state(c)).currentQueueEntry, null); assert.equal((await state(p)).currentQueueEntry, null);
++    assert.equal(await snapshot(), before);
++  }
++});
++
++test("E07.2 consultas repetidas não alteram nenhuma linha, contador ou idempotência das fixtures", async () => {
++  const c = await context(); const entry = await enqueue(c, c.experienceId); const p = await participant(c.eventId); await enqueue(p, c.experienceId);
++  await call(c, c.experienceId, entry.queueEntryId, c.stationIds[0], c.staffId);
++  const before = await snapshot();
++  for (let i=0;i<3;i++) { await state(c); await state(p); }
++  assert.equal(await snapshot(), before);
++});
++
++test("E07.2 contrato não expõe Staff, outras pessoas ou credenciais", async () => {
++  const c = await context(); const p = await participant(c.eventId); await enqueue(p, c.experienceId);
++  const entry = await enqueue(c, c.experienceId); await call(c, c.experienceId, entry.queueEntryId, c.stationIds[1], c.staffId);
++  const result = await state(c); const json = JSON.stringify(result);
++  for (const secret of [...privateNames, c.userId, c.staffId, p.userId, p.participationId, "private-password-hash", "example.test"]) assert.equal(json.includes(secret), false);
++  assert.deepEqual(Object.keys(result).sort(), ["currentQueueEntry", "kind", "observedAt", "participationId"]);
++  assert.ok(result.currentQueueEntry?.status === "called");
++  assert.deepEqual(Object.keys(result.currentQueueEntry).sort(), ["experienceId", "experienceName", "id", "position", "queueOrder", "serviceSession", "status"]);
++  assert.deepEqual(Object.keys(result.currentQueueEntry.serviceSession).sort(), ["calledAt", "id", "station", "status"]);
++  assert.deepEqual(Object.keys(result.currentQueueEntry.serviceSession.station).sort(), ["id", "label"]);
++});
++
++test("E07.2 inconsistências permitidas pelo DDL são falhas explícitas, sem fabricação de estado", async () => {
++  for (const mode of ["orphan", "closed_pointer", "missing_pending", "terminal_session", "external_with_queue"]) {
++    const c = await context(); const entry = await enqueue(c, c.experienceId);
++    if (mode === "orphan") await fixturePool.query("UPDATE participations SET current_queue_entry_id=NULL WHERE id=$1", [c.participationId]);
++    if (mode === "closed_pointer") await fixturePool.query("UPDATE queue_entries SET status='closed',closed_at=clock_timestamp(),close_reason='fixture_inconsistent' WHERE id=$1", [entry.queueEntryId]);
++    if (mode === "missing_pending") await fixturePool.query("UPDATE queue_entries SET status='called' WHERE id=$1", [entry.queueEntryId]);
++    if (mode === "terminal_session") {
++      const sessionId = await call(c, c.experienceId, entry.queueEntryId, c.stationIds[0], c.staffId);
++      await fixturePool.query("UPDATE service_sessions SET status='completed',resolved_at=clock_timestamp(),resolved_by_user_id=$2 WHERE id=$1", [sessionId, c.staffId]);
++    }
++    if (mode === "external_with_queue") await fixturePool.query("UPDATE participations SET status='waiting',arena_entered_at=NULL WHERE id=$1", [c.participationId]);
++    const before = await snapshot(); await assert.rejects(service.getParticipationQueue(c.userId, c.participationId), { name: "QueueStateIntegrityError" });
++    assert.equal(await snapshot(), before);
++  }
++});
+diff --git a/docs/E07_2_IMPLEMENTACAO.md b/docs/E07_2_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..48f9a4b
+--- /dev/null
++++ b/docs/E07_2_IMPLEMENTACAO.md
+@@ -0,0 +1,209 @@
++# E07.2 — consulta da fila interna do participante
++
++Implementação de 30/10/2026 em `feature/events-participations`, iniciada sobre
++`5d7fae1217eb28a4be2610660245a6b8dacc4f7a`, HEAD real após o commit da E07.1.
++O working tree inicial continha somente `audit-1647dd6/`, preservado e excluído
++da entrega. Sem commit, push ou auditoria independente nesta rodada.
++
++## Arquivos e escopo
++
++| Arquivo | Alteração |
++| --- | --- |
++| `backend/src/events/queue-state.service.ts` | Novo QueueStateService, exclusivamente leitura. |
++| `backend/src/events/queue-state.types.ts` | União discriminada e tipos internos de espera/chamada. |
++| `backend/src/events/events.module.ts` | Registro/exportação aditivos do serviço. |
++| `backend/test/unit/queue-state.test.ts` | 18 testes próprios E07.2. |
++| `backend/test/integration/queue-state.integration.test.ts` | 20 testes PostgreSQL próprios E07.2, ainda pendentes de execução. |
++| `docs/ARQUITETURA_BACKEND_ARENAGO.md` | §16.5 alinhada ao contrato interno, contagem inclusiva e projeção temporal. |
++| `docs/PLANEJAMENTO_ARENAGO.md` | Atualiza apenas o trabalho atual; preserva o histórico E07.1/C-15. |
++| `docs/E07_2_IMPLEMENTACAO.md` | Este registro. |
++| `qa-evidence/e07-2-changes.diff` | Patch contra o HEAD inicial, incluindo novos arquivos; exclui a si próprio e arquivos externos. |
++
++Foram inspecionados arquitetura §§16.1/16.2/16.5, planejamento C-14/C-15,
++relatório E07.1, serviço/tipos de ingresso, E06, E04, schemas, migrações/FKs e
++testes existentes. E07.1, E01–E06, módulos do Kaled e testes anteriores foram
++preservados, salvo o registro aditivo no módulo de eventos. Sem migrations,
++controllers, DTOs públicos, Expo, polling, WebSocket, notificações ou E07.3.
++
++## Contrato interno
++
++```ts
++QueueStateService.getParticipationQueue(
++  userId: string,
++  participationId: string,
++): Promise<ParticipationQueueResult>
++```
++
++Nome recomendado mantido, em serviço separado do mutador E07.1. O chamador
++confiável fornece userId e UUID com sintaxe válida; autenticação HTTP não é
++implementada aqui. Participação inexistente ou alheia retorna exatamente
++`{ kind: 'access_denied' }`, sem consulta posterior à fila ou dados de terceiros.
++
++Sucesso contém somente `kind: 'ok'`, `participationId`, `observedAt: Date` UTC
++serializável como ISO 8601 e `currentQueueEntry`. A entrada pode ser:
++
++- `null`: sem entrada corrente ou projeção após encerramento efetivo.
++- `waiting`: `id`, `experienceId`, `experienceName`, `status`, `queueOrder: string`,
++  `position: number` positivo e `serviceSession: null`.
++- `called`: mesmos identificadores e ordem histórica, `status`, `position: null`
++  e `serviceSession: { id, status: 'pending', calledAt: Date, station: { id, label } }`.
++
++Retornar queueOrder também para called mantém a identidade histórica sem dar
++posição de espera a quem já foi chamado. Não expõe Staff, usuários, perfis,
++jogos, snapshots, credenciais ou motivos administrativos. Datas têm resolução
++de milissegundos do contrato Date. Não consulta idempotência ou replay do ingresso.
++
++## Snapshot, consultas e posição
++
++Uma transação `REPEATABLE READ READ ONLY`, com duas instruções de leitura,
++independentemente do tamanho da fila, usando exclusivamente o executor tx:
++
++1. Validar `participations.id/user_id`, carregar evento/ponteiro/estado e prazos
++   operacionais e obter observedAt de `statement_timestamp()` na primeira leitura,
++   como na E06. Este é o instante de referência da projeção, não o horário do app.
++2. Ler a entrada apontada, experiência, atendimento/estação e as contagens no
++   mesmo snapshot. Não buscar a última entrada histórica. Os dois counts são
++   subconsultas escalares para uma única participação, sem N+1 por pessoa/estação.
++
++Posição = `count(*)` de queue_entries com mesmo evento e experiência,
++`status='waiting'` e `queue_order <=` ordem própria. Inclui a pessoa; exclui
++called, closed, outras experiências, fila externa e participações sem entrada.
++Estações múltiplas não multiplicam a contagem: não há join de estações no count.
++Encerrar alguém à frente pode reduzir a posição sem renumerar ordens históricas.
++
++PostgreSQL retorna ordens e counts como texto. queueOrder não é convertido para
++number; posição é validada por BigInt e só convertida se positiva e <=
++Number.MAX_SAFE_INTEGER. Contagem corrente também exige decimal seguro. Os
++índices existentes da fila FIFO e da entrada corrente continuam disponíveis;
++nenhuma coluna de posição ou índice novo foi criado.
++
++Não há locks de linha, escrita em tabelas, incremento, reserva idempotente ou
++limpeza. Locks normais de leitura do PostgreSQL não são usados como mutex de
++ingressos/chamadas. Nova consulta inicia novo snapshot e vê commits posteriores.
++
++## Estados e decisão técnica de encerramento
++
++| Situação no snapshot/observedAt | Projeção |
++| --- | --- |
++| Titular ativo, externo waiting, finished ou canceled sem fila corrente | Sucesso com null. |
++| Entrada waiting vigente | Posição positiva, sem serviceSession. |
++| Entrada called vigente | Atendimento pending e estação coerentes, posição null. |
++| Estação indisponível, Staff revogado ou fila pausada | Preserva leitura da entrada preexistente; capacidade C-14 é guarda de novo ingresso. |
++| Corte oficial de inscrições ou início controlado; prazo residual ainda vigente | Preserva waiting/called. |
++| `events.status='closed'` | null, mesmo se o job não atualizou as linhas. |
++| observedAt >= menor prazo operacional/administrativo | null; igualdade já é encerramento efetivo. |
++| Fechamento imediato | Prazo administrativo coincide com closure_requested_at; null a partir dele. |
++
++Decisão técnica mínima: **null significa ausência de fila operacional atual no
++instante observedAt**, sem criar estado persistido novo nem fingir execução de
++limpeza. A participação não é reativada/finalizada; os registros ficam intactos.
++O contrato não adiciona um motivo de encerramento ou estado efetivo de
++participação; E04/histórico/E06 continuam necessários para essa navegação.
++Null não implica permissão de novo ingresso. Se o relógio ultrapassar o prazo
++durante uma leitura longa, a resposta ainda descreve seu observedAt; não é uma
++garantia de estado corrente no momento de entrega ao cliente.
++
++Relações e ponteiro são conferidos antes dessa projeção. Após encerramento,
++dados operacionais atrasados não são apresentados como chamada vigente. Enquanto
++o prazo permite operação, called sem pending ou waiting com atendimento é erro,
++não um estado aparentemente válido. Participação não ativa com entrada corrente
++também é erro enquanto operacionalmente vigente. A exceção de projeção temporal
++não corrige nenhuma dessas linhas nem produz resultado de atendimento.
++
++## Privacidade e integridade
++
++Primeira consulta filtra titularidade antes de acessar fila. A segunda repete
++participação/usuário/evento e correlaciona ponteiro com entrada, participação e
++evento; experiência deve pertencer ao evento, atendimento à entrada/experiência
++e estação à mesma experiência. Campos extras não são repassados ao resultado.
++
++`QueueStateIntegrityError` é falha interna explícita, com mensagem sem IDs:
++ponteiro quebrado/para closed, entrada corrente sem ponteiro, multiplicidade,
++vínculos inconsistentes, ausência de pending/estação/horário, estados desconhecidos,
++contagens inseguras e datas inválidas. Constraints e FKs compostas não foram
++alteradas. Situações que o DDL ainda permite, mas os serviços normais não produzem,
++têm fixtures próprias de erro, sem desabilitar constraints para construí-las.
++
++## Testes e resultados
++
++18 unitários cobrem titularidade, contratos exatos, consultas/params, transação
++somente leitura, posição inclusiva, bigint, limites de contagem/data, privacidade,
++projeção temporal e integridade. Drizzle usa driver simulado: esses testes não
++demonstram segurança concorrente PostgreSQL.
++
++20 testes de integração escritos cobrem os 18 requisitos da rodada: ausência de
++fila, ingresso real E07.1/posição 1, posições 1–3, queda de posição após close,
++called/closed fora da espera, experiências/estações, chamada/estação/horário,
++indisponibilidade, estados da participação, histórico/C-15, acesso neutro,
++snapshots concorrentes, consultas posteriores, cortes oficial/controlado,
++encerramento definitivo com job atrasado, nenhuma escrita, privacidade e
++inconsistências. Ainda não foram executados nesta rodada.
++
++Nos dois testes de snapshot, uma barreira depois da primeira consulta REAL
++mantém a transação aberta. Outra conexão confirma chamada ou encerramento da
++fixture antes de liberar a segunda leitura. A leitura antiga deve retornar
++waiting; uma nova deve retornar called ou null. O writer precisa comitar com o
++reader pausado, demonstrando também que a leitura não o bloqueia. Não se presume
++concorrência por Promise.all ou sleep fixo. Comandos de chamada/saída existem
++somente nos helpers de fixture; não implementam E08/E07.3 no serviço.
++
++| Validação executada pelo Codex | Resultado |
++| --- | --- |
++| `npm.cmd --prefix backend test` | **126/126 aprovados**, zero falhas/cancelamentos/skips, exit 0: 108 anteriores + 18 novos. |
++| `npm.cmd --prefix backend run typecheck:test` | Aprovado, exit 0, incluindo integração nova. |
++| `npm.cmd --prefix backend run lint` | Aprovado após remover dois tipos não utilizados, exit 0. |
++| `npm.cmd --prefix backend run build` | Aprovado, exit 0. |
++| Whitespace, correspondência reversa do patch e aplicação em memória contra o HEAD inicial | Aprovados; não usam staging ou checkout. |
++| PostgreSQL específico e regressão completa | Pendentes; nenhuma conexão efetuada nesta rodada. |
++
++Conferência SHA-256 dos 179 arquivos existentes de backend/app e da evidência E07.1
++identificou somente o registro aditivo em `events.module.ts`; os demais, incluindo
++o mutador, tipos e testes E07.1 e os módulos do Kaled, permanecem intactos.
++
++Unitários foram executados com carregamento dotenv direcionado a NUL e URL local
++sem conexão. Foi usado o acesso de execução já necessário ao tsx nesta sessão
++para contornar a falha conhecida `uv_os_get_passwd / ENOMEM` da sandbox Windows.
++Não se atribuem à E07.2 os resultados PostgreSQL 21/21 e 129/129 da E07.1.
++
++## Execução manual pendente e segurança
++
++DATABASE_URL, DATABASE_DIRECT_URL e EVENTS_TEST_DATABASE_URL estão ausentes no
++processo. Não foram lidos arquivos .env, acessados bancos ou executadas migrations,
++reset, DROP, TRUNCATE ou seed. Nenhum outro banco é fallback permitido.
++
++O responsável deve configurar as três URLs explicitamente, idênticas, com
++credenciais locais para `127.0.0.1:55432/arenago_events_test`, sem query params.
++O teste novo valida todas antes de importar serviços/configuração ou abrir pools;
++dotenv é direcionado ao dispositivo nulo. O banco deve estar previamente pronto.
++Não preparar schema ou dados globais como parte da execução.
++
++```powershell
++Set-Location C:\DoJob\ProgramacaoMobile\backend
++# Definir DATABASE_URL, DATABASE_DIRECT_URL e EVENTS_TEST_DATABASE_URL explicitamente.
++$env:DOTENV_CONFIG_PATH = 'NUL'
++.\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test --test-concurrency=1 test/integration/queue-state.integration.test.ts
++if ($LASTEXITCODE -ne 0) { throw 'Revisar falha E07.2 antes da regressão.' }
++npm.cmd run test:integration
++```
++
++Contagem esperada, ainda não validada em execução: **20 testes específicos** e
++**149 na regressão completa** (129 anteriores + 20 novos). Antes da regressão,
++confirmar o mesmo preflight explícito no processo; manter dotenv desabilitado
++para as suítes anteriores. Nenhuma credencial deve ser exibida no relatório.
++
++Fixtures são isoladas por UUID de evento/usuário, incluindo idempotência criada
++pelo ingresso real E07.1. Limpeza transacional remove somente seus registros na
++ordem das FKs; pools são encerrados mesmo com erro na limpeza. O cenário de
++estação indisponível usa configuração direta de fixture para testar a leitura;
++não concede permissão a uma futura operação Staff para desativar estação pendente.
++
++## Continuidade
++
++E07.3 deverá fechar a entrada e resolver pending/limpar ponteiro atomicamente,
++mantendo participação active conforme C-15. A leitura já aceita esse resultado
++como null e observa nova entrada E07.1 como uma tentativa distinta. Não foi criada
++operação de saída nesta etapa.
++
++A revisão técnica consolidada E07.1–E07.3 está reservada pelo responsável para
++depois da implementação da E07.3. Esta rodada entrega implementação e validações,
++sem abrir auditoria independente e sem commit/push/PR/merge/reset/stash.

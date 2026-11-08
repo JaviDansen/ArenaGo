@@ -1,0 +1,1185 @@
+diff --git a/backend/src/events/admin-events.module.ts b/backend/src/events/admin-events.module.ts
+index b3eccdebb196059fc16b887ade6d638ed425ca17..9a8b0994a3468d6ae904db15f153a04109f0962f 100644
+--- a/backend/src/events/admin-events.module.ts
++++ b/backend/src/events/admin-events.module.ts
+@@ -7,11 +7,13 @@ import { AdminExternalQueueService } from "./admin-external-queue.service";
+ import { AdminIdempotencyPolicy } from "./admin-idempotency.policy";
+ import { AdminScheduleController } from "./admin-schedule.controller";
+ import { AdminScheduleService } from "./admin-schedule.service";
++import { AdminCloseController } from "./admin-close.controller";
++import { AdminCloseService } from "./admin-close.service";
+ 
+ @Module({
+   imports: [DatabaseModule, AuthModule, ParticipationsModule],
+-  controllers: [AdminExternalQueueController, AdminScheduleController],
+-  providers: [AdminExternalQueueService, AdminScheduleService, AdminIdempotencyPolicy],
+-  exports: [AdminExternalQueueService, AdminScheduleService],
++  controllers: [AdminExternalQueueController, AdminScheduleController, AdminCloseController],
++  providers: [AdminExternalQueueService, AdminScheduleService, AdminCloseService, AdminIdempotencyPolicy],
++  exports: [AdminExternalQueueService, AdminScheduleService, AdminCloseService],
+ })
+ export class AdminEventsModule {}
+diff --git a/docs/ARQUITETURA_BACKEND_ARENAGO.md b/docs/ARQUITETURA_BACKEND_ARENAGO.md
+index c89911bd5d20cc83ba28304a87497782db7f7d0f..57a6dfeb33131fe7927ffb67c2bd8b3c131dd073 100644
+--- a/docs/ARQUITETURA_BACKEND_ARENAGO.md
++++ b/docs/ARQUITETURA_BACKEND_ARENAGO.md
+@@ -1488,6 +1488,23 @@ Quando não houver pendências: `items: []`, **não** `404`. Não retornar pesso
+ 
+ ### 17.8 `POST /admin/events/:eventId/close` — encerramento antecipado
+ 
++**Implementação E08.8 — 03/11/2026:** endpoint `/api/v1` disponível para o
++encerramento inicial imediato/controlado e seus retries idempotentes. Admin
++global/conta/sessão/2FA são revalidados pelo helper transacional compartilhado.
++Body estrito, reason conforme E08.6 e Idempotency-Key obrigatória; controlledUntilAt
++somente no controlado, com a precisão explícita aprovada na E08.7. Usa o TTL Admin
++obrigatório existente e namespace `admin_close_event`, sem expurgo por expires_at.
++Evento, recursos correntes, efeitos, auditoria e intenção são confirmados juntos
++em READ COMMITTED. O imediato publica closed, cancela pending e fecha entradas/
++participações com motivo `admin_immediate`. O controlado publica closing e finaliza
++waiting externas com `admin_controlled_external_wait_closed`, preservando active
++com/sem fila e a operação residual. Instantes decisivos vêm do PostgreSQL após
++locks; respostas e efeitos preservam microssegundos. Segunda intenção distinta
++com encerramento já iniciado recebe `409 EVENT_ALREADY_CLOSED`; a semântica de
++encurtamento continua pendente, sem implementá-la implicitamente. O job definitivo
++por vencimento **não está implementado nesta etapa**, nem o ciclo automático completo.
++Contrato, limites e resultados de validação em `E08_8_IMPLEMENTACAO.md`.
++
+ **Bearer Admin global + sessão com TOTP validado, justificativa obrigatória e auditoria.** `Idempotency-Key` recomendado para evitar múltiplos fechamentos por retry. Corpo proposto:
+ 
+ ```json
+diff --git a/backend/src/events/admin-close.controller.ts b/backend/src/events/admin-close.controller.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..8c319a5790f475d62b26190f29e09b189922c185
+--- /dev/null
++++ b/backend/src/events/admin-close.controller.ts
+@@ -0,0 +1,35 @@
++import { Body, Controller, HttpCode, HttpStatus, Inject, Param, Post, Req } from "@nestjs/common";
++import { CurrentUser, CurrentUserId, RequireSessionAuth } from "../auth/current-user.decorator";
++import type { AuthenticatedRequest } from "../auth/session-auth.guard";
++import { ProblemException } from "../common/errors/problem.exception";
++import { validateOperationBody, validateOperationIdempotencyKey, validateOperationParams } from "../common/http/operation-validation";
++import { AdminIdempotencyPolicy } from "./admin-idempotency.policy";
++import { adminCloseBody, adminCloseParams } from "./admin-close.dto";
++import { AdminCloseService } from "./admin-close.service";
++
++const failures = {
++  resource_not_found: [404, "RESOURCE_NOT_FOUND"], admin_required: [403, "ADMIN_REQUIRED"], account_inactive: [401, "ACCOUNT_DEACTIVATED"],
++  invalid_session: [401, "INVALID_SESSION"], session_revoked: [401, "SESSION_REVOKED"], session_expired: [401, "SESSION_EXPIRED"], admin_2fa_required: [401, "ADMIN_2FA_REQUIRED"],
++  event_already_closed: [409, "EVENT_ALREADY_CLOSED"], closure_deadline_invalid: [409, "CLOSURE_DEADLINE_INVALID"],
++  request_conflict: [409, "IDEMPOTENCY_KEY_REUSED"], in_progress: [409, "IDEMPOTENCY_IN_PROGRESS"],
++} as const;
++@Controller("admin/events/:eventId/close")
++@RequireSessionAuth()
++export class AdminCloseController {
++  constructor(@Inject(AdminCloseService) private readonly closure: AdminCloseService,
++    @Inject(AdminIdempotencyPolicy) private readonly idempotency: AdminIdempotencyPolicy) {}
++  @Post()
++  @HttpCode(HttpStatus.OK)
++  async close(@CurrentUserId() userId: string, @CurrentUser("sessionId") sessionId: string,
++    @Param() params: unknown, @Body() body: unknown, @Req() request: AuthenticatedRequest) {
++    const ids = validateOperationParams(adminCloseParams, params), change = validateOperationBody(adminCloseBody, body, request);
++    const idempotencyKey = validateOperationIdempotencyKey(request);
++    const result = await this.closure.closeEvent({ userId, sessionId, ...ids, ...change, idempotencyKey, expiresAt: this.idempotency.expiresAt() });
++    if (result.kind === "completed" || result.kind === "replay") return { eventId: result.eventId, status: result.status, closureMode: result.closureMode,
++      newEntriesClosedAt: result.newEntriesClosedAt, effectiveOperationalDeadlineAt: result.effectiveOperationalDeadlineAt, externalWaitingFinalized: result.externalWaitingFinalized };
++    const [status, code] = failures[result.kind];
++    throw new ProblemException({ status, code, typeSlug: code.toLowerCase().replaceAll("_", "-"),
++      title: status === 401 ? "Autenticação obrigatória" : status === 403 ? "Acesso negado" : status === 404 ? "Recurso não encontrado" : "Conflito operacional",
++      detail: "Não foi possível efetivar o encerramento solicitado." });
++  }
++}
+diff --git a/backend/src/events/admin-close.dto.ts b/backend/src/events/admin-close.dto.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..2128d574148bc428573b0bf61cf38c874bd46504
+--- /dev/null
++++ b/backend/src/events/admin-close.dto.ts
+@@ -0,0 +1,17 @@
++import { z } from "zod";
++import { operationUuid } from "../common/http/operation-validation";
++import { adminExternalQueueBody } from "./admin-external-queue.dto";
++import { normalizeScheduleInstant } from "./admin-schedule.dto";
++
++const reason = adminExternalQueueBody.shape.reason;
++const instant = z.string().transform((value, ctx) => {
++  const normalized = normalizeScheduleInstant(value);
++  if (normalized === undefined) { ctx.addIssue({ code: "custom", message: "Informe instante ISO com fuso explícito e até três casas decimais." }); return z.NEVER; }
++  return normalized;
++});
++export const adminCloseParams = z.object({ eventId: operationUuid }).strict();
++export const adminCloseBody = z.discriminatedUnion("mode", [
++  z.object({ mode: z.literal("immediate"), reason }).strict(),
++  z.object({ mode: z.literal("controlled"), reason, controlledUntilAt: instant }).strict(),
++]);
++export type AdminCloseBody = z.infer<typeof adminCloseBody>;
+diff --git a/backend/src/events/admin-close.service.ts b/backend/src/events/admin-close.service.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..b57397089ddc56abd1ae08ef86fa735473aa1b36
+--- /dev/null
++++ b/backend/src/events/admin-close.service.ts
+@@ -0,0 +1,143 @@
++import { Inject, Injectable } from "@nestjs/common";
++import { randomUUID } from "node:crypto";
++import { sql } from "drizzle-orm";
++import type { NodePgDatabase } from "drizzle-orm/node-postgres";
++import { DRIZZLE_DATABASE } from "../database/database.module";
++import type { DatabaseTransactionExecutor } from "../database/database-executor";
++import type * as schema from "../database/schema";
++import { completeIdempotencyOperationWithTx, createRequestFingerprint, reserveIdempotencyOperationWithTx } from "../participations/join-idempotency";
++import type { JsonValue } from "../participations/join-idempotency";
++import { assertAdminSessionWithTx, authorizeGlobalAdminWithTx } from "./admin-operation-auth";
++import { adminCloseBody, type AdminCloseBody } from "./admin-close.dto";
++import type { AdminCloseInput, AdminCloseResult, AdminCloseState } from "./admin-close.types";
++
++export const ADMIN_CLOSE_OPERATION = "admin_close_event";
++export const ADMIN_IMMEDIATE_REASON = "admin_immediate";
++export const ADMIN_CONTROLLED_EXTERNAL_REASON = "admin_controlled_external_wait_closed";
++export function closeFingerprint(eventId: string, body: AdminCloseBody): string {
++  return createRequestFingerprint(ADMIN_CLOSE_OPERATION, { eventId, ...adminCloseBody.parse(body) });
++}
++class CloseRollback extends Error { constructor(readonly result: AdminCloseResult) { super(result.kind); } }
++function block(result: AdminCloseResult): never { throw new CloseRollback(result); }
++function ensure(value: unknown, detail: string): asserts value { if (!value) throw new Error(`Integridade do encerramento: ${detail}`); }
++function validInstant(value: unknown): value is string {
++  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(value) && Number.isFinite(Date.parse(value));
++}
++function replay(payload: JsonValue | null, input: AdminCloseInput): AdminCloseState {
++  ensure(payload && typeof payload === "object" && !Array.isArray(payload), "replay não é objeto.");
++  const { eventId, status, closureMode, newEntriesClosedAt, effectiveOperationalDeadlineAt, externalWaitingFinalized } = payload;
++  ensure(eventId === input.eventId && closureMode === input.mode && status === (input.mode === "immediate" ? "closed" : "closing")
++    && validInstant(newEntriesClosedAt) && validInstant(effectiveOperationalDeadlineAt)
++    && typeof externalWaitingFinalized === "number" && Number.isSafeInteger(externalWaitingFinalized) && externalWaitingFinalized >= 0, "resposta de replay inválida.");
++  ensure(input.mode === "immediate" ? effectiveOperationalDeadlineAt <= newEntriesClosedAt
++    : Date.parse(effectiveOperationalDeadlineAt) === Date.parse(input.controlledUntilAt), "prazo de replay inválido.");
++  return { eventId, status, closureMode, newEntriesClosedAt, effectiveOperationalDeadlineAt, externalWaitingFinalized };
++}
++type Person = { id: string; status: string; currentId: string | null };
++type Entry = { id: string; personId: string; experienceId: string; status: string };
++type Pending = { id: string; entryId: string; experienceId: string; stationId: string };
++
++/** E08.8: nenhuma publicação parcial entre corte administrativo e efeitos de domínio. */
++@Injectable()
++export class AdminCloseService {
++  constructor(@Inject(DRIZZLE_DATABASE) private readonly database: NodePgDatabase<typeof schema>) {}
++
++  private async lockResources(tx: DatabaseTransactionExecutor, eventId: string) {
++    const experiences = (await tx.execute<{ id: string }>(sql`SELECT id FROM experiences WHERE event_id=${eventId} ORDER BY id FOR UPDATE`)).rows;
++    const stations = (await tx.execute<{ id: string; experienceId: string }>(sql`SELECT s.id,s.experience_id AS "experienceId" FROM stations s
++      JOIN experiences x ON x.id=s.experience_id WHERE x.event_id=${eventId} ORDER BY s.id FOR UPDATE OF s`)).rows;
++    const people = (await tx.execute<Person>(sql`SELECT id,status,current_queue_entry_id AS "currentId" FROM participations
++      WHERE event_id=${eventId} ORDER BY id FOR UPDATE`)).rows;
++    const entries = (await tx.execute<Entry>(sql`SELECT id,participation_id AS "personId",experience_id AS "experienceId",status FROM queue_entries
++      WHERE event_id=${eventId} AND status IN ('waiting','called') ORDER BY id FOR UPDATE`)).rows;
++    const pending = (await tx.execute<Pending>(sql`SELECT s.id,s.queue_entry_id AS "entryId",s.experience_id AS "experienceId",s.station_id AS "stationId"
++      FROM service_sessions s JOIN experiences x ON x.id=s.experience_id WHERE x.event_id=${eventId} AND s.status='pending' ORDER BY s.id FOR UPDATE OF s`)).rows;
++    return { experiences, stations, people, entries, pending };
++  }
++
++  async closeEvent(input: AdminCloseInput): Promise<AdminCloseResult> {
++    const body = adminCloseBody.parse({ mode: input.mode, reason: input.reason, ...(input.mode === "controlled" ? { controlledUntilAt: input.controlledUntilAt } : {}) });
++    input = { ...input, ...body };
++    ensure(input.idempotencyKey.trim() && input.idempotencyKey.length <= 128
++      && [...input.idempotencyKey].every(c => c.charCodeAt(0) >= 32 && c.charCodeAt(0) !== 127) && Number.isFinite(input.expiresAt.getTime()), "idempotência inválida.");
++    try {
++      return await this.database.transaction(async tx => {
++        const event = await tx.execute(sql`SELECT id FROM events WHERE id=${input.eventId} FOR UPDATE`);
++        const resources = await this.lockResources(tx, input.eventId);
++        await authorizeGlobalAdminWithTx(tx, input, block);
++        if (!event.rows.length) block({ kind: "resource_not_found" });
++        const reservation = await reserveIdempotencyOperationWithTx(tx, { actorUserId: input.userId, operation: ADMIN_CLOSE_OPERATION,
++          idempotencyKey: input.idempotencyKey, requestHash: closeFingerprint(input.eventId, body), expiresAt: input.expiresAt });
++        await assertAdminSessionWithTx(tx, input, block);
++        if (reservation.kind === "request_conflict" || reservation.kind === "in_progress") block({ kind: reservation.kind });
++        if (reservation.kind === "replay") {
++          ensure(reservation.httpStatus === 200, "status de replay inválido.");
++          block({ kind: "replay", ...replay(reservation.resultPayload, input) });
++        }
++        // Revalidação cruzada após TODOS os locks. Nenhum estado incoerente vira limpeza parcial.
++        const { people, entries, pending, experiences, stations } = resources;
++        const persons = new Map(people.map(p => [p.id, p])), qs = new Map(entries.map(q => [q.id, q]));
++        const xs = new Set(experiences.map(x => x.id)), ss = new Map(stations.map(s => [s.id, s.experienceId]));
++        const calls = new Map(pending.map(s => [s.entryId, s]));
++        ensure(calls.size === pending.length, "múltiplos pending para uma entrada.");
++        for (const q of entries) { const p = persons.get(q.personId); ensure(p?.status === "active" && p.currentId === q.id && xs.has(q.experienceId), "entrada sem participação ativa/ponteiro/experiência.");
++          ensure(q.status === "called" ? calls.has(q.id) : !calls.has(q.id), "entrada e chamada divergentes."); }
++        for (const p of people) ensure(p.currentId === null || (p.status === "active" && qs.get(p.currentId)?.personId === p.id), "ponteiro corrente divergente.");
++        for (const s of pending) { const q = qs.get(s.entryId); ensure(q?.status === "called" && q.experienceId === s.experienceId && ss.get(s.stationId) === s.experienceId, "pending sem vínculos correntes."); }
++
++        const immediate = input.mode === "immediate", until = input.mode === "controlled" ? input.controlledUntilAt : null;
++        const changed = await tx.execute<{ outcome: string; at: string | null; deadline: string | null; before: JsonValue }>(sql`
++          WITH decision AS MATERIALIZED (SELECT clock_timestamp() AS at), previous AS MATERIALIZED (
++            SELECT e.*,d.at,(e.status IN ('closing','closed') OR e.closure_requested_at IS NOT NULL OR e.closure_mode IS NOT NULL OR e.admin_deadline_at IS NOT NULL) AS closed,
++              (NOT ${immediate}::boolean AND (${until}::timestamptz IS NULL OR ${until}::timestamptz <= d.at
++                OR ${until}::timestamptz > d.at+interval '1 hour' OR ${until}::timestamptz > e.operational_deadline_at)) AS invalid
++            FROM events e CROSS JOIN decision d WHERE e.id=${input.eventId}),
++          changed AS (UPDATE events e SET status=${immediate ? "closed" : "closing"}::varchar(20),closure_mode=${input.mode}::varchar(20),
++            closure_requested_at=p.at,admin_deadline_at=CASE WHEN ${immediate}::boolean THEN p.at ELSE ${until}::timestamptz END,updated_at=p.at
++            FROM previous p,sessions a WHERE e.id=p.id AND NOT p.closed AND NOT p.invalid
++              AND a.id=${input.sessionId} AND a.user_id=${input.userId} AND a.revoked_at IS NULL AND a.admin_2fa_verified_at IS NOT NULL AND p.at<a.expires_at
++            RETURNING e.id,e.closure_requested_at,e.admin_deadline_at,e.operational_deadline_at)
++          SELECT CASE WHEN p.closed THEN 'closed' WHEN p.invalid THEN 'invalid' WHEN c.id IS NULL THEN 'not_written' ELSE 'changed' END AS outcome,
++            to_char(c.closure_requested_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at,
++            to_char(LEAST(c.operational_deadline_at,c.admin_deadline_at) AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS deadline,
++            jsonb_build_object('status',p.status,'closureMode',p.closure_mode,'operationalDeadlineAt',p.operational_deadline_at,
++              'effectiveOperationalDeadlineAt',LEAST(p.operational_deadline_at,p.admin_deadline_at)) AS before
++          FROM previous p LEFT JOIN changed c ON c.id=p.id`);
++        await assertAdminSessionWithTx(tx, input, block);
++        const row = changed.rows[0]; ensure(row, "decisão ausente.");
++        if (row.outcome === "closed") block({ kind: "event_already_closed" });
++        if (row.outcome === "invalid") block({ kind: "closure_deadline_invalid" });
++        ensure(row.outcome === "changed" && validInstant(row.at) && validInstant(row.deadline), "UPDATE de encerramento não efetivado.");
++        if (immediate) {
++          const canceled = await tx.execute(sql`UPDATE service_sessions s SET status='canceled',resolved_at=e.closure_requested_at,
++            resolved_by_user_id=${input.userId},cancel_reason=${ADMIN_IMMEDIATE_REASON}
++            FROM experiences x,events e WHERE s.experience_id=x.id AND x.event_id=e.id AND e.id=${input.eventId} AND s.status='pending' RETURNING s.id`);
++          ensure(canceled.rows.length === pending.length, "contagem de pending cancelados divergente.");
++          const closed = await tx.execute(sql`UPDATE queue_entries q SET status='closed',closed_at=e.closure_requested_at,close_reason=${ADMIN_IMMEDIATE_REASON}
++            FROM events e WHERE q.event_id=e.id AND e.id=${input.eventId} AND q.status IN ('waiting','called') RETURNING q.id`);
++          ensure(closed.rows.length === entries.length, "contagem de entradas encerradas divergente.");
++        }
++        const finalized = await tx.execute<{ previousStatus: string }>(sql`WITH targets AS MATERIALIZED (
++            SELECT id,status FROM participations WHERE event_id=${input.eventId} AND (status='waiting' OR (${immediate}::boolean AND status='active')))
++          UPDATE participations p SET status='finished',finished_at=e.closure_requested_at,
++            finish_reason=${immediate ? ADMIN_IMMEDIATE_REASON : ADMIN_CONTROLLED_EXTERNAL_REASON},current_queue_entry_id=NULL
++          FROM events e,targets t WHERE p.id=t.id AND p.event_id=e.id AND e.id=${input.eventId} RETURNING t.status AS "previousStatus"`);
++        ensure(finalized.rows.length === people.filter(p => p.status === "waiting" || (immediate && p.status === "active")).length, "contagem de participações finalizadas divergente.");
++        const externalWaitingFinalized = finalized.rows.filter(p => p.previousStatus === "waiting").length;
++        const audit = await tx.execute(sql`INSERT INTO audit_logs(id,actor_user_id,event_id,origin,category,action,reason,metadata,occurred_at)
++          SELECT ${randomUUID()},${input.userId},e.id,'user','event','event_admin_closed',${input.reason},
++            jsonb_build_object('before',${JSON.stringify(row.before)}::jsonb,'after',jsonb_build_object('status',e.status,'closureMode',e.closure_mode,
++              'newEntriesClosedAt',e.closure_requested_at,'effectiveOperationalDeadlineAt',LEAST(e.operational_deadline_at,e.admin_deadline_at)),
++              'externalWaitingFinalized',${externalWaitingFinalized}::bigint),e.closure_requested_at
++          FROM events e WHERE e.id=${input.eventId} RETURNING id`);
++        ensure(audit.rows.length === 1, "encerramento exige exatamente uma auditoria.");
++        await assertAdminSessionWithTx(tx, input, block);
++        const state: AdminCloseState = { eventId: input.eventId, status: immediate ? "closed" : "closing", closureMode: input.mode,
++          newEntriesClosedAt: row.at, effectiveOperationalDeadlineAt: row.deadline, externalWaitingFinalized };
++        await completeIdempotencyOperationWithTx(tx, reservation.operationId, { httpStatus: 200, resultReference: input.eventId, resultPayload: { ...state } });
++        await assertAdminSessionWithTx(tx, input, block);
++        return { kind: "completed" as const, ...state };
++      }, { isolationLevel: "read committed" });
++    } catch (error) { if (error instanceof CloseRollback) return error.result; throw error; }
++  }
++}
+diff --git a/backend/src/events/admin-close.types.ts b/backend/src/events/admin-close.types.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..0598431368b8e26118a6b73365f3b3c37b28065d
+--- /dev/null
++++ b/backend/src/events/admin-close.types.ts
+@@ -0,0 +1,14 @@
++import type { AdminAuthFailure } from "./admin-operation-auth";
++import type { AdminCloseBody } from "./admin-close.dto";
++
++export type AdminCloseInput = AdminCloseBody & { userId: string; sessionId: string; eventId: string; idempotencyKey: string; expiresAt: Date };
++export interface AdminCloseState {
++  eventId: string;
++  status: "closed" | "closing";
++  closureMode: "immediate" | "controlled";
++  newEntriesClosedAt: string;
++  effectiveOperationalDeadlineAt: string;
++  externalWaitingFinalized: number;
++}
++export type AdminCloseResult = ({ kind: "completed" | "replay" } & AdminCloseState)
++  | { kind: AdminAuthFailure | "resource_not_found" | "event_already_closed" | "closure_deadline_invalid" | "request_conflict" | "in_progress" };
+diff --git a/backend/test/integration/admin-close-http.integration.test.ts b/backend/test/integration/admin-close-http.integration.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..4a00937f64834d696bbf9c7dab1fa2879a563700
+--- /dev/null
++++ b/backend/test/integration/admin-close-http.integration.test.ts
+@@ -0,0 +1,421 @@
++import "reflect-metadata";
++import assert from "node:assert/strict";
++import { randomUUID } from "node:crypto";
++import { devNull } from "node:os";
++import { after, before, test } from "node:test";
++import { NestFactory } from "@nestjs/core";
++import type { INestApplication } from "@nestjs/common";
++import { sql } from "drizzle-orm";
++import { PgDialect } from "drizzle-orm/pg-core";
++import type { NodePgDatabase } from "drizzle-orm/node-postgres";
++import { Pool, type PoolClient } from "pg";
++import supertest from "supertest";
++import type * as schema from "../../src/database/schema";
++import type { ParticipationsService } from "../../src/participations/participations.service";
++import type { QueueEntryService } from "../../src/events/queue-entry.service";
++import { assertSafeTestDatabase } from "./test-db-guard";
++
++// Guarda executada ANTES de importar AppModule/providers; nunca consulta .env ou banco remoto.
++const urls = ["DATABASE_URL", "DATABASE_DIRECT_URL", "EVENTS_TEST_DATABASE_URL"].map(name => {
++  const value = assertSafeTestDatabase(process.env[name]), url = new URL(value);
++  if (url.hostname !== "127.0.0.1" || url.port !== "55432" || url.pathname !== "/arenago_events_test" || url.search || url.hash || !url.username) throw new Error(`${name}: destino local explícito obrigatório.`);
++  return value;
++});
++if (urls.some(value => value !== urls[0])) throw new Error("As três URLs precisam ser idênticas.");
++process.env.DOTENV_CONFIG_PATH = devNull;
++process.env.STAFF_IDEMPOTENCY_TTL_SECONDS = "60";
++process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = "60";
++process.env.ADMIN_IDEMPOTENCY_TTL_SECONDS = "60";
++const pool = new Pool({ connectionString: urls[0], ssl: false, max: 8, connectionTimeoutMillis: 2000, statement_timeout: 20000, lock_timeout: 16000 });
++let app: INestApplication, database: NodePgDatabase<typeof schema>, participations: ParticipationsService, queues: QueueEntryService;
++let signAccess: (userId: string, sessionId: string, expired?: boolean) => string;
++let fingerprint: typeof import("../../src/events/admin-close.service").closeFingerprint;
++const operation = "admin_close_event", reason = "Encerramento autorizado pela organização";
++const ids = { events: [] as string[], users: [] as string[], versions: [] as string[], games: [] as string[] };
++before(async () => {
++  assert.equal((await pool.query("SELECT current_database() AS name")).rows[0].name, "arenago_events_test");
++  const { AppModule } = await import("../../src/app.module"), { DRIZZLE_DATABASE } = await import("../../src/database/database.module");
++  const { ParticipationsService } = await import("../../src/participations/participations.service"), { QueueEntryService } = await import("../../src/events/queue-entry.service");
++  fingerprint = (await import("../../src/events/admin-close.service")).closeFingerprint;
++  const tokens = await import("../../src/auth/token.util");
++  signAccess = (userId, sessionId, expired) => tokens.signAccessToken({ userId, sessionId }, expired ? { nowMs: Date.now() - 120000, ttlSeconds: 1 } : undefined);
++  app = await NestFactory.create(AppModule, { logger: false }); app.setGlobalPrefix("api/v1"); await app.listen(0, "127.0.0.1");
++  database = app.get(DRIZZLE_DATABASE); participations = app.get(ParticipationsService); queues = app.get(QueueEntryService);
++});
++after(async () => {
++  const errors: unknown[] = [];
++  try {
++    const c = await pool.connect();
++    try {
++      await c.query("BEGIN");
++      await c.query("DELETE FROM audit_logs WHERE event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("UPDATE participations SET current_queue_entry_id=NULL WHERE event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM service_sessions s USING queue_entries q WHERE s.queue_entry_id=q.id AND q.event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM queue_entries WHERE event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM participation_profile_snapshots s USING participations p WHERE s.participation_id=p.id AND p.event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM participations WHERE event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM stations s USING experiences e WHERE s.experience_id=e.id AND e.event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM experiences WHERE event_id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM idempotency_operations WHERE actor_user_id=ANY($1::uuid[])", [ids.users]);
++      await c.query("DELETE FROM user_roles WHERE user_id=ANY($1::uuid[])", [ids.users]);
++      await c.query("DELETE FROM sessions WHERE user_id=ANY($1::uuid[])", [ids.users]);
++      await c.query("DELETE FROM user_games WHERE user_id=ANY($1::uuid[])", [ids.users]);
++      await c.query("DELETE FROM profiles WHERE user_id=ANY($1::uuid[])", [ids.users]);
++      await c.query("DELETE FROM events WHERE id=ANY($1::uuid[])", [ids.events]);
++      await c.query("DELETE FROM games WHERE id=ANY($1::uuid[])", [ids.games]);
++      await c.query("DELETE FROM users WHERE id=ANY($1::uuid[])", [ids.users]);
++      await c.query("DELETE FROM questionnaire_versions WHERE id=ANY($1::uuid[])", [ids.versions]); await c.query("COMMIT");
++    } catch (e) { await c.query("ROLLBACK"); throw e; } finally { c.release(); }
++  } catch (e) { errors.push(e); }
++  for (const r of await Promise.allSettled([app?.close(), pool.end()])) if (r.status === "rejected") errors.push(r.reason);
++  if (errors.length) throw new AggregateError(errors, "Limpeza E08.8 falhou.");
++});
++async function account() {
++  const userId = randomUUID(), sessionId = randomUUID(); ids.users.push(userId);
++  await pool.query(`INSERT INTO users(id,name,email,password_hash,email_verified_at,created_at,updated_at)
++    VALUES($1,'Pessoa privada E088',$2,'fixture-private-hash',clock_timestamp(),clock_timestamp(),clock_timestamp())`, [userId, `${userId}@example.test`]);
++  await pool.query(`INSERT INTO sessions(id,user_id,expires_at,last_activity_at,created_at)
++    VALUES($1,$2,clock_timestamp()+interval '1 hour',clock_timestamp(),clock_timestamp())`, [sessionId, userId]);
++  return { userId, sessionId, token: signAccess(userId, sessionId) };
++}
++async function grant(userId: string, eventId: string | null) {
++  const roleId = randomUUID(); await pool.query("INSERT INTO user_roles(id,user_id,role,event_id,granted_at) VALUES($1,$2,$3,$4,clock_timestamp())", [roleId, userId, eventId ? "staff" : "admin", eventId]); return roleId;
++}
++async function admin() {
++  const a = await account(), roleId = await grant(a.userId, null); await pool.query("UPDATE sessions SET admin_2fa_verified_at=clock_timestamp() WHERE id=$1", [a.sessionId]); return { ...a, roleId };
++}
++interface Context { eventId: string; experienceId: string; stationId: string; admin: Awaited<ReturnType<typeof admin>>; staff: Awaited<ReturnType<typeof account>> }
++async function context(): Promise<Context> {
++  const eventId = randomUUID(), experienceId = randomUUID(), stationId = randomUUID(); ids.events.push(eventId);
++  await pool.query(`INSERT INTO events(id,name,access_code_normalized,timezone,starts_at,official_ends_at,operational_deadline_at,status,external_queue_enabled,external_last_order,created_at,updated_at)
++    VALUES($1,'E088 fixture',$2,'America/Sao_Paulo',clock_timestamp()-interval '1 hour',clock_timestamp()+interval '1 hour',clock_timestamp()+interval '90 minutes','open',true,9007199254741000,clock_timestamp(),clock_timestamp())`, [eventId, `E088-${eventId.toUpperCase()}`]);
++  const actor = await admin(), staff = await account(); await grant(staff.userId, eventId);
++  await pool.query("INSERT INTO experiences(id,event_id,name,last_queue_order,created_at,updated_at) VALUES($1,$2,'Experiência E088',9007199254741000,clock_timestamp(),clock_timestamp())", [experienceId, eventId]);
++  await pool.query("INSERT INTO stations(id,experience_id,label,availability,created_at,updated_at) VALUES($1,$2,'Estação E088','available',clock_timestamp(),clock_timestamp())", [stationId, experienceId]);
++  return { eventId, experienceId, stationId, admin: actor, staff };
++}
++async function proposal(c: Context, minutes = 120, margin = 30) {
++  const r = (await pool.query("SELECT date_trunc('milliseconds',clock_timestamp()) + $1::int*interval '1 minute' AS at", [minutes])).rows[0].at as Date;
++  return { officialEndsAt: r.toISOString(), operationalDeadlineAt: new Date(r.getTime() + margin * 60000).toISOString(), reason };
++}
++const route = (c: Context) => `/api/v1/admin/events/${c.eventId}/schedule`;
++const patch = (c: Context, body: object, key: string = randomUUID(), actor: { token: string } = c.admin) => supertest(app.getHttpServer()).patch(route(c)).set("Authorization", `Bearer ${actor.token}`).set("Idempotency-Key", key).send(body);
++const external = (c: Context) => supertest(app.getHttpServer()).patch(`/api/v1/admin/events/${c.eventId}/external-queue`).set("Authorization", `Bearer ${c.admin.token}`).set("Idempotency-Key", randomUUID()).send({ enabled: false, reason });
++const station = (c: Context) => supertest(app.getHttpServer()).patch(`/api/v1/staff/events/${c.eventId}/stations/${c.stationId}/availability`).set("Authorization", `Bearer ${c.admin.token}`).send({ availability: "unavailable" });
++async function person(c: Context, status: "waiting" | "active" | "finished" | "canceled" = "active") {
++  const a = await account(), participationId = randomUUID(), terminal = status === "finished" || status === "canceled";
++  const order = status === "waiting" ? (await pool.query("UPDATE events SET external_last_order=external_last_order+1 WHERE id=$1 RETURNING external_last_order::text AS n", [c.eventId])).rows[0].n : null;
++  await pool.query(`INSERT INTO participations(id,user_id,event_id,status,external_queue_order,joined_at,arena_entered_at,finished_at,finish_reason)
++    VALUES($1,$2,$3,$4::varchar(20),$5,clock_timestamp(),CASE WHEN $6::boolean THEN clock_timestamp() END,
++      CASE WHEN $7::boolean THEN clock_timestamp() END,CASE WHEN $7::boolean THEN 'fixture_terminal' END)`, [participationId, a.userId, c.eventId, status, order, status === "active", terminal]);
++  return { ...a, participationId };
++}
++async function readyEntrant() {
++  const a = await account(), version = randomUUID(), game = randomUUID(); ids.versions.push(version); ids.games.push(game);
++  await pool.query("INSERT INTO questionnaire_versions(id,version,definition,activated_at,created_at) VALUES($1,$2,'{}',clock_timestamp(),clock_timestamp())", [version, `e88-${version}`]);
++  await pool.query(`INSERT INTO profiles(user_id,birth_date,gender,education,market_knowledge,market_interest,questionnaire_version_id,completed_at,created_at,updated_at)
++    VALUES($1,'2000-01-01','Prefiro não informar','Superior','Sim, conheço.','Sim, tenho interesse.',$2,clock_timestamp(),clock_timestamp(),clock_timestamp())`, [a.userId, version]);
++  await pool.query("INSERT INTO games(id,name,is_curated,created_at) VALUES($1,$2,false,clock_timestamp())", [game, `E088-${game}`]);
++  await pool.query("INSERT INTO user_games(user_id,game_id,created_at) VALUES($1,$2,clock_timestamp())", [a.userId, game]); return a;
++}
++const admit = (c: Context, a: { userId: string }) => participations.createParticipation({ userId: a.userId, eventId: c.eventId, idempotencyKey: randomUUID(), expiresAt: new Date(Date.now() + 60000) });
++const join = (c: Context, a: { userId: string; participationId: string }) => queues.joinExperienceQueue({ userId: a.userId, participationId: a.participationId, experienceId: c.experienceId, idempotencyKey: randomUUID(), expiresAt: new Date(Date.now() + 60000) });
++const audit = async (c: Context) => (await pool.query("SELECT * FROM audit_logs WHERE event_id=$1 AND action='event_admin_closed' ORDER BY occurred_at,id", [c.eventId])).rows;
++async function state(c: Context) {
++  return (await pool.query(`SELECT jsonb_build_object(
++    'event',(SELECT to_jsonb(e)||jsonb_build_object('external_last_order',e.external_last_order::text) FROM events e WHERE e.id=$1),
++    'people',(SELECT jsonb_agg(to_jsonb(p)||jsonb_build_object('external_queue_order',p.external_queue_order::text) ORDER BY p.id) FROM participations p WHERE p.event_id=$1),
++    'snapshots',(SELECT jsonb_agg(to_jsonb(s) ORDER BY s.participation_id) FROM participation_profile_snapshots s JOIN participations p ON p.id=s.participation_id WHERE p.event_id=$1),
++    'experiences',(SELECT jsonb_agg(to_jsonb(e)||jsonb_build_object('last_queue_order',e.last_queue_order::text) ORDER BY e.id) FROM experiences e WHERE e.event_id=$1),
++    'stations',(SELECT jsonb_agg(to_jsonb(s) ORDER BY s.id) FROM stations s JOIN experiences e ON e.id=s.experience_id WHERE e.event_id=$1),
++    'queues',(SELECT jsonb_agg(to_jsonb(q)||jsonb_build_object('queue_order',q.queue_order::text) ORDER BY q.id) FROM queue_entries q WHERE q.event_id=$1),
++    'services',(SELECT jsonb_agg(to_jsonb(s) ORDER BY s.id) FROM service_sessions s JOIN experiences e ON e.id=s.experience_id WHERE e.event_id=$1),
++    'audits',(SELECT jsonb_agg(to_jsonb(a) ORDER BY a.id) FROM audit_logs a WHERE a.event_id=$1),
++    'idempotency',(SELECT jsonb_agg(to_jsonb(i) ORDER BY i.id) FROM idempotency_operations i WHERE i.actor_user_id=$2 AND i.operation=$3)) AS value`, [c.eventId, c.admin.userId, operation])).rows[0].value;
++}
++function problem(r: supertest.Response, status: number, code: string) {
++  assert.equal(r.status, status, JSON.stringify(r.body)); assert.equal(r.body.status, status); assert.equal(r.body.code, code);
++  assert.match(r.headers["content-type"], /application\/problem\+json/); assert.equal(JSON.stringify(r.body).includes("@example.test"), false);
++}
++async function blocked(pid: number) {
++  const until = Date.now() + 6000;
++  while (Date.now() < until) { if ((await pool.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))", [pid])).rows[0].n > 0) return; await new Promise(done => setTimeout(done, 20)); }
++  throw new Error("Espera real pelo lock não observada.");
++}
++async function ordered<A, B>(first: () => PromiseLike<A>, second: () => PromiseLike<B>, whileBlocked?: (pid: number) => Promise<void>): Promise<[A, B]> {
++  const original = database.transaction.bind(database) as typeof database.transaction; let ready!: (pid: number) => void, release!: () => void;
++  const reached = new Promise<number>(yes => { ready = yes; }), gate = new Promise<void>(yes => { release = yes; });
++  database.transaction = (callback, config) => original(async tx => { const value = await callback(tx); ready((await tx.execute<{ pid: number }>(sql`SELECT pg_backend_pid() AS pid`)).rows[0].pid); await gate; return value; }, config);
++  let a: Promise<A> | undefined, b: Promise<B> | undefined;
++  try {
++    a = Promise.resolve(first()); a.catch(() => undefined); const pid = await Promise.race([reached, a.then(() => { throw new Error("Primeira operação não manteve tx."); })]);
++    database.transaction = original; b = Promise.resolve(second()); b.catch(() => undefined); await blocked(pid); await whileBlocked?.(pid); release(); return await Promise.all([a, b]);
++  } finally { database.transaction = original; release(); await Promise.allSettled([a, b]); }
++}
++async function lockWait(c: Context, request: () => PromiseLike<supertest.Response>, change: (client: PoolClient, pid: number) => Promise<void>, lock: "event" | "role" | "account" | "participation" | "station" = "event") {
++  const client = await pool.connect(); let pending: Promise<supertest.Response> | undefined;
++  try {
++    await client.query("BEGIN");
++    if (lock === "event") await client.query("SELECT id FROM events WHERE id=$1 FOR UPDATE", [c.eventId]);
++    if (lock === "role") await client.query("SELECT id FROM user_roles WHERE id=$1 FOR UPDATE", [c.admin.roleId]);
++    if (lock === "account") await client.query("SELECT id FROM users WHERE id=$1 FOR UPDATE", [c.admin.userId]);
++    if (lock === "participation") await client.query("SELECT id FROM participations WHERE event_id=$1 ORDER BY id FOR UPDATE", [c.eventId]);
++    if (lock === "station") await client.query("SELECT id FROM stations WHERE id=$1 FOR UPDATE", [c.stationId]);
++    const pid = (await client.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
++    pending = Promise.resolve(request()); pending.catch(() => undefined); await blocked(pid); await change(client, pid); await client.query("COMMIT"); return await pending;
++  } finally { await client.query("ROLLBACK"); await Promise.allSettled([pending]); client.release(); }
++}
++async function waitPast(at: string, pid: number) {
++  assert.equal((await pool.query('SELECT clock_timestamp()<$1::timestamptz AS "beforeCut"', [at])).rows[0].beforeCut, true, "Espera precisa começar antes do corte.");
++  const until = Date.now() + 14000; let crossed = false;
++  while (Date.now() < until) { if ((await pool.query("SELECT clock_timestamp()>=$1::timestamptz AS ended", [at])).rows[0].ended) { crossed = true; break; } await new Promise(done => setTimeout(done, 100)); }
++  assert.equal(crossed, true); await blocked(pid);
++}
++
++const closeRoute = (c: Context) => `/api/v1/admin/events/${c.eventId}/close`;
++const immediate = () => ({ mode: "immediate" as const, reason });
++async function controlled(seconds = 1800) {
++  const at = (await pool.query("SELECT date_trunc('milliseconds',clock_timestamp())+$1::int*interval '1 second' AS at", [seconds])).rows[0].at as Date;
++  return { mode: "controlled" as const, reason, controlledUntilAt: at.toISOString() };
++}
++const close = (c: Context, body: object = immediate(), key: string = randomUUID(), actor: { token: string } = c.admin) => supertest(app.getHttpServer()).post(closeRoute(c)).set("Authorization", `Bearer ${actor.token}`).set("Idempotency-Key", key).send(body);
++const call = (c: Context) => supertest(app.getHttpServer()).post(`/api/v1/staff/events/${c.eventId}/experiences/${c.experienceId}/stations/${c.stationId}/call-next`).set("Authorization", `Bearer ${c.staff.token}`).set("Idempotency-Key", randomUUID()).send({});
++const resolve = (c: Context, session: string, action: "complete" | "absent") => supertest(app.getHttpServer()).post(`/api/v1/staff/events/${c.eventId}/service-sessions/${session}/${action}`).set("Authorization", `Bearer ${c.staff.token}`).set("Idempotency-Key", randomUUID()).send({});
++const withdraw = (c: Context, p: Awaited<ReturnType<typeof person>>, entry: string) => supertest(app.getHttpServer()).post(`/api/v1/participations/${p.participationId}/queue-entries/${entry}/withdraw`).set("Authorization", `Bearer ${p.token}`).set("Idempotency-Key", randomUUID()).send({});
++async function queued(c: Context) { const p = await person(c), q = await join(c, p); assert.equal(q.kind, "created"); if (q.kind !== "created") assert.fail(); return { p, entry: q.queueEntryId }; }
++async function called(c: Context) { const q = await queued(c), r = await call(c); assert.equal(r.status, 201, JSON.stringify(r.body)); return { ...q, session: r.body.serviceSession.id as string }; }
++async function rich(c: Context) {
++  const outside = await person(c, "waiting"), idle = await person(c), history = await called(c); assert.equal((await resolve(c, history.session, "complete")).status, 200);
++  const pending = await called(c), waiting = await queued(c); await person(c, "finished"); await person(c, "canceled");
++  const v = randomUUID(); ids.versions.push(v); await pool.query("INSERT INTO questionnaire_versions(id,version,definition,activated_at,created_at) VALUES($1,$2,'{}',clock_timestamp(),clock_timestamp())", [v, `e88-${v}`]);
++  for (const p of [outside, idle]) await pool.query("INSERT INTO participation_profile_snapshots(participation_id,questionnaire_version_id,answers,games_snapshot,captured_at) VALUES($1,$2,'{\"private\":\"E088_PRIVATE\"}','[]',clock_timestamp())", [p.participationId, v]);
++  return { outside, idle, history, pending, waiting };
++}
++async function assertNoOpen(c: Context) {
++  const r = (await pool.query(`SELECT
++    (SELECT count(*)::int FROM participations WHERE event_id=$1 AND (status IN ('waiting','active') OR current_queue_entry_id IS NOT NULL)) AS people,
++    (SELECT count(*)::int FROM queue_entries WHERE event_id=$1 AND status IN ('waiting','called')) AS queues,
++    (SELECT count(*)::int FROM service_sessions s JOIN experiences x ON x.id=s.experience_id WHERE x.event_id=$1 AND s.status='pending') AS pending,
++    (SELECT count(*)::int FROM evaluations v JOIN participations p ON p.id=v.participation_id WHERE p.event_id=$1) AS evaluations`, [c.eventId])).rows[0];
++  assert.deepEqual(r, { people: 0, queues: 0, pending: 0, evaluations: 0 });
++}
++test("E08.8 PostgreSQL imediato encerra tudo atomicamente sem alterar completed/histórico/snapshots/outro evento", async () => {
++  const c = await context(), other = await context(), data = await rich(c); await rich(other); const before = await state(c), otherBefore = await state(other), r = await close(c); assert.equal(r.status, 200);
++  assert.deepEqual(Object.keys(r.body).sort(), ["closureMode", "effectiveOperationalDeadlineAt", "eventId", "externalWaitingFinalized", "newEntriesClosedAt", "status"]); assert.equal(r.body.status, "closed"); assert.equal(r.body.closureMode, "immediate"); assert.equal(r.body.externalWaitingFinalized, 1); assert.equal(r.body.newEntriesClosedAt, r.body.effectiveOperationalDeadlineAt); assert.match(r.body.newEntriesClosedAt, /\.\d{6}Z$/);
++  await assertNoOpen(c); const after = await state(c); for (const key of ["snapshots", "experiences", "stations"]) assert.deepEqual(after[key], before[key]); assert.deepEqual(await state(other), otherBefore);
++  for (const p of before.people) { const next = after.people.find((n: { id: string }) => n.id === p.id); if (["finished", "canceled"].includes(p.status)) assert.deepEqual(next, p); else { assert.equal(next.status, "finished"); assert.equal(next.finish_reason, "admin_immediate"); assert.equal(next.current_queue_entry_id, null); assert.equal(Date.parse(next.finished_at), Date.parse(r.body.newEntriesClosedAt)); assert.equal(next.external_queue_order, p.external_queue_order); assert.equal(next.arena_entered_at, p.arena_entered_at); } }
++  for (const s of before.services) { const next = after.services.find((n: { id: string }) => n.id === s.id); if (s.status !== "pending") assert.deepEqual(next, s); else { assert.equal(next.status, "canceled"); assert.equal(next.cancel_reason, "admin_immediate"); assert.equal(next.resolved_by_user_id, c.admin.userId); } }
++  assert.equal(after.services.find((s: { id: string }) => s.id === data.history.session).status, "completed");
++  const exact = (await pool.query(`SELECT
++    NOT EXISTS(SELECT 1 FROM participations p JOIN events e ON e.id=p.event_id WHERE p.event_id=$1 AND p.finish_reason='admin_immediate' AND p.finished_at<>e.closure_requested_at) AS people,
++    NOT EXISTS(SELECT 1 FROM queue_entries q JOIN events e ON e.id=q.event_id WHERE q.event_id=$1 AND q.close_reason='admin_immediate' AND q.closed_at<>e.closure_requested_at) AS queues,
++    NOT EXISTS(SELECT 1 FROM service_sessions s JOIN experiences x ON x.id=s.experience_id JOIN events e ON e.id=x.event_id WHERE e.id=$1 AND s.cancel_reason='admin_immediate' AND s.resolved_at<>e.closure_requested_at) AS services`, [c.eventId])).rows[0]; assert.deepEqual(exact, { people: true, queues: true, services: true });
++  const a = (await audit(c))[0]; assert.equal((await audit(c)).length, 1); assert.equal(a.actor_user_id, c.admin.userId); assert.equal(a.reason, reason); assert.equal(a.origin, "user"); assert.equal(a.category, "event"); assert.equal(a.metadata.before.status, "open"); assert.equal(a.metadata.after.status, "closed"); assert.equal(a.metadata.externalWaitingFinalized, 1);
++  assert.equal((await pool.query("SELECT occurred_at=$2::timestamptz AS exact FROM audit_logs WHERE id=$1", [a.id, r.body.newEntriesClosedAt])).rows[0].exact, true);
++});
++test("E08.8 PostgreSQL controlado fecha waiting externas e preserva active com/sem fila e pending", async () => {
++  const c = await context(), data = await rich(c), before = await state(c), body = await controlled(), r = await close(c, body); assert.equal(r.status, 200); assert.equal(r.body.status, "closing"); assert.equal(r.body.externalWaitingFinalized, 1); assert.equal(Date.parse(r.body.effectiveOperationalDeadlineAt), Date.parse(body.controlledUntilAt));
++  const after = await state(c); for (const key of ["queues", "services", "snapshots", "experiences", "stations"]) assert.deepEqual(after[key], before[key]);
++  for (const p of before.people) { const next = after.people.find((n: { id: string }) => n.id === p.id); if (p.status !== "waiting") assert.deepEqual(next, p); else { assert.equal(next.status, "finished"); assert.equal(next.finish_reason, "admin_controlled_external_wait_closed"); assert.equal(next.arena_entered_at, null); } }
++  assert.equal(after.people.find((p: { id: string }) => p.id === data.idle.participationId).status, "active");
++  const entrant = await readyEntrant(), denied = await admit(c, entrant); assert.equal(denied.kind, "blocked"); if (denied.kind !== "blocked") assert.fail(); assert.deepEqual(denied.eligibility.blockingReasons, ["EVENT_REGISTRATION_CLOSED"]);
++  const newEntry = await join(c, data.idle); assert.equal(newEntry.kind, "event_closed"); problem(await external(c), 409, "EVENT_REGISTRATION_CLOSED"); problem(await patch(c, await proposal(c)), 409, "EVENT_TIME_CHANGE_CLOSED");
++  assert.equal((await resolve(c, data.pending.session, "complete")).status, 200); const residual = await call(c); assert.equal(residual.status, 201);
++  const absent = await resolve(c, residual.body.serviceSession.id, "absent"); assert.equal(absent.status, 200); assert.equal(absent.body.requeued, false); assert.equal(absent.body.newQueueEntry, null);
++  assert.equal((await state(c)).people.find((p: { id: string }) => p.id === data.idle.participationId).status, "active");
++});
++for (const mode of ["immediate", "controlled"] as const) test(`E08.8 PostgreSQL ${mode} pode encerrar evento sem prontidão/antes do início`, async () => {
++  const c = await context(); await pool.query("UPDATE events SET starts_at=clock_timestamp()+interval '10 minutes',status='scheduled' WHERE id=$1", [c.eventId]); await pool.query("UPDATE stations SET availability='unavailable' WHERE id=$1", [c.stationId]); await pool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE event_id=$1", [c.eventId]);
++  const r = await close(c, mode === "immediate" ? immediate() : await controlled()); assert.equal(r.status, 200); assert.equal(r.body.externalWaitingFinalized, 0);
++});
++test("E08.8 PostgreSQL imediato após prazo operacional preserva deadline efetivo mínimo", async () => {
++  const c = await context(); await person(c); await pool.query("UPDATE events SET official_ends_at=clock_timestamp()-interval '20 minutes',operational_deadline_at=clock_timestamp()-interval '10 minutes' WHERE id=$1", [c.eventId]); const r = await close(c); assert.equal(r.status, 200); assert.ok(Date.parse(r.body.effectiveOperationalDeadlineAt) < Date.parse(r.body.newEntriesClosedAt)); await assertNoOpen(c);
++});
++test("E08.8 PostgreSQL prazos controlados passado/igual/agora/além de hora ou limite original são recusados", async () => {
++  for (const seconds of [-1, 0, 3601, 7200]) { const c = await context(), before = await state(c); problem(await close(c, await controlled(seconds)), 409, "CLOSURE_DEADLINE_INVALID"); assert.deepEqual(await state(c), before); }
++  const c = await context(); await pool.query("UPDATE events SET official_ends_at=clock_timestamp()-interval '5 minutes',operational_deadline_at=clock_timestamp()-interval '1 minute' WHERE id=$1", [c.eventId]); const before = await state(c); problem(await close(c, await controlled()), 409, "CLOSURE_DEADLINE_INVALID"); assert.deepEqual(await state(c), before);
++});
++test("E08.8 PostgreSQL controlado aceita limite original exato e limite de uma hora", async () => {
++  for (const boundary of ["original", "hour"]) { const c = await context(); if (boundary === "original") await pool.query("UPDATE events SET official_ends_at=date_trunc('milliseconds',clock_timestamp())+interval '20 minutes',operational_deadline_at=date_trunc('milliseconds',clock_timestamp())+interval '30 minutes' WHERE id=$1", [c.eventId]);
++    const until = boundary === "original" ? ((await pool.query("SELECT operational_deadline_at FROM events WHERE id=$1", [c.eventId])).rows[0].operational_deadline_at as Date).toISOString() : (await controlled(3600)).controlledUntilAt;
++    const r = await close(c, { mode: "controlled", controlledUntilAt: until, reason }); assert.equal(r.status, 200); assert.equal(Date.parse(r.body.effectiveOperationalDeadlineAt), Date.parse(until)); }
++});
++test("E08.8 PostgreSQL auth atual exige Admin global/TOTP/conta e sessão ativos", async () => {
++  for (const mode of ["participant", "staff", "role", "2fa", "inactive", "revoked", "expired"]) { const c = await context(), a = mode === "participant" ? await account() : mode === "staff" ? c.staff : c.admin;
++    if (mode === "role") await pool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE id=$1", [c.admin.roleId]);
++    if (mode === "2fa") await pool.query("UPDATE sessions SET admin_2fa_verified_at=NULL WHERE id=$1", [a.sessionId]);
++    if (mode === "inactive") await pool.query("UPDATE users SET is_active=false WHERE id=$1", [a.userId]);
++    if (mode === "revoked") await pool.query("UPDATE sessions SET revoked_at=clock_timestamp() WHERE id=$1", [a.sessionId]);
++    if (mode === "expired") await pool.query("UPDATE sessions SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [a.sessionId]);
++    const before = await state(c); problem(await close(c, immediate(), randomUUID(), a), ["participant", "staff", "role"].includes(mode) ? 403 : 401,
++      ["participant", "staff", "role"].includes(mode) ? "ADMIN_REQUIRED" : mode === "2fa" ? "ADMIN_2FA_REQUIRED" : mode === "inactive" ? "ACCOUNT_DEACTIVATED" : mode === "revoked" ? "SESSION_REVOKED" : "SESSION_EXPIRED"); assert.deepEqual(await state(c), before); }
++});
++test("E08.8 PostgreSQL Bearer/token/sessão/UUID/recurso inválidos usam RFC 7807", async () => {
++  const c = await context(), before = await state(c); problem(await supertest(app.getHttpServer()).post(closeRoute(c)).send(immediate()), 401, "MISSING_ACCESS_TOKEN");
++  problem(await close(c, immediate(), randomUUID(), { token: "invalid" }), 401, "INVALID_ACCESS_TOKEN"); problem(await close(c, immediate(), randomUUID(), { token: signAccess(c.admin.userId, c.admin.sessionId, true) }), 401, "ACCESS_TOKEN_EXPIRED");
++  problem(await close(c, immediate(), randomUUID(), { token: signAccess(c.admin.userId, randomUUID()) }), 401, "INVALID_SESSION");
++  problem(await close({ ...c, eventId: "bad" }), 400, "VALIDATION_ERROR"); problem(await close({ ...c, eventId: randomUUID() }), 404, "RESOURCE_NOT_FOUND"); problem(await close({ ...c, eventId: randomUUID() }, immediate(), randomUUID(), c.staff), 403, "ADMIN_REQUIRED"); assert.deepEqual(await state(c), before);
++});
++test("E08.8 PostgreSQL body, modo, reason, prazo e header estritos antes de efeitos", async () => {
++  const c = await context(), before = await state(c), req = () => supertest(app.getHttpServer()).post(closeRoute(c)).set("Authorization", `Bearer ${c.admin.token}`).set("Idempotency-Key", randomUUID());
++  problem(await req(), 400, "VALIDATION_ERROR"); problem(await req().type("application/json").send("{bad"), 400, "BAD_REQUEST");
++  for (const body of [{}, [], { mode: "bad", reason }, { mode: "controlled", reason }, { ...immediate(), controlledUntilAt: "2026-11-05T19:00:00Z" }, { ...immediate(), reason: " " }, { ...immediate(), reason: "x\u0000y" }, { ...immediate(), reason: "x".repeat(501) },
++    ...["bad", "2026-02-30T00:00:00Z", "2026-11-05T19:00:00", "2026-11-05T19:00:00.1234Z"].map(controlledUntilAt => ({ mode: "controlled", reason, controlledUntilAt })),
++    ...["userId", "status", "closureRequestedAt", "adminDeadlineAt", "queueAcceptingEntries"].map(key => ({ ...immediate(), [key]: "private" }))]) problem(await req().send(body), 400, "VALIDATION_ERROR");
++  problem(await req().type("text/plain").send(JSON.stringify(immediate())), 400, "VALIDATION_ERROR");
++  problem(await supertest(app.getHttpServer()).post(closeRoute(c)).set("Authorization", `Bearer ${c.admin.token}`).send(immediate()), 400, "VALIDATION_ERROR");
++  for (const key of ["", " ", "x".repeat(129)]) problem(await req().set("Idempotency-Key", key).send(immediate()), 400, "VALIDATION_ERROR"); problem(await req().set({ "Idempotency-Key": ["a", "b"] }).send(immediate()), 400, "VALIDATION_ERROR"); assert.deepEqual(await state(c), before);
++});
++test("E08.8 PostgreSQL resposta mínima não vaza motivo/identidade/snapshot e audita trim", async () => {
++  const c = await context(); await rich(c); const r = await close(c, { ...immediate(), reason: ` ${reason} ` }); assert.equal(r.status, 200); assert.equal((await audit(c))[0].reason, reason);
++  for (const secret of [reason, c.admin.userId, c.admin.sessionId, "E088_PRIVATE", "Pessoa privada", "@example.test", "metadata", "before"]) assert.equal(JSON.stringify(r.body).includes(secret), false);
++});
++for (const mode of ["closing", "closed", "stale-controlled", "stale-immediate"]) test(`E08.8 PostgreSQL evento ${mode} não aceita outra intenção`, async () => {
++  const c = await context(); if (mode === "closing" || mode === "closed") await pool.query("UPDATE events SET status=$2::varchar(20) WHERE id=$1", [c.eventId, mode]);
++  else await pool.query(`UPDATE events SET closure_mode=$2::varchar(20),closure_requested_at=statement_timestamp()-interval '1 minute',
++    admin_deadline_at=CASE WHEN $2::varchar(20)='immediate' THEN statement_timestamp()-interval '1 minute' ELSE statement_timestamp()+interval '20 minutes' END WHERE id=$1`, [c.eventId, mode === "stale-immediate" ? "immediate" : "controlled"]);
++  const before = await state(c); problem(await close(c), 409, "EVENT_ALREADY_CLOSED"); problem(await close(c, await controlled()), 409, "EVENT_ALREADY_CLOSED"); assert.deepEqual(await state(c), before);
++});
++for (const mode of ["immediate", "controlled"] as const) test(`E08.8 PostgreSQL retry ${mode} conserva resposta e efeito único após prazo técnico vencido`, async () => {
++  const c = await context(); await rich(c); const body = mode === "immediate" ? immediate() : await controlled(), key = randomUUID(), first = await close(c, body, key); assert.equal(first.status, 200);
++  await pool.query("UPDATE idempotency_operations SET expires_at=clock_timestamp()-interval '1 hour' WHERE actor_user_id=$1 AND operation=$2", [c.admin.userId, operation]); const before = await state(c), retry = await close(c, body, key); assert.equal(retry.status, 200); assert.deepEqual(retry.body, first.body); assert.deepEqual(await state(c), before); assert.equal((await audit(c)).length, 1);
++});
++test("E08.8 PostgreSQL replay controlado após estado posterior não reaplica limpeza ou prazo", async () => {
++  const c = await context(), data = await rich(c), body = await controlled(), key = randomUUID(), first = await close(c, body, key); assert.equal(first.status, 200); assert.equal((await resolve(c, data.pending.session, "complete")).status, 200);
++  // Estado posterior de fixture, sem implementar job ou segunda intenção fora do escopo.
++  await pool.query("UPDATE events SET status='closed' WHERE id=$1", [c.eventId]); const before = await state(c), retry = await close(c, body, key); assert.equal(retry.status, 200); assert.deepEqual(retry.body, first.body); assert.deepEqual(await state(c), before);
++});
++test("E08.8 PostgreSQL segunda intenção controlada distinta não encurta nem converte fechamento", async () => {
++  const c = await context(), body = await controlled(), key = randomUUID(); assert.equal((await close(c, body, key)).status, 200); const before = await state(c);
++  problem(await close(c, await controlled(600)), 409, "EVENT_ALREADY_CLOSED"); problem(await close(c), 409, "EVENT_ALREADY_CLOSED"); assert.deepEqual(await state(c), before);
++});
++test("E08.8 PostgreSQL conflitos de chave incluem modo/prazo/motivo/evento e normalização preserva intenção", async () => {
++  const c = await context(), body = await controlled(), key = randomUUID(), first = await close(c, body, key); assert.equal(first.status, 200);
++  const before = await state(c); for (const value of [immediate(), { ...body, reason: "outro" }, { ...body, controlledUntilAt: new Date(Date.parse(body.controlledUntilAt) + 1).toISOString() }]) problem(await close(c, value, key), 409, "IDEMPOTENCY_KEY_REUSED");
++  const other = { ...await context(), admin: c.admin }, otherBefore = await state(other); problem(await close(other, body, key), 409, "IDEMPOTENCY_KEY_REUSED"); assert.deepEqual(await state(other), otherBefore);
++  const retry = await close(c, { ...body, reason: ` ${reason} `, controlledUntilAt: body.controlledUntilAt.replace("Z", "+00:00") }, key); assert.deepEqual(retry.body, first.body); assert.deepEqual(await state(c), before);
++});
++test("E08.8 PostgreSQL namespace/atores não compartilham intenção e replay exige autorização atual", async () => {
++  const c = await context(), key = randomUUID(), body = immediate(); assert.equal((await supertest(app.getHttpServer()).patch(`/api/v1/admin/events/${c.eventId}/external-queue`).set("Authorization", `Bearer ${c.admin.token}`).set("Idempotency-Key", key).send({ enabled: false, reason })).status, 200);
++  assert.equal((await close(c, body, key)).status, 200); const other = await admin(); problem(await close(c, body, key, other), 409, "EVENT_ALREADY_CLOSED");
++  for (const mode of ["2fa", "role"]) { if (mode === "2fa") await pool.query("UPDATE sessions SET admin_2fa_verified_at=NULL WHERE id=$1", [c.admin.sessionId]); else { await pool.query("UPDATE sessions SET admin_2fa_verified_at=clock_timestamp() WHERE id=$1", [c.admin.sessionId]); await pool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE id=$1", [c.admin.roleId]); }
++    const before = await state(c); problem(await close(c, body, key), mode === "role" ? 403 : 401, mode === "role" ? "ADMIN_REQUIRED" : "ADMIN_2FA_REQUIRED"); assert.deepEqual(await state(c), before); }
++});
++test("E08.8 PostgreSQL in_progress e recusa de prazo não deixam novas reservas parciais", async () => {
++  const c = await context(), key = randomUUID(); await pool.query(`INSERT INTO idempotency_operations(id,actor_user_id,operation,idempotency_key,request_hash,status,created_at,expires_at)
++    VALUES($1,$2,$3,$4,$5,'in_progress',clock_timestamp(),clock_timestamp()+interval '1 hour')`, [randomUUID(), c.admin.userId, operation, key, fingerprint(c.eventId, immediate())]);
++  const before = await state(c); problem(await close(c, immediate(), key), 409, "IDEMPOTENCY_IN_PROGRESS"); assert.deepEqual(await state(c), before);
++  const newKey = randomUUID(); problem(await close(c, await controlled(-1), newKey), 409, "CLOSURE_DEADLINE_INVALID"); assert.equal((await close(c, immediate(), newKey)).status, 200);
++});
++test("E08.8 PostgreSQL falhas SQL reais em cada fase revertem corte, pessoas, filas, serviços, auditoria e intenção", async () => {
++  const dialect = new PgDialect();
++  for (const phase of ["event", "services", "queues", "people", "audit", "complete"]) {
++    const c = await context(); await rich(c); const key = randomUUID(), before = await state(c), original = database.transaction.bind(database) as typeof database.transaction; let reached = false;
++    database.transaction = (callback, config) => original(async tx => { const execute = tx.execute.bind(tx); tx.execute = (async (...args: Parameters<typeof tx.execute>) => {
++      const q = args[0], text = typeof q === "string" ? q : dialect.sqlToQuery(q.getSQL()).sql, result = await execute(...args);
++      const current = text.includes("WITH decision AS MATERIALIZED") ? "event" : text.includes("UPDATE service_sessions") ? "services" : text.includes("UPDATE queue_entries") ? "queues" : text.includes("WITH targets AS MATERIALIZED") ? "people" : text.includes("INSERT INTO audit_logs") ? "audit" : "";
++      if (current === phase) { assert.ok(result.rows.length > 0); reached = true; await execute(sql`SELECT 1/0`); } return result;
++    }) as typeof tx.execute;
++      const value = await callback(tx);
++      if (phase === "complete") {
++        // O query builder de conclusão não passa por tx.execute. Provar o estado
++        // persistido nesta execução, dentro do mesmo tx e antes do COMMIT.
++        const intent = (await execute<{ status: string; httpStatus: number; resultReference: string; resultPayload: unknown }>(sql`
++          SELECT status,http_status AS "httpStatus",result_reference AS "resultReference",result_payload AS "resultPayload"
++          FROM idempotency_operations WHERE actor_user_id=${c.admin.userId} AND operation=${operation} AND idempotency_key=${key}`)).rows;
++        assert.equal(intent.length, 1); assert.equal(intent[0].status, "completed"); assert.equal(intent[0].httpStatus, 200); assert.equal(intent[0].resultReference, c.eventId);
++        const completed: unknown = value;
++        assert.ok(completed && typeof completed === "object" && !Array.isArray(completed) && "kind" in completed
++          && "eventId" in completed && "status" in completed && "closureMode" in completed && "externalWaitingFinalized" in completed);
++        assert.equal(completed.kind, "completed"); assert.equal(completed.eventId, c.eventId); assert.equal(completed.status, "closed"); assert.equal(completed.closureMode, "immediate"); assert.equal(completed.externalWaitingFinalized, 1);
++        const { kind, ...payload } = completed; assert.equal(kind, "completed"); assert.deepEqual(intent[0].resultPayload, payload);
++        const effects = (await execute<{ eventClosed: boolean; finalized: number; openPeople: number; pointers: number; openQueues: number; pending: number; canceled: number; completed: number; audits: number }>(sql`
++          SELECT (SELECT status='closed' AND closure_mode='immediate' AND closure_requested_at IS NOT NULL
++              AND admin_deadline_at=closure_requested_at FROM events WHERE id=${c.eventId}) AS "eventClosed",
++            (SELECT count(*)::int FROM participations WHERE event_id=${c.eventId} AND status='finished' AND finish_reason='admin_immediate') AS finalized,
++            (SELECT count(*)::int FROM participations WHERE event_id=${c.eventId} AND status IN ('waiting','active')) AS "openPeople",
++            (SELECT count(*)::int FROM participations WHERE event_id=${c.eventId} AND current_queue_entry_id IS NOT NULL) AS pointers,
++            (SELECT count(*)::int FROM queue_entries WHERE event_id=${c.eventId} AND status IN ('waiting','called')) AS "openQueues",
++            (SELECT count(*)::int FROM service_sessions s JOIN experiences x ON x.id=s.experience_id WHERE x.event_id=${c.eventId} AND s.status='pending') AS pending,
++            (SELECT count(*)::int FROM service_sessions s JOIN experiences x ON x.id=s.experience_id WHERE x.event_id=${c.eventId} AND s.status='canceled' AND s.cancel_reason='admin_immediate') AS canceled,
++            (SELECT count(*)::int FROM service_sessions s JOIN experiences x ON x.id=s.experience_id WHERE x.event_id=${c.eventId} AND s.status='completed') AS completed,
++            (SELECT count(*)::int FROM audit_logs WHERE event_id=${c.eventId} AND action='event_admin_closed') AS audits`)).rows;
++        assert.deepEqual(effects, [{ eventClosed: true, finalized: 5, openPeople: 0, pointers: 0, openQueues: 0, pending: 0, canceled: 1, completed: 1, audits: 1 }]);
++        reached = true; await execute(sql`SELECT 1/0`);
++      }
++      return value;
++    }, config);
++    try { problem(await close(c, immediate(), key), 500, "INTERNAL_SERVER_ERROR"); } finally { database.transaction = original; }
++    assert.equal(reached, true); assert.deepEqual(await state(c), before); assert.equal((await audit(c)).length, 0);
++  }
++});
++test("E08.8 PostgreSQL retries concorrentes retornam exatamente a mesma resposta e uma auditoria", async () => {
++  const c = await context(); await rich(c); const body = immediate(), key = randomUUID(), [a, b] = await ordered(() => close(c, body, key), () => close(c, body, key)); assert.equal(a.status, 200); assert.equal(b.status, 200); assert.deepEqual(a.body, b.body); assert.equal((await audit(c)).length, 1); await assertNoOpen(c);
++});
++test("E08.8 PostgreSQL intenções concorrentes distintas não inventam encurtamento controlado", async () => {
++  const c = await context(), body = await controlled(), [a, b] = await ordered(() => close(c, body), () => close(c));
++  assert.equal(a.status, 200); problem(b, 409, "EVENT_ALREADY_CLOSED"); assert.equal((await audit(c)).length, 1);
++});
++for (const mode of ["immediate", "controlled"] as const) for (const first of ["close", "operation"] as const) for (const name of ["E03", "E07.1", "E07.4", "E07.5", "E07.6", "E07.3", "E08.5", "E08.6", "E08.7"] as const) test(`E08.8 PostgreSQL ${mode}, ${name}, ${first} primeiro serializa efeitos`, async () => {
++  const c = await context(), entrant = name === "E03" ? await readyEntrant() : undefined;
++  const pending = name === "E07.5" || name === "E07.6" ? await called(c) : undefined;
++  const waiting = name === "E07.4" || name === "E07.3" ? await queued(c) : undefined;
++  const idle = name === "E07.1" ? await person(c) : undefined;
++  if (name === "E08.6") await person(c, "waiting");
++  const schedule = name === "E08.7" ? await proposal(c) : undefined;
++  const body = mode === "immediate" ? immediate() : await controlled();
++  const operationRequest = async (): Promise<string> => {
++    if (name === "E03") { assert.ok(entrant); const r = await admit(c, entrant); if (first === "close") { assert.equal(r.kind, "blocked"); if (r.kind !== "blocked") assert.fail(); assert.deepEqual(r.eligibility.blockingReasons, ["EVENT_REGISTRATION_CLOSED"]); } return r.kind; }
++    if (name === "E07.1") { assert.ok(idle); return (await join(c, idle)).kind; }
++    let r: supertest.Response;
++    if (name === "E07.4") r = await call(c);
++    else if (name === "E07.5" || name === "E07.6") { assert.ok(pending); r = await resolve(c, pending.session, name === "E07.5" ? "complete" : "absent"); if (name === "E07.6" && first === "close" && mode === "controlled") { assert.equal(r.body.requeued, false); assert.equal(r.body.newQueueEntry, null); } }
++    else if (name === "E07.3") { assert.ok(waiting); r = await withdraw(c, waiting.p, waiting.entry); }
++    else if (name === "E08.5") r = await station(c);
++    else if (name === "E08.6") r = await external(c);
++    else { assert.ok(schedule); r = await patch(c, schedule); }
++    if (r.status >= 400) { assert.equal(r.status, 409, JSON.stringify(r.body)); assert.match(r.headers["content-type"], /application\/problem\+json/); return r.body.code as string; }
++    return String(r.status);
++  };
++  let result: supertest.Response, code: string;
++  if (first === "close") [result, code] = await ordered(() => close(c, body), operationRequest);
++  else [code, result] = await ordered(operationRequest, () => close(c, body));
++  assert.equal(result.status, 200, JSON.stringify(result.body));
++  const success = { E03: "created", "E07.1": "created", "E07.4": "201", "E07.5": "200", "E07.6": "200", "E07.3": "200", "E08.5": "200", "E08.6": "200", "E08.7": "200" };
++  const afterImmediate = { E03: "blocked", "E07.1": "participation_not_active", "E07.4": "EVENT_OPERATION_ENDED", "E07.5": "SERVICE_NOT_PENDING", "E07.6": "SERVICE_NOT_PENDING", "E07.3": "PARTICIPATION_NOT_ACTIVE", "E08.5": "EVENT_OPERATION_ENDED", "E08.6": "EVENT_REGISTRATION_CLOSED", "E08.7": "EVENT_TIME_CHANGE_CLOSED" };
++  const afterControlled = { ...success, E03: "blocked", "E07.1": "event_closed", "E08.6": "EVENT_REGISTRATION_CLOSED", "E08.7": "EVENT_TIME_CHANGE_CLOSED" };
++  assert.equal(code, first === "operation" ? success[name] : mode === "immediate" ? afterImmediate[name] : afterControlled[name]);
++  assert.equal((await audit(c)).length, 1);
++  if (mode === "immediate") await assertNoOpen(c);
++  const after = await state(c);
++  if (pending && name === "E07.5") assert.equal(after.services.find((s: { id: string }) => s.id === pending.session).status, first === "operation" || mode === "controlled" ? "completed" : "canceled");
++  if (pending && name === "E07.6") assert.equal(after.services.find((s: { id: string }) => s.id === pending.session).status, first === "operation" || mode === "controlled" ? "absent" : "canceled");
++  if (name === "E08.6") { assert.equal(after.event.external_queue_enabled, first !== "operation"); assert.equal(result.body.externalWaitingFinalized, first === "operation" ? 0 : 1); }
++  if (mode === "controlled" && name === "E07.4") assert.equal(after.services[0].status, "pending");
++});
++test("E08.8 PostgreSQL revalida conta/Admin/sessão/2FA após espera em participação", async () => {
++  for (const change of ["inactive", "role", "revoked", "expired", "2fa"]) { const c = await context(); await rich(c); const before = await state(c), r = await lockWait(c, () => close(c), async () => {
++    if (change === "inactive") await pool.query("UPDATE users SET is_active=false WHERE id=$1", [c.admin.userId]);
++    if (change === "role") await pool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE id=$1", [c.admin.roleId]);
++    if (change === "revoked") await pool.query("UPDATE sessions SET revoked_at=clock_timestamp() WHERE id=$1", [c.admin.sessionId]);
++    if (change === "expired") await pool.query("UPDATE sessions SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [c.admin.sessionId]);
++    if (change === "2fa") await pool.query("UPDATE sessions SET admin_2fa_verified_at=NULL WHERE id=$1", [c.admin.sessionId]);
++  }, "participation"); problem(r, change === "role" ? 403 : 401, change === "role" ? "ADMIN_REQUIRED" : change === "inactive" ? "ACCOUNT_DEACTIVATED" : change === "revoked" ? "SESSION_REVOKED" : change === "expired" ? "SESSION_EXPIRED" : "ADMIN_2FA_REQUIRED"); assert.deepEqual(await state(c), before); }
++});
++test("E08.8 PostgreSQL revogação antes da concessão prevalece; fechamento vencedor retém autorização", async () => {
++  const c = await context(), r = await lockWait(c, () => close(c), async client => { await client.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE id=$1", [c.admin.roleId]); }, "role"); problem(r, 403, "ADMIN_REQUIRED"); assert.equal((await audit(c)).length, 0);
++  const other = await context(), key = randomUUID(), [done] = await ordered(() => close(other, immediate(), key), () => pool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE id=$1", [other.admin.roleId])); assert.equal(done.status, 200); problem(await close(other, immediate(), key), 403, "ADMIN_REQUIRED");
++});
++for (const lock of ["event", "station", "participation"] as const) test(`E08.8 PostgreSQL prazo controlado expira durante lock de ${lock} e não é efetivado`, async () => {
++  const c = await context(); await person(c, "waiting"); const body = await controlled(10), before = await state(c), r = await lockWait(c, () => close(c, body), async (_client, pid) => { await waitPast(body.controlledUntilAt, pid); }, lock); problem(r, 409, "CLOSURE_DEADLINE_INVALID"); assert.deepEqual(await state(c), before);
++});
++test("E08.8 PostgreSQL sessão expira enquanto espera lock de estação e não confirma encerramento", async () => {
++  const c = await context(); await rich(c); const until = (await pool.query("UPDATE sessions SET expires_at=date_trunc('milliseconds',clock_timestamp())+interval '10 seconds' WHERE id=$1 RETURNING expires_at", [c.admin.sessionId])).rows[0].expires_at as Date;
++  const before = await state(c), r = await lockWait(c, () => close(c), async (_client, pid) => { await waitPast(until.toISOString(), pid); }, "station"); problem(r, 401, "SESSION_EXPIRED"); assert.deepEqual(await state(c), before);
++});
++test("E08.8 PostgreSQL controlado vencido bloqueia residual mas não executa job de limpeza", async () => {
++  const c = await context(), data = await called(c), body = await controlled(10), r = await close(c, body); assert.equal(r.status, 200);
++  // Aguarda relógio real sem executar limpeza fora da task.
++  const until = Date.now() + 14000; let expired = false; while (Date.now() < until) { if ((await pool.query("SELECT clock_timestamp()>=$1::timestamptz AS ended", [body.controlledUntilAt])).rows[0].ended) { expired = true; break; } await new Promise(done => setTimeout(done, 100)); } assert.equal(expired, true);
++  const before = await state(c); problem(await resolve(c, data.session, "complete"), 409, "EVENT_OPERATION_ENDED"); assert.deepEqual(await state(c), before); assert.equal(before.people[0].status, "active"); assert.equal(before.services[0].status, "pending");
++});
+diff --git a/backend/test/unit/admin-close-http.test.ts b/backend/test/unit/admin-close-http.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..a0bbd752b229e55d5162ecaaa8466f786a4648ed
+--- /dev/null
++++ b/backend/test/unit/admin-close-http.test.ts
+@@ -0,0 +1,64 @@
++import "reflect-metadata";
++import assert from "node:assert/strict";
++import { before, after, test } from "node:test";
++import { Module, type INestApplication } from "@nestjs/common";
++import { NestFactory } from "@nestjs/core";
++import supertest from "supertest";
++import type { Pool } from "pg";
++import { AuthService } from "../../src/auth/auth.service";
++import { SessionAuthGuard } from "../../src/auth/session-auth.guard";
++import { ProblemException } from "../../src/common/errors/problem.exception";
++import { ProblemDetailsExceptionFilter } from "../../src/common/errors/problem-details.filter";
++import { AdminCloseController } from "../../src/events/admin-close.controller";
++import { AdminCloseService } from "../../src/events/admin-close.service";
++import { AdminIdempotencyPolicy } from "../../src/events/admin-idempotency.policy";
++import { AdminEventsModule } from "../../src/events/admin-events.module";
++import { DRIZZLE_DATABASE, POSTGRES_POOL } from "../../src/database/database.module";
++import type { AdminCloseInput, AdminCloseResult } from "../../src/events/admin-close.types";
++const eventId = "abcdef00-0000-4000-8000-000000000001", userId = "admin", sessionId = "session", route = `/api/v1/admin/events/${eventId}/close`;
++const body = { mode: "immediate", reason: "Interrupção autorizada" }, at = "2026-11-03T15:00:00.123456Z";
++const state = { eventId, status: "closed", closureMode: "immediate", newEntriesClosedAt: at, effectiveOperationalDeadlineAt: at, externalWaitingFinalized: 2 } as const;
++let result: AdminCloseResult, failure: Error | undefined; const calls: AdminCloseInput[] = [];
++@Module({ controllers: [AdminCloseController], providers: [SessionAuthGuard, AdminIdempotencyPolicy,
++  { provide: AuthService, useValue: { authenticateBearerToken: async (token: string) => { if (token !== "unit-admin") throw new ProblemException({ typeSlug: "invalid-access-token", title: "Inválido", status: 401, code: "INVALID_ACCESS_TOKEN", detail: "Token inválido." }); return { userId, sessionId, roles: ["admin"] }; } } },
++  { provide: AdminCloseService, useValue: { closeEvent: async (input: AdminCloseInput) => { calls.push(input); if (failure) throw failure; return result; } } },
++] }) class HttpModule {}
++let app: INestApplication; const variables = ["ADMIN_IDEMPOTENCY_TTL_SECONDS", "STAFF_IDEMPOTENCY_TTL_SECONDS", "PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS"], previous = variables.map(v => process.env[v]);
++before(async () => { variables.forEach(v => { process.env[v] = "60"; }); app = await NestFactory.create(HttpModule, { logger: false }); app.setGlobalPrefix("api/v1"); app.useGlobalFilters(new ProblemDetailsExceptionFilter()); await app.listen(0, "127.0.0.1"); });
++after(async () => { await app?.close(); variables.forEach((v, i) => { if (previous[i] === undefined) delete process.env[v]; else process.env[v] = previous[i]; }); });
++const post = (url = route) => supertest(app.getHttpServer()).post(url).set("Authorization", "Bearer unit-admin").set("Idempotency-Key", "opaque");
++function reset() { calls.length = 0; failure = undefined; result = { kind: "completed", ...state }; }
++function problem(r: supertest.Response, status: number, code: string) { assert.equal(r.status, status); assert.equal(r.body.status, status); assert.equal(r.body.code, code); assert.match(r.headers["content-type"], /application\/problem\+json/); }
++test("E08.8 HTTP 200 projeta somente encerramento e usa identidade/TTL confiáveis", async () => {
++  reset(); const now = Date.now(), r = await post().query({ userId: "other", sessionId: "other" }).send({ ...body, reason: ` ${body.reason} ` }); assert.equal(r.status, 200); assert.deepEqual(r.body, state);
++  assert.equal(calls[0].userId, userId); assert.equal(calls[0].sessionId, sessionId); assert.equal(calls[0].reason, body.reason); assert.equal(calls[0].idempotencyKey, "opaque"); assert.ok(calls[0].expiresAt.getTime() >= now + 60000 && calls[0].expiresAt.getTime() <= Date.now() + 60000);
++});
++test("E08.8 HTTP controlado normaliza instante e replay conserva resposta histórica", async () => {
++  reset(); result = { kind: "replay", ...state, closureMode: "controlled", status: "closing", effectiveOperationalDeadlineAt: "2026-11-03T15:30:00.000000Z" };
++  const r = await post().send({ mode: "controlled", reason: body.reason, controlledUntilAt: "2026-11-03T12:30:00-03:00" }); assert.equal(r.status, 200); assert.equal(calls[0].mode, "controlled"); if (calls[0].mode !== "controlled") assert.fail(); assert.equal(calls[0].controlledUntilAt, "2026-11-03T15:30:00.000Z"); assert.equal(r.body.effectiveOperationalDeadlineAt, "2026-11-03T15:30:00.000000Z");
++});
++test("E08.8 HTTP Bearer obrigatório e UUID normalizado", async () => {
++  reset(); problem(await supertest(app.getHttpServer()).post(route).send(body), 401, "MISSING_ACCESS_TOKEN"); problem(await post().set("Authorization", "Bearer invalid").send(body), 401, "INVALID_ACCESS_TOKEN"); problem(await post(route.replace(eventId, "bad")).send(body), 400, "VALIDATION_ERROR"); assert.equal(calls.length, 0);
++  assert.equal((await post(route.replace(eventId, eventId.toUpperCase())).send(body)).status, 200); assert.equal(calls[0].eventId, eventId);
++});
++test("E08.8 HTTP body estrito, modos e prazos sem coerção ou campos administrativos", async () => {
++  reset(); problem(await post(), 400, "VALIDATION_ERROR");
++  for (const value of [{}, [], { ...body, mode: "other" }, { ...body, mode: "controlled" }, { ...body, controlledUntilAt: at }, { ...body, reason: " " }, { ...body, reason: "x\u0000y" }, { ...body, reason: "x".repeat(501) },
++    ...["bad", "2026-02-30T00:00:00Z", "2026-11-03T15:30:00", "2026-11-03T15:30:00.1234Z"].map(controlledUntilAt => ({ mode: "controlled", reason: "x", controlledUntilAt })),
++    ...["status", "adminDeadlineAt", "closureRequestedAt", "userId", "expiresAt", "queueAcceptingEntries"].map(key => ({ ...body, [key]: "private" }))]) problem(await post().send(value), 400, "VALIDATION_ERROR");
++  problem(await post().type("text/plain").send(JSON.stringify(body)), 400, "VALIDATION_ERROR"); problem(await post().type("application/json").send("{bad"), 400, "BAD_REQUEST"); assert.equal(calls.length, 0);
++});
++test("E08.8 HTTP header único obrigatório e chave opaca", async () => {
++  reset(); problem(await supertest(app.getHttpServer()).post(route).set("Authorization", "Bearer unit-admin").send(body), 400, "VALIDATION_ERROR");
++  for (const key of ["", " ", "x".repeat(129)]) problem(await post().set("Idempotency-Key", key).send(body), 400, "VALIDATION_ERROR"); problem(await post().set({ "Idempotency-Key": ["a", "b"] }).send(body), 400, "VALIDATION_ERROR"); assert.equal(calls.length, 0);
++});
++test("E08.8 HTTP erros atuais e encerramento usam RFC 7807", async () => {
++  reset(); for (const [kind, status, code] of [["resource_not_found", 404, "RESOURCE_NOT_FOUND"], ["admin_required", 403, "ADMIN_REQUIRED"], ["account_inactive", 401, "ACCOUNT_DEACTIVATED"], ["invalid_session", 401, "INVALID_SESSION"], ["session_revoked", 401, "SESSION_REVOKED"], ["session_expired", 401, "SESSION_EXPIRED"], ["admin_2fa_required", 401, "ADMIN_2FA_REQUIRED"], ["event_already_closed", 409, "EVENT_ALREADY_CLOSED"], ["closure_deadline_invalid", 409, "CLOSURE_DEADLINE_INVALID"], ["request_conflict", 409, "IDEMPOTENCY_KEY_REUSED"], ["in_progress", 409, "IDEMPOTENCY_IN_PROGRESS"]] as const) { result = { kind }; problem(await post().send(body), status, code); }
++});
++test("E08.8 HTTP privacidade de resposta e erro SQL", async () => {
++  reset(); Object.assign(result, { reason: "PRIVATE", actor: userId, audit: "PRIVATE" }); assert.deepEqual((await post().send(body)).body, state);
++  failure = new Error("PRIVATE_SQL_secret@example.test"); const r = await post().send(body); problem(r, 500, "INTERNAL_SERVER_ERROR"); assert.equal(JSON.stringify(r.body).includes("PRIVATE"), false);
++});
++test("E08.8 DI real resolve controller, serviço, banco e TTL compartilhados sem conexão", async () => {
++  const real = await NestFactory.create(AdminEventsModule, { logger: false }); try { const service = real.get(AdminCloseService); assert.equal(Reflect.get(real.get(AdminCloseController), "closure"), service); assert.equal(Reflect.get(service, "database"), real.get(DRIZZLE_DATABASE)); assert.equal(Reflect.get(real.get(AdminCloseController), "idempotency"), real.get(AdminIdempotencyPolicy)); assert.equal(real.get<Pool>(POSTGRES_POOL).totalCount, 0); } finally { await real.close(); }
++});
+diff --git a/backend/test/unit/admin-close.test.ts b/backend/test/unit/admin-close.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..b32a93be9ba0b7880d9012f0e057e7d156e77e92
+--- /dev/null
++++ b/backend/test/unit/admin-close.test.ts
+@@ -0,0 +1,104 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { drizzle } from "drizzle-orm/node-postgres";
++import type { Client } from "pg";
++import * as schema from "../../src/database/schema";
++import { adminCloseBody } from "../../src/events/admin-close.dto";
++import { AdminCloseService, closeFingerprint, ADMIN_CLOSE_OPERATION } from "../../src/events/admin-close.service";
++import type { AdminCloseInput } from "../../src/events/admin-close.types";
++
++const at = "2026-11-03T15:00:00.123456Z", deadline = "2026-11-03T15:30:00.000000Z";
++const input: AdminCloseInput = { userId: "admin", sessionId: "session", eventId: "event", mode: "immediate", reason: "Interrupção autorizada", idempotencyKey: "intent", expiresAt: new Date("2099-01-01") };
++const controlled: AdminCloseInput = { ...input, mode: "controlled", controlledUntilAt: "2026-11-03T15:30:00.000Z" };
++const state = { eventId: input.eventId, status: "closed", closureMode: "immediate", newEntriesClosedAt: at, effectiveOperationalDeadlineAt: at, externalWaitingFinalized: 1 } as const;
++function fixture(options: { absent?: boolean; active?: boolean; admin?: boolean; missingSession?: boolean; revoked?: boolean; secondFactor?: boolean; expiredAt?: number;
++  reservation?: "replay" | "request_conflict" | "in_progress"; payload?: object | null; outcome?: string; invalidLinks?: boolean;
++  fail?: string; wrongCount?: string } = {}) {
++  const queries: Array<{ text: string; params: unknown[] }> = [], marker = new Error("PRIVATE_E088_SQL"); let checks = 0;
++  const database = drizzle({ async query(config: { text: string }, params: unknown[]) {
++    const text = config.text; queries.push({ text, params });
++    if (/^(begin|commit|rollback)/.test(text)) return { rows: [] };
++    if (text.includes("SELECT id FROM events")) return { rows: options.absent ? [] : [{ id: "event" }] };
++    if (text.includes("SELECT id FROM experiences")) return { rows: [{ id: "experience" }] };
++    if (text.includes('SELECT s.id,s.experience_id AS "experienceId"')) return { rows: [{ id: "station", experienceId: "experience" }] };
++    if (text.includes('SELECT id,status,current_queue_entry_id')) return { rows: [
++      { id: "outside", status: "waiting", currentId: null }, { id: "inside", status: "active", currentId: options.invalidLinks ? "bad" : "entry" },
++      { id: "idle", status: "active", currentId: null }, { id: "history", status: "finished", currentId: null }] };
++    if (text.includes('SELECT id,participation_id AS "personId"')) return { rows: [{ id: "entry", personId: "inside", experienceId: "experience", status: "called" }] };
++    if (text.includes('SELECT s.id,s.queue_entry_id AS "entryId"')) return { rows: [{ id: "pending", entryId: "entry", experienceId: "experience", stationId: "station" }] };
++    if (text.includes("FROM users WHERE")) return { rows: [{ active: options.active ?? true }] };
++    if (text.includes("SELECT id FROM user_roles")) return { rows: options.admin === false ? [] : [{ id: "role" }] };
++    if (text.includes("SELECT id FROM sessions")) return { rows: options.missingSession ? [] : [{ id: "session" }] };
++    if (text.includes('AS "secondFactor"')) return { rows: [{ revoked: options.revoked ?? false, expired: ++checks >= (options.expiredAt ?? Infinity), secondFactor: options.secondFactor ?? true }] };
++    if (text.includes('insert into "idempotency_operations"')) return { rows: options.reservation ? [] : [["reservation"]] };
++    if (text.includes('from "idempotency_operations"')) return { rows: [["reservation", options.reservation === "request_conflict" ? "other" : closeFingerprint(input.eventId, { mode: "immediate", reason: input.reason }),
++      options.reservation === "in_progress" ? "in_progress" : "completed", 200, input.eventId, options.payload === undefined ? state : options.payload]] };
++    const phase = text.includes("WITH decision AS MATERIALIZED") ? "event" : text.includes("UPDATE service_sessions") ? "services" : text.includes("UPDATE queue_entries") ? "queues"
++      : text.includes("WITH targets AS MATERIALIZED") ? "people" : text.includes("INSERT INTO audit_logs") ? "audit" : text.startsWith('update "idempotency_operations"') ? "complete" : undefined;
++    if (options.fail === phase) throw marker;
++    if (phase === "event") return { rows: [{ outcome: options.outcome ?? "changed", at, deadline: params.includes("controlled") ? deadline : at, before: { status: "open", operationalDeadlineAt: "2026-11-03T16:00:00Z" } }] };
++    if (phase === "services" || phase === "queues" || phase === "audit") return { rows: options.wrongCount === phase ? [] : [{ id: "id" }] };
++    if (phase === "people") return { rows: options.wrongCount === phase ? [] : params.includes("admin_immediate") ? [{ previousStatus: "waiting" }, { previousStatus: "active" }, { previousStatus: "active" }] : [{ previousStatus: "waiting" }] };
++    if (phase === "complete") return { rows: [["reservation", 200, input.eventId, {}]] };
++    throw new Error(`SQL inesperado: ${text}`);
++  } } as unknown as Client, { schema });
++  return { service: new AdminCloseService(database), queries, marker };
++}
++test("E08.8 DTO estrito valida modos, prazo somente controlado e reason normalizada", () => {
++  assert.deepEqual(adminCloseBody.parse({ mode: "controlled", controlledUntilAt: "2026-11-03T12:30:00-03:00", reason: "  autorização  " }), { mode: "controlled", controlledUntilAt: controlled.controlledUntilAt, reason: "autorização" });
++  for (const body of [{}, { mode: "bad", reason: "x" }, { mode: "controlled", reason: "x" }, { mode: "immediate", reason: "x", controlledUntilAt: deadline },
++    { mode: "immediate", reason: " " }, { mode: "immediate", reason: "x".repeat(501) }, { mode: "immediate", reason: "x\u0000y" },
++    { mode: "immediate", reason: "x", status: "closed" }, ...["bad", "2026-02-30T00:00:00Z", "2026-11-03T12:00:00", "2026-11-03T12:00:00.1234Z"].map(controlledUntilAt => ({ mode: "controlled", reason: "x", controlledUntilAt }))]) assert.equal(adminCloseBody.safeParse(body).success, false);
++});
++test("E08.8 imediato cancela pendências, fecha filas, finaliza pessoas e audita em um tx", async () => {
++  const f = fixture(); assert.deepEqual(await f.service.closeEvent(input), { kind: "completed", ...state }); assert.equal(f.queries[0].text, "begin isolation level read committed"); assert.equal(f.queries.at(-1)?.text, "commit");
++  const order = ["SELECT id FROM events", "SELECT id FROM experiences", 'SELECT s.id,s.experience_id', 'SELECT id,status,current_queue_entry_id', 'SELECT id,participation_id', 'SELECT s.id,s.queue_entry_id', "FROM users WHERE", "SELECT id FROM user_roles", "SELECT id FROM sessions", 'insert into "idempotency_operations"', "WITH decision", "UPDATE service_sessions", "UPDATE queue_entries", "WITH targets", "INSERT INTO audit_logs", 'update "idempotency_operations"'];
++  for (let n = 1; n < order.length; n++) assert.ok(f.queries.findIndex(q => q.text.includes(order[n - 1])) < f.queries.findIndex(q => q.text.includes(order[n])), order[n]);
++  for (const q of f.queries.filter(q => q.text.includes("ORDER BY"))) assert.match(q.text, /FOR (UPDATE|SHARE)/);
++  for (const name of ["UPDATE service_sessions", "UPDATE queue_entries", "WITH targets", "INSERT INTO audit_logs"]) assert.ok(f.queries.find(q => q.text.includes(name))!.text.includes("closure_requested_at"));
++  const canceled = f.queries.find(q => q.text.includes("UPDATE service_sessions"))!; assert.match(canceled.text, /status='pending'/); assert.match(canceled.text, /status='canceled'/); assert.ok(canceled.params.includes("admin_immediate"));
++  assert.equal(f.queries.some(q => /INSERT INTO evaluations|status='completed'|status='absent'/.test(q.text)), false);
++});
++test("E08.8 controlado finaliza somente waiting externa e preserva operação residual", async () => {
++  const f = fixture(), r = await f.service.closeEvent(controlled); assert.deepEqual(r, { kind: "completed", ...state, status: "closing", closureMode: "controlled", effectiveOperationalDeadlineAt: deadline });
++  assert.equal(f.queries.some(q => q.text.includes("UPDATE service_sessions") || q.text.includes("UPDATE queue_entries")), false);
++  const p = f.queries.find(q => q.text.includes("WITH targets"))!; assert.ok(p.params.includes("admin_controlled_external_wait_closed")); assert.ok(p.params.includes(false));
++  assert.equal(f.queries.some(q => /SET availability|SET queue_accepting_entries|last_queue_order=/.test(q.text)), false);
++});
++test("E08.8 instante decisivo e sessão condicionam UPDATE após todos os locks e reserva", async () => {
++  const f = fixture(); await f.service.closeEvent(controlled); const q = f.queries.find(q => q.text.includes("WITH decision"))!.text;
++  for (const part of ["clock_timestamp()", "d.at+interval '1 hour'", "<= d.at", "> e.operational_deadline_at", "e.closure_requested_at IS NOT NULL", "NOT p.closed AND NOT p.invalid", "p.at<a.expires_at", "a.admin_2fa_verified_at IS NOT NULL"]) assert.ok(q.includes(part), part);
++  assert.equal(f.queries.filter(q => q.text.includes('AS "secondFactor"')).length, 5);
++});
++test("E08.8 fingerprint distingue evento, modo, prazo e motivo e normaliza fuso/trim", () => {
++  assert.equal(ADMIN_CLOSE_OPERATION, "admin_close_event"); const body = { mode: "controlled", reason: "x", controlledUntilAt: controlled.controlledUntilAt } as const;
++  const hash = closeFingerprint("event", body); assert.equal(hash, closeFingerprint("event", { ...body, reason: " x ", controlledUntilAt: "2026-11-03T12:30:00-03:00" }));
++  for (const h of [closeFingerprint("other", body), closeFingerprint("event", { mode: "immediate", reason: "x" }), closeFingerprint("event", { ...body, reason: "y" }), closeFingerprint("event", { ...body, controlledUntilAt: "2026-11-03T15:31:00Z" })]) assert.notEqual(hash, h);
++});
++test("E08.8 replay autorizado retorna resposta original sem efeitos/auditoria/conclusão novos", async () => {
++  const f = fixture({ reservation: "replay" }); assert.deepEqual(await f.service.closeEvent(input), { kind: "replay", ...state });
++  assert.equal(f.queries.some(q => q.text.includes("WITH decision") || q.text.includes("UPDATE service_sessions") || q.text.includes("INSERT INTO audit_logs")), false); assert.equal(f.queries.at(-1)?.text, "rollback");
++});
++for (const [name, options, kind] of [
++  ["evento ausente", { absent: true }, "resource_not_found"], ["conta inativa", { active: false }, "account_inactive"], ["Staff/Admin revogado", { admin: false }, "admin_required"],
++  ["sessão ausente", { missingSession: true }, "invalid_session"], ["sessão revogada", { revoked: true }, "session_revoked"], ["2FA ausente", { secondFactor: false }, "admin_2fa_required"],
++  ["expiração após locks", { expiredAt: 1 }, "session_expired"], ["expiração após reserva", { expiredAt: 2 }, "session_expired"], ["expiração na decisão", { expiredAt: 3 }, "session_expired"],
++  ["expiração após auditoria", { expiredAt: 4 }, "session_expired"], ["expiração antes de commit", { expiredAt: 5 }, "session_expired"],
++  ["encerramento iniciado/fechado", { outcome: "closed" }, "event_already_closed"], ["prazo inválido", { outcome: "invalid" }, "closure_deadline_invalid"],
++  ["chave conflitante", { reservation: "request_conflict" }, "request_conflict"], ["intenção em andamento", { reservation: "in_progress" }, "in_progress"],
++] as const) test(`E08.8 ${name} não confirma encerramento`, async () => {
++  const f = fixture(options); assert.deepEqual(await f.service.closeEvent(input), { kind }); assert.equal(f.queries.at(-1)?.text, "rollback"); assert.equal(f.queries.some(q => q.text === "commit"), false);
++});
++test("E08.8 falhas em todas as escritas e contagens inconsistentes causam rollback", async () => {
++  for (const fail of ["event", "services", "queues", "people", "audit", "complete"]) { const f = fixture({ fail }); await assert.rejects(f.service.closeEvent(input), e => e instanceof Error && e.cause === f.marker); assert.equal(f.queries.at(-1)?.text, "rollback"); }
++  for (const wrongCount of ["services", "queues", "people", "audit"]) { const f = fixture({ wrongCount }); await assert.rejects(f.service.closeEvent(input), /Integridade/); assert.equal(f.queries.at(-1)?.text, "rollback"); }
++});
++test("E08.8 vínculos divergentes falham antes de qualquer efeito de domínio", async () => {
++  const f = fixture({ invalidLinks: true }); await assert.rejects(f.service.closeEvent(input), /Integridade/); assert.equal(f.queries.some(q => q.text.includes("WITH decision")), false);
++});
++test("E08.8 replay corrupto não fabrica resposta nem reexecuta encerramento", async () => {
++  for (const payload of [null, {}, { ...state, eventId: "other" }, { ...state, externalWaitingFinalized: -1 }, { ...state, newEntriesClosedAt: "bad" }, { ...state, status: "closing" }]) { const f = fixture({ reservation: "replay", payload }); await assert.rejects(f.service.closeEvent(input), /Integridade/); assert.equal(f.queries.at(-1)?.text, "rollback"); }
++});
++test("E08.8 chave/data de expiração internas inválidas falham antes do tx", async () => {
++  for (const patch of [{ idempotencyKey: " " }, { idempotencyKey: "x\u0000y" }, { expiresAt: new Date(NaN) }, { reason: " " }]) { const f = fixture(); await assert.rejects(f.service.closeEvent({ ...input, ...patch })); assert.equal(f.queries.length, 0); }
++});
+diff --git a/docs/E08_8_IMPLEMENTACAO.md b/docs/E08_8_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..a7e2c7efcd8883608f3c49db6b448a789e87c9e6
+--- /dev/null
++++ b/docs/E08_8_IMPLEMENTACAO.md
+@@ -0,0 +1,290 @@
++# E08.8 — Encerramento antecipado HTTP pelo Admin
++
++Implementação em 03/11/2026, branch `feature/events-participations`, sobre
++`a63e6330112f573c3f3bdc46b298f3243bc2601f`. Conferidos HEAD, branch, histórico,
++índice, working tree e arquivos não rastreados antes das edições: árvore limpa,
++índice sem alterações. E08.7 commitada em `a63e633` (`feat(events): implementar
++alteração administrativa dos horários do evento`). Nenhuma mudança preexistente
++incorporada. Base PostgreSQL anterior informada pelo responsável: 462 aprovados.
++O relatório histórico E08.7 foi preservado; esta informação não é execução do Codex.
++
++## Contrato e validação
++
++`POST /api/v1/admin/events/:eventId/close`, no AdminEventsModule existente.
++Bearer válido e Idempotency-Key única obrigatórios. UUID normalizado pelos
++helpers HTTP atuais. Body obrigatório, JSON estrito:
++
++```json
++{ "mode": "immediate", "reason": "Interrupção operacional" }
++```
++
++```json
++{
++  "mode": "controlled",
++  "reason": "Encerramento antecipado autorizado",
++  "controlledUntilAt": "2026-11-05T19:00:00.000Z"
++}
++```
++
++Mode admite somente os dois literais. Reason reutiliza o schema E08.6: trim,
++1–500 caracteres, sem controles internos. ControlledUntilAt é obrigatório somente
++no controlado e proibido no imediato. Reutiliza a normalização E08.7: instante ISO
++inequívoco, ano UTC 0001–9999, calendário válido, T e fuso Z/offset explícito,
++até três casas decimais, sem hora 24, segundo intercalar, offset desconhecido
++-00:00 ou arredondamento silencioso de precisão adicional. Datas equivalentes
++normalizam em UTC antes do fingerprint. Identidades/campos administrativos extras,
++arrays, corpo ausente, JSON malformado e Content-Type inadequado são recusados.
++
++Resposta 200, inclusive replay, com projeção fechada:
++
++```json
++{
++  "eventId": "550e8400-e29b-41d4-a716-446655440101",
++  "status": "closing",
++  "closureMode": "controlled",
++  "newEntriesClosedAt": "2026-11-03T20:00:00.123456Z",
++  "effectiveOperationalDeadlineAt": "2026-11-03T20:30:00.000000Z",
++  "externalWaitingFinalized": 2
++}
++```
++
++Não retorna kind, atores, justificativa, participantes, perfis ou auditoria.
++Instantes são strings UTC de seis casas geradas pelo PostgreSQL, sem perda por
++Date. NewEntriesClosedAt identifica closure_requested_at do encerramento Admin.
++EffectiveOperationalDeadlineAt é LEAST(prazo operacional original, prazo Admin),
++inclusive no imediato executado depois de o prazo original ter vencido. O modo
++imediato retorna status closed; o controlado, closing. A contagem é das waiting
++externas efetivamente finalizadas nesta intenção, não de todos os active encerrados.
++
++| HTTP | Código efetivo |
++| --- | --- |
++| 400 | VALIDATION_ERROR para parâmetros/body/header; BAD_REQUEST para JSON malformado |
++| 401 | Códigos atuais de token/conta/sessão e ADMIN_2FA_REQUIRED |
++| 403 | ADMIN_REQUIRED para ausência de concessão Admin global vigente |
++| 404 | RESOURCE_NOT_FOUND para evento ausente, após autorização |
++| 409 | EVENT_ALREADY_CLOSED para evento fechado ou encerramento já iniciado, inclusive com status defasado |
++| 409 | CLOSURE_DEADLINE_INVALID para prazo controlado não futuro ou acima dos limites |
++| 409 | IDEMPOTENCY_KEY_REUSED ou IDEMPOTENCY_IN_PROGRESS conforme E08.6 |
++| 500 | INTERNAL_SERVER_ERROR genérico para SQL, auditoria, integridade ou persistência |
++
++Reutiliza RequireSessionAuth, CurrentUser/CurrentUserId, validação de operações
++e filtro RFC 7807. IDs/papéis fornecidos no body/query/token não substituem a
++autorização vigente no banco. Staff isolado não recebe a permissão Admin.
++
++## Locks, autorização e relógio decisivo
++
++Uma transação READ COMMITTED. Ordem: events FOR UPDATE → todas as experiências
++do evento por UUID → estações por UUID → participações por UUID → entradas waiting/
++called por UUID → atendimentos pending por UUID. Recursos recebem FOR UPDATE;
++joins usam OF na tabela bloqueada. Não usa SKIP LOCKED, commits intermediários,
++lotes publicados parcialmente ou upgrade de SHARE para UPDATE. O mutex do evento
++serializa E03/E05/E08.5–E08.7 e conflita com SHARE de E07.1/E07.3–E07.6.
++
++Depois dos recursos: conta → concessão Admin global → sessão própria, com FOR SHARE
++retido até COMMIT, via helper compartilhado E08.6/E08.7. Exige conta ativa, role admin
++com event_id NULL e revoked_at NULL, sessão do ator vigente/não revogada e 2FA
++confirmado. Consulta validade em instrução nova depois dos locks, após reserva
++idempotente, após decisão, antes da conclusão e depois dela, antes de retornar ao
++COMMIT. UPDATE decisivo também exige sessão vigente/não revogada/com 2FA.
++
++Após todas as esperas, revalida relações experiência/estação/participação/entrada/
++atendimento: entrada corrente exige active e ponteiro coerente; called exige
++pending correspondente, waiting não possui pending; pending exige called e estação
++da mesma experiência. Inconsistências ou contagens divergentes causam rollback/500.
++Não converte inconsistência de domínio em fechamento parcial aparentemente válido.
++
++Uma CTE MATERIALIZED usa clock_timestamp() após locks/reserva, classificando e
++condicionando a escrita na mesma instrução. Nunca usa o relógio do aplicativo para
++autorizar fechamento/prazo. Recusa novo encerramento com status closing/closed,
++closure_mode, closure_requested_at ou admin_deadline_at já preenchidos. Isso também
++impede reabertura quando o status persistido está defasado. Não exige prontidão ou
++início já alcançado para encerrar. O controlado pode ocorrer durante janela residual
++oficial se ainda houver prazo operacional original suficiente.
++
++ControlledUntilAt deve ser estritamente maior que o instante decisivo, no máximo
++uma hora depois dele, e menor ou igual ao operational_deadline_at original.
++Não cria prazo passado, não altera o prazo original e não converte silenciosamente
++controlado inválido em imediato. Não promete precisão do instante de COMMIT: as
++operações residuais continuam fazendo suas próprias guardas temporais no banco.
++
++## Efeitos atômicos e preservação
++
++Imediato grava status closed, closure_mode immediate e closure_requested_at/
++admin_deadline_at/updated_at no mesmo instante PostgreSQL. Cancela todos os pending
++do evento como canceled, resolved_by_user_id do Admin, cancel_reason admin_immediate.
++Fecha waiting/called internas como closed, close_reason admin_immediate. Finaliza
++waiting/active como finished, finish_reason admin_immediate e limpa seus ponteiros.
++O motivo é compatível com o exemplo administrativo da §17.7 e os varchar(40)
++atuais; nenhum enum, tabela ou migration nova. Todas as datas dos efeitos copiam
++closure_requested_at diretamente no PostgreSQL, preservando microssegundos.
++
++Controlado grava closing, closure_mode controlled, corte atual e prazo validado;
++finaliza somente waiting externas como finished, com exatamente
++admin_controlled_external_wait_closed, sem entrada na Arena ou desistência
++voluntária. Active com ou sem fila permanecem active; filas/chamadas preexistentes
++são preservadas. E07 continua autorizando operação residual até o menor prazo,
++sem novas participações, inscrições internas ou reentrada após ausência.
++
++Ambos preservam IDs, ordens bigint, contadores FIFO, snapshots, serviços completed,
++resultados terminais/históricos, disponibilidade de estações, flag de fila externa,
++horários originais, queue_accepting_entries e outros eventos. Não insere avaliações,
++nem produz conclusão ou ausência artificiais. A elegibilidade de avaliação continua
++dependendo de completed real, conforme §17.1; nenhum endpoint de avaliação foi criado.
++
++## Idempotência, auditoria e limites
++
++Namespace admin_close_event. Fingerprint SHA-256 inclui evento, modo, prazo controlado
++normalizado quando aplicável e reason normalizada. Ator/operação/chave compõem a
++unicidade existente. Usa AdminIdempotencyPolicy e ADMIN_IDEMPOTENCY_TTL_SECONDS
++obrigatório, sem novo TTL/default/fallback. Expires_at vencido não autoriza reexecução
++enquanto a linha existir; retenção/expurgo continuam fora do escopo.
++
++Reserva, corte, efeitos, auditoria e resposta concluída confirmam/revertem juntos.
++Replay autorizado é reconhecido antes de novos efeitos/validação de janela e retorna
++a resposta histórica após rollback do caminho de consulta/conflito da reserva.
++Não reaplica limpeza, reabre evento nem restaura prazo/estado anterior. Replay segue
++exigindo autorização atual. Não existe no-op novo por mera igualdade de body: uma
++chave distinta é outra intenção e recebe EVENT_ALREADY_CLOSED quando já iniciado.
++
++Auditoria única por mudança: origin user, category event, action event_admin_closed,
++ator, evento, reason, before com estado/modo/prazo original/efetivo anterior, after
++com modo/estado/corte/prazo efetivo, externalWaitingFinalized. Occurred_at é o mesmo
++closure_requested_at do evento. Falha da auditoria ou de qualquer escrita/conclusão
++idempotente reverte tudo, sem auditoria fictícia. Payload idempotente contém somente
++a resposta pública, sem texto da justificativa ou tokens.
++
++A semântica completa de segunda intenção para encurtar controlado continua sem
++aprovação. A E08.8 limita-se ao encerramento inicial e retries da mesma intenção;
++recusa outra intenção, inclusive mudança para imediato, sem inventar uma transição.
++O job que limpará o estado físico no vencimento controlado/operacional é futuro
++(E08.9), **não implementado**. Após vencimento, guardas existentes bloqueiam operação
++tardia, mas active/filas/pending podem aguardar o job: não declarar ciclo automático
++completo. A transação atômica bloqueia o conjunto do evento; custo/latência crescem
++com seu tamanho. Qualquer otimização em lotes exige desenho equivalente de garantia,
++fora desta task. Concorrência real e latência ainda dependem de validação manual.
++
++## Validações realizadas e pendências
++
++| Execução pelo Codex | Resultado |
++| --- | --- |
++| Focados E08.8 + E08.7 + E08.6 + E05 sob tsconfig.test | 105/105 aprovados: 33 novos + 72 anteriores |
++| Regressão unitária npm.cmd test | 390/390 aprovados: 357 anteriores + 33 novos |
++| npm.cmd run typecheck:test | Aprovado, incluindo a suíte PostgreSQL escrita |
++| npm.cmd run lint | Aprovado |
++| npm.cmd run build | Aprovado |
++| PostgreSQL real (validação manual posterior) | 68/68 HTTP E08.8 e 530/530 na regressão completa aprovados; zero falhas, cancelamentos ou testes ignorados |
++
++Zero falhas, cancelamentos ou testes ignorados nas execuções aprovadas. Os novos
++unitários são 25 de DTO/serviço/driver simulado e oito de HTTP/DI. DI real resolve
++controller/serviço/banco/política compartilhados, sem conexão ou init/listen.
++Unitários executados fora da sandbox pela falha de inicialização conhecida do tsx
++(uv_os_get_passwd/ENOMEM), com DOTENV_CONFIG_PATH=NUL, URL fictícia sem conexão
++postgresql://unit:unit@127.0.0.1:1/unit_no_connection e três TTLs explícitos de 60.
++Nenhum .env, credencial, Neon ou PostgreSQL real foi acessado. Na preparação dos
++novos testes, typecheck/lint identificaram um bloco de testes de programação copiado
++além dos helpers e um alias local sem uso; ambos removidos do arquivo novo, sem
++alterar testes anteriores ou suas expectativas. Nenhuma falha funcional nos focados.
++
++Correção pontual após a primeira execução manual informada pelo responsável:
++68 testes executados, 67 aprovados e uma falha no teste de rollback; a regressão
++de 530 foi corretamente interrompida antes de iniciar. A fase que não acionava a
++injeção era **complete**. O SQL emitido corresponde ao prefixo
++`update "idempotency_operations"`, mas completeIdempotencyOperationWithTx usa
++`tx.update(...).returning()`, cuja execução preparada passa pela sessão/driver
++Drizzle, sem atravessar o `tx.execute` instrumentado. Portanto, alterar somente o
++reconhecimento textual não resolveria a causa. O caminho foi conferido no helper
++e no Drizzle instalado e reproduzido localmente com driver simulado: um UPDATE
++idempotente observado no driver, zero observados pelo interceptador tx.execute;
++um SELECT explícito é interceptado. Nenhuma conexão de rede nessa reprodução.
++
++Mantidos os cinco pontos de falha de event/services/queues/people/audit e suas
++asserções. Para complete, seguindo E08.6/E08.7, a injeção agora ocorre depois de
++`await callback(tx)` e antes do COMMIT: consulta na mesma transação a intenção
++exata por ator/operação/chave exclusiva da execução, exige completed/HTTP 200/
++referência e payload correspondentes, verifica evento closed, cinco participações
++finalizadas, ausência de pessoas/ponteiros/filas/pending abertos, um cancelamento,
++um completed preservado e uma auditoria. Só então marca a fase atingida e executa
++SQL real SELECT 1/0 na mesma transação. Permanecem obrigatórios HTTP 500
++INTERNAL_SERVER_ERROR, reached=true, restauração integral do snapshot e zero
++auditorias após rollback. Não simula o banco da integração nem altera produção,
++schema, dependências ou testes anteriores.
++
++Nesta correção, focados locais E08.8 (33/33), typecheck, lint e build aprovados;
++os demais resultados da tabela pertencem à implementação anterior. O typecheck
++exigiu estreitamento explícito do resultado genérico do callback no teste, feito
++por asserções de runtime. PostgreSQL não foi reexecutado pelo Codex.
++
++Em 03/11/2026, o responsável confirmou a nova execução manual PostgreSQL após
++essa correção: os 68/68 testes HTTP da E08.8 passaram, inclusive o rollback que
++antes retornara HTTP 200 inesperadamente, e a regressão PostgreSQL completa passou
++em 530/530. Não houve falhas, cancelamentos ou testes ignorados. Esta aprovação
++manual posterior confirma o mecanismo corrigido; não altera o histórico da primeira
++execução, sua interrupção preventiva da regressão ou a causa verificada acima.
++
++Escritos **68 testes HTTP/integração PostgreSQL**, com AppModule real. Total previsto:
++**530 = 462 anteriores + 68 novos**. A contagem das matrizes foi conferida
++estaticamente pela AST TypeScript durante a implementação, e a execução manual
++posterior aprovou os 68 testes da task e os 530 da regressão completa.
++
++Cobertura: modos, auth/2FA/sessão/revogação, UUID/body/header/prazos/reason, efeitos
++imediatos/controlados, preservação de histórico/completed/snapshots/bigint/ponteiros,
++privacidade, auditoria exata, replay histórico/vencido/conflitos/in_progress/segunda
++intenção e isolamento. Matriz de 36 combinações: dois modos × duas ordens × E03,
++E07.1, E07.4, E07.5, E07.6, E07.3, E08.5, E08.6 e E08.7. Usa operações reais;
++retém primeira transação antes do COMMIT e exige espera real por pg_blocking_pids.
++Verifica resultado vencedor, bloqueios posteriores e operação residual permitida.
++
++Testes temporais observam bloqueio antes do prazo, aguardam relógio PostgreSQL
++ultrapassá-lo e reconfirmam o bloqueio antes de liberar evento/estação/participação.
++Incluem expiração de sessão e revalidação de autorização após espera; um teste
++explicita que vencimento controlado bloqueia resolução sem executar job de limpeza.
++Falhas SQL reais SELECT 1/0 são injetadas depois de evento, cancelamentos, filas,
++participações, auditoria e conclusão; conferem efeitos intermediários antes do erro
++e snapshot integral restaurado depois. Wrappers delegam SQL real, sem mock de banco,
++e são restaurados/liberados/aguardados em finally.
++
++Preflight antes dos providers exige três URLs explícitas idênticas, sem query/hash,
++somente 127.0.0.1:55432/arenago_events_test. Fixtures isoladas por UUID e limpeza
++transacional própria, sem seed/reset/migrations. Para execução manual, configurar
++credenciais privadamente no banco local já preparado:
++
++```powershell
++Set-Location C:\DoJob\ProgramacaoMobile\backend
++$env:NODE_ENV = 'test'
++$env:EVENTS_TEST_DATABASE_URL = 'postgresql://USUARIO:SENHA@127.0.0.1:55432/arenago_events_test'
++$env:DATABASE_URL = $env:EVENTS_TEST_DATABASE_URL
++$env:DATABASE_DIRECT_URL = $env:EVENTS_TEST_DATABASE_URL
++$env:DOTENV_CONFIG_PATH = 'NUL'
++$env:STAFF_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:ADMIN_IDEMPOTENCY_TTL_SECONDS = '60'
++.\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test --test-concurrency=1 test/integration/admin-close-http.integration.test.ts
++if ($LASTEXITCODE -ne 0) { throw 'Investigar E08.8 antes da regressão PostgreSQL.' }
++npm.cmd run test:integration
++if ($LASTEXITCODE -ne 0) { throw 'Investigar falhas da regressão PostgreSQL.' }
++```
++
++60 segundos é valor de fixture, não definição de TTL de produção.
++
++## Arquivos e evidência única
++
++- backend/src/events/admin-events.module.ts: registro/exportação do endpoint/serviço.
++- backend/src/events/admin-close.controller.ts: POST 200, projeção e RFC 7807.
++- backend/src/events/admin-close.dto.ts: modos estritos, reason e prazo normalizado.
++- backend/src/events/admin-close.types.ts: contratos públicos/internos.
++- backend/src/events/admin-close.service.ts: locks, corte, efeitos, auditoria e intenção.
++- backend/test/unit/admin-close.test.ts: 25 testes de DTO/serviço/SQL/rollback.
++- backend/test/unit/admin-close-http.test.ts: oito testes HTTP/DI.
++- backend/test/integration/admin-close-http.integration.test.ts: 68 testes PostgreSQL aprovados manualmente.
++- docs/ARQUITETURA_BACKEND_ARENAGO.md: nota local na §17.8, preservando decisões históricas.
++- docs/E08_8_IMPLEMENTACAO.md: este relatório.
++
++Evidência única: qa-evidence/e08-8-changes.diff, completa contra a63e633, com os
++arquivos novos não rastreados. Aplicação conferida por git apply --check
++--whitespace=error-all e aplicação efetiva em cópia isolada da base; conteúdo
++comparado aos dez arquivos finais com normalização Git de linhas, sem omissões.
++UTF-8 sem BOM, diff --git e caminhos relativos. Exclui a própria evidência, outros
++diffs, .env/segredos, dependências, temporários e mudanças alheias. HEAD/índice
++preservados; arquivos disponíveis para revisão e versionamento manual.
++Sem git add/commit/push/merge/rebase, auditoria consolidada da E08 ou início da
++próxima etapa. Nenhuma validação de produção declarada.

@@ -1,14 +1,13 @@
 # ArenaGo
 
-ArenaGo é um aplicativo mobile para apoiar a participação em eventos de games. A proposta reúne entrada em eventos, acompanhamento de filas e participação em experiências da Arena. O backend em desenvolvimento fornecerá a API e a persistência PostgreSQL necessárias para substituir os dados locais simulados.
+ArenaGo é um aplicativo mobile para apoiar a participação em eventos de games. O repositório contém o frontend Expo e uma API NestJS com persistência PostgreSQL. A integração entre eles é parcial: autenticação e questionário usam a API, enquanto os fluxos de eventos e Arena no aplicativo ainda dependem de dados e estado locais.
 
 ## Estado do desenvolvimento
 
-- **Frontend:** aplicativo React Native com Expo e fluxos de demonstração executados localmente. Cadastro, login, eventos, filas, experiências e avaliações ainda usam validações, estado ou dados simulados no cliente.
-- **Backend:** fundação NestJS com Drizzle ORM, configuração de conexão PostgreSQL, schemas e migrações versionadas implementados. Os documentos de arquitetura relatam validação local da fundação; isso não representa prontidão de produção.
-- **Banco:** o schema Drizzle define 23 tabelas e o diretório `backend/drizzle/` contém cinco migrações SQL versionadas.
-- **APIs e integração:** não há endpoints funcionais de domínio; o app Expo ainda não consome o backend.
-- **Hospedagem:** não há banco Neon nem ambiente de produção configurados.
+- **Frontend Expo:** cadastro, login, sessão e questionário consultam ou gravam na API real. Entrada por código de demonstração, participação na Arena, filas e avaliações exibidas nas telas ainda usam simulação/estado local; a integração desses fluxos com os endpoints existentes não está concluída.
+- **Backend NestJS:** autenticação e sessão, perfil/questionário, jogos, configuração administrativa de eventos, participações, filas, operação Staff, encerramentos e avaliações têm controllers e serviços implementados. Isso não significa que todo o percurso do participante esteja disponível por HTTP: consulta pública do evento por código e criação de participação ainda não têm controller.
+- **Banco e testes:** Drizzle, migrações SQL e PostgreSQL local de testes. Após a E08-EST04, o responsável confirmou 1.229/1.229 testes PostgreSQL e a regressão unitária passou 992/992. Esses resultados são do ambiente de desenvolvimento/testes.
+- **Dependências abertas:** concessão/revogação de Staff e Admin, conclusão do fluxo Admin TOTP, integração Expo dos eventos, BI, LGPD e infraestrutura de produção. Não há validação de produção declarada.
 
 ## Tecnologias
 
@@ -27,7 +26,7 @@ O frontend também usa React 19.2.3 e React Navigation 7. Para as dependências 
 
 ```text
 app/       Aplicativo mobile Expo, telas, estado local e testes
-backend/   Fundação da API NestJS, schemas Drizzle e migrações PostgreSQL
+backend/   API NestJS, schemas Drizzle, migrações PostgreSQL e testes
 docs/      Planejamento do produto e arquitetura técnica
 ```
 
@@ -47,7 +46,7 @@ O servidor Expo oferece as opções de execução disponíveis no README do app.
 
 ### Backend
 
-O backend requer uma instância PostgreSQL local e `DATABASE_URL` configurada conforme as instruções específicas. Na pasta do backend:
+O backend requer uma instância PostgreSQL local e as variáveis de conexão, tokens e TTLs descritas no [README do backend](backend/README.md). Na pasta do backend:
 
 ```powershell
 cd C:\DoJob\ProgramacaoMobile\backend
