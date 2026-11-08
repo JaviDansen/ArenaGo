@@ -7,11 +7,12 @@ import { ParticipationProvider } from './context/ParticipationContext';
 import MainTabs from './navigation/MainTabs';
 import AuthSessionGate, { resolveInitialRouteForAuthState } from './screens/auth/AuthSessionGate';
 import EvaluationScreen from './screens/participation/EvaluationScreen';
+import RealEvaluationScreen from './screens/participation/RealEvaluationScreen';
 import EventConfirmationScreen from './screens/event-entry/EventConfirmationScreen';
 import EventEntryScreen from './screens/event-entry/EventEntryScreen';
 import ForgotPasswordScreen from './screens/auth/ForgotPasswordScreen';
 import LoginScreen from './screens/auth/LoginScreen';
-import ParticipationDetailsScreen from './screens/participation/ParticipationDetailsScreen';
+import ParticipationDetailsScreen from './screens/participation/ParticipationRealDetailsScreen';
 import ProfileQuestionnaireScreen from './screens/profile/ProfileQuestionnaireScreen';
 import RegisterScreen from './screens/auth/RegisterScreen';
 import WelcomeScreen from './screens/auth/WelcomeScreen';
@@ -53,6 +54,11 @@ export function AppNavigation() {
       name: 'Evaluation',
       component: EvaluationScreen,
       options: { headerShown: true, headerBackVisible: false, title: 'Avaliação' },
+    },
+    {
+      name: 'RealEvaluation',
+      component: RealEvaluationScreen,
+      options: { headerShown: true, title: 'Avaliar evento' },
     },
   ];
   const isQuestionnairePending =

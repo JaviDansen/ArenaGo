@@ -4,6 +4,7 @@ import { Pressable, Text } from 'react-native';
 import ScreenContainer from '../../components/ScreenContainer';
 import { ParticipationContext } from '../../context/ParticipationContext';
 import ActiveArenaScreen from '../arena/ActiveArenaScreen';
+import RealArenaScreen from '../arena/RealArenaScreen';
 import ArenaQueueScreen from '../arena/ArenaQueueScreen';
 import HomeScreen from './HomeScreen';
 
@@ -22,10 +23,13 @@ export default function HomeFlowScreen({ navigation }) {
   }
 
   if (participation?.source === 'server') {
+    if (participation.status === 'active') {
+      return <RealArenaScreen key={participation.id} participation={participation} refreshParticipation={refreshParticipation} />;
+    }
     return (
       <ScreenContainer>
-        <Text>{participation.status === 'waiting' ? 'Você está na fila externa.' : 'Sua participação na Arena está ativa.'}</Text>
-        {participation.status === 'waiting' ? <Text>Sua posição: {participation.externalQueue.position}º</Text> : null}
+        <Text>Você está na fila externa do evento.</Text>
+        {participation.externalQueue?.position ? <Text>Posição: {participation.externalQueue.position}º</Text> : null}
         <Text>Evento: {participation.eventId}</Text>
         <Pressable onPress={refreshParticipation}><Text>Atualizar participação</Text></Pressable>
       </ScreenContainer>

@@ -51,6 +51,8 @@ export function AuthProvider({
     isPersistentStorage: snapshot.isPersistentStorage,
     register: manager.register,
     login: manager.login,
+    verifyAdminTwoFactor: manager.verifyAdminTwoFactor,
+    cancelAdminTwoFactor: manager.cancelAdminTwoFactor,
     logout: manager.logout,
     refreshSession: manager.refreshSession,
     restoreSession: manager.restoreSession,

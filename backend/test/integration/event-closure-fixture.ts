@@ -26,6 +26,7 @@ process.env.DOTENV_CONFIG_PATH = devNull;
 process.env.STAFF_IDEMPOTENCY_TTL_SECONDS = "60";
 process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = "60";
 process.env.ADMIN_IDEMPOTENCY_TTL_SECONDS = "60";
+process.env.EVALUATION_IDEMPOTENCY_TTL_SECONDS = "60";
 const pool = new Pool({ connectionString: urls[0], ssl: false, max: 8, connectionTimeoutMillis: 2000, statement_timeout: 20000, lock_timeout: 16000 });
 let app: INestApplication, database: NodePgDatabase<typeof schema>, participations: ParticipationsService, queues: QueueEntryService;
 let signAccess: (userId: string, sessionId: string, expired?: boolean) => string;

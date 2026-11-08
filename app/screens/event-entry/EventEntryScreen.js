@@ -1,45 +1,47 @@
-import { useState } from 'react';
+import { useContext, useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput } from 'react-native';
 
 import ScreenContainer from '../../components/ScreenContainer';
-import { mockEvents } from '../../data/mockData';
+import { ParticipationContext } from '../../context/ParticipationContext';
 
 export default function EventEntryScreen({ navigation }) {
+  const { admission, lookupEvent, isCurrentAdmission } = useContext(ParticipationContext);
   const [eventCode, setEventCode] = useState('');
+  const [localError, setLocalError] = useState(null);
+  const loading = admission?.status === 'looking_up';
 
-  function handleContinue() {
-    const normalizedCode = eventCode.trim().toUpperCase();
-
-    if (normalizedCode === '') {
+  async function handleContinue() {
+    if (loading) return;
+    const code = eventCode.trim();
+    if (!code) {
+      setLocalError('Digite o código do evento.');
       return;
     }
-
-    const event = Object.prototype.hasOwnProperty.call(mockEvents, normalizedCode)
-      ? mockEvents[normalizedCode]
-      : null;
-
-    if (!event) {
-      return;
+    setLocalError(null);
+    const result = await lookupEvent(code);
+    if (result?.kind === 'found' && isCurrentAdmission()) {
+      navigation.navigate('EventConfirmation', { event: result.event, eligibility: result.eligibility });
     }
-
-    console.log(normalizedCode);
-    navigation.navigate('EventConfirmation', { event });
   }
 
   return (
     <ScreenContainer>
       <Text style={styles.description}>
-        Escaneie o QR Code do evento ou digite o código de acesso.
+        Digite o código de acesso do evento.
       </Text>
-      <Text>Modo demonstração: a entrada por código ainda não é registrada no servidor.</Text>
       <TextInput
         placeholder="Código do evento"
         style={styles.input}
         value={eventCode}
-        onChangeText={setEventCode}
+        onChangeText={(value) => { setEventCode(value); setLocalError(null); }}
+        autoCapitalize="characters"
+        autoCorrect={false}
       />
-      <Pressable style={styles.button} onPress={handleContinue}>
-        <Text style={styles.buttonText}>Continuar</Text>
+      {localError || admission?.status === 'error' ? (
+        <Text style={styles.error}>{localError ?? admission?.error}</Text>
+      ) : null}
+      <Pressable style={styles.button} onPress={handleContinue} disabled={loading}>
+        <Text style={styles.buttonText}>{loading ? 'Consultando...' : 'Continuar'}</Text>
       </Pressable>
     </ScreenContainer>
   );
@@ -68,5 +70,9 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 16,
     fontWeight: 'bold',
+  },
+  error: {
+    color: '#9b1c1c',
+    marginTop: 12,
   },
 });

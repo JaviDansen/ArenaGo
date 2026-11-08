@@ -2,250 +2,161 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const { loadModule, nodes, textOf } = require('./helpers/questionnaireHarness.cjs');
 
-function nativeComponents() {
-  const native = Object.fromEntries(
-    ['Pressable', 'Text', 'TextInput'].map((name) => [name, name])
-  );
-  native.StyleSheet = { create: (styles) => styles };
-  return native;
-}
+const event = {
+  id: '11111111-1111-4111-8111-111111111111', name: 'Arena real', timezone: 'America/Sao_Paulo',
+  startsAt: '2026-11-08T10:00:00.000Z', officialEndsAt: '2026-11-08T20:00:00.000Z',
+  operationalDeadlineAt: '2026-11-08T21:00:00.000Z', externalQueueEnabled: true,
+};
+const eligible = { eligible: true, blockingReasons: [] };
 
-function entryScreen() {
-  const state = [];
-  const navigationCalls = [];
-  let cursor = 0;
-  let tree;
-  const data = loadModule('data/mockData.js', require).exports;
-  const screen = loadModule('screens/event-entry/EventEntryScreen.js', (name) => {
-    if (name === 'react') return {
-      useState(initial) {
-        const index = cursor++;
-        if (!(index in state)) state[index] = initial;
-        return [state[index], (value) => {
-          state[index] = typeof value === 'function' ? value(state[index]) : value;
-        }];
-      },
-    };
-    if (name === 'react-native') return nativeComponents();
-    if (name === '../../components/ScreenContainer') {
-      return { __esModule: true, default: 'ScreenContainer' };
-    }
-    if (name === '../../data/mockData') return data;
-    return require(name);
-  });
-  screen.context.console = { log() {} };
-
-  function render() {
-    cursor = 0;
-    tree = screen.exports.default({
-      navigation: {
-        navigate: (name, params) => navigationCalls.push({ name, params }),
-      },
-    });
-  }
-
-  render();
-  return {
-    navigationCalls,
-    changeCode(value) {
-      const input = nodes(tree).find((node) => node.type === 'TextInput');
-      assert.ok(input, 'missing event code input');
-      input.props.onChangeText(value);
-      render();
-    },
-    continue() {
-      const button = nodes(tree).find((node) =>
-        node.type === 'Pressable' && textOf(node) === 'Continuar');
-      assert.ok(button, 'missing continue button');
-      button.props.onPress();
-      render();
+function screenRig(path, context, params = {}) {
+  const state = [], calls = [];
+  let cursor = 0, tree;
+  const react = {
+    useContext: () => context,
+    useRef(initial) { const index = cursor++; return state[index] ||= { current: initial }; },
+    useState(initial) {
+      const index = cursor++;
+      if (!(index in state)) state[index] = initial;
+      return [state[index], (value) => { state[index] = typeof value === 'function' ? value(state[index]) : value; }];
     },
   };
-}
-
-function confirmationScreen(event, previousParticipation) {
-  let participation = previousParticipation;
-  const contextUpdates = [];
-  const navigationCalls = [];
-  let tree;
-  const screen = loadModule('screens/event-entry/EventConfirmationScreen.js', (name) => {
-    if (name === 'react') return {
-      useContext: () => ({
-        participation,
-        setParticipation(value) {
-          contextUpdates.push(value);
-          participation = value;
-        },
-      }),
+  const module = loadModule(path, (name) => {
+    if (name === 'react') return react;
+    if (name === 'react-native') return {
+      Pressable: 'Pressable', Text: 'Text', TextInput: 'TextInput',
+      StyleSheet: { create: (styles) => styles },
     };
-    if (name === 'react-native') return nativeComponents();
-    if (name === '../../components/ScreenContainer') {
-      return { __esModule: true, default: 'ScreenContainer' };
-    }
+    if (name === '../../components/ScreenContainer') return { __esModule: true, default: 'ScreenContainer' };
     if (name === '../../context/ParticipationContext') return { ParticipationContext: {} };
     return require(name);
-  });
-
+  }).exports;
   function render() {
-    tree = screen.exports.default({
-      route: { params: { event } },
+    cursor = 0;
+    tree = module.default({
+      route: { params },
       navigation: {
-        reset: (payload) => navigationCalls.push(structuredClone(payload)),
+        navigate: (name, value) => calls.push({ name, value }),
+        reset: (value) => calls.push({ reset: value }),
       },
     });
   }
-
+  function button(label) {
+    const result = nodes(tree).find((node) => node.type === 'Pressable' && textOf(node) === label);
+    assert.ok(result, `Botão ausente: ${label}`);
+    return result;
+  }
   render();
   return {
-    contextUpdates,
-    navigationCalls,
-    get participation() { return participation; },
-    confirm() {
-      const button = nodes(tree).find((node) =>
-        node.type === 'Pressable' && textOf(node) === 'Confirmar entrada');
-      assert.ok(button, 'missing confirmation button');
-      button.props.onPress();
-      render();
-    },
+    calls, render, button,
+    text: () => textOf(tree),
+    input(value) { nodes(tree).find((node) => node.type === 'TextInput').props.onChangeText(value); render(); },
   };
 }
 
-function enteredEvent(h) {
-  assert.equal(h.navigationCalls.length, 1);
-  assert.equal(h.navigationCalls[0].name, 'EventConfirmation');
-  return structuredClone(h.navigationCalls[0].params.event);
-}
-
-test('FILA code is case-insensitive and opens the queue event', () => {
-  for (const code of ['FILA', 'fila', 'Fila', 'fIlA']) {
-    const h = entryScreen();
-    h.changeCode(code);
-    h.continue();
-    const event = enteredEvent(h);
-    assert.equal(event.id, 'beast-arena-queue');
-    assert.equal(event.hasArenaQueue, true);
-  }
-});
-
-test('LIVRE code is case-insensitive and opens the direct-entry event', () => {
-  for (const code of ['LIVRE', 'livre', 'Livre', 'lIvRe']) {
-    const h = entryScreen();
-    h.changeCode(code);
-    h.continue();
-    const event = enteredEvent(h);
-    assert.equal(event.id, 'beast-arena-free');
-    assert.equal(event.hasArenaQueue, false);
-  }
-});
-
-test('event code ignores outer whitespace before normalizing its case', () => {
-  const h = entryScreen();
-  h.changeCode(' \tfIlA\r\n ');
-  h.continue();
-  assert.equal(enteredEvent(h).id, 'beast-arena-queue');
-});
-
-test('empty or whitespace-only event code does not navigate', () => {
-  for (const code of ['', ' ', '\t\r\n']) {
-    const h = entryScreen();
-    h.changeCode(code);
-    h.continue();
-    assert.deepEqual(h.navigationCalls, []);
-  }
-});
-
-test('unknown event codes do not navigate regardless of case', () => {
-  for (const code of ['DESCONHECIDO', 'desconhecido', 'Desconhecido']) {
-    const h = entryScreen();
-    h.changeCode(code);
-    h.continue();
-    assert.deepEqual(h.navigationCalls, []);
-  }
-});
-
-test('inherited mock object properties are not interpreted as events', () => {
-  const h = entryScreen();
-  h.changeCode('toString');
-  h.continue();
-  assert.deepEqual(h.navigationCalls, []);
-});
-
-test('navigation occurs only after the current code resolves to a valid event', () => {
-  const h = entryScreen();
-  h.changeCode('INVALIDO');
-  h.continue();
-  h.changeCode('FILA');
-  h.continue();
-  h.changeCode('toString');
-  h.continue();
-  assert.equal(h.navigationCalls.length, 1);
-  assert.equal(enteredEvent(h).id, 'beast-arena-queue');
-});
-
-test('confirming a FILA event replaces prior context with a waiting participation', () => {
-  const event = {
-    id: 'queue-event',
-    name: 'Evento com fila',
-    location: 'Local A',
-    hasArenaQueue: true,
-    experiences: [{ id: 'experience-a', name: 'Experiência A' }],
+test('consulta real envia o código sem mudar sua caixa e navega somente após resposta válida', async () => {
+  const requests = [];
+  const context = {
+    admission: { status: 'idle' }, isCurrentAdmission: () => true,
+    lookupEvent: async (code) => { requests.push(code); return { kind: 'found', event, eligibility: eligible }; },
   };
-  const previous = {
-    event: { id: 'old-event' },
-    status: 'finished',
-    queuePosition: 99,
-    experienceQueue: { experienceId: 'old-experience', position: 2 },
-    activeExperience: { experienceId: 'old-experience' },
-    experienceParticipations: { 'old-experience': 7 },
-    residualData: true,
-  };
-  const h = confirmationScreen(event, previous);
-  h.confirm();
-
-  assert.equal(h.contextUpdates.length, 1);
-  assert.equal(h.contextUpdates[0], h.participation);
-  assert.equal(h.participation.event, event);
-  assert.deepEqual(structuredClone(h.participation), {
-    event,
-    status: 'waiting',
-    queuePosition: 5,
-    experienceQueue: null,
-    activeExperience: null,
-    experienceParticipations: {},
-  });
-  assert.deepEqual(h.navigationCalls, [{ index: 0, routes: [{ name: 'MainTabs' }] }]);
+  const rig = screenRig('screens/event-entry/EventEntryScreen.js', context);
+  rig.input('  AbC-42  ');
+  await rig.button('Continuar').props.onPress();
+  assert.deepEqual(requests, ['AbC-42']);
+  assert.deepEqual(structuredClone(rig.calls), [{ name: 'EventConfirmation', value: { event, eligibility: eligible } }]);
 });
 
-test('confirming a LIVRE event replaces prior context with an active participation', () => {
-  const event = {
-    id: 'free-event',
-    name: 'Evento livre',
-    location: 'Local B',
-    hasArenaQueue: false,
-    experiences: [{ id: 'experience-b', name: 'Experiência B' }],
+test('código vazio não consulta o backend nem navega', async () => {
+  let count = 0;
+  const context = {
+    admission: { status: 'idle' }, isCurrentAdmission: () => true,
+    lookupEvent: async () => { count++; return { kind: 'error', message: 'Evento inexistente' }; },
   };
-  const previous = {
-    event: { id: 'old-event' },
-    status: 'waiting',
-    queuePosition: 8,
-    experienceQueue: { experienceId: 'old-experience', position: 3 },
-    activeExperience: { experienceId: 'old-experience' },
-    experienceParticipations: { 'old-experience': 4 },
-    residualData: true,
-  };
-  const h = confirmationScreen(event, previous);
-  h.confirm();
+  const rig = screenRig('screens/event-entry/EventEntryScreen.js', context);
+  await rig.button('Continuar').props.onPress();
+  assert.equal(count, 0);
+  rig.render();
+  assert.match(rig.text(), /Digite o código do evento/);
+  assert.deepEqual(rig.calls, []);
+});
 
-  assert.equal(h.contextUpdates.length, 1);
-  assert.equal(h.contextUpdates[0], h.participation);
-  assert.equal(h.participation.event, event);
-  assert.deepEqual(structuredClone(h.participation), {
-    event,
-    status: 'active',
-    queuePosition: null,
-    experienceQueue: null,
-    activeExperience: null,
-    experienceParticipations: {},
-  });
-  assert.deepEqual(h.navigationCalls, [{ index: 0, routes: [{ name: 'MainTabs' }] }]);
+test('consulta inexistente e resposta tardia após logout não navegam', async () => {
+  let resolve, current = true;
+  const context = {
+    admission: { status: 'idle' }, isCurrentAdmission: () => current,
+    lookupEvent: () => new Promise((done) => { resolve = done; }),
+  };
+  const rig = screenRig('screens/event-entry/EventEntryScreen.js', context);
+  rig.input('ABC');
+  const pending = rig.button('Continuar').props.onPress();
+  current = false;
+  resolve({ kind: 'found', event, eligibility: eligible });
+  await pending;
+  assert.deepEqual(rig.calls, []);
+  context.lookupEvent = async () => ({ kind: 'error', message: 'Evento inexistente' });
+  rig.render();
+  await rig.button('Continuar').props.onPress();
+  assert.deepEqual(rig.calls, []);
+});
+
+test('ineligibilidade mostra motivo real e impede POST', async () => {
+  let count = 0;
+  const context = {
+    admission: { status: 'ready', event }, isCurrentAdmission: () => true,
+    confirmEventEntry: async () => { count++; return { kind: 'complete' }; },
+  };
+  const rig = screenRig('screens/event-entry/EventConfirmationScreen.js', context,
+    { event, eligibility: { eligible: false, blockingReasons: ['PROFILE_INCOMPLETE'] } });
+  assert.match(rig.text(), /PROFILE_INCOMPLETE/);
+  assert.equal(rig.button('Confirmar entrada').props.disabled, true);
+  await rig.button('Confirmar entrada').props.onPress();
+  assert.equal(count, 0);
+  assert.deepEqual(rig.calls, []);
+});
+
+test('ingresso confirmado navega uma vez; toque duplo não duplica POST', async () => {
+  let resolve, count = 0;
+  const context = {
+    admission: { status: 'ready', event }, isCurrentAdmission: () => true,
+    confirmEventEntry: () => { count++; return new Promise((done) => { resolve = done; }); },
+  };
+  const rig = screenRig('screens/event-entry/EventConfirmationScreen.js', context, { event, eligibility: eligible });
+  const button = rig.button('Confirmar entrada');
+  const first = button.props.onPress();
+  await button.props.onPress();
+  assert.equal(count, 1);
+  resolve({ kind: 'complete' });
+  await first;
+  assert.deepEqual(structuredClone(rig.calls), [{ reset: { index: 0, routes: [{ name: 'MainTabs' }] } }]);
+  assert.doesNotMatch(rig.text(), /Demonstração|queuePosition|Local A/);
+});
+
+test('ingresso confirmado sem sincronização só repete GET', async () => {
+  let posts = 0, reads = 0;
+  const context = {
+    admission: { status: 'confirmed_unsynced', event, confirmedParticipationId: '22222222-2222-4222-8222-222222222222',
+      error: 'Atualize sem repetir o ingresso.' }, isCurrentAdmission: () => true,
+    confirmEventEntry: async () => { posts++; return { kind: 'complete' }; },
+    retryEntrySync: async () => { reads++; return { kind: 'complete' }; },
+  };
+  const rig = screenRig('screens/event-entry/EventConfirmationScreen.js', context, { event, eligibility: eligible });
+  assert.match(rig.text(), /Atualize sem repetir/);
+  await rig.button('Atualizar participação').props.onPress();
+  assert.equal(posts, 0);
+  assert.equal(reads, 1);
+  assert.equal(rig.calls.length, 1);
+});
+
+test('erro HTTP na confirmação preserva a tela e informa o problema', async () => {
+  const context = {
+    admission: { status: 'ready', event }, isCurrentAdmission: () => true,
+    confirmEventEntry: async () => ({ kind: 'error', message: 'Evento encerrado' }),
+  };
+  const rig = screenRig('screens/event-entry/EventConfirmationScreen.js', context, { event, eligibility: eligible });
+  await rig.button('Confirmar entrada').props.onPress();
+  assert.deepEqual(rig.calls, []);
+  context.admission = { status: 'error', event, error: 'Evento encerrado' };
+  rig.render();
+  assert.match(rig.text(), /Evento encerrado/);
 });

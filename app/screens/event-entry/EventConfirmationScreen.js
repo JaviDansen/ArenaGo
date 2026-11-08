@@ -1,52 +1,47 @@
-import { useContext } from 'react';
+import { useContext, useRef } from 'react';
 import { Pressable, StyleSheet, Text } from 'react-native';
 
 import ScreenContainer from '../../components/ScreenContainer';
 import { ParticipationContext } from '../../context/ParticipationContext';
 
 export default function EventConfirmationScreen({ navigation, route }) {
-  const { setParticipation } = useContext(ParticipationContext);
-  const { event } = route.params;
+  const { admission, confirmEventEntry, retryEntrySync, isCurrentAdmission } = useContext(ParticipationContext);
+  const { event, eligibility } = route.params;
+  const inFlight = useRef(false);
+  const current = admission?.event?.id === event.id;
+  const busy = current && ['joining', 'looking_up'].includes(admission.status);
+  const confirmed = current && admission.confirmedParticipationId;
+  const blocked = !eligibility?.eligible;
 
-  function handleConfirmEntry() {
-    // Eventos com fila externa começam em espera; os demais entram direto na Arena.
-    if (event.hasArenaQueue) {
-      setParticipation({
-        event,
-        status: 'waiting',
-        // Posição temporariamente simulada enquanto não há integração com backend.
-        queuePosition: 5,
-        experienceQueue: null,
-        // Será preenchida quando o participante for chamado para uma experiência.
-        activeExperience: null,
-        experienceParticipations: {},
-      });
-    } else {
-      setParticipation({
-        event,
-        status: 'active',
-        queuePosition: null,
-        experienceQueue: null,
-        activeExperience: null,
-        experienceParticipations: {},
-      });
+  async function handleConfirmEntry() {
+    if (inFlight.current || busy || blocked || !isCurrentAdmission()) return;
+    inFlight.current = true;
+    try {
+      const result = confirmed ? await retryEntrySync() : await confirmEventEntry(event.id);
+      if (result?.kind === 'complete' && isCurrentAdmission()) {
+        navigation.reset({ index: 0, routes: [{ name: 'MainTabs' }] });
+      }
+    } finally {
+      inFlight.current = false;
     }
-
-    // Remove as telas de entrada para não retornar a elas com participação ativa.
-    navigation.reset({
-      index: 0,
-      routes: [{ name: 'MainTabs' }],
-    });
   }
+
+  const message = !current ? 'Consulte novamente o evento para confirmar o ingresso.' : admission?.error;
 
   return (
     <ScreenContainer>
       <Text style={styles.title}>Evento encontrado</Text>
-      <Text>Demonstração: esta entrada não será registrada no servidor.</Text>
       <Text style={styles.eventName}>{event.name}</Text>
-      <Text style={styles.location}>{event.location}</Text>
-      <Pressable style={styles.button} onPress={handleConfirmEntry}>
-        <Text style={styles.buttonText}>Confirmar entrada</Text>
+      <Text style={styles.detail}>Fuso horário: {event.timezone}</Text>
+      <Text style={styles.detail}>Início: {event.startsAt}</Text>
+      <Text style={styles.detail}>Término oficial: {event.officialEndsAt}</Text>
+      <Text style={styles.detail}>Prazo operacional: {event.operationalDeadlineAt}</Text>
+      <Text style={styles.detail}>{event.externalQueueEnabled ? 'Fila externa habilitada' : 'Sem fila externa'}</Text>
+      {blocked ? <Text style={styles.error}>Ingresso indisponível: {eligibility.blockingReasons.join(', ')}</Text> : null}
+      {message ? <Text style={styles.error}>{message}</Text> : null}
+      <Pressable style={styles.button} onPress={handleConfirmEntry}
+        disabled={busy || blocked || !current || admission.status === 'complete'}>
+        <Text style={styles.buttonText}>{busy ? 'Aguarde...' : confirmed ? 'Atualizar participação' : 'Confirmar entrada'}</Text>
       </Pressable>
     </ScreenContainer>
   );
@@ -61,7 +56,7 @@ const styles = StyleSheet.create({
     fontSize: 18,
     marginTop: 24,
   },
-  location: {
+  detail: {
     fontSize: 16,
     marginTop: 8,
   },

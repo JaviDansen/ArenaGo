@@ -26,6 +26,24 @@ function providerRig() {
     if (name === 'react') return react;
     if (name === './AuthContext') return { useAuth: () => auth };
     if (name === '../services/participationService') return { createParticipationStore };
+    if (name === '../services/eventAdmissionService') return {
+      createEventAdmissionStore: () => {
+        let state = { userId: null, epoch: null, status: 'idle' };
+        const listeners = new Set();
+        return {
+          getSnapshot: () => state,
+          subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+          setIdentity(identity) {
+            state = { userId: identity?.userId ?? null, epoch: identity?.epoch ?? null, status: 'idle' };
+            listeners.forEach((listener) => listener(state));
+          },
+          lookup: async () => ({ kind: 'stale' }),
+          confirm: async () => ({ kind: 'stale' }),
+          retrySync: async () => ({ kind: 'stale' }),
+          isCurrent: () => Boolean(state.userId),
+        };
+      },
+    };
     return require(name);
   }).exports;
   const render = () => { cursor = 0; return module.ParticipationProvider({ children: null }).props.value; };

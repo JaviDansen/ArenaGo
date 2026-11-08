@@ -27,6 +27,7 @@ if (urls.some(value => value !== urls[0])) throw new Error("As três URLs explí
 process.env.DOTENV_CONFIG_PATH = devNull;
 process.env.STAFF_IDEMPOTENCY_TTL_SECONDS = "60"; // Valor explícito exclusivo desta suíte.
 process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = "60"; // EventsModule também instancia as rotas E08.2.
+process.env.EVALUATION_IDEMPOTENCY_TTL_SECONDS = "60";
 const pool = new Pool({ connectionString: urls[0], ssl: false, max: 5, connectionTimeoutMillis: 2000, statement_timeout: 10000 });
 type Database = NodePgDatabase<typeof schema>;
 let app: INestApplication, database: Database, joining: QueueEntryService, caller: CallNextService, completion: CompleteService;
