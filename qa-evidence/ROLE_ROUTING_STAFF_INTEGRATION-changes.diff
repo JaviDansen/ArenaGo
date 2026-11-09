@@ -1,0 +1,2040 @@
+diff --git a/app/App.js b/app/App.js
+index f692a07..2bbea05 100644
+--- a/app/App.js
++++ b/app/App.js
+@@ -7,6 +7,7 @@ import { useAuth } from './context/AuthContext';
+ import { ParticipationProvider } from './context/ParticipationContext';
+ import MainTabs from './navigation/MainTabs';
+ import AuthSessionGate, { resolveInitialRouteForAuthState } from './screens/auth/AuthSessionGate';
++import RolePendingScreen from './screens/auth/RolePendingScreen';
+ import EvaluationScreen from './screens/participation/EvaluationScreen';
+ import RealEvaluationScreen from './screens/participation/RealEvaluationScreen';
+ import EventConfirmationScreen from './screens/event-entry/EventConfirmationScreen';
+@@ -36,6 +37,13 @@ export function AppNavigation() {
+   const auth = useAuth();
+   const isAuthenticated = Boolean(auth?.isAuthenticated);
+   const initialRouteName = resolveInitialRouteForAuthState(auth);
++  const roleArea = initialRouteName === 'AdminPending' ? 'admin'
++    : initialRouteName === 'StaffPending' ? 'staff'
++      : initialRouteName === 'IdentityRecovery' ? 'recovery'
++      : isAuthenticated ? 'participant' : 'public';
++  const sessionKey = isAuthenticated
++    ? `${roleArea}:${auth?.user?.id || ''}:${auth?.getSessionEpoch?.() ?? ''}`
++    : 'public';
+ 
+   const publicScreens = [
+     { name: 'Welcome', component: WelcomeScreen },
+@@ -112,7 +120,13 @@ export function AppNavigation() {
+ 
+   const availableScreens = !isAuthenticated
+     ? publicScreens
+-    : isQuestionnairePending
++    : roleArea === 'admin'
++      ? [{ name: 'AdminPending', component: RolePendingScreen }]
++      : roleArea === 'staff'
++        ? [{ name: 'StaffPending', component: RolePendingScreen }]
++        : roleArea === 'recovery'
++          ? [{ name: 'IdentityRecovery', component: RolePendingScreen }]
++        : isQuestionnairePending
+       ? pendingQuestionnaireScreens
+       : appScreens;
+ 
+@@ -129,8 +143,8 @@ export function AppNavigation() {
+       : availableScreens;
+ 
+   return (
+-    <ParticipationProvider>
+-      <NavigationContainer>
++    <ParticipationProvider key={sessionKey}>
++      <NavigationContainer key={sessionKey}>
+         <Stack.Navigator screenOptions={{ headerShown: false }}>
+           {orderedScreens.map(({ name, component, getComponent, options }) => (
+             <Stack.Screen
+diff --git a/app/components/BirthDateInput.native.js b/app/components/BirthDateInput.native.js
+index 7fb8766..1db8667 100644
+--- a/app/components/BirthDateInput.native.js
++++ b/app/components/BirthDateInput.native.js
+@@ -1,4 +1,4 @@
+-import { useRef, useState } from 'react';
++import { useEffect, useRef, useState } from 'react';
+ import {
+   Keyboard,
+   Modal,
+@@ -11,6 +11,7 @@ import {
+ } from 'react-native';
+ import DateTimePicker, { DateTimePickerAndroid } from '@react-native-community/datetimepicker';
+ import { SafeAreaView } from 'react-native-safe-area-context';
++import { useAuth } from '../context/AuthContext';
+ 
+ import {
+   civilDateToLocalDate,
+@@ -31,13 +32,33 @@ export default function BirthDateInput({
+ }) {
+   const [isPickerOpen, setIsPickerOpen] = useState(false);
+   const hasSelectedDate = useRef(false);
++  const auth = useAuth();
++  const authRef = useRef(auth);
++  authRef.current = auth;
++  const pickerRevision = useRef(null);
++  const androidPickerOpen = useRef(false);
++  const canInteract = () => {
++    const current = authRef.current;
++    return current?.isIdentityVerified
++      ? current.isIdentityVerified() && current.getIdentityRevision() === pickerRevision.current
++      : !current?.isInitializing && !['checking', 'error', 'unverified'].includes(current?.identityStatus);
++  };
++  useEffect(() => {
++    if (auth?.isInitializing || ['checking', 'error', 'unverified'].includes(auth?.identityStatus)) {
++      setIsPickerOpen(false);
++      if (Platform.OS === 'android' && androidPickerOpen.current) {
++        androidPickerOpen.current = false;
++        void Promise.resolve(DateTimePickerAndroid.dismiss?.('date')).catch(() => {});
++      }
++    }
++  }, [auth?.identityStatus, auth?.isInitializing]);
+   const fieldStyle = StyleSheet.flatten(inputStyle) || {};
+   const tintColor = fieldStyle.color || '#ffffff';
+   const today = getTodayCivilDate();
+   const pickerDate = civilDateToLocalDate(parseBirthDate(value) || today);
+ 
+   function handleDateSelected(_event, selectedDate) {
+-    if (!selectedDate) return;
++    if (!canInteract() || !selectedDate) return;
+ 
+     const displayDate = formatBirthDate(localDateToCivilDate(selectedDate));
+     if (parseBirthDate(displayDate)) {
+@@ -47,14 +68,20 @@ export default function BirthDateInput({
+   }
+ 
+   function openPicker() {
++    pickerRevision.current = authRef.current?.getIdentityRevision?.() ?? null;
++    if (!canInteract()) return;
+     Keyboard.dismiss();
+ 
+     if (Platform.OS === 'android') {
++      androidPickerOpen.current = true;
+       DateTimePickerAndroid.open({
+         mode: 'date',
+         value: pickerDate,
+         maximumDate: civilDateToLocalDate(today),
+-        onValueChange: handleDateSelected,
++        onValueChange: (event, selectedDate) => {
++          androidPickerOpen.current = false;
++          handleDateSelected(event, selectedDate);
++        },
+       });
+       return;
+     }
+@@ -64,6 +91,7 @@ export default function BirthDateInput({
+   }
+ 
+   function confirmPicker() {
++    if (!canInteract()) return;
+     // O spinner não emite mudança ao confirmar a data inicial já destacada.
+     if (!hasSelectedDate.current) {
+       handleDateSelected(null, pickerDate);
+@@ -99,7 +127,7 @@ export default function BirthDateInput({
+ 
+       {Platform.OS === 'ios' && (
+         <Modal
+-          visible={isPickerOpen}
++          visible={isPickerOpen && canInteract()}
+           transparent
+           animationType="slide"
+           onRequestClose={() => setIsPickerOpen(false)}
+@@ -130,7 +158,7 @@ export default function BirthDateInput({
+                   <Text style={{ color: tintColor }}>Fechar</Text>
+                 </Pressable>
+               </View>
+-              {isPickerOpen && (
++              {isPickerOpen && canInteract() && (
+                 <DateTimePicker
+                   value={pickerDate}
+                   mode="date"
+diff --git a/app/context/AuthContext.js b/app/context/AuthContext.js
+index 3d6ff4a..18f2cb0 100644
+--- a/app/context/AuthContext.js
++++ b/app/context/AuthContext.js
+@@ -40,9 +40,12 @@ export function AuthProvider({
+     accessToken: manager.getAccessToken(),
+     getAccessToken: manager.getAccessToken,
+     getSessionEpoch: manager.getSessionEpoch,
++    getIdentityRevision: manager.getIdentityRevision,
++    isIdentityVerified: manager.isIdentityVerified,
+     isAuthenticated: snapshot.isAuthenticated,
+     isInitializing: snapshot.isInitializing,
+     sessionStatus: snapshot.sessionStatus,
++    identityStatus: snapshot.identityStatus,
+     authNotice: snapshot.authNotice,
+     networkError: snapshot.networkError,
+     storageError: snapshot.storageError,
+diff --git a/app/screens/auth/AuthSessionGate.js b/app/screens/auth/AuthSessionGate.js
+index 4317fb2..3ee2d4f 100644
+--- a/app/screens/auth/AuthSessionGate.js
++++ b/app/screens/auth/AuthSessionGate.js
+@@ -18,6 +18,14 @@ export function resolveInitialRouteForAuthState(authState) {
+     return 'Welcome';
+   }
+ 
++  const roles = authState.user?.roles;
++  if (!Array.isArray(roles) || roles.length === 0 ||
++      !roles.every((role) => ['admin', 'staff', 'participante'].includes(role))) {
++    return 'IdentityRecovery';
++  }
++  if (roles.includes('admin')) return 'AdminPending';
++  if (roles.includes('staff')) return 'StaffPending';
++
+   if (authState.user && authState.user.hasCompletedQuestionnaire === false) {
+     return 'ProfileQuestionnaire';
+   }
+@@ -37,8 +45,24 @@ export function AuthSessionCoordinator({ children }) {
+     return children;
+   }
+ 
+-  if (auth.isInitializing) {
+-    return (
++  // Mantém a pilha montada durante uma verificação da mesma sessão, mas sem
++  // exibir ou permitir interação com dados cuja identidade ainda não foi confirmada.
++  const wrap = (content, blocked) => (
++    <View style={styles.fill}>
++      {(!blocked || auth.isAuthenticated) && (
++        <View style={blocked ? styles.hidden : styles.fill}
++          pointerEvents={blocked ? 'none' : 'auto'}
++          accessibilityElementsHidden={blocked}
++          importantForAccessibility={blocked ? 'no-hide-descendants' : 'auto'}>
++          {children}
++        </View>
++      )}
++      {content}
++    </View>
++  );
++
++  if (auth.isInitializing || auth.identityStatus === 'checking') {
++    return wrap((
+       <SafeAreaView style={styles.container}>
+         <StatusBar style="light" />
+         <View style={styles.centerBox}>
+@@ -52,7 +76,27 @@ export function AuthSessionCoordinator({ children }) {
+           </Text>
+         </View>
+       </SafeAreaView>
+-    );
++    ), true);
++  }
++
++  if (auth.identityStatus === 'error' ||
++      (auth.isAuthenticated && resolveInitialRouteForAuthState(auth) === 'IdentityRecovery')) {
++    return wrap((
++      <SafeAreaView style={styles.container}>
++        <View style={styles.centerBox}>
++          <Text style={styles.loadingTitle}>Não foi possível verificar sua sessão</Text>
++          <Text style={styles.loadingSubtitle}>Confirme sua conexão e tente novamente.</Text>
++          <Pressable style={styles.primaryButton} accessibilityLabel="Tentar verificar sessão"
++            onPress={() => { void auth.restoreSession(); }}>
++            <Text style={styles.primaryButtonText}>Tentar novamente</Text>
++          </Pressable>
++          <Pressable style={styles.secondaryButton} accessibilityLabel="Sair da conta"
++            onPress={() => { void auth.logout(); }}>
++            <Text style={styles.secondaryButtonText}>Sair da conta</Text>
++          </Pressable>
++        </View>
++      </SafeAreaView>
++    ), true);
+   }
+ 
+   const isStorageFailure = auth.sessionStatus === 'storage_error';
+@@ -65,7 +109,7 @@ export function AuthSessionCoordinator({ children }) {
+     recoveryMessage &&
+     !bypassNetworkRecovery
+   ) {
+-    return (
++    return wrap((
+       <SafeAreaView style={styles.container}>
+         <StatusBar style="light" />
+         <View style={styles.centerBox}>
+@@ -98,10 +142,10 @@ export function AuthSessionCoordinator({ children }) {
+           </View>
+         </View>
+       </SafeAreaView>
+-    );
++    ), true);
+   }
+ 
+-  return children;
++  return wrap(null, false);
+ }
+ 
+ export default function AuthSessionGate({
+@@ -124,6 +168,8 @@ export default function AuthSessionGate({
+ }
+ 
+ const styles = StyleSheet.create({
++  fill: { flex: 1 },
++  hidden: { display: 'none' },
+   container: {
+     flex: 1,
+     backgroundColor: '#0c0a17',
+diff --git a/app/screens/staff/StaffEntryControlScreen.js b/app/screens/staff/StaffEntryControlScreen.js
+index d65df34..47e3b5b 100644
+--- a/app/screens/staff/StaffEntryControlScreen.js
++++ b/app/screens/staff/StaffEntryControlScreen.js
+@@ -1,4 +1,4 @@
+-import { useState } from 'react';
++import { useEffect, useState } from 'react';
+ import { Pressable, StyleSheet, Text, View } from 'react-native';
+ 
+ import StaffButton from './components/StaffButton';
+@@ -10,6 +10,7 @@ import StaffNotice from './components/StaffNotice';
+ import StaffScreen from './components/StaffScreen';
+ import { staffColors } from './components/staffTheme';
+ import { useStaffDemo } from './StaffDemoContext';
++import { useAuth } from '../../context/AuthContext';
+ import { confirmEntry, disableEntryQueue, reactivateEntryQueue } from './staffDemoState';
+ 
+ // Controle de Entrada / fila externa (SV02, print 03). Toda mudança aqui é
+@@ -18,6 +19,16 @@ export default function StaffEntryControlScreen({ navigation }) {
+   const { session, run, failNextAction, toggleFailNextAction } = useStaffDemo();
+   const [dialog, setDialog] = useState(null);
+   const [feedback, setFeedback] = useState(null);
++  const auth = useAuth();
++  const identityRevision = auth?.getIdentityRevision?.();
++  const openDialog = (value) => {
++    if (auth?.isIdentityVerified && !auth.isIdentityVerified()) return;
++    setDialog({ ...value, identityRevision: auth?.getIdentityRevision?.() });
++  };
++  useEffect(() => {
++    if (auth?.isInitializing || ['checking', 'error', 'unverified'].includes(auth?.identityStatus) ||
++        (dialog && dialog.identityRevision !== identityRevision)) setDialog(null);
++  }, [auth?.identityStatus, auth?.isInitializing, identityRevision, dialog]);
+ 
+   if (!session) {
+     return (
+@@ -34,6 +45,7 @@ export default function StaffEntryControlScreen({ navigation }) {
+   const next = entryQueue.waiting[0] ?? null;
+ 
+   function apply(transition, ...args) {
++    if (auth?.isIdentityVerified && !auth.isIdentityVerified()) return;
+     setDialog(null);
+     const result = run(transition, ...args);
+     // Repetição da mesma confirmação não sobrescreve o retorno da primeira.
+@@ -51,7 +63,7 @@ export default function StaffEntryControlScreen({ navigation }) {
+           </View>
+           <Pressable
+             style={[styles.pill, !entryQueue.active && styles.pillOff]}
+-            onPress={entryQueue.active ? () => setDialog({ type: 'disable' }) : undefined}
++            onPress={entryQueue.active ? () => openDialog({ type: 'disable' }) : undefined}
+             accessibilityRole="button"
+             accessibilityLabel="Fila de acesso: Não"
+             accessibilityState={{ selected: !entryQueue.active }}
+@@ -113,7 +125,7 @@ export default function StaffEntryControlScreen({ navigation }) {
+               <StaffButton
+                 label="CONFIRMAR ENTRADA"
+                 compact
+-                onPress={() => setDialog({ type: 'confirm', participant })}
++                onPress={() => openDialog({ type: 'confirm', participant })}
+               />
+             ) : null}
+           </View>
+@@ -124,7 +136,7 @@ export default function StaffEntryControlScreen({ navigation }) {
+         <StaffButton
+           label="DESATIVAR FILA (LIBERA TODOS)"
+           variant="danger"
+-          onPress={() => setDialog({ type: 'disable' })}
++          onPress={() => openDialog({ type: 'disable' })}
+           accessibilityHint="Abre uma confirmação. Na operação real, só Admin poderá executar."
+         />
+       ) : null}
+@@ -138,6 +150,7 @@ export default function StaffEntryControlScreen({ navigation }) {
+       <StaffDemoTools failNextAction={failNextAction} onToggleFailure={toggleFailNextAction} />
+ 
+       <StaffConfirmDialog
++        openedAtRevision={dialog?.identityRevision}
+         visible={dialog?.type === 'confirm'}
+         title="Confirmar entrada?"
+         message={dialog?.participant ? `${dialog.participant.name} será marcado(a) como dentro da Arena.` : ''}
+@@ -148,6 +161,7 @@ export default function StaffEntryControlScreen({ navigation }) {
+       />
+ 
+       <StaffConfirmDialog
++        openedAtRevision={dialog?.identityRevision}
+         visible={dialog?.type === 'disable'}
+         title="Desativar a fila de acesso?"
+         message={`Todos os ${entryQueue.waiting.length} participante(s) aguardando seriam liberados para a Arena.`}
+diff --git a/app/screens/staff/StaffStationScreen.js b/app/screens/staff/StaffStationScreen.js
+index c6bbac8..4c65e29 100644
+--- a/app/screens/staff/StaffStationScreen.js
++++ b/app/screens/staff/StaffStationScreen.js
+@@ -1,4 +1,4 @@
+-import { useState } from 'react';
++import { useEffect, useState } from 'react';
+ import { Pressable, StyleSheet, Text, View } from 'react-native';
+ 
+ import StaffButton from './components/StaffButton';
+@@ -9,6 +9,7 @@ import StaffNotice from './components/StaffNotice';
+ import StaffScreen from './components/StaffScreen';
+ import { staffColors } from './components/staffTheme';
+ import { useStaffDemo } from './StaffDemoContext';
++import { useAuth } from '../../context/AuthContext';
+ import {
+   callNext,
+   completeCall,
+@@ -29,6 +30,16 @@ export default function StaffStationScreen({ navigation, route }) {
+   const { session, run, failNextAction, toggleFailNextAction } = useStaffDemo();
+   const [dialog, setDialog] = useState(null);
+   const [feedback, setFeedback] = useState(null);
++  const auth = useAuth();
++  const identityRevision = auth?.getIdentityRevision?.();
++  const openDialog = (value) => {
++    if (auth?.isIdentityVerified && !auth.isIdentityVerified()) return;
++    setDialog({ ...value, identityRevision: auth?.getIdentityRevision?.() });
++  };
++  useEffect(() => {
++    if (auth?.isInitializing || ['checking', 'error', 'unverified'].includes(auth?.identityStatus) ||
++        (dialog && dialog.identityRevision !== identityRevision)) setDialog(null);
++  }, [auth?.identityStatus, auth?.isInitializing, identityRevision, dialog]);
+ 
+   const params = route?.params ?? {};
+   const experience = findExperience(session, params.experienceId);
+@@ -50,6 +61,7 @@ export default function StaffStationScreen({ navigation, route }) {
+   const absentRequeues = session.queueEntriesOpen;
+ 
+   function apply(transition, ...args) {
++    if (auth?.isIdentityVerified && !auth.isIdentityVerified()) return;
+     setDialog(null);
+     const result = run(transition, station.id, ...args);
+     // Callback antigo ou repetido (chamado já resolvido ou trocado) não
+@@ -64,6 +76,7 @@ export default function StaffStationScreen({ navigation, route }) {
+   }
+ 
+   function confirmRemoval() {
++    if (auth?.isIdentityVerified && !auth.isIdentityVerified()) return;
+     const participant = dialog?.participant;
+     setDialog(null);
+     setFeedback({
+@@ -114,12 +127,12 @@ export default function StaffStationScreen({ navigation, route }) {
+           </StaffNotice>
+           <StaffButton
+             label="CONCLUIR EXPERIÊNCIA"
+-            onPress={() => setDialog({ type: 'complete', call: station.call })}
++            onPress={() => openDialog({ type: 'complete', call: station.call })}
+           />
+           <StaffButton
+             label={absentRequeues ? 'AUSENTE → FINAL DA FILA' : 'AUSENTE (NÃO VOLTA À FILA)'}
+             variant="secondary"
+-            onPress={() => setDialog({ type: 'absent', call: station.call })}
++            onPress={() => openDialog({ type: 'absent', call: station.call })}
+           />
+         </>
+       ) : null}
+@@ -156,7 +169,7 @@ export default function StaffStationScreen({ navigation, route }) {
+               variant="secondary"
+               compact
+               accessibilityLabel={`Remover ${participant.name}`}
+-              onPress={() => setDialog({ type: 'remove', participant })}
++              onPress={() => openDialog({ type: 'remove', participant })}
+             />
+           </View>
+         ))
+@@ -173,6 +186,7 @@ export default function StaffStationScreen({ navigation, route }) {
+       <StaffDemoTools failNextAction={failNextAction} onToggleFailure={toggleFailNextAction} />
+ 
+       <StaffConfirmDialog
++        openedAtRevision={dialog?.identityRevision}
+         visible={dialog?.type === 'complete'}
+         title="Concluir experiência?"
+         message={dialog?.call ? `Confirma que ${dialog.call.name} concluiu a experiência?` : ''}
+@@ -183,6 +197,7 @@ export default function StaffStationScreen({ navigation, route }) {
+       />
+ 
+       <StaffConfirmDialog
++        openedAtRevision={dialog?.identityRevision}
+         visible={dialog?.type === 'absent'}
+         title="Registrar ausência?"
+         message={absentRequeues
+@@ -196,6 +211,7 @@ export default function StaffStationScreen({ navigation, route }) {
+       />
+ 
+       <StaffConfirmDialog
++        openedAtRevision={dialog?.identityRevision}
+         visible={dialog?.type === 'remove'}
+         title={`Remover ${dialog?.participant?.name ?? ''}?`}
+         message="Remover não é o mesmo que Ausente."
+diff --git a/app/screens/staff/components/StaffConfirmDialog.js b/app/screens/staff/components/StaffConfirmDialog.js
+index c8092bc..f22effd 100644
+--- a/app/screens/staff/components/StaffConfirmDialog.js
++++ b/app/screens/staff/components/StaffConfirmDialog.js
+@@ -1,4 +1,5 @@
+ import { Modal, StyleSheet, Text, View } from 'react-native';
++import { useAuth } from '../../../context/AuthContext';
+ 
+ import StaffButton from './StaffButton';
+ import { staffColors, staffSpacing } from './staffTheme';
+@@ -14,16 +15,24 @@ export default function StaffConfirmDialog({
+   variant = 'primary',
+   onConfirm,
+   onCancel,
++  openedAtRevision,
+ }) {
++  const auth = useAuth();
++  const revision = openedAtRevision ?? auth?.getIdentityRevision?.();
++  const canInteract = () => auth?.isIdentityVerified
++    ? auth.isIdentityVerified() && auth.getIdentityRevision() === revision
++    : !auth?.isInitializing && !['checking', 'error', 'unverified'].includes(auth?.identityStatus);
++  const allowed = canInteract();
+   return (
+-    <Modal visible={visible} transparent animationType="fade" onRequestClose={onCancel}>
++    <Modal visible={visible && allowed} transparent animationType="fade"
++      onRequestClose={() => { if (canInteract()) onCancel?.(); }}>
+       <View style={styles.backdrop}>
+         <View style={styles.dialog} accessibilityViewIsModal>
+           <Text style={styles.title} accessibilityRole="header">{title}</Text>
+           {message ? <Text style={styles.message}>{message}</Text> : null}
+           {note ? <Text style={styles.note}>{note}</Text> : null}
+-          <StaffButton label={confirmLabel} variant={variant} onPress={onConfirm} />
+-          <StaffButton label={cancelLabel} variant="secondary" onPress={onCancel} />
++          <StaffButton label={confirmLabel} variant={variant} onPress={() => { if (canInteract()) onConfirm?.(); }} />
++          <StaffButton label={cancelLabel} variant="secondary" onPress={() => { if (canInteract()) onCancel?.(); }} />
+         </View>
+       </View>
+     </Modal>
+diff --git a/app/services/authService.js b/app/services/authService.js
+index 673520f..b0efcf3 100644
+--- a/app/services/authService.js
++++ b/app/services/authService.js
+@@ -1,6 +1,10 @@
+ import { ApiError, createHttpClient, httpClient as defaultHttpClient } from './httpClient';
+ import { defaultTokenStorage } from './tokenStorage';
+ 
++// Gravado antes do POST: uma interrupção nunca deixa o token consumido no disco.
++// O prefixo não pertence ao formato dos tokens opacos emitidos pelo backend.
++const REFRESH_PENDING_MARKER = '!arenago-refresh-pending-v1';
++
+ function resolveInvalidationNotice(error) {
+   if (!error) {
+     return 'Sua sessão foi encerrada. Faça login novamente para continuar.';
+@@ -24,7 +28,9 @@ function sanitizePublicUser(rawInput) {
+     rawInput && typeof rawInput === 'object' && rawInput.user && typeof rawInput.user === 'object'
+       ? rawInput.user
+       : rawInput;
+-  if (!rawUser || typeof rawUser !== 'object') {
++  if (!rawUser || typeof rawUser !== 'object' || !Array.isArray(rawUser.roles) ||
++      rawUser.roles.length === 0 ||
++      !rawUser.roles.every((role) => ['admin', 'staff', 'participante'].includes(role))) {
+     return null;
+   }
+   return {
+@@ -32,7 +38,7 @@ function sanitizePublicUser(rawInput) {
+     name: String(rawUser.name || ''),
+     email: String(rawUser.email || ''),
+     emailVerified: Boolean(rawUser.emailVerified),
+-    roles: Array.isArray(rawUser.roles) ? [...rawUser.roles] : ['participante'],
++    roles: [...rawUser.roles],
+     hasCompletedQuestionnaire: Boolean(rawUser.hasCompletedQuestionnaire),
+   };
+ }
+@@ -71,6 +77,9 @@ export function createAuthSessionManager(options = {}) {
+   let inFlightRefreshPromise = null;
+   let inFlightRestorePromise = null;
+   let inFlightTwoFactorPromise = null;
++  let identityRequestGeneration = 0;
++  let identityRevision = 0;
++  let pendingRotation = null;
+   let privateAdminChallenge = null;
+   let challengeTimer = null;
+   const now = options.now ?? Date.now;
+@@ -95,6 +104,7 @@ export function createAuthSessionManager(options = {}) {
+     adminChallenge: null,
+     postAuthRoute: null,
+     isPersistentStorage: Boolean(tokenStorage.isPersistent),
++    identityStatus: 'unverified',
+   };
+ 
+   function enqueueStorageOp(task) {
+@@ -247,9 +257,19 @@ export function createAuthSessionManager(options = {}) {
+   }
+ 
+   function emitState(patch) {
++    if (patch.identityStatus && patch.identityStatus !== state.identityStatus &&
++        patch.identityStatus !== 'verified') identityRevision += 1;
++    if (patch.isAuthenticated === false && state.isAuthenticated) identityRevision += 1;
++    if (patch.isInitializing === true && !state.isInitializing) identityRevision += 1;
++    if (patch.user && state.user && (patch.user.id !== state.user.id ||
++        [...(patch.user.roles || [])].sort().join('|') !== [...(state.user.roles || [])].sort().join('|'))) {
++      identityRevision += 1;
++    }
+     state = Object.freeze({
+       ...state,
+       ...patch,
++      ...(patch.isAuthenticated === false && !Object.prototype.hasOwnProperty.call(patch, 'identityStatus')
++        ? { identityStatus: 'unverified' } : {}),
+     });
+     for (const listener of listeners) {
+       listener(state);
+@@ -279,6 +299,11 @@ export function createAuthSessionManager(options = {}) {
+     return sessionEpoch;
+   }
+ 
++  function getIdentityRevision() { return identityRevision; }
++  function isIdentityVerified() {
++    return state.isAuthenticated && !state.isInitializing && state.identityStatus === 'verified';
++  }
++
+   function clearAdminChallenge({ resetFlight = true } = {}) {
+     privateAdminChallenge = null;
+     if (resetFlight) inFlightTwoFactorPromise = null;
+@@ -290,6 +315,7 @@ export function createAuthSessionManager(options = {}) {
+     if (!privateAdminChallenge && !state.adminChallenge &&
+         !['authenticating', 'admin_2fa_verifying'].includes(state.sessionStatus)) return Promise.resolve();
+     sessionEpoch += 1;
++    pendingRotation = null;
+     const cancellationEpoch = sessionEpoch;
+     clearAdminChallenge();
+     accessToken = null;
+@@ -317,11 +343,20 @@ export function createAuthSessionManager(options = {}) {
+     }
+ 
+     sessionEpoch += 1;
++    pendingRotation = null;
+     const invalidationEpoch = sessionEpoch;
+     clearAdminChallenge();
+     accessToken = null;
+     inFlightRefreshPromise = null;
+ 
++    // Retira as rotas imediatamente; o armazenamento seguro pode demorar.
++    const nextStatus = error?.code === 'SESSION_EXPIRED' ? 'expired' : 'revoked';
++    emitState({
++      user: null, isAuthenticated: false, isInitializing: false,
++      sessionStatus: nextStatus, authNotice: resolveInvalidationNotice(error),
++      networkError: null, storageError: null, adminChallenge: null, postAuthRoute: null,
++    });
++
+     try {
+       await clearRefreshTokenForEpoch(invalidationEpoch);
+     } catch {
+@@ -332,18 +367,6 @@ export function createAuthSessionManager(options = {}) {
+       return;
+     }
+ 
+-    const nextStatus = error?.code === 'SESSION_EXPIRED' ? 'expired' : 'revoked';
+-    emitState({
+-      user: null,
+-      isAuthenticated: false,
+-      isInitializing: false,
+-      sessionStatus: nextStatus,
+-      authNotice: resolveInvalidationNotice(error),
+-      networkError: null,
+-      storageError: null,
+-      adminChallenge: null,
+-      postAuthRoute: null,
+-    });
+   }
+ 
+   /**
+@@ -357,9 +380,32 @@ export function createAuthSessionManager(options = {}) {
+     }
+ 
+     const epochAtStart = sessionEpoch;
++    let refreshConfirmed = false;
++    identityRequestGeneration += 1;
++    emitState({ identityStatus: 'checking' });
+ 
+     const currentRefreshPromise = (async () => {
+       try {
++        if (pendingRotation?.epoch === epochAtStart) {
++          const pending = pendingRotation;
++          try {
++            const saved = await writeRefreshTokenForEpoch(pending.refreshToken, epochAtStart);
++            if (!saved || sessionEpoch !== epochAtStart) return null;
++          } catch (error) {
++            if (sessionEpoch !== epochAtStart) return null;
++            emitState({ identityStatus: 'error', isInitializing: false,
++              sessionStatus: 'identity_error', storageError: 'Não foi possível salvar a sessão renovada.',
++              networkError: 'Não foi possível salvar a sessão renovada. Tente novamente.' });
++            throw error;
++          }
++          if (sessionEpoch !== epochAtStart) return null;
++          accessToken = pending.accessToken;
++          pendingRotation = null;
++          const user = await fetchCurrentUser({ retryOnUnauthorized: false, fromRefresh: true });
++          if (sessionEpoch !== epochAtStart || !user) return null;
++          return { accessToken: pending.accessToken, refreshToken: pending.refreshToken,
++            expiresIn: pending.expiresIn, user };
++        }
+         const storageRead = await readRefreshTokenState();
+ 
+         if (sessionEpoch !== epochAtStart) {
+@@ -379,16 +425,13 @@ export function createAuthSessionManager(options = {}) {
+         const storedRefreshToken = storageRead.token;
+ 
+         if (
+-          (storedRefreshToken && uncertainRefreshTokens.has(storedRefreshToken)) ||
++          (storedRefreshToken && (storedRefreshToken === REFRESH_PENDING_MARKER || uncertainRefreshTokens.has(storedRefreshToken))) ||
+           (!storedRefreshToken && state.sessionStatus === 'uncertain_refresh')
+         ) {
+-          if (storedRefreshToken) {
+-            try {
+-              await clearRefreshTokenForEpoch(epochAtStart);
+-            } catch {
+-              // Ignora erro secundário de limpeza
+-            }
+-          }
++          sessionEpoch += 1;
++          const blockedEpoch = sessionEpoch;
++          accessToken = null;
++          pendingRotation = null;
+           emitState({
+             user: null,
+             isAuthenticated: false,
+@@ -398,6 +441,13 @@ export function createAuthSessionManager(options = {}) {
+               state.authNotice ||
+               'A tentativa anterior de renovar a sessão falhou sem confirmação do servidor. Por segurança, faça login novamente.',
+           });
++          if (storedRefreshToken) {
++            try {
++              await clearRefreshTokenForEpoch(blockedEpoch);
++            } catch {
++              // O marcador persistente continua impedindo o reenvio.
++            }
++          }
+           const uncertainError = new ApiError({
+             kind: 'timeout',
+             status: null,
+@@ -424,6 +474,11 @@ export function createAuthSessionManager(options = {}) {
+           throw missingError;
+         }
+ 
++        // Sem esse registro prévio, um encerramento após o POST e antes da
++        // gravação do novo token poderia reenviar o token já consumido.
++        const marked = await writeRefreshTokenForEpoch(REFRESH_PENDING_MARKER, epochAtStart);
++        if (!marked || sessionEpoch !== epochAtStart) return null;
++
+         try {
+           const response = await client.post(
+             '/auth/refresh',
+@@ -442,8 +497,9 @@ export function createAuthSessionManager(options = {}) {
+ 
+           if (
+             !response ||
+-            typeof response.accessToken !== 'string' ||
+-            typeof response.refreshToken !== 'string'
++            typeof response.accessToken !== 'string' || !response.accessToken.trim() ||
++            typeof response.refreshToken !== 'string' || !response.refreshToken.trim() ||
++            response.refreshToken === storedRefreshToken || response.refreshToken === REFRESH_PENDING_MARKER
+           ) {
+             throw new ApiError({
+               kind: 'http',
+@@ -454,6 +510,10 @@ export function createAuthSessionManager(options = {}) {
+             });
+           }
+ 
++          refreshConfirmed = true;
++          pendingRotation = { epoch: epochAtStart, accessToken: response.accessToken,
++            refreshToken: response.refreshToken, expiresIn: response.expiresIn };
++
+           const persisted = await writeRefreshTokenForEpoch(
+             response.refreshToken,
+             epochAtStart
+@@ -467,21 +527,33 @@ export function createAuthSessionManager(options = {}) {
+           }
+ 
+           accessToken = response.accessToken;
++          pendingRotation = null;
+ 
+-          emitState({
+-            networkError: null,
+-            storageError: null,
+-          });
++          // A resposta de refresh não contém papéis. Confirme-os com o novo token
++          // antes de liberar a requisição que provocou a renovação.
++          const liveUser = await fetchCurrentUser({ retryOnUnauthorized: false, fromRefresh: true });
++          if (sessionEpoch !== epochAtStart || !liveUser) return null;
+ 
+           return {
+             accessToken: response.accessToken,
+             refreshToken: response.refreshToken,
+             expiresIn: response.expiresIn,
++            user: liveUser,
+           };
+         } catch (error) {
+           if (sessionEpoch !== epochAtStart) {
+             return null;
+           }
++          // Falhas na leitura de identidade após a rotação confirmada não são
++          // falhas incertas do POST e não devem apagar a credencial recém-gravada.
++          if (refreshConfirmed) {
++            if (pendingRotation?.epoch === epochAtStart) {
++              emitState({ identityStatus: 'error', isInitializing: false, sessionStatus: 'identity_error',
++                storageError: 'Não foi possível salvar a sessão renovada.',
++                networkError: 'Não foi possível salvar a sessão renovada. Tente novamente.' });
++            }
++            throw error;
++          }
+ 
+           // Timeout ou qualquer falha de transporte durante POST /auth/refresh quando não é
+           // possível provar que o servidor não recebeu a requisição:
+@@ -529,6 +601,12 @@ export function createAuthSessionManager(options = {}) {
+             throw error;
+           }
+ 
++          // Somente uma falha comprovadamente anterior ao envio permite restaurar
++          // o token original. Nos demais casos o marcador impede seu reuso.
++          if (error?.isNetworkError && error?.cause?.requestNotSent === true) {
++            await writeRefreshTokenForEpoch(storedRefreshToken, epochAtStart);
++          }
++
+           // Falha de transporte apenas quando comprovadamente a requisição não chegou a ser enviada:
+           if (error?.isNetworkError) {
+             emitState({
+@@ -541,6 +619,14 @@ export function createAuthSessionManager(options = {}) {
+           throw error;
+         }
+       } finally {
++        if (sessionEpoch === epochAtStart && state.identityStatus === 'checking') {
++          if (accessToken || state.isAuthenticated) {
++            emitState({ identityStatus: 'error', isInitializing: false,
++              sessionStatus: 'identity_error', networkError: 'Não foi possível confirmar sua sessão.' });
++          } else {
++            emitState({ identityStatus: 'unverified' });
++          }
++        }
+         if (inFlightRefreshPromise === currentRefreshPromise) {
+           inFlightRefreshPromise = null;
+         }
+@@ -556,44 +642,48 @@ export function createAuthSessionManager(options = {}) {
+    */
+   async function fetchCurrentUser(options = {}) {
+     const epochAtStart = sessionEpoch;
+-    const meResponse = await client.get('/auth/me', {
+-      auth: true,
+-      retryOnUnauthorized: options.retryOnUnauthorized ?? true,
+-      _retriedAfterRefresh: Boolean(options._retriedAfterRefresh),
+-      _requestEpoch: epochAtStart,
+-    });
+-
+-    if (sessionEpoch !== epochAtStart) {
+-      return null;
++    if (inFlightRefreshPromise && !options.fromRefresh) {
++      const refreshed = await inFlightRefreshPromise;
++      return sessionEpoch === epochAtStart && refreshed ? refreshed.user : null;
+     }
+-
+-    const liveUser = sanitizePublicUser(meResponse);
+-    if (!liveUser || !liveUser.id) {
+-      throw new ApiError({
+-        kind: 'http',
+-        status: 500,
+-        code: 'INVALID_ME_RESPONSE',
+-        title: 'Resposta inválida',
+-        detail: 'Não foi possível validar os dados da conta autenticada.',
++    const requestGeneration = ++identityRequestGeneration;
++    const isCurrent = () => sessionEpoch === epochAtStart && requestGeneration === identityRequestGeneration;
++    try {
++      // O retry de /me é coordenado aqui: o refresh faz sua própria consulta,
++      // evitando dependência circular entre /me e a renovação single-flight.
++      const meResponse = await client.get('/auth/me', {
++        auth: true, retryOnUnauthorized: false, _requestEpoch: epochAtStart,
+       });
++      if (!isCurrent()) return null;
++      const liveUser = sanitizePublicUser(meResponse);
++      if (!liveUser?.id || (state.user?.id && state.user.id !== liveUser.id)) {
++        throw new ApiError({ kind: 'http', status: 500, code: 'INVALID_ME_RESPONSE',
++          title: 'Resposta inválida', detail: 'Não foi possível validar os dados da conta autenticada.' });
++      }
++      if (state.user?.id === liveUser.id && state.user?.hasCompletedQuestionnaire === true) {
++        liveUser.hasCompletedQuestionnaire = true;
++      }
++      emitState({ user: liveUser, isAuthenticated: true, isInitializing: false,
++        identityStatus: 'verified', sessionStatus: 'authenticated',
++        postAuthRoute: liveUser.hasCompletedQuestionnaire ? 'MainTabs' : 'ProfileQuestionnaire',
++        networkError: null, storageError: null });
++      return liveUser;
++    } catch (error) {
++      if (!isCurrent()) return null;
++      if (error?.status === 401) {
++        const terminal = ['SESSION_REVOKED', 'SESSION_EXPIRED', 'REFRESH_TOKEN_REUSED',
++          'INVALID_REFRESH_TOKEN', 'ACCOUNT_DEACTIVATED'].includes(error.code);
++        if (!terminal && options.retryOnUnauthorized !== false && !options._retriedAfterRefresh) {
++          const refreshed = await refreshSession();
++          return sessionEpoch === epochAtStart && refreshed ? refreshed.user : null;
++        }
++        await handleSessionInvalidated(error, { targetEpoch: epochAtStart });
++        throw error;
++      }
++      emitState({ identityStatus: 'error', isInitializing: false, sessionStatus: 'identity_error',
++        networkError: 'Não foi possível confirmar os dados da sessão. Tente novamente.' });
++      throw error;
+     }
+-
+-    // Proteção contra resposta obsoleta: não reverte questionário concluído
+-    if (state.user?.id === liveUser.id && state.user?.hasCompletedQuestionnaire === true) {
+-      liveUser.hasCompletedQuestionnaire = true;
+-    }
+-
+-    emitState({
+-      user: liveUser,
+-      isAuthenticated: true,
+-      isInitializing: false,
+-      sessionStatus: 'authenticated',
+-      postAuthRoute: liveUser.hasCompletedQuestionnaire ? 'MainTabs' : 'ProfileQuestionnaire',
+-      networkError: null,
+-      storageError: null,
+-    });
+-
+-    return liveUser;
+   }
+ 
+   /**
+@@ -665,36 +755,25 @@ export function createAuthSessionManager(options = {}) {
+           return { status: 'unauthenticated', user: null };
+         }
+ 
+-        if (!accessToken) {
++        let liveUser;
++        if (!accessToken || pendingRotation?.epoch === epochAtStart || storedRefreshToken === REFRESH_PENDING_MARKER) {
+           const refreshed = await refreshSession();
+           if (sessionEpoch !== epochAtStart || !refreshed) {
+-            return { status: 'aborted', user: state.user };
++            const status = ['revoked', 'expired', 'uncertain_refresh'].includes(state.sessionStatus)
++              ? state.sessionStatus : 'aborted';
++            return { status, user: state.user };
+           }
++          liveUser = refreshed.user;
++        } else {
++          liveUser = await fetchCurrentUser();
+         }
+ 
+-        const liveUser = await fetchCurrentUser({
+-          retryOnUnauthorized: false,
+-          _retriedAfterRefresh: true,
+-        });
+-
+         if (sessionEpoch !== epochAtStart || !liveUser) {
+           return { status: 'aborted', user: state.user };
+         }
+ 
+         const resolvedRoute = liveUser.hasCompletedQuestionnaire ? 'MainTabs' : 'ProfileQuestionnaire';
+ 
+-        emitState({
+-          user: liveUser,
+-          isAuthenticated: true,
+-          isInitializing: false,
+-          sessionStatus: 'authenticated',
+-          authNotice: null,
+-          networkError: null,
+-          storageError: null,
+-          adminChallenge: null,
+-          postAuthRoute: resolvedRoute,
+-        });
+-
+         return {
+           status: 'authenticated',
+           user: liveUser,
+@@ -710,6 +789,10 @@ export function createAuthSessionManager(options = {}) {
+           return { status: 'aborted', user: state.user };
+         }
+ 
++        if (state.identityStatus === 'error') {
++          return { status: 'identity_error', user: null, error };
++        }
++
+         if (error?.isStorageError || error?.kind === 'storage') {
+           accessToken = null;
+           emitState({
+@@ -799,6 +882,7 @@ export function createAuthSessionManager(options = {}) {
+     }
+ 
+     sessionEpoch += 1;
++    pendingRotation = null;
+     const currentEpoch = sessionEpoch;
+     inFlightRefreshPromise = null;
+     inFlightRestorePromise = null;
+@@ -825,6 +909,7 @@ export function createAuthSessionManager(options = {}) {
+       isAuthenticated: true,
+       isInitializing: false,
+       sessionStatus: 'authenticated',
++      identityStatus: 'verified',
+       authNotice: null,
+       networkError: null,
+       storageError: null,
+@@ -832,26 +917,15 @@ export function createAuthSessionManager(options = {}) {
+       postAuthRoute: 'ProfileQuestionnaire',
+     });
+ 
+-    // Confirmar sessão atual em /auth/me quando disponível, sem falhar o cadastro já persistido se /auth/me oscilar
++    // A confirmação usa a mesma geração de todas as demais leituras de identidade.
+     try {
+-      const meResponse = await client.get('/auth/me', {
+-        auth: true,
+-        retryOnUnauthorized: false,
+-        _retriedAfterRefresh: true,
+-        _requestEpoch: currentEpoch,
+-      });
+-      if (sessionEpoch === currentEpoch && meResponse?.id) {
+-        confirmedUser = sanitizePublicUser(meResponse);
+-        const resolvedRoute = confirmedUser.hasCompletedQuestionnaire ? 'MainTabs' : 'ProfileQuestionnaire';
+-        emitState({ user: confirmedUser, postAuthRoute: resolvedRoute });
+-      }
++      confirmedUser = (await fetchCurrentUser({ retryOnUnauthorized: false })) ?? state.user;
+     } catch (meError) {
+-      if (meError?.status === 401 && sessionEpoch === currentEpoch) {
+-        await handleSessionInvalidated(meError, { targetEpoch: currentEpoch });
+-        throw meError;
+-      }
++      if (meError?.status === 401) throw meError;
+     }
+ 
++    if (sessionEpoch !== currentEpoch) return { status: 'aborted', user: null, nextRoute: null };
++
+     return {
+       status: 'authenticated',
+       user: confirmedUser,
+@@ -867,6 +941,7 @@ export function createAuthSessionManager(options = {}) {
+   async function login(input) {
+     // Invalida a tentativa anterior antes de qualquer await, inclusive verificações 2FA em trânsito.
+     sessionEpoch += 1;
++    pendingRotation = null;
+     const currentEpoch = sessionEpoch;
+     const startedAt = now();
+     clearAdminChallenge();
+@@ -997,6 +1072,7 @@ export function createAuthSessionManager(options = {}) {
+       isAuthenticated: true,
+       isInitializing: false,
+       sessionStatus: 'authenticated',
++      identityStatus: 'verified',
+       authNotice: null,
+       networkError: null,
+       storageError: null,
+@@ -1006,26 +1082,15 @@ export function createAuthSessionManager(options = {}) {
+ 
+     // Confirmar dados atuais da conta em GET /auth/me
+     try {
+-      const meResponse = await client.get('/auth/me', {
+-        auth: true,
+-        retryOnUnauthorized: false,
+-        _retriedAfterRefresh: true,
+-        _requestEpoch: currentEpoch,
+-      });
+-      if (sessionEpoch === currentEpoch && meResponse?.id) {
+-        confirmedUser = sanitizePublicUser(meResponse);
+-        const resolvedRoute = confirmedUser.hasCompletedQuestionnaire ? 'MainTabs' : 'ProfileQuestionnaire';
+-        emitState({ user: confirmedUser, postAuthRoute: resolvedRoute });
+-      }
++      confirmedUser = (await fetchCurrentUser({ retryOnUnauthorized: false })) ?? state.user;
+     } catch (meError) {
+-      if (meError?.status === 401 && sessionEpoch === currentEpoch) {
+-        await handleSessionInvalidated(meError, { targetEpoch: currentEpoch });
+-        throw meError;
+-      }
++      if (sessionEpoch !== currentEpoch) return { status: 'aborted', user: null, nextRoute: null };
++      if (meError?.status === 401) throw meError;
+     }
+ 
+-    const finalRoute = confirmedUser.hasCompletedQuestionnaire ? 'MainTabs' : 'ProfileQuestionnaire';
+     if (sessionEpoch !== currentEpoch) return { status: 'aborted', user: null, nextRoute: null };
++    if (!confirmedUser) return { status: 'aborted', user: null, nextRoute: null };
++    const finalRoute = confirmedUser.hasCompletedQuestionnaire ? 'MainTabs' : 'ProfileQuestionnaire';
+     return {
+       status: 'authenticated',
+       user: confirmedUser,
+@@ -1097,6 +1162,7 @@ export function createAuthSessionManager(options = {}) {
+    */
+   async function logout() {
+     sessionEpoch += 1;
++    pendingRotation = null;
+     const logoutEpoch = sessionEpoch;
+     clearAdminChallenge();
+     const tokenToRevoke = accessToken;
+@@ -1201,6 +1267,8 @@ export function createAuthSessionManager(options = {}) {
+     getSnapshot,
+     getAccessToken,
+     getSessionEpoch,
++    getIdentityRevision,
++    isIdentityVerified,
+     register,
+     login,
+     verifyAdminTwoFactor,
+diff --git a/app/tests/auth.test.cjs b/app/tests/auth.test.cjs
+index a2ca007..344bee1 100644
+--- a/app/tests/auth.test.cjs
++++ b/app/tests/auth.test.cjs
+@@ -548,6 +548,264 @@ function deferred() {
+   return { promise, resolve };
+ }
+ 
++test('refresh confirma concessão e revogação Staff antes de liberar a sessão', async () => {
++  let roles = ['participante'];
++  let refreshNumber = 0;
++  const user = () => ({ ...adminUser, roles });
++  const rig = createAuthRig(async (req) => {
++    if (req.url.endsWith('/auth/login')) return jsonResponse(200, { ...adminSession, user: user() });
++    if (req.url.endsWith('/auth/refresh')) return jsonResponse(200, {
++      accessToken: 'rotated-access', refreshToken: `rotated-refresh-${++refreshNumber}`, expiresIn: 900,
++    });
++    if (req.url.endsWith('/auth/me')) return jsonResponse(200, user());
++    throw new Error(`Unexpected URL: ${req.url}`);
++  });
++  await rig.manager.login({ email: user().email, password: 'ValidPassword#2026' });
++  roles = ['participante', 'staff'];
++  await rig.manager.refreshSession();
++  assert.deepEqual([...rig.manager.getSnapshot().user.roles], roles);
++  roles = ['participante'];
++  await rig.manager.refreshSession();
++  assert.deepEqual([...rig.manager.getSnapshot().user.roles], roles);
++  assert.equal(rig.manager.getSnapshot().identityStatus, 'verified');
++});
++
++test('resposta antiga de /me não reverte a revogação recebida pela consulta mais recente', async () => {
++  const oldResponse = deferred();
++  let delay = false;
++  let calls = 0;
++  const user = (roles) => ({ ...adminUser, roles });
++  const rig = createAuthRig(async (req) => {
++    if (req.url.endsWith('/auth/login')) return jsonResponse(200, { ...adminSession, user: user(['staff']) });
++    if (req.url.endsWith('/auth/me')) {
++      if (!delay) return jsonResponse(200, user(['staff']));
++      calls += 1;
++      return calls === 1 ? oldResponse.promise : jsonResponse(200, user(['participante']));
++    }
++    throw new Error(`Unexpected URL: ${req.url}`);
++  });
++  await rig.manager.login({ email: adminUser.email, password: 'ValidPassword#2026' });
++  delay = true;
++  const old = rig.manager.fetchCurrentUser();
++  await rig.manager.fetchCurrentUser();
++  oldResponse.resolve(jsonResponse(200, user(['staff'])));
++  assert.equal(await old, null);
++  assert.deepEqual([...rig.manager.getSnapshot().user.roles], ['participante']);
++});
++
++test('resposta antiga de identidade não atravessa logout e login de outra conta', async () => {
++  const oldResponse = deferred();
++  let oldPending = false;
++  let current = { ...adminUser, roles: ['staff'] };
++  const rig = createAuthRig(async (req) => {
++    if (req.url.endsWith('/auth/login')) return jsonResponse(200, { ...adminSession, user: current });
++    if (req.url.endsWith('/auth/logout')) return jsonResponse(200, { message: 'ok' });
++    if (req.url.endsWith('/auth/me')) return oldPending ? oldResponse.promise : jsonResponse(200, current);
++    throw new Error(`Unexpected URL: ${req.url}`);
++  });
++  await rig.manager.login({ email: current.email, password: 'ValidPassword#2026' });
++  oldPending = true;
++  const old = rig.manager.fetchCurrentUser();
++  await rig.manager.logout();
++  current = { ...current, id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', roles: ['participante'] };
++  oldPending = false;
++  await rig.manager.login({ email: current.email, password: 'ValidPassword#2026' });
++  oldResponse.resolve(jsonResponse(200, { ...adminUser, roles: ['staff'] }));
++  assert.equal(await old, null);
++  assert.equal(rig.manager.getSnapshot().user.id, current.id);
++  assert.deepEqual([...rig.manager.getSnapshot().user.roles], ['participante']);
++});
++
++test('consulta anterior ao refresh não reabre a área antiga durante a rotação', async () => {
++  const oldResponse = deferred();
++  const refreshResponse = deferred();
++  let delayMe = false;
++  let current = { ...adminUser, roles: ['staff'] };
++  const rig = createAuthRig(async (req) => {
++    if (req.url.endsWith('/auth/login')) return jsonResponse(200, { ...adminSession, user: current });
++    if (req.url.endsWith('/auth/refresh')) return refreshResponse.promise;
++    if (req.url.endsWith('/auth/me')) return delayMe ? oldResponse.promise : jsonResponse(200, current);
++    throw new Error(`Unexpected URL: ${req.url}`);
++  });
++  await rig.manager.login({ email: current.email, password: 'ValidPassword#2026' });
++  delayMe = true;
++  const old = rig.manager.fetchCurrentUser();
++  const refresh = rig.manager.refreshSession();
++  oldResponse.resolve(jsonResponse(200, current));
++  assert.equal(await old, null);
++  assert.equal(rig.manager.getSnapshot().identityStatus, 'checking');
++  current = { ...current, roles: ['participante'] };
++  delayMe = false;
++  refreshResponse.resolve(jsonResponse(200, { accessToken: 'new', refreshToken: 'new-ref', expiresIn: 900 }));
++  await refresh;
++  assert.deepEqual([...rig.manager.getSnapshot().user.roles], ['participante']);
++});
++
++test('contrato inválido de papéis bloqueia a identidade sem inventar participante', async () => {
++  for (const roles of [undefined, null, [], ['desconhecido'], ['staff', 'desconhecido']]) {
++    const user = { ...adminUser, roles };
++    const rig = createAuthRig(async (req) => {
++      if (req.url.endsWith('/auth/refresh')) return jsonResponse(200, {
++        accessToken: 'access', refreshToken: 'rotated', expiresIn: 900,
++      });
++      if (req.url.endsWith('/auth/me')) return jsonResponse(200, user);
++      throw new Error(`Unexpected URL: ${req.url}`);
++    }, { initialRefreshToken: 'initial' });
++    const result = await rig.manager.restoreSession();
++    assert.equal(result.status, 'identity_error');
++    assert.equal(rig.manager.getSnapshot().identityStatus, 'error');
++    assert.equal(rig.manager.getSnapshot().isAuthenticated, false);
++    assert.equal(await rig.tokenStorage.getRefreshToken(), 'rotated');
++  }
++});
++
++test('login com roles inválido não publica nem persiste sessão', async () => {
++  const rig = createAuthRig(async () => jsonResponse(200, { ...adminSession,
++    user: { ...adminUser, roles: [] } }));
++  await assert.rejects(rig.manager.login({ email: adminUser.email, password: 'ValidPassword#2026' }),
++    (error) => error.code === 'INVALID_LOGIN_RESPONSE');
++  assert.equal(rig.manager.getSnapshot().isAuthenticated, false);
++  assert.equal(await rig.tokenStorage.getRefreshToken(), null);
++});
++
++test('falha de rede na confirmação após refresh preserva token e permite recuperação', async () => {
++  let offline = true;
++  const user = { ...adminUser, roles: ['staff'] };
++  const rig = createAuthRig(async (req) => {
++    if (req.url.endsWith('/auth/refresh')) return jsonResponse(200, {
++      accessToken: 'new-access', refreshToken: 'new-refresh', expiresIn: 900,
++    });
++    if (req.url.endsWith('/auth/me')) {
++      if (offline) throw new TypeError('offline');
++      return jsonResponse(200, user);
++    }
++    throw new Error(`Unexpected URL: ${req.url}`);
++  }, { initialRefreshToken: 'initial' });
++  assert.equal((await rig.manager.restoreSession()).status, 'identity_error');
++  assert.equal(await rig.tokenStorage.getRefreshToken(), 'new-refresh');
++  offline = false;
++  assert.equal((await rig.manager.restoreSession()).status, 'authenticated');
++  assert.deepEqual([...rig.manager.getSnapshot().user.roles], ['staff']);
++});
++
++test('rotação confirmada com falha de gravação recupera sem reenviar token consumido', async () => {
++  const sent = [];
++  const user = { ...adminUser, roles: ['staff'] };
++  const rig = createAuthRig(async (req) => {
++    if (req.url.endsWith('/auth/refresh')) {
++      sent.push(req.body.refreshToken);
++      return jsonResponse(200, { accessToken: `access-${sent.length}`,
++        refreshToken: `rotated-${sent.length}`, expiresIn: 900 });
++    }
++    if (req.url.endsWith('/auth/me')) return jsonResponse(200, user);
++    throw new Error(`Unexpected URL: ${req.url}`);
++  }, { initialRefreshToken: 'original' });
++  const write = rig.secureStore.setItemAsync;
++  rig.secureStore.setItemAsync = async (key, value) => {
++    if (value === 'rotated-1') throw new Error('SecureStore indisponível');
++    return write(key, value);
++  };
++  assert.equal((await rig.manager.restoreSession()).status, 'identity_error');
++  const marker = await rig.tokenStorage.getRefreshToken();
++  assert.ok(marker && marker !== 'original' && marker !== 'rotated-1');
++  rig.secureStore.setItemAsync = write;
++  assert.equal((await rig.manager.restoreSession()).status, 'authenticated');
++  assert.deepEqual(sent, ['original']);
++  assert.equal(await rig.tokenStorage.getRefreshToken(), 'rotated-1');
++  await rig.manager.refreshSession();
++  assert.deepEqual(sent, ['original', 'rotated-1']);
++});
++
++test('reinício após falha de persistência nunca envia token antigo consumido', async () => {
++  const first = createAuthRig(async (req) => {
++    if (req.url.endsWith('/auth/refresh')) return jsonResponse(200, {
++      accessToken: 'new', refreshToken: 'rotated', expiresIn: 900,
++    });
++    throw new Error('requisição inesperada');
++  }, { initialRefreshToken: 'original' });
++  const write = first.secureStore.setItemAsync;
++  first.secureStore.setItemAsync = async (key, value) => {
++    if (value === 'rotated') throw new Error('falha');
++    return write(key, value);
++  };
++  await first.manager.restoreSession();
++  const marker = await first.tokenStorage.getRefreshToken();
++  const restarted = createAuthRig(async () => { throw new Error('não deve enviar refresh'); },
++    { initialRefreshToken: marker });
++  const result = await restarted.manager.restoreSession();
++  assert.equal(result.status, 'uncertain_refresh');
++  assert.equal(restarted.requests.length, 0);
++});
++
++test('logout durante recuperação da gravação descarta token rotacionado tardio', async () => {
++  const entered = deferred(), release = deferred();
++  let fail = true;
++  const rig = createAuthRig(async (req) => {
++    if (req.url.endsWith('/auth/refresh')) return jsonResponse(200, {
++      accessToken: 'new', refreshToken: 'rotated', expiresIn: 900,
++    });
++    throw new Error('requisição inesperada');
++  }, { initialRefreshToken: 'original' });
++  const write = rig.secureStore.setItemAsync;
++  rig.secureStore.setItemAsync = async (key, value) => {
++    if (value === 'rotated') {
++      if (fail) throw new Error('falha');
++      entered.resolve();
++      await release.promise;
++    }
++    return write(key, value);
++  };
++  await rig.manager.restoreSession();
++  fail = false;
++  const retry = rig.manager.restoreSession();
++  await entered.promise;
++  const logout = rig.manager.logout();
++  release.resolve();
++  await Promise.all([retry, logout]);
++  assert.equal(await rig.tokenStorage.getRefreshToken(), null);
++  assert.equal(rig.manager.getSnapshot().isAuthenticated, false);
++});
++
++test('logout durante /me do login retorna aborted e não acessa usuário nulo', async () => {
++  const entered = deferred(), response = deferred();
++  const user = { ...adminUser, roles: ['participante'] };
++  const rig = createAuthRig(async (req) => {
++    if (req.url.endsWith('/auth/login')) return jsonResponse(200, { ...adminSession, user });
++    if (req.url.endsWith('/auth/me')) { entered.resolve(); return response.promise; }
++    if (req.url.endsWith('/auth/logout')) return jsonResponse(200, { message: 'ok' });
++    throw new Error('requisição inesperada');
++  });
++  const login = rig.manager.login({ email: user.email, password: 'ValidPassword#2026' });
++  await entered.promise;
++  await rig.manager.logout();
++  response.resolve(jsonResponse(200, user));
++  assert.equal((await login).status, 'aborted');
++  assert.equal(rig.manager.getSnapshot().isAuthenticated, false);
++});
++
++test('novo login durante /me anterior preserva a nova conta', async () => {
++  const entered = deferred(), response = deferred();
++  const first = { ...adminUser, roles: ['participante'] };
++  const second = { ...first, id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', roles: ['staff'] };
++  let account = first, delay = true;
++  const rig = createAuthRig(async (req) => {
++    if (req.url.endsWith('/auth/login')) return jsonResponse(200, { ...adminSession, user: account });
++    if (req.url.endsWith('/auth/me')) {
++      if (delay) { entered.resolve(); return response.promise; }
++      return jsonResponse(200, account);
++    }
++    throw new Error('requisição inesperada');
++  });
++  const old = rig.manager.login({ email: first.email, password: 'ValidPassword#2026' });
++  await entered.promise;
++  account = second; delay = false;
++  await rig.manager.login({ email: second.email, password: 'ValidPassword#2026' });
++  response.resolve(jsonResponse(200, first));
++  assert.equal((await old).status, 'aborted');
++  assert.equal(rig.manager.getSnapshot().user.id, second.id);
++  assert.deepEqual([...rig.manager.getSnapshot().user.roles], ['staff']);
++});
++
+ async function beginAdminChallenge(rig) {
+   return rig.manager.login({ email: adminUser.email, password: 'ValidPassword#2026' });
+ }
+@@ -1028,7 +1286,7 @@ test('startup network error on GET /auth/me preserves rotated refreshToken in Se
+   );
+ 
+   const result = await rig.manager.restoreSession();
+-  assert.equal(result.status, 'network_error');
++  assert.equal(result.status, 'identity_error');
+   assert.equal(rig.secureStore.store.get('arenago.auth.refresh_token'), 'rotated-keep-me-on-offline-startup');
+   assert.ok(rig.manager.getSnapshot().networkError);
+ });
+@@ -1091,7 +1349,7 @@ test('two concurrent 401 responses on protected endpoints trigger only ONE singl
+ 
+   assert.equal(refreshCount, 1, 'must execute only one POST /auth/refresh for concurrent 401s');
+   assert.equal(resourceACount, 2);
+-  assert.equal(resourceBCount, 2);
++  assert.equal(resourceBCount, 3, 'inclui a confirmação de identidade após o refresh');
+   assert.deepEqual(structuredClone(resA), { eventId: 'evt-1' });
+   assert.equal(resB.email, 'p@example.com');
+   assert.equal(rig.secureStore.store.get('arenago.auth.refresh_token'), 'refresh-after-401');
+@@ -1336,10 +1594,10 @@ test('logout during pending setRefreshToken() prevents rotated token from remain
+       return rawMap.has(key) ? rawMap.get(key) : null;
+     },
+     async setItemAsync(key, value) {
+-      setItemStarted = true;
+-      await new Promise((resolve) => {
+-        resolveSetItem = resolve;
+-      });
++      if (value === 'rotated-refresh-token') {
++        setItemStarted = true;
++        await new Promise((resolve) => { resolveSetItem = resolve; });
++      }
+       rawMap.set(key, value);
+     },
+     async deleteItemAsync(key) {
+@@ -1408,10 +1666,10 @@ test('token write finishing after logout start is cleaned up even when tokenStor
+       return rawStore.get('arenago.auth.refresh_token') ?? null;
+     },
+     async setRefreshToken(token) {
+-      writeEntered = true;
+-      await new Promise((resolve) => {
+-        finishDelayedWrite = resolve;
+-      });
++      if (token === 'late-refresh-token') {
++        writeEntered = true;
++        await new Promise((resolve) => { finishDelayedWrite = resolve; });
++      }
+       rawStore.set('arenago.auth.refresh_token', token);
+     },
+     async clearRefreshToken() {
+diff --git a/app/tests/authNavigation.test.cjs b/app/tests/authNavigation.test.cjs
+index 204c29e..eb72d30 100644
+--- a/app/tests/authNavigation.test.cjs
++++ b/app/tests/authNavigation.test.cjs
+@@ -76,7 +76,7 @@ function renderStack(state) {
+     }
+   }
+   collect(stack.props.children);
+-  return { stack, names };
++  return { stack, names, tree };
+ }
+ 
+ function routerOptions(routeNames) {
+@@ -101,6 +101,62 @@ function navigate(router, state, routeNames, name) {
+   });
+ }
+ 
++test('papéis do backend definem pilhas isoladas e precedência admin > staff > participante', () => {
++  for (const [roles, expected] of [
++    [['admin', 'staff', 'participante'], 'AdminPending'],
++    [['staff', 'participante'], 'StaffPending'],
++    [['participante'], 'MainTabs'],
++  ]) {
++    const result = renderStack({ isAuthenticated: true, user: {
++      id: 'user', roles, hasCompletedQuestionnaire: true,
++    } });
++    assert.equal(result.names[0], expected);
++    const router = StackRouter(routerOptions(result.names));
++    const state = router.getInitialState(routerOptions(result.names));
++    for (const forbidden of ['AdminPending', 'StaffPending', 'MainTabs'].filter((name) => name !== expected)) {
++      assert.equal(navigate(router, state, result.names, forbidden), null);
++    }
++  }
++});
++
++test('papéis ausentes, vazios ou inválidos não abrem nenhuma área de papel', () => {
++  for (const roles of [undefined, null, [], ['desconhecido'], ['admin', 'desconhecido']]) {
++    const result = renderStack({ isAuthenticated: true,
++      user: { id: 'u', roles, hasCompletedQuestionnaire: true } });
++    assert.deepEqual(result.names, ['IdentityRecovery']);
++    const router = StackRouter(routerOptions(result.names));
++    const state = router.getInitialState(routerOptions(result.names));
++    for (const name of ['MainTabs', 'AdminPending', 'StaffPending']) {
++      assert.equal(navigate(router, state, result.names, name), null);
++    }
++  }
++});
++
++test('questionário só determina a entrada de participante, inclusive na restauração', () => {
++  for (const [roles, expected] of [
++    [['admin'], 'AdminPending'], [['staff'], 'StaffPending'], [['participante'], 'ProfileQuestionnaire'],
++  ]) {
++    const restored = renderStack({ isAuthenticated: true, sessionStatus: 'authenticated',
++      postAuthRoute: 'ProfileQuestionnaire', user: { id: 'restored', roles, hasCompletedQuestionnaire: false } });
++    assert.equal(restored.names[0], expected);
++    assert.ok(!restored.names.includes('MainTabs'));
++  }
++});
++
++test('logout, troca de conta e alteração de papel descartam a árvore anterior', () => {
++  const session = (id, roles, epoch) => ({ isAuthenticated: true,
++    user: { id, roles, hasCompletedQuestionnaire: true }, getSessionEpoch: () => epoch });
++  const staff = renderStack(session('a', ['staff'], 1));
++  const other = renderStack(session('b', ['staff'], 2));
++  const changedRole = renderStack(session('a', ['admin'], 1));
++  const logout = renderStack({ isAuthenticated: false, sessionStatus: 'revoked' });
++  assert.notEqual(staff.tree.key, other.tree.key);
++  assert.notEqual(staff.tree.key, changedRole.tree.key);
++  assert.notEqual(staff.tree.key, logout.tree.key);
++  assert.deepEqual(logout.names, ['Login', 'Welcome', 'Register', 'Cadastro', 'ForgotPassword', 'EsqueciSenha']);
++  assert.equal(renderStack(session('a', ['staff'], 3)).names[0], 'StaffPending');
++});
++
+ test('React Navigation replaces Login with MainTabs immediately when login authenticates', async () => {
+   const publicTree = renderStack({ isAuthenticated: false, sessionStatus: 'unauthenticated' });
+   assert.equal(publicTree.names[0], 'Welcome');
+@@ -121,7 +177,7 @@ test('React Navigation replaces Login with MainTabs immediately when login authe
+           isAuthenticated: true,
+           sessionStatus: 'authenticated',
+           postAuthRoute: 'MainTabs',
+-          user: { hasCompletedQuestionnaire: true },
++          user: { roles: ['participante'], hasCompletedQuestionnaire: true },
+         };
+         return { status: 'authenticated', user: authState.user };
+       },
+@@ -174,6 +230,7 @@ test('React Navigation switches auth route sets for signup, logout, relogin and
+   const signupTree = renderStack({
+     isAuthenticated: true,
+     sessionStatus: 'authenticated',
++    user: { roles: ['participante'], hasCompletedQuestionnaire: false },
+     postAuthRoute: 'ProfileQuestionnaire',
+   });
+   assert.equal(signupTree.names[0], 'ProfileQuestionnaire');
+@@ -189,6 +246,7 @@ test('React Navigation switches auth route sets for signup, logout, relogin and
+   const reloginTree = renderStack({
+     isAuthenticated: true,
+     sessionStatus: 'authenticated',
++    user: { roles: ['participante'], hasCompletedQuestionnaire: true },
+     postAuthRoute: 'MainTabs',
+   });
+   assert.equal(reloginTree.names[0], 'MainTabs');
+@@ -199,7 +257,7 @@ test('React Navigation switches auth route sets for signup, logout, relogin and
+     isAuthenticated: true,
+     sessionStatus: 'authenticated',
+     postAuthRoute: 'MainTabs',
+-    user: { hasCompletedQuestionnaire: true },
++    user: { roles: ['participante'], hasCompletedQuestionnaire: true },
+   });
+   const restoredRouter = StackRouter(routerOptions(restoredTree.names));
+   state = restoredRouter.getInitialState(routerOptions(restoredTree.names));
+@@ -216,6 +274,7 @@ test('React Navigation switches auth route sets for signup, logout, relogin and
+   const signupAfterRestore = renderStack({
+     isAuthenticated: true,
+     sessionStatus: 'authenticated',
++    user: { roles: ['participante'], hasCompletedQuestionnaire: false },
+     postAuthRoute: 'ProfileQuestionnaire',
+   });
+   state = routeChange(restoredRouter, state, signupAfterRestore.names);
+@@ -283,7 +342,7 @@ test('K05 Auditoria: Login com questionario pendente direciona para ProfileQuest
+           isAuthenticated: true,
+           sessionStatus: 'authenticated',
+           postAuthRoute: 'ProfileQuestionnaire',
+-          user: { id: 'u-1', name: 'Pendente', hasCompletedQuestionnaire: false },
++          user: { id: 'u-1', name: 'Pendente', roles: ['participante'], hasCompletedQuestionnaire: false },
+         };
+         return { status: 'authenticated', user: authState.user, nextRoute: 'ProfileQuestionnaire' };
+       },
+@@ -314,7 +373,7 @@ test('K05 Auditoria: Restauracao de sessao com questionario pendente direciona p
+   const pendingRestoreTree = renderStack({
+     isAuthenticated: true,
+     sessionStatus: 'authenticated',
+-    user: { id: 'u-2', name: 'Restaurado Pendente', hasCompletedQuestionnaire: false },
++    user: { id: 'u-2', name: 'Restaurado Pendente', roles: ['participante'], hasCompletedQuestionnaire: false },
+   });
+   assert.equal(pendingRestoreTree.names[0], 'ProfileQuestionnaire');
+   const router = StackRouter(routerOptions(pendingRestoreTree.names));
+@@ -326,7 +385,7 @@ test('Adversarial A.1: Usuario com questionario pendente tem acesso estritamente
+   const pendingTree = renderStack({
+     isAuthenticated: true,
+     sessionStatus: 'authenticated',
+-    user: { id: 'u-pending', name: 'Participante Pendente', hasCompletedQuestionnaire: false },
++    user: { id: 'u-pending', name: 'Participante Pendente', roles: ['participante'], hasCompletedQuestionnaire: false },
+   });
+ 
+   // Apenas ProfileQuestionnaire e alias Questionario devem estar presentes na Stack
+@@ -351,7 +410,7 @@ test('Adversarial A.2: Usuario com questionario concluido tem acesso completo as
+   const completedTree = renderStack({
+     isAuthenticated: true,
+     sessionStatus: 'authenticated',
+-    user: { id: 'u-completed', name: 'Participante Concluido', hasCompletedQuestionnaire: true },
++    user: { id: 'u-completed', name: 'Participante Concluido', roles: ['participante'], hasCompletedQuestionnaire: true },
+   });
+ 
+   assert.ok(completedTree.names.includes('MainTabs'));
+diff --git a/app/tests/birthDateInput.test.cjs b/app/tests/birthDateInput.test.cjs
+index caa060f..c4f3c5c 100644
+--- a/app/tests/birthDateInput.test.cjs
++++ b/app/tests/birthDateInput.test.cjs
+@@ -122,3 +122,22 @@ test('Android native picker receives the same civil date and fills the masked di
+   picker.onValueChange({}, h.birthDate.civilDateToLocalDate('2000-02-29'));
+   assert.deepEqual(changes, ['29/02/2000']);
+ });
++
++test('seleção nativa pendente é descartada durante revalidação e não revive depois', () => {
++  let status = 'verified';
++  let revision = 0;
++  const auth = () => ({ isAuthenticated: true, identityStatus: status,
++    isIdentityVerified: () => status === 'verified', getIdentityRevision: () => revision });
++  const changes = [];
++  const h = createHarness('components/BirthDateInput.native.js', { platform: 'android', authContext: auth(),
++    props: { value: '', onChangeText: (value) => changes.push(value), inputStyle: {} } });
++  h.act(() => h.press('Abrir calendário de data de nascimento'));
++  const callback = h.nativePickerCalls[0].onValueChange;
++  status = 'checking'; revision += 1;
++  callback({}, h.birthDate.civilDateToLocalDate('2000-02-29'));
++  h.setAuthContext(auth());
++  status = 'error'; h.setAuthContext(auth());
++  status = 'verified'; h.setAuthContext(auth());
++  callback({}, h.birthDate.civilDateToLocalDate('2000-02-29'));
++  assert.deepEqual(changes, []);
++});
+diff --git a/app/tests/questionnaire.test.cjs b/app/tests/questionnaire.test.cjs
+index 7b7a822..4c1ecb1 100644
+--- a/app/tests/questionnaire.test.cjs
++++ b/app/tests/questionnaire.test.cjs
+@@ -533,7 +533,7 @@ test('K05 Auditoria 2: Restauracao de sessao com questionario pendente direciona
+ 
+   const { resolveInitialRouteForAuthState } = gateExports;
+   const targetRoute = resolveInitialRouteForAuthState({
+-    user: { id: 'u1', hasCompletedQuestionnaire: false },
++    user: { id: 'u1', roles: ['participante'], hasCompletedQuestionnaire: false },
+     isAuthenticated: true,
+   });
+   assert.equal(targetRoute, 'ProfileQuestionnaire');
+@@ -861,6 +861,7 @@ test('K05 Auditoria 9: Persistencia e restauracao apos reinicio do app', async (
+   };
+ 
+   let questionnaireSavedOnBackend = false;
++  let refreshCount = 0;
+ 
+   const mockClient = {
+     setAuthHandlers: () => {},
+@@ -869,12 +870,13 @@ test('K05 Auditoria 9: Persistencia e restauracao apos reinicio do app', async (
+       if (url === '/auth/refresh') {
+         return {
+           accessToken: 'new-acc-token',
+-          refreshToken: 'new-ref-token',
+-          expiresInSeconds: 900,
++          refreshToken: `new-ref-token-${++refreshCount}`,
++          expiresIn: 900,
+           user: {
+             id: 'user-restore-1',
+             name: 'Kaled',
+             email: 'kaled@example.com',
++            roles: ['participante'],
+             hasCompletedQuestionnaire: questionnaireSavedOnBackend,
+           },
+         };
+@@ -888,6 +890,7 @@ test('K05 Auditoria 9: Persistencia e restauracao apos reinicio do app', async (
+             id: 'user-restore-1',
+             name: 'Kaled',
+             email: 'kaled@example.com',
++            roles: ['participante'],
+             hasCompletedQuestionnaire: questionnaireSavedOnBackend,
+           },
+         };
+@@ -906,6 +909,7 @@ test('K05 Auditoria 9: Persistencia e restauracao apos reinicio do app', async (
+   const restored1 = await session1.restoreSession();
+   assert.equal(restored1.user.hasCompletedQuestionnaire, false);
+   assert.equal(session1.getSnapshot().postAuthRoute, 'ProfileQuestionnaire');
++  assert.equal(storedTokens.refreshToken, 'new-ref-token-1');
+ 
+   // 2. Questionario eh salvo no backend
+   questionnaireSavedOnBackend = true;
+@@ -920,6 +924,7 @@ test('K05 Auditoria 9: Persistencia e restauracao apos reinicio do app', async (
+   const restored2 = await session2.restoreSession();
+   assert.equal(restored2.user.hasCompletedQuestionnaire, true);
+   assert.equal(session2.getSnapshot().postAuthRoute, 'MainTabs');
++  assert.equal(storedTokens.refreshToken, 'new-ref-token-2');
+ });
+ 
+ test('Adversarial B.1: Pre-carregamento tardio preserva campo editado pelo usuario e carrega campos nao editados', async () => {
+@@ -1288,6 +1293,7 @@ test('Adversarial D.1: Conclusao nao e revertida por resposta obsoleta de /auth/
+     id: 'user-me-test',
+     name: 'Test Me',
+     email: 'test@example.com',
++    roles: ['participante'],
+     hasCompletedQuestionnaire: false,
+   };
+ 
+diff --git a/app/tests/staffRealNavigation.test.cjs b/app/tests/staffRealNavigation.test.cjs
+index 823c04f..a3234e8 100644
+--- a/app/tests/staffRealNavigation.test.cjs
++++ b/app/tests/staffRealNavigation.test.cjs
+@@ -164,12 +164,10 @@ test('React Navigation real: troca direta A → B descarta o estado de A sem log
+   assert.ok(app.hasText('Painel Operacional'));
+ 
+   app.setAuth(accountB); // sem logout
+-  assert.deepEqual(app.rootRoutes(), ['MainTabs', 'StaffDemo']);
++  assert.deepEqual(app.rootRoutes(), ['MainTabs']);
+   assert.ok(!app.hasText('Painel Operacional'), 'painel de A não aparece para B');
+   assert.ok(!app.hasText('BEAST Arena'));
+-  // A pilha aninhada mantém a rota, mas o provedor novo não tem evento: estado seguro.
+-  assert.ok(app.hasText('Nenhum evento selecionado'));
+-  await app.press('IR PARA A ÁREA DO STAFF');
++  app.navigate('StaffDemo');
+   assert.ok(app.hasText('Conectado como: Conta B'));
+   assert.ok(app.hasText('Código do evento'));
+   app.dispose();
+diff --git a/app/tests/staffScreens.test.cjs b/app/tests/staffScreens.test.cjs
+index 319b264..cb559af 100644
+--- a/app/tests/staffScreens.test.cjs
++++ b/app/tests/staffScreens.test.cjs
+@@ -23,6 +23,39 @@ function confirmDialog(app, action, confirm) {
+   assert.equal(app.modalOpen, false);
+ }
+ 
++test('confirmação aberta é descartada e callback antigo é bloqueado durante revalidação', async () => {
++  let status = 'verified';
++  let revision = 1;
++  const auth = () => ({ isAuthenticated: true, user: { id: 'u', name: 'Teste' },
++    identityStatus: status, getIdentityRevision: () => revision,
++    isIdentityVerified: () => status === 'verified' });
++  const app = createStaffApp({ auth: auth() });
++  app.typeCode('STAFFDEMO');
++  await app.pressAsync('ENTRAR NO EVENTO');
++  app.press(ENTRY_ACTIVE);
++  app.press('CONFIRMAR ENTRADA');
++  const oldConfirm = app.handlerOf('CONFIRMAR');
++  const before = plain(app.session);
++  status = 'checking'; revision += 1;
++  oldConfirm();
++  app.setAuth(auth());
++  assert.equal(app.modalOpen, false);
++  assert.deepEqual(plain(app.session), before);
++  status = 'error'; app.setAuth(auth());
++  oldConfirm();
++  status = 'verified'; app.setAuth(auth());
++  oldConfirm();
++  assert.equal(app.modalOpen, false);
++  assert.deepEqual(plain(app.session), before);
++  app.press('CONFIRMAR ENTRADA');
++  const secondConfirm = app.handlerOf('CONFIRMAR');
++  revision += 1; // checking e verified podem ser agrupados antes de renderizar.
++  app.setAuth(auth());
++  secondConfirm();
++  assert.equal(app.modalOpen, false);
++  assert.deepEqual(plain(app.session), before);
++});
++
+ test('SV01 acesso: layout do print 01, faixa de demonstração e conta do AuthContext', () => {
+   const app = createStaffApp({ auth: { isAuthenticated: true, user: { id: 'u-9', name: 'Heliom Teste' } } });
+   for (const text of ['🔐 Área do Staff', 'Operação de um evento', 'Login', 'Código do evento',
+diff --git a/app/screens/auth/RolePendingScreen.js b/app/screens/auth/RolePendingScreen.js
+new file mode 100644
+index 0000000..93bfc5e
+--- /dev/null
++++ b/app/screens/auth/RolePendingScreen.js
+@@ -0,0 +1,37 @@
++import { Pressable, StyleSheet, Text, View } from 'react-native';
++import { SafeAreaView } from 'react-native-safe-area-context';
++import { useAuth } from '../../context/AuthContext';
++
++// Esta entrada não concede acesso a operações nem armazena um evento selecionado.
++export default function RolePendingScreen({ route }) {
++  const auth = useAuth();
++  const admin = route.name === 'AdminPending';
++  const recovery = route.name === 'IdentityRecovery';
++  return (
++    <SafeAreaView style={styles.container}>
++      <View style={styles.content}>
++        <Text style={styles.title}>{recovery ? 'Verificação da sessão' : admin ? 'Área administrativa' : 'Área Staff'}</Text>
++        <Text style={styles.message}>
++          {recovery ? 'Não foi possível confirmar os papéis da conta.' : admin
++            ? 'Integração administrativa pendente.'
++            : 'Integração Staff pendente. A seleção de eventos autorizados ainda não está disponível.'}
++        </Text>
++        {recovery && <Pressable accessibilityRole="button" onPress={() => { void auth?.restoreSession(); }} style={styles.button}>
++          <Text style={styles.buttonText}>Tentar novamente</Text>
++        </Pressable>}
++        <Pressable accessibilityRole="button" onPress={() => { void auth?.logout(); }} style={styles.button}>
++          <Text style={styles.buttonText}>Sair da conta</Text>
++        </Pressable>
++      </View>
++    </SafeAreaView>
++  );
++}
++
++const styles = StyleSheet.create({
++  container: { flex: 1, backgroundColor: '#0c0a17', justifyContent: 'center', padding: 24 },
++  content: { alignItems: 'center', gap: 16 },
++  title: { color: '#ffffff', fontSize: 22, fontWeight: '800', textAlign: 'center' },
++  message: { color: '#cbd5e1', fontSize: 15, lineHeight: 22, textAlign: 'center' },
++  button: { backgroundColor: '#7c3aed', borderRadius: 14, padding: 16 },
++  buttonText: { color: '#ffffff', fontWeight: '700' },
++});
+diff --git a/app/tests/roleRoutingIntegration.test.cjs b/app/tests/roleRoutingIntegration.test.cjs
+new file mode 100644
+index 0000000..0c701a4
+--- /dev/null
++++ b/app/tests/roleRoutingIntegration.test.cjs
+@@ -0,0 +1,266 @@
++// Exercita gerenciador, AuthProvider, ParticipationProvider e roteador juntos;
++// somente transporte, armazenamento e views nativas são substituídos.
++const assert = require('node:assert/strict');
++const path = require('node:path');
++const test = require('node:test');
++const { createRequire } = require('node:module');
++const { loadModule, createParticipantThemeStub } = require('./helpers/questionnaireHarness.cjs');
++
++const qaRequire = createRequire(path.resolve(__dirname, '../../qa/regression/package.json'));
++let deps;
++try {
++  deps = { React: qaRequire('react'), jsx: qaRequire('react/jsx-runtime'),
++    Renderer: qaRequire('react-test-renderer'), Navigation: qaRequire('@react-navigation/core'),
++    StackRouter: qaRequire('@react-navigation/routers').StackRouter };
++} catch { deps = null; }
++const skip = deps ? false : 'dependências de qa/regression não instaladas';
++
++function createIntegration({ initialToken = null, initialUser, control = {} }) {
++  const { React, jsx, Renderer, Navigation, StackRouter } = deps;
++  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
++  let user = initialUser;
++  let token = initialToken;
++  let refreshCount = 0;
++  const calls = [];
++  const navRef = Navigation.createNavigationContainerRef();
++  const unhandled = [];
++  const storage = { isPersistent: true, getRefreshToken: async () => token,
++    setRefreshToken: async (value) => {
++      if (control.failWrite?.(value)) throw Object.assign(new Error('storage'), { kind: 'storage', isStorageError: true });
++      token = value;
++    }, clearRefreshToken: async () => { token = null; } };
++  const transport = {
++    async get(url) {
++      calls.push(url);
++      if (url === '/auth/me') {
++        if (control.me) return control.me({ ...user });
++        return { ...user };
++      }
++      if (url === '/participations/current') return { participation: null };
++      if (url === '/participations/return-state') return { pendingEvaluationParticipationIds: [], recentFinalization: null };
++      throw new Error(`GET inesperado: ${url}`);
++    },
++    async post(url) {
++      calls.push(url);
++      if (url === '/auth/login' && user.roles.includes('admin')) {
++        return { requires2FA: true, isTotpConfigured: true, tempToken: 'challenge', message: 'TOTP' };
++      }
++      if (url === '/auth/login' || url === '/auth/2fa/verify') {
++        return { user: { ...user }, accessToken: 'access', refreshToken: 'refresh', expiresIn: 900 };
++      }
++      if (url === '/auth/refresh') return { accessToken: 'new-access', refreshToken: `new-refresh-${++refreshCount}`, expiresIn: 900 };
++      if (url === '/auth/logout') return { message: 'ok' };
++      throw new Error(`POST inesperado: ${url}`);
++    },
++  };
++  const http = loadModule('services/httpClient.js', (name) => {
++    if (name === '../config/apiConfig') return { DEFAULT_HTTP_TIMEOUT_MS: 10000,
++      resolveApiBaseUrl: () => 'http://127.0.0.1:3000/api/v1' };
++    return require(name);
++  }).exports;
++  const client = http.createHttpClient({ fetchImpl: async (url, options) => {
++    const route = new URL(url).pathname.replace('/api/v1', '');
++    const result = control.http ? await control.http(route, options) : undefined;
++    const value = result ?? (options.method === 'GET' ? await transport.get(route) : await transport.post(route));
++    const status = value.statusCode ?? 200;
++    return { ok: status >= 200 && status < 300, status, headers: { get: () => null },
++      text: async () => JSON.stringify(value.body ?? value) };
++  } });
++  const passthrough = ({ children }) => children;
++  const native = Object.fromEntries(['ActivityIndicator', 'Modal', 'Pressable', 'Text', 'View'].map((name) => [name, name]));
++  native.StyleSheet = { create: (styles) => styles };
++  native.Platform = { OS: 'web' };
++  function FocusedStack(props) {
++    const { state, descriptors, NavigationContent } = Navigation.useNavigationBuilder(StackRouter, props);
++    return React.createElement(NavigationContent, null, descriptors[state.routes[state.index].key].render());
++  }
++  const cache = new Map();
++  function load(relative) {
++    if (cache.has(relative)) return cache.get(relative);
++    const directory = path.posix.dirname(relative);
++    const { exports } = loadModule(relative, (name) => {
++      if (name === 'react') return React;
++      if (name === 'react/jsx-runtime') return jsx;
++      if (name === 'react-native') return native;
++      if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
++      if (name === 'expo-crypto') return { randomUUID: () => '00000000-0000-4000-8000-000000000001' };
++      if (name === 'expo-secure-store') return {};
++      if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView', SafeAreaProvider: passthrough };
++      if (name === '@react-navigation/native-stack') return { createNativeStackNavigator: Navigation.createNavigatorFactory(FocusedStack) };
++      if (name === '@react-navigation/native') return { NavigationContainer: ({ children }) =>
++        React.createElement(Navigation.BaseNavigationContainer, { ref: navRef, onUnhandledAction: (action) => unhandled.push(action) }, children) };
++      const target = path.posix.normalize(path.posix.join(directory, name));
++      if (target === 'theme') return createParticipantThemeStub();
++      if (target === 'services/httpClient') return { ...http, httpClient: client };
++      if (target === 'services/tokenStorage') return { defaultTokenStorage: storage };
++      if (target === 'screens/event-entry/EventEntryScreen' && control.modalFixture) {
++        const Dialog = load('screens/staff/components/StaffConfirmDialog.js').default;
++        return { __esModule: true, default: () => React.createElement(Dialog, { visible: true,
++          title: 'Confirmação', onConfirm: () => { control.confirmed += 1; }, onCancel() {} }) };
++      }
++      if (target.startsWith('context/') || ['services/authService', 'services/participationService',
++        'services/eventAdmissionService', 'screens/auth/AuthSessionGate', 'screens/auth/RolePendingScreen',
++        'screens/staff/components/StaffConfirmDialog', 'screens/staff/components/StaffButton',
++        'screens/staff/components/staffTheme'].includes(target)) {
++        return load(`${target}.js`);
++      }
++      return { __esModule: true, default: ({ route }) => React.createElement('Text', null, route?.name ?? 'screen') };
++    });
++    cache.set(relative, exports);
++    return exports;
++  }
++  const manager = load('services/authService.js').createAuthSessionManager({ client, tokenStorage: storage });
++  const Gate = load('screens/auth/AuthSessionGate.js').default;
++  const { AppNavigation } = load('App.js');
++  let tree;
++  return {
++    manager, calls, unhandled,
++    setUser(value) { user = value; },
++    async mount() { await Renderer.act(async () => { tree = Renderer.create(React.createElement(Gate,
++      { sessionManager: manager }, React.createElement(AppNavigation))); }); },
++    async act(work) { await Renderer.act(work); },
++    route() { const state = navRef.getRootState(); return state.routes[state.index].name; },
++    routes() { return navRef.getRootState().routes.map((route) => route.name); },
++    navigate(name) { Renderer.act(() => navRef.navigate(name)); },
++    back() { Renderer.act(() => navRef.goBack()); },
++    modal() { return tree.root.findByType('Modal'); },
++    confirmHandler() { return tree.root.findAllByType('Pressable')
++      .find((node) => node.props.accessibilityLabel === 'CONFIRMAR').props.onPress; },
++    dispose() { Renderer.act(() => tree.unmount()); },
++  };
++}
++
++const participant = { id: 'a', name: 'A', email: 'a@example.test', emailVerified: true,
++  roles: ['participante'], hasCompletedQuestionnaire: true };
++
++test('integra sessão real, papéis, TOTP, provedores e isolamento da navegação', { skip }, async () => {
++  const app = createIntegration({ initialUser: participant });
++  await app.mount();
++  await app.act(() => app.manager.login({ email: participant.email, password: 'password' }));
++  assert.equal(app.route(), 'MainTabs');
++  app.navigate('EventEntry');
++  assert.deepEqual(app.routes(), ['MainTabs', 'EventEntry']);
++  const participantReads = app.calls.filter((url) => url === '/participations/current').length;
++  await app.act(() => app.manager.refreshSession());
++  assert.deepEqual(app.routes(), ['MainTabs', 'EventEntry'], 'refresh com mesmo papel preserva a pilha');
++  assert.equal(app.calls.filter((url) => url === '/participations/current').length, participantReads,
++    'provedor da mesma sessão permanece montado');
++  app.setUser({ ...participant, roles: ['participante', 'staff'] });
++  await app.act(() => app.manager.refreshSession());
++  assert.deepEqual(app.routes(), ['StaffPending']);
++  assert.ok(app.calls.filter((url) => url === '/participations/current').length > participantReads,
++    'mudança de área remonta o provedor');
++  app.navigate('MainTabs');
++  app.back();
++  assert.deepEqual(app.routes(), ['StaffPending']);
++  app.setUser(participant);
++  await app.act(() => app.manager.refreshSession());
++  assert.deepEqual(app.routes(), ['MainTabs']);
++  app.setUser({ ...participant, id: 'b', roles: ['admin', 'staff'] });
++  await app.act(() => app.manager.login({ email: participant.email, password: 'password' }));
++  assert.equal(app.manager.getSnapshot().isAuthenticated, false);
++  assert.equal(app.manager.getSnapshot().sessionStatus, 'admin_2fa_required');
++  await app.act(() => app.manager.verifyAdminTwoFactor('123456'));
++  assert.deepEqual(app.routes(), ['AdminPending']);
++  app.navigate('StaffPending');
++  assert.deepEqual(app.routes(), ['AdminPending']);
++  await app.act(() => app.manager.logout());
++  assert.equal(app.route(), 'Welcome');
++  app.setUser({ ...participant, id: 'c', roles: ['staff'] });
++  await app.act(() => app.manager.login({ email: participant.email, password: 'password' }));
++  assert.deepEqual(app.routes(), ['StaffPending']);
++  assert.ok(app.calls.includes('/auth/2fa/verify'));
++  assert.ok(app.calls.includes('/participations/current'));
++  app.dispose();
++});
++
++test('restauração real mantém questionário obrigatório para participante', { skip }, async () => {
++  const app = createIntegration({ initialToken: 'stored', initialUser: { ...participant, hasCompletedQuestionnaire: false } });
++  await app.mount();
++  assert.equal(app.route(), 'ProfileQuestionnaire');
++  app.navigate('MainTabs');
++  assert.equal(app.route(), 'ProfileQuestionnaire');
++  await app.act(() => app.manager.markQuestionnaireCompleted());
++  app.navigate('MainTabs');
++  assert.equal(app.route(), 'MainTabs');
++  assert.ok(app.calls.includes('/auth/refresh'));
++  assert.ok(app.calls.includes('/auth/me'));
++  app.dispose();
++});
++
++function deferred() {
++  let resolve, reject;
++  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
++  return { promise, resolve, reject };
++}
++
++test('401 real no cliente renova, revalida Staff e substitui a navegação', { skip }, async () => {
++  const control = { http: async (route, options) => {
++    if (route !== '/protected') return undefined;
++    return options.headers.Authorization === 'Bearer access'
++      ? { statusCode: 401, body: { code: 'ACCESS_TOKEN_EXPIRED' } }
++      : { body: { ok: true } };
++  } };
++  const app = createIntegration({ initialUser: participant, control });
++  await app.mount();
++  await app.act(() => app.manager.login({ email: participant.email, password: 'password' }));
++  app.navigate('EventEntry');
++  app.setUser({ ...participant, roles: ['staff'] });
++  await app.act(async () => { await app.manager.client.get('/protected', { auth: true }); });
++  assert.deepEqual(app.routes(), ['StaffPending']);
++  assert.ok(app.calls.includes('/auth/refresh'));
++  app.dispose();
++});
++
++test('provedores recuperam rotação com falha de gravação sem novo POST', { skip }, async () => {
++  let fail = true;
++  const control = { failWrite: (value) => fail && value === 'new-refresh-1' };
++  const app = createIntegration({ initialToken: 'stored', initialUser: { ...participant, roles: ['staff'] }, control });
++  await app.mount();
++  assert.equal(app.manager.getSnapshot().identityStatus, 'error');
++  fail = false;
++  await app.act(() => app.manager.restoreSession());
++  assert.equal(app.route(), 'StaffPending');
++  assert.equal(app.calls.filter((url) => url === '/auth/refresh').length, 1);
++  app.dispose();
++});
++
++test('logout durante /me de login deixa navegação pública e descarta resposta', { skip }, async () => {
++  const entered = deferred(), response = deferred();
++  const control = { me: () => { entered.resolve(); return response.promise; } };
++  const app = createIntegration({ initialUser: participant, control });
++  await app.mount();
++  let login;
++  await app.act(() => { login = app.manager.login({ email: participant.email, password: 'password' }); });
++  await entered.promise;
++  await app.act(() => app.manager.logout());
++  response.resolve(participant);
++  let result;
++  await app.act(async () => { result = await login; });
++  assert.equal(result.status, 'aborted');
++  assert.equal(app.route(), 'Welcome');
++  app.dispose();
++});
++
++test('modal protegido fica invisível e callback antigo não executa durante erro de identidade', { skip }, async () => {
++  const entered = deferred(), response = deferred();
++  const control = { modalFixture: true, confirmed: 0 };
++  const app = createIntegration({ initialUser: participant, control });
++  await app.mount();
++  await app.act(() => app.manager.login({ email: participant.email, password: 'password' }));
++  app.navigate('EventEntry');
++  const oldConfirm = app.confirmHandler();
++  control.me = () => { entered.resolve(); return response.promise; };
++  let refresh;
++  await app.act(() => { refresh = app.manager.refreshSession(); refresh.catch(() => {}); });
++  await entered.promise;
++  assert.equal(app.modal().props.visible, false);
++  oldConfirm();
++  response.reject(new Error('offline'));
++  await app.act(async () => { await assert.rejects(refresh); });
++  assert.equal(app.manager.getSnapshot().identityStatus, 'error');
++  assert.equal(app.modal().props.visible, false);
++  oldConfirm();
++  assert.equal(control.confirmed, 0);
++  app.dispose();
++});
+diff --git a/docs/ROLE_ROUTING_STAFF_INTEGRATION_IMPLEMENTACAO.md b/docs/ROLE_ROUTING_STAFF_INTEGRATION_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..0126b6a
+--- /dev/null
++++ b/docs/ROLE_ROUTING_STAFF_INTEGRATION_IMPLEMENTACAO.md
+@@ -0,0 +1,34 @@
++# Roteamento por papel autenticado
++
++O aplicativo escolhe a área a partir dos nomes de `roles` retornados pelo backend, com precedência admin, staff e participante. Admin e Staff recebem entradas provisórias sem operações, com saída da conta. O fluxo TOTP não foi alterado. O participante mantém o questionário e as rotas existentes, inclusive a demonstração Staff identificada como tal, que não concede acesso real.
++
++As pilhas são exclusivas por área e a árvore de navegação e o estado de participação são recriados na troca de conta, geração de sessão ou área. A autorização efetiva continua no backend. Uma alteração de concessão é refletida quando a aplicação atualiza os dados da sessão; não foi adicionado polling.
++
++Após a revisão de segurança, o refresh confirmado consulta `/auth/me` antes de liberar o acesso e a restauração usa a mesma confirmação. Uma geração de leitura impede que respostas antigas da mesma sessão sobrescrevam uma leitura mais recente; login, cadastro e refresh usam a mesma coordenação, e a geração da sessão continua invalidando respostas de outras contas. Roles ausentes, vazios ou fora do contrato bloqueiam o acesso às áreas. Em falha da confirmação, a tela oferece nova tentativa e saída, preservando credenciais já renovadas. Falhas incertas do próprio POST de refresh mantêm a política anterior de não reutilizar o token.
++
++Uma alteração de papel só pode ser observada após uma revalidação ou outra resposta de identidade; sem polling, não há detecção instantânea de revogação enquanto o aplicativo estiver ocioso. As operações protegidas continuam sujeitas à autorização do backend. A interface Admin deve consumir a sessão validada e preservar as verificações do servidor.
++
++Após a segunda revisão, a renovação grava um marcador no armazenamento seguro antes do POST. Se o processo parar depois do envio, o token anterior não será reenviado após o reinício. Uma resposta válida é reconhecida antes da gravação do novo token; se esta falhar, o par renovado fica temporariamente em memória, vinculado à geração da sessão, e a recuperação tenta persistir o mesmo token antes de revalidar `/auth/me`. Logout e troca de conta invalidam essa recuperação e a fila de armazenamento reconcilia gravações tardias. Se o aplicativo encerrar antes da recuperação, o marcador exige novo login, pois o novo token deixou de estar disponível. O marcador não é enviado ao backend.
++
++Confirmações Staff e seletores nativos de data fecham durante a verificação ou falha de identidade. Os callbacks verificam a identidade e a revisão atuais, inclusive se forem invocados antes da atualização visual ou depois de uma revalidação; isso cobre o portal web e o seletor Android. A pilha continua montada quando possível. Na confirmação do login, a geração é conferida antes de usar o usuário retornado, descartando a resposta após logout ou troca de conta.
++
++O DTO público de autenticação contém nomes de papéis, mas não os IDs dos eventos Staff. As consultas Staff existentes exigem um `eventId` e verificam a concessão para esse evento no servidor. Falta um contrato para descobrir ou selecionar eventos autorizados com segurança; não foi presumido endpoint nem criado estado operacional fictício. O frontend Admin de Heliom deverá substituir a entrada provisória e manter a separação de rotas e a autorização de servidor.
++
++## Evidências e validações
++
++- Inspeção estática: contratos de autenticação, consultas e operações Staff, navegação e testes existentes.
++- Testes preparados: precedência, isolamento de rotas, questionário, restauração, refresh, concessão e revogação Staff, respostas de identidade fora de ordem, contrato inválido, falha de rede, logout e troca de conta; falha de persistência após rotação, recuperação, reinício e logout concorrente; confirmação de login atrasada; modal e seletor abertos durante bloqueio. A integração monta o gerenciador e o cliente HTTP reais com provedores, roteador, transporte e views nativas simulados, incluindo 401, TOTP e retorno por navegação. Os testes simulam o comportamento do modal; a verificação visual do portal real e dos seletores nativos ainda depende da validação nas plataformas.
++- Validação focada executada por Luna Medium com `NODE_ENV=test`: 163 testes, 155 aprovados, 0 falhos e 8 ignorados. O teste `K05 Auditoria 9` passou após corrigir a fixture para emitir um refresh token novo em cada rotação.
++- Integração executada por Luna Medium com `NODE_ENV=test`: `node --test tests/roleRoutingIntegration.test.cjs tests/staffRealNavigation.test.cjs`, 8 testes aprovados, 0 falhos e 0 ignorados. Inclui navegação React Navigation, troca de conta, papéis Admin/Staff/Participante, TOTP, remount dos provedores, questionário, 401/refresh, recuperação de persistência, logout concorrente e modal.
++- Suíte completa executada por Luna Medium com `NODE_ENV=test` via `npm.cmd --prefix app test`: 404 testes, 404 aprovados, 0 falhos e 0 ignorados.
++- `git diff --check`: executado sem apontamentos; `git status --short` registrou somente as alterações locais da task.
++- A execução integrada emitiu avisos de depreciação do `react-test-renderer` e avisos do harness sobre nomes `default` nos componentes mockados. Não causaram falha nos cenários.
++- Lint, typecheck e build: não há scripts nem configurações correspondentes no pacote `app`; não executados. Validação visual em plataformas também não executada.
++- Validações manuais pelo responsável: nenhuma informada.
++- Comandos sugeridos para a etapa autorizada, após inspeção e configuração de ambiente isolado: em `app`, `node --test tests/authNavigation.test.cjs tests/staffNavigation.test.cjs tests/staffRealNavigation.test.cjs tests/staffScreens.test.cjs tests/birthDateInput.test.cjs tests/roleRoutingIntegration.test.cjs tests/auth.test.cjs tests/questionnaire.test.cjs`. As suítes com navegação real podem ser ignoradas se as dependências opcionais de `qa/regression` não estiverem disponíveis. Não instalar dependências nem executar banco implicitamente.
++
++## Ajuste após validação focada
++
++- A validação anterior do comando focado registrou 154 testes aprovados, um falho e oito ignorados. A falha em `K05 Auditoria 9` ocorreu porque o mock retornava o mesmo refresh token em duas rotações; o backend consome o token anterior e gera outro. A fixture agora emite tokens distintos e verifica a persistência em ambas as restaurações. A alteração não foi executada nesta etapa.
++- Os seis testes de `roleRoutingIntegration.test.cjs` e os dois de `staffRealNavigation.test.cjs` foram ignorados porque as dependências de `qa/regression` não estavam disponíveis. A resolução a partir desse pacote não encontrou `react`, `react/jsx-runtime`, `react-test-renderer`, `@react-navigation/core` nem `@react-navigation/routers`. Ambos os arquivos convertem qualquer falha de carregamento das dependências em skip; uma nova execução deve confirmar a causa se ainda houver omissões.
++- `qa/regression/package-lock.json` fixa as dependências de desenvolvimento. Após autorização específica para instalar pacotes, o procedimento previsto no README é `npm.cmd --prefix qa/regression ci --ignore-scripts --no-audit --no-fund`, a partir da raiz, seguido da execução do comando focado por Luna Medium. A instalação acessa o registro npm e substitui `qa/regression/node_modules`; verificar previamente a pasta e preservar qualquer conteúdo necessário. Não há necessidade de instalar dependências de produção para esses oito testes se as dependências atuais do app já atenderem aos seus helpers.

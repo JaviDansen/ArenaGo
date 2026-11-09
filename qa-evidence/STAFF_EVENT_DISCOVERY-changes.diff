@@ -1,0 +1,202 @@
+diff --git a/backend/src/events/staff-queries.controller.ts b/backend/src/events/staff-queries.controller.ts
+index 897a1fd..f873e94 100644
+--- a/backend/src/events/staff-queries.controller.ts
++++ b/backend/src/events/staff-queries.controller.ts
+@@ -1,4 +1,4 @@
+-import { Controller, Get, HttpCode, HttpStatus, Inject, Param } from "@nestjs/common";
++import { Controller, Get, Header, HttpCode, HttpStatus, Inject, Param } from "@nestjs/common";
+ import { z } from "zod";
+ import { CurrentUserId, RequireSessionAuth } from "../auth/current-user.decorator";
+ import { ProblemException } from "../common/errors/problem.exception";
+@@ -17,6 +17,14 @@ function denied(): never {
+ export class StaffQueriesController {
+   constructor(@Inject(StaffQueriesService) private readonly queries: StaffQueriesService) {}
+ 
++  @Get()
++  @HttpCode(HttpStatus.OK)
++  @Header("Cache-Control", "no-store")
++  async events(@CurrentUserId() userId: string) {
++    const events = await this.queries.listEvents(userId);
++    return { events: events.map(({ id, name, status }) => ({ id, name, status })) };
++  }
++
+   @Get(":eventId/stations")
+   @HttpCode(HttpStatus.OK)
+   async stations(@CurrentUserId() userId: string, @Param() params: unknown) {
+diff --git a/backend/src/events/staff-queries.service.ts b/backend/src/events/staff-queries.service.ts
+index b714584..f987e15 100644
+--- a/backend/src/events/staff-queries.service.ts
++++ b/backend/src/events/staff-queries.service.ts
+@@ -11,6 +11,11 @@ interface AccessRow extends Record<string, unknown> {
+   observedAtMs: number;
+   operating: boolean;
+ }
++interface StaffEventRow extends Record<string, unknown> {
++  id: string;
++  name: string;
++  status: "scheduled" | "open" | "closing" | "closed";
++}
+ interface StationRow extends Record<string, unknown> {
+   id: string;
+   experienceId: string;
+@@ -42,6 +47,21 @@ export class StaffQueriesService {
+     @Inject(EventsService) private readonly events: EventsService,
+   ) {}
+ 
++  /** Lista apenas eventos com concessão Staff vigente para a conta da sessão. */
++  async listEvents(staffUserId: string): Promise<StaffEventRow[]> {
++    const result = await this.database.execute<StaffEventRow>(sql`
++      SELECT e.id, e.name, e.status
++      FROM events e
++      WHERE EXISTS (
++        SELECT 1 FROM users u JOIN user_roles r ON r.user_id=u.id
++        WHERE u.id=${staffUserId} AND u.is_active=true AND u.email_verified_at IS NOT NULL
++          AND r.role='staff' AND r.event_id=e.id AND r.revoked_at IS NULL
++      )
++      ORDER BY e.name, e.id
++    `);
++    return result.rows.map(({ id, name, status }) => ({ id, name, status }));
++  }
++
+   private async authorize(tx: DatabaseExecutor, staffUserId: string, eventId: string) {
+     // Papel da sessão não substitui concessão vigente. Admin isolado não autoriza.
+     // statement_timestamp é estável na instrução que estabelece o snapshot.
+diff --git a/backend/test/integration/staff-queries-http.integration.test.ts b/backend/test/integration/staff-queries-http.integration.test.ts
+index a14780a..d7518bf 100644
+--- a/backend/test/integration/staff-queries-http.integration.test.ts
++++ b/backend/test/integration/staff-queries-http.integration.test.ts
+@@ -127,6 +127,24 @@ const routes = (c: Context, experienceId: string) => [`/api/v1/staff/events/${c.
+ const get = (route: string, auth: { token: string }) => supertest(app.getHttpServer()).get(route).set("Authorization", `Bearer ${auth.token}`);
+ const stationsGet = (c: Context) => get(routes(c, "unused")[0], c.staff);
+ const queueGet = (c: Context & { experienceId: string }) => get(routes(c, c.experienceId)[1], c.staff);
++test("descoberta PostgreSQL isola concessões por conta e reflete revogação", async () => {
++  const a = await context(), b = await context(), route = "/api/v1/staff/events";
++  const secondGrant = randomUUID();
++  await pool.query("INSERT INTO user_roles(id,user_id,role,event_id,granted_at) VALUES($1,$2,'staff',$3,clock_timestamp())",
++    [secondGrant, a.staff.userId, b.eventId]);
++  const list = (auth: { token: string }) => get(route, auth);
++  const first = await list(a.staff);
++  assert.equal(first.status, 200); assert.equal(first.headers["cache-control"], "no-store");
++  assert.deepEqual(first.body.events.map((event: { id: string }) => event.id).sort(), [a.eventId, b.eventId].sort());
++  for (const event of first.body.events) assert.deepEqual(Object.keys(event).sort(), ["id", "name", "status"]);
++  const other = await get(route, b.staff).query({ userId: a.staff.userId });
++  assert.equal(other.status, 200); assert.deepEqual(other.body.events.map((event: { id: string }) => event.id), [b.eventId]);
++  const empty = await list(a.viewer); assert.equal(empty.status, 200); assert.deepEqual(empty.body, { events: [] });
++  await pool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE id=$1", [secondGrant]);
++  const revoked = await list(a.staff); assert.equal(revoked.status, 200);
++  assert.deepEqual(revoked.body.events.map((event: { id: string }) => event.id), [a.eventId]);
++  assert.equal((await supertest(app.getHttpServer()).get(route)).status, 401);
++});
+ function problem(r: supertest.Response, status: number, code?: string) {
+   assert.equal(r.status, status, JSON.stringify(r.body)); assert.equal(r.body.status, status);
+   assert.match(r.headers["content-type"], /application\/problem\+json/); if (code) assert.equal(r.body.code, code);
+diff --git a/backend/test/unit/staff-queries-http.test.ts b/backend/test/unit/staff-queries-http.test.ts
+index 22aa726..329205c 100644
+--- a/backend/test/unit/staff-queries-http.test.ts
++++ b/backend/test/unit/staff-queries-http.test.ts
+@@ -25,6 +25,7 @@ const stations = { eventId, stations: [{ id: id(4), experienceId, label: "Estaç
+ const queue = { eventId, experienceId, observedAt: at, waitingCount: 3,
+   acceptingNewEntries: false, canCallWaitingEntries: true, firstWaitingQueueEntryId: id(6) };
+ let stationResult: StaffStationsResult, queueResult: StaffQueueResult, failure: Error | undefined;
++let eventResults: Array<{ id: string; name: string; status: "open" }> = [];
+ const calls: unknown[][] = [];
+ @Module({ controllers: [StaffQueriesController], providers: [SessionAuthGuard,
+   { provide: AuthService, useValue: { authenticateBearerToken: async (token: string) => {
+@@ -32,6 +33,7 @@ const calls: unknown[][] = [];
+     return { userId, sessionId: id(7), roles: ["staff"] };
+   } } },
+   { provide: StaffQueriesService, useValue: {
++    listEvents: async (...args: string[]) => { calls.push(["events", ...args]); if (failure) throw failure; return eventResults; },
+     getStations: async (...args: string[]) => { calls.push(["stations", ...args]); if (failure) throw failure; return stationResult; },
+     getQueue: async (...args: string[]) => { calls.push(["queue", ...args]); if (failure) throw failure; return queueResult; },
+   } },
+@@ -46,8 +48,25 @@ after(async () => { await app?.close(); });
+ const get = (route: string) => supertest(app.getHttpServer()).get(route).set("Authorization", "Bearer unit-staff");
+ function reset() {
+   calls.length = 0; failure = undefined;
++  eventResults = [];
+   stationResult = { kind: "ok", ...structuredClone(stations) }; queueResult = { kind: "ok", ...structuredClone(queue) };
+ }
++test("descoberta HTTP exige sessão e usa somente o usuário autenticado", async () => {
++  reset();
++  problem(await supertest(app.getHttpServer()).get("/api/v1/staff/events"), 401, "MISSING_ACCESS_TOKEN");
++  problem(await get("/api/v1/staff/events").set("Authorization", "Bearer invalid"), 401, "INVALID_ACCESS_TOKEN");
++  assert.equal(calls.length, 0);
++  eventResults = [{ id: eventId, name: "Arena", status: "open" }];
++  Object.assign(eventResults[0], { userId: id(9), accessCode: "PRIVATE" });
++  const r = await get("/api/v1/staff/events").query({ userId: id(9) });
++  assert.equal(r.status, 200); assert.equal(r.headers["cache-control"], "no-store");
++  assert.deepEqual(r.body, { events: [{ id: eventId, name: "Arena", status: "open" }] });
++  assert.deepEqual(calls, [["events", userId]]);
++});
++test("descoberta HTTP retorna lista vazia sem concessões", async () => {
++  reset(); const r = await get("/api/v1/staff/events");
++  assert.equal(r.status, 200); assert.deepEqual(r.body, { events: [] });
++});
+ function problem(r: supertest.Response, status: number, code: string) {
+   assert.equal(r.status, status); assert.equal(r.body.status, status); assert.equal(r.body.code, code);
+   assert.match(r.headers["content-type"], /application\/problem\+json/);
+diff --git a/backend/test/unit/staff-queries.test.ts b/backend/test/unit/staff-queries.test.ts
+index 64301a7..c8fda49 100644
+--- a/backend/test/unit/staff-queries.test.ts
++++ b/backend/test/unit/staff-queries.test.ts
+@@ -10,6 +10,21 @@ const eventId = "event", experienceId = "experience", userId = "staff", at = new
+ const station = { id: "station", experienceId, label: "Estação", availability: "available",
+   pendingServiceSessionId: "pending", pendingCalledAtMs: at.getTime() };
+ const queue = { queueAcceptingEntries: true, hasAvailableStation: true, waitingCount: "2", firstWaitingQueueEntryId: "first" };
++test("descoberta usa SQL parametrizado, concessão ativa e conta apta", async () => {
++  const queries: Array<{ text: string; params: unknown[] }> = [];
++  const database = drizzle({ async query(config: { text: string }, params: unknown[]) {
++    queries.push({ text: config.text, params });
++    return { rows: [{ id: "e1", name: "Arena", status: "open", accessCode: "private" }] };
++  } } as unknown as Client, { schema });
++  const service = new StaffQueriesService(database, new EventsService(database));
++  assert.deepEqual(await service.listEvents(userId), [{ id: "e1", name: "Arena", status: "open" }]);
++  assert.equal(queries.length, 1); assert.deepEqual(queries[0].params, [userId]);
++  for (const expression of [/r.role='staff'/, /r.event_id=e.id/, /r.revoked_at IS NULL/,
++    /u.is_active=true/, /u.email_verified_at IS NOT NULL/, /ORDER BY e.name, e.id/]) {
++    assert.match(queries[0].text, expression);
++  }
++  assert.doesNotMatch(queries[0].text, /\b(insert|update|delete)\b/i);
++});
+ function fixture(options: { denied?: boolean; clock?: number; operating?: boolean; accepting?: boolean;
+   stations?: object[]; queue?: object[] } = {}) {
+   const queries: Array<{ text: string; params: unknown[] }> = [];
+diff --git a/docs/STAFF_EVENT_DISCOVERY_IMPLEMENTACAO.md b/docs/STAFF_EVENT_DISCOVERY_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..71a55b2
+--- /dev/null
++++ b/docs/STAFF_EVENT_DISCOVERY_IMPLEMENTACAO.md
+@@ -0,0 +1,32 @@
++# Descoberta de eventos Staff
++
++## Contrato para o aplicativo
++
++`GET /api/v1/staff/events` exige `Authorization: Bearer <accessToken>` de sessão válida. Retorna HTTP 200 e `Cache-Control: no-store`:
++
++```json
++{
++  "events": [
++    { "id": "00000000-0000-4000-8000-000000000001", "name": "Arena", "status": "open" }
++  ]
++}
++```
++
++Uma conta sem concessão Staff válida recebe `{ "events": [] }`. `id` é o UUID a usar nas consultas Staff vinculadas ao evento. `status` é um dos valores existentes: `scheduled`, `open`, `closing` ou `closed`. A ordenação é por nome e ID. O endpoint ignora parâmetros de identidade do cliente; o guard fornece o usuário da sessão. Credenciais ausentes ou inválidas retornam 401 conforme o contrato de autenticação existente.
++
++A consulta usa um snapshot de uma instrução e inclui somente concessões `staff` do próprio usuário com `revoked_at IS NULL`, conta ativa e e-mail verificado. O resultado pode incluir eventos em qualquer status, inclusive encerrados: as consultas Staff já existentes autorizam por concessão e tratam condições operacionais separadamente. Uma concessão revogada depois da resposta pode tornar a lista desatualizada; cada operação subsequente continua verificando a autorização no servidor. O papel Admin isolado não concede acesso Staff. A listagem não retorna códigos de acesso, dados de conta, participantes ou informações de concessão.
++
++## Arquitetura e riscos
++
++- Inspeção estática: `user_roles` já contém usuário, evento e revogação, e `events` possui os três campos necessários. Nenhum endpoint de listagem Staff correspondente foi encontrado. `GET /staff/events` não conflita com as rotas existentes com `:eventId`.
++- Nenhuma migration ou alteração de schema é necessária. Os arquivos de backend tocados não tinham alterações locais no início desta tarefa; não foi encontrado conflito local com o trabalho Admin. Integração simultânea em outra cópia ainda deve ser coordenada pelo responsável.
++- A listagem não é paginada; um volume muito grande de concessões pode exigir paginação em etapa futura. Não há polling nem integração do painel nesta etapa.
++- Testes preparados: HTTP com guard, identidade de sessão, tentativa de escolher outro usuário, lista vazia e projeção; teste unitário da consulta parametrizada e das condições de concessão; integração PostgreSQL para duas contas, concessão adicional, isolamento, revogação e autenticação.
++- Testes focados executados por Luna Medium (`NODE_ENV=test`): `staff-queries.test.ts` e `staff-queries-http.test.ts`, 21 aprovados, 0 falhos e 0 ignorados. Cobrem Bearer obrigatório, uso do ID da sessão apesar de `userId` enviado pelo cliente, lista vazia, projeção, SQL parametrizado, concessão Staff ativa e operações existentes.
++- Suíte unitária completa executada por Luna Medium (`npm.cmd --prefix backend test`): primeira execução teve 1.146 aprovados e 2 falhos em `evaluation-write-http.test.ts`, pois o teste presume TTL de 60 segundos e a variável `EVALUATION_IDEMPOTENCY_TTL_SECONDS` estava ausente. Com a variável configurada em `60`, a suíte repetida teve 1.148 aprovados, 0 falhos e 0 ignorados. Os testes unitários não abriram conexão PostgreSQL.
++- Typecheck de produção (`tsconfig.build.json`) e typecheck de testes (`tsconfig.test.json`): aprovados, sem erros.
++- Compilação de produção: `tsc --project tsconfig.build.json --outDir <diretório temporário novo> --incremental false` concluiu sem erros, preservando o `backend/dist` existente. O comando Nest `nest build` não foi executado: a configuração padrão está com `deleteOutDir: true`, e a revisão da execução rejeitou o comando que incluía a remoção recursiva do diretório temporário criado para evitar tocar no `dist` preexistente.
++- Nenhum teste PostgreSQL foi executado e nenhuma conexão ou alteração de banco foi feita. A integração em `staff-queries-http.integration.test.ts` continua pendente de campanha autorizada com confirmação do banco dedicado.
++- `git diff --check`: executado na raiz sem apontamentos. `git status --short` preservou as alterações locais já existentes e mostra as alterações não commitadas deste endpoint.
++- `tsx` falhou inicialmente porque `os.userInfo()` retornou `uv_os_get_passwd ENOMEM` no Windows. Os testes foram executados com um preloader temporário que fornece apenas um identificador estável à criação de diretório temporário pelo `tsx`; lógica e asserções dos testes não foram alteradas.
++- Lint: não executado nesta campanha. Validação manual pelo responsável: nenhuma informada para este endpoint.
