@@ -38,6 +38,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
       }
       if (url === '/participations/current') return { participation: null };
       if (url === '/participations/return-state') return { pendingEvaluationParticipationIds: [], recentFinalization: null };
+      if (url === '/staff/events') return { events: control.events ?? [] };
       throw new Error(`GET inesperado: ${url}`);
     },
     async post(url) {
@@ -67,7 +68,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
       text: async () => JSON.stringify(value.body ?? value) };
   } });
   const passthrough = ({ children }) => children;
-  const native = Object.fromEntries(['ActivityIndicator', 'Modal', 'Pressable', 'Text', 'View'].map((name) => [name, name]));
+  const native = Object.fromEntries(['ActivityIndicator', 'Modal', 'Pressable', 'ScrollView', 'Text', 'View'].map((name) => [name, name]));
   native.StyleSheet = { create: (styles) => styles };
   native.Platform = { OS: 'web' };
   function FocusedStack(props) {
@@ -93,6 +94,9 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
       if (target === 'theme') return createParticipantThemeStub();
       if (target === 'services/httpClient') return { ...http, httpClient: client };
       if (target === 'services/tokenStorage') return { defaultTokenStorage: storage };
+      if (control.realStaff && ['screens/staff/StaffEventsNavigator', 'services/staffEventsService'].includes(target)) {
+        return load(`${target}.js`);
+      }
       if (target === 'screens/event-entry/EventEntryScreen' && control.modalFixture) {
         const Dialog = load('screens/staff/components/StaffConfirmDialog.js').default;
         return { __esModule: true, default: () => React.createElement(Dialog, { visible: true,
@@ -121,8 +125,18 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
     async act(work) { await Renderer.act(work); },
     route() { const state = navRef.getRootState(); return state.routes[state.index].name; },
     routes() { return navRef.getRootState().routes.map((route) => route.name); },
-    navigate(name) { Renderer.act(() => navRef.navigate(name)); },
+    navigate(name, params) { Renderer.act(() => navRef.navigate(name, params)); },
     back() { Renderer.act(() => navRef.goBack()); },
+    hasText(text) { return tree.root.findAllByType('Text').some((node) => {
+      const flatten = (value) => Array.isArray(value) ? value.map(flatten).join('')
+        : value && typeof value === 'object' ? flatten(value.props?.children) : String(value ?? '');
+      return flatten(node.props.children).includes(text);
+    }); },
+    async press(label) {
+      const buttons = tree.root.findAllByType('Pressable').filter((node) => node.props.accessibilityLabel === label);
+      assert.equal(buttons.length, 1, `botão ${label}`);
+      await Renderer.act(async () => { await buttons[0].props.onPress(); });
+    },
     modal() { return tree.root.findByType('Modal'); },
     confirmHandler() { return tree.root.findAllByType('Pressable')
       .find((node) => node.props.accessibilityLabel === 'CONFIRMAR').props.onPress; },
@@ -262,5 +276,107 @@ test('modal protegido fica invisível e callback antigo não executa durante err
   assert.equal(app.modal().props.visible, false);
   oldConfirm();
   assert.equal(control.confirmed, 0);
+  app.dispose();
+});
+
+const staffEvent = { id: '11111111-1111-4111-8111-111111111111', name: 'Evento autorizado', status: 'open' };
+
+test('Staff real consulta eventos, seleciona, volta e não aceita rota com ID manual', { skip }, async () => {
+  const control = { realStaff: true, events: [staffEvent] };
+  const app = createIntegration({ initialUser: { ...participant, roles: ['participante', 'staff'] }, control });
+  await app.mount();
+  await app.act(() => app.manager.login({ email: participant.email, password: 'password' }));
+  assert.equal(app.route(), 'StaffPending');
+  assert.ok(app.calls.includes('/staff/events'));
+  assert.ok(app.hasText('Evento autorizado'));
+  await app.press('Selecionar evento Evento autorizado');
+  assert.ok(app.hasText('Status: Aberto'));
+  assert.ok(app.hasText('próxima etapa'));
+  await app.press('Voltar aos eventos');
+  app.navigate('StaffPending', { screen: 'StaffEventHome', params: { eventId: '22222222-2222-4222-8222-222222222222' } });
+  assert.ok(app.hasText('Atualize a lista para confirmar os eventos autorizados'));
+  assert.ok(!app.hasText('Status: Aberto'));
+  await app.press('Voltar aos eventos');
+  control.events = [];
+  await app.press('Atualizar eventos');
+  assert.ok(app.hasText('Nenhum evento autorizado'));
+  app.dispose();
+});
+
+test('Staff real trata erro de rede, atualização manual e troca de conta sem reaproveitar seleção', { skip }, async () => {
+  let offline = true;
+  const control = { realStaff: true, events: [staffEvent], http: async (route) => {
+    if (route === '/staff/events' && offline) throw new Error('offline');
+    return undefined;
+  } };
+  const app = createIntegration({ initialUser: { ...participant, roles: ['staff'] }, control });
+  await app.mount();
+  await app.act(() => app.manager.login({ email: participant.email, password: 'password' }));
+  assert.ok(app.hasText('Não foi possível conectar'));
+  offline = false;
+  await app.press('Atualizar eventos');
+  await app.press('Selecionar evento Evento autorizado');
+  assert.ok(app.hasText('Status: Aberto'));
+  await app.act(() => app.manager.logout());
+  control.events = [];
+  app.setUser({ ...participant, id: 'b', email: 'b@example.test', roles: ['staff'] });
+  await app.act(() => app.manager.login({ email: 'b@example.test', password: 'password' }));
+  assert.ok(app.hasText('Nenhum evento autorizado'));
+  assert.ok(!app.hasText('Evento autorizado'));
+  app.navigate('StaffPending', { screen: 'StaffEventHome' });
+  assert.ok(app.hasText('Atualize a lista para confirmar os eventos autorizados'));
+  app.dispose();
+});
+
+test('revalidação limpa evento selecionado e revogação Staff remove a pilha real', { skip }, async () => {
+  const control = { realStaff: true, events: [staffEvent] };
+  const app = createIntegration({ initialUser: { ...participant, roles: ['staff'] }, control });
+  await app.mount();
+  await app.act(() => app.manager.login({ email: participant.email, password: 'password' }));
+  await app.press('Selecionar evento Evento autorizado');
+  control.events = [];
+  await app.act(() => app.manager.refreshSession());
+  assert.ok(app.hasText('Atualize a lista para confirmar os eventos autorizados'));
+  assert.ok(!app.hasText('Status: Aberto'));
+  await app.press('Voltar aos eventos');
+  assert.ok(app.hasText('Nenhum evento autorizado'));
+  app.setUser(participant);
+  await app.act(() => app.manager.refreshSession());
+  assert.equal(app.route(), 'MainTabs');
+  app.navigate('StaffPending', { screen: 'StaffEventHome' });
+  assert.equal(app.route(), 'MainTabs');
+  app.dispose();
+});
+
+test('401 terminal na lista Staff usa o gerenciador real e remove a área protegida', { skip }, async () => {
+  const control = { realStaff: true, http: async (route) => route === '/staff/events'
+    ? { statusCode: 401, body: { code: 'SESSION_REVOKED' } } : undefined };
+  const app = createIntegration({ initialUser: { ...participant, roles: ['staff'] }, control });
+  await app.mount();
+  await app.act(() => app.manager.login({ email: participant.email, password: 'password' }));
+  assert.equal(app.manager.getSnapshot().isAuthenticated, false);
+  assert.equal(app.route(), 'Login');
+  assert.ok(!app.hasText('Eventos Staff'));
+  app.navigate('StaffEventHome');
+  assert.equal(app.route(), 'Login');
+  app.dispose();
+});
+
+test('401 recuperável na lista Staff renova sessão e obtém eventos com a identidade revalidada', { skip }, async () => {
+  let attempts = 0;
+  const control = { realStaff: true, http: async (route, options) => {
+    if (route !== '/staff/events') return undefined;
+    attempts += 1;
+    return options.headers.Authorization === 'Bearer access'
+      ? { statusCode: 401, body: { code: 'ACCESS_TOKEN_EXPIRED' } }
+      : { body: { events: [staffEvent] } };
+  } };
+  const app = createIntegration({ initialUser: { ...participant, roles: ['staff'] }, control });
+  await app.mount();
+  await app.act(() => app.manager.login({ email: participant.email, password: 'password' }));
+  assert.equal(app.manager.getSnapshot().identityStatus, 'verified');
+  assert.ok(app.calls.includes('/auth/refresh'));
+  assert.ok(attempts >= 2);
+  assert.ok(app.hasText('Evento autorizado'));
   app.dispose();
 });

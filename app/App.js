@@ -8,6 +8,7 @@ import { ParticipationProvider } from './context/ParticipationContext';
 import MainTabs from './navigation/MainTabs';
 import AuthSessionGate, { resolveInitialRouteForAuthState } from './screens/auth/AuthSessionGate';
 import RolePendingScreen from './screens/auth/RolePendingScreen';
+import StaffEventsNavigator from './screens/staff/StaffEventsNavigator';
 import EvaluationScreen from './screens/participation/EvaluationScreen';
 import RealEvaluationScreen from './screens/participation/RealEvaluationScreen';
 import EventConfirmationScreen from './screens/event-entry/EventConfirmationScreen';
@@ -115,7 +116,7 @@ export function AppNavigation() {
     : roleArea === 'admin'
       ? [{ name: 'AdminPending', component: RolePendingScreen }]
       : roleArea === 'staff'
-        ? [{ name: 'StaffPending', component: RolePendingScreen }]
+        ? [{ name: 'StaffPending', component: StaffEventsNavigator }]
         : roleArea === 'recovery'
           ? [{ name: 'IdentityRecovery', component: RolePendingScreen }]
         : isQuestionnairePending
