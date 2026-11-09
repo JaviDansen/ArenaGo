@@ -75,3 +75,58 @@ test('horarios PostgreSQL com seis casas permitem calcular permanencia', async (
   const card = { enteredAt: '2026-11-07T21:20:39.940000Z', exitedAt: '2026-11-07T21:27:36.097197Z' };
   assert.equal(utils.getStayDurationInMinutes(card), 7);
 });
+
+test('avaliação após saída usa elegibilidade e encontra o item real mesmo em outra página', async () => {
+  const { fetchPendingEvaluationHistoryItem } = await service;
+  const pendingItem = { ...historyItem, evaluation: { eligible: true, submitted: false, pending: true } };
+  const calls = [];
+  const client = { async get(path, options) {
+    calls.push([path, options]);
+    if (path.endsWith('/evaluation-eligibility')) return { participationId: ID, eligible: true, submitted: false, pending: true };
+    if (path === '/participations/history?limit=50') return { items: [], nextCursor: 'page+2' };
+    return { items: [pendingItem], nextCursor: null };
+  } };
+  assert.equal(await fetchPendingEvaluationHistoryItem(client, ID), pendingItem);
+  assert.deepEqual(calls.map(call => call[0]), [
+    `/participations/${ID}/evaluation-eligibility`, '/participations/history?limit=50',
+    '/participations/history?limit=50&cursor=page%2B2',
+  ]);
+  assert.ok(calls.every(call => call[1].auth === true));
+});
+
+test('não abre avaliação enviada, não elegível, expirada ou inconsistente no histórico', async () => {
+  const { fetchPendingEvaluationHistoryItem } = await service;
+  for (const evaluation of [
+    { eligible: true, submitted: true, pending: false },
+    { eligible: false, submitted: false, pending: false },
+    { eligible: true, submitted: false, pending: false },
+  ]) {
+    let calls = 0;
+    const client = { async get() { calls += 1; return { participationId: ID, ...evaluation }; } };
+    assert.equal(await fetchPendingEvaluationHistoryItem(client, ID), null);
+    assert.equal(calls, 1);
+  }
+  const client = { async get(path) {
+    if (path.endsWith('/evaluation-eligibility')) return { participationId: ID, eligible: true, submitted: false, pending: true };
+    return { items: [historyItem], nextCursor: null };
+  } };
+  assert.equal(await fetchPendingEvaluationHistoryItem(client, ID), null);
+});
+
+test('falhas, cursores repetidos e troca de sessão não geram item de avaliação', async () => {
+  const { fetchPendingEvaluationHistoryItem } = await service;
+  const eligibility = { participationId: ID, eligible: true, submitted: false, pending: true };
+  await assert.rejects(() => fetchPendingEvaluationHistoryItem({ get: async () => { throw new Error('rede'); } }, ID), /rede/);
+  await assert.rejects(() => fetchPendingEvaluationHistoryItem({ get: async path => {
+    if (path.endsWith('/evaluation-eligibility')) return eligibility;
+    throw new Error('histórico indisponível');
+  } }, ID), /histórico indisponível/);
+  await assert.rejects(() => fetchPendingEvaluationHistoryItem({ get: async () => ({ ...eligibility, participationId: EVENT_ID }) }, ID), /elegibilidade inválida/);
+  await assert.rejects(() => fetchPendingEvaluationHistoryItem({ get: async path => path.endsWith('/evaluation-eligibility')
+    ? eligibility : { items: [], nextCursor: 'same' } }, ID), /cursor/);
+  let current = true;
+  let calls = 0;
+  const client = { async get() { calls += 1; current = false; return eligibility; } };
+  assert.equal(await fetchPendingEvaluationHistoryItem(client, ID, { isCurrent: () => current }), null);
+  assert.equal(calls, 1);
+});

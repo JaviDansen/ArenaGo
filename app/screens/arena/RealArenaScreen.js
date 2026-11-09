@@ -9,11 +9,14 @@ import { useAuth } from '../../context/AuthContext';
 import { createArenaQueueCoordinator, describeArenaError } from '../../services/arenaQueueService';
 import { defaultArenaQueueIntentStorage } from '../../services/arenaQueueIntentStorage';
 import { createParticipationActionCoordinator, describeParticipationActionError } from '../../services/participationActionService';
+import { fetchPendingEvaluationHistoryItem } from '../../services/participationHistoryService';
 import { colors, spacing, typography } from '../../theme';
 
 /** Tela real de participação ativa. Sem alterações de domínio feitas em estado React. */
-export default function RealArenaScreen({ participation, refreshParticipation }) {
+export default function RealArenaScreen({ participation, refreshParticipation, onOpenEvaluation }) {
   const auth = useAuth();
+  const authRef = useRef(auth);
+  authRef.current = auth;
   const userId = auth?.user?.id;
   const participationId = participation.id;
   const eventId = participation.eventId;
@@ -21,11 +24,14 @@ export default function RealArenaScreen({ participation, refreshParticipation })
   const getEpoch = auth?.getSessionEpoch;
   const epoch = typeof getEpoch === 'function' ? getEpoch() : null;
   const focused = useRef(false);
+  const focusGeneration = useRef(0);
+  const finishedRef = useRef(false);
   const [state, setState] = useState(null);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(null);
+  const [finished, setFinished] = useState(false);
   const busyRef = useRef(false);
 
   const context = useMemo(() => ({ userId, participationId, eventId }), [userId, participationId, eventId]);
@@ -37,9 +43,9 @@ export default function RealArenaScreen({ participation, refreshParticipation })
   }), [client, getEpoch, epoch]);
   const completion = useMemo(() => createParticipationActionCoordinator({
     client,
-    isCurrent: () => focused.current && auth?.user?.id === userId
+    isCurrent: () => authRef.current?.isAuthenticated === true && authRef.current?.user?.id === userId
       && typeof getEpoch === 'function' && getEpoch() === epoch,
-  }), [client, auth, getEpoch, epoch, userId]);
+  }), [client, getEpoch, epoch, userId]);
 
   const refresh = useCallback(async () => {
     if (!focused.current || busyRef.current) return;
@@ -57,8 +63,9 @@ export default function RealArenaScreen({ participation, refreshParticipation })
 
   useFocusEffect(useCallback(() => {
     focused.current = true;
+    focusGeneration.current += 1;
     void refresh();
-    return () => { focused.current = false; };
+    return () => { focused.current = false; focusGeneration.current += 1; };
   }, [refresh]));
 
   const join = async (experienceId) => {
@@ -85,23 +92,42 @@ export default function RealArenaScreen({ participation, refreshParticipation })
   };
 
   const finish = () => {
-    if (busyRef.current || loading || state?.pendingIntent) return;
+    if (busyRef.current || finishedRef.current || loading || state?.pendingIntent) return;
     Alert.alert('Deseja sair da Arena?', 'Sua participação será encerrada e não poderá ser retomada.', [
       { text: 'Cancelar', style: 'cancel' },
       { text: 'Sair da Arena', style: 'destructive', onPress: async () => {
-        if (busyRef.current || !focused.current) return;
+        if (busyRef.current || finishedRef.current || !focused.current) return;
         busyRef.current = true;
         setBusy(true);
         setError(null);
+        const generation = focusGeneration.current;
+        const sameSession = () => authRef.current?.isAuthenticated === true && authRef.current?.user?.id === userId
+          && typeof getEpoch === 'function' && getEpoch() === epoch;
+        const isCurrent = () => focused.current && focusGeneration.current === generation && sameSession();
+        let confirmed = false;
         try {
           await completion.finish(userId, participationId);
-          if (!focused.current) return;
-          await refreshParticipation();
+          confirmed = true;
+          if (sameSession()) {
+            finishedRef.current = true;
+            if (isCurrent()) setFinished(true);
+          }
         } catch (err) {
-          if (focused.current) setError(describeParticipationActionError(err, 'finish'));
+          if (isCurrent()) setError(describeParticipationActionError(err, 'finish'));
+        }
+        try {
+          if (confirmed && isCurrent()) {
+            const historyItem = await fetchPendingEvaluationHistoryItem(client, participationId, { isCurrent });
+            if (historyItem?.event?.id === eventId && isCurrent()) onOpenEvaluation?.(historyItem);
+          }
+        } catch {
+          // O encerramento já foi confirmado; o histórico pode ser consultado depois.
         } finally {
+          if (confirmed && sameSession()) {
+            try { await refreshParticipation(); } catch { /* A atualização pode ser repetida sem reenviar a saída. */ }
+          }
           busyRef.current = false;
-          if (focused.current) setBusy(false);
+          if (focused.current && sameSession()) setBusy(false);
         }
       } },
     ]);
@@ -219,7 +245,7 @@ export default function RealArenaScreen({ participation, refreshParticipation })
         <Button
           title={busy ? 'Aguarde...' : 'Sair da Arena'}
           variant="dangerOutline"
-          disabled={busy || loading || Boolean(pending)}
+          disabled={busy || loading || finished || Boolean(pending)}
           onPress={finish}
           style={styles.actionButton}
         />

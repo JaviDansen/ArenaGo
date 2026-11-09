@@ -99,7 +99,7 @@ test('Arena real exige confirmação e bloqueia duas finalizações simultâneas
     if (name === '../../components/ui') return createParticipantUiStubs();
     if (name === '../../theme') return createParticipantThemeStub();
     if (name === '../../components/ScreenContainer') return { __esModule: true, default: 'ScreenContainer' };
-    if (name === '../../context/AuthContext') return { useAuth: () => ({ user: { id: USER }, httpClient: {}, getSessionEpoch: () => 1 }) };
+    if (name === '../../context/AuthContext') return { useAuth: () => ({ isAuthenticated: true, user: { id: USER }, httpClient: {}, getSessionEpoch: () => 1 }) };
     if (name === '../../services/arenaQueueService') return {
       createArenaQueueCoordinator: () => ({ read: async () => arena }), describeArenaError: () => 'erro',
     };
@@ -111,6 +111,7 @@ test('Arena real exige confirmação e bloqueia duas finalizações simultâneas
       } }),
       describeParticipationActionError: () => 'erro',
     };
+    if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
     return require(name);
   }).exports.default;
   const tree = screen({ participation: { id: ID, eventId: EVENT },
@@ -127,4 +128,140 @@ test('Arena real exige confirmação e bloqueia duas finalizações simultâneas
   releaseFinish();
   await Promise.all([first, second]);
   assert.equal(refreshes, 1);
+});
+
+function realArenaExitHarness(lookup, waitForFinish = async () => {}) {
+  const alerts = [], events = [];
+  const arena = { experiences: [], currentQueueEntry: null, pendingIntent: null };
+  let stateIndex = 0, epoch = 1, blur = () => {};
+  const screen = loadModule('screens/arena/RealArenaScreen.js', name => {
+    if (name === 'react') return {
+      useRef: value => ({ current: value }), useMemo: factory => factory(), useCallback: fn => fn,
+      useState(initial) { const index = stateIndex++; return [index === 0 ? arena : index === 2 ? false : initial, () => {}]; },
+    };
+    if (name === '@react-navigation/native') return { useFocusEffect: callback => { blur = callback(); } };
+    if (name === 'expo-crypto') return { randomUUID: () => '33333333-3333-4333-8333-333333333333' };
+    if (name === 'react-native') return { ...native, Alert: { alert: (...args) => alerts.push(args) } };
+    if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
+    if (name === '../../components/ui') return createParticipantUiStubs();
+    if (name === '../../theme') return createParticipantThemeStub();
+    if (name === '../../context/AuthContext') return { useAuth: () => ({
+      isAuthenticated: true, user: { id: USER }, httpClient: {}, getSessionEpoch: () => epoch,
+    }) };
+    if (name === '../../services/arenaQueueService') return {
+      createArenaQueueCoordinator: () => ({ read: async () => arena }), describeArenaError: () => 'erro',
+    };
+    if (name === '../../services/arenaQueueIntentStorage') return { defaultArenaQueueIntentStorage: {} };
+    if (name === '../../services/participationActionService') return {
+      createParticipationActionCoordinator: ({ isCurrent }) => ({ finish: async () => {
+        events.push('finish');
+        await waitForFinish();
+        if (!isCurrent()) throw new Error('sessão alterada');
+      } }),
+      describeParticipationActionError: () => 'erro',
+    };
+    if (name === '../../services/participationHistoryService') return {
+      fetchPendingEvaluationHistoryItem: async (...args) => { events.push('lookup'); return lookup(...args); },
+    };
+    return require(name);
+  }).exports.default;
+  const tree = screen({ participation: { id: ID, eventId: EVENT },
+    refreshParticipation: async () => { events.push('refresh'); },
+    onOpenEvaluation: value => { events.push(value); } });
+  button(tree, 'Sair da Arena').props.onPress();
+  return { events, confirm: alerts[0][2][1].onPress, blur: () => blur(), changeSession: () => { epoch += 1; } };
+}
+
+test('saída real abre uma vez o item pendente e atualiza a participação', async () => {
+  const h = realArenaExitHarness(async () => item);
+  await h.confirm();
+  await h.confirm();
+  assert.deepEqual(h.events, ['finish', 'lookup', item, 'refresh']);
+});
+
+test('falha ou ausência de avaliação após saída atualiza sem repetir finish', async () => {
+  for (const lookup of [async () => null, async () => { throw new Error('rede'); }]) {
+    const h = realArenaExitHarness(lookup);
+    await h.confirm();
+    await h.confirm();
+    assert.deepEqual(h.events, ['finish', 'lookup', 'refresh']);
+  }
+});
+
+test('item de histórico de outro evento não abre avaliação', async () => {
+  const h = realArenaExitHarness(async () => ({ ...item, event: { ...item.event, id: USER } }));
+  await h.confirm();
+  assert.deepEqual(h.events, ['finish', 'lookup', 'refresh']);
+});
+
+test('avaliar mais tarde na rota real retorna à tela anterior', () => {
+  let backs = 0;
+  const screen = loadModule('screens/participation/RealEvaluationScreen.js', name => {
+    if (name === 'react') return {
+      useCallback: fn => fn, useContext: () => ({ refreshParticipation: async () => {} }),
+      useEffect: () => {}, useMemo: factory => factory(), useRef: value => ({ current: value }),
+      useState: initial => [initial, () => {}],
+    };
+    if (name === 'react-native') return native;
+    if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
+    if (name === 'expo-crypto') return { randomUUID: () => '33333333-3333-4333-8333-333333333333' };
+    if (name === '../../components/ui') return createParticipantUiStubs();
+    if (name === '../../theme') return createParticipantThemeStub();
+    if (name === '../../context/AuthContext') return { useAuth: () => ({
+      isAuthenticated: true, user: { id: USER }, httpClient: {}, getSessionEpoch: () => 1,
+    }) };
+    if (name === '../../context/ParticipationContext') return { ParticipationContext: {} };
+    if (name === '../../services/participationActionService') return {
+      createParticipationActionCoordinator: () => ({}), describeParticipationActionError: () => 'erro',
+    };
+    if (name === '../../services/participationHistoryService') return { validateHistoryItem: () => true };
+    if (name === './EvaluationScreen') return { __esModule: true, default: 'EvaluationScreen' };
+    return require(name);
+  }).exports.default;
+  const tree = screen({ navigation: { goBack: () => { backs += 1; } }, route: { params: { participationId: ID, historyItem: item } } });
+  assert.equal(tree.type, 'EvaluationScreen');
+  tree.props.onLater();
+  assert.equal(backs, 1);
+});
+
+test('perda de foco durante consulta impede navegação e ainda atualiza a sessão original', async () => {
+  let release;
+  const h = realArenaExitHarness(() => new Promise(resolve => { release = resolve; }));
+  const result = h.confirm();
+  await new Promise(resolve => setImmediate(resolve));
+  h.blur();
+  release(item);
+  await result;
+  assert.deepEqual(h.events, ['finish', 'lookup', 'refresh']);
+});
+
+test('troca de sessão durante consulta descarta navegação e atualização tardia', async () => {
+  let release;
+  const h = realArenaExitHarness(() => new Promise(resolve => { release = resolve; }));
+  const result = h.confirm();
+  await new Promise(resolve => setImmediate(resolve));
+  h.changeSession();
+  release(item);
+  await result;
+  assert.deepEqual(h.events, ['finish', 'lookup']);
+});
+
+test('saída confirmada após perder foco atualiza participação sem abrir avaliação', async () => {
+  let releaseFinish;
+  const h = realArenaExitHarness(async () => item, () => new Promise(resolve => { releaseFinish = resolve; }));
+  const result = h.confirm();
+  h.blur();
+  releaseFinish();
+  await result;
+  assert.deepEqual(h.events, ['finish', 'refresh']);
+});
+
+test('troca de sessão durante finish descarta o resultado tardio', async () => {
+  let releaseFinish;
+  const h = realArenaExitHarness(async () => item, () => new Promise(resolve => { releaseFinish = resolve; }));
+  const result = h.confirm();
+  h.changeSession();
+  releaseFinish();
+  await result;
+  assert.deepEqual(h.events, ['finish']);
 });

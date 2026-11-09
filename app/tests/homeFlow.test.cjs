@@ -4,7 +4,8 @@ const { loadModule, createParticipantUiStubs } = require('./helpers/questionnair
 
 function renderHomeFlow(participation, extra = {}) {
   let contextWrites = 0;
-  const navigation = { navigate() {} };
+  const navigationCalls = [];
+  const navigation = { navigate: (...args) => navigationCalls.push(args) };
   const screen = loadModule('screens/home/HomeFlowScreen.js', (name) => {
     if (name === 'react') return {
       useContext: () => ({
@@ -33,7 +34,7 @@ function renderHomeFlow(participation, extra = {}) {
     return require(name);
   });
   const rendered = screen.exports.default({ navigation });
-  return { contextWrites, navigation, participation, rendered };
+  return { contextWrites, navigation, navigationCalls, participation, rendered };
 }
 
 function assertReadOnlySelection(result, expectedType, initialParticipation) {
@@ -66,6 +67,25 @@ test('HomeFlow renders the real Arena for an active server participation', () =>
   assert.equal(result.rendered.props.participation, participation);
   assert.equal(result.rendered.props.refreshParticipation, refreshParticipation);
   assert.equal(result.contextWrites, 0);
+});
+
+test('HomeFlow encaminha a avaliação real para o stack raiz', () => {
+  const participation = { source: 'server', id: 'participation-a', status: 'active', eventId: 'event-a' };
+  const result = renderHomeFlow(participation, { status: 'ready', refreshParticipation() {} });
+  const calls = [];
+  result.navigation.getParent = () => ({ navigate: (...args) => calls.push(args) });
+  const historyItem = { participationId: participation.id };
+  result.rendered.props.onOpenEvaluation(historyItem);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], 'RealEvaluation');
+  assert.equal(calls[0][1].participationId, participation.id);
+  assert.equal(calls[0][1].historyItem, historyItem);
+});
+
+test('pendência no estado de retorno não abre avaliação ao renderizar a Home', () => {
+  const result = renderHomeFlow(null, { status: 'ready', returnState: { pendingEvaluationParticipationIds: ['participation-a'] } });
+  assert.equal(result.rendered.type, 'HomeScreen');
+  assert.deepEqual(result.navigationCalls, []);
 });
 
 test('HomeFlow keeps loading and error states out of simulated navigation', () => {

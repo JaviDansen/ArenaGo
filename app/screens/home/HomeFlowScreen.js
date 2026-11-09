@@ -47,7 +47,10 @@ export default function HomeFlowScreen({ navigation }) {
 
   if (participation?.source === 'server') {
     if (participation.status === 'active') {
-      return <RealArenaScreen key={participation.id} participation={participation} refreshParticipation={refreshParticipation} />;
+      return <RealArenaScreen key={participation.id} participation={participation} refreshParticipation={refreshParticipation}
+        onOpenEvaluation={(historyItem) => navigation.getParent()?.navigate('RealEvaluation', {
+          participationId: historyItem.participationId, historyItem,
+        })} />;
     }
     return <ExternalQueueScreen participation={participation} onRefresh={refreshParticipation} />;
   }
