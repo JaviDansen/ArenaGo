@@ -1,17 +1,22 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
+import { StatusBar } from 'expo-status-bar';
 import * as Crypto from 'expo-crypto';
-import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, ScrollView, StyleSheet, Text, View } from 'react-native';
 
-import ScreenContainer from '../../components/ScreenContainer';
+import { AuthBackground, Badge, Button, Card, ScreenHeader } from '../../components/ui';
 import { useAuth } from '../../context/AuthContext';
 import { createArenaQueueCoordinator, describeArenaError } from '../../services/arenaQueueService';
 import { defaultArenaQueueIntentStorage } from '../../services/arenaQueueIntentStorage';
 import { createParticipationActionCoordinator, describeParticipationActionError } from '../../services/participationActionService';
+import { fetchPendingEvaluationHistoryItem } from '../../services/participationHistoryService';
+import { colors, spacing, typography } from '../../theme';
 
 /** Tela real de participação ativa. Sem alterações de domínio feitas em estado React. */
-export default function RealArenaScreen({ participation, refreshParticipation }) {
+export default function RealArenaScreen({ participation, refreshParticipation, onOpenEvaluation }) {
   const auth = useAuth();
+  const authRef = useRef(auth);
+  authRef.current = auth;
   const userId = auth?.user?.id;
   const participationId = participation.id;
   const eventId = participation.eventId;
@@ -19,11 +24,14 @@ export default function RealArenaScreen({ participation, refreshParticipation })
   const getEpoch = auth?.getSessionEpoch;
   const epoch = typeof getEpoch === 'function' ? getEpoch() : null;
   const focused = useRef(false);
+  const focusGeneration = useRef(0);
+  const finishedRef = useRef(false);
   const [state, setState] = useState(null);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(null);
+  const [finished, setFinished] = useState(false);
   const busyRef = useRef(false);
 
   const context = useMemo(() => ({ userId, participationId, eventId }), [userId, participationId, eventId]);
@@ -35,9 +43,9 @@ export default function RealArenaScreen({ participation, refreshParticipation })
   }), [client, getEpoch, epoch]);
   const completion = useMemo(() => createParticipationActionCoordinator({
     client,
-    isCurrent: () => focused.current && auth?.user?.id === userId
+    isCurrent: () => authRef.current?.isAuthenticated === true && authRef.current?.user?.id === userId
       && typeof getEpoch === 'function' && getEpoch() === epoch,
-  }), [client, auth, getEpoch, epoch, userId]);
+  }), [client, getEpoch, epoch, userId]);
 
   const refresh = useCallback(async () => {
     if (!focused.current || busyRef.current) return;
@@ -55,8 +63,9 @@ export default function RealArenaScreen({ participation, refreshParticipation })
 
   useFocusEffect(useCallback(() => {
     focused.current = true;
+    focusGeneration.current += 1;
     void refresh();
-    return () => { focused.current = false; };
+    return () => { focused.current = false; focusGeneration.current += 1; };
   }, [refresh]));
 
   const join = async (experienceId) => {
@@ -83,23 +92,42 @@ export default function RealArenaScreen({ participation, refreshParticipation })
   };
 
   const finish = () => {
-    if (busyRef.current || loading || state?.pendingIntent) return;
+    if (busyRef.current || finishedRef.current || loading || state?.pendingIntent) return;
     Alert.alert('Deseja sair da Arena?', 'Sua participação será encerrada e não poderá ser retomada.', [
       { text: 'Cancelar', style: 'cancel' },
       { text: 'Sair da Arena', style: 'destructive', onPress: async () => {
-        if (busyRef.current || !focused.current) return;
+        if (busyRef.current || finishedRef.current || !focused.current) return;
         busyRef.current = true;
         setBusy(true);
         setError(null);
+        const generation = focusGeneration.current;
+        const sameSession = () => authRef.current?.isAuthenticated === true && authRef.current?.user?.id === userId
+          && typeof getEpoch === 'function' && getEpoch() === epoch;
+        const isCurrent = () => focused.current && focusGeneration.current === generation && sameSession();
+        let confirmed = false;
         try {
           await completion.finish(userId, participationId);
-          if (!focused.current) return;
-          await refreshParticipation();
+          confirmed = true;
+          if (sameSession()) {
+            finishedRef.current = true;
+            if (isCurrent()) setFinished(true);
+          }
         } catch (err) {
-          if (focused.current) setError(describeParticipationActionError(err, 'finish'));
+          if (isCurrent()) setError(describeParticipationActionError(err, 'finish'));
+        }
+        try {
+          if (confirmed && isCurrent()) {
+            const historyItem = await fetchPendingEvaluationHistoryItem(client, participationId, { isCurrent });
+            if (historyItem?.event?.id === eventId && isCurrent()) onOpenEvaluation?.(historyItem);
+          }
+        } catch {
+          // O encerramento já foi confirmado; o histórico pode ser consultado depois.
         } finally {
+          if (confirmed && sameSession()) {
+            try { await refreshParticipation(); } catch { /* A atualização pode ser repetida sem reenviar a saída. */ }
+          }
           busyRef.current = false;
-          if (focused.current) setBusy(false);
+          if (focused.current && sameSession()) setBusy(false);
         }
       } },
     ]);
@@ -112,27 +140,49 @@ export default function RealArenaScreen({ participation, refreshParticipation })
   const lockActions = busy || loading || Boolean(entry) || Boolean(pending);
 
   return (
-    <ScreenContainer>
-      <ScrollView contentContainerStyle={styles.body}>
-        <Text style={styles.heading}>Minha Arena</Text>
-        <Text style={styles.sub}>Participação ativa · informações do servidor</Text>
-        {loading && !state ? <ActivityIndicator accessibilityLabel="Consultando a Arena" /> : null}
-        {error ? <Text style={styles.error} accessibilityRole="alert">{error}</Text> : null}
-        {notice ? <Text style={styles.notice}>{notice}</Text> : null}
+    <AuthBackground variant="login" overlayOpacity={0.7} testID="active-arena-background">
+      <StatusBar style="light" />
+      <ScreenHeader
+        title="Minha Arena"
+        subtitle="Participação ativa · informações do servidor"
+        showBack={false}
+        rightAction={<Badge label="ATIVA" variant="success" />}
+      />
+      <ScrollView contentContainerStyle={styles.body} showsVerticalScrollIndicator={false}>
+        {loading && !state ? (
+          <Card variant="elevated" style={styles.stateCard}>
+            <ActivityIndicator accessibilityLabel="Consultando a Arena" color={colors.brand.primaryLight} />
+            <Text style={styles.line}>Consultando a Arena...</Text>
+          </Card>
+        ) : null}
+        {error ? (
+          <View style={styles.errorCard} accessibilityRole="alert">
+            <Badge label="ERRO" variant="danger" />
+            <Text style={styles.error}>{error}</Text>
+          </View>
+        ) : null}
+        {notice ? (
+          <View style={styles.noticeCard}>
+            <Badge label="ATUALIZADO" variant="success" />
+            <Text style={styles.notice}>{notice}</Text>
+          </View>
+        ) : null}
 
         {entry ? (
-          <View style={styles.highlight}>
+          <Card variant="highlight" style={styles.highlight}>
+            <Badge label={entry.status === 'waiting' ? 'NA FILA' : 'SUA VEZ'} variant="brand" />
             <Text style={styles.sectionTitle}>{entry.status === 'waiting' ? 'Você está na fila' : 'É a sua vez!'}</Text>
             <Text style={styles.line}>{entry.experienceName}</Text>
             {entry.status === 'waiting'
               ? <Text style={styles.position}>Posição {entry.position}º</Text>
               : <Text style={styles.position}>Dirija-se à estação: {entry.stationLabel}</Text>}
             <Text style={styles.note}>A posição e a chamada são atualizadas ao tocar em “Atualizar”.</Text>
-          </View>
+          </Card>
         ) : null}
 
         {!entry && pending ? (
-          <View style={styles.highlight}>
+          <Card variant="elevated" style={styles.highlight}>
+            <Badge label="TENTATIVA PENDENTE" variant="warning" />
             <Text style={styles.sectionTitle}>Tentativa anterior não confirmada</Text>
             <Text style={styles.line}>
               {hasOtherPending
@@ -140,67 +190,88 @@ export default function RealArenaScreen({ participation, refreshParticipation })
                 : 'Atualize a fila antes de tentar novamente. A mesma chave de operação será reutilizada.'}
             </Text>
             {pendingHere ? (
-              <Pressable disabled={busy || loading} style={styles.button} onPress={() => join(pending.experienceId)}>
-                <Text style={styles.buttonText}>Conferir / repetir a mesma tentativa</Text>
-              </Pressable>
+              <Button
+                title="Conferir / repetir a mesma tentativa"
+                variant="outline"
+                disabled={busy || loading}
+                onPress={() => join(pending.experienceId)}
+                style={styles.actionButton}
+              />
             ) : null}
-          </View>
+          </Card>
         ) : null}
 
         <Text style={styles.sectionTitle}>Experiências disponíveis</Text>
-        {state?.experiences.length === 0 ? <Text style={styles.line}>Nenhuma experiência cadastrada.</Text> : null}
+        {state?.experiences.length === 0 ? (
+          <Card variant="default" style={styles.card}>
+            <Text style={styles.line}>Nenhuma experiência cadastrada.</Text>
+          </Card>
+        ) : null}
         {state?.experiences.map((experience) => {
           const permitted = state.acceptingNewQueueEntries && experience.acceptingNewQueueEntries;
           return (
-            <View key={experience.id} style={styles.card}>
-              <Text style={styles.cardTitle}>{experience.name}</Text>
+            <Card key={experience.id} variant="default" style={styles.card}>
+              <View style={styles.experienceHeader}>
+                <Text style={styles.cardTitle}>{experience.name}</Text>
+                <Badge label={permitted ? 'ABERTA' : 'ENCERRADA'} variant={permitted ? 'success' : 'default'} size="sm" />
+              </View>
               <Text style={styles.line}>{experience.waitingCount} pessoa(s) aguardando</Text>
               <Text style={styles.note}>{permitted ? 'Recebendo entradas' : 'Entrada na fila encerrada'}</Text>
               {!entry && !pending && permitted ? (
-                <Pressable disabled={lockActions} style={[styles.button, lockActions && styles.disabled]}
-                  onPress={() => join(experience.id)}>
-                  <Text style={styles.buttonText}>{busy ? 'Verificando...' : 'Entrar na fila'}</Text>
-                </Pressable>
+                <Button
+                  title={busy ? 'Verificando...' : 'Entrar na fila'}
+                  variant="primary"
+                  disabled={lockActions}
+                  onPress={() => join(experience.id)}
+                  style={styles.actionButton}
+                />
               ) : null}
-            </View>
+            </Card>
           );
         })}
-        <Pressable disabled={busy} style={[styles.secondaryButton, busy && styles.disabled]} onPress={refresh}>
-          <Text style={styles.secondaryText}>{loading ? 'Consultando...' : 'Atualizar fila e experiências'}</Text>
-        </Pressable>
-        <Pressable style={styles.secondaryButton} onPress={refreshParticipation}>
-          <Text style={styles.secondaryText}>Atualizar situação da participação</Text>
-        </Pressable>
-        <Pressable disabled={busy || loading || Boolean(pending)}
-          style={[styles.secondaryButton, (busy || loading || pending) && styles.disabled]}
-          onPress={finish} accessibilityRole="button">
-          <Text style={styles.secondaryText}>{busy ? 'Aguarde...' : 'Sair da Arena'}</Text>
-        </Pressable>
+        <Button
+          title={loading ? 'Consultando...' : 'Atualizar fila e experiências'}
+          variant="secondary"
+          disabled={busy}
+          onPress={refresh}
+          style={styles.actionButton}
+        />
+        <Button
+          title="Atualizar situação da participação"
+          variant="outline"
+          onPress={refreshParticipation}
+          style={styles.actionButton}
+        />
+        <Button
+          title={busy ? 'Aguarde...' : 'Sair da Arena'}
+          variant="dangerOutline"
+          disabled={busy || loading || finished || Boolean(pending)}
+          onPress={finish}
+          style={styles.actionButton}
+        />
         <Text style={styles.note}>
           Chamada e conclusão são realizadas pelo Staff. Este aplicativo não simula atendimento
           nem permite cancelar somente a fila.
         </Text>
       </ScrollView>
-    </ScreenContainer>
+    </AuthBackground>
   );
 }
 
 const styles = StyleSheet.create({
-  body: { padding: 16, paddingBottom: 40 },
-  heading: { fontSize: 25, fontWeight: '700', color: '#111827' },
-  sub: { color: '#6b7280', marginTop: 6, marginBottom: 16 },
-  sectionTitle: { fontSize: 19, fontWeight: '700', marginVertical: 12, color: '#111827' },
-  highlight: { borderWidth: 1, borderColor: '#93c5fd', backgroundColor: '#eff6ff', borderRadius: 12, padding: 14, marginBottom: 16 },
-  card: { borderWidth: 1, borderColor: '#e5e7eb', borderRadius: 12, padding: 14, marginBottom: 12 },
-  cardTitle: { fontSize: 17, fontWeight: '600', color: '#111827', marginBottom: 6 },
-  line: { fontSize: 15, color: '#374151', marginTop: 4 },
-  position: { fontSize: 19, fontWeight: '700', marginTop: 10, color: '#1d4ed8' },
-  note: { fontSize: 13, color: '#6b7280', marginTop: 10, lineHeight: 20 },
-  button: { backgroundColor: '#111827', padding: 14, borderRadius: 8, marginTop: 14, alignItems: 'center' },
-  buttonText: { color: '#fff', fontWeight: '600', textAlign: 'center' },
-  secondaryButton: { borderWidth: 1, borderColor: '#d1d5db', borderRadius: 8, padding: 14, marginTop: 10, alignItems: 'center' },
-  secondaryText: { color: '#111827', fontWeight: '600', textAlign: 'center' },
-  disabled: { opacity: 0.5 },
-  error: { color: '#991b1b', backgroundColor: '#fef2f2', padding: 12, borderRadius: 8, marginBottom: 10 },
-  notice: { color: '#166534', backgroundColor: '#f0fdf4', padding: 12, borderRadius: 8, marginBottom: 10 },
+  body: { flexGrow: 1, paddingHorizontal: spacing.layout.screenPaddingHorizontal, paddingTop: spacing.md, paddingBottom: 40 },
+  stateCard: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginBottom: spacing.lg },
+  sectionTitle: { ...typography.titleSmall, color: colors.text.primary, marginTop: spacing.lg },
+  highlight: { marginBottom: spacing.lg, alignItems: 'flex-start' },
+  card: { marginBottom: spacing.md, alignItems: 'stretch' },
+  experienceHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: spacing.sm },
+  cardTitle: { ...typography.titleSmall, color: colors.text.primary, flex: 1 },
+  line: { ...typography.body, color: colors.text.secondary, marginTop: spacing.sm },
+  position: { ...typography.titleMedium, color: colors.brand.primaryLight, marginTop: spacing.md },
+  note: { ...typography.bodySmall, color: colors.text.muted, marginTop: spacing.md, lineHeight: 20 },
+  actionButton: { marginTop: spacing.md },
+  errorCard: { borderColor: colors.semantic.danger, borderWidth: 1, backgroundColor: colors.semantic.dangerBg, borderRadius: 12, padding: spacing.lg, marginBottom: spacing.md },
+  error: { ...typography.body, color: '#FF9AAE', marginTop: spacing.sm },
+  noticeCard: { borderColor: colors.semantic.success, borderWidth: 1, backgroundColor: colors.semantic.successBg, borderRadius: 12, padding: spacing.lg, marginBottom: spacing.md },
+  notice: { ...typography.body, color: colors.text.primary, marginTop: spacing.sm },
 });

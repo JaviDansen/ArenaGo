@@ -116,7 +116,7 @@ export default function BirthDateInput({
               accessibilityViewIsModal
               style={[
                 styles.pickerPanel,
-                { backgroundColor: fieldStyle.backgroundColor || '#141026' },
+                { backgroundColor: fieldStyle.backgroundColor || '#131122' },
               ]}
             >
               <View style={styles.pickerHeader}>
@@ -170,7 +170,9 @@ const styles = StyleSheet.create({
     top: 0,
     bottom: 0,
     right: 4,
-    width: 44,
+    width: 48,
+    minWidth: 48,
+    minHeight: 48,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -195,8 +197,12 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-end',
   },
   backdrop: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    backgroundColor: 'rgba(5, 5, 10, 0.72)',
   },
   pickerPanel: {
     paddingHorizontal: 16,

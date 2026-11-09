@@ -1,8 +1,17 @@
+import { StatusBar } from 'expo-status-bar';
 import { useContext, useState } from 'react';
-import { Pressable, StyleSheet, Text, TextInput } from 'react-native';
+import {
+  KeyboardAvoidingView,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 
-import ScreenContainer from '../../components/ScreenContainer';
+import { AuthBackground, Badge, Button, Card, InputField, ScreenHeader } from '../../components/ui';
 import { ParticipationContext } from '../../context/ParticipationContext';
+import { colors, spacing, typography } from '../../theme';
 
 export default function EventEntryScreen({ navigation }) {
   const { admission, lookupEvent, isCurrentAdmission } = useContext(ParticipationContext);
@@ -25,54 +34,93 @@ export default function EventEntryScreen({ navigation }) {
   }
 
   return (
-    <ScreenContainer>
-      <Text style={styles.description}>
-        Digite o código de acesso do evento.
-      </Text>
-      <TextInput
-        placeholder="Código do evento"
-        style={styles.input}
-        value={eventCode}
-        onChangeText={(value) => { setEventCode(value); setLocalError(null); }}
-        autoCapitalize="characters"
-        autoCorrect={false}
-      />
-      {localError || admission?.status === 'error' ? (
-        <Text style={styles.error}>{localError ?? admission?.error}</Text>
-      ) : null}
-      <Pressable style={styles.button} onPress={handleContinue} disabled={loading}>
-        <Text style={styles.buttonText}>{loading ? 'Consultando...' : 'Continuar'}</Text>
-      </Pressable>
-    </ScreenContainer>
+    <AuthBackground variant="login" overlayOpacity={0.65} testID="event-entry-background">
+      <StatusBar style="light" />
+      <ScreenHeader title="Entrar em um evento" onBack={() => navigation.goBack()} testID="event-entry-header" />
+      <KeyboardAvoidingView
+        style={styles.keyboardView}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      >
+        <ScrollView
+          contentContainerStyle={styles.scrollContent}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag"
+          showsVerticalScrollIndicator={false}
+        >
+          <View style={styles.heroSection}>
+            <Badge label="CHECK-IN PRESENCIAL" variant="brand" />
+            <Text style={styles.title}>Digite o código de acesso</Text>
+            <Text style={styles.description}>
+              Informe o código disponibilizado na recepção ou nas estações do evento para consultar sua entrada.
+            </Text>
+          </View>
+
+          <Card variant="highlight" style={styles.formCard} testID="event-entry-form-card">
+            <Badge label="CÓDIGO DO EVENTO" variant="default" />
+            <InputField
+              value={eventCode}
+              onChangeText={(value) => { setEventCode(value); setLocalError(null); }}
+              placeholder="Ex.: ARENA123"
+              autoCapitalize="characters"
+              autoCorrect={false}
+              editable={!loading}
+              error={localError || (admission?.status === 'error' ? admission.error : null)}
+              testID="event-entry-code-input"
+              returnKeyType="go"
+              onSubmitEditing={handleContinue}
+              containerStyle={styles.codeInput}
+            />
+            <Text style={styles.helperText}>O código é fornecido presencialmente pela equipe do evento.</Text>
+            <Button
+              title={loading ? 'Consultando...' : 'Continuar'}
+              variant="primary"
+              onPress={handleContinue}
+              disabled={loading}
+              style={styles.continueButton}
+              testID="event-entry-continue-button"
+            />
+          </Card>
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </AuthBackground>
   );
 }
 
 const styles = StyleSheet.create({
+  keyboardView: {
+    flex: 1,
+  },
+  scrollContent: {
+    flexGrow: 1,
+    paddingHorizontal: spacing.layout.screenPaddingHorizontal,
+    paddingTop: spacing.xxl,
+    paddingBottom: spacing.xxxl,
+  },
+  heroSection: {
+    marginBottom: spacing.xxl,
+  },
+  title: {
+    ...typography.hero,
+    color: colors.text.primary,
+    marginTop: spacing.lg,
+  },
   description: {
-    fontSize: 16,
-    marginTop: 16,
+    ...typography.bodyLarge,
+    color: colors.text.secondary,
+    marginTop: spacing.sm,
   },
-  input: {
-    borderColor: '#000',
-    borderRadius: 4,
-    borderWidth: 1,
-    marginTop: 16,
-    padding: 12,
+  formCard: {
+    alignItems: 'stretch',
   },
-  button: {
-    alignItems: 'center',
-    backgroundColor: '#000',
-    borderRadius: 4,
-    marginTop: 16,
-    padding: 12,
+  codeInput: {
+    marginTop: spacing.lg,
   },
-  buttonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: 'bold',
+  helperText: {
+    ...typography.bodySmall,
+    color: colors.text.secondary,
+    marginTop: spacing.sm,
   },
-  error: {
-    color: '#9b1c1c',
-    marginTop: 12,
+  continueButton: {
+    marginTop: spacing.xl,
   },
 });

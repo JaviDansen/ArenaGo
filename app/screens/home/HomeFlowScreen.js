@@ -1,39 +1,58 @@
 import { useContext } from 'react';
-import { Pressable, Text } from 'react-native';
+import { StatusBar } from 'expo-status-bar';
+import { StyleSheet, Text, View } from 'react-native';
 
-import ScreenContainer from '../../components/ScreenContainer';
+import { AuthBackground, Badge, Button, Card, ScreenHeader } from '../../components/ui';
 import { ParticipationContext } from '../../context/ParticipationContext';
 import ActiveArenaScreen from '../arena/ActiveArenaScreen';
 import RealArenaScreen from '../arena/RealArenaScreen';
 import ArenaQueueScreen from '../arena/ArenaQueueScreen';
 import HomeScreen from './HomeScreen';
 
+function ExternalQueueScreen({ participation, onRefresh }) {
+  return (
+    <AuthBackground variant="login" overlayOpacity={0.68} testID="external-queue-background">
+      <StatusBar style="light" />
+      <ScreenHeader title="Fila do evento" showBack={false} />
+      <View style={styles.externalQueueContent}>
+        <Card variant="highlight" style={styles.externalQueueCard}>
+          <Badge label="AGUARDANDO NA FILA" variant="brand" />
+          <Text style={styles.externalQueueTitle}>Sua participação está confirmada</Text>
+          <Text style={styles.externalQueueText}>
+            {participation.externalQueue?.position
+              ? `Sua posição atual é ${participation.externalQueue.position}º.`
+              : 'Aguarde a chamada da equipe do evento.'}
+          </Text>
+          <Text style={styles.externalQueueMeta}>Evento: {participation.eventId}</Text>
+        </Card>
+        <Button title="Atualizar participação" variant="secondary" onPress={onRefresh} />
+      </View>
+    </AuthBackground>
+  );
+}
+
 export default function HomeFlowScreen({ navigation }) {
   const { participation, status, error, returnState, refreshParticipation } = useContext(ParticipationContext);
 
   if (status === 'loading') {
-    return <ScreenContainer><Text>Carregando sua participação...</Text></ScreenContainer>;
+    return <HomeScreen mode="loading" />;
   }
 
   if (status === 'error') {
     const message = error === 'authorization' ? 'Não foi possível autorizar a consulta da participação.' :
       error === 'network' ? 'Não foi possível conectar ao servidor para consultar sua participação.' :
       'Não foi possível consultar sua participação agora.';
-    return <ScreenContainer><Text>{message}</Text><Pressable onPress={refreshParticipation}><Text>Tentar novamente</Text></Pressable></ScreenContainer>;
+    return <HomeScreen mode="error" message={message} onRetry={refreshParticipation} />;
   }
 
   if (participation?.source === 'server') {
     if (participation.status === 'active') {
-      return <RealArenaScreen key={participation.id} participation={participation} refreshParticipation={refreshParticipation} />;
+      return <RealArenaScreen key={participation.id} participation={participation} refreshParticipation={refreshParticipation}
+        onOpenEvaluation={(historyItem) => navigation.getParent()?.navigate('RealEvaluation', {
+          participationId: historyItem.participationId, historyItem,
+        })} />;
     }
-    return (
-      <ScreenContainer>
-        <Text>Você está na fila externa do evento.</Text>
-        {participation.externalQueue?.position ? <Text>Posição: {participation.externalQueue.position}º</Text> : null}
-        <Text>Evento: {participation.eventId}</Text>
-        <Pressable onPress={refreshParticipation}><Text>Atualizar participação</Text></Pressable>
-      </ScreenContainer>
-    );
+    return <ExternalQueueScreen participation={participation} onRefresh={refreshParticipation} />;
   }
 
   if (!participation) {
@@ -50,3 +69,31 @@ export default function HomeFlowScreen({ navigation }) {
 
   return <HomeScreen navigation={navigation} />;
 }
+
+const styles = StyleSheet.create({
+  externalQueueContent: {
+    flex: 1,
+    justifyContent: 'center',
+    padding: 20,
+  },
+  externalQueueCard: {
+    marginBottom: 20,
+  },
+  externalQueueTitle: {
+    color: '#FFFFFF',
+    fontSize: 22,
+    fontWeight: '700',
+    marginTop: 18,
+  },
+  externalQueueText: {
+    color: '#A0A0B8',
+    fontSize: 16,
+    lineHeight: 23,
+    marginTop: 10,
+  },
+  externalQueueMeta: {
+    color: '#A0A0B8',
+    fontSize: 13,
+    marginTop: 18,
+  },
+});

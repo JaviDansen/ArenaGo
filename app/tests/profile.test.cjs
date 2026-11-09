@@ -28,7 +28,12 @@ test('Profile loads real identity and questionnaire while preserving only demo i
       },
     },
   });
-  assert.ok(h.nodes.some(node => textOf(node) === 'Carregando perfil...'));
+  const loadingText = h.nodes.find(node => node.type === 'Text'
+    && textOf(node) === 'Carregando perfil...');
+  assert.ok(loadingText);
+  assert.equal(loadingText.props.accessibilityLiveRegion, 'polite');
+  assert.ok(!h.nodes.some(node => node.type === 'View'
+    && node.props.accessibilityLiveRegion === 'polite'));
   assert.ok(!h.nodes.some(node => node.type === 'Text' && textOf(node) === user.name));
   await h.actAsync(() => new Promise(resolve => setImmediate(resolve)));
   const texts = h.nodes.filter(node => node.type === 'Text').map(textOf);
@@ -135,4 +140,54 @@ test('Home has no logout and preserves event entry and pending questionnaire nav
   h.press('Completar questionário de perfil');
   assert.equal(h.navigationCalls[1].name, 'ProfileQuestionnaire');
   assert.equal(h.navigationCalls[1].params.user.id, 'user-1');
+});
+test('UI-11/12: ProfileScreen renders modernized dark Design System, structured cards and TagChips for games', async () => {
+  const user = { id: 'usr-modern', name: 'Lucas Gamer', email: 'lucas@gamer.test', hasCompletedQuestionnaire: true };
+  const questionnaire = {
+    hasCompleted: true,
+    aboutYou: { birthDate: '1995-05-15', gender: 'Masculino', education: 'Pós-graduação' },
+    yourGames: ['Valorant', 'Minecraft', 'League of Legends'],
+    gamesMarket: { marketKnowledge: 'Conheço e acompanho o mercado.', marketInterest: 'Sim, muito interesse.' },
+  };
+
+  const h = createHarness('screens/profile/ProfileScreen.js', {
+    authContext: {
+      isAuthenticated: true,
+      user,
+      logout: async () => {},
+      httpClient: {
+        async get(path) {
+          if (path === '/profile') return user;
+          if (path === '/profile/questionnaire') return questionnaire;
+          return {};
+        },
+      },
+    },
+  });
+
+  await h.actAsync(() => new Promise((resolve) => setImmediate(resolve)));
+
+  assert.ok(h.nodes.some((n) => n.props?.testID === 'profile-background'));
+  const statusBar = h.nodes.find((n) => n.type === 'StatusBar');
+  assert.equal(statusBar?.props?.style, 'light');
+
+  const texts = h.nodes.filter((n) => n.type === 'Text').map(textOf);
+  assert.ok(texts.includes('PARTICIPANTE'));
+  assert.ok(texts.includes('DEMO'));
+  assert.ok(texts.includes('Meu Perfil'));
+  assert.ok(texts.includes('Informações Pessoais'));
+  assert.ok(texts.includes('Jogos de Interesse'));
+  assert.ok(texts.includes('Mercado de Games'));
+
+  for (const game of questionnaire.yourGames) {
+    assert.ok(texts.includes(game), 'Missing TagChip/game text: ' + game);
+  }
+
+  const editBtn = h.nodes.find((n) => n.props?.accessibilityLabel === 'Editar dados do questionário');
+  assert.ok(editBtn);
+  assert.equal(editBtn.props?.disabled, false);
+
+  const logoutBtn = h.nodes.find((n) => n.props?.accessibilityLabel === 'Sair da conta');
+  assert.ok(logoutBtn);
+  assert.equal(logoutBtn.props?.disabled, false);
 });

@@ -6,7 +6,7 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const test = require('node:test');
 const { createRequire } = require('node:module');
-const { loadModule } = require('./helpers/questionnaireHarness.cjs');
+const { loadModule, createParticipantThemeStub } = require('./helpers/questionnaireHarness.cjs');
 
 const qaRequire = createRequire(path.resolve(__dirname, '../../qa/regression/package.json'));
 let deps = null;
@@ -76,6 +76,7 @@ function createRealApp(initialAuth) {
       }
       assert.ok(name.startsWith('.'), `import inesperado: ${name}`);
       const target = path.posix.normalize(path.posix.join(directory, name));
+      if (target === 'theme') return createParticipantThemeStub();
       if (target === 'context/AuthContext') return authModule;
       if (target === 'context/ParticipationContext') return { ParticipationProvider: passthrough };
       if (target === 'screens/auth/AuthSessionGate') {

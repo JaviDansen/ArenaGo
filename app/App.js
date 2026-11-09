@@ -17,8 +17,20 @@ import ParticipationDetailsScreen from './screens/participation/ParticipationRea
 import ProfileQuestionnaireScreen from './screens/profile/ProfileQuestionnaireScreen';
 import RegisterScreen from './screens/auth/RegisterScreen';
 import WelcomeScreen from './screens/auth/WelcomeScreen';
+import { colors, typography } from './theme';
 
 const Stack = createNativeStackNavigator();
+const participantHeaderOptions = {
+  headerStyle: { backgroundColor: colors.background.base },
+  headerTintColor: colors.text.primary,
+  headerTitleStyle: {
+    color: colors.text.primary,
+    fontFamily: typography.fontFamily,
+    fontSize: typography.sizes.bodyLarge,
+    fontWeight: typography.weights.bold,
+  },
+  headerShadowVisible: false,
+};
 
 export function AppNavigation() {
   const auth = useAuth();
@@ -41,23 +53,18 @@ export function AppNavigation() {
     {
       name: 'EventEntry',
       component: EventEntryScreen,
-      options: {
-        headerShown: true,
-        title: 'Entrar em um evento',
-      },
+      options: { headerShown: false, title: 'Entrar em um evento' },
     },
     {
       name: 'EventConfirmation',
       component: EventConfirmationScreen,
-      options: {
-        headerShown: true,
-        title: 'Confirmar entrada',
-      },
+      options: { headerShown: false, title: 'Confirmar entrada' },
     },
     {
       name: 'ParticipationDetails',
       component: ParticipationDetailsScreen,
       options: {
+        ...participantHeaderOptions,
         headerShown: true,
         title: 'Detalhes da participação',
       },
@@ -66,6 +73,7 @@ export function AppNavigation() {
       name: 'Evaluation',
       component: EvaluationScreen,
       options: {
+        ...participantHeaderOptions,
         headerShown: true,
         headerBackVisible: false,
         title: 'Avaliação',
@@ -85,6 +93,7 @@ export function AppNavigation() {
       name: 'RealEvaluation',
       component: RealEvaluationScreen,
       options: {
+        ...participantHeaderOptions,
         headerShown: true,
         title: 'Avaliar evento',
       },

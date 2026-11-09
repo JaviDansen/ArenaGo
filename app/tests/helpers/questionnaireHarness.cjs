@@ -70,6 +70,71 @@ function textOf(element) {
   return textOf(element.props?.children);
 }
 
+function createParticipantUiStubs() {
+  const text = (children, props = {}) => ({ type: 'Text', props: { ...props, children } });
+  const view = (children, props = {}) => ({ type: 'View', props: { ...props, children } });
+
+  return {
+    AuthBackground: ({ children, ...props }) => view(children, props),
+    Badge: ({ label, children, ...props }) => text(label || children, props),
+    Button: ({ title, children, onPress, disabled, accessibilityLabel, ...props }) => ({
+      type: 'Pressable',
+      props: {
+        ...props,
+        onPress: disabled ? undefined : onPress,
+        disabled,
+        accessibilityRole: 'button',
+        accessibilityLabel: accessibilityLabel || title,
+        accessibilityState: { disabled: Boolean(disabled), busy: Boolean(props.loading) },
+        children: text(title || children),
+      },
+    }),
+    Card: ({ children, onPress, disabled, accessibilityLabel, ...props }) => view(children, {
+      ...props,
+      onPress,
+      disabled,
+      accessibilityLabel,
+    }),
+    InputField: ({ label, error, value, onChangeText, ...props }) => view([
+      label ? text(label) : null,
+      { type: 'TextInput', props: { ...props, value, onChangeText } },
+      error ? text(error, { accessibilityRole: 'alert' }) : null,
+    ]),
+    ScreenHeader: ({ title, subtitle, onBack, showBack = true, ...props }) => view([
+      showBack && onBack ? {
+        type: 'Pressable',
+        props: { accessibilityRole: 'button', accessibilityLabel: 'Voltar', onPress: onBack, children: text('Voltar') },
+      } : null,
+      title ? text(title) : null,
+      subtitle ? text(subtitle) : null,
+    ], props),
+  };
+}
+
+function createParticipantThemeStub() {
+  return {
+    colors: {
+      background: { canvas: '#05050A', base: '#0B0B12', surface: '#161626', elevated: '#1F1F35' },
+      brand: { primary: '#5F33FA', primaryLight: '#8A68FF', primaryDim: 'rgba(95, 51, 250, 0.15)' },
+      text: { primary: '#FFFFFF', secondary: '#A0A0B8', muted: '#6C6C8A', disabled: '#43435B', onBrand: '#FFFFFF' },
+      border: { subtle: '#24243A', input: '#2E2E48', focus: '#5F33FA', glass: 'rgba(255, 255, 255, 0.08)' },
+      semantic: {
+        success: '#00E676', successBg: 'rgba(0, 230, 118, 0.12)', danger: '#E11D48',
+        dangerBg: 'rgba(225, 29, 72, 0.12)', warning: '#FFB800', warningBg: 'rgba(255, 184, 0, 0.12)',
+        info: '#38BDF8', infoBg: 'rgba(56, 189, 248, 0.12)',
+      },
+    },
+    spacing: {
+      none: 0, xxs: 2, xs: 4, sm: 8, md: 12, lg: 16, xl: 20, xxl: 24, xxxl: 32, huge: 48,
+      layout: { screenPaddingHorizontal: 20, screenPaddingVertical: 16, cardPadding: 16, cardGap: 12, inputHeight: 52, buttonHeight: 52, buttonHeightSm: 38 },
+    },
+    radii: { none: 0, xs: 4, sm: 6, md: 10, lg: 12, xl: 18, xxl: 24, pill: 9999, full: 9999 },
+    typography: new Proxy({ fontFamily: 'sans-serif', weights: { regular: '400', medium: '500', semiBold: '600', bold: '700', extraBold: '800' }, sizes: { caption: 12, bodyLarge: 16 } }, {
+      get(target, property) { return property in target ? target[property] : {}; },
+    }),
+  };
+}
+
 function syncResolve(value) {
   return {
     then(onFulfilled) {
@@ -229,14 +294,15 @@ function createHarness(relativePath, options = {}) {
       }
     },
   };
-  const native = Object.fromEntries(['ActivityIndicator', 'KeyboardAvoidingView', 'Modal', 'Pressable', 'ScrollView',
+  const native = Object.fromEntries(['ActivityIndicator', 'Image', 'KeyboardAvoidingView', 'Modal', 'Pressable', 'ScrollView',
     'Text', 'TextInput', 'View', 'SafeAreaView'].map((name) => [name, name]));
   native.Platform = { OS: options.platform || 'ios' };
   native.Keyboard = { dismiss() {} };
   native.StyleSheet = {
     create: (value) => value,
     flatten: (value) => Array.isArray(value) ? Object.assign({}, ...value) : value,
-    absoluteFillObject: { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0 },
+    // API disponível no React Native 0.86; absoluteFillObject foi removido.
+    absoluteFill: { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0 },
   };
   const birthDate = loadModule('utils/birthDate.js', require).exports;
   const validation = loadModule('utils/validation.js', (name) =>
@@ -264,10 +330,12 @@ function createHarness(relativePath, options = {}) {
     assert.equal(insideUpdater, false);
     navigationCalls.push({ type: 'reset', payload });
   };
-  const screen = loadModule(relativePath, (name) => {
+
+  const internalModules = new Map();
+  function resolveInternalModule(fromRelativePath, name) {
     if (name === 'react') return react;
     if (name === 'react-native') return native;
-    if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView' };
+    if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView', useSafeAreaInsets: () => ({ bottom: 0, top: 0, left: 0, right: 0 }) };
     if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
     if (name === '@react-native-community/datetimepicker') return nativePicker;
     if (name === '../components/BirthDateInput' || name === '../../components/BirthDateInput') return { __esModule: true, default: 'BirthDateInput' };
@@ -285,12 +353,45 @@ function createHarness(relativePath, options = {}) {
     }
     if (name === '../utils/validation' || name === '../../utils/validation') return validation;
     if (name === '../data/mockData' || name === '../../data/mockData') return data;
+    if (name.startsWith('.') && /\.(jpg|jpeg|png|webp|gif|svg)$/i.test(name)) {
+      return { uri: name };
+    }
+    if (name.startsWith('.')) {
+      const fromDir = path.dirname(path.join(appDirectory, fromRelativePath));
+      let resolvedAbs = path.resolve(fromDir, name);
+      if (!resolvedAbs.endsWith('.js')) {
+        const asFile = `${resolvedAbs}.js`;
+        try {
+          readFileSync(asFile);
+          resolvedAbs = asFile;
+        } catch {
+          resolvedAbs = path.join(resolvedAbs, 'index.js');
+        }
+      }
+      const targetRelative = path.relative(appDirectory, resolvedAbs);
+      if (internalModules.has(targetRelative)) {
+        return internalModules.get(targetRelative);
+      }
+      const loaded = loadModule(targetRelative, (dep) => resolveInternalModule(targetRelative, dep)).exports;
+      internalModules.set(targetRelative, loaded);
+      return loaded;
+    }
     return require(name);
-  }, options.fields || [], options.source);
+  }
+
+  const screen = loadModule(
+    relativePath,
+    (name) => resolveInternalModule(relativePath, name),
+    options.fields || [],
+    options.source
+  );
+
+  let renderedNodes = [];
 
   function render() {
     cursor = 0;
     tree = screen.exports.default({ navigation, route: {}, ...props });
+    renderedNodes = nodes(tree);
     capture = screen.context.__capture;
   }
 
@@ -327,7 +428,7 @@ function createHarness(relativePath, options = {}) {
   flush();
   return {
     get capture() { return capture; },
-    get nodes() { return nodes(tree); },
+    get nodes() { return renderedNodes; },
     exports: screen.exports,
     birthDate,
     navigationCalls,
@@ -345,6 +446,7 @@ function createHarness(relativePath, options = {}) {
         }
       }
       tree = null;
+      renderedNodes = [];
     },
     setAuthContext(nextAuthContext) {
       authContextValue = nextAuthContext;
@@ -358,18 +460,28 @@ function createHarness(relativePath, options = {}) {
       flush();
     },
     inputBirthDate(value) {
-      const input = nodes(tree).find((node) => node.type === 'BirthDateInput');
+      const input = renderedNodes.find((node) => node.type === 'BirthDateInput');
       assert.ok(input);
       input.props.onChangeText(value);
     },
     press(label) {
-      const button = nodes(tree).find((node) => node.type === 'Pressable' &&
+      const button = renderedNodes.find((node) => node.type === 'Pressable' &&
         (node.props.accessibilityLabel === label || textOf(node) === label));
       assert.ok(button, `missing button: ${label}`);
       assert.notEqual(button.props.disabled, true);
+      const wrapper = renderedNodes.find((node) =>
+        typeof node.type === 'function' &&
+        typeof node.props?.onPress === 'function' &&
+        !node.props?.disabled &&
+        !node.props?.loading &&
+        (node.props.accessibilityLabel === label || node.props.title === label || textOf(node) === label)
+      );
+      if (wrapper) {
+        return wrapper.props.onPress();
+      }
       return button.props.onPress();
     },
   };
 }
 
-module.exports = { createHarness, loadModule, nodes, textOf };
+module.exports = { createHarness, loadModule, nodes, textOf, createParticipantUiStubs, createParticipantThemeStub };

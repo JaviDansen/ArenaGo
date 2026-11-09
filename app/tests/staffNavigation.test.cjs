@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { createHarness, loadModule, textOf } = require('./helpers/questionnaireHarness.cjs');
+const { createHarness, loadModule, textOf, createParticipantThemeStub } = require('./helpers/questionnaireHarness.cjs');
 
 let authState;
 function StackNavigator() {}
@@ -16,6 +16,7 @@ const appExports = loadModule('App.js', (name) => {
     return { createNativeStackNavigator: () => ({ Navigator: StackNavigator, Screen: StackScreen }) };
   }
   if (name === 'react-native-safe-area-context') return { SafeAreaProvider() {} };
+  if (name === './theme') return createParticipantThemeStub();
   if (name === './context/AuthContext') return { useAuth: () => authState };
   if (name === './screens/auth/AuthSessionGate') {
     return {

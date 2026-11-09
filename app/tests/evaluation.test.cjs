@@ -1,6 +1,8 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { loadModule, nodes, textOf } = require('./helpers/questionnaireHarness.cjs');
+const {
+  loadModule, nodes, textOf, createParticipantUiStubs, createParticipantThemeStub,
+} = require('./helpers/questionnaireHarness.cjs');
 
 function evaluationScreen() {
   const state = [];
@@ -25,6 +27,9 @@ function evaluationScreen() {
       },
     };
     if (name === 'react-native') return native;
+    if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
+    if (name === '../../components/ui') return createParticipantUiStubs();
+    if (name === '../../theme') return createParticipantThemeStub();
     if (name === '../../components/ScreenContainer') return { __esModule: true, default: 'ScreenContainer' };
     if (name === '../../context/ParticipationContext') return { ParticipationContext: {} };
     return require(name);
@@ -88,10 +93,10 @@ test('evaluation starts empty with submission disabled and a guarded submit hand
   assert.equal(h.stars.map(textOf).join(''), '☆☆☆☆☆');
   assert.equal(submit.props.disabled, true);
   assert.equal(submit.props.accessibilityState.disabled, true);
-  assert.equal(typeof submit.props.onPress, 'function');
+  assert.equal(submit.props.onPress, undefined, 'disabled UI button does not expose a press handler');
   assert.equal(h.buttons.some((button) => textOf(button) === 'Pular avaliação'), false);
   assert.notEqual(h.button('Avaliar mais tarde').props.disabled, true);
-  submit.props.onPress();
+  submit.props.onPress?.();
   assert.deepEqual(h.events, []);
 });
 
@@ -116,7 +121,7 @@ test('invalid ratings do not log, clear participation, or navigate', () => {
     const h = evaluationScreen();
     h.setRating(rating);
     h.changeComment('Comentário não enviado');
-    h.button('Enviar avaliação').props.onPress();
+    h.button('Enviar avaliação').props.onPress?.();
     assert.deepEqual(h.events, [], `unexpected side effect for rating ${String(rating)}`);
     assert.equal(h.input.props.value, 'Comentário não enviado');
   }

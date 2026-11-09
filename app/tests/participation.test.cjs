@@ -14,7 +14,13 @@ const reactNative = {
   Pressable: 'Pressable',
   StyleSheet: { create: (styles) => styles },
   Text: 'Text',
+  View: 'View',
 };
+const designTheme = loadModule('theme/index.js', (name) => {
+  if (name === 'react-native') return reactNative;
+  if (name.startsWith('./')) return loadModule(`theme/${name.slice(2)}`, require).exports;
+  return require(name);
+}).exports;
 
 function nodes(element) {
   if (element == null || typeof element === 'boolean') return [];
@@ -49,6 +55,7 @@ function renderParticipationsScreen(participations) {
 function renderParticipationCard(props) {
   const card = loadModule('components/ParticipationCard.js', (name) => {
     if (name === 'react-native') return reactNative;
+    if (name === '../theme') return designTheme;
     if (name === '../../utils/evaluation') return loadModule('utils/evaluation.js', require).exports;
     return require(name);
   });

@@ -1,6 +1,8 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { loadModule, nodes, textOf } = require('./helpers/questionnaireHarness.cjs');
+const {
+  loadModule, nodes, textOf, createParticipantUiStubs, createParticipantThemeStub,
+} = require('./helpers/questionnaireHarness.cjs');
 
 const event = {
   id: '11111111-1111-4111-8111-111111111111', name: 'Arena real', timezone: 'America/Sao_Paulo',
@@ -11,6 +13,7 @@ const eligible = { eligible: true, blockingReasons: [] };
 
 function screenRig(path, context, params = {}) {
   const state = [], calls = [];
+  const ui = createParticipantUiStubs();
   let cursor = 0, tree;
   const react = {
     useContext: () => context,
@@ -24,9 +27,14 @@ function screenRig(path, context, params = {}) {
   const module = loadModule(path, (name) => {
     if (name === 'react') return react;
     if (name === 'react-native') return {
-      Pressable: 'Pressable', Text: 'Text', TextInput: 'TextInput',
+      ActivityIndicator: 'ActivityIndicator', KeyboardAvoidingView: 'KeyboardAvoidingView',
+      Platform: { OS: 'android' }, Pressable: 'Pressable', ScrollView: 'ScrollView',
+      Text: 'Text', TextInput: 'TextInput', View: 'View',
       StyleSheet: { create: (styles) => styles },
     };
+    if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
+    if (name === '../../components/ui') return ui;
+    if (name === '../../theme') return createParticipantThemeStub();
     if (name === '../../components/ScreenContainer') return { __esModule: true, default: 'ScreenContainer' };
     if (name === '../../context/ParticipationContext') return { ParticipationContext: {} };
     return require(name);
@@ -50,6 +58,7 @@ function screenRig(path, context, params = {}) {
   return {
     calls, render, button,
     text: () => textOf(tree),
+    inputError: () => nodes(tree).find((node) => node.type === ui.InputField)?.props.error,
     input(value) { nodes(tree).find((node) => node.type === 'TextInput').props.onChangeText(value); render(); },
   };
 }
@@ -77,7 +86,7 @@ test('código vazio não consulta o backend nem navega', async () => {
   await rig.button('Continuar').props.onPress();
   assert.equal(count, 0);
   rig.render();
-  assert.match(rig.text(), /Digite o código do evento/);
+  assert.equal(rig.inputError(), 'Digite o código do evento.');
   assert.deepEqual(rig.calls, []);
 });
 
@@ -110,7 +119,7 @@ test('ineligibilidade mostra motivo real e impede POST', async () => {
     { event, eligibility: { eligible: false, blockingReasons: ['PROFILE_INCOMPLETE'] } });
   assert.match(rig.text(), /PROFILE_INCOMPLETE/);
   assert.equal(rig.button('Confirmar entrada').props.disabled, true);
-  await rig.button('Confirmar entrada').props.onPress();
+  await rig.button('Confirmar entrada').props.onPress?.();
   assert.equal(count, 0);
   assert.deepEqual(rig.calls, []);
 });

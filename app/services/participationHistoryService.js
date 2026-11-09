@@ -65,6 +65,36 @@ export async function fetchParticipationHistory(client, { limit = 20, cursor = n
   return parseHistoryResponse(await client.get(`/participations/history${query}`, { auth: true }));
 }
 
+/** Só devolve o item real quando ambas as leituras confirmam avaliação pendente. */
+export async function fetchPendingEvaluationHistoryItem(client, participationId, { isCurrent = () => true } = {}) {
+  if (!UUID.test(participationId)) throw new Error('Identificador de participação inválido.');
+  if (!isCurrent()) return null;
+  const eligibility = await client.get(`/participations/${participationId}/evaluation-eligibility`, { auth: true });
+  if (!isCurrent()) return null;
+  if (eligibility?.participationId !== participationId || typeof eligibility.eligible !== 'boolean'
+      || typeof eligibility.submitted !== 'boolean' || typeof eligibility.pending !== 'boolean') {
+    throw new Error('O servidor retornou uma elegibilidade inválida.');
+  }
+  if (!eligibility.eligible || eligibility.submitted || !eligibility.pending) return null;
+
+  let cursor = null;
+  const seenCursors = new Set();
+  do {
+    if (!isCurrent()) return null;
+    const page = await fetchParticipationHistory(client, { limit: 50, cursor });
+    if (!isCurrent()) return null;
+    const item = page.items.find(entry => entry.participationId === participationId);
+    if (item) {
+      return item.status === 'finished' && item.evaluation.eligible
+        && item.evaluation.pending && !item.evaluation.submitted ? item : null;
+    }
+    cursor = page.nextCursor;
+    if (cursor && seenCursors.has(cursor)) throw new Error('O servidor retornou um cursor de histórico repetido.');
+    if (cursor) seenCursors.add(cursor);
+  } while (cursor);
+  return null;
+}
+
 export async function fetchParticipationEvaluation(client, participationId) {
   if (!UUID.test(participationId)) throw new Error('Identificador de participação inválido.');
   const body = await client.get(`/participations/${participationId}/evaluation`, { auth: true });
