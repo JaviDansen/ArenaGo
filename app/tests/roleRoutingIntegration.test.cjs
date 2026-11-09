@@ -39,6 +39,11 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
       if (url === '/participations/current') return { participation: null };
       if (url === '/participations/return-state') return { pendingEvaluationParticipationIds: [], recentFinalization: null };
       if (url === '/staff/events') return { events: control.events ?? [] };
+      const stationMatch = url.match(/^\/staff\/events\/([^/]+)\/stations$/);
+      if (stationMatch) return { eventId: stationMatch[1], stations: control.stations ?? [] };
+      const queueMatch = url.match(/^\/staff\/events\/([^/]+)\/experiences\/([^/]+)\/queue$/);
+      if (queueMatch) return { eventId: queueMatch[1], experienceId: queueMatch[2], waitingCount: 0,
+        canCallWaitingEntries: false, firstWaitingQueueEntryId: null, acceptingNewEntries: false };
       throw new Error(`GET inesperado: ${url}`);
     },
     async post(url) {
@@ -94,7 +99,8 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
       if (target === 'theme') return createParticipantThemeStub();
       if (target === 'services/httpClient') return { ...http, httpClient: client };
       if (target === 'services/tokenStorage') return { defaultTokenStorage: storage };
-      if (control.realStaff && ['screens/staff/StaffEventsNavigator', 'services/staffEventsService'].includes(target)) {
+      if (control.realStaff && ['screens/staff/StaffEventsNavigator', 'services/staffEventsService',
+        'services/staffDashboardService', 'services/staffOperationsService'].includes(target)) {
         return load(`${target}.js`);
       }
       if (target === 'screens/event-entry/EventEntryScreen' && control.modalFixture) {
@@ -280,6 +286,87 @@ test('modal protegido fica invisível e callback antigo não executa durante err
 });
 
 const staffEvent = { id: '11111111-1111-4111-8111-111111111111', name: 'Evento autorizado', status: 'open' };
+const realExperienceId = '33333333-3333-4333-8333-333333333333';
+const realStation = { id: '44444444-4444-4444-8444-444444444444', experienceId: realExperienceId,
+  label: 'Estação real', availability: 'available', pendingServiceSessionId: null, pendingCalledAt: null };
+
+test('painel Staff real exibe estação e fila e limpa os dados ao receber 403', { skip }, async () => {
+  let denied = false;
+  const control = { realStaff: true, events: [staffEvent], stations: [realStation], http: async (route) => {
+    if (denied && route.endsWith('/queue')) return { statusCode: 403, body: { code: 'FORBIDDEN' } };
+    return undefined;
+  } };
+  const app = createIntegration({ initialUser: { ...participant, roles: ['staff'] }, control });
+  await app.mount();
+  await app.act(() => app.manager.login({ email: participant.email, password: 'password' }));
+  await app.press('Selecionar evento Evento autorizado');
+  assert.ok(app.hasText('Estação real'));
+  await app.press(`Consultar fila ${realExperienceId}`);
+  assert.ok(app.hasText('Pessoas em espera: 0'));
+  assert.ok(!app.hasText('Rafael T.'));
+  denied = true;
+  await app.press('Atualizar fila');
+  assert.ok(app.hasText('Acesso ao evento ou à experiência indisponível'));
+  assert.ok(!app.hasText('Estação real'));
+  await app.press('Voltar aos eventos');
+  assert.ok(app.hasText('Eventos Staff'));
+  app.dispose();
+});
+
+test('401 recuperável nas estações renova e revalida a sessão Staff', { skip }, async () => {
+  let attempts = 0;
+  const control = { realStaff: true, events: [staffEvent], stations: [realStation], http: async (route, options) => {
+    if (!route.endsWith('/stations')) return undefined;
+    attempts += 1;
+    return options.headers.Authorization === 'Bearer access'
+      ? { statusCode: 401, body: { code: 'ACCESS_TOKEN_EXPIRED' } } : undefined;
+  } };
+  const app = createIntegration({ initialUser: { ...participant, roles: ['staff'] }, control });
+  await app.mount();
+  await app.act(() => app.manager.login({ email: participant.email, password: 'password' }));
+  await app.press('Selecionar evento Evento autorizado');
+  assert.ok(attempts >= 2);
+  assert.ok(app.calls.includes('/auth/refresh'));
+  assert.equal(app.manager.getSnapshot().identityStatus, 'verified');
+  // A revalidação descarta a seleção antiga; nova seleção exige nova lista autorizada.
+  assert.ok(!app.hasText('Estação real'));
+  app.dispose();
+});
+
+test('401 terminal nas estações invalida sessão e remove o painel Staff', { skip }, async () => {
+  const control = { realStaff: true, events: [staffEvent], http: async (route) =>
+    route.endsWith('/stations') ? { statusCode: 401, body: { code: 'SESSION_REVOKED' } } : undefined };
+  const app = createIntegration({ initialUser: { ...participant, roles: ['staff'] }, control });
+  await app.mount();
+  await app.act(() => app.manager.login({ email: participant.email, password: 'password' }));
+  await app.press('Selecionar evento Evento autorizado');
+  assert.equal(app.manager.getSnapshot().isAuthenticated, false);
+  assert.equal(app.route(), 'Login');
+  assert.ok(!app.hasText('Estação real'));
+  app.dispose();
+});
+
+test('trocar evento Staff descarta estações e preserva status scheduled e closed', { skip }, async () => {
+  const closedEvent = { id: '22222222-2222-4222-8222-222222222222', name: 'Evento encerrado', status: 'closed' };
+  const control = { realStaff: true, events: [{ ...staffEvent, status: 'scheduled' }, closedEvent],
+    http: async (route) => {
+      if (route === `/staff/events/${staffEvent.id}/stations`) return { body: { eventId: staffEvent.id, stations: [realStation] } };
+      if (route === `/staff/events/${closedEvent.id}/stations`) return { body: { eventId: closedEvent.id, stations: [] } };
+      return undefined;
+    } };
+  const app = createIntegration({ initialUser: { ...participant, roles: ['staff'] }, control });
+  await app.mount();
+  await app.act(() => app.manager.login({ email: participant.email, password: 'password' }));
+  await app.press('Selecionar evento Evento autorizado');
+  assert.ok(app.hasText('Status: Agendado'));
+  assert.ok(app.hasText('Estação real'));
+  await app.press('Voltar aos eventos');
+  await app.press('Selecionar evento Evento encerrado');
+  assert.ok(app.hasText('Status: Encerrado'));
+  assert.ok(app.hasText('Nenhuma estação encontrada'));
+  assert.ok(!app.hasText('Estação real'));
+  app.dispose();
+});
 
 test('Staff real consulta eventos, seleciona, volta e não aceita rota com ID manual', { skip }, async () => {
   const control = { realStaff: true, events: [staffEvent] };
@@ -291,7 +378,7 @@ test('Staff real consulta eventos, seleciona, volta e não aceita rota com ID ma
   assert.ok(app.hasText('Evento autorizado'));
   await app.press('Selecionar evento Evento autorizado');
   assert.ok(app.hasText('Status: Aberto'));
-  assert.ok(app.hasText('próxima etapa'));
+  assert.ok(app.hasText('Nenhuma estação encontrada'));
   await app.press('Voltar aos eventos');
   app.navigate('StaffPending', { screen: 'StaffEventHome', params: { eventId: '22222222-2222-4222-8222-222222222222' } });
   assert.ok(app.hasText('Atualize a lista para confirmar os eventos autorizados'));

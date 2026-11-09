@@ -1,0 +1,479 @@
+diff --git a/app/screens/staff/StaffEventsNavigator.js b/app/screens/staff/StaffEventsNavigator.js
+index 387a8d5..0338079 100644
+--- a/app/screens/staff/StaffEventsNavigator.js
++++ b/app/screens/staff/StaffEventsNavigator.js
+@@ -5,6 +5,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
+ 
+ import { useAuth } from '../../context/AuthContext';
+ import { createStaffEventsStore } from '../../services/staffEventsService';
++import { createStaffDashboardStore } from '../../services/staffDashboardService';
+ 
+ const Stack = createNativeStackNavigator();
+ const StaffEventsContext = createContext(null);
+@@ -54,6 +55,7 @@ function StaffEventsProvider({ children }) {
+     select: store.select,
+     clearSelection: store.clearSelection,
+     isCurrent: store.isCurrent,
++    getSelected: () => store.isCurrent() ? store.getSnapshot().selected : null,
+   };
+   return <StaffEventsContext.Provider value={value}>{children}</StaffEventsContext.Provider>;
+ }
+@@ -108,11 +110,11 @@ function StaffEventHomeScreen({ navigation }) {
+   const selected = staff.isCurrent() ? staff.selected : null;
+   return (
+     <SafeAreaView style={styles.container}>
+-      <View style={styles.content}>
++      <ScrollView contentContainerStyle={styles.content}>
+         {selected ? <>
+           <Text style={styles.title}>{selected.name}</Text>
+           <Text style={styles.description}>Status: {STATUS_LABELS[selected.status]}</Text>
+-          <Text style={styles.message}>A área operacional deste evento será disponibilizada em uma próxima etapa.</Text>
++          <StaffEventDashboard event={selected} staff={staff} />
+         </> : <>
+           <Text style={styles.title}>Selecione um evento</Text>
+           <Text style={styles.message}>Atualize a lista para confirmar os eventos autorizados.</Text>
+@@ -122,11 +124,76 @@ function StaffEventHomeScreen({ navigation }) {
+           if (navigation.canGoBack()) navigation.goBack();
+           else navigation.navigate('StaffEvents');
+         }} />
+-      </View>
++      </ScrollView>
+     </SafeAreaView>
+   );
+ }
+ 
++function StaffEventDashboard({ event, staff }) {
++  const auth = useAuth();
++  const live = useRef({ auth, staff });
++  live.current = { auth, staff };
++  const storeRef = useRef(null);
++  if (!storeRef.current) {
++    storeRef.current = createStaffDashboardStore({
++      client: { get: (...args) => live.current.auth.httpClient.get(...args) },
++      getContext: () => {
++        const { auth: current, staff: area } = live.current;
++        const selected = area.getSelected();
++        if (!selected || !current?.isAuthenticated || !current.isIdentityVerified()) return null;
++        return { eventId: selected.id, userId: current.user.id,
++          epoch: current.getSessionEpoch(), revision: current.getIdentityRevision() };
++      },
++    });
++  }
++  const store = storeRef.current;
++  const [snapshot, setSnapshot] = useState(store.getSnapshot());
++  const epoch = auth.getSessionEpoch();
++  const revision = auth.getIdentityRevision();
++  useEffect(() => store.subscribe(setSnapshot), [store]);
++  useEffect(() => {
++    store.setContext({ eventId: event.id, userId: auth.user.id, epoch, revision });
++    void store.refreshStations();
++    return () => store.setContext(null);
++  }, [store, event.id, auth.user.id, epoch, revision]);
++  if (!store.isCurrent()) return null;
++  const messages = {
++    session: 'Não foi possível confirmar sua sessão. Entre novamente ou tente atualizar.',
++    denied: 'Acesso ao evento ou à experiência indisponível. Atualize seus eventos autorizados.',
++    network: 'Não foi possível conectar ao servidor. Verifique sua conexão e tente novamente.',
++    unavailable: 'Não foi possível carregar os dados. Tente novamente.',
++  };
++  const experiences = [...new Set(snapshot.stations.map((station) => station.experienceId))];
++  return <>
++    <Text style={styles.title}>Estações</Text>
++    {snapshot.stationStatus === 'loading' && <Text style={styles.message}>Carregando estações...</Text>}
++    {snapshot.stationStatus === 'error' && <Text accessibilityRole="alert" style={styles.message}>{messages[snapshot.stationError]}</Text>}
++    {snapshot.stationStatus === 'ready' && snapshot.stations.length === 0 &&
++      <Text style={styles.message}>Nenhuma estação encontrada neste evento.</Text>}
++    {snapshot.stationStatus === 'ready' && snapshot.stations.map((station) => <View key={station.id} style={styles.event}>
++      <Text style={styles.eventName}>{station.label}</Text>
++      <Text style={styles.message}>Experiência: {station.experienceId}</Text>
++      <Text style={styles.message}>Disponibilidade: {station.availability === 'available' ? 'Disponível' : 'Indisponível'}</Text>
++      <Text style={styles.message}>Atendimento pendente: {station.pendingServiceSessionId ? 'Sim' : 'Não'}</Text>
++    </View>)}
++    <Button label="Atualizar estações" disabled={snapshot.stationStatus === 'loading'} onPress={() => { void store.refreshStations(); }} />
++    {snapshot.stationStatus === 'ready' && <>
++      <Text style={styles.title}>Filas por experiência</Text>
++      <Text style={styles.message}>São exibidas apenas experiências com estações retornadas. Os nomes ainda não estão disponíveis.</Text>
++      {experiences.map((id) => <Button key={id} label={`Consultar fila ${id}`} onPress={() => { void store.refreshQueue(id); }} />)}
++      {snapshot.queueStatus === 'loading' && <Text style={styles.message}>Carregando fila...</Text>}
++      {snapshot.queueStatus === 'error' && <Text accessibilityRole="alert" style={styles.message}>{messages[snapshot.queueError]}</Text>}
++      {snapshot.queueStatus === 'ready' && <View style={styles.event}>
++        <Text style={styles.eventName}>Fila da experiência {snapshot.experienceId}</Text>
++        <Text style={styles.message}>Pessoas em espera: {snapshot.queue.waitingCount}</Text>
++        <Text style={styles.message}>Janela operacional para chamadas: {snapshot.queue.canCallWaitingEntries ? 'Aberta' : 'Fechada'}</Text>
++      </View>}
++      {snapshot.experienceId && snapshot.queueStatus !== 'loading' &&
++        <Button label="Atualizar fila" onPress={() => { void store.refreshQueue(); }} />}
++    </>}
++  </>;
++}
++
+ export default function StaffEventsNavigator() {
+   return (
+     <StaffEventsProvider>
+diff --git a/app/tests/roleRoutingIntegration.test.cjs b/app/tests/roleRoutingIntegration.test.cjs
+index 68a3c57..ff20c3e 100644
+--- a/app/tests/roleRoutingIntegration.test.cjs
++++ b/app/tests/roleRoutingIntegration.test.cjs
+@@ -39,6 +39,11 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+       if (url === '/participations/current') return { participation: null };
+       if (url === '/participations/return-state') return { pendingEvaluationParticipationIds: [], recentFinalization: null };
+       if (url === '/staff/events') return { events: control.events ?? [] };
++      const stationMatch = url.match(/^\/staff\/events\/([^/]+)\/stations$/);
++      if (stationMatch) return { eventId: stationMatch[1], stations: control.stations ?? [] };
++      const queueMatch = url.match(/^\/staff\/events\/([^/]+)\/experiences\/([^/]+)\/queue$/);
++      if (queueMatch) return { eventId: queueMatch[1], experienceId: queueMatch[2], waitingCount: 0,
++        canCallWaitingEntries: false, firstWaitingQueueEntryId: null, acceptingNewEntries: false };
+       throw new Error(`GET inesperado: ${url}`);
+     },
+     async post(url) {
+@@ -94,7 +99,8 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+       if (target === 'theme') return createParticipantThemeStub();
+       if (target === 'services/httpClient') return { ...http, httpClient: client };
+       if (target === 'services/tokenStorage') return { defaultTokenStorage: storage };
+-      if (control.realStaff && ['screens/staff/StaffEventsNavigator', 'services/staffEventsService'].includes(target)) {
++      if (control.realStaff && ['screens/staff/StaffEventsNavigator', 'services/staffEventsService',
++        'services/staffDashboardService', 'services/staffOperationsService'].includes(target)) {
+         return load(`${target}.js`);
+       }
+       if (target === 'screens/event-entry/EventEntryScreen' && control.modalFixture) {
+@@ -280,6 +286,87 @@ test('modal protegido fica invisível e callback antigo não executa durante err
+ });
+ 
+ const staffEvent = { id: '11111111-1111-4111-8111-111111111111', name: 'Evento autorizado', status: 'open' };
++const realExperienceId = '33333333-3333-4333-8333-333333333333';
++const realStation = { id: '44444444-4444-4444-8444-444444444444', experienceId: realExperienceId,
++  label: 'Estação real', availability: 'available', pendingServiceSessionId: null, pendingCalledAt: null };
++
++test('painel Staff real exibe estação e fila e limpa os dados ao receber 403', { skip }, async () => {
++  let denied = false;
++  const control = { realStaff: true, events: [staffEvent], stations: [realStation], http: async (route) => {
++    if (denied && route.endsWith('/queue')) return { statusCode: 403, body: { code: 'FORBIDDEN' } };
++    return undefined;
++  } };
++  const app = createIntegration({ initialUser: { ...participant, roles: ['staff'] }, control });
++  await app.mount();
++  await app.act(() => app.manager.login({ email: participant.email, password: 'password' }));
++  await app.press('Selecionar evento Evento autorizado');
++  assert.ok(app.hasText('Estação real'));
++  await app.press(`Consultar fila ${realExperienceId}`);
++  assert.ok(app.hasText('Pessoas em espera: 0'));
++  assert.ok(!app.hasText('Rafael T.'));
++  denied = true;
++  await app.press('Atualizar fila');
++  assert.ok(app.hasText('Acesso ao evento ou à experiência indisponível'));
++  assert.ok(!app.hasText('Estação real'));
++  await app.press('Voltar aos eventos');
++  assert.ok(app.hasText('Eventos Staff'));
++  app.dispose();
++});
++
++test('401 recuperável nas estações renova e revalida a sessão Staff', { skip }, async () => {
++  let attempts = 0;
++  const control = { realStaff: true, events: [staffEvent], stations: [realStation], http: async (route, options) => {
++    if (!route.endsWith('/stations')) return undefined;
++    attempts += 1;
++    return options.headers.Authorization === 'Bearer access'
++      ? { statusCode: 401, body: { code: 'ACCESS_TOKEN_EXPIRED' } } : undefined;
++  } };
++  const app = createIntegration({ initialUser: { ...participant, roles: ['staff'] }, control });
++  await app.mount();
++  await app.act(() => app.manager.login({ email: participant.email, password: 'password' }));
++  await app.press('Selecionar evento Evento autorizado');
++  assert.ok(attempts >= 2);
++  assert.ok(app.calls.includes('/auth/refresh'));
++  assert.equal(app.manager.getSnapshot().identityStatus, 'verified');
++  // A revalidação descarta a seleção antiga; nova seleção exige nova lista autorizada.
++  assert.ok(!app.hasText('Estação real'));
++  app.dispose();
++});
++
++test('401 terminal nas estações invalida sessão e remove o painel Staff', { skip }, async () => {
++  const control = { realStaff: true, events: [staffEvent], http: async (route) =>
++    route.endsWith('/stations') ? { statusCode: 401, body: { code: 'SESSION_REVOKED' } } : undefined };
++  const app = createIntegration({ initialUser: { ...participant, roles: ['staff'] }, control });
++  await app.mount();
++  await app.act(() => app.manager.login({ email: participant.email, password: 'password' }));
++  await app.press('Selecionar evento Evento autorizado');
++  assert.equal(app.manager.getSnapshot().isAuthenticated, false);
++  assert.equal(app.route(), 'Login');
++  assert.ok(!app.hasText('Estação real'));
++  app.dispose();
++});
++
++test('trocar evento Staff descarta estações e preserva status scheduled e closed', { skip }, async () => {
++  const closedEvent = { id: '22222222-2222-4222-8222-222222222222', name: 'Evento encerrado', status: 'closed' };
++  const control = { realStaff: true, events: [{ ...staffEvent, status: 'scheduled' }, closedEvent],
++    http: async (route) => {
++      if (route === `/staff/events/${staffEvent.id}/stations`) return { body: { eventId: staffEvent.id, stations: [realStation] } };
++      if (route === `/staff/events/${closedEvent.id}/stations`) return { body: { eventId: closedEvent.id, stations: [] } };
++      return undefined;
++    } };
++  const app = createIntegration({ initialUser: { ...participant, roles: ['staff'] }, control });
++  await app.mount();
++  await app.act(() => app.manager.login({ email: participant.email, password: 'password' }));
++  await app.press('Selecionar evento Evento autorizado');
++  assert.ok(app.hasText('Status: Agendado'));
++  assert.ok(app.hasText('Estação real'));
++  await app.press('Voltar aos eventos');
++  await app.press('Selecionar evento Evento encerrado');
++  assert.ok(app.hasText('Status: Encerrado'));
++  assert.ok(app.hasText('Nenhuma estação encontrada'));
++  assert.ok(!app.hasText('Estação real'));
++  app.dispose();
++});
+ 
+ test('Staff real consulta eventos, seleciona, volta e não aceita rota com ID manual', { skip }, async () => {
+   const control = { realStaff: true, events: [staffEvent] };
+@@ -291,7 +378,7 @@ test('Staff real consulta eventos, seleciona, volta e não aceita rota com ID ma
+   assert.ok(app.hasText('Evento autorizado'));
+   await app.press('Selecionar evento Evento autorizado');
+   assert.ok(app.hasText('Status: Aberto'));
+-  assert.ok(app.hasText('próxima etapa'));
++  assert.ok(app.hasText('Nenhuma estação encontrada'));
+   await app.press('Voltar aos eventos');
+   app.navigate('StaffPending', { screen: 'StaffEventHome', params: { eventId: '22222222-2222-4222-8222-222222222222' } });
+   assert.ok(app.hasText('Atualize a lista para confirmar os eventos autorizados'));
+diff --git a/app/services/staffDashboardService.js b/app/services/staffDashboardService.js
+new file mode 100644
+index 0000000..36142fb
+--- /dev/null
++++ b/app/services/staffDashboardService.js
+@@ -0,0 +1,63 @@
++import { fetchStaffQueue, fetchStaffStations } from './staffOperationsService';
++
++const same = (a, b) => Boolean(a && b && a.eventId === b.eventId && a.userId === b.userId &&
++  a.epoch === b.epoch && a.revision === b.revision);
++const empty = () => ({ context: null, stationStatus: 'idle', stations: [], stationError: null,
++  experienceId: null, queueStatus: 'idle', queue: null, queueError: null });
++const errorKind = (error) => error?.status === 401 ? 'session' :
++  (error?.status === 403 || error?.status === 404) ? 'denied' : error?.isNetworkError ? 'network' : 'unavailable';
++
++// O contexto é conferido novamente antes de publicar qualquer resultado.
++export function createStaffDashboardStore({ client, getContext }) {
++  let state = empty();
++  let generation = 0;
++  let stationGeneration = 0;
++  let queueGeneration = 0;
++  const listeners = new Set();
++  const publish = (next) => { state = next; listeners.forEach((listener) => listener(state)); };
++  const isCurrent = () => same(state.context, getContext());
++  function setContext(context) {
++    generation += 1; stationGeneration += 1; queueGeneration += 1;
++    publish(context ? { ...empty(), context, stationStatus: 'loading' } : empty());
++  }
++  function denied() {
++    stationGeneration += 1; queueGeneration += 1;
++    publish({ ...state, stationStatus: 'error', stationError: 'denied', stations: [],
++      experienceId: null, queueStatus: 'idle', queue: null, queueError: null });
++  }
++  async function refreshStations() {
++    if (!isCurrent()) return;
++    const context = state.context, revision = generation, request = ++stationGeneration;
++    queueGeneration += 1;
++    publish({ ...state, stationStatus: 'loading', stationError: null, stations: [],
++      experienceId: null, queueStatus: 'idle', queue: null, queueError: null });
++    try {
++      const { stations } = await fetchStaffStations(client, context.eventId);
++      if (revision !== generation || request !== stationGeneration || !isCurrent()) return;
++      publish({ ...state, stationStatus: 'ready', stations });
++    } catch (error) {
++      if (revision !== generation || request !== stationGeneration || !isCurrent()) return;
++      const kind = errorKind(error);
++      if (kind === 'denied') return denied();
++      publish({ ...state, stationStatus: 'error', stationError: kind, stations: [] });
++    }
++  }
++  async function refreshQueue(experienceId = state.experienceId) {
++    if (!isCurrent() || state.stationStatus !== 'ready' ||
++        !state.stations.some((station) => station.experienceId === experienceId)) return;
++    const context = state.context, revision = generation, request = ++queueGeneration;
++    publish({ ...state, experienceId, queueStatus: 'loading', queue: null, queueError: null });
++    try {
++      const queue = await fetchStaffQueue(client, context.eventId, experienceId);
++      if (revision !== generation || request !== queueGeneration || !isCurrent()) return;
++      publish({ ...state, queueStatus: 'ready', queue });
++    } catch (error) {
++      if (revision !== generation || request !== queueGeneration || !isCurrent()) return;
++      const kind = errorKind(error);
++      if (kind === 'denied') return denied();
++      publish({ ...state, queueStatus: 'error', queue: null, queueError: kind });
++    }
++  }
++  return { getSnapshot: () => state, isCurrent, setContext, refreshStations, refreshQueue,
++    subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); } };
++}
+diff --git a/app/tests/staffDashboard.test.cjs b/app/tests/staffDashboard.test.cjs
+new file mode 100644
+index 0000000..5dd7ee9
+--- /dev/null
++++ b/app/tests/staffDashboard.test.cjs
+@@ -0,0 +1,126 @@
++const assert = require('node:assert/strict');
++const test = require('node:test');
++const { loadModule } = require('./helpers/questionnaireHarness.cjs');
++const operations = loadModule('services/staffOperationsService.js', require).exports;
++const { createStaffDashboardStore } = loadModule('services/staffDashboardService.js', (name) => {
++  if (name === './staffOperationsService') return operations;
++  return require(name);
++}).exports;
++
++const eventId = '11111111-1111-4111-8111-111111111111';
++const otherEventId = '22222222-2222-4222-8222-222222222222';
++const experienceId = '33333333-3333-4333-8333-333333333333';
++const stationId = '44444444-4444-4444-8444-444444444444';
++const secondExperienceId = '55555555-5555-4555-8555-555555555555';
++const secondStationId = '66666666-6666-4666-8666-666666666666';
++const context = (event = eventId, userId = 'a', revision = 1) => ({ eventId: event, userId, epoch: 1, revision });
++const stations = (event = eventId) => ({ eventId: event, stations: [{ id: stationId, experienceId,
++  label: 'Estação real', availability: 'available', pendingServiceSessionId: null, pendingCalledAt: null }] });
++const queue = (event = eventId) => ({ eventId: event, experienceId, waitingCount: 0,
++  canCallWaitingEntries: false, acceptingNewEntries: false, firstWaitingQueueEntryId: null });
++const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
++  return { promise, resolve, reject }; };
++
++test('consulta estações e fila reais com cliente autenticado e somente experiência retornada', async () => {
++  const current = context(), calls = [];
++  const store = createStaffDashboardStore({ getContext: () => current, client: { get: async (url, options) => {
++    calls.push({ url, options }); return url.endsWith('/stations') ? stations() : queue();
++  } } });
++  store.setContext(current);
++  await store.refreshStations();
++  assert.equal(store.getSnapshot().stations[0].label, 'Estação real');
++  await store.refreshQueue(otherEventId);
++  assert.equal(calls.length, 1, 'ID arbitrário não inicia consulta');
++  await store.refreshQueue(experienceId);
++  assert.equal(store.getSnapshot().queue.waitingCount, 0);
++  assert.deepEqual(calls.map((item) => item.url), [`/staff/events/${eventId}/stations`,
++    `/staff/events/${eventId}/experiences/${experienceId}/queue`]);
++  assert.ok(calls.every((item) => item.options.auth === true));
++});
++
++test('lista vazia, rede, 401 e 403 limpam dados e permitem nova leitura', async () => {
++  const current = context(); let result = stations();
++  const store = createStaffDashboardStore({ getContext: () => current, client: { get: async () => {
++    if (result instanceof Error) throw result; return result;
++  } } });
++  store.setContext(current);
++  await store.refreshStations();
++  result = Object.assign(new Error('offline'), { isNetworkError: true });
++  await store.refreshStations();
++  assert.equal(store.getSnapshot().stationError, 'network');
++  assert.equal(store.getSnapshot().stations.length, 0);
++  result = Object.assign(new Error('401'), { status: 401 });
++  await store.refreshStations();
++  assert.equal(store.getSnapshot().stationError, 'session');
++  result = { eventId, stations: [] };
++  await store.refreshStations();
++  assert.equal(store.getSnapshot().stationStatus, 'ready');
++  assert.equal(store.getSnapshot().stations.length, 0);
++  result = stations(); await store.refreshStations();
++  result = Object.assign(new Error('403'), { status: 403 });
++  await store.refreshQueue(experienceId);
++  assert.equal(store.getSnapshot().stationError, 'denied');
++  assert.equal(store.getSnapshot().stations.length, 0);
++  assert.equal(store.getSnapshot().queue, null);
++});
++
++test('troca de evento, revisão, logout e respostas fora de ordem descartam dados', async () => {
++  let current = context(); const requests = [];
++  const store = createStaffDashboardStore({ getContext: () => current, client: { get: () => {
++    const request = deferred(); requests.push(request); return request.promise;
++  } } });
++  store.setContext(current);
++  const first = store.refreshStations(), second = store.refreshStations();
++  requests[1].resolve({ eventId, stations: [] }); await second;
++  requests[0].resolve(stations()); await first;
++  assert.equal(store.getSnapshot().stations.length, 0);
++  const old = store.refreshStations();
++  current = context(otherEventId, 'b', 2); store.setContext(current);
++  const fresh = store.refreshStations();
++  requests[2].resolve(stations()); await old;
++  requests[3].resolve(stations(otherEventId)); await fresh;
++  assert.equal(store.getSnapshot().context.eventId, otherEventId);
++  const pendingQueue = store.refreshQueue(experienceId);
++  current = null;
++  requests[4].resolve(queue(otherEventId)); await pendingQueue;
++  assert.equal(store.isCurrent(), false);
++  store.setContext(null);
++  assert.equal(store.getSnapshot().queue, null);
++  assert.equal(store.getSnapshot().stations.length, 0);
++});
++
++test('respostas inválidas e filas concorrentes não substituem a leitura mais recente', async () => {
++  const current = context(), requests = [];
++  const store = createStaffDashboardStore({ getContext: () => current, client: { get: () => {
++    const request = deferred(); requests.push(request); return request.promise;
++  } } });
++  store.setContext(current);
++  const invalid = store.refreshStations(); requests[0].resolve({ eventId, stations: [{ id: 'inválido' }] }); await invalid;
++  assert.equal(store.getSnapshot().stationError, 'unavailable');
++  const load = store.refreshStations(); requests[1].resolve(stations()); await load;
++  const old = store.refreshQueue(experienceId), latest = store.refreshQueue(experienceId);
++  requests[3].resolve(queue()); await latest;
++  requests[2].resolve({ ...queue(), waitingCount: 2, firstWaitingQueueEntryId: stationId }); await old;
++  assert.equal(store.getSnapshot().queue.waitingCount, 0);
++});
++
++test('troca de experiência descarta fila anterior e 404 limpa os dados do evento', async () => {
++  const current = context(), requests = [];
++  const store = createStaffDashboardStore({ getContext: () => current, client: { get: () => {
++    const request = deferred(); requests.push(request); return request.promise;
++  } } });
++  store.setContext(current);
++  const load = store.refreshStations();
++  const response = stations();
++  response.stations.push({ ...response.stations[0], id: secondStationId, experienceId: secondExperienceId });
++  requests[0].resolve(response); await load;
++  const old = store.refreshQueue(experienceId), latest = store.refreshQueue(secondExperienceId);
++  requests[2].resolve({ ...queue(), experienceId: secondExperienceId }); await latest;
++  requests[1].resolve(queue()); await old;
++  assert.equal(store.getSnapshot().queue.experienceId, secondExperienceId);
++  const denied = store.refreshQueue(secondExperienceId);
++  requests[3].reject(Object.assign(new Error('404'), { status: 404 })); await denied;
++  assert.equal(store.getSnapshot().stationError, 'denied');
++  assert.equal(store.getSnapshot().queue, null);
++  assert.equal(store.getSnapshot().stations.length, 0);
++});
+diff --git a/docs/STAFF_REAL_STATIONS_QUEUES_IMPLEMENTACAO.md b/docs/STAFF_REAL_STATIONS_QUEUES_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..ea551f5
+--- /dev/null
++++ b/docs/STAFF_REAL_STATIONS_QUEUES_IMPLEMENTACAO.md
+@@ -0,0 +1,37 @@
++# Consulta real de estações e filas Staff
++
++## Dependência de contrato identificada
++
++Não existe, na inspeção atual, uma listagem de experiências autorizada pela concessão Staff. `GET /events/:eventId/experiences` exige participação ativa no evento; não é adequado presumir essa participação para Staff. `GET /staff/events/:eventId/stations` retorna `experienceId`, mas não o nome da experiência e não inclui experiências sem estação. Nesta etapa não será criado endpoint nem alterado o backend. O painel poderá consultar apenas filas das experiências identificadas pelas estações retornadas, exibindo o ID real e informando essa limitação. Uma futura listagem Staff autorizada pelo evento é necessária para apresentar nomes e experiências sem estação.
++
++## Escopo e arquivos
++
++- `app/screens/staff/StaffEventsNavigator.js`: painel de consulta para o evento selecionado, estações, seleção de experiência por ID e fila; carregamento, vazio, erro, atualização e retorno.
++- `app/services/staffDashboardService.js`: estado e coordenação das leituras, associados a usuário, evento, geração e revisão da identidade.
++- `app/tests/staffDashboard.test.cjs` e `app/tests/roleRoutingIntegration.test.cjs`: testes preparados da camada de estado e da integração com sessão, cliente HTTP, provedores e navegação.
++- Este relatório e `qa-evidence/STAFF_REAL_STATIONS_QUEUES-changes.diff` documentam a entrega.
++
++## Contratos confirmados
++
++As consultas usam o cliente autenticado e a identidade da sessão é extraída no servidor. A concessão Staff vigente é verificada por evento em transação de leitura; acesso negado ou experiência inexistente retornam 404 indistinguível. O frontend também trata 403 como acesso indisponível e limpa os dados operacionais. O cliente HTTP existente trata 401, renovação e invalidação da sessão.
++
++- `GET /api/v1/staff/events/:eventId/stations`: `{eventId, stations:[{id, experienceId, label, availability, pendingServiceSessionId, pendingCalledAt}]}`. A disponibilidade configurada e a existência de atendimento pendente são informações separadas. O serviço existente valida os campos utilizados; a tela não exibe o horário pendente.
++- `GET /api/v1/staff/events/:eventId/experiences/:experienceId/queue`: `{eventId, experienceId, observedAt, waitingCount, acceptingNewEntries, canCallWaitingEntries, firstWaitingQueueEntryId}`. O painel exibe a contagem e a janela operacional retornadas; o contrato não inclui nomes ou lista de participantes. `canCallWaitingEntries` não garante que haja alguém aguardando nem estação livre.
++- Os eventos `scheduled` e `closed` continuam selecionáveis quando retornados pelo backend. Não se infere a condição da fila pelo status do evento: a resposta da fila determina a janela operacional.
++
++## Arquitetura e riscos
++
++O evento vem somente da seleção autorizada em memória; parâmetros de navegação não definem acesso. A escolha de experiência é limitada aos IDs nas estações obtidas para o evento. O servidor revalida a concessão em cada requisição. Mudança de contexto, retorno, troca de conta, revalidação e concorrência invalidam resultados anteriores; falhas não preservam dados antigos. Não há polling, chamadas, conclusões, ausências nem fixtures demonstrativas no painel.
++
++As respostas são retratos do momento da consulta e podem ficar desatualizadas; a atualização é manual. IDs de experiências são exibidos porque não há nome no contrato Staff, e experiências sem estação não aparecem. A listagem não é uma prova persistente de autorização: operações futuras exigem nova verificação no servidor.
++
++## Testes preparados e validação
++
++- Testes de estado cobrem estações, filas, resposta vazia ou inválida, falhas de rede, 401, 403 e 404, troca de evento ou usuário, logout, revisão de identidade e respostas fora de ordem.
++- Testes de integração preparados cobrem tela e dados reais simulados, retorno, dois eventos, `scheduled` e `closed`, 403 e 401 terminal ou recuperável com o gerenciador de sessão. Os testes existentes de roteamento Admin e participante permanecem.
++- Inspeção estática realizada sobre os contratos, a autorização e a implementação. Testes, lint, typecheck e build não foram executados; ficam para Luna Medium. A homologação HTTP anterior do endpoint de eventos e a seleção no Expo Go foram informadas pelo responsável, não repetidas nesta etapa.
++- Para validação, inspecionar os comandos e executar com `NODE_ENV=test` em `app`: `node --test tests/staffDashboard.test.cjs tests/roleRoutingIntegration.test.cjs tests/staffEventDiscovery.test.cjs tests/staffDemoState.test.cjs tests/authNavigation.test.cjs tests/staffNavigation.test.cjs tests/staffRealNavigation.test.cjs`, seguido da suíte completa se os focados passarem.
++
++## Homologação no Expo Go
++
++Após a validação automatizada, entrar com Staff autorizado, selecionar o evento, conferir estações e disponibilidade frente aos dados do backend, escolher um ID de experiência e comparar contagem e janela da fila. Verificar evento sem estação, atualização manual, retorno e troca de conta. Conferir `scheduled` e `closed` sem realizar operações de escrita. Exercitar falha de rede e sessão expirada de forma controlada.
