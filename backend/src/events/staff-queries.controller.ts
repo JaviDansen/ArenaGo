@@ -1,4 +1,4 @@
-import { Controller, Get, HttpCode, HttpStatus, Inject, Param } from "@nestjs/common";
+import { Controller, Get, Header, HttpCode, HttpStatus, Inject, Param } from "@nestjs/common";
 import { z } from "zod";
 import { CurrentUserId, RequireSessionAuth } from "../auth/current-user.decorator";
 import { ProblemException } from "../common/errors/problem.exception";
@@ -16,6 +16,14 @@ function denied(): never {
 @RequireSessionAuth()
 export class StaffQueriesController {
   constructor(@Inject(StaffQueriesService) private readonly queries: StaffQueriesService) {}
+
+  @Get()
+  @HttpCode(HttpStatus.OK)
+  @Header("Cache-Control", "no-store")
+  async events(@CurrentUserId() userId: string) {
+    const events = await this.queries.listEvents(userId);
+    return { events: events.map(({ id, name, status }) => ({ id, name, status })) };
+  }
 
   @Get(":eventId/stations")
   @HttpCode(HttpStatus.OK)

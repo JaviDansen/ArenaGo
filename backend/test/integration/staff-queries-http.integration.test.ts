@@ -127,6 +127,24 @@ const routes = (c: Context, experienceId: string) => [`/api/v1/staff/events/${c.
 const get = (route: string, auth: { token: string }) => supertest(app.getHttpServer()).get(route).set("Authorization", `Bearer ${auth.token}`);
 const stationsGet = (c: Context) => get(routes(c, "unused")[0], c.staff);
 const queueGet = (c: Context & { experienceId: string }) => get(routes(c, c.experienceId)[1], c.staff);
+test("descoberta PostgreSQL isola concessões por conta e reflete revogação", async () => {
+  const a = await context(), b = await context(), route = "/api/v1/staff/events";
+  const secondGrant = randomUUID();
+  await pool.query("INSERT INTO user_roles(id,user_id,role,event_id,granted_at) VALUES($1,$2,'staff',$3,clock_timestamp())",
+    [secondGrant, a.staff.userId, b.eventId]);
+  const list = (auth: { token: string }) => get(route, auth);
+  const first = await list(a.staff);
+  assert.equal(first.status, 200); assert.equal(first.headers["cache-control"], "no-store");
+  assert.deepEqual(first.body.events.map((event: { id: string }) => event.id).sort(), [a.eventId, b.eventId].sort());
+  for (const event of first.body.events) assert.deepEqual(Object.keys(event).sort(), ["id", "name", "status"]);
+  const other = await get(route, b.staff).query({ userId: a.staff.userId });
+  assert.equal(other.status, 200); assert.deepEqual(other.body.events.map((event: { id: string }) => event.id), [b.eventId]);
+  const empty = await list(a.viewer); assert.equal(empty.status, 200); assert.deepEqual(empty.body, { events: [] });
+  await pool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE id=$1", [secondGrant]);
+  const revoked = await list(a.staff); assert.equal(revoked.status, 200);
+  assert.deepEqual(revoked.body.events.map((event: { id: string }) => event.id), [a.eventId]);
+  assert.equal((await supertest(app.getHttpServer()).get(route)).status, 401);
+});
 function problem(r: supertest.Response, status: number, code?: string) {
   assert.equal(r.status, status, JSON.stringify(r.body)); assert.equal(r.body.status, status);
   assert.match(r.headers["content-type"], /application\/problem\+json/); if (code) assert.equal(r.body.code, code);

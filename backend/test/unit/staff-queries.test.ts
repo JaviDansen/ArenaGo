@@ -10,6 +10,21 @@ const eventId = "event", experienceId = "experience", userId = "staff", at = new
 const station = { id: "station", experienceId, label: "Estação", availability: "available",
   pendingServiceSessionId: "pending", pendingCalledAtMs: at.getTime() };
 const queue = { queueAcceptingEntries: true, hasAvailableStation: true, waitingCount: "2", firstWaitingQueueEntryId: "first" };
+test("descoberta usa SQL parametrizado, concessão ativa e conta apta", async () => {
+  const queries: Array<{ text: string; params: unknown[] }> = [];
+  const database = drizzle({ async query(config: { text: string }, params: unknown[]) {
+    queries.push({ text: config.text, params });
+    return { rows: [{ id: "e1", name: "Arena", status: "open", accessCode: "private" }] };
+  } } as unknown as Client, { schema });
+  const service = new StaffQueriesService(database, new EventsService(database));
+  assert.deepEqual(await service.listEvents(userId), [{ id: "e1", name: "Arena", status: "open" }]);
+  assert.equal(queries.length, 1); assert.deepEqual(queries[0].params, [userId]);
+  for (const expression of [/r.role='staff'/, /r.event_id=e.id/, /r.revoked_at IS NULL/,
+    /u.is_active=true/, /u.email_verified_at IS NOT NULL/, /ORDER BY e.name, e.id/]) {
+    assert.match(queries[0].text, expression);
+  }
+  assert.doesNotMatch(queries[0].text, /\b(insert|update|delete)\b/i);
+});
 function fixture(options: { denied?: boolean; clock?: number; operating?: boolean; accepting?: boolean;
   stations?: object[]; queue?: object[] } = {}) {
   const queries: Array<{ text: string; params: unknown[] }> = [];

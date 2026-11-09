@@ -11,6 +11,11 @@ interface AccessRow extends Record<string, unknown> {
   observedAtMs: number;
   operating: boolean;
 }
+interface StaffEventRow extends Record<string, unknown> {
+  id: string;
+  name: string;
+  status: "scheduled" | "open" | "closing" | "closed";
+}
 interface StationRow extends Record<string, unknown> {
   id: string;
   experienceId: string;
@@ -41,6 +46,21 @@ export class StaffQueriesService {
     @Inject(DRIZZLE_DATABASE) private readonly database: NodePgDatabase<typeof schema>,
     @Inject(EventsService) private readonly events: EventsService,
   ) {}
+
+  /** Lista apenas eventos com concessão Staff vigente para a conta da sessão. */
+  async listEvents(staffUserId: string): Promise<StaffEventRow[]> {
+    const result = await this.database.execute<StaffEventRow>(sql`
+      SELECT e.id, e.name, e.status
+      FROM events e
+      WHERE EXISTS (
+        SELECT 1 FROM users u JOIN user_roles r ON r.user_id=u.id
+        WHERE u.id=${staffUserId} AND u.is_active=true AND u.email_verified_at IS NOT NULL
+          AND r.role='staff' AND r.event_id=e.id AND r.revoked_at IS NULL
+      )
+      ORDER BY e.name, e.id
+    `);
+    return result.rows.map(({ id, name, status }) => ({ id, name, status }));
+  }
 
   private async authorize(tx: DatabaseExecutor, staffUserId: string, eventId: string) {
     // Papel da sessão não substitui concessão vigente. Admin isolado não autoriza.

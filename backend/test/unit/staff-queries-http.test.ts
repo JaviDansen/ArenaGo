@@ -25,6 +25,7 @@ const stations = { eventId, stations: [{ id: id(4), experienceId, label: "Estaç
 const queue = { eventId, experienceId, observedAt: at, waitingCount: 3,
   acceptingNewEntries: false, canCallWaitingEntries: true, firstWaitingQueueEntryId: id(6) };
 let stationResult: StaffStationsResult, queueResult: StaffQueueResult, failure: Error | undefined;
+let eventResults: Array<{ id: string; name: string; status: "open" }> = [];
 const calls: unknown[][] = [];
 @Module({ controllers: [StaffQueriesController], providers: [SessionAuthGuard,
   { provide: AuthService, useValue: { authenticateBearerToken: async (token: string) => {
@@ -32,6 +33,7 @@ const calls: unknown[][] = [];
     return { userId, sessionId: id(7), roles: ["staff"] };
   } } },
   { provide: StaffQueriesService, useValue: {
+    listEvents: async (...args: string[]) => { calls.push(["events", ...args]); if (failure) throw failure; return eventResults; },
     getStations: async (...args: string[]) => { calls.push(["stations", ...args]); if (failure) throw failure; return stationResult; },
     getQueue: async (...args: string[]) => { calls.push(["queue", ...args]); if (failure) throw failure; return queueResult; },
   } },
@@ -46,8 +48,25 @@ after(async () => { await app?.close(); });
 const get = (route: string) => supertest(app.getHttpServer()).get(route).set("Authorization", "Bearer unit-staff");
 function reset() {
   calls.length = 0; failure = undefined;
+  eventResults = [];
   stationResult = { kind: "ok", ...structuredClone(stations) }; queueResult = { kind: "ok", ...structuredClone(queue) };
 }
+test("descoberta HTTP exige sessão e usa somente o usuário autenticado", async () => {
+  reset();
+  problem(await supertest(app.getHttpServer()).get("/api/v1/staff/events"), 401, "MISSING_ACCESS_TOKEN");
+  problem(await get("/api/v1/staff/events").set("Authorization", "Bearer invalid"), 401, "INVALID_ACCESS_TOKEN");
+  assert.equal(calls.length, 0);
+  eventResults = [{ id: eventId, name: "Arena", status: "open" }];
+  Object.assign(eventResults[0], { userId: id(9), accessCode: "PRIVATE" });
+  const r = await get("/api/v1/staff/events").query({ userId: id(9) });
+  assert.equal(r.status, 200); assert.equal(r.headers["cache-control"], "no-store");
+  assert.deepEqual(r.body, { events: [{ id: eventId, name: "Arena", status: "open" }] });
+  assert.deepEqual(calls, [["events", userId]]);
+});
+test("descoberta HTTP retorna lista vazia sem concessões", async () => {
+  reset(); const r = await get("/api/v1/staff/events");
+  assert.equal(r.status, 200); assert.deepEqual(r.body, { events: [] });
+});
 function problem(r: supertest.Response, status: number, code: string) {
   assert.equal(r.status, status); assert.equal(r.body.status, status); assert.equal(r.body.code, code);
   assert.match(r.headers["content-type"], /application\/problem\+json/);
