@@ -533,7 +533,7 @@ test('K05 Auditoria 2: Restauracao de sessao com questionario pendente direciona
 
   const { resolveInitialRouteForAuthState } = gateExports;
   const targetRoute = resolveInitialRouteForAuthState({
-    user: { id: 'u1', hasCompletedQuestionnaire: false },
+    user: { id: 'u1', roles: ['participante'], hasCompletedQuestionnaire: false },
     isAuthenticated: true,
   });
   assert.equal(targetRoute, 'ProfileQuestionnaire');
@@ -861,6 +861,7 @@ test('K05 Auditoria 9: Persistencia e restauracao apos reinicio do app', async (
   };
 
   let questionnaireSavedOnBackend = false;
+  let refreshCount = 0;
 
   const mockClient = {
     setAuthHandlers: () => {},
@@ -869,12 +870,13 @@ test('K05 Auditoria 9: Persistencia e restauracao apos reinicio do app', async (
       if (url === '/auth/refresh') {
         return {
           accessToken: 'new-acc-token',
-          refreshToken: 'new-ref-token',
-          expiresInSeconds: 900,
+          refreshToken: `new-ref-token-${++refreshCount}`,
+          expiresIn: 900,
           user: {
             id: 'user-restore-1',
             name: 'Kaled',
             email: 'kaled@example.com',
+            roles: ['participante'],
             hasCompletedQuestionnaire: questionnaireSavedOnBackend,
           },
         };
@@ -888,6 +890,7 @@ test('K05 Auditoria 9: Persistencia e restauracao apos reinicio do app', async (
             id: 'user-restore-1',
             name: 'Kaled',
             email: 'kaled@example.com',
+            roles: ['participante'],
             hasCompletedQuestionnaire: questionnaireSavedOnBackend,
           },
         };
@@ -906,6 +909,7 @@ test('K05 Auditoria 9: Persistencia e restauracao apos reinicio do app', async (
   const restored1 = await session1.restoreSession();
   assert.equal(restored1.user.hasCompletedQuestionnaire, false);
   assert.equal(session1.getSnapshot().postAuthRoute, 'ProfileQuestionnaire');
+  assert.equal(storedTokens.refreshToken, 'new-ref-token-1');
 
   // 2. Questionario eh salvo no backend
   questionnaireSavedOnBackend = true;
@@ -920,6 +924,7 @@ test('K05 Auditoria 9: Persistencia e restauracao apos reinicio do app', async (
   const restored2 = await session2.restoreSession();
   assert.equal(restored2.user.hasCompletedQuestionnaire, true);
   assert.equal(session2.getSnapshot().postAuthRoute, 'MainTabs');
+  assert.equal(storedTokens.refreshToken, 'new-ref-token-2');
 });
 
 test('Adversarial B.1: Pre-carregamento tardio preserva campo editado pelo usuario e carrega campos nao editados', async () => {
@@ -1288,6 +1293,7 @@ test('Adversarial D.1: Conclusao nao e revertida por resposta obsoleta de /auth/
     id: 'user-me-test',
     name: 'Test Me',
     email: 'test@example.com',
+    roles: ['participante'],
     hasCompletedQuestionnaire: false,
   };
 

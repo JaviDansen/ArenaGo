@@ -1,6 +1,10 @@
 import { ApiError, createHttpClient, httpClient as defaultHttpClient } from './httpClient';
 import { defaultTokenStorage } from './tokenStorage';
 
+// Gravado antes do POST: uma interrupção nunca deixa o token consumido no disco.
+// O prefixo não pertence ao formato dos tokens opacos emitidos pelo backend.
+const REFRESH_PENDING_MARKER = '!arenago-refresh-pending-v1';
+
 function resolveInvalidationNotice(error) {
   if (!error) {
     return 'Sua sessão foi encerrada. Faça login novamente para continuar.';
@@ -24,7 +28,9 @@ function sanitizePublicUser(rawInput) {
     rawInput && typeof rawInput === 'object' && rawInput.user && typeof rawInput.user === 'object'
       ? rawInput.user
       : rawInput;
-  if (!rawUser || typeof rawUser !== 'object') {
+  if (!rawUser || typeof rawUser !== 'object' || !Array.isArray(rawUser.roles) ||
+      rawUser.roles.length === 0 ||
+      !rawUser.roles.every((role) => ['admin', 'staff', 'participante'].includes(role))) {
     return null;
   }
   return {
@@ -32,7 +38,7 @@ function sanitizePublicUser(rawInput) {
     name: String(rawUser.name || ''),
     email: String(rawUser.email || ''),
     emailVerified: Boolean(rawUser.emailVerified),
-    roles: Array.isArray(rawUser.roles) ? [...rawUser.roles] : ['participante'],
+    roles: [...rawUser.roles],
     hasCompletedQuestionnaire: Boolean(rawUser.hasCompletedQuestionnaire),
   };
 }
@@ -71,6 +77,9 @@ export function createAuthSessionManager(options = {}) {
   let inFlightRefreshPromise = null;
   let inFlightRestorePromise = null;
   let inFlightTwoFactorPromise = null;
+  let identityRequestGeneration = 0;
+  let identityRevision = 0;
+  let pendingRotation = null;
   let privateAdminChallenge = null;
   let challengeTimer = null;
   const now = options.now ?? Date.now;
@@ -95,6 +104,7 @@ export function createAuthSessionManager(options = {}) {
     adminChallenge: null,
     postAuthRoute: null,
     isPersistentStorage: Boolean(tokenStorage.isPersistent),
+    identityStatus: 'unverified',
   };
 
   function enqueueStorageOp(task) {
@@ -247,9 +257,19 @@ export function createAuthSessionManager(options = {}) {
   }
 
   function emitState(patch) {
+    if (patch.identityStatus && patch.identityStatus !== state.identityStatus &&
+        patch.identityStatus !== 'verified') identityRevision += 1;
+    if (patch.isAuthenticated === false && state.isAuthenticated) identityRevision += 1;
+    if (patch.isInitializing === true && !state.isInitializing) identityRevision += 1;
+    if (patch.user && state.user && (patch.user.id !== state.user.id ||
+        [...(patch.user.roles || [])].sort().join('|') !== [...(state.user.roles || [])].sort().join('|'))) {
+      identityRevision += 1;
+    }
     state = Object.freeze({
       ...state,
       ...patch,
+      ...(patch.isAuthenticated === false && !Object.prototype.hasOwnProperty.call(patch, 'identityStatus')
+        ? { identityStatus: 'unverified' } : {}),
     });
     for (const listener of listeners) {
       listener(state);
@@ -279,6 +299,11 @@ export function createAuthSessionManager(options = {}) {
     return sessionEpoch;
   }
 
+  function getIdentityRevision() { return identityRevision; }
+  function isIdentityVerified() {
+    return state.isAuthenticated && !state.isInitializing && state.identityStatus === 'verified';
+  }
+
   function clearAdminChallenge({ resetFlight = true } = {}) {
     privateAdminChallenge = null;
     if (resetFlight) inFlightTwoFactorPromise = null;
@@ -290,6 +315,7 @@ export function createAuthSessionManager(options = {}) {
     if (!privateAdminChallenge && !state.adminChallenge &&
         !['authenticating', 'admin_2fa_verifying'].includes(state.sessionStatus)) return Promise.resolve();
     sessionEpoch += 1;
+    pendingRotation = null;
     const cancellationEpoch = sessionEpoch;
     clearAdminChallenge();
     accessToken = null;
@@ -317,10 +343,19 @@ export function createAuthSessionManager(options = {}) {
     }
 
     sessionEpoch += 1;
+    pendingRotation = null;
     const invalidationEpoch = sessionEpoch;
     clearAdminChallenge();
     accessToken = null;
     inFlightRefreshPromise = null;
+
+    // Retira as rotas imediatamente; o armazenamento seguro pode demorar.
+    const nextStatus = error?.code === 'SESSION_EXPIRED' ? 'expired' : 'revoked';
+    emitState({
+      user: null, isAuthenticated: false, isInitializing: false,
+      sessionStatus: nextStatus, authNotice: resolveInvalidationNotice(error),
+      networkError: null, storageError: null, adminChallenge: null, postAuthRoute: null,
+    });
 
     try {
       await clearRefreshTokenForEpoch(invalidationEpoch);
@@ -332,18 +367,6 @@ export function createAuthSessionManager(options = {}) {
       return;
     }
 
-    const nextStatus = error?.code === 'SESSION_EXPIRED' ? 'expired' : 'revoked';
-    emitState({
-      user: null,
-      isAuthenticated: false,
-      isInitializing: false,
-      sessionStatus: nextStatus,
-      authNotice: resolveInvalidationNotice(error),
-      networkError: null,
-      storageError: null,
-      adminChallenge: null,
-      postAuthRoute: null,
-    });
   }
 
   /**
@@ -357,9 +380,32 @@ export function createAuthSessionManager(options = {}) {
     }
 
     const epochAtStart = sessionEpoch;
+    let refreshConfirmed = false;
+    identityRequestGeneration += 1;
+    emitState({ identityStatus: 'checking' });
 
     const currentRefreshPromise = (async () => {
       try {
+        if (pendingRotation?.epoch === epochAtStart) {
+          const pending = pendingRotation;
+          try {
+            const saved = await writeRefreshTokenForEpoch(pending.refreshToken, epochAtStart);
+            if (!saved || sessionEpoch !== epochAtStart) return null;
+          } catch (error) {
+            if (sessionEpoch !== epochAtStart) return null;
+            emitState({ identityStatus: 'error', isInitializing: false,
+              sessionStatus: 'identity_error', storageError: 'Não foi possível salvar a sessão renovada.',
+              networkError: 'Não foi possível salvar a sessão renovada. Tente novamente.' });
+            throw error;
+          }
+          if (sessionEpoch !== epochAtStart) return null;
+          accessToken = pending.accessToken;
+          pendingRotation = null;
+          const user = await fetchCurrentUser({ retryOnUnauthorized: false, fromRefresh: true });
+          if (sessionEpoch !== epochAtStart || !user) return null;
+          return { accessToken: pending.accessToken, refreshToken: pending.refreshToken,
+            expiresIn: pending.expiresIn, user };
+        }
         const storageRead = await readRefreshTokenState();
 
         if (sessionEpoch !== epochAtStart) {
@@ -379,16 +425,13 @@ export function createAuthSessionManager(options = {}) {
         const storedRefreshToken = storageRead.token;
 
         if (
-          (storedRefreshToken && uncertainRefreshTokens.has(storedRefreshToken)) ||
+          (storedRefreshToken && (storedRefreshToken === REFRESH_PENDING_MARKER || uncertainRefreshTokens.has(storedRefreshToken))) ||
           (!storedRefreshToken && state.sessionStatus === 'uncertain_refresh')
         ) {
-          if (storedRefreshToken) {
-            try {
-              await clearRefreshTokenForEpoch(epochAtStart);
-            } catch {
-              // Ignora erro secundário de limpeza
-            }
-          }
+          sessionEpoch += 1;
+          const blockedEpoch = sessionEpoch;
+          accessToken = null;
+          pendingRotation = null;
           emitState({
             user: null,
             isAuthenticated: false,
@@ -398,6 +441,13 @@ export function createAuthSessionManager(options = {}) {
               state.authNotice ||
               'A tentativa anterior de renovar a sessão falhou sem confirmação do servidor. Por segurança, faça login novamente.',
           });
+          if (storedRefreshToken) {
+            try {
+              await clearRefreshTokenForEpoch(blockedEpoch);
+            } catch {
+              // O marcador persistente continua impedindo o reenvio.
+            }
+          }
           const uncertainError = new ApiError({
             kind: 'timeout',
             status: null,
@@ -424,6 +474,11 @@ export function createAuthSessionManager(options = {}) {
           throw missingError;
         }
 
+        // Sem esse registro prévio, um encerramento após o POST e antes da
+        // gravação do novo token poderia reenviar o token já consumido.
+        const marked = await writeRefreshTokenForEpoch(REFRESH_PENDING_MARKER, epochAtStart);
+        if (!marked || sessionEpoch !== epochAtStart) return null;
+
         try {
           const response = await client.post(
             '/auth/refresh',
@@ -442,8 +497,9 @@ export function createAuthSessionManager(options = {}) {
 
           if (
             !response ||
-            typeof response.accessToken !== 'string' ||
-            typeof response.refreshToken !== 'string'
+            typeof response.accessToken !== 'string' || !response.accessToken.trim() ||
+            typeof response.refreshToken !== 'string' || !response.refreshToken.trim() ||
+            response.refreshToken === storedRefreshToken || response.refreshToken === REFRESH_PENDING_MARKER
           ) {
             throw new ApiError({
               kind: 'http',
@@ -453,6 +509,10 @@ export function createAuthSessionManager(options = {}) {
               detail: 'Não foi possível validar os novos tokens de sessão.',
             });
           }
+
+          refreshConfirmed = true;
+          pendingRotation = { epoch: epochAtStart, accessToken: response.accessToken,
+            refreshToken: response.refreshToken, expiresIn: response.expiresIn };
 
           const persisted = await writeRefreshTokenForEpoch(
             response.refreshToken,
@@ -467,20 +527,32 @@ export function createAuthSessionManager(options = {}) {
           }
 
           accessToken = response.accessToken;
+          pendingRotation = null;
 
-          emitState({
-            networkError: null,
-            storageError: null,
-          });
+          // A resposta de refresh não contém papéis. Confirme-os com o novo token
+          // antes de liberar a requisição que provocou a renovação.
+          const liveUser = await fetchCurrentUser({ retryOnUnauthorized: false, fromRefresh: true });
+          if (sessionEpoch !== epochAtStart || !liveUser) return null;
 
           return {
             accessToken: response.accessToken,
             refreshToken: response.refreshToken,
             expiresIn: response.expiresIn,
+            user: liveUser,
           };
         } catch (error) {
           if (sessionEpoch !== epochAtStart) {
             return null;
+          }
+          // Falhas na leitura de identidade após a rotação confirmada não são
+          // falhas incertas do POST e não devem apagar a credencial recém-gravada.
+          if (refreshConfirmed) {
+            if (pendingRotation?.epoch === epochAtStart) {
+              emitState({ identityStatus: 'error', isInitializing: false, sessionStatus: 'identity_error',
+                storageError: 'Não foi possível salvar a sessão renovada.',
+                networkError: 'Não foi possível salvar a sessão renovada. Tente novamente.' });
+            }
+            throw error;
           }
 
           // Timeout ou qualquer falha de transporte durante POST /auth/refresh quando não é
@@ -529,6 +601,12 @@ export function createAuthSessionManager(options = {}) {
             throw error;
           }
 
+          // Somente uma falha comprovadamente anterior ao envio permite restaurar
+          // o token original. Nos demais casos o marcador impede seu reuso.
+          if (error?.isNetworkError && error?.cause?.requestNotSent === true) {
+            await writeRefreshTokenForEpoch(storedRefreshToken, epochAtStart);
+          }
+
           // Falha de transporte apenas quando comprovadamente a requisição não chegou a ser enviada:
           if (error?.isNetworkError) {
             emitState({
@@ -541,6 +619,14 @@ export function createAuthSessionManager(options = {}) {
           throw error;
         }
       } finally {
+        if (sessionEpoch === epochAtStart && state.identityStatus === 'checking') {
+          if (accessToken || state.isAuthenticated) {
+            emitState({ identityStatus: 'error', isInitializing: false,
+              sessionStatus: 'identity_error', networkError: 'Não foi possível confirmar sua sessão.' });
+          } else {
+            emitState({ identityStatus: 'unverified' });
+          }
+        }
         if (inFlightRefreshPromise === currentRefreshPromise) {
           inFlightRefreshPromise = null;
         }
@@ -556,44 +642,48 @@ export function createAuthSessionManager(options = {}) {
    */
   async function fetchCurrentUser(options = {}) {
     const epochAtStart = sessionEpoch;
-    const meResponse = await client.get('/auth/me', {
-      auth: true,
-      retryOnUnauthorized: options.retryOnUnauthorized ?? true,
-      _retriedAfterRefresh: Boolean(options._retriedAfterRefresh),
-      _requestEpoch: epochAtStart,
-    });
-
-    if (sessionEpoch !== epochAtStart) {
-      return null;
+    if (inFlightRefreshPromise && !options.fromRefresh) {
+      const refreshed = await inFlightRefreshPromise;
+      return sessionEpoch === epochAtStart && refreshed ? refreshed.user : null;
     }
-
-    const liveUser = sanitizePublicUser(meResponse);
-    if (!liveUser || !liveUser.id) {
-      throw new ApiError({
-        kind: 'http',
-        status: 500,
-        code: 'INVALID_ME_RESPONSE',
-        title: 'Resposta inválida',
-        detail: 'Não foi possível validar os dados da conta autenticada.',
+    const requestGeneration = ++identityRequestGeneration;
+    const isCurrent = () => sessionEpoch === epochAtStart && requestGeneration === identityRequestGeneration;
+    try {
+      // O retry de /me é coordenado aqui: o refresh faz sua própria consulta,
+      // evitando dependência circular entre /me e a renovação single-flight.
+      const meResponse = await client.get('/auth/me', {
+        auth: true, retryOnUnauthorized: false, _requestEpoch: epochAtStart,
       });
+      if (!isCurrent()) return null;
+      const liveUser = sanitizePublicUser(meResponse);
+      if (!liveUser?.id || (state.user?.id && state.user.id !== liveUser.id)) {
+        throw new ApiError({ kind: 'http', status: 500, code: 'INVALID_ME_RESPONSE',
+          title: 'Resposta inválida', detail: 'Não foi possível validar os dados da conta autenticada.' });
+      }
+      if (state.user?.id === liveUser.id && state.user?.hasCompletedQuestionnaire === true) {
+        liveUser.hasCompletedQuestionnaire = true;
+      }
+      emitState({ user: liveUser, isAuthenticated: true, isInitializing: false,
+        identityStatus: 'verified', sessionStatus: 'authenticated',
+        postAuthRoute: liveUser.hasCompletedQuestionnaire ? 'MainTabs' : 'ProfileQuestionnaire',
+        networkError: null, storageError: null });
+      return liveUser;
+    } catch (error) {
+      if (!isCurrent()) return null;
+      if (error?.status === 401) {
+        const terminal = ['SESSION_REVOKED', 'SESSION_EXPIRED', 'REFRESH_TOKEN_REUSED',
+          'INVALID_REFRESH_TOKEN', 'ACCOUNT_DEACTIVATED'].includes(error.code);
+        if (!terminal && options.retryOnUnauthorized !== false && !options._retriedAfterRefresh) {
+          const refreshed = await refreshSession();
+          return sessionEpoch === epochAtStart && refreshed ? refreshed.user : null;
+        }
+        await handleSessionInvalidated(error, { targetEpoch: epochAtStart });
+        throw error;
+      }
+      emitState({ identityStatus: 'error', isInitializing: false, sessionStatus: 'identity_error',
+        networkError: 'Não foi possível confirmar os dados da sessão. Tente novamente.' });
+      throw error;
     }
-
-    // Proteção contra resposta obsoleta: não reverte questionário concluído
-    if (state.user?.id === liveUser.id && state.user?.hasCompletedQuestionnaire === true) {
-      liveUser.hasCompletedQuestionnaire = true;
-    }
-
-    emitState({
-      user: liveUser,
-      isAuthenticated: true,
-      isInitializing: false,
-      sessionStatus: 'authenticated',
-      postAuthRoute: liveUser.hasCompletedQuestionnaire ? 'MainTabs' : 'ProfileQuestionnaire',
-      networkError: null,
-      storageError: null,
-    });
-
-    return liveUser;
   }
 
   /**
@@ -665,35 +755,24 @@ export function createAuthSessionManager(options = {}) {
           return { status: 'unauthenticated', user: null };
         }
 
-        if (!accessToken) {
+        let liveUser;
+        if (!accessToken || pendingRotation?.epoch === epochAtStart || storedRefreshToken === REFRESH_PENDING_MARKER) {
           const refreshed = await refreshSession();
           if (sessionEpoch !== epochAtStart || !refreshed) {
-            return { status: 'aborted', user: state.user };
+            const status = ['revoked', 'expired', 'uncertain_refresh'].includes(state.sessionStatus)
+              ? state.sessionStatus : 'aborted';
+            return { status, user: state.user };
           }
+          liveUser = refreshed.user;
+        } else {
+          liveUser = await fetchCurrentUser();
         }
-
-        const liveUser = await fetchCurrentUser({
-          retryOnUnauthorized: false,
-          _retriedAfterRefresh: true,
-        });
 
         if (sessionEpoch !== epochAtStart || !liveUser) {
           return { status: 'aborted', user: state.user };
         }
 
         const resolvedRoute = liveUser.hasCompletedQuestionnaire ? 'MainTabs' : 'ProfileQuestionnaire';
-
-        emitState({
-          user: liveUser,
-          isAuthenticated: true,
-          isInitializing: false,
-          sessionStatus: 'authenticated',
-          authNotice: null,
-          networkError: null,
-          storageError: null,
-          adminChallenge: null,
-          postAuthRoute: resolvedRoute,
-        });
 
         return {
           status: 'authenticated',
@@ -708,6 +787,10 @@ export function createAuthSessionManager(options = {}) {
           state.sessionStatus !== 'uncertain_refresh'
         ) {
           return { status: 'aborted', user: state.user };
+        }
+
+        if (state.identityStatus === 'error') {
+          return { status: 'identity_error', user: null, error };
         }
 
         if (error?.isStorageError || error?.kind === 'storage') {
@@ -799,6 +882,7 @@ export function createAuthSessionManager(options = {}) {
     }
 
     sessionEpoch += 1;
+    pendingRotation = null;
     const currentEpoch = sessionEpoch;
     inFlightRefreshPromise = null;
     inFlightRestorePromise = null;
@@ -825,6 +909,7 @@ export function createAuthSessionManager(options = {}) {
       isAuthenticated: true,
       isInitializing: false,
       sessionStatus: 'authenticated',
+      identityStatus: 'verified',
       authNotice: null,
       networkError: null,
       storageError: null,
@@ -832,25 +917,14 @@ export function createAuthSessionManager(options = {}) {
       postAuthRoute: 'ProfileQuestionnaire',
     });
 
-    // Confirmar sessão atual em /auth/me quando disponível, sem falhar o cadastro já persistido se /auth/me oscilar
+    // A confirmação usa a mesma geração de todas as demais leituras de identidade.
     try {
-      const meResponse = await client.get('/auth/me', {
-        auth: true,
-        retryOnUnauthorized: false,
-        _retriedAfterRefresh: true,
-        _requestEpoch: currentEpoch,
-      });
-      if (sessionEpoch === currentEpoch && meResponse?.id) {
-        confirmedUser = sanitizePublicUser(meResponse);
-        const resolvedRoute = confirmedUser.hasCompletedQuestionnaire ? 'MainTabs' : 'ProfileQuestionnaire';
-        emitState({ user: confirmedUser, postAuthRoute: resolvedRoute });
-      }
+      confirmedUser = (await fetchCurrentUser({ retryOnUnauthorized: false })) ?? state.user;
     } catch (meError) {
-      if (meError?.status === 401 && sessionEpoch === currentEpoch) {
-        await handleSessionInvalidated(meError, { targetEpoch: currentEpoch });
-        throw meError;
-      }
+      if (meError?.status === 401) throw meError;
     }
+
+    if (sessionEpoch !== currentEpoch) return { status: 'aborted', user: null, nextRoute: null };
 
     return {
       status: 'authenticated',
@@ -867,6 +941,7 @@ export function createAuthSessionManager(options = {}) {
   async function login(input) {
     // Invalida a tentativa anterior antes de qualquer await, inclusive verificações 2FA em trânsito.
     sessionEpoch += 1;
+    pendingRotation = null;
     const currentEpoch = sessionEpoch;
     const startedAt = now();
     clearAdminChallenge();
@@ -997,6 +1072,7 @@ export function createAuthSessionManager(options = {}) {
       isAuthenticated: true,
       isInitializing: false,
       sessionStatus: 'authenticated',
+      identityStatus: 'verified',
       authNotice: null,
       networkError: null,
       storageError: null,
@@ -1006,26 +1082,15 @@ export function createAuthSessionManager(options = {}) {
 
     // Confirmar dados atuais da conta em GET /auth/me
     try {
-      const meResponse = await client.get('/auth/me', {
-        auth: true,
-        retryOnUnauthorized: false,
-        _retriedAfterRefresh: true,
-        _requestEpoch: currentEpoch,
-      });
-      if (sessionEpoch === currentEpoch && meResponse?.id) {
-        confirmedUser = sanitizePublicUser(meResponse);
-        const resolvedRoute = confirmedUser.hasCompletedQuestionnaire ? 'MainTabs' : 'ProfileQuestionnaire';
-        emitState({ user: confirmedUser, postAuthRoute: resolvedRoute });
-      }
+      confirmedUser = (await fetchCurrentUser({ retryOnUnauthorized: false })) ?? state.user;
     } catch (meError) {
-      if (meError?.status === 401 && sessionEpoch === currentEpoch) {
-        await handleSessionInvalidated(meError, { targetEpoch: currentEpoch });
-        throw meError;
-      }
+      if (sessionEpoch !== currentEpoch) return { status: 'aborted', user: null, nextRoute: null };
+      if (meError?.status === 401) throw meError;
     }
 
-    const finalRoute = confirmedUser.hasCompletedQuestionnaire ? 'MainTabs' : 'ProfileQuestionnaire';
     if (sessionEpoch !== currentEpoch) return { status: 'aborted', user: null, nextRoute: null };
+    if (!confirmedUser) return { status: 'aborted', user: null, nextRoute: null };
+    const finalRoute = confirmedUser.hasCompletedQuestionnaire ? 'MainTabs' : 'ProfileQuestionnaire';
     return {
       status: 'authenticated',
       user: confirmedUser,
@@ -1097,6 +1162,7 @@ export function createAuthSessionManager(options = {}) {
    */
   async function logout() {
     sessionEpoch += 1;
+    pendingRotation = null;
     const logoutEpoch = sessionEpoch;
     clearAdminChallenge();
     const tokenToRevoke = accessToken;
@@ -1201,6 +1267,8 @@ export function createAuthSessionManager(options = {}) {
     getSnapshot,
     getAccessToken,
     getSessionEpoch,
+    getIdentityRevision,
+    isIdentityVerified,
     register,
     login,
     verifyAdminTwoFactor,

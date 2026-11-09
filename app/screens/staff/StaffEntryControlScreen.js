@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import StaffButton from './components/StaffButton';
@@ -10,6 +10,7 @@ import StaffNotice from './components/StaffNotice';
 import StaffScreen from './components/StaffScreen';
 import { staffColors } from './components/staffTheme';
 import { useStaffDemo } from './StaffDemoContext';
+import { useAuth } from '../../context/AuthContext';
 import { confirmEntry, disableEntryQueue, reactivateEntryQueue } from './staffDemoState';
 
 // Controle de Entrada / fila externa (SV02, print 03). Toda mudança aqui é
@@ -18,6 +19,16 @@ export default function StaffEntryControlScreen({ navigation }) {
   const { session, run, failNextAction, toggleFailNextAction } = useStaffDemo();
   const [dialog, setDialog] = useState(null);
   const [feedback, setFeedback] = useState(null);
+  const auth = useAuth();
+  const identityRevision = auth?.getIdentityRevision?.();
+  const openDialog = (value) => {
+    if (auth?.isIdentityVerified && !auth.isIdentityVerified()) return;
+    setDialog({ ...value, identityRevision: auth?.getIdentityRevision?.() });
+  };
+  useEffect(() => {
+    if (auth?.isInitializing || ['checking', 'error', 'unverified'].includes(auth?.identityStatus) ||
+        (dialog && dialog.identityRevision !== identityRevision)) setDialog(null);
+  }, [auth?.identityStatus, auth?.isInitializing, identityRevision, dialog]);
 
   if (!session) {
     return (
@@ -34,6 +45,7 @@ export default function StaffEntryControlScreen({ navigation }) {
   const next = entryQueue.waiting[0] ?? null;
 
   function apply(transition, ...args) {
+    if (auth?.isIdentityVerified && !auth.isIdentityVerified()) return;
     setDialog(null);
     const result = run(transition, ...args);
     // Repetição da mesma confirmação não sobrescreve o retorno da primeira.
@@ -51,7 +63,7 @@ export default function StaffEntryControlScreen({ navigation }) {
           </View>
           <Pressable
             style={[styles.pill, !entryQueue.active && styles.pillOff]}
-            onPress={entryQueue.active ? () => setDialog({ type: 'disable' }) : undefined}
+            onPress={entryQueue.active ? () => openDialog({ type: 'disable' }) : undefined}
             accessibilityRole="button"
             accessibilityLabel="Fila de acesso: Não"
             accessibilityState={{ selected: !entryQueue.active }}
@@ -113,7 +125,7 @@ export default function StaffEntryControlScreen({ navigation }) {
               <StaffButton
                 label="CONFIRMAR ENTRADA"
                 compact
-                onPress={() => setDialog({ type: 'confirm', participant })}
+                onPress={() => openDialog({ type: 'confirm', participant })}
               />
             ) : null}
           </View>
@@ -124,7 +136,7 @@ export default function StaffEntryControlScreen({ navigation }) {
         <StaffButton
           label="DESATIVAR FILA (LIBERA TODOS)"
           variant="danger"
-          onPress={() => setDialog({ type: 'disable' })}
+          onPress={() => openDialog({ type: 'disable' })}
           accessibilityHint="Abre uma confirmação. Na operação real, só Admin poderá executar."
         />
       ) : null}
@@ -138,6 +150,7 @@ export default function StaffEntryControlScreen({ navigation }) {
       <StaffDemoTools failNextAction={failNextAction} onToggleFailure={toggleFailNextAction} />
 
       <StaffConfirmDialog
+        openedAtRevision={dialog?.identityRevision}
         visible={dialog?.type === 'confirm'}
         title="Confirmar entrada?"
         message={dialog?.participant ? `${dialog.participant.name} será marcado(a) como dentro da Arena.` : ''}
@@ -148,6 +161,7 @@ export default function StaffEntryControlScreen({ navigation }) {
       />
 
       <StaffConfirmDialog
+        openedAtRevision={dialog?.identityRevision}
         visible={dialog?.type === 'disable'}
         title="Desativar a fila de acesso?"
         message={`Todos os ${entryQueue.waiting.length} participante(s) aguardando seriam liberados para a Arena.`}

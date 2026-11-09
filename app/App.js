@@ -7,6 +7,7 @@ import { useAuth } from './context/AuthContext';
 import { ParticipationProvider } from './context/ParticipationContext';
 import MainTabs from './navigation/MainTabs';
 import AuthSessionGate, { resolveInitialRouteForAuthState } from './screens/auth/AuthSessionGate';
+import RolePendingScreen from './screens/auth/RolePendingScreen';
 import EvaluationScreen from './screens/participation/EvaluationScreen';
 import RealEvaluationScreen from './screens/participation/RealEvaluationScreen';
 import EventConfirmationScreen from './screens/event-entry/EventConfirmationScreen';
@@ -36,6 +37,13 @@ export function AppNavigation() {
   const auth = useAuth();
   const isAuthenticated = Boolean(auth?.isAuthenticated);
   const initialRouteName = resolveInitialRouteForAuthState(auth);
+  const roleArea = initialRouteName === 'AdminPending' ? 'admin'
+    : initialRouteName === 'StaffPending' ? 'staff'
+      : initialRouteName === 'IdentityRecovery' ? 'recovery'
+      : isAuthenticated ? 'participant' : 'public';
+  const sessionKey = isAuthenticated
+    ? `${roleArea}:${auth?.user?.id || ''}:${auth?.getSessionEpoch?.() ?? ''}`
+    : 'public';
 
   const publicScreens = [
     { name: 'Welcome', component: WelcomeScreen },
@@ -80,14 +88,6 @@ export function AppNavigation() {
       },
     },
 
-    // Área Staff somente em modo de demonstração.
-    // Não concede permissão Staff real.
-    {
-      name: 'StaffDemo',
-      getComponent: () =>
-        require('./screens/staff/StaffDemoNavigator').default,
-    },
-
     // Avaliação real de uma participação finalizada.
     {
       name: 'RealEvaluation',
@@ -112,7 +112,13 @@ export function AppNavigation() {
 
   const availableScreens = !isAuthenticated
     ? publicScreens
-    : isQuestionnairePending
+    : roleArea === 'admin'
+      ? [{ name: 'AdminPending', component: RolePendingScreen }]
+      : roleArea === 'staff'
+        ? [{ name: 'StaffPending', component: RolePendingScreen }]
+        : roleArea === 'recovery'
+          ? [{ name: 'IdentityRecovery', component: RolePendingScreen }]
+        : isQuestionnairePending
       ? pendingQuestionnaireScreens
       : appScreens;
 
@@ -129,8 +135,8 @@ export function AppNavigation() {
       : availableScreens;
 
   return (
-    <ParticipationProvider>
-      <NavigationContainer>
+    <ParticipationProvider key={sessionKey}>
+      <NavigationContainer key={sessionKey}>
         <Stack.Navigator screenOptions={{ headerShown: false }}>
           {orderedScreens.map(({ name, component, getComponent, options }) => (
             <Stack.Screen
