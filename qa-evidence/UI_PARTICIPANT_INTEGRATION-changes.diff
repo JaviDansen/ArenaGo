@@ -2,9 +2,13 @@ diff --git a/app/App.js b/app/App.js
 index 87fb6c4..f692a07 100644
 --- a/app/App.js
 +++ b/app/App.js
-@@ -19,0 +20 @@ import WelcomeScreen from './screens/auth/WelcomeScreen';
+@@ -17,8 +17,20 @@ import ParticipationDetailsScreen from './screens/participation/ParticipationRea
+ import ProfileQuestionnaireScreen from './screens/profile/ProfileQuestionnaireScreen';
+ import RegisterScreen from './screens/auth/RegisterScreen';
+ import WelcomeScreen from './screens/auth/WelcomeScreen';
 +import { colors, typography } from './theme';
-@@ -21,0 +23,11 @@ const Stack = createNativeStackNavigator();
+ 
+ const Stack = createNativeStackNavigator();
 +const participantHeaderOptions = {
 +  headerStyle: { backgroundColor: colors.background.base },
 +  headerTintColor: colors.text.primary,
@@ -16,25 +20,56 @@ index 87fb6c4..f692a07 100644
 +  },
 +  headerShadowVisible: false,
 +};
-@@ -44,4 +56 @@ export function AppNavigation() {
+ 
+ export function AppNavigation() {
+   const auth = useAuth();
+@@ -41,23 +53,18 @@ export function AppNavigation() {
+     {
+       name: 'EventEntry',
+       component: EventEntryScreen,
 -      options: {
 -        headerShown: true,
 -        title: 'Entrar em um evento',
 -      },
 +      options: { headerShown: false, title: 'Entrar em um evento' },
-@@ -52,4 +61 @@ export function AppNavigation() {
+     },
+     {
+       name: 'EventConfirmation',
+       component: EventConfirmationScreen,
 -      options: {
 -        headerShown: true,
 -        title: 'Confirmar entrada',
 -      },
 +      options: { headerShown: false, title: 'Confirmar entrada' },
-@@ -60,0 +67 @@ export function AppNavigation() {
+     },
+     {
+       name: 'ParticipationDetails',
+       component: ParticipationDetailsScreen,
+       options: {
 +        ...participantHeaderOptions,
-@@ -68,0 +76 @@ export function AppNavigation() {
+         headerShown: true,
+         title: 'Detalhes da participação',
+       },
+@@ -66,6 +73,7 @@ export function AppNavigation() {
+       name: 'Evaluation',
+       component: EvaluationScreen,
+       options: {
 +        ...participantHeaderOptions,
-@@ -87,0 +96 @@ export function AppNavigation() {
+         headerShown: true,
+         headerBackVisible: false,
+         title: 'Avaliação',
+@@ -85,6 +93,7 @@ export function AppNavigation() {
+       name: 'RealEvaluation',
+       component: RealEvaluationScreen,
+       options: {
 +        ...participantHeaderOptions,
-@@ -149 +158 @@ export default function App() {
+         headerShown: true,
+         title: 'Avaliar evento',
+       },
+@@ -146,4 +155,4 @@ export default function App() {
+       </AuthSessionGate>
+     </SafeAreaProvider>
+   );
 -}
 \ No newline at end of file
 +}
@@ -48066,15 +48101,30 @@ diff --git a/app/components/BirthDateInput.native.js b/app/components/BirthDateI
 index 00f7a78..7fb8766 100644
 --- a/app/components/BirthDateInput.native.js
 +++ b/app/components/BirthDateInput.native.js
-@@ -119 +119 @@ export default function BirthDateInput({
+@@ -116,7 +116,7 @@ export default function BirthDateInput({
+               accessibilityViewIsModal
+               style={[
+                 styles.pickerPanel,
 -                { backgroundColor: fieldStyle.backgroundColor || '#141026' },
 +                { backgroundColor: fieldStyle.backgroundColor || '#131122' },
-@@ -173 +173,3 @@ const styles = StyleSheet.create({
+               ]}
+             >
+               <View style={styles.pickerHeader}>
+@@ -170,7 +170,9 @@ const styles = StyleSheet.create({
+     top: 0,
+     bottom: 0,
+     right: 4,
 -    width: 44,
 +    width: 48,
 +    minWidth: 48,
 +    minHeight: 48,
-@@ -198,2 +200,6 @@ const styles = StyleSheet.create({
+     alignItems: 'center',
+     justifyContent: 'center',
+   },
+@@ -195,8 +197,12 @@ const styles = StyleSheet.create({
+     justifyContent: 'flex-end',
+   },
+   backdrop: {
 -    ...StyleSheet.absoluteFillObject,
 -    backgroundColor: 'rgba(0, 0, 0, 0.5)',
 +    position: 'absolute',
@@ -48083,16 +48133,25 @@ index 00f7a78..7fb8766 100644
 +    bottom: 0,
 +    left: 0,
 +    backgroundColor: 'rgba(5, 5, 10, 0.72)',
+   },
+   pickerPanel: {
+     paddingHorizontal: 16,
 diff --git a/app/components/ParticipationCard.js b/app/components/ParticipationCard.js
 index 62373ea..0f67c34 100644
 --- a/app/components/ParticipationCard.js
 +++ b/app/components/ParticipationCard.js
-@@ -1 +1 @@
+@@ -1,5 +1,6 @@
 -import { Pressable, StyleSheet, Text } from 'react-native';
 +import { Pressable, StyleSheet, Text, View } from 'react-native';
-@@ -2,0 +3 @@ import { Pressable, StyleSheet, Text } from 'react-native';
+ 
 +import { colors, radii, spacing, typography } from '../theme';
-@@ -18,7 +19,8 @@ const EVALUATION_LABELS = {
+ import { EVALUATION_SITUATIONS } from '../utils/evaluation';
+ import {
+   formatParticipationDate,
+@@ -15,13 +16,14 @@ const EVALUATION_LABELS = {
+   [EVALUATION_SITUATIONS.NOT_FINISHED]: 'Em andamento · avaliação indisponível',
+ };
+ 
 -/**
 - * Item da lista de Minhas Participações.
 - *
@@ -48108,12 +48167,24 @@ index 62373ea..0f67c34 100644
 +};
 +
 +/** Item visual da lista. Todas as informações vêm do histórico real do servidor. */
-@@ -38,0 +41 @@ export default function ParticipationCard({ participation, onPress, evaluationSi
+ export default function ParticipationCard({ participation, onPress, evaluationSituation }) {
+   if (!participation || !Object.prototype.hasOwnProperty.call(participation, 'id')
+     || typeof participation.id !== 'string' || participation.id.trim() === '') {
+@@ -36,6 +38,7 @@ export default function ParticipationCard({ participation, onPress, evaluationSi
+   const evaluationLabel = Object.prototype.hasOwnProperty.call(EVALUATION_LABELS, evaluationSituation)
+     ? EVALUATION_LABELS[evaluationSituation]
+     : null;
 +  const evaluationColor = EVALUATION_COLORS[evaluationSituation];
-@@ -45,0 +49,2 @@ export default function ParticipationCard({ participation, onPress, evaluationSi
+ 
+   return (
+     <Pressable
+@@ -43,8 +46,17 @@ export default function ParticipationCard({ participation, onPress, evaluationSi
+       onPress={onPress}
+       disabled={!onPress}
+       accessibilityRole={onPress ? 'button' : undefined}
 +      accessibilityLabel={`${eventName}${date ? `, ${date}` : ''}`}
 +      accessibilityState={{ disabled: !onPress }}
-@@ -47 +52,8 @@ export default function ParticipationCard({ participation, onPress, evaluationSi
+     >
 -      <Text style={styles.eventName}>{eventName}</Text>
 +      <View style={styles.headingRow}>
 +        <Text style={styles.eventName}>{eventName}</Text>
@@ -48123,20 +48194,32 @@ index 62373ea..0f67c34 100644
 +          </View>
 +        ) : null}
 +      </View>
-@@ -55 +66,0 @@ export default function ParticipationCard({ participation, onPress, evaluationSi
+       {date ? <Text style={styles.info}>{date}</Text> : null}
+       {stayDuration ? (
+         <Text style={styles.info}>Permanência: {stayDuration}</Text>
+@@ -52,38 +64,53 @@ export default function ParticipationCard({ participation, onPress, evaluationSi
+         // Sem saída registrada não há permanência válida: não estimamos um valor.
+         <Text style={styles.infoMuted}>Permanência não registrada</Text>
+       )}
 -      {evaluationLabel ? <Text style={styles.evaluation}>{evaluationLabel}</Text> : null}
-@@ -62,2 +73,3 @@ const styles = StyleSheet.create({
+     </Pressable>
+   );
+ }
+ 
+ const styles = StyleSheet.create({
+   card: {
 -    borderColor: '#ddd',
 -    borderRadius: 4,
 +    backgroundColor: colors.background.surface,
 +    borderColor: colors.border.subtle,
 +    borderRadius: radii.xl,
-@@ -65,2 +77,2 @@ const styles = StyleSheet.create({
+     borderWidth: 1,
 -    marginTop: 12,
 -    padding: 12,
 +    marginTop: spacing.md,
 +    padding: spacing.layout.cardPadding,
-@@ -69 +81,8 @@ const styles = StyleSheet.create({
+   },
+   cardPressed: {
 -    opacity: 0.6,
 +    opacity: 0.82,
 +    borderColor: colors.brand.primaryLight,
@@ -48146,13 +48229,14 @@ index 62373ea..0f67c34 100644
 +    alignItems: 'flex-start',
 +    justifyContent: 'space-between',
 +    gap: spacing.sm,
-@@ -72,2 +91,3 @@ const styles = StyleSheet.create({
+   },
+   eventName: {
 -    fontSize: 16,
 -    fontWeight: 'bold',
 +    ...typography.titleSmall,
 +    color: colors.text.primary,
 +    flex: 1,
-@@ -75,3 +95,10 @@ const styles = StyleSheet.create({
+   },
 -  info: {
 -    fontSize: 14,
 -    marginTop: 4,
@@ -48166,7 +48250,7 @@ index 62373ea..0f67c34 100644
 +  badgeText: {
 +    ...typography.micro,
 +    fontWeight: '700',
-@@ -79,4 +106,4 @@ const styles = StyleSheet.create({
+   },
 -  evaluation: {
 -    fontSize: 14,
 -    fontWeight: 'bold',
@@ -48175,13 +48259,16 @@ index 62373ea..0f67c34 100644
 +    ...typography.bodySmall,
 +    color: colors.text.secondary,
 +    marginTop: spacing.sm,
-@@ -85,3 +112,3 @@ const styles = StyleSheet.create({
+   },
+   infoMuted: {
 -    color: '#777',
 -    fontSize: 14,
 -    marginTop: 4,
 +    ...typography.bodySmall,
 +    color: colors.text.muted,
 +    marginTop: spacing.sm,
+   },
+ });
 diff --git a/app/components/ui/AuthBackground.js b/app/components/ui/AuthBackground.js
 new file mode 100644
 index 0000000..665fea7
@@ -50340,12 +50427,18 @@ diff --git a/app/navigation/MainTabs.js b/app/navigation/MainTabs.js
 index fb2ada9..a8bb1db 100644
 --- a/app/navigation/MainTabs.js
 +++ b/app/navigation/MainTabs.js
-@@ -1,0 +2,2 @@ import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
+@@ -1,17 +1,332 @@
+ import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 +import { StyleSheet, Text, View } from 'react-native';
 +import * as SafeAreaContext from 'react-native-safe-area-context';
-@@ -5,0 +8 @@ import ProfileScreen from '../screens/profile/ProfileScreen';
+ 
+ import HomeFlowScreen from '../screens/home/HomeFlowScreen';
+ import ParticipationsScreen from '../screens/participation/ParticipationsRealScreen';
+ import ProfileScreen from '../screens/profile/ProfileScreen';
 +import { colors, radii, spacing, typography } from '../theme';
-@@ -8,0 +12,102 @@ const Tab = createBottomTabNavigator();
+ 
+ const Tab = createBottomTabNavigator();
+ 
 +/**
 + * Ícone profissional de Casa (Home) desenhado com Views nativas.
 + * Mesma espessura (1.8dp), proporção e bounding box (20x20dp) dos demais ícones.
@@ -50448,7 +50541,7 @@ index fb2ada9..a8bb1db 100644
 +  );
 +}
 +
-@@ -9,0 +115,15 @@ export default function MainTabs() {
+ export default function MainTabs() {
 +  let insets = { bottom: 0, top: 0, left: 0, right: 0 };
 +  if (typeof SafeAreaContext?.useSafeAreaInsets === 'function') {
 +    try {
@@ -50464,7 +50557,7 @@ index fb2ada9..a8bb1db 100644
 +  const dynamicTabHeight = 60 + bottomInset;
 +  const dynamicPaddingBottom = bottomInset > 0 ? bottomInset : spacing.xs;
 +
-@@ -11,4 +131,47 @@ export default function MainTabs() {
+   return (
 -    <Tab.Navigator>
 -      <Tab.Screen name="Início" component={HomeFlowScreen} />
 -      <Tab.Screen name="Eventos" component={ParticipationsScreen} />
@@ -50516,7 +50609,9 @@ index fb2ada9..a8bb1db 100644
 +          tabBarIcon: ({ focused }) => <TabBarIcon focused={focused} name="profile" symbol="👤" />,
 +        }}
 +      />
-@@ -17,0 +181,152 @@ export default function MainTabs() {
+     </Tab.Navigator>
+   );
+ }
 +
 +const iconStyles = StyleSheet.create({
 +  container: {
@@ -50673,17 +50768,28 @@ diff --git a/app/screens/arena/RealArenaScreen.js b/app/screens/arena/RealArenaS
 index 33f19f3..54233be 100644
 --- a/app/screens/arena/RealArenaScreen.js
 +++ b/app/screens/arena/RealArenaScreen.js
-@@ -2,0 +3 @@ import { useFocusEffect } from '@react-navigation/native';
+@@ -1,13 +1,15 @@
+ import { useCallback, useMemo, useRef, useState } from 'react';
+ import { useFocusEffect } from '@react-navigation/native';
 +import { StatusBar } from 'expo-status-bar';
-@@ -4 +5 @@ import * as Crypto from 'expo-crypto';
+ import * as Crypto from 'expo-crypto';
 -import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 +import { ActivityIndicator, Alert, ScrollView, StyleSheet, Text, View } from 'react-native';
-@@ -6 +7 @@ import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View
+ 
 -import ScreenContainer from '../../components/ScreenContainer';
 +import { AuthBackground, Badge, Button, Card, ScreenHeader } from '../../components/ui';
-@@ -10,0 +12 @@ import { createParticipationActionCoordinator, describeParticipationActionError
+ import { useAuth } from '../../context/AuthContext';
+ import { createArenaQueueCoordinator, describeArenaError } from '../../services/arenaQueueService';
+ import { defaultArenaQueueIntentStorage } from '../../services/arenaQueueIntentStorage';
+ import { createParticipationActionCoordinator, describeParticipationActionError } from '../../services/participationActionService';
 +import { colors, spacing, typography } from '../../theme';
-@@ -115,7 +117,27 @@ export default function RealArenaScreen({ participation, refreshParticipation })
+ 
+ /** Tela real de participação ativa. Sem alterações de domínio feitas em estado React. */
+ export default function RealArenaScreen({ participation, refreshParticipation }) {
+@@ -112,27 +114,49 @@ export default function RealArenaScreen({ participation, refreshParticipation })
+   const lockActions = busy || loading || Boolean(entry) || Boolean(pending);
+ 
+   return (
 -    <ScreenContainer>
 -      <ScrollView contentContainerStyle={styles.body}>
 -        <Text style={styles.heading}>Minha Arena</Text>
@@ -50718,18 +50824,32 @@ index 33f19f3..54233be 100644
 +            <Text style={styles.notice}>{notice}</Text>
 +          </View>
 +        ) : null}
-@@ -124 +146,2 @@ export default function RealArenaScreen({ participation, refreshParticipation })
+ 
+         {entry ? (
 -          <View style={styles.highlight}>
 +          <Card variant="highlight" style={styles.highlight}>
 +            <Badge label={entry.status === 'waiting' ? 'NA FILA' : 'SUA VEZ'} variant="brand" />
-@@ -131 +154 @@ export default function RealArenaScreen({ participation, refreshParticipation })
+             <Text style={styles.sectionTitle}>{entry.status === 'waiting' ? 'Você está na fila' : 'É a sua vez!'}</Text>
+             <Text style={styles.line}>{entry.experienceName}</Text>
+             {entry.status === 'waiting'
+               ? <Text style={styles.position}>Posição {entry.position}º</Text>
+               : <Text style={styles.position}>Dirija-se à estação: {entry.stationLabel}</Text>}
+             <Text style={styles.note}>A posição e a chamada são atualizadas ao tocar em “Atualizar”.</Text>
 -          </View>
 +          </Card>
-@@ -135 +158,2 @@ export default function RealArenaScreen({ participation, refreshParticipation })
+         ) : null}
+ 
+         {!entry && pending ? (
 -          <View style={styles.highlight}>
 +          <Card variant="elevated" style={styles.highlight}>
 +            <Badge label="TENTATIVA PENDENTE" variant="warning" />
-@@ -143,3 +167,7 @@ export default function RealArenaScreen({ participation, refreshParticipation })
+             <Text style={styles.sectionTitle}>Tentativa anterior não confirmada</Text>
+             <Text style={styles.line}>
+               {hasOtherPending
+@@ -140,67 +164,88 @@ export default function RealArenaScreen({ participation, refreshParticipation })
+                 : 'Atualize a fila antes de tentar novamente. A mesma chave de operação será reutilizada.'}
+             </Text>
+             {pendingHere ? (
 -              <Pressable disabled={busy || loading} style={styles.button} onPress={() => join(pending.experienceId)}>
 -                <Text style={styles.buttonText}>Conferir / repetir a mesma tentativa</Text>
 -              </Pressable>
@@ -50740,17 +50860,21 @@ index 33f19f3..54233be 100644
 +                onPress={() => join(pending.experienceId)}
 +                style={styles.actionButton}
 +              />
-@@ -147 +175 @@ export default function RealArenaScreen({ participation, refreshParticipation })
+             ) : null}
 -          </View>
 +          </Card>
-@@ -151 +179,5 @@ export default function RealArenaScreen({ participation, refreshParticipation })
+         ) : null}
+ 
+         <Text style={styles.sectionTitle}>Experiências disponíveis</Text>
 -        {state?.experiences.length === 0 ? <Text style={styles.line}>Nenhuma experiência cadastrada.</Text> : null}
 +        {state?.experiences.length === 0 ? (
 +          <Card variant="default" style={styles.card}>
 +            <Text style={styles.line}>Nenhuma experiência cadastrada.</Text>
 +          </Card>
 +        ) : null}
-@@ -155,2 +187,5 @@ export default function RealArenaScreen({ participation, refreshParticipation })
+         {state?.experiences.map((experience) => {
+           const permitted = state.acceptingNewQueueEntries && experience.acceptingNewQueueEntries;
+           return (
 -            <View key={experience.id} style={styles.card}>
 -              <Text style={styles.cardTitle}>{experience.name}</Text>
 +            <Card key={experience.id} variant="default" style={styles.card}>
@@ -50758,7 +50882,9 @@ index 33f19f3..54233be 100644
 +                <Text style={styles.cardTitle}>{experience.name}</Text>
 +                <Badge label={permitted ? 'ABERTA' : 'ENCERRADA'} variant={permitted ? 'success' : 'default'} size="sm" />
 +              </View>
-@@ -160,4 +195,7 @@ export default function RealArenaScreen({ participation, refreshParticipation })
+               <Text style={styles.line}>{experience.waitingCount} pessoa(s) aguardando</Text>
+               <Text style={styles.note}>{permitted ? 'Recebendo entradas' : 'Entrada na fila encerrada'}</Text>
+               {!entry && !pending && permitted ? (
 -                <Pressable disabled={lockActions} style={[styles.button, lockActions && styles.disabled]}
 -                  onPress={() => join(experience.id)}>
 -                  <Text style={styles.buttonText}>{busy ? 'Verificando...' : 'Entrar na fila'}</Text>
@@ -50770,10 +50896,11 @@ index 33f19f3..54233be 100644
 +                  onPress={() => join(experience.id)}
 +                  style={styles.actionButton}
 +                />
-@@ -165 +203 @@ export default function RealArenaScreen({ participation, refreshParticipation })
+               ) : null}
 -            </View>
 +            </Card>
-@@ -168,11 +206,20 @@ export default function RealArenaScreen({ participation, refreshParticipation })
+           );
+         })}
 -        <Pressable disabled={busy} style={[styles.secondaryButton, busy && styles.disabled]} onPress={refresh}>
 -          <Text style={styles.secondaryText}>{loading ? 'Consultando...' : 'Atualizar fila e experiências'}</Text>
 -        </Pressable>
@@ -50805,10 +50932,17 @@ index 33f19f3..54233be 100644
 +          onPress={finish}
 +          style={styles.actionButton}
 +        />
-@@ -184 +231 @@ export default function RealArenaScreen({ participation, refreshParticipation })
+         <Text style={styles.note}>
+           Chamada e conclusão são realizadas pelo Staff. Este aplicativo não simula atendimento
+           nem permite cancelar somente a fila.
+         </Text>
+       </ScrollView>
 -    </ScreenContainer>
 +    </AuthBackground>
-@@ -189,17 +236,15 @@ const styles = StyleSheet.create({
+   );
+ }
+ 
+ const styles = StyleSheet.create({
 -  body: { padding: 16, paddingBottom: 40 },
 -  heading: { fontSize: 25, fontWeight: '700', color: '#111827' },
 -  sub: { color: '#6b7280', marginTop: 6, marginBottom: 16 },
@@ -50841,11 +50975,13 @@ index 33f19f3..54233be 100644
 +  error: { ...typography.body, color: '#FF9AAE', marginTop: spacing.sm },
 +  noticeCard: { borderColor: colors.semantic.success, borderWidth: 1, backgroundColor: colors.semantic.successBg, borderRadius: 12, padding: spacing.lg, marginBottom: spacing.md },
 +  notice: { ...typography.body, color: colors.text.primary, marginTop: spacing.sm },
+ });
 diff --git a/app/screens/auth/ForgotPasswordScreen.js b/app/screens/auth/ForgotPasswordScreen.js
 index 1918328..dd7b7be 100644
 --- a/app/screens/auth/ForgotPasswordScreen.js
 +++ b/app/screens/auth/ForgotPasswordScreen.js
-@@ -2,2 +2,8 @@ import { StatusBar } from 'expo-status-bar';
+@@ -1,147 +1,149 @@
+ import { StatusBar } from 'expo-status-bar';
 -import { Pressable, StyleSheet, Text, View } from 'react-native';
 -import { SafeAreaView } from 'react-native-safe-area-context';
 +import { ScrollView, StyleSheet, Text, View } from 'react-native';
@@ -50856,7 +50992,8 @@ index 1918328..dd7b7be 100644
 +import { Card } from '../../components/ui/Card';
 +import { ScreenHeader } from '../../components/ui/ScreenHeader';
 +import { colors, spacing, typography } from '../../theme';
-@@ -6,4 +12,5 @@ import { SafeAreaView } from 'react-native-safe-area-context';
+ 
+ // =============================================================================
 -// ESTRUTURA PROVISÓRIA (TASK 2):
 -// A recuperação de senha real depende da tecnologia de autenticação e backend
 -// que ainda será definida pela equipe. Mantemos a tela/acesso provisório criado
@@ -50866,7 +51003,8 @@ index 1918328..dd7b7be 100644
 +// de mensageria. Esta tela aplica o Design System oficial mantendo explícita
 +// a indisponibilidade atual do envio de e-mail, sem simular envio ou exibir
 +// confirmação falsa.
-@@ -11,0 +19,8 @@ export default function ForgotPasswordScreen({ navigation }) {
+ // =============================================================================
+ export default function ForgotPasswordScreen({ navigation }) {
 +  function handleReturnToLogin() {
 +    if (navigation && typeof navigation.goBack === 'function') {
 +      navigation.goBack();
@@ -50875,10 +51013,11 @@ index 1918328..dd7b7be 100644
 +    }
 +  }
 +
-@@ -13 +28 @@ export default function ForgotPasswordScreen({ navigation }) {
+   return (
 -    <SafeAreaView style={styles.container}>
 +    <AuthBackground variant="forgotPassword" testID="forgot-password-background">
-@@ -16,13 +31,5 @@ export default function ForgotPasswordScreen({ navigation }) {
+       <StatusBar style="light" />
+ 
 -      {/* Header com botão de voltar e marca centralizada */}
 -      <View style={styles.header}>
 -        <Pressable
@@ -50897,7 +51036,7 @@ index 1918328..dd7b7be 100644
 +        onBack={handleReturnToLogin}
 +        testID="forgot-password-header"
 +      />
-@@ -30,6 +37,13 @@ export default function ForgotPasswordScreen({ navigation }) {
+ 
 -      <View style={styles.content}>
 -        <Text style={styles.tag}>RECUPERAÇÃO</Text>
 -        <Text style={styles.title}>Recuperar acesso</Text>
@@ -50917,7 +51056,7 @@ index 1918328..dd7b7be 100644
 +              A redefinição automática de senha estará disponível em uma próxima etapa do projeto.
 +            </Text>
 +          </View>
-@@ -37,5 +51,23 @@ export default function ForgotPasswordScreen({ navigation }) {
+ 
 -        <View style={styles.card}>
 -          <Text style={styles.cardBadge}>EM CONSTRUÇÃO</Text>
 -          <Text style={styles.cardText}>
@@ -50946,7 +51085,8 @@ index 1918328..dd7b7be 100644
 +              Caso precise de auxílio imediato durante o evento, procure a equipe de atendimento presencial na ArenaGO.
 +            </Text>
 +          </Card>
-@@ -44,8 +76,11 @@ export default function ForgotPasswordScreen({ navigation }) {
+         </View>
+ 
 -        <Pressable
 -          style={styles.primaryButton}
 -          onPress={() => navigation.goBack()}
@@ -50966,25 +51106,28 @@ index 1918328..dd7b7be 100644
 +        />
 +      </ScrollView>
 +    </AuthBackground>
-@@ -56 +91 @@ const styles = StyleSheet.create({
+   );
+ }
+ 
+ const styles = StyleSheet.create({
 -  container: {
 +  scrollView: {
-@@ -58 +93 @@ const styles = StyleSheet.create({
+     flex: 1,
 -    backgroundColor: '#0c0a17',
 +    backgroundColor: 'transparent',
-@@ -60,3 +95,2 @@ const styles = StyleSheet.create({
+   },
 -  header: {
 -    flexDirection: 'row',
 -    alignItems: 'center',
 +  scrollContent: {
 +    flexGrow: 1,
-@@ -64,2 +98,3 @@ const styles = StyleSheet.create({
+     justifyContent: 'space-between',
 -    paddingHorizontal: 20,
 -    paddingVertical: 12,
 +    paddingHorizontal: spacing.layout.screenPaddingHorizontal,
 +    paddingTop: spacing.sm,
 +    paddingBottom: spacing.xxl,
-@@ -67,7 +102,2 @@ const styles = StyleSheet.create({
+   },
 -  backButton: {
 -    width: 40,
 -    height: 40,
@@ -50994,7 +51137,7 @@ index 1918328..dd7b7be 100644
 -    borderColor: '#34265a',
 +  mainSection: {
 +    flexGrow: 1,
-@@ -75,12 +105 @@ const styles = StyleSheet.create({
+     justifyContent: 'center',
 -    alignItems: 'center',
 -  },
 -  backButtonText: {
@@ -51008,13 +51151,13 @@ index 1918328..dd7b7be 100644
 -    fontWeight: '700',
 -    letterSpacing: 1.5,
 +    paddingVertical: spacing.sm,
-@@ -88,2 +107,3 @@ const styles = StyleSheet.create({
+   },
 -  headerPlaceholder: {
 -    width: 40,
 +  heroHeader: {
 +    marginBottom: spacing.lg,
 +    gap: spacing.xxs,
-@@ -91,11 +111,4 @@ const styles = StyleSheet.create({
+   },
 -  content: {
 -    flex: 1,
 -    paddingHorizontal: 24,
@@ -51030,21 +51173,23 @@ index 1918328..dd7b7be 100644
 +    ...typography.tag,
 +    color: colors.brand.primaryLight,
 +    marginBottom: spacing.xxs,
-@@ -104,4 +117,2 @@ const styles = StyleSheet.create({
+   },
+   title: {
 -    color: '#ffffff',
 -    fontSize: 28,
 -    fontWeight: '800',
 -    marginBottom: 8,
 +    ...typography.hero,
 +    color: colors.text.primary,
-@@ -110,4 +121,2 @@ const styles = StyleSheet.create({
+   },
+   subtitle: {
 -    color: '#9ca3af',
 -    fontSize: 15,
 -    lineHeight: 22,
 -    marginBottom: 28,
 +    ...typography.body,
 +    color: colors.text.secondary,
-@@ -115,7 +124,4 @@ const styles = StyleSheet.create({
+   },
 -  card: {
 -    backgroundColor: '#141026',
 -    borderWidth: 1,
@@ -51056,7 +51201,7 @@ index 1918328..dd7b7be 100644
 +    backgroundColor: 'rgba(11, 11, 18, 0.86)',
 +    borderColor: colors.border.glass,
 +    gap: spacing.md,
-@@ -123,6 +129,6 @@ const styles = StyleSheet.create({
+   },
 -  cardBadge: {
 -    color: '#c084fc',
 -    fontSize: 11,
@@ -51069,13 +51214,14 @@ index 1918328..dd7b7be 100644
 +  cardTitle: {
 +    ...typography.titleMedium,
 +    color: colors.text.primary,
-@@ -131,3 +137,2 @@ const styles = StyleSheet.create({
+   },
+   cardText: {
 -    color: '#94a3b8',
 -    fontSize: 14,
 -    lineHeight: 20,
 +    ...typography.body,
 +    color: colors.text.secondary,
-@@ -135,6 +140,4 @@ const styles = StyleSheet.create({
+   },
 -  primaryButton: {
 -    backgroundColor: '#7c3aed',
 -    height: 52,
@@ -51086,7 +51232,7 @@ index 1918328..dd7b7be 100644
 +    height: 1,
 +    backgroundColor: colors.border.subtle,
 +    marginVertical: spacing.xxs,
-@@ -142,4 +145,3 @@ const styles = StyleSheet.create({
+   },
 -  primaryButtonText: {
 -    color: '#ffffff',
 -    fontSize: 16,
@@ -51094,29 +51240,59 @@ index 1918328..dd7b7be 100644
 +  cardHint: {
 +    ...typography.bodySmall,
 +    color: colors.text.muted,
+   },
+ });
 diff --git a/app/screens/auth/LoginScreen.js b/app/screens/auth/LoginScreen.js
 index 3622131..f97f802 100644
 --- a/app/screens/auth/LoginScreen.js
 +++ b/app/screens/auth/LoginScreen.js
-@@ -10 +9,0 @@ import {
+@@ -7,12 +7,16 @@ import {
+   ScrollView,
+   StyleSheet,
+   Text,
 -  TextInput,
-@@ -13 +11,0 @@ import {
+   View,
+ } from 'react-native';
 -import { SafeAreaView } from 'react-native-safe-area-context';
-@@ -14,0 +13,5 @@ import { SafeAreaView } from 'react-native-safe-area-context';
+ 
 +import { AuthBackground } from '../../components/ui/AuthBackground';
 +import { Button, MIN_TOUCH_TARGET } from '../../components/ui/Button';
 +import { Card } from '../../components/ui/Card';
 +import { InputField } from '../../components/ui/InputField';
 +import { ScreenHeader } from '../../components/ui/ScreenHeader';
-@@ -15,0 +19 @@ import { AuthContext } from '../../context/AuthContext';
+ import { AuthContext } from '../../context/AuthContext';
 +import { colors, radii, spacing, typography } from '../../theme';
-@@ -26,0 +31 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
+ import { validateLoginForm } from '../../utils/validation';
+ 
+ export default function LoginScreen({ navigation, route, auth: propAuth }) {
+@@ -24,6 +28,7 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
+ 
+   const [email, setEmail] = useState(initialEmail);
+   const [password, setPassword] = useState('');
 +  const [showPassword, setShowPassword] = useState(false);
-@@ -53,0 +59 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
+   const [errors, setErrors] = useState({});
+   const [authError, setAuthError] = useState('');
+   const [twoFactorCode, setTwoFactorCode] = useState('');
+@@ -51,6 +56,7 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
+       setIsSubmitting(false);
+       setTwoFactorCode('');
+       setPassword('');
 +      setShowPassword(false);
-@@ -66,0 +73 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
+       setAuthError('');
+     });
+     return () => { unsubscribe?.(); cancel(); };
+@@ -64,6 +70,7 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
+     setTwoFactorCode('');
+     setAuthError('');
+     setPassword('');
 +    setShowPassword(false);
-@@ -221,0 +229,19 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
+   }
+ 
+   async function handleVerifyTwoFactor() {
+@@ -219,93 +226,136 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
+     }
+   }
+ 
 +  const passwordToggle = (
 +    <Pressable
 +      onPress={() => setShowPassword((prev) => !prev)}
@@ -51136,10 +51312,11 @@ index 3622131..f97f802 100644
 +    </Pressable>
 +  );
 +
-@@ -223 +249 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
+   return (
 -    <SafeAreaView style={styles.container}>
 +    <AuthBackground variant="login" testID="login-background">
-@@ -226,13 +252,5 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
+       <StatusBar style="light" />
+ 
 -      {/* Header com botão de voltar e marca centralizada */}
 -      <View style={styles.header}>
 -        <Pressable
@@ -51158,11 +51335,17 @@ index 3622131..f97f802 100644
 +        onBack={() => { handleCancelTwoFactor(); if (!challenge) navigation.goBack(); }}
 +        testID="login-header"
 +      />
-@@ -244,0 +263 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
+ 
+       <KeyboardAvoidingView
+         style={styles.keyboardView}
+         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+       >
+         <ScrollView
 +          style={styles.scrollView}
-@@ -246,0 +266 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
+           contentContainerStyle={styles.scrollContent}
+           keyboardShouldPersistTaps="handled"
 +          showsVerticalScrollIndicator={false}
-@@ -248,37 +268,55 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
+         >
 -          {/* Cabeçalho textual */}
 -          <Text style={styles.tag}>ACESSO</Text>
 -          <Text style={styles.title}>De volta ao jogo.</Text>
@@ -51255,7 +51438,7 @@ index 3622131..f97f802 100644
 +                        label="Código TOTP"
 +                        placeholder="Código de seis dígitos"
 +                        value={twoFactorCode}
-@@ -286,19 +324,31 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
+                         onChangeText={(text) => { setTwoFactorCode(text.replace(/\D/g, '').slice(0, 6)); setAuthError(''); }}
 -                        keyboardType="number-pad" maxLength={6} autoCorrect={false}
 -                        textContentType="oneTimeCode" editable={!isSubmitting} accessibilityLabel="Código TOTP" />
 -                    </View>
@@ -51306,19 +51489,26 @@ index 3622131..f97f802 100644
 +              <InputField
 +                label="E-mail"
 +                required
-@@ -306 +355,0 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
+                 placeholder="seu.email@exemplo.com"
 -                placeholderTextColor="#64748b"
-@@ -308,0 +358 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
+                 value={email}
+                 editable={!isSubmitting}
 +                error={errors.email}
-@@ -320,0 +371,2 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
+                 onChangeText={(text) => {
+                   setEmail(text);
+                   if (errors.email) {
+@@ -318,20 +368,17 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
+                 keyboardType="email-address"
+                 autoCapitalize="none"
+                 autoCorrect={false}
 +                containerStyle={styles.fieldContainer}
 +                testID="login-email-input"
-@@ -322,4 +373,0 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
+               />
 -              {errors.email ? (
 -                <Text style={styles.errorText}>{errors.email}</Text>
 -              ) : null}
 -            </View>
-@@ -327,4 +375,3 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
+ 
 -            <View style={styles.inputGroup}>
 -              <Text style={styles.label}>Senha</Text>
 -              <TextInput
@@ -51326,22 +51516,29 @@ index 3622131..f97f802 100644
 +              <InputField
 +                label="Senha"
 +                required
-@@ -332 +378,0 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
+                 placeholder="Digite sua senha"
 -                placeholderTextColor="#64748b"
-@@ -334,0 +381 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
+                 value={password}
+                 editable={!isSubmitting}
 +                error={errors.password}
-@@ -344 +391,4 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
+                 onChangeText={(text) => {
+                   setPassword(text);
+                   if (errors.password) {
+@@ -341,226 +388,194 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
+                     setAuthError('');
+                   }
+                 }}
 -                secureTextEntry
 +                secureTextEntry={!showPassword}
 +                rightIcon={passwordToggle}
 +                containerStyle={styles.fieldContainer}
 +                testID="login-password-input"
-@@ -346,4 +395,0 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
+               />
 -              {errors.password ? (
 -                <Text style={styles.errorText}>{errors.password}</Text>
 -              ) : null}
 -            </View>
-@@ -351,7 +397,31 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
+ 
 -            <Pressable
 -              style={styles.forgotPasswordContainer}
 -              onPress={() => navigation.navigate('ForgotPassword')}
@@ -51380,7 +51577,7 @@ index 3622131..f97f802 100644
 +                </>
 +              )}
 +            </View>
-@@ -359,3 +429,8 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
+ 
 -            <Pressable
 -              style={[styles.primaryButton, isSubmitting ? styles.primaryButtonDisabled : null]}
 -              onPress={handleLogin}
@@ -51392,18 +51589,19 @@ index 3622131..f97f802 100644
 +                pressed && !isSubmitting && styles.pressedControl,
 +              ]}
 +              onPress={() => navigation.navigate('Register')}
-@@ -363 +438,4 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
+               disabled={isSubmitting}
 -              accessibilityLabel="Entrar na conta"
 +              accessibilityRole="button"
 +              accessibilityLabel="Ainda não tem cadastro? Crie sua conta"
 +              accessibilityState={{ disabled: isSubmitting }}
 +              testID="login-switch-register-button"
-@@ -365,2 +443,2 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
+             >
 -              <Text style={styles.primaryButtonText}>
 -                {isSubmitting ? 'Entrando...' : 'Entrar na conta'}
 +              <Text style={styles.switchAuthText}>
 +                Ainda não tem cadastro? Crie sua conta
-@@ -369,14 +447 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
+               </Text>
+             </Pressable>
 -              </>
 -            )}
 -          </View>
@@ -51419,17 +51617,22 @@ index 3622131..f97f802 100644
 -            </Text>
 -          </Pressable> : null}
 +            : null}
-@@ -385 +450 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
+         </ScrollView>
+       </KeyboardAvoidingView>
 -    </SafeAreaView>
 +    </AuthBackground>
-@@ -390,4 +454,0 @@ const styles = StyleSheet.create({
+   );
+ }
+ 
+ const styles = StyleSheet.create({
 -  container: {
 -    flex: 1,
 -    backgroundColor: '#0c0a17',
 -  },
-@@ -395,0 +457 @@ const styles = StyleSheet.create({
+   keyboardView: {
+     flex: 1,
 +    backgroundColor: 'transparent',
-@@ -397,30 +459,3 @@ const styles = StyleSheet.create({
+   },
 -  header: {
 -    flexDirection: 'row',
 -    alignItems: 'center',
@@ -51463,7 +51666,8 @@ index 3622131..f97f802 100644
 +  scrollView: {
 +    flex: 1,
 +    backgroundColor: 'transparent',
-@@ -429,3 +464,9 @@ const styles = StyleSheet.create({
+   },
+   scrollContent: {
 -    paddingHorizontal: 24,
 -    paddingTop: 16,
 -    paddingBottom: 40,
@@ -51476,7 +51680,7 @@ index 3622131..f97f802 100644
 +  heroHeader: {
 +    marginBottom: spacing.lg,
 +    gap: spacing.xxs,
-@@ -433,6 +474,4 @@ const styles = StyleSheet.create({
+   },
 -  tag: {
 -    color: '#a78bfa',
 -    fontSize: 12,
@@ -51487,14 +51691,16 @@ index 3622131..f97f802 100644
 +    ...typography.tag,
 +    color: colors.brand.primaryLight,
 +    marginBottom: spacing.xxs,
-@@ -441,4 +480,2 @@ const styles = StyleSheet.create({
+   },
+   title: {
 -    color: '#ffffff',
 -    fontSize: 28,
 -    fontWeight: '800',
 -    marginBottom: 8,
 +    ...typography.hero,
 +    color: colors.text.primary,
-@@ -447,9 +484,2 @@ const styles = StyleSheet.create({
+   },
+   subtitle: {
 -    color: '#94a3b8',
 -    fontSize: 15,
 -    marginBottom: 28,
@@ -51506,7 +51712,7 @@ index 3622131..f97f802 100644
 -    gap: 8,
 +    ...typography.body,
 +    color: colors.text.secondary,
-@@ -457,7 +487,2 @@ const styles = StyleSheet.create({
+   },
 -  label: {
 -    color: '#94a3b8',
 -    fontSize: 14,
@@ -51516,7 +51722,7 @@ index 3622131..f97f802 100644
 -    backgroundColor: '#141026',
 +  formSurface: {
 +    backgroundColor: 'rgba(11, 11, 18, 0.84)',
-@@ -465,6 +490,4 @@ const styles = StyleSheet.create({
+     borderWidth: 1,
 -    borderColor: '#2a2046',
 -    borderRadius: 12,
 -    height: 52,
@@ -51527,12 +51733,12 @@ index 3622131..f97f802 100644
 +    borderRadius: radii.xl,
 +    padding: spacing.xl,
 +    gap: spacing.md,
-@@ -472,2 +495,2 @@ const styles = StyleSheet.create({
+   },
 -  inputError: {
 -    borderColor: '#ef4444',
 +  fieldContainer: {
 +    marginBottom: 0,
-@@ -475,5 +498,6 @@ const styles = StyleSheet.create({
+   },
 -  errorText: {
 -    color: '#f87171',
 -    fontSize: 12,
@@ -51544,7 +51750,7 @@ index 3622131..f97f802 100644
 +    paddingHorizontal: spacing.xs,
 +    alignItems: 'center',
 +    justifyContent: 'center',
-@@ -481,8 +505,8 @@ const styles = StyleSheet.create({
+   },
 -  sessionNoticeContainer: {
 -    backgroundColor: '#1e1b4b',
 -    borderWidth: 1,
@@ -51561,16 +51767,17 @@ index 3622131..f97f802 100644
 +  sessionNoticeCard: {
 +    backgroundColor: colors.semantic.infoBg,
 +    borderColor: colors.semantic.info,
-@@ -491,3 +515,3 @@ const styles = StyleSheet.create({
+   },
+   sessionNoticeText: {
 -    color: '#c7d2fe',
 -    fontSize: 13,
 -    fontWeight: '600',
 +    ...typography.bodySmall,
 +    color: colors.text.primary,
 +    fontWeight: typography.weights.semiBold,
-@@ -495 +518,0 @@ const styles = StyleSheet.create({
+     textAlign: 'center',
 -    lineHeight: 18,
-@@ -497,8 +520,4 @@ const styles = StyleSheet.create({
+   },
 -  twoFactorContainer: {
 -    backgroundColor: '#2c1f0f',
 -    borderWidth: 1,
@@ -51583,20 +51790,22 @@ index 3622131..f97f802 100644
 +    backgroundColor: colors.semantic.warningBg,
 +    borderColor: colors.semantic.warning,
 +    gap: spacing.xs,
-@@ -507,3 +526,3 @@ const styles = StyleSheet.create({
+   },
+   twoFactorTitle: {
 -    color: '#fcd34d',
 -    fontSize: 14,
 -    fontWeight: '700',
 +    ...typography.body,
 +    color: colors.semantic.warning,
 +    fontWeight: typography.weights.bold,
-@@ -512,3 +531,2 @@ const styles = StyleSheet.create({
+   },
+   twoFactorText: {
 -    color: '#fde68a',
 -    fontSize: 13,
 -    lineHeight: 18,
 +    ...typography.bodySmall,
 +    color: colors.text.primary,
-@@ -516,8 +534,3 @@ const styles = StyleSheet.create({
+   },
 -  authErrorContainer: {
 -    backgroundColor: '#2a121d',
 -    borderWidth: 1,
@@ -51608,14 +51817,18 @@ index 3622131..f97f802 100644
 +  authErrorCard: {
 +    backgroundColor: colors.semantic.dangerBg,
 +    borderColor: colors.semantic.danger,
-@@ -526,3 +539,3 @@ const styles = StyleSheet.create({
+   },
+   authErrorText: {
 -    color: '#fca5a5',
 -    fontSize: 14,
 -    fontWeight: '600',
 +    ...typography.body,
 +    color: colors.semantic.danger,
 +    fontWeight: typography.weights.semiBold,
-@@ -533,11 +546,2 @@ const styles = StyleSheet.create({
+     textAlign: 'center',
+   },
+   forgotPasswordContainer: {
+     alignSelf: 'flex-end',
 -    paddingVertical: 4,
 -  },
 -  forgotPasswordText: {
@@ -51629,36 +51842,38 @@ index 3622131..f97f802 100644
 -    borderRadius: 14,
 +    minHeight: MIN_TOUCH_TARGET,
 +    minWidth: MIN_TOUCH_TARGET,
-@@ -545,2 +549 @@ const styles = StyleSheet.create({
+     justifyContent: 'center',
 -    alignItems: 'center',
 -    marginTop: 8,
 +    paddingHorizontal: spacing.xs,
-@@ -548,2 +551,4 @@ const styles = StyleSheet.create({
+   },
 -  primaryButtonDisabled: {
 -    opacity: 0.65,
 +  forgotPasswordText: {
 +    ...typography.body,
 +    color: colors.brand.primaryLight,
 +    fontWeight: typography.weights.semiBold,
-@@ -551,4 +556,2 @@ const styles = StyleSheet.create({
+   },
 -  primaryButtonText: {
 -    color: '#ffffff',
 -    fontSize: 16,
 -    fontWeight: '700',
 +  submitButton: {
 +    marginTop: spacing.xxs,
-@@ -557 +560,3 @@ const styles = StyleSheet.create({
+   },
+   switchAuthContainer: {
 -    marginTop: 36,
 +    marginTop: spacing.lg,
 +    minHeight: MIN_TOUCH_TARGET,
 +    minWidth: MIN_TOUCH_TARGET,
-@@ -559 +564,4 @@ const styles = StyleSheet.create({
+     alignItems: 'center',
 -    paddingVertical: 8,
 +    justifyContent: 'center',
 +    paddingVertical: spacing.sm,
 +    paddingHorizontal: spacing.md,
 +    borderRadius: radii.lg,
-@@ -562,3 +570,10 @@ const styles = StyleSheet.create({
+   },
+   switchAuthText: {
 -    color: '#c084fc',
 -    fontSize: 15,
 -    fontWeight: '800',
@@ -51672,35 +51887,61 @@ index 3622131..f97f802 100644
 +  },
 +  pressedControl: {
 +    opacity: 0.8,
+   },
+ });
 diff --git a/app/screens/auth/RegisterScreen.js b/app/screens/auth/RegisterScreen.js
 index 85fa768..32879da 100644
 --- a/app/screens/auth/RegisterScreen.js
 +++ b/app/screens/auth/RegisterScreen.js
-@@ -1 +1 @@
+@@ -1,4 +1,4 @@
 -import { useContext, useRef, useState } from 'react';
 +import { useContext, useEffect, useRef, useState } from 'react';
-@@ -10 +9,0 @@ import {
+ import { StatusBar } from 'expo-status-bar';
+ import {
+   KeyboardAvoidingView,
+@@ -7,12 +7,16 @@ import {
+   ScrollView,
+   StyleSheet,
+   Text,
 -  TextInput,
-@@ -13 +11,0 @@ import {
+   View,
+ } from 'react-native';
 -import { SafeAreaView } from 'react-native-safe-area-context';
-@@ -14,0 +13,5 @@ import { SafeAreaView } from 'react-native-safe-area-context';
+ 
 +import { AuthBackground } from '../../components/ui/AuthBackground';
 +import { Button, MIN_TOUCH_TARGET } from '../../components/ui/Button';
 +import { Card } from '../../components/ui/Card';
 +import { InputField } from '../../components/ui/InputField';
 +import { ScreenHeader } from '../../components/ui/ScreenHeader';
-@@ -15,0 +19 @@ import { AuthContext } from '../../context/AuthContext';
+ import { AuthContext } from '../../context/AuthContext';
 +import { colors, radii, spacing, typography } from '../../theme';
-@@ -25,0 +30,2 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+ import { validateRegisterForm } from '../../utils/validation';
+ 
+ export default function RegisterScreen({ navigation, auth: propAuth }) {
+@@ -23,12 +27,19 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+   const [email, setEmail] = useState('');
+   const [password, setPassword] = useState('');
+   const [confirmPassword, setConfirmPassword] = useState('');
 +  const [showPassword, setShowPassword] = useState(false);
 +  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
-@@ -31,0 +38,5 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+   const [errors, setErrors] = useState({});
+   const [formError, setFormError] = useState('');
+   const [timeoutNotice, setTimeoutNotice] = useState('');
+   const [isSubmitting, setIsSubmitting] = useState(false);
+   const submittingRef = useRef(false);
+ 
 +  useEffect(() => navigation?.addListener?.('blur', () => {
 +    setShowPassword(false);
 +    setShowConfirmPassword(false);
 +  }), [navigation]);
 +
-@@ -135,0 +147,40 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+   async function handleRegister() {
+     if (submittingRef.current || isSubmitting) {
+       return;
+@@ -133,69 +144,119 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+     }
+   }
+ 
 +  const passwordToggle = (
 +    <Pressable
 +      onPress={() => setShowPassword((prev) => !prev)}
@@ -51741,10 +51982,11 @@ index 85fa768..32879da 100644
 +    </Pressable>
 +  );
 +
-@@ -137 +188 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+   return (
 -    <SafeAreaView style={styles.container}>
 +    <AuthBackground variant="register" testID="register-background">
-@@ -140,13 +191,5 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+       <StatusBar style="light" />
+ 
 -      {/* Header com botão de voltar e marca centralizada */}
 -      <View style={styles.header}>
 -        <Pressable
@@ -51763,11 +52005,17 @@ index 85fa768..32879da 100644
 +        onBack={() => navigation.goBack()}
 +        testID="register-header"
 +      />
-@@ -158,0 +202 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+ 
+       <KeyboardAvoidingView
+         style={styles.keyboardView}
+         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+       >
+         <ScrollView
 +          style={styles.scrollView}
-@@ -160,0 +205 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+           contentContainerStyle={styles.scrollContent}
+           keyboardShouldPersistTaps="handled"
 +          showsVerticalScrollIndicator={false}
-@@ -162,17 +207,39 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+         >
 -          {/* Cabeçalho textual */}
 -          <Text style={styles.tag}>NOVO REGISTRO</Text>
 -          <Text style={styles.title}>Comece sua jornada.</Text>
@@ -51824,7 +52072,7 @@ index 85fa768..32879da 100644
 +                  padding={spacing.md}
 +                  style={styles.formErrorCard}
 +                  testID="register-form-error"
-@@ -180,15 +247,9 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+                 >
 -                  <Text style={styles.timeoutButtonText}>Verificar fazendo Login</Text>
 -                </Pressable>
 -              </View>
@@ -51849,19 +52097,26 @@ index 85fa768..32879da 100644
 +              <InputField
 +                label="Nome completo"
 +                required
-@@ -196 +256,0 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+                 placeholder="Como quer ser chamado?"
 -                placeholderTextColor="#64748b"
-@@ -198,0 +259 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+                 value={name}
+                 editable={!isSubmitting}
 +                error={errors.name}
-@@ -208,0 +270,2 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+                 onChangeText={(text) => {
+                   setName(text);
+                   if (errors.name) {
+@@ -206,20 +267,17 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+                 }}
+                 autoCapitalize="words"
+                 autoCorrect={false}
 +                containerStyle={styles.fieldContainer}
 +                testID="register-name-input"
-@@ -210,4 +272,0 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+               />
 -              {errors.name ? (
 -                <Text style={styles.errorText}>{errors.name}</Text>
 -              ) : null}
 -            </View>
-@@ -215,4 +274,3 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+ 
 -            <View style={styles.inputGroup}>
 -              <Text style={styles.label}>E-mail</Text>
 -              <TextInput
@@ -51869,19 +52124,26 @@ index 85fa768..32879da 100644
 +              <InputField
 +                label="E-mail"
 +                required
-@@ -220 +277,0 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+                 placeholder="seu.email@exemplo.com"
 -                placeholderTextColor="#64748b"
-@@ -222,0 +280 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+                 value={email}
+                 editable={!isSubmitting}
 +                error={errors.email}
-@@ -233,0 +292,2 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+                 onChangeText={(text) => {
+                   setEmail(text);
+                   if (errors.email) {
+@@ -231,20 +289,18 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+                 keyboardType="email-address"
+                 autoCapitalize="none"
+                 autoCorrect={false}
 +                containerStyle={styles.fieldContainer}
 +                testID="register-email-input"
-@@ -235,4 +294,0 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+               />
 -              {errors.email ? (
 -                <Text style={styles.errorText}>{errors.email}</Text>
 -              ) : null}
 -            </View>
-@@ -240,4 +296,3 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+ 
 -            <View style={styles.inputGroup}>
 -              <Text style={styles.label}>Senha</Text>
 -              <TextInput
@@ -51889,23 +52151,30 @@ index 85fa768..32879da 100644
 +              <InputField
 +                label="Senha"
 +                required
-@@ -245 +299,0 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+                 placeholder="Crie uma senha de acesso"
 -                placeholderTextColor="#64748b"
-@@ -247,0 +302,2 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+                 value={password}
+                 editable={!isSubmitting}
 +                error={errors.password}
 +                hint="Mínimo de 8 caracteres"
-@@ -256 +312,4 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+                 onChangeText={(text) => {
+                   setPassword(text);
+                   if (errors.password) {
+@@ -253,21 +309,19 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+                   if (formError) setFormError('');
+                   if (timeoutNotice) setTimeoutNotice('');
+                 }}
 -                secureTextEntry
 +                secureTextEntry={!showPassword}
 +                rightIcon={passwordToggle}
 +                containerStyle={styles.fieldContainer}
 +                testID="register-password-input"
-@@ -258,4 +316,0 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+               />
 -              {errors.password ? (
 -                <Text style={styles.errorText}>{errors.password}</Text>
 -              ) : null}
 -            </View>
-@@ -263,4 +318,3 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+ 
 -            <View style={styles.inputGroup}>
 -              <Text style={styles.label}>Confirmar senha</Text>
 -              <TextInput
@@ -51913,22 +52182,29 @@ index 85fa768..32879da 100644
 +              <InputField
 +                label="Confirmar senha"
 +                required
-@@ -268 +321,0 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+                 placeholder="Digite a mesma senha novamente"
 -                placeholderTextColor="#64748b"
-@@ -270,0 +324 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+                 value={confirmPassword}
+                 editable={!isSubmitting}
 +                error={errors.confirmPassword}
-@@ -279 +333,4 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+                 onChangeText={(text) => {
+                   setConfirmPassword(text);
+                   if (errors.confirmPassword) {
+@@ -276,225 +330,167 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+                   if (formError) setFormError('');
+                   if (timeoutNotice) setTimeoutNotice('');
+                 }}
 -                secureTextEntry
 +                secureTextEntry={!showConfirmPassword}
 +                rightIcon={confirmPasswordToggle}
 +                containerStyle={styles.fieldContainer}
 +                testID="register-confirm-password-input"
-@@ -281,4 +337,0 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+               />
 -              {errors.confirmPassword ? (
 -                <Text style={styles.errorText}>{errors.confirmPassword}</Text>
 -              ) : null}
 -            </View>
-@@ -286,10 +339,12 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+ 
 -            <Pressable
 -              style={[styles.primaryButton, isSubmitting ? styles.primaryButtonDisabled : null]}
 -              onPress={handleRegister}
@@ -51951,38 +52227,50 @@ index 85fa768..32879da 100644
 +                style={styles.submitButton}
 +                testID="register-submit-button"
 +              />
-@@ -297,4 +352,2 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+ 
 -            {/* Card informativo de fluxo posterior */}
 -            <View style={styles.infoCard}>
 -              <Text style={styles.infoCardText}>
 -                Etapas seguintes: <Text style={styles.infoCardBold}>Cadastro → Questionário de Perfil → Próxima etapa</Text>. Ao criar sua conta, você será direcionado para o questionário.
 +              <Text style={styles.stepFootnote}>
 +                Ao criar sua conta, você seguirá para o questionário rápido de perfil de jogador.
-@@ -303 +355,0 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+               </Text>
+             </View>
 -          </View>
-@@ -307 +359,5 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+ 
+           {/* Navegação cruzada para Login */}
+           <Pressable
 -            style={styles.switchAuthContainer}
 +            style={({ pressed }) => [
 +              styles.switchAuthContainer,
 +              isSubmitting && styles.disabledControl,
 +              pressed && !isSubmitting && styles.pressedControl,
 +            ]}
-@@ -309,0 +366,4 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+             onPress={() => navigation.navigate('Login')}
+             disabled={isSubmitting}
 +            accessibilityRole="button"
 +            accessibilityLabel="Já possui uma conta? Acesse aqui"
 +            accessibilityState={{ disabled: isSubmitting }}
 +            testID="register-switch-login-button"
-@@ -315 +375 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
+           >
+             <Text style={styles.switchAuthText}>Já possui uma conta? Acesse aqui</Text>
+           </Pressable>
+         </ScrollView>
+       </KeyboardAvoidingView>
 -    </SafeAreaView>
 +    </AuthBackground>
-@@ -320,4 +379,0 @@ const styles = StyleSheet.create({
+   );
+ }
+ 
+ const styles = StyleSheet.create({
 -  container: {
 -    flex: 1,
 -    backgroundColor: '#0c0a17',
 -  },
-@@ -325,0 +382 @@ const styles = StyleSheet.create({
+   keyboardView: {
+     flex: 1,
 +    backgroundColor: 'transparent',
-@@ -327,30 +384,3 @@ const styles = StyleSheet.create({
+   },
 -  header: {
 -    flexDirection: 'row',
 -    alignItems: 'center',
@@ -52016,7 +52304,8 @@ index 85fa768..32879da 100644
 +  scrollView: {
 +    flex: 1,
 +    backgroundColor: 'transparent',
-@@ -359,3 +389,5 @@ const styles = StyleSheet.create({
+   },
+   scrollContent: {
 -    paddingHorizontal: 24,
 -    paddingTop: 16,
 -    paddingBottom: 40,
@@ -52025,7 +52314,7 @@ index 85fa768..32879da 100644
 +    paddingHorizontal: spacing.layout.screenPaddingHorizontal,
 +    paddingTop: spacing.xs,
 +    paddingBottom: spacing.xxxl,
-@@ -363,6 +395,8 @@ const styles = StyleSheet.create({
+   },
 -  tag: {
 -    color: '#a78bfa',
 -    fontSize: 12,
@@ -52040,7 +52329,8 @@ index 85fa768..32879da 100644
 +    ...typography.tag,
 +    color: colors.brand.primaryLight,
 +    marginBottom: spacing.xxs,
-@@ -371,4 +405,4 @@ const styles = StyleSheet.create({
+   },
+   title: {
 -    color: '#ffffff',
 -    fontSize: 28,
 -    fontWeight: '800',
@@ -52049,7 +52339,8 @@ index 85fa768..32879da 100644
 +    fontSize: 26,
 +    lineHeight: 32,
 +    color: colors.text.primary,
-@@ -377,6 +411,2 @@ const styles = StyleSheet.create({
+   },
+   subtitle: {
 -    color: '#94a3b8',
 -    fontSize: 15,
 -    marginBottom: 28,
@@ -52058,7 +52349,7 @@ index 85fa768..32879da 100644
 -    gap: 16,
 +    ...typography.body,
 +    color: colors.text.secondary,
-@@ -384,10 +414,2 @@ const styles = StyleSheet.create({
+   },
 -  inputGroup: {
 -    gap: 8,
 -  },
@@ -52071,7 +52362,7 @@ index 85fa768..32879da 100644
 -    backgroundColor: '#141026',
 +  formSurface: {
 +    backgroundColor: 'rgba(11, 11, 18, 0.88)',
-@@ -395,9 +417,15 @@ const styles = StyleSheet.create({
+     borderWidth: 1,
 -    borderColor: '#2a2046',
 -    borderRadius: 12,
 -    height: 52,
@@ -52096,7 +52387,7 @@ index 85fa768..32879da 100644
 +    paddingHorizontal: spacing.xs,
 +    alignItems: 'center',
 +    justifyContent: 'center',
-@@ -405,5 +433,4 @@ const styles = StyleSheet.create({
+   },
 -  errorText: {
 -    color: '#f87171',
 -    fontSize: 12,
@@ -52106,7 +52397,8 @@ index 85fa768..32879da 100644
 +    ...typography.caption,
 +    color: colors.brand.primaryLight,
 +    fontWeight: typography.weights.bold,
-@@ -412,7 +439,2 @@ const styles = StyleSheet.create({
+   },
+   formErrorCard: {
 -    backgroundColor: '#2a121d',
 -    borderWidth: 1,
 -    borderColor: '#ef4444',
@@ -52116,14 +52408,17 @@ index 85fa768..32879da 100644
 -    marginBottom: 4,
 +    backgroundColor: colors.semantic.dangerBg,
 +    borderColor: colors.semantic.danger,
-@@ -421,3 +443,3 @@ const styles = StyleSheet.create({
+   },
+   formErrorText: {
 -    color: '#fca5a5',
 -    fontSize: 14,
 -    fontWeight: '600',
 +    ...typography.body,
 +    color: colors.semantic.danger,
 +    fontWeight: typography.weights.semiBold,
-@@ -427,7 +449,3 @@ const styles = StyleSheet.create({
+     textAlign: 'center',
+   },
+   timeoutCard: {
 -    backgroundColor: '#2c1f0f',
 -    borderWidth: 1,
 -    borderColor: '#f59e0b',
@@ -52134,20 +52429,23 @@ index 85fa768..32879da 100644
 +    backgroundColor: colors.semantic.warningBg,
 +    borderColor: colors.semantic.warning,
 +    gap: spacing.sm,
-@@ -436,3 +454,3 @@ const styles = StyleSheet.create({
+   },
+   timeoutTitle: {
 -    color: '#fcd34d',
 -    fontSize: 14,
 -    fontWeight: '700',
 +    ...typography.body,
 +    color: colors.semantic.warning,
 +    fontWeight: typography.weights.bold,
-@@ -441,3 +459,2 @@ const styles = StyleSheet.create({
+   },
+   timeoutText: {
 -    color: '#fde68a',
 -    fontSize: 13,
 -    lineHeight: 18,
 +    ...typography.bodySmall,
 +    color: colors.text.primary,
-@@ -446,26 +463 @@ const styles = StyleSheet.create({
+   },
+   timeoutButton: {
 -    backgroundColor: '#d97706',
 -    borderRadius: 10,
 -    paddingVertical: 10,
@@ -52175,7 +52473,7 @@ index 85fa768..32879da 100644
 -    fontSize: 16,
 -    fontWeight: '700',
 +    marginTop: spacing.xs,
-@@ -473,12 +465,2 @@ const styles = StyleSheet.create({
+   },
 -  infoCard: {
 -    backgroundColor: '#141026',
 -    borderWidth: 1,
@@ -52190,7 +52488,7 @@ index 85fa768..32879da 100644
 -    lineHeight: 18,
 +  submitButton: {
 +    marginTop: spacing.xxs,
-@@ -486,3 +468,5 @@ const styles = StyleSheet.create({
+   },
 -  infoCardBold: {
 -    color: '#cbd5e1',
 -    fontWeight: '700',
@@ -52199,18 +52497,20 @@ index 85fa768..32879da 100644
 +    color: colors.text.muted,
 +    textAlign: 'center',
 +    marginTop: spacing.xxs,
-@@ -491 +475,3 @@ const styles = StyleSheet.create({
+   },
+   switchAuthContainer: {
 -    marginTop: 32,
 +    marginTop: spacing.md,
 +    minHeight: MIN_TOUCH_TARGET,
 +    minWidth: MIN_TOUCH_TARGET,
-@@ -493 +479,4 @@ const styles = StyleSheet.create({
+     alignItems: 'center',
 -    paddingVertical: 8,
 +    justifyContent: 'center',
 +    paddingVertical: spacing.xs,
 +    paddingHorizontal: spacing.md,
 +    borderRadius: radii.lg,
-@@ -496,3 +485,10 @@ const styles = StyleSheet.create({
+   },
+   switchAuthText: {
 -    color: '#c084fc',
 -    fontSize: 15,
 -    fontWeight: '800',
@@ -52224,11 +52524,14 @@ index 85fa768..32879da 100644
 +  },
 +  pressedControl: {
 +    opacity: 0.8,
+   },
+ });
 diff --git a/app/screens/auth/WelcomeScreen.js b/app/screens/auth/WelcomeScreen.js
 index 4b071fb..e6d5e86 100644
 --- a/app/screens/auth/WelcomeScreen.js
 +++ b/app/screens/auth/WelcomeScreen.js
-@@ -2,2 +2,5 @@ import { StatusBar } from 'expo-status-bar';
+@@ -1,130 +1,124 @@
+ import { StatusBar } from 'expo-status-bar';
 -import { Pressable, StyleSheet, Text, View } from 'react-native';
 -import { SafeAreaView } from 'react-native-safe-area-context';
 +import { ScrollView, StyleSheet, Text, View } from 'react-native';
@@ -52236,10 +52539,13 @@ index 4b071fb..e6d5e86 100644
 +import { AuthBackground } from '../../components/ui/AuthBackground';
 +import { Button } from '../../components/ui/Button';
 +import { colors, spacing, typography } from '../../theme';
-@@ -7 +10 @@ export default function WelcomeScreen({ navigation }) {
+ 
+ export default function WelcomeScreen({ navigation }) {
+   return (
 -    <SafeAreaView style={styles.container}>
 +    <AuthBackground variant="welcome" testID="welcome-background">
-@@ -10,7 +13,10 @@ export default function WelcomeScreen({ navigation }) {
+       <StatusBar style="light" />
+ 
 -      <View style={styles.header}>
 -        <Text style={styles.headerBrand}>BEAST MARAGAMES</Text>
 -      </View>
@@ -52257,7 +52563,8 @@ index 4b071fb..e6d5e86 100644
 +          <Text style={styles.srOnly} accessibilityRole="header">
 +            ArenaGO
 +          </Text>
-@@ -19,6 +25,2 @@ export default function WelcomeScreen({ navigation }) {
+         </View>
+ 
 -        <Text style={styles.tag}>PRIMEIROS PASSOS</Text>
 -        <Text style={styles.title}>Viva a experiência BEAST.</Text>
 -        <Text style={styles.subtitle}>
@@ -52266,7 +52573,7 @@ index 4b071fb..e6d5e86 100644
 -      </View>
 +        {/* Área central livre para valorizar a composição artística de fundo */}
 +        <View style={styles.artworkStage} pointerEvents="none" />
-@@ -26,7 +28,9 @@ export default function WelcomeScreen({ navigation }) {
+ 
 -      <View style={styles.actions}>
 -        <Pressable
 -          style={styles.primaryButton}
@@ -52283,7 +52590,7 @@ index 4b071fb..e6d5e86 100644
 +              Entre nos eventos, acompanhe suas filas em tempo real e registre todo o seu histórico na arena.
 +            </Text>
 +          </View>
-@@ -34,8 +38,25 @@ export default function WelcomeScreen({ navigation }) {
+ 
 -        <Pressable
 -          style={styles.secondaryButton}
 -          onPress={() => navigation.navigate('Login')}
@@ -52317,23 +52624,26 @@ index 4b071fb..e6d5e86 100644
 +        </View>
 +      </ScrollView>
 +    </AuthBackground>
-@@ -46 +67 @@ const styles = StyleSheet.create({
+   );
+ }
+ 
+ const styles = StyleSheet.create({
 -  container: {
 +  scrollView: {
-@@ -48 +69,4 @@ const styles = StyleSheet.create({
+     flex: 1,
 -    backgroundColor: '#0c0a17',
 +    backgroundColor: 'transparent',
 +  },
 +  scrollContent: {
 +    flexGrow: 1,
-@@ -50,3 +74,3 @@ const styles = StyleSheet.create({
+     justifyContent: 'space-between',
 -    paddingHorizontal: 24,
 -    paddingTop: 16,
 -    paddingBottom: 24,
 +    paddingHorizontal: spacing.xxl,
 +    paddingTop: spacing.md,
 +    paddingBottom: spacing.xxl,
-@@ -54,2 +78,6 @@ const styles = StyleSheet.create({
+   },
 -  header: {
 -    paddingVertical: 12,
 +  srOnly: {
@@ -52342,7 +52652,7 @@ index 4b071fb..e6d5e86 100644
 +    height: 1,
 +    opacity: 0,
 +    overflow: 'hidden',
-@@ -57,5 +85,5 @@ const styles = StyleSheet.create({
+   },
 -  headerBrand: {
 -    color: '#ffffff',
 -    fontSize: 14,
@@ -52353,14 +52663,14 @@ index 4b071fb..e6d5e86 100644
 +    alignItems: 'center',
 +    justifyContent: 'space-between',
 +    paddingVertical: spacing.sm,
-@@ -63 +91 @@ const styles = StyleSheet.create({
+   },
 -  content: {
 +  artworkStage: {
-@@ -65,2 +93 @@ const styles = StyleSheet.create({
+     flex: 1,
 -    justifyContent: 'center',
 -    paddingBottom: 40,
 +    minHeight: 120,
-@@ -68,8 +95,3 @@ const styles = StyleSheet.create({
+   },
 -  logoBadge: {
 -    width: 68,
 -    height: 68,
@@ -52372,14 +52682,14 @@ index 4b071fb..e6d5e86 100644
 +  bottomSection: {
 +    gap: spacing.xl,
 +    paddingTop: spacing.lg,
-@@ -77,4 +99,2 @@ const styles = StyleSheet.create({
+   },
 -  logoBadgeText: {
 -    color: '#ffffff',
 -    fontSize: 32,
 -    fontWeight: '900',
 +  editorialBlock: {
 +    gap: spacing.sm,
-@@ -82,6 +102,3 @@ const styles = StyleSheet.create({
+   },
 -  tag: {
 -    color: '#a78bfa',
 -    fontSize: 12,
@@ -52389,23 +52699,26 @@ index 4b071fb..e6d5e86 100644
 +  kicker: {
 +    ...typography.tag,
 +    color: colors.brand.primaryLight,
-@@ -90 +107 @@ const styles = StyleSheet.create({
+   },
+   title: {
 -    color: '#ffffff',
 +    ...typography.hero,
-@@ -92,3 +109,2 @@ const styles = StyleSheet.create({
+     fontSize: 30,
 -    fontWeight: '800',
 -    lineHeight: 36,
 -    marginBottom: 14,
 +    lineHeight: 38,
 +    color: colors.text.primary,
-@@ -97,3 +113,3 @@ const styles = StyleSheet.create({
+   },
+   subtitle: {
 -    color: '#9ca3af',
 -    fontSize: 15,
 -    lineHeight: 22,
 +    ...typography.bodyLarge,
 +    lineHeight: 24,
 +    color: colors.text.secondary,
-@@ -102,13 +118 @@ const styles = StyleSheet.create({
+   },
+   actions: {
 -    gap: 12,
 -  },
 -  primaryButton: {
@@ -52420,7 +52733,8 @@ index 4b071fb..e6d5e86 100644
 -    fontSize: 16,
 -    fontWeight: '700',
 +    gap: spacing.md,
-@@ -117,12 +121,2 @@ const styles = StyleSheet.create({
+   },
+   secondaryButton: {
 -    backgroundColor: '#191330',
 -    borderWidth: 1,
 -    borderColor: '#34265a',
@@ -52435,23 +52749,32 @@ index 4b071fb..e6d5e86 100644
 -    fontWeight: '700',
 +    backgroundColor: 'rgba(13, 13, 24, 0.84)',
 +    borderColor: colors.border.input,
+   },
+ });
 diff --git a/app/screens/event-entry/EventConfirmationScreen.js b/app/screens/event-entry/EventConfirmationScreen.js
 index b329d9e..b236704 100644
 --- a/app/screens/event-entry/EventConfirmationScreen.js
 +++ b/app/screens/event-entry/EventConfirmationScreen.js
-@@ -0,0 +1 @@
+@@ -1,8 +1,10 @@
 +import { StatusBar } from 'expo-status-bar';
-@@ -2 +3 @@ import { useContext, useRef } from 'react';
+ import { useContext, useRef } from 'react';
 -import { Pressable, StyleSheet, Text } from 'react-native';
 +import { ScrollView, StyleSheet, Text, View } from 'react-native';
-@@ -4 +5 @@ import { Pressable, StyleSheet, Text } from 'react-native';
+ 
 -import ScreenContainer from '../../components/ScreenContainer';
 +import { AuthBackground, Badge, Button, Card, ScreenHeader } from '../../components/ui';
-@@ -5,0 +7 @@ import { ParticipationContext } from '../../context/ParticipationContext';
+ import { ParticipationContext } from '../../context/ParticipationContext';
 +import { colors, spacing, typography } from '../../theme';
-@@ -29,0 +32 @@ export default function EventConfirmationScreen({ navigation, route }) {
+ 
+ export default function EventConfirmationScreen({ navigation, route }) {
+   const { admission, confirmEventEntry, retryEntrySync, isCurrentAdmission } = useContext(ParticipationContext);
+@@ -27,49 +29,122 @@ export default function EventConfirmationScreen({ navigation, route }) {
+   }
+ 
+   const message = !current ? 'Consulte novamente o evento para confirmar o ingresso.' : admission?.error;
 +  const disabled = busy || blocked || !current || admission.status === 'complete';
-@@ -32,15 +35,51 @@ export default function EventConfirmationScreen({ navigation, route }) {
+ 
+   return (
 -    <ScreenContainer>
 -      <Text style={styles.title}>Evento encontrado</Text>
 -      <Text style={styles.eventName}>{event.name}</Text>
@@ -52518,7 +52841,10 @@ index b329d9e..b236704 100644
 +      <Text style={styles.detailLabel}>{label}</Text>
 +      <Text style={styles.detailValue}>{String(value || 'Não informado')}</Text>
 +    </View>
-@@ -50,0 +90,9 @@ const styles = StyleSheet.create({
+   );
+ }
+ 
+ const styles = StyleSheet.create({
 +  content: {
 +    flexGrow: 1,
 +    paddingHorizontal: spacing.layout.screenPaddingHorizontal,
@@ -52528,7 +52854,7 @@ index b329d9e..b236704 100644
 +  heroSection: {
 +    marginBottom: spacing.xl,
 +  },
-@@ -52,2 +100,6 @@ const styles = StyleSheet.create({
+   title: {
 -    fontSize: 24,
 -    fontWeight: 'bold',
 +    ...typography.titleLarge,
@@ -52537,7 +52863,8 @@ index b329d9e..b236704 100644
 +  },
 +  eventCard: {
 +    alignItems: 'stretch',
-@@ -56,2 +108,27 @@ const styles = StyleSheet.create({
+   },
+   eventName: {
 -    fontSize: 18,
 -    marginTop: 24,
 +    ...typography.titleMedium,
@@ -52567,7 +52894,7 @@ index b329d9e..b236704 100644
 +    borderRadius: 12,
 +    padding: spacing.lg,
 +    marginTop: spacing.lg,
-@@ -59,3 +136,4 @@ const styles = StyleSheet.create({
+   },
 -  detail: {
 -    fontSize: 16,
 -    marginTop: 8,
@@ -52575,7 +52902,7 @@ index b329d9e..b236704 100644
 +    ...typography.body,
 +    color: '#FF9AAE',
 +    marginTop: spacing.md,
-@@ -63,6 +141,2 @@ const styles = StyleSheet.create({
+   },
 -  button: {
 -    alignItems: 'center',
 -    backgroundColor: '#000',
@@ -52584,7 +52911,7 @@ index b329d9e..b236704 100644
 -    padding: 12,
 +  confirmButton: {
 +    marginTop: spacing.xxl,
-@@ -70,4 +144,5 @@ const styles = StyleSheet.create({
+   },
 -  buttonText: {
 -    color: '#fff',
 -    fontSize: 16,
@@ -52594,13 +52921,15 @@ index b329d9e..b236704 100644
 +    color: colors.text.secondary,
 +    marginTop: spacing.md,
 +    textAlign: 'center',
+   },
+ });
 diff --git a/app/screens/event-entry/EventEntryScreen.js b/app/screens/event-entry/EventEntryScreen.js
 index 67e881e..5854650 100644
 --- a/app/screens/event-entry/EventEntryScreen.js
 +++ b/app/screens/event-entry/EventEntryScreen.js
-@@ -0,0 +1 @@
+@@ -1,8 +1,17 @@
 +import { StatusBar } from 'expo-status-bar';
-@@ -2 +3,8 @@ import { useContext, useState } from 'react';
+ import { useContext, useState } from 'react';
 -import { Pressable, StyleSheet, Text, TextInput } from 'react-native';
 +import {
 +  KeyboardAvoidingView,
@@ -52610,12 +52939,18 @@ index 67e881e..5854650 100644
 +  Text,
 +  View,
 +} from 'react-native';
-@@ -4 +12 @@ import { Pressable, StyleSheet, Text, TextInput } from 'react-native';
+ 
 -import ScreenContainer from '../../components/ScreenContainer';
 +import { AuthBackground, Badge, Button, Card, InputField, ScreenHeader } from '../../components/ui';
-@@ -5,0 +14 @@ import { ParticipationContext } from '../../context/ParticipationContext';
+ import { ParticipationContext } from '../../context/ParticipationContext';
 +import { colors, spacing, typography } from '../../theme';
-@@ -28,19 +37,49 @@ export default function EventEntryScreen({ navigation }) {
+ 
+ export default function EventEntryScreen({ navigation }) {
+   const { admission, lookupEvent, isCurrentAdmission } = useContext(ParticipationContext);
+@@ -25,54 +34,93 @@ export default function EventEntryScreen({ navigation }) {
+   }
+ 
+   return (
 -    <ScreenContainer>
 -      <Text style={styles.description}>
 -        Digite o código de acesso do evento.
@@ -52684,7 +53019,10 @@ index 67e881e..5854650 100644
 +        </ScrollView>
 +      </KeyboardAvoidingView>
 +    </AuthBackground>
-@@ -50,0 +90,17 @@ const styles = StyleSheet.create({
+   );
+ }
+ 
+ const styles = StyleSheet.create({
 +  keyboardView: {
 +    flex: 1,
 +  },
@@ -52702,13 +53040,13 @@ index 67e881e..5854650 100644
 +    color: colors.text.primary,
 +    marginTop: spacing.lg,
 +  },
-@@ -52,2 +108,3 @@ const styles = StyleSheet.create({
+   description: {
 -    fontSize: 16,
 -    marginTop: 16,
 +    ...typography.bodyLarge,
 +    color: colors.text.secondary,
 +    marginTop: spacing.sm,
-@@ -55,6 +112,2 @@ const styles = StyleSheet.create({
+   },
 -  input: {
 -    borderColor: '#000',
 -    borderRadius: 4,
@@ -52717,7 +53055,7 @@ index 67e881e..5854650 100644
 -    padding: 12,
 +  formCard: {
 +    alignItems: 'stretch',
-@@ -62,6 +115,2 @@ const styles = StyleSheet.create({
+   },
 -  button: {
 -    alignItems: 'center',
 -    backgroundColor: '#000',
@@ -52726,7 +53064,7 @@ index 67e881e..5854650 100644
 -    padding: 12,
 +  codeInput: {
 +    marginTop: spacing.lg,
-@@ -69,4 +118,4 @@ const styles = StyleSheet.create({
+   },
 -  buttonText: {
 -    color: '#fff',
 -    fontSize: 16,
@@ -52735,24 +53073,32 @@ index 67e881e..5854650 100644
 +    ...typography.bodySmall,
 +    color: colors.text.secondary,
 +    marginTop: spacing.sm,
-@@ -74,3 +123,2 @@ const styles = StyleSheet.create({
+   },
 -  error: {
 -    color: '#9b1c1c',
 -    marginTop: 12,
 +  continueButton: {
 +    marginTop: spacing.xl,
+   },
+ });
 diff --git a/app/screens/home/HomeFlowScreen.js b/app/screens/home/HomeFlowScreen.js
 index 63dfcdd..cbc9ee4 100644
 --- a/app/screens/home/HomeFlowScreen.js
 +++ b/app/screens/home/HomeFlowScreen.js
-@@ -2 +2,2 @@ import { useContext } from 'react';
+@@ -1,39 +1,55 @@
+ import { useContext } from 'react';
 -import { Pressable, Text } from 'react-native';
 +import { StatusBar } from 'expo-status-bar';
 +import { StyleSheet, Text, View } from 'react-native';
-@@ -4 +5 @@ import { Pressable, Text } from 'react-native';
+ 
 -import ScreenContainer from '../../components/ScreenContainer';
 +import { AuthBackground, Badge, Button, Card, ScreenHeader } from '../../components/ui';
-@@ -10,0 +12,22 @@ import HomeScreen from './HomeScreen';
+ import { ParticipationContext } from '../../context/ParticipationContext';
+ import ActiveArenaScreen from '../arena/ActiveArenaScreen';
+ import RealArenaScreen from '../arena/RealArenaScreen';
+ import ArenaQueueScreen from '../arena/ArenaQueueScreen';
+ import HomeScreen from './HomeScreen';
+ 
 +function ExternalQueueScreen({ participation, onRefresh }) {
 +  return (
 +    <AuthBackground variant="login" overlayOpacity={0.68} testID="external-queue-background">
@@ -52775,13 +53121,26 @@ index 63dfcdd..cbc9ee4 100644
 +  );
 +}
 +
-@@ -15 +38 @@ export default function HomeFlowScreen({ navigation }) {
+ export default function HomeFlowScreen({ navigation }) {
+   const { participation, status, error, returnState, refreshParticipation } = useContext(ParticipationContext);
+ 
+   if (status === 'loading') {
 -    return <ScreenContainer><Text>Carregando sua participação...</Text></ScreenContainer>;
 +    return <HomeScreen mode="loading" />;
-@@ -22 +45 @@ export default function HomeFlowScreen({ navigation }) {
+   }
+ 
+   if (status === 'error') {
+     const message = error === 'authorization' ? 'Não foi possível autorizar a consulta da participação.' :
+       error === 'network' ? 'Não foi possível conectar ao servidor para consultar sua participação.' :
+       'Não foi possível consultar sua participação agora.';
 -    return <ScreenContainer><Text>{message}</Text><Pressable onPress={refreshParticipation}><Text>Tentar novamente</Text></Pressable></ScreenContainer>;
 +    return <HomeScreen mode="error" message={message} onRetry={refreshParticipation} />;
-@@ -29,8 +52 @@ export default function HomeFlowScreen({ navigation }) {
+   }
+ 
+   if (participation?.source === 'server') {
+     if (participation.status === 'active') {
+       return <RealArenaScreen key={participation.id} participation={participation} refreshParticipation={refreshParticipation} />;
+     }
 -    return (
 -      <ScreenContainer>
 -        <Text>Você está na fila externa do evento.</Text>
@@ -52791,7 +53150,13 @@ index 63dfcdd..cbc9ee4 100644
 -      </ScreenContainer>
 -    );
 +    return <ExternalQueueScreen participation={participation} onRefresh={refreshParticipation} />;
-@@ -52,0 +69,28 @@ export default function HomeFlowScreen({ navigation }) {
+   }
+ 
+   if (!participation) {
+@@ -50,3 +66,31 @@ export default function HomeFlowScreen({ navigation }) {
+ 
+   return <HomeScreen navigation={navigation} />;
+ }
 +
 +const styles = StyleSheet.create({
 +  externalQueueContent: {
@@ -52824,24 +53189,28 @@ diff --git a/app/screens/home/HomeScreen.js b/app/screens/home/HomeScreen.js
 index 0a869c0..31dc279 100644
 --- a/app/screens/home/HomeScreen.js
 +++ b/app/screens/home/HomeScreen.js
-@@ -3 +3 @@ import { useContext } from 'react';
+@@ -1,138 +1,278 @@
+ import { StatusBar } from 'expo-status-bar';
+ import { useContext } from 'react';
 -import { Pressable, StyleSheet, Text, View } from 'react-native';
 +import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-@@ -5 +5 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
+ 
 -import ScreenContainer from '../../components/ScreenContainer';
 +import { AuthBackground, Badge, Button, Card } from '../../components/ui';
-@@ -6,0 +7 @@ import { AuthContext } from '../../context/AuthContext';
+ import { AuthContext } from '../../context/AuthContext';
 +import { colors, spacing, typography } from '../../theme';
-@@ -8,3 +9,2 @@ import { AuthContext } from '../../context/AuthContext';
+ 
 -export default function HomeScreen({ navigation, returnState }) {
 -  const auth = typeof useContext === 'function' ? useContext(AuthContext) : null;
 -
 +export default function HomeScreen({ navigation, returnState, mode = 'ready', message, onRetry }) {
 +  const auth = useContext(AuthContext);
-@@ -12,0 +13,2 @@ export default function HomeScreen({ navigation, returnState }) {
+   const hasPendingQuestionnaire =
+     auth?.user != null && auth.user.hasCompletedQuestionnaire === false;
 +  const rawName = typeof auth?.user?.name === 'string' ? auth.user.name.trim() : '';
 +  const firstName = rawName ? rawName.split(/\s+/)[0] : '';
-@@ -15,11 +17,37 @@ export default function HomeScreen({ navigation, returnState }) {
+ 
+   return (
 -    <ScreenContainer>
 -      <Text style={styles.title}>BEAST MARAGAMES</Text>
 -      <Text style={styles.welcome}>Bem-vindo à BEAST!</Text>
@@ -52890,7 +53259,7 @@ index 0a869c0..31dc279 100644
 +            </View>
 +            <Badge label="ONLINE" variant="brand" />
 +          </View>
-@@ -27,18 +55,3 @@ export default function HomeScreen({ navigation, returnState }) {
+ 
 -      {hasPendingQuestionnaire ? (
 -        <View style={styles.questionnaireBanner}>
 -          <Text style={styles.questionnaireBannerTitle}>
@@ -52912,7 +53281,7 @@ index 0a869c0..31dc279 100644
 +          <View style={styles.greetingSection}>
 +            <Text style={styles.welcome}>
 +              {firstName ? `Olá, ${firstName}!` : 'Bem-vindo ao ArenaGo!'}
-@@ -46,3 +59,4 @@ export default function HomeScreen({ navigation, returnState }) {
+             </Text>
 -          </Pressable>
 -        </View>
 -      ) : null}
@@ -52920,7 +53289,7 @@ index 0a869c0..31dc279 100644
 +              Acompanhe suas experiências e gerencie sua participação nos eventos presenciais.
 +            </Text>
 +          </View>
-@@ -50,6 +64,22 @@ export default function HomeScreen({ navigation, returnState }) {
+ 
 -      <Pressable
 -        style={styles.eventButton}
 -        onPress={() => navigation.navigate('EventEntry')}
@@ -52949,7 +53318,7 @@ index 0a869c0..31dc279 100644
 +              </Pressable>
 +            </Card>
 +          ) : null}
-@@ -57,7 +87,15 @@ export default function HomeScreen({ navigation, returnState }) {
+ 
 -      <Pressable
 -        style={styles.staffButton}
 -        onPress={() => navigation.navigate('StaffDemo')}
@@ -52972,7 +53341,7 @@ index 0a869c0..31dc279 100644
 +              />
 +            </Card>
 +          ) : null}
-@@ -65,2 +103,42 @@ export default function HomeScreen({ navigation, returnState }) {
+ 
 -      <StatusBar style="dark" />
 -    </ScreenContainer>
 +          <Card variant="highlight" style={styles.heroCard} testID="home-event-entry-card">
@@ -53017,7 +53386,10 @@ index 0a869c0..31dc279 100644
 +        </ScrollView>
 +      )}
 +    </AuthBackground>
-@@ -71,3 +149,53 @@ const styles = StyleSheet.create({
+   );
+ }
+ 
+ const styles = StyleSheet.create({
 -  title: {
 -    fontSize: 24,
 -    fontWeight: 'bold',
@@ -53074,12 +53446,14 @@ index 0a869c0..31dc279 100644
 +  greetingSection: {
 +    marginTop: spacing.xxxl,
 +    marginBottom: spacing.xxl,
-@@ -76,2 +204,2 @@ const styles = StyleSheet.create({
+   },
+   welcome: {
 -    fontSize: 18,
 -    marginTop: 24,
 +    ...typography.hero,
 +    color: colors.text.primary,
-@@ -80,28 +208,27 @@ const styles = StyleSheet.create({
+   },
+   description: {
 -    fontSize: 16,
 -    marginTop: 8,
 -  },
@@ -53135,7 +53509,7 @@ index 0a869c0..31dc279 100644
 +    ...typography.titleLarge,
 +    color: colors.text.primary,
 +    marginTop: spacing.lg,
-@@ -109,4 +236,4 @@ const styles = StyleSheet.create({
+   },
 -  questionnaireButtonText: {
 -    color: '#fff',
 -    fontSize: 14,
@@ -53144,7 +53518,8 @@ index 0a869c0..31dc279 100644
 +    ...typography.body,
 +    color: colors.text.secondary,
 +    marginTop: spacing.sm,
-@@ -115,5 +242,12 @@ const styles = StyleSheet.create({
+   },
+   eventButton: {
 -    alignItems: 'center',
 -    backgroundColor: '#000',
 -    borderRadius: 4,
@@ -53162,7 +53537,7 @@ index 0a869c0..31dc279 100644
 +  },
 +  participationCard: {
 +    alignItems: 'flex-start',
-@@ -121,4 +255,19 @@ const styles = StyleSheet.create({
+   },
 -  eventButtonText: {
 -    color: '#fff',
 -    fontSize: 16,
@@ -53186,7 +53561,8 @@ index 0a869c0..31dc279 100644
 +    ...typography.body,
 +    color: colors.brand.primaryLight,
 +    fontWeight: '700',
-@@ -127,10 +276 @@ const styles = StyleSheet.create({
+   },
+   staffButton: {
 -    alignItems: 'center',
 -    backgroundColor: '#f3f4f6',
 -    borderRadius: 4,
@@ -53198,31 +53574,40 @@ index 0a869c0..31dc279 100644
 -    fontSize: 15,
 -    fontWeight: '600',
 +    alignSelf: 'center',
+   },
+ });
 diff --git a/app/screens/participation/EvaluationScreen.js b/app/screens/participation/EvaluationScreen.js
 index b9916f1..40d5ac2 100644
 --- a/app/screens/participation/EvaluationScreen.js
 +++ b/app/screens/participation/EvaluationScreen.js
-@@ -0,0 +1 @@
+@@ -1,8 +1,10 @@
 +import { StatusBar } from 'expo-status-bar';
-@@ -2 +3 @@ import { useContext, useState } from 'react';
+ import { useContext, useState } from 'react';
 -import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 +import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-@@ -4 +5 @@ import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-
+ 
 -import ScreenContainer from '../../components/ScreenContainer';
 +import { AuthBackground, Badge, Button, Card, InputField } from '../../components/ui';
-@@ -5,0 +7 @@ import { ParticipationContext } from '../../context/ParticipationContext';
+ import { ParticipationContext } from '../../context/ParticipationContext';
 +import { colors, spacing, typography } from '../../theme';
-@@ -37 +39,2 @@ export default function EvaluationScreen({ navigation, real = false, onSubmit, o
+ 
+ export default function EvaluationScreen({ navigation, real = false, onSubmit, onLater,
+   submitting = false, error = null, pendingIntent = false, onRetry }) {
+@@ -34,130 +36,99 @@ export default function EvaluationScreen({ navigation, real = false, onSubmit, o
+   }
+ 
+   return (
 -    <ScreenContainer>
 +    <AuthBackground variant="login" overlayOpacity={0.68} testID="evaluation-background">
 +      <StatusBar style="light" />
-@@ -38,0 +42 @@ export default function EvaluationScreen({ navigation, real = false, onSubmit, o
+       <ScrollView
 +        contentContainerStyle={styles.content}
-@@ -40,0 +45 @@ export default function EvaluationScreen({ navigation, real = false, onSubmit, o
+         automaticallyAdjustKeyboardInsets
+         keyboardShouldPersistTaps="handled"
 +        showsVerticalScrollIndicator={false}
-@@ -41,0 +47 @@ export default function EvaluationScreen({ navigation, real = false, onSubmit, o
+       >
 +        <Badge label={real ? 'AVALIAÇÃO DE EVENTO' : 'MODO DEMONSTRAÇÃO'} variant={real ? 'brand' : 'default'} />
-@@ -43,43 +49,7 @@ export default function EvaluationScreen({ navigation, real = false, onSubmit, o
+         <Text style={styles.title}>Participação Finalizada</Text>
 -        {real ? <Text>Esta avaliação será enviada ao ArenaGo.</Text>
 -          : <Text>Modo demonstração: esta avaliação não será enviada ao servidor.</Text>}
 -        {error ? <Text style={styles.error} accessibilityRole="alert">{error}</Text> : null}
@@ -53273,7 +53658,7 @@ index b9916f1..40d5ac2 100644
 +            <Badge label="NÃO FOI POSSÍVEL ENVIAR" variant="danger" />
 +            <Text style={styles.error}>{error}</Text>
 +          </View>
-@@ -87,10 +57,56 @@ export default function EvaluationScreen({ navigation, real = false, onSubmit, o
+         ) : null}
 -        <Pressable
 -          style={[styles.button, styles.secondaryButton]}
 -          onPress={handleReturnHome}
@@ -53340,10 +53725,13 @@ index b9916f1..40d5ac2 100644
 +            style={styles.actionButton}
 +          />
 +        </Card>
-@@ -98 +114 @@ export default function EvaluationScreen({ navigation, real = false, onSubmit, o
+       </ScrollView>
 -    </ScreenContainer>
 +    </AuthBackground>
-@@ -103,60 +119,15 @@ const styles = StyleSheet.create({
+   );
+ }
+ 
+ const styles = StyleSheet.create({
 -  title: {
 -    fontSize: 24,
 -    fontWeight: 'bold',
@@ -53419,20 +53807,30 @@ index b9916f1..40d5ac2 100644
 +  commentField: { marginTop: spacing.lg },
 +  commentInput: { minHeight: 104, textAlignVertical: 'top' },
 +  actionButton: { marginTop: spacing.md },
+ });
 diff --git a/app/screens/participation/ParticipationRealDetailsScreen.js b/app/screens/participation/ParticipationRealDetailsScreen.js
 index 803ad1e..3973ce0 100644
 --- a/app/screens/participation/ParticipationRealDetailsScreen.js
 +++ b/app/screens/participation/ParticipationRealDetailsScreen.js
-@@ -2 +2,2 @@ import { useContext, useEffect, useState } from 'react';
+@@ -1,10 +1,12 @@
+ import { useContext, useEffect, useState } from 'react';
 -import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 +import { StatusBar } from 'expo-status-bar';
 +import { ScrollView, StyleSheet, Text, View } from 'react-native';
-@@ -4 +5 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+ 
 -import ScreenContainer from '../../components/ScreenContainer';
 +import { AuthBackground, Badge, Button, Card } from '../../components/ui';
-@@ -7,0 +9 @@ import { formatStayDuration } from '../../utils/participation';
+ import { AuthContext } from '../../context/AuthContext';
+ import { fetchParticipationEvaluation, validateHistoryItem } from '../../services/participationHistoryService';
+ import { formatStayDuration } from '../../utils/participation';
 +import { colors, spacing, typography } from '../../theme';
-@@ -24 +26,6 @@ function DetailRow({ label, value }) {
+ 
+ function dateText(value) {
+   if (!value) return 'Não registrado';
+@@ -21,7 +23,12 @@ function durationText(start, end) {
+ }
+ 
+ function DetailRow({ label, value }) {
 -  return <View style={styles.row}><Text style={styles.label}>{label}</Text><Text style={styles.value}>{value}</Text></View>;
 +  return (
 +    <View style={styles.row}>
@@ -53440,7 +53838,13 @@ index 803ad1e..3973ce0 100644
 +      <Text style={styles.value}>{value}</Text>
 +    </View>
 +  );
-@@ -55,3 +62,13 @@ export default function ParticipationRealDetailsScreen({ route, navigation }) {
+ }
+ 
+ export default function ParticipationRealDetailsScreen({ route, navigation }) {
+@@ -52,62 +59,84 @@ export default function ParticipationRealDetailsScreen({ route, navigation }) {
+   }, [client, userId, epoch, participationId, submitted]);
+ 
+   if (!valid) {
 -    return <ScreenContainer><Text style={styles.notice}>
 -      Os detalhes não estão disponíveis nesta navegação. Volte à aba Eventos e selecione a participação.
 -    </Text></ScreenContainer>;
@@ -53457,21 +53861,27 @@ index 803ad1e..3973ce0 100644
 +        </View>
 +      </AuthBackground>
 +    );
-@@ -61,0 +79,6 @@ export default function ParticipationRealDetailsScreen({ route, navigation }) {
+   }
+ 
+   const evaluation = evaluationState.evaluation;
+   const entry = item.arenaEnteredAt ?? item.joinedAt;
 +  const statusLabel = item.status === 'finished'
 +    ? 'PARTICIPAÇÃO FINALIZADA'
 +    : item.status === 'active'
 +      ? 'PARTICIPAÇÃO ATIVA'
 +      : 'PARTICIPAÇÃO NA FILA';
 +  const statusVariant = item.status === 'finished' ? 'success' : item.status === 'active' ? 'brand' : 'warning';
-@@ -64,2 +87,4 @@ export default function ParticipationRealDetailsScreen({ route, navigation }) {
+ 
+   return (
 -    <ScreenContainer>
 -      <ScrollView contentContainerStyle={styles.content}>
 +    <AuthBackground variant="login" overlayOpacity={0.68} testID="participation-details-background">
 +      <StatusBar style="light" />
 +      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
 +        <Badge label={statusLabel} variant={statusVariant} />
-@@ -69,7 +94,9 @@ export default function ParticipationRealDetailsScreen({ route, navigation }) {
+         <Text style={styles.title}>{item.event.name}</Text>
+         <Text style={styles.note}>Dados reais da sua participação. Horários no fuso do dispositivo.</Text>
+         <Text style={styles.section}>Participação</Text>
 -        <DetailRow label="Situação" value={item.status} />
 -        <DetailRow label="Ingresso" value={dateText(item.joinedAt)} />
 -        <DetailRow label="Entrada na Arena" value={dateText(item.arenaEnteredAt)} />
@@ -53488,7 +53898,7 @@ index 803ad1e..3973ce0 100644
 +          <DetailRow label="Atendimentos concluídos" value={String(item.completedServicesCount)} />
 +          {item.finishReason ? <DetailRow label="Motivo da saída" value={item.finishReason} /> : null}
 +        </Card>
-@@ -77,4 +104,11 @@ export default function ParticipationRealDetailsScreen({ route, navigation }) {
+         <Text style={styles.section}>Avaliação</Text>
 -        {submitted ? (
 -          evaluationState.loading ? <Text>Carregando avaliação...</Text>
 -          : evaluationState.error ? <Text style={styles.error}>{evaluationState.error}</Text>
@@ -53504,14 +53914,14 @@ index 803ad1e..3973ce0 100644
 +              </>
 +            ) : <Text style={styles.notice}>Avaliação indisponível.</Text>
 +          ) : item.evaluation.pending ? (
-@@ -82,2 +116,4 @@ export default function ParticipationRealDetailsScreen({ route, navigation }) {
+             <>
 -              <DetailRow label="Nota" value={`${evaluation.rating} de 5 estrelas`} />
 -              {evaluation.comment ? <Text style={styles.comment}>{evaluation.comment}</Text> : null}
 +              <Badge label="AVALIAÇÃO PENDENTE" variant="warning" />
 +              <Text style={styles.notice}>Sua avaliação está pendente.</Text>
 +              <Button style={styles.actionButton} title="Avaliar evento" variant="primary" accessibilityLabel="Avaliar este evento"
 +                onPress={() => navigation.navigate('RealEvaluation', { participationId, historyItem: item })} />
-@@ -85,10 +121,2 @@ export default function ParticipationRealDetailsScreen({ route, navigation }) {
+             </>
 -          ) : <Text style={styles.notice}>Avaliação indisponível.</Text>
 -        ) : item.evaluation.pending ? (
 -          <>
@@ -53524,10 +53934,13 @@ index 803ad1e..3973ce0 100644
 -        ) : <Text style={styles.notice}>Nenhuma avaliação pendente para esta participação.</Text>}
 +          ) : <Text style={styles.notice}>Nenhuma avaliação pendente para esta participação.</Text>}
 +        </Card>
-@@ -96 +124 @@ export default function ParticipationRealDetailsScreen({ route, navigation }) {
+       </ScrollView>
 -    </ScreenContainer>
 +    </AuthBackground>
-@@ -101,12 +129,13 @@ const styles = StyleSheet.create({
+   );
+ }
+ 
+ const styles = StyleSheet.create({
 -  content: { paddingBottom: 24 },
 -  title: { fontSize: 24, fontWeight: 'bold', marginTop: 16 },
 -  note: { marginTop: 8, color: '#666', fontSize: 13 },
@@ -53553,20 +53966,34 @@ index 803ad1e..3973ce0 100644
 +  error: { ...typography.body, color: '#FF9AAE', marginTop: spacing.md },
 +  comment: { ...typography.body, color: colors.text.secondary, marginTop: spacing.md },
 +  actionButton: { marginTop: spacing.lg },
+ });
 diff --git a/app/screens/participation/ParticipationsRealScreen.js b/app/screens/participation/ParticipationsRealScreen.js
 index 69dadf9..c72eb78 100644
 --- a/app/screens/participation/ParticipationsRealScreen.js
 +++ b/app/screens/participation/ParticipationsRealScreen.js
-@@ -3 +3,2 @@ import { useFocusEffect } from '@react-navigation/native';
+@@ -1,14 +1,16 @@
+ import { useCallback, useContext, useRef, useState } from 'react';
+ import { useFocusEffect } from '@react-navigation/native';
 -import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 +import { StatusBar } from 'expo-status-bar';
 +import { ActivityIndicator, FlatList, StyleSheet, Text, View } from 'react-native';
-@@ -6 +7 @@ import ParticipationCard from '../../components/ParticipationCard';
+ 
+ import ParticipationCard from '../../components/ParticipationCard';
 -import ScreenContainer from '../../components/ScreenContainer';
 +import { AuthBackground, Badge, Button, Card } from '../../components/ui';
-@@ -11,0 +13 @@ import {
+ import { AuthContext } from '../../context/AuthContext';
+ import { EVALUATION_SITUATIONS, getEvaluationSituation, getPendingEvaluationParticipations } from '../../utils/evaluation';
+ import {
+   fetchParticipationHistory, mergeHistoryItems, toParticipationCardItem,
+ } from '../../services/participationHistoryService';
 +import { colors, spacing, typography } from '../../theme';
-@@ -68,45 +70,72 @@ export default function ParticipationsRealScreen({ navigation }) {
+ 
+ const INITIAL = { items: [], nextCursor: null, status: 'loading', loadingMore: false, error: null };
+ 
+@@ -65,60 +67,94 @@ export default function ParticipationsRealScreen({ navigation }) {
+   const pendingCount = getPendingEvaluationParticipations(participations).length;
+ 
+   return (
 -    <ScreenContainer>
 -      <Text style={styles.title}>Minhas Participações</Text>
 -      <Text style={styles.subtitle}>Histórico registrado no ArenaGo.</Text>
@@ -53684,7 +54111,10 @@ index 69dadf9..c72eb78 100644
 +        ) : null}
 +      </View>
 +    </AuthBackground>
-@@ -117,7 +146,14 @@ const styles = StyleSheet.create({
+   );
+ }
+ 
+ const styles = StyleSheet.create({
 -  title: { fontSize: 24, fontWeight: 'bold', marginTop: 16 },
 -  subtitle: { marginTop: 8, color: '#555', fontSize: 14 },
 -  notice: { marginTop: 18, fontSize: 15, color: '#555' },
@@ -53706,20 +54136,32 @@ index 69dadf9..c72eb78 100644
 +  emptyCard: { marginTop: spacing.lg },
 +  evaluationButton: { marginTop: spacing.sm },
 +  loadMoreButton: { marginTop: spacing.xl },
+ });
 diff --git a/app/screens/participation/RealEvaluationScreen.js b/app/screens/participation/RealEvaluationScreen.js
 index 67bf890..5e0fcc3 100644
 --- a/app/screens/participation/RealEvaluationScreen.js
 +++ b/app/screens/participation/RealEvaluationScreen.js
-@@ -2 +2,2 @@ import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'r
+@@ -1,12 +1,14 @@
+ import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 -import { Text } from 'react-native';
 +import { StyleSheet, Text, View } from 'react-native';
 +import { StatusBar } from 'expo-status-bar';
-@@ -5 +6 @@ import * as Crypto from 'expo-crypto';
+ import * as Crypto from 'expo-crypto';
+ 
 -import ScreenContainer from '../../components/ScreenContainer';
 +import { AuthBackground, Badge, Card } from '../../components/ui';
-@@ -9,0 +11 @@ import { validateHistoryItem } from '../../services/participationHistoryService'
+ import { useAuth } from '../../context/AuthContext';
+ import { ParticipationContext } from '../../context/ParticipationContext';
+ import { createParticipationActionCoordinator, describeParticipationActionError } from '../../services/participationActionService';
+ import { validateHistoryItem } from '../../services/participationHistoryService';
 +import { colors, spacing, typography } from '../../theme';
-@@ -68 +70,13 @@ export default function RealEvaluationScreen({ navigation, route }) {
+ import EvaluationScreen from './EvaluationScreen';
+ 
+ export default function RealEvaluationScreen({ navigation, route }) {
+@@ -65,9 +67,26 @@ export default function RealEvaluationScreen({ navigation, route }) {
+   }, [coordinator, navigation, participationId, refreshParticipation, userId, valid]);
+ 
+   if (!valid || !userId) {
 -    return <ScreenContainer><Text>A avaliação não está disponível para esta participação. Atualize o histórico.</Text></ScreenContainer>;
 +    return (
 +      <AuthBackground variant="login" overlayOpacity={0.68} testID="evaluation-unavailable-background">
@@ -53734,7 +54176,11 @@ index 67bf890..5e0fcc3 100644
 +        </View>
 +      </AuthBackground>
 +    );
-@@ -73,0 +88,5 @@ export default function RealEvaluationScreen({ navigation, route }) {
+   }
+ 
+   return <EvaluationScreen navigation={navigation} real onSubmit={submit} onRetry={() => submit(null)}
+     onLater={() => navigation.goBack()} submitting={busy} error={error} pendingIntent={pending} />;
+ }
 +
 +const styles = StyleSheet.create({
 +  unavailable: { flex: 1, padding: spacing.layout.screenPaddingHorizontal, justifyContent: 'center' },
@@ -53744,18 +54190,29 @@ diff --git a/app/screens/profile/ProfileQuestionnaireScreen.js b/app/screens/pro
 index 537d84f..c98131a 100644
 --- a/app/screens/profile/ProfileQuestionnaireScreen.js
 +++ b/app/screens/profile/ProfileQuestionnaireScreen.js
-@@ -14 +13,0 @@ import {
+@@ -11,9 +11,9 @@ import {
+   TextInput,
+   View,
+ } from 'react-native';
 -import { SafeAreaView } from 'react-native-safe-area-context';
-@@ -16,0 +16 @@ import { useAuth } from '../../context/AuthContext';
+ 
+ import { useAuth } from '../../context/AuthContext';
 +import { AuthBackground } from '../../components/ui/AuthBackground';
-@@ -765 +765,5 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
+ import BirthDateInput from '../../components/BirthDateInput';
+ import { formatBirthDate, parseBirthDate } from '../../utils/birthDate';
+ import {
+@@ -762,34 +762,47 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
+ 
+   if (isEditMode && (!canEdit || profileLoadStatus !== 'ready')) {
+     return (
 -      <SafeAreaView style={styles.container}>
 +      <AuthBackground
 +        variant="login"
 +        showAmbientGlow={false}
 +        testID="questionnaire-background"
 +      >
-@@ -768,18 +772,23 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
+         <StatusBar style="light" />
+         <View style={styles.scrollContent}>
 -          <Text style={styles.title}>Editar questionário</Text>
 -          {canEdit && profileLoadStatus === 'loading' ? <>
 -            <ActivityIndicator color="#a78bfa" />
@@ -53797,20 +54254,29 @@ index 537d84f..c98131a 100644
 +              <Text style={styles.secondaryButtonText}>Cancelar edição</Text>
 +            </Pressable>
 +          </View>
-@@ -787 +796 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
+         </View>
 -      </SafeAreaView>
 +      </AuthBackground>
-@@ -792 +801,5 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
+     );
+   }
+ 
+   return (
 -    <SafeAreaView style={styles.container}>
 +    <AuthBackground
 +      variant="login"
 +      showAmbientGlow={false}
 +      testID="questionnaire-background"
 +    >
-@@ -832 +845 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
+       <StatusBar style="light" />
+ 
+       {/* Top Header com botão voltar e marca */}
+@@ -829,22 +842,30 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
+         )}
+       </View>
+ 
 -      {/* Barra visual de progresso */}
 +      {/* Indicador de progresso em 3 segmentos (Design System StepperIndicator) */}
-@@ -833,0 +847,19 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
+       <View style={styles.progressContainer}>
 +        <View style={styles.stepsSegments}>
 +          {QUESTIONNAIRE_STEPS.map((step, idx) => {
 +            const isCompleted = idx < currentStepIndex;
@@ -53830,7 +54296,9 @@ index 537d84f..c98131a 100644
 +            );
 +          })}
 +        </View>
-@@ -837,11 +868,0 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
+         <View style={styles.progressTrack}>
+           <View style={[styles.progressFill, { width: `${progressPercent}%` }]} />
+         </View>
 -        <View style={styles.stepsSegments}>
 -          {QUESTIONNAIRE_STEPS.map((step, idx) => (
 -            <View
@@ -53842,10 +54310,17 @@ index 537d84f..c98131a 100644
 -            />
 -          ))}
 -        </View>
-@@ -856,0 +878,2 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
+       </View>
+ 
+       <KeyboardAvoidingView
+@@ -854,11 +875,17 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
+         <ScrollView
+           contentContainerStyle={styles.scrollContent}
+           keyboardShouldPersistTaps="handled"
 +          keyboardDismissMode="none"
 +          showsVerticalScrollIndicator={false}
-@@ -859,3 +882,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
+         >
+           {/* Cabeçalho da Etapa Atual */}
 -          <Text style={styles.tag}>{currentStep.tag}</Text>
 -          <Text style={styles.title}>{currentStep.title}</Text>
 -          <Text style={styles.subtitle}>{currentStep.subtitle}</Text>
@@ -53856,19 +54331,35 @@ index 537d84f..c98131a 100644
 +            <Text style={styles.title}>{currentStep.title}</Text>
 +            <Text style={styles.subtitle}>{currentStep.subtitle}</Text>
 +          </View>
-@@ -1437 +1464 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
+ 
+           {/* ================================================================= */}
+           {/* ETAPA 1 — SOBRE VOCÊ */}
+@@ -1434,15 +1461,11 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
+           )}
+         </ScrollView>
+       </KeyboardAvoidingView>
 -    </SafeAreaView>
 +    </AuthBackground>
-@@ -1442,4 +1468,0 @@ const styles = StyleSheet.create({
+   );
+ }
+ 
+ const styles = StyleSheet.create({
 -  container: {
 -    flex: 1,
 -    backgroundColor: '#0c0a17',
 -  },
-@@ -1454,0 +1478,3 @@ const styles = StyleSheet.create({
+   keyboardView: {
+     flex: 1,
+   },
+@@ -1452,110 +1475,149 @@ const styles = StyleSheet.create({
+     justifyContent: 'space-between',
+     paddingHorizontal: 20,
+     paddingVertical: 12,
 +    borderBottomWidth: 1,
 +    borderBottomColor: '#2A2444',
 +    backgroundColor: 'rgba(11, 11, 18, 0.85)',
-@@ -1457,4 +1483,6 @@ const styles = StyleSheet.create({
+   },
+   backButton: {
 -    width: 40,
 -    height: 40,
 -    borderRadius: 20,
@@ -53879,52 +54370,71 @@ index 537d84f..c98131a 100644
 +    minHeight: 48,
 +    borderRadius: 12,
 +    backgroundColor: '#1B1730',
-@@ -1462 +1490 @@ const styles = StyleSheet.create({
+     borderWidth: 1,
 -    borderColor: '#34265a',
 +    borderColor: '#3D3466',
-@@ -1467 +1495 @@ const styles = StyleSheet.create({
+     justifyContent: 'center',
+     alignItems: 'center',
+   },
+   backButtonText: {
 -    color: '#ffffff',
 +    color: '#FFFFFF',
-@@ -1472,0 +1501,2 @@ const styles = StyleSheet.create({
+     fontSize: 18,
+     fontWeight: '700',
+   },
+   headerTitleContainer: {
+     alignItems: 'center',
 +    flex: 1,
 +    paddingHorizontal: 8,
-@@ -1475,2 +1505,2 @@ const styles = StyleSheet.create({
+   },
+   headerTitle: {
 -    color: '#ffffff',
 -    fontSize: 13,
 +    color: '#FFFFFF',
 +    fontSize: 12,
-@@ -1481 +1511 @@ const styles = StyleSheet.create({
+     fontWeight: '700',
+     letterSpacing: 1.2,
+   },
+   headerStepBadge: {
 -    color: '#a78bfa',
 +    color: '#A78BFA',
-@@ -1483 +1513 @@ const styles = StyleSheet.create({
+     fontSize: 12,
 -    fontWeight: '600',
 +    fontWeight: '700',
-@@ -1487 +1517 @@ const styles = StyleSheet.create({
+     marginTop: 2,
+   },
+   headerPlaceholder: {
 -    width: 40,
 +    width: 48,
-@@ -1490 +1520,2 @@ const styles = StyleSheet.create({
+   },
+   headerLogoutButton: {
 -    paddingHorizontal: 12,
 +    minHeight: 40,
 +    paddingHorizontal: 14,
-@@ -1492,2 +1523,2 @@ const styles = StyleSheet.create({
+     paddingVertical: 8,
 -    borderRadius: 16,
 -    backgroundColor: '#25152a',
 +    borderRadius: 9999,
 +    backgroundColor: 'rgba(239, 68, 68, 0.14)',
-@@ -1495 +1526,3 @@ const styles = StyleSheet.create({
+     borderWidth: 1,
 -    borderColor: '#5c1d35',
 +    borderColor: 'rgba(239, 68, 68, 0.45)',
 +    justifyContent: 'center',
 +    alignItems: 'center',
-@@ -1498 +1531 @@ const styles = StyleSheet.create({
+   },
+   headerLogoutButtonText: {
 -    color: '#f87171',
 +    color: '#FCA5A5',
-@@ -1504 +1537,3 @@ const styles = StyleSheet.create({
+     fontSize: 12,
+     fontWeight: '700',
+   },
+   progressContainer: {
+     paddingHorizontal: 20,
 -    paddingBottom: 12,
 +    paddingTop: 14,
 +    paddingBottom: 10,
 +    gap: 8,
-@@ -1506 +1541,7 @@ const styles = StyleSheet.create({
+   },
 -  progressTrack: {
 +  stepsSegments: {
 +    flexDirection: 'row',
@@ -53933,19 +54443,19 @@ index 537d84f..c98131a 100644
 +  },
 +  segmentBar: {
 +    flex: 1,
-@@ -1508,3 +1549 @@ const styles = StyleSheet.create({
+     height: 6,
 -    backgroundColor: '#191330',
 -    borderRadius: 3,
 -    overflow: 'hidden',
 +    borderRadius: 9999,
-@@ -1512,4 +1551,2 @@ const styles = StyleSheet.create({
+   },
 -  progressFill: {
 -    height: '100%',
 -    backgroundColor: '#7c3aed',
 -    borderRadius: 3,
 +  segmentBarCompleted: {
 +    backgroundColor: '#5F33FA',
-@@ -1517,5 +1554,2 @@ const styles = StyleSheet.create({
+   },
 -  stepsSegments: {
 -    flexDirection: 'row',
 -    justifyContent: 'space-between',
@@ -53953,14 +54463,14 @@ index 537d84f..c98131a 100644
 -    paddingHorizontal: 2,
 +  segmentBarActive: {
 +    backgroundColor: '#A78BFA',
-@@ -1523,4 +1557,2 @@ const styles = StyleSheet.create({
+   },
 -  segmentDot: {
 -    width: 8,
 -    height: 8,
 -    borderRadius: 4,
 +  segmentBarInactive: {
 +    backgroundColor: '#231E3D',
-@@ -1528,2 +1560,5 @@ const styles = StyleSheet.create({
+   },
 -  segmentDotActive: {
 -    backgroundColor: '#a78bfa',
 +  progressTrack: {
@@ -53968,17 +54478,18 @@ index 537d84f..c98131a 100644
 +    backgroundColor: '#131122',
 +    borderRadius: 9999,
 +    overflow: 'hidden',
-@@ -1531,2 +1566,4 @@ const styles = StyleSheet.create({
+   },
 -  segmentDotInactive: {
 -    backgroundColor: '#2a2046',
 +  progressFill: {
 +    height: '100%',
 +    backgroundColor: '#7C4DFF',
 +    borderRadius: 9999,
-@@ -1535 +1572 @@ const styles = StyleSheet.create({
+   },
+   scrollContent: {
 -    paddingHorizontal: 24,
 +    paddingHorizontal: 20,
-@@ -1537 +1574,14 @@ const styles = StyleSheet.create({
+     paddingTop: 16,
 -    paddingBottom: 40,
 +    paddingBottom: 96,
 +  },
@@ -53994,23 +54505,27 @@ index 537d84f..c98131a 100644
 +    paddingHorizontal: 12,
 +    paddingVertical: 4,
 +    marginBottom: 10,
-@@ -1540,2 +1590,2 @@ const styles = StyleSheet.create({
+   },
+   tag: {
 -    color: '#a78bfa',
 -    fontSize: 12,
 +    color: '#A78BFA',
 +    fontSize: 11,
-@@ -1543,2 +1593 @@ const styles = StyleSheet.create({
+     fontWeight: '800',
 -    letterSpacing: 1.2,
 -    marginBottom: 6,
 +    letterSpacing: 1.1,
-@@ -1547,2 +1596,2 @@ const styles = StyleSheet.create({
+   },
+   title: {
 -    color: '#ffffff',
 -    fontSize: 26,
 +    color: '#FFFFFF',
 +    fontSize: 28,
-@@ -1549,0 +1599 @@ const styles = StyleSheet.create({
+     fontWeight: '800',
 +    letterSpacing: -0.4,
-@@ -1553,4 +1603,11 @@ const styles = StyleSheet.create({
+     marginBottom: 8,
+   },
+   subtitle: {
 -    color: '#94a3b8',
 -    fontSize: 14,
 -    lineHeight: 20,
@@ -54026,306 +54541,498 @@ index 537d84f..c98131a 100644
 +    borderRadius: 16,
 +    padding: 20,
 +    gap: 14,
-@@ -1558,0 +1616,5 @@ const styles = StyleSheet.create({
+   },
+   form: {
 +    backgroundColor: '#131122',
 +    borderWidth: 1,
 +    borderColor: '#2A2444',
 +    borderRadius: 16,
 +    padding: 20,
-@@ -1570 +1632 @@ const styles = StyleSheet.create({
+     gap: 20,
+   },
+   inputGroup: {
+@@ -1567,38 +1629,39 @@ const styles = StyleSheet.create({
+     gap: 4,
+   },
+   label: {
 -    color: '#cbd5e1',
 +    color: '#FFFFFF',
-@@ -1575 +1637 @@ const styles = StyleSheet.create({
+     fontSize: 14,
+     fontWeight: '600',
+   },
+   questionLabel: {
 -    color: '#cbd5e1',
 +    color: '#FFFFFF',
-@@ -1582 +1644 @@ const styles = StyleSheet.create({
+     fontSize: 14,
+     fontWeight: '600',
+     lineHeight: 20,
+     flex: 1,
+   },
+   requiredStar: {
 -    color: '#f87171',
 +    color: '#EF4444',
-@@ -1587 +1649 @@ const styles = StyleSheet.create({
+     fontSize: 14,
+     fontWeight: '700',
+   },
+   input: {
 -    backgroundColor: '#141026',
 +    backgroundColor: '#231E3D',
-@@ -1589 +1651 @@ const styles = StyleSheet.create({
+     borderWidth: 1,
 -    borderColor: '#2a2046',
 +    borderColor: '#3D3466',
-@@ -1590,0 +1653 @@ const styles = StyleSheet.create({
+     borderRadius: 12,
 +    minHeight: 52,
-@@ -1593 +1656 @@ const styles = StyleSheet.create({
+     height: 52,
+     paddingHorizontal: 16,
 -    color: '#ffffff',
 +    color: '#FFFFFF',
-@@ -1597 +1660 @@ const styles = StyleSheet.create({
+     fontSize: 15,
+   },
+   inputError: {
 -    borderColor: '#ef4444',
 +    borderColor: '#EF4444',
-@@ -1600,2 +1663,2 @@ const styles = StyleSheet.create({
+   },
+   errorText: {
 -    color: '#f87171',
 -    fontSize: 12,
 +    color: '#FCA5A5',
 +    fontSize: 13,
-@@ -1612 +1675 @@ const styles = StyleSheet.create({
+     fontWeight: '600',
+     marginTop: 2,
+   },
+@@ -1609,28 +1672,29 @@ const styles = StyleSheet.create({
+   optionCard: {
+     flexDirection: 'row',
+     alignItems: 'center',
 -    backgroundColor: '#141026',
 +    backgroundColor: '#1B1730',
-@@ -1614 +1677 @@ const styles = StyleSheet.create({
+     borderWidth: 1,
 -    borderColor: '#2a2046',
 +    borderColor: '#2A2444',
-@@ -1615,0 +1679 @@ const styles = StyleSheet.create({
+     borderRadius: 12,
 +    minHeight: 52,
-@@ -1621,2 +1685,2 @@ const styles = StyleSheet.create({
+     paddingHorizontal: 16,
+     paddingVertical: 14,
+     gap: 12,
+   },
+   optionCardSelected: {
 -    backgroundColor: '#1f1638',
 -    borderColor: '#7c3aed',
 +    backgroundColor: '#231E3D',
 +    borderColor: '#5F33FA',
-@@ -1626 +1690 @@ const styles = StyleSheet.create({
+     borderWidth: 1.5,
+   },
+   optionCardError: {
 -    borderColor: '#ef4444',
 +    borderColor: '#EF4444',
-@@ -1633 +1697 @@ const styles = StyleSheet.create({
+   },
+   optionRadioOuter: {
+     width: 20,
+     height: 20,
+     borderRadius: 10,
+     borderWidth: 2,
 -    borderColor: '#64748b',
 +    borderColor: '#787191',
-@@ -1641 +1705 @@ const styles = StyleSheet.create({
+     justifyContent: 'center',
+     alignItems: 'center',
+   },
+@@ -1638,49 +1702,55 @@ const styles = StyleSheet.create({
+     width: 10,
+     height: 10,
+     borderRadius: 5,
 -    backgroundColor: '#a78bfa',
 +    backgroundColor: '#A78BFA',
-@@ -1644 +1708 @@ const styles = StyleSheet.create({
+   },
+   optionText: {
 -    color: '#94a3b8',
 +    color: '#B5B0C8',
-@@ -1650 +1714 @@ const styles = StyleSheet.create({
+     fontSize: 15,
+     fontWeight: '500',
+     flex: 1,
+   },
+   optionTextSelected: {
 -    color: '#ffffff',
 +    color: '#FFFFFF',
-@@ -1655 +1719,5 @@ const styles = StyleSheet.create({
+     fontWeight: '700',
+   },
+   conditionalInputContainer: {
+     marginTop: 10,
 -    paddingLeft: 4,
 +    padding: 12,
 +    borderRadius: 12,
 +    backgroundColor: '#1B1730',
 +    borderWidth: 1,
 +    borderColor: '#3D3466',
-@@ -1659 +1727,2 @@ const styles = StyleSheet.create({
+     gap: 8,
+   },
+   primaryButton: {
 -    backgroundColor: '#7c3aed',
 +    backgroundColor: '#5F33FA',
 +    minHeight: 52,
-@@ -1661 +1730 @@ const styles = StyleSheet.create({
+     height: 52,
 -    borderRadius: 14,
 +    borderRadius: 12,
-@@ -1664 +1733 @@ const styles = StyleSheet.create({
+     justifyContent: 'center',
+     alignItems: 'center',
 -    marginTop: 12,
 +    marginTop: 8,
-@@ -1667 +1736 @@ const styles = StyleSheet.create({
+   },
+   primaryButtonText: {
 -    color: '#ffffff',
 +    color: '#FFFFFF',
-@@ -1672 +1741 @@ const styles = StyleSheet.create({
+     fontSize: 16,
+     fontWeight: '700',
+   },
+   secondaryButton: {
 -    backgroundColor: '#191330',
 +    backgroundColor: '#1B1730',
-@@ -1674 +1743,2 @@ const styles = StyleSheet.create({
+     borderWidth: 1,
 -    borderColor: '#34265a',
 +    borderColor: '#3D3466',
 +    minHeight: 52,
-@@ -1676 +1746 @@ const styles = StyleSheet.create({
+     height: 52,
 -    borderRadius: 14,
 +    borderRadius: 12,
-@@ -1681 +1751 @@ const styles = StyleSheet.create({
+     justifyContent: 'center',
+     alignItems: 'center',
+   },
+   secondaryButtonText: {
 -    color: '#e2d9f3',
 +    color: '#FFFFFF',
-@@ -1683 +1753 @@ const styles = StyleSheet.create({
+     fontSize: 15,
 -    fontWeight: '700',
 +    fontWeight: '600',
-@@ -1693 +1763 @@ const styles = StyleSheet.create({
+   },
+ 
+   searchRow: {
+@@ -1690,19 +1760,21 @@ const styles = StyleSheet.create({
+   },
+   searchInput: {
+     flex: 1,
 -    backgroundColor: '#141026',
 +    backgroundColor: '#231E3D',
-@@ -1695 +1765 @@ const styles = StyleSheet.create({
+     borderWidth: 1,
 -    borderColor: '#2a2046',
 +    borderColor: '#3D3466',
-@@ -1696,0 +1767 @@ const styles = StyleSheet.create({
+     borderRadius: 12,
 +    minHeight: 52,
-@@ -1699 +1770 @@ const styles = StyleSheet.create({
+     height: 52,
+     paddingHorizontal: 16,
 -    color: '#ffffff',
 +    color: '#FFFFFF',
-@@ -1703 +1774 @@ const styles = StyleSheet.create({
+     fontSize: 15,
+   },
+   searchAddButton: {
 -    backgroundColor: '#261b47',
 +    backgroundColor: 'rgba(95, 51, 250, 0.22)',
-@@ -1705 +1776,2 @@ const styles = StyleSheet.create({
+     borderWidth: 1,
 -    borderColor: '#7c3aed',
 +    borderColor: '#7C4DFF',
 +    minHeight: 52,
-@@ -1713 +1785 @@ const styles = StyleSheet.create({
+     height: 52,
+     paddingHorizontal: 18,
+     borderRadius: 12,
+@@ -1710,44 +1782,44 @@ const styles = StyleSheet.create({
+     alignItems: 'center',
+   },
+   searchAddButtonText: {
 -    color: '#c084fc',
 +    color: '#A78BFA',
-@@ -1718 +1790 @@ const styles = StyleSheet.create({
+     fontSize: 14,
+     fontWeight: '700',
+   },
+   feedbackBanner: {
 -    borderRadius: 10,
 +    borderRadius: 12,
-@@ -1720 +1792 @@ const styles = StyleSheet.create({
+     paddingHorizontal: 14,
 -    paddingVertical: 10,
 +    paddingVertical: 12,
-@@ -1724,2 +1796,2 @@ const styles = StyleSheet.create({
+     borderWidth: 1,
+   },
+   feedbackBannerWarning: {
 -    backgroundColor: '#2a1a12',
 -    borderColor: '#f59e0b',
 +    backgroundColor: 'rgba(245, 158, 11, 0.14)',
 +    borderColor: '#F59E0B',
-@@ -1728,2 +1800,2 @@ const styles = StyleSheet.create({
+   },
+   feedbackBannerSuccess: {
 -    backgroundColor: '#0f241a',
 -    borderColor: '#10b981',
 +    backgroundColor: 'rgba(16, 185, 129, 0.14)',
 +    borderColor: '#10B981',
-@@ -1736 +1808 @@ const styles = StyleSheet.create({
+   },
+   feedbackText: {
+     fontSize: 13,
+     fontWeight: '600',
+   },
+   feedbackTextWarning: {
 -    color: '#fbbf24',
 +    color: '#FBBF24',
-@@ -1739 +1811 @@ const styles = StyleSheet.create({
+   },
+   feedbackTextSuccess: {
 -    color: '#34d399',
 +    color: '#34D399',
-@@ -1742 +1814 @@ const styles = StyleSheet.create({
+   },
+   suggestionsCard: {
 -    backgroundColor: '#141026',
 +    backgroundColor: '#1B1730',
-@@ -1745 +1817 @@ const styles = StyleSheet.create({
+     borderRadius: 14,
+     borderWidth: 1,
 -    borderColor: '#2a2046',
 +    borderColor: '#3D3466',
-@@ -1750 +1822 @@ const styles = StyleSheet.create({
+     padding: 12,
+     gap: 8,
+   },
+   suggestionsHeader: {
 -    color: '#a78bfa',
 +    color: '#A78BFA',
-@@ -1764 +1836 @@ const styles = StyleSheet.create({
+     fontSize: 11,
+     fontWeight: '800',
+     letterSpacing: 1,
+@@ -1761,92 +1833,100 @@ const styles = StyleSheet.create({
+     flexDirection: 'row',
+     justifyContent: 'space-between',
+     alignItems: 'center',
 -    backgroundColor: '#0c0a17',
 +    backgroundColor: '#131122',
-@@ -1766 +1838 @@ const styles = StyleSheet.create({
+     borderWidth: 1,
 -    borderColor: '#22193b',
 +    borderColor: '#2A2444',
-@@ -1767,0 +1840 @@ const styles = StyleSheet.create({
+     borderRadius: 10,
 +    minHeight: 48,
-@@ -1772,3 +1845,3 @@ const styles = StyleSheet.create({
+     paddingHorizontal: 14,
+     paddingVertical: 10,
+   },
+   suggestionItemSelected: {
 -    backgroundColor: '#18122c',
 -    borderColor: '#382561',
 -    opacity: 0.7,
 +    backgroundColor: '#1B1730',
 +    borderColor: '#3D3466',
 +    opacity: 0.72,
-@@ -1777 +1850 @@ const styles = StyleSheet.create({
+   },
+   suggestionGameName: {
 -    color: '#ffffff',
 +    color: '#FFFFFF',
-@@ -1783 +1856 @@ const styles = StyleSheet.create({
+     fontSize: 14,
+     fontWeight: '600',
+     flex: 1,
+   },
+   suggestionGameNameSelected: {
 -    color: '#94a3b8',
 +    color: '#B5B0C8',
-@@ -1786 +1859,3 @@ const styles = StyleSheet.create({
+   },
+   suggestionBadge: {
 -    backgroundColor: '#261b47',
 +    backgroundColor: 'rgba(95, 51, 250, 0.24)',
 +    borderWidth: 1,
 +    borderColor: '#5F33FA',
-@@ -1789 +1864 @@ const styles = StyleSheet.create({
+     paddingHorizontal: 10,
+     paddingVertical: 4,
 -    borderRadius: 6,
 +    borderRadius: 9999,
-@@ -1792 +1867,2 @@ const styles = StyleSheet.create({
+   },
+   suggestionBadgeSelected: {
 -    backgroundColor: '#1b1433',
 +    backgroundColor: '#231E3D',
 +    borderColor: '#3D3466',
-@@ -1795 +1871 @@ const styles = StyleSheet.create({
+   },
+   suggestionBadgeText: {
 -    color: '#c084fc',
 +    color: '#A78BFA',
-@@ -1800 +1876 @@ const styles = StyleSheet.create({
+     fontSize: 12,
+     fontWeight: '700',
+   },
+   suggestionBadgeTextSelected: {
 -    color: '#64748b',
 +    color: '#787191',
-@@ -1803,0 +1880 @@ const styles = StyleSheet.create({
+   },
+   manualAddInlineButton: {
+     marginTop: 6,
 +    minHeight: 48,
-@@ -1806,2 +1883,2 @@ const styles = StyleSheet.create({
+     paddingVertical: 10,
+     paddingHorizontal: 12,
 -    backgroundColor: '#1f1638',
 -    borderRadius: 8,
 +    backgroundColor: '#231E3D',
 +    borderRadius: 10,
-@@ -1809 +1886,2 @@ const styles = StyleSheet.create({
+     borderWidth: 1,
 -    borderColor: '#7c3aed',
 +    borderColor: '#5F33FA',
 +    justifyContent: 'center',
-@@ -1813 +1891 @@ const styles = StyleSheet.create({
+     alignItems: 'center',
+   },
+   manualAddInlineText: {
 -    color: '#c084fc',
 +    color: '#A78BFA',
-@@ -1818 +1896 @@ const styles = StyleSheet.create({
+     fontSize: 13,
+     fontWeight: '700',
+   },
+   noSuggestionsCard: {
 -    backgroundColor: '#141026',
 +    backgroundColor: '#1B1730',
-@@ -1821 +1899 @@ const styles = StyleSheet.create({
+     borderRadius: 14,
+     borderWidth: 1,
 -    borderColor: '#2a2046',
 +    borderColor: '#2A2444',
-@@ -1827 +1905 @@ const styles = StyleSheet.create({
+     padding: 16,
+     alignItems: 'center',
+     gap: 12,
+   },
+   noSuggestionsText: {
 -    color: '#94a3b8',
 +    color: '#B5B0C8',
-@@ -1833 +1911,2 @@ const styles = StyleSheet.create({
+     fontSize: 13,
+     textAlign: 'center',
+     lineHeight: 18,
+   },
+   manualAddPrimaryButton: {
 -    backgroundColor: '#7c3aed',
 +    backgroundColor: '#5F33FA',
 +    minHeight: 48,
-@@ -1837,0 +1917 @@ const styles = StyleSheet.create({
+     paddingHorizontal: 20,
+     paddingVertical: 12,
+     borderRadius: 10,
+     width: '100%',
 +    justifyContent: 'center',
-@@ -1841 +1921 @@ const styles = StyleSheet.create({
+     alignItems: 'center',
+   },
+   manualAddPrimaryButtonText: {
 -    color: '#ffffff',
 +    color: '#FFFFFF',
-@@ -1846 +1926 @@ const styles = StyleSheet.create({
+     fontSize: 14,
+     fontWeight: '700',
+   },
+   quickSuggestionsCard: {
 -    gap: 8,
 +    gap: 10,
-@@ -1849 +1929 @@ const styles = StyleSheet.create({
+   },
+   quickSuggestionsHeader: {
 -    color: '#94a3b8',
 +    color: '#B5B0C8',
-@@ -1859 +1939 @@ const styles = StyleSheet.create({
+     fontSize: 13,
+     fontWeight: '600',
+   },
+@@ -1856,25 +1936,27 @@ const styles = StyleSheet.create({
+     gap: 8,
+   },
+   quickChip: {
 -    backgroundColor: '#141026',
 +    backgroundColor: '#1B1730',
-@@ -1861,2 +1941,3 @@ const styles = StyleSheet.create({
+     borderWidth: 1,
 -    borderColor: '#2a2046',
 -    paddingHorizontal: 12,
 +    borderColor: '#3D3466',
 +    minHeight: 40,
 +    paddingHorizontal: 14,
-@@ -1864 +1945,2 @@ const styles = StyleSheet.create({
+     paddingVertical: 8,
 -    borderRadius: 20,
 +    borderRadius: 9999,
 +    justifyContent: 'center',
-@@ -1867,3 +1949,3 @@ const styles = StyleSheet.create({
+   },
+   quickChipSelected: {
 -    backgroundColor: '#1e153b',
 -    borderColor: '#4c2889',
 -    opacity: 0.6,
 +    backgroundColor: 'rgba(95, 51, 250, 0.2)',
 +    borderColor: '#5F33FA',
 +    opacity: 0.75,
-@@ -1872 +1954 @@ const styles = StyleSheet.create({
+   },
+   quickChipText: {
 -    color: '#cbd5e1',
 +    color: '#FFFFFF',
-@@ -1877 +1959 @@ const styles = StyleSheet.create({
+     fontSize: 13,
+     fontWeight: '600',
+   },
+   quickChipTextSelected: {
 -    color: '#8b5cf6',
 +    color: '#A78BFA',
-@@ -1889 +1971 @@ const styles = StyleSheet.create({
+   },
+   selectedSection: {
+     gap: 10,
+@@ -1886,26 +1968,28 @@ const styles = StyleSheet.create({
+     justifyContent: 'space-between',
+   },
+   selectedSectionTitle: {
 -    color: '#cbd5e1',
 +    color: '#FFFFFF',
-@@ -1892 +1974 @@ const styles = StyleSheet.create({
+     fontSize: 14,
+     fontWeight: '700',
 -    letterSpacing: 0.5,
 +    letterSpacing: 0.3,
-@@ -1895 +1977,3 @@ const styles = StyleSheet.create({
+   },
+   counterBadge: {
 -    backgroundColor: '#261b47',
 +    backgroundColor: 'rgba(95, 51, 250, 0.25)',
 +    borderWidth: 1,
 +    borderColor: '#5F33FA',
-@@ -1898 +1982 @@ const styles = StyleSheet.create({
+     paddingHorizontal: 10,
+     paddingVertical: 2,
 -    borderRadius: 10,
 +    borderRadius: 9999,
-@@ -1901 +1985 @@ const styles = StyleSheet.create({
+   },
+   counterBadgeText: {
 -    color: '#c084fc',
 +    color: '#A78BFA',
-@@ -1906 +1990 @@ const styles = StyleSheet.create({
+     fontSize: 12,
+     fontWeight: '800',
+   },
+   emptySelectedCard: {
 -    backgroundColor: '#141026',
 +    backgroundColor: '#1B1730',
-@@ -1908 +1992 @@ const styles = StyleSheet.create({
+     borderWidth: 1,
 -    borderColor: '#2a2046',
 +    borderColor: '#2A2444',
-@@ -1919 +2003 @@ const styles = StyleSheet.create({
+     borderRadius: 14,
+     padding: 20,
+     alignItems: 'center',
+@@ -1916,15 +2000,15 @@ const styles = StyleSheet.create({
+     marginBottom: 4,
+   },
+   emptySelectedTitle: {
 -    color: '#cbd5e1',
 +    color: '#FFFFFF',
-@@ -1924,2 +2008,2 @@ const styles = StyleSheet.create({
+     fontSize: 14,
+     fontWeight: '700',
+   },
+   emptySelectedSubtitle: {
 -    color: '#64748b',
 -    fontSize: 12,
 +    color: '#787191',
 +    fontSize: 13,
-@@ -1927 +2011 @@ const styles = StyleSheet.create({
+     textAlign: 'center',
 -    lineHeight: 16,
 +    lineHeight: 18,
-@@ -1936 +2020 @@ const styles = StyleSheet.create({
+   },
+   selectedList: {
+     gap: 8,
+@@ -1933,12 +2017,12 @@ const styles = StyleSheet.create({
+     flexDirection: 'row',
+     alignItems: 'center',
+     justifyContent: 'space-between',
 -    backgroundColor: '#141026',
 +    backgroundColor: '#1B1730',
-@@ -1938 +2022 @@ const styles = StyleSheet.create({
+     borderWidth: 1,
 -    borderColor: '#2a2046',
 +    borderColor: '#3D3466',
-@@ -1941 +2025 @@ const styles = StyleSheet.create({
+     borderRadius: 12,
+     paddingHorizontal: 14,
 -    paddingVertical: 12,
 +    paddingVertical: 10,
-@@ -1953 +2037 @@ const styles = StyleSheet.create({
+   },
+   selectedGameContent: {
+     flexDirection: 'row',
+@@ -1950,30 +2034,30 @@ const styles = StyleSheet.create({
+     fontSize: 16,
+   },
+   selectedGameName: {
 -    color: '#ffffff',
 +    color: '#FFFFFF',
-@@ -1959,4 +2043,4 @@ const styles = StyleSheet.create({
+     fontSize: 14,
+     fontWeight: '600',
+     flex: 1,
+   },
+   removeGameButton: {
 -    width: 28,
 -    height: 28,
 -    borderRadius: 14,
@@ -54334,53 +55041,102 @@ index 537d84f..c98131a 100644
 +    height: 36,
 +    borderRadius: 18,
 +    backgroundColor: 'rgba(239, 68, 68, 0.14)',
-@@ -1964 +2048 @@ const styles = StyleSheet.create({
+     borderWidth: 1,
 -    borderColor: '#5c1d35',
 +    borderColor: 'rgba(239, 68, 68, 0.45)',
-@@ -1969 +2053 @@ const styles = StyleSheet.create({
+     justifyContent: 'center',
+     alignItems: 'center',
+   },
+   removeGameButtonText: {
 -    color: '#f87171',
 +    color: '#FCA5A5',
-@@ -1974 +2058 @@ const styles = StyleSheet.create({
+     fontSize: 13,
+     fontWeight: '800',
+   },
+   stepErrorContainer: {
 -    backgroundColor: '#291118',
 +    backgroundColor: 'rgba(239, 68, 68, 0.14)',
-@@ -1976 +2060 @@ const styles = StyleSheet.create({
+     borderWidth: 1,
 -    borderColor: '#ef4444',
 +    borderColor: '#EF4444',
-@@ -1987,2 +2071,2 @@ const styles = StyleSheet.create({
+     borderRadius: 10,
+     paddingHorizontal: 14,
+     paddingVertical: 10,
+@@ -1984,8 +2068,8 @@ const styles = StyleSheet.create({
+     marginTop: 8,
+   },
+   saveErrorBanner: {
 -    backgroundColor: '#2a1118',
 -    borderColor: '#ef4444',
 +    backgroundColor: 'rgba(239, 68, 68, 0.14)',
 +    borderColor: '#EF4444',
-@@ -2002 +2086 @@ const styles = StyleSheet.create({
+     borderWidth: 1,
+     borderRadius: 12,
+     paddingHorizontal: 16,
+@@ -1999,7 +2083,7 @@ const styles = StyleSheet.create({
+     fontSize: 20,
+   },
+   saveErrorText: {
 -    color: '#fca5a5',
 +    color: '#FCA5A5',
-@@ -2018,2 +2102,2 @@ const styles = StyleSheet.create({
+     fontSize: 14,
+     fontWeight: '600',
+     lineHeight: 20,
+@@ -2015,8 +2099,8 @@ const styles = StyleSheet.create({
+     gap: 10,
+   },
+   searchErrorBanner: {
 -    backgroundColor: '#2a1118',
 -    borderColor: '#ef4444',
 +    backgroundColor: 'rgba(239, 68, 68, 0.14)',
 +    borderColor: '#EF4444',
-@@ -2027 +2111 @@ const styles = StyleSheet.create({
+     borderWidth: 1,
+     borderRadius: 10,
+     paddingHorizontal: 14,
+@@ -2024,7 +2108,7 @@ const styles = StyleSheet.create({
+     marginTop: 6,
+   },
+   searchErrorText: {
 -    color: '#fca5a5',
 +    color: '#FCA5A5',
-@@ -2038 +2122 @@ const styles = StyleSheet.create({
+     fontSize: 13,
+     fontWeight: '600',
+   },
+@@ -2035,23 +2119,23 @@ const styles = StyleSheet.create({
+     paddingVertical: 8,
+   },
+   catalogLoadingText: {
 -    color: '#94a3b8',
 +    color: '#B5B0C8',
-@@ -2042,2 +2126,2 @@ const styles = StyleSheet.create({
+     fontSize: 13,
+   },
+   catalogUnavailableContainer: {
 -    backgroundColor: '#1a132e',
 -    borderColor: '#34265a',
 +    backgroundColor: '#1B1730',
 +    borderColor: '#3D3466',
-@@ -2049 +2133 @@ const styles = StyleSheet.create({
+     borderWidth: 1,
+     borderRadius: 10,
+     padding: 12,
+   },
+   catalogUnavailableText: {
 -    color: '#94a3b8',
 +    color: '#B5B0C8',
-@@ -2054 +2138 @@ const styles = StyleSheet.create({
+     fontSize: 13,
+     lineHeight: 18,
+   },
+   noCatalogGamesText: {
 -    color: '#64748b',
 +    color: '#787191',
+     fontSize: 13,
+   },
+ });
 diff --git a/app/screens/profile/ProfileScreen.js b/app/screens/profile/ProfileScreen.js
-index be439aa..7a4b24c 100644
+index be439aa..0a6b23a 100644
 --- a/app/screens/profile/ProfileScreen.js
 +++ b/app/screens/profile/ProfileScreen.js
-@@ -2,2 +2,8 @@ import { useContext, useEffect, useRef, useState } from 'react';
+@@ -1,10 +1,18 @@
+ import { useContext, useEffect, useRef, useState } from 'react';
 -import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 -import { SafeAreaView } from 'react-native-safe-area-context';
 +import {
@@ -54391,10 +55147,19 @@ index be439aa..7a4b24c 100644
 +  View,
 +} from 'react-native';
 +import { StatusBar } from 'expo-status-bar';
-@@ -7,0 +14,2 @@ import { getProfileViewData } from '../../utils/profile';
+ 
+ import { AuthContext } from '../../context/AuthContext';
+ import { mockProfileStatistics } from '../../data/mockData';
+ import { getProfileViewData } from '../../utils/profile';
 +import { AuthBackground, Badge, Button, Card, TagChip } from '../../components/ui';
 +import { colors, radii, spacing, typography } from '../../theme';
-@@ -110,3 +118,17 @@ export default function ProfileScreen({ navigation, route }) {
+ 
+ export default function ProfileScreen({ navigation, route }) {
+   const auth = useContext(AuthContext);
+@@ -107,129 +115,416 @@ export default function ProfileScreen({ navigation, route }) {
+   }
+ 
+   return (
 -    <SafeAreaView style={styles.safeArea} edges={['left', 'right']}>
 -      <ScrollView contentContainerStyle={styles.content}>
 -        <Text style={styles.title}>Meu Perfil</Text>
@@ -54415,7 +55180,7 @@ index be439aa..7a4b24c 100644
 +            Meu Perfil
 +          </Text>
 +        </View>
-@@ -114,2 +136,6 @@ export default function ProfileScreen({ navigation, route }) {
+ 
 -        <View style={styles.identity}>
 -          <View style={styles.avatar} accessible accessibilityLabel="Avatar genérico de usuário">
 +        <Card style={styles.identityCard} variant="elevated">
@@ -54424,7 +55189,9 @@ index be439aa..7a4b24c 100644
 +            accessible
 +            accessibilityLabel="Avatar genérico de usuário"
 +          >
-@@ -119,5 +145,7 @@ export default function ProfileScreen({ navigation, route }) {
+             <View style={styles.avatarHead} />
+             <View style={styles.avatarBody} />
+           </View>
 -          {account ? <>
 -            <Text style={styles.name}>{profile.name}</Text>
 -            <Text style={styles.email}>{profile.email}</Text>
@@ -54437,46 +55204,51 @@ index be439aa..7a4b24c 100644
 +            </View>
 +          ) : null}
 +        </Card>
-@@ -125 +153,4 @@ export default function ProfileScreen({ navigation, route }) {
+ 
 -        <Text style={styles.demoNotice}>Indicadores demonstrativos</Text>
 +        <View style={styles.sectionHeaderRow}>
 +          <Badge label="DEMO" variant="brand" size="sm" />
 +          <Text style={styles.demoNotice}>Indicadores demonstrativos</Text>
 +        </View>
-@@ -127 +158 @@ export default function ProfileScreen({ navigation, route }) {
+         <View style={styles.statistics}>
 -          <View style={styles.statCard}>
 +          <Card style={styles.statCard} variant="surface">
-@@ -130,2 +161,2 @@ export default function ProfileScreen({ navigation, route }) {
+             <Text style={styles.statValue}>{profile.participationCount}</Text>
+             <Text style={styles.statLabel}>Participações</Text>
 -          </View>
 -          <View style={styles.statCard}>
 +          </Card>
 +          <Card style={styles.statCard} variant="surface">
-@@ -134 +165,5 @@ export default function ProfileScreen({ navigation, route }) {
+             <Text style={styles.statValue}>{profile.totalTime}</Text>
+             <Text style={styles.statLabel}>Tempo total</Text>
 -          </View>
 +          </Card>
 +        </View>
 +
 +        <View style={styles.questionnaireHeader}>
 +          <Text style={styles.sectionTitle}>Dados do questionário</Text>
-@@ -137 +171,0 @@ export default function ProfileScreen({ navigation, route }) {
+         </View>
+ 
 -        <Text style={styles.sectionTitle}>Dados do questionário</Text>
-@@ -139 +173,5 @@ export default function ProfileScreen({ navigation, route }) {
+         {route?.params?.questionnaireSaved ? (
 -          <Text style={styles.demoNotice} accessibilityLiveRegion="polite">Questionário atualizado com sucesso.</Text>
 +          <Card style={styles.successBanner} variant="surface">
 +            <Text style={styles.successText} accessibilityLiveRegion="polite">
 +              Questionário atualizado com sucesso.
 +            </Text>
 +          </Card>
-@@ -140,0 +179 @@ export default function ProfileScreen({ navigation, route }) {
+         ) : null}
 +
-@@ -142,4 +181,23 @@ export default function ProfileScreen({ navigation, route }) {
+         {isLoading ? (
 -          <View accessibilityLiveRegion="polite">
 -            <ActivityIndicator color="#111827" />
 -            <Text style={styles.demoNotice}>Carregando perfil...</Text>
 -          </View>
-+          <Card style={styles.loadingCard} variant="surface" accessibilityLiveRegion="polite">
++          <Card style={styles.loadingCard} variant="surface">
 +            <ActivityIndicator color={colors.brand.primaryLight} size="small" />
-+            <Text style={styles.loadingText}>Carregando perfil...</Text>
++            <Text style={styles.loadingText} accessibilityLiveRegion="polite">
++              Carregando perfil...
++            </Text>
 +          </Card>
 +        ) : null}
 +
@@ -54497,7 +55269,7 @@ index be439aa..7a4b24c 100644
 +              Tentar novamente
 +            </Button>
 +          </Card>
-@@ -147,7 +205 @@ export default function ProfileScreen({ navigation, route }) {
+         ) : null}
 -        {loadError ? <>
 -          <Text style={styles.error} accessibilityRole="alert">{loadError}</Text>
 -          <Pressable style={styles.editButton} onPress={() => reloadRef.current?.()}
@@ -54506,12 +55278,12 @@ index be439aa..7a4b24c 100644
 -          </Pressable>
 -        </> : null}
 +
-@@ -155 +207,3 @@ export default function ProfileScreen({ navigation, route }) {
+         {questionnaire?.hasCompleted === false ? (
 -          <Text style={styles.demoNotice}>Questionário ainda não concluído.</Text>
 +          <Card style={styles.pendingCard} variant="surface">
 +            <Text style={styles.demoNotice}>Questionário ainda não concluído.</Text>
 +          </Card>
-@@ -157,10 +210,0 @@ export default function ProfileScreen({ navigation, route }) {
+         ) : null}
 -        {questionnaire?.hasCompleted ? <View style={styles.questionnaireCard}>
 -          {profile.questionnaireRows.map((row, index) => (
 -            <View key={row.label} style={[
@@ -54522,7 +55294,7 @@ index be439aa..7a4b24c 100644
 -            </View>
 -          ))}
 -        </View> : null}
-@@ -168,2 +212,63 @@ export default function ProfileScreen({ navigation, route }) {
+ 
 -        <Pressable
 -          style={styles.editButton}
 +        {questionnaire?.hasCompleted ? (
@@ -54588,11 +55360,13 @@ index be439aa..7a4b24c 100644
 +        <Button
 +          variant="secondary"
 +          size="lg"
-@@ -173 +277,0 @@ export default function ProfileScreen({ navigation, route }) {
+           onPress={openQuestionnaire}
+           disabled={!canEdit}
+           accessibilityRole="button"
 -          accessibilityState={{ disabled: !canEdit }}
-@@ -174,0 +279 @@ export default function ProfileScreen({ navigation, route }) {
+           accessibilityLabel="Editar dados do questionário"
 +          style={styles.editButton}
-@@ -176,2 +281,8 @@ export default function ProfileScreen({ navigation, route }) {
+         >
 -          <Text style={styles.editButtonText}>EDITAR DADOS DO QUESTIONÁRIO</Text>
 -        </Pressable>
 +          EDITAR DADOS DO QUESTIONÁRIO
@@ -54603,27 +55377,32 @@ index be439aa..7a4b24c 100644
 +            {logoutError}
 +          </Text>
 +        ) : null}
-@@ -179,3 +290,3 @@ export default function ProfileScreen({ navigation, route }) {
+ 
 -        {logoutError ? <Text style={styles.error} accessibilityRole="alert">{logoutError}</Text> : null}
 -        <Pressable
 -          style={[styles.logoutButton, (isLoggingOut || !canLogout) && styles.disabledButton]}
 +        <Button
 +          variant="dangerOutline"
 +          size="lg"
-@@ -183,0 +295 @@ export default function ProfileScreen({ navigation, route }) {
+           onPress={handleLogout}
+           disabled={isLoggingOut || !canLogout}
 +          loading={isLoggingOut}
-@@ -186 +298 @@ export default function ProfileScreen({ navigation, route }) {
+           accessibilityRole="button"
+           accessibilityLabel="Sair da conta"
 -          accessibilityState={{ disabled: isLoggingOut || !canLogout, busy: isLoggingOut }}
 +          style={styles.logoutButton}
-@@ -188,2 +300,2 @@ export default function ProfileScreen({ navigation, route }) {
+         >
 -          <Text style={styles.logoutButtonText}>{isLoggingOut ? 'Saindo...' : 'SAIR DA CONTA'}</Text>
 -        </Pressable>
 +          {isLoggingOut ? 'Saindo...' : 'SAIR DA CONTA'}
 +        </Button>
-@@ -191 +303 @@ export default function ProfileScreen({ navigation, route }) {
+       </ScrollView>
 -    </SafeAreaView>
 +    </AuthBackground>
-@@ -196,5 +308,23 @@ const styles = StyleSheet.create({
+   );
+ }
+ 
+ const styles = StyleSheet.create({
 -  // O cabeçalho e a barra de abas existentes já cuidam dos insets superior e inferior.
 -  safeArea: { flex: 1, backgroundColor: '#fff' },
 -  content: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 24 },
@@ -54652,7 +55431,7 @@ index be439aa..7a4b24c 100644
 +    borderColor: colors.border.subtle,
 +    backgroundColor: colors.background.elevated,
 +  },
-@@ -202,2 +332,20 @@ const styles = StyleSheet.create({
+   avatar: {
 -    width: 80, height: 80, borderRadius: 40, backgroundColor: '#f3f4f6',
 -    alignItems: 'center', justifyContent: 'center', gap: 4,
 +    width: 80,
@@ -54675,9 +55454,9 @@ index be439aa..7a4b24c 100644
 +    height: 22,
 +    borderRadius: 11,
 +    backgroundColor: colors.brand.primaryLight,
-@@ -205 +352,0 @@ const styles = StyleSheet.create({
+   },
 -  avatarHead: { width: 22, height: 22, borderRadius: 11, backgroundColor: '#6b7280' },
-@@ -207,2 +354,43 @@ const styles = StyleSheet.create({
+   avatarBody: {
 -    width: 42, height: 23, borderTopLeftRadius: 24, borderTopRightRadius: 24,
 -    borderBottomLeftRadius: 6, borderBottomRightRadius: 6, backgroundColor: '#6b7280',
 +    width: 42,
@@ -54723,12 +55502,12 @@ index be439aa..7a4b24c 100644
 +    flexDirection: 'row',
 +    gap: spacing.md,
 +    marginBottom: spacing.xl,
-@@ -210,4 +397,0 @@ const styles = StyleSheet.create({
+   },
 -  name: { color: '#111827', fontSize: 20, fontWeight: '600', textAlign: 'center', marginTop: 12 },
 -  email: { color: '#6b7280', fontSize: 14, textAlign: 'center', marginTop: 6 },
 -  demoNotice: { color: '#6b7280', fontSize: 12, lineHeight: 18, marginBottom: 8 },
 -  statistics: { flexDirection: 'row', gap: 12 },
-@@ -215,11 +399,122 @@ const styles = StyleSheet.create({
+   statCard: {
 -    flex: 1, paddingVertical: 18, paddingHorizontal: 8, alignItems: 'center',
 -    backgroundColor: '#f9fafb', borderColor: '#e5e7eb', borderWidth: 1, borderRadius: 8,
 -  },
@@ -54862,7 +55641,7 @@ index be439aa..7a4b24c 100644
 +  gameChip: {
 +    marginRight: 0,
 +  },
-@@ -227,8 +522,6 @@ const styles = StyleSheet.create({
+   editButton: {
 -    alignItems: 'center', backgroundColor: '#f3f4f6', borderRadius: 4,
 -    marginTop: 20, padding: 14, gap: 4,
 -  },
@@ -54877,17 +55656,30 @@ index be439aa..7a4b24c 100644
 +  logoutButton: {
 +    marginTop: spacing.sm,
 +  },
+ });
 diff --git a/app/tests/authNavigation.test.cjs b/app/tests/authNavigation.test.cjs
 index 099c909..204c29e 100644
 --- a/app/tests/authNavigation.test.cjs
 +++ b/app/tests/authNavigation.test.cjs
-@@ -4 +4,3 @@ const { StackRouter, CommonActions } = require('@react-navigation/routers');
+@@ -1,7 +1,9 @@
+ const assert = require('node:assert/strict');
+ const test = require('node:test');
+ const { StackRouter, CommonActions } = require('@react-navigation/routers');
 -const { createHarness, loadModule, textOf } = require('./helpers/questionnaireHarness.cjs');
 +const {
 +  createHarness, loadModule, textOf, createParticipantThemeStub,
 +} = require('./helpers/questionnaireHarness.cjs');
-@@ -36,0 +39 @@ const appExports = loadModule('App.js', (name) => {
+ 
+ let authState;
+ function NavigationContainer() {}
+@@ -34,6 +36,7 @@ const appExports = loadModule('App.js', (name) => {
+     return { createNativeStackNavigator: () => ({ Navigator: StackNavigator, Screen: StackScreen }) };
+   }
+   if (name === './context/AuthContext') return { useAuth: () => authState };
 +  if (name === './theme') return createParticipantThemeStub();
+   if (name === './screens/auth/AuthSessionGate') {
+     return {
+       __esModule: true,
 diff --git a/app/tests/authVisualIntegration.test.cjs b/app/tests/authVisualIntegration.test.cjs
 new file mode 100644
 index 0000000..037f2af
@@ -54983,57 +55775,120 @@ diff --git a/app/tests/evaluation.test.cjs b/app/tests/evaluation.test.cjs
 index 79dcafb..ce1a52e 100644
 --- a/app/tests/evaluation.test.cjs
 +++ b/app/tests/evaluation.test.cjs
-@@ -3 +3,3 @@ const test = require('node:test');
+@@ -1,6 +1,8 @@
+ const assert = require('node:assert/strict');
+ const test = require('node:test');
 -const { loadModule, nodes, textOf } = require('./helpers/questionnaireHarness.cjs');
 +const {
 +  loadModule, nodes, textOf, createParticipantUiStubs, createParticipantThemeStub,
 +} = require('./helpers/questionnaireHarness.cjs');
-@@ -27,0 +30,3 @@ function evaluationScreen() {
+ 
+ function evaluationScreen() {
+   const state = [];
+@@ -25,6 +27,9 @@ function evaluationScreen() {
+       },
+     };
+     if (name === 'react-native') return native;
 +    if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
 +    if (name === '../../components/ui') return createParticipantUiStubs();
 +    if (name === '../../theme') return createParticipantThemeStub();
-@@ -91 +96 @@ test('evaluation starts empty with submission disabled and a guarded submit hand
+     if (name === '../../components/ScreenContainer') return { __esModule: true, default: 'ScreenContainer' };
+     if (name === '../../context/ParticipationContext') return { ParticipationContext: {} };
+     return require(name);
+@@ -88,10 +93,10 @@ test('evaluation starts empty with submission disabled and a guarded submit hand
+   assert.equal(h.stars.map(textOf).join(''), '☆☆☆☆☆');
+   assert.equal(submit.props.disabled, true);
+   assert.equal(submit.props.accessibilityState.disabled, true);
 -  assert.equal(typeof submit.props.onPress, 'function');
 +  assert.equal(submit.props.onPress, undefined, 'disabled UI button does not expose a press handler');
-@@ -94 +99 @@ test('evaluation starts empty with submission disabled and a guarded submit hand
+   assert.equal(h.buttons.some((button) => textOf(button) === 'Pular avaliação'), false);
+   assert.notEqual(h.button('Avaliar mais tarde').props.disabled, true);
 -  submit.props.onPress();
 +  submit.props.onPress?.();
-@@ -119 +124 @@ test('invalid ratings do not log, clear participation, or navigate', () => {
+   assert.deepEqual(h.events, []);
+ });
+ 
+@@ -116,7 +121,7 @@ test('invalid ratings do not log, clear participation, or navigate', () => {
+     const h = evaluationScreen();
+     h.setRating(rating);
+     h.changeComment('Comentário não enviado');
 -    h.button('Enviar avaliação').props.onPress();
 +    h.button('Enviar avaliação').props.onPress?.();
+     assert.deepEqual(h.events, [], `unexpected side effect for rating ${String(rating)}`);
+     assert.equal(h.input.props.value, 'Comentário não enviado');
+   }
 diff --git a/app/tests/eventEntry.test.cjs b/app/tests/eventEntry.test.cjs
 index 1160ed0..066c43a 100644
 --- a/app/tests/eventEntry.test.cjs
 +++ b/app/tests/eventEntry.test.cjs
-@@ -3 +3,3 @@ const test = require('node:test');
+@@ -1,6 +1,8 @@
+ const assert = require('node:assert/strict');
+ const test = require('node:test');
 -const { loadModule, nodes, textOf } = require('./helpers/questionnaireHarness.cjs');
 +const {
 +  loadModule, nodes, textOf, createParticipantUiStubs, createParticipantThemeStub,
 +} = require('./helpers/questionnaireHarness.cjs');
-@@ -13,0 +16 @@ function screenRig(path, context, params = {}) {
+ 
+ const event = {
+   id: '11111111-1111-4111-8111-111111111111', name: 'Arena real', timezone: 'America/Sao_Paulo',
+@@ -11,6 +13,7 @@ const eligible = { eligible: true, blockingReasons: [] };
+ 
+ function screenRig(path, context, params = {}) {
+   const state = [], calls = [];
 +  const ui = createParticipantUiStubs();
-@@ -27 +30,3 @@ function screenRig(path, context, params = {}) {
+   let cursor = 0, tree;
+   const react = {
+     useContext: () => context,
+@@ -24,9 +27,14 @@ function screenRig(path, context, params = {}) {
+   const module = loadModule(path, (name) => {
+     if (name === 'react') return react;
+     if (name === 'react-native') return {
 -      Pressable: 'Pressable', Text: 'Text', TextInput: 'TextInput',
 +      ActivityIndicator: 'ActivityIndicator', KeyboardAvoidingView: 'KeyboardAvoidingView',
 +      Platform: { OS: 'android' }, Pressable: 'Pressable', ScrollView: 'ScrollView',
 +      Text: 'Text', TextInput: 'TextInput', View: 'View',
-@@ -29,0 +35,3 @@ function screenRig(path, context, params = {}) {
+       StyleSheet: { create: (styles) => styles },
+     };
 +    if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
 +    if (name === '../../components/ui') return ui;
 +    if (name === '../../theme') return createParticipantThemeStub();
-@@ -52,0 +61 @@ function screenRig(path, context, params = {}) {
+     if (name === '../../components/ScreenContainer') return { __esModule: true, default: 'ScreenContainer' };
+     if (name === '../../context/ParticipationContext') return { ParticipationContext: {} };
+     return require(name);
+@@ -50,6 +58,7 @@ function screenRig(path, context, params = {}) {
+   return {
+     calls, render, button,
+     text: () => textOf(tree),
 +    inputError: () => nodes(tree).find((node) => node.type === ui.InputField)?.props.error,
-@@ -80 +89 @@ test('código vazio não consulta o backend nem navega', async () => {
+     input(value) { nodes(tree).find((node) => node.type === 'TextInput').props.onChangeText(value); render(); },
+   };
+ }
+@@ -77,7 +86,7 @@ test('código vazio não consulta o backend nem navega', async () => {
+   await rig.button('Continuar').props.onPress();
+   assert.equal(count, 0);
+   rig.render();
 -  assert.match(rig.text(), /Digite o código do evento/);
 +  assert.equal(rig.inputError(), 'Digite o código do evento.');
-@@ -113 +122 @@ test('ineligibilidade mostra motivo real e impede POST', async () => {
+   assert.deepEqual(rig.calls, []);
+ });
+ 
+@@ -110,7 +119,7 @@ test('ineligibilidade mostra motivo real e impede POST', async () => {
+     { event, eligibility: { eligible: false, blockingReasons: ['PROFILE_INCOMPLETE'] } });
+   assert.match(rig.text(), /PROFILE_INCOMPLETE/);
+   assert.equal(rig.button('Confirmar entrada').props.disabled, true);
 -  await rig.button('Confirmar entrada').props.onPress();
 +  await rig.button('Confirmar entrada').props.onPress?.();
+   assert.equal(count, 0);
+   assert.deepEqual(rig.calls, []);
+ });
 diff --git a/app/tests/helpers/questionnaireHarness.cjs b/app/tests/helpers/questionnaireHarness.cjs
 index 8458927..c49c409 100644
 --- a/app/tests/helpers/questionnaireHarness.cjs
 +++ b/app/tests/helpers/questionnaireHarness.cjs
-@@ -72,0 +73,65 @@ function textOf(element) {
+@@ -70,6 +70,71 @@ function textOf(element) {
+   return textOf(element.props?.children);
+ }
+ 
 +function createParticipantUiStubs() {
 +  const text = (children, props = {}) => ({ type: 'Text', props: { ...props, children } });
 +  const view = (children, props = {}) => ({ type: 'View', props: { ...props, children } });
@@ -55099,22 +55954,46 @@ index 8458927..c49c409 100644
 +  };
 +}
 +
-@@ -232 +297 @@ function createHarness(relativePath, options = {}) {
+ function syncResolve(value) {
+   return {
+     then(onFulfilled) {
+@@ -229,14 +294,15 @@ function createHarness(relativePath, options = {}) {
+       }
+     },
+   };
 -  const native = Object.fromEntries(['ActivityIndicator', 'KeyboardAvoidingView', 'Modal', 'Pressable', 'ScrollView',
 +  const native = Object.fromEntries(['ActivityIndicator', 'Image', 'KeyboardAvoidingView', 'Modal', 'Pressable', 'ScrollView',
-@@ -239 +304,2 @@ function createHarness(relativePath, options = {}) {
+     'Text', 'TextInput', 'View', 'SafeAreaView'].map((name) => [name, name]));
+   native.Platform = { OS: options.platform || 'ios' };
+   native.Keyboard = { dismiss() {} };
+   native.StyleSheet = {
+     create: (value) => value,
+     flatten: (value) => Array.isArray(value) ? Object.assign({}, ...value) : value,
 -    absoluteFillObject: { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0 },
 +    // API disponível no React Native 0.86; absoluteFillObject foi removido.
 +    absoluteFill: { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0 },
-@@ -267 +333,3 @@ function createHarness(relativePath, options = {}) {
+   };
+   const birthDate = loadModule('utils/birthDate.js', require).exports;
+   const validation = loadModule('utils/validation.js', (name) =>
+@@ -264,10 +330,12 @@ function createHarness(relativePath, options = {}) {
+     assert.equal(insideUpdater, false);
+     navigationCalls.push({ type: 'reset', payload });
+   };
 -  const screen = loadModule(relativePath, (name) => {
 +
 +  const internalModules = new Map();
 +  function resolveInternalModule(fromRelativePath, name) {
-@@ -270 +338 @@ function createHarness(relativePath, options = {}) {
+     if (name === 'react') return react;
+     if (name === 'react-native') return native;
 -    if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView' };
 +    if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView', useSafeAreaInsets: () => ({ bottom: 0, top: 0, left: 0, right: 0 }) };
-@@ -287,0 +356,23 @@ function createHarness(relativePath, options = {}) {
+     if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
+     if (name === '@react-native-community/datetimepicker') return nativePicker;
+     if (name === '../components/BirthDateInput' || name === '../../components/BirthDateInput') return { __esModule: true, default: 'BirthDateInput' };
+@@ -285,12 +353,45 @@ function createHarness(relativePath, options = {}) {
+     }
+     if (name === '../utils/validation' || name === '../../utils/validation') return validation;
+     if (name === '../data/mockData' || name === '../../data/mockData') return data;
 +    if (name.startsWith('.') && /\.(jpg|jpeg|png|webp|gif|svg)$/i.test(name)) {
 +      return { uri: name };
 +    }
@@ -55138,7 +56017,7 @@ index 8458927..c49c409 100644
 +      internalModules.set(targetRelative, loaded);
 +      return loaded;
 +    }
-@@ -289 +380,10 @@ function createHarness(relativePath, options = {}) {
+     return require(name);
 -  }, options.fields || [], options.source);
 +  }
 +
@@ -55150,20 +56029,46 @@ index 8458927..c49c409 100644
 +  );
 +
 +  let renderedNodes = [];
-@@ -293,0 +394 @@ function createHarness(relativePath, options = {}) {
+ 
+   function render() {
+     cursor = 0;
+     tree = screen.exports.default({ navigation, route: {}, ...props });
 +    renderedNodes = nodes(tree);
-@@ -330 +431 @@ function createHarness(relativePath, options = {}) {
+     capture = screen.context.__capture;
+   }
+ 
+@@ -327,7 +428,7 @@ function createHarness(relativePath, options = {}) {
+   flush();
+   return {
+     get capture() { return capture; },
 -    get nodes() { return nodes(tree); },
 +    get nodes() { return renderedNodes; },
-@@ -347,0 +449 @@ function createHarness(relativePath, options = {}) {
+     exports: screen.exports,
+     birthDate,
+     navigationCalls,
+@@ -345,6 +446,7 @@ function createHarness(relativePath, options = {}) {
+         }
+       }
+       tree = null;
 +      renderedNodes = [];
-@@ -361 +463 @@ function createHarness(relativePath, options = {}) {
+     },
+     setAuthContext(nextAuthContext) {
+       authContextValue = nextAuthContext;
+@@ -358,18 +460,28 @@ function createHarness(relativePath, options = {}) {
+       flush();
+     },
+     inputBirthDate(value) {
 -      const input = nodes(tree).find((node) => node.type === 'BirthDateInput');
 +      const input = renderedNodes.find((node) => node.type === 'BirthDateInput');
-@@ -366 +468 @@ function createHarness(relativePath, options = {}) {
+       assert.ok(input);
+       input.props.onChangeText(value);
+     },
+     press(label) {
 -      const button = nodes(tree).find((node) => node.type === 'Pressable' &&
 +      const button = renderedNodes.find((node) => node.type === 'Pressable' &&
-@@ -369,0 +472,10 @@ function createHarness(relativePath, options = {}) {
+         (node.props.accessibilityLabel === label || textOf(node) === label));
+       assert.ok(button, `missing button: ${label}`);
+       assert.notEqual(button.props.disabled, true);
 +      const wrapper = renderedNodes.find((node) =>
 +        typeof node.type === 'function' &&
 +        typeof node.props?.onPress === 'function' &&
@@ -55174,24 +56079,42 @@ index 8458927..c49c409 100644
 +      if (wrapper) {
 +        return wrapper.props.onPress();
 +      }
-@@ -375 +487 @@ function createHarness(relativePath, options = {}) {
+       return button.props.onPress();
+     },
+   };
+ }
+ 
 -module.exports = { createHarness, loadModule, nodes, textOf };
 +module.exports = { createHarness, loadModule, nodes, textOf, createParticipantUiStubs, createParticipantThemeStub };
 diff --git a/app/tests/homeFlow.test.cjs b/app/tests/homeFlow.test.cjs
 index d51f20b..e9a7ce6 100644
 --- a/app/tests/homeFlow.test.cjs
 +++ b/app/tests/homeFlow.test.cjs
-@@ -3 +3 @@ const test = require('node:test');
+@@ -1,6 +1,6 @@
+ const assert = require('node:assert/strict');
+ const test = require('node:test');
 -const { loadModule } = require('./helpers/questionnaireHarness.cjs');
 +const { loadModule, createParticipantUiStubs } = require('./helpers/questionnaireHarness.cjs');
-@@ -16 +16,5 @@ function renderHomeFlow(participation, extra = {}) {
+ 
+ function renderHomeFlow(participation, extra = {}) {
+   let contextWrites = 0;
+@@ -13,7 +13,11 @@ function renderHomeFlow(participation, extra = {}) {
+         setParticipation() { contextWrites += 1; },
+       }),
+     };
 -    if (name === 'react-native') return { Pressable: 'Pressable', Text: 'Text' };
 +    if (name === 'react-native') return {
 +      Pressable: 'Pressable', Text: 'Text', View: 'View', StyleSheet: { create: (styles) => styles },
 +    };
 +    if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
 +    if (name === '../../components/ui') return createParticipantUiStubs();
-@@ -48,2 +52,6 @@ test('HomeFlow shows a real participation without routing to simulated Arena scr
+     if (name === '../../components/ScreenContainer') return { __esModule: true, default: 'ScreenContainer' };
+     if (name === '../../context/ParticipationContext') return { ParticipationContext: {} };
+     if (name === '../arena/RealArenaScreen') {
+@@ -45,8 +49,12 @@ test('HomeFlow renders HomeScreen when there is no participation', () => {
+ });
+ 
+ test('HomeFlow shows a real participation without routing to simulated Arena screens', () => {
 -  const result = renderHomeFlow({ source: 'server', status: 'waiting', eventId: 'event-a', externalQueue: { position: 2 } }, { status: 'ready' });
 -  assert.equal(result.rendered.type, 'ScreenContainer');
 +  const participation = { source: 'server', status: 'waiting', eventId: 'event-a', externalQueue: { position: 2 } };
@@ -55200,7 +56123,13 @@ index d51f20b..e9a7ce6 100644
 +  assert.equal(result.rendered.type.name, 'ExternalQueueScreen');
 +  assert.equal(result.rendered.props.participation, participation);
 +  assert.equal(result.rendered.props.onRefresh, refreshParticipation);
-@@ -65,2 +73,8 @@ test('HomeFlow keeps loading and error states out of simulated navigation', () =
+   assert.equal(result.contextWrites, 0);
+ });
+ 
+@@ -62,8 +70,14 @@ test('HomeFlow renders the real Arena for an active server participation', () =>
+ 
+ test('HomeFlow keeps loading and error states out of simulated navigation', () => {
+   for (const status of ['loading', 'error']) {
 -    const result = renderHomeFlow(null, { status, error: 'network', refreshParticipation() {} });
 -    assert.equal(result.rendered.type, 'ScreenContainer');
 +    const refreshParticipation = () => {};
@@ -55211,89 +56140,206 @@ index d51f20b..e9a7ce6 100644
 +      assert.equal(result.rendered.props.message, 'Não foi possível conectar ao servidor para consultar sua participação.');
 +      assert.equal(result.rendered.props.onRetry, refreshParticipation);
 +    }
+     assert.equal(result.contextWrites, 0);
+   }
+ });
 diff --git a/app/tests/participation.test.cjs b/app/tests/participation.test.cjs
 index 64eaa3b..d9f9ee9 100644
 --- a/app/tests/participation.test.cjs
 +++ b/app/tests/participation.test.cjs
-@@ -16,0 +17 @@ const reactNative = {
+@@ -14,7 +14,13 @@ const reactNative = {
+   Pressable: 'Pressable',
+   StyleSheet: { create: (styles) => styles },
+   Text: 'Text',
 +  View: 'View',
-@@ -17,0 +19,5 @@ const reactNative = {
+ };
 +const designTheme = loadModule('theme/index.js', (name) => {
 +  if (name === 'react-native') return reactNative;
 +  if (name.startsWith('./')) return loadModule(`theme/${name.slice(2)}`, require).exports;
 +  return require(name);
 +}).exports;
-@@ -51,0 +58 @@ function renderParticipationCard(props) {
+ 
+ function nodes(element) {
+   if (element == null || typeof element === 'boolean') return [];
+@@ -49,6 +55,7 @@ function renderParticipationsScreen(participations) {
+ function renderParticipationCard(props) {
+   const card = loadModule('components/ParticipationCard.js', (name) => {
+     if (name === 'react-native') return reactNative;
 +    if (name === '../theme') return designTheme;
+     if (name === '../../utils/evaluation') return loadModule('utils/evaluation.js', require).exports;
+     return require(name);
+   });
 diff --git a/app/tests/participationActionScreens.test.cjs b/app/tests/participationActionScreens.test.cjs
 index f6629a3..29bc9d5 100644
 --- a/app/tests/participationActionScreens.test.cjs
 +++ b/app/tests/participationActionScreens.test.cjs
-@@ -3 +3,3 @@ const test = require('node:test');
+@@ -1,6 +1,8 @@
+ const assert = require('node:assert/strict');
+ const test = require('node:test');
 -const { loadModule, nodes, textOf } = require('./helpers/questionnaireHarness.cjs');
 +const {
 +  loadModule, nodes, textOf, createParticipantUiStubs, createParticipantThemeStub,
 +} = require('./helpers/questionnaireHarness.cjs');
-@@ -27,0 +30,3 @@ test('histórico real oferece Avaliar evento somente para avaliação pendente',
+ 
+ const ID = '22222222-2222-4222-8222-222222222222';
+ const USER = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+@@ -25,6 +27,9 @@ test('histórico real oferece Avaliar evento somente para avaliação pendente',
+     };
+     if (name === '@react-navigation/native') return { useFocusEffect: () => {} };
+     if (name === 'react-native') return native;
 +    if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
 +    if (name === '../../components/ui') return createParticipantUiStubs();
 +    if (name === '../../theme') return createParticipantThemeStub();
-@@ -60,0 +66,3 @@ test('detalhes reais oferecem avaliação pendente e bloqueiam a já enviada', (
+     if (name === '../../components/ParticipationCard') return { __esModule: true, default: 'ParticipationCard' };
+     if (name === '../../components/ScreenContainer') return { __esModule: true, default: 'ScreenContainer' };
+     if (name === '../../context/AuthContext') return { AuthContext: {} };
+@@ -58,6 +63,9 @@ test('detalhes reais oferecem avaliação pendente e bloqueiam a já enviada', (
+       useEffect: () => {}, useState: initial => [initial, () => {}],
+     };
+     if (name === 'react-native') return native;
 +    if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
 +    if (name === '../../components/ui') return createParticipantUiStubs();
 +    if (name === '../../theme') return createParticipantThemeStub();
-@@ -89,0 +98,3 @@ test('Arena real exige confirmação e bloqueia duas finalizações simultâneas
+     if (name === '../../components/ScreenContainer') return { __esModule: true, default: 'ScreenContainer' };
+     if (name === '../../context/AuthContext') return { AuthContext: {} };
+     if (name === '../../services/participationHistoryService') return { validateHistoryItem: () => true };
+@@ -87,6 +95,9 @@ test('Arena real exige confirmação e bloqueia duas finalizações simultâneas
+     if (name === '@react-navigation/native') return { useFocusEffect: callback => callback() };
+     if (name === 'expo-crypto') return { randomUUID: () => '33333333-3333-4333-8333-333333333333' };
+     if (name === 'react-native') return { ...native, Alert: { alert: (...args) => alerts.push(args) } };
 +    if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
 +    if (name === '../../components/ui') return createParticipantUiStubs();
 +    if (name === '../../theme') return createParticipantThemeStub();
+     if (name === '../../components/ScreenContainer') return { __esModule: true, default: 'ScreenContainer' };
+     if (name === '../../context/AuthContext') return { useAuth: () => ({ user: { id: USER }, httpClient: {}, getSessionEpoch: () => 1 }) };
+     if (name === '../../services/arenaQueueService') return {
 diff --git a/app/tests/participationDetails.test.cjs b/app/tests/participationDetails.test.cjs
 index 97fa267..eacdd9b 100644
 --- a/app/tests/participationDetails.test.cjs
 +++ b/app/tests/participationDetails.test.cjs
-@@ -3 +3 @@ const test = require('node:test');
+@@ -1,6 +1,6 @@
+ const assert = require('node:assert/strict');
+ const test = require('node:test');
 -const { loadModule } = require('./helpers/questionnaireHarness.cjs');
 +const { loadModule, createParticipantThemeStub } = require('./helpers/questionnaireHarness.cjs');
-@@ -303,0 +304 @@ test('details open from the root stack with a back button to the list', () => {
+ 
+ const participationUtils = loadModule('utils/participation.js', require).exports;
+ const { exports: mockData } = loadModule('data/mockData.js', require);
+@@ -301,6 +301,7 @@ test('details open from the root stack with a back button to the list', () => {
+     }
+     if (name === './context/ParticipationContext') return { ParticipationProvider: 'ParticipationProvider' };
+     if (name === './context/AuthContext') return { useAuth: () => authState };
 +    if (name === './theme') return createParticipantThemeStub();
-@@ -325,0 +327,4 @@ test('the bottom tabs keep Início, Eventos and Perfil without a new tab', () =>
+     if (name === './screens/auth/AuthSessionGate') {
+       return {
+         __esModule: true,
+@@ -323,10 +324,15 @@ test('details open from the root stack with a back button to the list', () => {
+ 
+ test('the bottom tabs keep Início, Eventos and Perfil without a new tab', () => {
+   const tabs = loadModule('navigation/MainTabs.js', (name) => {
 +    if (name === 'react-native') return reactNative;
 +    if (name === 'react-native-safe-area-context') {
 +      return { useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }) };
 +    }
-@@ -329,0 +335 @@ test('the bottom tabs keep Início, Eventos and Perfil without a new tab', () =>
+     if (name === '@react-navigation/bottom-tabs') {
+       return { createBottomTabNavigator: () => ({ Navigator: 'TabNavigator', Screen: 'TabScreen' }) };
+     }
+     if (name.startsWith('../screens/')) return { __esModule: true, default: name };
 +    if (name === '../theme') return createParticipantThemeStub();
+     return require(name);
+   });
+   const screens = nodes(tabs.exports.default()).filter((node) => node.type === 'TabScreen');
 diff --git a/app/tests/participationEvaluations.test.cjs b/app/tests/participationEvaluations.test.cjs
 index 1eea395..14a4b1d 100644
 --- a/app/tests/participationEvaluations.test.cjs
 +++ b/app/tests/participationEvaluations.test.cjs
-@@ -19,0 +20,5 @@ const reactNative = {
+@@ -17,6 +17,11 @@ const reactNative = {
+   Text: 'Text',
+   View: 'View',
+ };
 +const designTheme = loadModule('theme/index.js', (name) => {
 +  if (name === 'react-native') return reactNative;
 +  if (name.startsWith('./')) return loadModule(`theme/${name.slice(2)}`, require).exports;
 +  return require(name);
 +}).exports;
-@@ -53,0 +59 @@ function requireStub(data) {
+ 
+ // Expande componentes de função (DetailRow, EvaluationSection...) para ler o que a tela exibe.
+ function renderTree(element) {
+@@ -51,6 +56,7 @@ function requireStub(data) {
+     if (name === '../../data/mockData') return data;
+     if (name === '../../utils/participation') return participationUtils;
+     if (name === '../../utils/evaluation') return evaluationUtils;
 +    if (name === '../theme') return designTheme;
-@@ -121 +127 @@ test('1. participation with a pending evaluation is identified, listed and expla
+     return require(name);
+   };
+ }
+@@ -118,7 +124,7 @@ const pendingIds = (participations) => [...evaluationUtils.getPendingEvaluationP
+ test('1. participation with a pending evaluation is identified, listed and explained', () => {
+   assert.equal(evaluationUtils.getEvaluationSituation(pending), SITUATIONS.PENDING);
+   assert.deepEqual(pendingIds(all), ['participation-pending']);
 -  assert.deepEqual(renderCard(pending, SITUATIONS.PENDING).at(-1), 'Avaliação pendente');
 +  assert.ok(renderCard(pending, SITUATIONS.PENDING).includes('Avaliação pendente'), 'badge de avaliação pendente');
-@@ -130 +136 @@ test('2. evaluated participation shows the registered rating', () => {
+   assert.deepEqual(evaluationTexts(renderDetails(all, evaluations, pending.id)), [
+     'Avaliação',
+     'Esta participação ainda não foi avaliada.',
+@@ -127,7 +133,7 @@ test('1. participation with a pending evaluation is identified, listed and expla
+ 
+ test('2. evaluated participation shows the registered rating', () => {
+   assert.equal(evaluationUtils.getEvaluationSituation(evaluated), SITUATIONS.EVALUATED);
 -  assert.equal(renderCard(evaluated, SITUATIONS.EVALUATED).at(-1), 'Avaliada');
 +  assert.ok(renderCard(evaluated, SITUATIONS.EVALUATED).includes('Avaliada'), 'badge de avaliação registrada');
-@@ -158 +164 @@ test('4. participation whose first-evaluation deadline ended', () => {
+   assert.deepEqual(evaluationTexts(renderDetails(all, evaluations, evaluated.id)), [
+     'Avaliação',
+     'Nota', '5 de 5',
+@@ -155,7 +161,7 @@ test('3. evaluation comment is shown when present and never invented when absent
+ 
+ test('4. participation whose first-evaluation deadline ended', () => {
+   assert.equal(evaluationUtils.getEvaluationSituation(expired), SITUATIONS.EXPIRED);
 -  assert.equal(renderCard(expired, SITUATIONS.EXPIRED).at(-1), 'Prazo de avaliação encerrado');
 +  assert.ok(renderCard(expired, SITUATIONS.EXPIRED).includes('Prazo de avaliação encerrado'), 'badge de prazo encerrado');
-@@ -172 +178 @@ test('5. participation still in progress is never shown as pending', () => {
+   assert.deepEqual(evaluationTexts(renderDetails(all, evaluations, expired.id)), [
+     'Avaliação',
+     'O prazo para a primeira avaliação desta participação terminou.',
+@@ -169,7 +175,7 @@ test('5. participation still in progress is never shown as pending', () => {
+     assert.equal(evaluationUtils.getEvaluationSituation(current), SITUATIONS.NOT_FINISHED, status);
+     assert.equal(pendingIds([current]).length, 0, status);
+   }
 -  assert.equal(renderCard(ongoing, SITUATIONS.NOT_FINISHED).at(-1), 'Em andamento · avaliação indisponível');
 +  assert.ok(renderCard(ongoing, SITUATIONS.NOT_FINISHED).includes('Em andamento · avaliação indisponível'), 'badge de participação em andamento');
-@@ -337 +343 @@ test('submitted projection remains evaluated when its detail record is absent, i
+   assert.deepEqual(evaluationTexts(renderDetails(all, evaluations, ongoing.id)), [
+     'Avaliação',
+     'A participação ainda não foi finalizada. Não há avaliação disponível.',
+@@ -334,7 +340,7 @@ test('submitted projection remains evaluated when its detail record is absent, i
+   ];
+   for (const records of [missing, invalidRating, duplicated]) {
+     assert.equal(evaluationUtils.getEvaluationSituation(evaluated), SITUATIONS.EVALUATED);
 -    assert.equal(renderCard(evaluated, SITUATIONS.EVALUATED).at(-1), 'Avaliada');
 +    assert.ok(renderCard(evaluated, SITUATIONS.EVALUATED).includes('Avaliada'), 'badge de avaliação registrada');
+     assert.deepEqual(evaluationTexts(renderDetails([evaluated], records, evaluated.id)), [
+       'Avaliação', 'Esta participação foi avaliada, mas os detalhes da avaliação estão indisponíveis.',
+     ]);
 diff --git a/app/tests/profile.test.cjs b/app/tests/profile.test.cjs
-index 244e81f..a5a8a7b 100644
+index 244e81f..32ca732 100644
 --- a/app/tests/profile.test.cjs
 +++ b/app/tests/profile.test.cjs
-@@ -138,0 +139,50 @@ test('Home has no logout and preserves event entry and pending questionnaire nav
+@@ -28,7 +28,12 @@ test('Profile loads real identity and questionnaire while preserving only demo i
+       },
+     },
+   });
+-  assert.ok(h.nodes.some(node => textOf(node) === 'Carregando perfil...'));
++  const loadingText = h.nodes.find(node => node.type === 'Text'
++    && textOf(node) === 'Carregando perfil...');
++  assert.ok(loadingText);
++  assert.equal(loadingText.props.accessibilityLiveRegion, 'polite');
++  assert.ok(!h.nodes.some(node => node.type === 'View'
++    && node.props.accessibilityLiveRegion === 'polite'));
+   assert.ok(!h.nodes.some(node => node.type === 'Text' && textOf(node) === user.name));
+   await h.actAsync(() => new Promise(resolve => setImmediate(resolve)));
+   const texts = h.nodes.filter(node => node.type === 'Text').map(textOf);
+@@ -136,3 +141,53 @@ test('Home has no logout and preserves event entry and pending questionnaire nav
+   assert.equal(h.navigationCalls[1].name, 'ProfileQuestionnaire');
+   assert.equal(h.navigationCalls[1].params.user.id, 'user-1');
+ });
 +test('UI-11/12: ProfileScreen renders modernized dark Design System, structured cards and TagChips for games', async () => {
 +  const user = { id: 'usr-modern', name: 'Lucas Gamer', email: 'lucas@gamer.test', hasCompletedQuestionnaire: true };
 +  const questionnaire = {
@@ -55348,20 +56394,43 @@ diff --git a/app/tests/staffNavigation.test.cjs b/app/tests/staffNavigation.test
 index 7a32f72..9a31b3c 100644
 --- a/app/tests/staffNavigation.test.cjs
 +++ b/app/tests/staffNavigation.test.cjs
-@@ -3 +3 @@ const test = require('node:test');
+@@ -1,6 +1,6 @@
+ const assert = require('node:assert/strict');
+ const test = require('node:test');
 -const { createHarness, loadModule, textOf } = require('./helpers/questionnaireHarness.cjs');
 +const { createHarness, loadModule, textOf, createParticipantThemeStub } = require('./helpers/questionnaireHarness.cjs');
-@@ -18,0 +19 @@ const appExports = loadModule('App.js', (name) => {
+ 
+ let authState;
+ function StackNavigator() {}
+@@ -16,6 +16,7 @@ const appExports = loadModule('App.js', (name) => {
+     return { createNativeStackNavigator: () => ({ Navigator: StackNavigator, Screen: StackScreen }) };
+   }
+   if (name === 'react-native-safe-area-context') return { SafeAreaProvider() {} };
 +  if (name === './theme') return createParticipantThemeStub();
+   if (name === './context/AuthContext') return { useAuth: () => authState };
+   if (name === './screens/auth/AuthSessionGate') {
+     return {
 diff --git a/app/tests/staffRealNavigation.test.cjs b/app/tests/staffRealNavigation.test.cjs
 index f73cb49..823c04f 100644
 --- a/app/tests/staffRealNavigation.test.cjs
 +++ b/app/tests/staffRealNavigation.test.cjs
-@@ -9 +9 @@ const { createRequire } = require('node:module');
+@@ -6,7 +6,7 @@ const assert = require('node:assert/strict');
+ const path = require('node:path');
+ const test = require('node:test');
+ const { createRequire } = require('node:module');
 -const { loadModule } = require('./helpers/questionnaireHarness.cjs');
 +const { loadModule, createParticipantThemeStub } = require('./helpers/questionnaireHarness.cjs');
-@@ -78,0 +79 @@ function createRealApp(initialAuth) {
+ 
+ const qaRequire = createRequire(path.resolve(__dirname, '../../qa/regression/package.json'));
+ let deps = null;
+@@ -76,6 +76,7 @@ function createRealApp(initialAuth) {
+       }
+       assert.ok(name.startsWith('.'), `import inesperado: ${name}`);
+       const target = path.posix.normalize(path.posix.join(directory, name));
 +      if (target === 'theme') return createParticipantThemeStub();
+       if (target === 'context/AuthContext') return authModule;
+       if (target === 'context/ParticipationContext') return { ParticipationProvider: passthrough };
+       if (target === 'screens/auth/AuthSessionGate') {
 diff --git a/app/tests/uiComponents.test.cjs b/app/tests/uiComponents.test.cjs
 new file mode 100644
 index 0000000..6dbdeab
@@ -56485,10 +57554,10 @@ index 0000000..b118b00
 +export default typography;
 diff --git a/docs/UI_PARTICIPANT_INTEGRATION_IMPLEMENTACAO.md b/docs/UI_PARTICIPANT_INTEGRATION_IMPLEMENTACAO.md
 new file mode 100644
-index 0000000..3ed6709
+index 0000000..e49676a
 --- /dev/null
 +++ b/docs/UI_PARTICIPANT_INTEGRATION_IMPLEMENTACAO.md
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,46 @@
 +# ArenaGo — integração visual da Participant UI
 +
 +Base: `a3f235436b2cb5d35b71958fed3f6bbf43a5cb1f` (`origin/develop`).
@@ -56524,3 +57593,14 @@ index 0000000..3ed6709
 +A homologação visual no Expo Go foi realizada parcialmente. A homologação ponta a ponta de eventos, Arena, filas e avaliações continua pendente: o banco Neon consultado não possui eventos cadastrados para exercitar esses fluxos. As telas demonstrativas legadas `ActiveArenaScreen` e `ArenaQueueScreen` ainda usam o visual anterior; as rotas operacionais reais recebidas do servidor usam as telas integradas.
 +
 +Os resultados acima não representam homologação completa nem aprovação para merge. Antes do merge, ainda é necessária a conferência ponta a ponta dos fluxos reais de eventos, Arena, filas e avaliações com dados disponíveis, além da revisão de merge pelo responsável.
++
++## Correção pós-revisão do PR #5
++
++- O `accessibilityLiveRegion="polite"` do estado de carregamento do Perfil foi movido do `Card` para o `Text` “Carregando perfil...”, pois `Card` não encaminha essa propriedade ao elemento nativo. O layout e o comportamento do loading foram preservados.
++- A tela foi a única ocorrência equivalente encontrada nas telas do participante alteradas pelo PR; a mensagem de sucesso já aplica a propriedade diretamente a `Text`, e o alerta do questionário a aplica a um `View` nativo acessível.
++- `app/tests/profile.test.cjs` agora verifica o anúncio no texto e a ausência da propriedade no contêiner.
++- Validações desta correção, executadas pelo Codex após designação do responsável para Luna Medium:
++  - `node --test tests/profile.test.cjs tests/uiComponents.test.cjs` (a partir de `app`): 17 aprovados, 0 falhos, 0 ignorados.
++  - `npm.cmd --prefix app test` (raiz do worktree): 367 aprovados, 0 falhos, 0 ignorados.
++  - `git diff --check`: aprovado, código de saída 0; sem erros (Git reportou apenas avisos de conversão LF para CRLF nos arquivos do relatório e da evidência).
++- Não foram necessárias alterações funcionais adicionais após a correção de acessibilidade.

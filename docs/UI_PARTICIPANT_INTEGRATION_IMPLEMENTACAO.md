@@ -33,3 +33,14 @@ O visual atualizado foi integrado ao Welcome, Login, Cadastro, Recuperação de 
 A homologação visual no Expo Go foi realizada parcialmente. A homologação ponta a ponta de eventos, Arena, filas e avaliações continua pendente: o banco Neon consultado não possui eventos cadastrados para exercitar esses fluxos. As telas demonstrativas legadas `ActiveArenaScreen` e `ArenaQueueScreen` ainda usam o visual anterior; as rotas operacionais reais recebidas do servidor usam as telas integradas.
 
 Os resultados acima não representam homologação completa nem aprovação para merge. Antes do merge, ainda é necessária a conferência ponta a ponta dos fluxos reais de eventos, Arena, filas e avaliações com dados disponíveis, além da revisão de merge pelo responsável.
+
+## Correção pós-revisão do PR #5
+
+- O `accessibilityLiveRegion="polite"` do estado de carregamento do Perfil foi movido do `Card` para o `Text` “Carregando perfil...”, pois `Card` não encaminha essa propriedade ao elemento nativo. O layout e o comportamento do loading foram preservados.
+- A tela foi a única ocorrência equivalente encontrada nas telas do participante alteradas pelo PR; a mensagem de sucesso já aplica a propriedade diretamente a `Text`, e o alerta do questionário a aplica a um `View` nativo acessível.
+- `app/tests/profile.test.cjs` agora verifica o anúncio no texto e a ausência da propriedade no contêiner.
+- Validações desta correção, executadas pelo Codex após designação do responsável para Luna Medium:
+  - `node --test tests/profile.test.cjs tests/uiComponents.test.cjs` (a partir de `app`): 17 aprovados, 0 falhos, 0 ignorados.
+  - `npm.cmd --prefix app test` (raiz do worktree): 367 aprovados, 0 falhos, 0 ignorados.
+  - `git diff --check`: aprovado, código de saída 0; sem erros (Git reportou apenas avisos de conversão LF para CRLF nos arquivos do relatório e da evidência).
+- Não foram necessárias alterações funcionais adicionais após a correção de acessibilidade.

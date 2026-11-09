@@ -178,9 +178,11 @@ export default function ProfileScreen({ navigation, route }) {
         ) : null}
 
         {isLoading ? (
-          <Card style={styles.loadingCard} variant="surface" accessibilityLiveRegion="polite">
+          <Card style={styles.loadingCard} variant="surface">
             <ActivityIndicator color={colors.brand.primaryLight} size="small" />
-            <Text style={styles.loadingText}>Carregando perfil...</Text>
+            <Text style={styles.loadingText} accessibilityLiveRegion="polite">
+              Carregando perfil...
+            </Text>
           </Card>
         ) : null}
 

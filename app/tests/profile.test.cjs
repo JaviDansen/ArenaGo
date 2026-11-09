@@ -28,7 +28,12 @@ test('Profile loads real identity and questionnaire while preserving only demo i
       },
     },
   });
-  assert.ok(h.nodes.some(node => textOf(node) === 'Carregando perfil...'));
+  const loadingText = h.nodes.find(node => node.type === 'Text'
+    && textOf(node) === 'Carregando perfil...');
+  assert.ok(loadingText);
+  assert.equal(loadingText.props.accessibilityLiveRegion, 'polite');
+  assert.ok(!h.nodes.some(node => node.type === 'View'
+    && node.props.accessibilityLiveRegion === 'polite'));
   assert.ok(!h.nodes.some(node => node.type === 'Text' && textOf(node) === user.name));
   await h.actAsync(() => new Promise(resolve => setImmediate(resolve)));
   const texts = h.nodes.filter(node => node.type === 'Text').map(textOf);
