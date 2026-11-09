@@ -1,130 +1,124 @@
 import { StatusBar } from 'expo-status-bar';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { ScrollView, StyleSheet, Text, View } from 'react-native';
+
+import { AuthBackground } from '../../components/ui/AuthBackground';
+import { Button } from '../../components/ui/Button';
+import { colors, spacing, typography } from '../../theme';
 
 export default function WelcomeScreen({ navigation }) {
   return (
-    <SafeAreaView style={styles.container}>
+    <AuthBackground variant="welcome" testID="welcome-background">
       <StatusBar style="light" />
 
-      <View style={styles.header}>
-        <Text style={styles.headerBrand}>BEAST MARAGAMES</Text>
-      </View>
-
-      <View style={styles.content}>
-        <View style={styles.logoBadge}>
-          <Text style={styles.logoBadgeText}>B</Text>
+      <ScrollView
+        style={styles.scrollView}
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+        bounces={false}
+      >
+        <View style={styles.header}>
+          <Text style={styles.srOnly} accessibilityRole="header">
+            ArenaGO
+          </Text>
         </View>
 
-        <Text style={styles.tag}>PRIMEIROS PASSOS</Text>
-        <Text style={styles.title}>Viva a experiência BEAST.</Text>
-        <Text style={styles.subtitle}>
-          Conecte-se para participar de eventos, competições e acompanhar toda a arena em tempo real.
-        </Text>
-      </View>
+        {/* Área central livre para valorizar a composição artística de fundo */}
+        <View style={styles.artworkStage} pointerEvents="none" />
 
-      <View style={styles.actions}>
-        <Pressable
-          style={styles.primaryButton}
-          onPress={() => navigation.navigate('Register')}
-        >
-          <Text style={styles.primaryButtonText}>Criar minha conta</Text>
-        </Pressable>
+        {/* Bloco editorial e ações principais na metade inferior */}
+        <View style={styles.bottomSection}>
+          <View style={styles.editorialBlock}>
+            <Text style={styles.kicker}>EXPERIÊNCIA OFICIAL</Text>
+            <Text style={styles.title}>Viva a experiência ArenaGO.</Text>
+            <Text style={styles.subtitle}>
+              Entre nos eventos, acompanhe suas filas em tempo real e registre todo o seu histórico na arena.
+            </Text>
+          </View>
 
-        <Pressable
-          style={styles.secondaryButton}
-          onPress={() => navigation.navigate('Login')}
-        >
-          <Text style={styles.secondaryButtonText}>Já possuo uma conta</Text>
-        </Pressable>
-      </View>
-    </SafeAreaView>
+          <View style={styles.actions}>
+            <Button
+              title="Criar minha conta"
+              variant="primary"
+              size="lg"
+              fullWidth
+              onPress={() => navigation.navigate('Register')}
+              accessibilityLabel="Criar minha conta"
+              testID="welcome-register-button"
+            />
+
+            <Button
+              title="Já possuo uma conta"
+              variant="secondary"
+              size="lg"
+              fullWidth
+              onPress={() => navigation.navigate('Login')}
+              accessibilityLabel="Já possuo uma conta"
+              style={styles.secondaryButton}
+              testID="welcome-login-button"
+            />
+          </View>
+        </View>
+      </ScrollView>
+    </AuthBackground>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  scrollView: {
     flex: 1,
-    backgroundColor: '#0c0a17',
+    backgroundColor: 'transparent',
+  },
+  scrollContent: {
+    flexGrow: 1,
     justifyContent: 'space-between',
-    paddingHorizontal: 24,
-    paddingTop: 16,
-    paddingBottom: 24,
+    paddingHorizontal: spacing.xxl,
+    paddingTop: spacing.md,
+    paddingBottom: spacing.xxl,
+  },
+  srOnly: {
+    position: 'absolute',
+    width: 1,
+    height: 1,
+    opacity: 0,
+    overflow: 'hidden',
   },
   header: {
-    paddingVertical: 12,
-  },
-  headerBrand: {
-    color: '#ffffff',
-    fontSize: 14,
-    fontWeight: '700',
-    letterSpacing: 1.5,
-  },
-  content: {
-    flex: 1,
-    justifyContent: 'center',
-    paddingBottom: 40,
-  },
-  logoBadge: {
-    width: 68,
-    height: 68,
-    borderRadius: 18,
-    backgroundColor: '#7c3aed',
-    justifyContent: 'center',
+    flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 28,
+    justifyContent: 'space-between',
+    paddingVertical: spacing.sm,
   },
-  logoBadgeText: {
-    color: '#ffffff',
-    fontSize: 32,
-    fontWeight: '900',
+  artworkStage: {
+    flex: 1,
+    minHeight: 120,
   },
-  tag: {
-    color: '#a78bfa',
-    fontSize: 12,
-    fontWeight: '800',
-    letterSpacing: 1.2,
-    marginBottom: 8,
+  bottomSection: {
+    gap: spacing.xl,
+    paddingTop: spacing.lg,
+  },
+  editorialBlock: {
+    gap: spacing.sm,
+  },
+  kicker: {
+    ...typography.tag,
+    color: colors.brand.primaryLight,
   },
   title: {
-    color: '#ffffff',
+    ...typography.hero,
     fontSize: 30,
-    fontWeight: '800',
-    lineHeight: 36,
-    marginBottom: 14,
+    lineHeight: 38,
+    color: colors.text.primary,
   },
   subtitle: {
-    color: '#9ca3af',
-    fontSize: 15,
-    lineHeight: 22,
+    ...typography.bodyLarge,
+    lineHeight: 24,
+    color: colors.text.secondary,
   },
   actions: {
-    gap: 12,
-  },
-  primaryButton: {
-    backgroundColor: '#7c3aed',
-    height: 52,
-    borderRadius: 14,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  primaryButtonText: {
-    color: '#ffffff',
-    fontSize: 16,
-    fontWeight: '700',
+    gap: spacing.md,
   },
   secondaryButton: {
-    backgroundColor: '#191330',
-    borderWidth: 1,
-    borderColor: '#34265a',
-    height: 52,
-    borderRadius: 14,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  secondaryButtonText: {
-    color: '#e2d9f3',
-    fontSize: 16,
-    fontWeight: '700',
+    backgroundColor: 'rgba(13, 13, 24, 0.84)',
+    borderColor: colors.border.input,
   },
 });

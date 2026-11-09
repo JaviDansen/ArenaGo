@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { loadModule } = require('./helpers/questionnaireHarness.cjs');
+const { loadModule, createParticipantThemeStub } = require('./helpers/questionnaireHarness.cjs');
 
 const participationUtils = loadModule('utils/participation.js', require).exports;
 const { exports: mockData } = loadModule('data/mockData.js', require);
@@ -301,6 +301,7 @@ test('details open from the root stack with a back button to the list', () => {
     }
     if (name === './context/ParticipationContext') return { ParticipationProvider: 'ParticipationProvider' };
     if (name === './context/AuthContext') return { useAuth: () => authState };
+    if (name === './theme') return createParticipantThemeStub();
     if (name === './screens/auth/AuthSessionGate') {
       return {
         __esModule: true,
@@ -323,10 +324,15 @@ test('details open from the root stack with a back button to the list', () => {
 
 test('the bottom tabs keep Início, Eventos and Perfil without a new tab', () => {
   const tabs = loadModule('navigation/MainTabs.js', (name) => {
+    if (name === 'react-native') return reactNative;
+    if (name === 'react-native-safe-area-context') {
+      return { useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }) };
+    }
     if (name === '@react-navigation/bottom-tabs') {
       return { createBottomTabNavigator: () => ({ Navigator: 'TabNavigator', Screen: 'TabScreen' }) };
     }
     if (name.startsWith('../screens/')) return { __esModule: true, default: name };
+    if (name === '../theme') return createParticipantThemeStub();
     return require(name);
   });
   const screens = nodes(tabs.exports.default()).filter((node) => node.type === 'TabScreen');

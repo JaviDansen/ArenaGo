@@ -1,6 +1,8 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { loadModule, nodes, textOf } = require('./helpers/questionnaireHarness.cjs');
+const {
+  loadModule, nodes, textOf, createParticipantUiStubs, createParticipantThemeStub,
+} = require('./helpers/questionnaireHarness.cjs');
 
 const ID = '22222222-2222-4222-8222-222222222222';
 const USER = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
@@ -25,6 +27,9 @@ test('histórico real oferece Avaliar evento somente para avaliação pendente',
     };
     if (name === '@react-navigation/native') return { useFocusEffect: () => {} };
     if (name === 'react-native') return native;
+    if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
+    if (name === '../../components/ui') return createParticipantUiStubs();
+    if (name === '../../theme') return createParticipantThemeStub();
     if (name === '../../components/ParticipationCard') return { __esModule: true, default: 'ParticipationCard' };
     if (name === '../../components/ScreenContainer') return { __esModule: true, default: 'ScreenContainer' };
     if (name === '../../context/AuthContext') return { AuthContext: {} };
@@ -58,6 +63,9 @@ test('detalhes reais oferecem avaliação pendente e bloqueiam a já enviada', (
       useEffect: () => {}, useState: initial => [initial, () => {}],
     };
     if (name === 'react-native') return native;
+    if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
+    if (name === '../../components/ui') return createParticipantUiStubs();
+    if (name === '../../theme') return createParticipantThemeStub();
     if (name === '../../components/ScreenContainer') return { __esModule: true, default: 'ScreenContainer' };
     if (name === '../../context/AuthContext') return { AuthContext: {} };
     if (name === '../../services/participationHistoryService') return { validateHistoryItem: () => true };
@@ -87,6 +95,9 @@ test('Arena real exige confirmação e bloqueia duas finalizações simultâneas
     if (name === '@react-navigation/native') return { useFocusEffect: callback => callback() };
     if (name === 'expo-crypto') return { randomUUID: () => '33333333-3333-4333-8333-333333333333' };
     if (name === 'react-native') return { ...native, Alert: { alert: (...args) => alerts.push(args) } };
+    if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
+    if (name === '../../components/ui') return createParticipantUiStubs();
+    if (name === '../../theme') return createParticipantThemeStub();
     if (name === '../../components/ScreenContainer') return { __esModule: true, default: 'ScreenContainer' };
     if (name === '../../context/AuthContext') return { useAuth: () => ({ user: { id: USER }, httpClient: {}, getSessionEpoch: () => 1 }) };
     if (name === '../../services/arenaQueueService') return {

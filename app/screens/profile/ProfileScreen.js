@@ -1,10 +1,18 @@
 import { useContext, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import {
+  ActivityIndicator,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
+import { StatusBar } from 'expo-status-bar';
 
 import { AuthContext } from '../../context/AuthContext';
 import { mockProfileStatistics } from '../../data/mockData';
 import { getProfileViewData } from '../../utils/profile';
+import { AuthBackground, Badge, Button, Card, TagChip } from '../../components/ui';
+import { colors, radii, spacing, typography } from '../../theme';
 
 export default function ProfileScreen({ navigation, route }) {
   const auth = useContext(AuthContext);
@@ -107,129 +115,414 @@ export default function ProfileScreen({ navigation, route }) {
   }
 
   return (
-    <SafeAreaView style={styles.safeArea} edges={['left', 'right']}>
-      <ScrollView contentContainerStyle={styles.content}>
-        <Text style={styles.title}>Meu Perfil</Text>
+    <AuthBackground
+      variant="login"
+      overlayOpacity={0.65}
+      useSafeArea
+      testID="profile-background"
+    >
+      <StatusBar style="light" />
+      <ScrollView
+        contentContainerStyle={styles.content}
+        showsVerticalScrollIndicator={false}
+      >
+        <View style={styles.header}>
+          <Badge label="PARTICIPANTE" variant="brand" />
+          <Text style={styles.title} accessibilityRole="header">
+            Meu Perfil
+          </Text>
+        </View>
 
-        <View style={styles.identity}>
-          <View style={styles.avatar} accessible accessibilityLabel="Avatar genérico de usuário">
+        <Card style={styles.identityCard} variant="elevated">
+          <View
+            style={styles.avatar}
+            accessible
+            accessibilityLabel="Avatar genérico de usuário"
+          >
             <View style={styles.avatarHead} />
             <View style={styles.avatarBody} />
           </View>
-          {account ? <>
-            <Text style={styles.name}>{profile.name}</Text>
-            <Text style={styles.email}>{profile.email}</Text>
-          </> : null}
-        </View>
+          {account ? (
+            <View style={styles.identityInfo}>
+              <Text style={styles.name}>{profile.name}</Text>
+              <Text style={styles.email}>{profile.email}</Text>
+            </View>
+          ) : null}
+        </Card>
 
-        <Text style={styles.demoNotice}>Indicadores demonstrativos</Text>
+        <View style={styles.sectionHeaderRow}>
+          <Badge label="DEMO" variant="brand" size="sm" />
+          <Text style={styles.demoNotice}>Indicadores demonstrativos</Text>
+        </View>
         <View style={styles.statistics}>
-          <View style={styles.statCard}>
+          <Card style={styles.statCard} variant="surface">
             <Text style={styles.statValue}>{profile.participationCount}</Text>
             <Text style={styles.statLabel}>Participações</Text>
-          </View>
-          <View style={styles.statCard}>
+          </Card>
+          <Card style={styles.statCard} variant="surface">
             <Text style={styles.statValue}>{profile.totalTime}</Text>
             <Text style={styles.statLabel}>Tempo total</Text>
-          </View>
+          </Card>
         </View>
 
-        <Text style={styles.sectionTitle}>Dados do questionário</Text>
+        <View style={styles.questionnaireHeader}>
+          <Text style={styles.sectionTitle}>Dados do questionário</Text>
+        </View>
+
         {route?.params?.questionnaireSaved ? (
-          <Text style={styles.demoNotice} accessibilityLiveRegion="polite">Questionário atualizado com sucesso.</Text>
+          <Card style={styles.successBanner} variant="surface">
+            <Text style={styles.successText} accessibilityLiveRegion="polite">
+              Questionário atualizado com sucesso.
+            </Text>
+          </Card>
         ) : null}
+
         {isLoading ? (
-          <View accessibilityLiveRegion="polite">
-            <ActivityIndicator color="#111827" />
-            <Text style={styles.demoNotice}>Carregando perfil...</Text>
+          <Card style={styles.loadingCard} variant="surface" accessibilityLiveRegion="polite">
+            <ActivityIndicator color={colors.brand.primaryLight} size="small" />
+            <Text style={styles.loadingText}>Carregando perfil...</Text>
+          </Card>
+        ) : null}
+
+        {loadError ? (
+          <Card style={styles.errorCard} variant="surface">
+            <Text style={styles.error} accessibilityRole="alert">
+              {loadError}
+            </Text>
+            <Button
+              variant="outline"
+              size="md"
+              onPress={() => reloadRef.current?.()}
+              disabled={isLoading}
+              accessibilityRole="button"
+              accessibilityLabel="Tentar carregar perfil novamente"
+              style={styles.retryButton}
+            >
+              Tentar novamente
+            </Button>
+          </Card>
+        ) : null}
+
+        {questionnaire?.hasCompleted === false ? (
+          <Card style={styles.pendingCard} variant="surface">
+            <Text style={styles.demoNotice}>Questionário ainda não concluído.</Text>
+          </Card>
+        ) : null}
+
+        {questionnaire?.hasCompleted ? (
+          <View style={styles.questionnaireSections}>
+            {/* 1. Informações Pessoais */}
+            <Card style={styles.sectionCard} variant="surface">
+              <Text style={styles.cardHeaderTitle}>Informações Pessoais</Text>
+              {profile.questionnaireRows.slice(0, 3).map((row, index) => (
+                <View
+                  key={row.label}
+                  style={[styles.dataRow, index > 0 && styles.dataRowBorder]}
+                >
+                  <Text style={styles.dataLabel}>{row.label}</Text>
+                  <Text style={styles.dataValue}>{row.value}</Text>
+                </View>
+              ))}
+            </Card>
+
+            {/* 2. Jogos de Interesse */}
+            <Card style={styles.sectionCard} variant="surface">
+              <Text style={styles.cardHeaderTitle}>Jogos de Interesse</Text>
+              <View style={styles.dataRow}>
+                <Text style={styles.dataLabel}>
+                  {profile.questionnaireRows[3].label}
+                </Text>
+                <Text style={styles.dataValue}>
+                  {profile.questionnaireRows[3].value}
+                </Text>
+              </View>
+              {Array.isArray(questionnaire?.yourGames) && questionnaire.yourGames.length > 0 ? (
+                <View style={styles.gameChipsContainer}>
+                  {questionnaire.yourGames.map((game, i) => {
+                    const gameName = typeof game === 'string' ? game : game?.name;
+                    if (!gameName) return null;
+                    return (
+                      <TagChip
+                        key={`game-${i}-${gameName}`}
+                        label={gameName}
+                        style={styles.gameChip}
+                      />
+                    );
+                  })}
+                </View>
+              ) : null}
+            </Card>
+
+            {/* 3. Mercado de Games */}
+            <Card style={styles.sectionCard} variant="surface">
+              <Text style={styles.cardHeaderTitle}>Mercado de Games</Text>
+              {profile.questionnaireRows.slice(4, 6).map((row, index) => (
+                <View
+                  key={row.label}
+                  style={[styles.dataRow, index > 0 && styles.dataRowBorder]}
+                >
+                  <Text style={styles.dataLabel}>{row.label}</Text>
+                  <Text style={styles.dataValue}>{row.value}</Text>
+                </View>
+              ))}
+            </Card>
           </View>
         ) : null}
-        {loadError ? <>
-          <Text style={styles.error} accessibilityRole="alert">{loadError}</Text>
-          <Pressable style={styles.editButton} onPress={() => reloadRef.current?.()}
-            disabled={isLoading} accessibilityRole="button" accessibilityLabel="Tentar carregar perfil novamente">
-            <Text style={styles.editButtonText}>Tentar novamente</Text>
-          </Pressable>
-        </> : null}
-        {questionnaire?.hasCompleted === false ? (
-          <Text style={styles.demoNotice}>Questionário ainda não concluído.</Text>
-        ) : null}
-        {questionnaire?.hasCompleted ? <View style={styles.questionnaireCard}>
-          {profile.questionnaireRows.map((row, index) => (
-            <View key={row.label} style={[
-              styles.dataRow, index > 0 && styles.dataRowBorder,
-            ]}>
-              <Text style={styles.dataLabel}>{row.label}</Text>
-              <Text style={styles.dataValue}>{row.value}</Text>
-            </View>
-          ))}
-        </View> : null}
 
-        <Pressable
-          style={styles.editButton}
+        <Button
+          variant="secondary"
+          size="lg"
           onPress={openQuestionnaire}
           disabled={!canEdit}
           accessibilityRole="button"
-          accessibilityState={{ disabled: !canEdit }}
           accessibilityLabel="Editar dados do questionário"
+          style={styles.editButton}
         >
-          <Text style={styles.editButtonText}>EDITAR DADOS DO QUESTIONÁRIO</Text>
-        </Pressable>
+          EDITAR DADOS DO QUESTIONÁRIO
+        </Button>
 
-        {logoutError ? <Text style={styles.error} accessibilityRole="alert">{logoutError}</Text> : null}
-        <Pressable
-          style={[styles.logoutButton, (isLoggingOut || !canLogout) && styles.disabledButton]}
+        {logoutError ? (
+          <Text style={styles.error} accessibilityRole="alert">
+            {logoutError}
+          </Text>
+        ) : null}
+
+        <Button
+          variant="dangerOutline"
+          size="lg"
           onPress={handleLogout}
           disabled={isLoggingOut || !canLogout}
+          loading={isLoggingOut}
           accessibilityRole="button"
           accessibilityLabel="Sair da conta"
-          accessibilityState={{ disabled: isLoggingOut || !canLogout, busy: isLoggingOut }}
+          style={styles.logoutButton}
         >
-          <Text style={styles.logoutButtonText}>{isLoggingOut ? 'Saindo...' : 'SAIR DA CONTA'}</Text>
-        </Pressable>
+          {isLoggingOut ? 'Saindo...' : 'SAIR DA CONTA'}
+        </Button>
       </ScrollView>
-    </SafeAreaView>
+    </AuthBackground>
   );
 }
 
 const styles = StyleSheet.create({
-  // O cabeçalho e a barra de abas existentes já cuidam dos insets superior e inferior.
-  safeArea: { flex: 1, backgroundColor: '#fff' },
-  content: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 24 },
-  title: { color: '#000', fontSize: 24, fontWeight: 'bold' },
-  identity: { alignItems: 'center', marginVertical: 24 },
+  content: {
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.md,
+    paddingBottom: spacing.xxl,
+  },
+  header: {
+    marginBottom: spacing.lg,
+    gap: spacing.xs,
+  },
+  title: {
+    ...typography.hero,
+    color: colors.text.primary,
+    marginTop: spacing.xs,
+  },
+  identityCard: {
+    alignItems: 'center',
+    paddingVertical: spacing.xl,
+    paddingHorizontal: spacing.lg,
+    marginBottom: spacing.lg,
+    borderWidth: 1,
+    borderColor: colors.border.subtle,
+    backgroundColor: colors.background.elevated,
+  },
   avatar: {
-    width: 80, height: 80, borderRadius: 40, backgroundColor: '#f3f4f6',
-    alignItems: 'center', justifyContent: 'center', gap: 4,
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: colors.background.surface,
+    borderColor: colors.brand.primary,
+    borderWidth: 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+    shadowColor: colors.brand.primary,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 4,
   },
-  avatarHead: { width: 22, height: 22, borderRadius: 11, backgroundColor: '#6b7280' },
+  avatarHead: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: colors.brand.primaryLight,
+  },
   avatarBody: {
-    width: 42, height: 23, borderTopLeftRadius: 24, borderTopRightRadius: 24,
-    borderBottomLeftRadius: 6, borderBottomRightRadius: 6, backgroundColor: '#6b7280',
+    width: 42,
+    height: 22,
+    borderTopLeftRadius: 22,
+    borderTopRightRadius: 22,
+    borderBottomLeftRadius: 6,
+    borderBottomRightRadius: 6,
+    backgroundColor: colors.brand.primaryLight,
   },
-  name: { color: '#111827', fontSize: 20, fontWeight: '600', textAlign: 'center', marginTop: 12 },
-  email: { color: '#6b7280', fontSize: 14, textAlign: 'center', marginTop: 6 },
-  demoNotice: { color: '#6b7280', fontSize: 12, lineHeight: 18, marginBottom: 8 },
-  statistics: { flexDirection: 'row', gap: 12 },
+  identityInfo: {
+    alignItems: 'center',
+    marginTop: spacing.md,
+  },
+  name: {
+    ...typography.titleMedium,
+    color: colors.text.primary,
+    textAlign: 'center',
+  },
+  email: {
+    ...typography.bodySmall,
+    color: colors.text.secondary,
+    textAlign: 'center',
+    marginTop: spacing.xxs,
+  },
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    marginBottom: spacing.xs,
+  },
+  sectionSubtitle: {
+    ...typography.caption,
+    color: colors.text.muted,
+    fontWeight: '700',
+    letterSpacing: 0.8,
+  },
+  demoNotice: {
+    ...typography.bodySmall,
+    color: colors.text.secondary,
+  },
+  statistics: {
+    flexDirection: 'row',
+    gap: spacing.md,
+    marginBottom: spacing.xl,
+  },
   statCard: {
-    flex: 1, paddingVertical: 18, paddingHorizontal: 8, alignItems: 'center',
-    backgroundColor: '#f9fafb', borderColor: '#e5e7eb', borderWidth: 1, borderRadius: 8,
+    flex: 1,
+    paddingVertical: spacing.lg,
+    paddingHorizontal: spacing.md,
+    alignItems: 'center',
+    backgroundColor: colors.background.surface,
+    borderColor: colors.border.subtle,
+    borderWidth: 1,
+    borderRadius: radii.md,
   },
-  statValue: { color: '#111827', fontSize: 26, fontWeight: 'bold' },
-  statLabel: { color: '#6b7280', fontSize: 14, textAlign: 'center', marginTop: 4 },
-  sectionTitle: { color: '#111827', fontSize: 18, fontWeight: 'bold', marginTop: 28, marginBottom: 8 },
-  questionnaireCard: { borderColor: '#e5e7eb', borderWidth: 1, borderRadius: 8, paddingHorizontal: 16 },
-  dataRow: { paddingVertical: 14, gap: 5 },
-  dataRowBorder: { borderTopColor: '#e5e7eb', borderTopWidth: 1 },
-  dataLabel: { color: '#6b7280', fontSize: 13 },
-  dataValue: { color: '#111827', fontSize: 15, lineHeight: 22 },
+  statValue: {
+    ...typography.hero,
+    color: colors.brand.primaryLight,
+    fontWeight: '800',
+  },
+  statLabel: {
+    ...typography.caption,
+    color: colors.text.secondary,
+    textAlign: 'center',
+    marginTop: spacing.xxs,
+  },
+  questionnaireHeader: {
+    marginBottom: spacing.sm,
+  },
+  sectionTitle: {
+    ...typography.titleSmall,
+    color: colors.text.primary,
+  },
+  successBanner: {
+    backgroundColor: colors.semantic.successBg,
+    borderColor: colors.semantic.success,
+    borderWidth: 1,
+    padding: spacing.md,
+    marginBottom: spacing.md,
+  },
+  successText: {
+    ...typography.bodySmall,
+    color: colors.semantic.success,
+    fontWeight: '600',
+  },
+  loadingCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.sm,
+    padding: spacing.lg,
+    marginBottom: spacing.md,
+    backgroundColor: colors.background.surface,
+    borderColor: colors.border.subtle,
+  },
+  loadingText: {
+    ...typography.body,
+    color: colors.text.secondary,
+  },
+  errorCard: {
+    backgroundColor: colors.semantic.dangerBg,
+    borderColor: colors.semantic.danger,
+    borderWidth: 1,
+    padding: spacing.md,
+    marginBottom: spacing.md,
+    gap: spacing.sm,
+  },
+  error: {
+    ...typography.bodySmall,
+    color: colors.semantic.danger,
+    lineHeight: 20,
+  },
+  retryButton: {
+    alignSelf: 'flex-start',
+    marginTop: spacing.xs,
+  },
+  pendingCard: {
+    padding: spacing.md,
+    marginBottom: spacing.md,
+    backgroundColor: colors.background.surface,
+    borderColor: colors.border.subtle,
+  },
+  questionnaireSections: {
+    gap: spacing.md,
+    marginBottom: spacing.lg,
+  },
+  sectionCard: {
+    backgroundColor: colors.background.surface,
+    borderColor: colors.border.subtle,
+    borderWidth: 1,
+    borderRadius: radii.md,
+    padding: spacing.md,
+  },
+  cardHeaderTitle: {
+    ...typography.labelSmall,
+    color: colors.brand.primaryLight,
+    fontWeight: '700',
+    marginBottom: spacing.sm,
+    letterSpacing: 0.5,
+  },
+  dataRow: {
+    paddingVertical: spacing.xs,
+    gap: 2,
+  },
+  dataRowBorder: {
+    borderTopColor: colors.border.subtle,
+    borderTopWidth: 1,
+    marginTop: spacing.xs,
+    paddingTop: spacing.xs,
+  },
+  dataLabel: {
+    ...typography.caption,
+    color: colors.text.secondary,
+  },
+  dataValue: {
+    ...typography.body,
+    color: colors.text.primary,
+    fontWeight: '600',
+  },
+  gameChipsContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.xs,
+    marginTop: spacing.sm,
+  },
+  gameChip: {
+    marginRight: 0,
+  },
   editButton: {
-    alignItems: 'center', backgroundColor: '#f3f4f6', borderRadius: 4,
-    marginTop: 20, padding: 14, gap: 4,
+    marginTop: spacing.md,
+    marginBottom: spacing.sm,
   },
-  editButtonText: { color: '#6b7280', fontSize: 13, fontWeight: '600', textAlign: 'center' },
-  logoutButton: { alignItems: 'center', backgroundColor: '#000', borderRadius: 4, marginTop: 24, padding: 14 },
-  logoutButtonText: { color: '#fff', fontSize: 15, fontWeight: 'bold' },
-  disabledButton: { opacity: 0.6 },
-  error: { color: '#b91c1c', fontSize: 14, marginTop: 16 },
+  logoutButton: {
+    marginTop: spacing.sm,
+  },
 });

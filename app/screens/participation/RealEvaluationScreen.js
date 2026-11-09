@@ -1,12 +1,14 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { Text } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
+import { StatusBar } from 'expo-status-bar';
 import * as Crypto from 'expo-crypto';
 
-import ScreenContainer from '../../components/ScreenContainer';
+import { AuthBackground, Badge, Card } from '../../components/ui';
 import { useAuth } from '../../context/AuthContext';
 import { ParticipationContext } from '../../context/ParticipationContext';
 import { createParticipationActionCoordinator, describeParticipationActionError } from '../../services/participationActionService';
 import { validateHistoryItem } from '../../services/participationHistoryService';
+import { colors, spacing, typography } from '../../theme';
 import EvaluationScreen from './EvaluationScreen';
 
 export default function RealEvaluationScreen({ navigation, route }) {
@@ -65,9 +67,26 @@ export default function RealEvaluationScreen({ navigation, route }) {
   }, [coordinator, navigation, participationId, refreshParticipation, userId, valid]);
 
   if (!valid || !userId) {
-    return <ScreenContainer><Text>A avaliação não está disponível para esta participação. Atualize o histórico.</Text></ScreenContainer>;
+    return (
+      <AuthBackground variant="login" overlayOpacity={0.68} testID="evaluation-unavailable-background">
+        <StatusBar style="light" />
+        <View style={styles.unavailable}>
+          <Card variant="elevated">
+            <Badge label="AVALIAÇÃO INDISPONÍVEL" variant="warning" />
+            <Text style={styles.message} accessibilityRole="alert">
+              A avaliação não está disponível para esta participação. Atualize o histórico.
+            </Text>
+          </Card>
+        </View>
+      </AuthBackground>
+    );
   }
 
   return <EvaluationScreen navigation={navigation} real onSubmit={submit} onRetry={() => submit(null)}
     onLater={() => navigation.goBack()} submitting={busy} error={error} pendingIntent={pending} />;
 }
+
+const styles = StyleSheet.create({
+  unavailable: { flex: 1, padding: spacing.layout.screenPaddingHorizontal, justifyContent: 'center' },
+  message: { ...typography.body, color: colors.text.primary, marginTop: spacing.md },
+});

@@ -17,6 +17,11 @@ const reactNative = {
   Text: 'Text',
   View: 'View',
 };
+const designTheme = loadModule('theme/index.js', (name) => {
+  if (name === 'react-native') return reactNative;
+  if (name.startsWith('./')) return loadModule(`theme/${name.slice(2)}`, require).exports;
+  return require(name);
+}).exports;
 
 // Expande componentes de função (DetailRow, EvaluationSection...) para ler o que a tela exibe.
 function renderTree(element) {
@@ -51,6 +56,7 @@ function requireStub(data) {
     if (name === '../../data/mockData') return data;
     if (name === '../../utils/participation') return participationUtils;
     if (name === '../../utils/evaluation') return evaluationUtils;
+    if (name === '../theme') return designTheme;
     return require(name);
   };
 }
@@ -118,7 +124,7 @@ const pendingIds = (participations) => [...evaluationUtils.getPendingEvaluationP
 test('1. participation with a pending evaluation is identified, listed and explained', () => {
   assert.equal(evaluationUtils.getEvaluationSituation(pending), SITUATIONS.PENDING);
   assert.deepEqual(pendingIds(all), ['participation-pending']);
-  assert.deepEqual(renderCard(pending, SITUATIONS.PENDING).at(-1), 'Avaliação pendente');
+  assert.ok(renderCard(pending, SITUATIONS.PENDING).includes('Avaliação pendente'), 'badge de avaliação pendente');
   assert.deepEqual(evaluationTexts(renderDetails(all, evaluations, pending.id)), [
     'Avaliação',
     'Esta participação ainda não foi avaliada.',
@@ -127,7 +133,7 @@ test('1. participation with a pending evaluation is identified, listed and expla
 
 test('2. evaluated participation shows the registered rating', () => {
   assert.equal(evaluationUtils.getEvaluationSituation(evaluated), SITUATIONS.EVALUATED);
-  assert.equal(renderCard(evaluated, SITUATIONS.EVALUATED).at(-1), 'Avaliada');
+  assert.ok(renderCard(evaluated, SITUATIONS.EVALUATED).includes('Avaliada'), 'badge de avaliação registrada');
   assert.deepEqual(evaluationTexts(renderDetails(all, evaluations, evaluated.id)), [
     'Avaliação',
     'Nota', '5 de 5',
@@ -155,7 +161,7 @@ test('3. evaluation comment is shown when present and never invented when absent
 
 test('4. participation whose first-evaluation deadline ended', () => {
   assert.equal(evaluationUtils.getEvaluationSituation(expired), SITUATIONS.EXPIRED);
-  assert.equal(renderCard(expired, SITUATIONS.EXPIRED).at(-1), 'Prazo de avaliação encerrado');
+  assert.ok(renderCard(expired, SITUATIONS.EXPIRED).includes('Prazo de avaliação encerrado'), 'badge de prazo encerrado');
   assert.deepEqual(evaluationTexts(renderDetails(all, evaluations, expired.id)), [
     'Avaliação',
     'O prazo para a primeira avaliação desta participação terminou.',
@@ -169,7 +175,7 @@ test('5. participation still in progress is never shown as pending', () => {
     assert.equal(evaluationUtils.getEvaluationSituation(current), SITUATIONS.NOT_FINISHED, status);
     assert.equal(pendingIds([current]).length, 0, status);
   }
-  assert.equal(renderCard(ongoing, SITUATIONS.NOT_FINISHED).at(-1), 'Em andamento · avaliação indisponível');
+  assert.ok(renderCard(ongoing, SITUATIONS.NOT_FINISHED).includes('Em andamento · avaliação indisponível'), 'badge de participação em andamento');
   assert.deepEqual(evaluationTexts(renderDetails(all, evaluations, ongoing.id)), [
     'Avaliação',
     'A participação ainda não foi finalizada. Não há avaliação disponível.',
@@ -334,7 +340,7 @@ test('submitted projection remains evaluated when its detail record is absent, i
   ];
   for (const records of [missing, invalidRating, duplicated]) {
     assert.equal(evaluationUtils.getEvaluationSituation(evaluated), SITUATIONS.EVALUATED);
-    assert.equal(renderCard(evaluated, SITUATIONS.EVALUATED).at(-1), 'Avaliada');
+    assert.ok(renderCard(evaluated, SITUATIONS.EVALUATED).includes('Avaliada'), 'badge de avaliação registrada');
     assert.deepEqual(evaluationTexts(renderDetails([evaluated], records, evaluated.id)), [
       'Avaliação', 'Esta participação foi avaliada, mas os detalhes da avaliação estão indisponíveis.',
     ]);

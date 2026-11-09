@@ -1,138 +1,278 @@
 import { StatusBar } from 'expo-status-bar';
 import { useContext } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
-import ScreenContainer from '../../components/ScreenContainer';
+import { AuthBackground, Badge, Button, Card } from '../../components/ui';
 import { AuthContext } from '../../context/AuthContext';
+import { colors, spacing, typography } from '../../theme';
 
-export default function HomeScreen({ navigation, returnState }) {
-  const auth = typeof useContext === 'function' ? useContext(AuthContext) : null;
-
+export default function HomeScreen({ navigation, returnState, mode = 'ready', message, onRetry }) {
+  const auth = useContext(AuthContext);
   const hasPendingQuestionnaire =
     auth?.user != null && auth.user.hasCompletedQuestionnaire === false;
+  const rawName = typeof auth?.user?.name === 'string' ? auth.user.name.trim() : '';
+  const firstName = rawName ? rawName.split(/\s+/)[0] : '';
 
   return (
-    <ScreenContainer>
-      <Text style={styles.title}>BEAST MARAGAMES</Text>
-      <Text style={styles.welcome}>Bem-vindo à BEAST!</Text>
-      <Text style={styles.description}>
-        Participe das experiências e eventos da BEAST MARAGAMES.
-      </Text>
-
-      {returnState?.recentFinalization ? <Text>Sua participação recente foi encerrada.</Text> : null}
-      {returnState?.pendingEvaluationParticipationIds?.length > 0 ? (
-        <Text>Você possui {returnState.pendingEvaluationParticipationIds.length} avaliação(ões) pendente(s).</Text>
-      ) : null}
-
-      {hasPendingQuestionnaire ? (
-        <View style={styles.questionnaireBanner}>
-          <Text style={styles.questionnaireBannerTitle}>
-            Seu questionário de perfil ainda está pendente.
-          </Text>
-          <Text style={styles.questionnaireBannerText}>
-            Conclua o questionário para personalizar sua experiência na Arena.
-          </Text>
-          <Pressable
-            style={styles.questionnaireButton}
-            onPress={() =>
-              navigation.navigate('ProfileQuestionnaire', {
-                user: auth.user,
-              })
-            }
-          >
-            <Text style={styles.questionnaireButtonText}>
-              Completar questionário de perfil
-            </Text>
-          </Pressable>
+    <AuthBackground variant="login" overlayOpacity={0.65} testID="home-background">
+      <StatusBar style="light" />
+      {mode === 'loading' || mode === 'error' ? (
+        <View style={styles.stateScreen}>
+          <View style={styles.brandRow}>
+            <Text style={styles.brandArena}>Arena</Text>
+            <Text style={styles.brandGo}>GO</Text>
+          </View>
+          <Card variant="elevated" style={styles.stateCard}>
+            {mode === 'loading' ? (
+              <>
+                <ActivityIndicator size="small" color={colors.brand.primaryLight} />
+                <Text style={styles.stateTitle}>Carregando sua participação</Text>
+                <Text style={styles.stateText}>Estamos consultando o servidor do evento.</Text>
+              </>
+            ) : (
+              <>
+                <Badge label="ATENÇÃO" variant="danger" />
+                <Text style={styles.stateTitle}>Não foi possível atualizar</Text>
+                <Text style={styles.stateText}>{message}</Text>
+                <Button title="Tentar novamente" variant="secondary" onPress={onRetry} style={styles.stateAction} />
+              </>
+            )}
+          </Card>
         </View>
-      ) : null}
+      ) : (
+        <ScrollView
+          contentContainerStyle={styles.scrollContent}
+          showsVerticalScrollIndicator={false}
+        >
+          <View style={styles.topBar}>
+            <View style={styles.brandRow}>
+              <Text style={styles.brandArena}>Arena</Text>
+              <Text style={styles.brandGo}>GO</Text>
+            </View>
+            <Badge label="ONLINE" variant="brand" />
+          </View>
 
-      <Pressable
-        style={styles.eventButton}
-        onPress={() => navigation.navigate('EventEntry')}
-      >
-        <Text style={styles.eventButtonText}>Entrar em um evento</Text>
-      </Pressable>
+          <View style={styles.greetingSection}>
+            <Text style={styles.welcome}>
+              {firstName ? `Olá, ${firstName}!` : 'Bem-vindo ao ArenaGo!'}
+            </Text>
+            <Text style={styles.description}>
+              Acompanhe suas experiências e gerencie sua participação nos eventos presenciais.
+            </Text>
+          </View>
 
-      <Pressable
-        style={styles.staffButton}
-        onPress={() => navigation.navigate('StaffDemo')}
-        accessibilityRole="button"
-      >
-        <Text style={styles.staffButtonText}>Área do Staff (demonstração)</Text>
-      </Pressable>
+          {returnState?.recentFinalization ? (
+            <Card variant="elevated" style={styles.noticeCard}>
+              <Badge label="PARTICIPAÇÃO ENCERRADA" variant="success" />
+              <Text style={styles.noticeText}>Sua participação recente foi encerrada.</Text>
+            </Card>
+          ) : null}
+          {returnState?.pendingEvaluationParticipationIds?.length > 0 ? (
+            <Card variant="elevated" style={styles.noticeCard}>
+              <Badge label="AVALIAÇÃO PENDENTE" variant="warning" />
+              <Text style={styles.noticeText}>
+                Você possui {returnState.pendingEvaluationParticipationIds.length} avaliação(ões) pendente(s).
+              </Text>
+              <Pressable
+                onPress={() => navigation.navigate('Eventos')}
+                accessibilityRole="button"
+                accessibilityLabel="Abrir avaliações pendentes na aba Eventos"
+                style={styles.inlineAction}
+              >
+                <Text style={styles.inlineActionText}>Ver eventos e avaliações →</Text>
+              </Pressable>
+            </Card>
+          ) : null}
 
-      <StatusBar style="dark" />
-    </ScreenContainer>
+          {hasPendingQuestionnaire ? (
+            <Card variant="elevated" style={styles.noticeCard} testID="home-pending-questionnaire-banner">
+              <Badge label="PERFIL INCOMPLETO" variant="warning" />
+              <Text style={styles.noticeTitle}>Seu questionário de perfil ainda está pendente.</Text>
+              <Text style={styles.noticeText}>
+                Conclua o questionário para personalizar sua experiência na Arena.
+              </Text>
+              <Button
+                title="Completar questionário de perfil"
+                variant="secondary"
+                onPress={() => navigation.navigate('ProfileQuestionnaire', { user: auth.user })}
+                style={styles.noticeAction}
+              />
+            </Card>
+          ) : null}
+
+          <Card variant="highlight" style={styles.heroCard} testID="home-event-entry-card">
+            <Badge label="ACESSO À ARENA" variant="brand" />
+            <Text style={styles.heroTitle}>Pronto para jogar?</Text>
+            <Text style={styles.heroDescription}>
+              Informe o código disponibilizado na estação do evento para iniciar sua participação.
+            </Text>
+            <Button
+              title="Entrar em um evento"
+              variant="primary"
+              onPress={() => navigation.navigate('EventEntry')}
+              style={styles.eventButton}
+            />
+          </Card>
+
+          <View style={styles.sectionBlock}>
+            <Text style={styles.sectionLabel}>STATUS DE PARTICIPAÇÃO</Text>
+            <Card variant="default" style={styles.participationCard} testID="home-empty-participation-card">
+              <Badge label="SEM PARTICIPAÇÃO ATIVA" variant="default" />
+              <Text style={styles.participationTitle}>Nenhuma participação ativa no momento</Text>
+              <Text style={styles.participationSubtitle}>
+                Você não está aguardando em uma fila nem em atendimento. Use o botão acima quando estiver em um evento.
+              </Text>
+              <Pressable
+                style={styles.inlineAction}
+                onPress={() => navigation.navigate('Eventos')}
+                accessibilityRole="button"
+                accessibilityLabel="Consultar histórico de eventos"
+              >
+                <Text style={styles.inlineActionText}>Consultar histórico na aba Eventos →</Text>
+              </Pressable>
+            </Card>
+          </View>
+
+          <Button
+            title="Área do Staff (demonstração)"
+            variant="ghost"
+            onPress={() => navigation.navigate('StaffDemo')}
+            style={styles.staffButton}
+          />
+        </ScrollView>
+      )}
+    </AuthBackground>
   );
 }
 
 const styles = StyleSheet.create({
-  title: {
-    fontSize: 24,
-    fontWeight: 'bold',
+  stateScreen: {
+    flex: 1,
+    justifyContent: 'center',
+    padding: spacing.layout.screenPaddingHorizontal,
+  },
+  stateCard: {
+    marginTop: spacing.xxl,
+    alignItems: 'flex-start',
+    gap: spacing.md,
+  },
+  stateTitle: {
+    ...typography.titleMedium,
+    color: colors.text.primary,
+    marginTop: spacing.sm,
+  },
+  stateText: {
+    ...typography.body,
+    color: colors.text.secondary,
+  },
+  stateAction: {
+    alignSelf: 'stretch',
+    marginTop: spacing.md,
+  },
+  scrollContent: {
+    flexGrow: 1,
+    paddingHorizontal: spacing.layout.screenPaddingHorizontal,
+    paddingTop: spacing.lg,
+    paddingBottom: spacing.xxxl,
+  },
+  topBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  brandRow: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+  },
+  brandArena: {
+    color: colors.text.primary,
+    fontSize: 21,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
+  brandGo: {
+    color: colors.brand.primaryLight,
+    fontSize: 21,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+  greetingSection: {
+    marginTop: spacing.xxxl,
+    marginBottom: spacing.xxl,
   },
   welcome: {
-    fontSize: 18,
-    marginTop: 24,
+    ...typography.hero,
+    color: colors.text.primary,
   },
   description: {
-    fontSize: 16,
-    marginTop: 8,
+    ...typography.bodyLarge,
+    color: colors.text.secondary,
+    marginTop: spacing.sm,
   },
-  questionnaireBanner: {
-    backgroundColor: '#fef3c7',
-    borderColor: '#f59e0b',
-    borderRadius: 8,
-    borderWidth: 1,
-    marginTop: 20,
-    padding: 12,
+  noticeCard: {
+    marginBottom: spacing.lg,
   },
-  questionnaireBannerTitle: {
-    color: '#92400e',
-    fontSize: 14,
-    fontWeight: '600',
+  noticeTitle: {
+    ...typography.titleSmall,
+    color: colors.text.primary,
+    marginTop: spacing.md,
   },
-  questionnaireBannerText: {
-    color: '#92400e',
-    fontSize: 13,
-    marginTop: 4,
+  noticeText: {
+    ...typography.body,
+    color: colors.text.secondary,
+    marginTop: spacing.sm,
   },
-  questionnaireButton: {
-    alignItems: 'center',
-    backgroundColor: '#92400e',
-    borderRadius: 6,
-    marginTop: 10,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
+  noticeAction: {
+    marginTop: spacing.md,
   },
-  questionnaireButtonText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '600',
+  heroCard: {
+    marginBottom: spacing.xxl,
+  },
+  heroTitle: {
+    ...typography.titleLarge,
+    color: colors.text.primary,
+    marginTop: spacing.lg,
+  },
+  heroDescription: {
+    ...typography.body,
+    color: colors.text.secondary,
+    marginTop: spacing.sm,
   },
   eventButton: {
-    alignItems: 'center',
-    backgroundColor: '#000',
-    borderRadius: 4,
-    marginTop: 24,
-    padding: 12,
+    marginTop: spacing.xl,
   },
-  eventButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: 'bold',
+  sectionBlock: {
+    marginBottom: spacing.xl,
+  },
+  sectionLabel: {
+    ...typography.tag,
+    color: colors.text.muted,
+    marginBottom: spacing.md,
+  },
+  participationCard: {
+    alignItems: 'flex-start',
+  },
+  participationTitle: {
+    ...typography.titleSmall,
+    color: colors.text.primary,
+    marginTop: spacing.md,
+  },
+  participationSubtitle: {
+    ...typography.body,
+    color: colors.text.secondary,
+    marginTop: spacing.sm,
+  },
+  inlineAction: {
+    minHeight: 48,
+    justifyContent: 'center',
+    marginTop: spacing.sm,
+  },
+  inlineActionText: {
+    ...typography.body,
+    color: colors.brand.primaryLight,
+    fontWeight: '700',
   },
   staffButton: {
-    alignItems: 'center',
-    backgroundColor: '#f3f4f6',
-    borderRadius: 4,
-    marginTop: 12,
-    padding: 12,
-  },
-  staffButtonText: {
-    color: '#111827',
-    fontSize: 15,
-    fontWeight: '600',
+    alignSelf: 'center',
   },
 });

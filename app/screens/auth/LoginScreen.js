@@ -7,12 +7,16 @@ import {
   ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { AuthBackground } from '../../components/ui/AuthBackground';
+import { Button, MIN_TOUCH_TARGET } from '../../components/ui/Button';
+import { Card } from '../../components/ui/Card';
+import { InputField } from '../../components/ui/InputField';
+import { ScreenHeader } from '../../components/ui/ScreenHeader';
 import { AuthContext } from '../../context/AuthContext';
+import { colors, radii, spacing, typography } from '../../theme';
 import { validateLoginForm } from '../../utils/validation';
 
 export default function LoginScreen({ navigation, route, auth: propAuth }) {
@@ -24,6 +28,7 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
 
   const [email, setEmail] = useState(initialEmail);
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [errors, setErrors] = useState({});
   const [authError, setAuthError] = useState('');
   const [twoFactorCode, setTwoFactorCode] = useState('');
@@ -51,6 +56,7 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
       setIsSubmitting(false);
       setTwoFactorCode('');
       setPassword('');
+      setShowPassword(false);
       setAuthError('');
     });
     return () => { unsubscribe?.(); cancel(); };
@@ -64,6 +70,7 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
     setTwoFactorCode('');
     setAuthError('');
     setPassword('');
+    setShowPassword(false);
   }
 
   async function handleVerifyTwoFactor() {
@@ -219,93 +226,136 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
     }
   }
 
+  const passwordToggle = (
+    <Pressable
+      onPress={() => setShowPassword((prev) => !prev)}
+      disabled={isSubmitting}
+      style={({ pressed }) => [
+        styles.visibilityButton,
+        pressed && !isSubmitting && styles.pressedControl,
+      ]}
+      accessibilityRole="button"
+      accessibilityLabel={showPassword ? 'Ocultar senha' : 'Mostrar senha'}
+      accessibilityState={{ disabled: isSubmitting }}
+      testID="login-toggle-password"
+    >
+      <Text style={styles.visibilityButtonText}>
+        {showPassword ? 'Ocultar' : 'Mostrar'}
+      </Text>
+    </Pressable>
+  );
+
   return (
-    <SafeAreaView style={styles.container}>
+    <AuthBackground variant="login" testID="login-background">
       <StatusBar style="light" />
 
-      {/* Header com botão de voltar e marca centralizada */}
-      <View style={styles.header}>
-        <Pressable
-          style={styles.backButton}
-          onPress={() => { handleCancelTwoFactor(); if (!challenge) navigation.goBack(); }}
-          hitSlop={8}
-          accessibilityLabel="Voltar"
-        >
-          <Text style={styles.backButtonText}>←</Text>
-        </Pressable>
-        <Text style={styles.headerTitle}>BEAST</Text>
-        <View style={styles.headerPlaceholder} />
-      </View>
+      <ScreenHeader
+        title="ArenaGO"
+        onBack={() => { handleCancelTwoFactor(); if (!challenge) navigation.goBack(); }}
+        testID="login-header"
+      />
 
       <KeyboardAvoidingView
         style={styles.keyboardView}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
         <ScrollView
+          style={styles.scrollView}
           contentContainerStyle={styles.scrollContent}
           keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
         >
-          {/* Cabeçalho textual */}
-          <Text style={styles.tag}>ACESSO</Text>
-          <Text style={styles.title}>De volta ao jogo.</Text>
-          <Text style={styles.subtitle}>
-            {challenge ? 'Confirme o segundo fator para concluir seu acesso.' : 'Informe suas credenciais para entrar na sua conta.'}
-          </Text>
+          {/* Cabeçalho textual com hierarquia clara */}
+          <View style={styles.heroHeader}>
+            <Text style={styles.kicker}>ACESSO À CONTA</Text>
+            <Text style={styles.title}>De volta ao jogo.</Text>
+            <Text style={styles.subtitle}>
+              {challenge ? 'Confirme o segundo fator para concluir seu acesso.' : 'Informe suas credenciais para entrar na sua conta.'}
+            </Text>
+          </View>
 
-          {/* Formulário */}
-          <View style={styles.form}>
-            {sessionNotice && !authError && !twoFactorNotice ? (
-              <View style={styles.sessionNoticeContainer}>
-                <Text style={styles.sessionNoticeText}>{sessionNotice}</Text>
-              </View>
-            ) : null}
+          {/* Superfície de formulário com contraste refinado sobre os inputs */}
+          <View style={styles.formSurface}>
+              {sessionNotice && !authError && !twoFactorNotice ? (
+                <Card
+                  variant="default"
+                  padding={spacing.md}
+                  style={styles.sessionNoticeCard}
+                  testID="login-session-notice"
+                >
+                  <Text style={styles.sessionNoticeText}>{sessionNotice}</Text>
+                </Card>
+              ) : null}
 
-            {twoFactorNotice ? (
-              <View style={styles.twoFactorContainer}>
-                <Text style={styles.twoFactorTitle}>Verificação em duas etapas exigida</Text>
-                <Text style={styles.twoFactorText}>{twoFactorNotice}</Text>
-              </View>
-            ) : null}
+              {twoFactorNotice ? (
+                <Card
+                  variant="default"
+                  padding={spacing.md}
+                  style={styles.twoFactorCard}
+                  testID="login-2fa-notice"
+                >
+                  <Text style={styles.twoFactorTitle}>Verificação em duas etapas exigida</Text>
+                  <Text style={styles.twoFactorText}>{twoFactorNotice}</Text>
+                </Card>
+              ) : null}
 
-            {/* Mensagem estruturada para retorno de autenticação */}
-            {authError ? (
-              <View style={styles.authErrorContainer}>
-                <Text style={styles.authErrorText}>{authError}</Text>
-              </View>
-            ) : null}
+              {authError ? (
+                <Card
+                  variant="default"
+                  padding={spacing.md}
+                  style={styles.authErrorCard}
+                  testID="login-auth-error"
+                >
+                  <Text style={styles.authErrorText} accessibilityRole="alert">
+                    {authError}
+                  </Text>
+                </Card>
+              ) : null}
 
-            {challenge ? (
-              <>
-                {challenge.isTotpConfigured ? (
-                  <>
-                    <View style={styles.inputGroup}>
-                      <Text style={styles.label}>Código TOTP</Text>
-                      <TextInput style={styles.input} placeholder="Código de seis dígitos"
-                        placeholderTextColor="#64748b" value={twoFactorCode}
+              {challenge ? (
+                <>
+                  {challenge.isTotpConfigured ? (
+                    <>
+                      <InputField
+                        label="Código TOTP"
+                        placeholder="Código de seis dígitos"
+                        value={twoFactorCode}
                         onChangeText={(text) => { setTwoFactorCode(text.replace(/\D/g, '').slice(0, 6)); setAuthError(''); }}
-                        keyboardType="number-pad" maxLength={6} autoCorrect={false}
-                        textContentType="oneTimeCode" editable={!isSubmitting} accessibilityLabel="Código TOTP" />
-                    </View>
-                    <Pressable style={[styles.primaryButton, isSubmitting ? styles.primaryButtonDisabled : null]}
-                      onPress={handleVerifyTwoFactor} disabled={isSubmitting} accessibilityLabel="Verificar código">
-                      <Text style={styles.primaryButtonText}>{isSubmitting ? 'Verificando...' : 'Verificar código'}</Text>
-                    </Pressable>
-                  </>
-                ) : null}
-                <Pressable onPress={handleCancelTwoFactor} accessibilityLabel="Cancelar verificação">
-                  <Text style={styles.forgotPasswordText}>Cancelar verificação</Text>
-                </Pressable>
-              </>
-            ) : (
-              <>
-            <View style={styles.inputGroup}>
-              <Text style={styles.label}>E-mail</Text>
-              <TextInput
-                style={[styles.input, errors.email ? styles.inputError : null]}
+                        keyboardType="number-pad"
+                        maxLength={6}
+                        autoCorrect={false}
+                        textContentType="oneTimeCode"
+                        editable={!isSubmitting}
+                        accessibilityLabel="Código TOTP"
+                      />
+                      <Button
+                        title={isSubmitting ? 'Verificando...' : 'Verificar código'}
+                        variant="primary"
+                        size="lg"
+                        onPress={handleVerifyTwoFactor}
+                        disabled={isSubmitting}
+                        loading={isSubmitting}
+                        accessibilityLabel="Verificar código"
+                      />
+                    </>
+                  ) : null}
+                  <Button
+                    title="Cancelar verificação"
+                    variant="secondary"
+                    size="lg"
+                    onPress={handleCancelTwoFactor}
+                    accessibilityLabel="Cancelar verificação"
+                  />
+                </>
+              ) : (
+                <>
+              <InputField
+                label="E-mail"
+                required
                 placeholder="seu.email@exemplo.com"
-                placeholderTextColor="#64748b"
                 value={email}
                 editable={!isSubmitting}
+                error={errors.email}
                 onChangeText={(text) => {
                   setEmail(text);
                   if (errors.email) {
@@ -318,20 +368,17 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
                 keyboardType="email-address"
                 autoCapitalize="none"
                 autoCorrect={false}
+                containerStyle={styles.fieldContainer}
+                testID="login-email-input"
               />
-              {errors.email ? (
-                <Text style={styles.errorText}>{errors.email}</Text>
-              ) : null}
-            </View>
 
-            <View style={styles.inputGroup}>
-              <Text style={styles.label}>Senha</Text>
-              <TextInput
-                style={[styles.input, errors.password ? styles.inputError : null]}
+              <InputField
+                label="Senha"
+                required
                 placeholder="Digite sua senha"
-                placeholderTextColor="#64748b"
                 value={password}
                 editable={!isSubmitting}
+                error={errors.password}
                 onChangeText={(text) => {
                   setPassword(text);
                   if (errors.password) {
@@ -341,226 +388,194 @@ export default function LoginScreen({ navigation, route, auth: propAuth }) {
                     setAuthError('');
                   }
                 }}
-                secureTextEntry
+                secureTextEntry={!showPassword}
+                rightIcon={passwordToggle}
+                containerStyle={styles.fieldContainer}
+                testID="login-password-input"
               />
-              {errors.password ? (
-                <Text style={styles.errorText}>{errors.password}</Text>
-              ) : null}
+
+              <Pressable
+                style={({ pressed }) => [
+                  styles.forgotPasswordContainer,
+                  isSubmitting && styles.disabledControl,
+                  pressed && !isSubmitting && styles.pressedControl,
+                ]}
+                onPress={() => navigation.navigate('ForgotPassword')}
+                disabled={isSubmitting}
+                accessibilityRole="button"
+                accessibilityLabel="Esqueceu sua senha?"
+                accessibilityState={{ disabled: isSubmitting }}
+                testID="login-forgot-password-button"
+              >
+                <Text style={styles.forgotPasswordText}>Esqueceu sua senha?</Text>
+              </Pressable>
+
+              <Button
+                title={isSubmitting ? 'Entrando...' : 'Entrar na conta'}
+                variant="primary"
+                size="lg"
+                fullWidth
+                loading={isSubmitting}
+                disabled={isSubmitting}
+                onPress={handleLogin}
+                accessibilityLabel="Entrar na conta"
+                style={styles.submitButton}
+                testID="login-submit-button"
+              />
+                </>
+              )}
             </View>
 
-            <Pressable
-              style={styles.forgotPasswordContainer}
-              onPress={() => navigation.navigate('ForgotPassword')}
+            {/* Navegação cruzada para Cadastro */}
+            {!challenge ? <Pressable
+              style={({ pressed }) => [
+                styles.switchAuthContainer,
+                isSubmitting && styles.disabledControl,
+                pressed && !isSubmitting && styles.pressedControl,
+              ]}
+              onPress={() => navigation.navigate('Register')}
               disabled={isSubmitting}
+              accessibilityRole="button"
+              accessibilityLabel="Ainda não tem cadastro? Crie sua conta"
+              accessibilityState={{ disabled: isSubmitting }}
+              testID="login-switch-register-button"
             >
-              <Text style={styles.forgotPasswordText}>Esqueceu sua senha?</Text>
-            </Pressable>
-
-            <Pressable
-              style={[styles.primaryButton, isSubmitting ? styles.primaryButtonDisabled : null]}
-              onPress={handleLogin}
-              disabled={isSubmitting}
-              accessibilityLabel="Entrar na conta"
-            >
-              <Text style={styles.primaryButtonText}>
-                {isSubmitting ? 'Entrando...' : 'Entrar na conta'}
+              <Text style={styles.switchAuthText}>
+                Ainda não tem cadastro? Crie sua conta
               </Text>
             </Pressable>
-              </>
-            )}
-          </View>
-
-          {/* Navegação cruzada para Cadastro */}
-          {!challenge ? <Pressable
-            style={styles.switchAuthContainer}
-            onPress={() => navigation.navigate('Register')}
-            disabled={isSubmitting}
-          >
-            <Text style={styles.switchAuthText}>
-              Ainda não tem cadastro? Crie sua conta
-            </Text>
-          </Pressable> : null}
+            : null}
         </ScrollView>
       </KeyboardAvoidingView>
-    </SafeAreaView>
+    </AuthBackground>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#0c0a17',
-  },
   keyboardView: {
     flex: 1,
+    backgroundColor: 'transparent',
   },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-  },
-  backButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#191330',
-    borderWidth: 1,
-    borderColor: '#34265a',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  backButtonText: {
-    color: '#ffffff',
-    fontSize: 18,
-    fontWeight: '700',
-  },
-  headerTitle: {
-    color: '#ffffff',
-    fontSize: 14,
-    fontWeight: '700',
-    letterSpacing: 1.5,
-  },
-  headerPlaceholder: {
-    width: 40,
+  scrollView: {
+    flex: 1,
+    backgroundColor: 'transparent',
   },
   scrollContent: {
-    paddingHorizontal: 24,
-    paddingTop: 16,
-    paddingBottom: 40,
+    flexGrow: 1,
+    justifyContent: 'flex-end',
+    paddingHorizontal: spacing.layout.screenPaddingHorizontal,
+    paddingTop: spacing.sm,
+    paddingBottom: spacing.xxxl,
   },
-  tag: {
-    color: '#a78bfa',
-    fontSize: 12,
-    fontWeight: '800',
-    letterSpacing: 1.2,
-    marginBottom: 8,
+  heroHeader: {
+    marginBottom: spacing.lg,
+    gap: spacing.xxs,
+  },
+  kicker: {
+    ...typography.tag,
+    color: colors.brand.primaryLight,
+    marginBottom: spacing.xxs,
   },
   title: {
-    color: '#ffffff',
-    fontSize: 28,
-    fontWeight: '800',
-    marginBottom: 8,
+    ...typography.hero,
+    color: colors.text.primary,
   },
   subtitle: {
-    color: '#94a3b8',
-    fontSize: 15,
-    marginBottom: 28,
+    ...typography.body,
+    color: colors.text.secondary,
   },
-  form: {
-    gap: 16,
-  },
-  inputGroup: {
-    gap: 8,
-  },
-  label: {
-    color: '#94a3b8',
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  input: {
-    backgroundColor: '#141026',
+  formSurface: {
+    backgroundColor: 'rgba(11, 11, 18, 0.84)',
     borderWidth: 1,
-    borderColor: '#2a2046',
-    borderRadius: 12,
-    height: 52,
-    paddingHorizontal: 16,
-    color: '#ffffff',
-    fontSize: 15,
+    borderColor: colors.border.glass,
+    borderRadius: radii.xl,
+    padding: spacing.xl,
+    gap: spacing.md,
   },
-  inputError: {
-    borderColor: '#ef4444',
+  fieldContainer: {
+    marginBottom: 0,
   },
-  errorText: {
-    color: '#f87171',
-    fontSize: 12,
-    fontWeight: '600',
-    marginTop: 2,
+  visibilityButton: {
+    minWidth: MIN_TOUCH_TARGET,
+    minHeight: MIN_TOUCH_TARGET,
+    paddingHorizontal: spacing.xs,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  sessionNoticeContainer: {
-    backgroundColor: '#1e1b4b',
-    borderWidth: 1,
-    borderColor: '#6366f1',
-    borderRadius: 12,
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    marginBottom: 4,
+  visibilityButtonText: {
+    ...typography.caption,
+    color: colors.brand.primaryLight,
+    fontWeight: typography.weights.bold,
+  },
+  sessionNoticeCard: {
+    backgroundColor: colors.semantic.infoBg,
+    borderColor: colors.semantic.info,
   },
   sessionNoticeText: {
-    color: '#c7d2fe',
-    fontSize: 13,
-    fontWeight: '600',
+    ...typography.bodySmall,
+    color: colors.text.primary,
+    fontWeight: typography.weights.semiBold,
     textAlign: 'center',
-    lineHeight: 18,
   },
-  twoFactorContainer: {
-    backgroundColor: '#2c1f0f',
-    borderWidth: 1,
-    borderColor: '#f59e0b',
-    borderRadius: 12,
-    padding: 14,
-    gap: 6,
-    marginBottom: 4,
+  twoFactorCard: {
+    backgroundColor: colors.semantic.warningBg,
+    borderColor: colors.semantic.warning,
+    gap: spacing.xs,
   },
   twoFactorTitle: {
-    color: '#fcd34d',
-    fontSize: 14,
-    fontWeight: '700',
+    ...typography.body,
+    color: colors.semantic.warning,
+    fontWeight: typography.weights.bold,
   },
   twoFactorText: {
-    color: '#fde68a',
-    fontSize: 13,
-    lineHeight: 18,
+    ...typography.bodySmall,
+    color: colors.text.primary,
   },
-  authErrorContainer: {
-    backgroundColor: '#2a121d',
-    borderWidth: 1,
-    borderColor: '#ef4444',
-    borderRadius: 12,
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    marginBottom: 4,
+  authErrorCard: {
+    backgroundColor: colors.semantic.dangerBg,
+    borderColor: colors.semantic.danger,
   },
   authErrorText: {
-    color: '#fca5a5',
-    fontSize: 14,
-    fontWeight: '600',
+    ...typography.body,
+    color: colors.semantic.danger,
+    fontWeight: typography.weights.semiBold,
     textAlign: 'center',
   },
   forgotPasswordContainer: {
     alignSelf: 'flex-end',
-    paddingVertical: 4,
+    minHeight: MIN_TOUCH_TARGET,
+    minWidth: MIN_TOUCH_TARGET,
+    justifyContent: 'center',
+    paddingHorizontal: spacing.xs,
   },
   forgotPasswordText: {
-    color: '#a78bfa',
-    fontSize: 14,
-    fontWeight: '700',
+    ...typography.body,
+    color: colors.brand.primaryLight,
+    fontWeight: typography.weights.semiBold,
   },
-  primaryButton: {
-    backgroundColor: '#7c3aed',
-    height: 52,
-    borderRadius: 14,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginTop: 8,
-  },
-  primaryButtonDisabled: {
-    opacity: 0.65,
-  },
-  primaryButtonText: {
-    color: '#ffffff',
-    fontSize: 16,
-    fontWeight: '700',
+  submitButton: {
+    marginTop: spacing.xxs,
   },
   switchAuthContainer: {
-    marginTop: 36,
+    marginTop: spacing.lg,
+    minHeight: MIN_TOUCH_TARGET,
+    minWidth: MIN_TOUCH_TARGET,
     alignItems: 'center',
-    paddingVertical: 8,
+    justifyContent: 'center',
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    borderRadius: radii.lg,
   },
   switchAuthText: {
-    color: '#c084fc',
-    fontSize: 15,
-    fontWeight: '800',
+    ...typography.body,
+    color: colors.brand.primaryLight,
+    fontWeight: typography.weights.bold,
+    textAlign: 'center',
+  },
+  disabledControl: {
+    opacity: 0.45,
+  },
+  pressedControl: {
+    opacity: 0.8,
   },
 });

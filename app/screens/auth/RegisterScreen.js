@@ -1,4 +1,4 @@
-import { useContext, useRef, useState } from 'react';
+import { useContext, useEffect, useRef, useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import {
   KeyboardAvoidingView,
@@ -7,12 +7,16 @@ import {
   ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { AuthBackground } from '../../components/ui/AuthBackground';
+import { Button, MIN_TOUCH_TARGET } from '../../components/ui/Button';
+import { Card } from '../../components/ui/Card';
+import { InputField } from '../../components/ui/InputField';
+import { ScreenHeader } from '../../components/ui/ScreenHeader';
 import { AuthContext } from '../../context/AuthContext';
+import { colors, radii, spacing, typography } from '../../theme';
 import { validateRegisterForm } from '../../utils/validation';
 
 export default function RegisterScreen({ navigation, auth: propAuth }) {
@@ -23,11 +27,18 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [errors, setErrors] = useState({});
   const [formError, setFormError] = useState('');
   const [timeoutNotice, setTimeoutNotice] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const submittingRef = useRef(false);
+
+  useEffect(() => navigation?.addListener?.('blur', () => {
+    setShowPassword(false);
+    setShowConfirmPassword(false);
+  }), [navigation]);
 
   async function handleRegister() {
     if (submittingRef.current || isSubmitting) {
@@ -133,69 +144,119 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
     }
   }
 
+  const passwordToggle = (
+    <Pressable
+      onPress={() => setShowPassword((prev) => !prev)}
+      disabled={isSubmitting}
+      style={({ pressed }) => [
+        styles.visibilityButton,
+        pressed && !isSubmitting && styles.pressedControl,
+      ]}
+      accessibilityRole="button"
+      accessibilityLabel={showPassword ? 'Ocultar senha' : 'Mostrar senha'}
+      accessibilityState={{ disabled: isSubmitting }}
+      testID="register-toggle-password"
+    >
+      <Text style={styles.visibilityButtonText}>
+        {showPassword ? 'Ocultar' : 'Mostrar'}
+      </Text>
+    </Pressable>
+  );
+
+  const confirmPasswordToggle = (
+    <Pressable
+      onPress={() => setShowConfirmPassword((prev) => !prev)}
+      disabled={isSubmitting}
+      style={({ pressed }) => [
+        styles.visibilityButton,
+        pressed && !isSubmitting && styles.pressedControl,
+      ]}
+      accessibilityRole="button"
+      accessibilityLabel={
+        showConfirmPassword ? 'Ocultar confirmação de senha' : 'Mostrar confirmação de senha'
+      }
+      accessibilityState={{ disabled: isSubmitting }}
+      testID="register-toggle-confirm-password"
+    >
+      <Text style={styles.visibilityButtonText}>
+        {showConfirmPassword ? 'Ocultar' : 'Mostrar'}
+      </Text>
+    </Pressable>
+  );
+
   return (
-    <SafeAreaView style={styles.container}>
+    <AuthBackground variant="register" testID="register-background">
       <StatusBar style="light" />
 
-      {/* Header com botão de voltar e marca centralizada */}
-      <View style={styles.header}>
-        <Pressable
-          style={styles.backButton}
-          onPress={() => navigation.goBack()}
-          hitSlop={8}
-          accessibilityLabel="Voltar"
-        >
-          <Text style={styles.backButtonText}>←</Text>
-        </Pressable>
-        <Text style={styles.headerTitle}>BEAST</Text>
-        <View style={styles.headerPlaceholder} />
-      </View>
+      <ScreenHeader
+        title="ArenaGO"
+        onBack={() => navigation.goBack()}
+        testID="register-header"
+      />
 
       <KeyboardAvoidingView
         style={styles.keyboardView}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
         <ScrollView
+          style={styles.scrollView}
           contentContainerStyle={styles.scrollContent}
           keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
         >
-          {/* Cabeçalho textual */}
-          <Text style={styles.tag}>NOVO REGISTRO</Text>
-          <Text style={styles.title}>Comece sua jornada.</Text>
-          <Text style={styles.subtitle}>
-            Preencha suas informações básicas. Seu perfil de jogador será configurado na próxima etapa.
-          </Text>
+          {/* Cabeçalho textual compacto e hierarquizado */}
+          <View style={styles.heroHeader}>
+            <Text style={styles.kicker}>CRIAR CONTA</Text>
+            <Text style={styles.title}>Comece sua jornada.</Text>
+            <Text style={styles.subtitle}>
+              Preencha suas informações básicas. Seu perfil de jogador será configurado na próxima etapa.
+            </Text>
+          </View>
 
-          {/* Formulário - Somente Nome, E-mail, Senha e Confirmar senha */}
-          <View style={styles.form}>
-            {timeoutNotice ? (
-              <View style={styles.timeoutCard}>
-                <Text style={styles.timeoutTitle}>Resultado do cadastro não confirmado</Text>
-                <Text style={styles.timeoutText}>{timeoutNotice}</Text>
-                <Pressable
-                  style={styles.timeoutButton}
-                  onPress={() => navigation.navigate('Login', { email: email.trim() })}
-                  accessibilityLabel="Verificar conta no Login"
+          {/* Superfície de formulário com contraste refinado sobre os inputs */}
+          <View style={styles.formSurface}>
+              {timeoutNotice ? (
+                <Card
+                  variant="default"
+                  padding={spacing.md}
+                  style={styles.timeoutCard}
+                  testID="register-timeout-notice"
                 >
-                  <Text style={styles.timeoutButtonText}>Verificar fazendo Login</Text>
-                </Pressable>
-              </View>
-            ) : null}
+                  <Text style={styles.timeoutTitle}>Resultado do cadastro não confirmado</Text>
+                  <Text style={styles.timeoutText}>{timeoutNotice}</Text>
+                  <Button
+                    title="Verificar fazendo Login"
+                    variant="secondary"
+                    size="md"
+                    fullWidth
+                    onPress={() => navigation.navigate('Login', { email: email.trim() })}
+                    accessibilityLabel="Verificar fazendo Login"
+                    style={styles.timeoutButton}
+                    testID="register-timeout-login-button"
+                  />
+                </Card>
+              ) : null}
 
-            {formError ? (
-              <View style={styles.formErrorCard}>
-                <Text style={styles.formErrorText}>{formError}</Text>
-              </View>
-            ) : null}
+              {formError ? (
+                <Card
+                  variant="default"
+                  padding={spacing.md}
+                  style={styles.formErrorCard}
+                  testID="register-form-error"
+                >
+                  <Text style={styles.formErrorText} accessibilityRole="alert">
+                    {formError}
+                  </Text>
+                </Card>
+              ) : null}
 
-            <View style={styles.inputGroup}>
-              <Text style={styles.label}>Nome completo</Text>
-              <TextInput
-                style={[styles.input, errors.name ? styles.inputError : null]}
+              <InputField
+                label="Nome completo"
+                required
                 placeholder="Como quer ser chamado?"
-                placeholderTextColor="#64748b"
                 value={name}
                 editable={!isSubmitting}
+                error={errors.name}
                 onChangeText={(text) => {
                   setName(text);
                   if (errors.name) {
@@ -206,20 +267,17 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
                 }}
                 autoCapitalize="words"
                 autoCorrect={false}
+                containerStyle={styles.fieldContainer}
+                testID="register-name-input"
               />
-              {errors.name ? (
-                <Text style={styles.errorText}>{errors.name}</Text>
-              ) : null}
-            </View>
 
-            <View style={styles.inputGroup}>
-              <Text style={styles.label}>E-mail</Text>
-              <TextInput
-                style={[styles.input, errors.email ? styles.inputError : null]}
+              <InputField
+                label="E-mail"
+                required
                 placeholder="seu.email@exemplo.com"
-                placeholderTextColor="#64748b"
                 value={email}
                 editable={!isSubmitting}
+                error={errors.email}
                 onChangeText={(text) => {
                   setEmail(text);
                   if (errors.email) {
@@ -231,20 +289,18 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
                 keyboardType="email-address"
                 autoCapitalize="none"
                 autoCorrect={false}
+                containerStyle={styles.fieldContainer}
+                testID="register-email-input"
               />
-              {errors.email ? (
-                <Text style={styles.errorText}>{errors.email}</Text>
-              ) : null}
-            </View>
 
-            <View style={styles.inputGroup}>
-              <Text style={styles.label}>Senha</Text>
-              <TextInput
-                style={[styles.input, errors.password ? styles.inputError : null]}
+              <InputField
+                label="Senha"
+                required
                 placeholder="Crie uma senha de acesso"
-                placeholderTextColor="#64748b"
                 value={password}
                 editable={!isSubmitting}
+                error={errors.password}
+                hint="Mínimo de 8 caracteres"
                 onChangeText={(text) => {
                   setPassword(text);
                   if (errors.password) {
@@ -253,21 +309,19 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
                   if (formError) setFormError('');
                   if (timeoutNotice) setTimeoutNotice('');
                 }}
-                secureTextEntry
+                secureTextEntry={!showPassword}
+                rightIcon={passwordToggle}
+                containerStyle={styles.fieldContainer}
+                testID="register-password-input"
               />
-              {errors.password ? (
-                <Text style={styles.errorText}>{errors.password}</Text>
-              ) : null}
-            </View>
 
-            <View style={styles.inputGroup}>
-              <Text style={styles.label}>Confirmar senha</Text>
-              <TextInput
-                style={[styles.input, errors.confirmPassword ? styles.inputError : null]}
+              <InputField
+                label="Confirmar senha"
+                required
                 placeholder="Digite a mesma senha novamente"
-                placeholderTextColor="#64748b"
                 value={confirmPassword}
                 editable={!isSubmitting}
+                error={errors.confirmPassword}
                 onChangeText={(text) => {
                   setConfirmPassword(text);
                   if (errors.confirmPassword) {
@@ -276,225 +330,167 @@ export default function RegisterScreen({ navigation, auth: propAuth }) {
                   if (formError) setFormError('');
                   if (timeoutNotice) setTimeoutNotice('');
                 }}
-                secureTextEntry
+                secureTextEntry={!showConfirmPassword}
+                rightIcon={confirmPasswordToggle}
+                containerStyle={styles.fieldContainer}
+                testID="register-confirm-password-input"
               />
-              {errors.confirmPassword ? (
-                <Text style={styles.errorText}>{errors.confirmPassword}</Text>
-              ) : null}
-            </View>
 
-            <Pressable
-              style={[styles.primaryButton, isSubmitting ? styles.primaryButtonDisabled : null]}
-              onPress={handleRegister}
-              disabled={isSubmitting}
-              accessibilityLabel="Criar minha conta"
-            >
-              <Text style={styles.primaryButtonText}>
-                {isSubmitting ? 'Criando sua conta...' : 'Criar minha conta'}
-              </Text>
-            </Pressable>
+              <Button
+                title={isSubmitting ? 'Criando sua conta...' : 'Criar minha conta'}
+                variant="primary"
+                size="lg"
+                fullWidth
+                loading={isSubmitting}
+                disabled={isSubmitting}
+                onPress={handleRegister}
+                accessibilityLabel="Criar minha conta"
+                style={styles.submitButton}
+                testID="register-submit-button"
+              />
 
-            {/* Card informativo de fluxo posterior */}
-            <View style={styles.infoCard}>
-              <Text style={styles.infoCardText}>
-                Etapas seguintes: <Text style={styles.infoCardBold}>Cadastro → Questionário de Perfil → Próxima etapa</Text>. Ao criar sua conta, você será direcionado para o questionário.
+              <Text style={styles.stepFootnote}>
+                Ao criar sua conta, você seguirá para o questionário rápido de perfil de jogador.
               </Text>
             </View>
-          </View>
 
           {/* Navegação cruzada para Login */}
           <Pressable
-            style={styles.switchAuthContainer}
+            style={({ pressed }) => [
+              styles.switchAuthContainer,
+              isSubmitting && styles.disabledControl,
+              pressed && !isSubmitting && styles.pressedControl,
+            ]}
             onPress={() => navigation.navigate('Login')}
             disabled={isSubmitting}
+            accessibilityRole="button"
+            accessibilityLabel="Já possui uma conta? Acesse aqui"
+            accessibilityState={{ disabled: isSubmitting }}
+            testID="register-switch-login-button"
           >
             <Text style={styles.switchAuthText}>Já possui uma conta? Acesse aqui</Text>
           </Pressable>
         </ScrollView>
       </KeyboardAvoidingView>
-    </SafeAreaView>
+    </AuthBackground>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#0c0a17',
-  },
   keyboardView: {
     flex: 1,
+    backgroundColor: 'transparent',
   },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-  },
-  backButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#191330',
-    borderWidth: 1,
-    borderColor: '#34265a',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  backButtonText: {
-    color: '#ffffff',
-    fontSize: 18,
-    fontWeight: '700',
-  },
-  headerTitle: {
-    color: '#ffffff',
-    fontSize: 14,
-    fontWeight: '700',
-    letterSpacing: 1.5,
-  },
-  headerPlaceholder: {
-    width: 40,
+  scrollView: {
+    flex: 1,
+    backgroundColor: 'transparent',
   },
   scrollContent: {
-    paddingHorizontal: 24,
-    paddingTop: 16,
-    paddingBottom: 40,
+    flexGrow: 1,
+    justifyContent: 'flex-end',
+    paddingHorizontal: spacing.layout.screenPaddingHorizontal,
+    paddingTop: spacing.xs,
+    paddingBottom: spacing.xxxl,
   },
-  tag: {
-    color: '#a78bfa',
-    fontSize: 12,
-    fontWeight: '800',
-    letterSpacing: 1.2,
-    marginBottom: 8,
+  heroHeader: {
+    marginBottom: spacing.md,
+    gap: spacing.xxs,
+  },
+  kicker: {
+    ...typography.tag,
+    color: colors.brand.primaryLight,
+    marginBottom: spacing.xxs,
   },
   title: {
-    color: '#ffffff',
-    fontSize: 28,
-    fontWeight: '800',
-    marginBottom: 8,
+    ...typography.hero,
+    fontSize: 26,
+    lineHeight: 32,
+    color: colors.text.primary,
   },
   subtitle: {
-    color: '#94a3b8',
-    fontSize: 15,
-    marginBottom: 28,
+    ...typography.body,
+    color: colors.text.secondary,
   },
-  form: {
-    gap: 16,
-  },
-  inputGroup: {
-    gap: 8,
-  },
-  label: {
-    color: '#94a3b8',
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  input: {
-    backgroundColor: '#141026',
+  formSurface: {
+    backgroundColor: 'rgba(11, 11, 18, 0.88)',
     borderWidth: 1,
-    borderColor: '#2a2046',
-    borderRadius: 12,
-    height: 52,
-    paddingHorizontal: 16,
-    color: '#ffffff',
-    fontSize: 15,
+    borderColor: colors.border.glass,
+    borderRadius: radii.xl,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.lg,
+    gap: spacing.sm + 2,
   },
-  inputError: {
-    borderColor: '#ef4444',
+  fieldContainer: {
+    marginBottom: 0,
   },
-  errorText: {
-    color: '#f87171',
-    fontSize: 12,
-    fontWeight: '600',
-    marginTop: 2,
+  visibilityButton: {
+    minWidth: MIN_TOUCH_TARGET,
+    minHeight: MIN_TOUCH_TARGET,
+    paddingHorizontal: spacing.xs,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  visibilityButtonText: {
+    ...typography.caption,
+    color: colors.brand.primaryLight,
+    fontWeight: typography.weights.bold,
   },
   formErrorCard: {
-    backgroundColor: '#2a121d',
-    borderWidth: 1,
-    borderColor: '#ef4444',
-    borderRadius: 12,
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    marginBottom: 4,
+    backgroundColor: colors.semantic.dangerBg,
+    borderColor: colors.semantic.danger,
   },
   formErrorText: {
-    color: '#fca5a5',
-    fontSize: 14,
-    fontWeight: '600',
+    ...typography.body,
+    color: colors.semantic.danger,
+    fontWeight: typography.weights.semiBold,
     textAlign: 'center',
   },
   timeoutCard: {
-    backgroundColor: '#2c1f0f',
-    borderWidth: 1,
-    borderColor: '#f59e0b',
-    borderRadius: 12,
-    padding: 14,
-    gap: 10,
-    marginBottom: 4,
+    backgroundColor: colors.semantic.warningBg,
+    borderColor: colors.semantic.warning,
+    gap: spacing.sm,
   },
   timeoutTitle: {
-    color: '#fcd34d',
-    fontSize: 14,
-    fontWeight: '700',
+    ...typography.body,
+    color: colors.semantic.warning,
+    fontWeight: typography.weights.bold,
   },
   timeoutText: {
-    color: '#fde68a',
-    fontSize: 13,
-    lineHeight: 18,
+    ...typography.bodySmall,
+    color: colors.text.primary,
   },
   timeoutButton: {
-    backgroundColor: '#d97706',
-    borderRadius: 10,
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-    alignItems: 'center',
+    marginTop: spacing.xs,
   },
-  timeoutButtonText: {
-    color: '#ffffff',
-    fontSize: 14,
-    fontWeight: '700',
+  submitButton: {
+    marginTop: spacing.xxs,
   },
-  primaryButton: {
-    backgroundColor: '#7c3aed',
-    height: 52,
-    borderRadius: 14,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginTop: 8,
-  },
-  primaryButtonDisabled: {
-    opacity: 0.65,
-  },
-  primaryButtonText: {
-    color: '#ffffff',
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  infoCard: {
-    backgroundColor: '#141026',
-    borderWidth: 1,
-    borderColor: '#2a2046',
-    borderRadius: 12,
-    padding: 14,
-    marginTop: 4,
-  },
-  infoCardText: {
-    color: '#94a3b8',
-    fontSize: 13,
-    lineHeight: 18,
-  },
-  infoCardBold: {
-    color: '#cbd5e1',
-    fontWeight: '700',
+  stepFootnote: {
+    ...typography.caption,
+    color: colors.text.muted,
+    textAlign: 'center',
+    marginTop: spacing.xxs,
   },
   switchAuthContainer: {
-    marginTop: 32,
+    marginTop: spacing.md,
+    minHeight: MIN_TOUCH_TARGET,
+    minWidth: MIN_TOUCH_TARGET,
     alignItems: 'center',
-    paddingVertical: 8,
+    justifyContent: 'center',
+    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.md,
+    borderRadius: radii.lg,
   },
   switchAuthText: {
-    color: '#c084fc',
-    fontSize: 15,
-    fontWeight: '800',
+    ...typography.body,
+    color: colors.brand.primaryLight,
+    fontWeight: typography.weights.bold,
+    textAlign: 'center',
+  },
+  disabledControl: {
+    opacity: 0.45,
+  },
+  pressedControl: {
+    opacity: 0.8,
   },
 });

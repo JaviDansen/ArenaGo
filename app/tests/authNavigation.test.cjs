@@ -1,7 +1,9 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { StackRouter, CommonActions } = require('@react-navigation/routers');
-const { createHarness, loadModule, textOf } = require('./helpers/questionnaireHarness.cjs');
+const {
+  createHarness, loadModule, textOf, createParticipantThemeStub,
+} = require('./helpers/questionnaireHarness.cjs');
 
 let authState;
 function NavigationContainer() {}
@@ -34,6 +36,7 @@ const appExports = loadModule('App.js', (name) => {
     return { createNativeStackNavigator: () => ({ Navigator: StackNavigator, Screen: StackScreen }) };
   }
   if (name === './context/AuthContext') return { useAuth: () => authState };
+  if (name === './theme') return createParticipantThemeStub();
   if (name === './screens/auth/AuthSessionGate') {
     return {
       __esModule: true,

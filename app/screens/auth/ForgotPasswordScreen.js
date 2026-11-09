@@ -1,147 +1,149 @@
 import { StatusBar } from 'expo-status-bar';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { ScrollView, StyleSheet, Text, View } from 'react-native';
+
+import { AuthBackground } from '../../components/ui/AuthBackground';
+import { Badge } from '../../components/ui/Badge';
+import { Button } from '../../components/ui/Button';
+import { Card } from '../../components/ui/Card';
+import { ScreenHeader } from '../../components/ui/ScreenHeader';
+import { colors, spacing, typography } from '../../theme';
 
 // =============================================================================
-// ESTRUTURA PROVISÓRIA (TASK 2):
-// A recuperação de senha real depende da tecnologia de autenticação e backend
-// que ainda será definida pela equipe. Mantemos a tela/acesso provisório criado
-// na Task 1 sem implementar serviço de recuperação por conta própria.
+// ESTRUTURA PROVISÓRIA (TASK 2 / UI-02.4 / UI-02A):
+// A recuperação de senha real depende de integração futura de backend e serviço
+// de mensageria. Esta tela aplica o Design System oficial mantendo explícita
+// a indisponibilidade atual do envio de e-mail, sem simular envio ou exibir
+// confirmação falsa.
 // =============================================================================
 export default function ForgotPasswordScreen({ navigation }) {
+  function handleReturnToLogin() {
+    if (navigation && typeof navigation.goBack === 'function') {
+      navigation.goBack();
+    } else if (navigation && typeof navigation.navigate === 'function') {
+      navigation.navigate('Login');
+    }
+  }
+
   return (
-    <SafeAreaView style={styles.container}>
+    <AuthBackground variant="forgotPassword" testID="forgot-password-background">
       <StatusBar style="light" />
 
-      {/* Header com botão de voltar e marca centralizada */}
-      <View style={styles.header}>
-        <Pressable
-          style={styles.backButton}
-          onPress={() => navigation.goBack()}
-          hitSlop={8}
-          accessibilityLabel="Voltar"
-        >
-          <Text style={styles.backButtonText}>←</Text>
-        </Pressable>
-        <Text style={styles.headerTitle}>BEAST</Text>
-        <View style={styles.headerPlaceholder} />
-      </View>
+      <ScreenHeader
+        title="ArenaGO"
+        onBack={handleReturnToLogin}
+        testID="forgot-password-header"
+      />
 
-      <View style={styles.content}>
-        <Text style={styles.tag}>RECUPERAÇÃO</Text>
-        <Text style={styles.title}>Recuperar acesso</Text>
-        <Text style={styles.subtitle}>
-          Em breve você poderá redefinir sua senha por aqui. O fluxo completo será definido nas próximas etapas do projeto.
-        </Text>
+      <ScrollView
+        style={styles.scrollView}
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+      >
+        <View style={styles.mainSection}>
+          <View style={styles.heroHeader}>
+            <Text style={styles.kicker}>RECUPERAÇÃO DE ACESSO</Text>
+            <Text style={styles.title}>Recuperar acesso</Text>
+            <Text style={styles.subtitle}>
+              A redefinição automática de senha estará disponível em uma próxima etapa do projeto.
+            </Text>
+          </View>
 
-        <View style={styles.card}>
-          <Text style={styles.cardBadge}>EM CONSTRUÇÃO</Text>
-          <Text style={styles.cardText}>
-            Esta página servirá para inserção do e-mail cadastrado e envio de instruções de recuperação de conta.
-          </Text>
+          <Card
+            variant="elevated"
+            padding={spacing.xl}
+            style={styles.statusCard}
+            testID="forgot-password-status-card"
+          >
+            <Badge
+              label="EM CONSTRUÇÃO"
+              variant="warning"
+              size="md"
+              style={styles.statusBadge}
+            />
+            <Text style={styles.cardTitle}>
+              Recuperação por e-mail indisponível nesta versão
+            </Text>
+            <Text style={styles.cardText}>
+              O envio de instruções de recuperação será habilitado assim que o serviço de redefinição estiver integrado ao servidor.
+            </Text>
+            <View style={styles.cardDivider} />
+            <Text style={styles.cardHint}>
+              Caso precise de auxílio imediato durante o evento, procure a equipe de atendimento presencial na ArenaGO.
+            </Text>
+          </Card>
         </View>
 
-        <Pressable
-          style={styles.primaryButton}
-          onPress={() => navigation.goBack()}
-        >
-          <Text style={styles.primaryButtonText}>Voltar para o Login</Text>
-        </Pressable>
-      </View>
-    </SafeAreaView>
+        <Button
+          title="Voltar para o Login"
+          variant="primary"
+          size="lg"
+          fullWidth
+          onPress={handleReturnToLogin}
+          accessibilityLabel="Voltar para o Login"
+          testID="forgot-password-return-button"
+        />
+      </ScrollView>
+    </AuthBackground>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  scrollView: {
     flex: 1,
-    backgroundColor: '#0c0a17',
+    backgroundColor: 'transparent',
   },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
+  scrollContent: {
+    flexGrow: 1,
     justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    paddingVertical: 12,
+    paddingHorizontal: spacing.layout.screenPaddingHorizontal,
+    paddingTop: spacing.sm,
+    paddingBottom: spacing.xxl,
   },
-  backButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#191330',
-    borderWidth: 1,
-    borderColor: '#34265a',
+  mainSection: {
+    flexGrow: 1,
     justifyContent: 'center',
-    alignItems: 'center',
+    paddingVertical: spacing.sm,
   },
-  backButtonText: {
-    color: '#ffffff',
-    fontSize: 18,
-    fontWeight: '700',
+  heroHeader: {
+    marginBottom: spacing.lg,
+    gap: spacing.xxs,
   },
-  headerTitle: {
-    color: '#ffffff',
-    fontSize: 14,
-    fontWeight: '700',
-    letterSpacing: 1.5,
-  },
-  headerPlaceholder: {
-    width: 40,
-  },
-  content: {
-    flex: 1,
-    paddingHorizontal: 24,
-    paddingTop: 24,
-  },
-  tag: {
-    color: '#a78bfa',
-    fontSize: 12,
-    fontWeight: '800',
-    letterSpacing: 1.2,
-    marginBottom: 8,
+  kicker: {
+    ...typography.tag,
+    color: colors.brand.primaryLight,
+    marginBottom: spacing.xxs,
   },
   title: {
-    color: '#ffffff',
-    fontSize: 28,
-    fontWeight: '800',
-    marginBottom: 8,
+    ...typography.hero,
+    color: colors.text.primary,
   },
   subtitle: {
-    color: '#9ca3af',
-    fontSize: 15,
-    lineHeight: 22,
-    marginBottom: 28,
+    ...typography.body,
+    color: colors.text.secondary,
   },
-  card: {
-    backgroundColor: '#141026',
-    borderWidth: 1,
-    borderColor: '#2a2046',
-    borderRadius: 14,
-    padding: 20,
-    marginBottom: 28,
+  statusCard: {
+    backgroundColor: 'rgba(11, 11, 18, 0.86)',
+    borderColor: colors.border.glass,
+    gap: spacing.md,
   },
-  cardBadge: {
-    color: '#c084fc',
-    fontSize: 11,
-    fontWeight: '800',
-    letterSpacing: 1,
-    marginBottom: 8,
+  statusBadge: {
+    marginBottom: spacing.xxs,
+  },
+  cardTitle: {
+    ...typography.titleMedium,
+    color: colors.text.primary,
   },
   cardText: {
-    color: '#94a3b8',
-    fontSize: 14,
-    lineHeight: 20,
+    ...typography.body,
+    color: colors.text.secondary,
   },
-  primaryButton: {
-    backgroundColor: '#7c3aed',
-    height: 52,
-    borderRadius: 14,
-    justifyContent: 'center',
-    alignItems: 'center',
+  cardDivider: {
+    height: 1,
+    backgroundColor: colors.border.subtle,
+    marginVertical: spacing.xxs,
   },
-  primaryButtonText: {
-    color: '#ffffff',
-    fontSize: 16,
-    fontWeight: '700',
+  cardHint: {
+    ...typography.bodySmall,
+    color: colors.text.muted,
   },
 });

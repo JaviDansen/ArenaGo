@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { loadModule } = require('./helpers/questionnaireHarness.cjs');
+const { loadModule, createParticipantUiStubs } = require('./helpers/questionnaireHarness.cjs');
 
 function renderHomeFlow(participation, extra = {}) {
   let contextWrites = 0;
@@ -13,7 +13,11 @@ function renderHomeFlow(participation, extra = {}) {
         setParticipation() { contextWrites += 1; },
       }),
     };
-    if (name === 'react-native') return { Pressable: 'Pressable', Text: 'Text' };
+    if (name === 'react-native') return {
+      Pressable: 'Pressable', Text: 'Text', View: 'View', StyleSheet: { create: (styles) => styles },
+    };
+    if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
+    if (name === '../../components/ui') return createParticipantUiStubs();
     if (name === '../../components/ScreenContainer') return { __esModule: true, default: 'ScreenContainer' };
     if (name === '../../context/ParticipationContext') return { ParticipationContext: {} };
     if (name === '../arena/RealArenaScreen') {
@@ -45,8 +49,12 @@ test('HomeFlow renders HomeScreen when there is no participation', () => {
 });
 
 test('HomeFlow shows a real participation without routing to simulated Arena screens', () => {
-  const result = renderHomeFlow({ source: 'server', status: 'waiting', eventId: 'event-a', externalQueue: { position: 2 } }, { status: 'ready' });
-  assert.equal(result.rendered.type, 'ScreenContainer');
+  const participation = { source: 'server', status: 'waiting', eventId: 'event-a', externalQueue: { position: 2 } };
+  const refreshParticipation = () => {};
+  const result = renderHomeFlow(participation, { status: 'ready', refreshParticipation });
+  assert.equal(result.rendered.type.name, 'ExternalQueueScreen');
+  assert.equal(result.rendered.props.participation, participation);
+  assert.equal(result.rendered.props.onRefresh, refreshParticipation);
   assert.equal(result.contextWrites, 0);
 });
 
@@ -62,8 +70,14 @@ test('HomeFlow renders the real Arena for an active server participation', () =>
 
 test('HomeFlow keeps loading and error states out of simulated navigation', () => {
   for (const status of ['loading', 'error']) {
-    const result = renderHomeFlow(null, { status, error: 'network', refreshParticipation() {} });
-    assert.equal(result.rendered.type, 'ScreenContainer');
+    const refreshParticipation = () => {};
+    const result = renderHomeFlow(null, { status, error: 'network', refreshParticipation });
+    assert.equal(result.rendered.type, 'HomeScreen');
+    assert.equal(result.rendered.props.mode, status);
+    if (status === 'error') {
+      assert.equal(result.rendered.props.message, 'Não foi possível conectar ao servidor para consultar sua participação.');
+      assert.equal(result.rendered.props.onRetry, refreshParticipation);
+    }
     assert.equal(result.contextWrites, 0);
   }
 });
