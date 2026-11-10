@@ -10,6 +10,7 @@ import { GamesModule } from "./games/games.module";
 import { ProfileModule } from "./profile/profile.module";
 import { AdminRoleManagementModule } from "./auth/admin-role-management.module";
 import { ParticipationsModule } from "./participations/participations.module";
+import { NotificationsModule } from "./notifications/notifications.module";
 
 @Module({
   imports: [
@@ -21,6 +22,7 @@ import { ParticipationsModule } from "./participations/participations.module";
     GamesModule,
     ProfileModule,
     AdminRoleManagementModule,
+    NotificationsModule,
   ],
   providers: [
     {

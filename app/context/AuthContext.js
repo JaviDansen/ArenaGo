@@ -3,6 +3,32 @@ import { createAuthSessionManager } from '../services/authService';
 import { httpClient as defaultHttpClient } from '../services/httpClient';
 import { defaultTokenStorage } from '../services/tokenStorage';
 
+let syncDevicePushToken = () => Promise.resolve(null);
+let unregisterDevicePushToken = () => Promise.resolve(false);
+try {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const push = require('../services/devicePushService');
+  if (push) {
+    syncDevicePushToken = push.syncDevicePushToken;
+    unregisterDevicePushToken = push.unregisterDevicePushToken;
+  }
+} catch {
+  // Fallback seguro em ambientes de teste isolados
+}
+
+let resetQueueCallAlerts = () => {};
+let setupQueueCallNotificationHandlers = () => Promise.resolve(null);
+try {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const vib = require('../services/queueCallVibrationService');
+  if (vib) {
+    resetQueueCallAlerts = vib.resetQueueCallAlerts;
+    setupQueueCallNotificationHandlers = vib.setupQueueCallNotificationHandlers;
+  }
+} catch {
+  // Fallback seguro em ambientes de teste isolados
+}
+
 export const AuthContext = createContext(null);
 
 export function AuthProvider({
@@ -35,6 +61,36 @@ export function AuthProvider({
     return unsubscribe;
   }, [autoRestore, manager]);
 
+  // Inicializa manipulador silencioso e background task de notificações
+  useEffect(() => {
+    let subscription = null;
+    void setupQueueCallNotificationHandlers().then((sub) => {
+      subscription = sub;
+    });
+    return () => {
+      if (subscription && typeof subscription.remove === 'function') {
+        subscription.remove();
+      }
+    };
+  }, []);
+
+  // Sincroniza o token de push do aparelho quando autenticado
+  useEffect(() => {
+    if (snapshot.isAuthenticated && manager.client) {
+      void syncDevicePushToken(manager.client);
+    }
+  }, [snapshot.isAuthenticated, manager.client]);
+
+  const handleLogout = async () => {
+    try {
+      await unregisterDevicePushToken(manager.client);
+    } catch {
+      // Ignora erro de rede ao desvincular o token
+    }
+    resetQueueCallAlerts();
+    return manager.logout();
+  };
+
   const contextValue = {
     user: snapshot.user,
     accessToken: manager.getAccessToken(),
@@ -53,7 +109,7 @@ export function AuthProvider({
     login: manager.login,
     verifyAdminTwoFactor: manager.verifyAdminTwoFactor,
     cancelAdminTwoFactor: manager.cancelAdminTwoFactor,
-    logout: manager.logout,
+    logout: handleLogout,
     refreshSession: manager.refreshSession,
     restoreSession: manager.restoreSession,
     fetchCurrentUser: manager.fetchCurrentUser,

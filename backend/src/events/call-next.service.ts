@@ -1,5 +1,5 @@
 import { assertMutationSession, mutationTransaction, revalidateMutationSession, type MutationSession } from "../auth/mutation-session";
-import { Inject, Injectable } from "@nestjs/common";
+import { Inject, Injectable, Optional } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
@@ -8,6 +8,7 @@ import type * as schema from "../database/schema";
 import { completeIdempotencyOperationWithTx, createRequestFingerprint, reserveIdempotencyOperationWithTx } from "../participations/join-idempotency";
 import type { JsonValue } from "../participations/join-idempotency";
 import type { CalledNext, CallNextBlock, CallNextInput, CallNextResult } from "./call-next.types";
+import { QueueCallPushService } from "../notifications/queue-call-push.service";
 
 export const CALL_NEXT_OPERATION = "call_next";
 
@@ -46,7 +47,10 @@ function replay(payload: JsonValue | null, input: CallNextInput): CalledNext {
 /** E07.4: reserva o primeiro waiting na estação, sem resolver presença ou chamar automaticamente. */
 @Injectable()
 export class CallNextService {
-  constructor(@Inject(DRIZZLE_DATABASE) private readonly database: NodePgDatabase<typeof schema>) {}
+  constructor(
+    @Inject(DRIZZLE_DATABASE) private readonly database: NodePgDatabase<typeof schema>,
+    @Optional() @Inject(QueueCallPushService) private readonly pushService?: QueueCallPushService,
+  ) {}
 
   /** Contrato interno E07; os controllers usam exclusivamente a entrada autenticada. */
   async callNext(input: CallNextInput): Promise<CallNextResult> {
@@ -63,7 +67,7 @@ export class CallNextService {
       throw new Error("Chave de idempotência ou expiração inválida.");
     }
     try {
-      return await mutationTransaction(this.database, context, async (tx): Promise<CallNextResult> => {
+      const result = await mutationTransaction(this.database, context, async (tx): Promise<CallNextResult> => {
         const event = await tx.execute(sql`SELECT id FROM events WHERE id=${input.eventId} FOR SHARE`);
         if (!event.rows.length) block({ kind: "staff_event_forbidden" });
         const experience = await tx.execute(sql`SELECT id FROM experiences
@@ -108,7 +112,7 @@ export class CallNextService {
           FROM queue_entries WHERE experience_id=${input.experienceId} AND event_id=${input.eventId} AND status='waiting'
           ORDER BY queue_order, id LIMIT 1`);
         const first = candidate.rows[0]; if (!first) block({ kind: "queue_empty" });
-        const person = await tx.execute<{ status: string; currentId: string | null }>(sql`SELECT status, current_queue_entry_id AS "currentId"
+        const person = await tx.execute<{ status: string; currentId: string | null; userId: string }>(sql`SELECT status, current_queue_entry_id AS "currentId", user_id AS "userId"
           FROM participations WHERE id=${first.participationId} AND event_id=${input.eventId} FOR UPDATE`);
         ensure(person.rows.length === 1 && person.rows[0].status === "active" && person.rows[0].currentId === first.id,
           "primeiro waiting sem participação ativa e ponteiro coerente.");
@@ -144,12 +148,37 @@ export class CallNextService {
           WHERE id=${first.id} AND participation_id=${first.participationId} AND event_id=${input.eventId}
             AND experience_id=${input.experienceId} AND status='waiting' RETURNING id`);
         ensure(called.rows.length === 1, "waiting não pôde ser chamada.");
+
+        // Registra outbox transacional na mesma transação que confirma a chamada
+        const outboxPayload = {
+          type: "queue.called",
+          serviceSessionId: sessionId,
+          participationId: first.participationId,
+          eventId: input.eventId,
+          version: 1,
+        };
+        await tx.execute(sql`
+          INSERT INTO queue_call_outbox (
+            id, service_session_id, user_id, event_id, experience_id, payload, status, attempts, created_at
+          ) VALUES (
+            ${randomUUID()}, ${sessionId}, ${person.rows[0].userId}, ${input.eventId}, ${input.experienceId},
+            ${JSON.stringify(outboxPayload)}::jsonb, 'pending', 0, ${calledAt}
+          )
+          ON CONFLICT (service_session_id) DO NOTHING
+        `);
+
         const result: CalledNext = { serviceSession: { id: sessionId, queueEntryId: first.id, experienceId: input.experienceId,
           station: { id: input.stationId, label: station.rows[0].label }, status: "pending", calledAt } };
         await completeIdempotencyOperationWithTx(tx, reservation.operationId, { httpStatus: 201,
           resultReference: sessionId, resultPayload: { serviceSession: { ...result.serviceSession, calledAt: calledAt.toISOString() } } });
         return { kind: "created", ...result };
       }, { isolationLevel: "read committed" });
+
+      if (result.kind === "created") {
+        this.pushService?.triggerDispatch();
+      }
+
+      return result;
     } catch (error) {
       if (error instanceof CallNextRollback) return error.result;
       throw error;

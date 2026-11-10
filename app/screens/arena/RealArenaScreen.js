@@ -12,6 +12,17 @@ import { createParticipationActionCoordinator, describeParticipationActionError 
 import { fetchPendingEvaluationHistoryItem } from '../../services/participationHistoryService';
 import { colors, spacing, typography } from '../../theme';
 
+let addQueueCallListener = () => () => {};
+try {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const vib = require('../../services/queueCallVibrationService');
+  if (vib && typeof vib.addQueueCallListener === 'function') {
+    addQueueCallListener = vib.addQueueCallListener;
+  }
+} catch {
+  // Fallback seguro em ambientes de teste isolados
+}
+
 /** Tela real de participação ativa. Sem alterações de domínio feitas em estado React. */
 export default function RealArenaScreen({ participation, refreshParticipation, onOpenEvaluation }) {
   const auth = useAuth();
@@ -65,8 +76,17 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
     focused.current = true;
     focusGeneration.current += 1;
     void refresh();
-    return () => { focused.current = false; focusGeneration.current += 1; };
-  }, [refresh]));
+    const unsubscribe = addQueueCallListener((call) => {
+      if (!call || call.participationId === participationId || !call.participationId) {
+        void refresh();
+      }
+    });
+    return () => {
+      focused.current = false;
+      focusGeneration.current += 1;
+      unsubscribe();
+    };
+  }, [participationId, refresh]));
 
   const join = async (experienceId) => {
     if (busyRef.current || !focused.current || loading || !state) return;
