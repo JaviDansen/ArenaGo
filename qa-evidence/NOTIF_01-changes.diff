@@ -1,19 +1,10 @@
 diff --git a/app/app.json b/app/app.json
-index 5e480ab..219641a 100644
+index 5e480ab..add4ac5 100644
 --- a/app/app.json
 +++ b/app/app.json
-@@ -1,19 +1,24 @@
- {
-   "expo": {
--    "name": "app",
--    "slug": "app",
-+    "name": "ArenaGo",
-+    "slug": "arenago",
-     "version": "1.0.0",
-     "orientation": "portrait",
+@@ -7,13 +7,18 @@
      "icon": "./assets/icon.png",
--    "userInterfaceStyle": "light",
-+    "userInterfaceStyle": "dark",
+     "userInterfaceStyle": "light",
      "ios": {
 -      "supportsTablet": true
 +      "supportsTablet": true,
@@ -23,9 +14,8 @@ index 5e480ab..219641a 100644
 +      "package": "com.arenago.app",
        "adaptiveIcon": {
          "foregroundImage": "./assets/adaptive-icon.png",
--        "backgroundColor": "#ffffff"
+         "backgroundColor": "#ffffff"
 -      }
-+        "backgroundColor": "#120B24"
 +      },
 +      "permissions": [
 +        "android.permission.VIBRATE"
@@ -33,13 +23,7 @@ index 5e480ab..219641a 100644
      },
      "web": {
        "favicon": "./assets/favicon.png"
-@@ -24,12 +29,19 @@
-         {
-           "image": "./assets/splash-icon.png",
-           "resizeMode": "contain",
--          "backgroundColor": "#ffffff"
-+          "backgroundColor": "#120B24"
-         }
+@@ -29,7 +34,14 @@
        ],
        "@react-native-community/datetimepicker",
        "expo-secure-store",
@@ -56,21 +40,23 @@ index 5e480ab..219641a 100644
    }
  }
 diff --git a/app/context/AuthContext.js b/app/context/AuthContext.js
-index 3d6ff4a..1e7e970 100644
+index 3d6ff4a..9d25d69 100644
 --- a/app/context/AuthContext.js
 +++ b/app/context/AuthContext.js
-@@ -3,6 +3,32 @@ import { createAuthSessionManager } from '../services/authService';
+@@ -3,6 +3,41 @@ import { createAuthSessionManager } from '../services/authService';
  import { httpClient as defaultHttpClient } from '../services/httpClient';
  import { defaultTokenStorage } from '../services/tokenStorage';
  
 +let syncDevicePushToken = () => Promise.resolve(null);
 +let unregisterDevicePushToken = () => Promise.resolve(false);
++let cancelPendingPushTokenSync = () => {};
 +try {
 +  // eslint-disable-next-line @typescript-eslint/no-var-requires
 +  const push = require('../services/devicePushService');
 +  if (push) {
-+    syncDevicePushToken = push.syncDevicePushToken;
-+    unregisterDevicePushToken = push.unregisterDevicePushToken;
++    syncDevicePushToken = push.syncDevicePushToken ?? syncDevicePushToken;
++    unregisterDevicePushToken = push.unregisterDevicePushToken ?? unregisterDevicePushToken;
++    cancelPendingPushTokenSync = push.cancelPendingPushTokenSync ?? cancelPendingPushTokenSync;
 +  }
 +} catch {
 +  // Fallback seguro em ambientes de teste isolados
@@ -78,12 +64,19 @@ index 3d6ff4a..1e7e970 100644
 +
 +let resetQueueCallAlerts = () => {};
 +let setupQueueCallNotificationHandlers = () => Promise.resolve(null);
++let setActiveQueueCallUser = () => Promise.resolve();
++let clearActiveQueueCallUser = () => Promise.resolve();
++let setQueueCallStateValidator = () => {};
 +try {
 +  // eslint-disable-next-line @typescript-eslint/no-var-requires
 +  const vib = require('../services/queueCallVibrationService');
 +  if (vib) {
-+    resetQueueCallAlerts = vib.resetQueueCallAlerts;
-+    setupQueueCallNotificationHandlers = vib.setupQueueCallNotificationHandlers;
++    resetQueueCallAlerts = vib.resetQueueCallAlerts ?? resetQueueCallAlerts;
++    setupQueueCallNotificationHandlers =
++      vib.setupQueueCallNotificationHandlers ?? setupQueueCallNotificationHandlers;
++    setActiveQueueCallUser = vib.setActiveQueueCallUser ?? setActiveQueueCallUser;
++    clearActiveQueueCallUser = vib.clearActiveQueueCallUser ?? clearActiveQueueCallUser;
++    setQueueCallStateValidator = vib.setQueueCallStateValidator ?? setQueueCallStateValidator;
 +  }
 +} catch {
 +  // Fallback seguro em ambientes de teste isolados
@@ -92,7 +85,7 @@ index 3d6ff4a..1e7e970 100644
  export const AuthContext = createContext(null);
  
  export function AuthProvider({
-@@ -35,6 +61,36 @@ export function AuthProvider({
+@@ -35,6 +70,99 @@ export function AuthProvider({
      return unsubscribe;
    }, [autoRestore, manager]);
  
@@ -109,16 +102,79 @@ index 3d6ff4a..1e7e970 100644
 +    };
 +  }, []);
 +
-+  // Sincroniza o token de push do aparelho quando autenticado
++  // Sincroniza o token de push e o isolamento de sessão por usuário autenticado
 +  useEffect(() => {
-+    if (snapshot.isAuthenticated && manager.client) {
-+      void syncDevicePushToken(manager.client);
++    const currentUserId = snapshot.user?.id;
++    const currentEpoch =
++      typeof manager.getSessionEpoch === 'function' ? manager.getSessionEpoch() : null;
++
++    if (snapshot.isAuthenticated && currentUserId && manager.client) {
++      void setActiveQueueCallUser(currentUserId);
++
++      setQueueCallStateValidator(async (payload) => {
++        if (!payload?.participationId || typeof manager.client?.get !== 'function') {
++          return 'unknown';
++        }
++        const token =
++          typeof manager.getAccessToken === 'function' ? manager.getAccessToken() : null;
++        if (!token) {
++          return 'unknown';
++        }
++        try {
++          const queueResponse = await manager.client.get(
++            `/participations/${payload.participationId}/queue`,
++            { auth: true }
++          );
++          const entry = queueResponse?.currentQueueEntry;
++          if (
++            !entry ||
++            entry.status !== 'called' ||
++            entry.serviceSession?.id !== payload.serviceSessionId ||
++            entry.serviceSession?.status !== 'pending'
++          ) {
++            return 'ended';
++          }
++          return 'pending';
++        } catch (err) {
++          if (err?.status === 404 || err?.status === 403 || err?.status === 409) {
++            return 'ended';
++          }
++          return 'unknown';
++        }
++      });
++
++      void syncDevicePushToken(manager.client, {
++        userId: currentUserId,
++        accessToken:
++          typeof manager.getAccessToken === 'function' ? manager.getAccessToken() : null,
++        getSessionEpoch: manager.getSessionEpoch,
++        isCurrent: () => {
++          const latest = manager.getSnapshot();
++          const latestEpoch =
++            typeof manager.getSessionEpoch === 'function' ? manager.getSessionEpoch() : null;
++          return (
++            Boolean(latest.isAuthenticated) &&
++            latest.user?.id === currentUserId &&
++            latestEpoch === currentEpoch
++          );
++        },
++      });
++    } else if (!snapshot.isInitializing && !snapshot.isAuthenticated) {
++      cancelPendingPushTokenSync();
++      setQueueCallStateValidator(null);
++      void clearActiveQueueCallUser();
 +    }
-+  }, [snapshot.isAuthenticated, manager.client]);
++  }, [snapshot.isAuthenticated, snapshot.isInitializing, snapshot.user?.id, manager]);
 +
 +  const handleLogout = async () => {
++    const logoutAccessToken =
++      typeof manager.getAccessToken === 'function' ? manager.getAccessToken() : null;
++    cancelPendingPushTokenSync();
++    setQueueCallStateValidator(null);
 +    try {
-+      await unregisterDevicePushToken(manager.client);
++      await unregisterDevicePushToken(manager.client, {
++        accessToken: logoutAccessToken,
++      });
 +    } catch {
 +      // Ignora erro de rede ao desvincular o token
 +    }
@@ -129,7 +185,7 @@ index 3d6ff4a..1e7e970 100644
    const contextValue = {
      user: snapshot.user,
      accessToken: manager.getAccessToken(),
-@@ -53,7 +109,7 @@ export function AuthProvider({
+@@ -53,7 +181,7 @@ export function AuthProvider({
      login: manager.login,
      verifyAdminTwoFactor: manager.verifyAdminTwoFactor,
      cancelAdminTwoFactor: manager.cancelAdminTwoFactor,
@@ -138,6 +194,16 @@ index 3d6ff4a..1e7e970 100644
      refreshSession: manager.refreshSession,
      restoreSession: manager.restoreSession,
      fetchCurrentUser: manager.fetchCurrentUser,
+diff --git a/app/index.js b/app/index.js
+index 1d6e981..edbbee3 100644
+--- a/app/index.js
++++ b/app/index.js
+@@ -1,4 +1,5 @@
+ import { registerRootComponent } from 'expo';
++import './services/queueCallVibrationService';
+ 
+ import App from './App';
+ 
 diff --git a/app/package-lock.json b/app/package-lock.json
 index 069798e..cedb261 100644
 --- a/app/package-lock.json
@@ -334,6 +400,1626 @@ index 28ae90f..593cc97 100644
  
    const join = async (experienceId) => {
      if (busyRef.current || !focused.current || loading || !state) return;
+diff --git a/app/services/devicePushService.js b/app/services/devicePushService.js
+new file mode 100644
+index 0000000..1275f80
+--- /dev/null
++++ b/app/services/devicePushService.js
+@@ -0,0 +1,271 @@
++import { Platform } from 'react-native';
++import * as Notifications from 'expo-notifications';
++import * as SecureStore from 'expo-secure-store';
++import {
++  clearActiveQueueCallUser,
++  setActiveQueueCallUser,
++} from './queueCallVibrationService';
++
++let Constants = null;
++try {
++  // eslint-disable-next-line @typescript-eslint/no-var-requires
++  const rawConstants = require('expo-constants');
++  Constants = rawConstants?.default ?? rawConstants;
++} catch {
++  // Opcional em ambientes de teste isolados sem expo-constants
++}
++
++export const SECURE_STORE_PUSH_TOKEN_KEY = 'arenago_device_push_token';
++export const ANDROID_SILENT_CHANNEL_ID = 'arenago-silent-queue-calls';
++
++const EAS_PROJECT_ID_UUID_REGEX =
++  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
++
++let syncGeneration = 0;
++let inFlightCandidateToken = null;
++
++/**
++ * Valida se o projectId EAS está presente e segue o formato UUID oficial do EAS.
++ */
++export function validateEasProjectId(rawProjectId) {
++  if (typeof rawProjectId !== 'string') return null;
++  const trimmed = rawProjectId.trim();
++  if (!EAS_PROJECT_ID_UUID_REGEX.test(trimmed)) return null;
++  return trimmed.toLowerCase();
++}
++
++/**
++ * Resolve e valida o projectId EAS a partir das opções explícitas, variáveis de ambiente
++ * ou manifesto do Expo (`Constants.easConfig` / `Constants.expoConfig`).
++ */
++export function resolveEasProjectId(options = {}) {
++  const constantsModule = options.constants !== undefined ? options.constants : Constants;
++  const env = options.env ?? (typeof process !== 'undefined' ? process.env : undefined);
++
++  const candidate =
++    options.projectId ??
++    env?.EXPO_PUBLIC_EAS_PROJECT_ID ??
++    constantsModule?.easConfig?.projectId ??
++    constantsModule?.expoConfig?.extra?.eas?.projectId ??
++    null;
++
++  return validateEasProjectId(candidate);
++}
++
++/**
++ * Cria o canal silencioso obrigatório no Android 8.0+ antes de requisitar permissões
++ * ou obter o push token, conforme documentação do Expo SDK 58.
++ */
++export async function ensureAndroidSilentChannel({
++  notifications = Notifications,
++  platformOS = Platform.OS,
++} = {}) {
++  if (platformOS !== 'android') return null;
++  if (!notifications || typeof notifications.setNotificationChannelAsync !== 'function') {
++    return null;
++  }
++
++  return notifications.setNotificationChannelAsync(ANDROID_SILENT_CHANNEL_ID, {
++    name: 'Chamadas silenciosas da fila',
++    importance: notifications.AndroidImportance?.LOW ?? 2,
++    sound: null,
++    enableVibrate: false,
++    showBadge: false,
++    lockscreenVisibility: notifications.AndroidNotificationVisibility?.SECRET ?? -1,
++  });
++}
++
++/**
++ * Invalida qualquer sincronização de token em andamento (ex: ao iniciar logout ou troca de conta).
++ */
++export function cancelPendingPushTokenSync() {
++  syncGeneration += 1;
++}
++
++/**
++ * Obtém e registra o token de push do aparelho no backend do ArenaGo (`POST /devices/push-token`).
++ * - Inclui `{ auth: true }` para enviar o cabeçalho `Authorization: Bearer <token>`.
++ * - Cria o canal Android silencioso antes de obter o token.
++ * - Valida o `projectId` EAS antes de solicitar o token ao Expo.
++ * - Impede que uma operação iniciada antes do logout ou troca de sessão registre o dispositivo.
++ */
++export async function syncDevicePushToken(client, options = {}) {
++  const platformOS = options.platformOS ?? Platform.OS;
++  const notifications = options.notifications ?? Notifications;
++  const secureStore = options.secureStore ?? SecureStore;
++
++  if (platformOS === 'web' || !client || typeof client.post !== 'function') {
++    return null;
++  }
++
++  const currentGeneration = ++syncGeneration;
++  const getSessionEpoch =
++    typeof options.getSessionEpoch === 'function' ? options.getSessionEpoch : null;
++  const isCurrent = typeof options.isCurrent === 'function' ? options.isCurrent : null;
++  const startEpoch = getSessionEpoch ? getSessionEpoch() : null;
++  const targetUserId =
++    typeof options.userId === 'string' && options.userId.trim()
++      ? options.userId.trim()
++      : null;
++  const capturedAccessToken =
++    typeof options.accessToken === 'string' && options.accessToken.trim()
++      ? options.accessToken.trim()
++      : null;
++
++  const isSessionStillValid = () => {
++    if (syncGeneration !== currentGeneration) return false;
++    if (isCurrent && !isCurrent()) return false;
++    if (getSessionEpoch && getSessionEpoch() !== startEpoch) return false;
++    return true;
++  };
++
++  try {
++    if (!isSessionStillValid()) return null;
++
++    // 1. Valida o projectId EAS antes de prosseguir
++    const projectId = resolveEasProjectId(options);
++    if (!projectId) {
++      return null;
++    }
++
++    // 2. Cria o canal Android silencioso antes de solicitar permissão ou obter o token (SDK 58)
++    await ensureAndroidSilentChannel({ notifications, platformOS });
++    if (!isSessionStillValid()) return null;
++
++    // 3. Verifica / solicita permissão de notificações
++    const { status: existingStatus } = await notifications.getPermissionsAsync();
++    if (!isSessionStillValid()) return null;
++
++    let finalStatus = existingStatus;
++    if (existingStatus !== 'granted') {
++      const { status } = await notifications.requestPermissionsAsync();
++      finalStatus = status;
++    }
++
++    if (!isSessionStillValid() || finalStatus !== 'granted') {
++      return null;
++    }
++
++    // 4. Obtém o token Expo Push validando o projectId
++    const tokenResult = await notifications
++      .getExpoPushTokenAsync({ projectId })
++      .catch(() => null);
++    const pushToken =
++      typeof tokenResult?.data === 'string' ? tokenResult.data.trim() : null;
++
++    if (!pushToken || !isSessionStillValid()) {
++      return null;
++    }
++
++    inFlightCandidateToken = pushToken;
++
++    // 5. Envia o token ao backend autenticado ({ auth: true })
++    await client.post(
++      '/devices/push-token',
++      {
++        pushToken,
++        platform: platformOS === 'ios' ? 'ios' : 'android',
++      },
++      {
++        auth: true,
++        ...(capturedAccessToken ? { accessToken: capturedAccessToken } : {}),
++        ...(startEpoch !== null && startEpoch !== undefined
++          ? { _requestEpoch: startEpoch }
++          : {}),
++      }
++    );
++
++    // 6. Se houve logout ou troca de sessão enquanto o POST estava em trânsito, desfaz imediatamente
++    if (!isSessionStillValid()) {
++      if (typeof client.delete === 'function') {
++        await client
++          .delete('/devices/push-token', {
++            auth: true,
++            ...(capturedAccessToken ? { accessToken: capturedAccessToken } : {}),
++            body: { pushToken },
++          })
++          .catch(() => undefined);
++      }
++      return null;
++    }
++
++    // 7. Salva localmente o token e o vínculo com o usuário autenticado
++    if (secureStore && typeof secureStore.setItemAsync === 'function') {
++      await secureStore
++        .setItemAsync(SECURE_STORE_PUSH_TOKEN_KEY, pushToken)
++        .catch(() => undefined);
++    }
++
++    if (targetUserId) {
++      await setActiveQueueCallUser(targetUserId, { secureStore });
++    }
++
++    return pushToken;
++  } catch {
++    // Falha silenciosa: a indisponibilidade de push não impede o uso do aplicativo
++    return null;
++  } finally {
++    if (syncGeneration === currentGeneration) {
++      inFlightCandidateToken = null;
++    }
++  }
++}
++
++/**
++ * Remove o vínculo do token no backend (`DELETE /devices/push-token`) durante logout ou troca de conta.
++ * - Cancela qualquer sincronização de registro em andamento.
++ * - Envia `{ auth: true, body: { pushToken } }` respeitando o contrato de `httpClient.js`.
++ */
++export async function unregisterDevicePushToken(client, options = {}) {
++  const platformOS = options.platformOS ?? Platform.OS;
++  const secureStore = options.secureStore ?? SecureStore;
++  const explicitAccessToken =
++    typeof options.accessToken === 'string' && options.accessToken.trim()
++      ? options.accessToken.trim()
++      : null;
++
++  // Invalida imediatamente qualquer tentativa de registro iniciada antes do logout
++  cancelPendingPushTokenSync();
++  const pendingToken = inFlightCandidateToken;
++  inFlightCandidateToken = null;
++
++  await clearActiveQueueCallUser({ secureStore });
++
++  if (platformOS === 'web' || !client || typeof client.delete !== 'function') {
++    return false;
++  }
++
++  try {
++    const savedToken =
++      secureStore && typeof secureStore.getItemAsync === 'function'
++        ? await secureStore.getItemAsync(SECURE_STORE_PUSH_TOKEN_KEY).catch(() => null)
++        : null;
++
++    const tokenToUnregister =
++      (typeof savedToken === 'string' && savedToken.trim()) ||
++      (typeof pendingToken === 'string' && pendingToken.trim()) ||
++      null;
++
++    if (tokenToUnregister) {
++      await client
++        .delete('/devices/push-token', {
++          auth: true,
++          ...(explicitAccessToken ? { accessToken: explicitAccessToken } : {}),
++          body: {
++            pushToken: tokenToUnregister,
++          },
++        })
++        .catch(() => undefined);
++    }
++
++    if (secureStore && typeof secureStore.deleteItemAsync === 'function') {
++      await secureStore
++        .deleteItemAsync(SECURE_STORE_PUSH_TOKEN_KEY)
++        .catch(() => undefined);
++    }
++
++    return true;
++  } catch {
++    return false;
++  }
++}
+diff --git a/app/services/queueCallVibrationService.js b/app/services/queueCallVibrationService.js
+new file mode 100644
+index 0000000..ead4543
+--- /dev/null
++++ b/app/services/queueCallVibrationService.js
+@@ -0,0 +1,717 @@
++import { Vibration, Platform } from 'react-native';
++import * as Notifications from 'expo-notifications';
++import * as TaskManager from 'expo-task-manager';
++import * as SecureStore from 'expo-secure-store';
++
++export const QUEUE_CALL_VIBRATION_PATTERN = [0, 500, 200, 500, 200, 500];
++export const QUEUE_CALL_VIBRATION_REPEAT = false;
++export const BACKGROUND_QUEUE_CALL_TASK = 'ARENAGO_QUEUE_CALL_VIBRATION_TASK';
++
++export const ACTIVE_PUSH_USER_STORAGE_KEY = 'arenago_push_active_user_id';
++export const ALERTED_SESSIONS_STORAGE_KEY = 'arenago_alerted_service_sessions_v1';
++export const MAX_ALERT_STALENESS_MS = 5 * 60 * 1000;
++const MAX_PERSISTED_SESSIONS_PER_USER = 100;
++
++const FORBIDDEN_PRESENTATION_KEYS = [
++  'title',
++  'body',
++  'message',
++  'subtitle',
++  'sound',
++  'alert',
++  'badge',
++];
++
++export const SILENT_NOTIFICATION_BEHAVIOR = Object.freeze({
++  shouldShowBanner: false,
++  shouldShowList: false,
++  shouldPlaySound: false,
++  shouldSetBadge: false,
++});
++
++// Estado em memória sincronizado com SecureStore por usuário
++const processedSessionIdsGlobal = new Set();
++const processedSessionsByUser = new Map();
++const endedSessionIds = new Set();
++const inFlightSessionIds = new Set();
++const callListeners = new Set();
++
++let activeUserIdInMemory = null;
++let isExplicitlyLoggedOut = false;
++let callStateValidator = null;
++let backgroundTaskExecutorRef = null;
++
++function getUserSessionSet(userKey) {
++  const key = userKey || '__anonymous__';
++  let set = processedSessionsByUser.get(key);
++  if (!set) {
++    set = new Set();
++    processedSessionsByUser.set(key, set);
++  }
++  return set;
++}
++
++/**
++ * Configura o comportamento do manipulador de notificações do Expo SDK 58:
++ * SUPRIME explicitamente banners, lista de notificações, sons e badges.
++ */
++export function configureSilentNotificationHandler(notificationsModule = Notifications) {
++  try {
++    if (notificationsModule && typeof notificationsModule.setNotificationHandler === 'function') {
++      notificationsModule.setNotificationHandler({
++        handleNotification: async () => ({ ...SILENT_NOTIFICATION_BEHAVIOR }),
++      });
++    }
++  } catch {
++    // Ignorado em ambientes sem suporte nativo
++  }
++}
++
++configureSilentNotificationHandler(Notifications);
++
++/**
++ * Valida o payload técnico mínimo da chamada na fila.
++ * Rejeita qualquer payload que contenha campos de apresentação visual/sonora ou estrutura malformada.
++ */
++export function validateQueueCallPayload(data) {
++  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
++
++  for (const forbiddenKey of FORBIDDEN_PRESENTATION_KEYS) {
++    if (data[forbiddenKey] !== undefined && data[forbiddenKey] !== null) {
++      return null;
++    }
++  }
++
++  if (data.type !== 'queue.called') return null;
++  if (typeof data.serviceSessionId !== 'string' || !data.serviceSessionId.trim()) return null;
++
++  if (
++    data.participationId !== undefined &&
++    data.participationId !== null &&
++    (typeof data.participationId !== 'string' || !data.participationId.trim())
++  ) {
++    return null;
++  }
++
++  if (
++    data.eventId !== undefined &&
++    data.eventId !== null &&
++    (typeof data.eventId !== 'string' || !data.eventId.trim())
++  ) {
++    return null;
++  }
++
++  if (
++    data.userId !== undefined &&
++    data.userId !== null &&
++    (typeof data.userId !== 'string' || !data.userId.trim())
++  ) {
++    return null;
++  }
++
++  let normalizedCalledAt = null;
++  if (data.calledAt !== undefined && data.calledAt !== null) {
++    const parsedTime = Date.parse(String(data.calledAt));
++    if (!Number.isFinite(parsedTime)) {
++      return null;
++    }
++    normalizedCalledAt = new Date(parsedTime).toISOString();
++  }
++
++  if (data.version !== undefined && data.version !== 1 && data.version !== '1') {
++    return null;
++  }
++
++  return {
++    type: 'queue.called',
++    serviceSessionId: data.serviceSessionId.trim(),
++    participationId:
++      typeof data.participationId === 'string' ? data.participationId.trim() : null,
++    eventId: typeof data.eventId === 'string' ? data.eventId.trim() : null,
++    userId: typeof data.userId === 'string' ? data.userId.trim() : null,
++    calledAt: normalizedCalledAt,
++    version: 1,
++  };
++}
++
++/**
++ * Extrai e valida o payload do formato real de `NotificationTaskPayload` do Expo SDK 58.
++ * Suporta:
++ * - `data.data.dataString` (JSON serializado pelo `RemoteMessageSerializer` do Android)
++ * - `data.dataString` (JSON serializado conforme documentação do `NotificationTaskPayload`)
++ * - `data.data.body` (fallback JSON serializado de mensagens remotas FCM)
++ * - `data.notification.request.content.data` (notificações entregues sem campos visuais)
++ * Rejeita `NotificationResponse` (toques de ação) e qualquer JSON malformado.
++ */
++export function extractNotificationTaskPayload(taskData) {
++  if (!taskData || typeof taskData !== 'object' || Array.isArray(taskData)) {
++    return null;
++  }
++
++  // Ignora respostas de interação do usuário (NotificationResponse)
++  if ('actionIdentifier' in taskData) {
++    return null;
++  }
++
++  // Rejeita se houver objeto de notificação visual do sistema acoplado
++  const rawNotif = taskData.notification;
++  if (rawNotif && typeof rawNotif === 'object') {
++    if (
++      rawNotif.title != null ||
++      rawNotif.body != null ||
++      rawNotif.request?.content?.title != null ||
++      rawNotif.request?.content?.body != null
++    ) {
++      return null;
++    }
++  }
++
++  // 1. Formato Android RemoteMessageSerializer: { notification: null, data: { dataString: "{...}" } }
++  if (
++    taskData.data &&
++    typeof taskData.data === 'object' &&
++    !Array.isArray(taskData.data) &&
++    Object.prototype.hasOwnProperty.call(taskData.data, 'dataString')
++  ) {
++    const rawString = taskData.data.dataString;
++    if (typeof rawString !== 'string' || !rawString.trim()) {
++      return null;
++    }
++    try {
++      const parsed = JSON.parse(rawString);
++      return validateQueueCallPayload(parsed);
++    } catch {
++      return null;
++    }
++  }
++
++  // 2. Formato direto NotificationTaskPayload: { dataString: "{...}" }
++  if (Object.prototype.hasOwnProperty.call(taskData, 'dataString')) {
++    const rawString = taskData.dataString;
++    if (typeof rawString !== 'string' || !rawString.trim()) {
++      return null;
++    }
++    try {
++      const parsed = JSON.parse(rawString);
++      return validateQueueCallPayload(parsed);
++    } catch {
++      return null;
++    }
++  }
++
++  // 3. Formato FCM body string em data.data.body
++  if (
++    taskData.data &&
++    typeof taskData.data === 'object' &&
++    !Array.isArray(taskData.data) &&
++    Object.prototype.hasOwnProperty.call(taskData.data, 'body') &&
++    taskData.data.type === undefined
++  ) {
++    if (typeof taskData.data.body !== 'string' || !taskData.data.body.trim()) {
++      return null;
++    }
++    try {
++      const parsed = JSON.parse(taskData.data.body);
++      return validateQueueCallPayload(parsed);
++    } catch {
++      return null;
++    }
++  }
++
++  // 4. Formato de evento em primeiro plano / iOS: notification.request.content.data
++  if (rawNotif?.request?.content?.data && typeof rawNotif.request.content.data === 'object') {
++    const contentData = rawNotif.request.content.data;
++    if (Object.prototype.hasOwnProperty.call(contentData, 'dataString')) {
++      if (typeof contentData.dataString !== 'string' || !contentData.dataString.trim()) {
++        return null;
++      }
++      try {
++        return validateQueueCallPayload(JSON.parse(contentData.dataString));
++      } catch {
++        return null;
++      }
++    }
++    return validateQueueCallPayload(contentData);
++  }
++
++  // 5. Objeto de dados direto em taskData.data ou taskData
++  if (taskData.data && typeof taskData.data === 'object' && !Array.isArray(taskData.data)) {
++    return validateQueueCallPayload(taskData.data);
++  }
++
++  return validateQueueCallPayload(taskData);
++}
++
++async function readPersistedActiveUserId(secureStore = SecureStore) {
++  if (!secureStore || typeof secureStore.getItemAsync !== 'function') {
++    return null;
++  }
++  try {
++    const raw = await secureStore.getItemAsync(ACTIVE_PUSH_USER_STORAGE_KEY);
++    if (!raw || typeof raw !== 'string') return null;
++    const parsed = JSON.parse(raw);
++    if (parsed && typeof parsed.userId === 'string' && parsed.userId.trim()) {
++      return parsed.userId.trim();
++    }
++    return null;
++  } catch {
++    return null;
++  }
++}
++
++async function readPersistedAlertedMap(secureStore = SecureStore) {
++  if (!secureStore || typeof secureStore.getItemAsync !== 'function') {
++    return {};
++  }
++  try {
++    const raw = await secureStore.getItemAsync(ALERTED_SESSIONS_STORAGE_KEY);
++    if (!raw || typeof raw !== 'string') return {};
++    const parsed = JSON.parse(raw);
++    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
++      return parsed;
++    }
++    return {};
++  } catch {
++    return {};
++  }
++}
++
++async function persistAlertedSessionForUser(
++  userId,
++  serviceSessionId,
++  secureStore = SecureStore
++) {
++  if (!secureStore || typeof secureStore.setItemAsync !== 'function') {
++    return;
++  }
++  const key = userId || '__anonymous__';
++  try {
++    const map = await readPersistedAlertedMap(secureStore);
++    const existing = Array.isArray(map[key]) ? map[key].filter((x) => typeof x === 'string') : [];
++    if (!existing.includes(serviceSessionId)) {
++      existing.push(serviceSessionId);
++    }
++    map[key] = existing.slice(-MAX_PERSISTED_SESSIONS_PER_USER);
++    await secureStore.setItemAsync(ALERTED_SESSIONS_STORAGE_KEY, JSON.stringify(map));
++  } catch {
++    // Falha de escrita no SecureStore não interrompe o alerta já vibrado
++  }
++}
++
++/**
++ * Define o usuário autenticado atual para isolamento de alertas em primeiro e segundo plano.
++ */
++export async function setActiveQueueCallUser(userId, { secureStore = SecureStore } = {}) {
++  const normalized = typeof userId === 'string' && userId.trim() ? userId.trim() : null;
++  activeUserIdInMemory = normalized;
++  isExplicitlyLoggedOut = !normalized;
++
++  if (!normalized) {
++    if (secureStore && typeof secureStore.deleteItemAsync === 'function') {
++      await secureStore.deleteItemAsync(ACTIVE_PUSH_USER_STORAGE_KEY).catch(() => undefined);
++    }
++    return;
++  }
++
++  if (secureStore && typeof secureStore.setItemAsync === 'function') {
++    await secureStore
++      .setItemAsync(
++        ACTIVE_PUSH_USER_STORAGE_KEY,
++        JSON.stringify({ userId: normalized, updatedAt: Date.now() })
++      )
++      .catch(() => undefined);
++  }
++
++  const persistedMap = await readPersistedAlertedMap(secureStore);
++  const userList = Array.isArray(persistedMap[normalized]) ? persistedMap[normalized] : [];
++  const userSet = getUserSessionSet(normalized);
++  for (const sessionId of userList) {
++    if (typeof sessionId === 'string' && sessionId.trim()) {
++      userSet.add(sessionId.trim());
++    }
++  }
++}
++
++/**
++ * Remove o usuário ativo durante logout, impedindo que alertas da conta anterior vibrem.
++ */
++export async function clearActiveQueueCallUser({ secureStore = SecureStore } = {}) {
++  activeUserIdInMemory = null;
++  isExplicitlyLoggedOut = true;
++  if (secureStore && typeof secureStore.deleteItemAsync === 'function') {
++    await secureStore.deleteItemAsync(ACTIVE_PUSH_USER_STORAGE_KEY).catch(() => undefined);
++  }
++}
++
++/**
++ * Registra que uma sessão de atendimento já foi encerrada/concluída/cancelada,
++ * impedindo que notificações atrasadas produzam vibração.
++ */
++export function markQueueCallSessionEnded(serviceSessionId) {
++  if (typeof serviceSessionId === 'string' && serviceSessionId.trim()) {
++    endedSessionIds.add(serviceSessionId.trim());
++  }
++}
++
++/**
++ * Configura um validador opcional do estado atual da chamada (ex: consulta HTTP ao backend quando disponível).
++ * Deve retornar `'pending'`, `'ended'` ou `'unknown'`.
++ */
++export function setQueueCallStateValidator(validator) {
++  callStateValidator = typeof validator === 'function' ? validator : null;
++}
++
++function isAlertStale(payload, nowMs, maxAgeMs) {
++  if (!payload.calledAt) return false;
++  const calledAtMs = Date.parse(payload.calledAt);
++  if (!Number.isFinite(calledAtMs)) return true;
++  return nowMs - calledAtMs > maxAgeMs;
++}
++
++function executeHardwareVibration(vibrationEngine) {
++  if (!vibrationEngine || typeof vibrationEngine.vibrate !== 'function') {
++    return false;
++  }
++  try {
++    vibrationEngine.vibrate(QUEUE_CALL_VIBRATION_PATTERN, QUEUE_CALL_VIBRATION_REPEAT);
++    return true;
++  } catch {
++    return false;
++  }
++}
++
++function notifyForegroundListeners(payload) {
++  for (const listener of callListeners) {
++    try {
++      listener(payload);
++    } catch {
++      // Ignora erro em listener individual
++    }
++  }
++}
++
++/**
++ * Execução síncrona do alerta vibratório com isolamento de usuário, verificação de atraso e proteção
++ * para não marcar como executada caso o hardware de vibração falhe.
++ */
++export function processQueueCallAlert(
++  rawPayload,
++  {
++    vibrationEngine = Vibration,
++    currentUserId = activeUserIdInMemory,
++    nowMs = Date.now(),
++    maxAlertAgeMs = MAX_ALERT_STALENESS_MS,
++    secureStore = SecureStore,
++  } = {}
++) {
++  const payload =
++    validateQueueCallPayload(rawPayload) || extractNotificationTaskPayload(rawPayload);
++  if (!payload) return false;
++
++  // Bloqueia se o usuário fez logout explícito
++  if (isExplicitlyLoggedOut && !currentUserId) {
++    return false;
++  }
++
++  // Isolamento de conta: se o payload especifica userId, exige correspondência exata com o usuário ativo
++  if (payload.userId && currentUserId && payload.userId !== currentUserId) {
++    return false;
++  }
++  if (payload.userId && !currentUserId && isExplicitlyLoggedOut) {
++    return false;
++  }
++
++  const effectiveUserId = currentUserId || payload.userId || null;
++  const userSet = getUserSessionSet(effectiveUserId);
++
++  // Deduplicação e proteção contra concorrência foreground/background ou chamada já encerrada
++  if (
++    inFlightSessionIds.has(payload.serviceSessionId) ||
++    endedSessionIds.has(payload.serviceSessionId) ||
++    userSet.has(payload.serviceSessionId) ||
++    (!effectiveUserId && processedSessionIdsGlobal.has(payload.serviceSessionId))
++  ) {
++    return false;
++  }
++
++  // Rejeita alertas atrasados além da janela máxima
++  if (isAlertStale(payload, nowMs, maxAlertAgeMs)) {
++    return false;
++  }
++
++  inFlightSessionIds.add(payload.serviceSessionId);
++  try {
++    // Executa o padrão exato de 1,9 segundo: [0, 500, 200, 500, 200, 500]
++    // IMPORTANTE: não marca como executada se houver falha na execução da vibração
++    const vibrated = executeHardwareVibration(vibrationEngine);
++    if (!vibrated) {
++      return false;
++    }
++
++    userSet.add(payload.serviceSessionId);
++    processedSessionIdsGlobal.add(payload.serviceSessionId);
++    void persistAlertedSessionForUser(effectiveUserId, payload.serviceSessionId, secureStore);
++
++    notifyForegroundListeners(payload);
++    return true;
++  } finally {
++    inFlightSessionIds.delete(payload.serviceSessionId);
++  }
++}
++
++/**
++ * Processamento assíncrono completo (usado em background headless e no listener de primeiro plano).
++ * - Não pressupõe disponibilidade de `AuthContext` (consulta `SecureStore` diretamente após reinício).
++ * - Sobrevive ao reinício do processo respeitando o usuário autenticado.
++ * - Valida o estado atual da chamada quando há validador disponível.
++ * - Nunca marca a vibração como executada se a chamada a `Vibration.vibrate` falhar.
++ */
++export async function processQueueCallAlertAsync(
++  rawPayload,
++  {
++    vibrationEngine = Vibration,
++    currentUserId = undefined,
++    nowMs = Date.now(),
++    maxAlertAgeMs = MAX_ALERT_STALENESS_MS,
++    secureStore = SecureStore,
++    validateCallState = callStateValidator,
++    requireAuthenticatedUser = false,
++  } = {}
++) {
++  const payload =
++    validateQueueCallPayload(rawPayload) || extractNotificationTaskPayload(rawPayload);
++  if (!payload) return false;
++
++  // Reserva síncrona imediata para impedir duplicidade entre listener foreground e task background
++  if (
++    inFlightSessionIds.has(payload.serviceSessionId) ||
++    endedSessionIds.has(payload.serviceSessionId)
++  ) {
++    return false;
++  }
++
++  inFlightSessionIds.add(payload.serviceSessionId);
++  try {
++    // 1. Resolver o usuário autenticado (memória ou SecureStore em execução headless)
++    let resolvedUserId =
++      currentUserId !== undefined ? currentUserId : activeUserIdInMemory;
++
++    if (!resolvedUserId && !isExplicitlyLoggedOut) {
++      resolvedUserId = await readPersistedActiveUserId(secureStore);
++    }
++
++    if (isExplicitlyLoggedOut && currentUserId === undefined) {
++      return false;
++    }
++
++    if ((requireAuthenticatedUser || payload.userId) && !resolvedUserId) {
++      return false;
++    }
++
++    if (payload.userId && resolvedUserId && payload.userId !== resolvedUserId) {
++      return false;
++    }
++
++    const effectiveUserId = resolvedUserId || payload.userId || null;
++    const userSet = getUserSessionSet(effectiveUserId);
++
++    // 2. Verificar deduplicação em memória
++    if (
++      userSet.has(payload.serviceSessionId) ||
++      (!effectiveUserId && processedSessionIdsGlobal.has(payload.serviceSessionId))
++    ) {
++      return false;
++    }
++
++    // 3. Verificar deduplicação persistida no SecureStore (sobrevive ao reinício do processo)
++    const persistedMap = await readPersistedAlertedMap(secureStore);
++    const persistedKey = effectiveUserId || '__anonymous__';
++    const persistedList = Array.isArray(persistedMap[persistedKey])
++      ? persistedMap[persistedKey]
++      : [];
++    for (const id of persistedList) {
++      if (typeof id === 'string') {
++        userSet.add(id);
++      }
++    }
++    if (userSet.has(payload.serviceSessionId)) {
++      return false;
++    }
++
++    // 4. Rejeitar alertas excessivamente atrasados
++    if (isAlertStale(payload, nowMs, maxAlertAgeMs)) {
++      return false;
++    }
++
++    // 5. Validar se a chamada já foi encerrada, quando possível confirmar o estado atual
++    if (typeof validateCallState === 'function') {
++      try {
++        const stateOutcome = await validateCallState(payload);
++        if (stateOutcome === 'ended' || stateOutcome === false) {
++          endedSessionIds.add(payload.serviceSessionId);
++          return false;
++        }
++      } catch {
++        // Quando a confirmação de rede não é possível (ex: offline ou background sem JWT em memória),
++        // prossegue respeitando a janela de validade e a deduplicação persistida.
++      }
++    }
++
++    // 6. Executar vibração de 1,9s e só registrar sucesso se não houver falha de execução
++    const vibrated = executeHardwareVibration(vibrationEngine);
++    if (!vibrated) {
++      return false;
++    }
++
++    userSet.add(payload.serviceSessionId);
++    processedSessionIdsGlobal.add(payload.serviceSessionId);
++    await persistAlertedSessionForUser(effectiveUserId, payload.serviceSessionId, secureStore);
++
++    notifyForegroundListeners(payload);
++    return true;
++  } finally {
++    inFlightSessionIds.delete(payload.serviceSessionId);
++  }
++}
++
++/**
++ * Registra um ouvinte para quando o participante for chamado na fila.
++ */
++export function addQueueCallListener(listener) {
++  if (typeof listener !== 'function') return () => {};
++  callListeners.add(listener);
++  return () => {
++    callListeners.delete(listener);
++  };
++}
++
++/**
++ * Limpa a deduplicação em memória e desativa o usuário ativo no logout.
++ */
++export function resetQueueCallAlerts({
++  clearPersistedUser = true,
++  secureStore = SecureStore,
++} = {}) {
++  processedSessionIdsGlobal.clear();
++  processedSessionsByUser.clear();
++  endedSessionIds.clear();
++  inFlightSessionIds.clear();
++  if (clearPersistedUser) {
++    activeUserIdInMemory = null;
++    isExplicitlyLoggedOut = false;
++    if (secureStore && typeof secureStore.deleteItemAsync === 'function') {
++      void secureStore.deleteItemAsync(ACTIVE_PUSH_USER_STORAGE_KEY).catch(() => undefined);
++    }
++  }
++}
++
++/**
++ * Retorna se um atendimento já foi alertado pelo identificador para o usuário atual.
++ */
++export function hasSessionBeenAlerted(serviceSessionId, userId = activeUserIdInMemory) {
++  if (userId) {
++    return getUserSessionSet(userId).has(serviceSessionId);
++  }
++  return (
++    processedSessionIdsGlobal.has(serviceSessionId) ||
++    getUserSessionSet(null).has(serviceSessionId)
++  );
++}
++
++/**
++ * Callback real da tarefa em segundo plano para `TaskManager.defineTask`.
++ */
++export async function executeBackgroundNotificationTask(
++  taskEvent,
++  options = {}
++) {
++  const NoData = Notifications.BackgroundNotificationTaskResult?.NoData ?? 1;
++  const NewData = Notifications.BackgroundNotificationTaskResult?.NewData ?? 0;
++  const Failed = Notifications.BackgroundNotificationTaskResult?.Failed ?? 2;
++
++  if (!taskEvent || typeof taskEvent !== 'object') {
++    return NoData;
++  }
++  if (taskEvent.error) {
++    return Failed;
++  }
++
++  const extracted = extractNotificationTaskPayload(taskEvent.data);
++  if (!extracted) {
++    return NoData;
++  }
++
++  const vibrated = await processQueueCallAlertAsync(extracted, {
++    requireAuthenticatedUser: Boolean(extracted.userId),
++    ...options,
++  });
++
++  return vibrated ? NewData : NoData;
++}
++
++export function getRegisteredBackgroundTaskExecutor() {
++  return backgroundTaskExecutorRef;
++}
++
++// -----------------------------------------------------------------------------
++// Definição e registro da Headless Task no escopo de inicialização do módulo
++// Garante funcionamento quando o bundle JS é carregado em background sem React montado.
++// -----------------------------------------------------------------------------
++try {
++  if (typeof TaskManager.defineTask === 'function') {
++    backgroundTaskExecutorRef = (taskEvent) => executeBackgroundNotificationTask(taskEvent);
++    TaskManager.defineTask(BACKGROUND_QUEUE_CALL_TASK, backgroundTaskExecutorRef);
++  }
++} catch {
++  // Ignorado em ambientes de teste ou sem suporte
++}
++
++try {
++  if (
++    Platform.OS !== 'web' &&
++    typeof Notifications.registerTaskAsync === 'function'
++  ) {
++    void Notifications.registerTaskAsync(BACKGROUND_QUEUE_CALL_TASK).catch(() => undefined);
++  }
++} catch {
++  // Ignorado na carga inicial se o módulo nativo não estiver disponível
++}
++
++/**
++ * Garante o registro da tarefa em segundo plano e inicializa o ouvinte de primeiro plano.
++ */
++export async function setupQueueCallNotificationHandlers({
++  notificationsModule = Notifications,
++  taskManagerModule = TaskManager,
++  platformOS = Platform.OS,
++} = {}) {
++  if (platformOS === 'web') return null;
++
++  configureSilentNotificationHandler(notificationsModule);
++
++  try {
++    if (typeof notificationsModule.registerTaskAsync === 'function') {
++      const isRegistered =
++        typeof taskManagerModule?.isTaskRegisteredAsync === 'function'
++          ? await taskManagerModule.isTaskRegisteredAsync(BACKGROUND_QUEUE_CALL_TASK)
++          : false;
++      if (!isRegistered) {
++        await notificationsModule.registerTaskAsync(BACKGROUND_QUEUE_CALL_TASK);
++      }
++    }
++
++    if (typeof notificationsModule.addNotificationReceivedListener === 'function') {
++      const subscription = notificationsModule.addNotificationReceivedListener((notification) => {
++        const extracted = extractNotificationTaskPayload({ notification });
++        if (extracted) {
++          void processQueueCallAlertAsync(extracted);
++        }
++      });
++      return subscription;
++    }
++  } catch {
++    // Ignorado se não suportado no ambiente atual
++  }
++
++  return null;
++}
+diff --git a/app/tests/queue-call-vibration.test.cjs b/app/tests/queue-call-vibration.test.cjs
+new file mode 100644
+index 0000000..b42b9f0
+--- /dev/null
++++ b/app/tests/queue-call-vibration.test.cjs
+@@ -0,0 +1,566 @@
++const test = require('node:test');
++const assert = require('node:assert/strict');
++const { loadModule } = require('./helpers/questionnaireHarness.cjs');
++
++function createSecureStoreMock(initialData = {}) {
++  const store = new Map(Object.entries(initialData));
++  return {
++    store,
++    getItemAsync: async (key) => (store.has(key) ? store.get(key) : null),
++    setItemAsync: async (key, value) => {
++      store.set(key, String(value));
++    },
++    deleteItemAsync: async (key) => {
++      store.delete(key);
++    },
++  };
++}
++
++function loadVibrationServiceEnv({
++  secureStore = createSecureStoreMock(),
++  vibrationImpl = () => {},
++  platformOS = 'android',
++} = {}) {
++  const vibrationCalls = [];
++  const registeredTasks = [];
++  const definedTasks = new Map();
++  let configuredHandler = null;
++  let foregroundListener = null;
++
++  const mockVibration = {
++    vibrate: (pattern, repeat) => {
++      vibrationImpl(pattern, repeat);
++      vibrationCalls.push({ pattern: Array.from(pattern), repeat });
++    },
++  };
++
++  const mockNotifications = {
++    BackgroundNotificationTaskResult: {
++      NewData: 0,
++      NoData: 1,
++      Failed: 2,
++    },
++    AndroidImportance: {
++      MIN: 1,
++      LOW: 2,
++    },
++    AndroidNotificationVisibility: {
++      SECRET: -1,
++    },
++    setNotificationHandler: (handler) => {
++      configuredHandler = handler;
++    },
++    registerTaskAsync: async (taskName) => {
++      registeredTasks.push(taskName);
++    },
++    addNotificationReceivedListener: (listener) => {
++      foregroundListener = listener;
++      return {
++        remove: () => {
++          if (foregroundListener === listener) {
++            foregroundListener = null;
++          }
++        },
++      };
++    },
++  };
++
++  const mockTaskManager = {
++    defineTask: (taskName, executor) => {
++      definedTasks.set(taskName, executor);
++    },
++    isTaskRegisteredAsync: async (taskName) => registeredTasks.includes(taskName),
++  };
++
++  const serviceModule = loadModule('services/queueCallVibrationService.js', (name) => {
++    if (name === 'react-native') {
++      return { Vibration: mockVibration, Platform: { OS: platformOS } };
++    }
++    if (name === 'expo-notifications') return mockNotifications;
++    if (name === 'expo-task-manager') return mockTaskManager;
++    if (name === 'expo-secure-store') return secureStore;
++    return require(name);
++  });
++
++  return {
++    exports: serviceModule.exports,
++    vibrationCalls,
++    registeredTasks,
++    definedTasks,
++    getConfiguredHandler: () => configuredHandler,
++    getForegroundListener: () => foregroundListener,
++    secureStore,
++  };
++}
++
++test('Padrão de vibração e handler silencioso: 1,9s exato e shouldShowBanner/List/Sound/Badge = false', async () => {
++  const env = loadVibrationServiceEnv();
++  const {
++    QUEUE_CALL_VIBRATION_PATTERN,
++    QUEUE_CALL_VIBRATION_REPEAT,
++    SILENT_NOTIFICATION_BEHAVIOR,
++  } = env.exports;
++
++  assert.deepEqual(Array.from(QUEUE_CALL_VIBRATION_PATTERN), [0, 500, 200, 500, 200, 500]);
++  assert.equal(QUEUE_CALL_VIBRATION_REPEAT, false);
++
++  const totalDurationMs = Array.from(QUEUE_CALL_VIBRATION_PATTERN).reduce((sum, val) => sum + val, 0);
++  assert.equal(totalDurationMs, 1900);
++
++  const handler = env.getConfiguredHandler();
++  assert.ok(handler && typeof handler.handleNotification === 'function');
++  const behavior = await handler.handleNotification();
++  assert.deepEqual(
++    { ...behavior },
++    {
++      shouldShowBanner: false,
++      shouldShowList: false,
++      shouldPlaySound: false,
++      shouldSetBadge: false,
++    }
++  );
++  assert.equal(Object.prototype.hasOwnProperty.call(SILENT_NOTIFICATION_BEHAVIOR, 'shouldShowAlert'), false);
++});
++
++test('Validação de payload da chamada: aceita apenas metadados técnicos mínimos e rejeita campos visuais', () => {
++  const env = loadVibrationServiceEnv();
++  const { validateQueueCallPayload } = env.exports;
++
++  const valid = {
++    type: 'queue.called',
++    serviceSessionId: 'session-uuid-1234',
++    participationId: 'part-uuid-5678',
++    eventId: 'event-uuid-9999',
++    userId: 'user-uuid-1111',
++    calledAt: '2026-11-10T15:00:00.000Z',
++    version: 1,
++  };
++
++  const parsed = validateQueueCallPayload(valid);
++  assert.ok(parsed);
++  assert.equal(parsed.type, 'queue.called');
++  assert.equal(parsed.serviceSessionId, 'session-uuid-1234');
++  assert.equal(parsed.participationId, 'part-uuid-5678');
++  assert.equal(parsed.eventId, 'event-uuid-9999');
++  assert.equal(parsed.userId, 'user-uuid-1111');
++
++  assert.equal(validateQueueCallPayload(null), null);
++  assert.equal(validateQueueCallPayload({}), null);
++  assert.equal(validateQueueCallPayload({ type: 'other.event', serviceSessionId: 's1' }), null);
++  assert.equal(validateQueueCallPayload({ type: 'queue.called' }), null);
++  assert.equal(validateQueueCallPayload({ type: 'queue.called', serviceSessionId: '   ' }), null);
++  assert.equal(validateQueueCallPayload({ ...valid, title: 'Chamada!' }), null);
++  assert.equal(validateQueueCallPayload({ ...valid, body: 'Sua vez!' }), null);
++  assert.equal(validateQueueCallPayload({ ...valid, message: 'Vá à estação' }), null);
++  assert.equal(validateQueueCallPayload({ ...valid, sound: 'default' }), null);
++});
++
++test('Background Task (Expo SDK 58 NotificationTaskPayload): define e registra no escopo do módulo e interpreta data.dataString', async () => {
++  const env = loadVibrationServiceEnv();
++  const {
++    BACKGROUND_QUEUE_CALL_TASK,
++    setActiveQueueCallUser,
++  } = env.exports;
++
++  // Verifica que a task foi definida e registrada na carga do módulo (sem precisar montar React)
++  assert.equal(env.definedTasks.has(BACKGROUND_QUEUE_CALL_TASK), true);
++  assert.equal(env.registeredTasks.includes(BACKGROUND_QUEUE_CALL_TASK), true);
++
++  const taskCallback = env.definedTasks.get(BACKGROUND_QUEUE_CALL_TASK);
++  assert.equal(typeof taskCallback, 'function');
++
++  await setActiveQueueCallUser('user-bg-1');
++
++  // 1. Formato real Android RemoteMessageSerializer: { data: { notification: null, data: { dataString: JSON } } }
++  const res1 = await taskCallback({
++    data: {
++      notification: null,
++      data: {
++        dataString: JSON.stringify({
++          type: 'queue.called',
++          serviceSessionId: 'session-bg-real-1',
++          participationId: 'part-bg-1',
++          eventId: 'event-bg-1',
++          userId: 'user-bg-1',
++          version: 1,
++        }),
++      },
++    },
++    error: null,
++    executionInfo: { taskName: BACKGROUND_QUEUE_CALL_TASK },
++  });
++  assert.equal(res1, 0); // NewData
++  assert.equal(env.vibrationCalls.length, 1);
++  assert.deepEqual(env.vibrationCalls[0].pattern, [0, 500, 200, 500, 200, 500]);
++
++  // 2. Formato documentado direto data.dataString: { data: { dataString: JSON } }
++  const res2 = await taskCallback({
++    data: {
++      dataString: JSON.stringify({
++        type: 'queue.called',
++        serviceSessionId: 'session-bg-real-2',
++        userId: 'user-bg-1',
++        version: 1,
++      }),
++    },
++    error: null,
++  });
++  assert.equal(res2, 0);
++  assert.equal(env.vibrationCalls.length, 2);
++
++  // 3. Rejeita dataString com JSON malformado sem vibrar
++  const resMalformed = await taskCallback({
++    data: {
++      notification: null,
++      data: {
++        dataString: '{malformed-json',
++      },
++    },
++    error: null,
++  });
++  assert.equal(resMalformed, 1); // NoData
++  assert.equal(env.vibrationCalls.length, 2);
++
++  // 4. Rejeita NotificationResponse (toque em ação) e erros da task sem vibrar
++  const resAction = await taskCallback({
++    data: {
++      actionIdentifier: 'expo.modules.notifications.actions.DEFAULT',
++      notification: null,
++    },
++    error: null,
++  });
++  assert.equal(resAction, 1);
++  assert.equal(env.vibrationCalls.length, 2);
++
++  const resError = await taskCallback({
++    data: null,
++    error: new Error('Native task failure'),
++  });
++  assert.equal(resError, 2); // Failed
++  assert.equal(env.vibrationCalls.length, 2);
++});
++
++test('Isolamento de sessão e deduplicação persistente (SecureStore): sobrevive ao reinício do processo sem AuthContext', async () => {
++  const sharedSecureStore = createSecureStoreMock();
++
++  // Processo 1: Usuário A autenticado recebe chamada e vibra
++  const proc1 = loadVibrationServiceEnv({ secureStore: sharedSecureStore });
++  await proc1.exports.setActiveQueueCallUser('user-A');
++
++  const task1 = proc1.definedTasks.get(proc1.exports.BACKGROUND_QUEUE_CALL_TASK);
++  const payloadSession1 = {
++    type: 'queue.called',
++    serviceSessionId: 'session-persisted-1',
++    userId: 'user-A',
++    version: 1,
++  };
++
++  await task1({
++    data: { notification: null, data: { dataString: JSON.stringify(payloadSession1) } },
++    error: null,
++  });
++  assert.equal(proc1.vibrationCalls.length, 1);
++
++  // Processo 2 (reinício do processo em headless background, sem AuthContext montado):
++  // Recebe retry da mesma chamada -> NÃO deve vibrar novamente
++  const proc2 = loadVibrationServiceEnv({ secureStore: sharedSecureStore });
++  const task2 = proc2.definedTasks.get(proc2.exports.BACKGROUND_QUEUE_CALL_TASK);
++
++  await task2({
++    data: { notification: null, data: { dataString: JSON.stringify(payloadSession1) } },
++    error: null,
++  });
++  assert.equal(proc2.vibrationCalls.length, 0, 'Não deve vibrar novamente após reinício do processo');
++
++  // Nova chamada para o mesmo usuário A em background após reinício -> DEVE vibrar
++  const payloadSession2 = {
++    type: 'queue.called',
++    serviceSessionId: 'session-persisted-2',
++    userId: 'user-A',
++    version: 1,
++  };
++  await task2({
++    data: { notification: null, data: { dataString: JSON.stringify(payloadSession2) } },
++    error: null,
++  });
++  assert.equal(proc2.vibrationCalls.length, 1, 'Nova chamada deve vibrar normalmente');
++
++  // Alerta atrasado de outra conta (user-B) enquanto user-A está autenticado -> BLOQUEADO
++  const payloadOtherUser = {
++    type: 'queue.called',
++    serviceSessionId: 'session-other-user',
++    userId: 'user-B',
++    version: 1,
++  };
++  await task2({
++    data: { notification: null, data: { dataString: JSON.stringify(payloadOtherUser) } },
++    error: null,
++  });
++  assert.equal(proc2.vibrationCalls.length, 1, 'Alerta de outra conta nunca deve vibrar');
++
++  // Após logout de user-A -> alertas de user-A são bloqueados
++  await proc2.exports.clearActiveQueueCallUser();
++  await task2({
++    data: {
++      notification: null,
++      data: {
++        dataString: JSON.stringify({
++          type: 'queue.called',
++          serviceSessionId: 'session-after-logout',
++          userId: 'user-A',
++          version: 1,
++        }),
++      },
++    },
++    error: null,
++  });
++  assert.equal(proc2.vibrationCalls.length, 1, 'Alerta após logout não deve vibrar');
++});
++
++test('Concorrência foreground + background, chamadas encerradas, atrasos e falha de hardware', async () => {
++  const env = loadVibrationServiceEnv();
++  const {
++    processQueueCallAlertAsync,
++    setActiveQueueCallUser,
++    setQueueCallStateValidator,
++    hasSessionBeenAlerted,
++  } = env.exports;
++
++  await setActiveQueueCallUser('user-1');
++
++  // 1. Disparo simultâneo foreground + background para o mesmo serviceSessionId -> vibra apenas 1 vez
++  const concurrentPayload = {
++    type: 'queue.called',
++    serviceSessionId: 'session-concurrent-1',
++    userId: 'user-1',
++    version: 1,
++  };
++  const [fgRes, bgRes] = await Promise.all([
++    processQueueCallAlertAsync(concurrentPayload),
++    processQueueCallAlertAsync(concurrentPayload),
++  ]);
++  assert.equal(Number(fgRes) + Number(bgRes), 1);
++  assert.equal(env.vibrationCalls.length, 1);
++
++  // 2. Chamada já encerrada (confirmada pelo validador de estado) -> NÃO vibra
++  setQueueCallStateValidator(async () => 'ended');
++  const endedRes = await processQueueCallAlertAsync({
++    type: 'queue.called',
++    serviceSessionId: 'session-already-ended',
++    participationId: 'part-1',
++    userId: 'user-1',
++    version: 1,
++  });
++  assert.equal(endedRes, false);
++  assert.equal(env.vibrationCalls.length, 1);
++  setQueueCallStateValidator(null);
++
++  // 3. Alerta atrasado além de 5 minutos -> NÃO vibra
++  const nowMs = Date.parse('2026-11-10T15:10:00.000Z');
++  const staleRes = await processQueueCallAlertAsync(
++    {
++      type: 'queue.called',
++      serviceSessionId: 'session-stale-1',
++      userId: 'user-1',
++      calledAt: '2026-11-10T15:00:00.000Z', // 10 min atrás
++      version: 1,
++    },
++    { nowMs }
++  );
++  assert.equal(staleRes, false);
++  assert.equal(env.vibrationCalls.length, 1);
++
++  // 4. Falha na execução de hardware -> NÃO marca como executada, permitindo retry posterior
++  const failingVibrator = {
++    vibrate: () => {
++      throw new Error('Vibrator hardware unavailable');
++    },
++  };
++  const failedAttempt = await processQueueCallAlertAsync(
++    {
++      type: 'queue.called',
++      serviceSessionId: 'session-hw-fail-1',
++      userId: 'user-1',
++      version: 1,
++    },
++    { vibrationEngine: failingVibrator }
++  );
++  assert.equal(failedAttempt, false);
++  assert.equal(hasSessionBeenAlerted('session-hw-fail-1', 'user-1'), false);
++
++  // Retry com vibrador funcional agora executa e registra
++  const retryAttempt = await processQueueCallAlertAsync({
++    type: 'queue.called',
++    serviceSessionId: 'session-hw-fail-1',
++    userId: 'user-1',
++    version: 1,
++  });
++  assert.equal(retryAttempt, true);
++  assert.equal(hasSessionBeenAlerted('session-hw-fail-1', 'user-1'), true);
++  assert.equal(env.vibrationCalls.length, 2);
++});
++
++test('devicePushService + httpClient: envia Authorization Bearer, body no DELETE, cria canal Android, valida projectId e bloqueia registro pós-logout', async () => {
++  const secureStore = createSecureStoreMock();
++  const channelCalls = [];
++  const tokenFetchCalls = [];
++  const httpRequests = [];
++
++  let activeToken = 'jwt-token-user-A';
++  let currentEpoch = 1;
++  let isUserAuthenticated = true;
++
++  const mockNotifications = {
++    AndroidImportance: { LOW: 2 },
++    AndroidNotificationVisibility: { SECRET: -1 },
++    setNotificationChannelAsync: async (channelId, config) => {
++      channelCalls.push({ channelId, config });
++      return { id: channelId };
++    },
++    getPermissionsAsync: async () => ({ status: 'granted' }),
++    requestPermissionsAsync: async () => ({ status: 'granted' }),
++    getExpoPushTokenAsync: async (options) => {
++      tokenFetchCalls.push(options);
++      return { data: 'ExponentPushToken[real-device-token-123]' };
++    },
++  };
++
++  // Carrega o httpClient real do projeto para validar método, headers (Authorization) e body reais
++  const apiConfigModule = loadModule('config/apiConfig.js', (name) => require(name));
++  const httpClientModule = loadModule('services/httpClient.js', (name) => {
++    if (name === '../config/apiConfig') return apiConfigModule.exports;
++    return require(name);
++  });
++
++  const client = httpClientModule.exports.createHttpClient({
++    baseUrl: 'http://127.0.0.1:3000/api/v1',
++    getAccessToken: () => activeToken,
++    getSessionEpoch: () => currentEpoch,
++    fetchImpl: async (url, init) => {
++      httpRequests.push({
++        url,
++        method: init.method,
++        headers: init.headers,
++        body: init.body ? JSON.parse(init.body) : undefined,
++      });
++      return {
++        ok: true,
++        status: 200,
++        text: async () => JSON.stringify({ status: 'registered', unlinked: true }),
++      };
++    },
++  });
++
++  const vibEnv = loadVibrationServiceEnv({ secureStore });
++  const pushModule = loadModule('services/devicePushService.js', (name) => {
++    if (name === 'react-native') return { Platform: { OS: 'android' } };
++    if (name === 'expo-notifications') return mockNotifications;
++    if (name === 'expo-secure-store') return secureStore;
++    if (name === './queueCallVibrationService') return vibEnv.exports;
++    if (name === 'expo-constants') {
++      return {
++        easConfig: { projectId: '11111111-2222-4333-8444-555555555555' },
++      };
++    }
++    return require(name);
++  });
++
++  const {
++    syncDevicePushToken,
++    unregisterDevicePushToken,
++    ANDROID_SILENT_CHANNEL_ID,
++  } = pushModule.exports;
++
++  // 1. Rejeita projectId inválido sem chamar getExpoPushTokenAsync nem POST
++  const invalidProjResult = await syncDevicePushToken(client, {
++    projectId: 'not-a-valid-uuid',
++    constants: null,
++    env: {},
++  });
++  assert.equal(invalidProjResult, null);
++  assert.equal(tokenFetchCalls.length, 0);
++  assert.equal(httpRequests.length, 0);
++
++  // 2. Registro válido: cria canal Android silencioso, valida projectId e envia POST com Authorization Bearer
++  const registeredToken = await syncDevicePushToken(client, {
++    userId: 'user-A',
++    getSessionEpoch: () => currentEpoch,
++    isCurrent: () => isUserAuthenticated && currentEpoch === 1,
++  });
++
++  assert.equal(registeredToken, 'ExponentPushToken[real-device-token-123]');
++  assert.equal(channelCalls.length, 1);
++  assert.equal(channelCalls[0].channelId, ANDROID_SILENT_CHANNEL_ID);
++  assert.equal(channelCalls[0].config.sound, null);
++  assert.equal(channelCalls[0].config.enableVibrate, false);
++  assert.equal(tokenFetchCalls.length, 1);
++  assert.equal(tokenFetchCalls[0].projectId, '11111111-2222-4333-8444-555555555555');
++
++  assert.equal(httpRequests.length, 1);
++  assert.equal(httpRequests[0].method, 'POST');
++  assert.equal(httpRequests[0].url, 'http://127.0.0.1:3000/api/v1/devices/push-token');
++  assert.equal(httpRequests[0].headers.Authorization, 'Bearer jwt-token-user-A');
++  assert.deepEqual(httpRequests[0].body, {
++    pushToken: 'ExponentPushToken[real-device-token-123]',
++    platform: 'android',
++  });
++
++  // 3. DELETE no logout: envia método DELETE, Authorization Bearer e body: { pushToken }
++  const unlinked = await unregisterDevicePushToken(client);
++  assert.equal(unlinked, true);
++  assert.equal(httpRequests.length, 2);
++  assert.equal(httpRequests[1].method, 'DELETE');
++  assert.equal(httpRequests[1].url, 'http://127.0.0.1:3000/api/v1/devices/push-token');
++  assert.equal(httpRequests[1].headers.Authorization, 'Bearer jwt-token-user-A');
++  assert.deepEqual(httpRequests[1].body, {
++    pushToken: 'ExponentPushToken[real-device-token-123]',
++  });
++
++  // 4. Operação iniciada antes do logout NÃO registra o dispositivo após troca de sessão/logout
++  let resolveSlowToken;
++  let notifyTokenFetchReached;
++  const tokenFetchReachedPromise = new Promise((resolve) => {
++    notifyTokenFetchReached = resolve;
++  });
++
++  const slowNotifications = {
++    ...mockNotifications,
++    getExpoPushTokenAsync: () => {
++      notifyTokenFetchReached();
++      return new Promise((resolve) => {
++        resolveSlowToken = resolve;
++      });
++    },
++  };
++
++  const inFlightSyncPromise = syncDevicePushToken(client, {
++    notifications: slowNotifications,
++    userId: 'user-A',
++    getSessionEpoch: () => currentEpoch,
++    isCurrent: () => isUserAuthenticated && currentEpoch === 1,
++  });
++
++  await tokenFetchReachedPromise;
++
++  // Usuário faz logout / troca de sessão enquanto getExpoPushTokenAsync estava pendente
++  isUserAuthenticated = false;
++  currentEpoch = 2;
++  activeToken = null;
++  await unregisterDevicePushToken(client);
++
++  // Agora a promessa atrasada do Expo resolve
++  resolveSlowToken({ data: 'ExponentPushToken[late-token-after-logout]' });
++  const lateResult = await inFlightSyncPromise;
++
++  assert.equal(lateResult, null);
++  assert.equal(
++    httpRequests.length,
++    2,
++    'Nenhuma requisição POST adicional deve ser enviada após o logout'
++  );
++  assert.equal(
++    await secureStore.getItemAsync('arenago_device_push_token'),
++    null,
++    'Nenhum token deve ser persistido após o logout'
++  );
++});
+diff --git a/backend/drizzle/0007_queue_call_vibration_outbox.sql b/backend/drizzle/0007_queue_call_vibration_outbox.sql
+new file mode 100644
+index 0000000..5e6394a
+--- /dev/null
++++ b/backend/drizzle/0007_queue_call_vibration_outbox.sql
+@@ -0,0 +1,42 @@
++CREATE TABLE IF NOT EXISTS "device_push_tokens" (
++	"id" uuid PRIMARY KEY NOT NULL,
++	"user_id" uuid NOT NULL,
++	"push_token" varchar(255) NOT NULL,
++	"platform" varchar(20) DEFAULT 'android' NOT NULL,
++	"created_at" timestamp with time zone NOT NULL,
++	"updated_at" timestamp with time zone NOT NULL,
++	"revoked_at" timestamp with time zone,
++	CONSTRAINT "uq_device_push_tokens_token" UNIQUE("push_token")
++);
++--> statement-breakpoint
++CREATE TABLE IF NOT EXISTS "queue_call_outbox" (
++	"id" uuid PRIMARY KEY NOT NULL,
++	"service_session_id" uuid NOT NULL,
++	"user_id" uuid NOT NULL,
++	"event_id" uuid NOT NULL,
++	"experience_id" uuid NOT NULL,
++	"payload" jsonb NOT NULL,
++	"status" varchar(30) DEFAULT 'pending' NOT NULL,
++	"attempts" integer DEFAULT 0 NOT NULL,
++	"next_attempt_at" timestamp with time zone,
++	"locked_at" timestamp with time zone,
++	"ticket_id" varchar(255),
++	"last_error" text,
++	"created_at" timestamp with time zone NOT NULL,
++	"processed_at" timestamp with time zone,
++	CONSTRAINT "uq_queue_call_outbox_session" UNIQUE("service_session_id")
++);
++--> statement-breakpoint
++CREATE INDEX IF NOT EXISTS "ix_device_push_tokens_user" ON "device_push_tokens" USING btree ("user_id","revoked_at");
++--> statement-breakpoint
++CREATE INDEX IF NOT EXISTS "ix_queue_call_outbox_pending" ON "queue_call_outbox" USING btree ("status","next_attempt_at","created_at");
++--> statement-breakpoint
++ALTER TABLE "device_push_tokens" ADD CONSTRAINT "fk_device_push_tokens_user" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;
++--> statement-breakpoint
++ALTER TABLE "queue_call_outbox" ADD CONSTRAINT "fk_queue_call_outbox_service_session" FOREIGN KEY ("service_session_id") REFERENCES "public"."service_sessions"("id") ON DELETE cascade ON UPDATE no action;
++--> statement-breakpoint
++ALTER TABLE "queue_call_outbox" ADD CONSTRAINT "fk_queue_call_outbox_user" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;
++--> statement-breakpoint
++ALTER TABLE "queue_call_outbox" ADD CONSTRAINT "fk_queue_call_outbox_event" FOREIGN KEY ("event_id") REFERENCES "public"."events"("id") ON DELETE cascade ON UPDATE no action;
++--> statement-breakpoint
++ALTER TABLE "queue_call_outbox" ADD CONSTRAINT "fk_queue_call_outbox_experience" FOREIGN KEY ("experience_id") REFERENCES "public"."experiences"("id") ON DELETE cascade ON UPDATE no action;
 diff --git a/backend/drizzle/meta/_journal.json b/backend/drizzle/meta/_journal.json
 index f18fb77..adddc27 100644
 --- a/backend/drizzle/meta/_journal.json
@@ -381,6 +2067,97 @@ index 268d873..4e3f5b5 100644
  export * from "./participations.schema";
  export * from "./idempotency.schema";
 +export * from "./notifications.schema";
+diff --git a/backend/src/database/schema/notifications.schema.ts b/backend/src/database/schema/notifications.schema.ts
+new file mode 100644
+index 0000000..20b3cf4
+--- /dev/null
++++ b/backend/src/database/schema/notifications.schema.ts
+@@ -0,0 +1,85 @@
++import { sql } from "drizzle-orm";
++import {
++  foreignKey,
++  index,
++  integer,
++  jsonb,
++  pgTable,
++  text,
++  timestamp,
++  unique,
++  uuid,
++  varchar,
++} from "drizzle-orm/pg-core";
++import { users } from "./identity.schema";
++import { events } from "./events.schema";
++import { experiences } from "./arena-structure.schema";
++import { serviceSessions } from "./participations.schema";
++
++const instant = (name: string) => timestamp(name, { withTimezone: true, mode: "date" });
++
++export const devicePushTokens = pgTable(
++  "device_push_tokens",
++  {
++    id: uuid("id").primaryKey(),
++    userId: uuid("user_id").notNull(),
++    pushToken: varchar("push_token", { length: 255 }).notNull(),
++    platform: varchar("platform", { length: 20 }).notNull().default("android"),
++    createdAt: instant("created_at").notNull(),
++    updatedAt: instant("updated_at").notNull(),
++    revokedAt: instant("revoked_at"),
++  },
++  (table) => [
++    unique("uq_device_push_tokens_token").on(table.pushToken),
++    index("ix_device_push_tokens_user").on(table.userId, table.revokedAt),
++    foreignKey({
++      name: "fk_device_push_tokens_user",
++      columns: [table.userId],
++      foreignColumns: [users.id],
++    }).onDelete("cascade"),
++  ],
++);
++
++export const queueCallOutbox = pgTable(
++  "queue_call_outbox",
++  {
++    id: uuid("id").primaryKey(),
++    serviceSessionId: uuid("service_session_id").notNull(),
++    userId: uuid("user_id").notNull(),
++    eventId: uuid("event_id").notNull(),
++    experienceId: uuid("experience_id").notNull(),
++    payload: jsonb("payload").notNull(),
++    status: varchar("status", { length: 30 }).notNull().default("pending"),
++    attempts: integer("attempts").notNull().default(0),
++    nextAttemptAt: instant("next_attempt_at"),
++    lockedAt: instant("locked_at"),
++    ticketId: varchar("ticket_id", { length: 255 }),
++    lastError: text("last_error"),
++    createdAt: instant("created_at").notNull(),
++    processedAt: instant("processed_at"),
++  },
++  (table) => [
++    unique("uq_queue_call_outbox_session").on(table.serviceSessionId),
++    index("ix_queue_call_outbox_pending").on(table.status, table.nextAttemptAt, table.createdAt),
++    foreignKey({
++      name: "fk_queue_call_outbox_service_session",
++      columns: [table.serviceSessionId],
++      foreignColumns: [serviceSessions.id],
++    }).onDelete("cascade"),
++    foreignKey({
++      name: "fk_queue_call_outbox_user",
++      columns: [table.userId],
++      foreignColumns: [users.id],
++    }).onDelete("cascade"),
++    foreignKey({
++      name: "fk_queue_call_outbox_event",
++      columns: [table.eventId],
++      foreignColumns: [events.id],
++    }).onDelete("cascade"),
++    foreignKey({
++      name: "fk_queue_call_outbox_experience",
++      columns: [table.experienceId],
++      foreignColumns: [experiences.id],
++    }).onDelete("cascade"),
++  ],
++);
 diff --git a/backend/src/events/call-next.service.ts b/backend/src/events/call-next.service.ts
 index dee0fd9..2e5618c 100644
 --- a/backend/src/events/call-next.service.ts
@@ -485,528 +2262,6 @@ index 9e6caa1..051f1ac 100644
    controllers: [EvaluationWriteController, EvaluationReadController, ParticipationLifecycleController, StaffOperationsController, StaffQueriesController, ExperienceQueueControlController, StationAvailabilityController, ParticipantQueueController, ExperiencesController],
    providers: [EventsService, StaffQueriesService, StationAvailabilityService, ExperienceQueueControlService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, StaffIdempotencyPolicy, ParticipantQueueIdempotencyPolicy, EventClosureService, EventClosurePolicy, EventClosureScheduler, EvaluationReadService, EvaluationWriteService, EvaluationWriteIdempotencyPolicy, ParticipationLifecycleService, ParticipationQueryService],
    exports: [EventsService, StaffQueriesService, StationAvailabilityService, ExperienceQueueControlService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, EventClosureService, EvaluationReadService, EvaluationWriteService, ParticipationLifecycleService, ParticipationQueryService],
-diff --git a/app/services/devicePushService.js b/app/services/devicePushService.js
-new file mode 100644
-index 0000000..8586d13
---- /dev/null
-+++ b/app/services/devicePushService.js
-@@ -0,0 +1,69 @@
-+import { Platform } from 'react-native';
-+import * as Notifications from 'expo-notifications';
-+import * as SecureStore from 'expo-secure-store';
-+
-+const SECURE_STORE_PUSH_TOKEN_KEY = 'arenago_device_push_token';
-+
-+/**
-+ * Obtém ou registra o token de push do aparelho no backend do ArenaGo.
-+ */
-+export async function syncDevicePushToken(client) {
-+  if (Platform.OS === 'web' || !client) return null;
-+
-+  try {
-+    // 1. Verifica/solicita permissão
-+    const { status: existingStatus } = await Notifications.getPermissionsAsync();
-+    let finalStatus = existingStatus;
-+
-+    if (existingStatus !== 'granted') {
-+      const { status } = await Notifications.requestPermissionsAsync();
-+      finalStatus = status;
-+    }
-+
-+    if (finalStatus !== 'granted') {
-+      return null;
-+    }
-+
-+    // 2. Obtém o token Expo Push
-+    const tokenResult = await Notifications.getExpoPushTokenAsync().catch(() => null);
-+    const pushToken = tokenResult?.data;
-+
-+    if (!pushToken || typeof pushToken !== 'string') {
-+      return null;
-+    }
-+
-+    // 3. Envia o token ao backend
-+    await client.post('/devices/push-token', {
-+      pushToken,
-+      platform: Platform.OS === 'ios' ? 'ios' : 'android',
-+    });
-+
-+    // 4. Salva localmente para desvinculação no logout
-+    await SecureStore.setItemAsync(SECURE_STORE_PUSH_TOKEN_KEY, pushToken).catch(() => undefined);
-+
-+    return pushToken;
-+  } catch {
-+    // Falha silenciosa: a perda de push não impede o uso do aplicativo
-+    return null;
-+  }
-+}
-+
-+/**
-+ * Remove o vínculo do token no backend durante o logout ou troca de conta.
-+ */
-+export async function unregisterDevicePushToken(client) {
-+  if (Platform.OS === 'web' || !client) return false;
-+
-+  try {
-+    const savedToken = await SecureStore.getItemAsync(SECURE_STORE_PUSH_TOKEN_KEY).catch(() => null);
-+    if (savedToken) {
-+      await client.delete('/devices/push-token', {
-+        pushToken: savedToken,
-+      }).catch(() => undefined);
-+      await SecureStore.deleteItemAsync(SECURE_STORE_PUSH_TOKEN_KEY).catch(() => undefined);
-+    }
-+    return true;
-+  } catch {
-+    return false;
-+  }
-+}
-diff --git a/app/services/queueCallVibrationService.js b/app/services/queueCallVibrationService.js
-new file mode 100644
-index 0000000..9629eb1
---- /dev/null
-+++ b/app/services/queueCallVibrationService.js
-@@ -0,0 +1,161 @@
-+import { Vibration, Platform } from 'react-native';
-+import * as Notifications from 'expo-notifications';
-+import * as TaskManager from 'expo-task-manager';
-+
-+export const QUEUE_CALL_VIBRATION_PATTERN = [0, 500, 200, 500, 200, 500];
-+export const QUEUE_CALL_VIBRATION_REPEAT = false;
-+export const BACKGROUND_QUEUE_CALL_TASK = 'ARENAGO_QUEUE_CALL_VIBRATION_TASK';
-+
-+// Deduplicação em memória das sessões de atendimento já alertadas
-+const processedSessionIds = new Set();
-+// Ouvintes registrados no app (ex: RealArenaScreen)
-+const callListeners = new Set();
-+
-+/**
-+ * Configura o comportamento do manipulador de notificações do Expo:
-+ * SUPRIME explicitamente alertas visuais, banners, sons e badges.
-+ */
-+try {
-+  if (typeof Notifications.setNotificationHandler === 'function') {
-+    Notifications.setNotificationHandler({
-+      handleNotification: async () => ({
-+        shouldShowAlert: false,
-+        shouldPlaySound: false,
-+        shouldSetBadge: false,
-+      }),
-+    });
-+  }
-+} catch {
-+  // Ignorado em ambientes sem suporte
-+}
-+
-+/**
-+ * Valida o payload mínimo da chamada na fila.
-+ * Rejeita qualquer payload que contenha campos de apresentação visual ou estrutura inválida.
-+ */
-+export function validateQueueCallPayload(data) {
-+  if (!data || typeof data !== 'object') return null;
-+  if (data.type !== 'queue.called') return null;
-+  if (typeof data.serviceSessionId !== 'string' || !data.serviceSessionId.trim()) return null;
-+
-+  return {
-+    type: 'queue.called',
-+    serviceSessionId: data.serviceSessionId.trim(),
-+    participationId: typeof data.participationId === 'string' ? data.participationId : null,
-+    eventId: typeof data.eventId === 'string' ? data.eventId : null,
-+    version: data.version ?? 1,
-+  };
-+}
-+
-+/**
-+ * Executa o alerta vibratório exatamente uma vez por atendimento confirmado.
-+ * Retorna true se a vibração foi executada, false se for replay/duplicada ou inválida.
-+ */
-+export function processQueueCallAlert(rawPayload, { vibrationEngine = Vibration } = {}) {
-+  const payload = validateQueueCallPayload(rawPayload);
-+  if (!payload) return false;
-+
-+  // Deduplicação: se a chamada já vibrou anteriormente, ignora
-+  if (processedSessionIds.has(payload.serviceSessionId)) {
-+    return false;
-+  }
-+
-+  // Registra atendimento como já alertado
-+  processedSessionIds.add(payload.serviceSessionId);
-+
-+  // Executa o padrão exato de 1,9 segundo: [0, 500, 200, 500, 200, 500]
-+  try {
-+    if (vibrationEngine && typeof vibrationEngine.vibrate === 'function') {
-+      vibrationEngine.vibrate(QUEUE_CALL_VIBRATION_PATTERN, QUEUE_CALL_VIBRATION_REPEAT);
-+    }
-+  } catch {
-+    // Falha de hardware tratada sem interromper o fluxo
-+  }
-+
-+  // Notifica componentes em primeiro plano (ex: atualização da tela do participante)
-+  for (const listener of callListeners) {
-+    try {
-+      listener(payload);
-+    } catch {
-+      // Ignora erro em listener individual
-+    }
-+  }
-+
-+  return true;
-+}
-+
-+/**
-+ * Registra um ouvinte para quando o participante for chamado na fila.
-+ * Retorna função para cancelar a assinatura.
-+ */
-+export function addQueueCallListener(listener) {
-+  if (typeof listener !== 'function') return () => {};
-+  callListeners.add(listener);
-+  return () => {
-+    callListeners.delete(listener);
-+  };
-+}
-+
-+/**
-+ * Limpa a deduplicação de sessões (útil para logout ou troca de usuário).
-+ */
-+export function resetQueueCallAlerts() {
-+  processedSessionIds.clear();
-+}
-+
-+/**
-+ * Retorna se um atendimento já foi alertado pelo identificador.
-+ */
-+export function hasSessionBeenAlerted(serviceSessionId) {
-+  return processedSessionIds.has(serviceSessionId);
-+}
-+
-+// -----------------------------------------------------------------------------
-+// Registro da tarefa em segundo plano (Headless Task)
-+// -----------------------------------------------------------------------------
-+try {
-+  if (typeof TaskManager.defineTask === 'function') {
-+    TaskManager.defineTask(BACKGROUND_QUEUE_CALL_TASK, async ({ data, error }) => {
-+      if (error) return;
-+      const notification = data?.notification;
-+      const payloadData =
-+        notification?.request?.content?.data ||
-+        data?.data ||
-+        data;
-+
-+      processQueueCallAlert(payloadData);
-+    });
-+  }
-+} catch {
-+  // Ignorado em ambientes de teste ou sem suporte
-+}
-+
-+/**
-+ * Inicializa a escuta de notificações em primeiro e segundo plano.
-+ */
-+export async function setupQueueCallNotificationHandlers() {
-+  if (Platform.OS === 'web') return null;
-+
-+  try {
-+    // Registra a tarefa em segundo plano para notificações remotas recebidas
-+    if (typeof Notifications.registerTaskAsync === 'function') {
-+      const isRegistered = await TaskManager.isTaskRegisteredAsync(BACKGROUND_QUEUE_CALL_TASK);
-+      if (!isRegistered) {
-+        await Notifications.registerTaskAsync(BACKGROUND_QUEUE_CALL_TASK);
-+      }
-+    }
-+
-+    // Ouvinte em primeiro plano
-+    if (typeof Notifications.addNotificationReceivedListener === 'function') {
-+      const subscription = Notifications.addNotificationReceivedListener((notification) => {
-+        const data = notification?.request?.content?.data;
-+        processQueueCallAlert(data);
-+      });
-+      return subscription;
-+    }
-+  } catch {
-+    // Ignorado se não suportado no ambiente atual
-+  }
-+
-+  return null;
-+}
-diff --git a/app/tests/queue-call-vibration.test.cjs b/app/tests/queue-call-vibration.test.cjs
-new file mode 100644
-index 0000000..784576a
---- /dev/null
-+++ b/app/tests/queue-call-vibration.test.cjs
-@@ -0,0 +1,141 @@
-+const test = require('node:test');
-+const assert = require('node:assert/strict');
-+const { loadModule } = require('./helpers/questionnaireHarness.cjs');
-+
-+const mockVibration = {
-+  vibrate: () => {},
-+};
-+const mockNotifications = {
-+  setNotificationHandler: () => {},
-+  registerTaskAsync: async () => {},
-+  addNotificationReceivedListener: () => ({ remove: () => {} }),
-+};
-+const mockTaskManager = {
-+  defineTask: () => {},
-+  isTaskRegisteredAsync: async () => false,
-+};
-+
-+const serviceModule = loadModule('services/queueCallVibrationService.js', (name) => {
-+  if (name === 'react-native') {
-+    return { Vibration: mockVibration, Platform: { OS: 'android' } };
-+  }
-+  if (name === 'expo-notifications') return mockNotifications;
-+  if (name === 'expo-task-manager') return mockTaskManager;
-+  return require(name);
-+});
-+
-+const {
-+  QUEUE_CALL_VIBRATION_PATTERN,
-+  QUEUE_CALL_VIBRATION_REPEAT,
-+  validateQueueCallPayload,
-+  processQueueCallAlert,
-+  resetQueueCallAlerts,
-+  hasSessionBeenAlerted,
-+  addQueueCallListener,
-+} = serviceModule.exports;
-+
-+test('Padrão de vibração: dura 1,9 segundo, 3 pulsos de 500ms com pausas de 200ms, sem repetição', () => {
-+  // Padrão exato: [0, 500, 200, 500, 200, 500]
-+  assert.deepEqual(Array.from(QUEUE_CALL_VIBRATION_PATTERN), [0, 500, 200, 500, 200, 500]);
-+  assert.equal(QUEUE_CALL_VIBRATION_REPEAT, false);
-+
-+  // Calcula a duração total
-+  const totalDurationMs = Array.from(QUEUE_CALL_VIBRATION_PATTERN).reduce((sum, val) => sum + val, 0);
-+  assert.equal(totalDurationMs, 1900); // 1,9 segundo exato
-+});
-+
-+test('Validação de payload da chamada: aceita apenas metadados técnicos mínimos e rejeita campos visuais', () => {
-+  const valid = {
-+    type: 'queue.called',
-+    serviceSessionId: 'session-uuid-1234',
-+    participationId: 'part-uuid-5678',
-+    eventId: 'event-uuid-9999',
-+    version: 1,
-+  };
-+
-+  const parsed = validateQueueCallPayload(valid);
-+  assert.ok(parsed);
-+  assert.equal(parsed.type, 'queue.called');
-+  assert.equal(parsed.serviceSessionId, 'session-uuid-1234');
-+  assert.equal(parsed.participationId, 'part-uuid-5678');
-+  assert.equal(parsed.eventId, 'event-uuid-9999');
-+
-+  // Rejeita payloads inválidos
-+  assert.equal(validateQueueCallPayload(null), null);
-+  assert.equal(validateQueueCallPayload({}), null);
-+  assert.equal(validateQueueCallPayload({ type: 'other.event' }), null);
-+  assert.equal(validateQueueCallPayload({ type: 'queue.called' }), null); // sem serviceSessionId
-+  assert.equal(validateQueueCallPayload({ type: 'queue.called', serviceSessionId: '   ' }), null);
-+});
-+
-+test('Deduplicação de vibração: vibra uma única vez por atendimento e ignora retries/replays', () => {
-+  resetQueueCallAlerts();
-+
-+  const vibrationCalls = [];
-+  const customVibrator = {
-+    vibrate: (pattern, repeat) => {
-+      vibrationCalls.push({ pattern, repeat });
-+    },
-+  };
-+
-+  const payload1 = {
-+    type: 'queue.called',
-+    serviceSessionId: 'session-unique-1',
-+    participationId: 'part-1',
-+    eventId: 'event-1',
-+    version: 1,
-+  };
-+
-+  // 1ª vez: deve vibrar
-+  const executed1 = processQueueCallAlert(payload1, { vibrationEngine: customVibrator });
-+  assert.equal(executed1, true);
-+  assert.equal(vibrationCalls.length, 1);
-+  assert.deepEqual(Array.from(vibrationCalls[0].pattern), [0, 500, 200, 500, 200, 500]);
-+  assert.equal(vibrationCalls[0].repeat, false);
-+  assert.equal(hasSessionBeenAlerted('session-unique-1'), true);
-+
-+  // 2ª vez (mesmo serviceSessionId): NÃO deve vibrar
-+  const executed2 = processQueueCallAlert(payload1, { vibrationEngine: customVibrator });
-+  assert.equal(executed2, false);
-+  assert.equal(vibrationCalls.length, 1); // continua 1, sem duplicar
-+
-+  // Novo serviceSessionId: deve vibrar
-+  const payload2 = {
-+    type: 'queue.called',
-+    serviceSessionId: 'session-unique-2',
-+  };
-+  const executed3 = processQueueCallAlert(payload2, { vibrationEngine: customVibrator });
-+  assert.equal(executed3, true);
-+  assert.equal(vibrationCalls.length, 2);
-+
-+  // Limpeza de deduplicação (logout / troca de usuário)
-+  resetQueueCallAlerts();
-+  assert.equal(hasSessionBeenAlerted('session-unique-1'), false);
-+});
-+
-+test('Notificação aos ouvintes da tela: propaga evento para atualização imediata da Arena', () => {
-+  resetQueueCallAlerts();
-+
-+  const receivedCalls = [];
-+  const unsubscribe = addQueueCallListener((call) => {
-+    receivedCalls.push(call);
-+  });
-+
-+  const payload = {
-+    type: 'queue.called',
-+    serviceSessionId: 'session-listener-test',
-+    participationId: 'part-xyz',
-+    eventId: 'event-xyz',
-+  };
-+
-+  const customVibrator = { vibrate: () => {} };
-+  processQueueCallAlert(payload, { vibrationEngine: customVibrator });
-+
-+  assert.equal(receivedCalls.length, 1);
-+  assert.equal(receivedCalls[0].serviceSessionId, 'session-listener-test');
-+
-+  unsubscribe();
-+  // Após cancelar a assinatura, novos chamados não chamam o listener removido
-+  processQueueCallAlert({ type: 'queue.called', serviceSessionId: 'session-listener-test-2' }, { vibrationEngine: customVibrator });
-+  assert.equal(receivedCalls.length, 1);
-+});
-diff --git a/backend/drizzle/0007_queue_call_vibration_outbox.sql b/backend/drizzle/0007_queue_call_vibration_outbox.sql
-new file mode 100644
-index 0000000..0dddce6
---- /dev/null
-+++ b/backend/drizzle/0007_queue_call_vibration_outbox.sql
-@@ -0,0 +1,39 @@
-+CREATE TABLE IF NOT EXISTS "device_push_tokens" (
-+	"id" uuid PRIMARY KEY NOT NULL,
-+	"user_id" uuid NOT NULL,
-+	"push_token" varchar(255) NOT NULL,
-+	"platform" varchar(20) DEFAULT 'android' NOT NULL,
-+	"created_at" timestamp with time zone NOT NULL,
-+	"updated_at" timestamp with time zone NOT NULL,
-+	"revoked_at" timestamp with time zone,
-+	CONSTRAINT "uq_device_push_tokens_token" UNIQUE("push_token")
-+);
-+--> statement-breakpoint
-+CREATE TABLE IF NOT EXISTS "queue_call_outbox" (
-+	"id" uuid PRIMARY KEY NOT NULL,
-+	"service_session_id" uuid NOT NULL,
-+	"user_id" uuid NOT NULL,
-+	"event_id" uuid NOT NULL,
-+	"experience_id" uuid NOT NULL,
-+	"payload" jsonb NOT NULL,
-+	"status" varchar(20) DEFAULT 'pending' NOT NULL,
-+	"attempts" integer DEFAULT 0 NOT NULL,
-+	"last_error" text,
-+	"created_at" timestamp with time zone NOT NULL,
-+	"processed_at" timestamp with time zone,
-+	CONSTRAINT "uq_queue_call_outbox_session" UNIQUE("service_session_id")
-+);
-+--> statement-breakpoint
-+CREATE INDEX IF NOT EXISTS "ix_device_push_tokens_user" ON "device_push_tokens" USING btree ("user_id","revoked_at");
-+--> statement-breakpoint
-+CREATE INDEX IF NOT EXISTS "ix_queue_call_outbox_pending" ON "queue_call_outbox" USING btree ("status","created_at");
-+--> statement-breakpoint
-+ALTER TABLE "device_push_tokens" ADD CONSTRAINT "fk_device_push_tokens_user" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;
-+--> statement-breakpoint
-+ALTER TABLE "queue_call_outbox" ADD CONSTRAINT "fk_queue_call_outbox_service_session" FOREIGN KEY ("service_session_id") REFERENCES "public"."service_sessions"("id") ON DELETE cascade ON UPDATE no action;
-+--> statement-breakpoint
-+ALTER TABLE "queue_call_outbox" ADD CONSTRAINT "fk_queue_call_outbox_user" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;
-+--> statement-breakpoint
-+ALTER TABLE "queue_call_outbox" ADD CONSTRAINT "fk_queue_call_outbox_event" FOREIGN KEY ("event_id") REFERENCES "public"."events"("id") ON DELETE cascade ON UPDATE no action;
-+--> statement-breakpoint
-+ALTER TABLE "queue_call_outbox" ADD CONSTRAINT "fk_queue_call_outbox_experience" FOREIGN KEY ("experience_id") REFERENCES "public"."experiences"("id") ON DELETE cascade ON UPDATE no action;
-diff --git a/backend/src/database/schema/notifications.schema.ts b/backend/src/database/schema/notifications.schema.ts
-new file mode 100644
-index 0000000..e4bebae
---- /dev/null
-+++ b/backend/src/database/schema/notifications.schema.ts
-@@ -0,0 +1,82 @@
-+import { sql } from "drizzle-orm";
-+import {
-+  foreignKey,
-+  index,
-+  integer,
-+  jsonb,
-+  pgTable,
-+  text,
-+  timestamp,
-+  unique,
-+  uuid,
-+  varchar,
-+} from "drizzle-orm/pg-core";
-+import { users } from "./identity.schema";
-+import { events } from "./events.schema";
-+import { experiences } from "./arena-structure.schema";
-+import { serviceSessions } from "./participations.schema";
-+
-+const instant = (name: string) => timestamp(name, { withTimezone: true, mode: "date" });
-+
-+export const devicePushTokens = pgTable(
-+  "device_push_tokens",
-+  {
-+    id: uuid("id").primaryKey(),
-+    userId: uuid("user_id").notNull(),
-+    pushToken: varchar("push_token", { length: 255 }).notNull(),
-+    platform: varchar("platform", { length: 20 }).notNull().default("android"),
-+    createdAt: instant("created_at").notNull(),
-+    updatedAt: instant("updated_at").notNull(),
-+    revokedAt: instant("revoked_at"),
-+  },
-+  (table) => [
-+    unique("uq_device_push_tokens_token").on(table.pushToken),
-+    index("ix_device_push_tokens_user").on(table.userId, table.revokedAt),
-+    foreignKey({
-+      name: "fk_device_push_tokens_user",
-+      columns: [table.userId],
-+      foreignColumns: [users.id],
-+    }).onDelete("cascade"),
-+  ],
-+);
-+
-+export const queueCallOutbox = pgTable(
-+  "queue_call_outbox",
-+  {
-+    id: uuid("id").primaryKey(),
-+    serviceSessionId: uuid("service_session_id").notNull(),
-+    userId: uuid("user_id").notNull(),
-+    eventId: uuid("event_id").notNull(),
-+    experienceId: uuid("experience_id").notNull(),
-+    payload: jsonb("payload").notNull(),
-+    status: varchar("status", { length: 20 }).notNull().default("pending"),
-+    attempts: integer("attempts").notNull().default(0),
-+    lastError: text("last_error"),
-+    createdAt: instant("created_at").notNull(),
-+    processedAt: instant("processed_at"),
-+  },
-+  (table) => [
-+    unique("uq_queue_call_outbox_session").on(table.serviceSessionId),
-+    index("ix_queue_call_outbox_pending").on(table.status, table.createdAt),
-+    foreignKey({
-+      name: "fk_queue_call_outbox_service_session",
-+      columns: [table.serviceSessionId],
-+      foreignColumns: [serviceSessions.id],
-+    }).onDelete("cascade"),
-+    foreignKey({
-+      name: "fk_queue_call_outbox_user",
-+      columns: [table.userId],
-+      foreignColumns: [users.id],
-+    }).onDelete("cascade"),
-+    foreignKey({
-+      name: "fk_queue_call_outbox_event",
-+      columns: [table.eventId],
-+      foreignColumns: [events.id],
-+    }).onDelete("cascade"),
-+    foreignKey({
-+      name: "fk_queue_call_outbox_experience",
-+      columns: [table.experienceId],
-+      foreignColumns: [experiences.id],
-+    }).onDelete("cascade"),
-+  ],
-+);
 diff --git a/backend/src/notifications/device-tokens.controller.ts b/backend/src/notifications/device-tokens.controller.ts
 new file mode 100644
 index 0000000..2ec5eb5
@@ -1226,11 +2481,18 @@ index 0000000..cf0ae20
 +export class NotificationsModule {}
 diff --git a/backend/src/notifications/queue-call-push.service.ts b/backend/src/notifications/queue-call-push.service.ts
 new file mode 100644
-index 0000000..e6824e8
+index 0000000..e8d5b7d
 --- /dev/null
 +++ b/backend/src/notifications/queue-call-push.service.ts
-@@ -0,0 +1,293 @@
-+import { Inject, Injectable, Logger, Optional } from "@nestjs/common";
+@@ -0,0 +1,799 @@
++import {
++  BeforeApplicationShutdown,
++  Inject,
++  Injectable,
++  Logger,
++  OnApplicationBootstrap,
++  Optional,
++} from "@nestjs/common";
 +import { randomUUID } from "node:crypto";
 +import { sql } from "drizzle-orm";
 +import type { NodePgDatabase } from "drizzle-orm/node-postgres";
@@ -1239,7 +2501,29 @@ index 0000000..e6824e8
 +import { DeviceTokensService } from "./device-tokens.service";
 +
 +export const EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send";
++export const EXPO_RECEIPTS_URL = "https://exp.host/--/api/v2/push/getReceipts";
 +export const PUSH_HTTP_TRANSPORT = Symbol("PUSH_HTTP_TRANSPORT");
++
++export const MAX_OUTBOX_ATTEMPTS = 3;
++export const OUTBOX_RETRY_DELAYS_SECONDS = [5, 15] as const;
++export const OUTBOX_PROCESSING_LOCK_TIMEOUT_SECONDS = 60;
++export const DEFAULT_OUTBOX_POLL_INTERVAL_MS = 5000;
++
++const NON_RETRYABLE_EXPO_ERRORS = new Set([
++  "DeviceNotRegistered",
++  "MessageTooBig",
++  "InvalidCredentials",
++  "MismatchSenderId",
++]);
++
++export type OutboxEntryStatus =
++  | "pending"
++  | "processing"
++  | "accepted"
++  | "delivered"
++  | "no_device"
++  | "expired"
++  | "failed";
 +
 +export type PushHttpTransport = (
 +  url: string,
@@ -1255,6 +2539,8 @@ index 0000000..e6824e8
 +  serviceSessionId: string;
 +  participationId: string;
 +  eventId: string;
++  userId?: string;
++  calledAt?: string;
 +  version: 1;
 +}
 +
@@ -1267,10 +2553,72 @@ index 0000000..e6824e8
 +  calledAt: Date;
 +}
 +
++export interface DispatchOutboxResult {
++  processed: number;
++  accepted: number;
++  delivered: number;
++  noDevice: number;
++  expired: number;
++  retried: number;
++  failed: number;
++}
++
++type ClaimedOutboxRow = {
++  id: string;
++  serviceSessionId: string;
++  userId: string;
++  eventId: string;
++  experienceId: string;
++  payload: QueueCallOutboxPayload;
++  attempts: number;
++};
++
++type AcceptedOutboxRow = {
++  id: string;
++  serviceSessionId: string;
++  userId: string;
++  ticketId: string;
++  attempts: number;
++};
++
++interface ExpoPushTicket {
++  status: "ok" | "error";
++  id?: string;
++  message?: string;
++  details?: {
++    error?: string;
++  };
++}
++
++interface ExpoPushReceipt {
++  status: "ok" | "error";
++  message?: string;
++  details?: {
++    error?: string;
++  };
++}
++
++class TicketDispatchError extends Error {
++  constructor(
++    message: string,
++    public readonly retryable: boolean,
++  ) {
++    super(message);
++    this.name = "TicketDispatchError";
++  }
++}
++
++export function getOutboxRetryDelaySeconds(attemptNumber: number): number {
++  const index = Math.max(0, Math.min(attemptNumber - 1, OUTBOX_RETRY_DELAYS_SECONDS.length - 1));
++  return OUTBOX_RETRY_DELAYS_SECONDS[index];
++}
++
 +@Injectable()
-+export class QueueCallPushService {
++export class QueueCallPushService implements OnApplicationBootstrap, BeforeApplicationShutdown {
 +  private readonly logger = new Logger(QueueCallPushService.name);
-+  private isProcessing = false;
++  private inFlightDispatch: Promise<DispatchOutboxResult> | null = null;
++  private pollTimer: ReturnType<typeof setTimeout> | null = null;
++  private stopped = false;
 +
 +  constructor(
 +    @Inject(DRIZZLE_DATABASE)
@@ -1281,6 +2629,76 @@ index 0000000..e6824e8
 +    @Inject(PUSH_HTTP_TRANSPORT)
 +    private readonly transport?: PushHttpTransport,
 +  ) {}
++
++  async onApplicationBootstrap(): Promise<void> {
++    const enabled =
++      process.env.NODE_ENV !== "test" ||
++      process.env.QUEUE_CALL_OUTBOX_JOB_TEST_ENABLED === "true";
++    if (!enabled) {
++      return;
++    }
++    await this.recoverOnStartup();
++    this.startScheduler();
++  }
++
++  async beforeApplicationShutdown(): Promise<void> {
++    await this.stopScheduler();
++  }
++
++  /**
++   * Retoma pendências após reinício do servidor:
++   * - Expira ou libera registros presos em `processing` com lock expirado.
++   * - Reprocessa registros `pending` elegíveis e verifica recibos de registros `accepted`.
++   */
++  async recoverOnStartup(): Promise<DispatchOutboxResult> {
++    try {
++      return await this.dispatchPending();
++    } catch (err) {
++      this.logger.error("Falha na recuperação inicial da outbox de chamadas:", err);
++      return {
++        processed: 0,
++        accepted: 0,
++        delivered: 0,
++        noDevice: 0,
++        expired: 0,
++        retried: 0,
++        failed: 0,
++      };
++    }
++  }
++
++  startScheduler(intervalMs = DEFAULT_OUTBOX_POLL_INTERVAL_MS): void {
++    this.stopped = false;
++    if (this.pollTimer) {
++      clearTimeout(this.pollTimer);
++      this.pollTimer = null;
++    }
++    const scheduleNext = () => {
++      if (this.stopped) return;
++      this.pollTimer = setTimeout(() => {
++        void this.dispatchPending()
++          .catch((err) => {
++            this.logger.error("Erro no ciclo periódico da outbox de chamadas:", err);
++          })
++          .finally(() => {
++            scheduleNext();
++          });
++      }, intervalMs);
++      this.pollTimer.unref?.();
++    };
++    scheduleNext();
++  }
++
++  async stopScheduler(): Promise<void> {
++    this.stopped = true;
++    if (this.pollTimer) {
++      clearTimeout(this.pollTimer);
++      this.pollTimer = null;
++    }
++    if (this.inFlightDispatch) {
++      await this.inFlightDispatch.catch(() => undefined);
++    }
++  }
 +
 +  /**
 +   * Insere o registro de outbox na mesma transação que confirmou a chamada do Staff.
@@ -1296,6 +2714,8 @@ index 0000000..e6824e8
 +      serviceSessionId: input.sessionId,
 +      participationId: input.participationId,
 +      eventId: input.eventId,
++      userId: input.userId,
++      calledAt: input.calledAt.toISOString(),
 +      version: 1,
 +    };
 +
@@ -1339,128 +2759,332 @@ index 0000000..e6824e8
 +  }
 +
 +  /**
-+   * Processa a fila de outbox: verifica integridade da sessão, consulta tokens ativos,
-+   * envia push estritamente de dados (silencioso) e atualiza o status.
++   * Processa a fila de outbox com reserva atômica por registro:
++   * 1. Finaliza registros órfãos em `processing` que já esgotaram `MAX_OUTBOX_ATTEMPTS`.
++   * 2. Reserva atomicamente registros `pending` elegíveis ou `processing` com lock expirado (`FOR UPDATE SKIP LOCKED`).
++   * 3. Valida que a `service_session` segue `pending`.
++   * 4. Não marca como entregue quando não há dispositivo ativo (`status = 'no_device'`).
++   * 5. Distingue envio aceito pelo Expo (`status = 'accepted'`), erro de ticket (`pending` com backoff ou `failed`)
++   *    e entrega confirmada por recibo do provedor (`status = 'delivered'`).
 +   */
-+  async dispatchPending(): Promise<{
-+    processed: number;
-+    delivered: number;
-+    expired: number;
-+    failed: number;
-+  }> {
-+    if (this.isProcessing) {
-+      return { processed: 0, delivered: 0, expired: 0, failed: 0 };
++  async dispatchPending(): Promise<DispatchOutboxResult> {
++    if (this.inFlightDispatch) {
++      return this.inFlightDispatch;
 +    }
 +
-+    this.isProcessing = true;
++    const run = this.executeDispatchCycle();
++    this.inFlightDispatch = run;
++    try {
++      return await run;
++    } finally {
++      if (this.inFlightDispatch === run) {
++        this.inFlightDispatch = null;
++      }
++    }
++  }
++
++  private async executeDispatchCycle(): Promise<DispatchOutboxResult> {
 +    let processed = 0;
++    let accepted = 0;
 +    let delivered = 0;
++    let noDevice = 0;
 +    let expired = 0;
++    let retried = 0;
 +    let failed = 0;
 +
-+    try {
-+      const pendingEntries = await this.database.execute<{
-+        id: string;
-+        serviceSessionId: string;
-+        userId: string;
-+        eventId: string;
-+        experienceId: string;
-+        payload: QueueCallOutboxPayload;
-+        attempts: number;
-+      }>(sql`
-+        SELECT
-+          id,
-+          service_session_id AS "serviceSessionId",
-+          user_id AS "userId",
-+          event_id AS "eventId",
-+          experience_id AS "experienceId",
-+          payload,
-+          attempts
++    // 1. Marcar como falha registros presos em processing que já atingiram o limite de tentativas
++    const exhaustedStale = await this.database.execute<{ id: string }>(sql`
++      UPDATE queue_call_outbox
++      SET status = 'failed',
++          locked_at = NULL,
++          processed_at = clock_timestamp(),
++          last_error = COALESCE(last_error, 'Processamento interrompido após atingir o limite máximo de tentativas')
++      WHERE status = 'processing'
++        AND locked_at <= clock_timestamp() - (${OUTBOX_PROCESSING_LOCK_TIMEOUT_SECONDS} * INTERVAL '1 second')
++        AND attempts >= ${MAX_OUTBOX_ATTEMPTS}
++      RETURNING id
++    `);
++    failed += exhaustedStale.rows?.length ?? 0;
++
++    // 2. Reserva atômica: UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED) RETURNING ...
++    // Impede que múltiplas instâncias processem o mesmo registro simultaneamente.
++    const claimedEntries = await this.database.execute<ClaimedOutboxRow>(sql`
++      UPDATE queue_call_outbox
++      SET status = 'processing',
++          attempts = attempts + 1,
++          locked_at = clock_timestamp()
++      WHERE id IN (
++        SELECT id
 +        FROM queue_call_outbox
-+        WHERE status = 'pending' AND attempts < 3
++        WHERE (
++          (status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= clock_timestamp()))
++          OR
++          (status = 'processing' AND locked_at <= clock_timestamp() - (${OUTBOX_PROCESSING_LOCK_TIMEOUT_SECONDS} * INTERVAL '1 second'))
++        )
++        AND attempts < ${MAX_OUTBOX_ATTEMPTS}
 +        ORDER BY created_at ASC
 +        LIMIT 20
 +        FOR UPDATE SKIP LOCKED
-+      `);
++      )
++      RETURNING
++        id,
++        service_session_id AS "serviceSessionId",
++        user_id AS "userId",
++        event_id AS "eventId",
++        experience_id AS "experienceId",
++        payload,
++        attempts
++    `);
 +
-+      for (const entry of pendingEntries.rows) {
-+        processed++;
++    for (const entry of claimedEntries.rows ?? []) {
++      processed++;
++      const currentAttempt = Number(entry.attempts ?? 1);
 +
-+        // 1. Evitar despachar alertas de chamadas encerradas ou invalidadas
-+        const sessionCheck = await this.database.execute<{ status: string }>(
-+          sql`SELECT status FROM service_sessions WHERE id = ${entry.serviceSessionId}`,
++      // 2.1. Evitar despachar alertas de chamadas já encerradas, ausentes ou invalidadas
++      const sessionCheck = await this.database.execute<{ status: string }>(
++        sql`SELECT status FROM service_sessions WHERE id = ${entry.serviceSessionId}`,
++      );
++
++      if (!sessionCheck.rows.length || sessionCheck.rows[0].status !== "pending") {
++        await this.database.execute(sql`
++          UPDATE queue_call_outbox
++          SET status = 'expired',
++              locked_at = NULL,
++              processed_at = clock_timestamp(),
++              last_error = 'Sessão de atendimento não está mais pendente'
++          WHERE id = ${entry.id}
++        `);
++        expired++;
++        continue;
++      }
++
++      // 2.2. Consultar tokens ativos do participante chamado
++      const tokens = await this.deviceTokensService.getActiveTokensForUser(entry.userId);
++
++      if (tokens.length === 0) {
++        // IMPORTANTE: Não marcar como entregue quando não há dispositivo destinatário
++        await this.database.execute(sql`
++          UPDATE queue_call_outbox
++          SET status = 'no_device',
++              locked_at = NULL,
++              processed_at = clock_timestamp(),
++              last_error = 'Nenhum dispositivo ativo registrado para o participante'
++          WHERE id = ${entry.id}
++        `);
++        noDevice++;
++        continue;
++      }
++
++      // 2.3. Transmitir push silencioso e avaliar tickets individuais
++      try {
++        const dispatchOutcome = await this.sendSilentPush(
++          tokens.map((t) => t.pushToken),
++          entry.payload,
 +        );
 +
-+        if (!sessionCheck.rows.length || sessionCheck.rows[0].status !== "pending") {
++        const joinedTicketIds =
++          dispatchOutcome.acceptedTicketIds.length > 0
++            ? dispatchOutcome.acceptedTicketIds.join(",")
++            : null;
++
++        await this.database.execute(sql`
++          UPDATE queue_call_outbox
++          SET status = 'accepted',
++              ticket_id = ${joinedTicketIds},
++              locked_at = NULL,
++              last_error = ${dispatchOutcome.partialErrorSummary}
++          WHERE id = ${entry.id}
++        `);
++        accepted++;
++      } catch (pushError: unknown) {
++        const errorMessage =
++          pushError instanceof Error ? pushError.message : String(pushError);
++        const isRetryable =
++          pushError instanceof TicketDispatchError ? pushError.retryable : true;
++
++        if (!isRetryable || currentAttempt >= MAX_OUTBOX_ATTEMPTS) {
 +          await this.database.execute(sql`
 +            UPDATE queue_call_outbox
-+            SET status = 'expired',
++            SET status = 'failed',
++                locked_at = NULL,
 +                processed_at = clock_timestamp(),
-+                last_error = 'Sessão de atendimento não está mais pendente'
-+            WHERE id = ${entry.id}
-+          `);
-+          expired++;
-+          continue;
-+        }
-+
-+        // 2. Consultar tokens do participante chamado
-+        const tokens = await this.deviceTokensService.getActiveTokensForUser(entry.userId);
-+
-+        if (tokens.length === 0) {
-+          // Sem dispositivos cadastrados: registrar conclusão da tentativa sem falha
-+          await this.database.execute(sql`
-+            UPDATE queue_call_outbox
-+            SET status = 'delivered',
-+                processed_at = clock_timestamp(),
-+                last_error = 'Nenhum dispositivo ativo registrado para o participante'
-+            WHERE id = ${entry.id}
-+          `);
-+          delivered++;
-+          continue;
-+        }
-+
-+        // 3. Montar e transmitir push estritamente data-only
-+        try {
-+          await this.sendSilentPush(tokens.map((t) => t.pushToken), entry.payload);
-+
-+          await this.database.execute(sql`
-+            UPDATE queue_call_outbox
-+            SET status = 'delivered',
-+                processed_at = clock_timestamp(),
-+                last_error = NULL
-+            WHERE id = ${entry.id}
-+          `);
-+          delivered++;
-+        } catch (pushError: unknown) {
-+          const errorMessage =
-+            pushError instanceof Error ? pushError.message : String(pushError);
-+          const nextAttempts = entry.attempts + 1;
-+          const newStatus = nextAttempts >= 3 ? "failed" : "pending";
-+
-+          await this.database.execute(sql`
-+            UPDATE queue_call_outbox
-+            SET attempts = ${nextAttempts},
-+                status = ${newStatus},
 +                last_error = ${errorMessage}
 +            WHERE id = ${entry.id}
 +          `);
-+
-+          if (newStatus === "failed") {
-+            failed++;
-+          }
++          failed++;
++        } else {
++          const delaySeconds = getOutboxRetryDelaySeconds(currentAttempt);
++          await this.database.execute(sql`
++            UPDATE queue_call_outbox
++            SET status = 'pending',
++                locked_at = NULL,
++                next_attempt_at = clock_timestamp() + (${delaySeconds} * INTERVAL '1 second'),
++                last_error = ${errorMessage}
++            WHERE id = ${entry.id}
++          `);
++          retried++;
 +        }
 +      }
-+    } finally {
-+      this.isProcessing = false;
 +    }
 +
-+    return { processed, delivered, expired, failed };
++    // 3. Verificar recibos de entrega de registros já aceitos pelo Expo (status = 'accepted')
++    const receiptStats = await this.verifyAcceptedReceipts();
++    delivered += receiptStats.delivered;
++    expired += receiptStats.expired;
++    retried += receiptStats.retried;
++    failed += receiptStats.failed;
++
++    return {
++      processed,
++      accepted,
++      delivered,
++      noDevice,
++      expired,
++      retried,
++      failed,
++    };
++  }
++
++  /**
++   * Consulta a API de Push Receipts do Expo para confirmar a entrega real ao provedor (FCM/APNs)
++   * dos registros em estado `accepted`.
++   */
++  async verifyAcceptedReceipts(): Promise<{
++    delivered: number;
++    expired: number;
++    retried: number;
++    failed: number;
++  }> {
++    let delivered = 0;
++    let expired = 0;
++    let retried = 0;
++    let failed = 0;
++
++    const acceptedRows = await this.database.execute<AcceptedOutboxRow>(sql`
++      UPDATE queue_call_outbox
++      SET locked_at = clock_timestamp()
++      WHERE id IN (
++        SELECT id
++        FROM queue_call_outbox
++        WHERE status = 'accepted'
++          AND ticket_id IS NOT NULL
++          AND (
++            locked_at IS NULL
++            OR locked_at <= clock_timestamp() - (${OUTBOX_PROCESSING_LOCK_TIMEOUT_SECONDS} * INTERVAL '1 second')
++          )
++        ORDER BY created_at ASC
++        LIMIT 20
++        FOR UPDATE SKIP LOCKED
++      )
++      RETURNING
++        id,
++        service_session_id AS "serviceSessionId",
++        user_id AS "userId",
++        ticket_id AS "ticketId",
++        attempts
++    `);
++
++    for (const row of acceptedRows.rows ?? []) {
++      const sessionCheck = await this.database.execute<{ status: string }>(
++        sql`SELECT status FROM service_sessions WHERE id = ${row.serviceSessionId}`,
++      );
++
++      if (!sessionCheck.rows.length || sessionCheck.rows[0].status !== "pending") {
++        await this.database.execute(sql`
++          UPDATE queue_call_outbox
++          SET status = 'expired',
++              locked_at = NULL,
++              processed_at = clock_timestamp(),
++              last_error = 'Sessão de atendimento encerrada antes da confirmação do recibo'
++          WHERE id = ${row.id}
++        `);
++        expired++;
++        continue;
++      }
++
++      const ticketIds = row.ticketId
++        .split(",")
++        .map((id) => id.trim())
++        .filter(Boolean);
++
++      if (ticketIds.length === 0) {
++        await this.database.execute(sql`
++          UPDATE queue_call_outbox
++          SET locked_at = NULL
++          WHERE id = ${row.id}
++        `);
++        continue;
++      }
++
++      try {
++        const receiptsOutcome = await this.fetchExpoReceipts(ticketIds, row.userId);
++
++        if (receiptsOutcome.kind === "delivered") {
++          await this.database.execute(sql`
++            UPDATE queue_call_outbox
++            SET status = 'delivered',
++                locked_at = NULL,
++                processed_at = clock_timestamp(),
++                last_error = ${receiptsOutcome.partialErrorSummary}
++            WHERE id = ${row.id}
++          `);
++          delivered++;
++        } else if (receiptsOutcome.kind === "pending_receipt") {
++          // O recibo ainda não foi gerado pelo provedor; permanece em 'accepted'
++          await this.database.execute(sql`
++            UPDATE queue_call_outbox
++            SET locked_at = NULL
++            WHERE id = ${row.id}
++          `);
++        } else {
++          // Todos os recibos retornaram erro
++          const currentAttempt = Number(row.attempts ?? 1);
++          if (!receiptsOutcome.retryable || currentAttempt >= MAX_OUTBOX_ATTEMPTS) {
++            await this.database.execute(sql`
++              UPDATE queue_call_outbox
++              SET status = 'failed',
++                  locked_at = NULL,
++                  processed_at = clock_timestamp(),
++                  last_error = ${receiptsOutcome.errorMessage}
++              WHERE id = ${row.id}
++            `);
++            failed++;
++          } else {
++            const delaySeconds = getOutboxRetryDelaySeconds(currentAttempt);
++            await this.database.execute(sql`
++              UPDATE queue_call_outbox
++              SET status = 'pending',
++                  ticket_id = NULL,
++                  locked_at = NULL,
++                  next_attempt_at = clock_timestamp() + (${delaySeconds} * INTERVAL '1 second'),
++                  last_error = ${receiptsOutcome.errorMessage}
++              WHERE id = ${row.id}
++            `);
++            retried++;
++          }
++        }
++      } catch (err: unknown) {
++        // Falha transitória ao consultar getReceipts: mantém 'accepted' para nova checagem
++        const errorMessage = err instanceof Error ? err.message : String(err);
++        await this.database.execute(sql`
++          UPDATE queue_call_outbox
++          SET locked_at = NULL,
++              last_error = ${errorMessage}
++          WHERE id = ${row.id}
++        `);
++      }
++    }
++
++    return { delivered, expired, retried, failed };
 +  }
 +
 +  private async sendSilentPush(
 +    tokens: string[],
 +    payload: QueueCallOutboxPayload,
-+  ): Promise<void> {
++  ): Promise<{
++    acceptedTicketIds: string[];
++    partialErrorSummary: string | null;
++  }> {
 +    const messages = tokens.map((token) => ({
 +      to: token,
 +      data: {
@@ -1468,6 +3092,8 @@ index 0000000..e6824e8
 +        serviceSessionId: payload.serviceSessionId,
 +        participationId: payload.participationId,
 +        eventId: payload.eventId,
++        ...(payload.userId ? { userId: payload.userId } : {}),
++        ...(payload.calledAt ? { calledAt: payload.calledAt } : {}),
 +        version: payload.version,
 +      },
 +      priority: "high",
@@ -1481,46 +3107,181 @@ index 0000000..e6824e8
 +      "Content-Type": "application/json",
 +    };
 +
-+    let response: { ok: boolean; status: number; json: () => Promise<unknown> };
-+
-+    if (this.transport) {
-+      response = await this.transport(EXPO_PUSH_URL, {
-+        method: "POST",
-+        headers,
-+        body: bodyString,
-+      });
-+    } else {
-+      const res = await fetch(EXPO_PUSH_URL, {
-+        method: "POST",
-+        headers,
-+        body: bodyString,
-+      });
-+      response = {
-+        ok: res.ok,
-+        status: res.status,
-+        json: () => res.json(),
-+      };
-+    }
++    const response = await this.performHttpPost(EXPO_PUSH_URL, headers, bodyString);
 +
 +    if (!response.ok) {
-+      throw new Error(`Expo Push API retornou status HTTP ${response.status}`);
++      const retryable = response.status >= 500 || response.status === 429;
++      throw new TicketDispatchError(
++        `Expo Push API retornou status HTTP ${response.status}`,
++        retryable,
++      );
 +    }
 +
 +    const result = (await response.json()) as {
-+      data?: Array<{ status: string; message?: string; details?: { error?: string } }>;
++      data?: ExpoPushTicket[];
++      errors?: Array<{ code?: string; message?: string }>;
 +    };
 +
-+    if (Array.isArray(result?.data)) {
-+      for (let i = 0; i < result.data.length; i++) {
-+        const ticket = result.data[i];
-+        if (ticket.status === "error" && ticket.details?.error === "DeviceNotRegistered") {
-+          const invalidToken = tokens[i];
-+          if (invalidToken) {
-+            await this.deviceTokensService.revokeInvalidToken(invalidToken).catch(() => undefined);
-+          }
++    if (!Array.isArray(result?.data) || result.data.length === 0) {
++      const topError =
++        Array.isArray(result?.errors) && result.errors.length > 0
++          ? result.errors.map((e) => e.message || e.code || "Erro Expo").join("; ")
++          : "Resposta da Expo Push API sem tickets de envio";
++      throw new TicketDispatchError(topError, true);
++    }
++
++    const acceptedTicketIds: string[] = [];
++    const ticketErrors: string[] = [];
++    let hasRetryableError = false;
++
++    for (let i = 0; i < result.data.length; i++) {
++      const ticket = result.data[i];
++      const token = tokens[i];
++
++      if (!ticket || typeof ticket !== "object") {
++        ticketErrors.push("Ticket malformado na resposta do Expo");
++        hasRetryableError = true;
++        continue;
++      }
++
++      if (ticket.status === "ok") {
++        if (typeof ticket.id === "string" && ticket.id.trim().length > 0) {
++          acceptedTicketIds.push(ticket.id.trim());
++        } else {
++          acceptedTicketIds.push(`accepted-${i}`);
 +        }
++        continue;
++      }
++
++      const errorCode = ticket.details?.error || "UnknownTicketError";
++      const errorDesc = ticket.message
++        ? `${errorCode}: ${ticket.message}`
++        : errorCode;
++      ticketErrors.push(errorDesc);
++
++      if (errorCode === "DeviceNotRegistered" && token) {
++        await this.deviceTokensService.revokeInvalidToken(token).catch(() => undefined);
++      }
++
++      if (!NON_RETRYABLE_EXPO_ERRORS.has(errorCode)) {
++        hasRetryableError = true;
 +      }
 +    }
++
++    if (acceptedTicketIds.length === 0) {
++      const summary =
++        ticketErrors.join("; ") || "Todos os tickets de push falharam no Expo";
++      throw new TicketDispatchError(summary, hasRetryableError);
++    }
++
++    return {
++      acceptedTicketIds,
++      partialErrorSummary: ticketErrors.length > 0 ? ticketErrors.join("; ") : null,
++    };
++  }
++
++  private async fetchExpoReceipts(
++    ticketIds: string[],
++    userId: string,
++  ): Promise<
++    | { kind: "delivered"; partialErrorSummary: string | null }
++    | { kind: "pending_receipt" }
++    | { kind: "failed"; errorMessage: string; retryable: boolean }
++  > {
++    const headers = {
++      "Accept": "application/json",
++      "Accept-Encoding": "gzip, deflate",
++      "Content-Type": "application/json",
++    };
++    const bodyString = JSON.stringify({ ids: ticketIds });
++
++    const response = await this.performHttpPost(EXPO_RECEIPTS_URL, headers, bodyString);
++    if (!response.ok) {
++      throw new Error(`Expo Push Receipts API retornou status HTTP ${response.status}`);
++    }
++
++    const result = (await response.json()) as {
++      data?: Record<string, ExpoPushReceipt>;
++    };
++
++    const receiptsMap = result?.data;
++    if (!receiptsMap || typeof receiptsMap !== "object" || Array.isArray(receiptsMap)) {
++      return { kind: "pending_receipt" };
++    }
++
++    let okCount = 0;
++    let missingCount = 0;
++    let hasRetryableError = false;
++    const receiptErrors: string[] = [];
++
++    for (const ticketId of ticketIds) {
++      const receipt = receiptsMap[ticketId];
++      if (!receipt) {
++        missingCount++;
++        continue;
++      }
++
++      if (receipt.status === "ok") {
++        okCount++;
++        continue;
++      }
++
++      const errorCode = receipt.details?.error || "UnknownReceiptError";
++      const errorDesc = receipt.message
++        ? `${errorCode}: ${receipt.message}`
++        : errorCode;
++      receiptErrors.push(errorDesc);
++
++      if (errorCode === "DeviceNotRegistered") {
++        await this.deviceTokensService.revokeAllUserTokens(userId).catch(() => undefined);
++      }
++
++      if (!NON_RETRYABLE_EXPO_ERRORS.has(errorCode)) {
++        hasRetryableError = true;
++      }
++    }
++
++    if (okCount > 0) {
++      return {
++        kind: "delivered",
++        partialErrorSummary: receiptErrors.length > 0 ? receiptErrors.join("; ") : null,
++      };
++    }
++
++    if (missingCount > 0 && receiptErrors.length === 0) {
++      return { kind: "pending_receipt" };
++    }
++
++    return {
++      kind: "failed",
++      errorMessage: receiptErrors.join("; ") || "Recibo de push indicou falha na entrega",
++      retryable: hasRetryableError,
++    };
++  }
++
++  private async performHttpPost(
++    url: string,
++    headers: Record<string, string>,
++    body: string,
++  ): Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }> {
++    if (this.transport) {
++      return this.transport(url, {
++        method: "POST",
++        headers,
++        body,
++      });
++    }
++
++    const res = await fetch(url, {
++      method: "POST",
++      headers,
++      body,
++    });
++    return {
++      ok: res.ok,
++      status: res.status,
++      json: () => res.json(),
++    };
 +  }
 +}
 diff --git a/backend/test/unit/call-next-outbox.test.ts b/backend/test/unit/call-next-outbox.test.ts
@@ -1669,26 +3430,86 @@ index 0000000..2c60854
 +});
 diff --git a/backend/test/unit/notifications-device-tokens.test.ts b/backend/test/unit/notifications-device-tokens.test.ts
 new file mode 100644
-index 0000000..a29fa18
+index 0000000..ac221dc
 --- /dev/null
 +++ b/backend/test/unit/notifications-device-tokens.test.ts
-@@ -0,0 +1,90 @@
+@@ -0,0 +1,180 @@
 +import "reflect-metadata";
 +import assert from "node:assert/strict";
-+import { test } from "node:test";
++import { after, before, test } from "node:test";
++import { Module, type INestApplication } from "@nestjs/common";
++import { NestFactory } from "@nestjs/core";
++import supertest from "supertest";
++import { AuthService } from "../../src/auth/auth.service";
++import { SessionAuthGuard } from "../../src/auth/session-auth.guard";
++import { ProblemDetailsExceptionFilter } from "../../src/common/errors/problem-details.filter";
++import { ProblemException } from "../../src/common/errors/problem.exception";
++import { DeviceTokensController } from "../../src/notifications/device-tokens.controller";
 +import {
 +  registerPushTokenSchema,
 +  unregisterPushTokenSchema,
 +  validateDto,
 +} from "../../src/notifications/device-tokens.dto";
 +import { DeviceTokensService } from "../../src/notifications/device-tokens.service";
-+import { ProblemException } from "../../src/common/errors/problem.exception";
 +
 +const userId = "00000000-0000-4000-8000-000000000001";
++const sessionId = "00000000-0000-4000-8000-000000000099";
 +const validToken = "ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]";
 +
++const capturedCalls: Array<{ op: string; userId: string; dto: unknown }> = [];
++
++@Module({
++  controllers: [DeviceTokensController],
++  providers: [
++    SessionAuthGuard,
++    {
++      provide: AuthService,
++      useValue: {
++        authenticateBearerToken: async (token: string) => {
++          if (token !== "valid-bearer-token") {
++            throw new ProblemException({
++              typeSlug: "invalid-access-token",
++              title: "Token inválido",
++              status: 401,
++              code: "INVALID_ACCESS_TOKEN",
++              detail: "O token de acesso informado é inválido.",
++            });
++          }
++          return { userId, sessionId, roles: ["participante"] };
++        },
++      },
++    },
++    {
++      provide: DeviceTokensService,
++      useValue: {
++        registerToken: async (uid: string, dto: unknown) => {
++          capturedCalls.push({ op: "register", userId: uid, dto });
++          return { status: "registered" as const };
++        },
++        unregisterToken: async (uid: string, dto: unknown) => {
++          capturedCalls.push({ op: "unregister", userId: uid, dto });
++          return { unlinked: true };
++        },
++      },
++    },
++  ],
++})
++class DeviceTokensHttpTestModule {}
++
++let app: INestApplication;
++
++before(async () => {
++  app = await NestFactory.create(DeviceTokensHttpTestModule, { logger: false });
++  app.setGlobalPrefix("api/v1");
++  app.useGlobalFilters(new ProblemDetailsExceptionFilter());
++  await app.listen(0, "127.0.0.1");
++});
++
++after(async () => {
++  await app?.close();
++});
++
 +test("DeviceTokens DTO: valida limites de tamanho de pushToken e opções de plataforma", () => {
-+  // Válido
 +  const valid = validateDto(registerPushTokenSchema, { pushToken: validToken });
 +  assert.equal(valid.pushToken, validToken);
 +  assert.equal(valid.platform, "android");
@@ -1696,19 +3517,16 @@ index 0000000..a29fa18
 +  const validIos = validateDto(registerPushTokenSchema, { pushToken: validToken, platform: "ios" });
 +  assert.equal(validIos.platform, "ios");
 +
-+  // Rejeita curto (<10)
 +  assert.throws(
 +    () => validateDto(registerPushTokenSchema, { pushToken: "short" }),
 +    (err: unknown) => err instanceof ProblemException && err.problem.code === "INVALID_REQUEST_BODY",
 +  );
 +
-+  // Rejeita plataforma inválida
 +  assert.throws(
 +    () => validateDto(registerPushTokenSchema, { pushToken: validToken, platform: "windows" }),
 +    (err: unknown) => err instanceof ProblemException && err.problem.code === "INVALID_REQUEST_BODY",
 +  );
 +
-+  // Unregister DTO valida token
 +  const unreg = validateDto(unregisterPushTokenSchema, { pushToken: validToken });
 +  assert.equal(unreg.pushToken, validToken);
 +});
@@ -1722,11 +3540,9 @@ index 0000000..a29fa18
 +      queries.push({ sql: String(_query), params: [] });
 +      queryIndex++;
 +      if (queryIndex === 1) {
-+        // Primeira busca: não existe
 +        return { rows: [] };
 +      }
 +      if (queryIndex === 3) {
-+        // Terceira busca: token já existe para outro usuário
 +        return { rows: [{ id: "token-id-1", userId: "other-user" }] };
 +      }
 +      return { rows: [], rowCount: 1 };
@@ -1735,11 +3551,9 @@ index 0000000..a29fa18
 +
 +  const service = new DeviceTokensService(mockDb as any);
 +
-+  // 1. Inserção
 +  const r1 = await service.registerToken(userId, { pushToken: validToken, platform: "android" });
 +  assert.equal(r1.status, "registered");
 +
-+  // 2. Atualização / rotação de conta no mesmo aparelho
 +  const r2 = await service.registerToken(userId, { pushToken: validToken, platform: "android" });
 +  assert.equal(r2.status, "updated");
 +});
@@ -1763,12 +3577,49 @@ index 0000000..a29fa18
 +
 +  assert.equal(executed.length, 3);
 +});
++
++test("DeviceTokensController HTTP: exige Bearer Token em POST e DELETE /api/v1/devices/push-token", async () => {
++  capturedCalls.length = 0;
++
++  // Sem Authorization -> 401
++  const postNoAuth = await supertest(app.getHttpServer())
++    .post("/api/v1/devices/push-token")
++    .send({ pushToken: validToken, platform: "android" });
++  assert.equal(postNoAuth.status, 401);
++
++  const delNoAuth = await supertest(app.getHttpServer())
++    .delete("/api/v1/devices/push-token")
++    .send({ pushToken: validToken });
++  assert.equal(delNoAuth.status, 401);
++  assert.equal(capturedCalls.length, 0);
++
++  // Com Authorization válido -> 200 OK
++  const postOk = await supertest(app.getHttpServer())
++    .post("/api/v1/devices/push-token")
++    .set("Authorization", "Bearer valid-bearer-token")
++    .send({ pushToken: validToken, platform: "android" });
++  assert.equal(postOk.status, 200);
++  assert.deepEqual(postOk.body, { status: "registered" });
++  assert.equal(capturedCalls.length, 1);
++  assert.equal(capturedCalls[0].op, "register");
++  assert.equal(capturedCalls[0].userId, userId);
++
++  const delOk = await supertest(app.getHttpServer())
++    .delete("/api/v1/devices/push-token")
++    .set("Authorization", "Bearer valid-bearer-token")
++    .send({ pushToken: validToken });
++  assert.equal(delOk.status, 200);
++  assert.deepEqual(delOk.body, { unlinked: true });
++  assert.equal(capturedCalls.length, 2);
++  assert.equal(capturedCalls[1].op, "unregister");
++  assert.equal(capturedCalls[1].userId, userId);
++});
 diff --git a/backend/test/unit/queue-call-push.test.ts b/backend/test/unit/queue-call-push.test.ts
 new file mode 100644
-index 0000000..c196b47
+index 0000000..8547b7d
 --- /dev/null
 +++ b/backend/test/unit/queue-call-push.test.ts
-@@ -0,0 +1,226 @@
+@@ -0,0 +1,669 @@
 +import "reflect-metadata";
 +import assert from "node:assert/strict";
 +import { test } from "node:test";
@@ -1776,8 +3627,14 @@ index 0000000..c196b47
 +import type { Client } from "pg";
 +import * as schema from "../../src/database/schema";
 +import {
++  EXPO_PUSH_URL,
++  EXPO_RECEIPTS_URL,
++  MAX_OUTBOX_ATTEMPTS,
++  OUTBOX_RETRY_DELAYS_SECONDS,
 +  QueueCallPushService,
++  getOutboxRetryDelaySeconds,
 +  type PushHttpTransport,
++  type QueueCallOutboxPayload,
 +} from "../../src/notifications/queue-call-push.service";
 +import { DeviceTokensService } from "../../src/notifications/device-tokens.service";
 +
@@ -1788,17 +3645,224 @@ index 0000000..c196b47
 +const participationId = "55555555-5555-4000-8000-000000000005";
 +const pushToken = "ExponentPushToken[unit-test-token-abcdef]";
 +
-+test("QueueCallPushService: inserção da outbox cria payload estritamente silencioso (sem title/body/message)", async () => {
-+  let capturedQuery: string = "";
++interface SimulatedOutboxRow {
++  id: string;
++  serviceSessionId: string;
++  userId: string;
++  eventId: string;
++  experienceId: string;
++  payload: QueueCallOutboxPayload;
++  status: string;
++  attempts: number;
++  nextAttemptAtMs: number | null;
++  lockedAtMs: number | null;
++  ticketId: string | null;
++  lastError: string | null;
++  createdAtMs: number;
++  processedAtMs: number | null;
++}
++
++function createStatefulOutboxDb(options: {
++  initialRows: SimulatedOutboxRow[];
++  sessionStatus?: string;
++  nowMs?: () => number;
++}) {
++  const rows = options.initialRows.map((r) => ({ ...r }));
++  const getNow = options.nowMs ?? (() => Date.now());
++  const sessionStatus = options.sessionStatus ?? "pending";
++  const queries: Array<{ text: string; values: unknown[] }> = [];
++
 +  const client = {
-+    async query(config: { text: string }) {
++    async query(config: { text: string; values?: unknown[] }, extraValues?: unknown[]) {
++      const text = config.text;
++      const values = config.values ?? extraValues ?? [];
++      queries.push({ text, values });
++      const now = getNow();
++
++      // 1. Limpeza de processing órfãos esgotados
++      if (text.includes("AND attempts >=") && text.includes("SET status = 'failed'")) {
++        const lockTimeoutSec = Number(values[0] ?? 60);
++        const maxAttempts = Number(values[1] ?? 3);
++        const updated: Array<{ id: string }> = [];
++        for (const row of rows) {
++          if (
++            row.status === "processing" &&
++            row.lockedAtMs !== null &&
++            row.lockedAtMs <= now - lockTimeoutSec * 1000 &&
++            row.attempts >= maxAttempts
++          ) {
++            row.status = "failed";
++            row.lockedAtMs = null;
++            row.processedAtMs = now;
++            row.lastError = row.lastError ?? "Processamento interrompido após atingir o limite máximo de tentativas";
++            updated.push({ id: row.id });
++          }
++        }
++        return { rows: updated, rowCount: updated.length };
++      }
++
++      // 2. Reserva atômica de registros pendentes ou órfãos em processing
++      if (text.includes("SET status = 'processing'") && text.includes("FOR UPDATE SKIP LOCKED")) {
++        const lockTimeoutSec = Number(values[0] ?? 60);
++        const maxAttempts = Number(values[1] ?? 3);
++        const claimed: unknown[] = [];
++        for (const row of rows) {
++          const isEligiblePending =
++            row.status === "pending" &&
++            (row.nextAttemptAtMs === null || row.nextAttemptAtMs <= now);
++          const isStaleProcessing =
++            row.status === "processing" &&
++            row.lockedAtMs !== null &&
++            row.lockedAtMs <= now - lockTimeoutSec * 1000;
++
++          if ((isEligiblePending || isStaleProcessing) && row.attempts < maxAttempts) {
++            row.status = "processing";
++            row.attempts += 1;
++            row.lockedAtMs = now;
++            claimed.push({
++              id: row.id,
++              serviceSessionId: row.serviceSessionId,
++              userId: row.userId,
++              eventId: row.eventId,
++              experienceId: row.experienceId,
++              payload: row.payload,
++              attempts: row.attempts,
++            });
++          }
++        }
++        return { rows: claimed, rowCount: claimed.length };
++      }
++
++      // 3. Verificação da service_session
++      if (text.includes("FROM service_sessions")) {
++        if (sessionStatus === "missing") return { rows: [], rowCount: 0 };
++        return { rows: [{ status: sessionStatus }], rowCount: 1 };
++      }
++
++      // 4. Reserva para verificação de recibos de registros accepted
++      if (text.includes("WHERE status = 'accepted'") && text.includes("FOR UPDATE SKIP LOCKED")) {
++        const lockTimeoutSec = Number(values[0] ?? 60);
++        const claimedAccepted: unknown[] = [];
++        for (const row of rows) {
++          if (
++            row.status === "accepted" &&
++            row.ticketId !== null &&
++            (row.lockedAtMs === null || row.lockedAtMs <= now - lockTimeoutSec * 1000)
++          ) {
++            row.lockedAtMs = now;
++            claimedAccepted.push({
++              id: row.id,
++              serviceSessionId: row.serviceSessionId,
++              userId: row.userId,
++              ticketId: row.ticketId,
++              attempts: row.attempts,
++            });
++          }
++        }
++        return { rows: claimedAccepted, rowCount: claimedAccepted.length };
++      }
++
++      // 5. Atualizações individuais de status da outbox
++      if (text.includes("UPDATE queue_call_outbox")) {
++        const targetId = String(values[values.length - 1]);
++        const row = rows.find((r) => r.id === targetId);
++        if (!row) return { rows: [], rowCount: 0 };
++
++        if (text.includes("SET status = 'expired'")) {
++          row.status = "expired";
++          row.lockedAtMs = null;
++          row.processedAtMs = now;
++          row.lastError = "Sessão de atendimento não está mais pendente";
++        } else if (text.includes("SET status = 'no_device'")) {
++          row.status = "no_device";
++          row.lockedAtMs = null;
++          row.processedAtMs = now;
++          row.lastError = "Nenhum dispositivo ativo registrado para o participante";
++        } else if (text.includes("SET status = 'accepted'")) {
++          row.status = "accepted";
++          row.ticketId = (values[0] as string | null) ?? null;
++          row.lockedAtMs = null;
++          row.lastError = (values[1] as string | null) ?? null;
++        } else if (text.includes("SET status = 'delivered'")) {
++          row.status = "delivered";
++          row.lockedAtMs = null;
++          row.processedAtMs = now;
++          row.lastError = (values[0] as string | null) ?? null;
++        } else if (text.includes("SET status = 'failed'")) {
++          row.status = "failed";
++          row.lockedAtMs = null;
++          row.processedAtMs = now;
++          row.lastError = String(values[0] ?? "");
++        } else if (text.includes("SET status = 'pending'")) {
++          const delaySec = Number(values[0] ?? 5);
++          row.status = "pending";
++          if (text.includes("ticket_id = NULL")) {
++            row.ticketId = null;
++          }
++          row.lockedAtMs = null;
++          row.nextAttemptAtMs = now + delaySec * 1000;
++          row.lastError = String(values[1] ?? "");
++        } else if (text.includes("SET locked_at = NULL")) {
++          row.lockedAtMs = null;
++          if (values.length > 1) {
++            row.lastError = String(values[0] ?? "");
++          }
++        }
++        return { rows: [], rowCount: 1 };
++      }
++
++      return { rows: [], rowCount: 0 };
++    },
++  };
++
++  return {
++    db: drizzle(client as unknown as Client, { schema }),
++    rows,
++    queries,
++  };
++}
++
++function makeSampleRow(overrides: Partial<SimulatedOutboxRow> = {}): SimulatedOutboxRow {
++  return {
++    id: "outbox-1",
++    serviceSessionId: sessionId,
++    userId,
++    eventId,
++    experienceId,
++    payload: {
++      type: "queue.called",
++      serviceSessionId: sessionId,
++      participationId,
++      eventId,
++      userId,
++      calledAt: "2026-11-10T12:00:00.000Z",
++      version: 1,
++    },
++    status: "pending",
++    attempts: 0,
++    nextAttemptAtMs: null,
++    lockedAtMs: null,
++    ticketId: null,
++    lastError: null,
++    createdAtMs: 1000,
++    processedAtMs: null,
++    ...overrides,
++  };
++}
++
++test("QueueCallPushService: inserção da outbox cria payload estritamente silencioso (sem title/body/message)", async () => {
++  let capturedQuery = "";
++  let capturedValues: unknown[] = [];
++  const client = {
++    async query(config: { text: string; values?: unknown[] }, extraValues?: unknown[]) {
 +      capturedQuery = config.text;
++      capturedValues = config.values ?? extraValues ?? [];
 +      return { rows: [] };
 +    },
 +  };
 +  const db = drizzle(client as unknown as Client, { schema });
 +
-+  const service = new QueueCallPushService(db, null as any);
++  const service = new QueueCallPushService(db, null as unknown as DeviceTokensService);
 +  const outboxId = await service.createOutboxEntryWithTx(db as any, {
 +    sessionId,
 +    userId,
@@ -1810,177 +3874,152 @@ index 0000000..c196b47
 +
 +  assert.ok(typeof outboxId === "string" && outboxId.length > 0);
 +  assert.ok(capturedQuery.includes("queue_call_outbox"));
-+  // Garante que campos visuais proibidos NÃO constam no SQL/payload
-+  assert.equal(capturedQuery.includes('"title"'), false);
-+  assert.equal(capturedQuery.includes('"body"'), false);
-+  assert.equal(capturedQuery.includes('"message"'), false);
++  const serializedPayload = String(capturedValues.find((v) => typeof v === "string" && v.includes("queue.called")) ?? "");
++  assert.ok(serializedPayload.length > 0);
++  const parsed = JSON.parse(serializedPayload);
++  assert.equal(parsed.type, "queue.called");
++  assert.equal(parsed.serviceSessionId, sessionId);
++  assert.equal(parsed.userId, userId);
++  assert.equal(parsed.title, undefined);
++  assert.equal(parsed.body, undefined);
++  assert.equal(parsed.message, undefined);
++  assert.equal(parsed.sound, undefined);
 +});
 +
 +test("QueueCallPushService: descarta chamadas encerradas ou invalidadas (status !== pending)", async () => {
-+  const updates: string[] = [];
-+  const client = {
-+    async query(config: { text: string }) {
-+      const text = config.text;
-+      if (text.includes("FROM queue_call_outbox")) {
-+        return {
-+          rows: [
-+            {
-+              id: "outbox-1",
-+              serviceSessionId: sessionId,
-+              userId,
-+              eventId,
-+              experienceId,
-+              payload: {
-+                type: "queue.called" as const,
-+                serviceSessionId: sessionId,
-+                participationId,
-+                eventId,
-+                version: 1 as const,
-+              },
-+              attempts: 0,
-+            },
-+          ],
-+        };
-+      }
-+      if (text.includes("FROM service_sessions")) {
-+        // Sessão já foi concluída ou cancelada antes do envio
-+        return { rows: [{ status: "completed" }] };
-+      }
-+      if (text.includes("UPDATE queue_call_outbox")) {
-+        updates.push(text);
-+        return { rows: [], rowCount: 1 };
-+      }
-+      return { rows: [] };
-+    },
-+  };
-+  const db = drizzle(client as unknown as Client, { schema });
++  const state = createStatefulOutboxDb({
++    initialRows: [makeSampleRow()],
++    sessionStatus: "completed",
++  });
 +
 +  const mockDeviceTokensService = {
 +    getActiveTokensForUser: async () => [{ pushToken, platform: "android" }],
 +    revokeInvalidToken: async () => undefined,
 +  } as unknown as DeviceTokensService;
 +
-+  const service = new QueueCallPushService(db, mockDeviceTokensService);
++  const service = new QueueCallPushService(state.db, mockDeviceTokensService);
 +  const result = await service.dispatchPending();
 +
 +  assert.equal(result.processed, 1);
 +  assert.equal(result.expired, 1);
++  assert.equal(result.accepted, 0);
 +  assert.equal(result.delivered, 0);
-+  assert.ok(updates.some((u) => u.includes("expired")));
++  assert.equal(state.rows[0].status, "expired");
 +});
 +
-+test("QueueCallPushService: envio silencioso data-only com prioridade alta e contentAvailable", async () => {
-+  const dispatchedRequests: any[] = [];
++test("QueueCallPushService: NÃO marca como entregue quando não há dispositivo destinatário (status = no_device)", async () => {
++  const state = createStatefulOutboxDb({
++    initialRows: [makeSampleRow()],
++  });
++
++  const mockDeviceTokensService = {
++    getActiveTokensForUser: async () => [],
++    revokeInvalidToken: async () => undefined,
++  } as unknown as DeviceTokensService;
++
++  const service = new QueueCallPushService(state.db, mockDeviceTokensService);
++  const result = await service.dispatchPending();
++
++  assert.equal(result.processed, 1);
++  assert.equal(result.noDevice, 1);
++  assert.equal(result.accepted, 0);
++  assert.equal(result.delivered, 0);
++  assert.equal(state.rows[0].status, "no_device");
++  assert.match(state.rows[0].lastError ?? "", /Nenhum dispositivo ativo/);
++});
++
++test("QueueCallPushService: distingue envio aceito pelo Expo (accepted) de entrega confirmada por recibo (delivered)", async () => {
++  const dispatchedRequests: Array<{ url: string; body: any }> = [];
++  let receiptReady = false;
++
 +  const mockTransport: PushHttpTransport = async (url, options) => {
-+    dispatchedRequests.push({ url, options, body: JSON.parse(options.body) });
-+    return {
-+      ok: true,
-+      status: 200,
-+      json: async () => ({
-+        data: [{ status: "ok", id: "ticket-1" }],
-+      }),
-+    };
++    const parsedBody = JSON.parse(options.body);
++    dispatchedRequests.push({ url, body: parsedBody });
++
++    if (url === EXPO_PUSH_URL) {
++      return {
++        ok: true,
++        status: 200,
++        json: async () => ({
++          data: [{ status: "ok", id: "expo-receipt-ticket-123" }],
++        }),
++      };
++    }
++
++    if (url === EXPO_RECEIPTS_URL) {
++      return {
++        ok: true,
++        status: 200,
++        json: async () => ({
++          data: receiptReady
++            ? { "expo-receipt-ticket-123": { status: "ok" } }
++            : {},
++        }),
++      };
++    }
++
++    throw new Error(`Unexpected URL: ${url}`);
 +  };
 +
-+  const client = {
-+    async query(config: { text: string }) {
-+      const text = config.text;
-+      if (text.includes("FROM queue_call_outbox")) {
-+        return {
-+          rows: [
-+            {
-+              id: "outbox-1",
-+              serviceSessionId: sessionId,
-+              userId,
-+              eventId,
-+              experienceId,
-+              payload: {
-+                type: "queue.called" as const,
-+                serviceSessionId: sessionId,
-+                participationId,
-+                eventId,
-+                version: 1 as const,
-+              },
-+              attempts: 0,
-+            },
-+          ],
-+        };
-+      }
-+      if (text.includes("FROM service_sessions")) {
-+        return { rows: [{ status: "pending" }] };
-+      }
-+      return { rows: [], rowCount: 1 };
-+    },
-+  };
-+  const db = drizzle(client as unknown as Client, { schema });
++  const state = createStatefulOutboxDb({
++    initialRows: [makeSampleRow()],
++  });
 +
 +  const mockDeviceTokensService = {
 +    getActiveTokensForUser: async () => [{ pushToken, platform: "android" }],
 +    revokeInvalidToken: async () => undefined,
 +  } as unknown as DeviceTokensService;
 +
-+  const service = new QueueCallPushService(db, mockDeviceTokensService, mockTransport);
++  const service = new QueueCallPushService(state.db, mockDeviceTokensService, mockTransport);
 +
-+  const result = await service.dispatchPending();
-+  assert.equal(result.delivered, 1);
-+  assert.equal(dispatchedRequests.length, 1);
++  // 1º ciclo: Expo aceita o ticket, mas o recibo de entrega ainda não está disponível
++  const pass1 = await service.dispatchPending();
++  assert.equal(pass1.processed, 1);
++  assert.equal(pass1.accepted, 1);
++  assert.equal(pass1.delivered, 0);
++  assert.equal(state.rows[0].status, "accepted");
++  assert.equal(state.rows[0].ticketId, "expo-receipt-ticket-123");
 +
-+  const req = dispatchedRequests[0];
-+  assert.equal(req.url, "https://exp.host/--/api/v2/push/send");
-+  const msg = req.body[0];
++  const sendReq = dispatchedRequests.find((r) => r.url === EXPO_PUSH_URL);
++  assert.ok(sendReq);
++  const msg = sendReq.body[0];
 +  assert.equal(msg.to, pushToken);
 +  assert.equal(msg.priority, "high");
 +  assert.equal(msg._contentAvailable, true);
-+  // Garante que não possui campos de notificação visual
 +  assert.equal(msg.title, undefined);
 +  assert.equal(msg.body, undefined);
-+  assert.equal(msg.message, undefined);
 +  assert.equal(msg.sound, undefined);
 +  assert.equal(msg.data.type, "queue.called");
 +  assert.equal(msg.data.serviceSessionId, sessionId);
++
++  // 2º ciclo: Provedor confirma o recibo de entrega (status = ok)
++  receiptReady = true;
++  const pass2 = await service.dispatchPending();
++  assert.equal(pass2.processed, 0);
++  assert.equal(pass2.delivered, 1);
++  assert.equal(state.rows[0].status, "delivered");
++  assert.ok(state.rows[0].processedAtMs !== null);
 +});
 +
-+test("QueueCallPushService: trata DeviceNotRegistered revogando o token", async () => {
++test("QueueCallPushService: falha em todos os tickets DeviceNotRegistered revoga token e marca como failed (nunca delivered)", async () => {
 +  const revokedTokens: string[] = [];
 +  const mockTransport: PushHttpTransport = async () => ({
 +    ok: true,
 +    status: 200,
 +    json: async () => ({
-+      data: [{ status: "error", message: "DeviceNotRegistered", details: { error: "DeviceNotRegistered" } }],
++      data: [
++        {
++          status: "error",
++          message: "The recipient device is not registered with FCM.",
++          details: { error: "DeviceNotRegistered" },
++        },
++      ],
 +    }),
 +  });
 +
-+  const client = {
-+    async query(config: { text: string }) {
-+      const text = config.text;
-+      if (text.includes("FROM queue_call_outbox")) {
-+        return {
-+          rows: [
-+            {
-+              id: "outbox-1",
-+              serviceSessionId: sessionId,
-+              userId,
-+              eventId,
-+              experienceId,
-+              payload: {
-+                type: "queue.called" as const,
-+                serviceSessionId: sessionId,
-+                participationId,
-+                eventId,
-+                version: 1 as const,
-+              },
-+              attempts: 0,
-+            },
-+          ],
-+        };
-+      }
-+      if (text.includes("FROM service_sessions")) {
-+        return { rows: [{ status: "pending" }] };
-+      }
-+      return { rows: [], rowCount: 1 };
-+    },
-+  };
-+  const db = drizzle(client as unknown as Client, { schema });
++  const state = createStatefulOutboxDb({
++    initialRows: [makeSampleRow()],
++  });
 +
 +  const mockDeviceTokensService = {
 +    getActiveTokensForUser: async () => [{ pushToken, platform: "android" }],
@@ -1989,294 +4028,442 @@ index 0000000..c196b47
 +    },
 +  } as unknown as DeviceTokensService;
 +
-+  const service = new QueueCallPushService(db, mockDeviceTokensService, mockTransport);
-+
++  const service = new QueueCallPushService(state.db, mockDeviceTokensService, mockTransport);
 +  const result = await service.dispatchPending();
-+  assert.equal(result.delivered, 1);
++
++  assert.equal(result.processed, 1);
++  assert.equal(result.accepted, 0);
++  assert.equal(result.delivered, 0);
++  assert.equal(result.failed, 1);
++  assert.equal(state.rows[0].status, "failed");
 +  assert.deepEqual(revokedTokens, [pushToken]);
++});
++
++test("QueueCallPushService: múltiplos tokens tratam erro individual e entregam no dispositivo válido", async () => {
++  const revokedTokens: string[] = [];
++  const deadToken = "ExponentPushToken[dead-token]";
++  const validToken = "ExponentPushToken[valid-token]";
++
++  const mockTransport: PushHttpTransport = async (url) => {
++    if (url === EXPO_PUSH_URL) {
++      return {
++        ok: true,
++        status: 200,
++        json: async () => ({
++          data: [
++            { status: "error", message: "Unregistered", details: { error: "DeviceNotRegistered" } },
++            { status: "ok", id: "ticket-valid-2" },
++          ],
++        }),
++      };
++    }
++    return {
++      ok: true,
++      status: 200,
++      json: async () => ({
++        data: { "ticket-valid-2": { status: "ok" } },
++      }),
++    };
++  };
++
++  const state = createStatefulOutboxDb({
++    initialRows: [makeSampleRow()],
++  });
++
++  const mockDeviceTokensService = {
++    getActiveTokensForUser: async () => [
++      { pushToken: deadToken, platform: "android" },
++      { pushToken: validToken, platform: "android" },
++    ],
++    revokeInvalidToken: async (t: string) => {
++      revokedTokens.push(t);
++    },
++  } as unknown as DeviceTokensService;
++
++  const service = new QueueCallPushService(state.db, mockDeviceTokensService, mockTransport);
++  const result = await service.dispatchPending();
++
++  assert.deepEqual(revokedTokens, [deadToken]);
++  assert.equal(result.accepted, 1);
++  assert.equal(result.delivered, 1);
++  assert.equal(state.rows[0].status, "delivered");
++});
++
++test("QueueCallPushService: retries com intervalo de backoff definido e limite de 3 tentativas em falha de rede/503", async () => {
++  let currentTimeMs = 10_000;
++  let shouldSucceed = false;
++
++  const mockTransport: PushHttpTransport = async (url) => {
++    if (!shouldSucceed) {
++      return {
++        ok: false,
++        status: 503,
++        json: async () => ({ errors: [{ message: "Service Unavailable" }] }),
++      };
++    }
++    if (url === EXPO_PUSH_URL) {
++      return {
++        ok: true,
++        status: 200,
++        json: async () => ({ data: [{ status: "ok", id: "ticket-retry-ok" }] }),
++      };
++    }
++    return {
++      ok: true,
++      status: 200,
++      json: async () => ({ data: { "ticket-retry-ok": { status: "ok" } } }),
++    };
++  };
++
++  const state = createStatefulOutboxDb({
++    initialRows: [makeSampleRow()],
++    nowMs: () => currentTimeMs,
++  });
++
++  const mockDeviceTokensService = {
++    getActiveTokensForUser: async () => [{ pushToken, platform: "android" }],
++    revokeInvalidToken: async () => undefined,
++  } as unknown as DeviceTokensService;
++
++  const service = new QueueCallPushService(state.db, mockDeviceTokensService, mockTransport);
++
++  // Tentativa 1 falha -> agenda retry para +5s (OUTBOX_RETRY_DELAYS_SECONDS[0])
++  const r1 = await service.dispatchPending();
++  assert.equal(r1.processed, 1);
++  assert.equal(r1.retried, 1);
++  assert.equal(r1.failed, 0);
++  assert.equal(state.rows[0].status, "pending");
++  assert.equal(state.rows[0].attempts, 1);
++  assert.equal(state.rows[0].nextAttemptAtMs, currentTimeMs + OUTBOX_RETRY_DELAYS_SECONDS[0] * 1000);
++
++  // Antes do intervalo de 5s -> não processa novamente
++  currentTimeMs += 2000;
++  const rEarly = await service.dispatchPending();
++  assert.equal(rEarly.processed, 0);
++
++  // Após 5s -> Tentativa 2 falha -> agenda retry para +15s (OUTBOX_RETRY_DELAYS_SECONDS[1])
++  currentTimeMs += 4000;
++  const r2 = await service.dispatchPending();
++  assert.equal(r2.processed, 1);
++  assert.equal(r2.retried, 1);
++  assert.equal(state.rows[0].status, "pending");
++  assert.equal(state.rows[0].attempts, 2);
++  assert.equal(state.rows[0].nextAttemptAtMs, currentTimeMs + OUTBOX_RETRY_DELAYS_SECONDS[1] * 1000);
++
++  // Após 15s -> Tentativa 3 falha -> atinge MAX_OUTBOX_ATTEMPTS (3) e marca como failed definitivo
++  currentTimeMs += 16_000;
++  const r3 = await service.dispatchPending();
++  assert.equal(r3.processed, 1);
++  assert.equal(r3.retried, 0);
++  assert.equal(r3.failed, 1);
++  assert.equal(state.rows[0].status, "failed");
++  assert.equal(state.rows[0].attempts, MAX_OUTBOX_ATTEMPTS);
++
++  // Mesmo se o serviço voltar depois, registro failed não é reprocessado
++  shouldSucceed = true;
++  currentTimeMs += 60_000;
++  const rAfter = await service.dispatchPending();
++  assert.equal(rAfter.processed, 0);
++  assert.equal(getOutboxRetryDelaySeconds(1), 5);
++  assert.equal(getOutboxRetryDelaySeconds(2), 15);
++});
++
++test("QueueCallPushService: concorrência entre múltiplas instâncias reserva cada registro uma única vez", async () => {
++  let sendCount = 0;
++  const mockTransport: PushHttpTransport = async (url, options) => {
++    await new Promise((resolve) => setTimeout(resolve, 15));
++    if (url === EXPO_PUSH_URL) {
++      sendCount++;
++      const ticketId = `ticket-${sendCount}`;
++      return {
++        ok: true,
++        status: 200,
++        json: async () => ({ data: [{ status: "ok", id: ticketId }] }),
++      };
++    }
++    const { ids } = JSON.parse(options.body) as { ids: string[] };
++    return {
++      ok: true,
++      status: 200,
++      json: async () => ({
++        data: Object.fromEntries(ids.map((id) => [id, { status: "ok" }])),
++      }),
++    };
++  };
++
++  const state = createStatefulOutboxDb({
++    initialRows: [
++      makeSampleRow({ id: "outbox-concurrent-1", serviceSessionId: "11111111-1111-4000-8000-000000000011" }),
++      makeSampleRow({ id: "outbox-concurrent-2", serviceSessionId: "11111111-1111-4000-8000-000000000012" }),
++    ],
++  });
++
++  const mockDeviceTokensService = {
++    getActiveTokensForUser: async () => [{ pushToken, platform: "android" }],
++    revokeInvalidToken: async () => undefined,
++  } as unknown as DeviceTokensService;
++
++  // Duas instâncias independentes do serviço compartilhando o mesmo banco
++  const instanceA = new QueueCallPushService(state.db, mockDeviceTokensService, mockTransport);
++  const instanceB = new QueueCallPushService(state.db, mockDeviceTokensService, mockTransport);
++
++  const [resA, resB] = await Promise.all([
++    instanceA.dispatchPending(),
++    instanceB.dispatchPending(),
++  ]);
++
++  assert.equal(resA.processed + resB.processed, 2);
++  assert.equal(sendCount, 2, "Cada registro deve ser enviado exatamente uma vez");
++  assert.equal(state.rows[0].status, "delivered");
++  assert.equal(state.rows[1].status, "delivered");
++});
++
++test("QueueCallPushService: retomada após reinício recupera registros pendentes e processing órfãos", async () => {
++  const nowMs = 500_000;
++  const state = createStatefulOutboxDb({
++    nowMs: () => nowMs,
++    initialRows: [
++      // Registro preso em processing há 120s (servidor caiu durante tentativa 1)
++      makeSampleRow({
++        id: "outbox-stale-processing",
++        serviceSessionId: "11111111-1111-4000-8000-000000000021",
++        status: "processing",
++        attempts: 1,
++        lockedAtMs: nowMs - 120_000,
++      }),
++      // Registro preso em processing que já estava na 3ª tentativa -> deve ir para failed
++      makeSampleRow({
++        id: "outbox-exhausted-processing",
++        serviceSessionId: "11111111-1111-4000-8000-000000000022",
++        status: "processing",
++        attempts: 3,
++        lockedAtMs: nowMs - 120_000,
++      }),
++      // Registro accepted aguardando confirmação de recibo antes do reinício
++      makeSampleRow({
++        id: "outbox-accepted-before-restart",
++        serviceSessionId: "11111111-1111-4000-8000-000000000023",
++        status: "accepted",
++        attempts: 1,
++        ticketId: "ticket-before-restart",
++        lockedAtMs: null,
++      }),
++    ],
++  });
++
++  const mockTransport: PushHttpTransport = async (url) => {
++    if (url === EXPO_PUSH_URL) {
++      return {
++        ok: true,
++        status: 200,
++        json: async () => ({ data: [{ status: "ok", id: "ticket-recovered" }] }),
++      };
++    }
++    return {
++      ok: true,
++      status: 200,
++      json: async () => ({
++        data: {
++          "ticket-recovered": { status: "ok" },
++          "ticket-before-restart": { status: "ok" },
++        },
++      }),
++    };
++  };
++
++  const mockDeviceTokensService = {
++    getActiveTokensForUser: async () => [{ pushToken, platform: "android" }],
++    revokeInvalidToken: async () => undefined,
++  } as unknown as DeviceTokensService;
++
++  const restartedService = new QueueCallPushService(state.db, mockDeviceTokensService, mockTransport);
++  const recoveryResult = await restartedService.recoverOnStartup();
++
++  assert.equal(recoveryResult.processed, 1);
++  assert.equal(recoveryResult.accepted, 1);
++  assert.equal(recoveryResult.delivered, 2);
++  assert.equal(recoveryResult.failed, 1);
++
++  assert.equal(state.rows[0].status, "delivered");
++  assert.equal(state.rows[0].attempts, 2);
++  assert.equal(state.rows[1].status, "failed");
++  assert.equal(state.rows[2].status, "delivered");
 +});
 diff --git a/docs/NOTIF_01_IMPLEMENTACAO.md b/docs/NOTIF_01_IMPLEMENTACAO.md
 new file mode 100644
-index 0000000..3dcd5d4
+index 0000000..b045a56
 --- /dev/null
 +++ b/docs/NOTIF_01_IMPLEMENTACAO.md
-@@ -0,0 +1,279 @@
+@@ -0,0 +1,172 @@
 +# ArenaGo — TASK NOTIF-01: Alerta vibratório silencioso ao ser chamado na fila
 +
 +## 1. Identificação da Entrega
 +
 +- **Repositório:** `JaviDansen/ArenaGo`
-+- **Branch-base:** `develop`
-+- **HEAD de referência:** `41b231f`
++- **Branch-base:** `develop` (`41b231f`)
 +- **Branch de trabalho:** `feature/queue-call-vibration`
 +- **Expo SDK:** 58 (Expo ~58.0.23, React 19.3.0, React Native 0.88.1)
-+- **Convenção de commit:** `feat(queue): implementar alerta vibratório silencioso para chamadas da fila`
++- **Commit de correção:** `fix(queue): corrigir entrega e processamento do alerta vibratório silencioso`
 +
 +---
 +
-+## 2. Seleção de Modelos e Níveis de Raciocínio (AGENTS.md)
++## 2. Seleção de Modelos e Níveis de Raciocínio (`AGENTS.md`)
 +
-+- **Modelo Recomendado para Implementação:** **GPT-6.1 Sol com raciocínio High**  
-+  *Justificativa:* A tarefa exige desenvolvimento full-stack com integração transacional complexa entre NestJS, PostgreSQL Drizzle (tabelas de outbox e tokens, idempotência em mutações de fila), serviços de mensageria assíncrona (Expo Push API), hooks de autenticação mobile e execução headless em background no Expo SDK 58.
-+- **Modelo Recomendado para Revisão Crítica:** **GPT-6 Astra com raciocínio High / Extra High**  
-+  *Justificativa:* Verificação estática de concorrência, consistência ACID da chamada do Staff sob race conditions, isolamento transacional da outbox e garantias de não-reversão do banco em falhas de rede.
-+- **Executor Designado para Validação Rotineira:** **GPT-6 Luna com raciocínio Medium** (conforme política permanente).
++- **Modelo Recomendado para Implementação e Correções:** **GPT-6.1 Sol com raciocínio High**
++  *Justificativa:* Correções estruturais de confiabilidade transacional e concorrência na outbox PostgreSQL, autenticação e isolamento de sessão no cliente HTTP, parsing de `NotificationTaskPayload` do Expo SDK 58 em modo headless e deduplicação persistente no `SecureStore`.
++- **Modelo Recomendado para Revisão Crítica:** **GPT-6 Astra com raciocínio High / Extra High**
++  *Justificativa:* Verificação de invariantes de reserva atômica (`FOR UPDATE SKIP LOCKED`), isolamento entre contas após logout/troca de sessão e fidelidade das limitações reais do Android.
++- **Executor Designado para Validações Rotineiras:** **GPT-6 Luna com raciocínio Medium**.
 +
 +---
 +
-+## 3. Arquitetura da Solução
++## 3. Correções Implementadas (P1 e P2)
 +
-+### 3.1. Fonte de Verdade e Transacionalidade (PostgreSQL)
++### 3.1. Autenticação e Isolamento dos Endpoints de Dispositivo — P1 (`app/services/devicePushService.js` e `app/context/AuthContext.js`)
++- **`POST /devices/push-token`:** agora envia explicitamente `{ auth: true }` para que `httpClient.js` inclua o cabeçalho `Authorization: Bearer <accessToken>`.
++- **`DELETE /devices/push-token`:** agora envia `{ auth: true, body: { pushToken } }`, respeitando o contrato de `httpClient.delete(path, options)` em `app/services/httpClient.js`.
++- **Proteção contra registro tardio após logout ou troca de sessão:**
++  - `syncDevicePushToken` controla uma geração monotônica (`syncGeneration`), valida `getSessionEpoch()` e `isCurrent()` antes e depois de cada fronteira assíncrona (`ensureAndroidSilentChannel`, `getPermissionsAsync`, `requestPermissionsAsync`, `getExpoPushTokenAsync` e `client.post`).
++  - Se o logout (`unregisterDevicePushToken` / `cancelPendingPushTokenSync`) ocorrer enquanto a obtenção do token está pendente, o envio `POST /devices/push-token` é abortado imediatamente.
++  - Se o logout ocorrer enquanto o `POST /devices/push-token` já estava em trânsito na rede, a conclusão tardia executa compensação imediata via `DELETE /devices/push-token` e não persiste o token no `SecureStore`.
 +
-+A fonte de verdade absoluta permanece no PostgreSQL. Quando o Staff executa a operação real de chamada (`POST /api/v1/staff/events/:eventId/experiences/:experienceId/stations/:stationId/call-next`):
-+1. O backend adquire os locks em ordem estrita (`events` FOR SHARE → `experiences` FOR UPDATE → `stations` FOR UPDATE → `users`/`user_roles` FOR SHARE → reserva de idempotência).
-+2. Se a chamada for confirmada e um novo atendimento for criado (`service_sessions` com status `pending`), um registro é inserido na tabela transacional `queue_call_outbox` dentro da mesma `mutationTransaction(tx)`.
-+3. O payload é rigorosamente silencioso (*data-only*), sem campos visuais (`title`, `body`, `message`, `sound`).
-+4. Replays idempotentes (`reservation.kind === "replay"`) retornam a resposta histórica e **nunca** inserem novo registro na outbox nem disparam push.
-+5. Se o envio de push falhar, a chamada do Staff **já está confirmada e commitada**, garantindo que instabilidades externas não afetem o atendimento presencial.
++### 3.2. Processamento do Payload em Background (Expo SDK 58 `NotificationTaskPayload`) — P1 (`app/services/queueCallVibrationService.js` e `app/index.js`)
++- **Interpretação real de `NotificationTaskPayload`:**
++  - `extractNotificationTaskPayload` interpreta `data.data.dataString` (formato nativo produzido por `RemoteMessageSerializer.java` no Android) e `data.dataString` (formato documentado no `NotificationTaskPayload` do Expo SDK 58), fazendo `JSON.parse` seguro e validando o conteúdo.
++  - Rejeita mensagens malformadas, `NotificationResponse` (`'actionIdentifier' in data`), erros da task e qualquer payload que contenha campos visuais ou sonoros (`title`, `body`, `message`, `subtitle`, `sound`, `alert`, `badge`) sem produzir vibração.
++- **Inicialização Headless:**
++  - `TaskManager.defineTask(BACKGROUND_QUEUE_CALL_TASK, ...)` e `Notifications.registerTaskAsync(BACKGROUND_QUEUE_CALL_TASK)` são executados no escopo de inicialização do módulo `queueCallVibrationService.js`, que é importado diretamente no topo de `app/index.js` antes de `registerRootComponent(App)`. Isso garante que a task esteja definida e registrada quando o Android carregar o bundle JS em segundo plano sem montar a árvore React.
 +
-+### 3.2. Deduplicação e Resiliência
-+
-+- **No Backend:**
-+  - A tabela `queue_call_outbox` possui restrição única `UNIQUE("service_session_id")`.
-+  - Antes de despachar cada mensagem, o serviço `QueueCallPushService` valida se a sessão de atendimento ainda se encontra com status `pending`. Se o atendimento foi concluído, cancelado ou marcado como ausente pelo Staff antes da entrega do push, a mensagem é imediatamente marcada como `expired` e não é transmitida.
-+  - Se o serviço Expo Push retornar erro `DeviceNotRegistered`, o token de push do aparelho é automaticamente invalidado no banco (`revoked_at = clock_timestamp()`).
-+- **No Aplicativo Mobile:**
-+  - Deduplicação em memória e ciclo de vida: o identificador `serviceSessionId` é registrado em um `Set` local. Qualquer recepção subsequente da mesma sessão (por retry de rede ou atualização de tela) é ignorada sem vibrar.
-+  - Ao realizar logout ou troca de usuário, o conjunto de deduplicação é limpo via `resetQueueCallAlerts()`.
-+
-+### 3.3. Padrão de Vibração e Transporte Silencioso
-+
-+- **Padrão Exato de Vibração:**
-+  - Início imediato (0 ms)
-+  - Pulso 1: 500 ms de vibração
-+  - Pausa 1: 200 ms de repouso
-+  - Pulso 2: 500 ms de vibração
-+  - Pausa 2: 200 ms de repouso
-+  - Pulso 3: 500 ms de vibração
-+  - Sem repetição (`repeat = false`)
-+  - **Duração total exata:** 1.900 ms (1,9 segundo).
-+  - Array React Native: `[0, 500, 200, 500, 200, 500]`.
-+- **Supressão Visual Total:**
-+  - Configuração do manipulador: `Notifications.setNotificationHandler({ handleNotification: async () => ({ shouldShowAlert: false, shouldPlaySound: false, shouldSetBadge: false }) })`.
-+  - O payload de dados contém exclusivamente:
-+    ```json
-+    {
-+      "type": "queue.called",
-+      "serviceSessionId": "<UUID>",
-+      "participationId": "<UUID>",
-+      "eventId": "<UUID>",
-+      "version": 1
-+    }
++### 3.3. Confiabilidade, Reserva Atômica e Retomada da Outbox — P1 (`backend/src/notifications/queue-call-push.service.ts`)
++- **Reserva atômica por registro:**
++  - Substituído o `SELECT ... FOR UPDATE SKIP LOCKED` avulso por uma reserva atômica em instrução única:
++    ```sql
++    UPDATE queue_call_outbox
++    SET status = 'processing',
++        attempts = attempts + 1,
++        locked_at = clock_timestamp()
++    WHERE id IN (
++      SELECT id
++      FROM queue_call_outbox
++      WHERE (
++        (status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= clock_timestamp()))
++        OR
++        (status = 'processing' AND locked_at <= clock_timestamp() - (60 * INTERVAL '1 second'))
++      )
++      AND attempts < 3
++      ORDER BY created_at ASC
++      LIMIT 20
++      FOR UPDATE SKIP LOCKED
++    )
++    RETURNING ...
 +    ```
++  - Evita que múltiplas instâncias do backend processem o mesmo registro simultaneamente.
++- **Retomada após reinício e agendador periódico:**
++  - `QueueCallPushService` implementa `OnApplicationBootstrap` e `BeforeApplicationShutdown`.
++  - Na inicialização (`recoverOnStartup()`), recupera registros pendentes, libera/reprocessa registros órfãos em `processing` cujo lock de 60s expirou durante uma queda e verifica recibos de registros `accepted`.
++  - Mantém ciclo periódico não sobreposto (`startScheduler`, intervalo padrão de 5s com `.unref()`), não dependendo exclusivamente de `triggerDispatch()`.
++- **Retries com intervalo e limite definidos:**
++  - Limite máximo: `MAX_OUTBOX_ATTEMPTS = 3`.
++  - Backoff progressivo via `next_attempt_at`: `5 segundos` após a 1ª falha e `15 segundos` após a 2ª falha; na 3ª falha, o registro transita definitivamente para `status = 'failed'`.
++- **Distinção estrita de estados de envio e entrega:**
++  - `no_device`: quando o participante não possui nenhum token ativo (`tokens.length === 0`). **Nunca é marcado como `delivered`.**
++  - `accepted`: quando a Expo Push API (`/api/v2/push/send`) aceita ao menos um ticket (`status: "ok"`), persistindo o `ticket_id`.
++  - `delivered`: somente quando a API de recibos (`/api/v2/push/getReceipts`) confirma `{ status: "ok" }` para o `ticket_id`.
++  - `expired`: quando a `service_session` não está mais `pending` antes do envio ou da confirmação do recibo.
++  - `failed`: quando todos os tickets/recibos falham com erro não recuperável (ex.: `DeviceNotRegistered`, revogando o token inválido) ou após esgotar as 3 tentativas.
++
++### 3.4. Isolamento de Sessão, Deduplicação Persistente e Validação de Estado — P1 (`app/services/queueCallVibrationService.js`)
++- **Deduplicação persistente por usuário (`SecureStore`):**
++  - Os identificadores `serviceSessionId` já vibrados são persistidos no `SecureStore` (`arenago_alerted_service_sessions_v1`) indexados pelo `userId`, sobrevivendo ao reinício do processo.
++  - O usuário autenticado ativo é persistido em `arenago_push_active_user_id` no `SecureStore`, permitindo que a task em background valide a titularidade do alerta mesmo quando `AuthContext` não está montado.
++- **Proteções implementadas:**
++  - **Nenhum alerta de conta anterior:** alertas cujo `userId` divirja do usuário ativo ou recebidos após logout (`clearActiveQueueCallUser`) são descartados.
++  - **Nenhuma vibração duplicada foreground/background:** trava síncrona `inFlightSessionIds` impede execução concorrente quando o listener de primeiro plano e a task de segundo plano recebem o mesmo evento simultaneamente.
++  - **Nenhuma vibração de chamada já encerrada (quando verificável):** quando o cliente autenticado possui `accessToken` em memória, o validador registrado em `AuthContext` consulta `GET /participations/:participationId/queue` e cancela a vibração se a chamada não estiver mais `called`/`pending`. Alertas atrasados com `calledAt` superior a 5 minutos (`MAX_ALERT_STALENESS_MS`) também são descartados.
++  - **Falha de execução de hardware:** `serviceSessionId` só é marcado como executado após `vibrationEngine.vibrate(QUEUE_CALL_VIBRATION_PATTERN, false)` retornar sem erro. Se o hardware lançar exceção ou estiver indisponível, o ID não é marcado como processado.
++- **Situações em que a confirmação online do estado atual não é possível:**
++  1. **Execução headless após reinício do processo:** por regra de segurança da arquitetura de autenticação (K02), o JWT `accessToken` é mantido exclusivamente em memória RAM (apenas o `refreshToken` fica no `SecureStore`). Portanto, quando o processo inicia em background sem montar o `AuthContext`, não há `accessToken` em memória para consultar `GET /participations/:id/queue`.
++  2. **Indisponibilidade momentânea de rede / timeout na consulta GET:** caso a entrega do push ocorra durante oscilação de conectividade HTTP.
++  *Mitigação nessas situações:* o backend valida `service_sessions.status = 'pending'` imediatamente antes do disparo na outbox, e o cliente aplica a janela de expiração por `calledAt` (5 minutos), isolamento por `userId` no `SecureStore` e deduplicação persistida por `serviceSessionId`.
++
++### 3.5. Configuração Android e Justificativa do `app.json` — P2
++- **Canal Android silencioso:** `ensureAndroidSilentChannel` cria o canal `arenago-silent-queue-calls` (`importance: LOW`, `sound: null`, `enableVibrate: false`, `showBadge: false`, `lockscreenVisibility: SECRET`) antes de requisitar permissões ou chamar `getExpoPushTokenAsync`.
++- **Validação do `projectId` EAS:** `resolveEasProjectId` valida que o `projectId` é um UUID válido antes de invocar `Notifications.getExpoPushTokenAsync({ projectId })`.
++- **Supressão visual no SDK 58:** `Notifications.setNotificationHandler` utiliza `shouldShowBanner: false`, `shouldShowList: false`, `shouldPlaySound: false` e `shouldSetBadge: false`.
++- **Justificativa das alterações em `app/app.json`:**
++  - `name: "app"`, `slug: "app"`, `userInterfaceStyle: "light"` e `backgroundColor: "#ffffff"` foram **preservados exatamente como na branch `develop`** para evitar quebra de identidade com configurações preexistentes do projeto Expo.
++  - `android.package: "com.arenago.app"` e `ios.bundleIdentifier: "com.arenago.app"` foram adicionados porque `expo-notifications` (`getExpoPushTokenAsync`) exige `Application.applicationId` nativo (lançando `ERR_NOTIFICATIONS_NO_APPLICATION_ID` se ausente) e o EAS Build / `expo prebuild` exige ambos os identificadores para gerar os projetos nativos e vincular credenciais FCM/APNs.
++  - `android.permissions: ["android.permission.VIBRATE"]` e o plugin `expo-notifications` habilitam o controle nativo do motor de vibração e o serviço receptor de mensagens remotas.
++  - Nenhuma credencial (`google-services.json` ou chaves privadas) foi incluída no repositório.
 +
 +---
 +
-+## 4. Alterações no Banco de Dados (Drizzle Migration)
++## 4. Migração de Banco de Dados e Contratos de API
 +
-+Arquivo: `backend/drizzle/0007_queue_call_vibration_outbox.sql`
++### 4.1. Migração Drizzle (`backend/drizzle/0007_queue_call_vibration_outbox.sql`)
++- Tabela `device_push_tokens`: `id`, `user_id`, `push_token` (UNIQUE), `platform`, `created_at`, `updated_at`, `revoked_at`.
++- Tabela `queue_call_outbox`: `id`, `service_session_id` (UNIQUE), `user_id`, `event_id`, `experience_id`, `payload` (JSONB), `status` (`pending`, `processing`, `accepted`, `delivered`, `no_device`, `expired`, `failed`), `attempts`, `next_attempt_at`, `locked_at`, `ticket_id`, `last_error`, `created_at`, `processed_at`.
 +
-+```sql
-+CREATE TABLE IF NOT EXISTS "device_push_tokens" (
-+	"id" uuid PRIMARY KEY NOT NULL,
-+	"user_id" uuid NOT NULL,
-+	"push_token" varchar(255) NOT NULL,
-+	"platform" varchar(20) DEFAULT 'android' NOT NULL,
-+	"created_at" timestamp with time zone NOT NULL,
-+	"updated_at" timestamp with time zone NOT NULL,
-+	"revoked_at" timestamp with time zone,
-+	CONSTRAINT "uq_device_push_tokens_token" UNIQUE("push_token")
-+);
-+--> statement-breakpoint
-+CREATE TABLE IF NOT EXISTS "queue_call_outbox" (
-+	"id" uuid PRIMARY KEY NOT NULL,
-+	"service_session_id" uuid NOT NULL,
-+	"user_id" uuid NOT NULL,
-+	"event_id" uuid NOT NULL,
-+	"experience_id" uuid NOT NULL,
-+	"payload" jsonb NOT NULL,
-+	"status" varchar(20) DEFAULT 'pending' NOT NULL,
-+	"attempts" integer DEFAULT 0 NOT NULL,
-+	"last_error" text,
-+	"created_at" timestamp with time zone NOT NULL,
-+	"processed_at" timestamp with time zone,
-+	CONSTRAINT "uq_queue_call_outbox_session" UNIQUE("service_session_id")
-+);
-+--> statement-breakpoint
-+CREATE INDEX IF NOT EXISTS "ix_device_push_tokens_user" ON "device_push_tokens" USING btree ("user_id","revoked_at");
-+--> statement-breakpoint
-+CREATE INDEX IF NOT EXISTS "ix_queue_call_outbox_pending" ON "queue_call_outbox" USING btree ("status","created_at");
-+--> statement-breakpoint
-+ALTER TABLE "device_push_tokens" ADD CONSTRAINT "fk_device_push_tokens_user" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;
-+--> statement-breakpoint
-+ALTER TABLE "queue_call_outbox" ADD CONSTRAINT "fk_queue_call_outbox_service_session" FOREIGN KEY ("service_session_id") REFERENCES "public"."service_sessions"("id") ON DELETE cascade ON UPDATE no action;
-+--> statement-breakpoint
-+ALTER TABLE "queue_call_outbox" ADD CONSTRAINT "fk_queue_call_outbox_user" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;
-+--> statement-breakpoint
-+ALTER TABLE "queue_call_outbox" ADD CONSTRAINT "fk_queue_call_outbox_event" FOREIGN KEY ("event_id") REFERENCES "public"."events"("id") ON DELETE cascade ON UPDATE no action;
-+--> statement-breakpoint
-+ALTER TABLE "queue_call_outbox" ADD CONSTRAINT "fk_queue_call_outbox_experience" FOREIGN KEY ("experience_id") REFERENCES "public"."experiences"("id") ON DELETE cascade ON UPDATE no action;
-+```
++### 4.2. Endpoints de Dispositivo
++- `POST /api/v1/devices/push-token` (`@RequireSessionAuth()`): recebe `{ pushToken, platform }` e retorna `{ status: "registered" | "updated" }`.
++- `DELETE /api/v1/devices/push-token` (`@RequireSessionAuth()`): recebe `{ pushToken }` no `body` e retorna `{ unlinked: boolean }`.
 +
 +---
 +
-+## 5. Contratos dos Endpoints Adicionados
++## 5. Resultados das Validações Automatizadas Executadas
 +
-+### 5.1. Registrar / Atualizar Push Token do Dispositivo
-+
-+- **Método / Rota:** `POST /api/v1/devices/push-token`
-+- **Autenticação:** Obrigatória (`Bearer <accessToken>`)
-+- **Headers:** `Content-Type: application/json`
-+- **Requisição:**
-+  ```json
-+  {
-+    "pushToken": "ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]",
-+    "platform": "android"
-+  }
-+  ```
-+- **Resposta (200 OK):**
-+  ```json
-+  {
-+    "status": "registered"
-+  }
-+  ```
-+  *(ou `status: "updated"` quando o token já existia e foi associado ao novo usuário/sessão).*
-+
-+### 5.2. Desvincular Push Token do Dispositivo
-+
-+- **Método / Rota:** `DELETE /api/v1/devices/push-token`
-+- **Autenticação:** Obrigatória (`Bearer <accessToken>`)
-+- **Headers:** `Content-Type: application/json`
-+- **Requisição:**
-+  ```json
-+  {
-+    "pushToken": "ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]"
-+  }
-+  ```
-+- **Resposta (200 OK):**
-+  ```json
-+  {
-+    "unlinked": true
-+  }
-+  ```
-+
-+---
-+
-+## 6. Arquivos Modificados e Criados
-+
-+### Backend
-+- `backend/src/database/schema/notifications.schema.ts` (criado)
-+- `backend/src/database/schema/index.ts` (exportação do novo schema)
-+- `backend/drizzle/0007_queue_call_vibration_outbox.sql` (criado)
-+- `backend/drizzle/meta/_journal.json` (registro da migração)
-+- `backend/src/notifications/device-tokens.dto.ts` (criado)
-+- `backend/src/notifications/device-tokens.service.ts` (criado)
-+- `backend/src/notifications/device-tokens.controller.ts` (criado)
-+- `backend/src/notifications/queue-call-push.service.ts` (criado)
-+- `backend/src/notifications/notifications.module.ts` (criado)
-+- `backend/src/events/call-next.service.ts` (inserção atômica na outbox e trigger pós-commit)
-+- `backend/src/events/events.module.ts` (importação do `NotificationsModule`)
-+- `backend/src/app.module.ts` (registro do `NotificationsModule`)
-+- `backend/test/unit/notifications-device-tokens.test.ts` (criado)
-+- `backend/test/unit/queue-call-push.test.ts` (criado)
-+- `backend/test/unit/call-next-outbox.test.ts` (criado)
-+
-+### Frontend (App)
-+- `app/package.json` (adição de `expo-notifications` ~58.1.8 e `expo-task-manager` ~58.0.13)
-+- `app/app.json` (permissão `android.permission.VIBRATE`, identificador Android `com.arenago.app`, plugin `expo-notifications`)
-+- `app/services/queueCallVibrationService.js` (criado: padrão 1.9s, deduplicação por ID, handlers silenciosos e headless task)
-+- `app/services/devicePushService.js` (criado: permissões, obtenção de token e sincronização segura com backend)
-+- `app/screens/arena/RealArenaScreen.js` (atualização reativa imediata da tela ao receber alerta na fila)
-+- `app/context/AuthContext.js` (registro de token no login, desvinculação e limpeza de alertas no logout)
-+- `app/tests/queue-call-vibration.test.cjs` (criado: 4 testes unitários de duração, deduplicação e eventos)
-+
-+---
-+
-+## 7. Resultados dos Testes Técnicos Automatizados
-+
-+### 7.1. Testes do Aplicativo Mobile (`npm.cmd --prefix app test`)
-+```
-+ℹ tests 384
-+ℹ suites 0
-+ℹ pass 384
-+ℹ fail 0
-+ℹ cancelled 0
-+ℹ skipped 0
-+ℹ todo 0
-+ℹ duration_ms 20800.6527
-+```
-+**Exit Code:** `0` (100% de aprovação em todos os 384 testes).
-+
-+### 7.2. Verificação de Dependências e Integridade Expo
-+- `npx.cmd expo install --check`:
-+  ```
-+  Dependencies are up to date
-+  ```
-+  **Exit Code:** `0`.
-+- `npx.cmd expo-doctor`:
-+  ```
-+  Running 20 checks on your project...
-+  20/20 checks passed. No issues detected!
-+  ```
-+  **Exit Code:** `0`.
-+
-+### 7.3. Testes Unitários de Backend (`call-next`, `notifications`, `outbox`)
-+```
-+✔ CallNext outbox: nova chamada insere registro na queue_call_outbox e dispara triggerDispatch
-+✔ CallNext outbox: replay idempotente NÃO grava outbox e NÃO dispara triggerDispatch
-+✔ CallNext outbox: falha ao inserir na outbox reverte a transação de chamada
-+✔ E07.4 (35 testes de concorrência, locks, idempotência e integridade da fila)
-+✔ DeviceTokens DTO: valida limites de tamanho de pushToken e opções de plataforma
-+✔ DeviceTokensService: registra novo token e atualiza token existente em caso de troca de usuário
-+✔ DeviceTokensService: unregisterToken e revogação de tokens inválidos
-+✔ QueueCallPushService: inserção da outbox cria payload estritamente silencioso (sem title/body/message)
-+✔ QueueCallPushService: descarta chamadas encerradas ou invalidadas (status !== pending)
-+✔ QueueCallPushService: envio silencioso data-only com prioridade alta e contentAvailable
-+✔ QueueCallPushService: trata DeviceNotRegistered revogando o token
-+ℹ tests 45
-+ℹ pass 45
-+ℹ fail 0
-+```
-+**Exit Code:** `0`.
-+
-+### 7.4. Compilação TypeScript do Backend (`npm.cmd --prefix backend run build`)
-+```
-+> arenago-backend@0.1.0 build
-+> nest build
-+```
-+**Exit Code:** `0`.
-+
-+### 7.5. Verificação Git (`git diff --check`)
-+**Exit Code:** `0` (nenhum espaço em branco espúrio ou conflito).
-+
-+---
-+
-+## 8. Matriz de Comportamento e Limitações do Android
-+
-+A vibração em segundo plano por notificações *data-only* no ecossistema Android está sujeita a fortes restrições impostas pelo sistema operacional e por customizações de fabricantes (OEMs):
-+
-+| Cenário de Teste / Estado do Dispositivo | Comportamento Esperado | Avaliação Técnica / Status | Detalhes Operacionais |
++| Escopo | Comando Executado | Resultado Observado | Exit Code |
 +| :--- | :--- | :--- | :--- |
-+| **1. App em primeiro plano (Foreground)** | Vibra 3 vezes (500ms / 200ms pausa / 1,9s total). Tela atualiza para "É a sua vez!". Nenhum banner ou som. | **PASSOU** | Manipulador local executa imediatamente sem interferência do sistema. |
-+| **2. App minimizado (Background recente)** | Vibra 3 vezes silenciosamente. Nenhum banner ou som na central de notificações. | **PASSOU** | O processo do app continua aquecido na memória RAM e executa a headless task. |
-+| **3. Tela bloqueada (Lock Screen)** | Vibra 3 vezes com a tela desligada. | **PASSOU** | Notificação de alta prioridade (`priority: high`) acorda a CPU temporariamente para a vibração. |
-+| **4. App removido dos recentes (Swiped out)** | Dependente da versão do Android e do fabricante. | **LIMITAÇÃO DO SO** | No Android 12+, deslizar o aplicativo para fora da lista de recentes pode colocar o processo em parada completa, impedindo headless tasks até nova abertura. |
-+| **5. Modo Economia de Bateria / Doze Mode** | Pode haver atraso na entrega até a próxima janela de manutenção do Doze. | **LIMITAÇÃO DO SO** | Mensagens FCM *high-priority* têm cota diária de acordar o dispositivo do Doze Mode. Se a cota for atingida, a entrega é postergada. |
-+| **6. Forçar Interrupção (Force Stop nas configurações)** | Não executa. | **LIMITAÇÃO DO SO** | O Android impede estritamente que qualquer serviço ou receptor em segundo plano seja executado após Force Stop até que o usuário abra o app manualmente. |
-+| **7. Fabricantes agressivos (Xiaomi MIUI, Samsung OneUI)** | Processos em segundo plano são congelados ou eliminados se "Iniciar em segundo plano" ou "Sem restrições de bateria" não forem ativados nas configurações do aparelho. | **LIMITAÇÃO DO SO** | Requer concessão manual de exceção de economia de bateria pelo participante para garantir 100% de despertar. |
-+| **8. Modo Não Perturbe (DND) / Vibração desativada** | Sistema Android suprime a vibração por diretriz do usuário no aparelho. | **LIMITAÇÃO DO SO** | O hardware respeita a configuração global do sistema operacional. |
-+| **9. Replay / Atualização de Tela** | Nenhuma vibração repetida. | **PASSOU** | Deduplicação por `serviceSessionId` garante disparo único. |
-+| **10. Troca de conta / Logout** | Dispositivo desvinculado, cache de deduplicação reiniciado. | **PASSOU** | Token desvinculado no backend via endpoint dedicado e localmente limpo. |
++| **Testes Unitários Mobile (App completo)** | `npm.cmd --prefix app test` | **386/386 aprovados** (incluindo 6 suítes completas em `queue-call-vibration.test.cjs`) | `0` |
++| **Testes Unitários Backend (Notificações, Fila e CallNext)** | `cd backend; $env:NODE_ENV="test"; $env:STAFF_IDEMPOTENCY_TTL_SECONDS="60"; $env:PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS="60"; $env:EVALUATION_IDEMPOTENCY_TTL_SECONDS="60"; npx.cmd tsx --test test/unit/call-next*.test.ts test/unit/notifications*.test.ts test/unit/queue-call*.test.ts test/unit/staff-http.test.ts test/unit/participant-queue-http.test.ts` | **79/79 aprovados** (0 falhas) | `0` |
++| **Build TypeScript do Backend** | `npm.cmd --prefix backend run build` | **Compilado sem erros** (`nest build`) | `0` |
++| **Typecheck de Testes do Backend** | `npm.cmd --prefix backend run typecheck:test` | **0 erros** (`tsc --project tsconfig.test.json`) | `0` |
++| **Verificação de Dependências Expo** | `cd app; npx.cmd expo install --check` | **Dependencies are up to date** | `0` |
++| **Diagnóstico Expo Doctor** | `cd app; npx.cmd expo-doctor` | **20/20 checks passed. No issues detected!** | `0` |
++| **Higiene do Git** | `git diff --check` | **0 erros** | `0` |
++
++> **Nota sobre testes de integração PostgreSQL (`call-next.integration.test.ts` / `staff-http.integration.test.ts`):**
++> No ambiente local desta execução, o daemon do Docker Desktop estava desligado (`127.0.0.1:55432` inacessível) e, conforme a seção 2 do `AGENTS.md` (*Integrações PostgreSQL*), campanhas contra banco PostgreSQL real e aplicação de novas migrations (`0007_queue_call_vibration_outbox.sql`) exigem instância ativa e autorização explícita do responsável. As validações de banco nesta etapa foram comprovadas via suítes unitárias e HTTP simuladas (`call-next.test.ts`, `call-next-outbox.test.ts`, `staff-http.test.ts`, `queue-call-push.test.ts` e `notifications-device-tokens.test.ts`).
 +
 +---
 +
-+## 9. Recomendações Operacionais e Procedimento de Homologação
++## 6. Validação em Android Real e Limitações do Sistema Operacional
 +
-+1. **Chamada Presencial Obrigatória:**  
-+   Conforme especificado, o alerta vibratório no celular é um complemento de conveniência. **A chamada presencial pelo Staff é o procedimento operacional soberano.**
-+2. **Build de Desenvolvimento Android (EAS / Dev Client):**  
-+   O Expo Go no Android não oferece suporte nativo completo para tarefas remotas headless e notificações push de dados puros em segundo plano. Para testes de campo no dispositivo físico, deve-se gerar a Development Build:
++> **Declaração de transparência (Seção 5 do `AGENTS.md` e Item 6 da revisão):**
++> Nenhum cenário abaixo foi marcado como `PASSOU` sem execução física comprovada em aparelho Android real. No ambiente de desenvolvimento atual, `adb devices` não possui dispositivo físico conectado e o repositório não contém credenciais privadas do Firebase (`google-services.json`) nem `projectId` EAS vinculado a conta de nuvem.
++
++### 6.1. Descoberta Técnica Crítica sobre `Vibration.vibrate()` em Segundo Plano no Android 9+
++A inspeção direta da implementação nativa do React Native (`node_modules/react-native/ReactAndroid/src/main/java/com/facebook/react/modules/vibration/VibrationModule.kt`, linhas 36–48) demonstra que `Vibration.vibrate(pattern, repeat)` executa:
++```kotlin
++v.vibrate(VibrationEffect.createWaveform(patternLong, repeat))
++```
++sem fornecer `AudioAttributes` ou `VibrationAttributes` com `USAGE_NOTIFICATION` / `USAGE_ALARM`. No AOSP (Android 9+ / API 28+), o serviço `VibratorManagerService` do sistema operacional aplica a regra `shouldIgnoreVibrationLocked`: quando o processo da aplicação não está em `IMPORTANCE_FOREGROUND` (aplicativo em segundo plano ou tela bloqueada), o Android **ignora silenciosamente** chamadas diretas a `Vibrator.vibrate()` que não possuam atributos de sistema ou que não sejam disparadas pela apresentação de uma notificação visível na barra de status.
++
++Portanto, a exigência simultânea de **(a) zero notificação visível no sistema** e **(b) vibração via API JS `Vibration.vibrate()` em segundo plano** sofre bloqueio nativo do próprio sistema operacional Android na maioria dos aparelhos modernos quando a Activity sai de primeiro plano.
++
++### 6.2. Matriz de Status Real por Cenário
++
++| # | Cenário | Status em Hardware Real | Status em Testes Automatizados | Explicação Técnica do Comportamento Real |
++| :--- | :--- | :--- | :--- | :--- |
++| **1** | **Aplicativo aberto (Foreground)** | **PENDENTE DE HOMOLOGAÇÃO FÍSICA** *(sem aparelho conectado ao ADB)* | **VALIDADO EM TESTE AUTOMATIZADO** | Com a Activity em primeiro plano (`IMPORTANCE_FOREGROUND`), o Android permite `Vibration.vibrate([0, 500, 200, 500, 200, 500], false)` (1,9s) sem som e sem banner (`shouldShowBanner: false`, `shouldShowList: false`), atualizando a `RealArenaScreen`. |
++| **2** | **Aplicativo em segundo plano** | **LIMITAÇÃO DO SISTEMA ANDROID** | **CALLBACK HEADLESS VALIDADO EM TESTE** | Embora a task `ARENAGO_QUEUE_CALL_VIBRATION_TASK` interprete `data.dataString` e invoque `Vibration.vibrate`, o `VibratorManagerService` do Android 9+ suprime vibrações diretas de processos em background que não exibam notificação visual do sistema. |
++| **3** | **Tela bloqueada** | **LIMITAÇÃO DO SISTEMA ANDROID** | **CALLBACK HEADLESS VALIDADO EM TESTE** | Com a tela desligada/bloqueada, o processo não detém foco de primeiro plano e sofre a mesma restrição do `VibratorManagerService` e do Doze Mode sem notificação visual. |
++| **4** | **Aplicativo removido dos recentes** | **LIMITAÇÃO DO SISTEMA ANDROID** | **N/A (Comportamento do SO)** | No Android 12+ e em OEMs (Samsung OneUI, Xiaomi MIUI), remover o app dos recentes encerra o processo ou atrasa broadcasts FCM de dados até reabertura. |
++| **5** | **Force-stop** | **LIMITAÇÃO DO SISTEMA ANDROID** | **N/A (Comportamento do SO)** | O Android bloqueia terminantemente qualquer receptor, job ou serviço de aplicativos em estado *stopped* (`FLAG_STOPPED`) até que o usuário abra o app manualmente. |
++| **6** | **Nova chamada após outra já atendida** | **PENDENTE DE HOMOLOGAÇÃO FÍSICA** | **VALIDADO EM TESTE AUTOMATIZADO** | Cada chamada gera um novo `serviceSessionId` único; a deduplicação bloqueia apenas IDs já processados e permite que a nova chamada vibre normalmente. |
++| **7** | **Retry e entrega duplicada** | **PENDENTE DE HOMOLOGAÇÃO FÍSICA** | **VALIDADO EM TESTE AUTOMATIZADO** | A trava síncrona `inFlightSessionIds` e a persistência em `SecureStore` (`arenago_alerted_service_sessions_v1`) garantem disparo único mesmo com recebimento simultâneo foreground/background ou após reinício do processo. |
++| **8** | **Logout e troca de conta** | **PENDENTE DE HOMOLOGAÇÃO FÍSICA** | **VALIDADO EM TESTE AUTOMATIZADO** | O logout envia `DELETE /devices/push-token` autenticado, cancela registros pendentes, remove o usuário ativo do `SecureStore` e impede alertas da conta anterior. |
++
++### 6.3. Procedimento para Homologação em Dispositivo Físico (Development Build)
++Para executar o teste de campo no celular Android:
++1. Configurar um projeto EAS (`npx eas-cli project:init`) e definir `EXPO_PUBLIC_EAS_PROJECT_ID=<uuid>` no `.env` local (não versionado), além de configurar as credenciais FCM V1 no painel EAS.
++2. Gerar e instalar a Development Build no aparelho:
 +   ```powershell
-+   npx eas-cli build --profile development --platform android
++   npx expo run:android
 +   ```
-+   instalando o APK gerado no aparelho e executando com `npx expo start --dev-client`.
++   *(ou `npx eas-cli build --profile development --platform android`).*
++3. Conectar o aparelho via USB (`adb devices`) e monitorar os logs do vibrador e do FCM:
++   ```powershell
++   adb logcat | findstr /i "Vibrator FirebaseMessaging expo-notifications"
++   ```
++4. **Recomendação Operacional:** A chamada presencial pelo Staff permanece obrigatória em todas as experiências da Arena, pois o alerta vibratório silencioso está sujeito às restrições de segundo plano do Android descritas acima.

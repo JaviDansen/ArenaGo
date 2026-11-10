@@ -1,4 +1,5 @@
 import { registerRootComponent } from 'expo';
+import './services/queueCallVibrationService';
 
 import App from './App';
 

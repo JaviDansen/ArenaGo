@@ -5,12 +5,14 @@ import { defaultTokenStorage } from '../services/tokenStorage';
 
 let syncDevicePushToken = () => Promise.resolve(null);
 let unregisterDevicePushToken = () => Promise.resolve(false);
+let cancelPendingPushTokenSync = () => {};
 try {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const push = require('../services/devicePushService');
   if (push) {
-    syncDevicePushToken = push.syncDevicePushToken;
-    unregisterDevicePushToken = push.unregisterDevicePushToken;
+    syncDevicePushToken = push.syncDevicePushToken ?? syncDevicePushToken;
+    unregisterDevicePushToken = push.unregisterDevicePushToken ?? unregisterDevicePushToken;
+    cancelPendingPushTokenSync = push.cancelPendingPushTokenSync ?? cancelPendingPushTokenSync;
   }
 } catch {
   // Fallback seguro em ambientes de teste isolados
@@ -18,12 +20,19 @@ try {
 
 let resetQueueCallAlerts = () => {};
 let setupQueueCallNotificationHandlers = () => Promise.resolve(null);
+let setActiveQueueCallUser = () => Promise.resolve();
+let clearActiveQueueCallUser = () => Promise.resolve();
+let setQueueCallStateValidator = () => {};
 try {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const vib = require('../services/queueCallVibrationService');
   if (vib) {
-    resetQueueCallAlerts = vib.resetQueueCallAlerts;
-    setupQueueCallNotificationHandlers = vib.setupQueueCallNotificationHandlers;
+    resetQueueCallAlerts = vib.resetQueueCallAlerts ?? resetQueueCallAlerts;
+    setupQueueCallNotificationHandlers =
+      vib.setupQueueCallNotificationHandlers ?? setupQueueCallNotificationHandlers;
+    setActiveQueueCallUser = vib.setActiveQueueCallUser ?? setActiveQueueCallUser;
+    clearActiveQueueCallUser = vib.clearActiveQueueCallUser ?? clearActiveQueueCallUser;
+    setQueueCallStateValidator = vib.setQueueCallStateValidator ?? setQueueCallStateValidator;
   }
 } catch {
   // Fallback seguro em ambientes de teste isolados
@@ -74,16 +83,79 @@ export function AuthProvider({
     };
   }, []);
 
-  // Sincroniza o token de push do aparelho quando autenticado
+  // Sincroniza o token de push e o isolamento de sessão por usuário autenticado
   useEffect(() => {
-    if (snapshot.isAuthenticated && manager.client) {
-      void syncDevicePushToken(manager.client);
+    const currentUserId = snapshot.user?.id;
+    const currentEpoch =
+      typeof manager.getSessionEpoch === 'function' ? manager.getSessionEpoch() : null;
+
+    if (snapshot.isAuthenticated && currentUserId && manager.client) {
+      void setActiveQueueCallUser(currentUserId);
+
+      setQueueCallStateValidator(async (payload) => {
+        if (!payload?.participationId || typeof manager.client?.get !== 'function') {
+          return 'unknown';
+        }
+        const token =
+          typeof manager.getAccessToken === 'function' ? manager.getAccessToken() : null;
+        if (!token) {
+          return 'unknown';
+        }
+        try {
+          const queueResponse = await manager.client.get(
+            `/participations/${payload.participationId}/queue`,
+            { auth: true }
+          );
+          const entry = queueResponse?.currentQueueEntry;
+          if (
+            !entry ||
+            entry.status !== 'called' ||
+            entry.serviceSession?.id !== payload.serviceSessionId ||
+            entry.serviceSession?.status !== 'pending'
+          ) {
+            return 'ended';
+          }
+          return 'pending';
+        } catch (err) {
+          if (err?.status === 404 || err?.status === 403 || err?.status === 409) {
+            return 'ended';
+          }
+          return 'unknown';
+        }
+      });
+
+      void syncDevicePushToken(manager.client, {
+        userId: currentUserId,
+        accessToken:
+          typeof manager.getAccessToken === 'function' ? manager.getAccessToken() : null,
+        getSessionEpoch: manager.getSessionEpoch,
+        isCurrent: () => {
+          const latest = manager.getSnapshot();
+          const latestEpoch =
+            typeof manager.getSessionEpoch === 'function' ? manager.getSessionEpoch() : null;
+          return (
+            Boolean(latest.isAuthenticated) &&
+            latest.user?.id === currentUserId &&
+            latestEpoch === currentEpoch
+          );
+        },
+      });
+    } else if (!snapshot.isInitializing && !snapshot.isAuthenticated) {
+      cancelPendingPushTokenSync();
+      setQueueCallStateValidator(null);
+      void clearActiveQueueCallUser();
     }
-  }, [snapshot.isAuthenticated, manager.client]);
+  }, [snapshot.isAuthenticated, snapshot.isInitializing, snapshot.user?.id, manager]);
 
   const handleLogout = async () => {
+    const logoutAccessToken =
+      typeof manager.getAccessToken === 'function' ? manager.getAccessToken() : null;
+    cancelPendingPushTokenSync();
+    setQueueCallStateValidator(null);
     try {
-      await unregisterDevicePushToken(manager.client);
+      await unregisterDevicePushToken(manager.client, {
+        accessToken: logoutAccessToken,
+      });
     } catch {
       // Ignora erro de rede ao desvincular o token
     }

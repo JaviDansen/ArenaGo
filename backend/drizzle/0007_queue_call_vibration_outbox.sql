@@ -16,8 +16,11 @@ CREATE TABLE IF NOT EXISTS "queue_call_outbox" (
 	"event_id" uuid NOT NULL,
 	"experience_id" uuid NOT NULL,
 	"payload" jsonb NOT NULL,
-	"status" varchar(20) DEFAULT 'pending' NOT NULL,
+	"status" varchar(30) DEFAULT 'pending' NOT NULL,
 	"attempts" integer DEFAULT 0 NOT NULL,
+	"next_attempt_at" timestamp with time zone,
+	"locked_at" timestamp with time zone,
+	"ticket_id" varchar(255),
 	"last_error" text,
 	"created_at" timestamp with time zone NOT NULL,
 	"processed_at" timestamp with time zone,
@@ -26,7 +29,7 @@ CREATE TABLE IF NOT EXISTS "queue_call_outbox" (
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "ix_device_push_tokens_user" ON "device_push_tokens" USING btree ("user_id","revoked_at");
 --> statement-breakpoint
-CREATE INDEX IF NOT EXISTS "ix_queue_call_outbox_pending" ON "queue_call_outbox" USING btree ("status","created_at");
+CREATE INDEX IF NOT EXISTS "ix_queue_call_outbox_pending" ON "queue_call_outbox" USING btree ("status","next_attempt_at","created_at");
 --> statement-breakpoint
 ALTER TABLE "device_push_tokens" ADD CONSTRAINT "fk_device_push_tokens_user" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;
 --> statement-breakpoint
