@@ -133,6 +133,7 @@ function createStatefulOutboxDb(options: {
               serviceSessionId: row.serviceSessionId,
               userId: row.userId,
               ticketId: row.ticketId,
+              payload: row.payload,
               attempts: row.attempts,
             });
           }
@@ -140,11 +141,44 @@ function createStatefulOutboxDb(options: {
         return { rows: claimedAccepted, rowCount: claimedAccepted.length };
       }
 
+      // 4.1. Renovação de lease / heartbeat de registro em processing
+      if (
+        text.includes("UPDATE queue_call_outbox") &&
+        text.includes("SET locked_at = clock_timestamp()") &&
+        text.includes("AND status = 'processing'")
+      ) {
+        const targetId = String(values[0]);
+        const expectedAttempts = Number(values[1]);
+        const row = rows.find((r) => r.id === targetId);
+        if (!row || row.status !== "processing" || row.attempts !== expectedAttempts) {
+          return { rows: [], rowCount: 0 };
+        }
+        row.lockedAtMs = now;
+        return { rows: [{ id: row.id }], rowCount: 1 };
+      }
+
       // 5. Atualizações individuais de status da outbox
       if (text.includes("UPDATE queue_call_outbox")) {
-        const targetId = String(values[values.length - 1]);
+        const hasProcessingFence =
+          text.includes("AND status = 'processing'") && text.includes("AND attempts =");
+        const hasAcceptedFence = text.includes("AND status = 'accepted'");
+
+        const targetId = hasProcessingFence
+          ? String(values[values.length - 2])
+          : String(values[values.length - 1]);
+        const expectedAttempts = hasProcessingFence
+          ? Number(values[values.length - 1])
+          : null;
+
         const row = rows.find((r) => r.id === targetId);
         if (!row) return { rows: [], rowCount: 0 };
+
+        if (hasProcessingFence && (row.status !== "processing" || row.attempts !== expectedAttempts)) {
+          return { rows: [], rowCount: 0 };
+        }
+        if (hasAcceptedFence && row.status !== "accepted") {
+          return { rows: [], rowCount: 0 };
+        }
 
         if (text.includes("SET status = 'expired'")) {
           row.status = "expired";
@@ -159,8 +193,15 @@ function createStatefulOutboxDb(options: {
         } else if (text.includes("SET status = 'accepted'")) {
           row.status = "accepted";
           row.ticketId = (values[0] as string | null) ?? null;
+          if (typeof values[1] === "string") {
+            try {
+              row.payload = JSON.parse(values[1]) as QueueCallOutboxPayload;
+            } catch {
+              // ignore
+            }
+          }
           row.lockedAtMs = null;
-          row.lastError = (values[1] as string | null) ?? null;
+          row.lastError = (values[2] as string | null) ?? null;
         } else if (text.includes("SET status = 'delivered'")) {
           row.status = "delivered";
           row.lockedAtMs = null;
@@ -186,7 +227,7 @@ function createStatefulOutboxDb(options: {
             row.lastError = String(values[0] ?? "");
           }
         }
-        return { rows: [], rowCount: 1 };
+        return { rows: [{ id: row.id }], rowCount: 1 };
       }
 
       return { rows: [], rowCount: 0 };
@@ -666,4 +707,435 @@ test("QueueCallPushService: retomada após reinício recupera registros pendente
   assert.equal(state.rows[0].attempts, 2);
   assert.equal(state.rows[1].status, "failed");
   assert.equal(state.rows[2].status, "delivered");
+});
+
+test("QueueCallPushService (P1): recibo DeviceNotRegistered revoga SOMENTE o dispositivo inválido sem afetar outro dispositivo válido do mesmo usuário", async () => {
+  const invalidDeviceToken = "ExponentPushToken[device-invalid-1]";
+  const validDeviceToken = "ExponentPushToken[device-valid-2]";
+  const activeTokens = new Set([invalidDeviceToken, validDeviceToken]);
+  const revokedIndividualTokens: string[] = [];
+  let revokeAllCalled = false;
+  let receiptsAvailable = false;
+
+  const mockTransport: PushHttpTransport = async (url) => {
+    if (url === EXPO_PUSH_URL) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: [
+            { status: "ok", id: "receipt-ticket-invalid-1" },
+            { status: "ok", id: "receipt-ticket-valid-2" },
+          ],
+        }),
+      };
+    }
+
+    if (url === EXPO_RECEIPTS_URL) {
+      if (!receiptsAvailable) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ data: {} }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: {
+            "receipt-ticket-invalid-1": {
+              status: "error",
+              message: "The recipient device is not registered with FCM.",
+              details: { error: "DeviceNotRegistered" },
+            },
+            "receipt-ticket-valid-2": {
+              status: "ok",
+            },
+          },
+        }),
+      };
+    }
+
+    throw new Error(`Unexpected URL: ${url}`);
+  };
+
+  const state = createStatefulOutboxDb({
+    initialRows: [makeSampleRow()],
+  });
+
+  const mockDeviceTokensService = {
+    getActiveTokensForUser: async () =>
+      Array.from(activeTokens).map((t) => ({ pushToken: t, platform: "android" })),
+    revokeInvalidToken: async (token: string) => {
+      revokedIndividualTokens.push(token);
+      activeTokens.delete(token);
+    },
+    revokeAllUserTokens: async () => {
+      revokeAllCalled = true;
+      activeTokens.clear();
+    },
+  } as unknown as DeviceTokensService;
+
+  // Instância 1 envia os pushes e recebe os 2 tickets ok
+  const serviceInstance1 = new QueueCallPushService(
+    state.db,
+    mockDeviceTokensService,
+    mockTransport,
+  );
+  const pass1 = await serviceInstance1.dispatchPending();
+  assert.equal(pass1.accepted, 1);
+  assert.equal(pass1.delivered, 0);
+  assert.equal(state.rows[0].status, "accepted");
+  assert.equal(state.rows[0].ticketId, "receipt-ticket-invalid-1,receipt-ticket-valid-2");
+
+  // Instância 2 (simulando inclusive outra instância/reinício lendo do banco) consulta os recibos
+  receiptsAvailable = true;
+  const serviceInstance2 = new QueueCallPushService(
+    state.db,
+    mockDeviceTokensService,
+    mockTransport,
+  );
+  const pass2 = await serviceInstance2.dispatchPending();
+
+  assert.equal(pass2.delivered, 1);
+  assert.equal(state.rows[0].status, "delivered");
+  assert.equal(revokeAllCalled, false, "NUNCA deve chamar revokeAllUserTokens");
+  assert.deepEqual(
+    revokedIndividualTokens,
+    [invalidDeviceToken],
+    "Apenas o token associado ao recibo DeviceNotRegistered deve ser revogado",
+  );
+  assert.equal(activeTokens.has(validDeviceToken), true, "O dispositivo válido deve permanecer ativo");
+  assert.equal(activeTokens.has(invalidDeviceToken), false);
+});
+
+test("QueueCallPushService (P2): rejeita tickets ok sem ID válido (sem criar accepted-0), classifica como inconclusivo e aplica retry preservando deduplicação", async () => {
+  let currentTimeMs = 20_000;
+  let callAttempt = 0;
+  const sentPayloads: any[] = [];
+
+  const mockTransport: PushHttpTransport = async (url, options) => {
+    if (url === EXPO_PUSH_URL) {
+      callAttempt++;
+      sentPayloads.push(JSON.parse(options.body));
+      if (callAttempt === 1) {
+        // 1ª tentativa: ticket ok sem id
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: [{ status: "ok" }],
+          }),
+        };
+      }
+      if (callAttempt === 2) {
+        // 2ª tentativa: ticket ok com id vazio/espaços
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: [{ status: "ok", id: "   " }],
+          }),
+        };
+      }
+      // 3ª tentativa: ticket ok com id real válido
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: [{ status: "ok", id: "real-expo-ticket-uuid-999" }],
+        }),
+      };
+    }
+
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: { "real-expo-ticket-uuid-999": { status: "ok" } },
+      }),
+    };
+  };
+
+  const state = createStatefulOutboxDb({
+    initialRows: [makeSampleRow()],
+    nowMs: () => currentTimeMs,
+  });
+
+  const mockDeviceTokensService = {
+    getActiveTokensForUser: async () => [{ pushToken, platform: "android" }],
+    revokeInvalidToken: async () => undefined,
+  } as unknown as DeviceTokensService;
+
+  const service = new QueueCallPushService(state.db, mockDeviceTokensService, mockTransport);
+
+  // Tentativa 1: ticket ok sem id -> NÃO aceita, agenda retry (+5s)
+  const r1 = await service.dispatchPending();
+  assert.equal(r1.processed, 1);
+  assert.equal(r1.accepted, 0);
+  assert.equal(r1.delivered, 0);
+  assert.equal(r1.retried, 1);
+  assert.equal(state.rows[0].status, "pending");
+  assert.equal(state.rows[0].ticketId, null, "Não deve gravar accepted-0 nem ticket fictício");
+  assert.match(state.rows[0].lastError ?? "", /Ticket ok sem identificador válido/i);
+
+  // Tentativa 2 (após 5s): ticket ok com id em branco -> NÃO aceita, agenda retry (+15s)
+  currentTimeMs += 6000;
+  const r2 = await service.dispatchPending();
+  assert.equal(r2.processed, 1);
+  assert.equal(r2.accepted, 0);
+  assert.equal(r2.retried, 1);
+  assert.equal(state.rows[0].status, "pending");
+  assert.equal(state.rows[0].ticketId, null);
+
+  // Tentativa 3 (após 15s): ticket ok com id válido -> aceita e confirma recibo
+  currentTimeMs += 16_000;
+  const r3 = await service.dispatchPending();
+  assert.equal(r3.processed, 1);
+  assert.equal(r3.accepted, 1);
+  assert.equal(r3.delivered, 1);
+  assert.equal(state.rows[0].status, "delivered");
+  assert.equal(state.rows[0].ticketId, "real-expo-ticket-uuid-999");
+
+  // Deduplicação lógica preservada: todas as tentativas mantiveram exatamente o mesmo serviceSessionId
+  assert.equal(sentPayloads.length, 3);
+  for (const batch of sentPayloads) {
+    assert.equal(batch[0].data.serviceSessionId, sessionId);
+  }
+});
+
+test("QueueCallPushService (P2): aplica timeout explícito quando resposta do provedor é incerta e impede processamento concorrente durante ou após expiração do lease", async () => {
+  let currentTimeMs = 100_000;
+  let attemptCount = 0;
+  const abortSignalsObserved: boolean[] = [];
+
+  const state = createStatefulOutboxDb({
+    initialRows: [makeSampleRow()],
+    nowMs: () => currentTimeMs,
+  });
+
+  const mockDeviceTokensService = {
+    getActiveTokensForUser: async () => [{ pushToken, platform: "android" }],
+    revokeInvalidToken: async () => undefined,
+  } as unknown as DeviceTokensService;
+
+  // Parte 1: Timeout explícito quando o provedor não responde (resposta incerta)
+  const slowOrRecoveringTransport: PushHttpTransport = async (url, options) => {
+    if (url === EXPO_PUSH_URL) {
+      attemptCount++;
+      if (attemptCount === 1) {
+        // Simula requisição presa que nunca responde até o AbortController abortar
+        return await new Promise((_resolve, reject) => {
+          options.signal?.addEventListener("abort", () => {
+            abortSignalsObserved.push(Boolean(options.signal?.aborted));
+            const abortErr = new Error("The operation was aborted");
+            abortErr.name = "AbortError";
+            reject(abortErr);
+          });
+        });
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: [{ status: "ok", id: "ticket-after-timeout-recovery" }],
+        }),
+      };
+    }
+
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: { "ticket-after-timeout-recovery": { status: "ok" } },
+      }),
+    };
+  };
+
+  const serviceA = new QueueCallPushService(
+    state.db,
+    mockDeviceTokensService,
+    slowOrRecoveringTransport,
+  );
+  serviceA.setHttpTimeoutMs(30);
+
+  const timeoutRun = await serviceA.dispatchPending();
+  assert.equal(timeoutRun.processed, 1);
+  assert.equal(timeoutRun.accepted, 0);
+  assert.equal(timeoutRun.delivered, 0);
+  assert.equal(timeoutRun.retried, 1);
+  assert.deepEqual(abortSignalsObserved, [true]);
+  assert.equal(state.rows[0].status, "pending");
+  assert.match(state.rows[0].lastError ?? "", /Timeout na requisição para a Expo Push API/i);
+
+  // Após o backoff de 5s, a retomada entrega com sucesso
+  currentTimeMs += 6000;
+  const recoveredRun = await serviceA.dispatchPending();
+  assert.equal(recoveredRun.processed, 1);
+  assert.equal(recoveredRun.accepted, 1);
+  assert.equal(recoveredRun.delivered, 1);
+  assert.equal(state.rows[0].status, "delivered");
+
+  // Parte 2: Requisição em andamento mantém o lease renovado (heartbeat) e fencing impede sobrescrita concorrente
+  const concurrentState = createStatefulOutboxDb({
+    initialRows: [
+      makeSampleRow({
+        id: "outbox-lease-guard",
+        serviceSessionId: "11111111-1111-4000-8000-000000000099",
+      }),
+    ],
+    nowMs: () => currentTimeMs,
+  });
+
+  let releaseInFlightRequest!: () => void;
+  let notifyInFlightStarted!: () => void;
+  const inFlightStarted = new Promise<void>((resolve) => {
+    notifyInFlightStarted = resolve;
+  });
+  let pushSendCalls = 0;
+
+  const inFlightTransport: PushHttpTransport = async (url) => {
+    if (url === EXPO_PUSH_URL) {
+      pushSendCalls++;
+      notifyInFlightStarted();
+      await new Promise<void>((resolve) => {
+        releaseInFlightRequest = resolve;
+      });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: [{ status: "ok", id: `ticket-lease-${pushSendCalls}` }],
+        }),
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: { "ticket-lease-1": { status: "ok" } },
+      }),
+    };
+  };
+
+  const worker1 = new QueueCallPushService(
+    concurrentState.db,
+    mockDeviceTokensService,
+    inFlightTransport,
+  );
+  worker1.setHttpTimeoutMs(80);
+
+  const worker2 = new QueueCallPushService(
+    concurrentState.db,
+    mockDeviceTokensService,
+    inFlightTransport,
+  );
+  worker2.setHttpTimeoutMs(80);
+
+  const worker1Promise = worker1.dispatchPending();
+  await inFlightStarted;
+
+  // Avança o relógio simulado em 65s enquanto a requisição do worker1 ainda está em andamento:
+  // o heartbeat de worker1 (a cada 20ms) renova locked_at e impede que worker2 processe a mesma entrega concorrentemente
+  currentTimeMs += 65_000;
+  await new Promise((resolve) => setTimeout(resolve, 35));
+
+  const worker2ResultWhileInFlight = await worker2.dispatchPending();
+  assert.equal(
+    worker2ResultWhileInFlight.processed,
+    0,
+    "Worker 2 não deve assumir o registro enquanto a requisição do Worker 1 ainda está ativa e renovando o lease",
+  );
+  assert.equal(pushSendCalls, 1, "Apenas 1 envio deve estar em andamento");
+
+  releaseInFlightRequest();
+  const worker1Result = await worker1Promise;
+  assert.equal(worker1Result.accepted, 1);
+  assert.equal(worker1Result.delivered, 1);
+  assert.equal(concurrentState.rows[0].status, "delivered");
+  assert.equal(pushSendCalls, 1);
+
+  // Parte 3: Fencing por tentativa (attempts) impede que resposta tardia de instância congelada sobrescreva outra instância
+  const fencingState = createStatefulOutboxDb({
+    initialRows: [
+      makeSampleRow({
+        id: "outbox-fenced-row",
+        serviceSessionId: "11111111-1111-4000-8000-000000000100",
+      }),
+    ],
+    nowMs: () => currentTimeMs,
+  });
+
+  let releaseFrozenWorker!: () => void;
+  let notifyFrozenStarted!: () => void;
+  const frozenStarted = new Promise<void>((resolve) => {
+    notifyFrozenStarted = resolve;
+  });
+  let callIndex = 0;
+
+  const fencingTransport: PushHttpTransport = async (url) => {
+    if (url === EXPO_PUSH_URL) {
+      callIndex++;
+      if (callIndex === 1) {
+        notifyFrozenStarted();
+        await new Promise<void>((resolve) => {
+          releaseFrozenWorker = resolve;
+        });
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: [{ status: "ok", id: "stale-worker-ticket" }],
+          }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: [{ status: "ok", id: "fresh-worker-ticket" }],
+        }),
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: { "fresh-worker-ticket": { status: "ok" } },
+      }),
+    };
+  };
+
+  const staleWorker = new QueueCallPushService(
+    fencingState.db,
+    mockDeviceTokensService,
+    fencingTransport,
+  );
+  staleWorker.setHttpTimeoutMs(500);
+
+  const freshWorker = new QueueCallPushService(
+    fencingState.db,
+    mockDeviceTokensService,
+    fencingTransport,
+  );
+  freshWorker.setHttpTimeoutMs(500);
+
+  const stalePromise = staleWorker.dispatchPending();
+  await frozenStarted;
+
+  // Simula congelamento da instância 1 avançando o relógio imediatamente além do lease antes do próximo tick de heartbeat
+  currentTimeMs += 65_000;
+  const freshResult = await freshWorker.dispatchPending();
+  assert.equal(freshResult.processed, 1);
+  assert.equal(freshResult.delivered, 1);
+  assert.equal(fencingState.rows[0].status, "delivered");
+  assert.equal(fencingState.rows[0].attempts, 2);
+
+  // Quando a resposta tardia da instância 1 chega (attempts = 1), o UPDATE cercado (fenced) não altera o registro já entregue
+  releaseFrozenWorker();
+  const staleResult = await stalePromise;
+  assert.equal(staleResult.accepted, 0, "Instância obsoleta não deve marcar accepted após perder o lease");
+  assert.equal(fencingState.rows[0].status, "delivered");
+  assert.equal(fencingState.rows[0].ticketId, "fresh-worker-ticket");
 });

@@ -6,7 +6,7 @@
 - **Branch-base:** `develop` (`41b231f`)
 - **Branch de trabalho:** `feature/queue-call-vibration`
 - **Expo SDK:** 58 (Expo ~58.0.23, React 19.3.0, React Native 0.88.1)
-- **Commit de correção:** `fix(queue): corrigir entrega e processamento do alerta vibratório silencioso`
+- **Commit de correção:** `fix(queue): reforçar isolamento de sessão e confiabilidade dos alertas`
 
 ---
 
@@ -22,13 +22,15 @@
 
 ## 3. Correções Implementadas (P1 e P2)
 
-### 3.1. Autenticação e Isolamento dos Endpoints de Dispositivo — P1 (`app/services/devicePushService.js` e `app/context/AuthContext.js`)
-- **`POST /devices/push-token`:** agora envia explicitamente `{ auth: true }` para que `httpClient.js` inclua o cabeçalho `Authorization: Bearer <accessToken>`.
-- **`DELETE /devices/push-token`:** agora envia `{ auth: true, body: { pushToken } }`, respeitando o contrato de `httpClient.delete(path, options)` em `app/services/httpClient.js`.
-- **Proteção contra registro tardio após logout ou troca de sessão:**
-  - `syncDevicePushToken` controla uma geração monotônica (`syncGeneration`), valida `getSessionEpoch()` e `isCurrent()` antes e depois de cada fronteira assíncrona (`ensureAndroidSilentChannel`, `getPermissionsAsync`, `requestPermissionsAsync`, `getExpoPushTokenAsync` e `client.post`).
-  - Se o logout (`unregisterDevicePushToken` / `cancelPendingPushTokenSync`) ocorrer enquanto a obtenção do token está pendente, o envio `POST /devices/push-token` é abortado imediatamente.
-  - Se o logout ocorrer enquanto o `POST /devices/push-token` já estava em trânsito na rede, a conclusão tardia executa compensação imediata via `DELETE /devices/push-token` e não persiste o token no `SecureStore`.
+### 3.1. Autenticação, Isolamento e Prevenção de Condições de Corrida no Registro do Dispositivo — P1 (`app/services/devicePushService.js`, `app/services/queueCallVibrationService.js` e `app/context/AuthContext.js`)
+- **`POST /devices/push-token`:** envia explicitamente `{ auth: true }` para que `httpClient.js` inclua o cabeçalho `Authorization: Bearer <accessToken>`.
+- **`DELETE /devices/push-token`:** envia `{ auth: true, body: { pushToken } }`, respeitando o contrato de `httpClient.delete(path, options)` em `app/services/httpClient.js`.
+- **Proteção determinística contra condições de corrida entre login, logout e troca de conta:**
+  - `syncDevicePushToken` revalida a geração monotônica (`syncGeneration`), `getSessionEpoch()` e `isCurrent()` antes e após **cada** operação assíncrona (`ensureAndroidSilentChannel`, `getPermissionsAsync`, `requestPermissionsAsync`, `getExpoPushTokenAsync`, `client.post`, `secureStore.setItemAsync(SECURE_STORE_PUSH_TOKEN_KEY)` e `setActiveQueueCallUser`).
+  - `setActiveQueueCallUser` possui seu próprio controle monotônico de geração (`activeUserStateGeneration`) e callback `shouldAbort`, revertendo imediatamente qualquer escrita em `arenago_push_active_user_id` caso o logout ou troca de conta ocorra enquanto o `SecureStore` está pendente.
+  - Em caso de logout durante `POST /devices/push-token`, `secureStore.setItemAsync` ou `setActiveQueueCallUser`, a função `compensateAndCleanup` remove qualquer gravação tardia no `SecureStore`, limpa o usuário ativo e envia compensação `DELETE /devices/push-token`.
+  - Em caso de troca direta de contas (`User A -> User B`), `compensateAndCleanup` preserva integralmente o token e o usuário ativo da nova conta (`latestCommittedSync`) no `SecureStore` e em memória, compensando apenas o registro obsoleto da conta anterior.
+  - Em caso de falha de rede durante `DELETE /devices/push-token` no logout, `unregisterDevicePushToken` captura o erro sem bloquear o fluxo de logout e limpa obrigatoriamente o token e o usuário ativo no `SecureStore` e em memória.
 
 ### 3.2. Processamento do Payload em Background (Expo SDK 58 `NotificationTaskPayload`) — P1 (`app/services/queueCallVibrationService.js` e `app/index.js`)
 - **Interpretação real de `NotificationTaskPayload`:**
@@ -37,7 +39,7 @@
 - **Inicialização Headless:**
   - `TaskManager.defineTask(BACKGROUND_QUEUE_CALL_TASK, ...)` e `Notifications.registerTaskAsync(BACKGROUND_QUEUE_CALL_TASK)` são executados no escopo de inicialização do módulo `queueCallVibrationService.js`, que é importado diretamente no topo de `app/index.js` antes de `registerRootComponent(App)`. Isso garante que a task esteja definida e registrada quando o Android carregar o bundle JS em segundo plano sem montar a árvore React.
 
-### 3.3. Confiabilidade, Reserva Atômica e Retomada da Outbox — P1 (`backend/src/notifications/queue-call-push.service.ts`)
+### 3.3. Confiabilidade, Reserva Atômica, Associação Ticket-Token e Timeouts da Outbox — P1/P2 (`backend/src/notifications/queue-call-push.service.ts`)
 - **Reserva atômica por registro:**
   - Substituído o `SELECT ... FOR UPDATE SKIP LOCKED` avulso por uma reserva atômica em instrução única:
     ```sql
@@ -61,6 +63,16 @@
     RETURNING ...
     ```
   - Evita que múltiplas instâncias do backend processem o mesmo registro simultaneamente.
+- **Revogação exclusiva do dispositivo inválido (`DeviceNotRegistered`) — P1:**
+  - A associação entre `ticketId` e `pushToken` é preservada em `payload._ticketTokens` (persistida no banco para sobreviver a reinícios e múltiplas instâncias) e em cache em memória (`ticketTokenCache`).
+  - Quando um recibo `/api/v2/push/getReceipts` retorna `DeviceNotRegistered`, o serviço revoga **exclusivamente** o token correspondente àquele recibo (`deviceTokensService.revokeInvalidToken(invalidToken)`), preservando intactos outros dispositivos válidos do mesmo usuário.
+- **Rejeição de tickets `ok` sem ID válido — P2:**
+  - Não são gerados identificadores fictícios como `accepted-0`.
+  - Se a Expo Push API retornar `{ status: "ok" }` sem `id` válido (ausente ou vazio), o ticket é classificado como resposta inconclusiva/inválida e submetido à política de retry (`pending` com backoff progressivo até 3 tentativas), preservando o mesmo `serviceSessionId` para deduplicação lógica.
+- **Timeouts HTTP explícitos, renovação de lease (heartbeat) e fencing por tentativa — P2:**
+  - `performHttpPost` aplica timeout explícito (`EXPO_HTTP_TIMEOUT_MS = 10_000` ms, compatível com o lease de 60s) via `AbortController` e `Promise.race`. Quando a resposta do provedor é incerta por timeout, a requisição é abortada e o registro agenda retry sem ser marcado como `accepted` ou `delivered`.
+  - Antes de iniciar o envio HTTP e durante sua execução (dentro do limite de timeout), a instância valida e renova periodicamente `locked_at = clock_timestamp()` (`WHERE id = ... AND status = 'processing' AND attempts = currentAttempt`), impedindo que outra instância assuma a mesma entrega enquanto a requisição ainda está em andamento.
+  - Todas as transições de estado pós-envio utilizam *fencing* por número de tentativa (`WHERE id = ${entry.id} AND status = 'processing' AND attempts = ${currentAttempt}`), garantindo que uma resposta tardia de uma instância cujo lease expirou jamais sobrescreva o estado de outra instância.
 - **Retomada após reinício e agendador periódico:**
   - `QueueCallPushService` implementa `OnApplicationBootstrap` e `BeforeApplicationShutdown`.
   - Na inicialização (`recoverOnStartup()`), recupera registros pendentes, libera/reprocessa registros órfãos em `processing` cujo lock de 60s expirou durante uma queda e verifica recibos de registros `accepted`.
@@ -70,10 +82,10 @@
   - Backoff progressivo via `next_attempt_at`: `5 segundos` após a 1ª falha e `15 segundos` após a 2ª falha; na 3ª falha, o registro transita definitivamente para `status = 'failed'`.
 - **Distinção estrita de estados de envio e entrega:**
   - `no_device`: quando o participante não possui nenhum token ativo (`tokens.length === 0`). **Nunca é marcado como `delivered`.**
-  - `accepted`: quando a Expo Push API (`/api/v2/push/send`) aceita ao menos um ticket (`status: "ok"`), persistindo o `ticket_id`.
+  - `accepted`: quando a Expo Push API (`/api/v2/push/send`) aceita ao menos um ticket (`status: "ok"`) com `id` válido, persistindo o `ticket_id`.
   - `delivered`: somente quando a API de recibos (`/api/v2/push/getReceipts`) confirma `{ status: "ok" }` para o `ticket_id`.
   - `expired`: quando a `service_session` não está mais `pending` antes do envio ou da confirmação do recibo.
-  - `failed`: quando todos os tickets/recibos falham com erro não recuperável (ex.: `DeviceNotRegistered`, revogando o token inválido) ou após esgotar as 3 tentativas.
+  - `failed`: quando todos os tickets/recibos falham com erro não recuperável (ex.: `DeviceNotRegistered`, revogando apenas o token inválido) ou após esgotar as 3 tentativas.
 
 ### 3.4. Isolamento de Sessão, Deduplicação Persistente e Validação de Estado — P1 (`app/services/queueCallVibrationService.js`)
 - **Deduplicação persistente por usuário (`SecureStore`):**
@@ -117,8 +129,8 @@
 
 | Escopo | Comando Executado | Resultado Observado | Exit Code |
 | :--- | :--- | :--- | :--- |
-| **Testes Unitários Mobile (App completo)** | `npm.cmd --prefix app test` | **386/386 aprovados** (incluindo 6 suítes completas em `queue-call-vibration.test.cjs`) | `0` |
-| **Testes Unitários Backend (Notificações, Fila e CallNext)** | `cd backend; $env:NODE_ENV="test"; $env:STAFF_IDEMPOTENCY_TTL_SECONDS="60"; $env:PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS="60"; $env:EVALUATION_IDEMPOTENCY_TTL_SECONDS="60"; npx.cmd tsx --test test/unit/call-next*.test.ts test/unit/notifications*.test.ts test/unit/queue-call*.test.ts test/unit/staff-http.test.ts test/unit/participant-queue-http.test.ts` | **79/79 aprovados** (0 falhas) | `0` |
+| **Testes Unitários Mobile (App completo)** | `npm.cmd --prefix app test` | **387/387 aprovados** (incluindo 7 suítes completas em `queue-call-vibration.test.cjs`) | `0` |
+| **Testes Unitários Backend (Notificações, Fila e CallNext)** | `cd backend; $env:NODE_ENV="test"; $env:STAFF_IDEMPOTENCY_TTL_SECONDS="60"; $env:PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS="60"; $env:EVALUATION_IDEMPOTENCY_TTL_SECONDS="60"; npx.cmd tsx --test test/unit/call-next*.test.ts test/unit/notifications*.test.ts test/unit/queue-call*.test.ts test/unit/staff-http.test.ts test/unit/participant-queue-http.test.ts` | **82/82 aprovados** (0 falhas) | `0` |
 | **Build TypeScript do Backend** | `npm.cmd --prefix backend run build` | **Compilado sem erros** (`nest build`) | `0` |
 | **Typecheck de Testes do Backend** | `npm.cmd --prefix backend run typecheck:test` | **0 erros** (`tsc --project tsconfig.test.json`) | `0` |
 | **Verificação de Dependências Expo** | `cd app; npx.cmd expo install --check` | **Dependencies are up to date** | `0` |

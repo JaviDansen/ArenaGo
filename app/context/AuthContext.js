@@ -90,7 +90,20 @@ export function AuthProvider({
       typeof manager.getSessionEpoch === 'function' ? manager.getSessionEpoch() : null;
 
     if (snapshot.isAuthenticated && currentUserId && manager.client) {
-      void setActiveQueueCallUser(currentUserId);
+      const isCurrentSession = () => {
+        const latest = manager.getSnapshot();
+        const latestEpoch =
+          typeof manager.getSessionEpoch === 'function' ? manager.getSessionEpoch() : null;
+        return (
+          Boolean(latest.isAuthenticated) &&
+          latest.user?.id === currentUserId &&
+          latestEpoch === currentEpoch
+        );
+      };
+
+      void setActiveQueueCallUser(currentUserId, {
+        shouldAbort: () => !isCurrentSession(),
+      });
 
       setQueueCallStateValidator(async (payload) => {
         if (!payload?.participationId || typeof manager.client?.get !== 'function') {
@@ -129,16 +142,7 @@ export function AuthProvider({
         accessToken:
           typeof manager.getAccessToken === 'function' ? manager.getAccessToken() : null,
         getSessionEpoch: manager.getSessionEpoch,
-        isCurrent: () => {
-          const latest = manager.getSnapshot();
-          const latestEpoch =
-            typeof manager.getSessionEpoch === 'function' ? manager.getSessionEpoch() : null;
-          return (
-            Boolean(latest.isAuthenticated) &&
-            latest.user?.id === currentUserId &&
-            latestEpoch === currentEpoch
-          );
-        },
+        isCurrent: isCurrentSession,
       });
     } else if (!snapshot.isInitializing && !snapshot.isAuthenticated) {
       cancelPendingPushTokenSync();

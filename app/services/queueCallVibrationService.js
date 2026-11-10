@@ -38,6 +38,7 @@ const callListeners = new Set();
 
 let activeUserIdInMemory = null;
 let isExplicitlyLoggedOut = false;
+let activeUserStateGeneration = 0;
 let callStateValidator = null;
 let backgroundTaskExecutorRef = null;
 
@@ -300,18 +301,56 @@ async function persistAlertedSessionForUser(
 
 /**
  * Define o usuário autenticado atual para isolamento de alertas em primeiro e segundo plano.
+ * Protegido por geração monotônica e `shouldAbort` para impedir que operações iniciadas
+ * antes do logout ou de uma troca de conta ativem um usuário obsoleto.
  */
-export async function setActiveQueueCallUser(userId, { secureStore = SecureStore } = {}) {
-  const normalized = typeof userId === 'string' && userId.trim() ? userId.trim() : null;
-  activeUserIdInMemory = normalized;
-  isExplicitlyLoggedOut = !normalized;
+export async function setActiveQueueCallUser(
+  userId,
+  { secureStore = SecureStore, shouldAbort = null } = {}
+) {
+  if (typeof shouldAbort === 'function' && shouldAbort()) {
+    return false;
+  }
 
+  const normalized = typeof userId === 'string' && userId.trim() ? userId.trim() : null;
   if (!normalized) {
+    await clearActiveQueueCallUser({ secureStore });
+    return false;
+  }
+
+  const myGeneration = ++activeUserStateGeneration;
+  const isOperationStale = () =>
+    myGeneration !== activeUserStateGeneration ||
+    (typeof shouldAbort === 'function' && Boolean(shouldAbort()));
+
+  const rollbackOrRestoreActiveUser = async () => {
+    if (
+      myGeneration !== activeUserStateGeneration &&
+      activeUserIdInMemory &&
+      !isExplicitlyLoggedOut
+    ) {
+      if (secureStore && typeof secureStore.setItemAsync === 'function') {
+        await secureStore
+          .setItemAsync(
+            ACTIVE_PUSH_USER_STORAGE_KEY,
+            JSON.stringify({ userId: activeUserIdInMemory, updatedAt: Date.now() })
+          )
+          .catch(() => undefined);
+      }
+      return;
+    }
+
+    if (myGeneration === activeUserStateGeneration) {
+      activeUserIdInMemory = null;
+      isExplicitlyLoggedOut = true;
+    }
     if (secureStore && typeof secureStore.deleteItemAsync === 'function') {
       await secureStore.deleteItemAsync(ACTIVE_PUSH_USER_STORAGE_KEY).catch(() => undefined);
     }
-    return;
-  }
+  };
+
+  activeUserIdInMemory = normalized;
+  isExplicitlyLoggedOut = false;
 
   if (secureStore && typeof secureStore.setItemAsync === 'function') {
     await secureStore
@@ -322,7 +361,17 @@ export async function setActiveQueueCallUser(userId, { secureStore = SecureStore
       .catch(() => undefined);
   }
 
+  if (isOperationStale()) {
+    await rollbackOrRestoreActiveUser();
+    return false;
+  }
+
   const persistedMap = await readPersistedAlertedMap(secureStore);
+  if (isOperationStale()) {
+    await rollbackOrRestoreActiveUser();
+    return false;
+  }
+
   const userList = Array.isArray(persistedMap[normalized]) ? persistedMap[normalized] : [];
   const userSet = getUserSessionSet(normalized);
   for (const sessionId of userList) {
@@ -330,17 +379,26 @@ export async function setActiveQueueCallUser(userId, { secureStore = SecureStore
       userSet.add(sessionId.trim());
     }
   }
+  return true;
 }
 
 /**
  * Remove o usuário ativo durante logout, impedindo que alertas da conta anterior vibrem.
  */
 export async function clearActiveQueueCallUser({ secureStore = SecureStore } = {}) {
+  activeUserStateGeneration += 1;
   activeUserIdInMemory = null;
   isExplicitlyLoggedOut = true;
   if (secureStore && typeof secureStore.deleteItemAsync === 'function') {
     await secureStore.deleteItemAsync(ACTIVE_PUSH_USER_STORAGE_KEY).catch(() => undefined);
   }
+}
+
+/**
+ * Retorna o ID do usuário autenticado ativo em memória (ou `null` quando deslogado).
+ */
+export function getActiveQueueCallUser() {
+  return activeUserIdInMemory;
 }
 
 /**
@@ -597,6 +655,7 @@ export function resetQueueCallAlerts({
   endedSessionIds.clear();
   inFlightSessionIds.clear();
   if (clearPersistedUser) {
+    activeUserStateGeneration += 1;
     activeUserIdInMemory = null;
     isExplicitlyLoggedOut = false;
     if (secureStore && typeof secureStore.deleteItemAsync === 'function') {

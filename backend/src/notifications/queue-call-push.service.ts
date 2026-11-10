@@ -20,6 +20,7 @@ export const PUSH_HTTP_TRANSPORT = Symbol("PUSH_HTTP_TRANSPORT");
 export const MAX_OUTBOX_ATTEMPTS = 3;
 export const OUTBOX_RETRY_DELAYS_SECONDS = [5, 15] as const;
 export const OUTBOX_PROCESSING_LOCK_TIMEOUT_SECONDS = 60;
+export const EXPO_HTTP_TIMEOUT_MS = 10_000;
 export const DEFAULT_OUTBOX_POLL_INTERVAL_MS = 5000;
 
 const NON_RETRYABLE_EXPO_ERRORS = new Set([
@@ -44,6 +45,7 @@ export type PushHttpTransport = (
     method: string;
     headers: Record<string, string>;
     body: string;
+    signal?: AbortSignal;
   },
 ) => Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }>;
 
@@ -55,6 +57,7 @@ export interface QueueCallOutboxPayload {
   userId?: string;
   calledAt?: string;
   version: 1;
+  _ticketTokens?: Record<string, string>;
 }
 
 export interface CreateOutboxEntryInput {
@@ -91,6 +94,7 @@ type AcceptedOutboxRow = {
   serviceSessionId: string;
   userId: string;
   ticketId: string;
+  payload?: QueueCallOutboxPayload;
   attempts: number;
 };
 
@@ -132,6 +136,8 @@ export class QueueCallPushService implements OnApplicationBootstrap, BeforeAppli
   private inFlightDispatch: Promise<DispatchOutboxResult> | null = null;
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
+  private httpTimeoutMs = EXPO_HTTP_TIMEOUT_MS;
+  private readonly ticketTokenCache = new Map<string, string>();
 
   constructor(
     @Inject(DRIZZLE_DATABASE)
@@ -142,6 +148,16 @@ export class QueueCallPushService implements OnApplicationBootstrap, BeforeAppli
     @Inject(PUSH_HTTP_TRANSPORT)
     private readonly transport?: PushHttpTransport,
   ) {}
+
+  setHttpTimeoutMs(timeoutMs: number): void {
+    if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+      this.httpTimeoutMs = Math.floor(timeoutMs);
+    }
+  }
+
+  getHttpTimeoutMs(): number {
+    return this.httpTimeoutMs;
+  }
 
   async onApplicationBootstrap(): Promise<void> {
     const enabled =
@@ -359,15 +375,20 @@ export class QueueCallPushService implements OnApplicationBootstrap, BeforeAppli
       );
 
       if (!sessionCheck.rows.length || sessionCheck.rows[0].status !== "pending") {
-        await this.database.execute(sql`
+        const expUpdate = await this.database.execute<{ id: string }>(sql`
           UPDATE queue_call_outbox
           SET status = 'expired',
               locked_at = NULL,
               processed_at = clock_timestamp(),
               last_error = 'Sessão de atendimento não está mais pendente'
           WHERE id = ${entry.id}
+            AND status = 'processing'
+            AND attempts = ${currentAttempt}
+          RETURNING id
         `);
-        expired++;
+        if ((expUpdate.rowCount ?? expUpdate.rows?.length ?? 0) > 0) {
+          expired++;
+        }
         continue;
       }
 
@@ -376,19 +397,61 @@ export class QueueCallPushService implements OnApplicationBootstrap, BeforeAppli
 
       if (tokens.length === 0) {
         // IMPORTANTE: Não marcar como entregue quando não há dispositivo destinatário
-        await this.database.execute(sql`
+        const noDevUpdate = await this.database.execute<{ id: string }>(sql`
           UPDATE queue_call_outbox
           SET status = 'no_device',
               locked_at = NULL,
               processed_at = clock_timestamp(),
               last_error = 'Nenhum dispositivo ativo registrado para o participante'
           WHERE id = ${entry.id}
+            AND status = 'processing'
+            AND attempts = ${currentAttempt}
+          RETURNING id
         `);
-        noDevice++;
+        if ((noDevUpdate.rowCount ?? noDevUpdate.rows?.length ?? 0) > 0) {
+          noDevice++;
+        }
         continue;
       }
 
-      // 2.3. Transmitir push silencioso e avaliar tickets individuais
+      // 2.3. Confirmar posse do lease antes de iniciar a chamada externa ao provedor
+      const leaseRefresh = await this.database.execute<{ id: string }>(sql`
+        UPDATE queue_call_outbox
+        SET locked_at = clock_timestamp()
+        WHERE id = ${entry.id}
+          AND status = 'processing'
+          AND attempts = ${currentAttempt}
+        RETURNING id
+      `);
+      if ((leaseRefresh.rowCount ?? leaseRefresh.rows?.length ?? 0) === 0) {
+        // Outra instância assumiu o registro após expiração do lease; aborta para impedir envio concorrente
+        continue;
+      }
+
+      // Mantém o lease renovado enquanto a requisição externa ainda estiver em andamento (dentro do timeout HTTP)
+      const heartbeatIntervalMs = Math.max(
+        15,
+        Math.floor(
+          Math.min(
+            this.httpTimeoutMs,
+            OUTBOX_PROCESSING_LOCK_TIMEOUT_SECONDS * 1000,
+          ) / 4,
+        ),
+      );
+      const leaseHeartbeat = setInterval(() => {
+        void this.database
+          .execute(sql`
+            UPDATE queue_call_outbox
+            SET locked_at = clock_timestamp()
+            WHERE id = ${entry.id}
+              AND status = 'processing'
+              AND attempts = ${currentAttempt}
+          `)
+          .catch(() => undefined);
+      }, heartbeatIntervalMs);
+      leaseHeartbeat.unref?.();
+
+      // 2.4. Transmitir push silencioso e avaliar tickets individuais
       try {
         const dispatchOutcome = await this.sendSilentPush(
           tokens.map((t) => t.pushToken),
@@ -400,15 +463,26 @@ export class QueueCallPushService implements OnApplicationBootstrap, BeforeAppli
             ? dispatchOutcome.acceptedTicketIds.join(",")
             : null;
 
-        await this.database.execute(sql`
+        const payloadWithTicketMap: QueueCallOutboxPayload = {
+          ...entry.payload,
+          _ticketTokens: dispatchOutcome.ticketTokenMap,
+        };
+
+        const acceptUpdate = await this.database.execute<{ id: string }>(sql`
           UPDATE queue_call_outbox
           SET status = 'accepted',
               ticket_id = ${joinedTicketIds},
+              payload = ${JSON.stringify(payloadWithTicketMap)}::jsonb,
               locked_at = NULL,
               last_error = ${dispatchOutcome.partialErrorSummary}
           WHERE id = ${entry.id}
+            AND status = 'processing'
+            AND attempts = ${currentAttempt}
+          RETURNING id
         `);
-        accepted++;
+        if ((acceptUpdate.rowCount ?? acceptUpdate.rows?.length ?? 0) > 0) {
+          accepted++;
+        }
       } catch (pushError: unknown) {
         const errorMessage =
           pushError instanceof Error ? pushError.message : String(pushError);
@@ -416,27 +490,39 @@ export class QueueCallPushService implements OnApplicationBootstrap, BeforeAppli
           pushError instanceof TicketDispatchError ? pushError.retryable : true;
 
         if (!isRetryable || currentAttempt >= MAX_OUTBOX_ATTEMPTS) {
-          await this.database.execute(sql`
+          const failUpdate = await this.database.execute<{ id: string }>(sql`
             UPDATE queue_call_outbox
             SET status = 'failed',
-                locked_at = NULL,
-                processed_at = clock_timestamp(),
-                last_error = ${errorMessage}
+                 locked_at = NULL,
+                 processed_at = clock_timestamp(),
+                 last_error = ${errorMessage}
             WHERE id = ${entry.id}
+              AND status = 'processing'
+              AND attempts = ${currentAttempt}
+            RETURNING id
           `);
-          failed++;
+          if ((failUpdate.rowCount ?? failUpdate.rows?.length ?? 0) > 0) {
+            failed++;
+          }
         } else {
           const delaySeconds = getOutboxRetryDelaySeconds(currentAttempt);
-          await this.database.execute(sql`
+          const retryUpdate = await this.database.execute<{ id: string }>(sql`
             UPDATE queue_call_outbox
             SET status = 'pending',
                 locked_at = NULL,
                 next_attempt_at = clock_timestamp() + (${delaySeconds} * INTERVAL '1 second'),
                 last_error = ${errorMessage}
             WHERE id = ${entry.id}
+              AND status = 'processing'
+              AND attempts = ${currentAttempt}
+            RETURNING id
           `);
-          retried++;
+          if ((retryUpdate.rowCount ?? retryUpdate.rows?.length ?? 0) > 0) {
+            retried++;
+          }
         }
+      } finally {
+        clearInterval(leaseHeartbeat);
       }
     }
 
@@ -494,6 +580,7 @@ export class QueueCallPushService implements OnApplicationBootstrap, BeforeAppli
         service_session_id AS "serviceSessionId",
         user_id AS "userId",
         ticket_id AS "ticketId",
+        payload,
         attempts
     `);
 
@@ -510,6 +597,7 @@ export class QueueCallPushService implements OnApplicationBootstrap, BeforeAppli
               processed_at = clock_timestamp(),
               last_error = 'Sessão de atendimento encerrada antes da confirmação do recibo'
           WHERE id = ${row.id}
+            AND status = 'accepted'
         `);
         expired++;
         continue;
@@ -525,12 +613,24 @@ export class QueueCallPushService implements OnApplicationBootstrap, BeforeAppli
           UPDATE queue_call_outbox
           SET locked_at = NULL
           WHERE id = ${row.id}
+            AND status = 'accepted'
         `);
         continue;
       }
 
+      const persistedTicketTokens =
+        row.payload &&
+        typeof row.payload === "object" &&
+        row.payload._ticketTokens &&
+        typeof row.payload._ticketTokens === "object"
+          ? row.payload._ticketTokens
+          : {};
+
       try {
-        const receiptsOutcome = await this.fetchExpoReceipts(ticketIds, row.userId);
+        const receiptsOutcome = await this.fetchExpoReceipts(
+          ticketIds,
+          persistedTicketTokens,
+        );
 
         if (receiptsOutcome.kind === "delivered") {
           await this.database.execute(sql`
@@ -540,6 +640,7 @@ export class QueueCallPushService implements OnApplicationBootstrap, BeforeAppli
                 processed_at = clock_timestamp(),
                 last_error = ${receiptsOutcome.partialErrorSummary}
             WHERE id = ${row.id}
+              AND status = 'accepted'
           `);
           delivered++;
         } else if (receiptsOutcome.kind === "pending_receipt") {
@@ -548,6 +649,7 @@ export class QueueCallPushService implements OnApplicationBootstrap, BeforeAppli
             UPDATE queue_call_outbox
             SET locked_at = NULL
             WHERE id = ${row.id}
+              AND status = 'accepted'
           `);
         } else {
           // Todos os recibos retornaram erro
@@ -560,6 +662,7 @@ export class QueueCallPushService implements OnApplicationBootstrap, BeforeAppli
                   processed_at = clock_timestamp(),
                   last_error = ${receiptsOutcome.errorMessage}
               WHERE id = ${row.id}
+                AND status = 'accepted'
             `);
             failed++;
           } else {
@@ -572,6 +675,7 @@ export class QueueCallPushService implements OnApplicationBootstrap, BeforeAppli
                   next_attempt_at = clock_timestamp() + (${delaySeconds} * INTERVAL '1 second'),
                   last_error = ${receiptsOutcome.errorMessage}
               WHERE id = ${row.id}
+                AND status = 'accepted'
             `);
             retried++;
           }
@@ -584,6 +688,7 @@ export class QueueCallPushService implements OnApplicationBootstrap, BeforeAppli
           SET locked_at = NULL,
               last_error = ${errorMessage}
           WHERE id = ${row.id}
+            AND status = 'accepted'
         `);
       }
     }
@@ -596,6 +701,7 @@ export class QueueCallPushService implements OnApplicationBootstrap, BeforeAppli
     payload: QueueCallOutboxPayload,
   ): Promise<{
     acceptedTicketIds: string[];
+    ticketTokenMap: Record<string, string>;
     partialErrorSummary: string | null;
   }> {
     const messages = tokens.map((token) => ({
@@ -635,7 +741,11 @@ export class QueueCallPushService implements OnApplicationBootstrap, BeforeAppli
       errors?: Array<{ code?: string; message?: string }>;
     };
 
-    if (!Array.isArray(result?.data) || result.data.length === 0) {
+    const tickets: ExpoPushTicket[] | undefined = Array.isArray(result?.data)
+      ? result.data
+      : undefined;
+
+    if (!tickets || tickets.length === 0) {
       const topError =
         Array.isArray(result?.errors) && result.errors.length > 0
           ? result.errors.map((e) => e.message || e.code || "Erro Expo").join("; ")
@@ -644,11 +754,12 @@ export class QueueCallPushService implements OnApplicationBootstrap, BeforeAppli
     }
 
     const acceptedTicketIds: string[] = [];
+    const ticketTokenMap: Record<string, string> = {};
     const ticketErrors: string[] = [];
     let hasRetryableError = false;
 
-    for (let i = 0; i < result.data.length; i++) {
-      const ticket = result.data[i];
+    for (let i = 0; i < tickets.length; i++) {
+      const ticket: ExpoPushTicket | undefined = tickets[i];
       const token = tokens[i];
 
       if (!ticket || typeof ticket !== "object") {
@@ -659,9 +770,18 @@ export class QueueCallPushService implements OnApplicationBootstrap, BeforeAppli
 
       if (ticket.status === "ok") {
         if (typeof ticket.id === "string" && ticket.id.trim().length > 0) {
-          acceptedTicketIds.push(ticket.id.trim());
+          const validTicketId = ticket.id.trim();
+          acceptedTicketIds.push(validTicketId);
+          if (token) {
+            ticketTokenMap[validTicketId] = token;
+            this.ticketTokenCache.set(validTicketId, token);
+          }
         } else {
-          acceptedTicketIds.push(`accepted-${i}`);
+          // P2: Não gerar identificadores fictícios como accepted-0; classificar como resposta inconclusiva e elegível a retry
+          ticketErrors.push(
+            "Ticket ok sem identificador válido (resposta inconclusiva da Expo Push API)",
+          );
+          hasRetryableError = true;
         }
         continue;
       }
@@ -689,13 +809,14 @@ export class QueueCallPushService implements OnApplicationBootstrap, BeforeAppli
 
     return {
       acceptedTicketIds,
+      ticketTokenMap,
       partialErrorSummary: ticketErrors.length > 0 ? ticketErrors.join("; ") : null,
     };
   }
 
   private async fetchExpoReceipts(
     ticketIds: string[],
-    userId: string,
+    ticketTokenMap: Record<string, string> = {},
   ): Promise<
     | { kind: "delivered"; partialErrorSummary: string | null }
     | { kind: "pending_receipt" }
@@ -736,6 +857,7 @@ export class QueueCallPushService implements OnApplicationBootstrap, BeforeAppli
 
       if (receipt.status === "ok") {
         okCount++;
+        this.ticketTokenCache.delete(ticketId);
         continue;
       }
 
@@ -746,7 +868,15 @@ export class QueueCallPushService implements OnApplicationBootstrap, BeforeAppli
       receiptErrors.push(errorDesc);
 
       if (errorCode === "DeviceNotRegistered") {
-        await this.deviceTokensService.revokeAllUserTokens(userId).catch(() => undefined);
+        // P1: Revogar apenas o token correspondente ao recibo inválido, preservando outros dispositivos do usuário
+        const invalidToken =
+          ticketTokenMap[ticketId] ?? this.ticketTokenCache.get(ticketId);
+        if (invalidToken) {
+          await this.deviceTokensService
+            .revokeInvalidToken(invalidToken)
+            .catch(() => undefined);
+        }
+        this.ticketTokenCache.delete(ticketId);
       }
 
       if (!NON_RETRYABLE_EXPO_ERRORS.has(errorCode)) {
@@ -777,23 +907,72 @@ export class QueueCallPushService implements OnApplicationBootstrap, BeforeAppli
     headers: Record<string, string>,
     body: string,
   ): Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }> {
-    if (this.transport) {
-      return this.transport(url, {
-        method: "POST",
-        headers,
-        body,
-      });
-    }
+    const timeoutMs = this.httpTimeoutMs;
+    const controller =
+      typeof AbortController === "function" ? new AbortController() : null;
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
 
-    const res = await fetch(url, {
-      method: "POST",
-      headers,
-      body,
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutHandle = setTimeout(() => {
+        controller?.abort();
+        reject(
+          new TicketDispatchError(
+            `Timeout na requisição para a Expo Push API após ${timeoutMs}ms (resposta do provedor incerta)`,
+            true,
+          ),
+        );
+      }, timeoutMs);
+      timeoutHandle.unref?.();
     });
-    return {
-      ok: res.ok,
-      status: res.status,
-      json: () => res.json(),
+
+    const executeRequest = async (): Promise<{
+      ok: boolean;
+      status: number;
+      json: () => Promise<unknown>;
+    }> => {
+      try {
+        if (this.transport) {
+          return await this.transport(url, {
+            method: "POST",
+            headers,
+            body,
+            ...(controller ? { signal: controller.signal } : {}),
+          });
+        }
+
+        const res = await fetch(url, {
+          method: "POST",
+          headers,
+          body,
+          ...(controller ? { signal: controller.signal } : {}),
+        });
+        return {
+          ok: res.ok,
+          status: res.status,
+          json: () => res.json(),
+        };
+      } catch (err: unknown) {
+        const isAbortOrTimeout =
+          (err instanceof Error &&
+            (err.name === "AbortError" ||
+              /timeout|timed out|aborted/i.test(err.message))) ||
+          controller?.signal.aborted;
+        if (isAbortOrTimeout) {
+          throw new TicketDispatchError(
+            `Timeout na requisição para a Expo Push API após ${timeoutMs}ms (resposta do provedor incerta)`,
+            true,
+          );
+        }
+        throw err;
+      }
     };
+
+    try {
+      return await Promise.race([executeRequest(), timeoutPromise]);
+    } finally {
+      if (timeoutHandle !== null) {
+        clearTimeout(timeoutHandle);
+      }
+    }
   }
 }

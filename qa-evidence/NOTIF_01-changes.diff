@@ -40,7 +40,7 @@ index 5e480ab..add4ac5 100644
    }
  }
 diff --git a/app/context/AuthContext.js b/app/context/AuthContext.js
-index 3d6ff4a..9d25d69 100644
+index 3d6ff4a..eeff37a 100644
 --- a/app/context/AuthContext.js
 +++ b/app/context/AuthContext.js
 @@ -3,6 +3,41 @@ import { createAuthSessionManager } from '../services/authService';
@@ -85,7 +85,7 @@ index 3d6ff4a..9d25d69 100644
  export const AuthContext = createContext(null);
  
  export function AuthProvider({
-@@ -35,6 +70,99 @@ export function AuthProvider({
+@@ -35,6 +70,103 @@ export function AuthProvider({
      return unsubscribe;
    }, [autoRestore, manager]);
  
@@ -109,7 +109,20 @@ index 3d6ff4a..9d25d69 100644
 +      typeof manager.getSessionEpoch === 'function' ? manager.getSessionEpoch() : null;
 +
 +    if (snapshot.isAuthenticated && currentUserId && manager.client) {
-+      void setActiveQueueCallUser(currentUserId);
++      const isCurrentSession = () => {
++        const latest = manager.getSnapshot();
++        const latestEpoch =
++          typeof manager.getSessionEpoch === 'function' ? manager.getSessionEpoch() : null;
++        return (
++          Boolean(latest.isAuthenticated) &&
++          latest.user?.id === currentUserId &&
++          latestEpoch === currentEpoch
++        );
++      };
++
++      void setActiveQueueCallUser(currentUserId, {
++        shouldAbort: () => !isCurrentSession(),
++      });
 +
 +      setQueueCallStateValidator(async (payload) => {
 +        if (!payload?.participationId || typeof manager.client?.get !== 'function') {
@@ -148,16 +161,7 @@ index 3d6ff4a..9d25d69 100644
 +        accessToken:
 +          typeof manager.getAccessToken === 'function' ? manager.getAccessToken() : null,
 +        getSessionEpoch: manager.getSessionEpoch,
-+        isCurrent: () => {
-+          const latest = manager.getSnapshot();
-+          const latestEpoch =
-+            typeof manager.getSessionEpoch === 'function' ? manager.getSessionEpoch() : null;
-+          return (
-+            Boolean(latest.isAuthenticated) &&
-+            latest.user?.id === currentUserId &&
-+            latestEpoch === currentEpoch
-+          );
-+        },
++        isCurrent: isCurrentSession,
 +      });
 +    } else if (!snapshot.isInitializing && !snapshot.isAuthenticated) {
 +      cancelPendingPushTokenSync();
@@ -185,7 +189,7 @@ index 3d6ff4a..9d25d69 100644
    const contextValue = {
      user: snapshot.user,
      accessToken: manager.getAccessToken(),
-@@ -53,7 +181,7 @@ export function AuthProvider({
+@@ -53,7 +185,7 @@ export function AuthProvider({
      login: manager.login,
      verifyAdminTwoFactor: manager.verifyAdminTwoFactor,
      cancelAdminTwoFactor: manager.cancelAdminTwoFactor,
@@ -402,10 +406,10 @@ index 28ae90f..593cc97 100644
      if (busyRef.current || !focused.current || loading || !state) return;
 diff --git a/app/services/devicePushService.js b/app/services/devicePushService.js
 new file mode 100644
-index 0000000..1275f80
+index 0000000..eb0ad12
 --- /dev/null
 +++ b/app/services/devicePushService.js
-@@ -0,0 +1,271 @@
+@@ -0,0 +1,408 @@
 +import { Platform } from 'react-native';
 +import * as Notifications from 'expo-notifications';
 +import * as SecureStore from 'expo-secure-store';
@@ -430,7 +434,8 @@ index 0000000..1275f80
 +  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 +
 +let syncGeneration = 0;
-+let inFlightCandidateToken = null;
++let inFlightSyncRecord = null;
++let latestCommittedSync = null;
 +
 +/**
 + * Valida se o projectId EAS está presente e segue o formato UUID oficial do EAS.
@@ -488,6 +493,7 @@ index 0000000..1275f80
 + */
 +export function cancelPendingPushTokenSync() {
 +  syncGeneration += 1;
++  latestCommittedSync = null;
 +}
 +
 +/**
@@ -495,7 +501,8 @@ index 0000000..1275f80
 + * - Inclui `{ auth: true }` para enviar o cabeçalho `Authorization: Bearer <token>`.
 + * - Cria o canal Android silencioso antes de obter o token.
 + * - Valida o `projectId` EAS antes de solicitar o token ao Expo.
-+ * - Impede que uma operação iniciada antes do logout ou troca de sessão registre o dispositivo.
++ * - Revalida a geração da sessão após cada operação assíncrona relevante.
++ * - Impede que uma operação iniciada antes do logout ou troca de sessão grave token ou ative usuário obsoleto.
 + */
 +export async function syncDevicePushToken(client, options = {}) {
 +  const platformOS = options.platformOS ?? Platform.OS;
@@ -520,11 +527,95 @@ index 0000000..1275f80
 +      ? options.accessToken.trim()
 +      : null;
 +
++  const record = {
++    generation: currentGeneration,
++    userId: targetUserId,
++    accessToken: capturedAccessToken,
++    pushToken: null,
++    platform: platformOS === 'ios' ? 'ios' : 'android',
++    postCompleted: false,
++    unlinkedByLogout: false,
++  };
++  inFlightSyncRecord = record;
++
 +  const isSessionStillValid = () => {
 +    if (syncGeneration !== currentGeneration) return false;
 +    if (isCurrent && !isCurrent()) return false;
 +    if (getSessionEpoch && getSessionEpoch() !== startEpoch) return false;
 +    return true;
++  };
++
++  const compensateAndCleanup = async ({ wroteTokenToStore = false } = {}) => {
++    const newerCommitted =
++      latestCommittedSync && latestCommittedSync.generation > currentGeneration
++        ? latestCommittedSync
++        : null;
++    const hasNewerActiveSync =
++      newerCommitted !== null ||
++      (inFlightSyncRecord !== null && inFlightSyncRecord.generation > currentGeneration);
++
++    // 1. Limpar ou restaurar o token no SecureStore
++    if (newerCommitted && newerCommitted.pushToken) {
++      if (secureStore && typeof secureStore.setItemAsync === 'function') {
++        await secureStore
++          .setItemAsync(SECURE_STORE_PUSH_TOKEN_KEY, newerCommitted.pushToken)
++          .catch(() => undefined);
++      }
++    } else if (wroteTokenToStore || !hasNewerActiveSync) {
++      if (secureStore && typeof secureStore.deleteItemAsync === 'function') {
++        await secureStore
++          .deleteItemAsync(SECURE_STORE_PUSH_TOKEN_KEY)
++          .catch(() => undefined);
++      }
++    }
++
++    // 2. Limpar ou restaurar o usuário ativo
++    if (newerCommitted && newerCommitted.userId) {
++      await setActiveQueueCallUser(newerCommitted.userId, { secureStore });
++    } else if (!hasNewerActiveSync) {
++      await clearActiveQueueCallUser({ secureStore });
++    }
++
++    // 3. Compensar registro tardio no backend se o POST já havia concluído
++    if (
++      record.postCompleted &&
++      !record.unlinkedByLogout &&
++      record.pushToken &&
++      typeof client.delete === 'function'
++    ) {
++      record.unlinkedByLogout = true;
++      await client
++        .delete('/devices/push-token', {
++          auth: true,
++          ...(capturedAccessToken ? { accessToken: capturedAccessToken } : {}),
++          body: { pushToken: record.pushToken },
++        })
++        .catch(() => undefined);
++
++      // Se houve troca direta de conta e a nova conta já havia registrado o mesmo token físico,
++      // revalida o vínculo da nova conta para que a compensação da conta antiga não o deixe revogado.
++      if (
++        newerCommitted &&
++        newerCommitted.pushToken === record.pushToken &&
++        typeof client.post === 'function'
++      ) {
++        await client
++          .post(
++            '/devices/push-token',
++            {
++              pushToken: newerCommitted.pushToken,
++              platform: newerCommitted.platform,
++            },
++            {
++              auth: true,
++              ...(newerCommitted.accessToken
++                ? { accessToken: newerCommitted.accessToken }
++                : {}),
++            }
++          )
++          .catch(() => undefined);
++      }
++    }
 +  };
 +
 +  try {
@@ -565,14 +656,14 @@ index 0000000..1275f80
 +      return null;
 +    }
 +
-+    inFlightCandidateToken = pushToken;
++    record.pushToken = pushToken;
 +
 +    // 5. Envia o token ao backend autenticado ({ auth: true })
 +    await client.post(
 +      '/devices/push-token',
 +      {
 +        pushToken,
-+        platform: platformOS === 'ios' ? 'ios' : 'android',
++        platform: record.platform,
 +      },
 +      {
 +        auth: true,
@@ -582,39 +673,61 @@ index 0000000..1275f80
 +          : {}),
 +      }
 +    );
++    record.postCompleted = true;
 +
-+    // 6. Se houve logout ou troca de sessão enquanto o POST estava em trânsito, desfaz imediatamente
++    // 6. Revalida geração após o POST: se houve logout ou troca de conta em trânsito, compensa imediatamente
 +    if (!isSessionStillValid()) {
-+      if (typeof client.delete === 'function') {
-+        await client
-+          .delete('/devices/push-token', {
-+            auth: true,
-+            ...(capturedAccessToken ? { accessToken: capturedAccessToken } : {}),
-+            body: { pushToken },
-+          })
-+          .catch(() => undefined);
-+      }
++      await compensateAndCleanup({ wroteTokenToStore: false });
 +      return null;
 +    }
 +
-+    // 7. Salva localmente o token e o vínculo com o usuário autenticado
++    // 7. Salva localmente o token no SecureStore e revalida a geração imediatamente após a escrita
 +    if (secureStore && typeof secureStore.setItemAsync === 'function') {
 +      await secureStore
 +        .setItemAsync(SECURE_STORE_PUSH_TOKEN_KEY, pushToken)
 +        .catch(() => undefined);
 +    }
 +
-+    if (targetUserId) {
-+      await setActiveQueueCallUser(targetUserId, { secureStore });
++    if (!isSessionStillValid()) {
++      await compensateAndCleanup({ wroteTokenToStore: true });
++      return null;
 +    }
++
++    // 8. Atualiza o usuário ativo com verificação de aborto antes e durante a operação
++    if (targetUserId) {
++      const activated = await setActiveQueueCallUser(targetUserId, {
++        secureStore,
++        shouldAbort: () => !isSessionStillValid(),
++      });
++      if (!activated || !isSessionStillValid()) {
++        await compensateAndCleanup({ wroteTokenToStore: true });
++        return null;
++      }
++    }
++
++    if (!isSessionStillValid()) {
++      await compensateAndCleanup({ wroteTokenToStore: true });
++      return null;
++    }
++
++    latestCommittedSync = {
++      generation: currentGeneration,
++      userId: targetUserId,
++      accessToken: capturedAccessToken,
++      pushToken,
++      platform: record.platform,
++    };
 +
 +    return pushToken;
 +  } catch {
 +    // Falha silenciosa: a indisponibilidade de push não impede o uso do aplicativo
++    if (!isSessionStillValid()) {
++      await compensateAndCleanup({ wroteTokenToStore: false }).catch(() => undefined);
++    }
 +    return null;
 +  } finally {
-+    if (syncGeneration === currentGeneration) {
-+      inFlightCandidateToken = null;
++    if (inFlightSyncRecord === record) {
++      inFlightSyncRecord = null;
 +    }
 +  }
 +}
@@ -623,6 +736,7 @@ index 0000000..1275f80
 + * Remove o vínculo do token no backend (`DELETE /devices/push-token`) durante logout ou troca de conta.
 + * - Cancela qualquer sincronização de registro em andamento.
 + * - Envia `{ auth: true, body: { pushToken } }` respeitando o contrato de `httpClient.js`.
++ * - Não bloqueia o logout caso a requisição de desvinculação falhe por erro de rede, limpando sempre o estado local.
 + */
 +export async function unregisterDevicePushToken(client, options = {}) {
 +  const platformOS = options.platformOS ?? Platform.OS;
@@ -632,16 +746,24 @@ index 0000000..1275f80
 +      ? options.accessToken.trim()
 +      : null;
 +
++  const activeRecord = inFlightSyncRecord;
++  const committedRecord = latestCommittedSync;
++
 +  // Invalida imediatamente qualquer tentativa de registro iniciada antes do logout
 +  cancelPendingPushTokenSync();
-+  const pendingToken = inFlightCandidateToken;
-+  inFlightCandidateToken = null;
++  inFlightSyncRecord = null;
++  latestCommittedSync = null;
 +
 +  await clearActiveQueueCallUser({ secureStore });
 +
 +  if (platformOS === 'web' || !client || typeof client.delete !== 'function') {
++    if (secureStore && typeof secureStore.deleteItemAsync === 'function') {
++      await secureStore.deleteItemAsync(SECURE_STORE_PUSH_TOKEN_KEY).catch(() => undefined);
++    }
 +    return false;
 +  }
++
++  let remoteUnlinkSucceeded = true;
 +
 +  try {
 +    const savedToken =
@@ -649,40 +771,59 @@ index 0000000..1275f80
 +        ? await secureStore.getItemAsync(SECURE_STORE_PUSH_TOKEN_KEY).catch(() => null)
 +        : null;
 +
++    const candidateFromCompletedInFlight =
++      activeRecord &&
++      activeRecord.postCompleted &&
++      typeof activeRecord.pushToken === 'string' &&
++      activeRecord.pushToken.trim()
++        ? activeRecord.pushToken.trim()
++        : null;
++
 +    const tokenToUnregister =
++      candidateFromCompletedInFlight ||
 +      (typeof savedToken === 'string' && savedToken.trim()) ||
-+      (typeof pendingToken === 'string' && pendingToken.trim()) ||
++      (typeof committedRecord?.pushToken === 'string' && committedRecord.pushToken.trim()) ||
++      null;
++
++    const fallbackAccessToken =
++      explicitAccessToken ||
++      activeRecord?.accessToken ||
++      committedRecord?.accessToken ||
 +      null;
 +
 +    if (tokenToUnregister) {
-+      await client
-+        .delete('/devices/push-token', {
++      try {
++        await client.delete('/devices/push-token', {
 +          auth: true,
-+          ...(explicitAccessToken ? { accessToken: explicitAccessToken } : {}),
++          ...(fallbackAccessToken ? { accessToken: fallbackAccessToken } : {}),
 +          body: {
 +            pushToken: tokenToUnregister,
 +          },
-+        })
-+        .catch(() => undefined);
++        });
++        if (activeRecord && activeRecord.pushToken === tokenToUnregister) {
++          activeRecord.unlinkedByLogout = true;
++        }
++      } catch {
++        remoteUnlinkSucceeded = false;
++      }
 +    }
-+
++  } finally {
 +    if (secureStore && typeof secureStore.deleteItemAsync === 'function') {
 +      await secureStore
 +        .deleteItemAsync(SECURE_STORE_PUSH_TOKEN_KEY)
 +        .catch(() => undefined);
 +    }
-+
-+    return true;
-+  } catch {
-+    return false;
++    await clearActiveQueueCallUser({ secureStore });
 +  }
++
++  return remoteUnlinkSucceeded;
 +}
 diff --git a/app/services/queueCallVibrationService.js b/app/services/queueCallVibrationService.js
 new file mode 100644
-index 0000000..ead4543
+index 0000000..cc92817
 --- /dev/null
 +++ b/app/services/queueCallVibrationService.js
-@@ -0,0 +1,717 @@
+@@ -0,0 +1,776 @@
 +import { Vibration, Platform } from 'react-native';
 +import * as Notifications from 'expo-notifications';
 +import * as TaskManager from 'expo-task-manager';
@@ -723,6 +864,7 @@ index 0000000..ead4543
 +
 +let activeUserIdInMemory = null;
 +let isExplicitlyLoggedOut = false;
++let activeUserStateGeneration = 0;
 +let callStateValidator = null;
 +let backgroundTaskExecutorRef = null;
 +
@@ -985,18 +1127,56 @@ index 0000000..ead4543
 +
 +/**
 + * Define o usuário autenticado atual para isolamento de alertas em primeiro e segundo plano.
++ * Protegido por geração monotônica e `shouldAbort` para impedir que operações iniciadas
++ * antes do logout ou de uma troca de conta ativem um usuário obsoleto.
 + */
-+export async function setActiveQueueCallUser(userId, { secureStore = SecureStore } = {}) {
-+  const normalized = typeof userId === 'string' && userId.trim() ? userId.trim() : null;
-+  activeUserIdInMemory = normalized;
-+  isExplicitlyLoggedOut = !normalized;
++export async function setActiveQueueCallUser(
++  userId,
++  { secureStore = SecureStore, shouldAbort = null } = {}
++) {
++  if (typeof shouldAbort === 'function' && shouldAbort()) {
++    return false;
++  }
 +
++  const normalized = typeof userId === 'string' && userId.trim() ? userId.trim() : null;
 +  if (!normalized) {
++    await clearActiveQueueCallUser({ secureStore });
++    return false;
++  }
++
++  const myGeneration = ++activeUserStateGeneration;
++  const isOperationStale = () =>
++    myGeneration !== activeUserStateGeneration ||
++    (typeof shouldAbort === 'function' && Boolean(shouldAbort()));
++
++  const rollbackOrRestoreActiveUser = async () => {
++    if (
++      myGeneration !== activeUserStateGeneration &&
++      activeUserIdInMemory &&
++      !isExplicitlyLoggedOut
++    ) {
++      if (secureStore && typeof secureStore.setItemAsync === 'function') {
++        await secureStore
++          .setItemAsync(
++            ACTIVE_PUSH_USER_STORAGE_KEY,
++            JSON.stringify({ userId: activeUserIdInMemory, updatedAt: Date.now() })
++          )
++          .catch(() => undefined);
++      }
++      return;
++    }
++
++    if (myGeneration === activeUserStateGeneration) {
++      activeUserIdInMemory = null;
++      isExplicitlyLoggedOut = true;
++    }
 +    if (secureStore && typeof secureStore.deleteItemAsync === 'function') {
 +      await secureStore.deleteItemAsync(ACTIVE_PUSH_USER_STORAGE_KEY).catch(() => undefined);
 +    }
-+    return;
-+  }
++  };
++
++  activeUserIdInMemory = normalized;
++  isExplicitlyLoggedOut = false;
 +
 +  if (secureStore && typeof secureStore.setItemAsync === 'function') {
 +    await secureStore
@@ -1007,7 +1187,17 @@ index 0000000..ead4543
 +      .catch(() => undefined);
 +  }
 +
++  if (isOperationStale()) {
++    await rollbackOrRestoreActiveUser();
++    return false;
++  }
++
 +  const persistedMap = await readPersistedAlertedMap(secureStore);
++  if (isOperationStale()) {
++    await rollbackOrRestoreActiveUser();
++    return false;
++  }
++
 +  const userList = Array.isArray(persistedMap[normalized]) ? persistedMap[normalized] : [];
 +  const userSet = getUserSessionSet(normalized);
 +  for (const sessionId of userList) {
@@ -1015,17 +1205,26 @@ index 0000000..ead4543
 +      userSet.add(sessionId.trim());
 +    }
 +  }
++  return true;
 +}
 +
 +/**
 + * Remove o usuário ativo durante logout, impedindo que alertas da conta anterior vibrem.
 + */
 +export async function clearActiveQueueCallUser({ secureStore = SecureStore } = {}) {
++  activeUserStateGeneration += 1;
 +  activeUserIdInMemory = null;
 +  isExplicitlyLoggedOut = true;
 +  if (secureStore && typeof secureStore.deleteItemAsync === 'function') {
 +    await secureStore.deleteItemAsync(ACTIVE_PUSH_USER_STORAGE_KEY).catch(() => undefined);
 +  }
++}
++
++/**
++ * Retorna o ID do usuário autenticado ativo em memória (ou `null` quando deslogado).
++ */
++export function getActiveQueueCallUser() {
++  return activeUserIdInMemory;
 +}
 +
 +/**
@@ -1282,6 +1481,7 @@ index 0000000..ead4543
 +  endedSessionIds.clear();
 +  inFlightSessionIds.clear();
 +  if (clearPersistedUser) {
++    activeUserStateGeneration += 1;
 +    activeUserIdInMemory = null;
 +    isExplicitlyLoggedOut = false;
 +    if (secureStore && typeof secureStore.deleteItemAsync === 'function') {
@@ -1402,10 +1602,10 @@ index 0000000..ead4543
 +}
 diff --git a/app/tests/queue-call-vibration.test.cjs b/app/tests/queue-call-vibration.test.cjs
 new file mode 100644
-index 0000000..b42b9f0
+index 0000000..9ab3f20
 --- /dev/null
 +++ b/app/tests/queue-call-vibration.test.cjs
-@@ -0,0 +1,566 @@
+@@ -0,0 +1,987 @@
 +const test = require('node:test');
 +const assert = require('node:assert/strict');
 +const { loadModule } = require('./helpers/questionnaireHarness.cjs');
@@ -1972,6 +2172,427 @@ index 0000000..b42b9f0
 +    'Nenhum token deve ser persistido após o logout'
 +  );
 +});
++
++test('devicePushService (P1): corrige condições de corrida determinísticas (1 a 5) e falha de rede no DELETE sem bloquear logout', async () => {
++  const baseStore = createSecureStoreMock();
++  let setItemInterceptor = null;
++
++  const controlledSecureStore = {
++    getItemAsync: (key) => baseStore.getItemAsync(key),
++    deleteItemAsync: (key) => baseStore.deleteItemAsync(key),
++    setItemAsync: async (key, value) => {
++      if (typeof setItemInterceptor === 'function') {
++        await setItemInterceptor(key, value);
++      }
++      return baseStore.setItemAsync(key, value);
++    },
++    dump: () => baseStore.dump(),
++  };
++
++  let postInterceptor = null;
++  let deleteInterceptor = null;
++  const httpLog = [];
++
++  const mockClient = {
++    post: async (path, body, options = {}) => {
++      httpLog.push({
++        method: 'POST',
++        path,
++        body: body ? JSON.parse(JSON.stringify(body)) : undefined,
++        options: options ? JSON.parse(JSON.stringify(options)) : {},
++      });
++      if (typeof postInterceptor === 'function') {
++        await postInterceptor(path, body, options);
++      }
++      return { status: 'registered' };
++    },
++    delete: async (path, options = {}) => {
++      httpLog.push({
++        method: 'DELETE',
++        path,
++        body: options?.body ? JSON.parse(JSON.stringify(options.body)) : undefined,
++        options: options ? JSON.parse(JSON.stringify(options)) : {},
++      });
++      if (typeof deleteInterceptor === 'function') {
++        await deleteInterceptor(path, options);
++      }
++      return { unlinked: true };
++    },
++  };
++
++  let tokenFetchInterceptor = null;
++  let nextExpoToken = 'ExponentPushToken[token-default]';
++
++  const mockNotifications = {
++    AndroidImportance: { LOW: 2 },
++    AndroidNotificationVisibility: { SECRET: -1 },
++    setNotificationChannelAsync: async () => ({ id: 'arenago-silent-queue-calls' }),
++    getPermissionsAsync: async () => ({ status: 'granted' }),
++    requestPermissionsAsync: async () => ({ status: 'granted' }),
++    getExpoPushTokenAsync: async () => {
++      const tokenToReturn = nextExpoToken;
++      if (typeof tokenFetchInterceptor === 'function') {
++        await tokenFetchInterceptor(tokenToReturn);
++      }
++      return { data: tokenToReturn };
++    },
++  };
++
++  const vibEnv = loadVibrationServiceEnv({ secureStore: controlledSecureStore });
++  const pushModule = loadModule('services/devicePushService.js', (name) => {
++    if (name === 'react-native') return { Platform: { OS: 'android' } };
++    if (name === 'expo-notifications') return mockNotifications;
++    if (name === 'expo-secure-store') return controlledSecureStore;
++    if (name === './queueCallVibrationService') return vibEnv.exports;
++    if (name === 'expo-constants') {
++      return {
++        easConfig: { projectId: '11111111-2222-4333-8444-555555555555' },
++      };
++    }
++    return require(name);
++  });
++
++  const {
++    syncDevicePushToken,
++    unregisterDevicePushToken,
++    SECURE_STORE_PUSH_TOKEN_KEY,
++  } = pushModule.exports;
++  const {
++    getActiveQueueCallUser,
++    ACTIVE_PUSH_USER_STORAGE_KEY,
++    processQueueCallAlertAsync,
++  } = vibEnv.exports;
++
++  // --- Cenário 1: Logout ANTES de obter o push token ---
++  {
++    httpLog.length = 0;
++    let releaseTokenFetch;
++    let notifyReached;
++    const reached = new Promise((r) => {
++      notifyReached = r;
++    });
++    tokenFetchInterceptor = () => {
++      notifyReached();
++      return new Promise((r) => {
++        releaseTokenFetch = r;
++      });
++    };
++
++    let epoch = 10;
++    let loggedIn = true;
++    nextExpoToken = 'ExponentPushToken[case-1]';
++
++    const syncPromise = syncDevicePushToken(mockClient, {
++      userId: 'user-1',
++      accessToken: 'jwt-1',
++      getSessionEpoch: () => epoch,
++      isCurrent: () => loggedIn && epoch === 10,
++    });
++
++    await reached;
++    loggedIn = false;
++    epoch = 11;
++    await unregisterDevicePushToken(mockClient, { accessToken: 'jwt-1' });
++
++    releaseTokenFetch();
++    const res = await syncPromise;
++    tokenFetchInterceptor = null;
++
++    assert.equal(res, null);
++    assert.equal(httpLog.filter((r) => r.method === 'POST').length, 0);
++    assert.equal(await controlledSecureStore.getItemAsync(SECURE_STORE_PUSH_TOKEN_KEY), null);
++    assert.equal(await controlledSecureStore.getItemAsync(ACTIVE_PUSH_USER_STORAGE_KEY), null);
++    assert.equal(getActiveQueueCallUser(), null);
++  }
++
++  // --- Cenário 2: Logout DURANTE o POST de registro ---
++  {
++    httpLog.length = 0;
++    let releasePost;
++    let notifyPostReached;
++    const postReached = new Promise((r) => {
++      notifyPostReached = r;
++    });
++    postInterceptor = () => {
++      notifyPostReached();
++      return new Promise((r) => {
++        releasePost = r;
++      });
++    };
++
++    let epoch = 20;
++    let loggedIn = true;
++    nextExpoToken = 'ExponentPushToken[case-2]';
++
++    const syncPromise = syncDevicePushToken(mockClient, {
++      userId: 'user-2',
++      accessToken: 'jwt-2',
++      getSessionEpoch: () => epoch,
++      isCurrent: () => loggedIn && epoch === 20,
++    });
++
++    await postReached;
++    // Logout ocorre enquanto o POST está em andamento na rede
++    loggedIn = false;
++    epoch = 21;
++    await unregisterDevicePushToken(mockClient, { accessToken: 'jwt-2' });
++
++    releasePost();
++    const res = await syncPromise;
++    postInterceptor = null;
++
++    assert.equal(res, null);
++    const deleteCalls = httpLog.filter((r) => r.method === 'DELETE');
++    assert.equal(deleteCalls.length, 1, 'Deve compensar o POST tardio com um DELETE');
++    assert.equal(deleteCalls[0].options.accessToken, 'jwt-2');
++    assert.deepEqual(deleteCalls[0].body, { pushToken: 'ExponentPushToken[case-2]' });
++    assert.equal(await controlledSecureStore.getItemAsync(SECURE_STORE_PUSH_TOKEN_KEY), null);
++    assert.equal(await controlledSecureStore.getItemAsync(ACTIVE_PUSH_USER_STORAGE_KEY), null);
++    assert.equal(getActiveQueueCallUser(), null);
++  }
++
++  // --- Cenário 3: Logout DURANTE a gravação do token no SecureStore ---
++  {
++    httpLog.length = 0;
++    let releaseTokenStoreWrite;
++    let notifyTokenStoreReached;
++    const tokenStoreReached = new Promise((r) => {
++      notifyTokenStoreReached = r;
++    });
++    setItemInterceptor = (key) => {
++      if (key === SECURE_STORE_PUSH_TOKEN_KEY) {
++        notifyTokenStoreReached();
++        return new Promise((r) => {
++          releaseTokenStoreWrite = r;
++        });
++      }
++      return Promise.resolve();
++    };
++
++    let epoch = 30;
++    let loggedIn = true;
++    nextExpoToken = 'ExponentPushToken[case-3]';
++
++    const syncPromise = syncDevicePushToken(mockClient, {
++      userId: 'user-3',
++      accessToken: 'jwt-3',
++      getSessionEpoch: () => epoch,
++      isCurrent: () => loggedIn && epoch === 30,
++    });
++
++    await tokenStoreReached;
++    // Logout ocorre enquanto setItemAsync(SECURE_STORE_PUSH_TOKEN_KEY) está pendente
++    loggedIn = false;
++    epoch = 31;
++    setItemInterceptor = null;
++    await unregisterDevicePushToken(mockClient, { accessToken: 'jwt-3' });
++
++    // Agora a escrita atrasada do SecureStore conclui
++    releaseTokenStoreWrite();
++    const res = await syncPromise;
++
++    assert.equal(res, null);
++    assert.equal(
++      await controlledSecureStore.getItemAsync(SECURE_STORE_PUSH_TOKEN_KEY),
++      null,
++      'A escrita tardia no SecureStore deve ser limpa imediatamente'
++    );
++    assert.equal(await controlledSecureStore.getItemAsync(ACTIVE_PUSH_USER_STORAGE_KEY), null);
++    assert.equal(getActiveQueueCallUser(), null);
++    const deleteCalls = httpLog.filter((r) => r.method === 'DELETE');
++    assert.equal(deleteCalls.length, 1);
++    assert.deepEqual(deleteCalls[0].body, { pushToken: 'ExponentPushToken[case-3]' });
++  }
++
++  // --- Cenário 4A: Logout ANTES da atualização do usuário ativo ---
++  {
++    httpLog.length = 0;
++    let epoch = 40;
++    let loggedIn = true;
++    nextExpoToken = 'ExponentPushToken[case-4a]';
++
++    setItemInterceptor = async (key) => {
++      if (key === SECURE_STORE_PUSH_TOKEN_KEY) {
++        // Sessão encerra exatamente ao finalizar a escrita do token, antes de setActiveQueueCallUser
++        loggedIn = false;
++        epoch = 41;
++      }
++    };
++
++    const res = await syncDevicePushToken(mockClient, {
++      userId: 'user-4a',
++      accessToken: 'jwt-4a',
++      getSessionEpoch: () => epoch,
++      isCurrent: () => loggedIn && epoch === 40,
++    });
++    setItemInterceptor = null;
++
++    assert.equal(res, null);
++    assert.equal(await controlledSecureStore.getItemAsync(SECURE_STORE_PUSH_TOKEN_KEY), null);
++    assert.equal(await controlledSecureStore.getItemAsync(ACTIVE_PUSH_USER_STORAGE_KEY), null);
++    assert.equal(getActiveQueueCallUser(), null);
++    const deleteCalls = httpLog.filter((r) => r.method === 'DELETE');
++    assert.equal(deleteCalls.length, 1);
++    assert.deepEqual(deleteCalls[0].body, { pushToken: 'ExponentPushToken[case-4a]' });
++  }
++
++  // --- Cenário 4B: Logout DURANTE a atualização do usuário ativo (setActiveQueueCallUser) ---
++  {
++    httpLog.length = 0;
++    let releaseUserStoreWrite;
++    let notifyUserStoreReached;
++    const userStoreReached = new Promise((r) => {
++      notifyUserStoreReached = r;
++    });
++
++    setItemInterceptor = (key) => {
++      if (key === ACTIVE_PUSH_USER_STORAGE_KEY) {
++        notifyUserStoreReached();
++        return new Promise((r) => {
++          releaseUserStoreWrite = r;
++        });
++      }
++      return Promise.resolve();
++    };
++
++    let epoch = 45;
++    let loggedIn = true;
++    nextExpoToken = 'ExponentPushToken[case-4b]';
++
++    const syncPromise = syncDevicePushToken(mockClient, {
++      userId: 'user-4b',
++      accessToken: 'jwt-4b',
++      getSessionEpoch: () => epoch,
++      isCurrent: () => loggedIn && epoch === 45,
++    });
++
++    await userStoreReached;
++    // Logout ocorre enquanto setActiveQueueCallUser aguarda a escrita no SecureStore
++    loggedIn = false;
++    epoch = 46;
++    setItemInterceptor = null;
++    await unregisterDevicePushToken(mockClient, { accessToken: 'jwt-4b' });
++
++    releaseUserStoreWrite();
++    const res = await syncPromise;
++
++    assert.equal(res, null);
++    assert.equal(await controlledSecureStore.getItemAsync(SECURE_STORE_PUSH_TOKEN_KEY), null);
++    assert.equal(
++      await controlledSecureStore.getItemAsync(ACTIVE_PUSH_USER_STORAGE_KEY),
++      null,
++      'Não deve deixar usuário ativo gravado no SecureStore após logout'
++    );
++    assert.equal(getActiveQueueCallUser(), null);
++
++    // Confirma que uma notificação da conta deslogada não vibra
++    const vibratedAfterLogout = await processQueueCallAlertAsync({
++      type: 'queue.called',
++      serviceSessionId: 'sess-after-4b-logout',
++      participationId: 'part-4b',
++      eventId: 'ev-4b',
++      userId: 'user-4b',
++      version: 1,
++    });
++    assert.equal(vibratedAfterLogout, false);
++  }
++
++  // --- Cenário 5: Troca direta de contas (User A -> User B) com concorrência ---
++  {
++    httpLog.length = 0;
++    let releasePostA;
++    let notifyPostAReached;
++    const postAReached = new Promise((r) => {
++      notifyPostAReached = r;
++    });
++
++    postInterceptor = (_path, _body, options) => {
++      if (options.accessToken === 'jwt-user-A') {
++        notifyPostAReached();
++        return new Promise((r) => {
++          releasePostA = r;
++        });
++      }
++      return Promise.resolve();
++    };
++
++    let activeAccount = 'user-A';
++    let epoch = 50;
++
++    nextExpoToken = 'ExponentPushToken[device-token-A]';
++    const syncAPromise = syncDevicePushToken(mockClient, {
++      userId: 'user-A',
++      accessToken: 'jwt-user-A',
++      getSessionEpoch: () => epoch,
++      isCurrent: () => activeAccount === 'user-A' && epoch === 50,
++    });
++
++    await postAReached;
++
++    // Troca direta da conta A para a conta B enquanto o registro de A estava em trânsito
++    activeAccount = 'user-B';
++    epoch = 51;
++    nextExpoToken = 'ExponentPushToken[device-token-B]';
++
++    const resB = await syncDevicePushToken(mockClient, {
++      userId: 'user-B',
++      accessToken: 'jwt-user-B',
++      getSessionEpoch: () => epoch,
++      isCurrent: () => activeAccount === 'user-B' && epoch === 51,
++    });
++    assert.equal(resB, 'ExponentPushToken[device-token-B]');
++
++    // Agora o POST atrasado da conta A termina
++    postInterceptor = null;
++    releasePostA();
++    const resA = await syncAPromise;
++
++    assert.equal(resA, null, 'O registro atrasado da conta A deve ser abortado');
++    assert.equal(
++      await controlledSecureStore.getItemAsync(SECURE_STORE_PUSH_TOKEN_KEY),
++      'ExponentPushToken[device-token-B]',
++      'O token da conta B deve permanecer íntegro no SecureStore'
++    );
++    assert.equal(
++      getActiveQueueCallUser(),
++      'user-B',
++      'O usuário ativo em memória deve continuar sendo user-B'
++    );
++    const persistedUserRaw = await controlledSecureStore.getItemAsync(ACTIVE_PUSH_USER_STORAGE_KEY);
++    assert.equal(JSON.parse(persistedUserRaw).userId, 'user-B');
++
++    const deleteCallsForA = httpLog.filter(
++      (r) => r.method === 'DELETE' && r.options.accessToken === 'jwt-user-A'
++    );
++    assert.equal(deleteCallsForA.length, 1, 'A conta A deve compensar seu registro tardio com DELETE');
++  }
++
++  // --- Cenário 6: Falha de rede na desvinculação (DELETE) não bloqueia o logout e limpa o estado local ---
++  {
++    httpLog.length = 0;
++    deleteInterceptor = async () => {
++      throw new Error('Network request failed: timeout reaching backend');
++    };
++
++    const unlinkResult = await unregisterDevicePushToken(mockClient, {
++      accessToken: 'jwt-user-B',
++    });
++    deleteInterceptor = null;
++
++    assert.equal(unlinkResult, false, 'Deve indicar falha remota sem lançar exceção');
++    assert.equal(
++      await controlledSecureStore.getItemAsync(SECURE_STORE_PUSH_TOKEN_KEY),
++      null,
++      'Mesmo com falha de rede no DELETE, o token local deve ser removido do SecureStore'
++    );
++    assert.equal(
++      await controlledSecureStore.getItemAsync(ACTIVE_PUSH_USER_STORAGE_KEY),
++      null,
++      'Mesmo com falha de rede no DELETE, o usuário ativo deve ser removido do SecureStore'
++    );
++    assert.equal(getActiveQueueCallUser(), null);
++  }
++});
 diff --git a/backend/drizzle/0007_queue_call_vibration_outbox.sql b/backend/drizzle/0007_queue_call_vibration_outbox.sql
 new file mode 100644
 index 0000000..5e6394a
@@ -2481,10 +3102,10 @@ index 0000000..cf0ae20
 +export class NotificationsModule {}
 diff --git a/backend/src/notifications/queue-call-push.service.ts b/backend/src/notifications/queue-call-push.service.ts
 new file mode 100644
-index 0000000..e8d5b7d
+index 0000000..2c8092e
 --- /dev/null
 +++ b/backend/src/notifications/queue-call-push.service.ts
-@@ -0,0 +1,799 @@
+@@ -0,0 +1,978 @@
 +import {
 +  BeforeApplicationShutdown,
 +  Inject,
@@ -2507,6 +3128,7 @@ index 0000000..e8d5b7d
 +export const MAX_OUTBOX_ATTEMPTS = 3;
 +export const OUTBOX_RETRY_DELAYS_SECONDS = [5, 15] as const;
 +export const OUTBOX_PROCESSING_LOCK_TIMEOUT_SECONDS = 60;
++export const EXPO_HTTP_TIMEOUT_MS = 10_000;
 +export const DEFAULT_OUTBOX_POLL_INTERVAL_MS = 5000;
 +
 +const NON_RETRYABLE_EXPO_ERRORS = new Set([
@@ -2531,6 +3153,7 @@ index 0000000..e8d5b7d
 +    method: string;
 +    headers: Record<string, string>;
 +    body: string;
++    signal?: AbortSignal;
 +  },
 +) => Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }>;
 +
@@ -2542,6 +3165,7 @@ index 0000000..e8d5b7d
 +  userId?: string;
 +  calledAt?: string;
 +  version: 1;
++  _ticketTokens?: Record<string, string>;
 +}
 +
 +export interface CreateOutboxEntryInput {
@@ -2578,6 +3202,7 @@ index 0000000..e8d5b7d
 +  serviceSessionId: string;
 +  userId: string;
 +  ticketId: string;
++  payload?: QueueCallOutboxPayload;
 +  attempts: number;
 +};
 +
@@ -2619,6 +3244,8 @@ index 0000000..e8d5b7d
 +  private inFlightDispatch: Promise<DispatchOutboxResult> | null = null;
 +  private pollTimer: ReturnType<typeof setTimeout> | null = null;
 +  private stopped = false;
++  private httpTimeoutMs = EXPO_HTTP_TIMEOUT_MS;
++  private readonly ticketTokenCache = new Map<string, string>();
 +
 +  constructor(
 +    @Inject(DRIZZLE_DATABASE)
@@ -2629,6 +3256,16 @@ index 0000000..e8d5b7d
 +    @Inject(PUSH_HTTP_TRANSPORT)
 +    private readonly transport?: PushHttpTransport,
 +  ) {}
++
++  setHttpTimeoutMs(timeoutMs: number): void {
++    if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
++      this.httpTimeoutMs = Math.floor(timeoutMs);
++    }
++  }
++
++  getHttpTimeoutMs(): number {
++    return this.httpTimeoutMs;
++  }
 +
 +  async onApplicationBootstrap(): Promise<void> {
 +    const enabled =
@@ -2846,15 +3483,20 @@ index 0000000..e8d5b7d
 +      );
 +
 +      if (!sessionCheck.rows.length || sessionCheck.rows[0].status !== "pending") {
-+        await this.database.execute(sql`
++        const expUpdate = await this.database.execute<{ id: string }>(sql`
 +          UPDATE queue_call_outbox
 +          SET status = 'expired',
 +              locked_at = NULL,
 +              processed_at = clock_timestamp(),
 +              last_error = 'Sessão de atendimento não está mais pendente'
 +          WHERE id = ${entry.id}
++            AND status = 'processing'
++            AND attempts = ${currentAttempt}
++          RETURNING id
 +        `);
-+        expired++;
++        if ((expUpdate.rowCount ?? expUpdate.rows?.length ?? 0) > 0) {
++          expired++;
++        }
 +        continue;
 +      }
 +
@@ -2863,19 +3505,61 @@ index 0000000..e8d5b7d
 +
 +      if (tokens.length === 0) {
 +        // IMPORTANTE: Não marcar como entregue quando não há dispositivo destinatário
-+        await this.database.execute(sql`
++        const noDevUpdate = await this.database.execute<{ id: string }>(sql`
 +          UPDATE queue_call_outbox
 +          SET status = 'no_device',
 +              locked_at = NULL,
 +              processed_at = clock_timestamp(),
 +              last_error = 'Nenhum dispositivo ativo registrado para o participante'
 +          WHERE id = ${entry.id}
++            AND status = 'processing'
++            AND attempts = ${currentAttempt}
++          RETURNING id
 +        `);
-+        noDevice++;
++        if ((noDevUpdate.rowCount ?? noDevUpdate.rows?.length ?? 0) > 0) {
++          noDevice++;
++        }
 +        continue;
 +      }
 +
-+      // 2.3. Transmitir push silencioso e avaliar tickets individuais
++      // 2.3. Confirmar posse do lease antes de iniciar a chamada externa ao provedor
++      const leaseRefresh = await this.database.execute<{ id: string }>(sql`
++        UPDATE queue_call_outbox
++        SET locked_at = clock_timestamp()
++        WHERE id = ${entry.id}
++          AND status = 'processing'
++          AND attempts = ${currentAttempt}
++        RETURNING id
++      `);
++      if ((leaseRefresh.rowCount ?? leaseRefresh.rows?.length ?? 0) === 0) {
++        // Outra instância assumiu o registro após expiração do lease; aborta para impedir envio concorrente
++        continue;
++      }
++
++      // Mantém o lease renovado enquanto a requisição externa ainda estiver em andamento (dentro do timeout HTTP)
++      const heartbeatIntervalMs = Math.max(
++        15,
++        Math.floor(
++          Math.min(
++            this.httpTimeoutMs,
++            OUTBOX_PROCESSING_LOCK_TIMEOUT_SECONDS * 1000,
++          ) / 4,
++        ),
++      );
++      const leaseHeartbeat = setInterval(() => {
++        void this.database
++          .execute(sql`
++            UPDATE queue_call_outbox
++            SET locked_at = clock_timestamp()
++            WHERE id = ${entry.id}
++              AND status = 'processing'
++              AND attempts = ${currentAttempt}
++          `)
++          .catch(() => undefined);
++      }, heartbeatIntervalMs);
++      leaseHeartbeat.unref?.();
++
++      // 2.4. Transmitir push silencioso e avaliar tickets individuais
 +      try {
 +        const dispatchOutcome = await this.sendSilentPush(
 +          tokens.map((t) => t.pushToken),
@@ -2887,15 +3571,26 @@ index 0000000..e8d5b7d
 +            ? dispatchOutcome.acceptedTicketIds.join(",")
 +            : null;
 +
-+        await this.database.execute(sql`
++        const payloadWithTicketMap: QueueCallOutboxPayload = {
++          ...entry.payload,
++          _ticketTokens: dispatchOutcome.ticketTokenMap,
++        };
++
++        const acceptUpdate = await this.database.execute<{ id: string }>(sql`
 +          UPDATE queue_call_outbox
 +          SET status = 'accepted',
 +              ticket_id = ${joinedTicketIds},
++              payload = ${JSON.stringify(payloadWithTicketMap)}::jsonb,
 +              locked_at = NULL,
 +              last_error = ${dispatchOutcome.partialErrorSummary}
 +          WHERE id = ${entry.id}
++            AND status = 'processing'
++            AND attempts = ${currentAttempt}
++          RETURNING id
 +        `);
-+        accepted++;
++        if ((acceptUpdate.rowCount ?? acceptUpdate.rows?.length ?? 0) > 0) {
++          accepted++;
++        }
 +      } catch (pushError: unknown) {
 +        const errorMessage =
 +          pushError instanceof Error ? pushError.message : String(pushError);
@@ -2903,27 +3598,39 @@ index 0000000..e8d5b7d
 +          pushError instanceof TicketDispatchError ? pushError.retryable : true;
 +
 +        if (!isRetryable || currentAttempt >= MAX_OUTBOX_ATTEMPTS) {
-+          await this.database.execute(sql`
++          const failUpdate = await this.database.execute<{ id: string }>(sql`
 +            UPDATE queue_call_outbox
 +            SET status = 'failed',
-+                locked_at = NULL,
-+                processed_at = clock_timestamp(),
-+                last_error = ${errorMessage}
++                 locked_at = NULL,
++                 processed_at = clock_timestamp(),
++                 last_error = ${errorMessage}
 +            WHERE id = ${entry.id}
++              AND status = 'processing'
++              AND attempts = ${currentAttempt}
++            RETURNING id
 +          `);
-+          failed++;
++          if ((failUpdate.rowCount ?? failUpdate.rows?.length ?? 0) > 0) {
++            failed++;
++          }
 +        } else {
 +          const delaySeconds = getOutboxRetryDelaySeconds(currentAttempt);
-+          await this.database.execute(sql`
++          const retryUpdate = await this.database.execute<{ id: string }>(sql`
 +            UPDATE queue_call_outbox
 +            SET status = 'pending',
 +                locked_at = NULL,
 +                next_attempt_at = clock_timestamp() + (${delaySeconds} * INTERVAL '1 second'),
 +                last_error = ${errorMessage}
 +            WHERE id = ${entry.id}
++              AND status = 'processing'
++              AND attempts = ${currentAttempt}
++            RETURNING id
 +          `);
-+          retried++;
++          if ((retryUpdate.rowCount ?? retryUpdate.rows?.length ?? 0) > 0) {
++            retried++;
++          }
 +        }
++      } finally {
++        clearInterval(leaseHeartbeat);
 +      }
 +    }
 +
@@ -2981,6 +3688,7 @@ index 0000000..e8d5b7d
 +        service_session_id AS "serviceSessionId",
 +        user_id AS "userId",
 +        ticket_id AS "ticketId",
++        payload,
 +        attempts
 +    `);
 +
@@ -2997,6 +3705,7 @@ index 0000000..e8d5b7d
 +              processed_at = clock_timestamp(),
 +              last_error = 'Sessão de atendimento encerrada antes da confirmação do recibo'
 +          WHERE id = ${row.id}
++            AND status = 'accepted'
 +        `);
 +        expired++;
 +        continue;
@@ -3012,12 +3721,24 @@ index 0000000..e8d5b7d
 +          UPDATE queue_call_outbox
 +          SET locked_at = NULL
 +          WHERE id = ${row.id}
++            AND status = 'accepted'
 +        `);
 +        continue;
 +      }
 +
++      const persistedTicketTokens =
++        row.payload &&
++        typeof row.payload === "object" &&
++        row.payload._ticketTokens &&
++        typeof row.payload._ticketTokens === "object"
++          ? row.payload._ticketTokens
++          : {};
++
 +      try {
-+        const receiptsOutcome = await this.fetchExpoReceipts(ticketIds, row.userId);
++        const receiptsOutcome = await this.fetchExpoReceipts(
++          ticketIds,
++          persistedTicketTokens,
++        );
 +
 +        if (receiptsOutcome.kind === "delivered") {
 +          await this.database.execute(sql`
@@ -3027,6 +3748,7 @@ index 0000000..e8d5b7d
 +                processed_at = clock_timestamp(),
 +                last_error = ${receiptsOutcome.partialErrorSummary}
 +            WHERE id = ${row.id}
++              AND status = 'accepted'
 +          `);
 +          delivered++;
 +        } else if (receiptsOutcome.kind === "pending_receipt") {
@@ -3035,6 +3757,7 @@ index 0000000..e8d5b7d
 +            UPDATE queue_call_outbox
 +            SET locked_at = NULL
 +            WHERE id = ${row.id}
++              AND status = 'accepted'
 +          `);
 +        } else {
 +          // Todos os recibos retornaram erro
@@ -3047,6 +3770,7 @@ index 0000000..e8d5b7d
 +                  processed_at = clock_timestamp(),
 +                  last_error = ${receiptsOutcome.errorMessage}
 +              WHERE id = ${row.id}
++                AND status = 'accepted'
 +            `);
 +            failed++;
 +          } else {
@@ -3059,6 +3783,7 @@ index 0000000..e8d5b7d
 +                  next_attempt_at = clock_timestamp() + (${delaySeconds} * INTERVAL '1 second'),
 +                  last_error = ${receiptsOutcome.errorMessage}
 +              WHERE id = ${row.id}
++                AND status = 'accepted'
 +            `);
 +            retried++;
 +          }
@@ -3071,6 +3796,7 @@ index 0000000..e8d5b7d
 +          SET locked_at = NULL,
 +              last_error = ${errorMessage}
 +          WHERE id = ${row.id}
++            AND status = 'accepted'
 +        `);
 +      }
 +    }
@@ -3083,6 +3809,7 @@ index 0000000..e8d5b7d
 +    payload: QueueCallOutboxPayload,
 +  ): Promise<{
 +    acceptedTicketIds: string[];
++    ticketTokenMap: Record<string, string>;
 +    partialErrorSummary: string | null;
 +  }> {
 +    const messages = tokens.map((token) => ({
@@ -3122,7 +3849,11 @@ index 0000000..e8d5b7d
 +      errors?: Array<{ code?: string; message?: string }>;
 +    };
 +
-+    if (!Array.isArray(result?.data) || result.data.length === 0) {
++    const tickets: ExpoPushTicket[] | undefined = Array.isArray(result?.data)
++      ? result.data
++      : undefined;
++
++    if (!tickets || tickets.length === 0) {
 +      const topError =
 +        Array.isArray(result?.errors) && result.errors.length > 0
 +          ? result.errors.map((e) => e.message || e.code || "Erro Expo").join("; ")
@@ -3131,11 +3862,12 @@ index 0000000..e8d5b7d
 +    }
 +
 +    const acceptedTicketIds: string[] = [];
++    const ticketTokenMap: Record<string, string> = {};
 +    const ticketErrors: string[] = [];
 +    let hasRetryableError = false;
 +
-+    for (let i = 0; i < result.data.length; i++) {
-+      const ticket = result.data[i];
++    for (let i = 0; i < tickets.length; i++) {
++      const ticket: ExpoPushTicket | undefined = tickets[i];
 +      const token = tokens[i];
 +
 +      if (!ticket || typeof ticket !== "object") {
@@ -3146,9 +3878,18 @@ index 0000000..e8d5b7d
 +
 +      if (ticket.status === "ok") {
 +        if (typeof ticket.id === "string" && ticket.id.trim().length > 0) {
-+          acceptedTicketIds.push(ticket.id.trim());
++          const validTicketId = ticket.id.trim();
++          acceptedTicketIds.push(validTicketId);
++          if (token) {
++            ticketTokenMap[validTicketId] = token;
++            this.ticketTokenCache.set(validTicketId, token);
++          }
 +        } else {
-+          acceptedTicketIds.push(`accepted-${i}`);
++          // P2: Não gerar identificadores fictícios como accepted-0; classificar como resposta inconclusiva e elegível a retry
++          ticketErrors.push(
++            "Ticket ok sem identificador válido (resposta inconclusiva da Expo Push API)",
++          );
++          hasRetryableError = true;
 +        }
 +        continue;
 +      }
@@ -3176,13 +3917,14 @@ index 0000000..e8d5b7d
 +
 +    return {
 +      acceptedTicketIds,
++      ticketTokenMap,
 +      partialErrorSummary: ticketErrors.length > 0 ? ticketErrors.join("; ") : null,
 +    };
 +  }
 +
 +  private async fetchExpoReceipts(
 +    ticketIds: string[],
-+    userId: string,
++    ticketTokenMap: Record<string, string> = {},
 +  ): Promise<
 +    | { kind: "delivered"; partialErrorSummary: string | null }
 +    | { kind: "pending_receipt" }
@@ -3223,6 +3965,7 @@ index 0000000..e8d5b7d
 +
 +      if (receipt.status === "ok") {
 +        okCount++;
++        this.ticketTokenCache.delete(ticketId);
 +        continue;
 +      }
 +
@@ -3233,7 +3976,15 @@ index 0000000..e8d5b7d
 +      receiptErrors.push(errorDesc);
 +
 +      if (errorCode === "DeviceNotRegistered") {
-+        await this.deviceTokensService.revokeAllUserTokens(userId).catch(() => undefined);
++        // P1: Revogar apenas o token correspondente ao recibo inválido, preservando outros dispositivos do usuário
++        const invalidToken =
++          ticketTokenMap[ticketId] ?? this.ticketTokenCache.get(ticketId);
++        if (invalidToken) {
++          await this.deviceTokensService
++            .revokeInvalidToken(invalidToken)
++            .catch(() => undefined);
++        }
++        this.ticketTokenCache.delete(ticketId);
 +      }
 +
 +      if (!NON_RETRYABLE_EXPO_ERRORS.has(errorCode)) {
@@ -3264,24 +4015,73 @@ index 0000000..e8d5b7d
 +    headers: Record<string, string>,
 +    body: string,
 +  ): Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }> {
-+    if (this.transport) {
-+      return this.transport(url, {
-+        method: "POST",
-+        headers,
-+        body,
-+      });
-+    }
++    const timeoutMs = this.httpTimeoutMs;
++    const controller =
++      typeof AbortController === "function" ? new AbortController() : null;
++    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
 +
-+    const res = await fetch(url, {
-+      method: "POST",
-+      headers,
-+      body,
++    const timeoutPromise = new Promise<never>((_, reject) => {
++      timeoutHandle = setTimeout(() => {
++        controller?.abort();
++        reject(
++          new TicketDispatchError(
++            `Timeout na requisição para a Expo Push API após ${timeoutMs}ms (resposta do provedor incerta)`,
++            true,
++          ),
++        );
++      }, timeoutMs);
++      timeoutHandle.unref?.();
 +    });
-+    return {
-+      ok: res.ok,
-+      status: res.status,
-+      json: () => res.json(),
++
++    const executeRequest = async (): Promise<{
++      ok: boolean;
++      status: number;
++      json: () => Promise<unknown>;
++    }> => {
++      try {
++        if (this.transport) {
++          return await this.transport(url, {
++            method: "POST",
++            headers,
++            body,
++            ...(controller ? { signal: controller.signal } : {}),
++          });
++        }
++
++        const res = await fetch(url, {
++          method: "POST",
++          headers,
++          body,
++          ...(controller ? { signal: controller.signal } : {}),
++        });
++        return {
++          ok: res.ok,
++          status: res.status,
++          json: () => res.json(),
++        };
++      } catch (err: unknown) {
++        const isAbortOrTimeout =
++          (err instanceof Error &&
++            (err.name === "AbortError" ||
++              /timeout|timed out|aborted/i.test(err.message))) ||
++          controller?.signal.aborted;
++        if (isAbortOrTimeout) {
++          throw new TicketDispatchError(
++            `Timeout na requisição para a Expo Push API após ${timeoutMs}ms (resposta do provedor incerta)`,
++            true,
++          );
++        }
++        throw err;
++      }
 +    };
++
++    try {
++      return await Promise.race([executeRequest(), timeoutPromise]);
++    } finally {
++      if (timeoutHandle !== null) {
++        clearTimeout(timeoutHandle);
++      }
++    }
 +  }
 +}
 diff --git a/backend/test/unit/call-next-outbox.test.ts b/backend/test/unit/call-next-outbox.test.ts
@@ -3616,10 +4416,10 @@ index 0000000..ac221dc
 +});
 diff --git a/backend/test/unit/queue-call-push.test.ts b/backend/test/unit/queue-call-push.test.ts
 new file mode 100644
-index 0000000..8547b7d
+index 0000000..71cf446
 --- /dev/null
 +++ b/backend/test/unit/queue-call-push.test.ts
-@@ -0,0 +1,669 @@
+@@ -0,0 +1,1141 @@
 +import "reflect-metadata";
 +import assert from "node:assert/strict";
 +import { test } from "node:test";
@@ -3755,6 +4555,7 @@ index 0000000..8547b7d
 +              serviceSessionId: row.serviceSessionId,
 +              userId: row.userId,
 +              ticketId: row.ticketId,
++              payload: row.payload,
 +              attempts: row.attempts,
 +            });
 +          }
@@ -3762,11 +4563,44 @@ index 0000000..8547b7d
 +        return { rows: claimedAccepted, rowCount: claimedAccepted.length };
 +      }
 +
++      // 4.1. Renovação de lease / heartbeat de registro em processing
++      if (
++        text.includes("UPDATE queue_call_outbox") &&
++        text.includes("SET locked_at = clock_timestamp()") &&
++        text.includes("AND status = 'processing'")
++      ) {
++        const targetId = String(values[0]);
++        const expectedAttempts = Number(values[1]);
++        const row = rows.find((r) => r.id === targetId);
++        if (!row || row.status !== "processing" || row.attempts !== expectedAttempts) {
++          return { rows: [], rowCount: 0 };
++        }
++        row.lockedAtMs = now;
++        return { rows: [{ id: row.id }], rowCount: 1 };
++      }
++
 +      // 5. Atualizações individuais de status da outbox
 +      if (text.includes("UPDATE queue_call_outbox")) {
-+        const targetId = String(values[values.length - 1]);
++        const hasProcessingFence =
++          text.includes("AND status = 'processing'") && text.includes("AND attempts =");
++        const hasAcceptedFence = text.includes("AND status = 'accepted'");
++
++        const targetId = hasProcessingFence
++          ? String(values[values.length - 2])
++          : String(values[values.length - 1]);
++        const expectedAttempts = hasProcessingFence
++          ? Number(values[values.length - 1])
++          : null;
++
 +        const row = rows.find((r) => r.id === targetId);
 +        if (!row) return { rows: [], rowCount: 0 };
++
++        if (hasProcessingFence && (row.status !== "processing" || row.attempts !== expectedAttempts)) {
++          return { rows: [], rowCount: 0 };
++        }
++        if (hasAcceptedFence && row.status !== "accepted") {
++          return { rows: [], rowCount: 0 };
++        }
 +
 +        if (text.includes("SET status = 'expired'")) {
 +          row.status = "expired";
@@ -3781,8 +4615,15 @@ index 0000000..8547b7d
 +        } else if (text.includes("SET status = 'accepted'")) {
 +          row.status = "accepted";
 +          row.ticketId = (values[0] as string | null) ?? null;
++          if (typeof values[1] === "string") {
++            try {
++              row.payload = JSON.parse(values[1]) as QueueCallOutboxPayload;
++            } catch {
++              // ignore
++            }
++          }
 +          row.lockedAtMs = null;
-+          row.lastError = (values[1] as string | null) ?? null;
++          row.lastError = (values[2] as string | null) ?? null;
 +        } else if (text.includes("SET status = 'delivered'")) {
 +          row.status = "delivered";
 +          row.lockedAtMs = null;
@@ -3808,7 +4649,7 @@ index 0000000..8547b7d
 +            row.lastError = String(values[0] ?? "");
 +          }
 +        }
-+        return { rows: [], rowCount: 1 };
++        return { rows: [{ id: row.id }], rowCount: 1 };
 +      }
 +
 +      return { rows: [], rowCount: 0 };
@@ -4289,12 +5130,443 @@ index 0000000..8547b7d
 +  assert.equal(state.rows[1].status, "failed");
 +  assert.equal(state.rows[2].status, "delivered");
 +});
++
++test("QueueCallPushService (P1): recibo DeviceNotRegistered revoga SOMENTE o dispositivo inválido sem afetar outro dispositivo válido do mesmo usuário", async () => {
++  const invalidDeviceToken = "ExponentPushToken[device-invalid-1]";
++  const validDeviceToken = "ExponentPushToken[device-valid-2]";
++  const activeTokens = new Set([invalidDeviceToken, validDeviceToken]);
++  const revokedIndividualTokens: string[] = [];
++  let revokeAllCalled = false;
++  let receiptsAvailable = false;
++
++  const mockTransport: PushHttpTransport = async (url) => {
++    if (url === EXPO_PUSH_URL) {
++      return {
++        ok: true,
++        status: 200,
++        json: async () => ({
++          data: [
++            { status: "ok", id: "receipt-ticket-invalid-1" },
++            { status: "ok", id: "receipt-ticket-valid-2" },
++          ],
++        }),
++      };
++    }
++
++    if (url === EXPO_RECEIPTS_URL) {
++      if (!receiptsAvailable) {
++        return {
++          ok: true,
++          status: 200,
++          json: async () => ({ data: {} }),
++        };
++      }
++      return {
++        ok: true,
++        status: 200,
++        json: async () => ({
++          data: {
++            "receipt-ticket-invalid-1": {
++              status: "error",
++              message: "The recipient device is not registered with FCM.",
++              details: { error: "DeviceNotRegistered" },
++            },
++            "receipt-ticket-valid-2": {
++              status: "ok",
++            },
++          },
++        }),
++      };
++    }
++
++    throw new Error(`Unexpected URL: ${url}`);
++  };
++
++  const state = createStatefulOutboxDb({
++    initialRows: [makeSampleRow()],
++  });
++
++  const mockDeviceTokensService = {
++    getActiveTokensForUser: async () =>
++      Array.from(activeTokens).map((t) => ({ pushToken: t, platform: "android" })),
++    revokeInvalidToken: async (token: string) => {
++      revokedIndividualTokens.push(token);
++      activeTokens.delete(token);
++    },
++    revokeAllUserTokens: async () => {
++      revokeAllCalled = true;
++      activeTokens.clear();
++    },
++  } as unknown as DeviceTokensService;
++
++  // Instância 1 envia os pushes e recebe os 2 tickets ok
++  const serviceInstance1 = new QueueCallPushService(
++    state.db,
++    mockDeviceTokensService,
++    mockTransport,
++  );
++  const pass1 = await serviceInstance1.dispatchPending();
++  assert.equal(pass1.accepted, 1);
++  assert.equal(pass1.delivered, 0);
++  assert.equal(state.rows[0].status, "accepted");
++  assert.equal(state.rows[0].ticketId, "receipt-ticket-invalid-1,receipt-ticket-valid-2");
++
++  // Instância 2 (simulando inclusive outra instância/reinício lendo do banco) consulta os recibos
++  receiptsAvailable = true;
++  const serviceInstance2 = new QueueCallPushService(
++    state.db,
++    mockDeviceTokensService,
++    mockTransport,
++  );
++  const pass2 = await serviceInstance2.dispatchPending();
++
++  assert.equal(pass2.delivered, 1);
++  assert.equal(state.rows[0].status, "delivered");
++  assert.equal(revokeAllCalled, false, "NUNCA deve chamar revokeAllUserTokens");
++  assert.deepEqual(
++    revokedIndividualTokens,
++    [invalidDeviceToken],
++    "Apenas o token associado ao recibo DeviceNotRegistered deve ser revogado",
++  );
++  assert.equal(activeTokens.has(validDeviceToken), true, "O dispositivo válido deve permanecer ativo");
++  assert.equal(activeTokens.has(invalidDeviceToken), false);
++});
++
++test("QueueCallPushService (P2): rejeita tickets ok sem ID válido (sem criar accepted-0), classifica como inconclusivo e aplica retry preservando deduplicação", async () => {
++  let currentTimeMs = 20_000;
++  let callAttempt = 0;
++  const sentPayloads: any[] = [];
++
++  const mockTransport: PushHttpTransport = async (url, options) => {
++    if (url === EXPO_PUSH_URL) {
++      callAttempt++;
++      sentPayloads.push(JSON.parse(options.body));
++      if (callAttempt === 1) {
++        // 1ª tentativa: ticket ok sem id
++        return {
++          ok: true,
++          status: 200,
++          json: async () => ({
++            data: [{ status: "ok" }],
++          }),
++        };
++      }
++      if (callAttempt === 2) {
++        // 2ª tentativa: ticket ok com id vazio/espaços
++        return {
++          ok: true,
++          status: 200,
++          json: async () => ({
++            data: [{ status: "ok", id: "   " }],
++          }),
++        };
++      }
++      // 3ª tentativa: ticket ok com id real válido
++      return {
++        ok: true,
++        status: 200,
++        json: async () => ({
++          data: [{ status: "ok", id: "real-expo-ticket-uuid-999" }],
++        }),
++      };
++    }
++
++    return {
++      ok: true,
++      status: 200,
++      json: async () => ({
++        data: { "real-expo-ticket-uuid-999": { status: "ok" } },
++      }),
++    };
++  };
++
++  const state = createStatefulOutboxDb({
++    initialRows: [makeSampleRow()],
++    nowMs: () => currentTimeMs,
++  });
++
++  const mockDeviceTokensService = {
++    getActiveTokensForUser: async () => [{ pushToken, platform: "android" }],
++    revokeInvalidToken: async () => undefined,
++  } as unknown as DeviceTokensService;
++
++  const service = new QueueCallPushService(state.db, mockDeviceTokensService, mockTransport);
++
++  // Tentativa 1: ticket ok sem id -> NÃO aceita, agenda retry (+5s)
++  const r1 = await service.dispatchPending();
++  assert.equal(r1.processed, 1);
++  assert.equal(r1.accepted, 0);
++  assert.equal(r1.delivered, 0);
++  assert.equal(r1.retried, 1);
++  assert.equal(state.rows[0].status, "pending");
++  assert.equal(state.rows[0].ticketId, null, "Não deve gravar accepted-0 nem ticket fictício");
++  assert.match(state.rows[0].lastError ?? "", /Ticket ok sem identificador válido/i);
++
++  // Tentativa 2 (após 5s): ticket ok com id em branco -> NÃO aceita, agenda retry (+15s)
++  currentTimeMs += 6000;
++  const r2 = await service.dispatchPending();
++  assert.equal(r2.processed, 1);
++  assert.equal(r2.accepted, 0);
++  assert.equal(r2.retried, 1);
++  assert.equal(state.rows[0].status, "pending");
++  assert.equal(state.rows[0].ticketId, null);
++
++  // Tentativa 3 (após 15s): ticket ok com id válido -> aceita e confirma recibo
++  currentTimeMs += 16_000;
++  const r3 = await service.dispatchPending();
++  assert.equal(r3.processed, 1);
++  assert.equal(r3.accepted, 1);
++  assert.equal(r3.delivered, 1);
++  assert.equal(state.rows[0].status, "delivered");
++  assert.equal(state.rows[0].ticketId, "real-expo-ticket-uuid-999");
++
++  // Deduplicação lógica preservada: todas as tentativas mantiveram exatamente o mesmo serviceSessionId
++  assert.equal(sentPayloads.length, 3);
++  for (const batch of sentPayloads) {
++    assert.equal(batch[0].data.serviceSessionId, sessionId);
++  }
++});
++
++test("QueueCallPushService (P2): aplica timeout explícito quando resposta do provedor é incerta e impede processamento concorrente durante ou após expiração do lease", async () => {
++  let currentTimeMs = 100_000;
++  let attemptCount = 0;
++  const abortSignalsObserved: boolean[] = [];
++
++  const state = createStatefulOutboxDb({
++    initialRows: [makeSampleRow()],
++    nowMs: () => currentTimeMs,
++  });
++
++  const mockDeviceTokensService = {
++    getActiveTokensForUser: async () => [{ pushToken, platform: "android" }],
++    revokeInvalidToken: async () => undefined,
++  } as unknown as DeviceTokensService;
++
++  // Parte 1: Timeout explícito quando o provedor não responde (resposta incerta)
++  const slowOrRecoveringTransport: PushHttpTransport = async (url, options) => {
++    if (url === EXPO_PUSH_URL) {
++      attemptCount++;
++      if (attemptCount === 1) {
++        // Simula requisição presa que nunca responde até o AbortController abortar
++        return await new Promise((_resolve, reject) => {
++          options.signal?.addEventListener("abort", () => {
++            abortSignalsObserved.push(Boolean(options.signal?.aborted));
++            const abortErr = new Error("The operation was aborted");
++            abortErr.name = "AbortError";
++            reject(abortErr);
++          });
++        });
++      }
++      return {
++        ok: true,
++        status: 200,
++        json: async () => ({
++          data: [{ status: "ok", id: "ticket-after-timeout-recovery" }],
++        }),
++      };
++    }
++
++    return {
++      ok: true,
++      status: 200,
++      json: async () => ({
++        data: { "ticket-after-timeout-recovery": { status: "ok" } },
++      }),
++    };
++  };
++
++  const serviceA = new QueueCallPushService(
++    state.db,
++    mockDeviceTokensService,
++    slowOrRecoveringTransport,
++  );
++  serviceA.setHttpTimeoutMs(30);
++
++  const timeoutRun = await serviceA.dispatchPending();
++  assert.equal(timeoutRun.processed, 1);
++  assert.equal(timeoutRun.accepted, 0);
++  assert.equal(timeoutRun.delivered, 0);
++  assert.equal(timeoutRun.retried, 1);
++  assert.deepEqual(abortSignalsObserved, [true]);
++  assert.equal(state.rows[0].status, "pending");
++  assert.match(state.rows[0].lastError ?? "", /Timeout na requisição para a Expo Push API/i);
++
++  // Após o backoff de 5s, a retomada entrega com sucesso
++  currentTimeMs += 6000;
++  const recoveredRun = await serviceA.dispatchPending();
++  assert.equal(recoveredRun.processed, 1);
++  assert.equal(recoveredRun.accepted, 1);
++  assert.equal(recoveredRun.delivered, 1);
++  assert.equal(state.rows[0].status, "delivered");
++
++  // Parte 2: Requisição em andamento mantém o lease renovado (heartbeat) e fencing impede sobrescrita concorrente
++  const concurrentState = createStatefulOutboxDb({
++    initialRows: [
++      makeSampleRow({
++        id: "outbox-lease-guard",
++        serviceSessionId: "11111111-1111-4000-8000-000000000099",
++      }),
++    ],
++    nowMs: () => currentTimeMs,
++  });
++
++  let releaseInFlightRequest!: () => void;
++  let notifyInFlightStarted!: () => void;
++  const inFlightStarted = new Promise<void>((resolve) => {
++    notifyInFlightStarted = resolve;
++  });
++  let pushSendCalls = 0;
++
++  const inFlightTransport: PushHttpTransport = async (url) => {
++    if (url === EXPO_PUSH_URL) {
++      pushSendCalls++;
++      notifyInFlightStarted();
++      await new Promise<void>((resolve) => {
++        releaseInFlightRequest = resolve;
++      });
++      return {
++        ok: true,
++        status: 200,
++        json: async () => ({
++          data: [{ status: "ok", id: `ticket-lease-${pushSendCalls}` }],
++        }),
++      };
++    }
++    return {
++      ok: true,
++      status: 200,
++      json: async () => ({
++        data: { "ticket-lease-1": { status: "ok" } },
++      }),
++    };
++  };
++
++  const worker1 = new QueueCallPushService(
++    concurrentState.db,
++    mockDeviceTokensService,
++    inFlightTransport,
++  );
++  worker1.setHttpTimeoutMs(80);
++
++  const worker2 = new QueueCallPushService(
++    concurrentState.db,
++    mockDeviceTokensService,
++    inFlightTransport,
++  );
++  worker2.setHttpTimeoutMs(80);
++
++  const worker1Promise = worker1.dispatchPending();
++  await inFlightStarted;
++
++  // Avança o relógio simulado em 65s enquanto a requisição do worker1 ainda está em andamento:
++  // o heartbeat de worker1 (a cada 20ms) renova locked_at e impede que worker2 processe a mesma entrega concorrentemente
++  currentTimeMs += 65_000;
++  await new Promise((resolve) => setTimeout(resolve, 35));
++
++  const worker2ResultWhileInFlight = await worker2.dispatchPending();
++  assert.equal(
++    worker2ResultWhileInFlight.processed,
++    0,
++    "Worker 2 não deve assumir o registro enquanto a requisição do Worker 1 ainda está ativa e renovando o lease",
++  );
++  assert.equal(pushSendCalls, 1, "Apenas 1 envio deve estar em andamento");
++
++  releaseInFlightRequest();
++  const worker1Result = await worker1Promise;
++  assert.equal(worker1Result.accepted, 1);
++  assert.equal(worker1Result.delivered, 1);
++  assert.equal(concurrentState.rows[0].status, "delivered");
++  assert.equal(pushSendCalls, 1);
++
++  // Parte 3: Fencing por tentativa (attempts) impede que resposta tardia de instância congelada sobrescreva outra instância
++  const fencingState = createStatefulOutboxDb({
++    initialRows: [
++      makeSampleRow({
++        id: "outbox-fenced-row",
++        serviceSessionId: "11111111-1111-4000-8000-000000000100",
++      }),
++    ],
++    nowMs: () => currentTimeMs,
++  });
++
++  let releaseFrozenWorker!: () => void;
++  let notifyFrozenStarted!: () => void;
++  const frozenStarted = new Promise<void>((resolve) => {
++    notifyFrozenStarted = resolve;
++  });
++  let callIndex = 0;
++
++  const fencingTransport: PushHttpTransport = async (url) => {
++    if (url === EXPO_PUSH_URL) {
++      callIndex++;
++      if (callIndex === 1) {
++        notifyFrozenStarted();
++        await new Promise<void>((resolve) => {
++          releaseFrozenWorker = resolve;
++        });
++        return {
++          ok: true,
++          status: 200,
++          json: async () => ({
++            data: [{ status: "ok", id: "stale-worker-ticket" }],
++          }),
++        };
++      }
++      return {
++        ok: true,
++        status: 200,
++        json: async () => ({
++          data: [{ status: "ok", id: "fresh-worker-ticket" }],
++        }),
++      };
++    }
++    return {
++      ok: true,
++      status: 200,
++      json: async () => ({
++        data: { "fresh-worker-ticket": { status: "ok" } },
++      }),
++    };
++  };
++
++  const staleWorker = new QueueCallPushService(
++    fencingState.db,
++    mockDeviceTokensService,
++    fencingTransport,
++  );
++  staleWorker.setHttpTimeoutMs(500);
++
++  const freshWorker = new QueueCallPushService(
++    fencingState.db,
++    mockDeviceTokensService,
++    fencingTransport,
++  );
++  freshWorker.setHttpTimeoutMs(500);
++
++  const stalePromise = staleWorker.dispatchPending();
++  await frozenStarted;
++
++  // Simula congelamento da instância 1 avançando o relógio imediatamente além do lease antes do próximo tick de heartbeat
++  currentTimeMs += 65_000;
++  const freshResult = await freshWorker.dispatchPending();
++  assert.equal(freshResult.processed, 1);
++  assert.equal(freshResult.delivered, 1);
++  assert.equal(fencingState.rows[0].status, "delivered");
++  assert.equal(fencingState.rows[0].attempts, 2);
++
++  // Quando a resposta tardia da instância 1 chega (attempts = 1), o UPDATE cercado (fenced) não altera o registro já entregue
++  releaseFrozenWorker();
++  const staleResult = await stalePromise;
++  assert.equal(staleResult.accepted, 0, "Instância obsoleta não deve marcar accepted após perder o lease");
++  assert.equal(fencingState.rows[0].status, "delivered");
++  assert.equal(fencingState.rows[0].ticketId, "fresh-worker-ticket");
++});
 diff --git a/docs/NOTIF_01_IMPLEMENTACAO.md b/docs/NOTIF_01_IMPLEMENTACAO.md
 new file mode 100644
-index 0000000..b045a56
+index 0000000..781dab9
 --- /dev/null
 +++ b/docs/NOTIF_01_IMPLEMENTACAO.md
-@@ -0,0 +1,172 @@
+@@ -0,0 +1,184 @@
 +# ArenaGo — TASK NOTIF-01: Alerta vibratório silencioso ao ser chamado na fila
 +
 +## 1. Identificação da Entrega
@@ -4303,7 +5575,7 @@ index 0000000..b045a56
 +- **Branch-base:** `develop` (`41b231f`)
 +- **Branch de trabalho:** `feature/queue-call-vibration`
 +- **Expo SDK:** 58 (Expo ~58.0.23, React 19.3.0, React Native 0.88.1)
-+- **Commit de correção:** `fix(queue): corrigir entrega e processamento do alerta vibratório silencioso`
++- **Commit de correção:** `fix(queue): reforçar isolamento de sessão e confiabilidade dos alertas`
 +
 +---
 +
@@ -4319,13 +5591,15 @@ index 0000000..b045a56
 +
 +## 3. Correções Implementadas (P1 e P2)
 +
-+### 3.1. Autenticação e Isolamento dos Endpoints de Dispositivo — P1 (`app/services/devicePushService.js` e `app/context/AuthContext.js`)
-+- **`POST /devices/push-token`:** agora envia explicitamente `{ auth: true }` para que `httpClient.js` inclua o cabeçalho `Authorization: Bearer <accessToken>`.
-+- **`DELETE /devices/push-token`:** agora envia `{ auth: true, body: { pushToken } }`, respeitando o contrato de `httpClient.delete(path, options)` em `app/services/httpClient.js`.
-+- **Proteção contra registro tardio após logout ou troca de sessão:**
-+  - `syncDevicePushToken` controla uma geração monotônica (`syncGeneration`), valida `getSessionEpoch()` e `isCurrent()` antes e depois de cada fronteira assíncrona (`ensureAndroidSilentChannel`, `getPermissionsAsync`, `requestPermissionsAsync`, `getExpoPushTokenAsync` e `client.post`).
-+  - Se o logout (`unregisterDevicePushToken` / `cancelPendingPushTokenSync`) ocorrer enquanto a obtenção do token está pendente, o envio `POST /devices/push-token` é abortado imediatamente.
-+  - Se o logout ocorrer enquanto o `POST /devices/push-token` já estava em trânsito na rede, a conclusão tardia executa compensação imediata via `DELETE /devices/push-token` e não persiste o token no `SecureStore`.
++### 3.1. Autenticação, Isolamento e Prevenção de Condições de Corrida no Registro do Dispositivo — P1 (`app/services/devicePushService.js`, `app/services/queueCallVibrationService.js` e `app/context/AuthContext.js`)
++- **`POST /devices/push-token`:** envia explicitamente `{ auth: true }` para que `httpClient.js` inclua o cabeçalho `Authorization: Bearer <accessToken>`.
++- **`DELETE /devices/push-token`:** envia `{ auth: true, body: { pushToken } }`, respeitando o contrato de `httpClient.delete(path, options)` em `app/services/httpClient.js`.
++- **Proteção determinística contra condições de corrida entre login, logout e troca de conta:**
++  - `syncDevicePushToken` revalida a geração monotônica (`syncGeneration`), `getSessionEpoch()` e `isCurrent()` antes e após **cada** operação assíncrona (`ensureAndroidSilentChannel`, `getPermissionsAsync`, `requestPermissionsAsync`, `getExpoPushTokenAsync`, `client.post`, `secureStore.setItemAsync(SECURE_STORE_PUSH_TOKEN_KEY)` e `setActiveQueueCallUser`).
++  - `setActiveQueueCallUser` possui seu próprio controle monotônico de geração (`activeUserStateGeneration`) e callback `shouldAbort`, revertendo imediatamente qualquer escrita em `arenago_push_active_user_id` caso o logout ou troca de conta ocorra enquanto o `SecureStore` está pendente.
++  - Em caso de logout durante `POST /devices/push-token`, `secureStore.setItemAsync` ou `setActiveQueueCallUser`, a função `compensateAndCleanup` remove qualquer gravação tardia no `SecureStore`, limpa o usuário ativo e envia compensação `DELETE /devices/push-token`.
++  - Em caso de troca direta de contas (`User A -> User B`), `compensateAndCleanup` preserva integralmente o token e o usuário ativo da nova conta (`latestCommittedSync`) no `SecureStore` e em memória, compensando apenas o registro obsoleto da conta anterior.
++  - Em caso de falha de rede durante `DELETE /devices/push-token` no logout, `unregisterDevicePushToken` captura o erro sem bloquear o fluxo de logout e limpa obrigatoriamente o token e o usuário ativo no `SecureStore` e em memória.
 +
 +### 3.2. Processamento do Payload em Background (Expo SDK 58 `NotificationTaskPayload`) — P1 (`app/services/queueCallVibrationService.js` e `app/index.js`)
 +- **Interpretação real de `NotificationTaskPayload`:**
@@ -4334,7 +5608,7 @@ index 0000000..b045a56
 +- **Inicialização Headless:**
 +  - `TaskManager.defineTask(BACKGROUND_QUEUE_CALL_TASK, ...)` e `Notifications.registerTaskAsync(BACKGROUND_QUEUE_CALL_TASK)` são executados no escopo de inicialização do módulo `queueCallVibrationService.js`, que é importado diretamente no topo de `app/index.js` antes de `registerRootComponent(App)`. Isso garante que a task esteja definida e registrada quando o Android carregar o bundle JS em segundo plano sem montar a árvore React.
 +
-+### 3.3. Confiabilidade, Reserva Atômica e Retomada da Outbox — P1 (`backend/src/notifications/queue-call-push.service.ts`)
++### 3.3. Confiabilidade, Reserva Atômica, Associação Ticket-Token e Timeouts da Outbox — P1/P2 (`backend/src/notifications/queue-call-push.service.ts`)
 +- **Reserva atômica por registro:**
 +  - Substituído o `SELECT ... FOR UPDATE SKIP LOCKED` avulso por uma reserva atômica em instrução única:
 +    ```sql
@@ -4358,6 +5632,16 @@ index 0000000..b045a56
 +    RETURNING ...
 +    ```
 +  - Evita que múltiplas instâncias do backend processem o mesmo registro simultaneamente.
++- **Revogação exclusiva do dispositivo inválido (`DeviceNotRegistered`) — P1:**
++  - A associação entre `ticketId` e `pushToken` é preservada em `payload._ticketTokens` (persistida no banco para sobreviver a reinícios e múltiplas instâncias) e em cache em memória (`ticketTokenCache`).
++  - Quando um recibo `/api/v2/push/getReceipts` retorna `DeviceNotRegistered`, o serviço revoga **exclusivamente** o token correspondente àquele recibo (`deviceTokensService.revokeInvalidToken(invalidToken)`), preservando intactos outros dispositivos válidos do mesmo usuário.
++- **Rejeição de tickets `ok` sem ID válido — P2:**
++  - Não são gerados identificadores fictícios como `accepted-0`.
++  - Se a Expo Push API retornar `{ status: "ok" }` sem `id` válido (ausente ou vazio), o ticket é classificado como resposta inconclusiva/inválida e submetido à política de retry (`pending` com backoff progressivo até 3 tentativas), preservando o mesmo `serviceSessionId` para deduplicação lógica.
++- **Timeouts HTTP explícitos, renovação de lease (heartbeat) e fencing por tentativa — P2:**
++  - `performHttpPost` aplica timeout explícito (`EXPO_HTTP_TIMEOUT_MS = 10_000` ms, compatível com o lease de 60s) via `AbortController` e `Promise.race`. Quando a resposta do provedor é incerta por timeout, a requisição é abortada e o registro agenda retry sem ser marcado como `accepted` ou `delivered`.
++  - Antes de iniciar o envio HTTP e durante sua execução (dentro do limite de timeout), a instância valida e renova periodicamente `locked_at = clock_timestamp()` (`WHERE id = ... AND status = 'processing' AND attempts = currentAttempt`), impedindo que outra instância assuma a mesma entrega enquanto a requisição ainda está em andamento.
++  - Todas as transições de estado pós-envio utilizam *fencing* por número de tentativa (`WHERE id = ${entry.id} AND status = 'processing' AND attempts = ${currentAttempt}`), garantindo que uma resposta tardia de uma instância cujo lease expirou jamais sobrescreva o estado de outra instância.
 +- **Retomada após reinício e agendador periódico:**
 +  - `QueueCallPushService` implementa `OnApplicationBootstrap` e `BeforeApplicationShutdown`.
 +  - Na inicialização (`recoverOnStartup()`), recupera registros pendentes, libera/reprocessa registros órfãos em `processing` cujo lock de 60s expirou durante uma queda e verifica recibos de registros `accepted`.
@@ -4367,10 +5651,10 @@ index 0000000..b045a56
 +  - Backoff progressivo via `next_attempt_at`: `5 segundos` após a 1ª falha e `15 segundos` após a 2ª falha; na 3ª falha, o registro transita definitivamente para `status = 'failed'`.
 +- **Distinção estrita de estados de envio e entrega:**
 +  - `no_device`: quando o participante não possui nenhum token ativo (`tokens.length === 0`). **Nunca é marcado como `delivered`.**
-+  - `accepted`: quando a Expo Push API (`/api/v2/push/send`) aceita ao menos um ticket (`status: "ok"`), persistindo o `ticket_id`.
++  - `accepted`: quando a Expo Push API (`/api/v2/push/send`) aceita ao menos um ticket (`status: "ok"`) com `id` válido, persistindo o `ticket_id`.
 +  - `delivered`: somente quando a API de recibos (`/api/v2/push/getReceipts`) confirma `{ status: "ok" }` para o `ticket_id`.
 +  - `expired`: quando a `service_session` não está mais `pending` antes do envio ou da confirmação do recibo.
-+  - `failed`: quando todos os tickets/recibos falham com erro não recuperável (ex.: `DeviceNotRegistered`, revogando o token inválido) ou após esgotar as 3 tentativas.
++  - `failed`: quando todos os tickets/recibos falham com erro não recuperável (ex.: `DeviceNotRegistered`, revogando apenas o token inválido) ou após esgotar as 3 tentativas.
 +
 +### 3.4. Isolamento de Sessão, Deduplicação Persistente e Validação de Estado — P1 (`app/services/queueCallVibrationService.js`)
 +- **Deduplicação persistente por usuário (`SecureStore`):**
@@ -4414,8 +5698,8 @@ index 0000000..b045a56
 +
 +| Escopo | Comando Executado | Resultado Observado | Exit Code |
 +| :--- | :--- | :--- | :--- |
-+| **Testes Unitários Mobile (App completo)** | `npm.cmd --prefix app test` | **386/386 aprovados** (incluindo 6 suítes completas em `queue-call-vibration.test.cjs`) | `0` |
-+| **Testes Unitários Backend (Notificações, Fila e CallNext)** | `cd backend; $env:NODE_ENV="test"; $env:STAFF_IDEMPOTENCY_TTL_SECONDS="60"; $env:PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS="60"; $env:EVALUATION_IDEMPOTENCY_TTL_SECONDS="60"; npx.cmd tsx --test test/unit/call-next*.test.ts test/unit/notifications*.test.ts test/unit/queue-call*.test.ts test/unit/staff-http.test.ts test/unit/participant-queue-http.test.ts` | **79/79 aprovados** (0 falhas) | `0` |
++| **Testes Unitários Mobile (App completo)** | `npm.cmd --prefix app test` | **387/387 aprovados** (incluindo 7 suítes completas em `queue-call-vibration.test.cjs`) | `0` |
++| **Testes Unitários Backend (Notificações, Fila e CallNext)** | `cd backend; $env:NODE_ENV="test"; $env:STAFF_IDEMPOTENCY_TTL_SECONDS="60"; $env:PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS="60"; $env:EVALUATION_IDEMPOTENCY_TTL_SECONDS="60"; npx.cmd tsx --test test/unit/call-next*.test.ts test/unit/notifications*.test.ts test/unit/queue-call*.test.ts test/unit/staff-http.test.ts test/unit/participant-queue-http.test.ts` | **82/82 aprovados** (0 falhas) | `0` |
 +| **Build TypeScript do Backend** | `npm.cmd --prefix backend run build` | **Compilado sem erros** (`nest build`) | `0` |
 +| **Typecheck de Testes do Backend** | `npm.cmd --prefix backend run typecheck:test` | **0 erros** (`tsc --project tsconfig.test.json`) | `0` |
 +| **Verificação de Dependências Expo** | `cd app; npx.cmd expo install --check` | **Dependencies are up to date** | `0` |

@@ -22,7 +22,8 @@ const EAS_PROJECT_ID_UUID_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 let syncGeneration = 0;
-let inFlightCandidateToken = null;
+let inFlightSyncRecord = null;
+let latestCommittedSync = null;
 
 /**
  * Valida se o projectId EAS está presente e segue o formato UUID oficial do EAS.
@@ -80,6 +81,7 @@ export async function ensureAndroidSilentChannel({
  */
 export function cancelPendingPushTokenSync() {
   syncGeneration += 1;
+  latestCommittedSync = null;
 }
 
 /**
@@ -87,7 +89,8 @@ export function cancelPendingPushTokenSync() {
  * - Inclui `{ auth: true }` para enviar o cabeçalho `Authorization: Bearer <token>`.
  * - Cria o canal Android silencioso antes de obter o token.
  * - Valida o `projectId` EAS antes de solicitar o token ao Expo.
- * - Impede que uma operação iniciada antes do logout ou troca de sessão registre o dispositivo.
+ * - Revalida a geração da sessão após cada operação assíncrona relevante.
+ * - Impede que uma operação iniciada antes do logout ou troca de sessão grave token ou ative usuário obsoleto.
  */
 export async function syncDevicePushToken(client, options = {}) {
   const platformOS = options.platformOS ?? Platform.OS;
@@ -112,11 +115,95 @@ export async function syncDevicePushToken(client, options = {}) {
       ? options.accessToken.trim()
       : null;
 
+  const record = {
+    generation: currentGeneration,
+    userId: targetUserId,
+    accessToken: capturedAccessToken,
+    pushToken: null,
+    platform: platformOS === 'ios' ? 'ios' : 'android',
+    postCompleted: false,
+    unlinkedByLogout: false,
+  };
+  inFlightSyncRecord = record;
+
   const isSessionStillValid = () => {
     if (syncGeneration !== currentGeneration) return false;
     if (isCurrent && !isCurrent()) return false;
     if (getSessionEpoch && getSessionEpoch() !== startEpoch) return false;
     return true;
+  };
+
+  const compensateAndCleanup = async ({ wroteTokenToStore = false } = {}) => {
+    const newerCommitted =
+      latestCommittedSync && latestCommittedSync.generation > currentGeneration
+        ? latestCommittedSync
+        : null;
+    const hasNewerActiveSync =
+      newerCommitted !== null ||
+      (inFlightSyncRecord !== null && inFlightSyncRecord.generation > currentGeneration);
+
+    // 1. Limpar ou restaurar o token no SecureStore
+    if (newerCommitted && newerCommitted.pushToken) {
+      if (secureStore && typeof secureStore.setItemAsync === 'function') {
+        await secureStore
+          .setItemAsync(SECURE_STORE_PUSH_TOKEN_KEY, newerCommitted.pushToken)
+          .catch(() => undefined);
+      }
+    } else if (wroteTokenToStore || !hasNewerActiveSync) {
+      if (secureStore && typeof secureStore.deleteItemAsync === 'function') {
+        await secureStore
+          .deleteItemAsync(SECURE_STORE_PUSH_TOKEN_KEY)
+          .catch(() => undefined);
+      }
+    }
+
+    // 2. Limpar ou restaurar o usuário ativo
+    if (newerCommitted && newerCommitted.userId) {
+      await setActiveQueueCallUser(newerCommitted.userId, { secureStore });
+    } else if (!hasNewerActiveSync) {
+      await clearActiveQueueCallUser({ secureStore });
+    }
+
+    // 3. Compensar registro tardio no backend se o POST já havia concluído
+    if (
+      record.postCompleted &&
+      !record.unlinkedByLogout &&
+      record.pushToken &&
+      typeof client.delete === 'function'
+    ) {
+      record.unlinkedByLogout = true;
+      await client
+        .delete('/devices/push-token', {
+          auth: true,
+          ...(capturedAccessToken ? { accessToken: capturedAccessToken } : {}),
+          body: { pushToken: record.pushToken },
+        })
+        .catch(() => undefined);
+
+      // Se houve troca direta de conta e a nova conta já havia registrado o mesmo token físico,
+      // revalida o vínculo da nova conta para que a compensação da conta antiga não o deixe revogado.
+      if (
+        newerCommitted &&
+        newerCommitted.pushToken === record.pushToken &&
+        typeof client.post === 'function'
+      ) {
+        await client
+          .post(
+            '/devices/push-token',
+            {
+              pushToken: newerCommitted.pushToken,
+              platform: newerCommitted.platform,
+            },
+            {
+              auth: true,
+              ...(newerCommitted.accessToken
+                ? { accessToken: newerCommitted.accessToken }
+                : {}),
+            }
+          )
+          .catch(() => undefined);
+      }
+    }
   };
 
   try {
@@ -157,14 +244,14 @@ export async function syncDevicePushToken(client, options = {}) {
       return null;
     }
 
-    inFlightCandidateToken = pushToken;
+    record.pushToken = pushToken;
 
     // 5. Envia o token ao backend autenticado ({ auth: true })
     await client.post(
       '/devices/push-token',
       {
         pushToken,
-        platform: platformOS === 'ios' ? 'ios' : 'android',
+        platform: record.platform,
       },
       {
         auth: true,
@@ -174,39 +261,61 @@ export async function syncDevicePushToken(client, options = {}) {
           : {}),
       }
     );
+    record.postCompleted = true;
 
-    // 6. Se houve logout ou troca de sessão enquanto o POST estava em trânsito, desfaz imediatamente
+    // 6. Revalida geração após o POST: se houve logout ou troca de conta em trânsito, compensa imediatamente
     if (!isSessionStillValid()) {
-      if (typeof client.delete === 'function') {
-        await client
-          .delete('/devices/push-token', {
-            auth: true,
-            ...(capturedAccessToken ? { accessToken: capturedAccessToken } : {}),
-            body: { pushToken },
-          })
-          .catch(() => undefined);
-      }
+      await compensateAndCleanup({ wroteTokenToStore: false });
       return null;
     }
 
-    // 7. Salva localmente o token e o vínculo com o usuário autenticado
+    // 7. Salva localmente o token no SecureStore e revalida a geração imediatamente após a escrita
     if (secureStore && typeof secureStore.setItemAsync === 'function') {
       await secureStore
         .setItemAsync(SECURE_STORE_PUSH_TOKEN_KEY, pushToken)
         .catch(() => undefined);
     }
 
-    if (targetUserId) {
-      await setActiveQueueCallUser(targetUserId, { secureStore });
+    if (!isSessionStillValid()) {
+      await compensateAndCleanup({ wroteTokenToStore: true });
+      return null;
     }
+
+    // 8. Atualiza o usuário ativo com verificação de aborto antes e durante a operação
+    if (targetUserId) {
+      const activated = await setActiveQueueCallUser(targetUserId, {
+        secureStore,
+        shouldAbort: () => !isSessionStillValid(),
+      });
+      if (!activated || !isSessionStillValid()) {
+        await compensateAndCleanup({ wroteTokenToStore: true });
+        return null;
+      }
+    }
+
+    if (!isSessionStillValid()) {
+      await compensateAndCleanup({ wroteTokenToStore: true });
+      return null;
+    }
+
+    latestCommittedSync = {
+      generation: currentGeneration,
+      userId: targetUserId,
+      accessToken: capturedAccessToken,
+      pushToken,
+      platform: record.platform,
+    };
 
     return pushToken;
   } catch {
     // Falha silenciosa: a indisponibilidade de push não impede o uso do aplicativo
+    if (!isSessionStillValid()) {
+      await compensateAndCleanup({ wroteTokenToStore: false }).catch(() => undefined);
+    }
     return null;
   } finally {
-    if (syncGeneration === currentGeneration) {
-      inFlightCandidateToken = null;
+    if (inFlightSyncRecord === record) {
+      inFlightSyncRecord = null;
     }
   }
 }
@@ -215,6 +324,7 @@ export async function syncDevicePushToken(client, options = {}) {
  * Remove o vínculo do token no backend (`DELETE /devices/push-token`) durante logout ou troca de conta.
  * - Cancela qualquer sincronização de registro em andamento.
  * - Envia `{ auth: true, body: { pushToken } }` respeitando o contrato de `httpClient.js`.
+ * - Não bloqueia o logout caso a requisição de desvinculação falhe por erro de rede, limpando sempre o estado local.
  */
 export async function unregisterDevicePushToken(client, options = {}) {
   const platformOS = options.platformOS ?? Platform.OS;
@@ -224,16 +334,24 @@ export async function unregisterDevicePushToken(client, options = {}) {
       ? options.accessToken.trim()
       : null;
 
+  const activeRecord = inFlightSyncRecord;
+  const committedRecord = latestCommittedSync;
+
   // Invalida imediatamente qualquer tentativa de registro iniciada antes do logout
   cancelPendingPushTokenSync();
-  const pendingToken = inFlightCandidateToken;
-  inFlightCandidateToken = null;
+  inFlightSyncRecord = null;
+  latestCommittedSync = null;
 
   await clearActiveQueueCallUser({ secureStore });
 
   if (platformOS === 'web' || !client || typeof client.delete !== 'function') {
+    if (secureStore && typeof secureStore.deleteItemAsync === 'function') {
+      await secureStore.deleteItemAsync(SECURE_STORE_PUSH_TOKEN_KEY).catch(() => undefined);
+    }
     return false;
   }
+
+  let remoteUnlinkSucceeded = true;
 
   try {
     const savedToken =
@@ -241,31 +359,50 @@ export async function unregisterDevicePushToken(client, options = {}) {
         ? await secureStore.getItemAsync(SECURE_STORE_PUSH_TOKEN_KEY).catch(() => null)
         : null;
 
+    const candidateFromCompletedInFlight =
+      activeRecord &&
+      activeRecord.postCompleted &&
+      typeof activeRecord.pushToken === 'string' &&
+      activeRecord.pushToken.trim()
+        ? activeRecord.pushToken.trim()
+        : null;
+
     const tokenToUnregister =
+      candidateFromCompletedInFlight ||
       (typeof savedToken === 'string' && savedToken.trim()) ||
-      (typeof pendingToken === 'string' && pendingToken.trim()) ||
+      (typeof committedRecord?.pushToken === 'string' && committedRecord.pushToken.trim()) ||
+      null;
+
+    const fallbackAccessToken =
+      explicitAccessToken ||
+      activeRecord?.accessToken ||
+      committedRecord?.accessToken ||
       null;
 
     if (tokenToUnregister) {
-      await client
-        .delete('/devices/push-token', {
+      try {
+        await client.delete('/devices/push-token', {
           auth: true,
-          ...(explicitAccessToken ? { accessToken: explicitAccessToken } : {}),
+          ...(fallbackAccessToken ? { accessToken: fallbackAccessToken } : {}),
           body: {
             pushToken: tokenToUnregister,
           },
-        })
-        .catch(() => undefined);
+        });
+        if (activeRecord && activeRecord.pushToken === tokenToUnregister) {
+          activeRecord.unlinkedByLogout = true;
+        }
+      } catch {
+        remoteUnlinkSucceeded = false;
+      }
     }
-
+  } finally {
     if (secureStore && typeof secureStore.deleteItemAsync === 'function') {
       await secureStore
         .deleteItemAsync(SECURE_STORE_PUSH_TOKEN_KEY)
         .catch(() => undefined);
     }
-
-    return true;
-  } catch {
-    return false;
+    await clearActiveQueueCallUser({ secureStore });
   }
+
+  return remoteUnlinkSucceeded;
 }

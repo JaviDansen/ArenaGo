@@ -564,3 +564,424 @@ test('devicePushService + httpClient: envia Authorization Bearer, body no DELETE
     'Nenhum token deve ser persistido após o logout'
   );
 });
+
+test('devicePushService (P1): corrige condições de corrida determinísticas (1 a 5) e falha de rede no DELETE sem bloquear logout', async () => {
+  const baseStore = createSecureStoreMock();
+  let setItemInterceptor = null;
+
+  const controlledSecureStore = {
+    getItemAsync: (key) => baseStore.getItemAsync(key),
+    deleteItemAsync: (key) => baseStore.deleteItemAsync(key),
+    setItemAsync: async (key, value) => {
+      if (typeof setItemInterceptor === 'function') {
+        await setItemInterceptor(key, value);
+      }
+      return baseStore.setItemAsync(key, value);
+    },
+    dump: () => baseStore.dump(),
+  };
+
+  let postInterceptor = null;
+  let deleteInterceptor = null;
+  const httpLog = [];
+
+  const mockClient = {
+    post: async (path, body, options = {}) => {
+      httpLog.push({
+        method: 'POST',
+        path,
+        body: body ? JSON.parse(JSON.stringify(body)) : undefined,
+        options: options ? JSON.parse(JSON.stringify(options)) : {},
+      });
+      if (typeof postInterceptor === 'function') {
+        await postInterceptor(path, body, options);
+      }
+      return { status: 'registered' };
+    },
+    delete: async (path, options = {}) => {
+      httpLog.push({
+        method: 'DELETE',
+        path,
+        body: options?.body ? JSON.parse(JSON.stringify(options.body)) : undefined,
+        options: options ? JSON.parse(JSON.stringify(options)) : {},
+      });
+      if (typeof deleteInterceptor === 'function') {
+        await deleteInterceptor(path, options);
+      }
+      return { unlinked: true };
+    },
+  };
+
+  let tokenFetchInterceptor = null;
+  let nextExpoToken = 'ExponentPushToken[token-default]';
+
+  const mockNotifications = {
+    AndroidImportance: { LOW: 2 },
+    AndroidNotificationVisibility: { SECRET: -1 },
+    setNotificationChannelAsync: async () => ({ id: 'arenago-silent-queue-calls' }),
+    getPermissionsAsync: async () => ({ status: 'granted' }),
+    requestPermissionsAsync: async () => ({ status: 'granted' }),
+    getExpoPushTokenAsync: async () => {
+      const tokenToReturn = nextExpoToken;
+      if (typeof tokenFetchInterceptor === 'function') {
+        await tokenFetchInterceptor(tokenToReturn);
+      }
+      return { data: tokenToReturn };
+    },
+  };
+
+  const vibEnv = loadVibrationServiceEnv({ secureStore: controlledSecureStore });
+  const pushModule = loadModule('services/devicePushService.js', (name) => {
+    if (name === 'react-native') return { Platform: { OS: 'android' } };
+    if (name === 'expo-notifications') return mockNotifications;
+    if (name === 'expo-secure-store') return controlledSecureStore;
+    if (name === './queueCallVibrationService') return vibEnv.exports;
+    if (name === 'expo-constants') {
+      return {
+        easConfig: { projectId: '11111111-2222-4333-8444-555555555555' },
+      };
+    }
+    return require(name);
+  });
+
+  const {
+    syncDevicePushToken,
+    unregisterDevicePushToken,
+    SECURE_STORE_PUSH_TOKEN_KEY,
+  } = pushModule.exports;
+  const {
+    getActiveQueueCallUser,
+    ACTIVE_PUSH_USER_STORAGE_KEY,
+    processQueueCallAlertAsync,
+  } = vibEnv.exports;
+
+  // --- Cenário 1: Logout ANTES de obter o push token ---
+  {
+    httpLog.length = 0;
+    let releaseTokenFetch;
+    let notifyReached;
+    const reached = new Promise((r) => {
+      notifyReached = r;
+    });
+    tokenFetchInterceptor = () => {
+      notifyReached();
+      return new Promise((r) => {
+        releaseTokenFetch = r;
+      });
+    };
+
+    let epoch = 10;
+    let loggedIn = true;
+    nextExpoToken = 'ExponentPushToken[case-1]';
+
+    const syncPromise = syncDevicePushToken(mockClient, {
+      userId: 'user-1',
+      accessToken: 'jwt-1',
+      getSessionEpoch: () => epoch,
+      isCurrent: () => loggedIn && epoch === 10,
+    });
+
+    await reached;
+    loggedIn = false;
+    epoch = 11;
+    await unregisterDevicePushToken(mockClient, { accessToken: 'jwt-1' });
+
+    releaseTokenFetch();
+    const res = await syncPromise;
+    tokenFetchInterceptor = null;
+
+    assert.equal(res, null);
+    assert.equal(httpLog.filter((r) => r.method === 'POST').length, 0);
+    assert.equal(await controlledSecureStore.getItemAsync(SECURE_STORE_PUSH_TOKEN_KEY), null);
+    assert.equal(await controlledSecureStore.getItemAsync(ACTIVE_PUSH_USER_STORAGE_KEY), null);
+    assert.equal(getActiveQueueCallUser(), null);
+  }
+
+  // --- Cenário 2: Logout DURANTE o POST de registro ---
+  {
+    httpLog.length = 0;
+    let releasePost;
+    let notifyPostReached;
+    const postReached = new Promise((r) => {
+      notifyPostReached = r;
+    });
+    postInterceptor = () => {
+      notifyPostReached();
+      return new Promise((r) => {
+        releasePost = r;
+      });
+    };
+
+    let epoch = 20;
+    let loggedIn = true;
+    nextExpoToken = 'ExponentPushToken[case-2]';
+
+    const syncPromise = syncDevicePushToken(mockClient, {
+      userId: 'user-2',
+      accessToken: 'jwt-2',
+      getSessionEpoch: () => epoch,
+      isCurrent: () => loggedIn && epoch === 20,
+    });
+
+    await postReached;
+    // Logout ocorre enquanto o POST está em andamento na rede
+    loggedIn = false;
+    epoch = 21;
+    await unregisterDevicePushToken(mockClient, { accessToken: 'jwt-2' });
+
+    releasePost();
+    const res = await syncPromise;
+    postInterceptor = null;
+
+    assert.equal(res, null);
+    const deleteCalls = httpLog.filter((r) => r.method === 'DELETE');
+    assert.equal(deleteCalls.length, 1, 'Deve compensar o POST tardio com um DELETE');
+    assert.equal(deleteCalls[0].options.accessToken, 'jwt-2');
+    assert.deepEqual(deleteCalls[0].body, { pushToken: 'ExponentPushToken[case-2]' });
+    assert.equal(await controlledSecureStore.getItemAsync(SECURE_STORE_PUSH_TOKEN_KEY), null);
+    assert.equal(await controlledSecureStore.getItemAsync(ACTIVE_PUSH_USER_STORAGE_KEY), null);
+    assert.equal(getActiveQueueCallUser(), null);
+  }
+
+  // --- Cenário 3: Logout DURANTE a gravação do token no SecureStore ---
+  {
+    httpLog.length = 0;
+    let releaseTokenStoreWrite;
+    let notifyTokenStoreReached;
+    const tokenStoreReached = new Promise((r) => {
+      notifyTokenStoreReached = r;
+    });
+    setItemInterceptor = (key) => {
+      if (key === SECURE_STORE_PUSH_TOKEN_KEY) {
+        notifyTokenStoreReached();
+        return new Promise((r) => {
+          releaseTokenStoreWrite = r;
+        });
+      }
+      return Promise.resolve();
+    };
+
+    let epoch = 30;
+    let loggedIn = true;
+    nextExpoToken = 'ExponentPushToken[case-3]';
+
+    const syncPromise = syncDevicePushToken(mockClient, {
+      userId: 'user-3',
+      accessToken: 'jwt-3',
+      getSessionEpoch: () => epoch,
+      isCurrent: () => loggedIn && epoch === 30,
+    });
+
+    await tokenStoreReached;
+    // Logout ocorre enquanto setItemAsync(SECURE_STORE_PUSH_TOKEN_KEY) está pendente
+    loggedIn = false;
+    epoch = 31;
+    setItemInterceptor = null;
+    await unregisterDevicePushToken(mockClient, { accessToken: 'jwt-3' });
+
+    // Agora a escrita atrasada do SecureStore conclui
+    releaseTokenStoreWrite();
+    const res = await syncPromise;
+
+    assert.equal(res, null);
+    assert.equal(
+      await controlledSecureStore.getItemAsync(SECURE_STORE_PUSH_TOKEN_KEY),
+      null,
+      'A escrita tardia no SecureStore deve ser limpa imediatamente'
+    );
+    assert.equal(await controlledSecureStore.getItemAsync(ACTIVE_PUSH_USER_STORAGE_KEY), null);
+    assert.equal(getActiveQueueCallUser(), null);
+    const deleteCalls = httpLog.filter((r) => r.method === 'DELETE');
+    assert.equal(deleteCalls.length, 1);
+    assert.deepEqual(deleteCalls[0].body, { pushToken: 'ExponentPushToken[case-3]' });
+  }
+
+  // --- Cenário 4A: Logout ANTES da atualização do usuário ativo ---
+  {
+    httpLog.length = 0;
+    let epoch = 40;
+    let loggedIn = true;
+    nextExpoToken = 'ExponentPushToken[case-4a]';
+
+    setItemInterceptor = async (key) => {
+      if (key === SECURE_STORE_PUSH_TOKEN_KEY) {
+        // Sessão encerra exatamente ao finalizar a escrita do token, antes de setActiveQueueCallUser
+        loggedIn = false;
+        epoch = 41;
+      }
+    };
+
+    const res = await syncDevicePushToken(mockClient, {
+      userId: 'user-4a',
+      accessToken: 'jwt-4a',
+      getSessionEpoch: () => epoch,
+      isCurrent: () => loggedIn && epoch === 40,
+    });
+    setItemInterceptor = null;
+
+    assert.equal(res, null);
+    assert.equal(await controlledSecureStore.getItemAsync(SECURE_STORE_PUSH_TOKEN_KEY), null);
+    assert.equal(await controlledSecureStore.getItemAsync(ACTIVE_PUSH_USER_STORAGE_KEY), null);
+    assert.equal(getActiveQueueCallUser(), null);
+    const deleteCalls = httpLog.filter((r) => r.method === 'DELETE');
+    assert.equal(deleteCalls.length, 1);
+    assert.deepEqual(deleteCalls[0].body, { pushToken: 'ExponentPushToken[case-4a]' });
+  }
+
+  // --- Cenário 4B: Logout DURANTE a atualização do usuário ativo (setActiveQueueCallUser) ---
+  {
+    httpLog.length = 0;
+    let releaseUserStoreWrite;
+    let notifyUserStoreReached;
+    const userStoreReached = new Promise((r) => {
+      notifyUserStoreReached = r;
+    });
+
+    setItemInterceptor = (key) => {
+      if (key === ACTIVE_PUSH_USER_STORAGE_KEY) {
+        notifyUserStoreReached();
+        return new Promise((r) => {
+          releaseUserStoreWrite = r;
+        });
+      }
+      return Promise.resolve();
+    };
+
+    let epoch = 45;
+    let loggedIn = true;
+    nextExpoToken = 'ExponentPushToken[case-4b]';
+
+    const syncPromise = syncDevicePushToken(mockClient, {
+      userId: 'user-4b',
+      accessToken: 'jwt-4b',
+      getSessionEpoch: () => epoch,
+      isCurrent: () => loggedIn && epoch === 45,
+    });
+
+    await userStoreReached;
+    // Logout ocorre enquanto setActiveQueueCallUser aguarda a escrita no SecureStore
+    loggedIn = false;
+    epoch = 46;
+    setItemInterceptor = null;
+    await unregisterDevicePushToken(mockClient, { accessToken: 'jwt-4b' });
+
+    releaseUserStoreWrite();
+    const res = await syncPromise;
+
+    assert.equal(res, null);
+    assert.equal(await controlledSecureStore.getItemAsync(SECURE_STORE_PUSH_TOKEN_KEY), null);
+    assert.equal(
+      await controlledSecureStore.getItemAsync(ACTIVE_PUSH_USER_STORAGE_KEY),
+      null,
+      'Não deve deixar usuário ativo gravado no SecureStore após logout'
+    );
+    assert.equal(getActiveQueueCallUser(), null);
+
+    // Confirma que uma notificação da conta deslogada não vibra
+    const vibratedAfterLogout = await processQueueCallAlertAsync({
+      type: 'queue.called',
+      serviceSessionId: 'sess-after-4b-logout',
+      participationId: 'part-4b',
+      eventId: 'ev-4b',
+      userId: 'user-4b',
+      version: 1,
+    });
+    assert.equal(vibratedAfterLogout, false);
+  }
+
+  // --- Cenário 5: Troca direta de contas (User A -> User B) com concorrência ---
+  {
+    httpLog.length = 0;
+    let releasePostA;
+    let notifyPostAReached;
+    const postAReached = new Promise((r) => {
+      notifyPostAReached = r;
+    });
+
+    postInterceptor = (_path, _body, options) => {
+      if (options.accessToken === 'jwt-user-A') {
+        notifyPostAReached();
+        return new Promise((r) => {
+          releasePostA = r;
+        });
+      }
+      return Promise.resolve();
+    };
+
+    let activeAccount = 'user-A';
+    let epoch = 50;
+
+    nextExpoToken = 'ExponentPushToken[device-token-A]';
+    const syncAPromise = syncDevicePushToken(mockClient, {
+      userId: 'user-A',
+      accessToken: 'jwt-user-A',
+      getSessionEpoch: () => epoch,
+      isCurrent: () => activeAccount === 'user-A' && epoch === 50,
+    });
+
+    await postAReached;
+
+    // Troca direta da conta A para a conta B enquanto o registro de A estava em trânsito
+    activeAccount = 'user-B';
+    epoch = 51;
+    nextExpoToken = 'ExponentPushToken[device-token-B]';
+
+    const resB = await syncDevicePushToken(mockClient, {
+      userId: 'user-B',
+      accessToken: 'jwt-user-B',
+      getSessionEpoch: () => epoch,
+      isCurrent: () => activeAccount === 'user-B' && epoch === 51,
+    });
+    assert.equal(resB, 'ExponentPushToken[device-token-B]');
+
+    // Agora o POST atrasado da conta A termina
+    postInterceptor = null;
+    releasePostA();
+    const resA = await syncAPromise;
+
+    assert.equal(resA, null, 'O registro atrasado da conta A deve ser abortado');
+    assert.equal(
+      await controlledSecureStore.getItemAsync(SECURE_STORE_PUSH_TOKEN_KEY),
+      'ExponentPushToken[device-token-B]',
+      'O token da conta B deve permanecer íntegro no SecureStore'
+    );
+    assert.equal(
+      getActiveQueueCallUser(),
+      'user-B',
+      'O usuário ativo em memória deve continuar sendo user-B'
+    );
+    const persistedUserRaw = await controlledSecureStore.getItemAsync(ACTIVE_PUSH_USER_STORAGE_KEY);
+    assert.equal(JSON.parse(persistedUserRaw).userId, 'user-B');
+
+    const deleteCallsForA = httpLog.filter(
+      (r) => r.method === 'DELETE' && r.options.accessToken === 'jwt-user-A'
+    );
+    assert.equal(deleteCallsForA.length, 1, 'A conta A deve compensar seu registro tardio com DELETE');
+  }
+
+  // --- Cenário 6: Falha de rede na desvinculação (DELETE) não bloqueia o logout e limpa o estado local ---
+  {
+    httpLog.length = 0;
+    deleteInterceptor = async () => {
+      throw new Error('Network request failed: timeout reaching backend');
+    };
+
+    const unlinkResult = await unregisterDevicePushToken(mockClient, {
+      accessToken: 'jwt-user-B',
+    });
+    deleteInterceptor = null;
+
+    assert.equal(unlinkResult, false, 'Deve indicar falha remota sem lançar exceção');
+    assert.equal(
+      await controlledSecureStore.getItemAsync(SECURE_STORE_PUSH_TOKEN_KEY),
+      null,
+      'Mesmo com falha de rede no DELETE, o token local deve ser removido do SecureStore'
+    );
+    assert.equal(
+      await controlledSecureStore.getItemAsync(ACTIVE_PUSH_USER_STORAGE_KEY),
+      null,
+      'Mesmo com falha de rede no DELETE, o usuário ativo deve ser removido do SecureStore'
+    );
+    assert.equal(getActiveQueueCallUser(), null);
+  }
+});
