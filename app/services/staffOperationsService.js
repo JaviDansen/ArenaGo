@@ -79,12 +79,29 @@ export function parseCompletedSession(body, serviceSessionId) {
       || body.serviceSession.status !== 'completed'
       || body.queueEntry?.status !== 'closed'
       || body.queueEntry.closeReason !== 'completed'
+      || body.participation?.status !== 'active'
       || body.participation?.currentQueueEntryId !== null) {
     throw bad('Resposta inesperada da conclusão. Não repetir com nova chave.');
   }
   return { id: serviceSessionId, status: 'completed', resolvedAt: body.serviceSession.resolvedAt ?? null,
     queueEntryStatus: 'closed', closeReason: 'completed',
     participationStatus: body.participation.status };
+}
+
+export function parseAbsentSession(body, serviceSessionId) {
+  requireIds(serviceSessionId);
+  const entry = body?.newQueueEntry;
+  if (body?.serviceSession?.id !== serviceSessionId || body.serviceSession.status !== 'absent' ||
+      !isUuid(body?.previousQueueEntry?.id) || body.previousQueueEntry.status !== 'closed' ||
+      body.previousQueueEntry.closeReason !== 'absent' || typeof body.requeued !== 'boolean' ||
+      (body.requeued ? (!isUuid(entry?.id) || entry.id.toLowerCase() === body.previousQueueEntry.id.toLowerCase() || entry.status !== 'waiting' ||
+        typeof entry.queueOrder !== 'string' || !/^[1-9]\d*$/.test(entry.queueOrder) || !Number.isSafeInteger(entry.position) || entry.position < 1)
+        : entry !== null)) {
+    throw bad('Resposta inesperada da ausência. Não repetir com nova chave.');
+  }
+  return { id: serviceSessionId, status: 'absent', requeued: body.requeued,
+    newQueueEntry: body.requeued ? { id: entry.id, status: entry.status,
+      queueOrder: entry.queueOrder, position: entry.position } : null };
 }
 
 /** Leituras autenticadas; a API, não o app, autoriza o Staff para o evento. */
@@ -124,61 +141,135 @@ export async function completeStaffService(client, { eventId, serviceSessionId, 
   return parseCompletedSession(body, serviceSessionId);
 }
 
-export function createStaffOperationsCoordinator({ client, storage, createKey, isCurrent = () => true }) {
+export async function absentStaffService(client, { eventId, serviceSessionId, idempotencyKey }) {
+  requireIds(eventId, serviceSessionId, idempotencyKey);
+  const body = await client.post(
+    `/staff/events/${eventId}/service-sessions/${serviceSessionId}/absent`, {},
+    { auth: true, headers: { 'Idempotency-Key': idempotencyKey }, outcomeUnknownOnNetworkError: true });
+  return parseAbsentSession(body, serviceSessionId);
+}
+
+const definitiveConflicts = new Set(['QUEUE_EMPTY', 'STATION_UNAVAILABLE', 'STATION_HAS_PENDING_CALL',
+  'SERVICE_NOT_PENDING', 'EVENT_OPERATION_ENDED']);
+
+/** Uma resposta inválida ou um erro após envio pode ocultar um commit. */
+export function classifyStaffOperationError(error) {
+  const code = typeof error?.code === 'string' ? error.code : null;
+  const status = Number.isInteger(error?.status) ? error.status : null;
+  if (error?.outcomeUnknown || error?.isNetworkError || error?.isTimeout || !status || status >= 500)
+    return { kind: 'uncertain', status, code };
+  if (code === 'IDEMPOTENCY_IN_PROGRESS' || code === 'IDEMPOTENCY_REQUEST_CONFLICT')
+    return { kind: 'pending_reconciliation', status, code };
+  if ((status === 409 && definitiveConflicts.has(code)) || [400, 401, 403, 404].includes(status))
+    return { kind: 'rejected', status, code };
+  return { kind: 'pending_reconciliation', status, code };
+}
+
+export function createStaffOperationsCoordinator({ client, storage, createKey, isCurrent }) {
+  if (typeof isCurrent !== 'function' || typeof createKey !== 'function' || storage?.isPersistent !== true ||
+      ['get', 'reserve', 'dispatch', 'recordTerminal', 'cancelReserved', 'clear', 'acknowledge']
+        .some((name) => typeof storage?.[name] !== 'function'))
+    throw bad('Contexto verificado e armazenamento persistente são obrigatórios.');
   let inflight = null;
-  function alive() { if (!isCurrent()) throw bad('Sessão alterada. Não enviar nova operação.'); }
-  function contextValid(context) { requireIds(context?.userId, context?.eventId); }
+  function alive(context, intent) { if (!isCurrent(context, intent)) throw bad('Sessão alterada. Não enviar nova operação.'); }
+  function contextValid(context) { requireIds(context?.userId, context?.eventId, context?.sessionId); }
   function conflict(existing, next) {
-    return existing && (existing.kind !== next.kind || existing.eventId !== next.eventId
+    return existing && (existing.kind !== next.kind || existing.eventId !== next.eventId || existing.sessionId !== next.sessionId
       || existing.userId !== next.userId || existing.experienceId !== next.experienceId
       || existing.stationId !== next.stationId || existing.serviceSessionId !== next.serviceSessionId);
   }
   async function getIntent(context) {
-    alive();
+    alive(context);
     const intent = await storage.get(context.userId);
-    alive();
+    alive(context);
     return intent;
   }
   async function execute(context, desired, check, operation) {
     contextValid(context);
     const existing = await getIntent(context);
+    alive(context, desired);
     if (conflict(existing, desired)) return { kind: 'pending_other' };
-    // Somente a intenção inicial é submetida a pré-condições de leitura.
-    // Depois de um timeout, reexecutar a mesma chave permite replay idempotente.
+    // O backend não expõe prazo de retenção nem estado da chave; replay após
+    // resultado desconhecido poderia executar novamente após eventual expurgo.
+    if (existing) return existing.phase === 'terminal'
+      ? { kind: 'terminal_pending', outcome: existing.outcome, receiptId: existing.key }
+      : { kind: existing.phase === 'reserved' ? 'reserved' : 'pending_reconciliation' };
     if (!existing) {
-      const possible = await check();
-      alive();
+      let possible;
+      try { possible = await check(); }
+      catch (error) {
+        alive(context, desired);
+        return { kind: 'rejected', phase: 'precondition', status: error?.status ?? null,
+          code: error?.code ?? null, network: Boolean(error?.isNetworkError) };
+      }
+      alive(context, desired);
       if (!possible) return { kind: 'blocked' };
     }
-    const intent = existing ?? { ...desired, key: createKey() };
+    const intent = { ...desired, key: createKey(), phase: 'reserved' };
     requireIds(intent.key);
-    if (!existing) { alive(); await storage.set(intent); alive(); }
-    let error = null;
+    alive(context, desired);
+    const reservation = await storage.reserve(intent);
+    if (!isCurrent(context, desired)) {
+      if (reservation?.created) { try { await storage.cancelReserved(context.userId, intent.key); } catch { /* ainda bloqueada ou removida */ } }
+      return { kind: 'stale' };
+    }
+    if (!reservation?.created) return { kind: 'pending_reconciliation' };
+    let dispatched;
+    try { dispatched = await storage.dispatch(context.userId, intent.key); }
+    catch { return isCurrent(context, desired) ? { kind: 'storage_error' } : { kind: 'stale' }; }
+    if (!isCurrent(context, desired)) return { kind: 'stale' };
+    if (!dispatched) return { kind: 'pending_reconciliation' };
+    let outcome;
     try {
       const result = await operation(intent.key);
-      alive();
-      await storage.clear(context.userId, intent.key);
-      return { kind: 'confirmed', result };
-    } catch (e) { error = e; }
-    alive();
-    return { kind: 'unconfirmed', code: error?.code ?? null,
-      message: 'Não foi possível confirmar a operação. Consulte o estado e repita somente com a chave preservada.' };
+      outcome = { kind: 'confirmed', result };
+    } catch (error) {
+      const classification = classifyStaffOperationError(error);
+      if (classification.kind !== 'rejected') return isCurrent(context, desired) ? classification : { kind: 'stale' };
+      outcome = classification;
+    }
+    // A resposta histórica pertence à intenção original mesmo após logout.
+    try { await storage.recordTerminal(context.userId, intent.key, outcome); }
+    catch {
+      if (!isCurrent(context, desired)) return { kind: 'stale' };
+      return outcome.kind === 'confirmed' ? { kind: 'confirmed_cleanup_pending', result: outcome.result, receiptId: intent.key }
+        : { kind: 'rejected_cleanup_pending', status: outcome.status, code: outcome.code, receiptId: intent.key };
+    }
+    if (!isCurrent(context, desired)) return { kind: 'stale' };
+    try { await storage.clear(context.userId, intent.key); }
+    catch {
+      if (!isCurrent(context, desired)) return { kind: 'stale' };
+      return outcome.kind === 'confirmed' ? { kind: 'confirmed_cleanup_pending', result: outcome.result, receiptId: intent.key }
+        : { kind: 'rejected_cleanup_pending', status: outcome.status, code: outcome.code, receiptId: intent.key };
+    }
+    return isCurrent(context, desired) ? { ...outcome, receiptId: intent.key } : { kind: 'stale' };
   }
-  function single(work) {
-    if (inflight) return inflight;
+  function single(work, context, scope) {
+    if (inflight) return Promise.resolve({ kind: 'busy' });
     const promise = work();
     inflight = promise;
-    return promise.finally(() => { if (inflight === promise) inflight = null; });
+    return promise.catch((error) => {
+      if (!isCurrent(context, scope) || error?.message === 'Sessão alterada. Não enviar nova operação.') return { kind: 'stale' };
+      throw error;
+    }).finally(() => { if (inflight === promise) inflight = null; });
+  }
+  async function scoped(context, work, getScope = () => undefined) {
+    try { return await work(); }
+    catch (error) {
+      if (!isCurrent(context, getScope()) || error?.message === 'Sessão alterada. Não enviar nova operação.') return { kind: 'stale' };
+      throw error;
+    }
   }
   return {
-    async readStations(context) { contextValid(context); const value = await fetchStaffStations(client, context.eventId); alive(); return value; },
+    async readStations(context) { contextValid(context); const value = await fetchStaffStations(client, context.eventId); alive(context); return value; },
     async readQueue(context, experienceId) {
-      contextValid(context); const value = await fetchStaffQueue(client, context.eventId, experienceId); alive(); return value;
+      contextValid(context); const value = await fetchStaffQueue(client, context.eventId, experienceId); alive(context); return value;
     },
     callNext(context, experienceId, stationId) {
+      context = { ...context };
       return single(async () => {
         contextValid(context); requireIds(experienceId, stationId);
-        const desired = { kind: 'call', userId: context.userId, eventId: context.eventId,
+        const desired = { kind: 'call', userId: context.userId, eventId: context.eventId, sessionId: context.sessionId,
           experienceId, stationId, serviceSessionId: null };
         return execute(context, desired, async () => {
           const [queue, { stations }] = await Promise.all([
@@ -189,19 +280,94 @@ export function createStaffOperationsCoordinator({ client, storage, createKey, i
           return Boolean(queue.waitingCount > 0 && queue.canCallWaitingEntries && station
             && station.availability === 'available' && station.pendingServiceSessionId === null);
         }, (key) => callNextStaff(client, { eventId: context.eventId, experienceId, stationId, idempotencyKey: key }));
-      });
+      }, context, { ...context, kind: 'call', experienceId, stationId, serviceSessionId: null });
     },
     complete(context, serviceSessionId, stationId) {
+      context = { ...context };
       return single(async () => {
         contextValid(context); requireIds(serviceSessionId, stationId);
-        const desired = { kind: 'complete', userId: context.userId, eventId: context.eventId,
+        const desired = { kind: 'complete', userId: context.userId, eventId: context.eventId, sessionId: context.sessionId,
           experienceId: null, stationId, serviceSessionId };
         return execute(context, desired, async () => {
           const { stations } = await fetchStaffStations(client, context.eventId);
           return stations.some((s) => s.id === stationId && s.pendingServiceSessionId === serviceSessionId);
         }, (key) => completeStaffService(client, { eventId: context.eventId, serviceSessionId, idempotencyKey: key }));
-      });
+      }, context, { ...context, kind: 'complete', experienceId: null, stationId, serviceSessionId });
     },
-    async pending(context) { contextValid(context); return getIntent(context); },
+    absent(context, serviceSessionId, stationId) {
+      context = { ...context };
+      return single(async () => {
+        contextValid(context); requireIds(serviceSessionId, stationId);
+        const desired = { kind: 'absent', userId: context.userId, eventId: context.eventId, sessionId: context.sessionId,
+          experienceId: null, stationId, serviceSessionId };
+        return execute(context, desired, async () => {
+          const { stations } = await fetchStaffStations(client, context.eventId);
+          return stations.some((s) => s.id === stationId && s.pendingServiceSessionId === serviceSessionId);
+        }, (key) => absentStaffService(client, { eventId: context.eventId, serviceSessionId, idempotencyKey: key }));
+      }, context, { ...context, kind: 'absent', experienceId: null, stationId, serviceSessionId });
+    },
+    pending(context) { context = { ...context }; return scoped(context, async () => {
+      contextValid(context);
+      const intent = await getIntent(context);
+      if (!intent) return { kind: 'none' };
+      if (intent.sessionId !== context.sessionId || intent.eventId !== context.eventId ||
+          !isUuid(context.stationId) || intent.stationId !== context.stationId) return { kind: 'pending_other' };
+      alive(context, intent);
+      return intent.phase === 'terminal' ? { kind: 'terminal_pending', operation: intent.kind, outcome: intent.outcome, receiptId: intent.key }
+        : { kind: intent.phase === 'reserved' ? 'reserved' : 'pending_reconciliation', operation: intent.kind };
+    }); },
+    cancelReserved(context) { context = { ...context }; return scoped(context, async () => {
+      contextValid(context);
+      const intent = await getIntent(context);
+      if (!intent || intent.phase !== 'reserved')
+        return { kind: 'blocked' };
+      const cancelled = await storage.cancelReserved(context.userId, intent.key);
+      return isCurrent(context) ? { kind: cancelled ? 'cancelled' : 'blocked' } : { kind: 'stale' };
+    }); },
+    cleanupTerminal(context, receiptId) { context = { ...context };
+      let scope = { ...context, key: receiptId };
+      return scoped(context, async () => {
+      contextValid(context);
+      requireIds(receiptId);
+      alive(context, scope);
+      const intent = await getIntent(context);
+      alive(context, scope);
+      if (!intent || intent.phase !== 'terminal' || intent.sessionId !== context.sessionId ||
+          intent.eventId !== context.eventId || intent.stationId !== context.stationId) return { kind: 'blocked' };
+      if (intent.key !== receiptId) return { kind: 'receipt_changed' };
+      scope = intent;
+      alive(context, intent);
+      try { await storage.clear(context.userId, intent.key); }
+      catch { return isCurrent(context, intent) ? { kind: 'cleanup_pending' } : { kind: 'stale' }; }
+      return isCurrent(context, intent) ? { kind: 'terminal_pending', outcome: intent.outcome, receiptId } : { kind: 'stale' };
+    }, () => scope); },
+    acknowledgeTerminal(context, receiptId) { context = { ...context };
+      let scope = { ...context, key: receiptId };
+      return scoped(context, async () => {
+      contextValid(context);
+      requireIds(receiptId);
+      alive(context, scope);
+      let intent;
+      try { intent = await getIntent(context); }
+      catch {
+        return isCurrent(context) && isCurrent(context, scope)
+          ? { kind: 'acknowledgement_uncertain' } : { kind: 'stale' };
+      }
+      alive(context, scope);
+      if (!intent) return { kind: 'receipt_absent' };
+      scope = intent;
+      alive(context, intent);
+      if (intent.phase !== 'terminal' || intent.sessionId !== context.sessionId ||
+          intent.eventId !== context.eventId || intent.stationId !== context.stationId) return { kind: 'blocked' };
+      if (intent.key !== receiptId) return { kind: 'receipt_changed' };
+      const serviceId = intent.serviceSessionId ?? (intent.kind === 'call' && intent.outcome?.kind === 'confirmed'
+        ? intent.outcome.result.id : null);
+      if (serviceId && serviceId !== context.serviceSessionId) return { kind: 'blocked' };
+      alive(context, intent);
+      let acknowledged;
+      try { acknowledged = await storage.acknowledge(context.userId, receiptId, intent); }
+      catch { return isCurrent(context, intent) ? { kind: 'acknowledgement_uncertain' } : { kind: 'stale' }; }
+      return isCurrent(context, intent) ? acknowledged : { kind: 'stale' };
+    }, () => scope); },
   };
 }
