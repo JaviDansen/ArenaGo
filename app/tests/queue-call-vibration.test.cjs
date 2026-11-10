@@ -985,3 +985,159 @@ test('devicePushService (P1): corrige condições de corrida determinísticas (1
     assert.equal(getActiveQueueCallUser(), null);
   }
 });
+
+test('queueCallVibrationService (P1): revalida sessão antes da vibração com validação HTTP pendente (logout, troca de conta, sessão válida e deduplicação)', async () => {
+  const env = loadVibrationServiceEnv();
+  const {
+    setActiveQueueCallUser,
+    clearActiveQueueCallUser,
+    processQueueCallAlertAsync,
+    hasSessionBeenAlerted,
+    getActiveUserStateGeneration,
+  } = env.exports;
+
+  // --- Subcenário 1: Logout antes da resposta da validação HTTP -> nenhuma vibração ---
+  {
+    await setActiveQueueCallUser('user-A');
+    assert.equal(env.vibrationCalls.length, 0);
+
+    let releaseHttpValidation;
+    let notifyHttpStarted;
+    const httpStarted = new Promise((resolve) => {
+      notifyHttpStarted = resolve;
+    });
+
+    const pendingValidator = () => {
+      notifyHttpStarted();
+      return new Promise((resolve) => {
+        releaseHttpValidation = resolve;
+      });
+    };
+
+    const payloadA1 = {
+      type: 'queue.called',
+      serviceSessionId: 'session-reval-logout-1',
+      participationId: 'part-reval-1',
+      eventId: 'ev-reval-1',
+      userId: 'user-A',
+      version: 1,
+    };
+
+    const alertPromise = processQueueCallAlertAsync(payloadA1, {
+      validateCallState: pendingValidator,
+    });
+
+    await httpStarted;
+    // O usuário faz logout enquanto a consulta HTTP /participations/:id/queue está em trânsito
+    await clearActiveQueueCallUser();
+
+    // A consulta HTTP responde tardiamente informando que a chamada no servidor ainda estava pending
+    releaseHttpValidation('pending');
+    const result = await alertPromise;
+
+    assert.equal(result, false, 'Deve recusar alerta quando houve logout durante a validação assíncrona');
+    assert.equal(env.vibrationCalls.length, 0, 'Nenhuma vibração de hardware deve ocorrer');
+    assert.equal(
+      hasSessionBeenAlerted(payloadA1.serviceSessionId, 'user-A'),
+      false,
+      'Sessão não deve ser registrada como alertada para a conta deslogada'
+    );
+  }
+
+  // --- Subcenário 2: Troca de usuário A para B durante a validação HTTP -> nenhuma vibração da conta A ---
+  {
+    await setActiveQueueCallUser('user-A');
+    assert.equal(env.vibrationCalls.length, 0);
+
+    let releaseHttpValidation;
+    let notifyHttpStarted;
+    const httpStarted = new Promise((resolve) => {
+      notifyHttpStarted = resolve;
+    });
+
+    const pendingValidator = () => {
+      notifyHttpStarted();
+      return new Promise((resolve) => {
+        releaseHttpValidation = resolve;
+      });
+    };
+
+    const payloadA2 = {
+      type: 'queue.called',
+      serviceSessionId: 'session-reval-switch-2',
+      participationId: 'part-reval-2',
+      eventId: 'ev-reval-2',
+      userId: 'user-A',
+      version: 1,
+    };
+
+    const alertPromise = processQueueCallAlertAsync(payloadA2, {
+      validateCallState: pendingValidator,
+    });
+
+    await httpStarted;
+    // Troca direta de usuário da conta A para a conta B durante a validação da chamada de A
+    await setActiveQueueCallUser('user-B');
+
+    // A validação HTTP da chamada de A conclui
+    releaseHttpValidation('pending');
+    const result = await alertPromise;
+
+    assert.equal(result, false, 'Deve recusar alerta da conta A após troca de usuário para conta B');
+    assert.equal(env.vibrationCalls.length, 0, 'Nenhuma vibração deve ocorrer para a conta anterior');
+    assert.equal(hasSessionBeenAlerted(payloadA2.serviceSessionId, 'user-A'), false);
+    assert.equal(hasSessionBeenAlerted(payloadA2.serviceSessionId, 'user-B'), false);
+  }
+
+  // --- Subcenário 3: Sessão permanece válida -> vibração normalmente ---
+  const payloadB1 = {
+    type: 'queue.called',
+    serviceSessionId: 'session-reval-valid-3',
+    participationId: 'part-reval-3',
+    eventId: 'ev-reval-3',
+    userId: 'user-B',
+    version: 1,
+  };
+
+  {
+    let releaseHttpValidation;
+    let notifyHttpStarted;
+    const httpStarted = new Promise((resolve) => {
+      notifyHttpStarted = resolve;
+    });
+
+    const pendingValidator = () => {
+      notifyHttpStarted();
+      return new Promise((resolve) => {
+        releaseHttpValidation = resolve;
+      });
+    };
+
+    const alertPromise = processQueueCallAlertAsync(payloadB1, {
+      validateCallState: pendingValidator,
+    });
+
+    await httpStarted;
+    // Sessão de user-B permanece inalterada e ativa durante a requisição
+    releaseHttpValidation('pending');
+    const result = await alertPromise;
+
+    assert.equal(result, true, 'Deve vibrar normalmente quando a sessão permanece íntegra');
+    assert.equal(env.vibrationCalls.length, 1, 'Deve executar 1 vibração no hardware');
+    assert.equal(
+      hasSessionBeenAlerted(payloadB1.serviceSessionId, 'user-B'),
+      true,
+      'Sessão deve ser registrada como alertada para user-B'
+    );
+  }
+
+  // --- Subcenário 4: Mesmo evento entregue novamente -> sem duplicidade ---
+  {
+    const duplicateResult = await processQueueCallAlertAsync(payloadB1, {
+      validateCallState: async () => 'pending',
+    });
+
+    assert.equal(duplicateResult, false, 'Entrega repetida do mesmo evento não deve ser processada');
+    assert.equal(env.vibrationCalls.length, 1, 'Contagem de vibrações deve continuar sendo exatamente 1');
+  }
+});

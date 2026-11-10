@@ -395,6 +395,13 @@ export async function clearActiveQueueCallUser({ secureStore = SecureStore } = {
 }
 
 /**
+ * Retorna a geração monotônica atual do estado de usuário/sessão.
+ */
+export function getActiveUserStateGeneration() {
+  return activeUserStateGeneration;
+}
+
+/**
  * Retorna o ID do usuário autenticado ativo em memória (ou `null` quando deslogado).
  */
 export function getActiveQueueCallUser() {
@@ -534,6 +541,8 @@ export async function processQueueCallAlertAsync(
     secureStore = SecureStore,
     validateCallState = callStateValidator,
     requireAuthenticatedUser = false,
+    getSessionGeneration = null,
+    isCurrent = null,
   } = {}
 ) {
   const payload =
@@ -548,6 +557,42 @@ export async function processQueueCallAlertAsync(
     return false;
   }
 
+  const startGeneration = activeUserStateGeneration;
+  const startSessionEpoch =
+    typeof getSessionGeneration === 'function' ? getSessionGeneration() : null;
+
+  const isCurrentSessionValid = async (targetUserId) => {
+    if (typeof isCurrent === 'function' && !isCurrent()) {
+      return false;
+    }
+    if (
+      typeof getSessionGeneration === 'function' &&
+      startSessionEpoch !== null &&
+      getSessionGeneration() !== startSessionEpoch
+    ) {
+      return false;
+    }
+    if (activeUserStateGeneration !== startGeneration) {
+      return false;
+    }
+    if (isExplicitlyLoggedOut && currentUserId === undefined) {
+      return false;
+    }
+    const currentActive =
+      currentUserId !== undefined ? currentUserId : activeUserIdInMemory;
+    if (currentActive !== null && currentActive !== undefined) {
+      if (targetUserId && currentActive !== targetUserId) {
+        return false;
+      }
+    } else if (targetUserId && !isExplicitlyLoggedOut) {
+      const persistedNow = await readPersistedActiveUserId(secureStore);
+      if (persistedNow !== targetUserId) {
+        return false;
+      }
+    }
+    return true;
+  };
+
   inFlightSessionIds.add(payload.serviceSessionId);
   try {
     // 1. Resolver o usuário autenticado (memória ou SecureStore em execução headless)
@@ -556,6 +601,10 @@ export async function processQueueCallAlertAsync(
 
     if (!resolvedUserId && !isExplicitlyLoggedOut) {
       resolvedUserId = await readPersistedActiveUserId(secureStore);
+    }
+
+    if (!(await isCurrentSessionValid(resolvedUserId))) {
+      return false;
     }
 
     if (isExplicitlyLoggedOut && currentUserId === undefined) {
@@ -583,6 +632,10 @@ export async function processQueueCallAlertAsync(
 
     // 3. Verificar deduplicação persistida no SecureStore (sobrevive ao reinício do processo)
     const persistedMap = await readPersistedAlertedMap(secureStore);
+    if (!(await isCurrentSessionValid(resolvedUserId))) {
+      return false;
+    }
+
     const persistedKey = effectiveUserId || '__anonymous__';
     const persistedList = Array.isArray(persistedMap[persistedKey])
       ? persistedMap[persistedKey]
@@ -615,7 +668,27 @@ export async function processQueueCallAlertAsync(
       }
     }
 
-    // 6. Executar vibração de 1,9s e só registrar sucesso se não houver falha de execução
+    // 6. Confirmação obrigatória de sessão e correspondência exata de identidade antes de acionar a vibração
+    if (!(await isCurrentSessionValid(resolvedUserId))) {
+      return false;
+    }
+
+    const currentActiveIdentity =
+      currentUserId !== undefined ? currentUserId : activeUserIdInMemory;
+    if (resolvedUserId) {
+      if (currentActiveIdentity && currentActiveIdentity !== resolvedUserId) {
+        return false;
+      }
+      if (!currentActiveIdentity) {
+        if (isExplicitlyLoggedOut) return false;
+        const persistedCurrent = await readPersistedActiveUserId(secureStore);
+        if (persistedCurrent !== resolvedUserId) {
+          return false;
+        }
+      }
+    }
+
+    // Executar vibração de 1,9s e só registrar sucesso se não houver falha de execução
     const vibrated = executeHardwareVibration(vibrationEngine);
     if (!vibrated) {
       return false;

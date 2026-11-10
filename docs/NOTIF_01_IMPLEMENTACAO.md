@@ -7,6 +7,7 @@
 - **Branch de trabalho:** `feature/queue-call-vibration`
 - **Expo SDK:** 58 (Expo ~58.0.23, React 19.3.0, React Native 0.88.1)
 - **Commit de correção:** `fix(queue): reforçar isolamento de sessão e confiabilidade dos alertas`
+- **Commit de fechamento dos riscos residuais:** `fix(queue): revalidar sessao antes de vibrar e timeout na leitura http`
 
 ---
 
@@ -69,10 +70,10 @@
 - **Rejeição de tickets `ok` sem ID válido — P2:**
   - Não são gerados identificadores fictícios como `accepted-0`.
   - Se a Expo Push API retornar `{ status: "ok" }` sem `id` válido (ausente ou vazio), o ticket é classificado como resposta inconclusiva/inválida e submetido à política de retry (`pending` com backoff progressivo até 3 tentativas), preservando o mesmo `serviceSessionId` para deduplicação lógica.
-- **Timeouts HTTP explícitos, renovação de lease (heartbeat) e fencing por tentativa — P2:**
-  - `performHttpPost` aplica timeout explícito (`EXPO_HTTP_TIMEOUT_MS = 10_000` ms, compatível com o lease de 60s) via `AbortController` e `Promise.race`. Quando a resposta do provedor é incerta por timeout, a requisição é abortada e o registro agenda retry sem ser marcado como `accepted` ou `delivered`.
+- **Timeouts HTTP explícitos, extensão à leitura completa do corpo, renovação de lease (heartbeat) e fencing por tentativa — P2:**
+  - `performHttpPost` aplica timeout explícito (`EXPO_HTTP_TIMEOUT_MS = 10_000` ms, compatível com o lease de 60s) via `AbortController` e `Promise.race` cobrindo **tanto o recebimento dos headers quanto a leitura e decodificação completa do corpo JSON (`rawRes.json()`)**. Caso a conexão trave durante o streaming da resposta ou `json()` não resolva, a requisição é abortada via `signal.abort()`, o lease do registro é liberado imediatamente (`locked_at = NULL`), o heartbeat é cancelado e o registro agenda retry com backoff progressivo, sem ser marcado indevidamente como `accepted` ou `delivered`.
   - Antes de iniciar o envio HTTP e durante sua execução (dentro do limite de timeout), a instância valida e renova periodicamente `locked_at = clock_timestamp()` (`WHERE id = ... AND status = 'processing' AND attempts = currentAttempt`), impedindo que outra instância assuma a mesma entrega enquanto a requisição ainda está em andamento.
-  - Todas as transições de estado pós-envio utilizam *fencing* por número de tentativa (`WHERE id = ${entry.id} AND status = 'processing' AND attempts = ${currentAttempt}`), garantindo que uma resposta tardia de uma instância cujo lease expirou jamais sobrescreva o estado de outra instância.
+  - Todas as transições de estado pós-envio utilizam *fencing* por número de tentativa (`WHERE id = ${entry.id} AND status = 'processing' AND attempts = ${currentAttempt}`), garantindo que uma resposta tardia de uma instância cujo lease expirou jamais sobrescreva o estado de outra instância ou worker mais recente.
 - **Retomada após reinício e agendador periódico:**
   - `QueueCallPushService` implementa `OnApplicationBootstrap` e `BeforeApplicationShutdown`.
   - Na inicialização (`recoverOnStartup()`), recupera registros pendentes, libera/reprocessa registros órfãos em `processing` cujo lock de 60s expirou durante uma queda e verifica recibos de registros `accepted`.
@@ -92,6 +93,7 @@
   - Os identificadores `serviceSessionId` já vibrados são persistidos no `SecureStore` (`arenago_alerted_service_sessions_v1`) indexados pelo `userId`, sobrevivendo ao reinício do processo.
   - O usuário autenticado ativo é persistido em `arenago_push_active_user_id` no `SecureStore`, permitindo que a task em background valide a titularidade do alerta mesmo quando `AuthContext` não está montado.
 - **Proteções implementadas:**
+  - **Revalidação imediata de sessão antes da vibração (P1):** `processQueueCallAlertAsync` captura a geração da sessão (`activeUserStateGeneration` e época de autenticação) e revalida a consistência de identidade após **cada** etapa assíncrona (`readPersistedActiveUserId`, `readPersistedAlertedMap`, `validateCallState`). Imediatamente antes de invocar `vibrationEngine.vibrate()`, é realizada uma confirmação estrita de que a identidade ativa permanece idêntica à do início do alerta e que nenhuma troca de conta ou logout ocorreu. Se um logout ocorrer enquanto a validação HTTP estiver pendente, nenhuma vibração é executada. Se ocorrer troca do usuário A para o usuário B durante a validação, a conta A não vibra. Apenas quando a sessão permanece inalterada a vibração é acionada normalmente, com deduplicação para impedir vibrações repetidas para o mesmo evento.
   - **Nenhum alerta de conta anterior:** alertas cujo `userId` divirja do usuário ativo ou recebidos após logout (`clearActiveQueueCallUser`) são descartados.
   - **Nenhuma vibração duplicada foreground/background:** trava síncrona `inFlightSessionIds` impede execução concorrente quando o listener de primeiro plano e a task de segundo plano recebem o mesmo evento simultaneamente.
   - **Nenhuma vibração de chamada já encerrada (quando verificável):** quando o cliente autenticado possui `accessToken` em memória, o validador registrado em `AuthContext` consulta `GET /participations/:participationId/queue` e cancela a vibração se a chamada não estiver mais `called`/`pending`. Alertas atrasados com `calledAt` superior a 5 minutos (`MAX_ALERT_STALENESS_MS`) também são descartados.
@@ -129,8 +131,8 @@
 
 | Escopo | Comando Executado | Resultado Observado | Exit Code |
 | :--- | :--- | :--- | :--- |
-| **Testes Unitários Mobile (App completo)** | `npm.cmd --prefix app test` | **387/387 aprovados** (incluindo 7 suítes completas em `queue-call-vibration.test.cjs`) | `0` |
-| **Testes Unitários Backend (Notificações, Fila e CallNext)** | `cd backend; $env:NODE_ENV="test"; $env:STAFF_IDEMPOTENCY_TTL_SECONDS="60"; $env:PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS="60"; $env:EVALUATION_IDEMPOTENCY_TTL_SECONDS="60"; npx.cmd tsx --test test/unit/call-next*.test.ts test/unit/notifications*.test.ts test/unit/queue-call*.test.ts test/unit/staff-http.test.ts test/unit/participant-queue-http.test.ts` | **82/82 aprovados** (0 falhas) | `0` |
+| **Testes Unitários Mobile (App completo)** | `npm.cmd --prefix app test` | **388/388 aprovados** (incluindo 8 suítes completas em `queue-call-vibration.test.cjs`) | `0` |
+| **Testes Unitários Backend (Notificações, Fila e CallNext)** | `cd backend; $env:NODE_ENV="test"; $env:STAFF_IDEMPOTENCY_TTL_SECONDS="60"; $env:PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS="60"; $env:EVALUATION_IDEMPOTENCY_TTL_SECONDS="60"; npx.cmd tsx --test test/unit/call-next*.test.ts test/unit/notifications*.test.ts test/unit/queue-call*.test.ts test/unit/staff-http.test.ts test/unit/participant-queue-http.test.ts` | **83/83 aprovados** (0 falhas) | `0` |
 | **Build TypeScript do Backend** | `npm.cmd --prefix backend run build` | **Compilado sem erros** (`nest build`) | `0` |
 | **Typecheck de Testes do Backend** | `npm.cmd --prefix backend run typecheck:test` | **0 erros** (`tsc --project tsconfig.test.json`) | `0` |
 | **Verificação de Dependências Expo** | `cd app; npx.cmd expo install --check` | **Dependencies are up to date** | `0` |

@@ -1139,3 +1139,118 @@ test("QueueCallPushService (P2): aplica timeout explícito quando resposta do pr
   assert.equal(fencingState.rows[0].status, "delivered");
   assert.equal(fencingState.rows[0].ticketId, "fresh-worker-ticket");
 });
+
+test("QueueCallPushService (P2): timeout estendido à leitura completa do corpo (json() pendente/abort), liberação do lease, retomada e fencing de worker obsoleto", async () => {
+  let currentTimeMs = 200_000;
+  let attemptsMade = 0;
+  const abortSignalsDuringBodyRead: boolean[] = [];
+
+  const state = createStatefulOutboxDb({
+    initialRows: [
+      makeSampleRow({
+        id: "outbox-body-read-timeout",
+        serviceSessionId: "11111111-1111-4000-8000-000000000201",
+      }),
+    ],
+    nowMs: () => currentTimeMs,
+  });
+
+  const mockDeviceTokensService = {
+    getActiveTokensForUser: async () => [{ pushToken, platform: "android" }],
+    revokeInvalidToken: async () => undefined,
+  } as unknown as DeviceTokensService;
+
+  let releaseStalledBodyRead!: () => void;
+  let notifyBodyReadStarted!: () => void;
+  const bodyReadStartedPromise = new Promise<void>((resolve) => {
+    notifyBodyReadStarted = resolve;
+  });
+
+  const bodyStallTransport: PushHttpTransport = async (url, options) => {
+    if (url === EXPO_PUSH_URL) {
+      attemptsMade++;
+      if (attemptsMade === 1) {
+        // Resposta HTTP 200 recebida, mas json() fica pendente e monitora abort
+        return {
+          ok: true,
+          status: 200,
+          json: async () => {
+            notifyBodyReadStarted();
+            return await new Promise<unknown>((resolve, reject) => {
+              options.signal?.addEventListener("abort", () => {
+                abortSignalsDuringBodyRead.push(Boolean(options.signal?.aborted));
+                const abortErr = new Error("The operation was aborted");
+                abortErr.name = "AbortError";
+                reject(abortErr);
+              });
+              releaseStalledBodyRead = () => {
+                resolve({ data: [{ status: "ok", id: "ticket-late-body" }] });
+              };
+            });
+          },
+        };
+      }
+
+      // 2ª tentativa (retomada): leitura do corpo completa normalmente
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: [{ status: "ok", id: "ticket-recovered-after-body-timeout" }],
+        }),
+      };
+    }
+
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: { "ticket-recovered-after-body-timeout": { status: "ok" } },
+      }),
+    };
+  };
+
+  const service = new QueueCallPushService(
+    state.db,
+    mockDeviceTokensService,
+    bodyStallTransport,
+  );
+  service.setHttpTimeoutMs(35);
+
+  // 1. Executa o ciclo: resposta HTTP chega, mas json() nunca resolve antes do timeout de 35ms
+  const dispatchPromise = service.dispatchPending();
+  await bodyReadStartedPromise;
+
+  const result1 = await dispatchPromise;
+
+  assert.equal(result1.processed, 1);
+  assert.equal(result1.accepted, 0);
+  assert.equal(result1.delivered, 0);
+  assert.equal(result1.retried, 1);
+  assert.deepEqual(abortSignalsDuringBodyRead, [true], "AbortController deve ser acionado pelo timeout durante a leitura do corpo");
+
+  // 2. Garantir liberação do lease e recuperação da outbox
+  const rowAfterTimeout = state.rows[0];
+  assert.equal(rowAfterTimeout.status, "pending");
+  assert.equal(rowAfterTimeout.lockedAtMs, null, "O lease deve ser liberado imediatamente (locked_at = NULL)");
+  assert.equal(rowAfterTimeout.attempts, 1);
+  assert.match(rowAfterTimeout.lastError ?? "", /Timeout na requisição para a Expo Push API após 35ms/);
+
+  // 3. Retomada após falha: após decorrer o backoff de 5s, o reprocessamento tem sucesso completo
+  currentTimeMs += 6000;
+  const recoveryResult = await service.dispatchPending();
+
+  assert.equal(recoveryResult.processed, 1);
+  assert.equal(recoveryResult.accepted, 1);
+  assert.equal(recoveryResult.delivered, 1);
+  assert.equal(state.rows[0].status, "delivered");
+  assert.equal(state.rows[0].attempts, 2);
+  assert.equal(state.rows[0].ticketId, "ticket-recovered-after-body-timeout");
+
+  // 4. Ausência de alteração indevida por worker obsoleto:
+  // Se a leitura pendente da tentativa 1 resolver tardiamente agora, ela não deve sobrescrever o registro entregue
+  releaseStalledBodyRead();
+  assert.equal(state.rows[0].status, "delivered");
+  assert.equal(state.rows[0].ticketId, "ticket-recovered-after-body-timeout");
+  assert.equal(state.rows[0].attempts, 2);
+});

@@ -106,6 +106,9 @@ export function AuthProvider({
       });
 
       setQueueCallStateValidator(async (payload) => {
+        if (!isCurrentSession()) {
+          return 'ended';
+        }
         if (!payload?.participationId || typeof manager.client?.get !== 'function') {
           return 'unknown';
         }
@@ -119,6 +122,9 @@ export function AuthProvider({
             `/participations/${payload.participationId}/queue`,
             { auth: true }
           );
+          if (!isCurrentSession()) {
+            return 'ended';
+          }
           const entry = queueResponse?.currentQueueEntry;
           if (
             !entry ||

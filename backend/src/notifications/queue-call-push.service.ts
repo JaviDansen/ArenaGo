@@ -726,7 +726,10 @@ export class QueueCallPushService implements OnApplicationBootstrap, BeforeAppli
       "Content-Type": "application/json",
     };
 
-    const response = await this.performHttpPost(EXPO_PUSH_URL, headers, bodyString);
+    const response = await this.performHttpPost<{
+      data?: ExpoPushTicket[];
+      errors?: Array<{ code?: string; message?: string }>;
+    }>(EXPO_PUSH_URL, headers, bodyString);
 
     if (!response.ok) {
       const retryable = response.status >= 500 || response.status === 429;
@@ -736,10 +739,7 @@ export class QueueCallPushService implements OnApplicationBootstrap, BeforeAppli
       );
     }
 
-    const result = (await response.json()) as {
-      data?: ExpoPushTicket[];
-      errors?: Array<{ code?: string; message?: string }>;
-    };
+    const result = response.data;
 
     const tickets: ExpoPushTicket[] | undefined = Array.isArray(result?.data)
       ? result.data
@@ -829,14 +829,14 @@ export class QueueCallPushService implements OnApplicationBootstrap, BeforeAppli
     };
     const bodyString = JSON.stringify({ ids: ticketIds });
 
-    const response = await this.performHttpPost(EXPO_RECEIPTS_URL, headers, bodyString);
+    const response = await this.performHttpPost<{
+      data?: Record<string, ExpoPushReceipt>;
+    }>(EXPO_RECEIPTS_URL, headers, bodyString);
     if (!response.ok) {
       throw new Error(`Expo Push Receipts API retornou status HTTP ${response.status}`);
     }
 
-    const result = (await response.json()) as {
-      data?: Record<string, ExpoPushReceipt>;
-    };
+    const result = response.data;
 
     const receiptsMap = result?.data;
     if (!receiptsMap || typeof receiptsMap !== "object" || Array.isArray(receiptsMap)) {
@@ -902,11 +902,11 @@ export class QueueCallPushService implements OnApplicationBootstrap, BeforeAppli
     };
   }
 
-  private async performHttpPost(
+  private async performHttpPost<T = unknown>(
     url: string,
     headers: Record<string, string>,
     body: string,
-  ): Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }> {
+  ): Promise<{ ok: boolean; status: number; data: T; json: () => Promise<T> }> {
     const timeoutMs = this.httpTimeoutMs;
     const controller =
       typeof AbortController === "function" ? new AbortController() : null;
@@ -928,28 +928,37 @@ export class QueueCallPushService implements OnApplicationBootstrap, BeforeAppli
     const executeRequest = async (): Promise<{
       ok: boolean;
       status: number;
-      json: () => Promise<unknown>;
+      data: T;
+      json: () => Promise<T>;
     }> => {
       try {
-        if (this.transport) {
-          return await this.transport(url, {
-            method: "POST",
-            headers,
-            body,
-            ...(controller ? { signal: controller.signal } : {}),
-          });
+        const rawRes = this.transport
+          ? await this.transport(url, {
+              method: "POST",
+              headers,
+              body,
+              ...(controller ? { signal: controller.signal } : {}),
+            })
+          : await fetch(url, {
+              method: "POST",
+              headers,
+              body,
+              ...(controller ? { signal: controller.signal } : {}),
+            });
+
+        // Leitura e interpretação do corpo sob o mesmo timeout e AbortController
+        let parsedData: T;
+        if (typeof rawRes.json === "function") {
+          parsedData = (await rawRes.json()) as T;
+        } else {
+          parsedData = {} as T;
         }
 
-        const res = await fetch(url, {
-          method: "POST",
-          headers,
-          body,
-          ...(controller ? { signal: controller.signal } : {}),
-        });
         return {
-          ok: res.ok,
-          status: res.status,
-          json: () => res.json(),
+          ok: rawRes.ok,
+          status: rawRes.status,
+          data: parsedData,
+          json: async () => parsedData,
         };
       } catch (err: unknown) {
         const isAbortOrTimeout =
