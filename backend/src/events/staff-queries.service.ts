@@ -5,7 +5,7 @@ import { DRIZZLE_DATABASE } from "../database/database.module";
 import type { DatabaseExecutor } from "../database/database-executor";
 import type * as schema from "../database/schema";
 import { EventsService } from "./events.service";
-import type { StaffQueueResult, StaffStationsResult } from "./staff-queries.types";
+import type { StaffExperiencesResult, StaffQueueResult, StaffStationsResult } from "./staff-queries.types";
 
 interface AccessRow extends Record<string, unknown> {
   observedAtMs: number;
@@ -15,6 +15,10 @@ interface StaffEventRow extends Record<string, unknown> {
   id: string;
   name: string;
   status: "scheduled" | "open" | "closing" | "closed";
+}
+interface StaffExperienceRow extends Record<string, unknown> {
+  id: string;
+  name: string;
 }
 interface StationRow extends Record<string, unknown> {
   id: string;
@@ -78,6 +82,19 @@ export class StaffQueriesService {
       )
     `);
     return result.rows[0];
+  }
+
+  async getExperiences(staffUserId: string, eventId: string): Promise<StaffExperiencesResult> {
+    return this.database.transaction(async (tx): Promise<StaffExperiencesResult> => {
+      const access = await this.authorize(tx, staffUserId, eventId);
+      if (!access) return { kind: "access_denied" };
+      const result = await tx.execute<StaffExperienceRow>(sql`
+        SELECT e.id, e.name FROM experiences e
+        WHERE e.event_id=${eventId}
+        ORDER BY e.name, e.id
+      `);
+      return { kind: "ok", eventId, experiences: result.rows.map(({ id, name }) => ({ id, name })) };
+    }, { isolationLevel: "repeatable read", accessMode: "read only" });
   }
 
   async getStations(staffUserId: string, eventId: string): Promise<StaffStationsResult> {

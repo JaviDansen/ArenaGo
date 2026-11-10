@@ -25,6 +25,16 @@ export class StaffQueriesController {
     return { events: events.map(({ id, name, status }) => ({ id, name, status })) };
   }
 
+  @Get(":eventId/experiences")
+  @HttpCode(HttpStatus.OK)
+  @Header("Cache-Control", "no-store")
+  async experiences(@CurrentUserId() userId: string, @Param() params: unknown) {
+    const { eventId } = validateOperationParams(eventParams, params);
+    const result = await this.queries.getExperiences(userId, eventId);
+    if (result.kind === "access_denied") return denied();
+    return { eventId: result.eventId, experiences: result.experiences.map(({ id, name }) => ({ id, name })) };
+  }
+
   @Get(":eventId/stations")
   @HttpCode(HttpStatus.OK)
   async stations(@CurrentUserId() userId: string, @Param() params: unknown) {

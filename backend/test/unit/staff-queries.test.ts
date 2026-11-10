@@ -26,13 +26,14 @@ test("descoberta usa SQL parametrizado, concessão ativa e conta apta", async ()
   assert.doesNotMatch(queries[0].text, /\b(insert|update|delete)\b/i);
 });
 function fixture(options: { denied?: boolean; clock?: number; operating?: boolean; accepting?: boolean;
-  stations?: object[]; queue?: object[] } = {}) {
+  stations?: object[]; queue?: object[]; experiences?: object[] } = {}) {
   const queries: Array<{ text: string; params: unknown[] }> = [];
   let evaluations = 0;
   const database = drizzle({ async query(config: { text: string }, params: unknown[]) {
     queries.push({ text: config.text, params });
     if (config.text.includes("FROM events e")) return { rows: options.denied ? [] : [{ observedAtMs: options.clock ?? at.getTime(), operating: options.operating ?? true }] };
     if (config.text.includes("FROM experiences e JOIN stations")) return { rows: options.stations ?? [station] };
+    if (config.text.includes("SELECT e.id, e.name FROM experiences e")) return { rows: options.experiences ?? [] };
     if (config.text.includes("WITH waiting")) return { rows: options.queue ?? [queue] };
     return { rows: [] };
   } } as unknown as Client, { schema });
@@ -46,6 +47,31 @@ function fixture(options: { denied?: boolean; clock?: number; operating?: boolea
   };
   return { service: new StaffQueriesService(database, events), queries, evaluations: () => evaluations };
 }
+
+test("experiências Staff consultam somente o evento autorizado, sem depender de estação", async () => {
+  const f = fixture({ experiences: [{ id: "x1", name: "Arena", privateField: "PRIVATE" },
+    { id: "x2", name: "Sem estação" }] });
+  assert.deepEqual(await f.service.getExperiences(userId, eventId), { kind: "ok", eventId,
+    experiences: [{ id: "x1", name: "Arena" }, { id: "x2", name: "Sem estação" }] });
+  assert.equal(f.queries[0].text, "begin isolation level repeatable read read only");
+  const access = f.queries[1], query = f.queries[2];
+  assert.deepEqual(access.params, [eventId, userId]);
+  for (const expression of [/r.role='staff'/, /r.event_id=e.id/, /r.revoked_at IS NULL/,
+    /u.is_active=true/, /u.email_verified_at IS NOT NULL/]) assert.match(access.text, expression);
+  assert.deepEqual(query.params, [eventId]);
+  assert.match(query.text, /e.event_id=\$1/); assert.match(query.text, /ORDER BY e.name, e.id/);
+  assert.doesNotMatch(query.text, /\b(join|stations|queue_entries|participations|access_code)\b/i);
+  assert.equal(f.queries.at(-1)?.text, "commit");
+});
+
+test("experiências Staff vazias são distintas de acesso negado", async () => {
+  const empty = fixture({ experiences: [] });
+  assert.deepEqual(await empty.service.getExperiences(userId, eventId), { kind: "ok", eventId, experiences: [] });
+  const denied = fixture({ denied: true });
+  assert.deepEqual(await denied.service.getExperiences(userId, eventId), { kind: "access_denied" });
+  assert.equal(denied.queries.length, 3);
+  assert.equal(denied.queries.some((query) => /FROM experiences e/.test(query.text)), false);
+});
 
 test("E08.4 estações preservam configuração e instante pending sem ocupação redundante", async () => {
   const f = fixture({ stations: [station, { ...station, id: "unavailable", availability: "unavailable", pendingServiceSessionId: null, pendingCalledAtMs: null }] });

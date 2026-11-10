@@ -14,7 +14,7 @@ import { EventsModule } from "../../src/events/events.module";
 import { EventsService } from "../../src/events/events.service";
 import { StaffQueriesController } from "../../src/events/staff-queries.controller";
 import { StaffQueriesService } from "../../src/events/staff-queries.service";
-import type { StaffQueueResult, StaffStationsResult } from "../../src/events/staff-queries.types";
+import type { StaffExperiencesResult, StaffQueueResult, StaffStationsResult } from "../../src/events/staff-queries.types";
 
 const id = (n: number) => `abcdef00-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const eventId = id(1), experienceId = id(2), userId = id(3), at = new Date("2026-11-03T15:00:00Z");
@@ -24,7 +24,7 @@ const stations = { eventId, stations: [{ id: id(4), experienceId, label: "Estaç
   pendingServiceSessionId: id(5), pendingCalledAt: at }] };
 const queue = { eventId, experienceId, observedAt: at, waitingCount: 3,
   acceptingNewEntries: false, canCallWaitingEntries: true, firstWaitingQueueEntryId: id(6) };
-let stationResult: StaffStationsResult, queueResult: StaffQueueResult, failure: Error | undefined;
+let stationResult: StaffStationsResult, queueResult: StaffQueueResult, experienceResult: StaffExperiencesResult, failure: Error | undefined;
 let eventResults: Array<{ id: string; name: string; status: "open" }> = [];
 const calls: unknown[][] = [];
 @Module({ controllers: [StaffQueriesController], providers: [SessionAuthGuard,
@@ -34,6 +34,7 @@ const calls: unknown[][] = [];
   } } },
   { provide: StaffQueriesService, useValue: {
     listEvents: async (...args: string[]) => { calls.push(["events", ...args]); if (failure) throw failure; return eventResults; },
+    getExperiences: async (...args: string[]) => { calls.push(["experiences", ...args]); if (failure) throw failure; return experienceResult; },
     getStations: async (...args: string[]) => { calls.push(["stations", ...args]); if (failure) throw failure; return stationResult; },
     getQueue: async (...args: string[]) => { calls.push(["queue", ...args]); if (failure) throw failure; return queueResult; },
   } },
@@ -49,6 +50,7 @@ const get = (route: string) => supertest(app.getHttpServer()).get(route).set("Au
 function reset() {
   calls.length = 0; failure = undefined;
   eventResults = [];
+  experienceResult = { kind: "ok", eventId, experiences: [] };
   stationResult = { kind: "ok", ...structuredClone(stations) }; queueResult = { kind: "ok", ...structuredClone(queue) };
 }
 test("descoberta HTTP exige sessão e usa somente o usuário autenticado", async () => {
@@ -71,6 +73,33 @@ function problem(r: supertest.Response, status: number, code: string) {
   assert.equal(r.status, status); assert.equal(r.body.status, status); assert.equal(r.body.code, code);
   assert.match(r.headers["content-type"], /application\/problem\+json/);
 }
+test("experiências HTTP exigem Bearer e validam UUID antes da consulta", async () => {
+  reset(); const route = `${base}/experiences`;
+  problem(await supertest(app.getHttpServer()).get(route), 401, "MISSING_ACCESS_TOKEN");
+  problem(await get(route).set("Authorization", "Bearer invalid"), 401, "INVALID_ACCESS_TOKEN");
+  problem(await get(route.replace(eventId, "bad")), 400, "VALIDATION_ERROR");
+  assert.equal(calls.length, 0);
+});
+test("experiências HTTP usam identidade da sessão e expõem apenas ID e nome", async () => {
+  reset(); experienceResult = { kind: "ok", eventId, experiences: [
+    { id: experienceId, name: "Com estação" }, { id: id(8), name: "Sem estação" }] };
+  Object.assign(experienceResult.experiences[0], { participants: ["PRIVATE"], accessCode: "PRIVATE" });
+  const r = await get(`${base}/experiences`).query({ userId: id(9), staffUserId: id(9) });
+  assert.equal(r.status, 200); assert.equal(r.headers["cache-control"], "no-store");
+  assert.deepEqual(r.body, { eventId, experiences: [{ id: experienceId, name: "Com estação" },
+    { id: id(8), name: "Sem estação" }] });
+  assert.deepEqual(calls, [["experiences", userId, eventId]]);
+});
+test("experiências HTTP retornam vazio ou 404 neutro e normalizam UUID", async () => {
+  reset(); const route = `${base}/experiences`;
+  const empty = await get(route.replace(eventId, eventId.toUpperCase()));
+  assert.equal(empty.status, 200); assert.deepEqual(empty.body, { eventId, experiences: [] });
+  assert.deepEqual(calls, [["experiences", userId, eventId]]);
+  experienceResult = { kind: "access_denied" };
+  const denied = await get(route), missing = await get(route.replace(eventId, id(9)));
+  problem(denied, 404, "RESOURCE_NOT_FOUND"); problem(missing, 404, "RESOURCE_NOT_FOUND");
+  assert.deepEqual(denied.body, missing.body);
+});
 test("E08.4 HTTP estações delega ator da sessão, mantém disponibilidade e serializa pendingCalledAt", async () => {
   reset(); const r = await get(routes[0]).query({ staffUserId: id(9) }); assert.equal(r.status, 200);
   assert.deepEqual(r.body, JSON.parse(JSON.stringify(stations))); assert.deepEqual(calls, [["stations", userId, eventId]]);
@@ -102,7 +131,7 @@ test("E08.4 HTTP recusa neutra 404 não confirma existência de recursos", async
 });
 test("E08.4 HTTP erro interno retorna RFC 7807 sem SQL nem informações privadas", async () => {
   reset(); failure = new Error("PRIVATE_SQL_private@example.test");
-  for (const route of routes) {
+  for (const route of [...routes, `${base}/experiences`]) {
     const r = await get(route); problem(r, 500, "INTERNAL_SERVER_ERROR"); assert.equal(JSON.stringify(r.body).includes("PRIVATE"), false);
   }
 });

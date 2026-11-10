@@ -1,0 +1,333 @@
+diff --git a/backend/src/events/staff-queries.controller.ts b/backend/src/events/staff-queries.controller.ts
+index f873e94..77c238f 100644
+--- a/backend/src/events/staff-queries.controller.ts
++++ b/backend/src/events/staff-queries.controller.ts
+@@ -25,6 +25,16 @@ export class StaffQueriesController {
+     return { events: events.map(({ id, name, status }) => ({ id, name, status })) };
+   }
+ 
++  @Get(":eventId/experiences")
++  @HttpCode(HttpStatus.OK)
++  @Header("Cache-Control", "no-store")
++  async experiences(@CurrentUserId() userId: string, @Param() params: unknown) {
++    const { eventId } = validateOperationParams(eventParams, params);
++    const result = await this.queries.getExperiences(userId, eventId);
++    if (result.kind === "access_denied") return denied();
++    return { eventId: result.eventId, experiences: result.experiences.map(({ id, name }) => ({ id, name })) };
++  }
++
+   @Get(":eventId/stations")
+   @HttpCode(HttpStatus.OK)
+   async stations(@CurrentUserId() userId: string, @Param() params: unknown) {
+diff --git a/backend/src/events/staff-queries.service.ts b/backend/src/events/staff-queries.service.ts
+index f987e15..04bc0eb 100644
+--- a/backend/src/events/staff-queries.service.ts
++++ b/backend/src/events/staff-queries.service.ts
+@@ -5,7 +5,7 @@ import { DRIZZLE_DATABASE } from "../database/database.module";
+ import type { DatabaseExecutor } from "../database/database-executor";
+ import type * as schema from "../database/schema";
+ import { EventsService } from "./events.service";
+-import type { StaffQueueResult, StaffStationsResult } from "./staff-queries.types";
++import type { StaffExperiencesResult, StaffQueueResult, StaffStationsResult } from "./staff-queries.types";
+ 
+ interface AccessRow extends Record<string, unknown> {
+   observedAtMs: number;
+@@ -16,6 +16,10 @@ interface StaffEventRow extends Record<string, unknown> {
+   name: string;
+   status: "scheduled" | "open" | "closing" | "closed";
+ }
++interface StaffExperienceRow extends Record<string, unknown> {
++  id: string;
++  name: string;
++}
+ interface StationRow extends Record<string, unknown> {
+   id: string;
+   experienceId: string;
+@@ -80,6 +84,19 @@ export class StaffQueriesService {
+     return result.rows[0];
+   }
+ 
++  async getExperiences(staffUserId: string, eventId: string): Promise<StaffExperiencesResult> {
++    return this.database.transaction(async (tx): Promise<StaffExperiencesResult> => {
++      const access = await this.authorize(tx, staffUserId, eventId);
++      if (!access) return { kind: "access_denied" };
++      const result = await tx.execute<StaffExperienceRow>(sql`
++        SELECT e.id, e.name FROM experiences e
++        WHERE e.event_id=${eventId}
++        ORDER BY e.name, e.id
++      `);
++      return { kind: "ok", eventId, experiences: result.rows.map(({ id, name }) => ({ id, name })) };
++    }, { isolationLevel: "repeatable read", accessMode: "read only" });
++  }
++
+   async getStations(staffUserId: string, eventId: string): Promise<StaffStationsResult> {
+     return this.database.transaction(async (tx): Promise<StaffStationsResult> => {
+       const access = await this.authorize(tx, staffUserId, eventId);
+diff --git a/backend/src/events/staff-queries.types.ts b/backend/src/events/staff-queries.types.ts
+index 54a8b5d..5a44947 100644
+--- a/backend/src/events/staff-queries.types.ts
++++ b/backend/src/events/staff-queries.types.ts
+@@ -13,6 +13,12 @@ export type StaffStationsResult = { kind: "access_denied" } | {
+   stations: StaffStationState[];
+ };
+ 
++export type StaffExperiencesResult = { kind: "access_denied" } | {
++  kind: "ok";
++  eventId: string;
++  experiences: Array<{ id: string; name: string }>;
++};
++
+ export type StaffQueueResult = { kind: "access_denied" } | {
+   kind: "ok";
+   eventId: string;
+diff --git a/backend/test/integration/staff-queries-http.integration.test.ts b/backend/test/integration/staff-queries-http.integration.test.ts
+index d7518bf..2c78df8 100644
+--- a/backend/test/integration/staff-queries-http.integration.test.ts
++++ b/backend/test/integration/staff-queries-http.integration.test.ts
+@@ -149,6 +149,46 @@ function problem(r: supertest.Response, status: number, code?: string) {
+   assert.equal(r.status, status, JSON.stringify(r.body)); assert.equal(r.body.status, status);
+   assert.match(r.headers["content-type"], /application\/problem\+json/); if (code) assert.equal(r.body.code, code);
+ }
++test("experiências Staff PostgreSQL isolam contas e eventos e incluem experiência sem estação", async () => {
++  const a = await context(), b = await context();
++  const withStation = await experience(a.eventId, "Com estação"); await station(withStation);
++  const withoutStation = await experience(a.eventId, "Sem estação");
++  const other = await experience(b.eventId, "Outra conta");
++  const route = (eventId: string) => `/api/v1/staff/events/${eventId}/experiences`;
++  const aResult = await get(route(a.eventId), a.staff).query({ userId: b.staff.userId });
++  assert.equal(aResult.status, 200); assert.equal(aResult.headers["cache-control"], "no-store");
++  assert.deepEqual(aResult.body, { eventId: a.eventId, experiences: [
++    { id: withStation, name: "Com estação" }, { id: withoutStation, name: "Sem estação" }] });
++  const bResult = await get(route(b.eventId), b.staff);
++  assert.equal(bResult.status, 200);
++  assert.deepEqual(bResult.body, { eventId: b.eventId, experiences: [{ id: other, name: "Outra conta" }] });
++  for (const auth of [b.staff, a.viewer]) problem(await get(route(a.eventId), auth), 404, "RESOURCE_NOT_FOUND");
++  problem(await supertest(app.getHttpServer()).get(route(a.eventId)), 401, "MISSING_ACCESS_TOKEN");
++  problem(await get(route("invalid"), a.staff), 400, "VALIDATION_ERROR");
++  await pool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE id=$1", [a.roleId]);
++  problem(await get(route(a.eventId), a.staff), 404, "RESOURCE_NOT_FOUND");
++  const missing = await get(route(randomUUID()), a.staff), revoked = await get(route(a.eventId), a.staff);
++  assert.deepEqual(revoked.body, missing.body);
++});
++test("experiências Staff PostgreSQL retornam vazio e Admin sem concessão recebe 404 após 2FA", async () => {
++  const c = await context(), admin = await account();
++  const route = `/api/v1/staff/events/${c.eventId}/experiences`;
++  const empty = await get(route, c.staff);
++  assert.equal(empty.status, 200); assert.deepEqual(empty.body, { eventId: c.eventId, experiences: [] });
++  await pool.query("INSERT INTO user_roles(id,user_id,role,event_id,granted_at) VALUES($1,$2,'admin',NULL,clock_timestamp())", [randomUUID(), admin.userId]);
++  problem(await get(route, admin), 401, "ADMIN_2FA_REQUIRED");
++  await pool.query("UPDATE sessions SET admin_2fa_verified_at=clock_timestamp() WHERE id=$1", [admin.sessionId]);
++  problem(await get(route, admin), 404, "RESOURCE_NOT_FOUND");
++});
++test("experiências Staff PostgreSQL exigem conta ativa e e-mail verificado", async () => {
++  for (const mode of ["inactive", "unverified"] as const) {
++    const c = await context();
++    if (mode === "inactive") await pool.query("UPDATE users SET is_active=false WHERE id=$1", [c.staff.userId]);
++    else await pool.query("UPDATE users SET email_verified_at=NULL WHERE id=$1", [c.staff.userId]);
++    const r = await get(`/api/v1/staff/events/${c.eventId}/experiences`, c.staff);
++    problem(r, mode === "inactive" ? 401 : 404, mode === "inactive" ? "ACCOUNT_DEACTIVATED" : "RESOURCE_NOT_FOUND");
++  }
++});
+ async function state() {
+   return (await pool.query(`SELECT jsonb_build_object(
+     'events',(SELECT jsonb_agg(to_jsonb(e) ORDER BY e.id) FROM events e WHERE e.id=ANY($1::uuid[])),
+@@ -189,6 +229,18 @@ async function afterAuthorization(effect: () => Promise<void>, request: () => Pr
+   finally { database.transaction = original; }
+ }
+ 
++test("experiências Staff usam o mesmo snapshot de autorização e dados", async () => {
++  const c = await context(), id = await experience(c.eventId, "Snapshot");
++  const route = `/api/v1/staff/events/${c.eventId}/experiences`;
++  const result = await afterAuthorization(
++    async () => { await pool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE id=$1", [c.roleId]); },
++    () => get(route, c.staff),
++  );
++  assert.equal(result.status, 200);
++  assert.deepEqual(result.body, { eventId: c.eventId, experiences: [{ id, name: "Snapshot" }] });
++  problem(await get(route, c.staff), 404, "RESOURCE_NOT_FOUND");
++});
++
+ test("E08.4 PostgreSQL HTTP Staff vigente recebe estações e fila com relógio PostgreSQL", async () => {
+   const c = await populated(), before = (await pool.query("SELECT clock_timestamp() AS at")).rows[0].at as Date;
+   const stations = await stationsGet(c), queue = await queueGet(c);
+diff --git a/backend/test/unit/staff-queries-http.test.ts b/backend/test/unit/staff-queries-http.test.ts
+index 329205c..0a52894 100644
+--- a/backend/test/unit/staff-queries-http.test.ts
++++ b/backend/test/unit/staff-queries-http.test.ts
+@@ -14,7 +14,7 @@ import { EventsModule } from "../../src/events/events.module";
+ import { EventsService } from "../../src/events/events.service";
+ import { StaffQueriesController } from "../../src/events/staff-queries.controller";
+ import { StaffQueriesService } from "../../src/events/staff-queries.service";
+-import type { StaffQueueResult, StaffStationsResult } from "../../src/events/staff-queries.types";
++import type { StaffExperiencesResult, StaffQueueResult, StaffStationsResult } from "../../src/events/staff-queries.types";
+ 
+ const id = (n: number) => `abcdef00-0000-4000-8000-${String(n).padStart(12, "0")}`;
+ const eventId = id(1), experienceId = id(2), userId = id(3), at = new Date("2026-11-03T15:00:00Z");
+@@ -24,7 +24,7 @@ const stations = { eventId, stations: [{ id: id(4), experienceId, label: "Estaç
+   pendingServiceSessionId: id(5), pendingCalledAt: at }] };
+ const queue = { eventId, experienceId, observedAt: at, waitingCount: 3,
+   acceptingNewEntries: false, canCallWaitingEntries: true, firstWaitingQueueEntryId: id(6) };
+-let stationResult: StaffStationsResult, queueResult: StaffQueueResult, failure: Error | undefined;
++let stationResult: StaffStationsResult, queueResult: StaffQueueResult, experienceResult: StaffExperiencesResult, failure: Error | undefined;
+ let eventResults: Array<{ id: string; name: string; status: "open" }> = [];
+ const calls: unknown[][] = [];
+ @Module({ controllers: [StaffQueriesController], providers: [SessionAuthGuard,
+@@ -34,6 +34,7 @@ const calls: unknown[][] = [];
+   } } },
+   { provide: StaffQueriesService, useValue: {
+     listEvents: async (...args: string[]) => { calls.push(["events", ...args]); if (failure) throw failure; return eventResults; },
++    getExperiences: async (...args: string[]) => { calls.push(["experiences", ...args]); if (failure) throw failure; return experienceResult; },
+     getStations: async (...args: string[]) => { calls.push(["stations", ...args]); if (failure) throw failure; return stationResult; },
+     getQueue: async (...args: string[]) => { calls.push(["queue", ...args]); if (failure) throw failure; return queueResult; },
+   } },
+@@ -49,6 +50,7 @@ const get = (route: string) => supertest(app.getHttpServer()).get(route).set("Au
+ function reset() {
+   calls.length = 0; failure = undefined;
+   eventResults = [];
++  experienceResult = { kind: "ok", eventId, experiences: [] };
+   stationResult = { kind: "ok", ...structuredClone(stations) }; queueResult = { kind: "ok", ...structuredClone(queue) };
+ }
+ test("descoberta HTTP exige sessão e usa somente o usuário autenticado", async () => {
+@@ -71,6 +73,33 @@ function problem(r: supertest.Response, status: number, code: string) {
+   assert.equal(r.status, status); assert.equal(r.body.status, status); assert.equal(r.body.code, code);
+   assert.match(r.headers["content-type"], /application\/problem\+json/);
+ }
++test("experiências HTTP exigem Bearer e validam UUID antes da consulta", async () => {
++  reset(); const route = `${base}/experiences`;
++  problem(await supertest(app.getHttpServer()).get(route), 401, "MISSING_ACCESS_TOKEN");
++  problem(await get(route).set("Authorization", "Bearer invalid"), 401, "INVALID_ACCESS_TOKEN");
++  problem(await get(route.replace(eventId, "bad")), 400, "VALIDATION_ERROR");
++  assert.equal(calls.length, 0);
++});
++test("experiências HTTP usam identidade da sessão e expõem apenas ID e nome", async () => {
++  reset(); experienceResult = { kind: "ok", eventId, experiences: [
++    { id: experienceId, name: "Com estação" }, { id: id(8), name: "Sem estação" }] };
++  Object.assign(experienceResult.experiences[0], { participants: ["PRIVATE"], accessCode: "PRIVATE" });
++  const r = await get(`${base}/experiences`).query({ userId: id(9), staffUserId: id(9) });
++  assert.equal(r.status, 200); assert.equal(r.headers["cache-control"], "no-store");
++  assert.deepEqual(r.body, { eventId, experiences: [{ id: experienceId, name: "Com estação" },
++    { id: id(8), name: "Sem estação" }] });
++  assert.deepEqual(calls, [["experiences", userId, eventId]]);
++});
++test("experiências HTTP retornam vazio ou 404 neutro e normalizam UUID", async () => {
++  reset(); const route = `${base}/experiences`;
++  const empty = await get(route.replace(eventId, eventId.toUpperCase()));
++  assert.equal(empty.status, 200); assert.deepEqual(empty.body, { eventId, experiences: [] });
++  assert.deepEqual(calls, [["experiences", userId, eventId]]);
++  experienceResult = { kind: "access_denied" };
++  const denied = await get(route), missing = await get(route.replace(eventId, id(9)));
++  problem(denied, 404, "RESOURCE_NOT_FOUND"); problem(missing, 404, "RESOURCE_NOT_FOUND");
++  assert.deepEqual(denied.body, missing.body);
++});
+ test("E08.4 HTTP estações delega ator da sessão, mantém disponibilidade e serializa pendingCalledAt", async () => {
+   reset(); const r = await get(routes[0]).query({ staffUserId: id(9) }); assert.equal(r.status, 200);
+   assert.deepEqual(r.body, JSON.parse(JSON.stringify(stations))); assert.deepEqual(calls, [["stations", userId, eventId]]);
+@@ -102,7 +131,7 @@ test("E08.4 HTTP recusa neutra 404 não confirma existência de recursos", async
+ });
+ test("E08.4 HTTP erro interno retorna RFC 7807 sem SQL nem informações privadas", async () => {
+   reset(); failure = new Error("PRIVATE_SQL_private@example.test");
+-  for (const route of routes) {
++  for (const route of [...routes, `${base}/experiences`]) {
+     const r = await get(route); problem(r, 500, "INTERNAL_SERVER_ERROR"); assert.equal(JSON.stringify(r.body).includes("PRIVATE"), false);
+   }
+ });
+diff --git a/backend/test/unit/staff-queries.test.ts b/backend/test/unit/staff-queries.test.ts
+index c8fda49..d7c1292 100644
+--- a/backend/test/unit/staff-queries.test.ts
++++ b/backend/test/unit/staff-queries.test.ts
+@@ -26,13 +26,14 @@ test("descoberta usa SQL parametrizado, concessão ativa e conta apta", async ()
+   assert.doesNotMatch(queries[0].text, /\b(insert|update|delete)\b/i);
+ });
+ function fixture(options: { denied?: boolean; clock?: number; operating?: boolean; accepting?: boolean;
+-  stations?: object[]; queue?: object[] } = {}) {
++  stations?: object[]; queue?: object[]; experiences?: object[] } = {}) {
+   const queries: Array<{ text: string; params: unknown[] }> = [];
+   let evaluations = 0;
+   const database = drizzle({ async query(config: { text: string }, params: unknown[]) {
+     queries.push({ text: config.text, params });
+     if (config.text.includes("FROM events e")) return { rows: options.denied ? [] : [{ observedAtMs: options.clock ?? at.getTime(), operating: options.operating ?? true }] };
+     if (config.text.includes("FROM experiences e JOIN stations")) return { rows: options.stations ?? [station] };
++    if (config.text.includes("SELECT e.id, e.name FROM experiences e")) return { rows: options.experiences ?? [] };
+     if (config.text.includes("WITH waiting")) return { rows: options.queue ?? [queue] };
+     return { rows: [] };
+   } } as unknown as Client, { schema });
+@@ -47,6 +48,31 @@ function fixture(options: { denied?: boolean; clock?: number; operating?: boolea
+   return { service: new StaffQueriesService(database, events), queries, evaluations: () => evaluations };
+ }
+ 
++test("experiências Staff consultam somente o evento autorizado, sem depender de estação", async () => {
++  const f = fixture({ experiences: [{ id: "x1", name: "Arena", privateField: "PRIVATE" },
++    { id: "x2", name: "Sem estação" }] });
++  assert.deepEqual(await f.service.getExperiences(userId, eventId), { kind: "ok", eventId,
++    experiences: [{ id: "x1", name: "Arena" }, { id: "x2", name: "Sem estação" }] });
++  assert.equal(f.queries[0].text, "begin isolation level repeatable read read only");
++  const access = f.queries[1], query = f.queries[2];
++  assert.deepEqual(access.params, [eventId, userId]);
++  for (const expression of [/r.role='staff'/, /r.event_id=e.id/, /r.revoked_at IS NULL/,
++    /u.is_active=true/, /u.email_verified_at IS NOT NULL/]) assert.match(access.text, expression);
++  assert.deepEqual(query.params, [eventId]);
++  assert.match(query.text, /e.event_id=\$1/); assert.match(query.text, /ORDER BY e.name, e.id/);
++  assert.doesNotMatch(query.text, /\b(join|stations|queue_entries|participations|access_code)\b/i);
++  assert.equal(f.queries.at(-1)?.text, "commit");
++});
++
++test("experiências Staff vazias são distintas de acesso negado", async () => {
++  const empty = fixture({ experiences: [] });
++  assert.deepEqual(await empty.service.getExperiences(userId, eventId), { kind: "ok", eventId, experiences: [] });
++  const denied = fixture({ denied: true });
++  assert.deepEqual(await denied.service.getExperiences(userId, eventId), { kind: "access_denied" });
++  assert.equal(denied.queries.length, 3);
++  assert.equal(denied.queries.some((query) => /FROM experiences e/.test(query.text)), false);
++});
++
+ test("E08.4 estações preservam configuração e instante pending sem ocupação redundante", async () => {
+   const f = fixture({ stations: [station, { ...station, id: "unavailable", availability: "unavailable", pendingServiceSessionId: null, pendingCalledAtMs: null }] });
+   assert.deepEqual(await f.service.getStations(userId, eventId), { kind: "ok", eventId, stations: [
+diff --git a/docs/STAFF_EXPERIENCE_DISCOVERY_IMPLEMENTACAO.md b/docs/STAFF_EXPERIENCE_DISCOVERY_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..9e1f3d3
+--- /dev/null
++++ b/docs/STAFF_EXPERIENCE_DISCOVERY_IMPLEMENTACAO.md
+@@ -0,0 +1,42 @@
++# Descoberta de experiências Staff
++
++## Contrato HTTP
++
++`GET /api/v1/staff/events/:eventId/experiences` exige uma sessão Bearer válida. Para evento com concessão Staff vigente da conta autenticada, responde `200`, `Cache-Control: no-store`:
++
++```json
++{
++  "eventId": "00000000-0000-4000-8000-000000000001",
++  "experiences": [
++    { "id": "00000000-0000-4000-8000-000000000002", "name": "Experiência" }
++  ]
++}
++```
++
++O resultado contém todas as experiências do evento, inclusive sem estação, ordenadas por nome e ID. Um evento autorizado sem experiências retorna `experiences: []`. O UUID do evento é validado e normalizado pela validação existente; formato inválido resulta em `400 VALIDATION_ERROR`. Evento inexistente e falta de autorização recebem o mesmo `404 RESOURCE_NOT_FOUND`. Sessão ausente, inválida ou incompatível com as regras de autenticação recebe o 401 correspondente. Um Admin sem concessão Staff não ganha acesso ao evento por seu papel Admin; as regras existentes de TOTP continuam em vigor.
++
++A resposta não contém participantes, códigos, dados de concessão ou campos de fila. A identidade vem de `CurrentUserId` após `SessionAuthGuard`; parâmetros de consulta enviados pelo cliente não definem a conta.
++
++## Arquitetura
++
++O endpoint foi acrescentado a `StaffQueriesController` e `StaffQueriesService`, reutilizando a autorização por evento das leituras Staff existentes. A consulta de autorização exige conta ativa, e-mail verificado e concessão `staff` não revogada para o evento. Autorização e seleção usam uma transação `REPEATABLE READ READ ONLY`; a consulta seleciona somente `id` e `name` diretamente de `experiences`, sem junção com estações. O schema existente já possui os campos e o índice por evento; não há migration ou endpoint substituído.
++
++O snapshot pode refletir uma concessão revogada após o início da leitura; a próxima consulta verifica a concessão novamente. O resultado não é autorização para operações futuras, que devem continuar autorizadas no backend. Não há paginação; volumes grandes podem exigir contrato posterior. A interface Staff ainda precisa integrar este novo endpoint; a implementação atual baseada nas estações permanece inalterada nesta entrega.
++
++## Arquivos e testes preparados
++
++- `backend/src/events/staff-queries.controller.ts`, `staff-queries.service.ts` e `staff-queries.types.ts`: rota, consulta e tipo de resposta.
++- `backend/test/unit/staff-queries.test.ts`: SQL parametrizado, conta e concessão, transação de leitura, projeção, lista vazia e acesso negado.
++- `backend/test/unit/staff-queries-http.test.ts`: autenticação, UUID inválido e normalizado, identidade da sessão, projeção mínima, lista vazia, recusa neutra e erro 500 sem dados privados para a rota de experiências.
++- `backend/test/integration/staff-queries-http.integration.test.ts`: cenários preparados com contas e eventos isolados, múltiplas experiências com e sem estação, revogação, conta inativa, e-mail não verificado, Admin com 2FA sem concessão e snapshot concorrente.
++- Esta documentação e `qa-evidence/STAFF_EXPERIENCE_DISCOVERY-changes.diff` acompanham a entrega.
++
++## Validação e segurança
++
++Na implementação inicial, foi realizada inspeção estática de contratos, schema, guard e alterações. Na validação final pelo Codex com Luna Medium, os testes focados tiveram **26 aprovados, 0 falhos e 0 ignorados**; a suíte unitária completa teve **1.153 aprovados, 0 falhos e 0 ignorados**. A correção P3 foi executada: o teste HTTP 500 percorreu `/experiences` e confirmou `INTERNAL_SERVER_ERROR` sem o marcador `PRIVATE`, além dos cenários existentes de estações e filas. O `git diff --check` passou nessa campanha.
++
++O runner `tsx` falhou no carregamento por `uv_os_get_passwd`/`ENOMEM`, antes de executar testes. Para concluir a validação, o código e os testes foram compilados em diretório temporário e executados com Node, com `NODE_ENV=test` e `EVALUATION_IDEMPOTENCY_TTL_SECONDS=60`. Os typechecks de produção e de testes e a compilação isolada haviam passado na campanha anterior. Nenhum teste PostgreSQL de integração foi executado e não houve acesso ao Neon na validação final unitária.
++
++Em homologação HTTP real separada no Neon `dev-shared`, conforme informado pelo responsável, o endpoint retornou HTTP 401 sem autenticação; `/auth/me` retornou HTTP 200 com papéis `participante,staff`; a consulta de experiências retornou HTTP 200 com uma experiência, `Experiencia de Homologacao 01`, e somente `eventId` e `experiences` com `id` e `name`; o logout retornou HTTP 200. Essa homologação ocorreu antes da correção P3, que altera apenas o teste.
++
++Os testes PostgreSQL preparados exigem autorização específica para uma campanha em banco dedicado e **não devem ser executados no Neon compartilhado**. A integração do frontend permanece para etapa posterior.
