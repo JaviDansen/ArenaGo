@@ -888,6 +888,7 @@ test('K05 Auditoria 9: Persistencia e restauracao apos reinicio do app', async (
         return {
           user: {
             id: 'user-restore-1',
+            sessionId: '10000000-0000-4000-8000-000000000001',
             name: 'Kaled',
             email: 'kaled@example.com',
             roles: ['participante'],
@@ -1291,6 +1292,7 @@ test('Adversarial D.1: Conclusao nao e revertida por resposta obsoleta de /auth/
 
   let meResponsePayload = {
     id: 'user-me-test',
+    sessionId: '10000000-0000-4000-8000-000000000001',
     name: 'Test Me',
     email: 'test@example.com',
     roles: ['participante'],

@@ -4,6 +4,7 @@ import { defaultTokenStorage } from './tokenStorage';
 // Gravado antes do POST: uma interrupção nunca deixa o token consumido no disco.
 // O prefixo não pertence ao formato dos tokens opacos emitidos pelo backend.
 const REFRESH_PENDING_MARKER = '!arenago-refresh-pending-v1';
+const SESSION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function resolveInvalidationNotice(error) {
   if (!error) {
@@ -262,6 +263,7 @@ export function createAuthSessionManager(options = {}) {
     if (patch.isAuthenticated === false && state.isAuthenticated) identityRevision += 1;
     if (patch.isInitializing === true && !state.isInitializing) identityRevision += 1;
     if (patch.user && state.user && (patch.user.id !== state.user.id ||
+        patch.user.sessionId !== state.user.sessionId ||
         [...(patch.user.roles || [])].sort().join('|') !== [...(state.user.roles || [])].sort().join('|'))) {
       identityRevision += 1;
     }
@@ -656,10 +658,16 @@ export function createAuthSessionManager(options = {}) {
       });
       if (!isCurrent()) return null;
       const liveUser = sanitizePublicUser(meResponse);
-      if (!liveUser?.id || (state.user?.id && state.user.id !== liveUser.id)) {
+      const rawIdentity = meResponse?.user ?? meResponse;
+      const sessionId = rawIdentity?.sessionId;
+      if (!liveUser?.id || typeof sessionId !== 'string' || !SESSION_UUID.test(sessionId) ||
+          (options.expectedUserId && options.expectedUserId !== liveUser.id) ||
+          (state.user?.id && state.user.id !== liveUser.id) ||
+          (state.user?.sessionId && state.user.sessionId !== sessionId)) {
         throw new ApiError({ kind: 'http', status: 500, code: 'INVALID_ME_RESPONSE',
           title: 'Resposta inválida', detail: 'Não foi possível validar os dados da conta autenticada.' });
       }
+      liveUser.sessionId = sessionId;
       if (state.user?.id === liveUser.id && state.user?.hasCompletedQuestionnaire === true) {
         liveUser.hasCompletedQuestionnaire = true;
       }
@@ -905,11 +913,11 @@ export function createAuthSessionManager(options = {}) {
 
     let confirmedUser = registeredUser;
     emitState({
-      user: confirmedUser,
-      isAuthenticated: true,
+      user: null,
+      isAuthenticated: false,
       isInitializing: false,
       sessionStatus: 'authenticated',
-      identityStatus: 'verified',
+      identityStatus: 'checking',
       authNotice: null,
       networkError: null,
       storageError: null,
@@ -919,12 +927,14 @@ export function createAuthSessionManager(options = {}) {
 
     // A confirmação usa a mesma geração de todas as demais leituras de identidade.
     try {
-      confirmedUser = (await fetchCurrentUser({ retryOnUnauthorized: false })) ?? state.user;
+      confirmedUser = await fetchCurrentUser({ retryOnUnauthorized: false, expectedUserId: registeredUser.id });
     } catch (meError) {
-      if (meError?.status === 401) throw meError;
+      if (sessionEpoch !== currentEpoch) return { status: 'aborted', user: null, nextRoute: null };
+      throw meError;
     }
 
     if (sessionEpoch !== currentEpoch) return { status: 'aborted', user: null, nextRoute: null };
+    if (!confirmedUser) return { status: 'aborted', user: null, nextRoute: null };
 
     return {
       status: 'authenticated',
@@ -1068,11 +1078,11 @@ export function createAuthSessionManager(options = {}) {
     let confirmedUser = loggedUser;
     const initialRoute = confirmedUser.hasCompletedQuestionnaire ? 'MainTabs' : 'ProfileQuestionnaire';
     emitState({
-      user: confirmedUser,
-      isAuthenticated: true,
+      user: null,
+      isAuthenticated: false,
       isInitializing: false,
       sessionStatus: 'authenticated',
-      identityStatus: 'verified',
+      identityStatus: 'checking',
       authNotice: null,
       networkError: null,
       storageError: null,
@@ -1082,10 +1092,10 @@ export function createAuthSessionManager(options = {}) {
 
     // Confirmar dados atuais da conta em GET /auth/me
     try {
-      confirmedUser = (await fetchCurrentUser({ retryOnUnauthorized: false })) ?? state.user;
+      confirmedUser = await fetchCurrentUser({ retryOnUnauthorized: false, expectedUserId: loggedUser.id });
     } catch (meError) {
       if (sessionEpoch !== currentEpoch) return { status: 'aborted', user: null, nextRoute: null };
-      if (meError?.status === 401) throw meError;
+      throw meError;
     }
 
     if (sessionEpoch !== currentEpoch) return { status: 'aborted', user: null, nextRoute: null };

@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { createHarness, loadModule, textOf } = require('./helpers/questionnaireHarness.cjs');
+const testSessionId = '10000000-0000-4000-8000-000000000001';
 
 const apiConfigModule = loadModule('config/apiConfig.js', require).exports;
 const { ApiError, createHttpClient } = loadModule(
@@ -207,6 +208,7 @@ test('valid registration sends only { name, email, password } (never confirmPass
           name: req.body.name,
           email: req.body.email.toLowerCase(),
           emailVerified: false,
+          sessionId: testSessionId,
           roles: ['participante'],
           hasCompletedQuestionnaire: false,
         },
@@ -222,6 +224,7 @@ test('valid registration sends only { name, email, password } (never confirmPass
         name: 'Ana  Maria',
         email: 'ana@example.com',
         emailVerified: false,
+        sessionId: testSessionId,
         roles: ['participante'],
         hasCompletedQuestionnaire: false,
       });
@@ -366,6 +369,7 @@ test('login succeeds with completed questionnaire and with pending questionnaire
             name: 'Participante',
             email: req.body.email,
             emailVerified: false,
+            sessionId: testSessionId,
             roles: ['participante'],
             hasCompletedQuestionnaire,
           },
@@ -381,6 +385,7 @@ test('login succeeds with completed questionnaire and with pending questionnaire
           name: 'Participante',
           email: 'teste@example.com',
           emailVerified: false,
+          sessionId: testSessionId,
           roles: ['participante'],
           hasCompletedQuestionnaire,
         });
@@ -526,7 +531,7 @@ test('Admin login with requires2FA: true does not grant authenticated access or 
 // Login Admin: confirmação real de segundo fator, com rede e SecureStore simulados.
 const adminUser = {
   id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', name: 'Admin de teste', email: 'admin@example.test',
-  emailVerified: true, roles: ['participante', 'admin'], hasCompletedQuestionnaire: true,
+  emailVerified: true, sessionId: testSessionId, roles: ['participante', 'admin'], hasCompletedQuestionnaire: true,
 };
 const adminSession = { user: adminUser, accessToken: 'admin-access-after-2fa',
   refreshToken: 'admin-refresh-after-2fa', expiresIn: 900 };
@@ -547,6 +552,67 @@ function deferred() {
   const promise = new Promise((done) => { resolve = done; });
   return { promise, resolve };
 }
+
+test('vínculo de sessão vem de /me e permanece no refresh e na restauração', async () => {
+  let count = 0;
+  const rig = createAuthRig(async (req) => {
+    if (req.url.endsWith('/auth/login')) return jsonResponse(200, adminSession);
+    if (req.url.endsWith('/auth/me')) return jsonResponse(200, adminUser);
+    if (req.url.endsWith('/auth/refresh')) return jsonResponse(200, {
+      accessToken: 'refreshed-access', refreshToken: `refresh-${++count}`, expiresIn: 900 });
+    if (req.url.endsWith('/auth/logout')) return jsonResponse(200, { message: 'ok' });
+    throw new Error('requisição inesperada');
+  });
+  await rig.manager.login({ email: adminUser.email, password: 'password' });
+  assert.equal(rig.manager.getSnapshot().user.sessionId, testSessionId);
+  await rig.manager.refreshSession();
+  assert.equal(rig.manager.getSnapshot().user.sessionId, testSessionId);
+  const restored = createAuthRig(async (req) => req.url.endsWith('/auth/refresh')
+    ? jsonResponse(200, { accessToken: 'restored', refreshToken: 'restored-refresh', expiresIn: 900 })
+    : jsonResponse(200, adminUser), { initialRefreshToken: await rig.tokenStorage.getRefreshToken() });
+  await restored.manager.restoreSession();
+  assert.equal(restored.manager.getSnapshot().user.sessionId, testSessionId);
+  await rig.manager.logout();
+  assert.equal(rig.manager.getSnapshot().user, null);
+});
+
+test('login da mesma conta troca vínculo; /me inválido ou de outra sessão não é verificado', async () => {
+  const otherSession = '10000000-0000-4000-8000-000000000002';
+  let sessionId = testSessionId;
+  const rig = createAuthRig(async (req) => {
+    if (req.url.endsWith('/auth/login')) return jsonResponse(200, adminSession);
+    if (req.url.endsWith('/auth/me')) return jsonResponse(200, { ...adminUser, sessionId });
+    throw new Error('requisição inesperada');
+  });
+  await rig.manager.login({ email: adminUser.email, password: 'password' });
+  sessionId = otherSession;
+  await assert.rejects(rig.manager.fetchCurrentUser(), (error) => error.code === 'INVALID_ME_RESPONSE');
+  assert.equal(rig.manager.getSnapshot().identityStatus, 'error');
+  await rig.manager.login({ email: adminUser.email, password: 'password' });
+  assert.equal(rig.manager.getSnapshot().user.sessionId, otherSession);
+  for (const invalid of [undefined, null, '', 'invalid']) {
+    sessionId = invalid;
+    await assert.rejects(rig.manager.fetchCurrentUser(), (error) => error.code === 'INVALID_ME_RESPONSE');
+    assert.equal(rig.manager.isIdentityVerified(), false);
+  }
+});
+
+test('login não publica identidade antes de /me válido e rejeita vínculo ausente', async () => {
+  const entered = deferred(), response = deferred();
+  const rig = createAuthRig(async (req) => {
+    if (req.url.endsWith('/auth/login')) return jsonResponse(200, adminSession);
+    if (req.url.endsWith('/auth/me')) { entered.resolve(); return response.promise; }
+    throw new Error('requisição inesperada');
+  });
+  const login = rig.manager.login({ email: adminUser.email, password: 'password' });
+  await entered.promise;
+  assert.equal(rig.manager.getSnapshot().isAuthenticated, false);
+  assert.equal(rig.manager.getSnapshot().user, null);
+  response.resolve(jsonResponse(200, { ...adminUser, sessionId: undefined }));
+  await assert.rejects(login, (error) => error.code === 'INVALID_ME_RESPONSE');
+  assert.equal(rig.manager.getSnapshot().identityStatus, 'error');
+  assert.equal(rig.manager.getSnapshot().isAuthenticated, false);
+});
 
 test('refresh confirma concessão e revogação Staff antes de liberar a sessão', async () => {
   let roles = ['participante'];
@@ -1250,6 +1316,7 @@ test('startup with valid refresh token rotates token in SecureStore and loads /a
           name: 'Restaurado',
           email: 'restaurado@example.com',
           emailVerified: false,
+          sessionId: testSessionId,
           roles: ['participante'],
           hasCompletedQuestionnaire: true,
         });
@@ -1331,6 +1398,7 @@ test('two concurrent 401 responses on protected endpoints trigger only ONE singl
           name: 'Participante',
           email: 'p@example.com',
           emailVerified: false,
+          sessionId: testSessionId,
           roles: ['participante'],
           hasCompletedQuestionnaire: true,
         });
@@ -1423,6 +1491,7 @@ test('logout revokes session on backend via POST /auth/logout with Bearer access
           name: 'Participante',
           email: 'p@example.com',
           emailVerified: false,
+          sessionId: testSessionId,
           roles: ['participante'],
           hasCompletedQuestionnaire: true,
         },
@@ -1437,6 +1506,7 @@ test('logout revokes session on backend via POST /auth/logout with Bearer access
         name: 'Participante',
         email: 'p@example.com',
         emailVerified: false,
+        sessionId: testSessionId,
         roles: ['participante'],
         hasCompletedQuestionnaire: true,
       });
@@ -1469,6 +1539,7 @@ test('logout revokes session on backend via POST /auth/logout with Bearer access
           name: 'Participante',
           email: 'p@example.com',
           emailVerified: false,
+          sessionId: testSessionId,
           roles: ['participante'],
           hasCompletedQuestionnaire: true,
         },
@@ -1483,6 +1554,7 @@ test('logout revokes session on backend via POST /auth/logout with Bearer access
         name: 'Participante',
         email: 'p@example.com',
         emailVerified: false,
+        sessionId: testSessionId,
         roles: ['participante'],
         hasCompletedQuestionnaire: true,
       });
@@ -1836,6 +1908,7 @@ test('logout followed immediately by a new login preserves the new session crede
             name: 'Novo Login',
             email: 'novo@example.com',
             emailVerified: false,
+            sessionId: testSessionId,
             roles: ['participante'],
             hasCompletedQuestionnaire: true,
           },
@@ -1850,6 +1923,7 @@ test('logout followed immediately by a new login preserves the new session crede
           name: 'Novo Login',
           email: 'novo@example.com',
           emailVerified: false,
+          sessionId: testSessionId,
           roles: ['participante'],
           hasCompletedQuestionnaire: true,
         });
@@ -1952,6 +2026,7 @@ test('SecureStore read failure is differentiated from missing token, preserves s
           name: 'Recuperado',
           email: 'recuperado@example.com',
           emailVerified: false,
+          sessionId: testSessionId,
           roles: ['participante'],
           hasCompletedQuestionnaire: true,
         });
@@ -2014,6 +2089,7 @@ test('delayed session invalidation or stale 401 from previous session never clea
             name: 'Sessão Nova',
             email: 'nova@example.com',
             emailVerified: false,
+            sessionId: testSessionId,
             roles: ['participante'],
             hasCompletedQuestionnaire: true,
           },
@@ -2028,6 +2104,7 @@ test('delayed session invalidation or stale 401 from previous session never clea
           name: 'Sessão Nova',
           email: 'nova@example.com',
           emailVerified: false,
+          sessionId: testSessionId,
           roles: ['participante'],
           hasCompletedQuestionnaire: true,
         });

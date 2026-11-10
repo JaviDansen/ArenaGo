@@ -153,6 +153,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
 }
 
 const participant = { id: 'a', name: 'A', email: 'a@example.test', emailVerified: true,
+  sessionId: '10000000-0000-4000-8000-000000000001',
   roles: ['participante'], hasCompletedQuestionnaire: true };
 
 test('integra sessão real, papéis, TOTP, provedores e isolamento da navegação', { skip }, async () => {

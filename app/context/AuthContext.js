@@ -37,6 +37,7 @@ export function AuthProvider({
 
   const contextValue = {
     user: snapshot.user,
+    sessionId: snapshot.identityStatus === 'verified' ? snapshot.user?.sessionId ?? null : null,
     accessToken: manager.getAccessToken(),
     getAccessToken: manager.getAccessToken,
     getSessionEpoch: manager.getSessionEpoch,

@@ -1004,9 +1004,10 @@ export class AuthService {
     }
   }
 
-  getMe(principal: AuthenticatedPrincipal): PublicUserDto {
+  getMe(principal: AuthenticatedPrincipal): PublicUserDto & { sessionId: string } {
     return {
       id: principal.userId,
+      sessionId: principal.sessionId,
       name: principal.name,
       email: principal.email,
       emailVerified: principal.emailVerified,
