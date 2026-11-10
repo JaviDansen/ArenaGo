@@ -7,6 +7,7 @@ import { useAuth } from './context/AuthContext';
 import { ParticipationProvider } from './context/ParticipationContext';
 import MainTabs from './navigation/MainTabs';
 import AuthSessionGate, { resolveInitialRouteForAuthState } from './screens/auth/AuthSessionGate';
+import SplashScreenGate from './screens/splash/SplashScreenGate';
 import EvaluationScreen from './screens/participation/EvaluationScreen';
 import RealEvaluationScreen from './screens/participation/RealEvaluationScreen';
 import EventConfirmationScreen from './screens/event-entry/EventConfirmationScreen';
@@ -150,9 +151,11 @@ export function AppNavigation() {
 export default function App() {
   return (
     <SafeAreaProvider>
-      <AuthSessionGate>
-        <AppNavigation />
-      </AuthSessionGate>
+      <SplashScreenGate>
+        <AuthSessionGate>
+          <AppNavigation />
+        </AuthSessionGate>
+      </SplashScreenGate>
     </SafeAreaProvider>
   );
 }
