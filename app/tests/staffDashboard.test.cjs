@@ -124,3 +124,67 @@ test('troca de experiência descarta fila anterior e 404 limpa os dados do event
   assert.equal(store.getSnapshot().queue, null);
   assert.equal(store.getSnapshot().stations.length, 0);
 });
+
+test('descoberta autenticada valida experiências, inclui experiência sem estação e preserva IDs reais', async () => {
+  const current = context(), calls = [];
+  const experiences = [{ id: experienceId, name: 'Just Dance' }, { id: secondExperienceId, name: 'Sem estação' }];
+  const store = createStaffDashboardStore({ getContext: () => current, client: { get: async (url, options) => {
+    calls.push({ url, options }); return { eventId, experiences };
+  } } });
+  store.setContext(current); await store.refreshExperiences();
+  assert.deepEqual(JSON.parse(JSON.stringify(store.getSnapshot().experiences)), experiences);
+  assert.equal(calls[0].url, `/staff/events/${eventId}/experiences`);
+  assert.equal(calls[0].options.auth, true);
+  for (const invalid of [null, {}, { eventId: otherEventId, experiences }, { eventId, experiences: [experiences[0], experiences[0]] },
+    { eventId, experiences: [{ id: experienceId, name: '' }] }, { eventId, experiences: [{ id: 'invalid', name: 'A' }] }]) {
+    assert.throws(() => operations.parseStaffExperiences(invalid, eventId));
+  }
+  assert.equal(operations.parseStaffExperiences({ eventId, experiences: [] }, eventId).experiences.length, 0);
+});
+
+test('revalidação de experiências descarta respostas antigas em troca de usuário, evento e revisão', async () => {
+  let current = context(); const requests = [];
+  const store = createStaffDashboardStore({ getContext: () => current, client: { get: () => {
+    const request = deferred(); requests.push(request); return request.promise;
+  } } });
+  store.setContext(current);
+  const older = store.refreshExperiences(), newer = store.refreshExperiences();
+  requests[1].resolve({ eventId, experiences: [] }); await newer;
+  requests[0].resolve({ eventId, experiences: [{ id: experienceId, name: 'Antiga' }] }); await older;
+  assert.equal(store.getSnapshot().experiences.length, 0);
+  const pending = store.refreshExperiences();
+  current = context(otherEventId, 'b', 2); store.setContext(current);
+  requests[2].resolve({ eventId, experiences: [{ id: experienceId, name: 'Antiga' }] }); await pending;
+  assert.equal(store.getSnapshot().context.eventId, otherEventId);
+  assert.equal(store.getSnapshot().experiences.length, 0);
+  const logout = store.refreshExperiences(); current = null;
+  requests[3].resolve({ eventId: otherEventId, experiences: [{ id: experienceId, name: 'Antiga' }] }); await logout;
+  store.setContext(null); assert.equal(store.getSnapshot().experiences.length, 0);
+});
+
+test('experiências tratam rede, 401, 403 e 404 sem manter dados protegidos', async () => {
+  for (const [error, kind] of [[{ isNetworkError: true }, 'network'], [{ status: 401 }, 'session'],
+    [{ status: 403 }, 'denied'], [{ status: 404 }, 'denied']]) {
+    const current = context(); let failure = false;
+    const store = createStaffDashboardStore({ getContext: () => current, client: { get: async () => {
+      if (failure) throw Object.assign(new Error('falha'), error);
+      return { eventId, experiences: [{ id: experienceId, name: 'Real' }] };
+    } } });
+    store.setContext(current); await store.refreshExperiences(); failure = true; await store.refreshExperiences();
+    assert.equal(store.getSnapshot().experienceError, kind);
+    assert.equal(store.getSnapshot().experiences.length, 0);
+  }
+});
+
+test('retorno da estação invalida consulta de fila ainda pendente', async () => {
+  const current = context(), requests = [];
+  const store = createStaffDashboardStore({ getContext: () => current, client: { get: () => {
+    const request = deferred(); requests.push(request); return request.promise;
+  } } });
+  store.setContext(current);
+  const load = store.refreshStations(); requests[0].resolve(stations()); await load;
+  const pending = store.refreshQueue(experienceId); store.clearQueue();
+  requests[1].resolve(queue()); await pending;
+  assert.equal(store.getSnapshot().queue, null);
+  assert.equal(store.getSnapshot().experienceId, null);
+});

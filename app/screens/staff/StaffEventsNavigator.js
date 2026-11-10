@@ -106,7 +106,15 @@ function StaffEventsScreen({ navigation }) {
 
 function StaffEventHomeScreen({ navigation }) {
   const staff = useContext(StaffEventsContext);
-  useEffect(() => navigation.addListener('beforeRemove', staff.clearSelection), [navigation, staff.clearSelection]);
+  const [section, setSection] = useState('panel');
+  const [stationId, setStationId] = useState(null);
+  useEffect(() => navigation.addListener('beforeRemove', (action) => {
+    if (staff.getSelected() && section !== 'panel') {
+      action.preventDefault();
+      setStationId(null);
+      setSection(section === 'station' ? 'stations' : 'panel');
+    } else staff.clearSelection();
+  }), [navigation, staff.clearSelection, staff.getSelected, section]);
   const selected = staff.isCurrent() ? staff.selected : null;
   return (
     <SafeAreaView style={styles.container}>
@@ -114,22 +122,23 @@ function StaffEventHomeScreen({ navigation }) {
         {selected ? <>
           <Text style={styles.title}>{selected.name}</Text>
           <Text style={styles.description}>Status: {STATUS_LABELS[selected.status]}</Text>
-          <StaffEventDashboard event={selected} staff={staff} />
+          <StaffEventDashboard event={selected} staff={staff} section={section} setSection={setSection}
+            stationId={stationId} setStationId={setStationId} />
         </> : <>
           <Text style={styles.title}>Selecione um evento</Text>
           <Text style={styles.message}>Atualize a lista para confirmar os eventos autorizados.</Text>
         </>}
-        <Button label="Voltar aos eventos" onPress={() => {
+        {(!selected || section === 'panel') && <Button label="Voltar aos eventos" onPress={() => {
           staff.clearSelection();
           if (navigation.canGoBack()) navigation.goBack();
           else navigation.navigate('StaffEvents');
-        }} />
+        }} />}
       </ScrollView>
     </SafeAreaView>
   );
 }
 
-function StaffEventDashboard({ event, staff }) {
+function StaffEventDashboard({ event, staff, section, setSection, stationId, setStationId }) {
   const auth = useAuth();
   const live = useRef({ auth, staff });
   live.current = { auth, staff };
@@ -140,7 +149,7 @@ function StaffEventDashboard({ event, staff }) {
       getContext: () => {
         const { auth: current, staff: area } = live.current;
         const selected = area.getSelected();
-        if (!selected || !current?.isAuthenticated || !current.isIdentityVerified()) return null;
+        if (!selected || !current?.isAuthenticated || !current.user?.id || !current.isIdentityVerified()) return null;
         return { eventId: selected.id, userId: current.user.id,
           epoch: current.getSessionEpoch(), revision: current.getIdentityRevision() };
       },
@@ -154,42 +163,78 @@ function StaffEventDashboard({ event, staff }) {
   useEffect(() => {
     store.setContext({ eventId: event.id, userId: auth.user.id, epoch, revision });
     void store.refreshStations();
+    void store.refreshExperiences();
+    setStationId(null);
+    setSection('panel');
     return () => store.setContext(null);
-  }, [store, event.id, auth.user.id, epoch, revision]);
-  if (!store.isCurrent()) return null;
+  }, [store, event.id, auth.user.id, epoch, revision, setSection, setStationId]);
+  useEffect(() => {
+    if (section !== 'station') store.clearQueue();
+  }, [store, section]);
+  if (!store.isCurrent(snapshot.context)) return null;
   const messages = {
     session: 'Não foi possível confirmar sua sessão. Entre novamente ou tente atualizar.',
     denied: 'Acesso ao evento ou à experiência indisponível. Atualize seus eventos autorizados.',
     network: 'Não foi possível conectar ao servidor. Verifique sua conexão e tente novamente.',
     unavailable: 'Não foi possível carregar os dados. Tente novamente.',
   };
-  const experiences = [...new Set(snapshot.stations.map((station) => station.experienceId))];
+  const experiencesById = new Map(snapshot.experiences.map((experience) => [experience.id, experience]));
+  const station = snapshot.stations.find((item) => item.id === stationId);
+  const stationExperience = station && experiencesById.get(station.experienceId);
+  const ready = snapshot.stationStatus === 'ready' && snapshot.experienceStatus === 'ready';
+  const refresh = () => { setStationId(null); setSection('stations'); void store.refreshStations(); void store.refreshExperiences(); };
   return <>
+    {section === 'panel' && <>
+      <Text style={styles.title}>Painel operacional</Text>
+      <Button label="Controle de Entrada" onPress={() => setSection('entry')} />
+      <Button label="Estações" onPress={() => setSection('stations')} />
+    </>}
+    {section === 'entry' && <>
+      <Text style={styles.title}>Controle de Entrada</Text>
+      <Text style={styles.message}>O controle da fila de acesso ao evento está em desenvolvimento.</Text>
+      <Button label="Voltar ao painel" onPress={() => setSection('panel')} />
+    </>}
+    {(section === 'stations' || section === 'station') && <>
     <Text style={styles.title}>Estações</Text>
     {snapshot.stationStatus === 'loading' && <Text style={styles.message}>Carregando estações...</Text>}
     {snapshot.stationStatus === 'error' && <Text accessibilityRole="alert" style={styles.message}>{messages[snapshot.stationError]}</Text>}
-    {snapshot.stationStatus === 'ready' && snapshot.stations.length === 0 &&
+    {snapshot.experienceStatus === 'loading' && <Text style={styles.message}>Carregando experiências...</Text>}
+    {snapshot.experienceStatus === 'error' && <Text accessibilityRole="alert" style={styles.message}>{messages[snapshot.experienceError]}</Text>}
+    {section === 'stations' && ready && snapshot.stations.length === 0 &&
       <Text style={styles.message}>Nenhuma estação encontrada neste evento.</Text>}
-    {snapshot.stationStatus === 'ready' && snapshot.stations.map((station) => <View key={station.id} style={styles.event}>
+    {section === 'stations' && ready && snapshot.experiences.length === 0 &&
+      <Text style={styles.message}>Nenhuma experiência encontrada neste evento.</Text>}
+    {section === 'stations' && ready && snapshot.stations.map((item) => <View key={item.id} style={styles.event}>
+      <Text style={styles.eventName}>{item.label}</Text>
+      <Text style={styles.message}>Experiência: {experiencesById.get(item.experienceId)?.name ?? 'Dados da experiência indisponíveis'}</Text>
+      <Text style={styles.message}>Disponibilidade: {item.availability === 'available' ? 'Disponível' : 'Indisponível'}</Text>
+      <Text style={styles.message}>Atendimento pendente: {item.pendingServiceSessionId ? 'Sim' : 'Não'}</Text>
+      {experiencesById.has(item.experienceId) && <Button label={`Selecionar estação ${item.label}`} onPress={() => {
+        setStationId(item.id); setSection('station'); void store.refreshQueue(item.experienceId);
+      }} />}
+    </View>)}
+    {section === 'stations' && ready && snapshot.experiences.filter((experience) =>
+      !snapshot.stations.some((item) => item.experienceId === experience.id)).map((experience) =>
+      <Text key={experience.id} style={styles.message}>{experience.name}: nenhuma estação associada.</Text>)}
+    {section === 'stations' && <Button label="Atualizar estações" disabled={snapshot.stationStatus === 'loading' || snapshot.experienceStatus === 'loading'} onPress={refresh} />}
+    {section === 'station' && ready && station && stationExperience && <>
       <Text style={styles.eventName}>{station.label}</Text>
-      <Text style={styles.message}>Experiência: {station.experienceId}</Text>
+      <Text style={styles.message}>Experiência: {stationExperience.name}</Text>
       <Text style={styles.message}>Disponibilidade: {station.availability === 'available' ? 'Disponível' : 'Indisponível'}</Text>
       <Text style={styles.message}>Atendimento pendente: {station.pendingServiceSessionId ? 'Sim' : 'Não'}</Text>
-    </View>)}
-    <Button label="Atualizar estações" disabled={snapshot.stationStatus === 'loading'} onPress={() => { void store.refreshStations(); }} />
-    {snapshot.stationStatus === 'ready' && <>
-      <Text style={styles.title}>Filas por experiência</Text>
-      <Text style={styles.message}>São exibidas apenas experiências com estações retornadas. Os nomes ainda não estão disponíveis.</Text>
-      {experiences.map((id) => <Button key={id} label={`Consultar fila ${id}`} onPress={() => { void store.refreshQueue(id); }} />)}
-      {snapshot.queueStatus === 'loading' && <Text style={styles.message}>Carregando fila...</Text>}
-      {snapshot.queueStatus === 'error' && <Text accessibilityRole="alert" style={styles.message}>{messages[snapshot.queueError]}</Text>}
-      {snapshot.queueStatus === 'ready' && <View style={styles.event}>
-        <Text style={styles.eventName}>Fila da experiência {snapshot.experienceId}</Text>
+      <Text style={styles.message}>Fila compartilhada da experiência</Text>
+      {snapshot.experienceId === station.experienceId && snapshot.queueStatus === 'loading' && <Text style={styles.message}>Carregando fila...</Text>}
+      {snapshot.experienceId === station.experienceId && snapshot.queueStatus === 'error' && <Text accessibilityRole="alert" style={styles.message}>{messages[snapshot.queueError]}</Text>}
+      {snapshot.experienceId === station.experienceId && snapshot.queueStatus === 'ready' && <View style={styles.event}>
+        <Text style={styles.eventName}>Fila de {stationExperience.name}</Text>
         <Text style={styles.message}>Pessoas em espera: {snapshot.queue.waitingCount}</Text>
         <Text style={styles.message}>Janela operacional para chamadas: {snapshot.queue.canCallWaitingEntries ? 'Aberta' : 'Fechada'}</Text>
       </View>}
-      {snapshot.experienceId && snapshot.queueStatus !== 'loading' &&
+      {snapshot.experienceId === station.experienceId && snapshot.queueStatus !== 'loading' &&
         <Button label="Atualizar fila" onPress={() => { void store.refreshQueue(); }} />}
+    </>}
+    {section === 'station' && <Button label="Voltar às estações" onPress={() => { store.clearQueue(); setStationId(null); setSection('stations'); }} />}
+    {section === 'stations' && <Button label="Voltar ao painel" onPress={() => setSection('panel')} />}
     </>}
   </>;
 }

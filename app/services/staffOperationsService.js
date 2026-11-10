@@ -7,6 +7,20 @@ function requireIds(...ids) {
   if (ids.some((id) => !isUuid(id))) throw bad('Identificador inválido para operação de Staff.');
 }
 
+export function parseStaffExperiences(body, eventId) {
+  requireIds(eventId);
+  if (body?.eventId !== eventId || !Array.isArray(body.experiences)) throw bad('Resposta inválida de experiências do evento.');
+  const seen = new Set();
+  const experiences = body.experiences.map((experience) => {
+    if (!isUuid(experience?.id) || seen.has(experience.id) || typeof experience.name !== 'string' || !experience.name.trim()) {
+      throw bad('Resposta inválida de experiência.');
+    }
+    seen.add(experience.id);
+    return { id: experience.id, name: experience.name };
+  });
+  return { eventId, experiences };
+}
+
 export function parseStaffStations(body, eventId) {
   requireIds(eventId);
   if (body?.eventId !== eventId || !Array.isArray(body.stations)) {
@@ -74,6 +88,11 @@ export function parseCompletedSession(body, serviceSessionId) {
 }
 
 /** Leituras autenticadas; a API, não o app, autoriza o Staff para o evento. */
+export async function fetchStaffExperiences(client, eventId) {
+  requireIds(eventId);
+  return parseStaffExperiences(await client.get(`/staff/events/${eventId}/experiences`, { auth: true }), eventId);
+}
+
 export async function fetchStaffStations(client, eventId) {
   requireIds(eventId);
   return parseStaffStations(await client.get(`/staff/events/${eventId}/stations`, { auth: true }), eventId);
