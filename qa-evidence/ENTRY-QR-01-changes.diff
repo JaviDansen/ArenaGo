@@ -1,0 +1,1318 @@
+diff --git a/app/app.json b/app/app.json
+index 6245f51c..e5392bc7 100644
+--- a/app/app.json
++++ b/app/app.json
+@@ -7,13 +7,19 @@
+     "icon": "./assets/icon.png",
+     "userInterfaceStyle": "light",
+     "ios": {
+-      "supportsTablet": true
++      "supportsTablet": true,
++      "infoPlist": {
++        "NSCameraUsageDescription": "O ArenaGO precisa de acesso à câmera para ler o QR Code de acesso aos eventos."
++      }
+     },
+     "android": {
+       "adaptiveIcon": {
+         "foregroundImage": "./assets/adaptive-icon.png",
+         "backgroundColor": "#ffffff"
+-      }
++      },
++      "permissions": [
++        "android.permission.CAMERA"
++      ]
+     },
+     "web": {
+       "favicon": "./assets/favicon.png"
+@@ -33,7 +39,14 @@
+       ],
+       "@react-native-community/datetimepicker",
+       "expo-secure-store",
+-      "expo-status-bar"
++      "expo-status-bar",
++      [
++        "expo-camera",
++        {
++          "cameraPermission": "O ArenaGO precisa de acesso à câmera para ler o QR Code de acesso aos eventos.",
++          "recordAudioAndroid": false
++        }
++      ]
+     ]
+   }
+ }
+diff --git a/app/package-lock.json b/app/package-lock.json
+index 069798ea..3aee8b90 100644
+--- a/app/package-lock.json
++++ b/app/package-lock.json
+@@ -13,6 +13,7 @@
+         "@react-navigation/native": "^7.4.1",
+         "@react-navigation/native-stack": "^7.19.2",
+         "expo": "~58.0.23",
++        "expo-camera": "~58.0.14",
+         "expo-crypto": "~58.0.7",
+         "expo-secure-store": "~58.0.2",
+         "expo-splash-screen": "~58.0.13",
+@@ -2416,6 +2417,12 @@
+       "integrity": "sha512-hhyNJ+nbR6ZR7pToHvllEFun9TL0sbL+tk/ON75lo+Xas054uez98qRbsuNt7MBCyZKK4+8Yli/OAGZhmfBZ/g==",
+       "license": "MIT"
+     },
++    "node_modules/@types/emscripten": {
++      "version": "1.41.6",
++      "resolved": "https://registry.npmjs.org/@types/emscripten/-/emscripten-1.41.6.tgz",
++      "integrity": "sha512-uN+9i8bFT5CUcZfyIEYDrSueACEyKGbUs5kC/72DGlZZoinh84sJfVV0i8UOJD1asdzkvLPBRrKs41kZ8MdEXg==",
++      "license": "MIT"
++    },
+     "node_modules/@types/istanbul-lib-coverage": {
+       "version": "2.0.6",
+       "resolved": "https://registry.npmjs.org/@types/istanbul-lib-coverage/-/istanbul-lib-coverage-2.0.6.tgz",
+@@ -2774,6 +2781,15 @@
+         "node": "18 || 20 || >=22"
+       }
+     },
++    "node_modules/barcode-detector": {
++      "version": "3.2.3",
++      "resolved": "https://registry.npmjs.org/barcode-detector/-/barcode-detector-3.2.3.tgz",
++      "integrity": "sha512-PLinpWGiOQoQH4X+YObWZ6iXeffXKDM3d4vnOD86481SvukIfvkf7jEE/tud9oI4HTDxtDdlHaFilA5Kn7Xa7A==",
++      "license": "MIT",
++      "dependencies": {
++        "zxing-wasm": "3.1.6"
++      }
++    },
+     "node_modules/base64-js": {
+       "version": "1.5.1",
+       "resolved": "https://registry.npmjs.org/base64-js/-/base64-js-1.5.1.tgz",
+@@ -3454,6 +3470,26 @@
+         "react-native": "*"
+       }
+     },
++    "node_modules/expo-camera": {
++      "version": "58.0.14",
++      "resolved": "https://registry.npmjs.org/expo-camera/-/expo-camera-58.0.14.tgz",
++      "integrity": "sha512-yEiMuJ2d7A+EqsP8rlGIvgaUzdk/rW9CXR6R7WKqludxU3H+JcSUbPC3ldr3ZpmaYlgXP3x+oOO9BfQy7yKK2A==",
++      "license": "MIT",
++      "dependencies": {
++        "barcode-detector": "^3.0.0"
++      },
++      "peerDependencies": {
++        "expo": "*",
++        "react": "*",
++        "react-native": "*",
++        "react-native-web": "*"
++      },
++      "peerDependenciesMeta": {
++        "react-native-web": {
++          "optional": true
++        }
++      }
++    },
+     "node_modules/expo-constants": {
+       "version": "58.0.15",
+       "resolved": "https://registry.npmjs.org/expo-constants/-/expo-constants-58.0.15.tgz",
+@@ -6495,6 +6531,18 @@
+         "url": "https://github.com/sponsors/ljharb"
+       }
+     },
++    "node_modules/tagged-tag": {
++      "version": "1.0.0",
++      "resolved": "https://registry.npmjs.org/tagged-tag/-/tagged-tag-1.0.0.tgz",
++      "integrity": "sha512-yEFYrVhod+hdNyx7g5Bnkkb0G6si8HJurOoOEgC8B/O0uXLHlaey/65KRv6cuWBNhBgHKAROVpc7QyYqE5gFng==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=20"
++      },
++      "funding": {
++        "url": "https://github.com/sponsors/sindresorhus"
++      }
++    },
+     "node_modules/terminal-link": {
+       "version": "2.1.1",
+       "resolved": "https://registry.npmjs.org/terminal-link/-/terminal-link-2.1.1.tgz",
+@@ -6985,6 +7033,34 @@
+       "engines": {
+         "node": ">=12"
+       }
++    },
++    "node_modules/zxing-wasm": {
++      "version": "3.1.6",
++      "resolved": "https://registry.npmjs.org/zxing-wasm/-/zxing-wasm-3.1.6.tgz",
++      "integrity": "sha512-mU7UNuvl+hOT+nlSOQTMHZ2tM8lRMsbjDIp5IO/+HmBl/FOq77q0OSZPJ3cm42A9c1MKU6Uve67FiGdkhsrT9g==",
++      "license": "MIT",
++      "dependencies": {
++        "@types/emscripten": "^1.41.6",
++        "type-fest": "^5.10.0"
++      },
++      "peerDependencies": {
++        "@types/emscripten": ">=1.39.6"
++      }
++    },
++    "node_modules/zxing-wasm/node_modules/type-fest": {
++      "version": "5.10.0",
++      "resolved": "https://registry.npmjs.org/type-fest/-/type-fest-5.10.0.tgz",
++      "integrity": "sha512-NoSdpq/WEiAg5sjmBkmV/hfxv6HJH4NqPNrqjtSO5CwRmpsDfaf4begxW34KdJykH/l1yHtwBWQkCRdoXO8mPA==",
++      "license": "(MIT OR CC0-1.0)",
++      "dependencies": {
++        "tagged-tag": "^1.0.0"
++      },
++      "engines": {
++        "node": ">=20"
++      },
++      "funding": {
++        "url": "https://github.com/sponsors/sindresorhus"
++      }
+     }
+   }
+ }
+diff --git a/app/package.json b/app/package.json
+index 1a5c3afa..08f50aaf 100644
+--- a/app/package.json
++++ b/app/package.json
+@@ -15,6 +15,7 @@
+     "@react-navigation/native": "^7.4.1",
+     "@react-navigation/native-stack": "^7.19.2",
+     "expo": "~58.0.23",
++    "expo-camera": "~58.0.14",
+     "expo-crypto": "~58.0.7",
+     "expo-secure-store": "~58.0.2",
+     "expo-splash-screen": "~58.0.13",
+diff --git a/app/screens/event-entry/EventEntryScreen.js b/app/screens/event-entry/EventEntryScreen.js
+index 58546500..156a991a 100644
+--- a/app/screens/event-entry/EventEntryScreen.js
++++ b/app/screens/event-entry/EventEntryScreen.js
+@@ -1,24 +1,106 @@
+ import { StatusBar } from 'expo-status-bar';
+-import { useContext, useState } from 'react';
++import { useContext, useEffect, useRef, useState } from 'react';
+ import {
++  ActivityIndicator,
+   KeyboardAvoidingView,
++  Linking,
+   Platform,
+   ScrollView,
+   StyleSheet,
+   Text,
+   View,
+ } from 'react-native';
++import { CameraView, useCameraPermissions } from 'expo-camera';
++import { useIsFocused } from '@react-navigation/native';
+ 
+ import { AuthBackground, Badge, Button, Card, InputField, ScreenHeader } from '../../components/ui';
+ import { ParticipationContext } from '../../context/ParticipationContext';
+-import { colors, spacing, typography } from '../../theme';
++import { colors, radii, spacing, typography } from '../../theme';
+ 
+-export default function EventEntryScreen({ navigation }) {
++/**
++ * Valida e normaliza o conteúdo textual lido de um QR Code de evento.
++ * Rejeita valores vazios, URLs arbitrárias, comandos e tamanhos excessivos.
++ */
++export function validateAndNormalizeQrCode(raw) {
++  if (typeof raw !== 'string') {
++    return { ok: false, error: 'QR Code com formato incompatível.' };
++  }
++  const trimmed = raw.trim();
++  if (!trimmed) {
++    return { ok: false, error: 'QR Code vazio. Aponte para um código de evento válido.' };
++  }
++  // Bloqueia esquemas de URL, scripts ou quebras de linha arbitrárias
++  if (/^(?:https?|ftp|javascript|data|file):/i.test(trimmed) || /[\r\n\t]/.test(trimmed)) {
++    return { ok: false, error: 'O QR Code escaneado não é um código de evento válido.' };
++  }
++  if (trimmed.length > 64) {
++    return { ok: false, error: 'Código de evento excessivamente longo.' };
++  }
++  // Permite grupos ASCII alfanuméricos com hífens ou underscores
++  if (!/^[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*$/.test(trimmed)) {
++    return { ok: false, error: 'O QR Code deve conter apenas caracteres alfanuméricos e hífens.' };
++  }
++  return { ok: true, code: trimmed };
++}
++
++export default function EventEntryScreen({ navigation, route }) {
+   const { admission, lookupEvent, isCurrentAdmission } = useContext(ParticipationContext);
++
++  // Modo inicial: 'select' (padrão), 'qr' ou 'manual'
++  const [mode, setMode] = useState(route?.params?.initialMethod || 'select');
++
++  // Estado do formulário manual
+   const [eventCode, setEventCode] = useState('');
+   const [localError, setLocalError] = useState(null);
++
++  // Estado do scanner QR
++  const [permission, requestPermission] = useCameraPermissions();
++  const [cameraError, setCameraError] = useState(null);
++  const [scanned, setScanned] = useState(false);
++  const [scanError, setScanError] = useState(null);
++
++  // Controle de concorrência e ciclo de vida
++  const isScanningRef = useRef(false);
++  const scanSequenceRef = useRef(0);
++  const isMountedRef = useRef(true);
++
++  // Foco da tela via React Navigation (somente ativa câmera quando em foco)
++  let isFocused = true;
++  try {
++    isFocused = useIsFocused();
++  } catch {
++    isFocused = true;
++  }
++
+   const loading = admission?.status === 'looking_up';
+ 
++  useEffect(() => {
++    isMountedRef.current = true;
++    return () => {
++      isMountedRef.current = false;
++      scanSequenceRef.current += 1;
++      isScanningRef.current = false;
++    };
++  }, []);
++
++  useEffect(() => {
++    if (!isFocused) {
++      scanSequenceRef.current += 1;
++      isScanningRef.current = false;
++      setScanned(false);
++    }
++  }, [isFocused]);
++
++  function switchMode(newMode) {
++    scanSequenceRef.current += 1;
++    isScanningRef.current = false;
++    setScanned(false);
++    setScanError(null);
++    setLocalError(null);
++    setCameraError(null);
++    setMode(newMode);
++  }
++
+   async function handleContinue() {
+     if (loading) return;
+     const code = eventCode.trim();
+@@ -33,55 +115,377 @@ export default function EventEntryScreen({ navigation }) {
+     }
+   }
+ 
++  async function handleBarcodeScanned({ data } = {}) {
++    if (isScanningRef.current || scanned) return;
++    isScanningRef.current = true;
++    setScanned(true);
++
++    const currentSequence = ++scanSequenceRef.current;
++    const validation = validateAndNormalizeQrCode(data);
++
++    if (!validation.ok) {
++      if (isMountedRef.current && currentSequence === scanSequenceRef.current) {
++        setScanError(validation.error);
++      }
++      isScanningRef.current = false;
++      return;
++    }
++
++    setScanError(null);
++    try {
++      const result = await lookupEvent(validation.code);
++      if (!isMountedRef.current || currentSequence !== scanSequenceRef.current) {
++        return;
++      }
++      if (!isCurrentAdmission()) {
++        isScanningRef.current = false;
++        return;
++      }
++      if (result?.kind === 'found') {
++        navigation.navigate('EventConfirmation', {
++          event: result.event,
++          eligibility: result.eligibility,
++        });
++      } else {
++        setScanError(result?.message || 'Evento não encontrado para este QR Code.');
++        isScanningRef.current = false;
++      }
++    } catch {
++      if (isMountedRef.current && currentSequence === scanSequenceRef.current) {
++        setScanError('Erro ao consultar o evento. Verifique sua conexão e tente novamente.');
++      }
++      isScanningRef.current = false;
++    }
++  }
++
++  function handleRetryScan() {
++    setScanError(null);
++    setScanned(false);
++    isScanningRef.current = false;
++  }
++
++  // --- Renderização por Modo ---
++
++  // Modo A: Leitor de QR Code
++  if (mode === 'qr') {
++    return (
++      <AuthBackground variant="login" overlayOpacity={0.65} testID="event-entry-background">
++        <StatusBar style="light" />
++        <ScreenHeader
++          title="Ler QR Code"
++          onBack={() => switchMode('select')}
++          testID="event-entry-header"
++        />
++
++        <View style={styles.scannerRoot}>
++          {!permission ? (
++            <View style={styles.centeredFeedback}>
++              <ActivityIndicator size="large" color={colors.brand.primary} />
++              <Text style={styles.feedbackText}>Verificando permissões de câmera...</Text>
++            </View>
++          ) : !permission.granted ? (
++            <ScrollView contentContainerStyle={styles.permissionContent}>
++              <Card variant="highlight" style={styles.permissionCard} testID="event-entry-permission-card">
++                <Badge
++                  label="ACESSO À CÂMERA"
++                  variant={permission.canAskAgain === false ? 'danger' : 'brand'}
++                />
++                <Text style={styles.permissionTitle}>
++                  {permission.canAskAgain === false
++                    ? 'Permissão de câmera bloqueada'
++                    : 'Permissão de câmera necessária'}
++                </Text>
++                <Text style={styles.permissionDescription}>
++                  {permission.canAskAgain === false
++                    ? 'A permissão de câmera foi negada permanentemente. Por favor, habilite o acesso à câmera nas configurações do seu celular ou utilize a digitação manual.'
++                    : 'O ArenaGO precisa de acesso à câmera para ler o QR Code de acesso ao evento.'}
++                </Text>
++
++                {permission.canAskAgain === false ? (
++                  <Button
++                    title="Abrir configurações"
++                    variant="primary"
++                    onPress={() => Linking.openSettings()}
++                    style={styles.actionMargin}
++                    testID="event-entry-settings-button"
++                  />
++                ) : (
++                  <Button
++                    title="Permitir acesso à câmera"
++                    variant="primary"
++                    onPress={requestPermission}
++                    style={styles.actionMargin}
++                    testID="event-entry-permission-button"
++                  />
++                )}
++
++                <Button
++                  title="Digitar código manualmente"
++                  variant="outline"
++                  onPress={() => switchMode('manual')}
++                  style={styles.actionMargin}
++                  testID="event-entry-switch-manual-button"
++                />
++                <Button
++                  title="Voltar para opções"
++                  variant="ghost"
++                  onPress={() => switchMode('select')}
++                  style={styles.actionMargin}
++                  testID="event-entry-back-select-button"
++                />
++              </Card>
++            </ScrollView>
++          ) : cameraError ? (
++            <ScrollView contentContainerStyle={styles.permissionContent}>
++              <Card variant="highlight" style={styles.permissionCard} testID="event-entry-camera-error-card">
++                <Badge label="CÂMERA INDISPONÍVEL" variant="danger" />
++                <Text style={styles.permissionTitle}>Falha ao iniciar a câmera</Text>
++                <Text style={styles.permissionDescription}>{cameraError}</Text>
++                <Button
++                  title="Digitar código manualmente"
++                  variant="primary"
++                  onPress={() => switchMode('manual')}
++                  style={styles.actionMargin}
++                  testID="event-entry-switch-manual-button"
++                />
++                <Button
++                  title="Voltar para opções"
++                  variant="ghost"
++                  onPress={() => switchMode('select')}
++                  style={styles.actionMargin}
++                  testID="event-entry-back-select-button"
++                />
++              </Card>
++            </ScrollView>
++          ) : isFocused ? (
++            <View style={styles.cameraContainer}>
++              <CameraView
++                style={StyleSheet.absoluteFillObject}
++                facing="back"
++                barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
++                onBarcodeScanned={scanned || isScanningRef.current ? undefined : handleBarcodeScanned}
++                onMountError={(error) => setCameraError(error?.message || 'Câmera indisponível no dispositivo.')}
++                testID="event-entry-camera-view"
++              />
++
++              {/* Sobreposição visual de enquadramento */}
++              <View style={styles.overlay} pointerEvents="box-none">
++                <View style={styles.overlayTop}>
++                  <Text style={styles.scannerInstruction}>
++                    Aponte a câmera para o QR Code do evento
++                  </Text>
++                </View>
++
++                <View style={styles.reticleRow} pointerEvents="none">
++                  <View style={styles.overlaySide} />
++                  <View style={styles.reticleFrame} testID="event-entry-scanner-reticle">
++                    <View style={[styles.reticleCorner, styles.cornerTL]} />
++                    <View style={[styles.reticleCorner, styles.cornerTR]} />
++                    <View style={[styles.reticleCorner, styles.cornerBL]} />
++                    <View style={[styles.reticleCorner, styles.cornerBR]} />
++                  </View>
++                  <View style={styles.overlaySide} />
++                </View>
++
++                <View style={styles.overlayBottom}>
++                  {loading && (
++                    <View style={styles.loadingBanner}>
++                      <ActivityIndicator size="small" color={colors.brand.primary} />
++                      <Text style={styles.loadingBannerText}>Consultando evento...</Text>
++                    </View>
++                  )}
++
++                  {scanError && (
++                    <View style={styles.scanErrorCard} accessibilityRole="alert">
++                      <Text style={styles.scanErrorText} testID="event-entry-scan-error">
++                        {scanError}
++                      </Text>
++                      <Button
++                        title="Escanear novamente"
++                        variant="secondary"
++                        size="sm"
++                        onPress={handleRetryScan}
++                        style={styles.retryButton}
++                        testID="event-entry-retry-scan-button"
++                      />
++                    </View>
++                  )}
++
++                  <View style={styles.scannerActions}>
++                    <Button
++                      title="Digitar código manualmente"
++                      variant="outline"
++                      onPress={() => switchMode('manual')}
++                      style={styles.scannerActionButton}
++                      testID="event-entry-switch-manual-button"
++                    />
++                    <Button
++                      title="Voltar para opções"
++                      variant="ghost"
++                      onPress={() => switchMode('select')}
++                      style={styles.scannerActionButton}
++                      testID="event-entry-back-select-button"
++                    />
++                  </View>
++                </View>
++              </View>
++            </View>
++          ) : (
++            <View style={styles.centeredFeedback}>
++              <Text style={styles.feedbackText}>Leitor inativo fora de foco.</Text>
++            </View>
++          )}
++        </View>
++      </AuthBackground>
++    );
++  }
++
++  // Modo B: Digitar código manualmente
++  if (mode === 'manual') {
++    return (
++      <AuthBackground variant="login" overlayOpacity={0.65} testID="event-entry-background">
++        <StatusBar style="light" />
++        <ScreenHeader
++          title="Digitar código"
++          onBack={() => switchMode('select')}
++          testID="event-entry-header"
++        />
++        <KeyboardAvoidingView
++          style={styles.keyboardView}
++          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
++        >
++          <ScrollView
++            contentContainerStyle={styles.scrollContent}
++            keyboardShouldPersistTaps="handled"
++            keyboardDismissMode="on-drag"
++            showsVerticalScrollIndicator={false}
++          >
++            <View style={styles.heroSection}>
++              <Badge label="CHECK-IN PRESENCIAL" variant="brand" />
++              <Text style={styles.title}>Digite o código de acesso</Text>
++              <Text style={styles.description}>
++                Informe o código disponibilizado na recepção ou nas estações do evento para consultar sua entrada.
++              </Text>
++            </View>
++
++            <Card variant="highlight" style={styles.formCard} testID="event-entry-form-card">
++              <Badge label="CÓDIGO DO EVENTO" variant="default" />
++              <InputField
++                value={eventCode}
++                onChangeText={(value) => { setEventCode(value); setLocalError(null); }}
++                placeholder="Ex.: ARENA123"
++                autoCapitalize="characters"
++                autoCorrect={false}
++                editable={!loading}
++                error={localError || (admission?.status === 'error' ? admission.error : null)}
++                testID="event-entry-code-input"
++                returnKeyType="go"
++                onSubmitEditing={handleContinue}
++                containerStyle={styles.codeInput}
++              />
++              <Text style={styles.helperText}>O código é fornecido presencialmente pela equipe do evento.</Text>
++              <Button
++                title={loading ? 'Consultando...' : 'Continuar'}
++                variant="primary"
++                onPress={handleContinue}
++                disabled={loading}
++                style={styles.continueButton}
++                testID="event-entry-continue-button"
++              />
++              <Button
++                title="Ler QR Code"
++                variant="outline"
++                onPress={() => switchMode('qr')}
++                disabled={loading}
++                style={styles.switchButton}
++                testID="event-entry-switch-qr-button"
++              />
++              <Button
++                title="Voltar para opções"
++                variant="ghost"
++                onPress={() => switchMode('select')}
++                disabled={loading}
++                style={styles.backOptionsButton}
++                testID="event-entry-back-to-options-button"
++              />
++            </Card>
++          </ScrollView>
++        </KeyboardAvoidingView>
++      </AuthBackground>
++    );
++  }
++
++  // Modo Seleção Inicial: Apresenta as duas opções
+   return (
+     <AuthBackground variant="login" overlayOpacity={0.65} testID="event-entry-background">
+       <StatusBar style="light" />
+-      <ScreenHeader title="Entrar em um evento" onBack={() => navigation.goBack()} testID="event-entry-header" />
+-      <KeyboardAvoidingView
+-        style={styles.keyboardView}
+-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
++      <ScreenHeader
++        title="Entrar em um evento"
++        onBack={() => navigation.goBack()}
++        testID="event-entry-header"
++      />
++      <ScrollView
++        contentContainerStyle={styles.scrollContent}
++        showsVerticalScrollIndicator={false}
+       >
+-        <ScrollView
+-          contentContainerStyle={styles.scrollContent}
+-          keyboardShouldPersistTaps="handled"
+-          keyboardDismissMode="on-drag"
+-          showsVerticalScrollIndicator={false}
+-        >
+-          <View style={styles.heroSection}>
+-            <Badge label="CHECK-IN PRESENCIAL" variant="brand" />
+-            <Text style={styles.title}>Digite o código de acesso</Text>
+-            <Text style={styles.description}>
+-              Informe o código disponibilizado na recepção ou nas estações do evento para consultar sua entrada.
++        <View style={styles.heroSection}>
++          <Badge label="CHECK-IN PRESENCIAL" variant="brand" />
++          <Text style={styles.title}>Como deseja entrar?</Text>
++          <Text style={styles.description}>
++            Escolha entre apontar a câmera para o QR Code do evento ou digitar o código de acesso manualmente.
++          </Text>
++        </View>
++
++        <View style={styles.methodsContainer}>
++          {/* Opção A: QR Code */}
++          <Card
++            variant="interactive"
++            style={styles.methodCard}
++            onPress={() => switchMode('qr')}
++            testID="event-entry-choose-qr"
++            accessibilityLabel="Ler QR Code. Aponte a câmera para o QR Code do evento."
++          >
++            <View style={styles.methodCardBadgeRow}>
++              <Badge label="RÁPIDO" variant="brand" />
++            </View>
++            <Text style={styles.methodCardTitle}>Ler QR Code</Text>
++            <Text style={styles.methodCardDescription}>
++              Aponte a câmera do seu celular para a credencial, banner ou totem da estação.
+             </Text>
+-          </View>
+-
+-          <Card variant="highlight" style={styles.formCard} testID="event-entry-form-card">
+-            <Badge label="CÓDIGO DO EVENTO" variant="default" />
+-            <InputField
+-              value={eventCode}
+-              onChangeText={(value) => { setEventCode(value); setLocalError(null); }}
+-              placeholder="Ex.: ARENA123"
+-              autoCapitalize="characters"
+-              autoCorrect={false}
+-              editable={!loading}
+-              error={localError || (admission?.status === 'error' ? admission.error : null)}
+-              testID="event-entry-code-input"
+-              returnKeyType="go"
+-              onSubmitEditing={handleContinue}
+-              containerStyle={styles.codeInput}
+-            />
+-            <Text style={styles.helperText}>O código é fornecido presencialmente pela equipe do evento.</Text>
+             <Button
+-              title={loading ? 'Consultando...' : 'Continuar'}
++              title="Ler QR Code"
+               variant="primary"
+-              onPress={handleContinue}
+-              disabled={loading}
+-              style={styles.continueButton}
+-              testID="event-entry-continue-button"
++              onPress={() => switchMode('qr')}
++              style={styles.methodCardButton}
++              testID="event-entry-select-qr-button"
++            />
++          </Card>
++
++          {/* Opção B: Digitar código */}
++          <Card
++            variant="interactive"
++            style={styles.methodCard}
++            onPress={() => switchMode('manual')}
++            testID="event-entry-choose-manual"
++            accessibilityLabel="Digitar código. Informe o código de acesso manualmente."
++          >
++            <View style={styles.methodCardBadgeRow}>
++              <Badge label="MANUAL" variant="default" />
++            </View>
++            <Text style={styles.methodCardTitle}>Digitar código</Text>
++            <Text style={styles.methodCardDescription}>
++              Informe o código alfanumérico fornecido pela recepção ou equipe do evento.
++            </Text>
++            <Button
++              title="Digitar código"
++              variant="outline"
++              onPress={() => switchMode('manual')}
++              style={styles.methodCardButton}
++              testID="event-entry-select-manual-button"
+             />
+           </Card>
+-        </ScrollView>
+-      </KeyboardAvoidingView>
++        </View>
++      </ScrollView>
+     </AuthBackground>
+   );
+ }
+@@ -109,6 +513,31 @@ const styles = StyleSheet.create({
+     color: colors.text.secondary,
+     marginTop: spacing.sm,
+   },
++  methodsContainer: {
++    gap: spacing.lg,
++  },
++  methodCard: {
++    alignItems: 'stretch',
++    padding: spacing.xl,
++  },
++  methodCardBadgeRow: {
++    alignItems: 'flex-start',
++    marginBottom: spacing.sm,
++  },
++  methodCardTitle: {
++    ...typography.titleLarge,
++    color: colors.text.primary,
++    marginTop: spacing.xs,
++  },
++  methodCardDescription: {
++    ...typography.bodyMedium,
++    color: colors.text.secondary,
++    marginTop: spacing.xs,
++    marginBottom: spacing.lg,
++  },
++  methodCardButton: {
++    marginTop: spacing.xs,
++  },
+   formCard: {
+     alignItems: 'stretch',
+   },
+@@ -123,4 +552,168 @@ const styles = StyleSheet.create({
+   continueButton: {
+     marginTop: spacing.xl,
+   },
++  switchButton: {
++    marginTop: spacing.md,
++  },
++  backOptionsButton: {
++    marginTop: spacing.sm,
++  },
++  scannerRoot: {
++    flex: 1,
++  },
++  cameraContainer: {
++    flex: 1,
++    position: 'relative',
++  },
++  centeredFeedback: {
++    flex: 1,
++    alignItems: 'center',
++    justifyContent: 'center',
++    padding: spacing.xl,
++  },
++  feedbackText: {
++    ...typography.bodyMedium,
++    color: colors.text.secondary,
++    marginTop: spacing.md,
++    textAlign: 'center',
++  },
++  permissionContent: {
++    flexGrow: 1,
++    paddingHorizontal: spacing.layout.screenPaddingHorizontal,
++    paddingTop: spacing.xxl,
++    paddingBottom: spacing.xxxl,
++  },
++  permissionCard: {
++    alignItems: 'stretch',
++    padding: spacing.xl,
++  },
++  permissionTitle: {
++    ...typography.titleLarge,
++    color: colors.text.primary,
++    marginTop: spacing.md,
++  },
++  permissionDescription: {
++    ...typography.bodyMedium,
++    color: colors.text.secondary,
++    marginTop: spacing.sm,
++    marginBottom: spacing.lg,
++  },
++  actionMargin: {
++    marginTop: spacing.md,
++  },
++  overlay: {
++    ...StyleSheet.absoluteFillObject,
++    flexDirection: 'column',
++  },
++  overlayTop: {
++    flex: 1,
++    backgroundColor: 'rgba(5, 5, 10, 0.72)',
++    alignItems: 'center',
++    justifyContent: 'center',
++    paddingHorizontal: spacing.lg,
++  },
++  scannerInstruction: {
++    ...typography.titleMedium,
++    color: colors.text.primary,
++    textAlign: 'center',
++  },
++  reticleRow: {
++    flexDirection: 'row',
++    height: 250,
++  },
++  overlaySide: {
++    flex: 1,
++    backgroundColor: 'rgba(5, 5, 10, 0.72)',
++  },
++  reticleFrame: {
++    width: 250,
++    height: 250,
++    position: 'relative',
++    borderRadius: radii.md,
++    borderWidth: 1,
++    borderColor: 'rgba(255, 255, 255, 0.25)',
++  },
++  reticleCorner: {
++    position: 'absolute',
++    width: 24,
++    height: 24,
++    borderColor: colors.brand.primaryLight,
++  },
++  cornerTL: {
++    top: -1,
++    left: -1,
++    borderTopWidth: 4,
++    borderLeftWidth: 4,
++    borderTopLeftRadius: radii.md,
++  },
++  cornerTR: {
++    top: -1,
++    right: -1,
++    borderTopWidth: 4,
++    borderRightWidth: 4,
++    borderTopRightRadius: radii.md,
++  },
++  cornerBL: {
++    bottom: -1,
++    left: -1,
++    borderBottomWidth: 4,
++    borderLeftWidth: 4,
++    borderBottomLeftRadius: radii.md,
++  },
++  cornerBR: {
++    bottom: -1,
++    right: -1,
++    borderBottomWidth: 4,
++    borderRightWidth: 4,
++    borderBottomRightRadius: radii.md,
++  },
++  overlayBottom: {
++    flex: 1.2,
++    backgroundColor: 'rgba(5, 5, 10, 0.72)',
++    alignItems: 'center',
++    justifyContent: 'flex-start',
++    paddingHorizontal: spacing.layout.screenPaddingHorizontal,
++    paddingTop: spacing.lg,
++    paddingBottom: spacing.xxl,
++  },
++  loadingBanner: {
++    flexDirection: 'row',
++    alignItems: 'center',
++    gap: spacing.sm,
++    backgroundColor: colors.background.surface,
++    paddingHorizontal: spacing.lg,
++    paddingVertical: spacing.sm,
++    borderRadius: radii.pill,
++    marginBottom: spacing.md,
++  },
++  loadingBannerText: {
++    ...typography.bodySmall,
++    color: colors.text.primary,
++  },
++  scanErrorCard: {
++    width: '100%',
++    backgroundColor: colors.semantic.dangerBg,
++    borderColor: colors.semantic.danger,
++    borderWidth: 1,
++    borderRadius: radii.lg,
++    padding: spacing.md,
++    alignItems: 'center',
++    marginBottom: spacing.md,
++  },
++  scanErrorText: {
++    ...typography.bodySmall,
++    color: colors.semantic.danger,
++    textAlign: 'center',
++  },
++  retryButton: {
++    marginTop: spacing.sm,
++  },
++  scannerActions: {
++    width: '100%',
++    marginTop: 'auto',
++    gap: spacing.sm,
++  },
++  scannerActionButton: {
++    width: '100%',
++  },
+ });
+diff --git a/app/tests/eventEntry.test.cjs b/app/tests/eventEntry.test.cjs
+index 066c43a2..592181df 100644
+--- a/app/tests/eventEntry.test.cjs
++++ b/app/tests/eventEntry.test.cjs
+@@ -11,10 +11,12 @@ const event = {
+ };
+ const eligible = { eligible: true, blockingReasons: [] };
+ 
+-function screenRig(path, context, params = {}) {
+-  const state = [], calls = [];
++function screenRig(path, context, params = {}, options = {}) {
++  const state = [], calls = [], cleanups = [];
+   const ui = createParticipantUiStubs();
+   let cursor = 0, tree;
++  let settingsOpened = 0;
++
+   const react = {
+     useContext: () => context,
+     useRef(initial) { const index = cursor++; return state[index] ||= { current: initial }; },
+@@ -23,22 +25,41 @@ function screenRig(path, context, params = {}) {
+       if (!(index in state)) state[index] = initial;
+       return [state[index], (value) => { state[index] = typeof value === 'function' ? value(state[index]) : value; }];
+     },
++    useEffect(effect) {
++      const cleanup = effect?.();
++      if (typeof cleanup === 'function') cleanups.push(cleanup);
++    },
+   };
++
+   const module = loadModule(path, (name) => {
+     if (name === 'react') return react;
+     if (name === 'react-native') return {
+       ActivityIndicator: 'ActivityIndicator', KeyboardAvoidingView: 'KeyboardAvoidingView',
+       Platform: { OS: 'android' }, Pressable: 'Pressable', ScrollView: 'ScrollView',
+       Text: 'Text', TextInput: 'TextInput', View: 'View',
+-      StyleSheet: { create: (styles) => styles },
++      StyleSheet: { create: (styles) => styles, absoluteFillObject: {} },
++      Linking: {
++        openSettings: async () => { settingsOpened++; return true; },
++      },
+     };
+     if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
++    if (name === 'expo-camera') return {
++      CameraView: (props) => ({ type: 'CameraView', props }),
++      useCameraPermissions: () => [
++        options.cameraPermission !== undefined ? options.cameraPermission : { granted: true, canAskAgain: true },
++        options.requestPermission ?? (async () => ({ granted: true })),
++      ],
++    };
++    if (name === '@react-navigation/native') return {
++      useIsFocused: () => (options.isFocused !== undefined ? options.isFocused : true),
++    };
+     if (name === '../../components/ui') return ui;
+     if (name === '../../theme') return createParticipantThemeStub();
+     if (name === '../../components/ScreenContainer') return { __esModule: true, default: 'ScreenContainer' };
+     if (name === '../../context/ParticipationContext') return { ParticipationContext: {} };
+     return require(name);
+   }).exports;
++
+   function render() {
+     cursor = 0;
+     tree = module.default({
+@@ -46,23 +67,74 @@ function screenRig(path, context, params = {}) {
+       navigation: {
+         navigate: (name, value) => calls.push({ name, value }),
+         reset: (value) => calls.push({ reset: value }),
++        goBack: () => calls.push({ back: true }),
+       },
+     });
+   }
++
+   function button(label) {
+-    const result = nodes(tree).find((node) => node.type === 'Pressable' && textOf(node) === label);
++    let result = nodes(tree).find((node) => node.type === 'Pressable' && textOf(node) === label);
++    // Para manter compatibilidade com testes manuais legados que buscavam diretamente 'Continuar'
++    if (!result && (label === 'Continuar' || label === 'Consultando...')) {
++      const manualBtn = nodes(tree).find((node) => node.type === 'Pressable' && textOf(node).includes('Digitar código'));
++      if (manualBtn) {
++        manualBtn.props.onPress();
++        render();
++        result = nodes(tree).find((node) => node.type === 'Pressable' && textOf(node) === label);
++      }
++    }
+     assert.ok(result, `Botão ausente: ${label}`);
+     return result;
+   }
++
+   render();
+   return {
+-    calls, render, button,
+-    text: () => textOf(tree),
++    calls,
++    render,
++    button,
++    findButton: (label) => nodes(tree).find((node) => node.type === 'Pressable' && textOf(node) === label),
++    text: () => nodes(tree).map(textOf).join(' '),
+     inputError: () => nodes(tree).find((node) => node.type === ui.InputField)?.props.error,
+-    input(value) { nodes(tree).find((node) => node.type === 'TextInput').props.onChangeText(value); render(); },
++    input(value) {
++      let textInput = nodes(tree).find((node) => node.type === 'TextInput');
++      if (!textInput) {
++        const manualBtn = nodes(tree).find((node) => node.type === 'Pressable' && textOf(node).includes('Digitar código'));
++        if (manualBtn) {
++          manualBtn.props.onPress();
++          render();
++          textInput = nodes(tree).find((node) => node.type === 'TextInput');
++        }
++      }
++      assert.ok(textInput, 'Campo de texto não encontrado');
++      textInput.props.onChangeText(value);
++      render();
++    },
++    camera: () => nodes(tree).find((node) => node.type === 'CameraView'),
++    reticle: () => nodes(tree).find((node) => node.props?.testID === 'event-entry-scanner-reticle'),
++    async simulateScan(data) {
++      const cam = nodes(tree).find((node) => node.type === 'CameraView');
++      assert.ok(cam, 'Câmera não está montada na tela');
++      const handler = cam.props.onBarcodeScanned;
++      if (typeof handler === 'function') {
++        await handler({ data });
++        render();
++      }
++    },
++    unmount() {
++      while (cleanups.length) {
++        const fn = cleanups.pop();
++        fn?.();
++      }
++    },
++    getSettingsOpenedCount: () => settingsOpened,
++    exports: module,
+   };
+ }
+ 
++// -------------------------------------------------------------
++// Testes preexistentes do fluxo manual e confirmação
++// -------------------------------------------------------------
++
+ test('consulta real envia o código sem mudar sua caixa e navega somente após resposta válida', async () => {
+   const requests = [];
+   const context = {
+@@ -169,3 +241,267 @@ test('erro HTTP na confirmação preserva a tela e informa o problema', async ()
+   rig.render();
+   assert.match(rig.text(), /Evento encerrado/);
+ });
++
++// -------------------------------------------------------------
++// Novos testes específicos da TASK ENTRY-QR-01
++// -------------------------------------------------------------
++
++test('ENTRY-QR-01: tela inicial apresenta as duas opções visíveis e independentes', () => {
++  const context = { admission: { status: 'idle' }, isCurrentAdmission: () => true };
++  const rig = screenRig('screens/event-entry/EventEntryScreen.js', context);
++
++  // Deve exibir o cabeçalho e as duas opções com títulos claros
++  assert.match(rig.text(), /Entrar em um evento/);
++  assert.match(rig.text(), /Como deseja entrar\?/);
++  assert.match(rig.text(), /Ler QR Code/);
++  assert.match(rig.text(), /Digitar código/);
++
++  // Ambas as opções devem possuir botões acionáveis
++  assert.ok(rig.button('Ler QR Code'));
++  assert.ok(rig.button('Digitar código'));
++});
++
++test('ENTRY-QR-01: selecionar Digitar código exibe formulário manual e permite voltar para seleção', async () => {
++  const context = { admission: { status: 'idle' }, isCurrentAdmission: () => true };
++  const rig = screenRig('screens/event-entry/EventEntryScreen.js', context);
++
++  await rig.button('Digitar código').props.onPress();
++  rig.render();
++
++  // Agora exibe o formulário manual
++  assert.match(rig.text(), /Digite o código de acesso/);
++  assert.ok(rig.button('Continuar'));
++  assert.ok(rig.button('Ler QR Code'));
++  assert.ok(rig.button('Voltar para opções'));
++
++  // Voltar para opções retorna ao menu de seleção
++  await rig.button('Voltar para opções').props.onPress();
++  rig.render();
++  assert.match(rig.text(), /Como deseja entrar\?/);
++});
++
++test('ENTRY-QR-01: selecionar Ler QR Code ativa a câmera com enquadramento e instruções', async () => {
++  const context = { admission: { status: 'idle' }, isCurrentAdmission: () => true };
++  const rig = screenRig('screens/event-entry/EventEntryScreen.js', context, {}, {
++    cameraPermission: { granted: true, canAskAgain: true },
++    isFocused: true,
++  });
++
++  await rig.button('Ler QR Code').props.onPress();
++  rig.render();
++
++  // Verifica elementos da câmera e enquadramento
++  assert.match(rig.text(), /Aponte a câmera para o QR Code do evento/);
++  assert.ok(rig.camera(), 'CameraView deve estar montada');
++  assert.equal(rig.camera().props.facing, 'back', 'Deve utilizar a câmera traseira');
++  assert.deepEqual(structuredClone(rig.camera().props.barcodeScannerSettings), { barcodeTypes: ['qr'] });
++  assert.ok(rig.reticle(), 'Retículo de enquadramento deve estar presente');
++  assert.ok(rig.button('Digitar código manualmente'));
++  assert.ok(rig.button('Voltar para opções'));
++});
++
++test('ENTRY-QR-01: permissão de câmera negada exibe aviso e botão para solicitar permissão', async () => {
++  let requested = 0;
++  const context = { admission: { status: 'idle' }, isCurrentAdmission: () => true };
++  const rig = screenRig('screens/event-entry/EventEntryScreen.js', context, {}, {
++    cameraPermission: { granted: false, canAskAgain: true },
++    requestPermission: async () => { requested++; return { granted: true }; },
++  });
++
++  await rig.button('Ler QR Code').props.onPress();
++  rig.render();
++
++  assert.match(rig.text(), /Permissão de câmera necessária/);
++  assert.equal(rig.camera(), undefined, 'CameraView não deve ser montada sem permissão');
++
++  await rig.button('Permitir acesso à câmera').props.onPress();
++  assert.equal(requested, 1);
++});
++
++test('ENTRY-QR-01: permissão bloqueada permanentemente orienta a abrir configurações', async () => {
++  const context = { admission: { status: 'idle' }, isCurrentAdmission: () => true };
++  const rig = screenRig('screens/event-entry/EventEntryScreen.js', context, {}, {
++    cameraPermission: { granted: false, canAskAgain: false },
++  });
++
++  await rig.button('Ler QR Code').props.onPress();
++  rig.render();
++
++  assert.match(rig.text(), /Permissão de câmera bloqueada/);
++  assert.match(rig.text(), /habilite o acesso à câmera nas configurações/);
++
++  await rig.button('Abrir configurações').props.onPress();
++  assert.equal(rig.getSettingsOpenedCount(), 1);
++});
++
++test('ENTRY-QR-01: validação e normalização de QR Code rejeita códigos inválidos ou perigosos', () => {
++  const context = { admission: { status: 'idle' }, isCurrentAdmission: () => true };
++  const rig = screenRig('screens/event-entry/EventEntryScreen.js', context);
++  const { validateAndNormalizeQrCode } = rig.exports;
++
++  // Códigos válidos
++  assert.deepEqual(structuredClone(validateAndNormalizeQrCode('ARENA123')), { ok: true, code: 'ARENA123' });
++  assert.deepEqual(structuredClone(validateAndNormalizeQrCode('  AbC-42  ')), { ok: true, code: 'AbC-42' });
++  assert.deepEqual(structuredClone(validateAndNormalizeQrCode('EVENT_2026-SP')), { ok: true, code: 'EVENT_2026-SP' });
++
++  // Rejeição de vazios
++  assert.equal(validateAndNormalizeQrCode('').ok, false);
++  assert.equal(validateAndNormalizeQrCode('   ').ok, false);
++  assert.equal(validateAndNormalizeQrCode(null).ok, false);
++
++  // Rejeição de URLs e esquemas arbitrários
++  assert.equal(validateAndNormalizeQrCode('https://malicious.site').ok, false);
++  assert.equal(validateAndNormalizeQrCode('http://arenago.com').ok, false);
++  assert.equal(validateAndNormalizeQrCode('javascript:alert(1)').ok, false);
++
++  // Rejeição de quebras de linha ou injeções
++  assert.equal(validateAndNormalizeQrCode('ARENA\n123').ok, false);
++  assert.equal(validateAndNormalizeQrCode('CODE\r\n456').ok, false);
++
++  // Rejeição de código excessivamente longo (> 64 caracteres)
++  assert.equal(validateAndNormalizeQrCode('A'.repeat(65)).ok, false);
++
++  // Rejeição de caracteres especiais proibidos
++  assert.equal(validateAndNormalizeQrCode('ARENA@123!').ok, false);
++  assert.equal(validateAndNormalizeQrCode('ARENA 123').ok, false);
++});
++
++test('ENTRY-QR-01: leitura de QR Code executa lookupEvent e navega para EventConfirmation sem confirmar automaticamente', async () => {
++  const lookups = [], confirms = [];
++  const context = {
++    admission: { status: 'idle' },
++    isCurrentAdmission: () => true,
++    lookupEvent: async (code) => {
++      lookups.push(code);
++      return { kind: 'found', event, eligibility: eligible };
++    },
++    confirmEventEntry: async (id) => {
++      confirms.push(id);
++      return { kind: 'complete' };
++    },
++  };
++  const rig = screenRig('screens/event-entry/EventEntryScreen.js', context);
++
++  await rig.button('Ler QR Code').props.onPress();
++  rig.render();
++
++  await rig.simulateScan('  ARENA-2026  ');
++
++  // Verifica que lookupEvent foi chamado com o código normalizado
++  assert.deepEqual(lookups, ['ARENA-2026']);
++  // Não deve confirmar automaticamente a participação
++  assert.deepEqual(confirms, []);
++  // Navega para EventConfirmation com event e eligibility
++  assert.deepEqual(structuredClone(rig.calls), [
++    { name: 'EventConfirmation', value: { event, eligibility: eligible } },
++  ]);
++});
++
++test('ENTRY-QR-01: proteção contra leitura duplicada ignora detecções múltiplas durante consulta em andamento', async () => {
++  let resolve;
++  const lookups = [];
++  const context = {
++    admission: { status: 'idle' },
++    isCurrentAdmission: () => true,
++    lookupEvent: (code) => {
++      lookups.push(code);
++      return new Promise((done) => { resolve = done; });
++    },
++  };
++  const rig = screenRig('screens/event-entry/EventEntryScreen.js', context);
++
++  await rig.button('Ler QR Code').props.onPress();
++  rig.render();
++
++  // Dispara primeira leitura
++  const scanPromise = rig.simulateScan('ARENA123');
++
++  // Dispara leituras simultâneas/rápidas enquanto a primeira está pendente
++  await rig.simulateScan('ARENA123');
++  await rig.simulateScan('ARENA123');
++  await rig.simulateScan('ARENA456');
++
++  // Apenas uma consulta foi disparada
++  assert.equal(lookups.length, 1);
++
++  // Conclui a consulta
++  resolve({ kind: 'found', event, eligibility: eligible });
++  await scanPromise;
++
++  // Navegou apenas uma vez
++  assert.equal(rig.calls.length, 1);
++});
++
++test('ENTRY-QR-01: erro na consulta por QR Code exibe mensagem de erro e permite nova leitura', async () => {
++  const lookups = [];
++  const context = {
++    admission: { status: 'idle' },
++    isCurrentAdmission: () => true,
++    lookupEvent: async (code) => {
++      lookups.push(code);
++      if (lookups.length === 1) {
++        return { kind: 'error', message: 'Código de evento não encontrado.' };
++      }
++      return { kind: 'found', event, eligibility: eligible };
++    },
++  };
++  const rig = screenRig('screens/event-entry/EventEntryScreen.js', context);
++
++  await rig.button('Ler QR Code').props.onPress();
++  rig.render();
++
++  // Primeira leitura falha
++  await rig.simulateScan('INVALID-CODE');
++  assert.match(rig.text(), /Código de evento não encontrado/);
++  assert.deepEqual(rig.calls, []);
++
++  // Botão de nova tentativa está disponível
++  const retryBtn = rig.button('Escanear novamente');
++  assert.ok(retryBtn);
++
++  await retryBtn.props.onPress();
++  rig.render();
++
++  // Segunda leitura tem sucesso
++  await rig.simulateScan('VALID-CODE');
++  assert.equal(lookups.length, 2);
++  assert.equal(rig.calls.length, 1);
++  assert.equal(rig.calls[0].name, 'EventConfirmation');
++});
++
++test('ENTRY-QR-01: resposta tardia após troca de modo ou desmontagem é descartada', async () => {
++  let resolve;
++  const context = {
++    admission: { status: 'idle' },
++    isCurrentAdmission: () => true,
++    lookupEvent: () => new Promise((done) => { resolve = done; }),
++  };
++  const rig = screenRig('screens/event-entry/EventEntryScreen.js', context);
++
++  await rig.button('Ler QR Code').props.onPress();
++  rig.render();
++
++  const pending = rig.simulateScan('ARENA123');
++
++  // Usuário clica para alternar para digitação manual durante a consulta
++  await rig.button('Digitar código manualmente').props.onPress();
++  rig.render();
++
++  // Resposta da consulta antiga chega
++  resolve({ kind: 'found', event, eligibility: eligible });
++  await pending;
++
++  // Não deve navegar pois o modo foi alterado
++  assert.deepEqual(rig.calls, []);
++  assert.match(rig.text(), /Digite o código de acesso/);
++});
++
++test('ENTRY-QR-01: câmera é desativada quando a tela não está em foco', () => {
++  const context = { admission: { status: 'idle' }, isCurrentAdmission: () => true };
++  const rig = screenRig('screens/event-entry/EventEntryScreen.js', context, { initialMethod: 'qr' }, {
++    isFocused: false,
++  });
++
++  assert.equal(rig.camera(), undefined, 'CameraView não deve ser montada quando isFocused for false');
++  assert.match(rig.text(), /Leitor inativo fora de foco/);
++});
