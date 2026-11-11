@@ -1,0 +1,340 @@
+diff --git a/backend/scripts/prepare-staff-homologation.cjs b/backend/scripts/prepare-staff-homologation.cjs
+new file mode 100644
+index 0000000..5f85364
+--- /dev/null
++++ b/backend/scripts/prepare-staff-homologation.cjs
+@@ -0,0 +1,160 @@
++'use strict';
++
++// Utilitário de preparação exclusivamente local. Não carrega dotenv nem aceita URL.
++const { createHash, randomUUID } = require('node:crypto');
++const { readFileSync } = require('node:fs');
++const path = require('node:path');
++const readline = require('node:readline/promises');
++const { Writable } = require('node:stream');
++const { Client } = require('pg');
++const argon2 = require('argon2');
++const { evaluatePasswordSecurity } = require('../src/auth/password-policy.ts');
++
++const DATABASE = 'arenago_staff_homolog_20261111';
++const EXPECTED_TAGS = [
++  '0001_identity_profile', '0002_events_base', '0003_credentials_roles',
++  '0004_event_operations', '0005_idempotency', '0006_admin_2fa_login',
++  '0007_staff_idempotency_preparation',
++];
++const ACCOUNTS = [
++  { name: 'Homologacao Admin', email: 'staff-homolog-admin@arenago.invalid' },
++  { name: 'Homologacao Staff', email: 'staff-homolog-staff@arenago.invalid' },
++  ...Array.from({ length: 5 }, (_, i) => ({
++    name: `Homologacao Participante ${i + 1}`,
++    email: `staff-homolog-participante${i + 1}@arenago.invalid`,
++  })),
++];
++const CONFIRMATION = 'AUTORIZO CONTAS SINTETICAS';
++
++function validateLaunch(env, args, stdinIsTTY, stdoutIsTTY) {
++  if (env.NODE_ENV !== 'test' || args.length !== 1 || args[0] !== '--execute' || !stdinIsTTY || !stdoutIsTTY) {
++    throw new Error('Execução exige NODE_ENV=test, --execute e terminal interativo.');
++  }
++  for (const key of ['NODE_OPTIONS', 'DATABASE_URL', 'DATABASE_DIRECT_URL', 'PGHOST', 'PGHOSTADDR',
++    'PGPORT', 'PGDATABASE', 'PGUSER', 'PGPASSWORD', 'PGSERVICE', 'PGSERVICEFILE', 'PGOPTIONS']) {
++    if (env[key]) throw new Error(`Remova ${key} do processo antes de iniciar.`);
++  }
++}
++
++function expectedMigrations() {
++  const folder = path.resolve(__dirname, '../drizzle');
++  const journal = JSON.parse(readFileSync(path.join(folder, 'meta/_journal.json'), 'utf8'));
++  if (journal.version !== '7' || journal.dialect !== 'postgresql' || !Array.isArray(journal.entries)
++      || journal.entries.length !== EXPECTED_TAGS.length) throw new Error('Journal incompatível.');
++  return journal.entries.map((entry, index) => {
++    if (entry.idx !== index || entry.tag !== EXPECTED_TAGS[index] || !Number.isSafeInteger(entry.when)
++        || (index > 0 && entry.when <= journal.entries[index - 1].when)) throw new Error('Journal incompatível.');
++    const sql = readFileSync(path.join(folder, `${entry.tag}.sql`), 'utf8');
++    return { when: String(entry.when), hash: createHash('sha256').update(sql).digest('hex') };
++  });
++}
++
++async function question(prompt, hidden = false) {
++  const sink = hidden ? new Writable({ write(_chunk, _encoding, done) { done(); } }) : process.stdout;
++  const rl = readline.createInterface({ input: process.stdin, output: sink, terminal: true });
++  try {
++    if (hidden) process.stderr.write(prompt);
++    return await rl.question(hidden ? '' : prompt);
++  } finally {
++    rl.close();
++    if (hidden) process.stderr.write('\n');
++  }
++}
++
++async function verifyDatabase(client, migrations) {
++  const identity = (await client.query(`SELECT current_database() AS db, host(inet_server_addr()) AS host,
++    inet_server_port() AS port, pg_is_in_recovery() AS recovery`)).rows[0];
++  if (!identity || identity.db !== DATABASE || identity.host !== '127.0.0.1'
++      || identity.port !== 55432 || identity.recovery !== false) throw new Error('Identidade do servidor divergente.');
++  const applied = (await client.query('SELECT hash, created_at::text AS at FROM drizzle.__drizzle_migrations ORDER BY created_at, id')).rows;
++  if (applied.length !== migrations.length || applied.some((row, i) =>
++    row.hash !== migrations[i].hash || row.at !== migrations[i].when)) throw new Error('Migrations divergentes.');
++  const controls = (await client.query(`SELECT
++    to_regclass('public.users') IS NOT NULL AND to_regclass('public.user_roles') IS NOT NULL
++    AND to_regclass('public.events') IS NOT NULL AND to_regclass('public.idempotency_operations') IS NOT NULL
++    AND to_regclass('public.staff_idempotency_epochs') IS NOT NULL AS tables_ok,
++    EXISTS (SELECT 1 FROM pg_catalog.pg_constraint c WHERE c.conrelid = 'public.idempotency_operations'::regclass
++      AND c.conname = 'ck_idempotency_staff_preparation_disabled' AND c.convalidated
++      AND pg_catalog.pg_get_constraintdef(c.oid) LIKE '%origin_assurance%legacy%'
++      AND pg_catalog.pg_get_constraintdef(c.oid) LIKE '%origin_session_id%'
++      AND pg_catalog.pg_get_constraintdef(c.oid) LIKE '%origin_epoch_id%'
++      AND pg_catalog.pg_get_constraintdef(c.oid) LIKE '%result_state%'
++      AND pg_catalog.pg_get_constraintdef(c.oid) LIKE '%completed_at%'
++      AND pg_catalog.pg_get_constraintdef(c.oid) LIKE '%result_retain_until%') AS check_ok,
++    EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_proc p ON p.oid=t.tgfoid
++      JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
++      WHERE t.tgrelid = 'public.idempotency_operations'::regclass
++      AND t.tgname = 'tr_staff_idempotency_preparation_guard' AND NOT t.tgisinternal AND t.tgenabled IN ('O','A')
++      AND t.tgtype=19 AND n.nspname='public' AND p.proname='staff_idempotency_preparation_guard'
++      AND NOT p.prosecdef) AS trigger_ok,
++    EXISTS (SELECT 1 FROM public.questionnaire_versions WHERE activated_at IS NOT NULL) AS questionnaire_ok,
++    EXISTS (SELECT 1 FROM public.games WHERE is_curated = true) AS games_ok`)).rows[0];
++  if (!controls || Object.values(controls).some(value => value !== true)) throw new Error('Schema ou seed incompatível.');
++}
++
++async function main() {
++  validateLaunch(process.env, process.argv.slice(2), process.stdin.isTTY, process.stdout.isTTY);
++  const migrations = expectedMigrations();
++  const user = (await question('Role PostgreSQL local dedicada: ')).trim();
++  if (!/^[a-z_][a-z0-9_]{0,62}$/.test(user)) throw new Error('Role inválida.');
++  let password = await question('Senha PostgreSQL local (oculta): ', true);
++  if (!password) throw new Error('Senha ausente.');
++  const client = new Client({ host: '127.0.0.1', port: 55432, database: DATABASE, user, password,
++    ssl: false, options: '-c search_path=pg_catalog,public', application_name: 'arenago-staff-homolog-fixture', connectionTimeoutMillis: 5000 });
++  password = '';
++  let inTransaction = false;
++  try {
++    await client.connect();
++    await verifyDatabase(client, migrations);
++    console.log('Destino local e migrations conferidos. Serão criadas sete contas SINTÉTICAS; nenhuma concessão Staff ou Admin será criada.');
++    const confirmation = await question(`Digite ${CONFIRMATION} para autorizar esta execução: `);
++    if (confirmation !== CONFIRMATION) throw new Error('Autorização não confirmada.');
++    const hashes = [];
++    const used = new Set();
++    for (const account of ACCOUNTS) {
++      let secret = await question(`Nova senha sintética para ${account.email} (oculta): `, true);
++      const repeated = await question('Repita a senha (oculta): ', true);
++      if (secret !== repeated || secret.length < 8 || secret.length > 128 || used.has(secret)
++          || evaluatePasswordSecurity(secret, account).compromised) throw new Error('Senha inválida, repetida ou recusada pela política.');
++      used.add(secret);
++      hashes.push(await argon2.hash(secret, { type: argon2.argon2id, memoryCost: 19456, timeCost: 2, parallelism: 1 }));
++      secret = '';
++    }
++    used.clear();
++    await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
++    inTransaction = true;
++    await client.query('LOCK TABLE drizzle.__drizzle_migrations IN SHARE MODE');
++    await client.query('LOCK TABLE public.users, public.user_roles, public.events, public.idempotency_operations IN SHARE ROW EXCLUSIVE MODE');
++    await verifyDatabase(client, migrations);
++    const empty = (await client.query(`SELECT NOT EXISTS (SELECT 1 FROM public.users)
++      AND NOT EXISTS (SELECT 1 FROM public.user_roles) AND NOT EXISTS (SELECT 1 FROM public.events)
++      AND NOT EXISTS (SELECT 1 FROM public.idempotency_operations) AS empty`)).rows[0];
++    if (empty?.empty !== true) throw new Error('Banco não está vazio para a fixture.');
++    for (let i = 0; i < ACCOUNTS.length; i += 1) {
++      const id = randomUUID();
++      await client.query(`INSERT INTO public.users (id,name,email,password_hash,email_verified_at,is_active,created_at,updated_at)
++        VALUES ($1,$2,$3,$4,clock_timestamp(),true,clock_timestamp(),clock_timestamp())`,
++      [id, ACCOUNTS[i].name, ACCOUNTS[i].email, hashes[i]]);
++      await client.query(`INSERT INTO public.user_roles (id,user_id,role,event_id,granted_by,granted_at,revoked_at,revoked_by)
++        VALUES ($1,$2,'participante',NULL,NULL,clock_timestamp(),NULL,NULL)`, [randomUUID(), id]);
++    }
++    await client.query('COMMIT');
++    inTransaction = false;
++    console.log('Sete contas sintéticas criadas. Conclua bootstrap/TOTP, concessão Staff e perfis pelos fluxos existentes.');
++    for (const account of ACCOUNTS) console.log(account.email);
++  } catch (error) {
++    if (inTransaction) await client.query('ROLLBACK').catch(() => undefined);
++    throw error;
++  } finally {
++    await client.end().catch(() => undefined);
++  }
++}
++
++if (require.main === module) {
++  main().catch(() => {
++    console.error('Preparação não confirmada. Confira identidade, migrations e estado do banco antes de qualquer nova tentativa.');
++    process.exitCode = 1;
++  });
++}
++
++module.exports = { validateLaunch, expectedMigrations, verifyDatabase, EXPECTED_TAGS, DATABASE };
+diff --git a/backend/test/unit/staff-homolog-fixture.test.ts b/backend/test/unit/staff-homolog-fixture.test.ts
+new file mode 100644
+index 0000000..fd82e93
+--- /dev/null
++++ b/backend/test/unit/staff-homolog-fixture.test.ts
+@@ -0,0 +1,42 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++
++const fixture = require("../../scripts/prepare-staff-homologation.cjs");
++
++test("fixture exige test, --execute, terminal e ausência de redirecionadores", () => {
++  assert.doesNotThrow(() => fixture.validateLaunch({ NODE_ENV: "test" }, ["--execute"], true, true));
++  for (const args of [
++    [{ NODE_ENV: "development" }, ["--execute"], true, true],
++    [{ NODE_ENV: "test" }, [], true, true],
++    [{ NODE_ENV: "test" }, ["--execute"], false, true],
++    [{ NODE_ENV: "test", PGHOST: "remote" }, ["--execute"], true, true],
++    [{ NODE_ENV: "test", DATABASE_DIRECT_URL: "present" }, ["--execute"], true, true],
++    [{ NODE_ENV: "test", NODE_OPTIONS: "present" }, ["--execute"], true, true],
++  ]) assert.throws(() => fixture.validateLaunch(...args));
++  assert.equal(fixture.DATABASE, "arenago_staff_homolog_20261111");
++});
++
++test("verificação de destino e migrations usa somente consultas e falha fechada", async () => {
++  const migrations = fixture.expectedMigrations();
++  assert.equal(migrations.length, 7);
++  const identity = { db: fixture.DATABASE, host: "127.0.0.1", port: 55432, recovery: false };
++  const applied = migrations.map((entry: { hash: string; when: string }) => ({ hash: entry.hash, at: entry.when }));
++  const controls = { tables_ok: true, check_ok: true, trigger_ok: true, questionnaire_ok: true, games_ok: true };
++  const calls: string[] = [];
++  const client = { async query(sql: string) {
++    calls.push(sql);
++    if (sql.includes("current_database")) return { rows: [identity] };
++    if (sql.includes("__drizzle_migrations")) return { rows: applied };
++    return { rows: [controls] };
++  } };
++  await fixture.verifyDatabase(client, migrations);
++  assert.ok(calls.every(sql => /^\s*SELECT\b/i.test(sql)));
++  identity.db = "arenago_events_test";
++  await assert.rejects(fixture.verifyDatabase(client, migrations));
++  identity.db = fixture.DATABASE;
++  applied[0].hash = "divergente";
++  await assert.rejects(fixture.verifyDatabase(client, migrations));
++  applied[0].hash = migrations[0].hash;
++  controls.trigger_ok = false;
++  await assert.rejects(fixture.verifyDatabase(client, migrations));
++});
+diff --git a/docs/STAFF_HOMOLOG_FIXTURE_IMPLEMENTACAO.md b/docs/STAFF_HOMOLOG_FIXTURE_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..1bef4d3
+--- /dev/null
++++ b/docs/STAFF_HOMOLOG_FIXTURE_IMPLEMENTACAO.md
+@@ -0,0 +1,120 @@
++# Contas sintéticas para homologação Staff
++
++## Escopo e limitações
++
++O utilitário `backend/scripts/prepare-staff-homologation.cjs` prepara somente sete contas sintéticas: uma destinada ao bootstrap Admin, uma ao Staff e cinco participantes. Todos recebem UUID próprio, senha distinta fornecida em terminal e hash Argon2id com os parâmetros do cadastro real. A política de senha existente é aplicada. Os endereços são fictícios sob `arenago.invalid`; o utilitário marca o e-mail como verificado apenas como dado sintético de homologação. Cria o papel global `participante` como no cadastro e não cria papel Admin ou Staff, sessão, TOTP, perfil, evento ou participação.
++
++A execução exige `NODE_ENV=test`, `--execute`, terminal interativo e a frase de autorização `AUTORIZO CONTAS SINTETICAS`. O destino TCP e o banco são fixos no código: `127.0.0.1:55432/arenago_staff_homolog_20261111`. O programa não carrega `.env` nem aceita URL ou opções de conexão; pede role e senha PostgreSQL em terminal, sem mostrar a senha. Rejeita variáveis de redirecionamento e `NODE_OPTIONS` no ambiente. O PostgreSQL confirma banco, endereço, porta e que não está em recuperação. Antes das escritas e novamente na transação, os sete hashes e timestamps do journal Drizzle são comparados aos arquivos desta branch; também são exigidos tabelas, check e trigger da 0007, questionário ativo e jogo curado. A transação bloqueia as tabelas e exige ausência de usuários, papéis, eventos e operações de idempotência. Conflitos ou erros abortam; se o resultado do commit for incerto, inspecione o banco antes de qualquer nova tentativa.
++
++Essas verificações não comprovam ausência de proxy local, identidade operacional do cluster, equivalência integral do schema ou segurança dos privilégios. Conferir servidor, processo, porta, proprietário e ambiente antes da campanha. O banco `arenago_events_test` e seus dados históricos não devem ser usados. Nenhuma consulta PostgreSQL, fixture, seed, migration, teste ou build foi executado nesta implementação.
++
++## Preparação posterior — não executada
++
++Cada etapa de escrita requer autorização explícita própria. Em PowerShell, a partir da raiz, confirme branch, processo que escuta a porta e, com credenciais locais fornecidas interativamente, consulte somente metadados:
++
++```powershell
++git status --short --branch
++Get-NetTCPConnection -LocalPort 55432 -State Listen
++psql -X -h 127.0.0.1 -p 55432 -U <admin-local> -d postgres -W -v ON_ERROR_STOP=1 -c "SELECT current_database(), host(inet_server_addr()), inet_server_port(), pg_is_in_recovery(); SELECT datname FROM pg_database WHERE datname = 'arenago_staff_homolog_20261111';"
++```
++
++Substituir `<admin-local>` pelo nome da role local. Se o servidor não for o esperado ou o banco já existir, interromper. Após autorização para criação, usar uma role dedicada já autorizada e executar:
++
++```powershell
++createdb -h 127.0.0.1 -p 55432 -U <admin-local> -O <role-dedicada> -W arenago_staff_homolog_20261111
++```
++
++O dono deve ter privilégios limitados ao banco novo. Se for necessário criar uma role dedicada antes de criar o banco, isto é outra escrita no cluster e requer autorização específica; por exemplo, antes do `createdb`:
++
++```powershell
++createuser -h 127.0.0.1 -p 55432 -U <admin-local> -W --login --no-superuser --no-createdb --no-createrole --no-inherit --pwprompt arenago_staff_homolog
++```
++
++Nesse caso, use `arenago_staff_homolog` como `<role-dedicada>`. Confirmar novamente `current_database()`, endereço e porta conectando ao banco novo antes das migrations.
++
++Após autorização para aplicar **somente 0001–0007**, confirme que a branch contém somente essas entradas no journal. Em um terminal PowerShell em `backend`, prepare uma URL local em memória sem expor senha no comando ou no relatório. O caminho escolhido para `DOTENV_CONFIG_PATH` deve não existir; a implementação de `dotenv/config` respeita essa variável. `DATABASE_DIRECT_URL` tem precedência na configuração Drizzle e deve ser igual à URL local.
++
++```powershell
++$env:NODE_ENV = 'test'
++$env:DOTENV_CONFIG_PATH = Join-Path $env:TEMP ('arenago-no-dotenv-' + [guid]::NewGuid().ToString('N'))
++if (Test-Path -LiteralPath $env:DOTENV_CONFIG_PATH) { throw 'Caminho dotenv já existe' }
++[Environment]::SetEnvironmentVariable('NODE_OPTIONS', $null, 'Process')
++$dbRole = Read-Host 'Role dedicada do banco local'
++$dbSecret = Read-Host 'Senha da role local' -AsSecureString
++$dbPlain = [System.Net.NetworkCredential]::new('', $dbSecret).Password
++$dbUrl = 'postgresql://' + [uri]::EscapeDataString($dbRole) + ':' + [uri]::EscapeDataString($dbPlain) + '@127.0.0.1:55432/arenago_staff_homolog_20261111'
++$dbPlain = $null
++$env:DATABASE_URL = $dbUrl
++$env:DATABASE_DIRECT_URL = $dbUrl
++npm.cmd run db:migrate
++```
++
++Interrompa se houver erro; não repita automaticamente. Confirme journal, hashes e `current_database()` antes de prosseguir. O script Drizzle aplica as migrations pendentes listadas no journal; não o use se outra migration aparecer. Após autorização separada para dados iniciais, no mesmo ambiente execute `npm.cmd run db:seed`. O seed insere a versão publicada do questionário e jogos curados; não cria contas nem evento.
++
++Após autorização separada para criar contas, ainda em `backend`, mantenha `$dbUrl` somente em memória e limpe do processo as variáveis que a fixture recusa. Execute sem redirecionar saída ou registrar a sessão:
++
++```powershell
++@('NODE_OPTIONS','DATABASE_URL','DATABASE_DIRECT_URL','PGHOST','PGHOSTADDR','PGPORT','PGDATABASE','PGUSER','PGPASSWORD','PGSERVICE','PGSERVICEFILE','PGOPTIONS') | ForEach-Object { [Environment]::SetEnvironmentVariable($_, $null, 'Process') }
++$env:NODE_ENV = 'test'
++node scripts/prepare-staff-homologation.cjs --execute
++```
++
++O utilitário solicita a role e sua senha PostgreSQL, verifica o destino, pede a frase de autorização e solicita duas vezes uma senha nova e distinta para cada conta. Use apenas credenciais sintéticas, nunca reutilize credenciais reais. Ele encerra se qualquer conta, evento, concessão ou idempotência já existir no banco; não faz limpeza nem sobrescreve registros. Após o uso, limpe `$dbUrl` e outros valores sensíveis do processo quando não forem mais necessários.
++
++## Bootstrap e cenário real
++
++Para os comandos a seguir, restaure no processo `DATABASE_URL` e `DATABASE_DIRECT_URL` com `$dbUrl`, mantendo `DOTENV_CONFIG_PATH` apontando para caminho inexistente e `NODE_OPTIONS` vazio. Configure chaves sintéticas independentes `JWT_SECRET`, `JWT_TEMP_SECRET`, `TOTP_ENCRYPTION_KEY` e `TOTP_RECOVERY_HMAC_KEY` em memória. As duas chaves TOTP devem ser 32 bytes distintos codificados em base64, independentes dos segredos JWT; conserve-as durante a campanha, pois trocar a chave de criptografia impede usar o TOTP configurado.
++
++Para gerá-las no processo PowerShell atual, sem imprimir os valores:
++
++```powershell
++$env:DATABASE_URL = $dbUrl
++$env:DATABASE_DIRECT_URL = $dbUrl
++$rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
++try {
++  foreach ($keyName in @('JWT_SECRET','JWT_TEMP_SECRET','TOTP_ENCRYPTION_KEY','TOTP_RECOVERY_HMAC_KEY')) {
++    $bytes = New-Object byte[] 32
++    $rng.GetBytes($bytes)
++    [Environment]::SetEnvironmentVariable($keyName, [Convert]::ToBase64String($bytes), 'Process')
++  }
++} finally { $rng.Dispose() }
++```
++
++Depois de autorização para estas escritas, faça o bootstrap do primeiro Admin com a conta sintética:
++
++```powershell
++.\node_modules\.bin\tsx.cmd src/auth/bootstrap-first-admin.ts --email staff-homolog-admin@arenago.invalid
++.\node_modules\.bin\tsx.cmd src/auth/issue-first-admin-totp.ts --email staff-homolog-admin@arenago.invalid
++```
++
++A segunda ferramenta imprime uma autorização sensível de uso único no terminal interativo. Não capture saída, imagem ou log. Ela revoga autorizações pendentes e remove credenciais TOTP **não verificadas** anteriores dessa conta; use somente no banco e conta sintéticos, com autorização e após conferir seu estado. Verifique que a porta 3000 está livre e inicie o backend neste mesmo terminal, que possui as chaves e URLs locais:
++
++```powershell
++$env:PORT = '3000'
++$env:API_BIND_HOST = '0.0.0.0'
++npm.cmd run start:dev
++```
++
++Em outro terminal, autentique o Admin por senha, use o desafio e a autorização nos endpoints `/auth/2fa/setup` e `/auth/2fa/confirm`, configure o aplicativo autenticador e conclua o login TOTP. Mantenha códigos e tokens fora de logs e relatórios.
++
++Com Admin autenticado, crie o evento por `POST /api/v1/admin/events`, uma experiência por `POST /api/v1/admin/events/:eventId/experiences` e duas estações por `POST /api/v1/admin/events/:eventId/experiences/:experienceId/stations`; envie uma `Idempotency-Key` nova por intenção. Conceda Staff pela API `POST /api/v1/admin/roles/grant` com `{ "role": "staff", "email": "staff-homolog-staff@arenago.invalid", "eventId": "<UUID>" }`. Admin deve estar ativo, verificado e autenticado com TOTP; o Staff deve estar ativo e verificado.
++
++Obtenha `clock_timestamp()` do servidor local para calcular os horários em UTC: início cinco minutos antes, fim oficial algumas horas depois e prazo operacional entre o fim oficial e até uma hora depois. O DTO de criação e o INSERT aceitam início anterior ao instante atual, desde que `startsAt < officialEndsAt <= operationalDeadlineAt <= officialEndsAt + 1 hora`; o evento nasce `scheduled`. A prontidão exige código válido, fuso IANA, Staff vigente e estação disponível. Confirme `GET /api/v1/admin/events/:eventId/readiness` antes de admitir pessoas.
++
++O corpo de criação do evento é `{ "name": "Homologacao Staff", "accessCode": "STAFF-HOMOLOG-01", "timezone": "America/Sao_Paulo", "startsAt": "<ISO-inicio>", "officialEndsAt": "<ISO-fim>", "operationalDeadlineAt": "<ISO-prazo>", "externalQueueEnabled": true }`. Substitua os instantes pelos valores calculados do relógio do banco. A experiência recebe `{ "name": "Experiencia de homologacao" }` e cada estação `{ "label": "Estacao 1" }` ou `{ "label": "Estacao 2" }`; envie JSON e Bearer do Admin sem registrá-lo. A inscrição usa `{ "eventId": "<UUID>" }` e a entrada na fila da experiência usa `{ "experienceId": "<UUID>" }`.
++
++Cada participante autentica normalmente, conclui `PUT /api/v1/profile/questionnaire` com ao menos um jogo e usa `POST /api/v1/events/lookup`, `POST /api/v1/participations` e `POST /api/v1/participations/:participationId/queue-entries` quando aplicável. Com fila externa ligada, confirme o primeiro, desative para liberar os demais e reative; uma entrada posterior deve aguardar. Use duas estações da mesma experiência e confira chamada FIFO, conclusão, ausência e remoção. Cinco participantes são suficientes se um for admitido depois da reativação. Não repita automaticamente mutação de resultado incerto.
++
++Com o backend em execução, em outro terminal, em `app`, execute os comandos abaixo com o endereço LAN real do computador. `EXPO_NO_DOTENV=1` é reconhecido pelo pacote Expo instalado e impede carregar `.env` no processo Expo.
++
++```powershell
++$env:EXPO_NO_DOTENV = '1'
++$env:EXPO_PUBLIC_API_BASE_URL = 'http://<IP-LAN>:3000'
++npm.cmd run start -- --lan
++```
++
++O Expo e o backend devem estar na mesma rede; restrinja o firewall à LAN de homologação. Encerrar processos ao final. Descarte do banco isolado é destrutivo e depende de autorização separada e nova confirmação de identidade.
++
++## Validação pendente
++
++Foram preparados testes unitários de guardas e verificação simulada do destino e do journal; não foram executados. A revisão de segurança deve avaliar parsing de ambiente, entrada oculta, hashes, atomicidade e caminhos incertos. Depois, Luna Medium deve executar os testes autorizados em isolamento. A primeira conexão ou escrita PostgreSQL requer campanha explícita em banco dedicado, com verificação de identidade e ausência de túneis; testes simulados não comprovam as garantias físicas.
