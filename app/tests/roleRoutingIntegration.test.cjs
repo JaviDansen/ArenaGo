@@ -50,6 +50,10 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
       const queueMatch = url.match(/^\/staff\/events\/([^/]+)\/experiences\/([^/]+)\/queue$/);
       if (queueMatch) return { eventId: queueMatch[1], experienceId: queueMatch[2], waitingCount: 0,
         canCallWaitingEntries: false, firstWaitingQueueEntryId: null, acceptingNewEntries: false };
+      const operationalMatch = url.match(/^\/staff\/events\/([^/]+)\/experiences\/([^/]+)\/stations\/([^/]+)\/operational-state$/);
+      if (operationalMatch) return control.operational ?? { eventId: operationalMatch[1],
+        experienceId: operationalMatch[2], stationId: operationalMatch[3], availability: 'available',
+        canCall: false, waitingCount: 0, waiting: [], pending: null };
       throw new Error(`GET inesperado: ${url}`);
     },
     async post(url) {
@@ -107,6 +111,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
       if (target === 'services/tokenStorage') return { defaultTokenStorage: storage };
       if (control.realStaff && ['screens/staff/StaffEventsNavigator', 'services/staffEventsService',
         'screens/staff/StaffEntryControlRealScreen', 'services/staffEntryService', 'services/staffEntryIntentStorage',
+        'screens/staff/StaffStationOperationalScreen', 'services/staffIntentStorage',
         'services/staffDashboardService', 'services/staffOperationsService'].includes(target)) {
         return load(`${target}.js`);
       }
@@ -320,6 +325,39 @@ test('painel real separa entrada, estações e fila compartilhada por experiênc
   assert.equal(app.calls.filter((url) => url === `/staff/events/${staffEvent.id}/experiences/${realExperienceId}/queue`).length, 2);
   await app.press('Voltar às estações'); await app.press('Voltar ao painel');
   await app.press('Controle de Entrada'); assert.ok(app.hasText('Fila de acesso ao evento'));
+  app.dispose();
+});
+
+test('estação real chama pelo backend com intenção persistida e bloqueia reenvio incerto', { skip }, async () => {
+  const secure = new Map(); let posts = 0;
+  const calledId = '77777777-7777-4777-8777-777777777777';
+  const control = { realStaff: true, platformOS: 'ios', events: [staffEvent], stations: [realStation],
+    experiences: [{ id: realExperienceId, name: 'Just Dance' }],
+    secureStore: { isAvailableAsync: async () => true,
+      getItemAsync: async key => secure.get(key) ?? null,
+      setItemAsync: async (key, value) => { secure.set(key, value); },
+      deleteItemAsync: async key => { secure.delete(key); } },
+    operational: { eventId: staffEvent.id, experienceId: realExperienceId, stationId: realStation.id,
+      availability: 'available', canCall: true, waitingCount: 1,
+      waiting: [{ queueEntryId: calledId, displayName: 'Ana', position: 1 }], pending: null },
+    http: async (route, options) => {
+      if (route.endsWith('/queue')) return { body: { eventId: staffEvent.id, experienceId: realExperienceId,
+        waitingCount: 1, canCallWaitingEntries: true, firstWaitingQueueEntryId: calledId } };
+      if (route.endsWith('/call-next')) { posts++; assert.ok(options.headers['Idempotency-Key']);
+        assert.ok([...secure.values()].some(raw => raw.includes('dispatching')));
+        return { statusCode: 201, body: { serviceSession: { id: '88888888-8888-4888-8888-888888888888',
+          queueEntryId: calledId, experienceId: realExperienceId,
+          station: { id: realStation.id, label: realStation.label }, status: 'pending' } } }; }
+      return undefined;
+    } };
+  const app = createIntegration({ initialUser: { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] }, control });
+  await app.mount(); await app.act(() => app.manager.login({ email: participant.email, password: 'password' }));
+  await app.press('Selecionar evento Evento autorizado'); await app.press('Estações');
+  await app.press('Selecionar estação Estação real');
+  assert.ok(app.hasText('Ana'));
+  await app.press('Chamar próximo'); await app.press('CONFIRMAR OPERAÇÃO');
+  assert.equal(posts, 1); assert.ok(app.hasText('Operação confirmada pelo servidor'));
+  assert.ok(!app.hasText('Rafael T.'));
   app.dispose();
 });
 

@@ -7,6 +7,7 @@ import { useAuth } from '../../context/AuthContext';
 import { createStaffEventsStore } from '../../services/staffEventsService';
 import { createStaffDashboardStore } from '../../services/staffDashboardService';
 import StaffEntryControlRealScreen from './StaffEntryControlRealScreen';
+import StaffStationOperationalScreen from './StaffStationOperationalScreen';
 
 const Stack = createNativeStackNavigator();
 const StaffEventsContext = createContext(null);
@@ -230,6 +231,12 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
       </View>}
       {snapshot.experienceId === station.experienceId && snapshot.queueStatus !== 'loading' &&
         <Button label="Atualizar fila" onPress={() => { void store.refreshQueue(); }} />}
+      <StaffStationOperationalScreen event={event} experience={stationExperience} station={station}
+        isEventCurrent={() => staff.getSelected()?.id === event.id && stationId === station.id}
+        onChanged={() => { void (async () => {
+          await store.refreshStations();
+          await store.refreshQueue(station.experienceId);
+        })(); }} />
     </>}
     {section === 'station' && <Button label="Voltar às estações" onPress={() => { store.clearQueue(); setStationId(null); setSection('stations'); }} />}
     {section === 'stations' && <Button label="Voltar ao painel" onPress={() => setSection('panel')} />}

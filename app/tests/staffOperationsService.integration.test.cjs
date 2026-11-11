@@ -22,6 +22,11 @@ const called = () => ({ serviceSession: { id: sessionId, queueEntryId: entryId,
 const completed = () => ({ serviceSession: {id:sessionId,status:'completed',resolvedAt:'2026-11-07T21:24:52.985Z'},
   queueEntry:{status:'closed',closeReason:'completed'},
   participation:{status:'active',currentQueueEntryId:null} });
+const operational = (selectedStationId = stationId) => ({ eventId, experienceId, stationId: selectedStationId,
+  availability: 'available', canCall: true, waitingCount: 1,
+  waiting: [{ queueEntryId: entryId, displayName: 'Ana', position: 1 }], pending: null });
+const removed = () => ({ eventId, experienceId, queueEntry: { id: entryId, status: 'closed',
+  closeReason: 'staff_queue_removed' }, participation: { id: userId, status: 'active', currentQueueEntryId: null } });
 function memory() {
   const map = new Map(), receipts = new Map(), actions=[];
   return { map, receipts, actions, isPersistent: true,
@@ -57,6 +62,74 @@ test('lê estações e fila operacional apenas com sessão autenticada', async (
   assert.equal(values[0].stations[0].availability,'available');
   assert.equal(values[1].firstWaitingQueueEntryId, entryId);
   assert.deepEqual(paths.map(([p,o])=>o.auth),[true,true]);
+});
+
+test('estação nominal usa rota autenticada e valida FIFO, pending e campos recebidos', async () => {
+  const { fetchStaffStationState, parseStaffStationState } = await service;
+  const requests = [];
+  const client = { async get(path, options) { requests.push({ path, options }); return operational(); } };
+  const state = await fetchStaffStationState(client, eventId, experienceId, stationId);
+  assert.deepEqual(state.waiting, operational().waiting);
+  assert.equal(requests[0].options.auth, true);
+  assert.match(requests[0].path, /\/operational-state$/);
+  assert.throws(() => parseStaffStationState({ ...operational(), waitingCount: 2 }, eventId, experienceId, stationId));
+  assert.throws(() => parseStaffStationState({ ...operational(), waiting: [{ ...operational().waiting[0], position: 2 }] }, eventId, experienceId, stationId));
+  assert.throws(() => parseStaffStationState({ ...operational(), pending: { serviceSessionId: sessionId,
+    queueEntryId: entryId, displayName: 'Ana', calledAt: '2026-11-10' } }, eventId, experienceId, stationId));
+  assert.throws(() => parseStaffStationState({ ...operational(), availability: 'unavailable', canCall: true }, eventId, experienceId, stationId));
+});
+
+test('duas estações da mesma experiência consultam a mesma fila compartilhada', async () => {
+  const { fetchStaffStationState, fetchStaffQueue } = await service;
+  const otherStation = '892e9f40-d56a-464b-a6d4-aac44cbbb2fd';
+  const paths = [];
+  const client = { async get(path) { paths.push(path); return path.endsWith('/queue') ? queue()
+    : operational(path.includes(otherStation) ? otherStation : stationId); } };
+  await Promise.all([fetchStaffStationState(client, eventId, experienceId, stationId),
+    fetchStaffStationState(client, eventId, experienceId, otherStation)]);
+  await fetchStaffQueue(client, eventId, experienceId);
+  assert.equal(paths.filter(path => path.endsWith(`/experiences/${experienceId}/queue`)).length, 1);
+  assert.equal(paths.filter(path => path.includes(`/experiences/${experienceId}/stations/`)).length, 2);
+});
+
+test('remoção registra intenção antes do POST e não encerra a participação', async () => {
+  const { createStaffOperationsCoordinator } = await service;
+  const storage = memory(), posts = [];
+  const client = { async get() { return operational(); }, async post(path, body, options) {
+    posts.push(path); assert.equal(storage.map.get(userId)?.phase, 'dispatching');
+    assert.equal(options.headers['Idempotency-Key'], key);
+    assert.equal(options.retryOnUnauthorized, false);
+    return removed(); } };
+  const result = await createStaffOperationsCoordinator({ client, storage, createKey: () => key,
+    isCurrent: () => true }).removeWaiting(context, experienceId, stationId, entryId);
+  assert.equal(result.kind, 'confirmed'); assert.equal(result.result.participationStatus, 'active');
+  assert.equal(posts.length, 1);
+});
+
+test('timeout e 401 de remoção não reenvia automaticamente uma intenção incerta', async () => {
+  const { createStaffOperationsCoordinator } = await service;
+  const storage = memory(); let posts = 0;
+  const client = { async get() { return operational(); }, async post() { posts++;
+    throw Object.assign(new Error('timeout'), { isTimeout: true }); } };
+  const manager = createStaffOperationsCoordinator({ client, storage, createKey: () => key, isCurrent: () => true });
+  assert.equal((await manager.removeWaiting(context, experienceId, stationId, entryId)).kind, 'uncertain');
+  assert.equal((await manager.removeWaiting(context, experienceId, stationId, entryId)).kind, 'pending_reconciliation');
+  assert.equal(posts, 1);
+  assert.equal(storage.map.get(userId)?.phase, 'dispatching');
+});
+
+test('remoção pendente em outra sessão não é liberada por leitura visual ou troca de estação', async () => {
+  const { createStaffOperationsCoordinator } = await service;
+  const storage = memory(); let posts = 0;
+  storage.map.set(userId, { kind: 'remove', key, phase: 'dispatching', userId, eventId, sessionId: context.sessionId,
+    stationId, experienceId, queueEntryId: entryId, serviceSessionId: null });
+  const manager = createStaffOperationsCoordinator({ client: { async get() { return operational(); },
+    async post() { posts++; return removed(); } }, storage, createKey: () => key, isCurrent: () => true });
+  const otherContext = { ...context, sessionId: '10000000-0000-4000-8000-000000000099' };
+  assert.equal((await manager.pending(otherContext)).kind, 'pending_other');
+  assert.equal((await manager.cancelReserved(otherContext)).kind, 'blocked');
+  assert.equal((await manager.removeWaiting(otherContext, experienceId, stationId, entryId)).kind, 'pending_other');
+  assert.equal(posts, 0);
 });
 
 test('não aceita estação inconsistente, fila negativa ou resposta de chamada inventada', async () => {
@@ -218,6 +291,31 @@ test('armazenamento seguro reserva antes do POST e mantém a intenção após re
   assert.deepEqual(structuredClone(await second.get(userId)), intent);
   const web = createStaffIntentStorage({ platformOS: 'web', secureStore });
   await assert.rejects(web.reserve(intent), /indisponível/);
+});
+
+test('intenção de remoção sobrevive a reinício e recibo exige a mesma entrada da fila', async () => {
+  const { createStaffIntentStorage } = loadModule('services/staffIntentStorage.js', (name) => {
+    if (name === 'react-native') return { Platform: { OS: 'android' } };
+    if (name === 'expo-secure-store') return {};
+    return require(name);
+  }).exports;
+  const values = new Map(), secureStore = { async getItemAsync(k) { return values.get(k) ?? null; },
+    async setItemAsync(k, v) { values.set(k, v); }, async deleteItemAsync(k) { values.delete(k); } };
+  const intent = { ...context, stationId, experienceId, queueEntryId: entryId,
+    serviceSessionId: null, kind: 'remove', key, phase: 'reserved' };
+  const first = createStaffIntentStorage({ platformOS: 'android', secureStore });
+  assert.equal((await first.reserve(intent)).created, true);
+  const restarted = createStaffIntentStorage({ platformOS: 'android', secureStore });
+  assert.equal((await restarted.get(userId)).queueEntryId, entryId);
+  assert.equal(await restarted.dispatch(userId, key), true);
+  await restarted.recordTerminal(userId, key, { kind: 'confirmed', result: {
+    queueEntryId: entryId, experienceId, status: 'closed', closeReason: 'staff_queue_removed',
+    participationId: userId, participationStatus: 'active' } });
+  assert.equal((await restarted.get(userId)).phase, 'terminal');
+  await restarted.clear(userId, key);
+  const wrong = { ...intent, queueEntryId: '10000000-0000-4000-8000-000000000009' };
+  assert.equal((await restarted.acknowledge(userId, key, wrong)).kind, 'receipt_changed');
+  assert.equal((await restarted.acknowledge(userId, key, intent)).kind, 'acknowledged');
 });
 
 test('conflitos definitivos e falhas ambíguas são classificados separadamente', async () => {

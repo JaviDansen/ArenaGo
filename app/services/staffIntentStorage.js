@@ -19,6 +19,10 @@ const validOutcome = (intent) => {
   if (intent.kind === 'call') return validId(result.id) && validId(result.queueEntryId) &&
     result.experienceId === intent.experienceId && result.stationId === intent.stationId &&
     typeof result.stationLabel === 'string' && Boolean(result.stationLabel.trim()) && result.status === 'pending';
+  if (intent.kind === 'remove') return result.queueEntryId === intent.queueEntryId &&
+    result.experienceId === intent.experienceId && result.status === 'closed' &&
+    result.closeReason === 'staff_queue_removed' && validId(result.participationId) &&
+    result.participationStatus === 'active';
   if (result.id !== intent.serviceSessionId) return false;
   if (intent.kind === 'complete') return result.status === 'completed' && result.queueEntryStatus === 'closed' &&
     result.closeReason === 'completed' && result.participationStatus === 'active';
@@ -32,6 +36,8 @@ const valid = (intent, userId) => intent?.userId === userId && validId(intent.ke
   ['reserved', 'dispatching', 'terminal'].includes(intent.phase) &&
   (intent.phase !== 'terminal' || validOutcome(intent)) &&
   (intent.kind === 'call' ? validId(intent.experienceId) && intent.serviceSessionId === null :
+    intent.kind === 'remove' ? validId(intent.experienceId) && validId(intent.queueEntryId) &&
+      intent.serviceSessionId === null :
     ['complete', 'absent'].includes(intent.kind) && intent.experienceId === null && validId(intent.serviceSessionId));
 
 // Uma instância compartilhada serializa reserva, leitura e remoção; web bloqueia
@@ -135,7 +141,8 @@ export function createStaffIntentStorage({ platformOS = Platform.OS, secureStore
       if (!target) return { kind: 'receipt_absent' };
       if (target.sessionId !== expectedScope?.sessionId || target.eventId !== expectedScope?.eventId ||
           target.stationId !== expectedScope?.stationId || target.serviceSessionId !== expectedScope?.serviceSessionId ||
-          target.kind !== expectedScope?.kind || target.experienceId !== expectedScope?.experienceId)
+          target.kind !== expectedScope?.kind || target.experienceId !== expectedScope?.experienceId ||
+          target.queueEntryId !== expectedScope?.queueEntryId)
         return { kind: 'receipt_changed' };
       if (intent) return { kind: 'cleanup_pending' };
       if (marker?.status === 'completed' && marker.receipt.key === expectedKey && !receipt)

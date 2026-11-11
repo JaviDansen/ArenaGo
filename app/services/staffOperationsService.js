@@ -121,6 +121,40 @@ export async function fetchStaffQueue(client, eventId, experienceId) {
     `/staff/events/${eventId}/experiences/${experienceId}/queue`, { auth: true }), eventId, experienceId);
 }
 
+export function parseStaffStationState(body, eventId, experienceId, stationId) {
+  requireIds(eventId, experienceId, stationId);
+  if (body?.eventId !== eventId || body.experienceId !== experienceId || body.stationId !== stationId ||
+      !['available', 'unavailable'].includes(body.availability) || typeof body.canCall !== 'boolean' ||
+      !Number.isSafeInteger(body.waitingCount) || body.waitingCount < 0 || !Array.isArray(body.waiting) ||
+      body.waiting.length !== body.waitingCount) throw bad('Estado operacional da estação inválido.');
+  const seen = new Set();
+  const waiting = body.waiting.map((row, index) => {
+    if (!isUuid(row?.queueEntryId) || seen.has(row.queueEntryId.toLowerCase()) ||
+        typeof row.displayName !== 'string' || !row.displayName.trim() || row.position !== index + 1)
+      throw bad('Fila operacional inconsistente.');
+    seen.add(row.queueEntryId.toLowerCase());
+    return { queueEntryId: row.queueEntryId, displayName: row.displayName, position: row.position };
+  });
+  const pending = body.pending === null ? null : body.pending;
+  if (pending && (!isUuid(pending.serviceSessionId) || !isUuid(pending.queueEntryId) ||
+      typeof pending.displayName !== 'string' || !pending.displayName.trim() ||
+      typeof pending.calledAt !== 'string' || !Number.isFinite(Date.parse(pending.calledAt)) ||
+      new Date(pending.calledAt).toISOString() !== pending.calledAt)) throw bad('Atendimento pendente inválido.');
+  if (body.pending === undefined || (pending && body.canCall) ||
+      (body.availability === 'unavailable' && body.canCall)) throw bad('Estado de chamada inconsistente.');
+  return { eventId, experienceId, stationId, availability: body.availability, canCall: body.canCall,
+    waitingCount: body.waitingCount, waiting, pending: pending && {
+      serviceSessionId: pending.serviceSessionId, queueEntryId: pending.queueEntryId,
+      displayName: pending.displayName, calledAt: pending.calledAt } };
+}
+
+export async function fetchStaffStationState(client, eventId, experienceId, stationId) {
+  requireIds(eventId, experienceId, stationId);
+  return parseStaffStationState(await client.get(
+    `/staff/events/${eventId}/experiences/${experienceId}/stations/${stationId}/operational-state`,
+    { auth: true }), eventId, experienceId, stationId);
+}
+
 /**
  * As funções mutantes exigem a mesma chave estável em cada retry da MESMA intenção.
  * Usar createStaffOperationsCoordinator para guardar a chave antes do POST.
@@ -129,7 +163,7 @@ export async function callNextStaff(client, { eventId, experienceId, stationId, 
   requireIds(eventId, experienceId, stationId, idempotencyKey);
   const body = await client.post(
     `/staff/events/${eventId}/experiences/${experienceId}/stations/${stationId}/call-next`, {},
-    { auth: true, headers: { 'Idempotency-Key': idempotencyKey }, outcomeUnknownOnNetworkError: true });
+    { auth: true, headers: { 'Idempotency-Key': idempotencyKey }, retryOnUnauthorized: false, outcomeUnknownOnNetworkError: true });
   return parseCalledSession(body, { experienceId, stationId });
 }
 
@@ -137,7 +171,7 @@ export async function completeStaffService(client, { eventId, serviceSessionId, 
   requireIds(eventId, serviceSessionId, idempotencyKey);
   const body = await client.post(
     `/staff/events/${eventId}/service-sessions/${serviceSessionId}/complete`, {},
-    { auth: true, headers: { 'Idempotency-Key': idempotencyKey }, outcomeUnknownOnNetworkError: true });
+    { auth: true, headers: { 'Idempotency-Key': idempotencyKey }, retryOnUnauthorized: false, outcomeUnknownOnNetworkError: true });
   return parseCompletedSession(body, serviceSessionId);
 }
 
@@ -145,12 +179,32 @@ export async function absentStaffService(client, { eventId, serviceSessionId, id
   requireIds(eventId, serviceSessionId, idempotencyKey);
   const body = await client.post(
     `/staff/events/${eventId}/service-sessions/${serviceSessionId}/absent`, {},
-    { auth: true, headers: { 'Idempotency-Key': idempotencyKey }, outcomeUnknownOnNetworkError: true });
+    { auth: true, headers: { 'Idempotency-Key': idempotencyKey }, retryOnUnauthorized: false, outcomeUnknownOnNetworkError: true });
   return parseAbsentSession(body, serviceSessionId);
 }
 
+export function parseRemovedQueueEntry(body, eventId, experienceId, queueEntryId) {
+  requireIds(eventId, experienceId, queueEntryId);
+  if (body?.eventId !== eventId || body.experienceId !== experienceId ||
+      body.queueEntry?.id !== queueEntryId || body.queueEntry.status !== 'closed' ||
+      body.queueEntry.closeReason !== 'staff_queue_removed' || !isUuid(body.participation?.id) ||
+      body.participation.status !== 'active' || body.participation.currentQueueEntryId !== null)
+    throw bad('Resposta inesperada da remoção. Não repetir a operação.');
+  return { queueEntryId, experienceId, status: 'closed', closeReason: 'staff_queue_removed',
+    participationId: body.participation.id, participationStatus: 'active' };
+}
+
+export async function removeWaitingStaff(client, { eventId, experienceId, queueEntryId, idempotencyKey }) {
+  requireIds(eventId, experienceId, queueEntryId, idempotencyKey);
+  const body = await client.post(
+    `/staff/events/${eventId}/experiences/${experienceId}/queue-entries/${queueEntryId}/remove`, {},
+    { auth: true, headers: { 'Idempotency-Key': idempotencyKey }, retryOnUnauthorized: false,
+      outcomeUnknownOnNetworkError: true });
+  return parseRemovedQueueEntry(body, eventId, experienceId, queueEntryId);
+}
+
 const definitiveConflicts = new Set(['QUEUE_EMPTY', 'STATION_UNAVAILABLE', 'STATION_HAS_PENDING_CALL',
-  'SERVICE_NOT_PENDING', 'EVENT_OPERATION_ENDED']);
+  'SERVICE_NOT_PENDING', 'EVENT_OPERATION_ENDED', 'QUEUE_ENTRY_NOT_WAITING']);
 
 /** Uma resposta inválida ou um erro após envio pode ocultar um commit. */
 export function classifyStaffOperationError(error) {
@@ -176,7 +230,8 @@ export function createStaffOperationsCoordinator({ client, storage, createKey, i
   function conflict(existing, next) {
     return existing && (existing.kind !== next.kind || existing.eventId !== next.eventId || existing.sessionId !== next.sessionId
       || existing.userId !== next.userId || existing.experienceId !== next.experienceId
-      || existing.stationId !== next.stationId || existing.serviceSessionId !== next.serviceSessionId);
+      || existing.stationId !== next.stationId || existing.serviceSessionId !== next.serviceSessionId
+      || existing.queueEntryId !== next.queueEntryId);
   }
   async function getIntent(context) {
     alive(context);
@@ -265,6 +320,10 @@ export function createStaffOperationsCoordinator({ client, storage, createKey, i
     async readQueue(context, experienceId) {
       contextValid(context); const value = await fetchStaffQueue(client, context.eventId, experienceId); alive(context); return value;
     },
+    async readStationState(context, experienceId, stationId) {
+      contextValid(context); const value = await fetchStaffStationState(client, context.eventId, experienceId, stationId);
+      alive(context); return value;
+    },
     callNext(context, experienceId, stationId) {
       context = { ...context };
       return single(async () => {
@@ -306,6 +365,19 @@ export function createStaffOperationsCoordinator({ client, storage, createKey, i
         }, (key) => absentStaffService(client, { eventId: context.eventId, serviceSessionId, idempotencyKey: key }));
       }, context, { ...context, kind: 'absent', experienceId: null, stationId, serviceSessionId });
     },
+    removeWaiting(context, experienceId, stationId, queueEntryId) {
+      context = { ...context };
+      return single(async () => {
+        contextValid(context); requireIds(experienceId, stationId, queueEntryId);
+        const desired = { kind: 'remove', userId: context.userId, eventId: context.eventId,
+          sessionId: context.sessionId, experienceId, stationId, serviceSessionId: null, queueEntryId };
+        return execute(context, desired, async () => {
+          const state = await fetchStaffStationState(client, context.eventId, experienceId, stationId);
+          return state.waiting.some(row => row.queueEntryId === queueEntryId);
+        }, key => removeWaitingStaff(client, { eventId: context.eventId, experienceId, queueEntryId,
+          idempotencyKey: key }));
+      }, context, { ...context, kind: 'remove', experienceId, stationId, serviceSessionId: null, queueEntryId });
+    },
     pending(context) { context = { ...context }; return scoped(context, async () => {
       contextValid(context);
       const intent = await getIntent(context);
@@ -313,13 +385,16 @@ export function createStaffOperationsCoordinator({ client, storage, createKey, i
       if (intent.sessionId !== context.sessionId || intent.eventId !== context.eventId ||
           !isUuid(context.stationId) || intent.stationId !== context.stationId) return { kind: 'pending_other' };
       alive(context, intent);
-      return intent.phase === 'terminal' ? { kind: 'terminal_pending', operation: intent.kind, outcome: intent.outcome, receiptId: intent.key }
+      return intent.phase === 'terminal' ? { kind: 'terminal_pending', operation: intent.kind, outcome: intent.outcome,
+        receiptId: intent.key, serviceSessionId: intent.kind === 'call' && intent.outcome?.kind === 'confirmed'
+          ? intent.outcome.result.id : intent.serviceSessionId }
         : { kind: intent.phase === 'reserved' ? 'reserved' : 'pending_reconciliation', operation: intent.kind };
     }); },
     cancelReserved(context) { context = { ...context }; return scoped(context, async () => {
       contextValid(context);
       const intent = await getIntent(context);
-      if (!intent || intent.phase !== 'reserved')
+      if (!intent || intent.phase !== 'reserved' || intent.sessionId !== context.sessionId ||
+          intent.eventId !== context.eventId || intent.stationId !== context.stationId)
         return { kind: 'blocked' };
       const cancelled = await storage.cancelReserved(context.userId, intent.key);
       return isCurrent(context) ? { kind: cancelled ? 'cancelled' : 'blocked' } : { kind: 'stale' };
