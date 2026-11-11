@@ -29,7 +29,7 @@ const DIAGNOSTICS = Object.freeze({
   mismatch: 'Confirmação de senha divergente.',
   length: 'Comprimento de senha inválido: use de 8 a 128 caracteres.',
   policy: 'Senha recusada pela política de segurança existente.',
-  reused: 'Senha já utilizada nesta execução.',
+  adminConflict: 'A senha do Admin deve ser exclusiva das demais contas.',
   hash: 'Falha na geração do hash da senha.',
   input: 'Falha na leitura interativa.',
 });
@@ -48,7 +48,7 @@ function diagnosticMessage(error) {
   return 'Preparação não confirmada. Confira identidade, migrations e estado do banco antes de qualquer nova tentativa.';
 }
 
-async function prepareAccountHash(account, used, read = question, hash = argon2.hash) {
+async function prepareAccountHash(account, passwordState, isAdmin, read = question, hash = argon2.hash) {
   let secret;
   let repeated;
   try {
@@ -59,9 +59,16 @@ async function prepareAccountHash(account, used, read = question, hash = argon2.
   }
   if (secret !== repeated) throw new FixtureDiagnosticError('mismatch');
   if (secret.length < 8 || secret.length > 128) throw new FixtureDiagnosticError('length');
-  if (used.has(secret)) throw new FixtureDiagnosticError('reused');
   if (evaluatePasswordSecurity(secret, account).compromised) throw new FixtureDiagnosticError('policy');
-  used.add(secret);
+  if (isAdmin) {
+    if (passwordState.adminSecret !== undefined || passwordState.nonAdminSecrets.has(secret)) {
+      throw new FixtureDiagnosticError('adminConflict');
+    }
+    passwordState.adminSecret = secret;
+  } else {
+    if (secret === passwordState.adminSecret) throw new FixtureDiagnosticError('adminConflict');
+    passwordState.nonAdminSecrets.add(secret);
+  }
   try {
     return await hash(secret, { type: argon2.argon2id, memoryCost: 19456, timeCost: 2, parallelism: 1 });
   } catch {
@@ -153,11 +160,12 @@ async function main() {
     const confirmation = await question(`Digite ${CONFIRMATION} para autorizar esta execução: `);
     if (confirmation !== CONFIRMATION) throw new Error('Autorização não confirmada.');
     const hashes = [];
-    const used = new Set();
-    for (const account of ACCOUNTS) {
-      hashes.push(await prepareAccountHash(account, used));
+    const passwordState = { adminSecret: undefined, nonAdminSecrets: new Set() };
+    for (let index = 0; index < ACCOUNTS.length; index += 1) {
+      hashes.push(await prepareAccountHash(ACCOUNTS[index], passwordState, index === 0));
     }
-    used.clear();
+    passwordState.adminSecret = undefined;
+    passwordState.nonAdminSecrets.clear();
     await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
     inTransaction = true;
     await client.query('LOCK TABLE drizzle.__drizzle_migrations IN SHARE MODE');

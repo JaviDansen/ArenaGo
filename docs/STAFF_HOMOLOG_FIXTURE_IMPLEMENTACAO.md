@@ -2,7 +2,7 @@
 
 ## Escopo e limitações
 
-O utilitário `backend/scripts/prepare-staff-homologation.cjs` prepara somente sete contas sintéticas: uma destinada ao bootstrap Admin, uma ao Staff e cinco participantes. Todos recebem UUID próprio, senha distinta fornecida em terminal e hash Argon2id com os parâmetros do cadastro real. A política de senha existente é aplicada. Os endereços são fictícios sob `arenago.invalid`; o utilitário marca o e-mail como verificado apenas como dado sintético de homologação. Cria o papel global `participante` como no cadastro e não cria papel Admin ou Staff, sessão, TOTP, perfil, evento ou participação.
+O utilitário `backend/scripts/prepare-staff-homologation.cjs` prepara somente sete contas sintéticas: uma destinada ao bootstrap Admin, uma ao Staff e cinco participantes. Todos recebem UUID próprio e hash Argon2id com os parâmetros do cadastro real. A senha do Admin deve ser exclusiva; a conta Staff e os cinco participantes podem usar a mesma senha sintética, digitada e confirmada separadamente para cada conta. A política de senha existente é aplicada a cada conta. Os endereços são fictícios sob `arenago.invalid`; o utilitário marca o e-mail como verificado apenas como dado sintético de homologação. Cria o papel global `participante` como no cadastro e não cria papel Admin ou Staff, sessão, TOTP, perfil, evento ou participação.
 
 A execução exige `NODE_ENV=test`, `--execute`, terminal interativo e a frase de autorização `AUTORIZO CONTAS SINTETICAS`. O destino TCP e o banco são fixos no código: `127.0.0.1:55432/arenago_staff_homolog_20261111`. O programa não carrega `.env` nem aceita URL ou opções de conexão; pede role e senha PostgreSQL em terminal, sem mostrar a senha. Rejeita variáveis de redirecionamento e `NODE_OPTIONS` no ambiente. O PostgreSQL confirma banco, endereço, porta e que não está em recuperação. Antes das escritas e novamente na transação, os sete hashes e timestamps do journal Drizzle são comparados aos arquivos desta branch; também são exigidos tabelas, check e trigger da 0007, questionário ativo e jogo curado. A transação bloqueia as tabelas e exige ausência de usuários, papéis, eventos e operações de idempotência. Conflitos ou erros abortam; se o resultado do commit for incerto, inspecione o banco antes de qualquer nova tentativa.
 
@@ -59,7 +59,7 @@ $env:NODE_ENV = 'test'
 node scripts/prepare-staff-homologation.cjs --execute
 ```
 
-O utilitário solicita a role e sua senha PostgreSQL, verifica o destino, pede a frase de autorização e solicita duas vezes uma senha nova e distinta para cada conta. Use apenas credenciais sintéticas, nunca reutilize credenciais reais. Ele encerra se qualquer conta, evento, concessão ou idempotência já existir no banco; não faz limpeza nem sobrescreve registros. Após o uso, limpe `$dbUrl` e outros valores sensíveis do processo quando não forem mais necessários.
+O utilitário solicita a role e sua senha PostgreSQL, verifica o destino, pede a frase de autorização e solicita duas vezes a senha de cada conta. Use uma senha sintética exclusiva para Admin; Staff e participantes podem repetir entre si uma senha sintética aceita pela política. Nunca reutilize credenciais reais. Ele encerra se qualquer conta, evento, concessão ou idempotência já existir no banco; não faz limpeza nem sobrescreve registros. Após o uso, limpe `$dbUrl` e outros valores sensíveis do processo quando não forem mais necessários.
 
 ## Bootstrap e cenário real
 
