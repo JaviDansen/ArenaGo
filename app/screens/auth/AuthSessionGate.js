@@ -1,9 +1,20 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AuthProvider, useAuth } from '../../context/AuthContext';
+
+function loadLogoSource() {
+  try {
+    // eslint-disable-next-line global-require
+    return require('../../assets/images/logo-arenago.png');
+  } catch {
+    return null;
+  }
+}
+
+const logoArenaGoSource = loadLogoSource();
 
 export function resolveInitialRouteForAuthState(authState) {
   if (!authState || !authState.isAuthenticated) {
@@ -29,23 +40,39 @@ export function resolveInitialRouteForAuthState(authState) {
   return 'MainTabs';
 }
 
-export function AuthSessionCoordinator({ children }) {
+export function AuthSessionCoordinator({ children, onInitializingChange }) {
   const auth = useAuth();
   const [bypassNetworkRecovery, setBypassNetworkRecovery] = useState(false);
+
+  useEffect(() => {
+    if (typeof onInitializingChange === 'function' && auth) {
+      onInitializingChange(Boolean(auth.isInitializing));
+    }
+  }, [auth?.isInitializing, onInitializingChange]);
 
   if (!auth) {
     return children;
   }
 
   if (auth.isInitializing) {
+    const SafeImage = typeof Image !== 'undefined' ? Image : null;
     return (
       <SafeAreaView style={styles.container}>
         <StatusBar style="light" />
         <View style={styles.centerBox}>
-          <View style={styles.logoBadge}>
-            <Text style={styles.logoBadgeText}>B</Text>
-          </View>
-          <ActivityIndicator size="large" color="#a78bfa" />
+          {logoArenaGoSource && SafeImage ? (
+            <SafeImage
+              source={logoArenaGoSource}
+              style={styles.logoImage}
+              resizeMode="contain"
+              accessibilityLabel="ArenaGO"
+            />
+          ) : (
+            <View style={styles.logoBadge}>
+              <Text style={styles.logoBadgeText}>ArenaGO</Text>
+            </View>
+          )}
+          <ActivityIndicator size="large" color="#8A68FF" />
           <Text style={styles.loadingTitle}>Restaurando sua sessão...</Text>
           <Text style={styles.loadingSubtitle}>
             Confirmando suas credenciais com segurança no ArenaGo.
@@ -110,6 +137,7 @@ export default function AuthSessionGate({
   tokenStorage,
   sessionManager,
   autoRestore = true,
+  onInitializingChange,
 }) {
   return (
     <AuthProvider
@@ -118,7 +146,9 @@ export default function AuthSessionGate({
       sessionManager={sessionManager}
       autoRestore={autoRestore}
     >
-      <AuthSessionCoordinator>{children}</AuthSessionCoordinator>
+      <AuthSessionCoordinator onInitializingChange={onInitializingChange}>
+        {children}
+      </AuthSessionCoordinator>
     </AuthProvider>
   );
 }
@@ -126,7 +156,7 @@ export default function AuthSessionGate({
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0c0a17',
+    backgroundColor: '#1C0A35',
     justifyContent: 'center',
     paddingHorizontal: 24,
   },
@@ -134,34 +164,40 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 14,
   },
+  logoImage: {
+    width: 220,
+    height: 72,
+    marginBottom: 8,
+  },
   logoBadge: {
-    width: 64,
-    height: 64,
-    borderRadius: 18,
-    backgroundColor: '#7c3aed',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 14,
+    backgroundColor: '#5F33FA',
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: 8,
   },
   logoBadgeText: {
     color: '#ffffff',
-    fontSize: 30,
+    fontSize: 20,
     fontWeight: '900',
+    letterSpacing: 1,
   },
   recoveryTag: {
-    color: '#f59e0b',
+    color: '#FFB800',
     fontSize: 12,
     fontWeight: '800',
     letterSpacing: 1.2,
   },
   loadingTitle: {
-    color: '#ffffff',
+    color: '#FFFFFF',
     fontSize: 20,
     fontWeight: '800',
     textAlign: 'center',
   },
   loadingSubtitle: {
-    color: '#94a3b8',
+    color: '#A0A0B8',
     fontSize: 14,
     lineHeight: 20,
     textAlign: 'center',
@@ -172,28 +208,28 @@ const styles = StyleSheet.create({
     marginTop: 12,
   },
   primaryButton: {
-    backgroundColor: '#7c3aed',
+    backgroundColor: '#5F33FA',
     height: 50,
     borderRadius: 14,
     justifyContent: 'center',
     alignItems: 'center',
   },
   primaryButtonText: {
-    color: '#ffffff',
+    color: '#FFFFFF',
     fontSize: 15,
     fontWeight: '700',
   },
   secondaryButton: {
-    backgroundColor: '#191330',
+    backgroundColor: '#161626',
     borderWidth: 1,
-    borderColor: '#34265a',
+    borderColor: '#24243A',
     height: 50,
     borderRadius: 14,
     justifyContent: 'center',
     alignItems: 'center',
   },
   secondaryButtonText: {
-    color: '#e2d9f3',
+    color: '#A0A0B8',
     fontSize: 15,
     fontWeight: '700',
   },

@@ -24,7 +24,11 @@
         {
           "image": "./assets/splash-icon.png",
           "resizeMode": "contain",
-          "backgroundColor": "#ffffff"
+          "backgroundColor": "#1C0A35",
+          "dark": {
+            "image": "./assets/splash-icon.png",
+            "backgroundColor": "#1C0A35"
+          }
         }
       ],
       "@react-native-community/datetimepicker",
