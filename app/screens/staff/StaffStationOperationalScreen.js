@@ -100,7 +100,7 @@ export default function StaffStationOperationalScreen({ event, experience, stati
       result = action.kind === 'call' ? await coordinator.callNext(scope, experience.id, station.id)
         : action.kind === 'complete' ? await coordinator.complete(scope, action.serviceSessionId, station.id)
           : action.kind === 'absent' ? await coordinator.absent(scope, action.serviceSessionId, station.id)
-            : await coordinator.removeWaiting(scope, experience.id, station.id, action.queueEntryId);
+            : await coordinator.removeCalled(scope, experience.id, station.id, action.serviceSessionId);
     } catch { result = { kind: 'storage_error' }; }
     if (!same(scope, getContext())) return;
     setView(previous => ({ ...previous, busy: false, feedback: result }));
@@ -155,16 +155,15 @@ export default function StaffStationOperationalScreen({ event, experience, stati
       <Text style={styles.text}>Aguardando nesta experiência: {data.waitingCount}</Text>
       {data.pending ? <View style={styles.card}>
         <Text style={styles.title}>Participante chamado: {data.pending.displayName}</Text>
-        <Text style={styles.text}>A chamada precisa ser concluída ou registrada como ausência antes da próxima.</Text>
+        <Text style={styles.text}>Resolva a chamada antes da próxima: conclua, registre ausência ou remova da fila.</Text>
         <Button label="Concluir atendimento" disabled={blocked} onPress={() => open({ kind: 'complete', serviceSessionId: data.pending.serviceSessionId })} />
         <Button label="Registrar ausência" disabled={blocked} onPress={() => open({ kind: 'absent', serviceSessionId: data.pending.serviceSessionId })} />
+        <Button label="Remover da fila" disabled={blocked} onPress={() => open({ kind: 'remove_called', serviceSessionId: data.pending.serviceSessionId })} />
       </View> : <Button label="Chamar próximo" disabled={blocked || !data.canCall || data.waitingCount === 0}
         onPress={() => open({ kind: 'call' })} />}
       {data.waitingCount === 0 && <Text style={styles.text}>Nenhuma pessoa aguardando nesta experiência.</Text>}
       {data.waiting.map(person => <View key={person.queueEntryId} style={styles.card}>
         <Text style={styles.text}>{person.position}. {person.displayName}</Text>
-        <Button label={`Remover ${person.displayName} da fila`} disabled={blocked}
-          onPress={() => open({ kind: 'remove', queueEntryId: person.queueEntryId })} />
       </View>)}
     </>}
     {!coordinator && <Text style={styles.warning}>Operações indisponíveis sem armazenamento seguro neste dispositivo.</Text>}

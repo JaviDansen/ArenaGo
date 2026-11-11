@@ -27,6 +27,84 @@ const operational = (selectedStationId = stationId) => ({ eventId, experienceId,
   waiting: [{ queueEntryId: entryId, displayName: 'Ana', position: 1 }], pending: null });
 const removed = () => ({ eventId, experienceId, queueEntry: { id: entryId, status: 'closed',
   closeReason: 'staff_queue_removed' }, participation: { id: userId, status: 'active', currentQueueEntryId: null } });
+const removedCalled = () => ({ serviceSession: { id: sessionId, status: 'canceled',
+  cancelReason: 'staff_queue_removed', resolvedAt: '2026-11-11T15:00:00.000Z' },
+  queueEntry: { status: 'closed', closeReason: 'staff_queue_removed' },
+  participation: { status: 'active', currentQueueEntryId: null } });
+
+test('remoção de chamado persiste reserva/despacho/recibo com adaptador real e exige reconhecimento', async () => {
+  const { createStaffOperationsCoordinator } = await service;
+  const rig = secureStaffRig(); let posts = 0;
+  const manager = createStaffOperationsCoordinator({ storage: rig.storage, createKey: () => key, isCurrent: () => true,
+    client: { async get() { return stations(sessionId); }, async post(path, body, options) {
+      posts++; assert.match(path, new RegExp(`/service-sessions/${sessionId}/remove$`));
+      assert.deepEqual(body, {}); assert.equal(options.retryOnUnauthorized, false);
+      assert.equal(options.outcomeUnknownOnNetworkError, true);
+      assert.equal(options.headers['Idempotency-Key'], key);
+      const intent = await rig.storage.get(userId);
+      assert.equal(intent.phase, 'dispatching'); assert.equal(intent.kind, 'remove_called');
+      assert.equal(intent.experienceId, experienceId); return removedCalled();
+    } } });
+  const scope = { ...context, stationId, serviceSessionId: sessionId };
+  assert.equal((await manager.removeCalled(context, experienceId, stationId, sessionId)).kind, 'confirmed');
+  const reloaded = secureStaffRig(rig.values).storage;
+  const receipt = await reloaded.get(userId);
+  assert.equal(receipt.phase, 'terminal'); assert.equal(receipt.outcome.result.participationStatus, 'active');
+  assert.equal((await manager.removeCalled(context, experienceId, stationId, sessionId)).kind, 'terminal_pending');
+  assert.equal(posts, 1);
+  assert.equal((await manager.acknowledgeTerminal(scope, key)).kind, 'acknowledged');
+});
+
+test('timeout de remoção de chamado mantém dispatching após reinício e bloqueia complete/absent', async () => {
+  const { createStaffOperationsCoordinator } = await service;
+  const rig = secureStaffRig(); let posts = 0;
+  const options = { storage: rig.storage, createKey: () => key, isCurrent: () => true,
+    client: { async get() { return stations(sessionId); }, async post() { posts++; throw new Error('resposta perdida'); } } };
+  const manager = createStaffOperationsCoordinator(options);
+  assert.equal((await manager.removeCalled(context, experienceId, stationId, sessionId)).kind, 'uncertain');
+  const restarted = createStaffOperationsCoordinator({ ...options, storage: secureStaffRig(rig.values).storage });
+  assert.equal((await restarted.removeCalled(context, experienceId, stationId, sessionId)).kind, 'pending_reconciliation');
+  assert.equal((await restarted.complete(context, sessionId, stationId)).kind, 'pending_other');
+  assert.equal((await restarted.absent(context, sessionId, stationId)).kind, 'pending_other');
+  assert.equal((await restarted.pending({ ...context, stationId })).kind, 'pending_reconciliation');
+  assert.equal(posts, 1);
+});
+
+test('remoção de chamado não aceita conclusão, ausência ou participação encerrada como confirmação', async () => {
+  const { parseRemovedCalledSession } = await service;
+  for (const body of [completed(), { ...removedCalled(), serviceSession: { ...removedCalled().serviceSession, status: 'absent' } },
+    { ...removedCalled(), participation: { status: 'finished', currentQueueEntryId: null } }]) {
+    assert.throws(() => parseRemovedCalledSession(body, sessionId));
+  }
+});
+
+test('resposta tardia de remoção pertence à conta original e não é publicada após logout', async () => {
+  const { createStaffOperationsCoordinator } = await service;
+  const rig = secureStaffRig(); let active = true;
+  const manager = createStaffOperationsCoordinator({ storage: rig.storage, createKey: () => key,
+    isCurrent: () => active, client: { async get() { return stations(sessionId); },
+      async post() { active = false; return removedCalled(); } } });
+  assert.equal((await manager.removeCalled(context, experienceId, stationId, sessionId)).kind, 'stale');
+  const stored = await rig.storage.get(userId);
+  assert.equal(stored.sessionId, context.sessionId); assert.equal(stored.phase, 'terminal');
+  assert.equal(stored.outcome.kind, 'confirmed');
+});
+
+test('401 gera recibo de recusa e resposta inválida mantém remoção chamada incerta', async () => {
+  const { createStaffOperationsCoordinator } = await service;
+  for (const failure of ['401', 'invalid']) {
+    const rig = secureStaffRig(); let posts = 0;
+    const manager = createStaffOperationsCoordinator({ storage: rig.storage, createKey: () => key, isCurrent: () => true,
+      client: { async get() { return stations(sessionId); }, async post() {
+        posts++; if (failure === '401') throw Object.assign(new Error('sessão revogada'), { status: 401, code: 'SESSION_REVOKED' });
+        return completed();
+      } } });
+    assert.equal((await manager.removeCalled(context, experienceId, stationId, sessionId)).kind,
+      failure === '401' ? 'rejected' : 'uncertain');
+    await manager.removeCalled(context, experienceId, stationId, sessionId);
+    assert.equal(posts, 1);
+  }
+});
 function memory() {
   const map = new Map(), receipts = new Map(), actions=[];
   return { map, receipts, actions, isPersistent: true,

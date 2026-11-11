@@ -5,6 +5,7 @@ import type { CallNextResult } from "./call-next.types";
 import { CompleteServiceIntegrityError } from "./complete.service";
 import type { CompleteServiceResult } from "./complete.types";
 import { AbsentServiceIntegrityError } from "./absent.service";
+import { CalledRemovalServiceIntegrityError } from "./staff-called-removal.service";
 import type { AbsentServiceResult } from "./absent.types";
 
 type FailureKind = Exclude<(CallNextResult | CompleteServiceResult | AbsentServiceResult)["kind"], "created" | "completed" | "absent" | "replay">;
@@ -29,7 +30,7 @@ export function rejectStaffOperation(kind: FailureKind): never {
 /** Erros de integridade reais nunca viram conflito de negócio ou resposta com IDs/SQL. */
 export async function executeStaffOperation<T>(action: () => Promise<T>): Promise<T> {
   try { return await action(); } catch (error) {
-    if (error instanceof CallNextIntegrityError || error instanceof CompleteServiceIntegrityError || error instanceof AbsentServiceIntegrityError) {
+    if (error instanceof CallNextIntegrityError || error instanceof CompleteServiceIntegrityError || error instanceof AbsentServiceIntegrityError || error instanceof CalledRemovalServiceIntegrityError) {
       throw new ProblemException({ typeSlug: "internal-server-error", title: "Erro interno do servidor", status: HttpStatus.INTERNAL_SERVER_ERROR,
         code: "INTERNAL_SERVER_ERROR", detail: "Não foi possível processar a operação." });
     }

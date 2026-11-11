@@ -194,6 +194,28 @@ export function parseRemovedQueueEntry(body, eventId, experienceId, queueEntryId
     participationId: body.participation.id, participationStatus: 'active' };
 }
 
+export function parseRemovedCalledSession(body, serviceSessionId) {
+  requireIds(serviceSessionId);
+  if (body?.serviceSession?.id !== serviceSessionId || body.serviceSession.status !== 'canceled' ||
+      body.serviceSession.cancelReason !== 'staff_queue_removed' ||
+      typeof body.serviceSession.resolvedAt !== 'string' || !Number.isFinite(Date.parse(body.serviceSession.resolvedAt)) ||
+      new Date(body.serviceSession.resolvedAt).toISOString() !== body.serviceSession.resolvedAt ||
+      body.queueEntry?.status !== 'closed' || body.queueEntry.closeReason !== 'staff_queue_removed' ||
+      body.participation?.status !== 'active' || body.participation.currentQueueEntryId !== null)
+    throw bad('Resposta inesperada da remoção do atendimento. Não repetir a operação.');
+  return { id: serviceSessionId, status: 'canceled', cancelReason: 'staff_queue_removed',
+    resolvedAt: body.serviceSession.resolvedAt, queueEntryStatus: 'closed',
+    closeReason: 'staff_queue_removed', participationStatus: 'active' };
+}
+
+export async function removeCalledStaff(client, { eventId, serviceSessionId, idempotencyKey }) {
+  requireIds(eventId, serviceSessionId, idempotencyKey);
+  const body = await client.post(`/staff/events/${eventId}/service-sessions/${serviceSessionId}/remove`, {},
+    { auth: true, headers: { 'Idempotency-Key': idempotencyKey }, retryOnUnauthorized: false,
+      outcomeUnknownOnNetworkError: true });
+  return parseRemovedCalledSession(body, serviceSessionId);
+}
+
 export async function removeWaitingStaff(client, { eventId, experienceId, queueEntryId, idempotencyKey }) {
   requireIds(eventId, experienceId, queueEntryId, idempotencyKey);
   const body = await client.post(
@@ -364,6 +386,19 @@ export function createStaffOperationsCoordinator({ client, storage, createKey, i
           return stations.some((s) => s.id === stationId && s.pendingServiceSessionId === serviceSessionId);
         }, (key) => absentStaffService(client, { eventId: context.eventId, serviceSessionId, idempotencyKey: key }));
       }, context, { ...context, kind: 'absent', experienceId: null, stationId, serviceSessionId });
+    },
+    removeCalled(context, experienceId, stationId, serviceSessionId) {
+      context = { ...context };
+      return single(async () => {
+        contextValid(context); requireIds(experienceId, stationId, serviceSessionId);
+        const desired = { kind: 'remove_called', userId: context.userId, eventId: context.eventId,
+          sessionId: context.sessionId, experienceId, stationId, serviceSessionId };
+        return execute(context, desired, async () => {
+          const { stations } = await fetchStaffStations(client, context.eventId);
+          return stations.some(s => s.id === stationId && s.experienceId === experienceId &&
+            s.pendingServiceSessionId === serviceSessionId);
+        }, key => removeCalledStaff(client, { eventId: context.eventId, serviceSessionId, idempotencyKey: key }));
+      }, context, { ...context, kind: 'remove_called', experienceId, stationId, serviceSessionId });
     },
     removeWaiting(context, experienceId, stationId, queueEntryId) {
       context = { ...context };

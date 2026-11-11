@@ -304,6 +304,55 @@ const realExperienceId = '33333333-3333-4333-8333-333333333333';
 const realStation = { id: '44444444-4444-4444-8444-444444444444', experienceId: realExperienceId,
   label: 'Estação real', availability: 'available', pendingServiceSessionId: null, pendingCalledAt: null };
 
+test('tela real remove chamado somente após confirmação e atualiza estação sem reenvio', { skip }, async () => {
+  const secure = new Map(); let posts = 0;
+  const serviceId = '88888888-8888-4888-8888-888888888888';
+  const entryId = '77777777-7777-4777-8777-777777777777';
+  const control = { realStaff: true, platformOS: 'ios', events: [staffEvent],
+    stations: [{ ...realStation, pendingServiceSessionId: serviceId }],
+    experiences: [{ id: realExperienceId, name: 'Experiência real' }],
+    secureStore: { isAvailableAsync: async () => true, getItemAsync: async k => secure.get(k) ?? null,
+      setItemAsync: async (k, v) => { secure.set(k, v); }, deleteItemAsync: async k => { secure.delete(k); } },
+    operational: { eventId: staffEvent.id, experienceId: realExperienceId, stationId: realStation.id,
+      availability: 'available', canCall: false, waitingCount: 3, waiting: [
+        { queueEntryId: '11111111-1111-4111-8111-111111111112', displayName: 'Bia', position: 1 },
+        { queueEntryId: '11111111-1111-4111-8111-111111111113', displayName: 'Caio', position: 2 },
+        { queueEntryId: '11111111-1111-4111-8111-111111111114', displayName: 'Dora', position: 3 },
+      ], pending: {
+        serviceSessionId: serviceId, queueEntryId: entryId, displayName: 'Ana', calledAt: '2026-11-11T15:00:00.000Z' } },
+    http: async route => {
+      if (!route.endsWith(`/service-sessions/${serviceId}/remove`)) return undefined;
+      posts++; assert.ok([...secure.values()].some(raw => raw.includes('dispatching')));
+      control.operational = { ...control.operational, canCall: true, pending: null };
+      control.stations = [realStation];
+      return { body: { serviceSession: { id: serviceId, status: 'canceled', cancelReason: 'staff_queue_removed',
+        resolvedAt: '2026-11-11T15:01:00.000Z' }, queueEntry: { status: 'closed', closeReason: 'staff_queue_removed' },
+      participation: { status: 'active', currentQueueEntryId: null } } };
+    } };
+  const app = createIntegration({ initialUser: { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] }, control });
+  try {
+    await app.mount(); await app.act(() => app.manager.login({ email: participant.email, password: 'ficticia' }));
+    await app.press('Selecionar evento Evento autorizado'); await app.press('Estações');
+    await app.press('Selecionar estação Estação real');
+    assert.ok(app.hasText('Participante chamado: Ana'));
+    assert.ok(app.hasText('Aguardando nesta experiência: 3'));
+    for (const [position, name] of [[1, 'Bia'], [2, 'Caio'], [3, 'Dora']]) {
+      assert.ok(app.hasText(`${position}. ${name}`));
+      assert.ok(!app.hasText(`Remover ${name} da fila`));
+    }
+    assert.ok(app.hasText('Concluir atendimento'));
+    assert.ok(app.hasText('Registrar ausência'));
+    assert.ok(app.hasText('Remover da fila'));
+    await app.press('Remover da fila'); assert.equal(posts, 0);
+    await app.press('CANCELAR OPERAÇÃO'); assert.equal(posts, 0);
+    await app.press('Remover da fila'); await app.press('CONFIRMAR OPERAÇÃO');
+    assert.equal(posts, 1); assert.ok(!app.hasText('Participante chamado: Ana'));
+    assert.ok(app.hasText('Operação confirmada pelo servidor.'));
+    await app.press('Atualizar atendimento'); assert.equal(posts, 1);
+    await app.press('Entendi o resultado'); assert.equal(posts, 1);
+  } finally { app.dispose(); }
+});
+
 test('painel real separa entrada, estações e fila compartilhada por experiência', { skip }, async () => {
   const otherStation = { ...realStation, id: '55555555-5555-4555-8555-555555555555', label: 'Console 2' };
   const control = { realStaff: true, events: [staffEvent], stations: [realStation, otherStation], experiences: [

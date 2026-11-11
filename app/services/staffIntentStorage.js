@@ -24,6 +24,11 @@ const validOutcome = (intent) => {
     result.closeReason === 'staff_queue_removed' && validId(result.participationId) &&
     result.participationStatus === 'active';
   if (result.id !== intent.serviceSessionId) return false;
+  if (intent.kind === 'remove_called') return result.status === 'canceled' &&
+    result.cancelReason === 'staff_queue_removed' && result.queueEntryStatus === 'closed' &&
+    result.closeReason === 'staff_queue_removed' && result.participationStatus === 'active' &&
+    typeof result.resolvedAt === 'string' && Number.isFinite(Date.parse(result.resolvedAt)) &&
+    new Date(result.resolvedAt).toISOString() === result.resolvedAt;
   if (intent.kind === 'complete') return result.status === 'completed' && result.queueEntryStatus === 'closed' &&
     result.closeReason === 'completed' && result.participationStatus === 'active';
   if (intent.kind !== 'absent' || result.status !== 'absent' || typeof result.requeued !== 'boolean') return false;
@@ -38,6 +43,7 @@ const valid = (intent, userId) => intent?.userId === userId && validId(intent.ke
   (intent.kind === 'call' ? validId(intent.experienceId) && intent.serviceSessionId === null :
     intent.kind === 'remove' ? validId(intent.experienceId) && validId(intent.queueEntryId) &&
       intent.serviceSessionId === null :
+    intent.kind === 'remove_called' ? validId(intent.experienceId) && validId(intent.serviceSessionId) :
     ['complete', 'absent'].includes(intent.kind) && intent.experienceId === null && validId(intent.serviceSessionId));
 
 // Uma instância compartilhada serializa reserva, leitura e remoção; web bloqueia
