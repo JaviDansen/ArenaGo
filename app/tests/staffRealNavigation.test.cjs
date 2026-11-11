@@ -54,6 +54,8 @@ function createRealApp(initialAuth) {
   const passthrough = ({ children }) => children;
   const Placeholder = ({ route }) => React.createElement('Text', null, `tela ${route.name}`);
   const cache = new Map();
+  let generatedUuid = 0;
+  const secureValues = new Map();
 
   function load(relativePath) {
     if (cache.has(relativePath)) return cache.get(relativePath);
@@ -62,6 +64,13 @@ function createRealApp(initialAuth) {
       if (name === 'react') return React;
       if (name === 'react/jsx-runtime') return jsx;
       if (name === 'react-native') return native;
+      if (name === 'expo-crypto') return { randomUUID: () =>
+        `00000000-0000-4000-8000-${String(++generatedUuid).padStart(12, '0')}` };
+      if (name === 'expo-secure-store') return {
+        isAvailableAsync: async () => true,
+        getItemAsync: async (key) => secureValues.get(key) ?? null,
+        setItemAsync: async (key, value) => { secureValues.set(key, value); },
+      };
       if (name === 'react-native-safe-area-context') {
         return { SafeAreaView: 'SafeAreaView', SafeAreaProvider: passthrough };
       }

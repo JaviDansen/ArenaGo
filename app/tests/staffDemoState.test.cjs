@@ -219,7 +219,7 @@ const demoStaffScreens = [
   'components/StaffDemoTools.js', 'components/StaffHeader.js', 'components/StaffMissingSession.js',
   'components/StaffNotice.js', 'components/StaffScreen.js', 'components/staffTheme.js',
 ];
-const realStaffScreens = ['StaffEventsNavigator.js'];
+const realStaffScreens = ['StaffEventsNavigator.js', 'StaffEntryControlRealScreen.js'];
 
 test('arquivos Staff são classificados como demonstração ou fluxo real', () => {
   const staffDirectory = path.join(appDirectory, 'screens', 'staff');

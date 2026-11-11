@@ -6,6 +6,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { useAuth } from '../../context/AuthContext';
 import { createStaffEventsStore } from '../../services/staffEventsService';
 import { createStaffDashboardStore } from '../../services/staffDashboardService';
+import StaffEntryControlRealScreen from './StaffEntryControlRealScreen';
 
 const Stack = createNativeStackNavigator();
 const StaffEventsContext = createContext(null);
@@ -189,11 +190,8 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
       <Button label="Controle de Entrada" onPress={() => setSection('entry')} />
       <Button label="Estações" onPress={() => setSection('stations')} />
     </>}
-    {section === 'entry' && <>
-      <Text style={styles.title}>Controle de Entrada</Text>
-      <Text style={styles.message}>O controle da fila de acesso ao evento está em desenvolvimento.</Text>
-      <Button label="Voltar ao painel" onPress={() => setSection('panel')} />
-    </>}
+    {section === 'entry' && <StaffEntryControlRealScreen event={event}
+      isEventCurrent={() => staff.getSelected()?.id === event.id} onBack={() => setSection('panel')} />}
     {(section === 'stations' || section === 'station') && <>
     <Text style={styles.title}>Estações</Text>
     {snapshot.stationStatus === 'loading' && <Text style={styles.message}>Carregando estações...</Text>}

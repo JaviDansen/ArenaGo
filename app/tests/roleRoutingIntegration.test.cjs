@@ -21,6 +21,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
   let user = initialUser;
   let token = initialToken;
   let refreshCount = 0;
+  let generatedKeys = 0;
   const calls = [];
   const navRef = Navigation.createNavigationContainerRef();
   const unhandled = [];
@@ -39,6 +40,9 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
       if (url === '/participations/current') return { participation: null };
       if (url === '/participations/return-state') return { pendingEvaluationParticipationIds: [], recentFinalization: null };
       if (url === '/staff/events') return { events: control.events ?? [] };
+      const entryMatch = url.match(/^\/staff\/events\/([^/]+)\/entry-control$/);
+      if (entryMatch) return { eventId: entryMatch[1], externalQueueEnabled: true, canManage: false,
+        observedAt: '2026-11-10T15:00:00.000Z', waitingCount: 0, waiting: [] };
       const experienceMatch = url.match(/^\/staff\/events\/([^/]+)\/experiences$/);
       if (experienceMatch) return { eventId: experienceMatch[1], experiences: control.experiences ?? [] };
       const stationMatch = url.match(/^\/staff\/events\/([^/]+)\/stations$/);
@@ -77,7 +81,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
   const passthrough = ({ children }) => children;
   const native = Object.fromEntries(['ActivityIndicator', 'Modal', 'Pressable', 'ScrollView', 'Text', 'View'].map((name) => [name, name]));
   native.StyleSheet = { create: (styles) => styles };
-  native.Platform = { OS: 'web' };
+  native.Platform = { OS: control.platformOS ?? 'web' };
   function FocusedStack(props) {
     const { state, descriptors, NavigationContent } = Navigation.useNavigationBuilder(StackRouter, props);
     return React.createElement(NavigationContent, null, descriptors[state.routes[state.index].key].render());
@@ -91,8 +95,8 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
       if (name === 'react/jsx-runtime') return jsx;
       if (name === 'react-native') return native;
       if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
-      if (name === 'expo-crypto') return { randomUUID: () => '00000000-0000-4000-8000-000000000001' };
-      if (name === 'expo-secure-store') return {};
+      if (name === 'expo-crypto') return { randomUUID: () => `00000000-0000-4000-8000-${String(++generatedKeys).padStart(12, '0')}` };
+      if (name === 'expo-secure-store') return control.secureStore ?? {};
       if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView', SafeAreaProvider: passthrough };
       if (name === '@react-navigation/native-stack') return { createNativeStackNavigator: Navigation.createNavigatorFactory(FocusedStack) };
       if (name === '@react-navigation/native') return { NavigationContainer: ({ children }) =>
@@ -102,6 +106,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
       if (target === 'services/httpClient') return { ...http, httpClient: client };
       if (target === 'services/tokenStorage') return { defaultTokenStorage: storage };
       if (control.realStaff && ['screens/staff/StaffEventsNavigator', 'services/staffEventsService',
+        'screens/staff/StaffEntryControlRealScreen', 'services/staffEntryService', 'services/staffEntryIntentStorage',
         'services/staffDashboardService', 'services/staffOperationsService'].includes(target)) {
         return load(`${target}.js`);
       }
@@ -146,6 +151,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
       await Renderer.act(async () => { await buttons[0].props.onPress(); });
     },
     modal() { return tree.root.findByType('Modal'); },
+    handler(label) { return tree.root.findAllByType('Pressable').find(node => node.props.accessibilityLabel === label).props.onPress; },
     confirmHandler() { return tree.root.findAllByType('Pressable')
       .find((node) => node.props.accessibilityLabel === 'CONFIRMAR').props.onPress; },
     dispose() { Renderer.act(() => tree.unmount()); },
@@ -304,7 +310,7 @@ test('painel real separa entrada, estações e fila compartilhada por experiênc
   await app.act(() => app.manager.login({ email: participant.email, password: 'password' }));
   await app.press('Selecionar evento Evento autorizado');
   await app.press('Controle de Entrada');
-  assert.ok(app.hasText('em desenvolvimento'));
+  assert.ok(app.hasText('Fila de acesso ao evento'));
   await app.press('Voltar ao painel'); await app.press('Estações');
   assert.ok(app.hasText('Just Dance')); assert.ok(app.hasText('Sem estação: nenhuma estação associada'));
   await app.press('Selecionar estação Estação real');
@@ -313,7 +319,7 @@ test('painel real separa entrada, estações e fila compartilhada por experiênc
   assert.ok(app.hasText('Fila de Just Dance'));
   assert.equal(app.calls.filter((url) => url === `/staff/events/${staffEvent.id}/experiences/${realExperienceId}/queue`).length, 2);
   await app.press('Voltar às estações'); await app.press('Voltar ao painel');
-  await app.press('Controle de Entrada'); assert.ok(app.hasText('em desenvolvimento'));
+  await app.press('Controle de Entrada'); assert.ok(app.hasText('Fila de acesso ao evento'));
   app.dispose();
 });
 
@@ -505,4 +511,69 @@ test('401 recuperável na lista Staff renova sessão e obtém eventos com a iden
   assert.ok(attempts >= 2);
   assert.ok(app.hasText('Evento autorizado'));
   app.dispose();
+});
+
+test('Controle de Entrada real confirma primeiro, desativa, reativa e volta preservando evento', { skip }, async () => {
+  const values = new Map(), requests = [], at = '2026-11-10T15:00:00.000Z';
+  const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
+  let enabled = true, waiting = [{ participationId: 'abcdef00-0000-4000-8000-000000000004', displayName: 'Ana', position: 1 },
+    { participationId: 'abcdef00-0000-4000-8000-000000000005', displayName: 'Bia', position: 2 }];
+  const control = { realStaff: true, platformOS: 'android', events: [staffEvent],
+    secureStore: { getItemAsync: async key => values.get(key) ?? null, setItemAsync: async (key, value) => { values.set(key, value); } },
+    http: async (route, options) => {
+      if (!route.includes('/entry-control')) return;
+      requests.push({ route, method: options.method });
+      if (options.method === 'GET') return { eventId: staffEvent.id, externalQueueEnabled: enabled, canManage: true,
+        observedAt: at, waitingCount: waiting.length, waiting };
+      if (options.method === 'POST') { const first = waiting.shift(); waiting.forEach((p, index) => { p.position = index + 1; });
+        return { eventId: staffEvent.id, participation: { id: first.participationId, status: 'active', arenaEnteredAt: at } }; }
+      const payload = JSON.parse(options.body), releasedCount = payload.enabled ? 0 : waiting.length;
+      enabled = payload.enabled; if (!enabled) waiting = [];
+      return { eventId: staffEvent.id, externalQueueEnabled: enabled, releasedCount, changedAt: at };
+    } };
+  const app = createIntegration({ initialUser: staffUser, control }); await app.mount();
+  await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
+  await app.press('Selecionar evento Evento autorizado'); await app.press('Controle de Entrada');
+  assert.ok(app.hasText('1. Ana')); await app.press('Confirmar entrada de Ana'); await app.press('CONFIRMAR ALTERAÇÃO');
+  assert.ok(app.hasText('Entrada confirmada pelo servidor')); assert.ok(app.hasText('1. Bia'));
+  await app.press('Entendi'); await app.press('Desativar fila externa'); await app.press('CONFIRMAR ALTERAÇÃO');
+  assert.ok(app.hasText('Participantes liberados: 1')); await app.press('Entendi');
+  await app.press('Reativar fila externa'); await app.press('CONFIRMAR ALTERAÇÃO'); await app.press('Entendi');
+  assert.ok(app.hasText('Ninguém está aguardando')); await app.press('Voltar ao painel'); assert.ok(app.hasText('Painel operacional'));
+  assert.equal(requests.filter(r => r.method === 'POST').length, 1); assert.equal(requests.filter(r => r.method === 'PATCH').length, 2);
+  app.dispose();
+});
+
+test('confirmação de entrada aberta antes do logout não envia operação na sessão seguinte', { skip }, async () => {
+  const values = new Map(), at = '2026-11-10T15:00:00.000Z'; let mutations = 0;
+  const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
+  const control = { realStaff: true, platformOS: 'android', events: [staffEvent],
+    secureStore: { getItemAsync: async key => values.get(key) ?? null, setItemAsync: async (key, value) => { values.set(key, value); } },
+    http: async (route, options) => {
+      if (!route.includes('/entry-control')) return;
+      if (options.method !== 'GET') { mutations++; throw new Error('não deve enviar'); }
+      return { eventId: staffEvent.id, externalQueueEnabled: true, canManage: true, observedAt: at, waitingCount: 1,
+        waiting: [{ participationId: 'abcdef00-0000-4000-8000-000000000004', displayName: 'Ana', position: 1 }] };
+    } };
+  const app = createIntegration({ initialUser: staffUser, control }); await app.mount();
+  await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
+  await app.press('Selecionar evento Evento autorizado'); await app.press('Controle de Entrada'); await app.press('Confirmar entrada de Ana');
+  const old = app.handler('CONFIRMAR ALTERAÇÃO'); await app.act(() => app.manager.logout()); await app.act(async () => old());
+  assert.equal(mutations, 0); assert.ok(!app.hasText('1. Ana')); app.dispose();
+});
+
+test('401 terminal no Controle de Entrada remove lista nominal e área Staff', { skip }, async () => {
+  let revoked = false;
+  const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
+  const app = createIntegration({ initialUser: staffUser, control: { realStaff: true, events: [staffEvent],
+    http: async route => {
+      if (revoked && route.endsWith('/entry-control')) return { statusCode: 401, body: { code: 'SESSION_REVOKED' } };
+      if (route.endsWith('/entry-control')) return { eventId: staffEvent.id, externalQueueEnabled: true, canManage: true,
+        observedAt: '2026-11-10T15:00:00.000Z', waitingCount: 1, waiting: [
+          { participationId: 'abcdef00-0000-4000-8000-000000000004', displayName: 'Ana', position: 1 }] };
+    } } });
+  await app.mount(); await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
+  await app.press('Selecionar evento Evento autorizado'); await app.press('Controle de Entrada'); assert.ok(app.hasText('1. Ana'));
+  revoked = true; await app.press('Atualizar fila de entrada');
+  assert.equal(app.route(), 'Login'); assert.ok(!app.hasText('1. Ana')); app.dispose();
 });
