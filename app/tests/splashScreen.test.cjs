@@ -90,14 +90,20 @@ function createResolver(overrides = {}) {
             this.val = init;
             this.setValue = (v) => { this.val = v; };
           },
-          timing: (_val, config) => ({
-            start: (cb) => { if (cb) cb({ finished: true }); },
+          timing: (val, config) => ({
+            start: (cb) => {
+              if (val && typeof val.setValue === 'function' && config && config.toValue !== undefined) {
+                val.setValue(config.toValue);
+              }
+              if (cb) cb({ finished: true });
+            },
             stop: () => {},
           }),
           parallel: (anims) => ({
             start: (cb) => { if (cb) cb({ finished: true }); },
             stop: () => {},
           }),
+          View: (props) => ({ type: 'Animated.View', props }),
         },
         Easing: {
           out: () => (t) => t,
@@ -276,9 +282,6 @@ test('SPLASH-01 (4): Tela de destino permanece oculta (opacity: 0) sob a Splash 
 
   const gateMod = loadModule('screens/splash/SplashScreenGate.js', createResolver()).exports;
   const SplashScreenGate = gateMod.default;
-  const { styles } = gateMod;
-
-  assert.equal(styles.appContainerHidden.opacity, 0, 'appContainerHidden deve ter opacity: 0');
 
   // 1. Com Splash ativa (forceShow=true):
   const elementActive = SplashScreenGate({
@@ -293,11 +296,12 @@ test('SPLASH-01 (4): Tela de destino permanece oculta (opacity: 0) sob a Splash 
   const [appContainerActive, overlayActive] = elementActive.props.children;
   assert.ok(appContainerActive, 'appContainer deve estar presente');
   assert.equal(appContainerActive.props.pointerEvents, 'none', 'Enquanto a Splash está visível, pointerEvents dos filhos deve ser none');
-  assert.ok(
-    Array.isArray(appContainerActive.props.style) &&
-      appContainerActive.props.style.some((s) => s && s.opacity === 0),
-    'Filhos subjacentes devem ter opacity 0 enquanto a Splash está ativa'
-  );
+
+  // Opacidade inicial controlada por appOpacity deve ser 0
+  const activeOpacity = Array.isArray(appContainerActive.props.style)
+    ? appContainerActive.props.style.find((s) => s && s.opacity !== undefined)?.opacity?.val
+    : appContainerActive.props.style?.opacity?.val;
+  assert.equal(activeOpacity, 0, 'Filhos subjacentes devem iniciar com opacity 0');
   assert.ok(overlayActive, 'Overlay da Splash deve estar presente');
 
   // 2. Com Splash concluída:
@@ -309,14 +313,10 @@ test('SPLASH-01 (4): Tela de destino permanece oculta (opacity: 0) sob a Splash 
 
   const [appContainerDone, overlayDone] = elementDone.props.children;
   assert.equal(appContainerDone.props.pointerEvents, 'auto', 'Após a Splash, pointerEvents deve ser auto');
-  assert.equal(
-    Boolean(
-      Array.isArray(appContainerDone.props.style) &&
-        appContainerDone.props.style.some((s) => s && s.opacity === 0)
-    ),
-    false,
-    'Filhos subjacentes não devem mais ter opacity 0 após encerramento'
-  );
+  const doneOpacity = Array.isArray(appContainerDone.props.style)
+    ? appContainerDone.props.style.find((s) => s && s.opacity !== undefined)?.opacity?.val
+    : appContainerDone.props.style?.opacity?.val;
+  assert.equal(doneOpacity, 1, 'Filhos subjacentes devem ter opacity 1 após encerramento');
   assert.equal(overlayDone, false, 'Overlay da Splash deve ser removido após encerramento');
 });
 
@@ -573,6 +573,7 @@ test('SPLASH-01 (10): Prevenção de Splash infinita quando a inicialização ex
     fadeDurationMs: 5,
     maxWaitMs: 20,
     safetyTimeoutMs: 30,
+    preparationTimeoutMs: 10,
     splashModule: mockSplash,
     onDismiss: () => {
       onDismissFired = true;
@@ -587,7 +588,7 @@ test('SPLASH-01 (10): Prevenção de Splash infinita quando a inicialização ex
   }
 
   // Aguardar os timeouts dispararem o dismissSplash
-  await new Promise((resolve) => setTimeout(resolve, 60));
+  await new Promise((resolve) => setTimeout(resolve, 80));
 
   assert.equal(nativeHideCalled, true, 'Deve ter liberado a Splash nativa');
   assert.equal(onDismissFired, true, 'Deve ter disparado onDismiss mesmo com isReady=false');
@@ -736,6 +737,7 @@ test('SPLASH-01 (15): Splash não reaparece durante navegação entre telas ou a
     MIN_DISPLAY_TIME_MS: 2200,
     MAX_WAIT_MS: 3500,
     SAFETY_TIMEOUT_MS: 5000,
+    PREPARATION_TIMEOUT_MS: 250,
   };
 
   const gate = loadModule('screens/splash/SplashScreenGate.js', (name) => {
@@ -834,4 +836,155 @@ test('SPLASH-01 (18): Tratamento de erro quando expo-splash-screen falha ou reje
 
   const hideResult = await hideNativeSplashAsync(rejectingModule);
   assert.equal(hideResult, false, 'Deve retornar false sem lançar exceção');
+});
+
+// ---------------------------------------------------------------------------
+// 19. Transição de saída com cross-fade suave (revelação gradual da tela de destino e bloqueio de toques)
+// ---------------------------------------------------------------------------
+test('SPLASH-01 (19): Transição de saída com cross-fade suave (revelação gradual da tela de destino e bloqueio de toques)', () => {
+  resetSplashScreenStateForTesting();
+
+  let dismissStartFired = false;
+  let dismissFinishedFired = false;
+
+  const gateMod = loadModule('screens/splash/SplashScreenGate.js', (name) => {
+    if (name.includes('AnimatedSplashScreen')) {
+      return {
+        default: function MockAnimatedSplash(props) {
+          if (props.onDismissStart) {
+            props.onDismissStart();
+            dismissStartFired = true;
+          }
+          if (props.onDismiss) {
+            props.onDismiss();
+            dismissFinishedFired = true;
+          }
+          return { type: 'AnimatedSplashScreen', props };
+        },
+        ANIMATION_DEFAULTS: {
+          INTRO_DURATION_MS: 700,
+          HOLD_DURATION_MS: 1500,
+          FADE_DURATION_MS: 300,
+          TARGET_TOTAL_DURATION_MS: 2500,
+          MIN_DISPLAY_TIME_MS: 2200,
+          MAX_WAIT_MS: 3500,
+          SAFETY_TIMEOUT_MS: 5000,
+          PREPARATION_TIMEOUT_MS: 250,
+        },
+      };
+    }
+    return createResolver()(name);
+  }).exports;
+
+  const SplashScreenGate = gateMod.default;
+
+  const rendered = SplashScreenGate({
+    children: { type: 'WelcomeScreen', props: { testID: 'welcome' } },
+    forceShow: true,
+  });
+
+  assert.ok(rendered, 'Deve retornar contêiner estruturado');
+  const [appContainer, overlay] = rendered.props.children;
+  assert.ok(overlay, 'Overlay da Splash deve estar presente');
+
+  const splashElement = overlay.props.children;
+  assert.equal(typeof splashElement.props.onDismissStart, 'function', 'onDismissStart deve ser repassado');
+  assert.equal(typeof splashElement.props.onDismiss, 'function', 'onDismiss deve ser repassado');
+
+  // Executar componente de Splash mockado para disparar os callbacks
+  const Component = typeof splashElement.type === 'function' ? splashElement.type : splashElement.type.default;
+  Component(splashElement.props);
+
+  assert.equal(dismissStartFired, true, 'onDismissStart deve ser acionado no início do fade-out');
+  assert.equal(dismissFinishedFired, true, 'onDismiss deve ser acionado na conclusão do fade-out');
+});
+
+// ---------------------------------------------------------------------------
+// 20. Preparação estrita da Splash animada (ocultação nativa e início da animação condicionados ao layout pronto)
+// ---------------------------------------------------------------------------
+test('SPLASH-01 (20): Preparação estrita da Splash animada (ocultação nativa e início da animação condicionados ao layout pronto)', async () => {
+  resetSplashScreenStateForTesting();
+
+  let nativeHideCalls = 0;
+  const mockSplash = {
+    hideAsync: async () => {
+      nativeHideCalls++;
+    },
+  };
+
+  const effects = [];
+
+  const animatedSplashExports = loadModule('screens/splash/AnimatedSplashScreen.js', (name) => {
+    if (name === 'react') {
+      return {
+        useRef: (init) => ({ current: init }),
+        useState: (init) => [typeof init === 'function' ? init() : init, () => {}],
+        useEffect: (cb) => { effects.push(cb); },
+        useCallback: (fn) => fn,
+      };
+    }
+    if (name === 'react-native') {
+      return {
+        AccessibilityInfo: { isReduceMotionEnabled: async () => false },
+        Animated: {
+          Value: function (init) {
+            this.val = init;
+            this.setValue = (v) => { this.val = v; };
+          },
+          timing: (_val, config) => ({
+            start: (cb) => { if (cb) cb({ finished: true }); },
+            stop: () => {},
+          }),
+          parallel: (anims) => ({
+            start: (cb) => { if (cb) cb({ finished: true }); },
+            stop: () => {},
+          }),
+          View: (props) => ({ type: 'Animated.View', props }),
+        },
+        Easing: {
+          out: () => (t) => t,
+          cubic: (t) => t,
+          quad: (t) => t,
+        },
+        Image: (p) => ({ type: 'Image', props: p }),
+        StyleSheet: { create: (s) => s, absoluteFillObject: {} },
+        View: (p) => ({ type: 'View', props: p }),
+      };
+    }
+    if (name.includes('theme')) {
+      return { colors: { background: { canvas: '#05050A' } } };
+    }
+    if (name.includes('splashScreenService')) {
+      return {
+        hideNativeSplashAsync: async (m) => m?.hideAsync(),
+        markSplashCompleted: () => {},
+      };
+    }
+    if (name.endsWith('.png')) {
+      return 1;
+    }
+    return require(name);
+  }).exports;
+
+  const AnimatedSplash = animatedSplashExports.default;
+
+  const element = AnimatedSplash({
+    isReady: true,
+    animationDurationMs: 10,
+    holdDurationMs: 10,
+    fadeDurationMs: 10,
+    preparationTimeoutMs: 500, // Timeout defensivo longo para garantir que não dispare antes do onLayout
+    splashModule: mockSplash,
+  });
+
+  // Antes de onLayout: nativeHideCalls deve ser 0
+  assert.equal(nativeHideCalls, 0, 'Splash nativa NÃO deve ser ocultada antes da medição de layout');
+
+  // Disparar onLayout com medição válida da tela
+  if (typeof element.props?.onLayout === 'function') {
+    element.props.onLayout({ nativeEvent: { layout: { width: 390, height: 844 } } });
+  }
+
+  // Agora a chamada deve ter sido realizada
+  assert.equal(nativeHideCalls, 1, 'Splash nativa deve ser ocultada após onLayout com medição válida');
 });

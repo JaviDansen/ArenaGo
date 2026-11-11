@@ -37,18 +37,21 @@ export const ANIMATION_DEFAULTS = {
   MIN_DISPLAY_TIME_MS: 2200,      // 700 + 1500 = 2200ms antes da saída
   MAX_WAIT_MS: 3500,              // Limite máximo de espera por inicializações lentas
   SAFETY_TIMEOUT_MS: 5000,        // Timeout absoluto de segurança
+  PREPARATION_TIMEOUT_MS: 250,    // Timeout de segurança para ambientes sem medição onLayout
   SCALE_START: 0.9,
   SCALE_END: 1.0,
 };
 
 export default function AnimatedSplashScreen({
   isReady = true,
+  onDismissStart,
   onDismiss,
   animationDurationMs = ANIMATION_DEFAULTS.INTRO_DURATION_MS,
   holdDurationMs = ANIMATION_DEFAULTS.HOLD_DURATION_MS,
   fadeDurationMs = ANIMATION_DEFAULTS.FADE_DURATION_MS,
   maxWaitMs = ANIMATION_DEFAULTS.MAX_WAIT_MS,
   safetyTimeoutMs = ANIMATION_DEFAULTS.SAFETY_TIMEOUT_MS,
+  preparationTimeoutMs = ANIMATION_DEFAULTS.PREPARATION_TIMEOUT_MS,
   imageSource = defaultLogoSource,
   reduceMotion = undefined,
   splashModule = undefined,
@@ -58,8 +61,8 @@ export default function AnimatedSplashScreen({
   const [introFinished, setIntroFinished] = useState(false);
   const [holdFinished, setHoldFinished] = useState(false);
 
+  const isPreparedRef = useRef(false);
   const isDismissingRef = useRef(false);
-  const startTimeRef = useRef(Date.now());
 
   const containerOpacity = useRef(new Animated.Value(1)).current;
   const logoOpacity = useRef(new Animated.Value(0)).current;
@@ -88,27 +91,42 @@ export default function AnimatedSplashScreen({
     };
   }, [reduceMotion]);
 
-  // 2. Ocultar Splash nativa somente após a camada React Native estar pronta e com layout medido
-  const handleLayout = useCallback(() => {
-    if (!isPrepared) {
-      setIsPrepared(true);
-      void hideNativeSplashAsync(splashModule);
+  // Função centralizada para confirmar preparação da composição React Native
+  const markPrepared = useCallback(() => {
+    if (isPreparedRef.current) {
+      return;
     }
-  }, [isPrepared, splashModule]);
+    isPreparedRef.current = true;
+    setIsPrepared(true);
+    void hideNativeSplashAsync(splashModule);
+  }, [splashModule]);
 
-  // Fallback caso onLayout demore a disparar em algum mock ou ambiente restrito
+  // 2. Ocultar Splash nativa somente após a camada React Native concluir layout com medição válida
+  const handleLayout = useCallback(
+    (event) => {
+      const layout = event?.nativeEvent?.layout;
+      if (!layout || (layout.width > 0 && layout.height > 0)) {
+        markPrepared();
+      }
+    },
+    [markPrepared]
+  );
+
+  // Fallback de segurança para ambientes onde onLayout não dispara (mocks de teste, headless)
   useEffect(() => {
     const timer = setTimeout(() => {
-      if (!isPrepared) {
-        setIsPrepared(true);
-        void hideNativeSplashAsync(splashModule);
-      }
-    }, 50);
+      markPrepared();
+    }, preparationTimeoutMs);
     return () => clearTimeout(timer);
-  }, [isPrepared, splashModule]);
+  }, [markPrepared, preparationTimeoutMs]);
 
   // 3. Execução da fase de entrada (fade-in + zoom suave)
+  // Inicia rigorosamente após a preparação da camada React Native
   useEffect(() => {
+    if (!isPrepared) {
+      return;
+    }
+
     let animation = null;
 
     if (isReducedMotion) {
@@ -145,7 +163,7 @@ export default function AnimatedSplashScreen({
         animation.stop();
       }
     };
-  }, [animationDurationMs, isReducedMotion]);
+  }, [animationDurationMs, isPrepared, isReducedMotion, logoOpacity, logoScale]);
 
   // 4. Fase de permanência estável da logo (1.500 ms)
   useEffect(() => {
@@ -160,12 +178,17 @@ export default function AnimatedSplashScreen({
     return () => clearTimeout(holdTimer);
   }, [holdDurationMs, introFinished]);
 
-  // 5. Função de encerramento com fade-out suave (300 ms)
+  // 5. Função de encerramento com fade-out suave (300 ms) e notificação de início
   const dismissSplash = useCallback(() => {
     if (isDismissingRef.current) {
       return;
     }
     isDismissingRef.current = true;
+
+    // Notifica o início da saída para sincronizar a revelação gradual do conteúdo principal
+    if (typeof onDismissStart === 'function') {
+      onDismissStart();
+    }
 
     Animated.timing(containerOpacity, {
       toValue: 0,
@@ -178,7 +201,7 @@ export default function AnimatedSplashScreen({
         onDismiss();
       }
     });
-  }, [containerOpacity, fadeDurationMs, onDismiss]);
+  }, [containerOpacity, fadeDurationMs, onDismiss, onDismissStart]);
 
   // 6. Transição após tempo mínimo e prontidão da aplicação
   useEffect(() => {
@@ -219,7 +242,7 @@ export default function AnimatedSplashScreen({
       ]}
       onLayout={handleLayout}
       testID="animated-splash-screen"
-      pointerEvents="auto"
+      pointerEvents="box-none"
     >
       <Animated.View
         style={[
