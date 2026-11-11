@@ -2,7 +2,6 @@ import { useCallback, useRef, useState } from 'react';
 import { Animated, Easing, StyleSheet, View } from 'react-native';
 import AnimatedSplashScreen, { ANIMATION_DEFAULTS } from './AnimatedSplashScreen';
 import { isSplashCompleted } from '../../services/splashScreenService';
-import { colors } from '../../theme';
 
 export default function SplashScreenGate({
   children,
@@ -93,7 +92,7 @@ export const styles = StyleSheet.create({
   rootContainer: {
     flex: 1,
     position: 'relative',
-    backgroundColor: colors.background.canvas,
+    backgroundColor: '#1C0A35',
   },
   appContainer: {
     flex: 1,

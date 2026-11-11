@@ -7,7 +7,6 @@ import {
   StyleSheet,
   View,
 } from 'react-native';
-import { colors } from '../../theme';
 import {
   hideNativeSplashAsync,
   markSplashCompleted,
@@ -277,7 +276,7 @@ export const styles = StyleSheet.create({
     bottom: 0,
     width: '100%',
     height: '100%',
-    backgroundColor: colors.background.canvas,
+    backgroundColor: '#1C0A35',
     justifyContent: 'center',
     alignItems: 'center',
     zIndex: 999999,

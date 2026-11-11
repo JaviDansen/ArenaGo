@@ -173,10 +173,10 @@ test('SPLASH-01 (1): Configuração da Splash nativa em app.json e integridade d
   assert.ok(splashPlugin, 'Plugin expo-splash-screen deve estar configurado em plugins');
   const splashConfig = splashPlugin[1];
 
-  assert.equal(splashConfig.backgroundColor, '#05050A', 'Fundo da Splash deve ser #05050A (Design System canvas)');
+  assert.equal(splashConfig.backgroundColor, '#1C0A35', 'Fundo da Splash deve ser #1C0A35');
   assert.equal(splashConfig.resizeMode, 'contain', 'resizeMode deve ser contain');
   assert.equal(splashConfig.image, './assets/splash-icon.png', 'Imagem deve apontar para ./assets/splash-icon.png');
-  assert.equal(splashConfig.dark?.backgroundColor, '#05050A', 'Fundo dark deve ser #05050A');
+  assert.equal(splashConfig.dark?.backgroundColor, '#1C0A35', 'Fundo dark deve ser #1C0A35');
 
   // Verificar asset nativo splash-icon.png (1024x1024)
   const splashIconPath = path.join(appDirectory, 'assets/splash-icon.png');
@@ -258,7 +258,7 @@ test('SPLASH-01 (3): Splash animada ocupa integralmente a área disponível (abs
   assert.equal(animatedStyles.container.bottom, 0, 'Splash container deve ter bottom: 0');
   assert.equal(animatedStyles.container.width, '100%', 'Splash container deve ter width: 100%');
   assert.equal(animatedStyles.container.height, '100%', 'Splash container deve ter height: 100%');
-  assert.equal(animatedStyles.container.backgroundColor, '#05050A', 'Fundo deve ser #05050A');
+  assert.equal(animatedStyles.container.backgroundColor, '#1C0A35', 'Fundo deve ser #1C0A35');
 
   // Verificar zIndex e elevation elevados para ficar sobre a navegação no iOS e Android
   assert.ok(Number(animatedStyles.container.zIndex) >= 9999, 'zIndex deve ser >= 9999');
@@ -267,7 +267,9 @@ test('SPLASH-01 (3): Splash animada ocupa integralmente a área disponível (abs
   // Verificar também o splashOverlayContainer no SplashScreenGate
   const gateMod = loadModule('screens/splash/SplashScreenGate.js', createResolver()).exports;
   const { styles: gateStyles } = gateMod;
+  assert.equal(gateStyles.rootContainer.backgroundColor, '#1C0A35', 'Fundo raiz deve acompanhar a Splash');
   assert.ok(gateStyles.splashOverlayContainer, 'SplashScreenGate deve ter styles.splashOverlayContainer');
+  assert.equal(gateStyles.splashOverlayContainer.backgroundColor, 'transparent', 'Overlay deve preservar o cross-fade');
   assert.equal(gateStyles.splashOverlayContainer.position, 'absolute', 'Overlay no gate deve ser absolute');
   assert.equal(gateStyles.splashOverlayContainer.width, '100%', 'Overlay deve ter width 100%');
   assert.equal(gateStyles.splashOverlayContainer.height, '100%', 'Overlay deve ter height 100%');
@@ -424,12 +426,13 @@ test('SPLASH-01 (7): Sincronização do estado de prontidão com inicialização
   ).exports;
 
   // Executar AuthSessionCoordinator com callback onInitializingChange
-  coordMod.AuthSessionCoordinator({
+  const restoring = coordMod.AuthSessionCoordinator({
     children: 'MainContent',
     onInitializingChange: (initializing) => {
       capturedInitializing = initializing;
     },
   });
+  assert.equal(restoring.props.style.backgroundColor, '#1C0A35', 'Restauração deve acompanhar a Splash');
 
   // auth.isInitializing = true -> capturedInitializing = true -> isReady = false
   assert.equal(capturedInitializing, true, 'Deve sincronizar isInitializing=true com o callback');
@@ -692,6 +695,7 @@ test('SPLASH-01 (14): Erros de rede ou armazenamento na autenticação mantêm t
 
   const rendered = coordMod.AuthSessionCoordinator({ children: 'MainApp' });
   assert.notEqual(rendered, 'MainApp');
+  assert.equal(rendered.props.style.backgroundColor, '#1C0A35', 'Recuperação deve acompanhar a Splash');
 
   function collectTexts(node) {
     if (!node) return [];

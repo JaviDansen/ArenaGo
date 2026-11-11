@@ -24,10 +24,10 @@
         {
           "image": "./assets/splash-icon.png",
           "resizeMode": "contain",
-          "backgroundColor": "#05050A",
+          "backgroundColor": "#1C0A35",
           "dark": {
             "image": "./assets/splash-icon.png",
-            "backgroundColor": "#05050A"
+            "backgroundColor": "#1C0A35"
           }
         }
       ],

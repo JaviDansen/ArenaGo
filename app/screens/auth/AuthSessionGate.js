@@ -156,7 +156,7 @@ export default function AuthSessionGate({
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#05050A',
+    backgroundColor: '#1C0A35',
     justifyContent: 'center',
     paddingHorizontal: 24,
   },

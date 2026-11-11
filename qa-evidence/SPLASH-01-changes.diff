@@ -1,0 +1,174 @@
+diff --git a/app/app.json b/app/app.json
+index 01f604f..8179f28 100644
+--- a/app/app.json
++++ b/app/app.json
+@@ -24,10 +24,10 @@
+         {
+           "image": "./assets/splash-icon.png",
+           "resizeMode": "contain",
+-          "backgroundColor": "#05050A",
++          "backgroundColor": "#160A28",
+           "dark": {
+             "image": "./assets/splash-icon.png",
+-            "backgroundColor": "#05050A"
++            "backgroundColor": "#160A28"
+           }
+         }
+       ],
+diff --git a/app/screens/auth/AuthSessionGate.js b/app/screens/auth/AuthSessionGate.js
+index 8d375a4..a0e020f 100644
+--- a/app/screens/auth/AuthSessionGate.js
++++ b/app/screens/auth/AuthSessionGate.js
+@@ -156,7 +156,7 @@ export default function AuthSessionGate({
+ const styles = StyleSheet.create({
+   container: {
+     flex: 1,
+-    backgroundColor: '#05050A',
++    backgroundColor: '#160A28',
+     justifyContent: 'center',
+     paddingHorizontal: 24,
+   },
+diff --git a/app/screens/splash/AnimatedSplashScreen.js b/app/screens/splash/AnimatedSplashScreen.js
+index 3e23469..9ee1bfb 100644
+--- a/app/screens/splash/AnimatedSplashScreen.js
++++ b/app/screens/splash/AnimatedSplashScreen.js
+@@ -7,7 +7,6 @@ import {
+   StyleSheet,
+   View,
+ } from 'react-native';
+-import { colors } from '../../theme';
+ import {
+   hideNativeSplashAsync,
+   markSplashCompleted,
+@@ -277,7 +276,7 @@ export const styles = StyleSheet.create({
+     bottom: 0,
+     width: '100%',
+     height: '100%',
+-    backgroundColor: colors.background.canvas,
++    backgroundColor: '#160A28',
+     justifyContent: 'center',
+     alignItems: 'center',
+     zIndex: 999999,
+diff --git a/app/screens/splash/SplashScreenGate.js b/app/screens/splash/SplashScreenGate.js
+index d3904d5..28e9e35 100644
+--- a/app/screens/splash/SplashScreenGate.js
++++ b/app/screens/splash/SplashScreenGate.js
+@@ -2,7 +2,6 @@ import { useCallback, useRef, useState } from 'react';
+ import { Animated, Easing, StyleSheet, View } from 'react-native';
+ import AnimatedSplashScreen, { ANIMATION_DEFAULTS } from './AnimatedSplashScreen';
+ import { isSplashCompleted } from '../../services/splashScreenService';
+-import { colors } from '../../theme';
+ 
+ export default function SplashScreenGate({
+   children,
+@@ -93,7 +92,7 @@ export const styles = StyleSheet.create({
+   rootContainer: {
+     flex: 1,
+     position: 'relative',
+-    backgroundColor: colors.background.canvas,
++    backgroundColor: '#160A28',
+   },
+   appContainer: {
+     flex: 1,
+diff --git a/app/tests/splashScreen.test.cjs b/app/tests/splashScreen.test.cjs
+index d29bd1f..287781d 100644
+--- a/app/tests/splashScreen.test.cjs
++++ b/app/tests/splashScreen.test.cjs
+@@ -173,10 +173,10 @@ test('SPLASH-01 (1): Configuração da Splash nativa em app.json e integridade d
+   assert.ok(splashPlugin, 'Plugin expo-splash-screen deve estar configurado em plugins');
+   const splashConfig = splashPlugin[1];
+ 
+-  assert.equal(splashConfig.backgroundColor, '#05050A', 'Fundo da Splash deve ser #05050A (Design System canvas)');
++  assert.equal(splashConfig.backgroundColor, '#160A28', 'Fundo da Splash deve ser #160A28');
+   assert.equal(splashConfig.resizeMode, 'contain', 'resizeMode deve ser contain');
+   assert.equal(splashConfig.image, './assets/splash-icon.png', 'Imagem deve apontar para ./assets/splash-icon.png');
+-  assert.equal(splashConfig.dark?.backgroundColor, '#05050A', 'Fundo dark deve ser #05050A');
++  assert.equal(splashConfig.dark?.backgroundColor, '#160A28', 'Fundo dark deve ser #160A28');
+ 
+   // Verificar asset nativo splash-icon.png (1024x1024)
+   const splashIconPath = path.join(appDirectory, 'assets/splash-icon.png');
+@@ -258,7 +258,7 @@ test('SPLASH-01 (3): Splash animada ocupa integralmente a área disponível (abs
+   assert.equal(animatedStyles.container.bottom, 0, 'Splash container deve ter bottom: 0');
+   assert.equal(animatedStyles.container.width, '100%', 'Splash container deve ter width: 100%');
+   assert.equal(animatedStyles.container.height, '100%', 'Splash container deve ter height: 100%');
+-  assert.equal(animatedStyles.container.backgroundColor, '#05050A', 'Fundo deve ser #05050A');
++  assert.equal(animatedStyles.container.backgroundColor, '#160A28', 'Fundo deve ser #160A28');
+ 
+   // Verificar zIndex e elevation elevados para ficar sobre a navegação no iOS e Android
+   assert.ok(Number(animatedStyles.container.zIndex) >= 9999, 'zIndex deve ser >= 9999');
+@@ -267,7 +267,9 @@ test('SPLASH-01 (3): Splash animada ocupa integralmente a área disponível (abs
+   // Verificar também o splashOverlayContainer no SplashScreenGate
+   const gateMod = loadModule('screens/splash/SplashScreenGate.js', createResolver()).exports;
+   const { styles: gateStyles } = gateMod;
++  assert.equal(gateStyles.rootContainer.backgroundColor, '#160A28', 'Fundo raiz deve acompanhar a Splash');
+   assert.ok(gateStyles.splashOverlayContainer, 'SplashScreenGate deve ter styles.splashOverlayContainer');
++  assert.equal(gateStyles.splashOverlayContainer.backgroundColor, 'transparent', 'Overlay deve preservar o cross-fade');
+   assert.equal(gateStyles.splashOverlayContainer.position, 'absolute', 'Overlay no gate deve ser absolute');
+   assert.equal(gateStyles.splashOverlayContainer.width, '100%', 'Overlay deve ter width 100%');
+   assert.equal(gateStyles.splashOverlayContainer.height, '100%', 'Overlay deve ter height 100%');
+@@ -424,12 +426,13 @@ test('SPLASH-01 (7): Sincronização do estado de prontidão com inicialização
+   ).exports;
+ 
+   // Executar AuthSessionCoordinator com callback onInitializingChange
+-  coordMod.AuthSessionCoordinator({
++  const restoring = coordMod.AuthSessionCoordinator({
+     children: 'MainContent',
+     onInitializingChange: (initializing) => {
+       capturedInitializing = initializing;
+     },
+   });
++  assert.equal(restoring.props.style.backgroundColor, '#160A28', 'Restauração deve acompanhar a Splash');
+ 
+   // auth.isInitializing = true -> capturedInitializing = true -> isReady = false
+   assert.equal(capturedInitializing, true, 'Deve sincronizar isInitializing=true com o callback');
+@@ -692,6 +695,7 @@ test('SPLASH-01 (14): Erros de rede ou armazenamento na autenticação mantêm t
+ 
+   const rendered = coordMod.AuthSessionCoordinator({ children: 'MainApp' });
+   assert.notEqual(rendered, 'MainApp');
++  assert.equal(rendered.props.style.backgroundColor, '#160A28', 'Recuperação deve acompanhar a Splash');
+ 
+   function collectTexts(node) {
+     if (!node) return [];
+diff --git a/docs/SPLASH_01_IMPLEMENTACAO.md b/docs/SPLASH_01_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..6948182
+--- /dev/null
++++ b/docs/SPLASH_01_IMPLEMENTACAO.md
+@@ -0,0 +1,37 @@
++# SPLASH-01 — Inicialização visual ArenaGO
++
++## Objetivo e identidade visual
++
++A SPLASH-01 apresenta a identidade ArenaGO durante a inicialização do aplicativo e faz a transição para a área definida pela autenticação. O ajuste visual final define o fundo `#160A28` na Splash nativa, na animação, no contêiner da transição e na interface de restauração ou recuperação de sessão. A cor global do Design System permanece independente.
++
++A configuração nativa do plugin `expo-splash-screen` usa `app/assets/splash-icon.png`, com `resizeMode: contain` e o mesmo fundo nos modos normal e escuro. A Splash animada usa a logo oficial `app/assets/images/logo-arenago.png`, com fallback para `splash-icon.png`. Os assets PNG não foram alterados neste ajuste.
++
++## Arquitetura e comportamento
++
++`app/index.js` solicita a retenção da Splash nativa antes da montagem da árvore. `SplashScreenGate` envolve `AuthSessionGate` e a navegação. `AnimatedSplashScreen` oculta a Splash nativa após a preparação do layout, com timeout defensivo, e apresenta a logo centralizada com zoom suave.
++
++A animação padrão usa fade-in de 700 ms, permanência de 1.500 ms e fade-out de 300 ms, com duração-alvo de 2.500 ms. A revelação da tela de destino é sincronizada com a saída por cross-fade; a camada de sobreposição permanece transparente. Se a autenticação demorar, há limites de espera e segurança, portanto o tempo observado pode diferir do alvo. O estado de conclusão impede a reapresentação da Splash em navegações posteriores no mesmo processo. A árvore de autenticação é preservada durante a transição.
++
++## Arquivos deste ajuste final
++
++- `app/app.json`: fundo nativo normal e escuro.
++- `app/screens/splash/AnimatedSplashScreen.js` e `app/screens/splash/SplashScreenGate.js`: fundo animado e raiz da transição.
++- `app/screens/auth/AuthSessionGate.js`: fundo das interfaces de restauração e recuperação de sessão.
++- `app/tests/splashScreen.test.cjs`: expectativas da cor e verificações da raiz, transparência, restauração e recuperação.
++- Este relatório e `qa-evidence/SPLASH-01-changes.diff`.
++
++A evidência é o patch deste ajuste final sobre o `HEAD` existente na branch, que já contém a implementação inicial da Splash. Não inclui o próprio arquivo de evidência.
++
++## Validação e pendências
++
++O responsável informou que a Splash foi testada no iOS antes deste ajuste: logo centralizada, animação e transição funcionaram conforme o esperado. Esse relato não comprova a nova cor, que ainda precisa ser conferida após a alteração.
++
++Não há evidência de homologação Android identificada nesta tarefa. A aparência da Splash nativa e a nova cor devem ser conferidas em builds apropriadas de iOS e Android; a prévia no Expo Go não representa necessariamente a Splash de um build próprio. Verificar também a transição para autenticação lenta e para a tela de recuperação.
++
++Testes automatizados, build e typecheck não foram executados nesta etapa. Para Luna Medium, após inspecionar o ambiente e os scripts, executar em `app` com `NODE_ENV=test`:
++
++```text
++node --test tests/splashScreen.test.cjs
++```
++
++Executar depois a regressão do aplicativo conforme a política do projeto e registrar aprovações, falhas e testes ignorados separadamente. A inspeção estática deste ajuste conferiu que as cores configuradas coincidem e que a sobreposição conserva `transparent`.
