@@ -72,6 +72,7 @@ export function Card({
   testID,
   accessibilityRole,
   accessibilityLabel,
+  accessibilityHint,
   accessibilityState,
 }) {
   const isClickable = typeof onPress === 'function';
@@ -108,6 +109,7 @@ export function Card({
         ]}
         accessibilityRole={accessibilityRole || 'button'}
         accessibilityLabel={accessibilityLabel}
+        accessibilityHint={accessibilityHint}
         accessibilityState={{ ...accessibilityState, disabled: isDisabled }}
         testID={testID}
       >

@@ -16,7 +16,7 @@ function screenRig(path, context, params = {}, options = {}) {
   const baseUi = createParticipantUiStubs();
   const ui = {
     ...baseUi,
-    Card: ({ children, onPress, disabled, accessibilityLabel, testID, ...props }) => {
+    Card: ({ children, onPress, disabled, accessibilityRole, accessibilityLabel, accessibilityHint, testID, ...props }) => {
       if (onPress) {
         return {
           type: 'Pressable',
@@ -24,14 +24,15 @@ function screenRig(path, context, params = {}, options = {}) {
             ...props,
             onPress: disabled ? undefined : onPress,
             disabled,
-            accessibilityRole: props.accessibilityRole || 'button',
+            accessibilityRole: accessibilityRole || props.accessibilityRole || 'button',
             accessibilityLabel,
+            accessibilityHint,
             testID,
             children,
           },
         };
       }
-      return baseUi.Card({ children, disabled, accessibilityLabel, testID, ...props });
+      return baseUi.Card({ children, disabled, accessibilityRole, accessibilityLabel, accessibilityHint, testID, ...props });
     },
   };
 
@@ -315,6 +316,8 @@ test('ENTRY-QR-01: navegação por cada card com apenas uma ação e ausência d
 
   assert.ok(isPressableOrHasRole(cardQr), 'Card QR deve ser acessível como botão');
   assert.ok(isPressableOrHasRole(cardManual), 'Card Manual deve ser acessível como botão');
+  assert.equal(cardQr.props.accessibilityHint, 'Toque para abrir o leitor de QR Code');
+  assert.equal(cardManual.props.accessibilityHint, 'Toque para abrir a digitação manual de código');
 
   // Ausência de botões interativos aninhados dentro de cada card
   // O card em si é a única área interativa; seus filhos não podem conter botões/pressables
@@ -348,6 +351,53 @@ test('ENTRY-QR-01: navegação por cada card com apenas uma ação e ausência d
   await newCardManual.props.onPress();
   rig.render();
   assert.match(rig.text(), /Digite o código de acesso/);
+});
+
+test('ENTRY-QR-01: componente compartilhado Card encaminha accessibilityHint ao Pressable quando interativo', () => {
+  const cardModule = loadModule('components/ui/Card.js', (name) => {
+    if (name === 'react-native') {
+      return {
+        Pressable: (props) => ({ type: 'Pressable', props }),
+        View: (props) => ({ type: 'View', props }),
+        StyleSheet: { create: (s) => s },
+      };
+    }
+    if (name === '../../theme/colors.js') return { background: { surface: '#161626' }, border: { subtle: '#24243A' } };
+    if (name === '../../theme/radii.js') return { xl: 18 };
+    if (name === '../../theme/spacing.js') return { layout: { cardPadding: 16 } };
+    return require(name);
+  }).exports;
+
+  const { Card } = cardModule;
+
+  // 1. Card interativo com accessibilityHint encaminhado ao Pressable
+  const elementWithHint = Card({
+    onPress: () => {},
+    accessibilityRole: 'button',
+    accessibilityLabel: 'Ler QR Code',
+    accessibilityHint: 'Toque para abrir o leitor de QR Code',
+    children: 'Conteúdo',
+  });
+  assert.equal(elementWithHint.type, 'Pressable');
+  assert.equal(elementWithHint.props.accessibilityHint, 'Toque para abrir o leitor de QR Code');
+  assert.equal(elementWithHint.props.accessibilityRole, 'button');
+  assert.equal(elementWithHint.props.accessibilityLabel, 'Ler QR Code');
+
+  // 2. Card interativo sem accessibilityHint (permanece undefined sem erro)
+  const elementWithoutHint = Card({
+    onPress: () => {},
+    accessibilityRole: 'button',
+    accessibilityLabel: 'Sem dica',
+    children: 'Conteúdo',
+  });
+  assert.equal(elementWithoutHint.type, 'Pressable');
+  assert.equal(elementWithoutHint.props.accessibilityHint, undefined);
+
+  // 3. Card estático (não interativo) renderiza View sem erros
+  const staticCard = Card({
+    children: 'Texto estático',
+  });
+  assert.equal(staticCard.type, 'View');
 });
 
 test('ENTRY-QR-01: selecionar Digitar código exibe formulário manual e permite voltar para seleção', async () => {

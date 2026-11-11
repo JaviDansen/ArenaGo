@@ -4,8 +4,8 @@
 **Repositório:** `JaviDansen/ArenaGo`
 **Branch:** `feature/event-entry-qr-code`
 **Origem (HEAD base):** `1df82e17bc9e7cc24c84f1721031050c6cc442b9` (`develop`)
-**Commit anterior:** `e4a6691e`
-**Status:** Implementado, revisado e validado
+**Commits de referência:** `e4a6691e`, `f9a29a90`
+**Status:** Implementado, ajustado para acessibilidade e pronto para validação
 
 ---
 
@@ -43,6 +43,10 @@ Ambas as modalidades utilizam estritamente o mesmo fluxo unificado de consulta d
   - Nenhuma permissão de microfone, gravação de vídeo ou galeria de fotos foi solicitada.
 
 ### Código e Interface
+- `app/components/ui/Card.js`:
+  - Recebe a propriedade opcional `accessibilityHint`.
+  - Encaminha `accessibilityHint` diretamente ao `Pressable` nativo quando o card for interativo (`isClickable`).
+  - Preserva integralmente o comportamento de `accessibilityRole`, `accessibilityLabel`, `accessibilityState`, `disabled`, dimensões mínimas de 48dp e compatibilidade global.
 - `app/screens/event-entry/EventEntryScreen.js`:
   - Interface estruturada em três modos visuais: `'select'` (menu inicial de seleção), `'qr'` (leitor de câmera com retículo visual) e `'manual'` (formulário de digitação manual).
   - **Correção Rules of Hooks:** Invocação de `useIsFocused()` diretamente no nível superior do componente (sem `try/catch`).
@@ -58,9 +62,13 @@ Ambas as modalidades utilizam estritamente o mesmo fluxo unificado de consulta d
     *"Escaneie o QR Code ou digite o código de acesso disponibilizado pela equipe do evento para iniciar sua participação."*
 
 ### Testes
+- `app/tests/helpers/questionnaireHarness.cjs`:
+  - Repasse da propriedade `accessibilityHint` no stub compartilhado de `Card`.
+- `app/tests/uiComponents.test.cjs`:
+  - Cobertura de encaminhamento de `accessibilityHint` no Pressable interativo do `Card`.
 - `app/tests/eventEntry.test.cjs`:
   - Regressão completa dos 7 testes preexistentes (fluxo manual e confirmação).
-  - 14 testes automatizados cobrindo todos os cenários da TASK ENTRY-QR-01, incluindo ausência de controles aninhados, transição e recuperação de foco da câmera, e atualização da descrição na Home.
+  - Testes cobrindo ausência de botões aninhados, presença das dicas `accessibilityHint` nos cards "Ler QR Code" e "Digitar código", encaminhamento no `Card.js` compartilhado, e desativação/recuperação da câmera ao alternar foco.
 
 ---
 
@@ -69,7 +77,13 @@ Ambas as modalidades utilizam estritamente o mesmo fluxo unificado de consulta d
 ### 3.1. Tela Inicial e Seleção de Método (`mode === 'select'`)
 Ao entrar na tela, o participante encontra um cabeçalho oficial `ScreenHeader` com botão de retorno e duas opções apresentadas em cards interativos com tokens do Design System (`radii.md`, `spacing.xl`, `colors.background.surface`):
 - **Card Opção A (Ler QR Code):** Badge "RÁPIDO", título, descrição explicativa e indicador visual de ação primário. A área de toque é o próprio `Card`, sem botões clicáveis aninhados.
+  - `accessibilityRole="button"`
+  - `accessibilityLabel="Ler QR Code. Aponte a câmera para o QR Code do evento."`
+  - `accessibilityHint="Toque para abrir o leitor de QR Code"`
 - **Card Opção B (Digitar código):** Badge "MANUAL", título, descrição e indicador visual outline. A área de toque é o próprio `Card`, sem botões clicáveis aninhados.
+  - `accessibilityRole="button"`
+  - `accessibilityLabel="Digitar código. Informe o código de acesso manualmente."`
+  - `accessibilityHint="Toque para abrir a digitação manual de código"`
 - **Acessibilidade:** Leitores de tela anunciam cada card como um único botão com rótulo descritivo e dica de ação.
 
 ### 3.2. Opção A — Leitor de QR Code (`mode === 'qr'`)
@@ -102,45 +116,32 @@ A função `validateAndNormalizeQrCode(raw)` aplica as seguintes regras antes de
 - Se o evento não for encontrado ou houver erro de rede, o card exibe o erro e um botão "Escanear novamente" para permitir nova leitura de forma controlada.
 
 ### 3.6. Atualização de Texto na Tela Inicial (Home)
-- Conforme solicitado na revisão, a descrição do card de acesso à Arena em `HomeScreen.js` foi alinhada às duas opções disponíveis:
+- A descrição do card de acesso à Arena em `HomeScreen.js` contempla ambas as opções disponíveis:
   *"Escaneie o QR Code ou digite o código de acesso disponibilizado pela equipe do evento para iniciar sua participação."*
 
 ---
 
-## 4. Testes Automatizados
+## 4. Instruções de Validação Automatizada (Luna Medium)
 
-Comandos de execução executados no projeto:
+Conforme a política permanente do `AGENTS.md`, as validações preparadas devem ser executadas com o executor padrão Luna Medium:
+
 ```bash
 cd app
 node --test tests/eventEntry.test.cjs
+node --test tests/uiComponents.test.cjs
 npm test
 ```
 
-### Resultados dos Testes de Entrada em Evento (`eventEntry.test.cjs`):
-- `✔ consulta real envia o código sem mudar sua caixa e navega somente após resposta válida`
-- `✔ código vazio não consulta o backend nem navega`
-- `✔ consulta inexistente e resposta tardia após logout não navegam`
-- `✔ ineligibilidade mostra motivo real e impede POST`
-- `✔ ingresso confirmado navega uma vez; toque duplo não duplica POST`
-- `✔ ingresso confirmado sem sincronização só repete GET`
-- `✔ erro HTTP na confirmação preserva a tela e informa o problema`
-- `✔ ENTRY-QR-01: tela inicial apresenta as duas opções visíveis e independentes`
-- `✔ ENTRY-QR-01: navegação por cada card com apenas uma ação e ausência de botões aninhados`
-- `✔ ENTRY-QR-01: selecionar Digitar código exibe formulário manual e permite voltar para seleção`
-- `✔ ENTRY-QR-01: selecionar Ler QR Code ativa a câmera com enquadramento e instruções`
-- `✔ ENTRY-QR-01: permissão de câmera negada exibe aviso e botão para solicitar permissão`
-- `✔ ENTRY-QR-01: permissão bloqueada permanentemente orienta a abrir configurações`
-- `✔ ENTRY-QR-01: validação e normalização de QR Code rejeita códigos inválidos ou perigosos`
-- `✔ ENTRY-QR-01: leitura de QR Code executa lookupEvent e navega para EventConfirmation sem confirmar automaticamente`
-- `✔ ENTRY-QR-01: proteção contra leitura duplicada ignora detecções múltiplas durante consulta em andamento`
-- `✔ ENTRY-QR-01: erro na consulta por QR Code exibe mensagem de erro e permite nova leitura`
-- `✔ ENTRY-QR-01: resposta tardia após troca de modo ou desmontagem é descartada`
-- `✔ ENTRY-QR-01: comportamento do leitor ao perder e recuperar o foco`
-- `✔ ENTRY-QR-01: resposta pendente ao perder o foco não provoca navegação indevida`
-- `✔ ENTRY-QR-01: HomeScreen exibe texto atualizado com menção a QR Code e digitação manual`
-
-**Total em `eventEntry.test.cjs`:** 21 aprovados / 0 falhas.
-**Total na suíte completa (`npm test`):** 414 aprovados / 0 falhas.
+### Escopo das Verificações Preparadas:
+1. `eventEntry.test.cjs`:
+   - Cards de seleção de método encaminham `accessibilityHint` ao `Pressable` nativo (`"Toque para abrir o leitor de QR Code"` e `"Toque para abrir a digitação manual de código"`).
+   - Componente compartilhado `Card.js` encaminha `accessibilityHint` quando interativo e permanece `undefined` quando omitido.
+   - Navegação por cada card com apenas uma ação e ausência de `Pressables`/botões aninhados.
+   - Suíte de leitura, permissões, concorrência e desativação fora de foco.
+2. `uiComponents.test.cjs`:
+   - Encaminhamento de `accessibilityHint` no Pressable interativo do `Card`.
+3. `npm test`:
+   - Regressão completa de todas as 414+ asserções do aplicativo.
 
 ---
 
@@ -154,25 +155,19 @@ Para testar no celular físico Android:
    npx expo start
    ```
 2. **Abrir o aplicativo pelo Expo Go** escaneando o QR Code do terminal no celular Android conectado à mesma rede Wi-Fi.
-3. **Fluxo A — Leitura de QR Code:**
+3. **Fluxo A — Leitura de QR Code e Acessibilidade:**
    - Faça login como participante.
    - Na tela Home, confira o texto atualizado: *"Escaneie o QR Code ou digite o código de acesso disponibilizado pela equipe do evento para iniciar sua participação."*
    - Toque em "Entrar em um evento".
-   - Verifique a exibição dos dois cards com área de toque única ("Ler QR Code" e "Digitar código").
+   - Verifique com o leitor de tela (TalkBack / VoiceOver) que os cards são identificados como botões com seus respectivos rótulos e dicas de ação.
    - Toque no card "Ler QR Code".
-   - Se for a primeira execução, conceda a permissão de câmera no diálogo do Android.
-   - Aponte a câmera para um QR Code contendo o código de um evento cadastrado (ex.: `ARENA123`).
-   - Verifique que o retículo enquadra o código e que a consulta é realizada sem disparos múltiplos.
-   - Verifique a transição automática para a tela `EventConfirmationScreen` com os dados do evento.
-   - Verifique que o ingresso **não** foi confirmado automaticamente: o botão "Confirmar entrada" aguarda o toque voluntário.
+   - Conceda permissão de câmera e aponte para um QR Code de evento (ex.: `ARENA123`).
+   - Verifique a navegação para `EventConfirmationScreen` (sem confirmação automática).
 4. **Fluxo B — Digitação Manual:**
    - Volte para a tela de ingresso e selecione o card "Digitar código".
-   - Digite o código de acesso manualmente no campo de texto e toque em "Continuar".
-   - Confirme a navegação para a tela de confirmação.
+   - Digite o código de acesso manualmente e toque em "Continuar".
 5. **Fluxo C — Alternância e Retorno:**
-   - No leitor de QR Code, toque em "Digitar código manualmente" para trocar diretamente de modo.
-   - No leitor de QR Code, toque em "Voltar para opções" para retornar à seleção inicial.
-   - No formulário manual, toque em "Ler QR Code" e em "Voltar para opções".
+   - No leitor de QR Code, toque em "Digitar código manualmente" para alternar.
+   - No leitor de QR Code, toque em "Voltar para opções" para retornar.
 6. **Fluxo D — Permissão Negada:**
-   - Nas configurações do Android, revogue a permissão de câmera do Expo Go.
-   - Abra o leitor de QR Code e verifique a exibição do aviso de permissão necessária ou bloqueada, com o botão para abrir configurações ou usar a digitação manual.
+   - Revogue a permissão de câmera nas configurações do aparelho e verifique a mensagem de orientação e botão para abrir configurações.
