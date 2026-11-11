@@ -175,10 +175,10 @@ index 1a5c3afa..08f50aaf 100644
      "expo-secure-store": "~58.0.2",
      "expo-splash-screen": "~58.0.13",
 diff --git a/app/screens/event-entry/EventEntryScreen.js b/app/screens/event-entry/EventEntryScreen.js
-index 58546500..156a991a 100644
+index 58546500..142b6634 100644
 --- a/app/screens/event-entry/EventEntryScreen.js
 +++ b/app/screens/event-entry/EventEntryScreen.js
-@@ -1,24 +1,106 @@
+@@ -1,24 +1,101 @@
  import { StatusBar } from 'expo-status-bar';
 -import { useContext, useState } from 'react';
 +import { useContext, useEffect, useRef, useState } from 'react';
@@ -249,12 +249,7 @@ index 58546500..156a991a 100644
 +  const isMountedRef = useRef(true);
 +
 +  // Foco da tela via React Navigation (somente ativa câmera quando em foco)
-+  let isFocused = true;
-+  try {
-+    isFocused = useIsFocused();
-+  } catch {
-+    isFocused = true;
-+  }
++  const isFocused = useIsFocused();
 +
    const loading = admission?.status === 'looking_up';
  
@@ -288,7 +283,7 @@ index 58546500..156a991a 100644
    async function handleContinue() {
      if (loading) return;
      const code = eventCode.trim();
-@@ -33,55 +115,377 @@ export default function EventEntryScreen({ navigation }) {
+@@ -33,55 +110,381 @@ export default function EventEntryScreen({ navigation }) {
      }
    }
  
@@ -635,7 +630,9 @@ index 58546500..156a991a 100644
 +            style={styles.methodCard}
 +            onPress={() => switchMode('qr')}
 +            testID="event-entry-choose-qr"
++            accessibilityRole="button"
 +            accessibilityLabel="Ler QR Code. Aponte a câmera para o QR Code do evento."
++            accessibilityHint="Toque para abrir o leitor de QR Code"
 +          >
 +            <View style={styles.methodCardBadgeRow}>
 +              <Badge label="RÁPIDO" variant="brand" />
@@ -662,19 +659,24 @@ index 58546500..156a991a 100644
 -              containerStyle={styles.codeInput}
 -            />
 -            <Text style={styles.helperText}>O código é fornecido presencialmente pela equipe do evento.</Text>
-             <Button
+-            <Button
 -              title={loading ? 'Consultando...' : 'Continuar'}
-+              title="Ler QR Code"
-               variant="primary"
+-              variant="primary"
 -              onPress={handleContinue}
 -              disabled={loading}
 -              style={styles.continueButton}
 -              testID="event-entry-continue-button"
-+              onPress={() => switchMode('qr')}
-+              style={styles.methodCardButton}
-+              testID="event-entry-select-qr-button"
-+            />
-+          </Card>
+-            />
++            <View
++              style={[styles.methodCardActionBadge, styles.methodCardActionPrimary]}
++              pointerEvents="none"
++              testID="event-entry-qr-action-indicator"
++            >
++              <Text style={styles.methodCardActionTextPrimary}>Ler QR Code</Text>
++            </View>
+           </Card>
+-        </ScrollView>
+-      </KeyboardAvoidingView>
 +
 +          {/* Opção B: Digitar código */}
 +          <Card
@@ -682,7 +684,9 @@ index 58546500..156a991a 100644
 +            style={styles.methodCard}
 +            onPress={() => switchMode('manual')}
 +            testID="event-entry-choose-manual"
++            accessibilityRole="button"
 +            accessibilityLabel="Digitar código. Informe o código de acesso manualmente."
++            accessibilityHint="Toque para abrir a digitação manual de código"
 +          >
 +            <View style={styles.methodCardBadgeRow}>
 +              <Badge label="MANUAL" variant="default" />
@@ -691,22 +695,20 @@ index 58546500..156a991a 100644
 +            <Text style={styles.methodCardDescription}>
 +              Informe o código alfanumérico fornecido pela recepção ou equipe do evento.
 +            </Text>
-+            <Button
-+              title="Digitar código"
-+              variant="outline"
-+              onPress={() => switchMode('manual')}
-+              style={styles.methodCardButton}
-+              testID="event-entry-select-manual-button"
-             />
-           </Card>
--        </ScrollView>
--      </KeyboardAvoidingView>
++            <View
++              style={[styles.methodCardActionBadge, styles.methodCardActionOutline]}
++              pointerEvents="none"
++              testID="event-entry-manual-action-indicator"
++            >
++              <Text style={styles.methodCardActionTextOutline}>Digitar código</Text>
++            </View>
++          </Card>
 +        </View>
 +      </ScrollView>
      </AuthBackground>
    );
  }
-@@ -109,6 +513,31 @@ const styles = StyleSheet.create({
+@@ -109,6 +512,54 @@ const styles = StyleSheet.create({
      color: colors.text.secondary,
      marginTop: spacing.sm,
    },
@@ -732,13 +734,36 @@ index 58546500..156a991a 100644
 +    marginTop: spacing.xs,
 +    marginBottom: spacing.lg,
 +  },
-+  methodCardButton: {
++  methodCardActionBadge: {
++    minHeight: 48,
++    borderRadius: radii.lg,
++    alignItems: 'center',
++    justifyContent: 'center',
++    paddingHorizontal: spacing.lg,
 +    marginTop: spacing.xs,
++  },
++  methodCardActionPrimary: {
++    backgroundColor: colors.brand.primary,
++  },
++  methodCardActionOutline: {
++    backgroundColor: 'transparent',
++    borderWidth: 1,
++    borderColor: colors.border.input,
++  },
++  methodCardActionTextPrimary: {
++    ...typography.bodyLarge,
++    fontWeight: '700',
++    color: colors.text.onBrand,
++  },
++  methodCardActionTextOutline: {
++    ...typography.bodyLarge,
++    fontWeight: '700',
++    color: colors.text.primary,
 +  },
    formCard: {
      alignItems: 'stretch',
    },
-@@ -123,4 +552,168 @@ const styles = StyleSheet.create({
+@@ -123,4 +574,168 @@ const styles = StyleSheet.create({
    continueButton: {
      marginTop: spacing.xl,
    },
@@ -907,26 +932,61 @@ index 58546500..156a991a 100644
 +    width: '100%',
 +  },
  });
+diff --git a/app/screens/home/HomeScreen.js b/app/screens/home/HomeScreen.js
+index 31dc2793..8aaf26ef 100644
+--- a/app/screens/home/HomeScreen.js
++++ b/app/screens/home/HomeScreen.js
+@@ -104,7 +104,7 @@ export default function HomeScreen({ navigation, returnState, mode = 'ready', me
+             <Badge label="ACESSO À ARENA" variant="brand" />
+             <Text style={styles.heroTitle}>Pronto para jogar?</Text>
+             <Text style={styles.heroDescription}>
+-              Informe o código disponibilizado na estação do evento para iniciar sua participação.
++              Escaneie o QR Code ou digite o código de acesso disponibilizado pela equipe do evento para iniciar sua participação.
+             </Text>
+             <Button
+               title="Entrar em um evento"
 diff --git a/app/tests/eventEntry.test.cjs b/app/tests/eventEntry.test.cjs
-index 066c43a2..592181df 100644
+index 066c43a2..81f7c924 100644
 --- a/app/tests/eventEntry.test.cjs
 +++ b/app/tests/eventEntry.test.cjs
-@@ -11,10 +11,12 @@ const event = {
+@@ -11,10 +11,33 @@ const event = {
  };
  const eligible = { eligible: true, blockingReasons: [] };
  
 -function screenRig(path, context, params = {}) {
 -  const state = [], calls = [];
+-  const ui = createParticipantUiStubs();
 +function screenRig(path, context, params = {}, options = {}) {
 +  const state = [], calls = [], cleanups = [];
-   const ui = createParticipantUiStubs();
++  const baseUi = createParticipantUiStubs();
++  const ui = {
++    ...baseUi,
++    Card: ({ children, onPress, disabled, accessibilityLabel, testID, ...props }) => {
++      if (onPress) {
++        return {
++          type: 'Pressable',
++          props: {
++            ...props,
++            onPress: disabled ? undefined : onPress,
++            disabled,
++            accessibilityRole: props.accessibilityRole || 'button',
++            accessibilityLabel,
++            testID,
++            children,
++          },
++        };
++      }
++      return baseUi.Card({ children, disabled, accessibilityLabel, testID, ...props });
++    },
++  };
++
    let cursor = 0, tree;
 +  let settingsOpened = 0;
 +
    const react = {
      useContext: () => context,
      useRef(initial) { const index = cursor++; return state[index] ||= { current: initial }; },
-@@ -23,22 +25,41 @@ function screenRig(path, context, params = {}) {
+@@ -23,22 +46,41 @@ function screenRig(path, context, params = {}) {
        if (!(index in state)) state[index] = initial;
        return [state[index], (value) => { state[index] = typeof value === 'function' ? value(state[index]) : value; }];
      },
@@ -969,7 +1029,7 @@ index 066c43a2..592181df 100644
    function render() {
      cursor = 0;
      tree = module.default({
-@@ -46,23 +67,74 @@ function screenRig(path, context, params = {}) {
+@@ -46,23 +88,91 @@ function screenRig(path, context, params = {}) {
        navigation: {
          navigate: (name, value) => calls.push({ name, value }),
          reset: (value) => calls.push({ reset: value }),
@@ -980,17 +1040,24 @@ index 066c43a2..592181df 100644
 +
    function button(label) {
 -    const result = nodes(tree).find((node) => node.type === 'Pressable' && textOf(node) === label);
-+    let result = nodes(tree).find((node) => node.type === 'Pressable' && textOf(node) === label);
+-    assert.ok(result, `Botão ausente: ${label}`);
++    let result = nodes(tree).find((node) => node.type === 'Pressable' && (
++      textOf(node) === label ||
++      node.props?.accessibilityLabel === label ||
++      (typeof node.props?.accessibilityLabel === 'string' && node.props.accessibilityLabel.startsWith(label)) ||
++      (label === 'Ler QR Code' && node.props?.testID === 'event-entry-choose-qr') ||
++      (label === 'Digitar código' && node.props?.testID === 'event-entry-choose-manual')
++    ));
 +    // Para manter compatibilidade com testes manuais legados que buscavam diretamente 'Continuar'
 +    if (!result && (label === 'Continuar' || label === 'Consultando...')) {
-+      const manualBtn = nodes(tree).find((node) => node.type === 'Pressable' && textOf(node).includes('Digitar código'));
-+      if (manualBtn) {
-+        manualBtn.props.onPress();
++      const manualCard = nodes(tree).find((node) => node.props?.testID === 'event-entry-choose-manual');
++      if (manualCard) {
++        manualCard.props.onPress();
 +        render();
 +        result = nodes(tree).find((node) => node.type === 'Pressable' && textOf(node) === label);
 +      }
 +    }
-     assert.ok(result, `Botão ausente: ${label}`);
++    assert.ok(result, `Botão ou card ausente: ${label}`);
      return result;
    }
 +
@@ -1001,16 +1068,23 @@ index 066c43a2..592181df 100644
 +    calls,
 +    render,
 +    button,
-+    findButton: (label) => nodes(tree).find((node) => node.type === 'Pressable' && textOf(node) === label),
++    findButton: (label) => nodes(tree).find((node) => node.type === 'Pressable' && (
++      textOf(node) === label ||
++      node.props?.accessibilityLabel === label ||
++      (typeof node.props?.accessibilityLabel === 'string' && node.props.accessibilityLabel.startsWith(label)) ||
++      (label === 'Ler QR Code' && node.props?.testID === 'event-entry-choose-qr') ||
++      (label === 'Digitar código' && node.props?.testID === 'event-entry-choose-manual')
++    )),
++    card: (testID) => nodes(tree).find((node) => node.props?.testID === testID),
 +    text: () => nodes(tree).map(textOf).join(' '),
      inputError: () => nodes(tree).find((node) => node.type === ui.InputField)?.props.error,
 -    input(value) { nodes(tree).find((node) => node.type === 'TextInput').props.onChangeText(value); render(); },
 +    input(value) {
 +      let textInput = nodes(tree).find((node) => node.type === 'TextInput');
 +      if (!textInput) {
-+        const manualBtn = nodes(tree).find((node) => node.type === 'Pressable' && textOf(node).includes('Digitar código'));
-+        if (manualBtn) {
-+          manualBtn.props.onPress();
++        const manualCard = nodes(tree).find((node) => node.props?.testID === 'event-entry-choose-manual');
++        if (manualCard) {
++          manualCard.props.onPress();
 +          render();
 +          textInput = nodes(tree).find((node) => node.type === 'TextInput');
 +        }
@@ -1030,6 +1104,10 @@ index 066c43a2..592181df 100644
 +        render();
 +      }
 +    },
++    setFocused(focused) {
++      options.isFocused = focused;
++      render();
++    },
 +    unmount() {
 +      while (cleanups.length) {
 +        const fn = cleanups.pop();
@@ -1048,13 +1126,13 @@ index 066c43a2..592181df 100644
  test('consulta real envia o código sem mudar sua caixa e navega somente após resposta válida', async () => {
    const requests = [];
    const context = {
-@@ -169,3 +241,267 @@ test('erro HTTP na confirmação preserva a tela e informa o problema', async ()
+@@ -169,3 +279,395 @@ test('erro HTTP na confirmação preserva a tela e informa o problema', async ()
    rig.render();
    assert.match(rig.text(), /Evento encerrado/);
  });
 +
 +// -------------------------------------------------------------
-+// Novos testes específicos da TASK ENTRY-QR-01
++// Testes específicos da TASK ENTRY-QR-01
 +// -------------------------------------------------------------
 +
 +test('ENTRY-QR-01: tela inicial apresenta as duas opções visíveis e independentes', () => {
@@ -1067,9 +1145,60 @@ index 066c43a2..592181df 100644
 +  assert.match(rig.text(), /Ler QR Code/);
 +  assert.match(rig.text(), /Digitar código/);
 +
-+  // Ambas as opções devem possuir botões acionáveis
++  // Ambas as opções devem possuir cards acionáveis
 +  assert.ok(rig.button('Ler QR Code'));
 +  assert.ok(rig.button('Digitar código'));
++});
++
++test('ENTRY-QR-01: navegação por cada card com apenas uma ação e ausência de botões aninhados', async () => {
++  const context = { admission: { status: 'idle' }, isCurrentAdmission: () => true };
++  const rig = screenRig('screens/event-entry/EventEntryScreen.js', context);
++
++  const cardQr = rig.card('event-entry-choose-qr');
++  const cardManual = rig.card('event-entry-choose-manual');
++
++  assert.ok(cardQr, 'Card de QR Code deve existir');
++  assert.ok(cardManual, 'Card de código manual deve existir');
++
++  // Cada card é um elemento com acessibilidade e role button
++  const isPressableOrHasRole = (node) =>
++    node.type === 'Pressable' || node.props?.accessibilityRole === 'button';
++
++  assert.ok(isPressableOrHasRole(cardQr), 'Card QR deve ser acessível como botão');
++  assert.ok(isPressableOrHasRole(cardManual), 'Card Manual deve ser acessível como botão');
++
++  // Ausência de botões interativos aninhados dentro de cada card
++  // O card em si é a única área interativa; seus filhos não podem conter botões/pressables
++  const qrInnerPressables = (Array.isArray(cardQr.props?.children) ? cardQr.props.children : [cardQr.props?.children])
++    .flatMap(nodes)
++    .filter((n) => n.type === 'Pressable' || n.props?.accessibilityRole === 'button');
++
++  const manualInnerPressables = (Array.isArray(cardManual.props?.children) ? cardManual.props.children : [cardManual.props?.children])
++    .flatMap(nodes)
++    .filter((n) => n.type === 'Pressable' || n.props?.accessibilityRole === 'button');
++
++  assert.equal(qrInnerPressables.length, 0, 'Card de QR Code não deve conter botões ou Pressables aninhados');
++  assert.equal(manualInnerPressables.length, 0, 'Card de código manual não deve conter botões ou Pressables aninhados');
++
++  // Card possui indicador visual não interativo
++  assert.ok(nodes(cardQr).find((n) => n.props?.testID === 'event-entry-qr-action-indicator'));
++  assert.ok(nodes(cardManual).find((n) => n.props?.testID === 'event-entry-manual-action-indicator'));
++
++  // Navegação direta com um único toque no card de QR Code
++  await cardQr.props.onPress();
++  rig.render();
++  assert.match(rig.text(), /Aponte a câmera para o QR Code do evento/);
++
++  // Retorna para a seleção
++  await rig.button('Voltar para opções').props.onPress();
++  rig.render();
++  assert.match(rig.text(), /Como deseja entrar\?/);
++
++  // Navegação direta com um único toque no card de código manual
++  const newCardManual = rig.card('event-entry-choose-manual');
++  await newCardManual.props.onPress();
++  rig.render();
++  assert.match(rig.text(), /Digite o código de acesso/);
 +});
 +
 +test('ENTRY-QR-01: selecionar Digitar código exibe formulário manual e permite voltar para seleção', async () => {
@@ -1307,12 +1436,273 @@ index 066c43a2..592181df 100644
 +  assert.match(rig.text(), /Digite o código de acesso/);
 +});
 +
-+test('ENTRY-QR-01: câmera é desativada quando a tela não está em foco', () => {
-+  const context = { admission: { status: 'idle' }, isCurrentAdmission: () => true };
++test('ENTRY-QR-01: comportamento do leitor ao perder e recuperar o foco', async () => {
++  const lookups = [];
++  const context = {
++    admission: { status: 'idle' },
++    isCurrentAdmission: () => true,
++    lookupEvent: async (code) => {
++      lookups.push(code);
++      return { kind: 'found', event, eligibility: eligible };
++    },
++  };
 +  const rig = screenRig('screens/event-entry/EventEntryScreen.js', context, { initialMethod: 'qr' }, {
-+    isFocused: false,
++    isFocused: true,
 +  });
 +
-+  assert.equal(rig.camera(), undefined, 'CameraView não deve ser montada quando isFocused for false');
++  // Em foco: câmera montada e ativa
++  assert.ok(rig.camera(), 'CameraView deve estar montada quando em foco');
++
++  // Perde o foco: câmera é desativada
++  rig.setFocused(false);
++  assert.equal(rig.camera(), undefined, 'CameraView não deve estar montada fora de foco');
 +  assert.match(rig.text(), /Leitor inativo fora de foco/);
++
++  // Recupera o foco: câmera volta a ficar montada e pronta para nova leitura
++  rig.setFocused(true);
++  assert.ok(rig.camera(), 'CameraView deve ser remontada ao recuperar o foco');
++
++  // Lê código após recuperar o foco
++  await rig.simulateScan('ARENA-RECOVER');
++  assert.deepEqual(lookups, ['ARENA-RECOVER']);
++  assert.equal(rig.calls.length, 1);
++  assert.equal(rig.calls[0].name, 'EventConfirmation');
 +});
++
++test('ENTRY-QR-01: resposta pendente ao perder o foco não provoca navegação indevida', async () => {
++  let resolve;
++  const context = {
++    admission: { status: 'idle' },
++    isCurrentAdmission: () => true,
++    lookupEvent: () => new Promise((done) => { resolve = done; }),
++  };
++  const rig = screenRig('screens/event-entry/EventEntryScreen.js', context, { initialMethod: 'qr' }, {
++    isFocused: true,
++  });
++
++  const pending = rig.simulateScan('ARENA-PENDING');
++
++  // A tela perde o foco enquanto a requisição HTTP está em voo
++  rig.setFocused(false);
++
++  // A resposta chega tardiamente
++  resolve({ kind: 'found', event, eligibility: eligible });
++  await pending;
++
++  // Não deve navegar pois a tela estava fora de foco
++  assert.deepEqual(rig.calls, []);
++});
++
++test('ENTRY-QR-01: HomeScreen exibe texto atualizado com menção a QR Code e digitação manual', () => {
++  const calls = [];
++  const navigation = { navigate: (name) => calls.push(name) };
++  const auth = { user: { name: 'Kaled', hasCompletedQuestionnaire: true } };
++  const screen = loadModule('screens/home/HomeScreen.js', (name) => {
++    if (name === 'react') return { useContext: () => auth, useState: () => [null, () => {}] };
++    if (name === 'react-native') return {
++      ActivityIndicator: 'ActivityIndicator', Pressable: 'Pressable', ScrollView: 'ScrollView',
++      Text: 'Text', View: 'View', StyleSheet: { create: (s) => s },
++    };
++    if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
++    if (name === '../../components/ui') return createParticipantUiStubs();
++    if (name === '../../context/AuthContext') return { AuthContext: {} };
++    if (name === '../../theme') return createParticipantThemeStub();
++    return require(name);
++  }).exports.default;
++
++  const tree = screen({ navigation });
++  const allText = nodes(tree).map(textOf).join(' ');
++  assert.match(
++    allText,
++    /Escaneie o QR Code ou digite o código de acesso disponibilizado pela equipe do evento para iniciar sua participação\./
++  );
++
++  const entryButton = nodes(tree).find((n) => n.type === 'Pressable' && textOf(n) === 'Entrar em um evento');
++  assert.ok(entryButton, 'Botão Entrar em um evento deve estar presente');
++  entryButton.props.onPress();
++  assert.deepEqual(calls, ['EventEntry']);
++});
+diff --git a/docs/ENTRY_QR_01_IMPLEMENTACAO.md b/docs/ENTRY_QR_01_IMPLEMENTACAO.md
+new file mode 100644
+index 00000000..21172fa0
+--- /dev/null
++++ b/docs/ENTRY_QR_01_IMPLEMENTACAO.md
+@@ -0,0 +1,178 @@
++# ArenaGO — ENTRY-QR-01: Entrada em eventos por QR Code ou código manual
++
++**Responsável:** Kaled
++**Repositório:** `JaviDansen/ArenaGo`
++**Branch:** `feature/event-entry-qr-code`
++**Origem (HEAD base):** `1df82e17bc9e7cc24c84f1721031050c6cc442b9` (`develop`)
++**Commit anterior:** `e4a6691e`
++**Status:** Implementado, revisado e validado
++
++---
++
++## 1. Objetivo da Tarefa
++
++Implementar a leitura de QR Code para ingresso em eventos no ArenaGO e atualizar a interface da tela de entrada para disponibilizar duas alternativas bem visíveis, acessíveis e independentes:
++
++1. **Ler QR Code** (Câmera traseira com enquadramento visual, validação de payload e proteção contra leituras duplicadas).
++2. **Digitar código** (Formulário manual existente preservado com opções de alternância e retorno).
++
++Ambas as modalidades utilizam estritamente o mesmo fluxo unificado de consulta de evento (`lookupEvent`), elegibilidade e confirmação explícita na tela `EventConfirmationScreen`.
++
++---
++
++## 2. Arquivos Modificados e Novas Dependências
++
++### Dependências
++- `app/package.json` e `app/package-lock.json`:
++  - Adicionado `expo-camera@~58.0.14` (instalado via `npx expo install expo-camera`, totalmente alinhado ao Expo SDK 58).
++
++### Configurações Nativas
++- `app/app.json`:
++  - Permissão iOS configurada em `ios.infoPlist.NSCameraUsageDescription`: *"O ArenaGO precisa de acesso à câmera para ler o QR Code de acesso aos eventos."*
++  - Permissão Android declarada em `android.permissions`: `["android.permission.CAMERA"]`.
++  - Configuração do plugin `expo-camera`:
++    ```json
++    [
++      "expo-camera",
++      {
++        "cameraPermission": "O ArenaGO precisa de acesso à câmera para ler o QR Code de acesso aos eventos.",
++        "recordAudioAndroid": false
++      }
++    ]
++    ```
++  - Nenhuma permissão de microfone, gravação de vídeo ou galeria de fotos foi solicitada.
++
++### Código e Interface
++- `app/screens/event-entry/EventEntryScreen.js`:
++  - Interface estruturada em três modos visuais: `'select'` (menu inicial de seleção), `'qr'` (leitor de câmera com retículo visual) e `'manual'` (formulário de digitação manual).
++  - **Correção Rules of Hooks:** Invocação de `useIsFocused()` diretamente no nível superior do componente (sem `try/catch`).
++  - **Eliminação de botões aninhados:** Os cards de QR Code e código manual operam como controles interativos únicos (`Card` com `onPress`, `accessibilityRole="button"`, `accessibilityLabel` e `accessibilityHint`). No lugar de botões `<Button>` internos, utilizam indicadores visuais não interativos (`pointerEvents="none"`), garantindo que 1 toque na área confortável do card dispare apenas uma ação.
++  - Implementação de `validateAndNormalizeQrCode(raw)` para higienização e validação de segurança do QR Code lido.
++  - Integração com `CameraView` e `useCameraPermissions` de `expo-camera`.
++  - Retículo visual de enquadramento (`reticleFrame`) com cantos destacados na cor da marca (`colors.brand.primaryLight`) e máscara de foco escurecida (`rgba(5, 5, 10, 0.72)`).
++  - Tratamento de permissão concedida, negada e bloqueada permanentemente (com atalho para `Linking.openSettings()`).
++  - Tratamento de indisponibilidade da câmera com retorno direto à digitação manual.
++  - Proteção robusta contra concorrência e detecções duplicadas (`isScanningRef`, `scanned`, `scanSequenceRef`).
++- `app/screens/home/HomeScreen.js`:
++  - Atualizada a descrição da seção "Pronto para jogar?" para contemplar ambas as opções:
++    *"Escaneie o QR Code ou digite o código de acesso disponibilizado pela equipe do evento para iniciar sua participação."*
++
++### Testes
++- `app/tests/eventEntry.test.cjs`:
++  - Regressão completa dos 7 testes preexistentes (fluxo manual e confirmação).
++  - 14 testes automatizados cobrindo todos os cenários da TASK ENTRY-QR-01, incluindo ausência de controles aninhados, transição e recuperação de foco da câmera, e atualização da descrição na Home.
++
++---
++
++## 3. Arquitetura da Solução e Decisões de Design
++
++### 3.1. Tela Inicial e Seleção de Método (`mode === 'select'`)
++Ao entrar na tela, o participante encontra um cabeçalho oficial `ScreenHeader` com botão de retorno e duas opções apresentadas em cards interativos com tokens do Design System (`radii.md`, `spacing.xl`, `colors.background.surface`):
++- **Card Opção A (Ler QR Code):** Badge "RÁPIDO", título, descrição explicativa e indicador visual de ação primário. A área de toque é o próprio `Card`, sem botões clicáveis aninhados.
++- **Card Opção B (Digitar código):** Badge "MANUAL", título, descrição e indicador visual outline. A área de toque é o próprio `Card`, sem botões clicáveis aninhados.
++- **Acessibilidade:** Leitores de tela anunciam cada card como um único botão com rótulo descritivo e dica de ação.
++
++### 3.2. Opção A — Leitor de QR Code (`mode === 'qr'`)
++- **Câmera:** Utiliza `facing="back"` e `barcodeScannerSettings={{ barcodeTypes: ['qr'] }}`.
++- **Foco e Ciclo de Vida:** Utiliza o hook `useIsFocused()` no nível superior do componente. A câmera é desmontada/desativada caso a tela perca o foco (ex.: ao navegar para a tela de confirmação ou trocar de aba). Ao recuperar o foco, a câmera é remontada e fica pronta para novas leituras.
++- **Enquadramento Visual:** Sobreposição em 3 faixas com máscara semitransparente (`rgba(5, 5, 10, 0.72)`). A área central de 250x250dp possui borda sutil e 4 cantos reforçados (`borderWidth: 4`, `borderColor: colors.brand.primaryLight`), orientando o usuário a posicionar o código.
++- **Permissões:**
++  - Carregando: Indicador de progresso `ActivityIndicator`.
++  - Negada temporariamente: Card explicativo com botão "Permitir acesso à câmera" (`requestPermission()`).
++  - Negada permanentemente (`canAskAgain: false`): Card com orientação e botão "Abrir configurações" (`Linking.openSettings()`).
++  - Em qualquer cenário de bloqueio, os botões "Digitar código manualmente" e "Voltar para opções" permanecem acessíveis.
++
++### 3.3. Opção B — Digitar Código (`mode === 'manual'`)
++- Preserva integralmente o formulário existente com `InputField`, botão "Continuar", tratamento de erros locais e remotos, e submissão via teclado.
++- Adiciona botões de navegação "Ler QR Code" e "Voltar para opções", garantindo livre alternância entre os métodos.
++
++### 3.4. Validação e Segurança do QR Code
++A função `validateAndNormalizeQrCode(raw)` aplica as seguintes regras antes de consultar o backend:
++1. Rejeita payloads vazios ou constituídos apenas por espaços.
++2. Rejeita esquemas de URL (`http://`, `https://`, `ftp:`, `javascript:`, `data:`, `file:`) para evitar phishing ou redirecionamentos maliciosos.
++3. Rejeita caracteres de quebra de linha (`\r`, `\n`, `\t`) para evitar injeções em logs ou formulários.
++4. Limita o comprimento a 64 caracteres.
++5. Valida o alfabeto alfanumérico com hífens e underscores (`/^[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*$/`).
++6. Trata e normaliza o código sem alterar sua caixa externa antes de enviar para a consulta unificada.
++
++### 3.5. Proteção contra Leituras Duplicadas
++- `isScanningRef` e `scanned` garantem que múltiplos frames da câmera contendo o mesmo QR Code não disparem múltiplas consultas `lookupEvent()`.
++- `scanSequenceRef` invalida qualquer resposta assíncrona recebida se o usuário trocar de modo ou sair da tela antes do término da requisição HTTP.
++- O leitor de QR Code **não confirma a participação automaticamente**: ao encontrar o evento com sucesso (`{ kind: 'found' }`), navega para `EventConfirmationScreen`, onde o participante confirma expressamente a entrada.
++- Se o evento não for encontrado ou houver erro de rede, o card exibe o erro e um botão "Escanear novamente" para permitir nova leitura de forma controlada.
++
++### 3.6. Atualização de Texto na Tela Inicial (Home)
++- Conforme solicitado na revisão, a descrição do card de acesso à Arena em `HomeScreen.js` foi alinhada às duas opções disponíveis:
++  *"Escaneie o QR Code ou digite o código de acesso disponibilizado pela equipe do evento para iniciar sua participação."*
++
++---
++
++## 4. Testes Automatizados
++
++Comandos de execução executados no projeto:
++```bash
++cd app
++node --test tests/eventEntry.test.cjs
++npm test
++```
++
++### Resultados dos Testes de Entrada em Evento (`eventEntry.test.cjs`):
++- `✔ consulta real envia o código sem mudar sua caixa e navega somente após resposta válida`
++- `✔ código vazio não consulta o backend nem navega`
++- `✔ consulta inexistente e resposta tardia após logout não navegam`
++- `✔ ineligibilidade mostra motivo real e impede POST`
++- `✔ ingresso confirmado navega uma vez; toque duplo não duplica POST`
++- `✔ ingresso confirmado sem sincronização só repete GET`
++- `✔ erro HTTP na confirmação preserva a tela e informa o problema`
++- `✔ ENTRY-QR-01: tela inicial apresenta as duas opções visíveis e independentes`
++- `✔ ENTRY-QR-01: navegação por cada card com apenas uma ação e ausência de botões aninhados`
++- `✔ ENTRY-QR-01: selecionar Digitar código exibe formulário manual e permite voltar para seleção`
++- `✔ ENTRY-QR-01: selecionar Ler QR Code ativa a câmera com enquadramento e instruções`
++- `✔ ENTRY-QR-01: permissão de câmera negada exibe aviso e botão para solicitar permissão`
++- `✔ ENTRY-QR-01: permissão bloqueada permanentemente orienta a abrir configurações`
++- `✔ ENTRY-QR-01: validação e normalização de QR Code rejeita códigos inválidos ou perigosos`
++- `✔ ENTRY-QR-01: leitura de QR Code executa lookupEvent e navega para EventConfirmation sem confirmar automaticamente`
++- `✔ ENTRY-QR-01: proteção contra leitura duplicada ignora detecções múltiplas durante consulta em andamento`
++- `✔ ENTRY-QR-01: erro na consulta por QR Code exibe mensagem de erro e permite nova leitura`
++- `✔ ENTRY-QR-01: resposta tardia após troca de modo ou desmontagem é descartada`
++- `✔ ENTRY-QR-01: comportamento do leitor ao perder e recuperar o foco`
++- `✔ ENTRY-QR-01: resposta pendente ao perder o foco não provoca navegação indevida`
++- `✔ ENTRY-QR-01: HomeScreen exibe texto atualizado com menção a QR Code e digitação manual`
++
++**Total em `eventEntry.test.cjs`:** 21 aprovados / 0 falhas.
++**Total na suíte completa (`npm test`):** 414 aprovados / 0 falhas.
++
++---
++
++## 5. Roteiro de Homologação em Dispositivo Android
++
++Para testar no celular físico Android:
++
++1. **Iniciar o aplicativo com conexão para a rede local:**
++   ```bash
++   cd app
++   npx expo start
++   ```
++2. **Abrir o aplicativo pelo Expo Go** escaneando o QR Code do terminal no celular Android conectado à mesma rede Wi-Fi.
++3. **Fluxo A — Leitura de QR Code:**
++   - Faça login como participante.
++   - Na tela Home, confira o texto atualizado: *"Escaneie o QR Code ou digite o código de acesso disponibilizado pela equipe do evento para iniciar sua participação."*
++   - Toque em "Entrar em um evento".
++   - Verifique a exibição dos dois cards com área de toque única ("Ler QR Code" e "Digitar código").
++   - Toque no card "Ler QR Code".
++   - Se for a primeira execução, conceda a permissão de câmera no diálogo do Android.
++   - Aponte a câmera para um QR Code contendo o código de um evento cadastrado (ex.: `ARENA123`).
++   - Verifique que o retículo enquadra o código e que a consulta é realizada sem disparos múltiplos.
++   - Verifique a transição automática para a tela `EventConfirmationScreen` com os dados do evento.
++   - Verifique que o ingresso **não** foi confirmado automaticamente: o botão "Confirmar entrada" aguarda o toque voluntário.
++4. **Fluxo B — Digitação Manual:**
++   - Volte para a tela de ingresso e selecione o card "Digitar código".
++   - Digite o código de acesso manualmente no campo de texto e toque em "Continuar".
++   - Confirme a navegação para a tela de confirmação.
++5. **Fluxo C — Alternância e Retorno:**
++   - No leitor de QR Code, toque em "Digitar código manualmente" para trocar diretamente de modo.
++   - No leitor de QR Code, toque em "Voltar para opções" para retornar à seleção inicial.
++   - No formulário manual, toque em "Ler QR Code" e em "Voltar para opções".
++6. **Fluxo D — Permissão Negada:**
++   - Nas configurações do Android, revogue a permissão de câmera do Expo Go.
++   - Abra o leitor de QR Code e verifique a exibição do aviso de permissão necessária ou bloqueada, com o botão para abrir configurações ou usar a digitação manual.

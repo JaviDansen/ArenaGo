@@ -65,12 +65,7 @@ export default function EventEntryScreen({ navigation, route }) {
   const isMountedRef = useRef(true);
 
   // Foco da tela via React Navigation (somente ativa câmera quando em foco)
-  let isFocused = true;
-  try {
-    isFocused = useIsFocused();
-  } catch {
-    isFocused = true;
-  }
+  const isFocused = useIsFocused();
 
   const loading = admission?.status === 'looking_up';
 
@@ -443,7 +438,9 @@ export default function EventEntryScreen({ navigation, route }) {
             style={styles.methodCard}
             onPress={() => switchMode('qr')}
             testID="event-entry-choose-qr"
+            accessibilityRole="button"
             accessibilityLabel="Ler QR Code. Aponte a câmera para o QR Code do evento."
+            accessibilityHint="Toque para abrir o leitor de QR Code"
           >
             <View style={styles.methodCardBadgeRow}>
               <Badge label="RÁPIDO" variant="brand" />
@@ -452,13 +449,13 @@ export default function EventEntryScreen({ navigation, route }) {
             <Text style={styles.methodCardDescription}>
               Aponte a câmera do seu celular para a credencial, banner ou totem da estação.
             </Text>
-            <Button
-              title="Ler QR Code"
-              variant="primary"
-              onPress={() => switchMode('qr')}
-              style={styles.methodCardButton}
-              testID="event-entry-select-qr-button"
-            />
+            <View
+              style={[styles.methodCardActionBadge, styles.methodCardActionPrimary]}
+              pointerEvents="none"
+              testID="event-entry-qr-action-indicator"
+            >
+              <Text style={styles.methodCardActionTextPrimary}>Ler QR Code</Text>
+            </View>
           </Card>
 
           {/* Opção B: Digitar código */}
@@ -467,7 +464,9 @@ export default function EventEntryScreen({ navigation, route }) {
             style={styles.methodCard}
             onPress={() => switchMode('manual')}
             testID="event-entry-choose-manual"
+            accessibilityRole="button"
             accessibilityLabel="Digitar código. Informe o código de acesso manualmente."
+            accessibilityHint="Toque para abrir a digitação manual de código"
           >
             <View style={styles.methodCardBadgeRow}>
               <Badge label="MANUAL" variant="default" />
@@ -476,13 +475,13 @@ export default function EventEntryScreen({ navigation, route }) {
             <Text style={styles.methodCardDescription}>
               Informe o código alfanumérico fornecido pela recepção ou equipe do evento.
             </Text>
-            <Button
-              title="Digitar código"
-              variant="outline"
-              onPress={() => switchMode('manual')}
-              style={styles.methodCardButton}
-              testID="event-entry-select-manual-button"
-            />
+            <View
+              style={[styles.methodCardActionBadge, styles.methodCardActionOutline]}
+              pointerEvents="none"
+              testID="event-entry-manual-action-indicator"
+            >
+              <Text style={styles.methodCardActionTextOutline}>Digitar código</Text>
+            </View>
           </Card>
         </View>
       </ScrollView>
@@ -535,8 +534,31 @@ const styles = StyleSheet.create({
     marginTop: spacing.xs,
     marginBottom: spacing.lg,
   },
-  methodCardButton: {
+  methodCardActionBadge: {
+    minHeight: 48,
+    borderRadius: radii.lg,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: spacing.lg,
     marginTop: spacing.xs,
+  },
+  methodCardActionPrimary: {
+    backgroundColor: colors.brand.primary,
+  },
+  methodCardActionOutline: {
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+    borderColor: colors.border.input,
+  },
+  methodCardActionTextPrimary: {
+    ...typography.bodyLarge,
+    fontWeight: '700',
+    color: colors.text.onBrand,
+  },
+  methodCardActionTextOutline: {
+    ...typography.bodyLarge,
+    fontWeight: '700',
+    color: colors.text.primary,
   },
   formCard: {
     alignItems: 'stretch',

@@ -13,7 +13,28 @@ const eligible = { eligible: true, blockingReasons: [] };
 
 function screenRig(path, context, params = {}, options = {}) {
   const state = [], calls = [], cleanups = [];
-  const ui = createParticipantUiStubs();
+  const baseUi = createParticipantUiStubs();
+  const ui = {
+    ...baseUi,
+    Card: ({ children, onPress, disabled, accessibilityLabel, testID, ...props }) => {
+      if (onPress) {
+        return {
+          type: 'Pressable',
+          props: {
+            ...props,
+            onPress: disabled ? undefined : onPress,
+            disabled,
+            accessibilityRole: props.accessibilityRole || 'button',
+            accessibilityLabel,
+            testID,
+            children,
+          },
+        };
+      }
+      return baseUi.Card({ children, disabled, accessibilityLabel, testID, ...props });
+    },
+  };
+
   let cursor = 0, tree;
   let settingsOpened = 0;
 
@@ -73,17 +94,23 @@ function screenRig(path, context, params = {}, options = {}) {
   }
 
   function button(label) {
-    let result = nodes(tree).find((node) => node.type === 'Pressable' && textOf(node) === label);
+    let result = nodes(tree).find((node) => node.type === 'Pressable' && (
+      textOf(node) === label ||
+      node.props?.accessibilityLabel === label ||
+      (typeof node.props?.accessibilityLabel === 'string' && node.props.accessibilityLabel.startsWith(label)) ||
+      (label === 'Ler QR Code' && node.props?.testID === 'event-entry-choose-qr') ||
+      (label === 'Digitar código' && node.props?.testID === 'event-entry-choose-manual')
+    ));
     // Para manter compatibilidade com testes manuais legados que buscavam diretamente 'Continuar'
     if (!result && (label === 'Continuar' || label === 'Consultando...')) {
-      const manualBtn = nodes(tree).find((node) => node.type === 'Pressable' && textOf(node).includes('Digitar código'));
-      if (manualBtn) {
-        manualBtn.props.onPress();
+      const manualCard = nodes(tree).find((node) => node.props?.testID === 'event-entry-choose-manual');
+      if (manualCard) {
+        manualCard.props.onPress();
         render();
         result = nodes(tree).find((node) => node.type === 'Pressable' && textOf(node) === label);
       }
     }
-    assert.ok(result, `Botão ausente: ${label}`);
+    assert.ok(result, `Botão ou card ausente: ${label}`);
     return result;
   }
 
@@ -92,15 +119,22 @@ function screenRig(path, context, params = {}, options = {}) {
     calls,
     render,
     button,
-    findButton: (label) => nodes(tree).find((node) => node.type === 'Pressable' && textOf(node) === label),
+    findButton: (label) => nodes(tree).find((node) => node.type === 'Pressable' && (
+      textOf(node) === label ||
+      node.props?.accessibilityLabel === label ||
+      (typeof node.props?.accessibilityLabel === 'string' && node.props.accessibilityLabel.startsWith(label)) ||
+      (label === 'Ler QR Code' && node.props?.testID === 'event-entry-choose-qr') ||
+      (label === 'Digitar código' && node.props?.testID === 'event-entry-choose-manual')
+    )),
+    card: (testID) => nodes(tree).find((node) => node.props?.testID === testID),
     text: () => nodes(tree).map(textOf).join(' '),
     inputError: () => nodes(tree).find((node) => node.type === ui.InputField)?.props.error,
     input(value) {
       let textInput = nodes(tree).find((node) => node.type === 'TextInput');
       if (!textInput) {
-        const manualBtn = nodes(tree).find((node) => node.type === 'Pressable' && textOf(node).includes('Digitar código'));
-        if (manualBtn) {
-          manualBtn.props.onPress();
+        const manualCard = nodes(tree).find((node) => node.props?.testID === 'event-entry-choose-manual');
+        if (manualCard) {
+          manualCard.props.onPress();
           render();
           textInput = nodes(tree).find((node) => node.type === 'TextInput');
         }
@@ -119,6 +153,10 @@ function screenRig(path, context, params = {}, options = {}) {
         await handler({ data });
         render();
       }
+    },
+    setFocused(focused) {
+      options.isFocused = focused;
+      render();
     },
     unmount() {
       while (cleanups.length) {
@@ -243,7 +281,7 @@ test('erro HTTP na confirmação preserva a tela e informa o problema', async ()
 });
 
 // -------------------------------------------------------------
-// Novos testes específicos da TASK ENTRY-QR-01
+// Testes específicos da TASK ENTRY-QR-01
 // -------------------------------------------------------------
 
 test('ENTRY-QR-01: tela inicial apresenta as duas opções visíveis e independentes', () => {
@@ -256,9 +294,60 @@ test('ENTRY-QR-01: tela inicial apresenta as duas opções visíveis e independe
   assert.match(rig.text(), /Ler QR Code/);
   assert.match(rig.text(), /Digitar código/);
 
-  // Ambas as opções devem possuir botões acionáveis
+  // Ambas as opções devem possuir cards acionáveis
   assert.ok(rig.button('Ler QR Code'));
   assert.ok(rig.button('Digitar código'));
+});
+
+test('ENTRY-QR-01: navegação por cada card com apenas uma ação e ausência de botões aninhados', async () => {
+  const context = { admission: { status: 'idle' }, isCurrentAdmission: () => true };
+  const rig = screenRig('screens/event-entry/EventEntryScreen.js', context);
+
+  const cardQr = rig.card('event-entry-choose-qr');
+  const cardManual = rig.card('event-entry-choose-manual');
+
+  assert.ok(cardQr, 'Card de QR Code deve existir');
+  assert.ok(cardManual, 'Card de código manual deve existir');
+
+  // Cada card é um elemento com acessibilidade e role button
+  const isPressableOrHasRole = (node) =>
+    node.type === 'Pressable' || node.props?.accessibilityRole === 'button';
+
+  assert.ok(isPressableOrHasRole(cardQr), 'Card QR deve ser acessível como botão');
+  assert.ok(isPressableOrHasRole(cardManual), 'Card Manual deve ser acessível como botão');
+
+  // Ausência de botões interativos aninhados dentro de cada card
+  // O card em si é a única área interativa; seus filhos não podem conter botões/pressables
+  const qrInnerPressables = (Array.isArray(cardQr.props?.children) ? cardQr.props.children : [cardQr.props?.children])
+    .flatMap(nodes)
+    .filter((n) => n.type === 'Pressable' || n.props?.accessibilityRole === 'button');
+
+  const manualInnerPressables = (Array.isArray(cardManual.props?.children) ? cardManual.props.children : [cardManual.props?.children])
+    .flatMap(nodes)
+    .filter((n) => n.type === 'Pressable' || n.props?.accessibilityRole === 'button');
+
+  assert.equal(qrInnerPressables.length, 0, 'Card de QR Code não deve conter botões ou Pressables aninhados');
+  assert.equal(manualInnerPressables.length, 0, 'Card de código manual não deve conter botões ou Pressables aninhados');
+
+  // Card possui indicador visual não interativo
+  assert.ok(nodes(cardQr).find((n) => n.props?.testID === 'event-entry-qr-action-indicator'));
+  assert.ok(nodes(cardManual).find((n) => n.props?.testID === 'event-entry-manual-action-indicator'));
+
+  // Navegação direta com um único toque no card de QR Code
+  await cardQr.props.onPress();
+  rig.render();
+  assert.match(rig.text(), /Aponte a câmera para o QR Code do evento/);
+
+  // Retorna para a seleção
+  await rig.button('Voltar para opções').props.onPress();
+  rig.render();
+  assert.match(rig.text(), /Como deseja entrar\?/);
+
+  // Navegação direta com um único toque no card de código manual
+  const newCardManual = rig.card('event-entry-choose-manual');
+  await newCardManual.props.onPress();
+  rig.render();
+  assert.match(rig.text(), /Digite o código de acesso/);
 });
 
 test('ENTRY-QR-01: selecionar Digitar código exibe formulário manual e permite voltar para seleção', async () => {
@@ -496,12 +585,89 @@ test('ENTRY-QR-01: resposta tardia após troca de modo ou desmontagem é descart
   assert.match(rig.text(), /Digite o código de acesso/);
 });
 
-test('ENTRY-QR-01: câmera é desativada quando a tela não está em foco', () => {
-  const context = { admission: { status: 'idle' }, isCurrentAdmission: () => true };
+test('ENTRY-QR-01: comportamento do leitor ao perder e recuperar o foco', async () => {
+  const lookups = [];
+  const context = {
+    admission: { status: 'idle' },
+    isCurrentAdmission: () => true,
+    lookupEvent: async (code) => {
+      lookups.push(code);
+      return { kind: 'found', event, eligibility: eligible };
+    },
+  };
   const rig = screenRig('screens/event-entry/EventEntryScreen.js', context, { initialMethod: 'qr' }, {
-    isFocused: false,
+    isFocused: true,
   });
 
-  assert.equal(rig.camera(), undefined, 'CameraView não deve ser montada quando isFocused for false');
+  // Em foco: câmera montada e ativa
+  assert.ok(rig.camera(), 'CameraView deve estar montada quando em foco');
+
+  // Perde o foco: câmera é desativada
+  rig.setFocused(false);
+  assert.equal(rig.camera(), undefined, 'CameraView não deve estar montada fora de foco');
   assert.match(rig.text(), /Leitor inativo fora de foco/);
+
+  // Recupera o foco: câmera volta a ficar montada e pronta para nova leitura
+  rig.setFocused(true);
+  assert.ok(rig.camera(), 'CameraView deve ser remontada ao recuperar o foco');
+
+  // Lê código após recuperar o foco
+  await rig.simulateScan('ARENA-RECOVER');
+  assert.deepEqual(lookups, ['ARENA-RECOVER']);
+  assert.equal(rig.calls.length, 1);
+  assert.equal(rig.calls[0].name, 'EventConfirmation');
+});
+
+test('ENTRY-QR-01: resposta pendente ao perder o foco não provoca navegação indevida', async () => {
+  let resolve;
+  const context = {
+    admission: { status: 'idle' },
+    isCurrentAdmission: () => true,
+    lookupEvent: () => new Promise((done) => { resolve = done; }),
+  };
+  const rig = screenRig('screens/event-entry/EventEntryScreen.js', context, { initialMethod: 'qr' }, {
+    isFocused: true,
+  });
+
+  const pending = rig.simulateScan('ARENA-PENDING');
+
+  // A tela perde o foco enquanto a requisição HTTP está em voo
+  rig.setFocused(false);
+
+  // A resposta chega tardiamente
+  resolve({ kind: 'found', event, eligibility: eligible });
+  await pending;
+
+  // Não deve navegar pois a tela estava fora de foco
+  assert.deepEqual(rig.calls, []);
+});
+
+test('ENTRY-QR-01: HomeScreen exibe texto atualizado com menção a QR Code e digitação manual', () => {
+  const calls = [];
+  const navigation = { navigate: (name) => calls.push(name) };
+  const auth = { user: { name: 'Kaled', hasCompletedQuestionnaire: true } };
+  const screen = loadModule('screens/home/HomeScreen.js', (name) => {
+    if (name === 'react') return { useContext: () => auth, useState: () => [null, () => {}] };
+    if (name === 'react-native') return {
+      ActivityIndicator: 'ActivityIndicator', Pressable: 'Pressable', ScrollView: 'ScrollView',
+      Text: 'Text', View: 'View', StyleSheet: { create: (s) => s },
+    };
+    if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
+    if (name === '../../components/ui') return createParticipantUiStubs();
+    if (name === '../../context/AuthContext') return { AuthContext: {} };
+    if (name === '../../theme') return createParticipantThemeStub();
+    return require(name);
+  }).exports.default;
+
+  const tree = screen({ navigation });
+  const allText = nodes(tree).map(textOf).join(' ');
+  assert.match(
+    allText,
+    /Escaneie o QR Code ou digite o código de acesso disponibilizado pela equipe do evento para iniciar sua participação\./
+  );
+
+  const entryButton = nodes(tree).find((n) => n.type === 'Pressable' && textOf(n) === 'Entrar em um evento');
+  assert.ok(entryButton, 'Botão Entrar em um evento deve estar presente');
+  entryButton.props.onPress();
+  assert.deepEqual(calls, ['EventEntry']);
 });
