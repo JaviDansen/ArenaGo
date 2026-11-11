@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -40,9 +40,15 @@ export function resolveInitialRouteForAuthState(authState) {
   return 'MainTabs';
 }
 
-export function AuthSessionCoordinator({ children }) {
+export function AuthSessionCoordinator({ children, onInitializingChange }) {
   const auth = useAuth();
   const [bypassNetworkRecovery, setBypassNetworkRecovery] = useState(false);
+
+  useEffect(() => {
+    if (typeof onInitializingChange === 'function' && auth) {
+      onInitializingChange(Boolean(auth.isInitializing));
+    }
+  }, [auth?.isInitializing, onInitializingChange]);
 
   if (!auth) {
     return children;
@@ -131,6 +137,7 @@ export default function AuthSessionGate({
   tokenStorage,
   sessionManager,
   autoRestore = true,
+  onInitializingChange,
 }) {
   return (
     <AuthProvider
@@ -139,7 +146,9 @@ export default function AuthSessionGate({
       sessionManager={sessionManager}
       autoRestore={autoRestore}
     >
-      <AuthSessionCoordinator>{children}</AuthSessionCoordinator>
+      <AuthSessionCoordinator onInitializingChange={onInitializingChange}>
+        {children}
+      </AuthSessionCoordinator>
     </AuthProvider>
   );
 }

@@ -1,4 +1,5 @@
 
+import { useState } from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
@@ -149,10 +150,12 @@ export function AppNavigation() {
 }
 
 export default function App() {
+  const [isAuthInitializing, setIsAuthInitializing] = useState(true);
+
   return (
     <SafeAreaProvider>
-      <SplashScreenGate>
-        <AuthSessionGate>
+      <SplashScreenGate isReady={!isAuthInitializing}>
+        <AuthSessionGate onInitializingChange={setIsAuthInitializing}>
           <AppNavigation />
         </AuthSessionGate>
       </SplashScreenGate>
