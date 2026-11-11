@@ -5,6 +5,7 @@ const empty = () => ({ userId: null, epoch: null, status: 'idle', participation:
 export function createParticipationStore({ client = httpClient, getIdentity }) {
   let state = empty();
   let generation = 0;
+  let syncInFlight = null;
   const listeners = new Set();
   const publish = (next) => { state = next; listeners.forEach((listener) => listener(state)); };
   const matches = (identity) => {
@@ -50,6 +51,49 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
     }
   }
 
+  async function syncCurrentSilent() {
+    const identity = state.userId === null ? null : { userId: state.userId, epoch: state.epoch };
+    if (!matches(identity)) return null;
+    if (syncInFlight) return syncInFlight;
+
+    const requestGeneration = generation;
+    const task = (async () => {
+      try {
+        const current = await client.get('/participations/current', { auth: true });
+        if (requestGeneration !== generation || !matches(identity)) return;
+
+        const participation = current?.participation;
+        if (!current || !Object.prototype.hasOwnProperty.call(current, 'participation') ||
+            (participation !== null && (!participation || typeof participation.id !== 'string' ||
+              typeof participation.eventId !== 'string' || !['waiting', 'active'].includes(participation.status) ||
+              (participation.status === 'waiting' && (!Number.isSafeInteger(participation.externalQueue?.position) || participation.externalQueue.position < 1))))) {
+          return;
+        }
+
+        const prev = state.participation;
+        const changed = !prev || prev.id !== participation?.id ||
+          prev.status !== participation?.status ||
+          prev.externalQueue?.position !== participation?.externalQueue?.position;
+
+        if (changed || state.status !== 'ready') {
+          publish({
+            ...state,
+            status: 'ready',
+            participation,
+            error: null,
+          });
+        }
+      } catch {
+        // Preserva o último estado válido se a conexão falhar
+      } finally {
+        if (syncInFlight === task) syncInFlight = null;
+      }
+    })();
+
+    syncInFlight = task;
+    return task;
+  }
+
   function setDemoParticipation(update) {
     const identity = state.userId === null ? null : { userId: state.userId, epoch: state.epoch };
     if (!matches(identity) || state.status !== 'ready' || state.participation) return;
@@ -57,5 +101,5 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
     publish({ ...state, demoParticipation: next ? { ...next, source: 'demo' } : null });
   }
 
-  return { getSnapshot: () => state, subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); }, setIdentity, refresh, setDemoParticipation };
+  return { getSnapshot: () => state, subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); }, setIdentity, refresh, syncCurrentSilent, setDemoParticipation };
 }

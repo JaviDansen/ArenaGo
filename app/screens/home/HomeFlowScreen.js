@@ -1,6 +1,6 @@
-import { useContext } from 'react';
+import { useContext, useEffect, useRef } from 'react';
 import { StatusBar } from 'expo-status-bar';
-import { StyleSheet, Text, View } from 'react-native';
+import { AppState, StyleSheet, Text, View } from 'react-native';
 
 import { AuthBackground, Badge, Button, Card, ScreenHeader } from '../../components/ui';
 import { ParticipationContext } from '../../context/ParticipationContext';
@@ -9,7 +9,48 @@ import RealArenaScreen from '../arena/RealArenaScreen';
 import ArenaQueueScreen from '../arena/ArenaQueueScreen';
 import HomeScreen from './HomeScreen';
 
+function useSafeIsFocused() {
+  try {
+    const nav = require('@react-navigation/native');
+    return typeof nav?.useIsFocused === 'function' ? nav.useIsFocused() : true;
+  } catch {
+    return true;
+  }
+}
+
 function ExternalQueueScreen({ participation, onRefresh }) {
+  const { syncCurrentParticipation } = useContext(ParticipationContext) || {};
+  const isFocused = useSafeIsFocused();
+  const appStateRef = useRef(typeof AppState !== 'undefined' && AppState?.currentState ? AppState.currentState : 'active');
+
+  if (typeof useEffect === 'function') {
+    useEffect(() => {
+      if (typeof AppState?.addEventListener !== 'function') return;
+      const subscription = AppState.addEventListener('change', (nextState) => {
+        appStateRef.current = nextState;
+        if (nextState === 'active' && isFocused && typeof syncCurrentParticipation === 'function') {
+          void syncCurrentParticipation();
+        }
+      });
+      return () => subscription?.remove?.();
+    }, [isFocused, syncCurrentParticipation]);
+
+    useEffect(() => {
+      if (!isFocused || typeof syncCurrentParticipation !== 'function' || typeof setInterval !== 'function') return;
+
+      const intervalId = setInterval(() => {
+        if (appStateRef.current === 'active') {
+          void syncCurrentParticipation();
+        }
+      }, 5000);
+      intervalId?.unref?.();
+
+      return () => {
+        if (typeof clearInterval === 'function') clearInterval(intervalId);
+      };
+    }, [isFocused, syncCurrentParticipation]);
+  }
+
   return (
     <AuthBackground variant="login" overlayOpacity={0.68} testID="external-queue-background">
       <StatusBar style="light" />
@@ -22,6 +63,9 @@ function ExternalQueueScreen({ participation, onRefresh }) {
             {participation.externalQueue?.position
               ? `Sua posição atual é ${participation.externalQueue.position}º.`
               : 'Aguarde a chamada da equipe do evento.'}
+          </Text>
+          <Text style={styles.externalQueueAutoUpdate}>
+            A posição na fila é atualizada automaticamente a cada 5 segundos.
           </Text>
           <Text style={styles.externalQueueMeta}>Evento: {participation.eventId}</Text>
         </Card>
@@ -90,6 +134,11 @@ const styles = StyleSheet.create({
     fontSize: 16,
     lineHeight: 23,
     marginTop: 10,
+  },
+  externalQueueAutoUpdate: {
+    color: '#8282A8',
+    fontSize: 13,
+    marginTop: 8,
   },
   externalQueueMeta: {
     color: '#A0A0B8',

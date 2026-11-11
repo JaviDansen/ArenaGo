@@ -59,6 +59,7 @@ export function ParticipationProvider({ children }) {
     status: current ? snapshot.status : userId ? 'loading' : 'idle',
     error: current ? snapshot.error : null,
     refreshParticipation: store.refresh,
+    syncCurrentParticipation: store.syncCurrentSilent,
     setParticipation: store.setDemoParticipation,
     admission: currentAdmission ? admissionSnapshot : null,
     lookupEvent: admissionStore.lookup,

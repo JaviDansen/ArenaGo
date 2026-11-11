@@ -2,7 +2,7 @@ import { useCallback, useMemo, useRef, useState } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
 import { StatusBar } from 'expo-status-bar';
 import * as Crypto from 'expo-crypto';
-import { ActivityIndicator, Alert, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, AppState, ScrollView, StyleSheet, Text, Vibration, View } from 'react-native';
 
 import { AuthBackground, Badge, Button, Card, ScreenHeader } from '../../components/ui';
 import { useAuth } from '../../context/AuthContext';
@@ -10,6 +10,7 @@ import { createArenaQueueCoordinator, describeArenaError } from '../../services/
 import { defaultArenaQueueIntentStorage } from '../../services/arenaQueueIntentStorage';
 import { createParticipationActionCoordinator, describeParticipationActionError } from '../../services/participationActionService';
 import { fetchPendingEvaluationHistoryItem } from '../../services/participationHistoryService';
+import { createQueueAlertManager } from '../../services/queueAlertService';
 import { colors, spacing, typography } from '../../theme';
 
 /** Tela real de participação ativa. Sem alterações de domínio feitas em estado React. */
@@ -33,6 +34,25 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
   const [notice, setNotice] = useState(null);
   const [finished, setFinished] = useState(false);
   const busyRef = useRef(false);
+  const alertManagerRef = useRef(null);
+  if (!alertManagerRef.current) {
+    alertManagerRef.current = createQueueAlertManager({
+      getIdentity: () => {
+        const a = authRef.current;
+        return a?.isAuthenticated && a.user?.id
+          ? { userId: a.user.id, epoch: typeof a.getSessionEpoch === 'function' ? a.getSessionEpoch() : null }
+          : null;
+      },
+      isAppActive: () => (typeof AppState !== 'undefined' && AppState.currentState ? AppState.currentState === 'active' : true),
+      vibrate: () => {
+        try {
+          Vibration?.vibrate?.(500);
+        } catch {
+          // Falha silenciosa caso vibração não seja suportada
+        }
+      },
+    });
+  }
 
   const context = useMemo(() => ({ userId, participationId, eventId }), [userId, participationId, eventId]);
   const coordinator = useMemo(() => createArenaQueueCoordinator({
@@ -53,20 +73,69 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
     setError(null);
     try {
       const next = await coordinator.read(context);
-      if (focused.current) { setState(next); setNotice(null); }
+      if (focused.current) {
+        setState(next);
+        setNotice(null);
+        alertManagerRef.current?.checkAndAlert({
+          queueEntry: next.currentQueueEntry,
+          participationId,
+          isInitial: true,
+        });
+      }
     } catch (err) {
       if (focused.current) setError(describeArenaError(err));
     } finally {
       if (focused.current) setLoading(false);
     }
-  }, [coordinator, context]);
+  }, [coordinator, context, participationId]);
+
+  const syncSilent = useCallback(async () => {
+    if (!focused.current || busyRef.current || finishedRef.current) return;
+    try {
+      const next = await coordinator.read(context);
+      if (focused.current && !finishedRef.current) {
+        setState(next);
+        alertManagerRef.current?.checkAndAlert({
+          queueEntry: next.currentQueueEntry,
+          participationId,
+          isInitial: false,
+        });
+      }
+    } catch {
+      // Preserva o último estado válido se a conexão falhar
+    }
+  }, [coordinator, context, participationId]);
 
   useFocusEffect(useCallback(() => {
     focused.current = true;
     focusGeneration.current += 1;
     void refresh();
-    return () => { focused.current = false; focusGeneration.current += 1; };
-  }, [refresh]));
+
+    const appState = { current: typeof AppState !== 'undefined' && AppState.currentState ? AppState.currentState : 'active' };
+    let appStateSub = null;
+    if (typeof AppState?.addEventListener === 'function') {
+      appStateSub = AppState.addEventListener('change', (nextState) => {
+        appState.current = nextState;
+        if (nextState === 'active' && focused.current && !busyRef.current) {
+          void syncSilent();
+        }
+      });
+    }
+
+    const timer = typeof setInterval === 'function' ? setInterval(() => {
+      if (focused.current && appState.current === 'active' && !busyRef.current) {
+        void syncSilent();
+      }
+    }, 5000) : null;
+    timer?.unref?.();
+
+    return () => {
+      focused.current = false;
+      focusGeneration.current += 1;
+      if (timer && typeof clearInterval === 'function') clearInterval(timer);
+      appStateSub?.remove?.();
+    };
+  }, [refresh, syncSilent]));
 
   const join = async (experienceId) => {
     if (busyRef.current || !focused.current || loading || !state) return;
@@ -176,7 +245,7 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
             {entry.status === 'waiting'
               ? <Text style={styles.position}>Posição {entry.position}º</Text>
               : <Text style={styles.position}>Dirija-se à estação: {entry.stationLabel}</Text>}
-            <Text style={styles.note}>A posição e a chamada são atualizadas ao tocar em “Atualizar”.</Text>
+            <Text style={styles.note}>A posição e a chamada são atualizadas automaticamente a cada 5 segundos.</Text>
           </Card>
         ) : null}
 

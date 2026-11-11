@@ -357,14 +357,14 @@ test('ENTRY-QR-01: componente compartilhado Card encaminha accessibilityHint ao 
   const cardModule = loadModule('components/ui/Card.js', (name) => {
     if (name === 'react-native') {
       return {
-        Pressable: (props) => ({ type: 'Pressable', props }),
-        View: (props) => ({ type: 'View', props }),
+        Pressable: 'Pressable',
+        View: 'View',
         StyleSheet: { create: (s) => s },
       };
     }
-    if (name === '../../theme/colors.js') return { background: { surface: '#161626' }, border: { subtle: '#24243A' } };
-    if (name === '../../theme/radii.js') return { xl: 18 };
-    if (name === '../../theme/spacing.js') return { layout: { cardPadding: 16 } };
+    if (name === '../../theme/colors.js') return createParticipantThemeStub().colors;
+    if (name === '../../theme/radii.js') return createParticipantThemeStub().radii;
+    if (name === '../../theme/spacing.js') return createParticipantThemeStub().spacing;
     return require(name);
   }).exports;
 

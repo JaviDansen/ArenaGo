@@ -1,0 +1,1364 @@
+diff --git a/app/context/ParticipationContext.js b/app/context/ParticipationContext.js
+index ae2d6857..71ecb152 100644
+--- a/app/context/ParticipationContext.js
++++ b/app/context/ParticipationContext.js
+@@ -59,6 +59,7 @@ export function ParticipationProvider({ children }) {
+     status: current ? snapshot.status : userId ? 'loading' : 'idle',
+     error: current ? snapshot.error : null,
+     refreshParticipation: store.refresh,
++    syncCurrentParticipation: store.syncCurrentSilent,
+     setParticipation: store.setDemoParticipation,
+     admission: currentAdmission ? admissionSnapshot : null,
+     lookupEvent: admissionStore.lookup,
+diff --git a/app/screens/arena/RealArenaScreen.js b/app/screens/arena/RealArenaScreen.js
+index 28ae90fd..2e3845ac 100644
+--- a/app/screens/arena/RealArenaScreen.js
++++ b/app/screens/arena/RealArenaScreen.js
+@@ -2,7 +2,7 @@ import { useCallback, useMemo, useRef, useState } from 'react';
+ import { useFocusEffect } from '@react-navigation/native';
+ import { StatusBar } from 'expo-status-bar';
+ import * as Crypto from 'expo-crypto';
+-import { ActivityIndicator, Alert, ScrollView, StyleSheet, Text, View } from 'react-native';
++import { ActivityIndicator, Alert, AppState, ScrollView, StyleSheet, Text, Vibration, View } from 'react-native';
+ 
+ import { AuthBackground, Badge, Button, Card, ScreenHeader } from '../../components/ui';
+ import { useAuth } from '../../context/AuthContext';
+@@ -10,6 +10,7 @@ import { createArenaQueueCoordinator, describeArenaError } from '../../services/
+ import { defaultArenaQueueIntentStorage } from '../../services/arenaQueueIntentStorage';
+ import { createParticipationActionCoordinator, describeParticipationActionError } from '../../services/participationActionService';
+ import { fetchPendingEvaluationHistoryItem } from '../../services/participationHistoryService';
++import { createQueueAlertManager } from '../../services/queueAlertService';
+ import { colors, spacing, typography } from '../../theme';
+ 
+ /** Tela real de participação ativa. Sem alterações de domínio feitas em estado React. */
+@@ -33,6 +34,25 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+   const [notice, setNotice] = useState(null);
+   const [finished, setFinished] = useState(false);
+   const busyRef = useRef(false);
++  const alertManagerRef = useRef(null);
++  if (!alertManagerRef.current) {
++    alertManagerRef.current = createQueueAlertManager({
++      getIdentity: () => {
++        const a = authRef.current;
++        return a?.isAuthenticated && a.user?.id
++          ? { userId: a.user.id, epoch: typeof a.getSessionEpoch === 'function' ? a.getSessionEpoch() : null }
++          : null;
++      },
++      isAppActive: () => (typeof AppState !== 'undefined' && AppState.currentState ? AppState.currentState === 'active' : true),
++      vibrate: () => {
++        try {
++          Vibration?.vibrate?.(500);
++        } catch {
++          // Falha silenciosa caso vibração não seja suportada
++        }
++      },
++    });
++  }
+ 
+   const context = useMemo(() => ({ userId, participationId, eventId }), [userId, participationId, eventId]);
+   const coordinator = useMemo(() => createArenaQueueCoordinator({
+@@ -53,20 +73,69 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+     setError(null);
+     try {
+       const next = await coordinator.read(context);
+-      if (focused.current) { setState(next); setNotice(null); }
++      if (focused.current) {
++        setState(next);
++        setNotice(null);
++        alertManagerRef.current?.checkAndAlert({
++          queueEntry: next.currentQueueEntry,
++          participationId,
++          isInitial: true,
++        });
++      }
+     } catch (err) {
+       if (focused.current) setError(describeArenaError(err));
+     } finally {
+       if (focused.current) setLoading(false);
+     }
+-  }, [coordinator, context]);
++  }, [coordinator, context, participationId]);
++
++  const syncSilent = useCallback(async () => {
++    if (!focused.current || busyRef.current || finishedRef.current) return;
++    try {
++      const next = await coordinator.read(context);
++      if (focused.current && !finishedRef.current) {
++        setState(next);
++        alertManagerRef.current?.checkAndAlert({
++          queueEntry: next.currentQueueEntry,
++          participationId,
++          isInitial: false,
++        });
++      }
++    } catch {
++      // Preserva o último estado válido se a conexão falhar
++    }
++  }, [coordinator, context, participationId]);
+ 
+   useFocusEffect(useCallback(() => {
+     focused.current = true;
+     focusGeneration.current += 1;
+     void refresh();
+-    return () => { focused.current = false; focusGeneration.current += 1; };
+-  }, [refresh]));
++
++    const appState = { current: typeof AppState !== 'undefined' && AppState.currentState ? AppState.currentState : 'active' };
++    let appStateSub = null;
++    if (typeof AppState?.addEventListener === 'function') {
++      appStateSub = AppState.addEventListener('change', (nextState) => {
++        appState.current = nextState;
++        if (nextState === 'active' && focused.current && !busyRef.current) {
++          void syncSilent();
++        }
++      });
++    }
++
++    const timer = typeof setInterval === 'function' ? setInterval(() => {
++      if (focused.current && appState.current === 'active' && !busyRef.current) {
++        void syncSilent();
++      }
++    }, 5000) : null;
++    timer?.unref?.();
++
++    return () => {
++      focused.current = false;
++      focusGeneration.current += 1;
++      if (timer && typeof clearInterval === 'function') clearInterval(timer);
++      appStateSub?.remove?.();
++    };
++  }, [refresh, syncSilent]));
+ 
+   const join = async (experienceId) => {
+     if (busyRef.current || !focused.current || loading || !state) return;
+@@ -176,7 +245,7 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+             {entry.status === 'waiting'
+               ? <Text style={styles.position}>Posição {entry.position}º</Text>
+               : <Text style={styles.position}>Dirija-se à estação: {entry.stationLabel}</Text>}
+-            <Text style={styles.note}>A posição e a chamada são atualizadas ao tocar em “Atualizar”.</Text>
++            <Text style={styles.note}>A posição e a chamada são atualizadas automaticamente a cada 5 segundos.</Text>
+           </Card>
+         ) : null}
+ 
+diff --git a/app/screens/home/HomeFlowScreen.js b/app/screens/home/HomeFlowScreen.js
+index f708963d..1d31ffbd 100644
+--- a/app/screens/home/HomeFlowScreen.js
++++ b/app/screens/home/HomeFlowScreen.js
+@@ -1,6 +1,6 @@
+-import { useContext } from 'react';
++import { useContext, useEffect, useRef } from 'react';
+ import { StatusBar } from 'expo-status-bar';
+-import { StyleSheet, Text, View } from 'react-native';
++import { AppState, StyleSheet, Text, View } from 'react-native';
+ 
+ import { AuthBackground, Badge, Button, Card, ScreenHeader } from '../../components/ui';
+ import { ParticipationContext } from '../../context/ParticipationContext';
+@@ -9,7 +9,48 @@ import RealArenaScreen from '../arena/RealArenaScreen';
+ import ArenaQueueScreen from '../arena/ArenaQueueScreen';
+ import HomeScreen from './HomeScreen';
+ 
++function useSafeIsFocused() {
++  try {
++    const nav = require('@react-navigation/native');
++    return typeof nav?.useIsFocused === 'function' ? nav.useIsFocused() : true;
++  } catch {
++    return true;
++  }
++}
++
+ function ExternalQueueScreen({ participation, onRefresh }) {
++  const { syncCurrentParticipation } = useContext(ParticipationContext) || {};
++  const isFocused = useSafeIsFocused();
++  const appStateRef = useRef(typeof AppState !== 'undefined' && AppState?.currentState ? AppState.currentState : 'active');
++
++  if (typeof useEffect === 'function') {
++    useEffect(() => {
++      if (typeof AppState?.addEventListener !== 'function') return;
++      const subscription = AppState.addEventListener('change', (nextState) => {
++        appStateRef.current = nextState;
++        if (nextState === 'active' && isFocused && typeof syncCurrentParticipation === 'function') {
++          void syncCurrentParticipation();
++        }
++      });
++      return () => subscription?.remove?.();
++    }, [isFocused, syncCurrentParticipation]);
++
++    useEffect(() => {
++      if (!isFocused || typeof syncCurrentParticipation !== 'function' || typeof setInterval !== 'function') return;
++
++      const intervalId = setInterval(() => {
++        if (appStateRef.current === 'active') {
++          void syncCurrentParticipation();
++        }
++      }, 5000);
++      intervalId?.unref?.();
++
++      return () => {
++        if (typeof clearInterval === 'function') clearInterval(intervalId);
++      };
++    }, [isFocused, syncCurrentParticipation]);
++  }
++
+   return (
+     <AuthBackground variant="login" overlayOpacity={0.68} testID="external-queue-background">
+       <StatusBar style="light" />
+@@ -23,6 +64,9 @@ function ExternalQueueScreen({ participation, onRefresh }) {
+               ? `Sua posição atual é ${participation.externalQueue.position}º.`
+               : 'Aguarde a chamada da equipe do evento.'}
+           </Text>
++          <Text style={styles.externalQueueAutoUpdate}>
++            A posição na fila é atualizada automaticamente a cada 5 segundos.
++          </Text>
+           <Text style={styles.externalQueueMeta}>Evento: {participation.eventId}</Text>
+         </Card>
+         <Button title="Atualizar participação" variant="secondary" onPress={onRefresh} />
+@@ -91,6 +135,11 @@ const styles = StyleSheet.create({
+     lineHeight: 23,
+     marginTop: 10,
+   },
++  externalQueueAutoUpdate: {
++    color: '#8282A8',
++    fontSize: 13,
++    marginTop: 8,
++  },
+   externalQueueMeta: {
+     color: '#A0A0B8',
+     fontSize: 13,
+diff --git a/app/services/arenaQueueService.js b/app/services/arenaQueueService.js
+index 67ac79da..cfe95ea2 100644
+--- a/app/services/arenaQueueService.js
++++ b/app/services/arenaQueueService.js
+@@ -42,7 +42,8 @@ export function parseArenaQueue(body, participationId) {
+   return { id: entry.id, experienceId: entry.experienceId,
+     experienceName: entry.experienceName, status: entry.status,
+     position: entry.status === 'waiting' ? entry.position : null,
+-    stationLabel: entry.status === 'called' ? entry.serviceSession.station.label : null };
++    stationLabel: entry.status === 'called' ? entry.serviceSession.station.label : null,
++    serviceSessionId: entry.status === 'called' ? entry.serviceSession.id : null };
+ }
+ 
+ export async function fetchArenaState(client, { participationId, eventId }) {
+diff --git a/app/services/participationService.js b/app/services/participationService.js
+index 8742c6c4..cc740e12 100644
+--- a/app/services/participationService.js
++++ b/app/services/participationService.js
+@@ -5,6 +5,7 @@ const empty = () => ({ userId: null, epoch: null, status: 'idle', participation:
+ export function createParticipationStore({ client = httpClient, getIdentity }) {
+   let state = empty();
+   let generation = 0;
++  let syncInFlight = null;
+   const listeners = new Set();
+   const publish = (next) => { state = next; listeners.forEach((listener) => listener(state)); };
+   const matches = (identity) => {
+@@ -50,6 +51,49 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
+     }
+   }
+ 
++  async function syncCurrentSilent() {
++    const identity = state.userId === null ? null : { userId: state.userId, epoch: state.epoch };
++    if (!matches(identity)) return null;
++    if (syncInFlight) return syncInFlight;
++
++    const requestGeneration = generation;
++    const task = (async () => {
++      try {
++        const current = await client.get('/participations/current', { auth: true });
++        if (requestGeneration !== generation || !matches(identity)) return;
++
++        const participation = current?.participation;
++        if (!current || !Object.prototype.hasOwnProperty.call(current, 'participation') ||
++            (participation !== null && (!participation || typeof participation.id !== 'string' ||
++              typeof participation.eventId !== 'string' || !['waiting', 'active'].includes(participation.status) ||
++              (participation.status === 'waiting' && (!Number.isSafeInteger(participation.externalQueue?.position) || participation.externalQueue.position < 1))))) {
++          return;
++        }
++
++        const prev = state.participation;
++        const changed = !prev || prev.id !== participation?.id ||
++          prev.status !== participation?.status ||
++          prev.externalQueue?.position !== participation?.externalQueue?.position;
++
++        if (changed || state.status !== 'ready') {
++          publish({
++            ...state,
++            status: 'ready',
++            participation,
++            error: null,
++          });
++        }
++      } catch {
++        // Preserva o último estado válido se a conexão falhar
++      } finally {
++        if (syncInFlight === task) syncInFlight = null;
++      }
++    })();
++
++    syncInFlight = task;
++    return task;
++  }
++
+   function setDemoParticipation(update) {
+     const identity = state.userId === null ? null : { userId: state.userId, epoch: state.epoch };
+     if (!matches(identity) || state.status !== 'ready' || state.participation) return;
+@@ -57,5 +101,5 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
+     publish({ ...state, demoParticipation: next ? { ...next, source: 'demo' } : null });
+   }
+ 
+-  return { getSnapshot: () => state, subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); }, setIdentity, refresh, setDemoParticipation };
++  return { getSnapshot: () => state, subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); }, setIdentity, refresh, syncCurrentSilent, setDemoParticipation };
+ }
+diff --git a/app/tests/eventEntry.test.cjs b/app/tests/eventEntry.test.cjs
+index 231dc1a1..4e80ada2 100644
+--- a/app/tests/eventEntry.test.cjs
++++ b/app/tests/eventEntry.test.cjs
+@@ -357,14 +357,14 @@ test('ENTRY-QR-01: componente compartilhado Card encaminha accessibilityHint ao
+   const cardModule = loadModule('components/ui/Card.js', (name) => {
+     if (name === 'react-native') {
+       return {
+-        Pressable: (props) => ({ type: 'Pressable', props }),
+-        View: (props) => ({ type: 'View', props }),
++        Pressable: 'Pressable',
++        View: 'View',
+         StyleSheet: { create: (s) => s },
+       };
+     }
+-    if (name === '../../theme/colors.js') return { background: { surface: '#161626' }, border: { subtle: '#24243A' } };
+-    if (name === '../../theme/radii.js') return { xl: 18 };
+-    if (name === '../../theme/spacing.js') return { layout: { cardPadding: 16 } };
++    if (name === '../../theme/colors.js') return createParticipantThemeStub().colors;
++    if (name === '../../theme/radii.js') return createParticipantThemeStub().radii;
++    if (name === '../../theme/spacing.js') return createParticipantThemeStub().spacing;
+     return require(name);
+   }).exports;
+ 
+diff --git a/app/tests/helpers/questionnaireHarness.cjs b/app/tests/helpers/questionnaireHarness.cjs
+index 07012540..a5d3af99 100644
+--- a/app/tests/helpers/questionnaireHarness.cjs
++++ b/app/tests/helpers/questionnaireHarness.cjs
+@@ -30,15 +30,28 @@ function loadModule(relativePath, requireModule, exposeFields = [], sourceOverri
+       '@babel/plugin-transform-modules-commonjs'],
+   });
+   const module = { exports: {} };
++  const wrappedRequire = (id) => {
++    try {
++      return requireModule ? requireModule(id) : require(id);
++    } catch (err) {
++      if (err?.code === 'MODULE_NOT_FOUND' && typeof id === 'string' && id.startsWith('.')) {
++        const resolved = path.resolve(path.dirname(filename), id);
++        return require(resolved);
++      }
++      throw err;
++    }
++  };
+   const context = {
+     module,
+     exports: module.exports,
+-    require: requireModule,
++    require: wrappedRequire,
+     Date,
+     URL,
+     AbortController,
+     setTimeout,
+     clearTimeout,
++    setInterval,
++    clearInterval,
+     process,
+   };
+   vm.runInNewContext(code, context, { filename });
+
+diff --git a/app/services/queueAlertService.js b/app/services/queueAlertService.js
+new file mode 100644
+index 00000000..d54d20cc
+--- /dev/null
++++ b/app/services/queueAlertService.js
+@@ -0,0 +1,78 @@
++export function defaultVibrate() {
++  try {
++    const rn = require('react-native');
++    rn?.Vibration?.vibrate?.(500);
++  } catch {
++    // Falha silenciosa caso o dispositivo não suporte vibração
++  }
++}
++
++/**
++ * Gerenciador de alertas locais para novas chamadas na fila da Arena.
++ * Garante uma única vibração por nova chamada, sem repetições periódicas,
++ * sem vibração em segundo plano e sem disparo para chamadas já ativas na inicialização.
++ */
++export function createQueueAlertManager({
++  getIdentity,
++  vibrate = defaultVibrate,
++  isAppActive = () => true,
++} = {}) {
++  const alertedCallKeys = new Set();
++  const initializedParticipations = new Set();
++
++  function buildCallKey(identity, participationId, queueEntry) {
++    const sessionId = queueEntry.serviceSessionId || queueEntry.stationLabel || queueEntry.id;
++    return `${identity.userId}:${identity.epoch}:${participationId}:${queueEntry.id}:${sessionId}`;
++  }
++
++  function reset() {
++    alertedCallKeys.clear();
++    initializedParticipations.clear();
++  }
++
++  function checkAndAlert({ queueEntry, participationId, isInitial = false }) {
++    if (!queueEntry || queueEntry.status !== 'called' || !participationId) {
++      if (isInitial && participationId) {
++        initializedParticipations.add(participationId);
++      }
++      return false;
++    }
++
++    const identity = typeof getIdentity === 'function' ? getIdentity() : null;
++    if (!identity?.userId || identity.epoch === null || identity.epoch === undefined) {
++      return false;
++    }
++
++    if (typeof isAppActive === 'function' && !isAppActive()) {
++      return false;
++    }
++
++    const callKey = buildCallKey(identity, participationId, queueEntry);
++
++    // Se é a carga inicial ou a primeira conferência desta participação, registrar sem vibrar
++    if (isInitial || !initializedParticipations.has(participationId)) {
++      initializedParticipations.add(participationId);
++      alertedCallKeys.add(callKey);
++      return false;
++    }
++
++    // Se esta chamada já foi alertada nesta sessão, não vibrar novamente
++    if (alertedCallKeys.has(callKey)) {
++      return false;
++    }
++
++    alertedCallKeys.add(callKey);
++    try {
++      vibrate();
++    } catch {
++      // Aviso visual preservado mesmo se vibração falhar
++    }
++    return true;
++  }
++
++  return {
++    checkAndAlert,
++    reset,
++    hasAlerted(callKey) { return alertedCallKeys.has(callKey); },
++  };
++}
+
+diff --git a/app/tests/autoQueueSync.test.cjs b/app/tests/autoQueueSync.test.cjs
+new file mode 100644
+index 00000000..8863f131
+--- /dev/null
++++ b/app/tests/autoQueueSync.test.cjs
+@@ -0,0 +1,749 @@
++const assert = require('node:assert/strict');
++const test = require('node:test');
++const { loadModule } = require('./helpers/questionnaireHarness.cjs');
++
++// 1. Testes do serviço de alerta e vibração (queueAlertService)
++test('queueAlertService: dispara vibração única para nova chamada', () => {
++  const { createQueueAlertManager } = loadModule('services/queueAlertService.js', (name) => {
++    if (name === 'react-native') {
++      return { Vibration: { vibrate: () => {} } };
++    }
++    return require(name);
++  }).exports;
++
++  let vibrateCalls = 0;
++  let active = true;
++  let identity = { userId: 'user-1', epoch: 10 };
++
++  const manager = createQueueAlertManager({
++    getIdentity: () => identity,
++    vibrate: () => { vibrateCalls += 1; },
++    isAppActive: () => active,
++  });
++
++  const participationId = 'part-1';
++  const entryWaiting = { id: 'entry-1', status: 'waiting', position: 2 };
++  const entryCalled = { id: 'entry-1', status: 'called', stationLabel: 'Estação 1', serviceSessionId: 'sess-1' };
++
++  // Carga inicial com usuário na fila (waiting) - inicializa sem vibrar
++  assert.equal(manager.checkAndAlert({ queueEntry: entryWaiting, participationId, isInitial: true }), false);
++  assert.equal(vibrateCalls, 0);
++
++  // Primeira transição para chamado (called) - DEVE vibrar uma vez
++  assert.equal(manager.checkAndAlert({ queueEntry: entryCalled, participationId, isInitial: false }), true);
++  assert.equal(vibrateCalls, 1);
++
++  // Consulta seguinte após 5s com a mesma chamada ativa - NÃO deve vibrar novamente
++  assert.equal(manager.checkAndAlert({ queueEntry: entryCalled, participationId, isInitial: false }), false);
++  assert.equal(vibrateCalls, 1);
++});
++
++test('queueAlertService: NÃO vibra para chamadas preexistentes na carga inicial (reabertura/reconexão)', () => {
++  const { createQueueAlertManager } = loadModule('services/queueAlertService.js', (name) => {
++    if (name === 'react-native') return { Vibration: { vibrate: () => {} } };
++    return require(name);
++  }).exports;
++
++  let vibrateCalls = 0;
++  const manager = createQueueAlertManager({
++    getIdentity: () => ({ userId: 'user-1', epoch: 10 }),
++    vibrate: () => { vibrateCalls += 1; },
++    isAppActive: () => true,
++  });
++
++  const entryCalled = { id: 'entry-1', status: 'called', stationLabel: 'Estação 1', serviceSessionId: 'sess-1' };
++
++  // Reabertura do aplicativo com chamada já existente (isInitial: true)
++  assert.equal(manager.checkAndAlert({ queueEntry: entryCalled, participationId: 'part-1', isInitial: true }), false);
++  assert.equal(vibrateCalls, 0);
++
++  // Polling seguinte de 5s não vibra para o mesmo estado
++  assert.equal(manager.checkAndAlert({ queueEntry: entryCalled, participationId: 'part-1', isInitial: false }), false);
++  assert.equal(vibrateCalls, 0);
++});
++
++test('queueAlertService: NÃO vibra quando o aplicativo está em segundo plano', () => {
++  const { createQueueAlertManager } = loadModule('services/queueAlertService.js', (name) => {
++    if (name === 'react-native') return { Vibration: { vibrate: () => {} } };
++    return require(name);
++  }).exports;
++
++  let vibrateCalls = 0;
++  let appActive = false; // Background
++  const manager = createQueueAlertManager({
++    getIdentity: () => ({ userId: 'user-1', epoch: 10 }),
++    vibrate: () => { vibrateCalls += 1; },
++    isAppActive: () => appActive,
++  });
++
++  const entryCalled = { id: 'entry-1', status: 'called', stationLabel: 'Estação 1', serviceSessionId: 'sess-1' };
++
++  // Inicializa
++  manager.checkAndAlert({ queueEntry: { id: 'entry-1', status: 'waiting', position: 1 }, participationId: 'part-1', isInitial: true });
++
++  // Transição ocorre enquanto em segundo plano
++  assert.equal(manager.checkAndAlert({ queueEntry: entryCalled, participationId: 'part-1', isInitial: false }), false);
++  assert.equal(vibrateCalls, 0);
++
++  // App retorna ao primeiro plano
++  appActive = true;
++  assert.equal(manager.checkAndAlert({ queueEntry: entryCalled, participationId: 'part-1', isInitial: false }), true);
++  assert.equal(vibrateCalls, 1);
++});
++
++test('queueAlertService: logout ou troca de conta impede alerta de sessão anterior', () => {
++  const { createQueueAlertManager } = loadModule('services/queueAlertService.js', (name) => {
++    if (name === 'react-native') return { Vibration: { vibrate: () => {} } };
++    return require(name);
++  }).exports;
++
++  let vibrateCalls = 0;
++  let identity = { userId: 'user-a', epoch: 1 };
++  const manager = createQueueAlertManager({
++    getIdentity: () => identity,
++    vibrate: () => { vibrateCalls += 1; },
++    isAppActive: () => true,
++  });
++
++  const entryCalled = { id: 'entry-1', status: 'called', stationLabel: 'Estação 1', serviceSessionId: 'sess-1' };
++
++  manager.checkAndAlert({ queueEntry: { id: 'entry-1', status: 'waiting', position: 1 }, participationId: 'part-a', isInitial: true });
++
++  // Logout ocorre antes do alerta
++  identity = null;
++  assert.equal(manager.checkAndAlert({ queueEntry: entryCalled, participationId: 'part-a', isInitial: false }), false);
++  assert.equal(vibrateCalls, 0);
++
++  // Reset e login com usuário B
++  manager.reset();
++  identity = { userId: 'user-b', epoch: 2 };
++  // Chamada pertencente à conta A não dispara para conta B
++  assert.equal(manager.checkAndAlert({ queueEntry: entryCalled, participationId: 'part-b', isInitial: true }), false);
++  assert.equal(vibrateCalls, 0);
++});
++
++// 2. Testes da sincronização silenciosa da Fila Externa (participationService)
++test('participationService: syncCurrentSilent atualiza posição sem colocar em loading e sem piscar UI', async () => {
++  const { createParticipationStore } = loadModule('services/participationService.js', (name) =>
++    name === './httpClient' ? { httpClient: {} } : require(name)).exports;
++
++  const identity = { userId: 'user-x', epoch: 1 };
++  const waitingPos3 = { id: 'p-1', eventId: 'e-1', status: 'waiting', externalQueue: { position: 3 } };
++  const waitingPos2 = { id: 'p-1', eventId: 'e-1', status: 'waiting', externalQueue: { position: 2 } };
++  const returned = { recentFinalization: null, pendingEvaluationParticipationIds: [] };
++
++  const calls = [];
++  let currentResponse = { participation: waitingPos3 };
++
++  const store = createParticipationStore({
++    getIdentity: () => identity,
++    client: {
++      get(path, options) {
++        calls.push({ path, options });
++        return Promise.resolve(path.endsWith('/current') ? currentResponse : returned);
++      },
++    },
++  });
++
++  store.setIdentity(identity);
++  // Carga inicial
++  await store.refresh();
++  assert.equal(store.getSnapshot().status, 'ready');
++  assert.equal(store.getSnapshot().participation.externalQueue.position, 3);
++  calls.length = 0;
++
++  // Polling silencioso: posição avança de 3 para 2
++  currentResponse = { participation: waitingPos2 };
++  await store.syncCurrentSilent();
++
++  // Verifica que APENAS /current foi consultado (evita /return-state)
++  assert.equal(calls.length, 1);
++  assert.equal(calls[0].path, '/participations/current');
++  assert.equal(calls[0].options.auth, true);
++
++  // Verifica que o estado atualizou silenciosamente sem passar por status: 'loading'
++  const snapshot = store.getSnapshot();
++  assert.equal(snapshot.status, 'ready');
++  assert.equal(snapshot.participation.externalQueue.position, 2);
++  assert.equal(snapshot.error, null);
++});
++
++test('participationService: syncCurrentSilent identifica transição waiting -> active', async () => {
++  const { createParticipationStore } = loadModule('services/participationService.js', (name) =>
++    name === './httpClient' ? { httpClient: {} } : require(name)).exports;
++
++  const identity = { userId: 'user-x', epoch: 1 };
++  const waiting = { id: 'p-1', eventId: 'e-1', status: 'waiting', externalQueue: { position: 1 } };
++  const active = { id: 'p-1', eventId: 'e-1', status: 'active', externalQueue: null };
++  const returned = { recentFinalization: null, pendingEvaluationParticipationIds: [] };
++
++  let currentResponse = { participation: waiting };
++  const store = createParticipationStore({
++    getIdentity: () => identity,
++    client: {
++      get(path) {
++        return Promise.resolve(path.endsWith('/current') ? currentResponse : returned);
++      },
++    },
++  });
++
++  store.setIdentity(identity);
++  await store.refresh();
++  assert.equal(store.getSnapshot().participation.status, 'waiting');
++
++  // Transição disparada pelo backend
++  currentResponse = { participation: active };
++  await store.syncCurrentSilent();
++
++  assert.equal(store.getSnapshot().status, 'ready');
++  assert.equal(store.getSnapshot().participation.status, 'active');
++  assert.equal(store.getSnapshot().participation.externalQueue, null);
++});
++
++test('participationService: falha de rede em syncCurrentSilent preserva último estado confirmado', async () => {
++  const { createParticipationStore } = loadModule('services/participationService.js', (name) =>
++    name === './httpClient' ? { httpClient: {} } : require(name)).exports;
++
++  const identity = { userId: 'user-x', epoch: 1 };
++  const waiting = { id: 'p-1', eventId: 'e-1', status: 'waiting', externalQueue: { position: 5 } };
++  const returned = { recentFinalization: null, pendingEvaluationParticipationIds: [] };
++
++  let shouldFail = false;
++  const store = createParticipationStore({
++    getIdentity: () => identity,
++    client: {
++      get(path) {
++        if (shouldFail) {
++          const err = new Error('Falha de conexão');
++          err.isNetworkError = true;
++          return Promise.reject(err);
++        }
++        return Promise.resolve(path.endsWith('/current') ? { participation: waiting } : returned);
++      },
++    },
++  });
++
++  store.setIdentity(identity);
++  await store.refresh();
++  assert.equal(store.getSnapshot().participation.externalQueue.position, 5);
++
++  // Erro de rede durante polling silencioso
++  shouldFail = true;
++  await store.syncCurrentSilent();
++
++  // O snapshot deve preservar os dados confirmados sem substituir por status: 'error'
++  const snapshot = store.getSnapshot();
++  assert.equal(snapshot.status, 'ready');
++  assert.notEqual(snapshot.participation, null);
++  assert.equal(snapshot.participation.externalQueue.position, 5);
++  assert.equal(snapshot.error, null);
++});
++
++test('participationService: deduplica requisições concorrentes em voo em syncCurrentSilent', async () => {
++  const { createParticipationStore } = loadModule('services/participationService.js', (name) =>
++    name === './httpClient' ? { httpClient: {} } : require(name)).exports;
++
++  const identity = { userId: 'user-x', epoch: 1 };
++  const waiting = { id: 'p-1', eventId: 'e-1', status: 'waiting', externalQueue: { position: 1 } };
++  const returned = { recentFinalization: null, pendingEvaluationParticipationIds: [] };
++
++  let resolveGet;
++  let getCalls = 0;
++  const store = createParticipationStore({
++    getIdentity: () => identity,
++    client: {
++      get(path) {
++        if (path.endsWith('/current')) {
++          getCalls += 1;
++          return new Promise((res) => { resolveGet = () => res({ participation: waiting }); });
++        }
++        return Promise.resolve(returned);
++      },
++    },
++  });
++
++  store.setIdentity(identity);
++  // Dispara dois syncCurrentSilent simultâneos
++  const p1 = store.syncCurrentSilent();
++  const p2 = store.syncCurrentSilent();
++
++  assert.equal(getCalls, 1, 'apenas 1 requisição HTTP deve ser iniciada');
++  resolveGet();
++  await Promise.all([p1, p2]);
++});
++
++// 3. Testes do parseArenaQueue com serviceSessionId
++test('arenaQueueService: parseArenaQueue inclui serviceSessionId na chamada', () => {
++  const { parseArenaQueue } = loadModule('services/arenaQueueService.js', () => ({})).exports;
++
++  const participationId = '20000000-0000-4000-8000-000000000001';
++  const sessionId = '30000000-0000-4000-8000-000000000002';
++  const stationId = '40000000-0000-4000-8000-000000000003';
++  const entryId = '50000000-0000-4000-8000-000000000004';
++  const expId = '60000000-0000-4000-8000-000000000005';
++
++  const body = {
++    participationId,
++    currentQueueEntry: {
++      id: entryId,
++      experienceId: expId,
++      experienceName: 'PS5 VR',
++      status: 'called',
++      serviceSession: {
++        id: sessionId,
++        status: 'pending',
++        station: {
++          id: stationId,
++          label: 'Estação VR-1',
++        },
++      },
++    },
++  };
++
++  const parsed = parseArenaQueue(body, participationId);
++  assert.equal(parsed.status, 'called');
++  assert.equal(parsed.stationLabel, 'Estação VR-1');
++  assert.equal(parsed.serviceSessionId, sessionId);
++});
++
++// 4. Testes de renderização e ciclo de vida da fila interna (RealArenaScreen)
++test('RealArenaScreen: exibe nota de atualização automática a cada 5 segundos', () => {
++  const { createParticipantUiStubs, createParticipantThemeStub, nodes, textOf } = require('./helpers/questionnaireHarness.cjs');
++
++  const USER = '20000000-0000-4000-8000-000000000001';
++  const EVENT = 'e10da075-c6cb-4fd6-ba97-7b52403ebff8';
++  const ID = 'c79b25f1-b171-487f-9fee-a24d184054b5';
++
++  const arenaState = {
++    acceptingNewQueueEntries: true,
++    experiences: [],
++    currentQueueEntry: {
++      id: '50000000-0000-4000-8000-000000000004',
++      experienceId: '60000000-0000-4000-8000-000000000005',
++      experienceName: 'PS5 VR',
++      status: 'waiting',
++      position: 3,
++      stationLabel: null,
++    },
++    pendingIntent: null,
++  };
++
++  let stateIndex = 0;
++  const screen = loadModule('screens/arena/RealArenaScreen.js', (name) => {
++    if (name === 'react') {
++      return {
++        useRef: (value) => ({ current: value }),
++        useMemo: (factory) => factory(),
++        useCallback: (fn) => fn,
++        useState(initial) {
++          const index = stateIndex++;
++          return [index === 0 ? arenaState : index === 2 ? false : initial, () => {}];
++        },
++      };
++    }
++    if (name === '@react-navigation/native') return { useFocusEffect: () => {} };
++    if (name === 'expo-crypto') return { randomUUID: () => '33333333-3333-4333-8333-333333333333' };
++    if (name === 'react-native') {
++      return {
++        ActivityIndicator: 'ActivityIndicator',
++        Alert: { alert: () => {} },
++        AppState: { currentState: 'active', addEventListener: () => ({ remove: () => {} }) },
++        ScrollView: 'ScrollView',
++        StyleSheet: { create: (s) => s },
++        Text: 'Text',
++        View: 'View',
++      };
++    }
++    if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
++    if (name === '../../components/ui') return createParticipantUiStubs();
++    if (name === '../../theme') return createParticipantThemeStub();
++    if (name === '../../context/AuthContext') {
++      return {
++        useAuth: () => ({
++          isAuthenticated: true,
++          user: { id: USER },
++          httpClient: {},
++          getSessionEpoch: () => 1,
++        }),
++      };
++    }
++    if (name === '../../services/arenaQueueService') {
++      return {
++        createArenaQueueCoordinator: () => ({ read: async () => arenaState }),
++        describeArenaError: () => 'erro',
++      };
++    }
++    if (name === '../../services/arenaQueueIntentStorage') return { defaultArenaQueueIntentStorage: {} };
++    if (name === '../../services/participationActionService') {
++      return {
++        createParticipationActionCoordinator: () => ({ finish: async () => {} }),
++        describeParticipationActionError: () => 'erro',
++      };
++    }
++    if (name === '../../services/participationHistoryService') {
++      return { fetchPendingEvaluationHistoryItem: async () => null };
++    }
++    if (name === '../../services/queueAlertService') {
++      return { createQueueAlertManager: () => ({ checkAndAlert: () => false, reset: () => {} }) };
++    }
++    return require(name);
++  }).exports.default;
++
++  const tree = screen({
++    participation: { id: ID, eventId: EVENT },
++    refreshParticipation: async () => {},
++  });
++
++  const texts = nodes(tree).filter((n) => n.type === 'Text').map(textOf);
++  assert.ok(
++    texts.some((t) => t.includes('A posição e a chamada são atualizadas automaticamente a cada 5 segundos.')),
++    'deve exibir a nota de atualização automática a cada 5 segundos'
++  );
++  assert.ok(
++    texts.some((t) => t.includes('Posição 3º')),
++    'deve exibir a posição do participante na fila interna'
++  );
++});
++
++test('RealArenaScreen: useFocusEffect inicializa timer de 5s e limpa no blur', () => {
++  const timers = [];
++  const cleared = [];
++  const originalSetInterval = global.setInterval;
++  const originalClearInterval = global.clearInterval;
++
++  global.setInterval = (fn, ms) => {
++    timers.push({ fn, ms });
++    return timers.length;
++  };
++  global.clearInterval = (id) => {
++    cleared.push(id);
++  };
++
++  try {
++    let focusCallback;
++    let stateIndex = 0;
++    const arenaState = { acceptingNewQueueEntries: true, experiences: [], currentQueueEntry: null, pendingIntent: null };
++
++    const screen = loadModule('screens/arena/RealArenaScreen.js', (name) => {
++      if (name === 'react') {
++        return {
++          useRef: (value) => ({ current: value }),
++          useMemo: (factory) => factory(),
++          useCallback: (fn) => fn,
++          useState(initial) {
++            const index = stateIndex++;
++            return [index === 0 ? arenaState : index === 2 ? false : initial, () => {}];
++          },
++        };
++      }
++      if (name === '@react-navigation/native') {
++        return {
++          useFocusEffect: (cb) => { focusCallback = cb; },
++        };
++      }
++      if (name === 'expo-crypto') return { randomUUID: () => '33333333-3333-4333-8333-333333333333' };
++      if (name === 'react-native') {
++        return {
++          ActivityIndicator: 'ActivityIndicator',
++          Alert: { alert: () => {} },
++          AppState: { currentState: 'active', addEventListener: () => ({ remove: () => {} }) },
++          ScrollView: 'ScrollView',
++          StyleSheet: { create: (s) => s },
++          Text: 'Text',
++          View: 'View',
++        };
++      }
++      if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
++      if (name === '../../components/ui') return require('./helpers/questionnaireHarness.cjs').createParticipantUiStubs();
++      if (name === '../../theme') return require('./helpers/questionnaireHarness.cjs').createParticipantThemeStub();
++      if (name === '../../context/AuthContext') {
++        return {
++          useAuth: () => ({ isAuthenticated: true, user: { id: 'u-1' }, httpClient: {}, getSessionEpoch: () => 1 }),
++        };
++      }
++      if (name === '../../services/arenaQueueService') {
++        return { createArenaQueueCoordinator: () => ({ read: async () => arenaState }), describeArenaError: () => 'erro' };
++      }
++      if (name === '../../services/arenaQueueIntentStorage') return { defaultArenaQueueIntentStorage: {} };
++      if (name === '../../services/participationActionService') {
++        return { createParticipationActionCoordinator: () => ({ finish: async () => {} }), describeParticipationActionError: () => 'erro' };
++      }
++      if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
++      if (name === '../../services/queueAlertService') {
++        return { createQueueAlertManager: () => ({ checkAndAlert: () => false, reset: () => {} }) };
++      }
++      return require(name);
++    }).exports.default;
++
++    screen({ participation: { id: 'p-1', eventId: 'e-1' }, refreshParticipation: async () => {} });
++
++    assert.ok(focusCallback, 'deve registrar o callback de foco');
++    const blur = focusCallback();
++
++    assert.equal(timers.length, 1);
++    assert.equal(timers[0].ms, 5000, 'o intervalo deve ser de 5000ms (5 segundos)');
++
++    // Ao perder o foco (blur), o timer deve ser cancelado
++    assert.equal(typeof blur, 'function');
++    blur();
++    assert.equal(cleared.length, 1);
++    assert.equal(cleared[0], 1, 'o timer deve ser limpo no blur');
++  } finally {
++    global.setInterval = originalSetInterval;
++    global.clearInterval = originalClearInterval;
++  }
++});
++
++// 5. Testes de ciclo de vida e suspensão/retomada na fila interna
++test('RealArenaScreen: syncSilent aciona alerta em transição waiting -> called e preserva estado em falha de rede', async () => {
++  const { createParticipantUiStubs, createParticipantThemeStub, nodes, textOf } = require('./helpers/questionnaireHarness.cjs');
++
++  const alertsTriggered = [];
++  const stateUpdates = [];
++  let timerFn = null;
++  let appStateListener = null;
++
++  const originalSetInterval = global.setInterval;
++  const originalClearInterval = global.clearInterval;
++  global.setInterval = (fn) => { timerFn = fn; return 99; };
++  global.clearInterval = () => {};
++
++  try {
++    let focusCallback;
++    let readResponse = {
++      acceptingNewQueueEntries: true,
++      experiences: [{ id: '60000000-0000-4000-8000-000000000005', name: 'PS5 VR', waitingCount: 2, acceptingNewQueueEntries: true }],
++      currentQueueEntry: {
++        id: '50000000-0000-4000-8000-000000000004',
++        experienceId: '60000000-0000-4000-8000-000000000005',
++        experienceName: 'PS5 VR',
++        status: 'waiting',
++        position: 1,
++        stationLabel: null,
++      },
++      pendingIntent: null,
++    };
++
++    let currentState = readResponse;
++    let stateIndex = 0;
++    const screen = loadModule('screens/arena/RealArenaScreen.js', (name) => {
++      if (name === 'react') {
++        return {
++          useRef: (value) => ({ current: value }),
++          useMemo: (factory) => factory(),
++          useCallback: (fn) => fn,
++          useState(initial) {
++            const index = stateIndex++;
++            return [
++              index === 0 ? currentState : index === 2 ? false : initial,
++              (val) => {
++                if (index === 0) {
++                  currentState = typeof val === 'function' ? val(currentState) : val;
++                  stateUpdates.push(currentState);
++                }
++              },
++            ];
++          },
++        };
++      }
++      if (name === '@react-navigation/native') {
++        return { useFocusEffect: (cb) => { focusCallback = cb; } };
++      }
++      if (name === 'expo-crypto') return { randomUUID: () => '33333333-3333-4333-8333-333333333333' };
++      if (name === 'react-native') {
++        return {
++          ActivityIndicator: 'ActivityIndicator',
++          Alert: { alert: () => {} },
++          AppState: {
++            currentState: 'active',
++            addEventListener: (ev, handler) => { appStateListener = handler; return { remove: () => {} }; },
++          },
++          ScrollView: 'ScrollView',
++          StyleSheet: { create: (s) => s },
++          Text: 'Text',
++          View: 'View',
++        };
++      }
++      if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
++      if (name === '../../components/ui') return createParticipantUiStubs();
++      if (name === '../../theme') return createParticipantThemeStub();
++      if (name === '../../context/AuthContext') {
++        return {
++          useAuth: () => ({ isAuthenticated: true, user: { id: 'u-1' }, httpClient: {}, getSessionEpoch: () => 1 }),
++        };
++      }
++      if (name === '../../services/arenaQueueService') {
++        return {
++          createArenaQueueCoordinator: () => ({
++            read: async () => {
++              if (readResponse instanceof Error) throw readResponse;
++              return readResponse;
++            },
++          }),
++          describeArenaError: () => 'erro',
++        };
++      }
++      if (name === '../../services/arenaQueueIntentStorage') return { defaultArenaQueueIntentStorage: {} };
++      if (name === '../../services/participationActionService') {
++        return { createParticipationActionCoordinator: () => ({ finish: async () => {} }), describeParticipationActionError: () => 'erro' };
++      }
++      if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
++      if (name === '../../services/queueAlertService') {
++        return {
++          createQueueAlertManager: () => ({
++            checkAndAlert: (opts) => { alertsTriggered.push(opts); return true; },
++            reset: () => {},
++          }),
++        };
++      }
++      return require(name);
++    }).exports.default;
++
++    screen({ participation: { id: 'p-1', eventId: 'e-1' }, refreshParticipation: async () => {} });
++    focusCallback();
++
++    // Aguarda o término da chamada assíncrona do refresh inicial
++    await new Promise((r) => setTimeout(r, 10));
++
++    // 1. Carga inicial registrou alertManager com isInitial: true
++    assert.equal(alertsTriggered.length, 1);
++    assert.equal(alertsTriggered[0].isInitial, true);
++    assert.equal(alertsTriggered[0].queueEntry.status, 'waiting');
++
++    // 2. Staff chama o participante (transição para called)
++    readResponse = {
++      ...readResponse,
++      currentQueueEntry: {
++        ...readResponse.currentQueueEntry,
++        status: 'called',
++        position: null,
++        stationLabel: 'Estação PlayStation 01',
++      },
++    };
++
++    // O timer de 5s dispara o syncSilent
++    assert.ok(timerFn, 'timer do polling deve estar registrado');
++    timerFn();
++    await new Promise((r) => setTimeout(r, 10));
++
++    // Verifica que checkAndAlert foi chamado com isInitial: false
++    assert.equal(alertsTriggered.length, 2);
++    assert.equal(alertsTriggered[1].isInitial, false);
++    assert.equal(alertsTriggered[1].queueEntry.status, 'called');
++    assert.equal(alertsTriggered[1].queueEntry.stationLabel, 'Estação PlayStation 01');
++
++    // 3. Falha de rede durante o polling silencioso
++    readResponse = new Error('Network timeout');
++    const stateBeforeError = currentState;
++    timerFn();
++    await new Promise((r) => setTimeout(r, 10));
++
++    // O estado do participante é preservado, sem substituição por tela de erro
++    assert.equal(currentState, stateBeforeError);
++
++    // 4. Staff conclui o atendimento (currentQueueEntry torna-se null)
++    readResponse = {
++      ...readResponse,
++      currentQueueEntry: null,
++      experiences: [{ id: '60000000-0000-4000-8000-000000000005', name: 'PS5 VR', waitingCount: 1, acceptingNewQueueEntries: true }],
++    };
++    timerFn();
++    await new Promise((r) => setTimeout(r, 10));
++
++    assert.equal(currentState.currentQueueEntry, null);
++    assert.equal(currentState.experiences[0].waitingCount, 1);
++  } finally {
++    global.setInterval = originalSetInterval;
++    global.clearInterval = originalClearInterval;
++  }
++});
++
++// 6. Testes da Fila Externa em HomeFlowScreen
++test('HomeFlowScreen: ExternalQueueScreen dispara polling de 5s e suspende em segundo plano', () => {
++  const timers = [];
++  const cleared = [];
++  let appStateListener = null;
++
++  const originalSetInterval = global.setInterval;
++  const originalClearInterval = global.clearInterval;
++  global.setInterval = (fn, ms) => {
++    timers.push({ fn, ms });
++    return timers.length;
++  };
++  global.clearInterval = (id) => {
++    cleared.push(id);
++  };
++
++  try {
++    let syncCalls = 0;
++    const participation = { source: 'server', status: 'waiting', eventId: 'event-x', externalQueue: { position: 4 } };
++
++    const screen = loadModule('screens/home/HomeFlowScreen.js', (name) => {
++      if (name === 'react') {
++        return {
++          useContext: () => ({
++            participation,
++            status: 'ready',
++            refreshParticipation: () => {},
++            syncCurrentParticipation: () => { syncCalls += 1; },
++          }),
++          useEffect: (cb) => cb(),
++          useRef: (val) => ({ current: val }),
++        };
++      }
++      if (name === '@react-navigation/native') {
++        return { useIsFocused: () => true };
++      }
++      if (name === 'react-native') {
++        return {
++          AppState: {
++            currentState: 'active',
++            addEventListener: (ev, handler) => {
++              appStateListener = handler;
++              return { remove: () => {} };
++            },
++          },
++          Pressable: 'Pressable',
++          StyleSheet: { create: (s) => s },
++          Text: 'Text',
++          View: 'View',
++        };
++      }
++      if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
++      if (name === '../../components/ui') return require('./helpers/questionnaireHarness.cjs').createParticipantUiStubs();
++      if (name === '../../context/ParticipationContext') return { ParticipationContext: {} };
++      if (name === '../arena/RealArenaScreen') return { __esModule: true, default: 'RealArenaScreen' };
++      if (name === '../arena/ActiveArenaScreen') return { __esModule: true, default: 'ActiveArenaScreen' };
++      if (name === '../arena/ArenaQueueScreen') return { __esModule: true, default: 'ArenaQueueScreen' };
++      if (name === './HomeScreen') return { __esModule: true, default: 'HomeScreen' };
++      return require(name);
++    });
++
++    const rendered = screen.exports.default({ navigation: {} });
++    assert.equal(rendered.type.name, 'ExternalQueueScreen');
++
++    // Executa a função do componente ExternalQueueScreen
++    const externalQueueElement = rendered.type(rendered.props);
++    assert.ok(externalQueueElement);
++
++    // Verifica que o timer de 5s foi registrado
++    assert.equal(timers.length, 1);
++    assert.equal(timers[0].ms, 5000);
++
++    // O timer dispara a sincronização silenciosa
++    timers[0].fn();
++    assert.equal(syncCalls, 1);
++
++    // Se o aplicativo for para segundo plano (background), o polling não deve disparar sync
++    appStateListener('background');
++    timers[0].fn();
++    assert.equal(syncCalls, 1, 'não deve sincronizar enquanto em segundo plano');
++
++    // Ao retornar para active, deve sincronizar imediatamente
++    appStateListener('active');
++    assert.equal(syncCalls, 2, 'deve sincronizar ao retornar para o primeiro plano');
++  } finally {
++    global.setInterval = originalSetInterval;
++    global.clearInterval = originalClearInterval;
++  }
++});
+
+diff --git a/docs/AUTO_QUEUE_01_IMPLEMENTACAO.md b/docs/AUTO_QUEUE_01_IMPLEMENTACAO.md
+new file mode 100644
+index 00000000..faad2132
+--- /dev/null
++++ b/docs/AUTO_QUEUE_01_IMPLEMENTACAO.md
+@@ -0,0 +1,149 @@
++# ArenaGO — AUTO-QUEUE-01: Atualização Automática das Filas e Alertas do Participante
++
++**Responsável:** Kaled  
++**Branch:** `feature/participant-auto-queue-sync`  
++**Prioridade:** P0 — Apresentação em 13/11/2026, às 19h  
++**Data:** 11/11/2026  
++
++---
++
++## 1. Visão Geral e Objetivos
++
++A task **AUTO-QUEUE-01** implementa a atualização contínua e em tempo real (via polling periódico de 5 segundos) das filas do participante no ArenaGO:
++1. **Fila Externa (Evento):** Acompanhamento automático da posição de espera (`externalQueue.position`) e transição imediata para participação ativa (`waiting` → `active`) quando a entrada na Arena for liberada pela organização.
++2. **Fila Interna (Arena):** Atualização periódica da posição na experiência (`currentQueueEntry.position`), contagem de participantes aguardando (`waitingCount`), detecção de chamada pelo Staff (`waiting` → `called`) com identificação da estação designada, e atualização quando o atendimento for concluído ou a ausência registrada (`currentQueueEntry === null`).
++3. **Alerta de Vibração Local:** Vibração única no dispositivo móvel quando o participante autenticado é chamado pelo Staff, sem repetições nos ciclos seguintes de 5 segundos, sem vibração para chamadas antigas na abertura/reconexão e sem alertas em segundo plano.
++4. **Resiliência e Atualização Silenciosa:** Sincronização em background sem piscar a tela, sem desmontar componentes, com retenção do último estado confirmado em caso de oscilações de rede.
++
++---
++
++## 2. Arquitetura da Solução
++
++### 2.1. Fila Externa (`participationService.js` e `ParticipationContext.js`)
++- Criado o método assíncrono `syncCurrentSilent()` no store de participação:
++  - Consulta estritamente `GET /api/v1/participations/current` com autenticação.
++  - Não consulta `/participations/return-state` a cada 5 segundos, poupando largura de banda e processamento do backend.
++  - Não altera o estado do store para `loading`, evitando desmontagens e piscadas na interface.
++  - Implementa proteção contra concorrência (`syncInFlight`): requisições concorrentes são deduplicadas enquanto uma estiver em trânsito.
++  - Em falhas de rede transitórias, preserva integralmente os dados já confirmados e a posição do participante.
++  - Valida a geração de requisição e a identidade da sessão (`matches(identity)`), descartando respostas tardias após logout ou troca de conta.
++- Exposto `syncCurrentParticipation` no `ParticipationContext` para consumo na árvore de navegação.
++
++### 2.2. Polling na Tela da Fila Externa (`HomeFlowScreen.js` / `ExternalQueueScreen`)
++- Na tela `ExternalQueueScreen`, configurado intervalo de 5.000 ms (5s) que dispara `syncCurrentParticipation()`.
++- Monitoramento de ciclo de vida com `AppState` e `useIsFocused`:
++  - Polling suspenso quando o aplicativo entra em segundo plano (`AppState !== 'active'`).
++  - Polling suspenso quando a tela perde o foco de navegação (`!isFocused`).
++  - Retomada imediata da sincronização quando o aplicativo retorna ao primeiro plano.
++  - Limpeza dos timers e listeners ao desmontar o componente.
++- Exibição de mensagem informativa discreta: *"A posição na fila é atualizada automaticamente a cada 5 segundos."*
++- Preservação do botão manual "Atualizar participação" com o método tradicional `refreshParticipation()`.
++
++### 2.3. Fila Interna e Alertas na Arena (`RealArenaScreen.js` e `arenaQueueService.js`)
++- Em `arenaQueueService.js`:
++  - A função `parseArenaQueue` passa a expor `serviceSessionId: entry.status === 'called' ? entry.serviceSession.id : null`.
++- Em `RealArenaScreen.js`:
++  - Implementado `syncSilent`: método assíncrono de leitura periódica via `coordinator.read(context)` a cada 5 segundos.
++  - Não aciona indicador de carregamento de tela inteira durante o polling silencioso, preservando botões e visão geral das experiências.
++  - Atualização automática das quantidades de pessoas aguardando (`waitingCount`) em cada experiência aberta.
++  - Atualização automática quando o Staff finaliza o atendimento ou registra ausência (`currentQueueEntry` passa a `null`), liberando imediatamente a possibilidade de entrar em outra fila.
++  - Em oscilações de rede, mantém os dados anteriores confirmados.
++  - Ciclo de vida gerido no `useFocusEffect` em conjunto com `AppState`, cancelando timers no blur/desmonte.
++  - Atualizada a nota informativa da fila interna: *"A posição e a chamada são atualizadas automaticamente a cada 5 segundos."*
++
++### 2.4. Serviço Dedicado de Alertas (`queueAlertService.js`)
++- Criado o gerenciador `createQueueAlertManager({ getIdentity, vibrate, isAppActive })`:
++  - Utiliza `Vibration.vibrate(500)` do `react-native`, compatível com Android e iOS, com fallback silencioso caso o hardware ou permissões impeçam a vibração.
++  - **Identificador Único da Chamada:** Constrói chave composta por `userId:epoch:participationId:queueEntryId:sessionId`.
++  - **Vibração Única:** Dispara a vibração exatamente uma vez na detecção de transição para `called`. As consultas subsequentes de 5 segundos identificam que a chave já foi alertada e não repetem a vibração.
++  - **Sem Vibração na Inicialização / Reconexão:** Na carga inicial (`isInitial: true`), o estado atual é registrado no conjunto de chamadas conhecidas sem disparar o motor de vibração.
++  - **Primeiro Plano:** Apenas vibra se `isAppActive()` for verdadeiro (`AppState.currentState === 'active'`).
++  - **Isolamento de Sessão:** Qualquer troca de conta ou logout invalida os alertas da sessão anterior.
++
++---
++
++## 3. Resumo dos Arquivos Modificados e Criados
++
++| Arquivo | Tipo | Descrição |
++|---|---|---|
++| `app/services/queueAlertService.js` | Novo | Gerenciador de alertas de chamada, controle de chave de sessão, debounce de 5s e vibração nativa |
++| `app/services/participationService.js` | Modificado | Adicionado `syncCurrentSilent()` com proteção in-flight e preservação de estado |
++| `app/context/ParticipationContext.js` | Modificado | Exposto `syncCurrentParticipation` para consumo nos componentes |
++| `app/screens/home/HomeFlowScreen.js` | Modificado | Polling de 5s, monitoramento de `AppState`/`useIsFocused` e nota visual em `ExternalQueueScreen` |
++| `app/services/arenaQueueService.js` | Modificado | Exposto `serviceSessionId` na extração de `currentQueueEntry` |
++| `app/screens/arena/RealArenaScreen.js` | Modificado | Sincronização silenciosa a cada 5s, disparo do alerta via `alertManager` e ciclo de vida |
++| `app/tests/autoQueueSync.test.cjs` | Novo | 13 testes automatizados cobrindo filas externa/interna, alertas, ciclo de vida e concorrência |
++| `app/tests/helpers/questionnaireHarness.cjs` | Modificado | Disponibilizados `setInterval` e `clearInterval` no contexto de execução do harness VM |
++
++---
++
++## 4. Instruções de Validação Automatizada (Luna Medium)
++
++Conforme as regras do `AGENTS.md`, as validações foram preparadas para execução com o executor padrão Luna Medium:
++
++```bash
++cd app
++node --test tests/autoQueueSync.test.cjs
++npm test
++```
++
++### Cobertura dos Testes:
++1. `queueAlertService`:
++   - Disparo de vibração única na nova chamada.
++   - Ausência de vibrações repetidas a cada 5s.
++   - Bloqueio de vibração para chamadas antigas na carga inicial.
++   - Suspensão de alertas em segundo plano.
++   - Isolamento de alertas entre contas e sessões distintas.
++2. `participationService` e `HomeFlowScreen`:
++   - Atualização da posição na fila externa sem piscar a UI.
++   - Transição `waiting` → `active`.
++   - Preservação da posição em falhas de rede.
++   - Deduplicação de requisições concorrentes.
++   - Suspensão do polling em segundo plano e retomada no primeiro plano.
++3. `RealArenaScreen`:
++   - Atualização automática de posição e exibição de estação.
++   - Atualização após conclusão/ausência pelo Staff.
++   - Preservação de estado em falhas transitórias.
++   - Ciclo de vida com cancelamento de timers no blur.
++
++---
++
++## 5. Roteiro de Homologação Integrada (Android & iOS)
++
++### Pré-requisitos do Ambiente:
++1. Backend Node.js em execução (`cd backend && npm start` ou Docker).
++2. Dois aparelhos ou instâncias móveis: **Participante A** e **Participante B**.
++3. Um navegador com a **Área Staff** aberta (`/staff` ou painel web) apontando para o mesmo backend.
++4. Evento cadastrado com fila externa e pelo menos uma experiência interna configurada (ex.: PS5, VR).
++
++### Roteiro de Testes:
++1. **Entrada na Fila Externa:**
++   - Participante A e Participante B entram no evento pelo app.
++   - Ambos visualizam a tela "Fila do evento" com suas respectivas posições (ex.: 1º e 2º).
++   - Verifique que o texto informa *"A posição na fila é atualizada automaticamente a cada 5 segundos."*
++2. **Liberação de Entrada pelo Staff:**
++   - Na Área Staff, libere a entrada da fila externa para o Participante A.
++   - Observe a tela do Participante A: sem tocar em "Atualizar", em até 5 segundos a tela deve transitar automaticamente para a **Minha Arena** (`status: 'active'`).
++3. **Entrada na Fila Interna:**
++   - Participante A entra na fila de uma experiência (ex.: "PlayStation 5").
++   - A tela passa a exibir o card "Você está na fila" com posição 1º.
++4. **Chamada pelo Staff e Alerta de Vibração:**
++   - Na Área Staff, chame o Participante A indicando a estação (ex.: "Estação 01").
++   - Observe o dispositivo de A:
++     - O aparelho vibra **uma única vez**.
++     - O card é atualizado automaticamente para **"É a sua vez!"** e informa **"Dirija-se à estação: Estação 01"**.
++     - Aguarde 10 a 15 segundos: confirme que o aparelho **NÃO continua vibrando** a cada 5 segundos.
++5. **Conclusão pelo Staff:**
++   - O Staff clica em "Concluir atendimento".
++   - A interface do Participante A atualiza automaticamente em até 5 segundos: o card de chamada desaparece e os botões de entrar nas experiências voltam a ficar disponíveis.
++6. **Recuperação de Conexão:**
++   - Desative o Wi-Fi do aparelho durante 10 segundos enquanto estiver na fila.
++   - Verifique que a tela não pisca nem exibe erro fatal, mantendo a última posição exibida.
++   - Reative o Wi-Fi e confirme a retomada da atualização.
++
++---
++
++## 6. Status de Homologação
++
++- **Android:** Preparado para validação em dispositivo físico via Expo Go pelo responsável (Kaled).
++- **iOS:** Reservado para homologação pelo responsável de homologação iOS. Não declarar aprovação antes da execução com o build/dispositivo correspondente.

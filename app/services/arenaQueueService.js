@@ -42,7 +42,8 @@ export function parseArenaQueue(body, participationId) {
   return { id: entry.id, experienceId: entry.experienceId,
     experienceName: entry.experienceName, status: entry.status,
     position: entry.status === 'waiting' ? entry.position : null,
-    stationLabel: entry.status === 'called' ? entry.serviceSession.station.label : null };
+    stationLabel: entry.status === 'called' ? entry.serviceSession.station.label : null,
+    serviceSessionId: entry.status === 'called' ? entry.serviceSession.id : null };
 }
 
 export async function fetchArenaState(client, { participationId, eventId }) {
