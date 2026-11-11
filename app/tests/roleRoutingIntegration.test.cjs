@@ -361,6 +361,49 @@ test('estação real chama pelo backend com intenção persistida e bloqueia ree
   app.dispose();
 });
 
+test('tela da estação recupera reconhecimento após exclusão ambígua e não reconhece recibo posterior', { skip }, async () => {
+  const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
+  const keyA = '50000000-0000-4000-8000-000000000001', keyB = '50000000-0000-4000-8000-000000000002';
+  const serviceId = '88888888-8888-4888-8888-888888888888', entryId = '77777777-7777-4777-8777-777777777777';
+  const record = key => ({ userId: staffUser.id, sessionId: staffUser.sessionId, eventId: staffEvent.id,
+    experienceId: realExperienceId, stationId: realStation.id, serviceSessionId: null,
+    kind: 'call', key, phase: 'terminal', outcome: { kind: 'confirmed', result: { id: serviceId,
+      queueEntryId: entryId, experienceId: realExperienceId, stationId: realStation.id,
+      stationLabel: realStation.label, status: 'pending' } } });
+  const values = new Map(), slot = `arenago.staff.operation.${staffUser.id}`;
+  values.set(`${slot}.receipt`, JSON.stringify(record(keyA)));
+  let rejectAfterDelete = true;
+  const secureStore = { isAvailableAsync: async () => true, getItemAsync: async key => values.get(key) ?? null,
+    setItemAsync: async (key, value) => { values.set(key, value); },
+    deleteItemAsync: async key => { values.delete(key); if (key.endsWith('.receipt') && rejectAfterDelete) {
+      rejectAfterDelete = false; throw new Error('exclusão confirmada com resposta perdida'); } } };
+  const control = { realStaff: true, platformOS: 'ios', secureStore, events: [staffEvent], stations: [realStation],
+    experiences: [{ id: realExperienceId, name: 'Just Dance' }] };
+  async function open(restoring = false) {
+    const app = createIntegration({ initialToken: restoring ? 'stored' : null, initialUser: staffUser, control });
+    await app.mount();
+    if (!restoring) await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
+    await app.press('Selecionar evento Evento autorizado'); await app.press('Estações');
+    await app.press('Selecionar estação Estação real'); return app;
+  }
+  const first = await open();
+  assert.ok(first.hasText('Operação confirmada pelo servidor.'));
+  await first.press('Entendi o resultado');
+  assert.equal(values.has(`${slot}.receipt`), false);
+  assert.equal(JSON.parse(values.get(`${slot}.ack`)).status, 'pending');
+  first.dispose();
+  const restarted = await open(true);
+  const staleA = restarted.handler('Entendi o resultado');
+  await restarted.press('Entendi o resultado');
+  assert.equal(JSON.parse(values.get(`${slot}.ack`)).status, 'completed');
+  values.set(`${slot}.receipt`, JSON.stringify(record(keyB)));
+  await restarted.press('Atualizar atendimento');
+  await restarted.act(async () => staleA());
+  assert.equal(JSON.parse(values.get(`${slot}.receipt`)).key, keyB);
+  assert.ok(restarted.hasText('Operação confirmada pelo servidor.'));
+  restarted.dispose();
+});
+
 test('painel Staff real exibe estação e fila e limpa os dados ao receber 403', { skip }, async () => {
   let denied = false;
   const control = { realStaff: true, events: [staffEvent], stations: [realStation],

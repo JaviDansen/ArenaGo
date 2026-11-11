@@ -126,6 +126,10 @@ export function createStaffIntentStorage({ platformOS = Platform.OS, secureStore
     clear(userId, expectedKey) { return serialize(async () => {
       const receipt = await readSlot(userId, receiptKeyFor(userId));
       const intent = await readSlot(userId, keyFor(userId));
+      if (!receipt && !intent) {
+        const marker = await readAcknowledgement(userId);
+        if (marker?.status === 'pending' && marker.receipt.key === expectedKey) return;
+      }
       if (!receipt || receipt.key !== expectedKey || (intent && intent.key !== expectedKey))
         throw new Error('Recibo terminal necessário para limpeza.');
       if (intent) await secureStore.deleteItemAsync(keyFor(userId));

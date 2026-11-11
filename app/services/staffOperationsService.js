@@ -388,13 +388,16 @@ export function createStaffOperationsCoordinator({ client, storage, createKey, i
       return intent.phase === 'terminal' ? { kind: 'terminal_pending', operation: intent.kind, outcome: intent.outcome,
         receiptId: intent.key, serviceSessionId: intent.kind === 'call' && intent.outcome?.kind === 'confirmed'
           ? intent.outcome.result.id : intent.serviceSessionId }
-        : { kind: intent.phase === 'reserved' ? 'reserved' : 'pending_reconciliation', operation: intent.kind };
+        : { kind: intent.phase === 'reserved' ? 'reserved' : 'pending_reconciliation', operation: intent.kind,
+          receiptId: intent.key };
     }); },
-    cancelReserved(context) { context = { ...context }; return scoped(context, async () => {
+    cancelReserved(context, expectedKey = null) { context = { ...context }; return scoped(context, async () => {
       contextValid(context);
+      if (expectedKey !== null) requireIds(expectedKey);
       const intent = await getIntent(context);
       if (!intent || intent.phase !== 'reserved' || intent.sessionId !== context.sessionId ||
-          intent.eventId !== context.eventId || intent.stationId !== context.stationId)
+          intent.eventId !== context.eventId || intent.stationId !== context.stationId ||
+          (expectedKey !== null && intent.key !== expectedKey))
         return { kind: 'blocked' };
       const cancelled = await storage.cancelReserved(context.userId, intent.key);
       return isCurrent(context) ? { kind: cancelled ? 'cancelled' : 'blocked' } : { kind: 'stale' };

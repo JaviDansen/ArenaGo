@@ -108,12 +108,13 @@ export default function StaffStationOperationalScreen({ event, experience, stati
     if (same(scope, getContext())) onChanged();
   }
 
-  async function resolvePending() {
-    const scope = getContext(), pending = viewRef.current.pending;
-    if (!coordinator || !scope || viewRef.current.busy || !pending) return;
+  async function resolvePending(expected, scope) {
+    const pending = viewRef.current.pending;
+    if (!coordinator || !same(scope, getContext()) || viewRef.current.busy || !pending || !expected ||
+        pending.kind !== expected.kind || !expected.receiptId || pending.receiptId !== expected.receiptId) return;
     setView(previous => ({ ...previous, busy: true }));
     try {
-      if (pending.kind === 'reserved') await coordinator.cancelReserved(scope);
+      if (pending.kind === 'reserved') await coordinator.cancelReserved(scope, expected.receiptId);
       if (pending.kind === 'terminal_pending' && pending.receiptId) {
         const target = { ...scope, serviceSessionId: pending.serviceSessionId ?? null };
         const cleanup = await coordinator.cleanupTerminal(target, pending.receiptId);
@@ -170,11 +171,11 @@ export default function StaffStationOperationalScreen({ event, experience, stati
     {pending?.kind === 'pending_other' && <Text style={styles.warning}>Há uma operação pendente em outra sessão, evento ou estação desta conta.</Text>}
     {pending?.kind === 'pending_reconciliation' && <Text style={styles.warning}>Resultado incerto. Não repita a operação; peça reconciliação ao responsável.</Text>}
     {pending?.kind === 'reserved' && <><Text style={styles.warning}>Solicitação registrada, ainda não enviada.</Text>
-      <Button label="Descartar solicitação não enviada" disabled={view.busy} onPress={resolvePending} /></>}
+      <Button label="Descartar solicitação não enviada" disabled={view.busy} onPress={() => resolvePending(pending, context)} /></>}
     {pending?.kind === 'terminal_pending' && <View style={styles.card}>
       <Text style={pending.outcome?.kind === 'confirmed' ? styles.success : styles.warning}>
         {pending.outcome?.kind === 'confirmed' ? 'Operação confirmada pelo servidor.' : 'Operação recusada pelo servidor.'}</Text>
-      <Button label="Entendi o resultado" disabled={view.busy} onPress={resolvePending} />
+      <Button label="Entendi o resultado" disabled={view.busy} onPress={() => resolvePending(pending, context)} />
     </View>}
     {pending?.kind === 'storage_error' && <Text style={styles.warning}>Não foi possível verificar a intenção persistida. Operações bloqueadas.</Text>}
     <Button label="Atualizar atendimento" disabled={view.busy || view.status === 'loading'} onPress={() => refresh()} />

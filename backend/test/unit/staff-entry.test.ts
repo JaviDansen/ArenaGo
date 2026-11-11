@@ -57,7 +57,7 @@ for (const flags of [{ staff: false }, { verified: false }, { revoked: true }, {
       const f = entryFixture(); Object.assign(f.flags, flags);
       await assert.rejects(op === "read" ? f.service.read(actor) : op === "confirm"
         ? f.service.confirm({ ...intent(), participationId: id(4) }) : f.service.setEnabled({ ...intent(), enabled: false }));
-      assert.equal(f.queries.some(q => q.text.includes("UPDATE participations p SET") || q.text.startsWith('update "events"')), false);
+      assert.equal(f.queries.some(q => q.text.includes("UPDATE participations p SET") || q.text.includes('UPDATE events e SET external_queue_enabled')), false);
     }
   });
 }
@@ -82,6 +82,17 @@ test("falha após alteração reverte participação, alternância e reserva", a
     await assert.rejects(toggle ? f.service.setEnabled({ ...intent(), enabled: false }) : f.service.confirm({ ...intent(), participationId: id(4) }));
     assert.equal(f.state.enabled, true); assert.deepEqual(f.state.people.map(p => p.status), ["waiting", "waiting"]);
     assert.equal(f.state.receipts.size, 0); assert.equal(f.queries.at(-1)?.text, "rollback");
+  }
+});
+test("corte no UPDATE decisivo reverte reserva sem liberar participantes ou auditar", async () => {
+  for (const enabled of [false, true]) {
+    const f = entryFixture(); f.state.enabled = !enabled; f.flags.cutoffAtDecision = true;
+    await assert.rejects(f.service.setEnabled({ ...intent(), enabled }), code('EVENT_ENTRY_UNAVAILABLE'));
+    assert.equal(f.state.enabled, !enabled);
+    assert.deepEqual(f.state.people.map(p => p.status), ['waiting', 'waiting']);
+    assert.equal(f.state.receipts.size, 0);
+    assert.equal(f.queries.some(q => q.text.includes('INSERT INTO audit_logs')), false);
+    assert.equal(f.queries.at(-1)?.text, 'rollback');
   }
 });
 test("chave de alternância reutilizada para intenção diferente não altera o evento", async () => {

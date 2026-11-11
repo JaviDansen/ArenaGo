@@ -15,7 +15,8 @@ type Receipt = { id: string; hash: string; status: string; httpStatus: number | 
 type State = { enabled: boolean; people: Array<{ id: string; name: string; status: string }>; receipts: Map<string, Receipt> };
 export function entryFixture() {
   const flags = { exists: true, staff: true, active: true, verified: true, revoked: false, expired: false,
-    admin: false, secondFactor: true, manage: true, fail: false, hold: null as null | { entered: () => void; until: Promise<void> } };
+    admin: false, secondFactor: true, manage: true, fail: false, cutoffAtDecision: false,
+    hold: null as null | { entered: () => void; until: Promise<void> } };
   const state: State = { enabled: true, people: [{ id: id(4), name: "Ana", status: "waiting" },
     { id: id(5), name: "Bia", status: "waiting" }], receipts: new Map() };
   const queries: Array<{ text: string; params: unknown[] }> = [];
@@ -70,7 +71,10 @@ export function entryFixture() {
           if (!target) return { rows: [] };
           target.status = "active"; return { rows: [{ id: target.id, at }] };
         }
-        if (text.startsWith('update "events"')) { state.enabled = params[0] as boolean; return { rows: [], rowCount: 1 }; }
+        if (text.includes('UPDATE events e SET external_queue_enabled')) {
+          if (!flags.cutoffAtDecision) state.enabled = params[0] as boolean;
+          return { rows: [{ decisionAtMs: Date.parse(at) + (flags.cutoffAtDecision ? 1000 : 0), changed: !flags.cutoffAtDecision }] };
+        }
         if (text.startsWith('update "participations"')) {
           const waiting = state.people.filter(p => p.status === "waiting"); waiting.forEach(p => { p.status = "active"; });
           return { rows: [], rowCount: waiting.length };
@@ -90,7 +94,8 @@ export function entryFixture() {
   }
   const database = drizzle(new EntryFixturePool() as unknown as Pool, { schema });
   const events = new EventsService(database);
-  events.evaluateEventAvailabilityById = async () => ({ eventExists: true, eventAcceptingNewEntries: flags.manage } as EventAvailabilityResult);
+  events.evaluateEventAvailabilityById = async (_id, observed) => ({ eventExists: true,
+    eventAcceptingNewEntries: flags.manage && !(flags.cutoffAtDecision && observed.getTime() >= Date.parse(at) + 1000) } as EventAvailabilityResult);
   const participations = new ParticipationsService(database, events);
   return { database, events, participations, service: new StaffEntryService(database, events, participations), flags, state, queries };
 }

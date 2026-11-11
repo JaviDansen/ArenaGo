@@ -593,6 +593,16 @@ function secureStaffRig(values = new Map()) {
   return { storage: createStaffIntentStorage({ platformOS: 'android', secureStore }), values, fault };
 }
 
+test('limpeza não reconhece dispatching nem ausência de recibo sem marcador terminal', async () => {
+  const { storage } = secureStaffRig();
+  const intent = { ...context, stationId, experienceId, serviceSessionId: null, kind: 'call', key, phase: 'reserved' };
+  await storage.reserve(intent); await storage.dispatch(userId, key);
+  await assert.rejects(storage.clear(userId, key), /Recibo terminal/);
+  assert.equal((await storage.get(userId)).phase, 'dispatching');
+  const empty = secureStaffRig().storage;
+  await assert.rejects(empty.clear(userId, key), /Recibo terminal/);
+});
+
 for (const mode of ['before', 'after']) {
   test(`falha de marcador ${mode} da gravação não libera operação`, async () => {
     const { createStaffOperationsCoordinator } = await service;
