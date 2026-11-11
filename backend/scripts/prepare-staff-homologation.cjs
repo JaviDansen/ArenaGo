@@ -25,6 +25,49 @@ const ACCOUNTS = [
   })),
 ];
 const CONFIRMATION = 'AUTORIZO CONTAS SINTETICAS';
+const DIAGNOSTICS = Object.freeze({
+  mismatch: 'Confirmação de senha divergente.',
+  length: 'Comprimento de senha inválido: use de 8 a 128 caracteres.',
+  policy: 'Senha recusada pela política de segurança existente.',
+  reused: 'Senha já utilizada nesta execução.',
+  hash: 'Falha na geração do hash da senha.',
+  input: 'Falha na leitura interativa.',
+});
+
+class FixtureDiagnosticError extends Error {
+  constructor(code) {
+    super(DIAGNOSTICS[code]);
+    this.code = code;
+  }
+}
+
+function diagnosticMessage(error) {
+  if (error instanceof FixtureDiagnosticError && Object.hasOwn(DIAGNOSTICS, error.code)) {
+    return DIAGNOSTICS[error.code];
+  }
+  return 'Preparação não confirmada. Confira identidade, migrations e estado do banco antes de qualquer nova tentativa.';
+}
+
+async function prepareAccountHash(account, used, read = question, hash = argon2.hash) {
+  let secret;
+  let repeated;
+  try {
+    secret = await read(`Nova senha sintética para ${account.email} (oculta): `, true);
+    repeated = await read('Repita a senha (oculta): ', true);
+  } catch {
+    throw new FixtureDiagnosticError('input');
+  }
+  if (secret !== repeated) throw new FixtureDiagnosticError('mismatch');
+  if (secret.length < 8 || secret.length > 128) throw new FixtureDiagnosticError('length');
+  if (used.has(secret)) throw new FixtureDiagnosticError('reused');
+  if (evaluatePasswordSecurity(secret, account).compromised) throw new FixtureDiagnosticError('policy');
+  used.add(secret);
+  try {
+    return await hash(secret, { type: argon2.argon2id, memoryCost: 19456, timeCost: 2, parallelism: 1 });
+  } catch {
+    throw new FixtureDiagnosticError('hash');
+  }
+}
 
 function validateLaunch(env, args, stdinIsTTY, stdoutIsTTY) {
   if (env.NODE_ENV !== 'test' || args.length !== 1 || args[0] !== '--execute' || !stdinIsTTY || !stdoutIsTTY) {
@@ -112,13 +155,7 @@ async function main() {
     const hashes = [];
     const used = new Set();
     for (const account of ACCOUNTS) {
-      let secret = await question(`Nova senha sintética para ${account.email} (oculta): `, true);
-      const repeated = await question('Repita a senha (oculta): ', true);
-      if (secret !== repeated || secret.length < 8 || secret.length > 128 || used.has(secret)
-          || evaluatePasswordSecurity(secret, account).compromised) throw new Error('Senha inválida, repetida ou recusada pela política.');
-      used.add(secret);
-      hashes.push(await argon2.hash(secret, { type: argon2.argon2id, memoryCost: 19456, timeCost: 2, parallelism: 1 }));
-      secret = '';
+      hashes.push(await prepareAccountHash(account, used));
     }
     used.clear();
     await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
@@ -151,10 +188,10 @@ async function main() {
 }
 
 if (require.main === module) {
-  main().catch(() => {
-    console.error('Preparação não confirmada. Confira identidade, migrations e estado do banco antes de qualquer nova tentativa.');
+  main().catch((error) => {
+    console.error(diagnosticMessage(error));
     process.exitCode = 1;
   });
 }
 
-module.exports = { validateLaunch, expectedMigrations, verifyDatabase, EXPECTED_TAGS, DATABASE };
+module.exports = { validateLaunch, expectedMigrations, verifyDatabase, prepareAccountHash, diagnosticMessage, EXPECTED_TAGS, DATABASE };
