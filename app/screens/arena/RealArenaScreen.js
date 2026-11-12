@@ -27,11 +27,15 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
   const focused = useRef(false);
   const focusGeneration = useRef(0);
   const finishedRef = useRef(false);
+  const readSeqRef = useRef(0);
+  const syncInFlightRef = useRef(false);
+  const resumingFromBackgroundRef = useRef(false);
   const [state, setState] = useState(null);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(null);
+  const [syncStale, setSyncStale] = useState(false);
   const [finished, setFinished] = useState(false);
   const busyRef = useRef(false);
   const alertManagerRef = useRef(null);
@@ -68,14 +72,26 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
   }), [client, getEpoch, epoch, userId]);
 
   const refresh = useCallback(async () => {
-    if (!focused.current || busyRef.current) return;
+    if (!focused.current || busyRef.current || syncInFlightRef.current) return;
+    syncInFlightRef.current = true;
+    const currentSeq = ++readSeqRef.current;
+    const currentFocusGen = focusGeneration.current;
     setLoading(true);
     setError(null);
     try {
       const next = await coordinator.read(context);
-      if (focused.current) {
+      if (
+        focused.current &&
+        !finishedRef.current &&
+        focusGeneration.current === currentFocusGen &&
+        currentSeq === readSeqRef.current &&
+        authRef.current?.isAuthenticated === true &&
+        authRef.current?.user?.id === userId &&
+        (typeof getEpoch !== 'function' || getEpoch() === epoch)
+      ) {
         setState(next);
         setNotice(null);
+        setSyncStale(false);
         alertManagerRef.current?.checkAndAlert({
           queueEntry: next.currentQueueEntry,
           participationId,
@@ -83,28 +99,65 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
         });
       }
     } catch (err) {
-      if (focused.current) setError(describeArenaError(err));
+      if (
+        focused.current &&
+        !finishedRef.current &&
+        focusGeneration.current === currentFocusGen &&
+        currentSeq === readSeqRef.current
+      ) {
+        if (state) {
+          setSyncStale(true);
+        } else {
+          setError(describeArenaError(err));
+        }
+      }
     } finally {
-      if (focused.current) setLoading(false);
+      syncInFlightRef.current = false;
+      if (focused.current && currentSeq === readSeqRef.current) setLoading(false);
     }
-  }, [coordinator, context, participationId]);
+  }, [coordinator, context, participationId, userId, epoch, getEpoch, state]);
 
   const syncSilent = useCallback(async () => {
-    if (!focused.current || busyRef.current || finishedRef.current) return;
+    if (!focused.current || busyRef.current || finishedRef.current || syncInFlightRef.current) return;
+    syncInFlightRef.current = true;
+    const currentSeq = ++readSeqRef.current;
+    const currentFocusGen = focusGeneration.current;
     try {
       const next = await coordinator.read(context);
-      if (focused.current && !finishedRef.current) {
+      if (
+        focused.current &&
+        !finishedRef.current &&
+        focusGeneration.current === currentFocusGen &&
+        currentSeq === readSeqRef.current &&
+        authRef.current?.isAuthenticated === true &&
+        authRef.current?.user?.id === userId &&
+        (typeof getEpoch !== 'function' || getEpoch() === epoch)
+      ) {
         setState(next);
+        setSyncStale(false);
+        const isResuming = resumingFromBackgroundRef.current;
+        resumingFromBackgroundRef.current = false;
         alertManagerRef.current?.checkAndAlert({
           queueEntry: next.currentQueueEntry,
           participationId,
           isInitial: false,
+          isResuming,
         });
       }
     } catch {
-      // Preserva o último estado válido se a conexão falhar
+      // Preserva o último estado válido se a conexão falhar e exibe aviso discreto
+      if (
+        focused.current &&
+        !finishedRef.current &&
+        focusGeneration.current === currentFocusGen &&
+        currentSeq === readSeqRef.current
+      ) {
+        setSyncStale(true);
+      }
+    } finally {
+      syncInFlightRef.current = false;
     }
-  }, [coordinator, context, participationId]);
+  }, [coordinator, context, participationId, userId, epoch, getEpoch]);
 
   useFocusEffect(useCallback(() => {
     focused.current = true;
@@ -115,15 +168,19 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
     let appStateSub = null;
     if (typeof AppState?.addEventListener === 'function') {
       appStateSub = AppState.addEventListener('change', (nextState) => {
+        const wasBackground = appState.current !== 'active';
         appState.current = nextState;
-        if (nextState === 'active' && focused.current && !busyRef.current) {
-          void syncSilent();
+        if (nextState === 'active' && wasBackground) {
+          resumingFromBackgroundRef.current = true;
+          if (focused.current && !busyRef.current && !syncInFlightRef.current) {
+            void syncSilent();
+          }
         }
       });
     }
 
     const timer = typeof setInterval === 'function' ? setInterval(() => {
-      if (focused.current && appState.current === 'active' && !busyRef.current) {
+      if (focused.current && appState.current === 'active' && !busyRef.current && !syncInFlightRef.current) {
         void syncSilent();
       }
     }, 5000) : null;
@@ -236,6 +293,14 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
             <Text style={styles.notice}>{notice}</Text>
           </View>
         ) : null}
+        {syncStale ? (
+          <View style={styles.syncWarningCard} accessibilityRole="alert">
+            <Badge label="INSTÁVEL" variant="warning" size="sm" />
+            <Text style={styles.syncWarningText}>
+              Conexão instável. Exibindo as últimas informações confirmadas.
+            </Text>
+          </View>
+        ) : null}
 
         {entry ? (
           <Card variant="highlight" style={styles.highlight}>
@@ -245,7 +310,11 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
             {entry.status === 'waiting'
               ? <Text style={styles.position}>Posição {entry.position}º</Text>
               : <Text style={styles.position}>Dirija-se à estação: {entry.stationLabel}</Text>}
-            <Text style={styles.note}>A posição e a chamada são atualizadas automaticamente a cada 5 segundos.</Text>
+            <Text style={styles.note}>
+              {syncStale
+                ? 'A conexão com o servidor oscilou. Tentando reconectar automaticamente...'
+                : 'A posição e a chamada são atualizadas automaticamente a cada 5 segundos.'}
+            </Text>
           </Card>
         ) : null}
 
@@ -301,7 +370,7 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
         <Button
           title={loading ? 'Consultando...' : 'Atualizar fila e experiências'}
           variant="secondary"
-          disabled={busy}
+          disabled={busy || loading}
           onPress={refresh}
           style={styles.actionButton}
         />
@@ -343,4 +412,20 @@ const styles = StyleSheet.create({
   error: { ...typography.body, color: '#FF9AAE', marginTop: spacing.sm },
   noticeCard: { borderColor: colors.semantic.success, borderWidth: 1, backgroundColor: colors.semantic.successBg, borderRadius: 12, padding: spacing.lg, marginBottom: spacing.md },
   notice: { ...typography.body, color: colors.text.primary, marginTop: spacing.sm },
+  syncWarningCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    borderColor: '#F59E0B',
+    borderWidth: 1,
+    backgroundColor: '#2D2013',
+    borderRadius: 12,
+    padding: spacing.md,
+    marginBottom: spacing.md,
+  },
+  syncWarningText: {
+    ...typography.bodySmall,
+    color: '#FCD34D',
+    flex: 1,
+  },
 });

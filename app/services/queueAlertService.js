@@ -10,7 +10,8 @@ export function defaultVibrate() {
 /**
  * Gerenciador de alertas locais para novas chamadas na fila da Arena.
  * Garante uma única vibração por nova chamada, sem repetições periódicas,
- * sem vibração em segundo plano e sem disparo para chamadas já ativas na inicialização.
+ * sem vibração em segundo plano, sem vibração retroativa ao retomar do segundo plano
+ * e com isolamento estrito por usuário, sessão e participação.
  */
 export function createQueueAlertManager({
   getIdentity,
@@ -30,10 +31,19 @@ export function createQueueAlertManager({
     initializedParticipations.clear();
   }
 
-  function checkAndAlert({ queueEntry, participationId, isInitial = false }) {
+  function checkAndAlert({
+    queueEntry,
+    participationId,
+    isInitial = false,
+    isResuming = false,
+    suppressVibration = false,
+  }) {
     if (!queueEntry || queueEntry.status !== 'called' || !participationId) {
       if (isInitial && participationId) {
-        initializedParticipations.add(participationId);
+        const id = typeof getIdentity === 'function' ? getIdentity() : null;
+        if (id?.userId && id.epoch !== null && id.epoch !== undefined) {
+          initializedParticipations.add(`${id.userId}:${id.epoch}:${participationId}`);
+        }
       }
       return false;
     }
@@ -43,20 +53,28 @@ export function createQueueAlertManager({
       return false;
     }
 
-    if (typeof isAppActive === 'function' && !isAppActive()) {
-      return false;
-    }
-
+    const partSessionKey = `${identity.userId}:${identity.epoch}:${participationId}`;
     const callKey = buildCallKey(identity, participationId, queueEntry);
+    const active = typeof isAppActive === 'function' ? isAppActive() : true;
 
-    // Se é a carga inicial ou a primeira conferência desta participação, registrar sem vibrar
-    if (isInitial || !initializedParticipations.has(participationId)) {
-      initializedParticipations.add(participationId);
+    // Se a chamada foi detectada enquanto o aplicativo estava em segundo plano:
+    // registramos a chave para evitar alerta retroativo quando o app for reaberto,
+    // mas não efetuamos vibração.
+    if (!active) {
+      initializedParticipations.add(partSessionKey);
       alertedCallKeys.add(callKey);
       return false;
     }
 
-    // Se esta chamada já foi alertada nesta sessão, não vibrar novamente
+    // Se é carga inicial, conferência inicial desta participação, retorno do segundo plano
+    // (retomada) ou supressão solicitada: registramos a chamada sem produzir vibração.
+    if (isInitial || isResuming || suppressVibration || !initializedParticipations.has(partSessionKey)) {
+      initializedParticipations.add(partSessionKey);
+      alertedCallKeys.add(callKey);
+      return false;
+    }
+
+    // Se esta chamada já foi alertada nesta sessão/participação, não vibrar novamente
     if (alertedCallKeys.has(callKey)) {
       return false;
     }

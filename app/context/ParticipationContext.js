@@ -58,6 +58,7 @@ export function ParticipationProvider({ children }) {
     returnState: current ? snapshot.returnState : null,
     status: current ? snapshot.status : userId ? 'loading' : 'idle',
     error: current ? snapshot.error : null,
+    syncStale: current ? Boolean(snapshot.syncStale) : false,
     refreshParticipation: store.refresh,
     syncCurrentParticipation: store.syncCurrentSilent,
     setParticipation: store.setDemoParticipation,

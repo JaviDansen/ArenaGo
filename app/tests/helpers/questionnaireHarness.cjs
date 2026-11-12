@@ -34,6 +34,9 @@ function loadModule(relativePath, requireModule, exposeFields = [], sourceOverri
     try {
       return requireModule ? requireModule(id) : require(id);
     } catch (err) {
+      if (id === '@react-navigation/native') {
+        return { useIsFocused: () => true, useFocusEffect: (cb) => cb?.() };
+      }
       if (err?.code === 'MODULE_NOT_FOUND' && typeof id === 'string' && id.startsWith('.')) {
         const resolved = path.resolve(path.dirname(filename), id);
         return require(resolved);

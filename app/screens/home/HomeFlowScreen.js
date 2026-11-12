@@ -1,4 +1,5 @@
 import { useContext, useEffect, useRef } from 'react';
+import { useIsFocused } from '@react-navigation/native';
 import { StatusBar } from 'expo-status-bar';
 import { AppState, StyleSheet, Text, View } from 'react-native';
 
@@ -9,18 +10,9 @@ import RealArenaScreen from '../arena/RealArenaScreen';
 import ArenaQueueScreen from '../arena/ArenaQueueScreen';
 import HomeScreen from './HomeScreen';
 
-function useSafeIsFocused() {
-  try {
-    const nav = require('@react-navigation/native');
-    return typeof nav?.useIsFocused === 'function' ? nav.useIsFocused() : true;
-  } catch {
-    return true;
-  }
-}
-
-function ExternalQueueScreen({ participation, onRefresh }) {
+function ExternalQueueScreen({ participation, onRefresh, syncStale = false }) {
   const { syncCurrentParticipation } = useContext(ParticipationContext) || {};
-  const isFocused = useSafeIsFocused();
+  const isFocused = useIsFocused();
   const appStateRef = useRef(typeof AppState !== 'undefined' && AppState?.currentState ? AppState.currentState : 'active');
 
   if (typeof useEffect === 'function') {
@@ -56,6 +48,13 @@ function ExternalQueueScreen({ participation, onRefresh }) {
       <StatusBar style="light" />
       <ScreenHeader title="Fila do evento" showBack={false} />
       <View style={styles.externalQueueContent}>
+        {syncStale ? (
+          <View style={styles.syncWarningBanner} accessibilityRole="alert">
+            <Text style={styles.syncWarningText}>
+              Conexão instável. Exibindo as últimas informações confirmadas.
+            </Text>
+          </View>
+        ) : null}
         <Card variant="highlight" style={styles.externalQueueCard}>
           <Badge label="AGUARDANDO NA FILA" variant="brand" />
           <Text style={styles.externalQueueTitle}>Sua participação está confirmada</Text>
@@ -65,7 +64,9 @@ function ExternalQueueScreen({ participation, onRefresh }) {
               : 'Aguarde a chamada da equipe do evento.'}
           </Text>
           <Text style={styles.externalQueueAutoUpdate}>
-            A posição na fila é atualizada automaticamente a cada 5 segundos.
+            {syncStale
+              ? 'Tentando restabelecer conexão automaticamente...'
+              : 'A posição na fila é atualizada automaticamente a cada 5 segundos.'}
           </Text>
           <Text style={styles.externalQueueMeta}>Evento: {participation.eventId}</Text>
         </Card>
@@ -76,7 +77,7 @@ function ExternalQueueScreen({ participation, onRefresh }) {
 }
 
 export default function HomeFlowScreen({ navigation }) {
-  const { participation, status, error, returnState, refreshParticipation } = useContext(ParticipationContext);
+  const { participation, status, error, returnState, refreshParticipation, syncStale } = useContext(ParticipationContext);
 
   if (status === 'loading') {
     return <HomeScreen mode="loading" />;
@@ -96,7 +97,7 @@ export default function HomeFlowScreen({ navigation }) {
           participationId: historyItem.participationId, historyItem,
         })} />;
     }
-    return <ExternalQueueScreen participation={participation} onRefresh={refreshParticipation} />;
+    return <ExternalQueueScreen participation={participation} onRefresh={refreshParticipation} syncStale={syncStale} />;
   }
 
   if (!participation) {
@@ -119,6 +120,21 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     padding: 20,
+  },
+  syncWarningBanner: {
+    backgroundColor: '#2D2013',
+    borderColor: '#F59E0B',
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    marginBottom: 16,
+  },
+  syncWarningText: {
+    color: '#FCD34D',
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: '500',
   },
   externalQueueCard: {
     marginBottom: 20,

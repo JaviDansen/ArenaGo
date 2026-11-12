@@ -1,6 +1,6 @@
 import { httpClient } from './httpClient';
 
-const empty = () => ({ userId: null, epoch: null, status: 'idle', participation: null, returnState: null, demoParticipation: null, error: null });
+const empty = () => ({ userId: null, epoch: null, status: 'idle', participation: null, returnState: null, demoParticipation: null, error: null, syncStale: false });
 
 export function createParticipationStore({ client = httpClient, getIdentity }) {
   let state = empty();
@@ -43,10 +43,10 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
           !Object.prototype.hasOwnProperty.call(returned, 'recentFinalization')) {
         throw new Error('Resposta inválida de estado de retorno.');
       }
-      publish({ ...state, status: 'ready', participation, returnState: returned, demoParticipation: null, error: null });
+      publish({ ...state, status: 'ready', participation, returnState: returned, demoParticipation: null, error: null, syncStale: false });
     } catch (error) {
       if (requestGeneration !== generation || !matches(identity)) return;
-      publish({ ...state, status: 'error', participation: null, returnState: null, demoParticipation: null,
+      publish({ ...state, status: 'error', participation: null, returnState: null, demoParticipation: null, syncStale: false,
         error: error?.status === 401 || error?.status === 403 ? 'authorization' : error?.isNetworkError ? 'network' : 'unavailable' });
     }
   }
@@ -75,16 +75,23 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
           prev.status !== participation?.status ||
           prev.externalQueue?.position !== participation?.externalQueue?.position;
 
-        if (changed || state.status !== 'ready') {
+        if (changed || state.status !== 'ready' || state.syncStale) {
           publish({
             ...state,
             status: 'ready',
             participation,
             error: null,
+            syncStale: false,
           });
         }
       } catch {
-        // Preserva o último estado válido se a conexão falhar
+        // Preserva o último estado válido se a conexão falhar e sinaliza instabilidade temporária
+        if (requestGeneration === generation && matches(identity) && state.participation && !state.syncStale) {
+          publish({
+            ...state,
+            syncStale: true,
+          });
+        }
       } finally {
         if (syncInFlight === task) syncInFlight = null;
       }

@@ -7,6 +7,7 @@ function renderHomeFlow(participation, extra = {}) {
   const navigationCalls = [];
   const navigation = { navigate: (...args) => navigationCalls.push(args) };
   const screen = loadModule('screens/home/HomeFlowScreen.js', (name) => {
+    if (name === '@react-navigation/native') return { useIsFocused: () => true };
     if (name === 'react') return {
       useContext: () => ({
         participation,
