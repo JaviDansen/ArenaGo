@@ -90,6 +90,13 @@ export function AppNavigation() {
         require('./screens/staff/StaffDemoNavigator').default,
     },
 
+    // Área Admin demonstrativa e isolada, sem permissões administrativas reais.
+    {
+      name: 'AdminDemo',
+      getComponent: () =>
+        require('./screens/admin/AdminDemoNavigator').default,
+    },
+
     // Avaliação real de uma participação finalizada.
     {
       name: 'RealEvaluation',
