@@ -1,5 +1,12 @@
 # Execução independente — commit 77381cf
 
+> Registro histórico da campanha original. A manutenção de 2026-11-12 contra
+> develop f9c9084 executou 51/51 testes nas referências develop e Admin, sem
+> falhas ou skips. Consulte [QA_RECOVERY_IMPLEMENTACAO.md](../../docs/QA_RECOVERY_IMPLEMENTACAO.md)
+> para comandos, diagnósticos, cobertura recuperada e evidências atuais.
+> SHA256SUMS.json permanece como registro histórico da organização original,
+> não como manifesto dos arquivos modificados nesta manutenção.
+
 **Resultado final:** 49 cenários executados, **30 RED**, **19 GREEN**, **0 BLOQUEADO**.
 Todas as 30 falhas foram revisadas: são asserções do comportamento pretendido,
 com pré-condições satisfeitas. Não há falha de importação/transpilação na execução
