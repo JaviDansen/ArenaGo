@@ -10,11 +10,12 @@ const { Client } = require('pg');
 const argon2 = require('argon2');
 const { evaluatePasswordSecurity } = require('../src/auth/password-policy.ts');
 
-const DATABASE = 'arenago_staff_homolog_20261111';
+const DATABASE = 'arenago_staff_homolog_geral_20261111';
+const ROLE = 'arenago_staff_homolog_geral';
 const EXPECTED_TAGS = [
   '0001_identity_profile', '0002_events_base', '0003_credentials_roles',
   '0004_event_operations', '0005_idempotency', '0006_admin_2fa_login',
-  '0007_staff_idempotency_preparation',
+  '0007_staff_idempotency_preparation', '0008_external_entry_calls',
 ];
 const ACCOUNTS = [
   { name: 'Homologacao Admin', email: 'staff-homolog-admin@arenago.invalid' },
@@ -113,16 +114,24 @@ async function question(prompt, hidden = false) {
 
 async function verifyDatabase(client, migrations) {
   const identity = (await client.query(`SELECT current_database() AS db, host(inet_server_addr()) AS host,
-    inet_server_port() AS port, pg_is_in_recovery() AS recovery`)).rows[0];
+    inet_server_port() AS port, pg_is_in_recovery() AS recovery,
+    current_user AS db_role, session_user AS session_role`)).rows[0];
   if (!identity || identity.db !== DATABASE || identity.host !== '127.0.0.1'
-      || identity.port !== 55432 || identity.recovery !== false) throw new Error('Identidade do servidor divergente.');
+      || identity.port !== 55432 || identity.recovery !== false
+      || identity.db_role !== ROLE || identity.session_role !== ROLE) throw new Error('Identidade do servidor divergente.');
+  const role = (await client.query(`SELECT rolsuper, rolcreatedb, rolcreaterole, rolreplication,
+    rolbypassrls, rolinherit, rolcanlogin FROM pg_catalog.pg_roles WHERE rolname = current_user`)).rows[0];
+  if (!role || role.rolsuper !== false || role.rolcreatedb !== false || role.rolcreaterole !== false
+      || role.rolreplication !== false || role.rolbypassrls !== false || role.rolinherit !== false
+      || role.rolcanlogin !== true) throw new Error('Role PostgreSQL não é restrita.');
   const applied = (await client.query('SELECT hash, created_at::text AS at FROM drizzle.__drizzle_migrations ORDER BY created_at, id')).rows;
   if (applied.length !== migrations.length || applied.some((row, i) =>
     row.hash !== migrations[i].hash || row.at !== migrations[i].when)) throw new Error('Migrations divergentes.');
   const controls = (await client.query(`SELECT
     to_regclass('public.users') IS NOT NULL AND to_regclass('public.user_roles') IS NOT NULL
     AND to_regclass('public.events') IS NOT NULL AND to_regclass('public.idempotency_operations') IS NOT NULL
-    AND to_regclass('public.staff_idempotency_epochs') IS NOT NULL AS tables_ok,
+    AND to_regclass('public.staff_idempotency_epochs') IS NOT NULL
+    AND to_regclass('public.external_entry_calls') IS NOT NULL AS tables_ok,
     EXISTS (SELECT 1 FROM pg_catalog.pg_constraint c WHERE c.conrelid = 'public.idempotency_operations'::regclass
       AND c.conname = 'ck_idempotency_staff_preparation_disabled' AND c.convalidated
       AND pg_catalog.pg_get_constraintdef(c.oid) LIKE '%origin_assurance%legacy%'
@@ -137,16 +146,33 @@ async function verifyDatabase(client, migrations) {
       AND t.tgname = 'tr_staff_idempotency_preparation_guard' AND NOT t.tgisinternal AND t.tgenabled IN ('O','A')
       AND t.tgtype=19 AND n.nspname='public' AND p.proname='staff_idempotency_preparation_guard'
       AND NOT p.prosecdef) AS trigger_ok,
+    EXISTS (SELECT 1 FROM pg_catalog.pg_constraint c WHERE c.conrelid = 'public.external_entry_calls'::regclass
+      AND c.conname = 'ck_external_calls_resolution' AND c.convalidated) AS external_calls_check_ok,
+    EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t
+      WHERE t.tgrelid = 'public.external_entry_calls'::regclass
+      AND t.tgname = 'protect_external_entry_call' AND NOT t.tgisinternal AND t.tgenabled IN ('O','A')) AS external_calls_trigger_ok,
     EXISTS (SELECT 1 FROM public.questionnaire_versions WHERE activated_at IS NOT NULL) AS questionnaire_ok,
     EXISTS (SELECT 1 FROM public.games WHERE is_curated = true) AS games_ok`)).rows[0];
   if (!controls || Object.values(controls).some(value => value !== true)) throw new Error('Schema ou seed incompatível.');
+}
+
+function validateRole(user) {
+  if (user !== ROLE) throw new Error('Role PostgreSQL dedicada divergente.');
+}
+
+async function verifyEmptyDatabase(client) {
+  const empty = (await client.query(`SELECT NOT EXISTS (SELECT 1 FROM public.users)
+    AND NOT EXISTS (SELECT 1 FROM public.user_roles) AND NOT EXISTS (SELECT 1 FROM public.events)
+    AND NOT EXISTS (SELECT 1 FROM public.idempotency_operations)
+    AND NOT EXISTS (SELECT 1 FROM public.external_entry_calls) AS empty`)).rows[0];
+  if (empty?.empty !== true) throw new Error('Banco não está vazio para a fixture.');
 }
 
 async function main() {
   validateLaunch(process.env, process.argv.slice(2), process.stdin.isTTY, process.stdout.isTTY);
   const migrations = expectedMigrations();
   const user = (await question('Role PostgreSQL local dedicada: ')).trim();
-  if (!/^[a-z_][a-z0-9_]{0,62}$/.test(user)) throw new Error('Role inválida.');
+  validateRole(user);
   let password = await question('Senha PostgreSQL local (oculta): ', true);
   if (!password) throw new Error('Senha ausente.');
   const client = new Client({ host: '127.0.0.1', port: 55432, database: DATABASE, user, password,
@@ -169,12 +195,9 @@ async function main() {
     await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
     inTransaction = true;
     await client.query('LOCK TABLE drizzle.__drizzle_migrations IN SHARE MODE');
-    await client.query('LOCK TABLE public.users, public.user_roles, public.events, public.idempotency_operations IN SHARE ROW EXCLUSIVE MODE');
+    await client.query('LOCK TABLE public.users, public.user_roles, public.events, public.idempotency_operations, public.external_entry_calls IN SHARE ROW EXCLUSIVE MODE');
     await verifyDatabase(client, migrations);
-    const empty = (await client.query(`SELECT NOT EXISTS (SELECT 1 FROM public.users)
-      AND NOT EXISTS (SELECT 1 FROM public.user_roles) AND NOT EXISTS (SELECT 1 FROM public.events)
-      AND NOT EXISTS (SELECT 1 FROM public.idempotency_operations) AS empty`)).rows[0];
-    if (empty?.empty !== true) throw new Error('Banco não está vazio para a fixture.');
+    await verifyEmptyDatabase(client);
     for (let i = 0; i < ACCOUNTS.length; i += 1) {
       const id = randomUUID();
       await client.query(`INSERT INTO public.users (id,name,email,password_hash,email_verified_at,is_active,created_at,updated_at)
@@ -202,4 +225,5 @@ if (require.main === module) {
   });
 }
 
-module.exports = { validateLaunch, expectedMigrations, verifyDatabase, prepareAccountHash, diagnosticMessage, EXPECTED_TAGS, DATABASE };
+module.exports = { validateLaunch, validateRole, expectedMigrations, verifyDatabase, verifyEmptyDatabase,
+  prepareAccountHash, diagnosticMessage, EXPECTED_TAGS, DATABASE, ROLE };

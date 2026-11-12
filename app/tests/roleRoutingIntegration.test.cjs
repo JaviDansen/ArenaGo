@@ -41,7 +41,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
       if (url === '/participations/return-state') return { pendingEvaluationParticipationIds: [], recentFinalization: null };
       if (url === '/staff/events') return { events: control.events ?? [] };
       const entryMatch = url.match(/^\/staff\/events\/([^/]+)\/entry-control$/);
-      if (entryMatch) return { eventId: entryMatch[1], externalQueueEnabled: true, canManage: false,
+      if (entryMatch) return { eventId: entryMatch[1], externalQueueEnabled: true, canManage: false,pendingCall:null,canCall:false,canConfirm:false,canMarkAbsent:false,canRemove:false,
         observedAt: '2026-11-10T15:00:00.000Z', waitingCount: 0, waiting: [] };
       const experienceMatch = url.match(/^\/staff\/events\/([^/]+)\/experiences$/);
       if (experienceMatch) return { eventId: experienceMatch[1], experiences: control.experiences ?? [] };
@@ -646,17 +646,24 @@ test('401 recuperável na lista Staff renova sessão e obtém eventos com a iden
 test('Controle de Entrada real confirma primeiro, desativa, reativa e volta preservando evento', { skip }, async () => {
   const values = new Map(), requests = [], at = '2026-11-10T15:00:00.000Z';
   const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
-  let enabled = true, waiting = [{ participationId: 'abcdef00-0000-4000-8000-000000000004', displayName: 'Ana', position: 1 },
+  let pendingCall=null; let enabled = true, waiting = [{ participationId: 'abcdef00-0000-4000-8000-000000000004', displayName: 'Ana', position: 1 },
     { participationId: 'abcdef00-0000-4000-8000-000000000005', displayName: 'Bia', position: 2 }];
   const control = { realStaff: true, platformOS: 'android', events: [staffEvent],
     secureStore: { getItemAsync: async key => values.get(key) ?? null, setItemAsync: async (key, value) => { values.set(key, value); } },
     http: async (route, options) => {
       if (!route.includes('/entry-control')) return;
       requests.push({ route, method: options.method });
-      if (options.method === 'GET') return { eventId: staffEvent.id, externalQueueEnabled: enabled, canManage: true,
+      if (options.method === 'GET') return { eventId: staffEvent.id, externalQueueEnabled: enabled, canManage: true,pendingCall,canCall:enabled&&!pendingCall&&waiting.length>0,canConfirm:!!pendingCall,canMarkAbsent:!!pendingCall,canRemove:!!pendingCall,
         observedAt: at, waitingCount: waiting.length, waiting };
-      if (options.method === 'POST') { const first = waiting.shift(); waiting.forEach((p, index) => { p.position = index + 1; });
-        return { eventId: staffEvent.id, participation: { id: first.participationId, status: 'active', arenaEnteredAt: at } }; }
+      if (options.method === 'POST') {
+        const isCall=route.endsWith('/call-next');
+        let person;
+        if(isCall){person=waiting.shift();waiting.forEach((p,i)=>p.position=i+1);pendingCall={id:'abcdef00-0000-4000-8000-000000000060',...person,calledAt:at};}
+        else person=pendingCall;
+        const call={id:pendingCall.id,participationId:person.participationId,status:isCall?'pending':'confirmed',calledAt:at,resolvedAt:isCall?null:at};
+        if(!isCall)pendingCall=null;
+        return {eventId:staffEvent.id,call,participation:{id:person.participationId,status:isCall?'waiting':'active',arenaEnteredAt:isCall?null:at,finishReason:null,externalQueueOrder:'1'},requeued:false};
+      }
       const payload = JSON.parse(options.body), releasedCount = payload.enabled ? 0 : waiting.length;
       enabled = payload.enabled; if (!enabled) waiting = [];
       return { eventId: staffEvent.id, externalQueueEnabled: enabled, releasedCount, changedAt: at };
@@ -664,13 +671,19 @@ test('Controle de Entrada real confirma primeiro, desativa, reativa e volta pres
   const app = createIntegration({ initialUser: staffUser, control }); await app.mount();
   await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
   await app.press('Selecionar evento Evento autorizado'); await app.press('Controle de Entrada');
-  assert.ok(app.hasText('1. Ana')); await app.press('Confirmar entrada de Ana'); await app.press('CONFIRMAR ALTERAÇÃO');
+  assert.ok(app.hasText('1. Ana')); assert.ok(!app.hasText('Confirmar entrada de Ana'));
+  await app.press('Chamar próximo'); await app.press('CANCELAR ALTERAÇÃO');
+  assert.equal(requests.filter(r => r.method === 'POST').length, 0);
+  await app.press('Chamar próximo'); await app.press('CONFIRMAR ALTERAÇÃO'); await app.press('Entendi');
+  assert.ok(app.hasText('Participante chamado: Ana'));
+  assert.ok(app.hasText('Confirmar entrada')); assert.ok(app.hasText('Marcar ausência')); assert.ok(app.hasText('Remover da fila'));
+  await app.press('Confirmar entrada'); await app.press('CONFIRMAR ALTERAÇÃO');
   assert.ok(app.hasText('Entrada confirmada pelo servidor')); assert.ok(app.hasText('1. Bia'));
   await app.press('Entendi'); await app.press('Desativar fila externa'); await app.press('CONFIRMAR ALTERAÇÃO');
   assert.ok(app.hasText('Participantes liberados: 1')); await app.press('Entendi');
   await app.press('Reativar fila externa'); await app.press('CONFIRMAR ALTERAÇÃO'); await app.press('Entendi');
   assert.ok(app.hasText('Ninguém está aguardando')); await app.press('Voltar ao painel'); assert.ok(app.hasText('Painel operacional'));
-  assert.equal(requests.filter(r => r.method === 'POST').length, 1); assert.equal(requests.filter(r => r.method === 'PATCH').length, 2);
+  assert.equal(requests.filter(r => r.method === 'POST').length, 2); assert.equal(requests.filter(r => r.method === 'PATCH').length, 2);
   app.dispose();
 });
 
@@ -682,12 +695,12 @@ test('confirmação de entrada aberta antes do logout não envia operação na s
     http: async (route, options) => {
       if (!route.includes('/entry-control')) return;
       if (options.method !== 'GET') { mutations++; throw new Error('não deve enviar'); }
-      return { eventId: staffEvent.id, externalQueueEnabled: true, canManage: true, observedAt: at, waitingCount: 1,
+      return { eventId: staffEvent.id, externalQueueEnabled: true, canManage: true,pendingCall:null,canCall:true,canConfirm:false,canMarkAbsent:false,canRemove:false, observedAt: at, waitingCount: 1,
         waiting: [{ participationId: 'abcdef00-0000-4000-8000-000000000004', displayName: 'Ana', position: 1 }] };
     } };
   const app = createIntegration({ initialUser: staffUser, control }); await app.mount();
   await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
-  await app.press('Selecionar evento Evento autorizado'); await app.press('Controle de Entrada'); await app.press('Confirmar entrada de Ana');
+  await app.press('Selecionar evento Evento autorizado'); await app.press('Controle de Entrada'); await app.press('Chamar próximo');
   const old = app.handler('CONFIRMAR ALTERAÇÃO'); await app.act(() => app.manager.logout()); await app.act(async () => old());
   assert.equal(mutations, 0); assert.ok(!app.hasText('1. Ana')); app.dispose();
 });
@@ -698,7 +711,7 @@ test('401 terminal no Controle de Entrada remove lista nominal e área Staff', {
   const app = createIntegration({ initialUser: staffUser, control: { realStaff: true, events: [staffEvent],
     http: async route => {
       if (revoked && route.endsWith('/entry-control')) return { statusCode: 401, body: { code: 'SESSION_REVOKED' } };
-      if (route.endsWith('/entry-control')) return { eventId: staffEvent.id, externalQueueEnabled: true, canManage: true,
+      if (route.endsWith('/entry-control')) return { eventId: staffEvent.id, externalQueueEnabled: true, canManage: true,pendingCall:null,canCall:true,canConfirm:false,canMarkAbsent:false,canRemove:false,
         observedAt: '2026-11-10T15:00:00.000Z', waitingCount: 1, waiting: [
           { participationId: 'abcdef00-0000-4000-8000-000000000004', displayName: 'Ana', position: 1 }] };
     } } });

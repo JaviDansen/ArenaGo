@@ -20,24 +20,11 @@ test("entrada vazia e fechamento continuam consultáveis sem autorizar mutação
   const f = entryFixture(); f.state.people = []; f.flags.manage = false;
   const result = await f.service.read(actor); assert.equal(result.waitingCount, 0); assert.equal(result.canManage, false);
 });
-test("confirma somente o primeiro e persiste efeito, auditoria e idempotência no mesmo tx", async () => {
-  const f = entryFixture(); const input = { ...intent(), participationId: id(4) };
-  const result = await f.service.confirm(input); assert.equal(result.participation.status, "active");
-  assert.deepEqual(f.state.people.map(p => p.status), ["active", "waiting"]);
-  const sql = f.queries.map(q => q.text).join("\n");
-  assert.match(sql, /FROM events WHERE.*FOR UPDATE/);
-  assert.match(sql, /ORDER BY external_queue_order, id LIMIT 1 FOR UPDATE/);
-  assert.match(sql, /closure_requested_at IS NULL/); assert.match(sql, /d.at<e.official_ends_at/);
-  assert.equal(f.queries.at(-1)?.text, "commit");
-  const before = f.queries.filter(q => q.text.includes("UPDATE participations p SET")).length;
-  assert.deepEqual(await f.service.confirm(input), result);
-  assert.equal(f.queries.filter(q => q.text.includes("UPDATE participations p SET")).length, before);
-  assert.equal(f.queries.at(-1)?.text, "rollback");
-});
-test("segundo participante e alvo de outro evento não furam FIFO nem deixam reserva", async () => {
-  for (const participationId of [id(5), id(99)]) {
-    const f = entryFixture(); await assert.rejects(f.service.confirm({ ...intent(), participationId }), code("ENTRY_NOT_FIRST"));
-    assert.deepEqual(f.state.people.map(p => p.status), ["waiting", "waiting"]); assert.equal(f.state.receipts.size, 0);
+test("rota legada recusa novas confirmações sem callId, sem efeito ou reserva",async()=>{
+  for(const participationId of [id(4),id(5),id(99)]) {
+    const f=entryFixture();await assert.rejects(f.service.confirm({...intent(),participationId}),code('ENTRY_CALL_REQUIRED'));
+    assert.deepEqual(f.state.people.map(p=>p.status),['waiting','waiting']);assert.equal(f.state.receipts.size,0);
+    assert.equal(f.queries.some(q=>q.text.includes('UPDATE participations p SET')),false);
   }
 });
 test("Staff desativa liberando todos atomicamente e reativa sem recolocar ativos", async () => {
@@ -71,7 +58,7 @@ test("evento ausente e não autorizado retornam 404 sem consulta nominal", async
 test("cortes D07/D09, evento não pronto e fila desligada não ativam participação", async () => {
   for (const enabled of [true, false]) {
     const f = entryFixture(); f.state.enabled = enabled; f.flags.manage = false;
-    await assert.rejects(f.service.confirm({ ...intent(), participationId: id(4) }), code("EVENT_ENTRY_UNAVAILABLE"));
+    await assert.rejects(f.service.confirm({ ...intent(), participationId: id(4) }), code("ENTRY_CALL_REQUIRED"));
     await assert.rejects(f.service.setEnabled({ ...intent(21), enabled: !enabled }), code("EVENT_ENTRY_UNAVAILABLE"));
     assert.equal(f.state.enabled, enabled); assert.equal(f.state.receipts.size, 0);
   }
@@ -102,13 +89,21 @@ test("chave de alternância reutilizada para intenção diferente não altera o 
 });
 test("confirmações concorrentes do mesmo alvo não ativam o próximo; liberação aguarda evento", async () => {
   const f = entryFixture(), entered = deferred(), release = deferred();
+  const called = await f.calls.execute('call', intent(19));
   f.flags.hold = { entered: entered.resolve, until: release.promise };
-  const first = f.service.confirm({ ...intent(), participationId: id(4) }); await entered.promise;
-  const second = f.service.confirm({ ...intent(21), participationId: id(4) });
-  const refused = assert.rejects(second, code("ENTRY_NOT_FIRST"));
+  const first = f.calls.execute('confirm', { ...intent(), callId: called.call.id }); await entered.promise;
+  const second = f.calls.execute('confirm', { ...intent(21), callId: called.call.id });
+  const refused = assert.rejects(second, code("ENTRY_CALL_NOT_PENDING"));
   const bulk = f.service.setEnabled({ ...intent(22), enabled: false });
   assert.equal(f.state.enabled, true, "alternância não ultrapassa a confirmação pendente");
   release.resolve(); await first; await refused;
   const result = await bulk; assert.equal(result.releasedCount, 1);
   assert.deepEqual(f.state.people.map(p => p.status), ["active", "active"]);
+});
+test('replay legado válido é preservado sem nova admissão',async()=>{
+  const {entryFingerprint}=await import('../../src/participations/staff-entry.service');
+  const f=entryFixture();const payload={eventId:actor.eventId,participation:{id:id(4),status:'active',arenaEnteredAt:'2026-11-10T15:00:00.000Z'}};
+  f.state.receipts.set(`${actor.userId}:staff_confirm_event_entry:${id(20)}`,{id:id(90),hash:entryFingerprint(actor.eventId,id(4)),status:'completed',httpStatus:200,reference:id(4),payload});
+  assert.deepEqual(await f.service.confirm({...intent(),participationId:id(4)}),payload);
+  assert.deepEqual(f.state.people.map(p=>p.status),['waiting','waiting']);
 });

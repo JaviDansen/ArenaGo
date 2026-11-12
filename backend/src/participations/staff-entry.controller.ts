@@ -8,6 +8,8 @@ import { emptyOperationBody, operationUuid, validateOperationBody, validateOpera
 import { StaffIdempotencyPolicy } from "../events/staff-idempotency.policy";
 import { StaffEntryService } from "./staff-entry.service";
 
+import { StaffEntryCallService } from './staff-entry-call.service';
+
 const eventParams = z.object({ eventId: operationUuid }).strict();
 const confirmationParams = eventParams.extend({ participationId: operationUuid });
 const toggleBody = z.object({ enabled: z.boolean() }).strict();
@@ -22,6 +24,7 @@ export class StaffEntryNoStoreGuard implements CanActivate {
 @UseGuards(StaffEntryNoStoreGuard, SessionAuthGuard)
 export class StaffEntryController {
   constructor(@Inject(StaffEntryService) private readonly entries: StaffEntryService,
+    @Inject(StaffEntryCallService) private readonly calls: StaffEntryCallService,
     @Inject(StaffIdempotencyPolicy) private readonly policy: StaffIdempotencyPolicy) {}
 
   @Get()
@@ -37,6 +40,25 @@ export class StaffEntryController {
     const ids = validateOperationParams(confirmationParams, params);
     validateOperationBody(emptyOperationBody, body, request, true);
     return this.entries.confirm({ ...ids, ...mutationSession(request, principal.userId),
+      idempotencyKey: validateOperationIdempotencyKey(request), expiresAt: this.policy.expiresAt() });
+  }
+
+  @Post('call-next') @HttpCode(200)
+  callNext(@CurrentUser() principal: AuthenticatedPrincipal, @Param() params: unknown,
+    @Body() body: unknown, @Req() request: AuthenticatedRequest) {
+    const ids = validateOperationParams(eventParams, params);
+    validateOperationBody(emptyOperationBody, body, request, true);
+    return this.calls.execute('call', { ...ids, ...mutationSession(request, principal.userId),
+      idempotencyKey: validateOperationIdempotencyKey(request), expiresAt: this.policy.expiresAt() });
+  }
+
+  @Post('calls/:callId/:action') @HttpCode(200)
+  resolve(@CurrentUser() principal: AuthenticatedPrincipal, @Param() params: unknown,
+    @Body() body: unknown, @Req() request: AuthenticatedRequest) {
+    const { action, ...ids } = validateOperationParams(eventParams.extend({ callId: operationUuid,
+      action: z.enum(['confirm', 'absent', 'remove']) }), params);
+    validateOperationBody(emptyOperationBody, body, request, true);
+    return this.calls.execute(action, { ...ids, ...mutationSession(request, principal.userId),
       idempotencyKey: validateOperationIdempotencyKey(request), expiresAt: this.policy.expiresAt() });
   }
 

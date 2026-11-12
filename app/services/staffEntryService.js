@@ -13,11 +13,40 @@ export function parseEntryState(body, eventId) {
     seen.add(row.participationId.toLowerCase());
     return { participationId: row.participationId, displayName: row.displayName, position: row.position };
   });
-  return { eventId, externalQueueEnabled: body.externalQueueEnabled, canManage: body.canManage,
+  if (!['canCall','canConfirm','canMarkAbsent','canRemove'].every(k => typeof body[k] === 'boolean') ||
+      !(body.pendingCall === null || (validEntryId(body.pendingCall?.id) && validEntryId(body.pendingCall?.participationId) &&
+        !seen.has(body.pendingCall.participationId.toLowerCase()) && typeof body.pendingCall.displayName === 'string' &&
+        body.pendingCall.displayName.trim() && instant(body.pendingCall.calledAt)))) return invalid();
+  if ((body.canCall && (body.pendingCall || !body.externalQueueEnabled || !body.canManage || !waiting.length)) ||
+      (body.canConfirm && (!body.pendingCall || !body.externalQueueEnabled || !body.canManage)) ||
+      ((body.canMarkAbsent || body.canRemove) && (!body.pendingCall || !body.externalQueueEnabled))) return invalid();
+  return { pendingCall: body.pendingCall, canCall: body.canCall, canConfirm: body.canConfirm,
+    canMarkAbsent: body.canMarkAbsent, canRemove: body.canRemove, eventId, externalQueueEnabled: body.externalQueueEnabled, canManage: body.canManage,
     observedAt: body.observedAt, waitingCount: body.waitingCount, waiting };
 }
 export function parseEntryResult(body, intent) {
   if (body?.eventId !== intent.eventId) return invalid();
+  if (['call','confirm_call','absent','remove'].includes(intent.kind)) {
+    const c = body.call, p = body.participation;
+    const status = {call:'pending',confirm_call:'confirmed',absent:'absent',remove:'removed'}[intent.kind];
+    if (!validEntryId(c?.id) || !validEntryId(c.participationId) || p?.id !== c.participationId || c.status !== status ||
+        !instant(c.calledAt) || (status === 'pending' ? c.resolvedAt !== null : !instant(c.resolvedAt)) ||
+        (intent.kind !== 'call' && (c.id !== intent.callId || c.participationId !== intent.participationId)) ||
+        typeof body.requeued !== 'boolean' ||
+        (intent.kind !== 'absent' && body.requeued) ||
+        (intent.kind === 'call' && p.status !== 'waiting') ||
+        (intent.kind === 'confirm_call' && (p.status !== 'active' || !instant(p.arenaEnteredAt))) ||
+        (intent.kind === 'remove' && (p.status !== 'canceled' || p.finishReason !== 'staff_external_wait_removed')) ||
+        (intent.kind === 'absent' && (body.requeued ? p.status !== 'waiting' : p.status !== 'finished' || p.finishReason !== 'external_absence_after_entry_cutoff')) ||
+        (p.externalQueueOrder !== null && (typeof p.externalQueueOrder !== 'string' || !/^[1-9]\d*$/.test(p.externalQueueOrder) ||
+          p.externalQueueOrder.length > 19 || BigInt(p.externalQueueOrder)>9223372036854775807n))) return invalid();
+    if ((c.resolvedAt && Date.parse(c.resolvedAt) < Date.parse(c.calledAt)) ||
+        (p.status !== 'active' && p.arenaEnteredAt !== null) ||
+        (['waiting','active'].includes(p.status) && p.finishReason !== null) ||
+        (body.requeued && !p.externalQueueOrder)) return invalid();
+    return { eventId: body.eventId, call: {id:c.id,participationId:c.participationId,status:c.status,calledAt:c.calledAt,resolvedAt:c.resolvedAt},
+      participation: {id:p.id,status:p.status,arenaEnteredAt:p.arenaEnteredAt,finishReason:p.finishReason,externalQueueOrder:p.externalQueueOrder}, requeued: body.requeued };
+  }
   if (intent.kind === 'confirm') {
     if (body.participation?.id !== intent.participationId || body.participation.status !== 'active' ||
         !instant(body.participation.arenaEnteredAt)) return invalid();
@@ -36,7 +65,7 @@ const empty = () => ({ context: null, status: 'idle', data: null, error: null, b
 const failure = (error) => error?.status === 401 ? 'session' : [403, 404].includes(error?.status) ? 'denied'
   : error?.isNetworkError || error?.isTimeout ? 'network' : 'unavailable';
 export const isDefinitiveEntryRejection = (error) => [400, 401, 403, 404].includes(error?.status) ||
-  (error?.status === 409 && ['ENTRY_NOT_FIRST', 'EVENT_ENTRY_UNAVAILABLE'].includes(error.code));
+  (error?.status === 409 && ['ENTRY_NOT_FIRST', 'EVENT_ENTRY_UNAVAILABLE', 'ENTRY_CALL_REQUIRED', 'ENTRY_CALL_PENDING', 'ENTRY_CALL_NOT_PENDING', 'ENTRY_QUEUE_EMPTY'].includes(error.code));
 
 /** Sem replay de POST: um dispatching desconhecido só permite consultas. */
 export function createStaffEntryStore({ client, storage, createKey, getContext }) {
@@ -62,12 +91,16 @@ export function createStaffEntryStore({ client, storage, createKey, getContext }
   async function mutate(action) {
     if (flight) return { kind: 'busy' };
     const context = state.context;
-    if (!isCurrent(context) || state.status !== 'ready' || !state.data?.canManage || state.storageError || state.pending ||
+    if (!isCurrent(context) || state.status !== 'ready' || !state.data || state.storageError || state.pending ||
         storage.isPersistent !== true || !['userId', 'sessionId', 'eventId'].every(key => validEntryId(context[key]))) return { kind: 'blocked' };
-    if (action.kind === 'confirm' ? !state.data.externalQueueEnabled || action.participationId !== state.data.waiting[0]?.participationId
-      : action.kind !== 'toggle' || typeof action.enabled !== 'boolean' || action.enabled === state.data.externalQueueEnabled) return { kind: 'blocked' };
+    const data = state.data, call = data.pendingCall;
+    if (action.kind === 'toggle' ? !data.canManage || typeof action.enabled !== 'boolean' || action.enabled === data.externalQueueEnabled
+      : action.kind === 'call' ? !data.canCall || Boolean(call)
+        : !['confirm_call','absent','remove'].includes(action.kind) || !call || action.callId !== call.id ||
+          !data[{confirm_call:'canConfirm',absent:'canMarkAbsent',remove:'canRemove'}[action.kind]]) return { kind: 'blocked' };
     const intent = { userId: context.userId, sessionId: context.sessionId, eventId: context.eventId, key: createKey(),
-      kind: action.kind, participationId: action.kind === 'confirm' ? action.participationId : null,
+      kind: action.kind, participationId: ['confirm_call','absent','remove'].includes(action.kind) ? call.participationId : null,
+      callId: ['confirm_call','absent','remove'].includes(action.kind) ? call.id : null,
       enabled: action.kind === 'toggle' ? action.enabled : null, phase: 'reserved' };
     if (!validEntryId(intent.key)) throw new Error('Chave de entrada inválida.');
     publish({ busy: true, feedback: null, knownOutcome: null });
@@ -86,9 +119,11 @@ export function createStaffEntryStore({ client, storage, createKey, getContext }
         try {
           const options = { auth: true, retryOnUnauthorized: false, outcomeUnknownOnNetworkError: true,
             headers: { 'Idempotency-Key': intent.key } };
-          const body = intent.kind === 'confirm'
-            ? await client.post(`/staff/events/${context.eventId}/entry-control/participants/${intent.participationId}/confirm`, {}, options)
-            : await client.patch(`/staff/events/${context.eventId}/entry-control`, { enabled: intent.enabled }, options);
+          const base = `/staff/events/${context.eventId}/entry-control`;
+          const body = intent.kind === 'toggle'
+            ? await client.patch(base, { enabled: intent.enabled }, options)
+            : await client.post(intent.kind === 'call' ? `${base}/call-next`
+              : `${base}/calls/${intent.callId}/${intent.kind === 'confirm_call' ? 'confirm' : intent.kind}`, {}, options);
           outcome = { kind: 'confirmed', result: parseEntryResult(body, intent) };
         } catch (error) {
           if (!isDefinitiveEntryRejection(error)) {

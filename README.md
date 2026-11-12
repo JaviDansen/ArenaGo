@@ -1,13 +1,13 @@
 # ArenaGo
 
-ArenaGo é um aplicativo mobile para apoiar a participação em eventos de games. O repositório contém o frontend Expo e uma API NestJS com persistência PostgreSQL. A integração entre eles é parcial: autenticação e questionário usam a API, enquanto os fluxos de eventos e Arena no aplicativo ainda dependem de dados e estado locais.
+ArenaGo é um aplicativo mobile para apoiar a participação em eventos de games. O repositório contém o frontend Expo e uma API NestJS com persistência PostgreSQL. A integração inclui autenticação, questionário e as telas operacionais Staff de Controle de Entrada e estações; outras telas demonstrativas e etapas do participante ainda exigem validação própria.
 
 ## Estado do desenvolvimento
 
-- **Frontend Expo:** cadastro, login, sessão e questionário consultam ou gravam na API real. Entrada por código de demonstração, participação na Arena, filas e avaliações exibidas nas telas ainda usam simulação/estado local; a integração desses fluxos com os endpoints existentes não está concluída.
-- **Backend NestJS:** autenticação e sessão, perfil/questionário, jogos, configuração administrativa de eventos, participações, filas, operação Staff, encerramentos e avaliações têm controllers e serviços implementados. Isso não significa que todo o percurso do participante esteja disponível por HTTP: consulta pública do evento por código e criação de participação ainda não têm controller.
-- **Banco e testes:** Drizzle, migrações SQL e PostgreSQL local de testes. Após a E08-EST04, o responsável confirmou 1.229/1.229 testes PostgreSQL e a regressão unitária passou 992/992. Esses resultados são do ambiente de desenvolvimento/testes.
-- **Dependências abertas:** concessão/revogação de Staff e Admin, conclusão do fluxo Admin TOTP, integração Expo dos eventos, BI, LGPD e infraestrutura de produção. Não há validação de produção declarada.
+- **Frontend Expo:** cadastro, login, sessão e questionário usam a API. Controle de Entrada Staff e operação das estações consomem contratos reais e foram homologados funcionalmente no Expo Go em cenários delimitados. Telas demonstrativas e outros percursos do participante devem ser distinguidos das jornadas operacionais reais.
+- **Backend NestJS:** autenticação e sessão, Admin com TOTP, concessões Staff, configuração de eventos, participações, filas, operações Staff, encerramentos e avaliações têm contratos implementados. Staff 02 usa chamadas externas persistidas por `callId`; a migration 0008 foi aplicada em bancos locais isolados de homologação.
+- **Banco e testes:** Drizzle e migrations SQL versionadas. A validação focada Staff 02 passou 341 testes backend e 145 do aplicativo; o ensaio físico específico da 0008 passou 1/1 no banco inicial dedicado. Na auditoria pré-commit posterior, a suíte completa do backend ainda apresentou falhas no fallback de execução, registradas em `docs/STAFF_ENTRY_CALL_FLOW_IMPLEMENTACAO.md`. Resultados históricos de outras campanhas não comprovam a entrega atual.
+- **Dependências abertas:** diagnóstico da regressão completa do backend, correspondência da evidência QA, concorrência física, recuperação segura de intenções incertas, cenários após cutoff, BI, LGPD e infraestrutura de produção. Não há validação de produção declarada.
 
 ## Tecnologias
 

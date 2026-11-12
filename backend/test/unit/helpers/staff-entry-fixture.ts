@@ -1,3 +1,4 @@
+import { StaffEntryCallService } from '../../../src/participations/staff-entry-call.service';
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { Pool } from "pg";
 import * as schema from "../../../src/database/schema";
@@ -12,13 +13,16 @@ export const at = "2026-11-10T15:00:00.000Z";
 export const intent = (n = 20) => ({ ...actor, idempotencyKey: id(n), expiresAt: new Date("2099-01-01") });
 export function deferred() { let resolve!: () => void; const promise = new Promise<void>(yes => { resolve = yes; }); return { promise, resolve }; }
 type Receipt = { id: string; hash: string; status: string; httpStatus: number | null; reference: string | null; payload: unknown };
-type State = { enabled: boolean; people: Array<{ id: string; name: string; status: string }>; receipts: Map<string, Receipt> };
+type ExternalCall = {id:string;participationId:string;status:string;calledAt:string;resolvedAt:string|null};
+type State = { calls: ExternalCall[]; lastOrder: number; enabled: boolean; people: Array<{ id: string; name: string; status: string; order?: string; arenaEnteredAt?: string | null; finishReason?: string | null }>; receipts: Map<string, Receipt> };
 export function entryFixture() {
   const flags = { exists: true, staff: true, active: true, verified: true, revoked: false, expired: false,
     admin: false, secondFactor: true, manage: true, fail: false, cutoffAtDecision: false,
     hold: null as null | { entered: () => void; until: Promise<void> } };
-  const state: State = { enabled: true, people: [{ id: id(4), name: "Ana", status: "waiting" },
-    { id: id(5), name: "Bia", status: "waiting" }], receipts: new Map() };
+  const state: State = { calls: [], lastOrder: 2, enabled: true, people: [{ id: id(4), name: "Ana", status: "waiting", order: '1' },
+    { id: id(5), name: "Bia", status: "waiting", order: '2' }], receipts: new Map() };
+  const orderedWaiting = () => state.people.filter(p => p.status === 'waiting').sort((a,b) =>
+    BigInt(a.order!) < BigInt(b.order!) ? -1 : BigInt(a.order!) > BigInt(b.order!) ? 1 : a.id.localeCompare(b.id));
   const queries: Array<{ text: string; params: unknown[] }> = [];
   let eventQueue = Promise.resolve();
   // Simula a exclusão solicitada pelo SQL. Não prova locks físicos PostgreSQL.
@@ -30,7 +34,7 @@ export function entryFixture() {
         const previous = eventQueue;
         eventQueue = new Promise<void>(yes => { unlock = yes; });
         await previous;
-        snapshot = { enabled: state.enabled, people: structuredClone(state.people), receipts: structuredClone(state.receipts) };
+        snapshot = { calls: structuredClone(state.calls), lastOrder: state.lastOrder, enabled: state.enabled, people: structuredClone(state.people), receipts: structuredClone(state.receipts) };
       };
       return { release() {}, async query(config: { text: string }, params: unknown[] = []) {
         const text = config.text; queries.push({ text, params });
@@ -52,8 +56,34 @@ export function entryFixture() {
           (flags.admin && !flags.secondFactor) ? [] : [{ id: actor.sessionId }] };
         if (text.includes('AS "observedAt" FROM events')) return { rows: flags.exists && flags.staff && flags.verified
           ? [{ enabled: state.enabled, observedAt: at }] : [] };
-        if (text.includes("row_number() OVER")) return { rows: state.people.filter(p => p.status === "waiting")
-          .map((p, i) => ({ participationId: p.id, displayName: p.name, position: String(i + 1), order: String(i + 1) })) };
+        if (text.includes('AS residual')) return {rows:[{residual: state.enabled && !flags.cutoffAtDecision}]};
+        if (text.includes('SELECT c.id,c.participation_id')) return {rows: state.calls.filter(c=>c.status==='pending').map(c=>({...c,displayName:state.people.find(p=>p.id===c.participationId)?.name}))};
+        if (text.includes('SELECT id,status,external_queue_order')) return {rows:state.people.filter(p=>p.status==='waiting').map((p,i)=>({...p,order:p.order??String(i+1)}))};
+        if (text.includes('FROM external_entry_calls') && text.includes('FOR UPDATE')) return {rows:state.calls.filter(c=>c.status==='pending'||params.includes(c.id))};
+        if (text.includes('INSERT INTO external_entry_calls')) {
+          if (!state.enabled||!flags.manage||flags.cutoffAtDecision) return {rows:[]};
+          const person=state.people.find(p=>params.includes(p.id))!;
+          const c={id:String(params[0]),participationId:person.id,status:'pending',calledAt:at,resolvedAt:null};state.calls.push(c);return {rows:[c]};
+        }
+        if (text.includes('UPDATE external_entry_calls c SET')) {
+          if (!state.enabled||flags.cutoffAtDecision && params.includes(true)) return {rows:[]};
+          const c=state.calls.find(c=>params.includes(c.id)&&c.status==='pending');if(!c)return {rows:[]};
+          if(flags.hold){flags.hold.entered();await flags.hold.until;}
+          c.status=String(params[0]);c.resolvedAt=at;
+          const requeue=flags.manage&&!flags.cutoffAtDecision;
+          if(c.status==='absent'&&requeue)state.lastOrder++;
+          return {rows:[{at,requeue,order:c.status==='absent'&&requeue?String(state.lastOrder):null}]};
+        }
+        if (text.includes('UPDATE events SET external_last_order')) {state.lastOrder++;return {rows:[{order:String(state.lastOrder)}]};}
+        if (text.includes('UPDATE participations SET external_queue_order')) {const p=state.people.find(p=>params.includes(p.id))!;p.order=String(params[0]);return {rows:[{id:p.id}]};}
+        if (text.includes('FROM external_entry_calls c WHERE p.id')) {
+          const c=state.calls.find(c=>params.includes(c.id))!;const p=state.people.find(p=>p.id===c.participationId)!;
+          p.status=String(params[0]);p.arenaEnteredAt=p.status==='active'?at:null;p.finishReason=params[3] as string|null;return {rows:[{id:p.id}]};
+        }
+        if (text.includes('SELECT id,status,arena_entered_at')) {const p=state.people.find(p=>params.includes(p.id))!;
+          return {rows:[{id:p.id,status:p.status,arenaEnteredAt:p.arenaEnteredAt??null,finishReason:p.finishReason??null,externalQueueOrder:p.order??String(state.people.indexOf(p)+1)}]};}
+        if (text.includes("row_number() OVER")) return { rows: orderedWaiting().filter(p => !state.calls.some(c => c.status === 'pending' && c.participationId === p.id))
+          .map((p, i) => ({ participationId: p.id, displayName: p.name, position: String(i + 1), order: p.order })) };
         if (text.includes('insert into "idempotency_operations"')) {
           const slot = `${params[1]}:${params[2]}:${params[3]}`;
           if (state.receipts.has(slot)) return { rows: [] };
@@ -77,6 +107,7 @@ export function entryFixture() {
         }
         if (text.startsWith('update "participations"')) {
           const waiting = state.people.filter(p => p.status === "waiting"); waiting.forEach(p => { p.status = "active"; });
+          state.calls.filter(c=>c.status==='pending').forEach(c=>{c.status='canceled';c.resolvedAt=at;});
           return { rows: [], rowCount: waiting.length };
         }
         if (text.includes('AS "decisionAtMs"')) return { rows: [{ decisionAtMs: Date.parse(at) }] };
@@ -97,5 +128,5 @@ export function entryFixture() {
   events.evaluateEventAvailabilityById = async (_id, observed) => ({ eventExists: true,
     eventAcceptingNewEntries: flags.manage && !(flags.cutoffAtDecision && observed.getTime() >= Date.parse(at) + 1000) } as EventAvailabilityResult);
   const participations = new ParticipationsService(database, events);
-  return { database, events, participations, service: new StaffEntryService(database, events, participations), flags, state, queries };
+  return { calls: new StaffEntryCallService(database,events), database, events, participations, service: new StaffEntryService(database, events, participations), flags, state, queries };
 }

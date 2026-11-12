@@ -1,3 +1,4 @@
+import { StaffEntryCallService } from './staff-entry-call.service';
 import { Module } from "@nestjs/common";
 import { DatabaseModule } from "../database/database.module";
 import { EventsModule } from "../events/events.module";
@@ -13,7 +14,7 @@ import { StaffIdempotencyPolicy } from "../events/staff-idempotency.policy";
 @Module({
   imports: [DatabaseModule, EventsModule, AuthModule],
   controllers: [ParticipantAdmissionController, StaffEntryController],
-  providers: [ParticipationsService, ParticipantQueueIdempotencyPolicy, StaffEntryService, StaffEntryNoStoreGuard, StaffIdempotencyPolicy],
+  providers: [StaffEntryCallService, ParticipationsService, ParticipantQueueIdempotencyPolicy, StaffEntryService, StaffEntryNoStoreGuard, StaffIdempotencyPolicy],
   exports: [ParticipationsService],
 })
 export class ParticipationsModule {}

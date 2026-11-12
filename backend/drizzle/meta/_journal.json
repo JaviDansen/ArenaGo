@@ -50,6 +50,13 @@
       "when": 1794200000000,
       "tag": "0007_staff_idempotency_preparation",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1794412800000,
+      "tag": "0008_external_entry_calls",
+      "breakpoints": true
     }
   ]
 }

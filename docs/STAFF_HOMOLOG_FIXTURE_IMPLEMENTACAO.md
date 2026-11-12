@@ -4,35 +4,35 @@
 
 O utilitário `backend/scripts/prepare-staff-homologation.cjs` prepara somente sete contas sintéticas: uma destinada ao bootstrap Admin, uma ao Staff e cinco participantes. Todos recebem UUID próprio e hash Argon2id com os parâmetros do cadastro real. A senha do Admin deve ser exclusiva; a conta Staff e os cinco participantes podem usar a mesma senha sintética, digitada e confirmada separadamente para cada conta. A política de senha existente é aplicada a cada conta. Os endereços são fictícios sob `arenago.invalid`; o utilitário marca o e-mail como verificado apenas como dado sintético de homologação. Cria o papel global `participante` como no cadastro e não cria papel Admin ou Staff, sessão, TOTP, perfil, evento ou participação.
 
-A execução exige `NODE_ENV=test`, `--execute`, terminal interativo e a frase de autorização `AUTORIZO CONTAS SINTETICAS`. O destino TCP e o banco são fixos no código: `127.0.0.1:55432/arenago_staff_homolog_20261111`. O programa não carrega `.env` nem aceita URL ou opções de conexão; pede role e senha PostgreSQL em terminal, sem mostrar a senha. Rejeita variáveis de redirecionamento e `NODE_OPTIONS` no ambiente. O PostgreSQL confirma banco, endereço, porta e que não está em recuperação. Antes das escritas e novamente na transação, os sete hashes e timestamps do journal Drizzle são comparados aos arquivos desta branch; também são exigidos tabelas, check e trigger da 0007, questionário ativo e jogo curado. A transação bloqueia as tabelas e exige ausência de usuários, papéis, eventos e operações de idempotência. Conflitos ou erros abortam; se o resultado do commit for incerto, inspecione o banco antes de qualquer nova tentativa.
+A execução exige `NODE_ENV=test`, `--execute`, terminal interativo e a frase de autorização `AUTORIZO CONTAS SINTETICAS`. O destino TCP, banco e role são fixos no código: `127.0.0.1:55432/arenago_staff_homolog_geral_20261111`, `arenago_staff_homolog_geral`. O programa não carrega `.env` nem aceita URL ou opções de conexão; pede a senha PostgreSQL em terminal, sem mostrá-la. Rejeita variáveis de redirecionamento e `NODE_OPTIONS` no ambiente. O PostgreSQL confirma banco, endereço, porta, role restrita e que não está em recuperação. Antes das escritas e novamente na transação, os oito hashes e timestamps do journal Drizzle são comparados aos arquivos desta branch; também são exigidos os controles da 0007 e 0008, questionário ativo e jogo curado. A transação bloqueia as tabelas e exige ausência de usuários, papéis, eventos, operações de idempotência e chamadas externas. Conflitos ou erros abortam; se o resultado do commit for incerto, inspecione o banco antes de qualquer nova tentativa.
 
-Essas verificações não comprovam ausência de proxy local, identidade operacional do cluster, equivalência integral do schema ou segurança dos privilégios. Conferir servidor, processo, porta, proprietário e ambiente antes da campanha. O banco `arenago_events_test` e seus dados históricos não devem ser usados. Nenhuma consulta PostgreSQL, fixture, seed, migration, teste ou build foi executado nesta implementação.
+Essas verificações não comprovam ausência de proxy local, identidade operacional do cluster ou equivalência integral do schema. O banco `arenago_events_test` e seus dados históricos não devem ser usados. Na campanha posterior, o responsável preparou o banco geral com as migrations 0001–0008, seed do questionário 1.0.0 e 20 jogos, e executou a fixture das sete contas. O banco agora está populado; a guarda de banco vazio impede uma segunda execução da fixture. A preparação inicial do script não executou PostgreSQL.
 
-## Preparação posterior — não executada
+## Procedimento histórico de preparação do banco geral
 
-Cada etapa de escrita requer autorização explícita própria. Em PowerShell, a partir da raiz, confirme branch, processo que escuta a porta e, com credenciais locais fornecidas interativamente, consulte somente metadados:
+As etapas abaixo registram o procedimento para um banco inicialmente vazio. **Não repetir criação, migrations, seed ou fixture no banco geral já populado.** Cada etapa de escrita exigiu autorização explícita própria. Em PowerShell, a partir da raiz, foram previstas as seguintes conferências de branch, listener e metadados:
 
 ```powershell
 git status --short --branch
 Get-NetTCPConnection -LocalPort 55432 -State Listen
-psql -X -h 127.0.0.1 -p 55432 -U <admin-local> -d postgres -W -v ON_ERROR_STOP=1 -c "SELECT current_database(), host(inet_server_addr()), inet_server_port(), pg_is_in_recovery(); SELECT datname FROM pg_database WHERE datname = 'arenago_staff_homolog_20261111';"
+psql -X -h 127.0.0.1 -p 55432 -U <admin-local> -d postgres -W -v ON_ERROR_STOP=1 -c "SELECT current_database(), host(inet_server_addr()), inet_server_port(), pg_is_in_recovery(); SELECT datname FROM pg_database WHERE datname = 'arenago_staff_homolog_geral_20261111';"
 ```
 
 Substituir `<admin-local>` pelo nome da role local. Se o servidor não for o esperado ou o banco já existir, interromper. Após autorização para criação, usar uma role dedicada já autorizada e executar:
 
 ```powershell
-createdb -h 127.0.0.1 -p 55432 -U <admin-local> -O <role-dedicada> -W arenago_staff_homolog_20261111
+createdb -h 127.0.0.1 -p 55432 -U <admin-local> -O <role-dedicada> -W arenago_staff_homolog_geral_20261111
 ```
 
 O dono deve ter privilégios limitados ao banco novo. Se for necessário criar uma role dedicada antes de criar o banco, isto é outra escrita no cluster e requer autorização específica; por exemplo, antes do `createdb`:
 
 ```powershell
-createuser -h 127.0.0.1 -p 55432 -U <admin-local> -W --login --no-superuser --no-createdb --no-createrole --no-inherit --pwprompt arenago_staff_homolog
+createuser -h 127.0.0.1 -p 55432 -U <admin-local> -W --login --no-superuser --no-createdb --no-createrole --no-inherit --pwprompt arenago_staff_homolog_geral
 ```
 
-Nesse caso, use `arenago_staff_homolog` como `<role-dedicada>`. Confirmar novamente `current_database()`, endereço e porta conectando ao banco novo antes das migrations.
+Nesse caso, use `arenago_staff_homolog_geral` como `<role-dedicada>`. Confirmar novamente `current_database()`, endereço e porta conectando ao banco novo antes das migrations.
 
-Após autorização para aplicar **somente 0001–0007**, confirme que a branch contém somente essas entradas no journal. Em um terminal PowerShell em `backend`, prepare uma URL local em memória sem expor senha no comando ou no relatório. O caminho escolhido para `DOTENV_CONFIG_PATH` deve não existir; a implementação de `dotenv/config` respeita essa variável. `DATABASE_DIRECT_URL` tem precedência na configuração Drizzle e deve ser igual à URL local.
+Após autorização para aplicar **somente 0001–0008**, confirme que a branch contém exatamente essas oito entradas no journal. Em um terminal PowerShell em `backend`, prepare uma URL local em memória sem expor senha no comando ou no relatório. O caminho escolhido para `DOTENV_CONFIG_PATH` deve não existir; a implementação de `dotenv/config` respeita essa variável. `DATABASE_DIRECT_URL` tem precedência na configuração Drizzle e deve ser igual à URL local.
 
 ```powershell
 $env:NODE_ENV = 'test'
@@ -42,7 +42,7 @@ if (Test-Path -LiteralPath $env:DOTENV_CONFIG_PATH) { throw 'Caminho dotenv já 
 $dbRole = Read-Host 'Role dedicada do banco local'
 $dbSecret = Read-Host 'Senha da role local' -AsSecureString
 $dbPlain = [System.Net.NetworkCredential]::new('', $dbSecret).Password
-$dbUrl = 'postgresql://' + [uri]::EscapeDataString($dbRole) + ':' + [uri]::EscapeDataString($dbPlain) + '@127.0.0.1:55432/arenago_staff_homolog_20261111'
+$dbUrl = 'postgresql://' + [uri]::EscapeDataString($dbRole) + ':' + [uri]::EscapeDataString($dbPlain) + '@127.0.0.1:55432/arenago_staff_homolog_geral_20261111'
 $dbPlain = $null
 $env:DATABASE_URL = $dbUrl
 $env:DATABASE_DIRECT_URL = $dbUrl
@@ -115,6 +115,6 @@ npm.cmd run start -- --lan
 
 O Expo e o backend devem estar na mesma rede; restrinja o firewall à LAN de homologação. Encerrar processos ao final. Descarte do banco isolado é destrutivo e depende de autorização separada e nova confirmação de identidade.
 
-## Validação pendente
+## Validação e limites
 
-Foram preparados testes unitários de guardas e verificação simulada do destino e do journal; não foram executados. A revisão de segurança deve avaliar parsing de ambiente, entrada oculta, hashes, atomicidade e caminhos incertos. Depois, Luna Medium deve executar os testes autorizados em isolamento. A primeira conexão ou escrita PostgreSQL requer campanha explícita em banco dedicado, com verificação de identidade e ausência de túneis; testes simulados não comprovam as garantias físicas.
+Na campanha de validação simulada, Luna Medium registrou 3 testes da fixture aprovados, 0 falhas, e typechecks de produção e testes aprovados. A execução real posterior criou as sete contas sintéticas no banco geral, sem concessões automáticas; Admin/TOTP e Staff foram configurados depois pelos fluxos oficiais. Os testes simulados não comprovam identidade física do servidor, ausência de proxy ou recuperação após um commit de resultado incerto. Qualquer nova campanha de escrita requer autorização e verificação própria; a fixture atual exige banco vazio e não deve ser repetida neste banco.

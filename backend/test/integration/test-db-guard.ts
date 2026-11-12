@@ -10,6 +10,7 @@ const ALLOWED_DATABASES = new Set([
   "arenago_k03_test",
   "arenago_events_test",
 ]);
+const STAFF_ENTRY_CALLS_SCHEMA_DATABASE = "arenago_staff_homolog_20261111";
 
 /**
  * Barreira de segurança contra execução de testes em bancos
@@ -24,10 +25,12 @@ const ALLOWED_DATABASES = new Set([
  * 3. Portas limitadas a 5432 e 55432.
  * 4. Banco limitado à lista de testes autorizados.
  * 5. arenago_events_test permitido somente na porta 55432.
- * 6. Redirecionamentos de host, porta ou banco bloqueados.
+ * 6. arenago_staff_homolog_20261111 somente no guard especÃ­fico do teste Staff 02.
+ * 7. Redirecionamentos de host, porta ou banco bloqueados.
  */
-export function assertSafeTestDatabase(
+function validateSafeTestDatabase(
   urlStr: string | undefined,
+  additionalDatabase: string | null = null,
 ): string {
   if (!urlStr || typeof urlStr !== "string" || !urlStr.trim()) {
     throw new Error(
@@ -151,21 +154,29 @@ export function assertSafeTestDatabase(
   }
 
   // 8. Exigir banco de testes explicitamente autorizado.
-  if (!ALLOWED_DATABASES.has(databaseName)) {
+  // 9. Restringir o banco dos eventos ao PostgreSQL local na porta 55432.
+  if (
+    ["arenago_events_test", STAFF_ENTRY_CALLS_SCHEMA_DATABASE].includes(databaseName) &&
+    effectivePort !== "55432"
+  ) {
+    throw new Error("[SEGURANÇA BLOQUEADA] Bancos locais de eventos exigem a porta 55432.");
+  }
+
+  const isAllowed = ALLOWED_DATABASES.has(databaseName) || databaseName === additionalDatabase;
+  if (!isAllowed) {
     throw new Error(
       `[SEGURANÇA BLOQUEADA] O banco "${databaseName}" não está na lista de bancos descartáveis de teste autorizados (${Array.from(ALLOWED_DATABASES).join(", ")}).`,
     );
   }
 
-  // 9. Restringir o banco dos eventos ao PostgreSQL local na porta 55432.
-  if (
-    databaseName === "arenago_events_test" &&
-    effectivePort !== "55432"
-  ) {
-    throw new Error(
-      "[SEGURANÇA BLOQUEADA] arenago_events_test exige a porta 55432.",
-    );
-  }
-
   return urlStr;
+}
+
+export function assertSafeTestDatabase(urlStr: string | undefined): string {
+  return validateSafeTestDatabase(urlStr);
+}
+
+/** Allowlist restrita ao ensaio Staff 02, sem liberar o banco nas demais integraÃ§Ãµes. */
+export function assertSafeStaffEntryCallsSchemaDatabase(urlStr: string | undefined): string {
+  return validateSafeTestDatabase(urlStr, STAFF_ENTRY_CALLS_SCHEMA_DATABASE);
 }

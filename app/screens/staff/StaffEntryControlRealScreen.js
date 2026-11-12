@@ -40,7 +40,7 @@ export default function StaffEntryControlRealScreen({ event, isEventCurrent, onB
   if (!store.isCurrent(snapshot.context)) return null;
   const ownPending = snapshot.pending && ['userId', 'sessionId', 'eventId'].every(key => snapshot.pending[key] === snapshot.context[key]);
   const pending = ownPending ? snapshot.pending : null;
-  const disabled = snapshot.busy || snapshot.status !== 'ready' || !snapshot.data?.canManage ||
+  const disabled = snapshot.busy || snapshot.status !== 'ready' || !snapshot.data ||
     Boolean(snapshot.pending) || snapshot.storageError || !defaultStaffEntryIntentStorage.isPersistent;
   const open = (action) => { if (!disabled && store.isCurrent()) setDialog({ action, context: snapshot.context }); };
   const confirm = (expected) => {
@@ -61,19 +61,27 @@ export default function StaffEntryControlRealScreen({ event, isEventCurrent, onB
         <Text style={styles.title}>Fila {snapshot.data.externalQueueEnabled ? 'ATIVA' : 'INATIVA'}</Text>
         <Text style={styles.text}>Aguardando: {snapshot.data.waitingCount}</Text>
         <Text style={styles.text}>{snapshot.data.externalQueueEnabled
-          ? 'Confirme a entrada presencial do primeiro participante da lista.'
+          ? 'Chame o próximo participante para conferir sua entrada presencial.'
           : 'Novas participações entram diretamente no evento. Reativar não recoloca quem já foi liberado na fila.'}</Text>
         <Button label={snapshot.data.externalQueueEnabled ? 'Desativar fila externa' : 'Reativar fila externa'}
-          danger={snapshot.data.externalQueueEnabled} disabled={disabled}
+          danger={snapshot.data.externalQueueEnabled} disabled={disabled || !snapshot.data.canManage}
           onPress={() => open({ kind: 'toggle', enabled: !snapshot.data.externalQueueEnabled })} />
       </View>
       {!snapshot.data.canManage && <Text style={styles.warning}>O evento não permite entradas ou alterações da fila neste momento.</Text>}
+      {snapshot.data.pendingCall ? <View style={styles.card}>
+        <Text style={styles.title}>Participante chamado: {snapshot.data.pendingCall.displayName}</Text>
+        <Button label="Confirmar entrada" disabled={disabled || !snapshot.data.canConfirm}
+          onPress={() => open({ kind: 'confirm_call', callId: snapshot.data.pendingCall.id })} />
+        <Button label="Marcar ausência" disabled={disabled || !snapshot.data.canMarkAbsent}
+          onPress={() => open({ kind: 'absent', callId: snapshot.data.pendingCall.id })} />
+        <Button label="Remover da fila" danger disabled={disabled || !snapshot.data.canRemove}
+          onPress={() => open({ kind: 'remove', callId: snapshot.data.pendingCall.id })} />
+      </View> : <Button label="Chamar próximo" disabled={disabled || !snapshot.data.canCall} onPress={() => open({ kind: 'call' })} />}
       <Text style={styles.title}>Participantes aguardando</Text>
       {snapshot.data.waiting.length === 0 && <Text style={styles.text}>Ninguém está aguardando na fila de entrada.</Text>}
       {snapshot.data.waiting.map((person, index) => <View key={person.participationId} style={styles.card}>
-        <Text style={styles.text}>{person.position}. {person.displayName}{index === 0 ? ' · Próximo' : ''}</Text>
-        {index === 0 && snapshot.data.externalQueueEnabled && <Button label={`Confirmar entrada de ${person.displayName}`}
-          disabled={disabled} onPress={() => open({ kind: 'confirm', participationId: person.participationId })} />}
+        <Text style={styles.text}>{person.position}. {person.displayName}{index === 0 && !snapshot.data.pendingCall ? ' · Próximo' : ''}</Text>
+
       </View>)}
     </>}
     {snapshot.storageError && <Text accessibilityRole="alert" style={styles.warning}>Não foi possível verificar o registro seguro da solicitação. Atualize antes de continuar.</Text>}
@@ -87,7 +95,7 @@ export default function StaffEntryControlRealScreen({ event, isEventCurrent, onB
     </>}
     {pending?.phase === 'terminal' && <View accessibilityRole="alert" style={styles.card}>
       <Text style={confirmed ? styles.success : styles.warning}>{confirmed
-        ? pending.kind === 'confirm' ? 'Entrada confirmada pelo servidor.'
+        ? pending.kind !== 'toggle' ? ({call:'Participante chamado pelo servidor.',confirm_call:'Entrada confirmada pelo servidor.',absent:'Ausência registrada pelo servidor.',remove:'Participante removido da espera externa.'}[pending.kind] ?? 'Entrada confirmada pelo servidor.')
           : `Fila ${pending.outcome.result.externalQueueEnabled ? 'reativada' : 'desativada'}. Participantes liberados: ${pending.outcome.result.releasedCount}.`
         : pending.outcome.code === 'ENTRY_NOT_FIRST' ? 'A fila mudou. Confira o primeiro participante na lista atualizada.' : 'A solicitação foi recusada pelo servidor. Confira o estado atualizado.'}</Text>
       <Button label="Entendi" disabled={snapshot.busy} onPress={() => { void store.acknowledge(pending.key); }} />
@@ -97,9 +105,9 @@ export default function StaffEntryControlRealScreen({ event, isEventCurrent, onB
     <Modal transparent animationType="fade" visible={Boolean(dialog && store.isCurrent(dialog.context) && !snapshot.busy)}
       onRequestClose={() => { dialogRef.current = null; setDialog(null); }}>
       <View style={styles.backdrop}><View style={styles.card} accessibilityViewIsModal>
-        <Text style={styles.title}>{dialog?.action.kind === 'confirm' ? 'Confirmar entrada presencial?'
+        <Text style={styles.title}>{dialog?.action.kind !== 'toggle' ? ({call:'Chamar próximo participante?',confirm_call:'Confirmar entrada presencial?',absent:'Marcar ausência externa?',remove:'Remover da fila externa?'}[dialog?.action.kind] ?? '')
           : dialog?.action.enabled ? 'Reativar fila externa?' : 'Desativar fila externa?'}</Text>
-        <Text style={styles.text}>{dialog?.action.kind === 'confirm' ? 'Confirme que o primeiro participante está entrando no evento.'
+        <Text style={styles.text}>{dialog?.action.kind !== 'toggle' ? 'Confirme a ação para a chamada externa apresentada. A remoção cancela somente a espera no evento.'
           : dialog?.action.enabled ? 'Somente novas participações aguardarão. Quem já entrou permanece ativo.'
             : `Todos os ${snapshot.data?.waitingCount ?? 0} participantes aguardando serão liberados. Isso não encerra o evento nem altera filas de experiências.`}</Text>
         <Button label="CONFIRMAR ALTERAÇÃO" onPress={() => confirm(dialog)} />

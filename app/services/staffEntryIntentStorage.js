@@ -3,12 +3,14 @@ import * as SecureStore from 'expo-secure-store';
 import { isDefinitiveEntryRejection, parseEntryResult, validEntryId } from './staffEntryService';
 
 let queue = Promise.resolve();
-const same = (a, b) => a && b && ['userId', 'sessionId', 'eventId', 'key', 'kind', 'participationId', 'enabled'].every(key => a[key] === b[key]);
+const same = (a, b) => a && b && ['userId', 'sessionId', 'eventId', 'key', 'kind', 'participationId', 'enabled', 'callId'].every(key => a[key] === b[key]);
 function valid(record, userId) {
   if (!record || record.userId !== userId || !['userId', 'sessionId', 'eventId', 'key'].every(key => validEntryId(record[key])) ||
       !['reserved', 'dispatching', 'terminal', 'acknowledged', 'cancelled'].includes(record.phase) ||
       (record.kind === 'confirm' ? !validEntryId(record.participationId) || record.enabled !== null
-        : record.kind !== 'toggle' || typeof record.enabled !== 'boolean' || record.participationId !== null)) return false;
+        : record.kind === 'toggle' ? typeof record.enabled !== 'boolean' || record.participationId !== null
+          : record.kind === 'call' ? record.callId !== null || record.participationId !== null || record.enabled !== null
+            : !['confirm_call','absent','remove'].includes(record.kind) || !validEntryId(record.callId) || !validEntryId(record.participationId) || record.enabled !== null)) return false;
   if (!['terminal', 'acknowledged'].includes(record.phase)) return record.outcome === undefined;
   if (record.outcome?.kind === 'rejected') return isDefinitiveEntryRejection(record.outcome) &&
     (record.outcome.code === null || typeof record.outcome.code === 'string');
