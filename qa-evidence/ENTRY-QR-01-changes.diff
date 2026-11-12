@@ -1,10 +1,8 @@
 diff --git a/app/app.json b/app/app.json
-index 6245f51c..e5392bc7 100644
+index 6245f51c32c2205f3e3e598f7a2b997991772f76..e5392bc7ccc83cdeb20bae1f760c8c935c4acf5a 100644
 --- a/app/app.json
 +++ b/app/app.json
-@@ -7,13 +7,19 @@
-     "icon": "./assets/icon.png",
-     "userInterfaceStyle": "light",
+@@ -9,3 +9,6 @@
      "ios": {
 -      "supportsTablet": true
 +      "supportsTablet": true,
@@ -12,9 +10,7 @@ index 6245f51c..e5392bc7 100644
 +        "NSCameraUsageDescription": "O ArenaGO precisa de acesso à câmera para ler o QR Code de acesso aos eventos."
 +      }
      },
-     "android": {
-       "adaptiveIcon": {
-         "foregroundImage": "./assets/adaptive-icon.png",
+@@ -15,3 +18,6 @@
          "backgroundColor": "#ffffff"
 -      }
 +      },
@@ -22,11 +18,7 @@ index 6245f51c..e5392bc7 100644
 +        "android.permission.CAMERA"
 +      ]
      },
-     "web": {
-       "favicon": "./assets/favicon.png"
-@@ -33,7 +39,14 @@
-       ],
-       "@react-native-community/datetimepicker",
+@@ -35,3 +41,10 @@
        "expo-secure-store",
 -      "expo-status-bar"
 +      "expo-status-bar",
@@ -38,43 +30,27 @@ index 6245f51c..e5392bc7 100644
 +        }
 +      ]
      ]
-   }
- }
 diff --git a/app/components/ui/Card.js b/app/components/ui/Card.js
-index 8cb2099a..92b18bf7 100644
+index 8cb2099aa0c2c177210937505a61328560ba1423..92b18bf79adb614c0e6ee8c230a2879c9dadd264 100644
 --- a/app/components/ui/Card.js
 +++ b/app/components/ui/Card.js
-@@ -72,6 +72,7 @@ export function Card({
-   testID,
-   accessibilityRole,
+@@ -74,2 +74,3 @@ export function Card({
    accessibilityLabel,
 +  accessibilityHint,
    accessibilityState,
- }) {
-   const isClickable = typeof onPress === 'function';
-@@ -108,6 +109,7 @@ export function Card({
-         ]}
-         accessibilityRole={accessibilityRole || 'button'}
+@@ -110,2 +111,3 @@ export function Card({
          accessibilityLabel={accessibilityLabel}
 +        accessibilityHint={accessibilityHint}
          accessibilityState={{ ...accessibilityState, disabled: isDisabled }}
-         testID={testID}
-       >
 diff --git a/app/package-lock.json b/app/package-lock.json
-index 069798ea..3aee8b90 100644
+index 069798ea095745dc7d252b064e12e561d02e3206..3aee8b90d3394d0fd7e80c67a909da7ae7e93a48 100644
 --- a/app/package-lock.json
 +++ b/app/package-lock.json
-@@ -13,6 +13,7 @@
-         "@react-navigation/native": "^7.4.1",
-         "@react-navigation/native-stack": "^7.19.2",
+@@ -15,2 +15,3 @@
          "expo": "~58.0.23",
 +        "expo-camera": "~58.0.14",
          "expo-crypto": "~58.0.7",
-         "expo-secure-store": "~58.0.2",
-         "expo-splash-screen": "~58.0.13",
-@@ -2416,6 +2417,12 @@
-       "integrity": "sha512-hhyNJ+nbR6ZR7pToHvllEFun9TL0sbL+tk/ON75lo+Xas054uez98qRbsuNt7MBCyZKK4+8Yli/OAGZhmfBZ/g==",
-       "license": "MIT"
+@@ -2418,2 +2419,8 @@
      },
 +    "node_modules/@types/emscripten": {
 +      "version": "1.41.6",
@@ -83,11 +59,7 @@ index 069798ea..3aee8b90 100644
 +      "license": "MIT"
 +    },
      "node_modules/@types/istanbul-lib-coverage": {
-       "version": "2.0.6",
-       "resolved": "https://registry.npmjs.org/@types/istanbul-lib-coverage/-/istanbul-lib-coverage-2.0.6.tgz",
-@@ -2774,6 +2781,15 @@
-         "node": "18 || 20 || >=22"
-       }
+@@ -2776,2 +2783,11 @@
      },
 +    "node_modules/barcode-detector": {
 +      "version": "3.2.3",
@@ -99,11 +71,7 @@ index 069798ea..3aee8b90 100644
 +      }
 +    },
      "node_modules/base64-js": {
-       "version": "1.5.1",
-       "resolved": "https://registry.npmjs.org/base64-js/-/base64-js-1.5.1.tgz",
-@@ -3454,6 +3470,26 @@
-         "react-native": "*"
-       }
+@@ -3456,2 +3472,22 @@
      },
 +    "node_modules/expo-camera": {
 +      "version": "58.0.14",
@@ -126,11 +94,7 @@ index 069798ea..3aee8b90 100644
 +      }
 +    },
      "node_modules/expo-constants": {
-       "version": "58.0.15",
-       "resolved": "https://registry.npmjs.org/expo-constants/-/expo-constants-58.0.15.tgz",
-@@ -6495,6 +6531,18 @@
-         "url": "https://github.com/sponsors/ljharb"
-       }
+@@ -6497,2 +6533,14 @@
      },
 +    "node_modules/tagged-tag": {
 +      "version": "1.0.0",
@@ -145,11 +109,7 @@ index 069798ea..3aee8b90 100644
 +      }
 +    },
      "node_modules/terminal-link": {
-       "version": "2.1.1",
-       "resolved": "https://registry.npmjs.org/terminal-link/-/terminal-link-2.1.1.tgz",
-@@ -6985,6 +7033,34 @@
-       "engines": {
-         "node": ">=12"
+@@ -6987,2 +7035,30 @@
        }
 +    },
 +    "node_modules/zxing-wasm": {
@@ -180,25 +140,19 @@ index 069798ea..3aee8b90 100644
 +        "url": "https://github.com/sponsors/sindresorhus"
 +      }
      }
-   }
- }
 diff --git a/app/package.json b/app/package.json
-index 1a5c3afa..08f50aaf 100644
+index 1a5c3afa65f539464279b27bf802c1e14a727efe..08f50aaf04aacb6d6b1bb82c4cdac731a4dfc698 100644
 --- a/app/package.json
 +++ b/app/package.json
-@@ -15,6 +15,7 @@
-     "@react-navigation/native": "^7.4.1",
-     "@react-navigation/native-stack": "^7.19.2",
+@@ -17,2 +17,3 @@
      "expo": "~58.0.23",
 +    "expo-camera": "~58.0.14",
      "expo-crypto": "~58.0.7",
-     "expo-secure-store": "~58.0.2",
-     "expo-splash-screen": "~58.0.13",
 diff --git a/app/screens/event-entry/EventEntryScreen.js b/app/screens/event-entry/EventEntryScreen.js
-index 58546500..142b6634 100644
+index 58546500a18bf1c0af99a262fc7ff612fd9b5433..73b18ed39e4ae3df469fc0d9a82248b03ba1ec34 100644
 --- a/app/screens/event-entry/EventEntryScreen.js
 +++ b/app/screens/event-entry/EventEntryScreen.js
-@@ -1,24 +1,101 @@
+@@ -1,5 +1,7 @@
  import { StatusBar } from 'expo-status-bar';
 -import { useContext, useState } from 'react';
 +import { useContext, useEffect, useRef, useState } from 'react';
@@ -207,19 +161,16 @@ index 58546500..142b6634 100644
    KeyboardAvoidingView,
 +  Linking,
    Platform,
-   ScrollView,
-   StyleSheet,
-   Text,
-   View,
+@@ -10,2 +12,4 @@ import {
  } from 'react-native';
 +import { CameraView, useCameraPermissions } from 'expo-camera';
 +import { useIsFocused } from '@react-navigation/native';
- 
- import { AuthBackground, Badge, Button, Card, InputField, ScreenHeader } from '../../components/ui';
+
+@@ -13,12 +17,89 @@ import { AuthBackground, Badge, Button, Card, InputField, ScreenHeader } from '.
  import { ParticipationContext } from '../../context/ParticipationContext';
 -import { colors, spacing, typography } from '../../theme';
 +import { colors, radii, spacing, typography } from '../../theme';
- 
+
 -export default function EventEntryScreen({ navigation }) {
 +/**
 + * Valida e normaliza o conteúdo textual lido de um QR Code de evento.
@@ -237,11 +188,11 @@ index 58546500..142b6634 100644
 +  if (/^(?:https?|ftp|javascript|data|file):/i.test(trimmed) || /[\r\n\t]/.test(trimmed)) {
 +    return { ok: false, error: 'O QR Code escaneado não é um código de evento válido.' };
 +  }
-+  if (trimmed.length > 64) {
-+    return { ok: false, error: 'Código de evento excessivamente longo.' };
++  if (trimmed.length < 4 || trimmed.length > 64) {
++    return { ok: false, error: 'O código do evento deve ter de 4 a 64 caracteres.' };
 +  }
-+  // Permite grupos ASCII alfanuméricos com hífens ou underscores
-+  if (!/^[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*$/.test(trimmed)) {
++  // Segue o contrato de grupos ASCII alfanuméricos separados por hífens.
++  if (!/^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$/.test(trimmed)) {
 +    return { ok: false, error: 'O QR Code deve conter apenas caracteres alfanuméricos e hífens.' };
 +  }
 +  return { ok: true, code: trimmed };
@@ -265,6 +216,7 @@ index 58546500..142b6634 100644
 +
 +  // Controle de concorrência e ciclo de vida
 +  const isScanningRef = useRef(false);
++  const isManualLookupRef = useRef(false);
 +  const scanSequenceRef = useRef(0);
 +  const isMountedRef = useRef(true);
 +
@@ -272,13 +224,14 @@ index 58546500..142b6634 100644
 +  const isFocused = useIsFocused();
 +
    const loading = admission?.status === 'looking_up';
- 
+
 +  useEffect(() => {
 +    isMountedRef.current = true;
 +    return () => {
 +      isMountedRef.current = false;
 +      scanSequenceRef.current += 1;
 +      isScanningRef.current = false;
++      isManualLookupRef.current = false;
 +    };
 +  }, []);
 +
@@ -286,6 +239,7 @@ index 58546500..142b6634 100644
 +    if (!isFocused) {
 +      scanSequenceRef.current += 1;
 +      isScanningRef.current = false;
++      isManualLookupRef.current = false;
 +      setScanned(false);
 +    }
 +  }, [isFocused]);
@@ -293,6 +247,7 @@ index 58546500..142b6634 100644
 +  function switchMode(newMode) {
 +    scanSequenceRef.current += 1;
 +    isScanningRef.current = false;
++    isManualLookupRef.current = false;
 +    setScanned(false);
 +    setScanError(null);
 +    setLocalError(null);
@@ -301,12 +256,27 @@ index 58546500..142b6634 100644
 +  }
 +
    async function handleContinue() {
-     if (loading) return;
+-    if (loading) return;
++    if (loading || isManualLookupRef.current) return;
      const code = eventCode.trim();
-@@ -33,55 +110,381 @@ export default function EventEntryScreen({ navigation }) {
-     }
-   }
- 
+@@ -29,8 +110,316 @@ export default function EventEntryScreen({ navigation }) {
+     setLocalError(null);
+-    const result = await lookupEvent(code);
+-    if (result?.kind === 'found' && isCurrentAdmission()) {
+-      navigation.navigate('EventConfirmation', { event: result.event, eligibility: result.eligibility });
++    const currentSequence = ++scanSequenceRef.current;
++    isManualLookupRef.current = true;
++    try {
++      const result = await lookupEvent(code);
++      if (isMountedRef.current && currentSequence === scanSequenceRef.current &&
++          result?.kind === 'found' && isCurrentAdmission()) {
++        navigation.navigate('EventConfirmation', { event: result.event, eligibility: result.eligibility });
++      }
++    } finally {
++      if (currentSequence === scanSequenceRef.current) isManualLookupRef.current = false;
++    }
++  }
++
 +  async function handleBarcodeScanned({ data } = {}) {
 +    if (isScanningRef.current || scanned) return;
 +    isScanningRef.current = true;
@@ -321,7 +291,7 @@ index 58546500..142b6634 100644
 +      }
 +      isScanningRef.current = false;
 +      return;
-+    }
+     }
 +
 +    setScanError(null);
 +    try {
@@ -345,8 +315,8 @@ index 58546500..142b6634 100644
 +    } catch {
 +      if (isMountedRef.current && currentSequence === scanSequenceRef.current) {
 +        setScanError('Erro ao consultar o evento. Verifique sua conexão e tente novamente.');
++        isScanningRef.current = false;
 +      }
-+      isScanningRef.current = false;
 +    }
 +  }
 +
@@ -354,8 +324,8 @@ index 58546500..142b6634 100644
 +    setScanError(null);
 +    setScanned(false);
 +    isScanningRef.current = false;
-+  }
-+
+   }
+
 +  // --- Renderização por Modo ---
 +
 +  // Modo A: Leitor de QR Code
@@ -452,7 +422,7 @@ index 58546500..142b6634 100644
 +          ) : isFocused ? (
 +            <View style={styles.cameraContainer}>
 +              <CameraView
-+                style={StyleSheet.absoluteFillObject}
++                style={StyleSheet.absoluteFill}
 +                facing="back"
 +                barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
 +                onBarcodeScanned={scanned || isScanningRef.current ? undefined : handleBarcodeScanned}
@@ -461,7 +431,7 @@ index 58546500..142b6634 100644
 +              />
 +
 +              {/* Sobreposição visual de enquadramento */}
-+              <View style={styles.overlay} pointerEvents="box-none">
++              <View style={styles.overlay} pointerEvents="box-none" testID="event-entry-scanner-overlay">
 +                <View style={styles.overlayTop}>
 +                  <Text style={styles.scannerInstruction}>
 +                    Aponte a câmera para o QR Code do evento
@@ -609,7 +579,7 @@ index 58546500..142b6634 100644
 +
 +  // Modo Seleção Inicial: Apresenta as duas opções
    return (
-     <AuthBackground variant="login" overlayOpacity={0.65} testID="event-entry-background">
+@@ -38,48 +427,73 @@ export default function EventEntryScreen({ navigation }) {
        <StatusBar style="light" />
 -      <ScreenHeader title="Entrar em um evento" onBack={() => navigation.goBack()} testID="event-entry-header" />
 -      <KeyboardAvoidingView
@@ -726,11 +696,7 @@ index 58546500..142b6634 100644
 +        </View>
 +      </ScrollView>
      </AuthBackground>
-   );
- }
-@@ -109,6 +512,54 @@ const styles = StyleSheet.create({
-     color: colors.text.secondary,
-     marginTop: spacing.sm,
+@@ -111,2 +525,50 @@ const styles = StyleSheet.create({
    },
 +  methodsContainer: {
 +    gap: spacing.lg,
@@ -781,11 +747,7 @@ index 58546500..142b6634 100644
 +    color: colors.text.primary,
 +  },
    formCard: {
-     alignItems: 'stretch',
-   },
-@@ -123,4 +574,168 @@ const styles = StyleSheet.create({
-   continueButton: {
-     marginTop: spacing.xl,
+@@ -125,2 +587,166 @@ const styles = StyleSheet.create({
    },
 +  switchButton: {
 +    marginTop: spacing.md,
@@ -837,7 +799,7 @@ index 58546500..142b6634 100644
 +    marginTop: spacing.md,
 +  },
 +  overlay: {
-+    ...StyleSheet.absoluteFillObject,
++    ...StyleSheet.absoluteFill,
 +    flexDirection: 'column',
 +  },
 +  overlayTop: {
@@ -953,26 +915,20 @@ index 58546500..142b6634 100644
 +  },
  });
 diff --git a/app/screens/home/HomeScreen.js b/app/screens/home/HomeScreen.js
-index 31dc2793..8aaf26ef 100644
+index 31dc2793a30b8f1a75c7148947bd57e0a8c64ae6..8aaf26ef433563b9077181ee335125fba898ef3c 100644
 --- a/app/screens/home/HomeScreen.js
 +++ b/app/screens/home/HomeScreen.js
-@@ -104,7 +104,7 @@ export default function HomeScreen({ navigation, returnState, mode = 'ready', me
-             <Badge label="ACESSO À ARENA" variant="brand" />
-             <Text style={styles.heroTitle}>Pronto para jogar?</Text>
+@@ -106,3 +106,3 @@ export default function HomeScreen({ navigation, returnState, mode = 'ready', me
              <Text style={styles.heroDescription}>
 -              Informe o código disponibilizado na estação do evento para iniciar sua participação.
 +              Escaneie o QR Code ou digite o código de acesso disponibilizado pela equipe do evento para iniciar sua participação.
              </Text>
-             <Button
-               title="Entrar em um evento"
 diff --git a/app/tests/eventEntry.test.cjs b/app/tests/eventEntry.test.cjs
-index 066c43a2..231dc1a1 100644
+index 066c43a25226350158186e51c57471a0573e0e86..4ea440488eadc39de8f7f67edf4f271a55efa4f4 100644
 --- a/app/tests/eventEntry.test.cjs
 +++ b/app/tests/eventEntry.test.cjs
-@@ -11,10 +11,34 @@ const event = {
- };
- const eligible = { eligible: true, blockingReasons: [] };
- 
+@@ -13,6 +13,30 @@ const eligible = { eligible: true, blockingReasons: [] };
+
 -function screenRig(path, context, params = {}) {
 -  const state = [], calls = [];
 -  const ui = createParticipantUiStubs();
@@ -1005,11 +961,7 @@ index 066c43a2..231dc1a1 100644
 +  let settingsOpened = 0;
 +
    const react = {
-     useContext: () => context,
-     useRef(initial) { const index = cursor++; return state[index] ||= { current: initial }; },
-@@ -23,22 +47,41 @@ function screenRig(path, context, params = {}) {
-       if (!(index in state)) state[index] = initial;
-       return [state[index], (value) => { state[index] = typeof value === 'function' ? value(state[index]) : value; }];
+@@ -25,3 +49,8 @@ function screenRig(path, context, params = {}) {
      },
 +    useEffect(effect) {
 +      const cleanup = effect?.();
@@ -1018,13 +970,10 @@ index 066c43a2..231dc1a1 100644
    };
 +
    const module = loadModule(path, (name) => {
-     if (name === 'react') return react;
-     if (name === 'react-native') return {
-       ActivityIndicator: 'ActivityIndicator', KeyboardAvoidingView: 'KeyboardAvoidingView',
-       Platform: { OS: 'android' }, Pressable: 'Pressable', ScrollView: 'ScrollView',
+@@ -32,5 +61,18 @@ function screenRig(path, context, params = {}) {
        Text: 'Text', TextInput: 'TextInput', View: 'View',
 -      StyleSheet: { create: (styles) => styles },
-+      StyleSheet: { create: (styles) => styles, absoluteFillObject: {} },
++      StyleSheet: { create: (styles) => styles, absoluteFill: { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0 } },
 +      Linking: {
 +        openSettings: async () => { settingsOpened++; return true; },
 +      },
@@ -1041,22 +990,15 @@ index 066c43a2..231dc1a1 100644
 +      useIsFocused: () => (options.isFocused !== undefined ? options.isFocused : true),
 +    };
      if (name === '../../components/ui') return ui;
-     if (name === '../../theme') return createParticipantThemeStub();
-     if (name === '../../components/ScreenContainer') return { __esModule: true, default: 'ScreenContainer' };
-     if (name === '../../context/ParticipationContext') return { ParticipationContext: {} };
-     return require(name);
+@@ -41,2 +83,3 @@ function screenRig(path, context, params = {}) {
    }).exports;
 +
    function render() {
-     cursor = 0;
-     tree = module.default({
-@@ -46,23 +89,91 @@ function screenRig(path, context, params = {}) {
-       navigation: {
-         navigate: (name, value) => calls.push({ name, value }),
+@@ -48,2 +91,3 @@ function screenRig(path, context, params = {}) {
          reset: (value) => calls.push({ reset: value }),
 +        goBack: () => calls.push({ back: true }),
        },
-     });
+@@ -51,13 +95,76 @@ function screenRig(path, context, params = {}) {
    }
 +
    function button(label) {
@@ -1138,18 +1080,14 @@ index 066c43a2..231dc1a1 100644
 +    getSettingsOpenedCount: () => settingsOpened,
 +    exports: module,
    };
- }
- 
+@@ -65,2 +172,6 @@ function screenRig(path, context, params = {}) {
+
 +// -------------------------------------------------------------
 +// Testes preexistentes do fluxo manual e confirmação
 +// -------------------------------------------------------------
 +
  test('consulta real envia o código sem mudar sua caixa e navega somente após resposta válida', async () => {
-   const requests = [];
-   const context = {
-@@ -169,3 +280,444 @@ test('erro HTTP na confirmação preserva a tela e informa o problema', async ()
-   rig.render();
-   assert.match(rig.text(), /Evento encerrado/);
+@@ -171 +282,494 @@ test('erro HTTP na confirmação preserva a tela e informa o problema', async ()
  });
 +
 +// -------------------------------------------------------------
@@ -1304,6 +1242,9 @@ index 066c43a2..231dc1a1 100644
 +  assert.match(rig.text(), /Aponte a câmera para o QR Code do evento/);
 +  assert.ok(rig.camera(), 'CameraView deve estar montada');
 +  assert.equal(rig.camera().props.facing, 'back', 'Deve utilizar a câmera traseira');
++  assert.deepEqual(structuredClone(rig.camera().props.style), { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0 });
++  assert.equal(rig.card('event-entry-scanner-overlay').props.style.position, 'absolute');
++  assert.equal(rig.card('event-entry-scanner-overlay').props.style.bottom, 0);
 +  assert.deepEqual(structuredClone(rig.camera().props.barcodeScannerSettings), { barcodeTypes: ['qr'] });
 +  assert.ok(rig.reticle(), 'Retículo de enquadramento deve estar presente');
 +  assert.ok(rig.button('Digitar código manualmente'));
@@ -1352,7 +1293,13 @@ index 066c43a2..231dc1a1 100644
 +  // Códigos válidos
 +  assert.deepEqual(structuredClone(validateAndNormalizeQrCode('ARENA123')), { ok: true, code: 'ARENA123' });
 +  assert.deepEqual(structuredClone(validateAndNormalizeQrCode('  AbC-42  ')), { ok: true, code: 'AbC-42' });
-+  assert.deepEqual(structuredClone(validateAndNormalizeQrCode('EVENT_2026-SP')), { ok: true, code: 'EVENT_2026-SP' });
++  assert.equal(validateAndNormalizeQrCode('EVENT_2026-SP').ok, false);
++  assert.equal(validateAndNormalizeQrCode('ABC').ok, false);
++  assert.equal(validateAndNormalizeQrCode('ABCD').ok, true);
++  assert.equal(validateAndNormalizeQrCode('A'.repeat(64)).ok, true);
++  for (const code of ['-ABCD', 'ABCD-', 'AB--CD', 'AB_1', 'ÁBCD']) {
++    assert.equal(validateAndNormalizeQrCode(code).ok, false);
++  }
 +
 +  // Rejeição de vazios
 +  assert.equal(validateAndNormalizeQrCode('').ok, false);
@@ -1563,6 +1510,49 @@ index 066c43a2..231dc1a1 100644
 +  assert.deepEqual(rig.calls, []);
 +});
 +
++test('ENTRY-QR-01: consulta manual pendente não navega após perda de foco nem duplica submissões', async () => {
++  let resolve, count = 0;
++  const context = {
++    admission: { status: 'idle' }, isCurrentAdmission: () => true,
++    lookupEvent: () => { count++; return new Promise((done) => { resolve = done; }); },
++  };
++  const rig = screenRig('screens/event-entry/EventEntryScreen.js', context, { initialMethod: 'manual' });
++  rig.input('ARENA123');
++  const pending = rig.button('Continuar').props.onPress();
++  await rig.button('Continuar').props.onPress();
++  assert.equal(count, 1);
++  rig.setFocused(false);
++  resolve({ kind: 'found', event, eligibility: eligible });
++  await pending;
++  assert.deepEqual(rig.calls, []);
++});
++
++test('ENTRY-QR-01: rejeição de leitura antiga não libera consulta QR mais recente', async () => {
++  let rejectOld, resolveNew, count = 0;
++  const context = {
++    admission: { status: 'idle' }, isCurrentAdmission: () => true,
++    lookupEvent: () => {
++      count++;
++      return count === 1 ? new Promise((_, reject) => { rejectOld = reject; }) :
++        new Promise((resolve) => { resolveNew = resolve; });
++    },
++  };
++  const rig = screenRig('screens/event-entry/EventEntryScreen.js', context, { initialMethod: 'qr' });
++  const oldScan = rig.simulateScan('CODE-OLD');
++  await rig.button('Digitar código manualmente').props.onPress();
++  rig.render();
++  await rig.button('Ler QR Code').props.onPress();
++  rig.render();
++  const newScan = rig.simulateScan('CODE-NEW');
++  rejectOld(new Error('falha tardia'));
++  await oldScan;
++  await rig.simulateScan('CODE-EXTRA');
++  assert.equal(count, 2);
++  resolveNew({ kind: 'found', event, eligibility: eligible });
++  await newScan;
++  assert.equal(rig.calls.length, 1);
++});
++
 +test('ENTRY-QR-01: HomeScreen exibe texto atualizado com menção a QR Code e digitação manual', () => {
 +  const calls = [];
 +  const navigation = { navigate: (name) => calls.push(name) };
@@ -1593,45 +1583,36 @@ index 066c43a2..231dc1a1 100644
 +  assert.deepEqual(calls, ['EventEntry']);
 +});
 diff --git a/app/tests/helpers/questionnaireHarness.cjs b/app/tests/helpers/questionnaireHarness.cjs
-index c49c4097..07012540 100644
+index c49c40978c8f4fe159bb8d24f021259e07aa98b6..0701254017194ab2d251e063667c93ee558be5e9 100644
 --- a/app/tests/helpers/questionnaireHarness.cjs
 +++ b/app/tests/helpers/questionnaireHarness.cjs
-@@ -89,11 +89,12 @@ function createParticipantUiStubs() {
-         children: text(title || children),
-       },
+@@ -91,3 +91,3 @@ function createParticipantUiStubs() {
      }),
 -    Card: ({ children, onPress, disabled, accessibilityLabel, ...props }) => view(children, {
 +    Card: ({ children, onPress, disabled, accessibilityLabel, accessibilityHint, ...props }) => view(children, {
        ...props,
-       onPress,
-       disabled,
+@@ -96,2 +96,3 @@ function createParticipantUiStubs() {
        accessibilityLabel,
 +      accessibilityHint,
      }),
-     InputField: ({ label, error, value, onChangeText, ...props }) => view([
-       label ? text(label) : null,
 diff --git a/app/tests/uiComponents.test.cjs b/app/tests/uiComponents.test.cjs
-index 6dbdeabd..d3fba80d 100644
+index 6dbdeabd712cc065197a61742c4ab591d923036e..d3fba80df4d2e05f386e8d80ac8735df7a93c6ca 100644
 --- a/app/tests/uiComponents.test.cjs
 +++ b/app/tests/uiComponents.test.cjs
-@@ -483,9 +483,11 @@ test('C07: Button and clickable Card protect minimum 48x48dp style dimensions ag
-       onPress: () => {},
-       style: shrinkingOverride,
+@@ -485,2 +485,3 @@ test('C07: Button and clickable Card protect minimum 48x48dp style dimensions ag
        accessibilityLabel: 'Card customizado',
 +      accessibilityHint: 'Toque para abrir opções',
      },
-   });
+@@ -488,2 +489,3 @@ test('C07: Button and clickable Card protect minimum 48x48dp style dimensions ag
    const cardPressable = hCard.nodes.find((n) => n.type === 'Pressable');
 +  assert.equal(cardPressable.props.accessibilityHint, 'Toque para abrir opções');
    const cardStyle = flattenStyle(cardPressable.props.style({ pressed: false }));
-   assert.ok(cardStyle.minWidth >= 48, 'Clickable Card protects minWidth >= 48');
-   assert.ok(cardStyle.minHeight >= 48, 'Clickable Card protects minHeight >= 48');
 diff --git a/docs/ENTRY_QR_01_IMPLEMENTACAO.md b/docs/ENTRY_QR_01_IMPLEMENTACAO.md
 new file mode 100644
-index 00000000..9bf1c16f
+index 0000000000000000000000000000000000000000..c3ffe26e41ca3f5456e695f449635f0c4f21df3d
 --- /dev/null
 +++ b/docs/ENTRY_QR_01_IMPLEMENTACAO.md
-@@ -0,0 +1,173 @@
+@@ -0,0 +1,183 @@
 +# ArenaGO — ENTRY-QR-01: Entrada em eventos por QR Code ou código manual
 +
 +**Responsável:** Kaled
@@ -1639,7 +1620,7 @@ index 00000000..9bf1c16f
 +**Branch:** `feature/event-entry-qr-code`
 +**Origem (HEAD base):** `1df82e17bc9e7cc24c84f1721031050c6cc442b9` (`develop`)
 +**Commits de referência:** `e4a6691e`, `f9a29a90`
-+**Status:** Implementado, ajustado para acessibilidade e pronto para validação
++**Status:** Em revisão de homologação; validações pendentes
 +
 +---
 +
@@ -1739,9 +1720,17 @@ index 00000000..9bf1c16f
 +1. Rejeita payloads vazios ou constituídos apenas por espaços.
 +2. Rejeita esquemas de URL (`http://`, `https://`, `ftp:`, `javascript:`, `data:`, `file:`) para evitar phishing ou redirecionamentos maliciosos.
 +3. Rejeita caracteres de quebra de linha (`\r`, `\n`, `\t`) para evitar injeções em logs ou formulários.
-+4. Limita o comprimento a 64 caracteres.
-+5. Valida o alfabeto alfanumérico com hífens e underscores (`/^[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*$/`).
-+6. Trata e normaliza o código sem alterar sua caixa externa antes de enviar para a consulta unificada.
++4. Exige de 4 a 64 caracteres após remover espaços externos.
++5. Aceita apenas grupos ASCII alfanuméricos separados por um hífen (`/^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$/`); underscores são rejeitados.
++6. Envia o código sem alterar sua caixa à consulta unificada; o backend normaliza a caixa na consulta.
++
++### Revisão de homologação
++
++- A câmera e a sobreposição usam `StyleSheet.absoluteFill`, exportado pela versão instalada do React Native 0.88.1. O mock e as verificações de posicionamento foram atualizados.
++- A validação QR segue o contrato C-10 de comprimento e caracteres. Os testes preparados incluem limites, underscores, separadores e caracteres não ASCII.
++- A consulta manual passou a bloquear submissões simultâneas e a descartar navegação após perda de foco, troca de modo ou desmontagem. Uma falha tardia de leitura QR não libera o bloqueio de uma consulta posterior.
++- A inspeção estática confirmou alternativas para permissão negada, desligamento da câmera sem foco e navegação para confirmação explícita antes de criar participação. A consulta usa o `ParticipationContext` e o serviço existentes; o estado compartilhado da consulta pode ser atualizado após a saída da tela, embora a navegação tardia seja descartada.
++- O comportamento nativo da câmera, permissões, layout em telas pequenas e tamanhos de fonte ampliados, acessibilidade e retorno das configurações ainda requerem homologação em aparelho. As alterações e testes preparados nesta revisão não foram executados.
 +
 +### 3.5. Proteção contra Leituras Duplicadas
 +- `isScanningRef` e `scanned` garantem que múltiplos frames da câmera contendo o mesmo QR Code não disparem múltiplas consultas `lookupEvent()`.
@@ -1757,7 +1746,7 @@ index 00000000..9bf1c16f
 +
 +## 4. Instruções de Validação Automatizada (Luna Medium)
 +
-+Conforme a política permanente do `AGENTS.md`, as validações preparadas devem ser executadas com o executor padrão Luna Medium:
++Após seleção manual confirmada de Luna Medium pelo responsável, inspecionar previamente os scripts e comandos, confirmar branch e diretório, preservar alterações e usar ambiente isolado. Conforme a política do `AGENTS.md`, executar:
 +
 +```bash
 +cd app
@@ -1775,7 +1764,9 @@ index 00000000..9bf1c16f
 +2. `uiComponents.test.cjs`:
 +   - Encaminhamento de `accessibilityHint` no Pressable interativo do `Card`.
 +3. `npm test`:
-+   - Regressão completa de todas as 414+ asserções do aplicativo.
++   - Regressão completa do aplicativo; registrar contagens e códigos de saída reais.
++
++Nesta revisão: nenhuma validação automatizada foi executada pelo Codex ou relatada pelo responsável; houve apenas inspeção estática. Testes, lint, typecheck e build permanecem pendentes. Nenhuma homologação ou prontidão para merge é declarada.
 +
 +---
 +
