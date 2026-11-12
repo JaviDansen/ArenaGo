@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
+import { AuthBackground } from '../../components/ui/AuthBackground';
 
 import { useAuth } from '../../context/AuthContext';
 import { createStaffEventsStore } from '../../services/staffEventsService';
@@ -80,7 +80,7 @@ function StaffEventsScreen({ navigation }) {
     unavailable: 'Não foi possível carregar os eventos autorizados. Tente novamente.',
   };
   return (
-    <SafeAreaView style={styles.container}>
+    <AuthBackground testID="staff-events-background" variant="login">
       <ScrollView contentContainerStyle={styles.content}>
         <Text style={styles.title}>Eventos Staff</Text>
         <Text style={styles.description}>Selecione um evento autorizado para sua conta.</Text>
@@ -102,7 +102,7 @@ function StaffEventsScreen({ navigation }) {
         <Button label="Atualizar eventos" disabled={staff.status === 'loading'} onPress={() => { void staff.refresh(); }} />
         <Button label="Sair da conta" onPress={() => { if (staff.isCurrent()) void auth.logout(); }} />
       </ScrollView>
-    </SafeAreaView>
+    </AuthBackground>
   );
 }
 
@@ -119,7 +119,7 @@ function StaffEventHomeScreen({ navigation }) {
   }), [navigation, staff.clearSelection, staff.getSelected, section]);
   const selected = staff.isCurrent() ? staff.selected : null;
   return (
-    <SafeAreaView style={styles.container}>
+    <AuthBackground testID="staff-event-home-background" variant="login">
       <ScrollView contentContainerStyle={styles.content}>
         {selected ? <>
           <Text style={styles.title}>{selected.name}</Text>
@@ -136,7 +136,7 @@ function StaffEventHomeScreen({ navigation }) {
           else navigation.navigate('StaffEvents');
         }} />}
       </ScrollView>
-    </SafeAreaView>
+    </AuthBackground>
   );
 }
 
@@ -247,7 +247,7 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
 export default function StaffEventsNavigator() {
   return (
     <StaffEventsProvider>
-      <Stack.Navigator screenOptions={{ headerShown: false }}>
+      <Stack.Navigator screenOptions={{ headerShown: false, contentStyle: styles.stackContent }}>
         <Stack.Screen name="StaffEvents" component={StaffEventsScreen} />
         <Stack.Screen name="StaffEventHome" component={StaffEventHomeScreen} />
       </Stack.Navigator>
@@ -256,7 +256,7 @@ export default function StaffEventsNavigator() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0c0a17' },
+  stackContent: { backgroundColor: '#0c0a17' },
   content: { flexGrow: 1, padding: 24, gap: 14 },
   title: { color: '#ffffff', fontSize: 22, fontWeight: '800' },
   description: { color: '#cbd5e1', fontSize: 15, lineHeight: 22 },

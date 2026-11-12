@@ -1,0 +1,157 @@
+diff --git a/app/screens/staff/StaffEventsNavigator.js b/app/screens/staff/StaffEventsNavigator.js
+index 97cd2c8..cba8b7e 100644
+--- a/app/screens/staff/StaffEventsNavigator.js
++++ b/app/screens/staff/StaffEventsNavigator.js
+@@ -1,7 +1,7 @@
+ import { createContext, useContext, useEffect, useRef, useState } from 'react';
+ import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+-import { SafeAreaView } from 'react-native-safe-area-context';
+ import { createNativeStackNavigator } from '@react-navigation/native-stack';
++import { AuthBackground } from '../../components/ui/AuthBackground';
+ 
+ import { useAuth } from '../../context/AuthContext';
+ import { createStaffEventsStore } from '../../services/staffEventsService';
+@@ -80,7 +80,7 @@ function StaffEventsScreen({ navigation }) {
+     unavailable: 'Não foi possível carregar os eventos autorizados. Tente novamente.',
+   };
+   return (
+-    <SafeAreaView style={styles.container}>
++    <AuthBackground testID="staff-events-background" variant="login">
+       <ScrollView contentContainerStyle={styles.content}>
+         <Text style={styles.title}>Eventos Staff</Text>
+         <Text style={styles.description}>Selecione um evento autorizado para sua conta.</Text>
+@@ -102,7 +102,7 @@ function StaffEventsScreen({ navigation }) {
+         <Button label="Atualizar eventos" disabled={staff.status === 'loading'} onPress={() => { void staff.refresh(); }} />
+         <Button label="Sair da conta" onPress={() => { if (staff.isCurrent()) void auth.logout(); }} />
+       </ScrollView>
+-    </SafeAreaView>
++    </AuthBackground>
+   );
+ }
+ 
+@@ -119,7 +119,7 @@ function StaffEventHomeScreen({ navigation }) {
+   }), [navigation, staff.clearSelection, staff.getSelected, section]);
+   const selected = staff.isCurrent() ? staff.selected : null;
+   return (
+-    <SafeAreaView style={styles.container}>
++    <AuthBackground testID="staff-event-home-background" variant="login">
+       <ScrollView contentContainerStyle={styles.content}>
+         {selected ? <>
+           <Text style={styles.title}>{selected.name}</Text>
+@@ -136,7 +136,7 @@ function StaffEventHomeScreen({ navigation }) {
+           else navigation.navigate('StaffEvents');
+         }} />}
+       </ScrollView>
+-    </SafeAreaView>
++    </AuthBackground>
+   );
+ }
+ 
+@@ -247,7 +247,7 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
+ export default function StaffEventsNavigator() {
+   return (
+     <StaffEventsProvider>
+-      <Stack.Navigator screenOptions={{ headerShown: false }}>
++      <Stack.Navigator screenOptions={{ headerShown: false, contentStyle: styles.stackContent }}>
+         <Stack.Screen name="StaffEvents" component={StaffEventsScreen} />
+         <Stack.Screen name="StaffEventHome" component={StaffEventHomeScreen} />
+       </Stack.Navigator>
+@@ -256,7 +256,7 @@ export default function StaffEventsNavigator() {
+ }
+ 
+ const styles = StyleSheet.create({
+-  container: { flex: 1, backgroundColor: '#0c0a17' },
++  stackContent: { backgroundColor: '#0c0a17' },
+   content: { flexGrow: 1, padding: 24, gap: 14 },
+   title: { color: '#ffffff', fontSize: 22, fontWeight: '800' },
+   description: { color: '#cbd5e1', fontSize: 15, lineHeight: 22 },
+diff --git a/app/tests/roleRoutingIntegration.test.cjs b/app/tests/roleRoutingIntegration.test.cjs
+index 0651d06..1899368 100644
+--- a/app/tests/roleRoutingIntegration.test.cjs
++++ b/app/tests/roleRoutingIntegration.test.cjs
+@@ -106,6 +106,9 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+       if (name === '@react-navigation/native') return { NavigationContainer: ({ children }) =>
+         React.createElement(Navigation.BaseNavigationContainer, { ref: navRef, onUnhandledAction: (action) => unhandled.push(action) }, children) };
+       const target = path.posix.normalize(path.posix.join(directory, name));
++      if (target === 'components/ui/AuthBackground') {
++        return { AuthBackground: ({ children, ...props }) => React.createElement('View', props, children) };
++      }
+       if (target === 'theme') return createParticipantThemeStub();
+       if (target === 'services/httpClient') return { ...http, httpClient: client };
+       if (target === 'services/tokenStorage') return { defaultTokenStorage: storage };
+diff --git a/app/tests/staffBackground.test.cjs b/app/tests/staffBackground.test.cjs
+new file mode 100644
+index 0000000..ea985bd
+--- /dev/null
++++ b/app/tests/staffBackground.test.cjs
+@@ -0,0 +1,26 @@
++const assert = require('node:assert/strict');
++const fs = require('node:fs');
++const path = require('node:path');
++const test = require('node:test');
++
++const navigatorPath = path.join(__dirname, '../screens/staff/StaffEventsNavigator.js');
++const navigatorSource = fs.readFileSync(navigatorPath, 'utf8');
++
++test('each native Staff route renders the shared background inside its screen', () => {
++  assert.match(navigatorSource, /import \{ AuthBackground \} from '\.\.\/\.\.\/components\/ui\/AuthBackground';/);
++  const eventsScreen = navigatorSource.split('function StaffEventsScreen(')[1].split('function StaffEventHomeScreen(')[0];
++  const homeScreen = navigatorSource.split('function StaffEventHomeScreen(')[1].split('function StaffEventDashboard(')[0];
++  for (const [screen, source, testID] of [
++    ['StaffEventsScreen', eventsScreen, 'staff-events-background'],
++    ['StaffEventHomeScreen', homeScreen, 'staff-event-home-background'],
++  ]) {
++    assert.match(source, new RegExp(`<AuthBackground testID="${testID}" variant="login">`), screen);
++    assert.match(source, /<ScrollView contentContainerStyle=\{styles\.content\}>/, screen);
++    assert.match(source, /<\/AuthBackground>/, screen);
++    assert.doesNotMatch(source, /<SafeAreaView|backgroundColor:\s*['"](?:white|#fff(?:fff)?)['"]/, screen);
++  }
++  assert.match(navigatorSource, /<Stack\.Navigator screenOptions=\{\{ headerShown: false, contentStyle: styles\.stackContent \}\}>/);
++  assert.match(navigatorSource, /stackContent:\s*\{\s*backgroundColor:\s*'#0c0a17'/);
++  const navigator = navigatorSource.split('export default function StaffEventsNavigator()')[1];
++  assert.doesNotMatch(navigator, /<AuthBackground/);
++});
+diff --git a/docs/STAFF_A3_IMPLEMENTACAO.md b/docs/STAFF_A3_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..48f2f49
+--- /dev/null
++++ b/docs/STAFF_A3_IMPLEMENTACAO.md
+@@ -0,0 +1,38 @@
++# Task A3 — background compartilhado nas telas reais Staff
++
++## Objetivo e implementação
++
++A A3 aplica às telas reais Staff o recurso visual compartilhado já utilizado pelo aplicativo. O asset é `app/assets/images/auth/shared-background.png`, carregado pelo componente reutilizável `AuthBackground` em `app/components/ui/AuthBackground.js` e exportado por `app/components/ui/index.js`.
++
++A primeira implementação envolveu `Stack.Navigator` em `AuthBackground`. Na homologação visual do responsável no Expo Go, a tela “Eventos Staff” apareceu branca/clara sob textos brancos. A versão instalada de `@react-navigation/native-stack` (7.19.2) cria uma superfície de tela com cor do tema; essa superfície pode cobrir um fundo colocado fora do Stack. A transparência da `SafeAreaView` interna não corrigia essa ordem de camadas.
++
++A correção coloca `AuthBackground` com preset `login` dentro de cada rota real (`StaffEventsScreen` e `StaffEventHomeScreen`), envolvendo sua `ScrollView`. O componente fornece a SafeArea e mantém a imagem atrás do conteúdo. O `contentStyle` do Stack usa `#0c0a17` como base escura atrás das rotas, inclusive durante transições. Cada rota tem sua própria instância visível; Controle de Entrada e Estação são seções da rota de evento e não recebem outra camada de imagem. Os cartões e botões preservam suas cores. Modais, carregamento, erros, rolagem, operações e navegação não foram alterados.
++
++## Arquivos da A3
++
++- `app/screens/staff/StaffEventsNavigator.js`
++- `app/tests/staffBackground.test.cjs`
++- `docs/STAFF_A3_IMPLEMENTACAO.md`
++- `qa-evidence/STAFF_A3-changes.diff`
++
++Na revalidação após a correção do harness, os testes focados passaram: 29 aprovados, 0 falhos e 0 ignorados, exit code 0. A regressão completa do aplicativo também passou: 525 aprovados, 0 falhos e 0 ignorados, exit code 0. As 20 falhas anteriores ocorreram porque o loader não reconhecia a importação nomeada de `components/ui/AuthBackground`, causando `Element type is invalid`. O harness agora fornece um componente React passthrough, seguindo o stub de UI já usado pelo harness de questionário. Os testes continuam carregando as telas e serviços Staff reais; somente a camada visual é simulada.
++
++Na homologação visual manual confirmada pelo responsável no Expo Go, a lista de Eventos Staff, o painel operacional, o Controle de Entrada e as Estações foram aprovados. Transições, legibilidade, SafeArea e botões também foram aprovados.
++
++## Validação
++
++Os resultados automatizados acima foram executados na campanha de validação da A3. Esta atualização documental não repetiu testes, builds ou typechecks. As verificações Git e da evidência foram executadas após a atualização.
++
++Para Luna Medium validar:
++
++```powershell
++Set-Location app
++$env:NODE_ENV = 'test'
++node --test tests/staffBackground.test.cjs tests/staffRealNavigation.test.cjs tests/roleRoutingIntegration.test.cjs
++```
++
++Se aprovado, executar também os testes de regressão de navegação Staff definidos pelo responsável e conferir novamente `git diff --check` e a aplicação reversa de `qa-evidence/STAFF_A3-changes.diff`.
++
++## Limites
++
++A primeira homologação visual falhou com fundo branco/claro e textos brancos; a composição foi corrigida e a homologação visual posterior foi aprovada nos quatro contextos e itens acima. Essa homologação não substitui testes físicos de concorrência nem validação em todos os dispositivos e configurações de tela. Não foram alterados fluxos operacionais ou regras funcionais das Tasks A1/A2.

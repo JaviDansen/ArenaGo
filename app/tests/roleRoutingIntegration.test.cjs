@@ -106,6 +106,9 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
       if (name === '@react-navigation/native') return { NavigationContainer: ({ children }) =>
         React.createElement(Navigation.BaseNavigationContainer, { ref: navRef, onUnhandledAction: (action) => unhandled.push(action) }, children) };
       const target = path.posix.normalize(path.posix.join(directory, name));
+      if (target === 'components/ui/AuthBackground') {
+        return { AuthBackground: ({ children, ...props }) => React.createElement('View', props, children) };
+      }
       if (target === 'theme') return createParticipantThemeStub();
       if (target === 'services/httpClient') return { ...http, httpClient: client };
       if (target === 'services/tokenStorage') return { defaultTokenStorage: storage };
