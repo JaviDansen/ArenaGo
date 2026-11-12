@@ -14,6 +14,8 @@ function renderHomeFlow(participation, extra = {}) {
         ...extra,
         setParticipation() { contextWrites += 1; },
       }),
+      useEffect: () => {},
+      useRef: (value) => ({ current: value }),
     };
     if (name === 'react-native') return {
       Pressable: 'Pressable', Text: 'Text', View: 'View', StyleSheet: { create: (styles) => styles },

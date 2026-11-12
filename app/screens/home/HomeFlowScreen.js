@@ -15,33 +15,31 @@ function ExternalQueueScreen({ participation, onRefresh, syncStale = false }) {
   const isFocused = useIsFocused();
   const appStateRef = useRef(typeof AppState !== 'undefined' && AppState?.currentState ? AppState.currentState : 'active');
 
-  if (typeof useEffect === 'function') {
-    useEffect(() => {
-      if (typeof AppState?.addEventListener !== 'function') return;
-      const subscription = AppState.addEventListener('change', (nextState) => {
-        appStateRef.current = nextState;
-        if (nextState === 'active' && isFocused && typeof syncCurrentParticipation === 'function') {
-          void syncCurrentParticipation();
-        }
-      });
-      return () => subscription?.remove?.();
-    }, [isFocused, syncCurrentParticipation]);
+  useEffect(() => {
+    if (typeof AppState?.addEventListener !== 'function') return;
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      appStateRef.current = nextState;
+      if (nextState === 'active' && isFocused && typeof syncCurrentParticipation === 'function') {
+        void syncCurrentParticipation();
+      }
+    });
+    return () => subscription?.remove?.();
+  }, [isFocused, syncCurrentParticipation]);
 
-    useEffect(() => {
-      if (!isFocused || typeof syncCurrentParticipation !== 'function' || typeof setInterval !== 'function') return;
+  useEffect(() => {
+    if (!isFocused || typeof syncCurrentParticipation !== 'function' || typeof setInterval !== 'function') return;
 
-      const intervalId = setInterval(() => {
-        if (appStateRef.current === 'active') {
-          void syncCurrentParticipation();
-        }
-      }, 5000);
-      intervalId?.unref?.();
+    const intervalId = setInterval(() => {
+      if (appStateRef.current === 'active') {
+        void syncCurrentParticipation();
+      }
+    }, 5000);
+    intervalId?.unref?.();
 
-      return () => {
-        if (typeof clearInterval === 'function') clearInterval(intervalId);
-      };
-    }, [isFocused, syncCurrentParticipation]);
-  }
+    return () => {
+      if (typeof clearInterval === 'function') clearInterval(intervalId);
+    };
+  }, [isFocused, syncCurrentParticipation]);
 
   return (
     <AuthBackground variant="login" overlayOpacity={0.68} testID="external-queue-background">

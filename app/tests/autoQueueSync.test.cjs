@@ -1162,3 +1162,310 @@ test('HomeFlowScreen (Cenário 9): ExternalQueueScreen exibe aviso discreto de c
     'deve exibir aviso discreto de conexão instável'
   );
 });
+
+// ============================================================================
+// 6. Testes de Estabilidade de Referência e Ciclo de Atualização (P1 / P2)
+// ============================================================================
+
+test('RealArenaScreen: atualizações sucessivas de posição NÃO recriam o timer, NÃO provocam consultas extras e NÃO reinicializam alertas', async () => {
+  const timers = [];
+  const cleared = [];
+  const originalSetInterval = global.setInterval;
+  const originalClearInterval = global.clearInterval;
+
+  global.setInterval = (fn, ms) => {
+    const id = timers.length + 1;
+    timers.push({ id, fn, ms });
+    return id;
+  };
+  global.clearInterval = (id) => {
+    cleared.push(id);
+  };
+
+  try {
+    const shallowEqualDeps = (a, b) =>
+      Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => Object.is(v, b[i]));
+
+    const refs = [];
+    const memos = [];
+    const callbacks = [];
+    const states = [];
+    let hookCursor = { ref: 0, memo: 0, cb: 0, state: 0 };
+    let lastFocusCb = null;
+    let lastFocusCleanup = null;
+    let focusEffectRuns = 0;
+
+    let readCount = 0;
+    let currentPosition = 3;
+    const alertChecks = [];
+
+    const makeResponse = (pos) => ({
+      acceptingNewQueueEntries: true,
+      experiences: [{ id: 'exp-1', name: 'VR Arena', waitingCount: pos, acceptingNewQueueEntries: true }],
+      currentQueueEntry: {
+        id: 'entry-1',
+        experienceId: 'exp-1',
+        experienceName: 'VR Arena',
+        status: 'waiting',
+        position: pos,
+        stationLabel: null,
+      },
+      pendingIntent: null,
+    });
+
+    const authObj = {
+      isAuthenticated: true,
+      user: { id: 'user-stable' },
+      httpClient: {},
+      getSessionEpoch: () => 1,
+    };
+
+    const screen = loadModule('screens/arena/RealArenaScreen.js', (name) => {
+      if (name === 'react') {
+        return {
+          useRef(initial) {
+            const idx = hookCursor.ref++;
+            if (idx >= refs.length) refs.push({ current: initial });
+            return refs[idx];
+          },
+          useMemo(factory, deps) {
+            const idx = hookCursor.memo++;
+            if (idx >= memos.length || !shallowEqualDeps(memos[idx].deps, deps)) {
+              memos[idx] = { value: factory(), deps };
+            }
+            return memos[idx].value;
+          },
+          useCallback(fn, deps) {
+            const idx = hookCursor.cb++;
+            if (idx >= callbacks.length || !shallowEqualDeps(callbacks[idx].deps, deps)) {
+              callbacks[idx] = { fn, deps };
+            }
+            return callbacks[idx].fn;
+          },
+          useState(initial) {
+            const idx = hookCursor.state++;
+            if (idx >= states.length) {
+              const initVal = typeof initial === 'function' ? initial() : initial;
+              states.push(initVal);
+            }
+            const setVal = (next) => {
+              states[idx] = typeof next === 'function' ? next(states[idx]) : next;
+            };
+            return [states[idx], setVal];
+          },
+        };
+      }
+      if (name === '@react-navigation/native') {
+        return {
+          useFocusEffect(cb) {
+            // Comportamento real do React Navigation: reexecuta se a referência do callback mudar
+            if (cb !== lastFocusCb) {
+              if (typeof lastFocusCleanup === 'function') lastFocusCleanup();
+              lastFocusCb = cb;
+              focusEffectRuns += 1;
+              lastFocusCleanup = cb();
+            }
+          },
+        };
+      }
+      if (name === 'expo-crypto') return { randomUUID: () => 'uuid-1' };
+      if (name === 'react-native') {
+        return {
+          ActivityIndicator: 'ActivityIndicator',
+          Alert: { alert: () => {} },
+          AppState: { currentState: 'active', addEventListener: () => ({ remove: () => {} }) },
+          ScrollView: 'ScrollView',
+          StyleSheet: { create: (s) => s },
+          Text: 'Text',
+          View: 'View',
+        };
+      }
+      if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
+      if (name === '../../components/ui') return createParticipantUiStubs();
+      if (name === '../../theme') return createParticipantThemeStub();
+      if (name === '../../context/AuthContext') return { useAuth: () => authObj };
+      if (name === '../../services/arenaQueueService') {
+        return {
+          createArenaQueueCoordinator: () => ({
+            read: async () => {
+              readCount += 1;
+              return makeResponse(currentPosition);
+            },
+          }),
+          describeArenaError: () => 'erro',
+        };
+      }
+      if (name === '../../services/arenaQueueIntentStorage') return { defaultArenaQueueIntentStorage: {} };
+      if (name === '../../services/participationActionService') {
+        return { createParticipationActionCoordinator: () => ({ finish: async () => {} }), describeParticipationActionError: () => 'erro' };
+      }
+      if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
+      if (name === '../../services/queueAlertService') {
+        return {
+          createQueueAlertManager: () => ({
+            checkAndAlert: (opts) => {
+              alertChecks.push(opts);
+              return false;
+            },
+            reset: () => {},
+          }),
+        };
+      }
+      return require(name);
+    }).exports.default;
+
+    const props = {
+      participation: { id: 'part-stable', eventId: 'ev-stable' },
+      refreshParticipation: async () => {},
+    };
+
+    const renderScreen = () => {
+      hookCursor = { ref: 0, memo: 0, cb: 0, state: 0 };
+      return screen(props);
+    };
+
+    // 1ª renderização (montagem e foco inicial -> dispara refresh inicial)
+    renderScreen();
+    await new Promise((r) => setTimeout(r, 10));
+
+    assert.equal(focusEffectRuns, 1, 'useFocusEffect deve rodar apenas 1 vez na montagem');
+    assert.equal(timers.length, 1, 'exatamente 1 timer de 5s criado');
+    assert.equal(timers[0].ms, 5000);
+    assert.equal(cleared.length, 0, 'nenhum timer limpo');
+    assert.equal(readCount, 1, 'apenas a consulta inicial foi executada');
+    assert.equal(alertChecks.length, 1);
+    assert.equal(alertChecks[0].isInitial, true, 'apenas a carga inicial usa isInitial: true');
+
+    // Re-render após atualização do estado inicial (posição 3)
+    renderScreen();
+    await new Promise((r) => setTimeout(r, 10));
+
+    assert.equal(focusEffectRuns, 1, 'mudança de state NÃO deve reiniciar useFocusEffect');
+    assert.equal(timers.length, 1, 'NÃO deve recriar o timer após setState');
+    assert.equal(cleared.length, 0, 'NÃO deve limpar o timer ativo após setState');
+    assert.equal(readCount, 1, 'NÃO deve provocar consulta extra ao atualizar state');
+
+    // 1º ciclo de polling (5s): posição avança de 3 para 2
+    currentPosition = 2;
+    timers[0].fn();
+    await new Promise((r) => setTimeout(r, 10));
+    renderScreen();
+    await new Promise((r) => setTimeout(r, 10));
+
+    assert.equal(states[0].currentQueueEntry.position, 2);
+    assert.equal(focusEffectRuns, 1, 'avanço para posição 2 NÃO reinicia useFocusEffect');
+    assert.equal(timers.length, 1, 'continua com o mesmo único timer ativo');
+    assert.equal(cleared.length, 0);
+    assert.equal(readCount, 2, 'apenas a consulta do ciclo de polling foi feita');
+    assert.equal(alertChecks.length, 2);
+    assert.equal(alertChecks[1].isInitial, false, 'polling não reinicializa controle de alertas');
+
+    // 2º ciclo de polling (10s): posição avança de 2 para 1
+    currentPosition = 1;
+    timers[0].fn();
+    await new Promise((r) => setTimeout(r, 10));
+    renderScreen();
+    await new Promise((r) => setTimeout(r, 10));
+
+    assert.equal(states[0].currentQueueEntry.position, 1);
+    assert.equal(focusEffectRuns, 1, 'avanço para posição 1 NÃO reinicia useFocusEffect');
+    assert.equal(timers.length, 1, 'continua com apenas 1 timer criado em toda a sessão');
+    assert.equal(cleared.length, 0);
+    assert.equal(readCount, 3);
+    assert.equal(alertChecks.length, 3);
+    assert.equal(alertChecks[2].isInitial, false);
+  } finally {
+    global.setInterval = originalSetInterval;
+    global.clearInterval = originalClearInterval;
+  }
+});
+
+test('HomeFlowScreen: ExternalQueueScreen suspende polling ao perder foco e retoma ao recuperar foco com apenas um timer ativo', () => {
+  const timers = [];
+  const cleared = [];
+  const originalSetInterval = global.setInterval;
+  const originalClearInterval = global.clearInterval;
+
+  global.setInterval = (fn, ms) => {
+    const id = timers.length + 1;
+    timers.push({ id, fn, ms });
+    return id;
+  };
+  global.clearInterval = (id) => {
+    cleared.push(id);
+  };
+
+  try {
+    let focusedState = true;
+    let syncCalls = 0;
+    const cleanups = [];
+    const participation = { source: 'server', status: 'waiting', eventId: 'event-focus', externalQueue: { position: 2 } };
+
+    const screen = loadModule('screens/home/HomeFlowScreen.js', (name) => {
+      if (name === 'react') {
+        return {
+          useContext: () => ({
+            participation,
+            status: 'ready',
+            refreshParticipation: () => {},
+            syncCurrentParticipation: () => { syncCalls += 1; },
+          }),
+          useEffect: (cb) => {
+            const cleanup = cb();
+            if (typeof cleanup === 'function') cleanups.push(cleanup);
+          },
+          useRef: (val) => ({ current: val }),
+        };
+      }
+      if (name === '@react-navigation/native') {
+        return { useIsFocused: () => focusedState };
+      }
+      if (name === 'react-native') {
+        return {
+          AppState: { currentState: 'active', addEventListener: () => ({ remove: () => {} }) },
+          Pressable: 'Pressable',
+          StyleSheet: { create: (s) => s },
+          Text: 'Text',
+          View: 'View',
+        };
+      }
+      if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
+      if (name === '../../components/ui') return createParticipantUiStubs();
+      if (name === '../../context/ParticipationContext') return { ParticipationContext: {} };
+      if (name === '../arena/RealArenaScreen') return { __esModule: true, default: 'RealArenaScreen' };
+      if (name === '../arena/ActiveArenaScreen') return { __esModule: true, default: 'ActiveArenaScreen' };
+      if (name === '../arena/ArenaQueueScreen') return { __esModule: true, default: 'ArenaQueueScreen' };
+      if (name === './HomeScreen') return { __esModule: true, default: 'HomeScreen' };
+      return require(name);
+    });
+
+    // 1. Com foco inicial: registra exatamente 1 timer de 5s
+    const rendered1 = screen.exports.default({ navigation: {} });
+    rendered1.type(rendered1.props);
+    assert.equal(timers.length, 1);
+    assert.equal(timers[0].ms, 5000);
+    assert.equal(cleared.length, 0);
+
+    // 2. Perde o foco: executa cleanups e renderiza com isFocused = false
+    while (cleanups.length) cleanups.pop()();
+    assert.equal(cleared.length, 1, 'timer anterior limpo ao perder foco');
+    focusedState = false;
+    const renderedBlur = screen.exports.default({ navigation: {} });
+    renderedBlur.type(renderedBlur.props);
+    assert.equal(timers.length, 1, 'nenhum novo timer criado enquanto sem foco');
+
+    // 3. Recupera o foco: cria 1 novo timer de 5s e retoma polling
+    while (cleanups.length) cleanups.pop()();
+    focusedState = true;
+    const renderedFocus = screen.exports.default({ navigation: {} });
+    renderedFocus.type(renderedFocus.props);
+    assert.equal(timers.length, 2, 'novo timer único criado ao recuperar foco');
+    assert.equal(timers[1].ms, 5000);
+
+    timers[1].fn();
+    assert.equal(syncCalls, 1, 'polling retomado após recuperar foco');
+  } finally {
+    global.setInterval = originalSetInterval;
+    global.clearInterval = originalClearInterval;
+  }
+});

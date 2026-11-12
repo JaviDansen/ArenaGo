@@ -13,7 +13,7 @@ index ae2d6857..3c15df73 100644
      admission: currentAdmission ? admissionSnapshot : null,
      lookupEvent: admissionStore.lookup,
 diff --git a/app/screens/arena/RealArenaScreen.js b/app/screens/arena/RealArenaScreen.js
-index 28ae90fd..d5f8998d 100644
+index 28ae90fd..9ba55248 100644
 --- a/app/screens/arena/RealArenaScreen.js
 +++ b/app/screens/arena/RealArenaScreen.js
 @@ -2,7 +2,7 @@ import { useCallback, useMemo, useRef, useState } from 'react';
@@ -33,7 +33,7 @@ index 28ae90fd..d5f8998d 100644
  import { colors, spacing, typography } from '../../theme';
  
  /** Tela real de participação ativa. Sem alterações de domínio feitas em estado React. */
-@@ -26,13 +27,36 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+@@ -26,13 +27,38 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
    const focused = useRef(false);
    const focusGeneration = useRef(0);
    const finishedRef = useRef(false);
@@ -41,6 +41,8 @@ index 28ae90fd..d5f8998d 100644
 +  const syncInFlightRef = useRef(false);
 +  const resumingFromBackgroundRef = useRef(false);
    const [state, setState] = useState(null);
++  const stateRef = useRef(state);
++  stateRef.current = state;
    const [busy, setBusy] = useState(false);
    const [loading, setLoading] = useState(true);
    const [error, setError] = useState(null);
@@ -70,7 +72,7 @@ index 28ae90fd..d5f8998d 100644
  
    const context = useMemo(() => ({ userId, participationId, eventId }), [userId, participationId, eventId]);
    const coordinator = useMemo(() => createArenaQueueCoordinator({
-@@ -48,25 +72,127 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+@@ -48,25 +74,129 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
    }), [client, getEpoch, epoch, userId]);
  
    const refresh = useCallback(async () => {
@@ -93,6 +95,7 @@ index 28ae90fd..d5f8998d 100644
 +        authRef.current?.user?.id === userId &&
 +        (typeof getEpoch !== 'function' || getEpoch() === epoch)
 +      ) {
++        stateRef.current = next;
 +        setState(next);
 +        setNotice(null);
 +        setSyncStale(false);
@@ -110,7 +113,7 @@ index 28ae90fd..d5f8998d 100644
 +        focusGeneration.current === currentFocusGen &&
 +        currentSeq === readSeqRef.current
 +      ) {
-+        if (state) {
++        if (stateRef.current) {
 +          setSyncStale(true);
 +        } else {
 +          setError(describeArenaError(err));
@@ -120,7 +123,7 @@ index 28ae90fd..d5f8998d 100644
 +      syncInFlightRef.current = false;
 +      if (focused.current && currentSeq === readSeqRef.current) setLoading(false);
 +    }
-+  }, [coordinator, context, participationId, userId, epoch, getEpoch, state]);
++  }, [coordinator, context, participationId, userId, epoch, getEpoch]);
 +
 +  const syncSilent = useCallback(async () => {
 +    if (!focused.current || busyRef.current || finishedRef.current || syncInFlightRef.current) return;
@@ -138,6 +141,7 @@ index 28ae90fd..d5f8998d 100644
 +        authRef.current?.user?.id === userId &&
 +        (typeof getEpoch !== 'function' || getEpoch() === epoch)
 +      ) {
++        stateRef.current = next;
 +        setState(next);
 +        setSyncStale(false);
 +        const isResuming = resumingFromBackgroundRef.current;
@@ -205,7 +209,19 @@ index 28ae90fd..d5f8998d 100644
  
    const join = async (experienceId) => {
      if (busyRef.current || !focused.current || loading || !state) return;
-@@ -167,6 +293,14 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+@@ -77,7 +207,10 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+     try {
+       const result = await coordinator.join(context, experienceId);
+       if (!focused.current) return;
+-      if (result.state) setState(result.state);
++      if (result.state) {
++        stateRef.current = result.state;
++        setState(result.state);
++      }
+       if (result.kind === 'confirmed') setNotice('Entrada na fila confirmada pelo servidor.');
+       else if (result.kind === 'already') setNotice('Você já possui uma entrada na fila.');
+       else if (result.kind === 'pending_other') setError('Há outra tentativa de fila pendente nesta conta. Nenhuma nova entrada foi enviada.');
+@@ -167,6 +300,14 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
              <Text style={styles.notice}>{notice}</Text>
            </View>
          ) : null}
@@ -220,7 +236,7 @@ index 28ae90fd..d5f8998d 100644
  
          {entry ? (
            <Card variant="highlight" style={styles.highlight}>
-@@ -176,7 +310,11 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+@@ -176,7 +317,11 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
              {entry.status === 'waiting'
                ? <Text style={styles.position}>Posição {entry.position}º</Text>
                : <Text style={styles.position}>Dirija-se à estação: {entry.stationLabel}</Text>}
@@ -233,7 +249,7 @@ index 28ae90fd..d5f8998d 100644
            </Card>
          ) : null}
  
-@@ -232,7 +370,7 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+@@ -232,7 +377,7 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
          <Button
            title={loading ? 'Consultando...' : 'Atualizar fila e experiências'}
            variant="secondary"
@@ -242,7 +258,7 @@ index 28ae90fd..d5f8998d 100644
            onPress={refresh}
            style={styles.actionButton}
          />
-@@ -274,4 +412,20 @@ const styles = StyleSheet.create({
+@@ -274,4 +419,20 @@ const styles = StyleSheet.create({
    error: { ...typography.body, color: '#FF9AAE', marginTop: spacing.sm },
    noticeCard: { borderColor: colors.semantic.success, borderWidth: 1, backgroundColor: colors.semantic.successBg, borderRadius: 12, padding: spacing.lg, marginBottom: spacing.md },
    notice: { ...typography.body, color: colors.text.primary, marginTop: spacing.sm },
@@ -264,7 +280,7 @@ index 28ae90fd..d5f8998d 100644
 +  },
  });
 diff --git a/app/screens/home/HomeFlowScreen.js b/app/screens/home/HomeFlowScreen.js
-index f708963d..2a35e3a6 100644
+index f708963d..60dc355f 100644
 --- a/app/screens/home/HomeFlowScreen.js
 +++ b/app/screens/home/HomeFlowScreen.js
 @@ -1,6 +1,7 @@
@@ -277,7 +293,7 @@ index f708963d..2a35e3a6 100644
  
  import { AuthBackground, Badge, Button, Card, ScreenHeader } from '../../components/ui';
  import { ParticipationContext } from '../../context/ParticipationContext';
-@@ -9,12 +10,51 @@ import RealArenaScreen from '../arena/RealArenaScreen';
+@@ -9,12 +10,49 @@ import RealArenaScreen from '../arena/RealArenaScreen';
  import ArenaQueueScreen from '../arena/ArenaQueueScreen';
  import HomeScreen from './HomeScreen';
  
@@ -287,33 +303,31 @@ index f708963d..2a35e3a6 100644
 +  const isFocused = useIsFocused();
 +  const appStateRef = useRef(typeof AppState !== 'undefined' && AppState?.currentState ? AppState.currentState : 'active');
 +
-+  if (typeof useEffect === 'function') {
-+    useEffect(() => {
-+      if (typeof AppState?.addEventListener !== 'function') return;
-+      const subscription = AppState.addEventListener('change', (nextState) => {
-+        appStateRef.current = nextState;
-+        if (nextState === 'active' && isFocused && typeof syncCurrentParticipation === 'function') {
-+          void syncCurrentParticipation();
-+        }
-+      });
-+      return () => subscription?.remove?.();
-+    }, [isFocused, syncCurrentParticipation]);
++  useEffect(() => {
++    if (typeof AppState?.addEventListener !== 'function') return;
++    const subscription = AppState.addEventListener('change', (nextState) => {
++      appStateRef.current = nextState;
++      if (nextState === 'active' && isFocused && typeof syncCurrentParticipation === 'function') {
++        void syncCurrentParticipation();
++      }
++    });
++    return () => subscription?.remove?.();
++  }, [isFocused, syncCurrentParticipation]);
 +
-+    useEffect(() => {
-+      if (!isFocused || typeof syncCurrentParticipation !== 'function' || typeof setInterval !== 'function') return;
++  useEffect(() => {
++    if (!isFocused || typeof syncCurrentParticipation !== 'function' || typeof setInterval !== 'function') return;
 +
-+      const intervalId = setInterval(() => {
-+        if (appStateRef.current === 'active') {
-+          void syncCurrentParticipation();
-+        }
-+      }, 5000);
-+      intervalId?.unref?.();
++    const intervalId = setInterval(() => {
++      if (appStateRef.current === 'active') {
++        void syncCurrentParticipation();
++      }
++    }, 5000);
++    intervalId?.unref?.();
 +
-+      return () => {
-+        if (typeof clearInterval === 'function') clearInterval(intervalId);
-+      };
-+    }, [isFocused, syncCurrentParticipation]);
-+  }
++    return () => {
++      if (typeof clearInterval === 'function') clearInterval(intervalId);
++    };
++  }, [isFocused, syncCurrentParticipation]);
 +
    return (
      <AuthBackground variant="login" overlayOpacity={0.68} testID="external-queue-background">
@@ -330,7 +344,7 @@ index f708963d..2a35e3a6 100644
          <Card variant="highlight" style={styles.externalQueueCard}>
            <Badge label="AGUARDANDO NA FILA" variant="brand" />
            <Text style={styles.externalQueueTitle}>Sua participação está confirmada</Text>
-@@ -23,6 +63,11 @@ function ExternalQueueScreen({ participation, onRefresh }) {
+@@ -23,6 +61,11 @@ function ExternalQueueScreen({ participation, onRefresh }) {
                ? `Sua posição atual é ${participation.externalQueue.position}º.`
                : 'Aguarde a chamada da equipe do evento.'}
            </Text>
@@ -342,7 +356,7 @@ index f708963d..2a35e3a6 100644
            <Text style={styles.externalQueueMeta}>Evento: {participation.eventId}</Text>
          </Card>
          <Button title="Atualizar participação" variant="secondary" onPress={onRefresh} />
-@@ -32,7 +77,7 @@ function ExternalQueueScreen({ participation, onRefresh }) {
+@@ -32,7 +75,7 @@ function ExternalQueueScreen({ participation, onRefresh }) {
  }
  
  export default function HomeFlowScreen({ navigation }) {
@@ -351,7 +365,7 @@ index f708963d..2a35e3a6 100644
  
    if (status === 'loading') {
      return <HomeScreen mode="loading" />;
-@@ -52,7 +97,7 @@ export default function HomeFlowScreen({ navigation }) {
+@@ -52,7 +95,7 @@ export default function HomeFlowScreen({ navigation }) {
            participationId: historyItem.participationId, historyItem,
          })} />;
      }
@@ -360,7 +374,7 @@ index f708963d..2a35e3a6 100644
    }
  
    if (!participation) {
-@@ -76,6 +121,21 @@ const styles = StyleSheet.create({
+@@ -76,6 +119,21 @@ const styles = StyleSheet.create({
      justifyContent: 'center',
      padding: 20,
    },
@@ -382,7 +396,7 @@ index f708963d..2a35e3a6 100644
    externalQueueCard: {
      marginBottom: 20,
    },
-@@ -91,6 +151,11 @@ const styles = StyleSheet.create({
+@@ -91,6 +149,11 @@ const styles = StyleSheet.create({
      lineHeight: 23,
      marginTop: 10,
    },
@@ -603,10 +617,10 @@ index 00000000..9bf734fa
 +}
 diff --git a/app/tests/autoQueueSync.test.cjs b/app/tests/autoQueueSync.test.cjs
 new file mode 100644
-index 00000000..dd00d20c
+index 00000000..d6fb6a93
 --- /dev/null
 +++ b/app/tests/autoQueueSync.test.cjs
-@@ -0,0 +1,1164 @@
+@@ -0,0 +1,1471 @@
 +const assert = require('node:assert/strict');
 +const test = require('node:test');
 +const { loadModule, createParticipantUiStubs, createParticipantThemeStub, nodes, textOf } = require('./helpers/questionnaireHarness.cjs');
@@ -1771,6 +1785,313 @@ index 00000000..dd00d20c
 +    'deve exibir aviso discreto de conexão instável'
 +  );
 +});
++
++// ============================================================================
++// 6. Testes de Estabilidade de Referência e Ciclo de Atualização (P1 / P2)
++// ============================================================================
++
++test('RealArenaScreen: atualizações sucessivas de posição NÃO recriam o timer, NÃO provocam consultas extras e NÃO reinicializam alertas', async () => {
++  const timers = [];
++  const cleared = [];
++  const originalSetInterval = global.setInterval;
++  const originalClearInterval = global.clearInterval;
++
++  global.setInterval = (fn, ms) => {
++    const id = timers.length + 1;
++    timers.push({ id, fn, ms });
++    return id;
++  };
++  global.clearInterval = (id) => {
++    cleared.push(id);
++  };
++
++  try {
++    const shallowEqualDeps = (a, b) =>
++      Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => Object.is(v, b[i]));
++
++    const refs = [];
++    const memos = [];
++    const callbacks = [];
++    const states = [];
++    let hookCursor = { ref: 0, memo: 0, cb: 0, state: 0 };
++    let lastFocusCb = null;
++    let lastFocusCleanup = null;
++    let focusEffectRuns = 0;
++
++    let readCount = 0;
++    let currentPosition = 3;
++    const alertChecks = [];
++
++    const makeResponse = (pos) => ({
++      acceptingNewQueueEntries: true,
++      experiences: [{ id: 'exp-1', name: 'VR Arena', waitingCount: pos, acceptingNewQueueEntries: true }],
++      currentQueueEntry: {
++        id: 'entry-1',
++        experienceId: 'exp-1',
++        experienceName: 'VR Arena',
++        status: 'waiting',
++        position: pos,
++        stationLabel: null,
++      },
++      pendingIntent: null,
++    });
++
++    const authObj = {
++      isAuthenticated: true,
++      user: { id: 'user-stable' },
++      httpClient: {},
++      getSessionEpoch: () => 1,
++    };
++
++    const screen = loadModule('screens/arena/RealArenaScreen.js', (name) => {
++      if (name === 'react') {
++        return {
++          useRef(initial) {
++            const idx = hookCursor.ref++;
++            if (idx >= refs.length) refs.push({ current: initial });
++            return refs[idx];
++          },
++          useMemo(factory, deps) {
++            const idx = hookCursor.memo++;
++            if (idx >= memos.length || !shallowEqualDeps(memos[idx].deps, deps)) {
++              memos[idx] = { value: factory(), deps };
++            }
++            return memos[idx].value;
++          },
++          useCallback(fn, deps) {
++            const idx = hookCursor.cb++;
++            if (idx >= callbacks.length || !shallowEqualDeps(callbacks[idx].deps, deps)) {
++              callbacks[idx] = { fn, deps };
++            }
++            return callbacks[idx].fn;
++          },
++          useState(initial) {
++            const idx = hookCursor.state++;
++            if (idx >= states.length) {
++              const initVal = typeof initial === 'function' ? initial() : initial;
++              states.push(initVal);
++            }
++            const setVal = (next) => {
++              states[idx] = typeof next === 'function' ? next(states[idx]) : next;
++            };
++            return [states[idx], setVal];
++          },
++        };
++      }
++      if (name === '@react-navigation/native') {
++        return {
++          useFocusEffect(cb) {
++            // Comportamento real do React Navigation: reexecuta se a referência do callback mudar
++            if (cb !== lastFocusCb) {
++              if (typeof lastFocusCleanup === 'function') lastFocusCleanup();
++              lastFocusCb = cb;
++              focusEffectRuns += 1;
++              lastFocusCleanup = cb();
++            }
++          },
++        };
++      }
++      if (name === 'expo-crypto') return { randomUUID: () => 'uuid-1' };
++      if (name === 'react-native') {
++        return {
++          ActivityIndicator: 'ActivityIndicator',
++          Alert: { alert: () => {} },
++          AppState: { currentState: 'active', addEventListener: () => ({ remove: () => {} }) },
++          ScrollView: 'ScrollView',
++          StyleSheet: { create: (s) => s },
++          Text: 'Text',
++          View: 'View',
++        };
++      }
++      if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
++      if (name === '../../components/ui') return createParticipantUiStubs();
++      if (name === '../../theme') return createParticipantThemeStub();
++      if (name === '../../context/AuthContext') return { useAuth: () => authObj };
++      if (name === '../../services/arenaQueueService') {
++        return {
++          createArenaQueueCoordinator: () => ({
++            read: async () => {
++              readCount += 1;
++              return makeResponse(currentPosition);
++            },
++          }),
++          describeArenaError: () => 'erro',
++        };
++      }
++      if (name === '../../services/arenaQueueIntentStorage') return { defaultArenaQueueIntentStorage: {} };
++      if (name === '../../services/participationActionService') {
++        return { createParticipationActionCoordinator: () => ({ finish: async () => {} }), describeParticipationActionError: () => 'erro' };
++      }
++      if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
++      if (name === '../../services/queueAlertService') {
++        return {
++          createQueueAlertManager: () => ({
++            checkAndAlert: (opts) => {
++              alertChecks.push(opts);
++              return false;
++            },
++            reset: () => {},
++          }),
++        };
++      }
++      return require(name);
++    }).exports.default;
++
++    const props = {
++      participation: { id: 'part-stable', eventId: 'ev-stable' },
++      refreshParticipation: async () => {},
++    };
++
++    const renderScreen = () => {
++      hookCursor = { ref: 0, memo: 0, cb: 0, state: 0 };
++      return screen(props);
++    };
++
++    // 1ª renderização (montagem e foco inicial -> dispara refresh inicial)
++    renderScreen();
++    await new Promise((r) => setTimeout(r, 10));
++
++    assert.equal(focusEffectRuns, 1, 'useFocusEffect deve rodar apenas 1 vez na montagem');
++    assert.equal(timers.length, 1, 'exatamente 1 timer de 5s criado');
++    assert.equal(timers[0].ms, 5000);
++    assert.equal(cleared.length, 0, 'nenhum timer limpo');
++    assert.equal(readCount, 1, 'apenas a consulta inicial foi executada');
++    assert.equal(alertChecks.length, 1);
++    assert.equal(alertChecks[0].isInitial, true, 'apenas a carga inicial usa isInitial: true');
++
++    // Re-render após atualização do estado inicial (posição 3)
++    renderScreen();
++    await new Promise((r) => setTimeout(r, 10));
++
++    assert.equal(focusEffectRuns, 1, 'mudança de state NÃO deve reiniciar useFocusEffect');
++    assert.equal(timers.length, 1, 'NÃO deve recriar o timer após setState');
++    assert.equal(cleared.length, 0, 'NÃO deve limpar o timer ativo após setState');
++    assert.equal(readCount, 1, 'NÃO deve provocar consulta extra ao atualizar state');
++
++    // 1º ciclo de polling (5s): posição avança de 3 para 2
++    currentPosition = 2;
++    timers[0].fn();
++    await new Promise((r) => setTimeout(r, 10));
++    renderScreen();
++    await new Promise((r) => setTimeout(r, 10));
++
++    assert.equal(states[0].currentQueueEntry.position, 2);
++    assert.equal(focusEffectRuns, 1, 'avanço para posição 2 NÃO reinicia useFocusEffect');
++    assert.equal(timers.length, 1, 'continua com o mesmo único timer ativo');
++    assert.equal(cleared.length, 0);
++    assert.equal(readCount, 2, 'apenas a consulta do ciclo de polling foi feita');
++    assert.equal(alertChecks.length, 2);
++    assert.equal(alertChecks[1].isInitial, false, 'polling não reinicializa controle de alertas');
++
++    // 2º ciclo de polling (10s): posição avança de 2 para 1
++    currentPosition = 1;
++    timers[0].fn();
++    await new Promise((r) => setTimeout(r, 10));
++    renderScreen();
++    await new Promise((r) => setTimeout(r, 10));
++
++    assert.equal(states[0].currentQueueEntry.position, 1);
++    assert.equal(focusEffectRuns, 1, 'avanço para posição 1 NÃO reinicia useFocusEffect');
++    assert.equal(timers.length, 1, 'continua com apenas 1 timer criado em toda a sessão');
++    assert.equal(cleared.length, 0);
++    assert.equal(readCount, 3);
++    assert.equal(alertChecks.length, 3);
++    assert.equal(alertChecks[2].isInitial, false);
++  } finally {
++    global.setInterval = originalSetInterval;
++    global.clearInterval = originalClearInterval;
++  }
++});
++
++test('HomeFlowScreen: ExternalQueueScreen suspende polling ao perder foco e retoma ao recuperar foco com apenas um timer ativo', () => {
++  const timers = [];
++  const cleared = [];
++  const originalSetInterval = global.setInterval;
++  const originalClearInterval = global.clearInterval;
++
++  global.setInterval = (fn, ms) => {
++    const id = timers.length + 1;
++    timers.push({ id, fn, ms });
++    return id;
++  };
++  global.clearInterval = (id) => {
++    cleared.push(id);
++  };
++
++  try {
++    let focusedState = true;
++    let syncCalls = 0;
++    const cleanups = [];
++    const participation = { source: 'server', status: 'waiting', eventId: 'event-focus', externalQueue: { position: 2 } };
++
++    const screen = loadModule('screens/home/HomeFlowScreen.js', (name) => {
++      if (name === 'react') {
++        return {
++          useContext: () => ({
++            participation,
++            status: 'ready',
++            refreshParticipation: () => {},
++            syncCurrentParticipation: () => { syncCalls += 1; },
++          }),
++          useEffect: (cb) => {
++            const cleanup = cb();
++            if (typeof cleanup === 'function') cleanups.push(cleanup);
++          },
++          useRef: (val) => ({ current: val }),
++        };
++      }
++      if (name === '@react-navigation/native') {
++        return { useIsFocused: () => focusedState };
++      }
++      if (name === 'react-native') {
++        return {
++          AppState: { currentState: 'active', addEventListener: () => ({ remove: () => {} }) },
++          Pressable: 'Pressable',
++          StyleSheet: { create: (s) => s },
++          Text: 'Text',
++          View: 'View',
++        };
++      }
++      if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
++      if (name === '../../components/ui') return createParticipantUiStubs();
++      if (name === '../../context/ParticipationContext') return { ParticipationContext: {} };
++      if (name === '../arena/RealArenaScreen') return { __esModule: true, default: 'RealArenaScreen' };
++      if (name === '../arena/ActiveArenaScreen') return { __esModule: true, default: 'ActiveArenaScreen' };
++      if (name === '../arena/ArenaQueueScreen') return { __esModule: true, default: 'ArenaQueueScreen' };
++      if (name === './HomeScreen') return { __esModule: true, default: 'HomeScreen' };
++      return require(name);
++    });
++
++    // 1. Com foco inicial: registra exatamente 1 timer de 5s
++    const rendered1 = screen.exports.default({ navigation: {} });
++    rendered1.type(rendered1.props);
++    assert.equal(timers.length, 1);
++    assert.equal(timers[0].ms, 5000);
++    assert.equal(cleared.length, 0);
++
++    // 2. Perde o foco: executa cleanups e renderiza com isFocused = false
++    while (cleanups.length) cleanups.pop()();
++    assert.equal(cleared.length, 1, 'timer anterior limpo ao perder foco');
++    focusedState = false;
++    const renderedBlur = screen.exports.default({ navigation: {} });
++    renderedBlur.type(renderedBlur.props);
++    assert.equal(timers.length, 1, 'nenhum novo timer criado enquanto sem foco');
++
++    // 3. Recupera o foco: cria 1 novo timer de 5s e retoma polling
++    while (cleanups.length) cleanups.pop()();
++    focusedState = true;
++    const renderedFocus = screen.exports.default({ navigation: {} });
++    renderedFocus.type(renderedFocus.props);
++    assert.equal(timers.length, 2, 'novo timer único criado ao recuperar foco');
++    assert.equal(timers[1].ms, 5000);
++
++    timers[1].fn();
++    assert.equal(syncCalls, 1, 'polling retomado após recuperar foco');
++  } finally {
++    global.setInterval = originalSetInterval;
++    global.clearInterval = originalClearInterval;
++  }
++});
 diff --git a/app/tests/eventEntry.test.cjs b/app/tests/eventEntry.test.cjs
 index 231dc1a1..4e80ada2 100644
 --- a/app/tests/eventEntry.test.cjs
@@ -1833,10 +2154,10 @@ index 07012540..63d27849 100644
    };
    vm.runInNewContext(code, context, { filename });
 diff --git a/app/tests/homeFlow.test.cjs b/app/tests/homeFlow.test.cjs
-index be3d3753..d288fb05 100644
+index be3d3753..8512772b 100644
 --- a/app/tests/homeFlow.test.cjs
 +++ b/app/tests/homeFlow.test.cjs
-@@ -7,6 +7,7 @@ function renderHomeFlow(participation, extra = {}) {
+@@ -7,12 +7,15 @@ function renderHomeFlow(participation, extra = {}) {
    const navigationCalls = [];
    const navigation = { navigate: (...args) => navigationCalls.push(args) };
    const screen = loadModule('screens/home/HomeFlowScreen.js', (name) => {
@@ -1844,19 +2165,27 @@ index be3d3753..d288fb05 100644
      if (name === 'react') return {
        useContext: () => ({
          participation,
+         ...extra,
+         setParticipation() { contextWrites += 1; },
+       }),
++      useEffect: () => {},
++      useRef: (value) => ({ current: value }),
+     };
+     if (name === 'react-native') return {
+       Pressable: 'Pressable', Text: 'Text', View: 'View', StyleSheet: { create: (styles) => styles },
 diff --git a/docs/AUTO_QUEUE_01_IMPLEMENTACAO.md b/docs/AUTO_QUEUE_01_IMPLEMENTACAO.md
 new file mode 100644
-index 00000000..04a319a7
+index 00000000..e442f557
 --- /dev/null
 +++ b/docs/AUTO_QUEUE_01_IMPLEMENTACAO.md
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,132 @@
 +# ArenaGO — AUTO-QUEUE-01: Atualização Automática das Filas e Alertas do Participante
 +
 +**Responsável:** Kaled<br>
 +**Branch:** `feature/participant-auto-queue-sync`<br>
 +**Prioridade:** P0 — Apresentação em 13/11/2026, às 19h<br>
 +**Data da Implementação Inicial:** 11/11/2026<br>
-+**Revisão Técnica e Correções:** 11/11/2026 (após revisão do commit `2de957b`)
++**Revisão Técnica e Correções:** 11/11/2026 (após revisão dos commits `2de957b` e `87316ca`)
 +
 +---
 +
@@ -1912,11 +2241,21 @@ index 00000000..04a319a7
 +  - A nota da fila interna informa que a conexão oscilou e está tentando reconectar.
 +  - No próximo polling bem-sucedido, o banner é removido e a nota volta à indicação regular de 5 segundos.
 +
++### 2.5. P1 — Estabilização da referência de `refresh` e não reinicialização do polling (`RealArenaScreen.js`)
++- Adicionada a referência `stateRef = useRef(state)` sincronizada em cada renderização e nas chamadas de `setState`.
++- Removido `state` da lista de dependências de `useCallback` em `refresh`, que passa a consultar `stateRef.current` ao decidir entre exibir erro inicial ou sinalizar `syncStale`.
++- Com `refresh` e `syncSilent` referencialmente estáveis ao longo da participação ativa, atualizações sucessivas de posição ou estado da fila **não** reiniciam o `useFocusEffect`, **não** recriam o timer de 5 segundos, **não** disparam consultas extras e **não** reenviam `isInitial: true` ao gerenciador de alertas.
++
++### 2.6. P2 — Remoção de condicional envolvendo `useEffect` (`HomeFlowScreen.js`)
++- Removido o bloco condicional `if (typeof useEffect === 'function')` em `ExternalQueueScreen`.
++- Mantidos ambos os hooks `useEffect` (listener de `AppState` e timer de 5s) diretamente no nível superior do componente.
++- Adaptado o mock de `react` em `homeFlow.test.cjs` para expor `useEffect` e `useRef`.
++
 +---
 +
-+## 3. Matriz dos 10 Cenários de Testes Automatizados
++## 3. Matriz dos Cenários de Testes Automatizados
 +
-+O arquivo `app/tests/autoQueueSync.test.cjs` foi atualizado para cobrir expressamente os 10 cenários especificados:
++O arquivo `app/tests/autoQueueSync.test.cjs` foi atualizado para cobrir expressamente todos os cenários especificados:
 +
 +| # | Cenário Solicitado | Arquivo / Módulo Testado | Descrição da Validação |
 +|---|---|---|---|
@@ -1927,9 +2266,11 @@ index 00000000..04a319a7
 +| 5 | Retomada sem vibração retroativa | `queueAlertService.js` / `RealArenaScreen.js` | Primeira sincronização ao voltar ao primeiro plano não vibra para chamada já ocorrida. |
 +| 6 | Nova chamada legítima após retomada | `queueAlertService.js` | Nova chamada com nova estação/sessão identificada enquanto o app está ativo dispara vibração. |
 +| 7 | Ausência de vibrações duplicadas | `queueAlertService.js` | Polling repetido a cada 5s com a mesma chamada não vibra mais de uma vez. |
-+| 8 | Suspensão e retomada do polling conforme o foco | `RealArenaScreen.js` / `HomeFlowScreen.js` | Intervalo de 5s é cancelado no blur e reativado no foco. |
++| 8 | Suspensão e retomada do polling conforme o foco | `RealArenaScreen.js` / `HomeFlowScreen.js` | Intervalo de 5s é cancelado no blur e reativado no foco com um único timer ativo. |
 +| 9 | Falha de conexão com preservação da posição e aviso visual | `participationService.js` / `HomeFlowScreen.js` / `RealArenaScreen.js` | Dados confirmados permanecem visíveis e aviso discreto é renderizado em ambas as telas. |
 +| 10 | Recuperação da conexão com remoção do aviso | `participationService.js` / `HomeFlowScreen.js` / `RealArenaScreen.js` | Sucesso na consulta seguinte limpa `syncStale` e oculta o aviso discreto. |
++| 11 | Atualizações sucessivas de posição sem reinicializar polling | `RealArenaScreen.js` | Avanço de posições (3 → 2 → 1) mantém `useFocusEffect` intacto, 1 único timer de 5s e sem consultas extras. |
++| 12 | Funcionamento da fila externa com hooks incondicionais | `HomeFlowScreen.js` | `useEffect` e `useIsFocused` no nível superior suspendem no blur e retomam no foco. |
 +
 +---
 +
@@ -1940,10 +2281,10 @@ index 00000000..04a319a7
 +| `app/services/queueAlertService.js` | Adicionados `isResuming` e `suppressVibration`; registro de chaves sem vibração no background; isolamento por conta/sessão/participação. |
 +| `app/services/participationService.js` | Flag `syncStale` no estado do store; preservação de dados e marcação de instabilidade em falha do `syncCurrentSilent()`. |
 +| `app/context/ParticipationContext.js` | Exposição da propriedade `syncStale` no contexto para consumo nas telas. |
-+| `app/screens/home/HomeFlowScreen.js` | Chamada incondicional de `useIsFocused()`; aviso discreto de conexão instável sem desmontagem; remoção de `useSafeIsFocused()`. |
-+| `app/screens/arena/RealArenaScreen.js` | Controle in-flight `syncInFlightRef`; controle de sequência `readSeqRef`; descarte de respostas defasadas/sessão; supressão de vibração na retomada; banner discreto `syncWarningCard`. |
-+| `app/tests/autoQueueSync.test.cjs` | Cobertura estruturada dos 10 cenários da especificação. |
-+| `app/tests/homeFlow.test.cjs` | Mock explícito de `@react-navigation/native` para compatibilidade com o hook de foco. |
++| `app/screens/home/HomeFlowScreen.js` | Chamada incondicional de `useIsFocused()` e `useEffect()`; aviso discreto de conexão instável sem desmontagem; remoção de `useSafeIsFocused()`. |
++| `app/screens/arena/RealArenaScreen.js` | Estabilização de `refresh` via `stateRef`; controle in-flight `syncInFlightRef`; controle de sequência `readSeqRef`; descarte de respostas defasadas/sessão; supressão de vibração na retomada; banner discreto `syncWarningCard`. |
++| `app/tests/autoQueueSync.test.cjs` | Cobertura estruturada dos cenários de concorrência, foco, retomada, conexão instável e estabilidade de timer em atualizações sucessivas. |
++| `app/tests/homeFlow.test.cjs` | Mock explícito de `@react-navigation/native`, `useEffect` e `useRef` para compatibilidade com hooks incondicionais. |
 +| `app/tests/helpers/questionnaireHarness.cjs` | Fallback seguro para `@react-navigation/native` na resolução de módulos do harness. |
 +
 +---

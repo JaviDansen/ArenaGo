@@ -31,6 +31,8 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
   const syncInFlightRef = useRef(false);
   const resumingFromBackgroundRef = useRef(false);
   const [state, setState] = useState(null);
+  const stateRef = useRef(state);
+  stateRef.current = state;
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -89,6 +91,7 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
         authRef.current?.user?.id === userId &&
         (typeof getEpoch !== 'function' || getEpoch() === epoch)
       ) {
+        stateRef.current = next;
         setState(next);
         setNotice(null);
         setSyncStale(false);
@@ -105,7 +108,7 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
         focusGeneration.current === currentFocusGen &&
         currentSeq === readSeqRef.current
       ) {
-        if (state) {
+        if (stateRef.current) {
           setSyncStale(true);
         } else {
           setError(describeArenaError(err));
@@ -115,7 +118,7 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
       syncInFlightRef.current = false;
       if (focused.current && currentSeq === readSeqRef.current) setLoading(false);
     }
-  }, [coordinator, context, participationId, userId, epoch, getEpoch, state]);
+  }, [coordinator, context, participationId, userId, epoch, getEpoch]);
 
   const syncSilent = useCallback(async () => {
     if (!focused.current || busyRef.current || finishedRef.current || syncInFlightRef.current) return;
@@ -133,6 +136,7 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
         authRef.current?.user?.id === userId &&
         (typeof getEpoch !== 'function' || getEpoch() === epoch)
       ) {
+        stateRef.current = next;
         setState(next);
         setSyncStale(false);
         const isResuming = resumingFromBackgroundRef.current;
@@ -203,7 +207,10 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
     try {
       const result = await coordinator.join(context, experienceId);
       if (!focused.current) return;
-      if (result.state) setState(result.state);
+      if (result.state) {
+        stateRef.current = result.state;
+        setState(result.state);
+      }
       if (result.kind === 'confirmed') setNotice('Entrada na fila confirmada pelo servidor.');
       else if (result.kind === 'already') setNotice('Você já possui uma entrada na fila.');
       else if (result.kind === 'pending_other') setError('Há outra tentativa de fila pendente nesta conta. Nenhuma nova entrada foi enviada.');

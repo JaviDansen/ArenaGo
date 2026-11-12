@@ -4,7 +4,7 @@
 **Branch:** `feature/participant-auto-queue-sync`<br>
 **Prioridade:** P0 — Apresentação em 13/11/2026, às 19h<br>
 **Data da Implementação Inicial:** 11/11/2026<br>
-**Revisão Técnica e Correções:** 11/11/2026 (após revisão do commit `2de957b`)
+**Revisão Técnica e Correções:** 11/11/2026 (após revisão dos commits `2de957b` e `87316ca`)
 
 ---
 
@@ -60,11 +60,21 @@ A task **AUTO-QUEUE-01** implementa a sincronização periódica (polling de 5 s
   - A nota da fila interna informa que a conexão oscilou e está tentando reconectar.
   - No próximo polling bem-sucedido, o banner é removido e a nota volta à indicação regular de 5 segundos.
 
+### 2.5. P1 — Estabilização da referência de `refresh` e não reinicialização do polling (`RealArenaScreen.js`)
+- Adicionada a referência `stateRef = useRef(state)` sincronizada em cada renderização e nas chamadas de `setState`.
+- Removido `state` da lista de dependências de `useCallback` em `refresh`, que passa a consultar `stateRef.current` ao decidir entre exibir erro inicial ou sinalizar `syncStale`.
+- Com `refresh` e `syncSilent` referencialmente estáveis ao longo da participação ativa, atualizações sucessivas de posição ou estado da fila **não** reiniciam o `useFocusEffect`, **não** recriam o timer de 5 segundos, **não** disparam consultas extras e **não** reenviam `isInitial: true` ao gerenciador de alertas.
+
+### 2.6. P2 — Remoção de condicional envolvendo `useEffect` (`HomeFlowScreen.js`)
+- Removido o bloco condicional `if (typeof useEffect === 'function')` em `ExternalQueueScreen`.
+- Mantidos ambos os hooks `useEffect` (listener de `AppState` e timer de 5s) diretamente no nível superior do componente.
+- Adaptado o mock de `react` em `homeFlow.test.cjs` para expor `useEffect` e `useRef`.
+
 ---
 
-## 3. Matriz dos 10 Cenários de Testes Automatizados
+## 3. Matriz dos Cenários de Testes Automatizados
 
-O arquivo `app/tests/autoQueueSync.test.cjs` foi atualizado para cobrir expressamente os 10 cenários especificados:
+O arquivo `app/tests/autoQueueSync.test.cjs` foi atualizado para cobrir expressamente todos os cenários especificados:
 
 | # | Cenário Solicitado | Arquivo / Módulo Testado | Descrição da Validação |
 |---|---|---|---|
@@ -75,9 +85,11 @@ O arquivo `app/tests/autoQueueSync.test.cjs` foi atualizado para cobrir expressa
 | 5 | Retomada sem vibração retroativa | `queueAlertService.js` / `RealArenaScreen.js` | Primeira sincronização ao voltar ao primeiro plano não vibra para chamada já ocorrida. |
 | 6 | Nova chamada legítima após retomada | `queueAlertService.js` | Nova chamada com nova estação/sessão identificada enquanto o app está ativo dispara vibração. |
 | 7 | Ausência de vibrações duplicadas | `queueAlertService.js` | Polling repetido a cada 5s com a mesma chamada não vibra mais de uma vez. |
-| 8 | Suspensão e retomada do polling conforme o foco | `RealArenaScreen.js` / `HomeFlowScreen.js` | Intervalo de 5s é cancelado no blur e reativado no foco. |
+| 8 | Suspensão e retomada do polling conforme o foco | `RealArenaScreen.js` / `HomeFlowScreen.js` | Intervalo de 5s é cancelado no blur e reativado no foco com um único timer ativo. |
 | 9 | Falha de conexão com preservação da posição e aviso visual | `participationService.js` / `HomeFlowScreen.js` / `RealArenaScreen.js` | Dados confirmados permanecem visíveis e aviso discreto é renderizado em ambas as telas. |
 | 10 | Recuperação da conexão com remoção do aviso | `participationService.js` / `HomeFlowScreen.js` / `RealArenaScreen.js` | Sucesso na consulta seguinte limpa `syncStale` e oculta o aviso discreto. |
+| 11 | Atualizações sucessivas de posição sem reinicializar polling | `RealArenaScreen.js` | Avanço de posições (3 → 2 → 1) mantém `useFocusEffect` intacto, 1 único timer de 5s e sem consultas extras. |
+| 12 | Funcionamento da fila externa com hooks incondicionais | `HomeFlowScreen.js` | `useEffect` e `useIsFocused` no nível superior suspendem no blur e retomam no foco. |
 
 ---
 
@@ -88,10 +100,10 @@ O arquivo `app/tests/autoQueueSync.test.cjs` foi atualizado para cobrir expressa
 | `app/services/queueAlertService.js` | Adicionados `isResuming` e `suppressVibration`; registro de chaves sem vibração no background; isolamento por conta/sessão/participação. |
 | `app/services/participationService.js` | Flag `syncStale` no estado do store; preservação de dados e marcação de instabilidade em falha do `syncCurrentSilent()`. |
 | `app/context/ParticipationContext.js` | Exposição da propriedade `syncStale` no contexto para consumo nas telas. |
-| `app/screens/home/HomeFlowScreen.js` | Chamada incondicional de `useIsFocused()`; aviso discreto de conexão instável sem desmontagem; remoção de `useSafeIsFocused()`. |
-| `app/screens/arena/RealArenaScreen.js` | Controle in-flight `syncInFlightRef`; controle de sequência `readSeqRef`; descarte de respostas defasadas/sessão; supressão de vibração na retomada; banner discreto `syncWarningCard`. |
-| `app/tests/autoQueueSync.test.cjs` | Cobertura estruturada dos 10 cenários da especificação. |
-| `app/tests/homeFlow.test.cjs` | Mock explícito de `@react-navigation/native` para compatibilidade com o hook de foco. |
+| `app/screens/home/HomeFlowScreen.js` | Chamada incondicional de `useIsFocused()` e `useEffect()`; aviso discreto de conexão instável sem desmontagem; remoção de `useSafeIsFocused()`. |
+| `app/screens/arena/RealArenaScreen.js` | Estabilização de `refresh` via `stateRef`; controle in-flight `syncInFlightRef`; controle de sequência `readSeqRef`; descarte de respostas defasadas/sessão; supressão de vibração na retomada; banner discreto `syncWarningCard`. |
+| `app/tests/autoQueueSync.test.cjs` | Cobertura estruturada dos cenários de concorrência, foco, retomada, conexão instável e estabilidade de timer em atualizações sucessivas. |
+| `app/tests/homeFlow.test.cjs` | Mock explícito de `@react-navigation/native`, `useEffect` e `useRef` para compatibilidade com hooks incondicionais. |
 | `app/tests/helpers/questionnaireHarness.cjs` | Fallback seguro para `@react-navigation/native` na resolução de módulos do harness. |
 
 ---
