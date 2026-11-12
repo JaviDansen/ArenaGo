@@ -343,6 +343,10 @@ test('tela real remove chamado somente após confirmação e atualiza estação 
     assert.ok(app.hasText('Concluir atendimento'));
     assert.ok(app.hasText('Registrar ausência'));
     assert.ok(app.hasText('Remover da fila'));
+    await app.press('Concluir atendimento'); assert.equal(app.modal().props.visible, true);
+    await app.press('CANCELAR OPERAÇÃO'); assert.equal(posts, 0);
+    await app.press('Registrar ausência'); assert.equal(app.modal().props.visible, true);
+    await app.press('CANCELAR OPERAÇÃO'); assert.equal(posts, 0);
     await app.press('Remover da fila'); assert.equal(posts, 0);
     await app.press('CANCELAR OPERAÇÃO'); assert.equal(posts, 0);
     await app.press('Remover da fila'); await app.press('CONFIRMAR OPERAÇÃO');
@@ -377,7 +381,7 @@ test('painel real separa entrada, estações e fila compartilhada por experiênc
   app.dispose();
 });
 
-test('estação real chama pelo backend com intenção persistida e bloqueia reenvio incerto', { skip }, async () => {
+test('estação real chama diretamente pelo backend com intenção persistida e sem duplo envio', { skip }, async () => {
   const secure = new Map(); let posts = 0;
   const calledId = '77777777-7777-4777-8777-777777777777';
   const control = { realStaff: true, platformOS: 'ios', events: [staffEvent], stations: [realStation],
@@ -404,10 +408,65 @@ test('estação real chama pelo backend com intenção persistida e bloqueia ree
   await app.press('Selecionar evento Evento autorizado'); await app.press('Estações');
   await app.press('Selecionar estação Estação real');
   assert.ok(app.hasText('Ana'));
-  await app.press('Chamar próximo'); await app.press('CONFIRMAR OPERAÇÃO');
+  const call = app.handler('Chamar próximo');
+  await app.act(async () => { await Promise.all([call(), call()]); });
+  assert.equal(app.modal().props.visible, false);
   assert.equal(posts, 1); assert.ok(app.hasText('Operação confirmada pelo servidor'));
   assert.ok(!app.hasText('Rafael T.'));
   app.dispose();
+});
+
+test('chamada direta da estação não reenvia após resposta incerta nem após atualizar', { skip }, async () => {
+  const secure = new Map(); let posts = 0;
+  const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
+  const control = { realStaff: true, platformOS: 'ios', events: [staffEvent], stations: [realStation],
+    experiences: [{ id: realExperienceId, name: 'Experiência real' }],
+    secureStore: { isAvailableAsync: async () => true, getItemAsync: async key => secure.get(key) ?? null,
+      setItemAsync: async (key, value) => { secure.set(key, value); }, deleteItemAsync: async key => { secure.delete(key); } },
+    operational: { eventId: staffEvent.id, experienceId: realExperienceId, stationId: realStation.id,
+      availability: 'available', canCall: true, waitingCount: 1,
+      waiting: [{ queueEntryId: '77777777-7777-4777-8777-777777777777', displayName: 'Ana', position: 1 }], pending: null },
+    http: async (route) => {
+      if (route.endsWith('/queue')) return { body: { eventId: staffEvent.id, experienceId: realExperienceId,
+        waitingCount: 1, canCallWaitingEntries: true, firstWaitingQueueEntryId: '77777777-7777-4777-8777-777777777777' } };
+      if (route.endsWith('/call-next')) { posts++; assert.ok([...secure.values()].some(raw => raw.includes('dispatching')));
+        throw Object.assign(new Error('offline'), { isNetworkError: true }); }
+      return undefined;
+    } };
+  const app = createIntegration({ initialUser: staffUser, control });
+  try {
+    await app.mount(); await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
+    await app.press('Selecionar evento Evento autorizado'); await app.press('Estações');
+    await app.press('Selecionar estação Estação real');
+    await app.press('Chamar próximo');
+    assert.equal(posts, 1); assert.equal(app.modal().props.visible, false);
+    assert.ok(app.hasText('Resultado incerto'));
+    await app.press('Atualizar atendimento');
+    assert.equal(posts, 1);
+    assert.ok([...secure.values()].some(raw => raw.includes('dispatching')));
+  } finally { app.dispose(); }
+});
+
+test('chamada direta da estação capturada antes do logout não envia POST', { skip }, async () => {
+  let posts = 0;
+  const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
+  const control = { realStaff: true, platformOS: 'ios', events: [staffEvent], stations: [realStation],
+    experiences: [{ id: realExperienceId, name: 'Experiência real' }],
+    secureStore: { isAvailableAsync: async () => true, getItemAsync: async () => null,
+      setItemAsync: async () => {}, deleteItemAsync: async () => {} },
+    operational: { eventId: staffEvent.id, experienceId: realExperienceId, stationId: realStation.id,
+      availability: 'available', canCall: true, waitingCount: 1,
+      waiting: [{ queueEntryId: '77777777-7777-4777-8777-777777777777', displayName: 'Ana', position: 1 }], pending: null },
+    http: async route => { if (route.endsWith('/call-next')) posts++; return undefined; } };
+  const app = createIntegration({ initialUser: staffUser, control });
+  try {
+    await app.mount(); await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
+    await app.press('Selecionar evento Evento autorizado'); await app.press('Estações');
+    await app.press('Selecionar estação Estação real');
+    const old = app.handler('Chamar próximo');
+    await app.act(() => app.manager.logout()); await app.act(async () => old());
+    assert.equal(posts, 0);
+  } finally { app.dispose(); }
 });
 
 test('tela da estação recupera reconhecimento após exclusão ambígua e não reconhece recibo posterior', { skip }, async () => {
@@ -672,22 +731,33 @@ test('Controle de Entrada real confirma primeiro, desativa, reativa e volta pres
   await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
   await app.press('Selecionar evento Evento autorizado'); await app.press('Controle de Entrada');
   assert.ok(app.hasText('1. Ana')); assert.ok(!app.hasText('Confirmar entrada de Ana'));
-  await app.press('Chamar próximo'); await app.press('CANCELAR ALTERAÇÃO');
-  assert.equal(requests.filter(r => r.method === 'POST').length, 0);
-  await app.press('Chamar próximo'); await app.press('CONFIRMAR ALTERAÇÃO'); await app.press('Entendi');
+  const call = app.handler('Chamar próximo');
+  await app.act(async () => { await Promise.all([call(), call()]); });
+  assert.equal(app.modal().props.visible, false);
+  assert.equal(requests.filter(r => r.method === 'POST').length, 1);
+  await app.press('Entendi');
   assert.ok(app.hasText('Participante chamado: Ana'));
   assert.ok(app.hasText('Confirmar entrada')); assert.ok(app.hasText('Marcar ausência')); assert.ok(app.hasText('Remover da fila'));
+  await app.press('Marcar ausência'); assert.equal(app.modal().props.visible, true);
+  await app.press('CANCELAR ALTERAÇÃO');
+  await app.press('Remover da fila'); assert.equal(app.modal().props.visible, true);
+  await app.press('CANCELAR ALTERAÇÃO');
   await app.press('Confirmar entrada'); await app.press('CONFIRMAR ALTERAÇÃO');
   assert.ok(app.hasText('Entrada confirmada pelo servidor')); assert.ok(app.hasText('1. Bia'));
-  await app.press('Entendi'); await app.press('Desativar fila externa'); await app.press('CONFIRMAR ALTERAÇÃO');
+  await app.press('Entendi'); await app.press('Desativar fila externa'); assert.equal(app.modal().props.visible, true);
+  await app.press('CANCELAR ALTERAÇÃO'); assert.equal(requests.filter(r => r.method === 'PATCH').length, 0);
+  await app.press('Desativar fila externa'); await app.press('CONFIRMAR ALTERAÇÃO');
   assert.ok(app.hasText('Participantes liberados: 1')); await app.press('Entendi');
-  await app.press('Reativar fila externa'); await app.press('CONFIRMAR ALTERAÇÃO'); await app.press('Entendi');
+  const reactivate = app.handler('Reativar fila externa');
+  await app.act(async () => { await Promise.all([reactivate(), reactivate()]); });
+  assert.equal(app.modal().props.visible, false);
+  await app.press('Entendi');
   assert.ok(app.hasText('Ninguém está aguardando')); await app.press('Voltar ao painel'); assert.ok(app.hasText('Painel operacional'));
   assert.equal(requests.filter(r => r.method === 'POST').length, 2); assert.equal(requests.filter(r => r.method === 'PATCH').length, 2);
   app.dispose();
 });
 
-test('confirmação de entrada aberta antes do logout não envia operação na sessão seguinte', { skip }, async () => {
+test('chamada direta capturada antes do logout não envia operação na sessão seguinte', { skip }, async () => {
   const values = new Map(), at = '2026-11-10T15:00:00.000Z'; let mutations = 0;
   const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
   const control = { realStaff: true, platformOS: 'android', events: [staffEvent],
@@ -700,9 +770,36 @@ test('confirmação de entrada aberta antes do logout não envia operação na s
     } };
   const app = createIntegration({ initialUser: staffUser, control }); await app.mount();
   await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
-  await app.press('Selecionar evento Evento autorizado'); await app.press('Controle de Entrada'); await app.press('Chamar próximo');
-  const old = app.handler('CONFIRMAR ALTERAÇÃO'); await app.act(() => app.manager.logout()); await app.act(async () => old());
+  await app.press('Selecionar evento Evento autorizado'); await app.press('Controle de Entrada');
+  const old = app.handler('Chamar próximo'); await app.act(() => app.manager.logout()); await app.act(async () => old());
   assert.equal(mutations, 0); assert.ok(!app.hasText('1. Ana')); app.dispose();
+});
+
+test('chamada direta externa mantém intenção incerta e não repete POST após atualização', { skip }, async () => {
+  const values = new Map(), at = '2026-11-10T15:00:00.000Z'; let posts = 0;
+  const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
+  const control = { realStaff: true, platformOS: 'android', events: [staffEvent],
+    secureStore: { getItemAsync: async key => values.get(key) ?? null,
+      setItemAsync: async (key, value) => { values.set(key, value); } },
+    http: async (route, options) => {
+      if (!route.includes('/entry-control')) return;
+      if (options.method === 'POST') { posts++; assert.ok([...values.values()].some(raw => raw.includes('dispatching')));
+        throw Object.assign(new Error('offline'), { isNetworkError: true }); }
+      return { eventId: staffEvent.id, externalQueueEnabled: true, canManage: true, pendingCall: null,
+        canCall: true, canConfirm: false, canMarkAbsent: false, canRemove: false, observedAt: at, waitingCount: 1,
+        waiting: [{ participationId: 'abcdef00-0000-4000-8000-000000000004', displayName: 'Ana', position: 1 }] };
+    } };
+  const app = createIntegration({ initialUser: staffUser, control });
+  try {
+    await app.mount(); await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
+    await app.press('Selecionar evento Evento autorizado'); await app.press('Controle de Entrada');
+    await app.press('Chamar próximo');
+    assert.equal(posts, 1); assert.equal(app.modal().props.visible, false);
+    assert.ok(app.hasText('O resultado de uma solicitação ainda não foi confirmado'));
+    await app.press('Atualizar fila de entrada');
+    assert.equal(posts, 1);
+    assert.ok([...values.values()].some(raw => raw.includes('dispatching')));
+  } finally { app.dispose(); }
 });
 
 test('401 terminal no Controle de Entrada remove lista nominal e área Staff', { skip }, async () => {

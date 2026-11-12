@@ -45,6 +45,7 @@ export default function StaffStationOperationalScreen({ event, experience, stati
   const [dialog, setDialog] = useState(null);
   const dialogRef = useRef(dialog);
   dialogRef.current = dialog;
+  const dispatching = useRef(false);
   const generation = useRef(0);
   const epoch = auth.getSessionEpoch(), revision = auth.getIdentityRevision();
   const context = getContext();
@@ -83,29 +84,37 @@ export default function StaffStationOperationalScreen({ event, experience, stati
   }, [event.id, experience.id, station.id, auth.user?.id, auth.sessionId, epoch, revision]);
 
   const blocked = !same(view.scope, context) || view.busy || view.status !== 'ready' || !coordinator ||
-    (view.pending && view.pending.kind !== 'none');
+    dispatching.current || (view.pending && view.pending.kind !== 'none');
   const open = action => {
     if (!blocked && context) setDialog({ action, context, observed: view.data });
   };
-  async function confirm(expected) {
-    if (!expected || dialogRef.current !== expected || !same(expected.context, getContext()) ||
+  async function dispatch(expected, fromDialog = false) {
+    if (!expected || dispatching.current || !coordinator || (fromDialog && dialogRef.current !== expected) ||
+        (!fromDialog && (expected.action.kind !== 'call' || dialogRef.current)) ||
+        !same(expected.context, getContext()) ||
         !same(viewRef.current.scope, getContext()) || viewRef.current.busy || viewRef.current.status !== 'ready' ||
         (viewRef.current.pending && viewRef.current.pending.kind !== 'none')) return;
+    if (expected.action.kind === 'call' && (!viewRef.current.data?.canCall ||
+        viewRef.current.data.pending || viewRef.current.data.waitingCount === 0 ||
+        viewRef.current.data.availability !== 'available')) return;
+    dispatching.current = true;
     dialogRef.current = null; setDialog(null);
     const scope = expected.context;
     setView(previous => ({ ...previous, busy: true, feedback: null }));
-    let result;
     try {
-      const action = expected.action;
-      result = action.kind === 'call' ? await coordinator.callNext(scope, experience.id, station.id)
-        : action.kind === 'complete' ? await coordinator.complete(scope, action.serviceSessionId, station.id)
-          : action.kind === 'absent' ? await coordinator.absent(scope, action.serviceSessionId, station.id)
-            : await coordinator.removeCalled(scope, experience.id, station.id, action.serviceSessionId);
-    } catch { result = { kind: 'storage_error' }; }
-    if (!same(scope, getContext())) return;
-    setView(previous => ({ ...previous, busy: false, feedback: result }));
-    await refresh(true);
-    if (same(scope, getContext())) onChanged();
+      let result;
+      try {
+        const action = expected.action;
+        result = action.kind === 'call' ? await coordinator.callNext(scope, experience.id, station.id)
+          : action.kind === 'complete' ? await coordinator.complete(scope, action.serviceSessionId, station.id)
+            : action.kind === 'absent' ? await coordinator.absent(scope, action.serviceSessionId, station.id)
+              : await coordinator.removeCalled(scope, experience.id, station.id, action.serviceSessionId);
+      } catch { result = { kind: 'storage_error' }; }
+      if (!same(scope, getContext())) return;
+      setView(previous => ({ ...previous, busy: false, feedback: result }));
+      await refresh(true);
+      if (same(scope, getContext())) onChanged();
+    } finally { dispatching.current = false; }
   }
 
   async function resolvePending(expected, scope) {
@@ -160,7 +169,7 @@ export default function StaffStationOperationalScreen({ event, experience, stati
         <Button label="Registrar ausência" disabled={blocked} onPress={() => open({ kind: 'absent', serviceSessionId: data.pending.serviceSessionId })} />
         <Button label="Remover da fila" disabled={blocked} onPress={() => open({ kind: 'remove_called', serviceSessionId: data.pending.serviceSessionId })} />
       </View> : <Button label="Chamar próximo" disabled={blocked || !data.canCall || data.waitingCount === 0}
-        onPress={() => open({ kind: 'call' })} />}
+        onPress={() => dispatch({ action: { kind: 'call' }, context })} />}
       {data.waitingCount === 0 && <Text style={styles.text}>Nenhuma pessoa aguardando nesta experiência.</Text>}
       {data.waiting.map(person => <View key={person.queueEntryId} style={styles.card}>
         <Text style={styles.text}>{person.position}. {person.displayName}</Text>
@@ -186,7 +195,7 @@ export default function StaffStationOperationalScreen({ event, experience, stati
             : dialog?.action.kind === 'absent' ? 'Registrar ausência?'
               : 'Remover pessoa da fila?'}</Text>
         <Text style={styles.text}>Confirme a operação presencial. Uma resposta incerta bloqueará novas ações até reconciliação.</Text>
-        <Button label="CONFIRMAR OPERAÇÃO" onPress={() => confirm(dialog)} />
+        <Button label="CONFIRMAR OPERAÇÃO" onPress={() => dispatch(dialog, true)} />
         <Button label="CANCELAR OPERAÇÃO" onPress={() => { dialogRef.current = null; setDialog(null); }} />
       </View></View>
     </Modal>

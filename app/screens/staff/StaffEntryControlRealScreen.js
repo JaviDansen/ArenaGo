@@ -42,6 +42,12 @@ export default function StaffEntryControlRealScreen({ event, isEventCurrent, onB
   const pending = ownPending ? snapshot.pending : null;
   const disabled = snapshot.busy || snapshot.status !== 'ready' || !snapshot.data ||
     Boolean(snapshot.pending) || snapshot.storageError || !defaultStaffEntryIntentStorage.isPersistent;
+  const runDirect = (action) => {
+    if (disabled || dialogRef.current || !store.isCurrent(snapshot.context) ||
+        (action.kind === 'call' ? !snapshot.data.canCall
+          : action.kind !== 'toggle' || action.enabled !== true || !snapshot.data.canManage || snapshot.data.externalQueueEnabled)) return;
+    return store.mutate(action);
+  };
   const open = (action) => { if (!disabled && store.isCurrent()) setDialog({ action, context: snapshot.context }); };
   const confirm = (expected) => {
     if (!expected || dialogRef.current !== expected || !store.isCurrent(expected.context)) return;
@@ -65,7 +71,8 @@ export default function StaffEntryControlRealScreen({ event, isEventCurrent, onB
           : 'Novas participações entram diretamente no evento. Reativar não recoloca quem já foi liberado na fila.'}</Text>
         <Button label={snapshot.data.externalQueueEnabled ? 'Desativar fila externa' : 'Reativar fila externa'}
           danger={snapshot.data.externalQueueEnabled} disabled={disabled || !snapshot.data.canManage}
-          onPress={() => open({ kind: 'toggle', enabled: !snapshot.data.externalQueueEnabled })} />
+          onPress={() => snapshot.data.externalQueueEnabled
+            ? open({ kind: 'toggle', enabled: false }) : runDirect({ kind: 'toggle', enabled: true })} />
       </View>
       {!snapshot.data.canManage && <Text style={styles.warning}>O evento não permite entradas ou alterações da fila neste momento.</Text>}
       {snapshot.data.pendingCall ? <View style={styles.card}>
@@ -76,7 +83,7 @@ export default function StaffEntryControlRealScreen({ event, isEventCurrent, onB
           onPress={() => open({ kind: 'absent', callId: snapshot.data.pendingCall.id })} />
         <Button label="Remover da fila" danger disabled={disabled || !snapshot.data.canRemove}
           onPress={() => open({ kind: 'remove', callId: snapshot.data.pendingCall.id })} />
-      </View> : <Button label="Chamar próximo" disabled={disabled || !snapshot.data.canCall} onPress={() => open({ kind: 'call' })} />}
+      </View> : <Button label="Chamar próximo" disabled={disabled || !snapshot.data.canCall} onPress={() => runDirect({ kind: 'call' })} />}
       <Text style={styles.title}>Participantes aguardando</Text>
       {snapshot.data.waiting.length === 0 && <Text style={styles.text}>Ninguém está aguardando na fila de entrada.</Text>}
       {snapshot.data.waiting.map((person, index) => <View key={person.participationId} style={styles.card}>
