@@ -18,7 +18,7 @@ for (const name of ['react', '@react-navigation/core', '@react-navigation/router
 
 const native = Object.fromEntries([
   'ActivityIndicator', 'KeyboardAvoidingView', 'Pressable', 'ScrollView',
-  'Text', 'TextInput', 'View', 'SafeAreaView',
+  'Text', 'TextInput', 'View', 'SafeAreaView', 'Image',
 ].map(name => [name, name]));
 native.Platform = { OS: 'ios' };
 native.StyleSheet = { create: value => value };
@@ -40,11 +40,29 @@ const authContext = loadJs('app/context/AuthContext.js', {
 });
 const birthDate = loadJs('app/utils/birthDate.js', {});
 const validation = loadJs('app/utils/validation.js', { './birthDate': birthDate });
+// Render the real visual container and real theme; only native views/assets
+// are represented as host nodes. Questionnaire hooks and events stay real.
+const colors = loadJs('app/theme/colors.js', {});
+const typography = loadJs('app/theme/typography.js', {});
+const spacing = loadJs('app/theme/spacing.js', {});
+const radii = loadJs('app/theme/radii.js', {});
+const theme = loadJs('app/theme/index.js', {
+  './colors.js': colors, './typography.js': typography,
+  './spacing.js': spacing, './radii.js': radii,
+});
+const background = loadJs('app/components/ui/AuthBackground.js', {
+  react: React, 'react/jsx-runtime': jsx, 'react-native': native,
+  'react-native-safe-area-context': { SafeAreaView: 'SafeAreaView' },
+  '../../theme/colors.js': colors,
+  '../../assets/images/auth/shared-background.png': { uri: 'fixture:shared-background' },
+  '../../assets/images/auth/welcome-background.png': { uri: 'fixture:welcome-background' },
+});
 const questionnaire = loadJs('app/screens/profile/ProfileQuestionnaireScreen.js', {
   react: React, 'react/jsx-runtime': jsx, 'react-native': native,
   'expo-status-bar': { StatusBar: 'StatusBar' },
   'react-native-safe-area-context': { SafeAreaView: 'SafeAreaView' },
   '../../context/AuthContext': authContext,
+  '../../components/ui/AuthBackground': background,
   '../../components/BirthDateInput': { __esModule: true, default: 'BirthDateInput' },
   '../../utils/birthDate': birthDate, '../../utils/validation': validation,
 });
@@ -53,6 +71,7 @@ const gate = loadJs('app/screens/auth/AuthSessionGate.js', {
   'expo-status-bar': { StatusBar: 'StatusBar' },
   'react-native-safe-area-context': { SafeAreaView: 'SafeAreaView' },
   '../../context/AuthContext': authContext,
+  '../../assets/images/logo-arenago.png': { uri: 'fixture:logo' },
 });
 
 function FocusedStack(props) {
@@ -145,6 +164,7 @@ async function mount({ routed = false, catalog = [], deferCatalog = false } = {}
   const passthrough = ({ children }) => children;
   const Placeholder = ({ route }) => React.createElement('Text', null, route?.name);
   const imports = {
+    react: React,
     'react/jsx-runtime': jsx,
     'react-native-safe-area-context': { SafeAreaProvider: passthrough },
     '@react-navigation/native': { NavigationContainer: Container },
@@ -155,12 +175,14 @@ async function mount({ routed = false, catalog = [], deferCatalog = false } = {}
     './context/ParticipationContext': { ParticipationProvider: passthrough },
     './screens/auth/AuthSessionGate': gate,
     './screens/profile/ProfileQuestionnaireScreen': questionnaire,
+    './theme': theme,
   };
   for (const path of [
     './navigation/MainTabs', './screens/participation/EvaluationScreen',
     './screens/event-entry/EventConfirmationScreen', './screens/event-entry/EventEntryScreen',
     './screens/auth/ForgotPasswordScreen', './screens/auth/LoginScreen',
-    './screens/participation/ParticipationDetailsScreen',
+    './screens/participation/ParticipationRealDetailsScreen',
+    './screens/participation/RealEvaluationScreen', './screens/splash/SplashScreenGate',
     './screens/auth/RegisterScreen', './screens/auth/WelcomeScreen',
   ]) imports[path] = { __esModule: true, default: Placeholder };
   const app = loadJs('app/App.js', imports);

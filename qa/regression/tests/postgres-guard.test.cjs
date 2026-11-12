@@ -74,8 +74,9 @@ for (const [id, host] of [['A17', '127.0.0.1'], ['A18', 'localhost']]) {
   });
 }
 
-test('A19 database query parameter alone does not override the pg database path', () => {
+test('A19 database query parameter is rejected even when the driver ignores it', () => {
   const url = 'postgresql://u:p@127.0.0.1/arenago_test?database=production';
   // Negative control: do not invent a redirect that this driver does not perform.
-  assert.equal(parse(assertSafeTestDatabase(url)).database, 'arenago_test');
+  assert.equal(parse(url).database, 'arenago_test');
+  assert.throws(() => assertSafeTestDatabase(url), /Redirecionamento de banco/);
 });

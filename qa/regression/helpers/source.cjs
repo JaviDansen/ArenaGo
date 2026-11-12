@@ -57,7 +57,15 @@ function integrationCallback(prefix, globals) {
   const contents = read(relative);
   const ast = ts.createSourceFile(relative, contents, ts.ScriptTarget.Latest, true);
   const matches = [];
+  const constants = [];
   function visit(node) {
+    // Include only this real SQL literal, never module setup or arbitrary code.
+    if (ts.isVariableDeclaration(node) && node.name.getText(ast) === 'restoreQuestionnaireActivationSql') {
+      if (!node.initializer || !ts.isNoSubstitutionTemplateLiteral(node.initializer)) {
+        throw new Error('Expected a literal restoration SQL constant');
+      }
+      constants.push(node.getText(ast));
+    }
     if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
         node.expression.name.text === 'test' &&
         ts.isStringLiteral(node.arguments[0]) &&
@@ -70,7 +78,8 @@ function integrationCallback(prefix, globals) {
   if (matches.length !== 1) {
     throw new Error('Expected exactly one integration callback for ' + prefix);
   }
-  const code = ts.transpileModule('module.exports = (' + matches[0].getText(ast) + ');', {
+  if (constants.length !== 1) throw new Error('Expected exactly one restoration SQL constant');
+  const code = ts.transpileModule('const ' + constants[0] + '; module.exports = (' + matches[0].getText(ast) + ');', {
     compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS },
   }).outputText;
   return evaluate(code, path.join(root, relative), {}, globals);
