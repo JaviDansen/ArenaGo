@@ -483,9 +483,11 @@ test('C07: Button and clickable Card protect minimum 48x48dp style dimensions ag
       onPress: () => {},
       style: shrinkingOverride,
       accessibilityLabel: 'Card customizado',
+      accessibilityHint: 'Toque para abrir opções',
     },
   });
   const cardPressable = hCard.nodes.find((n) => n.type === 'Pressable');
+  assert.equal(cardPressable.props.accessibilityHint, 'Toque para abrir opções');
   const cardStyle = flattenStyle(cardPressable.props.style({ pressed: false }));
   assert.ok(cardStyle.minWidth >= 48, 'Clickable Card protects minWidth >= 48');
   assert.ok(cardStyle.minHeight >= 48, 'Clickable Card protects minHeight >= 48');

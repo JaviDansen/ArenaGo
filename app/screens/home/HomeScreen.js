@@ -104,7 +104,7 @@ export default function HomeScreen({ navigation, returnState, mode = 'ready', me
             <Badge label="ACESSO À ARENA" variant="brand" />
             <Text style={styles.heroTitle}>Pronto para jogar?</Text>
             <Text style={styles.heroDescription}>
-              Informe o código disponibilizado na estação do evento para iniciar sua participação.
+              Escaneie o QR Code ou digite o código de acesso disponibilizado pela equipe do evento para iniciar sua participação.
             </Text>
             <Button
               title="Entrar em um evento"

@@ -89,11 +89,12 @@ function createParticipantUiStubs() {
         children: text(title || children),
       },
     }),
-    Card: ({ children, onPress, disabled, accessibilityLabel, ...props }) => view(children, {
+    Card: ({ children, onPress, disabled, accessibilityLabel, accessibilityHint, ...props }) => view(children, {
       ...props,
       onPress,
       disabled,
       accessibilityLabel,
+      accessibilityHint,
     }),
     InputField: ({ label, error, value, onChangeText, ...props }) => view([
       label ? text(label) : null,
