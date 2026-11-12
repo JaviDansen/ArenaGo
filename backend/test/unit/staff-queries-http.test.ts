@@ -25,7 +25,7 @@ const stations = { eventId, stations: [{ id: id(4), experienceId, label: "Estaç
 const queue = { eventId, experienceId, observedAt: at, waitingCount: 3,
   acceptingNewEntries: false, canCallWaitingEntries: true, firstWaitingQueueEntryId: id(6) };
 let stationResult: StaffStationsResult, queueResult: StaffQueueResult, experienceResult: StaffExperiencesResult, failure: Error | undefined;
-let eventResults: Array<{ id: string; name: string; status: "open" }> = [];
+let eventResults: Array<{ id: string; name: string; status: "open"; effectivePhase: "not_ready" }> = [];
 const calls: unknown[][] = [];
 @Module({ controllers: [StaffQueriesController], providers: [SessionAuthGuard,
   { provide: AuthService, useValue: { authenticateBearerToken: async (token: string) => {
@@ -58,11 +58,11 @@ test("descoberta HTTP exige sessão e usa somente o usuário autenticado", async
   problem(await supertest(app.getHttpServer()).get("/api/v1/staff/events"), 401, "MISSING_ACCESS_TOKEN");
   problem(await get("/api/v1/staff/events").set("Authorization", "Bearer invalid"), 401, "INVALID_ACCESS_TOKEN");
   assert.equal(calls.length, 0);
-  eventResults = [{ id: eventId, name: "Arena", status: "open" }];
+  eventResults = [{ id: eventId, name: "Arena", status: "open", effectivePhase: "not_ready" }];
   Object.assign(eventResults[0], { userId: id(9), accessCode: "PRIVATE" });
   const r = await get("/api/v1/staff/events").query({ userId: id(9) });
   assert.equal(r.status, 200); assert.equal(r.headers["cache-control"], "no-store");
-  assert.deepEqual(r.body, { events: [{ id: eventId, name: "Arena", status: "open" }] });
+  assert.deepEqual(r.body, { events: [{ id: eventId, name: "Arena", status: "open", effectivePhase: "not_ready" }] });
   assert.deepEqual(calls, [["events", userId]]);
 });
 test("descoberta HTTP retorna lista vazia sem concessões", async () => {

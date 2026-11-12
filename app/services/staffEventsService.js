@@ -1,16 +1,19 @@
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const STATUSES = new Set(['scheduled', 'open', 'closing', 'closed']);
+const PHASES = new Set(['scheduled', 'open', 'closing', 'closed', 'not_ready']);
 
 export function parseStaffEvents(body) {
   if (!body || !Array.isArray(body.events)) throw new Error('Resposta inválida de eventos Staff.');
   const ids = new Set();
   return body.events.map((event) => {
     if (!event || typeof event.id !== 'string' || !UUID.test(event.id) || ids.has(event.id.toLowerCase()) ||
-        typeof event.name !== 'string' || !event.name.trim() || !STATUSES.has(event.status)) {
+        typeof event.name !== 'string' || !event.name.trim() || !STATUSES.has(event.status) ||
+        (event.effectivePhase !== undefined && !PHASES.has(event.effectivePhase))) {
       throw new Error('Resposta inválida de eventos Staff.');
     }
     ids.add(event.id.toLowerCase());
-    return { id: event.id, name: event.name, status: event.status };
+    return { id: event.id, name: event.name, status: event.status,
+      ...(event.effectivePhase === undefined ? {} : { effectivePhase: event.effectivePhase }) };
   });
 }
 

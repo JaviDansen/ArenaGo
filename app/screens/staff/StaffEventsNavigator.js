@@ -11,7 +11,8 @@ import StaffStationOperationalScreen from './StaffStationOperationalScreen';
 
 const Stack = createNativeStackNavigator();
 const StaffEventsContext = createContext(null);
-const STATUS_LABELS = { scheduled: 'Agendado', open: 'Aberto', closing: 'Em encerramento', closed: 'Encerrado' };
+const STATUS_LABELS = { scheduled: 'Agendado', open: 'Aberto', closing: 'Em encerramento', closed: 'Encerrado', not_ready: 'Não está pronto' };
+const phaseLabel = (event) => STATUS_LABELS[event.effectivePhase] ?? 'Situação indisponível';
 
 function StaffEventsProvider({ children }) {
   const auth = useAuth();
@@ -96,7 +97,7 @@ function StaffEventsScreen({ navigation }) {
               if (staff.select(event.id)) navigation.navigate('StaffEventHome');
             }}>
             <Text style={styles.eventName}>{event.name}</Text>
-            <Text style={styles.eventStatus}>{STATUS_LABELS[event.status]}</Text>
+            <Text style={styles.eventStatus}>{phaseLabel(event)}</Text>
           </Pressable>
         ))}
         <Button label="Atualizar eventos" disabled={staff.status === 'loading'} onPress={() => { void staff.refresh(); }} />
@@ -123,7 +124,7 @@ function StaffEventHomeScreen({ navigation }) {
       <ScrollView contentContainerStyle={styles.content}>
         {selected ? <>
           <Text style={styles.title}>{selected.name}</Text>
-          <Text style={styles.description}>Status: {STATUS_LABELS[selected.status]}</Text>
+          <Text style={styles.description}>Status: {phaseLabel(selected)}</Text>
           <StaffEventDashboard event={selected} staff={staff} section={section} setSection={setSection}
             stationId={stationId} setStationId={setStationId} />
         </> : <>

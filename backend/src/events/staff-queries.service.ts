@@ -5,6 +5,7 @@ import { DRIZZLE_DATABASE } from "../database/database.module";
 import type { DatabaseExecutor } from "../database/database-executor";
 import type * as schema from "../database/schema";
 import { EventsService } from "./events.service";
+import { configurationProjection } from "./admin-configuration.projection";
 import type { StaffExperiencesResult, StaffQueueResult, StaffStationsResult } from "./staff-queries.types";
 
 interface AccessRow extends Record<string, unknown> {
@@ -15,6 +16,7 @@ interface StaffEventRow extends Record<string, unknown> {
   id: string;
   name: string;
   status: "scheduled" | "open" | "closing" | "closed";
+  effectivePhase: "scheduled" | "open" | "closing" | "closed" | "not_ready";
 }
 interface StaffExperienceRow extends Record<string, unknown> {
   id: string;
@@ -54,16 +56,15 @@ export class StaffQueriesService {
   /** Lista apenas eventos com concessão Staff vigente para a conta da sessão. */
   async listEvents(staffUserId: string): Promise<StaffEventRow[]> {
     const result = await this.database.execute<StaffEventRow>(sql`
-      SELECT e.id, e.name, e.status
-      FROM events e
-      WHERE EXISTS (
+      SELECT p.id, p.name, p."statusStored" AS status, p."effectivePhase"
+      FROM (${configurationProjection(sql`EXISTS (
         SELECT 1 FROM users u JOIN user_roles r ON r.user_id=u.id
         WHERE u.id=${staffUserId} AND u.is_active=true AND u.email_verified_at IS NOT NULL
           AND r.role='staff' AND r.event_id=e.id AND r.revoked_at IS NULL
-      )
-      ORDER BY e.name, e.id
+      )`)}) p
+      ORDER BY p.name, p.id
     `);
-    return result.rows.map(({ id, name, status }) => ({ id, name, status }));
+    return result.rows.map(({ id, name, status, effectivePhase }) => ({ id, name, status, effectivePhase }));
   }
 
   private async authorize(tx: DatabaseExecutor, staffUserId: string, eventId: string) {

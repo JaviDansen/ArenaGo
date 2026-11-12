@@ -14,13 +14,13 @@ test("descoberta usa SQL parametrizado, concessão ativa e conta apta", async ()
   const queries: Array<{ text: string; params: unknown[] }> = [];
   const database = drizzle({ async query(config: { text: string }, params: unknown[]) {
     queries.push({ text: config.text, params });
-    return { rows: [{ id: "e1", name: "Arena", status: "open", accessCode: "private" }] };
+    return { rows: [{ id: "e1", name: "Arena", status: "scheduled", effectivePhase: "open", accessCode: "private" }] };
   } } as unknown as Client, { schema });
   const service = new StaffQueriesService(database, new EventsService(database));
-  assert.deepEqual(await service.listEvents(userId), [{ id: "e1", name: "Arena", status: "open" }]);
-  assert.equal(queries.length, 1); assert.deepEqual(queries[0].params, [userId]);
+  assert.deepEqual(await service.listEvents(userId), [{ id: "e1", name: "Arena", status: "scheduled", effectivePhase: "open" }]);
+  assert.equal(queries.length, 1); assert.ok(queries[0].params.includes(userId));
   for (const expression of [/r.role='staff'/, /r.event_id=e.id/, /r.revoked_at IS NULL/,
-    /u.is_active=true/, /u.email_verified_at IS NOT NULL/, /ORDER BY e.name, e.id/]) {
+    /u.is_active=true/, /u.email_verified_at IS NOT NULL/, /ORDER BY p.name, p.id/, /not_ready/, /effectivePhase/]) {
     assert.match(queries[0].text, expression);
   }
   assert.doesNotMatch(queries[0].text, /\b(insert|update|delete)\b/i);

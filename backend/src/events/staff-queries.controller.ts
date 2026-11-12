@@ -22,7 +22,7 @@ export class StaffQueriesController {
   @Header("Cache-Control", "no-store")
   async events(@CurrentUserId() userId: string) {
     const events = await this.queries.listEvents(userId);
-    return { events: events.map(({ id, name, status }) => ({ id, name, status })) };
+    return { events: events.map(({ id, name, status, effectivePhase }) => ({ id, name, status, effectivePhase })) };
   }
 
   @Get(":eventId/experiences")

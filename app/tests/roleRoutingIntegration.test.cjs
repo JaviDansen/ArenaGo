@@ -303,7 +303,21 @@ test('modal protegido fica invisível e callback antigo não executa durante err
   app.dispose();
 });
 
-const staffEvent = { id: '11111111-1111-4111-8111-111111111111', name: 'Evento autorizado', status: 'open' };
+const staffEvent = { id: '11111111-1111-4111-8111-111111111111', name: 'Evento autorizado', status: 'open', effectivePhase: 'open' };
+
+test('lista e painel exibem a fase efetiva em vez do status persistido', { skip }, async () => {
+  for (const [effectivePhase, label] of [['scheduled', 'Agendado'], ['open', 'Aberto'],
+    ['not_ready', 'Não está pronto'], ['closing', 'Em encerramento'], ['closed', 'Encerrado']]) {
+    const app = createIntegration({ initialUser: { ...participant, roles: ['staff'] },
+      control: { realStaff: true, events: [{ ...staffEvent, status: 'scheduled', effectivePhase }] } });
+    await app.mount();
+    await app.act(() => app.manager.login({ email: participant.email, password: 'password' }));
+    assert.ok(app.hasText(label));
+    await app.press('Selecionar evento Evento autorizado');
+    assert.ok(app.hasText(`Status: ${label}`));
+    app.dispose();
+  }
+});
 const realExperienceId = '33333333-3333-4333-8333-333333333333';
 const realStation = { id: '44444444-4444-4444-8444-444444444444', experienceId: realExperienceId,
   label: 'Estação real', availability: 'available', pendingServiceSessionId: null, pendingCalledAt: null };
@@ -586,8 +600,8 @@ test('401 terminal nas estações invalida sessão e remove o painel Staff', { s
 });
 
 test('trocar evento Staff descarta estações e preserva status scheduled e closed', { skip }, async () => {
-  const closedEvent = { id: '22222222-2222-4222-8222-222222222222', name: 'Evento encerrado', status: 'closed' };
-  const control = { realStaff: true, events: [{ ...staffEvent, status: 'scheduled' }, closedEvent],
+  const closedEvent = { id: '22222222-2222-4222-8222-222222222222', name: 'Evento encerrado', status: 'closed', effectivePhase: 'closed' };
+  const control = { realStaff: true, events: [{ ...staffEvent, status: 'scheduled', effectivePhase: 'scheduled' }, closedEvent],
     experiences: [{ id: realExperienceId, name: 'Experiência real' }],
     http: async (route) => {
       if (route === `/staff/events/${staffEvent.id}/stations`) return { body: { eventId: staffEvent.id, stations: [realStation] } };

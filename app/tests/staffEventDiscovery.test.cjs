@@ -16,6 +16,15 @@ test('lista Staff aceita somente o contrato conhecido e preserva o ID para sele�
     { events: [event, event] }]) assert.throws(() => parseStaffEvents(body));
 });
 
+test('fase efetiva é preservada separadamente e valores desconhecidos são recusados', () => {
+  for (const effectivePhase of ['scheduled', 'open', 'not_ready', 'closing', 'closed']) {
+    const parsed = parseStaffEvents({ events: [{ ...event, status: 'scheduled', effectivePhase }] });
+    assert.equal(parsed[0].status, 'scheduled');
+    assert.equal(parsed[0].effectivePhase, effectivePhase);
+  }
+  assert.throws(() => parseStaffEvents({ events: [{ ...event, effectivePhase: 'unknown' }] }));
+});
+
 test('consulta autenticada, seleção e atualização manual removem seleção anterior', async () => {
   let current = identity();
   const calls = [];
