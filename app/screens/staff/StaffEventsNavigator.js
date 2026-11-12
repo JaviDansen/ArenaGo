@@ -62,9 +62,9 @@ function StaffEventsProvider({ children }) {
   return <StaffEventsContext.Provider value={value}>{children}</StaffEventsContext.Provider>;
 }
 
-function Button({ label, onPress, disabled = false }) {
+function Button({ label, accessibilityLabel = label, onPress, disabled = false }) {
   return (
-    <Pressable accessibilityRole="button" accessibilityLabel={label} disabled={disabled}
+    <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel} disabled={disabled}
       onPress={disabled ? undefined : onPress} style={[styles.button, disabled && styles.disabled]}>
       <Text style={styles.buttonText}>{label}</Text>
     </Pressable>
@@ -114,7 +114,7 @@ function StaffEventHomeScreen({ navigation }) {
     if (staff.getSelected() && section !== 'panel') {
       action.preventDefault();
       setStationId(null);
-      setSection(section === 'station' ? 'stations' : 'panel');
+      setSection('panel');
     } else staff.clearSelection();
   }), [navigation, staff.clearSelection, staff.getSelected, section]);
   const selected = staff.isCurrent() ? staff.selected : null;
@@ -184,39 +184,44 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
   const station = snapshot.stations.find((item) => item.id === stationId);
   const stationExperience = station && experiencesById.get(station.experienceId);
   const ready = snapshot.stationStatus === 'ready' && snapshot.experienceStatus === 'ready';
-  const refresh = () => { setStationId(null); setSection('stations'); void store.refreshStations(); void store.refreshExperiences(); };
+  const dashboardErrors = [...new Set([
+    snapshot.stationStatus === 'error' ? snapshot.stationError : null,
+    snapshot.experienceStatus === 'error' ? snapshot.experienceError : null,
+  ].filter(Boolean))];
+  const refresh = () => { void store.refreshStations(); void store.refreshExperiences(); };
   return <>
+    {(section === 'panel' || section === 'station') && dashboardErrors.map((kind) =>
+      <Text key={kind} accessibilityRole="alert" style={styles.message}>{messages[kind]}</Text>)}
     {section === 'panel' && <>
       <Text style={styles.title}>Painel operacional</Text>
       <Button label="Controle de Entrada" onPress={() => setSection('entry')} />
-      <Button label="Estações" onPress={() => setSection('stations')} />
+      <Text style={styles.title}>Estações do evento</Text>
+    {snapshot.stationStatus === 'loading' && <Text style={styles.message}>Carregando estações...</Text>}
+    {snapshot.experienceStatus === 'loading' && <Text style={styles.message}>Carregando experiências...</Text>}
+    {ready && snapshot.stations.length === 0 &&
+      <Text style={styles.message}>Nenhuma estação encontrada neste evento.</Text>}
+    {ready && snapshot.experiences.length === 0 &&
+      <Text style={styles.message}>Nenhuma experiência encontrada neste evento.</Text>}
+    {ready && snapshot.experiences.map((experience) => <View key={experience.id} style={styles.experienceGroup}>
+      {snapshot.experiences.length > 1 && <Text style={styles.eventName}>{experience.name}</Text>}
+      {snapshot.stations.filter((item) => item.experienceId === experience.id).length === 0 &&
+        <Text style={styles.message}>Nenhuma estação associada.</Text>}
+      {snapshot.stations.filter((item) => item.experienceId === experience.id).map((item) => <View key={item.id} style={styles.event}>
+        <Text style={styles.eventName}>{item.label}</Text>
+        <Text style={styles.message}>Disponibilidade: {item.availability === 'available' ? 'Disponível' : 'Indisponível'}</Text>
+        <Text style={styles.message}>Atendimento pendente: {item.pendingServiceSessionId ? 'Sim' : 'Não'}</Text>
+        <Button label={`Selecionar estação ${item.label}`}
+          accessibilityLabel={`Selecionar estação ${item.label} da experiência ${experience.name}`} onPress={() => {
+          setStationId(item.id); setSection('station'); void store.refreshQueue(item.experienceId);
+        }} />
+      </View>)}
+    </View>)}
+    <Button label="Atualizar estações" disabled={snapshot.stationStatus === 'loading' || snapshot.experienceStatus === 'loading'} onPress={refresh} />
     </>}
     {section === 'entry' && <StaffEntryControlRealScreen event={event}
       isEventCurrent={() => staff.getSelected()?.id === event.id} onBack={() => setSection('panel')} />}
-    {(section === 'stations' || section === 'station') && <>
-    <Text style={styles.title}>Estações</Text>
-    {snapshot.stationStatus === 'loading' && <Text style={styles.message}>Carregando estações...</Text>}
-    {snapshot.stationStatus === 'error' && <Text accessibilityRole="alert" style={styles.message}>{messages[snapshot.stationError]}</Text>}
-    {snapshot.experienceStatus === 'loading' && <Text style={styles.message}>Carregando experiências...</Text>}
-    {snapshot.experienceStatus === 'error' && <Text accessibilityRole="alert" style={styles.message}>{messages[snapshot.experienceError]}</Text>}
-    {section === 'stations' && ready && snapshot.stations.length === 0 &&
-      <Text style={styles.message}>Nenhuma estação encontrada neste evento.</Text>}
-    {section === 'stations' && ready && snapshot.experiences.length === 0 &&
-      <Text style={styles.message}>Nenhuma experiência encontrada neste evento.</Text>}
-    {section === 'stations' && ready && snapshot.stations.map((item) => <View key={item.id} style={styles.event}>
-      <Text style={styles.eventName}>{item.label}</Text>
-      <Text style={styles.message}>Experiência: {experiencesById.get(item.experienceId)?.name ?? 'Dados da experiência indisponíveis'}</Text>
-      <Text style={styles.message}>Disponibilidade: {item.availability === 'available' ? 'Disponível' : 'Indisponível'}</Text>
-      <Text style={styles.message}>Atendimento pendente: {item.pendingServiceSessionId ? 'Sim' : 'Não'}</Text>
-      {experiencesById.has(item.experienceId) && <Button label={`Selecionar estação ${item.label}`} onPress={() => {
-        setStationId(item.id); setSection('station'); void store.refreshQueue(item.experienceId);
-      }} />}
-    </View>)}
-    {section === 'stations' && ready && snapshot.experiences.filter((experience) =>
-      !snapshot.stations.some((item) => item.experienceId === experience.id)).map((experience) =>
-      <Text key={experience.id} style={styles.message}>{experience.name}: nenhuma estação associada.</Text>)}
-    {section === 'stations' && <Button label="Atualizar estações" disabled={snapshot.stationStatus === 'loading' || snapshot.experienceStatus === 'loading'} onPress={refresh} />}
-    {section === 'station' && ready && station && stationExperience && <>
+    {section === 'station' && <>
+    {ready && station && stationExperience && <>
       <Text style={styles.eventName}>{station.label}</Text>
       <Text style={styles.message}>Experiência: {stationExperience.name}</Text>
       <Text style={styles.message}>Disponibilidade: {station.availability === 'available' ? 'Disponível' : 'Indisponível'}</Text>
@@ -238,8 +243,7 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
           await store.refreshQueue(station.experienceId);
         })(); }} />
     </>}
-    {section === 'station' && <Button label="Voltar às estações" onPress={() => { store.clearQueue(); setStationId(null); setSection('stations'); }} />}
-    {section === 'stations' && <Button label="Voltar ao painel" onPress={() => setSection('panel')} />}
+    <Button label="Voltar ao painel" onPress={() => { store.clearQueue(); setStationId(null); setSection('panel'); }} />
     </>}
   </>;
 }
@@ -263,6 +267,7 @@ const styles = StyleSheet.create({
   message: { color: '#cbd5e1', fontSize: 14, lineHeight: 21 },
   notice: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   event: { backgroundColor: '#191330', borderColor: '#34265a', borderWidth: 1, borderRadius: 14, padding: 16 },
+  experienceGroup: { gap: 12 },
   eventName: { color: '#ffffff', fontSize: 16, fontWeight: '700' },
   eventStatus: { color: '#c4b5fd', marginTop: 6, fontSize: 14 },
   button: { backgroundColor: '#7c3aed', borderRadius: 14, padding: 16, alignItems: 'center' },

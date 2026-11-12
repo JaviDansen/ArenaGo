@@ -336,8 +336,8 @@ test('tela real remove chamado somente após confirmação e atualiza estação 
   const app = createIntegration({ initialUser: { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] }, control });
   try {
     await app.mount(); await app.act(() => app.manager.login({ email: participant.email, password: 'ficticia' }));
-    await app.press('Selecionar evento Evento autorizado'); await app.press('Estações');
-    await app.press('Selecionar estação Estação real');
+    await app.press('Selecionar evento Evento autorizado');
+    await app.press('Selecionar estação Estação real da experiência Experiência real');
     assert.ok(app.hasText('Participante chamado: Ana'));
     assert.ok(app.hasText('Aguardando nesta experiência: 3'));
     for (const [position, name] of [[1, 'Bia'], [2, 'Caio'], [3, 'Dora']]) {
@@ -361,10 +361,14 @@ test('tela real remove chamado somente após confirmação e atualiza estação 
   } finally { app.dispose(); }
 });
 
-test('painel real separa entrada, estações e fila compartilhada por experiência', { skip }, async () => {
+test('painel real apresenta estações por experiência e abre atendimento diretamente', { skip }, async () => {
   const otherStation = { ...realStation, id: '55555555-5555-4555-8555-555555555555', label: 'Console 2' };
-  const control = { realStaff: true, events: [staffEvent], stations: [realStation, otherStation], experiences: [
+  const secondExperienceId = '77777777-7777-4777-8777-777777777777';
+  const secondExperienceStation = { ...realStation, id: '88888888-8888-4888-8888-888888888888',
+    experienceId: secondExperienceId };
+  const control = { realStaff: true, events: [staffEvent], stations: [realStation, otherStation, secondExperienceStation], experiences: [
     { id: realExperienceId, name: 'Just Dance' },
+    { id: secondExperienceId, name: 'PlayStation' },
     { id: '66666666-6666-4666-8666-666666666666', name: 'Sem estação' },
   ] };
   const app = createIntegration({ initialUser: { ...participant, roles: ['staff'] }, control });
@@ -373,14 +377,24 @@ test('painel real separa entrada, estações e fila compartilhada por experiênc
   await app.press('Selecionar evento Evento autorizado');
   await app.press('Controle de Entrada');
   assert.ok(app.hasText('Fila de acesso ao evento'));
-  await app.press('Voltar ao painel'); await app.press('Estações');
-  assert.ok(app.hasText('Just Dance')); assert.ok(app.hasText('Sem estação: nenhuma estação associada'));
-  await app.press('Selecionar estação Estação real');
+  await app.press('Voltar ao painel');
+  assert.ok(app.hasText('Just Dance')); assert.ok(app.hasText('Nenhuma estação associada.'));
+  assert.ok(app.hasText('PlayStation'));
+  assert.ok(app.hasButton('Selecionar estação Estação real da experiência Just Dance'));
+  assert.ok(app.hasButton('Selecionar estação Console 2 da experiência Just Dance'));
+  assert.ok(app.hasButton('Selecionar estação Estação real da experiência PlayStation'));
+  assert.equal(app.hasButton('Estações'), false);
+  await app.press('Selecionar estação Estação real da experiência Just Dance');
   assert.ok(app.hasText('Fila compartilhada da experiência'));
-  await app.press('Voltar às estações'); await app.press('Selecionar estação Console 2');
+  await app.press('Voltar ao painel'); await app.press('Selecionar estação Console 2 da experiência Just Dance');
   assert.ok(app.hasText('Fila de Just Dance'));
   assert.equal(app.calls.filter((url) => url === `/staff/events/${staffEvent.id}/experiences/${realExperienceId}/queue`).length, 2);
-  await app.press('Voltar às estações'); await app.press('Voltar ao painel');
+  app.back();
+  assert.ok(app.hasText('Painel operacional'));
+  await app.press('Selecionar estação Estação real da experiência PlayStation');
+  assert.ok(app.hasText('Fila de PlayStation'));
+  assert.ok(app.calls.includes(`/staff/events/${staffEvent.id}/experiences/${secondExperienceId}/stations/${secondExperienceStation.id}/operational-state`));
+  await app.press('Voltar ao painel');
   await app.press('Controle de Entrada'); assert.ok(app.hasText('Fila de acesso ao evento'));
   app.dispose();
 });
@@ -409,8 +423,8 @@ test('estação real chama diretamente pelo backend com intenção persistida e 
     } };
   const app = createIntegration({ initialUser: { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] }, control });
   await app.mount(); await app.act(() => app.manager.login({ email: participant.email, password: 'password' }));
-  await app.press('Selecionar evento Evento autorizado'); await app.press('Estações');
-  await app.press('Selecionar estação Estação real');
+  await app.press('Selecionar evento Evento autorizado');
+  await app.press('Selecionar estação Estação real da experiência Just Dance');
   assert.ok(app.hasText('Ana'));
   const call = app.handler('Chamar próximo');
   await app.act(async () => { await Promise.all([call(), call()]); });
@@ -440,8 +454,8 @@ test('chamada direta da estação não reenvia após resposta incerta nem após 
   const app = createIntegration({ initialUser: staffUser, control });
   try {
     await app.mount(); await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
-    await app.press('Selecionar evento Evento autorizado'); await app.press('Estações');
-    await app.press('Selecionar estação Estação real');
+    await app.press('Selecionar evento Evento autorizado');
+    await app.press('Selecionar estação Estação real da experiência Experiência real');
     await app.press('Chamar próximo');
     assert.equal(posts, 1); assert.equal(app.modal().props.visible, false);
     assert.ok(app.hasText('Resultado incerto'));
@@ -465,8 +479,8 @@ test('chamada direta da estação capturada antes do logout não envia POST', { 
   const app = createIntegration({ initialUser: staffUser, control });
   try {
     await app.mount(); await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
-    await app.press('Selecionar evento Evento autorizado'); await app.press('Estações');
-    await app.press('Selecionar estação Estação real');
+    await app.press('Selecionar evento Evento autorizado');
+    await app.press('Selecionar estação Estação real da experiência Experiência real');
     const old = app.handler('Chamar próximo');
     await app.act(() => app.manager.logout()); await app.act(async () => old());
     assert.equal(posts, 0);
@@ -495,8 +509,8 @@ test('tela da estação recupera reconhecimento automático após exclusão amb�
     const app = createIntegration({ initialToken: restoring ? 'stored' : null, initialUser: staffUser, control });
     await app.mount();
     if (!restoring) await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
-    await app.press('Selecionar evento Evento autorizado'); await app.press('Estações');
-    await app.press('Selecionar estação Estação real'); return app;
+    await app.press('Selecionar evento Evento autorizado');
+    await app.press('Selecionar estação Estação real da experiência Just Dance'); return app;
   }
   const first = await open();
   assert.equal(first.hasButton('Entendi o resultado'), false);
@@ -522,17 +536,16 @@ test('painel Staff real exibe estação e fila e limpa os dados ao receber 403',
   await app.act(() => app.manager.login({ email: participant.email, password: 'password' }));
   await app.press('Selecionar evento Evento autorizado');
   assert.ok(app.hasText('Painel operacional'));
-  await app.press('Estações');
   assert.ok(app.hasText('Estação real'));
-  assert.ok(app.hasText('Experiência real'));
-  await app.press('Selecionar estação Estação real');
+  assert.equal(app.hasText('Experiência real'), false, 'uma experiência não repete seu título no painel');
+  await app.press('Selecionar estação Estação real da experiência Experiência real');
   assert.ok(app.hasText('Pessoas em espera: 0'));
   assert.ok(!app.hasText('Rafael T.'));
   denied = true;
   await app.press('Atualizar fila');
   assert.ok(app.hasText('Acesso ao evento ou à experiência indisponível'));
   assert.ok(!app.hasText('Estação real'));
-  await app.press('Voltar às estações');
+  assert.equal(app.hasButton('Chamar próximo'), false);
   await app.press('Voltar ao painel');
   await app.press('Voltar aos eventos');
   assert.ok(app.hasText('Eventos Staff'));
@@ -586,13 +599,10 @@ test('trocar evento Staff descarta estações e preserva status scheduled e clos
   await app.act(() => app.manager.login({ email: participant.email, password: 'password' }));
   await app.press('Selecionar evento Evento autorizado');
   assert.ok(app.hasText('Status: Agendado'));
-  await app.press('Estações');
   assert.ok(app.hasText('Estação real'));
-  await app.press('Voltar ao painel');
   await app.press('Voltar aos eventos');
   await app.press('Selecionar evento Evento encerrado');
   assert.ok(app.hasText('Status: Encerrado'));
-  await app.press('Estações');
   assert.ok(app.hasText('Nenhuma estação encontrada'));
   assert.ok(!app.hasText('Estação real'));
   app.dispose();
@@ -608,9 +618,7 @@ test('Staff real consulta eventos, seleciona, volta e não aceita rota com ID ma
   assert.ok(app.hasText('Evento autorizado'));
   await app.press('Selecionar evento Evento autorizado');
   assert.ok(app.hasText('Status: Aberto'));
-  await app.press('Estações');
   assert.ok(app.hasText('Nenhuma estação encontrada'));
-  await app.press('Voltar ao painel');
   await app.press('Voltar aos eventos');
   app.navigate('StaffPending', { screen: 'StaffEventHome', params: { eventId: '22222222-2222-4222-8222-222222222222' } });
   assert.ok(app.hasText('Atualize a lista para confirmar os eventos autorizados'));
