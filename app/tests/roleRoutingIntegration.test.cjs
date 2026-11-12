@@ -156,6 +156,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
       await Renderer.act(async () => { await buttons[0].props.onPress(); });
     },
     modal() { return tree.root.findByType('Modal'); },
+    hasButton(label) { return tree.root.findAllByType('Pressable').some(node => node.props.accessibilityLabel === label); },
     handler(label) { return tree.root.findAllByType('Pressable').find(node => node.props.accessibilityLabel === label).props.onPress; },
     confirmHandler() { return tree.root.findAllByType('Pressable')
       .find((node) => node.props.accessibilityLabel === 'CONFIRMAR').props.onPress; },
@@ -352,8 +353,8 @@ test('tela real remove chamado somente após confirmação e atualiza estação 
     await app.press('Remover da fila'); await app.press('CONFIRMAR OPERAÇÃO');
     assert.equal(posts, 1); assert.ok(!app.hasText('Participante chamado: Ana'));
     assert.ok(app.hasText('Operação confirmada pelo servidor.'));
+    assert.equal(app.hasButton('Entendi o resultado'), false);
     await app.press('Atualizar atendimento'); assert.equal(posts, 1);
-    await app.press('Entendi o resultado'); assert.equal(posts, 1);
   } finally { app.dispose(); }
 });
 
@@ -469,9 +470,9 @@ test('chamada direta da estação capturada antes do logout não envia POST', { 
   } finally { app.dispose(); }
 });
 
-test('tela da estação recupera reconhecimento após exclusão ambígua e não reconhece recibo posterior', { skip }, async () => {
+test('tela da estação recupera reconhecimento automático após exclusão ambígua', { skip }, async () => {
   const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
-  const keyA = '50000000-0000-4000-8000-000000000001', keyB = '50000000-0000-4000-8000-000000000002';
+  const keyA = '50000000-0000-4000-8000-000000000001';
   const serviceId = '88888888-8888-4888-8888-888888888888', entryId = '77777777-7777-4777-8777-777777777777';
   const record = key => ({ userId: staffUser.id, sessionId: staffUser.sessionId, eventId: staffEvent.id,
     experienceId: realExperienceId, stationId: realStation.id, serviceSessionId: null,
@@ -495,20 +496,14 @@ test('tela da estação recupera reconhecimento após exclusão ambígua e não 
     await app.press('Selecionar estação Estação real'); return app;
   }
   const first = await open();
-  assert.ok(first.hasText('Operação confirmada pelo servidor.'));
-  await first.press('Entendi o resultado');
+  assert.equal(first.hasButton('Entendi o resultado'), false);
   assert.equal(values.has(`${slot}.receipt`), false);
   assert.equal(JSON.parse(values.get(`${slot}.ack`)).status, 'pending');
   first.dispose();
   const restarted = await open(true);
-  const staleA = restarted.handler('Entendi o resultado');
-  await restarted.press('Entendi o resultado');
   assert.equal(JSON.parse(values.get(`${slot}.ack`)).status, 'completed');
-  values.set(`${slot}.receipt`, JSON.stringify(record(keyB)));
-  await restarted.press('Atualizar atendimento');
-  await restarted.act(async () => staleA());
-  assert.equal(JSON.parse(values.get(`${slot}.receipt`)).key, keyB);
   assert.ok(restarted.hasText('Operação confirmada pelo servidor.'));
+  assert.equal(restarted.hasButton('Entendi o resultado'), false);
   restarted.dispose();
 });
 
@@ -735,7 +730,7 @@ test('Controle de Entrada real confirma primeiro, desativa, reativa e volta pres
   await app.act(async () => { await Promise.all([call(), call()]); });
   assert.equal(app.modal().props.visible, false);
   assert.equal(requests.filter(r => r.method === 'POST').length, 1);
-  await app.press('Entendi');
+  assert.equal(app.hasButton('Entendi'), false);
   assert.ok(app.hasText('Participante chamado: Ana'));
   assert.ok(app.hasText('Confirmar entrada')); assert.ok(app.hasText('Marcar ausência')); assert.ok(app.hasText('Remover da fila'));
   await app.press('Marcar ausência'); assert.equal(app.modal().props.visible, true);
@@ -744,14 +739,14 @@ test('Controle de Entrada real confirma primeiro, desativa, reativa e volta pres
   await app.press('CANCELAR ALTERAÇÃO');
   await app.press('Confirmar entrada'); await app.press('CONFIRMAR ALTERAÇÃO');
   assert.ok(app.hasText('Entrada confirmada pelo servidor')); assert.ok(app.hasText('1. Bia'));
-  await app.press('Entendi'); await app.press('Desativar fila externa'); assert.equal(app.modal().props.visible, true);
+  await app.press('Desativar fila externa'); assert.equal(app.modal().props.visible, true);
   await app.press('CANCELAR ALTERAÇÃO'); assert.equal(requests.filter(r => r.method === 'PATCH').length, 0);
   await app.press('Desativar fila externa'); await app.press('CONFIRMAR ALTERAÇÃO');
-  assert.ok(app.hasText('Participantes liberados: 1')); await app.press('Entendi');
+  assert.ok(app.hasText('Participantes liberados: 1')); assert.equal(app.hasButton('Entendi'), false);
   const reactivate = app.handler('Reativar fila externa');
   await app.act(async () => { await Promise.all([reactivate(), reactivate()]); });
   assert.equal(app.modal().props.visible, false);
-  await app.press('Entendi');
+  assert.equal(app.hasButton('Entendi'), false);
   assert.ok(app.hasText('Ninguém está aguardando')); await app.press('Voltar ao painel'); assert.ok(app.hasText('Painel operacional'));
   assert.equal(requests.filter(r => r.method === 'POST').length, 2); assert.equal(requests.filter(r => r.method === 'PATCH').length, 2);
   app.dispose();
@@ -799,6 +794,31 @@ test('chamada direta externa mantém intenção incerta e não repete POST após
     await app.press('Atualizar fila de entrada');
     assert.equal(posts, 1);
     assert.ok([...values.values()].some(raw => raw.includes('dispatching')));
+  } finally { app.dispose(); }
+});
+
+test('recusa definitiva da entrada é reconhecida sem toque e preserva feedback', { skip }, async () => {
+  const values = new Map(), at = '2026-11-10T15:00:00.000Z'; let posts = 0;
+  const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
+  const control = { realStaff: true, platformOS: 'android', events: [staffEvent],
+    secureStore: { getItemAsync: async key => values.get(key) ?? null,
+      setItemAsync: async (key, value) => { values.set(key, value); } },
+    http: async (route, options) => {
+      if (!route.includes('/entry-control')) return;
+      if (options.method === 'POST') { posts++; return { statusCode: 409, body: { code: 'ENTRY_NOT_FIRST' } }; }
+      return { eventId: staffEvent.id, externalQueueEnabled: true, canManage: true, pendingCall: null,
+        canCall: true, canConfirm: false, canMarkAbsent: false, canRemove: false, observedAt: at, waitingCount: 1,
+        waiting: [{ participationId: 'abcdef00-0000-4000-8000-000000000004', displayName: 'Ana', position: 1 }] };
+    } };
+  const app = createIntegration({ initialUser: staffUser, control });
+  try {
+    await app.mount(); await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
+    await app.press('Selecionar evento Evento autorizado'); await app.press('Controle de Entrada');
+    await app.press('Chamar próximo');
+    assert.equal(posts, 1);
+    assert.ok(app.hasText('A fila mudou. Confira o primeiro participante'));
+    assert.equal(app.hasButton('Entendi'), false);
+    assert.ok([...values.values()].some(raw => raw.includes('"phase":"acknowledged"')));
   } finally { app.dispose(); }
 });
 

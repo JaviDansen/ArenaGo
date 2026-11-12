@@ -46,6 +46,8 @@ export default function StaffStationOperationalScreen({ event, experience, stati
   const dialogRef = useRef(dialog);
   dialogRef.current = dialog;
   const dispatching = useRef(false);
+  const autoAttempt = useRef(null);
+  const acknowledging = useRef(false);
   const generation = useRef(0);
   const epoch = auth.getSessionEpoch(), revision = auth.getIdentityRevision();
   const context = getContext();
@@ -79,17 +81,46 @@ export default function StaffStationOperationalScreen({ event, experience, stati
 
   useEffect(() => {
     mounted.current = true;
+    autoAttempt.current = null;
     void refresh();
     return () => { mounted.current = false; generation.current++; dialogRef.current = null; };
   }, [event.id, experience.id, station.id, auth.user?.id, auth.sessionId, epoch, revision]);
 
+  useEffect(() => {
+    const pending = view.pending, scope = view.scope;
+    if (!coordinator || view.status !== 'ready' || view.busy || pending?.kind !== 'terminal_pending' || !pending.receiptId ||
+        !same(scope, getContext()) || autoAttempt.current === pending.receiptId || acknowledging.current) return;
+    autoAttempt.current = pending.receiptId;
+    acknowledging.current = true;
+    setView(previous => ({ ...previous, busy: true }));
+    void (async () => {
+      const target = { ...scope, serviceSessionId: pending.serviceSessionId ?? null };
+      let verified = false;
+      try {
+        const cleanup = await coordinator.cleanupTerminal(target, pending.receiptId);
+        if (['terminal_pending', 'cleanup_pending'].includes(cleanup.kind) && same(scope, getContext())) {
+          await coordinator.acknowledgeTerminal(target, pending.receiptId);
+          // O marcador concluído e a ausência do recibo precisam ser confirmados por nova leitura.
+          const remaining = await coordinator.pending(scope);
+          verified = remaining.kind === 'none';
+        }
+      } catch { /* A releitura manterá o bloqueio se o armazenamento falhar. */ }
+      acknowledging.current = false;
+      if (same(scope, getContext())) {
+        if (verified) setView(previous => ({ ...previous, feedback: pending.outcome }));
+        setView(previous => ({ ...previous, busy: false }));
+        await refresh(true);
+      } else if (getContext()) void refresh();
+    })();
+  }, [view.pending, view.scope, coordinator]);
+
   const blocked = !same(view.scope, context) || view.busy || view.status !== 'ready' || !coordinator ||
-    dispatching.current || (view.pending && view.pending.kind !== 'none');
+    dispatching.current || acknowledging.current || (view.pending && view.pending.kind !== 'none');
   const open = action => {
     if (!blocked && context) setDialog({ action, context, observed: view.data });
   };
   async function dispatch(expected, fromDialog = false) {
-    if (!expected || dispatching.current || !coordinator || (fromDialog && dialogRef.current !== expected) ||
+    if (!expected || dispatching.current || acknowledging.current || !coordinator || (fromDialog && dialogRef.current !== expected) ||
         (!fromDialog && (expected.action.kind !== 'call' || dialogRef.current)) ||
         !same(expected.context, getContext()) ||
         !same(viewRef.current.scope, getContext()) || viewRef.current.busy || viewRef.current.status !== 'ready' ||
@@ -119,16 +150,11 @@ export default function StaffStationOperationalScreen({ event, experience, stati
 
   async function resolvePending(expected, scope) {
     const pending = viewRef.current.pending;
-    if (!coordinator || !same(scope, getContext()) || viewRef.current.busy || !pending || !expected ||
+    if (!coordinator || acknowledging.current || !same(scope, getContext()) || viewRef.current.busy || !pending || !expected ||
         pending.kind !== expected.kind || !expected.receiptId || pending.receiptId !== expected.receiptId) return;
     setView(previous => ({ ...previous, busy: true }));
     try {
       if (pending.kind === 'reserved') await coordinator.cancelReserved(scope, expected.receiptId);
-      if (pending.kind === 'terminal_pending' && pending.receiptId) {
-        const target = { ...scope, serviceSessionId: pending.serviceSessionId ?? null };
-        const cleanup = await coordinator.cleanupTerminal(target, pending.receiptId);
-        if (cleanup.kind === 'terminal_pending') await coordinator.acknowledgeTerminal(target, pending.receiptId);
-      }
     } catch { /* A intenção permanece bloqueada; nova leitura mostra o estado persistido. */ }
     if (same(scope, getContext())) {
       setView(previous => ({ ...previous, busy: false }));
@@ -180,13 +206,11 @@ export default function StaffStationOperationalScreen({ event, experience, stati
     {pending?.kind === 'pending_reconciliation' && <Text style={styles.warning}>Resultado incerto. Não repita a operação; peça reconciliação ao responsável.</Text>}
     {pending?.kind === 'reserved' && <><Text style={styles.warning}>Solicitação registrada, ainda não enviada.</Text>
       <Button label="Descartar solicitação não enviada" disabled={view.busy} onPress={() => resolvePending(pending, context)} /></>}
-    {pending?.kind === 'terminal_pending' && <View style={styles.card}>
-      <Text style={pending.outcome?.kind === 'confirmed' ? styles.success : styles.warning}>
-        {pending.outcome?.kind === 'confirmed' ? 'Operação confirmada pelo servidor.' : 'Operação recusada pelo servidor.'}</Text>
-      <Button label="Entendi o resultado" disabled={view.busy} onPress={() => resolvePending(pending, context)} />
-    </View>}
+    {pending?.kind === 'terminal_pending' && <Text accessibilityRole="alert" style={styles.warning}>
+      Resultado registrado; reconhecimento seguro pendente. As operações permanecem bloqueadas.</Text>}
     {pending?.kind === 'storage_error' && <Text style={styles.warning}>Não foi possível verificar a intenção persistida. Operações bloqueadas.</Text>}
-    <Button label="Atualizar atendimento" disabled={view.busy || view.status === 'loading'} onPress={() => refresh()} />
+    <Button label="Atualizar atendimento" disabled={view.busy || view.status === 'loading'}
+      onPress={() => { autoAttempt.current = null; void refresh(); }} />
     <Modal transparent animationType="fade" visible={Boolean(dialog && same(dialog.context, getContext()) && !view.busy)}
       onRequestClose={() => { dialogRef.current = null; setDialog(null); }}>
       <View style={styles.backdrop}><View style={styles.card} accessibilityViewIsModal>

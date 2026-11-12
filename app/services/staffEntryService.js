@@ -155,10 +155,16 @@ export function createStaffEntryStore({ client, storage, createKey, getContext }
         intent.phase !== (cancel ? 'reserved' : 'terminal')) return { kind: 'blocked' };
     publish({ busy: true });
     try {
-      const done = await storage[cancel ? 'cancelReserved' : 'acknowledge'](intent);
+      let writeFailed = false;
+      try { await storage[cancel ? 'cancelReserved' : 'acknowledge'](intent); }
+      catch { writeFailed = true; }
+      const persisted = await storage.get(context.userId);
       if (!isCurrent(context)) return { kind: 'stale' };
-      if (done) publish({ pending: null, feedback: null, storageError: false, knownOutcome: null });
-      return { kind: done ? 'done' : 'blocked' };
+      const verified = persisted?.key === key && persisted.phase === (cancel ? 'cancelled' : 'acknowledged') &&
+        owns(persisted, context);
+      if (verified) publish({ pending: null, feedback: null, storageError: false, knownOutcome: null });
+      if (writeFailed && !verified) publish({ storageError: true });
+      return { kind: verified ? 'done' : writeFailed ? 'storage_error' : 'blocked' };
     } catch { if (isCurrent(context)) publish({ storageError: true }); return { kind: isCurrent(context) ? 'storage_error' : 'stale' }; }
     finally { if (isCurrent(context)) { publish({ busy: false }); await refresh(); } }
   }

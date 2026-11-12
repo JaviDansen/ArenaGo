@@ -29,14 +29,29 @@ export default function StaffEntryControlRealScreen({ event, isEventCurrent, onB
   });
   const store = storeRef.current;
   const [snapshot, setSnapshot] = useState(store.getSnapshot());
+  const [notice, setNotice] = useState(null);
+  const autoAttempt = useRef(null);
   const [dialog, setDialog] = useState(null), dialogRef = useRef(null);
   dialogRef.current = dialog;
   const epoch = auth.getSessionEpoch(), revision = auth.getIdentityRevision();
   useEffect(() => store.subscribe(setSnapshot), [store]);
   useEffect(() => {
+    autoAttempt.current = null; setNotice(null);
     store.setContext(getContext()); setDialog(null); void store.refresh();
     return () => { dialogRef.current = null; store.setContext(null); };
   }, [store, event.id, auth.user?.id, auth.sessionId, epoch, revision]);
+  useEffect(() => {
+    const intent = snapshot.pending, scope = snapshot.context;
+    if (intent?.phase !== 'terminal' || snapshot.status !== 'ready' || snapshot.busy || !store.isCurrent(scope) ||
+        !['userId', 'sessionId', 'eventId'].every(key => intent[key] === scope[key]) ||
+        autoAttempt.current === intent.key) return;
+    autoAttempt.current = intent.key;
+    void (async () => {
+      const result = await store.acknowledge(intent.key);
+      if (result.kind === 'done' && store.isCurrent(scope)) setNotice({ key: intent.key, outcome: intent.outcome, operation: intent.kind });
+      if (result.kind === 'blocked') autoAttempt.current = null;
+    })();
+  }, [snapshot, store]);
   if (!store.isCurrent(snapshot.context)) return null;
   const ownPending = snapshot.pending && ['userId', 'sessionId', 'eventId'].every(key => snapshot.pending[key] === snapshot.context[key]);
   const pending = ownPending ? snapshot.pending : null;
@@ -46,17 +61,16 @@ export default function StaffEntryControlRealScreen({ event, isEventCurrent, onB
     if (disabled || dialogRef.current || !store.isCurrent(snapshot.context) ||
         (action.kind === 'call' ? !snapshot.data.canCall
           : action.kind !== 'toggle' || action.enabled !== true || !snapshot.data.canManage || snapshot.data.externalQueueEnabled)) return;
-    return store.mutate(action);
+    setNotice(null); return store.mutate(action);
   };
   const open = (action) => { if (!disabled && store.isCurrent()) setDialog({ action, context: snapshot.context }); };
   const confirm = (expected) => {
     if (!expected || dialogRef.current !== expected || !store.isCurrent(expected.context)) return;
-    dialogRef.current = null; setDialog(null); return store.mutate(expected.action);
+    dialogRef.current = null; setDialog(null); setNotice(null); return store.mutate(expected.action);
   };
-  const refresh = () => { dialogRef.current = null; setDialog(null); void store.refresh(); };
+  const refresh = () => { dialogRef.current = null; setDialog(null); autoAttempt.current = null; void store.refresh(); };
   const errors = { session: 'Sessão inválida. Verifique sua sessão ou entre novamente.', denied: 'Acesso ao evento indisponível. Atualize seus eventos autorizados.',
     network: 'Não foi possível conectar. Verifique sua conexão e atualize.', unavailable: 'Não foi possível consultar a fila de entrada. Tente atualizar.' };
-  const confirmed = pending?.phase === 'terminal' && pending.outcome.kind === 'confirmed';
   return <View style={styles.content}>
     <Text style={styles.title}>Controle de Entrada</Text>
     <Text style={styles.text}>Fila de acesso ao evento</Text>
@@ -100,13 +114,14 @@ export default function StaffEntryControlRealScreen({ event, isEventCurrent, onB
       <Text style={styles.warning}>Há uma solicitação registrada que ainda não foi enviada.</Text>
       <Button label="Descartar solicitação não enviada" disabled={snapshot.busy} onPress={() => { void store.cancelReserved(pending.key); }} />
     </>}
-    {pending?.phase === 'terminal' && <View accessibilityRole="alert" style={styles.card}>
-      <Text style={confirmed ? styles.success : styles.warning}>{confirmed
-        ? pending.kind !== 'toggle' ? ({call:'Participante chamado pelo servidor.',confirm_call:'Entrada confirmada pelo servidor.',absent:'Ausência registrada pelo servidor.',remove:'Participante removido da espera externa.'}[pending.kind] ?? 'Entrada confirmada pelo servidor.')
-          : `Fila ${pending.outcome.result.externalQueueEnabled ? 'reativada' : 'desativada'}. Participantes liberados: ${pending.outcome.result.releasedCount}.`
-        : pending.outcome.code === 'ENTRY_NOT_FIRST' ? 'A fila mudou. Confira o primeiro participante na lista atualizada.' : 'A solicitação foi recusada pelo servidor. Confira o estado atualizado.'}</Text>
-      <Button label="Entendi" disabled={snapshot.busy} onPress={() => { void store.acknowledge(pending.key); }} />
-    </View>}
+    {pending?.phase === 'terminal' && <Text accessibilityRole="alert" style={styles.warning}>
+      Resultado registrado; verificando o reconhecimento seguro. As alterações permanecem bloqueadas até a confirmação local.</Text>}
+    {notice && !snapshot.pending && !snapshot.storageError && <Text accessibilityRole="alert"
+      style={notice.outcome.kind === 'confirmed' ? styles.success : styles.warning}>
+      {notice.outcome.kind === 'confirmed'
+        ? notice.operation !== 'toggle' ? ({call:'Participante chamado pelo servidor.',confirm_call:'Entrada confirmada pelo servidor.',absent:'Ausência registrada pelo servidor.',remove:'Participante removido da espera externa.'}[notice.operation] ?? 'Entrada confirmada pelo servidor.')
+          : `Fila ${notice.outcome.result.externalQueueEnabled ? 'reativada' : 'desativada'}. Participantes liberados: ${notice.outcome.result.releasedCount}.`
+        : notice.outcome.code === 'ENTRY_NOT_FIRST' ? 'A fila mudou. Confira o primeiro participante na lista atualizada.' : 'A solicitação foi recusada pelo servidor. Confira o estado atualizado.'}</Text>}
     <Button label="Atualizar fila de entrada" disabled={snapshot.busy || snapshot.status === 'loading'} onPress={refresh} />
     <Button label="Voltar ao painel" onPress={onBack} />
     <Modal transparent animationType="fade" visible={Boolean(dialog && store.isCurrent(dialog.context) && !snapshot.busy)}
