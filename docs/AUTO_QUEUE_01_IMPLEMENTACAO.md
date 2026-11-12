@@ -4,7 +4,7 @@
 **Branch:** `feature/participant-auto-queue-sync`<br>
 **Prioridade:** P0 — Apresentação em 13/11/2026, às 19h<br>
 **Data da Implementação Inicial:** 11/11/2026<br>
-**Revisão Técnica e Correções:** 11/11/2026 (após revisão dos commits `2de957b` e `87316ca`)
+**Revisão Técnica e Correções:** 12/11/2026 (após revisão dos commits `2de957b`, `87316ca` e `3cf045e`)
 
 ---
 
@@ -70,6 +70,23 @@ A task **AUTO-QUEUE-01** implementa a sincronização periódica (polling de 5 s
 - Mantidos ambos os hooks `useEffect` (listener de `AppState` e timer de 5s) diretamente no nível superior do componente.
 - Adaptado o mock de `react` em `homeFlow.test.cjs` para expor `useEffect` e `useRef`.
 
+### 2.7. P1 — Invalidação de consultas pendentes durante ingresso ou saída da fila interna (`RealArenaScreen.js`)
+- Ao iniciar `join(experienceId)` ou confirmar `finish()`, `readSeqRef.current` é incrementado e o bloqueio de leitura ativa (`activeReadSeqRef.current` / `activeReadFocusGenRef.current`) é zerado antes da operação de escrita.
+- Quando `join` retorna estado confirmado (`result.state`), `readSeqRef.current` é novamente avançado, garantindo que nenhuma consulta automática (`syncSilent`) iniciada antes do ingresso possa sobrescrever o estado confirmado se resolver atrasada.
+- As proteções de idempotência do `coordinator.join` e o polling de 5 segundos permanecem intactos após a conclusão da operação.
+
+### 2.8. P2 — Preservação de vibração legítima em atualizações manuais (`RealArenaScreen.js`)
+- Introduzida a referência `initialReadDoneRef` (resetada apenas quando muda a chave `userId:epoch:participationId` via `lastSessionKeyRef`).
+- Apenas a primeira leitura concluída da sessão repassa `isInitial: true` ao `alertManager.checkAndAlert(...)` para registrar chamadas preexistentes sem vibrar.
+- Atualizações manuais posteriores acionadas pelo botão *"Atualizar fila e experiências"* repassam `isInitial: false`, permitindo que uma nova chamada (`called`) detectada manualmente dispare exatamente uma vibração.
+
+### 2.9. P2 & Regressão — Controle de leitura ativa por geração/sequência no ciclo de foco (`RealArenaScreen.js` e `autoQueueSync.test.cjs`)
+- Substituída a flag booleana simples por `activeReadSeqRef` e `activeReadFocusGenRef`.
+- Uma leitura em trânsito só bloqueia novas leituras se pertencer à mesma geração de foco (`activeReadFocusGenRef.current === focusGeneration.current`).
+- No `blur`, o bloqueio da geração anterior é limpo; ao recuperar foco, a nova geração inicia imediatamente uma leitura válida sem ficar bloqueada por requisições antigas pendentes.
+- No bloco `finally`, uma requisição antiga verifica `if (activeReadSeqRef.current === currentSeq)` e `currentSeq === readSeqRef.current`, impedindo que sua conclusão tardia libere indevidamente o bloqueio ou encerre o `loading` de uma consulta mais recente.
+- O teste do Cenário 1 foi corrigido para exercitar efetivamente duas gerações de leitura em sequência com resolução fora de ordem, comprovando que a resposta mais recente (posição 2) nunca é substituída pela resposta antiga (posição 5).
+
 ---
 
 ## 3. Matriz dos Cenários de Testes Automatizados
@@ -78,9 +95,9 @@ O arquivo `app/tests/autoQueueSync.test.cjs` foi atualizado para cobrir expressa
 
 | # | Cenário Solicitado | Arquivo / Módulo Testado | Descrição da Validação |
 |---|---|---|---|
-| 1 | Consultas simultâneas e respostas fora de ordem | `RealArenaScreen.js` | Resposta antiga com posição 5 descartada após chegada de resposta mais nova com posição 2. |
-| 2 | Atualização manual concorrendo com polling | `RealArenaScreen.js` / `participationService.js` | `syncInFlight` bloqueia sobreposição de requisições; deduplicação em trânsito. |
-| 3 | Resposta tardia após logout ou troca de participação | `RealArenaScreen.js` | Resposta resolvida após o logout do usuário é descartada sem atualizar o estado. |
+| 1 | Consultas de gerações distintas e respostas fora de ordem | `RealArenaScreen.js` | Consulta 2 (posição 2) resolve antes da Consulta 1 (posição 5); resposta tardia da Consulta 1 é descartada e posição 2 é mantida. |
+| 2 | Atualização manual concorrendo com polling | `RealArenaScreen.js` / `participationService.js` | Controle in-flight bloqueia sobreposição de requisições na mesma geração; deduplicação em trânsito. |
+| 3 | Resposta tardia após logout ou troca de participação | `RealArenaScreen.js` | Resposta resolvida após mudança de sessão/logout é descartada sem atualizar o estado. |
 | 4 | Chamada recebida enquanto app está em segundo plano | `queueAlertService.js` | Quando `isAppActive() === false`, chamada é registrada sem vibrar. |
 | 5 | Retomada sem vibração retroativa | `queueAlertService.js` / `RealArenaScreen.js` | Primeira sincronização ao voltar ao primeiro plano não vibra para chamada já ocorrida. |
 | 6 | Nova chamada legítima após retomada | `queueAlertService.js` | Nova chamada com nova estação/sessão identificada enquanto o app está ativo dispara vibração. |
@@ -90,6 +107,9 @@ O arquivo `app/tests/autoQueueSync.test.cjs` foi atualizado para cobrir expressa
 | 10 | Recuperação da conexão com remoção do aviso | `participationService.js` / `HomeFlowScreen.js` / `RealArenaScreen.js` | Sucesso na consulta seguinte limpa `syncStale` e oculta o aviso discreto. |
 | 11 | Atualizações sucessivas de posição sem reinicializar polling | `RealArenaScreen.js` | Avanço de posições (3 → 2 → 1) mantém `useFocusEffect` intacto, 1 único timer de 5s e sem consultas extras. |
 | 12 | Funcionamento da fila externa com hooks incondicionais | `HomeFlowScreen.js` | `useEffect` e `useIsFocused` no nível superior suspendem no blur e retomam no foco. |
+| 13 | Concorrência entre polling pendente e ingresso na fila (`join`) | `RealArenaScreen.js` | Consulta antiga iniciada antes de `join()` e resolvida depois não sobrescreve a entrada confirmada (posição 3) e preserva o polling subsequente. |
+| 14 | Chamada nova identificada por atualização manual (`refresh`) | `RealArenaScreen.js` / `queueAlertService.js` | Transição `waiting` → `called` detectada por refresh manual produz exatamente 1 vibração, sem repetir no polling seguinte. |
+| 15 | Perda e recuperação de foco com consulta pendente | `RealArenaScreen.js` | Nova geração não fica bloqueada pela leitura anterior; resposta antiga não libera lock da nova geração e `isInitial: true` é preservado na primeira leitura concluída. |
 
 ---
 
@@ -101,8 +121,8 @@ O arquivo `app/tests/autoQueueSync.test.cjs` foi atualizado para cobrir expressa
 | `app/services/participationService.js` | Flag `syncStale` no estado do store; preservação de dados e marcação de instabilidade em falha do `syncCurrentSilent()`. |
 | `app/context/ParticipationContext.js` | Exposição da propriedade `syncStale` no contexto para consumo nas telas. |
 | `app/screens/home/HomeFlowScreen.js` | Chamada incondicional de `useIsFocused()` e `useEffect()`; aviso discreto de conexão instável sem desmontagem; remoção de `useSafeIsFocused()`. |
-| `app/screens/arena/RealArenaScreen.js` | Estabilização de `refresh` via `stateRef`; controle in-flight `syncInFlightRef`; controle de sequência `readSeqRef`; descarte de respostas defasadas/sessão; supressão de vibração na retomada; banner discreto `syncWarningCard`. |
-| `app/tests/autoQueueSync.test.cjs` | Cobertura estruturada dos cenários de concorrência, foco, retomada, conexão instável e estabilidade de timer em atualizações sucessivas. |
+| `app/screens/arena/RealArenaScreen.js` | Coordenação `join`/`finish` vs polling; diferenciação de `initialReadDoneRef` em `refresh`; controle de leitura ativa por sequência/geração (`activeReadSeqRef`, `activeReadFocusGenRef`); estabilização via `stateRef`; banner discreto `syncWarningCard`. |
+| `app/tests/autoQueueSync.test.cjs` | Cobertura completa dos 15 cenários de concorrência, respostas fora de ordem, `join` vs polling, vibração em atualização manual, foco com consulta pendente, conexão instável e estabilidade de timer. |
 | `app/tests/homeFlow.test.cjs` | Mock explícito de `@react-navigation/native`, `useEffect` e `useRef` para compatibilidade com hooks incondicionais. |
 | `app/tests/helpers/questionnaireHarness.cjs` | Fallback seguro para `@react-navigation/native` na resolução de módulos do harness. |
 

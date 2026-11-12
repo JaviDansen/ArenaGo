@@ -619,279 +619,343 @@ test('RealArenaScreen (Cenário 8): useFocusEffect inicializa timer de 5s e limp
   }
 });
 
-test('RealArenaScreen (Cenário 1): consultas simultâneas descartam respostas fora de ordem (não sobrescreve dado recente)', async () => {
-  const appliedStates = [];
-  let readCallCount = 0;
-  let delayedResolve;
+test('RealArenaScreen (Cenário 1): respostas fora de ordem entre gerações de leitura não sobrescrevem dado mais recente', async () => {
+  const originalSetInterval = global.setInterval;
+  const originalClearInterval = global.clearInterval;
+  global.setInterval = () => 1;
+  global.clearInterval = () => {};
 
-  const responseSlowOld = {
-    acceptingNewQueueEntries: true,
-    experiences: [],
-    currentQueueEntry: { id: 'e1', status: 'waiting', position: 5, stationLabel: null },
-    pendingIntent: null,
-  };
+  try {
+    const appliedStates = [];
+    let readCallCount = 0;
+    let resolveSlowOld;
+    let resolveFastNew;
 
-  const responseFastNew = {
-    acceptingNewQueueEntries: true,
-    experiences: [],
-    currentQueueEntry: { id: 'e1', status: 'waiting', position: 2, stationLabel: null },
-    pendingIntent: null,
-  };
+    const responseSlowOld = {
+      acceptingNewQueueEntries: true,
+      experiences: [],
+      currentQueueEntry: { id: 'e1', status: 'waiting', position: 5, stationLabel: null },
+      pendingIntent: null,
+    };
 
-  let capturedRefresh;
-  let capturedSyncSilent;
-  let stateIndex = 0;
-  let currentState = null;
+    const responseFastNew = {
+      acceptingNewQueueEntries: true,
+      experiences: [],
+      currentQueueEntry: { id: 'e1', status: 'waiting', position: 2, stationLabel: null },
+      pendingIntent: null,
+    };
 
-  const screen = loadModule('screens/arena/RealArenaScreen.js', (name) => {
-    if (name === 'react') {
-      return {
-        useRef: (val) => ({ current: val }),
-        useMemo: (factory) => factory(),
-        useCallback: (fn) => {
-          if (!capturedRefresh) capturedRefresh = fn;
-          else if (!capturedSyncSilent) capturedSyncSilent = fn;
-          return fn;
-        },
-        useState: (init) => {
-          const idx = stateIndex++;
-          return [
-            idx === 0 ? currentState : idx === 2 ? false : init,
-            (v) => {
-              if (idx === 0) {
-                currentState = typeof v === 'function' ? v(currentState) : v;
-                appliedStates.push(currentState);
-              }
-            },
-          ];
-        },
-      };
-    }
-    if (name === '@react-navigation/native') return { useFocusEffect: (cb) => { cb(); } };
-    if (name === 'expo-crypto') return { randomUUID: () => 'uuid' };
-    if (name === 'react-native') {
-      return {
-        ActivityIndicator: 'ActivityIndicator',
-        Alert: { alert: () => {} },
-        AppState: { currentState: 'active', addEventListener: () => ({ remove: () => {} }) },
-        ScrollView: 'ScrollView',
-        StyleSheet: { create: (s) => s },
-        Text: 'Text',
-        View: 'View',
-      };
-    }
-    if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
-    if (name === '../../components/ui') return createParticipantUiStubs();
-    if (name === '../../theme') return createParticipantThemeStub();
-    if (name === '../../context/AuthContext') {
-      return {
-        useAuth: () => ({ isAuthenticated: true, user: { id: 'u1' }, httpClient: {}, getSessionEpoch: () => 1 }),
-      };
-    }
-    if (name === '../../services/arenaQueueService') {
-      return {
-        createArenaQueueCoordinator: () => ({
-          read: async () => {
-            readCallCount += 1;
-            if (readCallCount === 1) {
-              // Primeira consulta (lenta, dado antigo)
-              return new Promise((res) => { delayedResolve = () => res(responseSlowOld); });
-            }
-            // Segunda consulta (rápida, dado mais novo)
-            return responseFastNew;
+    let focusCallback;
+    let stateIndex = 0;
+    let currentState = null;
+
+    const screen = loadModule('screens/arena/RealArenaScreen.js', (name) => {
+      if (name === 'react') {
+        return {
+          useRef: (val) => ({ current: val }),
+          useMemo: (factory) => factory(),
+          useCallback: (fn) => fn,
+          useState: (init) => {
+            const idx = stateIndex++;
+            return [
+              idx === 0 ? currentState : idx === 2 ? false : init,
+              (v) => {
+                if (idx === 0) {
+                  currentState = typeof v === 'function' ? v(currentState) : v;
+                  appliedStates.push(currentState);
+                }
+              },
+            ];
           },
-        }),
-        describeArenaError: () => 'erro',
-      };
-    }
-    if (name === '../../services/arenaQueueIntentStorage') return { defaultArenaQueueIntentStorage: {} };
-    if (name === '../../services/participationActionService') {
-      return { createParticipationActionCoordinator: () => ({ finish: async () => {} }), describeParticipationActionError: () => 'erro' };
-    }
-    if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
-    if (name === '../../services/queueAlertService') {
-      return { createQueueAlertManager: () => ({ checkAndAlert: () => false, reset: () => {} }) };
-    }
-    return require(name);
-  }).exports.default;
+        };
+      }
+      if (name === '@react-navigation/native') {
+        return { useFocusEffect: (cb) => { focusCallback = cb; } };
+      }
+      if (name === 'expo-crypto') return { randomUUID: () => 'uuid' };
+      if (name === 'react-native') {
+        return {
+          ActivityIndicator: 'ActivityIndicator',
+          Alert: { alert: () => {} },
+          AppState: { currentState: 'active', addEventListener: () => ({ remove: () => {} }) },
+          ScrollView: 'ScrollView',
+          StyleSheet: { create: (s) => s },
+          Text: 'Text',
+          View: 'View',
+        };
+      }
+      if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
+      if (name === '../../components/ui') return createParticipantUiStubs();
+      if (name === '../../theme') return createParticipantThemeStub();
+      if (name === '../../context/AuthContext') {
+        return {
+          useAuth: () => ({ isAuthenticated: true, user: { id: 'u1' }, httpClient: {}, getSessionEpoch: () => 1 }),
+        };
+      }
+      if (name === '../../services/arenaQueueService') {
+        return {
+          createArenaQueueCoordinator: () => ({
+            read: () => {
+              readCallCount += 1;
+              if (readCallCount === 1) {
+                return new Promise((res) => { resolveSlowOld = () => res(responseSlowOld); });
+              }
+              return new Promise((res) => { resolveFastNew = () => res(responseFastNew); });
+            },
+          }),
+          describeArenaError: () => 'erro',
+        };
+      }
+      if (name === '../../services/arenaQueueIntentStorage') return { defaultArenaQueueIntentStorage: {} };
+      if (name === '../../services/participationActionService') {
+        return { createParticipationActionCoordinator: () => ({ finish: async () => {} }), describeParticipationActionError: () => 'erro' };
+      }
+      if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
+      if (name === '../../services/queueAlertService') {
+        return { createQueueAlertManager: () => ({ checkAndAlert: () => false, reset: () => {} }) };
+      }
+      return require(name);
+    }).exports.default;
 
-  screen({ participation: { id: 'p1', eventId: 'e1' }, refreshParticipation: async () => {} });
+    screen({ participation: { id: 'p1', eventId: 'e1' }, refreshParticipation: async () => {} });
 
-  // Dispara consulta 1 (lenta)
-  const req1 = capturedRefresh();
+    // 1ª geração de foco inicia Consulta 1 (lenta, posição 5)
+    const blurGen1 = focusCallback();
+    assert.equal(readCallCount, 1);
 
-  // Enquanto req1 está em voo, o lock syncInFlight impede overlapping;
-  // simulamos a chegada subsequente de uma nova consulta com dado mais recente
-  // simulando avanço de geração/sequência
-  // Resolvemos a requisição rápida primeiro
-  delayedResolve();
-  await req1;
+    // Tela perde foco e recupera foco em seguida -> inicia Consulta 2 (rápida, posição 2)
+    blurGen1();
+    focusCallback();
+    assert.equal(readCallCount, 2);
 
-  assert.equal(appliedStates.length, 1);
-  assert.equal(appliedStates[0].currentQueueEntry.position, 5);
+    // Consulta 2 (mais recente, posição 2) responde PRIMEIRO
+    resolveFastNew();
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(appliedStates.length, 1);
+    assert.equal(currentState.currentQueueEntry.position, 2, 'deve aplicar a posição mais recente (2)');
+
+    // Consulta 1 (mais antiga, posição 5) responde DEPOIS (fora de ordem)
+    resolveSlowOld();
+    await new Promise((r) => setTimeout(r, 10));
+
+    assert.equal(appliedStates.length, 1, 'resposta antiga fora de ordem deve ser descartada');
+    assert.equal(currentState.currentQueueEntry.position, 2, 'posição 2 nunca deve ser sobrescrita pela posição 5');
+  } finally {
+    global.setInterval = originalSetInterval;
+    global.clearInterval = originalClearInterval;
+  }
 });
 
 test('RealArenaScreen (Cenário 2): atualização manual não sobrepõe com polling em voo', async () => {
-  let readCalls = 0;
-  let resolveRead;
-  let capturedRefresh;
-  let capturedSyncSilent;
+  const originalSetInterval = global.setInterval;
+  const originalClearInterval = global.clearInterval;
+  global.setInterval = () => 1;
+  global.clearInterval = () => {};
 
-  const mockState = {
-    acceptingNewQueueEntries: true,
-    experiences: [],
-    currentQueueEntry: { id: 'e1', status: 'waiting', position: 1, stationLabel: null },
-    pendingIntent: null,
-  };
+  try {
+    let readCalls = 0;
+    let resolveRead;
+    let capturedRefresh;
+    let capturedSyncSilent;
+    let focusCallback;
 
-  const screen = loadModule('screens/arena/RealArenaScreen.js', (name) => {
-    if (name === 'react') {
-      return {
-        useRef: (val) => ({ current: val }),
-        useMemo: (f) => f(),
-        useCallback: (fn) => {
-          if (!capturedRefresh) capturedRefresh = fn;
-          else if (!capturedSyncSilent) capturedSyncSilent = fn;
-          return fn;
-        },
-        useState: (init) => [init, () => {}],
-      };
-    }
-    if (name === '@react-navigation/native') return { useFocusEffect: () => {} };
-    if (name === 'expo-crypto') return { randomUUID: () => 'uuid' };
-    if (name === 'react-native') {
-      return {
-        ActivityIndicator: 'ActivityIndicator',
-        Alert: { alert: () => {} },
-        AppState: { currentState: 'active', addEventListener: () => ({ remove: () => {} }) },
-        ScrollView: 'ScrollView',
-        StyleSheet: { create: (s) => s },
-        Text: 'Text',
-        View: 'View',
-      };
-    }
-    if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
-    if (name === '../../components/ui') return createParticipantUiStubs();
-    if (name === '../../theme') return createParticipantThemeStub();
-    if (name === '../../context/AuthContext') {
-      return {
-        useAuth: () => ({ isAuthenticated: true, user: { id: 'u1' }, httpClient: {}, getSessionEpoch: () => 1 }),
-      };
-    }
-    if (name === '../../services/arenaQueueService') {
-      return {
-        createArenaQueueCoordinator: () => ({
-          read: () => {
-            readCalls += 1;
-            return new Promise((res) => { resolveRead = () => res(mockState); });
+    const mockState = {
+      acceptingNewQueueEntries: true,
+      experiences: [],
+      currentQueueEntry: { id: 'e1', status: 'waiting', position: 1, stationLabel: null },
+      pendingIntent: null,
+    };
+
+    const screen = loadModule('screens/arena/RealArenaScreen.js', (name) => {
+      if (name === 'react') {
+        return {
+          useRef: (val) => ({ current: val }),
+          useMemo: (f) => f(),
+          useCallback: (fn) => {
+            if (!capturedRefresh) capturedRefresh = fn;
+            else if (!capturedSyncSilent) capturedSyncSilent = fn;
+            return fn;
           },
-        }),
-        describeArenaError: () => 'erro',
-      };
-    }
-    if (name === '../../services/arenaQueueIntentStorage') return { defaultArenaQueueIntentStorage: {} };
-    if (name === '../../services/participationActionService') {
-      return { createParticipationActionCoordinator: () => ({ finish: async () => {} }), describeParticipationActionError: () => 'erro' };
-    }
-    if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
-    if (name === '../../services/queueAlertService') {
-      return { createQueueAlertManager: () => ({ checkAndAlert: () => false, reset: () => {} }) };
-    }
-    return require(name);
-  }).exports.default;
+          useState: (init) => [init, () => {}],
+        };
+      }
+      if (name === '@react-navigation/native') return { useFocusEffect: (cb) => { focusCallback = cb; } };
+      if (name === 'expo-crypto') return { randomUUID: () => 'uuid' };
+      if (name === 'react-native') {
+        return {
+          ActivityIndicator: 'ActivityIndicator',
+          Alert: { alert: () => {} },
+          AppState: { currentState: 'active', addEventListener: () => ({ remove: () => {} }) },
+          ScrollView: 'ScrollView',
+          StyleSheet: { create: (s) => s },
+          Text: 'Text',
+          View: 'View',
+        };
+      }
+      if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
+      if (name === '../../components/ui') return createParticipantUiStubs();
+      if (name === '../../theme') return createParticipantThemeStub();
+      if (name === '../../context/AuthContext') {
+        return {
+          useAuth: () => ({ isAuthenticated: true, user: { id: 'u1' }, httpClient: {}, getSessionEpoch: () => 1 }),
+        };
+      }
+      if (name === '../../services/arenaQueueService') {
+        return {
+          createArenaQueueCoordinator: () => ({
+            read: () => {
+              readCalls += 1;
+              return new Promise((res) => { resolveRead = () => res(mockState); });
+            },
+          }),
+          describeArenaError: () => 'erro',
+        };
+      }
+      if (name === '../../services/arenaQueueIntentStorage') return { defaultArenaQueueIntentStorage: {} };
+      if (name === '../../services/participationActionService') {
+        return { createParticipationActionCoordinator: () => ({ finish: async () => {} }), describeParticipationActionError: () => 'erro' };
+      }
+      if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
+      if (name === '../../services/queueAlertService') {
+        return { createQueueAlertManager: () => ({ checkAndAlert: () => false, reset: () => {} }) };
+      }
+      return require(name);
+    }).exports.default;
 
-  screen({ participation: { id: 'p1', eventId: 'e1' }, refreshParticipation: async () => {} });
+    screen({ participation: { id: 'p1', eventId: 'e1' }, refreshParticipation: async () => {} });
 
-  // Inicia refresh (em voo)
-  const pRefresh = capturedRefresh();
-  assert.equal(readCalls, 1, 'primeira leitura em voo');
+    // Ativa o foco da tela (dispara leitura inicial via refresh)
+    focusCallback();
+    assert.equal(readCalls, 1, 'primeira leitura real iniciada com a tela em foco');
 
-  // Dispara polling concorrente enquanto refresh está em voo
-  const pSyncSilent = capturedSyncSilent();
-  assert.equal(readCalls, 1, 'polling concorrente deve ser ignorado / sem sobreposição');
+    // Dispara polling e refresh manual concorrentes enquanto a primeira leitura está em voo
+    const pSyncSilent = capturedSyncSilent();
+    const pManualRefresh = capturedRefresh();
+    assert.equal(readCalls, 1, 'nenhuma leitura sobreposta deve ser iniciada');
 
-  resolveRead();
-  await Promise.all([pRefresh, pSyncSilent]);
+    resolveRead();
+    await Promise.all([pSyncSilent, pManualRefresh]);
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Agora com o lock liberado, inicia polling em voo e tenta refresh manual concorrente
+    const pSync2 = capturedSyncSilent();
+    assert.equal(readCalls, 2, 'nova leitura de polling iniciada após término da anterior');
+    const pRefreshDuringSync = capturedRefresh();
+    assert.equal(readCalls, 2, 'refresh manual não sobrepõe com polling em andamento');
+
+    resolveRead();
+    await Promise.all([pSync2, pRefreshDuringSync]);
+  } finally {
+    global.setInterval = originalSetInterval;
+    global.clearInterval = originalClearInterval;
+  }
 });
 
 test('RealArenaScreen (Cenário 3): resposta tardia após logout ou troca de participação é descartada', async () => {
-  let resolveLateRead;
-  let authState = { isAuthenticated: true, user: { id: 'u1' }, httpClient: {}, getSessionEpoch: () => 1 };
-  let appliedState = null;
-  let capturedRefresh;
+  const originalSetInterval = global.setInterval;
+  const originalClearInterval = global.clearInterval;
+  global.setInterval = () => 1;
+  global.clearInterval = () => {};
 
-  const lateResponse = {
-    acceptingNewQueueEntries: true,
-    experiences: [],
-    currentQueueEntry: { id: 'e1', status: 'called', stationLabel: 'Estação X', serviceSessionId: 's1' },
-    pendingIntent: null,
-  };
+  try {
+    let resolveLateRead;
+    let readCalls = 0;
+    let currentEpoch = 1;
+    let appliedState = null;
+    let focusCallback;
+    let stateIndex = 0;
 
-  const screen = loadModule('screens/arena/RealArenaScreen.js', (name) => {
-    if (name === 'react') {
-      return {
-        useRef: (val) => ({ current: val }),
-        useMemo: (f) => f(),
-        useCallback: (fn) => {
-          if (!capturedRefresh) capturedRefresh = fn;
-          return fn;
-        },
-        useState: (init) => [init, (v) => { appliedState = v; }],
-      };
-    }
-    if (name === '@react-navigation/native') return { useFocusEffect: () => {} };
-    if (name === 'expo-crypto') return { randomUUID: () => 'uuid' };
-    if (name === 'react-native') {
-      return {
-        ActivityIndicator: 'ActivityIndicator',
-        Alert: { alert: () => {} },
-        AppState: { currentState: 'active', addEventListener: () => ({ remove: () => {} }) },
-        ScrollView: 'ScrollView',
-        StyleSheet: { create: (s) => s },
-        Text: 'Text',
-        View: 'View',
-      };
-    }
-    if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
-    if (name === '../../components/ui') return createParticipantUiStubs();
-    if (name === '../../theme') return createParticipantThemeStub();
-    if (name === '../../context/AuthContext') {
-      return {
-        useAuth: () => authState,
-      };
-    }
-    if (name === '../../services/arenaQueueService') {
-      return {
-        createArenaQueueCoordinator: () => ({
-          read: () => new Promise((res) => { resolveLateRead = () => res(lateResponse); }),
-        }),
-        describeArenaError: () => 'erro',
-      };
-    }
-    if (name === '../../services/arenaQueueIntentStorage') return { defaultArenaQueueIntentStorage: {} };
-    if (name === '../../services/participationActionService') {
-      return { createParticipationActionCoordinator: () => ({ finish: async () => {} }), describeParticipationActionError: () => 'erro' };
-    }
-    if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
-    if (name === '../../services/queueAlertService') {
-      return { createQueueAlertManager: () => ({ checkAndAlert: () => false, reset: () => {} }) };
-    }
-    return require(name);
-  }).exports.default;
+    const lateResponse = {
+      acceptingNewQueueEntries: true,
+      experiences: [],
+      currentQueueEntry: { id: 'e1', status: 'called', stationLabel: 'Estação X', serviceSessionId: 's1' },
+      pendingIntent: null,
+    };
 
-  screen({ participation: { id: 'p1', eventId: 'e1' }, refreshParticipation: async () => {} });
+    const screen = loadModule('screens/arena/RealArenaScreen.js', (name) => {
+      if (name === 'react') {
+        return {
+          useRef: (val) => ({ current: val }),
+          useMemo: (f) => f(),
+          useCallback: (fn) => fn,
+          useState: (init) => {
+            const idx = stateIndex++;
+            return [
+              init,
+              (v) => {
+                if (idx === 0) appliedState = v;
+              },
+            ];
+          },
+        };
+      }
+      if (name === '@react-navigation/native') return { useFocusEffect: (cb) => { focusCallback = cb; } };
+      if (name === 'expo-crypto') return { randomUUID: () => 'uuid' };
+      if (name === 'react-native') {
+        return {
+          ActivityIndicator: 'ActivityIndicator',
+          Alert: { alert: () => {} },
+          AppState: { currentState: 'active', addEventListener: () => ({ remove: () => {} }) },
+          ScrollView: 'ScrollView',
+          StyleSheet: { create: (s) => s },
+          Text: 'Text',
+          View: 'View',
+        };
+      }
+      if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
+      if (name === '../../components/ui') return createParticipantUiStubs();
+      if (name === '../../theme') return createParticipantThemeStub();
+      if (name === '../../context/AuthContext') {
+        return {
+          useAuth: () => ({
+            isAuthenticated: true,
+            user: { id: 'u1' },
+            httpClient: {},
+            getSessionEpoch: () => currentEpoch,
+          }),
+        };
+      }
+      if (name === '../../services/arenaQueueService') {
+        return {
+          createArenaQueueCoordinator: () => ({
+            read: () => {
+              readCalls += 1;
+              return new Promise((res) => { resolveLateRead = () => res(lateResponse); });
+            },
+          }),
+          describeArenaError: () => 'erro',
+        };
+      }
+      if (name === '../../services/arenaQueueIntentStorage') return { defaultArenaQueueIntentStorage: {} };
+      if (name === '../../services/participationActionService') {
+        return { createParticipationActionCoordinator: () => ({ finish: async () => {} }), describeParticipationActionError: () => 'erro' };
+      }
+      if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
+      if (name === '../../services/queueAlertService') {
+        return { createQueueAlertManager: () => ({ checkAndAlert: () => false, reset: () => {} }) };
+      }
+      return require(name);
+    }).exports.default;
 
-  const p = capturedRefresh();
+    screen({ participation: { id: 'p1', eventId: 'e1' }, refreshParticipation: async () => {} });
 
-  // Usuário desloga antes da resposta da requisição chegar
-  authState = { isAuthenticated: false, user: null, httpClient: {}, getSessionEpoch: () => null };
+    // Inicia leitura com a tela focada
+    focusCallback();
+    assert.equal(readCalls, 1, 'requisição foi efetivamente disparada');
 
-  // Resposta chega após o logout
-  resolveLateRead();
-  await p;
+    // Sessão muda (logout / novo epoch) enquanto a requisição ainda está em trânsito
+    currentEpoch = 2;
 
-  // O estado não deve ser atualizado com os dados da sessão deslogada
-  assert.equal(appliedState, null, 'resposta tardia após logout deve ser descartada');
+    // Resposta chega após mudança de sessão
+    resolveLateRead();
+    await new Promise((r) => setTimeout(r, 10));
+
+    // O estado da fila (idx === 0) não deve ser atualizado com os dados da sessão anterior
+    assert.equal(appliedState, null, 'resposta tardia após mudança de sessão/logout deve ser descartada');
+  } finally {
+    global.setInterval = originalSetInterval;
+    global.clearInterval = originalClearInterval;
+  }
 });
 
 test('RealArenaScreen (Cenários 9 e 10): falha temporária no polling preserva estado e exibe aviso discreto; recuperação remove aviso', async () => {
@@ -1464,6 +1528,491 @@ test('HomeFlowScreen: ExternalQueueScreen suspende polling ao perder foco e reto
 
     timers[1].fn();
     assert.equal(syncCalls, 1, 'polling retomado após recuperar foco');
+  } finally {
+    global.setInterval = originalSetInterval;
+    global.clearInterval = originalClearInterval;
+  }
+});
+
+// ============================================================================
+// 7. Testes de Concorrência (join vs syncSilent), Vibração Manual e Foco Pendente
+// ============================================================================
+
+test('RealArenaScreen (P1 - Concorrência join vs syncSilent): consulta antiga pendente resolvida após ingresso na fila NÃO sobrescreve estado confirmado', async () => {
+  let timerFn = null;
+  const originalSetInterval = global.setInterval;
+  const originalClearInterval = global.clearInterval;
+  global.setInterval = (fn) => { timerFn = fn; return 77; };
+  global.clearInterval = () => {};
+
+  try {
+    const EXP_ID = '60000000-0000-4000-8000-000000000005';
+    const initialNotInQueue = {
+      acceptingNewQueueEntries: true,
+      experiences: [{ id: EXP_ID, name: 'PS5 VR', waitingCount: 2, acceptingNewQueueEntries: true }],
+      currentQueueEntry: null,
+      pendingIntent: null,
+    };
+
+    const confirmedJoinedState = {
+      acceptingNewQueueEntries: true,
+      experiences: [{ id: EXP_ID, name: 'PS5 VR', waitingCount: 3, acceptingNewQueueEntries: true }],
+      currentQueueEntry: {
+        id: '50000000-0000-4000-8000-000000000004',
+        experienceId: EXP_ID,
+        experienceName: 'PS5 VR',
+        status: 'waiting',
+        position: 3,
+        stationLabel: null,
+      },
+      pendingIntent: null,
+    };
+
+    const nextPollAfterJoinState = {
+      ...confirmedJoinedState,
+      currentQueueEntry: {
+        ...confirmedJoinedState.currentQueueEntry,
+        position: 2,
+      },
+    };
+
+    let readCallCount = 0;
+    let resolveStalePoll;
+    let joinCalls = 0;
+    let focusCallback;
+
+    const refs = [];
+    const memos = [];
+    const callbacks = [];
+    const states = [];
+    let hookCursor = { ref: 0, memo: 0, cb: 0, state: 0 };
+
+    const authObj = {
+      isAuthenticated: true,
+      user: { id: '20000000-0000-4000-8000-000000000001' },
+      httpClient: {},
+      getSessionEpoch: () => 1,
+    };
+
+    const screen = loadModule('screens/arena/RealArenaScreen.js', (name) => {
+      if (name === 'react') {
+        return {
+          useRef(initial) {
+            const idx = hookCursor.ref++;
+            if (idx >= refs.length) refs.push({ current: initial });
+            return refs[idx];
+          },
+          useMemo(factory) {
+            const idx = hookCursor.memo++;
+            if (idx >= memos.length) memos.push(factory());
+            return memos[idx];
+          },
+          useCallback(fn) {
+            const idx = hookCursor.cb++;
+            callbacks[idx] = fn;
+            return fn;
+          },
+          useState(initial) {
+            const idx = hookCursor.state++;
+            if (idx >= states.length) states.push(initial);
+            return [states[idx], (v) => { states[idx] = typeof v === 'function' ? v(states[idx]) : v; }];
+          },
+        };
+      }
+      if (name === '@react-navigation/native') {
+        return { useFocusEffect: (cb) => { focusCallback = cb; } };
+      }
+      if (name === 'expo-crypto') return { randomUUID: () => '33333333-3333-4333-8333-333333333333' };
+      if (name === 'react-native') {
+        return {
+          ActivityIndicator: 'ActivityIndicator',
+          Alert: { alert: () => {} },
+          AppState: { currentState: 'active', addEventListener: () => ({ remove: () => {} }) },
+          ScrollView: 'ScrollView',
+          StyleSheet: { create: (s) => s },
+          Text: 'Text',
+          View: 'View',
+        };
+      }
+      if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
+      if (name === '../../components/ui') return createParticipantUiStubs();
+      if (name === '../../theme') return createParticipantThemeStub();
+      if (name === '../../context/AuthContext') return { useAuth: () => authObj };
+      if (name === '../../services/arenaQueueService') {
+        return {
+          createArenaQueueCoordinator: () => ({
+            read: () => {
+              readCallCount += 1;
+              if (readCallCount === 1) {
+                return Promise.resolve(initialNotInQueue);
+              }
+              if (readCallCount === 2) {
+                // Consulta automática iniciada ANTES do join, que vai responder atrasada com currentQueueEntry: null
+                return new Promise((res) => { resolveStalePoll = () => res(initialNotInQueue); });
+              }
+              return Promise.resolve(nextPollAfterJoinState);
+            },
+            join: async () => {
+              joinCalls += 1;
+              return { kind: 'confirmed', state: confirmedJoinedState };
+            },
+          }),
+          describeArenaError: () => 'erro',
+        };
+      }
+      if (name === '../../services/arenaQueueIntentStorage') return { defaultArenaQueueIntentStorage: {} };
+      if (name === '../../services/participationActionService') {
+        return { createParticipationActionCoordinator: () => ({ finish: async () => {} }), describeParticipationActionError: () => 'erro' };
+      }
+      if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
+      if (name === '../../services/queueAlertService') {
+        return { createQueueAlertManager: () => ({ checkAndAlert: () => false, reset: () => {} }) };
+      }
+      return require(name);
+    }).exports.default;
+
+    const renderScreen = () => {
+      hookCursor = { ref: 0, memo: 0, cb: 0, state: 0 };
+      return screen({
+        participation: { id: 'c79b25f1-b171-487f-9fee-a24d184054b5', eventId: 'e10da075-c6cb-4fd6-ba97-7b52403ebff8' },
+        refreshParticipation: async () => {},
+      });
+    };
+
+    // 1. Montagem e leitura inicial (participante ainda fora da fila)
+    renderScreen();
+    focusCallback();
+    await new Promise((r) => setTimeout(r, 10));
+    const treeReady = renderScreen();
+    assert.equal(states[0].currentQueueEntry, null);
+    assert.equal(states[2], false, 'loading concluído');
+
+    // 2. Uma consulta automática da fila (polling) inicia e fica em andamento
+    timerFn();
+    assert.equal(readCallCount, 2, 'consulta automática pendente em andamento');
+
+    // 3. O participante toca em "Entrar na fila" enquanto a consulta automática está pendente
+    const joinBtn = nodes(treeReady).find((n) => n.props?.title === 'Entrar na fila' && typeof n.props?.onPress === 'function');
+    assert.ok(joinBtn, 'botão Entrar na fila deve estar disponível');
+    await joinBtn.props.onPress();
+
+    assert.equal(joinCalls, 1, 'apenas uma operação de join enviada');
+    assert.notEqual(states[0].currentQueueEntry, null, 'estado de ingresso confirmado aplicado');
+    assert.equal(states[0].currentQueueEntry.position, 3, 'posição confirmada pelo join é 3');
+    assert.equal(states[4], 'Entrada na fila confirmada pelo servidor.');
+
+    // 4. A resposta da consulta automática anterior (que dizia currentQueueEntry: null) chega DEPOIS
+    resolveStalePoll();
+    await new Promise((r) => setTimeout(r, 10));
+
+    // 5. O estado confirmado pelo join deve permanecer intacto!
+    assert.notEqual(states[0].currentQueueEntry, null, 'resposta antiga NÃO pode apagar a entrada confirmada');
+    assert.equal(states[0].currentQueueEntry.position, 3, 'posição 3 permanece intacta após resposta antiga');
+
+    // 6. O polling automático de 5s continua funcionando normalmente após o ingresso
+    timerFn();
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(readCallCount, 3, 'próximo ciclo de polling executado normalmente');
+    assert.equal(states[0].currentQueueEntry.position, 2, 'polling subsequente atualiza posição para 2');
+  } finally {
+    global.setInterval = originalSetInterval;
+    global.clearInterval = originalClearInterval;
+  }
+});
+
+test('RealArenaScreen (P2 - Vibração em Atualização Manual): chamada nova identificada por atualização manual dispara exatamente uma vibração', async () => {
+  let timerFn = null;
+  const originalSetInterval = global.setInterval;
+  const originalClearInterval = global.clearInterval;
+  global.setInterval = (fn) => { timerFn = fn; return 88; };
+  global.clearInterval = () => {};
+
+  try {
+    const { createQueueAlertManager } = loadModule('services/queueAlertService.js', (name) => {
+      if (name === 'react-native') return { Vibration: { vibrate: () => {} } };
+      return require(name);
+    }).exports;
+
+    let vibrateCalls = 0;
+    let focusCallback;
+    let capturedRefresh;
+
+    const waitingState = {
+      acceptingNewQueueEntries: true,
+      experiences: [],
+      currentQueueEntry: {
+        id: 'entry-manual-1',
+        experienceId: 'exp-1',
+        experienceName: 'PS5 VR',
+        status: 'waiting',
+        position: 1,
+        stationLabel: null,
+        serviceSessionId: null,
+      },
+      pendingIntent: null,
+    };
+
+    const calledState = {
+      acceptingNewQueueEntries: true,
+      experiences: [],
+      currentQueueEntry: {
+        id: 'entry-manual-1',
+        experienceId: 'exp-1',
+        experienceName: 'PS5 VR',
+        status: 'called',
+        position: null,
+        stationLabel: 'Estação Manual 01',
+        serviceSessionId: 'sess-manual-01',
+      },
+      pendingIntent: null,
+    };
+
+    let currentServerResponse = waitingState;
+    const refs = [];
+    const states = [];
+    let hookCursor = { ref: 0, state: 0 };
+
+    const authObj = {
+      isAuthenticated: true,
+      user: { id: 'user-manual-vib' },
+      httpClient: {},
+      getSessionEpoch: () => 1,
+    };
+
+    const screen = loadModule('screens/arena/RealArenaScreen.js', (name) => {
+      if (name === 'react') {
+        return {
+          useRef(initial) {
+            const idx = hookCursor.ref++;
+            if (idx >= refs.length) refs.push({ current: initial });
+            return refs[idx];
+          },
+          useMemo: (f) => f(),
+          useCallback: (fn) => {
+            if (!capturedRefresh) capturedRefresh = fn;
+            return fn;
+          },
+          useState(initial) {
+            const idx = hookCursor.state++;
+            if (idx >= states.length) states.push(initial);
+            return [states[idx], (v) => { states[idx] = typeof v === 'function' ? v(states[idx]) : v; }];
+          },
+        };
+      }
+      if (name === '@react-navigation/native') {
+        return { useFocusEffect: (cb) => { focusCallback = cb; } };
+      }
+      if (name === 'expo-crypto') return { randomUUID: () => 'uuid' };
+      if (name === 'react-native') {
+        return {
+          ActivityIndicator: 'ActivityIndicator',
+          Alert: { alert: () => {} },
+          AppState: { currentState: 'active', addEventListener: () => ({ remove: () => {} }) },
+          ScrollView: 'ScrollView',
+          StyleSheet: { create: (s) => s },
+          Text: 'Text',
+          Vibration: { vibrate: () => { vibrateCalls += 1; } },
+          View: 'View',
+        };
+      }
+      if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
+      if (name === '../../components/ui') return createParticipantUiStubs();
+      if (name === '../../theme') return createParticipantThemeStub();
+      if (name === '../../context/AuthContext') return { useAuth: () => authObj };
+      if (name === '../../services/arenaQueueService') {
+        return {
+          createArenaQueueCoordinator: () => ({
+            read: async () => currentServerResponse,
+          }),
+          describeArenaError: () => 'erro',
+        };
+      }
+      if (name === '../../services/arenaQueueIntentStorage') return { defaultArenaQueueIntentStorage: {} };
+      if (name === '../../services/participationActionService') {
+        return { createParticipationActionCoordinator: () => ({ finish: async () => {} }), describeParticipationActionError: () => 'erro' };
+      }
+      if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
+      if (name === '../../services/queueAlertService') {
+        return { createQueueAlertManager };
+      }
+      return require(name);
+    }).exports.default;
+
+    // 1. Inicia com participante em waiting (primeira consulta da tela)
+    screen({ participation: { id: 'part-manual', eventId: 'ev-manual' }, refreshParticipation: async () => {} });
+    focusCallback();
+    await new Promise((r) => setTimeout(r, 10));
+
+    assert.equal(states[0].currentQueueEntry.status, 'waiting');
+    assert.equal(vibrateCalls, 0, 'nenhuma vibração em waiting');
+
+    // 2. Staff registra chamada (called) e participante toca em "Atualizar fila e experiências" antes do próximo polling
+    currentServerResponse = calledState;
+    await capturedRefresh();
+
+    assert.equal(states[0].currentQueueEntry.status, 'called');
+    assert.equal(states[0].currentQueueEntry.stationLabel, 'Estação Manual 01');
+    assert.equal(vibrateCalls, 1, 'atualização manual DEVE produzir exatamente uma vibração para chamada nova');
+
+    // 3. Próximo ciclo de polling de 5s e nova atualização manual NÃO devem repetir a vibração
+    timerFn();
+    await new Promise((r) => setTimeout(r, 10));
+    await capturedRefresh();
+    assert.equal(vibrateCalls, 1, 'não deve repetir vibração para a mesma sessão de atendimento');
+  } finally {
+    global.setInterval = originalSetInterval;
+    global.clearInterval = originalClearInterval;
+  }
+});
+
+test('RealArenaScreen (Regressão - Foco com Consulta Pendente): perda e recuperação de foco com leitura pendente não bloqueia nova geração nem libera lock indevidamente', async () => {
+  const timers = [];
+  const cleared = [];
+  const originalSetInterval = global.setInterval;
+  const originalClearInterval = global.clearInterval;
+  global.setInterval = (fn, ms) => {
+    const id = timers.length + 1;
+    timers.push({ id, fn, ms });
+    return id;
+  };
+  global.clearInterval = (id) => {
+    cleared.push(id);
+  };
+
+  try {
+    let readCallCount = 0;
+    let resolveGen1Read;
+    let resolveGen2Read;
+    let focusCallback;
+    const alertCalls = [];
+
+    const staleGen1Response = {
+      acceptingNewQueueEntries: true,
+      experiences: [],
+      currentQueueEntry: { id: 'e1', status: 'waiting', position: 9, stationLabel: null },
+      pendingIntent: null,
+    };
+
+    const validGen2Response = {
+      acceptingNewQueueEntries: true,
+      experiences: [],
+      currentQueueEntry: { id: 'e1', status: 'called', position: null, stationLabel: 'Estação 02', serviceSessionId: 's-init' },
+      pendingIntent: null,
+    };
+
+    const refs = [];
+    const states = [];
+    let hookCursor = { ref: 0, state: 0 };
+
+    const authObj = {
+      isAuthenticated: true,
+      user: { id: 'user-focus-reg' },
+      httpClient: {},
+      getSessionEpoch: () => 1,
+    };
+
+    const screen = loadModule('screens/arena/RealArenaScreen.js', (name) => {
+      if (name === 'react') {
+        return {
+          useRef(initial) {
+            const idx = hookCursor.ref++;
+            if (idx >= refs.length) refs.push({ current: initial });
+            return refs[idx];
+          },
+          useMemo: (f) => f(),
+          useCallback: (fn) => fn,
+          useState(initial) {
+            const idx = hookCursor.state++;
+            if (idx >= states.length) states.push(initial);
+            return [states[idx], (v) => { states[idx] = typeof v === 'function' ? v(states[idx]) : v; }];
+          },
+        };
+      }
+      if (name === '@react-navigation/native') {
+        return { useFocusEffect: (cb) => { focusCallback = cb; } };
+      }
+      if (name === 'expo-crypto') return { randomUUID: () => 'uuid' };
+      if (name === 'react-native') {
+        return {
+          ActivityIndicator: 'ActivityIndicator',
+          Alert: { alert: () => {} },
+          AppState: { currentState: 'active', addEventListener: () => ({ remove: () => {} }) },
+          ScrollView: 'ScrollView',
+          StyleSheet: { create: (s) => s },
+          Text: 'Text',
+          View: 'View',
+        };
+      }
+      if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
+      if (name === '../../components/ui') return createParticipantUiStubs();
+      if (name === '../../theme') return createParticipantThemeStub();
+      if (name === '../../context/AuthContext') return { useAuth: () => authObj };
+      if (name === '../../services/arenaQueueService') {
+        return {
+          createArenaQueueCoordinator: () => ({
+            read: () => {
+              readCallCount += 1;
+              if (readCallCount === 1) {
+                return new Promise((res) => { resolveGen1Read = () => res(staleGen1Response); });
+              }
+              return new Promise((res) => { resolveGen2Read = () => res(validGen2Response); });
+            },
+          }),
+          describeArenaError: () => 'erro',
+        };
+      }
+      if (name === '../../services/arenaQueueIntentStorage') return { defaultArenaQueueIntentStorage: {} };
+      if (name === '../../services/participationActionService') {
+        return { createParticipationActionCoordinator: () => ({ finish: async () => {} }), describeParticipationActionError: () => 'erro' };
+      }
+      if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
+      if (name === '../../services/queueAlertService') {
+        return {
+          createQueueAlertManager: () => ({
+            checkAndAlert: (opts) => { alertCalls.push(opts); return false; },
+            reset: () => {},
+          }),
+        };
+      }
+      return require(name);
+    }).exports.default;
+
+    screen({ participation: { id: 'p-focus', eventId: 'e-focus' }, refreshParticipation: async () => {} });
+
+    // 1. Uma consulta inicial começa (Geração 1)
+    const blurGen1 = focusCallback();
+    assert.equal(readCallCount, 1, 'consulta da geração 1 iniciada');
+    assert.equal(timers.length, 1);
+
+    // 2. A tela perde foco antes da resposta
+    blurGen1();
+    assert.equal(cleared.length, 1, 'timer da geração 1 limpo no blur');
+
+    // 3. A tela recupera foco enquanto a requisição antiga continua pendente
+    focusCallback();
+    assert.equal(readCallCount, 2, 'nova geração inicia leitura válida sem ficar bloqueada pela anterior');
+    assert.equal(timers.length, 2, 'apenas 1 novo timer ativo para a nova geração');
+    assert.equal(cleared.length, 1);
+
+    // 4. A requisição antiga (Geração 1) termina enquanto a Geração 2 ainda está pendente
+    resolveGen1Read();
+    await new Promise((r) => setTimeout(r, 10));
+
+    assert.equal(states[0], null, 'resposta da geração anterior não altera a interface');
+    assert.equal(states[2], true, 'resposta antiga não encerra loading da geração atual');
+
+    // Verifica que a resposta antiga NÃO liberou indevidamente o bloqueio da consulta da Geração 2
+    timers[1].fn();
+    assert.equal(readCallCount, 2, 'bloqueio da consulta atual permanece ativo até que a geração 2 termine');
+
+    // 5. Agora a consulta da Geração 2 responde
+    resolveGen2Read();
+    await new Promise((r) => setTimeout(r, 10));
+
+    assert.equal(states[0].currentQueueEntry.stationLabel, 'Estação 02');
+    assert.equal(states[2], false, 'loading encerrado pela consulta válida da geração atual');
+    assert.equal(alertCalls.length, 1);
+    assert.equal(alertCalls[0].isInitial, true, 'alerta respeita o estado inicial da sessão na primeira leitura concluída');
   } finally {
     global.setInterval = originalSetInterval;
     global.clearInterval = originalClearInterval;
