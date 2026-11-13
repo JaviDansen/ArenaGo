@@ -30,15 +30,31 @@ function loadModule(relativePath, requireModule, exposeFields = [], sourceOverri
       '@babel/plugin-transform-modules-commonjs'],
   });
   const module = { exports: {} };
+  const wrappedRequire = (id) => {
+    try {
+      return requireModule ? requireModule(id) : require(id);
+    } catch (err) {
+      if (id === '@react-navigation/native') {
+        return { useIsFocused: () => true, useFocusEffect: (cb) => cb?.() };
+      }
+      if (err?.code === 'MODULE_NOT_FOUND' && typeof id === 'string' && id.startsWith('.')) {
+        const resolved = path.resolve(path.dirname(filename), id);
+        return require(resolved);
+      }
+      throw err;
+    }
+  };
   const context = {
     module,
     exports: module.exports,
-    require: requireModule,
+    require: wrappedRequire,
     Date,
     URL,
     AbortController,
     setTimeout,
     clearTimeout,
+    setInterval,
+    clearInterval,
     process,
   };
   vm.runInNewContext(code, context, { filename });

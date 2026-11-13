@@ -1,10 +1,19 @@
 import { httpClient } from './httpClient';
 
-const empty = () => ({ userId: null, epoch: null, status: 'idle', participation: null, returnState: null, returnStateVersion: 0, demoParticipation: null, error: null });
+const empty = () => ({ userId: null, epoch: null, status: 'idle', participation: null, returnState: null, returnStateVersion: 0, demoParticipation: null, error: null, syncStale: false });
+
+function validateReturnState(returned) {
+  if (!returned || !Array.isArray(returned.pendingEvaluationParticipationIds) ||
+      !returned.pendingEvaluationParticipationIds.every((id) => typeof id === 'string') ||
+      !Object.prototype.hasOwnProperty.call(returned, 'recentFinalization')) {
+    throw new Error('Resposta inválida de estado de retorno.');
+  }
+}
 
 export function createParticipationStore({ client = httpClient, getIdentity }) {
   let state = empty();
   let generation = 0;
+  let syncInFlight = null;
   let suspended = false;
   const presentedReturnEvaluations = new Set();
   const listeners = new Set();
@@ -66,17 +75,78 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
             (participation.status === 'waiting' && (!Number.isSafeInteger(participation.externalQueue?.position) || participation.externalQueue.position < 1))))) {
         throw new Error('Resposta inválida de participação.');
       }
-      if (!returned || !Array.isArray(returned.pendingEvaluationParticipationIds) ||
-          !returned.pendingEvaluationParticipationIds.every((id) => typeof id === 'string') ||
-          !Object.prototype.hasOwnProperty.call(returned, 'recentFinalization')) {
-        throw new Error('Resposta inválida de estado de retorno.');
-      }
-      publish({ ...state, status: 'ready', participation, returnState: returned, returnStateVersion: requestGeneration, demoParticipation: null, error: null });
+      validateReturnState(returned);
+      publish({ ...state, status: 'ready', participation, returnState: returned, returnStateVersion: requestGeneration, demoParticipation: null, error: null, syncStale: false });
     } catch (error) {
       if (requestGeneration !== generation || !matches(identity)) return;
-      publish({ ...state, status: 'error', participation: null, returnState: null, demoParticipation: null,
+      publish({ ...state, status: 'error', participation: null, returnState: null, demoParticipation: null, syncStale: false,
         error: error?.status === 401 || error?.status === 403 ? 'authorization' : error?.isNetworkError ? 'network' : 'unavailable' });
     }
+  }
+
+  async function syncCurrentSilent() {
+    const identity = state.userId === null ? null : { userId: state.userId, epoch: state.epoch };
+    // Uma atualização completa publica participação e retorno juntos; não antecipar seu resultado.
+    if (!matches(identity) || state.status !== 'ready') return null;
+    if (syncInFlight?.generation === generation) return syncInFlight.promise;
+
+    const requestGeneration = generation;
+    const task = (async () => {
+      try {
+        const current = await client.get('/participations/current', { auth: true });
+        if (requestGeneration !== generation || !matches(identity)) return;
+
+        const participation = current?.participation;
+        if (!current || !Object.prototype.hasOwnProperty.call(current, 'participation') ||
+            (participation !== null && (!participation || typeof participation.id !== 'string' ||
+              typeof participation.eventId !== 'string' || !['waiting', 'active'].includes(participation.status) ||
+              (participation.status === 'waiting' && (!Number.isSafeInteger(participation.externalQueue?.position) || participation.externalQueue.position < 1))))) {
+          return;
+        }
+
+        const prev = state.participation;
+        let returned = state.returnState;
+        let returnStateVersion = state.returnStateVersion;
+        if (prev && participation === null) {
+          // Publicação atômica: se esta leitura falhar, manter a participação confirmada
+          // e tentar reconciliar a transição novamente no próximo ciclo.
+          returned = await client.get('/participations/return-state', { auth: true });
+          if (requestGeneration !== generation || !matches(identity)) return;
+          validateReturnState(returned);
+          // Só a transição reconciliada renova a referência de retorno. Polling de
+          // posição não altera a versão nem o conjunto de avaliações consumidas.
+          returnStateVersion = requestGeneration;
+        }
+        const changed = !prev || prev.id !== participation?.id ||
+          prev.status !== participation?.status ||
+          prev.externalQueue?.position !== participation?.externalQueue?.position;
+
+        if (changed || state.status !== 'ready' || state.syncStale) {
+          publish({
+            ...state,
+            status: 'ready',
+            participation,
+            returnState: returned,
+            returnStateVersion,
+            error: null,
+            syncStale: false,
+          });
+        }
+      } catch {
+        // Preserva o último estado válido se a conexão falhar e sinaliza instabilidade temporária
+        if (requestGeneration === generation && matches(identity) && state.participation && !state.syncStale) {
+          publish({
+            ...state,
+            syncStale: true,
+          });
+        }
+      } finally {
+        if (syncInFlight?.promise === task) syncInFlight = null;
+      }
+    })();
+
+    syncInFlight = { generation: requestGeneration, promise: task };
+    return task;
   }
 
   function setDemoParticipation(update) {
@@ -87,5 +157,5 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
   }
 
   return { getSnapshot: () => state, subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
-    setIdentity, refresh, setDemoParticipation, canPresentReturnEvaluation, claimReturnEvaluation, suspend, resume };
+    setIdentity, refresh, syncCurrentSilent, setDemoParticipation, canPresentReturnEvaluation, claimReturnEvaluation, suspend, resume };
 }

@@ -1,7 +1,7 @@
 import { useContext, useEffect, useRef, useState } from 'react';
 import { useIsFocused } from '@react-navigation/native';
 import { StatusBar } from 'expo-status-bar';
-import { StyleSheet, Text, View } from 'react-native';
+import { AppState, StyleSheet, Text, View } from 'react-native';
 
 import { AuthBackground, Badge, Button, Card, ScreenHeader } from '../../components/ui';
 import { ParticipationContext } from '../../context/ParticipationContext';
@@ -12,12 +12,49 @@ import HomeScreen from './HomeScreen';
 import { useAuth } from '../../context/AuthContext';
 import { fetchReturnEvaluationHistoryItem } from '../../services/participationHistoryService';
 
-function ExternalQueueScreen({ participation, onRefresh }) {
+function ExternalQueueScreen({ participation, onRefresh, syncStale = false }) {
+  const { syncCurrentParticipation } = useContext(ParticipationContext) || {};
+  const isFocused = useIsFocused();
+  const appStateRef = useRef(typeof AppState !== 'undefined' && AppState?.currentState ? AppState.currentState : 'active');
+
+  useEffect(() => {
+    if (typeof AppState?.addEventListener !== 'function') return;
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      appStateRef.current = nextState;
+      if (nextState === 'active' && isFocused && typeof syncCurrentParticipation === 'function') {
+        void syncCurrentParticipation();
+      }
+    });
+    return () => subscription?.remove?.();
+  }, [isFocused, syncCurrentParticipation]);
+
+  useEffect(() => {
+    if (!isFocused || typeof syncCurrentParticipation !== 'function' || typeof setInterval !== 'function') return;
+
+    const intervalId = setInterval(() => {
+      if (appStateRef.current === 'active') {
+        void syncCurrentParticipation();
+      }
+    }, 5000);
+    intervalId?.unref?.();
+
+    return () => {
+      if (typeof clearInterval === 'function') clearInterval(intervalId);
+    };
+  }, [isFocused, syncCurrentParticipation]);
+
   return (
     <AuthBackground variant="login" overlayOpacity={0.68} testID="external-queue-background">
       <StatusBar style="light" />
       <ScreenHeader title="Fila do evento" showBack={false} />
       <View style={styles.externalQueueContent}>
+        {syncStale ? (
+          <View style={styles.syncWarningBanner} accessibilityRole="alert">
+            <Text style={styles.syncWarningText}>
+              Conexão instável. Exibindo as últimas informações confirmadas.
+            </Text>
+          </View>
+        ) : null}
         <Card variant="highlight" style={styles.externalQueueCard}>
           <Badge label="AGUARDANDO NA FILA" variant="brand" />
           <Text style={styles.externalQueueTitle}>Sua participação está confirmada</Text>
@@ -25,6 +62,11 @@ function ExternalQueueScreen({ participation, onRefresh }) {
             {participation.externalQueue?.position
               ? `Sua posição atual é ${participation.externalQueue.position}º.`
               : 'Aguarde a chamada da equipe do evento.'}
+          </Text>
+          <Text style={styles.externalQueueAutoUpdate}>
+            {syncStale
+              ? 'Tentando restabelecer conexão automaticamente...'
+              : 'A posição na fila é atualizada automaticamente a cada 5 segundos.'}
           </Text>
           <Text style={styles.externalQueueMeta}>Evento: {participation.eventId}</Text>
         </Card>
@@ -36,7 +78,7 @@ function ExternalQueueScreen({ participation, onRefresh }) {
 
 export default function HomeFlowScreen({ navigation }) {
   const { participation, status, error, returnState, returnStateVersion, refreshParticipation,
-    canPresentReturnEvaluation, claimReturnEvaluation } = useContext(ParticipationContext);
+    syncStale, canPresentReturnEvaluation, claimReturnEvaluation } = useContext(ParticipationContext);
   const auth = useAuth();
   const focused = useIsFocused();
   const live = useRef(null);
@@ -92,7 +134,7 @@ export default function HomeFlowScreen({ navigation }) {
           participationId: historyItem.participationId, historyItem,
         })} />;
     }
-    return <ExternalQueueScreen participation={participation} onRefresh={refreshParticipation} />;
+    return <ExternalQueueScreen participation={participation} onRefresh={refreshParticipation} syncStale={syncStale} />;
   }
 
   if (!participation) {
@@ -126,6 +168,21 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     padding: 20,
   },
+  syncWarningBanner: {
+    backgroundColor: '#2D2013',
+    borderColor: '#F59E0B',
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    marginBottom: 16,
+  },
+  syncWarningText: {
+    color: '#FCD34D',
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: '500',
+  },
   externalQueueCard: {
     marginBottom: 20,
   },
@@ -140,6 +197,11 @@ const styles = StyleSheet.create({
     fontSize: 16,
     lineHeight: 23,
     marginTop: 10,
+  },
+  externalQueueAutoUpdate: {
+    color: '#8282A8',
+    fontSize: 13,
+    marginTop: 8,
   },
   externalQueueMeta: {
     color: '#A0A0B8',

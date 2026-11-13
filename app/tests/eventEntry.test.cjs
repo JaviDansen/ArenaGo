@@ -362,13 +362,9 @@ test('ENTRY-QR-01: componente compartilhado Card encaminha accessibilityHint ao 
         StyleSheet: { create: (s) => s },
       };
     }
-    if (name === '../../theme/colors.js') return {
-      background: { surface: '#161626', elevated: '#1F1F35' },
-      border: { subtle: '#24243A', input: '#2E2E48' },
-      brand: { primary: '#5F33FA', primaryLight: '#8A68FF' },
-    };
-    if (name === '../../theme/radii.js') return { xl: 18 };
-    if (name === '../../theme/spacing.js') return { layout: { cardPadding: 16 } };
+    if (name === '../../theme/colors.js') return createParticipantThemeStub().colors;
+    if (name === '../../theme/radii.js') return createParticipantThemeStub().radii;
+    if (name === '../../theme/spacing.js') return createParticipantThemeStub().spacing;
     return require(name);
   }).exports;
 

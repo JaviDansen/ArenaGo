@@ -7,6 +7,7 @@ function renderHomeFlow(participation, extra = {}) {
   const navigationCalls = [];
   const navigation = { navigate: (...args) => navigationCalls.push(args) };
   const screen = loadModule('screens/home/HomeFlowScreen.js', (name) => {
+    if (name === '@react-navigation/native') return { useIsFocused: () => true };
     if (name === 'react') return {
       useEffect() {}, useRef: value => ({ current: value }), useState: value => [value, () => {}],
       useContext: () => ({
@@ -14,6 +15,8 @@ function renderHomeFlow(participation, extra = {}) {
         ...extra,
         setParticipation() { contextWrites += 1; },
       }),
+      useEffect: () => {},
+      useRef: (value) => ({ current: value }),
     };
     if (name === '@react-navigation/native') return { useIsFocused: () => false };
     if (name === '../../context/AuthContext') return { useAuth: () => null };
