@@ -515,6 +515,7 @@ test('K05 Auditoria 1: Login com questionario pendente direciona para ProfileQue
 
 test('K05 Auditoria 2: Restauracao de sessao com questionario pendente direciona para ProfileQuestionnaire', () => {
   const gateExports = loadModule('screens/auth/AuthSessionGate.js', (name) => {
+    if (name === '../../context/adminAccess') return loadModule('context/adminAccess.js', require).exports;
     if (name === 'react') return { ...require('react'), useState: (value) => [value, () => {}] };
     if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
     if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView' };

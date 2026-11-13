@@ -4,6 +4,7 @@ import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'rea
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AuthProvider, useAuth } from '../../context/AuthContext';
+import { canAccessAdminArea } from '../../context/adminAccess';
 
 function loadLogoSource() {
   try {
@@ -34,7 +35,7 @@ export function resolveInitialRouteForAuthState(authState) {
       !roles.every((role) => ['admin', 'staff', 'participante'].includes(role))) {
     return 'IdentityRecovery';
   }
-  if (roles.includes('admin')) return 'AdminPending';
+  if (roles.includes('admin')) return canAccessAdminArea(authState) ? 'AdminArea' : 'IdentityRecovery';
   if (roles.includes('staff')) return 'StaffPending';
 
   if (authState.user && authState.user.hasCompletedQuestionnaire === false) {

@@ -83,7 +83,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
       text: async () => JSON.stringify(value.body ?? value) };
   } });
   const passthrough = ({ children }) => children;
-  const native = Object.fromEntries(['ActivityIndicator', 'Modal', 'Pressable', 'ScrollView', 'Text', 'View'].map((name) => [name, name]));
+  const native = Object.fromEntries(['ActivityIndicator', 'KeyboardAvoidingView', 'Modal', 'Pressable', 'ScrollView', 'Text', 'TextInput', 'View'].map((name) => [name, name]));
   native.StyleSheet = { create: (styles) => styles };
   native.AppState = { currentState: 'active', addEventListener: () => ({ remove() {} }) };
   native.Platform = { OS: control.platformOS ?? 'web' };
@@ -113,6 +113,12 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
       if (target === 'theme') return createParticipantThemeStub();
       if (target === 'services/httpClient') return { ...http, httpClient: client };
       if (target === 'services/tokenStorage') return { defaultTokenStorage: storage };
+      if (control.realAdmin && target === 'screens/admin/adminDemoLatency') {
+        return { waitAdminDemoLatency: async () => {} };
+      }
+      if (control.realAdmin && (target.startsWith('screens/admin/') || target === 'data/adminDemoData')) {
+        return load(`${target}.js`);
+      }
       if (control.realStaff && ['screens/staff/StaffEventsNavigator', 'services/staffEventsService',
         'screens/staff/StaffEntryControlRealScreen', 'services/staffEntryService', 'services/staffEntryIntentStorage',
         'screens/staff/StaffStationOperationalScreen', 'services/staffIntentStorage',
@@ -147,6 +153,13 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
     async act(work) { await Renderer.act(work); },
     route() { const state = navRef.getRootState(); return state.routes[state.index].name; },
     routes() { return navRef.getRootState().routes.map((route) => route.name); },
+    activeRoute() {
+      let state = navRef.getRootState();
+      let route = state.routes[state.index];
+      while (route.state) { state = route.state; route = state.routes[state.index]; }
+      return route.name;
+    },
+    storedToken() { return token; },
     navigate(name, params) { Renderer.act(() => navRef.navigate(name, params)); },
     back() { Renderer.act(() => navRef.goBack()); },
     hasText(text) { return tree.root.findAllByType('Text').some((node) => {
@@ -171,6 +184,163 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
 const participant = { id: 'a', name: 'A', email: 'a@example.test', emailVerified: true,
   sessionId: '10000000-0000-4000-8000-000000000001',
   roles: ['participante'], hasCompletedQuestionnaire: true };
+
+const adminUser = { ...participant, roles: ['admin', 'staff', 'participante'], hasCompletedQuestionnaire: false };
+
+test('Admin: senha e desafio não abrem painel; TOTP e identidade confirmada abrem Heliom', { skip }, async () => {
+  const identity = deferred();
+  const control = { realAdmin: true, me: () => identity.promise };
+  const app = createIntegration({ initialUser: adminUser, control });
+  await app.mount();
+  try {
+    await app.act(() => app.manager.login({ email: adminUser.email, password: 'password' }));
+    assert.equal(app.manager.getSnapshot().sessionStatus, 'admin_2fa_required');
+    assert.equal(app.manager.getSnapshot().isAuthenticated, false);
+    for (const name of ['AdminArea', 'AdminDemo', 'AdminPending', 'AdminPanel']) app.navigate(name);
+    assert.ok(!app.routes().includes('AdminArea'));
+    assert.ok(!app.hasText('Conectado como:'));
+    let pending;
+    await app.act(async () => { pending = app.manager.verifyAdminTwoFactor('123456'); });
+    assert.equal(app.manager.getSnapshot().identityStatus, 'checking');
+    assert.ok(!app.hasText('Conectado como:'));
+    await app.act(async () => { identity.resolve(adminUser); await pending; });
+    assert.deepEqual(app.routes(), ['AdminArea']);
+    assert.equal(app.activeRoute(), 'AdminPanel');
+    assert.ok(app.hasText('Sessão Admin autenticada com segundo fator'));
+    assert.ok(app.hasText('nada aqui é salvo no servidor'));
+    for (const name of ['MainTabs', 'StaffPending', 'StaffDemo', 'ProfileQuestionnaire', 'AdminDemo', 'AdminPending']) {
+      app.navigate(name);
+      assert.equal(app.activeRoute(), 'AdminPanel');
+    }
+    assert.ok(app.calls.includes('/auth/2fa/verify'));
+    assert.ok(app.calls.includes('/auth/me'));
+    assert.ok(!app.calls.some(url => url.startsWith('/admin/') || url.startsWith('/staff/')));
+  } finally { app.dispose(); }
+});
+
+test('Admin: restauração válida reutiliza telas, retornos internos e logout real', { skip }, async () => {
+  const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control: { realAdmin: true } });
+  await app.mount();
+  try {
+    assert.equal(app.activeRoute(), 'AdminPanel');
+    assert.ok(app.calls.includes('/auth/refresh') && app.calls.includes('/auth/me'));
+    assert.ok(!app.calls.includes('/auth/2fa/verify'), 'sessão já autenticada é restaurada pelo contrato real');
+    await app.press('Gerenciar Eventos, 7 eventos na demonstração');
+    assert.equal(app.activeRoute(), 'AdminEvents');
+    assert.ok(app.hasText('Copa Noturna'));
+    await app.press('← Painel');
+    assert.equal(app.activeRoute(), 'AdminPanel');
+    const params = { eventId: 'demo-admin-arena-xp', experienceId: 'demo-admin-exp-xp-dance',
+      stationId: 'demo-admin-station-xp-dance-1' };
+    for (const name of ['AdminCreateEvent', 'AdminEventDetail', 'AdminEventSchedule', 'AdminEventQueue',
+      'AdminEventClose', 'AdminEventExperiences', 'AdminExperienceDetail', 'AdminStationDetail',
+      'AdminEventStaff', 'AdminHistory', 'AdminEventBi', 'AdminOverview']) {
+      app.navigate('AdminArea', { screen: name, params });
+      await app.act(async () => {});
+      assert.equal(app.activeRoute(), name);
+      assert.ok(!app.hasText('não encontrada') && !app.hasText('não encontrado'), name);
+      app.back();
+      assert.equal(app.activeRoute(), 'AdminPanel');
+    }
+    await app.press('← Sair da conta');
+    assert.equal(app.route(), 'Welcome');
+    assert.equal(app.storedToken(), null);
+    assert.equal(app.manager.getAccessToken(), null);
+    assert.equal(app.calls.filter(url => url === '/auth/logout').length, 1);
+    app.navigate('AdminArea', { screen: 'AdminPanel' });
+    assert.equal(app.route(), 'Welcome');
+  } finally { app.dispose(); }
+});
+
+test('Admin: mocks reiniciam em refresh, troca de Admin, papéis e novo login', { skip }, async () => {
+  const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control: { realAdmin: true } });
+  await app.mount();
+  try {
+    const initialClock = '05/11/2026 09:00';
+    assert.ok(app.hasText(initialClock));
+    const staleAdvance = app.handler('Avançar relógio 1 hora');
+    await app.press('Avançar relógio 1 hora');
+    assert.ok(app.hasText('05/11/2026 10:00'));
+    await app.act(() => app.manager.refreshSession());
+    assert.ok(app.hasText(initialClock));
+    await app.act(async () => staleAdvance());
+    assert.ok(app.hasText(initialClock), 'callback anterior ao refresh não atua');
+    const staleExit = app.handler('← Sair da conta');
+    await app.act(() => app.manager.logout());
+    const other = { ...adminUser, id: 'admin-b', name: 'Admin B',
+      sessionId: '20000000-0000-4000-8000-000000000002' };
+    app.setUser(other);
+    await app.act(() => app.manager.login({ email: other.email, password: 'password' }));
+    await app.act(() => app.manager.verifyAdminTwoFactor('123456'));
+    await app.act(async () => { staleAdvance(); staleExit(); });
+    assert.equal(app.activeRoute(), 'AdminPanel');
+    assert.ok(app.hasText('Conectado como: Admin B'));
+    assert.ok(app.hasText(initialClock));
+    app.setUser({ ...other, roles: ['staff', 'participante'] });
+    await app.act(() => app.manager.fetchCurrentUser());
+    assert.equal(app.route(), 'StaffPending');
+    for (const name of ['AdminArea', 'AdminDemo', 'AdminPending', 'AdminPanel']) app.navigate(name);
+    assert.equal(app.route(), 'StaffPending');
+    app.setUser({ ...other, roles: ['participante'], hasCompletedQuestionnaire: true });
+    await app.act(() => app.manager.fetchCurrentUser());
+    assert.equal(app.route(), 'MainTabs');
+    for (const name of ['AdminArea', 'AdminDemo', 'AdminPending', 'AdminPanel']) app.navigate(name);
+    assert.equal(app.route(), 'MainTabs');
+    app.setUser(other);
+    await app.act(() => app.manager.fetchCurrentUser());
+    assert.equal(app.activeRoute(), 'AdminPanel');
+    assert.ok(app.hasText(initialClock));
+  } finally { app.dispose(); }
+});
+
+test('Admin: revogação remota retira a área e invalida ações guardadas', { skip }, async () => {
+  const control = { realAdmin: true };
+  const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control });
+  await app.mount();
+  try {
+    const stale = app.handler('Avançar relógio 1 hora');
+    control.http = async route => route === '/auth/me'
+      ? { statusCode: 401, body: { code: 'SESSION_REVOKED' } } : undefined;
+    await app.act(async () => { await app.manager.fetchCurrentUser().catch(() => {}); });
+    assert.equal(app.manager.getSnapshot().isAuthenticated, false);
+    assert.equal(app.route(), 'Login');
+    assert.equal(app.storedToken(), null);
+    await app.act(async () => stale());
+    app.navigate('AdminArea', { screen: 'AdminEvents' });
+    app.back();
+    assert.equal(app.route(), 'Login');
+    assert.ok(!app.hasText('Conectado como:'));
+  } finally { app.dispose(); }
+});
+
+test('Admin: restauração recusada por falta de segundo fator não monta painel', { skip }, async () => {
+  const control = { realAdmin: true, http: async route => route === '/auth/refresh'
+    ? { statusCode: 401, body: { code: 'ADMIN_2FA_REQUIRED' } } : undefined };
+  const app = createIntegration({ initialToken: 'stored-without-2fa', initialUser: adminUser, control });
+  await app.mount();
+  try {
+    assert.equal(app.manager.getSnapshot().isAuthenticated, false);
+    assert.ok(!app.hasText('Conectado como:'));
+    app.navigate('AdminArea');
+    assert.ok(!app.routes().includes('AdminArea'));
+  } finally { app.dispose(); }
+});
+
+test('Admin: falha de revogação remota mantém logout local e painel inacessível', { skip }, async () => {
+  const control = { realAdmin: true, http: async route => route === '/auth/logout'
+    ? { statusCode: 503, body: { code: 'SERVICE_UNAVAILABLE' } } : undefined };
+  const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control });
+  await app.mount();
+  try {
+    await app.press('← Sair da conta');
+    assert.equal(app.manager.getSnapshot().isAuthenticated, false);
+    assert.ok(app.manager.getSnapshot().authNotice.includes('não foi possível confirmar a revogação'));
+    assert.equal(app.storedToken(), null);
+    app.navigate('AdminArea');
+    assert.ok(!app.routes().includes('AdminArea'));
+    assert.ok(!app.hasText('Conectado como:'));
+  } finally { app.dispose(); }
+});
 
 test('integra sessão real, papéis, TOTP, provedores e isolamento da navegação', { skip }, async () => {
   const app = createIntegration({ initialUser: participant });
@@ -200,9 +370,9 @@ test('integra sessão real, papéis, TOTP, provedores e isolamento da navegaçã
   assert.equal(app.manager.getSnapshot().isAuthenticated, false);
   assert.equal(app.manager.getSnapshot().sessionStatus, 'admin_2fa_required');
   await app.act(() => app.manager.verifyAdminTwoFactor('123456'));
-  assert.deepEqual(app.routes(), ['AdminPending']);
+  assert.deepEqual(app.routes(), ['AdminArea']);
   app.navigate('StaffPending');
-  assert.deepEqual(app.routes(), ['AdminPending']);
+  assert.deepEqual(app.routes(), ['AdminArea']);
   await app.act(() => app.manager.logout());
   assert.equal(app.route(), 'Welcome');
   app.setUser({ ...participant, id: 'c', roles: ['staff'] });

@@ -2,6 +2,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { createAdminApp } = require('./helpers/adminHarness.cjs');
+const { verifiedAdminAuth } = require('./helpers/adminAuthFixture.cjs');
 
 const plain = (value) => JSON.parse(JSON.stringify(value));
 const byCode = (app, code) => app.session.events.find((event) => event.accessCode === code);
@@ -28,10 +29,10 @@ function fillCreateForm(app, overrides = {}) {
   for (const [label, value] of Object.entries(values)) app.type(label, value);
 }
 
-test('painel: rótulo de demonstração, aviso sem permissão Admin/TOTP e contadores coerentes', () => {
-  const app = createAdminApp({ auth: { isAuthenticated: true, user: { id: 'u-9', name: 'Heliom Teste' }, getSessionEpoch: () => 1 } });
+test('painel: autenticação real, operações demonstrativas e contadores coerentes', () => {
+  const app = createAdminApp({ auth: verifiedAdminAuth({ user: { id: 'u-9', name: 'Heliom Teste' } }) });
   for (const text of ['ÁREA ADMIN (DEMONSTRAÇÃO)', 'MODO DEMONSTRAÇÃO', 'Heliom Teste',
-    'NÃO recebeu permissão Admin nem verificação TOTP', 'Resumo da demonstração', 'Contadores fictícios']) {
+    'Sessão Admin autenticada com segundo fator', 'Resumo da demonstração', 'Contadores fictícios']) {
     assert.ok(app.hasText(text), text);
   }
   for (const counter of ['Eventos: 7', 'Agendados: 3', 'Abertos: 1', 'Encerrando: 1',
@@ -361,10 +362,10 @@ test('isolamento: troca direta de conta ou nova geração da sessão descarta a 
   const app = createAdminApp();
   app.press('Avançar relógio 1 hora');
   assert.equal(app.session.clockNow, '2026-11-05T13:00:00.000Z');
-  app.setAuth({ isAuthenticated: true, user: { id: 'u-2', name: 'Outra Conta' }, getSessionEpoch: () => 1 });
+  app.setAuth(verifiedAdminAuth({ user: { id: 'u-2', name: 'Outra Conta' } }));
   assert.equal(app.session.clockNow, '2026-11-05T12:00:00.000Z', 'conta B começa do zero');
   app.press('Avançar relógio 1 hora');
-  app.setAuth({ isAuthenticated: true, user: { id: 'u-2', name: 'Outra Conta' }, getSessionEpoch: () => 2 });
+  app.setAuth(verifiedAdminAuth({ user: { id: 'u-2', name: 'Outra Conta' }, getSessionEpoch: () => 2 }));
   assert.equal(app.session.clockNow, '2026-11-05T12:00:00.000Z', 'nova sessão da mesma conta também');
   app.setAuth({ isAuthenticated: false, user: null });
   assert.equal(app.session, null, 'logout limpa');
@@ -374,23 +375,68 @@ test('isolamento: troca direta de conta ou nova geração da sessão descarta a 
 test('isolamento: callback antigo disparado após trocar de conta não altera a nova demonstração', () => {
   const app = createAdminApp();
   const advance = app.handlerOf('Avançar relógio 1 hora');
-  app.setAuthWithoutRender({ isAuthenticated: true, user: { id: 'u-3' }, getSessionEpoch: () => 1 });
+  app.setAuthWithoutRender(verifiedAdminAuth({ user: { id: 'u-3' } }));
   advance();
-  app.setAuth({ isAuthenticated: true, user: { id: 'u-3' }, getSessionEpoch: () => 1 });
+  app.setAuth(verifiedAdminAuth({ user: { id: 'u-3' } }));
   assert.equal(app.session.clockNow, '2026-11-05T12:00:00.000Z', 'a conta nova começa limpa');
   assert.equal(app.session.events.length, 7);
   app.press('Avançar relógio 1 hora');
   assert.equal(app.session.clockNow, '2026-11-05T13:00:00.000Z', 'ações novas funcionam normalmente');
 });
 
-test('saída: "Voltar ao aplicativo" descarta a demonstração e fecha a Área Admin', () => {
+test('saída: logout descarta a demonstração sem retornar ao participante', async () => {
   const app = createAdminApp();
-  app.press('← Voltar ao aplicativo');
-  assert.equal(app.exitedToApp, true);
-  assert.deepEqual(plain(app.navigationCalls), [{ type: 'parentBack' }]);
+  await app.pressAsync('← Sair da conta');
+  assert.equal(app.logoutCount, 1);
+  assert.equal(app.session, null);
+  assert.deepEqual(plain(app.navigationCalls), []);
 });
 
-test('fluxo completo: Painel → Eventos → Criar → Detalhe → Gerenciar → Painel → app', async () => {
+test('provedor recusa Participante, Staff, desafio pendente e identidade não confirmada', () => {
+  for (const overrides of [
+    { user: { roles: ['participante'] } }, { user: { roles: ['staff'] } },
+    { user: { roles: ['admin', 'invalid'] } }, { user: { sessionId: null } },
+    { identityStatus: 'checking' }, { identityStatus: 'error' },
+    { isAuthenticated: false }, { adminChallenge: { isTotpConfigured: true } },
+  ]) {
+    const app = createAdminApp({ auth: verifiedAdminAuth(overrides) });
+    assert.equal(app.session, null);
+    assert.ok(!app.hasButton('Gerenciar Eventos, 7 eventos na demonstração'));
+    assert.ok(app.hasText('Sessão indisponível'));
+  }
+});
+
+test('callbacks antigos não alteram outra conta após renderização nem encerram sua sessão', async () => {
+  const app = createAdminApp();
+  const stale = app.demo;
+  const exit = app.handlerOf('← Sair da conta');
+  app.setAuth(verifiedAdminAuth({ user: { id: 'admin-b' } }));
+  const before = plain(app.session);
+  stale.advanceClock(60);
+  stale.toggleFailNextAction();
+  assert.equal(stale.run(() => { throw new Error('transição antiga executada'); }).code, 'NO_SESSION');
+  assert.equal(stale.discard(), false);
+  await exit();
+  app.sync();
+  assert.equal(app.logoutCount, 0);
+  assert.deepEqual(plain(app.session), before);
+  assert.equal(app.demo.failNextAction, false);
+});
+
+test('perda de papel limpa mocks e ações anteriores não retornam após nova autorização', () => {
+  const app = createAdminApp();
+  const stale = app.demo;
+  app.press('Avançar relógio 1 hora');
+  app.setAuth(verifiedAdminAuth({ user: { roles: ['staff'] } }));
+  assert.equal(app.session, null);
+  assert.equal(stale.simulateLoad().code, 'NO_SESSION');
+  app.setAuth(verifiedAdminAuth());
+  stale.advanceClock(60);
+  app.sync();
+  assert.equal(app.session.clockNow, '2026-11-05T12:00:00.000Z');
+});
+
+test('fluxo completo: Painel → Eventos → Criar → Detalhe → Gerenciar → Painel → logout', async () => {
   const app = createAdminApp();
   await openEvents(app);
   app.press('+ Criar novo evento');
@@ -409,8 +455,9 @@ test('fluxo completo: Painel → Eventos → Criar → Detalhe → Gerenciar →
   app.press('Voltar ao painel');
   assert.equal(app.route, 'AdminPanel');
   assert.ok(app.hasButton('Gerenciar Eventos, 8 eventos na demonstração'));
-  app.press('← Voltar ao aplicativo');
-  assert.equal(app.exitedToApp, true);
+  await app.pressAsync('← Sair da conta');
+  assert.equal(app.logoutCount, 1);
+  assert.equal(app.session, null);
 });
 
 test('isolamento de módulos: Admin não importa participação, serviços HTTP nem Área Staff', () => {

@@ -3,6 +3,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { createAdminApp } = require('./helpers/adminHarness.cjs');
+const { verifiedAdminAuth } = require('./helpers/adminAuthFixture.cjs');
 
 const HISTORY = 'Histórico, 2 eventos encerrados na demonstração';
 const OVERVIEW = 'Visão Geral, indicadores consolidados da demonstração';
@@ -287,11 +288,15 @@ test('critério 6 (tela): evento criado entra na contagem sem participações, a
 test('critério 12: troca de conta descarta filtros e eventos criados na Visão Geral', async () => {
   const app = createAdminApp();
   app.press('Avançar relógio 15 minutos');
-  app.setAuth({ isAuthenticated: true, user: { id: 'u-2', name: 'Outra Conta' }, getSessionEpoch: () => 1 });
+  app.setAuth(verifiedAdminAuth({ user: { id: 'u-2', name: 'Outra Conta', sessionId: '20000000-0000-4000-8000-000000000002' } }));
   assert.equal(app.session.clockNow, '2026-11-05T12:00:00.000Z');
   assert.ok(app.hasButton(HISTORY));
-  app.setAuth({ isAuthenticated: true, user: { id: 'u-2', name: 'Outra Conta' }, getSessionEpoch: () => 2 });
+  app.press('Avançar relógio 15 minutos');
+  assert.equal(app.session.clockNow, '2026-11-05T12:15:00.000Z');
+  app.setAuth(verifiedAdminAuth({ user: { id: 'u-2', name: 'Outra Conta', sessionId: '20000000-0000-4000-8000-000000000002' }, getSessionEpoch: () => 2 }));
   assert.equal(app.session.clockNow, '2026-11-05T12:00:00.000Z');
+  app.setAuth({ isAuthenticated: true, user: { id: 'incompleta' } });
+  assert.equal(app.session, null);
 });
 
 test('isolamento de módulos: telas da ADM03 não importam participação, HTTP nem Staff', () => {

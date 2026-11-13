@@ -132,7 +132,6 @@ export default function HomeScreen({ navigation, returnState, mode = 'ready', me
               </Pressable>
             </Card>
           </View>
-
         </ScrollView>
       )}
     </AuthBackground>
