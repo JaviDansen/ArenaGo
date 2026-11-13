@@ -51,6 +51,7 @@ test('editing loads every field, saves the complete authenticated payload once a
       requests.push({ path, options });
       if (path === '/profile') return { id: 'A', name: 'Conta real', email: 'real@example.test', hasCompletedQuestionnaire: true };
       if (path === '/profile/questionnaire') return stored;
+      if (path === '/profile/statistics') return { participationCount: 2, totalMinutes: 75 };
       if (path.startsWith('/games')) return { games: [{ name: 'Roblox' }] };
       assert.fail(path);
     },
@@ -128,7 +129,7 @@ test('editing loads every field, saves the complete authenticated payload once a
   assert.ok(texts(profile).includes('Feminino'));
   assert.ok(texts(profile).includes('Valorant, Roblox'));
   assert.ok(texts(profile).includes('Não tenho interesse.'));
-  assert.ok(texts(profile).includes('3') && texts(profile).includes('8h'));
+  assert.ok(texts(profile).includes('2') && texts(profile).includes('1h 15min'));
   assert.equal(requests.filter(request => request.path === '/profile').length, 2);
   assert.ok(requests.filter(request => request.path.startsWith('/profile')).every(request => request.options.auth));
 });
@@ -243,6 +244,7 @@ test('Profile retries partial loading errors without falling back to demo answer
   const client = {
     async get(path) {
       if (path === '/profile') return { id: 'A', name: 'Nome real', email: 'real@example.test', hasCompletedQuestionnaire: true };
+      if (path === '/profile/statistics') return { participationCount: 0, totalMinutes: 0 };
       if (fail) throw new Error('offline');
       return answers('Roblox');
     },
@@ -252,7 +254,7 @@ test('Profile retries partial loading errors without falling back to demo answer
   assert.ok(texts(h).includes('Nome real'));
   assert.ok(texts(h).some(text => text.includes('Não foi possível carregar todos os dados')));
   assert.ok(!texts(h).includes('22 anos'));
-  assert.ok(texts(h).includes('3') && texts(h).includes('8h'));
+  assert.ok(texts(h).includes('0') && texts(h).includes('0min'));
   fail = false;
   h.act(() => h.press('Tentar carregar perfil novamente'));
   await settle(h);
@@ -262,7 +264,7 @@ test('Profile retries partial loading errors without falling back to demo answer
 
 test('Profile loads only on focus and deduplicates repeated focus events while loading', async () => {
   const requests = [];
-  const client = { get(path) { const request = { path, ...deferred() }; requests.push(request); return request.promise; } };
+  const client = { get(path) { if (path === '/profile/statistics') return Promise.resolve({ participationCount: 0, totalMinutes: 0 }); const request = { path, ...deferred() }; requests.push(request); return request.promise; } };
   const h = createHarness('screens/profile/ProfileScreen.js', { authContext: context('A', client), focused: false });
   await settle(h);
   assert.equal(requests.length, 0);
@@ -278,7 +280,7 @@ test('Profile loads only on focus and deduplicates repeated focus events while l
 
 test('Profile discards old account and old focus responses, and clears personal data on logout', async () => {
   const requests = [];
-  const client = { get(path) { const request = { path, ...deferred() }; requests.push(request); return request.promise; } };
+  const client = { get(path) { if (path === '/profile/statistics') return Promise.resolve({ participationCount: 0, totalMinutes: 0 }); const request = { path, ...deferred() }; requests.push(request); return request.promise; } };
   const h = createHarness('screens/profile/ProfileScreen.js', { authContext: context('A', client) });
   await settle(h);
   h.setAuthContext(context('B', client));
@@ -354,7 +356,7 @@ test('edit rejects old GET and PUT results after a new session for the same user
 test('Profile rejects stale results before the new same-user session has rendered', async () => {
   let epoch = 1;
   const requests = [];
-  const client = { get(path) { const request = { path, ...deferred() }; requests.push(request); return request.promise; } };
+  const client = { get(path) { if (path === '/profile/statistics') return Promise.resolve({ participationCount: 0, totalMinutes: 0 }); const request = { path, ...deferred() }; requests.push(request); return request.promise; } };
   const auth = context('A', client, { getSessionEpoch: () => epoch });
   const h = createHarness('screens/profile/ProfileScreen.js', { authContext: auth });
   await settle(h);

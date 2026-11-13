@@ -1,4 +1,4 @@
-// Rota da Área Admin no app, botão do Início e pilha própria (ADM01).
+// Rota da Área Admin no app, ausência do atalho no Início e pilha própria (ADM01).
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { createHarness, loadModule, textOf, createParticipantThemeStub } = require('./helpers/questionnaireHarness.cjs');
@@ -85,7 +85,7 @@ test('AdminArea reutiliza a pilha Heliom e as rotas antigas não são registrada
   }
 });
 
-test('Início mantém entrada em evento sem atalhos administrativos ou StaffDemo', () => {
+test('Início permite entrada em evento sem oferecer atalhos Admin ou Staff demonstrativos', () => {
   const h = createHarness('screens/home/HomeScreen.js', {
     authContext: { user: { id: 'u-1', hasCompletedQuestionnaire: true } },
   });
@@ -98,7 +98,7 @@ test('Início mantém entrada em evento sem atalhos administrativos ou StaffDemo
   assert.deepEqual(h.navigationCalls.map((call) => call.name), ['EventEntry']);
 });
 
-test('Home não oferece Admin em nenhum estado', () => {
+test('Home não oferece atalho Admin nos estados de carregamento, erro ou pronto', () => {
   const h = createHarness('screens/home/HomeScreen.js', {
     authContext: { user: { id: 'u-1', hasCompletedQuestionnaire: true } },
   });
@@ -106,6 +106,7 @@ test('Home não oferece Admin em nenhum estado', () => {
     h.setProps({ mode, message: 'Falha simulada', onRetry() {} });
     assert.ok(!h.nodes.some((node) => node.type === 'Pressable'
       && node.props.accessibilityLabel === 'Área Admin (demonstração)'));
+    assert.ok(!h.nodes.some((node) => node.type === 'Pressable' && /Admin/.test(textOf(node))));
   }
   assert.deepEqual(h.navigationCalls, []);
 });

@@ -1,0 +1,590 @@
+diff --git a/app/screens/home/HomeScreen.js b/app/screens/home/HomeScreen.js
+index ddd64cc..3c63089 100644
+--- a/app/screens/home/HomeScreen.js
++++ b/app/screens/home/HomeScreen.js
+@@ -133,12 +133,6 @@ export default function HomeScreen({ navigation, returnState, mode = 'ready', me
+             </Card>
+           </View>
+ 
+-          <Button
+-            title="Área Admin (demonstração)"
+-            variant="ghost"
+-            onPress={() => navigation.navigate('AdminDemo')}
+-            style={styles.staffButton}
+-          />
+         </ScrollView>
+       )}
+     </AuthBackground>
+diff --git a/app/screens/profile/ProfileScreen.js b/app/screens/profile/ProfileScreen.js
+index 0a6b23a..96f3218 100644
+--- a/app/screens/profile/ProfileScreen.js
++++ b/app/screens/profile/ProfileScreen.js
+@@ -9,7 +9,6 @@ import {
+ import { StatusBar } from 'expo-status-bar';
+ 
+ import { AuthContext } from '../../context/AuthContext';
+-import { mockProfileStatistics } from '../../data/mockData';
+ import { getProfileViewData } from '../../utils/profile';
+ import { AuthBackground, Badge, Button, Card, TagChip } from '../../components/ui';
+ import { colors, radii, spacing, typography } from '../../theme';
+@@ -23,6 +22,8 @@ export default function ProfileScreen({ navigation, route }) {
+   const authRef = useRef(auth);
+   authRef.current = auth;
+   const reloadRef = useRef(null);
++  const reloadStatisticsRef = useRef(null);
++  const [statisticsState, setStatisticsState] = useState(null);
+   const [loaded, setLoaded] = useState(null);
+   const [isLoading, setIsLoading] = useState(true);
+   const [loadError, setLoadError] = useState('');
+@@ -34,7 +35,9 @@ export default function ProfileScreen({ navigation, route }) {
+   const account = ownsData ? loaded.account : null;
+   const questionnaire = ownsData ? loaded.questionnaire : null;
+   const profile = getProfileViewData({
+-    statistics: mockProfileStatistics, user: account, questionnaire,
++    statistics: isAuthenticated && statisticsState?.userId === userId
++      && statisticsState?.sessionEpoch === sessionEpoch && statisticsState?.client === client
++      ? statisticsState.value : null, user: account, questionnaire,
+   });
+   const canLogout = typeof auth?.logout === 'function';
+   const canEdit = !isLoading && account?.hasCompletedQuestionnaire === true
+@@ -44,11 +47,37 @@ export default function ProfileScreen({ navigation, route }) {
+     let active = true;
+     let pending = false;
+     let requestVersion = 0;
++    let statisticsVersion = 0;
++    let statisticsPending = false;
+     const isCurrent = (version) => active && requestVersion === version
+       && authRef.current?.isAuthenticated && authRef.current?.user?.id === userId
+       && authRef.current?.httpClient === client
+       && authRef.current?.getSessionEpoch?.() === sessionEpoch;
+ 
++    async function loadStatistics() {
++      if (statisticsPending || !isAuthenticated || !userId || !client) return;
++      statisticsPending = true;
++      const version = ++statisticsVersion;
++      setStatisticsState({ userId, sessionEpoch, client, value: null, error: false });
++      try {
++        const value = await client.get('/profile/statistics', { auth: true });
++        if (!active || version !== statisticsVersion || !authRef.current?.isAuthenticated
++          || authRef.current?.user?.id !== userId || authRef.current?.httpClient !== client
++          || authRef.current?.getSessionEpoch?.() !== sessionEpoch) return;
++        if (!Number.isSafeInteger(value?.participationCount) || value.participationCount < 0
++          || !Number.isSafeInteger(value?.totalMinutes) || value.totalMinutes < 0) throw new Error('Resposta inválida');
++        setStatisticsState({ userId, sessionEpoch, client, value, error: false });
++      } catch {
++        if (active && version === statisticsVersion && authRef.current?.isAuthenticated
++          && authRef.current?.user?.id === userId && authRef.current?.httpClient === client
++          && authRef.current?.getSessionEpoch?.() === sessionEpoch) {
++          setStatisticsState({ userId, sessionEpoch, client, value: null, error: true });
++        }
++      } finally {
++        if (version === statisticsVersion) statisticsPending = false;
++      }
++    }
++
+     async function loadProfile() {
+       if (pending || !isAuthenticated || !userId || !client) return;
+       pending = true;
+@@ -78,15 +107,20 @@ export default function ProfileScreen({ navigation, route }) {
+     setLoadError('');
+     setIsLoading(isAuthenticated);
+     reloadRef.current = loadProfile;
+-    if (navigation?.isFocused?.() !== false) void loadProfile();
+-    const unsubscribeFocus = navigation?.addListener?.('focus', loadProfile);
++    reloadStatisticsRef.current = loadStatistics;
++    const refresh = () => { void loadProfile(); void loadStatistics(); };
++    if (navigation?.isFocused?.() !== false) refresh();
++    const unsubscribeFocus = navigation?.addListener?.('focus', refresh);
+     const unsubscribeBlur = navigation?.addListener?.('blur', () => {
+       requestVersion += 1;
+       pending = false;
++      statisticsVersion += 1;
++      statisticsPending = false;
+     });
+     return () => {
+       active = false;
+       reloadRef.current = null;
++      reloadStatisticsRef.current = null;
+       unsubscribeFocus?.();
+       unsubscribeBlur?.();
+     };
+@@ -150,10 +184,6 @@ export default function ProfileScreen({ navigation, route }) {
+           ) : null}
+         </Card>
+ 
+-        <View style={styles.sectionHeaderRow}>
+-          <Badge label="DEMO" variant="brand" size="sm" />
+-          <Text style={styles.demoNotice}>Indicadores demonstrativos</Text>
+-        </View>
+         <View style={styles.statistics}>
+           <Card style={styles.statCard} variant="surface">
+             <Text style={styles.statValue}>{profile.participationCount}</Text>
+@@ -165,6 +195,15 @@ export default function ProfileScreen({ navigation, route }) {
+           </Card>
+         </View>
+ 
++        {isAuthenticated && statisticsState?.userId === userId && statisticsState?.client === client
++          && statisticsState?.sessionEpoch === sessionEpoch && statisticsState?.error ? (
++          <Card style={styles.errorCard} variant="surface">
++            <Text style={styles.error} accessibilityRole="alert">Estatísticas indisponíveis.</Text>
++            <Button variant="outline" size="md" onPress={() => reloadStatisticsRef.current?.()}
++              accessibilityLabel="Tentar carregar estatísticas novamente">Tentar novamente</Button>
++          </Card>
++        ) : null}
++
+         <View style={styles.questionnaireHeader}>
+           <Text style={styles.sectionTitle}>Dados do questionário</Text>
+         </View>
+diff --git a/app/tests/adminNavigation.test.cjs b/app/tests/adminNavigation.test.cjs
+index 4b191d4..8b12adc 100644
+--- a/app/tests/adminNavigation.test.cjs
++++ b/app/tests/adminNavigation.test.cjs
+@@ -1,4 +1,4 @@
+-// Rota da Área Admin no app, botão do Início e pilha própria (ADM01).
++// Rota da Área Admin no app, ausência do atalho no Início e pilha própria (ADM01).
+ const assert = require('node:assert/strict');
+ const test = require('node:test');
+ const { createHarness, loadModule, textOf, createParticipantThemeStub } = require('./helpers/questionnaireHarness.cjs');
+@@ -78,22 +78,20 @@ test('rota AdminDemo existe só no app autenticado e é carregada sob demanda',
+   }
+ });
+ 
+-test('Início abre a demonstração Admin e a entrada em evento sem oferecer StaffDemo', () => {
++test('Início permite entrada em evento sem oferecer atalhos Admin ou Staff demonstrativos', () => {
+   const h = createHarness('screens/home/HomeScreen.js', {
+     authContext: { user: { id: 'u-1', hasCompletedQuestionnaire: true } },
+   });
+-  const label = h.nodes.find((node) => node.type === 'Pressable' && /Admin/.test(textOf(node)));
+-  assert.equal(textOf(label), 'Área Admin (demonstração)');
++  assert.ok(!h.nodes.some((node) => node.type === 'Pressable' && /Admin/.test(textOf(node))));
+   for (const testID of ['home-background', 'home-event-entry-card', 'home-empty-participation-card']) {
+     assert.ok(h.nodes.some((node) => node.props.testID === testID), `${testID} preservado`);
+   }
+   assert.ok(!h.nodes.some((node) => node.type === 'Pressable' && /Staff/.test(textOf(node))));
+-  h.press('Área Admin (demonstração)');
+   h.press('Entrar em um evento');
+-  assert.deepEqual(h.navigationCalls.map((call) => call.name), ['AdminDemo', 'EventEntry']);
++  assert.deepEqual(h.navigationCalls.map((call) => call.name), ['EventEntry']);
+ });
+ 
+-test('atalho Admin respeita os estados de carregamento e erro da Home atual', () => {
++test('Home não oferece atalho Admin nos estados de carregamento, erro ou pronto', () => {
+   const h = createHarness('screens/home/HomeScreen.js', {
+     authContext: { user: { id: 'u-1', hasCompletedQuestionnaire: true } },
+   });
+@@ -103,8 +101,7 @@ test('atalho Admin respeita os estados de carregamento e erro da Home atual', ()
+       && node.props.accessibilityLabel === 'Área Admin (demonstração)'));
+   }
+   h.setProps({ mode: 'ready' });
+-  h.press('Área Admin (demonstração)');
+-  assert.equal(h.navigationCalls.at(-1).name, 'AdminDemo');
++  assert.ok(!h.nodes.some((node) => node.type === 'Pressable' && /Admin/.test(textOf(node))));
+ });
+ 
+ test('pilha da Área Admin registra as telas com títulos em português e provedor por sessão', () => {
+diff --git a/app/tests/profile.test.cjs b/app/tests/profile.test.cjs
+index 32ca732..0fdb7d4 100644
+--- a/app/tests/profile.test.cjs
++++ b/app/tests/profile.test.cjs
+@@ -6,7 +6,7 @@ const birthDate = loadModule('utils/birthDate.js', require).exports;
+ const { getProfileViewData } = loadModule('utils/profile.js', name =>
+   name === './birthDate' ? birthDate : require(name)).exports;
+ 
+-test('Profile loads real identity and questionnaire while preserving only demo indicators', async () => {
++test('Profile loads real identity, questionnaire and statistics', async () => {
+   const requests = [];
+   const user = { id: 'A', name: 'Ana Souza', email: 'ana@example.test', hasCompletedQuestionnaire: true };
+   const questionnaire = {
+@@ -22,7 +22,8 @@ test('Profile loads real identity and questionnaire while preserving only demo i
+       httpClient: {
+         async get(path, options) {
+           requests.push({ path, options });
+-          return path === '/profile' ? user : questionnaire;
++          return path === '/profile' ? user : path === '/profile/statistics'
++            ? { participationCount: 2, totalMinutes: 135 } : questionnaire;
+         },
+         put() { assert.fail('Profile must not save questionnaire data'); },
+       },
+@@ -38,8 +39,8 @@ test('Profile loads real identity and questionnaire while preserving only demo i
+   await h.actAsync(() => new Promise(resolve => setImmediate(resolve)));
+   const texts = h.nodes.filter(node => node.type === 'Text').map(textOf);
+   for (const text of [
+-    'Meu Perfil', 'Ana Souza', 'ana@example.test', '3', 'Participações', '8h', 'Tempo total',
+-    'Indicadores demonstrativos', 'Dados do questionário',
++    'Meu Perfil', 'Ana Souza', 'ana@example.test', '2', 'Participações', '2h 15min', 'Tempo total',
++    'Dados do questionário',
+     getProfileViewData({ questionnaire }).questionnaireRows[0].value,
+     'Feminino', 'Ensino Superior', 'Roblox', 'Não conheço.', 'Não tenho interesse.',
+   ]) assert.ok(texts.includes(text), text);
+@@ -47,8 +48,8 @@ test('Profile loads real identity and questionnaire while preserving only demo i
+   const edit = h.nodes.find(node => node.type === 'Pressable'
+     && textOf(node).includes('EDITAR DADOS DO QUESTIONÁRIO'));
+   assert.equal(edit.props.disabled, false);
+-  assert.equal(requests.length, 2);
+-  assert.deepEqual(requests.map(request => request.path), ['/profile', '/profile/questionnaire']);
++  assert.equal(requests.length, 3);
++  assert.deepEqual(new Set(requests.map(request => request.path)), new Set(['/profile', '/profile/questionnaire', '/profile/statistics']));
+   assert.ok(requests.every(request => request.options.auth === true));
+   assert.ok(!texts.includes('Em breve'));
+   assert.ok(!texts.some(text => text.includes('não são respostas da sua conta')));
+@@ -63,8 +64,7 @@ test('Profile loads real identity and questionnaire while preserving only demo i
+ test('Profile never invents identity or questionnaire data when there is no authenticated session', () => {
+   const h = createHarness('screens/profile/ProfileScreen.js', { authContext: null });
+   const texts = () => h.nodes.filter(node => node.type === 'Text').map(textOf);
+-  assert.ok(texts().includes('3'));
+-  assert.ok(texts().includes('8h'));
++  assert.equal(texts().filter(text => text === '—').length, 2);
+   assert.ok(!texts().includes('22 anos'));
+   const logout = h.nodes.find(node => node.props.accessibilityLabel === 'Sair da conta');
+   assert.equal(logout.props.disabled, true);
+@@ -80,7 +80,7 @@ test('Profile data transformation accepts questionnaire response shape and prese
+   const source = {
+     user: { name: '  Ana  ', email: ' ana@example.test ' },
+     referenceDate: '2026-10-28',
+-    statistics: { participationCount: 0, totalHours: 0 },
++    statistics: { participationCount: 0, totalMinutes: 0 },
+     questionnaire: {
+       aboutYou: { birthDate: '2004-10-29', gender: 'Outro', otherGender: 'Não binário', education: 'Médio' },
+       yourGames: [{ id: 'valorant', name: 'Valorant' }, 'Minecraft', null, {}],
+@@ -93,7 +93,10 @@ test('Profile data transformation accepts questionnaire response shape and prese
+   assert.equal(profile.name, 'Ana');
+   assert.equal(profile.email, 'ana@example.test');
+   assert.equal(profile.participationCount, '0');
+-  assert.equal(profile.totalTime, '0h');
++  assert.equal(profile.totalTime, '0min');
++  for (const [minutes, expected] of [[45, '45min'], [120, '2h'], [135, '2h 15min']]) {
++    assert.equal(getProfileViewData({ statistics: { participationCount: 1, totalMinutes: minutes } }).totalTime, expected);
++  }
+   assert.equal(value('Idade'), '21 anos');
+   assert.equal(value('Gênero'), 'Não binário');
+   assert.equal(value('Escolaridade'), 'Médio');
+@@ -127,6 +130,83 @@ test('Profile allows logout retry after failure and never navigates manually', a
+   assert.deepEqual(h.navigationCalls, []);
+ });
+ 
++test('statistics failure keeps profile visible and retry recovers zero values', async () => {
++  let fail = true;
++  const user = { id: 'A', name: 'Ana', email: 'ana@example.test', hasCompletedQuestionnaire: true };
++  const h = createHarness('screens/profile/ProfileScreen.js', { authContext: {
++    isAuthenticated: true, user, httpClient: { async get(path) {
++      if (path === '/profile') return user;
++      if (path === '/profile/questionnaire') return { hasCompleted: true, yourGames: [] };
++      if (fail) throw new Error('offline');
++      return { participationCount: 0, totalMinutes: 0 };
++    } },
++  } });
++  await h.actAsync(() => new Promise(resolve => setImmediate(resolve)));
++  let texts = h.nodes.filter(node => node.type === 'Text').map(textOf);
++  assert.ok(texts.includes('Ana'));
++  assert.ok(texts.includes('Estatísticas indisponíveis.'));
++  assert.ok(!texts.includes('0min'));
++  fail = false;
++  await h.actAsync(() => h.press('Tentar carregar estatísticas novamente'));
++  texts = h.nodes.filter(node => node.type === 'Text').map(textOf);
++  assert.ok(texts.includes('0min'));
++  assert.ok(!texts.includes('Estatísticas indisponíveis.'));
++});
++
++test('late statistics cannot cross account, epoch or logout; focus reloads', async () => {
++  let resolveOld;
++  const oldResult = new Promise(resolve => { resolveOld = resolve; });
++  const makeAuth = (id, epoch, stats) => {
++    const user = { id, name: id, email: `${id}@example.test`, hasCompletedQuestionnaire: true };
++    return { isAuthenticated: true, user, getSessionEpoch: () => epoch,
++      httpClient: { async get(path) {
++        if (path === '/profile') return user;
++        if (path === '/profile/questionnaire') return { hasCompleted: true };
++        return stats;
++      } } };
++  };
++  const a = makeAuth('A', 1, oldResult);
++  const b = makeAuth('B', 2, { participationCount: 4, totalMinutes: 45 });
++  const h = createHarness('screens/profile/ProfileScreen.js', { authContext: a });
++  await h.actAsync(() => new Promise(resolve => setImmediate(resolve)));
++  h.setAuthContext(b);
++  await h.actAsync(() => new Promise(resolve => setImmediate(resolve)));
++  await h.actAsync(() => { resolveOld({ participationCount: 99, totalMinutes: 999 }); });
++  let texts = h.nodes.filter(node => node.type === 'Text').map(textOf);
++  assert.ok(texts.includes('45min'));
++  assert.ok(!texts.includes('99'));
++  h.setFocused(false);
++  h.setFocused(true);
++  await h.actAsync(() => new Promise(resolve => setImmediate(resolve)));
++  texts = h.nodes.filter(node => node.type === 'Text').map(textOf);
++  assert.ok(texts.includes('45min'));
++  h.setAuthContext({ isAuthenticated: false });
++  texts = h.nodes.filter(node => node.type === 'Text').map(textOf);
++  assert.ok(!texts.includes('45min'));
++});
++
++test('late statistics from an earlier session of the same user are discarded', async () => {
++  let epoch = 1;
++  const pending = [];
++  const user = { id: 'A', name: 'Ana', hasCompletedQuestionnaire: true };
++  const auth = { isAuthenticated: true, user, getSessionEpoch: () => epoch,
++    httpClient: { get(path) {
++      if (path === '/profile') return Promise.resolve(user);
++      if (path === '/profile/questionnaire') return Promise.resolve({ hasCompleted: true });
++      return new Promise(resolve => pending.push(resolve));
++    } } };
++  const h = createHarness('screens/profile/ProfileScreen.js', { authContext: auth });
++  await h.actAsync(() => new Promise(resolve => setImmediate(resolve)));
++  epoch = 2;
++  h.setAuthContext({ ...auth });
++  await h.actAsync(() => new Promise(resolve => setImmediate(resolve)));
++  await h.actAsync(() => pending[1]({ participationCount: 1, totalMinutes: 120 }));
++  await h.actAsync(() => pending[0]({ participationCount: 99, totalMinutes: 999 }));
++  const texts = h.nodes.filter(node => node.type === 'Text').map(textOf);
++  assert.ok(texts.includes('2h'));
++  assert.ok(!texts.includes('99'));
++});
++
+ test('Home has no logout and preserves event entry and pending questionnaire navigation', () => {
+   const h = createHarness('screens/home/HomeScreen.js', {
+     authContext: {
+@@ -173,7 +253,7 @@ test('UI-11/12: ProfileScreen renders modernized dark Design System, structured
+ 
+   const texts = h.nodes.filter((n) => n.type === 'Text').map(textOf);
+   assert.ok(texts.includes('PARTICIPANTE'));
+-  assert.ok(texts.includes('DEMO'));
++  assert.ok(!texts.includes('DEMO'));
+   assert.ok(texts.includes('Meu Perfil'));
+   assert.ok(texts.includes('Informações Pessoais'));
+   assert.ok(texts.includes('Jogos de Interesse'));
+diff --git a/app/tests/profileEditing.test.cjs b/app/tests/profileEditing.test.cjs
+index 8504706..08ad0f8 100644
+--- a/app/tests/profileEditing.test.cjs
++++ b/app/tests/profileEditing.test.cjs
+@@ -51,6 +51,7 @@ test('editing loads every field, saves the complete authenticated payload once a
+       requests.push({ path, options });
+       if (path === '/profile') return { id: 'A', name: 'Conta real', email: 'real@example.test', hasCompletedQuestionnaire: true };
+       if (path === '/profile/questionnaire') return stored;
++      if (path === '/profile/statistics') return { participationCount: 2, totalMinutes: 75 };
+       if (path.startsWith('/games')) return { games: [{ name: 'Roblox' }] };
+       assert.fail(path);
+     },
+@@ -128,7 +129,7 @@ test('editing loads every field, saves the complete authenticated payload once a
+   assert.ok(texts(profile).includes('Feminino'));
+   assert.ok(texts(profile).includes('Valorant, Roblox'));
+   assert.ok(texts(profile).includes('Não tenho interesse.'));
+-  assert.ok(texts(profile).includes('3') && texts(profile).includes('8h'));
++  assert.ok(texts(profile).includes('2') && texts(profile).includes('1h 15min'));
+   assert.equal(requests.filter(request => request.path === '/profile').length, 2);
+   assert.ok(requests.filter(request => request.path.startsWith('/profile')).every(request => request.options.auth));
+ });
+@@ -243,6 +244,7 @@ test('Profile retries partial loading errors without falling back to demo answer
+   const client = {
+     async get(path) {
+       if (path === '/profile') return { id: 'A', name: 'Nome real', email: 'real@example.test', hasCompletedQuestionnaire: true };
++      if (path === '/profile/statistics') return { participationCount: 0, totalMinutes: 0 };
+       if (fail) throw new Error('offline');
+       return answers('Roblox');
+     },
+@@ -252,7 +254,7 @@ test('Profile retries partial loading errors without falling back to demo answer
+   assert.ok(texts(h).includes('Nome real'));
+   assert.ok(texts(h).some(text => text.includes('Não foi possível carregar todos os dados')));
+   assert.ok(!texts(h).includes('22 anos'));
+-  assert.ok(texts(h).includes('3') && texts(h).includes('8h'));
++  assert.ok(texts(h).includes('0') && texts(h).includes('0min'));
+   fail = false;
+   h.act(() => h.press('Tentar carregar perfil novamente'));
+   await settle(h);
+@@ -262,7 +264,7 @@ test('Profile retries partial loading errors without falling back to demo answer
+ 
+ test('Profile loads only on focus and deduplicates repeated focus events while loading', async () => {
+   const requests = [];
+-  const client = { get(path) { const request = { path, ...deferred() }; requests.push(request); return request.promise; } };
++  const client = { get(path) { if (path === '/profile/statistics') return Promise.resolve({ participationCount: 0, totalMinutes: 0 }); const request = { path, ...deferred() }; requests.push(request); return request.promise; } };
+   const h = createHarness('screens/profile/ProfileScreen.js', { authContext: context('A', client), focused: false });
+   await settle(h);
+   assert.equal(requests.length, 0);
+@@ -278,7 +280,7 @@ test('Profile loads only on focus and deduplicates repeated focus events while l
+ 
+ test('Profile discards old account and old focus responses, and clears personal data on logout', async () => {
+   const requests = [];
+-  const client = { get(path) { const request = { path, ...deferred() }; requests.push(request); return request.promise; } };
++  const client = { get(path) { if (path === '/profile/statistics') return Promise.resolve({ participationCount: 0, totalMinutes: 0 }); const request = { path, ...deferred() }; requests.push(request); return request.promise; } };
+   const h = createHarness('screens/profile/ProfileScreen.js', { authContext: context('A', client) });
+   await settle(h);
+   h.setAuthContext(context('B', client));
+@@ -354,7 +356,7 @@ test('edit rejects old GET and PUT results after a new session for the same user
+ test('Profile rejects stale results before the new same-user session has rendered', async () => {
+   let epoch = 1;
+   const requests = [];
+-  const client = { get(path) { const request = { path, ...deferred() }; requests.push(request); return request.promise; } };
++  const client = { get(path) { if (path === '/profile/statistics') return Promise.resolve({ participationCount: 0, totalMinutes: 0 }); const request = { path, ...deferred() }; requests.push(request); return request.promise; } };
+   const auth = context('A', client, { getSessionEpoch: () => epoch });
+   const h = createHarness('screens/profile/ProfileScreen.js', { authContext: auth });
+   await settle(h);
+diff --git a/app/utils/profile.js b/app/utils/profile.js
+index 23e5aae..8b52fb0 100644
+--- a/app/utils/profile.js
++++ b/app/utils/profile.js
+@@ -16,6 +16,13 @@ function displayAge(birthDate, referenceDate) {
+   return `${age} ${age === 1 ? 'ano' : 'anos'}`;
+ }
+ 
++function displayMinutes(value) {
++  if (!Number.isSafeInteger(value) || value < 0) return '—';
++  const hours = Math.floor(value / 60);
++  const minutes = value % 60;
++  return hours ? `${hours}h${minutes ? ` ${minutes}min` : ''}` : `${minutes}min`;
++}
++
+ // Recebe dados da conta e o formato do GET de questionário, sem buscar dados.
+ export function getProfileViewData({
+   user, statistics, questionnaire, referenceDate = getTodayCivilDate(),
+@@ -32,9 +39,9 @@ export function getProfileViewData({
+   return {
+     name: displayText(user?.name, 'Participante'),
+     email: displayText(user?.email, 'E-mail não disponível'),
+-    participationCount: Number.isFinite(statistics?.participationCount)
++    participationCount: Number.isSafeInteger(statistics?.participationCount) && statistics.participationCount >= 0
+       ? String(statistics.participationCount) : '—',
+-    totalTime: Number.isFinite(statistics?.totalHours) ? `${statistics.totalHours}h` : '—',
++    totalTime: displayMinutes(statistics?.totalMinutes),
+     questionnaireRows: [
+       { label: 'Idade', value: displayAge(aboutYou?.birthDate, referenceDate) },
+       { label: 'Gênero', value: displayText(
+diff --git a/backend/src/profile/profile.controller.ts b/backend/src/profile/profile.controller.ts
+index c328ab0..aadc492 100644
+--- a/backend/src/profile/profile.controller.ts
++++ b/backend/src/profile/profile.controller.ts
+@@ -24,6 +24,12 @@ export class ProfileController {
+     return this.profileService.getProfile(userId);
+   }
+ 
++  @Get("statistics")
++  @HttpCode(HttpStatus.OK)
++  async getStatistics(@CurrentUserId() userId: string): Promise<{ participationCount: number; totalMinutes: number }> {
++    return this.profileService.getStatistics(userId);
++  }
++
+   @Patch()
+   @HttpCode(HttpStatus.OK)
+   async updateProfile(
+diff --git a/backend/src/profile/profile.service.ts b/backend/src/profile/profile.service.ts
+index a571ec1..2c684bb 100644
+--- a/backend/src/profile/profile.service.ts
++++ b/backend/src/profile/profile.service.ts
+@@ -16,6 +16,22 @@ const ROLE_ORDER: Record<UserRoleName, number> = {
+ export class ProfileService {
+   constructor(@Inject(POSTGRES_POOL) private readonly pool: Pool) {}
+ 
++  async getStatistics(authenticatedUserId: string): Promise<{ participationCount: number; totalMinutes: number }> {
++    const result = await this.pool.query<{ participation_count: string; total_minutes: string }>(
++      `SELECT COUNT(*) FILTER (WHERE arena_entered_at IS NOT NULL)::text AS participation_count,
++              FLOOR(COALESCE(SUM(EXTRACT(EPOCH FROM (finished_at - arena_entered_at))) FILTER (
++                WHERE status = 'finished' AND arena_entered_at IS NOT NULL AND finished_at IS NOT NULL
++                  AND isfinite(arena_entered_at) AND isfinite(finished_at) AND finished_at >= arena_entered_at
++              ), 0) / 60)::text AS total_minutes
++       FROM participations WHERE user_id = $1`,
++      [authenticatedUserId],
++    );
++    return {
++      participationCount: Number(result.rows[0].participation_count),
++      totalMinutes: Number(result.rows[0].total_minutes),
++    };
++  }
++
+   /**
+    * Consulta os dados cadastrais da própria conta autenticada (`GET /api/v1/profile`).
+    * Retorna estritamente: id, name, email, emailVerified, roles, hasCompletedQuestionnaire, createdAt, updatedAt.
+diff --git a/backend/test/unit/profile-statistics.unit.test.ts b/backend/test/unit/profile-statistics.unit.test.ts
+new file mode 100644
+index 0000000..e1f8062
+--- /dev/null
++++ b/backend/test/unit/profile-statistics.unit.test.ts
+@@ -0,0 +1,55 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import type { Pool } from "pg";
++import { ProfileController } from "../../src/profile/profile.controller";
++import { ProfileService } from "../../src/profile/profile.service";
++
++test("statistics uses only the authenticated user and a read-only aggregate", async () => {
++  const calls: Array<{ sql: string; values: unknown[] }> = [];
++  const pool = { async query(sql: string, values: unknown[]) {
++    calls.push({ sql, values });
++    return { rows: [{ participation_count: values[0] === "A" ? "3" : "0", total_minutes: values[0] === "A" ? "135" : "0" }] };
++  } } as unknown as Pool;
++  const service = new ProfileService(pool);
++  const controller = new ProfileController(service);
++  assert.deepEqual(await controller.getStatistics("A"), { participationCount: 3, totalMinutes: 135 });
++  assert.deepEqual(await controller.getStatistics("B"), { participationCount: 0, totalMinutes: 0 });
++  assert.deepEqual(calls.map(call => call.values), [["A"], ["B"]]);
++  const sql = calls[0].sql;
++  assert.match(sql, /FROM participations WHERE user_id = \$1/);
++  assert.match(sql, /COUNT\(\*\) FILTER \(WHERE arena_entered_at IS NOT NULL\)/);
++  assert.match(sql, /status = 'finished'/);
++  assert.match(sql, /isfinite\(arena_entered_at\).*isfinite\(finished_at\)/);
++  assert.match(sql, /finished_at >= arena_entered_at/);
++  assert.match(sql, /FLOOR\(COALESCE\(SUM\(EXTRACT\(EPOCH/);
++  assert.doesNotMatch(sql, /\b(?:UPDATE|INSERT|DELETE|TRUNCATE)\b/i);
++});
++
++test("simulated aggregate separates waiting, active, canceled and valid finished periods", async () => {
++  const rows = [
++    { user: "A", status: "waiting", entered: null, finished: null },
++    { user: "A", status: "active", entered: 1000, finished: null },
++    { user: "A", status: "canceled", entered: 1000, finished: 61000 },
++    { user: "A", status: "finished", entered: 1000, finished: 91000 },
++    { user: "A", status: "finished", entered: 1000, finished: 31000 },
++    { user: "A", status: "finished", entered: null, finished: 61000 },
++    { user: "A", status: "finished", entered: 61000, finished: 1000 },
++    { user: "A", status: "finished", entered: Number.NEGATIVE_INFINITY, finished: 1000 },
++    { user: "B", status: "finished", entered: 1000, finished: 601000 },
++  ];
++  const pool = { async query(sql: string, values: string[]) {
++    assert.match(sql, /WHERE user_id = \$1/);
++    assert.match(sql, /status = 'finished'/);
++    assert.match(sql, /finished_at >= arena_entered_at/);
++    const own = rows.filter(row => row.user === values[0]);
++    const milliseconds = own.reduce((sum, row) => sum + (row.status === "finished" && row.entered !== null
++      && row.finished !== null && Number.isFinite(row.entered) && Number.isFinite(row.finished)
++      && row.finished >= row.entered ? row.finished - row.entered : 0), 0);
++    return { rows: [{ participation_count: String(own.filter(row => row.entered !== null).length),
++      total_minutes: String(Math.floor(milliseconds / 60000)) }] };
++  } } as unknown as Pool;
++  const service = new ProfileService(pool);
++  assert.deepEqual(await service.getStatistics("A"), { participationCount: 6, totalMinutes: 2 });
++  assert.deepEqual(await service.getStatistics("B"), { participationCount: 1, totalMinutes: 10 });
++  assert.deepEqual(await service.getStatistics("C"), { participationCount: 0, totalMinutes: 0 });
++});
+diff --git a/docs/PROFILE_REAL_STATISTICS_IMPLEMENTACAO.md b/docs/PROFILE_REAL_STATISTICS_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..d08d3f1
+--- /dev/null
++++ b/docs/PROFILE_REAL_STATISTICS_IMPLEMENTACAO.md
+@@ -0,0 +1,31 @@
++# PROFILE_REAL_STATISTICS
++
++## Implementação
++
++O Perfil consulta `GET /api/v1/profile/statistics`, autenticado pela sessão existente. O controlador recebe o identificador exclusivamente de `CurrentUserId`; a consulta é de leitura, parametrizada por usuário e não recebe identificadores do cliente. Resposta: `{ "participationCount": number, "totalMinutes": number }`.
++
++`participationCount` conta cada linha de participação com `arena_entered_at` preenchido, inclusive ativa ou cancelada que já entrou. A fila externa sem entrada confirmada não conta. `totalMinutes` soma a duração de participações `finished` com ambos os instantes finitos e fim não anterior à entrada. A soma dos segundos é dividida por 60 e arredondada para baixo uma única vez; valores ausentes geram zero. O intervalo começa na entrada na Arena, sem incluir espera externa.
++
++O Perfil atualiza as estatísticas ao ganhar foco, separadamente da identidade e do questionário. Durante carregamento ou erro mostra `—`; erro oferece nova tentativa. Resultados são associados ao usuário, cliente e geração de sessão e descartados ao trocar contexto, perder foco ou desmontar. A apresentação usa minutos e horas, sem indicador demonstrativo.
++
++## Validação preparada
++
++- Backend: `test/unit/profile-statistics.unit.test.ts`, com verificação do parâmetro autenticado, estrutura da consulta e cenários simulados de estados e tempos.
++- Aplicativo: `tests/profile.test.cjs` e `tests/profileEditing.test.cjs`, cobrindo apresentação, recuperação, foco e isolamento de sessão, além da edição existente.
++- Executar os testes direcionados e os typechecks do backend com Luna Medium, em ambiente isolado, após inspecionar os scripts. Testes, lint, build e typechecks não foram executados nesta implementação.
++
++Os testes backend simulam a resposta do banco: eles não executam a agregação no PostgreSQL. Uma campanha física em banco dedicado, autorizada separadamente, é necessária para confirmar a semântica SQL com timestamps reais e infinitos. Nenhuma migration é necessária.
++
++## Homologação funcional no Expo Go
++
++1. **Conta sem participações — aprovado:** o Perfil apresentou 0 participações e 0min; os indicadores demonstrativos anteriores foram removidos.
++2. **Conta com histórico — aprovado:** o histórico mostrou duas participações com permanências de 5min e 36min. O Perfil apresentou 2 participações e 41min, coerentes com o histórico observado.
++3. **Atalho Admin — aprovado:** a remoção do botão “Área Admin (demonstração)” da Home foi confirmada visualmente. A rota AdminDemo permanece no projeto.
++
++Não houve campanha SQL independente executando diretamente a agregação no PostgreSQL. A observação de valores positivos fornece evidência funcional, mas não comprova todos os casos possíveis da consulta. O problema de autenticação Admin/TOTP será investigado separadamente e não integra esta task.
++
++## Campanhas automatizadas
++
++Na validação automatizada anterior ao ajuste da Home, passaram 113 testes focados do aplicativo, 17 testes backend pelo fallback Node e 745 testes na regressão do aplicativo; os dois typechecks backend passaram. A consulta SQL real não foi executada nessa validação.
++
++Na última campanha Luna Medium, após o ajuste da Home, passaram 117 testes focados e 745 testes na regressão completa do frontend, sem falhas e com exit 0 em ambos. `git diff --check` e a verificação reversa do patch tiveram exit 0. O parecer dessa campanha foi **APROVADO PARA COMMIT**.
