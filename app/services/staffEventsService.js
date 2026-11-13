@@ -29,6 +29,7 @@ const sameIdentity = (a, b) => Boolean(a && b && a.userId === b.userId &&
 export function createStaffEventsStore({ client, getIdentity }) {
   let state = empty();
   let generation = 0;
+  let silentFlight = false;
   const listeners = new Set();
   const publish = (next) => { state = next; listeners.forEach((listener) => listener(state)); };
   const isCurrent = (identity = state.identity) => sameIdentity(identity, state.identity) &&
@@ -55,6 +56,22 @@ export function createStaffEventsStore({ client, getIdentity }) {
     }
   }
 
+  async function refreshSilent() {
+    if (silentFlight || !isCurrent() || state.status !== 'ready') return;
+    const identity = state.identity, requestGeneration = generation;
+    silentFlight = true;
+    try {
+      const events = await fetchStaffEvents(client);
+      if (requestGeneration !== generation || !isCurrent(identity)) return;
+      const selected = state.selected ? events.find(item => item.id === state.selected.id) ?? null : null;
+      publish({ ...state, events, selected, error: null });
+    } catch (error) {
+      if (requestGeneration !== generation || !isCurrent(identity)) return;
+      if ([401, 403].includes(error?.status)) publish({ ...state, events: [], selected: null, status: 'error', error: 'session' });
+      else publish({ ...state, error: 'stale' });
+    } finally { silentFlight = false; }
+  }
+
   function select(eventId) {
     if (!isCurrent() || state.status !== 'ready') return false;
     const event = state.events.find((item) => item.id === eventId);
@@ -68,5 +85,5 @@ export function createStaffEventsStore({ client, getIdentity }) {
   }
 
   return { getSnapshot: () => state, subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
-    setIdentity, refresh, select, clearSelection, isCurrent };
+    setIdentity, refresh, refreshSilent, select, clearSelection, isCurrent };
 }

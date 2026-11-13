@@ -21,6 +21,26 @@ const queue = (event = eventId) => ({ eventId: event, experienceId, waitingCount
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject }; };
 
+test('polling preserva dados durante rede, atualiza estação e fila e descarta contexto antigo', async () => {
+  let current = context(), stationResult = stations(), queueResult = queue();
+  const store = createStaffDashboardStore({ getContext: () => current, client: { get: async url =>
+    url.endsWith('/stations') ? stationResult : queueResult } });
+  store.setContext(current); await store.refreshStations(); await store.refreshQueue(experienceId);
+  stationResult = { ...stations(), stations: [{ ...stations().stations[0], availability: 'unavailable' }] };
+  queueResult = { ...queue(), waitingCount: 2, firstWaitingQueueEntryId: stationId };
+  await store.pollStations(); await store.pollQueue();
+  assert.equal(store.getSnapshot().stations[0].availability, 'unavailable');
+  assert.equal(store.getSnapshot().queue.waitingCount, 2);
+  stationResult = Promise.reject(Object.assign(new Error('offline'), { isNetworkError: true }));
+  await store.pollStations();
+  assert.equal(store.getSnapshot().stations[0].availability, 'unavailable');
+  assert.equal(store.getSnapshot().stationError, 'stale');
+  const late = deferred(); stationResult = late.promise;
+  const old = store.pollStations(); current = context(otherEventId); store.setContext(current);
+  late.resolve(stations()); await old;
+  assert.equal(store.getSnapshot().stations.length, 0);
+});
+
 test('consulta estações e fila reais com cliente autenticado e somente experiência retornada', async () => {
   const current = context(), calls = [];
   const store = createStaffDashboardStore({ getContext: () => current, client: { get: async (url, options) => {

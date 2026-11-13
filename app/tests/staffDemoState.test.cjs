@@ -219,7 +219,7 @@ const demoStaffScreens = [
   'components/StaffDemoTools.js', 'components/StaffHeader.js', 'components/StaffMissingSession.js',
   'components/StaffNotice.js', 'components/StaffScreen.js', 'components/staffTheme.js',
 ];
-const realStaffScreens = ['StaffEventsNavigator.js', 'StaffEntryControlRealScreen.js', 'StaffStationOperationalScreen.js'];
+const realStaffScreens = ['StaffEventsNavigator.js', 'StaffEntryControlRealScreen.js', 'StaffStationOperationalScreen.js', 'useStaffPolling.js'];
 
 test('estação operacional real não carrega estado demonstrativo', () => {
   const source = readFileSync(path.join(appDirectory, 'screens', 'staff', 'StaffStationOperationalScreen.js'), 'utf8');

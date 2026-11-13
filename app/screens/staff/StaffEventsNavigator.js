@@ -8,6 +8,7 @@ import { createStaffEventsStore } from '../../services/staffEventsService';
 import { createStaffDashboardStore } from '../../services/staffDashboardService';
 import StaffEntryControlRealScreen from './StaffEntryControlRealScreen';
 import StaffStationOperationalScreen from './StaffStationOperationalScreen';
+import { useStaffPolling } from './useStaffPolling';
 
 const Stack = createNativeStackNavigator();
 const StaffEventsContext = createContext(null);
@@ -55,6 +56,7 @@ function StaffEventsProvider({ children }) {
     selected: current ? snapshot.selected : null,
     error: current ? snapshot.error : null,
     refresh: store.refresh,
+    refreshSilent: store.refreshSilent,
     select: store.select,
     clearSelection: store.clearSelection,
     isCurrent: store.isCurrent,
@@ -74,6 +76,7 @@ function Button({ label, accessibilityLabel = label, onPress, disabled = false }
 
 function StaffEventsScreen({ navigation }) {
   const staff = useContext(StaffEventsContext);
+  useStaffPolling(staff.status === 'ready', staff.refreshSilent, 60000);
   const auth = useAuth();
   const messages = {
     session: 'Não foi possível confirmar sua sessão. Entre novamente ou tente atualizar.',
@@ -89,6 +92,7 @@ function StaffEventsScreen({ navigation }) {
           <ActivityIndicator color="#a78bfa" /><Text style={styles.message}>Carregando eventos...</Text>
         </View>}
         {staff.status === 'error' && <Text accessibilityRole="alert" style={styles.message}>{messages[staff.error]}</Text>}
+        {staff.error === 'stale' && <Text accessibilityRole="alert" style={styles.message}>A lista pode estar desatualizada. Atualize os eventos.</Text>}
         {staff.status === 'ready' && staff.events.length === 0 &&
           <Text style={styles.message}>Nenhum evento autorizado para esta conta.</Text>}
         {staff.status === 'ready' && staff.events.map((event) => (
@@ -109,6 +113,7 @@ function StaffEventsScreen({ navigation }) {
 
 function StaffEventHomeScreen({ navigation }) {
   const staff = useContext(StaffEventsContext);
+  useStaffPolling(Boolean(staff.selected && staff.status === 'ready'), staff.refreshSilent, 60000, staff.selected?.id);
   const [section, setSection] = useState('panel');
   const [stationId, setStationId] = useState(null);
   useEffect(() => navigation.addListener('beforeRemove', (action) => {
@@ -174,12 +179,17 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
   useEffect(() => {
     if (section !== 'station') store.clearQueue();
   }, [store, section]);
+  useStaffPolling((section === 'panel' || section === 'station') && store.isCurrent(snapshot.context) && snapshot.stationStatus === 'ready',
+    () => store.pollStations(), 5000, `${event.id}:${section}:${epoch}:${revision}`);
+  useStaffPolling(section === 'station' && store.isCurrent(snapshot.context) && snapshot.queueStatus === 'ready',
+    () => store.pollQueue(), 5000, `${event.id}:${stationId}:${epoch}:${revision}`);
   if (!store.isCurrent(snapshot.context)) return null;
   const messages = {
     session: 'Não foi possível confirmar sua sessão. Entre novamente ou tente atualizar.',
     denied: 'Acesso ao evento ou à experiência indisponível. Atualize seus eventos autorizados.',
     network: 'Não foi possível conectar ao servidor. Verifique sua conexão e tente novamente.',
     unavailable: 'Não foi possível carregar os dados. Tente novamente.',
+    stale: 'Dados operacionais possivelmente desatualizados. Atualize antes de operar.',
   };
   const experiencesById = new Map(snapshot.experiences.map((experience) => [experience.id, experience]));
   const station = snapshot.stations.find((item) => item.id === stationId);
@@ -193,6 +203,7 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
   return <>
     {(section === 'panel' || section === 'station') && dashboardErrors.map((kind) =>
       <Text key={kind} accessibilityRole="alert" style={styles.message}>{messages[kind]}</Text>)}
+    {snapshot.queueError === 'stale' && <Text accessibilityRole="alert" style={styles.message}>{messages.stale}</Text>}
     {section === 'panel' && <>
       <Text style={styles.title}>Painel operacional</Text>
       <Button label="Controle de Entrada" onPress={() => setSection('entry')} />

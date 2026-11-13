@@ -85,6 +85,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
   const passthrough = ({ children }) => children;
   const native = Object.fromEntries(['ActivityIndicator', 'Modal', 'Pressable', 'ScrollView', 'Text', 'View'].map((name) => [name, name]));
   native.StyleSheet = { create: (styles) => styles };
+  native.AppState = { currentState: 'active', addEventListener: () => ({ remove() {} }) };
   native.Platform = { OS: control.platformOS ?? 'web' };
   function FocusedStack(props) {
     const { state, descriptors, NavigationContent } = Navigation.useNavigationBuilder(StackRouter, props);
@@ -103,7 +104,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
       if (name === 'expo-secure-store') return control.secureStore ?? {};
       if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView', SafeAreaProvider: passthrough };
       if (name === '@react-navigation/native-stack') return { createNativeStackNavigator: Navigation.createNavigatorFactory(FocusedStack) };
-      if (name === '@react-navigation/native') return { NavigationContainer: ({ children }) =>
+      if (name === '@react-navigation/native') return { useIsFocused: () => true, NavigationContainer: ({ children }) =>
         React.createElement(Navigation.BaseNavigationContainer, { ref: navRef, onUnhandledAction: (action) => unhandled.push(action) }, children) };
       const target = path.posix.normalize(path.posix.join(directory, name));
       if (target === 'components/ui/AuthBackground') {
@@ -115,7 +116,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
       if (control.realStaff && ['screens/staff/StaffEventsNavigator', 'services/staffEventsService',
         'screens/staff/StaffEntryControlRealScreen', 'services/staffEntryService', 'services/staffEntryIntentStorage',
         'screens/staff/StaffStationOperationalScreen', 'services/staffIntentStorage',
-        'services/staffDashboardService', 'services/staffOperationsService'].includes(target)) {
+        'services/staffDashboardService', 'services/staffOperationsService', 'screens/staff/useStaffPolling'].includes(target)) {
         return load(`${target}.js`);
       }
       if (target === 'screens/event-entry/EventEntryScreen' && control.modalFixture) {

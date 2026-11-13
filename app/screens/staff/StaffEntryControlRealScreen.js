@@ -4,6 +4,7 @@ import { randomUUID } from 'expo-crypto';
 import { useAuth } from '../../context/AuthContext';
 import { createStaffEntryStore } from '../../services/staffEntryService';
 import { defaultStaffEntryIntentStorage } from '../../services/staffEntryIntentStorage';
+import { useStaffPolling } from './useStaffPolling';
 
 function Button({ label, onPress, disabled = false, danger = false }) {
   return <Pressable accessibilityRole="button" accessibilityLabel={label} disabled={disabled}
@@ -40,6 +41,8 @@ export default function StaffEntryControlRealScreen({ event, isEventCurrent, onB
     store.setContext(getContext()); setDialog(null); void store.refresh();
     return () => { dialogRef.current = null; store.setContext(null); };
   }, [store, event.id, auth.user?.id, auth.sessionId, epoch, revision]);
+  useStaffPolling(store.isCurrent(snapshot.context) && snapshot.status === 'ready' && !snapshot.busy,
+    () => store.poll(), 5000, `${event.id}:${epoch}:${revision}`);
   useEffect(() => {
     const intent = snapshot.pending, scope = snapshot.context;
     if (intent?.phase !== 'terminal' || snapshot.status !== 'ready' || snapshot.busy || !store.isCurrent(scope) ||
@@ -55,7 +58,7 @@ export default function StaffEntryControlRealScreen({ event, isEventCurrent, onB
   if (!store.isCurrent(snapshot.context)) return null;
   const ownPending = snapshot.pending && ['userId', 'sessionId', 'eventId'].every(key => snapshot.pending[key] === snapshot.context[key]);
   const pending = ownPending ? snapshot.pending : null;
-  const disabled = snapshot.busy || snapshot.status !== 'ready' || !snapshot.data ||
+  const disabled = snapshot.busy || snapshot.status !== 'ready' || snapshot.error === 'stale' || !snapshot.data ||
     Boolean(snapshot.pending) || snapshot.storageError || !defaultStaffEntryIntentStorage.isPersistent;
   const runDirect = (action) => {
     if (disabled || dialogRef.current || !store.isCurrent(snapshot.context) ||
@@ -76,6 +79,7 @@ export default function StaffEntryControlRealScreen({ event, isEventCurrent, onB
     <Text style={styles.text}>Fila de acesso ao evento</Text>
     {snapshot.status === 'loading' && <View accessibilityRole="progressbar"><ActivityIndicator color="#a78bfa" /><Text style={styles.text}>Carregando fila de entrada...</Text></View>}
     {snapshot.status === 'error' && <Text accessibilityRole="alert" style={styles.warning}>{errors[snapshot.error]}</Text>}
+    {snapshot.error === 'stale' && <Text accessibilityRole="alert" style={styles.warning}>Dados de entrada possivelmente desatualizados. Atualize antes de operar.</Text>}
     {snapshot.data && <>
       <View style={styles.card}>
         <Text style={styles.title}>Fila {snapshot.data.externalQueueEnabled ? 'ATIVA' : 'INATIVA'}</Text>

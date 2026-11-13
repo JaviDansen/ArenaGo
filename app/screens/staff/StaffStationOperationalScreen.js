@@ -4,6 +4,7 @@ import { randomUUID } from 'expo-crypto';
 import { useAuth } from '../../context/AuthContext';
 import { createStaffOperationsCoordinator, fetchStaffStationState } from '../../services/staffOperationsService';
 import { defaultStaffIntentStorage } from '../../services/staffIntentStorage';
+import { useStaffPolling } from './useStaffPolling';
 
 const same = (a, b) => Boolean(a && b && ['userId', 'sessionId', 'eventId', 'stationId', 'epoch', 'revision']
   .every(key => a[key] === b[key]));
@@ -79,6 +80,27 @@ export default function StaffStationOperationalScreen({ event, experience, stati
     }
   }
 
+  async function poll() {
+    const scope = getContext(), request = generation.current;
+    if (!scope || viewRef.current.status !== 'ready' || viewRef.current.busy || dialogRef.current ||
+        dispatching.current || acknowledging.current) return;
+    try {
+      const data = coordinator
+        ? await coordinator.readStationState(scope, experience.id, station.id)
+        : await fetchStaffStationState(live.current.auth.httpClient, event.id, experience.id, station.id);
+      if (request === generation.current && same(scope, getContext()))
+        setView(previous => ({ ...previous, data, error: null }));
+    } catch (error) {
+      if (request !== generation.current || !same(scope, getContext())) return;
+      const kind = error?.status === 401 ? 'session' : [403, 404].includes(error?.status) ? 'denied' : 'stale';
+      setView(previous => kind === 'stale' ? { ...previous, error: kind }
+        : { ...previous, data: null, status: 'error', error: kind });
+    }
+  }
+
+  useStaffPolling(Boolean(context && view.status === 'ready' && !view.busy), poll, 5000,
+    `${event.id}:${station.id}:${epoch}:${revision}`);
+
   useEffect(() => {
     mounted.current = true;
     autoAttempt.current = null;
@@ -114,7 +136,7 @@ export default function StaffStationOperationalScreen({ event, experience, stati
     })();
   }, [view.pending, view.scope, coordinator]);
 
-  const blocked = !same(view.scope, context) || view.busy || view.status !== 'ready' || !coordinator ||
+  const blocked = !same(view.scope, context) || view.busy || view.status !== 'ready' || view.error === 'stale' || !coordinator ||
     dispatching.current || acknowledging.current || (view.pending && view.pending.kind !== 'none');
   const open = action => {
     if (!blocked && context) setDialog({ action, context, observed: view.data });
@@ -124,6 +146,7 @@ export default function StaffStationOperationalScreen({ event, experience, stati
         (!fromDialog && (expected.action.kind !== 'call' || dialogRef.current)) ||
         !same(expected.context, getContext()) ||
         !same(viewRef.current.scope, getContext()) || viewRef.current.busy || viewRef.current.status !== 'ready' ||
+        viewRef.current.error === 'stale' ||
         (viewRef.current.pending && viewRef.current.pending.kind !== 'none')) return;
     if (expected.action.kind === 'call' && (!viewRef.current.data?.canCall ||
         viewRef.current.data.pending || viewRef.current.data.waitingCount === 0 ||
@@ -166,7 +189,8 @@ export default function StaffStationOperationalScreen({ event, experience, stati
   if (!same(view.scope, context)) return <View style={styles.content}>
     <Text style={styles.text}>Verificando atendimento da estação...</Text></View>;
   const messages = { session: 'Sessão inválida. Entre novamente.', denied: 'Acesso à estação indisponível.',
-    network: 'Falha de conexão. Atualize a estação.', unavailable: 'Não foi possível consultar a estação.' };
+    network: 'Falha de conexão. Atualize a estação.', unavailable: 'Não foi possível consultar a estação.',
+    stale: 'Dados da estação possivelmente desatualizados. Atualize antes de operar.' };
   const data = view.data;
   const pending = view.pending;
   return <View style={styles.content}>
@@ -175,6 +199,7 @@ export default function StaffStationOperationalScreen({ event, experience, stati
     {view.status === 'loading' && <View accessibilityRole="progressbar"><ActivityIndicator color="#a78bfa" />
       <Text style={styles.text}>Carregando atendimento...</Text></View>}
     {view.status === 'error' && <Text accessibilityRole="alert" style={styles.warning}>{messages[view.error]}</Text>}
+    {view.error === 'stale' && <Text accessibilityRole="alert" style={styles.warning}>{messages.stale}</Text>}
     {view.feedback?.kind === 'confirmed' && <Text accessibilityRole="alert" style={styles.success}>
       {view.feedback.result?.status === 'absent'
         ? view.feedback.result.requeued ? 'Ausência registrada; participante retornou ao fim da fila.'

@@ -95,3 +95,18 @@ test('troca de conta, geração, revisão e respostas fora de ordem descartam da
   store.setIdentity(null);
   assert.equal(store.getSnapshot().selected, null);
 });
+
+test('consulta silenciosa preserva seleção e descarta resposta após troca de identidade', async () => {
+  let current = identity(), response = { events: [event] };
+  const store = createStaffEventsStore({ client: { get: async () => response }, getIdentity: () => current });
+  store.setIdentity(current); await store.refresh(); store.select(event.id);
+  response = { events: [{ ...event, effectivePhase: 'closing' }] };
+  await store.refreshSilent();
+  assert.equal(store.getSnapshot().selected.effectivePhase, 'closing');
+  const waiting = deferred();
+  response = waiting.promise;
+  const old = store.refreshSilent();
+  current = identity('new', 2, 2); store.setIdentity(current);
+  waiting.resolve({ events: [event] }); await old;
+  assert.equal(store.getSnapshot().selected, null);
+});

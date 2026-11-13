@@ -47,6 +47,7 @@ function createRealApp(initialAuth) {
     'Text', 'TextInput', 'View'].map((name) => [name, name]));
   native.Modal = ({ visible, children }) => (visible ? React.createElement('Modal', null, children) : null);
   native.StyleSheet = { create: (styles) => styles };
+  native.AppState = { currentState: 'active', addEventListener: () => ({ remove() {} }) };
   native.Platform = { OS: 'ios' };
 
   const navRef = Navigation.createNavigationContainerRef();
@@ -77,6 +78,7 @@ function createRealApp(initialAuth) {
       if (name === '@react-navigation/native-stack') return nativeStack;
       if (name === '@react-navigation/native') {
         return {
+          useIsFocused: () => true,
           NavigationContainer: ({ children }) => React.createElement(Navigation.BaseNavigationContainer, {
             ref: navRef,
             onUnhandledAction: (action) => unhandled.push(action),

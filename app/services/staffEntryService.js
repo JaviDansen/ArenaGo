@@ -69,7 +69,7 @@ export const isDefinitiveEntryRejection = (error) => [400, 401, 403, 404].includ
 
 /** Sem replay de POST: um dispatching desconhecido só permite consultas. */
 export function createStaffEntryStore({ client, storage, createKey, getContext }) {
-  let state = empty(), generation = 0, readGeneration = 0, flight = null;
+  let state = empty(), generation = 0, readGeneration = 0, flight = null, silentFlight = false;
   const listeners = new Set();
   const publish = (patch) => { state = { ...state, ...patch }; listeners.forEach(fn => fn(state)); };
   const isCurrent = (context = state.context) => same(context, state.context) && same(context, getContext());
@@ -88,10 +88,25 @@ export function createStaffEntryStore({ client, storage, createKey, getContext }
       if (current()) publish({ status: 'ready', data });
     } catch (error) { if (current()) publish({ status: 'error', data: null, error: failure(error) }); }
   }
+  async function poll() {
+    if (silentFlight || flight || !isCurrent() || state.status !== 'ready') return;
+    const context = state.context, currentGeneration = generation, request = readGeneration;
+    silentFlight = true;
+    try {
+      const data = parseEntryState(await client.get(`/staff/events/${context.eventId}/entry-control`, { auth: true }), context.eventId);
+      if (currentGeneration === generation && request === readGeneration && isCurrent(context))
+        publish({ data, error: null });
+    } catch (error) {
+      if (currentGeneration !== generation || request !== readGeneration || !isCurrent(context)) return;
+      const kind = failure(error);
+      if (kind === 'session' || kind === 'denied') publish({ status: 'error', data: null, error: kind });
+      else publish({ error: 'stale' });
+    } finally { silentFlight = false; }
+  }
   async function mutate(action) {
     if (flight) return { kind: 'busy' };
     const context = state.context;
-    if (!isCurrent(context) || state.status !== 'ready' || !state.data || state.storageError || state.pending ||
+    if (!isCurrent(context) || state.status !== 'ready' || state.error === 'stale' || !state.data || state.storageError || state.pending ||
         storage.isPersistent !== true || !['userId', 'sessionId', 'eventId'].every(key => validEntryId(context[key]))) return { kind: 'blocked' };
     const data = state.data, call = data.pendingCall;
     if (action.kind === 'toggle' ? !data.canManage || typeof action.enabled !== 'boolean' || action.enabled === data.externalQueueEnabled
@@ -168,7 +183,7 @@ export function createStaffEntryStore({ client, storage, createKey, getContext }
     } catch { if (isCurrent(context)) publish({ storageError: true }); return { kind: isCurrent(context) ? 'storage_error' : 'stale' }; }
     finally { if (isCurrent(context)) { publish({ busy: false }); await refresh(); } }
   }
-  return { getSnapshot: () => state, setContext, isCurrent, refresh, mutate,
+  return { getSnapshot: () => state, setContext, isCurrent, refresh, poll, mutate,
     acknowledge: key => resolveLocal(key), cancelReserved: key => resolveLocal(key, true),
     subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); } };
 }

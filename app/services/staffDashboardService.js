@@ -15,6 +15,7 @@ export function createStaffDashboardStore({ client, getContext }) {
   let stationGeneration = 0;
   let experienceGeneration = 0;
   let queueGeneration = 0;
+  let silentStations = false, silentQueue = false;
   const listeners = new Set();
   const publish = (next) => { state = next; listeners.forEach((listener) => listener(state)); };
   const isCurrent = (candidate = state.context) => same(state.context, candidate) && same(state.context, getContext());
@@ -62,6 +63,21 @@ export function createStaffDashboardStore({ client, getContext }) {
       publish({ ...state, stationStatus: 'error', stationError: kind, stations: [] });
     }
   }
+  async function pollStations() {
+    if (silentStations || !isCurrent() || state.stationStatus !== 'ready') return;
+    const context = state.context, revision = generation, request = stationGeneration;
+    silentStations = true;
+    try {
+      const { stations } = await fetchStaffStations(client, context.eventId);
+      if (revision === generation && request === stationGeneration && isCurrent(context))
+        publish({ ...state, stations, stationError: null });
+    } catch (error) {
+      if (revision !== generation || request !== stationGeneration || !isCurrent(context)) return;
+      const kind = errorKind(error);
+      if (kind === 'denied' || kind === 'session') denied(kind);
+      else publish({ ...state, stationError: 'stale' });
+    } finally { silentStations = false; }
+  }
   async function refreshQueue(experienceId = state.experienceId) {
     if (!isCurrent() || state.stationStatus !== 'ready' ||
         !state.stations.some((station) => station.experienceId === experienceId)) return;
@@ -78,10 +94,25 @@ export function createStaffDashboardStore({ client, getContext }) {
       publish({ ...state, queueStatus: 'error', queue: null, queueError: kind });
     }
   }
+  async function pollQueue(experienceId = state.experienceId) {
+    if (silentQueue || !isCurrent() || state.queueStatus !== 'ready' || state.experienceId !== experienceId) return;
+    const context = state.context, revision = generation, request = queueGeneration;
+    silentQueue = true;
+    try {
+      const queue = await fetchStaffQueue(client, context.eventId, experienceId);
+      if (revision === generation && request === queueGeneration && isCurrent(context) && state.experienceId === experienceId)
+        publish({ ...state, queue, queueError: null });
+    } catch (error) {
+      if (revision !== generation || request !== queueGeneration || !isCurrent(context)) return;
+      const kind = errorKind(error);
+      if (kind === 'denied' || kind === 'session') denied(kind);
+      else publish({ ...state, queueError: 'stale' });
+    } finally { silentQueue = false; }
+  }
   function clearQueue() {
     queueGeneration += 1;
     if (isCurrent()) publish({ ...state, experienceId: null, queueStatus: 'idle', queue: null, queueError: null });
   }
-  return { getSnapshot: () => state, isCurrent, setContext, refreshStations, refreshExperiences, refreshQueue, clearQueue,
+  return { getSnapshot: () => state, isCurrent, setContext, refreshStations, refreshExperiences, refreshQueue, pollStations, pollQueue, clearQueue,
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); } };
 }

@@ -53,6 +53,19 @@ async function rig(options = {}) {
   const store = make(persisted.storage); store.setContext(current); await store.refresh();
   return { store, persisted, calls, client, make, setContext(value) { current = value; store.setContext(value); }, get current() { return current; } };
 }
+test('leitura silenciosa atualiza FIFO sem POST e conserva dados durante falha transitória', async () => {
+  let answer = body();
+  const r = await rig({ get: () => answer });
+  answer = { ...body(), waiting: [body().waiting[1]], waitingCount: 1, canCall: true };
+  answer.waiting[0].position = 1;
+  await r.store.poll();
+  assert.equal(r.store.getSnapshot().data.waiting[0].displayName, 'Bia');
+  assert.equal(r.calls.filter(call => call.method !== 'GET').length, 0);
+  answer = Promise.reject(Object.assign(new Error('offline'), { isNetworkError: true }));
+  await r.store.poll();
+  assert.equal(r.store.getSnapshot().data.waiting[0].displayName, 'Bia');
+  assert.equal(r.store.getSnapshot().error, 'stale');
+});
 test('contrato valida identidade mínima, FIFO, contagem e resposta da operação', () => {
   assert.equal(api.parseEntryState(body(), id(3)).waiting[0].displayName, 'Ana');
   for (const patch of [{ waitingCount: 3 }, { observedAt: '2026-11-10' }, { waiting: [...body().waiting].reverse() },
