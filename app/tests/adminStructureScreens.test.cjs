@@ -3,6 +3,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { createAdminApp } = require('./helpers/adminHarness.cjs');
+const { verifiedAdminAuth } = require('./helpers/adminAuthFixture.cjs');
 
 const XP = 'demo-admin-arena-xp';
 const D1 = 'demo-admin-beast-d1';
@@ -187,7 +188,7 @@ test('critério 12: troca de conta ou logout descarta experiências, estações 
   app.press('CRIAR EXPERIÊNCIA');
   await app.pressAsync('CRIAR EXPERIÊNCIA');
   assert.equal(experiencesOf(app, D1).length, 3);
-  app.setAuth({ isAuthenticated: true, user: { id: 'u-2', name: 'Outra Conta' }, getSessionEpoch: () => 1 });
+  app.setAuth(verifiedAdminAuth({ user: { id: 'u-2', name: 'Outra Conta', sessionId: '20000000-0000-4000-8000-000000000002' } }));
   assert.equal(experiencesOf(app, D1).length, 2, 'conta B começa do zero');
   assert.ok(!app.hasText('Fliperama  →'));
   app.setAuth({ isAuthenticated: false, user: null });

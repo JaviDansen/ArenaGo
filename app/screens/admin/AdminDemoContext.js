@@ -1,6 +1,7 @@
-import { createContext, useContext, useRef, useState } from 'react';
+import { createContext, useContext, useEffect, useRef, useState } from 'react';
 
 import { useAuth } from '../../context/AuthContext';
+import { canAccessAdminArea } from '../../context/adminAccess';
 import {
   advanceClock as advanceClockTransition,
   createAdminDemoSession,
@@ -16,12 +17,13 @@ export const AdminDemoContext = createContext(null);
 export const ADMIN_SIMULATED_FAILURE_MESSAGE =
   'Erro simulado: nenhuma alteração foi feita. Tente novamente.';
 
-// Dono da demonstração: conta autenticada + geração da sessão (epoch do
-// AuthContext). Login, logout ou troca direta de conta mudam a chave.
+// Dono: conta, sessão confirmada, geração e revisão da identidade.
+// Revalidação/renovação invalida callbacks e descarta os dados locais anteriores.
 export function getAdminDemoOwnerKey(auth) {
-  if (!auth?.isAuthenticated || !auth.user?.id) return null;
+  if (!canAccessAdminArea(auth)) return null;
   const epoch = typeof auth.getSessionEpoch === 'function' ? auth.getSessionEpoch() : 0;
-  return `${auth.user.id}#${epoch}`;
+  const revision = typeof auth.getIdentityRevision === 'function' ? auth.getIdentityRevision() : 0;
+  return `${auth.user.id}#${auth.user.sessionId}#${epoch}#${revision}`;
 }
 
 function freshDemo(ownerKey) {
@@ -33,6 +35,11 @@ export function AdminDemoProvider({ children }) {
   const ownerKey = getAdminDemoOwnerKey(auth);
   const authRef = useRef(auth);
   authRef.current = auth;
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   const [demo, setDemo] = useState(() => freshDemo(ownerKey));
   // Ref garante resultado síncrono mesmo com cliques seguidos.
@@ -51,6 +58,8 @@ export function AdminDemoProvider({ children }) {
   // depois de trocar de conta e antes da nova renderização, não altera nada.
   function liveDemo() {
     const liveKey = getAdminDemoOwnerKey(authRef.current);
+    // Um callback da conta/geração anterior não pode operar sobre a nova conta.
+    if (!mountedRef.current || !liveKey || liveKey !== ownerKey) return freshDemo(null);
     if (demoRef.current.ownerKey !== liveKey) commit(freshDemo(liveKey));
     return demoRef.current;
   }
@@ -90,12 +99,15 @@ export function AdminDemoProvider({ children }) {
 
   function toggleFailNextAction() {
     const latest = liveDemo();
+    if (!latest.session) return;
     commit({ ...latest, failNextAction: !latest.failNextAction });
   }
 
   // Sair da Área Admin descarta toda a demonstração.
   function discard() {
-    commit(freshDemo(liveDemo().ownerKey));
+    if (!liveDemo().session) return false;
+    commit(freshDemo(null));
+    return true;
   }
 
   const value = {

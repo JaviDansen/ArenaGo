@@ -19,12 +19,14 @@ import AdminStationDetailScreen from './AdminStationDetailScreen';
 
 const Stack = createNativeStackNavigator();
 
-// Pilha própria da Área Admin (demonstração). O provedor fica aqui dentro para
+// Pilha do Admin autenticado; as operações continuam demonstrativas. O provedor fica aqui para
 // que todo o estado simulado seja descartado ao sair da área. A key amarrada à
 // conta e à geração da sessão remonta provedor e telas se a identidade mudar.
 // O cabeçalho nativo fica oculto porque cada tela desenha o seu.
 export default function AdminDemoNavigator() {
-  const ownerKey = getAdminDemoOwnerKey(useAuth()) ?? 'sem-conta';
+  const ownerKey = getAdminDemoOwnerKey(useAuth());
+  // Defesa adicional inclusive se este componente for montado por uma rota antiga.
+  if (!ownerKey) return null;
   return (
     <AdminDemoProvider key={ownerKey}>
       <Stack.Navigator initialRouteName="AdminPanel" screenOptions={{ headerShown: false }}>

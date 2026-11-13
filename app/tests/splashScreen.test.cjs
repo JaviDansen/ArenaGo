@@ -38,6 +38,7 @@ const {
 // Função fábrica de resolvedores de módulo com suporte robusto a caminhos relativos
 function createResolver(overrides = {}) {
   const baseResolver = (name) => {
+    if (name === '../../context/adminAccess') return loadModule('context/adminAccess.js', require).exports;
     if (overrides[name]) {
       return overrides[name];
     }
@@ -827,7 +828,7 @@ test('SPLASH-01 (16): Transições de rota baseadas no estado de autenticação'
   assert.equal(resolveInitialRouteForAuthState({ isAuthenticated: true,
     user: { roles: ['staff'], hasCompletedQuestionnaire: false } }), 'StaffPending');
   assert.equal(resolveInitialRouteForAuthState({ isAuthenticated: true,
-    user: { roles: ['admin'], hasCompletedQuestionnaire: false } }), 'AdminPending');
+    user: { roles: ['admin'], hasCompletedQuestionnaire: false } }), 'IdentityRecovery');
   assert.equal(resolveInitialRouteForAuthState({ isAuthenticated: true,
     user: { roles: [] } }), 'IdentityRecovery');
 

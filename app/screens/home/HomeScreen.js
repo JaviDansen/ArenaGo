@@ -132,13 +132,6 @@ export default function HomeScreen({ navigation, returnState, mode = 'ready', me
               </Pressable>
             </Card>
           </View>
-
-          <Button
-            title="Área Admin (demonstração)"
-            variant="ghost"
-            onPress={() => navigation.navigate('AdminDemo')}
-            style={styles.staffButton}
-          />
         </ScrollView>
       )}
     </AuthBackground>

@@ -3,6 +3,7 @@
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const { loadModule, textOf } = require('./questionnaireHarness.cjs');
+const { verifiedAdminAuth } = require('./adminAuthFixture.cjs');
 
 const nativeNames = ['ActivityIndicator', 'KeyboardAvoidingView', 'Modal', 'Pressable', 'ScrollView',
   'Text', 'TextInput', 'View'];
@@ -123,11 +124,23 @@ function createAdminApp({ auth, initialRoute = 'AdminPanel', initialParams, late
   const { react, mount } = createReactMock();
   const cache = new Map();
   // Conta trocável durante o teste (troca direta A → B, sem logout).
-  let authValue = auth ?? {
-    isAuthenticated: true,
-    user: { id: 'u-1', name: 'Conta Teste' },
-    getSessionEpoch: () => 1,
-  };
+  let authValue = auth ?? verifiedAdminAuth();
+  let authRevision = 0;
+  let logoutCount = 0;
+  const liveAuth = () => ({
+    ...authValue,
+    getSessionEpoch: () => authValue.getSessionEpoch?.() ?? 0,
+    getIdentityRevision: () => authRevision,
+    isIdentityVerified: () => authValue.isIdentityVerified?.() ?? false,
+    logout: async () => {
+      logoutCount += 1;
+      await authValue.logout?.();
+      authValue = { isAuthenticated: false, user: null };
+      authRevision += 1;
+      provider.render();
+      sync();
+    },
+  });
   const requested = [];
 
   function load(relativePath) {
@@ -146,7 +159,7 @@ function createAdminApp({ auth, initialRoute = 'AdminPanel', initialParams, late
       if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView' };
       if (name.startsWith('.')) {
         const target = path.posix.normalize(path.posix.join(directory, name));
-        if (target === 'context/AuthContext') return { AuthContext: {}, useAuth: () => authValue };
+        if (target === 'context/AuthContext') return { AuthContext: {}, useAuth: liveAuth };
         if (target === 'screens/admin/adminDemoLatency') {
           return { waitAdminDemoLatency: latency ?? (() => Promise.resolve()) };
         }
@@ -255,6 +268,8 @@ function createAdminApp({ auth, initialRoute = 'AdminPanel', initialParams, late
   const api = {
     navigationCalls,
     requested,
+    ownerKeyFor: context.getAdminDemoOwnerKey,
+    get logoutCount() { return logoutCount; },
     get exitedToApp() { return exitedToApp; },
     get route() { return top().name; },
     get routes() { return stack.map((route) => route.name); },
@@ -304,9 +319,9 @@ function createAdminApp({ auth, initialRoute = 'AdminPanel', initialParams, late
     },
     sync,
     // Troca a conta e re-renderiza (como faria o AuthContext).
-    setAuth(next) { authValue = next; provider.render(); sync(); },
+    setAuth(next) { authValue = next; authRevision += 1; provider.render(); sync(); },
     // Troca a conta SEM re-renderizar: simula callback antigo antes da nova renderização.
-    setAuthWithoutRender(next) { authValue = next; },
+    setAuthWithoutRender(next) { authValue = next; authRevision += 1; },
     handlerOf(label) {
       const button = findPressable(label);
       assert.ok(button, `botão ausente ou encoberto: ${label}`);

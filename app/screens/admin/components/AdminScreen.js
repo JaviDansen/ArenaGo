@@ -19,7 +19,7 @@ export default function AdminScreen({ title, highlight, subtitle, backLabel, onB
       <View
         style={styles.demoBanner}
         accessibilityRole="alert"
-        accessibilityLabel="Modo demonstração: dados fictícios, nada é salvo no servidor e não há permissão Admin real"
+        accessibilityLabel="Operações demonstrativas: dados fictícios, nada é salvo no servidor. Acesso por sessão Admin autenticada."
       >
         <Text style={styles.demoBannerText}>
           <Text style={styles.demoBannerTitle}>{ADMIN_DEMO_LABEL}</Text>

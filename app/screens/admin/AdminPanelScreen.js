@@ -18,9 +18,9 @@ export default function AdminPanelScreen({ navigation }) {
     return (
       <AdminMissing
         title="Sessão indisponível"
-        message="Entre com sua conta para abrir a Área Admin (demonstração)."
-        actionLabel="VOLTAR AO APLICATIVO"
-        onAction={() => navigation.getParent()?.goBack()}
+        message="Entre com uma conta Admin e conclua a verificação de segundo fator."
+        actionLabel="SAIR DA CONTA"
+        onAction={() => { void auth?.logout(); }}
       />
     );
   }
@@ -28,11 +28,10 @@ export default function AdminPanelScreen({ navigation }) {
   const summary = getPanelSummary(session);
   const accountName = auth?.user?.name || auth?.user?.email || 'Conta conectada';
 
-  // Sai da Área Admin: descarta a demonstração e fecha a rota AdminDemo na
-  // pilha do app (o provedor desmonta). A sessão autenticada não é tocada.
-  function handleExitToApp() {
-    discard();
-    navigation.getParent()?.goBack();
+  // O roteador de autenticação remove a área; não há retorno a MainTabs/Staff.
+  function handleLogout() {
+    if (!discard()) return;
+    return auth.logout();
   }
 
   const counters = [
@@ -49,14 +48,14 @@ export default function AdminPanelScreen({ navigation }) {
       title="Painel"
       highlight="Administrativo"
       subtitle="Gerencie eventos e acompanhe a demonstração da plataforma."
-      backLabel="Voltar ao aplicativo"
-      onBack={handleExitToApp}
+      backLabel="Sair da conta"
+      onBack={handleLogout}
     >
       <AdminCard>
         <Text style={styles.account}>Conectado como: {accountName}</Text>
         <Text style={styles.warning}>
-          Modo demonstração: esta conta NÃO recebeu permissão Admin nem verificação TOTP. A
-          autorização real dependerá da API futura; nada aqui é salvo no servidor.
+          Sessão Admin autenticada com segundo fator. As operações e os dados deste painel
+          continuam demonstrativos, apenas nesta sessão; nada aqui é salvo no servidor.
         </Text>
       </AdminCard>
 

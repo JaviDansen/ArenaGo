@@ -4,6 +4,7 @@ const { StackRouter, CommonActions } = require('@react-navigation/routers');
 const {
   createHarness, loadModule, textOf, createParticipantThemeStub,
 } = require('./helpers/questionnaireHarness.cjs');
+const { verifiedAdminAuth } = require('./helpers/adminAuthFixture.cjs');
 
 let authState;
 function NavigationContainer() {}
@@ -12,6 +13,7 @@ function StackScreen() {}
 function ImportedScreen() {}
 
 const gateExports = loadModule('screens/auth/AuthSessionGate.js', (name) => {
+  if (name === '../../context/adminAccess') return loadModule('context/adminAccess.js', require).exports;
   if (name === 'react') return { ...require('react'), useState: (value) => [value, () => {}] };
   if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
   if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView' };
@@ -103,17 +105,17 @@ function navigate(router, state, routeNames, name) {
 
 test('papéis do backend definem pilhas isoladas e precedência admin > staff > participante', () => {
   for (const [roles, expected] of [
-    [['admin', 'staff', 'participante'], 'AdminPending'],
+    [['admin', 'staff', 'participante'], 'AdminArea'],
     [['staff', 'participante'], 'StaffPending'],
     [['participante'], 'MainTabs'],
   ]) {
-    const result = renderStack({ isAuthenticated: true, user: {
+    const result = renderStack(verifiedAdminAuth({ user: {
       id: 'user', roles, hasCompletedQuestionnaire: true,
-    } });
+    } }));
     assert.equal(result.names[0], expected);
     const router = StackRouter(routerOptions(result.names));
     const state = router.getInitialState(routerOptions(result.names));
-    for (const forbidden of ['AdminPending', 'StaffPending', 'MainTabs'].filter((name) => name !== expected)) {
+    for (const forbidden of ['AdminArea', 'AdminPending', 'AdminDemo', 'AdminPanel', 'StaffPending', 'MainTabs'].filter((name) => name !== expected)) {
       assert.equal(navigate(router, state, result.names, forbidden), null);
     }
   }
@@ -126,7 +128,7 @@ test('papéis ausentes, vazios ou inválidos não abrem nenhuma área de papel',
     assert.deepEqual(result.names, ['IdentityRecovery']);
     const router = StackRouter(routerOptions(result.names));
     const state = router.getInitialState(routerOptions(result.names));
-    for (const name of ['MainTabs', 'AdminPending', 'StaffPending']) {
+    for (const name of ['MainTabs', 'AdminArea', 'AdminPending', 'AdminDemo', 'StaffPending']) {
       assert.equal(navigate(router, state, result.names, name), null);
     }
   }
@@ -134,17 +136,17 @@ test('papéis ausentes, vazios ou inválidos não abrem nenhuma área de papel',
 
 test('questionário só determina a entrada de participante, inclusive na restauração', () => {
   for (const [roles, expected] of [
-    [['admin'], 'AdminPending'], [['staff'], 'StaffPending'], [['participante'], 'ProfileQuestionnaire'],
+    [['admin'], 'AdminArea'], [['staff'], 'StaffPending'], [['participante'], 'ProfileQuestionnaire'],
   ]) {
-    const restored = renderStack({ isAuthenticated: true, sessionStatus: 'authenticated',
-      postAuthRoute: 'ProfileQuestionnaire', user: { id: 'restored', roles, hasCompletedQuestionnaire: false } });
+    const restored = renderStack(verifiedAdminAuth({
+      postAuthRoute: 'ProfileQuestionnaire', user: { id: 'restored', roles, hasCompletedQuestionnaire: false } }));
     assert.equal(restored.names[0], expected);
     assert.ok(!restored.names.includes('MainTabs'));
   }
 });
 
 test('logout, troca de conta e alteração de papel descartam a árvore anterior', () => {
-  const session = (id, roles, epoch) => ({ isAuthenticated: true,
+  const session = (id, roles, epoch) => verifiedAdminAuth({
     user: { id, roles, hasCompletedQuestionnaire: true }, getSessionEpoch: () => epoch });
   const staff = renderStack(session('a', ['staff'], 1));
   const other = renderStack(session('b', ['staff'], 2));
@@ -157,8 +159,8 @@ test('logout, troca de conta e alteração de papel descartam a árvore anterior
   assert.equal(renderStack(session('a', ['staff'], 3)).names[0], 'StaffPending');
 });
 
-test('revalidação da mesma sessão preserva a árvore e papéis reais isolam AdminDemo', () => {
-  const session = (identityStatus, roles = ['participante'], epoch = 7) => ({
+test('revalidação de participante preserva a árvore e AdminDemo permanece removida', () => {
+  const session = (identityStatus, roles = ['participante'], epoch = 7) => verifiedAdminAuth({
     isAuthenticated: true,
     identityStatus,
     user: { id: 'mesma-conta', roles, hasCompletedQuestionnaire: true },
@@ -168,7 +170,8 @@ test('revalidação da mesma sessão preserva a árvore e papéis reais isolam A
   const checking = renderStack(session('checking'));
   assert.equal(checking.tree.key, verified.tree.key,
     'a checagem da mesma geração não remonta navegação nem participação');
-  assert.ok(verified.names.includes('AdminDemo'), 'demonstração disponível ao participante');
+  assert.ok(!verified.names.includes('AdminDemo'), 'demonstração removida do participante');
+  assert.ok(!verified.names.includes('AdminArea'));
   assert.ok(!verified.names.includes('StaffDemo'), 'demonstração Staff permanece removida');
 
   const renewed = renderStack(session('verified', ['participante'], 8));
@@ -176,8 +179,36 @@ test('revalidação da mesma sessão preserva a árvore e papéis reais isolam A
   for (const roles of [['staff'], ['admin'], ['admin', 'staff']]) {
     const privileged = renderStack(session('verified', roles));
     assert.deepEqual(privileged.names,
-      [roles.includes('admin') ? 'AdminPending' : 'StaffPending']);
+      [roles.includes('admin') ? 'AdminArea' : 'StaffPending']);
     assert.ok(!privileged.names.includes('AdminDemo'), 'papéis reais não recebem a demonstração');
+  }
+});
+
+test('AdminArea falha fechada para sessão incompleta, identidade não confirmada ou desafio pendente', () => {
+  const invalid = [
+    { isAuthenticated: false, sessionStatus: 'admin_2fa_required' },
+    { isAuthenticated: false, sessionStatus: 'admin_2fa_verifying' },
+    { isInitializing: true }, { identityStatus: 'checking' },
+    { identityStatus: 'unverified' }, { identityStatus: 'error' },
+    { identityStatus: undefined }, { sessionStatus: 'revoked' },
+    { sessionStatus: 'expired' }, { sessionStatus: 'identity_error' },
+    { sessionStatus: undefined }, { adminChallenge: { isTotpConfigured: true } },
+    { isIdentityVerified: () => false }, { isIdentityVerified: undefined },
+    { user: { id: '' } }, { user: { sessionId: null } },
+    { user: { roles: ['participante'] } }, { user: { roles: ['staff'] } },
+    { user: { roles: ['admin', 'invalid'] } },
+  ];
+  for (const overrides of invalid) {
+    const auth = verifiedAdminAuth(overrides);
+    // Ausência explícita do mecanismo confiável também deve bloquear.
+    if ('isIdentityVerified' in overrides) auth.isIdentityVerified = overrides.isIdentityVerified;
+    const result = renderStack(auth);
+    assert.ok(!result.names.includes('AdminArea'));
+    const router = StackRouter(routerOptions(result.names));
+    const state = router.getInitialState(routerOptions(result.names));
+    for (const name of ['AdminArea', 'AdminDemo', 'AdminPending', 'AdminPanel']) {
+      assert.equal(navigate(router, state, result.names, name), null);
+    }
   }
 });
 

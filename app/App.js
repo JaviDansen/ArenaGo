@@ -40,12 +40,12 @@ export function AppNavigation() {
   const auth = useAuth();
   const isAuthenticated = Boolean(auth?.isAuthenticated);
   const initialRouteName = resolveInitialRouteForAuthState(auth);
-  const roleArea = initialRouteName === 'AdminPending' ? 'admin'
+  const roleArea = initialRouteName === 'AdminArea' ? 'admin'
     : initialRouteName === 'StaffPending' ? 'staff'
       : initialRouteName === 'IdentityRecovery' ? 'recovery'
       : isAuthenticated ? 'participant' : 'public';
   const sessionKey = isAuthenticated
-    ? `${roleArea}:${auth?.user?.id || ''}:${auth?.getSessionEpoch?.() ?? ''}`
+    ? `${roleArea}:${auth?.user?.id || ''}:${auth?.user?.sessionId || ''}:${auth?.getSessionEpoch?.() ?? ''}`
     : 'public';
 
   const publicScreens = [
@@ -91,13 +91,6 @@ export function AppNavigation() {
       },
     },
 
-    // A demonstração Admin pertence apenas à pilha do Participante autenticado.
-    // O papel Admin real segue para AdminPending, sem conceder acesso por esta rota.
-    {
-      name: 'AdminDemo',
-      getComponent: () =>
-        require('./screens/admin/AdminDemoNavigator').default,
-    },
     // Avaliação real de uma participação finalizada.
     {
       name: 'RealEvaluation',
@@ -123,7 +116,7 @@ export function AppNavigation() {
   const availableScreens = !isAuthenticated
     ? publicScreens
     : roleArea === 'admin'
-      ? [{ name: 'AdminPending', component: RolePendingScreen }]
+      ? [{ name: 'AdminArea', getComponent: () => require('./screens/admin/AdminDemoNavigator').default }]
       : roleArea === 'staff'
         ? [{ name: 'StaffPending', component: StaffEventsNavigator }]
         : roleArea === 'recovery'
