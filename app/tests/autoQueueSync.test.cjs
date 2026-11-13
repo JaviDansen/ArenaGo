@@ -369,12 +369,14 @@ test('participationService (Cenário 2): deduplica requisições concorrentes em
 
   let resolveGet;
   let getCalls = 0;
+  let deferCurrent = false;
   const store = createParticipationStore({
     getIdentity: () => identity,
     client: {
       get(path) {
         if (path.endsWith('/current')) {
           getCalls += 1;
+          if (!deferCurrent) return Promise.resolve({ participation: waiting });
           return new Promise((res) => { resolveGet = () => res({ participation: waiting }); });
         }
         return Promise.resolve(returned);
@@ -383,6 +385,9 @@ test('participationService (Cenário 2): deduplica requisições concorrentes em
   });
 
   store.setIdentity(identity);
+  await store.refresh();
+  getCalls = 0;
+  deferCurrent = true;
   // Dispara dois syncCurrentSilent simultâneos
   const p1 = store.syncCurrentSilent();
   const p2 = store.syncCurrentSilent();
@@ -458,6 +463,7 @@ test('RealArenaScreen: exibe nota de atualização automática a cada 5 segundos
     if (name === 'react') {
       return {
         useRef: (value) => ({ current: value }),
+        useEffect: (effect) => effect(),
         useMemo: (factory) => factory(),
         useCallback: (fn) => fn,
         useState(initial) {
@@ -553,6 +559,7 @@ test('RealArenaScreen (Cenário 8): useFocusEffect inicializa timer de 5s e limp
       if (name === 'react') {
         return {
           useRef: (value) => ({ current: value }),
+          useEffect: (effect) => effect(),
           useMemo: (factory) => factory(),
           useCallback: (fn) => fn,
           useState(initial) {
@@ -653,6 +660,7 @@ test('RealArenaScreen (Cenário 1): respostas fora de ordem entre gerações de 
       if (name === 'react') {
         return {
           useRef: (val) => ({ current: val }),
+          useEffect: (effect) => effect(),
           useMemo: (factory) => factory(),
           useCallback: (fn) => fn,
           useState: (init) => {
@@ -770,6 +778,7 @@ test('RealArenaScreen (Cenário 2): atualização manual não sobrepõe com poll
       if (name === 'react') {
         return {
           useRef: (val) => ({ current: val }),
+          useEffect: (effect) => effect(),
           useMemo: (f) => f(),
           useCallback: (fn) => {
             if (!capturedRefresh) capturedRefresh = fn;
@@ -876,6 +885,7 @@ test('RealArenaScreen (Cenário 3): resposta tardia após logout ou troca de par
       if (name === 'react') {
         return {
           useRef: (val) => ({ current: val }),
+          useEffect: (effect) => effect(),
           useMemo: (f) => f(),
           useCallback: (fn) => fn,
           useState: (init) => {
@@ -989,6 +999,7 @@ test('RealArenaScreen (Cenários 9 e 10): falha temporária no polling preserva 
       if (name === 'react') {
         return {
           useRef: (val) => ({ current: val }),
+          useEffect: (effect) => effect(),
           useMemo: (f) => f(),
           useCallback: (fn) => fn,
           useState(init) {
@@ -1054,6 +1065,7 @@ test('RealArenaScreen (Cenários 9 e 10): falha temporária no polling preserva 
     assert.equal(currentState.currentQueueEntry.position, 2);
     assert.equal(currentSyncStale, false);
 
+    const lastValidResponse = readResponse;
     // Cenário 9: Falha temporária no polling
     readResponse = new Error('Falha temporária de conexão');
     timerFn();
@@ -1065,9 +1077,9 @@ test('RealArenaScreen (Cenários 9 e 10): falha temporária no polling preserva 
 
     // Cenário 10: Conexão restabelecida
     readResponse = {
-      ...readResponse,
+      ...lastValidResponse,
       currentQueueEntry: {
-        ...readResponse.currentQueueEntry,
+        ...lastValidResponse.currentQueueEntry,
         position: 1,
       },
     };
@@ -1292,6 +1304,7 @@ test('RealArenaScreen: atualizações sucessivas de posição NÃO recriam o tim
             if (idx >= refs.length) refs.push({ current: initial });
             return refs[idx];
           },
+          useEffect: (effect) => effect(),
           useMemo(factory, deps) {
             const idx = hookCursor.memo++;
             if (idx >= memos.length || !shallowEqualDeps(memos[idx].deps, deps)) {
@@ -1602,6 +1615,7 @@ test('RealArenaScreen (P1 - Concorrência join vs syncSilent): consulta antiga p
             if (idx >= refs.length) refs.push({ current: initial });
             return refs[idx];
           },
+          useEffect: (effect) => effect(),
           useMemo(factory) {
             const idx = hookCursor.memo++;
             if (idx >= memos.length) memos.push(factory());
@@ -1787,6 +1801,7 @@ test('RealArenaScreen (P2 - Vibração em Atualização Manual): chamada nova id
             if (idx >= refs.length) refs.push({ current: initial });
             return refs[idx];
           },
+          useEffect: (effect) => effect(),
           useMemo: (f) => f(),
           useCallback: (fn) => {
             if (!capturedRefresh) capturedRefresh = fn;
@@ -1919,6 +1934,7 @@ test('RealArenaScreen (Regressão - Foco com Consulta Pendente): perda e recuper
             if (idx >= refs.length) refs.push({ current: initial });
             return refs[idx];
           },
+          useEffect: (effect) => effect(),
           useMemo: (f) => f(),
           useCallback: (fn) => fn,
           useState(initial) {
@@ -2017,4 +2033,437 @@ test('RealArenaScreen (Regressão - Foco com Consulta Pendente): perda e recuper
     global.setInterval = originalSetInterval;
     global.clearInterval = originalClearInterval;
   }
+});
+
+// Regressões da auditoria final. Promessas controladas, efeitos com dependências,
+// cleanup de montagem distinto do blur e gerenciador de vibração real.
+function auditDeferred() {
+  let resolve, reject;
+  const promise = new Promise((ok, fail) => { resolve = ok; reject = fail; });
+  return { promise, resolve, reject };
+}
+
+const auditIds = {
+  user: '20000000-0000-4000-8000-000000000001',
+  participation: '20000000-0000-4000-8000-000000000002',
+  event: '20000000-0000-4000-8000-000000000003',
+  experience: '20000000-0000-4000-8000-000000000004',
+  history: '20000000-0000-4000-8000-000000000005',
+  entry: '20000000-0000-4000-8000-000000000011',
+  nextEntry: '20000000-0000-4000-8000-000000000012',
+  call: '20000000-0000-4000-8000-000000000021',
+  nextCall: '20000000-0000-4000-8000-000000000022',
+};
+const auditArena = (entry = null) => ({
+  acceptingNewQueueEntries: true,
+  experiences: [{ id: auditIds.experience, name: 'VR', waitingCount: 1, acceptingNewQueueEntries: true }],
+  currentQueueEntry: entry, pendingIntent: null,
+});
+const auditWaiting = (id = auditIds.entry) => ({ id, experienceId: auditIds.experience,
+  experienceName: 'VR', status: 'waiting', position: 2, stationLabel: null, serviceSessionId: null });
+const auditCalled = (session = auditIds.call, entry = auditIds.entry) => ({ ...auditWaiting(entry),
+  status: 'called', position: null, stationLabel: 'Estação 1', serviceSessionId: session });
+
+function createArenaAuditRig({ initialRead } = {}) {
+  const hooks = [], effects = [], listeners = new Set(), timers = new Map(), alerts = [];
+  let cursor = 0, tree, focusCallback, focusCleanup, lastFocusCallback, focused = true;
+  let destroyed = false, writesAfterUnmount = 0, timerId = 0, epoch = 1;
+  let response = auditArena(), read = initialRead || (() => Promise.resolve(response));
+  let join = () => Promise.resolve({ kind: 'confirmed', state: response });
+  let finish = () => Promise.resolve();
+  let vibrations = 0, refreshes = 0, reads = 0;
+  const auth = { isAuthenticated: true, user: { id: auditIds.user }, httpClient: {}, getSessionEpoch: () => epoch };
+  const depsEqual = (a, b) => a?.length === b?.length && a.every((v, i) => Object.is(v, b[i]));
+  const memo = (factory, deps) => {
+    const index = cursor++;
+    if (!hooks[index] || !depsEqual(hooks[index].deps, deps)) hooks[index] = { value: factory(), deps };
+    return hooks[index].value;
+  };
+  const nativeState = { currentState: 'active', addEventListener: (_, listener) => {
+    listeners.add(listener);
+    return { remove: () => listeners.delete(listener) };
+  } };
+  const { createQueueAlertManager } = loadModule('services/queueAlertService.js', require).exports;
+  const loaded = loadModule('screens/arena/RealArenaScreen.js', name => {
+    if (name === 'react') return {
+      useRef: initial => {
+        const index = cursor++;
+        if (!hooks[index]) hooks[index] = { current: initial };
+        return hooks[index];
+      },
+      useState: initial => {
+        const index = cursor++;
+        if (!hooks[index]) hooks[index] = { value: initial };
+        return [hooks[index].value, next => {
+          if (destroyed) writesAfterUnmount++;
+          hooks[index].value = typeof next === 'function' ? next(hooks[index].value) : next;
+        }];
+      },
+      useMemo: memo, useCallback: (fn, deps) => memo(() => fn, deps),
+      useEffect: (effect, deps) => {
+        const index = cursor++;
+        if (!hooks[index] || !depsEqual(hooks[index].deps, deps)) effects.push(() => {
+          hooks[index]?.cleanup?.();
+          hooks[index] = { deps, cleanup: effect() };
+        });
+      },
+    };
+    if (name === '@react-navigation/native') return { useFocusEffect: cb => { focusCallback = cb; } };
+    if (name === 'react-native') return {
+      AppState: nativeState, Vibration: { vibrate: () => vibrations++ },
+      ActivityIndicator: 'ActivityIndicator', ScrollView: 'ScrollView', Text: 'Text', View: 'View',
+      StyleSheet: { create: value => value }, Alert: { alert: (...args) => alerts.push(args) },
+    };
+    if (name === 'expo-crypto') return { randomUUID: () => auditIds.experience };
+    if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
+    if (name === '../../components/ui') return createParticipantUiStubs();
+    if (name === '../../theme') return createParticipantThemeStub();
+    if (name === '../../context/AuthContext') return { useAuth: () => auth };
+    if (name === '../../services/arenaQueueService') return {
+      createArenaQueueCoordinator: () => ({ read: () => { reads++; return read(); }, join: (...args) => join(...args) }),
+      describeArenaError: error => error.message,
+    };
+    if (name === '../../services/arenaQueueIntentStorage') return { defaultArenaQueueIntentStorage: {} };
+    if (name === '../../services/participationActionService') return {
+      createParticipationActionCoordinator: () => ({ finish: (...args) => finish(...args) }),
+      describeParticipationActionError: error => error.message,
+    };
+    if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
+    if (name === '../../services/queueAlertService') return { createQueueAlertManager };
+    return require(name);
+  });
+  loaded.context.setInterval = (fn, ms) => {
+    assert.equal(ms, 5000);
+    timers.set(++timerId, fn);
+    return timerId;
+  };
+  loaded.context.clearInterval = id => timers.delete(id);
+  const render = () => {
+    assert.equal(destroyed, false);
+    cursor = 0;
+    tree = loaded.exports.default({
+      participation: { id: auditIds.participation, eventId: auditIds.event },
+      refreshParticipation: async () => { refreshes++; },
+    });
+    while (effects.length) effects.shift()();
+    if (lastFocusCallback !== focusCallback) {
+      focusCleanup?.();
+      lastFocusCallback = focusCallback;
+      focusCleanup = focused ? focusCallback() : null;
+    }
+    return tree;
+  };
+  const button = title => nodes(tree).find(n => n.props?.title === title);
+  const flush = async () => { await new Promise(resolve => setImmediate(resolve)); render(); };
+  render();
+  return {
+    render, flush, button,
+    text: () => textOf(tree),
+    tick: () => { for (const fn of [...timers.values()]) fn(); },
+    response: value => { response = value; },
+    read: fn => { read = fn; }, join: fn => { join = fn; }, finish: fn => { finish = fn; },
+    blur: () => { focused = false; focusCleanup?.(); focusCleanup = null; },
+    focus: () => { focused = true; focusCleanup = focusCallback(); },
+    appState: next => { nativeState.currentState = next; for (const fn of [...listeners]) fn(next); },
+    session: () => { epoch++; render(); },
+    confirmFinish: () => alerts.at(-1)[2][1].onPress(),
+    unmount: () => {
+      focusCleanup?.();
+      hooks.forEach(hook => hook.cleanup?.());
+      destroyed = true;
+    },
+    get reads() { return reads; }, get vibrations() { return vibrations; },
+    get refreshes() { return refreshes; }, get writesAfterUnmount() { return writesAfterUnmount; },
+    get listeners() { return listeners.size; }, get timers() { return timers.size; },
+  };
+}
+
+for (const outcome of ['resolve', 'reject']) {
+  for (const returnBeforeSettlement of [false, true]) {
+    test(`auditoria P1: join ${outcome}, retorno antes da conclusão=${returnBeforeSettlement} libera botões`, async () => {
+      const h = createArenaAuditRig(), pending = auditDeferred();
+      try {
+        await h.flush();
+        h.join(() => pending.promise);
+        const operation = h.button('Entrar na fila').props.onPress();
+        h.render();
+        assert.equal(h.button('Aguarde...').props.disabled, true);
+        h.blur();
+        if (returnBeforeSettlement) h.focus();
+        if (outcome === 'resolve') {
+          h.response(auditArena(auditWaiting()));
+          pending.resolve({ kind: 'confirmed', state: auditArena(auditWaiting()) });
+        } else pending.reject(new Error('ingresso interrompido'));
+        await operation;
+        await h.flush();
+        assert.equal(h.button('Sair da Arena').props.disabled, false);
+        assert.equal(h.button('Atualizar fila e experiências').props.disabled, false);
+        if (!returnBeforeSettlement) { h.focus(); await h.flush(); }
+        // Resultado da geração antiga é descartado; uma leitura atual reconcilia a tela.
+        if (outcome === 'resolve') assert.match(h.text(), /Posição 2º/);
+        else assert.equal(h.button('Entrar na fila').props.disabled, false);
+        assert.equal(h.timers, 1);
+      } finally { h.unmount(); }
+    });
+  }
+}
+
+test('auditoria P1: finally antigo não libera uma operação da nova sessão', async () => {
+  const h = createArenaAuditRig(), old = auditDeferred(), current = auditDeferred();
+  try {
+    await h.flush();
+    h.join(() => old.promise);
+    const first = h.button('Entrar na fila').props.onPress();
+    h.session(); await h.flush();
+    h.join(() => current.promise);
+    const second = h.button('Entrar na fila').props.onPress();
+    old.resolve({ kind: 'confirmed', state: auditArena(auditWaiting()) });
+    await first; h.render();
+    assert.equal(h.button('Aguarde...').props.disabled, true);
+    assert.doesNotMatch(h.text(), /Entrada na fila confirmada/);
+    current.resolve({ kind: 'confirmed', state: auditArena(auditWaiting()) });
+    await second; h.render();
+    assert.equal(h.button('Sair da Arena').props.disabled, false);
+  } finally { h.unmount(); }
+});
+
+for (const kind of ['join', 'finish']) {
+  test(`auditoria P1: ${kind} tardio não atualiza componente desmontado`, async () => {
+    const h = createArenaAuditRig(), pending = auditDeferred();
+    await h.flush();
+    let operation;
+    if (kind === 'join') {
+      h.join(() => pending.promise);
+      operation = h.button('Entrar na fila').props.onPress();
+    } else {
+      h.finish(() => pending.promise);
+      h.button('Sair da Arena').props.onPress();
+      operation = h.confirmFinish();
+    }
+    h.unmount();
+    pending.resolve({ kind: 'confirmed', state: auditArena(auditWaiting()) });
+    await operation;
+    assert.equal(h.writesAfterUnmount, 0);
+    assert.equal(h.listeners, 0);
+    assert.equal(h.timers, 0);
+  });
+}
+
+for (const outcome of ['resolve', 'reject']) {
+  for (const returnBeforeSettlement of [false, true]) {
+    test(`auditoria P1: finish ${outcome}, retorno antes da conclusão=${returnBeforeSettlement} libera ocupação`, async () => {
+      const h = createArenaAuditRig(), pending = auditDeferred();
+      try {
+        await h.flush();
+        h.finish(() => pending.promise);
+        h.button('Sair da Arena').props.onPress();
+        const operation = h.confirmFinish();
+        h.blur();
+        if (returnBeforeSettlement) h.focus();
+        if (outcome === 'resolve') pending.resolve(); else pending.reject(new Error('saída interrompida'));
+        await operation; await h.flush();
+        assert.equal(h.button('Atualizar fila e experiências').props.disabled, false);
+        assert.equal(h.refreshes, outcome === 'resolve' ? 1 : 0);
+        if (!returnBeforeSettlement) { h.focus(); await h.flush(); }
+        assert.equal(h.button('Atualizar fila e experiências').props.disabled, false);
+      } finally { h.unmount(); }
+    });
+  }
+}
+
+test('auditoria P2: leitura anterior à suspensão não consome referência válida da retomada', async () => {
+  const h = createArenaAuditRig(), old = auditDeferred(), resumed = auditDeferred();
+  try {
+    h.response(auditArena(auditWaiting()));
+    await h.flush(); h.tick(); await h.flush();
+    h.read(() => old.promise); h.tick();
+    h.appState('background');
+    h.read(() => resumed.promise); h.appState('active');
+    old.resolve(auditArena(auditWaiting()));
+    await h.flush();
+    assert.equal(h.vibrations, 0);
+    resumed.resolve(auditArena(auditCalled()));
+    await h.flush();
+    assert.match(h.text(), /Dirija-se à estação: Estação 1/);
+    assert.equal(h.vibrations, 0);
+    h.read(() => Promise.resolve(auditArena(auditCalled(auditIds.nextCall))));
+    h.tick(); await h.flush(); h.tick(); await h.flush();
+    assert.equal(h.vibrations, 1);
+  } finally { h.unmount(); }
+});
+
+test('auditoria P2: suspensão em outra aba suprime chamada antiga ao retornar à Arena', async () => {
+  const h = createArenaAuditRig();
+  try {
+    h.response(auditArena(auditWaiting()));
+    await h.flush(); h.tick(); await h.flush();
+    h.blur();
+    assert.equal(h.listeners, 1, 'listener de montagem permanece durante blur');
+    const reads = h.reads;
+    h.appState('background'); h.appState('active');
+    assert.equal(h.reads, reads, 'não consultar Arena sem foco');
+    h.response(auditArena(auditCalled()));
+    h.focus(); await h.flush();
+    assert.equal(h.vibrations, 0);
+    assert.match(h.text(), /Dirija-se à estação/);
+    // Ausência pode recolocar em nova entrada waiting; uma chamada posterior deve vibrar.
+    h.response(auditArena(auditWaiting(auditIds.nextEntry))); h.tick(); await h.flush();
+    assert.match(h.text(), /Posição 2º/);
+    h.response(auditArena(auditCalled(auditIds.nextCall, auditIds.nextEntry))); h.tick(); await h.flush();
+    h.tick(); await h.flush();
+    assert.equal(h.vibrations, 1);
+    // Conclusão (ou ausência sem reentrada) remove o aviso de chamada e libera ingresso.
+    h.response(auditArena()); h.tick(); await h.flush();
+    assert.doesNotMatch(h.text(), /Dirija-se à estação/);
+    assert.equal(h.button('Entrar na fila').props.disabled, false);
+  } finally { h.unmount(); }
+});
+
+test('auditoria P2: retomada com falha mantém supressão até primeira consulta válida', async () => {
+  const h = createArenaAuditRig();
+  try {
+    await h.flush();
+    h.appState('background');
+    h.read(() => Promise.reject(new Error('offline'))); h.appState('active');
+    await h.flush();
+    h.read(() => Promise.resolve(auditArena(auditCalled()))); h.tick(); await h.flush();
+    assert.equal(h.vibrations, 0);
+    h.read(() => Promise.resolve(auditArena(auditCalled(auditIds.nextCall)))); h.tick(); await h.flush();
+    assert.equal(h.vibrations, 1);
+  } finally { h.unmount(); }
+});
+
+test('auditoria P2: recuperação automática limpa erro inicial de leitura', async () => {
+  const h = createArenaAuditRig({ initialRead: () => Promise.reject(new Error('consulta indisponível')) });
+  try {
+    await h.flush();
+    assert.match(h.text(), /consulta indisponível/);
+    assert.equal(h.button('Entrar na fila'), undefined);
+    h.read(() => Promise.resolve(auditArena(auditWaiting()))); h.tick(); await h.flush();
+    assert.doesNotMatch(h.text(), /consulta indisponível/);
+    assert.match(h.text(), /Posição 2º/);
+  } finally { h.unmount(); }
+});
+
+test('auditoria P2: leitura bem-sucedida preserva erro de ação pertinente', async () => {
+  const h = createArenaAuditRig();
+  try {
+    await h.flush();
+    h.join(() => Promise.reject(new Error('ingresso não confirmado')));
+    await h.button('Entrar na fila').props.onPress(); await h.flush();
+    assert.match(h.text(), /ingresso não confirmado/);
+    h.tick(); await h.flush();
+    assert.match(h.text(), /ingresso não confirmado/);
+    await h.button('Atualizar fila e experiências').props.onPress(); await h.flush();
+    assert.match(h.text(), /ingresso não confirmado/);
+  } finally { h.unmount(); }
+});
+
+async function createParticipationAuditRig() {
+  const { createParticipationStore } = loadModule('services/participationService.js', name =>
+    name === './httpClient' ? { httpClient: {} } : require(name)).exports;
+  let identity = { userId: auditIds.user, epoch: 1 };
+  let current = { id: auditIds.participation, eventId: auditIds.event, status: 'waiting', externalQueue: { position: 2 } };
+  let returned = { recentFinalization: null, pendingEvaluationParticipationIds: [] };
+  let readReturn = () => Promise.resolve(returned);
+  const calls = [], snapshots = [];
+  const store = createParticipationStore({ getIdentity: () => identity, client: {
+    async get(path, options) {
+      calls.push(path);
+      assert.equal(options.auth, true);
+      if (path === '/participations/current') return { participation: current };
+      assert.equal(path, '/participations/return-state');
+      return readReturn();
+    },
+  } });
+  store.subscribe(snapshot => snapshots.push(snapshot));
+  store.setIdentity(identity);
+  await store.refresh();
+  calls.length = 0; snapshots.length = 0;
+  return {
+    store, calls, snapshots,
+    current: value => { current = value; },
+    readReturn: fn => { readReturn = fn; },
+    identity: value => { identity = value; store.setIdentity(value); },
+  };
+}
+
+const auditReturn = () => ({
+  recentFinalization: { participationId: auditIds.participation, eventId: auditIds.event,
+    finishReason: 'admin_controlled_external_wait_closed', finishedAt: '2026-11-13T18:00:00.000000Z' },
+  pendingEvaluationParticipationIds: [auditIds.history],
+});
+
+test('auditoria P2: desaparecimento reconcilia retorno atomicamente e não o consulta nos ciclos normais', async () => {
+  const r = await createParticipationAuditRig(), pending = auditDeferred(), returned = auditReturn();
+  await r.store.syncCurrentSilent();
+  assert.deepEqual(r.calls, ['/participations/current']);
+  r.calls.length = 0;
+  r.current(null); r.readReturn(() => pending.promise);
+  const first = r.store.syncCurrentSilent();
+  await new Promise(resolve => setImmediate(resolve));
+  const second = r.store.syncCurrentSilent();
+  assert.equal(r.store.getSnapshot().participation.id, auditIds.participation);
+  assert.deepEqual(r.calls, ['/participations/current', '/participations/return-state']);
+  pending.resolve(returned);
+  await Promise.all([first, second]);
+  assert.equal(r.store.getSnapshot().participation, null);
+  assert.equal(r.store.getSnapshot().returnState, returned);
+  assert.ok(r.snapshots.filter(s => s.participation === null).every(s => s.returnState === returned));
+  await r.store.syncCurrentSilent(); await r.store.syncCurrentSilent();
+  assert.equal(r.calls.filter(path => path.endsWith('/return-state')).length, 1);
+});
+
+for (const failure of ['network', 'malformed']) {
+  test(`auditoria P2: retorno ${failure} preserva participação e permite repetir reconciliação`, async () => {
+    const r = await createParticipationAuditRig(), returned = auditReturn();
+    r.current(null);
+    r.readReturn(() => failure === 'network' ? Promise.reject(new Error('offline')) : Promise.resolve({}));
+    await r.store.syncCurrentSilent();
+    assert.equal(r.store.getSnapshot().participation.id, auditIds.participation);
+    assert.equal(r.store.getSnapshot().syncStale, true);
+    r.readReturn(() => Promise.resolve(returned));
+    await r.store.syncCurrentSilent();
+    assert.equal(r.store.getSnapshot().participation, null);
+    assert.equal(r.store.getSnapshot().returnState, returned);
+    assert.equal(r.store.getSnapshot().syncStale, false);
+  });
+}
+
+for (const change of ['logout', 'account', 'epoch', 'refresh']) {
+  test(`auditoria P2: reconciliação tardia descartada após ${change}`, async () => {
+    const r = await createParticipationAuditRig(), pending = auditDeferred();
+    r.current(null); r.readReturn(() => pending.promise);
+    const old = r.store.syncCurrentSilent();
+    await new Promise(resolve => setImmediate(resolve));
+    r.readReturn(() => Promise.resolve({ recentFinalization: null, pendingEvaluationParticipationIds: [] }));
+    if (change === 'logout') r.identity(null);
+    else {
+      if (change !== 'refresh') r.identity({ userId: change === 'account' ? auditIds.experience : auditIds.user, epoch: 2 });
+      r.current({ id: auditIds.participation, eventId: auditIds.event, status: 'waiting', externalQueue: { position: 1 } });
+      await r.store.refresh();
+      // A consulta antiga de retorno não bloqueia sincronização da geração atual.
+      const before = r.calls.length;
+      await r.store.syncCurrentSilent();
+      assert.equal(r.calls.length, before + 1);
+    }
+    const currentSnapshot = r.store.getSnapshot(), count = r.snapshots.length;
+    pending.resolve(auditReturn());
+    await old;
+    assert.equal(r.store.getSnapshot(), currentSnapshot);
+    assert.equal(r.snapshots.length, count);
+  });
+}
+
+test('auditoria P2: sync silencioso não antecipa refresh completo pendente', async () => {
+  const r = await createParticipationAuditRig(), pending = auditDeferred();
+  r.readReturn(() => pending.promise);
+  const refresh = r.store.refresh();
+  const count = r.calls.length;
+  await r.store.syncCurrentSilent();
+  assert.equal(r.calls.length, count);
+  assert.equal(r.store.getSnapshot().status, 'loading');
+  pending.resolve(auditReturn());
+  await refresh;
+  assert.equal(r.store.getSnapshot().status, 'ready');
 });

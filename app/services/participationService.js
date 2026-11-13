@@ -2,6 +2,14 @@ import { httpClient } from './httpClient';
 
 const empty = () => ({ userId: null, epoch: null, status: 'idle', participation: null, returnState: null, demoParticipation: null, error: null, syncStale: false });
 
+function validateReturnState(returned) {
+  if (!returned || !Array.isArray(returned.pendingEvaluationParticipationIds) ||
+      !returned.pendingEvaluationParticipationIds.every((id) => typeof id === 'string') ||
+      !Object.prototype.hasOwnProperty.call(returned, 'recentFinalization')) {
+    throw new Error('Resposta inválida de estado de retorno.');
+  }
+}
+
 export function createParticipationStore({ client = httpClient, getIdentity }) {
   let state = empty();
   let generation = 0;
@@ -38,11 +46,7 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
             (participation.status === 'waiting' && (!Number.isSafeInteger(participation.externalQueue?.position) || participation.externalQueue.position < 1))))) {
         throw new Error('Resposta inválida de participação.');
       }
-      if (!returned || !Array.isArray(returned.pendingEvaluationParticipationIds) ||
-          !returned.pendingEvaluationParticipationIds.every((id) => typeof id === 'string') ||
-          !Object.prototype.hasOwnProperty.call(returned, 'recentFinalization')) {
-        throw new Error('Resposta inválida de estado de retorno.');
-      }
+      validateReturnState(returned);
       publish({ ...state, status: 'ready', participation, returnState: returned, demoParticipation: null, error: null, syncStale: false });
     } catch (error) {
       if (requestGeneration !== generation || !matches(identity)) return;
@@ -53,8 +57,9 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
 
   async function syncCurrentSilent() {
     const identity = state.userId === null ? null : { userId: state.userId, epoch: state.epoch };
-    if (!matches(identity)) return null;
-    if (syncInFlight) return syncInFlight;
+    // Uma atualização completa publica participação e retorno juntos; não antecipar seu resultado.
+    if (!matches(identity) || state.status !== 'ready') return null;
+    if (syncInFlight?.generation === generation) return syncInFlight.promise;
 
     const requestGeneration = generation;
     const task = (async () => {
@@ -71,6 +76,14 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
         }
 
         const prev = state.participation;
+        let returned = state.returnState;
+        if (prev && participation === null) {
+          // Publicação atômica: se esta leitura falhar, manter a participação confirmada
+          // e tentar reconciliar a transição novamente no próximo ciclo.
+          returned = await client.get('/participations/return-state', { auth: true });
+          if (requestGeneration !== generation || !matches(identity)) return;
+          validateReturnState(returned);
+        }
         const changed = !prev || prev.id !== participation?.id ||
           prev.status !== participation?.status ||
           prev.externalQueue?.position !== participation?.externalQueue?.position;
@@ -80,6 +93,7 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
             ...state,
             status: 'ready',
             participation,
+            returnState: returned,
             error: null,
             syncStale: false,
           });
@@ -93,11 +107,11 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
           });
         }
       } finally {
-        if (syncInFlight === task) syncInFlight = null;
+        if (syncInFlight?.promise === task) syncInFlight = null;
       }
     })();
 
-    syncInFlight = task;
+    syncInFlight = { generation: requestGeneration, promise: task };
     return task;
   }
 

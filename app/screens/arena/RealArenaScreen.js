@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
 import { StatusBar } from 'expo-status-bar';
 import * as Crypto from 'expo-crypto';
@@ -38,12 +38,16 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
   stateRef.current = state;
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+  const [error, setError] = useState(null); // Erros de ações não são apagados por leituras.
   const [notice, setNotice] = useState(null);
   const [syncStale, setSyncStale] = useState(false);
   const [finished, setFinished] = useState(false);
+  const [readError, setReadError] = useState(null);
   const busyRef = useRef(false);
   const alertManagerRef = useRef(null);
+  const mountedRef = useRef(false);
+  const operationRef = useRef(null);
+  const appStateRef = useRef(AppState?.currentState || 'active');
 
   const sessionKey = `${userId ?? ''}:${epoch ?? ''}:${participationId}`;
   if (lastSessionKeyRef.current !== sessionKey) {
@@ -53,6 +57,32 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
     activeReadFocusGenRef.current = 0;
     readSeqRef.current += 1;
   }
+
+  useEffect(() => {
+    mountedRef.current = true;
+    busyRef.current = false;
+    operationRef.current = null;
+    setBusy(false);
+    return () => {
+      mountedRef.current = false;
+      operationRef.current = null;
+      busyRef.current = false;
+      readSeqRef.current += 1;
+    };
+  }, [sessionKey]);
+
+  const sameSession = () => mountedRef.current && lastSessionKeyRef.current === sessionKey
+    && authRef.current?.isAuthenticated === true && authRef.current?.user?.id === userId
+    && typeof getEpoch === 'function' && getEpoch() === epoch;
+
+  const releaseOperation = (operation) => {
+    if (operationRef.current !== operation) return false;
+    operationRef.current = null;
+    busyRef.current = false;
+    if (!sameSession()) return false;
+    setBusy(false); // Blur invalida resultados, mas não a limpeza da mesma operação montada.
+    return true;
+  };
   if (!alertManagerRef.current) {
     alertManagerRef.current = createQueueAlertManager({
       getIdentity: () => {
@@ -77,8 +107,10 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
     client,
     storage: defaultArenaQueueIntentStorage,
     createKey: () => Crypto.randomUUID(),
-    isCurrent: () => focused.current && typeof getEpoch === 'function' && getEpoch() === epoch,
-  }), [client, getEpoch, epoch]);
+    isCurrent: () => mountedRef.current && focused.current && lastSessionKeyRef.current === sessionKey
+      && authRef.current?.isAuthenticated === true && authRef.current?.user?.id === userId
+      && typeof getEpoch === 'function' && getEpoch() === epoch,
+  }), [client, getEpoch, epoch, userId, sessionKey]);
   const completion = useMemo(() => createParticipationActionCoordinator({
     client,
     isCurrent: () => authRef.current?.isAuthenticated === true && authRef.current?.user?.id === userId
@@ -88,6 +120,7 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
   const refresh = useCallback(async () => {
     if (
       !focused.current ||
+      appStateRef.current !== 'active' ||
       busyRef.current ||
       finishedRef.current ||
       (activeReadSeqRef.current !== 0 && activeReadFocusGenRef.current === focusGeneration.current)
@@ -99,7 +132,7 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
     activeReadSeqRef.current = currentSeq;
     activeReadFocusGenRef.current = currentFocusGen;
     setLoading(true);
-    setError(null);
+    setReadError(null);
     try {
       const next = await coordinator.read(context);
       if (
@@ -114,6 +147,7 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
       ) {
         stateRef.current = next;
         setState(next);
+        setReadError(null);
         setNotice(null);
         setSyncStale(false);
         const isInitial = !initialReadDoneRef.current;
@@ -138,7 +172,7 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
         if (stateRef.current) {
           setSyncStale(true);
         } else {
-          setError(describeArenaError(err));
+          setReadError(describeArenaError(err));
         }
       }
     } finally {
@@ -159,6 +193,7 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
   const syncSilent = useCallback(async () => {
     if (
       !focused.current ||
+      appStateRef.current !== 'active' ||
       busyRef.current ||
       finishedRef.current ||
       (activeReadSeqRef.current !== 0 && activeReadFocusGenRef.current === focusGeneration.current)
@@ -183,6 +218,8 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
       ) {
         stateRef.current = next;
         setState(next);
+        setReadError(null);
+        setLoading(false);
         setSyncStale(false);
         const isInitial = !initialReadDoneRef.current;
         initialReadDoneRef.current = true;
@@ -214,6 +251,25 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
     }
   }, [coordinator, context, participationId, userId, epoch, getEpoch]);
 
+  // Continua observando suspensão mesmo quando outra aba está focada.
+  useEffect(() => {
+    const subscription = AppState?.addEventListener?.('change', (nextState) => {
+      const previous = appStateRef.current;
+      appStateRef.current = nextState;
+      if (nextState !== 'active') {
+        resumingFromBackgroundRef.current = true;
+        readSeqRef.current += 1; // Uma leitura anterior não pode consumir a referência de retomada.
+        activeReadSeqRef.current = 0;
+        activeReadFocusGenRef.current = 0;
+        if (mountedRef.current) setLoading(false);
+      } else if (previous !== 'active') {
+        resumingFromBackgroundRef.current = true;
+        if (focused.current) void syncSilent();
+      }
+    });
+    return () => subscription?.remove?.();
+  }, [syncSilent]);
+
   useFocusEffect(useCallback(() => {
     focused.current = true;
     focusGeneration.current += 1;
@@ -222,23 +278,8 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
     const isCurrentReadInFlight = () =>
       activeReadSeqRef.current !== 0 && activeReadFocusGenRef.current === focusGeneration.current;
 
-    const appState = { current: typeof AppState !== 'undefined' && AppState.currentState ? AppState.currentState : 'active' };
-    let appStateSub = null;
-    if (typeof AppState?.addEventListener === 'function') {
-      appStateSub = AppState.addEventListener('change', (nextState) => {
-        const wasBackground = appState.current !== 'active';
-        appState.current = nextState;
-        if (nextState === 'active' && wasBackground) {
-          resumingFromBackgroundRef.current = true;
-          if (focused.current && !busyRef.current && !isCurrentReadInFlight()) {
-            void syncSilent();
-          }
-        }
-      });
-    }
-
     const timer = typeof setInterval === 'function' ? setInterval(() => {
-      if (focused.current && appState.current === 'active' && !busyRef.current && !isCurrentReadInFlight()) {
+      if (focused.current && appStateRef.current === 'active' && !busyRef.current && !isCurrentReadInFlight()) {
         void syncSilent();
       }
     }, 5000) : null;
@@ -250,17 +291,18 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
       activeReadSeqRef.current = 0;
       activeReadFocusGenRef.current = 0;
       if (timer && typeof clearInterval === 'function') clearInterval(timer);
-      appStateSub?.remove?.();
     };
   }, [refresh, syncSilent]));
 
   const join = async (experienceId) => {
-    if (busyRef.current || !focused.current || loading || !state) return;
+    if (busyRef.current || !focused.current || !sameSession() || loading || !state) return;
     // Invalida leituras automáticas (polling) anteriores que ainda estejam pendentes
     readSeqRef.current += 1;
     activeReadSeqRef.current = 0;
     activeReadFocusGenRef.current = 0;
     busyRef.current = true;
+    const operation = {};
+    operationRef.current = operation;
     setBusy(true);
     setError(null);
     setNotice(null);
@@ -269,11 +311,9 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
       const result = await coordinator.join(context, experienceId);
       if (
         !focused.current ||
+        operationRef.current !== operation || !sameSession() ||
         focusGeneration.current !== joinFocusGen ||
-        finishedRef.current ||
-        authRef.current?.isAuthenticated !== true ||
-        authRef.current?.user?.id !== userId ||
-        (typeof getEpoch === 'function' && getEpoch() !== epoch)
+        finishedRef.current
       ) {
         return;
       }
@@ -288,7 +328,8 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
           queueEntry: result.state.currentQueueEntry,
           participationId,
           isInitial,
-          isResuming: false,
+          // O resultado pode vir de uma escrita iniciada antes da suspensão.
+          isResuming: resumingFromBackgroundRef.current,
         });
       }
       if (result.kind === 'confirmed') setNotice('Entrada na fila confirmada pelo servidor.');
@@ -297,10 +338,12 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
       else if (result.kind === 'closed') setError('Esta experiência não está mais aceitando entradas.');
       else setError(result.message || 'Entrada não confirmada. Atualize e repita somente com a mesma chave.');
     } catch (err) {
-      if (focused.current && focusGeneration.current === joinFocusGen) setError(describeArenaError(err));
+      if (sameSession() && operationRef.current === operation && focused.current
+        && focusGeneration.current === joinFocusGen) setError(describeArenaError(err));
     } finally {
-      busyRef.current = false;
-      if (focused.current && focusGeneration.current === joinFocusGen) setBusy(false);
+      if (releaseOperation(operation) && focused.current && focusGeneration.current !== joinFocusGen) {
+        void refresh();
+      }
     }
   };
 
@@ -309,24 +352,28 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
     Alert.alert('Deseja sair da Arena?', 'Sua participação será encerrada e não poderá ser retomada.', [
       { text: 'Cancelar', style: 'cancel' },
       { text: 'Sair da Arena', style: 'destructive', onPress: async () => {
-        if (busyRef.current || finishedRef.current || !focused.current) return;
+        if (busyRef.current || finishedRef.current || !focused.current || !sameSession()) return;
         readSeqRef.current += 1;
         activeReadSeqRef.current = 0;
         activeReadFocusGenRef.current = 0;
         busyRef.current = true;
+        const operation = {};
+        operationRef.current = operation;
         setBusy(true);
         setError(null);
         const generation = focusGeneration.current;
-        const sameSession = () => authRef.current?.isAuthenticated === true && authRef.current?.user?.id === userId
+        const sameIdentity = () => lastSessionKeyRef.current === sessionKey
+          && authRef.current?.isAuthenticated === true && authRef.current?.user?.id === userId
           && typeof getEpoch === 'function' && getEpoch() === epoch;
-        const isCurrent = () => focused.current && focusGeneration.current === generation && sameSession();
+        const isCurrent = () => sameSession() && operationRef.current === operation
+          && focused.current && focusGeneration.current === generation;
         let confirmed = false;
         try {
           await completion.finish(userId, participationId);
           confirmed = true;
-          if (sameSession()) {
+          if (sameSession() && operationRef.current === operation) {
             finishedRef.current = true;
-            if (isCurrent()) setFinished(true);
+            setFinished(true);
           }
         } catch (err) {
           if (isCurrent()) setError(describeParticipationActionError(err, 'finish'));
@@ -339,11 +386,11 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
         } catch {
           // O encerramento já foi confirmado; o histórico pode ser consultado depois.
         } finally {
-          if (confirmed && sameSession()) {
+          if (confirmed && sameIdentity()) {
             try { await refreshParticipation(); } catch { /* A atualização pode ser repetida sem reenviar a saída. */ }
           }
-          busyRef.current = false;
-          if (focused.current && sameSession()) setBusy(false);
+          if (releaseOperation(operation) && !confirmed && focused.current
+            && focusGeneration.current !== generation) void refresh();
         }
       } },
     ]);
@@ -371,10 +418,10 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
             <Text style={styles.line}>Consultando a Arena...</Text>
           </Card>
         ) : null}
-        {error ? (
+        {error || readError ? (
           <View style={styles.errorCard} accessibilityRole="alert">
             <Badge label="ERRO" variant="danger" />
-            <Text style={styles.error}>{error}</Text>
+            <Text style={styles.error}>{error || readError}</Text>
           </View>
         ) : null}
         {notice ? (

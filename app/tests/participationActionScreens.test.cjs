@@ -86,6 +86,7 @@ test('Arena real exige confirmação e bloqueia duas finalizações simultâneas
   const arena = { experiences: [], currentQueueEntry: null, pendingIntent: null };
   const screen = loadModule('screens/arena/RealArenaScreen.js', name => {
     if (name === 'react') return {
+      useEffect: effect => effect(),
       useRef: value => ({ current: value }), useMemo: factory => factory(), useCallback: fn => fn,
       useState(initial) {
         const index = stateIndex++;
@@ -136,6 +137,7 @@ function realArenaExitHarness(lookup, waitForFinish = async () => {}) {
   let stateIndex = 0, epoch = 1, blur = () => {};
   const screen = loadModule('screens/arena/RealArenaScreen.js', name => {
     if (name === 'react') return {
+      useEffect: effect => effect(),
       useRef: value => ({ current: value }), useMemo: factory => factory(), useCallback: fn => fn,
       useState(initial) { const index = stateIndex++; return [index === 0 ? arena : index === 2 ? false : initial, () => {}]; },
     };

@@ -1,5 +1,5 @@
 diff --git a/app/context/ParticipationContext.js b/app/context/ParticipationContext.js
-index ae2d6857..3c15df73 100644
+index ae2d685..3c15df7 100644
 --- a/app/context/ParticipationContext.js
 +++ b/app/context/ParticipationContext.js
 @@ -58,7 +58,9 @@ export function ParticipationProvider({ children }) {
@@ -13,10 +13,12 @@ index ae2d6857..3c15df73 100644
      admission: currentAdmission ? admissionSnapshot : null,
      lookupEvent: admissionStore.lookup,
 diff --git a/app/screens/arena/RealArenaScreen.js b/app/screens/arena/RealArenaScreen.js
-index 28ae90fd..2211b4b7 100644
+index 28ae90f..35a31d6 100644
 --- a/app/screens/arena/RealArenaScreen.js
 +++ b/app/screens/arena/RealArenaScreen.js
-@@ -2,7 +2,7 @@ import { useCallback, useMemo, useRef, useState } from 'react';
+@@ -1,8 +1,8 @@
+-import { useCallback, useMemo, useRef, useState } from 'react';
++import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
  import { useFocusEffect } from '@react-navigation/native';
  import { StatusBar } from 'expo-status-bar';
  import * as Crypto from 'expo-crypto';
@@ -33,7 +35,7 @@ index 28ae90fd..2211b4b7 100644
  import { colors, spacing, typography } from '../../theme';
  
  /** Tela real de participação ativa. Sem alterações de domínio feitas em estado React. */
-@@ -26,13 +27,50 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+@@ -26,21 +27,90 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
    const focused = useRef(false);
    const focusGeneration = useRef(0);
    const finishedRef = useRef(false);
@@ -48,12 +50,17 @@ index 28ae90fd..2211b4b7 100644
 +  stateRef.current = state;
    const [busy, setBusy] = useState(false);
    const [loading, setLoading] = useState(true);
-   const [error, setError] = useState(null);
+-  const [error, setError] = useState(null);
++  const [error, setError] = useState(null); // Erros de ações não são apagados por leituras.
    const [notice, setNotice] = useState(null);
 +  const [syncStale, setSyncStale] = useState(false);
    const [finished, setFinished] = useState(false);
++  const [readError, setReadError] = useState(null);
    const busyRef = useRef(false);
 +  const alertManagerRef = useRef(null);
++  const mountedRef = useRef(false);
++  const operationRef = useRef(null);
++  const appStateRef = useRef(AppState?.currentState || 'active');
 +
 +  const sessionKey = `${userId ?? ''}:${epoch ?? ''}:${participationId}`;
 +  if (lastSessionKeyRef.current !== sessionKey) {
@@ -63,6 +70,32 @@ index 28ae90fd..2211b4b7 100644
 +    activeReadFocusGenRef.current = 0;
 +    readSeqRef.current += 1;
 +  }
++
++  useEffect(() => {
++    mountedRef.current = true;
++    busyRef.current = false;
++    operationRef.current = null;
++    setBusy(false);
++    return () => {
++      mountedRef.current = false;
++      operationRef.current = null;
++      busyRef.current = false;
++      readSeqRef.current += 1;
++    };
++  }, [sessionKey]);
++
++  const sameSession = () => mountedRef.current && lastSessionKeyRef.current === sessionKey
++    && authRef.current?.isAuthenticated === true && authRef.current?.user?.id === userId
++    && typeof getEpoch === 'function' && getEpoch() === epoch;
++
++  const releaseOperation = (operation) => {
++    if (operationRef.current !== operation) return false;
++    operationRef.current = null;
++    busyRef.current = false;
++    if (!sameSession()) return false;
++    setBusy(false); // Blur invalida resultados, mas não a limpeza da mesma operação montada.
++    return true;
++  };
 +  if (!alertManagerRef.current) {
 +    alertManagerRef.current = createQueueAlertManager({
 +      getIdentity: () => {
@@ -84,13 +117,26 @@ index 28ae90fd..2211b4b7 100644
  
    const context = useMemo(() => ({ userId, participationId, eventId }), [userId, participationId, eventId]);
    const coordinator = useMemo(() => createArenaQueueCoordinator({
-@@ -48,46 +86,221 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+     client,
+     storage: defaultArenaQueueIntentStorage,
+     createKey: () => Crypto.randomUUID(),
+-    isCurrent: () => focused.current && typeof getEpoch === 'function' && getEpoch() === epoch,
+-  }), [client, getEpoch, epoch]);
++    isCurrent: () => mountedRef.current && focused.current && lastSessionKeyRef.current === sessionKey
++      && authRef.current?.isAuthenticated === true && authRef.current?.user?.id === userId
++      && typeof getEpoch === 'function' && getEpoch() === epoch,
++  }), [client, getEpoch, epoch, userId, sessionKey]);
+   const completion = useMemo(() => createParticipationActionCoordinator({
+     client,
+     isCurrent: () => authRef.current?.isAuthenticated === true && authRef.current?.user?.id === userId
+@@ -48,46 +118,232 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
    }), [client, getEpoch, epoch, userId]);
  
    const refresh = useCallback(async () => {
 -    if (!focused.current || busyRef.current) return;
 +    if (
 +      !focused.current ||
++      appStateRef.current !== 'active' ||
 +      busyRef.current ||
 +      finishedRef.current ||
 +      (activeReadSeqRef.current !== 0 && activeReadFocusGenRef.current === focusGeneration.current)
@@ -102,7 +148,8 @@ index 28ae90fd..2211b4b7 100644
 +    activeReadSeqRef.current = currentSeq;
 +    activeReadFocusGenRef.current = currentFocusGen;
      setLoading(true);
-     setError(null);
+-    setError(null);
++    setReadError(null);
      try {
        const next = await coordinator.read(context);
 -      if (focused.current) { setState(next); setNotice(null); }
@@ -118,6 +165,7 @@ index 28ae90fd..2211b4b7 100644
 +      ) {
 +        stateRef.current = next;
 +        setState(next);
++        setReadError(null);
 +        setNotice(null);
 +        setSyncStale(false);
 +        const isInitial = !initialReadDoneRef.current;
@@ -143,7 +191,7 @@ index 28ae90fd..2211b4b7 100644
 +        if (stateRef.current) {
 +          setSyncStale(true);
 +        } else {
-+          setError(describeArenaError(err));
++          setReadError(describeArenaError(err));
 +        }
 +      }
 +    } finally {
@@ -164,6 +212,7 @@ index 28ae90fd..2211b4b7 100644
 +  const syncSilent = useCallback(async () => {
 +    if (
 +      !focused.current ||
++      appStateRef.current !== 'active' ||
 +      busyRef.current ||
 +      finishedRef.current ||
 +      (activeReadSeqRef.current !== 0 && activeReadFocusGenRef.current === focusGeneration.current)
@@ -188,6 +237,8 @@ index 28ae90fd..2211b4b7 100644
 +      ) {
 +        stateRef.current = next;
 +        setState(next);
++        setReadError(null);
++        setLoading(false);
 +        setSyncStale(false);
 +        const isInitial = !initialReadDoneRef.current;
 +        initialReadDoneRef.current = true;
@@ -220,6 +271,25 @@ index 28ae90fd..2211b4b7 100644
      }
 -  }, [coordinator, context]);
 +  }, [coordinator, context, participationId, userId, epoch, getEpoch]);
++
++  // Continua observando suspensão mesmo quando outra aba está focada.
++  useEffect(() => {
++    const subscription = AppState?.addEventListener?.('change', (nextState) => {
++      const previous = appStateRef.current;
++      appStateRef.current = nextState;
++      if (nextState !== 'active') {
++        resumingFromBackgroundRef.current = true;
++        readSeqRef.current += 1; // Uma leitura anterior não pode consumir a referência de retomada.
++        activeReadSeqRef.current = 0;
++        activeReadFocusGenRef.current = 0;
++        if (mountedRef.current) setLoading(false);
++      } else if (previous !== 'active') {
++        resumingFromBackgroundRef.current = true;
++        if (focused.current) void syncSilent();
++      }
++    });
++    return () => subscription?.remove?.();
++  }, [syncSilent]);
  
    useFocusEffect(useCallback(() => {
      focused.current = true;
@@ -231,23 +301,8 @@ index 28ae90fd..2211b4b7 100644
 +    const isCurrentReadInFlight = () =>
 +      activeReadSeqRef.current !== 0 && activeReadFocusGenRef.current === focusGeneration.current;
 +
-+    const appState = { current: typeof AppState !== 'undefined' && AppState.currentState ? AppState.currentState : 'active' };
-+    let appStateSub = null;
-+    if (typeof AppState?.addEventListener === 'function') {
-+      appStateSub = AppState.addEventListener('change', (nextState) => {
-+        const wasBackground = appState.current !== 'active';
-+        appState.current = nextState;
-+        if (nextState === 'active' && wasBackground) {
-+          resumingFromBackgroundRef.current = true;
-+          if (focused.current && !busyRef.current && !isCurrentReadInFlight()) {
-+            void syncSilent();
-+          }
-+        }
-+      });
-+    }
-+
 +    const timer = typeof setInterval === 'function' ? setInterval(() => {
-+      if (focused.current && appState.current === 'active' && !busyRef.current && !isCurrentReadInFlight()) {
++      if (focused.current && appStateRef.current === 'active' && !busyRef.current && !isCurrentReadInFlight()) {
 +        void syncSilent();
 +      }
 +    }, 5000) : null;
@@ -259,17 +314,19 @@ index 28ae90fd..2211b4b7 100644
 +      activeReadSeqRef.current = 0;
 +      activeReadFocusGenRef.current = 0;
 +      if (timer && typeof clearInterval === 'function') clearInterval(timer);
-+      appStateSub?.remove?.();
 +    };
 +  }, [refresh, syncSilent]));
  
    const join = async (experienceId) => {
-     if (busyRef.current || !focused.current || loading || !state) return;
+-    if (busyRef.current || !focused.current || loading || !state) return;
++    if (busyRef.current || !focused.current || !sameSession() || loading || !state) return;
 +    // Invalida leituras automáticas (polling) anteriores que ainda estejam pendentes
 +    readSeqRef.current += 1;
 +    activeReadSeqRef.current = 0;
 +    activeReadFocusGenRef.current = 0;
      busyRef.current = true;
++    const operation = {};
++    operationRef.current = operation;
      setBusy(true);
      setError(null);
      setNotice(null);
@@ -280,11 +337,9 @@ index 28ae90fd..2211b4b7 100644
 -      if (result.state) setState(result.state);
 +      if (
 +        !focused.current ||
++        operationRef.current !== operation || !sameSession() ||
 +        focusGeneration.current !== joinFocusGen ||
-+        finishedRef.current ||
-+        authRef.current?.isAuthenticated !== true ||
-+        authRef.current?.user?.id !== userId ||
-+        (typeof getEpoch === 'function' && getEpoch() !== epoch)
++        finishedRef.current
 +      ) {
 +        return;
 +      }
@@ -299,7 +354,8 @@ index 28ae90fd..2211b4b7 100644
 +          queueEntry: result.state.currentQueueEntry,
 +          participationId,
 +          isInitial,
-+          isResuming: false,
++          // O resultado pode vir de uma escrita iniciada antes da suspensão.
++          isResuming: resumingFromBackgroundRef.current,
 +        });
 +      }
        if (result.kind === 'confirmed') setNotice('Entrada na fila confirmada pelo servidor.');
@@ -309,25 +365,80 @@ index 28ae90fd..2211b4b7 100644
        else setError(result.message || 'Entrada não confirmada. Atualize e repita somente com a mesma chave.');
      } catch (err) {
 -      if (focused.current) setError(describeArenaError(err));
-+      if (focused.current && focusGeneration.current === joinFocusGen) setError(describeArenaError(err));
++      if (sameSession() && operationRef.current === operation && focused.current
++        && focusGeneration.current === joinFocusGen) setError(describeArenaError(err));
      } finally {
-       busyRef.current = false;
+-      busyRef.current = false;
 -      if (focused.current) setBusy(false);
-+      if (focused.current && focusGeneration.current === joinFocusGen) setBusy(false);
++      if (releaseOperation(operation) && focused.current && focusGeneration.current !== joinFocusGen) {
++        void refresh();
++      }
      }
    };
  
-@@ -97,6 +310,9 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+@@ -96,21 +352,28 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+     Alert.alert('Deseja sair da Arena?', 'Sua participação será encerrada e não poderá ser retomada.', [
        { text: 'Cancelar', style: 'cancel' },
        { text: 'Sair da Arena', style: 'destructive', onPress: async () => {
-         if (busyRef.current || finishedRef.current || !focused.current) return;
+-        if (busyRef.current || finishedRef.current || !focused.current) return;
++        if (busyRef.current || finishedRef.current || !focused.current || !sameSession()) return;
 +        readSeqRef.current += 1;
 +        activeReadSeqRef.current = 0;
 +        activeReadFocusGenRef.current = 0;
          busyRef.current = true;
++        const operation = {};
++        operationRef.current = operation;
          setBusy(true);
          setError(null);
-@@ -167,6 +383,14 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+         const generation = focusGeneration.current;
+-        const sameSession = () => authRef.current?.isAuthenticated === true && authRef.current?.user?.id === userId
++        const sameIdentity = () => lastSessionKeyRef.current === sessionKey
++          && authRef.current?.isAuthenticated === true && authRef.current?.user?.id === userId
+           && typeof getEpoch === 'function' && getEpoch() === epoch;
+-        const isCurrent = () => focused.current && focusGeneration.current === generation && sameSession();
++        const isCurrent = () => sameSession() && operationRef.current === operation
++          && focused.current && focusGeneration.current === generation;
+         let confirmed = false;
+         try {
+           await completion.finish(userId, participationId);
+           confirmed = true;
+-          if (sameSession()) {
++          if (sameSession() && operationRef.current === operation) {
+             finishedRef.current = true;
+-            if (isCurrent()) setFinished(true);
++            setFinished(true);
+           }
+         } catch (err) {
+           if (isCurrent()) setError(describeParticipationActionError(err, 'finish'));
+@@ -123,11 +386,11 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+         } catch {
+           // O encerramento já foi confirmado; o histórico pode ser consultado depois.
+         } finally {
+-          if (confirmed && sameSession()) {
++          if (confirmed && sameIdentity()) {
+             try { await refreshParticipation(); } catch { /* A atualização pode ser repetida sem reenviar a saída. */ }
+           }
+-          busyRef.current = false;
+-          if (focused.current && sameSession()) setBusy(false);
++          if (releaseOperation(operation) && !confirmed && focused.current
++            && focusGeneration.current !== generation) void refresh();
+         }
+       } },
+     ]);
+@@ -155,10 +418,10 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+             <Text style={styles.line}>Consultando a Arena...</Text>
+           </Card>
+         ) : null}
+-        {error ? (
++        {error || readError ? (
+           <View style={styles.errorCard} accessibilityRole="alert">
+             <Badge label="ERRO" variant="danger" />
+-            <Text style={styles.error}>{error}</Text>
++            <Text style={styles.error}>{error || readError}</Text>
+           </View>
+         ) : null}
+         {notice ? (
+@@ -167,6 +430,14 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
              <Text style={styles.notice}>{notice}</Text>
            </View>
          ) : null}
@@ -342,7 +453,7 @@ index 28ae90fd..2211b4b7 100644
  
          {entry ? (
            <Card variant="highlight" style={styles.highlight}>
-@@ -176,7 +400,11 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+@@ -176,7 +447,11 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
              {entry.status === 'waiting'
                ? <Text style={styles.position}>Posição {entry.position}º</Text>
                : <Text style={styles.position}>Dirija-se à estação: {entry.stationLabel}</Text>}
@@ -355,7 +466,7 @@ index 28ae90fd..2211b4b7 100644
            </Card>
          ) : null}
  
-@@ -232,7 +460,7 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+@@ -232,7 +507,7 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
          <Button
            title={loading ? 'Consultando...' : 'Atualizar fila e experiências'}
            variant="secondary"
@@ -364,7 +475,7 @@ index 28ae90fd..2211b4b7 100644
            onPress={refresh}
            style={styles.actionButton}
          />
-@@ -274,4 +502,20 @@ const styles = StyleSheet.create({
+@@ -274,4 +549,20 @@ const styles = StyleSheet.create({
    error: { ...typography.body, color: '#FF9AAE', marginTop: spacing.sm },
    noticeCard: { borderColor: colors.semantic.success, borderWidth: 1, backgroundColor: colors.semantic.successBg, borderRadius: 12, padding: spacing.lg, marginBottom: spacing.md },
    notice: { ...typography.body, color: colors.text.primary, marginTop: spacing.sm },
@@ -386,7 +497,7 @@ index 28ae90fd..2211b4b7 100644
 +  },
  });
 diff --git a/app/screens/home/HomeFlowScreen.js b/app/screens/home/HomeFlowScreen.js
-index f708963d..60dc355f 100644
+index f708963..60dc355 100644
 --- a/app/screens/home/HomeFlowScreen.js
 +++ b/app/screens/home/HomeFlowScreen.js
 @@ -1,6 +1,7 @@
@@ -515,7 +626,7 @@ index f708963d..60dc355f 100644
      color: '#A0A0B8',
      fontSize: 13,
 diff --git a/app/services/arenaQueueService.js b/app/services/arenaQueueService.js
-index 67ac79da..cfe95ea2 100644
+index 67ac79d..cfe95ea 100644
 --- a/app/services/arenaQueueService.js
 +++ b/app/services/arenaQueueService.js
 @@ -42,7 +42,8 @@ export function parseArenaQueue(body, participationId) {
@@ -529,14 +640,22 @@ index 67ac79da..cfe95ea2 100644
  
  export async function fetchArenaState(client, { participationId, eventId }) {
 diff --git a/app/services/participationService.js b/app/services/participationService.js
-index 8742c6c4..af9bdff3 100644
+index 8742c6c..7200018 100644
 --- a/app/services/participationService.js
 +++ b/app/services/participationService.js
-@@ -1,10 +1,11 @@
+@@ -1,10 +1,19 @@
  import { httpClient } from './httpClient';
  
 -const empty = () => ({ userId: null, epoch: null, status: 'idle', participation: null, returnState: null, demoParticipation: null, error: null });
 +const empty = () => ({ userId: null, epoch: null, status: 'idle', participation: null, returnState: null, demoParticipation: null, error: null, syncStale: false });
++
++function validateReturnState(returned) {
++  if (!returned || !Array.isArray(returned.pendingEvaluationParticipationIds) ||
++      !returned.pendingEvaluationParticipationIds.every((id) => typeof id === 'string') ||
++      !Object.prototype.hasOwnProperty.call(returned, 'recentFinalization')) {
++    throw new Error('Resposta inválida de estado de retorno.');
++  }
++}
  
  export function createParticipationStore({ client = httpClient, getIdentity }) {
    let state = empty();
@@ -545,11 +664,17 @@ index 8742c6c4..af9bdff3 100644
    const listeners = new Set();
    const publish = (next) => { state = next; listeners.forEach((listener) => listener(state)); };
    const matches = (identity) => {
-@@ -42,14 +43,64 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
-           !Object.prototype.hasOwnProperty.call(returned, 'recentFinalization')) {
-         throw new Error('Resposta inválida de estado de retorno.');
+@@ -37,19 +46,75 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
+             (participation.status === 'waiting' && (!Number.isSafeInteger(participation.externalQueue?.position) || participation.externalQueue.position < 1))))) {
+         throw new Error('Resposta inválida de participação.');
        }
+-      if (!returned || !Array.isArray(returned.pendingEvaluationParticipationIds) ||
+-          !returned.pendingEvaluationParticipationIds.every((id) => typeof id === 'string') ||
+-          !Object.prototype.hasOwnProperty.call(returned, 'recentFinalization')) {
+-        throw new Error('Resposta inválida de estado de retorno.');
+-      }
 -      publish({ ...state, status: 'ready', participation, returnState: returned, demoParticipation: null, error: null });
++      validateReturnState(returned);
 +      publish({ ...state, status: 'ready', participation, returnState: returned, demoParticipation: null, error: null, syncStale: false });
      } catch (error) {
        if (requestGeneration !== generation || !matches(identity)) return;
@@ -561,8 +686,9 @@ index 8742c6c4..af9bdff3 100644
  
 +  async function syncCurrentSilent() {
 +    const identity = state.userId === null ? null : { userId: state.userId, epoch: state.epoch };
-+    if (!matches(identity)) return null;
-+    if (syncInFlight) return syncInFlight;
++    // Uma atualização completa publica participação e retorno juntos; não antecipar seu resultado.
++    if (!matches(identity) || state.status !== 'ready') return null;
++    if (syncInFlight?.generation === generation) return syncInFlight.promise;
 +
 +    const requestGeneration = generation;
 +    const task = (async () => {
@@ -579,6 +705,14 @@ index 8742c6c4..af9bdff3 100644
 +        }
 +
 +        const prev = state.participation;
++        let returned = state.returnState;
++        if (prev && participation === null) {
++          // Publicação atômica: se esta leitura falhar, manter a participação confirmada
++          // e tentar reconciliar a transição novamente no próximo ciclo.
++          returned = await client.get('/participations/return-state', { auth: true });
++          if (requestGeneration !== generation || !matches(identity)) return;
++          validateReturnState(returned);
++        }
 +        const changed = !prev || prev.id !== participation?.id ||
 +          prev.status !== participation?.status ||
 +          prev.externalQueue?.position !== participation?.externalQueue?.position;
@@ -588,6 +722,7 @@ index 8742c6c4..af9bdff3 100644
 +            ...state,
 +            status: 'ready',
 +            participation,
++            returnState: returned,
 +            error: null,
 +            syncStale: false,
 +          });
@@ -601,18 +736,18 @@ index 8742c6c4..af9bdff3 100644
 +          });
 +        }
 +      } finally {
-+        if (syncInFlight === task) syncInFlight = null;
++        if (syncInFlight?.promise === task) syncInFlight = null;
 +      }
 +    })();
 +
-+    syncInFlight = task;
++    syncInFlight = { generation: requestGeneration, promise: task };
 +    return task;
 +  }
 +
    function setDemoParticipation(update) {
      const identity = state.userId === null ? null : { userId: state.userId, epoch: state.epoch };
      if (!matches(identity) || state.status !== 'ready' || state.participation) return;
-@@ -57,5 +108,5 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
+@@ -57,5 +122,5 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
      publish({ ...state, demoParticipation: next ? { ...next, source: 'demo' } : null });
    }
  
@@ -621,7 +756,7 @@ index 8742c6c4..af9bdff3 100644
  }
 diff --git a/app/services/queueAlertService.js b/app/services/queueAlertService.js
 new file mode 100644
-index 00000000..9bf734fa
+index 0000000..9bf734f
 --- /dev/null
 +++ b/app/services/queueAlertService.js
 @@ -0,0 +1,96 @@
@@ -723,10 +858,10 @@ index 00000000..9bf734fa
 +}
 diff --git a/app/tests/autoQueueSync.test.cjs b/app/tests/autoQueueSync.test.cjs
 new file mode 100644
-index 00000000..7b9e8e13
+index 0000000..1f95a41
 --- /dev/null
 +++ b/app/tests/autoQueueSync.test.cjs
-@@ -0,0 +1,2020 @@
+@@ -0,0 +1,2469 @@
 +const assert = require('node:assert/strict');
 +const test = require('node:test');
 +const { loadModule, createParticipantUiStubs, createParticipantThemeStub, nodes, textOf } = require('./helpers/questionnaireHarness.cjs');
@@ -1098,12 +1233,14 @@ index 00000000..7b9e8e13
 +
 +  let resolveGet;
 +  let getCalls = 0;
++  let deferCurrent = false;
 +  const store = createParticipationStore({
 +    getIdentity: () => identity,
 +    client: {
 +      get(path) {
 +        if (path.endsWith('/current')) {
 +          getCalls += 1;
++          if (!deferCurrent) return Promise.resolve({ participation: waiting });
 +          return new Promise((res) => { resolveGet = () => res({ participation: waiting }); });
 +        }
 +        return Promise.resolve(returned);
@@ -1112,6 +1249,9 @@ index 00000000..7b9e8e13
 +  });
 +
 +  store.setIdentity(identity);
++  await store.refresh();
++  getCalls = 0;
++  deferCurrent = true;
 +  // Dispara dois syncCurrentSilent simultâneos
 +  const p1 = store.syncCurrentSilent();
 +  const p2 = store.syncCurrentSilent();
@@ -1187,6 +1327,7 @@ index 00000000..7b9e8e13
 +    if (name === 'react') {
 +      return {
 +        useRef: (value) => ({ current: value }),
++        useEffect: (effect) => effect(),
 +        useMemo: (factory) => factory(),
 +        useCallback: (fn) => fn,
 +        useState(initial) {
@@ -1282,6 +1423,7 @@ index 00000000..7b9e8e13
 +      if (name === 'react') {
 +        return {
 +          useRef: (value) => ({ current: value }),
++          useEffect: (effect) => effect(),
 +          useMemo: (factory) => factory(),
 +          useCallback: (fn) => fn,
 +          useState(initial) {
@@ -1382,6 +1524,7 @@ index 00000000..7b9e8e13
 +      if (name === 'react') {
 +        return {
 +          useRef: (val) => ({ current: val }),
++          useEffect: (effect) => effect(),
 +          useMemo: (factory) => factory(),
 +          useCallback: (fn) => fn,
 +          useState: (init) => {
@@ -1499,6 +1642,7 @@ index 00000000..7b9e8e13
 +      if (name === 'react') {
 +        return {
 +          useRef: (val) => ({ current: val }),
++          useEffect: (effect) => effect(),
 +          useMemo: (f) => f(),
 +          useCallback: (fn) => {
 +            if (!capturedRefresh) capturedRefresh = fn;
@@ -1605,6 +1749,7 @@ index 00000000..7b9e8e13
 +      if (name === 'react') {
 +        return {
 +          useRef: (val) => ({ current: val }),
++          useEffect: (effect) => effect(),
 +          useMemo: (f) => f(),
 +          useCallback: (fn) => fn,
 +          useState: (init) => {
@@ -1718,6 +1863,7 @@ index 00000000..7b9e8e13
 +      if (name === 'react') {
 +        return {
 +          useRef: (val) => ({ current: val }),
++          useEffect: (effect) => effect(),
 +          useMemo: (f) => f(),
 +          useCallback: (fn) => fn,
 +          useState(init) {
@@ -1783,6 +1929,7 @@ index 00000000..7b9e8e13
 +    assert.equal(currentState.currentQueueEntry.position, 2);
 +    assert.equal(currentSyncStale, false);
 +
++    const lastValidResponse = readResponse;
 +    // Cenário 9: Falha temporária no polling
 +    readResponse = new Error('Falha temporária de conexão');
 +    timerFn();
@@ -1794,9 +1941,9 @@ index 00000000..7b9e8e13
 +
 +    // Cenário 10: Conexão restabelecida
 +    readResponse = {
-+      ...readResponse,
++      ...lastValidResponse,
 +      currentQueueEntry: {
-+        ...readResponse.currentQueueEntry,
++        ...lastValidResponse.currentQueueEntry,
 +        position: 1,
 +      },
 +    };
@@ -2021,6 +2168,7 @@ index 00000000..7b9e8e13
 +            if (idx >= refs.length) refs.push({ current: initial });
 +            return refs[idx];
 +          },
++          useEffect: (effect) => effect(),
 +          useMemo(factory, deps) {
 +            const idx = hookCursor.memo++;
 +            if (idx >= memos.length || !shallowEqualDeps(memos[idx].deps, deps)) {
@@ -2331,6 +2479,7 @@ index 00000000..7b9e8e13
 +            if (idx >= refs.length) refs.push({ current: initial });
 +            return refs[idx];
 +          },
++          useEffect: (effect) => effect(),
 +          useMemo(factory) {
 +            const idx = hookCursor.memo++;
 +            if (idx >= memos.length) memos.push(factory());
@@ -2516,6 +2665,7 @@ index 00000000..7b9e8e13
 +            if (idx >= refs.length) refs.push({ current: initial });
 +            return refs[idx];
 +          },
++          useEffect: (effect) => effect(),
 +          useMemo: (f) => f(),
 +          useCallback: (fn) => {
 +            if (!capturedRefresh) capturedRefresh = fn;
@@ -2648,6 +2798,7 @@ index 00000000..7b9e8e13
 +            if (idx >= refs.length) refs.push({ current: initial });
 +            return refs[idx];
 +          },
++          useEffect: (effect) => effect(),
 +          useMemo: (f) => f(),
 +          useCallback: (fn) => fn,
 +          useState(initial) {
@@ -2747,8 +2898,441 @@ index 00000000..7b9e8e13
 +    global.clearInterval = originalClearInterval;
 +  }
 +});
++
++// Regressões da auditoria final. Promessas controladas, efeitos com dependências,
++// cleanup de montagem distinto do blur e gerenciador de vibração real.
++function auditDeferred() {
++  let resolve, reject;
++  const promise = new Promise((ok, fail) => { resolve = ok; reject = fail; });
++  return { promise, resolve, reject };
++}
++
++const auditIds = {
++  user: '20000000-0000-4000-8000-000000000001',
++  participation: '20000000-0000-4000-8000-000000000002',
++  event: '20000000-0000-4000-8000-000000000003',
++  experience: '20000000-0000-4000-8000-000000000004',
++  history: '20000000-0000-4000-8000-000000000005',
++  entry: '20000000-0000-4000-8000-000000000011',
++  nextEntry: '20000000-0000-4000-8000-000000000012',
++  call: '20000000-0000-4000-8000-000000000021',
++  nextCall: '20000000-0000-4000-8000-000000000022',
++};
++const auditArena = (entry = null) => ({
++  acceptingNewQueueEntries: true,
++  experiences: [{ id: auditIds.experience, name: 'VR', waitingCount: 1, acceptingNewQueueEntries: true }],
++  currentQueueEntry: entry, pendingIntent: null,
++});
++const auditWaiting = (id = auditIds.entry) => ({ id, experienceId: auditIds.experience,
++  experienceName: 'VR', status: 'waiting', position: 2, stationLabel: null, serviceSessionId: null });
++const auditCalled = (session = auditIds.call, entry = auditIds.entry) => ({ ...auditWaiting(entry),
++  status: 'called', position: null, stationLabel: 'Estação 1', serviceSessionId: session });
++
++function createArenaAuditRig({ initialRead } = {}) {
++  const hooks = [], effects = [], listeners = new Set(), timers = new Map(), alerts = [];
++  let cursor = 0, tree, focusCallback, focusCleanup, lastFocusCallback, focused = true;
++  let destroyed = false, writesAfterUnmount = 0, timerId = 0, epoch = 1;
++  let response = auditArena(), read = initialRead || (() => Promise.resolve(response));
++  let join = () => Promise.resolve({ kind: 'confirmed', state: response });
++  let finish = () => Promise.resolve();
++  let vibrations = 0, refreshes = 0, reads = 0;
++  const auth = { isAuthenticated: true, user: { id: auditIds.user }, httpClient: {}, getSessionEpoch: () => epoch };
++  const depsEqual = (a, b) => a?.length === b?.length && a.every((v, i) => Object.is(v, b[i]));
++  const memo = (factory, deps) => {
++    const index = cursor++;
++    if (!hooks[index] || !depsEqual(hooks[index].deps, deps)) hooks[index] = { value: factory(), deps };
++    return hooks[index].value;
++  };
++  const nativeState = { currentState: 'active', addEventListener: (_, listener) => {
++    listeners.add(listener);
++    return { remove: () => listeners.delete(listener) };
++  } };
++  const { createQueueAlertManager } = loadModule('services/queueAlertService.js', require).exports;
++  const loaded = loadModule('screens/arena/RealArenaScreen.js', name => {
++    if (name === 'react') return {
++      useRef: initial => {
++        const index = cursor++;
++        if (!hooks[index]) hooks[index] = { current: initial };
++        return hooks[index];
++      },
++      useState: initial => {
++        const index = cursor++;
++        if (!hooks[index]) hooks[index] = { value: initial };
++        return [hooks[index].value, next => {
++          if (destroyed) writesAfterUnmount++;
++          hooks[index].value = typeof next === 'function' ? next(hooks[index].value) : next;
++        }];
++      },
++      useMemo: memo, useCallback: (fn, deps) => memo(() => fn, deps),
++      useEffect: (effect, deps) => {
++        const index = cursor++;
++        if (!hooks[index] || !depsEqual(hooks[index].deps, deps)) effects.push(() => {
++          hooks[index]?.cleanup?.();
++          hooks[index] = { deps, cleanup: effect() };
++        });
++      },
++    };
++    if (name === '@react-navigation/native') return { useFocusEffect: cb => { focusCallback = cb; } };
++    if (name === 'react-native') return {
++      AppState: nativeState, Vibration: { vibrate: () => vibrations++ },
++      ActivityIndicator: 'ActivityIndicator', ScrollView: 'ScrollView', Text: 'Text', View: 'View',
++      StyleSheet: { create: value => value }, Alert: { alert: (...args) => alerts.push(args) },
++    };
++    if (name === 'expo-crypto') return { randomUUID: () => auditIds.experience };
++    if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
++    if (name === '../../components/ui') return createParticipantUiStubs();
++    if (name === '../../theme') return createParticipantThemeStub();
++    if (name === '../../context/AuthContext') return { useAuth: () => auth };
++    if (name === '../../services/arenaQueueService') return {
++      createArenaQueueCoordinator: () => ({ read: () => { reads++; return read(); }, join: (...args) => join(...args) }),
++      describeArenaError: error => error.message,
++    };
++    if (name === '../../services/arenaQueueIntentStorage') return { defaultArenaQueueIntentStorage: {} };
++    if (name === '../../services/participationActionService') return {
++      createParticipationActionCoordinator: () => ({ finish: (...args) => finish(...args) }),
++      describeParticipationActionError: error => error.message,
++    };
++    if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
++    if (name === '../../services/queueAlertService') return { createQueueAlertManager };
++    return require(name);
++  });
++  loaded.context.setInterval = (fn, ms) => {
++    assert.equal(ms, 5000);
++    timers.set(++timerId, fn);
++    return timerId;
++  };
++  loaded.context.clearInterval = id => timers.delete(id);
++  const render = () => {
++    assert.equal(destroyed, false);
++    cursor = 0;
++    tree = loaded.exports.default({
++      participation: { id: auditIds.participation, eventId: auditIds.event },
++      refreshParticipation: async () => { refreshes++; },
++    });
++    while (effects.length) effects.shift()();
++    if (lastFocusCallback !== focusCallback) {
++      focusCleanup?.();
++      lastFocusCallback = focusCallback;
++      focusCleanup = focused ? focusCallback() : null;
++    }
++    return tree;
++  };
++  const button = title => nodes(tree).find(n => n.props?.title === title);
++  const flush = async () => { await new Promise(resolve => setImmediate(resolve)); render(); };
++  render();
++  return {
++    render, flush, button,
++    text: () => textOf(tree),
++    tick: () => { for (const fn of [...timers.values()]) fn(); },
++    response: value => { response = value; },
++    read: fn => { read = fn; }, join: fn => { join = fn; }, finish: fn => { finish = fn; },
++    blur: () => { focused = false; focusCleanup?.(); focusCleanup = null; },
++    focus: () => { focused = true; focusCleanup = focusCallback(); },
++    appState: next => { nativeState.currentState = next; for (const fn of [...listeners]) fn(next); },
++    session: () => { epoch++; render(); },
++    confirmFinish: () => alerts.at(-1)[2][1].onPress(),
++    unmount: () => {
++      focusCleanup?.();
++      hooks.forEach(hook => hook.cleanup?.());
++      destroyed = true;
++    },
++    get reads() { return reads; }, get vibrations() { return vibrations; },
++    get refreshes() { return refreshes; }, get writesAfterUnmount() { return writesAfterUnmount; },
++    get listeners() { return listeners.size; }, get timers() { return timers.size; },
++  };
++}
++
++for (const outcome of ['resolve', 'reject']) {
++  for (const returnBeforeSettlement of [false, true]) {
++    test(`auditoria P1: join ${outcome}, retorno antes da conclusão=${returnBeforeSettlement} libera botões`, async () => {
++      const h = createArenaAuditRig(), pending = auditDeferred();
++      try {
++        await h.flush();
++        h.join(() => pending.promise);
++        const operation = h.button('Entrar na fila').props.onPress();
++        h.render();
++        assert.equal(h.button('Aguarde...').props.disabled, true);
++        h.blur();
++        if (returnBeforeSettlement) h.focus();
++        if (outcome === 'resolve') {
++          h.response(auditArena(auditWaiting()));
++          pending.resolve({ kind: 'confirmed', state: auditArena(auditWaiting()) });
++        } else pending.reject(new Error('ingresso interrompido'));
++        await operation;
++        await h.flush();
++        assert.equal(h.button('Sair da Arena').props.disabled, false);
++        assert.equal(h.button('Atualizar fila e experiências').props.disabled, false);
++        if (!returnBeforeSettlement) { h.focus(); await h.flush(); }
++        // Resultado da geração antiga é descartado; uma leitura atual reconcilia a tela.
++        if (outcome === 'resolve') assert.match(h.text(), /Posição 2º/);
++        else assert.equal(h.button('Entrar na fila').props.disabled, false);
++        assert.equal(h.timers, 1);
++      } finally { h.unmount(); }
++    });
++  }
++}
++
++test('auditoria P1: finally antigo não libera uma operação da nova sessão', async () => {
++  const h = createArenaAuditRig(), old = auditDeferred(), current = auditDeferred();
++  try {
++    await h.flush();
++    h.join(() => old.promise);
++    const first = h.button('Entrar na fila').props.onPress();
++    h.session(); await h.flush();
++    h.join(() => current.promise);
++    const second = h.button('Entrar na fila').props.onPress();
++    old.resolve({ kind: 'confirmed', state: auditArena(auditWaiting()) });
++    await first; h.render();
++    assert.equal(h.button('Aguarde...').props.disabled, true);
++    assert.doesNotMatch(h.text(), /Entrada na fila confirmada/);
++    current.resolve({ kind: 'confirmed', state: auditArena(auditWaiting()) });
++    await second; h.render();
++    assert.equal(h.button('Sair da Arena').props.disabled, false);
++  } finally { h.unmount(); }
++});
++
++for (const kind of ['join', 'finish']) {
++  test(`auditoria P1: ${kind} tardio não atualiza componente desmontado`, async () => {
++    const h = createArenaAuditRig(), pending = auditDeferred();
++    await h.flush();
++    let operation;
++    if (kind === 'join') {
++      h.join(() => pending.promise);
++      operation = h.button('Entrar na fila').props.onPress();
++    } else {
++      h.finish(() => pending.promise);
++      h.button('Sair da Arena').props.onPress();
++      operation = h.confirmFinish();
++    }
++    h.unmount();
++    pending.resolve({ kind: 'confirmed', state: auditArena(auditWaiting()) });
++    await operation;
++    assert.equal(h.writesAfterUnmount, 0);
++    assert.equal(h.listeners, 0);
++    assert.equal(h.timers, 0);
++  });
++}
++
++for (const outcome of ['resolve', 'reject']) {
++  for (const returnBeforeSettlement of [false, true]) {
++    test(`auditoria P1: finish ${outcome}, retorno antes da conclusão=${returnBeforeSettlement} libera ocupação`, async () => {
++      const h = createArenaAuditRig(), pending = auditDeferred();
++      try {
++        await h.flush();
++        h.finish(() => pending.promise);
++        h.button('Sair da Arena').props.onPress();
++        const operation = h.confirmFinish();
++        h.blur();
++        if (returnBeforeSettlement) h.focus();
++        if (outcome === 'resolve') pending.resolve(); else pending.reject(new Error('saída interrompida'));
++        await operation; await h.flush();
++        assert.equal(h.button('Atualizar fila e experiências').props.disabled, false);
++        assert.equal(h.refreshes, outcome === 'resolve' ? 1 : 0);
++        if (!returnBeforeSettlement) { h.focus(); await h.flush(); }
++        assert.equal(h.button('Atualizar fila e experiências').props.disabled, false);
++      } finally { h.unmount(); }
++    });
++  }
++}
++
++test('auditoria P2: leitura anterior à suspensão não consome referência válida da retomada', async () => {
++  const h = createArenaAuditRig(), old = auditDeferred(), resumed = auditDeferred();
++  try {
++    h.response(auditArena(auditWaiting()));
++    await h.flush(); h.tick(); await h.flush();
++    h.read(() => old.promise); h.tick();
++    h.appState('background');
++    h.read(() => resumed.promise); h.appState('active');
++    old.resolve(auditArena(auditWaiting()));
++    await h.flush();
++    assert.equal(h.vibrations, 0);
++    resumed.resolve(auditArena(auditCalled()));
++    await h.flush();
++    assert.match(h.text(), /Dirija-se à estação: Estação 1/);
++    assert.equal(h.vibrations, 0);
++    h.read(() => Promise.resolve(auditArena(auditCalled(auditIds.nextCall))));
++    h.tick(); await h.flush(); h.tick(); await h.flush();
++    assert.equal(h.vibrations, 1);
++  } finally { h.unmount(); }
++});
++
++test('auditoria P2: suspensão em outra aba suprime chamada antiga ao retornar à Arena', async () => {
++  const h = createArenaAuditRig();
++  try {
++    h.response(auditArena(auditWaiting()));
++    await h.flush(); h.tick(); await h.flush();
++    h.blur();
++    assert.equal(h.listeners, 1, 'listener de montagem permanece durante blur');
++    const reads = h.reads;
++    h.appState('background'); h.appState('active');
++    assert.equal(h.reads, reads, 'não consultar Arena sem foco');
++    h.response(auditArena(auditCalled()));
++    h.focus(); await h.flush();
++    assert.equal(h.vibrations, 0);
++    assert.match(h.text(), /Dirija-se à estação/);
++    // Ausência pode recolocar em nova entrada waiting; uma chamada posterior deve vibrar.
++    h.response(auditArena(auditWaiting(auditIds.nextEntry))); h.tick(); await h.flush();
++    assert.match(h.text(), /Posição 2º/);
++    h.response(auditArena(auditCalled(auditIds.nextCall, auditIds.nextEntry))); h.tick(); await h.flush();
++    h.tick(); await h.flush();
++    assert.equal(h.vibrations, 1);
++    // Conclusão (ou ausência sem reentrada) remove o aviso de chamada e libera ingresso.
++    h.response(auditArena()); h.tick(); await h.flush();
++    assert.doesNotMatch(h.text(), /Dirija-se à estação/);
++    assert.equal(h.button('Entrar na fila').props.disabled, false);
++  } finally { h.unmount(); }
++});
++
++test('auditoria P2: retomada com falha mantém supressão até primeira consulta válida', async () => {
++  const h = createArenaAuditRig();
++  try {
++    await h.flush();
++    h.appState('background');
++    h.read(() => Promise.reject(new Error('offline'))); h.appState('active');
++    await h.flush();
++    h.read(() => Promise.resolve(auditArena(auditCalled()))); h.tick(); await h.flush();
++    assert.equal(h.vibrations, 0);
++    h.read(() => Promise.resolve(auditArena(auditCalled(auditIds.nextCall)))); h.tick(); await h.flush();
++    assert.equal(h.vibrations, 1);
++  } finally { h.unmount(); }
++});
++
++test('auditoria P2: recuperação automática limpa erro inicial de leitura', async () => {
++  const h = createArenaAuditRig({ initialRead: () => Promise.reject(new Error('consulta indisponível')) });
++  try {
++    await h.flush();
++    assert.match(h.text(), /consulta indisponível/);
++    assert.equal(h.button('Entrar na fila'), undefined);
++    h.read(() => Promise.resolve(auditArena(auditWaiting()))); h.tick(); await h.flush();
++    assert.doesNotMatch(h.text(), /consulta indisponível/);
++    assert.match(h.text(), /Posição 2º/);
++  } finally { h.unmount(); }
++});
++
++test('auditoria P2: leitura bem-sucedida preserva erro de ação pertinente', async () => {
++  const h = createArenaAuditRig();
++  try {
++    await h.flush();
++    h.join(() => Promise.reject(new Error('ingresso não confirmado')));
++    await h.button('Entrar na fila').props.onPress(); await h.flush();
++    assert.match(h.text(), /ingresso não confirmado/);
++    h.tick(); await h.flush();
++    assert.match(h.text(), /ingresso não confirmado/);
++    await h.button('Atualizar fila e experiências').props.onPress(); await h.flush();
++    assert.match(h.text(), /ingresso não confirmado/);
++  } finally { h.unmount(); }
++});
++
++async function createParticipationAuditRig() {
++  const { createParticipationStore } = loadModule('services/participationService.js', name =>
++    name === './httpClient' ? { httpClient: {} } : require(name)).exports;
++  let identity = { userId: auditIds.user, epoch: 1 };
++  let current = { id: auditIds.participation, eventId: auditIds.event, status: 'waiting', externalQueue: { position: 2 } };
++  let returned = { recentFinalization: null, pendingEvaluationParticipationIds: [] };
++  let readReturn = () => Promise.resolve(returned);
++  const calls = [], snapshots = [];
++  const store = createParticipationStore({ getIdentity: () => identity, client: {
++    async get(path, options) {
++      calls.push(path);
++      assert.equal(options.auth, true);
++      if (path === '/participations/current') return { participation: current };
++      assert.equal(path, '/participations/return-state');
++      return readReturn();
++    },
++  } });
++  store.subscribe(snapshot => snapshots.push(snapshot));
++  store.setIdentity(identity);
++  await store.refresh();
++  calls.length = 0; snapshots.length = 0;
++  return {
++    store, calls, snapshots,
++    current: value => { current = value; },
++    readReturn: fn => { readReturn = fn; },
++    identity: value => { identity = value; store.setIdentity(value); },
++  };
++}
++
++const auditReturn = () => ({
++  recentFinalization: { participationId: auditIds.participation, eventId: auditIds.event,
++    finishReason: 'admin_controlled_external_wait_closed', finishedAt: '2026-11-13T18:00:00.000000Z' },
++  pendingEvaluationParticipationIds: [auditIds.history],
++});
++
++test('auditoria P2: desaparecimento reconcilia retorno atomicamente e não o consulta nos ciclos normais', async () => {
++  const r = await createParticipationAuditRig(), pending = auditDeferred(), returned = auditReturn();
++  await r.store.syncCurrentSilent();
++  assert.deepEqual(r.calls, ['/participations/current']);
++  r.calls.length = 0;
++  r.current(null); r.readReturn(() => pending.promise);
++  const first = r.store.syncCurrentSilent();
++  await new Promise(resolve => setImmediate(resolve));
++  const second = r.store.syncCurrentSilent();
++  assert.equal(r.store.getSnapshot().participation.id, auditIds.participation);
++  assert.deepEqual(r.calls, ['/participations/current', '/participations/return-state']);
++  pending.resolve(returned);
++  await Promise.all([first, second]);
++  assert.equal(r.store.getSnapshot().participation, null);
++  assert.equal(r.store.getSnapshot().returnState, returned);
++  assert.ok(r.snapshots.filter(s => s.participation === null).every(s => s.returnState === returned));
++  await r.store.syncCurrentSilent(); await r.store.syncCurrentSilent();
++  assert.equal(r.calls.filter(path => path.endsWith('/return-state')).length, 1);
++});
++
++for (const failure of ['network', 'malformed']) {
++  test(`auditoria P2: retorno ${failure} preserva participação e permite repetir reconciliação`, async () => {
++    const r = await createParticipationAuditRig(), returned = auditReturn();
++    r.current(null);
++    r.readReturn(() => failure === 'network' ? Promise.reject(new Error('offline')) : Promise.resolve({}));
++    await r.store.syncCurrentSilent();
++    assert.equal(r.store.getSnapshot().participation.id, auditIds.participation);
++    assert.equal(r.store.getSnapshot().syncStale, true);
++    r.readReturn(() => Promise.resolve(returned));
++    await r.store.syncCurrentSilent();
++    assert.equal(r.store.getSnapshot().participation, null);
++    assert.equal(r.store.getSnapshot().returnState, returned);
++    assert.equal(r.store.getSnapshot().syncStale, false);
++  });
++}
++
++for (const change of ['logout', 'account', 'epoch', 'refresh']) {
++  test(`auditoria P2: reconciliação tardia descartada após ${change}`, async () => {
++    const r = await createParticipationAuditRig(), pending = auditDeferred();
++    r.current(null); r.readReturn(() => pending.promise);
++    const old = r.store.syncCurrentSilent();
++    await new Promise(resolve => setImmediate(resolve));
++    r.readReturn(() => Promise.resolve({ recentFinalization: null, pendingEvaluationParticipationIds: [] }));
++    if (change === 'logout') r.identity(null);
++    else {
++      if (change !== 'refresh') r.identity({ userId: change === 'account' ? auditIds.experience : auditIds.user, epoch: 2 });
++      r.current({ id: auditIds.participation, eventId: auditIds.event, status: 'waiting', externalQueue: { position: 1 } });
++      await r.store.refresh();
++      // A consulta antiga de retorno não bloqueia sincronização da geração atual.
++      const before = r.calls.length;
++      await r.store.syncCurrentSilent();
++      assert.equal(r.calls.length, before + 1);
++    }
++    const currentSnapshot = r.store.getSnapshot(), count = r.snapshots.length;
++    pending.resolve(auditReturn());
++    await old;
++    assert.equal(r.store.getSnapshot(), currentSnapshot);
++    assert.equal(r.snapshots.length, count);
++  });
++}
++
++test('auditoria P2: sync silencioso não antecipa refresh completo pendente', async () => {
++  const r = await createParticipationAuditRig(), pending = auditDeferred();
++  r.readReturn(() => pending.promise);
++  const refresh = r.store.refresh();
++  const count = r.calls.length;
++  await r.store.syncCurrentSilent();
++  assert.equal(r.calls.length, count);
++  assert.equal(r.store.getSnapshot().status, 'loading');
++  pending.resolve(auditReturn());
++  await refresh;
++  assert.equal(r.store.getSnapshot().status, 'ready');
++});
 diff --git a/app/tests/eventEntry.test.cjs b/app/tests/eventEntry.test.cjs
-index 231dc1a1..4e80ada2 100644
+index 231dc1a..4e80ada 100644
 --- a/app/tests/eventEntry.test.cjs
 +++ b/app/tests/eventEntry.test.cjs
 @@ -357,14 +357,14 @@ test('ENTRY-QR-01: componente compartilhado Card encaminha accessibilityHint ao
@@ -2772,7 +3356,7 @@ index 231dc1a1..4e80ada2 100644
    }).exports;
  
 diff --git a/app/tests/helpers/questionnaireHarness.cjs b/app/tests/helpers/questionnaireHarness.cjs
-index 07012540..63d27849 100644
+index 0701254..63d2784 100644
 --- a/app/tests/helpers/questionnaireHarness.cjs
 +++ b/app/tests/helpers/questionnaireHarness.cjs
 @@ -30,15 +30,31 @@ function loadModule(relativePath, requireModule, exposeFields = [], sourceOverri
@@ -2809,7 +3393,7 @@ index 07012540..63d27849 100644
    };
    vm.runInNewContext(code, context, { filename });
 diff --git a/app/tests/homeFlow.test.cjs b/app/tests/homeFlow.test.cjs
-index be3d3753..8512772b 100644
+index be3d375..8512772 100644
 --- a/app/tests/homeFlow.test.cjs
 +++ b/app/tests/homeFlow.test.cjs
 @@ -7,12 +7,15 @@ function renderHomeFlow(participation, extra = {}) {
@@ -2828,27 +3412,49 @@ index be3d3753..8512772b 100644
      };
      if (name === 'react-native') return {
        Pressable: 'Pressable', Text: 'Text', View: 'View', StyleSheet: { create: (styles) => styles },
+diff --git a/app/tests/participationActionScreens.test.cjs b/app/tests/participationActionScreens.test.cjs
+index 1bf8579..585da77 100644
+--- a/app/tests/participationActionScreens.test.cjs
++++ b/app/tests/participationActionScreens.test.cjs
+@@ -86,6 +86,7 @@ test('Arena real exige confirmação e bloqueia duas finalizações simultâneas
+   const arena = { experiences: [], currentQueueEntry: null, pendingIntent: null };
+   const screen = loadModule('screens/arena/RealArenaScreen.js', name => {
+     if (name === 'react') return {
++      useEffect: effect => effect(),
+       useRef: value => ({ current: value }), useMemo: factory => factory(), useCallback: fn => fn,
+       useState(initial) {
+         const index = stateIndex++;
+@@ -136,6 +137,7 @@ function realArenaExitHarness(lookup, waitForFinish = async () => {}) {
+   let stateIndex = 0, epoch = 1, blur = () => {};
+   const screen = loadModule('screens/arena/RealArenaScreen.js', name => {
+     if (name === 'react') return {
++      useEffect: effect => effect(),
+       useRef: value => ({ current: value }), useMemo: factory => factory(), useCallback: fn => fn,
+       useState(initial) { const index = stateIndex++; return [index === 0 ? arena : index === 2 ? false : initial, () => {}]; },
+     };
 diff --git a/docs/AUTO_QUEUE_01_IMPLEMENTACAO.md b/docs/AUTO_QUEUE_01_IMPLEMENTACAO.md
 new file mode 100644
-index 00000000..0020283d
+index 0000000..6573768
 --- /dev/null
 +++ b/docs/AUTO_QUEUE_01_IMPLEMENTACAO.md
-@@ -0,0 +1,152 @@
+@@ -0,0 +1,224 @@
 +# ArenaGO — AUTO-QUEUE-01: Atualização Automática das Filas e Alertas do Participante
 +
 +**Responsável:** Kaled<br>
 +**Branch:** `feature/participant-auto-queue-sync`<br>
 +**Prioridade:** P0 — Apresentação em 13/11/2026, às 19h<br>
 +**Data da Implementação Inicial:** 11/11/2026<br>
-+**Revisão Técnica e Correções:** 12/11/2026 (após revisão dos commits `2de957b`, `87316ca` e `3cf045e`)
++**Revisão Técnica e Correções:** 13/11/2026 (correções da auditoria final sobre `d5cad92`)
++
++**Estado desta entrega:** implementação concluída; testes automatizados aprovados; homologação operacional no Expo Go concluída. Integração com `develop` e encerramento no Git permanecem pendentes.
 +
 +---
 +
 +## 1. Visão Geral e Objetivos
 +
 +A task **AUTO-QUEUE-01** implementa a sincronização periódica (polling de 5 segundos) e alertas em tempo real para as filas do participante no ArenaGO:
-+1. **Fila Externa (Evento):** Acompanhamento contínuo da posição de espera (`externalQueue.position`) e transição imediata para participação ativa (`waiting` → `active`) quando liberada pela organização.
-+2. **Fila Interna (Arena):** Atualização automática da posição na experiência (`currentQueueEntry.position`), contagem de participantes aguardando (`waitingCount`), detecção de chamada pelo Staff (`waiting` → `called`) com identificação da estação designada, e liberação imediata após conclusão do atendimento ou registro de ausência (`currentQueueEntry === null`).
++1. **Fila Externa (Evento):** Acompanhamento da posição de espera (`externalQueue.position`) e transição para participação ativa (`waiting` → `active`) na próxima consulta válida após a liberação pela organização.
++2. **Fila Interna (Arena):** Atualização automática da posição na experiência (`currentQueueEntry.position`), contagem de participantes aguardando (`waitingCount`) e detecção de chamada (`waiting` → `called`) com estação. Após conclusão, a entrada corrente desaparece; após ausência, pode desaparecer ou ser substituída por nova entrada `waiting`, conforme o backend.
 +3. **Alerta de Vibração Local Controlado:** Vibração única no dispositivo móvel quando o participante é chamado enquanto o aplicativo está ativo no primeiro plano. Supressão total de vibração em segundo plano e sem vibração retroativa ao retomar o aplicativo do segundo plano.
 +4. **Proteção Concorrente e Antirrace:** Bloqueio de consultas simultâneas na fila interna (`syncInFlight`), descarte estrito de respostas defasadas por sequência/geração e invalidação em logout, troca de conta ou perda de foco.
 +5. **Resiliência e Sinalização Discreta:** Retenção dos últimos dados válidos confirmados em oscilações de rede, exibindo aviso visual discreto (*"Conexão instável. Exibindo as últimas informações confirmadas."*), sem desmontar a tela ou apagar a posição, com remoção automática do aviso na recuperação da conectividade.
@@ -2858,7 +3464,7 @@ index 00000000..0020283d
 +## 2. Detalhamento das Correções da Revisão Técnica
 +
 +### 2.1. P1 — Impedir consultas simultâneas e respostas fora de ordem na fila interna (`RealArenaScreen.js`)
-+- **Controle In-Flight:** Adicionada a referência `syncInFlightRef`. Se uma consulta de leitura já estiver em trânsito (seja pelo polling silencioso ou pelo refresh manual inicial/acionado pelo usuário), novas consultas não são iniciadas em paralelo, evitando sobreposição de tráfego HTTP.
++- **Controle In-Flight:** `activeReadSeqRef` e `activeReadFocusGenRef` bloqueiam sobreposição de leituras da mesma geração de foco. Uma nova geração pode consultar enquanto a requisição invalidada termina; sua resposta antiga é descartada.
 +- **Identificação de Sequência e Geração:** Introduzida a referência de sequência incremental `readSeqRef` e validação com `focusGeneration`, `finishedRef` e `authRef`.
 +- **Descarte de Respostas Tardias:** Quando a resposta assíncrona do `coordinator.read(context)` é resolvida, ela é estritamente descartada se:
 +  - Uma leitura posterior já foi disparada ou concluída (`currentSeq !== readSeqRef.current`);
@@ -2921,19 +3527,19 @@ index 00000000..0020283d
 +- Uma leitura em trânsito só bloqueia novas leituras se pertencer à mesma geração de foco (`activeReadFocusGenRef.current === focusGeneration.current`).
 +- No `blur`, o bloqueio da geração anterior é limpo; ao recuperar foco, a nova geração inicia imediatamente uma leitura válida sem ficar bloqueada por requisições antigas pendentes.
 +- No bloco `finally`, uma requisição antiga verifica `if (activeReadSeqRef.current === currentSeq)` e `currentSeq === readSeqRef.current`, impedindo que sua conclusão tardia libere indevidamente o bloqueio ou encerre o `loading` de uma consulta mais recente.
-+- O teste do Cenário 1 foi corrigido para exercitar efetivamente duas gerações de leitura em sequência com resolução fora de ordem, comprovando que a resposta mais recente (posição 2) nunca é substituída pela resposta antiga (posição 5).
++- O teste do Cenário 1 exercita duas gerações de leitura com resolução fora de ordem e confirma que a posição 2 não é substituída pela posição 5; passou na campanha focada registrada na seção 5.
 +
 +---
 +
 +## 3. Matriz dos Cenários de Testes Automatizados
 +
-+O arquivo `app/tests/autoQueueSync.test.cjs` foi atualizado para cobrir expressamente todos os cenários especificados:
++O arquivo `app/tests/autoQueueSync.test.cjs` contém os cenários automatizados abaixo. A seção 7 registra os acréscimos e limites da auditoria final:
 +
 +| # | Cenário Solicitado | Arquivo / Módulo Testado | Descrição da Validação |
 +|---|---|---|---|
 +| 1 | Consultas de gerações distintas e respostas fora de ordem | `RealArenaScreen.js` | Consulta 2 (posição 2) resolve antes da Consulta 1 (posição 5); resposta tardia da Consulta 1 é descartada e posição 2 é mantida. |
 +| 2 | Atualização manual concorrendo com polling | `RealArenaScreen.js` / `participationService.js` | Controle in-flight bloqueia sobreposição de requisições na mesma geração; deduplicação em trânsito. |
-+| 3 | Resposta tardia após logout ou troca de participação | `RealArenaScreen.js` | Resposta resolvida após mudança de sessão/logout é descartada sem atualizar o estado. |
++| 3 | Resposta tardia após mudança de epoch | `RealArenaScreen.js` | O teste original altera o epoch; não simula uma troca completa de participação nem comprova todos os cenários anunciados em seu nome. |
 +| 4 | Chamada recebida enquanto app está em segundo plano | `queueAlertService.js` | Quando `isAppActive() === false`, chamada é registrada sem vibrar. |
 +| 5 | Retomada sem vibração retroativa | `queueAlertService.js` / `RealArenaScreen.js` | Primeira sincronização ao voltar ao primeiro plano não vibra para chamada já ocorrida. |
 +| 6 | Nova chamada legítima após retomada | `queueAlertService.js` | Nova chamada com nova estação/sessão identificada enquanto o app está ativo dispara vibração. |
@@ -2958,31 +3564,101 @@ index 00000000..0020283d
 +| `app/context/ParticipationContext.js` | Exposição da propriedade `syncStale` no contexto para consumo nas telas. |
 +| `app/screens/home/HomeFlowScreen.js` | Chamada incondicional de `useIsFocused()` e `useEffect()`; aviso discreto de conexão instável sem desmontagem; remoção de `useSafeIsFocused()`. |
 +| `app/screens/arena/RealArenaScreen.js` | Coordenação `join`/`finish` vs polling; diferenciação de `initialReadDoneRef` em `refresh`; controle de leitura ativa por sequência/geração (`activeReadSeqRef`, `activeReadFocusGenRef`); estabilização via `stateRef`; banner discreto `syncWarningCard`. |
-+| `app/tests/autoQueueSync.test.cjs` | Cobertura completa dos 15 cenários de concorrência, respostas fora de ordem, `join` vs polling, vibração em atualização manual, foco com consulta pendente, conexão instável e estabilidade de timer. |
++| `app/tests/autoQueueSync.test.cjs` | Cenários preparados de concorrência, respostas fora de ordem, alertas, foco e conexão; regressões da auditoria final detalhadas na seção 7. |
 +| `app/tests/homeFlow.test.cjs` | Mock explícito de `@react-navigation/native`, `useEffect` e `useRef` para compatibilidade com hooks incondicionais. |
 +| `app/tests/helpers/questionnaireHarness.cjs` | Fallback seguro para `@react-navigation/native` na resolução de módulos do harness. |
 +
 +---
 +
-+## 5. Instruções para Validação Automatizada (Luna Medium)
++## 5. Validação Automatizada (GPT-6 Luna Medium)
 +
-+Conforme a seção 2 do `AGENTS.md`, as validações automatizadas foram preparadas durante a implementação e devem ser executadas pelo modelo **GPT-6 Luna (Medium)**:
++Campanha executada pelo GPT-6 Luna (Medium), após confirmação manual do responsável e autorização explícita. Os testes usaram dependências simuladas; não foram executados testes com PostgreSQL real, migrations ou seeds.
++
++### Testes focados
++
++Comando executado no diretório `app`:
 +
 +```bash
-+# Validação focada dos cenários de atualização automática e alertas
-+cmd.exe /c "cd app && node --test tests/autoQueueSync.test.cjs"
-+
-+# Validação do fluxo de navegação da Home
-+cmd.exe /c "cd app && node --test tests/homeFlow.test.cjs"
-+
-+# Bateria completa de testes do aplicativo
-+cmd.exe /c "cd app && npm test"
++node --test tests/autoQueueSync.test.cjs tests/homeFlow.test.cjs tests/participationService.test.cjs tests/participationProvider.test.cjs tests/arenaQueueService.integration.test.cjs tests/participationActionScreens.test.cjs
 +```
++
++Resultado: **87 aprovados, 0 falhos, 0 cancelados, 0 ignorados**, código de saída **0**.
++
++### Suíte completa
++
++O comando `npm test` foi inicialmente bloqueado antes de iniciar pelo PowerShell, que impediu carregar `npm.ps1` (código de saída **1**). O launcher equivalente `npm.cmd test` executou o script `node --test tests/*.test.cjs` definido em `app/package.json` e terminou com código **0**: **464 aprovados, 0 falhos, 0 cancelados, 0 ignorados**.
++
++Os avisos de módulos ES reparsados e de depreciação do `react-test-renderer` não provocaram falhas.
 +
 +---
 +
 +## 6. Limitações Restantes e Recomendações
 +
-+1. **Vibração em Dispositivos Físicos:** Testes de vibração física exigem dispositivo Android/iOS real via Expo Go ou build nativo. Em emuladores de desktop, a API `Vibration` pode não produzir vibração tátil perceptível.
++1. **Vibração em Dispositivos Físicos:** A homologação não confirmou individualmente a vibração tátil. A API `Vibration` e o comportamento de `AppState` podem depender do dispositivo e exigem confirmação específica em Android/iOS via Expo Go ou build nativo.
 +2. **Intervalo Fixo de 5 Segundos:** Mantido estritamente em 5 segundos conforme requisito P0. Não foram introduzidas tecnologias baseadas em WebSocket, SSE ou Push Notifications, que permanecem fora de escopo.
 +3. **Fluxo Git:** Conforme política do `AGENTS.md`, commits e push não foram executados pelo agente; o commit deve ser gerado pelo responsável via VSCode.
++
++## 7. Correções da auditoria final — 13/11/2026
++
++### Alterações nesta rodada
++
++- **P1 / ocupação após blur:** `RealArenaScreen.js` identifica cada operação por um objeto em `operationRef`. A limpeza de `busy` independe da geração de foco e exige a mesma operação, montagem e identidade (`userId`, epoch e participação). A desmontagem invalida o token. Resultados, erros e navegação continuam protegidos pelo foco. Se o foco voltou durante `join()`, uma leitura atual reconcilia o resultado descartado. A mesma limpeza foi aplicada a `finish()`, inclusive na rejeição. A saída confirmada ainda atualiza o contexto da sessão original sem navegar quando não está focada.
++- **P2 / retomada:** o listener de `AppState` pertence à montagem e permanece ativo no blur. Suspender invalida a sequência e o bloqueio de leitura anterior. Leituras novas só começam com app ativo; apenas uma leitura válida posterior à retomada consome `resumingFromBackgroundRef`. Falhas e respostas antigas não consomem essa referência. Resultados de `join()` não a consomem. Chamada antiga continua visível sem vibração; nova sessão de atendimento observada depois da referência pode vibrar uma vez.
++- **P2 / erro obsoleto:** `readError` guarda falhas de consulta separadamente de `error`, reservado para ações. Sucesso manual ou automático remove somente `readError`, preservando erro de ação pertinente. Uma resposta válida após falha inicial também encerra o loading.
++- **P2 / desaparecimento:** `participationService.js` consulta `/participations/return-state` somente ao observar participação existente → `null`. Valida o DTO e publica participação e retorno juntos, sem publicar ausência com retorno antigo. Falha preserva o snapshot anterior com `syncStale`, permitindo nova tentativa enquanto a transição não for confirmada. Após confirmação, ciclos com `null` não repetem a consulta adicional. `refresh()` e a reconciliação usam a mesma validação do retorno.
++- O single-flight silencioso agora pertence à geração: requisição antiga não bloqueia outra sessão/refresh nem libera seu lock. O sync não começa enquanto o snapshot está em `loading` por refresh completo.
++- A fixture de recuperação preserva o último DTO válido e modifica sua posição; não espalha mais um `Error`. O teste de deduplicação carrega primeiro um snapshot `ready`, como no fluxo real.
++- Mocks locais da Arena em `autoQueueSync.test.cjs` e `participationActionScreens.test.cjs` expõem `useEffect`. Os testes novos modelam dependências, montagem, blur, cleanup e promessas controladas; usam o gerenciador real de alertas, com coordenador de rede substituído por mock.
++
++### Cenários adicionais preparados e cobertos pelos testes
++
++- `join()` resolvido/rejeitado, concluindo antes ou depois do retorno ao foco; botões liberados e leitura atual de reconciliação.
++- Limpeza tardia da operação antiga preservando a ocupação da nova sessão.
++- `join()` e `finish()` concluindo após desmontagem, sem setters tardios e com listener/timer removidos.
++- `finish()` resolvido/rejeitado, com conclusão sem foco ou após retornar à Arena.
++- Consulta anterior à suspensão resolvida enquanto a consulta de retomada está pendente; chamada antiga sem vibração e chamada posterior com vibração única.
++- Background em outra aba, retorno à Arena, ausência com nova entrada `waiting`, nova chamada e remoção da entrada após conclusão/ausência sem reentrada. O teste usa projeções de fila; não executa operações de Staff.
++- Falha na consulta de retomada mantendo supressão até a primeira resposta válida.
++- Falha inicial de leitura seguida de recuperação automática; polling e refresh manual preservando erro de ação.
++- Desaparecimento com publicação conjunta de retorno/pendências, deduplicação em voo e ausência de consultas extras nos ciclos normais.
++- Retorno malformado ou falha de rede, preservação do snapshot e nova tentativa.
++- Descarte do retorno tardio após logout, conta, epoch ou refresh; sync da nova geração sem bloqueio pela anterior.
++- Refresh completo pendente não antecipado por sync silencioso.
++
++### Integração futura com develop
++
++Inspecionados, sem modificar a branch, os contratos de `develop` em `66efaf6c36a8d90d8a032ab930aaa9c6dc83a69d`: `participationService.js`, `ParticipationContext.js` e o fluxo de retorno/avaliação da Home. A branch atual ainda não contém esses mecanismos; esta correção não os importa nem os substitui.
++
++Na integração, preservar integralmente:
++
++1. `suspend()` e `resume()`, incluindo bloqueio por `suspended`, incremento de geração na suspensão e refresh completo ao retomar. As respostas silenciosas também devem respeitar essas guardas. O single-flight por geração evita herdar uma requisição da suspensão anterior.
++2. `returnStateVersion`: na publicação conjunta da transição reconciliada, vincular o retorno ao `requestGeneration` validado, como o refresh completo já faz em develop. Uma consulta de posição sem mudança no retorno não deve renovar versão nem limpar decisões de apresentação.
++3. `canPresentReturnEvaluation()`, `claimReturnEvaluation()` e `presentedReturnEvaluations`: manter consumo antes da navegação, adiamento por sessão e validações de geração/identidade. Polling não deve limpar esse conjunto. Preservar o fluxo da Home e as proteções de identidade verificada.
++4. O listener global do Provider de develop pode desmontar a Arena ao suspender e disparar refresh na retomada. Conciliar os dois listeners sem antecipar snapshots incompletos nem recriar polling a cada posição. Revalidar os testes de retorno/avaliação após a integração; não houve merge nem confirmação de conflito textual nesta rodada.
++
++### Validação e evidência
++
++- **Inspeção estática:** revisão dos fluxos de leitura/escrita, identidade, montagem, foco, suspensão, contratos da develop e diff. `git diff --check` executado com código de saída **0**; isso verifica whitespace do patch e não comprova comportamento funcional.
++- **Validações automatizadas executadas pelo Codex com autorização:** GPT-6 Luna Medium; 87 testes focados e 464 testes da suíte completa aprovados, sem falhas, cancelamentos ou ignorados. O primeiro `npm test` não iniciou devido à política do PowerShell (`npm.ps1`); `npm.cmd test` executou a mesma suíte com sucesso. Nenhum teste com PostgreSQL real, migration ou seed foi executado.
++- **Homologação operacional manual no Expo Go:** concluída no backend real do ambiente A4. O backend A4 foi executado pela branch `develop` em worktree separado, e o frontend Expo pela branch `feature/participant-auto-queue-sync`. A conta Staff já estava vinculada ao evento; operações Staff foram realizadas pelo PowerShell.
++- **Próxima etapa:** integrar cuidadosamente com `develop`, preservando os contratos e as proteções descritos acima, e revalidar retorno/avaliação após a integração. A homologação operacional não integra branches nem encerra a task no Git.
++- **Risco residual:** a vibração física não foi aprovada individualmente; os cenários de integração com os mecanismos de retorno/avaliação de `develop` ainda precisam ser revalidados após integrar. A primeira consulta válida de retomada estabelece uma referência conservadora sem vibração e não distingue por horário uma chamada ocorrida entre a retomada e essa consulta.
++- **Evidência única:** `qa-evidence/AUTO-QUEUE-01-changes.diff`, cumulativa desde a base comum `b545998420699fe37b387bc2434da6c039ed939b`, incluindo esta rodada e excluindo o próprio arquivo de evidência para evitar autorreferência. Gerada pelo formato nativo de `git diff`, sem staging, commit ou alteração de histórico.
++
++## 8. Homologação operacional no Expo Go
++
++- **Evento:** `Multiestações 2`, mantido aberto para testes futuros.
++- **Fluxo:** frontend Expo na branch `feature/participant-auto-queue-sync`, usando backend real do ambiente A4 executado pela branch `develop` em worktree separado. A conta Staff já estava vinculada ao evento; operações Staff foram realizadas pelo PowerShell.
++- **Just Dance — Estação 01:** atendimento concluído e estação disponível.
++- **Just Dance — Estação 02:** atendimento concluído e estação disponível.
++- **Fila interna:** vazia ao final da homologação.
++- **Participante:** atualização automática da tela funcionando conforme observado.
++- Nenhuma alteração estrutural no banco ou no código foi necessária durante a homologação. Não há confirmação explícita de aprovação individual da vibração física.
++
++## 9. Estado da task
++
++- **Implementação:** concluída.
++- **Testes automatizados:** aprovados (87 focados e 464 na suíte completa).
++- **Homologação operacional no Expo Go:** concluída para os cenários registrados acima.
++- **Integração com `develop`:** pendente; preservar `suspend()`, `resume()`, `returnStateVersion` e as proteções de apresentação única de avaliações descritas na seção de integração.
++- **Encerramento no Git:** pendente; não houve staging, commit, push, merge ou rebase.
