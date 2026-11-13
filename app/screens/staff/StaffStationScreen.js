@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import StaffButton from './components/StaffButton';
@@ -9,6 +9,7 @@ import StaffNotice from './components/StaffNotice';
 import StaffScreen from './components/StaffScreen';
 import { staffColors } from './components/staffTheme';
 import { useStaffDemo } from './StaffDemoContext';
+import { useAuth } from '../../context/AuthContext';
 import {
   callNext,
   completeCall,
@@ -29,6 +30,16 @@ export default function StaffStationScreen({ navigation, route }) {
   const { session, run, failNextAction, toggleFailNextAction } = useStaffDemo();
   const [dialog, setDialog] = useState(null);
   const [feedback, setFeedback] = useState(null);
+  const auth = useAuth();
+  const identityRevision = auth?.getIdentityRevision?.();
+  const openDialog = (value) => {
+    if (auth?.isIdentityVerified && !auth.isIdentityVerified()) return;
+    setDialog({ ...value, identityRevision: auth?.getIdentityRevision?.() });
+  };
+  useEffect(() => {
+    if (auth?.isInitializing || ['checking', 'error', 'unverified'].includes(auth?.identityStatus) ||
+        (dialog && dialog.identityRevision !== identityRevision)) setDialog(null);
+  }, [auth?.identityStatus, auth?.isInitializing, identityRevision, dialog]);
 
   const params = route?.params ?? {};
   const experience = findExperience(session, params.experienceId);
@@ -50,6 +61,7 @@ export default function StaffStationScreen({ navigation, route }) {
   const absentRequeues = session.queueEntriesOpen;
 
   function apply(transition, ...args) {
+    if (auth?.isIdentityVerified && !auth.isIdentityVerified()) return;
     setDialog(null);
     const result = run(transition, station.id, ...args);
     // Callback antigo ou repetido (chamado já resolvido ou trocado) não
@@ -64,6 +76,7 @@ export default function StaffStationScreen({ navigation, route }) {
   }
 
   function confirmRemoval() {
+    if (auth?.isIdentityVerified && !auth.isIdentityVerified()) return;
     const participant = dialog?.participant;
     setDialog(null);
     setFeedback({
@@ -114,12 +127,12 @@ export default function StaffStationScreen({ navigation, route }) {
           </StaffNotice>
           <StaffButton
             label="CONCLUIR EXPERIÊNCIA"
-            onPress={() => setDialog({ type: 'complete', call: station.call })}
+            onPress={() => openDialog({ type: 'complete', call: station.call })}
           />
           <StaffButton
             label={absentRequeues ? 'AUSENTE → FINAL DA FILA' : 'AUSENTE (NÃO VOLTA À FILA)'}
             variant="secondary"
-            onPress={() => setDialog({ type: 'absent', call: station.call })}
+            onPress={() => openDialog({ type: 'absent', call: station.call })}
           />
         </>
       ) : null}
@@ -156,7 +169,7 @@ export default function StaffStationScreen({ navigation, route }) {
               variant="secondary"
               compact
               accessibilityLabel={`Remover ${participant.name}`}
-              onPress={() => setDialog({ type: 'remove', participant })}
+              onPress={() => openDialog({ type: 'remove', participant })}
             />
           </View>
         ))
@@ -173,6 +186,7 @@ export default function StaffStationScreen({ navigation, route }) {
       <StaffDemoTools failNextAction={failNextAction} onToggleFailure={toggleFailNextAction} />
 
       <StaffConfirmDialog
+        openedAtRevision={dialog?.identityRevision}
         visible={dialog?.type === 'complete'}
         title="Concluir experiência?"
         message={dialog?.call ? `Confirma que ${dialog.call.name} concluiu a experiência?` : ''}
@@ -183,6 +197,7 @@ export default function StaffStationScreen({ navigation, route }) {
       />
 
       <StaffConfirmDialog
+        openedAtRevision={dialog?.identityRevision}
         visible={dialog?.type === 'absent'}
         title="Registrar ausência?"
         message={absentRequeues
@@ -196,6 +211,7 @@ export default function StaffStationScreen({ navigation, route }) {
       />
 
       <StaffConfirmDialog
+        openedAtRevision={dialog?.identityRevision}
         visible={dialog?.type === 'remove'}
         title={`Remover ${dialog?.participant?.name ?? ''}?`}
         message="Remover não é o mesmo que Ausente."

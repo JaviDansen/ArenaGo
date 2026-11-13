@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { createHarness, loadModule, textOf } = require('./helpers/questionnaireHarness.cjs');
+const testSessionId = '10000000-0000-4000-8000-000000000001';
 
 const apiConfigModule = loadModule('config/apiConfig.js', require).exports;
 const { ApiError, createHttpClient } = loadModule(
@@ -207,6 +208,7 @@ test('valid registration sends only { name, email, password } (never confirmPass
           name: req.body.name,
           email: req.body.email.toLowerCase(),
           emailVerified: false,
+          sessionId: testSessionId,
           roles: ['participante'],
           hasCompletedQuestionnaire: false,
         },
@@ -222,6 +224,7 @@ test('valid registration sends only { name, email, password } (never confirmPass
         name: 'Ana  Maria',
         email: 'ana@example.com',
         emailVerified: false,
+        sessionId: testSessionId,
         roles: ['participante'],
         hasCompletedQuestionnaire: false,
       });
@@ -366,6 +369,7 @@ test('login succeeds with completed questionnaire and with pending questionnaire
             name: 'Participante',
             email: req.body.email,
             emailVerified: false,
+            sessionId: testSessionId,
             roles: ['participante'],
             hasCompletedQuestionnaire,
           },
@@ -381,6 +385,7 @@ test('login succeeds with completed questionnaire and with pending questionnaire
           name: 'Participante',
           email: 'teste@example.com',
           emailVerified: false,
+          sessionId: testSessionId,
           roles: ['participante'],
           hasCompletedQuestionnaire,
         });
@@ -526,7 +531,7 @@ test('Admin login with requires2FA: true does not grant authenticated access or 
 // Login Admin: confirmação real de segundo fator, com rede e SecureStore simulados.
 const adminUser = {
   id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', name: 'Admin de teste', email: 'admin@example.test',
-  emailVerified: true, roles: ['participante', 'admin'], hasCompletedQuestionnaire: true,
+  emailVerified: true, sessionId: testSessionId, roles: ['participante', 'admin'], hasCompletedQuestionnaire: true,
 };
 const adminSession = { user: adminUser, accessToken: 'admin-access-after-2fa',
   refreshToken: 'admin-refresh-after-2fa', expiresIn: 900 };
@@ -547,6 +552,325 @@ function deferred() {
   const promise = new Promise((done) => { resolve = done; });
   return { promise, resolve };
 }
+
+test('vínculo de sessão vem de /me e permanece no refresh e na restauração', async () => {
+  let count = 0;
+  const rig = createAuthRig(async (req) => {
+    if (req.url.endsWith('/auth/login')) return jsonResponse(200, adminSession);
+    if (req.url.endsWith('/auth/me')) return jsonResponse(200, adminUser);
+    if (req.url.endsWith('/auth/refresh')) return jsonResponse(200, {
+      accessToken: 'refreshed-access', refreshToken: `refresh-${++count}`, expiresIn: 900 });
+    if (req.url.endsWith('/auth/logout')) return jsonResponse(200, { message: 'ok' });
+    throw new Error('requisição inesperada');
+  });
+  await rig.manager.login({ email: adminUser.email, password: 'password' });
+  assert.equal(rig.manager.getSnapshot().user.sessionId, testSessionId);
+  await rig.manager.refreshSession();
+  assert.equal(rig.manager.getSnapshot().user.sessionId, testSessionId);
+  const restored = createAuthRig(async (req) => req.url.endsWith('/auth/refresh')
+    ? jsonResponse(200, { accessToken: 'restored', refreshToken: 'restored-refresh', expiresIn: 900 })
+    : jsonResponse(200, adminUser), { initialRefreshToken: await rig.tokenStorage.getRefreshToken() });
+  await restored.manager.restoreSession();
+  assert.equal(restored.manager.getSnapshot().user.sessionId, testSessionId);
+  await rig.manager.logout();
+  assert.equal(rig.manager.getSnapshot().user, null);
+});
+
+test('login da mesma conta troca vínculo; /me inválido ou de outra sessão não é verificado', async () => {
+  const otherSession = '10000000-0000-4000-8000-000000000002';
+  let sessionId = testSessionId;
+  const rig = createAuthRig(async (req) => {
+    if (req.url.endsWith('/auth/login')) return jsonResponse(200, adminSession);
+    if (req.url.endsWith('/auth/me')) return jsonResponse(200, { ...adminUser, sessionId });
+    throw new Error('requisição inesperada');
+  });
+  await rig.manager.login({ email: adminUser.email, password: 'password' });
+  sessionId = otherSession;
+  await assert.rejects(rig.manager.fetchCurrentUser(), (error) => error.code === 'INVALID_ME_RESPONSE');
+  assert.equal(rig.manager.getSnapshot().identityStatus, 'error');
+  await rig.manager.login({ email: adminUser.email, password: 'password' });
+  assert.equal(rig.manager.getSnapshot().user.sessionId, otherSession);
+  for (const invalid of [undefined, null, '', 'invalid']) {
+    sessionId = invalid;
+    await assert.rejects(rig.manager.fetchCurrentUser(), (error) => error.code === 'INVALID_ME_RESPONSE');
+    assert.equal(rig.manager.isIdentityVerified(), false);
+  }
+});
+
+test('login não publica identidade antes de /me válido e rejeita vínculo ausente', async () => {
+  const entered = deferred(), response = deferred();
+  const rig = createAuthRig(async (req) => {
+    if (req.url.endsWith('/auth/login')) return jsonResponse(200, adminSession);
+    if (req.url.endsWith('/auth/me')) { entered.resolve(); return response.promise; }
+    throw new Error('requisição inesperada');
+  });
+  const login = rig.manager.login({ email: adminUser.email, password: 'password' });
+  await entered.promise;
+  assert.equal(rig.manager.getSnapshot().isAuthenticated, false);
+  assert.equal(rig.manager.getSnapshot().user, null);
+  response.resolve(jsonResponse(200, { ...adminUser, sessionId: undefined }));
+  await assert.rejects(login, (error) => error.code === 'INVALID_ME_RESPONSE');
+  assert.equal(rig.manager.getSnapshot().identityStatus, 'error');
+  assert.equal(rig.manager.getSnapshot().isAuthenticated, false);
+});
+
+test('refresh confirma concessão e revogação Staff antes de liberar a sessão', async () => {
+  let roles = ['participante'];
+  let refreshNumber = 0;
+  const user = () => ({ ...adminUser, roles });
+  const rig = createAuthRig(async (req) => {
+    if (req.url.endsWith('/auth/login')) return jsonResponse(200, { ...adminSession, user: user() });
+    if (req.url.endsWith('/auth/refresh')) return jsonResponse(200, {
+      accessToken: 'rotated-access', refreshToken: `rotated-refresh-${++refreshNumber}`, expiresIn: 900,
+    });
+    if (req.url.endsWith('/auth/me')) return jsonResponse(200, user());
+    throw new Error(`Unexpected URL: ${req.url}`);
+  });
+  await rig.manager.login({ email: user().email, password: 'ValidPassword#2026' });
+  roles = ['participante', 'staff'];
+  await rig.manager.refreshSession();
+  assert.deepEqual([...rig.manager.getSnapshot().user.roles], roles);
+  roles = ['participante'];
+  await rig.manager.refreshSession();
+  assert.deepEqual([...rig.manager.getSnapshot().user.roles], roles);
+  assert.equal(rig.manager.getSnapshot().identityStatus, 'verified');
+});
+
+test('resposta antiga de /me não reverte a revogação recebida pela consulta mais recente', async () => {
+  const oldResponse = deferred();
+  let delay = false;
+  let calls = 0;
+  const user = (roles) => ({ ...adminUser, roles });
+  const rig = createAuthRig(async (req) => {
+    if (req.url.endsWith('/auth/login')) return jsonResponse(200, { ...adminSession, user: user(['staff']) });
+    if (req.url.endsWith('/auth/me')) {
+      if (!delay) return jsonResponse(200, user(['staff']));
+      calls += 1;
+      return calls === 1 ? oldResponse.promise : jsonResponse(200, user(['participante']));
+    }
+    throw new Error(`Unexpected URL: ${req.url}`);
+  });
+  await rig.manager.login({ email: adminUser.email, password: 'ValidPassword#2026' });
+  delay = true;
+  const old = rig.manager.fetchCurrentUser();
+  await rig.manager.fetchCurrentUser();
+  oldResponse.resolve(jsonResponse(200, user(['staff'])));
+  assert.equal(await old, null);
+  assert.deepEqual([...rig.manager.getSnapshot().user.roles], ['participante']);
+});
+
+test('resposta antiga de identidade não atravessa logout e login de outra conta', async () => {
+  const oldResponse = deferred();
+  let oldPending = false;
+  let current = { ...adminUser, roles: ['staff'] };
+  const rig = createAuthRig(async (req) => {
+    if (req.url.endsWith('/auth/login')) return jsonResponse(200, { ...adminSession, user: current });
+    if (req.url.endsWith('/auth/logout')) return jsonResponse(200, { message: 'ok' });
+    if (req.url.endsWith('/auth/me')) return oldPending ? oldResponse.promise : jsonResponse(200, current);
+    throw new Error(`Unexpected URL: ${req.url}`);
+  });
+  await rig.manager.login({ email: current.email, password: 'ValidPassword#2026' });
+  oldPending = true;
+  const old = rig.manager.fetchCurrentUser();
+  await rig.manager.logout();
+  current = { ...current, id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', roles: ['participante'] };
+  oldPending = false;
+  await rig.manager.login({ email: current.email, password: 'ValidPassword#2026' });
+  oldResponse.resolve(jsonResponse(200, { ...adminUser, roles: ['staff'] }));
+  assert.equal(await old, null);
+  assert.equal(rig.manager.getSnapshot().user.id, current.id);
+  assert.deepEqual([...rig.manager.getSnapshot().user.roles], ['participante']);
+});
+
+test('consulta anterior ao refresh não reabre a área antiga durante a rotação', async () => {
+  const oldResponse = deferred();
+  const refreshResponse = deferred();
+  let delayMe = false;
+  let current = { ...adminUser, roles: ['staff'] };
+  const rig = createAuthRig(async (req) => {
+    if (req.url.endsWith('/auth/login')) return jsonResponse(200, { ...adminSession, user: current });
+    if (req.url.endsWith('/auth/refresh')) return refreshResponse.promise;
+    if (req.url.endsWith('/auth/me')) return delayMe ? oldResponse.promise : jsonResponse(200, current);
+    throw new Error(`Unexpected URL: ${req.url}`);
+  });
+  await rig.manager.login({ email: current.email, password: 'ValidPassword#2026' });
+  delayMe = true;
+  const old = rig.manager.fetchCurrentUser();
+  const refresh = rig.manager.refreshSession();
+  oldResponse.resolve(jsonResponse(200, current));
+  assert.equal(await old, null);
+  assert.equal(rig.manager.getSnapshot().identityStatus, 'checking');
+  current = { ...current, roles: ['participante'] };
+  delayMe = false;
+  refreshResponse.resolve(jsonResponse(200, { accessToken: 'new', refreshToken: 'new-ref', expiresIn: 900 }));
+  await refresh;
+  assert.deepEqual([...rig.manager.getSnapshot().user.roles], ['participante']);
+});
+
+test('contrato inválido de papéis bloqueia a identidade sem inventar participante', async () => {
+  for (const roles of [undefined, null, [], ['desconhecido'], ['staff', 'desconhecido']]) {
+    const user = { ...adminUser, roles };
+    const rig = createAuthRig(async (req) => {
+      if (req.url.endsWith('/auth/refresh')) return jsonResponse(200, {
+        accessToken: 'access', refreshToken: 'rotated', expiresIn: 900,
+      });
+      if (req.url.endsWith('/auth/me')) return jsonResponse(200, user);
+      throw new Error(`Unexpected URL: ${req.url}`);
+    }, { initialRefreshToken: 'initial' });
+    const result = await rig.manager.restoreSession();
+    assert.equal(result.status, 'identity_error');
+    assert.equal(rig.manager.getSnapshot().identityStatus, 'error');
+    assert.equal(rig.manager.getSnapshot().isAuthenticated, false);
+    assert.equal(await rig.tokenStorage.getRefreshToken(), 'rotated');
+  }
+});
+
+test('login com roles inválido não publica nem persiste sessão', async () => {
+  const rig = createAuthRig(async () => jsonResponse(200, { ...adminSession,
+    user: { ...adminUser, roles: [] } }));
+  await assert.rejects(rig.manager.login({ email: adminUser.email, password: 'ValidPassword#2026' }),
+    (error) => error.code === 'INVALID_LOGIN_RESPONSE');
+  assert.equal(rig.manager.getSnapshot().isAuthenticated, false);
+  assert.equal(await rig.tokenStorage.getRefreshToken(), null);
+});
+
+test('falha de rede na confirmação após refresh preserva token e permite recuperação', async () => {
+  let offline = true;
+  const user = { ...adminUser, roles: ['staff'] };
+  const rig = createAuthRig(async (req) => {
+    if (req.url.endsWith('/auth/refresh')) return jsonResponse(200, {
+      accessToken: 'new-access', refreshToken: 'new-refresh', expiresIn: 900,
+    });
+    if (req.url.endsWith('/auth/me')) {
+      if (offline) throw new TypeError('offline');
+      return jsonResponse(200, user);
+    }
+    throw new Error(`Unexpected URL: ${req.url}`);
+  }, { initialRefreshToken: 'initial' });
+  assert.equal((await rig.manager.restoreSession()).status, 'identity_error');
+  assert.equal(await rig.tokenStorage.getRefreshToken(), 'new-refresh');
+  offline = false;
+  assert.equal((await rig.manager.restoreSession()).status, 'authenticated');
+  assert.deepEqual([...rig.manager.getSnapshot().user.roles], ['staff']);
+});
+
+test('rotação confirmada com falha de gravação recupera sem reenviar token consumido', async () => {
+  const sent = [];
+  const user = { ...adminUser, roles: ['staff'] };
+  const rig = createAuthRig(async (req) => {
+    if (req.url.endsWith('/auth/refresh')) {
+      sent.push(req.body.refreshToken);
+      return jsonResponse(200, { accessToken: `access-${sent.length}`,
+        refreshToken: `rotated-${sent.length}`, expiresIn: 900 });
+    }
+    if (req.url.endsWith('/auth/me')) return jsonResponse(200, user);
+    throw new Error(`Unexpected URL: ${req.url}`);
+  }, { initialRefreshToken: 'original' });
+  const write = rig.secureStore.setItemAsync;
+  rig.secureStore.setItemAsync = async (key, value) => {
+    if (value === 'rotated-1') throw new Error('SecureStore indisponível');
+    return write(key, value);
+  };
+  assert.equal((await rig.manager.restoreSession()).status, 'identity_error');
+  const marker = await rig.tokenStorage.getRefreshToken();
+  assert.ok(marker && marker !== 'original' && marker !== 'rotated-1');
+  rig.secureStore.setItemAsync = write;
+  assert.equal((await rig.manager.restoreSession()).status, 'authenticated');
+  assert.deepEqual(sent, ['original']);
+  assert.equal(await rig.tokenStorage.getRefreshToken(), 'rotated-1');
+  await rig.manager.refreshSession();
+  assert.deepEqual(sent, ['original', 'rotated-1']);
+});
+
+test('reinício após falha de persistência nunca envia token antigo consumido', async () => {
+  const first = createAuthRig(async (req) => {
+    if (req.url.endsWith('/auth/refresh')) return jsonResponse(200, {
+      accessToken: 'new', refreshToken: 'rotated', expiresIn: 900,
+    });
+    throw new Error('requisição inesperada');
+  }, { initialRefreshToken: 'original' });
+  const write = first.secureStore.setItemAsync;
+  first.secureStore.setItemAsync = async (key, value) => {
+    if (value === 'rotated') throw new Error('falha');
+    return write(key, value);
+  };
+  await first.manager.restoreSession();
+  const marker = await first.tokenStorage.getRefreshToken();
+  const restarted = createAuthRig(async () => { throw new Error('não deve enviar refresh'); },
+    { initialRefreshToken: marker });
+  const result = await restarted.manager.restoreSession();
+  assert.equal(result.status, 'uncertain_refresh');
+  assert.equal(restarted.requests.length, 0);
+});
+
+test('logout durante recuperação da gravação descarta token rotacionado tardio', async () => {
+  const entered = deferred(), release = deferred();
+  let fail = true;
+  const rig = createAuthRig(async (req) => {
+    if (req.url.endsWith('/auth/refresh')) return jsonResponse(200, {
+      accessToken: 'new', refreshToken: 'rotated', expiresIn: 900,
+    });
+    throw new Error('requisição inesperada');
+  }, { initialRefreshToken: 'original' });
+  const write = rig.secureStore.setItemAsync;
+  rig.secureStore.setItemAsync = async (key, value) => {
+    if (value === 'rotated') {
+      if (fail) throw new Error('falha');
+      entered.resolve();
+      await release.promise;
+    }
+    return write(key, value);
+  };
+  await rig.manager.restoreSession();
+  fail = false;
+  const retry = rig.manager.restoreSession();
+  await entered.promise;
+  const logout = rig.manager.logout();
+  release.resolve();
+  await Promise.all([retry, logout]);
+  assert.equal(await rig.tokenStorage.getRefreshToken(), null);
+  assert.equal(rig.manager.getSnapshot().isAuthenticated, false);
+});
+
+test('logout durante /me do login retorna aborted e não acessa usuário nulo', async () => {
+  const entered = deferred(), response = deferred();
+  const user = { ...adminUser, roles: ['participante'] };
+  const rig = createAuthRig(async (req) => {
+    if (req.url.endsWith('/auth/login')) return jsonResponse(200, { ...adminSession, user });
+    if (req.url.endsWith('/auth/me')) { entered.resolve(); return response.promise; }
+    if (req.url.endsWith('/auth/logout')) return jsonResponse(200, { message: 'ok' });
+    throw new Error('requisição inesperada');
+  });
+  const login = rig.manager.login({ email: user.email, password: 'ValidPassword#2026' });
+  await entered.promise;
+  await rig.manager.logout();
+  response.resolve(jsonResponse(200, user));
+  assert.equal((await login).status, 'aborted');
+  assert.equal(rig.manager.getSnapshot().isAuthenticated, false);
+});
+
+test('novo login durante /me anterior preserva a nova conta', async () => {
+  const entered = deferred(), response = deferred();
+  const first = { ...adminUser, roles: ['participante'] };
+  const second = { ...first, id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', roles: ['staff'] };
+  let account = first, delay = true;
+  const rig = createAuthRig(async (req) => {
+    if (req.url.endsWith('/auth/login')) return jsonResponse(200, { ...adminSession, user: account });
+    if (req.url.endsWith('/auth/me')) {
+      if (delay) { entered.resolve(); return response.promise; }
+      return jsonResponse(200, account);
+    }
+    throw new Error('requisição inesperada');
+  });
+  const old = rig.manager.login({ email: first.email, password: 'ValidPassword#2026' });
+  await entered.promise;
+  account = second; delay = false;
+  await rig.manager.login({ email: second.email, password: 'ValidPassword#2026' });
+  response.resolve(jsonResponse(200, first));
+  assert.equal((await old).status, 'aborted');
+  assert.equal(rig.manager.getSnapshot().user.id, second.id);
+  assert.deepEqual([...rig.manager.getSnapshot().user.roles], ['staff']);
+});
 
 async function beginAdminChallenge(rig) {
   return rig.manager.login({ email: adminUser.email, password: 'ValidPassword#2026' });
@@ -992,6 +1316,7 @@ test('startup with valid refresh token rotates token in SecureStore and loads /a
           name: 'Restaurado',
           email: 'restaurado@example.com',
           emailVerified: false,
+          sessionId: testSessionId,
           roles: ['participante'],
           hasCompletedQuestionnaire: true,
         });
@@ -1028,7 +1353,7 @@ test('startup network error on GET /auth/me preserves rotated refreshToken in Se
   );
 
   const result = await rig.manager.restoreSession();
-  assert.equal(result.status, 'network_error');
+  assert.equal(result.status, 'identity_error');
   assert.equal(rig.secureStore.store.get('arenago.auth.refresh_token'), 'rotated-keep-me-on-offline-startup');
   assert.ok(rig.manager.getSnapshot().networkError);
 });
@@ -1073,6 +1398,7 @@ test('two concurrent 401 responses on protected endpoints trigger only ONE singl
           name: 'Participante',
           email: 'p@example.com',
           emailVerified: false,
+          sessionId: testSessionId,
           roles: ['participante'],
           hasCompletedQuestionnaire: true,
         });
@@ -1091,7 +1417,7 @@ test('two concurrent 401 responses on protected endpoints trigger only ONE singl
 
   assert.equal(refreshCount, 1, 'must execute only one POST /auth/refresh for concurrent 401s');
   assert.equal(resourceACount, 2);
-  assert.equal(resourceBCount, 2);
+  assert.equal(resourceBCount, 3, 'inclui a confirmação de identidade após o refresh');
   assert.deepEqual(structuredClone(resA), { eventId: 'evt-1' });
   assert.equal(resB.email, 'p@example.com');
   assert.equal(rig.secureStore.store.get('arenago.auth.refresh_token'), 'refresh-after-401');
@@ -1165,6 +1491,7 @@ test('logout revokes session on backend via POST /auth/logout with Bearer access
           name: 'Participante',
           email: 'p@example.com',
           emailVerified: false,
+          sessionId: testSessionId,
           roles: ['participante'],
           hasCompletedQuestionnaire: true,
         },
@@ -1179,6 +1506,7 @@ test('logout revokes session on backend via POST /auth/logout with Bearer access
         name: 'Participante',
         email: 'p@example.com',
         emailVerified: false,
+        sessionId: testSessionId,
         roles: ['participante'],
         hasCompletedQuestionnaire: true,
       });
@@ -1211,6 +1539,7 @@ test('logout revokes session on backend via POST /auth/logout with Bearer access
           name: 'Participante',
           email: 'p@example.com',
           emailVerified: false,
+          sessionId: testSessionId,
           roles: ['participante'],
           hasCompletedQuestionnaire: true,
         },
@@ -1225,6 +1554,7 @@ test('logout revokes session on backend via POST /auth/logout with Bearer access
         name: 'Participante',
         email: 'p@example.com',
         emailVerified: false,
+        sessionId: testSessionId,
         roles: ['participante'],
         hasCompletedQuestionnaire: true,
       });
@@ -1336,10 +1666,10 @@ test('logout during pending setRefreshToken() prevents rotated token from remain
       return rawMap.has(key) ? rawMap.get(key) : null;
     },
     async setItemAsync(key, value) {
-      setItemStarted = true;
-      await new Promise((resolve) => {
-        resolveSetItem = resolve;
-      });
+      if (value === 'rotated-refresh-token') {
+        setItemStarted = true;
+        await new Promise((resolve) => { resolveSetItem = resolve; });
+      }
       rawMap.set(key, value);
     },
     async deleteItemAsync(key) {
@@ -1408,10 +1738,10 @@ test('token write finishing after logout start is cleaned up even when tokenStor
       return rawStore.get('arenago.auth.refresh_token') ?? null;
     },
     async setRefreshToken(token) {
-      writeEntered = true;
-      await new Promise((resolve) => {
-        finishDelayedWrite = resolve;
-      });
+      if (token === 'late-refresh-token') {
+        writeEntered = true;
+        await new Promise((resolve) => { finishDelayedWrite = resolve; });
+      }
       rawStore.set('arenago.auth.refresh_token', token);
     },
     async clearRefreshToken() {
@@ -1578,6 +1908,7 @@ test('logout followed immediately by a new login preserves the new session crede
             name: 'Novo Login',
             email: 'novo@example.com',
             emailVerified: false,
+            sessionId: testSessionId,
             roles: ['participante'],
             hasCompletedQuestionnaire: true,
           },
@@ -1592,6 +1923,7 @@ test('logout followed immediately by a new login preserves the new session crede
           name: 'Novo Login',
           email: 'novo@example.com',
           emailVerified: false,
+          sessionId: testSessionId,
           roles: ['participante'],
           hasCompletedQuestionnaire: true,
         });
@@ -1694,6 +2026,7 @@ test('SecureStore read failure is differentiated from missing token, preserves s
           name: 'Recuperado',
           email: 'recuperado@example.com',
           emailVerified: false,
+          sessionId: testSessionId,
           roles: ['participante'],
           hasCompletedQuestionnaire: true,
         });
@@ -1756,6 +2089,7 @@ test('delayed session invalidation or stale 401 from previous session never clea
             name: 'Sessão Nova',
             email: 'nova@example.com',
             emailVerified: false,
+            sessionId: testSessionId,
             roles: ['participante'],
             hasCompletedQuestionnaire: true,
           },
@@ -1770,6 +2104,7 @@ test('delayed session invalidation or stale 401 from previous session never clea
           name: 'Sessão Nova',
           email: 'nova@example.com',
           emailVerified: false,
+          sessionId: testSessionId,
           roles: ['participante'],
           hasCompletedQuestionnaire: true,
         });

@@ -134,12 +134,6 @@ export default function HomeScreen({ navigation, returnState, mode = 'ready', me
           </View>
 
           <Button
-            title="Área do Staff (demonstração)"
-            variant="ghost"
-            onPress={() => navigation.navigate('StaffDemo')}
-            style={styles.staffButton}
-          />
-          <Button
             title="Área Admin (demonstração)"
             variant="ghost"
             onPress={() => navigation.navigate('AdminDemo')}
@@ -277,8 +271,5 @@ const styles = StyleSheet.create({
     ...typography.body,
     color: colors.brand.primaryLight,
     fontWeight: '700',
-  },
-  staffButton: {
-    alignSelf: 'center',
   },
 });

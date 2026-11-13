@@ -1,0 +1,1344 @@
+diff --git a/app/screens/staff/StaffEventsNavigator.js b/app/screens/staff/StaffEventsNavigator.js
+index f10bd2e..2bd5a50 100644
+--- a/app/screens/staff/StaffEventsNavigator.js
++++ b/app/screens/staff/StaffEventsNavigator.js
+@@ -6,6 +6,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
+ import { useAuth } from '../../context/AuthContext';
+ import { createStaffEventsStore } from '../../services/staffEventsService';
+ import { createStaffDashboardStore } from '../../services/staffDashboardService';
++import StaffEntryControlRealScreen from './StaffEntryControlRealScreen';
+ 
+ const Stack = createNativeStackNavigator();
+ const StaffEventsContext = createContext(null);
+@@ -189,11 +190,8 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
+       <Button label="Controle de Entrada" onPress={() => setSection('entry')} />
+       <Button label="Estações" onPress={() => setSection('stations')} />
+     </>}
+-    {section === 'entry' && <>
+-      <Text style={styles.title}>Controle de Entrada</Text>
+-      <Text style={styles.message}>O controle da fila de acesso ao evento está em desenvolvimento.</Text>
+-      <Button label="Voltar ao painel" onPress={() => setSection('panel')} />
+-    </>}
++    {section === 'entry' && <StaffEntryControlRealScreen event={event}
++      isEventCurrent={() => staff.getSelected()?.id === event.id} onBack={() => setSection('panel')} />}
+     {(section === 'stations' || section === 'station') && <>
+     <Text style={styles.title}>Estações</Text>
+     {snapshot.stationStatus === 'loading' && <Text style={styles.message}>Carregando estações...</Text>}
+diff --git a/app/tests/roleRoutingIntegration.test.cjs b/app/tests/roleRoutingIntegration.test.cjs
+index b038ff0..826791e 100644
+--- a/app/tests/roleRoutingIntegration.test.cjs
++++ b/app/tests/roleRoutingIntegration.test.cjs
+@@ -21,6 +21,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+   let user = initialUser;
+   let token = initialToken;
+   let refreshCount = 0;
++  let generatedKeys = 0;
+   const calls = [];
+   const navRef = Navigation.createNavigationContainerRef();
+   const unhandled = [];
+@@ -39,6 +40,9 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+       if (url === '/participations/current') return { participation: null };
+       if (url === '/participations/return-state') return { pendingEvaluationParticipationIds: [], recentFinalization: null };
+       if (url === '/staff/events') return { events: control.events ?? [] };
++      const entryMatch = url.match(/^\/staff\/events\/([^/]+)\/entry-control$/);
++      if (entryMatch) return { eventId: entryMatch[1], externalQueueEnabled: true, canManage: false,
++        observedAt: '2026-11-10T15:00:00.000Z', waitingCount: 0, waiting: [] };
+       const experienceMatch = url.match(/^\/staff\/events\/([^/]+)\/experiences$/);
+       if (experienceMatch) return { eventId: experienceMatch[1], experiences: control.experiences ?? [] };
+       const stationMatch = url.match(/^\/staff\/events\/([^/]+)\/stations$/);
+@@ -77,7 +81,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+   const passthrough = ({ children }) => children;
+   const native = Object.fromEntries(['ActivityIndicator', 'Modal', 'Pressable', 'ScrollView', 'Text', 'View'].map((name) => [name, name]));
+   native.StyleSheet = { create: (styles) => styles };
+-  native.Platform = { OS: 'web' };
++  native.Platform = { OS: control.platformOS ?? 'web' };
+   function FocusedStack(props) {
+     const { state, descriptors, NavigationContent } = Navigation.useNavigationBuilder(StackRouter, props);
+     return React.createElement(NavigationContent, null, descriptors[state.routes[state.index].key].render());
+@@ -91,8 +95,8 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+       if (name === 'react/jsx-runtime') return jsx;
+       if (name === 'react-native') return native;
+       if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
+-      if (name === 'expo-crypto') return { randomUUID: () => '00000000-0000-4000-8000-000000000001' };
+-      if (name === 'expo-secure-store') return {};
++      if (name === 'expo-crypto') return { randomUUID: () => `00000000-0000-4000-8000-${String(++generatedKeys).padStart(12, '0')}` };
++      if (name === 'expo-secure-store') return control.secureStore ?? {};
+       if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView', SafeAreaProvider: passthrough };
+       if (name === '@react-navigation/native-stack') return { createNativeStackNavigator: Navigation.createNavigatorFactory(FocusedStack) };
+       if (name === '@react-navigation/native') return { NavigationContainer: ({ children }) =>
+@@ -102,6 +106,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+       if (target === 'services/httpClient') return { ...http, httpClient: client };
+       if (target === 'services/tokenStorage') return { defaultTokenStorage: storage };
+       if (control.realStaff && ['screens/staff/StaffEventsNavigator', 'services/staffEventsService',
++        'screens/staff/StaffEntryControlRealScreen', 'services/staffEntryService', 'services/staffEntryIntentStorage',
+         'services/staffDashboardService', 'services/staffOperationsService'].includes(target)) {
+         return load(`${target}.js`);
+       }
+@@ -146,6 +151,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+       await Renderer.act(async () => { await buttons[0].props.onPress(); });
+     },
+     modal() { return tree.root.findByType('Modal'); },
++    handler(label) { return tree.root.findAllByType('Pressable').find(node => node.props.accessibilityLabel === label).props.onPress; },
+     confirmHandler() { return tree.root.findAllByType('Pressable')
+       .find((node) => node.props.accessibilityLabel === 'CONFIRMAR').props.onPress; },
+     dispose() { Renderer.act(() => tree.unmount()); },
+@@ -304,7 +310,7 @@ test('painel real separa entrada, estações e fila compartilhada por experiênc
+   await app.act(() => app.manager.login({ email: participant.email, password: 'password' }));
+   await app.press('Selecionar evento Evento autorizado');
+   await app.press('Controle de Entrada');
+-  assert.ok(app.hasText('em desenvolvimento'));
++  assert.ok(app.hasText('Fila de acesso ao evento'));
+   await app.press('Voltar ao painel'); await app.press('Estações');
+   assert.ok(app.hasText('Just Dance')); assert.ok(app.hasText('Sem estação: nenhuma estação associada'));
+   await app.press('Selecionar estação Estação real');
+@@ -313,7 +319,7 @@ test('painel real separa entrada, estações e fila compartilhada por experiênc
+   assert.ok(app.hasText('Fila de Just Dance'));
+   assert.equal(app.calls.filter((url) => url === `/staff/events/${staffEvent.id}/experiences/${realExperienceId}/queue`).length, 2);
+   await app.press('Voltar às estações'); await app.press('Voltar ao painel');
+-  await app.press('Controle de Entrada'); assert.ok(app.hasText('em desenvolvimento'));
++  await app.press('Controle de Entrada'); assert.ok(app.hasText('Fila de acesso ao evento'));
+   app.dispose();
+ });
+ 
+@@ -506,3 +512,68 @@ test('401 recuperável na lista Staff renova sessão e obtém eventos com a iden
+   assert.ok(app.hasText('Evento autorizado'));
+   app.dispose();
+ });
++
++test('Controle de Entrada real confirma primeiro, desativa, reativa e volta preservando evento', { skip }, async () => {
++  const values = new Map(), requests = [], at = '2026-11-10T15:00:00.000Z';
++  const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
++  let enabled = true, waiting = [{ participationId: 'abcdef00-0000-4000-8000-000000000004', displayName: 'Ana', position: 1 },
++    { participationId: 'abcdef00-0000-4000-8000-000000000005', displayName: 'Bia', position: 2 }];
++  const control = { realStaff: true, platformOS: 'android', events: [staffEvent],
++    secureStore: { getItemAsync: async key => values.get(key) ?? null, setItemAsync: async (key, value) => { values.set(key, value); } },
++    http: async (route, options) => {
++      if (!route.includes('/entry-control')) return;
++      requests.push({ route, method: options.method });
++      if (options.method === 'GET') return { eventId: staffEvent.id, externalQueueEnabled: enabled, canManage: true,
++        observedAt: at, waitingCount: waiting.length, waiting };
++      if (options.method === 'POST') { const first = waiting.shift(); waiting.forEach((p, index) => { p.position = index + 1; });
++        return { eventId: staffEvent.id, participation: { id: first.participationId, status: 'active', arenaEnteredAt: at } }; }
++      const payload = JSON.parse(options.body), releasedCount = payload.enabled ? 0 : waiting.length;
++      enabled = payload.enabled; if (!enabled) waiting = [];
++      return { eventId: staffEvent.id, externalQueueEnabled: enabled, releasedCount, changedAt: at };
++    } };
++  const app = createIntegration({ initialUser: staffUser, control }); await app.mount();
++  await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
++  await app.press('Selecionar evento Evento autorizado'); await app.press('Controle de Entrada');
++  assert.ok(app.hasText('1. Ana')); await app.press('Confirmar entrada de Ana'); await app.press('CONFIRMAR ALTERAÇÃO');
++  assert.ok(app.hasText('Entrada confirmada pelo servidor')); assert.ok(app.hasText('1. Bia'));
++  await app.press('Entendi'); await app.press('Desativar fila externa'); await app.press('CONFIRMAR ALTERAÇÃO');
++  assert.ok(app.hasText('Participantes liberados: 1')); await app.press('Entendi');
++  await app.press('Reativar fila externa'); await app.press('CONFIRMAR ALTERAÇÃO'); await app.press('Entendi');
++  assert.ok(app.hasText('Ninguém está aguardando')); await app.press('Voltar ao painel'); assert.ok(app.hasText('Painel operacional'));
++  assert.equal(requests.filter(r => r.method === 'POST').length, 1); assert.equal(requests.filter(r => r.method === 'PATCH').length, 2);
++  app.dispose();
++});
++
++test('confirmação de entrada aberta antes do logout não envia operação na sessão seguinte', { skip }, async () => {
++  const values = new Map(), at = '2026-11-10T15:00:00.000Z'; let mutations = 0;
++  const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
++  const control = { realStaff: true, platformOS: 'android', events: [staffEvent],
++    secureStore: { getItemAsync: async key => values.get(key) ?? null, setItemAsync: async (key, value) => { values.set(key, value); } },
++    http: async (route, options) => {
++      if (!route.includes('/entry-control')) return;
++      if (options.method !== 'GET') { mutations++; throw new Error('não deve enviar'); }
++      return { eventId: staffEvent.id, externalQueueEnabled: true, canManage: true, observedAt: at, waitingCount: 1,
++        waiting: [{ participationId: 'abcdef00-0000-4000-8000-000000000004', displayName: 'Ana', position: 1 }] };
++    } };
++  const app = createIntegration({ initialUser: staffUser, control }); await app.mount();
++  await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
++  await app.press('Selecionar evento Evento autorizado'); await app.press('Controle de Entrada'); await app.press('Confirmar entrada de Ana');
++  const old = app.handler('CONFIRMAR ALTERAÇÃO'); await app.act(() => app.manager.logout()); await app.act(async () => old());
++  assert.equal(mutations, 0); assert.ok(!app.hasText('1. Ana')); app.dispose();
++});
++
++test('401 terminal no Controle de Entrada remove lista nominal e área Staff', { skip }, async () => {
++  let revoked = false;
++  const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
++  const app = createIntegration({ initialUser: staffUser, control: { realStaff: true, events: [staffEvent],
++    http: async route => {
++      if (revoked && route.endsWith('/entry-control')) return { statusCode: 401, body: { code: 'SESSION_REVOKED' } };
++      if (route.endsWith('/entry-control')) return { eventId: staffEvent.id, externalQueueEnabled: true, canManage: true,
++        observedAt: '2026-11-10T15:00:00.000Z', waitingCount: 1, waiting: [
++          { participationId: 'abcdef00-0000-4000-8000-000000000004', displayName: 'Ana', position: 1 }] };
++    } } });
++  await app.mount(); await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
++  await app.press('Selecionar evento Evento autorizado'); await app.press('Controle de Entrada'); assert.ok(app.hasText('1. Ana'));
++  revoked = true; await app.press('Atualizar fila de entrada');
++  assert.equal(app.route(), 'Login'); assert.ok(!app.hasText('1. Ana')); app.dispose();
++});
+diff --git a/app/tests/staffDemoState.test.cjs b/app/tests/staffDemoState.test.cjs
+index 9d745bc..fa3b00f 100644
+--- a/app/tests/staffDemoState.test.cjs
++++ b/app/tests/staffDemoState.test.cjs
+@@ -219,7 +219,7 @@ const demoStaffScreens = [
+   'components/StaffDemoTools.js', 'components/StaffHeader.js', 'components/StaffMissingSession.js',
+   'components/StaffNotice.js', 'components/StaffScreen.js', 'components/staffTheme.js',
+ ];
+-const realStaffScreens = ['StaffEventsNavigator.js'];
++const realStaffScreens = ['StaffEventsNavigator.js', 'StaffEntryControlRealScreen.js'];
+ 
+ test('arquivos Staff são classificados como demonstração ou fluxo real', () => {
+   const staffDirectory = path.join(appDirectory, 'screens', 'staff');
+diff --git a/backend/src/participations/participations.module.ts b/backend/src/participations/participations.module.ts
+index 05ac49f..fbc4a67 100644
+--- a/backend/src/participations/participations.module.ts
++++ b/backend/src/participations/participations.module.ts
+@@ -5,12 +5,15 @@ import { AuthModule } from "../auth/auth.module";
+ import { ParticipantQueueIdempotencyPolicy } from "../events/participant-queue-idempotency.policy";
+ import { ParticipantAdmissionController } from "./participant-admission.controller";
+ import { ParticipationsService } from "./participations.service";
++import { StaffEntryController, StaffEntryNoStoreGuard } from "./staff-entry.controller";
++import { StaffEntryService } from "./staff-entry.service";
++import { StaffIdempotencyPolicy } from "../events/staff-idempotency.policy";
+ 
+ /** Prepara as consultas de participação e reutiliza Events e a conexão Drizzle compartilhada. */
+ @Module({
+   imports: [DatabaseModule, EventsModule, AuthModule],
+-  controllers: [ParticipantAdmissionController],
+-  providers: [ParticipationsService, ParticipantQueueIdempotencyPolicy],
++  controllers: [ParticipantAdmissionController, StaffEntryController],
++  providers: [ParticipationsService, ParticipantQueueIdempotencyPolicy, StaffEntryService, StaffEntryNoStoreGuard, StaffIdempotencyPolicy],
+   exports: [ParticipationsService],
+ })
+ export class ParticipationsModule {}
+diff --git a/app/screens/staff/StaffEntryControlRealScreen.js b/app/screens/staff/StaffEntryControlRealScreen.js
+new file mode 100644
+index 0000000..6e6136f
+--- /dev/null
++++ b/app/screens/staff/StaffEntryControlRealScreen.js
+@@ -0,0 +1,117 @@
++import { useEffect, useRef, useState } from 'react';
++import { ActivityIndicator, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
++import { randomUUID } from 'expo-crypto';
++import { useAuth } from '../../context/AuthContext';
++import { createStaffEntryStore } from '../../services/staffEntryService';
++import { defaultStaffEntryIntentStorage } from '../../services/staffEntryIntentStorage';
++
++function Button({ label, onPress, disabled = false, danger = false }) {
++  return <Pressable accessibilityRole="button" accessibilityLabel={label} disabled={disabled}
++    onPress={disabled ? undefined : onPress} style={[styles.button, danger && styles.danger, disabled && styles.disabled]}>
++    <Text style={styles.buttonText}>{label}</Text>
++  </Pressable>;
++}
++export default function StaffEntryControlRealScreen({ event, isEventCurrent, onBack }) {
++  const auth = useAuth(), live = useRef(null);
++  live.current = { auth, event, isEventCurrent };
++  const getContext = () => {
++    const { auth: current, event: selected, isEventCurrent: selectedIsCurrent } = live.current;
++    if (!current?.isAuthenticated || !current.isIdentityVerified() || !current.sessionId || !selectedIsCurrent() ||
++        !current.user?.roles?.includes('staff') || current.user.roles.includes('admin')) return null;
++    return { userId: current.user.id, sessionId: current.sessionId, eventId: selected.id,
++      epoch: current.getSessionEpoch(), revision: current.getIdentityRevision() };
++  };
++  const storeRef = useRef(null);
++  if (!storeRef.current) storeRef.current = createStaffEntryStore({
++    client: { get: (...args) => live.current.auth.httpClient.get(...args),
++      post: (...args) => live.current.auth.httpClient.post(...args), patch: (...args) => live.current.auth.httpClient.patch(...args) },
++    storage: defaultStaffEntryIntentStorage, createKey: randomUUID, getContext,
++  });
++  const store = storeRef.current;
++  const [snapshot, setSnapshot] = useState(store.getSnapshot());
++  const [dialog, setDialog] = useState(null), dialogRef = useRef(null);
++  dialogRef.current = dialog;
++  const epoch = auth.getSessionEpoch(), revision = auth.getIdentityRevision();
++  useEffect(() => store.subscribe(setSnapshot), [store]);
++  useEffect(() => {
++    store.setContext(getContext()); setDialog(null); void store.refresh();
++    return () => { dialogRef.current = null; store.setContext(null); };
++  }, [store, event.id, auth.user?.id, auth.sessionId, epoch, revision]);
++  if (!store.isCurrent(snapshot.context)) return null;
++  const ownPending = snapshot.pending && ['userId', 'sessionId', 'eventId'].every(key => snapshot.pending[key] === snapshot.context[key]);
++  const pending = ownPending ? snapshot.pending : null;
++  const disabled = snapshot.busy || snapshot.status !== 'ready' || !snapshot.data?.canManage ||
++    Boolean(snapshot.pending) || snapshot.storageError || !defaultStaffEntryIntentStorage.isPersistent;
++  const open = (action) => { if (!disabled && store.isCurrent()) setDialog({ action, context: snapshot.context }); };
++  const confirm = (expected) => {
++    if (!expected || dialogRef.current !== expected || !store.isCurrent(expected.context)) return;
++    dialogRef.current = null; setDialog(null); return store.mutate(expected.action);
++  };
++  const refresh = () => { dialogRef.current = null; setDialog(null); void store.refresh(); };
++  const errors = { session: 'Sessão inválida. Verifique sua sessão ou entre novamente.', denied: 'Acesso ao evento indisponível. Atualize seus eventos autorizados.',
++    network: 'Não foi possível conectar. Verifique sua conexão e atualize.', unavailable: 'Não foi possível consultar a fila de entrada. Tente atualizar.' };
++  const confirmed = pending?.phase === 'terminal' && pending.outcome.kind === 'confirmed';
++  return <View style={styles.content}>
++    <Text style={styles.title}>Controle de Entrada</Text>
++    <Text style={styles.text}>Fila de acesso ao evento</Text>
++    {snapshot.status === 'loading' && <View accessibilityRole="progressbar"><ActivityIndicator color="#a78bfa" /><Text style={styles.text}>Carregando fila de entrada...</Text></View>}
++    {snapshot.status === 'error' && <Text accessibilityRole="alert" style={styles.warning}>{errors[snapshot.error]}</Text>}
++    {snapshot.data && <>
++      <View style={styles.card}>
++        <Text style={styles.title}>Fila {snapshot.data.externalQueueEnabled ? 'ATIVA' : 'INATIVA'}</Text>
++        <Text style={styles.text}>Aguardando: {snapshot.data.waitingCount}</Text>
++        <Text style={styles.text}>{snapshot.data.externalQueueEnabled
++          ? 'Confirme a entrada presencial do primeiro participante da lista.'
++          : 'Novas participações entram diretamente no evento. Reativar não recoloca quem já foi liberado na fila.'}</Text>
++        <Button label={snapshot.data.externalQueueEnabled ? 'Desativar fila externa' : 'Reativar fila externa'}
++          danger={snapshot.data.externalQueueEnabled} disabled={disabled}
++          onPress={() => open({ kind: 'toggle', enabled: !snapshot.data.externalQueueEnabled })} />
++      </View>
++      {!snapshot.data.canManage && <Text style={styles.warning}>O evento não permite entradas ou alterações da fila neste momento.</Text>}
++      <Text style={styles.title}>Participantes aguardando</Text>
++      {snapshot.data.waiting.length === 0 && <Text style={styles.text}>Ninguém está aguardando na fila de entrada.</Text>}
++      {snapshot.data.waiting.map((person, index) => <View key={person.participationId} style={styles.card}>
++        <Text style={styles.text}>{person.position}. {person.displayName}{index === 0 ? ' · Próximo' : ''}</Text>
++        {index === 0 && snapshot.data.externalQueueEnabled && <Button label={`Confirmar entrada de ${person.displayName}`}
++          disabled={disabled} onPress={() => open({ kind: 'confirm', participationId: person.participationId })} />}
++      </View>)}
++    </>}
++    {snapshot.storageError && <Text accessibilityRole="alert" style={styles.warning}>Não foi possível verificar o registro seguro da solicitação. Atualize antes de continuar.</Text>}
++    {snapshot.knownOutcome?.kind === 'confirmed' && pending?.phase !== 'terminal' && <Text style={styles.success}>O servidor confirmou a alteração, mas o registro local não foi confirmado. Não repita a operação; procure o responsável.</Text>}
++    {!defaultStaffEntryIntentStorage.isPersistent && <Text style={styles.warning}>As alterações de entrada estão disponíveis somente no aplicativo com armazenamento seguro.</Text>}
++    {snapshot.pending && !ownPending && <Text style={styles.warning}>Há uma solicitação de entrada pendente em outro evento ou sessão desta conta. Procure o responsável antes de continuar.</Text>}
++    {pending?.phase === 'dispatching' && <Text accessibilityRole="alert" style={styles.warning}>O resultado de uma solicitação ainda não foi confirmado. Não repita a operação. As alterações estão bloqueadas até verificação pelo responsável.</Text>}
++    {pending?.phase === 'reserved' && <>
++      <Text style={styles.warning}>Há uma solicitação registrada que ainda não foi enviada.</Text>
++      <Button label="Descartar solicitação não enviada" disabled={snapshot.busy} onPress={() => { void store.cancelReserved(pending.key); }} />
++    </>}
++    {pending?.phase === 'terminal' && <View accessibilityRole="alert" style={styles.card}>
++      <Text style={confirmed ? styles.success : styles.warning}>{confirmed
++        ? pending.kind === 'confirm' ? 'Entrada confirmada pelo servidor.'
++          : `Fila ${pending.outcome.result.externalQueueEnabled ? 'reativada' : 'desativada'}. Participantes liberados: ${pending.outcome.result.releasedCount}.`
++        : pending.outcome.code === 'ENTRY_NOT_FIRST' ? 'A fila mudou. Confira o primeiro participante na lista atualizada.' : 'A solicitação foi recusada pelo servidor. Confira o estado atualizado.'}</Text>
++      <Button label="Entendi" disabled={snapshot.busy} onPress={() => { void store.acknowledge(pending.key); }} />
++    </View>}
++    <Button label="Atualizar fila de entrada" disabled={snapshot.busy || snapshot.status === 'loading'} onPress={refresh} />
++    <Button label="Voltar ao painel" onPress={onBack} />
++    <Modal transparent animationType="fade" visible={Boolean(dialog && store.isCurrent(dialog.context) && !snapshot.busy)}
++      onRequestClose={() => { dialogRef.current = null; setDialog(null); }}>
++      <View style={styles.backdrop}><View style={styles.card} accessibilityViewIsModal>
++        <Text style={styles.title}>{dialog?.action.kind === 'confirm' ? 'Confirmar entrada presencial?'
++          : dialog?.action.enabled ? 'Reativar fila externa?' : 'Desativar fila externa?'}</Text>
++        <Text style={styles.text}>{dialog?.action.kind === 'confirm' ? 'Confirme que o primeiro participante está entrando no evento.'
++          : dialog?.action.enabled ? 'Somente novas participações aguardarão. Quem já entrou permanece ativo.'
++            : `Todos os ${snapshot.data?.waitingCount ?? 0} participantes aguardando serão liberados. Isso não encerra o evento nem altera filas de experiências.`}</Text>
++        <Button label="CONFIRMAR ALTERAÇÃO" onPress={() => confirm(dialog)} />
++        <Button label="CANCELAR ALTERAÇÃO" onPress={() => { dialogRef.current = null; setDialog(null); }} />
++      </View></View>
++    </Modal>
++  </View>;
++}
++const styles = StyleSheet.create({
++  content: { gap: 14 }, title: { color: '#fff', fontSize: 20, fontWeight: '800' }, text: { color: '#cbd5e1', fontSize: 15, lineHeight: 22 },
++  card: { gap: 12, padding: 16, borderRadius: 14, backgroundColor: '#191330', borderWidth: 1, borderColor: '#34265a' },
++  button: { padding: 16, borderRadius: 14, backgroundColor: '#7c3aed', alignItems: 'center' }, danger: { backgroundColor: '#9f2345' },
++  buttonText: { color: '#fff', fontWeight: '700' }, disabled: { opacity: 0.45 }, warning: { color: '#fbbf24', lineHeight: 22 },
++  success: { color: '#86efac', lineHeight: 22 }, backdrop: { flex: 1, justifyContent: 'center', padding: 24, backgroundColor: 'rgba(0,0,0,0.7)' },
++});
+diff --git a/app/services/staffEntryIntentStorage.js b/app/services/staffEntryIntentStorage.js
+new file mode 100644
+index 0000000..55c869d
+--- /dev/null
++++ b/app/services/staffEntryIntentStorage.js
+@@ -0,0 +1,64 @@
++import { Platform } from 'react-native';
++import * as SecureStore from 'expo-secure-store';
++import { isDefinitiveEntryRejection, parseEntryResult, validEntryId } from './staffEntryService';
++
++let queue = Promise.resolve();
++const same = (a, b) => a && b && ['userId', 'sessionId', 'eventId', 'key', 'kind', 'participationId', 'enabled'].every(key => a[key] === b[key]);
++function valid(record, userId) {
++  if (!record || record.userId !== userId || !['userId', 'sessionId', 'eventId', 'key'].every(key => validEntryId(record[key])) ||
++      !['reserved', 'dispatching', 'terminal', 'acknowledged', 'cancelled'].includes(record.phase) ||
++      (record.kind === 'confirm' ? !validEntryId(record.participationId) || record.enabled !== null
++        : record.kind !== 'toggle' || typeof record.enabled !== 'boolean' || record.participationId !== null)) return false;
++  if (!['terminal', 'acknowledged'].includes(record.phase)) return record.outcome === undefined;
++  if (record.outcome?.kind === 'rejected') return isDefinitiveEntryRejection(record.outcome) &&
++    (record.outcome.code === null || typeof record.outcome.code === 'string');
++  if (record.outcome?.kind !== 'confirmed') return false;
++  try { parseEntryResult(record.outcome.result, record); return true; } catch { return false; }
++}
++
++/** Um único slot: reconhecimento é UPDATE lógico, sem exclusão ambígua de recibos. */
++export function createStaffEntryIntentStorage({ platformOS = Platform.OS, secureStore = SecureStore } = {}) {
++  const serialize = work => { const promise = queue.then(work, work); queue = promise.catch(() => {}); return promise; };
++  const keyFor = userId => {
++    if (!validEntryId(userId)) throw new Error('Conta Staff inválida.');
++    return `arenago.staff.entry.${userId.toLowerCase()}`;
++  };
++  async function read(userId) {
++    if (platformOS === 'web' || typeof secureStore?.getItemAsync !== 'function' || typeof secureStore?.setItemAsync !== 'function' ||
++        (typeof secureStore.isAvailableAsync === 'function' && !await secureStore.isAvailableAsync())) throw new Error('Armazenamento de entrada indisponível.');
++    const raw = await secureStore.getItemAsync(keyFor(userId));
++    if (raw === null) return null;
++    const record = JSON.parse(raw);
++    if (!valid(record, userId)) throw new Error('Intenção de entrada inválida.');
++    return record;
++  }
++  const write = record => secureStore.setItemAsync(keyFor(record.userId), JSON.stringify(record));
++  function transition(expected, phase, outcome) {
++    return serialize(async () => {
++      const current = await read(expected.userId);
++      if (!same(current, expected) || current.phase !== (phase === 'dispatching' || phase === 'cancelled' ? 'reserved'
++        : phase === 'terminal' ? 'dispatching' : 'terminal')) return false;
++      const next = { ...current, phase, ...(outcome ? { outcome } : {}) };
++      if (!valid(next, expected.userId)) throw new Error('Transição de entrada inválida.');
++      await write(next);
++      return true;
++    });
++  }
++  return {
++    isPersistent: platformOS !== 'web',
++    get: userId => serialize(() => read(userId)),
++    reserve: intent => serialize(async () => {
++      if (!valid(intent, intent?.userId) || intent.phase !== 'reserved') throw new Error('Reserva inválida.');
++      const previous = await read(intent.userId);
++      if (previous && (!['acknowledged', 'cancelled'].includes(previous.phase) || previous.key === intent.key))
++        return { created: false, intent: previous };
++      await write(intent);
++      return { created: true, intent };
++    }),
++    dispatch: intent => transition(intent, 'dispatching'),
++    async finish(intent, outcome) { if (!await transition(intent, 'terminal', outcome)) throw new Error('Recibo de entrada não persistido.'); },
++    acknowledge: intent => transition(intent, 'acknowledged'),
++    cancelReserved: intent => transition(intent, 'cancelled'),
++  };
++}
++export const defaultStaffEntryIntentStorage = createStaffEntryIntentStorage();
+diff --git a/app/services/staffEntryService.js b/app/services/staffEntryService.js
+new file mode 100644
+index 0000000..a4851ba
+--- /dev/null
++++ b/app/services/staffEntryService.js
+@@ -0,0 +1,133 @@
++const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
++export const validEntryId = (value) => typeof value === 'string' && UUID.test(value);
++const instant = (value) => typeof value === 'string' && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
++const invalid = () => { throw new Error('Resposta inválida do Controle de Entrada.'); };
++export function parseEntryState(body, eventId) {
++  if (!validEntryId(eventId) || body?.eventId !== eventId || typeof body.externalQueueEnabled !== 'boolean' ||
++      typeof body.canManage !== 'boolean' || !instant(body.observedAt) || !Array.isArray(body.waiting) ||
++      !Number.isSafeInteger(body.waitingCount) || body.waitingCount !== body.waiting.length) return invalid();
++  const seen = new Set();
++  const waiting = body.waiting.map((row, index) => {
++    if (!validEntryId(row?.participationId) || seen.has(row.participationId.toLowerCase()) ||
++        typeof row.displayName !== 'string' || !row.displayName.trim() || row.position !== index + 1) return invalid();
++    seen.add(row.participationId.toLowerCase());
++    return { participationId: row.participationId, displayName: row.displayName, position: row.position };
++  });
++  return { eventId, externalQueueEnabled: body.externalQueueEnabled, canManage: body.canManage,
++    observedAt: body.observedAt, waitingCount: body.waitingCount, waiting };
++}
++export function parseEntryResult(body, intent) {
++  if (body?.eventId !== intent.eventId) return invalid();
++  if (intent.kind === 'confirm') {
++    if (body.participation?.id !== intent.participationId || body.participation.status !== 'active' ||
++        !instant(body.participation.arenaEnteredAt)) return invalid();
++    return { eventId: body.eventId, participation: { id: body.participation.id, status: 'active', arenaEnteredAt: body.participation.arenaEnteredAt } };
++  }
++  if (intent.kind !== 'toggle' || body.externalQueueEnabled !== intent.enabled || !Number.isSafeInteger(body.releasedCount) ||
++      body.releasedCount < 0 || (intent.enabled && body.releasedCount !== 0) ||
++      (body.changedAt !== undefined ? !instant(body.changedAt) : body.releasedCount !== 0)) return invalid();
++  return { eventId: body.eventId, externalQueueEnabled: body.externalQueueEnabled, releasedCount: body.releasedCount,
++    ...(body.changedAt ? { changedAt: body.changedAt } : {}) };
++}
++const same = (a, b) => Boolean(a && b && ['userId', 'sessionId', 'eventId', 'epoch', 'revision'].every(key => a[key] === b[key]));
++const owns = (intent, context) => intent && ['userId', 'sessionId', 'eventId'].every(key => intent[key] === context[key]);
++const active = (intent) => intent && !['acknowledged', 'cancelled'].includes(intent.phase) ? intent : null;
++const empty = () => ({ context: null, status: 'idle', data: null, error: null, busy: false, pending: null, storageError: false, feedback: null, knownOutcome: null });
++const failure = (error) => error?.status === 401 ? 'session' : [403, 404].includes(error?.status) ? 'denied'
++  : error?.isNetworkError || error?.isTimeout ? 'network' : 'unavailable';
++export const isDefinitiveEntryRejection = (error) => [400, 401, 403, 404].includes(error?.status) ||
++  (error?.status === 409 && ['ENTRY_NOT_FIRST', 'EVENT_ENTRY_UNAVAILABLE'].includes(error.code));
++
++/** Sem replay de POST: um dispatching desconhecido só permite consultas. */
++export function createStaffEntryStore({ client, storage, createKey, getContext }) {
++  let state = empty(), generation = 0, readGeneration = 0, flight = null;
++  const listeners = new Set();
++  const publish = (patch) => { state = { ...state, ...patch }; listeners.forEach(fn => fn(state)); };
++  const isCurrent = (context = state.context) => same(context, state.context) && same(context, getContext());
++  function setContext(context) { generation++; readGeneration++; state = empty(); publish({ context }); }
++  async function refresh() {
++    const context = state.context, currentGeneration = generation, request = ++readGeneration;
++    if (!isCurrent(context)) return;
++    const current = () => generation === currentGeneration && request === readGeneration && isCurrent(context);
++    publish({ status: 'loading', data: null, error: null });
++    let pending = null, storageError = false;
++    try { pending = active(await storage.get(context.userId)); } catch { storageError = true; }
++    if (!current()) return;
++    publish({ pending, storageError });
++    try {
++      const data = parseEntryState(await client.get(`/staff/events/${context.eventId}/entry-control`, { auth: true }), context.eventId);
++      if (current()) publish({ status: 'ready', data });
++    } catch (error) { if (current()) publish({ status: 'error', data: null, error: failure(error) }); }
++  }
++  async function mutate(action) {
++    if (flight) return { kind: 'busy' };
++    const context = state.context;
++    if (!isCurrent(context) || state.status !== 'ready' || !state.data?.canManage || state.storageError || state.pending ||
++        storage.isPersistent !== true || !['userId', 'sessionId', 'eventId'].every(key => validEntryId(context[key]))) return { kind: 'blocked' };
++    if (action.kind === 'confirm' ? !state.data.externalQueueEnabled || action.participationId !== state.data.waiting[0]?.participationId
++      : action.kind !== 'toggle' || typeof action.enabled !== 'boolean' || action.enabled === state.data.externalQueueEnabled) return { kind: 'blocked' };
++    const intent = { userId: context.userId, sessionId: context.sessionId, eventId: context.eventId, key: createKey(),
++      kind: action.kind, participationId: action.kind === 'confirm' ? action.participationId : null,
++      enabled: action.kind === 'toggle' ? action.enabled : null, phase: 'reserved' };
++    if (!validEntryId(intent.key)) throw new Error('Chave de entrada inválida.');
++    publish({ busy: true, feedback: null, knownOutcome: null });
++    const work = async () => {
++      let knownOutcome = null;
++      try {
++        const reserved = await storage.reserve(intent);
++        if (!isCurrent(context)) return { kind: 'stale' };
++        if (!reserved.created) { publish({ pending: active(reserved.intent) }); return { kind: 'blocked' }; }
++        publish({ pending: intent });
++        const dispatched = await storage.dispatch(intent);
++        if (!isCurrent(context)) return { kind: 'stale' };
++        if (!dispatched) return { kind: 'blocked' };
++        publish({ pending: { ...intent, phase: 'dispatching' } });
++        let outcome;
++        try {
++          const options = { auth: true, retryOnUnauthorized: false, outcomeUnknownOnNetworkError: true,
++            headers: { 'Idempotency-Key': intent.key } };
++          const body = intent.kind === 'confirm'
++            ? await client.post(`/staff/events/${context.eventId}/entry-control/participants/${intent.participationId}/confirm`, {}, options)
++            : await client.patch(`/staff/events/${context.eventId}/entry-control`, { enabled: intent.enabled }, options);
++          outcome = { kind: 'confirmed', result: parseEntryResult(body, intent) };
++        } catch (error) {
++          if (!isDefinitiveEntryRejection(error)) {
++            if (isCurrent(context)) publish({ feedback: 'uncertain' });
++            return { kind: isCurrent(context) ? 'uncertain' : 'stale' };
++          }
++          outcome = { kind: 'rejected', status: error.status, code: typeof error.code === 'string' ? error.code : null };
++        }
++        // O resultado definitivo pertence à intenção original, inclusive após logout.
++        knownOutcome = outcome;
++        await storage.finish(intent, outcome);
++        if (!isCurrent(context)) return { kind: 'stale' };
++        publish({ pending: { ...intent, phase: 'terminal', outcome }, feedback: outcome.kind });
++        return { kind: outcome.kind, status: outcome.status };
++      } catch {
++        if (!isCurrent(context)) return { kind: 'stale' };
++        publish({ storageError: true, feedback: 'storage', knownOutcome });
++        return { kind: 'storage_error' };
++      } finally {
++        if (isCurrent(context)) { publish({ busy: false }); await refresh(); }
++      }
++    };
++    flight = work();
++    try { return await flight; } finally { flight = null; }
++  }
++  async function resolveLocal(key, cancel = false) {
++    const context = state.context, intent = state.pending;
++    if (flight || state.busy || !isCurrent(context) || !owns(intent, context) || intent.key !== key ||
++        intent.phase !== (cancel ? 'reserved' : 'terminal')) return { kind: 'blocked' };
++    publish({ busy: true });
++    try {
++      const done = await storage[cancel ? 'cancelReserved' : 'acknowledge'](intent);
++      if (!isCurrent(context)) return { kind: 'stale' };
++      if (done) publish({ pending: null, feedback: null, storageError: false, knownOutcome: null });
++      return { kind: done ? 'done' : 'blocked' };
++    } catch { if (isCurrent(context)) publish({ storageError: true }); return { kind: isCurrent(context) ? 'storage_error' : 'stale' }; }
++    finally { if (isCurrent(context)) { publish({ busy: false }); await refresh(); } }
++  }
++  return { getSnapshot: () => state, setContext, isCurrent, refresh, mutate,
++    acknowledge: key => resolveLocal(key), cancelReserved: key => resolveLocal(key, true),
++    subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); } };
++}
+diff --git a/app/tests/staffEntryControl.test.cjs b/app/tests/staffEntryControl.test.cjs
+new file mode 100644
+index 0000000..b8539f5
+--- /dev/null
++++ b/app/tests/staffEntryControl.test.cjs
+@@ -0,0 +1,160 @@
++const assert = require('node:assert/strict');
++const test = require('node:test');
++const { loadModule } = require('./helpers/questionnaireHarness.cjs');
++const api = loadModule('services/staffEntryService.js', require).exports;
++const id = n => `abcdef00-0000-4000-8000-${String(n).padStart(12, '0')}`;
++const at = '2026-11-10T15:00:00.000Z';
++const context = { userId: id(1), sessionId: id(2), eventId: id(3), epoch: 1, revision: 1 };
++const body = () => ({ eventId: id(3), observedAt: at, externalQueueEnabled: true, canManage: true, waitingCount: 2,
++  waiting: [{ participationId: id(4), displayName: 'Ana', position: 1 }, { participationId: id(5), displayName: 'Bia', position: 2 }] });
++const defer = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
++function adapter(values = new Map(), fault = {}) {
++  const secureStore = { getItemAsync: async key => { if (fault.read) throw new Error('read'); return values.get(key) ?? null; },
++    setItemAsync: async (key, raw) => {
++      const value = JSON.parse(raw), match = fault.phase === value.phase;
++      if (match && fault.mode === 'before') throw new Error('before');
++      values.set(key, raw);
++      if (match && fault.pending) { fault.entered?.(); await fault.pending; }
++      if (match && fault.mode === 'after') throw new Error('after');
++    } };
++  const { createStaffEntryIntentStorage } = loadModule('services/staffEntryIntentStorage.js', name => {
++    if (name === 'react-native') return { Platform: { OS: 'android' } };
++    if (name === 'expo-secure-store') return secureStore;
++    if (name === './staffEntryService') return api;
++    return require(name);
++  }).exports;
++  return { storage: createStaffEntryIntentStorage({ platformOS: 'android', secureStore }),
++    reopen: () => createStaffEntryIntentStorage({ platformOS: 'android', secureStore }), values, fault };
++}
++async function rig(options = {}) {
++  let current = { ...context }, data = body(), key = 20;
++  const persisted = options.persisted ?? adapter(); const calls = [];
++  const client = {
++    get: async (path, opts) => { calls.push({ method: 'GET', path, opts }); if (options.get) return options.get(); return structuredClone(data); },
++    post: async (path, payload, opts) => {
++      calls.push({ method: 'POST', path, payload, opts }); if (options.post) return options.post();
++      const first = data.waiting.shift(); data.waiting.forEach((p, i) => { p.position = i + 1; }); data.waitingCount--;
++      return { eventId: data.eventId, participation: { id: first.participationId, status: 'active', arenaEnteredAt: at } };
++    },
++    patch: async (path, payload, opts) => {
++      calls.push({ method: 'PATCH', path, payload, opts }); if (options.patch) return options.patch();
++      const releasedCount = payload.enabled ? 0 : data.waiting.length; data.externalQueueEnabled = payload.enabled;
++      if (!payload.enabled) { data.waiting = []; data.waitingCount = 0; }
++      return { eventId: data.eventId, externalQueueEnabled: payload.enabled, releasedCount, changedAt: at };
++    },
++  };
++  const make = storage => api.createStaffEntryStore({ client, storage, getContext: () => current, createKey: () => id(key++) });
++  const store = make(persisted.storage); store.setContext(current); await store.refresh();
++  return { store, persisted, calls, client, make, setContext(value) { current = value; store.setContext(value); }, get current() { return current; } };
++}
++test('contrato valida identidade mínima, FIFO, contagem e resposta da operação', () => {
++  assert.equal(api.parseEntryState(body(), id(3)).waiting[0].displayName, 'Ana');
++  for (const patch of [{ waitingCount: 3 }, { observedAt: '2026-11-10' }, { waiting: [...body().waiting].reverse() },
++    { waiting: [body().waiting[0], { ...body().waiting[1], participationId: id(4) }] }]) {
++    assert.throws(() => api.parseEntryState({ ...body(), ...patch }, id(3)));
++  }
++  assert.throws(() => api.parseEntryResult({ eventId: id(3), externalQueueEnabled: true, releasedCount: 1, changedAt: at }, { kind: 'toggle', eventId: id(3), enabled: true }));
++});
++test('consulta autenticada, confirmação FIFO, atualização e reconhecimento explícito', async () => {
++  const r = await rig(); assert.equal(r.calls[0].opts.auth, true);
++  assert.equal((await r.store.mutate({ kind: 'confirm', participationId: id(5) })).kind, 'blocked');
++  assert.equal((await r.store.mutate({ kind: 'confirm', participationId: id(4) })).kind, 'confirmed');
++  const sent = r.calls.find(c => c.method === 'POST');
++  assert.equal(sent.opts.retryOnUnauthorized, false); assert.equal(sent.opts.outcomeUnknownOnNetworkError, true);
++  assert.equal(sent.opts.headers['Idempotency-Key'], id(20));
++  assert.equal(r.store.getSnapshot().data.waitingCount, 1);
++  assert.equal((await r.store.mutate({ kind: 'confirm', participationId: id(5) })).kind, 'blocked');
++  await r.store.acknowledge(id(20)); assert.equal(r.store.getSnapshot().pending, null);
++});
++test('desativar libera lista, reativar não recoloca liberados', async () => {
++  const r = await rig(); await r.store.mutate({ kind: 'toggle', enabled: false });
++  assert.equal(r.store.getSnapshot().pending.outcome.result.releasedCount, 2);
++  await r.store.acknowledge(id(20)); await r.store.mutate({ kind: 'toggle', enabled: true });
++  assert.equal(r.store.getSnapshot().data.externalQueueEnabled, true); assert.equal(r.store.getSnapshot().data.waitingCount, 0);
++});
++test('timeout e reinício com novo adaptador preservam dispatching sem outro POST', async () => {
++  const r = await rig({ post: async () => { throw { isTimeout: true, outcomeUnknown: true }; } });
++  assert.equal((await r.store.mutate({ kind: 'confirm', participationId: id(4) })).kind, 'uncertain');
++  const restarted = r.make(r.persisted.reopen()); restarted.setContext(r.current); await restarted.refresh();
++  assert.equal(restarted.getSnapshot().pending.phase, 'dispatching');
++  assert.equal((await restarted.mutate({ kind: 'toggle', enabled: false })).kind, 'blocked');
++  assert.equal(r.calls.filter(c => c.method === 'POST').length, 1);
++});
++for (const phase of ['reserved', 'dispatching']) for (const mode of ['before', 'after']) {
++  test(`persistência ${phase} falha ${mode} sem envio`, async () => {
++    const persisted = adapter(new Map(), { phase, mode }), r = await rig({ persisted });
++    await r.store.mutate({ kind: 'confirm', participationId: id(4) });
++    assert.equal(r.calls.some(c => c.method === 'POST'), false);
++    const pending = r.store.getSnapshot().pending;
++    if (phase === 'dispatching' && mode === 'after') assert.equal(pending.phase, 'dispatching');
++    if (pending?.phase === 'reserved') { persisted.fault.phase = null; await r.store.cancelReserved(pending.key); assert.equal(r.store.getSnapshot().pending, null); }
++  });
++}
++for (const mode of ['before', 'after']) test(`confirmação não perdida em memória após falha ${mode} do recibo`, async () => {
++  const persisted = adapter(new Map(), { phase: 'terminal', mode }), r = await rig({ persisted });
++  await r.store.mutate({ kind: 'confirm', participationId: id(4) });
++  assert.equal(r.store.getSnapshot().knownOutcome.kind, 'confirmed');
++  assert.equal(r.store.getSnapshot().pending.phase, mode === 'before' ? 'dispatching' : 'terminal');
++  assert.equal((await r.store.mutate({ kind: 'toggle', enabled: false })).kind, 'blocked');
++});
++test('recibo atrasado A não reconhece B; gravação de reconhecimento pode ser repetida sem mutação', async () => {
++  const r = await rig(); await r.store.mutate({ kind: 'confirm', participationId: id(4) });
++  r.persisted.fault.phase = 'acknowledged'; r.persisted.fault.mode = 'before';
++  await r.store.acknowledge(id(20)); assert.equal(r.store.getSnapshot().pending.phase, 'terminal');
++  r.persisted.fault.mode = 'after'; await r.store.acknowledge(id(20)); assert.equal(r.store.getSnapshot().pending, null);
++  r.persisted.fault.phase = null; await r.store.mutate({ kind: 'confirm', participationId: id(5) });
++  assert.equal((await r.store.acknowledge(id(20))).kind, 'blocked'); assert.equal(r.store.getSnapshot().pending.key, id(21));
++  assert.equal(r.calls.filter(c => c.method === 'POST').length, 2);
++});
++test('dois coordenadores compartilham reserva e bloqueiam segundo envio durante POST pendente', async () => {
++  const pending = defer(), entered = defer(), r = await rig({ post: async () => { entered.resolve(); return pending.promise; } });
++  const other = r.make(r.persisted.storage); other.setContext(r.current); await other.refresh();
++  const first = r.store.mutate({ kind: 'confirm', participationId: id(4) }); await entered.promise;
++  assert.equal((await other.mutate({ kind: 'toggle', enabled: false })).kind, 'blocked');
++  pending.resolve({ eventId: id(3), participation: { id: id(4), status: 'active', arenaEnteredAt: at } }); await first;
++  assert.equal(r.calls.filter(c => c.method === 'POST').length, 1); assert.equal(r.calls.some(c => c.method === 'PATCH'), false);
++});
++test('logout ou troca de evento descarta resultado antigo mas preserva recibo original', async () => {
++  const pending = defer(), entered = defer(), r = await rig({ post: async () => { entered.resolve(); return pending.promise; } });
++  const work = r.store.mutate({ kind: 'confirm', participationId: id(4) }); await entered.promise;
++  r.setContext(null); pending.resolve({ eventId: id(3), participation: { id: id(4), status: 'active', arenaEnteredAt: at } });
++  assert.equal((await work).kind, 'stale'); assert.equal(r.store.getSnapshot().data, null);
++  assert.equal((await r.persisted.storage.get(context.userId)).phase, 'terminal');
++  r.setContext({ ...context, sessionId: id(99), epoch: 2 }); await r.store.refresh();
++  assert.equal((await r.store.mutate({ kind: 'toggle', enabled: false })).kind, 'blocked');
++});
++test('falha de leitura segura bloqueia alterações; erro de rede limpa lista', async () => {
++  const persisted = adapter(new Map(), { read: true }), r = await rig({ persisted });
++  assert.equal(r.store.getSnapshot().storageError, true); assert.equal((await r.store.mutate({ kind: 'toggle', enabled: false })).kind, 'blocked');
++  r.client.get = async () => { throw { isNetworkError: true }; }; await r.store.refresh();
++  assert.equal(r.store.getSnapshot().data, null); assert.equal(r.store.getSnapshot().error, 'network');
++});
++test('respostas de consulta fora de ordem e de outro evento não reaparecem', async () => {
++  const r = await rig(), requests = [];
++  let entered = defer();
++  r.client.get = () => { const request = defer(); requests.push(request); entered.resolve(); return request.promise; };
++  const older = r.store.refresh(); await entered.promise;
++  entered = defer(); const newer = r.store.refresh(); await entered.promise;
++  requests[1].resolve({ ...body(), waitingCount: 0, waiting: [] }); await newer;
++  requests[0].resolve(body()); await older; assert.equal(r.store.getSnapshot().data.waitingCount, 0);
++  entered = defer(); const previousEvent = r.store.refresh(); await entered.promise;
++  r.setContext({ ...context, eventId: id(88) }); requests[2].resolve(body()); await previousEvent;
++  assert.equal(r.store.getSnapshot().data, null);
++});
++test('marcação de reconhecimento pendente impede nova reserva e confirmação concorrente', async () => {
++  const r = await rig(); await r.store.mutate({ kind: 'confirm', participationId: id(4) });
++  const pending = defer(), entered = defer();
++  Object.assign(r.persisted.fault, { phase: 'acknowledged', pending: pending.promise, entered: entered.resolve });
++  const ack = r.store.acknowledge(id(20)); await entered.promise;
++  assert.equal((await r.store.mutate({ kind: 'toggle', enabled: false })).kind, 'blocked');
++  assert.equal((await r.store.acknowledge(id(20))).kind, 'blocked');
++  pending.resolve(); await ack;
++  assert.equal(r.store.getSnapshot().pending, null); assert.equal(r.calls.filter(c => c.method === 'POST').length, 1);
++});
++for (const [status, code, phase] of [[401, 'SESSION_REVOKED', 'terminal'], [403, 'STAFF_EVENT_FORBIDDEN', 'terminal'],
++  [404, 'RESOURCE_NOT_FOUND', 'terminal'], [409, 'ENTRY_NOT_FIRST', 'terminal'], [409, 'IDEMPOTENCY_IN_PROGRESS', 'dispatching'], [500, 'INTERNAL_SERVER_ERROR', 'dispatching']]) {
++  test(`erro HTTP ${status} ${code} preserva classificação segura`, async () => {
++    const r = await rig({ post: async () => { throw { status, code }; } }); await r.store.mutate({ kind: 'confirm', participationId: id(4) });
++    assert.equal(r.store.getSnapshot().pending.phase, phase); assert.equal(r.calls.filter(c => c.method === 'POST').length, 1);
++  });
++}
+diff --git a/backend/src/participations/staff-entry.controller.ts b/backend/src/participations/staff-entry.controller.ts
+new file mode 100644
+index 0000000..0974818
+--- /dev/null
++++ b/backend/src/participations/staff-entry.controller.ts
+@@ -0,0 +1,51 @@
++import { Body, Controller, Get, HttpCode, Inject, Injectable, Param, Patch, Post, Req, UseGuards, type CanActivate, type ExecutionContext } from "@nestjs/common";
++import { z } from "zod";
++import { CurrentUser } from "../auth/current-user.decorator";
++import type { AuthenticatedPrincipal } from "../auth/auth.types";
++import { SessionAuthGuard, type AuthenticatedRequest } from "../auth/session-auth.guard";
++import { mutationSession } from "../auth/mutation-session";
++import { emptyOperationBody, operationUuid, validateOperationBody, validateOperationIdempotencyKey, validateOperationParams } from "../common/http/operation-validation";
++import { StaffIdempotencyPolicy } from "../events/staff-idempotency.policy";
++import { StaffEntryService } from "./staff-entry.service";
++
++const eventParams = z.object({ eventId: operationUuid }).strict();
++const confirmationParams = eventParams.extend({ participationId: operationUuid });
++const toggleBody = z.object({ enabled: z.boolean() }).strict();
++@Injectable()
++export class StaffEntryNoStoreGuard implements CanActivate {
++  canActivate(context: ExecutionContext) {
++    context.switchToHttp().getResponse<{ setHeader(name: string, value: string): void }>().setHeader("Cache-Control", "no-store");
++    return true;
++  }
++}
++@Controller("staff/events/:eventId/entry-control")
++@UseGuards(StaffEntryNoStoreGuard, SessionAuthGuard)
++export class StaffEntryController {
++  constructor(@Inject(StaffEntryService) private readonly entries: StaffEntryService,
++    @Inject(StaffIdempotencyPolicy) private readonly policy: StaffIdempotencyPolicy) {}
++
++  @Get()
++  read(@CurrentUser() principal: AuthenticatedPrincipal, @Param() params: unknown) {
++    const ids = validateOperationParams(eventParams, params);
++    return this.entries.read({ ...ids, userId: principal.userId, sessionId: principal.sessionId });
++  }
++
++  @Post("participants/:participationId/confirm")
++  @HttpCode(200)
++  async confirm(@CurrentUser() principal: AuthenticatedPrincipal, @Param() params: unknown,
++    @Body() body: unknown, @Req() request: AuthenticatedRequest) {
++    const ids = validateOperationParams(confirmationParams, params);
++    validateOperationBody(emptyOperationBody, body, request, true);
++    return this.entries.confirm({ ...ids, ...mutationSession(request, principal.userId),
++      idempotencyKey: validateOperationIdempotencyKey(request), expiresAt: this.policy.expiresAt() });
++  }
++
++  @Patch()
++  setEnabled(@CurrentUser() principal: AuthenticatedPrincipal, @Param() params: unknown,
++    @Body() body: unknown, @Req() request: AuthenticatedRequest) {
++    const ids = validateOperationParams(eventParams, params);
++    const input = validateOperationBody(toggleBody, body, request);
++    return this.entries.setEnabled({ ...ids, ...input, ...mutationSession(request, principal.userId),
++      idempotencyKey: validateOperationIdempotencyKey(request), expiresAt: this.policy.expiresAt() });
++  }
++}
+diff --git a/backend/src/participations/staff-entry.service.ts b/backend/src/participations/staff-entry.service.ts
+new file mode 100644
+index 0000000..0d73233
+--- /dev/null
++++ b/backend/src/participations/staff-entry.service.ts
+@@ -0,0 +1,182 @@
++import { HttpStatus, Inject, Injectable } from "@nestjs/common";
++import { randomUUID } from "node:crypto";
++import { sql } from "drizzle-orm";
++import type { NodePgDatabase } from "drizzle-orm/node-postgres";
++import { z } from "zod";
++import { revalidateMutationSession, type MutationSession } from "../auth/mutation-session";
++import { ProblemException } from "../common/errors/problem.exception";
++import { DRIZZLE_DATABASE } from "../database/database.module";
++import type { DatabaseTransactionExecutor } from "../database/database-executor";
++import type * as schema from "../database/schema";
++import { EventsService } from "../events/events.service";
++import { ParticipationsService } from "./participations.service";
++import { completeIdempotencyOperationWithTx, createRequestFingerprint, reserveIdempotencyOperationWithTx } from "./join-idempotency";
++
++export const STAFF_ENTRY_CONFIRM = "staff_confirm_event_entry";
++export const STAFF_ENTRY_TOGGLE = "staff_set_external_queue";
++type Actor = MutationSession & { eventId: string };
++type Intent = Actor & { idempotencyKey: string; expiresAt: Date };
++const instant = z.string().refine(value => Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value);
++export const entryConfirmation = z.object({ eventId: z.uuid(), participation: z.object({
++  id: z.uuid(), status: z.literal("active"), arenaEnteredAt: instant,
++}) });
++export const entryToggle = z.object({ eventId: z.uuid(), externalQueueEnabled: z.boolean(),
++  releasedCount: z.number().int().nonnegative().refine(Number.isSafeInteger), changedAt: instant.optional() })
++  .refine(value => (!value.externalQueueEnabled || value.releasedCount === 0) &&
++    (value.changedAt !== undefined || value.releasedCount === 0));
++export function entryFingerprint(eventId: string, participationId: string) {
++  return createRequestFingerprint(STAFF_ENTRY_CONFIRM, { eventId, participationId });
++}
++export function entryToggleFingerprint(eventId: string, enabled: boolean) {
++  return createRequestFingerprint(STAFF_ENTRY_TOGGLE, { eventId, enabled });
++}
++function problem(status: HttpStatus, code: string, detail: string): never {
++  throw new ProblemException({ status, code, typeSlug: code.toLowerCase().replaceAll("_", "-"),
++    title: status === 404 ? "Recurso não encontrado" : status === 401 ? "Sessão inválida" : "Operação indisponível", detail });
++}
++const denied = () => problem(404, "RESOURCE_NOT_FOUND", "Recurso não encontrado.");
++class HistoricalReplay extends Error { constructor(readonly value: unknown) { super("replay"); } }
++
++/** Entrada no evento; não altera queue_entries, experiências ou atendimentos. */
++@Injectable()
++export class StaffEntryService {
++  constructor(@Inject(DRIZZLE_DATABASE) private readonly database: NodePgDatabase<typeof schema>,
++    @Inject(EventsService) private readonly events: EventsService,
++    @Inject(ParticipationsService) private readonly participations: ParticipationsService) {}
++
++  private async authorize(tx: DatabaseTransactionExecutor, actor: Actor) {
++    try { await revalidateMutationSession(tx, { ...actor, staffEventId: actor.eventId }); }
++    catch (error) {
++      if (error instanceof ProblemException && error.getStatus() === 403) return denied();
++      throw error;
++    }
++  }
++
++  async read(actor: Actor) {
++    return this.database.transaction(async tx => {
++      // Sem locks de escrita: identidade, concessão e lista pertencem ao mesmo snapshot.
++      const session = await tx.execute(sql`SELECT s.id FROM sessions s JOIN users u ON u.id=s.user_id
++        WHERE s.id=${actor.sessionId} AND s.user_id=${actor.userId} AND s.revoked_at IS NULL
++          AND s.expires_at > statement_timestamp() AND u.is_active=true
++          AND (s.admin_2fa_verified_at IS NOT NULL OR NOT EXISTS (SELECT 1 FROM user_roles a
++            WHERE a.user_id=u.id AND a.role='admin' AND a.event_id IS NULL AND a.revoked_at IS NULL))`);
++      if (!session.rows.length) problem(401, "INVALID_SESSION", "Sessão inválida ou expirada.");
++      const event = (await tx.execute<{ enabled: boolean; observedAt: string }>(sql`
++        SELECT e.external_queue_enabled AS enabled, statement_timestamp() AS "observedAt" FROM events e
++        WHERE e.id=${actor.eventId} AND EXISTS (SELECT 1 FROM users u JOIN user_roles r ON r.user_id=u.id
++          WHERE u.id=${actor.userId} AND u.is_active=true AND u.email_verified_at IS NOT NULL
++            AND r.role='staff' AND r.event_id=e.id AND r.revoked_at IS NULL)`)).rows[0];
++      if (!event) return denied();
++      const observedAt = new Date(event.observedAt);
++      if (!Number.isFinite(observedAt.getTime()) || typeof event.enabled !== "boolean") throw new Error("Estado de entrada inválido.");
++      const availability = await this.events.evaluateEventAvailabilityById(actor.eventId, observedAt, tx);
++      const rows = (await tx.execute<{ participationId: string; displayName: string; position: string; order: string }>(sql`
++        SELECT p.id AS "participationId", u.name AS "displayName", p.external_queue_order::text AS "order",
++          row_number() OVER (ORDER BY p.external_queue_order, p.id)::text AS position
++        FROM participations p JOIN users u ON u.id=p.user_id
++        WHERE p.event_id=${actor.eventId} AND p.status='waiting'
++        ORDER BY p.external_queue_order, p.id`)).rows;
++      const waiting = rows.map(row => {
++        if (!/^[1-9]\d*$/.test(row.order) || row.order.length > 19 || BigInt(row.order) > 9223372036854775807n ||
++            !/^[1-9]\d*$/.test(row.position) || !Number.isSafeInteger(Number(row.position)) ||
++            !z.uuid().safeParse(row.participationId).success || typeof row.displayName !== "string" || !row.displayName.trim())
++          throw new Error("Fila externa inconsistente.");
++        return { participationId: row.participationId, displayName: row.displayName, position: Number(row.position) };
++      });
++      return { eventId: actor.eventId, externalQueueEnabled: event.enabled, observedAt: observedAt.toISOString(),
++        canManage: availability.eventExists && availability.eventAcceptingNewEntries,
++        waitingCount: waiting.length, waiting };
++    }, { isolationLevel: "repeatable read", accessMode: "read only" });
++  }
++
++  private async reserve(tx: DatabaseTransactionExecutor, input: Intent, operation: string, fingerprint: string) {
++    if (!input.idempotencyKey.trim() || input.idempotencyKey.length > 128 || !Number.isFinite(input.expiresAt.getTime()))
++      throw new Error("Intenção de entrada inválida.");
++    const reservation = await reserveIdempotencyOperationWithTx(tx, { actorUserId: input.userId, operation,
++      idempotencyKey: input.idempotencyKey, requestHash: fingerprint, expiresAt: input.expiresAt });
++    await this.authorize(tx, input); // inclusive depois de eventual espera na chave única
++    if (reservation.kind === "request_conflict") problem(409, "IDEMPOTENCY_REQUEST_CONFLICT", "Chave vinculada a outra intenção.");
++    if (reservation.kind === "in_progress") problem(409, "IDEMPOTENCY_IN_PROGRESS", "Intenção em processamento.");
++    return reservation;
++  }
++
++  async confirm(input: Intent & { participationId: string }) {
++    try {
++      return await this.database.transaction(async tx => {
++        const event = await tx.execute(sql`SELECT id FROM events WHERE id=${input.eventId} FOR UPDATE`);
++        // Mesma ordem de E05: evento -> participações -> conta/concessão/sessão.
++        const first = event.rows.length ? (await tx.execute<{ id: string; order: string }>(sql`SELECT id, external_queue_order::text AS "order" FROM participations
++          WHERE event_id=${input.eventId} AND status='waiting'
++          ORDER BY external_queue_order, id LIMIT 1 FOR UPDATE`)).rows[0] : undefined;
++        await this.authorize(tx, input);
++        if (!event.rows.length) return denied();
++        const reservation = await this.reserve(tx, input, STAFF_ENTRY_CONFIRM, entryFingerprint(input.eventId, input.participationId));
++        if (reservation.kind === "replay") {
++          const result = entryConfirmation.parse(reservation.resultPayload);
++          if (reservation.httpStatus !== 200 || result.eventId !== input.eventId || result.participation.id !== input.participationId)
++            throw new Error("Replay de entrada inválido.");
++          throw new HistoricalReplay(result);
++        }
++        if (!first || first.id !== input.participationId) problem(409, "ENTRY_NOT_FIRST", "Atualize a fila e confirme somente o primeiro participante.");
++        if (!/^[1-9]\d*$/.test(first.order) || first.order.length > 19 || BigInt(first.order) > 9223372036854775807n)
++          throw new Error("Ordem externa inconsistente.");
++        const clock = (await tx.execute<{ at: string }>(sql`SELECT clock_timestamp() AS at`)).rows[0];
++        const availability = await this.events.evaluateEventAvailabilityById(input.eventId, new Date(clock.at), tx);
++        if (!availability.eventExists || !availability.eventAcceptingNewEntries) problem(409, "EVENT_ENTRY_UNAVAILABLE", "O evento não permite entradas neste instante.");
++        const changed = (await tx.execute<{ id: string; at: string }>(sql`WITH decision AS MATERIALIZED (SELECT clock_timestamp() AS at)
++          UPDATE participations p SET status='active', arena_entered_at=d.at FROM events e, decision d
++          WHERE p.id=${input.participationId} AND p.event_id=${input.eventId} AND p.status='waiting'
++            AND p.current_queue_entry_id IS NULL AND e.id=p.event_id AND e.external_queue_enabled=true
++            AND e.status NOT IN ('closing','closed') AND e.closure_requested_at IS NULL
++            AND e.starts_at<=d.at AND d.at<e.official_ends_at AND d.at<e.operational_deadline_at
++          RETURNING p.id, p.arena_entered_at AS at`)).rows[0];
++        if (!changed) problem(409, "EVENT_ENTRY_UNAVAILABLE", "A entrada não pode ser confirmada no estado atual.");
++        const result = entryConfirmation.parse({ eventId: input.eventId,
++          participation: { id: changed.id, status: "active", arenaEnteredAt: new Date(changed.at).toISOString() } });
++        const audit = await tx.execute(sql`INSERT INTO audit_logs(id,actor_user_id,event_id,origin,category,action,reason,metadata,occurred_at)
++          VALUES(${randomUUID()},${input.userId},${input.eventId},'user','event','staff_entry_confirmed','Confirmação individual pelo Staff',
++            jsonb_build_object('participationId',${input.participationId}::text),${result.participation.arenaEnteredAt}::timestamptz) RETURNING id`);
++        if (audit.rows.length !== 1) throw new Error("Confirmação de entrada exige auditoria.");
++        await completeIdempotencyOperationWithTx(tx, reservation.operationId, { httpStatus: 200,
++          resultReference: input.participationId, resultPayload: result });
++        await this.authorize(tx, input);
++        return result;
++      }, { isolationLevel: "read committed" });
++    } catch (error) { if (error instanceof HistoricalReplay) return entryConfirmation.parse(error.value); throw error; }
++  }
++
++  async setEnabled(input: Intent & { enabled: boolean }) {
++    if (typeof input.enabled !== "boolean") throw new Error("Estado de fila inválido.");
++    try {
++      return await this.database.transaction(async tx => {
++        let operationId: string | undefined;
++        const result = await this.participations.setExternalQueueEnabledWithTx(tx, input.eventId, input.enabled, async current => {
++          await this.authorize(tx, input);
++          if (current === undefined) return;
++          const reservation = await this.reserve(tx, input, STAFF_ENTRY_TOGGLE, entryToggleFingerprint(input.eventId, input.enabled));
++          if (reservation.kind === "replay") {
++            const replay = entryToggle.parse(reservation.resultPayload);
++            if (reservation.httpStatus !== 200 || replay.eventId !== input.eventId || replay.externalQueueEnabled !== input.enabled)
++              throw new Error("Replay de alternância inválido.");
++            throw new HistoricalReplay(replay);
++          }
++          operationId = reservation.operationId;
++        });
++        if (result.kind === "event_not_found") return denied();
++        if (result.kind === "blocked") problem(409, "EVENT_ENTRY_UNAVAILABLE", "O evento não permite alterar a fila externa neste instante.");
++        if (!operationId) throw new Error("Reserva Staff ausente.");
++        const response = entryToggle.parse({ eventId: result.eventId, externalQueueEnabled: result.externalQueueEnabled,
++          releasedCount: result.releasedCount, ...(result.kind === "changed" ? { changedAt: result.changedAt.toISOString() } : {}) });
++        if (result.kind === "changed") {
++          const audit = await tx.execute(sql`INSERT INTO audit_logs(id,actor_user_id,event_id,origin,category,action,reason,metadata,occurred_at)
++            VALUES(${randomUUID()},${input.userId},${input.eventId},'user','event','staff_external_queue_changed','Alternância pelo Staff',
++              jsonb_build_object('enabled',${input.enabled}::boolean,'releasedCount',${result.releasedCount}::bigint),${result.changedAt}) RETURNING id`);
++          if (audit.rows.length !== 1) throw new Error("Alternância de entrada exige auditoria.");
++        }
++        await completeIdempotencyOperationWithTx(tx, operationId, { httpStatus: 200, resultReference: input.eventId, resultPayload: response });
++        await this.authorize(tx, input);
++        return response;
++      }, { isolationLevel: "read committed" });
++    } catch (error) { if (error instanceof HistoricalReplay) return entryToggle.parse(error.value); throw error; }
++  }
++}
+diff --git a/backend/test/unit/helpers/staff-entry-fixture.ts b/backend/test/unit/helpers/staff-entry-fixture.ts
+new file mode 100644
+index 0000000..6b999e5
+--- /dev/null
++++ b/backend/test/unit/helpers/staff-entry-fixture.ts
+@@ -0,0 +1,96 @@
++import { drizzle } from "drizzle-orm/node-postgres";
++import type { Pool } from "pg";
++import * as schema from "../../../src/database/schema";
++import { EventsService } from "../../../src/events/events.service";
++import type { EventAvailabilityResult } from "../../../src/events/event-availability";
++import { ParticipationsService } from "../../../src/participations/participations.service";
++import { StaffEntryService } from "../../../src/participations/staff-entry.service";
++
++export const id = (n: number) => `abcdef00-0000-4000-8000-${String(n).padStart(12, "0")}`;
++export const actor = { userId: id(1), sessionId: id(2), eventId: id(3) };
++export const at = "2026-11-10T15:00:00.000Z";
++export const intent = (n = 20) => ({ ...actor, idempotencyKey: id(n), expiresAt: new Date("2099-01-01") });
++export function deferred() { let resolve!: () => void; const promise = new Promise<void>(yes => { resolve = yes; }); return { promise, resolve }; }
++type Receipt = { id: string; hash: string; status: string; httpStatus: number | null; reference: string | null; payload: unknown };
++type State = { enabled: boolean; people: Array<{ id: string; name: string; status: string }>; receipts: Map<string, Receipt> };
++export function entryFixture() {
++  const flags = { exists: true, staff: true, active: true, verified: true, revoked: false, expired: false,
++    admin: false, secondFactor: true, manage: true, fail: false, hold: null as null | { entered: () => void; until: Promise<void> } };
++  const state: State = { enabled: true, people: [{ id: id(4), name: "Ana", status: "waiting" },
++    { id: id(5), name: "Bia", status: "waiting" }], receipts: new Map() };
++  const queries: Array<{ text: string; params: unknown[] }> = [];
++  let eventQueue = Promise.resolve();
++  // Simula a exclusão solicitada pelo SQL. Não prova locks físicos PostgreSQL.
++  class EntryFixturePool {
++    async connect() {
++      let unlock: (() => void) | undefined, snapshot: State | undefined;
++      const lock = async () => {
++        if (unlock) return;
++        const previous = eventQueue;
++        eventQueue = new Promise<void>(yes => { unlock = yes; });
++        await previous;
++        snapshot = { enabled: state.enabled, people: structuredClone(state.people), receipts: structuredClone(state.receipts) };
++      };
++      return { release() {}, async query(config: { text: string }, params: unknown[] = []) {
++        const text = config.text; queries.push({ text, params });
++        if (text.startsWith("begin")) return { rows: [] };
++        if (text === "commit" || text === "rollback") {
++          if (text === "rollback" && snapshot) Object.assign(state, snapshot);
++          unlock?.(); unlock = undefined; return { rows: [] };
++        }
++        if ((text.includes("FROM events WHERE") || text.includes('from "events"')) && /for update/i.test(text)) {
++          await lock();
++          return { rows: !flags.exists ? [] : text.includes('from "events"') ? [[state.enabled]] : [{ id: actor.eventId }] };
++        }
++        if (text.includes('from "participations"') && /for update/i.test(text)) return { rows: state.people.filter(p => p.status === "waiting").map(p => [p.id]) };
++        if (text.includes('SELECT id, external_queue_order::text')) return { rows: state.people.filter(p => p.status === "waiting").slice(0, 1).map(p => ({ id: p.id, order: "1" })) };
++        if (text.includes("SELECT id FROM users") || text.includes("SELECT id FROM user_roles") || text.includes("SELECT id FROM sessions")) return { rows: [{ id: id(9) }] };
++        if (text.includes('AS "secondFactor"')) return { rows: [{ revoked: flags.revoked, expired: flags.expired,
++          active: flags.active, secondFactor: flags.secondFactor, admin: flags.admin, staff: flags.staff && flags.verified }] };
++        if (text.includes("SELECT s.id FROM sessions")) return { rows: flags.revoked || flags.expired || !flags.active ||
++          (flags.admin && !flags.secondFactor) ? [] : [{ id: actor.sessionId }] };
++        if (text.includes('AS "observedAt" FROM events')) return { rows: flags.exists && flags.staff && flags.verified
++          ? [{ enabled: state.enabled, observedAt: at }] : [] };
++        if (text.includes("row_number() OVER")) return { rows: state.people.filter(p => p.status === "waiting")
++          .map((p, i) => ({ participationId: p.id, displayName: p.name, position: String(i + 1), order: String(i + 1) })) };
++        if (text.includes('insert into "idempotency_operations"')) {
++          const slot = `${params[1]}:${params[2]}:${params[3]}`;
++          if (state.receipts.has(slot)) return { rows: [] };
++          state.receipts.set(slot, { id: String(params[0]), hash: String(params[4]), status: "in_progress", httpStatus: null, reference: null, payload: null });
++          return { rows: [[params[0]]] };
++        }
++        if (text.includes('from "idempotency_operations"')) {
++          const found = state.receipts.get(`${params[0]}:${params[1]}:${params[2]}`);
++          return { rows: found ? [[found.id, found.hash, found.status, found.httpStatus, found.reference, found.payload]] : [] };
++        }
++        if (text.includes("UPDATE participations p SET")) {
++          if (flags.hold) { flags.hold.entered(); await flags.hold.until; }
++          if (!state.enabled || !flags.manage) return { rows: [] };
++          const target = state.people.find(p => p.id === params[0] && p.status === "waiting");
++          if (!target) return { rows: [] };
++          target.status = "active"; return { rows: [{ id: target.id, at }] };
++        }
++        if (text.startsWith('update "events"')) { state.enabled = params[0] as boolean; return { rows: [], rowCount: 1 }; }
++        if (text.startsWith('update "participations"')) {
++          const waiting = state.people.filter(p => p.status === "waiting"); waiting.forEach(p => { p.status = "active"; });
++          return { rows: [], rowCount: waiting.length };
++        }
++        if (text.includes('AS "decisionAtMs"')) return { rows: [{ decisionAtMs: Date.parse(at) }] };
++        if (text.includes("SELECT clock_timestamp() AS at")) return { rows: [{ at }] };
++        if (text.includes("INSERT INTO audit_logs")) { if (flags.fail) throw new Error("PRIVATE_ENTRY_DATABASE"); return { rows: [{ id: id(70) }], rowCount: 1 }; }
++        if (text.startsWith('update "idempotency_operations"')) {
++          const found = [...state.receipts.values()].find(r => params.includes(r.id))!;
++          found.status = "completed"; found.httpStatus = Number(params[1]); found.reference = String(params[2]);
++          found.payload = typeof params[3] === "string" ? JSON.parse(params[3]) : params[3];
++          return { rows: [[found.id, found.httpStatus, found.reference, found.payload]] };
++        }
++        throw new Error(`SQL de teste não previsto: ${text}`);
++      } };
++    }
++  }
++  const database = drizzle(new EntryFixturePool() as unknown as Pool, { schema });
++  const events = new EventsService(database);
++  events.evaluateEventAvailabilityById = async () => ({ eventExists: true, eventAcceptingNewEntries: flags.manage } as EventAvailabilityResult);
++  const participations = new ParticipationsService(database, events);
++  return { database, events, participations, service: new StaffEntryService(database, events, participations), flags, state, queries };
++}
+diff --git a/backend/test/unit/staff-entry-http.test.ts b/backend/test/unit/staff-entry-http.test.ts
+new file mode 100644
+index 0000000..5f99bb6
+--- /dev/null
++++ b/backend/test/unit/staff-entry-http.test.ts
+@@ -0,0 +1,68 @@
++import "reflect-metadata";
++import assert from "node:assert/strict";
++import { after, before, test } from "node:test";
++import { Module, type INestApplication } from "@nestjs/common";
++import { NestFactory } from "@nestjs/core";
++import supertest from "supertest";
++import { AuthService } from "../../src/auth/auth.service";
++import { SessionAuthGuard } from "../../src/auth/session-auth.guard";
++import { ProblemException } from "../../src/common/errors/problem.exception";
++import { ProblemDetailsExceptionFilter } from "../../src/common/errors/problem-details.filter";
++import { StaffIdempotencyPolicy } from "../../src/events/staff-idempotency.policy";
++import { StaffEntryController, StaffEntryNoStoreGuard } from "../../src/participations/staff-entry.controller";
++import { StaffEntryService } from "../../src/participations/staff-entry.service";
++import { entryFixture, actor, id } from "./helpers/staff-entry-fixture";
++
++let fixture = entryFixture();
++@Module({ controllers: [StaffEntryController], providers: [SessionAuthGuard, StaffEntryNoStoreGuard,
++  { provide: AuthService, useValue: { authenticateBearerToken: async (token: string) => {
++    if (token !== "valid") throw new ProblemException({ status: 401, code: "INVALID_SESSION", typeSlug: "invalid-session", title: "Sessão inválida", detail: "Sessão inválida." });
++    return { userId: actor.userId, sessionId: actor.sessionId, roles: ["staff"] };
++  } } }, { provide: StaffEntryService, useValue: { read: (...args: Parameters<StaffEntryService["read"]>) => fixture.service.read(...args),
++    confirm: (...args: Parameters<StaffEntryService["confirm"]>) => fixture.service.confirm(...args),
++    setEnabled: (...args: Parameters<StaffEntryService["setEnabled"]>) => fixture.service.setEnabled(...args) } },
++  { provide: StaffIdempotencyPolicy, useValue: { expiresAt: () => new Date("2099-01-01") } },
++] }) class EntryModule {}
++let app: INestApplication;
++before(async () => { app = await NestFactory.create(EntryModule, { logger: false }); app.setGlobalPrefix("api/v1");
++  app.useGlobalFilters(new ProblemDetailsExceptionFilter()); await app.listen(0, "127.0.0.1"); });
++after(async () => { await app?.close(); });
++const base = `/api/v1/staff/events/${actor.eventId}/entry-control`;
++test("HTTP real do controller/serviço exige Bearer, UUID e chave, rejeitando identidade no corpo", async () => {
++  fixture = entryFixture();
++  for (const response of [await supertest(app.getHttpServer()).get(base), await supertest(app.getHttpServer()).patch(base).send({ enabled: false }),
++    await supertest(app.getHttpServer()).post(`${base}/participants/${id(4)}/confirm`).send({})]) {
++    assert.equal(response.status, 401); assert.equal(response.headers["cache-control"], "no-store");
++  }
++  assert.equal(fixture.queries.length, 0);
++  assert.equal((await supertest(app.getHttpServer()).get(base.replace(actor.eventId, "bad")).set("Authorization", "Bearer valid")).status, 400);
++  for (const body of [{ enabled: false, userId: id(90) }, { enabled: "false" }, {}]) {
++    assert.equal((await supertest(app.getHttpServer()).patch(base).set("Authorization", "Bearer valid").set("Idempotency-Key", id(20)).send(body)).status, 400);
++  }
++  assert.equal((await supertest(app.getHttpServer()).post(`${base}/participants/${id(4)}/confirm`).set("Authorization", "Bearer valid").send({})).status, 400);
++});
++test("HTTP utiliza principal, identifica minimamente e confirma FIFO com resposta 200", async () => {
++  fixture = entryFixture();
++  const read = await supertest(app.getHttpServer()).get(base).query({ userId: id(99), sessionId: id(98) }).set("Authorization", "Bearer valid");
++  assert.equal(read.status, 200); assert.equal(read.headers["cache-control"], "no-store");
++  assert.deepEqual(Object.keys(read.body.waiting[0]).sort(), ["displayName", "participationId", "position"]);
++  const session = fixture.queries.find(q => q.text.includes("SELECT s.id FROM sessions"))!;
++  assert.deepEqual(session.params, [actor.sessionId, actor.userId]);
++  const denied = await supertest(app.getHttpServer()).post(`${base}/participants/${id(5)}/confirm`).set("Authorization", "Bearer valid").set("Idempotency-Key", id(20)).send({});
++  assert.equal(denied.status, 409); assert.equal(denied.body.code, "ENTRY_NOT_FIRST");
++  const confirmed = await supertest(app.getHttpServer()).post(`${base}/participants/${id(4)}/confirm`).set("Authorization", "Bearer valid").set("Idempotency-Key", id(21)).send({});
++  assert.equal(confirmed.status, 200); assert.equal(confirmed.body.participation.status, "active");
++  const off = await supertest(app.getHttpServer()).patch(base).set("Authorization", "Bearer valid").set("Idempotency-Key", id(22)).send({ enabled: false });
++  assert.equal(off.status, 200); assert.equal(off.body.releasedCount, 1);
++});
++test("HTTP revalida Staff/sessão após guard e protege erro interno com no-store", async () => {
++  fixture = entryFixture(); fixture.flags.staff = false;
++  const denied = await supertest(app.getHttpServer()).get(base).set("Authorization", "Bearer valid"); assert.equal(denied.status, 404);
++  fixture.flags.staff = true; fixture.flags.revoked = true;
++  assert.equal((await supertest(app.getHttpServer()).get(base).set("Authorization", "Bearer valid")).status, 401);
++  fixture = entryFixture(); fixture.flags.fail = true;
++  const failed = await supertest(app.getHttpServer()).patch(base).set("Authorization", "Bearer valid").set("Idempotency-Key", id(20)).send({ enabled: false });
++  assert.equal(failed.status, 500); assert.equal(failed.body.code, "INTERNAL_SERVER_ERROR");
++  assert.equal(failed.headers["cache-control"], "no-store"); assert.doesNotMatch(JSON.stringify(failed.body), /PRIVATE|audit_logs|participations/);
++  assert.deepEqual(fixture.state.people.map(p => p.status), ["waiting", "waiting"]);
++});
+diff --git a/backend/test/unit/staff-entry.test.ts b/backend/test/unit/staff-entry.test.ts
+new file mode 100644
+index 0000000..b63f6be
+--- /dev/null
++++ b/backend/test/unit/staff-entry.test.ts
+@@ -0,0 +1,103 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { ProblemException } from "../../src/common/errors/problem.exception";
++import { entryFixture, actor, intent, id, deferred } from "./helpers/staff-entry-fixture";
++
++const code = (expected: string) => (error: unknown) => error instanceof ProblemException &&
++  (error.getResponse() as { code: string }).code === expected;
++test("entrada Staff lê snapshot autorizado, FIFO e identificação mínima, sem escrita", async () => {
++  const f = entryFixture(), result = await f.service.read(actor);
++  assert.equal(result.waitingCount, 2); assert.equal(result.externalQueueEnabled, true);
++  assert.deepEqual(result.waiting, [{ participationId: id(4), displayName: "Ana", position: 1 }, { participationId: id(5), displayName: "Bia", position: 2 }]);
++  assert.equal(f.queries[0].text, "begin isolation level repeatable read read only");
++  assert.equal(f.queries.some(q => /\b(insert|update|delete)\b/i.test(q.text)), false);
++  const grant = f.queries.find(q => q.text.includes('AS "observedAt"'))!;
++  assert.ok(grant.params.includes(actor.eventId) && grant.params.includes(actor.userId));
++  assert.match(grant.text, /r.role='staff'.*r.event_id=e.id.*r.revoked_at IS NULL/s);
++  assert.doesNotMatch(JSON.stringify(result), /email|password|userId|externalQueueOrder/);
++});
++test("entrada vazia e fechamento continuam consultáveis sem autorizar mutação", async () => {
++  const f = entryFixture(); f.state.people = []; f.flags.manage = false;
++  const result = await f.service.read(actor); assert.equal(result.waitingCount, 0); assert.equal(result.canManage, false);
++});
++test("confirma somente o primeiro e persiste efeito, auditoria e idempotência no mesmo tx", async () => {
++  const f = entryFixture(); const input = { ...intent(), participationId: id(4) };
++  const result = await f.service.confirm(input); assert.equal(result.participation.status, "active");
++  assert.deepEqual(f.state.people.map(p => p.status), ["active", "waiting"]);
++  const sql = f.queries.map(q => q.text).join("\n");
++  assert.match(sql, /FROM events WHERE.*FOR UPDATE/);
++  assert.match(sql, /ORDER BY external_queue_order, id LIMIT 1 FOR UPDATE/);
++  assert.match(sql, /closure_requested_at IS NULL/); assert.match(sql, /d.at<e.official_ends_at/);
++  assert.equal(f.queries.at(-1)?.text, "commit");
++  const before = f.queries.filter(q => q.text.includes("UPDATE participations p SET")).length;
++  assert.deepEqual(await f.service.confirm(input), result);
++  assert.equal(f.queries.filter(q => q.text.includes("UPDATE participations p SET")).length, before);
++  assert.equal(f.queries.at(-1)?.text, "rollback");
++});
++test("segundo participante e alvo de outro evento não furam FIFO nem deixam reserva", async () => {
++  for (const participationId of [id(5), id(99)]) {
++    const f = entryFixture(); await assert.rejects(f.service.confirm({ ...intent(), participationId }), code("ENTRY_NOT_FIRST"));
++    assert.deepEqual(f.state.people.map(p => p.status), ["waiting", "waiting"]); assert.equal(f.state.receipts.size, 0);
++  }
++});
++test("Staff desativa liberando todos atomicamente e reativa sem recolocar ativos", async () => {
++  const f = entryFixture();
++  const off = await f.service.setEnabled({ ...intent(), enabled: false }); assert.equal(off.releasedCount, 2);
++  assert.deepEqual(f.state.people.map(p => p.status), ["active", "active"]);
++  const on = await f.service.setEnabled({ ...intent(21), enabled: true }); assert.equal(on.releasedCount, 0);
++  assert.equal(f.state.enabled, true); assert.deepEqual(f.state.people.map(p => p.status), ["active", "active"]);
++  assert.deepEqual(await f.service.setEnabled({ ...intent(), enabled: false }), off);
++  assert.equal(f.state.enabled, true, "replay antigo não desfaz a reativação posterior");
++  assert.equal(f.queries.some(q => /update.*(queue_entries|service_sessions)/i.test(q.text)), false);
++});
++for (const flags of [{ staff: false }, { verified: false }, { revoked: true }, { expired: true }, { active: false },
++  { admin: true, staff: false, secondFactor: true }, { admin: true, secondFactor: false }]) {
++  test(`autorização atual protege consulta e mutações: ${JSON.stringify(flags)}`, async () => {
++    for (const op of ["read", "confirm", "toggle"]) {
++      const f = entryFixture(); Object.assign(f.flags, flags);
++      await assert.rejects(op === "read" ? f.service.read(actor) : op === "confirm"
++        ? f.service.confirm({ ...intent(), participationId: id(4) }) : f.service.setEnabled({ ...intent(), enabled: false }));
++      assert.equal(f.queries.some(q => q.text.includes("UPDATE participations p SET") || q.text.startsWith('update "events"')), false);
++    }
++  });
++}
++test("evento ausente e não autorizado retornam 404 sem consulta nominal", async () => {
++  for (const flags of [{ exists: false }, { staff: false }]) {
++    const f = entryFixture(); Object.assign(f.flags, flags);
++    await assert.rejects(f.service.read(actor), code("RESOURCE_NOT_FOUND"));
++    assert.equal(f.queries.some(q => q.text.includes("row_number() OVER")), false);
++  }
++});
++test("cortes D07/D09, evento não pronto e fila desligada não ativam participação", async () => {
++  for (const enabled of [true, false]) {
++    const f = entryFixture(); f.state.enabled = enabled; f.flags.manage = false;
++    await assert.rejects(f.service.confirm({ ...intent(), participationId: id(4) }), code("EVENT_ENTRY_UNAVAILABLE"));
++    await assert.rejects(f.service.setEnabled({ ...intent(21), enabled: !enabled }), code("EVENT_ENTRY_UNAVAILABLE"));
++    assert.equal(f.state.enabled, enabled); assert.equal(f.state.receipts.size, 0);
++  }
++});
++test("falha após alteração reverte participação, alternância e reserva", async () => {
++  for (const toggle of [true, false]) {
++    const f = entryFixture(); f.flags.fail = true;
++    await assert.rejects(toggle ? f.service.setEnabled({ ...intent(), enabled: false }) : f.service.confirm({ ...intent(), participationId: id(4) }));
++    assert.equal(f.state.enabled, true); assert.deepEqual(f.state.people.map(p => p.status), ["waiting", "waiting"]);
++    assert.equal(f.state.receipts.size, 0); assert.equal(f.queries.at(-1)?.text, "rollback");
++  }
++});
++test("chave de alternância reutilizada para intenção diferente não altera o evento", async () => {
++  const f = entryFixture(); await f.service.setEnabled({ ...intent(), enabled: false });
++  await assert.rejects(f.service.setEnabled({ ...intent(), enabled: true }), code("IDEMPOTENCY_REQUEST_CONFLICT"));
++  assert.equal(f.state.enabled, false);
++});
++test("confirmações concorrentes do mesmo alvo não ativam o próximo; liberação aguarda evento", async () => {
++  const f = entryFixture(), entered = deferred(), release = deferred();
++  f.flags.hold = { entered: entered.resolve, until: release.promise };
++  const first = f.service.confirm({ ...intent(), participationId: id(4) }); await entered.promise;
++  const second = f.service.confirm({ ...intent(21), participationId: id(4) });
++  const refused = assert.rejects(second, code("ENTRY_NOT_FIRST"));
++  const bulk = f.service.setEnabled({ ...intent(22), enabled: false });
++  assert.equal(f.state.enabled, true, "alternância não ultrapassa a confirmação pendente");
++  release.resolve(); await first; await refused;
++  const result = await bulk; assert.equal(result.releasedCount, 1);
++  assert.deepEqual(f.state.people.map(p => p.status), ["active", "active"]);
++});
+diff --git a/docs/STAFF_ENTRY_CONTROL_IMPLEMENTACAO.md b/docs/STAFF_ENTRY_CONTROL_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..cd3126d
+--- /dev/null
++++ b/docs/STAFF_ENTRY_CONTROL_IMPLEMENTACAO.md
+@@ -0,0 +1,104 @@
++# Controle de Entrada Staff — implementação
++
++## Escopo e estado da entrega
++
++Implementação de backend e aplicativo para consultar a fila externa, confirmar individualmente o primeiro participante e desativar/reativar a fila do evento. A autorização explícita desta tarefa amplia essas duas alternâncias para Staff com concessão vigente no evento; o endpoint Admin, sua exigência de TOTP e justificativa continuam com o contrato anterior. Esta entrega não modifica a tela de estações, operações de experiências, schema, migrations, snapshots, dados ou `.env`.
++
++Foram feitas inspeções estáticas do planejamento, arquitetura, contratos e alterações. **Testes, build e typechecks não foram executados nesta tarefa.** Não houve conexão PostgreSQL/Neon ou operação real. O código está preparado para revisão de segurança e validação por Luna Medium; não constitui homologação operacional.
++
++## Contratos HTTP
++
++Todas as rotas começam em `/api/v1/staff/events/:eventId/entry-control`, usam Bearer e `Cache-Control: no-store`, inclusive nos erros. O principal autenticado fornece conta e sessão; parâmetros do cliente não as substituem. UUIDs são validados/normalizados; corpos extras são recusados. Admin sem concessão Staff não obtém acesso; conta Admin também Staff conserva a exigência TOTP do guard e da revalidação transacional.
++
++### GET `/`
++
++Resposta 200:
++
++```json
++{
++  "eventId": "UUID do evento",
++  "externalQueueEnabled": true,
++  "observedAt": "2026-11-10T15:00:00.000Z",
++  "canManage": true,
++  "waitingCount": 1,
++  "waiting": [{ "participationId": "UUID da participação", "displayName": "Nome da conta", "position": 1 }]
++}
++```
++
++O nome e o identificador da participação são a identificação mínima autorizada nesta operação presencial. Não são retornados e-mail, UUID de conta, nascimento, questionário, códigos de acesso, credenciais ou histórico de experiências. A ordenação e as posições são calculadas no servidor por `external_queue_order, id`; BIGINT não é convertido para Number. O contrato retorna a lista completa, sem paginação. `canManage` vem da disponibilidade existente do evento; a lista é observacional, não autorização futura. A leitura usa `REPEATABLE READ READ ONLY` e revalida sessão, conta ativa, e-mail verificado e concessão Staff no mesmo snapshot. Uma revogação posterior ao snapshot pode não ser observada por uma leitura já iniciada.
++
++### POST `/participants/:participationId/confirm`
++
++Corpo `{}` ou ausente; `Idempotency-Key` obrigatório. Resposta 200:
++
++```json
++{ "eventId": "UUID do evento", "participation": {
++  "id": "UUID da participação", "status": "active", "arenaEnteredAt": "2026-11-10T15:00:00.000Z"
++} }
++```
++
++O ID representa o primeiro participante apresentado, não permite escolher alguém fora da ordem. O servidor obtém lock exclusivo do evento e do primeiro `waiting`, sem `SKIP LOCKED`, verifica o alvo e muda somente essa participação para `active`, com horário PostgreSQL. Confirmação repetida com outra chave não ativa a próxima pessoa. A chave original possui replay do resultado registrado; o aplicativo não o tenta automaticamente após resultado incerto.
++
++### PATCH `/`
++
++Corpo estrito `{ "enabled": false }` ou `{ "enabled": true }`; `Idempotency-Key` obrigatório. Resposta 200: `{ eventId, externalQueueEnabled, releasedCount, changedAt? }`. `changedAt` está ausente em no-op; neste caso `releasedCount` é zero. Reativação sempre libera zero pessoas. Um replay representa o resultado histórico original e não a situação atual do evento; a interface consulta o GET após a operação.
++
++Reutiliza `ParticipationsService.setExternalQueueEnabledWithTx` na mesma transação do chamador Staff. Desativar libera todos os `waiting` atomicamente; reativar muda somente a configuração para futuras participações. Não altera `queue_entries`, estações ou `service_sessions` e não encerra o evento.
++
++### Erros públicos
++
++- 400 `VALIDATION_ERROR`: UUID, corpo ou chave inválidos.
++- 401: sessão inválida, expirada/revogada, conta inativa ou TOTP exigido pelo contrato de autenticação.
++- 404 `RESOURCE_NOT_FOUND`: evento ausente ou sem concessão Staff; recusa neutra.
++- 409 `ENTRY_NOT_FIRST`: alvo não é mais o primeiro aguardando; exige atualização e nova decisão humana.
++- 409 `EVENT_ENTRY_UNAVAILABLE`: evento/fila não permitem a alteração.
++- 409 `IDEMPOTENCY_REQUEST_CONFLICT` ou `IDEMPOTENCY_IN_PROGRESS`: intenção conflitante/em processamento; não libera reenvio.
++- 500 `INTERNAL_SERVER_ERROR`: falha interna, sem SQL, marcador privado ou dados da persistência.
++
++## Transações, autorização e D06/D07/D09
++
++As mutações usam `READ COMMITTED`, ordem evento -> participações -> conta/concessões/sessão e revalidação da sessão após reserva e antes do retorno/commit. Reutilizam `revalidateMutationSession`, o helper de reserva/conclusão e o TTL Staff existente. A confirmação usa namespace `staff_confirm_event_entry` e fingerprint evento/participação. A alternância usa `staff_set_external_queue` e fingerprint evento/estado. Não compartilham chaves com o endpoint Admin ou com operações de experiências.
++
++Reserva, efeito, auditoria e resultado terminal pertencem à mesma transação; falhas provocam rollback. A alternância reutiliza a exclusão do evento e dos `waiting` da E05. Novos ingressos, fechamentos e outras operações que respeitam o lock de evento não ultrapassam essas decisões. O evento exclusivo serializa as ações de entrada entre Staffs. A confirmação adicionalmente confere corte e configuração no UPDATE decisivo, com `clock_timestamp()`. A liberação segue as guardas existentes da E05: prontidão, início, corte oficial e fechamento administrativo. A margem residual não reabre a entrada externa. No-op da alternância mantém o comportamento existente, inclusive depois do corte; não reabre nem libera ninguém.
++
++Não há garantia de commit em milissegundo exato; os limites e a ordem real de locks ainda exigem ensaio PostgreSQL específico. A confirmação não pula registros inconsistentes nem cria fila por experiência. Auditoria registra ator, evento, ação e ID da participação ou contagem/estado da alternância, sem copiar nomes. O schema existente comporta tudo; nenhuma alteração de banco foi criada.
++
++## Aplicativo e proteção contra resultado incerto
++
++`StaffEntryControlRealScreen` substitui a mensagem provisória dentro do painel existente. Mantém a identidade visual do painel, ordem FIFO, contagem, botões de ativação/desativação, confirmação explícita e retorno sem perder o evento. Somente o primeiro participante recebe o acionador individual. Carregamento, vazio, indisponibilidade temporal, rede, 401/403/404, falha de contrato e atualização manual têm estados próprios. As consultas passam pelo cliente autenticado; o eventId vem da seleção Staff. Mudanças de conta, sessão, evento, epoch ou revisão descartam respostas antigas e fecham a confirmação. Callbacks antigos não executam a ação após logout/revalidação.
++
++As intenções de entrada têm adaptador dedicado, sem alterar a infraestrutura de estações já validada. Um slot SecureStore por conta persiste `reserved -> dispatching -> terminal -> acknowledged`; `reserved -> cancelled` só é permitido antes de envio comprovado. Reserva e despacho são gravados antes do POST/PATCH. Não há exclusão do slot: reconhecer um resultado terminal grava a nova fase no mesmo registro, comparando chave e escopo sob serialização local. Um reconhecimento antigo não modifica uma intenção posterior. As informações persistidas são IDs, tipo da operação, estado desejado e resultado mínimo; nomes e credenciais não são persistidos.
++
++Falha de gravação antes/depois da efetivação é reavaliada por leitura; registros inválidos ou ilegíveis bloqueiam novas mutações. Resultado definitivo é persistido antes de liberar uma ação futura e exige reconhecimento humano (`Entendi`). Falha ao persistir esse resultado mantém o bloqueio e conserva a confirmação conhecida em memória enquanto o contexto original permanecer válido. O reconhecimento local não consulta nem prova o backend. Uma intenção pendente de outra sessão/evento não é excluída nem reconhecida na sessão atual.
++
++Timeout, rede, HTTP 5xx, resposta inválida e conflitos de idempotência mantêm `dispatching`; o aplicativo **não repete automaticamente** POST/PATCH, nem habilita uma nova mutação por observar uma lista diferente. As mutações desativam o retry automático de 401 do cliente; o GET posterior usa a renovação/invalidação existente. A serialização do adaptador vale somente para o mesmo runtime; autorizações e concorrência global permanecem no backend. Na web, as consultas funcionam, mas mutações ficam bloqueadas sem armazenamento durável apropriado.
++
++## Testes preparados (não executados)
++
++- `backend/test/unit/staff-entry.test.ts`: consulta mínima/read-only, autorização e recusa neutra, FIFO, idempotência/replay sem desfazer estado posterior, D06 e corte de ingresso, rollback e concorrência simulada entre confirmação/alternância.
++- `backend/test/unit/helpers/staff-entry-fixture.ts`: pool simulado com transações, reserva e exclusão solicitada pelo SQL. Essa simulação não comprova locks, isolamento ou deadlines físicos do PostgreSQL.
++- `backend/test/unit/staff-entry-http.test.ts`: guard, controller e serviço reais sobre persistência simulada; Bearer, identidade, UUID, corpos/chave, 200/400/401/404/409, 500 seguro e no-store.
++- `app/tests/staffEntryControl.test.cjs`: validação de contrato, seleção do primeiro, atualização após operação, alternância, timeout e recriação do adaptador, falhas antes/depois de gravações, recibo posterior, exclusão de contexto, concorrência local e respostas fora de ordem.
++- `app/tests/roleRoutingIntegration.test.cjs`: fluxo da tela real com gerenciador de autenticação, provedores, cliente HTTP e roteador; confirmação/alternância/retorno, callback após logout e 401 terminal. As dependências isoladas de `qa/regression` continuam necessárias; skips são pendências.
++- `app/tests/staffDemoState.test.cjs`: classificação explícita da nova tela como real; os 17 módulos demonstrativos e a fixture permanecem isolados.
++
++## Validação reservada ao Luna Medium
++
++Inspecionar scripts, confirmar branch/ambiente e preservar alterações locais. Sem banco e sem carregar `.env`, na pasta `backend`, configurar `NODE_ENV=test` e executar primeiro `node_modules/.bin/tsx --test test/unit/staff-entry.test.ts test/unit/staff-entry-http.test.ts`; depois a suíte unitária, com `EVALUATION_IDEMPOTENCY_TTL_SECONDS=60` somente no processo de teste, conforme a campanha anterior. Se `tsx` falhar em `uv_os_get_passwd/ENOMEM`, utilizar a compilação temporária já aprovada do `tsconfig.test.json` e Node com `NODE_PATH` apontando às dependências existentes, preservando `backend/dist`.
++
++No `app`, com `NODE_ENV=test`: `node --test tests/staffEntryControl.test.cjs tests/roleRoutingIntegration.test.cjs tests/staffDemoState.test.cjs tests/staffDashboard.test.cjs tests/authNavigation.test.cjs tests/staffNavigation.test.cjs tests/staffRealNavigation.test.cjs`. Se os focados passarem, executar as suítes unitárias completas do backend e aplicativo, typechecks de produção/testes do backend e verificações Git. Nenhum desses comandos foi executado nesta implementação.
++
++## Bloqueios e limites restantes
++
++1. Exige revisão de segurança e execução dos testes preparados. Não houve homologação HTTP ou Expo Go desta entrega.
++2. Um `dispatching` incerto continua bloqueado inclusive após reinício/novo login. Não existe nesta entrega endpoint histórico com prova de origem nem procedimento que autorize liberação automática. Verificação manual pelo responsável e evolução contratual de recuperação permanecem necessárias; atualizar a lista não resolve essa dependência.
++3. Namespaces de entrada usam a idempotência legada. Não recebem `verified_v1` e não são protegidos pelo trigger preparatório específico das três operações de experiências. Não há promessa de retenção durável ou coordenação de intenções entre dispositivos. A proteção local não sobrevive à perda/exclusão do SecureStore.
++4. Concorrência real (confirmação contra confirmação, desativação, cancelamento do titular, novo ingresso, revogação e fechamento D07/D09), locks, rollback e bordas de relógio exigem campanha PostgreSQL dedicada e autorizada. Nenhum teste PostgreSQL foi executado ou autorizado aqui.
++5. A expansão `0007` já exigida pelo schema atual da branch continua sendo pré-condição de implantação em outros bancos; esta tarefa não aplica migrations nem autoriza Neon.
++6. A lista nominal não é paginada; volume, pessoas com nomes iguais, conferência presencial e conectividade precisam de homologação. O nome da conta não constitui verificação documental de identidade. Não há polling.
++
++## Arquivos e evidência
++
++Produção: `backend/src/participations/staff-entry.service.ts`, `staff-entry.controller.ts`, `participations.module.ts`; `app/services/staffEntryService.js`, `staffEntryIntentStorage.js`; `app/screens/staff/StaffEntryControlRealScreen.js`, `StaffEventsNavigator.js`.
++
++Testes: os seis arquivos relacionados acima (incluindo o helper) e a atualização de navegação/classificação. Este relatório e `qa-evidence/STAFF_ENTRY_CONTROL-changes.diff` acompanham a entrega. A evidência deve representar apenas esta tarefa, incluir novos arquivos e ter sua aplicação reversa conferida sem alterar arquivos. Os nomes, UUIDs e credenciais de testes são sintéticos.

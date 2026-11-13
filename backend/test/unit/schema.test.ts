@@ -3,17 +3,17 @@ import { test } from "node:test";
 import { getTableName } from "drizzle-orm";
 import * as schema from "../../src/database/schema";
 
-test("schema exporta as 24 tabelas do dicionário v0.6.12 uma única vez", () => {
+test("schema exporta as tabelas existentes e a preparação de marcos uma única vez", () => {
   const tables = Object.values(schema);
   const names = tables.map((table) => getTableName(table));
-  assert.equal(names.length, 24);
-  assert.equal(new Set(names).size, 24);
+  assert.equal(names.length, 26);
+  assert.equal(new Set(names).size, 26);
   assert.equal(getTableName(schema.adminTwoFactorChallenges), "admin_2fa_challenges");
   assert.deepEqual(new Set(names), new Set([
     "users", "questionnaire_versions", "profiles", "games", "user_games",
     "sessions", "refresh_tokens", "password_reset_tokens", "email_verification_tokens",
     "user_roles", "user_totp_credentials", "user_backup_codes", "totp_activation_tokens", "audit_logs",
     "events", "experiences", "stations", "participations", "queue_entries", "service_sessions",
-    "evaluations", "participation_profile_snapshots", "idempotency_operations", "admin_2fa_challenges",
+    "evaluations", "participation_profile_snapshots", "idempotency_operations", "admin_2fa_challenges", "staff_idempotency_epochs", "external_entry_calls",
   ]));
 });

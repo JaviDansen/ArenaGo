@@ -139,20 +139,40 @@ export class ParticipationsService {
       if (typeof decisionAtMs !== "number" || !Number.isFinite(decisionAtMs)) {
         throw new Error("PostgreSQL não retornou o instante decisivo da alteração da fila externa.");
       }
-      const changedAt = new Date(decisionAtMs);
-      if (!Number.isFinite(changedAt.getTime())) {
+      const observedAt = new Date(decisionAtMs);
+      if (!Number.isFinite(observedAt.getTime())) {
         throw new Error("PostgreSQL retornou um instante da fila externa fora do intervalo de Date.");
       }
 
       // Reutiliza as guardas de E01/E03: prontidão, início, corte oficial e fechamento Admin.
-      const availability = await this.eventsService.evaluateEventAvailabilityById(eventId, changedAt, tx);
+      const availability = await this.eventsService.evaluateEventAvailabilityById(eventId, observedAt, tx);
       if (!availability.eventExists || !availability.eventAcceptingNewEntries) {
         return { kind: "blocked", availability };
       }
 
-      await tx.update(schema.events)
-        .set({ externalQueueEnabled: enabled, updatedAt: changedAt })
-        .where(eq(schema.events.id, eventId));
+      // Revalida a janela no UPDATE que altera o evento, após as consultas de prontidão.
+      // A mesma decisão, em milissegundos, é usada pelo evento e pela liberação coletiva.
+      const decision = (await tx.execute<{ decisionAtMs: number; changed: boolean }>(sql`
+        WITH decision AS MATERIALIZED (SELECT clock_timestamp() AS at), changed AS (
+          UPDATE events e SET external_queue_enabled=${enabled}, updated_at=date_trunc('milliseconds', d.at)
+          FROM decision d WHERE e.id=${eventId}
+            AND e.status NOT IN ('closing','closed') AND e.starts_at <= d.at AND d.at < e.official_ends_at
+            AND (e.closure_requested_at IS NULL OR d.at < e.closure_requested_at)
+          RETURNING e.id
+        ) SELECT (EXTRACT(EPOCH FROM d.at)*1000)::double precision AS "decisionAtMs",
+          EXISTS(SELECT 1 FROM changed) AS changed FROM decision d`)).rows[0];
+      if (!decision || typeof decision.decisionAtMs !== 'number' || !Number.isFinite(decision.decisionAtMs) ||
+          typeof decision.changed !== 'boolean') throw new Error('PostgreSQL não retornou a decisão da fila externa.');
+      const changedAt = new Date(decision.decisionAtMs);
+      if (!Number.isFinite(changedAt.getTime())) throw new Error('PostgreSQL retornou um instante decisivo inválido.');
+      if (!decision.changed) {
+        // Arredonda para cima apenas na classificação da recusa: Date perde microssegundos.
+        const blockedAt = new Date(Math.ceil(decision.decisionAtMs));
+        const current = await this.eventsService.evaluateEventAvailabilityById(eventId, blockedAt, tx);
+        if (current.eventExists && current.eventAcceptingNewEntries)
+          throw new Error('Alteração da fila externa recusada com janela inconsistente.');
+        return { kind: 'blocked', availability: current };
+      }
 
       let releasedCount = 0;
       if (!enabled) {

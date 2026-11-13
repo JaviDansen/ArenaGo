@@ -7,8 +7,16 @@ let authState;
 function StackNavigator() {}
 function StackScreen() {}
 function ImportedScreen() {}
-function StaffDemoNavigator() {}
 function AdminDemoNavigator() {}
+
+const gateExports = loadModule('screens/auth/AuthSessionGate.js', (name) => {
+  if (name === 'react') return require('react');
+  if (name === 'react-native') return { StyleSheet: { create: (styles) => styles } };
+  if (name === 'expo-status-bar') return { StatusBar() {} };
+  if (name === 'react-native-safe-area-context') return { SafeAreaView() {} };
+  if (name === '../../context/AuthContext') return { AuthProvider() {}, useAuth() {} };
+  return require(name);
+}).exports;
 
 const appExports = loadModule('App.js', (name) => {
   if (name === 'react') return require('react');
@@ -24,10 +32,9 @@ const appExports = loadModule('App.js', (name) => {
     return {
       __esModule: true,
       default() {},
-      resolveInitialRouteForAuthState: (state) => (state?.isAuthenticated ? 'MainTabs' : 'Welcome'),
+      resolveInitialRouteForAuthState: gateExports.resolveInitialRouteForAuthState,
     };
   }
-  if (name === './screens/staff/StaffDemoNavigator') return { __esModule: true, default: StaffDemoNavigator };
   if (name === './screens/admin/AdminDemoNavigator') return { __esModule: true, default: AdminDemoNavigator };
   return { __esModule: true, default: ImportedScreen };
 }).exports;
@@ -46,24 +53,32 @@ function routes(state) {
 }
 
 test('rota AdminDemo existe só no app autenticado e é carregada sob demanda', () => {
-  const signedIn = routes({ isAuthenticated: true, user: { id: 'u-1', hasCompletedQuestionnaire: true } });
+  const signedIn = routes({ isAuthenticated: true, user: { id: 'u-1', roles: ['participante'], hasCompletedQuestionnaire: true } });
   const admin = signedIn.find((route) => route.name === 'AdminDemo');
   assert.ok(admin, 'AdminDemo disponível');
   assert.equal(admin.component, undefined, 'sem import no topo do App.js');
   assert.equal(admin.getComponent(), AdminDemoNavigator);
   for (const name of ['MainTabs', 'EventEntry', 'EventConfirmation', 'ParticipationDetails', 'Evaluation',
-    'StaffDemo', 'ProfileQuestionnaire', 'RealEvaluation']) {
+    'ProfileQuestionnaire', 'RealEvaluation']) {
     assert.ok(signedIn.some((route) => route.name === name), `${name} preservada`);
   }
+  assert.ok(!signedIn.some((route) => route.name === 'StaffDemo'), 'participante não recebe StaffDemo');
   assert.equal(signedIn[0].name, 'MainTabs', 'abas continuam como tela inicial');
 
-  const pending = routes({ isAuthenticated: true, user: { id: 'u-2', hasCompletedQuestionnaire: false } });
+  const pending = routes({ isAuthenticated: true, user: { id: 'u-2', roles: ['participante'], hasCompletedQuestionnaire: false } });
   assert.ok(!pending.some((route) => route.name === 'AdminDemo'), 'questionário pendente não abre Admin');
   const signedOut = routes({ isAuthenticated: false });
   assert.ok(!signedOut.some((route) => route.name === 'AdminDemo'), 'acesso público protegido');
+
+  for (const roles of [['admin'], ['staff'], ['admin', 'staff']]) {
+    const privileged = routes({ isAuthenticated: true,
+      user: { id: 'u-3', roles, hasCompletedQuestionnaire: true } });
+    assert.ok(!privileged.some((route) => route.name === 'AdminDemo'), 'papéis reais não entram na demonstração');
+    assert.ok(!privileged.some((route) => route.name === 'MainTabs'), 'papéis reais não entram na pilha Participante');
+  }
 });
 
-test('Início abre a Área Admin (demonstração) sem afetar Staff e entrada em evento', () => {
+test('Início abre a demonstração Admin e a entrada em evento sem oferecer StaffDemo', () => {
   const h = createHarness('screens/home/HomeScreen.js', {
     authContext: { user: { id: 'u-1', hasCompletedQuestionnaire: true } },
   });
@@ -72,10 +87,10 @@ test('Início abre a Área Admin (demonstração) sem afetar Staff e entrada em 
   for (const testID of ['home-background', 'home-event-entry-card', 'home-empty-participation-card']) {
     assert.ok(h.nodes.some((node) => node.props.testID === testID), `${testID} preservado`);
   }
+  assert.ok(!h.nodes.some((node) => node.type === 'Pressable' && /Staff/.test(textOf(node))));
   h.press('Área Admin (demonstração)');
-  h.press('Área do Staff (demonstração)');
   h.press('Entrar em um evento');
-  assert.deepEqual(h.navigationCalls.map((call) => call.name), ['AdminDemo', 'StaffDemo', 'EventEntry']);
+  assert.deepEqual(h.navigationCalls.map((call) => call.name), ['AdminDemo', 'EventEntry']);
 });
 
 test('atalho Admin respeita os estados de carregamento e erro da Home atual', () => {

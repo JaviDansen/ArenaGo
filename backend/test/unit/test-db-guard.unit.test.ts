@@ -1,7 +1,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { assertSafeTestDatabase } from "../integration/test-db-guard";
+import { assertSafeStaffEntryCallsSchemaDatabase, assertSafeTestDatabase } from "../integration/test-db-guard";
 
 test("Segurança de banco de dados para testes de integração", async (t) => {
   await t.test("Rejeita DATABASE_URL indefinido ou vazio", () => {
@@ -200,14 +200,29 @@ test("Segurança de banco de dados para testes de integração", async (t) => {
     assert.equal(assertSafeTestDatabase(url), url);
   });
 
-  await t.test("Bloqueia arenago_events_test na porta 5432", () => {
+  await t.test("Bloqueia bancos locais de eventos na porta 5432", () => {
     assert.throws(
       () =>
         assertSafeTestDatabase(
           "postgresql://arenago:senha@localhost:5432/arenago_events_test",
         ),
-      /arenago_events_test exige a porta 55432/,
+      /Bancos locais de eventos exigem a porta 55432/,
     );
+    assert.throws(
+      () =>
+        assertSafeTestDatabase(
+          "postgresql://arenago:senha@localhost:5432/arenago_staff_homolog_20261111",
+        ),
+      /Bancos locais de eventos exigem a porta 55432/,
+    );
+  });
+
+  await t.test("Nao libera o banco Staff dedicado para os demais testes de integracao", () => {
+    const url = "postgresql://arenago:senha@127.0.0.1:55432/arenago_staff_homolog_20261111";
+    assert.throws(() => assertSafeTestDatabase(url), /não está na lista/);
+    assert.equal(assertSafeStaffEntryCallsSchemaDatabase(url), url);
+    assert.throws(() => assertSafeStaffEntryCallsSchemaDatabase(
+      "postgresql://arenago:senha@127.0.0.1:5432/arenago_staff_homolog_20261111"), /Bancos locais de eventos exigem a porta 55432/);
   });
 
   await t.test("Bloqueia arenago_events_test em host remoto", () => {

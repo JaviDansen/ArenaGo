@@ -1,0 +1,509 @@
+diff --git a/backend/src/events/events.module.ts b/backend/src/events/events.module.ts
+index 9e6caa1..0fd47a5 100644
+--- a/backend/src/events/events.module.ts
++++ b/backend/src/events/events.module.ts
+@@ -16,6 +16,8 @@ import { ParticipantQueueIdempotencyPolicy } from "./participant-queue-idempoten
+ import { ExperiencesController } from "./experiences.controller";
+ import { StaffQueriesController } from "./staff-queries.controller";
+ import { StaffQueriesService } from "./staff-queries.service";
++import { StaffHistoryController, StaffHistoryNoStoreGuard } from "./staff-history.controller";
++import { StaffHistoryService } from "./staff-history.service";
+ import { StationAvailabilityController } from "./station-availability.controller";
+ import { StationAvailabilityService } from "./station-availability.service";
+ import { EventClosureService } from "./event-closure.service";
+@@ -34,8 +36,8 @@ import { ExperienceQueueControlService } from "./experience-queue-control.servic
+ /** Agrupa os serviços de Events e reutiliza o acesso PostgreSQL compartilhado. */
+ @Module({
+   imports: [DatabaseModule, AuthModule],
+-  controllers: [EvaluationWriteController, EvaluationReadController, ParticipationLifecycleController, StaffOperationsController, StaffQueriesController, ExperienceQueueControlController, StationAvailabilityController, ParticipantQueueController, ExperiencesController],
+-  providers: [EventsService, StaffQueriesService, StationAvailabilityService, ExperienceQueueControlService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, StaffIdempotencyPolicy, ParticipantQueueIdempotencyPolicy, EventClosureService, EventClosurePolicy, EventClosureScheduler, EvaluationReadService, EvaluationWriteService, EvaluationWriteIdempotencyPolicy, ParticipationLifecycleService, ParticipationQueryService],
++  controllers: [EvaluationWriteController, EvaluationReadController, ParticipationLifecycleController, StaffOperationsController, StaffQueriesController, StaffHistoryController, ExperienceQueueControlController, StationAvailabilityController, ParticipantQueueController, ExperiencesController],
++  providers: [EventsService, StaffQueriesService, StaffHistoryService, StaffHistoryNoStoreGuard, StationAvailabilityService, ExperienceQueueControlService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, StaffIdempotencyPolicy, ParticipantQueueIdempotencyPolicy, EventClosureService, EventClosurePolicy, EventClosureScheduler, EvaluationReadService, EvaluationWriteService, EvaluationWriteIdempotencyPolicy, ParticipationLifecycleService, ParticipationQueryService],
+   exports: [EventsService, StaffQueriesService, StationAvailabilityService, ExperienceQueueControlService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, EventClosureService, EvaluationReadService, EvaluationWriteService, ParticipationLifecycleService, ParticipationQueryService],
+ })
+ export class EventsModule {}
+diff --git a/backend/src/events/staff-history.controller.ts b/backend/src/events/staff-history.controller.ts
+new file mode 100644
+index 0000000..91c1a7d
+--- /dev/null
++++ b/backend/src/events/staff-history.controller.ts
+@@ -0,0 +1,53 @@
++import { Controller, Get, Header, HttpStatus, Inject, Injectable, Param, Req, UseGuards, type CanActivate, type ExecutionContext } from "@nestjs/common";
++import { CurrentUser } from "../auth/current-user.decorator";
++import type { AuthenticatedPrincipal } from "../auth/auth.types";
++import { SessionAuthGuard, type AuthenticatedRequest } from "../auth/session-auth.guard";
++import { ProblemException } from "../common/errors/problem.exception";
++import { validateOperationIdempotencyKey } from "../common/http/operation-validation";
++import { callNextParamsSchema, serviceSessionParamsSchema, validateStaffParams } from "./staff-operation.dto";
++import { StaffHistoryService, type HistoricalScope } from "./staff-history.service";
++
++@Injectable()
++export class StaffHistoryNoStoreGuard implements CanActivate {
++  canActivate(context: ExecutionContext): boolean {
++    context.switchToHttp().getResponse<{ setHeader(name: string, value: string): void }>().setHeader("Cache-Control", "no-store");
++    return true;
++  }
++}
++
++@Controller("staff/events")
++@UseGuards(StaffHistoryNoStoreGuard, SessionAuthGuard)
++export class StaffHistoryController {
++  constructor(@Inject(StaffHistoryService) private readonly history: StaffHistoryService) {}
++
++  @Get(":eventId/experiences/:experienceId/stations/:stationId/history/call-next")
++  @Header("Cache-Control", "no-store")
++  async call(@CurrentUser() principal: AuthenticatedPrincipal, @Param() params: unknown, @Req() request: AuthenticatedRequest) {
++    const ids = validateStaffParams(callNextParamsSchema, params);
++    return this.lookup(principal, request, { kind: "call-next", ...ids });
++  }
++
++  @Get(":eventId/service-sessions/:serviceSessionId/history/complete")
++  @Header("Cache-Control", "no-store")
++  async complete(@CurrentUser() principal: AuthenticatedPrincipal, @Param() params: unknown, @Req() request: AuthenticatedRequest) {
++    const ids = validateStaffParams(serviceSessionParamsSchema, params);
++    return this.lookup(principal, request, { kind: "complete", ...ids });
++  }
++
++  @Get(":eventId/service-sessions/:serviceSessionId/history/absent")
++  @Header("Cache-Control", "no-store")
++  async absent(@CurrentUser() principal: AuthenticatedPrincipal, @Param() params: unknown, @Req() request: AuthenticatedRequest) {
++    const ids = validateStaffParams(serviceSessionParamsSchema, params);
++    return this.lookup(principal, request, { kind: "absent", ...ids });
++  }
++
++  private async lookup(principal: AuthenticatedPrincipal, request: AuthenticatedRequest, scope: HistoricalScope) {
++    const key = validateOperationIdempotencyKey(request);
++    const result = await this.history.find(principal.userId, principal.sessionId, key, scope);
++    if (result.kind === "session_invalid") throw new ProblemException({ typeSlug: "invalid-session", title: "Sessão inválida",
++      status: HttpStatus.UNAUTHORIZED, code: "INVALID_SESSION", detail: "Sessão inválida ou expirada." });
++    if (result.kind === "access_denied") throw new ProblemException({ typeSlug: "resource-not-found", title: "Recurso não encontrado",
++      status: HttpStatus.NOT_FOUND, code: "RESOURCE_NOT_FOUND", detail: "Recurso não encontrado." });
++    return result;
++  }
++}
+diff --git a/backend/src/events/staff-history.service.ts b/backend/src/events/staff-history.service.ts
+new file mode 100644
+index 0000000..e411f43
+--- /dev/null
++++ b/backend/src/events/staff-history.service.ts
+@@ -0,0 +1,90 @@
++import { Inject, Injectable } from "@nestjs/common";
++import { sql } from "drizzle-orm";
++import type { NodePgDatabase } from "drizzle-orm/node-postgres";
++import { z } from "zod";
++import { DRIZZLE_DATABASE } from "../database/database.module";
++import type * as schema from "../database/schema";
++import { CALL_NEXT_OPERATION, createCallNextFingerprint } from "./call-next.service";
++import { COMPLETE_SERVICE_OPERATION, createCompleteServiceFingerprint } from "./complete.service";
++import { ABSENT_SERVICE_OPERATION, createAbsentServiceFingerprint } from "./absent.service";
++
++export type HistoricalScope =
++  | { kind: "call-next"; eventId: string; experienceId: string; stationId: string }
++  | { kind: "complete" | "absent"; eventId: string; serviceSessionId: string };
++
++const uuid = z.uuid();
++// Os serviços persistem Date.toISOString(): UTC, precisão de milissegundos e data real.
++const instant = z.string().refine(value => {
++  if (!/^(?:\d{4}|[+-]\d{6})-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) return false;
++  const milliseconds = Date.parse(value);
++  return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value;
++});
++const queueOrder = z.string().refine(value => /^[1-9]\d*$/.test(value)
++  && value.length <= 19 && BigInt(value) <= 9223372036854775807n);
++const called = z.object({ serviceSession: z.object({ id: uuid, queueEntryId: uuid, experienceId: uuid,
++  station: z.object({ id: uuid, label: z.string().trim().min(1) }), status: z.literal("pending"), calledAt: instant }) });
++const completed = z.object({ serviceSession: z.object({ id: uuid, status: z.literal("completed"), resolvedAt: instant }),
++  queueEntry: z.object({ status: z.literal("closed"), closeReason: z.literal("completed") }),
++  participation: z.object({ status: z.literal("active"), currentQueueEntryId: z.null() }) });
++const absent = z.object({ serviceSession: z.object({ id: uuid, status: z.literal("absent"), resolvedAt: instant }),
++  previousQueueEntry: z.object({ id: uuid, status: z.literal("closed"), closeReason: z.literal("absent") }),
++  requeued: z.boolean(), newQueueEntry: z.object({ id: uuid, status: z.literal("waiting"),
++    queueOrder, position: z.number().int().positive().refine(Number.isSafeInteger) }).nullable() });
++
++interface HistoryRow extends Record<string, unknown> {
++  status: string; httpStatus: number | null; resultReference: string | null; resultPayload: unknown;
++}
++const unknownResult = { kind: "unknown", originSession: "unavailable", automaticReconciliation: false } as const;
++
++/** Reconstrução limitada aos campos públicos conhecidos, sem expor JSON arbitrário persistido. */
++function project(row: HistoryRow, scope: HistoricalScope): unknown | null {
++  if (row.status !== "completed") return null;
++  if (scope.kind === "call-next") {
++    const parsed = called.safeParse(row.resultPayload);
++    if (!parsed.success || row.httpStatus !== 201 || row.resultReference !== parsed.data.serviceSession.id ||
++        parsed.data.serviceSession.experienceId !== scope.experienceId || parsed.data.serviceSession.station.id !== scope.stationId) return null;
++    return parsed.data;
++  }
++  if (row.resultReference !== scope.serviceSessionId || row.httpStatus !== 200) return null;
++  if (scope.kind === "complete") {
++    const parsed = completed.safeParse(row.resultPayload);
++    return parsed.success && parsed.data.serviceSession.id === scope.serviceSessionId ? parsed.data : null;
++  }
++  const parsed = absent.safeParse(row.resultPayload);
++  if (!parsed.success || parsed.data.serviceSession.id !== scope.serviceSessionId) return null;
++  const { requeued, newQueueEntry, previousQueueEntry } = parsed.data;
++  if (requeued ? !newQueueEntry || newQueueEntry.id.toLowerCase() === previousQueueEntry.id.toLowerCase() : newQueueEntry !== null) return null;
++  return parsed.data;
++}
++
++/** Leitura por ator, operação e fingerprint; não reserva, reenvia ou executa operações. */
++@Injectable()
++export class StaffHistoryService {
++  constructor(@Inject(DRIZZLE_DATABASE) private readonly database: NodePgDatabase<typeof schema>) {}
++
++  async find(userId: string, sessionId: string, key: string, scope: HistoricalScope) {
++    const operation = scope.kind === "call-next" ? CALL_NEXT_OPERATION : scope.kind === "complete" ? COMPLETE_SERVICE_OPERATION : ABSENT_SERVICE_OPERATION;
++    const fingerprint = scope.kind === "call-next" ? createCallNextFingerprint(scope.eventId, scope.experienceId, scope.stationId)
++      : scope.kind === "complete" ? createCompleteServiceFingerprint(scope.eventId, scope.serviceSessionId)
++        : createAbsentServiceFingerprint(scope.eventId, scope.serviceSessionId);
++    return this.database.transaction(async tx => {
++      const session = await tx.execute(sql`SELECT s.id FROM sessions s JOIN users u ON u.id=s.user_id
++        WHERE s.id=${sessionId} AND s.user_id=${userId} AND s.revoked_at IS NULL
++          AND s.expires_at > statement_timestamp() AND u.is_active=true
++          AND (s.admin_2fa_verified_at IS NOT NULL OR NOT EXISTS (
++            SELECT 1 FROM user_roles a WHERE a.user_id=u.id AND a.role='admin' AND a.event_id IS NULL AND a.revoked_at IS NULL))`);
++      if (!session.rows.length) return { kind: "session_invalid" } as const;
++      const access = await tx.execute(sql`SELECT e.id FROM events e WHERE e.id=${scope.eventId} AND EXISTS (
++        SELECT 1 FROM users u JOIN user_roles r ON r.user_id=u.id
++        WHERE u.id=${userId} AND u.is_active=true AND u.email_verified_at IS NOT NULL
++          AND r.role='staff' AND r.event_id=e.id AND r.revoked_at IS NULL)`);
++      if (!access.rows.length) return { kind: "access_denied" } as const;
++      const rows = await tx.execute<HistoryRow>(sql`SELECT status, http_status AS "httpStatus",
++        result_reference AS "resultReference", result_payload AS "resultPayload"
++        FROM idempotency_operations WHERE actor_user_id=${userId} AND operation=${operation}
++          AND idempotency_key=${key} AND request_hash=${fingerprint} LIMIT 1`);
++      const result = rows.rows[0] ? project(rows.rows[0], scope) : null;
++      return result ? { kind: "recorded", originSession: "unavailable", automaticReconciliation: false, result } as const : unknownResult;
++    }, { isolationLevel: "repeatable read", accessMode: "read only" });
++  }
++}
+diff --git a/backend/test/unit/staff-history.test.ts b/backend/test/unit/staff-history.test.ts
+new file mode 100644
+index 0000000..a834fa3
+--- /dev/null
++++ b/backend/test/unit/staff-history.test.ts
+@@ -0,0 +1,155 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { drizzle } from "drizzle-orm/node-postgres";
++import type { Client } from "pg";
++import * as schema from "../../src/database/schema";
++import { createCallNextFingerprint } from "../../src/events/call-next.service";
++import { createCompleteServiceFingerprint } from "../../src/events/complete.service";
++import { createAbsentServiceFingerprint } from "../../src/events/absent.service";
++import { StaffHistoryService, type HistoricalScope } from "../../src/events/staff-history.service";
++
++const id = (n: number) => `abcdef00-0000-4000-8000-${String(n).padStart(12, "0")}`;
++const user = id(1), session = id(2), eventId = id(3), experienceId = id(4), stationId = id(5), serviceSessionId = id(6), key = id(7);
++const call = { kind: "call-next", eventId, experienceId, stationId } as const;
++const complete = { kind: "complete", eventId, serviceSessionId } as const;
++const absence = { kind: "absent", eventId, serviceSessionId } as const;
++const called = { serviceSession: { id: serviceSessionId, queueEntryId: id(8), experienceId,
++  station: { id: stationId, label: "Estação", privateValue: "PRIVATE" }, status: "pending", calledAt: "2026-11-03T15:00:00.000Z", privateValue: "PRIVATE" }, privateValue: "PRIVATE" };
++const completed = { serviceSession: { id: serviceSessionId, status: "completed", resolvedAt: "2026-11-03T15:00:00.000Z" },
++  queueEntry: { status: "closed", closeReason: "completed" }, participation: { status: "active", currentQueueEntryId: null } };
++const absent = { serviceSession: { id: serviceSessionId, status: "absent", resolvedAt: "2026-11-03T15:00:00.000Z" },
++  previousQueueEntry: { id: id(8), status: "closed", closeReason: "absent" }, requeued: false, newQueueEntry: null };
++
++function fixture(options: { invalidSession?: boolean; denied?: boolean; failHistory?: boolean; row?: Record<string, unknown> | null;
++  actor?: string; operation?: string; key?: string; hash?: string } = {}) {
++  const queries: Array<{ text: string; params: unknown[] }> = [];
++  const database = drizzle({ async query(config: { text: string }, params: unknown[] = []) {
++    const text = config.text; queries.push({ text, params });
++    if (text.includes("FROM sessions s JOIN users")) return { rows: options.invalidSession ? [] : [{ id: session }] };
++    if (text.includes("FROM events e")) return { rows: options.denied ? [] : [{ id: eventId }] };
++    if (text.includes("FROM idempotency_operations")) {
++      if (options.failHistory) throw new Error("PRIVATE_DATABASE_MARKER");
++      const matches = params[0] === (options.actor ?? user) && params[1] === (options.operation ?? "call_next") &&
++        params[2] === (options.key ?? key) && params[3] === (options.hash ?? createCallNextFingerprint(eventId, experienceId, stationId));
++      return { rows: matches && options.row !== null ? [options.row ?? { status: "completed", httpStatus: 201,
++        resultReference: serviceSessionId, resultPayload: called }] : [] };
++    }
++    return { rows: [] };
++  } } as unknown as Client, { schema });
++  return { service: new StaffHistoryService(database), queries };
++}
++
++test("histórico retorna somente resultado projetado, com aviso obrigatório de sessão desconhecida", async () => {
++  const f = fixture(); const result = await f.service.find(user, session, key, call);
++  assert.equal(result.kind, "recorded"); if (result.kind !== "recorded") throw new Error("Resultado ausente");
++  assert.equal(result.originSession, "unavailable");
++  assert.equal(result.automaticReconciliation, false); assert.doesNotMatch(JSON.stringify(result), /PRIVATE/);
++  assert.equal(f.queries[0].text, "begin isolation level repeatable read read only");
++  assert.match(f.queries[1].text, /revoked_at IS NULL/); assert.match(f.queries[1].text, /admin_2fa_verified_at/);
++  for (const s of [/r.role='staff'/, /r.event_id=e.id/, /r.revoked_at IS NULL/, /u.email_verified_at IS NOT NULL/]) assert.match(f.queries[2].text, s);
++  assert.deepEqual(f.queries[3].params, [user, "call_next", key, createCallNextFingerprint(eventId, experienceId, stationId)]);
++  assert.equal(f.queries.some(q => /\b(insert|update|delete|for update|for share)\b/i.test(q.text)), false);
++});
++
++test("mesma conta em outra sessão não adquire comprovação de sessão de origem", async () => {
++  const f = fixture(); const result = await f.service.find(user, id(30), key, call);
++  assert.equal(result.kind, "recorded");
++  if (result.kind !== "recorded") throw new Error("Resultado ausente");
++  assert.equal(result.originSession, "unavailable"); assert.equal(result.automaticReconciliation, false);
++  assert.deepEqual(f.queries[1].params, [id(30), user]);
++});
++
++test("sessão revogada, concessão revogada e conta sem Staff são recusadas antes da consulta histórica", async () => {
++  for (const [options, kind] of [[{ invalidSession: true }, "session_invalid"], [{ denied: true }, "access_denied"]] as const) {
++    const f = fixture(options); assert.equal((await f.service.find(user, session, key, call)).kind, kind);
++    assert.equal(f.queries.some(q => q.text.includes("FROM idempotency_operations")), false);
++  }
++});
++
++test("ator, chave, evento, operação e recursos divergentes não revelam resultados", async () => {
++  const cases: Array<[ReturnType<typeof fixture>, HistoricalScope, string, string]> = [
++    [fixture({ actor: id(20) }), call, user, key], [fixture({ key: id(21) }), call, user, key],
++    [fixture(), { ...call, eventId: id(22) }, user, key], [fixture(), { ...call, stationId: id(23) }, user, key],
++    [fixture(), complete, user, key], [fixture({ row: null }), call, user, key],
++  ];
++  for (const [f, scope, actor, suppliedKey] of cases) assert.equal((await f.service.find(actor, session, suppliedKey, scope)).kind, "unknown");
++});
++
++test("resultado completo e ausência com ou sem reentrada são projetados pelo fingerprint", async () => {
++  const scenarios = [
++    { scope: complete, operation: "complete_service_session", hash: createCompleteServiceFingerprint(eventId, serviceSessionId), payload: completed },
++    { scope: absence, operation: "absent_service_session", hash: createAbsentServiceFingerprint(eventId, serviceSessionId), payload: absent },
++    { scope: absence, operation: "absent_service_session", hash: createAbsentServiceFingerprint(eventId, serviceSessionId),
++      payload: { ...absent, requeued: true, newQueueEntry: { id: id(9), status: "waiting", queueOrder: "9007199254740993", position: 1 } } },
++  ];
++  for (const s of scenarios) {
++    const f = fixture({ operation: s.operation, hash: s.hash, row: { status: "completed", httpStatus: 200, resultReference: serviceSessionId, resultPayload: s.payload } });
++    assert.equal((await f.service.find(user, session, key, s.scope)).kind, "recorded");
++  }
++});
++
++test("registro expirado continua legível se presente; em andamento ou resultado inválido é desconhecido", async () => {
++  const expired = fixture({ row: { status: "completed", httpStatus: 201, resultReference: serviceSessionId, resultPayload: called, expiresAt: new Date(0) } });
++  assert.equal((await expired.service.find(user, session, key, call)).kind, "recorded");
++  assert.doesNotMatch(expired.queries[3].text, /expires_at/);
++  for (const row of [{ status: "in_progress", httpStatus: null, resultReference: null, resultPayload: null },
++    { status: "completed", httpStatus: 201, resultReference: id(99), resultPayload: called },
++    { status: "completed", httpStatus: 201, resultReference: serviceSessionId, resultPayload: { privateValue: "PRIVATE" } }]) {
++    const f = fixture({ row }); assert.equal((await f.service.find(user, session, key, call)).kind, "unknown");
++  }
++});
++
++test("ausência com reentrada igual à entrada encerrada não é apresentada como resultado válido", async () => {
++  const f = fixture({ operation: "absent_service_session", hash: createAbsentServiceFingerprint(eventId, serviceSessionId),
++    row: { status: "completed", httpStatus: 200, resultReference: serviceSessionId,
++      resultPayload: { ...absent, requeued: true, newQueueEntry: { id: id(8).toUpperCase(), status: "waiting", queueOrder: "1", position: 1 } } } });
++  assert.equal((await f.service.find(user, session, key, absence)).kind, "unknown");
++});
++
++test("timestamps históricos exigem o formato completo e canônico de toISOString nas três operações", async () => {
++  const scenarios = [
++    { scope: call, operation: "call_next", hash: createCallNextFingerprint(eventId, experienceId, stationId), payload: called, field: "calledAt", status: 201 },
++    { scope: complete, operation: "complete_service_session", hash: createCompleteServiceFingerprint(eventId, serviceSessionId), payload: completed, field: "resolvedAt", status: 200 },
++    { scope: absence, operation: "absent_service_session", hash: createAbsentServiceFingerprint(eventId, serviceSessionId), payload: absent, field: "resolvedAt", status: 200 },
++  ];
++  const valid = ["2026-11-03T15:00:00.000Z", "2024-02-29T23:59:59.999Z", "+010000-01-01T00:00:00.000Z"];
++  const invalid = ["2026-11-03", "2026-11-03T15:00:00.000", "2026-11-03T15:00:00Z",
++    "2026-11-03T15:00:00.000+00:00", "2026-02-29T15:00:00.000Z", "2026-04-31T15:00:00.000Z",
++    "2026-11-03T24:00:00.000Z", "not-a-date"];
++  for (const scenario of scenarios) {
++    for (const [values, expected] of [[valid, "recorded"], [invalid, "unknown"]] as const) {
++      for (const value of values) {
++        const payload = { ...scenario.payload, serviceSession: { ...scenario.payload.serviceSession, [scenario.field]: value } };
++        const f = fixture({ operation: scenario.operation, hash: scenario.hash, row: { status: "completed", httpStatus: scenario.status,
++          resultReference: serviceSessionId, resultPayload: payload } });
++        assert.equal((await f.service.find(user, session, key, scenario.scope)).kind, expected, `${scenario.scope.kind}: ${value}`);
++      }
++    }
++  }
++});
++
++test("ordem histórica de reentrada respeita limites positivos do bigint PostgreSQL sem perda de precisão", async () => {
++  for (const [value, expected] of [["1", "recorded"], ["9007199254740993", "recorded"],
++    ["9223372036854775807", "recorded"], ["0", "unknown"], ["-1", "unknown"], ["1.1", "unknown"],
++    ["01", "unknown"], ["9223372036854775808", "unknown"], ["999999999999999999999999999", "unknown"]] as const) {
++    const payload = { ...absent, requeued: true, newQueueEntry: { id: id(9), status: "waiting", queueOrder: value, position: 1 } };
++    const f = fixture({ operation: "absent_service_session", hash: createAbsentServiceFingerprint(eventId, serviceSessionId),
++      row: { status: "completed", httpStatus: 200, resultReference: serviceSessionId, resultPayload: payload } });
++    const outcome = await f.service.find(user, session, key, absence);
++    assert.equal(outcome.kind, expected, value);
++    if (outcome.kind === "recorded") {
++      assert.deepEqual((outcome.result as { newQueueEntry: { queueOrder: string } }).newQueueEntry.queueOrder, value);
++      assert.equal(outcome.originSession, "unavailable"); assert.equal(outcome.automaticReconciliation, false);
++    }
++  }
++});
++
++test("erro na leitura histórica propaga a falha e reverte transação sem SQL mutante", async () => {
++  const f = fixture({ failHistory: true });
++  await assert.rejects(f.service.find(user, session, key, call), (error: unknown) =>
++    error instanceof Error && error.cause instanceof Error && error.cause.message === "PRIVATE_DATABASE_MARKER");
++  assert.equal(f.queries[0].text, "begin isolation level repeatable read read only");
++  assert.equal(f.queries.at(-1)?.text, "rollback");
++  assert.equal(f.queries.some(query => query.text === "commit"), false);
++  assert.equal(f.queries.some(query => /\b(insert|update|delete|for update|for share)\b/i.test(query.text)), false);
++});
+diff --git a/backend/test/unit/staff-history-http.test.ts b/backend/test/unit/staff-history-http.test.ts
+new file mode 100644
+index 0000000..8e4b8f3
+--- /dev/null
++++ b/backend/test/unit/staff-history-http.test.ts
+@@ -0,0 +1,116 @@
++import "reflect-metadata";
++import assert from "node:assert/strict";
++import { after, before, test } from "node:test";
++import { Module, type INestApplication } from "@nestjs/common";
++import { NestFactory } from "@nestjs/core";
++import supertest from "supertest";
++import { drizzle } from "drizzle-orm/node-postgres";
++import type { Client } from "pg";
++import { AuthService } from "../../src/auth/auth.service";
++import { SessionAuthGuard } from "../../src/auth/session-auth.guard";
++import { ProblemException } from "../../src/common/errors/problem.exception";
++import { ProblemDetailsExceptionFilter } from "../../src/common/errors/problem-details.filter";
++import { DRIZZLE_DATABASE } from "../../src/database/database.module";
++import * as schema from "../../src/database/schema";
++import { createCallNextFingerprint } from "../../src/events/call-next.service";
++import { StaffHistoryController, StaffHistoryNoStoreGuard } from "../../src/events/staff-history.controller";
++import { StaffHistoryService } from "../../src/events/staff-history.service";
++
++const id = (n: number) => `abcdef00-0000-4000-8000-${String(n).padStart(12, "0")}`;
++const userId = id(1), sessionId = id(2), eventId = id(3), experienceId = id(4), stationId = id(5), serviceSessionId = id(6), key = id(7);
++const base = `/api/v1/staff/events/${eventId}`;
++const paths = [`${base}/experiences/${experienceId}/stations/${stationId}/history/call-next`,
++  `${base}/service-sessions/${serviceSessionId}/history/complete`, `${base}/service-sessions/${serviceSessionId}/history/absent`];
++let calls: unknown[][] = [], result: Record<string, unknown> = { kind: "unknown", originSession: "unavailable", automaticReconciliation: false };
++@Module({ controllers: [StaffHistoryController], providers: [StaffHistoryNoStoreGuard, SessionAuthGuard,
++  { provide: AuthService, useValue: { authenticateBearerToken: async (token: string) => {
++    if (token !== "valid") throw new ProblemException({ typeSlug: "invalid-session", title: "Inválida", status: 401, code: "INVALID_SESSION", detail: "Inválida." });
++    return { userId, sessionId, roles: ["staff"] };
++  } } },
++  { provide: StaffHistoryService, useValue: { find: async (...args: unknown[]) => { calls.push(args); return result; } } },
++] }) class HistoryModule {}
++let app: INestApplication;
++before(async () => { app = await NestFactory.create(HistoryModule, { logger: false }); app.setGlobalPrefix("api/v1");
++  app.useGlobalFilters(new ProblemDetailsExceptionFilter()); await app.listen(0, "127.0.0.1"); });
++after(async () => { await app?.close(); });
++const get = (path: string) => supertest(app.getHttpServer()).get(path).set("Authorization", "Bearer valid").set("Idempotency-Key", key);
++
++test("histórico HTTP exige Bearer, sessão válida, chave e UUIDs", async () => {
++  calls = [];
++  const noBearer = await supertest(app.getHttpServer()).get(paths[0]).set("Idempotency-Key", key);
++  assert.equal(noBearer.status, 401); assert.equal(noBearer.headers["cache-control"], "no-store");
++  assert.equal((await get(paths[0]).set("Authorization", "Bearer revoked")).status, 401);
++  assert.equal((await supertest(app.getHttpServer()).get(paths[0]).set("Authorization", "Bearer valid")).status, 400);
++  assert.equal((await get(paths[0]).set("Idempotency-Key", "a".repeat(129))).status, 400);
++  assert.equal((await get(paths[0].replace(eventId, "invalid"))).status, 400);
++  assert.equal(calls.length, 0);
++});
++
++test("histórico HTTP utiliza principal autenticado, escopos de rota e no-store", async () => {
++  calls = []; result = { kind: "unknown", originSession: "unavailable", automaticReconciliation: false };
++  for (const path of paths) {
++    const response = await get(path).query({ userId: id(9), sessionId: id(10) });
++    assert.equal(response.status, 200); assert.equal(response.headers["cache-control"], "no-store");
++    assert.deepEqual(response.body, result);
++  }
++  assert.deepEqual(calls, [
++    [userId, sessionId, key, { kind: "call-next", eventId, experienceId, stationId }],
++    [userId, sessionId, key, { kind: "complete", eventId, serviceSessionId }],
++    [userId, sessionId, key, { kind: "absent", eventId, serviceSessionId }],
++  ]);
++});
++
++test("histórico HTTP diferencia registro terminal, acesso negado e sessão invalidada", async () => {
++  result = { kind: "recorded", originSession: "unavailable", automaticReconciliation: false, result: { serviceSession: { id: serviceSessionId } } };
++  assert.deepEqual((await get(paths[0])).body, result);
++  result = { kind: "access_denied" }; assert.equal((await get(paths[0])).status, 404);
++  result = { kind: "session_invalid" }; assert.equal((await get(paths[0])).status, 401);
++});
++
++test("HTTP com controller e serviço reais revalida sessão e concessão e trata falha da consulta histórica", async () => {
++  const queries: Array<{ text: string; params: unknown[] }> = [];
++  let sessionAllowed = true, staffAllowed = true, failHistory = false, guardCalls = 0;
++  const database = drizzle({ async query(config: { text: string }, params: unknown[] = []) {
++    const text = config.text; queries.push({ text, params });
++    if (text.includes("FROM sessions s JOIN users")) return { rows: sessionAllowed ? [{ id: sessionId }] : [] };
++    if (text.includes("FROM events e")) return { rows: staffAllowed ? [{ id: eventId }] : [] };
++    if (text.includes("FROM idempotency_operations")) {
++      if (failHistory) throw new Error("PRIVATE_DATABASE_MARKER");
++      return { rows: [{ status: "completed", httpStatus: 201, resultReference: serviceSessionId,
++        resultPayload: { serviceSession: { id: serviceSessionId, queueEntryId: id(8), experienceId,
++          station: { id: stationId, label: "Estação" }, status: "pending", calledAt: "2026-11-03T15:00:00.000Z" },
++        privateValue: "PRIVATE_PAYLOAD_MARKER" } }] };
++    }
++    return { rows: [] };
++  } } as unknown as Client, { schema });
++  @Module({ controllers: [StaffHistoryController], providers: [StaffHistoryNoStoreGuard, SessionAuthGuard, StaffHistoryService,
++    { provide: DRIZZLE_DATABASE, useValue: database },
++    { provide: AuthService, useValue: { authenticateBearerToken: async () => { guardCalls++; return { userId, sessionId, roles: ["staff"] }; } } },
++  ] }) class RealHistoryModule {}
++  const real = await NestFactory.create(RealHistoryModule, { logger: false });
++  real.setGlobalPrefix("api/v1"); real.useGlobalFilters(new ProblemDetailsExceptionFilter());
++  await real.listen(0, "127.0.0.1");
++  const request = () => supertest(real.getHttpServer()).get(paths[0]).set("Authorization", "Bearer valid").set("Idempotency-Key", key);
++  try {
++    sessionAllowed = false;
++    const revoked = await request(); assert.equal(revoked.status, 401); assert.equal(revoked.headers["cache-control"], "no-store");
++    assert.deepEqual(queries[1].params, [sessionId, userId]);
++    assert.equal(queries.some(q => q.text.includes("FROM events e")), false);
++    queries.length = 0; sessionAllowed = true; staffAllowed = false;
++    const denied = await request(); assert.equal(denied.status, 404); assert.equal(denied.headers["cache-control"], "no-store");
++    assert.deepEqual(queries[2].params, [eventId, userId]);
++    assert.equal(queries.some(q => q.text.includes("FROM idempotency_operations")), false);
++    queries.length = 0; staffAllowed = true;
++    const found = await request(); assert.equal(found.status, 200); assert.equal(found.body.kind, "recorded");
++    assert.equal(found.body.originSession, "unavailable"); assert.equal(found.body.automaticReconciliation, false);
++    assert.doesNotMatch(JSON.stringify(found.body), /PRIVATE_PAYLOAD_MARKER/);
++    assert.deepEqual(queries[3].params, [userId, "call_next", key, createCallNextFingerprint(eventId, experienceId, stationId)]);
++    queries.length = 0; failHistory = true;
++    const failure = await request(); assert.equal(failure.status, 500); assert.equal(failure.body.code, "INTERNAL_SERVER_ERROR");
++    assert.equal(failure.headers["cache-control"], "no-store"); assert.doesNotMatch(JSON.stringify(failure.body), /PRIVATE_DATABASE_MARKER|idempotency_operations/);
++    assert.equal(queries[0].text, "begin isolation level repeatable read read only");
++    assert.equal(queries.at(-1)?.text, "rollback"); assert.equal(queries.some(q => q.text === "commit"), false);
++    assert.equal(queries.some(q => /\b(insert|update|delete|for update|for share)\b/i.test(q.text)), false);
++    assert.equal(guardCalls, 4);
++  } finally { await real.close(); }
++});
+diff --git a/docs/STAFF_HISTORICAL_RECONCILIATION_IMPLEMENTACAO.md b/docs/STAFF_HISTORICAL_RECONCILIATION_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..484d6d9
+--- /dev/null
++++ b/docs/STAFF_HISTORICAL_RECONCILIATION_IMPLEMENTACAO.md
+@@ -0,0 +1,41 @@
++# Consulta histórica das operações Staff
++
++## Escopo e contrato
++
++Consultas GET autenticadas de leitura, com `Idempotency-Key` no cabeçalho, sem corpo:
++
++- `/api/v1/staff/events/:eventId/experiences/:experienceId/stations/:stationId/history/call-next`
++- `/api/v1/staff/events/:eventId/service-sessions/:serviceSessionId/history/complete`
++- `/api/v1/staff/events/:eventId/service-sessions/:serviceSessionId/history/absent`
++
++Os UUIDs usam a mesma validação e normalização das operações Staff. A chave segue o contrato existente: uma única ocorrência, não vazia, até 128 caracteres e sem controles. A identidade da conta e a sessão são obtidas exclusivamente do principal autenticado. As respostas têm `Cache-Control: no-store`, inclusive quando o guard de autenticação recusa a requisição.
++
++Uma sessão inválida ou expirada recebe 401; evento inexistente e concessão ausente recebem 404 neutro. O serviço consulta novamente sessão, conta ativa, TOTP quando aplicável, e concessão Staff vigente para o evento, com e-mail confirmado. O resultado é lido pelo ator autenticado, nome da operação, chave e fingerprint dos recursos. Admin sem concessão Staff não recebe acesso. A leitura ocorre numa transação `REPEATABLE READ READ ONLY`, sem locks de fila nem métodos de execução operacional; autorizações e dados seguem o mesmo snapshot. Uma revogação confirmada depois do snapshot pode não ser observada pela consulta já em andamento.
++
++Para um registro terminal válido a resposta é `200` com `{ kind: "recorded", originSession: "unavailable", automaticReconciliation: false, result: {...} }`. `result` contém somente o formato mínimo correspondente ao resultado original de chamada, conclusão ou ausência, validado e projetado a partir do histórico; não representa o estado atual da fila. Os campos de identificação de experiência, estação ou atendimento são conferidos contra o fingerprint e a referência armazenada. Campos adicionais no JSON persistido não são devolvidos.
++
++Após a revisão Sol High, a projeção passou a exigir timestamps no formato canônico produzido pelos serviços com `toISOString()`: data e horário completos em UTC, milissegundos e sufixo `Z`, com verificação de ida e volta para rejeitar datas inexistentes. A ordem de reentrada deve ser uma string decimal inteira entre `1` e `9223372036854775807`, validada com `BigInt` sem perda de precisão. Um payload incompatível retorna `unknown`.
++
++Quando não houver prova histórica utilizável, a resposta é `200` com `{ kind: "unknown", originSession: "unavailable", automaticReconciliation: false }`. Isso inclui registro inexistente, removido, escopo divergente, resultado inconsistente e registro `in_progress` visível. A reserva e a conclusão normalmente ocorrem na mesma transação: uma reserva ainda não confirmada é invisível para esta leitura, e um registro `in_progress` isolado não comprova que um processo ainda está trabalhando. Nenhuma dessas respostas autoriza repetir o POST ou gerar outra chave.
++
++## Sessão e limite de segurança
++
++`idempotency_operations` não guarda o `sessionId` de origem. O backend pode verificar a sessão de consulta e a conta autora, mas não provar se o registro foi produzido pela sessão atual ou por uma sessão anterior da mesma conta, inclusive depois de restauração ou novo login. `originSession: "unavailable"` é obrigatório mesmo para `recorded`; **o resultado não deve liberar nem reconhecer automaticamente uma intenção persistida**. Após perda da concessão, troca de conta ou revogação da sessão de consulta, a consulta é recusada conforme a autorização atual.
++
++Para reconciliação automática futura será necessário um contrato persistente que vincule de forma imutável a sessão de origem à reserva e ao resultado, com política explícita para registros legados, nova sessão e revogação. Isso exige avaliar alteração de schema e migration em etapa própria; nenhuma foi criada ou executada aqui. Mesmo com a mesma chave e fingerprint, a remoção física seguida de reutilização pode criar novo registro e impede provar que ele corresponde à intenção antiga.
++
++## Retenção e idempotência
++
++`STAFF_IDEMPOTENCY_TTL_SECONDS` é obrigatório e positivo; a política calcula `expires_at` na criação. O helper de reserva existente não filtra `expires_at`: enquanto a linha existir, inclusive após esse instante, o POST encontra a restrição única e pode reproduzir seu resultado ou detectar conflito. Esta consulta também lê registros expirados ainda presentes. Não foi encontrado expurgo automático no código de produção inspecionado; testes de integração contêm limpeza de suas próprias fixtures. A presença da coluna ou do índice de expiração não garante retenção física, prazo mínimo ou ausência de limpeza externa/manual.
++
++Se uma linha for apagada, o backend atual não mantém tombstone e uma nova execução com a mesma chave pode ser aceita. O cliente deve manter a intenção despachada bloqueada, inclusive após reinício e logout, e nunca usar ausência histórica como prova de que pode repetir. Uma garantia entre dispositivos ou após remoção exige política de retenção verificável e mecanismo durável no servidor, ainda pendentes. Este GET não executa limpeza e não modifica o comportamento dos POSTs.
++
++## Integração futura e validação
++
++O coordenador poderá consultar o GET com a chave já persistida e o escopo original, somente após verificar conta, sessão, evento e recursos atuais. Nesta etapa, mesmo `recorded` é evidência histórica informativa, não um recibo automaticamente reconhecível, pois não há vínculo com a sessão de origem nem garantia contra reutilização depois de exclusão. As consultas não liberam intenções persistidas automaticamente; as operações Staff reais permanecem desabilitadas e os botões operacionais não foram conectados.
++
++Arquivos de implementação: `backend/src/events/staff-history.controller.ts`, `backend/src/events/staff-history.service.ts` e registro no `events.module.ts`. Os testes em `backend/test/unit/staff-history.test.ts` e `backend/test/unit/staff-history-http.test.ts` usam persistência e transporte simulados. A campanha cobriu os contratos `recorded` e `unknown`; timestamps ISO canônicos, parciais e inexistentes nas três operações; limites BIGINT e valores inválidos de `queueOrder`; falha de leitura, propagação e rollback sem SQL mutante; e HTTP 500 com `INTERNAL_SERVER_ERROR`, `Cache-Control: no-store` e resposta sem marcador privado. Um cenário usa controller, guard e serviço reais com persistência simulada para revalidar sessão e concessão Staff após o guard. Esses testes não comprovam retenção física em banco real nem coordenação entre dispositivos.
++
++Sol High revisou estaticamente a implementação inicial sem identificar problemas P0–P2; as três pendências P3 foram corrigidas antes da validação. Luna Medium executou a campanha autorizada: 14 testes focados aprovados e 1.168 testes unitários aprovados em 65 arquivos, em ambos os casos com zero falhas e zero ignorados. Os typechecks de produção e de testes, a compilação temporária isolada e `git diff --check` também foram aprovados.
++
++O comando padrão com `tsx` falhou antes de iniciar os testes com `uv_os_get_passwd / ENOMEM`. A execução utilizou o fallback de compilação temporária e Node, com `NODE_ENV=test` e `EVALUATION_IDEMPOTENCY_TTL_SECONDS=60` somente nos processos de teste. A campanha não acessou Neon nem executou migrations, seeds ou operações Staff reais. Não houve homologação em banco real nesta etapa.

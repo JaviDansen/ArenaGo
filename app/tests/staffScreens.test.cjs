@@ -23,6 +23,39 @@ function confirmDialog(app, action, confirm) {
   assert.equal(app.modalOpen, false);
 }
 
+test('confirmação aberta é descartada e callback antigo é bloqueado durante revalidação', async () => {
+  let status = 'verified';
+  let revision = 1;
+  const auth = () => ({ isAuthenticated: true, user: { id: 'u', name: 'Teste' },
+    identityStatus: status, getIdentityRevision: () => revision,
+    isIdentityVerified: () => status === 'verified' });
+  const app = createStaffApp({ auth: auth() });
+  app.typeCode('STAFFDEMO');
+  await app.pressAsync('ENTRAR NO EVENTO');
+  app.press(ENTRY_ACTIVE);
+  app.press('CONFIRMAR ENTRADA');
+  const oldConfirm = app.handlerOf('CONFIRMAR');
+  const before = plain(app.session);
+  status = 'checking'; revision += 1;
+  oldConfirm();
+  app.setAuth(auth());
+  assert.equal(app.modalOpen, false);
+  assert.deepEqual(plain(app.session), before);
+  status = 'error'; app.setAuth(auth());
+  oldConfirm();
+  status = 'verified'; app.setAuth(auth());
+  oldConfirm();
+  assert.equal(app.modalOpen, false);
+  assert.deepEqual(plain(app.session), before);
+  app.press('CONFIRMAR ENTRADA');
+  const secondConfirm = app.handlerOf('CONFIRMAR');
+  revision += 1; // checking e verified podem ser agrupados antes de renderizar.
+  app.setAuth(auth());
+  secondConfirm();
+  assert.equal(app.modalOpen, false);
+  assert.deepEqual(plain(app.session), before);
+});
+
 test('SV01 acesso: layout do print 01, faixa de demonstração e conta do AuthContext', () => {
   const app = createStaffApp({ auth: { isAuthenticated: true, user: { id: 'u-9', name: 'Heliom Teste' } } });
   for (const text of ['🔐 Área do Staff', 'Operação de um evento', 'Login', 'Código do evento',

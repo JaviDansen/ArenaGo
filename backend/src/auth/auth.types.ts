@@ -21,6 +21,10 @@ export interface PublicUserDto {
   hasCompletedQuestionnaire: boolean;
 }
 
+export interface AuthenticatedUserDto extends PublicUserDto {
+  sessionId: string;
+}
+
 export interface AuthSessionResponseDto {
   user: PublicUserDto;
   accessToken: string;

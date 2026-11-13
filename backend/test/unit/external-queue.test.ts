@@ -23,14 +23,21 @@ function fixture(options: {
   hasStaff?: boolean;
   hasStation?: boolean;
   failRelease?: boolean;
+  decisiveClock?: number;
 } = {}) {
   const queries: Array<{ text: string; params: unknown[] }> = [];
+  const availabilityChecks: Array<{ at: number; accepting: boolean }> = [];
   const client = {
     async query(config: { text: string }, params: unknown[]) {
       const query = config.text;
       queries.push({ text: query, params });
       if (query.startsWith("select") && query.includes('from "events"')) {
         return { rows: options.exists === false ? [] : [[options.enabled ?? true]], rowCount: 1 };
+      }
+      if (query.includes('UPDATE events e SET external_queue_enabled')) {
+        const at = options.decisiveClock ?? options.clock ?? decisionAt.getTime();
+        const cutoff = (options.officialEndsAt ?? new Date('2026-10-28T16:00:00Z')).getTime();
+        return { rows: [{ decisionAtMs: at, changed: at < cutoff }], rowCount: 1 };
       }
       if (query.startsWith("SELECT") && query.includes("clock_timestamp()")) {
         return { rows: [{ decisionAtMs: options.clock ?? decisionAt.getTime() }], rowCount: 1 };
@@ -46,7 +53,7 @@ function fixture(options: {
   const events = new EventsService(database);
   events.evaluateEventAvailabilityById = async (id, at, executor) => {
     assert.equal(id, eventId);
-    assert.equal(at.getTime(), decisionAt.getTime());
+    assert.ok([decisionAt.getTime(), options.decisiveClock].includes(at.getTime()));
     assert.notEqual(executor, database, "a disponibilidade precisa usar a mesma transação");
     const event = {
       name: "E05 unit",
@@ -55,11 +62,11 @@ function fixture(options: {
       externalQueueEnabled: options.enabled ?? true,
       startsAt: options.startsAt ?? new Date("2026-10-28T14:00:00Z"),
       officialEndsAt: options.officialEndsAt ?? new Date("2026-10-28T16:00:00Z"),
-      operationalDeadlineAt: new Date("2026-10-28T17:00:00Z"),
+      operationalDeadlineAt: new Date((options.officialEndsAt ?? new Date("2026-10-28T16:00:00Z")).getTime() + 3_600_000),
       closureRequestedAt: options.closureRequestedAt ?? null,
       adminDeadlineAt: null,
     };
-    return buildEventAvailabilityResult({
+    const availability = buildEventAvailabilityResult({
       eventId: id,
       eventStatus: options.status ?? "open",
       configuration: evaluateEventConfigurationReadiness(event),
@@ -68,8 +75,10 @@ function fixture(options: {
         options.hasStaff ?? true, options.hasStation ?? true,
       ),
     });
+    availabilityChecks.push({ at: at.getTime(), accepting: availability.eventExists && availability.eventAcceptingNewEntries });
+    return availability;
   };
-  return { service: new ParticipationsService(database, events), queries };
+  return { service: new ParticipationsService(database, events), queries, availabilityChecks };
 }
 
 test("E05 libera waiting na mesma transação e usa o relógio após todos os locks", async () => {
@@ -82,13 +91,31 @@ test("E05 libera waiting na mesma transação e usa o relógio após todos os lo
   assert.match(queries[2].text, /from "participations".*order by.*for update/);
   assert.deepEqual(queries[2].params, [eventId, "waiting"]);
   assert.match(queries[3].text, /clock_timestamp\(\)/);
-  const writes = queries.filter((q) => q.text.startsWith("update"));
+  const writes = queries.filter((q) => q.text.startsWith("update") || q.text.includes('UPDATE events e SET external_queue_enabled'));
   assert.equal(writes.length, 2);
-  assert.match(writes[0].text, /^update "events" set "external_queue_enabled" = \$1, "updated_at" = \$2 where/);
-  assert.deepEqual(writes[0].params, [false, decisionAt.toISOString(), eventId]);
+  assert.match(writes[0].text, /clock_timestamp\(\)[\s\S]*UPDATE events e SET[\s\S]*d.at < e.official_ends_at/);
+  assert.deepEqual(writes[0].params, [false, eventId]);
   assert.match(writes[1].text, /^update "participations" set "status" = \$1, "arena_entered_at" = \$2 where/);
   assert.deepEqual(writes[1].params, ["active", decisionAt.toISOString(), eventId, "waiting"]);
   assert.equal(queries.at(-1)?.text, "commit");
+});
+
+test("E05 recusa mudança se o corte ocorrer entre prontidão e UPDATE decisivo", async () => {
+  for (const enabled of [false, true]) {
+    const { service, queries, availabilityChecks } = fixture({ enabled: !enabled,
+      officialEndsAt: new Date(decisionAt.getTime() + 1000), decisiveClock: decisionAt.getTime() + 1000 });
+    const result = await service.setExternalQueueEnabled(eventId, enabled);
+    assert.equal(result.kind, 'blocked');
+    assert.deepEqual(availabilityChecks, [
+      { at: decisionAt.getTime(), accepting: true },
+      { at: decisionAt.getTime() + 1000, accepting: false },
+    ]);
+    assert.equal(queries.some(q => q.text.startsWith('update "participations"')), false);
+    const decisions = queries.filter(q => q.text.includes('UPDATE events e SET external_queue_enabled'));
+    assert.equal(decisions.length, 1);
+    assert.match(decisions[0].text, /d.at < e.official_ends_at/);
+    assert.equal(queries.at(-1)?.text, 'commit');
+  }
 });
 
 test("E05 reativação só muda o evento; repetições não escrevem nem consultam novo horário", async () => {
@@ -129,7 +156,7 @@ test("E05 início inclusivo permite mudança; cortes exatos, fechamento e falta 
       const { service, queries } = fixture({ ...options, enabled: !enabled });
       const result = await service.setExternalQueueEnabled(eventId, enabled);
       assert.equal(result.kind, "blocked", JSON.stringify(options));
-      assert.equal(queries.some((q) => q.text.startsWith("update")), false);
+      assert.equal(queries.some((q) => q.text.startsWith("update") || q.text.includes('UPDATE events e SET external_queue_enabled')), false);
     }
   }
 });

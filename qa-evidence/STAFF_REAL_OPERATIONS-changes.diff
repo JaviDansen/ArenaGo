@@ -1,0 +1,1271 @@
+diff --git a/app/services/staffOperationsService.js b/app/services/staffOperationsService.js
+index 399c39a..6adfd1f 100644
+--- a/app/services/staffOperationsService.js
++++ b/app/services/staffOperationsService.js
+@@ -79,6 +79,7 @@ export function parseCompletedSession(body, serviceSessionId) {
+       || body.serviceSession.status !== 'completed'
+       || body.queueEntry?.status !== 'closed'
+       || body.queueEntry.closeReason !== 'completed'
++      || body.participation?.status !== 'active'
+       || body.participation?.currentQueueEntryId !== null) {
+     throw bad('Resposta inesperada da conclusão. Não repetir com nova chave.');
+   }
+@@ -87,6 +88,22 @@ export function parseCompletedSession(body, serviceSessionId) {
+     participationStatus: body.participation.status };
+ }
+ 
++export function parseAbsentSession(body, serviceSessionId) {
++  requireIds(serviceSessionId);
++  const entry = body?.newQueueEntry;
++  if (body?.serviceSession?.id !== serviceSessionId || body.serviceSession.status !== 'absent' ||
++      !isUuid(body?.previousQueueEntry?.id) || body.previousQueueEntry.status !== 'closed' ||
++      body.previousQueueEntry.closeReason !== 'absent' || typeof body.requeued !== 'boolean' ||
++      (body.requeued ? (!isUuid(entry?.id) || entry.id.toLowerCase() === body.previousQueueEntry.id.toLowerCase() || entry.status !== 'waiting' ||
++        typeof entry.queueOrder !== 'string' || !/^[1-9]\d*$/.test(entry.queueOrder) || !Number.isSafeInteger(entry.position) || entry.position < 1)
++        : entry !== null)) {
++    throw bad('Resposta inesperada da ausência. Não repetir com nova chave.');
++  }
++  return { id: serviceSessionId, status: 'absent', requeued: body.requeued,
++    newQueueEntry: body.requeued ? { id: entry.id, status: entry.status,
++      queueOrder: entry.queueOrder, position: entry.position } : null };
++}
++
+ /** Leituras autenticadas; a API, não o app, autoriza o Staff para o evento. */
+ export async function fetchStaffExperiences(client, eventId) {
+   requireIds(eventId);
+@@ -124,61 +141,135 @@ export async function completeStaffService(client, { eventId, serviceSessionId,
+   return parseCompletedSession(body, serviceSessionId);
+ }
+ 
+-export function createStaffOperationsCoordinator({ client, storage, createKey, isCurrent = () => true }) {
++export async function absentStaffService(client, { eventId, serviceSessionId, idempotencyKey }) {
++  requireIds(eventId, serviceSessionId, idempotencyKey);
++  const body = await client.post(
++    `/staff/events/${eventId}/service-sessions/${serviceSessionId}/absent`, {},
++    { auth: true, headers: { 'Idempotency-Key': idempotencyKey }, outcomeUnknownOnNetworkError: true });
++  return parseAbsentSession(body, serviceSessionId);
++}
++
++const definitiveConflicts = new Set(['QUEUE_EMPTY', 'STATION_UNAVAILABLE', 'STATION_HAS_PENDING_CALL',
++  'SERVICE_NOT_PENDING', 'EVENT_OPERATION_ENDED']);
++
++/** Uma resposta inválida ou um erro após envio pode ocultar um commit. */
++export function classifyStaffOperationError(error) {
++  const code = typeof error?.code === 'string' ? error.code : null;
++  const status = Number.isInteger(error?.status) ? error.status : null;
++  if (error?.outcomeUnknown || error?.isNetworkError || error?.isTimeout || !status || status >= 500)
++    return { kind: 'uncertain', status, code };
++  if (code === 'IDEMPOTENCY_IN_PROGRESS' || code === 'IDEMPOTENCY_REQUEST_CONFLICT')
++    return { kind: 'pending_reconciliation', status, code };
++  if ((status === 409 && definitiveConflicts.has(code)) || [400, 401, 403, 404].includes(status))
++    return { kind: 'rejected', status, code };
++  return { kind: 'pending_reconciliation', status, code };
++}
++
++export function createStaffOperationsCoordinator({ client, storage, createKey, isCurrent }) {
++  if (typeof isCurrent !== 'function' || typeof createKey !== 'function' || storage?.isPersistent !== true ||
++      ['get', 'reserve', 'dispatch', 'recordTerminal', 'cancelReserved', 'clear', 'acknowledge']
++        .some((name) => typeof storage?.[name] !== 'function'))
++    throw bad('Contexto verificado e armazenamento persistente são obrigatórios.');
+   let inflight = null;
+-  function alive() { if (!isCurrent()) throw bad('Sessão alterada. Não enviar nova operação.'); }
+-  function contextValid(context) { requireIds(context?.userId, context?.eventId); }
++  function alive(context, intent) { if (!isCurrent(context, intent)) throw bad('Sessão alterada. Não enviar nova operação.'); }
++  function contextValid(context) { requireIds(context?.userId, context?.eventId, context?.sessionId); }
+   function conflict(existing, next) {
+-    return existing && (existing.kind !== next.kind || existing.eventId !== next.eventId
++    return existing && (existing.kind !== next.kind || existing.eventId !== next.eventId || existing.sessionId !== next.sessionId
+       || existing.userId !== next.userId || existing.experienceId !== next.experienceId
+       || existing.stationId !== next.stationId || existing.serviceSessionId !== next.serviceSessionId);
+   }
+   async function getIntent(context) {
+-    alive();
++    alive(context);
+     const intent = await storage.get(context.userId);
+-    alive();
++    alive(context);
+     return intent;
+   }
+   async function execute(context, desired, check, operation) {
+     contextValid(context);
+     const existing = await getIntent(context);
++    alive(context, desired);
+     if (conflict(existing, desired)) return { kind: 'pending_other' };
+-    // Somente a intenção inicial é submetida a pré-condições de leitura.
+-    // Depois de um timeout, reexecutar a mesma chave permite replay idempotente.
++    // O backend não expõe prazo de retenção nem estado da chave; replay após
++    // resultado desconhecido poderia executar novamente após eventual expurgo.
++    if (existing) return existing.phase === 'terminal'
++      ? { kind: 'terminal_pending', outcome: existing.outcome, receiptId: existing.key }
++      : { kind: existing.phase === 'reserved' ? 'reserved' : 'pending_reconciliation' };
+     if (!existing) {
+-      const possible = await check();
+-      alive();
++      let possible;
++      try { possible = await check(); }
++      catch (error) {
++        alive(context, desired);
++        return { kind: 'rejected', phase: 'precondition', status: error?.status ?? null,
++          code: error?.code ?? null, network: Boolean(error?.isNetworkError) };
++      }
++      alive(context, desired);
+       if (!possible) return { kind: 'blocked' };
+     }
+-    const intent = existing ?? { ...desired, key: createKey() };
++    const intent = { ...desired, key: createKey(), phase: 'reserved' };
+     requireIds(intent.key);
+-    if (!existing) { alive(); await storage.set(intent); alive(); }
+-    let error = null;
++    alive(context, desired);
++    const reservation = await storage.reserve(intent);
++    if (!isCurrent(context, desired)) {
++      if (reservation?.created) { try { await storage.cancelReserved(context.userId, intent.key); } catch { /* ainda bloqueada ou removida */ } }
++      return { kind: 'stale' };
++    }
++    if (!reservation?.created) return { kind: 'pending_reconciliation' };
++    let dispatched;
++    try { dispatched = await storage.dispatch(context.userId, intent.key); }
++    catch { return isCurrent(context, desired) ? { kind: 'storage_error' } : { kind: 'stale' }; }
++    if (!isCurrent(context, desired)) return { kind: 'stale' };
++    if (!dispatched) return { kind: 'pending_reconciliation' };
++    let outcome;
+     try {
+       const result = await operation(intent.key);
+-      alive();
+-      await storage.clear(context.userId, intent.key);
+-      return { kind: 'confirmed', result };
+-    } catch (e) { error = e; }
+-    alive();
+-    return { kind: 'unconfirmed', code: error?.code ?? null,
+-      message: 'Não foi possível confirmar a operação. Consulte o estado e repita somente com a chave preservada.' };
++      outcome = { kind: 'confirmed', result };
++    } catch (error) {
++      const classification = classifyStaffOperationError(error);
++      if (classification.kind !== 'rejected') return isCurrent(context, desired) ? classification : { kind: 'stale' };
++      outcome = classification;
++    }
++    // A resposta histórica pertence à intenção original mesmo após logout.
++    try { await storage.recordTerminal(context.userId, intent.key, outcome); }
++    catch {
++      if (!isCurrent(context, desired)) return { kind: 'stale' };
++      return outcome.kind === 'confirmed' ? { kind: 'confirmed_cleanup_pending', result: outcome.result, receiptId: intent.key }
++        : { kind: 'rejected_cleanup_pending', status: outcome.status, code: outcome.code, receiptId: intent.key };
++    }
++    if (!isCurrent(context, desired)) return { kind: 'stale' };
++    try { await storage.clear(context.userId, intent.key); }
++    catch {
++      if (!isCurrent(context, desired)) return { kind: 'stale' };
++      return outcome.kind === 'confirmed' ? { kind: 'confirmed_cleanup_pending', result: outcome.result, receiptId: intent.key }
++        : { kind: 'rejected_cleanup_pending', status: outcome.status, code: outcome.code, receiptId: intent.key };
++    }
++    return isCurrent(context, desired) ? { ...outcome, receiptId: intent.key } : { kind: 'stale' };
+   }
+-  function single(work) {
+-    if (inflight) return inflight;
++  function single(work, context, scope) {
++    if (inflight) return Promise.resolve({ kind: 'busy' });
+     const promise = work();
+     inflight = promise;
+-    return promise.finally(() => { if (inflight === promise) inflight = null; });
++    return promise.catch((error) => {
++      if (!isCurrent(context, scope) || error?.message === 'Sessão alterada. Não enviar nova operação.') return { kind: 'stale' };
++      throw error;
++    }).finally(() => { if (inflight === promise) inflight = null; });
++  }
++  async function scoped(context, work, getScope = () => undefined) {
++    try { return await work(); }
++    catch (error) {
++      if (!isCurrent(context, getScope()) || error?.message === 'Sessão alterada. Não enviar nova operação.') return { kind: 'stale' };
++      throw error;
++    }
+   }
+   return {
+-    async readStations(context) { contextValid(context); const value = await fetchStaffStations(client, context.eventId); alive(); return value; },
++    async readStations(context) { contextValid(context); const value = await fetchStaffStations(client, context.eventId); alive(context); return value; },
+     async readQueue(context, experienceId) {
+-      contextValid(context); const value = await fetchStaffQueue(client, context.eventId, experienceId); alive(); return value;
++      contextValid(context); const value = await fetchStaffQueue(client, context.eventId, experienceId); alive(context); return value;
+     },
+     callNext(context, experienceId, stationId) {
++      context = { ...context };
+       return single(async () => {
+         contextValid(context); requireIds(experienceId, stationId);
+-        const desired = { kind: 'call', userId: context.userId, eventId: context.eventId,
++        const desired = { kind: 'call', userId: context.userId, eventId: context.eventId, sessionId: context.sessionId,
+           experienceId, stationId, serviceSessionId: null };
+         return execute(context, desired, async () => {
+           const [queue, { stations }] = await Promise.all([
+@@ -189,19 +280,94 @@ export function createStaffOperationsCoordinator({ client, storage, createKey, i
+           return Boolean(queue.waitingCount > 0 && queue.canCallWaitingEntries && station
+             && station.availability === 'available' && station.pendingServiceSessionId === null);
+         }, (key) => callNextStaff(client, { eventId: context.eventId, experienceId, stationId, idempotencyKey: key }));
+-      });
++      }, context, { ...context, kind: 'call', experienceId, stationId, serviceSessionId: null });
+     },
+     complete(context, serviceSessionId, stationId) {
++      context = { ...context };
+       return single(async () => {
+         contextValid(context); requireIds(serviceSessionId, stationId);
+-        const desired = { kind: 'complete', userId: context.userId, eventId: context.eventId,
++        const desired = { kind: 'complete', userId: context.userId, eventId: context.eventId, sessionId: context.sessionId,
+           experienceId: null, stationId, serviceSessionId };
+         return execute(context, desired, async () => {
+           const { stations } = await fetchStaffStations(client, context.eventId);
+           return stations.some((s) => s.id === stationId && s.pendingServiceSessionId === serviceSessionId);
+         }, (key) => completeStaffService(client, { eventId: context.eventId, serviceSessionId, idempotencyKey: key }));
+-      });
++      }, context, { ...context, kind: 'complete', experienceId: null, stationId, serviceSessionId });
++    },
++    absent(context, serviceSessionId, stationId) {
++      context = { ...context };
++      return single(async () => {
++        contextValid(context); requireIds(serviceSessionId, stationId);
++        const desired = { kind: 'absent', userId: context.userId, eventId: context.eventId, sessionId: context.sessionId,
++          experienceId: null, stationId, serviceSessionId };
++        return execute(context, desired, async () => {
++          const { stations } = await fetchStaffStations(client, context.eventId);
++          return stations.some((s) => s.id === stationId && s.pendingServiceSessionId === serviceSessionId);
++        }, (key) => absentStaffService(client, { eventId: context.eventId, serviceSessionId, idempotencyKey: key }));
++      }, context, { ...context, kind: 'absent', experienceId: null, stationId, serviceSessionId });
+     },
+-    async pending(context) { contextValid(context); return getIntent(context); },
++    pending(context) { context = { ...context }; return scoped(context, async () => {
++      contextValid(context);
++      const intent = await getIntent(context);
++      if (!intent) return { kind: 'none' };
++      if (intent.sessionId !== context.sessionId || intent.eventId !== context.eventId ||
++          !isUuid(context.stationId) || intent.stationId !== context.stationId) return { kind: 'pending_other' };
++      alive(context, intent);
++      return intent.phase === 'terminal' ? { kind: 'terminal_pending', operation: intent.kind, outcome: intent.outcome, receiptId: intent.key }
++        : { kind: intent.phase === 'reserved' ? 'reserved' : 'pending_reconciliation', operation: intent.kind };
++    }); },
++    cancelReserved(context) { context = { ...context }; return scoped(context, async () => {
++      contextValid(context);
++      const intent = await getIntent(context);
++      if (!intent || intent.phase !== 'reserved')
++        return { kind: 'blocked' };
++      const cancelled = await storage.cancelReserved(context.userId, intent.key);
++      return isCurrent(context) ? { kind: cancelled ? 'cancelled' : 'blocked' } : { kind: 'stale' };
++    }); },
++    cleanupTerminal(context, receiptId) { context = { ...context };
++      let scope = { ...context, key: receiptId };
++      return scoped(context, async () => {
++      contextValid(context);
++      requireIds(receiptId);
++      alive(context, scope);
++      const intent = await getIntent(context);
++      alive(context, scope);
++      if (!intent || intent.phase !== 'terminal' || intent.sessionId !== context.sessionId ||
++          intent.eventId !== context.eventId || intent.stationId !== context.stationId) return { kind: 'blocked' };
++      if (intent.key !== receiptId) return { kind: 'receipt_changed' };
++      scope = intent;
++      alive(context, intent);
++      try { await storage.clear(context.userId, intent.key); }
++      catch { return isCurrent(context, intent) ? { kind: 'cleanup_pending' } : { kind: 'stale' }; }
++      return isCurrent(context, intent) ? { kind: 'terminal_pending', outcome: intent.outcome, receiptId } : { kind: 'stale' };
++    }, () => scope); },
++    acknowledgeTerminal(context, receiptId) { context = { ...context };
++      let scope = { ...context, key: receiptId };
++      return scoped(context, async () => {
++      contextValid(context);
++      requireIds(receiptId);
++      alive(context, scope);
++      let intent;
++      try { intent = await getIntent(context); }
++      catch {
++        return isCurrent(context) && isCurrent(context, scope)
++          ? { kind: 'acknowledgement_uncertain' } : { kind: 'stale' };
++      }
++      alive(context, scope);
++      if (!intent) return { kind: 'receipt_absent' };
++      scope = intent;
++      alive(context, intent);
++      if (intent.phase !== 'terminal' || intent.sessionId !== context.sessionId ||
++          intent.eventId !== context.eventId || intent.stationId !== context.stationId) return { kind: 'blocked' };
++      if (intent.key !== receiptId) return { kind: 'receipt_changed' };
++      const serviceId = intent.serviceSessionId ?? (intent.kind === 'call' && intent.outcome?.kind === 'confirmed'
++        ? intent.outcome.result.id : null);
++      if (serviceId && serviceId !== context.serviceSessionId) return { kind: 'blocked' };
++      alive(context, intent);
++      let acknowledged;
++      try { acknowledged = await storage.acknowledge(context.userId, receiptId, intent); }
++      catch { return isCurrent(context, intent) ? { kind: 'acknowledgement_uncertain' } : { kind: 'stale' }; }
++      return isCurrent(context, intent) ? acknowledged : { kind: 'stale' };
++    }, () => scope); },
+   };
+ }
+diff --git a/app/tests/staffOperationsService.integration.test.cjs b/app/tests/staffOperationsService.integration.test.cjs
+index edfbee6..24c6514 100644
+--- a/app/tests/staffOperationsService.integration.test.cjs
++++ b/app/tests/staffOperationsService.integration.test.cjs
+@@ -2,6 +2,7 @@ const test = require('node:test');
+ const assert = require('node:assert/strict');
+ const path = require('node:path');
+ const { pathToFileURL } = require('node:url');
++const { loadModule } = require('./helpers/questionnaireHarness.cjs');
+ const service = import(pathToFileURL(path.join(__dirname, '..', 'services', 'staffOperationsService.js')).href);
+ const userId = '20000000-0000-4000-8000-000000000001';
+ const eventId = 'e10da075-c6cb-4fd6-ba97-7b52403ebff8';
+@@ -10,7 +11,7 @@ const stationId = '892e9f40-d56a-464b-a6d4-aac44cbbb1fd';
+ const entryId = '6692c3ea-3335-4807-a1db-c97e83643d5a';
+ const sessionId = 'd87bacf1-4e38-4528-9f5a-f02afe4df39b';
+ const key = '50000000-0000-4000-8000-000000000001';
+-const context = { userId, eventId };
++const context = { userId, eventId, sessionId: '10000000-0000-4000-8000-000000000001' };
+ const queue = () => ({ eventId, experienceId, waitingCount: 1, canCallWaitingEntries: true,
+   firstWaitingQueueEntryId: entryId });
+ const stations = (pendingServiceSessionId = null) => ({ eventId, stations: [
+@@ -22,11 +23,29 @@ const completed = () => ({ serviceSession: {id:sessionId,status:'completed',reso
+   queueEntry:{status:'closed',closeReason:'completed'},
+   participation:{status:'active',currentQueueEntryId:null} });
+ function memory() {
+-  const map = new Map(), actions=[];
+-  return { map, actions,
+-    async get(user) { actions.push('get'); return map.get(user) ?? null; },
+-    async set(intent) { actions.push('set'); map.set(intent.userId, intent); },
+-    async clear(user, expected) { actions.push('clear'); if(map.get(user)?.key===expected) map.delete(user); },
++  const map = new Map(), receipts = new Map(), actions=[];
++  return { map, receipts, actions, isPersistent: true,
++    async get(user) { actions.push('get'); return receipts.get(user) ?? map.get(user) ?? null; },
++    async set(intent) { actions.push('set'); map.set(intent.userId, { phase: 'dispatching', ...intent }); },
++    async reserve(intent) { actions.push('reserve'); const previous = receipts.get(intent.userId) ?? map.get(intent.userId);
++      if (previous) return { created: false, intent: previous };
++      map.set(intent.userId, intent); return { created: true, intent }; },
++    async dispatch(user, expected) { const intent = map.get(user); if (intent?.key !== expected || intent.phase !== 'reserved') return false;
++      map.set(user, { ...intent, phase: 'dispatching' }); return true; },
++    async recordTerminal(user, expected, outcome) { const intent = map.get(user);
++      if (intent?.key !== expected || intent.phase !== 'dispatching') throw new Error('transição inválida');
++      const receipt = { ...intent, phase: 'terminal', outcome }; receipts.set(user, receipt); return receipt; },
++    async cancelReserved(user, expected) { const intent = map.get(user);
++      if (intent?.key !== expected || intent.phase !== 'reserved') return false; map.delete(user); return true; },
++    async clear(user, expected) { actions.push('clear'); if (receipts.get(user)?.key !== expected) throw new Error('sem recibo');
++      if(map.get(user)?.key===expected) map.delete(user); },
++    async acknowledge(user, expected, scope) { const receipt = receipts.get(user);
++      if (receipt && receipt.key !== expected) return { kind: 'receipt_changed' };
++      if (!receipt) return { kind: 'receipt_absent' };
++      if (map.has(user)) return { kind: 'cleanup_pending' };
++      if (receipt.sessionId !== scope.sessionId || receipt.eventId !== scope.eventId || receipt.stationId !== scope.stationId)
++        return { kind: 'receipt_changed' };
++      receipts.delete(user); return { kind: 'acknowledged' }; },
+   };
+ }
+ 
+@@ -57,7 +76,7 @@ test('Staff chama FIFO do servidor e preserva chave antes da operação', async
+       assert.equal(storage.map.get(userId).key,key);
+       return called();},
+   };
+-  const coordinator=createStaffOperationsCoordinator({client,storage,createKey:()=>key});
++  const coordinator=createStaffOperationsCoordinator({isCurrent:()=>true,client,storage,createKey:()=>key});
+   const result=await coordinator.callNext(context,experienceId,stationId);
+   assert.equal(result.kind,'confirmed');
+   assert.equal(result.result.id,sessionId);
+@@ -71,27 +90,27 @@ test('Staff não chama se estação ocupada ou sem fila', async () => {
+   const store=memory();
+   const client={ async get(path){return path.endsWith('/stations') ? stations(sessionId) : queue();},
+     async post() { assert.fail('Não enviar chamada'); } };
+-  const result=await createStaffOperationsCoordinator({client,storage:store,createKey:()=>key})
++  const result=await createStaffOperationsCoordinator({isCurrent:()=>true,client,storage:store,createKey:()=>key})
+     .callNext(context,experienceId,stationId);
+   assert.equal(result.kind,'blocked');
+   assert.equal(store.map.size,0);
+ });
+ 
+-test('timeout preserva chave para replay, nunca cria segunda chamada', async () => {
++test('timeout preserva chave e bloqueia repetição sem garantia de retenção', async () => {
+   const { createStaffOperationsCoordinator } = await service;
+   const storage=memory(), keys=[];
+   let calls=0;
+   const client={ async get(path){return path.endsWith('/stations')?stations():queue();},
+     async post(path,body,opts){keys.push(opts.headers['Idempotency-Key']);calls++;
+       if(calls===1){const e=new Error('timeout');e.isTimeout=true;throw e;}return called();} };
+-  const manager=createStaffOperationsCoordinator({client,storage,createKey:()=>key});
++  const manager=createStaffOperationsCoordinator({isCurrent:()=>true,client,storage,createKey:()=>key});
+   const first=await manager.callNext(context,experienceId,stationId);
+-  assert.equal(first.kind,'unconfirmed');
++  assert.equal(first.kind,'uncertain');
+   assert.equal(storage.map.get(userId).key,key);
+   const second=await manager.callNext(context,experienceId,stationId);
+-  assert.equal(second.kind,'confirmed');
+-  assert.deepEqual(keys,[key,key]);
+-  assert.equal(storage.map.size,0);
++  assert.equal(second.kind,'pending_reconciliation');
++  assert.deepEqual(keys,[key]);
++  assert.equal(storage.map.size,1);
+ });
+ 
+ test('conclusão exige chamada da mesma estação e confirma o resultado real', async () => {
+@@ -102,7 +121,7 @@ test('conclusão exige chamada da mesma estação e confirma o resultado real',
+       assert.equal(storage.map.get(userId).key,key);
+       assert.deepEqual(body,{});
+       return completed(); } };
+-  const res=await createStaffOperationsCoordinator({client,storage,createKey:()=>key})
++  const res=await createStaffOperationsCoordinator({isCurrent:()=>true,client,storage,createKey:()=>key})
+     .complete(context,sessionId,stationId);
+   assert.equal(res.kind,'confirmed');
+   assert.equal(res.result.closeReason,'completed');
+@@ -111,9 +130,9 @@ test('conclusão exige chamada da mesma estação e confirma o resultado real',
+ test('intent Staff pendente bloqueia outra mutação', async () => {
+   const { createStaffOperationsCoordinator } = await service;
+   const store=memory();
+-  await store.set({userId,eventId,kind:'call',experienceId,stationId,serviceSessionId:null,key});
++  await store.set({userId,eventId,sessionId:context.sessionId,kind:'call',experienceId,stationId,serviceSessionId:null,key});
+   const client={async post(){assert.fail('não enviar');}, async get(){assert.fail('não ler');}};
+-  const manager=createStaffOperationsCoordinator({client,storage:store,createKey:()=>key});
++  const manager=createStaffOperationsCoordinator({isCurrent:()=>true,client,storage:store,createKey:()=>key});
+   const res=await manager.complete(context,sessionId,stationId);
+   assert.equal(res.kind,'pending_other');
+   assert.equal(store.map.size,1);
+@@ -125,13 +144,13 @@ test('troca de sessão entre leitura e mutação bloqueia POST', async () => {
+   let current=true;
+   const client={async get(path){current=false;return path.endsWith('/stations')?stations():queue();},
+     async post(){assert.fail('POST depois de troca de sessão');}};
+-  const result=createStaffOperationsCoordinator({client,storage,createKey:()=>key,isCurrent:()=>current})
++  const result=createStaffOperationsCoordinator({isCurrent:()=>true,client,storage,createKey:()=>key,isCurrent:()=>current})
+     .callNext(context,experienceId,stationId);
+-  await assert.rejects(result,/Sessão alterada/);
++  assert.equal((await result).kind, 'stale');
+   assert.equal(storage.map.size,0);
+ });
+ 
+-test('conclusão após timeout usa a mesma chave até confirmar', async () => {
++test('conclusão após timeout conserva a chave e aguarda reconciliação', async () => {
+   const { createStaffOperationsCoordinator } = await service;
+   const storage = memory();
+   let attempts=0;
+@@ -140,10 +159,611 @@ test('conclusão após timeout usa a mesma chave até confirmar', async () => {
+     async post(path,body,opts){assert.equal(opts.headers['Idempotency-Key'],key);
+       attempts++;if(attempts===1)throw new Error('rede');return completed();},
+   };
+-  const manager=createStaffOperationsCoordinator({client,storage,createKey:()=>key});
+-  assert.equal((await manager.complete(context,sessionId,stationId)).kind,'unconfirmed');
++  const manager=createStaffOperationsCoordinator({isCurrent:()=>true,client,storage,createKey:()=>key});
++  assert.equal((await manager.complete(context,sessionId,stationId)).kind,'uncertain');
+   assert.equal(storage.map.get(userId).key,key);
+-  assert.equal((await manager.complete(context,sessionId,stationId)).kind,'confirmed');
+-  assert.equal(attempts,2);
+-  assert.equal(storage.map.size,0);
++  assert.equal((await manager.complete(context,sessionId,stationId)).kind,'pending_reconciliation');
++  assert.equal(attempts,1);
++  assert.equal(storage.map.size,1);
++});
++
++test('ausência preserva o resultado real de reinserção ou encerramento', async () => {
++  const { parseAbsentSession } = await service;
++  const base = { serviceSession: { id: sessionId, status: 'absent' },
++    previousQueueEntry: { id: entryId, status: 'closed', closeReason: 'absent' } };
++  const without = parseAbsentSession({ ...base, requeued: false, newQueueEntry: null }, sessionId);
++  assert.equal(without.requeued, false);
++  const withQueue = parseAbsentSession({ ...base, requeued: true,
++    newQueueEntry: { id: '6692c3ea-3335-4807-a1db-c97e83643d5b', status: 'waiting', queueOrder: '90071992547409931234', position: 2 } }, sessionId);
++  assert.equal(withQueue.newQueueEntry.position, 2);
++  for (const order of ['', '0', '-1', '01', '1.5']) assert.throws(() => parseAbsentSession({ ...base, requeued: true,
++    newQueueEntry: { id: '6692c3ea-3335-4807-a1db-c97e83643d5b', status: 'waiting', queueOrder: order, position: 1 } }, sessionId), /inesperada/);
++  assert.throws(() => parseAbsentSession({ ...base, requeued: true,
++    newQueueEntry: { id: entryId, status: 'waiting', queueOrder: '1', position: 1 } }, sessionId), /inesperada/);
++  assert.throws(() => parseAbsentSession({ ...base, requeued: false,
++    newQueueEntry: { id: entryId } }, sessionId), /inesperada/);
++});
++
++test('ausência após resultado desconhecido preserva a intenção sem reenviar', async () => {
++  const { createStaffOperationsCoordinator } = await service;
++  const storage = memory(), keys = [];
++  const client = { async get() { return stations(sessionId); }, async post(path, body, options) {
++    assert.match(path, /\/absent$/); assert.deepEqual(body, {});
++    keys.push(options.headers['Idempotency-Key']);
++    if (keys.length === 1) throw new Error('rede');
++    return { serviceSession: { id: sessionId, status: 'absent' },
++      previousQueueEntry: { id: entryId, status: 'closed', closeReason: 'absent' },
++      requeued: false, newQueueEntry: null };
++  } };
++  const manager = createStaffOperationsCoordinator({isCurrent:()=>true, client, storage, createKey: () => key });
++  assert.equal((await manager.absent(context, sessionId, stationId)).kind, 'uncertain');
++  assert.equal((await manager.absent(context, sessionId, stationId)).kind, 'pending_reconciliation');
++  assert.deepEqual(keys, [key]);
++});
++
++test('armazenamento seguro reserva antes do POST e mantém a intenção após reinício', async () => {
++  const { createStaffIntentStorage } = loadModule('services/staffIntentStorage.js', (name) => {
++    if (name === 'react-native') return { Platform: { OS: 'web' } };
++    if (name === 'expo-secure-store') return {};
++    return require(name);
++  }).exports;
++  const values = new Map();
++  const secureStore = { async getItemAsync(k) { return values.get(k) ?? null; },
++    async setItemAsync(k, v) { values.set(k, v); }, async deleteItemAsync(k) { values.delete(k); } };
++  const first = createStaffIntentStorage({ platformOS: 'android', secureStore });
++  const second = createStaffIntentStorage({ platformOS: 'android', secureStore });
++  const intent = { ...context, stationId, experienceId, serviceSessionId: null, kind: 'call', key, phase: 'reserved' };
++  const reservations = await Promise.all([first.reserve(intent), second.reserve(intent)]);
++  assert.equal(reservations.filter((x) => x.created).length, 1);
++  assert.deepEqual(structuredClone(await second.get(userId)), intent);
++  const web = createStaffIntentStorage({ platformOS: 'web', secureStore });
++  await assert.rejects(web.reserve(intent), /indisponível/);
++});
++
++test('conflitos definitivos e falhas ambíguas são classificados separadamente', async () => {
++  const { classifyStaffOperationError } = await service;
++  for (const code of ['QUEUE_EMPTY', 'STATION_UNAVAILABLE', 'STATION_HAS_PENDING_CALL',
++    'SERVICE_NOT_PENDING', 'EVENT_OPERATION_ENDED'])
++    assert.equal(classifyStaffOperationError({ status: 409, code }).kind, 'rejected');
++  for (const status of [400, 401, 403, 404])
++    assert.equal(classifyStaffOperationError({ status }).kind, 'rejected');
++  for (const code of ['IDEMPOTENCY_IN_PROGRESS', 'IDEMPOTENCY_REQUEST_CONFLICT'])
++    assert.equal(classifyStaffOperationError({ status: 409, code }).kind, 'pending_reconciliation');
++  assert.equal(classifyStaffOperationError({ isTimeout: true }).kind, 'uncertain');
++  assert.equal(classifyStaffOperationError({ status: 500 }).kind, 'uncertain');
++  assert.equal(classifyStaffOperationError(new Error('resposta inválida')).kind, 'uncertain');
++});
++
++test('troca de sessão, evento ou estação não reapresenta uma intenção anterior', async () => {
++  const { createStaffOperationsCoordinator } = await service;
++  const storage = memory();
++  await storage.set({ ...context, stationId, experienceId, serviceSessionId: null, kind: 'call', key });
++  const manager = createStaffOperationsCoordinator({ isCurrent: () => true, client: {}, storage, createKey: () => key });
++  assert.equal((await manager.pending({ ...context, stationId })).kind, 'pending_reconciliation');
++  assert.equal((await manager.pending({ ...context, stationId, sessionId: '10000000-0000-4000-8000-000000000002' })).kind, 'pending_other');
++  assert.equal((await manager.pending({ ...context, stationId, eventId: '10000000-0000-4000-8000-000000000003' })).kind, 'pending_other');
++  assert.equal((await manager.pending({ ...context, stationId: '10000000-0000-4000-8000-000000000004' })).kind, 'pending_other');
++  assert.equal((await manager.pending({ ...context, stationId, userId: '10000000-0000-4000-8000-000000000005' })).kind, 'none');
++});
++
++test('resposta atrasada após logout não confirma nem remove intenção', async () => {
++  const { createStaffOperationsCoordinator } = await service;
++  const storage = memory(); let current = true, resolvePost, started;
++  const entered = new Promise((resolve) => { started = resolve; });
++  const client = { async get(path) { return path.endsWith('/stations') ? stations() : queue(); },
++    post() { started(); return new Promise((resolve) => { resolvePost = resolve; }); } };
++  const manager = createStaffOperationsCoordinator({ client, storage, createKey: () => key, isCurrent: () => current });
++  const result = manager.callNext(context, experienceId, stationId);
++  await entered; current = false; resolvePost(called());
++  assert.equal((await result).kind, 'stale');
++  assert.equal(storage.map.get(userId).key, key);
++  assert.equal(storage.receipts.get(userId).outcome.result.id, sessionId);
++});
++
++test('conflito conhecido rejeita a primeira tentativa e libera a reserva', async () => {
++  const { createStaffOperationsCoordinator } = await service;
++  const storage = memory();
++  const client = { async get(path) { return path.endsWith('/stations') ? stations() : queue(); },
++    async post() { throw Object.assign(new Error('fila vazia'), { status: 409, code: 'QUEUE_EMPTY' }); } };
++  const manager = createStaffOperationsCoordinator({ client, storage, createKey: () => key, isCurrent: () => true });
++  assert.deepEqual(await manager.callNext(context, experienceId, stationId),
++    { kind: 'rejected', status: 409, code: 'QUEUE_EMPTY', receiptId: key });
++  assert.equal(storage.map.size, 0);
++});
++
++test('chamadas simultâneas em estações distintas não compartilham resultado nem chave', async () => {
++  const { createStaffOperationsCoordinator } = await service;
++  const storage = memory(); let resolvePost, started;
++  const entered = new Promise((resolve) => { started = resolve; });
++  const client = { async get(path) { return path.endsWith('/stations') ? stations() : queue(); },
++    post() { started(); return new Promise((resolve) => { resolvePost = resolve; }); } };
++  const manager = createStaffOperationsCoordinator({ client, storage, createKey: () => key, isCurrent: () => true });
++  const first = manager.callNext(context, experienceId, stationId);
++  await entered;
++  const second = await manager.callNext(context, experienceId, '10000000-0000-4000-8000-000000000004');
++  assert.equal(second.kind, 'busy');
++  resolvePost(called());
++  assert.equal((await first).kind, 'confirmed');
++});
++
++test('falha ao reservar impede o POST e mudança de estação descarta resposta atrasada', async () => {
++  const { createStaffOperationsCoordinator } = await service;
++  const storage = memory();
++  storage.reserve = async () => { throw new Error('armazenamento indisponível'); };
++  const client = { async get(path) { return path.endsWith('/stations') ? stations() : queue(); },
++    async post() { assert.fail('não enviar sem persistência'); } };
++  const manager = createStaffOperationsCoordinator({ client, storage, createKey: () => key, isCurrent: () => true });
++  await assert.rejects(manager.callNext(context, experienceId, stationId), /armazenamento/);
++
++  const otherStorage = memory(); let selected = stationId, resolvePost, entered;
++  const started = new Promise((resolve) => { entered = resolve; });
++  const otherClient = { ...client, post() { entered(); return new Promise((resolve) => { resolvePost = resolve; }); } };
++  const other = createStaffOperationsCoordinator({ client: otherClient, storage: otherStorage, createKey: () => key,
++    isCurrent: (_context, intent) => !intent || intent.stationId === selected });
++  const result = other.callNext(context, experienceId, stationId);
++  await started; selected = '10000000-0000-4000-8000-000000000004'; resolvePost(called());
++  assert.equal((await result).kind, 'stale');
++  assert.equal(otherStorage.map.get(userId).key, key);
++});
++
++for (const afterDelete of [false, true]) {
++  test(`confirmação sobrevive à falha de limpeza ${afterDelete ? 'após' : 'antes da'} exclusão`, async () => {
++    const { createStaffOperationsCoordinator } = await service;
++    const storage = memory(), originalClear = storage.clear.bind(storage);
++    storage.clear = async (...args) => { if (afterDelete) await originalClear(...args); throw new Error('falha na limpeza'); };
++    const client = { async get(path) { return path.endsWith('/stations') ? stations() : queue(); },
++      async post() { return called(); } };
++    const manager = createStaffOperationsCoordinator({ client, storage, createKey: () => key, isCurrent: () => true });
++    const result = await manager.callNext(context, experienceId, stationId);
++    assert.equal(result.kind, 'confirmed_cleanup_pending');
++    assert.equal(result.result.id, sessionId);
++    assert.equal(storage.receipts.get(userId).outcome.result.id, sessionId);
++    assert.equal((await manager.callNext(context, experienceId, stationId)).kind, 'terminal_pending');
++    storage.clear = originalClear;
++    assert.equal((await manager.cleanupTerminal({ ...context, stationId }, key)).kind, 'terminal_pending');
++    assert.equal((await manager.acknowledgeTerminal({ ...context, stationId, serviceSessionId: sessionId }, key)).kind, 'acknowledged');
++  });
++}
++
++test('falha ao persistir recibo mantém despacho bloqueado sem negar sucesso conhecido', async () => {
++  const { createStaffOperationsCoordinator } = await service;
++  const storage = memory(); storage.recordTerminal = async () => { throw new Error('falha de gravação'); };
++  const client = { async get(path) { return path.endsWith('/stations') ? stations() : queue(); }, async post() { return called(); } };
++  const manager = createStaffOperationsCoordinator({ client, storage, createKey: () => key, isCurrent: () => true });
++  assert.equal((await manager.callNext(context, experienceId, stationId)).kind, 'confirmed_cleanup_pending');
++  assert.equal(storage.map.get(userId).phase, 'dispatching');
++  assert.equal((await manager.callNext(context, experienceId, stationId)).kind, 'pending_reconciliation');
++});
++
++test('recibo gravado antes da falha pode ser recuperado sem reenviar', async () => {
++  const { createStaffOperationsCoordinator } = await service;
++  const storage = memory(), original = storage.recordTerminal.bind(storage); let posts = 0;
++  storage.recordTerminal = async (...args) => { await original(...args); throw new Error('gravação incerta'); };
++  const client = { async get(path) { return path.endsWith('/stations') ? stations() : queue(); },
++    async post() { posts += 1; return called(); } };
++  const make = () => createStaffOperationsCoordinator({ client, storage, createKey: () => key, isCurrent: () => true });
++  assert.equal((await make().callNext(context, experienceId, stationId)).kind, 'confirmed_cleanup_pending');
++  const restarted = make();
++  const pending = await restarted.pending({ ...context, stationId });
++  assert.equal(pending.kind, 'terminal_pending'); assert.equal(pending.outcome.result.id, sessionId);
++  assert.equal((await restarted.cleanupTerminal({ ...context, stationId }, key)).kind, 'terminal_pending');
++  assert.equal(posts, 1);
++});
++
++test('mudança depois da reserva cancela somente fase reservada e não envia POST', async () => {
++  const { createStaffOperationsCoordinator } = await service;
++  const storage = memory(), original = storage.reserve.bind(storage); let current = true;
++  storage.reserve = async (...args) => { const result = await original(...args); current = false; return result; };
++  const client = { async get(path) { return path.endsWith('/stations') ? stations() : queue(); }, async post() { assert.fail('POST proibido'); } };
++  const manager = createStaffOperationsCoordinator({ client, storage, createKey: () => key, isCurrent: () => current });
++  assert.equal((await manager.callNext(context, experienceId, stationId)).kind, 'stale');
++  assert.equal(storage.map.size, 0);
++});
++
++test('falha ambígua na transição para envio não permite POST nem descarta intenção', async () => {
++  const { createStaffOperationsCoordinator } = await service;
++  const storage = memory(), original = storage.dispatch.bind(storage);
++  storage.dispatch = async (...args) => { await original(...args); throw new Error('gravação incerta'); };
++  const client = { async get(path) { return path.endsWith('/stations') ? stations() : queue(); }, async post() { assert.fail('POST proibido'); } };
++  const manager = createStaffOperationsCoordinator({ client, storage, createKey: () => key, isCurrent: () => true });
++  assert.equal((await manager.callNext(context, experienceId, stationId)).kind, 'storage_error');
++  assert.equal(storage.map.get(userId).phase, 'dispatching');
++  assert.equal((await manager.cancelReserved({ ...context, stationId })).kind, 'blocked');
++});
++
++test('logout durante falha de limpeza rejeitada retorna contexto obsoleto e preserva recibo', async () => {
++  const { createStaffOperationsCoordinator } = await service;
++  const storage = memory(); let current = true, release, entered;
++  const started = new Promise((resolve) => { entered = resolve; });
++  storage.clear = () => { entered(); return new Promise((_, reject) => { release = reject; }); };
++  const client = { async get(path) { return path.endsWith('/stations') ? stations() : queue(); },
++    async post() { throw Object.assign(new Error('vazia'), { status: 409, code: 'QUEUE_EMPTY' }); } };
++  const manager = createStaffOperationsCoordinator({ client, storage, createKey: () => key, isCurrent: () => current });
++  const result = manager.callNext(context, experienceId, stationId);
++  await started; current = false; release(new Error('erro'));
++  assert.equal((await result).kind, 'stale');
++  assert.equal(storage.receipts.get(userId).outcome.code, 'QUEUE_EMPTY');
++});
++
++test('logout durante falha de persistência do recibo mantém o despacho para reconciliação', async () => {
++  const { createStaffOperationsCoordinator } = await service;
++  const storage = memory(); let current = true, release, entered;
++  const started = new Promise((resolve) => { entered = resolve; });
++  storage.recordTerminal = () => { entered(); return new Promise((_, reject) => { release = reject; }); };
++  const client = { async get(path) { return path.endsWith('/stations') ? stations() : queue(); }, async post() { return called(); } };
++  const manager = createStaffOperationsCoordinator({ client, storage, createKey: () => key, isCurrent: () => current });
++  const result = manager.callNext(context, experienceId, stationId);
++  await started; current = false; release(new Error('erro'));
++  assert.equal((await result).kind, 'stale');
++  assert.equal(storage.map.get(userId).phase, 'dispatching');
++});
++
++test('nova instância recupera fases e recibo após falha posterior à exclusão', async () => {
++  const { createStaffIntentStorage } = loadModule('services/staffIntentStorage.js', (name) => {
++    if (name === 'react-native') return { Platform: { OS: 'web' } };
++    if (name === 'expo-secure-store') return {};
++    return require(name);
++  }).exports;
++  const values = new Map(); let failAfterDelete = false;
++  const secureStore = { async getItemAsync(k) { return values.get(k) ?? null; },
++    async setItemAsync(k, v) { values.set(k, v); }, async deleteItemAsync(k) {
++      values.delete(k); if (failAfterDelete) throw new Error('exclusão incerta');
++    } };
++  const open = () => createStaffIntentStorage({ platformOS: 'android', secureStore });
++  let store = open();
++  const intent = { ...context, stationId, experienceId, serviceSessionId: null, kind: 'call', key, phase: 'reserved' };
++  await store.reserve(intent);
++  store = open(); assert.equal((await store.get(userId)).phase, 'reserved');
++  await store.dispatch(userId, key);
++  store = open(); assert.equal((await store.get(userId)).phase, 'dispatching');
++  assert.equal(await store.cancelReserved(userId, key), false);
++  await store.recordTerminal(userId, key, { kind: 'confirmed', result: { id: sessionId, queueEntryId: entryId,
++    experienceId, stationId, stationLabel: 'Estação 01', status: 'pending' } });
++  failAfterDelete = true;
++  await assert.rejects(store.clear(userId, key), /incerta/);
++  store = open(); assert.equal((await store.get(userId)).phase, 'terminal');
++  assert.equal((await store.reserve(intent)).created, false);
++  failAfterDelete = false;
++  await store.clear(userId, key);
++  assert.equal((await store.acknowledge(userId, key, intent)).kind, 'acknowledged');
++  assert.equal(await store.get(userId), null);
++});
++
++test('coordenadores concorrentes não enviam duas intenções pela mesma conta', async () => {
++  const { createStaffOperationsCoordinator } = await service;
++  const storage = memory(); let resolvePost, entered, posts = 0;
++  const started = new Promise((resolve) => { entered = resolve; });
++  const client = { async get(path) { return path.endsWith('/stations') ? stations() : queue(); },
++    post() { posts += 1; entered(); return new Promise((resolve) => { resolvePost = resolve; }); } };
++  const make = () => createStaffOperationsCoordinator({ client, storage, createKey: () => key, isCurrent: () => true });
++  const first = make().callNext(context, experienceId, stationId);
++  await started;
++  const second = await make().callNext(context, experienceId, stationId);
++  assert.equal(second.kind, 'pending_reconciliation'); assert.equal(posts, 1);
++  resolvePost(called()); assert.equal((await first).kind, 'confirmed');
++});
++
++for (const field of ['userId', 'sessionId', 'eventId', 'stationId']) {
++  test(`mudança de ${field} durante limpeza impede publicação do resultado antigo`, async () => {
++    const { createStaffOperationsCoordinator } = await service;
++    const storage = memory(); let live = { ...context, stationId }, release, entered;
++    const started = new Promise((resolve) => { entered = resolve; });
++    storage.clear = () => { entered(); return new Promise((_, reject) => { release = reject; }); };
++    const client = { async get(path) { return path.endsWith('/stations') ? stations() : queue(); }, async post() { return called(); } };
++    const isCurrent = (current, intent) => ['userId', 'sessionId', 'eventId'].every((name) => current[name] === live[name]) &&
++      (!intent || intent.stationId === live.stationId);
++    const manager = createStaffOperationsCoordinator({ client, storage, createKey: () => key, isCurrent });
++    const result = manager.callNext(context, experienceId, stationId);
++    await started; live = { ...live, [field]: '10000000-0000-4000-8000-000000000009' }; release(new Error('erro'));
++    assert.equal((await result).kind, 'stale');
++    assert.equal(storage.receipts.get(userId).outcome.result.id, sessionId);
++  });
++}
++
++function secureStaffRig(values = new Map()) {
++  const { createStaffIntentStorage } = loadModule('services/staffIntentStorage.js', (name) => {
++    if (name === 'react-native') return { Platform: { OS: 'web' } };
++    if (name === 'expo-secure-store') return {};
++    return require(name);
++  }).exports;
++  const fault = { deleteMode: null, readFails: false, readAckFails: false, writeAckMode: null,
++    writeCompletedMode: null, deleteReceipt: null };
++  const secureStore = {
++    async getItemAsync(k) {
++      if (fault.readAckFails && k.endsWith('.ack')) throw new Error('leitura ack');
++      if (fault.readFails && k.endsWith('.receipt')) throw new Error('leitura');
++      return values.get(k) ?? null;
++    },
++    async setItemAsync(k, v) {
++      if (k.endsWith('.ack') && fault.writeAckMode === 'before') throw new Error('gravação');
++      const completed = k.endsWith('.ack') && JSON.parse(v).status === 'completed';
++      if (completed && fault.writeCompletedMode === 'before') throw new Error('gravação completed');
++      values.set(k, v);
++      if (k.endsWith('.ack') && fault.writeAckMode === 'after') throw new Error('gravação');
++      if (completed && fault.writeCompletedMode === 'after') throw new Error('gravação completed');
++    },
++    async deleteItemAsync(k) {
++      if (k.endsWith('.receipt') && fault.deleteReceipt) await fault.deleteReceipt();
++      if (k.endsWith('.receipt') && fault.deleteMode === 'before') throw new Error('exclusão');
++      values.delete(k);
++      if (k.endsWith('.receipt') && ['after', 'after_read'].includes(fault.deleteMode)) {
++        if (fault.deleteMode === 'after_read') fault.readFails = true;
++        throw new Error('exclusão');
++      }
++    },
++  };
++  return { storage: createStaffIntentStorage({ platformOS: 'android', secureStore }), values, fault };
++}
++
++for (const mode of ['before', 'after']) {
++  test(`falha de marcador ${mode} da gravação não libera operação`, async () => {
++    const { createStaffOperationsCoordinator } = await service;
++    const { storage, fault } = secureStaffRig();
++    const client = { async get(path) { return path.endsWith('/stations') ? stations() : queue(); }, async post() { return called(); } };
++    const manager = createStaffOperationsCoordinator({ client, storage, isCurrent: () => true, createKey: () => key });
++    const scope = { ...context, stationId, serviceSessionId: sessionId };
++    await manager.callNext(context, experienceId, stationId);
++    fault.writeAckMode = mode;
++    assert.equal((await manager.acknowledgeTerminal(scope, key)).kind, 'storage_error');
++    assert.equal((await manager.pending(scope)).receiptId, key);
++    assert.equal((await manager.callNext(context, experienceId, stationId)).kind, 'terminal_pending');
++    fault.writeAckMode = null;
++    assert.equal((await manager.acknowledgeTerminal(scope, key)).kind, 'acknowledged');
++  });
++}
++
++test('reconhecimento de A não remove o recibo posterior B', async () => {
++  const { createStaffOperationsCoordinator } = await service;
++  const { storage } = secureStaffRig(); let index = 0;
++  const keyB = '50000000-0000-4000-8000-000000000002';
++  const client = { async get(path) { return path.endsWith('/stations') ? stations() : queue(); }, async post() { return called(); } };
++  const manager = createStaffOperationsCoordinator({ client, storage, isCurrent: () => true, createKey: () => index++ ? keyB : key });
++  const scope = { ...context, stationId, serviceSessionId: sessionId };
++  const first = await manager.callNext(context, experienceId, stationId);
++  assert.equal(first.receiptId, key);
++  assert.equal((await manager.acknowledgeTerminal(scope, key)).kind, 'acknowledged');
++  assert.equal((await manager.acknowledgeTerminal(scope, key)).kind, 'receipt_absent');
++  const second = await manager.callNext(context, experienceId, stationId);
++  assert.equal(second.receiptId, keyB);
++  assert.equal((await manager.acknowledgeTerminal(scope, key)).kind, 'receipt_changed');
++  const pending = await manager.pending(scope);
++  assert.equal(pending.receiptId, keyB);
++  assert.equal((await manager.acknowledgeTerminal({ ...scope, serviceSessionId: '10000000-0000-4000-8000-000000000009' }, keyB)).kind, 'blocked');
++  assert.equal((await manager.pending(scope)).receiptId, keyB);
++});
++
++for (const mode of ['before', 'after', 'after_read']) {
++  test(`reconhecimento com exclusão ${mode} preserva bloqueio até verificar o mesmo recibo`, async () => {
++    const { createStaffOperationsCoordinator } = await service;
++    const { storage, fault } = secureStaffRig();
++    const client = { async get(path) { return path.endsWith('/stations') ? stations() : queue(); }, async post() { return called(); } };
++    const make = () => createStaffOperationsCoordinator({ client, storage, isCurrent: () => true, createKey: () => key });
++    const first = make(); const scope = { ...context, stationId, serviceSessionId: sessionId };
++    assert.equal((await first.callNext(context, experienceId, stationId)).receiptId, key);
++    fault.deleteMode = mode;
++    const result = await first.acknowledgeTerminal(scope, key);
++    assert.equal(result.kind, mode === 'before' ? 'delete_failed' : mode === 'after' ? 'receipt_absent' : 'acknowledgement_uncertain');
++    fault.readFails = false;
++    const restarted = make();
++    assert.equal((await restarted.pending(scope)).receiptId, key);
++    assert.equal((await restarted.callNext(context, experienceId, stationId)).kind, 'terminal_pending');
++    fault.deleteMode = null;
++    assert.equal((await restarted.acknowledgeTerminal(scope, key)).kind, 'acknowledged');
++    assert.equal((await restarted.acknowledgeTerminal(scope, key)).kind, 'receipt_absent');
++  });
++}
++
++test('dois coordenadores reconhecem apenas o mesmo recibo uma vez', async () => {
++  const { createStaffOperationsCoordinator } = await service;
++  const { storage } = secureStaffRig();
++  const client = { async get(path) { return path.endsWith('/stations') ? stations() : queue(); }, async post() { return called(); } };
++  const make = () => createStaffOperationsCoordinator({ client, storage, isCurrent: () => true, createKey: () => key });
++  const first = make(), second = make(), scope = { ...context, stationId, serviceSessionId: sessionId };
++  await first.callNext(context, experienceId, stationId);
++  const results = await Promise.all([first.acknowledgeTerminal(scope, key), second.acknowledgeTerminal(scope, key)]);
++  assert.equal(results.filter((item) => item.kind === 'acknowledged').length, 1);
++  assert.ok(results.every((item) => ['acknowledged', 'receipt_absent', 'already_acknowledged'].includes(item.kind)));
++});
++
++test('recibo de outro contexto não pode ser reconhecido', async () => {
++  const { createStaffOperationsCoordinator } = await service;
++  const { storage } = secureStaffRig();
++  const client = { async get(path) { return path.endsWith('/stations') ? stations() : queue(); }, async post() { return called(); } };
++  const manager = createStaffOperationsCoordinator({ client, storage, isCurrent: () => true, createKey: () => key });
++  const scope = { ...context, stationId, serviceSessionId: sessionId };
++  await manager.callNext(context, experienceId, stationId);
++  for (const field of ['sessionId', 'eventId', 'stationId', 'serviceSessionId']) {
++    assert.equal((await manager.acknowledgeTerminal({ ...scope, [field]: '10000000-0000-4000-8000-000000000009' }, key)).kind, 'blocked');
++  }
++  assert.equal((await manager.acknowledgeTerminal({ ...scope, userId: '10000000-0000-4000-8000-000000000009' }, key)).kind, 'receipt_absent');
++  assert.equal((await manager.pending(scope)).receiptId, key);
++});
++
++test('reserva concorrente com exclusão incerta aguarda e mantém recibo protegido', async () => {
++  const { createStaffOperationsCoordinator } = await service;
++  const { storage, fault } = secureStaffRig(); let posts = 0, release, entered;
++  const client = { async get(path) { return path.endsWith('/stations') ? stations() : queue(); },
++    async post() { posts += 1; return called(); } };
++  const make = () => createStaffOperationsCoordinator({ client, storage, isCurrent: () => true, createKey: () => key });
++  const first = make(), second = make(), scope = { ...context, stationId, serviceSessionId: sessionId };
++  await first.callNext(context, experienceId, stationId);
++  const original = storage.acknowledge.bind(storage);
++  const started = new Promise((resolve) => { entered = resolve; });
++  storage.acknowledge = async (...args) => { entered(); await new Promise((resolve) => { release = resolve; }); return original(...args); };
++  const acknowledgement = first.acknowledgeTerminal(scope, key);
++  await started; fault.deleteMode = 'after';
++  const competing = second.callNext(context, experienceId, stationId);
++  release();
++  assert.equal((await acknowledgement).kind, 'receipt_absent');
++  assert.equal((await competing).kind, 'terminal_pending');
++  assert.equal(posts, 1);
++});
++
++for (const changed of ['userId', 'sessionId', 'eventId', 'stationId', 'serviceSessionId']) {
++  test(`mudança de ${changed} durante falha de reconhecimento retorna stale`, async () => {
++    const { createStaffOperationsCoordinator } = await service;
++    const storage = memory(); let live = { ...context, stationId, serviceSessionId: sessionId }, entered, release;
++    const started = new Promise((resolve) => { entered = resolve; });
++    const client = { async get(path) { return path.endsWith('/stations') ? stations() : queue(); }, async post() { return called(); } };
++    const isCurrent = (current, scope) => ['userId', 'sessionId', 'eventId'].every((field) => current[field] === live[field]) &&
++      (!scope?.stationId || scope.stationId === live.stationId) &&
++      (!scope?.outcome?.result?.id || scope.outcome.result.id === live.serviceSessionId);
++    const manager = createStaffOperationsCoordinator({ client, storage, isCurrent, createKey: () => key });
++    await manager.callNext(context, experienceId, stationId);
++    storage.acknowledge = () => { entered(); return new Promise((_, reject) => { release = reject; }); };
++    const result = manager.acknowledgeTerminal({ ...live }, key);
++    await started; live = { ...live, [changed]: '10000000-0000-4000-8000-000000000009' }; release(new Error('erro'));
++    assert.equal((await result).kind, 'stale');
++    assert.equal(storage.receipts.get(userId).key, key);
++  });
++}
++
++test('logout durante erro no reconhecimento retorna stale e mantém recibo original', async () => {
++  const { createStaffOperationsCoordinator } = await service;
++  const storage = memory(); let current = true, entered, release;
++  const started = new Promise((resolve) => { entered = resolve; });
++  const client = { async get(path) { return path.endsWith('/stations') ? stations() : queue(); }, async post() { return called(); } };
++  const manager = createStaffOperationsCoordinator({ client, storage, isCurrent: () => current, createKey: () => key });
++  await manager.callNext(context, experienceId, stationId);
++  storage.acknowledge = () => { entered(); return new Promise((_, reject) => { release = reject; }); };
++  const result = manager.acknowledgeTerminal({ ...context, stationId, serviceSessionId: sessionId }, key);
++  await started; current = false; release(new Error('armazenamento'));
++  assert.equal((await result).kind, 'stale');
++  assert.equal(storage.receipts.get(userId).key, key);
++});
++
++test('falha de leitura de .ack bloqueia POST e preserva recibo posterior', async () => {
++  const { createStaffOperationsCoordinator } = await service;
++  const { storage, values, fault } = secureStaffRig();
++  const keyB = '50000000-0000-4000-8000-000000000002';
++  let index = 0, posts = 0;
++  const client = { async get(path) { return path.endsWith('/stations') ? stations() : queue(); },
++    async post() { posts += 1; return called(); } };
++  const manager = createStaffOperationsCoordinator({ client, storage, isCurrent: () => true,
++    createKey: () => index++ ? keyB : key });
++  const scope = { ...context, stationId, serviceSessionId: sessionId };
++  await manager.callNext(context, experienceId, stationId);
++  assert.equal((await manager.acknowledgeTerminal(scope, key)).kind, 'acknowledged');
++  assert.equal((await manager.callNext(context, experienceId, stationId)).receiptId, keyB);
++  const receiptKey = `arenago.staff.operation.${userId}.receipt`;
++  const receiptBefore = values.get(receiptKey);
++  fault.readAckFails = true;
++  await assert.rejects(storage.get(userId), /leitura ack/);
++  await assert.rejects(manager.callNext(context, experienceId, stationId), /leitura ack/);
++  assert.equal((await manager.acknowledgeTerminal(scope, key)).kind, 'acknowledgement_uncertain');
++  assert.equal(posts, 2);
++  assert.equal(values.get(receiptKey), receiptBefore);
++  fault.readAckFails = false;
++  assert.equal((await manager.pending(scope)).receiptId, keyB);
++  assert.equal((await manager.acknowledgeTerminal(scope, key)).kind, 'receipt_changed');
++  assert.equal((await manager.pending(scope)).outcome.result.id, sessionId);
++});
++
++test('falha de leitura de .ack não libera intenção com resultado desconhecido', async () => {
++  const { createStaffOperationsCoordinator } = await service;
++  const { storage, fault } = secureStaffRig();
++  let posts = 0;
++  const client = { async get(path) { return path.endsWith('/stations') ? stations() : queue(); },
++    async post() { posts += 1; throw Object.assign(new Error('rede'), { isNetworkError: true }); } };
++  const manager = createStaffOperationsCoordinator({ client, storage, isCurrent: () => true, createKey: () => key });
++  assert.equal((await manager.callNext(context, experienceId, stationId)).kind, 'uncertain');
++  fault.readAckFails = true;
++  await assert.rejects(manager.callNext(context, experienceId, stationId), /leitura ack/);
++  assert.equal(posts, 1);
++  fault.readAckFails = false;
++  assert.equal((await manager.pending({ ...context, stationId })).kind, 'pending_reconciliation');
++});
++
++for (const mode of ['before', 'after']) {
++  test(`falha ${mode} de persistir completed preserva o estado efetivamente gravado`, async () => {
++    const { createStaffOperationsCoordinator } = await service;
++    const { storage, values, fault } = secureStaffRig();
++    const keyB = '50000000-0000-4000-8000-000000000002';
++    let index = 0, posts = 0;
++    const client = { async get(path) { return path.endsWith('/stations') ? stations() : queue(); },
++      async post() { posts += 1; return called(); } };
++    const manager = createStaffOperationsCoordinator({ client, storage, isCurrent: () => true,
++      createKey: () => index++ ? keyB : key });
++    const scope = { ...context, stationId, serviceSessionId: sessionId };
++    assert.equal((await manager.callNext(context, experienceId, stationId)).kind, 'confirmed');
++    fault.writeCompletedMode = mode;
++    assert.equal((await manager.acknowledgeTerminal(scope, key)).kind, 'acknowledgement_uncertain');
++    const marker = JSON.parse(values.get(`arenago.staff.operation.${userId}.ack`));
++    assert.equal(marker.status, mode === 'before' ? 'pending' : 'completed');
++    assert.equal(marker.receipt.outcome.kind, 'confirmed');
++    assert.equal(marker.receipt.outcome.result.id, sessionId);
++    const saved = await storage.get(userId);
++    if (mode === 'before') {
++      assert.equal(saved.key, key);
++      assert.equal(saved.acknowledgementPending, true);
++      assert.equal((await manager.callNext(context, experienceId, stationId)).kind, 'terminal_pending');
++      assert.equal(posts, 1);
++      fault.writeCompletedMode = null;
++      assert.equal((await manager.acknowledgeTerminal(scope, key)).kind, 'acknowledged');
++    } else {
++      assert.equal(saved, null);
++      fault.writeCompletedMode = null;
++      assert.equal((await manager.acknowledgeTerminal(scope, key)).kind, 'receipt_absent');
++    }
++    assert.equal((await manager.callNext(context, experienceId, stationId)).receiptId, keyB);
++    assert.equal((await manager.acknowledgeTerminal(scope, key)).kind, 'receipt_changed');
++    assert.equal((await manager.pending(scope)).receiptId, keyB);
++    assert.equal(posts, 2);
++  });
++}
++
++test('novo adaptador recupera marcador pendente somente dos dados persistidos', async () => {
++  const { createStaffOperationsCoordinator } = await service;
++  const original = secureStaffRig(); let posts = 0;
++  const client = { async get(path) { return path.endsWith('/stations') ? stations() : queue(); },
++    async post() { posts += 1; return called(); } };
++  const make = (storage) => createStaffOperationsCoordinator({ client, storage, isCurrent: () => true, createKey: () => key });
++  const scope = { ...context, stationId, serviceSessionId: sessionId };
++  const first = make(original.storage);
++  await first.callNext(context, experienceId, stationId);
++  original.fault.deleteMode = 'after';
++  assert.equal((await first.acknowledgeTerminal(scope, key)).kind, 'receipt_absent');
++  const restored = secureStaffRig(new Map(original.values));
++  const second = make(restored.storage);
++  const pending = await second.pending(scope);
++  assert.equal(pending.receiptId, key);
++  assert.equal(pending.outcome.kind, 'confirmed');
++  assert.equal((await second.callNext(context, experienceId, stationId)).kind, 'terminal_pending');
++  assert.equal(posts, 1);
++  assert.equal((await second.acknowledgeTerminal(scope, key)).kind, 'acknowledged');
++});
++
++test('exclusão SecureStore pendente serializa reconhecimento e reserva entre coordenadores', async () => {
++  const { createStaffOperationsCoordinator } = await service;
++  const { storage, fault } = secureStaffRig();
++  const keyB = '50000000-0000-4000-8000-000000000002';
++  let posts = 0, current = true, entered, release;
++  const enteredDelete = new Promise((resolve) => { entered = resolve; });
++  const client = { async get(path) { return path.endsWith('/stations') ? stations() : queue(); },
++    async post() { posts += 1; return called(); } };
++  const first = createStaffOperationsCoordinator({ client, storage, isCurrent: () => current, createKey: () => key });
++  const second = createStaffOperationsCoordinator({ client, storage, isCurrent: () => true, createKey: () => keyB });
++  const scope = { ...context, stationId, serviceSessionId: sessionId };
++  await first.callNext(context, experienceId, stationId);
++  fault.deleteReceipt = () => { entered(); return new Promise((_, reject) => { release = reject; }); };
++  const acknowledgement = first.acknowledgeTerminal(scope, key);
++  await enteredDelete;
++  const duplicate = first.acknowledgeTerminal(scope, key);
++  const reservation = storage.reserve({ ...context, stationId, experienceId, serviceSessionId: null,
++    kind: 'call', key: keyB, phase: 'reserved' });
++  const operation = second.callNext(context, experienceId, stationId);
++  current = false;
++  release(new Error('exclusão interrompida'));
++  assert.equal((await acknowledgement).kind, 'stale');
++  assert.equal((await duplicate).kind, 'stale');
++  assert.equal((await reservation).created, false);
++  assert.equal((await operation).kind, 'terminal_pending');
++  assert.equal(posts, 1);
++  fault.deleteReceipt = null;
++  current = true;
++  assert.equal((await first.acknowledgeTerminal(scope, key)).kind, 'acknowledged');
++  assert.equal((await second.callNext(context, experienceId, stationId)).receiptId, keyB);
++  assert.equal((await first.acknowledgeTerminal(scope, key)).kind, 'receipt_changed');
++  assert.equal((await second.pending(scope)).receiptId, keyB);
++  assert.equal(posts, 2);
+ });
+diff --git a/app/services/staffIntentStorage.js b/app/services/staffIntentStorage.js
+new file mode 100644
+index 0000000..e7f1453
+--- /dev/null
++++ b/app/services/staffIntentStorage.js
+@@ -0,0 +1,165 @@
++import { Platform } from 'react-native';
++import * as SecureStore from 'expo-secure-store';
++
++const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
++const validId = (value) => typeof value === 'string' && UUID.test(value);
++const keyFor = (userId) => {
++  if (!validId(userId)) throw new Error('Conta inválida para intenção Staff.');
++  return `arenago.staff.operation.${userId.toLowerCase()}`;
++};
++const receiptKeyFor = (userId) => `${keyFor(userId)}.receipt`;
++const acknowledgementKeyFor = (userId) => `${keyFor(userId)}.ack`;
++let storageQueue = Promise.resolve();
++const validOutcome = (intent) => {
++  const outcome = intent.outcome;
++  if (outcome?.kind === 'rejected') return Number.isInteger(outcome.status) &&
++    (outcome.code === null || typeof outcome.code === 'string');
++  if (outcome?.kind !== 'confirmed' || !outcome.result || typeof outcome.result !== 'object') return false;
++  const result = outcome.result;
++  if (intent.kind === 'call') return validId(result.id) && validId(result.queueEntryId) &&
++    result.experienceId === intent.experienceId && result.stationId === intent.stationId &&
++    typeof result.stationLabel === 'string' && Boolean(result.stationLabel.trim()) && result.status === 'pending';
++  if (result.id !== intent.serviceSessionId) return false;
++  if (intent.kind === 'complete') return result.status === 'completed' && result.queueEntryStatus === 'closed' &&
++    result.closeReason === 'completed' && result.participationStatus === 'active';
++  if (intent.kind !== 'absent' || result.status !== 'absent' || typeof result.requeued !== 'boolean') return false;
++  const entry = result.newQueueEntry;
++  return result.requeued ? validId(entry?.id) && entry.status === 'waiting' && typeof entry.queueOrder === 'string' &&
++    /^[1-9]\d*$/.test(entry.queueOrder) && Number.isSafeInteger(entry.position) && entry.position > 0 : entry === null;
++};
++const valid = (intent, userId) => intent?.userId === userId && validId(intent.key) &&
++  validId(intent.sessionId) && validId(intent.eventId) && validId(intent.stationId) &&
++  ['reserved', 'dispatching', 'terminal'].includes(intent.phase) &&
++  (intent.phase !== 'terminal' || validOutcome(intent)) &&
++  (intent.kind === 'call' ? validId(intent.experienceId) && intent.serviceSessionId === null :
++    ['complete', 'absent'].includes(intent.kind) && intent.experienceId === null && validId(intent.serviceSessionId));
++
++// Uma instância compartilhada serializa reserva, leitura e remoção; web bloqueia
++// mutações até existir armazenamento durável apropriado para intenções.
++export function createStaffIntentStorage({ platformOS = Platform.OS, secureStore = SecureStore } = {}) {
++  const serialize = (work) => {
++    const result = storageQueue.then(work, work);
++    storageQueue = result.catch(() => {});
++    return result;
++  };
++  async function available() {
++    if (platformOS === 'web' || !secureStore || typeof secureStore.getItemAsync !== 'function' ||
++        typeof secureStore.setItemAsync !== 'function' || typeof secureStore.deleteItemAsync !== 'function' ||
++        (typeof secureStore.isAvailableAsync === 'function' && !await secureStore.isAvailableAsync()))
++      throw new Error('Armazenamento persistente Staff indisponível. Operação bloqueada.');
++  }
++  async function readSlot(userId, key) {
++    await available();
++    const raw = await secureStore.getItemAsync(key);
++    if (raw === null) return null;
++    let intent;
++    try { intent = JSON.parse(raw); } catch { throw new Error('Intenção Staff armazenada inválida.'); }
++    // Registros anteriores sem fase podem representar um POST já enviado.
++    if (intent && !intent.phase && key === keyFor(userId)) intent.phase = 'dispatching';
++    if (!valid(intent, userId) || (key === receiptKeyFor(userId) && intent.phase !== 'terminal') ||
++        (key === keyFor(userId) && intent.phase === 'terminal')) throw new Error('Intenção Staff armazenada inválida.');
++    return intent;
++  }
++  async function read(userId) {
++    const marker = await readAcknowledgement(userId);
++    const receipt = await readSlot(userId, receiptKeyFor(userId));
++    const intent = await readSlot(userId, keyFor(userId));
++    if (marker?.status === 'pending') {
++      if ((receipt && receipt.key !== marker.receipt.key) || (intent && intent.key !== marker.receipt.key))
++        throw new Error('Reconhecimento Staff incompatível.');
++      return receipt ?? { ...marker.receipt, acknowledgementPending: true };
++    }
++    if (receipt && intent && receipt.key !== intent.key) throw new Error('Registros Staff incompatíveis.');
++    return receipt ?? intent;
++  }
++  async function readAcknowledgement(userId) {
++    await available();
++    const raw = await secureStore.getItemAsync(acknowledgementKeyFor(userId));
++    if (raw === null) return null;
++    let marker;
++    try { marker = JSON.parse(raw); } catch { throw new Error('Reconhecimento Staff inválido.'); }
++    if (!['pending', 'completed'].includes(marker?.status) || marker.receipt?.phase !== 'terminal' ||
++        !valid(marker.receipt, userId)) throw new Error('Reconhecimento Staff inválido.');
++    return marker;
++  }
++  return {
++    isPersistent: platformOS !== 'web',
++    get(userId) { return serialize(() => read(userId)); },
++    reserve(intent) { return serialize(async () => {
++      if (!valid(intent, intent?.userId) || intent.phase !== 'reserved') throw new Error('Intenção Staff inválida.');
++      const marker = await readAcknowledgement(intent.userId);
++      if (marker?.receipt.key === intent.key) throw new Error('Chave Staff já reconhecida.');
++      const previous = await read(intent.userId);
++      if (previous) return { created: false, intent: previous };
++      await secureStore.setItemAsync(keyFor(intent.userId), JSON.stringify(intent));
++      return { created: true, intent };
++    }); },
++    dispatch(userId, expectedKey) { return serialize(async () => {
++      const current = await read(userId);
++      if (!current || current.key !== expectedKey || current.phase !== 'reserved') return false;
++      await secureStore.setItemAsync(keyFor(userId), JSON.stringify({ ...current, phase: 'dispatching' }));
++      return true;
++    }); },
++    recordTerminal(userId, expectedKey, outcome) { return serialize(async () => {
++      const current = await read(userId);
++      if (current?.key === expectedKey && current.phase === 'terminal' &&
++          JSON.stringify(current.outcome) === JSON.stringify(outcome)) return current;
++      if (!current || current.key !== expectedKey || current.phase !== 'dispatching' ||
++          !['confirmed', 'rejected'].includes(outcome?.kind)) throw new Error('Transição Staff inválida.');
++      const receipt = { ...current, phase: 'terminal', outcome };
++      if (!valid(receipt, userId)) throw new Error('Recibo Staff inválido.');
++      await secureStore.setItemAsync(receiptKeyFor(userId), JSON.stringify(receipt));
++      return receipt;
++    }); },
++    cancelReserved(userId, expectedKey) { return serialize(async () => {
++      const current = await read(userId);
++      if (!current || current.key !== expectedKey || current.phase !== 'reserved') return false;
++      await secureStore.deleteItemAsync(keyFor(userId));
++      return true;
++    }); },
++    clear(userId, expectedKey) { return serialize(async () => {
++      const receipt = await readSlot(userId, receiptKeyFor(userId));
++      const intent = await readSlot(userId, keyFor(userId));
++      if (!receipt || receipt.key !== expectedKey || (intent && intent.key !== expectedKey))
++        throw new Error('Recibo terminal necessário para limpeza.');
++      if (intent) await secureStore.deleteItemAsync(keyFor(userId));
++    }); },
++    acknowledge(userId, expectedKey, expectedScope) { return serialize(async () => {
++      if (!validId(expectedKey)) throw new Error('Identificador de recibo inválido.');
++      let marker = await readAcknowledgement(userId);
++      const receipt = await readSlot(userId, receiptKeyFor(userId));
++      const intent = await readSlot(userId, keyFor(userId));
++      if (receipt && receipt.key !== expectedKey) return { kind: 'receipt_changed' };
++      if (marker?.status === 'pending' && marker.receipt.key !== expectedKey) return { kind: 'receipt_changed' };
++      const target = receipt ?? (marker?.receipt.key === expectedKey ? marker.receipt : null);
++      if (!target) return { kind: 'receipt_absent' };
++      if (target.sessionId !== expectedScope?.sessionId || target.eventId !== expectedScope?.eventId ||
++          target.stationId !== expectedScope?.stationId || target.serviceSessionId !== expectedScope?.serviceSessionId ||
++          target.kind !== expectedScope?.kind || target.experienceId !== expectedScope?.experienceId)
++        return { kind: 'receipt_changed' };
++      if (intent) return { kind: 'cleanup_pending' };
++      if (marker?.status === 'completed' && marker.receipt.key === expectedKey && !receipt)
++        return { kind: 'already_acknowledged' };
++      if (!marker || marker.status !== 'pending') {
++        marker = { status: 'pending', receipt: target };
++        try { await secureStore.setItemAsync(acknowledgementKeyFor(userId), JSON.stringify(marker)); }
++        catch { return { kind: 'storage_error' }; }
++      }
++      if (receipt) {
++        try { await secureStore.deleteItemAsync(receiptKeyFor(userId)); }
++        catch {
++          try {
++            const remaining = await readSlot(userId, receiptKeyFor(userId));
++            if (!remaining) return { kind: 'receipt_absent' };
++            return { kind: remaining.key === expectedKey ? 'delete_failed' : 'receipt_changed' };
++          } catch { return { kind: 'acknowledgement_uncertain' }; }
++        }
++      }
++      try { await secureStore.setItemAsync(acknowledgementKeyFor(userId), JSON.stringify({ ...marker, status: 'completed' })); }
++      catch { return { kind: 'acknowledgement_uncertain' }; }
++      return { kind: 'acknowledged' };
++    }); },
++  };
++}
++
++export const defaultStaffIntentStorage = createStaffIntentStorage();
+diff --git a/docs/STAFF_REAL_OPERATIONS_IMPLEMENTACAO.md b/docs/STAFF_REAL_OPERATIONS_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..22c5853
+--- /dev/null
++++ b/docs/STAFF_REAL_OPERATIONS_IMPLEMENTACAO.md
+@@ -0,0 +1,43 @@
++# Operações reais Staff — implementação parcial
++
++## Contratos inspecionados
++
++Os três POSTs exigem sessão autenticada, corpo vazio e `Idempotency-Key`. A chamada retorna 201 e `serviceSession`; conclusão retorna 200 com `serviceSession`, `queueEntry` e `participation`; ausência retorna 200 com `serviceSession`, `previousQueueEntry`, `requeued` e `newQueueEntry`. O servidor valida concessão Staff por evento e coordena a fila por experiência em transação. Conflitos incluem `QUEUE_EMPTY`, `STATION_UNAVAILABLE`, `STATION_HAS_PENDING_CALL`, `SERVICE_NOT_PENDING`, `EVENT_OPERATION_ENDED` e conflitos de idempotência. As estações fornecem `pendingServiceSessionId`; as consultas e a resposta de chamada não fornecem nome de participante para chamá-lo presencialmente.
++
++## Intenção e resultados
++
++O serviço inclui validação da resposta de ausência, inclusive se houve reinserção. `staffIntentStorage.js` oferece reserva serializada e persistida no SecureStore por conta, sem credenciais. O registro contém conta, identificador de sessão, evento, estação, operação, experiência ou atendimento conforme necessário e chave. Leituras inválidas e falhas de armazenamento bloqueiam a operação. A versão web recusa reservas por falta de armazenamento persistente apropriado. A fila de armazenamento é compartilhada entre instâncias no mesmo runtime; não constitui lock entre processos ou dispositivos.
++
++O coordenador existente exige adaptador persistente, gerador de chave e verificação de contexto. Ele reserva antes do POST, não compartilha resultado entre acionamentos simultâneos e não reapresenta detalhes de intenção de outra sessão, evento ou estação. Uma intenção por conta bloqueia outras intenções até ser resolvida. Uma resposta obsoleta não é publicada na nova tela: uma resposta definitiva pode ser registrada para a conta original, retornando `stale` ao chamador antigo.
++
++### Fases e limpeza
++
++- `reserved`: persistida antes de preparar o envio. Pode ser cancelada explicitamente pela mesma conta, inclusive após outra sessão, somente enquanto o armazenamento ainda confirmar essa fase. A comparação e a remoção são serializadas com a transição de envio no mesmo runtime.
++- `dispatching`: persistida antes do POST. Se a gravação falhar, o POST não é enviado e a fase gravada, que pode ser incerta, permanece bloqueada. Após timeout, reinício, logout ou mudança de tela, não há cancelamento nem repetição automática.
++- `terminal`: resultado definitivo confirmado ou rejeitado é gravado, com a chave e o resultado mínimo, em recibo separado. Esse recibo tem precedência na leitura e impede nova operação. A limpeza repetível remove somente a intenção original; o recibo continua até reconhecimento explícito em `acknowledgeTerminal`. Mesmo que a exclusão da intenção ocorra e depois rejeite, o recibo permanece. A interface futura deve apresentar o resultado e pedir reconhecimento antes de permitir outra operação.
++
++O identificador do recibo é a chave UUID da intenção, exposta como `receiptId` ao obter o resultado terminal ou consultar o recibo. A limpeza e o reconhecimento exigem o identificador apresentado; o adaptador compara o identificador e os dados de sessão, evento, estação, experiência e atendimento na mesma seção serializada da exclusão. O identificador não autoriza acesso: o coordenador também confere conta, sessão, contexto atual e atendimento. A geração de chaves deve utilizar UUIDs seguros e únicos.
++
++Antes de excluir um recibo, o adaptador persiste um marcador `pending` contendo o recibo original. Enquanto esse marcador estiver pendente, uma reserva nova permanece bloqueada, mesmo que a exclusão tenha ocorrido. Se a exclusão falhar antes de remover, retorna `delete_failed`; se removeu e a leitura confirmar a ausência, retorna `receipt_absent`; se a leitura falhar, retorna `acknowledgement_uncertain`. Uma tentativa posterior do mesmo `receiptId` resolve o marcador sem consultar nem alterar outro recibo. Com a ausência confirmada, o marcador passa a `completed`; esse resultado descreve somente o reconhecimento local, não uma confirmação da operação no backend. Um recibo de chave diferente retorna `receipt_changed` e permanece intacto. Falha ao gravar marcador retorna `storage_error` e mantém a proteção pelo recibo ou marcador existente. O marcador concluído persiste e pode ser substituído por um reconhecimento posterior.
++
++Quando o backend confirma e a gravação do recibo ou a limpeza falha, a chamada retorna `confirmed_cleanup_pending` enquanto o contexto atual for válido; uma rejeição conhecida usa `rejected_cleanup_pending`. Se a gravação do recibo falhar antes de persistir, a intenção continua em `dispatching`: depois de reiniciar, a confirmação em memória não pode ser recuperada sem o contrato de reconciliação do backend. A falha após gravação pode deixar o recibo recuperável. Esses casos não são tratados como nova intenção.
++
++Os estados estruturados distinguem confirmação, rejeição, resultado incerto, conciliação pendente, contexto diferente e operação em andamento. `QUEUE_EMPTY`, `STATION_UNAVAILABLE`, `STATION_HAS_PENDING_CALL`, `SERVICE_NOT_PENDING` e `EVENT_OPERATION_ENDED`, quando recebidos como primeira resposta HTTP 409, são rejeições. Também são classificadas respostas 400, 401, 403 e 404. Timeout, rede, resposta inválida e HTTP 5xx mantêm a intenção; `IDEMPOTENCY_IN_PROGRESS` e `IDEMPOTENCY_REQUEST_CONFLICT` exigem conciliação. A leitura da estação não prova o resultado histórico.
++
++## Bloqueios para integração e recuperação
++
++O backend define `expiresAt` a partir de `STAFF_IDEMPOTENCY_TTL_SECONDS`; a reserva consulta a chave existente sem verificar expiração, e o código inspecionado não define expurgo nem informa ao cliente uma garantia contratual de retenção. Assim, não há prazo verificável no aplicativo para repetir uma chamada com segurança após resultado desconhecido. O coordenador preserva a chave e bloqueia reenvio, inclusive com a mesma chave. Uma intenção pendente sobrevive à reinicialização, mas sua resolução requer mecanismo confiável de reconciliação ou garantia explícita de retenção. Não se presume sucesso pelo estado atual da estação.
++
++O backend associa `sid` à sessão nos tokens e ao principal autenticado, mas `PublicUserDto`, `/auth/me` e o contexto de autenticação do aplicativo não expõem um identificador estável de sessão. `sessionEpoch` é local ao processo e não serve para correlacionar sessões após reinício. Antes de ligar o coordenador à interface, é necessário um vínculo estável e confiável para `sessionId` e uma implementação de `isCurrent` que valide conta, sessão, revisão, evento, estação e atendimento. Não extrair ou confiar em dados de token sem o desenho e a validação apropriados. Até então, esta infraestrutura não está pronta para uso operacional.
++
++Uma intenção `dispatching` antiga ou de outra sessão pode bloquear novas operações da mesma conta até haver reconciliação. Um recibo terminal de outra sessão não é exibido nem reconhecido automaticamente. O reconhecimento de recibo e sua apresentação no fluxo real, inclusive falhas de armazenamento e mudanças simultâneas de contexto, ainda exigem integração e revisão. A identidade do participante permanece uma dependência de produto/backend.
++
++## Testes e validação
++
++Na campanha automatizada anterior, executada pelo Codex com Luna Medium, os testes focados tiveram 47 aprovados, 0 falhos e 0 ignorados; a suíte completa do frontend teve 466 aprovados, 0 falhos e 0 ignorados. `git diff --check` passou. A campanha usou transporte e armazenamento simulados, sem operação real de atendimento ou acesso ao Neon. Naquela campanha, a falha de leitura da chave `.ack` ainda não estava coberta: a falha simulada de leitura atingia `.receipt`.
++
++Na validação final automatizada, executada pelo Codex com Luna Medium e `NODE_ENV=test`, houve 53 testes focados aprovados e 472 testes aprovados na suíte completa do frontend, com 0 falhos e 0 ignorados em ambas. Os seis novos cenários passaram e `git diff --check` passou. Não houve acesso ao Neon nem operação real de atendimento nessa campanha.
++
++As quatro lacunas foram exercitadas com SecureStore e transporte simulados: falha de leitura de `.ack`, falha antes e depois de persistir `completed`, recriação do adaptador sobre dados persistidos com marcador pendente e concorrência enquanto `deleteItemAsync()` permanece pendente. Os cenários incluem mudança de contexto e tentativa tardia sobre recibo posterior. Eles não demonstram recuperação da sessão autenticada real nem exclusão entre processos ou dispositivos; permanece necessária cobertura de integração com o gerenciador real de sessão e a futura interface.
++
++Esta atualização documental não executou novamente as suítes, acessou o Neon ou realizou atendimento real. A infraestrutura local foi validada nos cenários simulados, mas continua parcial. Os botões operacionais permanecem desabilitados e a homologação de operações reais depende dos bloqueios descritos acima.

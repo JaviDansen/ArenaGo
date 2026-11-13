@@ -17,7 +17,8 @@ const input: AdminExternalQueueInput = { userId: "admin", sessionId: "session", 
 function fixture(options: { enabled?: boolean; absent?: boolean; active?: boolean; admin?: boolean; missingSession?: boolean;
   revoked?: boolean; expiredAtCheck?: number; secondFactor?: boolean; status?: string; capacity?: boolean;
   officialEndsAt?: Date; reservation?: "replay" | "request_conflict" | "in_progress";
-  payload?: object | null; fail?: "event" | "release" | "audit" | "complete"; auditCount?: number } = {}) {
+  payload?: object | null; fail?: "event" | "release" | "audit" | "complete"; auditCount?: number;
+  decisiveAfterCutoff?: boolean } = {}) {
   const queries: Array<{ text: string; params: unknown[] }> = [], marker = new Error("E086_PRIVATE_FAILURE");
   let sessionChecks = 0;
   const database = drizzle({ async query(config: { text: string }, params: unknown[]) {
@@ -35,6 +36,10 @@ function fixture(options: { enabled?: boolean; absent?: boolean; active?: boolea
       options.reservation === "request_conflict" ? "different" : externalQueueFingerprint(input.eventId, input.enabled, input.reason),
       options.reservation === "in_progress" ? "in_progress" : "completed", 200, input.eventId,
       options.payload === undefined ? { eventId: input.eventId, externalQueueEnabled: false, releasedCount: 3, changedAt: at.toISOString() } : options.payload]] };
+    if (text.includes('UPDATE events e SET external_queue_enabled')) {
+      if (options.fail === "event") throw marker;
+      return { rows: [{ decisionAtMs: at.getTime() + (options.decisiveAfterCutoff ? 1000 : 0), changed: !options.decisiveAfterCutoff }] };
+    }
     if (text.includes('AS "decisionAtMs"')) return { rows: [{ decisionAtMs: at.getTime() }] };
     if (text.startsWith('update "events"')) { if (options.fail === "event") throw marker; return { rows: [], rowCount: 1 }; }
     if (text.startsWith('update "participations"')) { if (options.fail === "release") throw marker; return { rows: [], rowCount: 3 }; }
@@ -44,8 +49,8 @@ function fixture(options: { enabled?: boolean; absent?: boolean; active?: boolea
   } } as unknown as Client, { schema });
   const events = new EventsService(database);
   events.evaluateEventAvailabilityById = async (eventId, observed, tx) => {
-    assert.equal(eventId, input.eventId); assert.deepEqual(observed, at); assert.ok(tx && tx !== database);
-    const officialEndsAt=options.officialEndsAt??new Date("2026-11-03T16:00:00Z");
+    assert.equal(eventId, input.eventId); assert.ok(tx && tx !== database);
+    const officialEndsAt=options.officialEndsAt??new Date(at.getTime()+(options.decisiveAfterCutoff ? 1000 : 3600000));
     const event = { name: "E086", accessCodeNormalized: "E086-UNIT", timezone: "America/Sao_Paulo", externalQueueEnabled: options.enabled ?? true,
       startsAt: new Date("2026-11-03T14:00:00Z"), officialEndsAt,
       operationalDeadlineAt: new Date(officialEndsAt.getTime()+60*60_000), closureRequestedAt: null, adminDeadlineAt: null };
@@ -60,13 +65,20 @@ test("E08.6 compõe E05 real, auditoria e idempotência em um único tx READ COM
     externalQueueEnabled: false, releasedCount: 3, changedAt: at });
   assert.equal(f.queries.filter(q => q.text.startsWith("begin")).length, 1); assert.equal(f.queries[0].text,"begin isolation level read committed");
   const order = ['from "events"','from "participations"',"FROM users WHERE","SELECT id FROM user_roles","SELECT id FROM sessions",
-    'insert into "idempotency_operations"','AS "decisionAtMs"','update "events"','update "participations"',"INSERT INTO audit_logs",'update "idempotency_operations"'];
+    'insert into "idempotency_operations"','AS "decisionAtMs"','UPDATE events e SET external_queue_enabled','update "participations"',"INSERT INTO audit_logs",'update "idempotency_operations"'];
   for(let n=1;n<order.length;n++) assert.ok(f.queries.findIndex(q=>q.text.includes(order[n-1])) < f.queries.findIndex(q=>q.text.includes(order[n])),order[n]);
   assert.match(f.queries.find(q=>q.text.includes('from "events"'))!.text,/for update/);
   assert.match(f.queries.find(q=>q.text.includes('from "participations"'))!.text,/order by.*for update/);
   assert.equal(f.queries.at(-1)?.text,"commit");
   const audit=f.queries.find(q=>q.text.includes("INSERT INTO audit_logs"))!;
   assert.match(audit.text,/'user','event','external_queue_enabled_changed'/);assert.match(audit.text,/e.updated_at/);assert.ok(audit.params.includes(input.reason));
+});
+test("E08.6 rollback da reserva quando o corte ocorre antes do UPDATE decisivo", async () => {
+  const f = fixture({ decisiveAfterCutoff: true });
+  assert.deepEqual(await f.service.setExternalQueue(input), { kind: 'event_closed' });
+  assert.equal(f.queries.at(-1)?.text, 'rollback');
+  assert.equal(f.queries.some(q => q.text.startsWith('update "participations"') || q.text.includes('INSERT INTO audit_logs') ||
+    q.text.startsWith('update "idempotency_operations"')), false);
 });
 test("E08.6 fingerprint inclui evento, estado e justificativa em namespace próprio",()=>{
   const hash=externalQueueFingerprint("e",false,"reason");assert.equal(ADMIN_EXTERNAL_QUEUE_OPERATION,"admin_set_external_queue");
@@ -77,7 +89,7 @@ test("E08.6 religa sem liberar participações e no-op não atualiza domínio ne
   assert.equal(enabling.queries.some(q=>q.text.startsWith('update "participations"')),false);
   const same=fixture({enabled:false,status:"closed"}),r=await same.service.setExternalQueue(input);
   assert.deepEqual(r,{kind:"completed",eventId:input.eventId,externalQueueEnabled:false,releasedCount:0});
-  assert.equal(same.queries.some(q=>/^(update "events"|update "participations"|.*INSERT INTO audit_logs)/.test(q.text)),false);
+  assert.equal(same.queries.some(q=>q.text.includes('UPDATE events e SET external_queue_enabled')||/^(update "participations"|.*INSERT INTO audit_logs)/.test(q.text)),false);
   assert.ok(same.queries.some(q=>q.text.startsWith('update "idempotency_operations"')));
 });
 test("E08.6 retry histórico não executa E05 após intenção oposta ou fechamento",async()=>{

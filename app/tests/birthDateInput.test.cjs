@@ -122,3 +122,22 @@ test('Android native picker receives the same civil date and fills the masked di
   picker.onValueChange({}, h.birthDate.civilDateToLocalDate('2000-02-29'));
   assert.deepEqual(changes, ['29/02/2000']);
 });
+
+test('seleção nativa pendente é descartada durante revalidação e não revive depois', () => {
+  let status = 'verified';
+  let revision = 0;
+  const auth = () => ({ isAuthenticated: true, identityStatus: status,
+    isIdentityVerified: () => status === 'verified', getIdentityRevision: () => revision });
+  const changes = [];
+  const h = createHarness('components/BirthDateInput.native.js', { platform: 'android', authContext: auth(),
+    props: { value: '', onChangeText: (value) => changes.push(value), inputStyle: {} } });
+  h.act(() => h.press('Abrir calendário de data de nascimento'));
+  const callback = h.nativePickerCalls[0].onValueChange;
+  status = 'checking'; revision += 1;
+  callback({}, h.birthDate.civilDateToLocalDate('2000-02-29'));
+  h.setAuthContext(auth());
+  status = 'error'; h.setAuthContext(auth());
+  status = 'verified'; h.setAuthContext(auth());
+  callback({}, h.birthDate.civilDateToLocalDate('2000-02-29'));
+  assert.deepEqual(changes, []);
+});

@@ -2,7 +2,7 @@
 
 **Versão:** v0.7.10 — desistência voluntária da fila interna, C-15 (30/10/2026)
 **Status funcional:** decisões D01–D11 e C-01–C-14 preservadas; C-15 implementada como serviço interno E07.3. E07.1, E07.2 e E07.3 aprovadas individualmente; integração APROVADA COM RESSALVAS na auditoria consolidada. Validação PostgreSQL concluída pelo responsável; nenhum defeito funcional bloqueante confirmado. Ver fechamento posterior de 30/10/2026 na seção 12.
-**Estado da implementação (verificado no repositório):** frontend Expo ainda baseado em simulações nos fluxos de backend; fundação `backend/` NestJS/Drizzle e consulta interna de eventos por UUID/código implementadas; endpoints HTTP de produto não implementados; Neon não criada.
+**Estado da implementação em 21/10/2026 (registro histórico):** frontend Expo ainda baseado em simulações nos fluxos de backend; fundação `backend/` NestJS/Drizzle e consulta interna de eventos por UUID/código implementadas; endpoints HTTP de produto não implementados; Neon não criada. Ver atualização posterior abaixo para o estado Staff atual.
 **Documento técnico complementar:** `ARQUITETURA_BACKEND_ARENAGO.md` (v0.6.17).
 
 > **Fonte e limite:** este texto preserva decisões anteriores e o registro da E01.2B e acrescenta a C-15 aprovada após a entrega inicial da E07.1. O complemento de 30/10/2026 é exclusivamente documental: E07.1 implementa ingresso; E07.3 implementará a saída isolada da fila interna. Não cria endpoint HTTP nem implica validação PostgreSQL ou de produção. O retrato de implementação da seção 2 mantém sua data histórica.
@@ -11,11 +11,13 @@
 
 **Fechamento posterior (30/10/2026):** as pendências da rodada de implementação acima foram revalidadas posteriormente. O responsável executou 20/20 E07.2, 27/27 E07.3 e 176/176 da regressão PostgreSQL, sem falhas, cancelamentos ou skips. Na auditoria consolidada, o Codex reexecutou 145/145 unitários e typecheck/lint/build com exit 0. Autoria, histórico e dependências futuras constam da seção 12 e dos relatórios E07.2/E07.3; este fechamento não executa testes nem nova auditoria.
 
+**Atualização Staff 01/02 (homologação funcional relatada em novembro de 2026):** as telas reais de Controle de Entrada e estações, os contratos HTTP Staff e a migration 0008 foram implementados. O responsável relatou 10 cenários funcionais Staff 01 e 10 Staff 02 exercitados no Expo Go; a desativação da fila externa ocorreu com a fila vazia e não teve GET ou captura posterior. A 0008 foi aplicada e validada em bancos locais isolados; o teste físico de schema passou no banco inicial dedicado. A validação focada Staff 02 passou 341 testes backend e 145 do aplicativo. A auditoria pré-commit posterior ainda registrou falhas no fallback da suíte completa do backend. O estado e os limites detalhados estão em `STAFF_ENTRY_CALL_FLOW_IMPLEMENTACAO.md`; as seções históricas abaixo não descrevem o estado atual dessas frentes.
+
 ## 1. Objetivo e escopo
 
 O ArenaGo é um aplicativo Expo/React Native para participantes de eventos com experiências. O backend será a fonte de verdade de identidade, participações, filas, atendimentos e avaliações; a interface deverá consumir os serviços gradualmente, sem transformar mocks em dados reais antes da implementação dos módulos correspondentes.
 
-**Não faz parte do ciclo atual:** implementar endpoints, integração Expo–API, novas telas Staff/Admin, notificações push, BI operacional ou implantação Neon. Esses itens seguem no roadmap, não foram cancelados como objetivos futuros.
+**Pendências fora da entrega Staff 01/02:** notificações push, BI operacional, implantação de produção e demais integrações não homologadas. Endpoints, integração Expo–API e telas Staff mencionados no planejamento original foram parcialmente implementados nas entregas posteriores documentadas acima.
 
 ## 2. Estado verificado no repositório em 21/10/2026 e limite da etapa atual
 
@@ -29,7 +31,7 @@ O ArenaGo é um aplicativo Expo/React Native para participantes de eventos com e
 | Neon e produção | **Não configuradas** | Nenhum banco remoto criado/contatado; nenhuma API funcional pública. |
 | Verificações E01.2B | Build, lint, typecheck e diff-check aprovados | Testes unitários interrompidos por `uv_os_get_passwd returned ENOMEM`; integração não executada sem confirmação do banco local descartável. Reproduzir `npm.cmd test` manualmente em PowerShell. |
 
-**Limite de escopo vigente:** E01.2B implementa somente a normalização e consulta interna de evento por código; não cria endpoint. Endpoints HTTP, integração Expo e demais fluxos dependem de priorização própria. O relatório anterior de dependências apontou vulnerabilidades no ferramental, cuja triagem permanece pendente.
+**Limite histórico da E01.2B:** aquela etapa implementou somente a normalização e consulta interna de evento por código. Os endpoints HTTP e a integração Expo descritos na atualização Staff acima pertencem a entregas posteriores. O relatório anterior de dependências apontou vulnerabilidades no ferramental, cuja triagem permanece pendente.
 
 ## 3. Princípios para a evolução
 
@@ -49,8 +51,8 @@ O ArenaGo é um aplicativo Expo/React Native para participantes de eventos com e
 | 1 — Planejamento e arquitetura | Regras de produto e esquema unificado | **Decisões consolidadas; documentos atualizados nesta v0.7.9** |
 | 2 — Validação relacional | Migrações e testes concorrentes PostgreSQL | **Concluída experimentalmente**; resultados incorporados à Task 6.2 |
 | 3 — Fundação do backend | NestJS, schemas Drizzle, 5 migrações locais e testes | **Concluída conforme relato Codex da Task 6.2**; E01.2B acrescenta consulta interna de eventos |
-| 4 — Endpoints e segurança | Auth, perfil/jogos, permissões; depois eventos e filas | **Não iniciada — pausada por decisão do responsável pelo projeto** |
-| 5 — Integração e operação | Expo↔API, avaliações, Admin/Staff, BI e testes E2E | **Futura; escopo de implementação não autorizado agora** |
+| 4 — Endpoints e segurança | Auth, perfil/jogos, permissões; depois eventos e filas | **Parcialmente implementada**; autenticação, Admin/TOTP, concessões e contratos Staff 01/02 existem. Outras frentes seguem seus próprios relatórios. |
+| 5 — Integração e operação | Expo↔API, avaliações, Admin/Staff, BI e testes E2E | **Parcialmente implementada**; Staff 01/02 homologadas funcionalmente no Expo Go, com pendências técnicas pré-commit. BI, operação de produção e testes exaustivos ainda pendem. |
 | 6 — Piloto público | Infraestrutura, LGPD, segurança, testes em aparelhos/carga | **Bloqueado** até requisitos próprios de privacidade e operação |
 
 A criação da Neon terá autorização e etapa próprias; não é pré-requisito para manter a fundação local concluída. Não confundir a existência das tabelas com a implementação dos serviços que aplicam regras de negócio.

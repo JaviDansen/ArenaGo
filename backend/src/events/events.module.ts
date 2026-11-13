@@ -16,6 +16,8 @@ import { ParticipantQueueIdempotencyPolicy } from "./participant-queue-idempoten
 import { ExperiencesController } from "./experiences.controller";
 import { StaffQueriesController } from "./staff-queries.controller";
 import { StaffQueriesService } from "./staff-queries.service";
+import { StaffHistoryController, StaffHistoryNoStoreGuard } from "./staff-history.controller";
+import { StaffHistoryService } from "./staff-history.service";
 import { StationAvailabilityController } from "./station-availability.controller";
 import { StationAvailabilityService } from "./station-availability.service";
 import { EventClosureService } from "./event-closure.service";
@@ -30,12 +32,19 @@ import { ParticipationLifecycleService } from "../participations/participation-l
 import { ParticipationQueryService } from "../participations/participation-query.service";
 import { ExperienceQueueControlController } from "./experience-queue-control.controller";
 import { ExperienceQueueControlService } from "./experience-queue-control.service";
+import { StaffStationStateController } from "./staff-station-state.controller";
+import { StaffStationStateService } from "./staff-station-state.service";
+import { StaffQueueRemovalController } from "./staff-queue-removal.controller";
+import { StaffQueueRemovalService } from "./staff-queue-removal.service";
+import { StaffCalledRemovalController } from "./staff-called-removal.controller";
+import { CalledRemovalService } from "./staff-called-removal.service";
+import { StaffEntryNoStoreGuard } from "../participations/staff-entry.controller";
 
 /** Agrupa os serviços de Events e reutiliza o acesso PostgreSQL compartilhado. */
 @Module({
   imports: [DatabaseModule, AuthModule],
-  controllers: [EvaluationWriteController, EvaluationReadController, ParticipationLifecycleController, StaffOperationsController, StaffQueriesController, ExperienceQueueControlController, StationAvailabilityController, ParticipantQueueController, ExperiencesController],
-  providers: [EventsService, StaffQueriesService, StationAvailabilityService, ExperienceQueueControlService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, StaffIdempotencyPolicy, ParticipantQueueIdempotencyPolicy, EventClosureService, EventClosurePolicy, EventClosureScheduler, EvaluationReadService, EvaluationWriteService, EvaluationWriteIdempotencyPolicy, ParticipationLifecycleService, ParticipationQueryService],
+  controllers: [StaffCalledRemovalController, EvaluationWriteController, EvaluationReadController, ParticipationLifecycleController, StaffOperationsController, StaffQueriesController, StaffHistoryController, StaffStationStateController, StaffQueueRemovalController, ExperienceQueueControlController, StationAvailabilityController, ParticipantQueueController, ExperiencesController],
+  providers: [CalledRemovalService, EventsService, StaffQueriesService, StaffHistoryService, StaffStationStateService, StaffQueueRemovalService, StaffEntryNoStoreGuard, StaffHistoryNoStoreGuard, StationAvailabilityService, ExperienceQueueControlService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, StaffIdempotencyPolicy, ParticipantQueueIdempotencyPolicy, EventClosureService, EventClosurePolicy, EventClosureScheduler, EvaluationReadService, EvaluationWriteService, EvaluationWriteIdempotencyPolicy, ParticipationLifecycleService, ParticipationQueryService],
   exports: [EventsService, StaffQueriesService, StationAvailabilityService, ExperienceQueueControlService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, EventClosureService, EvaluationReadService, EvaluationWriteService, ParticipationLifecycleService, ParticipationQueryService],
 })
 export class EventsModule {}

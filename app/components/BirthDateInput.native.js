@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Keyboard,
   Modal,
@@ -11,6 +11,7 @@ import {
 } from 'react-native';
 import DateTimePicker, { DateTimePickerAndroid } from '@react-native-community/datetimepicker';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useAuth } from '../context/AuthContext';
 
 import {
   civilDateToLocalDate,
@@ -31,13 +32,33 @@ export default function BirthDateInput({
 }) {
   const [isPickerOpen, setIsPickerOpen] = useState(false);
   const hasSelectedDate = useRef(false);
+  const auth = useAuth();
+  const authRef = useRef(auth);
+  authRef.current = auth;
+  const pickerRevision = useRef(null);
+  const androidPickerOpen = useRef(false);
+  const canInteract = () => {
+    const current = authRef.current;
+    return current?.isIdentityVerified
+      ? current.isIdentityVerified() && current.getIdentityRevision() === pickerRevision.current
+      : !current?.isInitializing && !['checking', 'error', 'unverified'].includes(current?.identityStatus);
+  };
+  useEffect(() => {
+    if (auth?.isInitializing || ['checking', 'error', 'unverified'].includes(auth?.identityStatus)) {
+      setIsPickerOpen(false);
+      if (Platform.OS === 'android' && androidPickerOpen.current) {
+        androidPickerOpen.current = false;
+        void Promise.resolve(DateTimePickerAndroid.dismiss?.('date')).catch(() => {});
+      }
+    }
+  }, [auth?.identityStatus, auth?.isInitializing]);
   const fieldStyle = StyleSheet.flatten(inputStyle) || {};
   const tintColor = fieldStyle.color || '#ffffff';
   const today = getTodayCivilDate();
   const pickerDate = civilDateToLocalDate(parseBirthDate(value) || today);
 
   function handleDateSelected(_event, selectedDate) {
-    if (!selectedDate) return;
+    if (!canInteract() || !selectedDate) return;
 
     const displayDate = formatBirthDate(localDateToCivilDate(selectedDate));
     if (parseBirthDate(displayDate)) {
@@ -47,14 +68,20 @@ export default function BirthDateInput({
   }
 
   function openPicker() {
+    pickerRevision.current = authRef.current?.getIdentityRevision?.() ?? null;
+    if (!canInteract()) return;
     Keyboard.dismiss();
 
     if (Platform.OS === 'android') {
+      androidPickerOpen.current = true;
       DateTimePickerAndroid.open({
         mode: 'date',
         value: pickerDate,
         maximumDate: civilDateToLocalDate(today),
-        onValueChange: handleDateSelected,
+        onValueChange: (event, selectedDate) => {
+          androidPickerOpen.current = false;
+          handleDateSelected(event, selectedDate);
+        },
       });
       return;
     }
@@ -64,6 +91,7 @@ export default function BirthDateInput({
   }
 
   function confirmPicker() {
+    if (!canInteract()) return;
     // O spinner não emite mudança ao confirmar a data inicial já destacada.
     if (!hasSelectedDate.current) {
       handleDateSelected(null, pickerDate);
@@ -99,7 +127,7 @@ export default function BirthDateInput({
 
       {Platform.OS === 'ios' && (
         <Modal
-          visible={isPickerOpen}
+          visible={isPickerOpen && canInteract()}
           transparent
           animationType="slide"
           onRequestClose={() => setIsPickerOpen(false)}
@@ -130,7 +158,7 @@ export default function BirthDateInput({
                   <Text style={{ color: tintColor }}>Fechar</Text>
                 </Pressable>
               </View>
-              {isPickerOpen && (
+              {isPickerOpen && canInteract() && (
                 <DateTimePicker
                   value={pickerDate}
                   mode="date"

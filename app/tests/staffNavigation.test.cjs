@@ -6,7 +6,6 @@ let authState;
 function StackNavigator() {}
 function StackScreen() {}
 function ImportedScreen() {}
-function StaffDemoNavigator() {}
 
 const appExports = loadModule('App.js', (name) => {
   if (name === 'react') return require('react');
@@ -25,7 +24,6 @@ const appExports = loadModule('App.js', (name) => {
       resolveInitialRouteForAuthState: (state) => (state?.isAuthenticated ? 'MainTabs' : 'Welcome'),
     };
   }
-  if (name === './screens/staff/StaffDemoNavigator') return { __esModule: true, default: StaffDemoNavigator };
   return { __esModule: true, default: ImportedScreen };
 }).exports;
 
@@ -42,16 +40,13 @@ function routes(state) {
   return found;
 }
 
-test('rota StaffDemo existe só no app autenticado com questionário concluído', () => {
+test('rota StaffDemo não é registrada para participantes, questionário pendente ou sessão pública', () => {
   const signedIn = routes({
     isAuthenticated: true,
     user: { id: 'u-1', hasCompletedQuestionnaire: true },
   });
-  const staff = signedIn.find((route) => route.name === 'StaffDemo');
-  assert.ok(staff, 'StaffDemo disponível');
-  assert.equal(staff.component, undefined, 'carregamento tardio, sem import no topo do App.js');
-  assert.equal(staff.getComponent(), StaffDemoNavigator);
-  for (const name of ['MainTabs', 'EventEntry', 'EventConfirmation', 'ParticipationDetails', 'Evaluation']) {
+  assert.ok(!signedIn.some((route) => route.name === 'StaffDemo'));
+  for (const name of ['MainTabs', 'EventEntry', 'EventConfirmation', 'ParticipationDetails', 'Evaluation', 'RealEvaluation']) {
     assert.ok(signedIn.some((route) => route.name === name), `${name} preservada`);
   }
   assert.equal(signedIn[0].name, 'MainTabs', 'abas continuam como tela inicial');
@@ -62,15 +57,13 @@ test('rota StaffDemo existe só no app autenticado com questionário concluído'
   assert.ok(!signedOut.some((route) => route.name === 'StaffDemo'));
 });
 
-test('Início abre a Área do Staff (demonstração) sem afetar a entrada em evento', () => {
+test('Início não oferece a demonstração Staff e preserva a entrada em evento', () => {
   const h = createHarness('screens/home/HomeScreen.js', {
     authContext: { user: { id: 'u-1', hasCompletedQuestionnaire: true } },
   });
-  const label = h.nodes.find((node) => node.type === 'Pressable' && /Staff/.test(textOf(node)));
-  assert.equal(textOf(label), 'Área do Staff (demonstração)');
-  h.press('Área do Staff (demonstração)');
+  assert.ok(!h.nodes.some((node) => node.type === 'Pressable' && /Staff/.test(textOf(node))));
   h.press('Entrar em um evento');
-  assert.deepEqual(h.navigationCalls.map((call) => call.name), ['StaffDemo', 'EventEntry']);
+  assert.deepEqual(h.navigationCalls.map((call) => call.name), ['EventEntry']);
 });
 
 test('pilha da Área Staff registra as quatro telas com títulos em português', () => {

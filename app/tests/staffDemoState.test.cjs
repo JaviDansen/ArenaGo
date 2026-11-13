@@ -210,22 +210,43 @@ test('resumo da experiência conta fila, chamados e estações disponíveis', ()
   assert.deepEqual(plain(summary), { queueSize: 1, pendingCalls: 1, availableStations: 1, totalStations: 2 });
 });
 
-test('código Staff não usa ParticipationContext nem clientes HTTP', () => {
-  const appDirectory = path.resolve(__dirname, '..');
+const appDirectory = path.resolve(__dirname, '..');
+const demoStaffScreens = [
+  'StaffAccessScreen.js', 'StaffDemoContext.js', 'staffDemoLatency.js',
+  'StaffDemoNavigator.js', 'staffDemoState.js', 'StaffEntryControlScreen.js',
+  'StaffPanelScreen.js', 'StaffStationScreen.js',
+  'components/StaffButton.js', 'components/StaffCard.js', 'components/StaffConfirmDialog.js',
+  'components/StaffDemoTools.js', 'components/StaffHeader.js', 'components/StaffMissingSession.js',
+  'components/StaffNotice.js', 'components/StaffScreen.js', 'components/staffTheme.js',
+];
+const realStaffScreens = ['StaffEventsNavigator.js', 'StaffEntryControlRealScreen.js', 'StaffStationOperationalScreen.js', 'useStaffPolling.js'];
+
+test('estação operacional real não carrega estado demonstrativo', () => {
+  const source = readFileSync(path.join(appDirectory, 'screens', 'staff', 'StaffStationOperationalScreen.js'), 'utf8');
+  assert.match(source, /staffOperationsService/);
+  assert.doesNotMatch(source, /staffDemoState|staffDemoData|StaffDemoContext|StaffStationScreen/);
+});
+
+test('arquivos Staff são classificados como demonstração ou fluxo real', () => {
+  const staffDirectory = path.join(appDirectory, 'screens', 'staff');
   const files = [];
   (function walk(directory) {
     for (const entry of readdirSync(directory)) {
       const full = path.join(directory, entry);
       if (statSync(full).isDirectory()) walk(full);
-      else if (full.endsWith('.js')) files.push(full);
+      else if (full.endsWith('.js')) files.push(path.relative(staffDirectory, full).split(path.sep).join('/'));
     }
-  })(path.join(appDirectory, 'screens', 'staff'));
+  })(staffDirectory);
+  assert.deepEqual(files.sort(), [...demoStaffScreens, ...realStaffScreens].sort());
+});
+
+test('demonstração Staff não usa ParticipationContext nem clientes HTTP ou fluxo real', () => {
+  const files = demoStaffScreens.map((file) => path.join(appDirectory, 'screens', 'staff', file));
   files.push(path.join(appDirectory, 'data', 'staffDemoData.js'));
-  assert.ok(files.length >= 10);
   for (const file of files) {
     const source = readFileSync(file, 'utf8');
-    for (const forbidden of [/from '[^']*ParticipationContext'/, /from '[^']*services\//,
-      /httpClient/, /\bfetch\(/, /tokenStorage/]) {
+    for (const forbidden of [/['"][^'"]*ParticipationContext['"]/, /['"][^'"]*services\//,
+      /httpClient/, /\bfetch\s*\(/, /tokenStorage/, /['"][^'"]*StaffEventsNavigator['"]/]) {
       assert.doesNotMatch(source, forbidden, `${path.basename(file)} contém ${forbidden}`);
     }
   }

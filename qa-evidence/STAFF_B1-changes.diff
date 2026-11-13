@@ -1,0 +1,661 @@
+diff --git a/app/screens/staff/StaffEntryControlRealScreen.js b/app/screens/staff/StaffEntryControlRealScreen.js
+index 77c0d77..d9ee943 100644
+--- a/app/screens/staff/StaffEntryControlRealScreen.js
++++ b/app/screens/staff/StaffEntryControlRealScreen.js
+@@ -4,6 +4,7 @@ import { randomUUID } from 'expo-crypto';
+ import { useAuth } from '../../context/AuthContext';
+ import { createStaffEntryStore } from '../../services/staffEntryService';
+ import { defaultStaffEntryIntentStorage } from '../../services/staffEntryIntentStorage';
++import { useStaffPolling } from './useStaffPolling';
+ 
+ function Button({ label, onPress, disabled = false, danger = false }) {
+   return <Pressable accessibilityRole="button" accessibilityLabel={label} disabled={disabled}
+@@ -40,6 +41,8 @@ export default function StaffEntryControlRealScreen({ event, isEventCurrent, onB
+     store.setContext(getContext()); setDialog(null); void store.refresh();
+     return () => { dialogRef.current = null; store.setContext(null); };
+   }, [store, event.id, auth.user?.id, auth.sessionId, epoch, revision]);
++  useStaffPolling(store.isCurrent(snapshot.context) && snapshot.status === 'ready' && !snapshot.busy,
++    () => store.poll(), 5000, `${event.id}:${epoch}:${revision}`);
+   useEffect(() => {
+     const intent = snapshot.pending, scope = snapshot.context;
+     if (intent?.phase !== 'terminal' || snapshot.status !== 'ready' || snapshot.busy || !store.isCurrent(scope) ||
+@@ -55,7 +58,7 @@ export default function StaffEntryControlRealScreen({ event, isEventCurrent, onB
+   if (!store.isCurrent(snapshot.context)) return null;
+   const ownPending = snapshot.pending && ['userId', 'sessionId', 'eventId'].every(key => snapshot.pending[key] === snapshot.context[key]);
+   const pending = ownPending ? snapshot.pending : null;
+-  const disabled = snapshot.busy || snapshot.status !== 'ready' || !snapshot.data ||
++  const disabled = snapshot.busy || snapshot.status !== 'ready' || snapshot.error === 'stale' || !snapshot.data ||
+     Boolean(snapshot.pending) || snapshot.storageError || !defaultStaffEntryIntentStorage.isPersistent;
+   const runDirect = (action) => {
+     if (disabled || dialogRef.current || !store.isCurrent(snapshot.context) ||
+@@ -76,6 +79,7 @@ export default function StaffEntryControlRealScreen({ event, isEventCurrent, onB
+     <Text style={styles.text}>Fila de acesso ao evento</Text>
+     {snapshot.status === 'loading' && <View accessibilityRole="progressbar"><ActivityIndicator color="#a78bfa" /><Text style={styles.text}>Carregando fila de entrada...</Text></View>}
+     {snapshot.status === 'error' && <Text accessibilityRole="alert" style={styles.warning}>{errors[snapshot.error]}</Text>}
++    {snapshot.error === 'stale' && <Text accessibilityRole="alert" style={styles.warning}>Dados de entrada possivelmente desatualizados. Atualize antes de operar.</Text>}
+     {snapshot.data && <>
+       <View style={styles.card}>
+         <Text style={styles.title}>Fila {snapshot.data.externalQueueEnabled ? 'ATIVA' : 'INATIVA'}</Text>
+diff --git a/app/screens/staff/StaffEventsNavigator.js b/app/screens/staff/StaffEventsNavigator.js
+index 5126f51..58b40b1 100644
+--- a/app/screens/staff/StaffEventsNavigator.js
++++ b/app/screens/staff/StaffEventsNavigator.js
+@@ -8,6 +8,7 @@ import { createStaffEventsStore } from '../../services/staffEventsService';
+ import { createStaffDashboardStore } from '../../services/staffDashboardService';
+ import StaffEntryControlRealScreen from './StaffEntryControlRealScreen';
+ import StaffStationOperationalScreen from './StaffStationOperationalScreen';
++import { useStaffPolling } from './useStaffPolling';
+ 
+ const Stack = createNativeStackNavigator();
+ const StaffEventsContext = createContext(null);
+@@ -55,6 +56,7 @@ function StaffEventsProvider({ children }) {
+     selected: current ? snapshot.selected : null,
+     error: current ? snapshot.error : null,
+     refresh: store.refresh,
++    refreshSilent: store.refreshSilent,
+     select: store.select,
+     clearSelection: store.clearSelection,
+     isCurrent: store.isCurrent,
+@@ -74,6 +76,7 @@ function Button({ label, accessibilityLabel = label, onPress, disabled = false }
+ 
+ function StaffEventsScreen({ navigation }) {
+   const staff = useContext(StaffEventsContext);
++  useStaffPolling(staff.status === 'ready', staff.refreshSilent, 60000);
+   const auth = useAuth();
+   const messages = {
+     session: 'Não foi possível confirmar sua sessão. Entre novamente ou tente atualizar.',
+@@ -89,6 +92,7 @@ function StaffEventsScreen({ navigation }) {
+           <ActivityIndicator color="#a78bfa" /><Text style={styles.message}>Carregando eventos...</Text>
+         </View>}
+         {staff.status === 'error' && <Text accessibilityRole="alert" style={styles.message}>{messages[staff.error]}</Text>}
++        {staff.error === 'stale' && <Text accessibilityRole="alert" style={styles.message}>A lista pode estar desatualizada. Atualize os eventos.</Text>}
+         {staff.status === 'ready' && staff.events.length === 0 &&
+           <Text style={styles.message}>Nenhum evento autorizado para esta conta.</Text>}
+         {staff.status === 'ready' && staff.events.map((event) => (
+@@ -109,6 +113,7 @@ function StaffEventsScreen({ navigation }) {
+ 
+ function StaffEventHomeScreen({ navigation }) {
+   const staff = useContext(StaffEventsContext);
++  useStaffPolling(Boolean(staff.selected && staff.status === 'ready'), staff.refreshSilent, 60000, staff.selected?.id);
+   const [section, setSection] = useState('panel');
+   const [stationId, setStationId] = useState(null);
+   useEffect(() => navigation.addListener('beforeRemove', (action) => {
+@@ -174,12 +179,17 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
+   useEffect(() => {
+     if (section !== 'station') store.clearQueue();
+   }, [store, section]);
++  useStaffPolling((section === 'panel' || section === 'station') && store.isCurrent(snapshot.context) && snapshot.stationStatus === 'ready',
++    () => store.pollStations(), 5000, `${event.id}:${section}:${epoch}:${revision}`);
++  useStaffPolling(section === 'station' && store.isCurrent(snapshot.context) && snapshot.queueStatus === 'ready',
++    () => store.pollQueue(), 5000, `${event.id}:${stationId}:${epoch}:${revision}`);
+   if (!store.isCurrent(snapshot.context)) return null;
+   const messages = {
+     session: 'Não foi possível confirmar sua sessão. Entre novamente ou tente atualizar.',
+     denied: 'Acesso ao evento ou à experiência indisponível. Atualize seus eventos autorizados.',
+     network: 'Não foi possível conectar ao servidor. Verifique sua conexão e tente novamente.',
+     unavailable: 'Não foi possível carregar os dados. Tente novamente.',
++    stale: 'Dados operacionais possivelmente desatualizados. Atualize antes de operar.',
+   };
+   const experiencesById = new Map(snapshot.experiences.map((experience) => [experience.id, experience]));
+   const station = snapshot.stations.find((item) => item.id === stationId);
+@@ -193,6 +203,7 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
+   return <>
+     {(section === 'panel' || section === 'station') && dashboardErrors.map((kind) =>
+       <Text key={kind} accessibilityRole="alert" style={styles.message}>{messages[kind]}</Text>)}
++    {snapshot.queueError === 'stale' && <Text accessibilityRole="alert" style={styles.message}>{messages.stale}</Text>}
+     {section === 'panel' && <>
+       <Text style={styles.title}>Painel operacional</Text>
+       <Button label="Controle de Entrada" onPress={() => setSection('entry')} />
+diff --git a/app/screens/staff/StaffStationOperationalScreen.js b/app/screens/staff/StaffStationOperationalScreen.js
+index cfff081..9ab7cc3 100644
+--- a/app/screens/staff/StaffStationOperationalScreen.js
++++ b/app/screens/staff/StaffStationOperationalScreen.js
+@@ -4,6 +4,7 @@ import { randomUUID } from 'expo-crypto';
+ import { useAuth } from '../../context/AuthContext';
+ import { createStaffOperationsCoordinator, fetchStaffStationState } from '../../services/staffOperationsService';
+ import { defaultStaffIntentStorage } from '../../services/staffIntentStorage';
++import { useStaffPolling } from './useStaffPolling';
+ 
+ const same = (a, b) => Boolean(a && b && ['userId', 'sessionId', 'eventId', 'stationId', 'epoch', 'revision']
+   .every(key => a[key] === b[key]));
+@@ -79,6 +80,27 @@ export default function StaffStationOperationalScreen({ event, experience, stati
+     }
+   }
+ 
++  async function poll() {
++    const scope = getContext(), request = generation.current;
++    if (!scope || viewRef.current.status !== 'ready' || viewRef.current.busy || dialogRef.current ||
++        dispatching.current || acknowledging.current) return;
++    try {
++      const data = coordinator
++        ? await coordinator.readStationState(scope, experience.id, station.id)
++        : await fetchStaffStationState(live.current.auth.httpClient, event.id, experience.id, station.id);
++      if (request === generation.current && same(scope, getContext()))
++        setView(previous => ({ ...previous, data, error: null }));
++    } catch (error) {
++      if (request !== generation.current || !same(scope, getContext())) return;
++      const kind = error?.status === 401 ? 'session' : [403, 404].includes(error?.status) ? 'denied' : 'stale';
++      setView(previous => kind === 'stale' ? { ...previous, error: kind }
++        : { ...previous, data: null, status: 'error', error: kind });
++    }
++  }
++
++  useStaffPolling(Boolean(context && view.status === 'ready' && !view.busy), poll, 5000,
++    `${event.id}:${station.id}:${epoch}:${revision}`);
++
+   useEffect(() => {
+     mounted.current = true;
+     autoAttempt.current = null;
+@@ -114,7 +136,7 @@ export default function StaffStationOperationalScreen({ event, experience, stati
+     })();
+   }, [view.pending, view.scope, coordinator]);
+ 
+-  const blocked = !same(view.scope, context) || view.busy || view.status !== 'ready' || !coordinator ||
++  const blocked = !same(view.scope, context) || view.busy || view.status !== 'ready' || view.error === 'stale' || !coordinator ||
+     dispatching.current || acknowledging.current || (view.pending && view.pending.kind !== 'none');
+   const open = action => {
+     if (!blocked && context) setDialog({ action, context, observed: view.data });
+@@ -124,6 +146,7 @@ export default function StaffStationOperationalScreen({ event, experience, stati
+         (!fromDialog && (expected.action.kind !== 'call' || dialogRef.current)) ||
+         !same(expected.context, getContext()) ||
+         !same(viewRef.current.scope, getContext()) || viewRef.current.busy || viewRef.current.status !== 'ready' ||
++        viewRef.current.error === 'stale' ||
+         (viewRef.current.pending && viewRef.current.pending.kind !== 'none')) return;
+     if (expected.action.kind === 'call' && (!viewRef.current.data?.canCall ||
+         viewRef.current.data.pending || viewRef.current.data.waitingCount === 0 ||
+@@ -166,7 +189,8 @@ export default function StaffStationOperationalScreen({ event, experience, stati
+   if (!same(view.scope, context)) return <View style={styles.content}>
+     <Text style={styles.text}>Verificando atendimento da estação...</Text></View>;
+   const messages = { session: 'Sessão inválida. Entre novamente.', denied: 'Acesso à estação indisponível.',
+-    network: 'Falha de conexão. Atualize a estação.', unavailable: 'Não foi possível consultar a estação.' };
++    network: 'Falha de conexão. Atualize a estação.', unavailable: 'Não foi possível consultar a estação.',
++    stale: 'Dados da estação possivelmente desatualizados. Atualize antes de operar.' };
+   const data = view.data;
+   const pending = view.pending;
+   return <View style={styles.content}>
+@@ -175,6 +199,7 @@ export default function StaffStationOperationalScreen({ event, experience, stati
+     {view.status === 'loading' && <View accessibilityRole="progressbar"><ActivityIndicator color="#a78bfa" />
+       <Text style={styles.text}>Carregando atendimento...</Text></View>}
+     {view.status === 'error' && <Text accessibilityRole="alert" style={styles.warning}>{messages[view.error]}</Text>}
++    {view.error === 'stale' && <Text accessibilityRole="alert" style={styles.warning}>{messages.stale}</Text>}
+     {view.feedback?.kind === 'confirmed' && <Text accessibilityRole="alert" style={styles.success}>
+       {view.feedback.result?.status === 'absent'
+         ? view.feedback.result.requeued ? 'Ausência registrada; participante retornou ao fim da fila.'
+diff --git a/app/services/staffDashboardService.js b/app/services/staffDashboardService.js
+index 76ae5e1..4550d36 100644
+--- a/app/services/staffDashboardService.js
++++ b/app/services/staffDashboardService.js
+@@ -15,6 +15,7 @@ export function createStaffDashboardStore({ client, getContext }) {
+   let stationGeneration = 0;
+   let experienceGeneration = 0;
+   let queueGeneration = 0;
++  let silentStations = false, silentQueue = false;
+   const listeners = new Set();
+   const publish = (next) => { state = next; listeners.forEach((listener) => listener(state)); };
+   const isCurrent = (candidate = state.context) => same(state.context, candidate) && same(state.context, getContext());
+@@ -62,6 +63,21 @@ export function createStaffDashboardStore({ client, getContext }) {
+       publish({ ...state, stationStatus: 'error', stationError: kind, stations: [] });
+     }
+   }
++  async function pollStations() {
++    if (silentStations || !isCurrent() || state.stationStatus !== 'ready') return;
++    const context = state.context, revision = generation, request = stationGeneration;
++    silentStations = true;
++    try {
++      const { stations } = await fetchStaffStations(client, context.eventId);
++      if (revision === generation && request === stationGeneration && isCurrent(context))
++        publish({ ...state, stations, stationError: null });
++    } catch (error) {
++      if (revision !== generation || request !== stationGeneration || !isCurrent(context)) return;
++      const kind = errorKind(error);
++      if (kind === 'denied' || kind === 'session') denied(kind);
++      else publish({ ...state, stationError: 'stale' });
++    } finally { silentStations = false; }
++  }
+   async function refreshQueue(experienceId = state.experienceId) {
+     if (!isCurrent() || state.stationStatus !== 'ready' ||
+         !state.stations.some((station) => station.experienceId === experienceId)) return;
+@@ -78,10 +94,25 @@ export function createStaffDashboardStore({ client, getContext }) {
+       publish({ ...state, queueStatus: 'error', queue: null, queueError: kind });
+     }
+   }
++  async function pollQueue(experienceId = state.experienceId) {
++    if (silentQueue || !isCurrent() || state.queueStatus !== 'ready' || state.experienceId !== experienceId) return;
++    const context = state.context, revision = generation, request = queueGeneration;
++    silentQueue = true;
++    try {
++      const queue = await fetchStaffQueue(client, context.eventId, experienceId);
++      if (revision === generation && request === queueGeneration && isCurrent(context) && state.experienceId === experienceId)
++        publish({ ...state, queue, queueError: null });
++    } catch (error) {
++      if (revision !== generation || request !== queueGeneration || !isCurrent(context)) return;
++      const kind = errorKind(error);
++      if (kind === 'denied' || kind === 'session') denied(kind);
++      else publish({ ...state, queueError: 'stale' });
++    } finally { silentQueue = false; }
++  }
+   function clearQueue() {
+     queueGeneration += 1;
+     if (isCurrent()) publish({ ...state, experienceId: null, queueStatus: 'idle', queue: null, queueError: null });
+   }
+-  return { getSnapshot: () => state, isCurrent, setContext, refreshStations, refreshExperiences, refreshQueue, clearQueue,
++  return { getSnapshot: () => state, isCurrent, setContext, refreshStations, refreshExperiences, refreshQueue, pollStations, pollQueue, clearQueue,
+     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); } };
+ }
+diff --git a/app/services/staffEntryService.js b/app/services/staffEntryService.js
+index a7db299..541a6f4 100644
+--- a/app/services/staffEntryService.js
++++ b/app/services/staffEntryService.js
+@@ -69,7 +69,7 @@ export const isDefinitiveEntryRejection = (error) => [400, 401, 403, 404].includ
+ 
+ /** Sem replay de POST: um dispatching desconhecido só permite consultas. */
+ export function createStaffEntryStore({ client, storage, createKey, getContext }) {
+-  let state = empty(), generation = 0, readGeneration = 0, flight = null;
++  let state = empty(), generation = 0, readGeneration = 0, flight = null, silentFlight = false;
+   const listeners = new Set();
+   const publish = (patch) => { state = { ...state, ...patch }; listeners.forEach(fn => fn(state)); };
+   const isCurrent = (context = state.context) => same(context, state.context) && same(context, getContext());
+@@ -88,10 +88,25 @@ export function createStaffEntryStore({ client, storage, createKey, getContext }
+       if (current()) publish({ status: 'ready', data });
+     } catch (error) { if (current()) publish({ status: 'error', data: null, error: failure(error) }); }
+   }
++  async function poll() {
++    if (silentFlight || flight || !isCurrent() || state.status !== 'ready') return;
++    const context = state.context, currentGeneration = generation, request = readGeneration;
++    silentFlight = true;
++    try {
++      const data = parseEntryState(await client.get(`/staff/events/${context.eventId}/entry-control`, { auth: true }), context.eventId);
++      if (currentGeneration === generation && request === readGeneration && isCurrent(context))
++        publish({ data, error: null });
++    } catch (error) {
++      if (currentGeneration !== generation || request !== readGeneration || !isCurrent(context)) return;
++      const kind = failure(error);
++      if (kind === 'session' || kind === 'denied') publish({ status: 'error', data: null, error: kind });
++      else publish({ error: 'stale' });
++    } finally { silentFlight = false; }
++  }
+   async function mutate(action) {
+     if (flight) return { kind: 'busy' };
+     const context = state.context;
+-    if (!isCurrent(context) || state.status !== 'ready' || !state.data || state.storageError || state.pending ||
++    if (!isCurrent(context) || state.status !== 'ready' || state.error === 'stale' || !state.data || state.storageError || state.pending ||
+         storage.isPersistent !== true || !['userId', 'sessionId', 'eventId'].every(key => validEntryId(context[key]))) return { kind: 'blocked' };
+     const data = state.data, call = data.pendingCall;
+     if (action.kind === 'toggle' ? !data.canManage || typeof action.enabled !== 'boolean' || action.enabled === data.externalQueueEnabled
+@@ -168,7 +183,7 @@ export function createStaffEntryStore({ client, storage, createKey, getContext }
+     } catch { if (isCurrent(context)) publish({ storageError: true }); return { kind: isCurrent(context) ? 'storage_error' : 'stale' }; }
+     finally { if (isCurrent(context)) { publish({ busy: false }); await refresh(); } }
+   }
+-  return { getSnapshot: () => state, setContext, isCurrent, refresh, mutate,
++  return { getSnapshot: () => state, setContext, isCurrent, refresh, poll, mutate,
+     acknowledge: key => resolveLocal(key), cancelReserved: key => resolveLocal(key, true),
+     subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); } };
+ }
+diff --git a/app/services/staffEventsService.js b/app/services/staffEventsService.js
+index e70530d..6828843 100644
+--- a/app/services/staffEventsService.js
++++ b/app/services/staffEventsService.js
+@@ -29,6 +29,7 @@ const sameIdentity = (a, b) => Boolean(a && b && a.userId === b.userId &&
+ export function createStaffEventsStore({ client, getIdentity }) {
+   let state = empty();
+   let generation = 0;
++  let silentFlight = false;
+   const listeners = new Set();
+   const publish = (next) => { state = next; listeners.forEach((listener) => listener(state)); };
+   const isCurrent = (identity = state.identity) => sameIdentity(identity, state.identity) &&
+@@ -55,6 +56,22 @@ export function createStaffEventsStore({ client, getIdentity }) {
+     }
+   }
+ 
++  async function refreshSilent() {
++    if (silentFlight || !isCurrent() || state.status !== 'ready') return;
++    const identity = state.identity, requestGeneration = generation;
++    silentFlight = true;
++    try {
++      const events = await fetchStaffEvents(client);
++      if (requestGeneration !== generation || !isCurrent(identity)) return;
++      const selected = state.selected ? events.find(item => item.id === state.selected.id) ?? null : null;
++      publish({ ...state, events, selected, error: null });
++    } catch (error) {
++      if (requestGeneration !== generation || !isCurrent(identity)) return;
++      if ([401, 403].includes(error?.status)) publish({ ...state, events: [], selected: null, status: 'error', error: 'session' });
++      else publish({ ...state, error: 'stale' });
++    } finally { silentFlight = false; }
++  }
++
+   function select(eventId) {
+     if (!isCurrent() || state.status !== 'ready') return false;
+     const event = state.events.find((item) => item.id === eventId);
+@@ -68,5 +85,5 @@ export function createStaffEventsStore({ client, getIdentity }) {
+   }
+ 
+   return { getSnapshot: () => state, subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+-    setIdentity, refresh, select, clearSelection, isCurrent };
++    setIdentity, refresh, refreshSilent, select, clearSelection, isCurrent };
+ }
+diff --git a/app/tests/roleRoutingIntegration.test.cjs b/app/tests/roleRoutingIntegration.test.cjs
+index 13af4bb..059bc4f 100644
+--- a/app/tests/roleRoutingIntegration.test.cjs
++++ b/app/tests/roleRoutingIntegration.test.cjs
+@@ -85,6 +85,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+   const passthrough = ({ children }) => children;
+   const native = Object.fromEntries(['ActivityIndicator', 'Modal', 'Pressable', 'ScrollView', 'Text', 'View'].map((name) => [name, name]));
+   native.StyleSheet = { create: (styles) => styles };
++  native.AppState = { currentState: 'active', addEventListener: () => ({ remove() {} }) };
+   native.Platform = { OS: control.platformOS ?? 'web' };
+   function FocusedStack(props) {
+     const { state, descriptors, NavigationContent } = Navigation.useNavigationBuilder(StackRouter, props);
+@@ -103,7 +104,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+       if (name === 'expo-secure-store') return control.secureStore ?? {};
+       if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView', SafeAreaProvider: passthrough };
+       if (name === '@react-navigation/native-stack') return { createNativeStackNavigator: Navigation.createNavigatorFactory(FocusedStack) };
+-      if (name === '@react-navigation/native') return { NavigationContainer: ({ children }) =>
++      if (name === '@react-navigation/native') return { useIsFocused: () => true, NavigationContainer: ({ children }) =>
+         React.createElement(Navigation.BaseNavigationContainer, { ref: navRef, onUnhandledAction: (action) => unhandled.push(action) }, children) };
+       const target = path.posix.normalize(path.posix.join(directory, name));
+       if (target === 'components/ui/AuthBackground') {
+@@ -115,7 +116,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+       if (control.realStaff && ['screens/staff/StaffEventsNavigator', 'services/staffEventsService',
+         'screens/staff/StaffEntryControlRealScreen', 'services/staffEntryService', 'services/staffEntryIntentStorage',
+         'screens/staff/StaffStationOperationalScreen', 'services/staffIntentStorage',
+-        'services/staffDashboardService', 'services/staffOperationsService'].includes(target)) {
++        'services/staffDashboardService', 'services/staffOperationsService', 'screens/staff/useStaffPolling'].includes(target)) {
+         return load(`${target}.js`);
+       }
+       if (target === 'screens/event-entry/EventEntryScreen' && control.modalFixture) {
+diff --git a/app/tests/staffDashboard.test.cjs b/app/tests/staffDashboard.test.cjs
+index d15f96a..9b89ac9 100644
+--- a/app/tests/staffDashboard.test.cjs
++++ b/app/tests/staffDashboard.test.cjs
+@@ -21,6 +21,26 @@ const queue = (event = eventId) => ({ eventId: event, experienceId, waitingCount
+ const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+   return { promise, resolve, reject }; };
+ 
++test('polling preserva dados durante rede, atualiza estação e fila e descarta contexto antigo', async () => {
++  let current = context(), stationResult = stations(), queueResult = queue();
++  const store = createStaffDashboardStore({ getContext: () => current, client: { get: async url =>
++    url.endsWith('/stations') ? stationResult : queueResult } });
++  store.setContext(current); await store.refreshStations(); await store.refreshQueue(experienceId);
++  stationResult = { ...stations(), stations: [{ ...stations().stations[0], availability: 'unavailable' }] };
++  queueResult = { ...queue(), waitingCount: 2, firstWaitingQueueEntryId: stationId };
++  await store.pollStations(); await store.pollQueue();
++  assert.equal(store.getSnapshot().stations[0].availability, 'unavailable');
++  assert.equal(store.getSnapshot().queue.waitingCount, 2);
++  stationResult = Promise.reject(Object.assign(new Error('offline'), { isNetworkError: true }));
++  await store.pollStations();
++  assert.equal(store.getSnapshot().stations[0].availability, 'unavailable');
++  assert.equal(store.getSnapshot().stationError, 'stale');
++  const late = deferred(); stationResult = late.promise;
++  const old = store.pollStations(); current = context(otherEventId); store.setContext(current);
++  late.resolve(stations()); await old;
++  assert.equal(store.getSnapshot().stations.length, 0);
++});
++
+ test('consulta estações e fila reais com cliente autenticado e somente experiência retornada', async () => {
+   const current = context(), calls = [];
+   const store = createStaffDashboardStore({ getContext: () => current, client: { get: async (url, options) => {
+diff --git a/app/tests/staffDemoState.test.cjs b/app/tests/staffDemoState.test.cjs
+index 60c4701..94f9a3a 100644
+--- a/app/tests/staffDemoState.test.cjs
++++ b/app/tests/staffDemoState.test.cjs
+@@ -219,7 +219,7 @@ const demoStaffScreens = [
+   'components/StaffDemoTools.js', 'components/StaffHeader.js', 'components/StaffMissingSession.js',
+   'components/StaffNotice.js', 'components/StaffScreen.js', 'components/staffTheme.js',
+ ];
+-const realStaffScreens = ['StaffEventsNavigator.js', 'StaffEntryControlRealScreen.js', 'StaffStationOperationalScreen.js'];
++const realStaffScreens = ['StaffEventsNavigator.js', 'StaffEntryControlRealScreen.js', 'StaffStationOperationalScreen.js', 'useStaffPolling.js'];
+ 
+ test('estação operacional real não carrega estado demonstrativo', () => {
+   const source = readFileSync(path.join(appDirectory, 'screens', 'staff', 'StaffStationOperationalScreen.js'), 'utf8');
+diff --git a/app/tests/staffEntryControl.test.cjs b/app/tests/staffEntryControl.test.cjs
+index 908afff..9ee0bf5 100644
+--- a/app/tests/staffEntryControl.test.cjs
++++ b/app/tests/staffEntryControl.test.cjs
+@@ -53,6 +53,19 @@ async function rig(options = {}) {
+   const store = make(persisted.storage); store.setContext(current); await store.refresh();
+   return { store, persisted, calls, client, make, setContext(value) { current = value; store.setContext(value); }, get current() { return current; } };
+ }
++test('leitura silenciosa atualiza FIFO sem POST e conserva dados durante falha transitória', async () => {
++  let answer = body();
++  const r = await rig({ get: () => answer });
++  answer = { ...body(), waiting: [body().waiting[1]], waitingCount: 1, canCall: true };
++  answer.waiting[0].position = 1;
++  await r.store.poll();
++  assert.equal(r.store.getSnapshot().data.waiting[0].displayName, 'Bia');
++  assert.equal(r.calls.filter(call => call.method !== 'GET').length, 0);
++  answer = Promise.reject(Object.assign(new Error('offline'), { isNetworkError: true }));
++  await r.store.poll();
++  assert.equal(r.store.getSnapshot().data.waiting[0].displayName, 'Bia');
++  assert.equal(r.store.getSnapshot().error, 'stale');
++});
+ test('contrato valida identidade mínima, FIFO, contagem e resposta da operação', () => {
+   assert.equal(api.parseEntryState(body(), id(3)).waiting[0].displayName, 'Ana');
+   for (const patch of [{ waitingCount: 3 }, { observedAt: '2026-11-10' }, { waiting: [...body().waiting].reverse() },
+diff --git a/app/tests/staffEventDiscovery.test.cjs b/app/tests/staffEventDiscovery.test.cjs
+index 52025cb..972c4fc 100644
+--- a/app/tests/staffEventDiscovery.test.cjs
++++ b/app/tests/staffEventDiscovery.test.cjs
+@@ -95,3 +95,18 @@ test('troca de conta, geração, revisão e respostas fora de ordem descartam da
+   store.setIdentity(null);
+   assert.equal(store.getSnapshot().selected, null);
+ });
++
++test('consulta silenciosa preserva seleção e descarta resposta após troca de identidade', async () => {
++  let current = identity(), response = { events: [event] };
++  const store = createStaffEventsStore({ client: { get: async () => response }, getIdentity: () => current });
++  store.setIdentity(current); await store.refresh(); store.select(event.id);
++  response = { events: [{ ...event, effectivePhase: 'closing' }] };
++  await store.refreshSilent();
++  assert.equal(store.getSnapshot().selected.effectivePhase, 'closing');
++  const waiting = deferred();
++  response = waiting.promise;
++  const old = store.refreshSilent();
++  current = identity('new', 2, 2); store.setIdentity(current);
++  waiting.resolve({ events: [event] }); await old;
++  assert.equal(store.getSnapshot().selected, null);
++});
+diff --git a/app/tests/staffRealNavigation.test.cjs b/app/tests/staffRealNavigation.test.cjs
+index da96b7d..c2bea1d 100644
+--- a/app/tests/staffRealNavigation.test.cjs
++++ b/app/tests/staffRealNavigation.test.cjs
+@@ -47,6 +47,7 @@ function createRealApp(initialAuth) {
+     'Text', 'TextInput', 'View'].map((name) => [name, name]));
+   native.Modal = ({ visible, children }) => (visible ? React.createElement('Modal', null, children) : null);
+   native.StyleSheet = { create: (styles) => styles };
++  native.AppState = { currentState: 'active', addEventListener: () => ({ remove() {} }) };
+   native.Platform = { OS: 'ios' };
+ 
+   const navRef = Navigation.createNavigationContainerRef();
+@@ -77,6 +78,7 @@ function createRealApp(initialAuth) {
+       if (name === '@react-navigation/native-stack') return nativeStack;
+       if (name === '@react-navigation/native') {
+         return {
++          useIsFocused: () => true,
+           NavigationContainer: ({ children }) => React.createElement(Navigation.BaseNavigationContainer, {
+             ref: navRef,
+             onUnhandledAction: (action) => unhandled.push(action),
+diff --git a/app/screens/staff/useStaffPolling.js b/app/screens/staff/useStaffPolling.js
+new file mode 100644
+index 0000000..3b8ea80
+--- /dev/null
++++ b/app/screens/staff/useStaffPolling.js
+@@ -0,0 +1,35 @@
++import { useEffect, useRef } from 'react';
++import { AppState } from 'react-native';
++import { useIsFocused } from '@react-navigation/native';
++
++// O próximo ciclo começa após o término da leitura; mudança de foco/contexto invalida o timer.
++const defaultScheduler = { set: (fn, ms) => setTimeout(fn, ms), clear: id => clearTimeout(id) };
++export function useStaffPolling(enabled, read, intervalMs = 5000, scope = null, scheduler = defaultScheduler) {
++  const focused = useIsFocused();
++  const readRef = useRef(read);
++  readRef.current = read;
++  useEffect(() => {
++    if (!enabled || !focused) return;
++    let active = true, timer = null, running = false, foreground = AppState.currentState === 'active';
++    const schedule = () => {
++      if (!active || !foreground || running || timer !== null) return;
++      timer = scheduler.set(() => { timer = null; void cycle(); }, intervalMs);
++    };
++    const cycle = async () => {
++      if (!active || !foreground || running) return;
++      running = true;
++      try { await readRef.current(); } catch { /* A leitura sinaliza seu erro no estado da tela. */ } finally {
++        running = false;
++        schedule();
++      }
++    };
++    const subscription = AppState.addEventListener('change', next => {
++      const wasForeground = foreground;
++      foreground = next === 'active';
++      if (!foreground) { scheduler.clear(timer); timer = null; }
++      else if (!wasForeground && active) schedule();
++    });
++    schedule();
++    return () => { active = false; scheduler.clear(timer); subscription.remove(); };
++  }, [enabled, focused, intervalMs, scope, scheduler]);
++}
+diff --git a/app/tests/staffPolling.test.cjs b/app/tests/staffPolling.test.cjs
+new file mode 100644
+index 0000000..e477c7f
+--- /dev/null
++++ b/app/tests/staffPolling.test.cjs
+@@ -0,0 +1,101 @@
++const assert = require('node:assert/strict');
++const test = require('node:test');
++const path = require('node:path');
++const { createRequire } = require('node:module');
++const { loadModule } = require('./helpers/questionnaireHarness.cjs');
++
++const qaRequire = createRequire(path.resolve(__dirname, '../../qa/regression/package.json'));
++let React, Renderer;
++try { React = qaRequire('react'); Renderer = qaRequire('react-test-renderer'); } catch { /* Ambiente QA ausente. */ }
++const skip = React && Renderer ? false : 'dependências de qa/regression não instaladas';
++const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
++
++function fixture() {
++  let focused = true, foreground = 'active', now = 0, serial = 0;
++  const timers = new Map(), listeners = new Set();
++  const appState = { currentState: foreground, addEventListener: (_, listener) => {
++    listeners.add(listener); return { remove: () => listeners.delete(listener) };
++  } };
++  const { useStaffPolling } = loadModule('screens/staff/useStaffPolling.js', name => {
++    if (name === 'react') return React;
++    if (name === 'react-native') return { AppState: appState };
++    if (name === '@react-navigation/native') return { useIsFocused: () => focused };
++    throw new Error(`Import inesperado: ${name}`);
++  }).exports;
++  const scheduler = { set: (callback, delay) => { const id = ++serial; timers.set(id, { callback, due: now + delay }); return id; },
++    clear: id => timers.delete(id) };
++  const Component = ({ enabled = true, read, scope = 'event' }) => {
++    useStaffPolling(enabled, read, 5000, scope, scheduler); return null;
++  };
++  return { Component, timers, listeners,
++    advance(ms) { now += ms; for (const [id, timer] of [...timers]) if (timer.due <= now) {
++      timers.delete(id); timer.callback();
++    } },
++    focus(value) { focused = value; },
++    app(value) { foreground = value; appState.currentState = value; listeners.forEach(listener => listener(value)); },
++    restore() { timers.clear(); listeners.clear(); },
++  };
++}
++
++test('timer aguarda cinco segundos e o fim da leitura; segundo plano durante leitura não duplica ciclos', { skip }, async () => {
++  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
++  const f = fixture(), pending = deferred(); let calls = 0, renderer;
++  try {
++    await Renderer.act(async () => { renderer = Renderer.create(React.createElement(f.Component, { read: () => {
++      calls++; return calls === 1 ? pending.promise : Promise.resolve();
++    } })); });
++    assert.equal(f.timers.size, 1);
++    await Renderer.act(async () => { f.advance(4999); }); assert.equal(calls, 0);
++    await Renderer.act(async () => { f.advance(1); }); assert.equal(calls, 1);
++    assert.equal(f.timers.size, 0, 'leitura pendente não agenda outra');
++    await Renderer.act(async () => { f.app('background'); f.app('active'); f.app('background'); f.app('active'); f.advance(20000); });
++    assert.equal(calls, 1, 'retomadas não consultam durante leitura pendente');
++    assert.equal(f.timers.size, 0);
++    await Renderer.act(async () => { pending.resolve(); await pending.promise; });
++    assert.equal(f.timers.size, 1, 'fim da leitura agenda exatamente um ciclo');
++    await Renderer.act(async () => { f.advance(5000); await Promise.resolve(); });
++    assert.equal(calls, 2);
++    await Renderer.act(async () => { renderer.unmount(); });
++    assert.equal(f.timers.size, 0); assert.equal(f.listeners.size, 0);
++    f.advance(5000); assert.equal(calls, 2);
++  } finally { pending.resolve(); try { if (renderer) await Renderer.act(async () => renderer.unmount()); } finally { f.restore(); } }
++});
++
++test('foco, primeiro plano, contexto e desmontagem cancelam timers anteriores', { skip }, async () => {
++  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
++  const f = fixture(); let calls = 0, renderer;
++  const read = () => { calls++; return Promise.resolve(); };
++  try {
++    await Renderer.act(async () => { renderer = Renderer.create(React.createElement(f.Component, { read })); });
++    f.focus(false);
++    await Renderer.act(async () => { renderer.update(React.createElement(f.Component, { read })); });
++    assert.equal(f.timers.size, 0); f.advance(10000); assert.equal(calls, 0);
++    f.focus(true);
++    await Renderer.act(async () => { renderer.update(React.createElement(f.Component, { read })); });
++    assert.equal(f.timers.size, 1);
++    await Renderer.act(async () => { f.app('background'); }); assert.equal(f.timers.size, 0);
++    f.advance(10000); assert.equal(calls, 0);
++    await Renderer.act(async () => { f.app('active'); f.app('active'); }); assert.equal(f.timers.size, 1);
++    await Renderer.act(async () => { renderer.update(React.createElement(f.Component, { read, scope: 'other-event' })); });
++    assert.equal(f.timers.size, 1, 'troca de contexto substitui o timer');
++    await Renderer.act(async () => { f.advance(5000); await Promise.resolve(); }); assert.equal(calls, 1);
++    await Renderer.act(async () => { renderer.unmount(); });
++    assert.equal(f.timers.size, 0); f.advance(5000); assert.equal(calls, 1);
++  } finally { try { if (renderer) await Renderer.act(async () => renderer.unmount()); } finally { f.restore(); } }
++});
++
++test('leitura de contexto anterior não agenda novo ciclo após troca ou desmontagem', { skip }, async () => {
++  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
++  const f = fixture(), old = deferred(); let calls = 0, renderer;
++  const read = () => { calls++; return calls === 1 ? old.promise : Promise.resolve(); };
++  try {
++    await Renderer.act(async () => { renderer = Renderer.create(React.createElement(f.Component, { read, scope: 'A' })); });
++    await Renderer.act(async () => { f.advance(5000); }); assert.equal(calls, 1);
++    await Renderer.act(async () => { renderer.update(React.createElement(f.Component, { read, scope: 'B' })); });
++    assert.equal(f.timers.size, 1);
++    await Renderer.act(async () => { old.resolve(); await old.promise; });
++    assert.equal(f.timers.size, 1, 'resposta antiga não cria segundo timer');
++    await Renderer.act(async () => { renderer.unmount(); });
++    f.advance(5000); assert.equal(calls, 1);
++  } finally { old.resolve(); try { if (renderer) await Renderer.act(async () => renderer.unmount()); } finally { f.restore(); } }
++});
+diff --git a/docs/STAFF_B1_IMPLEMENTACAO.md b/docs/STAFF_B1_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..141f61a
+--- /dev/null
++++ b/docs/STAFF_B1_IMPLEMENTACAO.md
+@@ -0,0 +1,31 @@
++# Staff B1 — atualização automática operacional
++
++## Implementação
++
++As telas reais Staff consultam somente leituras existentes. Controle de Entrada consulta `GET /staff/events/:eventId/entry-control` a cada 5 segundos. Estação selecionada consulta `GET /staff/events/:eventId/experiences/:experienceId/stations/:stationId/operational-state`, a lista de estações e o resumo de fila da experiência selecionada a cada 5 segundos. O painel consulta a lista de estações a cada 5 segundos. A lista de eventos e o painel selecionado consultam `GET /staff/events` a cada 60 segundos para atualizar `effectivePhase` sem usar a projeção B2 em cada ciclo operacional.
++
++O timer só existe com a rota em foco, seção visível, sessão corrente e app em primeiro plano. O próximo ciclo é agendado após o término da leitura. A retomada em primeiro plano não agenda outro timer quando uma leitura segue pendente; sua conclusão agenda um único ciclo. Mudanças de foco, evento, estação, usuário, época ou revisão da identidade limpam o timer; respostas tardias são descartadas pelas gerações e verificações de contexto dos stores. As leituras silenciosas preservam dados, seleção, modais, feedback e intenções. Falhas transitórias exibem aviso de desatualização e bloqueiam mutações sensíveis até leitura confirmada. Falhas de autorização limpam dados operacionais.
++
++Os botões manuais e os coordenadores de intenção persistida permanecem. O polling usa apenas GET e não inicia reconciliação ou repete mutações. A atualização da estação utiliza o estado operacional nominal, que inclui espera e chamada pendente; o resumo separado da experiência alimenta o indicador do painel de atendimento. A lista de experiências é carregada ao entrar no painel e não é consultada a cada ciclo.
++
++## Verificação
++
++Na primeira validação Luna Medium, os testes focados registraram 137 aprovados e 1 falho: a fixture usava `waitingCount: 2` com `firstWaitingQueueEntryId: null`, resposta recusada corretamente por `parseStaffQueue`. A fixture foi corrigida sem alterar o parser. Na validação posterior, os testes direcionados tiveram 141 aprovados, incluindo 3 do hook com relógio controlado. A regressão então apontou 532 aprovados e 1 falho, pois o inventário de `staffDemoState.test.cjs` não incluía `useStaffPolling.js`. Após a correção da lista, o teste de inventário teve 21 aprovados e a regressão completa teve **533 aprovados, 0 falhos e 0 ignorados**. As verificações anteriores de `git diff --check` e reversibilidade da evidência passaram. Estes são resultados automatizados previamente obtidos, sem nova execução nesta atualização documental.
++
++## Limites
++
++A revalidação anterior havia sido interrompida após o runner deixar de produzir saída; a interferência dos timers globais era uma hipótese não comprovada. O hook passou a aceitar um agendador opcional, preservando os timers de produção, e os testes usam relógio isolado e limpam os recursos. A execução isolada posterior terminou e aprovou os 3 testes do hook.
++
++A fase e a concessão da lista Staff podem levar até 60 segundos para atualizar na interface; os endpoints operacionais continuam revalidando autorização em cada leitura. O intervalo de 5 segundos não representa comunicação em tempo real. Não há dependência da sincronização automática do participante.
++
++## HOMOLOGAÇÃO FUNCIONAL (Expo Go)
++
++O responsável homologou a B1 no banco local isolado `arenago_staff_a4_20261112`, no evento Multiestações, com as experiências Just Dance e PlayStation. O teste principal utilizou Just Dance — Estação 01.
++
++Um participante sintético, com sessão autenticada e questionário completo, ingressou no evento pela API oficial via PowerShell. Ele apareceu automaticamente no Controle de Entrada, sem acionar Atualizar. Após chamada e confirmação pelo Staff, a participação ficou ativa e pôde ingressar na fila interna.
++
++A entrada na fila interna de Just Dance pelo endpoint oficial apareceu na tela Staff sem atualização manual, após aproximadamente 2 segundos. A retirada pelo endpoint oficial também atualizou a tela automaticamente. Na repetição, o botão Chamar próximo desapareceu praticamente de imediato após a retirada, enquanto a contagem mudou aproximadamente 4 segundos depois. A diferença visual transitória foi aceita na homologação, sem impacto funcional observado; sua causa técnica não foi investigada.
++
++Não foram observadas piscadas ou perda aparente dos dados. Ao colocar o Expo Go em segundo plano e retornar, a tela e a seleção permaneceram preservadas, sem anomalias observadas. A suspensão das requisições não foi verificada instrumentalmente nessa campanha; o comportamento é coberto pelos testes automatizados do hook.
++
++O inspector de rede do Expo DevTools estava indisponível por múltiplos React Native hosts. A evidência principal é o comportamento funcional observado. A B1 foi homologada e aprovada, sem necessidade de correções adicionais antes do commit, conforme confirmação do responsável.

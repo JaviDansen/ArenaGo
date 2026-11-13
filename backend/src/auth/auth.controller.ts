@@ -24,7 +24,7 @@ import type {
   AuthSessionResponseDto,
   LoginResponseDto,
   LogoutResponseDto,
-  PublicUserDto,
+  AuthenticatedUserDto,
   RefreshResponseDto,
 } from "./auth.types";
 import { extractClientMetadata } from "./client-metadata.util";
@@ -85,8 +85,10 @@ export class AuthController {
 
   @Get("me")
   @RequireSessionAuth()
+  @Header("Cache-Control", "no-store")
+  @Header("Pragma", "no-cache")
   @HttpCode(HttpStatus.OK)
-  getMe(@CurrentUser() principal: AuthenticatedPrincipal): PublicUserDto {
+  getMe(@CurrentUser() principal: AuthenticatedPrincipal): AuthenticatedUserDto {
     return this.authService.getMe(principal);
   }
 

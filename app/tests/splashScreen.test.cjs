@@ -413,7 +413,8 @@ test('SPLASH-01 (7): Sincronização do estado de prontidão com inicialização
   const mockAuth = {
     isAuthenticated: true,
     isInitializing: true,
-    user: { id: 'u1', name: 'Tester', hasCompletedQuestionnaire: true },
+    identityStatus: 'checking',
+    user: { id: 'u1', name: 'Tester', roles: ['participante'], hasCompletedQuestionnaire: true },
   };
 
   const coordMod = loadModule(
@@ -432,12 +433,19 @@ test('SPLASH-01 (7): Sincronização do estado de prontidão com inicialização
       capturedInitializing = initializing;
     },
   });
-  assert.equal(restoring.props.style.backgroundColor, '#1C0A35', 'Restauração deve acompanhar a Splash');
+  assert.equal(restoring.props.children[1].props.style.backgroundColor, '#1C0A35',
+    'Restauração deve acompanhar a Splash');
+  assert.equal(restoring.props.children[0].props.style.display, 'none',
+    'conteúdo autenticado fica oculto durante a checagem');
+  assert.equal(restoring.props.children[0].props.pointerEvents, 'none',
+    'conteúdo oculto não recebe interação');
+  assert.equal(restoring.props.children[0].props.children, 'MainContent',
+    'a pilha da mesma sessão permanece montada');
 
   // auth.isInitializing = true -> capturedInitializing = true -> isReady = false
   assert.equal(capturedInitializing, true, 'Deve sincronizar isInitializing=true com o callback');
 
-  // Quando auth.isInitializing passa para false:
+  // O fim da restauração não libera a Splash enquanto a identidade é checada.
   mockAuth.isInitializing = false;
   coordMod.AuthSessionCoordinator({
     children: 'MainContent',
@@ -445,8 +453,31 @@ test('SPLASH-01 (7): Sincronização do estado de prontidão com inicialização
       capturedInitializing = initializing;
     },
   });
+  assert.equal(capturedInitializing, true, 'checagem de identidade ainda bloqueia a revelação');
 
-  assert.equal(capturedInitializing, false, 'Deve sincronizar isInitializing=false quando concluído');
+  mockAuth.identityStatus = 'verified';
+  const verified = coordMod.AuthSessionCoordinator({
+    children: 'MainContent',
+    onInitializingChange: (initializing) => {
+      capturedInitializing = initializing;
+    },
+  });
+  assert.equal(capturedInitializing, false, 'Splash liberada somente após identidade confirmada');
+  assert.equal(verified.props.children[0].props.children, 'MainContent');
+  assert.equal(verified.props.children[0].props.pointerEvents, 'auto');
+
+  mockAuth.identityStatus = 'error';
+  const failed = coordMod.AuthSessionCoordinator({
+    children: 'MainContent',
+    onInitializingChange: (initializing) => {
+      capturedInitializing = initializing;
+    },
+  });
+  assert.equal(capturedInitializing, false, 'erro libera o splash inicial para mostrar recuperação');
+  assert.equal(failed.props.children[0].props.style.display, 'none',
+    'erro de identidade mantém o conteúdo autenticado oculto');
+  assert.equal(failed.props.children[0].props.pointerEvents, 'none');
+  assert.ok(failed.props.children[1], 'recuperação permanece visível');
 });
 
 // ---------------------------------------------------------------------------
@@ -622,9 +653,10 @@ test('SPLASH-01 (11): Nenhuma apresentação de logo duplicada na transição no
     children: { type: 'WelcomeScreen', props: { testID: 'welcome-screen' } },
   });
 
-  // Deve renderizar diretamente a WelcomeScreen, e NÃO a tela de restauração de sessão com logo
-  assert.equal(rendered.type, 'WelcomeScreen', 'Na inicialização normal, deve ir direto para a tela de destino');
-  assert.equal(rendered.props.testID, 'welcome-screen');
+  // O contêiner do gate mantém a tela montada, sem apresentar outro logo.
+  assert.equal(rendered.props.children[0].props.children.type, 'WelcomeScreen');
+  assert.equal(rendered.props.children[0].props.children.props.testID, 'welcome-screen');
+  assert.equal(rendered.props.children[1], null, 'sem segunda tela de restauração');
 });
 
 // ---------------------------------------------------------------------------
@@ -695,7 +727,8 @@ test('SPLASH-01 (14): Erros de rede ou armazenamento na autenticação mantêm t
 
   const rendered = coordMod.AuthSessionCoordinator({ children: 'MainApp' });
   assert.notEqual(rendered, 'MainApp');
-  assert.equal(rendered.props.style.backgroundColor, '#1C0A35', 'Recuperação deve acompanhar a Splash');
+  assert.equal(rendered.props.children[1].props.style.backgroundColor, '#1C0A35',
+    'Recuperação deve acompanhar a Splash');
 
   function collectTexts(node) {
     if (!node) return [];
@@ -777,7 +810,7 @@ test('SPLASH-01 (16): Transições de rota baseadas no estado de autenticação'
   assert.equal(
     resolveInitialRouteForAuthState({
       isAuthenticated: true,
-      user: { hasCompletedQuestionnaire: true },
+      user: { roles: ['participante'], hasCompletedQuestionnaire: true },
     }),
     'MainTabs'
   );
@@ -786,10 +819,17 @@ test('SPLASH-01 (16): Transições de rota baseadas no estado de autenticação'
   assert.equal(
     resolveInitialRouteForAuthState({
       isAuthenticated: true,
-      user: { hasCompletedQuestionnaire: false },
+      user: { roles: ['participante'], hasCompletedQuestionnaire: false },
     }),
     'ProfileQuestionnaire'
   );
+
+  assert.equal(resolveInitialRouteForAuthState({ isAuthenticated: true,
+    user: { roles: ['staff'], hasCompletedQuestionnaire: false } }), 'StaffPending');
+  assert.equal(resolveInitialRouteForAuthState({ isAuthenticated: true,
+    user: { roles: ['admin'], hasCompletedQuestionnaire: false } }), 'AdminPending');
+  assert.equal(resolveInitialRouteForAuthState({ isAuthenticated: true,
+    user: { roles: [] } }), 'IdentityRecovery');
 
   // 4. Sessão expirada ou revogada -> Login
   assert.equal(

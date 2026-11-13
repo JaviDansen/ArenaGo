@@ -1,0 +1,22 @@
+diff --git a/docs/STAFF_A5_IMPLEMENTACAO.md b/docs/STAFF_A5_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..a50e752
+--- /dev/null
++++ b/docs/STAFF_A5_IMPLEMENTACAO.md
+@@ -0,0 +1,16 @@
++# Staff A5 — caracteres na interface
++
++## Diagnóstico
++
++Na homologação da A4, conforme relato do responsável, três labels persistidos apresentavam caracteres corrompidos. Após PATCH administrativo com JSON UTF-8, o GET retornou os valores corretos e o Expo Go os exibiu corretamente. Isso sustenta que os valores persistidos explicavam o problema observado; não identifica quando nem como foram corrompidos. Um terminal pode também apresentar texto incorreto por sua própria codificação, sem demonstrar corrupção dos dados.
++
++## Inspeção estática
++
++- `StaffEventsNavigator.js` exibe `station.label`; `staffOperationsService.js` valida e repassa a string recebida.
++- A consulta Staff seleciona `stations.label` e o controller devolve esse valor. A configuração administrativa valida o label e as operações de criação e edição o gravam em `stations`.
++- As fixtures de contas Staff inspecionadas não criam estações. A busca direcionada na interface Staff, serviços, scripts e código de eventos por caracteres de substituição e sequências comuns de corrupção não identificou uma origem reproduzível no fluxo analisado.
++- Nenhuma alteração de renderização, transporte ou regra de negócio foi necessária com base nas evidências disponíveis. A origem da corrupção histórica permanece desconhecida; esta inspeção não comprova todos os caminhos de entrada de dados.
++
++## Validação
++
++A homologação visual citada acima foi realizada manualmente pelo responsável na A4; não foi repetida nesta task. Nesta etapa foram feitas apenas inspeções estáticas. Nenhum teste automatizado foi executado. Para uma verificação adicional com Luna Medium, em ambiente isolado e `NODE_ENV=test`, executar em `app`: `node --test tests/roleRoutingIntegration.test.cjs tests/staffRealNavigation.test.cjs`. Os testes existentes não demonstram necessariamente um round trip UTF-8 completo pelo backend e banco.

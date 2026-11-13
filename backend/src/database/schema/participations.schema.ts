@@ -20,6 +20,24 @@ import { experiences, stations } from "./arena-structure.schema";
 
 const instant = (name: string) => timestamp(name, { withTimezone: true, mode: "date" });
 
+/** Entrada no evento, independente das filas de experiências. */
+export const externalEntryCalls = pgTable("external_entry_calls", {
+  id: uuid("id").primaryKey(), eventId: uuid("event_id").notNull(), participationId: uuid("participation_id").notNull(),
+  calledByUserId: uuid("called_by_user_id"), calledAt: instant("called_at").notNull(),
+  status: varchar("status", { length: 20 }).notNull(), resolvedByUserId: uuid("resolved_by_user_id"),
+  resolvedAt: instant("resolved_at"), resolutionReason: varchar("resolution_reason", { length: 64 }),
+}, table => [
+  uniqueIndex("uq_external_calls_pending_event").on(table.eventId).where(sql`${table.status} = 'pending'`),
+  uniqueIndex("uq_external_calls_pending_participation").on(table.participationId).where(sql`${table.status} = 'pending'`),
+  index("ix_external_calls_participation_time").on(table.participationId, table.calledAt),
+  foreignKey({ name: "fk_external_calls_event", columns: [table.eventId], foreignColumns: [events.id] }),
+  foreignKey({ name: "fk_external_calls_participation_event", columns: [table.participationId, table.eventId], foreignColumns: [participations.id, participations.eventId] }),
+  foreignKey({ name: "fk_external_calls_caller", columns: [table.calledByUserId], foreignColumns: [users.id] }).onDelete("set null"),
+  foreignKey({ name: "fk_external_calls_resolver", columns: [table.resolvedByUserId], foreignColumns: [users.id] }).onDelete("set null"),
+  check("ck_external_calls_status", sql`${table.status} IN ('pending','confirmed','absent','removed','canceled')`),
+  check("ck_external_calls_resolution", sql`(${table.status} = 'pending' AND ${table.resolvedAt} IS NULL AND ${table.resolvedByUserId} IS NULL AND ${table.resolutionReason} IS NULL) OR (${table.status} <> 'pending' AND ${table.resolvedAt} IS NOT NULL AND ${table.resolutionReason} IS NOT NULL AND length(btrim(${table.resolutionReason})) > 0 AND ${table.resolvedAt} >= ${table.calledAt})`),
+]);
+
 export const participations = pgTable(
   "participations",
   {
