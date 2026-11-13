@@ -1,6 +1,27 @@
 # ArenaGo — Arquitetura Backend unificada e dicionário PostgreSQL
 
-**Versão:** v0.6.17 — desistência voluntária da fila interna, C-15; contrato futuro E07.3 (30/10/2026).
+**Versão:** v0.6.18 — consolidação documental da develop (13/11/2026).
+**Fonte funcional prevalente:** [Planejamento v0.7.11](PLANEJAMENTO_ARENAGO.md); decisões D01–D11 e C-01–C-15 preservadas.
+
+## Estado consolidado — novembro de 2026
+
+O código da develop implementa contratos HTTP de identidade, sessões, verificação de e-mail, Admin/TOTP, papéis, perfil/jogos, configuração de eventos, ingresso, participações, filas, operações Staff, encerramento e avaliações. O inventário vigente, diferenças para propostas, extensões relacionais e limites estão em **§27**. O journal contém **oito migrations (0001–0008)** e os schemas declaram **26 tabelas**. Presença no Git não comprova aplicação em banco algum.
+
+| Categoria | Estado |
+|---|---|
+| Decisões aprovadas | Planejamento e invariantes normativos deste documento permanecem válidos. Diferenças de implementação são registradas para decisão, sem redefinir negócio. |
+| Implementado | Controllers e serviços NestJS/Drizzle/PostgreSQL listados em §27; detalhes de locks, tempo, idempotência e auditoria continuam nos capítulos e relatórios de entrega. |
+| Integrado | Participante/Staff usam API nos fluxos dos READMEs. Admin usa senha/TOTP, identidade e logout reais, com rota exclusiva AdminArea; as 14 telas Heliom continuam em memória, sem persistência administrativa real. |
+| Homologado | Campanha histórica da integração Perfil/Admin: 755 aprovações frontend, zero falhas/ignorados, exit 0, conforme responsável; login Admin/TOTP e painel Heliom no Expo Go. Perfil/Staff têm campanhas delimitadas. Não há aprovação geral atual do backend ou produção. |
+| Pendente | Onboarding/reset geral TOTP, recuperação de senha, painel Admin persistido, reconciliação Staff, aderência da retomada de avaliações, BI/LGPD, concorrência física/carga e operação de produção. |
+
+**Convenção histórica:** capítulos 14–18 preservam propostas, exemplos e critérios originais, com atualizações E08 intercaladas. Afirmações “nenhum endpoint”, “sem HTTP”, “futuro” e contagens antigas descrevem sua rodada, não o inventário atual. Exemplo histórico não é resposta vigente quando §27 ou o controller indicar diferença. Regras normativas não se tornam sugestões por essa classificação. Nenhum resultado foi reexecutado nesta consolidação.
+
+**Fontes:** [README geral](../README.md), [app](../app/README.md), [backend](../backend/README.md), código em `backend/src/` e `app/`, schemas/migrations e relatórios citados em §27. O Planejamento prevalece para negócio; código e DDL versionado descrevem o que foi entregue, sem presumir aprovação de divergências.
+
+### Abertura v0.6.17 — registro histórico
+
+**Versão histórica:** v0.6.17 — desistência voluntária da fila interna, C-15; contrato futuro E07.3 (30/10/2026).
 **Fonte funcional prevalente:** `PLANEJAMENTO_ARENAGO.md` (v0.7.10).
 **Estado atual:** fundação NestJS/Drizzle e cinco migrações existentes; função TypeScript de normalização e consultas internas `EventsService.findById()`/`findByAccessCode()` implementadas. Nenhum endpoint HTTP de produto foi criado. Neon não foi criada.
 **Escopo desta revisão (30/10/2026):** complemento documental C-15 após a entrega inicial da E07.1, com saída isolada da fila interna reservada à E07.3. Preservados os registros históricos; nenhum código, teste ou migração alterado.
@@ -11,7 +32,9 @@
 
 > **Legenda de evidência:** **[APROVADO]** = decisão de produto já tomada; **[IMPLEMENTADO/RELATADO]** = execução informada pelo Codex, não verificada independentemente nesta revisão; **[PROPOSTA]** = contrato/lógica de serviço ainda sem implementação; **[PENDENTE]** = decisão/validação futura. O texto do dicionário representa o **desenho-alvo** que guiou a Task 6.2; detalhes exatos do SQL são autoridade do `backend/` e das migrations versionadas, sujeitos a conferência no próprio repositório.
 
-## Consolidação atual — E08-EST05 (05/11/2026)
+## Consolidação histórica — E08-EST05 (05/11/2026)
+
+**Atualização posterior:** a enumeração de lacunas abaixo pertence à E08-EST05. Descoberta/ingresso HTTP, papéis, bootstrap/ativação inicial e integração Expo foram implementados depois; onboarding geral e limites de produção permanecem em §27. Não atribuir a regressão dessa campanha à develop atual.
 
 Os capítulos e resumos datados acima preservam o desenho e o estado que existiam em
 suas revisões originais. Em particular, referências a “nenhum endpoint HTTP” e a
@@ -58,6 +81,10 @@ declarar o sistema pronto para produção.
 
 ## 0. Resumo executivo — o que existe e o que falta
 
+**Vigente:** contratos HTTP reais no inventário §27, oito migrations em §8 e 26 tabelas nos schemas. Integração Participante/Staff real; autenticação Admin real com painel demonstrativo. Onboarding TOTP geral, recuperação de senha, reconciliação, BI/LGPD e operação de produção continuam pendentes. A tabela a seguir preserva exclusivamente o marco da fundação/E01.2B.
+
+### Retrato histórico da fundação e E01.2B
+
 | Item | Situação | Evidência/limite |
 |---|---|---|
 | Estrutura `backend/` | NestJS, TS, `pg`, Drizzle, configuração, README e módulo Events | Código local inspecionado nesta revisão |
@@ -68,7 +95,7 @@ declarar o sistema pronto para produção.
 | Neon, hospedagem, LGPD e piloto | **[NÃO CONFIGURADO / PENDENTE]** | Não usar dados pessoais reais nem declarar prontidão de produção |
 | Commit da Task 6.2 | **[REGISTRADO LOCALMENTE]** | `4c4acbb` está no histórico da branch `develop` |
 
-**Limite de escopo atual:** preservar a fundação; **não executar Task 6.3A nem implementar endpoints**. O documento descreve a API futura para evitar perda de decisões, não autoriza sua construção nesta etapa. Quatro vulnerabilidades moderadas no tooling foram reportadas por `npm audit` e aguardam triagem sem atualizações forçadas.
+**Limite de escopo daquela revisão:** preservar a fundação; não executar Task 6.3A naquela rodada. A restrição não descreve inexistência atual das entregas posteriores. Quatro vulnerabilidades moderadas no tooling foram reportadas naquela campanha; não houve nova auditoria de dependências nesta consolidação.
 
 ## 1. Arquitetura e fronteira de responsabilidade
 
@@ -78,9 +105,11 @@ declarar o sistema pronto para produção.
 - **Relógio:** instantes em `timestamptz` (UTC no trânsito/API), apresentados usando `events.timezone` IANA. `birth_date` é `date` civil, sem timezone. Limites são validados no banco/backend, nunca pelo relógio do telefone.
 - **Chaves:** `uuid` (preferência UUIDv7 sujeita à viabilidade real no stack) e contadores `bigint` por fila. `CHECK` limita estados estáticos; regras de elegibilidade, prontidão e janelas de tempo exigem transações/serviços.
 - **Referência de nomenclatura:** `sessions` (não `auth_sessions`); `refresh_tokens`; `password_reset_tokens`; `email_verification_tokens`; `user_roles` (não duas tabelas de grants); `user_totp_credentials`, `user_backup_codes`, `totp_activation_tokens`; `audit_logs` (não `role_audit_logs`); `participation_profile_snapshots`.
-- **Contagem:** **22 tabelas de domínio + `idempotency_operations` (23ª tabela técnica, presente nas migrações segundo Codex)**. Agregados de BI não são incluídos sem política e contrato de anonimização. Nenhum número de tabelas é limite de expansão.
+- **Contagem:** 23 tabelas no marco da fundação, ampliadas para **26** por `admin_2fa_challenges`, `staff_idempotency_epochs` e `external_entry_calls` nas migrations 0006–0008 (§27.3). Agregados de BI não são incluídos sem política e contrato de anonimização. Nenhum número de tabelas é limite de expansão.
 
 ## 2. Dicionário relacional de referência — 23 tabelas [DESENHO-ALVO]
+
+**Escopo do dicionário:** preserva as 23 entidades originais e suas justificativas; não é a contagem atual. Extensões posteriores de tabelas, colunas e triggers constam de §8/§27.3. Tipos e restrições efetivos são os schemas e SQLs versionados.
 
 ### 2.1 Identidade e perfil (5)
 
@@ -252,7 +281,9 @@ declarar o sistema pronto para produção.
 
 **Null e estados:** todas as FKs compostas de ponteiro usam a regra `MATCH SIMPLE` padrão: quando `current_queue_entry_id IS NULL`, o vínculo é opcional. `CHECK` não referencia outras tabelas: prontidão, elegibilidade, contagem de Admins e transições são regras de serviço + locks + índices.
 
-## 4. Transações críticas de serviços futuros [PROPOSTA A VALIDAR]
+## 4. Transações críticas — especificação original e evolução implementada
+
+O protocolo abaixo continua referência de invariantes. As ordens efetivas e escolhas conservadoras de locks, inclusive `FOR UPDATE` no evento em finalização, estão distinguidas em §15.9 e §27.4. A palavra “proposta” registra a etapa original, não ausência atual de serviços nem aprovação de concorrência física universal.
 
 **Princípio:** usar `READ COMMITTED` com bloqueios curtos, invariantes únicos no banco e retentativas limitadas apenas onde for seguro. Fazer todos os fluxos que se cruzam seguir ordem compatível; **não** prometer “zero deadlocks” sem testes reais.
 
@@ -288,7 +319,9 @@ declarar o sistema pronto para produção.
 - **Avaliações:** primeira até 30 dias depois da finalização, integralmente editável por 7 dias após submissão, depois possibilidade de adicionar comentário antes inexistente uma única vez até dia 30, sem alterar nota, passado isso bloqueada.
 - **BI:** distinguir entrada Arena→última conclusão Staff de entrada Arena→saída **voluntária**; jamais considerar limpeza como saída voluntária.
 
-## 6. API futura: mapa de contratos [NÃO IMPLEMENTADO]
+## 6. Mapa histórico de contratos propostos
+
+Para existência, métodos, payloads e diferenças vigentes, usar §27. O mapa original abaixo inclui capacidades ainda pendentes, como recuperação de senha e BI; não é inventário atual de rotas.
 
 | Domínio | Rotas/capacidades | Pontos a verificar no código real |
 |---|---|---|
@@ -312,7 +345,9 @@ declarar o sistema pronto para produção.
 - Mecanismo de agregados seguros, se necessário (`bi_aggregates` ou equivalente), **não está aprovado como tabela**. Desenhar contagens sem duplicação, edições de avaliações e supressão conforme política, antes de implementar exclusão real.
 - `audit_logs` guarda razão/metadata mínimos e exige redaction/retention; tokens de sessão são revogados, filas/atendimentos fechados coerentemente com evento.
 
-## 8. Histórico único de cinco migrações [IMPLEMENTADO/RELATADO]
+## 8. Histórico único de oito migrations versionadas
+
+Inventário conferido em [journal](../backend/drizzle/meta/_journal.json), `backend/drizzle/` e [schemas](../backend/src/database/schema). As cinco primeiras pertencem à fundação; as três seguintes ampliam o mesmo histórico. Não foram aplicadas nesta tarefa.
 
 | Ordem | Arquivo | Conteúdo |
 |---|---|---|
@@ -321,6 +356,11 @@ declarar o sistema pronto para produção.
 | 0003 | `0003_credentials_roles.sql` | `sessions`, tokens, papéis, TOTP e auditoria |
 | 0004 | `0004_event_operations.sql` | experiências, estações, participações, filas, serviços, snapshots, avaliações e **FK circular por `ALTER TABLE`** |
 | 0005 | `0005_idempotency.sql` | operações idempotentes e índices/restrições |
+| 0006 | `0006_admin_2fa_login.sql` | `admin_2fa_challenges`, validade/terminalidade do desafio e `user_totp_credentials.last_totp_counter` |
+| 0007 | `0007_staff_idempotency_preparation.sql` | colunas de origem/resultado na idempotência, `staff_idempotency_epochs`, check que mantém preparação desativada e trigger parcial de proteção Staff |
+| 0008 | `0008_external_entry_calls.sql` | chamadas externas persistidas, unicidade de pending, proteção de histórico e integração por triggers com participações/eventos |
+
+**Aplicação x versionamento:** o relato da Task 6.2 a seguir refere-se somente às cinco migrations iniciais. Relatórios posteriores registram ensaios locais específicos das 0006/0007 e 0008; nenhum deles certifica aplicação em todo banco, em Neon ou em produção. Snapshots/journal/SQL formam um histórico único a preservar. A conferência estática atual não repete os ensaios nem confirma catálogo de um banco vivo.
 
 A Task 6.2 informou aplicação em **dois bancos PostgreSQL locais 16.15 vazios** pelo mecanismo de migrações do projeto (Drizzle), com segunda execução sobre o primeiro banco sem reaplicação indevida; `drizzle-kit check`, compilação e lint passaram. Preservar **SQL, metadata/snapshots e journal** como um único histórico. **Não reescrever migrações já aplicadas**; futuras mudanças devem gerar novas migrações incrementais. Trigger e FK circular versionados foram reportados, mas o SQL real não foi disponibilizado para conferência nesta revisão. A migração `0002` imobiliza o código de ingresso, em conformidade com C-10.
 
@@ -351,7 +391,11 @@ A Neon permanece sem projeto. O banco local foi de teste; esta validação não 
 | T19 | Duas experiências diferentes processam chamadas | Não bloquear todas as filas via lock exclusivo de evento |
 | T20 | Dois `401` simultâneos no Expo | No máximo um refresh por sessão no cliente; sem replay automático inseguro |
 
-## 10. Pendências efetivas (após a Task 6.2)
+## 10. Pendências efetivas — estado vigente e histórico
+
+**Estado vigente:** segurança/sessões, papéis, calendário civil, prontidão, filas, fechamento e avaliações já possuem código. Permanecem recuperação de senha, credenciamento/reset geral TOTP, recuperação confiável de operações incertas, decisões de retenção/expurgo, BI e critérios de piloto/produção. Os pontos de aderência do código às decisões estão em §27.6. As listas abaixo pertencem ao marco da Task 6.2 e não devem ser usadas como lista de módulos inexistentes hoje.
+
+### Pendências após Task 6.2 — registro histórico
 
 **Sem autorização para implementar agora:** contratos REST dos capítulos 14–18; segurança de sessão/TOTP; validação dinâmica de prontidão, locks cross-table, gerenciamento de filas, fechamento automático e Admin, avaliações, recuperação do Expo e BI. Os testes DB da Task 6.2 são de banco/protocolos mínimos, não equivalem às suítes completas T/EV/ST/AV/AD/OP.
 
@@ -367,15 +411,19 @@ A Neon permanece sem projeto. O banco local foi de teste; esta validação não 
 - v0.6.12: cinco migrações SQL foram aplicadas em sequência em PostgreSQL temporário via `psql`, ainda **antes** da fundação.
 - **Task 6.2 (estado vigente):** backend, cinco migrações e integridade local implementados conforme relatório mais recente; detalhes no §23. O histórico detalhado permanece recuperável nas versões anteriores do Git, sem necessidade de duplicação integral neste arquivo.
 
-## 12. Compatibilidade com o frontend e decisões já fechadas
+## 12. Compatibilidade com o frontend — retrato histórico e decisões preservadas
 
-A auditoria do Expo reportou cadastro/login mocks, senha mínima cliente de 6 vs backend planejado de 8, formulário de três etapas com sete campos, 20 jogos exemplificativos, fila externa/interna simuladas, avaliação exibida sem elegibilidade real e três cartões de histórico mockados. Esses comportamentos não foram rechecados diretamente na revisão documental atual. **Nenhuma integração deve ser apresentada como implementada.**
+**Evolução:** a auditoria de 95 testes abaixo antecede as integrações reais. Consultar §27.5 e os READMEs para rotas, serviços e demonstrações atuais. A regra de não apresentar simulação como integração permanece válida.
+
+A auditoria do Expo reportou cadastro/login mocks, senha mínima cliente de 6 vs backend planejado de 8, formulário de três etapas com sete campos, 20 jogos exemplificativos, fila externa/interna simuladas, avaliação exibida sem elegibilidade real e três cartões de histórico mockados. Naquela auditoria original, os fluxos eram demonstrativos e nenhuma integração podia ser apresentada como implementada. Essa conclusão e seus resultados permanecem válidos exclusivamente naquele contexto histórico; as integrações realizadas posteriormente estão documentadas no resumo vigente e na §27.
 
 Continuam **[APROVADAS]**: `birthDate` válido até hoje inclusive (não há idade mínima inventada), cadastro encaminhando imediatamente ao questionário sem botão para pular, login permitido apesar do questionário pendente e bloqueio apenas no ingresso, refresh estrito, código de ingresso único e imutável, ausência após corte sem reentrada e C-13/C-14. A Task 6.1 antiga não prevalece sobre essas decisões.
 
 ## 13. Convenções de interpretação dos contratos a seguir
 
-As seções 14–18 são **especificações técnicas candidatas**. Exemplos JSON são ilustrativos; endpoints, DTOs, respostas, idempotência, métodos de autorização e telas Staff/Admin permanecem **não implementados**. O prefixo proposto é `/api/v1`, erros RFC 7807. Nenhuma delas representa autorização para executar Tasks 6.3 ou seguintes neste momento.
+**Atualização v0.6.18:** a delimitação original abaixo é histórica. Os capítulos 14–18 combinam propostas originais e notas E08 implementadas; §27 identifica contratos atuais, mudanças e pendências, sem transformar exemplos ilustrativos em respostas efetivas. Critérios de aceitação não são resultados de execução.
+
+As seções 14–18 foram originalmente escritas como **propostas técnicas**, cujos contratos ainda não estavam implementados naquela etapa. Parte considerável desses contratos foi posteriormente implementada; a §27 identifica os contratos efetivos e suas diferenças, enquanto as propostas ainda pendentes continuam sendo propostas. Os exemplos JSON históricos são ilustrativos e não devem ser confundidos com respostas vigentes. O prefixo proposto era `/api/v1`, com erros RFC 7807. Essas especificações, por si só, não autorizam novas implementações.
 
 ## 14. Contratos de integração v0.1 — identidade, perfil, questionário e jogos (19/10/2026)
 
@@ -2034,9 +2082,13 @@ O modelo foi construído para permitir descarte controlado de informações iden
 
 ## 19. Resolução documental anterior — código de ingresso
 
+**Evolução posterior:** a criação administrativa e o ingresso Expo/HTTP já reutilizam a normalização; os trechos de “trabalho futuro” abaixo preservam a E01.2B. A limitação do CHECK SQL e a proibição de reescrever migrations continuam válidas.
+
 A decisão C-10 estabelece código **único, imutável e não reutilizável** desde a criação. A migração `0002` inclui trigger de imutabilidade e índice único histórico. A regra aprovada de formato/normalização está detalhada no §2.3 e implementada para a consulta interna da E01.2B. A integração do cliente e a validação da criação de eventos continuam trabalho futuro; o CHECK SQL existente oferece proteção parcial e não substitui a função TypeScript. Uma restrição SQL completa poderá exigir migração incremental futura após auditoria dos dados.
 
 ## 20. Regras operacionais aprovadas — alterações estruturais e perda de capacidade
+
+**Estado vigente:** C-13/C-14 continuam normativas; configuração, ingresso e guardas de capacidade têm serviços implementados (§27). Menções abaixo a serviços futuros pertencem à especificação original, não implicam inexistência atual ou aprovação física de toda a matriz OP.
 
 **Hierarquia:** as decisões deste §20 substituem expressamente as antigas marcações de **[VALIDAR]** e **[PENDENTE]** sobre mudança estrutural e perda da última estação/Staff em §18. Não modificam D01–D11, código de ingresso imutável, limite temporal oficial, fechamento Admin ou a exigência de autenticação Staff/Admin. A fundação Drizzle foi implementada posteriormente; as regras operacionais ainda dependem dos services futuros (§23).
 
@@ -2125,7 +2177,7 @@ não representam execução ou aprovação PostgreSQL pelo Codex.
 | OP14 | Nova admissão concorre com desativação da última estação | Não aceitar admissão sob prontidão desatualizada; respeitar pendências |
 | OP15 | App reinicia durante indisponibilidade temporária | Participação/posição recuperáveis; nenhuma ausência por desconexão |
 
-### 20.6 Situação e próxima etapa
+### 20.6 Situação e próxima etapa — registro da fundação
 
 As duas decisões operacionais anteriormente pendentes no §18 estão **resolvidas** por C-13/C-14. A consolidação do esquema, as cinco migrações e as verificações locais foram concluídas segundo o relatório da Task 6.2 (§23). Os cenários operacionais OP01–OP15 permanecem pendentes como serviços futuros. Concluir os procedimentos LGPD antes de usar dados pessoais reais.
 
@@ -2159,7 +2211,7 @@ A fundação pode ser considerada **concluída segundo o relatório**, sem certi
 
 **Os arquivos da fundação são fonte técnica de verdade do DDL efetivamente aplicado.** Este dicionário é referência de intenção e revisão; se algum campo, índice ou trigger divergir, **não editar retroativamente migrations existentes**: diagnosticar no repositório e planejar migração incremental após aprovação específica.
 
-### 23.3 Decisão de escopo vigente
+### 23.3 Decisão de escopo daquela etapa — histórico
 
 O responsável pelo ArenaGo definiu a E01.2B para normalização e consulta interna de eventos. A Task 6.3A (cadastro/login/refresh/logout/me) segue proposta, sem autorização registrada nesta etapa. Endpoints HTTP, integração frontend, deploy/Neon e procedimentos com dados pessoais reais continuam fora do escopo documentado aqui.
 
@@ -2186,3 +2238,103 @@ O CHECK existente `access_code_normalized = upper(btrim(access_code_normalized))
 ## 26. Complemento C-15 — desistência interna sem finalizar participação
 
 **v0.6.17 (30/10/2026):** decisão de negócio aprovada pelo responsável após a entrega inicial da E07.1. Corrigida a delimitação da §16.2: titular pode abandonar a fila interna, inclusive após chamada, e continuar com participação `active`. Registrados requisitos de locks, resolução atômica de `pending` sem ausência/conclusão, idempotência, preservação de histórico/FIFO e distinção entre corte de ingressos e prazo da saída. Conferidos estados e campos de motivo no schema/migração existentes; nenhum código novo de motivo ou rota HTTP foi arbitrado. Operação reservada à E07.3, sem implementar E07.2/E07.3, alterar código/testes, criar migrations, executar testes ou conectar a bancos nesta rodada.
+
+## 27. Inventário vigente, evolução de contratos e limites — novembro de 2026
+
+**v0.6.18 (13/11/2026):** inspeção estática da develop; atualização somente deste documento e do Planejamento. Nenhuma execução de testes, aplicação, SQL, migrations ou seeds. As decisões aprovadas e os exemplos históricos permanecem consultáveis; nenhuma rota abaixo concede autorização para operar bancos ou publicar serviços.
+
+### 27.1 Identidade, segurança e perfil
+
+Todas as rotas usam `/api/v1`. Nas tabelas seguintes, caminhos são relativos a esse prefixo. DTOs são estritos conforme os controllers; exemplos antigos não substituem os contratos executáveis.
+
+| Rotas implementadas | Fonte e contrato atual |
+|---|---|
+| `POST /auth/register`, `/auth/login`, `/auth/refresh`, `/auth/logout`; `GET /auth/me` | [AuthController](../backend/src/auth/auth.controller.ts), [AuthService](../backend/src/auth/auth.service.ts). Cadastro `{name,email,password}`; login `{email,password}`; refresh `{refreshToken}`; logout com Bearer. Sessão de cadastro/login contém `user/accessToken/refreshToken/expiresIn`; refresh contém tokens e prazo; `/me` inclui `sessionId`, além dos campos públicos históricos de §14.5. |
+| `POST /auth/2fa/verify` | Mesmo controller; `{tempToken,code}`, sem Bearer. Desafio não é sessão. TOTP de seis dígitos ou recovery hexadecimal minúsculo de 32 caracteres; resposta de sessão somente após verificação e consumo transacional. |
+| `POST /auth/verify-email/request`, `/auth/verify-email/confirm` | AuthController e [serviço HTTP de e-mail](../backend/src/auth/email-verification-http.service.ts). Solicitação autenticada e confirmação por token; transporte Resend configurável. Não são endpoints de reset de senha. |
+| `POST /auth/2fa/setup`, `/auth/2fa/confirm` | [TotpActivationController](../backend/src/auth/totp-activation.controller.ts). Setup exige `{tempToken,activationToken}`; confirm acrescenta `code`. Ativação é distinta da verificação de login. |
+| `POST /admin/roles/grant`, `/admin/roles/revoke` | [AdminRoleManagementController](../backend/src/auth/admin-role-management.controller.ts). Grant recebe `{role,email,eventId}` (Staff exige evento; Admin global sem evento); revoke recebe `{grantId}`. Exigem sessão Admin/2FA, idempotência e autorização transacional. |
+| `GET/PATCH /profile`; `GET/PUT /profile/questionnaire`; `GET /profile/statistics` | [ProfileController](../backend/src/profile/profile.controller.ts) e [questionário](../backend/src/profile/profile-questionnaire.controller.ts). Titular autenticado; PATCH altera somente nome. PUT grava as três etapas e jogos atomicamente. Estatísticas não recebem ID de usuário do cliente. |
+| `GET /games` | [GamesController](../backend/src/games/games.controller.ts); catálogo público persistido. `query` opcional 1–100, `limit` 1–50 (padrão 20); `total` é contagem antes do limite, curados primeiro e ordenação estável. Resolve as indefinições históricas de §14.10/§14.14. |
+
+O login novo concluído substitui a sessão anterior. Access de 15 minutos e sessão absoluta de 30 dias; refresh rotativo não prolonga a sessão e reuso de token consumido a revoga. `/me` e guardas consultam estado vivo, incluindo segundo fator Admin, não apenas claims. Perda da sessão não cancela participação/fila. O cliente usa single-flight, descarta respostas antigas e evita replay de refresh incerto.
+
+O primeiro Admin usa [bootstrap restrito](../backend/src/auth/bootstrap-first-admin.ts), conta existente/ativa/verificada e auditoria CLI. A [emissão de ativação](../backend/src/auth/issue-first-admin-totp.ts) verifica proveniência do primeiro Admin; não é um credenciamento geral de todos os promovidos. [T6.1-B1](T6_1_B1_IMPLEMENTACAO.md) e [T6.1-B2](T6_1_B2_IMPLEMENTACAO.md) preservam procedimentos e campanhas próprias. Não há recuperação emergencial aprovada nem endpoint público de bootstrap/reset de TOTP. Recuperação de senha continua pendente, apesar da tabela de tokens existir.
+
+O questionário adota calendário civil `America/Sao_Paulo` por padrão, configurável por `ARENAGO_CIVIL_TIMEZONE`, com revalidação PostgreSQL e nascimento até hoje inclusive. A atualização não reescreve snapshots históricos. O catálogo preserva grafia canônica e resolve inserções concorrentes em comandos separados sob READ COMMITTED.
+
+`ProfileService.getStatistics` retorna `{participationCount,totalMinutes}`: conta linhas com `arena_entered_at`; soma apenas `finished` com ambos os instantes finitos e fim não anterior à entrada; aplica FLOOR uma vez após somar segundos/dividir por 60. Não inclui espera externa e retorna zero sem registros. É estatística do Perfil, não implementação dos indicadores A/B de BI nem medição de presença física. [Relatório e limites SQL](PROFILE_REAL_STATISTICS_IMPLEMENTACAO.md).
+
+### 27.2 Eventos, Participante, Admin e Staff — inventário HTTP efetivo
+
+| Grupo | Rotas atuais e controller |
+|---|---|
+| Descoberta/ingresso | `POST /events/lookup` e `POST /participations`: [ParticipantAdmissionController](../backend/src/participations/participant-admission.controller.ts). Sessão exigida nos dois. Lookup `{accessCode}` retorna `{event,eligibility}`; ingresso `{eventId}` + Idempotency-Key retorna **201 `{participationId}`**. |
+| Participação atual/detalhe/saída | `GET /participations/current`, `GET /participations/:participationId`, `POST /participations/:participationId/cancel`, `/finish`: [ParticipationLifecycleController](../backend/src/participations/participation-lifecycle.controller.ts). Titular; mutações com corpo vazio e idempotência; GETs não limpam domínio. |
+| Experiências e fila do titular | `GET /events/:eventId/experiences`: [ExperiencesController](../backend/src/events/experiences.controller.ts); `GET /participations/:participationId/queue`, `POST /participations/:participationId/queue-entries`, `POST /participations/:participationId/queue-entries/:queueEntryId/withdraw`: [ParticipantQueueController](../backend/src/events/participant-queue.controller.ts). Ingresso `{experienceId}`, 201 plano (IDs/status/ordem/instante); consulta e desistência 200. |
+| Histórico/retomada/avaliação | `GET /participations/history`, `/participations/return-state`, `/evaluations/pending`, `/participations/:participationId/evaluation-eligibility` e `/participations/:participationId/evaluation`: [EvaluationReadController](../backend/src/evaluations/evaluation-read.controller.ts). `POST /participations/:participationId/evaluation` e `PATCH /evaluations/:evaluationId`: [EvaluationWriteController](../backend/src/evaluations/evaluation-write.controller.ts). POST `{rating,comment?}`; PATCH parcial conforme janela; idempotência e titularidade obrigatórias. |
+| Configuração Admin | `GET/POST /admin/events`, `GET/PATCH /admin/events/:eventId`, `GET /admin/events/:eventId/readiness`, `GET/POST /admin/events/:eventId/experiences`, `PATCH /admin/events/:eventId/experiences/:experienceId`, `POST /admin/events/:eventId/experiences/:experienceId/stations`, `PATCH /admin/events/:eventId/experiences/:experienceId/stations/:stationId`: [AdminConfigurationController](../backend/src/events/admin-configuration.controller.ts). |
+| Comandos Admin | `PATCH /admin/events/:eventId/schedule`, `/external-queue` e `POST /admin/events/:eventId/close`: [horários](../backend/src/events/admin-schedule.controller.ts), [fila externa](../backend/src/events/admin-external-queue.controller.ts), [encerramento](../backend/src/events/admin-close.controller.ts). Justificativa e Idempotency-Key exigidas; semântica E08.6–E08.8 preservada. |
+| Descoberta Staff | `GET /staff/events`, `/staff/events/:eventId/experiences`, `/staff/events/:eventId/stations`, `/staff/events/:eventId/experiences/:experienceId/queue`: [StaffQueriesController](../backend/src/events/staff-queries.controller.ts). Concessão vigente do evento; fase efetiva distinta do status persistido. |
+| Controle de Entrada | `GET/PATCH /staff/events/:eventId/entry-control`; `POST /staff/events/:eventId/entry-control/participants/:participationId/confirm`, `/staff/events/:eventId/entry-control/call-next`, `/staff/events/:eventId/entry-control/calls/:callId/:action`: [StaffEntryController](../backend/src/participations/staff-entry.controller.ts). PATCH `{enabled}`; ações `confirm/absent/remove`; mutações usam idempotência; chamadas externas retornam 200. |
+| Estado operacional | `GET /staff/events/:eventId/experiences/:experienceId/stations/:stationId/operational-state`: [StaffStationStateController](../backend/src/events/staff-station-state.controller.ts), com fila nominal mínima e pending. `PATCH /staff/events/:eventId/stations/:stationId/availability`: [disponibilidade](../backend/src/events/station-availability.controller.ts), idempotência natural, sem chave obrigatória. |
+| Atendimento | `POST /staff/events/:eventId/experiences/:experienceId/stations/:stationId/call-next`; `POST /staff/events/:eventId/service-sessions/:serviceSessionId/complete` e `/absent`: [StaffOperationsController](../backend/src/events/staff-operations.controller.ts). Corpo vazio e Idempotency-Key, chamada 201 e resoluções 200. |
+| Remoções e pausa | `POST /staff/events/:eventId/service-sessions/:serviceSessionId/remove`: [chamado](../backend/src/events/staff-called-removal.controller.ts); `POST /staff/events/:eventId/experiences/:experienceId/queue-entries/:queueEntryId/remove`: [espera](../backend/src/events/staff-queue-removal.controller.ts). `PATCH /staff/events/:eventId/experiences/:experienceId/queue` com `{acceptingEntries}`: [controle](../backend/src/events/experience-queue-control.controller.ts), Staff apto do evento ou Admin/2FA. |
+| Histórico Staff | `GET /staff/events/:eventId/experiences/:experienceId/stations/:stationId/history/call-next`; `GET /staff/events/:eventId/service-sessions/:serviceSessionId/history/complete` e `/absent`: [StaffHistoryController](../backend/src/events/staff-history.controller.ts). Exigem Idempotency-Key da intenção, sessão e escopo; não constituem reconciliação geral habilitada. |
+
+**Diferenças explícitas das propostas históricas:**
+
+- §15.5 propunha `POST /events/:eventId/participations` com `{}` e envelope completo; a rota efetiva é `POST /participations` com `{eventId}`, resposta mínima `{participationId}`. Não existe `GET /events/:eventId` genérico ao Participante (§15.4); lookup e leituras da participação atendem o fluxo real. Não substituir o exemplo antigo por uma resposta fictícia.
+- §15.3 propunha `entryStatus`/`acceptingEntries`; o lookup atual fornece `eligibility: {eligible,blockingReasons}` e horários do evento. `PROFILE_INCOMPLETE` no ingresso recebe **422**, não o 409 proposto; código não encontrado é `EVENT_NOT_FOUND`, não `EVENT_CODE_NOT_FOUND`. A consulta não reserva vaga.
+- §16.4 propunha envelope `queueEntry` e posição no POST; o contrato atual é plano e a posição pertence ao GET. C-15 ganhou a rota `withdraw` na E08.2, superando apenas as anotações de “sem HTTP” da E07.3.
+- §14.5 recebeu `sessionId` confirmado em `/auth/me`. Configuração TOTP usa `/setup` e `/confirm`, enquanto `/verify` conclui login de credencial já configurada. Reset/onboarding geral continuam pendentes.
+- §18: PATCH genérico só aceita `name`; experiência só `name` e estação só `label`, com `reason` opcional validado. `startsAt/timezone`, códigos, contadores e campos de comandos operacionais não são editados pelo PATCH genérico. A implementação conservadora também bloqueia renomear evento após participação histórica; não ampliar isso para regra nova de produto. Ver [E08.13](E08_13_IMPLEMENTACAO.md).
+- Pausa da experiência já foi autorizada/implementada na E08.14 (§16.2/§20.4); as marcações antigas de ownership pendente não revogam essa entrega. Fechar a flag não cancela fila existente nem altera capacidade global.
+- O atual Controle de Entrada e chamadas por `callId` não estavam no inventário REST original. Remoções não são conclusões/ausências e preservam sua semântica específica; não inferir novos resultados a partir das telas demonstrativas.
+
+### 27.3 Extensões do dicionário e integridade das migrations
+
+As 26 declarações `pgTable` correspondem às 23 tabelas de referência mais as três extensões abaixo. Nenhuma tabela de BI/pendências foi inventada. [Schemas](../backend/src/database/schema) e SQLs de §8 são autoridade dos tipos/checks exatos; a enumeração 01–23 original permanece intacta.
+
+| Extensão | Estrutura e papel efetivo |
+|---|---|
+| 0006 — Admin/TOTP | `admin_2fa_challenges`: jti, usuário, emissão/expiração, consumo/invalidação e criação; FK de usuário, validade até 5 minutos e terminalidade exclusiva. `last_totp_counter` na credencial protege contra reutilização do contador. Não é novo sistema paralelo de sessões/papéis. |
+| 0007 — preparação Staff | `idempotency_operations` recebe `origin_session_id`, `origin_assurance`, `origin_epoch_id`, `result_state`, `completed_at`, `result_retain_until`. O CHECK mantém assurance `legacy` e demais campos nulos. `staff_idempotency_epochs` admite somente `pending`, sem ativação/invalidação. Trigger protege parcialmente identidade e resultado terminal dos namespaces Staff existentes; não protege DELETE nem substitui grants/ownership. Reconciliação e prova de origem continuam desativadas. |
+| 0008 — chamada externa | `external_entry_calls`: ID, evento/participação, atores e instantes de chamada/resolução, status `pending/confirmed/absent/removed/canceled`, motivo. Uma pending por evento e por participação; FK composta participação/evento. Trigger preserva histórico terminal e limita anonimização de FKs; DELETE/TRUNCATE são recusados. |
+
+A 0008 também cancela pending externa na mudança de participação por liberação/encerramento e registra auditoria. Constraint triggers diferidas conferem coerência ao commit entre chamada, participação e evento; a aplicação não deve presumir que só seus próprios writers mantêm essa integração. Espera externa não vira atendimento de experiência em `service_sessions`.
+
+Esses controles não provam resistência a proprietário/superusuário nem resolvem retenção/LGPD. [Preparação idempotente](STAFF_IDEMPOTENCY_SCHEMA_PREPARACAO.md) e [chamadas externas](STAFF_ENTRY_CALL_FLOW_IMPLEMENTACAO.md) registram ensaios locais e limites. Não extrapolar aplicação das migrations para outro banco ou provedor. Nenhum schema, snapshot, SQL ou journal foi modificado nesta consolidação.
+
+### 27.4 Operação, locks, tempo, idempotência e replay
+
+- As invariantes de §3–§5 permanecem: uma participação corrente por usuário, uma fila corrente por participação, uma pendência por estação, FIFO por experiência e resolução terminal única. Chamadas usam evento FOR SHARE → experiência FOR UPDATE → estação → participação/entrada → atendimento, com revalidação após esperas e relógio PostgreSQL no comando decisivo. Não saltar o primeiro da fila com SKIP LOCKED.
+- Finalização/cancelamento e configuração usam locks exclusivos de evento em pontos documentados (§15.9/E08.12 e E08.13); serializam conservadoramente mutações daquele evento. Isso não deve ser confundido com lock global em toda chamada de experiências distintas. Homologação de desempenho/deadlocks exige campanha física; nenhuma promessa de precisão de commit em milissegundos.
+- E08-EST01–EST04 registram revalidação de sessão, estratégia temporal `evaluation-first` e preservação de timestamps/catálogos. A última checagem não elimina uma revogação entre consulta e commit; não prometer coordenação atômica inexistente. Replay histórico exige autorização atual e não é prova de estado corrente.
+- TTLs explícitos e independentes: `ADMIN_IDEMPOTENCY_TTL_SECONDS`, `STAFF_IDEMPOTENCY_TTL_SECONDS`, `PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS`, `EVALUATION_IDEMPOTENCY_TTL_SECONDS`. Sem padrão ou expurgo automático; vencimento não autoriza apagar prova nem repetir ação de resultado incerto. `/auth/refresh` permanece fora desse mecanismo.
+- [EventClosureScheduler](../backend/src/events/event-closure.scheduler.ts) e [política](../backend/src/events/event-closure.policy.ts) executam no bootstrap e periodicamente, sem sobreposição, regularizando eventos por transação e preservando instantes lógicos. Intervalo 1000–3600000 ms (padrão 30000). Em NODE_ENV=test só habilita com EVENT_CLOSURE_JOB_TEST_ENABLED=true; fora de test fica habilitado mesmo com essa variável false. Leituras projetam fim lógico sem depender da limpeza física.
+- Inicializar a API também pode inserir idempotentemente jogos e versão do questionário; não é inspeção somente leitura. Bind padrão 127.0.0.1, porta 3000; API_BIND_HOST permite LAN para Expo Go. TLS remoto exige validação de certificado; isso não demonstra implantação/backup remoto funcionando. Configuração operacional no [README backend](../backend/README.md).
+- Histórico Staff e preparação da 0007 não fornecem prova completa de origem/retenção para desbloquear `dispatching`. O app persiste intenção/recibo no SecureStore, bloqueia resultado desconhecido e descarta callbacks de outro contexto; serialização no runtime não equivale a exclusão entre dispositivos. [Limites](STAFF_IDEMPOTENCY_ORIGIN_RETENTION_DESIGN.md).
+
+### 27.5 Integração Expo e evidências por campanha
+
+Versões declaradas: Expo ~58.0.23, React Native 0.88.1 e React 19.3.0; Node >=24.15.0 no backend, NestJS 12.1.3, TypeScript 6.0.3, Drizzle ORM ^0.45.4/Kit ^0.31.11. PostgreSQL não tem mínimo declarado no manifest; versões de laboratórios são históricos, não requisito universal.
+
+Participante usa cliente HTTP, questionário/perfil, estatísticas, ingresso real, participação/filas e histórico/avaliação. QR implementado precisa de prova física própria. Staff seleciona eventos autorizados, painel/estações e Controle de Entrada com polling de 5 segundos operacional/60 segundos de fase, condicionado à identidade, foco e primeiro plano. [Staff B1](STAFF_B1_IMPLEMENTACAO.md) registra homologação delimitada; não são WebSockets nem repetição automática de POST.
+
+AdminArea exige autenticação e identidade confirmadas, papel Admin, sessão identificada, ausência de desafio e getter vivo. Senha/TOTP, `/me`, refresh e logout são reais. As 14 telas Heliom e seu provedor são demonstrativos; conta/sessão/geração/revisão de identidade isolam mocks e callbacks. Nenhuma configuração administrativa persiste por essas telas. [Navegação Admin](ADMIN_AUTHENTICATED_NAVIGATION_IMPLEMENTACAO.md) preserva base/resultados anteriores à integração; os 755 testes e a homologação Expo Go posteriores são informação do responsável registrada nos READMEs, não reexecução desta tarefa.
+
+[Perfil](PROFILE_REAL_STATISTICS_IMPLEMENTACAO.md) registra conta sem participações e exemplo positivo coerente com histórico; não cobre todos os casos SQL físicos. [Staff 02](STAFF_ENTRY_CALL_FLOW_IMPLEMENTACAO.md) registra cenários observados e ressalvas, sem aprovação exaustiva do backend. [Correção terminal/cutoff](STAFF_TERMINAL_CUTOFF_FIX_IMPLEMENTACAO.md) registra 61 testes backend focados e typechecks com fixtures simuladas; [QA_RECOVERY](QA_RECOVERY_IMPLEMENTACAO.md) recupera a campanha independente, sem validar PostgreSQL. Não somar contagens, presumir aprovação geral da suíte atual ou atribuir resultados históricos a nova execução.
+
+### 27.6 Divergências para decisão e critérios antes de piloto/produção
+
+| Referência normativa | Implementação observada / decisão necessária |
+|---|---|
+| C-04, D09 e §17.7: retomada sem Home forçada, avaliação elegível | [HomeFlowScreen](../app/screens/home/HomeFlowScreen.js) retorna Home com avisos/atalho Eventos quando current=null. O serviço busca return-state, mas a tela não abre automaticamente avaliação. Avaliar aderência de UX sem modificar a regra para justificar o código. |
+| Planejamento §9.2: dois Admins aptos antes de evento real | [AdminRoleManagementService](../backend/src/auth/admin-role-management.service.ts) bloqueia revogar o último apto, não a redução de dois para um. Credenciamento do segundo promovido não é resolvido pela CLI restrita ao primeiro. Preservar mínimo aprovado e decidir controles/fluxo antes de piloto. |
+| D10/C-07: exclusão autorizada e agregados seguros | 0008 recusa DELETE/TRUNCATE do histórico externo, com FK para participação. A futura política de exclusão deve compatibilizar essa proteção e dados identificáveis; não presumir anonimização só por nulificar ator. Não remover trigger nesta task. |
+| Planejamento §9.3: indicadores A/B de BI | Estatísticas do Perfil somam duração até finalização inclusive automática. Não equivalem ao tempo até última conclusão nem somente saída voluntária. Manter populações e rótulos separados; não apresentar como BI/presença física aprovado. |
+
+Esses registros não são correções de código nem aprovação de divergências. Atuação de Admin como jogador, encurtamento de fechamento já iniciado e políticas de aviso único seguem decisões/limites próprios. Não liberar piloto por existir endpoint.
+
+Continuam pendentes retenção/expurgo e recuperação confiável de operações incertas; onboarding/reset TOTP e senha; dados de menores, LGPD, pequenos grupos/comentários, exclusão/snapshots; BI real e exportações manuais autorizadas; ensaios concorrentes/carga e dispositivos; banco remoto/TLS, backups/restauração, observabilidade, rate limits entre instâncias e operação de produção. A checagem estática não confirma grants, ausência de vulnerabilidades, infraestrutura ou aplicação de migrations em qualquer ambiente. Não há prontidão de produção declarada.

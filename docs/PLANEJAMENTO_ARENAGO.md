@@ -1,6 +1,41 @@
 # ArenaGo — Planejamento geral do produto
 
-**Versão:** v0.7.10 — desistência voluntária da fila interna, C-15 (30/10/2026)
+**Versão:** v0.7.11 — consolidação documental da develop (13/11/2026).
+**Natureza:** atualização de implementação e rastreabilidade; nenhuma decisão de produto nova.
+**Referência técnica:** [Arquitetura Backend v0.6.18](ARQUITETURA_BACKEND_ARENAGO.md), especialmente §27.
+
+## Estado consolidado — novembro de 2026
+
+Esta seção e o roadmap da §4 descrevem o estado vigente. Registros datados de outubro permanecem históricos. Hierarquia: decisões aprovadas neste Planejamento; código da develop para comportamento entregue; schemas/migrations para modelo físico; relatórios para validação; READMEs para visão geral e execução. Divergência do código não revoga uma decisão aprovada.
+
+| Categoria | Estado e limite |
+|---|---|
+| Decisões aprovadas | D01–D11, C-01–C-15 e diretrizes de arquitetura preservadas. FIFO por experiência, estados, cortes, avaliações, privacidade e autorização continuam normativos. |
+| Implementação | API de identidade/sessões, e-mail, TOTP, papéis, perfil/jogos, eventos/configuração, ingresso, participações, filas, atendimento, encerramento e avaliações. O Git contém migrations 0001–0008 e 26 tabelas; não comprova aplicação em um banco específico. |
+| Integração Participante | Cadastro/login, questionário persistido, edição de nome, estatísticas reais, ingresso por código/QR, participação atual, filas, histórico, finalização e envio de avaliação usam serviços reais. Componentes antigos de demonstração continuam separados. Endpoint existente não significa que todo comando esteja oferecido na UI. |
+| Integração Staff | Eventos autorizados, seleção/painel, Controle de Entrada, chamadas externas por `callId`, experiências/estações, chamada/conclusão/ausência/remoção e polling real. Leituras operacionais a cada 5 segundos e eventos/fase a cada 60 segundos, condicionadas ao foco/primeiro plano/sessão. |
+| Integração Admin | Senha/TOTP reais, identidade confirmada e rota exclusiva `AdminArea`. As 14 telas Heliom continuam demonstrativas em memória: não persistem configuração, permissões, histórico ou BI na API. Logout real descarta os mocks. Gestão real de papéis existe no backend. |
+| Homologação | Campanha histórica da integração Perfil + Admin: 755 testes frontend aprovados, 0 falhos/ignorados, exit 0, conforme responsável. Login Admin/TOTP e acesso Heliom confirmados manualmente no Expo Go. Perfil e Staff têm homologações delimitadas nos relatórios; não há aprovação geral atual da regressão backend. |
+| Pendências | Persistência do painel Admin, onboarding/reset TOTP além do primeiro Admin, recuperação de senha, reconciliação de operações incertas, aderência de UX pós-fechamento, LGPD/BI/exportações, concorrência física/carga, infraestrutura, backups e observabilidade. Não há liberação de piloto/produção. |
+
+**Participante:** retirada externa, desistência interna C-15 e finalização são operações distintas no backend. Código/QR usa consulta e criação reais; implementação da câmera não comprova homologação física. O Perfil consulta estatísticas por titular: conta entradas efetivas na Arena e soma minutos de participações finalizadas. Esse indicador não implementa o BI da §9.3 nem comprova presença física.
+
+**Segurança:** sessão única, access de 15 minutos, refresh rotativo com limite absoluto de 30 dias, logout/revogação e identidade viva estão implementados. Admin exige segundo fator e identidade confirmada; Staff exige concessão apta por evento. Bootstrap/ativação inicial do primeiro Admin são restritos; promover outros Admins não resolve seu credenciamento TOTP. Admin como jogador continua decisão de produto pendente; a navegação exclusiva atual não a decide.
+
+**Validação e limites:** testes simulados não comprovam locks/relógio PostgreSQL ou exclusão entre aparelhos. Intenções Staff incertas não são reenviadas automaticamente; a migration 0007 mantém prova de origem/reconciliação desativadas. Relatórios descrevem campanhas próprias, sem somar contagens ou transformar pendências daquela data em defeitos atuais. Nesta consolidação houve somente inspeção estática, sem testes, serviços ou banco.
+
+**Pontos para decisão do responsável (regras preservadas):**
+
+- C-04/D09: `HomeFlowScreen` retorna à Home com avisos de finalização/avaliação pendente e acesso à aba Eventos quando não há participação corrente; não abre automaticamente a avaliação. Avaliar aderência à retomada aprovada, sem alterar C-04 para justificar a UI.
+- §9.2 exige dois Admins aptos antes de evento real. A proteção de revogação atual impede perder o último Admin apto, mas não garante manter dois. Há lacuna para piloto e onboarding do segundo Admin; não flexibilizar o mínimo aprovado.
+- D10/C-07: a migration 0008 protege chamadas externas contra DELETE/TRUNCATE e mantém vínculo com participação. Não há procedimento LGPD completo compatibilizado; desenhar retenção/exclusão autorizada antes do piloto, sem remover proteções nesta tarefa.
+- As métricas do Perfil incluem finalizações automáticas e não substituem os indicadores A/B da §9.3. Qualquer equiparação exige decisão explícita; as regras de BI permanecem iguais.
+
+Fontes: [README geral](../README.md), [app](../app/README.md), [backend](../backend/README.md), [Perfil](PROFILE_REAL_STATISTICS_IMPLEMENTACAO.md), [Admin](ADMIN_AUTHENTICATED_NAVIGATION_IMPLEMENTACAO.md), [Staff 02](STAFF_ENTRY_CALL_FLOW_IMPLEMENTACAO.md), [Staff B1](STAFF_B1_IMPLEMENTACAO.md), [preparação de idempotência](STAFF_IDEMPOTENCY_SCHEMA_PREPARACAO.md) e [QA independente](QA_RECOVERY_IMPLEMENTACAO.md). Resultados históricos não foram reexecutados.
+
+### Abertura e fechamentos anteriores — registros históricos
+
+**Versão histórica:** v0.7.10 — desistência voluntária da fila interna, C-15 (30/10/2026)
 **Status funcional:** decisões D01–D11 e C-01–C-14 preservadas; C-15 implementada como serviço interno E07.3. E07.1, E07.2 e E07.3 aprovadas individualmente; integração APROVADA COM RESSALVAS na auditoria consolidada. Validação PostgreSQL concluída pelo responsável; nenhum defeito funcional bloqueante confirmado. Ver fechamento posterior de 30/10/2026 na seção 12.
 **Estado da implementação em 21/10/2026 (registro histórico):** frontend Expo ainda baseado em simulações nos fluxos de backend; fundação `backend/` NestJS/Drizzle e consulta interna de eventos por UUID/código implementadas; endpoints HTTP de produto não implementados; Neon não criada. Ver atualização posterior abaixo para o estado Staff atual.
 **Documento técnico complementar:** `ARQUITETURA_BACKEND_ARENAGO.md` (v0.6.17).
@@ -15,7 +50,7 @@
 
 ## 1. Objetivo e escopo
 
-O ArenaGo é um aplicativo Expo/React Native para participantes de eventos com experiências. O backend será a fonte de verdade de identidade, participações, filas, atendimentos e avaliações; a interface deverá consumir os serviços gradualmente, sem transformar mocks em dados reais antes da implementação dos módulos correspondentes.
+O ArenaGo é um aplicativo Expo/React Native para participantes de eventos com experiências. O backend é a fonte de verdade dos fluxos reais de identidade, participações, filas, atendimentos e avaliações; a integração gradual preserva a separação entre dados reais e demonstrações.
 
 **Pendências fora da entrega Staff 01/02:** notificações push, BI operacional, implantação de produção e demais integrações não homologadas. Endpoints, integração Expo–API e telas Staff mencionados no planejamento original foram parcialmente implementados nas entregas posteriores documentadas acima.
 
@@ -47,12 +82,12 @@ O ArenaGo é um aplicativo Expo/React Native para participantes de eventos com e
 
 | Fase | Entrega | Estado |
 |---|---|---|
-| 0 — Qualidade e auditoria do Expo | Testes locais e avaliação do fluxo atual | **Concluída no relatório de 95 testes**, sem integração real |
-| 1 — Planejamento e arquitetura | Regras de produto e esquema unificado | **Decisões consolidadas; documentos atualizados nesta v0.7.9** |
-| 2 — Validação relacional | Migrações e testes concorrentes PostgreSQL | **Concluída experimentalmente**; resultados incorporados à Task 6.2 |
-| 3 — Fundação do backend | NestJS, schemas Drizzle, 5 migrações locais e testes | **Concluída conforme relato Codex da Task 6.2**; E01.2B acrescenta consulta interna de eventos |
-| 4 — Endpoints e segurança | Auth, perfil/jogos, permissões; depois eventos e filas | **Parcialmente implementada**; autenticação, Admin/TOTP, concessões e contratos Staff 01/02 existem. Outras frentes seguem seus próprios relatórios. |
-| 5 — Integração e operação | Expo↔API, avaliações, Admin/Staff, BI e testes E2E | **Parcialmente implementada**; Staff 01/02 homologadas funcionalmente no Expo Go, com pendências técnicas pré-commit. BI, operação de produção e testes exaustivos ainda pendem. |
+| 0 — Qualidade e auditoria do Expo | Campanhas por fluxo | Integração Perfil/Admin com 755 aprovações frontend históricas; sem aprovação universal de todos os percursos físicos. |
+| 1 — Planejamento e arquitetura | Regras e rastreabilidade | Decisões preservadas; consolidação nesta v0.7.11 e Arquitetura v0.6.18. |
+| 2 — Validação relacional | Schema e concorrência PostgreSQL | Fundação e campanhas locais específicas; concorrência/carga e aplicação em cada destino exigem verificação própria. |
+| 3 — Fundação do backend | NestJS, schemas Drizzle e migrations | Implementada; cinco SQLs iniciais ampliados pelas migrations 0006–0008. |
+| 4 — Endpoints e segurança | Identidade, perfil, permissões, eventos, filas, avaliações | Contratos reais implementados. Recuperação de senha, onboarding/reset geral TOTP e reconciliação completa ainda parciais/pendentes. |
+| 5 — Integração e operação | Participante, Staff e Admin no Expo | Participante/Staff integrados nos fluxos consolidados; Admin com acesso real e painel demonstrativo. Homologações específicas; sem persistência Admin/BI real ou validação exaustiva. |
 | 6 — Piloto público | Infraestrutura, LGPD, segurança, testes em aparelhos/carga | **Bloqueado** até requisitos próprios de privacidade e operação |
 
 A criação da Neon terá autorização e etapa próprias; não é pré-requisito para manter a fundação local concluída. Não confundir a existência das tabelas com a implementação dos serviços que aplicam regras de negócio.
@@ -107,7 +142,7 @@ PostgreSQL (local na fundação; Neon candidata para hospedagem futura, condicio
 
 ## 6. Modelo conceitual consolidado — fronteira entre produto e arquitetura
 
-O planejamento estabelece as **entidades e invariantes de negócio**; a arquitetura e os schemas reais de `backend/` são as referências para nomes de tabelas, colunas, tipos, índices e migrations. A arquitetura técnica consolidou **23 tabelas** (22 de domínio e uma tabela técnica de idempotência), implementadas nos schemas/migrações segundo o relatório da Task 6.2. O número de tabelas não é uma regra imutável de produto; mudanças futuras exigirão novas migrações versionadas.
+O planejamento estabelece as **entidades e invariantes de negócio**; a arquitetura e os schemas reais de `backend/` são as referências para nomes de tabelas, colunas, tipos, índices e migrations. A Task 6.2 consolidou historicamente **23 tabelas**; o schema atual contém **26** após as migrations 0006–0008, detalhadas na Arquitetura §8/§27. O número de tabelas não é uma regra imutável de produto; mudanças futuras exigirão novas migrações versionadas.
 
 | Domínio | Entidades lógicas | Regra de negócio determinante |
 |---|---|---|
@@ -129,9 +164,13 @@ O planejamento estabelece as **entidades e invariantes de negócio**; a arquitet
 - Após o **encerramento oficial**, não há novas participações, reentradas, entradas nas filas internas **nem retorno à fila por ausência**; a janela adicional opcional só permite chamar a fila preexistente.
 - Encerramento imediato pelo Admin encerra logicamente **todas** as participações abertas e os atendimentos pendentes. O app não força Home: exibe avaliação elegível e pendente após consultar o backend, com opção “Avaliar mais tarde”.
 
-**Referência técnica atual:** `MODELO_DADOS_ARENAGO_RASCUNHO_v0.4.md` e `ARENAGO_MATRIZ_COMPATIBILIZACAO_ARQUITETURA_v0.1.md`, ambos como **documentos de trabalho**. A arquitetura unificada v0.6.15 é a referência técnica principal; os modelos anteriores permanecem históricos.
+**Referência técnica atual:** a arquitetura unificada v0.6.18 é a referência principal. `MODELO_DADOS_ARENAGO_RASCUNHO_v0.4.md` e `ARENAGO_MATRIZ_COMPATIBILIZACAO_ARQUITETURA_v0.1.md` são referências históricas de trabalho, sem substituir o código, as migrations e o inventário vigente.
 
-## 7. Estados de domínio e operações — regras aprovadas, implementação a especificar
+Esses dois documentos de trabalho são citados pelo histórico, mas não estão versionados neste clone; não são links ou pré-requisitos de execução. Sua consulta depende do acervo original do responsável.
+
+## 7. Estados de domínio e operações — regras aprovadas
+
+**Rastreabilidade:** os estados e efeitos abaixo são normativos. Expressões de implementação futura preservam a rodada original; serviços e rotas efetivos estão na Arquitetura §27 e não mudam essas regras.
 
 ### Participação e encerramento
 
@@ -208,7 +247,7 @@ controle transacional, preservando `queue_entries`, `participations` e
 
 ## 8. Contratos de API — mapa de produto
 
-A Task 6.1 **já propôs contratos REST específicos** de autenticação, perfil, questionário e jogos; eles foram compatibilizados como propostas técnicas na arquitetura unificada, sem implementação de endpoints. A tabela abaixo lista as **capacidades do produto**, não declara que os endpoints de eventos e filas já existem:
+A Task 6.1 propôs o mapa original; hoje os contratos efetivos estão na Arquitetura §27 e nos controllers. A tabela abaixo lista **capacidades do produto**, sem declarar concluída uma integração apenas por existir endpoint. Recuperação de senha e BI permanecem pendentes:
 
 | Módulo | Operações candidatas |
 |---|---|
@@ -224,6 +263,8 @@ A Task 6.1 **já propôs contratos REST específicos** de autenticação, perfil
 **Critério para detalhar endpoints:** estados, papéis, regras de reentrada, unicidade e estações precisam estar definidos. Depois desenhar contratos de request/response, códigos de erro, autenticação e idempotência.
 
 ## 9. Registro de decisões de negócio — D01 a D11 e C-01 a C-15
+
+**Rastreabilidade de status:** as linhas D/C permanecem integrais. Menções técnicas antigas a “não implementado”, “futuro” ou “sem rota” são anotações da campanha original, superadas pelo estado consolidado e pela Arquitetura §27; não alteram as diretrizes aprovadas.
 
 **Convenção:** *aprovada* = decisão tomada sobre o comportamento do produto; *pendente* = detalhe que não foi decidido; *não implementada* = aprovação não indica existência no código.
 
@@ -247,10 +288,12 @@ A Task 6.1 **já propôs contratos REST específicos** de autenticação, perfil
 |---|---|---|
 | **DA-01** | Node.js + TypeScript + NestJS (adaptador HTTP padrão), monólito modular, PostgreSQL; Neon preferido condicionado às cotas | **Aprovada; fundação implementada localmente (Task 6.2)** |
 | **DA-02** | Drizzle ORM + `pg` + migrações SQL versionadas com Drizzle Kit | **Aprovada; fundação implementada localmente (Task 6.2)** |
-| **DA-03** | Identidade e sessões com e-mail/senha, access token e refresh token, regras detalhadas abaixo | **Produto aprovado; endpoints/serviços não implementados** |
+| **DA-03** | Identidade e sessões com e-mail/senha, access token e refresh token, regras detalhadas abaixo | **Produto aprovado; identidade/sessões implementadas; lacunas de recuperação no estado consolidado** |
 | **RA-01** | BI como experiência principal do Admin; exportação **manual por download**, sem conexão direta com Google Drive. Prioridade sugerida CSV/XLSX; formatos definitivos ainda não aprovados. | **Diretriz aprovada; exportação não implementada** |
 
 ### 9.2 Identidade, permissões e autenticação — decisões aprovadas
+
+**Contexto das anotações:** esta seção preserva decisões aprovadas e anotações técnicas da etapa original. Verificação de e-mail, sessões e renovação de tokens já possuem implementação na develop; recuperação de senha e onboarding/reset geral de TOTP continuam pendentes. Consultar o resumo consolidado e a Arquitetura §27 para o estado vigente. Anotações antigas de implementação não anulam nem substituem decisões de negócio.
 
 - **Perfis:** Participante (papel `participante`), Staff (opera eventos autorizados) e Admin (**global**). Uma conta pode acumular permissões. Cadastro público cria apenas conta comum.
 - **Concessões:** Admin localiza conta existente pelo e-mail e concede/revoga Staff por evento ou Admin global. Alterações são autorizadas pelo backend e auditadas; revogação interrompe imediatamente futuras ações privilegiadas.
@@ -312,6 +355,10 @@ A especificação da Task 6.1 (v1.1, 16/10/2026) fornece contratos e sugestões 
 
 ## 10. Pendências reais — por momento
 
+**Estado vigente:** calendário civil de referência, criação de eventos, contratos HTTP, integração Participante e operações Staff já foram implementados. As listas de outubro abaixo são históricas; não são pré-requisitos para começar módulos que já existem. Persistem retenção/expurgo, reconciliação de operações incertas, homologação física com escritores concorrentes e os critérios de piloto. Vulnerabilidades antigas e falhas de runner são relatos datados, sem nova auditoria de dependências nesta consolidação. Preservar as oito migrations atuais, não somente as cinco da fundação.
+
+### Pendências registradas em outubro — histórico
+
 **Antes de implementar serviços ou integrar o Expo:** especificar o comportamento de contas Admin como participantes (ainda sem decisão de produto); definir timezone civil de referência para nascimento até hoje, inclusive; catálogo de erros/DTOs e fluxos de autorização; tempo de retenção/expurgo de idempotência e de metadados técnicos; confirmar contratos com as telas reais quando a implementação for retomada. A C-10 e sua normalização no backend foram definidas; a criação de eventos ainda deverá reutilizar a função já implementada. Nenhum desses pontos por si só autoriza endpoints agora.
 
 **Dependências futuras após a auditoria E07.1–E07.3:** definir e validar a política de expurgo/idempotência antes de implementar remoção dos registros; homologar os escritores Staff reais e suas interações com os três serviços quando forem desenvolvidos. Não são defeitos funcionais atuais nem funcionalidades já homologadas; as fixtures SQL não substituem essa validação futura.
@@ -323,12 +370,14 @@ A especificação da Task 6.1 (v1.1, 16/10/2026) fornece contratos e sugestões 
 ## 11. Organização da documentação e próximo trabalho autorizado
 
 - Este **Planejamento** é a fonte de verdade das **decisões de negócio** (D01–D11 e C-01–C-15), escopo e prioridades.
-- A **Arquitetura Backend v0.6.17** (`ARQUITETURA_BACKEND_ARENAGO.md`) descreve as estruturas, contratos candidatos e resultados técnicos. Os endpoints HTTP seguem propostos e não implementados; a C-15 possui contrato interno específico de desistência na E07.3, sem definir rota pública.
+- A **Arquitetura Backend v0.6.18** (`ARQUITETURA_BACKEND_ARENAGO.md`) preserva as especificações e identifica os contratos efetivos em §27. C-15 tem rota HTTP E08.2, distinta da finalização da participação.
 - O `backend/README.md` é a referência operacional de execução local; o README do Expo descreve o aplicativo. Não repetir aqui comandos completos de instalação.
 - Os relatórios experimentais v0.6.11/v0.6.12 e a Task 6.1 são **fontes históricas**, não documentos concorrentes que substituam estas duas fontes canônicas.
-- **Trabalho atual (30/10/2026):** fechamento documental após a auditoria consolidada E07.1–E07.3, com parecer APROVADO COM RESSALVAS para a integração e aprovação individual das três entregas. PostgreSQL concluído pelo responsável; verificações locais reexecutadas pelo Codex na auditoria. Base HEAD `5d7fae1217eb28a4be2610660245a6b8dacc4f7a` e alterações locais anteriores preservadas. Resultados e histórico em `E07_2_IMPLEMENTACAO.md`/`E07_3_IMPLEMENTACAO.md`; E07.1 preservada. Somente documentos e patch cumulativo atualizados, sem código, testes reexecutados, nova auditoria, staging, commit ou push.
+- **Trabalho histórico (30/10/2026):** fechamento documental após a auditoria consolidada E07.1–E07.3, com parecer APROVADO COM RESSALVAS para a integração e aprovação individual das três entregas. PostgreSQL concluído pelo responsável; verificações locais reexecutadas pelo Codex na auditoria. Base HEAD `5d7fae1217eb28a4be2610660245a6b8dacc4f7a` e alterações locais anteriores preservadas. Resultados e histórico em `E07_2_IMPLEMENTACAO.md`/`E07_3_IMPLEMENTACAO.md`; E07.1 preservada. Somente documentos e patch cumulativo atualizados, sem código, testes reexecutados, nova auditoria, staging, commit ou push.
 
-## 12. Registro sintético desta revisão
+## 12. Registro sintético das revisões
+
+**v0.7.11 (13/11/2026):** consolidação documental da develop, roadmap, oito migrations e integrações. Regras D/C preservadas, evidências delimitadas e pontos para decisão registrados. Inspeção estática apenas, sem testes, serviços, banco ou operações de publicação. Os fechamentos abaixo pertencem às respectivas campanhas históricas.
 
 **Fechamento documental E07.1–E07.3 — registro posterior de 30/10/2026:** o responsável confirmou, no PostgreSQL local autorizado `127.0.0.1:55432/arenago_events_test`, **20/20 E07.2**, **27/27 E07.3** e **176/176 na regressão completa**, zero falhas, cancelamentos ou skips. Na auditoria consolidada anterior a este fechamento, o Codex reexecutou **145/145 unitários**, sem falhas/cancelamentos/skips, exit 0, além de typecheck, lint e build com exit 0. São executores e rodadas distintos: PostgreSQL pertence ao responsável; as verificações locais pertencem ao Codex. A primeira execução E07.3 teve **23/27 aprovados e quatro falhas 42P08**; a correção exclusiva dos casts das fixtures precedeu a revalidação de 27/27. Detalhes e sequência preservados em `E07_3_IMPLEMENTACAO.md`.
 
