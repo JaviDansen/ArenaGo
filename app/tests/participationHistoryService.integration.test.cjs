@@ -130,3 +130,61 @@ test('falhas, cursores repetidos e troca de sessão não geram item de avaliaç�
   assert.equal(await fetchPendingEvaluationHistoryItem(client, ID, { isCurrent: () => current }), null);
   assert.equal(calls, 1);
 });
+
+const recentItem = { ...historyItem, finishReason: 'automatic_operational_deadline',
+  evaluation: { eligible: true, submitted: false, pending: true } };
+const returnState = { recentFinalization: { participationId: ID, eventId: EVENT_ID,
+  finishReason: recentItem.finishReason, finishedAt: recentItem.finishedAt }, pendingEvaluationParticipationIds: [ID] };
+
+test('retomada correlaciona finalização e pendência, revalida elegibilidade e pagina histórico', async () => {
+  const { fetchReturnEvaluationHistoryItem } = await service;
+  const calls = [];
+  const client = { async get(path, options) {
+    assert.equal(options.auth, true); calls.push(path);
+    if (path.endsWith('/evaluation-eligibility')) return { participationId: ID, ...recentItem.evaluation };
+    if (path.endsWith('limit=50')) return { items: [{ ...historyItem, participationId: EVAL_ID }], nextCursor: 'next' };
+    return { items: [recentItem], nextCursor: null };
+  } };
+  // A primeira página representa outra participação; não escolher a primeira pendência.
+  assert.equal(await fetchReturnEvaluationHistoryItem(client, returnState), recentItem);
+  assert.equal(calls.length, 3);
+});
+
+test('retomada não escolhe avaliação antiga nem consulta sem finalização recente', async () => {
+  const { fetchReturnEvaluationHistoryItem } = await service;
+  const client = { get() { assert.fail('Não deve buscar outra pendência.'); } };
+  assert.equal(await fetchReturnEvaluationHistoryItem(client, { recentFinalization: null, pendingEvaluationParticipationIds: [ID] }), null);
+  assert.equal(await fetchReturnEvaluationHistoryItem(client, { ...returnState, pendingEvaluationParticipationIds: [EVAL_ID] }), null);
+});
+
+test('retomada recusa finalização inválida e histórico de outro evento, instante ou motivo', async () => {
+  const { fetchReturnEvaluationHistoryItem } = await service;
+  for (const recentFinalization of [false, {}, { ...returnState.recentFinalization, finishReason: 'voluntary' },
+    { ...returnState.recentFinalization, finishedAt: 'invalid' }]) {
+    await assert.rejects(() => fetchReturnEvaluationHistoryItem({}, { ...returnState, recentFinalization }), /inválida/);
+  }
+  for (const item of [
+    { ...recentItem, event: { id: EVAL_ID, name: 'Outro evento' } },
+    { ...recentItem, finishedAt: '2026-11-07T21:28:00.000000Z' },
+    { ...recentItem, finishReason: 'voluntary' }, { ...recentItem, completedServicesCount: 0 },
+  ]) {
+    const client = { get: async path => path.endsWith('/evaluation-eligibility')
+      ? { participationId: ID, ...recentItem.evaluation } : { items: [item], nextCursor: null } };
+    await assert.rejects(() => fetchReturnEvaluationHistoryItem(client, returnState), /não confirmou/);
+  }
+});
+
+test('retomada respeita ausência de conclusão, envio anterior e prazo expirado no servidor', async () => {
+  const { fetchReturnEvaluationHistoryItem } = await service;
+  for (const evaluation of [
+    { eligible: false, submitted: false, pending: false },
+    { eligible: true, submitted: true, pending: false },
+    { eligible: true, submitted: false, pending: false },
+  ]) {
+    let calls = 0;
+    assert.equal(await fetchReturnEvaluationHistoryItem({ get: async () => {
+      calls += 1; return { participationId: ID, ...evaluation };
+    } }, returnState), null);
+    assert.equal(calls, 1);
+  }
+});

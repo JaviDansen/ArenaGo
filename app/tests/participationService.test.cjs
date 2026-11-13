@@ -116,3 +116,37 @@ test('malformed server data is not treated as absence', async () => {
   assert.equal(r.store.getSnapshot().status, 'error');
   assert.equal(r.store.getSnapshot().error, 'unavailable');
 });
+
+test('apresentação é única na retomada, inclusive após refresh e remontagem da Home', async () => {
+  const recent = { ...returned, recentFinalization: { participationId: 'p-recent' } };
+  const r = rig(path => Promise.resolve(path.endsWith('/current') ? { participation: null } : recent));
+  r.store.setIdentity(identityA); await r.store.refresh();
+  assert.equal(r.store.canPresentReturnEvaluation(recent), true);
+  assert.equal(r.store.claimReturnEvaluation(recent), true);
+  assert.equal(r.store.claimReturnEvaluation(recent), false);
+  await r.store.refresh();
+  assert.equal(r.store.canPresentReturnEvaluation(recent), false);
+  r.store.suspend();
+  assert.equal(r.store.claimReturnEvaluation(recent), false);
+  await r.store.resume();
+  assert.equal(r.store.claimReturnEvaluation(recent), true);
+});
+
+test('claim recusa leitura antiga, participação corrente, demo e identidade trocada', async () => {
+  const recent = { ...returned, recentFinalization: { participationId: 'p-recent' } };
+  let current = null;
+  const r = rig(path => Promise.resolve(path.endsWith('/current') ? { participation: current } : recent));
+  r.store.setIdentity(identityA); await r.store.refresh();
+  const version = r.store.getSnapshot().returnStateVersion;
+  await r.store.refresh();
+  assert.equal(r.store.claimReturnEvaluation(recent, version), false);
+  r.store.setDemoParticipation({ status: 'active' });
+  assert.equal(r.store.claimReturnEvaluation(recent), false);
+  current = active; await r.store.refresh();
+  assert.equal(r.store.claimReturnEvaluation(recent), false);
+  current = waiting; await r.store.refresh();
+  assert.equal(r.store.claimReturnEvaluation(recent), false);
+  current = null; await r.store.refresh();
+  r.identity(identityB);
+  assert.equal(r.store.claimReturnEvaluation(recent), false);
+});

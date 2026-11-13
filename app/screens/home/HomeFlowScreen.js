@@ -1,4 +1,5 @@
-import { useContext } from 'react';
+import { useContext, useEffect, useRef, useState } from 'react';
+import { useIsFocused } from '@react-navigation/native';
 import { StatusBar } from 'expo-status-bar';
 import { StyleSheet, Text, View } from 'react-native';
 
@@ -8,6 +9,8 @@ import ActiveArenaScreen from '../arena/ActiveArenaScreen';
 import RealArenaScreen from '../arena/RealArenaScreen';
 import ArenaQueueScreen from '../arena/ArenaQueueScreen';
 import HomeScreen from './HomeScreen';
+import { useAuth } from '../../context/AuthContext';
+import { fetchReturnEvaluationHistoryItem } from '../../services/participationHistoryService';
 
 function ExternalQueueScreen({ participation, onRefresh }) {
   return (
@@ -32,7 +35,44 @@ function ExternalQueueScreen({ participation, onRefresh }) {
 }
 
 export default function HomeFlowScreen({ navigation }) {
-  const { participation, status, error, returnState, refreshParticipation } = useContext(ParticipationContext);
+  const { participation, status, error, returnState, returnStateVersion, refreshParticipation,
+    canPresentReturnEvaluation, claimReturnEvaluation } = useContext(ParticipationContext);
+  const auth = useAuth();
+  const focused = useIsFocused();
+  const live = useRef(null);
+  const [returnCheck, setReturnCheck] = useState(null);
+  const epoch = auth?.getSessionEpoch?.();
+  live.current = { auth, focused, participation, status, returnState };
+
+  useEffect(() => {
+    let active = true;
+    const isCurrent = () => {
+      const now = live.current;
+      return active && now.focused && !now.participation && now.status === 'ready'
+        && now.returnState === returnState && now.auth?.isAuthenticated
+        && now.auth.user?.id === auth?.user?.id && now.auth.httpClient === auth?.httpClient
+        && now.auth.getSessionEpoch?.() === epoch && now.auth.isIdentityVerified?.() === true
+        && canPresentReturnEvaluation?.(returnState, returnStateVersion);
+    };
+    if (isCurrent()) {
+      setReturnCheck({ returned: returnState, version: returnStateVersion, status: 'loading' });
+      fetchReturnEvaluationHistoryItem(auth.httpClient, returnState, { isCurrent }).then(item => {
+        if (!isCurrent()) return;
+        if (item) {
+          const root = navigation.getParent();
+          if (!root) throw new Error('Navegação de avaliação indisponível.');
+          if (!claimReturnEvaluation(returnState, returnStateVersion)) return;
+          root.navigate('RealEvaluation', { participationId: item.participationId, historyItem: item });
+        }
+        setReturnCheck({ returned: returnState, version: returnStateVersion, status: 'ready', unavailable: !item });
+      }).catch(() => {
+        if (isCurrent()) setReturnCheck({ returned: returnState, version: returnStateVersion, status: 'error' });
+      });
+    }
+    return () => { active = false; };
+  }, [focused, participation, status, returnState, returnStateVersion, auth?.user?.id, auth?.httpClient, epoch,
+    auth?.isAuthenticated, auth?.identityStatus, auth?.isInitializing,
+    canPresentReturnEvaluation, claimReturnEvaluation, navigation]);
 
   if (status === 'loading') {
     return <HomeScreen mode="loading" />;
@@ -56,7 +96,17 @@ export default function HomeFlowScreen({ navigation }) {
   }
 
   if (!participation) {
-    return <HomeScreen navigation={navigation} returnState={returnState} />;
+    if (focused && auth?.isAuthenticated && canPresentReturnEvaluation?.(returnState, returnStateVersion)) {
+      if (!returnCheck || returnCheck.returned !== returnState || returnCheck.version !== returnStateVersion || returnCheck.status === 'loading') return <HomeScreen mode="loading" />;
+      if (returnCheck.status === 'error') return <HomeScreen mode="error"
+        message="Não foi possível confirmar a avaliação da participação encerrada. Tente novamente."
+        onRetry={refreshParticipation} />;
+    }
+    const visibleReturnState = returnCheck && returnState && returnCheck.returned === returnState && returnCheck.version === returnStateVersion
+      && returnCheck.unavailable ? { ...returnState, pendingEvaluationParticipationIds:
+        returnState.pendingEvaluationParticipationIds.filter(id => id !== returnState.recentFinalization?.participationId) }
+      : returnState;
+    return <HomeScreen navigation={navigation} returnState={visibleReturnState} />;
   }
 
   if (participation.status === 'waiting') {

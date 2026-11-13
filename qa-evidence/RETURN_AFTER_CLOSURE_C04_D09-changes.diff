@@ -1,0 +1,712 @@
+diff --git a/app/context/ParticipationContext.js b/app/context/ParticipationContext.js
+index ae2d685..e9a3268 100644
+--- a/app/context/ParticipationContext.js
++++ b/app/context/ParticipationContext.js
+@@ -1,4 +1,5 @@
+ import { createContext, useEffect, useRef, useState } from 'react';
++import { AppState } from 'react-native';
+ import { useAuth } from './AuthContext';
+ import { createParticipationStore } from '../services/participationService';
+ import { createEventAdmissionStore } from '../services/eventAdmissionService';
+@@ -50,15 +51,29 @@ export function ParticipationProvider({ children }) {
+     return () => { store.setIdentity(null); admissionStore.setIdentity(null); };
+   }, [store, admissionStore, userId, epoch]);
+ 
++  useEffect(() => {
++    let previous = AppState.currentState;
++    if (previous === 'background' || previous === 'inactive') store.suspend();
++    const subscription = AppState.addEventListener('change', next => {
++      if (next === 'active' && previous !== 'active') void store.resume();
++      else if (next === 'background' || next === 'inactive') store.suspend();
++      previous = next;
++    });
++    return () => subscription.remove();
++  }, [store]);
++
+   const current = userId && snapshot.userId === userId && snapshot.epoch === epoch;
+   const participation = current ? (snapshot.participation ? { ...snapshot.participation, source: 'server' } : snapshot.demoParticipation) : null;
+   const currentAdmission = userId && admissionSnapshot.userId === userId && admissionSnapshot.epoch === epoch;
+   const value = {
+     participation,
+     returnState: current ? snapshot.returnState : null,
++    returnStateVersion: current ? snapshot.returnStateVersion : null,
+     status: current ? snapshot.status : userId ? 'loading' : 'idle',
+     error: current ? snapshot.error : null,
+     refreshParticipation: store.refresh,
++    canPresentReturnEvaluation: store.canPresentReturnEvaluation,
++    claimReturnEvaluation: store.claimReturnEvaluation,
+     setParticipation: store.setDemoParticipation,
+     admission: currentAdmission ? admissionSnapshot : null,
+     lookupEvent: admissionStore.lookup,
+diff --git a/app/screens/home/HomeFlowScreen.js b/app/screens/home/HomeFlowScreen.js
+index f708963..66fdf43 100644
+--- a/app/screens/home/HomeFlowScreen.js
++++ b/app/screens/home/HomeFlowScreen.js
+@@ -1,4 +1,5 @@
+-import { useContext } from 'react';
++import { useContext, useEffect, useRef, useState } from 'react';
++import { useIsFocused } from '@react-navigation/native';
+ import { StatusBar } from 'expo-status-bar';
+ import { StyleSheet, Text, View } from 'react-native';
+ 
+@@ -8,6 +9,8 @@ import ActiveArenaScreen from '../arena/ActiveArenaScreen';
+ import RealArenaScreen from '../arena/RealArenaScreen';
+ import ArenaQueueScreen from '../arena/ArenaQueueScreen';
+ import HomeScreen from './HomeScreen';
++import { useAuth } from '../../context/AuthContext';
++import { fetchReturnEvaluationHistoryItem } from '../../services/participationHistoryService';
+ 
+ function ExternalQueueScreen({ participation, onRefresh }) {
+   return (
+@@ -32,7 +35,44 @@ function ExternalQueueScreen({ participation, onRefresh }) {
+ }
+ 
+ export default function HomeFlowScreen({ navigation }) {
+-  const { participation, status, error, returnState, refreshParticipation } = useContext(ParticipationContext);
++  const { participation, status, error, returnState, returnStateVersion, refreshParticipation,
++    canPresentReturnEvaluation, claimReturnEvaluation } = useContext(ParticipationContext);
++  const auth = useAuth();
++  const focused = useIsFocused();
++  const live = useRef(null);
++  const [returnCheck, setReturnCheck] = useState(null);
++  const epoch = auth?.getSessionEpoch?.();
++  live.current = { auth, focused, participation, status, returnState };
++
++  useEffect(() => {
++    let active = true;
++    const isCurrent = () => {
++      const now = live.current;
++      return active && now.focused && !now.participation && now.status === 'ready'
++        && now.returnState === returnState && now.auth?.isAuthenticated
++        && now.auth.user?.id === auth?.user?.id && now.auth.httpClient === auth?.httpClient
++        && now.auth.getSessionEpoch?.() === epoch && now.auth.isIdentityVerified?.() === true
++        && canPresentReturnEvaluation?.(returnState, returnStateVersion);
++    };
++    if (isCurrent()) {
++      setReturnCheck({ returned: returnState, version: returnStateVersion, status: 'loading' });
++      fetchReturnEvaluationHistoryItem(auth.httpClient, returnState, { isCurrent }).then(item => {
++        if (!isCurrent()) return;
++        if (item) {
++          const root = navigation.getParent();
++          if (!root) throw new Error('Navegação de avaliação indisponível.');
++          if (!claimReturnEvaluation(returnState, returnStateVersion)) return;
++          root.navigate('RealEvaluation', { participationId: item.participationId, historyItem: item });
++        }
++        setReturnCheck({ returned: returnState, version: returnStateVersion, status: 'ready', unavailable: !item });
++      }).catch(() => {
++        if (isCurrent()) setReturnCheck({ returned: returnState, version: returnStateVersion, status: 'error' });
++      });
++    }
++    return () => { active = false; };
++  }, [focused, participation, status, returnState, returnStateVersion, auth?.user?.id, auth?.httpClient, epoch,
++    auth?.isAuthenticated, auth?.identityStatus, auth?.isInitializing,
++    canPresentReturnEvaluation, claimReturnEvaluation, navigation]);
+ 
+   if (status === 'loading') {
+     return <HomeScreen mode="loading" />;
+@@ -56,7 +96,17 @@ export default function HomeFlowScreen({ navigation }) {
+   }
+ 
+   if (!participation) {
+-    return <HomeScreen navigation={navigation} returnState={returnState} />;
++    if (focused && auth?.isAuthenticated && canPresentReturnEvaluation?.(returnState, returnStateVersion)) {
++      if (!returnCheck || returnCheck.returned !== returnState || returnCheck.version !== returnStateVersion || returnCheck.status === 'loading') return <HomeScreen mode="loading" />;
++      if (returnCheck.status === 'error') return <HomeScreen mode="error"
++        message="Não foi possível confirmar a avaliação da participação encerrada. Tente novamente."
++        onRetry={refreshParticipation} />;
++    }
++    const visibleReturnState = returnCheck && returnState && returnCheck.returned === returnState && returnCheck.version === returnStateVersion
++      && returnCheck.unavailable ? { ...returnState, pendingEvaluationParticipationIds:
++        returnState.pendingEvaluationParticipationIds.filter(id => id !== returnState.recentFinalization?.participationId) }
++      : returnState;
++    return <HomeScreen navigation={navigation} returnState={visibleReturnState} />;
+   }
+ 
+   if (participation.status === 'waiting') {
+diff --git a/app/services/participationHistoryService.js b/app/services/participationHistoryService.js
+index 6b0918f..6430365 100644
+--- a/app/services/participationHistoryService.js
++++ b/app/services/participationHistoryService.js
+@@ -95,6 +95,28 @@ export async function fetchPendingEvaluationHistoryItem(client, participationId,
+   return null;
+ }
+ 
++/** Retomada C-04/D09: pendências antigas não substituem a finalização indicada. */
++export async function fetchReturnEvaluationHistoryItem(client, returned, { isCurrent = () => true } = {}) {
++  const recent = returned?.recentFinalization;
++  if (recent === null) return null;
++  if (!recent || !UUID.test(recent.participationId) || !UUID.test(recent.eventId)
++      || typeof recent.finishedAt !== 'string' || !validInstant(recent.finishedAt)
++      || !['admin_immediate', 'admin_controlled_external_wait_closed',
++        'automatic_operational_deadline', 'automatic_admin_deadline'].includes(recent.finishReason)
++      || !Array.isArray(returned.pendingEvaluationParticipationIds)) {
++    throw new Error('O servidor retornou uma finalização recente inválida.');
++  }
++  if (!returned.pendingEvaluationParticipationIds.includes(recent.participationId)) return null;
++  const item = await fetchPendingEvaluationHistoryItem(client, recent.participationId, { isCurrent });
++  if (!item || !isCurrent()) return null;
++  if (item.event.id !== recent.eventId || item.finishedAt !== recent.finishedAt
++      || item.finishReason !== recent.finishReason || item.completedServicesCount < 1) {
++    throw new Error('O histórico não confirmou a finalização recente.');
++  }
++  // pending é calculado pelo relógio do backend; não arbitrar prazo no aparelho.
++  return item;
++}
++
+ export async function fetchParticipationEvaluation(client, participationId) {
+   if (!UUID.test(participationId)) throw new Error('Identificador de participação inválido.');
+   const body = await client.get(`/participations/${participationId}/evaluation`, { auth: true });
+diff --git a/app/services/participationService.js b/app/services/participationService.js
+index 8742c6c..385b3fb 100644
+--- a/app/services/participationService.js
++++ b/app/services/participationService.js
+@@ -1,24 +1,53 @@
+ import { httpClient } from './httpClient';
+ 
+-const empty = () => ({ userId: null, epoch: null, status: 'idle', participation: null, returnState: null, demoParticipation: null, error: null });
++const empty = () => ({ userId: null, epoch: null, status: 'idle', participation: null, returnState: null, returnStateVersion: 0, demoParticipation: null, error: null });
+ 
+ export function createParticipationStore({ client = httpClient, getIdentity }) {
+   let state = empty();
+   let generation = 0;
++  let suspended = false;
++  const presentedReturnEvaluations = new Set();
+   const listeners = new Set();
+   const publish = (next) => { state = next; listeners.forEach((listener) => listener(state)); };
+   const matches = (identity) => {
+     const current = getIdentity();
+-    return Boolean(identity && current && identity.userId === current.userId && identity.epoch === current.epoch &&
++    return Boolean(!suspended && identity && current && identity.userId === current.userId && identity.epoch === current.epoch &&
+       state.userId === identity.userId && state.epoch === identity.epoch);
+   };
+ 
+   function setIdentity(identity) {
+     generation += 1;
++    presentedReturnEvaluations.clear();
+     if (!identity) { publish(empty()); return; }
+     publish({ ...empty(), ...identity, status: 'loading' });
+   }
+ 
++  function canPresentReturnEvaluation(returned, version = state.returnStateVersion) {
++    return Boolean(matches(state) && state.status === 'ready' && !state.participation && !state.demoParticipation
++      && version === generation && version === state.returnStateVersion
++      && returned && returned === state.returnState && returned.recentFinalization
++      && !presentedReturnEvaluations.has(returned.recentFinalization.participationId));
++  }
++
++  function claimReturnEvaluation(returned, version = state.returnStateVersion) {
++    if (!canPresentReturnEvaluation(returned, version)) return false;
++    // Consumir antes de navegar; refresh e remontagem não desfazem o adiamento.
++    presentedReturnEvaluations.add(returned.recentFinalization.participationId);
++    return true;
++  }
++
++  function suspend() {
++    suspended = true;
++    generation += 1;
++    publish({ ...state, status: state.userId ? 'loading' : 'idle', returnState: null });
++  }
++
++  function resume() {
++    suspended = false;
++    presentedReturnEvaluations.clear();
++    return refresh();
++  }
++
+   async function refresh() {
+     const identity = state.userId === null ? null : { userId: state.userId, epoch: state.epoch };
+     if (!matches(identity)) return;
+@@ -42,7 +71,7 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
+           !Object.prototype.hasOwnProperty.call(returned, 'recentFinalization')) {
+         throw new Error('Resposta inválida de estado de retorno.');
+       }
+-      publish({ ...state, status: 'ready', participation, returnState: returned, demoParticipation: null, error: null });
++      publish({ ...state, status: 'ready', participation, returnState: returned, returnStateVersion: requestGeneration, demoParticipation: null, error: null });
+     } catch (error) {
+       if (requestGeneration !== generation || !matches(identity)) return;
+       publish({ ...state, status: 'error', participation: null, returnState: null, demoParticipation: null,
+@@ -57,5 +86,6 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
+     publish({ ...state, demoParticipation: next ? { ...next, source: 'demo' } : null });
+   }
+ 
+-  return { getSnapshot: () => state, subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); }, setIdentity, refresh, setDemoParticipation };
++  return { getSnapshot: () => state, subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
++    setIdentity, refresh, setDemoParticipation, canPresentReturnEvaluation, claimReturnEvaluation, suspend, resume };
+ }
+diff --git a/app/tests/homeFlow.test.cjs b/app/tests/homeFlow.test.cjs
+index be3d375..a72383a 100644
+--- a/app/tests/homeFlow.test.cjs
++++ b/app/tests/homeFlow.test.cjs
+@@ -8,12 +8,16 @@ function renderHomeFlow(participation, extra = {}) {
+   const navigation = { navigate: (...args) => navigationCalls.push(args) };
+   const screen = loadModule('screens/home/HomeFlowScreen.js', (name) => {
+     if (name === 'react') return {
++      useEffect() {}, useRef: value => ({ current: value }), useState: value => [value, () => {}],
+       useContext: () => ({
+         participation,
+         ...extra,
+         setParticipation() { contextWrites += 1; },
+       }),
+     };
++    if (name === '@react-navigation/native') return { useIsFocused: () => false };
++    if (name === '../../context/AuthContext') return { useAuth: () => null };
++    if (name === '../../services/participationHistoryService') return { fetchReturnEvaluationHistoryItem() { assert.fail('unexpected read'); } };
+     if (name === 'react-native') return {
+       Pressable: 'Pressable', Text: 'Text', View: 'View', StyleSheet: { create: (styles) => styles },
+     };
+@@ -82,7 +86,7 @@ test('HomeFlow encaminha a avaliação real para o stack raiz', () => {
+   assert.equal(calls[0][1].historyItem, historyItem);
+ });
+ 
+-test('pendência no estado de retorno não abre avaliação ao renderizar a Home', () => {
++test('pendência sem finalização recente não navega durante a renderização da Home', () => {
+   const result = renderHomeFlow(null, { status: 'ready', returnState: { pendingEvaluationParticipationIds: ['participation-a'] } });
+   assert.equal(result.rendered.type, 'HomeScreen');
+   assert.deepEqual(result.navigationCalls, []);
+diff --git a/app/tests/participationHistoryService.integration.test.cjs b/app/tests/participationHistoryService.integration.test.cjs
+index c8129ca..9b8d288 100644
+--- a/app/tests/participationHistoryService.integration.test.cjs
++++ b/app/tests/participationHistoryService.integration.test.cjs
+@@ -130,3 +130,61 @@ test('falhas, cursores repetidos e troca de sessão não geram item de avaliaç
+   assert.equal(await fetchPendingEvaluationHistoryItem(client, ID, { isCurrent: () => current }), null);
+   assert.equal(calls, 1);
+ });
++
++const recentItem = { ...historyItem, finishReason: 'automatic_operational_deadline',
++  evaluation: { eligible: true, submitted: false, pending: true } };
++const returnState = { recentFinalization: { participationId: ID, eventId: EVENT_ID,
++  finishReason: recentItem.finishReason, finishedAt: recentItem.finishedAt }, pendingEvaluationParticipationIds: [ID] };
++
++test('retomada correlaciona finalização e pendência, revalida elegibilidade e pagina histórico', async () => {
++  const { fetchReturnEvaluationHistoryItem } = await service;
++  const calls = [];
++  const client = { async get(path, options) {
++    assert.equal(options.auth, true); calls.push(path);
++    if (path.endsWith('/evaluation-eligibility')) return { participationId: ID, ...recentItem.evaluation };
++    if (path.endsWith('limit=50')) return { items: [{ ...historyItem, participationId: EVAL_ID }], nextCursor: 'next' };
++    return { items: [recentItem], nextCursor: null };
++  } };
++  // A primeira página representa outra participação; não escolher a primeira pendência.
++  assert.equal(await fetchReturnEvaluationHistoryItem(client, returnState), recentItem);
++  assert.equal(calls.length, 3);
++});
++
++test('retomada não escolhe avaliação antiga nem consulta sem finalização recente', async () => {
++  const { fetchReturnEvaluationHistoryItem } = await service;
++  const client = { get() { assert.fail('Não deve buscar outra pendência.'); } };
++  assert.equal(await fetchReturnEvaluationHistoryItem(client, { recentFinalization: null, pendingEvaluationParticipationIds: [ID] }), null);
++  assert.equal(await fetchReturnEvaluationHistoryItem(client, { ...returnState, pendingEvaluationParticipationIds: [EVAL_ID] }), null);
++});
++
++test('retomada recusa finalização inválida e histórico de outro evento, instante ou motivo', async () => {
++  const { fetchReturnEvaluationHistoryItem } = await service;
++  for (const recentFinalization of [false, {}, { ...returnState.recentFinalization, finishReason: 'voluntary' },
++    { ...returnState.recentFinalization, finishedAt: 'invalid' }]) {
++    await assert.rejects(() => fetchReturnEvaluationHistoryItem({}, { ...returnState, recentFinalization }), /inválida/);
++  }
++  for (const item of [
++    { ...recentItem, event: { id: EVAL_ID, name: 'Outro evento' } },
++    { ...recentItem, finishedAt: '2026-11-07T21:28:00.000000Z' },
++    { ...recentItem, finishReason: 'voluntary' }, { ...recentItem, completedServicesCount: 0 },
++  ]) {
++    const client = { get: async path => path.endsWith('/evaluation-eligibility')
++      ? { participationId: ID, ...recentItem.evaluation } : { items: [item], nextCursor: null } };
++    await assert.rejects(() => fetchReturnEvaluationHistoryItem(client, returnState), /não confirmou/);
++  }
++});
++
++test('retomada respeita ausência de conclusão, envio anterior e prazo expirado no servidor', async () => {
++  const { fetchReturnEvaluationHistoryItem } = await service;
++  for (const evaluation of [
++    { eligible: false, submitted: false, pending: false },
++    { eligible: true, submitted: true, pending: false },
++    { eligible: true, submitted: false, pending: false },
++  ]) {
++    let calls = 0;
++    assert.equal(await fetchReturnEvaluationHistoryItem({ get: async () => {
++      calls += 1; return { participationId: ID, ...evaluation };
++    } }, returnState), null);
++    assert.equal(calls, 1);
++  }
++});
+diff --git a/app/tests/participationProvider.test.cjs b/app/tests/participationProvider.test.cjs
+index 59c4d20..a0babb3 100644
+--- a/app/tests/participationProvider.test.cjs
++++ b/app/tests/participationProvider.test.cjs
+@@ -9,6 +9,8 @@ function providerRig() {
+   let auth = null;
+   let epoch = 0;
+   let cursor = 0;
++  let appState = 'active';
++  const appStateListeners = new Set();
+   const hooks = [], pending = [];
+   const react = {
+     createContext: () => ({ Provider: 'Provider' }),
+@@ -24,6 +26,10 @@ function providerRig() {
+   };
+   const module = loadModule('context/ParticipationContext.js', (name) => {
+     if (name === 'react') return react;
++    if (name === 'react-native') return { AppState: {
++      get currentState() { return appState; },
++      addEventListener(event, listener) { appStateListeners.add(listener); return { remove: () => appStateListeners.delete(listener) }; },
++    } };
+     if (name === './AuthContext') return { useAuth: () => auth };
+     if (name === '../services/participationService') return { createParticipationStore };
+     if (name === '../services/eventAdmissionService') return {
+@@ -55,6 +61,7 @@ function providerRig() {
+       auth = { isAuthenticated: true, user: { id: userId }, httpClient: client, getSessionEpoch: () => epoch };
+     },
+     logout() { epoch += 1; auth = { isAuthenticated: false, getSessionEpoch: () => epoch }; },
++    appState(value) { appState = value; appStateListeners.forEach(listener => listener(value)); },
+   };
+ }
+ 
+@@ -76,6 +83,36 @@ test('provider restores participation after session restoration and hides it imm
+   assert.equal(r.render().status, 'idle');
+ });
+ 
++test('provider invalida retorno no background e reconsulta ao retomar', async () => {
++  const r = providerRig();
++  let reads = 0;
++  const client = { async get(path) {
++    reads += 1;
++    return path.endsWith('/current') ? { participation: null }
++      : { recentFinalization: null, pendingEvaluationParticipationIds: [] };
++  } };
++  r.authenticate('a', client); r.render(); r.effects();
++  await new Promise(resolve => setImmediate(resolve));
++  assert.equal(r.render().status, 'ready');
++  r.appState('background');
++  assert.equal(r.render().status, 'loading');
++  assert.equal(r.render().returnState, null);
++  r.appState('active');
++  await new Promise(resolve => setImmediate(resolve));
++  assert.equal(r.render().status, 'ready');
++  assert.equal(reads, 4);
++});
++
++test('estado nativo inicial desconhecido não bloqueia restauração da participação', async () => {
++  const r = providerRig();
++  r.appState(null);
++  r.authenticate('a', { get: async path => path.endsWith('/current') ? { participation: null }
++    : { recentFinalization: null, pendingEvaluationParticipationIds: [] } });
++  r.render(); r.effects();
++  await new Promise(resolve => setImmediate(resolve));
++  assert.equal(r.render().status, 'ready');
++});
++
+ test('provider masks the previous account before the identity-change effect runs', async () => {
+   const r = providerRig();
+   const client = { get: async (path) => path.endsWith('/current')
+diff --git a/app/tests/participationService.test.cjs b/app/tests/participationService.test.cjs
+index 1a2b73c..06c0af9 100644
+--- a/app/tests/participationService.test.cjs
++++ b/app/tests/participationService.test.cjs
+@@ -116,3 +116,37 @@ test('malformed server data is not treated as absence', async () => {
+   assert.equal(r.store.getSnapshot().status, 'error');
+   assert.equal(r.store.getSnapshot().error, 'unavailable');
+ });
++
++test('apresentação é única na retomada, inclusive após refresh e remontagem da Home', async () => {
++  const recent = { ...returned, recentFinalization: { participationId: 'p-recent' } };
++  const r = rig(path => Promise.resolve(path.endsWith('/current') ? { participation: null } : recent));
++  r.store.setIdentity(identityA); await r.store.refresh();
++  assert.equal(r.store.canPresentReturnEvaluation(recent), true);
++  assert.equal(r.store.claimReturnEvaluation(recent), true);
++  assert.equal(r.store.claimReturnEvaluation(recent), false);
++  await r.store.refresh();
++  assert.equal(r.store.canPresentReturnEvaluation(recent), false);
++  r.store.suspend();
++  assert.equal(r.store.claimReturnEvaluation(recent), false);
++  await r.store.resume();
++  assert.equal(r.store.claimReturnEvaluation(recent), true);
++});
++
++test('claim recusa leitura antiga, participação corrente, demo e identidade trocada', async () => {
++  const recent = { ...returned, recentFinalization: { participationId: 'p-recent' } };
++  let current = null;
++  const r = rig(path => Promise.resolve(path.endsWith('/current') ? { participation: current } : recent));
++  r.store.setIdentity(identityA); await r.store.refresh();
++  const version = r.store.getSnapshot().returnStateVersion;
++  await r.store.refresh();
++  assert.equal(r.store.claimReturnEvaluation(recent, version), false);
++  r.store.setDemoParticipation({ status: 'active' });
++  assert.equal(r.store.claimReturnEvaluation(recent), false);
++  current = active; await r.store.refresh();
++  assert.equal(r.store.claimReturnEvaluation(recent), false);
++  current = waiting; await r.store.refresh();
++  assert.equal(r.store.claimReturnEvaluation(recent), false);
++  current = null; await r.store.refresh();
++  r.identity(identityB);
++  assert.equal(r.store.claimReturnEvaluation(recent), false);
++});
+diff --git a/app/tests/homeReturnEvaluation.test.cjs b/app/tests/homeReturnEvaluation.test.cjs
+new file mode 100644
+--- /dev/null
++++ b/app/tests/homeReturnEvaluation.test.cjs
+@@ -0,0 +1,204 @@
++const test = require('node:test');
++const assert = require('node:assert/strict');
++const { loadModule } = require('./helpers/questionnaireHarness.cjs');
++
++const history = loadModule('services/participationHistoryService.js', require).exports;
++const { createParticipationStore } = loadModule('services/participationService.js', name =>
++  name === './httpClient' ? { httpClient: {} } : require(name)).exports;
++const ID = 'c79b25f1-b171-487f-9fee-a24d184054b5';
++const EVENT = 'e10da075-c6cb-4fd6-ba97-7b52403ebff8';
++const item = { participationId: ID, event: { id: EVENT, name: 'Evento real' }, status: 'finished',
++  joinedAt: '2026-11-01T12:00:00.000000Z', arenaEnteredAt: '2026-11-01T12:05:00.000000Z',
++  finishedAt: '2026-11-01T14:00:00.000000Z', finishReason: 'automatic_operational_deadline',
++  completedServicesCount: 1, evaluation: { eligible: true, submitted: false, pending: true } };
++const returned = { recentFinalization: { participationId: ID, eventId: EVENT,
++  finishedAt: item.finishedAt, finishReason: item.finishReason }, pendingEvaluationParticipationIds: [ID] };
++const tick = () => new Promise(resolve => setImmediate(resolve));
++function deferred() { let resolve; const promise = new Promise(ok => { resolve = ok; }); return { promise, resolve }; }
++
++function rig({ current = null, returnState = returned, read } = {}) {
++  let identity = { userId: 'a', epoch: 1 }, verified = true, focused = true;
++  let cursor = 0, dirty = false, tree;
++  const hooks = [], effects = [], calls = [], reads = [];
++  const client = { async get(path, options) {
++    assert.equal(options.auth, true); reads.push(path);
++    if (path.endsWith('/current')) return { participation: current };
++    if (path.endsWith('/return-state')) return returnState;
++    if (read) return read(path);
++    return path.endsWith('/evaluation-eligibility') ? { participationId: ID, ...item.evaluation }
++      : { items: [item], nextCursor: null };
++  } };
++  let auth = { isAuthenticated: true, identityStatus: 'verified', user: { id: 'a' }, httpClient: client,
++    getSessionEpoch: () => identity?.epoch, isIdentityVerified: () => verified };
++  const store = createParticipationStore({ client, getIdentity: () => identity });
++  store.setIdentity(identity); store.subscribe(() => { dirty = true; });
++  const context = () => ({ ...store.getSnapshot(), participation: store.getSnapshot().participation,
++    refreshParticipation: store.refresh, canPresentReturnEvaluation: store.canPresentReturnEvaluation,
++    claimReturnEvaluation: store.claimReturnEvaluation });
++  const react = {
++    useContext: () => context(),
++    useRef(initial) { const i = cursor++; return hooks[i] ||= { current: initial }; },
++    useState(initial) { const i = cursor++; if (!(i in hooks)) hooks[i] = initial;
++      return [hooks[i], value => { hooks[i] = value; dirty = true; }]; },
++    useEffect(fn, deps) {
++      const i = cursor++, old = hooks[i];
++      if (!old || deps.some((v, j) => !Object.is(v, old.deps[j]))) {
++        hooks[i] = { deps, cleanup: old?.cleanup };
++        effects.push(() => { hooks[i].cleanup?.(); hooks[i].cleanup = fn(); });
++      }
++    },
++  };
++  const navigation = { getParent: () => ({ navigate(name, params) { calls.push({ name, params }); focused = false; dirty = true; } }) };
++  const screen = loadModule('screens/home/HomeFlowScreen.js', name => {
++    if (name === 'react') return react;
++    if (name === '@react-navigation/native') return { useIsFocused: () => focused };
++    if (name === 'react-native') return { StyleSheet: { create: v => v } };
++    if (name === 'expo-status-bar') return {};
++    if (name === '../../context/AuthContext') return { useAuth: () => auth };
++    if (name === '../../context/ParticipationContext') return { ParticipationContext: {} };
++    if (name === '../../services/participationHistoryService') return history;
++    if (name === '../../components/ui') return {};
++    if (name.startsWith('../arena/') || name === './HomeScreen') return { __esModule: true, default: name.split('/').at(-1) };
++    return require(name);
++  }).exports;
++  function flush() {
++    let loops = 0;
++    do {
++      assert.ok(loops++ < 15, 'loop de renderização/navegação');
++      dirty = false; cursor = 0; tree = screen.default({ navigation });
++      while (effects.length) effects.shift()();
++    } while (dirty);
++  }
++  return {
++    store, calls, reads, context, get auth() { return auth; }, get tree() { return tree; },
++    async start() { await store.refresh(); flush(); },
++    async settle() { await tick(); flush(); await tick(); flush(); },
++    focus(value) { focused = value; flush(); },
++    verify(value) { verified = value; auth = { ...auth, identityStatus: value ? 'verified' : 'checking' }; flush(); },
++    invalidate(value) { identity = value; },
++    async refresh() { await store.refresh(); flush(); },
++    later() { focused = true; flush(); },
++  };
++}
++
++test('retomada navega uma vez para RealEvaluation com dados reais revalidados', async () => {
++  const r = rig(); await r.start();
++  assert.equal(r.tree.props.mode, 'loading');
++  assert.equal(r.calls.length, 0);
++  await r.settle();
++  assert.equal(r.calls.length, 1);
++  assert.equal(r.calls[0].name, 'RealEvaluation');
++  assert.equal(r.calls[0].params.historyItem, item);
++  assert.equal(r.calls[0].params.participationId, ID);
++});
++
++test('Avaliar mais tarde real retorna sem loop, mesmo após refresh e novo foco', async () => {
++  const r = rig(); await r.start(); await r.settle();
++  const evaluation = loadModule('screens/participation/RealEvaluationScreen.js', name => {
++    if (name === 'react') return { useCallback: fn => fn, useContext: r.context, useEffect() {},
++      useMemo: fn => fn(), useRef: value => ({ current: value }), useState: value => [value, () => {}] };
++    if (name === 'react-native') return { StyleSheet: { create: v => v } };
++    if (name === 'expo-status-bar' || name === 'expo-crypto' || name === '../../components/ui') return {};
++    if (name === '../../context/AuthContext') return { useAuth: () => r.auth };
++    if (name === '../../context/ParticipationContext') return { ParticipationContext: {} };
++    if (name === '../../services/participationHistoryService') return history;
++    if (name === '../../services/participationActionService') return { createParticipationActionCoordinator: () => ({}) };
++    if (name === '../../theme') return { spacing: { layout: {} }, typography: {}, colors: { text: {} } };
++    if (name === './EvaluationScreen') return { __esModule: true, default: 'EvaluationScreen' };
++    return require(name);
++  }).exports.default({ route: { params: r.calls[0].params }, navigation: { goBack: () => r.later() } });
++  assert.equal(evaluation.props.real, true);
++  evaluation.props.onLater(); await r.settle(); await r.refresh(); await r.settle();
++  r.focus(false); r.focus(true); await r.settle();
++  assert.equal(r.calls.length, 1);
++  assert.equal(r.tree.type, 'HomeScreen');
++  assert.equal(r.tree.props.returnState.pendingEvaluationParticipationIds[0], ID);
++});
++
++test('finalização sem elegibilidade mantém aviso de encerramento na Home', async () => {
++  const r = rig({ read: async () => ({ participationId: ID, eligible: false, submitted: false, pending: false }) });
++  await r.start(); await r.settle();
++  assert.equal(r.calls.length, 0);
++  assert.equal(r.tree.type, 'HomeScreen');
++  assert.equal(r.tree.props.returnState.recentFinalization.participationId, ID);
++  assert.equal(r.tree.props.returnState.pendingEvaluationParticipationIds.length, 0);
++});
++
++test('nova retomada permite nova apresentação após adiamento, com leituras novas', async () => {
++  const r = rig(); await r.start(); await r.settle();
++  r.later(); await r.settle();
++  const previousReads = r.reads.length;
++  r.store.suspend(); await r.store.resume(); await r.settle();
++  assert.equal(r.calls.length, 2);
++  assert.equal(r.reads.length, previousReads + 4);
++});
++
++test('pendências antigas sem relação com a finalização continuam somente no histórico/atalho', async () => {
++  const other = '886c0487-5710-427a-a6ba-a5b1d2b01d72';
++  for (const returnState of [{ ...returned, pendingEvaluationParticipationIds: [other] },
++    { recentFinalization: null, pendingEvaluationParticipationIds: [other] }]) {
++    const r = rig({ returnState }); await r.start(); await r.settle();
++    assert.equal(r.calls.length, 0); assert.equal(r.reads.length, 2);
++    assert.equal(r.tree.props.returnState.pendingEvaluationParticipationIds[0], other);
++  }
++});
++
++test('erro de elegibilidade ou histórico não abre avaliação e permite retry por leitura', async () => {
++  for (const failingPath of ['eligibility', 'history']) {
++    let failing = true;
++    const r = rig({ read: async path => {
++      if (failing && path.includes(failingPath)) throw new Error('rede');
++      return path.endsWith('/evaluation-eligibility') ? { participationId: ID, ...item.evaluation }
++        : { items: [item], nextCursor: null };
++    } });
++    await r.start(); await r.settle();
++    assert.equal(r.calls.length, 0); assert.equal(r.tree.props.mode, 'error');
++    failing = false; await r.tree.props.onRetry(); await r.settle();
++    assert.equal(r.calls.length, 1);
++  }
++});
++
++test('sessão, conta, foco e identidade incerta descartam elegibilidade atrasada', async () => {
++  for (const invalidate of [r => r.invalidate(null), r => r.invalidate({ userId: 'b', epoch: 2 }),
++    r => r.invalidate({ userId: 'a', epoch: 2 }), r => r.focus(false), r => r.verify(false)]) {
++    const delayed = deferred();
++    const r = rig({ read: () => delayed.promise });
++    await r.start(); invalidate(r);
++    delayed.resolve({ participationId: ID, ...item.evaluation }); await r.settle();
++    assert.equal(r.calls.length, 0);
++  }
++});
++
++test('retomada seguinte invalida respostas anteriores mesmo se o objeto de retorno for reutilizado', async () => {
++  const delayed = deferred(); let first = true;
++  const r = rig({ read: async path => {
++    if (first) return delayed.promise;
++    return path.endsWith('/evaluation-eligibility') ? { participationId: ID, ...item.evaluation }
++      : { items: [item], nextCursor: null };
++  } });
++  await r.start(); r.store.suspend(); first = false; await r.store.resume();
++  delayed.resolve({ participationId: ID, ...item.evaluation }); await r.settle();
++  assert.equal(r.calls.length, 1);
++});
++
++test('logout durante leitura do histórico descarta os dados da participação anterior', async () => {
++  const delayed = deferred();
++  const r = rig({ read: path => path.endsWith('/evaluation-eligibility')
++    ? { participationId: ID, ...item.evaluation } : delayed.promise });
++  await r.start(); await r.settle();
++  assert.ok(r.reads.includes('/participations/history?limit=50'));
++  r.invalidate(null); delayed.resolve({ items: [item], nextCursor: null }); await r.settle();
++  assert.equal(r.calls.length, 0);
++});
++
++test('participação ativa e fila externa impedem apresentação de finalização anterior', async () => {
++  for (const current of [
++    { id: 'active', eventId: EVENT, status: 'active', source: 'server' },
++    { id: 'waiting', eventId: EVENT, status: 'waiting', source: 'server', externalQueue: { position: 1 } },
++  ]) {
++    const r = rig({ current }); await r.start(); await r.settle();
++    assert.equal(r.calls.length, 0);
++    assert.equal(r.reads.length, 2);
++    assert.equal(r.tree.type === 'RealArenaScreen' || r.tree.type.name === 'ExternalQueueScreen', true);
++  }
++});
+diff --git a/docs/RETURN_AFTER_CLOSURE_C04_D09_IMPLEMENTACAO.md b/docs/RETURN_AFTER_CLOSURE_C04_D09_IMPLEMENTACAO.md
+new file mode 100644
+--- /dev/null
++++ b/docs/RETURN_AFTER_CLOSURE_C04_D09_IMPLEMENTACAO.md
+@@ -0,0 +1,56 @@
++# Retomada após encerramento — C-04/D09
++
++## Escopo e estado
++
++Branch de implementação: `develop`. A campanha focada inicial foi executada pela Luna Medium; a correção pontual posterior ainda não foi revalidada nem homologada fisicamente.
++
++Foram alterados quatro arquivos de produção: `HomeFlowScreen.js`, `ParticipationContext.js`, `participationService.js` e `participationHistoryService.js`. `HomeScreen`, `RealEvaluationScreen`, `ParticipationsRealScreen` e backend foram inspecionados e reutilizados sem edição. As decisões C-04/D09 permanecem iguais.
++
++Este relatório e o patch único `qa-evidence/RETURN_AFTER_CLOSURE_C04_D09-changes.diff` atendem à obrigação de evidências do AGENTS.md. Os cinco documentos canônicos aprovados não foram editados nesta task.
++
++## Contratos e decisão de apresentação
++
++`GET /participations/return-state` retorna a última participação finalizada por motivo de sistema, ordenada por `finished_at` e ID, sem janela adicional de recência. `recentFinalization` não é uma lista de todas as avaliações pendentes nem um recibo de apresentação. `pendingEvaluationParticipationIds` contém pendências elegíveis calculadas pelo backend e pode conter outras participações.
++
++A retomada automática exige ausência de participação corrente e demonstração, estado de leitura `ready`, foco e identidade autenticada/verificada. O mesmo ID deve aparecer na finalização recente e nas pendências. São reconsultados elegibilidade e histórico paginado pelos serviços reais existentes. A navegação exige elegível, pendente, não enviada, participação `finished`, conclusão Staff positiva e correspondência de ID/evento/instante/motivo com a finalização recente. O backend determina o prazo; não foi inventada janela de recência nem decisão temporal pelo relógio do aparelho.
++
++O destino é a rota raiz `RealEvaluation`, com o item real validado. A opção existente “Avaliar mais tarde” usa `goBack()`. Uma marca em memória no store da participação é consumida antes de navegar e sobrevive à remontagem da Home e ao refresh comum. Ela é reiniciada na troca de identidade/sessão e em uma nova retomada do aplicativo. Não há gravação de adiamento no backend nem envio automático de avaliação.
++
++No segundo plano/inatividade, as leituras anteriores são invalidadas. Ao voltar ao primeiro plano, `/current` e `/return-state` são reconsultados. Uma versão de leitura impede que respostas anteriores sejam usadas mesmo se o objeto de retorno for reutilizado. Conta, epoch, cliente, foco e getter vivo de identidade são conferidos durante as leituras e imediatamente antes da navegação.
++
++Sem elegibilidade, a Home informa o encerramento; uma pendência recente recusada na revalidação deixa de ser anunciada nessa apresentação. Outras pendências permanecem acessíveis pela aba Eventos. Erro ou inconsistência nas leituras bloqueia a abertura e oferece nova tentativa por consulta. Participação ativa e espera externa mantêm seus destinos existentes.
++
++## Testes preparados e validação inicial
++
++Foram acrescentados 18 testes declarados, com cenários negativos agrupados por dados:
++
++- `homeReturnEvaluation.test.cjs`: navegação real, dados de rota, adiamento pela tela real, ausência de loop após refresh/foco, nova retomada, aviso sem elegibilidade, pendências antigas, falhas de leitura, sessão/conta/foco/identidade, respostas de retomada anterior, logout durante histórico e participação corrente.
++- `participationHistoryService.integration.test.cjs`: correlação, paginação, autenticação das leituras, finalização inválida, inconsistência de histórico, ausência de conclusão, envio anterior e prazo expirado. Apesar do nome do arquivo, são contratos com transporte simulado, sem banco.
++- `participationService.test.cjs`: marca única, versões, sessão, participação real/demo e nova retomada.
++- `participationProvider.test.cjs`: ciclo AppState e estado nativo inicial desconhecido.
++- `homeFlow.test.cjs`: adaptação dos stubs de hooks e manutenção dos testes de seleção das telas existentes.
++
++Na campanha focada inicial, a Luna Medium executou 99 testes: 98 aprovados, 1 falho, 0 ignorados, exit code 1. Os 18 testes novos passaram. O teste antigo `HomeFlow renders HomeScreen when there is no participation` revelou acesso a `returnCheck.version` com `returnCheck` nulo. A correção passou a exigir a presença de `returnCheck` antes de ler suas propriedades ou comparar seus campos com os de `returnState`. O teste existente cobre esse caso; nenhum teste foi alterado para ocultar a falha. A bateria focada e a regressão integral permanecem pendentes após a correção. O Sol não executou testes nesta etapa.
++
++## Inspeções estáticas
++
++Revisados o diff, os contratos de retorno/elegibilidade e os caminhos de navegação/adiamento. `git diff --check` retornou exit code 0. A leitura estrutural do patch com `git apply --stat` retornou exit code 0, sem aplicar alterações. A inspeção dos arquivos de código, testes e relatório não encontrou marcadores de conflito ou espaços finais. Não houve alteração de dependências, autenticação, endpoints, banco, migrations, seeds, `.env`, READMEs ou decisões de negócio.
++
++## Validação proposta para etapa autorizada
++
++Executor: Luna Medium, selecionado pelo responsável. Inspecionar os scripts antes da execução e registrar contagens, skips e exit codes. No diretório `app`, executar primeiro:
++
++```powershell
++$env:NODE_ENV = 'test'
++node --test tests/homeReturnEvaluation.test.cjs tests/homeFlow.test.cjs tests/participationService.test.cjs tests/participationProvider.test.cjs tests/participationHistoryService.integration.test.cjs tests/participationEvaluations.test.cjs tests/evaluation.test.cjs tests/roleRoutingIntegration.test.cjs
++```
++
++Após aprovação focada e autorização, executar `npm.cmd test` em `app`. Os testes usam transporte/armazenamento simulados; não iniciar banco, backend ou Expo para essa campanha. Registrar dependências QA ausentes e skips sem declarar regressão integral aprovada.
++
++Homologação manual posterior: fechamento automático e Admin com participante elegível; encerramento sem conclusão; pendência já enviada/expirada; “Avaliar mais tarde”, mudança de aba e nova retomada; troca de conta durante a consulta; preservação de participação ativa/fila externa e acesso pela aba Eventos. Esses cenários não foram exercitados nesta implementação.
++
++## Limites
++
++A evidência estática e os testes preparados não comprovam navegação nativa ou aprovação funcional. O backend pode mudar entre a última leitura e a navegação; os comandos reais de avaliação continuam sujeitos à elegibilidade transacional existente. Adiamento é local ao ciclo autenticado/retomada e não é persistido entre reinicializações do aplicativo.
++
++Parecer de implementação: PRONTO PARA VALIDAÇÃO.
