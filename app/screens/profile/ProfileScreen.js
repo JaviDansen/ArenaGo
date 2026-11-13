@@ -9,7 +9,6 @@ import {
 import { StatusBar } from 'expo-status-bar';
 
 import { AuthContext } from '../../context/AuthContext';
-import { mockProfileStatistics } from '../../data/mockData';
 import { getProfileViewData } from '../../utils/profile';
 import { AuthBackground, Badge, Button, Card, TagChip } from '../../components/ui';
 import { colors, radii, spacing, typography } from '../../theme';
@@ -23,6 +22,8 @@ export default function ProfileScreen({ navigation, route }) {
   const authRef = useRef(auth);
   authRef.current = auth;
   const reloadRef = useRef(null);
+  const reloadStatisticsRef = useRef(null);
+  const [statisticsState, setStatisticsState] = useState(null);
   const [loaded, setLoaded] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
@@ -34,7 +35,9 @@ export default function ProfileScreen({ navigation, route }) {
   const account = ownsData ? loaded.account : null;
   const questionnaire = ownsData ? loaded.questionnaire : null;
   const profile = getProfileViewData({
-    statistics: mockProfileStatistics, user: account, questionnaire,
+    statistics: isAuthenticated && statisticsState?.userId === userId
+      && statisticsState?.sessionEpoch === sessionEpoch && statisticsState?.client === client
+      ? statisticsState.value : null, user: account, questionnaire,
   });
   const canLogout = typeof auth?.logout === 'function';
   const canEdit = !isLoading && account?.hasCompletedQuestionnaire === true
@@ -44,10 +47,36 @@ export default function ProfileScreen({ navigation, route }) {
     let active = true;
     let pending = false;
     let requestVersion = 0;
+    let statisticsVersion = 0;
+    let statisticsPending = false;
     const isCurrent = (version) => active && requestVersion === version
       && authRef.current?.isAuthenticated && authRef.current?.user?.id === userId
       && authRef.current?.httpClient === client
       && authRef.current?.getSessionEpoch?.() === sessionEpoch;
+
+    async function loadStatistics() {
+      if (statisticsPending || !isAuthenticated || !userId || !client) return;
+      statisticsPending = true;
+      const version = ++statisticsVersion;
+      setStatisticsState({ userId, sessionEpoch, client, value: null, error: false });
+      try {
+        const value = await client.get('/profile/statistics', { auth: true });
+        if (!active || version !== statisticsVersion || !authRef.current?.isAuthenticated
+          || authRef.current?.user?.id !== userId || authRef.current?.httpClient !== client
+          || authRef.current?.getSessionEpoch?.() !== sessionEpoch) return;
+        if (!Number.isSafeInteger(value?.participationCount) || value.participationCount < 0
+          || !Number.isSafeInteger(value?.totalMinutes) || value.totalMinutes < 0) throw new Error('Resposta inválida');
+        setStatisticsState({ userId, sessionEpoch, client, value, error: false });
+      } catch {
+        if (active && version === statisticsVersion && authRef.current?.isAuthenticated
+          && authRef.current?.user?.id === userId && authRef.current?.httpClient === client
+          && authRef.current?.getSessionEpoch?.() === sessionEpoch) {
+          setStatisticsState({ userId, sessionEpoch, client, value: null, error: true });
+        }
+      } finally {
+        if (version === statisticsVersion) statisticsPending = false;
+      }
+    }
 
     async function loadProfile() {
       if (pending || !isAuthenticated || !userId || !client) return;
@@ -78,15 +107,20 @@ export default function ProfileScreen({ navigation, route }) {
     setLoadError('');
     setIsLoading(isAuthenticated);
     reloadRef.current = loadProfile;
-    if (navigation?.isFocused?.() !== false) void loadProfile();
-    const unsubscribeFocus = navigation?.addListener?.('focus', loadProfile);
+    reloadStatisticsRef.current = loadStatistics;
+    const refresh = () => { void loadProfile(); void loadStatistics(); };
+    if (navigation?.isFocused?.() !== false) refresh();
+    const unsubscribeFocus = navigation?.addListener?.('focus', refresh);
     const unsubscribeBlur = navigation?.addListener?.('blur', () => {
       requestVersion += 1;
       pending = false;
+      statisticsVersion += 1;
+      statisticsPending = false;
     });
     return () => {
       active = false;
       reloadRef.current = null;
+      reloadStatisticsRef.current = null;
       unsubscribeFocus?.();
       unsubscribeBlur?.();
     };
@@ -150,10 +184,6 @@ export default function ProfileScreen({ navigation, route }) {
           ) : null}
         </Card>
 
-        <View style={styles.sectionHeaderRow}>
-          <Badge label="DEMO" variant="brand" size="sm" />
-          <Text style={styles.demoNotice}>Indicadores demonstrativos</Text>
-        </View>
         <View style={styles.statistics}>
           <Card style={styles.statCard} variant="surface">
             <Text style={styles.statValue}>{profile.participationCount}</Text>
@@ -164,6 +194,15 @@ export default function ProfileScreen({ navigation, route }) {
             <Text style={styles.statLabel}>Tempo total</Text>
           </Card>
         </View>
+
+        {isAuthenticated && statisticsState?.userId === userId && statisticsState?.client === client
+          && statisticsState?.sessionEpoch === sessionEpoch && statisticsState?.error ? (
+          <Card style={styles.errorCard} variant="surface">
+            <Text style={styles.error} accessibilityRole="alert">Estatísticas indisponíveis.</Text>
+            <Button variant="outline" size="md" onPress={() => reloadStatisticsRef.current?.()}
+              accessibilityLabel="Tentar carregar estatísticas novamente">Tentar novamente</Button>
+          </Card>
+        ) : null}
 
         <View style={styles.questionnaireHeader}>
           <Text style={styles.sectionTitle}>Dados do questionário</Text>

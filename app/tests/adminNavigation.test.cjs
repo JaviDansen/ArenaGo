@@ -1,4 +1,4 @@
-// Rota da Área Admin no app, botão do Início e pilha própria (ADM01).
+// Rota da Área Admin no app, ausência do atalho no Início e pilha própria (ADM01).
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { createHarness, loadModule, textOf, createParticipantThemeStub } = require('./helpers/questionnaireHarness.cjs');
@@ -78,22 +78,20 @@ test('rota AdminDemo existe só no app autenticado e é carregada sob demanda', 
   }
 });
 
-test('Início abre a demonstração Admin e a entrada em evento sem oferecer StaffDemo', () => {
+test('Início permite entrada em evento sem oferecer atalhos Admin ou Staff demonstrativos', () => {
   const h = createHarness('screens/home/HomeScreen.js', {
     authContext: { user: { id: 'u-1', hasCompletedQuestionnaire: true } },
   });
-  const label = h.nodes.find((node) => node.type === 'Pressable' && /Admin/.test(textOf(node)));
-  assert.equal(textOf(label), 'Área Admin (demonstração)');
+  assert.ok(!h.nodes.some((node) => node.type === 'Pressable' && /Admin/.test(textOf(node))));
   for (const testID of ['home-background', 'home-event-entry-card', 'home-empty-participation-card']) {
     assert.ok(h.nodes.some((node) => node.props.testID === testID), `${testID} preservado`);
   }
   assert.ok(!h.nodes.some((node) => node.type === 'Pressable' && /Staff/.test(textOf(node))));
-  h.press('Área Admin (demonstração)');
   h.press('Entrar em um evento');
-  assert.deepEqual(h.navigationCalls.map((call) => call.name), ['AdminDemo', 'EventEntry']);
+  assert.deepEqual(h.navigationCalls.map((call) => call.name), ['EventEntry']);
 });
 
-test('atalho Admin respeita os estados de carregamento e erro da Home atual', () => {
+test('Home não oferece atalho Admin nos estados de carregamento, erro ou pronto', () => {
   const h = createHarness('screens/home/HomeScreen.js', {
     authContext: { user: { id: 'u-1', hasCompletedQuestionnaire: true } },
   });
@@ -103,8 +101,7 @@ test('atalho Admin respeita os estados de carregamento e erro da Home atual', ()
       && node.props.accessibilityLabel === 'Área Admin (demonstração)'));
   }
   h.setProps({ mode: 'ready' });
-  h.press('Área Admin (demonstração)');
-  assert.equal(h.navigationCalls.at(-1).name, 'AdminDemo');
+  assert.ok(!h.nodes.some((node) => node.type === 'Pressable' && /Admin/.test(textOf(node))));
 });
 
 test('pilha da Área Admin registra as telas com títulos em português e provedor por sessão', () => {

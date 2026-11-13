@@ -6,7 +6,7 @@ const birthDate = loadModule('utils/birthDate.js', require).exports;
 const { getProfileViewData } = loadModule('utils/profile.js', name =>
   name === './birthDate' ? birthDate : require(name)).exports;
 
-test('Profile loads real identity and questionnaire while preserving only demo indicators', async () => {
+test('Profile loads real identity, questionnaire and statistics', async () => {
   const requests = [];
   const user = { id: 'A', name: 'Ana Souza', email: 'ana@example.test', hasCompletedQuestionnaire: true };
   const questionnaire = {
@@ -22,7 +22,8 @@ test('Profile loads real identity and questionnaire while preserving only demo i
       httpClient: {
         async get(path, options) {
           requests.push({ path, options });
-          return path === '/profile' ? user : questionnaire;
+          return path === '/profile' ? user : path === '/profile/statistics'
+            ? { participationCount: 2, totalMinutes: 135 } : questionnaire;
         },
         put() { assert.fail('Profile must not save questionnaire data'); },
       },
@@ -38,8 +39,8 @@ test('Profile loads real identity and questionnaire while preserving only demo i
   await h.actAsync(() => new Promise(resolve => setImmediate(resolve)));
   const texts = h.nodes.filter(node => node.type === 'Text').map(textOf);
   for (const text of [
-    'Meu Perfil', 'Ana Souza', 'ana@example.test', '3', 'Participações', '8h', 'Tempo total',
-    'Indicadores demonstrativos', 'Dados do questionário',
+    'Meu Perfil', 'Ana Souza', 'ana@example.test', '2', 'Participações', '2h 15min', 'Tempo total',
+    'Dados do questionário',
     getProfileViewData({ questionnaire }).questionnaireRows[0].value,
     'Feminino', 'Ensino Superior', 'Roblox', 'Não conheço.', 'Não tenho interesse.',
   ]) assert.ok(texts.includes(text), text);
@@ -47,8 +48,8 @@ test('Profile loads real identity and questionnaire while preserving only demo i
   const edit = h.nodes.find(node => node.type === 'Pressable'
     && textOf(node).includes('EDITAR DADOS DO QUESTIONÁRIO'));
   assert.equal(edit.props.disabled, false);
-  assert.equal(requests.length, 2);
-  assert.deepEqual(requests.map(request => request.path), ['/profile', '/profile/questionnaire']);
+  assert.equal(requests.length, 3);
+  assert.deepEqual(new Set(requests.map(request => request.path)), new Set(['/profile', '/profile/questionnaire', '/profile/statistics']));
   assert.ok(requests.every(request => request.options.auth === true));
   assert.ok(!texts.includes('Em breve'));
   assert.ok(!texts.some(text => text.includes('não são respostas da sua conta')));
@@ -63,8 +64,7 @@ test('Profile loads real identity and questionnaire while preserving only demo i
 test('Profile never invents identity or questionnaire data when there is no authenticated session', () => {
   const h = createHarness('screens/profile/ProfileScreen.js', { authContext: null });
   const texts = () => h.nodes.filter(node => node.type === 'Text').map(textOf);
-  assert.ok(texts().includes('3'));
-  assert.ok(texts().includes('8h'));
+  assert.equal(texts().filter(text => text === '—').length, 2);
   assert.ok(!texts().includes('22 anos'));
   const logout = h.nodes.find(node => node.props.accessibilityLabel === 'Sair da conta');
   assert.equal(logout.props.disabled, true);
@@ -80,7 +80,7 @@ test('Profile data transformation accepts questionnaire response shape and prese
   const source = {
     user: { name: '  Ana  ', email: ' ana@example.test ' },
     referenceDate: '2026-10-28',
-    statistics: { participationCount: 0, totalHours: 0 },
+    statistics: { participationCount: 0, totalMinutes: 0 },
     questionnaire: {
       aboutYou: { birthDate: '2004-10-29', gender: 'Outro', otherGender: 'Não binário', education: 'Médio' },
       yourGames: [{ id: 'valorant', name: 'Valorant' }, 'Minecraft', null, {}],
@@ -93,7 +93,10 @@ test('Profile data transformation accepts questionnaire response shape and prese
   assert.equal(profile.name, 'Ana');
   assert.equal(profile.email, 'ana@example.test');
   assert.equal(profile.participationCount, '0');
-  assert.equal(profile.totalTime, '0h');
+  assert.equal(profile.totalTime, '0min');
+  for (const [minutes, expected] of [[45, '45min'], [120, '2h'], [135, '2h 15min']]) {
+    assert.equal(getProfileViewData({ statistics: { participationCount: 1, totalMinutes: minutes } }).totalTime, expected);
+  }
   assert.equal(value('Idade'), '21 anos');
   assert.equal(value('Gênero'), 'Não binário');
   assert.equal(value('Escolaridade'), 'Médio');
@@ -125,6 +128,83 @@ test('Profile allows logout retry after failure and never navigates manually', a
   await h.actAsync(() => h.press('Sair da conta'));
   assert.equal(calls, 2);
   assert.deepEqual(h.navigationCalls, []);
+});
+
+test('statistics failure keeps profile visible and retry recovers zero values', async () => {
+  let fail = true;
+  const user = { id: 'A', name: 'Ana', email: 'ana@example.test', hasCompletedQuestionnaire: true };
+  const h = createHarness('screens/profile/ProfileScreen.js', { authContext: {
+    isAuthenticated: true, user, httpClient: { async get(path) {
+      if (path === '/profile') return user;
+      if (path === '/profile/questionnaire') return { hasCompleted: true, yourGames: [] };
+      if (fail) throw new Error('offline');
+      return { participationCount: 0, totalMinutes: 0 };
+    } },
+  } });
+  await h.actAsync(() => new Promise(resolve => setImmediate(resolve)));
+  let texts = h.nodes.filter(node => node.type === 'Text').map(textOf);
+  assert.ok(texts.includes('Ana'));
+  assert.ok(texts.includes('Estatísticas indisponíveis.'));
+  assert.ok(!texts.includes('0min'));
+  fail = false;
+  await h.actAsync(() => h.press('Tentar carregar estatísticas novamente'));
+  texts = h.nodes.filter(node => node.type === 'Text').map(textOf);
+  assert.ok(texts.includes('0min'));
+  assert.ok(!texts.includes('Estatísticas indisponíveis.'));
+});
+
+test('late statistics cannot cross account, epoch or logout; focus reloads', async () => {
+  let resolveOld;
+  const oldResult = new Promise(resolve => { resolveOld = resolve; });
+  const makeAuth = (id, epoch, stats) => {
+    const user = { id, name: id, email: `${id}@example.test`, hasCompletedQuestionnaire: true };
+    return { isAuthenticated: true, user, getSessionEpoch: () => epoch,
+      httpClient: { async get(path) {
+        if (path === '/profile') return user;
+        if (path === '/profile/questionnaire') return { hasCompleted: true };
+        return stats;
+      } } };
+  };
+  const a = makeAuth('A', 1, oldResult);
+  const b = makeAuth('B', 2, { participationCount: 4, totalMinutes: 45 });
+  const h = createHarness('screens/profile/ProfileScreen.js', { authContext: a });
+  await h.actAsync(() => new Promise(resolve => setImmediate(resolve)));
+  h.setAuthContext(b);
+  await h.actAsync(() => new Promise(resolve => setImmediate(resolve)));
+  await h.actAsync(() => { resolveOld({ participationCount: 99, totalMinutes: 999 }); });
+  let texts = h.nodes.filter(node => node.type === 'Text').map(textOf);
+  assert.ok(texts.includes('45min'));
+  assert.ok(!texts.includes('99'));
+  h.setFocused(false);
+  h.setFocused(true);
+  await h.actAsync(() => new Promise(resolve => setImmediate(resolve)));
+  texts = h.nodes.filter(node => node.type === 'Text').map(textOf);
+  assert.ok(texts.includes('45min'));
+  h.setAuthContext({ isAuthenticated: false });
+  texts = h.nodes.filter(node => node.type === 'Text').map(textOf);
+  assert.ok(!texts.includes('45min'));
+});
+
+test('late statistics from an earlier session of the same user are discarded', async () => {
+  let epoch = 1;
+  const pending = [];
+  const user = { id: 'A', name: 'Ana', hasCompletedQuestionnaire: true };
+  const auth = { isAuthenticated: true, user, getSessionEpoch: () => epoch,
+    httpClient: { get(path) {
+      if (path === '/profile') return Promise.resolve(user);
+      if (path === '/profile/questionnaire') return Promise.resolve({ hasCompleted: true });
+      return new Promise(resolve => pending.push(resolve));
+    } } };
+  const h = createHarness('screens/profile/ProfileScreen.js', { authContext: auth });
+  await h.actAsync(() => new Promise(resolve => setImmediate(resolve)));
+  epoch = 2;
+  h.setAuthContext({ ...auth });
+  await h.actAsync(() => new Promise(resolve => setImmediate(resolve)));
+  await h.actAsync(() => pending[1]({ participationCount: 1, totalMinutes: 120 }));
+  await h.actAsync(() => pending[0]({ participationCount: 99, totalMinutes: 999 }));
+  const texts = h.nodes.filter(node => node.type === 'Text').map(textOf);
+  assert.ok(texts.includes('2h'));
+  assert.ok(!texts.includes('99'));
 });
 
 test('Home has no logout and preserves event entry and pending questionnaire navigation', () => {
@@ -173,7 +253,7 @@ test('UI-11/12: ProfileScreen renders modernized dark Design System, structured 
 
   const texts = h.nodes.filter((n) => n.type === 'Text').map(textOf);
   assert.ok(texts.includes('PARTICIPANTE'));
-  assert.ok(texts.includes('DEMO'));
+  assert.ok(!texts.includes('DEMO'));
   assert.ok(texts.includes('Meu Perfil'));
   assert.ok(texts.includes('Informações Pessoais'));
   assert.ok(texts.includes('Jogos de Interesse'));

@@ -24,6 +24,12 @@ export class ProfileController {
     return this.profileService.getProfile(userId);
   }
 
+  @Get("statistics")
+  @HttpCode(HttpStatus.OK)
+  async getStatistics(@CurrentUserId() userId: string): Promise<{ participationCount: number; totalMinutes: number }> {
+    return this.profileService.getStatistics(userId);
+  }
+
   @Patch()
   @HttpCode(HttpStatus.OK)
   async updateProfile(

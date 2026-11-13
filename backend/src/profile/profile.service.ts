@@ -16,6 +16,22 @@ const ROLE_ORDER: Record<UserRoleName, number> = {
 export class ProfileService {
   constructor(@Inject(POSTGRES_POOL) private readonly pool: Pool) {}
 
+  async getStatistics(authenticatedUserId: string): Promise<{ participationCount: number; totalMinutes: number }> {
+    const result = await this.pool.query<{ participation_count: string; total_minutes: string }>(
+      `SELECT COUNT(*) FILTER (WHERE arena_entered_at IS NOT NULL)::text AS participation_count,
+              FLOOR(COALESCE(SUM(EXTRACT(EPOCH FROM (finished_at - arena_entered_at))) FILTER (
+                WHERE status = 'finished' AND arena_entered_at IS NOT NULL AND finished_at IS NOT NULL
+                  AND isfinite(arena_entered_at) AND isfinite(finished_at) AND finished_at >= arena_entered_at
+              ), 0) / 60)::text AS total_minutes
+       FROM participations WHERE user_id = $1`,
+      [authenticatedUserId],
+    );
+    return {
+      participationCount: Number(result.rows[0].participation_count),
+      totalMinutes: Number(result.rows[0].total_minutes),
+    };
+  }
+
   /**
    * Consulta os dados cadastrais da própria conta autenticada (`GET /api/v1/profile`).
    * Retorna estritamente: id, name, email, emailVerified, roles, hasCompletedQuestionnaire, createdAt, updatedAt.
