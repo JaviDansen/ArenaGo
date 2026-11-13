@@ -36,15 +36,17 @@ O questionário incompleto direciona o Participante à sua conclusão; não alte
 | --- | --- |
 | Perfil e questionário | Leitura/edição de nome em `/profile`; três etapas em `/profile/questionnaire`; catálogo persistido em `/games`. Edição de e-mail/papéis não é oferecida como atualização cadastral. |
 | Entrada no evento | Código manual ou conteúdo do QR é validado e consultado em `POST /events/lookup`. A confirmação cria participação em `POST /participations`, com chave de idempotência. Não há códigos especiais `FILA`/`LIVRE` com ingresso simulado nesse serviço. |
-| Participação atual | `/participations/current` e `/participations/return-state` alimentam a Home; espera externa e Arena real são distinguidas pelo estado recebido do servidor. |
+| Participação atual | `/participations/current` e `/participations/return-state` alimentam a Home; espera externa e Arena real são distinguidas pelo estado recebido do servidor. Na retomada, o estado é reconsultado. |
 | Experiências e filas | `/events/:eventId/experiences`, consulta da própria fila, ingresso e retirada usam a API real. Resultado incerto preserva a intenção e impede novo ingresso indevido. |
 | Histórico e detalhes | Aba Eventos usa `/participations/history`; detalhes e pendências vêm dos contratos de leitura, sem histórico fictício como fallback de erro. |
 | Saída e avaliação | Saída confirmada por `/participations/:participationId/finish`; elegibilidade é reconsultada antes da nota de 1 a 5 e comentário opcional. Envio incerto é conferido por leitura, preservando a intenção. |
 | Estatísticas | `/profile/statistics` fornece contagem de participações que entraram na Arena e minutos de participações finalizadas. A espera externa não soma tempo. |
 
+Na retomada autenticada após encerramento, a Home correlaciona a finalização recente com a avaliação pendente e revalida elegibilidade e histórico no backend antes de abrir automaticamente `RealEvaluation`. “Avaliar mais tarde” evita reapresentação no mesmo ciclo; uma nova retomada pode oferecê-la novamente, e a aba Eventos mantém o acesso à pendência. Respostas atrasadas ou de outra conta/sessão não autorizam a navegação. O [relatório C-04/D09](../docs/RETURN_AFTER_CLOSURE_C04_D09_IMPLEMENTACAO.md) separa os 99/99 testes focados, os 773/773 testes frontend e a homologação física delimitada do fluxo principal após fechamento Admin; fechamento automático e cenários negativos não foram homologados fisicamente nessa campanha.
+
 O Perfil refaz a consulta de estatísticas ao ganhar foco, separada da carga de identidade/questionário. Mostra `—` durante carregamento/erro, oferece nova tentativa e descarta respostas de outro usuário, cliente ou geração de sessão. A duração é exibida em minutos/horas; os indicadores não são demonstrativos.
 
-O leitor QR usa `expo-camera`, solicita permissão e valida texto de código; não abre URLs arbitrárias como destino de autenticação. Sua presença no código e testes simulados não comprovam operação física da câmera; consulte [ENTRY_QR_01](../docs/ENTRY_QR_01_IMPLEMENTACAO.md).
+O leitor QR usa `expo-camera`, solicita permissão e valida texto de código; não abre URLs arbitrárias como destino de autenticação. O ingresso por QR foi observado fisicamente no cenário C-04/D09 descrito acima; código e testes simulados isolados não comprovam os demais cenários de câmera. Consulte [ENTRY_QR_01](../docs/ENTRY_QR_01_IMPLEMENTACAO.md).
 
 Formulários, navegação e seleções são estado local de interface. Componentes antigos de Arena/avaliação, `mockData` e o suporte a participação `source: 'demo'` continuam no repositório, separados da participação `source: 'server'`. Não devem receber dados reais por substituição silenciosa nem ser confundidos com a jornada persistida. Consulte [finalização e avaliação](../docs/EXPO_PARTICIPACAO_FINALIZACAO_AVALIACAO_IMPLEMENTACAO.md).
 

@@ -1,7 +1,7 @@
 # ArenaGo — Arquitetura Backend unificada e dicionário PostgreSQL
 
-**Versão:** v0.6.18 — consolidação documental da develop (13/11/2026).
-**Fonte funcional prevalente:** [Planejamento v0.7.11](PLANEJAMENTO_ARENAGO.md); decisões D01–D11 e C-01–C-15 preservadas.
+**Versão:** v0.6.19 — atualização da retomada C-04/D09 na develop (13/11/2026).
+**Fonte funcional prevalente:** [Planejamento v0.7.12](PLANEJAMENTO_ARENAGO.md); decisões D01–D11 e C-01–C-15 preservadas.
 
 ## Estado consolidado — novembro de 2026
 
@@ -12,8 +12,8 @@ O código da develop implementa contratos HTTP de identidade, sessões, verifica
 | Decisões aprovadas | Planejamento e invariantes normativos deste documento permanecem válidos. Diferenças de implementação são registradas para decisão, sem redefinir negócio. |
 | Implementado | Controllers e serviços NestJS/Drizzle/PostgreSQL listados em §27; detalhes de locks, tempo, idempotência e auditoria continuam nos capítulos e relatórios de entrega. |
 | Integrado | Participante/Staff usam API nos fluxos dos READMEs. Admin usa senha/TOTP, identidade e logout reais, com rota exclusiva AdminArea; as 14 telas Heliom continuam em memória, sem persistência administrativa real. |
-| Homologado | Campanha histórica da integração Perfil/Admin: 755 aprovações frontend, zero falhas/ignorados, exit 0, conforme responsável; login Admin/TOTP e painel Heliom no Expo Go. Perfil/Staff têm campanhas delimitadas. Não há aprovação geral atual do backend ou produção. |
-| Pendente | Onboarding/reset geral TOTP, recuperação de senha, painel Admin persistido, reconciliação Staff, aderência da retomada de avaliações, BI/LGPD, concorrência física/carga e operação de produção. |
+| Homologado | Campanha histórica da integração Perfil/Admin: 755 aprovações frontend, zero falhas/ignorados, exit 0, conforme responsável. Na campanha posterior C-04/D09, 99/99 testes focados e 773/773 frontend passaram sem falhas/skips; o fluxo principal após encerramento Admin foi homologado no Expo Go. Perfil/Staff têm campanhas delimitadas. Não há aprovação geral atual do backend ou produção. |
+| Pendente | Onboarding/reset geral TOTP, recuperação de senha, painel Admin persistido, reconciliação Staff, homologação física do fechamento automático e dos cenários negativos de retomada, BI/LGPD, concorrência física/carga e operação de produção. |
 
 **Convenção histórica:** capítulos 14–18 preservam propostas, exemplos e critérios originais, com atualizações E08 intercaladas. Afirmações “nenhum endpoint”, “sem HTTP”, “futuro” e contagens antigas descrevem sua rodada, não o inventário atual. Exemplo histórico não é resposta vigente quando §27 ou o controller indicar diferença. Regras normativas não se tornam sugestões por essa classificação. Nenhum resultado foi reexecutado nesta consolidação.
 
@@ -2243,6 +2243,8 @@ O CHECK existente `access_code_normalized = upper(btrim(access_code_normalized))
 
 **v0.6.18 (13/11/2026):** inspeção estática da develop; atualização somente deste documento e do Planejamento. Nenhuma execução de testes, aplicação, SQL, migrations ou seeds. As decisões aprovadas e os exemplos históricos permanecem consultáveis; nenhuma rota abaixo concede autorização para operar bancos ou publicar serviços.
 
+**v0.6.19 (13/11/2026):** retomada C-04/D09 implementada e validada após a revisão v0.6.18. A campanha posterior aprovou 99/99 testes focados e 773/773 frontend; o fluxo principal após fechamento Admin foi homologado no Expo Go. Ver [relatório específico](RETURN_AFTER_CLOSURE_C04_D09_IMPLEMENTACAO.md). Esta revisão atualiza apenas o estado documental; os registros de v0.6.18 permanecem históricos.
+
 ### 27.1 Identidade, segurança e perfil
 
 Todas as rotas usam `/api/v1`. Nas tabelas seguintes, caminhos são relativos a esse prefixo. DTOs são estritos conforme os controllers; exemplos antigos não substituem os contratos executáveis.
@@ -2320,7 +2322,7 @@ Esses controles não provam resistência a proprietário/superusuário nem resol
 
 Versões declaradas: Expo ~58.0.23, React Native 0.88.1 e React 19.3.0; Node >=24.15.0 no backend, NestJS 12.1.3, TypeScript 6.0.3, Drizzle ORM ^0.45.4/Kit ^0.31.11. PostgreSQL não tem mínimo declarado no manifest; versões de laboratórios são históricos, não requisito universal.
 
-Participante usa cliente HTTP, questionário/perfil, estatísticas, ingresso real, participação/filas e histórico/avaliação. QR implementado precisa de prova física própria. Staff seleciona eventos autorizados, painel/estações e Controle de Entrada com polling de 5 segundos operacional/60 segundos de fase, condicionado à identidade, foco e primeiro plano. [Staff B1](STAFF_B1_IMPLEMENTACAO.md) registra homologação delimitada; não são WebSockets nem repetição automática de POST.
+Participante usa cliente HTTP, questionário/perfil, estatísticas, ingresso real, participação/filas e histórico/avaliação. O ingresso por QR Code no Expo Go em dispositivo físico, integrado ao backend A4, a confirmação da entrada pelo Staff e a continuidade da participação foram observados na [homologação C-04/D09](RETURN_AFTER_CLOSURE_C04_D09_IMPLEMENTACAO.md). Essa evidência não cobre todos os cenários do scanner/câmera, como permissões, falhas de leitura, outros dispositivos e demais casos negativos não executados. Staff seleciona eventos autorizados, painel/estações e Controle de Entrada com polling de 5 segundos operacional/60 segundos de fase, condicionado à identidade, foco e primeiro plano. [Staff B1](STAFF_B1_IMPLEMENTACAO.md) registra homologação delimitada; não são WebSockets nem repetição automática de POST.
 
 AdminArea exige autenticação e identidade confirmadas, papel Admin, sessão identificada, ausência de desafio e getter vivo. Senha/TOTP, `/me`, refresh e logout são reais. As 14 telas Heliom e seu provedor são demonstrativos; conta/sessão/geração/revisão de identidade isolam mocks e callbacks. Nenhuma configuração administrativa persiste por essas telas. [Navegação Admin](ADMIN_AUTHENTICATED_NAVIGATION_IMPLEMENTACAO.md) preserva base/resultados anteriores à integração; os 755 testes e a homologação Expo Go posteriores são informação do responsável registrada nos READMEs, não reexecução desta tarefa.
 
@@ -2328,9 +2330,10 @@ AdminArea exige autenticação e identidade confirmadas, papel Admin, sessão id
 
 ### 27.6 Divergências para decisão e critérios antes de piloto/produção
 
+**C-04/D09 — divergência funcional resolvida no fluxo principal:** [HomeFlowScreen](../app/screens/home/HomeFlowScreen.js) reconsulta o estado na retomada, correlaciona a finalização recente com a pendência e revalida elegibilidade e histórico antes de abrir `RealEvaluation`. “Avaliar mais tarde” mantém a pendência na aba Eventos e evita reapresentação no mesmo ciclo; nova retomada pode apresentá-la novamente. O fechamento Admin imediato foi homologado fisicamente. Encerramento automático pelo scheduler e cenários negativos de elegibilidade, rede e sessão ainda não tiveram homologação física nesta campanha. Ver [relatório C-04/D09](RETURN_AFTER_CLOSURE_C04_D09_IMPLEMENTACAO.md).
+
 | Referência normativa | Implementação observada / decisão necessária |
 |---|---|
-| C-04, D09 e §17.7: retomada sem Home forçada, avaliação elegível | [HomeFlowScreen](../app/screens/home/HomeFlowScreen.js) retorna Home com avisos/atalho Eventos quando current=null. O serviço busca return-state, mas a tela não abre automaticamente avaliação. Avaliar aderência de UX sem modificar a regra para justificar o código. |
 | Planejamento §9.2: dois Admins aptos antes de evento real | [AdminRoleManagementService](../backend/src/auth/admin-role-management.service.ts) bloqueia revogar o último apto, não a redução de dois para um. Credenciamento do segundo promovido não é resolvido pela CLI restrita ao primeiro. Preservar mínimo aprovado e decidir controles/fluxo antes de piloto. |
 | D10/C-07: exclusão autorizada e agregados seguros | 0008 recusa DELETE/TRUNCATE do histórico externo, com FK para participação. A futura política de exclusão deve compatibilizar essa proteção e dados identificáveis; não presumir anonimização só por nulificar ator. Não remover trigger nesta task. |
 | Planejamento §9.3: indicadores A/B de BI | Estatísticas do Perfil somam duração até finalização inclusive automática. Não equivalem ao tempo até última conclusão nem somente saída voluntária. Manter populações e rótulos separados; não apresentar como BI/presença física aprovado. |

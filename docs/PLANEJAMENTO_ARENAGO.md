@@ -1,8 +1,8 @@
 # ArenaGo — Planejamento geral do produto
 
-**Versão:** v0.7.11 — consolidação documental da develop (13/11/2026).
+**Versão:** v0.7.12 — atualização da retomada C-04/D09 na develop (13/11/2026).
 **Natureza:** atualização de implementação e rastreabilidade; nenhuma decisão de produto nova.
-**Referência técnica:** [Arquitetura Backend v0.6.18](ARQUITETURA_BACKEND_ARENAGO.md), especialmente §27.
+**Referência técnica:** [Arquitetura Backend v0.6.19](ARQUITETURA_BACKEND_ARENAGO.md), especialmente §27.
 
 ## Estado consolidado — novembro de 2026
 
@@ -15,8 +15,8 @@ Esta seção e o roadmap da §4 descrevem o estado vigente. Registros datados de
 | Integração Participante | Cadastro/login, questionário persistido, edição de nome, estatísticas reais, ingresso por código/QR, participação atual, filas, histórico, finalização e envio de avaliação usam serviços reais. Componentes antigos de demonstração continuam separados. Endpoint existente não significa que todo comando esteja oferecido na UI. |
 | Integração Staff | Eventos autorizados, seleção/painel, Controle de Entrada, chamadas externas por `callId`, experiências/estações, chamada/conclusão/ausência/remoção e polling real. Leituras operacionais a cada 5 segundos e eventos/fase a cada 60 segundos, condicionadas ao foco/primeiro plano/sessão. |
 | Integração Admin | Senha/TOTP reais, identidade confirmada e rota exclusiva `AdminArea`. As 14 telas Heliom continuam demonstrativas em memória: não persistem configuração, permissões, histórico ou BI na API. Logout real descarta os mocks. Gestão real de papéis existe no backend. |
-| Homologação | Campanha histórica da integração Perfil + Admin: 755 testes frontend aprovados, 0 falhos/ignorados, exit 0, conforme responsável. Login Admin/TOTP e acesso Heliom confirmados manualmente no Expo Go. Perfil e Staff têm homologações delimitadas nos relatórios; não há aprovação geral atual da regressão backend. |
-| Pendências | Persistência do painel Admin, onboarding/reset TOTP além do primeiro Admin, recuperação de senha, reconciliação de operações incertas, aderência de UX pós-fechamento, LGPD/BI/exportações, concorrência física/carga, infraestrutura, backups e observabilidade. Não há liberação de piloto/produção. |
+| Homologação | Campanha histórica da integração Perfil + Admin: 755 testes frontend aprovados, 0 falhos/ignorados, exit 0, conforme responsável. A campanha posterior C-04/D09 aprovou 99/99 testes focados e 773/773 frontend, sem falhas/skips; o fluxo principal após fechamento Admin foi homologado no Expo Go. Login Admin/TOTP, Perfil e Staff têm homologações delimitadas nos respectivos relatórios; não há aprovação geral atual da regressão backend. |
+| Pendências | Persistência do painel Admin, onboarding/reset TOTP além do primeiro Admin, recuperação de senha, reconciliação de operações incertas, homologação física do fechamento automático e dos cenários negativos de retomada, LGPD/BI/exportações, concorrência física/carga, infraestrutura, backups e observabilidade. Não há liberação de piloto/produção. |
 
 **Participante:** retirada externa, desistência interna C-15 e finalização são operações distintas no backend. Código/QR usa consulta e criação reais; implementação da câmera não comprova homologação física. O Perfil consulta estatísticas por titular: conta entradas efetivas na Arena e soma minutos de participações finalizadas. Esse indicador não implementa o BI da §9.3 nem comprova presença física.
 
@@ -24,9 +24,10 @@ Esta seção e o roadmap da §4 descrevem o estado vigente. Registros datados de
 
 **Validação e limites:** testes simulados não comprovam locks/relógio PostgreSQL ou exclusão entre aparelhos. Intenções Staff incertas não são reenviadas automaticamente; a migration 0007 mantém prova de origem/reconciliação desativadas. Relatórios descrevem campanhas próprias, sem somar contagens ou transformar pendências daquela data em defeitos atuais. Nesta consolidação houve somente inspeção estática, sem testes, serviços ou banco.
 
+**C-04/D09 implementada:** na retomada autenticada, a finalização recente é correlacionada com a pendência e revalidada antes da abertura automática de `RealEvaluation`; “Avaliar mais tarde” e acesso pela aba Eventos permanecem. O fluxo principal após fechamento Admin foi homologado fisicamente. Fechamento automático e cenários negativos ainda carecem de homologação física própria. Ver [relatório C-04/D09](RETURN_AFTER_CLOSURE_C04_D09_IMPLEMENTACAO.md).
+
 **Pontos para decisão do responsável (regras preservadas):**
 
-- C-04/D09: `HomeFlowScreen` retorna à Home com avisos de finalização/avaliação pendente e acesso à aba Eventos quando não há participação corrente; não abre automaticamente a avaliação. Avaliar aderência à retomada aprovada, sem alterar C-04 para justificar a UI.
 - §9.2 exige dois Admins aptos antes de evento real. A proteção de revogação atual impede perder o último Admin apto, mas não garante manter dois. Há lacuna para piloto e onboarding do segundo Admin; não flexibilizar o mínimo aprovado.
 - D10/C-07: a migration 0008 protege chamadas externas contra DELETE/TRUNCATE e mantém vínculo com participação. Não há procedimento LGPD completo compatibilizado; desenhar retenção/exclusão autorizada antes do piloto, sem remover proteções nesta tarefa.
 - As métricas do Perfil incluem finalizações automáticas e não substituem os indicadores A/B da §9.3. Qualquer equiparação exige decisão explícita; as regras de BI permanecem iguais.
@@ -83,7 +84,7 @@ O ArenaGo é um aplicativo Expo/React Native para participantes de eventos com e
 | Fase | Entrega | Estado |
 |---|---|---|
 | 0 — Qualidade e auditoria do Expo | Campanhas por fluxo | Integração Perfil/Admin com 755 aprovações frontend históricas; sem aprovação universal de todos os percursos físicos. |
-| 1 — Planejamento e arquitetura | Regras e rastreabilidade | Decisões preservadas; consolidação nesta v0.7.11 e Arquitetura v0.6.18. |
+| 1 — Planejamento e arquitetura | Regras e rastreabilidade | Decisões preservadas; atualização nesta v0.7.12 e Arquitetura v0.6.19. |
 | 2 — Validação relacional | Schema e concorrência PostgreSQL | Fundação e campanhas locais específicas; concorrência/carga e aplicação em cada destino exigem verificação própria. |
 | 3 — Fundação do backend | NestJS, schemas Drizzle e migrations | Implementada; cinco SQLs iniciais ampliados pelas migrations 0006–0008. |
 | 4 — Endpoints e segurança | Identidade, perfil, permissões, eventos, filas, avaliações | Contratos reais implementados. Recuperação de senha, onboarding/reset geral TOTP e reconciliação completa ainda parciais/pendentes. |
@@ -164,7 +165,7 @@ O planejamento estabelece as **entidades e invariantes de negócio**; a arquitet
 - Após o **encerramento oficial**, não há novas participações, reentradas, entradas nas filas internas **nem retorno à fila por ausência**; a janela adicional opcional só permite chamar a fila preexistente.
 - Encerramento imediato pelo Admin encerra logicamente **todas** as participações abertas e os atendimentos pendentes. O app não força Home: exibe avaliação elegível e pendente após consultar o backend, com opção “Avaliar mais tarde”.
 
-**Referência técnica atual:** a arquitetura unificada v0.6.18 é a referência principal. `MODELO_DADOS_ARENAGO_RASCUNHO_v0.4.md` e `ARENAGO_MATRIZ_COMPATIBILIZACAO_ARQUITETURA_v0.1.md` são referências históricas de trabalho, sem substituir o código, as migrations e o inventário vigente.
+**Referência técnica atual:** a arquitetura unificada v0.6.19 é a referência principal. `MODELO_DADOS_ARENAGO_RASCUNHO_v0.4.md` e `ARENAGO_MATRIZ_COMPATIBILIZACAO_ARQUITETURA_v0.1.md` são referências históricas de trabalho, sem substituir o código, as migrations e o inventário vigente.
 
 Esses dois documentos de trabalho são citados pelo histórico, mas não estão versionados neste clone; não são links ou pré-requisitos de execução. Sua consulta depende do acervo original do responsável.
 
@@ -370,12 +371,14 @@ A especificação da Task 6.1 (v1.1, 16/10/2026) fornece contratos e sugestões 
 ## 11. Organização da documentação e próximo trabalho autorizado
 
 - Este **Planejamento** é a fonte de verdade das **decisões de negócio** (D01–D11 e C-01–C-15), escopo e prioridades.
-- A **Arquitetura Backend v0.6.18** (`ARQUITETURA_BACKEND_ARENAGO.md`) preserva as especificações e identifica os contratos efetivos em §27. C-15 tem rota HTTP E08.2, distinta da finalização da participação.
+- A **Arquitetura Backend v0.6.19** (`ARQUITETURA_BACKEND_ARENAGO.md`) preserva as especificações e identifica os contratos efetivos em §27. C-15 tem rota HTTP E08.2, distinta da finalização da participação.
 - O `backend/README.md` é a referência operacional de execução local; o README do Expo descreve o aplicativo. Não repetir aqui comandos completos de instalação.
 - Os relatórios experimentais v0.6.11/v0.6.12 e a Task 6.1 são **fontes históricas**, não documentos concorrentes que substituam estas duas fontes canônicas.
 - **Trabalho histórico (30/10/2026):** fechamento documental após a auditoria consolidada E07.1–E07.3, com parecer APROVADO COM RESSALVAS para a integração e aprovação individual das três entregas. PostgreSQL concluído pelo responsável; verificações locais reexecutadas pelo Codex na auditoria. Base HEAD `5d7fae1217eb28a4be2610660245a6b8dacc4f7a` e alterações locais anteriores preservadas. Resultados e histórico em `E07_2_IMPLEMENTACAO.md`/`E07_3_IMPLEMENTACAO.md`; E07.1 preservada. Somente documentos e patch cumulativo atualizados, sem código, testes reexecutados, nova auditoria, staging, commit ou push.
 
 ## 12. Registro sintético das revisões
+
+**v0.7.12 (13/11/2026):** registrada a implementação da retomada C-04/D09 e a homologação física delimitada após fechamento Admin. A campanha posterior aprovou 99/99 testes focados e 773/773 frontend, sem falhas ou skips; ver [relatório específico](RETURN_AFTER_CLOSURE_C04_D09_IMPLEMENTACAO.md). Fechamento automático e cenários negativos ainda não foram homologados fisicamente nesta campanha. Decisões normativas preservadas; esta revisão foi somente documental.
 
 **v0.7.11 (13/11/2026):** consolidação documental da develop, roadmap, oito migrations e integrações. Regras D/C preservadas, evidências delimitadas e pontos para decisão registrados. Inspeção estática apenas, sem testes, serviços, banco ou operações de publicação. Os fechamentos abaixo pertencem às respectivas campanhas históricas.
 

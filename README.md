@@ -8,12 +8,14 @@ O aplicativo consome a API sob `/api/v1` por um cliente HTTP compartilhado. O ba
 
 | Área | Implementado no aplicativo | Natureza e limites |
 | --- | --- | --- |
-| Participante | Cadastro/login, questionário, edição de nome, entrada por código ou QR, participação atual, filas, histórico, saída e avaliação, estatísticas do Perfil | Serviços reais de API. Componentes e estados demonstrativos antigos permanecem no código, separados do percurso real. A câmera/QR exige validação física própria. |
+| Participante | Cadastro/login, questionário, edição de nome, entrada por código ou QR, participação atual, filas, histórico, saída e avaliação, estatísticas do Perfil | Serviços reais de API. Componentes e estados demonstrativos antigos permanecem no código, separados do percurso real. O ingresso por QR foi observado fisicamente na campanha C-04/D09; isso não cobre todos os cenários da câmera. |
 | Staff | Seleção de eventos autorizados, painel, Controle de Entrada, experiências, estações, filas, chamadas, conclusão, ausência e remoção | API real com concessão por evento. Há homologações funcionais delimitadas; recuperação de operações incertas e concorrência física ainda têm limites. |
 | Admin | Login com senha e TOTP, confirmação de identidade, rota exclusiva `AdminArea`, logout real e 14 telas Heliom | Autenticação/autorização reais; operações, histórico, BI e indicadores do painel Heliom são demonstrativos, em memória. Não persistem configuração administrativa na API. |
 | Backend | Identidade, sessões, TOTP, papéis, perfil, jogos, eventos/configuração, participações, filas, operações Staff, encerramento e avaliações | Contratos implementados não implicam integração de todas as telas nem aprovação integral para produção. |
 
 O responsável informou **755 testes frontend aprovados, 0 falhos e 0 ignorados** na campanha após integrar `PROFILE_REAL_STATISTICS` e `ADMIN_AUTHENTICATED_NAVIGATION`. Confirmou também login Admin com TOTP e abertura do painel Heliom pelo Expo Go. Esses resultados pertencem à campanha da integração; esta atualização documental não executou testes. Para o backend, os relatórios registram campanhas específicas, sem aprovação geral da regressão atual.
+
+Na campanha posterior [C-04/D09](docs/RETURN_AFTER_CLOSURE_C04_D09_IMPLEMENTACAO.md), a retomada com avaliação elegível após fechamento Admin passou em 99/99 testes focados e 773/773 testes frontend e foi homologada no Expo Go no fluxo principal. O relatório distingue essa evidência da homologação física ainda pendente para fechamento automático e cenários negativos. Esta atualização dos READMEs não executou novos testes.
 
 ## Tecnologias declaradas
 
