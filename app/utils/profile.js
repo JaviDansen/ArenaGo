@@ -16,6 +16,13 @@ function displayAge(birthDate, referenceDate) {
   return `${age} ${age === 1 ? 'ano' : 'anos'}`;
 }
 
+function displayMinutes(value) {
+  if (!Number.isSafeInteger(value) || value < 0) return '—';
+  const hours = Math.floor(value / 60);
+  const minutes = value % 60;
+  return hours ? `${hours}h${minutes ? ` ${minutes}min` : ''}` : `${minutes}min`;
+}
+
 // Recebe dados da conta e o formato do GET de questionário, sem buscar dados.
 export function getProfileViewData({
   user, statistics, questionnaire, referenceDate = getTodayCivilDate(),
@@ -32,9 +39,9 @@ export function getProfileViewData({
   return {
     name: displayText(user?.name, 'Participante'),
     email: displayText(user?.email, 'E-mail não disponível'),
-    participationCount: Number.isFinite(statistics?.participationCount)
+    participationCount: Number.isSafeInteger(statistics?.participationCount) && statistics.participationCount >= 0
       ? String(statistics.participationCount) : '—',
-    totalTime: Number.isFinite(statistics?.totalHours) ? `${statistics.totalHours}h` : '—',
+    totalTime: displayMinutes(statistics?.totalMinutes),
     questionnaireRows: [
       { label: 'Idade', value: displayAge(aboutYou?.birthDate, referenceDate) },
       { label: 'Gênero', value: displayText(

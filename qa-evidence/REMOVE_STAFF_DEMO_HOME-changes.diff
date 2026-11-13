@@ -1,0 +1,197 @@
+diff --git a/app/App.js b/app/App.js
+index 2bbea05..22b2cba 100644
+--- a/app/App.js
++++ b/app/App.js
+@@ -88,14 +88,6 @@ export function AppNavigation() {
+       },
+     },
+ 
+-    // Área Staff somente em modo de demonstração.
+-    // Não concede permissão Staff real.
+-    {
+-      name: 'StaffDemo',
+-      getComponent: () =>
+-        require('./screens/staff/StaffDemoNavigator').default,
+-    },
+-
+     // Avaliação real de uma participação finalizada.
+     {
+       name: 'RealEvaluation',
+diff --git a/app/screens/home/HomeScreen.js b/app/screens/home/HomeScreen.js
+index 31dc279..cef11ca 100644
+--- a/app/screens/home/HomeScreen.js
++++ b/app/screens/home/HomeScreen.js
+@@ -133,12 +133,6 @@ export default function HomeScreen({ navigation, returnState, mode = 'ready', me
+             </Card>
+           </View>
+ 
+-          <Button
+-            title="Área do Staff (demonstração)"
+-            variant="ghost"
+-            onPress={() => navigation.navigate('StaffDemo')}
+-            style={styles.staffButton}
+-          />
+         </ScrollView>
+       )}
+     </AuthBackground>
+@@ -272,7 +266,4 @@ const styles = StyleSheet.create({
+     color: colors.brand.primaryLight,
+     fontWeight: '700',
+   },
+-  staffButton: {
+-    alignSelf: 'center',
+-  },
+ });
+diff --git a/app/tests/staffNavigation.test.cjs b/app/tests/staffNavigation.test.cjs
+index 9a31b3c..3f6f587 100644
+--- a/app/tests/staffNavigation.test.cjs
++++ b/app/tests/staffNavigation.test.cjs
+@@ -6,7 +6,6 @@ let authState;
+ function StackNavigator() {}
+ function StackScreen() {}
+ function ImportedScreen() {}
+-function StaffDemoNavigator() {}
+ 
+ const appExports = loadModule('App.js', (name) => {
+   if (name === 'react') return require('react');
+@@ -25,7 +24,6 @@ const appExports = loadModule('App.js', (name) => {
+       resolveInitialRouteForAuthState: (state) => (state?.isAuthenticated ? 'MainTabs' : 'Welcome'),
+     };
+   }
+-  if (name === './screens/staff/StaffDemoNavigator') return { __esModule: true, default: StaffDemoNavigator };
+   return { __esModule: true, default: ImportedScreen };
+ }).exports;
+ 
+@@ -42,16 +40,13 @@ function routes(state) {
+   return found;
+ }
+ 
+-test('rota StaffDemo existe só no app autenticado com questionário concluído', () => {
++test('rota StaffDemo não é registrada para participantes, questionário pendente ou sessão pública', () => {
+   const signedIn = routes({
+     isAuthenticated: true,
+     user: { id: 'u-1', hasCompletedQuestionnaire: true },
+   });
+-  const staff = signedIn.find((route) => route.name === 'StaffDemo');
+-  assert.ok(staff, 'StaffDemo disponível');
+-  assert.equal(staff.component, undefined, 'carregamento tardio, sem import no topo do App.js');
+-  assert.equal(staff.getComponent(), StaffDemoNavigator);
+-  for (const name of ['MainTabs', 'EventEntry', 'EventConfirmation', 'ParticipationDetails', 'Evaluation']) {
++  assert.ok(!signedIn.some((route) => route.name === 'StaffDemo'));
++  for (const name of ['MainTabs', 'EventEntry', 'EventConfirmation', 'ParticipationDetails', 'Evaluation', 'RealEvaluation']) {
+     assert.ok(signedIn.some((route) => route.name === name), `${name} preservada`);
+   }
+   assert.equal(signedIn[0].name, 'MainTabs', 'abas continuam como tela inicial');
+@@ -62,15 +57,13 @@ test('rota StaffDemo existe só no app autenticado com questionário concluído'
+   assert.ok(!signedOut.some((route) => route.name === 'StaffDemo'));
+ });
+ 
+-test('Início abre a Área do Staff (demonstração) sem afetar a entrada em evento', () => {
++test('Início não oferece a demonstração Staff e preserva a entrada em evento', () => {
+   const h = createHarness('screens/home/HomeScreen.js', {
+     authContext: { user: { id: 'u-1', hasCompletedQuestionnaire: true } },
+   });
+-  const label = h.nodes.find((node) => node.type === 'Pressable' && /Staff/.test(textOf(node)));
+-  assert.equal(textOf(label), 'Área do Staff (demonstração)');
+-  h.press('Área do Staff (demonstração)');
++  assert.ok(!h.nodes.some((node) => node.type === 'Pressable' && /Staff/.test(textOf(node))));
+   h.press('Entrar em um evento');
+-  assert.deepEqual(h.navigationCalls.map((call) => call.name), ['StaffDemo', 'EventEntry']);
++  assert.deepEqual(h.navigationCalls.map((call) => call.name), ['EventEntry']);
+ });
+ 
+ test('pilha da Área Staff registra as quatro telas com títulos em português', () => {
+diff --git a/app/tests/staffRealNavigation.test.cjs b/app/tests/staffRealNavigation.test.cjs
+index a3234e8..0b9d6fe 100644
+--- a/app/tests/staffRealNavigation.test.cjs
++++ b/app/tests/staffRealNavigation.test.cjs
+@@ -1,5 +1,5 @@
+-// Área Staff com React Navigation REAL (montagem de estado, ações, getComponent,
+-// pilha aninhada e desmontagem). O app não tem renderizador de testes e não
++// Isolamento da navegação do participante com React Navigation REAL.
++// O app não tem renderizador de testes e não
+ // ganha dependência nova: reaproveita, só para leitura, as dependências travadas
+ // do qa/regression (mesmas versões do lockfile do app). Sem elas, o teste é pulado.
+ const assert = require('node:assert/strict');
+@@ -127,48 +127,32 @@ const accountA = { isAuthenticated: true, user: { id: 'a', name: 'Conta A', hasC
+ const accountB = { isAuthenticated: true, user: { id: 'b', name: 'Conta B', hasCompletedQuestionnaire: true },
+   getSessionEpoch: () => 2 };
+ 
+-test('React Navigation real: StaffDemo via getComponent e "Voltar ao aplicativo" desmonta a demonstração',
++test('React Navigation real: participante não consegue navegar para StaffDemo',
+   { skip }, async () => {
+     versionsMatchApp();
+     const app = createRealApp(accountA);
+     assert.deepEqual(app.rootRoutes(), ['MainTabs']);
+-
++    assert.ok(!app.navRef.getRootState().routeNames.includes('StaffDemo'));
+     app.navigate('StaffDemo');
+-    assert.ok(app.loaded('screens/staff/StaffDemoNavigator.js'));
+-    assert.ok(app.hasText('Conectado como: Conta A'));
+-    await app.enter('STAFFDEMO');
+-    assert.ok(app.hasText('Painel Operacional'));
+-    await app.press('Controle de Entrada, fila ativa, 4 aguardando');
+-    await app.press('CONFIRMAR ENTRADA');
+-    await app.press('CONFIRMAR');
+-    await app.press('↩ Painel');
+-
+-    await app.press('Voltar ao aplicativo');
+-    assert.deepEqual(app.rootRoutes(), ['MainTabs'], 'rota StaffDemo removida da pilha do app');
++    assert.deepEqual(app.rootRoutes(), ['MainTabs']);
++    assert.equal(app.unhandled.at(-1)?.payload?.name, 'StaffDemo');
++    assert.ok(!app.loaded('screens/staff/StaffDemoNavigator.js'));
+     assert.ok(app.hasText('tela MainTabs'));
+-    assert.deepEqual(app.unhandled, []);
+-
+-    // Reabrir começa do zero: o estado anterior foi descartado na desmontagem.
+-    app.navigate('StaffDemo');
+-    assert.ok(app.hasText('Código do evento'));
+-    await app.enter('STAFFDEMO');
+-    await app.press('Controle de Entrada, fila ativa, 4 aguardando');
+-    assert.ok(app.hasText('Rafael T.'), 'fixture original, sem a entrada confirmada antes');
++    app.navigate('EventEntry');
++    assert.deepEqual(app.rootRoutes(), ['MainTabs', 'EventEntry']);
+     app.dispose();
+   });
+ 
+-test('React Navigation real: troca direta A → B descarta o estado de A sem logout', { skip }, async () => {
++test('React Navigation real: troca direta A → B remonta a pilha e mantém StaffDemo inacessível', { skip }, async () => {
+   const app = createRealApp(accountA);
+-  app.navigate('StaffDemo');
+-  await app.enter('STAFFDEMO');
+-  assert.ok(app.hasText('Painel Operacional'));
++  app.navigate('EventEntry');
++  assert.deepEqual(app.rootRoutes(), ['MainTabs', 'EventEntry']);
+ 
+   app.setAuth(accountB); // sem logout
+   assert.deepEqual(app.rootRoutes(), ['MainTabs']);
+-  assert.ok(!app.hasText('Painel Operacional'), 'painel de A não aparece para B');
+-  assert.ok(!app.hasText('BEAST Arena'));
+   app.navigate('StaffDemo');
+-  assert.ok(app.hasText('Conectado como: Conta B'));
+-  assert.ok(app.hasText('Código do evento'));
++  assert.deepEqual(app.rootRoutes(), ['MainTabs']);
++  assert.equal(app.unhandled.at(-1)?.payload?.name, 'StaffDemo');
++  assert.ok(!app.loaded('screens/staff/StaffDemoNavigator.js'));
+   app.dispose();
+ });
+diff --git a/docs/REMOVE_STAFF_DEMO_HOME_IMPLEMENTACAO.md b/docs/REMOVE_STAFF_DEMO_HOME_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..7a3c85f
+--- /dev/null
++++ b/docs/REMOVE_STAFF_DEMO_HOME_IMPLEMENTACAO.md
+@@ -0,0 +1,14 @@
++# Remoção do acesso demonstrativo Staff da Home
++
++A Home do participante não apresenta mais o botão “Área do Staff (demonstração)”. O registro `StaffDemo` foi removido da pilha do participante, impedindo que uma ação de navegação para esse nome abra a demonstração. A entrada em eventos e as demais rotas do participante foram mantidas. Os arquivos da demonstração Staff permanecem disponíveis para a futura integração, que continuará dependendo de autorização do backend por evento.
++
++## Evidências e validações
++
++- Inspeção estática: o único acionador de `StaffDemo` na aplicação estava na Home e o único registro ficava na pilha do participante. As telas Staff demonstrativas permanecem no repositório.
++- Testes preparados: ausência do botão e do registro em sessões públicas e de participante; rotas de participação preservadas; tentativa de navegar para `StaffDemo` rejeitada pelo React Navigation e pilha reiniciada ao trocar de conta. A cobertura existente das telas demonstrativas é mantida em `staffScreens.test.cjs`.
++- Testes específicos executados por Luna Medium com `NODE_ENV=test`: `node --test tests/staffNavigation.test.cjs tests/staffRealNavigation.test.cjs tests/authNavigation.test.cjs tests/roleRoutingIntegration.test.cjs`; 24 aprovados, 0 falhos e 0 ignorados. A tentativa de navegar manualmente para `StaffDemo` foi rejeitada, e a tela não carregou; entrada em evento e troca de conta também foram verificadas.
++- Suíte completa executada por Luna Medium com `NODE_ENV=test` via `npm.cmd --prefix app test`: 404 aprovados, 0 falhos e 0 ignorados, incluindo autenticação, TOTP, refresh, questionário, participação, fila, eventos e avaliações.
++- `git diff --check`: executado sem apontamentos.
++- Lint, typecheck e build: não há scripts nem configurações correspondentes no pacote `app`; não executados.
++- Validação manual informada pelo responsável, anterior a esta alteração: login encaminhou Admin, Staff e Participante às respectivas áreas no Expo Go. A remoção do botão ainda requer validação.
++- Avisos: o React Navigation emite alertas do harness de teste sobre nomes `default` nos componentes mockados, e o `react-test-renderer` informa depreciação. Não causaram falhas.

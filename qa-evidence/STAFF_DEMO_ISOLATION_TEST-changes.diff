@@ -1,0 +1,74 @@
+diff --git a/app/tests/staffDemoState.test.cjs b/app/tests/staffDemoState.test.cjs
+index 669a82e..9d745bc 100644
+--- a/app/tests/staffDemoState.test.cjs
++++ b/app/tests/staffDemoState.test.cjs
+@@ -210,22 +210,37 @@ test('resumo da experiência conta fila, chamados e estações disponíveis', ()
+   assert.deepEqual(plain(summary), { queueSize: 1, pendingCalls: 1, availableStations: 1, totalStations: 2 });
+ });
+ 
+-test('código Staff não usa ParticipationContext nem clientes HTTP', () => {
+-  const appDirectory = path.resolve(__dirname, '..');
++const appDirectory = path.resolve(__dirname, '..');
++const demoStaffScreens = [
++  'StaffAccessScreen.js', 'StaffDemoContext.js', 'staffDemoLatency.js',
++  'StaffDemoNavigator.js', 'staffDemoState.js', 'StaffEntryControlScreen.js',
++  'StaffPanelScreen.js', 'StaffStationScreen.js',
++  'components/StaffButton.js', 'components/StaffCard.js', 'components/StaffConfirmDialog.js',
++  'components/StaffDemoTools.js', 'components/StaffHeader.js', 'components/StaffMissingSession.js',
++  'components/StaffNotice.js', 'components/StaffScreen.js', 'components/staffTheme.js',
++];
++const realStaffScreens = ['StaffEventsNavigator.js'];
++
++test('arquivos Staff são classificados como demonstração ou fluxo real', () => {
++  const staffDirectory = path.join(appDirectory, 'screens', 'staff');
+   const files = [];
+   (function walk(directory) {
+     for (const entry of readdirSync(directory)) {
+       const full = path.join(directory, entry);
+       if (statSync(full).isDirectory()) walk(full);
+-      else if (full.endsWith('.js')) files.push(full);
++      else if (full.endsWith('.js')) files.push(path.relative(staffDirectory, full).split(path.sep).join('/'));
+     }
+-  })(path.join(appDirectory, 'screens', 'staff'));
++  })(staffDirectory);
++  assert.deepEqual(files.sort(), [...demoStaffScreens, ...realStaffScreens].sort());
++});
++
++test('demonstração Staff não usa ParticipationContext nem clientes HTTP ou fluxo real', () => {
++  const files = demoStaffScreens.map((file) => path.join(appDirectory, 'screens', 'staff', file));
+   files.push(path.join(appDirectory, 'data', 'staffDemoData.js'));
+-  assert.ok(files.length >= 10);
+   for (const file of files) {
+     const source = readFileSync(file, 'utf8');
+-    for (const forbidden of [/from '[^']*ParticipationContext'/, /from '[^']*services\//,
+-      /httpClient/, /\bfetch\(/, /tokenStorage/]) {
++    for (const forbidden of [/['"][^'"]*ParticipationContext['"]/, /['"][^'"]*services\//,
++      /httpClient/, /\bfetch\s*\(/, /tokenStorage/, /['"][^'"]*StaffEventsNavigator['"]/]) {
+       assert.doesNotMatch(source, forbidden, `${path.basename(file)} contém ${forbidden}`);
+     }
+   }
+diff --git a/docs/STAFF_DEMO_ISOLATION_TEST_IMPLEMENTACAO.md b/docs/STAFF_DEMO_ISOLATION_TEST_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..7c6a853
+--- /dev/null
++++ b/docs/STAFF_DEMO_ISOLATION_TEST_IMPLEMENTACAO.md
+@@ -0,0 +1,19 @@
++# Isolamento da demonstração Staff
++
++## Alteração
++
++- O teste classifica explicitamente os arquivos da demonstração e o navegador de eventos real. Uma verificação da árvore exige a classificação de novos arquivos JavaScript da pasta Staff.
++- Os módulos demonstrativos e sua fixture continuam sujeitos à proibição de `ParticipationContext`, serviços, cliente HTTP, `fetch` e armazenamento de tokens. O teste também bloqueia referências ao navegador Staff real.
++- O navegador real pode importar o serviço de eventos; os testes existentes de descoberta e integração cobrem o uso do cliente autenticado. Componentes demonstrativos, navegação e código de produção não foram alterados.
++
++## Validação
++
++- Inspeção estática dos imports e da árvore Staff realizada durante a implementação.
++- Testes, lint, typecheck e build não foram executados; a validação está reservada a Luna Medium.
++- A validação anterior relatou 33 testes focados aprovados e falha da suíte completa na regra anterior; esta alteração ainda não foi validada por execução.
++- Uma validação posterior por Luna identificou erro de sintaxe no fechamento da lista de padrões; o colchete ausente foi acrescentado. A correção ainda não foi executada em testes nem verificada por `node --check` nesta etapa, pois a política reserva verificações ao modelo de validação.
++- Sugestão: com `NODE_ENV=test`, executar em `app` `node --test tests/staffDemoState.test.cjs tests/staffEventDiscovery.test.cjs tests/roleRoutingIntegration.test.cjs`, seguido de `npm.cmd --prefix app test` na raiz e `git diff --check`, após inspecionar os comandos e o ambiente.
++
++## Limite
++
++A classificação exige manutenção explícita quando arquivos Staff forem criados ou removidos. A verificação de isolamento é estática e deve permanecer acompanhada dos testes funcionais da demonstração e da consulta autenticada.

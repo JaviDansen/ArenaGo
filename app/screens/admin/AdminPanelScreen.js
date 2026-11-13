@@ -1,0 +1,123 @@
+import { StyleSheet, Text, View } from 'react-native';
+
+import { useAuth } from '../../context/AuthContext';
+import AdminCard from './components/AdminCard';
+import AdminDemoTools from './components/AdminDemoTools';
+import AdminMissing from './components/AdminMissing';
+import AdminScreen from './components/AdminScreen';
+import { adminColors } from './components/adminTheme';
+import { useAdminDemo } from './AdminDemoContext';
+import { getPanelSummary } from './adminDemoState';
+
+// Painel Administrativo (ADM01–ADM03): atalhos e contadores da demonstração.
+export default function AdminPanelScreen({ navigation }) {
+  const auth = useAuth();
+  const { session, discard } = useAdminDemo();
+
+  if (!session) {
+    return (
+      <AdminMissing
+        title="Sessão indisponível"
+        message="Entre com uma conta Admin e conclua a verificação de segundo fator."
+        actionLabel="SAIR DA CONTA"
+        onAction={() => { void auth?.logout(); }}
+      />
+    );
+  }
+
+  const summary = getPanelSummary(session);
+  const accountName = auth?.user?.name || auth?.user?.email || 'Conta conectada';
+
+  // O roteador de autenticação remove a área; não há retorno a MainTabs/Staff.
+  function handleLogout() {
+    if (!discard()) return;
+    return auth.logout();
+  }
+
+  const counters = [
+    ['Eventos', summary.total],
+    ['Agendados', summary.scheduled],
+    ['Abertos', summary.open],
+    ['Encerrando', summary.closing],
+    ['Encerrados', summary.closed],
+    ['Não prontos', summary.notReady],
+  ];
+
+  return (
+    <AdminScreen
+      title="Painel"
+      highlight="Administrativo"
+      subtitle="Gerencie eventos e acompanhe a demonstração da plataforma."
+      backLabel="Sair da conta"
+      onBack={handleLogout}
+    >
+      <AdminCard>
+        <Text style={styles.account}>Conectado como: {accountName}</Text>
+        <Text style={styles.warning}>
+          Sessão Admin autenticada com segundo fator. As operações e os dados deste painel
+          continuam demonstrativos, apenas nesta sessão; nada aqui é salvo no servidor.
+        </Text>
+      </AdminCard>
+
+      <AdminCard
+        accent
+        onPress={() => navigation.navigate('AdminEvents')}
+        accessibilityLabel={`Gerenciar Eventos, ${summary.total} eventos na demonstração`}
+      >
+        <Text style={styles.cardTitle}>📅 Gerenciar Eventos  →</Text>
+        <Text style={styles.cardText}>Crie, consulte e gerencie eventos da demonstração.</Text>
+      </AdminCard>
+
+      <AdminCard
+        accent
+        onPress={() => navigation.navigate('AdminHistory')}
+        accessibilityLabel={`Histórico, ${summary.closed} eventos encerrados na demonstração`}
+      >
+        <Text style={styles.cardTitle}>📊 Histórico  →</Text>
+        <Text style={styles.cardText}>Eventos encerrados e seus resultados agregados (simulados).</Text>
+      </AdminCard>
+
+      <AdminCard
+        accent
+        onPress={() => navigation.navigate('AdminOverview')}
+        accessibilityLabel="Visão Geral, indicadores consolidados da demonstração"
+      >
+        <Text style={styles.cardTitle}>🧭 Visão Geral  →</Text>
+        <Text style={styles.cardText}>Indicadores gerais da plataforma (fictícios).</Text>
+      </AdminCard>
+
+      <Text style={styles.sectionTitle} accessibilityRole="header">Resumo da demonstração</Text>
+      <Text style={styles.cardText}>Contadores fictícios, calculados a partir dos eventos simulados e do relógio de teste.</Text>
+      <View style={styles.grid}>
+        {counters.map(([label, value]) => (
+          <View key={label} style={styles.counter} accessible accessibilityLabel={`${label}: ${value}`}>
+            <Text style={styles.counterValue}>{value}</Text>
+            <Text style={styles.counterLabel}>{label}</Text>
+          </View>
+        ))}
+      </View>
+
+      <AdminDemoTools />
+    </AdminScreen>
+  );
+}
+
+const styles = StyleSheet.create({
+  account: { color: adminColors.text, fontSize: 14, fontWeight: '600' },
+  warning: { color: adminColors.warning, fontSize: 13, lineHeight: 19, marginTop: 6 },
+  cardTitle: { color: adminColors.text, fontSize: 17, fontWeight: 'bold' },
+  cardText: { color: adminColors.muted, fontSize: 13, lineHeight: 19, marginTop: 4 },
+  sectionTitle: { color: adminColors.text, fontSize: 18, fontWeight: 'bold', marginTop: 28 },
+  grid: { flexDirection: 'row', flexWrap: 'wrap', marginHorizontal: -6, marginTop: 6 },
+  counter: {
+    backgroundColor: adminColors.surface,
+    borderColor: adminColors.border,
+    borderRadius: 12,
+    borderWidth: 1,
+    margin: 6,
+    padding: 12,
+    width: '45%',
+  },
+  counterValue: { color: adminColors.text, fontSize: 22, fontWeight: 'bold' },
+  counterLabel: { color: adminColors.muted, fontSize: 12, marginTop: 2 },
+});

@@ -4,6 +4,7 @@ const { StackRouter, CommonActions } = require('@react-navigation/routers');
 const {
   createHarness, loadModule, textOf, createParticipantThemeStub,
 } = require('./helpers/questionnaireHarness.cjs');
+const { verifiedAdminAuth } = require('./helpers/adminAuthFixture.cjs');
 
 let authState;
 function NavigationContainer() {}
@@ -12,6 +13,7 @@ function StackScreen() {}
 function ImportedScreen() {}
 
 const gateExports = loadModule('screens/auth/AuthSessionGate.js', (name) => {
+  if (name === '../../context/adminAccess') return loadModule('context/adminAccess.js', require).exports;
   if (name === 'react') return { ...require('react'), useState: (value) => [value, () => {}] };
   if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
   if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView' };
@@ -76,7 +78,7 @@ function renderStack(state) {
     }
   }
   collect(stack.props.children);
-  return { stack, names };
+  return { stack, names, tree };
 }
 
 function routerOptions(routeNames) {
@@ -101,6 +103,115 @@ function navigate(router, state, routeNames, name) {
   });
 }
 
+test('papéis do backend definem pilhas isoladas e precedência admin > staff > participante', () => {
+  for (const [roles, expected] of [
+    [['admin', 'staff', 'participante'], 'AdminArea'],
+    [['staff', 'participante'], 'StaffPending'],
+    [['participante'], 'MainTabs'],
+  ]) {
+    const result = renderStack(verifiedAdminAuth({ user: {
+      id: 'user', roles, hasCompletedQuestionnaire: true,
+    } }));
+    assert.equal(result.names[0], expected);
+    const router = StackRouter(routerOptions(result.names));
+    const state = router.getInitialState(routerOptions(result.names));
+    for (const forbidden of ['AdminArea', 'AdminPending', 'AdminDemo', 'AdminPanel', 'StaffPending', 'MainTabs'].filter((name) => name !== expected)) {
+      assert.equal(navigate(router, state, result.names, forbidden), null);
+    }
+  }
+});
+
+test('papéis ausentes, vazios ou inválidos não abrem nenhuma área de papel', () => {
+  for (const roles of [undefined, null, [], ['desconhecido'], ['admin', 'desconhecido']]) {
+    const result = renderStack({ isAuthenticated: true,
+      user: { id: 'u', roles, hasCompletedQuestionnaire: true } });
+    assert.deepEqual(result.names, ['IdentityRecovery']);
+    const router = StackRouter(routerOptions(result.names));
+    const state = router.getInitialState(routerOptions(result.names));
+    for (const name of ['MainTabs', 'AdminArea', 'AdminPending', 'AdminDemo', 'StaffPending']) {
+      assert.equal(navigate(router, state, result.names, name), null);
+    }
+  }
+});
+
+test('questionário só determina a entrada de participante, inclusive na restauração', () => {
+  for (const [roles, expected] of [
+    [['admin'], 'AdminArea'], [['staff'], 'StaffPending'], [['participante'], 'ProfileQuestionnaire'],
+  ]) {
+    const restored = renderStack(verifiedAdminAuth({
+      postAuthRoute: 'ProfileQuestionnaire', user: { id: 'restored', roles, hasCompletedQuestionnaire: false } }));
+    assert.equal(restored.names[0], expected);
+    assert.ok(!restored.names.includes('MainTabs'));
+  }
+});
+
+test('logout, troca de conta e alteração de papel descartam a árvore anterior', () => {
+  const session = (id, roles, epoch) => verifiedAdminAuth({
+    user: { id, roles, hasCompletedQuestionnaire: true }, getSessionEpoch: () => epoch });
+  const staff = renderStack(session('a', ['staff'], 1));
+  const other = renderStack(session('b', ['staff'], 2));
+  const changedRole = renderStack(session('a', ['admin'], 1));
+  const logout = renderStack({ isAuthenticated: false, sessionStatus: 'revoked' });
+  assert.notEqual(staff.tree.key, other.tree.key);
+  assert.notEqual(staff.tree.key, changedRole.tree.key);
+  assert.notEqual(staff.tree.key, logout.tree.key);
+  assert.deepEqual(logout.names, ['Login', 'Welcome', 'Register', 'Cadastro', 'ForgotPassword', 'EsqueciSenha']);
+  assert.equal(renderStack(session('a', ['staff'], 3)).names[0], 'StaffPending');
+});
+
+test('revalidação de participante preserva a árvore e AdminDemo permanece removida', () => {
+  const session = (identityStatus, roles = ['participante'], epoch = 7) => verifiedAdminAuth({
+    isAuthenticated: true,
+    identityStatus,
+    user: { id: 'mesma-conta', roles, hasCompletedQuestionnaire: true },
+    getSessionEpoch: () => epoch,
+  });
+  const verified = renderStack(session('verified'));
+  const checking = renderStack(session('checking'));
+  assert.equal(checking.tree.key, verified.tree.key,
+    'a checagem da mesma geração não remonta navegação nem participação');
+  assert.ok(!verified.names.includes('AdminDemo'), 'demonstração removida do participante');
+  assert.ok(!verified.names.includes('AdminArea'));
+  assert.ok(!verified.names.includes('StaffDemo'), 'demonstração Staff permanece removida');
+
+  const renewed = renderStack(session('verified', ['participante'], 8));
+  assert.notEqual(renewed.tree.key, verified.tree.key, 'nova geração descarta a árvore anterior');
+  for (const roles of [['staff'], ['admin'], ['admin', 'staff']]) {
+    const privileged = renderStack(session('verified', roles));
+    assert.deepEqual(privileged.names,
+      [roles.includes('admin') ? 'AdminArea' : 'StaffPending']);
+    assert.ok(!privileged.names.includes('AdminDemo'), 'papéis reais não recebem a demonstração');
+  }
+});
+
+test('AdminArea falha fechada para sessão incompleta, identidade não confirmada ou desafio pendente', () => {
+  const invalid = [
+    { isAuthenticated: false, sessionStatus: 'admin_2fa_required' },
+    { isAuthenticated: false, sessionStatus: 'admin_2fa_verifying' },
+    { isInitializing: true }, { identityStatus: 'checking' },
+    { identityStatus: 'unverified' }, { identityStatus: 'error' },
+    { identityStatus: undefined }, { sessionStatus: 'revoked' },
+    { sessionStatus: 'expired' }, { sessionStatus: 'identity_error' },
+    { sessionStatus: undefined }, { adminChallenge: { isTotpConfigured: true } },
+    { isIdentityVerified: () => false }, { isIdentityVerified: undefined },
+    { user: { id: '' } }, { user: { sessionId: null } },
+    { user: { roles: ['participante'] } }, { user: { roles: ['staff'] } },
+    { user: { roles: ['admin', 'invalid'] } },
+  ];
+  for (const overrides of invalid) {
+    const auth = verifiedAdminAuth(overrides);
+    // Ausência explícita do mecanismo confiável também deve bloquear.
+    if ('isIdentityVerified' in overrides) auth.isIdentityVerified = overrides.isIdentityVerified;
+    const result = renderStack(auth);
+    assert.ok(!result.names.includes('AdminArea'));
+    const router = StackRouter(routerOptions(result.names));
+    const state = router.getInitialState(routerOptions(result.names));
+    for (const name of ['AdminArea', 'AdminDemo', 'AdminPending', 'AdminPanel']) {
+      assert.equal(navigate(router, state, result.names, name), null);
+    }
+  }
+});
+
 test('React Navigation replaces Login with MainTabs immediately when login authenticates', async () => {
   const publicTree = renderStack({ isAuthenticated: false, sessionStatus: 'unauthenticated' });
   assert.equal(publicTree.names[0], 'Welcome');
@@ -121,7 +232,7 @@ test('React Navigation replaces Login with MainTabs immediately when login authe
           isAuthenticated: true,
           sessionStatus: 'authenticated',
           postAuthRoute: 'MainTabs',
-          user: { hasCompletedQuestionnaire: true },
+          user: { roles: ['participante'], hasCompletedQuestionnaire: true },
         };
         return { status: 'authenticated', user: authState.user };
       },
@@ -174,6 +285,7 @@ test('React Navigation switches auth route sets for signup, logout, relogin and 
   const signupTree = renderStack({
     isAuthenticated: true,
     sessionStatus: 'authenticated',
+    user: { roles: ['participante'], hasCompletedQuestionnaire: false },
     postAuthRoute: 'ProfileQuestionnaire',
   });
   assert.equal(signupTree.names[0], 'ProfileQuestionnaire');
@@ -189,6 +301,7 @@ test('React Navigation switches auth route sets for signup, logout, relogin and 
   const reloginTree = renderStack({
     isAuthenticated: true,
     sessionStatus: 'authenticated',
+    user: { roles: ['participante'], hasCompletedQuestionnaire: true },
     postAuthRoute: 'MainTabs',
   });
   assert.equal(reloginTree.names[0], 'MainTabs');
@@ -199,7 +312,7 @@ test('React Navigation switches auth route sets for signup, logout, relogin and 
     isAuthenticated: true,
     sessionStatus: 'authenticated',
     postAuthRoute: 'MainTabs',
-    user: { hasCompletedQuestionnaire: true },
+    user: { roles: ['participante'], hasCompletedQuestionnaire: true },
   });
   const restoredRouter = StackRouter(routerOptions(restoredTree.names));
   state = restoredRouter.getInitialState(routerOptions(restoredTree.names));
@@ -216,6 +329,7 @@ test('React Navigation switches auth route sets for signup, logout, relogin and 
   const signupAfterRestore = renderStack({
     isAuthenticated: true,
     sessionStatus: 'authenticated',
+    user: { roles: ['participante'], hasCompletedQuestionnaire: false },
     postAuthRoute: 'ProfileQuestionnaire',
   });
   state = routeChange(restoredRouter, state, signupAfterRestore.names);
@@ -283,7 +397,7 @@ test('K05 Auditoria: Login com questionario pendente direciona para ProfileQuest
           isAuthenticated: true,
           sessionStatus: 'authenticated',
           postAuthRoute: 'ProfileQuestionnaire',
-          user: { id: 'u-1', name: 'Pendente', hasCompletedQuestionnaire: false },
+          user: { id: 'u-1', name: 'Pendente', roles: ['participante'], hasCompletedQuestionnaire: false },
         };
         return { status: 'authenticated', user: authState.user, nextRoute: 'ProfileQuestionnaire' };
       },
@@ -314,7 +428,7 @@ test('K05 Auditoria: Restauracao de sessao com questionario pendente direciona p
   const pendingRestoreTree = renderStack({
     isAuthenticated: true,
     sessionStatus: 'authenticated',
-    user: { id: 'u-2', name: 'Restaurado Pendente', hasCompletedQuestionnaire: false },
+    user: { id: 'u-2', name: 'Restaurado Pendente', roles: ['participante'], hasCompletedQuestionnaire: false },
   });
   assert.equal(pendingRestoreTree.names[0], 'ProfileQuestionnaire');
   const router = StackRouter(routerOptions(pendingRestoreTree.names));
@@ -326,7 +440,7 @@ test('Adversarial A.1: Usuario com questionario pendente tem acesso estritamente
   const pendingTree = renderStack({
     isAuthenticated: true,
     sessionStatus: 'authenticated',
-    user: { id: 'u-pending', name: 'Participante Pendente', hasCompletedQuestionnaire: false },
+    user: { id: 'u-pending', name: 'Participante Pendente', roles: ['participante'], hasCompletedQuestionnaire: false },
   });
 
   // Apenas ProfileQuestionnaire e alias Questionario devem estar presentes na Stack
@@ -351,7 +465,7 @@ test('Adversarial A.2: Usuario com questionario concluido tem acesso completo as
   const completedTree = renderStack({
     isAuthenticated: true,
     sessionStatus: 'authenticated',
-    user: { id: 'u-completed', name: 'Participante Concluido', hasCompletedQuestionnaire: true },
+    user: { id: 'u-completed', name: 'Participante Concluido', roles: ['participante'], hasCompletedQuestionnaire: true },
   });
 
   assert.ok(completedTree.names.includes('MainTabs'));

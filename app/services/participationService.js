@@ -1,6 +1,6 @@
 import { httpClient } from './httpClient';
 
-const empty = () => ({ userId: null, epoch: null, status: 'idle', participation: null, returnState: null, demoParticipation: null, error: null, syncStale: false });
+const empty = () => ({ userId: null, epoch: null, status: 'idle', participation: null, returnState: null, returnStateVersion: 0, demoParticipation: null, error: null, syncStale: false });
 
 function validateReturnState(returned) {
   if (!returned || !Array.isArray(returned.pendingEvaluationParticipationIds) ||
@@ -14,18 +14,47 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
   let state = empty();
   let generation = 0;
   let syncInFlight = null;
+  let suspended = false;
+  const presentedReturnEvaluations = new Set();
   const listeners = new Set();
   const publish = (next) => { state = next; listeners.forEach((listener) => listener(state)); };
   const matches = (identity) => {
     const current = getIdentity();
-    return Boolean(identity && current && identity.userId === current.userId && identity.epoch === current.epoch &&
+    return Boolean(!suspended && identity && current && identity.userId === current.userId && identity.epoch === current.epoch &&
       state.userId === identity.userId && state.epoch === identity.epoch);
   };
 
   function setIdentity(identity) {
     generation += 1;
+    presentedReturnEvaluations.clear();
     if (!identity) { publish(empty()); return; }
     publish({ ...empty(), ...identity, status: 'loading' });
+  }
+
+  function canPresentReturnEvaluation(returned, version = state.returnStateVersion) {
+    return Boolean(matches(state) && state.status === 'ready' && !state.participation && !state.demoParticipation
+      && version === generation && version === state.returnStateVersion
+      && returned && returned === state.returnState && returned.recentFinalization
+      && !presentedReturnEvaluations.has(returned.recentFinalization.participationId));
+  }
+
+  function claimReturnEvaluation(returned, version = state.returnStateVersion) {
+    if (!canPresentReturnEvaluation(returned, version)) return false;
+    // Consumir antes de navegar; refresh e remontagem não desfazem o adiamento.
+    presentedReturnEvaluations.add(returned.recentFinalization.participationId);
+    return true;
+  }
+
+  function suspend() {
+    suspended = true;
+    generation += 1;
+    publish({ ...state, status: state.userId ? 'loading' : 'idle', returnState: null });
+  }
+
+  function resume() {
+    suspended = false;
+    presentedReturnEvaluations.clear();
+    return refresh();
   }
 
   async function refresh() {
@@ -47,7 +76,7 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
         throw new Error('Resposta inválida de participação.');
       }
       validateReturnState(returned);
-      publish({ ...state, status: 'ready', participation, returnState: returned, demoParticipation: null, error: null, syncStale: false });
+      publish({ ...state, status: 'ready', participation, returnState: returned, returnStateVersion: requestGeneration, demoParticipation: null, error: null, syncStale: false });
     } catch (error) {
       if (requestGeneration !== generation || !matches(identity)) return;
       publish({ ...state, status: 'error', participation: null, returnState: null, demoParticipation: null, syncStale: false,
@@ -77,12 +106,16 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
 
         const prev = state.participation;
         let returned = state.returnState;
+        let returnStateVersion = state.returnStateVersion;
         if (prev && participation === null) {
           // Publicação atômica: se esta leitura falhar, manter a participação confirmada
           // e tentar reconciliar a transição novamente no próximo ciclo.
           returned = await client.get('/participations/return-state', { auth: true });
           if (requestGeneration !== generation || !matches(identity)) return;
           validateReturnState(returned);
+          // Só a transição reconciliada renova a referência de retorno. Polling de
+          // posição não altera a versão nem o conjunto de avaliações consumidas.
+          returnStateVersion = requestGeneration;
         }
         const changed = !prev || prev.id !== participation?.id ||
           prev.status !== participation?.status ||
@@ -94,6 +127,7 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
             status: 'ready',
             participation,
             returnState: returned,
+            returnStateVersion,
             error: null,
             syncStale: false,
           });
@@ -122,5 +156,6 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
     publish({ ...state, demoParticipation: next ? { ...next, source: 'demo' } : null });
   }
 
-  return { getSnapshot: () => state, subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); }, setIdentity, refresh, syncCurrentSilent, setDemoParticipation };
+  return { getSnapshot: () => state, subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+    setIdentity, refresh, syncCurrentSilent, setDemoParticipation, canPresentReturnEvaluation, claimReturnEvaluation, suspend, resume };
 }

@@ -1,5 +1,5 @@
-// Área Staff com React Navigation REAL (montagem de estado, ações, getComponent,
-// pilha aninhada e desmontagem). O app não tem renderizador de testes e não
+// Isolamento da navegação do participante com React Navigation REAL.
+// O app não tem renderizador de testes e não
 // ganha dependência nova: reaproveita, só para leitura, as dependências travadas
 // do qa/regression (mesmas versões do lockfile do app). Sem elas, o teste é pulado.
 const assert = require('node:assert/strict');
@@ -47,6 +47,7 @@ function createRealApp(initialAuth) {
     'Text', 'TextInput', 'View'].map((name) => [name, name]));
   native.Modal = ({ visible, children }) => (visible ? React.createElement('Modal', null, children) : null);
   native.StyleSheet = { create: (styles) => styles };
+  native.AppState = { currentState: 'active', addEventListener: () => ({ remove() {} }) };
   native.Platform = { OS: 'ios' };
 
   const navRef = Navigation.createNavigationContainerRef();
@@ -54,6 +55,8 @@ function createRealApp(initialAuth) {
   const passthrough = ({ children }) => children;
   const Placeholder = ({ route }) => React.createElement('Text', null, `tela ${route.name}`);
   const cache = new Map();
+  let generatedUuid = 0;
+  const secureValues = new Map();
 
   function load(relativePath) {
     if (cache.has(relativePath)) return cache.get(relativePath);
@@ -62,12 +65,20 @@ function createRealApp(initialAuth) {
       if (name === 'react') return React;
       if (name === 'react/jsx-runtime') return jsx;
       if (name === 'react-native') return native;
+      if (name === 'expo-crypto') return { randomUUID: () =>
+        `00000000-0000-4000-8000-${String(++generatedUuid).padStart(12, '0')}` };
+      if (name === 'expo-secure-store') return {
+        isAvailableAsync: async () => true,
+        getItemAsync: async (key) => secureValues.get(key) ?? null,
+        setItemAsync: async (key, value) => { secureValues.set(key, value); },
+      };
       if (name === 'react-native-safe-area-context') {
         return { SafeAreaView: 'SafeAreaView', SafeAreaProvider: passthrough };
       }
       if (name === '@react-navigation/native-stack') return nativeStack;
       if (name === '@react-navigation/native') {
         return {
+          useIsFocused: () => true,
           NavigationContainer: ({ children }) => React.createElement(Navigation.BaseNavigationContainer, {
             ref: navRef,
             onUnhandledAction: (action) => unhandled.push(action),
@@ -127,50 +138,32 @@ const accountA = { isAuthenticated: true, user: { id: 'a', name: 'Conta A', hasC
 const accountB = { isAuthenticated: true, user: { id: 'b', name: 'Conta B', hasCompletedQuestionnaire: true },
   getSessionEpoch: () => 2 };
 
-test('React Navigation real: StaffDemo via getComponent e "Voltar ao aplicativo" desmonta a demonstração',
+test('React Navigation real: participante não consegue navegar para StaffDemo',
   { skip }, async () => {
     versionsMatchApp();
     const app = createRealApp(accountA);
     assert.deepEqual(app.rootRoutes(), ['MainTabs']);
-
+    assert.ok(!app.navRef.getRootState().routeNames.includes('StaffDemo'));
     app.navigate('StaffDemo');
-    assert.ok(app.loaded('screens/staff/StaffDemoNavigator.js'));
-    assert.ok(app.hasText('Conectado como: Conta A'));
-    await app.enter('STAFFDEMO');
-    assert.ok(app.hasText('Painel Operacional'));
-    await app.press('Controle de Entrada, fila ativa, 4 aguardando');
-    await app.press('CONFIRMAR ENTRADA');
-    await app.press('CONFIRMAR');
-    await app.press('↩ Painel');
-
-    await app.press('Voltar ao aplicativo');
-    assert.deepEqual(app.rootRoutes(), ['MainTabs'], 'rota StaffDemo removida da pilha do app');
+    assert.deepEqual(app.rootRoutes(), ['MainTabs']);
+    assert.equal(app.unhandled.at(-1)?.payload?.name, 'StaffDemo');
+    assert.ok(!app.loaded('screens/staff/StaffDemoNavigator.js'));
     assert.ok(app.hasText('tela MainTabs'));
-    assert.deepEqual(app.unhandled, []);
-
-    // Reabrir começa do zero: o estado anterior foi descartado na desmontagem.
-    app.navigate('StaffDemo');
-    assert.ok(app.hasText('Código do evento'));
-    await app.enter('STAFFDEMO');
-    await app.press('Controle de Entrada, fila ativa, 4 aguardando');
-    assert.ok(app.hasText('Rafael T.'), 'fixture original, sem a entrada confirmada antes');
+    app.navigate('EventEntry');
+    assert.deepEqual(app.rootRoutes(), ['MainTabs', 'EventEntry']);
     app.dispose();
   });
 
-test('React Navigation real: troca direta A → B descarta o estado de A sem logout', { skip }, async () => {
+test('React Navigation real: troca direta A → B remonta a pilha e mantém StaffDemo inacessível', { skip }, async () => {
   const app = createRealApp(accountA);
-  app.navigate('StaffDemo');
-  await app.enter('STAFFDEMO');
-  assert.ok(app.hasText('Painel Operacional'));
+  app.navigate('EventEntry');
+  assert.deepEqual(app.rootRoutes(), ['MainTabs', 'EventEntry']);
 
   app.setAuth(accountB); // sem logout
-  assert.deepEqual(app.rootRoutes(), ['MainTabs', 'StaffDemo']);
-  assert.ok(!app.hasText('Painel Operacional'), 'painel de A não aparece para B');
-  assert.ok(!app.hasText('BEAST Arena'));
-  // A pilha aninhada mantém a rota, mas o provedor novo não tem evento: estado seguro.
-  assert.ok(app.hasText('Nenhum evento selecionado'));
-  await app.press('IR PARA A ÁREA DO STAFF');
-  assert.ok(app.hasText('Conectado como: Conta B'));
-  assert.ok(app.hasText('Código do evento'));
+  assert.deepEqual(app.rootRoutes(), ['MainTabs']);
+  app.navigate('StaffDemo');
+  assert.deepEqual(app.rootRoutes(), ['MainTabs']);
+  assert.equal(app.unhandled.at(-1)?.payload?.name, 'StaffDemo');
+  assert.ok(!app.loaded('screens/staff/StaffDemoNavigator.js'));
   app.dispose();
 });

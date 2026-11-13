@@ -1,103 +1,176 @@
-# ArenaGo Backend
+# ArenaGo — Backend
 
-API NestJS + Express, Drizzle ORM e PostgreSQL. O repositório inclui os módulos de Identidade, Autenticação e Sessões (`K01`), Questionário de Perfil e Catálogo de Jogos (`K03`) e as entregas posteriores de Eventos (`E07`/`E08`).
+API NestJS com Express, Drizzle ORM e PostgreSQL. O prefixo global é `/api/v1`. Os módulos registrados em [AppModule](src/app.module.ts) cobrem identidade, sessões, TOTP, papéis, perfil, jogos, configuração de eventos, participações, filas, operações Staff, encerramentos e avaliações.
 
-## Estado atual do backend
+Os contratos abaixo existem no backend. O painel Admin Heliom do aplicativo ainda opera em memória: sua autenticação é real, mas suas alterações administrativas não chamam esses contratos. Implementação, teste simulado, ensaio PostgreSQL e homologação manual não são equivalentes.
 
-Além dos módulos iniciais, o repositório contém os contratos HTTP implementados de
-Eventos, Participações, filas internas, operações Staff, configuração administrativa,
-encerramento e avaliações. O inventário consolidado, suas decisões temporais e os
-limites de produção estão em [ARQUITETURA_BACKEND_ARENAGO.md](../docs/ARQUITETURA_BACKEND_ARENAGO.md)
-e nos relatórios `docs/E08_*_IMPLEMENTACAO.md`.
+Para decisões temporais e contratos detalhados, consulte a [arquitetura do backend](../docs/ARQUITETURA_BACKEND_ARENAGO.md) e os controllers em `src/`; o código atual prevalece sobre descrições históricas.
 
-Ainda não há controller público para descoberta por código de acesso e criação de
-participação, nem operações administrativas de concessão/revogação de Staff/Admin
-ou o fluxo completo de credenciamento TOTP Admin. A integração dos fluxos de Arena
-do Expo, BI/LGPD/retenção e a infraestrutura de produção também permanecem fora do
-que este README declara como entregue.
+## Requisitos e tecnologias
 
-## Requisitos
-
-- Node.js 24.15 ou superior e npm.
-- PostgreSQL local descartável para executar migrações, seed e testes de integração.
+- Node.js **>=24.15.0**, conforme [package.json](package.json), e npm.
+- NestJS `12.1.3`, TypeScript `6.0.3`, Drizzle ORM `^0.45.4`, Drizzle Kit `^0.31.11` e `pg` `^8.23.1`.
+- PostgreSQL local dedicado. Não há versão mínima de PostgreSQL declarada no manifest; os relatórios locais registram uso de PostgreSQL 18.
 
 ## Configuração local
 
-Copie `.env.example` para `.env` e ajuste `DATABASE_URL`, `JWT_SECRET` e `JWT_TEMP_SECRET` para o ambiente local. Não use credenciais de outro ambiente. Para preparar o banco de desenvolvimento, defina uma URL local fictícia e execute:
+Os comandos deste documento são para Windows PowerShell, dentro de `backend/`, a partir da raiz do clone:
 
 ```powershell
+Set-Location backend
 npm.cmd ci
+if (-not (Test-Path -LiteralPath .env)) { Copy-Item .env.example .env }
+```
+
+Edite a configuração apenas com credenciais próprias de desenvolvimento. O exemplo não substitui a lista de configurações validada pelo código. Não use bancos de produção, homologação ou compartilhados para preparar o ambiente local ou executar fixtures.
+
+| Variável | Contrato |
+| --- | --- |
+| `DATABASE_URL` | URL PostgreSQL obrigatória para a API. Deve apontar para o banco local pretendido. |
+| `DATABASE_DIRECT_URL` | Opcional na API; tem precedência sobre `DATABASE_URL` no Drizzle Kit. Deve identificar o mesmo ambiente e usar conexão direta quando houver pooler. |
+| `DATABASE_CA_CERT` | CA opcional para TLS remoto. O pool desativa TLS apenas em hosts locais e exige certificado válido para os demais. |
+| `JWT_SECRET`, `JWT_TEMP_SECRET` | Segredos distintos, com pelo menos 32 caracteres. Há padrões locais no código; em produção os valores explícitos são obrigatórios. Configure valores próprios também no desenvolvimento. |
+| `TOTP_ENCRYPTION_KEY`, `TOTP_RECOVERY_HMAC_KEY` | Para fluxos Admin/TOTP: duas chaves independentes de 32 bytes, em Base64 canônico, distintas entre si e dos segredos JWT. Ausência/formato inválido impede os fluxos TOTP. |
+| `ADMIN_IDEMPOTENCY_TTL_SECONDS` | Inteiro positivo explícito, sem padrão. |
+| `STAFF_IDEMPOTENCY_TTL_SECONDS` | Inteiro positivo explícito, independente do TTL Admin. |
+| `PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS` | Inteiro positivo explícito para ingresso/fila do participante. |
+| `EVALUATION_IDEMPOTENCY_TTL_SECONDS` | Inteiro positivo explícito para envio/edição de avaliações. |
+| `NODE_ENV` | `development` (padrão), `test` ou `production`. |
+| `API_BIND_HOST`, `PORT` | Bind padrão `127.0.0.1`; porta padrão `3000`. Use interface LAN adequada para Expo Go em celular físico. |
+| `EVENT_CLOSURE_INTERVAL_MS` | Inteiro de 1000 a 3600000 ms; padrão 30000. |
+| `EVENT_CLOSURE_JOB_TEST_ENABLED` | `true`/`false`. Em `NODE_ENV=test`, somente `true` habilita o scheduler. Fora de `test`, o scheduler fica habilitado mesmo com essa variável em `false`. |
+| `ARENAGO_CIVIL_TIMEZONE` | Fuso civil do questionário; padrão `America/Sao_Paulo`. |
+
+Os quatro TTLs são exigidos pelos serviços carregados na aplicação. Eles definem vencimentos de registros de idempotência; não garantem expurgo automático nem um prazo seguro de reenvio pelo cliente.
+
+Para envio de confirmação de e-mail, há integração Resend: `RESEND_API_KEY`, `RESEND_FROM` e `EMAIL_VERIFICATION_CONFIRMATION_URL`. A URL exige HTTPS, exceto localhost, sem credenciais/query/fragmento. `RESEND_TEST_RECIPIENT` é exigido com o remetente de teste do provedor. Sem configuração do transporte, solicitar envio retorna indisponibilidade; não há confirmação falsa. Os limites opcionais são `EMAIL_VERIFICATION_TTL_SECONDS` (86400), `EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS` (120) e `EMAIL_VERIFICATION_MAX_PER_HOUR` (5). Consulte [mailer](src/auth/email-verification-mailer.ts) e [política](src/auth/email-verification.policy.ts).
+
+### Banco, migrations e seeds
+
+O schema está em [src/database/schema](src/database/schema); o journal em [drizzle/meta/_journal.json](drizzle/meta/_journal.json) contém as migrations 0001 a 0008. `db:check` verifica a consistência das migrations; não confirma que o banco está atualizado. `db:generate` gera novos arquivos; `db:migrate` aplica os existentes e registra o journal em `drizzle.__drizzle_migrations`.
+
+Antes de qualquer escrita, o responsável deve confirmar host, porta, nome do banco, usuário e destino das URLs. Somente para preparar um banco de desenvolvimento dedicado e autorizado:
+
+```powershell
 npm.cmd run db:check
 npm.cmd run db:migrate
 npm.cmd run db:seed
-npm.cmd run build
+```
+
+Esses comandos não fazem parte da inicialização cotidiana. Não recrie migrations históricas nem execute limpeza global para obter aprovação de testes.
+
+O seed insere idempotentemente os 20 jogos curados iniciais e a versão `1.0.0` do questionário. Os serviços de jogos e questionário também fazem inserções idempotentes em `OnModuleInit`; iniciar a API pode escrever no banco. Reinicializações respeitam decisões de curadoria e versões inativas, sem reativá-las. O scheduler pode encerrar eventos conforme as regras operacionais. Uma inicialização não deve ser tratada como inspeção somente leitura.
+
+### Inicializar a API
+
+Após configurar o ambiente e o schema:
+
+```powershell
 npm.cmd run start:dev
 ```
 
-`db:generate` cria novas migrações a partir de `src/database/schema`. As migrações versionadas em `drizzle/` são aplicadas pelo migrador oficial `drizzle-kit migrate`, que registra cada arquivo em `drizzle.__drizzle_migrations`.
+Para acesso por Expo Go em outro aparelho da mesma LAN, defina antes do comando:
 
-## Autenticação e Sessões (K01)
+```powershell
+$env:API_BIND_HOST = '0.0.0.0'
+```
 
-Endpoints expostos sob `/api/v1/auth`:
+Também é possível selecionar uma interface LAN específica. Libere somente o acesso necessário no firewall; configure a URL pública da API no aplicativo conforme [app/README.md](../app/README.md). `localhost` no celular não aponta para o computador. O launcher privado de homologação A4 e seu arquivo DPAPI não são distribuídos pelo Git nem são pré-requisitos do projeto.
 
-- `POST /api/v1/auth/register`: cria conta (`participante`), armazena hash `Argon2id`, bloqueia senhas comuns/comprometidas (`422 PASSWORD_COMPROMISED_OR_COMMON`), cria sessão única de 30 dias e retorna `hasCompletedQuestionnaire: false`.
-- `POST /api/v1/auth/login`: autentica por e-mail/senha sem enumeração de contas (`401 INVALID_CREDENTIALS`), revoga sessão anterior na mesma transação (`superseded_by_new_login`), emite access JWT de 15 minutos e refresh token opaco persistido apenas por hash SHA-256. Contas com papel `admin` recebem `requires2FA: true` + `tempToken` restrito de 5 minutos sem criar sessão ativa antes do segundo fator.
-- `POST /api/v1/auth/refresh`: rotaciona o refresh token com `FOR UPDATE` na ordem canônica (`users` $\rightarrow$ `sessions` $\rightarrow$ `refresh_tokens`), preserva o `expires_at` absoluto de 30 dias da sessão e revoga imediatamente a sessão caso um refresh token já consumido seja reutilizado (`401 REFRESH_TOKEN_REUSED`).
-- `GET /api/v1/auth/me`: exige `Bearer <accessToken>`, valida assinatura/expiração/`sid` e consulta o estado vivo no PostgreSQL (`users`, `sessions`, `user_roles`, `profiles` e `user_games`).
-- `POST /api/v1/auth/logout`: revoga a sessão autenticada atual (`user_logout`) e invalida seus refresh tokens ativos.
+## Autenticação, identidade e papéis
 
-### Rate Limiting e Tratamento de IP
+As rotas abaixo usam o prefixo `/api/v1`.
 
-- **Cadastro (`POST /api/v1/auth/register`)**: `RegistrationRateLimiterService` aplica janela deslizante em memória de **10 requisições / 15 min por IP** e **5 requisições / 15 min por e-mail normalizado**, executada **antes** do cálculo do hash `Argon2id` e antes de consultar o banco. Contabiliza todas as tentativas (sucesso ou falha) com a mesma mensagem HTTP `429 TOO_MANY_REGISTRATION_ATTEMPTS` + cabeçalho `Retry-After`, evitando enumeração de contas.
-- **Login (`POST /api/v1/auth/login`)**: `LoginRateLimiterService` aplica janela deslizante em memória de **10 falhas / 15 min por IP** e **5 falhas / 15 min por par `email+IP`**, retornando HTTP `429 TOO_MANY_LOGIN_ATTEMPTS` + `Retry-After` antes do `Argon2id`.
-- **Extração segura de IP**: `extractClientMetadata` utiliza exclusivamente `req.ip` / `req.socket.remoteAddress` resolvidos pelo Express e ignora cabeçalhos `X-Forwarded-For` ou `X-Real-IP` arbitrários enviados diretamente pelo cliente quando `trust proxy` não está configurado.
-- **Limitação documentada do ambiente local**: os contadores de rate limiting operam em memória no processo Node.js local (sem dependência de Redis na `K01`).
+| Método e rota | Comportamento |
+| --- | --- |
+| `POST /auth/register` | Cadastro de Participante com `{ name, email, password }`, hash Argon2id, política de senha e criação de sessão; questionário inicialmente incompleto. |
+| `POST /auth/login` | Senha real; Participante/Staff recebem sessão. Admin recebe `{ requires2FA, isTotpConfigured, tempToken, message }`, sem sessão antes do segundo fator. |
+| `POST /auth/2fa/verify` | `{ tempToken, code }`, sem Bearer. Aceita TOTP de seis dígitos ou código de recuperação hexadecimal minúsculo de 32 caracteres; publica sessão após confirmação. |
+| `POST /auth/refresh` | Rotação do refresh token; reutilização de token consumido revoga a sessão. |
+| `GET /auth/me` | Bearer JWT e identidade viva no banco: usuário, sessão, papéis e estado do questionário. |
+| `POST /auth/logout` | Revoga a sessão autenticada atual e seus refresh tokens ativos. |
+| `POST /auth/verify-email/request` | Solicita confirmação de e-mail da conta autenticada pelo transporte configurado. |
+| `POST /auth/verify-email/confirm` | Confirma o token de verificação de e-mail. Não é recuperação de senha. |
 
-## Questionário de Perfil e Catálogo de Jogos (K03)
+O access JWT dura 15 minutos; a sessão tem limite absoluto de 30 dias. Refresh tokens opacos são persistidos por hash SHA-256. Novo login substitui a sessão anterior; refresh mantém a expiração absoluta e a ordem de bloqueio `users → sessions → refresh_tokens`. Sessões Admin exigem a marca de segundo fator verificado também no refresh e nas verificações de sessão. O token temporário de 5 minutos não funciona como credencial de API.
 
-Endpoints expostos sob `/api/v1`:
+Cadastro limita tentativas por IP/e-mail antes do Argon2id; login limita falhas por IP e par e-mail/IP. Os limitadores são locais ao processo. A extração de IP usa `req.ip`/socket; cabeçalhos de proxy arbitrários não conferem identidade. Erros seguem Problem Details (RFC 7807).
 
-- `GET /api/v1/profile/questionnaire`: exige sessão autenticada (`@RequireSessionAuth()`, `SessionAuthGuard`, `@CurrentUserId()`). Consulta exclusivamente o perfil do próprio titular autenticado. Quando não há perfil completo (ou não há jogos vinculados em `user_games`), retorna HTTP `200` com `{ hasCompleted: false, aboutYou: null, yourGames: [], gamesMarket: null, completedAt: null }` (sem retornar `404`). Quando completo, retorna as respostas persistidas, `birthDate` como texto civil `YYYY-MM-DD` (`birth_date::text`, sem conversão por fuso) e `yourGames` com os nomes canônicos do catálogo.
-- `PUT /api/v1/profile/questionnaire`: exige sessão autenticada e salva ou atualiza atomicamente as três etapas (`profiles`, `games` quando houver novos nomes, e `user_games`) em uma transação PostgreSQL real sob a ordem canônica de bloqueio `users FOR UPDATE` $\rightarrow$ `profiles` $\rightarrow$ `user_games` (compatível com a criação de snapshots em `participation_profile_snapshots`, que nunca são modificados retroativamente).
-  - **Calendário civil de referência (`birthDate`)**: valida datas reais do calendário gregoriano (`YYYY-MM-DD`) e exige `birthDate <= hoje` (aceitando a data de hoje e sem impor idade mínima presumida). O fuso civil de referência do servidor está explicitado como `America/Sao_Paulo` (`DEFAULT_REFERENCE_CIVIL_TIMEZONE`), revalidado diretamente contra o relógio do PostgreSQL (`(clock_timestamp() AT TIME ZONE 'America/Sao_Paulo')::date`) dentro da transação após `users FOR UPDATE`, podendo ser configurado via `ARENAGO_CIVIL_TIMEZONE`.
-  - **Deduplicação e concorrência de jogos**: normaliza e deduplica `selectedGames` por `lower(btrim(name))`, preservando a grafia canônica já existente no catálogo. Em inserções de jogos personalizados, utiliza `INSERT ... ON CONFLICT DO NOTHING RETURNING id, name` seguido de `SELECT` em comando SQL separado sob `READ COMMITTED`.
-- `GET /api/v1/games`: consulta o catálogo persistido de jogos com filtros opcionais `query` (1 a 100 caracteres após `trim`, pesquisa *case-insensitive*) e `limit` (1 a 50, padrão 20).
-  - **Ordenação estável**: `ORDER BY is_curated DESC, lower(btrim(name)) ASC, name ASC, id ASC`.
-  - **Semântica de `total`**: representa a quantidade total de registros no catálogo `games` que satisfazem o filtro `query` (contagem total antes da aplicação de `LIMIT`), enquanto `games` contém até `limit` itens `{ id, name, isCurated }`, sem expor metadados privados de usuários (`created_by_user_id` ou `created_at`).
-- **Seed idempotente (`npm run db:seed`)**: insere de forma idempotente a versão publicada `1.0.0` em `questionnaire_versions` e os 20 jogos curados iniciais definidos em `app/data/mockData.js`. Também é executado automaticamente de forma idempotente na inicialização dos módulos (`OnModuleInit`).
-- **Política de publicação e curadoria (K03-F)**: reinicializações do servidor respeitam versões inativas (`activated_at = NULL`), retornando `422 QUESTIONNAIRE_VERSION_UNAVAILABLE` sem reativá-las inadvertidamente. O seed de catálogo respeita decisões administrativas sobre `is_curated` sem desmarcar jogos customizados promovidos pela administração nem forçar `true` em jogos desmarcados.
+### Ativação TOTP e gestão de permissões
 
-## API Cadastral de Perfil (K04)
+- `POST /auth/2fa/setup`: recebe `tempToken` e `activationToken` e prepara o credenciamento autorizado.
+- `POST /auth/2fa/confirm`: recebe os mesmos tokens e `code` para confirmar a ativação. É distinto de `/auth/2fa/verify`, usado no login com credencial já configurada.
+- A autorização de ativação é emitida por procedimento restrito para o primeiro Admin com proveniência CLI. O `tempToken` de login sozinho não autoriza ativação. Veja [bootstrap do primeiro Admin](../docs/T6_1_B1_IMPLEMENTACAO.md) e [ativação TOTP](../docs/T6_1_B2_IMPLEMENTACAO.md). Não há endpoint público de bootstrap nem onboarding geral de novos Admins promovidos.
+- `POST /admin/roles/grant`: Admin autorizado concede papel `admin` global ou `staff` com `eventId` obrigatório a uma conta elegível.
+- `POST /admin/roles/revoke`: revoga uma concessão identificada por `grantId`. Concessões/revogações passam pelas validações transacionais e auditoria do serviço; não são edição livre de papéis.
+- Operações Staff exigem concessão vigente no evento, além da sessão válida. Ter um papel no cliente ou alterar parâmetros de navegação não concede autorização no servidor.
 
-Endpoints expostos sob `/api/v1/profile`:
+Nunca publique segredos TOTP, tokens de ativação, códigos de recuperação, senhas, URLs com credenciais ou conteúdo DPAPI. Não copie chaves de outro ambiente para contornar falhas de autenticação; preserve a relação entre as credenciais persistidas e as chaves do ambiente autorizado.
 
-- `GET /api/v1/profile`: exige sessão autenticada (`@RequireSessionAuth()`, `SessionAuthGuard`, `@CurrentUserId()`). Retorna os dados cadastrais essenciais do titular autenticado: `{ id, name, email, emailVerified, roles, hasCompletedQuestionnaire, createdAt, updatedAt }`.
-- `PATCH /api/v1/profile`: exige sessão autenticada. Atualiza o nome de exibição (`name` de 2 a 150 caracteres após normalização). Bloqueia a linha do usuário via `users FOR UPDATE` em transação e retorna `{ message: "Perfil atualizado com sucesso.", user }`. Rejeita modificação de e-mail, papéis administrativos ou respostas do questionário (`400 BAD_REQUEST`, RFC 7807).
+## Perfil, questionário e catálogo
 
-## PostgreSQL remoto futuro
+| Método e rota | Contrato principal |
+| --- | --- |
+| `GET /profile` | Dados cadastrais do titular autenticado, papéis e estado do questionário. |
+| `PATCH /profile` | Atualiza somente o nome de exibição, de 2 a 150 caracteres; rejeita alterações de e-mail, papéis e respostas do questionário. |
+| `GET /profile/statistics` | `{ participationCount, totalMinutes }`, filtrado pelo usuário autenticado, sem aceitar ID do cliente. |
+| `GET /profile/questionnaire` | Respostas persistidas; perfil incompleto retorna 200 com `hasCompleted: false`. |
+| `PUT /profile/questionnaire` | Salva atomicamente as três etapas, perfil e jogos; snapshots históricos não são reescritos. |
+| `GET /games` | Catálogo persistido; filtros `query` (1–100 caracteres) e `limit` (1–50, padrão 20); total antes do limite. |
 
-Nenhum banco remoto está configurado. Quando a conexão remota for autorizada, guarde URLs e certificados fora do Git. A API usa `DATABASE_URL`; para Drizzle Kit, `DATABASE_DIRECT_URL` tem precedência e deve apontar para conexão direta quando o provedor usar pooler. Use TLS com verificação completa do certificado (`sslmode=verify-full`), nunca desative `rejectUnauthorized`. `DATABASE_CA_CERT` pode conter uma CA customizada aprovada pelo ambiente.
+O questionário valida datas civis `YYYY-MM-DD`, reais e não futuras, sem idade mínima presumida; revalida pelo relógio PostgreSQL no fuso civil configurado. Jogos são normalizados/deduplicados, com resolução transacional de inserções concorrentes e preservação de nomes canônicos. O catálogo ordena curados primeiro e não expõe metadados privados dos criadores.
 
-## Scripts
+As estatísticas contam participações que já têm `arena_entered_at`, inclusive ativas ou canceladas após entrada. O tempo soma somente participações `finished` com início/fim finitos e intervalo não negativo; arredonda para minutos após somar os segundos. Espera externa não entra no tempo. Sem registros, retorna zero. Veja [PROFILE_REAL_STATISTICS](../docs/PROFILE_REAL_STATISTICS_IMPLEMENTACAO.md), incluindo os limites de validação da agregação SQL.
 
-Envio/edição de avaliações E08.11 exigem `EVALUATION_IDEMPOTENCY_TTL_SECONDS`
-inteiro positivo explícito, sem padrão e independente dos TTLs Staff, participante
-e Admin. Fornecer também essa variável ao iniciar `AppModule`/`EventsModule` e
-processos de teste. Contratos, política técnica de comentários e comandos de
-validação PostgreSQL manual em [E08.11](../docs/E08_11_IMPLEMENTACAO.md).
+## Eventos, participações e avaliações
 
-As três operações Staff HTTP (§16.9–16.11) exigem `STAFF_IDEMPOTENCY_TTL_SECONDS`
-configurado com inteiro positivo, sem padrão. A aplicação valida essa configuração
-ao iniciar. Ela define somente `expiresAt`, sem expurgo nem perda de replay enquanto
-o registro existir. Endpoints, códigos e validação local em [E08.1](../docs/E08_1_IMPLEMENTACAO.md).
+| Grupo | Endpoints principais (prefixo `/api/v1`) |
+| --- | --- |
+| Descoberta e ingresso | `POST /events/lookup` com `{ accessCode }`; `POST /participations` com `{ eventId }`. Ambos exigem sessão; descoberta não é um catálogo público anônimo. |
+| Participação atual e ciclo de vida | `GET /participations/current`, `GET /participations/:participationId`, `POST /participations/:participationId/cancel`, `POST /participations/:participationId/finish`. |
+| Experiências e filas internas | `GET /events/:eventId/experiences`; `GET /participations/:participationId/queue`; `POST /participations/:participationId/queue-entries`; `POST /participations/:participationId/queue-entries/:queueEntryId/withdraw`. |
+| Histórico e retorno | `GET /participations/history`, `GET /participations/return-state`, `GET /evaluations/pending`. |
+| Avaliação | `GET /participations/:participationId/evaluation-eligibility`; `GET` e `POST /participations/:participationId/evaluation`; `PATCH /evaluations/:evaluationId`. |
+| Configuração Admin | `GET` e `POST /admin/events`; `GET` e `PATCH /admin/events/:eventId`; `GET /admin/events/:eventId/readiness`. |
+| Estrutura Admin | `GET` e `POST /admin/events/:eventId/experiences`; `PATCH /admin/events/:eventId/experiences/:experienceId`; `POST /admin/events/:eventId/experiences/:experienceId/stations`; `PATCH /admin/events/:eventId/experiences/:experienceId/stations/:stationId`. |
+| Operação do evento por Admin | `PATCH /admin/events/:eventId/schedule`; `PATCH /admin/events/:eventId/external-queue`; `POST /admin/events/:eventId/close`. |
 
-As rotas de fila interna do participante E08.2 exigem também
-`PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS`, inteiro positivo explícito, sem
-padrão e independente do TTL Staff. Como `EventsModule` instancia ambas as
-políticas, fornecer as duas variáveis ao iniciar a aplicação ou testes desse
-módulo. Comandos, contratos e integração PostgreSQL manual em
-[E08.2](../docs/E08_2_IMPLEMENTACAO.md).
+O servidor decide elegibilidade, prontidão, janela temporal, exclusividade de participação e posição FIFO. As mutações idempotentes exigem `Idempotency-Key`; confirme DTO, corpo e resposta no controller correspondente antes de criar um cliente. Avaliações usam nota de 1 a 5 e comentário opcional, sujeitos à elegibilidade e à política de edição. O encerramento operacional usa o scheduler e a regularização transacional dos eventos, não depende de a tela permanecer aberta.
 
-- `npm run build`, `npm run start:dev`, `npm run start:prod`
-- `npm run lint`, `npm test`, `npm run test:integration`
-- `npm run db:generate`, `npm run db:check`, `npm run db:migrate`, `npm run db:seed`
+## Operações Staff
+
+| Grupo | Endpoints principais |
+| --- | --- |
+| Eventos autorizados | `GET /staff/events` com status persistido e fase operacional; `GET /staff/events/:eventId/experiences`; `GET /staff/events/:eventId/stations`. |
+| Controle de Entrada | `GET` e `PATCH /staff/events/:eventId/entry-control`; `POST /staff/events/:eventId/entry-control/participants/:participationId/confirm`. |
+| Chamadas da fila externa | `POST /staff/events/:eventId/entry-control/call-next`; `POST /staff/events/:eventId/entry-control/calls/:callId/:action`, com `action` igual a `confirm`, `absent` ou `remove`. |
+| Estado e fila da experiência | `GET /staff/events/:eventId/experiences/:experienceId/queue`; `GET /staff/events/:eventId/experiences/:experienceId/stations/:stationId/operational-state`. |
+| Chamar e atender na estação | `POST /staff/events/:eventId/experiences/:experienceId/stations/:stationId/call-next`; `POST /staff/events/:eventId/service-sessions/:serviceSessionId/complete`, `/absent` ou `/remove`. |
+| Controles adicionais | `PATCH /staff/events/:eventId/stations/:stationId/availability`; `PATCH /staff/events/:eventId/experiences/:experienceId/queue`; `POST /staff/events/:eventId/experiences/:experienceId/queue-entries/:queueEntryId/remove`. |
+
+Também existem consultas de histórico de `call-next`, `complete` e `absent` em [staff-history.controller.ts](src/events/staff-history.controller.ts). Elas não substituem uma garantia geral de reconciliação para toda operação incerta.
+
+O servidor escolhe o próximo da fila, revalida sessão/concessão e trata estação ocupada, fila vazia, ausência, reinserção e término operacional. As mutações usam chaves de idempotência e transações; testes simulados não comprovam concorrência física. Consulte [estação operacional](../docs/STAFF_STATION_OPERATIONAL_IMPLEMENTACAO.md) e [Controle de Entrada](../docs/STAFF_ENTRY_CALL_FLOW_IMPLEMENTACAO.md).
+
+## Build, lint e testes
+
+Os comandos são os declarados em [package.json](package.json). Não foram executados nesta atualização documental.
+
+```powershell
+npm.cmd run build
+npm.cmd run lint
+npm.cmd run typecheck:test
+npm.cmd test
+```
+
+`build` usa `nest build`; `lint` analisa `src/**/*.ts` e `test/**/*.ts`, sem `--fix`; `typecheck:test` usa `tsconfig.test.json`; `test` executa `tsx --test test/unit/*.test.ts`. Para servir uma compilação já preparada, existe `npm.cmd run start:prod` (`node dist/main.js`), o que não constitui aprovação de produção.
+
+O script `npm.cmd run test:integration` usa PostgreSQL real e execução serial. Exige autorização por campanha, `NODE_ENV=test`, banco dedicado e conferência das URLs/host/porta/nome/`current_database()` e migrations, sem aplicá-las automaticamente. As suítes têm guardas e destinos distintos, inclusive bootstrap; uma URL genérica não atende necessariamente a todas. Leia fixtures e guardas antes de escolher os arquivos; preserve dados históricos e não execute limpeza global. Não use o comando como etapa automática de instalação.
+
+A política do repositório designa Luna Medium para validações automatizadas rotineiras após seleção confirmada pelo responsável. Implementação/revisão deve preparar as verificações. Resultados precisam registrar comando, ambiente, contagens e código de saída.
+
+## Evidências e limitações
+
+As campanhas são específicas: [estação operacional](../docs/STAFF_STATION_OPERATIONAL_IMPLEMENTACAO.md) registra 10 testes backend focados aprovados e typechecks; [correção terminal/cutoff](../docs/STAFF_TERMINAL_CUTOFF_FIX_IMPLEMENTACAO.md) registra 61 testes backend focados e typechecks aprovados com fixtures simuladas. Há registros de fallback por falha de inicialização do `tsx`. Esses resultados não equivalem à regressão completa atual do backend.
+
+A [homologação Staff](../docs/STAFF_ENTRY_CALL_FLOW_IMPLEMENTACAO.md) descreve os cenários Expo Go observados e ressalvas da auditoria. Não se declara aprovação integral do backend. A consulta de estatísticas foi homologada funcionalmente, mas seus casos SQL extremos ainda carecem de campanha física própria. Onboarding TOTP além do primeiro Admin, recuperação de senha, retenção/reconciliação de operações incertas, concorrência física, BI/LGPD e infraestrutura de produção continuam com trabalho pendente. Não há prontidão de produção declarada.

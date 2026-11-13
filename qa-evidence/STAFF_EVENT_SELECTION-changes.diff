@@ -1,0 +1,538 @@
+diff --git a/app/App.js b/app/App.js
+index 22b2cba..91f38b4 100644
+--- a/app/App.js
++++ b/app/App.js
+@@ -8,6 +8,7 @@ import { ParticipationProvider } from './context/ParticipationContext';
+ import MainTabs from './navigation/MainTabs';
+ import AuthSessionGate, { resolveInitialRouteForAuthState } from './screens/auth/AuthSessionGate';
+ import RolePendingScreen from './screens/auth/RolePendingScreen';
++import StaffEventsNavigator from './screens/staff/StaffEventsNavigator';
+ import EvaluationScreen from './screens/participation/EvaluationScreen';
+ import RealEvaluationScreen from './screens/participation/RealEvaluationScreen';
+ import EventConfirmationScreen from './screens/event-entry/EventConfirmationScreen';
+@@ -115,7 +116,7 @@ export function AppNavigation() {
+     : roleArea === 'admin'
+       ? [{ name: 'AdminPending', component: RolePendingScreen }]
+       : roleArea === 'staff'
+-        ? [{ name: 'StaffPending', component: RolePendingScreen }]
++        ? [{ name: 'StaffPending', component: StaffEventsNavigator }]
+         : roleArea === 'recovery'
+           ? [{ name: 'IdentityRecovery', component: RolePendingScreen }]
+         : isQuestionnairePending
+diff --git a/app/tests/roleRoutingIntegration.test.cjs b/app/tests/roleRoutingIntegration.test.cjs
+index 0c701a4..68a3c57 100644
+--- a/app/tests/roleRoutingIntegration.test.cjs
++++ b/app/tests/roleRoutingIntegration.test.cjs
+@@ -38,6 +38,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+       }
+       if (url === '/participations/current') return { participation: null };
+       if (url === '/participations/return-state') return { pendingEvaluationParticipationIds: [], recentFinalization: null };
++      if (url === '/staff/events') return { events: control.events ?? [] };
+       throw new Error(`GET inesperado: ${url}`);
+     },
+     async post(url) {
+@@ -67,7 +68,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+       text: async () => JSON.stringify(value.body ?? value) };
+   } });
+   const passthrough = ({ children }) => children;
+-  const native = Object.fromEntries(['ActivityIndicator', 'Modal', 'Pressable', 'Text', 'View'].map((name) => [name, name]));
++  const native = Object.fromEntries(['ActivityIndicator', 'Modal', 'Pressable', 'ScrollView', 'Text', 'View'].map((name) => [name, name]));
+   native.StyleSheet = { create: (styles) => styles };
+   native.Platform = { OS: 'web' };
+   function FocusedStack(props) {
+@@ -93,6 +94,9 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+       if (target === 'theme') return createParticipantThemeStub();
+       if (target === 'services/httpClient') return { ...http, httpClient: client };
+       if (target === 'services/tokenStorage') return { defaultTokenStorage: storage };
++      if (control.realStaff && ['screens/staff/StaffEventsNavigator', 'services/staffEventsService'].includes(target)) {
++        return load(`${target}.js`);
++      }
+       if (target === 'screens/event-entry/EventEntryScreen' && control.modalFixture) {
+         const Dialog = load('screens/staff/components/StaffConfirmDialog.js').default;
+         return { __esModule: true, default: () => React.createElement(Dialog, { visible: true,
+@@ -121,8 +125,18 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+     async act(work) { await Renderer.act(work); },
+     route() { const state = navRef.getRootState(); return state.routes[state.index].name; },
+     routes() { return navRef.getRootState().routes.map((route) => route.name); },
+-    navigate(name) { Renderer.act(() => navRef.navigate(name)); },
++    navigate(name, params) { Renderer.act(() => navRef.navigate(name, params)); },
+     back() { Renderer.act(() => navRef.goBack()); },
++    hasText(text) { return tree.root.findAllByType('Text').some((node) => {
++      const flatten = (value) => Array.isArray(value) ? value.map(flatten).join('')
++        : value && typeof value === 'object' ? flatten(value.props?.children) : String(value ?? '');
++      return flatten(node.props.children).includes(text);
++    }); },
++    async press(label) {
++      const buttons = tree.root.findAllByType('Pressable').filter((node) => node.props.accessibilityLabel === label);
++      assert.equal(buttons.length, 1, `botão ${label}`);
++      await Renderer.act(async () => { await buttons[0].props.onPress(); });
++    },
+     modal() { return tree.root.findByType('Modal'); },
+     confirmHandler() { return tree.root.findAllByType('Pressable')
+       .find((node) => node.props.accessibilityLabel === 'CONFIRMAR').props.onPress; },
+@@ -264,3 +278,105 @@ test('modal protegido fica invisível e callback antigo não executa durante err
+   assert.equal(control.confirmed, 0);
+   app.dispose();
+ });
++
++const staffEvent = { id: '11111111-1111-4111-8111-111111111111', name: 'Evento autorizado', status: 'open' };
++
++test('Staff real consulta eventos, seleciona, volta e não aceita rota com ID manual', { skip }, async () => {
++  const control = { realStaff: true, events: [staffEvent] };
++  const app = createIntegration({ initialUser: { ...participant, roles: ['participante', 'staff'] }, control });
++  await app.mount();
++  await app.act(() => app.manager.login({ email: participant.email, password: 'password' }));
++  assert.equal(app.route(), 'StaffPending');
++  assert.ok(app.calls.includes('/staff/events'));
++  assert.ok(app.hasText('Evento autorizado'));
++  await app.press('Selecionar evento Evento autorizado');
++  assert.ok(app.hasText('Status: Aberto'));
++  assert.ok(app.hasText('próxima etapa'));
++  await app.press('Voltar aos eventos');
++  app.navigate('StaffPending', { screen: 'StaffEventHome', params: { eventId: '22222222-2222-4222-8222-222222222222' } });
++  assert.ok(app.hasText('Atualize a lista para confirmar os eventos autorizados'));
++  assert.ok(!app.hasText('Status: Aberto'));
++  await app.press('Voltar aos eventos');
++  control.events = [];
++  await app.press('Atualizar eventos');
++  assert.ok(app.hasText('Nenhum evento autorizado'));
++  app.dispose();
++});
++
++test('Staff real trata erro de rede, atualização manual e troca de conta sem reaproveitar seleção', { skip }, async () => {
++  let offline = true;
++  const control = { realStaff: true, events: [staffEvent], http: async (route) => {
++    if (route === '/staff/events' && offline) throw new Error('offline');
++    return undefined;
++  } };
++  const app = createIntegration({ initialUser: { ...participant, roles: ['staff'] }, control });
++  await app.mount();
++  await app.act(() => app.manager.login({ email: participant.email, password: 'password' }));
++  assert.ok(app.hasText('Não foi possível conectar'));
++  offline = false;
++  await app.press('Atualizar eventos');
++  await app.press('Selecionar evento Evento autorizado');
++  assert.ok(app.hasText('Status: Aberto'));
++  await app.act(() => app.manager.logout());
++  control.events = [];
++  app.setUser({ ...participant, id: 'b', email: 'b@example.test', roles: ['staff'] });
++  await app.act(() => app.manager.login({ email: 'b@example.test', password: 'password' }));
++  assert.ok(app.hasText('Nenhum evento autorizado'));
++  assert.ok(!app.hasText('Evento autorizado'));
++  app.navigate('StaffPending', { screen: 'StaffEventHome' });
++  assert.ok(app.hasText('Atualize a lista para confirmar os eventos autorizados'));
++  app.dispose();
++});
++
++test('revalidação limpa evento selecionado e revogação Staff remove a pilha real', { skip }, async () => {
++  const control = { realStaff: true, events: [staffEvent] };
++  const app = createIntegration({ initialUser: { ...participant, roles: ['staff'] }, control });
++  await app.mount();
++  await app.act(() => app.manager.login({ email: participant.email, password: 'password' }));
++  await app.press('Selecionar evento Evento autorizado');
++  control.events = [];
++  await app.act(() => app.manager.refreshSession());
++  assert.ok(app.hasText('Atualize a lista para confirmar os eventos autorizados'));
++  assert.ok(!app.hasText('Status: Aberto'));
++  await app.press('Voltar aos eventos');
++  assert.ok(app.hasText('Nenhum evento autorizado'));
++  app.setUser(participant);
++  await app.act(() => app.manager.refreshSession());
++  assert.equal(app.route(), 'MainTabs');
++  app.navigate('StaffPending', { screen: 'StaffEventHome' });
++  assert.equal(app.route(), 'MainTabs');
++  app.dispose();
++});
++
++test('401 terminal na lista Staff usa o gerenciador real e remove a área protegida', { skip }, async () => {
++  const control = { realStaff: true, http: async (route) => route === '/staff/events'
++    ? { statusCode: 401, body: { code: 'SESSION_REVOKED' } } : undefined };
++  const app = createIntegration({ initialUser: { ...participant, roles: ['staff'] }, control });
++  await app.mount();
++  await app.act(() => app.manager.login({ email: participant.email, password: 'password' }));
++  assert.equal(app.manager.getSnapshot().isAuthenticated, false);
++  assert.equal(app.route(), 'Login');
++  assert.ok(!app.hasText('Eventos Staff'));
++  app.navigate('StaffEventHome');
++  assert.equal(app.route(), 'Login');
++  app.dispose();
++});
++
++test('401 recuperável na lista Staff renova sessão e obtém eventos com a identidade revalidada', { skip }, async () => {
++  let attempts = 0;
++  const control = { realStaff: true, http: async (route, options) => {
++    if (route !== '/staff/events') return undefined;
++    attempts += 1;
++    return options.headers.Authorization === 'Bearer access'
++      ? { statusCode: 401, body: { code: 'ACCESS_TOKEN_EXPIRED' } }
++      : { body: { events: [staffEvent] } };
++  } };
++  const app = createIntegration({ initialUser: { ...participant, roles: ['staff'] }, control });
++  await app.mount();
++  await app.act(() => app.manager.login({ email: participant.email, password: 'password' }));
++  assert.equal(app.manager.getSnapshot().identityStatus, 'verified');
++  assert.ok(app.calls.includes('/auth/refresh'));
++  assert.ok(attempts >= 2);
++  assert.ok(app.hasText('Evento autorizado'));
++  app.dispose();
++});
+diff --git a/app/screens/staff/StaffEventsNavigator.js b/app/screens/staff/StaffEventsNavigator.js
+new file mode 100644
+index 0000000..387a8d5
+--- /dev/null
++++ b/app/screens/staff/StaffEventsNavigator.js
+@@ -0,0 +1,154 @@
++import { createContext, useContext, useEffect, useRef, useState } from 'react';
++import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
++import { SafeAreaView } from 'react-native-safe-area-context';
++import { createNativeStackNavigator } from '@react-navigation/native-stack';
++
++import { useAuth } from '../../context/AuthContext';
++import { createStaffEventsStore } from '../../services/staffEventsService';
++
++const Stack = createNativeStackNavigator();
++const StaffEventsContext = createContext(null);
++const STATUS_LABELS = { scheduled: 'Agendado', open: 'Aberto', closing: 'Em encerramento', closed: 'Encerrado' };
++
++function StaffEventsProvider({ children }) {
++  const auth = useAuth();
++  const authRef = useRef(auth);
++  authRef.current = auth;
++  const getIdentity = () => {
++    const current = authRef.current;
++    const roles = current?.user?.roles;
++    if (!current?.isAuthenticated || !current.user?.id || !Array.isArray(roles) ||
++        !roles.includes('staff') || roles.includes('admin') ||
++        typeof current.isIdentityVerified !== 'function' || !current.isIdentityVerified() ||
++        typeof current.getSessionEpoch !== 'function' || typeof current.getIdentityRevision !== 'function') return null;
++    return { userId: current.user.id, epoch: current.getSessionEpoch(), revision: current.getIdentityRevision() };
++  };
++  const storeRef = useRef(null);
++  if (!storeRef.current) {
++    storeRef.current = createStaffEventsStore({
++      client: { get: (...args) => authRef.current.httpClient.get(...args) }, getIdentity,
++    });
++  }
++  const store = storeRef.current;
++  const [snapshot, setSnapshot] = useState(store.getSnapshot());
++  const identity = getIdentity();
++  const userId = identity?.userId ?? null;
++  const epoch = identity?.epoch ?? null;
++  const revision = identity?.revision ?? null;
++
++  useEffect(() => store.subscribe(setSnapshot), [store]);
++  useEffect(() => {
++    const next = userId !== null ? { userId, epoch, revision } : null;
++    store.setIdentity(next);
++    if (next) void store.refresh();
++    return () => store.setIdentity(null);
++  }, [store, userId, epoch, revision]);
++
++  const current = store.isCurrent(snapshot.identity);
++  const value = {
++    status: current ? snapshot.status : 'loading',
++    events: current ? snapshot.events : [],
++    selected: current ? snapshot.selected : null,
++    error: current ? snapshot.error : null,
++    refresh: store.refresh,
++    select: store.select,
++    clearSelection: store.clearSelection,
++    isCurrent: store.isCurrent,
++  };
++  return <StaffEventsContext.Provider value={value}>{children}</StaffEventsContext.Provider>;
++}
++
++function Button({ label, onPress, disabled = false }) {
++  return (
++    <Pressable accessibilityRole="button" accessibilityLabel={label} disabled={disabled}
++      onPress={disabled ? undefined : onPress} style={[styles.button, disabled && styles.disabled]}>
++      <Text style={styles.buttonText}>{label}</Text>
++    </Pressable>
++  );
++}
++
++function StaffEventsScreen({ navigation }) {
++  const staff = useContext(StaffEventsContext);
++  const auth = useAuth();
++  const messages = {
++    session: 'Não foi possível confirmar sua sessão. Entre novamente ou tente atualizar.',
++    network: 'Não foi possível conectar ao servidor. Verifique sua conexão e tente novamente.',
++    unavailable: 'Não foi possível carregar os eventos autorizados. Tente novamente.',
++  };
++  return (
++    <SafeAreaView style={styles.container}>
++      <ScrollView contentContainerStyle={styles.content}>
++        <Text style={styles.title}>Eventos Staff</Text>
++        <Text style={styles.description}>Selecione um evento autorizado para sua conta.</Text>
++        {staff.status === 'loading' && <View accessibilityRole="progressbar" style={styles.notice}>
++          <ActivityIndicator color="#a78bfa" /><Text style={styles.message}>Carregando eventos...</Text>
++        </View>}
++        {staff.status === 'error' && <Text accessibilityRole="alert" style={styles.message}>{messages[staff.error]}</Text>}
++        {staff.status === 'ready' && staff.events.length === 0 &&
++          <Text style={styles.message}>Nenhum evento autorizado para esta conta.</Text>}
++        {staff.status === 'ready' && staff.events.map((event) => (
++          <Pressable key={event.id} accessibilityRole="button" accessibilityLabel={`Selecionar evento ${event.name}`}
++            style={styles.event} onPress={() => {
++              if (staff.select(event.id)) navigation.navigate('StaffEventHome');
++            }}>
++            <Text style={styles.eventName}>{event.name}</Text>
++            <Text style={styles.eventStatus}>{STATUS_LABELS[event.status]}</Text>
++          </Pressable>
++        ))}
++        <Button label="Atualizar eventos" disabled={staff.status === 'loading'} onPress={() => { void staff.refresh(); }} />
++        <Button label="Sair da conta" onPress={() => { if (staff.isCurrent()) void auth.logout(); }} />
++      </ScrollView>
++    </SafeAreaView>
++  );
++}
++
++function StaffEventHomeScreen({ navigation }) {
++  const staff = useContext(StaffEventsContext);
++  useEffect(() => navigation.addListener('beforeRemove', staff.clearSelection), [navigation, staff.clearSelection]);
++  const selected = staff.isCurrent() ? staff.selected : null;
++  return (
++    <SafeAreaView style={styles.container}>
++      <View style={styles.content}>
++        {selected ? <>
++          <Text style={styles.title}>{selected.name}</Text>
++          <Text style={styles.description}>Status: {STATUS_LABELS[selected.status]}</Text>
++          <Text style={styles.message}>A área operacional deste evento será disponibilizada em uma próxima etapa.</Text>
++        </> : <>
++          <Text style={styles.title}>Selecione um evento</Text>
++          <Text style={styles.message}>Atualize a lista para confirmar os eventos autorizados.</Text>
++        </>}
++        <Button label="Voltar aos eventos" onPress={() => {
++          staff.clearSelection();
++          if (navigation.canGoBack()) navigation.goBack();
++          else navigation.navigate('StaffEvents');
++        }} />
++      </View>
++    </SafeAreaView>
++  );
++}
++
++export default function StaffEventsNavigator() {
++  return (
++    <StaffEventsProvider>
++      <Stack.Navigator screenOptions={{ headerShown: false }}>
++        <Stack.Screen name="StaffEvents" component={StaffEventsScreen} />
++        <Stack.Screen name="StaffEventHome" component={StaffEventHomeScreen} />
++      </Stack.Navigator>
++    </StaffEventsProvider>
++  );
++}
++
++const styles = StyleSheet.create({
++  container: { flex: 1, backgroundColor: '#0c0a17' },
++  content: { flexGrow: 1, padding: 24, gap: 14 },
++  title: { color: '#ffffff', fontSize: 22, fontWeight: '800' },
++  description: { color: '#cbd5e1', fontSize: 15, lineHeight: 22 },
++  message: { color: '#cbd5e1', fontSize: 14, lineHeight: 21 },
++  notice: { flexDirection: 'row', alignItems: 'center', gap: 10 },
++  event: { backgroundColor: '#191330', borderColor: '#34265a', borderWidth: 1, borderRadius: 14, padding: 16 },
++  eventName: { color: '#ffffff', fontSize: 16, fontWeight: '700' },
++  eventStatus: { color: '#c4b5fd', marginTop: 6, fontSize: 14 },
++  button: { backgroundColor: '#7c3aed', borderRadius: 14, padding: 16, alignItems: 'center' },
++  disabled: { opacity: 0.55 },
++  buttonText: { color: '#ffffff', fontWeight: '700' },
++});
+diff --git a/app/services/staffEventsService.js b/app/services/staffEventsService.js
+new file mode 100644
+index 0000000..0a00fe3
+--- /dev/null
++++ b/app/services/staffEventsService.js
+@@ -0,0 +1,69 @@
++const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
++const STATUSES = new Set(['scheduled', 'open', 'closing', 'closed']);
++
++export function parseStaffEvents(body) {
++  if (!body || !Array.isArray(body.events)) throw new Error('Resposta inválida de eventos Staff.');
++  const ids = new Set();
++  return body.events.map((event) => {
++    if (!event || typeof event.id !== 'string' || !UUID.test(event.id) || ids.has(event.id.toLowerCase()) ||
++        typeof event.name !== 'string' || !event.name.trim() || !STATUSES.has(event.status)) {
++      throw new Error('Resposta inválida de eventos Staff.');
++    }
++    ids.add(event.id.toLowerCase());
++    return { id: event.id, name: event.name, status: event.status };
++  });
++}
++
++export async function fetchStaffEvents(client) {
++  return parseStaffEvents(await client.get('/staff/events', { auth: true }));
++}
++
++const empty = () => ({ identity: null, status: 'idle', events: [], selected: null, error: null });
++const sameIdentity = (a, b) => Boolean(a && b && a.userId === b.userId &&
++  a.epoch === b.epoch && a.revision === b.revision);
++
++// A identidade é consultada novamente antes de publicar cada resposta ou aceitar uma seleção.
++export function createStaffEventsStore({ client, getIdentity }) {
++  let state = empty();
++  let generation = 0;
++  const listeners = new Set();
++  const publish = (next) => { state = next; listeners.forEach((listener) => listener(state)); };
++  const isCurrent = (identity = state.identity) => sameIdentity(identity, state.identity) &&
++    sameIdentity(identity, getIdentity());
++
++  function setIdentity(identity) {
++    generation += 1;
++    publish(identity ? { ...empty(), identity, status: 'loading' } : empty());
++  }
++
++  async function refresh() {
++    const identity = state.identity;
++    if (!isCurrent(identity)) return;
++    const requestGeneration = ++generation;
++    publish({ ...state, status: 'loading', events: [], selected: null, error: null });
++    try {
++      const events = await fetchStaffEvents(client);
++      if (requestGeneration !== generation || !isCurrent(identity)) return;
++      publish({ ...state, status: 'ready', events, selected: null, error: null });
++    } catch (error) {
++      if (requestGeneration !== generation || !isCurrent(identity)) return;
++      const kind = error?.status === 401 ? 'session' : error?.isNetworkError ? 'network' : 'unavailable';
++      publish({ ...state, status: 'error', events: [], selected: null, error: kind });
++    }
++  }
++
++  function select(eventId) {
++    if (!isCurrent() || state.status !== 'ready') return false;
++    const event = state.events.find((item) => item.id === eventId);
++    if (!event) return false;
++    publish({ ...state, selected: event });
++    return true;
++  }
++
++  function clearSelection() {
++    if (state.selected) publish({ ...state, selected: null });
++  }
++
++  return { getSnapshot: () => state, subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
++    setIdentity, refresh, select, clearSelection, isCurrent };
++}
+diff --git a/app/tests/staffEventDiscovery.test.cjs b/app/tests/staffEventDiscovery.test.cjs
+new file mode 100644
+index 0000000..75bcda1
+--- /dev/null
++++ b/app/tests/staffEventDiscovery.test.cjs
+@@ -0,0 +1,88 @@
++const assert = require('node:assert/strict');
++const test = require('node:test');
++const { loadModule } = require('./helpers/questionnaireHarness.cjs');
++
++const { parseStaffEvents, createStaffEventsStore } = loadModule('services/staffEventsService.js', require).exports;
++const event = { id: '11111111-1111-4111-8111-111111111111', name: 'Evento real', status: 'open' };
++const identity = (userId = 'a', epoch = 1, revision = 1) => ({ userId, epoch, revision });
++const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
++  return { promise, resolve, reject }; };
++
++test('lista Staff aceita somente o contrato conhecido e preserva o ID para seleção', () => {
++  assert.deepEqual(JSON.parse(JSON.stringify(parseStaffEvents({ events: [event] }))), [event]);
++  assert.equal(parseStaffEvents({ events: [] }).length, 0);
++  for (const body of [null, {}, { events: null }, { events: [{ ...event, id: 'outro' }] },
++    { events: [{ ...event, name: '' }] }, { events: [{ ...event, status: 'unknown' }] },
++    { events: [event, event] }]) assert.throws(() => parseStaffEvents(body));
++});
++
++test('consulta autenticada, seleção e atualização manual removem seleção anterior', async () => {
++  let current = identity();
++  const calls = [];
++  let response = { events: [event] };
++  const store = createStaffEventsStore({ client: { get: async (...args) => { calls.push(args); return response; } },
++    getIdentity: () => current });
++  store.setIdentity(current);
++  assert.equal(store.select(event.id), false, 'seleção aguarda resposta autorizada');
++  await store.refresh();
++  assert.equal(calls[0][0], '/staff/events');
++  assert.equal(calls[0][1].auth, true);
++  assert.equal(store.select('11111111-1111-4111-8111-111111111112'), false);
++  assert.equal(store.select(event.id), true);
++  assert.equal(store.getSnapshot().selected.id, event.id);
++  response = { events: [] };
++  await store.refresh();
++  assert.equal(store.getSnapshot().status, 'ready');
++  assert.equal(store.getSnapshot().events.length, 0);
++  assert.equal(store.getSnapshot().selected, null);
++});
++
++test('401 e falha de rede limpam dados e permitem atualização posterior', async () => {
++  const current = identity();
++  let outcome = { events: [event] };
++  const store = createStaffEventsStore({ client: { get: async () => {
++    if (outcome instanceof Error) throw outcome;
++    return outcome;
++  } }, getIdentity: () => current });
++  store.setIdentity(current);
++  await store.refresh();
++  store.select(event.id);
++  outcome = Object.assign(new Error('unauthorized'), { status: 401 });
++  await store.refresh();
++  assert.equal(store.getSnapshot().error, 'session');
++  assert.equal(store.getSnapshot().selected, null);
++  assert.equal(store.getSnapshot().events.length, 0);
++  outcome = Object.assign(new Error('offline'), { isNetworkError: true });
++  await store.refresh();
++  assert.equal(store.getSnapshot().error, 'network');
++  outcome = { events: [event] };
++  await store.refresh();
++  assert.equal(store.getSnapshot().status, 'ready');
++});
++
++test('troca de conta, geração, revisão e respostas fora de ordem descartam dados antigos', async () => {
++  let current = identity();
++  const requests = [];
++  const store = createStaffEventsStore({ client: { get: () => { const pending = deferred(); requests.push(pending); return pending.promise; } },
++    getIdentity: () => current });
++  store.setIdentity(current);
++  const first = store.refresh();
++  const second = store.refresh();
++  requests[1].resolve({ events: [] });
++  await second;
++  requests[0].resolve({ events: [event] });
++  await first;
++  assert.equal(store.getSnapshot().events.length, 0);
++
++  const third = store.refresh();
++  current = identity('b', 2, 2);
++  store.setIdentity(current);
++  requests[2].resolve({ events: [event] });
++  await third;
++  assert.equal(store.getSnapshot().events.length, 0);
++  assert.equal(store.select(event.id), false);
++  current = identity('b', 2, 3);
++  assert.equal(store.isCurrent(), false, 'revalidação bloqueia imediatamente o estado anterior');
++  store.setIdentity(null);
++  assert.equal(store.getSnapshot().selected, null);
++});
+diff --git a/docs/STAFF_EVENT_SELECTION_IMPLEMENTACAO.md b/docs/STAFF_EVENT_SELECTION_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..74b265d
+--- /dev/null
++++ b/docs/STAFF_EVENT_SELECTION_IMPLEMENTACAO.md
+@@ -0,0 +1,25 @@
++# Seleção de eventos autorizados para Staff
++
++## Implementação
++
++- A rota interna `StaffPending` mantém o isolamento por papel já existente e agora abre uma pilha Staff própria. Admin e participante conservam suas entradas anteriores.
++- A tela consulta `GET /staff/events` pelo cliente autenticado do `AuthContext`. A resposta é validada conforme o contrato: lista de eventos com UUID, nome e status `scheduled`, `open`, `closing` ou `closed`. IDs duplicados ou resposta inválida geram erro sem mostrar dados antigos.
++- São apresentados carregamento, lista vazia, falha de rede, sessão inválida e atualização manual. O cliente HTTP e o gerenciador de sessão existentes continuam responsáveis por renovação e invalidação de credenciais.
++- A seleção guarda o objeto e seu `id` somente em memória. A tela inicial do evento obtém esse objeto do estado da área Staff, não de parâmetros de navegação; uma tentativa de acessar a tela sem seleção válida exibe a orientação para voltar à lista.
++- O estado e as requisições são vinculados ao usuário, à geração da sessão e à revisão da identidade. Logout, troca de conta, mudança de papel ou revalidação descartam seleção e respostas antigas. Retornar da tela do evento também limpa a seleção.
++- A seleção é apenas contexto de navegação. Cada operação futura deve enviar o `eventId` e ter sua autorização por evento verificada novamente pelo backend. A lista pode ficar desatualizada após revogação até atualização manual ou revalidação; não há polling nesta etapa.
++- A tela do evento informa que a área operacional virá depois. Nenhuma fila, chamada, conclusão, ausência ou fixture demonstrativa é apresentada como dado real. Os componentes da demonstração foram preservados.
++
++## Validação preparada
++
++- `app/tests/staffEventDiscovery.test.cjs`: contrato da lista, resposta inválida, consulta autenticada, seleção, lista vazia, atualização, 401, rede, troca de identidade e respostas fora de ordem.
++- `app/tests/roleRoutingIntegration.test.cjs`: cenários adicionais com gerenciador de sessão, cliente HTTP, provedores e roteadores reais; seleção e retorno, rota manual com ID, lista vazia, rede, troca de conta, revalidação/revogação, 401 terminal e 401 recuperável.
++- Os testes de integração usam as dependências isoladas de `qa/regression`; um teste ignorado por dependência indisponível deve ser reportado como pendente.
++- Sugestão para Luna Medium, após inspecionar os scripts e o ambiente: na pasta `app`, com `NODE_ENV=test`, executar `node --test tests/staffEventDiscovery.test.cjs tests/roleRoutingIntegration.test.cjs tests/authNavigation.test.cjs tests/staffNavigation.test.cjs tests/staffRealNavigation.test.cjs`, seguido da suíte `npm.cmd --prefix app test` na raiz se os focados estiverem sem falhas. Revisar também `git diff --check` e o estado Git.
++
++## Evidências e limites
++
++- Inspeção estática realizada sobre roteamento, gerenciamento de identidade, cliente HTTP, contrato do endpoint e diferenças locais.
++- Testes, lint, typecheck, build e verificações automatizadas não foram executados nesta implementação; estão reservados à validação por Luna Medium.
++- O responsável informou a homologação HTTP anterior do endpoint com contas Staff, participante e Admin; ela não foi repetida nesta etapa.
++- A apresentação no Expo Go, a navegação nativa de retorno e o comportamento em rede real ainda precisam de validação. O endpoint não é paginado e a lista é um retrato do momento da consulta.

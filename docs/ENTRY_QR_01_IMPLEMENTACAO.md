@@ -5,7 +5,7 @@
 **Branch:** `feature/event-entry-qr-code`
 **Origem (HEAD base):** `1df82e17bc9e7cc24c84f1721031050c6cc442b9` (`develop`)
 **Commits de referência:** `e4a6691e`, `f9a29a90`
-**Status:** Implementado, ajustado para acessibilidade e pronto para validação
+**Status:** Em revisão de homologação; validações pendentes
 
 ---
 
@@ -105,9 +105,17 @@ A função `validateAndNormalizeQrCode(raw)` aplica as seguintes regras antes de
 1. Rejeita payloads vazios ou constituídos apenas por espaços.
 2. Rejeita esquemas de URL (`http://`, `https://`, `ftp:`, `javascript:`, `data:`, `file:`) para evitar phishing ou redirecionamentos maliciosos.
 3. Rejeita caracteres de quebra de linha (`\r`, `\n`, `\t`) para evitar injeções em logs ou formulários.
-4. Limita o comprimento a 64 caracteres.
-5. Valida o alfabeto alfanumérico com hífens e underscores (`/^[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*$/`).
-6. Trata e normaliza o código sem alterar sua caixa externa antes de enviar para a consulta unificada.
+4. Exige de 4 a 64 caracteres após remover espaços externos.
+5. Aceita apenas grupos ASCII alfanuméricos separados por um hífen (`/^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$/`); underscores são rejeitados.
+6. Envia o código sem alterar sua caixa à consulta unificada; o backend normaliza a caixa na consulta.
+
+### Revisão de homologação
+
+- A câmera e a sobreposição usam `StyleSheet.absoluteFill`, exportado pela versão instalada do React Native 0.88.1. O mock e as verificações de posicionamento foram atualizados.
+- A validação QR segue o contrato C-10 de comprimento e caracteres. Os testes preparados incluem limites, underscores, separadores e caracteres não ASCII.
+- A consulta manual passou a bloquear submissões simultâneas e a descartar navegação após perda de foco, troca de modo ou desmontagem. Uma falha tardia de leitura QR não libera o bloqueio de uma consulta posterior.
+- A inspeção estática confirmou alternativas para permissão negada, desligamento da câmera sem foco e navegação para confirmação explícita antes de criar participação. A consulta usa o `ParticipationContext` e o serviço existentes; o estado compartilhado da consulta pode ser atualizado após a saída da tela, embora a navegação tardia seja descartada.
+- O comportamento nativo da câmera, permissões, layout em telas pequenas e tamanhos de fonte ampliados, acessibilidade e retorno das configurações ainda requerem homologação em aparelho. As alterações e testes preparados nesta revisão não foram executados.
 
 ### 3.5. Proteção contra Leituras Duplicadas
 - `isScanningRef` e `scanned` garantem que múltiplos frames da câmera contendo o mesmo QR Code não disparem múltiplas consultas `lookupEvent()`.
@@ -123,7 +131,7 @@ A função `validateAndNormalizeQrCode(raw)` aplica as seguintes regras antes de
 
 ## 4. Instruções de Validação Automatizada (Luna Medium)
 
-Conforme a política permanente do `AGENTS.md`, as validações preparadas devem ser executadas com o executor padrão Luna Medium:
+Após seleção manual confirmada de Luna Medium pelo responsável, inspecionar previamente os scripts e comandos, confirmar branch e diretório, preservar alterações e usar ambiente isolado. Conforme a política do `AGENTS.md`, executar:
 
 ```bash
 cd app
@@ -141,7 +149,9 @@ npm test
 2. `uiComponents.test.cjs`:
    - Encaminhamento de `accessibilityHint` no Pressable interativo do `Card`.
 3. `npm test`:
-   - Regressão completa de todas as 414+ asserções do aplicativo.
+   - Regressão completa do aplicativo; registrar contagens e códigos de saída reais.
+
+Nesta revisão: nenhuma validação automatizada foi executada pelo Codex ou relatada pelo responsável; houve apenas inspeção estática. Testes, lint, typecheck e build permanecem pendentes. Nenhuma homologação ou prontidão para merge é declarada.
 
 ---
 

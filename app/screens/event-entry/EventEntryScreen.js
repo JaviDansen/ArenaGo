@@ -33,11 +33,11 @@ export function validateAndNormalizeQrCode(raw) {
   if (/^(?:https?|ftp|javascript|data|file):/i.test(trimmed) || /[\r\n\t]/.test(trimmed)) {
     return { ok: false, error: 'O QR Code escaneado não é um código de evento válido.' };
   }
-  if (trimmed.length > 64) {
-    return { ok: false, error: 'Código de evento excessivamente longo.' };
+  if (trimmed.length < 4 || trimmed.length > 64) {
+    return { ok: false, error: 'O código do evento deve ter de 4 a 64 caracteres.' };
   }
-  // Permite grupos ASCII alfanuméricos com hífens ou underscores
-  if (!/^[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*$/.test(trimmed)) {
+  // Segue o contrato de grupos ASCII alfanuméricos separados por hífens.
+  if (!/^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$/.test(trimmed)) {
     return { ok: false, error: 'O QR Code deve conter apenas caracteres alfanuméricos e hífens.' };
   }
   return { ok: true, code: trimmed };
@@ -61,6 +61,7 @@ export default function EventEntryScreen({ navigation, route }) {
 
   // Controle de concorrência e ciclo de vida
   const isScanningRef = useRef(false);
+  const isManualLookupRef = useRef(false);
   const scanSequenceRef = useRef(0);
   const isMountedRef = useRef(true);
 
@@ -75,6 +76,7 @@ export default function EventEntryScreen({ navigation, route }) {
       isMountedRef.current = false;
       scanSequenceRef.current += 1;
       isScanningRef.current = false;
+      isManualLookupRef.current = false;
     };
   }, []);
 
@@ -82,6 +84,7 @@ export default function EventEntryScreen({ navigation, route }) {
     if (!isFocused) {
       scanSequenceRef.current += 1;
       isScanningRef.current = false;
+      isManualLookupRef.current = false;
       setScanned(false);
     }
   }, [isFocused]);
@@ -89,6 +92,7 @@ export default function EventEntryScreen({ navigation, route }) {
   function switchMode(newMode) {
     scanSequenceRef.current += 1;
     isScanningRef.current = false;
+    isManualLookupRef.current = false;
     setScanned(false);
     setScanError(null);
     setLocalError(null);
@@ -97,16 +101,23 @@ export default function EventEntryScreen({ navigation, route }) {
   }
 
   async function handleContinue() {
-    if (loading) return;
+    if (loading || isManualLookupRef.current) return;
     const code = eventCode.trim();
     if (!code) {
       setLocalError('Digite o código do evento.');
       return;
     }
     setLocalError(null);
-    const result = await lookupEvent(code);
-    if (result?.kind === 'found' && isCurrentAdmission()) {
-      navigation.navigate('EventConfirmation', { event: result.event, eligibility: result.eligibility });
+    const currentSequence = ++scanSequenceRef.current;
+    isManualLookupRef.current = true;
+    try {
+      const result = await lookupEvent(code);
+      if (isMountedRef.current && currentSequence === scanSequenceRef.current &&
+          result?.kind === 'found' && isCurrentAdmission()) {
+        navigation.navigate('EventConfirmation', { event: result.event, eligibility: result.eligibility });
+      }
+    } finally {
+      if (currentSequence === scanSequenceRef.current) isManualLookupRef.current = false;
     }
   }
 
@@ -148,8 +159,8 @@ export default function EventEntryScreen({ navigation, route }) {
     } catch {
       if (isMountedRef.current && currentSequence === scanSequenceRef.current) {
         setScanError('Erro ao consultar o evento. Verifique sua conexão e tente novamente.');
+        isScanningRef.current = false;
       }
-      isScanningRef.current = false;
     }
   }
 
@@ -255,7 +266,7 @@ export default function EventEntryScreen({ navigation, route }) {
           ) : isFocused ? (
             <View style={styles.cameraContainer}>
               <CameraView
-                style={StyleSheet.absoluteFillObject}
+                style={StyleSheet.absoluteFill}
                 facing="back"
                 barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
                 onBarcodeScanned={scanned || isScanningRef.current ? undefined : handleBarcodeScanned}
@@ -264,7 +275,7 @@ export default function EventEntryScreen({ navigation, route }) {
               />
 
               {/* Sobreposição visual de enquadramento */}
-              <View style={styles.overlay} pointerEvents="box-none">
+              <View style={styles.overlay} pointerEvents="box-none" testID="event-entry-scanner-overlay">
                 <View style={styles.overlayTop}>
                   <Text style={styles.scannerInstruction}>
                     Aponte a câmera para o QR Code do evento
@@ -624,7 +635,7 @@ const styles = StyleSheet.create({
     marginTop: spacing.md,
   },
   overlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     flexDirection: 'column',
   },
   overlayTop: {

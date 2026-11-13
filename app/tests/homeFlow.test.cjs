@@ -9,6 +9,7 @@ function renderHomeFlow(participation, extra = {}) {
   const screen = loadModule('screens/home/HomeFlowScreen.js', (name) => {
     if (name === '@react-navigation/native') return { useIsFocused: () => true };
     if (name === 'react') return {
+      useEffect() {}, useRef: value => ({ current: value }), useState: value => [value, () => {}],
       useContext: () => ({
         participation,
         ...extra,
@@ -17,6 +18,9 @@ function renderHomeFlow(participation, extra = {}) {
       useEffect: () => {},
       useRef: (value) => ({ current: value }),
     };
+    if (name === '@react-navigation/native') return { useIsFocused: () => false };
+    if (name === '../../context/AuthContext') return { useAuth: () => null };
+    if (name === '../../services/participationHistoryService') return { fetchReturnEvaluationHistoryItem() { assert.fail('unexpected read'); } };
     if (name === 'react-native') return {
       Pressable: 'Pressable', Text: 'Text', View: 'View', StyleSheet: { create: (styles) => styles },
     };
@@ -85,7 +89,7 @@ test('HomeFlow encaminha a avaliação real para o stack raiz', () => {
   assert.equal(calls[0][1].historyItem, historyItem);
 });
 
-test('pendência no estado de retorno não abre avaliação ao renderizar a Home', () => {
+test('pendência sem finalização recente não navega durante a renderização da Home', () => {
   const result = renderHomeFlow(null, { status: 'ready', returnState: { pendingEvaluationParticipationIds: ['participation-a'] } });
   assert.equal(result.rendered.type, 'HomeScreen');
   assert.deepEqual(result.navigationCalls, []);

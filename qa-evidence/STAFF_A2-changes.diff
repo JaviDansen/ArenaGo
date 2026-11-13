@@ -1,0 +1,358 @@
+diff --git a/app/screens/staff/StaffEntryControlRealScreen.js b/app/screens/staff/StaffEntryControlRealScreen.js
+index 855465b..77c0d77 100644
+--- a/app/screens/staff/StaffEntryControlRealScreen.js
++++ b/app/screens/staff/StaffEntryControlRealScreen.js
+@@ -29,14 +29,29 @@ export default function StaffEntryControlRealScreen({ event, isEventCurrent, onB
+   });
+   const store = storeRef.current;
+   const [snapshot, setSnapshot] = useState(store.getSnapshot());
++  const [notice, setNotice] = useState(null);
++  const autoAttempt = useRef(null);
+   const [dialog, setDialog] = useState(null), dialogRef = useRef(null);
+   dialogRef.current = dialog;
+   const epoch = auth.getSessionEpoch(), revision = auth.getIdentityRevision();
+   useEffect(() => store.subscribe(setSnapshot), [store]);
+   useEffect(() => {
++    autoAttempt.current = null; setNotice(null);
+     store.setContext(getContext()); setDialog(null); void store.refresh();
+     return () => { dialogRef.current = null; store.setContext(null); };
+   }, [store, event.id, auth.user?.id, auth.sessionId, epoch, revision]);
++  useEffect(() => {
++    const intent = snapshot.pending, scope = snapshot.context;
++    if (intent?.phase !== 'terminal' || snapshot.status !== 'ready' || snapshot.busy || !store.isCurrent(scope) ||
++        !['userId', 'sessionId', 'eventId'].every(key => intent[key] === scope[key]) ||
++        autoAttempt.current === intent.key) return;
++    autoAttempt.current = intent.key;
++    void (async () => {
++      const result = await store.acknowledge(intent.key);
++      if (result.kind === 'done' && store.isCurrent(scope)) setNotice({ key: intent.key, outcome: intent.outcome, operation: intent.kind });
++      if (result.kind === 'blocked') autoAttempt.current = null;
++    })();
++  }, [snapshot, store]);
+   if (!store.isCurrent(snapshot.context)) return null;
+   const ownPending = snapshot.pending && ['userId', 'sessionId', 'eventId'].every(key => snapshot.pending[key] === snapshot.context[key]);
+   const pending = ownPending ? snapshot.pending : null;
+@@ -46,17 +61,16 @@ export default function StaffEntryControlRealScreen({ event, isEventCurrent, onB
+     if (disabled || dialogRef.current || !store.isCurrent(snapshot.context) ||
+         (action.kind === 'call' ? !snapshot.data.canCall
+           : action.kind !== 'toggle' || action.enabled !== true || !snapshot.data.canManage || snapshot.data.externalQueueEnabled)) return;
+-    return store.mutate(action);
++    setNotice(null); return store.mutate(action);
+   };
+   const open = (action) => { if (!disabled && store.isCurrent()) setDialog({ action, context: snapshot.context }); };
+   const confirm = (expected) => {
+     if (!expected || dialogRef.current !== expected || !store.isCurrent(expected.context)) return;
+-    dialogRef.current = null; setDialog(null); return store.mutate(expected.action);
++    dialogRef.current = null; setDialog(null); setNotice(null); return store.mutate(expected.action);
+   };
+-  const refresh = () => { dialogRef.current = null; setDialog(null); void store.refresh(); };
++  const refresh = () => { dialogRef.current = null; setDialog(null); autoAttempt.current = null; void store.refresh(); };
+   const errors = { session: 'Sessão inválida. Verifique sua sessão ou entre novamente.', denied: 'Acesso ao evento indisponível. Atualize seus eventos autorizados.',
+     network: 'Não foi possível conectar. Verifique sua conexão e atualize.', unavailable: 'Não foi possível consultar a fila de entrada. Tente atualizar.' };
+-  const confirmed = pending?.phase === 'terminal' && pending.outcome.kind === 'confirmed';
+   return <View style={styles.content}>
+     <Text style={styles.title}>Controle de Entrada</Text>
+     <Text style={styles.text}>Fila de acesso ao evento</Text>
+@@ -100,13 +114,14 @@ export default function StaffEntryControlRealScreen({ event, isEventCurrent, onB
+       <Text style={styles.warning}>Há uma solicitação registrada que ainda não foi enviada.</Text>
+       <Button label="Descartar solicitação não enviada" disabled={snapshot.busy} onPress={() => { void store.cancelReserved(pending.key); }} />
+     </>}
+-    {pending?.phase === 'terminal' && <View accessibilityRole="alert" style={styles.card}>
+-      <Text style={confirmed ? styles.success : styles.warning}>{confirmed
+-        ? pending.kind !== 'toggle' ? ({call:'Participante chamado pelo servidor.',confirm_call:'Entrada confirmada pelo servidor.',absent:'Ausência registrada pelo servidor.',remove:'Participante removido da espera externa.'}[pending.kind] ?? 'Entrada confirmada pelo servidor.')
+-          : `Fila ${pending.outcome.result.externalQueueEnabled ? 'reativada' : 'desativada'}. Participantes liberados: ${pending.outcome.result.releasedCount}.`
+-        : pending.outcome.code === 'ENTRY_NOT_FIRST' ? 'A fila mudou. Confira o primeiro participante na lista atualizada.' : 'A solicitação foi recusada pelo servidor. Confira o estado atualizado.'}</Text>
+-      <Button label="Entendi" disabled={snapshot.busy} onPress={() => { void store.acknowledge(pending.key); }} />
+-    </View>}
++    {pending?.phase === 'terminal' && <Text accessibilityRole="alert" style={styles.warning}>
++      Resultado registrado; verificando o reconhecimento seguro. As alterações permanecem bloqueadas até a confirmação local.</Text>}
++    {notice && !snapshot.pending && !snapshot.storageError && <Text accessibilityRole="alert"
++      style={notice.outcome.kind === 'confirmed' ? styles.success : styles.warning}>
++      {notice.outcome.kind === 'confirmed'
++        ? notice.operation !== 'toggle' ? ({call:'Participante chamado pelo servidor.',confirm_call:'Entrada confirmada pelo servidor.',absent:'Ausência registrada pelo servidor.',remove:'Participante removido da espera externa.'}[notice.operation] ?? 'Entrada confirmada pelo servidor.')
++          : `Fila ${notice.outcome.result.externalQueueEnabled ? 'reativada' : 'desativada'}. Participantes liberados: ${notice.outcome.result.releasedCount}.`
++        : notice.outcome.code === 'ENTRY_NOT_FIRST' ? 'A fila mudou. Confira o primeiro participante na lista atualizada.' : 'A solicitação foi recusada pelo servidor. Confira o estado atualizado.'}</Text>}
+     <Button label="Atualizar fila de entrada" disabled={snapshot.busy || snapshot.status === 'loading'} onPress={refresh} />
+     <Button label="Voltar ao painel" onPress={onBack} />
+     <Modal transparent animationType="fade" visible={Boolean(dialog && store.isCurrent(dialog.context) && !snapshot.busy)}
+diff --git a/app/screens/staff/StaffStationOperationalScreen.js b/app/screens/staff/StaffStationOperationalScreen.js
+index 1bda9e0..cfff081 100644
+--- a/app/screens/staff/StaffStationOperationalScreen.js
++++ b/app/screens/staff/StaffStationOperationalScreen.js
+@@ -46,6 +46,8 @@ export default function StaffStationOperationalScreen({ event, experience, stati
+   const dialogRef = useRef(dialog);
+   dialogRef.current = dialog;
+   const dispatching = useRef(false);
++  const autoAttempt = useRef(null);
++  const acknowledging = useRef(false);
+   const generation = useRef(0);
+   const epoch = auth.getSessionEpoch(), revision = auth.getIdentityRevision();
+   const context = getContext();
+@@ -79,17 +81,46 @@ export default function StaffStationOperationalScreen({ event, experience, stati
+ 
+   useEffect(() => {
+     mounted.current = true;
++    autoAttempt.current = null;
+     void refresh();
+     return () => { mounted.current = false; generation.current++; dialogRef.current = null; };
+   }, [event.id, experience.id, station.id, auth.user?.id, auth.sessionId, epoch, revision]);
+ 
++  useEffect(() => {
++    const pending = view.pending, scope = view.scope;
++    if (!coordinator || view.status !== 'ready' || view.busy || pending?.kind !== 'terminal_pending' || !pending.receiptId ||
++        !same(scope, getContext()) || autoAttempt.current === pending.receiptId || acknowledging.current) return;
++    autoAttempt.current = pending.receiptId;
++    acknowledging.current = true;
++    setView(previous => ({ ...previous, busy: true }));
++    void (async () => {
++      const target = { ...scope, serviceSessionId: pending.serviceSessionId ?? null };
++      let verified = false;
++      try {
++        const cleanup = await coordinator.cleanupTerminal(target, pending.receiptId);
++        if (['terminal_pending', 'cleanup_pending'].includes(cleanup.kind) && same(scope, getContext())) {
++          await coordinator.acknowledgeTerminal(target, pending.receiptId);
++          // O marcador concluído e a ausência do recibo precisam ser confirmados por nova leitura.
++          const remaining = await coordinator.pending(scope);
++          verified = remaining.kind === 'none';
++        }
++      } catch { /* A releitura manterá o bloqueio se o armazenamento falhar. */ }
++      acknowledging.current = false;
++      if (same(scope, getContext())) {
++        if (verified) setView(previous => ({ ...previous, feedback: pending.outcome }));
++        setView(previous => ({ ...previous, busy: false }));
++        await refresh(true);
++      } else if (getContext()) void refresh();
++    })();
++  }, [view.pending, view.scope, coordinator]);
++
+   const blocked = !same(view.scope, context) || view.busy || view.status !== 'ready' || !coordinator ||
+-    dispatching.current || (view.pending && view.pending.kind !== 'none');
++    dispatching.current || acknowledging.current || (view.pending && view.pending.kind !== 'none');
+   const open = action => {
+     if (!blocked && context) setDialog({ action, context, observed: view.data });
+   };
+   async function dispatch(expected, fromDialog = false) {
+-    if (!expected || dispatching.current || !coordinator || (fromDialog && dialogRef.current !== expected) ||
++    if (!expected || dispatching.current || acknowledging.current || !coordinator || (fromDialog && dialogRef.current !== expected) ||
+         (!fromDialog && (expected.action.kind !== 'call' || dialogRef.current)) ||
+         !same(expected.context, getContext()) ||
+         !same(viewRef.current.scope, getContext()) || viewRef.current.busy || viewRef.current.status !== 'ready' ||
+@@ -119,16 +150,11 @@ export default function StaffStationOperationalScreen({ event, experience, stati
+ 
+   async function resolvePending(expected, scope) {
+     const pending = viewRef.current.pending;
+-    if (!coordinator || !same(scope, getContext()) || viewRef.current.busy || !pending || !expected ||
++    if (!coordinator || acknowledging.current || !same(scope, getContext()) || viewRef.current.busy || !pending || !expected ||
+         pending.kind !== expected.kind || !expected.receiptId || pending.receiptId !== expected.receiptId) return;
+     setView(previous => ({ ...previous, busy: true }));
+     try {
+       if (pending.kind === 'reserved') await coordinator.cancelReserved(scope, expected.receiptId);
+-      if (pending.kind === 'terminal_pending' && pending.receiptId) {
+-        const target = { ...scope, serviceSessionId: pending.serviceSessionId ?? null };
+-        const cleanup = await coordinator.cleanupTerminal(target, pending.receiptId);
+-        if (cleanup.kind === 'terminal_pending') await coordinator.acknowledgeTerminal(target, pending.receiptId);
+-      }
+     } catch { /* A intenção permanece bloqueada; nova leitura mostra o estado persistido. */ }
+     if (same(scope, getContext())) {
+       setView(previous => ({ ...previous, busy: false }));
+@@ -180,13 +206,11 @@ export default function StaffStationOperationalScreen({ event, experience, stati
+     {pending?.kind === 'pending_reconciliation' && <Text style={styles.warning}>Resultado incerto. Não repita a operação; peça reconciliação ao responsável.</Text>}
+     {pending?.kind === 'reserved' && <><Text style={styles.warning}>Solicitação registrada, ainda não enviada.</Text>
+       <Button label="Descartar solicitação não enviada" disabled={view.busy} onPress={() => resolvePending(pending, context)} /></>}
+-    {pending?.kind === 'terminal_pending' && <View style={styles.card}>
+-      <Text style={pending.outcome?.kind === 'confirmed' ? styles.success : styles.warning}>
+-        {pending.outcome?.kind === 'confirmed' ? 'Operação confirmada pelo servidor.' : 'Operação recusada pelo servidor.'}</Text>
+-      <Button label="Entendi o resultado" disabled={view.busy} onPress={() => resolvePending(pending, context)} />
+-    </View>}
++    {pending?.kind === 'terminal_pending' && <Text accessibilityRole="alert" style={styles.warning}>
++      Resultado registrado; reconhecimento seguro pendente. As operações permanecem bloqueadas.</Text>}
+     {pending?.kind === 'storage_error' && <Text style={styles.warning}>Não foi possível verificar a intenção persistida. Operações bloqueadas.</Text>}
+-    <Button label="Atualizar atendimento" disabled={view.busy || view.status === 'loading'} onPress={() => refresh()} />
++    <Button label="Atualizar atendimento" disabled={view.busy || view.status === 'loading'}
++      onPress={() => { autoAttempt.current = null; void refresh(); }} />
+     <Modal transparent animationType="fade" visible={Boolean(dialog && same(dialog.context, getContext()) && !view.busy)}
+       onRequestClose={() => { dialogRef.current = null; setDialog(null); }}>
+       <View style={styles.backdrop}><View style={styles.card} accessibilityViewIsModal>
+diff --git a/app/services/staffEntryService.js b/app/services/staffEntryService.js
+index 67cfd98..a7db299 100644
+--- a/app/services/staffEntryService.js
++++ b/app/services/staffEntryService.js
+@@ -155,10 +155,16 @@ export function createStaffEntryStore({ client, storage, createKey, getContext }
+         intent.phase !== (cancel ? 'reserved' : 'terminal')) return { kind: 'blocked' };
+     publish({ busy: true });
+     try {
+-      const done = await storage[cancel ? 'cancelReserved' : 'acknowledge'](intent);
++      let writeFailed = false;
++      try { await storage[cancel ? 'cancelReserved' : 'acknowledge'](intent); }
++      catch { writeFailed = true; }
++      const persisted = await storage.get(context.userId);
+       if (!isCurrent(context)) return { kind: 'stale' };
+-      if (done) publish({ pending: null, feedback: null, storageError: false, knownOutcome: null });
+-      return { kind: done ? 'done' : 'blocked' };
++      const verified = persisted?.key === key && persisted.phase === (cancel ? 'cancelled' : 'acknowledged') &&
++        owns(persisted, context);
++      if (verified) publish({ pending: null, feedback: null, storageError: false, knownOutcome: null });
++      if (writeFailed && !verified) publish({ storageError: true });
++      return { kind: verified ? 'done' : writeFailed ? 'storage_error' : 'blocked' };
+     } catch { if (isCurrent(context)) publish({ storageError: true }); return { kind: isCurrent(context) ? 'storage_error' : 'stale' }; }
+     finally { if (isCurrent(context)) { publish({ busy: false }); await refresh(); } }
+   }
+diff --git a/app/tests/roleRoutingIntegration.test.cjs b/app/tests/roleRoutingIntegration.test.cjs
+index 0a9be44..0651d06 100644
+--- a/app/tests/roleRoutingIntegration.test.cjs
++++ b/app/tests/roleRoutingIntegration.test.cjs
+@@ -156,6 +156,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+       await Renderer.act(async () => { await buttons[0].props.onPress(); });
+     },
+     modal() { return tree.root.findByType('Modal'); },
++    hasButton(label) { return tree.root.findAllByType('Pressable').some(node => node.props.accessibilityLabel === label); },
+     handler(label) { return tree.root.findAllByType('Pressable').find(node => node.props.accessibilityLabel === label).props.onPress; },
+     confirmHandler() { return tree.root.findAllByType('Pressable')
+       .find((node) => node.props.accessibilityLabel === 'CONFIRMAR').props.onPress; },
+@@ -352,8 +353,8 @@ test('tela real remove chamado somente após confirmação e atualiza estação
+     await app.press('Remover da fila'); await app.press('CONFIRMAR OPERAÇÃO');
+     assert.equal(posts, 1); assert.ok(!app.hasText('Participante chamado: Ana'));
+     assert.ok(app.hasText('Operação confirmada pelo servidor.'));
++    assert.equal(app.hasButton('Entendi o resultado'), false);
+     await app.press('Atualizar atendimento'); assert.equal(posts, 1);
+-    await app.press('Entendi o resultado'); assert.equal(posts, 1);
+   } finally { app.dispose(); }
+ });
+ 
+@@ -469,9 +470,9 @@ test('chamada direta da estação capturada antes do logout não envia POST', {
+   } finally { app.dispose(); }
+ });
+ 
+-test('tela da estação recupera reconhecimento após exclusão ambígua e não reconhece recibo posterior', { skip }, async () => {
++test('tela da estação recupera reconhecimento automático após exclusão ambígua', { skip }, async () => {
+   const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
+-  const keyA = '50000000-0000-4000-8000-000000000001', keyB = '50000000-0000-4000-8000-000000000002';
++  const keyA = '50000000-0000-4000-8000-000000000001';
+   const serviceId = '88888888-8888-4888-8888-888888888888', entryId = '77777777-7777-4777-8777-777777777777';
+   const record = key => ({ userId: staffUser.id, sessionId: staffUser.sessionId, eventId: staffEvent.id,
+     experienceId: realExperienceId, stationId: realStation.id, serviceSessionId: null,
+@@ -495,20 +496,14 @@ test('tela da estação recupera reconhecimento após exclusão ambígua e não
+     await app.press('Selecionar estação Estação real'); return app;
+   }
+   const first = await open();
+-  assert.ok(first.hasText('Operação confirmada pelo servidor.'));
+-  await first.press('Entendi o resultado');
++  assert.equal(first.hasButton('Entendi o resultado'), false);
+   assert.equal(values.has(`${slot}.receipt`), false);
+   assert.equal(JSON.parse(values.get(`${slot}.ack`)).status, 'pending');
+   first.dispose();
+   const restarted = await open(true);
+-  const staleA = restarted.handler('Entendi o resultado');
+-  await restarted.press('Entendi o resultado');
+   assert.equal(JSON.parse(values.get(`${slot}.ack`)).status, 'completed');
+-  values.set(`${slot}.receipt`, JSON.stringify(record(keyB)));
+-  await restarted.press('Atualizar atendimento');
+-  await restarted.act(async () => staleA());
+-  assert.equal(JSON.parse(values.get(`${slot}.receipt`)).key, keyB);
+   assert.ok(restarted.hasText('Operação confirmada pelo servidor.'));
++  assert.equal(restarted.hasButton('Entendi o resultado'), false);
+   restarted.dispose();
+ });
+ 
+@@ -735,7 +730,7 @@ test('Controle de Entrada real confirma primeiro, desativa, reativa e volta pres
+   await app.act(async () => { await Promise.all([call(), call()]); });
+   assert.equal(app.modal().props.visible, false);
+   assert.equal(requests.filter(r => r.method === 'POST').length, 1);
+-  await app.press('Entendi');
++  assert.equal(app.hasButton('Entendi'), false);
+   assert.ok(app.hasText('Participante chamado: Ana'));
+   assert.ok(app.hasText('Confirmar entrada')); assert.ok(app.hasText('Marcar ausência')); assert.ok(app.hasText('Remover da fila'));
+   await app.press('Marcar ausência'); assert.equal(app.modal().props.visible, true);
+@@ -744,14 +739,14 @@ test('Controle de Entrada real confirma primeiro, desativa, reativa e volta pres
+   await app.press('CANCELAR ALTERAÇÃO');
+   await app.press('Confirmar entrada'); await app.press('CONFIRMAR ALTERAÇÃO');
+   assert.ok(app.hasText('Entrada confirmada pelo servidor')); assert.ok(app.hasText('1. Bia'));
+-  await app.press('Entendi'); await app.press('Desativar fila externa'); assert.equal(app.modal().props.visible, true);
++  await app.press('Desativar fila externa'); assert.equal(app.modal().props.visible, true);
+   await app.press('CANCELAR ALTERAÇÃO'); assert.equal(requests.filter(r => r.method === 'PATCH').length, 0);
+   await app.press('Desativar fila externa'); await app.press('CONFIRMAR ALTERAÇÃO');
+-  assert.ok(app.hasText('Participantes liberados: 1')); await app.press('Entendi');
++  assert.ok(app.hasText('Participantes liberados: 1')); assert.equal(app.hasButton('Entendi'), false);
+   const reactivate = app.handler('Reativar fila externa');
+   await app.act(async () => { await Promise.all([reactivate(), reactivate()]); });
+   assert.equal(app.modal().props.visible, false);
+-  await app.press('Entendi');
++  assert.equal(app.hasButton('Entendi'), false);
+   assert.ok(app.hasText('Ninguém está aguardando')); await app.press('Voltar ao painel'); assert.ok(app.hasText('Painel operacional'));
+   assert.equal(requests.filter(r => r.method === 'POST').length, 2); assert.equal(requests.filter(r => r.method === 'PATCH').length, 2);
+   app.dispose();
+@@ -802,6 +797,31 @@ test('chamada direta externa mantém intenção incerta e não repete POST após
+   } finally { app.dispose(); }
+ });
+ 
++test('recusa definitiva da entrada é reconhecida sem toque e preserva feedback', { skip }, async () => {
++  const values = new Map(), at = '2026-11-10T15:00:00.000Z'; let posts = 0;
++  const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
++  const control = { realStaff: true, platformOS: 'android', events: [staffEvent],
++    secureStore: { getItemAsync: async key => values.get(key) ?? null,
++      setItemAsync: async (key, value) => { values.set(key, value); } },
++    http: async (route, options) => {
++      if (!route.includes('/entry-control')) return;
++      if (options.method === 'POST') { posts++; return { statusCode: 409, body: { code: 'ENTRY_NOT_FIRST' } }; }
++      return { eventId: staffEvent.id, externalQueueEnabled: true, canManage: true, pendingCall: null,
++        canCall: true, canConfirm: false, canMarkAbsent: false, canRemove: false, observedAt: at, waitingCount: 1,
++        waiting: [{ participationId: 'abcdef00-0000-4000-8000-000000000004', displayName: 'Ana', position: 1 }] };
++    } };
++  const app = createIntegration({ initialUser: staffUser, control });
++  try {
++    await app.mount(); await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
++    await app.press('Selecionar evento Evento autorizado'); await app.press('Controle de Entrada');
++    await app.press('Chamar próximo');
++    assert.equal(posts, 1);
++    assert.ok(app.hasText('A fila mudou. Confira o primeiro participante'));
++    assert.equal(app.hasButton('Entendi'), false);
++    assert.ok([...values.values()].some(raw => raw.includes('"phase":"acknowledged"')));
++  } finally { app.dispose(); }
++});
++
+ test('401 terminal no Controle de Entrada remove lista nominal e área Staff', { skip }, async () => {
+   let revoked = false;
+   const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
+diff --git a/docs/STAFF_A2_IMPLEMENTACAO.md b/docs/STAFF_A2_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..bb9492e
+--- /dev/null
++++ b/docs/STAFF_A2_IMPLEMENTACAO.md
+@@ -0,0 +1,37 @@
++# Staff A2 — reconhecimento terminal automático
++
++## Escopo e protocolo
++
++Antes da A2, as telas reais exigiam **Entendi** para reconhecer uma intenção terminal e liberar a próxima operação. Esse toque fazia uma transição persistida no Controle de Entrada; nas Estações, limpava a intenção e reconhecia o recibo pelo `receiptId` com marcador `.ack`.
++
++O reconhecimento de resultados confirmados e recusas definitivas agora começa automaticamente quando a tela encontra uma intenção terminal pertencente à conta, sessão, evento e, na Estação, estação atuais. O feedback permanece visível depois de concluído o reconhecimento. Não há alteração de endpoint, backend, migration, envio HTTP ou política de retry.
++
++## Controle de Entrada
++
++O store conserva `reserved → dispatching → terminal → acknowledged`. `acknowledge` agora confirma por nova leitura que a mesma chave chegou a `acknowledged`, inclusive se o SecureStore gravar a fase e depois rejeitar a promessa. Enquanto não houver comprovação, a intenção terminal ou o erro de armazenamento bloqueia novas mutações. A tela inicia uma tentativa por chave terminal, mostra o resultado após a confirmação segura e permite nova tentativa por atualização manual ou remontagem. Resultado `dispatching` e resultado incerto nunca são reconhecidos automaticamente.
++
++## Estações
++
++A tela captura o `receiptId` terminal, chama `cleanupTerminal` e `acknowledgeTerminal` com o escopo original e rele o coordenador antes de liberar ações. A operação só é tratada como encerrada quando a leitura confiável retorna `none`; o marcador `.ack` pendente mantém o recibo recuperável após exclusão ambígua. Um callback antigo não reconhece outro `receiptId`. A tentativa é única por recibo em cada montagem; a atualização manual ou nova montagem permite recuperar uma falha transitória. A tela preserva o resultado visual de sucesso ou recusa enquanto a intenção persistida deixa de bloquear.
++
++Em ambos os fluxos, logout e troca de contexto invalidam publicações antigas. Dois toques continuam protegidos pelos bloqueios e pela serialização dos adaptadores. Falhas de armazenamento, `dispatching` e resultados incertos permanecem bloqueados, sem reenvio automático de POST ou PATCH.
++
++## Validação automatizada
++
++Luna Medium executou os testes focados: **119 aprovados, 0 falhos, 0 ignorados, exit code 0**. A regressão completa do aplicativo teve **524 aprovados, 0 falhos, 0 ignorados, exit code 0**. Foram executados com `NODE_ENV=test`, sem URLs de banco herdadas.
++
++Os cenários automatizados relevantes incluem reconhecimento automático, confirmação de persistência antes da liberação, recusa definitiva, remontagem, falhas de gravação e exclusão ambíguas, proteção do recibo posterior, logout, troca de contexto e ausência de reenvio para resultado incerto. `git diff --check` e a conferência reversa da evidência passaram, ambos com código 0.
++
++## Homologação funcional no Expo Go
++
++O responsável informou uma campanha manual no banco local isolado `arenago_staff_homolog_geral_20261111`, no evento ArenaGo — Homologação Geral, na Experiência de Homologação Geral e Estação 01, usando conta Staff sintética e participantes fictícios P1, P2 e P5. As contas já existiam; nenhuma fixture de contas, migration ou seed foi repetida.
++
++Na Estação 01, P1 entrou pela API oficial, foi chamado sem confirmação prévia e teve feedback sem **Entendi**. O atendimento foi concluído com confirmação prévia; P2 pôde ser chamado em seguida. A ausência de P2 também manteve a confirmação prévia e terminou sem reconhecimento manual.
++
++No Controle de Entrada, P5 teve participação anterior encerrada pela API oficial com autorização do responsável, entrou novamente no evento e apareceu na fila externa. Foi chamado sem confirmação prévia; as resoluções ficaram disponíveis sem **Entendi**. A entrada foi confirmada com diálogo prévio, e o controle voltou a permitir novas operações.
++
++Esta foi homologação funcional manual no Expo Go. Não foram provocadas falhas físicas do SecureStore nem resultados incertos, e os cenários observados não demonstram exaustivamente concorrência real, recuperação de falhas ou todo o protocolo. A validação do protocolo de intenções depende também da suíte automatizada; não se afirma homologação técnica exaustiva do backend ou do PostgreSQL.
++
++O reconhecimento automático só libera a operação seguinte após comprovação do encerramento persistido correto. Resultados incertos, `dispatching` e falhas de armazenamento permanecem bloqueados. Não foram informados horários, capturas ou logs da campanha, e este relatório não os presume. O estado final conhecido limita-se aos resultados descritos; nenhum estado posterior dos participantes foi fornecido.
++
++O protocolo continua limitado à serialização no mesmo runtime; não oferece recuperação histórica nem coordenação entre dispositivos.

@@ -1,0 +1,3435 @@
+diff --git a/backend/drizzle/meta/_journal.json b/backend/drizzle/meta/_journal.json
+index f18fb77..6c0538d 100644
+--- a/backend/drizzle/meta/_journal.json
++++ b/backend/drizzle/meta/_journal.json
+@@ -43,6 +43,13 @@
+       "when": 1794000000000,
+       "tag": "0006_admin_2fa_login",
+       "breakpoints": true
++    },
++    {
++      "idx": 6,
++      "version": "7",
++      "when": 1794200000000,
++      "tag": "0007_staff_idempotency_preparation",
++      "breakpoints": true
+     }
+   ]
+ }
+diff --git a/backend/src/database/schema/idempotency.schema.ts b/backend/src/database/schema/idempotency.schema.ts
+index a54dfbc..8e30a14 100644
+--- a/backend/src/database/schema/idempotency.schema.ts
++++ b/backend/src/database/schema/idempotency.schema.ts
+@@ -28,12 +28,38 @@ export const idempotencyOperations = pgTable(
+     resultPayload: jsonb("result_payload"),
+     createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull(),
+     expiresAt: timestamp("expires_at", { withTimezone: true, mode: "date" }).notNull(),
++    originSessionId: uuid("origin_session_id"),
++    originAssurance: varchar("origin_assurance", { length: 20 }).notNull().default("legacy"),
++    originEpochId: uuid("origin_epoch_id"),
++    resultState: varchar("result_state", { length: 20 }),
++    completedAt: timestamp("completed_at", { withTimezone: true, mode: "date" }),
++    resultRetainUntil: timestamp("result_retain_until", { withTimezone: true, mode: "date" }),
+   },
+   (table) => [
+     unique("uq_idempotency_actor_operation_key").on(table.actorUserId, table.operation, table.idempotencyKey),
+     index("ix_idempotency_expires").on(table.expiresAt),
+     check("ck_idempotency_status", sql`${table.status} IN ('in_progress','completed')`),
+     check("ck_idempotency_http_status", sql`(${table.status} = 'in_progress' AND ${table.httpStatus} IS NULL) OR (${table.status} = 'completed' AND ${table.httpStatus} IS NOT NULL)`),
++    // Etapa A: ainda não existe caminho autorizado para prova ou compactação.
++    check("ck_idempotency_staff_preparation_disabled", sql`${table.originAssurance} = 'legacy' AND ${table.originSessionId} IS NULL AND ${table.originEpochId} IS NULL AND ${table.resultState} IS NULL AND ${table.completedAt} IS NULL AND ${table.resultRetainUntil} IS NULL`),
+     foreignKey({ name: "fk_idempotency_actor", columns: [table.actorUserId], foreignColumns: [users.id] }),
+   ],
+ );
++
++/** Marcos são somente planejados nesta etapa; nenhum estado ativo é aceito. */
++export const staffIdempotencyEpochs = pgTable(
++  "staff_idempotency_epochs",
++  {
++    id: uuid("id").primaryKey(),
++    controlsVersion: varchar("controls_version", { length: 80 }).notNull(),
++    status: varchar("status", { length: 20 }).notNull().default("pending"),
++    changeReference: varchar("change_reference", { length: 128 }),
++    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
++    activatedAt: timestamp("activated_at", { withTimezone: true, mode: "date" }),
++    invalidatedAt: timestamp("invalidated_at", { withTimezone: true, mode: "date" }),
++  },
++  (table) => [
++    check("ck_staff_idempotency_epoch_pending", sql`${table.status} = 'pending' AND ${table.activatedAt} IS NULL AND ${table.invalidatedAt} IS NULL`),
++    check("ck_staff_idempotency_epoch_version", sql`length(btrim(${table.controlsVersion})) > 0`),
++  ],
++);
+diff --git a/backend/test/unit/schema.test.ts b/backend/test/unit/schema.test.ts
+index da7f141..4383aed 100644
+--- a/backend/test/unit/schema.test.ts
++++ b/backend/test/unit/schema.test.ts
+@@ -3,17 +3,17 @@ import { test } from "node:test";
+ import { getTableName } from "drizzle-orm";
+ import * as schema from "../../src/database/schema";
+ 
+-test("schema exporta as 24 tabelas do dicionário v0.6.12 uma única vez", () => {
++test("schema exporta as tabelas existentes e a preparação de marcos uma única vez", () => {
+   const tables = Object.values(schema);
+   const names = tables.map((table) => getTableName(table));
+-  assert.equal(names.length, 24);
+-  assert.equal(new Set(names).size, 24);
++  assert.equal(names.length, 25);
++  assert.equal(new Set(names).size, 25);
+   assert.equal(getTableName(schema.adminTwoFactorChallenges), "admin_2fa_challenges");
+   assert.deepEqual(new Set(names), new Set([
+     "users", "questionnaire_versions", "profiles", "games", "user_games",
+     "sessions", "refresh_tokens", "password_reset_tokens", "email_verification_tokens",
+     "user_roles", "user_totp_credentials", "user_backup_codes", "totp_activation_tokens", "audit_logs",
+     "events", "experiences", "stations", "participations", "queue_entries", "service_sessions",
+-    "evaluations", "participation_profile_snapshots", "idempotency_operations", "admin_2fa_challenges",
++    "evaluations", "participation_profile_snapshots", "idempotency_operations", "admin_2fa_challenges", "staff_idempotency_epochs",
+   ]));
+ });
+diff --git a/backend/drizzle/0007_staff_idempotency_preparation.sql b/backend/drizzle/0007_staff_idempotency_preparation.sql
+new file mode 100644
+index 0000000..f6e30b0
+--- /dev/null
++++ b/backend/drizzle/0007_staff_idempotency_preparation.sql
+@@ -0,0 +1,52 @@
++ALTER TABLE "public"."idempotency_operations"
++  ADD COLUMN "origin_session_id" uuid,
++  ADD COLUMN "origin_assurance" varchar(20) DEFAULT 'legacy' NOT NULL,
++  ADD COLUMN "origin_epoch_id" uuid,
++  ADD COLUMN "result_state" varchar(20),
++  ADD COLUMN "completed_at" timestamp with time zone,
++  ADD COLUMN "result_retain_until" timestamp with time zone;
++--> statement-breakpoint
++ALTER TABLE "public"."idempotency_operations" ADD CONSTRAINT "ck_idempotency_staff_preparation_disabled"
++  CHECK ("origin_assurance" = 'legacy' AND "origin_session_id" IS NULL AND "origin_epoch_id" IS NULL
++    AND "result_state" IS NULL AND "completed_at" IS NULL AND "result_retain_until" IS NULL);
++--> statement-breakpoint
++CREATE TABLE "public"."staff_idempotency_epochs" (
++  "id" uuid PRIMARY KEY NOT NULL,
++  "controls_version" varchar(80) NOT NULL,
++  "status" varchar(20) DEFAULT 'pending' NOT NULL,
++  "change_reference" varchar(128),
++  "created_at" timestamp with time zone DEFAULT now() NOT NULL,
++  "activated_at" timestamp with time zone,
++  "invalidated_at" timestamp with time zone,
++  CONSTRAINT "ck_staff_idempotency_epoch_pending" CHECK ("status" = 'pending' AND "activated_at" IS NULL AND "invalidated_at" IS NULL),
++  CONSTRAINT "ck_staff_idempotency_epoch_version" CHECK (length(btrim("controls_version")) > 0)
++);
++--> statement-breakpoint
++-- Controle local de UPDATE; não impede DELETE nem substitui proteção por papéis.
++CREATE FUNCTION "public"."staff_idempotency_preparation_guard"() RETURNS trigger
++LANGUAGE plpgsql SECURITY INVOKER SET search_path = pg_catalog AS $$
++BEGIN
++  IF OLD."operation" IN ('call_next', 'complete_service_session', 'absent_service_session')
++     OR NEW."operation" IN ('call_next', 'complete_service_session', 'absent_service_session') THEN
++    IF OLD."id" IS DISTINCT FROM NEW."id"
++       OR OLD."actor_user_id" IS DISTINCT FROM NEW."actor_user_id"
++       OR OLD."operation" IS DISTINCT FROM NEW."operation"
++       OR OLD."idempotency_key" IS DISTINCT FROM NEW."idempotency_key"
++       OR OLD."request_hash" IS DISTINCT FROM NEW."request_hash" THEN
++      RAISE EXCEPTION 'Identidade da operação Staff é imutável' USING ERRCODE = '23514';
++    END IF;
++    IF OLD."status" = 'completed' AND
++       (NEW."status" IS DISTINCT FROM OLD."status"
++        OR NEW."http_status" IS DISTINCT FROM OLD."http_status"
++        OR NEW."result_reference" IS DISTINCT FROM OLD."result_reference"
++        OR NEW."result_payload" IS DISTINCT FROM OLD."result_payload") THEN
++      RAISE EXCEPTION 'Resultado terminal Staff é imutável' USING ERRCODE = '23514';
++    END IF;
++  END IF;
++  RETURN NEW;
++END;
++$$;
++--> statement-breakpoint
++CREATE TRIGGER "tr_staff_idempotency_preparation_guard"
++  BEFORE UPDATE ON "public"."idempotency_operations"
++  FOR EACH ROW EXECUTE FUNCTION "public"."staff_idempotency_preparation_guard"();
+diff --git a/backend/drizzle/meta/0006_snapshot.json b/backend/drizzle/meta/0006_snapshot.json
+new file mode 100644
+index 0000000..3b3ee13
+--- /dev/null
++++ b/backend/drizzle/meta/0006_snapshot.json
+@@ -0,0 +1,2884 @@
++{
++  "id": "4be3a039-249b-4e41-9edd-124d3b188ff0",
++  "prevId": "75a960c4-0213-48f4-9edd-2b63d6a21c87",
++  "version": "7",
++  "dialect": "postgresql",
++  "tables": {
++    "public.games": {
++      "name": "games",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "uuid",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "name": {
++          "name": "name",
++          "type": "varchar(100)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "is_curated": {
++          "name": "is_curated",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": true,
++          "default": false
++        },
++        "created_by_user_id": {
++          "name": "created_by_user_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {
++        "uq_games_name_ci": {
++          "name": "uq_games_name_ci",
++          "columns": [
++            {
++              "expression": "lower(btrim(\"name\"))",
++              "asc": true,
++              "isExpression": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": true,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {
++        "fk_games_creator": {
++          "name": "fk_games_creator",
++          "tableFrom": "games",
++          "tableTo": "users",
++          "columnsFrom": [
++            "created_by_user_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "set null",
++          "onUpdate": "no action"
++        }
++      },
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {
++        "ck_games_name_nonempty": {
++          "name": "ck_games_name_nonempty",
++          "value": "length(btrim(\"games\".\"name\")) >= 1"
++        }
++      },
++      "isRLSEnabled": false
++    },
++    "public.profiles": {
++      "name": "profiles",
++      "schema": "",
++      "columns": {
++        "user_id": {
++          "name": "user_id",
++          "type": "uuid",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "birth_date": {
++          "name": "birth_date",
++          "type": "date",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "gender": {
++          "name": "gender",
++          "type": "varchar(30)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "other_gender": {
++          "name": "other_gender",
++          "type": "varchar(100)",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "education": {
++          "name": "education",
++          "type": "varchar(30)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "market_knowledge": {
++          "name": "market_knowledge",
++          "type": "varchar(50)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "market_interest": {
++          "name": "market_interest",
++          "type": "varchar(50)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "questionnaire_version_id": {
++          "name": "questionnaire_version_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "completed_at": {
++          "name": "completed_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {
++        "fk_profiles_user": {
++          "name": "fk_profiles_user",
++          "tableFrom": "profiles",
++          "tableTo": "users",
++          "columnsFrom": [
++            "user_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "no action",
++          "onUpdate": "no action"
++        },
++        "fk_profiles_qversion": {
++          "name": "fk_profiles_qversion",
++          "tableFrom": "profiles",
++          "tableTo": "questionnaire_versions",
++          "columnsFrom": [
++            "questionnaire_version_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "no action",
++          "onUpdate": "no action"
++        }
++      },
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {
++        "ck_profiles_gender": {
++          "name": "ck_profiles_gender",
++          "value": "\"profiles\".\"gender\" IN ('Feminino','Masculino','Outro','Prefiro não informar')"
++        },
++        "ck_profiles_other_gender": {
++          "name": "ck_profiles_other_gender",
++          "value": "(\"profiles\".\"gender\" = 'Outro' AND \"profiles\".\"other_gender\" IS NOT NULL AND length(btrim(\"profiles\".\"other_gender\")) BETWEEN 1 AND 100) OR (\"profiles\".\"gender\" <> 'Outro' AND \"profiles\".\"other_gender\" IS NULL)"
++        },
++        "ck_profiles_education": {
++          "name": "ck_profiles_education",
++          "value": "\"profiles\".\"education\" IN ('Fundamental','Médio','Superior','Pós-graduação','Prefiro não informar')"
++        },
++        "ck_profiles_market_knowledge": {
++          "name": "ck_profiles_market_knowledge",
++          "value": "\"profiles\".\"market_knowledge\" IN ('Sim, conheço.','Conheço um pouco.','Não conheço.')"
++        },
++        "ck_profiles_market_interest": {
++          "name": "ck_profiles_market_interest",
++          "value": "\"profiles\".\"market_interest\" IN ('Sim, tenho interesse.','Talvez — quero conhecer melhor.','Não tenho interesse.')"
++        }
++      },
++      "isRLSEnabled": false
++    },
++    "public.questionnaire_versions": {
++      "name": "questionnaire_versions",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "uuid",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "version": {
++          "name": "version",
++          "type": "varchar(40)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "definition": {
++          "name": "definition",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "activated_at": {
++          "name": "activated_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {
++        "uq_questionnaire_versions_version": {
++          "name": "uq_questionnaire_versions_version",
++          "nullsNotDistinct": false,
++          "columns": [
++            "version"
++          ]
++        }
++      },
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.user_games": {
++      "name": "user_games",
++      "schema": "",
++      "columns": {
++        "user_id": {
++          "name": "user_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "game_id": {
++          "name": "game_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {
++        "ix_user_games_game": {
++          "name": "ix_user_games_game",
++          "columns": [
++            {
++              "expression": "game_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {
++        "fk_user_games_user": {
++          "name": "fk_user_games_user",
++          "tableFrom": "user_games",
++          "tableTo": "users",
++          "columnsFrom": [
++            "user_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "no action",
++          "onUpdate": "no action"
++        },
++        "fk_user_games_game": {
++          "name": "fk_user_games_game",
++          "tableFrom": "user_games",
++          "tableTo": "games",
++          "columnsFrom": [
++            "game_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "no action",
++          "onUpdate": "no action"
++        }
++      },
++      "compositePrimaryKeys": {
++        "pk_user_games": {
++          "name": "pk_user_games",
++          "columns": [
++            "user_id",
++            "game_id"
++          ]
++        }
++      },
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.users": {
++      "name": "users",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "uuid",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "name": {
++          "name": "name",
++          "type": "varchar(150)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "email": {
++          "name": "email",
++          "type": "varchar(255)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "password_hash": {
++          "name": "password_hash",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "email_verified_at": {
++          "name": "email_verified_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "is_active": {
++          "name": "is_active",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": true,
++          "default": true
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {
++        "uq_users_email_ci": {
++          "name": "uq_users_email_ci",
++          "columns": [
++            {
++              "expression": "lower(btrim(\"email\"))",
++              "asc": true,
++              "isExpression": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": true,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.events": {
++      "name": "events",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "uuid",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "name": {
++          "name": "name",
++          "type": "varchar(180)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "access_code_normalized": {
++          "name": "access_code_normalized",
++          "type": "varchar(64)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "timezone": {
++          "name": "timezone",
++          "type": "varchar(80)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "starts_at": {
++          "name": "starts_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "official_ends_at": {
++          "name": "official_ends_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "operational_deadline_at": {
++          "name": "operational_deadline_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "status": {
++          "name": "status",
++          "type": "varchar(20)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "external_queue_enabled": {
++          "name": "external_queue_enabled",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "external_last_order": {
++          "name": "external_last_order",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "0"
++        },
++        "closure_mode": {
++          "name": "closure_mode",
++          "type": "varchar(20)",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "closure_requested_at": {
++          "name": "closure_requested_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "admin_deadline_at": {
++          "name": "admin_deadline_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {
++        "uq_events_access_code": {
++          "name": "uq_events_access_code",
++          "columns": [
++            {
++              "expression": "access_code_normalized",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": true,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {
++        "ck_events_status": {
++          "name": "ck_events_status",
++          "value": "\"events\".\"status\" IN ('scheduled','open','closing','closed')"
++        },
++        "ck_events_time": {
++          "name": "ck_events_time",
++          "value": "\"events\".\"starts_at\" < \"events\".\"official_ends_at\" AND \"events\".\"official_ends_at\" <= \"events\".\"operational_deadline_at\" AND \"events\".\"operational_deadline_at\" <= \"events\".\"official_ends_at\" + interval '1 hour'"
++        },
++        "ck_events_external_order": {
++          "name": "ck_events_external_order",
++          "value": "\"events\".\"external_last_order\" >= 0"
++        },
++        "ck_events_access_code": {
++          "name": "ck_events_access_code",
++          "value": "\"events\".\"access_code_normalized\" = upper(btrim(\"events\".\"access_code_normalized\"))"
++        },
++        "ck_events_closure_shape": {
++          "name": "ck_events_closure_shape",
++          "value": "(\"events\".\"closure_mode\" IS NULL AND \"events\".\"closure_requested_at\" IS NULL AND \"events\".\"admin_deadline_at\" IS NULL) OR (\"events\".\"closure_mode\" IN ('immediate','controlled') AND \"events\".\"closure_requested_at\" IS NOT NULL AND \"events\".\"admin_deadline_at\" IS NOT NULL)"
++        },
++        "ck_events_closure_deadline": {
++          "name": "ck_events_closure_deadline",
++          "value": "\"events\".\"closure_mode\" IS NULL OR (\"events\".\"closure_mode\" = 'immediate' AND \"events\".\"admin_deadline_at\" = \"events\".\"closure_requested_at\") OR (\"events\".\"closure_mode\" = 'controlled' AND \"events\".\"closure_requested_at\" < \"events\".\"admin_deadline_at\" AND \"events\".\"admin_deadline_at\" <= LEAST(\"events\".\"closure_requested_at\" + interval '1 hour', \"events\".\"operational_deadline_at\"))"
++        }
++      },
++      "isRLSEnabled": false
++    },
++    "public.experiences": {
++      "name": "experiences",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "uuid",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "event_id": {
++          "name": "event_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "name": {
++          "name": "name",
++          "type": "varchar(160)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "queue_accepting_entries": {
++          "name": "queue_accepting_entries",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": true,
++          "default": true
++        },
++        "last_queue_order": {
++          "name": "last_queue_order",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "0"
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {
++        "ix_experiences_event": {
++          "name": "ix_experiences_event",
++          "columns": [
++            {
++              "expression": "event_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {
++        "fk_experiences_event": {
++          "name": "fk_experiences_event",
++          "tableFrom": "experiences",
++          "tableTo": "events",
++          "columnsFrom": [
++            "event_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "no action",
++          "onUpdate": "no action"
++        }
++      },
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {
++        "uq_experiences_id_event": {
++          "name": "uq_experiences_id_event",
++          "nullsNotDistinct": false,
++          "columns": [
++            "id",
++            "event_id"
++          ]
++        }
++      },
++      "policies": {},
++      "checkConstraints": {
++        "ck_experiences_queue_order": {
++          "name": "ck_experiences_queue_order",
++          "value": "\"experiences\".\"last_queue_order\" >= 0"
++        }
++      },
++      "isRLSEnabled": false
++    },
++    "public.stations": {
++      "name": "stations",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "uuid",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "experience_id": {
++          "name": "experience_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "label": {
++          "name": "label",
++          "type": "varchar(120)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "availability": {
++          "name": "availability",
++          "type": "varchar(20)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {
++        "ix_stations_experience_availability": {
++          "name": "ix_stations_experience_availability",
++          "columns": [
++            {
++              "expression": "experience_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            },
++            {
++              "expression": "availability",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {
++        "fk_stations_experience": {
++          "name": "fk_stations_experience",
++          "tableFrom": "stations",
++          "tableTo": "experiences",
++          "columnsFrom": [
++            "experience_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "no action",
++          "onUpdate": "no action"
++        }
++      },
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {
++        "uq_stations_id_experience": {
++          "name": "uq_stations_id_experience",
++          "nullsNotDistinct": false,
++          "columns": [
++            "id",
++            "experience_id"
++          ]
++        }
++      },
++      "policies": {},
++      "checkConstraints": {
++        "ck_stations_availability": {
++          "name": "ck_stations_availability",
++          "value": "\"stations\".\"availability\" IN ('available','unavailable')"
++        }
++      },
++      "isRLSEnabled": false
++    },
++    "public.audit_logs": {
++      "name": "audit_logs",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "uuid",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "actor_user_id": {
++          "name": "actor_user_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "target_user_id": {
++          "name": "target_user_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "event_id": {
++          "name": "event_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "origin": {
++          "name": "origin",
++          "type": "varchar(12)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "category": {
++          "name": "category",
++          "type": "varchar(40)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "action": {
++          "name": "action",
++          "type": "varchar(80)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "reason": {
++          "name": "reason",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "metadata": {
++          "name": "metadata",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "'{}'::jsonb"
++        },
++        "occurred_at": {
++          "name": "occurred_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "redacted_at": {
++          "name": "redacted_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": false
++        }
++      },
++      "indexes": {
++        "ix_audit_logs_event_time": {
++          "name": "ix_audit_logs_event_time",
++          "columns": [
++            {
++              "expression": "event_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            },
++            {
++              "expression": "occurred_at",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        },
++        "ix_audit_logs_actor_time": {
++          "name": "ix_audit_logs_actor_time",
++          "columns": [
++            {
++              "expression": "actor_user_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            },
++            {
++              "expression": "occurred_at",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        },
++        "ix_audit_logs_target_time": {
++          "name": "ix_audit_logs_target_time",
++          "columns": [
++            {
++              "expression": "target_user_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            },
++            {
++              "expression": "occurred_at",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {
++        "fk_audit_logs_actor": {
++          "name": "fk_audit_logs_actor",
++          "tableFrom": "audit_logs",
++          "tableTo": "users",
++          "columnsFrom": [
++            "actor_user_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "set null",
++          "onUpdate": "no action"
++        },
++        "fk_audit_logs_target": {
++          "name": "fk_audit_logs_target",
++          "tableFrom": "audit_logs",
++          "tableTo": "users",
++          "columnsFrom": [
++            "target_user_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "set null",
++          "onUpdate": "no action"
++        },
++        "fk_audit_logs_event": {
++          "name": "fk_audit_logs_event",
++          "tableFrom": "audit_logs",
++          "tableTo": "events",
++          "columnsFrom": [
++            "event_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "no action",
++          "onUpdate": "no action"
++        }
++      },
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {
++        "ck_audit_logs_origin": {
++          "name": "ck_audit_logs_origin",
++          "value": "\"audit_logs\".\"origin\" IN ('user','system','cli')"
++        }
++      },
++      "isRLSEnabled": false
++    },
++    "public.email_verification_tokens": {
++      "name": "email_verification_tokens",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "uuid",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "user_id": {
++          "name": "user_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "email": {
++          "name": "email",
++          "type": "varchar(255)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "token_hash": {
++          "name": "token_hash",
++          "type": "char(64)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "expires_at": {
++          "name": "expires_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "verified_at": {
++          "name": "verified_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {
++        "fk_email_verification_tokens_user": {
++          "name": "fk_email_verification_tokens_user",
++          "tableFrom": "email_verification_tokens",
++          "tableTo": "users",
++          "columnsFrom": [
++            "user_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "no action",
++          "onUpdate": "no action"
++        }
++      },
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {
++        "uq_email_verification_tokens_hash": {
++          "name": "uq_email_verification_tokens_hash",
++          "nullsNotDistinct": false,
++          "columns": [
++            "token_hash"
++          ]
++        }
++      },
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.password_reset_tokens": {
++      "name": "password_reset_tokens",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "uuid",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "user_id": {
++          "name": "user_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "token_hash": {
++          "name": "token_hash",
++          "type": "char(64)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "expires_at": {
++          "name": "expires_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "used_at": {
++          "name": "used_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "ip_address": {
++          "name": "ip_address",
++          "type": "inet",
++          "primaryKey": false,
++          "notNull": false
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {
++        "fk_password_reset_tokens_user": {
++          "name": "fk_password_reset_tokens_user",
++          "tableFrom": "password_reset_tokens",
++          "tableTo": "users",
++          "columnsFrom": [
++            "user_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "no action",
++          "onUpdate": "no action"
++        }
++      },
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {
++        "uq_password_reset_tokens_hash": {
++          "name": "uq_password_reset_tokens_hash",
++          "nullsNotDistinct": false,
++          "columns": [
++            "token_hash"
++          ]
++        }
++      },
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.refresh_tokens": {
++      "name": "refresh_tokens",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "uuid",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "session_id": {
++          "name": "session_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "token_hash": {
++          "name": "token_hash",
++          "type": "char(64)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "consumed_at": {
++          "name": "consumed_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "is_revoked": {
++          "name": "is_revoked",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": true,
++          "default": false
++        },
++        "expires_at": {
++          "name": "expires_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {
++        "ix_refresh_tokens_session": {
++          "name": "ix_refresh_tokens_session",
++          "columns": [
++            {
++              "expression": "session_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        },
++        "uq_refresh_tokens_one_live_session": {
++          "name": "uq_refresh_tokens_one_live_session",
++          "columns": [
++            {
++              "expression": "session_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": true,
++          "where": "\"refresh_tokens\".\"consumed_at\" IS NULL AND \"refresh_tokens\".\"is_revoked\" = false",
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {
++        "fk_refresh_tokens_session": {
++          "name": "fk_refresh_tokens_session",
++          "tableFrom": "refresh_tokens",
++          "tableTo": "sessions",
++          "columnsFrom": [
++            "session_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "no action",
++          "onUpdate": "no action"
++        }
++      },
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {
++        "uq_refresh_tokens_hash": {
++          "name": "uq_refresh_tokens_hash",
++          "nullsNotDistinct": false,
++          "columns": [
++            "token_hash"
++          ]
++        }
++      },
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.sessions": {
++      "name": "sessions",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "uuid",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "user_id": {
++          "name": "user_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "expires_at": {
++          "name": "expires_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "last_activity_at": {
++          "name": "last_activity_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "revoked_at": {
++          "name": "revoked_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "revocation_reason": {
++          "name": "revocation_reason",
++          "type": "varchar(50)",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "admin_2fa_verified_at": {
++          "name": "admin_2fa_verified_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "ip_address": {
++          "name": "ip_address",
++          "type": "inet",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "user_agent": {
++          "name": "user_agent",
++          "type": "varchar(255)",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {
++        "uq_sessions_one_unrevoked_user": {
++          "name": "uq_sessions_one_unrevoked_user",
++          "columns": [
++            {
++              "expression": "user_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": true,
++          "where": "\"sessions\".\"revoked_at\" IS NULL",
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {
++        "fk_sessions_user": {
++          "name": "fk_sessions_user",
++          "tableFrom": "sessions",
++          "tableTo": "users",
++          "columnsFrom": [
++            "user_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "no action",
++          "onUpdate": "no action"
++        }
++      },
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.totp_activation_tokens": {
++      "name": "totp_activation_tokens",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "uuid",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "user_id": {
++          "name": "user_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "token_hash": {
++          "name": "token_hash",
++          "type": "char(64)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "issued_by": {
++          "name": "issued_by",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "expires_at": {
++          "name": "expires_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "used_at": {
++          "name": "used_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "revoked_at": {
++          "name": "revoked_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {
++        "fk_totp_activation_tokens_user": {
++          "name": "fk_totp_activation_tokens_user",
++          "tableFrom": "totp_activation_tokens",
++          "tableTo": "users",
++          "columnsFrom": [
++            "user_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "no action",
++          "onUpdate": "no action"
++        },
++        "fk_totp_activation_tokens_issuer": {
++          "name": "fk_totp_activation_tokens_issuer",
++          "tableFrom": "totp_activation_tokens",
++          "tableTo": "users",
++          "columnsFrom": [
++            "issued_by"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "set null",
++          "onUpdate": "no action"
++        }
++      },
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {
++        "uq_totp_activation_tokens_hash": {
++          "name": "uq_totp_activation_tokens_hash",
++          "nullsNotDistinct": false,
++          "columns": [
++            "token_hash"
++          ]
++        }
++      },
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.user_backup_codes": {
++      "name": "user_backup_codes",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "uuid",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "user_id": {
++          "name": "user_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "code_hash": {
++          "name": "code_hash",
++          "type": "char(64)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "used_at": {
++          "name": "used_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {
++        "fk_user_backup_codes_user": {
++          "name": "fk_user_backup_codes_user",
++          "tableFrom": "user_backup_codes",
++          "tableTo": "users",
++          "columnsFrom": [
++            "user_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "no action",
++          "onUpdate": "no action"
++        }
++      },
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {
++        "uq_user_backup_codes_hash": {
++          "name": "uq_user_backup_codes_hash",
++          "nullsNotDistinct": false,
++          "columns": [
++            "code_hash"
++          ]
++        }
++      },
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.user_roles": {
++      "name": "user_roles",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "uuid",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "user_id": {
++          "name": "user_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "role": {
++          "name": "role",
++          "type": "varchar(20)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "event_id": {
++          "name": "event_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "granted_by": {
++          "name": "granted_by",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "granted_at": {
++          "name": "granted_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "revoked_at": {
++          "name": "revoked_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "revoked_by": {
++          "name": "revoked_by",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": false
++        }
++      },
++      "indexes": {
++        "uq_user_roles_global_active": {
++          "name": "uq_user_roles_global_active",
++          "columns": [
++            {
++              "expression": "user_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            },
++            {
++              "expression": "role",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": true,
++          "where": "\"user_roles\".\"revoked_at\" IS NULL AND \"user_roles\".\"event_id\" IS NULL",
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        },
++        "uq_user_roles_event_active": {
++          "name": "uq_user_roles_event_active",
++          "columns": [
++            {
++              "expression": "user_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            },
++            {
++              "expression": "role",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            },
++            {
++              "expression": "event_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": true,
++          "where": "\"user_roles\".\"revoked_at\" IS NULL AND \"user_roles\".\"event_id\" IS NOT NULL",
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        },
++        "ix_user_roles_event_role_active": {
++          "name": "ix_user_roles_event_role_active",
++          "columns": [
++            {
++              "expression": "event_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            },
++            {
++              "expression": "role",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "where": "\"user_roles\".\"revoked_at\" IS NULL",
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {
++        "fk_user_roles_user": {
++          "name": "fk_user_roles_user",
++          "tableFrom": "user_roles",
++          "tableTo": "users",
++          "columnsFrom": [
++            "user_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "no action",
++          "onUpdate": "no action"
++        },
++        "fk_user_roles_event": {
++          "name": "fk_user_roles_event",
++          "tableFrom": "user_roles",
++          "tableTo": "events",
++          "columnsFrom": [
++            "event_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "no action",
++          "onUpdate": "no action"
++        },
++        "fk_user_roles_granted_by": {
++          "name": "fk_user_roles_granted_by",
++          "tableFrom": "user_roles",
++          "tableTo": "users",
++          "columnsFrom": [
++            "granted_by"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "set null",
++          "onUpdate": "no action"
++        },
++        "fk_user_roles_revoked_by": {
++          "name": "fk_user_roles_revoked_by",
++          "tableFrom": "user_roles",
++          "tableTo": "users",
++          "columnsFrom": [
++            "revoked_by"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "set null",
++          "onUpdate": "no action"
++        }
++      },
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {
++        "ck_user_roles_shape": {
++          "name": "ck_user_roles_shape",
++          "value": "\"user_roles\".\"role\" IN ('participante','staff','admin') AND ((\"user_roles\".\"role\" = 'staff' AND \"user_roles\".\"event_id\" IS NOT NULL) OR (\"user_roles\".\"role\" IN ('participante','admin') AND \"user_roles\".\"event_id\" IS NULL))"
++        }
++      },
++      "isRLSEnabled": false
++    },
++    "public.user_totp_credentials": {
++      "name": "user_totp_credentials",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "uuid",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "user_id": {
++          "name": "user_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "secret_encrypted": {
++          "name": "secret_encrypted",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "is_verified": {
++          "name": "is_verified",
++          "type": "boolean",
++          "primaryKey": false,
++          "notNull": true,
++          "default": false
++        },
++        "verified_at": {
++          "name": "verified_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "last_totp_counter": {
++          "name": "last_totp_counter",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": false
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {
++        "fk_user_totp_credentials_user": {
++          "name": "fk_user_totp_credentials_user",
++          "tableFrom": "user_totp_credentials",
++          "tableTo": "users",
++          "columnsFrom": [
++            "user_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "no action",
++          "onUpdate": "no action"
++        }
++      },
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {
++        "uq_user_totp_credentials_user": {
++          "name": "uq_user_totp_credentials_user",
++          "nullsNotDistinct": false,
++          "columns": [
++            "user_id"
++          ]
++        }
++      },
++      "policies": {},
++      "checkConstraints": {
++        "ck_user_totp_verified": {
++          "name": "ck_user_totp_verified",
++          "value": "(\"user_totp_credentials\".\"is_verified\" = false AND \"user_totp_credentials\".\"verified_at\" IS NULL) OR (\"user_totp_credentials\".\"is_verified\" = true AND \"user_totp_credentials\".\"verified_at\" IS NOT NULL)"
++        }
++      },
++      "isRLSEnabled": false
++    },
++    "public.evaluations": {
++      "name": "evaluations",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "uuid",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "participation_id": {
++          "name": "participation_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "rating": {
++          "name": "rating",
++          "type": "smallint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "comment": {
++          "name": "comment",
++          "type": "text",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "submitted_at": {
++          "name": "submitted_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "updated_at": {
++          "name": "updated_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "first_comment_at": {
++          "name": "first_comment_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": false
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {
++        "fk_evaluations_participation": {
++          "name": "fk_evaluations_participation",
++          "tableFrom": "evaluations",
++          "tableTo": "participations",
++          "columnsFrom": [
++            "participation_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "no action",
++          "onUpdate": "no action"
++        }
++      },
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {
++        "uq_evaluations_participation": {
++          "name": "uq_evaluations_participation",
++          "nullsNotDistinct": false,
++          "columns": [
++            "participation_id"
++          ]
++        }
++      },
++      "policies": {},
++      "checkConstraints": {
++        "ck_evaluations_rating": {
++          "name": "ck_evaluations_rating",
++          "value": "\"evaluations\".\"rating\" BETWEEN 1 AND 5"
++        }
++      },
++      "isRLSEnabled": false
++    },
++    "public.participation_profile_snapshots": {
++      "name": "participation_profile_snapshots",
++      "schema": "",
++      "columns": {
++        "participation_id": {
++          "name": "participation_id",
++          "type": "uuid",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "questionnaire_version_id": {
++          "name": "questionnaire_version_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "answers": {
++          "name": "answers",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "games_snapshot": {
++          "name": "games_snapshot",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "age_band_at_event": {
++          "name": "age_band_at_event",
++          "type": "varchar(30)",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "captured_at": {
++          "name": "captured_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {
++        "ix_snapshots_questionnaire_version": {
++          "name": "ix_snapshots_questionnaire_version",
++          "columns": [
++            {
++              "expression": "questionnaire_version_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {
++        "fk_snapshots_participation": {
++          "name": "fk_snapshots_participation",
++          "tableFrom": "participation_profile_snapshots",
++          "tableTo": "participations",
++          "columnsFrom": [
++            "participation_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "no action",
++          "onUpdate": "no action"
++        },
++        "fk_snapshots_qversion": {
++          "name": "fk_snapshots_qversion",
++          "tableFrom": "participation_profile_snapshots",
++          "tableTo": "questionnaire_versions",
++          "columnsFrom": [
++            "questionnaire_version_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "no action",
++          "onUpdate": "no action"
++        }
++      },
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {},
++      "isRLSEnabled": false
++    },
++    "public.participations": {
++      "name": "participations",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "uuid",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "user_id": {
++          "name": "user_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "event_id": {
++          "name": "event_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "status": {
++          "name": "status",
++          "type": "varchar(20)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "joined_at": {
++          "name": "joined_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "external_queue_order": {
++          "name": "external_queue_order",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "arena_entered_at": {
++          "name": "arena_entered_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "finished_at": {
++          "name": "finished_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "finish_reason": {
++          "name": "finish_reason",
++          "type": "varchar(40)",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "current_queue_entry_id": {
++          "name": "current_queue_entry_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": false
++        }
++      },
++      "indexes": {
++        "uq_participations_one_current_user": {
++          "name": "uq_participations_one_current_user",
++          "columns": [
++            {
++              "expression": "user_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": true,
++          "where": "\"participations\".\"status\" IN ('waiting','active')",
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        },
++        "ix_participations_event_status": {
++          "name": "ix_participations_event_status",
++          "columns": [
++            {
++              "expression": "event_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            },
++            {
++              "expression": "status",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        },
++        "ix_participations_user_joined": {
++          "name": "ix_participations_user_joined",
++          "columns": [
++            {
++              "expression": "user_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            },
++            {
++              "expression": "joined_at",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {
++        "fk_participations_user": {
++          "name": "fk_participations_user",
++          "tableFrom": "participations",
++          "tableTo": "users",
++          "columnsFrom": [
++            "user_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "no action",
++          "onUpdate": "no action"
++        },
++        "fk_participations_event": {
++          "name": "fk_participations_event",
++          "tableFrom": "participations",
++          "tableTo": "events",
++          "columnsFrom": [
++            "event_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "no action",
++          "onUpdate": "no action"
++        }
++      },
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {
++        "uq_participations_id_event": {
++          "name": "uq_participations_id_event",
++          "nullsNotDistinct": false,
++          "columns": [
++            "id",
++            "event_id"
++          ]
++        },
++        "uq_participations_event_external_order": {
++          "name": "uq_participations_event_external_order",
++          "nullsNotDistinct": false,
++          "columns": [
++            "event_id",
++            "external_queue_order"
++          ]
++        }
++      },
++      "policies": {},
++      "checkConstraints": {
++        "ck_participations_status": {
++          "name": "ck_participations_status",
++          "value": "\"participations\".\"status\" IN ('waiting','active','finished','canceled')"
++        },
++        "ck_participations_terminal": {
++          "name": "ck_participations_terminal",
++          "value": "(\"participations\".\"status\" IN ('waiting','active') AND \"participations\".\"finished_at\" IS NULL AND \"participations\".\"finish_reason\" IS NULL) OR (\"participations\".\"status\" IN ('finished','canceled') AND \"participations\".\"finished_at\" IS NOT NULL AND \"participations\".\"finish_reason\" IS NOT NULL)"
++        },
++        "ck_participations_waiting_arena": {
++          "name": "ck_participations_waiting_arena",
++          "value": "\"participations\".\"status\" <> 'waiting' OR \"participations\".\"arena_entered_at\" IS NULL"
++        },
++        "ck_participations_external_order": {
++          "name": "ck_participations_external_order",
++          "value": "\"participations\".\"external_queue_order\" IS NULL OR \"participations\".\"external_queue_order\" > 0"
++        }
++      },
++      "isRLSEnabled": false
++    },
++    "public.queue_entries": {
++      "name": "queue_entries",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "uuid",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "participation_id": {
++          "name": "participation_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "event_id": {
++          "name": "event_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "experience_id": {
++          "name": "experience_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "queue_order": {
++          "name": "queue_order",
++          "type": "bigint",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "status": {
++          "name": "status",
++          "type": "varchar(20)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "entered_at": {
++          "name": "entered_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "closed_at": {
++          "name": "closed_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "close_reason": {
++          "name": "close_reason",
++          "type": "varchar(40)",
++          "primaryKey": false,
++          "notNull": false
++        }
++      },
++      "indexes": {
++        "uq_queue_entries_one_active_participation": {
++          "name": "uq_queue_entries_one_active_participation",
++          "columns": [
++            {
++              "expression": "participation_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": true,
++          "where": "\"queue_entries\".\"status\" IN ('waiting','called')",
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        },
++        "ix_queue_entries_fifo": {
++          "name": "ix_queue_entries_fifo",
++          "columns": [
++            {
++              "expression": "experience_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            },
++            {
++              "expression": "queue_order",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            },
++            {
++              "expression": "id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "where": "\"queue_entries\".\"status\" = 'waiting'",
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {
++        "fk_queue_entries_participation_event": {
++          "name": "fk_queue_entries_participation_event",
++          "tableFrom": "queue_entries",
++          "tableTo": "participations",
++          "columnsFrom": [
++            "participation_id",
++            "event_id"
++          ],
++          "columnsTo": [
++            "id",
++            "event_id"
++          ],
++          "onDelete": "no action",
++          "onUpdate": "no action"
++        },
++        "fk_queue_entries_experience_event": {
++          "name": "fk_queue_entries_experience_event",
++          "tableFrom": "queue_entries",
++          "tableTo": "experiences",
++          "columnsFrom": [
++            "experience_id",
++            "event_id"
++          ],
++          "columnsTo": [
++            "id",
++            "event_id"
++          ],
++          "onDelete": "no action",
++          "onUpdate": "no action"
++        }
++      },
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {
++        "uq_queue_entries_id_participation": {
++          "name": "uq_queue_entries_id_participation",
++          "nullsNotDistinct": false,
++          "columns": [
++            "id",
++            "participation_id"
++          ]
++        },
++        "uq_queue_entries_id_experience": {
++          "name": "uq_queue_entries_id_experience",
++          "nullsNotDistinct": false,
++          "columns": [
++            "id",
++            "experience_id"
++          ]
++        },
++        "uq_queue_entries_experience_order": {
++          "name": "uq_queue_entries_experience_order",
++          "nullsNotDistinct": false,
++          "columns": [
++            "experience_id",
++            "queue_order"
++          ]
++        }
++      },
++      "policies": {},
++      "checkConstraints": {
++        "ck_queue_entries_status": {
++          "name": "ck_queue_entries_status",
++          "value": "\"queue_entries\".\"status\" IN ('waiting','called','closed')"
++        },
++        "ck_queue_entries_order": {
++          "name": "ck_queue_entries_order",
++          "value": "\"queue_entries\".\"queue_order\" > 0"
++        },
++        "ck_queue_entries_closed": {
++          "name": "ck_queue_entries_closed",
++          "value": "(\"queue_entries\".\"status\" = 'closed' AND \"queue_entries\".\"closed_at\" IS NOT NULL AND \"queue_entries\".\"close_reason\" IS NOT NULL) OR (\"queue_entries\".\"status\" IN ('waiting','called') AND \"queue_entries\".\"closed_at\" IS NULL AND \"queue_entries\".\"close_reason\" IS NULL)"
++        }
++      },
++      "isRLSEnabled": false
++    },
++    "public.service_sessions": {
++      "name": "service_sessions",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "uuid",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "queue_entry_id": {
++          "name": "queue_entry_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "experience_id": {
++          "name": "experience_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "station_id": {
++          "name": "station_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "called_by_user_id": {
++          "name": "called_by_user_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "called_at": {
++          "name": "called_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "status": {
++          "name": "status",
++          "type": "varchar(20)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "resolved_by_user_id": {
++          "name": "resolved_by_user_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "resolved_at": {
++          "name": "resolved_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "cancel_reason": {
++          "name": "cancel_reason",
++          "type": "varchar(40)",
++          "primaryKey": false,
++          "notNull": false
++        }
++      },
++      "indexes": {
++        "uq_service_sessions_pending_station": {
++          "name": "uq_service_sessions_pending_station",
++          "columns": [
++            {
++              "expression": "station_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": true,
++          "where": "\"service_sessions\".\"status\" = 'pending'",
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        },
++        "ix_service_sessions_experience_status_called": {
++          "name": "ix_service_sessions_experience_status_called",
++          "columns": [
++            {
++              "expression": "experience_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            },
++            {
++              "expression": "status",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            },
++            {
++              "expression": "called_at",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        },
++        "ix_service_sessions_resolved": {
++          "name": "ix_service_sessions_resolved",
++          "columns": [
++            {
++              "expression": "resolved_at",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {
++        "fk_service_sessions_called_by": {
++          "name": "fk_service_sessions_called_by",
++          "tableFrom": "service_sessions",
++          "tableTo": "users",
++          "columnsFrom": [
++            "called_by_user_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "set null",
++          "onUpdate": "no action"
++        },
++        "fk_service_sessions_resolved_by": {
++          "name": "fk_service_sessions_resolved_by",
++          "tableFrom": "service_sessions",
++          "tableTo": "users",
++          "columnsFrom": [
++            "resolved_by_user_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "set null",
++          "onUpdate": "no action"
++        },
++        "fk_service_sessions_queue_experience": {
++          "name": "fk_service_sessions_queue_experience",
++          "tableFrom": "service_sessions",
++          "tableTo": "queue_entries",
++          "columnsFrom": [
++            "queue_entry_id",
++            "experience_id"
++          ],
++          "columnsTo": [
++            "id",
++            "experience_id"
++          ],
++          "onDelete": "no action",
++          "onUpdate": "no action"
++        },
++        "fk_service_sessions_station_experience": {
++          "name": "fk_service_sessions_station_experience",
++          "tableFrom": "service_sessions",
++          "tableTo": "stations",
++          "columnsFrom": [
++            "station_id",
++            "experience_id"
++          ],
++          "columnsTo": [
++            "id",
++            "experience_id"
++          ],
++          "onDelete": "no action",
++          "onUpdate": "no action"
++        }
++      },
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {
++        "uq_service_sessions_queue_entry": {
++          "name": "uq_service_sessions_queue_entry",
++          "nullsNotDistinct": false,
++          "columns": [
++            "queue_entry_id"
++          ]
++        }
++      },
++      "policies": {},
++      "checkConstraints": {
++        "ck_service_sessions_status": {
++          "name": "ck_service_sessions_status",
++          "value": "\"service_sessions\".\"status\" IN ('pending','completed','absent','canceled')"
++        },
++        "ck_service_sessions_resolution": {
++          "name": "ck_service_sessions_resolution",
++          "value": "(\"service_sessions\".\"status\" = 'pending' AND \"service_sessions\".\"resolved_at\" IS NULL AND \"service_sessions\".\"resolved_by_user_id\" IS NULL AND \"service_sessions\".\"cancel_reason\" IS NULL) OR (\"service_sessions\".\"status\" IN ('completed','absent') AND \"service_sessions\".\"resolved_at\" IS NOT NULL AND \"service_sessions\".\"cancel_reason\" IS NULL) OR (\"service_sessions\".\"status\" = 'canceled' AND \"service_sessions\".\"resolved_at\" IS NOT NULL AND \"service_sessions\".\"cancel_reason\" IS NOT NULL)"
++        }
++      },
++      "isRLSEnabled": false
++    },
++    "public.idempotency_operations": {
++      "name": "idempotency_operations",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "uuid",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "actor_user_id": {
++          "name": "actor_user_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "operation": {
++          "name": "operation",
++          "type": "varchar(80)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "idempotency_key": {
++          "name": "idempotency_key",
++          "type": "varchar(128)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "request_hash": {
++          "name": "request_hash",
++          "type": "char(64)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "status": {
++          "name": "status",
++          "type": "varchar(20)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "http_status": {
++          "name": "http_status",
++          "type": "smallint",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "result_reference": {
++          "name": "result_reference",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "result_payload": {
++          "name": "result_payload",
++          "type": "jsonb",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "expires_at": {
++          "name": "expires_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "origin_session_id": {
++          "name": "origin_session_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "origin_assurance": {
++          "name": "origin_assurance",
++          "type": "varchar(20)",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "'legacy'"
++        },
++        "origin_epoch_id": {
++          "name": "origin_epoch_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "result_state": {
++          "name": "result_state",
++          "type": "varchar(20)",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "completed_at": {
++          "name": "completed_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "result_retain_until": {
++          "name": "result_retain_until",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": false
++        }
++      },
++      "indexes": {
++        "ix_idempotency_expires": {
++          "name": "ix_idempotency_expires",
++          "columns": [
++            {
++              "expression": "expires_at",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {
++        "fk_idempotency_actor": {
++          "name": "fk_idempotency_actor",
++          "tableFrom": "idempotency_operations",
++          "tableTo": "users",
++          "columnsFrom": [
++            "actor_user_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "no action",
++          "onUpdate": "no action"
++        }
++      },
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {
++        "uq_idempotency_actor_operation_key": {
++          "name": "uq_idempotency_actor_operation_key",
++          "nullsNotDistinct": false,
++          "columns": [
++            "actor_user_id",
++            "operation",
++            "idempotency_key"
++          ]
++        }
++      },
++      "policies": {},
++      "checkConstraints": {
++        "ck_idempotency_status": {
++          "name": "ck_idempotency_status",
++          "value": "\"idempotency_operations\".\"status\" IN ('in_progress','completed')"
++        },
++        "ck_idempotency_http_status": {
++          "name": "ck_idempotency_http_status",
++          "value": "(\"idempotency_operations\".\"status\" = 'in_progress' AND \"idempotency_operations\".\"http_status\" IS NULL) OR (\"idempotency_operations\".\"status\" = 'completed' AND \"idempotency_operations\".\"http_status\" IS NOT NULL)"
++        },
++        "ck_idempotency_staff_preparation_disabled": {
++          "name": "ck_idempotency_staff_preparation_disabled",
++          "value": "\"idempotency_operations\".\"origin_assurance\" = 'legacy' AND \"idempotency_operations\".\"origin_session_id\" IS NULL AND \"idempotency_operations\".\"origin_epoch_id\" IS NULL AND \"idempotency_operations\".\"result_state\" IS NULL AND \"idempotency_operations\".\"completed_at\" IS NULL AND \"idempotency_operations\".\"result_retain_until\" IS NULL"
++        }
++      },
++      "isRLSEnabled": false
++    },
++    "public.admin_2fa_challenges": {
++      "name": "admin_2fa_challenges",
++      "schema": "",
++      "columns": {
++        "jti": {
++          "name": "jti",
++          "type": "uuid",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "user_id": {
++          "name": "user_id",
++          "type": "uuid",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "issued_at": {
++          "name": "issued_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "expires_at": {
++          "name": "expires_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "consumed_at": {
++          "name": "consumed_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "invalidated_at": {
++          "name": "invalidated_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true
++        }
++      },
++      "indexes": {
++        "ix_admin_2fa_challenges_user_created": {
++          "name": "ix_admin_2fa_challenges_user_created",
++          "columns": [
++            {
++              "expression": "user_id",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            },
++            {
++              "expression": "created_at",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        },
++        "ix_admin_2fa_challenges_expires": {
++          "name": "ix_admin_2fa_challenges_expires",
++          "columns": [
++            {
++              "expression": "expires_at",
++              "isExpression": false,
++              "asc": true,
++              "nulls": "last"
++            }
++          ],
++          "isUnique": false,
++          "concurrently": false,
++          "method": "btree",
++          "with": {}
++        }
++      },
++      "foreignKeys": {
++        "fk_admin_2fa_challenges_user": {
++          "name": "fk_admin_2fa_challenges_user",
++          "tableFrom": "admin_2fa_challenges",
++          "tableTo": "users",
++          "columnsFrom": [
++            "user_id"
++          ],
++          "columnsTo": [
++            "id"
++          ],
++          "onDelete": "no action",
++          "onUpdate": "no action"
++        }
++      },
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {
++        "ck_admin_2fa_challenges_expiration": {
++          "name": "ck_admin_2fa_challenges_expiration",
++          "value": "\"admin_2fa_challenges\".\"expires_at\" > \"admin_2fa_challenges\".\"issued_at\" AND \"admin_2fa_challenges\".\"expires_at\" <= \"admin_2fa_challenges\".\"issued_at\" + interval '5 minutes'"
++        },
++        "ck_admin_2fa_challenges_terminal": {
++          "name": "ck_admin_2fa_challenges_terminal",
++          "value": "NOT (\"admin_2fa_challenges\".\"consumed_at\" IS NOT NULL AND \"admin_2fa_challenges\".\"invalidated_at\" IS NOT NULL)"
++        }
++      },
++      "isRLSEnabled": false
++    },
++    "public.staff_idempotency_epochs": {
++      "name": "staff_idempotency_epochs",
++      "schema": "",
++      "columns": {
++        "id": {
++          "name": "id",
++          "type": "uuid",
++          "primaryKey": true,
++          "notNull": true
++        },
++        "controls_version": {
++          "name": "controls_version",
++          "type": "varchar(80)",
++          "primaryKey": false,
++          "notNull": true
++        },
++        "status": {
++          "name": "status",
++          "type": "varchar(20)",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "'pending'"
++        },
++        "change_reference": {
++          "name": "change_reference",
++          "type": "varchar(128)",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "created_at": {
++          "name": "created_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": true,
++          "default": "now()"
++        },
++        "activated_at": {
++          "name": "activated_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": false
++        },
++        "invalidated_at": {
++          "name": "invalidated_at",
++          "type": "timestamp with time zone",
++          "primaryKey": false,
++          "notNull": false
++        }
++      },
++      "indexes": {},
++      "foreignKeys": {},
++      "compositePrimaryKeys": {},
++      "uniqueConstraints": {},
++      "policies": {},
++      "checkConstraints": {
++        "ck_staff_idempotency_epoch_pending": {
++          "name": "ck_staff_idempotency_epoch_pending",
++          "value": "\"staff_idempotency_epochs\".\"status\" = 'pending' AND \"staff_idempotency_epochs\".\"activated_at\" IS NULL AND \"staff_idempotency_epochs\".\"invalidated_at\" IS NULL"
++        },
++        "ck_staff_idempotency_epoch_version": {
++          "name": "ck_staff_idempotency_epoch_version",
++          "value": "length(btrim(\"staff_idempotency_epochs\".\"controls_version\")) > 0"
++        }
++      },
++      "isRLSEnabled": false
++    }
++  },
++  "enums": {},
++  "schemas": {},
++  "sequences": {},
++  "roles": {},
++  "policies": {},
++  "views": {},
++  "_meta": {
++    "columns": {},
++    "schemas": {},
++    "tables": {}
++  }
++}
+diff --git a/backend/test/unit/staff-idempotency-schema-preparation.test.ts b/backend/test/unit/staff-idempotency-schema-preparation.test.ts
+new file mode 100644
+index 0000000..5fbfdc6
+--- /dev/null
++++ b/backend/test/unit/staff-idempotency-schema-preparation.test.ts
+@@ -0,0 +1,114 @@
++import assert from "node:assert/strict";
++import { readFileSync } from "node:fs";
++import { join } from "node:path";
++import { test } from "node:test";
++import { drizzle } from "drizzle-orm/node-postgres";
++import { getTableConfig, PgDialect } from "drizzle-orm/pg-core";
++import { idempotencyOperations, staffIdempotencyEpochs } from "../../src/database/schema";
++
++const dialect = new PgDialect();
++const table = getTableConfig(idempotencyOperations);
++const epochs = getTableConfig(staffIdempotencyEpochs);
++const checkSql = (name: string) => {
++  const item = [...table.checks, ...epochs.checks].find((entry) => entry.name === name);
++  assert.ok(item, `Check ausente: ${name}`);
++  return dialect.sqlToQuery(item.value).sql;
++};
++
++test("preparação expõe campos reservados com tipos e defaults conservadores", () => {
++  for (const [column, expectedType] of [
++    [idempotencyOperations.originSessionId, "uuid"],
++    [idempotencyOperations.originEpochId, "uuid"],
++    [idempotencyOperations.resultState, "varchar(20)"],
++    [idempotencyOperations.completedAt, "timestamp with time zone"],
++    [idempotencyOperations.resultRetainUntil, "timestamp with time zone"],
++  ] as const) {
++    assert.equal(column.getSQLType(), expectedType);
++    assert.equal(column.notNull, false);
++    assert.equal(column.hasDefault, false);
++  }
++  assert.equal(idempotencyOperations.originAssurance.getSQLType(), "varchar(20)");
++  assert.equal(idempotencyOperations.originAssurance.notNull, true);
++  assert.equal(idempotencyOperations.originAssurance.default, "legacy");
++  assert.equal(staffIdempotencyEpochs.status.default, "pending");
++  assert.equal(staffIdempotencyEpochs.id.getSQLType(), "uuid");
++  assert.equal(staffIdempotencyEpochs.controlsVersion.getSQLType(), "varchar(80)");
++  assert.equal(staffIdempotencyEpochs.activatedAt.notNull, false);
++  assert.equal(staffIdempotencyEpochs.invalidatedAt.notNull, false);
++});
++
++test("constraints conservam unicidade e impedem declarar prova, resultado ou marco ativo na etapa A", () => {
++  const unique = table.uniqueConstraints.find((item) => item.getName() === "uq_idempotency_actor_operation_key");
++  assert.deepEqual(unique?.columns.map((column) => column.name), ["actor_user_id", "operation", "idempotency_key"]);
++  assert.ok(table.checks.some((item) => item.name === "ck_idempotency_status"));
++  assert.ok(table.checks.some((item) => item.name === "ck_idempotency_http_status"));
++  const locked = checkSql("ck_idempotency_staff_preparation_disabled");
++  assert.match(locked, /"origin_assurance"\s*=\s*'legacy'/);
++  for (const column of ["origin_session_id", "origin_epoch_id", "result_state", "completed_at", "result_retain_until"]) {
++    assert.match(locked, new RegExp(`"${column}"\\s+IS NULL`));
++  }
++  const pending = checkSql("ck_staff_idempotency_epoch_pending");
++  assert.match(pending, /"status"\s*=\s*'pending'/);
++  assert.match(pending, /"activated_at"\s+IS NULL/);
++  assert.match(pending, /"invalidated_at"\s+IS NULL/);
++  assert.match(checkSql("ck_staff_idempotency_epoch_version"), /length\(btrim\(/);
++});
++
++test("o INSERT Drizzle legado menciona os campos novos e exige expansão prévia do banco", () => {
++  const query = drizzle.mock().insert(idempotencyOperations).values({
++    id: "abcdef00-0000-4000-8000-000000000001", actorUserId: "abcdef00-0000-4000-8000-000000000002",
++    operation: "call_next", idempotencyKey: "fixture", requestHash: "a".repeat(64),
++    status: "in_progress", createdAt: new Date("2026-01-01T00:00:00.000Z"), expiresAt: new Date("2026-01-02T00:00:00.000Z"),
++  }).toSQL();
++  for (const column of ["origin_session_id", "origin_assurance", "origin_epoch_id", "result_state", "completed_at", "result_retain_until"]) {
++    assert.match(query.sql, new RegExp(`"${column}"`));
++  }
++  assert.match(query.sql, /\bdefault\b/i);
++});
++
++test("migration preparatória registra somente schema aditivo e não ativa marcos", () => {
++  const migration = readFileSync(join(process.cwd(), "drizzle/0007_staff_idempotency_preparation.sql"), "utf8");
++  const journal = JSON.parse(readFileSync(join(process.cwd(), "drizzle/meta/_journal.json"), "utf8")) as {
++    entries: Array<{ idx: number; tag: string; when: number }>;
++  };
++  const current = journal.entries.find((entry) => entry.tag === "0007_staff_idempotency_preparation");
++  const previous = journal.entries.find((entry) => entry.tag === "0006_admin_2fa_login");
++  assert.ok(current && previous);
++  assert.equal(current.idx, previous.idx + 1);
++  assert.ok(current.when > previous.when);
++  assert.match(migration, /origin_assurance"\s+varchar\(20\)\s+DEFAULT\s+'legacy'\s+NOT NULL/i);
++  assert.equal((migration.match(/ALTER TABLE\s+"public"\."idempotency_operations"/gi) ?? []).length, 2);
++  assert.match(migration, /CREATE TABLE\s+"public"\."staff_idempotency_epochs"/i);
++  assert.doesNotMatch(migration, /(?:ALTER TABLE|CREATE TABLE)\s+"(?!public"\.)/i);
++  assert.match(migration, /CREATE FUNCTION\s+"public"\."staff_idempotency_preparation_guard"/i);
++  assert.match(migration, /CHECK\s*\("status"\s*=\s*'pending'/i);
++  assert.match(migration, /SECURITY INVOKER\s+SET search_path\s*=\s*pg_catalog/i);
++  assert.match(migration, /BEFORE UPDATE ON\s+"public"\."idempotency_operations"/i);
++  assert.match(migration, /EXECUTE FUNCTION\s+"public"\."staff_idempotency_preparation_guard"/i);
++  for (const column of ["id", "actor_user_id", "operation", "idempotency_key", "request_hash", "http_status", "result_reference", "result_payload"]) {
++    assert.match(migration, new RegExp(`(?:OLD|NEW)\\."${column}"\\s+IS DISTINCT FROM\\s+(?:OLD|NEW)\\."${column}"`, "i"));
++  }
++  assert.match(migration, /OLD\."status"\s*=\s*'completed'/i);
++  const executable = migration.replace(/--[^\r\n]*/g, "");
++  assert.doesNotMatch(executable, /\b(INSERT|DELETE|TRUNCATE|GRANT|REVOKE|DROP|SECURITY\s+DEFINER)\b/i);
++});
++
++test("snapshot contempla o schema anterior da migration 0006 e a preparação da 0007", () => {
++  const readSnapshot = (name: string) => JSON.parse(readFileSync(join(process.cwd(), "drizzle/meta", name), "utf8")) as {
++    id: string; prevId: string; tables: Record<string, { columns: Record<string, { type: string; default?: unknown }>;
++      uniqueConstraints: Record<string, { columns: string[] }>; checkConstraints: Record<string, unknown> }>;
++  };
++  const before = readSnapshot("0004_snapshot.json");
++  const after = readSnapshot("0006_snapshot.json");
++  assert.equal(after.prevId, before.id);
++  assert.notEqual(after.id, before.id);
++  assert.equal(after.tables["public.user_totp_credentials"].columns.last_totp_counter.type, "bigint");
++  assert.ok(after.tables["public.admin_2fa_challenges"]);
++  const operations = after.tables["public.idempotency_operations"];
++  assert.deepEqual(operations.uniqueConstraints.uq_idempotency_actor_operation_key.columns,
++    ["actor_user_id", "operation", "idempotency_key"]);
++  assert.equal(operations.columns.origin_assurance.default, "'legacy'");
++  assert.equal(operations.columns.origin_session_id.type, "uuid");
++  assert.ok(operations.checkConstraints.ck_idempotency_staff_preparation_disabled);
++  assert.equal(after.tables["public.staff_idempotency_epochs"].columns.status.default, "'pending'");
++});
+diff --git a/backend/test/integration/staff-idempotency-schema-preparation.integration.test.ts b/backend/test/integration/staff-idempotency-schema-preparation.integration.test.ts
+new file mode 100644
+index 0000000..7eac831
+--- /dev/null
++++ b/backend/test/integration/staff-idempotency-schema-preparation.integration.test.ts
+@@ -0,0 +1,130 @@
++import assert from "node:assert/strict";
++import { randomUUID } from "node:crypto";
++import { test } from "node:test";
++import { drizzle } from "drizzle-orm/node-postgres";
++import { Client } from "pg";
++import * as schema from "../../src/database/schema";
++import { completeIdempotencyOperationWithTx, createRequestFingerprint, reserveIdempotencyOperationWithTx } from "../../src/participations/join-idempotency";
++import { assertSafeTestDatabase } from "./test-db-guard";
++
++// Campanha separada e autorizada: banco local dedicado, migration já aplicada por responsável.
++function dedicatedDatabaseUrl(): string {
++  if (process.env.NODE_ENV !== "test") throw new Error("NODE_ENV=test é obrigatório.");
++  const urls = [process.env.DATABASE_URL, process.env.DATABASE_DIRECT_URL, process.env.EVENTS_TEST_DATABASE_URL]
++    .map((value) => assertSafeTestDatabase(value));
++  if (!urls.every((value) => value === urls[0])) throw new Error("As três URLs de teste devem identificar o mesmo banco dedicado.");
++  const parsed = new URL(urls[0]);
++  if (!["localhost", "127.0.0.1"].includes(parsed.hostname) || parsed.port !== "55432" ||
++      parsed.pathname !== "/arenago_events_test" || parsed.search || parsed.hash) {
++    throw new Error("É exigido exclusivamente localhost:55432/arenago_events_test sem parâmetros de conexão.");
++  }
++  return urls[0];
++}
++
++test("preparação PostgreSQL mantém legado e rejeita prova ou compactação prematuras", async () => {
++  const client = new Client({ connectionString: dedicatedDatabaseUrl() });
++  await client.connect();
++  try {
++    const identity = await client.query<{ database_name: string; server_port: number }>(
++      "SELECT pg_catalog.current_database() AS database_name, pg_catalog.inet_server_port() AS server_port",
++    );
++    assert.deepEqual(identity.rows[0], { database_name: "arenago_events_test", server_port: 55432 });
++    const prepared = await client.query<{ present: boolean }>(
++      "SELECT pg_catalog.to_regclass('public.staff_idempotency_epochs') IS NOT NULL AS present",
++    );
++    assert.equal(prepared.rows[0].present, true, "A migration deve estar previamente aplicada pelo responsável.");
++    const rollbackFixture = new Error("ROLLBACK_FIXTURE_ONLY");
++    try {
++      await drizzle(client, { schema }).transaction(async (tx) => {
++        await client.query("SET LOCAL search_path = pg_catalog, public");
++        const actor = randomUUID();
++        await client.query(
++          "INSERT INTO public.users(id,name,email,password_hash,created_at,updated_at) VALUES($1,'Fixture schema',$2,'fixture',now(),now())",
++          [actor, `${actor}@example.test`],
++        );
++        const insert = `INSERT INTO public.idempotency_operations
++          (id,actor_user_id,operation,idempotency_key,request_hash,status,created_at,expires_at)
++          VALUES($1,$2,$3,$4,$5,'in_progress',now(),now()+interval '1 day')`;
++        const ids: string[] = [];
++        const operations = ["call_next", "complete_service_session", "absent_service_session", "admin_grant_role", "join"];
++        const key = "fixture-shared";
++        for (const operation of operations) {
++          const requestHash = createRequestFingerprint(operation, { resource: "fixture" });
++          const input = { actorUserId: actor, operation, idempotencyKey: key, requestHash, expiresAt: new Date(Date.now() + 86_400_000) };
++          const reserved = await reserveIdempotencyOperationWithTx(tx, input);
++          assert.equal(reserved.kind, "reserved");
++          if (reserved.kind !== "reserved") throw new Error("Reserva da fixture não criada.");
++          ids.push(reserved.operationId);
++          assert.equal((await reserveIdempotencyOperationWithTx(tx, input)).kind, "in_progress");
++          assert.equal((await reserveIdempotencyOperationWithTx(tx, { ...input,
++            requestHash: createRequestFingerprint(operation, { resource: "different" }) })).kind, "request_conflict");
++          const httpStatus = operation === "call_next" ? 201 : 200;
++          const resultReference = randomUUID();
++          const resultPayload = { operation, marker: "fixture" };
++          const completed = await completeIdempotencyOperationWithTx(tx, reserved.operationId, { httpStatus, resultReference, resultPayload });
++          assert.equal(completed.httpStatus, httpStatus);
++          assert.deepEqual(completed.resultPayload, resultPayload);
++          const replay = await reserveIdempotencyOperationWithTx(tx, input);
++          assert.equal(replay.kind, "replay");
++          if (replay.kind !== "replay") throw new Error("Replay da fixture ausente.");
++          assert.equal(replay.httpStatus, httpStatus);
++          assert.equal(replay.resultReference, resultReference);
++          assert.deepEqual(replay.resultPayload, resultPayload);
++        }
++        const legacy = await client.query<{
++          origin_assurance: string; origin_session_id: string | null; origin_epoch_id: string | null;
++          result_state: string | null; completed_at: Date | null; result_retain_until: Date | null;
++        }>(`SELECT origin_assurance,origin_session_id,origin_epoch_id,result_state,completed_at,result_retain_until
++            FROM public.idempotency_operations WHERE id=ANY($1::uuid[]) ORDER BY operation`, [ids]);
++        assert.equal(legacy.rowCount, operations.length);
++        for (const row of legacy.rows) assert.deepEqual(row, { origin_assurance: "legacy", origin_session_id: null,
++          origin_epoch_id: null, result_state: null, completed_at: null, result_retain_until: null });
++
++        async function expectDatabaseError(statement: string, params: unknown[], expectedCode: string) {
++          await client.query("SAVEPOINT rejected_case");
++          try {
++            await assert.rejects(client.query(statement, params), (error: unknown) =>
++              typeof error === "object" && error !== null && "code" in error && error.code === expectedCode);
++          } finally {
++            await client.query("ROLLBACK TO SAVEPOINT rejected_case");
++            await client.query("RELEASE SAVEPOINT rejected_case");
++          }
++        }
++        await expectDatabaseError(insert, [randomUUID(), actor, operations[0], key, "b".repeat(64)], "23505");
++        for (const id of ids.slice(0, 3)) {
++          for (const change of [
++            "origin_assurance='verified_v1'", "origin_session_id='abcdef00-0000-4000-8000-000000000001'::uuid",
++            "origin_epoch_id='abcdef00-0000-4000-8000-000000000002'::uuid", "result_state='tombstone'",
++            "completed_at=now()", "result_retain_until=now()",
++          ]) await expectDatabaseError(`UPDATE public.idempotency_operations SET ${change} WHERE id=$1`, [id], "23514");
++          for (const change of [
++            "id='abcdef00-0000-4000-8000-000000000003'::uuid",
++            "actor_user_id='abcdef00-0000-4000-8000-000000000004'::uuid", "operation='join'",
++            "idempotency_key='alterada'", "request_hash=repeat('b',64)",
++            "status='in_progress',http_status=NULL", "http_status=299", "result_reference='abcdef00-0000-4000-8000-000000000005'::uuid",
++            "result_payload='{\"alterado\":true}'::jsonb",
++          ]) await expectDatabaseError(`UPDATE public.idempotency_operations SET ${change} WHERE id=$1`, [id], "23514");
++        }
++        await expectDatabaseError("UPDATE public.idempotency_operations SET operation='call_next' WHERE id=$1", [ids[3]], "23514");
++        assert.equal((await client.query("UPDATE public.idempotency_operations SET expires_at=now() WHERE id=$1", [ids[0]])).rowCount, 1);
++        assert.equal((await client.query("UPDATE public.idempotency_operations SET idempotency_key='admin-alterada' WHERE id=$1", [ids[3]])).rowCount, 1);
++
++        const epoch = randomUUID();
++        const pending = await client.query<{ status: string; activated_at: Date | null; invalidated_at: Date | null }>(
++          "INSERT INTO public.staff_idempotency_epochs(id,controls_version) VALUES($1,'fixture-v1') RETURNING status,activated_at,invalidated_at", [epoch],
++        );
++        assert.deepEqual(pending.rows[0], { status: "pending", activated_at: null, invalidated_at: null });
++        await expectDatabaseError("UPDATE public.staff_idempotency_epochs SET status='active',activated_at=now() WHERE id=$1", [epoch], "23514");
++        await expectDatabaseError("INSERT INTO public.staff_idempotency_epochs(id,controls_version) VALUES($1,'  ')", [randomUUID()], "23514");
++        const active = await client.query<{ count: string }>("SELECT count(*)::text AS count FROM public.staff_idempotency_epochs WHERE status <> 'pending' OR activated_at IS NOT NULL OR invalidated_at IS NOT NULL");
++        assert.equal(active.rows[0].count, "0");
++        throw rollbackFixture;
++      }, { isolationLevel: "read committed" });
++      assert.fail("A transação da fixture deveria terminar em rollback.");
++    } catch (error) {
++      if (error !== rollbackFixture) throw error;
++    }
++  } finally {
++    await client.end();
++  }
++});
+diff --git a/docs/STAFF_IDEMPOTENCY_SCHEMA_PREPARACAO.md b/docs/STAFF_IDEMPOTENCY_SCHEMA_PREPARACAO.md
+new file mode 100644
+index 0000000..aed78eb
+--- /dev/null
++++ b/docs/STAFF_IDEMPOTENCY_SCHEMA_PREPARACAO.md
+@@ -0,0 +1,138 @@
++# Preparação do schema de idempotência Staff — Etapa A
++
++## Escopo e estado
++
++Preparação local para origem e retenção futuras, conforme `docs/STAFF_IDEMPOTENCY_ORIGIN_RETENTION_DESIGN.md` e revisão Sol High. A migration `0007_staff_idempotency_preparation` foi **preparada, não aplicada**. Nenhum SQL foi executado contra PostgreSQL, nenhum banco foi acessado e nenhuma operação Staff real foi executada. A proteção de origem, o marco ativo, tombstones, compactação e reconciliação automática não estão implementados ou habilitados.
++
++Arquivos da entrega:
++
++- `backend/src/database/schema/idempotency.schema.ts`: campos, tabela e checks preparatórios.
++- `backend/drizzle/0007_staff_idempotency_preparation.sql`: DDL aditivo e trigger de atualização limitado.
++- `backend/drizzle/meta/_journal.json` e `backend/drizzle/meta/0006_snapshot.json`: registro da migration e snapshot preparado.
++- `backend/test/unit/schema.test.ts` e `backend/test/unit/staff-idempotency-schema-preparation.test.ts`: inventário e verificações de metadados/DDL.
++- `backend/test/integration/staff-idempotency-schema-preparation.integration.test.ts`: testes PostgreSQL separados, não executados.
++- Este relatório e `qa-evidence/STAFF_IDEMPOTENCY_SCHEMA_PREPARACAO-changes.diff`.
++
++O documento arquitetural anterior pode existir como alteração local independente; não integra o patch desta etapa.
++
++## Campos e controles preparados
++
++`idempotency_operations` recebe `origin_session_id` UUID nullable, `origin_assurance` varchar(20) `NOT NULL DEFAULT 'legacy'`, `origin_epoch_id` UUID nullable, `result_state` varchar(20) nullable, e `completed_at` / `result_retain_until` timestamptz nullable. A constraint existente `(actor_user_id, operation, idempotency_key)` e os checks existentes de status e HTTP são preservados; a sessão não entra na chave única.
++
++O check `ck_idempotency_staff_preparation_disabled` exige, para **todas** as operações, `origin_assurance='legacy'` e os outros cinco campos novos nulos. Assim o mesmo INSERT dos escritores atuais recebe o default conservador, e o UPDATE habitual de `in_progress` para `completed` continua previsto. O check rejeita `verified_v1`, origem, marco, estados de resultado e datas de retenção nesta etapa. Esse bloqueio é intencionalmente temporário e deverá ser substituído por migration revisada quando houver controles e autorização para a próxima etapa. Não há backfill de sessão, FK para sessão ou marco, nem índice adicional.
++
++`staff_idempotency_epochs` prepara UUID, versão dos controles, referência de mudança, criação e campos de ativação/invalidação. A tabela começa vazia: não há INSERT na migration. O default é `pending`; `ck_staff_idempotency_epoch_pending` aceita somente `pending` com datas de ativação/invalidação nulas, e `ck_staff_idempotency_epoch_version` exige versão não vazia. A simples existência de uma linha pendente não constitui prova. Nenhum grant ou função de ativação foi criado.
++
++O trigger `tr_staff_idempotency_preparation_guard`, `BEFORE UPDATE` e `SECURITY INVOKER`, compara `OLD` e `NEW` quando a operação antiga ou nova pertence às três operações Staff. Rejeita alteração de ID, ator, operação, chave ou fingerprint, inclusive mudança de namespace em qualquer direção. Para uma linha Staff já `completed`, também rejeita reabertura ou alteração do HTTP, referência ou payload terminal. Permite a conclusão normal de uma reserva `in_progress` e não muda `expires_at`; operações não Staff permanecem fora do filtro. A função não usa GUC, papéis inexistentes ou `SECURITY DEFINER` e não faz consultas de domínio nem altera a ordem de locks.
++
++Esses são controles **preparados no arquivo**, não controles já ativos em banco. Após eventual aplicação, seus checks impediriam a gravação de `verified_v1` enquanto estiverem íntegros e sujeitos à fiscalização PostgreSQL. Eles não impedem `DELETE` ou `TRUNCATE`, não protegem contra proprietário/superusuário que possa alterar DDL e não estabelecem retenção ou imutabilidade contra privilégios administrativos. Também não provam qual Bearer originou uma reserva. Correções manuais que antes alteravam identidade ou resultado terminal Staff seriam recusadas pelo trigger; sua compatibilidade operacional precisa de revisão antes da aplicação.
++
++## Compatibilidade e metadados
++
++O helper compartilhado não foi alterado; seus escritores Staff, Admin e participante não fornecem os campos novos e devem continuar utilizando os defaults. O trigger não exige papel Staff dedicado, nem modifica a semântica de replay ou executa compactação. Os endpoints históricos continuam retornando `originSession: "unavailable"` e `automaticReconciliation: false`. Essa compatibilidade é uma conclusão de inspeção estática e precisa ser demonstrada com os testes; mocks e DDL não comprovam permissões reais ou comportamento transacional no PostgreSQL.
++
++A migration qualifica `public.idempotency_operations` nos dois `ALTER TABLE`, `public.staff_idempotency_epochs` no `CREATE TABLE`, e a função e a tabela do trigger no mesmo schema. As referências `OLD`/`NEW` são campos da linha alvo; o `search_path` da função permanece fixo em `pg_catalog`. Isso elimina a dependência do schema corrente para escolher essas tabelas.
++
++O Drizzle instalado enumera todas as colunas do schema no INSERT, mesmo quando o chamador omite os campos novos e usa `DEFAULT`. Portanto **não iniciar nem liberar o backend atualizado contra banco sem a expansão 0007**: Staff, Admin, participante e avaliações podem falhar com coluna inexistente. O `SELECT 1` atual da inicialização do pool não comprova compatibilidade do schema; recomenda-se a conferência operacional de leitura abaixo em vez de alterar o startup nesta etapa.
++
++A última migration registrada era `0006_admin_2fa_login` (índice 5); a nova é `0007` (índice 6), com timestamp do journal posterior. Antes desta entrega o último snapshot disponível era `0004_snapshot.json`, embora `0006` já estivesse no journal. `0006_snapshot.json` foi preparado manualmente a partir de `0004_snapshot.json`, incorporando os objetos da migration `0006` e desta `0007`; sua equivalência com o schema representado pelo gerador foi conferida offline conforme abaixo.
++
++Uma tentativa anterior de `drizzle-kit generate` usou configuração temporária e ambiente de variáveis reduzido, mas foi iniciada com diretório de trabalho `backend`. A inspeção posterior do binário mostrou que ele inicializa `dotenv` automaticamente e pode ter lido `backend/.env`; nenhuma credencial foi impressa, o arquivo não foi modificado e não houve conexão com banco. A tentativa repetida usou diretório de trabalho temporário sem `.env` e também falhou com `uv_os_get_passwd / ENOMEM`. Em nova investigação, `os.userInfo()` falhou da mesma forma no isolamento e funcionou fora dele: a causa provável é a obtenção da identidade de usuário pelo ambiente isolado, antes da leitura do snapshot.
++
++Com Node 24.15.0, TypeScript 6.0.3, Drizzle ORM 0.45.4 e Drizzle Kit 0.31.11 instalados, a comparação offline foi executada fora desse isolamento, em cópias temporárias sem `.env` ou credenciais e sem conexão ao banco. O gerador não produziu delta a partir do snapshot atual; um snapshot gerado do zero coincidiu recursivamente com o manual em todas as propriedades, exceto `id` e `prevId`, que identificam sua geração e cadeia. `drizzle-kit check` aprovou a cadeia na cópia. O delta gerado a partir de `0004` corresponde aos objetos representáveis das migrations `0006` e `0007`; o snapshot `0004` contém a tabela e os objetos da migration `0005`. As qualificações SQL explícitas em `public` e a escrita das expressões diferem textualmente da saída gerada. A função e a trigger personalizadas da `0007` foram inspecionadas separadamente e não são representadas pelo snapshot. Nenhum SQL foi executado.
++
++O bloqueio específico de equivalência offline dos metadados representados pelo Drizzle foi resolvido. Isso não prova o estado de um banco nem o comportamento físico da migration: o ensaio em PostgreSQL dedicado ainda depende de revisão da função/trigger, autorização específica e preparação controlada do banco. A aplicação em qualquer ambiente depende também da validação física, plano de implantação e aprovações necessárias.
++
++O check aditivo deve ser validado contra a versão PostgreSQL real e o volume de registros, incluindo custo de lock e varredura. A adição de coluna com default não prova, por si só, ausência de rewrite em qualquer versão. Não aplicar sem plano de janela, timeout, backup e rollback aprovado. Como há nova tabela, campos e dados potencialmente futuros, remover a migration ou seus objetos não é rollback seguro automático; preservar dados/constraints e revisar um procedimento específico antes de qualquer execução.
++
++## Ordem futura de implantação e pré-verificação
++
++1. Revisar código, DDL, snapshot e resultado das campanhas; obter aprovação específica da migration, destino, janela e rollback antes de qualquer aplicação. Confirmar independentemente identidade do banco/branch autorizados, sem imprimir connection strings.
++2. Manter o backend novo parado ou sem tráfego de escrita. Após aprovação, expandir primeiro o banco autorizado com a `0007`; preservar os escritores antigos durante a expansão somente depois de demonstrar que continuam compatíveis com o trigger e os defaults. Controlar locks e coordenar conexões antigas; não presumir compatibilidade ou disponibilidade.
++3. Antes de liberar o backend novo, verificar por conexão **somente de leitura**, autorizada para essa campanha, a identidade do banco, os objetos em `public`, seus tipos/defaults/checks, a constraint única existente, o trigger e sua função, e a presença da entrada da `0007` no journal de migrations aplicado. O responsável deve comparar o hash registrado com o SHA-256 do arquivo SQL exato incluído no artefato implantado e o `when` do journal da entrega. Um journal sem objeto, objeto divergente, hash distinto ou visibilidade insuficiente é falha fechada, não prova de compatibilidade.
++4. Somente após a pré-verificação, liberar o backend novo e validar, em campanha autorizada e com dados apropriados, Staff, Admin, participante e avaliações. Monitorar erros de schema/locks e preservar a versão anterior compatível disponível conforme o plano de rollback aprovado.
++5. Se a expansão falhar, interromper a liberação do backend novo e qualquer tentativa automática de migration/retry. Verificar estado real da transação, journal, objetos e dados; não presumir rollback integral nem executar DDL destrutivo como recuperação. A retomada de escritores antigos exige confirmação de schema e compatibilidade pelo responsável; se houver dúvida, manter a escrita suspensa e investigar.
++
++Exemplo de consultas **para futura campanha de leitura autorizada**; não foram executadas nesta tarefa. Execute-as no alvo previamente identificado e compare com a migration e o schema revisados. A primeira consulta da tabela de migrations falha se ela não existir, situação que deve interromper a liberação.
++
++```sql
++SELECT pg_catalog.current_database() AS database_name, current_user;
++SELECT created_at, hash FROM drizzle.__drizzle_migrations WHERE created_at = 1794200000000;
++SELECT table_name, column_name, data_type, udt_name, is_nullable, column_default
++FROM information_schema.columns
++WHERE table_schema = 'public'
++  AND table_name IN ('idempotency_operations', 'staff_idempotency_epochs')
++ORDER BY table_name, ordinal_position;
++SELECT c.conname, c.convalidated, pg_catalog.pg_get_constraintdef(c.oid) AS definition
++FROM pg_catalog.pg_constraint c
++WHERE c.conrelid IN ('public.idempotency_operations'::regclass, 'public.staff_idempotency_epochs'::regclass)
++ORDER BY c.conname;
++SELECT t.tgname, t.tgenabled, pg_catalog.pg_get_triggerdef(t.oid) AS trigger_definition,
++       pg_catalog.pg_get_functiondef(t.tgfoid) AS function_definition
++FROM pg_catalog.pg_trigger t
++WHERE t.tgrelid = 'public.idempotency_operations'::regclass
++  AND t.tgname = 'tr_staff_idempotency_preparation_guard' AND NOT t.tgisinternal;
++```
++
++A conferência deve exigir todas as seis colunas de idempotência, os campos da tabela de marcos, defaults `legacy` e `pending`, nulabilidade e tipos esperados; os checks preparatórios validados, checks e unicidade existentes; e o trigger habilitado apontando à função correta com corpo revisado. Um registro no journal ou um nome de objeto isolado não comprova o conteúdo. A identidade do banco e a correção dos privilégios são verificações adicionais, e esse procedimento não autoriza executar a migration.
++
++## Procedimento para conferir o snapshot offline
++
++No terminal PowerShell, a partir de `backend`, com as dependências já instaladas, o trecho abaixo cria cópias temporárias dos metadados e executa somente `drizzle-kit generate`, sem URL ou credenciais no config e com diretório de trabalho temporário sem `.env`. Não usa `NODE_OPTIONS` nem conecta ao PostgreSQL. A primeira comparação usa o snapshot atual; a segunda usa os snapshots até `0004` e journal até a migration `0005` para gerar, em cópia, o delta esperado das migrations `0006` e `0007`.
++
++```powershell
++@'
++const fs = require('fs');
++const path = require('path');
++const os = require('os');
++const { spawnSync } = require('child_process');
++const backend = process.cwd();
++const root = fs.mkdtempSync(path.join(os.tmpdir(), 'arenago-0007-offline-'));
++const sourceMeta = path.join(backend, 'drizzle/meta');
++const original = JSON.parse(fs.readFileSync(path.join(sourceMeta, '_journal.json'), 'utf8'));
++const env = { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot,
++  TEMP: process.env.TEMP, TMP: process.env.TMP, NODE_ENV: 'test' };
++for (const mode of ['atual', 'base0004']) {
++  const work = path.join(root, mode), out = path.join(work, 'drizzle'), meta = path.join(out, 'meta');
++  fs.mkdirSync(meta, { recursive: true });
++  for (const name of fs.readdirSync(sourceMeta)) {
++    if (name === '_journal.json' || !name.endsWith('_snapshot.json')) continue;
++    if (mode === 'base0004' && name > '0004_snapshot.json') continue;
++    fs.copyFileSync(path.join(sourceMeta, name), path.join(meta, name));
++  }
++  const journal = structuredClone(original);
++  if (mode === 'base0004') journal.entries = journal.entries.filter((entry) => entry.idx <= 4);
++  fs.writeFileSync(path.join(meta, '_journal.json'), JSON.stringify(journal, null, 2));
++  const cfg = path.join(work, 'drizzle.config.ts');
++  const config = { dialect: 'postgresql', schema: path.join(backend, 'src/database/schema/index.ts').replace(/\\/g, '/'), out: './drizzle' };
++  fs.writeFileSync(cfg, 'export default ' + JSON.stringify(config) + ';\n');
++  const cli = path.join(backend, 'node_modules/drizzle-kit/bin.cjs');
++  const result = spawnSync(process.execPath, [cli, 'generate', '--config', cfg, '--name', 'offline_equivalence'],
++    { cwd: work, env, encoding: 'utf8', timeout: 40000 });
++  console.log(mode + ': exit=' + result.status + '\n' + (result.stdout || '') + (result.stderr || ''));
++  if (result.error || result.status !== 0) process.exitCode = 1;
++}
++console.log('Cópias e eventual DDL gerado: ' + root);
++'@ | node
++```
++
++Para repetir a conferência, confirmar que a comparação `atual` não gera delta, validar a cadeia de IDs/journal com `drizzle-kit check` em cópia igualmente isolada, e comparar integralmente o DDL gerado de `base0004` com os objetos declarados pelas migrations `0006` e `0007`, incluindo tipos, defaults, constraints, FKs e índices. Usar saída relativa: a versão instalada combinou incorretamente caminho absoluto de saída no Windows. Ela também retornou código 0 para uma tentativa que exibiu erro de arquivo; conferir a saída e os artefatos, não apenas o código de saída. A função e o trigger da `0007` são SQL personalizado e exigem comparação/revisão separada. Nenhuma saída deve ser copiada automaticamente para o repositório ou aplicada ao banco.
++
++## Testes e validação
++
++Os testes unitários verificam tipos, defaults, constraint única, checks, journal, aspectos do snapshot e conteúdo da migration. Os testes existentes cobrem regressões de Staff, histórico, Admin e participante; os testes de histórico verificam que a reconciliação permanece desativada. Esses testes não comprovam a equivalência integral do snapshot nem o comportamento físico do DDL no PostgreSQL.
++
++O teste PostgreSQL separado exige `NODE_ENV=test`, três URLs explicitamente iguais apontando a `localhost:55432/arenago_events_test`, sem parâmetros de redirecionamento; verifica `current_database()` e porta antes de iniciar a transação. Ele exige a migration previamente aplicada por responsável autorizado, cria apenas fixtures próprias dentro de uma transação Drizzle revertida e não executa migrations nem limpeza global. Usa o helper real para reserva, conflito de fingerprint, conclusão e replay em `call_next`, `complete_service_session`, `absent_service_session`, Admin e participante; prepara casos para unicidade, rejeição de prova/tombstone, alteração de identidade/namespace e marco ativo. Esses namespaces simulam operações do helper, não autenticação HTTP ou os serviços Staff completos. A asserção exige que o servidor veja a porta 55432; uma campanha com proxy ou mapeamento diferente precisa revisar a verificação de identidade antes de executar. O teste não verifica grants, ownership, papéis nem resistência a administrador. Uma campanha separada deve também testar registros criados **antes** da migration, preservando snapshots e dados preexistentes, mediante autorização específica.
++
++Na campanha autorizada, o Codex com Luna executou os typechecks de produção e de testes: ambos passaram com código de saída 0. A tentativa inicial de executar os testes com `tsx` falhou na inicialização com `uv_os_get_passwd / ENOMEM`, antes de qualquer teste iniciar.
++
++Posteriormente, o responsável executou manualmente o procedimento corrigido de compilação temporária e execução com Node. Conforme o resultado informado no terminal, o script executou primeiro os arquivos focados e, após sucesso, a suíte unitária completa, com **1.173 testes aprovados, 0 falhos, 0 cancelados, 0 ignorados e 0 pendentes (`todo`)**, seguido de `VALIDATION_SUCCEEDED`. Não foi informada uma contagem individual dos testes focados. Esta atualização documental não repetiu as suítes ou os typechecks.
++
++Nenhum teste PostgreSQL foi executado. Qualquer integração PostgreSQL exige campanha própria, banco local dedicado confirmado, schema previamente preparado por responsável autorizado e revisão do teste antes de sua execução. A revisão precisa cobrir, em especial, trigger `SECURITY INVOKER`, SQL e escopo por namespace, efeitos sobre manutenção legítima, condições de corrida, compatibilidade de INSERT/UPDATE antigos e locks da migration. A comparação offline dos metadados foi concluída; ensaio e aplicação da migration `0007` continuam sujeitos às autorizações e verificações próprias de cada campanha.
++
++## Dependências ainda não comprovadas
++
++- Não foram verificados papéis, privilégios efetivos, ownership, heranças, separação de credenciais ou capacidade de criar funções/trigger no provedor. Um runtime proprietário pode contornar o check/trigger; a existência dos arquivos não cria uma fronteira de segurança.
++- Faltam função de reserva/conclusão protegida, trigger de transições completo com `OLD`/`NEW` e autoridade por papel, proteção contra exclusão, marco durável ativável apenas após barreira verificada, executor transacional Staff e tratamento de versões antigas. A trigger atual é parcial e deverá ser revista/substituída, não confundida com esses controles futuros.
++- Retenção, remoção ou pseudonimização de resultados, duração de tombstones, exclusão de conta e política de recuperação manual continuam sujeitos a decisão de produto, operação, segurança e privacidade. A FK atual para usuário permanece intacta.
++- Antes de solicitar aplicação em Neon `dev-shared`, são necessárias revisão Sol High, testes autorizados em PostgreSQL local dedicado, aprovação da migration/rollback e confirmação independente de branch, banco, privilégios e preservação de dados. Esta tarefa não autoriza nem executa essa aplicação.

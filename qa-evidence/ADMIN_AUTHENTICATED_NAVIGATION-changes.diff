@@ -1,0 +1,1165 @@
+diff --git a/app/App.js b/app/App.js
+index 0a4640f..690a13d 100644
+--- a/app/App.js
++++ b/app/App.js
+@@ -40,12 +40,12 @@ export function AppNavigation() {
+   const auth = useAuth();
+   const isAuthenticated = Boolean(auth?.isAuthenticated);
+   const initialRouteName = resolveInitialRouteForAuthState(auth);
+-  const roleArea = initialRouteName === 'AdminPending' ? 'admin'
++  const roleArea = initialRouteName === 'AdminArea' ? 'admin'
+     : initialRouteName === 'StaffPending' ? 'staff'
+       : initialRouteName === 'IdentityRecovery' ? 'recovery'
+       : isAuthenticated ? 'participant' : 'public';
+   const sessionKey = isAuthenticated
+-    ? `${roleArea}:${auth?.user?.id || ''}:${auth?.getSessionEpoch?.() ?? ''}`
++    ? `${roleArea}:${auth?.user?.id || ''}:${auth?.user?.sessionId || ''}:${auth?.getSessionEpoch?.() ?? ''}`
+     : 'public';
+ 
+   const publicScreens = [
+@@ -91,13 +91,6 @@ export function AppNavigation() {
+       },
+     },
+ 
+-    // A demonstração Admin pertence apenas à pilha do Participante autenticado.
+-    // O papel Admin real segue para AdminPending, sem conceder acesso por esta rota.
+-    {
+-      name: 'AdminDemo',
+-      getComponent: () =>
+-        require('./screens/admin/AdminDemoNavigator').default,
+-    },
+     // Avaliação real de uma participação finalizada.
+     {
+       name: 'RealEvaluation',
+@@ -123,7 +116,7 @@ export function AppNavigation() {
+   const availableScreens = !isAuthenticated
+     ? publicScreens
+     : roleArea === 'admin'
+-      ? [{ name: 'AdminPending', component: RolePendingScreen }]
++      ? [{ name: 'AdminArea', getComponent: () => require('./screens/admin/AdminDemoNavigator').default }]
+       : roleArea === 'staff'
+         ? [{ name: 'StaffPending', component: StaffEventsNavigator }]
+         : roleArea === 'recovery'
+diff --git a/app/screens/admin/AdminDemoContext.js b/app/screens/admin/AdminDemoContext.js
+index fad1735..8202ff4 100644
+--- a/app/screens/admin/AdminDemoContext.js
++++ b/app/screens/admin/AdminDemoContext.js
+@@ -1,6 +1,7 @@
+-import { createContext, useContext, useRef, useState } from 'react';
++import { createContext, useContext, useEffect, useRef, useState } from 'react';
+ 
+ import { useAuth } from '../../context/AuthContext';
++import { canAccessAdminArea } from '../../context/adminAccess';
+ import {
+   advanceClock as advanceClockTransition,
+   createAdminDemoSession,
+@@ -16,12 +17,13 @@ export const AdminDemoContext = createContext(null);
+ export const ADMIN_SIMULATED_FAILURE_MESSAGE =
+   'Erro simulado: nenhuma alteração foi feita. Tente novamente.';
+ 
+-// Dono da demonstração: conta autenticada + geração da sessão (epoch do
+-// AuthContext). Login, logout ou troca direta de conta mudam a chave.
++// Dono: conta, sessão confirmada, geração e revisão da identidade.
++// Revalidação/renovação invalida callbacks e descarta os dados locais anteriores.
+ export function getAdminDemoOwnerKey(auth) {
+-  if (!auth?.isAuthenticated || !auth.user?.id) return null;
++  if (!canAccessAdminArea(auth)) return null;
+   const epoch = typeof auth.getSessionEpoch === 'function' ? auth.getSessionEpoch() : 0;
+-  return `${auth.user.id}#${epoch}`;
++  const revision = typeof auth.getIdentityRevision === 'function' ? auth.getIdentityRevision() : 0;
++  return `${auth.user.id}#${auth.user.sessionId}#${epoch}#${revision}`;
+ }
+ 
+ function freshDemo(ownerKey) {
+@@ -33,6 +35,11 @@ export function AdminDemoProvider({ children }) {
+   const ownerKey = getAdminDemoOwnerKey(auth);
+   const authRef = useRef(auth);
+   authRef.current = auth;
++  const mountedRef = useRef(true);
++  useEffect(() => {
++    mountedRef.current = true;
++    return () => { mountedRef.current = false; };
++  }, []);
+ 
+   const [demo, setDemo] = useState(() => freshDemo(ownerKey));
+   // Ref garante resultado síncrono mesmo com cliques seguidos.
+@@ -51,6 +58,8 @@ export function AdminDemoProvider({ children }) {
+   // depois de trocar de conta e antes da nova renderização, não altera nada.
+   function liveDemo() {
+     const liveKey = getAdminDemoOwnerKey(authRef.current);
++    // Um callback da conta/geração anterior não pode operar sobre a nova conta.
++    if (!mountedRef.current || !liveKey || liveKey !== ownerKey) return freshDemo(null);
+     if (demoRef.current.ownerKey !== liveKey) commit(freshDemo(liveKey));
+     return demoRef.current;
+   }
+@@ -90,12 +99,15 @@ export function AdminDemoProvider({ children }) {
+ 
+   function toggleFailNextAction() {
+     const latest = liveDemo();
++    if (!latest.session) return;
+     commit({ ...latest, failNextAction: !latest.failNextAction });
+   }
+ 
+   // Sair da Área Admin descarta toda a demonstração.
+   function discard() {
+-    commit(freshDemo(liveDemo().ownerKey));
++    if (!liveDemo().session) return false;
++    commit(freshDemo(null));
++    return true;
+   }
+ 
+   const value = {
+diff --git a/app/screens/admin/AdminDemoNavigator.js b/app/screens/admin/AdminDemoNavigator.js
+index 4d5f477..5d253cc 100644
+--- a/app/screens/admin/AdminDemoNavigator.js
++++ b/app/screens/admin/AdminDemoNavigator.js
+@@ -19,12 +19,14 @@ import AdminStationDetailScreen from './AdminStationDetailScreen';
+ 
+ const Stack = createNativeStackNavigator();
+ 
+-// Pilha própria da Área Admin (demonstração). O provedor fica aqui dentro para
++// Pilha do Admin autenticado; as operações continuam demonstrativas. O provedor fica aqui para
+ // que todo o estado simulado seja descartado ao sair da área. A key amarrada à
+ // conta e à geração da sessão remonta provedor e telas se a identidade mudar.
+ // O cabeçalho nativo fica oculto porque cada tela desenha o seu.
+ export default function AdminDemoNavigator() {
+-  const ownerKey = getAdminDemoOwnerKey(useAuth()) ?? 'sem-conta';
++  const ownerKey = getAdminDemoOwnerKey(useAuth());
++  // Defesa adicional inclusive se este componente for montado por uma rota antiga.
++  if (!ownerKey) return null;
+   return (
+     <AdminDemoProvider key={ownerKey}>
+       <Stack.Navigator initialRouteName="AdminPanel" screenOptions={{ headerShown: false }}>
+diff --git a/app/screens/admin/AdminPanelScreen.js b/app/screens/admin/AdminPanelScreen.js
+index c4a52f3..1ebf65e 100644
+--- a/app/screens/admin/AdminPanelScreen.js
++++ b/app/screens/admin/AdminPanelScreen.js
+@@ -18,9 +18,9 @@ export default function AdminPanelScreen({ navigation }) {
+     return (
+       <AdminMissing
+         title="Sessão indisponível"
+-        message="Entre com sua conta para abrir a Área Admin (demonstração)."
+-        actionLabel="VOLTAR AO APLICATIVO"
+-        onAction={() => navigation.getParent()?.goBack()}
++        message="Entre com uma conta Admin e conclua a verificação de segundo fator."
++        actionLabel="SAIR DA CONTA"
++        onAction={() => { void auth?.logout(); }}
+       />
+     );
+   }
+@@ -28,11 +28,10 @@ export default function AdminPanelScreen({ navigation }) {
+   const summary = getPanelSummary(session);
+   const accountName = auth?.user?.name || auth?.user?.email || 'Conta conectada';
+ 
+-  // Sai da Área Admin: descarta a demonstração e fecha a rota AdminDemo na
+-  // pilha do app (o provedor desmonta). A sessão autenticada não é tocada.
+-  function handleExitToApp() {
+-    discard();
+-    navigation.getParent()?.goBack();
++  // O roteador de autenticação remove a área; não há retorno a MainTabs/Staff.
++  function handleLogout() {
++    if (!discard()) return;
++    return auth.logout();
+   }
+ 
+   const counters = [
+@@ -49,14 +48,14 @@ export default function AdminPanelScreen({ navigation }) {
+       title="Painel"
+       highlight="Administrativo"
+       subtitle="Gerencie eventos e acompanhe a demonstração da plataforma."
+-      backLabel="Voltar ao aplicativo"
+-      onBack={handleExitToApp}
++      backLabel="Sair da conta"
++      onBack={handleLogout}
+     >
+       <AdminCard>
+         <Text style={styles.account}>Conectado como: {accountName}</Text>
+         <Text style={styles.warning}>
+-          Modo demonstração: esta conta NÃO recebeu permissão Admin nem verificação TOTP. A
+-          autorização real dependerá da API futura; nada aqui é salvo no servidor.
++          Sessão Admin autenticada com segundo fator. As operações e os dados deste painel
++          continuam demonstrativos, apenas nesta sessão; nada aqui é salvo no servidor.
+         </Text>
+       </AdminCard>
+ 
+diff --git a/app/screens/admin/components/AdminScreen.js b/app/screens/admin/components/AdminScreen.js
+index 81078a1..2d32940 100644
+--- a/app/screens/admin/components/AdminScreen.js
++++ b/app/screens/admin/components/AdminScreen.js
+@@ -19,7 +19,7 @@ export default function AdminScreen({ title, highlight, subtitle, backLabel, onB
+       <View
+         style={styles.demoBanner}
+         accessibilityRole="alert"
+-        accessibilityLabel="Modo demonstração: dados fictícios, nada é salvo no servidor e não há permissão Admin real"
++        accessibilityLabel="Operações demonstrativas: dados fictícios, nada é salvo no servidor. Acesso por sessão Admin autenticada."
+       >
+         <Text style={styles.demoBannerText}>
+           <Text style={styles.demoBannerTitle}>{ADMIN_DEMO_LABEL}</Text>
+diff --git a/app/screens/auth/AuthSessionGate.js b/app/screens/auth/AuthSessionGate.js
+index a046bab..da408a2 100644
+--- a/app/screens/auth/AuthSessionGate.js
++++ b/app/screens/auth/AuthSessionGate.js
+@@ -4,6 +4,7 @@ import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'rea
+ import { SafeAreaView } from 'react-native-safe-area-context';
+ 
+ import { AuthProvider, useAuth } from '../../context/AuthContext';
++import { canAccessAdminArea } from '../../context/adminAccess';
+ 
+ function loadLogoSource() {
+   try {
+@@ -34,7 +35,7 @@ export function resolveInitialRouteForAuthState(authState) {
+       !roles.every((role) => ['admin', 'staff', 'participante'].includes(role))) {
+     return 'IdentityRecovery';
+   }
+-  if (roles.includes('admin')) return 'AdminPending';
++  if (roles.includes('admin')) return canAccessAdminArea(authState) ? 'AdminArea' : 'IdentityRecovery';
+   if (roles.includes('staff')) return 'StaffPending';
+ 
+   if (authState.user && authState.user.hasCompletedQuestionnaire === false) {
+diff --git a/app/screens/home/HomeScreen.js b/app/screens/home/HomeScreen.js
+index ddd64cc..c0fcd69 100644
+--- a/app/screens/home/HomeScreen.js
++++ b/app/screens/home/HomeScreen.js
+@@ -132,13 +132,6 @@ export default function HomeScreen({ navigation, returnState, mode = 'ready', me
+               </Pressable>
+             </Card>
+           </View>
+-
+-          <Button
+-            title="Área Admin (demonstração)"
+-            variant="ghost"
+-            onPress={() => navigation.navigate('AdminDemo')}
+-            style={styles.staffButton}
+-          />
+         </ScrollView>
+       )}
+     </AuthBackground>
+diff --git a/app/tests/adminInsightsScreens.test.cjs b/app/tests/adminInsightsScreens.test.cjs
+index b83b61c..8e1f753 100644
+--- a/app/tests/adminInsightsScreens.test.cjs
++++ b/app/tests/adminInsightsScreens.test.cjs
+@@ -3,6 +3,7 @@
+ const assert = require('node:assert/strict');
+ const test = require('node:test');
+ const { createAdminApp } = require('./helpers/adminHarness.cjs');
++const { verifiedAdminAuth } = require('./helpers/adminAuthFixture.cjs');
+ 
+ const HISTORY = 'Histórico, 2 eventos encerrados na demonstração';
+ const OVERVIEW = 'Visão Geral, indicadores consolidados da demonstração';
+@@ -287,11 +288,15 @@ test('critério 6 (tela): evento criado entra na contagem sem participações, a
+ test('critério 12: troca de conta descarta filtros e eventos criados na Visão Geral', async () => {
+   const app = createAdminApp();
+   app.press('Avançar relógio 15 minutos');
+-  app.setAuth({ isAuthenticated: true, user: { id: 'u-2', name: 'Outra Conta' }, getSessionEpoch: () => 1 });
++  app.setAuth(verifiedAdminAuth({ user: { id: 'u-2', name: 'Outra Conta', sessionId: '20000000-0000-4000-8000-000000000002' } }));
+   assert.equal(app.session.clockNow, '2026-11-05T12:00:00.000Z');
+   assert.ok(app.hasButton(HISTORY));
+-  app.setAuth({ isAuthenticated: true, user: { id: 'u-2', name: 'Outra Conta' }, getSessionEpoch: () => 2 });
++  app.press('Avançar relógio 15 minutos');
++  assert.equal(app.session.clockNow, '2026-11-05T12:15:00.000Z');
++  app.setAuth(verifiedAdminAuth({ user: { id: 'u-2', name: 'Outra Conta', sessionId: '20000000-0000-4000-8000-000000000002' }, getSessionEpoch: () => 2 }));
+   assert.equal(app.session.clockNow, '2026-11-05T12:00:00.000Z');
++  app.setAuth({ isAuthenticated: true, user: { id: 'incompleta' } });
++  assert.equal(app.session, null);
+ });
+ 
+ test('isolamento de módulos: telas da ADM03 não importam participação, HTTP nem Staff', () => {
+diff --git a/app/tests/adminNavigation.test.cjs b/app/tests/adminNavigation.test.cjs
+index 4b191d4..79e7578 100644
+--- a/app/tests/adminNavigation.test.cjs
++++ b/app/tests/adminNavigation.test.cjs
+@@ -2,6 +2,8 @@
+ const assert = require('node:assert/strict');
+ const test = require('node:test');
+ const { createHarness, loadModule, textOf, createParticipantThemeStub } = require('./helpers/questionnaireHarness.cjs');
++const { verifiedAdminAuth } = require('./helpers/adminAuthFixture.cjs');
++const { createAdminApp } = require('./helpers/adminHarness.cjs');
+ 
+ let authState;
+ function StackNavigator() {}
+@@ -10,6 +12,7 @@ function ImportedScreen() {}
+ function AdminDemoNavigator() {}
+ 
+ const gateExports = loadModule('screens/auth/AuthSessionGate.js', (name) => {
++  if (name === '../../context/adminAccess') return loadModule('context/adminAccess.js', require).exports;
+   if (name === 'react') return require('react');
+   if (name === 'react-native') return { StyleSheet: { create: (styles) => styles } };
+   if (name === 'expo-status-bar') return { StatusBar() {} };
+@@ -52,17 +55,21 @@ function routes(state) {
+   return found;
+ }
+ 
+-test('rota AdminDemo existe só no app autenticado e é carregada sob demanda', () => {
++test('AdminArea reutiliza a pilha Heliom e as rotas antigas não são registradas', () => {
+   const signedIn = routes({ isAuthenticated: true, user: { id: 'u-1', roles: ['participante'], hasCompletedQuestionnaire: true } });
+-  const admin = signedIn.find((route) => route.name === 'AdminDemo');
+-  assert.ok(admin, 'AdminDemo disponível');
++  const privileged = routes(verifiedAdminAuth());
++  const admin = privileged.find((route) => route.name === 'AdminArea');
++  assert.ok(admin, 'AdminArea disponível ao Admin confirmado');
+   assert.equal(admin.component, undefined, 'sem import no topo do App.js');
+   assert.equal(admin.getComponent(), AdminDemoNavigator);
++  assert.deepEqual(privileged.map((route) => route.name), ['AdminArea']);
+   for (const name of ['MainTabs', 'EventEntry', 'EventConfirmation', 'ParticipationDetails', 'Evaluation',
+     'ProfileQuestionnaire', 'RealEvaluation']) {
+     assert.ok(signedIn.some((route) => route.name === name), `${name} preservada`);
+   }
+-  assert.ok(!signedIn.some((route) => route.name === 'StaffDemo'), 'participante não recebe StaffDemo');
++  for (const name of ['AdminArea', 'AdminDemo', 'AdminPending', 'AdminPanel', 'StaffDemo']) {
++    assert.ok(!signedIn.some((route) => route.name === name), `participante não recebe ${name}`);
++  }
+   assert.equal(signedIn[0].name, 'MainTabs', 'abas continuam como tela inicial');
+ 
+   const pending = routes({ isAuthenticated: true, user: { id: 'u-2', roles: ['participante'], hasCompletedQuestionnaire: false } });
+@@ -71,63 +78,73 @@ test('rota AdminDemo existe só no app autenticado e é carregada sob demanda',
+   assert.ok(!signedOut.some((route) => route.name === 'AdminDemo'), 'acesso público protegido');
+ 
+   for (const roles of [['admin'], ['staff'], ['admin', 'staff']]) {
+-    const privileged = routes({ isAuthenticated: true,
+-      user: { id: 'u-3', roles, hasCompletedQuestionnaire: true } });
+-    assert.ok(!privileged.some((route) => route.name === 'AdminDemo'), 'papéis reais não entram na demonstração');
+-    assert.ok(!privileged.some((route) => route.name === 'MainTabs'), 'papéis reais não entram na pilha Participante');
++    const area = routes(verifiedAdminAuth({ user: { roles } }));
++    assert.ok(!area.some((route) => route.name === 'AdminDemo'), 'rota antiga removida');
++    assert.ok(!area.some((route) => route.name === 'MainTabs'), 'papéis reais não entram na pilha Participante');
++    if (!roles.includes('admin')) assert.ok(!area.some((route) => route.name === 'AdminArea'));
+   }
+ });
+ 
+-test('Início abre a demonstração Admin e a entrada em evento sem oferecer StaffDemo', () => {
++test('Início mantém entrada em evento sem atalhos administrativos ou StaffDemo', () => {
+   const h = createHarness('screens/home/HomeScreen.js', {
+     authContext: { user: { id: 'u-1', hasCompletedQuestionnaire: true } },
+   });
+-  const label = h.nodes.find((node) => node.type === 'Pressable' && /Admin/.test(textOf(node)));
+-  assert.equal(textOf(label), 'Área Admin (demonstração)');
++  assert.ok(!h.nodes.some((node) => node.type === 'Pressable' && /Admin/.test(textOf(node))));
+   for (const testID of ['home-background', 'home-event-entry-card', 'home-empty-participation-card']) {
+     assert.ok(h.nodes.some((node) => node.props.testID === testID), `${testID} preservado`);
+   }
+   assert.ok(!h.nodes.some((node) => node.type === 'Pressable' && /Staff/.test(textOf(node))));
+-  h.press('Área Admin (demonstração)');
+   h.press('Entrar em um evento');
+-  assert.deepEqual(h.navigationCalls.map((call) => call.name), ['AdminDemo', 'EventEntry']);
++  assert.deepEqual(h.navigationCalls.map((call) => call.name), ['EventEntry']);
+ });
+ 
+-test('atalho Admin respeita os estados de carregamento e erro da Home atual', () => {
++test('Home não oferece Admin em nenhum estado', () => {
+   const h = createHarness('screens/home/HomeScreen.js', {
+     authContext: { user: { id: 'u-1', hasCompletedQuestionnaire: true } },
+   });
+-  for (const mode of ['loading', 'error']) {
++  for (const mode of ['loading', 'error', 'ready']) {
+     h.setProps({ mode, message: 'Falha simulada', onRetry() {} });
+     assert.ok(!h.nodes.some((node) => node.type === 'Pressable'
+       && node.props.accessibilityLabel === 'Área Admin (demonstração)'));
+   }
+-  h.setProps({ mode: 'ready' });
+-  h.press('Área Admin (demonstração)');
+-  assert.equal(h.navigationCalls.at(-1).name, 'AdminDemo');
++  assert.deepEqual(h.navigationCalls, []);
+ });
+ 
+ test('pilha da Área Admin registra as telas com títulos em português e provedor por sessão', () => {
+   const registered = [];
++  const { ownerKeyFor } = createAdminApp();
++  let currentAuth = verifiedAdminAuth({ getSessionEpoch: () => 7 });
+   const navigator = loadModule('screens/admin/AdminDemoNavigator.js', (name) => {
+     if (name === 'react/jsx-runtime') return require('react/jsx-runtime');
+     if (name === '@react-navigation/native-stack') {
+       return { createNativeStackNavigator: () => ({ Navigator: StackNavigator, Screen: StackScreen }) };
+     }
+     if (name === '../../context/AuthContext') {
+-      return { useAuth: () => ({ isAuthenticated: true, user: { id: 'u-1' }, getSessionEpoch: () => 7 }) };
++      return { useAuth: () => currentAuth };
+     }
+     if (name === './AdminDemoContext') {
+       return {
+         AdminDemoProvider: 'AdminDemoProvider',
+-        getAdminDemoOwnerKey: (auth) => `${auth.user.id}#${auth.getSessionEpoch()}`,
++        getAdminDemoOwnerKey: ownerKeyFor,
+       };
+     }
+     return { __esModule: true, default: ImportedScreen };
+   }).exports.default;
+   const tree = navigator();
+   assert.equal(tree.type, 'AdminDemoProvider', 'estado da demonstração fica dentro da área');
+-  assert.equal(tree.key, 'u-1#7', 'provedor remonta quando conta ou geração da sessão mudam');
++  assert.equal(tree.key, ownerKeyFor(currentAuth), 'provedor usa conta, sessão, geração e revisão reais');
++  const originalKey = tree.key;
++  for (const overrides of [{ user: { id: 'b' } }, { getSessionEpoch: () => 8 },
++    { getIdentityRevision: () => 2 }, { user: { sessionId: '20000000-0000-4000-8000-000000000002' } }]) {
++    currentAuth = verifiedAdminAuth({ getSessionEpoch: () => 7, ...overrides });
++    assert.notEqual(navigator().key, originalKey);
++  }
++  for (const overrides of [{ user: { roles: ['participante'] } }, { user: { roles: ['staff'] } },
++    { identityStatus: 'checking' }, { identityStatus: 'error' }, { isAuthenticated: false },
++    { adminChallenge: { isTotpConfigured: true } }]) {
++    currentAuth = verifiedAdminAuth(overrides);
++    assert.equal(navigator(), null, 'montagem direta/rota antiga não contorna autorização');
++  }
+   const stack = tree.props.children;
+   assert.equal(stack.props.initialRouteName, 'AdminPanel');
+   for (const screen of [].concat(stack.props.children)) registered.push([screen.props.name, screen.props.options.title]);
+diff --git a/app/tests/adminScreens.test.cjs b/app/tests/adminScreens.test.cjs
+index 211aff3..2432ceb 100644
+--- a/app/tests/adminScreens.test.cjs
++++ b/app/tests/adminScreens.test.cjs
+@@ -2,6 +2,7 @@
+ const assert = require('node:assert/strict');
+ const test = require('node:test');
+ const { createAdminApp } = require('./helpers/adminHarness.cjs');
++const { verifiedAdminAuth } = require('./helpers/adminAuthFixture.cjs');
+ 
+ const plain = (value) => JSON.parse(JSON.stringify(value));
+ const byCode = (app, code) => app.session.events.find((event) => event.accessCode === code);
+@@ -28,10 +29,10 @@ function fillCreateForm(app, overrides = {}) {
+   for (const [label, value] of Object.entries(values)) app.type(label, value);
+ }
+ 
+-test('painel: rótulo de demonstração, aviso sem permissão Admin/TOTP e contadores coerentes', () => {
+-  const app = createAdminApp({ auth: { isAuthenticated: true, user: { id: 'u-9', name: 'Heliom Teste' }, getSessionEpoch: () => 1 } });
++test('painel: autenticação real, operações demonstrativas e contadores coerentes', () => {
++  const app = createAdminApp({ auth: verifiedAdminAuth({ user: { id: 'u-9', name: 'Heliom Teste' } }) });
+   for (const text of ['ÁREA ADMIN (DEMONSTRAÇÃO)', 'MODO DEMONSTRAÇÃO', 'Heliom Teste',
+-    'NÃO recebeu permissão Admin nem verificação TOTP', 'Resumo da demonstração', 'Contadores fictícios']) {
++    'Sessão Admin autenticada com segundo fator', 'Resumo da demonstração', 'Contadores fictícios']) {
+     assert.ok(app.hasText(text), text);
+   }
+   for (const counter of ['Eventos: 7', 'Agendados: 3', 'Abertos: 1', 'Encerrando: 1',
+@@ -361,10 +362,10 @@ test('isolamento: troca direta de conta ou nova geração da sessão descarta a
+   const app = createAdminApp();
+   app.press('Avançar relógio 1 hora');
+   assert.equal(app.session.clockNow, '2026-11-05T13:00:00.000Z');
+-  app.setAuth({ isAuthenticated: true, user: { id: 'u-2', name: 'Outra Conta' }, getSessionEpoch: () => 1 });
++  app.setAuth(verifiedAdminAuth({ user: { id: 'u-2', name: 'Outra Conta' } }));
+   assert.equal(app.session.clockNow, '2026-11-05T12:00:00.000Z', 'conta B começa do zero');
+   app.press('Avançar relógio 1 hora');
+-  app.setAuth({ isAuthenticated: true, user: { id: 'u-2', name: 'Outra Conta' }, getSessionEpoch: () => 2 });
++  app.setAuth(verifiedAdminAuth({ user: { id: 'u-2', name: 'Outra Conta' }, getSessionEpoch: () => 2 }));
+   assert.equal(app.session.clockNow, '2026-11-05T12:00:00.000Z', 'nova sessão da mesma conta também');
+   app.setAuth({ isAuthenticated: false, user: null });
+   assert.equal(app.session, null, 'logout limpa');
+@@ -374,23 +375,68 @@ test('isolamento: troca direta de conta ou nova geração da sessão descarta a
+ test('isolamento: callback antigo disparado após trocar de conta não altera a nova demonstração', () => {
+   const app = createAdminApp();
+   const advance = app.handlerOf('Avançar relógio 1 hora');
+-  app.setAuthWithoutRender({ isAuthenticated: true, user: { id: 'u-3' }, getSessionEpoch: () => 1 });
++  app.setAuthWithoutRender(verifiedAdminAuth({ user: { id: 'u-3' } }));
+   advance();
+-  app.setAuth({ isAuthenticated: true, user: { id: 'u-3' }, getSessionEpoch: () => 1 });
++  app.setAuth(verifiedAdminAuth({ user: { id: 'u-3' } }));
+   assert.equal(app.session.clockNow, '2026-11-05T12:00:00.000Z', 'a conta nova começa limpa');
+   assert.equal(app.session.events.length, 7);
+   app.press('Avançar relógio 1 hora');
+   assert.equal(app.session.clockNow, '2026-11-05T13:00:00.000Z', 'ações novas funcionam normalmente');
+ });
+ 
+-test('saída: "Voltar ao aplicativo" descarta a demonstração e fecha a Área Admin', () => {
++test('saída: logout descarta a demonstração sem retornar ao participante', async () => {
+   const app = createAdminApp();
+-  app.press('← Voltar ao aplicativo');
+-  assert.equal(app.exitedToApp, true);
+-  assert.deepEqual(plain(app.navigationCalls), [{ type: 'parentBack' }]);
++  await app.pressAsync('← Sair da conta');
++  assert.equal(app.logoutCount, 1);
++  assert.equal(app.session, null);
++  assert.deepEqual(plain(app.navigationCalls), []);
+ });
+ 
+-test('fluxo completo: Painel → Eventos → Criar → Detalhe → Gerenciar → Painel → app', async () => {
++test('provedor recusa Participante, Staff, desafio pendente e identidade não confirmada', () => {
++  for (const overrides of [
++    { user: { roles: ['participante'] } }, { user: { roles: ['staff'] } },
++    { user: { roles: ['admin', 'invalid'] } }, { user: { sessionId: null } },
++    { identityStatus: 'checking' }, { identityStatus: 'error' },
++    { isAuthenticated: false }, { adminChallenge: { isTotpConfigured: true } },
++  ]) {
++    const app = createAdminApp({ auth: verifiedAdminAuth(overrides) });
++    assert.equal(app.session, null);
++    assert.ok(!app.hasButton('Gerenciar Eventos, 7 eventos na demonstração'));
++    assert.ok(app.hasText('Sessão indisponível'));
++  }
++});
++
++test('callbacks antigos não alteram outra conta após renderização nem encerram sua sessão', async () => {
++  const app = createAdminApp();
++  const stale = app.demo;
++  const exit = app.handlerOf('← Sair da conta');
++  app.setAuth(verifiedAdminAuth({ user: { id: 'admin-b' } }));
++  const before = plain(app.session);
++  stale.advanceClock(60);
++  stale.toggleFailNextAction();
++  assert.equal(stale.run(() => { throw new Error('transição antiga executada'); }).code, 'NO_SESSION');
++  assert.equal(stale.discard(), false);
++  await exit();
++  app.sync();
++  assert.equal(app.logoutCount, 0);
++  assert.deepEqual(plain(app.session), before);
++  assert.equal(app.demo.failNextAction, false);
++});
++
++test('perda de papel limpa mocks e ações anteriores não retornam após nova autorização', () => {
++  const app = createAdminApp();
++  const stale = app.demo;
++  app.press('Avançar relógio 1 hora');
++  app.setAuth(verifiedAdminAuth({ user: { roles: ['staff'] } }));
++  assert.equal(app.session, null);
++  assert.equal(stale.simulateLoad().code, 'NO_SESSION');
++  app.setAuth(verifiedAdminAuth());
++  stale.advanceClock(60);
++  app.sync();
++  assert.equal(app.session.clockNow, '2026-11-05T12:00:00.000Z');
++});
++
++test('fluxo completo: Painel → Eventos → Criar → Detalhe → Gerenciar → Painel → logout', async () => {
+   const app = createAdminApp();
+   await openEvents(app);
+   app.press('+ Criar novo evento');
+@@ -409,8 +455,9 @@ test('fluxo completo: Painel → Eventos → Criar → Detalhe → Gerenciar →
+   app.press('Voltar ao painel');
+   assert.equal(app.route, 'AdminPanel');
+   assert.ok(app.hasButton('Gerenciar Eventos, 8 eventos na demonstração'));
+-  app.press('← Voltar ao aplicativo');
+-  assert.equal(app.exitedToApp, true);
++  await app.pressAsync('← Sair da conta');
++  assert.equal(app.logoutCount, 1);
++  assert.equal(app.session, null);
+ });
+ 
+ test('isolamento de módulos: Admin não importa participação, serviços HTTP nem Área Staff', () => {
+diff --git a/app/tests/adminStructureScreens.test.cjs b/app/tests/adminStructureScreens.test.cjs
+index bcf3bbb..d0d3405 100644
+--- a/app/tests/adminStructureScreens.test.cjs
++++ b/app/tests/adminStructureScreens.test.cjs
+@@ -3,6 +3,7 @@
+ const assert = require('node:assert/strict');
+ const test = require('node:test');
+ const { createAdminApp } = require('./helpers/adminHarness.cjs');
++const { verifiedAdminAuth } = require('./helpers/adminAuthFixture.cjs');
+ 
+ const XP = 'demo-admin-arena-xp';
+ const D1 = 'demo-admin-beast-d1';
+@@ -187,7 +188,7 @@ test('critério 12: troca de conta ou logout descarta experiências, estações
+   app.press('CRIAR EXPERIÊNCIA');
+   await app.pressAsync('CRIAR EXPERIÊNCIA');
+   assert.equal(experiencesOf(app, D1).length, 3);
+-  app.setAuth({ isAuthenticated: true, user: { id: 'u-2', name: 'Outra Conta' }, getSessionEpoch: () => 1 });
++  app.setAuth(verifiedAdminAuth({ user: { id: 'u-2', name: 'Outra Conta', sessionId: '20000000-0000-4000-8000-000000000002' } }));
+   assert.equal(experiencesOf(app, D1).length, 2, 'conta B começa do zero');
+   assert.ok(!app.hasText('Fliperama  →'));
+   app.setAuth({ isAuthenticated: false, user: null });
+diff --git a/app/tests/authNavigation.test.cjs b/app/tests/authNavigation.test.cjs
+index ff838ec..ad1c95a 100644
+--- a/app/tests/authNavigation.test.cjs
++++ b/app/tests/authNavigation.test.cjs
+@@ -4,6 +4,7 @@ const { StackRouter, CommonActions } = require('@react-navigation/routers');
+ const {
+   createHarness, loadModule, textOf, createParticipantThemeStub,
+ } = require('./helpers/questionnaireHarness.cjs');
++const { verifiedAdminAuth } = require('./helpers/adminAuthFixture.cjs');
+ 
+ let authState;
+ function NavigationContainer() {}
+@@ -12,6 +13,7 @@ function StackScreen() {}
+ function ImportedScreen() {}
+ 
+ const gateExports = loadModule('screens/auth/AuthSessionGate.js', (name) => {
++  if (name === '../../context/adminAccess') return loadModule('context/adminAccess.js', require).exports;
+   if (name === 'react') return { ...require('react'), useState: (value) => [value, () => {}] };
+   if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
+   if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView' };
+@@ -103,17 +105,17 @@ function navigate(router, state, routeNames, name) {
+ 
+ test('papéis do backend definem pilhas isoladas e precedência admin > staff > participante', () => {
+   for (const [roles, expected] of [
+-    [['admin', 'staff', 'participante'], 'AdminPending'],
++    [['admin', 'staff', 'participante'], 'AdminArea'],
+     [['staff', 'participante'], 'StaffPending'],
+     [['participante'], 'MainTabs'],
+   ]) {
+-    const result = renderStack({ isAuthenticated: true, user: {
++    const result = renderStack(verifiedAdminAuth({ user: {
+       id: 'user', roles, hasCompletedQuestionnaire: true,
+-    } });
++    } }));
+     assert.equal(result.names[0], expected);
+     const router = StackRouter(routerOptions(result.names));
+     const state = router.getInitialState(routerOptions(result.names));
+-    for (const forbidden of ['AdminPending', 'StaffPending', 'MainTabs'].filter((name) => name !== expected)) {
++    for (const forbidden of ['AdminArea', 'AdminPending', 'AdminDemo', 'AdminPanel', 'StaffPending', 'MainTabs'].filter((name) => name !== expected)) {
+       assert.equal(navigate(router, state, result.names, forbidden), null);
+     }
+   }
+@@ -126,7 +128,7 @@ test('papéis ausentes, vazios ou inválidos não abrem nenhuma área de papel',
+     assert.deepEqual(result.names, ['IdentityRecovery']);
+     const router = StackRouter(routerOptions(result.names));
+     const state = router.getInitialState(routerOptions(result.names));
+-    for (const name of ['MainTabs', 'AdminPending', 'StaffPending']) {
++    for (const name of ['MainTabs', 'AdminArea', 'AdminPending', 'AdminDemo', 'StaffPending']) {
+       assert.equal(navigate(router, state, result.names, name), null);
+     }
+   }
+@@ -134,17 +136,17 @@ test('papéis ausentes, vazios ou inválidos não abrem nenhuma área de papel',
+ 
+ test('questionário só determina a entrada de participante, inclusive na restauração', () => {
+   for (const [roles, expected] of [
+-    [['admin'], 'AdminPending'], [['staff'], 'StaffPending'], [['participante'], 'ProfileQuestionnaire'],
++    [['admin'], 'AdminArea'], [['staff'], 'StaffPending'], [['participante'], 'ProfileQuestionnaire'],
+   ]) {
+-    const restored = renderStack({ isAuthenticated: true, sessionStatus: 'authenticated',
+-      postAuthRoute: 'ProfileQuestionnaire', user: { id: 'restored', roles, hasCompletedQuestionnaire: false } });
++    const restored = renderStack(verifiedAdminAuth({
++      postAuthRoute: 'ProfileQuestionnaire', user: { id: 'restored', roles, hasCompletedQuestionnaire: false } }));
+     assert.equal(restored.names[0], expected);
+     assert.ok(!restored.names.includes('MainTabs'));
+   }
+ });
+ 
+ test('logout, troca de conta e alteração de papel descartam a árvore anterior', () => {
+-  const session = (id, roles, epoch) => ({ isAuthenticated: true,
++  const session = (id, roles, epoch) => verifiedAdminAuth({
+     user: { id, roles, hasCompletedQuestionnaire: true }, getSessionEpoch: () => epoch });
+   const staff = renderStack(session('a', ['staff'], 1));
+   const other = renderStack(session('b', ['staff'], 2));
+@@ -157,8 +159,8 @@ test('logout, troca de conta e alteração de papel descartam a árvore anterior
+   assert.equal(renderStack(session('a', ['staff'], 3)).names[0], 'StaffPending');
+ });
+ 
+-test('revalidação da mesma sessão preserva a árvore e papéis reais isolam AdminDemo', () => {
+-  const session = (identityStatus, roles = ['participante'], epoch = 7) => ({
++test('revalidação de participante preserva a árvore e AdminDemo permanece removida', () => {
++  const session = (identityStatus, roles = ['participante'], epoch = 7) => verifiedAdminAuth({
+     isAuthenticated: true,
+     identityStatus,
+     user: { id: 'mesma-conta', roles, hasCompletedQuestionnaire: true },
+@@ -168,7 +170,8 @@ test('revalidação da mesma sessão preserva a árvore e papéis reais isolam A
+   const checking = renderStack(session('checking'));
+   assert.equal(checking.tree.key, verified.tree.key,
+     'a checagem da mesma geração não remonta navegação nem participação');
+-  assert.ok(verified.names.includes('AdminDemo'), 'demonstração disponível ao participante');
++  assert.ok(!verified.names.includes('AdminDemo'), 'demonstração removida do participante');
++  assert.ok(!verified.names.includes('AdminArea'));
+   assert.ok(!verified.names.includes('StaffDemo'), 'demonstração Staff permanece removida');
+ 
+   const renewed = renderStack(session('verified', ['participante'], 8));
+@@ -176,11 +179,39 @@ test('revalidação da mesma sessão preserva a árvore e papéis reais isolam A
+   for (const roles of [['staff'], ['admin'], ['admin', 'staff']]) {
+     const privileged = renderStack(session('verified', roles));
+     assert.deepEqual(privileged.names,
+-      [roles.includes('admin') ? 'AdminPending' : 'StaffPending']);
++      [roles.includes('admin') ? 'AdminArea' : 'StaffPending']);
+     assert.ok(!privileged.names.includes('AdminDemo'), 'papéis reais não recebem a demonstração');
+   }
+ });
+ 
++test('AdminArea falha fechada para sessão incompleta, identidade não confirmada ou desafio pendente', () => {
++  const invalid = [
++    { isAuthenticated: false, sessionStatus: 'admin_2fa_required' },
++    { isAuthenticated: false, sessionStatus: 'admin_2fa_verifying' },
++    { isInitializing: true }, { identityStatus: 'checking' },
++    { identityStatus: 'unverified' }, { identityStatus: 'error' },
++    { identityStatus: undefined }, { sessionStatus: 'revoked' },
++    { sessionStatus: 'expired' }, { sessionStatus: 'identity_error' },
++    { sessionStatus: undefined }, { adminChallenge: { isTotpConfigured: true } },
++    { isIdentityVerified: () => false }, { isIdentityVerified: undefined },
++    { user: { id: '' } }, { user: { sessionId: null } },
++    { user: { roles: ['participante'] } }, { user: { roles: ['staff'] } },
++    { user: { roles: ['admin', 'invalid'] } },
++  ];
++  for (const overrides of invalid) {
++    const auth = verifiedAdminAuth(overrides);
++    // Ausência explícita do mecanismo confiável também deve bloquear.
++    if ('isIdentityVerified' in overrides) auth.isIdentityVerified = overrides.isIdentityVerified;
++    const result = renderStack(auth);
++    assert.ok(!result.names.includes('AdminArea'));
++    const router = StackRouter(routerOptions(result.names));
++    const state = router.getInitialState(routerOptions(result.names));
++    for (const name of ['AdminArea', 'AdminDemo', 'AdminPending', 'AdminPanel']) {
++      assert.equal(navigate(router, state, result.names, name), null);
++    }
++  }
++});
++
+ test('React Navigation replaces Login with MainTabs immediately when login authenticates', async () => {
+   const publicTree = renderStack({ isAuthenticated: false, sessionStatus: 'unauthenticated' });
+   assert.equal(publicTree.names[0], 'Welcome');
+diff --git a/app/tests/helpers/adminHarness.cjs b/app/tests/helpers/adminHarness.cjs
+index c62caff..5977afd 100644
+--- a/app/tests/helpers/adminHarness.cjs
++++ b/app/tests/helpers/adminHarness.cjs
+@@ -3,6 +3,7 @@
+ const assert = require('node:assert/strict');
+ const path = require('node:path');
+ const { loadModule, textOf } = require('./questionnaireHarness.cjs');
++const { verifiedAdminAuth } = require('./adminAuthFixture.cjs');
+ 
+ const nativeNames = ['ActivityIndicator', 'KeyboardAvoidingView', 'Modal', 'Pressable', 'ScrollView',
+   'Text', 'TextInput', 'View'];
+@@ -123,11 +124,23 @@ function createAdminApp({ auth, initialRoute = 'AdminPanel', initialParams, late
+   const { react, mount } = createReactMock();
+   const cache = new Map();
+   // Conta trocável durante o teste (troca direta A → B, sem logout).
+-  let authValue = auth ?? {
+-    isAuthenticated: true,
+-    user: { id: 'u-1', name: 'Conta Teste' },
+-    getSessionEpoch: () => 1,
+-  };
++  let authValue = auth ?? verifiedAdminAuth();
++  let authRevision = 0;
++  let logoutCount = 0;
++  const liveAuth = () => ({
++    ...authValue,
++    getSessionEpoch: () => authValue.getSessionEpoch?.() ?? 0,
++    getIdentityRevision: () => authRevision,
++    isIdentityVerified: () => authValue.isIdentityVerified?.() ?? false,
++    logout: async () => {
++      logoutCount += 1;
++      await authValue.logout?.();
++      authValue = { isAuthenticated: false, user: null };
++      authRevision += 1;
++      provider.render();
++      sync();
++    },
++  });
+   const requested = [];
+ 
+   function load(relativePath) {
+@@ -146,7 +159,7 @@ function createAdminApp({ auth, initialRoute = 'AdminPanel', initialParams, late
+       if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView' };
+       if (name.startsWith('.')) {
+         const target = path.posix.normalize(path.posix.join(directory, name));
+-        if (target === 'context/AuthContext') return { AuthContext: {}, useAuth: () => authValue };
++        if (target === 'context/AuthContext') return { AuthContext: {}, useAuth: liveAuth };
+         if (target === 'screens/admin/adminDemoLatency') {
+           return { waitAdminDemoLatency: latency ?? (() => Promise.resolve()) };
+         }
+@@ -255,6 +268,8 @@ function createAdminApp({ auth, initialRoute = 'AdminPanel', initialParams, late
+   const api = {
+     navigationCalls,
+     requested,
++    ownerKeyFor: context.getAdminDemoOwnerKey,
++    get logoutCount() { return logoutCount; },
+     get exitedToApp() { return exitedToApp; },
+     get route() { return top().name; },
+     get routes() { return stack.map((route) => route.name); },
+@@ -304,9 +319,9 @@ function createAdminApp({ auth, initialRoute = 'AdminPanel', initialParams, late
+     },
+     sync,
+     // Troca a conta e re-renderiza (como faria o AuthContext).
+-    setAuth(next) { authValue = next; provider.render(); sync(); },
++    setAuth(next) { authValue = next; authRevision += 1; provider.render(); sync(); },
+     // Troca a conta SEM re-renderizar: simula callback antigo antes da nova renderização.
+-    setAuthWithoutRender(next) { authValue = next; },
++    setAuthWithoutRender(next) { authValue = next; authRevision += 1; },
+     handlerOf(label) {
+       const button = findPressable(label);
+       assert.ok(button, `botão ausente ou encoberto: ${label}`);
+diff --git a/app/tests/questionnaire.test.cjs b/app/tests/questionnaire.test.cjs
+index d79ba64..dbf9d9c 100644
+--- a/app/tests/questionnaire.test.cjs
++++ b/app/tests/questionnaire.test.cjs
+@@ -515,6 +515,7 @@ test('K05 Auditoria 1: Login com questionario pendente direciona para ProfileQue
+ 
+ test('K05 Auditoria 2: Restauracao de sessao com questionario pendente direciona para ProfileQuestionnaire', () => {
+   const gateExports = loadModule('screens/auth/AuthSessionGate.js', (name) => {
++    if (name === '../../context/adminAccess') return loadModule('context/adminAccess.js', require).exports;
+     if (name === 'react') return { ...require('react'), useState: (value) => [value, () => {}] };
+     if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
+     if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView' };
+diff --git a/app/tests/roleRoutingIntegration.test.cjs b/app/tests/roleRoutingIntegration.test.cjs
+index 059bc4f..a1cb612 100644
+--- a/app/tests/roleRoutingIntegration.test.cjs
++++ b/app/tests/roleRoutingIntegration.test.cjs
+@@ -83,7 +83,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+       text: async () => JSON.stringify(value.body ?? value) };
+   } });
+   const passthrough = ({ children }) => children;
+-  const native = Object.fromEntries(['ActivityIndicator', 'Modal', 'Pressable', 'ScrollView', 'Text', 'View'].map((name) => [name, name]));
++  const native = Object.fromEntries(['ActivityIndicator', 'KeyboardAvoidingView', 'Modal', 'Pressable', 'ScrollView', 'Text', 'TextInput', 'View'].map((name) => [name, name]));
+   native.StyleSheet = { create: (styles) => styles };
+   native.AppState = { currentState: 'active', addEventListener: () => ({ remove() {} }) };
+   native.Platform = { OS: control.platformOS ?? 'web' };
+@@ -113,6 +113,12 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+       if (target === 'theme') return createParticipantThemeStub();
+       if (target === 'services/httpClient') return { ...http, httpClient: client };
+       if (target === 'services/tokenStorage') return { defaultTokenStorage: storage };
++      if (control.realAdmin && target === 'screens/admin/adminDemoLatency') {
++        return { waitAdminDemoLatency: async () => {} };
++      }
++      if (control.realAdmin && (target.startsWith('screens/admin/') || target === 'data/adminDemoData')) {
++        return load(`${target}.js`);
++      }
+       if (control.realStaff && ['screens/staff/StaffEventsNavigator', 'services/staffEventsService',
+         'screens/staff/StaffEntryControlRealScreen', 'services/staffEntryService', 'services/staffEntryIntentStorage',
+         'screens/staff/StaffStationOperationalScreen', 'services/staffIntentStorage',
+@@ -147,6 +153,13 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+     async act(work) { await Renderer.act(work); },
+     route() { const state = navRef.getRootState(); return state.routes[state.index].name; },
+     routes() { return navRef.getRootState().routes.map((route) => route.name); },
++    activeRoute() {
++      let state = navRef.getRootState();
++      let route = state.routes[state.index];
++      while (route.state) { state = route.state; route = state.routes[state.index]; }
++      return route.name;
++    },
++    storedToken() { return token; },
+     navigate(name, params) { Renderer.act(() => navRef.navigate(name, params)); },
+     back() { Renderer.act(() => navRef.goBack()); },
+     hasText(text) { return tree.root.findAllByType('Text').some((node) => {
+@@ -172,6 +185,163 @@ const participant = { id: 'a', name: 'A', email: 'a@example.test', emailVerified
+   sessionId: '10000000-0000-4000-8000-000000000001',
+   roles: ['participante'], hasCompletedQuestionnaire: true };
+ 
++const adminUser = { ...participant, roles: ['admin', 'staff', 'participante'], hasCompletedQuestionnaire: false };
++
++test('Admin: senha e desafio não abrem painel; TOTP e identidade confirmada abrem Heliom', { skip }, async () => {
++  const identity = deferred();
++  const control = { realAdmin: true, me: () => identity.promise };
++  const app = createIntegration({ initialUser: adminUser, control });
++  await app.mount();
++  try {
++    await app.act(() => app.manager.login({ email: adminUser.email, password: 'password' }));
++    assert.equal(app.manager.getSnapshot().sessionStatus, 'admin_2fa_required');
++    assert.equal(app.manager.getSnapshot().isAuthenticated, false);
++    for (const name of ['AdminArea', 'AdminDemo', 'AdminPending', 'AdminPanel']) app.navigate(name);
++    assert.ok(!app.routes().includes('AdminArea'));
++    assert.ok(!app.hasText('Conectado como:'));
++    let pending;
++    await app.act(async () => { pending = app.manager.verifyAdminTwoFactor('123456'); });
++    assert.equal(app.manager.getSnapshot().identityStatus, 'checking');
++    assert.ok(!app.hasText('Conectado como:'));
++    await app.act(async () => { identity.resolve(adminUser); await pending; });
++    assert.deepEqual(app.routes(), ['AdminArea']);
++    assert.equal(app.activeRoute(), 'AdminPanel');
++    assert.ok(app.hasText('Sessão Admin autenticada com segundo fator'));
++    assert.ok(app.hasText('nada aqui é salvo no servidor'));
++    for (const name of ['MainTabs', 'StaffPending', 'StaffDemo', 'ProfileQuestionnaire', 'AdminDemo', 'AdminPending']) {
++      app.navigate(name);
++      assert.equal(app.activeRoute(), 'AdminPanel');
++    }
++    assert.ok(app.calls.includes('/auth/2fa/verify'));
++    assert.ok(app.calls.includes('/auth/me'));
++    assert.ok(!app.calls.some(url => url.startsWith('/admin/') || url.startsWith('/staff/')));
++  } finally { app.dispose(); }
++});
++
++test('Admin: restauração válida reutiliza telas, retornos internos e logout real', { skip }, async () => {
++  const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control: { realAdmin: true } });
++  await app.mount();
++  try {
++    assert.equal(app.activeRoute(), 'AdminPanel');
++    assert.ok(app.calls.includes('/auth/refresh') && app.calls.includes('/auth/me'));
++    assert.ok(!app.calls.includes('/auth/2fa/verify'), 'sessão já autenticada é restaurada pelo contrato real');
++    await app.press('Gerenciar Eventos, 7 eventos na demonstração');
++    assert.equal(app.activeRoute(), 'AdminEvents');
++    assert.ok(app.hasText('Copa Noturna'));
++    await app.press('← Painel');
++    assert.equal(app.activeRoute(), 'AdminPanel');
++    const params = { eventId: 'demo-admin-arena-xp', experienceId: 'demo-admin-exp-xp-dance',
++      stationId: 'demo-admin-station-xp-dance-1' };
++    for (const name of ['AdminCreateEvent', 'AdminEventDetail', 'AdminEventSchedule', 'AdminEventQueue',
++      'AdminEventClose', 'AdminEventExperiences', 'AdminExperienceDetail', 'AdminStationDetail',
++      'AdminEventStaff', 'AdminHistory', 'AdminEventBi', 'AdminOverview']) {
++      app.navigate('AdminArea', { screen: name, params });
++      await app.act(async () => {});
++      assert.equal(app.activeRoute(), name);
++      assert.ok(!app.hasText('não encontrada') && !app.hasText('não encontrado'), name);
++      app.back();
++      assert.equal(app.activeRoute(), 'AdminPanel');
++    }
++    await app.press('← Sair da conta');
++    assert.equal(app.route(), 'Welcome');
++    assert.equal(app.storedToken(), null);
++    assert.equal(app.manager.getAccessToken(), null);
++    assert.equal(app.calls.filter(url => url === '/auth/logout').length, 1);
++    app.navigate('AdminArea', { screen: 'AdminPanel' });
++    assert.equal(app.route(), 'Welcome');
++  } finally { app.dispose(); }
++});
++
++test('Admin: mocks reiniciam em refresh, troca de Admin, papéis e novo login', { skip }, async () => {
++  const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control: { realAdmin: true } });
++  await app.mount();
++  try {
++    const initialClock = '05/11/2026 09:00';
++    assert.ok(app.hasText(initialClock));
++    const staleAdvance = app.handler('Avançar relógio 1 hora');
++    await app.press('Avançar relógio 1 hora');
++    assert.ok(app.hasText('05/11/2026 10:00'));
++    await app.act(() => app.manager.refreshSession());
++    assert.ok(app.hasText(initialClock));
++    await app.act(async () => staleAdvance());
++    assert.ok(app.hasText(initialClock), 'callback anterior ao refresh não atua');
++    const staleExit = app.handler('← Sair da conta');
++    await app.act(() => app.manager.logout());
++    const other = { ...adminUser, id: 'admin-b', name: 'Admin B',
++      sessionId: '20000000-0000-4000-8000-000000000002' };
++    app.setUser(other);
++    await app.act(() => app.manager.login({ email: other.email, password: 'password' }));
++    await app.act(() => app.manager.verifyAdminTwoFactor('123456'));
++    await app.act(async () => { staleAdvance(); staleExit(); });
++    assert.equal(app.activeRoute(), 'AdminPanel');
++    assert.ok(app.hasText('Conectado como: Admin B'));
++    assert.ok(app.hasText(initialClock));
++    app.setUser({ ...other, roles: ['staff', 'participante'] });
++    await app.act(() => app.manager.fetchCurrentUser());
++    assert.equal(app.route(), 'StaffPending');
++    for (const name of ['AdminArea', 'AdminDemo', 'AdminPending', 'AdminPanel']) app.navigate(name);
++    assert.equal(app.route(), 'StaffPending');
++    app.setUser({ ...other, roles: ['participante'], hasCompletedQuestionnaire: true });
++    await app.act(() => app.manager.fetchCurrentUser());
++    assert.equal(app.route(), 'MainTabs');
++    for (const name of ['AdminArea', 'AdminDemo', 'AdminPending', 'AdminPanel']) app.navigate(name);
++    assert.equal(app.route(), 'MainTabs');
++    app.setUser(other);
++    await app.act(() => app.manager.fetchCurrentUser());
++    assert.equal(app.activeRoute(), 'AdminPanel');
++    assert.ok(app.hasText(initialClock));
++  } finally { app.dispose(); }
++});
++
++test('Admin: revogação remota retira a área e invalida ações guardadas', { skip }, async () => {
++  const control = { realAdmin: true };
++  const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control });
++  await app.mount();
++  try {
++    const stale = app.handler('Avançar relógio 1 hora');
++    control.http = async route => route === '/auth/me'
++      ? { statusCode: 401, body: { code: 'SESSION_REVOKED' } } : undefined;
++    await app.act(async () => { await app.manager.fetchCurrentUser().catch(() => {}); });
++    assert.equal(app.manager.getSnapshot().isAuthenticated, false);
++    assert.equal(app.route(), 'Login');
++    assert.equal(app.storedToken(), null);
++    await app.act(async () => stale());
++    app.navigate('AdminArea', { screen: 'AdminEvents' });
++    app.back();
++    assert.equal(app.route(), 'Login');
++    assert.ok(!app.hasText('Conectado como:'));
++  } finally { app.dispose(); }
++});
++
++test('Admin: restauração recusada por falta de segundo fator não monta painel', { skip }, async () => {
++  const control = { realAdmin: true, http: async route => route === '/auth/refresh'
++    ? { statusCode: 401, body: { code: 'ADMIN_2FA_REQUIRED' } } : undefined };
++  const app = createIntegration({ initialToken: 'stored-without-2fa', initialUser: adminUser, control });
++  await app.mount();
++  try {
++    assert.equal(app.manager.getSnapshot().isAuthenticated, false);
++    assert.ok(!app.hasText('Conectado como:'));
++    app.navigate('AdminArea');
++    assert.ok(!app.routes().includes('AdminArea'));
++  } finally { app.dispose(); }
++});
++
++test('Admin: falha de revogação remota mantém logout local e painel inacessível', { skip }, async () => {
++  const control = { realAdmin: true, http: async route => route === '/auth/logout'
++    ? { statusCode: 503, body: { code: 'SERVICE_UNAVAILABLE' } } : undefined };
++  const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control });
++  await app.mount();
++  try {
++    await app.press('← Sair da conta');
++    assert.equal(app.manager.getSnapshot().isAuthenticated, false);
++    assert.ok(app.manager.getSnapshot().authNotice.includes('não foi possível confirmar a revogação'));
++    assert.equal(app.storedToken(), null);
++    app.navigate('AdminArea');
++    assert.ok(!app.routes().includes('AdminArea'));
++    assert.ok(!app.hasText('Conectado como:'));
++  } finally { app.dispose(); }
++});
++
+ test('integra sessão real, papéis, TOTP, provedores e isolamento da navegação', { skip }, async () => {
+   const app = createIntegration({ initialUser: participant });
+   await app.mount();
+@@ -200,9 +370,9 @@ test('integra sessão real, papéis, TOTP, provedores e isolamento da navegaçã
+   assert.equal(app.manager.getSnapshot().isAuthenticated, false);
+   assert.equal(app.manager.getSnapshot().sessionStatus, 'admin_2fa_required');
+   await app.act(() => app.manager.verifyAdminTwoFactor('123456'));
+-  assert.deepEqual(app.routes(), ['AdminPending']);
++  assert.deepEqual(app.routes(), ['AdminArea']);
+   app.navigate('StaffPending');
+-  assert.deepEqual(app.routes(), ['AdminPending']);
++  assert.deepEqual(app.routes(), ['AdminArea']);
+   await app.act(() => app.manager.logout());
+   assert.equal(app.route(), 'Welcome');
+   app.setUser({ ...participant, id: 'c', roles: ['staff'] });
+diff --git a/app/tests/splashScreen.test.cjs b/app/tests/splashScreen.test.cjs
+index 7d9c042..3d41269 100644
+--- a/app/tests/splashScreen.test.cjs
++++ b/app/tests/splashScreen.test.cjs
+@@ -38,6 +38,7 @@ const {
+ // Função fábrica de resolvedores de módulo com suporte robusto a caminhos relativos
+ function createResolver(overrides = {}) {
+   const baseResolver = (name) => {
++    if (name === '../../context/adminAccess') return loadModule('context/adminAccess.js', require).exports;
+     if (overrides[name]) {
+       return overrides[name];
+     }
+@@ -827,7 +828,7 @@ test('SPLASH-01 (16): Transições de rota baseadas no estado de autenticação'
+   assert.equal(resolveInitialRouteForAuthState({ isAuthenticated: true,
+     user: { roles: ['staff'], hasCompletedQuestionnaire: false } }), 'StaffPending');
+   assert.equal(resolveInitialRouteForAuthState({ isAuthenticated: true,
+-    user: { roles: ['admin'], hasCompletedQuestionnaire: false } }), 'AdminPending');
++    user: { roles: ['admin'], hasCompletedQuestionnaire: false } }), 'IdentityRecovery');
+   assert.equal(resolveInitialRouteForAuthState({ isAuthenticated: true,
+     user: { roles: [] } }), 'IdentityRecovery');
+ 
+diff --git a/app/context/adminAccess.js b/app/context/adminAccess.js
+new file mode 100644
+index 0000000..c2eca35
+--- /dev/null
++++ b/app/context/adminAccess.js
+@@ -0,0 +1,13 @@
++// A sessão só é publicada após o fluxo real de login/segundo fator e GET /auth/me.
++// Não inferir TOTP de dados locais nem de parâmetros de navegação.
++export function canAccessAdminArea(auth) {
++  const roles = auth?.user?.roles;
++  return Boolean(
++    auth?.isAuthenticated && !auth.isInitializing &&
++    auth.sessionStatus === 'authenticated' && auth.identityStatus === 'verified' &&
++    !auth.adminChallenge && auth.user?.id && auth.user?.sessionId &&
++    Array.isArray(roles) && roles.includes('admin') &&
++    roles.every((role) => ['admin', 'staff', 'participante'].includes(role)) &&
++    typeof auth.isIdentityVerified === 'function' && auth.isIdentityVerified() === true
++  );
++}
+diff --git a/app/tests/helpers/adminAuthFixture.cjs b/app/tests/helpers/adminAuthFixture.cjs
+new file mode 100644
+index 0000000..5ce7198
+--- /dev/null
++++ b/app/tests/helpers/adminAuthFixture.cjs
+@@ -0,0 +1,21 @@
++// Snapshot de identidade confirmada; não simula nem executa criptografia/TOTP.
++function verifiedAdminAuth(overrides = {}) {
++  const auth = {
++    isAuthenticated: true,
++    isInitializing: false,
++    sessionStatus: 'authenticated',
++    identityStatus: 'verified',
++    adminChallenge: null,
++    getSessionEpoch: () => 1,
++    getIdentityRevision: () => 1,
++    ...overrides,
++    user: { id: 'u-1', name: 'Conta Teste', roles: ['admin'],
++      sessionId: '10000000-0000-4000-8000-000000000001', hasCompletedQuestionnaire: true,
++      ...overrides.user },
++  };
++  auth.isIdentityVerified = overrides.isIdentityVerified ?? (() =>
++    auth.isAuthenticated && !auth.isInitializing && auth.identityStatus === 'verified');
++  return auth;
++}
++
++module.exports = { verifiedAdminAuth };
+diff --git a/docs/ADMIN_AUTHENTICATED_NAVIGATION_IMPLEMENTACAO.md b/docs/ADMIN_AUTHENTICATED_NAVIGATION_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..5d51933
+--- /dev/null
++++ b/docs/ADMIN_AUTHENTICATED_NAVIGATION_IMPLEMENTACAO.md
+@@ -0,0 +1,106 @@
++# ADMIN_AUTHENTICATED_NAVIGATION
++
++## Escopo e base
++
++- Data: 13/11/2026.
++- Branch: `feature/admin-authenticated-navigation`, criada a partir de `origin/develop` após `git fetch origin develop`.
++- Base: `430b99f` (`merge: integrar implementacao Staff a develop`). Working tree limpo antes das alterações.
++- O commit de `PROFILE_REAL_STATISTICS` (`40d8760`) não compõe esta base nem este patch.
++- Recomendação: Sol High para implementação/revisão de autorização. A seleção efetiva do modelo não foi verificada nem alterada pelo Codex.
++
++## Comportamento implementado
++
++O fluxo de senha Admin continua produzindo um desafio temporário sem autenticar a conta. Após a verificação real em `/auth/2fa/verify`, o gerenciador existente confirma a identidade em `/auth/me`. Somente a sessão confirmada, com papel `admin`, recebe a rota raiz `AdminArea`, que carrega o `AdminDemoNavigator` existente do Heliom.
++
++A restauração usa o contrato existente de refresh e `/auth/me`; não pede TOTP novamente para uma sessão que o servidor já reconhece como verificada. A inspeção de `backend/src/auth/auth.service.ts` confirmou que o backend rejeita autenticação e refresh Admin sem `admin_2fa_verified_at`. Nenhum arquivo do backend foi alterado e nenhuma operação de banco foi executada.
++
++`canAccessAdminArea` exige autenticação, inicialização concluída, `sessionStatus=authenticated`, `identityStatus=verified`, identidade/sessão identificadas, ausência de desafio pendente, papéis conhecidos contendo `admin` e confirmação pelo getter vivo `isIdentityVerified()`. Parâmetros de navegação não concedem papel nem comprovam TOTP.
++
++A precedência permanece `admin > staff > participante`, inclusive para contas com múltiplos papéis e questionário incompleto. A conta Admin não registra `MainTabs`, questionário, fluxos Participante ou Staff. Participante/Staff não registram `AdminArea` nem suas telas internas. `AdminDemo` foi removida da pilha Participante e seu atalho saiu da Home; `AdminPending` deixou de ser registrada. O navegador administrativo também recusa montagem sem a sessão autorizada.
++
++As 14 telas existentes foram mantidas: Painel, Eventos, Criar Evento, Detalhe, Horários, Fila Externa, Encerramento, Experiências, Detalhe da Experiência, Estação, Staff do Evento, Histórico, BI do Evento e Visão Geral. Os retornos internos continuam dentro da pilha administrativa. No Painel, “Sair da conta” descarta o estado demonstrativo e chama `auth.logout()`. O gerenciador real limpa credenciais locais e tenta revogar a sessão no servidor; eventual falha remota mantém o encerramento local e o aviso existente, sem declarar revogação confirmada.
++
++## Autenticação real e operações demonstrativas
++
++| Recurso | Natureza |
++| --- | --- |
++| Login, desafio TOTP/código de recuperação, `/auth/me`, refresh, logout e tentativa de revogação | Contratos reais existentes, sem alterações criptográficas |
++| Verificação de identidade e papel para selecionar a pilha | Estado confirmado pelo gerenciador real |
++| Eventos, horários, fila externa e encerramento no painel | Simulados em memória |
++| Experiências, estações e concessões Staff editadas pelo painel | Simulados em memória; não alteram permissões reais |
++| Histórico, avaliações, BI, indicadores, relógio e falhas simuladas | Dados fictícios locais |
++
++O layout e a navegação Heliom foram reutilizados. Foram corrigidos os avisos que negavam permissão Admin/TOTP; a faixa de demonstração e os avisos de ausência de persistência permanecem.
++
++O estado local pertence à combinação conta + `sessionId` + geração de sessão + revisão de identidade. Logout, nova conta, nova sessão, perda de autorização, passagem por identidade não confirmada e renovação/refresh descartam os mocks. Mesmo quando React agrupa atualizações de refresh, a revisão da identidade muda e remonta o provedor/telas. Uma nova entrada começa com os dados fictícios originais. Não há migração desses dados para outra identidade. Uma consulta de `/auth/me` que confirma a mesma identidade e os mesmos papéis, sem invalidá-los, preserva o estado local.
++
++Callbacks capturados por telas antigas verificam proprietário, getters vivos e montagem antes de executar transições. Ações antigas não alteram os mocks da próxima conta; um callback antigo de saída também não encerra a nova sessão.
++
++## Arquivos
++
++Produto:
++
++- `app/App.js`: destino exclusivo Admin e chave da navegação incluindo sessão confirmada.
++- `app/context/adminAccess.js`: condição compartilhada de acesso Admin.
++- `app/screens/auth/AuthSessionGate.js`: resolução de `AdminArea` após confirmação.
++- `app/screens/admin/AdminDemoNavigator.js`: reutilização das telas e proteção da montagem.
++- `app/screens/admin/AdminDemoContext.js`: isolamento, invalidação de callbacks e descarte.
++- `app/screens/admin/AdminPanelScreen.js`: aviso correto e logout real.
++- `app/screens/admin/components/AdminScreen.js`: aviso acessível compatível com o acesso autenticado.
++- `app/screens/home/HomeScreen.js`: remoção do atalho demonstrativo do Participante.
++
++Testes e suporte:
++
++- `app/tests/roleRoutingIntegration.test.cjs`: gerenciador, provedores, React Navigation e telas Admin reais com transporte/armazenamento/nativos simulados; login/TOTP, espera por identidade, restauração, todas as telas/retornos, logout, falha remota, revogação, papéis, contas, refresh e callbacks antigos.
++- `app/tests/authNavigation.test.cjs`: pilhas, precedência, navegação manual, rotas antigas e matriz de estados incompletos/inválidos.
++- `app/tests/adminNavigation.test.cjs`: rota exclusiva, Home preservada, montagem direta protegida, chave de proprietário real e registro das 14 telas.
++- `app/tests/adminScreens.test.cjs`: mensagens, logout, fluxos existentes e isolamento dos mocks/callbacks.
++- `app/tests/adminInsightsScreens.test.cjs` e `app/tests/adminStructureScreens.test.cjs`: fixtures Admin confirmadas para troca de conta e isolamento dos mocks.
++- `app/tests/helpers/adminAuthFixture.cjs`: identidade Admin confirmada para testes de interface; não valida criptografia.
++- `app/tests/helpers/adminHarness.cjs`: getters vivos e simulação de logout/troca de identidade para testes isolados.
++- `app/tests/questionnaire.test.cjs` e `app/tests/splashScreen.test.cjs`: resolução da nova dependência de autorização e expectativa segura para Admin sem identidade confirmada.
++
++## Validações e evidências
++
++| Categoria | Execução nesta task |
++| --- | --- |
++| Inspeção estática | Realizada: fluxo de autenticação, contrato backend de segundo fator, rotas, importações, callbacks, mudanças e scripts de teste |
++| `git diff --check` pelo Codex, autorizado no prompt | Executado com código de saída 0, sem problemas de whitespace |
++| Testes focados por Luna na campanha anterior | 137 aprovados, 0 falhos, 0 ignorados; saída 0 |
++| Regressão frontend anterior à correção | 750 aprovados, 2 falhos, 0 ignorados; saída 1 |
++| Testes após a correção, lint, typecheck, build | Não executados nesta correção; aguardam validação independente |
++| Validações manuais pelo responsável | Expo Go: login Admin com TOTP, abertura do painel Heliom e navegação pelas telas administrativas testadas, conforme relato do responsável |
++| PostgreSQL, migrations, seeds, alterações em `.env`/chaves | Não executados |
++
++As duas falhas anteriores ocorreram em `adminInsightsScreens.test.cjs` e `adminStructureScreens.test.cjs`: os testes trocavam para uma conta B sem papel Admin, sessão e identidade confirmada; o provedor corretamente retornava `session: null`. Os casos agora usam `verifiedAdminAuth` para a conta B, mantêm os testes de isolamento e logout e verificam a renovação e a recusa de identidade incompleta. A regressão após esta correção ainda não foi executada nem declarada aprovada. As operações administrativas continuam simuladas e sem persistência.
++
++### Handoff para Luna Medium
++
++O responsável deve selecionar e confirmar Luna Medium antes da execução. Reinspecionar comandos, diretório, branch e working tree, preservar alterações e usar ambiente isolado sem carregar `.env`. Os arquivos abaixo usam transporte HTTP e armazenamento simulados; não iniciar backend nem conectar PostgreSQL.
++
++Diretório: `C:\DoJob\ProgramacaoMobile\app`.
++
++Campanha focada proposta para revalidação após a correção (não executada após a correção):
++
++```powershell
++$env:NODE_ENV = 'test'
++node --test tests/authNavigation.test.cjs tests/adminNavigation.test.cjs tests/adminScreens.test.cjs tests/adminInsightsScreens.test.cjs tests/adminStructureScreens.test.cjs tests/roleRoutingIntegration.test.cjs tests/questionnaire.test.cjs tests/splashScreen.test.cjs
++```
++
++Regressão de frontend proposta para verificar os fluxos existentes (não executada após a correção):
++
++```powershell
++node --test tests/*.test.cjs
++```
++
++O script `test` de `app/package.json` também chama diretamente `node --test tests/*.test.cjs`, sem lifecycle adicional declarado. A integração de papéis depende das bibliotecas já previstas em `qa/regression/package.json`; se estiverem ausentes, a suíte marca cenários como ignorados. Registrar esse motivo e não tratar uma campanha com esses cenários ignorados como validação completa. Não instalar dependências nem ampliar comandos sem a autorização aplicável.
++
++Registrar comandos exatos, saída/código de saída, contagens de aprovados/falhos/ignorados e diagnóstico inicial. Em falhas de autorização, concorrência ou inconsistência, interromper correções especulativas e recomendar Sol/Astra High ou Extra High. Não alterar expectativas para obter aprovação.
++
++O responsável informou homologação no Expo Go do login Admin/TOTP, abertura do painel Heliom e navegação pelas telas administrativas testadas. Resta validar, em ambiente autorizado, restauração e logout, bloqueio de Staff/Participante e rotas antigas, troca de contas e descarte dos mocks na renovação.
++
++### Patch reversível
++
++Evidência única: `qa-evidence/ADMIN_AUTHENTICATED_NAVIGATION-changes.diff`, patch Git UTF-8 com código, testes e este relatório; o patch não inclui a si próprio. Não há staging, commit, push, merge, reset ou alteração automática do histórico.
++
++Para revisão/reversão futura pelo responsável, verificar primeiro o estado de trabalho e usar `git apply --check` ou `git apply --reverse --check` antes da operação correspondente. Nenhum patch foi aplicado/revertido pelo Codex nesta task. Aguardar validação independente e revisão do responsável.

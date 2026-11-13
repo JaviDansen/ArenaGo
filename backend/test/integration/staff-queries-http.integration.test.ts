@@ -127,10 +127,68 @@ const routes = (c: Context, experienceId: string) => [`/api/v1/staff/events/${c.
 const get = (route: string, auth: { token: string }) => supertest(app.getHttpServer()).get(route).set("Authorization", `Bearer ${auth.token}`);
 const stationsGet = (c: Context) => get(routes(c, "unused")[0], c.staff);
 const queueGet = (c: Context & { experienceId: string }) => get(routes(c, c.experienceId)[1], c.staff);
+test("descoberta PostgreSQL isola concessões por conta e reflete revogação", async () => {
+  const a = await context(), b = await context(), route = "/api/v1/staff/events";
+  const secondGrant = randomUUID();
+  await pool.query("INSERT INTO user_roles(id,user_id,role,event_id,granted_at) VALUES($1,$2,'staff',$3,clock_timestamp())",
+    [secondGrant, a.staff.userId, b.eventId]);
+  const list = (auth: { token: string }) => get(route, auth);
+  const first = await list(a.staff);
+  assert.equal(first.status, 200); assert.equal(first.headers["cache-control"], "no-store");
+  assert.deepEqual(first.body.events.map((event: { id: string }) => event.id).sort(), [a.eventId, b.eventId].sort());
+  for (const event of first.body.events) assert.deepEqual(Object.keys(event).sort(), ["id", "name", "status"]);
+  const other = await get(route, b.staff).query({ userId: a.staff.userId });
+  assert.equal(other.status, 200); assert.deepEqual(other.body.events.map((event: { id: string }) => event.id), [b.eventId]);
+  const empty = await list(a.viewer); assert.equal(empty.status, 200); assert.deepEqual(empty.body, { events: [] });
+  await pool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE id=$1", [secondGrant]);
+  const revoked = await list(a.staff); assert.equal(revoked.status, 200);
+  assert.deepEqual(revoked.body.events.map((event: { id: string }) => event.id), [a.eventId]);
+  assert.equal((await supertest(app.getHttpServer()).get(route)).status, 401);
+});
 function problem(r: supertest.Response, status: number, code?: string) {
   assert.equal(r.status, status, JSON.stringify(r.body)); assert.equal(r.body.status, status);
   assert.match(r.headers["content-type"], /application\/problem\+json/); if (code) assert.equal(r.body.code, code);
 }
+test("experiências Staff PostgreSQL isolam contas e eventos e incluem experiência sem estação", async () => {
+  const a = await context(), b = await context();
+  const withStation = await experience(a.eventId, "Com estação"); await station(withStation);
+  const withoutStation = await experience(a.eventId, "Sem estação");
+  const other = await experience(b.eventId, "Outra conta");
+  const route = (eventId: string) => `/api/v1/staff/events/${eventId}/experiences`;
+  const aResult = await get(route(a.eventId), a.staff).query({ userId: b.staff.userId });
+  assert.equal(aResult.status, 200); assert.equal(aResult.headers["cache-control"], "no-store");
+  assert.deepEqual(aResult.body, { eventId: a.eventId, experiences: [
+    { id: withStation, name: "Com estação" }, { id: withoutStation, name: "Sem estação" }] });
+  const bResult = await get(route(b.eventId), b.staff);
+  assert.equal(bResult.status, 200);
+  assert.deepEqual(bResult.body, { eventId: b.eventId, experiences: [{ id: other, name: "Outra conta" }] });
+  for (const auth of [b.staff, a.viewer]) problem(await get(route(a.eventId), auth), 404, "RESOURCE_NOT_FOUND");
+  problem(await supertest(app.getHttpServer()).get(route(a.eventId)), 401, "MISSING_ACCESS_TOKEN");
+  problem(await get(route("invalid"), a.staff), 400, "VALIDATION_ERROR");
+  await pool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE id=$1", [a.roleId]);
+  problem(await get(route(a.eventId), a.staff), 404, "RESOURCE_NOT_FOUND");
+  const missing = await get(route(randomUUID()), a.staff), revoked = await get(route(a.eventId), a.staff);
+  assert.deepEqual(revoked.body, missing.body);
+});
+test("experiências Staff PostgreSQL retornam vazio e Admin sem concessão recebe 404 após 2FA", async () => {
+  const c = await context(), admin = await account();
+  const route = `/api/v1/staff/events/${c.eventId}/experiences`;
+  const empty = await get(route, c.staff);
+  assert.equal(empty.status, 200); assert.deepEqual(empty.body, { eventId: c.eventId, experiences: [] });
+  await pool.query("INSERT INTO user_roles(id,user_id,role,event_id,granted_at) VALUES($1,$2,'admin',NULL,clock_timestamp())", [randomUUID(), admin.userId]);
+  problem(await get(route, admin), 401, "ADMIN_2FA_REQUIRED");
+  await pool.query("UPDATE sessions SET admin_2fa_verified_at=clock_timestamp() WHERE id=$1", [admin.sessionId]);
+  problem(await get(route, admin), 404, "RESOURCE_NOT_FOUND");
+});
+test("experiências Staff PostgreSQL exigem conta ativa e e-mail verificado", async () => {
+  for (const mode of ["inactive", "unverified"] as const) {
+    const c = await context();
+    if (mode === "inactive") await pool.query("UPDATE users SET is_active=false WHERE id=$1", [c.staff.userId]);
+    else await pool.query("UPDATE users SET email_verified_at=NULL WHERE id=$1", [c.staff.userId]);
+    const r = await get(`/api/v1/staff/events/${c.eventId}/experiences`, c.staff);
+    problem(r, mode === "inactive" ? 401 : 404, mode === "inactive" ? "ACCOUNT_DEACTIVATED" : "RESOURCE_NOT_FOUND");
+  }
+});
 async function state() {
   return (await pool.query(`SELECT jsonb_build_object(
     'events',(SELECT jsonb_agg(to_jsonb(e) ORDER BY e.id) FROM events e WHERE e.id=ANY($1::uuid[])),
@@ -170,6 +228,18 @@ async function afterAuthorization(effect: () => Promise<void>, request: () => Pr
   try { const response = await request(); assert.ok(reached > 0); return response; }
   finally { database.transaction = original; }
 }
+
+test("experiências Staff usam o mesmo snapshot de autorização e dados", async () => {
+  const c = await context(), id = await experience(c.eventId, "Snapshot");
+  const route = `/api/v1/staff/events/${c.eventId}/experiences`;
+  const result = await afterAuthorization(
+    async () => { await pool.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE id=$1", [c.roleId]); },
+    () => get(route, c.staff),
+  );
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body, { eventId: c.eventId, experiences: [{ id, name: "Snapshot" }] });
+  problem(await get(route, c.staff), 404, "RESOURCE_NOT_FOUND");
+});
 
 test("E08.4 PostgreSQL HTTP Staff vigente recebe estações e fila com relógio PostgreSQL", async () => {
   const c = await populated(), before = (await pool.query("SELECT clock_timestamp() AS at")).rows[0].at as Date;

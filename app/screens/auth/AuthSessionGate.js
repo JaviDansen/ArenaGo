@@ -4,6 +4,7 @@ import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'rea
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AuthProvider, useAuth } from '../../context/AuthContext';
+import { canAccessAdminArea } from '../../context/adminAccess';
 
 function loadLogoSource() {
   try {
@@ -29,6 +30,14 @@ export function resolveInitialRouteForAuthState(authState) {
     return 'Welcome';
   }
 
+  const roles = authState.user?.roles;
+  if (!Array.isArray(roles) || roles.length === 0 ||
+      !roles.every((role) => ['admin', 'staff', 'participante'].includes(role))) {
+    return 'IdentityRecovery';
+  }
+  if (roles.includes('admin')) return canAccessAdminArea(authState) ? 'AdminArea' : 'IdentityRecovery';
+  if (roles.includes('staff')) return 'StaffPending';
+
   if (authState.user && authState.user.hasCompletedQuestionnaire === false) {
     return 'ProfileQuestionnaire';
   }
@@ -46,17 +55,33 @@ export function AuthSessionCoordinator({ children, onInitializingChange }) {
 
   useEffect(() => {
     if (typeof onInitializingChange === 'function' && auth) {
-      onInitializingChange(Boolean(auth.isInitializing));
+      onInitializingChange(Boolean(auth.isInitializing || auth.identityStatus === 'checking'));
     }
-  }, [auth?.isInitializing, onInitializingChange]);
+  }, [auth?.isInitializing, auth?.identityStatus, onInitializingChange]);
 
   if (!auth) {
     return children;
   }
 
-  if (auth.isInitializing) {
+  // Mantém a pilha montada durante uma verificação da mesma sessão, mas sem
+  // exibir ou permitir interação com dados cuja identidade ainda não foi confirmada.
+  const wrap = (content, blocked) => (
+    <View style={styles.fill}>
+      {(!blocked || auth.isAuthenticated) && (
+        <View style={blocked ? styles.hidden : styles.fill}
+          pointerEvents={blocked ? 'none' : 'auto'}
+          accessibilityElementsHidden={blocked}
+          importantForAccessibility={blocked ? 'no-hide-descendants' : 'auto'}>
+          {children}
+        </View>
+      )}
+      {content}
+    </View>
+  );
+
+  if (auth.isInitializing || auth.identityStatus === 'checking') {
     const SafeImage = typeof Image !== 'undefined' ? Image : null;
-    return (
+    return wrap((
       <SafeAreaView style={styles.container}>
         <StatusBar style="light" />
         <View style={styles.centerBox}>
@@ -79,7 +104,27 @@ export function AuthSessionCoordinator({ children, onInitializingChange }) {
           </Text>
         </View>
       </SafeAreaView>
-    );
+    ), true);
+  }
+
+  if (auth.identityStatus === 'error' ||
+      (auth.isAuthenticated && resolveInitialRouteForAuthState(auth) === 'IdentityRecovery')) {
+    return wrap((
+      <SafeAreaView style={styles.container}>
+        <View style={styles.centerBox}>
+          <Text style={styles.loadingTitle}>Não foi possível verificar sua sessão</Text>
+          <Text style={styles.loadingSubtitle}>Confirme sua conexão e tente novamente.</Text>
+          <Pressable style={styles.primaryButton} accessibilityLabel="Tentar verificar sessão"
+            onPress={() => { void auth.restoreSession(); }}>
+            <Text style={styles.primaryButtonText}>Tentar novamente</Text>
+          </Pressable>
+          <Pressable style={styles.secondaryButton} accessibilityLabel="Sair da conta"
+            onPress={() => { void auth.logout(); }}>
+            <Text style={styles.secondaryButtonText}>Sair da conta</Text>
+          </Pressable>
+        </View>
+      </SafeAreaView>
+    ), true);
   }
 
   const isStorageFailure = auth.sessionStatus === 'storage_error';
@@ -92,7 +137,7 @@ export function AuthSessionCoordinator({ children, onInitializingChange }) {
     recoveryMessage &&
     !bypassNetworkRecovery
   ) {
-    return (
+    return wrap((
       <SafeAreaView style={styles.container}>
         <StatusBar style="light" />
         <View style={styles.centerBox}>
@@ -125,10 +170,10 @@ export function AuthSessionCoordinator({ children, onInitializingChange }) {
           </View>
         </View>
       </SafeAreaView>
-    );
+    ), true);
   }
 
-  return children;
+  return wrap(null, false);
 }
 
 export default function AuthSessionGate({
@@ -154,6 +199,8 @@ export default function AuthSessionGate({
 }
 
 const styles = StyleSheet.create({
+  fill: { flex: 1 },
+  hidden: { display: 'none' },
   container: {
     flex: 1,
     backgroundColor: '#1C0A35',

@@ -1,0 +1,336 @@
+diff --git a/app/screens/staff/StaffEntryControlRealScreen.js b/app/screens/staff/StaffEntryControlRealScreen.js
+index 29e2996..855465b 100644
+--- a/app/screens/staff/StaffEntryControlRealScreen.js
++++ b/app/screens/staff/StaffEntryControlRealScreen.js
+@@ -42,6 +42,12 @@ export default function StaffEntryControlRealScreen({ event, isEventCurrent, onB
+   const pending = ownPending ? snapshot.pending : null;
+   const disabled = snapshot.busy || snapshot.status !== 'ready' || !snapshot.data ||
+     Boolean(snapshot.pending) || snapshot.storageError || !defaultStaffEntryIntentStorage.isPersistent;
++  const runDirect = (action) => {
++    if (disabled || dialogRef.current || !store.isCurrent(snapshot.context) ||
++        (action.kind === 'call' ? !snapshot.data.canCall
++          : action.kind !== 'toggle' || action.enabled !== true || !snapshot.data.canManage || snapshot.data.externalQueueEnabled)) return;
++    return store.mutate(action);
++  };
+   const open = (action) => { if (!disabled && store.isCurrent()) setDialog({ action, context: snapshot.context }); };
+   const confirm = (expected) => {
+     if (!expected || dialogRef.current !== expected || !store.isCurrent(expected.context)) return;
+@@ -65,7 +71,8 @@ export default function StaffEntryControlRealScreen({ event, isEventCurrent, onB
+           : 'Novas participações entram diretamente no evento. Reativar não recoloca quem já foi liberado na fila.'}</Text>
+         <Button label={snapshot.data.externalQueueEnabled ? 'Desativar fila externa' : 'Reativar fila externa'}
+           danger={snapshot.data.externalQueueEnabled} disabled={disabled || !snapshot.data.canManage}
+-          onPress={() => open({ kind: 'toggle', enabled: !snapshot.data.externalQueueEnabled })} />
++          onPress={() => snapshot.data.externalQueueEnabled
++            ? open({ kind: 'toggle', enabled: false }) : runDirect({ kind: 'toggle', enabled: true })} />
+       </View>
+       {!snapshot.data.canManage && <Text style={styles.warning}>O evento não permite entradas ou alterações da fila neste momento.</Text>}
+       {snapshot.data.pendingCall ? <View style={styles.card}>
+@@ -76,7 +83,7 @@ export default function StaffEntryControlRealScreen({ event, isEventCurrent, onB
+           onPress={() => open({ kind: 'absent', callId: snapshot.data.pendingCall.id })} />
+         <Button label="Remover da fila" danger disabled={disabled || !snapshot.data.canRemove}
+           onPress={() => open({ kind: 'remove', callId: snapshot.data.pendingCall.id })} />
+-      </View> : <Button label="Chamar próximo" disabled={disabled || !snapshot.data.canCall} onPress={() => open({ kind: 'call' })} />}
++      </View> : <Button label="Chamar próximo" disabled={disabled || !snapshot.data.canCall} onPress={() => runDirect({ kind: 'call' })} />}
+       <Text style={styles.title}>Participantes aguardando</Text>
+       {snapshot.data.waiting.length === 0 && <Text style={styles.text}>Ninguém está aguardando na fila de entrada.</Text>}
+       {snapshot.data.waiting.map((person, index) => <View key={person.participationId} style={styles.card}>
+diff --git a/app/screens/staff/StaffStationOperationalScreen.js b/app/screens/staff/StaffStationOperationalScreen.js
+index c76a296..1bda9e0 100644
+--- a/app/screens/staff/StaffStationOperationalScreen.js
++++ b/app/screens/staff/StaffStationOperationalScreen.js
+@@ -45,6 +45,7 @@ export default function StaffStationOperationalScreen({ event, experience, stati
+   const [dialog, setDialog] = useState(null);
+   const dialogRef = useRef(dialog);
+   dialogRef.current = dialog;
++  const dispatching = useRef(false);
+   const generation = useRef(0);
+   const epoch = auth.getSessionEpoch(), revision = auth.getIdentityRevision();
+   const context = getContext();
+@@ -83,29 +84,37 @@ export default function StaffStationOperationalScreen({ event, experience, stati
+   }, [event.id, experience.id, station.id, auth.user?.id, auth.sessionId, epoch, revision]);
+ 
+   const blocked = !same(view.scope, context) || view.busy || view.status !== 'ready' || !coordinator ||
+-    (view.pending && view.pending.kind !== 'none');
++    dispatching.current || (view.pending && view.pending.kind !== 'none');
+   const open = action => {
+     if (!blocked && context) setDialog({ action, context, observed: view.data });
+   };
+-  async function confirm(expected) {
+-    if (!expected || dialogRef.current !== expected || !same(expected.context, getContext()) ||
++  async function dispatch(expected, fromDialog = false) {
++    if (!expected || dispatching.current || !coordinator || (fromDialog && dialogRef.current !== expected) ||
++        (!fromDialog && (expected.action.kind !== 'call' || dialogRef.current)) ||
++        !same(expected.context, getContext()) ||
+         !same(viewRef.current.scope, getContext()) || viewRef.current.busy || viewRef.current.status !== 'ready' ||
+         (viewRef.current.pending && viewRef.current.pending.kind !== 'none')) return;
++    if (expected.action.kind === 'call' && (!viewRef.current.data?.canCall ||
++        viewRef.current.data.pending || viewRef.current.data.waitingCount === 0 ||
++        viewRef.current.data.availability !== 'available')) return;
++    dispatching.current = true;
+     dialogRef.current = null; setDialog(null);
+     const scope = expected.context;
+     setView(previous => ({ ...previous, busy: true, feedback: null }));
+-    let result;
+     try {
+-      const action = expected.action;
+-      result = action.kind === 'call' ? await coordinator.callNext(scope, experience.id, station.id)
+-        : action.kind === 'complete' ? await coordinator.complete(scope, action.serviceSessionId, station.id)
+-          : action.kind === 'absent' ? await coordinator.absent(scope, action.serviceSessionId, station.id)
+-            : await coordinator.removeCalled(scope, experience.id, station.id, action.serviceSessionId);
+-    } catch { result = { kind: 'storage_error' }; }
+-    if (!same(scope, getContext())) return;
+-    setView(previous => ({ ...previous, busy: false, feedback: result }));
+-    await refresh(true);
+-    if (same(scope, getContext())) onChanged();
++      let result;
++      try {
++        const action = expected.action;
++        result = action.kind === 'call' ? await coordinator.callNext(scope, experience.id, station.id)
++          : action.kind === 'complete' ? await coordinator.complete(scope, action.serviceSessionId, station.id)
++            : action.kind === 'absent' ? await coordinator.absent(scope, action.serviceSessionId, station.id)
++              : await coordinator.removeCalled(scope, experience.id, station.id, action.serviceSessionId);
++      } catch { result = { kind: 'storage_error' }; }
++      if (!same(scope, getContext())) return;
++      setView(previous => ({ ...previous, busy: false, feedback: result }));
++      await refresh(true);
++      if (same(scope, getContext())) onChanged();
++    } finally { dispatching.current = false; }
+   }
+ 
+   async function resolvePending(expected, scope) {
+@@ -160,7 +169,7 @@ export default function StaffStationOperationalScreen({ event, experience, stati
+         <Button label="Registrar ausência" disabled={blocked} onPress={() => open({ kind: 'absent', serviceSessionId: data.pending.serviceSessionId })} />
+         <Button label="Remover da fila" disabled={blocked} onPress={() => open({ kind: 'remove_called', serviceSessionId: data.pending.serviceSessionId })} />
+       </View> : <Button label="Chamar próximo" disabled={blocked || !data.canCall || data.waitingCount === 0}
+-        onPress={() => open({ kind: 'call' })} />}
++        onPress={() => dispatch({ action: { kind: 'call' }, context })} />}
+       {data.waitingCount === 0 && <Text style={styles.text}>Nenhuma pessoa aguardando nesta experiência.</Text>}
+       {data.waiting.map(person => <View key={person.queueEntryId} style={styles.card}>
+         <Text style={styles.text}>{person.position}. {person.displayName}</Text>
+@@ -186,7 +195,7 @@ export default function StaffStationOperationalScreen({ event, experience, stati
+             : dialog?.action.kind === 'absent' ? 'Registrar ausência?'
+               : 'Remover pessoa da fila?'}</Text>
+         <Text style={styles.text}>Confirme a operação presencial. Uma resposta incerta bloqueará novas ações até reconciliação.</Text>
+-        <Button label="CONFIRMAR OPERAÇÃO" onPress={() => confirm(dialog)} />
++        <Button label="CONFIRMAR OPERAÇÃO" onPress={() => dispatch(dialog, true)} />
+         <Button label="CANCELAR OPERAÇÃO" onPress={() => { dialogRef.current = null; setDialog(null); }} />
+       </View></View>
+     </Modal>
+diff --git a/app/tests/roleRoutingIntegration.test.cjs b/app/tests/roleRoutingIntegration.test.cjs
+index 5cf7de2..0a9be44 100644
+--- a/app/tests/roleRoutingIntegration.test.cjs
++++ b/app/tests/roleRoutingIntegration.test.cjs
+@@ -343,6 +343,10 @@ test('tela real remove chamado somente após confirmação e atualiza estação
+     assert.ok(app.hasText('Concluir atendimento'));
+     assert.ok(app.hasText('Registrar ausência'));
+     assert.ok(app.hasText('Remover da fila'));
++    await app.press('Concluir atendimento'); assert.equal(app.modal().props.visible, true);
++    await app.press('CANCELAR OPERAÇÃO'); assert.equal(posts, 0);
++    await app.press('Registrar ausência'); assert.equal(app.modal().props.visible, true);
++    await app.press('CANCELAR OPERAÇÃO'); assert.equal(posts, 0);
+     await app.press('Remover da fila'); assert.equal(posts, 0);
+     await app.press('CANCELAR OPERAÇÃO'); assert.equal(posts, 0);
+     await app.press('Remover da fila'); await app.press('CONFIRMAR OPERAÇÃO');
+@@ -377,7 +381,7 @@ test('painel real separa entrada, estações e fila compartilhada por experiênc
+   app.dispose();
+ });
+ 
+-test('estação real chama pelo backend com intenção persistida e bloqueia reenvio incerto', { skip }, async () => {
++test('estação real chama diretamente pelo backend com intenção persistida e sem duplo envio', { skip }, async () => {
+   const secure = new Map(); let posts = 0;
+   const calledId = '77777777-7777-4777-8777-777777777777';
+   const control = { realStaff: true, platformOS: 'ios', events: [staffEvent], stations: [realStation],
+@@ -404,12 +408,67 @@ test('estação real chama pelo backend com intenção persistida e bloqueia ree
+   await app.press('Selecionar evento Evento autorizado'); await app.press('Estações');
+   await app.press('Selecionar estação Estação real');
+   assert.ok(app.hasText('Ana'));
+-  await app.press('Chamar próximo'); await app.press('CONFIRMAR OPERAÇÃO');
++  const call = app.handler('Chamar próximo');
++  await app.act(async () => { await Promise.all([call(), call()]); });
++  assert.equal(app.modal().props.visible, false);
+   assert.equal(posts, 1); assert.ok(app.hasText('Operação confirmada pelo servidor'));
+   assert.ok(!app.hasText('Rafael T.'));
+   app.dispose();
+ });
+ 
++test('chamada direta da estação não reenvia após resposta incerta nem após atualizar', { skip }, async () => {
++  const secure = new Map(); let posts = 0;
++  const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
++  const control = { realStaff: true, platformOS: 'ios', events: [staffEvent], stations: [realStation],
++    experiences: [{ id: realExperienceId, name: 'Experiência real' }],
++    secureStore: { isAvailableAsync: async () => true, getItemAsync: async key => secure.get(key) ?? null,
++      setItemAsync: async (key, value) => { secure.set(key, value); }, deleteItemAsync: async key => { secure.delete(key); } },
++    operational: { eventId: staffEvent.id, experienceId: realExperienceId, stationId: realStation.id,
++      availability: 'available', canCall: true, waitingCount: 1,
++      waiting: [{ queueEntryId: '77777777-7777-4777-8777-777777777777', displayName: 'Ana', position: 1 }], pending: null },
++    http: async (route) => {
++      if (route.endsWith('/queue')) return { body: { eventId: staffEvent.id, experienceId: realExperienceId,
++        waitingCount: 1, canCallWaitingEntries: true, firstWaitingQueueEntryId: '77777777-7777-4777-8777-777777777777' } };
++      if (route.endsWith('/call-next')) { posts++; assert.ok([...secure.values()].some(raw => raw.includes('dispatching')));
++        throw Object.assign(new Error('offline'), { isNetworkError: true }); }
++      return undefined;
++    } };
++  const app = createIntegration({ initialUser: staffUser, control });
++  try {
++    await app.mount(); await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
++    await app.press('Selecionar evento Evento autorizado'); await app.press('Estações');
++    await app.press('Selecionar estação Estação real');
++    await app.press('Chamar próximo');
++    assert.equal(posts, 1); assert.equal(app.modal().props.visible, false);
++    assert.ok(app.hasText('Resultado incerto'));
++    await app.press('Atualizar atendimento');
++    assert.equal(posts, 1);
++    assert.ok([...secure.values()].some(raw => raw.includes('dispatching')));
++  } finally { app.dispose(); }
++});
++
++test('chamada direta da estação capturada antes do logout não envia POST', { skip }, async () => {
++  let posts = 0;
++  const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
++  const control = { realStaff: true, platformOS: 'ios', events: [staffEvent], stations: [realStation],
++    experiences: [{ id: realExperienceId, name: 'Experiência real' }],
++    secureStore: { isAvailableAsync: async () => true, getItemAsync: async () => null,
++      setItemAsync: async () => {}, deleteItemAsync: async () => {} },
++    operational: { eventId: staffEvent.id, experienceId: realExperienceId, stationId: realStation.id,
++      availability: 'available', canCall: true, waitingCount: 1,
++      waiting: [{ queueEntryId: '77777777-7777-4777-8777-777777777777', displayName: 'Ana', position: 1 }], pending: null },
++    http: async route => { if (route.endsWith('/call-next')) posts++; return undefined; } };
++  const app = createIntegration({ initialUser: staffUser, control });
++  try {
++    await app.mount(); await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
++    await app.press('Selecionar evento Evento autorizado'); await app.press('Estações');
++    await app.press('Selecionar estação Estação real');
++    const old = app.handler('Chamar próximo');
++    await app.act(() => app.manager.logout()); await app.act(async () => old());
++    assert.equal(posts, 0);
++  } finally { app.dispose(); }
++});
++
+ test('tela da estação recupera reconhecimento após exclusão ambígua e não reconhece recibo posterior', { skip }, async () => {
+   const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
+   const keyA = '50000000-0000-4000-8000-000000000001', keyB = '50000000-0000-4000-8000-000000000002';
+@@ -672,22 +731,33 @@ test('Controle de Entrada real confirma primeiro, desativa, reativa e volta pres
+   await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
+   await app.press('Selecionar evento Evento autorizado'); await app.press('Controle de Entrada');
+   assert.ok(app.hasText('1. Ana')); assert.ok(!app.hasText('Confirmar entrada de Ana'));
+-  await app.press('Chamar próximo'); await app.press('CANCELAR ALTERAÇÃO');
+-  assert.equal(requests.filter(r => r.method === 'POST').length, 0);
+-  await app.press('Chamar próximo'); await app.press('CONFIRMAR ALTERAÇÃO'); await app.press('Entendi');
++  const call = app.handler('Chamar próximo');
++  await app.act(async () => { await Promise.all([call(), call()]); });
++  assert.equal(app.modal().props.visible, false);
++  assert.equal(requests.filter(r => r.method === 'POST').length, 1);
++  await app.press('Entendi');
+   assert.ok(app.hasText('Participante chamado: Ana'));
+   assert.ok(app.hasText('Confirmar entrada')); assert.ok(app.hasText('Marcar ausência')); assert.ok(app.hasText('Remover da fila'));
++  await app.press('Marcar ausência'); assert.equal(app.modal().props.visible, true);
++  await app.press('CANCELAR ALTERAÇÃO');
++  await app.press('Remover da fila'); assert.equal(app.modal().props.visible, true);
++  await app.press('CANCELAR ALTERAÇÃO');
+   await app.press('Confirmar entrada'); await app.press('CONFIRMAR ALTERAÇÃO');
+   assert.ok(app.hasText('Entrada confirmada pelo servidor')); assert.ok(app.hasText('1. Bia'));
+-  await app.press('Entendi'); await app.press('Desativar fila externa'); await app.press('CONFIRMAR ALTERAÇÃO');
++  await app.press('Entendi'); await app.press('Desativar fila externa'); assert.equal(app.modal().props.visible, true);
++  await app.press('CANCELAR ALTERAÇÃO'); assert.equal(requests.filter(r => r.method === 'PATCH').length, 0);
++  await app.press('Desativar fila externa'); await app.press('CONFIRMAR ALTERAÇÃO');
+   assert.ok(app.hasText('Participantes liberados: 1')); await app.press('Entendi');
+-  await app.press('Reativar fila externa'); await app.press('CONFIRMAR ALTERAÇÃO'); await app.press('Entendi');
++  const reactivate = app.handler('Reativar fila externa');
++  await app.act(async () => { await Promise.all([reactivate(), reactivate()]); });
++  assert.equal(app.modal().props.visible, false);
++  await app.press('Entendi');
+   assert.ok(app.hasText('Ninguém está aguardando')); await app.press('Voltar ao painel'); assert.ok(app.hasText('Painel operacional'));
+   assert.equal(requests.filter(r => r.method === 'POST').length, 2); assert.equal(requests.filter(r => r.method === 'PATCH').length, 2);
+   app.dispose();
+ });
+ 
+-test('confirmação de entrada aberta antes do logout não envia operação na sessão seguinte', { skip }, async () => {
++test('chamada direta capturada antes do logout não envia operação na sessão seguinte', { skip }, async () => {
+   const values = new Map(), at = '2026-11-10T15:00:00.000Z'; let mutations = 0;
+   const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
+   const control = { realStaff: true, platformOS: 'android', events: [staffEvent],
+@@ -700,11 +770,38 @@ test('confirmação de entrada aberta antes do logout não envia operação na s
+     } };
+   const app = createIntegration({ initialUser: staffUser, control }); await app.mount();
+   await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
+-  await app.press('Selecionar evento Evento autorizado'); await app.press('Controle de Entrada'); await app.press('Chamar próximo');
+-  const old = app.handler('CONFIRMAR ALTERAÇÃO'); await app.act(() => app.manager.logout()); await app.act(async () => old());
++  await app.press('Selecionar evento Evento autorizado'); await app.press('Controle de Entrada');
++  const old = app.handler('Chamar próximo'); await app.act(() => app.manager.logout()); await app.act(async () => old());
+   assert.equal(mutations, 0); assert.ok(!app.hasText('1. Ana')); app.dispose();
+ });
+ 
++test('chamada direta externa mantém intenção incerta e não repete POST após atualização', { skip }, async () => {
++  const values = new Map(), at = '2026-11-10T15:00:00.000Z'; let posts = 0;
++  const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
++  const control = { realStaff: true, platformOS: 'android', events: [staffEvent],
++    secureStore: { getItemAsync: async key => values.get(key) ?? null,
++      setItemAsync: async (key, value) => { values.set(key, value); } },
++    http: async (route, options) => {
++      if (!route.includes('/entry-control')) return;
++      if (options.method === 'POST') { posts++; assert.ok([...values.values()].some(raw => raw.includes('dispatching')));
++        throw Object.assign(new Error('offline'), { isNetworkError: true }); }
++      return { eventId: staffEvent.id, externalQueueEnabled: true, canManage: true, pendingCall: null,
++        canCall: true, canConfirm: false, canMarkAbsent: false, canRemove: false, observedAt: at, waitingCount: 1,
++        waiting: [{ participationId: 'abcdef00-0000-4000-8000-000000000004', displayName: 'Ana', position: 1 }] };
++    } };
++  const app = createIntegration({ initialUser: staffUser, control });
++  try {
++    await app.mount(); await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
++    await app.press('Selecionar evento Evento autorizado'); await app.press('Controle de Entrada');
++    await app.press('Chamar próximo');
++    assert.equal(posts, 1); assert.equal(app.modal().props.visible, false);
++    assert.ok(app.hasText('O resultado de uma solicitação ainda não foi confirmado'));
++    await app.press('Atualizar fila de entrada');
++    assert.equal(posts, 1);
++    assert.ok([...values.values()].some(raw => raw.includes('dispatching')));
++  } finally { app.dispose(); }
++});
++
+ test('401 terminal no Controle de Entrada remove lista nominal e área Staff', { skip }, async () => {
+   let revoked = false;
+   const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
+diff --git a/docs/STAFF_A1_IMPLEMENTACAO.md b/docs/STAFF_A1_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..1c72354
+--- /dev/null
++++ b/docs/STAFF_A1_IMPLEMENTACAO.md
+@@ -0,0 +1,38 @@
++# Staff A1 — simplificação das confirmações prévias
++
++## Escopo
++
++Controle de Entrada e Estação operacional passam a executar **Chamar próximo** com um toque. **Reativar fila externa** também executa com um toque. Não há alteração de contrato HTTP, backend, armazenamento, navegação ou regras de negócio.
++
++Continuam com confirmação prévia: no Controle de Entrada, **Confirmar entrada**, **Marcar ausência**, **Remover da fila** e **Desativar fila externa**; na Estação, **Concluir atendimento**, **Registrar ausência** e **Remover da fila**. O reconhecimento terminal **Entendi** permanece como antes.
++
++## Implementação e proteção
++
++- `StaffEntryControlRealScreen.js`: as duas ações diretas chamam `store.mutate` após verificar contexto atual, estado pronto, disponibilidade da operação, ausência de intenção pendente, falha de armazenamento e diálogo aberto. O store mantém trava de voo síncrona, intenção persistida antes da requisição, Idempotency-Key e bloqueio de resultado incerto.
++- `StaffStationOperationalScreen.js`: o despacho antes usado apenas pelo diálogo é compartilhado com a chamada direta. A função revalida conta, sessão, evento, estação, epoch, revisão, estado pronto, ausência de pendência e disponibilidade da chamada. Uma ref síncrona impede dois despachos entre toques rápidos, inclusive antes de React publicar `busy`. O coordenador continua responsável pela reserva persistente e pela decisão de envio.
++- Respostas obsoletas continuam descartadas após mudança de contexto. Timeout ou resultado incerto não disparam retry automático nem liberam nova operação. SecureStore, recibos terminais e reconhecimento não foram alterados.
++
++## Validação automatizada
++
++`app/tests/roleRoutingIntegration.test.cjs` foi adaptado para verificar chamada externa e de estação sem modal, reativação sem modal, dois toques rápidos com uma mutação, persistência anterior ao POST, bloqueio após logout e ausência de reenvio após resposta incerta e atualização. Os cenários existentes continuam verificando os diálogos sensíveis e o reconhecimento terminal. Os testes de store/coordenador em `staffEntryControl.test.cjs` e `staffOperationsService.integration.test.cjs` continuam cobrindo reserva, idempotência, armazenamento e reconciliação.
++
++Luna Medium executou a regressão completa do aplicativo: **523 aprovados, 0 falhos, 0 ignorados, exit code 0**. Os quatro arquivos focados foram executados antes da regressão, mas a contagem e o exit code individuais não foram preservados integralmente; não são inferidos neste relatório.
++
++A primeira campanha focada registrou 117 aprovados, 1 falho, 0 ignorados e exit code 1. O teste de callback após logout parava antes de encontrar o botão: seu mock de SecureStore não implementava `deleteItemAsync`, embora o adaptador exija esse método. A fixture foi corrigida adicionando a operação simulada; a regressão completa posterior passou.
++
++## Homologação funcional no Expo Go
++
++O responsável observou os cenários abaixo no banco local isolado `arenago_staff_homolog_geral_20261111`, no evento ArenaGo — Homologação Geral, com conta Staff sintética, participante fictício P3 e Estação 01. As contas já existiam; não foram reexecutados criação de contas, migrations, seed ou fixture.
++
++1. Reativar a fila externa ocorreu com um toque e sem diálogo prévio.
++2. P3 foi chamado na fila externa com um toque e sem diálogo prévio; continuou chamado após **Entendi**.
++3. Confirmar entrada, marcar ausência e remover o chamado mantiveram confirmação prévia. O cenário observado prosseguiu com **Confirmar entrada**, que tornou a entrada de P3 efetiva.
++4. Após o ingresso de P3 na fila da experiência pela API oficial, **Chamar próximo** na Estação 01 ocorreu com um toque e sem diálogo prévio; P3 continuou chamado após **Entendi**.
++
++O estado final informado é P3 chamado na Estação 01, com atendimento ainda pendente. Essa homologação manual registra o fluxo observado; não comprova exaustivamente concorrência, resultados incertos, recuperação de falhas ou todas as operações sensíveis.
++
++Os resultados automatizados e as observações manuais são evidências diferentes: os primeiros cobrem os cenários executados nos harnesses do aplicativo; a segunda confirma o percurso funcional descrito no Expo Go.
++
++## Limites
++
++Esta A1 não altera o protocolo de intenções nem resolve recuperação histórica de operações incertas. A homologação funcional anterior de Staff 01/02 não substitui a validação automatizada desta alteração. A Task A2 e demais melhorias continuam separadas.

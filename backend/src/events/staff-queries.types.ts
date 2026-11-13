@@ -13,6 +13,12 @@ export type StaffStationsResult = { kind: "access_denied" } | {
   stations: StaffStationState[];
 };
 
+export type StaffExperiencesResult = { kind: "access_denied" } | {
+  kind: "ok";
+  eventId: string;
+  experiences: Array<{ id: string; name: string }>;
+};
+
 export type StaffQueueResult = { kind: "access_denied" } | {
   kind: "ok";
   eventId: string;

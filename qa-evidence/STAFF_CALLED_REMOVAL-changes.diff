@@ -1,0 +1,960 @@
+diff --git a/app/screens/staff/StaffStationOperationalScreen.js b/app/screens/staff/StaffStationOperationalScreen.js
+index 5d535ba..5ca7640 100644
+--- a/app/screens/staff/StaffStationOperationalScreen.js
++++ b/app/screens/staff/StaffStationOperationalScreen.js
+@@ -100,6 +100,7 @@ export default function StaffStationOperationalScreen({ event, experience, stati
+       result = action.kind === 'call' ? await coordinator.callNext(scope, experience.id, station.id)
+         : action.kind === 'complete' ? await coordinator.complete(scope, action.serviceSessionId, station.id)
+           : action.kind === 'absent' ? await coordinator.absent(scope, action.serviceSessionId, station.id)
++            : action.kind === 'remove_called' ? await coordinator.removeCalled(scope, experience.id, station.id, action.serviceSessionId)
+             : await coordinator.removeWaiting(scope, experience.id, station.id, action.queueEntryId);
+     } catch { result = { kind: 'storage_error' }; }
+     if (!same(scope, getContext())) return;
+@@ -155,9 +156,10 @@ export default function StaffStationOperationalScreen({ event, experience, stati
+       <Text style={styles.text}>Aguardando nesta experiência: {data.waitingCount}</Text>
+       {data.pending ? <View style={styles.card}>
+         <Text style={styles.title}>Participante chamado: {data.pending.displayName}</Text>
+-        <Text style={styles.text}>A chamada precisa ser concluída ou registrada como ausência antes da próxima.</Text>
++        <Text style={styles.text}>Resolva a chamada antes da próxima: conclua, registre ausência ou remova da fila.</Text>
+         <Button label="Concluir atendimento" disabled={blocked} onPress={() => open({ kind: 'complete', serviceSessionId: data.pending.serviceSessionId })} />
+         <Button label="Registrar ausência" disabled={blocked} onPress={() => open({ kind: 'absent', serviceSessionId: data.pending.serviceSessionId })} />
++        <Button label="Remover da fila" disabled={blocked} onPress={() => open({ kind: 'remove_called', serviceSessionId: data.pending.serviceSessionId })} />
+       </View> : <Button label="Chamar próximo" disabled={blocked || !data.canCall || data.waitingCount === 0}
+         onPress={() => open({ kind: 'call' })} />}
+       {data.waitingCount === 0 && <Text style={styles.text}>Nenhuma pessoa aguardando nesta experiência.</Text>}
+diff --git a/app/services/staffIntentStorage.js b/app/services/staffIntentStorage.js
+index 186e46f..dd6010e 100644
+--- a/app/services/staffIntentStorage.js
++++ b/app/services/staffIntentStorage.js
+@@ -24,6 +24,11 @@ const validOutcome = (intent) => {
+     result.closeReason === 'staff_queue_removed' && validId(result.participationId) &&
+     result.participationStatus === 'active';
+   if (result.id !== intent.serviceSessionId) return false;
++  if (intent.kind === 'remove_called') return result.status === 'canceled' &&
++    result.cancelReason === 'staff_queue_removed' && result.queueEntryStatus === 'closed' &&
++    result.closeReason === 'staff_queue_removed' && result.participationStatus === 'active' &&
++    typeof result.resolvedAt === 'string' && Number.isFinite(Date.parse(result.resolvedAt)) &&
++    new Date(result.resolvedAt).toISOString() === result.resolvedAt;
+   if (intent.kind === 'complete') return result.status === 'completed' && result.queueEntryStatus === 'closed' &&
+     result.closeReason === 'completed' && result.participationStatus === 'active';
+   if (intent.kind !== 'absent' || result.status !== 'absent' || typeof result.requeued !== 'boolean') return false;
+@@ -38,6 +43,7 @@ const valid = (intent, userId) => intent?.userId === userId && validId(intent.ke
+   (intent.kind === 'call' ? validId(intent.experienceId) && intent.serviceSessionId === null :
+     intent.kind === 'remove' ? validId(intent.experienceId) && validId(intent.queueEntryId) &&
+       intent.serviceSessionId === null :
++    intent.kind === 'remove_called' ? validId(intent.experienceId) && validId(intent.serviceSessionId) :
+     ['complete', 'absent'].includes(intent.kind) && intent.experienceId === null && validId(intent.serviceSessionId));
+ 
+ // Uma instância compartilhada serializa reserva, leitura e remoção; web bloqueia
+diff --git a/app/services/staffOperationsService.js b/app/services/staffOperationsService.js
+index 745ce4a..735cead 100644
+--- a/app/services/staffOperationsService.js
++++ b/app/services/staffOperationsService.js
+@@ -194,6 +194,28 @@ export function parseRemovedQueueEntry(body, eventId, experienceId, queueEntryId
+     participationId: body.participation.id, participationStatus: 'active' };
+ }
+ 
++export function parseRemovedCalledSession(body, serviceSessionId) {
++  requireIds(serviceSessionId);
++  if (body?.serviceSession?.id !== serviceSessionId || body.serviceSession.status !== 'canceled' ||
++      body.serviceSession.cancelReason !== 'staff_queue_removed' ||
++      typeof body.serviceSession.resolvedAt !== 'string' || !Number.isFinite(Date.parse(body.serviceSession.resolvedAt)) ||
++      new Date(body.serviceSession.resolvedAt).toISOString() !== body.serviceSession.resolvedAt ||
++      body.queueEntry?.status !== 'closed' || body.queueEntry.closeReason !== 'staff_queue_removed' ||
++      body.participation?.status !== 'active' || body.participation.currentQueueEntryId !== null)
++    throw bad('Resposta inesperada da remoção do atendimento. Não repetir a operação.');
++  return { id: serviceSessionId, status: 'canceled', cancelReason: 'staff_queue_removed',
++    resolvedAt: body.serviceSession.resolvedAt, queueEntryStatus: 'closed',
++    closeReason: 'staff_queue_removed', participationStatus: 'active' };
++}
++
++export async function removeCalledStaff(client, { eventId, serviceSessionId, idempotencyKey }) {
++  requireIds(eventId, serviceSessionId, idempotencyKey);
++  const body = await client.post(`/staff/events/${eventId}/service-sessions/${serviceSessionId}/remove`, {},
++    { auth: true, headers: { 'Idempotency-Key': idempotencyKey }, retryOnUnauthorized: false,
++      outcomeUnknownOnNetworkError: true });
++  return parseRemovedCalledSession(body, serviceSessionId);
++}
++
+ export async function removeWaitingStaff(client, { eventId, experienceId, queueEntryId, idempotencyKey }) {
+   requireIds(eventId, experienceId, queueEntryId, idempotencyKey);
+   const body = await client.post(
+@@ -365,6 +387,19 @@ export function createStaffOperationsCoordinator({ client, storage, createKey, i
+         }, (key) => absentStaffService(client, { eventId: context.eventId, serviceSessionId, idempotencyKey: key }));
+       }, context, { ...context, kind: 'absent', experienceId: null, stationId, serviceSessionId });
+     },
++    removeCalled(context, experienceId, stationId, serviceSessionId) {
++      context = { ...context };
++      return single(async () => {
++        contextValid(context); requireIds(experienceId, stationId, serviceSessionId);
++        const desired = { kind: 'remove_called', userId: context.userId, eventId: context.eventId,
++          sessionId: context.sessionId, experienceId, stationId, serviceSessionId };
++        return execute(context, desired, async () => {
++          const { stations } = await fetchStaffStations(client, context.eventId);
++          return stations.some(s => s.id === stationId && s.experienceId === experienceId &&
++            s.pendingServiceSessionId === serviceSessionId);
++        }, key => removeCalledStaff(client, { eventId: context.eventId, serviceSessionId, idempotencyKey: key }));
++      }, context, { ...context, kind: 'remove_called', experienceId, stationId, serviceSessionId });
++    },
+     removeWaiting(context, experienceId, stationId, queueEntryId) {
+       context = { ...context };
+       return single(async () => {
+diff --git a/app/tests/roleRoutingIntegration.test.cjs b/app/tests/roleRoutingIntegration.test.cjs
+index 76cd89e..486b555 100644
+--- a/app/tests/roleRoutingIntegration.test.cjs
++++ b/app/tests/roleRoutingIntegration.test.cjs
+@@ -304,6 +304,43 @@ const realExperienceId = '33333333-3333-4333-8333-333333333333';
+ const realStation = { id: '44444444-4444-4444-8444-444444444444', experienceId: realExperienceId,
+   label: 'Estação real', availability: 'available', pendingServiceSessionId: null, pendingCalledAt: null };
+ 
++test('tela real remove chamado somente após confirmação e atualiza estação sem reenvio', { skip }, async () => {
++  const secure = new Map(); let posts = 0;
++  const serviceId = '88888888-8888-4888-8888-888888888888';
++  const entryId = '77777777-7777-4777-8777-777777777777';
++  const control = { realStaff: true, platformOS: 'ios', events: [staffEvent],
++    stations: [{ ...realStation, pendingServiceSessionId: serviceId }],
++    experiences: [{ id: realExperienceId, name: 'Experiência real' }],
++    secureStore: { isAvailableAsync: async () => true, getItemAsync: async k => secure.get(k) ?? null,
++      setItemAsync: async (k, v) => { secure.set(k, v); }, deleteItemAsync: async k => { secure.delete(k); } },
++    operational: { eventId: staffEvent.id, experienceId: realExperienceId, stationId: realStation.id,
++      availability: 'available', canCall: false, waitingCount: 0, waiting: [], pending: {
++        serviceSessionId: serviceId, queueEntryId: entryId, displayName: 'Ana', calledAt: '2026-11-11T15:00:00.000Z' } },
++    http: async route => {
++      if (!route.endsWith(`/service-sessions/${serviceId}/remove`)) return undefined;
++      posts++; assert.ok([...secure.values()].some(raw => raw.includes('dispatching')));
++      control.operational = { ...control.operational, canCall: true, pending: null };
++      control.stations = [realStation];
++      return { body: { serviceSession: { id: serviceId, status: 'canceled', cancelReason: 'staff_queue_removed',
++        resolvedAt: '2026-11-11T15:01:00.000Z' }, queueEntry: { status: 'closed', closeReason: 'staff_queue_removed' },
++      participation: { status: 'active', currentQueueEntryId: null } } };
++    } };
++  const app = createIntegration({ initialUser: { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] }, control });
++  try {
++    await app.mount(); await app.act(() => app.manager.login({ email: participant.email, password: 'ficticia' }));
++    await app.press('Selecionar evento Evento autorizado'); await app.press('Estações');
++    await app.press('Selecionar estação Estação real');
++    assert.ok(app.hasText('Participante chamado: Ana'));
++    await app.press('Remover da fila'); assert.equal(posts, 0);
++    await app.press('CANCELAR OPERAÇÃO'); assert.equal(posts, 0);
++    await app.press('Remover da fila'); await app.press('CONFIRMAR OPERAÇÃO');
++    assert.equal(posts, 1); assert.ok(!app.hasText('Participante chamado: Ana'));
++    assert.ok(app.hasText('Operação confirmada pelo servidor.'));
++    await app.press('Atualizar atendimento'); assert.equal(posts, 1);
++    await app.press('Entendi o resultado'); assert.equal(posts, 1);
++  } finally { app.dispose(); }
++});
++
+ test('painel real separa entrada, estações e fila compartilhada por experiência', { skip }, async () => {
+   const otherStation = { ...realStation, id: '55555555-5555-4555-8555-555555555555', label: 'Console 2' };
+   const control = { realStaff: true, events: [staffEvent], stations: [realStation, otherStation], experiences: [
+diff --git a/app/tests/staffOperationsService.integration.test.cjs b/app/tests/staffOperationsService.integration.test.cjs
+index c27a077..11422ff 100644
+--- a/app/tests/staffOperationsService.integration.test.cjs
++++ b/app/tests/staffOperationsService.integration.test.cjs
+@@ -27,6 +27,84 @@ const operational = (selectedStationId = stationId) => ({ eventId, experienceId,
+   waiting: [{ queueEntryId: entryId, displayName: 'Ana', position: 1 }], pending: null });
+ const removed = () => ({ eventId, experienceId, queueEntry: { id: entryId, status: 'closed',
+   closeReason: 'staff_queue_removed' }, participation: { id: userId, status: 'active', currentQueueEntryId: null } });
++const removedCalled = () => ({ serviceSession: { id: sessionId, status: 'canceled',
++  cancelReason: 'staff_queue_removed', resolvedAt: '2026-11-11T15:00:00.000Z' },
++  queueEntry: { status: 'closed', closeReason: 'staff_queue_removed' },
++  participation: { status: 'active', currentQueueEntryId: null } });
++
++test('remoção de chamado persiste reserva/despacho/recibo com adaptador real e exige reconhecimento', async () => {
++  const { createStaffOperationsCoordinator } = await service;
++  const rig = secureStaffRig(); let posts = 0;
++  const manager = createStaffOperationsCoordinator({ storage: rig.storage, createKey: () => key, isCurrent: () => true,
++    client: { async get() { return stations(sessionId); }, async post(path, body, options) {
++      posts++; assert.match(path, new RegExp(`/service-sessions/${sessionId}/remove$`));
++      assert.deepEqual(body, {}); assert.equal(options.retryOnUnauthorized, false);
++      assert.equal(options.outcomeUnknownOnNetworkError, true);
++      assert.equal(options.headers['Idempotency-Key'], key);
++      const intent = await rig.storage.get(userId);
++      assert.equal(intent.phase, 'dispatching'); assert.equal(intent.kind, 'remove_called');
++      assert.equal(intent.experienceId, experienceId); return removedCalled();
++    } } });
++  const scope = { ...context, stationId, serviceSessionId: sessionId };
++  assert.equal((await manager.removeCalled(context, experienceId, stationId, sessionId)).kind, 'confirmed');
++  const reloaded = secureStaffRig(rig.values).storage;
++  const receipt = await reloaded.get(userId);
++  assert.equal(receipt.phase, 'terminal'); assert.equal(receipt.outcome.result.participationStatus, 'active');
++  assert.equal((await manager.removeCalled(context, experienceId, stationId, sessionId)).kind, 'terminal_pending');
++  assert.equal(posts, 1);
++  assert.equal((await manager.acknowledgeTerminal(scope, key)).kind, 'acknowledged');
++});
++
++test('timeout de remoção de chamado mantém dispatching após reinício e bloqueia complete/absent', async () => {
++  const { createStaffOperationsCoordinator } = await service;
++  const rig = secureStaffRig(); let posts = 0;
++  const options = { storage: rig.storage, createKey: () => key, isCurrent: () => true,
++    client: { async get() { return stations(sessionId); }, async post() { posts++; throw new Error('resposta perdida'); } } };
++  const manager = createStaffOperationsCoordinator(options);
++  assert.equal((await manager.removeCalled(context, experienceId, stationId, sessionId)).kind, 'uncertain');
++  const restarted = createStaffOperationsCoordinator({ ...options, storage: secureStaffRig(rig.values).storage });
++  assert.equal((await restarted.removeCalled(context, experienceId, stationId, sessionId)).kind, 'pending_reconciliation');
++  assert.equal((await restarted.complete(context, sessionId, stationId)).kind, 'pending_other');
++  assert.equal((await restarted.absent(context, sessionId, stationId)).kind, 'pending_other');
++  assert.equal((await restarted.pending({ ...context, stationId })).kind, 'pending_reconciliation');
++  assert.equal(posts, 1);
++});
++
++test('remoção de chamado não aceita conclusão, ausência ou participação encerrada como confirmação', async () => {
++  const { parseRemovedCalledSession } = await service;
++  for (const body of [completed(), { ...removedCalled(), serviceSession: { ...removedCalled().serviceSession, status: 'absent' } },
++    { ...removedCalled(), participation: { status: 'finished', currentQueueEntryId: null } }]) {
++    assert.throws(() => parseRemovedCalledSession(body, sessionId));
++  }
++});
++
++test('resposta tardia de remoção pertence à conta original e não é publicada após logout', async () => {
++  const { createStaffOperationsCoordinator } = await service;
++  const rig = secureStaffRig(); let active = true;
++  const manager = createStaffOperationsCoordinator({ storage: rig.storage, createKey: () => key,
++    isCurrent: () => active, client: { async get() { return stations(sessionId); },
++      async post() { active = false; return removedCalled(); } } });
++  assert.equal((await manager.removeCalled(context, experienceId, stationId, sessionId)).kind, 'stale');
++  const stored = await rig.storage.get(userId);
++  assert.equal(stored.sessionId, context.sessionId); assert.equal(stored.phase, 'terminal');
++  assert.equal(stored.outcome.kind, 'confirmed');
++});
++
++test('401 gera recibo de recusa e resposta inválida mantém remoção chamada incerta', async () => {
++  const { createStaffOperationsCoordinator } = await service;
++  for (const failure of ['401', 'invalid']) {
++    const rig = secureStaffRig(); let posts = 0;
++    const manager = createStaffOperationsCoordinator({ storage: rig.storage, createKey: () => key, isCurrent: () => true,
++      client: { async get() { return stations(sessionId); }, async post() {
++        posts++; if (failure === '401') throw Object.assign(new Error('sessão revogada'), { status: 401, code: 'SESSION_REVOKED' });
++        return completed();
++      } } });
++    assert.equal((await manager.removeCalled(context, experienceId, stationId, sessionId)).kind,
++      failure === '401' ? 'rejected' : 'uncertain');
++    await manager.removeCalled(context, experienceId, stationId, sessionId);
++    assert.equal(posts, 1);
++  }
++});
+ function memory() {
+   const map = new Map(), receipts = new Map(), actions=[];
+   return { map, receipts, actions, isPersistent: true,
+diff --git a/backend/src/events/events.module.ts b/backend/src/events/events.module.ts
+index d1aedec..79c6b0e 100644
+--- a/backend/src/events/events.module.ts
++++ b/backend/src/events/events.module.ts
+@@ -36,13 +36,15 @@ import { StaffStationStateController } from "./staff-station-state.controller";
+ import { StaffStationStateService } from "./staff-station-state.service";
+ import { StaffQueueRemovalController } from "./staff-queue-removal.controller";
+ import { StaffQueueRemovalService } from "./staff-queue-removal.service";
++import { StaffCalledRemovalController } from "./staff-called-removal.controller";
++import { CalledRemovalService } from "./staff-called-removal.service";
+ import { StaffEntryNoStoreGuard } from "../participations/staff-entry.controller";
+ 
+ /** Agrupa os serviços de Events e reutiliza o acesso PostgreSQL compartilhado. */
+ @Module({
+   imports: [DatabaseModule, AuthModule],
+-  controllers: [EvaluationWriteController, EvaluationReadController, ParticipationLifecycleController, StaffOperationsController, StaffQueriesController, StaffHistoryController, StaffStationStateController, StaffQueueRemovalController, ExperienceQueueControlController, StationAvailabilityController, ParticipantQueueController, ExperiencesController],
+-  providers: [EventsService, StaffQueriesService, StaffHistoryService, StaffStationStateService, StaffQueueRemovalService, StaffEntryNoStoreGuard, StaffHistoryNoStoreGuard, StationAvailabilityService, ExperienceQueueControlService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, StaffIdempotencyPolicy, ParticipantQueueIdempotencyPolicy, EventClosureService, EventClosurePolicy, EventClosureScheduler, EvaluationReadService, EvaluationWriteService, EvaluationWriteIdempotencyPolicy, ParticipationLifecycleService, ParticipationQueryService],
++  controllers: [StaffCalledRemovalController, EvaluationWriteController, EvaluationReadController, ParticipationLifecycleController, StaffOperationsController, StaffQueriesController, StaffHistoryController, StaffStationStateController, StaffQueueRemovalController, ExperienceQueueControlController, StationAvailabilityController, ParticipantQueueController, ExperiencesController],
++  providers: [CalledRemovalService, EventsService, StaffQueriesService, StaffHistoryService, StaffStationStateService, StaffQueueRemovalService, StaffEntryNoStoreGuard, StaffHistoryNoStoreGuard, StationAvailabilityService, ExperienceQueueControlService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, StaffIdempotencyPolicy, ParticipantQueueIdempotencyPolicy, EventClosureService, EventClosurePolicy, EventClosureScheduler, EvaluationReadService, EvaluationWriteService, EvaluationWriteIdempotencyPolicy, ParticipationLifecycleService, ParticipationQueryService],
+   exports: [EventsService, StaffQueriesService, StationAvailabilityService, ExperienceQueueControlService, ExperiencesService, QueueEntryService, QueueStateService, QueueWithdrawalService, CallNextService, CompleteService, AbsentService, EventClosureService, EvaluationReadService, EvaluationWriteService, ParticipationLifecycleService, ParticipationQueryService],
+ })
+ export class EventsModule {}
+diff --git a/backend/src/events/staff-operation.problem.ts b/backend/src/events/staff-operation.problem.ts
+index ead21da..3a510f4 100644
+--- a/backend/src/events/staff-operation.problem.ts
++++ b/backend/src/events/staff-operation.problem.ts
+@@ -5,6 +5,7 @@ import type { CallNextResult } from "./call-next.types";
+ import { CompleteServiceIntegrityError } from "./complete.service";
+ import type { CompleteServiceResult } from "./complete.types";
+ import { AbsentServiceIntegrityError } from "./absent.service";
++import { CalledRemovalServiceIntegrityError } from "./staff-called-removal.service";
+ import type { AbsentServiceResult } from "./absent.types";
+ 
+ type FailureKind = Exclude<(CallNextResult | CompleteServiceResult | AbsentServiceResult)["kind"], "created" | "completed" | "absent" | "replay">;
+@@ -29,7 +30,7 @@ export function rejectStaffOperation(kind: FailureKind): never {
+ /** Erros de integridade reais nunca viram conflito de negócio ou resposta com IDs/SQL. */
+ export async function executeStaffOperation<T>(action: () => Promise<T>): Promise<T> {
+   try { return await action(); } catch (error) {
+-    if (error instanceof CallNextIntegrityError || error instanceof CompleteServiceIntegrityError || error instanceof AbsentServiceIntegrityError) {
++    if (error instanceof CallNextIntegrityError || error instanceof CompleteServiceIntegrityError || error instanceof AbsentServiceIntegrityError || error instanceof CalledRemovalServiceIntegrityError) {
+       throw new ProblemException({ typeSlug: "internal-server-error", title: "Erro interno do servidor", status: HttpStatus.INTERNAL_SERVER_ERROR,
+         code: "INTERNAL_SERVER_ERROR", detail: "Não foi possível processar a operação." });
+     }
+diff --git a/backend/src/events/staff-called-removal.controller.ts b/backend/src/events/staff-called-removal.controller.ts
+new file mode 100644
+index 0000000..d7d9896
+--- /dev/null
++++ b/backend/src/events/staff-called-removal.controller.ts
+@@ -0,0 +1,33 @@
++import { Body, Controller, HttpCode, HttpStatus, Inject, Param, Post, Req, UseGuards } from '@nestjs/common';
++import { CurrentUser } from '../auth/current-user.decorator';
++import type { AuthenticatedPrincipal } from '../auth/auth.types';
++import { SessionAuthGuard, type AuthenticatedRequest } from '../auth/session-auth.guard';
++import { mutationSession } from '../auth/mutation-session';
++import { StaffEntryNoStoreGuard } from '../participations/staff-entry.controller';
++import { emptyOperationBody, validateOperationBody, validateOperationIdempotencyKey } from '../common/http/operation-validation';
++import { serviceSessionParamsSchema, validateStaffParams } from './staff-operation.dto';
++import { executeStaffOperation, rejectStaffOperation } from './staff-operation.problem';
++import { StaffIdempotencyPolicy } from './staff-idempotency.policy';
++import { CalledRemovalService } from './staff-called-removal.service';
++
++@Controller('staff/events/:eventId/service-sessions/:serviceSessionId/remove')
++@UseGuards(StaffEntryNoStoreGuard, SessionAuthGuard)
++export class StaffCalledRemovalController {
++  constructor(@Inject(CalledRemovalService) private readonly removal: CalledRemovalService,
++    @Inject(StaffIdempotencyPolicy) private readonly policy: StaffIdempotencyPolicy) {}
++
++  @Post()
++  @HttpCode(HttpStatus.OK)
++  async remove(@CurrentUser() principal: AuthenticatedPrincipal, @Param() params: unknown,
++    @Body() body: unknown, @Req() request: AuthenticatedRequest) {
++    const ids = validateStaffParams(serviceSessionParamsSchema, params);
++    validateOperationBody(emptyOperationBody, body, request, true);
++    const result = await executeStaffOperation(() => this.removal.removeAuthenticated({ ...ids,
++      staffUserId: principal.userId, idempotencyKey: validateOperationIdempotencyKey(request),
++      expiresAt: this.policy.expiresAt() }, mutationSession(request, principal.userId)));
++    if (result.kind === 'removed' || result.kind === 'replay') return {
++      serviceSession: result.serviceSession, queueEntry: result.queueEntry, participation: result.participation,
++    };
++    return rejectStaffOperation(result.kind);
++  }
++}
+diff --git a/backend/src/events/staff-called-removal.service.ts b/backend/src/events/staff-called-removal.service.ts
+new file mode 100644
+index 0000000..9d5d946
+--- /dev/null
++++ b/backend/src/events/staff-called-removal.service.ts
+@@ -0,0 +1,169 @@
++import { assertMutationSession, mutationTransaction, revalidateMutationSession, type MutationSession } from "../auth/mutation-session";
++import { randomUUID } from "node:crypto";
++import { Inject, Injectable } from "@nestjs/common";
++import { sql } from "drizzle-orm";
++import type { NodePgDatabase } from "drizzle-orm/node-postgres";
++import { DRIZZLE_DATABASE } from "../database/database.module";
++import type * as schema from "../database/schema";
++import { completeIdempotencyOperationWithTx, createRequestFingerprint, reserveIdempotencyOperationWithTx } from "../participations/join-idempotency";
++import type { JsonValue } from "../participations/join-idempotency";
++import type { RemovedCalledService, CalledRemovalServiceBlock, CalledRemovalServiceInput, CalledRemovalServiceResult } from "./staff-called-removal.types";
++
++export const CALLED_REMOVAL_OPERATION = "staff_remove_called_service_session";
++
++export function createCalledRemovalServiceFingerprint(eventId: string, serviceSessionId: string): string {
++  return createRequestFingerprint(CALLED_REMOVAL_OPERATION, { eventId, serviceSessionId });
++}
++export class CalledRemovalServiceIntegrityError extends Error {
++  constructor(detail: string) { super(`Integridade da remoção de chamado: ${detail}`); this.name = "CalledRemovalServiceIntegrityError"; }
++}
++class CalledRemovalRollback extends Error {
++  constructor(readonly result: CalledRemovalServiceBlock) { super(result.kind); }
++}
++function block(result: CalledRemovalServiceBlock): never { throw new CalledRemovalRollback(result); }
++function ensure(condition: unknown, detail: string): asserts condition {
++  if (!condition) throw new CalledRemovalServiceIntegrityError(detail);
++}
++function instant(ms: number): Date {
++  ensure(typeof ms === "number" && Number.isFinite(ms), "instante PostgreSQL inválido.");
++  const date = new Date(ms); ensure(Number.isFinite(date.getTime()), "instante fora do intervalo de Date."); return date;
++}
++function resultFor(id: string, resolvedAt: Date): RemovedCalledService {
++  return { serviceSession: { id, status: "canceled", cancelReason: "staff_queue_removed", resolvedAt },
++    queueEntry: { status: "closed", closeReason: "staff_queue_removed" },
++    participation: { status: "active", currentQueueEntryId: null } };
++}
++function replay(payload: JsonValue | null, input: CalledRemovalServiceInput): RemovedCalledService {
++  ensure(payload && typeof payload === "object" && !Array.isArray(payload), "replay inválido.");
++  const s = payload.serviceSession, q = payload.queueEntry, p = payload.participation;
++  ensure(s && typeof s === "object" && !Array.isArray(s) && s.id === input.serviceSessionId
++    && s.status === "canceled" && s.cancelReason === "staff_queue_removed" && typeof s.resolvedAt === "string", "replay de atendimento inválido.");
++  ensure(q && typeof q === "object" && !Array.isArray(q) && q.status === "closed" && q.closeReason === "staff_queue_removed"
++    && p && typeof p === "object" && !Array.isArray(p) && p.status === "active" && p.currentQueueEntryId === null,
++    "replay de entrada/participação inválido.");
++  return resultFor(input.serviceSessionId, instant(Date.parse(s.resolvedAt)));
++}
++
++/** Cancela o pending explícito por remoção Staff, sem concluir, marcar ausência ou reinserir. */
++@Injectable()
++export class CalledRemovalService {
++  constructor(@Inject(DRIZZLE_DATABASE) private readonly database: NodePgDatabase<typeof schema>) {}
++
++  /** Contrato interno E07; os controllers usam exclusivamente a entrada autenticada. */
++  async remove(input: CalledRemovalServiceInput): Promise<CalledRemovalServiceResult> {
++    return this.execute(input, null);
++  }
++
++  async removeAuthenticated(input: CalledRemovalServiceInput, context: MutationSession): Promise<CalledRemovalServiceResult> {
++    assertMutationSession(context, input.staffUserId);
++    return this.execute(input,  { ...context, staffEventId: input.eventId });
++  }
++
++  private async execute(input: CalledRemovalServiceInput, context: MutationSession | null): Promise<CalledRemovalServiceResult> {
++    if (!input.idempotencyKey.trim() || input.idempotencyKey.length > 128 || !Number.isFinite(input.expiresAt.getTime())) {
++      throw new Error("Chave de idempotência ou expiração inválida.");
++    }
++    try {
++      return await mutationTransaction(this.database, context, async (tx): Promise<CalledRemovalServiceResult> => {
++        // Descoberta da sessão EXPLÍCITA, sem autorizar mutação ou escolher a sessão atual da pessoa.
++        const lookup = await tx.execute<{ experienceId: string; stationId: string; queueEntryId: string; participationId: string }>(sql`
++          SELECT s.experience_id AS "experienceId", s.station_id AS "stationId",
++            s.queue_entry_id AS "queueEntryId", q.participation_id AS "participationId"
++          FROM service_sessions s JOIN queue_entries q ON q.id=s.queue_entry_id
++          WHERE s.id=${input.serviceSessionId} AND q.event_id=${input.eventId}
++        `);
++        const target = lookup.rows[0];
++        const event = await tx.execute(sql`SELECT id FROM events WHERE id=${input.eventId} FOR SHARE`);
++        if (!event.rows.length) block({ kind: "staff_event_forbidden" });
++        if (target) {
++          const experience = await tx.execute(sql`SELECT id FROM experiences
++            WHERE id=${target.experienceId} AND event_id=${input.eventId} FOR UPDATE`);
++          ensure(experience.rows.length === 1, "experiência do atendimento incoerente.");
++          const station = await tx.execute(sql`SELECT id FROM stations
++            WHERE id=${target.stationId} AND experience_id=${target.experienceId} FOR UPDATE`);
++          ensure(station.rows.length === 1, "estação do atendimento incoerente.");
++        }
++        // Conta/concessão ficam protegidas até COMMIT. Admin isolado não satisfaz a consulta.
++        const staff = await tx.execute(sql`SELECT r.id FROM users u JOIN user_roles r ON r.user_id=u.id
++          WHERE u.id=${input.staffUserId} AND u.is_active=true AND u.email_verified_at IS NOT NULL
++            AND r.role='staff' AND r.event_id=${input.eventId} AND r.revoked_at IS NULL
++          FOR SHARE OF u, r`);
++        if (!staff.rows.length) {
++          if (context !== null) await revalidateMutationSession(tx, context);
++          block({ kind: "staff_event_forbidden" });
++        }
++        if (!target) block({ kind: "service_not_found" });
++        const person = await tx.execute<{ status: string; currentId: string | null }>(sql`
++          SELECT status, current_queue_entry_id AS "currentId" FROM participations
++          WHERE id=${target.participationId} AND event_id=${input.eventId} FOR UPDATE`);
++        ensure(person.rows.length === 1, "participação do atendimento incoerente.");
++        const entry = await tx.execute<{ status: string }>(sql`SELECT status FROM queue_entries
++          WHERE id=${target.queueEntryId} AND participation_id=${target.participationId}
++            AND event_id=${input.eventId} AND experience_id=${target.experienceId} FOR UPDATE`);
++        ensure(entry.rows.length === 1, "entrada mudou de vínculo após descoberta.");
++        const session = await tx.execute<{ status: string }>(sql`SELECT status FROM service_sessions
++          WHERE id=${input.serviceSessionId} AND queue_entry_id=${target.queueEntryId}
++            AND experience_id=${target.experienceId} AND station_id=${target.stationId} FOR UPDATE`);
++        ensure(session.rows.length === 1, "atendimento mudou de vínculo após descoberta.");
++
++        const reservation = await reserveIdempotencyOperationWithTx(tx, {
++          actorUserId: input.staffUserId, operation: CALLED_REMOVAL_OPERATION, idempotencyKey: input.idempotencyKey,
++          requestHash: createCalledRemovalServiceFingerprint(input.eventId, input.serviceSessionId), expiresAt: input.expiresAt,
++        });
++        if (context !== null) await revalidateMutationSession(tx, context);
++        if (reservation.kind === "request_conflict" || reservation.kind === "in_progress") return { kind: reservation.kind };
++        // Resposta histórica: não exigir ponteiro/estados atuais nem tocar atendimento posterior.
++        if (reservation.kind === "replay") {
++          ensure(reservation.httpStatus === 200 && reservation.resultReference === input.serviceSessionId,
++            "referência de replay inválida.");
++          return { kind: "replay", ...replay(reservation.resultPayload, input) };
++        }
++        ensure(["pending", "completed", "absent", "canceled"].includes(session.rows[0].status), "estado do atendimento desconhecido.");
++        if (session.rows[0].status !== "pending") block({ kind: "service_not_pending" });
++        ensure(person.rows[0].status === "active" && person.rows[0].currentId === target.queueEntryId
++          && entry.rows[0].status === "called", "pending sem participação ativa e entrada called corrente.");
++
++        // Corte no UPDATE decisivo, depois de TODAS as esperas; sem guardas de novas inscrições.
++        const resolved = await tx.execute<{ resolvedAtMs: number }>(sql`
++          WITH decision AS MATERIALIZED (SELECT clock_timestamp() AS at)
++          UPDATE service_sessions s SET status='canceled', cancel_reason='staff_queue_removed', resolved_at=d.at, resolved_by_user_id=${input.staffUserId}
++          FROM queue_entries q, participations p, events e, decision d
++          WHERE s.id=${input.serviceSessionId} AND s.queue_entry_id=${target.queueEntryId}
++            AND s.experience_id=${target.experienceId} AND s.station_id=${target.stationId} AND s.status='pending'
++            AND q.id=s.queue_entry_id AND q.experience_id=s.experience_id AND q.event_id=${input.eventId} AND q.status='called'
++            AND p.id=q.participation_id AND p.id=${target.participationId} AND p.event_id=q.event_id
++            AND p.status='active' AND p.current_queue_entry_id=q.id AND e.id=q.event_id
++            AND e.status <> 'closed' AND e.starts_at <= d.at AND d.at < e.operational_deadline_at
++            AND (e.admin_deadline_at IS NULL OR d.at < e.admin_deadline_at)
++          RETURNING (EXTRACT(EPOCH FROM s.resolved_at)*1000)::double precision AS "resolvedAtMs"
++        `);
++        if (!resolved.rows.length) block({ kind: "event_operation_ended" });
++        ensure(resolved.rows.length === 1, "remoção afetou múltiplos atendimentos.");
++        const resolvedAt = instant(resolved.rows[0].resolvedAtMs);
++        // Copia timestamptz no PostgreSQL para preservar os mesmos microssegundos nas duas linhas.
++        const closed = await tx.execute(sql`UPDATE queue_entries q SET status='closed', closed_at=s.resolved_at, close_reason='staff_queue_removed'
++          FROM service_sessions s WHERE q.id=${target.queueEntryId} AND q.participation_id=${target.participationId}
++            AND q.event_id=${input.eventId} AND q.experience_id=${target.experienceId} AND q.status='called'
++            AND s.id=${input.serviceSessionId} AND s.queue_entry_id=q.id AND s.status='canceled' RETURNING q.id`);
++        ensure(closed.rows.length === 1, "entrada called não pôde ser encerrada.");
++        const cleared = await tx.execute(sql`UPDATE participations SET current_queue_entry_id=NULL
++          WHERE id=${target.participationId} AND event_id=${input.eventId} AND status='active'
++            AND current_queue_entry_id=${target.queueEntryId} RETURNING id`);
++        ensure(cleared.rows.length === 1, "ponteiro não pôde ser liberado.");
++        const audit = await tx.execute(sql`INSERT INTO audit_logs(id,actor_user_id,event_id,origin,category,action,reason,metadata,occurred_at)
++          VALUES(${randomUUID()},${input.staffUserId},${input.eventId},'user','event','staff_called_service_removed',
++            'Remoção manual pelo Staff',jsonb_build_object('serviceSessionId',${input.serviceSessionId}::text,
++              'queueEntryId',${target.queueEntryId}::text),clock_timestamp()) RETURNING id`);
++        ensure(audit.rows.length === 1, "remoção exige auditoria.");
++        const result = resultFor(input.serviceSessionId, resolvedAt);
++        await completeIdempotencyOperationWithTx(tx, reservation.operationId, { httpStatus: 200,
++          resultReference: input.serviceSessionId,
++          resultPayload: { ...result, serviceSession: { ...result.serviceSession, resolvedAt: resolvedAt.toISOString() } } });
++        return { kind: "removed", ...result };
++      }, { isolationLevel: "read committed" });
++    } catch (error) {
++      if (error instanceof CalledRemovalRollback) return error.result;
++      throw error;
++    }
++  }
++}
+diff --git a/backend/src/events/staff-called-removal.types.ts b/backend/src/events/staff-called-removal.types.ts
+new file mode 100644
+index 0000000..e01ffa9
+--- /dev/null
++++ b/backend/src/events/staff-called-removal.types.ts
+@@ -0,0 +1,27 @@
++/** Ator confiável do chamador interno; autorização Staff revalidada no banco. */
++export interface CalledRemovalServiceInput {
++  staffUserId: string;
++  eventId: string;
++  serviceSessionId: string;
++  idempotencyKey: string;
++  /** Expiração explícita, sem definir política nova de retenção. */
++  expiresAt: Date;
++}
++
++export interface RemovedCalledService {
++  serviceSession: { id: string; status: "canceled"; cancelReason: "staff_queue_removed"; resolvedAt: Date };
++  queueEntry: { status: "closed"; closeReason: "staff_queue_removed" };
++  participation: { status: "active"; currentQueueEntryId: null };
++}
++
++export type CalledRemovalServiceBlock = { kind:
++  | "staff_event_forbidden"
++  | "service_not_found"
++  | "service_not_pending"
++  | "event_operation_ended"
++};
++
++export type CalledRemovalServiceResult =
++  | ({ kind: "removed" | "replay" } & RemovedCalledService)
++  | CalledRemovalServiceBlock
++  | { kind: "request_conflict" | "in_progress" };
+diff --git a/backend/test/unit/helpers/staff-called-removal-fixture.ts b/backend/test/unit/helpers/staff-called-removal-fixture.ts
+new file mode 100644
+index 0000000..3f5d29b
+--- /dev/null
++++ b/backend/test/unit/helpers/staff-called-removal-fixture.ts
+@@ -0,0 +1,86 @@
++import { drizzle } from "drizzle-orm/node-postgres";
++import type { Client } from "pg";
++import * as schema from "../../../src/database/schema";
++import { CalledRemovalService, createCalledRemovalServiceFingerprint } from "../../../src/events/staff-called-removal.service";
++import type { CalledRemovalServiceInput } from "../../../src/events/staff-called-removal.types";
++
++const input: CalledRemovalServiceInput = { staffUserId: "00000000-0000-4000-8000-000000000001", eventId: "event", serviceSessionId: "session",
++  idempotencyKey: "remove-called-intent", expiresAt: new Date("2099-01-01") };
++const at = new Date("2026-11-02T18:00:00Z");
++const payload = { serviceSession: { id: input.serviceSessionId, status: "canceled", cancelReason: "staff_queue_removed", resolvedAt: at.toISOString() },
++  queueEntry: { status: "closed", closeReason: "staff_queue_removed" }, participation: { status: "active", currentQueueEntryId: null } };
++
++function fixture(options: {
++  missing?: "target" | "event" | "experience" | "station" | "staff" | "person" | "entry" | "session";
++  status?: string; participantStatus?: string; pointer?: string | null; entryStatus?: string;
++  ended?: boolean; clock?: number; closeCount?: number; clearCount?: number;
++  reservation?: "replay" | "conflict" | "in_progress"; replayPayload?: unknown;
++  fail?: "resolve" | "close" | "clear" | "complete" | "audit";
++} = {}) {
++  const queries: Array<{ text: string; params: unknown[] }> = [];
++  const marker = new Error(`PRIVATE_CALLED_REMOVAL_${options.fail}`);
++  const state = { session: options.status ?? 'pending', entry: options.entryStatus ?? 'called',
++    currentId: options.pointer === undefined ? 'entry' : options.pointer, audit: 0, reservation: 0 };
++  let snapshot = { ...state };
++  const client = { async query(config: { text: string }, params: unknown[]) {
++    const text = config.text; queries.push({ text, params });
++    if (text.startsWith('begin')) snapshot = { ...state };
++    if (text === 'rollback') Object.assign(state, snapshot);
++    if (text.includes('SELECT s.experience_id AS "experienceId"')) return { rows: options.missing === "target" ? [] : [{ experienceId: "experience", stationId: "station", queueEntryId: "entry", participationId: "person" }] };
++    if (text.includes('SELECT id, name, access_code_normalized AS "accessCodeNormalized"') && text.includes("FROM events WHERE id=")) {
++      return { rows: options.missing === "event" ? [] : [{ id: input.eventId, name: "Synthetic event",
++        accessCodeNormalized: "synthetic", timezone: "UTC", startsAtMs: at.getTime() - 3_600_000,
++        officialEndsAtMs: at.getTime() + 3_600_000, operationalDeadlineAtMs: at.getTime() + 5_400_000,
++        externalQueueEnabled: true }] };
++    }
++    if (text.includes("SELECT id FROM events")) return { rows: options.missing === "event" ? [] : [{ id: input.eventId }] };
++    if (text.includes("SELECT id FROM experiences")) return { rows: options.missing === "experience" ? [] : [{ id: "experience" }] };
++    if (text.includes("SELECT id FROM stations")) return { rows: options.missing === "station" ? [] : [{ id: "station" }] };
++    if (text.includes("SELECT r.id FROM users")) return { rows: options.missing === "staff" ? [] : [{ id: "role" }] };
++    if (text.includes('AS "currentId"')) return { rows: options.missing === "person" ? [] : [{ status: options.participantStatus ?? "active", currentId: state.currentId }] };
++    if (text.includes("SELECT status FROM queue_entries")) return { rows: options.missing === "entry" ? [] : [{ status: state.entry }] };
++    if (text.includes("SELECT status FROM service_sessions")) return { rows: options.missing === "session" ? [] : [{ status: state.session }] };
++    if (text.includes('insert into "idempotency_operations"')) { if (!options.reservation) state.reservation++; return { rows: options.reservation ? [] : [["reservation"]] }; }
++    if (text.includes('from "idempotency_operations"')) return { rows: [["reservation",
++      options.reservation === "conflict" ? "other" : createCalledRemovalServiceFingerprint(input.eventId, input.serviceSessionId),
++      options.reservation === "in_progress" ? "in_progress" : "completed", 200, input.serviceSessionId, options.replayPayload ?? payload]] };
++    if (text.includes("UPDATE service_sessions s SET")) {
++      if (options.fail === "resolve") throw marker;
++      if (!options.ended) state.session = 'canceled';
++      return { rows: options.ended ? [] : [{ resolvedAtMs: options.clock ?? at.getTime() }] };
++    }
++    if (text.includes("UPDATE queue_entries q SET")) {
++      if (options.fail === "close") throw marker;
++      state.entry = 'closed';
++      return { rows: options.closeCount === 0 ? [] : [{ id: "entry" }] };
++    }
++    if (text.includes("UPDATE participations SET")) {
++      if (options.fail === "clear") throw marker;
++      state.currentId = null;
++      return { rows: options.clearCount === 0 ? [] : [{ id: "person" }] };
++    }
++    if (text.includes('INSERT INTO audit_logs')) {
++      if (options.fail === "audit") throw marker;
++      state.audit++;
++      return { rows: [{ id: "audit" }] };
++    }
++    if (text.includes('update "idempotency_operations"')) {
++      if (options.fail === "complete") throw marker;
++      return { rows: [["reservation", 200, input.serviceSessionId, payload]] };
++    }
++    return { rows: [] };
++  } };
++  const database = drizzle(client as unknown as Client, { schema });
++  const transaction = database.transaction.bind(database);
++  let tail: Promise<unknown> = Promise.resolve();
++  // Serialização simulada do lock compartilhado da experiência; não comprova locks PostgreSQL.
++  database.transaction = ((...args: Parameters<typeof database.transaction>) => {
++    const result = tail.then(() => transaction(...args));
++    tail = result.catch(() => undefined);
++    return result;
++  }) as typeof database.transaction;
++  return { service: new CalledRemovalService(database), database, queries, marker, state };
++}
++
++
++export { fixture, input, at, payload };
+diff --git a/backend/test/unit/staff-called-removal-http.test.ts b/backend/test/unit/staff-called-removal-http.test.ts
+new file mode 100644
+index 0000000..7ed15c6
+--- /dev/null
++++ b/backend/test/unit/staff-called-removal-http.test.ts
+@@ -0,0 +1,65 @@
++import 'reflect-metadata';
++import assert from 'node:assert/strict';
++import { after, before, test } from 'node:test';
++import { Module, type INestApplication } from '@nestjs/common';
++import { NestFactory } from '@nestjs/core';
++import supertest from 'supertest';
++import { AuthService } from '../../src/auth/auth.service';
++import { SessionAuthGuard } from '../../src/auth/session-auth.guard';
++import { StaffEntryNoStoreGuard } from '../../src/participations/staff-entry.controller';
++import { ProblemDetailsExceptionFilter } from '../../src/common/errors/problem-details.filter';
++import { StaffCalledRemovalController } from '../../src/events/staff-called-removal.controller';
++import { CalledRemovalService } from '../../src/events/staff-called-removal.service';
++import { StaffIdempotencyPolicy } from '../../src/events/staff-idempotency.policy';
++import { fixture, input } from './helpers/staff-called-removal-fixture';
++import { sessionScenario } from './mutation-session-scenario';
++
++let f = fixture();
++function reset(options: Parameters<typeof fixture>[0] = {}, revoked = false) {
++  f = fixture(options);
++  sessionScenario(f.service, input.staffUserId, revoked ? 'revoked' : 'valid');
++}
++@Module({ controllers: [StaffCalledRemovalController], providers: [SessionAuthGuard, StaffEntryNoStoreGuard,
++  { provide: AuthService, useValue: { authenticateBearerToken: async () => ({ userId: input.staffUserId,
++    sessionId: '00000000-0000-4000-8000-000000000099', roles: ['staff'] }) } },
++  { provide: CalledRemovalService, useValue: { removeAuthenticated: (...args: Parameters<CalledRemovalService['removeAuthenticated']>) => f.service.removeAuthenticated(...args) } },
++  { provide: StaffIdempotencyPolicy, useValue: { expiresAt: () => new Date('2099-01-01') } },
++] }) class HttpModule {}
++let app: INestApplication;
++before(async () => { app = await NestFactory.create(HttpModule, { logger: false });
++  app.setGlobalPrefix('api/v1'); app.useGlobalFilters(new ProblemDetailsExceptionFilter()); await app.listen(0, '127.0.0.1'); });
++after(async () => { await app?.close(); });
++const id = '11111111-1111-4111-8111-111111111111';
++const url = `/api/v1/staff/events/${id}/service-sessions/${id}/remove`;
++const post = (path = url, body: object = {}) => supertest(app.getHttpServer()).post(path)
++  .set('Authorization', 'Bearer synthetic-staff').set('Idempotency-Key', 'synthetic-key').send(body);
++
++test('HTTP remove chamado: guard, UUID, chave, corpo vazio e contrato mínimo', async () => {
++  reset();
++  assert.equal((await supertest(app.getHttpServer()).post(url).send({})).status, 401);
++  assert.equal((await supertest(app.getHttpServer()).post(url).set('Authorization', 'Bearer synthetic-staff').send({})).status, 400);
++  assert.equal((await post(url.replace(id, 'invalid'))).status, 400);
++  assert.equal((await post(url, { sessionId: id })).status, 400);
++  const res = await post();
++  assert.equal(res.status, 200); assert.equal(res.headers['cache-control'], 'no-store');
++  assert.equal(res.body.serviceSession.status, 'canceled');
++  assert.equal(res.body.serviceSession.cancelReason, 'staff_queue_removed');
++  assert.equal(res.body.participation.status, 'active');
++  assert.equal(res.body.participation.currentQueueEntryId, null);
++  assert.deepEqual(Object.keys(res.body).sort(), ['participation', 'queueEntry', 'serviceSession']);
++});
++test('HTTP recusa sessão revogada, falta de Staff e recurso ausente', async () => {
++  reset({}, true); assert.equal((await post()).status, 401);
++  reset({ missing: 'staff' }); assert.equal((await post()).status, 403);
++  reset({ missing: 'target' }); assert.equal((await post()).status, 404);
++  reset({ status: 'completed' }); assert.equal((await post()).status, 409);
++});
++test('HTTP auditoria falha: rollback e 500 sanitizado sem marcador privado', async () => {
++  reset({ fail: 'audit' });
++  const res = await post();
++  assert.equal(res.status, 500); assert.equal(res.body.code, 'INTERNAL_SERVER_ERROR');
++  assert.equal(res.headers['cache-control'], 'no-store');
++  assert.doesNotMatch(JSON.stringify(res.body), /PRIVATE|audit_logs|idempotency_operations/);
++  assert.equal(f.state.session, 'pending'); assert.equal(f.state.currentId, 'entry');
++  assert.equal(f.state.reservation, 0); assert.equal(f.state.audit, 0);
++});
+diff --git a/backend/test/unit/staff-called-removal.test.ts b/backend/test/unit/staff-called-removal.test.ts
+new file mode 100644
+index 0000000..d494b96
+--- /dev/null
++++ b/backend/test/unit/staff-called-removal.test.ts
+@@ -0,0 +1,177 @@
++import { sessionScenario, assertSessionRefusal, assertSessionTransaction } from "./mutation-session-scenario";
++import type { MutationSession } from "../../src/auth/mutation-session";
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { CALLED_REMOVAL_OPERATION, CalledRemovalServiceIntegrityError, createCalledRemovalServiceFingerprint } from "../../src/events/staff-called-removal.service";
++import { createRequestFingerprint } from "../../src/participations/join-idempotency";
++
++import { fixture, input, at, payload } from "./helpers/staff-called-removal-fixture";
++import { CompleteService } from "../../src/events/complete.service";
++import { AbsentService } from "../../src/events/absent.service";
++
++test('remoção audita e libera pending sem efeitos de conclusão, ausência ou reentrada', async () => {
++  const f = fixture();
++  const result = await f.service.remove(input);
++  assert.equal(result.kind, 'removed');
++  assert.deepEqual(f.state, { session: 'canceled', entry: 'closed', currentId: null, audit: 1, reservation: 1 });
++  assert.ok(f.queries.some(q => q.text.includes("cancel_reason='staff_queue_removed'")));
++  assert.ok(f.queries.some(q => q.text.includes("'staff_called_service_removed'")));
++  assert.equal(f.queries.filter(q => /UPDATE service_sessions s SET/.test(q.text)).length, 1);
++  assert.ok(!f.queries.some(q => /INSERT INTO queue_entries|status='completed'|status='absent'|SET status='finished'/.test(q.text)));
++});
++
++test('falha de auditoria restaura sessão, entrada, ponteiro e reserva na persistência simulada', async () => {
++  const f = fixture({ fail: 'audit' });
++  await assert.rejects(f.service.remove(input));
++  assert.deepEqual(f.state, { session: 'pending', entry: 'called', currentId: 'entry', audit: 0, reservation: 0 });
++  assert.equal(f.queries.at(-1)?.text, 'rollback');
++});
++
++test('complete/absent/remove concorrentes após remoção não substituem terminal: lock simulado', async () => {
++  const f = fixture();
++  const results = await Promise.all([
++    f.service.remove(input),
++    new CompleteService(f.database).complete({ ...input, idempotencyKey: 'complete-competing' }),
++    new AbsentService(f.database).absent({ ...input, idempotencyKey: 'absent-competing' }),
++    f.service.remove({ ...input, idempotencyKey: 'remove-competing' }),
++  ]);
++  assert.deepEqual(results.map(r => r.kind), ['removed', 'service_not_pending', 'service_not_pending', 'service_not_pending']);
++  assert.equal(f.state.audit, 1);
++  assert.equal(f.state.session, 'canceled');
++  assert.equal(f.state.reservation, 1);
++});
++
++test("STAFF-CALLED fingerprint vincula evento/sessão em namespace próprio", () => {
++  const hash = createCalledRemovalServiceFingerprint("e", "s");
++  assert.equal(hash, createCalledRemovalServiceFingerprint("e", "s"));
++  assert.notEqual(hash, createCalledRemovalServiceFingerprint("other", "s"));
++  assert.notEqual(hash, createCalledRemovalServiceFingerprint("e", "other"));
++  assert.notEqual(hash, createRequestFingerprint("call_next", { eventId: "e", serviceSessionId: "s" }));
++  assert.equal(CALLED_REMOVAL_OPERATION, "staff_remove_called_service_session");
++});
++test("STAFF-CALLED conclui sessão/entrada/ponteiro/idempotência no mesmo tx e contrato mínimo", async () => {
++  const { service, queries } = fixture(); const result = await service.remove(input);
++  assert.deepEqual(result, { kind: "removed", ...payload, serviceSession: { ...payload.serviceSession, resolvedAt: at } });
++  assert.equal(queries[0].text, "begin isolation level read committed"); assert.equal(queries.at(-1)?.text, "commit");
++  assert.ok(queries.find(q => q.text.includes("UPDATE service_sessions s SET"))?.params.includes(input.staffUserId));
++  assert.equal(queries.some(q => /INSERT INTO service_sessions|INSERT INTO queue_entries|UPDATE stations|last_queue_order\s*=|SET status='finished'/i.test(q.text)), false);
++  assert.equal(JSON.stringify(result).includes(input.staffUserId), false);
++});
++test("STAFF-CALLED descobre sessão explícita e trava evento → experiência → estação → pessoa → entrada → sessão", async () => {
++  const { service, queries } = fixture(); await service.remove(input);
++  const order = ['SELECT s.experience_id AS "experienceId"', "SELECT id FROM events", "SELECT id FROM experiences", "SELECT id FROM stations",
++    "SELECT r.id FROM users", 'AS "currentId"', "SELECT status FROM queue_entries", "SELECT status FROM service_sessions", 'insert into "idempotency_operations"', "WITH decision AS MATERIALIZED"];
++  const index = (part: string) => queries.findIndex(q => q.text.includes(part));
++  for (let i = 1; i < order.length; i++) assert.ok(index(order[i-1]) < index(order[i]), order[i]);
++  assert.doesNotMatch(queries[1].text, /FOR UPDATE|FOR SHARE|current_queue_entry_id/);
++  assert.match(queries[index(order[1])].text, /FOR SHARE/);
++  for (const part of [order[2], order[3], order[5], order[6], order[7]]) assert.match(queries[index(part)].text, /FOR UPDATE/);
++  for (const part of [order[6], order[7]]) assert.ok(queries[index(part)].params.includes("entry"));
++});
++test("STAFF-CALLED Staff requer conta ativa/verificada e concessão vigente do evento inclusive no replay", async () => {
++  const { service, queries } = fixture({ reservation: "replay" }); await service.remove(input);
++  const auth = queries.find(q => q.text.includes("SELECT r.id FROM users"))!;
++  for (const part of ["u.is_active=true", "u.email_verified_at IS NOT NULL", "r.role='staff'", "r.revoked_at IS NULL", "FOR SHARE OF u, r"]) assert.ok(auth.text.includes(part));
++  assert.ok(auth.params.includes(input.eventId)); assert.ok(auth.params.includes(input.staffUserId)); assert.doesNotMatch(auth.text, /admin/);
++  assert.deepEqual(await fixture({ missing: "staff", reservation: "replay" }).service.remove(input), { kind: "staff_event_forbidden" });
++});
++test("STAFF-CALLED relógio decisivo após locks permite janela residual e copia timestamp PostgreSQL", async () => {
++  const { service, queries } = fixture(); await service.remove(input);
++  const decisive = queries.find(q => q.text.includes("UPDATE service_sessions s SET"))!.text;
++  for (const part of ["clock_timestamp()", "d.at < e.operational_deadline_at", "d.at < e.admin_deadline_at", "e.status <> 'closed'", "s.status='pending'", "q.status='called'", "p.current_queue_entry_id=q.id"]) assert.ok(decisive.includes(part));
++  assert.doesNotMatch(decisive, /official_ends_at|closure_requested_at|queue_accepting_entries|availability/);
++  assert.match(queries.find(q => q.text.includes("UPDATE queue_entries q SET"))!.text, /closed_at=s.resolved_at/);
++  assert.match(queries.find(q => q.text.includes("UPDATE participations SET"))!.text, /current_queue_entry_id=\$/);
++});
++for (const [name, options, kind] of [
++  ["sem evento", { missing: "event" }, "staff_event_forbidden"],
++  ["sem Staff", { missing: "staff" }, "staff_event_forbidden"],
++  ["sessão ausente/alheia", { missing: "target" }, "service_not_found"],
++  ["já concluído", { status: "completed", entryStatus: "closed", pointer: null }, "service_not_pending"],
++  ["ausência", { status: "absent" }, "service_not_pending"],
++  ["cancelamento", { status: "canceled" }, "service_not_pending"],
++  ["prazo encerrado", { ended: true }, "event_operation_ended"],
++] as const) {
++  test(`STAFF-CALLED bloqueia ${name} sem confirmar reserva ou escrever entrada/ponteiro`, async () => {
++    const { service, queries } = fixture(options); assert.deepEqual(await service.remove(input), { kind });
++    assert.equal(queries.at(-1)?.text, "rollback");
++    assert.equal(queries.some(q => q.text.includes("UPDATE queue_entries") || q.text.includes("UPDATE participations") || q.text.includes('update "idempotency_operations"')), false);
++  });
++}
++test("STAFF-CALLED replay histórico ignora estado/ponteiro posteriores e não repete resolução", async () => {
++  const { service, queries } = fixture({ reservation: "replay", status: "canceled", entryStatus: "closed", participantStatus: "finished", pointer: "later", ended: true });
++  const result = await service.remove(input); assert.equal(result.kind, "replay");
++  assert.deepEqual(result, { kind: "replay", ...payload, serviceSession: { ...payload.serviceSession, resolvedAt: at } });
++  assert.equal(queries.some(q => q.text.includes("WITH decision") || q.text.includes("UPDATE participations")), false);
++});
++test("STAFF-CALLED conflito/in_progress não resolvem atendimento", async () => {
++  for (const reservation of ["conflict", "in_progress"] as const) {
++    const { service, queries } = fixture({ reservation });
++    assert.deepEqual(await service.remove(input), { kind: reservation === "conflict" ? "request_conflict" : "in_progress" });
++    assert.equal(queries.some(q => q.text.includes("WITH decision")), false);
++  }
++});
++test("STAFF-CALLED vínculos/estados/linhas inconsistentes causam rollback", async () => {
++  for (const options of [{ missing: "experience" }, { missing: "station" }, { missing: "person" }, { missing: "entry" }, { missing: "session" },
++    { status: "unknown" }, { participantStatus: "finished" }, { participantStatus: "waiting" }, { pointer: null }, { pointer: "later" },
++    { entryStatus: "waiting" }, { entryStatus: "closed" }, { closeCount: 0 }, { clearCount: 0 }, { clock: NaN }] as const) {
++    const { service, queries } = fixture(options);
++    await assert.rejects(service.remove(input), CalledRemovalServiceIntegrityError); assert.equal(queries.at(-1)?.text, "rollback");
++  }
++});
++test("STAFF-CALLED replay inválido ou de outra sessão não vira sucesso", async () => {
++  for (const replayPayload of [{}, { ...payload, serviceSession: { ...payload.serviceSession, id: "other" } },
++    { ...payload, serviceSession: { ...payload.serviceSession, resolvedAt: "invalid" } }, { ...payload, queueEntry: { status: "waiting" } },
++    { ...payload, participation: { status: "active", currentQueueEntryId: "later" } }]) {
++    const { service, queries } = fixture({ reservation: "replay", replayPayload });
++    await assert.rejects(service.remove(input), CalledRemovalServiceIntegrityError); assert.equal(queries.at(-1)?.text, "rollback");
++  }
++});
++test("STAFF-CALLED falhas em cada escrita propagam causa e solicitam rollback", async () => {
++  for (const fail of ["resolve", "close", "clear", "audit", "complete"] as const) {
++    const { service, queries, marker } = fixture({ fail });
++    await assert.rejects(service.remove(input), (error: Error) => {
++      let cause: unknown = error; while (cause instanceof Error && cause.cause) cause = cause.cause;
++      assert.equal(cause, marker); return true;
++    });
++    assert.equal(queries.at(-1)?.text, "rollback");
++  }
++});
++test("STAFF-CALLED input inválido falha antes de abrir transação", async () => {
++  const { service, queries } = fixture();
++  for (const changes of [{ idempotencyKey: " " }, { idempotencyKey: "x".repeat(129) }, { expiresAt: new Date(NaN) }]) await assert.rejects(service.remove({ ...input, ...changes }), /inválida/);
++  assert.equal(queries.length, 0);
++});
++
++// E08-EST01: a entrada HTTP não admite fallback para o contrato interno E07.
++for (const scenario of ["valid", "revoked", "expired", "foreign", "inactive", "admin", "late", "wait", "intent-wait"] as const) {
++  test(`STAFF-CALLED sessão ${scenario}`, async () => {
++    const f = fixture(), auth = sessionScenario(f.service, input.staffUserId, scenario);
++    if (scenario === "valid") {
++      const result = await f.service.removeAuthenticated(input, auth.context);
++      assert.equal(result.kind, "removed");
++      assert.ok(auth.checks() >= 2); assertSessionTransaction(auth.queries, true);
++    } else {
++      const code = scenario === "foreign" ? "INVALID_SESSION" : scenario === "inactive" ? "ACCOUNT_DEACTIVATED"
++        : scenario === "admin" ? "ADMIN_2FA_REQUIRED" : scenario === "late" || scenario === "expired" ? "SESSION_EXPIRED" : "SESSION_REVOKED";
++      await assert.rejects(f.service.removeAuthenticated(input, auth.context), error => assertSessionRefusal(error, code));
++      assertSessionTransaction(auth.queries, false);
++      if (scenario === "late") assert.ok(auth.queries.some(q => q.includes('update "idempotency_operations"')));
++    }
++  });
++}
++for (const context of [undefined, { userId: "other", sessionId: "session" }, { userId: input.staffUserId, sessionId: "" }]) {
++  test(`STAFF-CALLED recusa contexto ausente ou incompatível ${JSON.stringify(context)}`, async () => {
++    const f = fixture();
++    await assert.rejects(async () => f.service.removeAuthenticated(input, context as MutationSession), error => assertSessionRefusal(error, "UNAUTHENTICATED_CONTEXT"));
++    assert.equal(f.queries.length, 0);
++  });
++}
++for (const scenario of ["valid", "revoked", "expired", "late"] as const) {
++  test(`STAFF-CALLED replay exige sessão ${scenario}`, async () => {
++    const f = fixture({ reservation: "replay" }), auth = sessionScenario(f.service, input.staffUserId, scenario);
++    if (scenario === "valid") { assert.equal((await f.service.removeAuthenticated(input, auth.context)).kind, "replay"); assertSessionTransaction(auth.queries, true); }
++    else { await assert.rejects(f.service.removeAuthenticated(input, auth.context), error => assertSessionRefusal(error, scenario === "revoked" ? "SESSION_REVOKED" : "SESSION_EXPIRED")); assertSessionTransaction(auth.queries, false); }
++    assert.equal(auth.queries.some(q => q.includes('update "idempotency_operations"')), false);
++  });
++}
+diff --git a/docs/STAFF_CALLED_REMOVAL_IMPLEMENTACAO.md b/docs/STAFF_CALLED_REMOVAL_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..89191bf
+--- /dev/null
++++ b/docs/STAFF_CALLED_REMOVAL_IMPLEMENTACAO.md
+@@ -0,0 +1,80 @@
++# STAFF-CALLED-REMOVAL — Remover participante chamado
++
++## Escopo e contrato
++
++Foi acrescentado `POST /api/v1/staff/events/:eventId/service-sessions/:serviceSessionId/remove`, com Bearer real, `Idempotency-Key`, UUIDs válidos e corpo vazio. A identidade vem exclusivamente do principal instalado pelo guard. `Cache-Control: no-store` também precede a autenticação. Admin sem concessão Staff vigente não recebe autorização operacional.
++
++Resposta HTTP 200 (incluindo replay):
++
++```json
++{
++  "serviceSession": {
++    "id": "<UUID do atendimento>",
++    "status": "canceled",
++    "cancelReason": "staff_queue_removed",
++    "resolvedAt": "<timestamp ISO UTC>"
++  },
++  "queueEntry": { "status": "closed", "closeReason": "staff_queue_removed" },
++  "participation": { "status": "active", "currentQueueEntryId": null }
++}
++```
++
++Erros seguem os contratos operacionais existentes: 400 para parâmetros, corpo ou chave inválidos; 401 para sessão inválida/revogada/expirada; 403 para ausência de Staff; 404 para atendimento inexistente no evento; 409 para atendimento já terminal, corte operacional ou conflito de idempotência. Falhas internas são sanitizadas como 500. Nenhum nome ou outro dado pessoal é necessário na resposta.
++
++## Transação e schema
++
++O serviço descobre a sessão explícita e bloqueia evento (SHARE), experiência, estação, participação, entrada e atendimento (UPDATE), com o mesmo posicionamento da autorização Staff usado por complete/absent. A concessão exige conta ativa, e-mail verificado e vínculo não revogado com o evento. Após a reserva idempotente e antes do commit, revalida a sessão autenticada.
++
++O namespace é `staff_remove_called_service_session`, com fingerprint de evento e atendimento e a mesma unicidade existente por ator, operação e chave. Replay não exige que os estados atuais ainda sejam os originais; valida a referência, o status HTTP e o payload terminal e não altera atendimento posterior. Uma chave com fingerprint divergente gera conflito. Uma nova chave não substitui um terminal já gravado.
++
++No UPDATE decisivo, `clock_timestamp()` verifica início, encerramento e prazo operacional/administrativo. A sessão só muda de pending para canceled; recebe responsável, instante e motivo Staff. A entrada called vinculada fecha com o mesmo timestamp PostgreSQL. Apenas o ponteiro da participação active é limpo. Não há inserção de fila, conclusão, ausência, alteração de disponibilidade da estação ou encerramento da participação. O índice parcial de pending por estação deixa de considerar a sessão cancelada. A auditoria `staff_called_service_removed` e o resultado idempotente pertencem à mesma transação; falha em qualquer escrita ou revalidação final causa rollback.
++
++As constraints de `0004_event_operations.sql` e do schema Drizzle já permitem canceled com resolved_at e cancel_reason obrigatórios, assim como close_reason textual. O namespace cabe em varchar(80). Nenhum schema, snapshot, journal ou migration foi alterado, inclusive 0008. A 0007 continua preparatória: sua proteção específica de UPDATE para os três namespaces antigos não foi ampliada; este contrato usa o mesmo mecanismo legado de idempotência das operações atuais, sem alegar origem verificada ou retenção durável.
++
++## Aplicativo
++
++No cartão de participante chamado há a ação **Remover da fila**, junto de concluir e registrar ausência. Ela abre a confirmação existente e só envia após confirmação válida no contexto atual. A intenção `remove_called` preserva conta, sessão estável, evento, experiência, estação e atendimento, recebe UUID próprio e é reservada e marcada dispatching antes do POST.
++
++O parser exige canceled, motivo Staff, fila closed, participação active e timestamp canônico. O armazenamento aceita o novo tipo sem mudar formatos antigos. Confirmação gera recibo terminal e exige o mesmo reconhecimento por receiptId das outras ações. Timeout, falha de rede, 5xx ou resposta inválida mantêm a intenção incerta; atualização visual e remount não reenviam mutações. Logout/contexto obsoleto não publica o resultado na nova sessão. O resultado definitivo pode ser preservado para a conta original.
++
++A remoção waiting mantém contrato e implementação próprios. Nenhuma política nova de reingresso foi criada: o participante removido permanece no evento e as regras existentes decidem qualquer ingresso futuro na experiência. Não há reinserção automática, polling ou alteração de fila externa.
++
++## Arquivos
++
++- Backend: `staff-called-removal.service.ts`, `.types.ts` e `.controller.ts`; registro em `events.module.ts` e sanitização em `staff-operation.problem.ts`.
++- App: `StaffStationOperationalScreen.js`, `staffOperationsService.js`, `staffIntentStorage.js`.
++- Testes: `staff-called-removal.test.ts`, `staff-called-removal-http.test.ts`, helper `staff-called-removal-fixture.ts`; acréscimos em `staffOperationsService.integration.test.cjs` e `roleRoutingIntegration.test.cjs`.
++- Este relatório e `qa-evidence/STAFF_CALLED_REMOVAL-changes.diff`.
++
++## Validação preparada, ainda não executada
++
++Os testes preparados cobrem cancelamento pending, participação active e ponteiro nulo, ausência de reentrada/conclusão/ausência, auditoria, replay, fingerprints distintos, terminal anterior, cortes, locks, sessão revogada/expirada, concessão, recurso ausente e falhas nas escritas. A persistência simulada restaura sessão, entrada, ponteiro e reserva quando a auditoria falha. A concorrência simulada executa os serviços reais com transações serializadas no adaptador; não comprova concorrência física ou constraints PostgreSQL.
++
++No aplicativo, o adaptador SecureStore real sobre memória simulada exercita reserva, dispatching, recibo e reconhecimento, recriação do adaptador, timeout sem reenvio, 401, resposta inválida e resposta obsoleta após logout. O teste de navegação usa a tela, o coordenador e os provedores reais com transporte simulado, incluindo cancelamento de confirmação e atualização sem novo POST. Os skips por dependências opcionais da infraestrutura existente devem ser reportados, nunca tratados como aprovação.
++
++Luna Medium deverá executar em `NODE_ENV=test`, sem `.env` ou variáveis herdadas de conexão:
++
++```powershell
++# backend
++.\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test test/unit/staff-called-removal.test.ts test/unit/staff-called-removal-http.test.ts test/unit/complete.test.ts test/unit/absent.test.ts test/unit/staff-station-operational.test.ts test/unit/staff-station-operational-http.test.ts
++.\node_modules\.bin\tsc.cmd --project tsconfig.json --noEmit --incremental false
++npm.cmd run typecheck:test
++# app
++node --test tests/staffOperationsService.integration.test.cjs tests/roleRoutingIntegration.test.cjs tests/staffDemoState.test.cjs tests/staffDashboard.test.cjs tests/staffRealNavigation.test.cjs
++```
++
++Se tsx falhar na inicialização com ENOMEM, utilizar o procedimento já autorizado de compilação temporária e Node, incluindo os helpers e preservando backend/dist. Nesta implementação foram feitas apenas inspeções estáticas e verificações Git; não foram executados testes, typechecks, build, migrations, seeds ou conexões PostgreSQL/Neon.
++
++## Riscos e homologação pendente
++
++A revisão e a validação automatizada estão registradas nesta documentação; falta a homologação operacional autorizada. O PostgreSQL real ainda precisa comprovar a disputa remove/complete/absent, replay com requisições concorrentes, rollback de auditoria e liberação efetiva do índice pending da estação. No Expo Go, conferir confirmação/cancelamento, desaparecimento do chamado, recibo, próxima chamada e preservação da remoção waiting. Intenções dispatching antigas continuam bloqueadas quando não há prova terminal; esta entrega não implementa reconciliação histórica nem autoriza reenvio incerto.
++
++## Validação automatizada posterior — 2026-11-11
++
++O executor `tsx` falhou antes de carregar os testes com `uv_os_get_passwd / ENOMEM`. A campanha prosseguiu por compilação TypeScript em diretório temporário e execução dos arquivos JavaScript com Node, preservando `backend/dist`. O processo de teste usou `NODE_ENV=test`, sem carregar `.env` e sem variáveis de conexão herdadas.
++
++Na primeira execução compilada, 120 testes passaram e 1 falhou: o fixture compartilhado não respondia à consulta ampliada de evento feita pelo `AbsentService` no cenário concorrente, produzindo `staff_event_forbidden` antes de observar o atendimento cancelado. O helper foi ajustado para devolver os campos de evento exigidos pela consulta real. Nenhum código de produção foi alterado por essa correção.
++
++Após o ajuste, os seis arquivos focados do backend executaram **121 testes: 121 aprovados, 0 falhos e 0 ignorados**. Os cinco arquivos focados do aplicativo executaram **119 testes: 119 aprovados, 0 falhos e 0 ignorados**. Os typechecks de produção e testes do backend passaram. `git diff --check` passou. Os testes HTTP usaram servidor efêmero em loopback e persistência simulada; nenhum PostgreSQL, Neon, migration, seed ou serviço externo foi acessado.
++
++Essa campanha valida a cobertura automatizada simulada, inclusive remoção pending, participação active, encerramento da entrada chamada, replay/conflito, rollback, autorização, integração do botão, cancelamento da confirmação sem POST e timeout sem reenvio automático. A concorrência serializada pelo helper não comprova locks ou constraints físicos no PostgreSQL. Permanecem necessários ensaio PostgreSQL autorizado e homologação manual no Expo Go; a remoção não está liberada operacionalmente apenas por esses testes.

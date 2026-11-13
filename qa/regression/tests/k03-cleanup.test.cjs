@@ -3,8 +3,10 @@ const { randomUUID } = require('node:crypto');
 const { test } = require('node:test');
 const { integrationCallback } = require('../helpers/source.cjs');
 
-function fixture({ activatedAt = null, curated = false, mainFailure, cleanupFailure } = {}) {
-  const db = { activatedAt, curated, custom: new Map() };
+function fixture({ activatedAt = null, additionalVersions = [], curated = false, mainFailure, cleanupFailure, readFailure } = {}) {
+  const versions = [{ id: 'version-1', version: '1.0.0', activated_at: activatedAt },
+    ...additionalVersions.map(row => ({ ...row }))];
+  const db = { get activatedAt() { return versions[0].activated_at; }, set activatedAt(v) { versions[0].activated_at = v; }, versions, curated, custom: new Map() };
   const calls = [];
   const primary = new Error('PRIMARY: simulated failure after data mutation');
   const cleanup = new Error('CLEANUP: simulated restoration failure');
@@ -13,11 +15,32 @@ function fixture({ activatedAt = null, curated = false, mainFailure, cleanupFail
     async query(sql, params = []) {
       const q = sql.replace(/\s+/g, ' ').trim();
       calls.push({ sql: q, params });
+      if (q.startsWith('SELECT id, version, activated_at::text')) {
+        if (readFailure) throw primary;
+        return { rows: versions.map(row => ({ ...row })), rowCount: versions.length };
+      }
+      if (q.startsWith('SELECT id FROM questionnaire_versions')) {
+        const rows = versions.filter(row => row.activated_at !== null);
+        return { rows, rowCount: rows.length };
+      }
+      if (q.startsWith('UPDATE questionnaire_versions AS qv')) {
+        assert.match(q, /unnest\(\$1::uuid\[\], \$2::text\[\]\)/);
+        assert.match(q, /saved\.activated_at::timestamptz/);
+        assert.match(q, /WHERE qv\.id = saved\.id/);
+        inCleanup = true;
+        if (cleanupFailure) throw cleanup;
+        params[0].forEach((id, index) => {
+          const row = versions.find(row => row.id === id);
+          if (!row) throw new Error('Unknown restoration ID: ' + id);
+          row.activated_at = params[1][index];
+        });
+        return { rowCount: params[0].length, rows: [] };
+      }
       if (q.startsWith('SELECT activated_at')) {
         return { rowCount: 1, rows: [{ activated_at: db.activatedAt }] };
       }
       if (q.startsWith('UPDATE questionnaire_versions SET activated_at = NULL')) {
-        db.activatedAt = null;
+        versions.forEach(row => { row.activated_at = null; });
         return { rowCount: 1, rows: [] };
       }
       if (q.startsWith('UPDATE questionnaire_versions SET activated_at = $1')) {
@@ -93,17 +116,17 @@ function errorContains(error, target, seen = new Set()) {
 
 test('F01 K03-F.1 restores an originally NULL activated_at as NULL', async (t) => {
   const f = fixture();
-  await integrationCallback('K03-F.1:', f.globals)();
+  await integrationCallback('K03-F.1: Reinicializa', f.globals)();
   assert.ok(f.inCleanup, 'existing finally must actually execute');
   t.diagnostic('Restored activated_at: ' + String(f.db.activatedAt));
   assert.equal(f.db.activatedAt, null, 'inactive version must not be activated by test cleanup');
 });
 
 test('F02 K03-F.1 preserves an existing activation timestamp exactly', async () => {
-  const original = new Date('2024-01-02T03:04:05.000Z');
+  const original = '2024-01-02 03:04:05.123456+00';
   const f = fixture({ activatedAt: original });
-  await integrationCallback('K03-F.1:', f.globals)();
-  assert.equal(f.db.activatedAt.getTime(), original.getTime());
+  await integrationCallback('K03-F.1: Reinicializa', f.globals)();
+  assert.equal(f.db.activatedAt, original);
 });
 
 test('F03 K03-F.2 preserves originally FALSE is_curated', async (t) => {
@@ -121,7 +144,7 @@ test('F04 K03-F.2 preserves originally TRUE is_curated and deletes its fixture',
   assert.equal(f.db.custom.size, 0);
 });
 
-for (const [id, prefix] of [['F05', 'K03-F.1:'], ['F06', 'K03-F.2:']]) {
+for (const [id, prefix] of [['F05', 'K03-F.1: Reinicializa'], ['F06', 'K03-F.2:']]) {
   test(id + ' ' + prefix + ' cleanup failure preserves the primary failure', async (t) => {
     const f = fixture({ mainFailure: true, cleanupFailure: true });
     let caught;
@@ -135,11 +158,11 @@ for (const [id, prefix] of [['F05', 'K03-F.1:'], ['F06', 'K03-F.2:']]) {
 }
 
 test('F07 K03-F.1 cleanup still runs after failure in the test body', async () => {
-  const original = new Date('2024-01-02T03:04:05.000Z');
+  const original = '2024-01-02 03:04:05.123456+00';
   const f = fixture({ activatedAt: original, mainFailure: true });
-  await assert.rejects(integrationCallback('K03-F.1:', f.globals)(), e => e === f.primary);
+  await assert.rejects(integrationCallback('K03-F.1: Reinicializa', f.globals)(), e => e === f.primary);
   assert.ok(f.inCleanup);
-  assert.equal(f.db.activatedAt.getTime(), original.getTime());
+  assert.equal(f.db.activatedAt, original);
 });
 
 test('F08 K03-F.2 removes its custom game after failure in the test body', async () => {
@@ -148,4 +171,26 @@ test('F08 K03-F.2 removes its custom game after failure in the test body', async
   assert.ok(f.inCleanup);
   assert.equal(f.db.curated, true);
   assert.equal(f.db.custom.size, 0);
+});
+
+test('F09 K03-F.1 restores all snapshotted versions by ID including NULL and microseconds', async () => {
+  const f = fixture({ activatedAt: '2024-01-02 03:04:05.123456+00', additionalVersions: [
+    { id: 'inactive', version: '2.0.0', activated_at: null },
+    { id: 'other-active', version: '3.0.0', activated_at: '2025-06-07 08:09:10.654321+00' },
+  ] });
+  const before = f.db.versions.map(row => ({ ...row }));
+  await integrationCallback('K03-F.1: Reinicializa', f.globals)();
+  assert.ok(f.inCleanup);
+  assert.deepEqual(f.db.versions, before);
+  const restores = f.calls.filter(call => call.sql.startsWith('UPDATE questionnaire_versions AS qv'));
+  assert.equal(restores.length, 1);
+  assert.deepEqual(restores[0].params[0], before.map(row => row.id));
+  assert.deepEqual(restores[0].params[1], before.map(row => row.activated_at));
+});
+
+test('F10 K03-F.1 never restores an unread snapshot and preserves the read failure', async () => {
+  const f = fixture({ readFailure: true });
+  await assert.rejects(integrationCallback('K03-F.1: Reinicializa', f.globals)(), e => e === f.primary);
+  assert.equal(f.inCleanup, false);
+  assert.equal(f.calls.some(call => call.sql.startsWith('UPDATE')), false);
 });

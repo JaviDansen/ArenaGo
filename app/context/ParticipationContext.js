@@ -1,4 +1,5 @@
 import { createContext, useEffect, useRef, useState } from 'react';
+import { AppState } from 'react-native';
 import { useAuth } from './AuthContext';
 import { createParticipationStore } from '../services/participationService';
 import { createEventAdmissionStore } from '../services/eventAdmissionService';
@@ -50,17 +51,31 @@ export function ParticipationProvider({ children }) {
     return () => { store.setIdentity(null); admissionStore.setIdentity(null); };
   }, [store, admissionStore, userId, epoch]);
 
+  useEffect(() => {
+    let previous = AppState.currentState;
+    if (previous === 'background' || previous === 'inactive') store.suspend();
+    const subscription = AppState.addEventListener('change', next => {
+      if (next === 'active' && previous !== 'active') void store.resume();
+      else if (next === 'background' || next === 'inactive') store.suspend();
+      previous = next;
+    });
+    return () => subscription.remove();
+  }, [store]);
+
   const current = userId && snapshot.userId === userId && snapshot.epoch === epoch;
   const participation = current ? (snapshot.participation ? { ...snapshot.participation, source: 'server' } : snapshot.demoParticipation) : null;
   const currentAdmission = userId && admissionSnapshot.userId === userId && admissionSnapshot.epoch === epoch;
   const value = {
     participation,
     returnState: current ? snapshot.returnState : null,
+    returnStateVersion: current ? snapshot.returnStateVersion : null,
     status: current ? snapshot.status : userId ? 'loading' : 'idle',
     error: current ? snapshot.error : null,
     syncStale: current ? Boolean(snapshot.syncStale) : false,
     refreshParticipation: store.refresh,
     syncCurrentParticipation: store.syncCurrentSilent,
+    canPresentReturnEvaluation: store.canPresentReturnEvaluation,
+    claimReturnEvaluation: store.claimReturnEvaluation,
     setParticipation: store.setDemoParticipation,
     admission: currentAdmission ? admissionSnapshot : null,
     lookupEvent: admissionStore.lookup,

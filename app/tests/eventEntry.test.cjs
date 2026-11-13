@@ -59,7 +59,7 @@ function screenRig(path, context, params = {}, options = {}) {
       ActivityIndicator: 'ActivityIndicator', KeyboardAvoidingView: 'KeyboardAvoidingView',
       Platform: { OS: 'android' }, Pressable: 'Pressable', ScrollView: 'ScrollView',
       Text: 'Text', TextInput: 'TextInput', View: 'View',
-      StyleSheet: { create: (styles) => styles, absoluteFillObject: {} },
+      StyleSheet: { create: (styles) => styles, absoluteFill: { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0 } },
       Linking: {
         openSettings: async () => { settingsOpened++; return true; },
       },
@@ -433,6 +433,9 @@ test('ENTRY-QR-01: selecionar Ler QR Code ativa a câmera com enquadramento e in
   assert.match(rig.text(), /Aponte a câmera para o QR Code do evento/);
   assert.ok(rig.camera(), 'CameraView deve estar montada');
   assert.equal(rig.camera().props.facing, 'back', 'Deve utilizar a câmera traseira');
+  assert.deepEqual(structuredClone(rig.camera().props.style), { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0 });
+  assert.equal(rig.card('event-entry-scanner-overlay').props.style.position, 'absolute');
+  assert.equal(rig.card('event-entry-scanner-overlay').props.style.bottom, 0);
   assert.deepEqual(structuredClone(rig.camera().props.barcodeScannerSettings), { barcodeTypes: ['qr'] });
   assert.ok(rig.reticle(), 'Retículo de enquadramento deve estar presente');
   assert.ok(rig.button('Digitar código manualmente'));
@@ -481,7 +484,13 @@ test('ENTRY-QR-01: validação e normalização de QR Code rejeita códigos inv�
   // Códigos válidos
   assert.deepEqual(structuredClone(validateAndNormalizeQrCode('ARENA123')), { ok: true, code: 'ARENA123' });
   assert.deepEqual(structuredClone(validateAndNormalizeQrCode('  AbC-42  ')), { ok: true, code: 'AbC-42' });
-  assert.deepEqual(structuredClone(validateAndNormalizeQrCode('EVENT_2026-SP')), { ok: true, code: 'EVENT_2026-SP' });
+  assert.equal(validateAndNormalizeQrCode('EVENT_2026-SP').ok, false);
+  assert.equal(validateAndNormalizeQrCode('ABC').ok, false);
+  assert.equal(validateAndNormalizeQrCode('ABCD').ok, true);
+  assert.equal(validateAndNormalizeQrCode('A'.repeat(64)).ok, true);
+  for (const code of ['-ABCD', 'ABCD-', 'AB--CD', 'AB_1', 'ÁBCD']) {
+    assert.equal(validateAndNormalizeQrCode(code).ok, false);
+  }
 
   // Rejeição de vazios
   assert.equal(validateAndNormalizeQrCode('').ok, false);
@@ -690,6 +699,49 @@ test('ENTRY-QR-01: resposta pendente ao perder o foco não provoca navegação i
 
   // Não deve navegar pois a tela estava fora de foco
   assert.deepEqual(rig.calls, []);
+});
+
+test('ENTRY-QR-01: consulta manual pendente não navega após perda de foco nem duplica submissões', async () => {
+  let resolve, count = 0;
+  const context = {
+    admission: { status: 'idle' }, isCurrentAdmission: () => true,
+    lookupEvent: () => { count++; return new Promise((done) => { resolve = done; }); },
+  };
+  const rig = screenRig('screens/event-entry/EventEntryScreen.js', context, { initialMethod: 'manual' });
+  rig.input('ARENA123');
+  const pending = rig.button('Continuar').props.onPress();
+  await rig.button('Continuar').props.onPress();
+  assert.equal(count, 1);
+  rig.setFocused(false);
+  resolve({ kind: 'found', event, eligibility: eligible });
+  await pending;
+  assert.deepEqual(rig.calls, []);
+});
+
+test('ENTRY-QR-01: rejeição de leitura antiga não libera consulta QR mais recente', async () => {
+  let rejectOld, resolveNew, count = 0;
+  const context = {
+    admission: { status: 'idle' }, isCurrentAdmission: () => true,
+    lookupEvent: () => {
+      count++;
+      return count === 1 ? new Promise((_, reject) => { rejectOld = reject; }) :
+        new Promise((resolve) => { resolveNew = resolve; });
+    },
+  };
+  const rig = screenRig('screens/event-entry/EventEntryScreen.js', context, { initialMethod: 'qr' });
+  const oldScan = rig.simulateScan('CODE-OLD');
+  await rig.button('Digitar código manualmente').props.onPress();
+  rig.render();
+  await rig.button('Ler QR Code').props.onPress();
+  rig.render();
+  const newScan = rig.simulateScan('CODE-NEW');
+  rejectOld(new Error('falha tardia'));
+  await oldScan;
+  await rig.simulateScan('CODE-EXTRA');
+  assert.equal(count, 2);
+  resolveNew({ kind: 'found', event, eligibility: eligible });
+  await newScan;
+  assert.equal(rig.calls.length, 1);
 });
 
 test('ENTRY-QR-01: HomeScreen exibe texto atualizado com menção a QR Code e digitação manual', () => {

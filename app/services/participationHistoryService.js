@@ -95,6 +95,28 @@ export async function fetchPendingEvaluationHistoryItem(client, participationId,
   return null;
 }
 
+/** Retomada C-04/D09: pendências antigas não substituem a finalização indicada. */
+export async function fetchReturnEvaluationHistoryItem(client, returned, { isCurrent = () => true } = {}) {
+  const recent = returned?.recentFinalization;
+  if (recent === null) return null;
+  if (!recent || !UUID.test(recent.participationId) || !UUID.test(recent.eventId)
+      || typeof recent.finishedAt !== 'string' || !validInstant(recent.finishedAt)
+      || !['admin_immediate', 'admin_controlled_external_wait_closed',
+        'automatic_operational_deadline', 'automatic_admin_deadline'].includes(recent.finishReason)
+      || !Array.isArray(returned.pendingEvaluationParticipationIds)) {
+    throw new Error('O servidor retornou uma finalização recente inválida.');
+  }
+  if (!returned.pendingEvaluationParticipationIds.includes(recent.participationId)) return null;
+  const item = await fetchPendingEvaluationHistoryItem(client, recent.participationId, { isCurrent });
+  if (!item || !isCurrent()) return null;
+  if (item.event.id !== recent.eventId || item.finishedAt !== recent.finishedAt
+      || item.finishReason !== recent.finishReason || item.completedServicesCount < 1) {
+    throw new Error('O histórico não confirmou a finalização recente.');
+  }
+  // pending é calculado pelo relógio do backend; não arbitrar prazo no aparelho.
+  return item;
+}
+
 export async function fetchParticipationEvaluation(client, participationId) {
   if (!UUID.test(participationId)) throw new Error('Identificador de participação inválido.');
   const body = await client.get(`/participations/${participationId}/evaluation`, { auth: true });

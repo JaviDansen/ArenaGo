@@ -1118,6 +1118,12 @@ test('HomeFlowScreen: ExternalQueueScreen dispara polling de 5s e suspende em se
     let syncCalls = 0;
     const participation = { source: 'server', status: 'waiting', eventId: 'event-x', externalQueue: { position: 4 } };
 
+    const auth = {
+      isAuthenticated: true, identityStatus: 'verified', isInitializing: false,
+      user: { id: 'participant-home' }, getSessionEpoch: () => 1, isIdentityVerified: () => true,
+      httpClient: { get() { assert.fail('Consulta HTTP inesperada na fila externa.'); } },
+    };
+
     const screen = loadModule('screens/home/HomeFlowScreen.js', (name) => {
       if (name === 'react') {
         return {
@@ -1129,6 +1135,7 @@ test('HomeFlowScreen: ExternalQueueScreen dispara polling de 5s e suspende em se
           }),
           useEffect: (cb) => cb(),
           useRef: (val) => ({ current: val }),
+          useState: (initial) => [initial, () => {}],
         };
       }
       if (name === '@react-navigation/native') {
@@ -1152,6 +1159,10 @@ test('HomeFlowScreen: ExternalQueueScreen dispara polling de 5s e suspende em se
       if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
       if (name === '../../components/ui') return createParticipantUiStubs();
       if (name === '../../context/ParticipationContext') return { ParticipationContext: {} };
+      if (name === '../../context/AuthContext') return { useAuth: () => auth };
+      if (name === '../../services/participationHistoryService') return {
+        fetchReturnEvaluationHistoryItem() { assert.fail('Consulta de retorno inesperada com participante na fila.'); },
+      };
       if (name === '../arena/RealArenaScreen') return { __esModule: true, default: 'RealArenaScreen' };
       if (name === '../arena/ActiveArenaScreen') return { __esModule: true, default: 'ActiveArenaScreen' };
       if (name === '../arena/ArenaQueueScreen') return { __esModule: true, default: 'ArenaQueueScreen' };
@@ -1189,6 +1200,12 @@ test('HomeFlowScreen: ExternalQueueScreen dispara polling de 5s e suspende em se
 test('HomeFlowScreen (Cenário 9): ExternalQueueScreen exibe aviso discreto de conexão instável sem desmontar nem apagar posição', () => {
   const participation = { source: 'server', status: 'waiting', eventId: 'event-x', externalQueue: { position: 7 } };
 
+  const auth = {
+    isAuthenticated: true, identityStatus: 'verified', isInitializing: false,
+    user: { id: 'participant-home' }, getSessionEpoch: () => 1, isIdentityVerified: () => true,
+    httpClient: { get() { assert.fail('Consulta HTTP inesperada na fila externa.'); } },
+  };
+
   const screen = loadModule('screens/home/HomeFlowScreen.js', (name) => {
     if (name === 'react') {
       return {
@@ -1201,6 +1218,7 @@ test('HomeFlowScreen (Cenário 9): ExternalQueueScreen exibe aviso discreto de c
         }),
         useEffect: () => {},
         useRef: (val) => ({ current: val }),
+        useState: (initial) => [initial, () => {}],
       };
     }
     if (name === '@react-navigation/native') return { useIsFocused: () => true };
@@ -1216,6 +1234,10 @@ test('HomeFlowScreen (Cenário 9): ExternalQueueScreen exibe aviso discreto de c
     if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
     if (name === '../../components/ui') return createParticipantUiStubs();
     if (name === '../../context/ParticipationContext') return { ParticipationContext: {} };
+    if (name === '../../context/AuthContext') return { useAuth: () => auth };
+    if (name === '../../services/participationHistoryService') return {
+      fetchReturnEvaluationHistoryItem() { assert.fail('Consulta de retorno inesperada com participante na fila.'); },
+    };
     if (name === '../arena/RealArenaScreen') return { __esModule: true, default: 'RealArenaScreen' };
     if (name === '../arena/ActiveArenaScreen') return { __esModule: true, default: 'ActiveArenaScreen' };
     if (name === '../arena/ArenaQueueScreen') return { __esModule: true, default: 'ArenaQueueScreen' };
@@ -1478,6 +1500,12 @@ test('HomeFlowScreen: ExternalQueueScreen suspende polling ao perder foco e reto
     const cleanups = [];
     const participation = { source: 'server', status: 'waiting', eventId: 'event-focus', externalQueue: { position: 2 } };
 
+    const auth = {
+      isAuthenticated: true, identityStatus: 'verified', isInitializing: false,
+      user: { id: 'participant-home' }, getSessionEpoch: () => 1, isIdentityVerified: () => true,
+      httpClient: { get() { assert.fail('Consulta HTTP inesperada na fila externa.'); } },
+    };
+
     const screen = loadModule('screens/home/HomeFlowScreen.js', (name) => {
       if (name === 'react') {
         return {
@@ -1492,6 +1520,7 @@ test('HomeFlowScreen: ExternalQueueScreen suspende polling ao perder foco e reto
             if (typeof cleanup === 'function') cleanups.push(cleanup);
           },
           useRef: (val) => ({ current: val }),
+          useState: (initial) => [initial, () => {}],
         };
       }
       if (name === '@react-navigation/native') {
@@ -1509,6 +1538,10 @@ test('HomeFlowScreen: ExternalQueueScreen suspende polling ao perder foco e reto
       if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
       if (name === '../../components/ui') return createParticipantUiStubs();
       if (name === '../../context/ParticipationContext') return { ParticipationContext: {} };
+      if (name === '../../context/AuthContext') return { useAuth: () => auth };
+      if (name === '../../services/participationHistoryService') return {
+        fetchReturnEvaluationHistoryItem() { assert.fail('Consulta de retorno inesperada com participante na fila.'); },
+      };
       if (name === '../arena/RealArenaScreen') return { __esModule: true, default: 'RealArenaScreen' };
       if (name === '../arena/ActiveArenaScreen') return { __esModule: true, default: 'ActiveArenaScreen' };
       if (name === '../arena/ArenaQueueScreen') return { __esModule: true, default: 'ArenaQueueScreen' };

@@ -1,4 +1,5 @@
 import { Modal, StyleSheet, Text, View } from 'react-native';
+import { useAuth } from '../../../context/AuthContext';
 
 import StaffButton from './StaffButton';
 import { staffColors, staffSpacing } from './staffTheme';
@@ -14,16 +15,24 @@ export default function StaffConfirmDialog({
   variant = 'primary',
   onConfirm,
   onCancel,
+  openedAtRevision,
 }) {
+  const auth = useAuth();
+  const revision = openedAtRevision ?? auth?.getIdentityRevision?.();
+  const canInteract = () => auth?.isIdentityVerified
+    ? auth.isIdentityVerified() && auth.getIdentityRevision() === revision
+    : !auth?.isInitializing && !['checking', 'error', 'unverified'].includes(auth?.identityStatus);
+  const allowed = canInteract();
   return (
-    <Modal visible={visible} transparent animationType="fade" onRequestClose={onCancel}>
+    <Modal visible={visible && allowed} transparent animationType="fade"
+      onRequestClose={() => { if (canInteract()) onCancel?.(); }}>
       <View style={styles.backdrop}>
         <View style={styles.dialog} accessibilityViewIsModal>
           <Text style={styles.title} accessibilityRole="header">{title}</Text>
           {message ? <Text style={styles.message}>{message}</Text> : null}
           {note ? <Text style={styles.note}>{note}</Text> : null}
-          <StaffButton label={confirmLabel} variant={variant} onPress={onConfirm} />
-          <StaffButton label={cancelLabel} variant="secondary" onPress={onCancel} />
+          <StaffButton label={confirmLabel} variant={variant} onPress={() => { if (canInteract()) onConfirm?.(); }} />
+          <StaffButton label={cancelLabel} variant="secondary" onPress={() => { if (canInteract()) onCancel?.(); }} />
         </View>
       </View>
     </Modal>
