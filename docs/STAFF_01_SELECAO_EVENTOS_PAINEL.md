@@ -118,14 +118,14 @@ Antes de qualquer alteração na interface, os arquivos atuais na base `ae2ba16b
 
 | Arquivo | Tipo | Alterações Realizadas |
 |---|---|---|
-| `docs/STAFF_01_SELECAO_EVENTOS_PAINEL.md` | Novo | Documentação técnica completa do ciclo STAFF-01 (diagnóstico, contratos, decisões, adaptações e testes) |
-| `app/services/staffOperationsService.js` | Modificado | Adicionados `parseStaffEntrySummary` e `fetchStaffEntrySummary` para resumo real do Controle de Entrada com `pendingCall` |
-| `app/services/staffDashboardService.js` | Modificado | Adicionados estados `entryStatus`, `entry`, `entryError`, além de `refreshEntryControl()` e `pollEntryControl()` com isolamento de falha parcial |
-| `app/screens/staff/StaffEventsNavigator.js` | Modificado | Reformulação visual de `StaffEventsScreen` (`ArenaGo_Staff_01_Home.png`) e `StaffEventHomeScreen`/`StaffEventDashboard` (`ArenaGO_Staff_02_Painel_Operacional.png`), integração de polling 5s/60s, badges semânticos e preservação das subtelas |
+| `docs/STAFF_01_SELECAO_EVENTOS_PAINEL.md` | Novo | Documentação técnica completa do ciclo STAFF-01 (diagnóstico, contratos, decisões, primeira revisão técnica, correções e testes) |
+| `app/services/staffOperationsService.js` | Modificado | Adicionados `parseStaffEntrySummary` e `fetchStaffEntrySummary` com exigência de `pendingCall`, validação de `calledAt`, `observedAt`, fila `waiting` sem duplicatas/posições sequenciais, rejeição de sobreposição entre `pendingCall` e `waiting` e checagem das flags operacionais |
+| `app/services/staffDashboardService.js` | Modificado | Adicionados estados `entryStatus`, `entry`, `entryError`, `refreshEntryControl()` e `pollEntryControl()` com recuperação automática após falha transitória (`network`/`unavailable`), limpeza global em `403`/`404`/`401` (`denied`) mantendo isolamento em `500`/rede, e controle de `silentEntry`/`silentStations` alinhado à geração |
+| `app/screens/staff/StaffEventsNavigator.js` | Modificado | Reformulação visual de `StaffEventsScreen` (`ArenaGo_Staff_01_Home.png`) e `StaffEventHomeScreen`/`StaffEventDashboard` (`ArenaGO_Staff_02_Painel_Operacional.png`), separação do polling de 5s de estações e Controle de Entrada para execução independente e auto-recuperável, bloqueio do card após perda de acesso (`403`/`404`/`401` — badge `SEM ACESSO`), compatibilidade com `staffBackground.test.cjs` e preservação das subtelas |
 | `app/tests/roleRoutingIntegration.test.cjs` | Modificado | Atualização da asserção de experiência única na linha 725 para refletir identificação obrigatória do grupo no painel |
-| `app/tests/staffDashboard.test.cjs` | Modificado | Testes unitários de `parseStaffEntrySummary`, `refreshEntryControl()`, `pollEntryControl()`, isolamento de falhas parciais e descarte por geração/troca de evento |
-| `app/tests/staffEventDiscovery.test.cjs` | Modificado | Suíte integrada de UI (`STAFF-01 UI 10.1` e `10.2`) cobrindo Seleção de Eventos, Painel Operacional, Controle de Entrada, agrupamento, falhas e navegação |
-| `qa-evidence/STAFF-01-changes.diff` | Novo | Patch unificado gerado a partir do commit-base `ae2ba16b289daeff21fa09db7ca95613d6d79a6e` (excluindo `qa-evidence/*`) |
+| `app/tests/staffDashboard.test.cjs` | Modificado | Testes unitários de `parseStaffEntrySummary` (incluindo rejeição de `pendingCall` ausente/inválido, `calledAt` inválido e sobreposição com `waiting`), recuperação automática e independente de `pollEntryControl()`/`pollStations()`, e limpeza de dados protegidos em `403`/`404` |
+| `app/tests/staffEventDiscovery.test.cjs` | Modificado | Reconciliador autossuficiente sem `skip` nem dependência de `qa/regression`, correção da fixture de `pendingCall`/`waiting` em `10.2` e suítes integradas `10.1`, `10.2` e `10.3` (recuperação após `500`, rejeição de payload inválido e bloqueio em `403`/`404`) |
+| `qa-evidence/STAFF-01-changes.diff` | Novo | Patch unificado atualizado gerado a partir do commit-base `ae2ba16b289daeff21fa09db7ca95613d6d79a6e` (excluindo `qa-evidence/*`) |
 
 ---
 
@@ -144,8 +144,8 @@ Antes de qualquer alteração na interface, os arquivos atuais na base `ae2ba16b
 
 ## 10. Testes Preparados, Comandos e Resultados Reais
 
-**Inspeções estáticas executadas durante a implementação:**
-- `git diff --check app docs`: executado para verificação de higiene de patch e ausência de erros sintáticos/espaços residuais.
+**Inspeções estáticas executadas nesta etapa de correção:**
+- `git diff --check app docs`: verificação de higiene de patch e ausência de erros de espaçamento/EOF.
 
 **Testes preparados (pendentes de execução automatizada com GPT-6 Luna — Medium, conforme política permanente do `AGENTS.md`):**
 
@@ -154,52 +154,64 @@ cmd.exe /c "cd app && node --test tests/staffEventDiscovery.test.cjs"
 cmd.exe /c "cd app && node --test tests/staffDashboard.test.cjs"
 cmd.exe /c "cd app && node --test tests/roleRoutingIntegration.test.cjs"
 cmd.exe /c "cd app && node --test tests/staffDemoState.test.cjs"
+cmd.exe /c "cd app && node --test tests/staffBackground.test.cjs"
 cmd.exe /c "cd app && node --test tests/staffScreens.test.cjs"
 cmd.exe /c "cd app && node --test tests/staffNavigation.test.cjs"
 cmd.exe /c "cd app && npm test"
 ```
 
-**Cobertura adicionada e atualizada:**
-1. **`app/tests/staffDashboard.test.cjs`:** validação estrita de `parseStaffEntrySummary` (com e sem `pendingCall`), leitura e polling de `entry-control`, preservação das estações e experiências durante falha 500/rede parcial em `/entry-control`, invalidação global em 401 e descarte de resposta obsoleta em troca de evento.
+**Cobertura adicionada e atualizada (incluindo os ajustes da primeira revisão técnica):**
+1. **`app/tests/staffDashboard.test.cjs`:**
+   - Validação estrita de `parseStaffEntrySummary` exigindo `pendingCall` presente (`null` ou objeto completo com `calledAt` ISO), rejeitando ausência da propriedade, duplicatas em `waiting`, posições fora da sequência `1..N`, sobreposição do mesmo `participationId` entre `pendingCall` e `waiting` (case-insensitive) e flags operacionais incoerentes.
+   - Recuperação automática de `pollEntryControl()` e `pollStations()` após falhas iniciais transitórias (`500`/`network`) mantendo independência entre as leituras, sem marcar `stale` quando não há dado prévio e sem disparar `POST`.
+   - Tratamento de perda de autorização (`403` e `404`) em `refreshEntryControl()` e `pollEntryControl()` limpando estações, experiências, fila e entrada protegidas e descartando voos concorrentes, mantendo isolamento quando o erro for `500`/rede.
 2. **`app/tests/staffEventDiscovery.test.cjs`:**
+   - Execução sem `{ skip }` por meio de reconciliador React autossuficiente e navegador em pilha local (sem dependência opcional de `qa/regression`).
+   - Fixture corrigida em `STAFF-01 UI (10.2)` com `participationId` distintos para `pendingCall` e itens de `waiting`.
    - **Seleção de Eventos (10.1):** renderização com marca `ArenaGO` e pill `STAFF`, carregamento, distinção erro de rede vs lista vazia, fases reais (`open`, `not_ready`), descarte de resposta atrasada em troca de conta, polling de 60s e logout no rodapé.
    - **Painel Operacional (10.2):** título único do evento sem repetição, exibição das métricas reais (`2/3`, `1`, `2`) sem valores de mockup (`128`, `05 de dez`), Controle de Entrada diferenciando `Chamada pendente` e `FILA ATIVA`/`FILA INATIVA`/`INDISPONÍVEL`, agrupamento por experiência (incluindo experiência vazia), disponibilidade e chamado por estação, falha parcial isolada em `/entry-control`, navegação para Controle de Entrada e Estação correta, e limpeza completa ao trocar de evento.
-3. **`app/tests/roleRoutingIntegration.test.cjs`:** atualizado teste de regressão para confirmar exibição do nome da experiência no painel mantendo todas as verificações de 401, 403, troca de evento, entrada e estação.
+   - **Primeira Revisão Técnica (10.3):** recuperação automática de `/entry-control` no painel mesmo com `/stations` falhando com `500`, rejeição visual de payloads sem `pendingCall` ou com sobreposição em `waiting`, remoção imediata de estações/experiências protegidas e bloqueio do card de Controle de Entrada (`SEM ACESSO` e `disabled`) após `403` e `404`.
+3. **`app/tests/roleRoutingIntegration.test.cjs`:** atualizado teste de regressão para confirmar exibição do nome da experiência no painel mantendo todas as verificações de `401`, `403`, troca de evento, entrada e estação.
 
-*(Nota: Nenhum teste unitário/integrado automatizado foi executado durante esta etapa de implementação; os resultados efetivos devem ser preenchidos somente após execução autorizada por GPT-6 Luna — Medium.)*
+*(Nota: Conforme `AGENTS.md`, nenhum teste automatizado (`node --test` / `npm test`) foi executado durante esta etapa de implementação/correção; os resultados reais deverão ser registrados após execução autorizada por GPT-6 Luna — Medium.)*
 
 ---
 
 ## 11. Validações Manuais e Ambientes
 
-- **Homologação física / Expo Go (Android e iOS):** Pendente de execução pelo responsável após validação automatizada da entrega.
+- **Homologação física / Expo Go (Android e iOS):** Pendente de execução pelo responsável após validação automatizada da entrega corrigida.
 - **Comparação visual esperada:** Confirmar legibilidade em telas compactas, scroll suave, contraste do tema escuro/roxo e fidelidade estrutural com `ArenaGo_Staff_01_Home.png` e `ArenaGO_Staff_02_Painel_Operacional.png`.
 
 ---
 
 ## 12. Problemas Identificados e Correções Realizadas
 
-- **17/11/2026 — Divergências entre referência inicial e `origin/develop` (`ae2ba16b`):** A base real trouxe `effectivePhase` (5 estados incluindo `not_ready`), `useStaffPolling`, `AuthBackground`, remoção da seção intermediária `'stations'` (Task A4) e `pendingCall` no Controle de Entrada. A implementação adaptou a reformulação exatamente para essa base, preservando integralmente o polling B1 e os seletores da integração.
-- **17/11/2026 — Compatibilidade visual vs `hasText` em maiúsculas:** Badges usam `textTransform: 'uppercase'` no estilo para corresponder aos mockups mantendo as strings contratuais em caixa mista para os assertions existentes (`Agendado`, `Aberto`, `Não está pronto`, `Em encerramento`, `Encerrado`).
+- **17/11/2026 — Entrega inicial (antes da primeira revisão):** Adaptação à base `origin/develop` (`ae2ba16b`) com `effectivePhase` em 5 estados, `useStaffPolling`, `AuthBackground`, navegação direta `'panel' -> 'station'`, `pendingCall` no Controle de Entrada e uso de `textTransform: 'uppercase'` mantendo compatibilidade com assertions existentes.
+- **17/11/2026 — Primeira revisão técnica sobre o commit `8184e76f` (`8184e76`):**
+  1. **Recuperação automática e independência de `/entry-control`:** `pollEntryControl()` e `pollStations()` em `staffDashboardService.js` passaram a tentar novamente quando `entryStatus`/`stationStatus` estão em erro transitório (`network`/`unavailable`), mantendo higiene de `silentEntry`/`silentStations` ligada à geração/requisição e retornando ao estado `ready` na primeira resposta válida. Em `StaffEventsNavigator.js`, `StaffEventDashboard` passou a registrar dois `useStaffPolling` de 5s independentes (um para estações e outro para `/entry-control`), eliminando o bloqueio causado quando `stationStatus !== 'ready'`.
+  2. **Validação estrita de `pendingCall`:** `parseStaffEntrySummary` em `staffOperationsService.js` passou a exigir a propriedade `pendingCall` (`null` ou objeto com `id` e `participationId` UUID, `displayName` não vazio e `calledAt` ISO válido), além de validar `observedAt` opcional, itens únicos e sequenciais (`1..N`) em `waiting`, ausência de sobreposição entre `pendingCall.participationId` e `waiting`, e coerência com flags operacionais opcionais (`canCall`, `canConfirm`, `canMarkAbsent`, `canRemove`).
+  3. **Perda de autorização (`403`/`404`) em `/entry-control`:** Tanto `refreshEntryControl()` quanto `pollEntryControl()` agora tratam `denied` (`403`/`404`) chamando `denied(kind)` para limpar imediatamente estações, experiências, fila e entrada protegidas e descartar respostas em voo, preservando o isolamento de falhas `500`/rede apenas no card do Controle de Entrada. Na UI (`StaffEventDashboard`), `accessLost` exibe o alerta de acesso indisponível, mostra `SEM ACESSO` no resumo de entrada e desabilita a abertura do Controle de Entrada (`disabled={accessLost}`).
+  4. **Fixture inconsistente e execução de testes sem `skip`:** Corrigida a fixture de `STAFF-01 UI (10.2)` separando `PART_CALLED` de `PART_WAIT_1`/`PART_WAIT_2`, removido o uso de `qa/regression` e `{ skip }` em `app/tests/staffEventDiscovery.test.cjs` por meio de reconciliador React autossuficiente, adicionados testes dos três itens da revisão em `staffDashboard.test.cjs` e `staffEventDiscovery.test.cjs`, e ajustadas as tags `<AuthBackground>`/`<ScrollView>` em `StaffEventsNavigator.js` para manter total aderência ao `staffBackground.test.cjs`.
 
 ---
 
 ## 13. Pendências e Limitações
 
-1. Execução da suíte de testes automatizados pendente com **GPT-6 Luna (Medium)** antes da aprovação.
-2. Homologação visual e tátil em dispositivo real (Android e iOS) pendente pelo responsável.
-3. Reformulações internas das telas de Estação (`STAFF-02`) e Controle de Entrada (`STAFF-04`) e refinamento de reconexão (`STAFF-05`) continuam reservadas para suas respectivas tasks.
-4. Campos opcionais (`stationCount` em `/staff/events`, `periodLabel`, `location`, participantes totais e filas internas somadas no resumo) permanecem omitidos até eventual evolução futura da API aprovada pelo responsável.
+1. Execução da suíte completa de testes automatizados pendente com **GPT-6 Luna (Medium)** após confirmação manual do responsável.
+2. Novo commit e push pelo responsável via VSCode para publicar as correções da primeira revisão na branch `feature/staff-operacional-v2` (e posterior registro dos SHAs resultantes).
+3. Homologação visual e operacional em dispositivo real (Android e iOS) pendente pelo responsável antes da aprovação formal da **STAFF-01**.
+4. Reformulações internas das telas de Estação (`STAFF-02`) e Controle de Entrada (`STAFF-04`) e refinamento de reconexão (`STAFF-05`) permanecem reservadas para suas respectivas tasks.
 
 ---
 
 ## 14. Commits Associados
 
-- **Commit-base (`origin/develop`):** `ae2ba16b289daeff21fa09db7ca95613d6d79a6e`
-- **Publicação Git (`feature/staff-operacional-v2`):** Conforme seção 6 do `AGENTS.md`, staging, commit e push permanecem sob responsabilidade do usuário via VSCode após revisão.
+- **Commit-base (`origin/develop`):** `ae2ba16b289daeff21fa09db7ca95613d6d79a6e` (`docs: consolida panorama e arquiva planejamento antigo`)
+- **Commit inicial publicado em `feature/staff-operacional-v2`:** `8184e76f` (`8184e76` — `Reformulação da Seleção de Eventos e Painel Operacional`, objeto da primeira revisão técnica)
+- **Publicação das correções da primeira revisão (`feature/staff-operacional-v2`):** Pendente de staging, commit e push pelo responsável via VSCode (conforme seção 6 do `AGENTS.md`).
 
 ---
 
 ## 15. Estado Final da Entrega
 
-Implementação e preparação de testes da **STAFF-01** concluídas na branch `feature/staff-operacional-v2` (working tree pronto para validação com GPT-6 Luna — Medium e posterior commit/push pelo responsável).
+Correções da **primeira revisão técnica da STAFF-01** aplicadas na branch `feature/staff-operacional-v2`, com documentação e `qa-evidence/STAFF-01-changes.diff` atualizados. Aguardando execução da suíte automatizada com **GPT-6 Luna — Medium**, publicação pelo responsável e nova revisão formal.

@@ -1,7 +1,5 @@
 const assert = require('node:assert/strict');
-const path = require('node:path');
 const test = require('node:test');
-const { createRequire } = require('node:module');
 const { loadModule } = require('./helpers/questionnaireHarness.cjs');
 
 const { parseStaffEvents, createStaffEventsStore } = loadModule('services/staffEventsService.js', require).exports;
@@ -115,28 +113,282 @@ test('consulta silenciosa preserva seleção e descarta resposta após troca de 
 
 // ============================================================================
 // Testes de interface e integração de navegação Staff (STAFF-01)
-// Cobre as seções 10.1 (Seleção de Eventos) e 10.2 (Painel Operacional)
+// Reconciliador autossuficiente (sem dependências opcionais ou skip)
+// Cobre as seções 10.1, 10.2 e cenários da primeira revisão técnica
 // ============================================================================
 
-const qaRequire = createRequire(path.resolve(__dirname, '../../qa/regression/package.json'));
-let uiDeps;
-try {
-  uiDeps = {
-    React: qaRequire('react'),
-    jsx: qaRequire('react/jsx-runtime'),
-    Renderer: qaRequire('react-test-renderer'),
-    Navigation: qaRequire('@react-navigation/core'),
-    StackRouter: qaRequire('@react-navigation/routers').StackRouter,
+function createUiRuntime(jsxRuntime) {
+  let typeSerial = 0;
+  const typeIds = new WeakMap();
+  const getTypeId = (fn) => {
+    let id = typeIds.get(fn);
+    if (!id) {
+      id = ++typeSerial;
+      typeIds.set(fn, id);
+    }
+    return id;
   };
-} catch {
-  uiDeps = null;
+
+  let activeInst = null;
+  let activeCursor = 0;
+  let currentNextInstances = null;
+  let currentPendingEffects = null;
+  let committedInstances = new Map();
+  let renderedTree = null;
+  let rootRenderFn = () => null;
+  let renderingNow = false;
+  let isFlushing = false;
+  let dirty = false;
+  let batchDepth = 0;
+
+  function renderElement(node, path) {
+    if (node == null || typeof node === 'boolean') return null;
+    if (typeof node === 'string' || typeof node === 'number') return String(node);
+    if (Array.isArray(node)) {
+      return node.map((child, idx) => renderElement(child, `${path}[${child?.key ?? idx}]`));
+    }
+    if (typeof node !== 'object') return null;
+
+    if (node.type?._isContextProvider) {
+      const ctx = node.type._ctx;
+      const previous = ctx._value;
+      ctx._value = node.props?.value;
+      try {
+        return renderElement(node.props?.children, `${path}>P`);
+      } finally {
+        ctx._value = previous;
+      }
+    }
+
+    if (node.type === jsxRuntime.Fragment) {
+      return renderElement(node.props?.children, `${path}>F`);
+    }
+
+    if (typeof node.type === 'function') {
+      const compKey = `${path}:${getTypeId(node.type)}${node.key != null ? `@${node.key}` : ''}`;
+      let inst = committedInstances.get(compKey);
+      if (!inst) {
+        inst = { slots: [], cleanups: new Map(), mounted: false };
+      }
+      currentNextInstances.set(compKey, inst);
+
+      const prevInst = activeInst;
+      const prevCursor = activeCursor;
+      const prevRendering = renderingNow;
+      activeInst = inst;
+      activeCursor = 0;
+      renderingNow = true;
+      let rendered;
+      try {
+        rendered = node.type(node.props);
+      } finally {
+        activeInst = prevInst;
+        activeCursor = prevCursor;
+        renderingNow = prevRendering;
+      }
+      return renderElement(rendered, `${compKey}>C`);
+    }
+
+    const renderedChildren = node.props?.children !== undefined
+      ? renderElement(node.props.children, `${path}>${String(node.type)}`)
+      : undefined;
+    return { type: node.type, props: { ...node.props, children: renderedChildren } };
+  }
+
+  function flushWork() {
+    if (isFlushing) return;
+    isFlushing = true;
+    try {
+      let passes = 0;
+      while (dirty) {
+        passes += 1;
+        if (passes > 50) throw new Error('Loop de renderização em StaffEventsNavigator');
+        dirty = false;
+        const nextInstances = new Map();
+        const pendingEffects = [];
+        currentNextInstances = nextInstances;
+        currentPendingEffects = pendingEffects;
+        const tree = renderElement(rootRenderFn(), 'root');
+        for (const [key, oldInst] of committedInstances) {
+          if (nextInstances.get(key) !== oldInst) {
+            oldInst.mounted = false;
+            for (const cleanup of oldInst.cleanups.values()) {
+              if (typeof cleanup === 'function') cleanup();
+            }
+            oldInst.cleanups.clear();
+          }
+        }
+        committedInstances = nextInstances;
+        for (const inst of committedInstances.values()) inst.mounted = true;
+        renderedTree = tree;
+        for (const { inst, idx, cb } of pendingEffects) {
+          if (!inst.mounted) continue;
+          const prevCleanup = inst.cleanups.get(idx);
+          if (typeof prevCleanup === 'function') prevCleanup();
+          const nextCleanup = cb();
+          inst.cleanups.set(idx, typeof nextCleanup === 'function' ? nextCleanup : null);
+        }
+      }
+    } finally {
+      isFlushing = false;
+    }
+  }
+
+  const react = {
+    createContext(defaultValue = null) {
+      const ctx = { _value: defaultValue };
+      const Provider = function ContextProvider() { return null; };
+      Provider._isContextProvider = true;
+      Provider._ctx = ctx;
+      ctx.Provider = Provider;
+      return ctx;
+    },
+    useContext(ctx) {
+      return ctx ? ctx._value : null;
+    },
+    useState(initial) {
+      const inst = activeInst;
+      const idx = activeCursor++;
+      if (!(idx in inst.slots)) {
+        inst.slots[idx] = typeof initial === 'function' ? initial() : initial;
+      }
+      const setter = (update) => {
+        if (!inst.mounted && !renderingNow) return;
+        const nextVal = typeof update === 'function' ? update(inst.slots[idx]) : update;
+        if (!Object.is(inst.slots[idx], nextVal)) {
+          inst.slots[idx] = nextVal;
+          dirty = true;
+          if (!renderingNow && batchDepth === 0) flushWork();
+        }
+      };
+      return [inst.slots[idx], setter];
+    },
+    useRef(initial) {
+      const inst = activeInst;
+      const idx = activeCursor++;
+      if (!(idx in inst.slots)) inst.slots[idx] = { current: initial };
+      return inst.slots[idx];
+    },
+    useCallback(fn, deps) {
+      const inst = activeInst;
+      const idx = activeCursor++;
+      const prev = inst.slots[idx];
+      const changed = !prev || !deps || deps.length !== prev.deps.length
+        || deps.some((v, i) => !Object.is(v, prev.deps[i]));
+      if (changed) inst.slots[idx] = { fn, deps };
+      return inst.slots[idx].fn;
+    },
+    useMemo(fn, deps) {
+      const inst = activeInst;
+      const idx = activeCursor++;
+      const prev = inst.slots[idx];
+      const changed = !prev || !deps || deps.length !== prev.deps.length
+        || deps.some((v, i) => !Object.is(v, prev.deps[i]));
+      if (changed) inst.slots[idx] = { val: fn(), deps };
+      return inst.slots[idx].val;
+    },
+    useEffect(cb, deps) {
+      const inst = activeInst;
+      const idx = activeCursor++;
+      const prev = inst.slots[idx];
+      const changed = !prev || !deps || deps.length !== prev.deps.length
+        || deps.some((v, i) => !Object.is(v, prev.deps[i]));
+      if (changed) {
+        inst.slots[idx] = { deps };
+        currentPendingEffects.push({ inst, idx, cb });
+      }
+    },
+  };
+
+  function createNativeStackNavigator() {
+    const Screen = function StackScreen() { return null; };
+    function Navigator({ initialRouteName, children }) {
+      const screens = [].concat(children).filter(Boolean).map((el) => el.props);
+      const [stack, setStack] = react.useState([initialRouteName ?? screens[0].name]);
+      const listenersRef = react.useRef([]);
+      const currentName = stack[stack.length - 1];
+      const currentScreen = screens.find((s) => s.name === currentName) ?? screens[0];
+
+      const navigation = {
+        navigate(name) {
+          setStack((prev) => (prev[prev.length - 1] === name ? prev : [...prev, name]));
+        },
+        canGoBack() {
+          return stack.length > 1;
+        },
+        goBack() {
+          let prevented = false;
+          for (const listener of [...listenersRef.current]) {
+            listener({ preventDefault() { prevented = true; } });
+          }
+          if (!prevented) {
+            setStack((prev) => (prev.length > 1 ? prev.slice(0, -1) : prev));
+          }
+        },
+        addListener(event, handler) {
+          if (event !== 'beforeRemove') return () => {};
+          listenersRef.current.push(handler);
+          return () => {
+            listenersRef.current = listenersRef.current.filter((item) => item !== handler);
+          };
+        },
+      };
+
+      return jsxRuntime.jsx(currentScreen.component, { navigation });
+    }
+    return { Navigator, Screen };
+  }
+
+  return {
+    react,
+    createNativeStackNavigator,
+    mount(renderFn) {
+      rootRenderFn = renderFn;
+      dirty = true;
+      flushWork();
+    },
+    update(renderFn) {
+      rootRenderFn = renderFn;
+      dirty = true;
+      flushWork();
+    },
+    async act(fn) {
+      batchDepth += 1;
+      try {
+        await fn();
+      } finally {
+        batchDepth -= 1;
+      }
+      dirty = true;
+      flushWork();
+      await new Promise((r) => setTimeout(r, 0));
+      if (dirty) flushWork();
+    },
+    async settle() {
+      await new Promise((r) => setTimeout(r, 0));
+      if (dirty) flushWork();
+    },
+    getTree() {
+      return renderedTree;
+    },
+    dispose() {
+      for (const oldInst of committedInstances.values()) {
+        oldInst.mounted = false;
+        for (const cleanup of oldInst.cleanups.values()) {
+          if (typeof cleanup === 'function') cleanup();
+        }
+        oldInst.cleanups.clear();
+      }
+      committedInstances.clear();
+      renderedTree = null;
+    },
+  };
 }
-const skipUi = uiDeps ? false : 'dependências de qa/regression não instaladas';
 
 function createStaffUiHarness({ initialAuth, onGet, onLogout }) {
-  const { React, jsx, Renderer, Navigation, StackRouter } = uiDeps;
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  const navRef = Navigation.createNavigationContainerRef();
+  const jsx = require('react/jsx-runtime');
+  const runtime = createUiRuntime(jsx);
+  const { react: React, createNativeStackNavigator } = runtime;
   const pollingRegistrations = [];
   let authState = initialAuth;
 
@@ -153,11 +405,6 @@ function createStaffUiHarness({ initialAuth, onGet, onLogout }) {
   native.StyleSheet = { create: (s) => s };
   native.AppState = { currentState: 'active', addEventListener: () => ({ remove() {} }) };
 
-  function FocusedStack(props) {
-    const { state, descriptors, NavigationContent } = Navigation.useNavigationBuilder(StackRouter, props);
-    return React.createElement(NavigationContent, null, descriptors[state.routes[state.index].key].render());
-  }
-
   const client = {
     get: (url, opts) => onGet(url, opts),
   };
@@ -170,22 +417,21 @@ function createStaffUiHarness({ initialAuth, onGet, onLogout }) {
     },
   });
 
-  const EntryStub = ({ event, onBack }) => React.createElement(
-    'View',
-    null,
-    React.createElement('Text', null, `EntryControl:${event.id}`),
-    React.createElement(
-      'Pressable',
-      { accessibilityRole: 'button', accessibilityLabel: 'Voltar do controle', onPress: onBack },
-      React.createElement('Text', null, 'Voltar ao painel'),
-    ),
-  );
+  const EntryStub = ({ event, onBack }) => jsx.jsxs('View', {
+    children: [
+      jsx.jsx('Text', { children: `EntryControl:${event.id}` }),
+      jsx.jsx('Pressable', {
+        accessibilityRole: 'button',
+        accessibilityLabel: 'Voltar do controle',
+        onPress: onBack,
+        children: jsx.jsx('Text', { children: 'Voltar ao painel' }),
+      }),
+    ],
+  });
 
-  const StationStub = ({ event, experience, station }) => React.createElement(
-    'View',
-    null,
-    React.createElement('Text', null, `StationOp:${event.id}:${experience.id}:${station.id}`),
-  );
+  const StationStub = ({ event, experience, station }) => jsx.jsx('View', {
+    children: jsx.jsx('Text', { children: `StationOp:${event.id}:${experience.id}:${station.id}` }),
+  });
 
   const AuthCtx = React.createContext(null);
 
@@ -194,13 +440,13 @@ function createStaffUiHarness({ initialAuth, onGet, onLogout }) {
     if (name === 'react/jsx-runtime') return jsx;
     if (name === 'react-native') return native;
     if (name === '@react-navigation/native-stack') {
-      return { createNativeStackNavigator: Navigation.createNavigatorFactory(FocusedStack) };
+      return { createNativeStackNavigator };
     }
     if (name === '@react-navigation/native') {
       return { useIsFocused: () => true };
     }
     if (name === '../../components/ui/AuthBackground') {
-      return { AuthBackground: ({ children, ...props }) => React.createElement('View', props, children) };
+      return { AuthBackground: ({ children, ...props }) => jsx.jsx('View', { ...props, children }) };
     }
     if (name === '../../context/AuthContext') {
       return { AuthContext: AuthCtx, useAuth: () => React.useContext(AuthCtx) };
@@ -212,43 +458,69 @@ function createStaffUiHarness({ initialAuth, onGet, onLogout }) {
     if (name === './useStaffPolling') {
       return {
         useStaffPolling(enabled, read, intervalMs, scope) {
-          pollingRegistrations.push({ enabled, intervalMs, scope });
+          pollingRegistrations.push({ enabled, read, intervalMs, scope });
         },
       };
     }
     return require(name);
   }).exports;
 
-  const textOf = (node) => (typeof node === 'string'
-    ? node
-    : (node?.children ?? []).map(textOf).join(''));
+  const textOf = (node) => {
+    if (node == null || typeof node === 'boolean') return '';
+    if (typeof node === 'string' || typeof node === 'number') return String(node);
+    if (Array.isArray(node)) return node.map(textOf).join('');
+    if (typeof node === 'object') return textOf(node.props?.children);
+    return '';
+  };
 
-  const wrapper = (currentAuth) => React.createElement(
-    Navigation.BaseNavigationContainer,
-    { ref: navRef },
-    React.createElement(
-      AuthCtx.Provider,
-      { value: currentAuth },
-      React.createElement(StaffEventsNavigator),
-    ),
-  );
+  function findAllByType(type) {
+    const matches = [];
+    (function walk(node) {
+      if (node == null || typeof node === 'boolean' || typeof node === 'string') return;
+      if (Array.isArray(node)) { node.forEach(walk); return; }
+      if (typeof node === 'object') {
+        if (node.type === type) matches.push(node);
+        walk(node.props?.children);
+      }
+    })(runtime.getTree());
+    return matches;
+  }
 
-  let tree;
+  const wrapper = (currentAuth) => jsx.jsx(AuthCtx.Provider, {
+    value: currentAuth,
+    children: jsx.jsx(StaffEventsNavigator, {}),
+  });
+
   return {
     pollingRegistrations,
+    latestPolling(scopeFragment) {
+      for (let i = pollingRegistrations.length - 1; i >= 0; i -= 1) {
+        const reg = pollingRegistrations[i];
+        if (String(reg.scope).includes(scopeFragment)) return reg;
+      }
+      return null;
+    },
+    async triggerPolling(scopeFragment) {
+      const reg = this.latestPolling(scopeFragment);
+      assert.ok(reg, `polling esperado para "${scopeFragment}"`);
+      assert.equal(reg.enabled, true, `polling "${scopeFragment}" deve estar habilitado`);
+      await runtime.act(async () => {
+        await reg.read();
+      });
+    },
     async mount() {
-      await Renderer.act(async () => {
-        tree = Renderer.create(wrapper(makeAuth()));
+      await runtime.act(async () => {
+        runtime.mount(() => wrapper(makeAuth()));
       });
     },
     async updateAuth(nextAuth) {
       authState = nextAuth;
-      await Renderer.act(async () => {
-        tree.update(wrapper(makeAuth()));
+      await runtime.act(async () => {
+        runtime.update(() => wrapper(makeAuth()));
       });
     },
     allTexts() {
-      return tree.root.findAllByType('Text').map(textOf);
+      return findAllByType('Text').map(textOf);
     },
     hasText(fragment) {
       return this.allTexts().some((t) => t.includes(fragment));
@@ -256,25 +528,25 @@ function createStaffUiHarness({ initialAuth, onGet, onLogout }) {
     textOccurrences(exact) {
       return this.allTexts().filter((t) => t === exact).length;
     },
-    hasButton(label) {
-      return tree.root.findAllByType('Pressable')
-        .some((n) => n.props.accessibilityLabel === label);
-    },
-    async press(label) {
-      const matches = tree.root.findAllByType('Pressable')
+    isDisabled(label) {
+      const matches = findAllByType('Pressable')
         .filter((n) => n.props.accessibilityLabel === label);
       assert.equal(matches.length, 1, `esperado exatamente 1 botão "${label}"`);
-      await Renderer.act(async () => {
+      return Boolean(matches[0].props.disabled);
+    },
+    async press(label) {
+      const matches = findAllByType('Pressable')
+        .filter((n) => n.props.accessibilityLabel === label);
+      assert.equal(matches.length, 1, `esperado exatamente 1 botão "${label}"`);
+      await runtime.act(async () => {
         await matches[0].props.onPress?.();
       });
     },
     async settle() {
-      await Renderer.act(async () => {
-        await new Promise((r) => setTimeout(r, 0));
-      });
+      await runtime.settle();
     },
     dispose() {
-      Renderer.act(() => tree.unmount());
+      runtime.dispose();
     },
   };
 }
@@ -297,9 +569,11 @@ const ST_2 = '77777777-7777-4777-8777-777777777777';
 const ST_3 = '88888888-8888-4888-8888-888888888888';
 const SESS_1 = '99999999-9999-4999-8999-999999999999';
 const CALL_1 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
-const PART_1 = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const PART_CALLED = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const PART_WAIT_1 = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+const PART_WAIT_2 = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
 
-test('STAFF-01 UI (10.1): Seleção de Eventos cobre carregamento, erro vs vazio, fases reais, resposta atrasada, troca de conta e logout', { skip: skipUi }, async () => {
+test('STAFF-01 UI (10.1): Seleção de Eventos cobre carregamento, erro vs vazio, fases reais, resposta atrasada, troca de conta e logout', async () => {
   const eventsDeferreds = [];
   let logoutCalls = 0;
   let scenario = 'deferred';
@@ -375,11 +649,11 @@ test('STAFF-01 UI (10.1): Seleção de Eventos cobre carregamento, erro vs vazio
   }
 });
 
-test('STAFF-01 UI (10.2): Painel Operacional exibe resumo real, Controle de Entrada, agrupamento de estações, falha parcial e navegação sem mistura de eventos', { skip: skipUi }, async () => {
+test('STAFF-01 UI (10.2): Painel Operacional exibe resumo real, Controle de Entrada, agrupamento de estações, falha parcial e navegação sem mistura de eventos', async () => {
   let failEntry = false;
   let entryPendingCall = {
     id: CALL_1,
-    participationId: PART_1,
+    participationId: PART_CALLED,
     displayName: 'Carlos Eduardo',
     calledAt: '2026-11-17T15:00:00.000Z',
   };
@@ -427,8 +701,8 @@ test('STAFF-01 UI (10.2): Painel Operacional exibe resumo real, Controle de Entr
           waitingCount,
           waiting: waitingCount === 2
             ? [
-                { participationId: PART_1, displayName: 'Ana', position: 1 },
-                { participationId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', displayName: 'Bia', position: 2 },
+                { participationId: PART_WAIT_1, displayName: 'Ana', position: 1 },
+                { participationId: PART_WAIT_2, displayName: 'Bia', position: 2 },
               ]
             : [],
           pendingCall: entryPendingCall,
@@ -514,12 +788,13 @@ test('STAFF-01 UI (10.2): Painel Operacional exibe resumo real, Controle de Entr
     assert.ok(rig.hasText('Fila externa desativada · entrada direta'));
     assert.ok(rig.hasText('FILA INATIVA'));
 
-    // 6. Falha parcial em /entry-control mostra indisponível sem apagar experiências/estações
+    // 6. Falha parcial em /entry-control mostra indisponível sem apagar experiências/estações e mantém card navegável
     failEntry = true;
     await rig.press('Atualizar estações');
     await rig.settle();
     assert.ok(rig.hasText('Estado da fila externa indisponível'));
     assert.ok(rig.hasText('INDISPONÍVEL'));
+    assert.equal(rig.isDisabled('Controle de Entrada'), false);
     assert.ok(rig.hasText('Just Dance'), 'estações/experiências preservadas em falha parcial');
 
     // 7. Navegar para a estação correta de Street Fighter e retornar ao painel
@@ -538,6 +813,125 @@ test('STAFF-01 UI (10.2): Painel Operacional exibe resumo real, Controle de Entr
     assert.ok(rig.hasText('Nenhuma estação encontrada neste evento.'));
     assert.ok(!rig.hasText('Just Dance'));
     assert.ok(!rig.hasText('Arena Neon UNDB'));
+  } finally {
+    rig.dispose();
+  }
+});
+
+test('STAFF-01 UI (10.3): Recuperação automática de /entry-control, rejeição de pendingCall inválido e perda de autorização (403/404)', async () => {
+  let stationsMode = 'error500';
+  let entryMode = 'error500';
+  const entryPayload = (patch = {}) => ({
+    eventId: EV_A,
+    externalQueueEnabled: true,
+    canManage: true,
+    observedAt: '2026-11-17T15:00:00.000Z',
+    waitingCount: 1,
+    waiting: [{ participationId: PART_WAIT_1, displayName: 'Ana', position: 1 }],
+    pendingCall: null,
+    ...patch,
+  });
+
+  const rig = createStaffUiHarness({
+    initialAuth: makeAuthIdentity('u-1', 1, 1),
+    onGet: (url) => {
+      if (url === '/staff/events') {
+        return Promise.resolve({
+          events: [{ id: EV_A, name: 'Arena UNDB Revisão', status: 'open', effectivePhase: 'open' }],
+        });
+      }
+      if (url === `/staff/events/${EV_A}/experiences`) {
+        return Promise.resolve({
+          eventId: EV_A,
+          experiences: [{ id: EXP_1, name: 'Just Dance' }],
+        });
+      }
+      if (url === `/staff/events/${EV_A}/stations`) {
+        if (stationsMode === 'error500') return Promise.reject(Object.assign(new Error('stations-500'), { status: 500 }));
+        return Promise.resolve({
+          eventId: EV_A,
+          stations: [{ id: ST_1, experienceId: EXP_1, label: 'Estação 01', availability: 'available', pendingServiceSessionId: null }],
+        });
+      }
+      if (url === `/staff/events/${EV_A}/entry-control`) {
+        if (entryMode === 'error500') return Promise.reject(Object.assign(new Error('entry-500'), { status: 500 }));
+        if (entryMode === 'forbidden403') return Promise.reject(Object.assign(new Error('forbidden'), { status: 403 }));
+        if (entryMode === 'notfound404') return Promise.reject(Object.assign(new Error('not-found'), { status: 404 }));
+        if (entryMode === 'missingPendingCall') {
+          const invalid = entryPayload();
+          delete invalid.pendingCall;
+          return Promise.resolve(invalid);
+        }
+        if (entryMode === 'inconsistentCall') {
+          return Promise.resolve(entryPayload({
+            pendingCall: {
+              id: CALL_1,
+              participationId: PART_WAIT_1,
+              displayName: 'Ana',
+              calledAt: '2026-11-17T15:01:00.000Z',
+            },
+          }));
+        }
+        return Promise.resolve(entryPayload());
+      }
+      return Promise.reject(new Error(`URL inesperada: ${url}`));
+    },
+  });
+
+  try {
+    await rig.mount();
+    await rig.press('Selecionar evento Arena UNDB Revisão');
+    await rig.settle();
+
+    // 1. Falha inicial 500 em /entry-control (e mesmo com /stations em erro 500) mantém polling independente de 5s ativo
+    assert.ok(rig.hasText('Estado da fila externa indisponível'));
+    assert.ok(rig.hasText('INDISPONÍVEL'));
+    const entryPoll = rig.latestPolling(':entry:');
+    assert.ok(entryPoll && entryPoll.intervalMs === 5000 && entryPoll.enabled === true);
+
+    // Quando o endpoint /entry-control volta (sem voltar /stations), polling recupera automaticamente
+    entryMode = 'ready';
+    await rig.triggerPolling(':entry:');
+    assert.ok(rig.hasText('1 pessoa aguardando na entrada'));
+    assert.ok(rig.hasText('FILA ATIVA'));
+
+    // 2. Respostas com pendingCall ausente ou inconsistente com waiting são rejeitadas como inválidas
+    entryMode = 'missingPendingCall';
+    await rig.press('Atualizar estações');
+    await rig.settle();
+    assert.ok(rig.hasText('Estado da fila externa indisponível'));
+    assert.ok(!rig.hasText('FILA ATIVA'));
+
+    entryMode = 'inconsistentCall';
+    await rig.triggerPolling(':entry:');
+    assert.ok(rig.hasText('Estado da fila externa indisponível'));
+
+    // Carrega painel saudável com estações visíveis antes de simular revogação
+    stationsMode = 'ready';
+    entryMode = 'ready';
+    await rig.press('Atualizar estações');
+    await rig.settle();
+    assert.ok(rig.hasText('Just Dance'));
+    assert.ok(rig.hasText('Estação 01'));
+    assert.equal(rig.isDisabled('Controle de Entrada'), false);
+
+    // 3. Perda de autorização (403 no polling) limpa dados protegidos da tela, bloqueia entrada e desliga polling
+    entryMode = 'forbidden403';
+    await rig.triggerPolling(':entry:');
+    assert.ok(!rig.hasText('Just Dance'), 'experiências protegidas removidas após 403');
+    assert.ok(!rig.hasText('Estação 01'), 'estações protegidas removidas após 403');
+    assert.ok(rig.hasText('Acesso ao evento ou à experiência indisponível. Atualize seus eventos autorizados.'));
+    assert.ok(rig.hasText('SEM ACESSO'));
+    assert.equal(rig.isDisabled('Controle de Entrada'), true);
+    assert.equal(rig.latestPolling(':entry:')?.enabled, false);
+
+    // 404 na carga manual também revoga e bloqueia o Controle de Entrada
+    entryMode = 'notfound404';
+    await rig.press('Atualizar estações');
+    await rig.settle();
+    assert.ok(!rig.hasText('Just Dance'));
+    assert.ok(rig.hasText('SEM ACESSO'));
+    assert.equal(rig.isDisabled('Controle de Entrada'), true);
   } finally {
     rig.dispose();
   }

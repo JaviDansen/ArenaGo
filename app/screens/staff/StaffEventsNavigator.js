@@ -158,6 +158,15 @@ function describeEntrySummary(snapshot) {
       hasPendingCall: false,
     };
   }
+  if (snapshot.entryError === 'denied' || snapshot.entryError === 'session') {
+    return {
+      subtitle: 'Acesso ao evento indisponível',
+      badgeLabel: 'SEM ACESSO',
+      badgeTone: 'danger',
+      waitingText: '—',
+      hasPendingCall: false,
+    };
+  }
   if (snapshot.entryStatus === 'error' || !snapshot.entry) {
     return {
       subtitle: 'Estado da fila externa indisponível',
@@ -269,8 +278,8 @@ function StaffEventsScreen({ navigation }) {
   };
 
   return (
-    <AuthBackground testID="staff-events-background" variant="login" overlayOpacity={0.74}>
-      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+    <AuthBackground testID="staff-events-background" variant="login">
+      <ScrollView contentContainerStyle={styles.content}>
         <StaffBrandHeader />
 
         <View style={styles.headerBlock}>
@@ -392,8 +401,8 @@ function StaffEventHomeScreen({ navigation }) {
   const selected = staff.isCurrent() ? staff.selected : null;
 
   return (
-    <AuthBackground testID="staff-event-home-background" variant="login" overlayOpacity={0.74}>
-      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+    <AuthBackground testID="staff-event-home-background" variant="login">
+      <ScrollView contentContainerStyle={styles.content}>
         <StaffBrandHeader />
 
         {(!selected || section === 'panel') && (
@@ -470,17 +479,25 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
   useEffect(() => {
     if (section !== 'station') store.clearQueue();
   }, [store, section]);
+  const canPollStations = (section === 'panel' || section === 'station')
+    && store.isCurrent(snapshot.context)
+    && (snapshot.stationStatus === 'ready'
+      || (snapshot.stationStatus === 'error' && (snapshot.stationError === 'network' || snapshot.stationError === 'unavailable')));
+  const canPollEntry = section === 'panel'
+    && store.isCurrent(snapshot.context)
+    && (snapshot.entryStatus === 'ready'
+      || (snapshot.entryStatus === 'error' && (snapshot.entryError === 'network' || snapshot.entryError === 'unavailable')));
   useStaffPolling(
-    (section === 'panel' || section === 'station') && store.isCurrent(snapshot.context) && snapshot.stationStatus === 'ready',
-    () => {
-      const tasks = [store.pollStations()];
-      if (section === 'panel' && store.getSnapshot().entryStatus === 'ready') {
-        tasks.push(store.pollEntryControl());
-      }
-      return Promise.all(tasks);
-    },
+    canPollStations,
+    () => store.pollStations(),
     5000,
-    `${event.id}:${section}:${epoch}:${revision}`,
+    `${event.id}:${section}:stations:${epoch}:${revision}`,
+  );
+  useStaffPolling(
+    canPollEntry,
+    () => store.pollEntryControl(),
+    5000,
+    `${event.id}:entry:${epoch}:${revision}`,
   );
   useStaffPolling(
     section === 'station' && store.isCurrent(snapshot.context) && snapshot.queueStatus === 'ready',
@@ -501,9 +518,12 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
   const station = snapshot.stations.find((item) => item.id === stationId);
   const stationExperience = station && experiencesById.get(station.experienceId);
   const ready = snapshot.stationStatus === 'ready' && snapshot.experienceStatus === 'ready';
+  const accessLost = [snapshot.stationError, snapshot.experienceError, snapshot.entryError]
+    .some((err) => err === 'denied' || err === 'session');
   const dashboardErrors = [...new Set([
     snapshot.stationStatus === 'error' ? snapshot.stationError : null,
     snapshot.experienceStatus === 'error' ? snapshot.experienceError : null,
+    (snapshot.entryError === 'denied' || snapshot.entryError === 'session') ? snapshot.entryError : null,
   ].filter(Boolean))];
   const refresh = () => {
     void store.refreshStations();
@@ -587,8 +607,9 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="Controle de Entrada"
-            style={styles.entryCard}
-            onPress={() => setSection('entry')}
+            disabled={accessLost}
+            style={[styles.entryCard, accessLost && styles.disabled]}
+            onPress={accessLost ? undefined : () => setSection('entry')}
           >
             <EntryScannerIcon />
             <View style={styles.cardBody}>

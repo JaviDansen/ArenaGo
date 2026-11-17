@@ -210,6 +210,7 @@ test('retorno da estação invalida consulta de fila ainda pendente', async () =
 });
 
 const participantAId = '77777777-7777-4777-8777-777777777777';
+const participantBId = '99999999-9999-4999-8999-999999999999';
 const callId = '88888888-8888-4888-8888-888888888888';
 const entrySummary = (patch = {}) => ({
   eventId,
@@ -222,7 +223,7 @@ const entrySummary = (patch = {}) => ({
   ...patch,
 });
 
-test('parseStaffEntrySummary valida fila externa ativa/inativa e pendingCall', () => {
+test('parseStaffEntrySummary valida fila externa ativa/inativa, pendingCall e consistência com waiting', () => {
   const parsedWaiting = operations.parseStaffEntrySummary(entrySummary(), eventId);
   assert.equal(parsedWaiting.externalQueueEnabled, true);
   assert.equal(parsedWaiting.waitingCount, 1);
@@ -230,28 +231,65 @@ test('parseStaffEntrySummary valida fila externa ativa/inativa e pendingCall', (
 
   const parsedCalled = operations.parseStaffEntrySummary(
     entrySummary({
-      waitingCount: 0,
-      waiting: [],
+      waitingCount: 1,
+      waiting: [{ participationId: participantAId, displayName: 'Ana', position: 1 }],
       pendingCall: {
         id: callId,
-        participationId: participantAId,
+        participationId: participantBId,
         displayName: '  Carlos Silva  ',
         calledAt: '2026-11-17T15:01:00.000Z',
       },
+      canCall: false,
+      canConfirm: true,
+      canMarkAbsent: true,
+      canRemove: true,
     }),
     eventId,
   );
   assert.equal(parsedCalled.pendingCall.id, callId);
+  assert.equal(parsedCalled.pendingCall.participationId, participantBId);
   assert.equal(parsedCalled.pendingCall.displayName, 'Carlos Silva');
-  assert.equal(parsedCalled.waitingCount, 0);
+  assert.equal(parsedCalled.pendingCall.calledAt, '2026-11-17T15:01:00.000Z');
+  assert.equal(parsedCalled.waitingCount, 1);
+
+  const withoutPendingCall = entrySummary();
+  delete withoutPendingCall.pendingCall;
 
   for (const invalid of [
     null,
     {},
+    withoutPendingCall,
+    entrySummary({ pendingCall: undefined }),
     entrySummary({ eventId: otherEventId }),
     entrySummary({ waitingCount: 2 }),
     entrySummary({ externalQueueEnabled: 'yes' }),
-    entrySummary({ pendingCall: { id: 'invalido', participationId: participantAId, displayName: 'Ana' } }),
+    entrySummary({ observedAt: '2026-11-17' }),
+    entrySummary({ pendingCall: { id: 'invalido', participationId: participantBId, displayName: 'Ana', calledAt: '2026-11-17T15:01:00.000Z' } }),
+    entrySummary({ pendingCall: { id: callId, participationId: participantBId, displayName: 'Carlos', calledAt: null } }),
+    entrySummary({ pendingCall: { id: callId, participationId: participantBId, displayName: 'Carlos', calledAt: 'data-invalida' } }),
+    entrySummary({ pendingCall: { id: callId, participationId: participantAId, displayName: 'Ana', calledAt: '2026-11-17T15:01:00.000Z' } }),
+    entrySummary({ pendingCall: { id: callId, participationId: participantAId.toUpperCase(), displayName: 'Ana', calledAt: '2026-11-17T15:01:00.000Z' } }),
+    entrySummary({
+      waitingCount: 2,
+      waiting: [
+        { participationId: participantAId, displayName: 'Ana', position: 1 },
+        { participationId: participantAId, displayName: 'Ana 2', position: 2 },
+      ],
+    }),
+    entrySummary({
+      waitingCount: 2,
+      waiting: [
+        { participationId: participantAId, displayName: 'Ana', position: 2 },
+        { participationId: participantBId, displayName: 'Bia', position: 1 },
+      ],
+    }),
+    entrySummary({
+      pendingCall: { id: callId, participationId: participantBId, displayName: 'Carlos', calledAt: '2026-11-17T15:01:00.000Z' },
+      canCall: true,
+    }),
+    entrySummary({ waitingCount: 0, waiting: [], canCall: true }),
+    entrySummary({ canConfirm: true }),
+    entrySummary({ canCall: 'yes' }),
   ]) {
     assert.throws(() => operations.parseStaffEntrySummary(invalid, eventId));
   }
@@ -285,7 +323,7 @@ test('refreshEntryControl e pollEntryControl isolam falhas parciais e descartam 
     externalQueueEnabled: false,
     waitingCount: 0,
     waiting: [],
-    pendingCall: { id: callId, participationId: participantAId, displayName: 'Bia', calledAt: '2026-11-17T15:02:00.000Z' },
+    pendingCall: { id: callId, participationId: participantBId, displayName: 'Bia', calledAt: '2026-11-17T15:02:00.000Z' },
   });
   await store.pollEntryControl();
   assert.equal(store.getSnapshot().entry.externalQueueEnabled, false);
@@ -331,4 +369,156 @@ test('refreshEntryControl e pollEntryControl isolam falhas parciais e descartam 
   requests[0].resolve(entrySummary());
   await oldReq;
   assert.equal(storeAsync.getSnapshot().entry, null);
+});
+
+test('pollEntryControl e pollStations recuperam automaticamente após falhas transitórias e mantêm leituras independentes', async () => {
+  const current = context();
+  let stationOutcome = Object.assign(new Error('stations-500'), { status: 500 });
+  let entryOutcome = Object.assign(new Error('entry-500'), { status: 500 });
+  const gets = [];
+
+  const store = createStaffDashboardStore({
+    getContext: () => current,
+    client: {
+      get: (url) => {
+        gets.push(url);
+        if (url.endsWith('/stations')) {
+          return stationOutcome instanceof Error ? Promise.reject(stationOutcome) : Promise.resolve(stationOutcome);
+        }
+        if (url.endsWith('/experiences')) {
+          return Promise.resolve({ eventId, experiences: [{ id: experienceId, name: 'Just Dance' }] });
+        }
+        if (url.endsWith('/entry-control')) {
+          return entryOutcome instanceof Error ? Promise.reject(entryOutcome) : Promise.resolve(entryOutcome);
+        }
+        return Promise.reject(new Error(`URL inesperada: ${url}`));
+      },
+    },
+  });
+
+  store.setContext(current);
+  await Promise.all([store.refreshStations(), store.refreshExperiences(), store.refreshEntryControl()]);
+  assert.equal(store.getSnapshot().stationStatus, 'error');
+  assert.equal(store.getSnapshot().stationError, 'unavailable');
+  assert.equal(store.getSnapshot().entryStatus, 'error');
+  assert.equal(store.getSnapshot().entryError, 'unavailable');
+
+  // Nova falha transitória no polling sem dados prévios mantém status error elegível para nova tentativa (sem marcar stale)
+  entryOutcome = Object.assign(new Error('offline'), { isNetworkError: true });
+  await store.pollEntryControl();
+  assert.equal(store.getSnapshot().entryStatus, 'error');
+  assert.equal(store.getSnapshot().entryError, 'network');
+  assert.equal(store.getSnapshot().entry, null);
+
+  // /entry-control recupera de forma independente mesmo com /stations ainda em erro
+  entryOutcome = entrySummary({ waitingCount: 1 });
+  await store.pollEntryControl();
+  assert.equal(store.getSnapshot().entryStatus, 'ready');
+  assert.equal(store.getSnapshot().entryError, null);
+  assert.equal(store.getSnapshot().entry.waitingCount, 1);
+  assert.equal(store.getSnapshot().stationStatus, 'error');
+
+  // /stations também recupera via polling quando o servidor volta
+  stationOutcome = stations();
+  await store.pollStations();
+  assert.equal(store.getSnapshot().stationStatus, 'ready');
+  assert.equal(store.getSnapshot().stationError, null);
+  assert.equal(store.getSnapshot().stations.length, 1);
+  assert.ok(gets.every((url) => typeof url === 'string'), 'somente GETs executados na recuperação');
+});
+
+test('perda de autorização (403 e 404) em /entry-control limpa dados operacionais protegidos e descarta voos pendentes', async () => {
+  for (const status of [403, 404]) {
+    // Caso A: 403/404 na carga inicial via refreshEntryControl invalida estações em voo e limpa dados
+    const current = context();
+    const stationsDeferred = deferred();
+    let entryOutcome = Object.assign(new Error(`http-${status}`), { status });
+
+    const store = createStaffDashboardStore({
+      getContext: () => current,
+      client: {
+        get: (url) => {
+          if (url.endsWith('/stations')) return stationsDeferred.promise;
+          if (url.endsWith('/experiences')) return Promise.resolve({ eventId, experiences: [{ id: experienceId, name: 'Just Dance' }] });
+          if (url.endsWith('/entry-control')) {
+            return entryOutcome instanceof Error ? Promise.reject(entryOutcome) : Promise.resolve(entryOutcome);
+          }
+          return Promise.reject(new Error(`URL inesperada: ${url}`));
+        },
+      },
+    });
+
+    store.setContext(current);
+    const pendingStations = store.refreshStations();
+    await store.refreshExperiences();
+    await store.refreshEntryControl();
+    stationsDeferred.resolve(stations());
+    await pendingStations;
+
+    assert.equal(store.getSnapshot().entryStatus, 'error');
+    assert.equal(store.getSnapshot().entryError, 'denied');
+    assert.equal(store.getSnapshot().stationError, 'denied');
+    assert.equal(store.getSnapshot().experienceError, 'denied');
+    assert.equal(store.getSnapshot().stations.length, 0);
+    assert.equal(store.getSnapshot().experiences.length, 0);
+    assert.equal(store.getSnapshot().entry, null);
+
+    // Após revogação confirmada ('denied'), pollEntryControl e pollStations não continuam consultando
+    let extraPollCalls = 0;
+    const revokingStore = createStaffDashboardStore({
+      getContext: () => current,
+      client: {
+        get: (url) => {
+          if (url.endsWith('/stations')) return Promise.resolve(stations());
+          if (url.endsWith('/experiences')) return Promise.resolve({ eventId, experiences: [{ id: experienceId, name: 'Just Dance' }] });
+          if (url.endsWith('/entry-control')) {
+            extraPollCalls += 1;
+            return Promise.resolve(entrySummary());
+          }
+          return Promise.reject(new Error(`URL inesperada: ${url}`));
+        },
+      },
+    });
+    revokingStore.setContext(current);
+    await Promise.all([revokingStore.refreshStations(), revokingStore.refreshExperiences(), revokingStore.refreshEntryControl()]);
+    extraPollCalls = 0;
+
+    // Caso B: revogação detectada durante pollEntryControl também limpa estações, experiências e entrada
+    let pollStep = 0;
+    const storeRevokedOnPoll = createStaffDashboardStore({
+      getContext: () => current,
+      client: {
+        get: (url) => {
+          if (url.endsWith('/stations')) return Promise.resolve(stations());
+          if (url.endsWith('/experiences')) return Promise.resolve({ eventId, experiences: [{ id: experienceId, name: 'Just Dance' }] });
+          if (url.endsWith('/entry-control')) {
+            pollStep += 1;
+            if (pollStep === 1) return Promise.resolve(entrySummary());
+            return Promise.reject(Object.assign(new Error(`http-${status}`), { status }));
+          }
+          return Promise.reject(new Error(`URL inesperada: ${url}`));
+        },
+      },
+    });
+    storeRevokedOnPoll.setContext(current);
+    await Promise.all([
+      storeRevokedOnPoll.refreshStations(),
+      storeRevokedOnPoll.refreshExperiences(),
+      storeRevokedOnPoll.refreshEntryControl(),
+    ]);
+    assert.equal(storeRevokedOnPoll.getSnapshot().stations.length, 1);
+
+    await storeRevokedOnPoll.pollEntryControl();
+    assert.equal(storeRevokedOnPoll.getSnapshot().entryError, 'denied');
+    assert.equal(storeRevokedOnPoll.getSnapshot().stationError, 'denied');
+    assert.equal(storeRevokedOnPoll.getSnapshot().experienceError, 'denied');
+    assert.equal(storeRevokedOnPoll.getSnapshot().stations.length, 0);
+    assert.equal(storeRevokedOnPoll.getSnapshot().experiences.length, 0);
+    assert.equal(storeRevokedOnPoll.getSnapshot().entry, null);
+    assert.equal(storeRevokedOnPoll.getSnapshot().queue, null);
+
+    // Após denied, polls subsequentes não executam novos GETs
+    await storeRevokedOnPoll.pollEntryControl();
+    assert.equal(pollStep, 2);
+  }
 });

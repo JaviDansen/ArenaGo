@@ -8,6 +8,7 @@ const empty = () => ({ context: null, stationStatus: 'idle', stations: [], stati
   experienceId: null, queueStatus: 'idle', queue: null, queueError: null });
 const errorKind = (error) => error?.status === 401 ? 'session' :
   (error?.status === 403 || error?.status === 404) ? 'denied' : error?.isNetworkError ? 'network' : 'unavailable';
+const isRecoverableError = (kind) => kind === 'network' || kind === 'unavailable';
 
 // O contexto é conferido novamente antes de publicar qualquer resultado.
 export function createStaffDashboardStore({ client, getContext }) {
@@ -23,10 +24,12 @@ export function createStaffDashboardStore({ client, getContext }) {
   const isCurrent = (candidate = state.context) => same(state.context, candidate) && same(state.context, getContext());
   function setContext(context) {
     generation += 1; stationGeneration += 1; experienceGeneration += 1; entryGeneration += 1; queueGeneration += 1;
-    publish(context ? { ...empty(), context, stationStatus: 'loading', experienceStatus: 'loading' } : empty());
+    silentStations = false; silentQueue = false; silentEntry = false;
+    publish(context ? { ...empty(), context, stationStatus: 'loading', experienceStatus: 'loading', entryStatus: 'loading' } : empty());
   }
   function denied(kind = 'denied') {
     stationGeneration += 1; experienceGeneration += 1; entryGeneration += 1; queueGeneration += 1;
+    silentStations = false; silentQueue = false; silentEntry = false;
     publish({ ...state, stationStatus: 'error', stationError: kind, stations: [],
       experienceStatus: 'error', experienceError: kind, experiences: [],
       entryStatus: 'error', entryError: kind, entry: null,
@@ -35,34 +38,39 @@ export function createStaffDashboardStore({ client, getContext }) {
   async function refreshEntryControl() {
     if (!isCurrent()) return;
     const context = state.context, revision = generation, request = ++entryGeneration;
+    silentEntry = false;
     publish({ ...state, entryStatus: 'loading', entryError: null, entry: null });
     try {
       const entry = await fetchStaffEntrySummary(client, context.eventId);
-      if (revision !== generation || request !== entryGeneration || !isCurrent()) return;
+      if (revision !== generation || request !== entryGeneration || !isCurrent(context)) return;
       publish({ ...state, entryStatus: 'ready', entry, entryError: null });
     } catch (error) {
-      if (revision !== generation || request !== entryGeneration || !isCurrent()) return;
+      if (revision !== generation || request !== entryGeneration || !isCurrent(context)) return;
       const kind = errorKind(error);
-      if (kind === 'session') return denied(kind);
+      if (kind === 'denied' || kind === 'session') return denied(kind);
       publish({ ...state, entryStatus: 'error', entryError: kind, entry: null });
     }
   }
   async function pollEntryControl() {
-    if (silentEntry || !isCurrent() || state.entryStatus !== 'ready') return;
+    const canRetry = state.entryStatus === 'error' && isRecoverableError(state.entryError);
+    if (silentEntry || !isCurrent() || (state.entryStatus !== 'ready' && !canRetry)) return;
     const context = state.context, revision = generation, request = entryGeneration;
+    const hadReady = state.entryStatus === 'ready';
     silentEntry = true;
     try {
       const entry = await fetchStaffEntrySummary(client, context.eventId);
       if (revision === generation && request === entryGeneration && isCurrent(context)) {
-        publish({ ...state, entry, entryError: null });
+        publish({ ...state, entryStatus: 'ready', entry, entryError: null });
       }
     } catch (error) {
       if (revision !== generation || request !== entryGeneration || !isCurrent(context)) return;
       const kind = errorKind(error);
-      if (kind === 'session') denied(kind);
-      else if (kind === 'denied') publish({ ...state, entryStatus: 'error', entryError: 'denied', entry: null });
-      else publish({ ...state, entryError: 'stale' });
-    } finally { silentEntry = false; }
+      if (kind === 'denied' || kind === 'session') denied(kind);
+      else if (hadReady) publish({ ...state, entryError: 'stale' });
+      else publish({ ...state, entryStatus: 'error', entryError: kind, entry: null });
+    } finally {
+      if (revision === generation && request === entryGeneration) silentEntry = false;
+    }
   }
   async function refreshExperiences() {
     if (!isCurrent()) return;
@@ -84,7 +92,9 @@ export function createStaffDashboardStore({ client, getContext }) {
   async function refreshStations() {
     if (!isCurrent()) return;
     const context = state.context, revision = generation, request = ++stationGeneration;
+    silentStations = false;
     queueGeneration += 1;
+    silentQueue = false;
     publish({ ...state, stationStatus: 'loading', stationError: null, stations: [],
       experienceId: null, queueStatus: 'idle', queue: null, queueError: null });
     try {
@@ -99,19 +109,24 @@ export function createStaffDashboardStore({ client, getContext }) {
     }
   }
   async function pollStations() {
-    if (silentStations || !isCurrent() || state.stationStatus !== 'ready') return;
+    const canRetry = state.stationStatus === 'error' && isRecoverableError(state.stationError);
+    if (silentStations || !isCurrent() || (state.stationStatus !== 'ready' && !canRetry)) return;
     const context = state.context, revision = generation, request = stationGeneration;
+    const hadReady = state.stationStatus === 'ready';
     silentStations = true;
     try {
       const { stations } = await fetchStaffStations(client, context.eventId);
       if (revision === generation && request === stationGeneration && isCurrent(context))
-        publish({ ...state, stations, stationError: null });
+        publish({ ...state, stationStatus: 'ready', stations, stationError: null });
     } catch (error) {
       if (revision !== generation || request !== stationGeneration || !isCurrent(context)) return;
       const kind = errorKind(error);
       if (kind === 'denied' || kind === 'session') denied(kind);
-      else publish({ ...state, stationError: 'stale' });
-    } finally { silentStations = false; }
+      else if (hadReady) publish({ ...state, stationError: 'stale' });
+      else publish({ ...state, stationStatus: 'error', stationError: kind, stations: [] });
+    } finally {
+      if (revision === generation && request === stationGeneration) silentStations = false;
+    }
   }
   async function refreshQueue(experienceId = state.experienceId) {
     if (!isCurrent() || state.stationStatus !== 'ready' ||
