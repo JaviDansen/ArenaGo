@@ -208,3 +208,127 @@ test('retorno da estação invalida consulta de fila ainda pendente', async () =
   assert.equal(store.getSnapshot().queue, null);
   assert.equal(store.getSnapshot().experienceId, null);
 });
+
+const participantAId = '77777777-7777-4777-8777-777777777777';
+const callId = '88888888-8888-4888-8888-888888888888';
+const entrySummary = (patch = {}) => ({
+  eventId,
+  externalQueueEnabled: true,
+  canManage: true,
+  observedAt: '2026-11-17T15:00:00.000Z',
+  waitingCount: 1,
+  waiting: [{ participationId: participantAId, displayName: 'Ana', position: 1 }],
+  pendingCall: null,
+  ...patch,
+});
+
+test('parseStaffEntrySummary valida fila externa ativa/inativa e pendingCall', () => {
+  const parsedWaiting = operations.parseStaffEntrySummary(entrySummary(), eventId);
+  assert.equal(parsedWaiting.externalQueueEnabled, true);
+  assert.equal(parsedWaiting.waitingCount, 1);
+  assert.equal(parsedWaiting.pendingCall, null);
+
+  const parsedCalled = operations.parseStaffEntrySummary(
+    entrySummary({
+      waitingCount: 0,
+      waiting: [],
+      pendingCall: {
+        id: callId,
+        participationId: participantAId,
+        displayName: '  Carlos Silva  ',
+        calledAt: '2026-11-17T15:01:00.000Z',
+      },
+    }),
+    eventId,
+  );
+  assert.equal(parsedCalled.pendingCall.id, callId);
+  assert.equal(parsedCalled.pendingCall.displayName, 'Carlos Silva');
+  assert.equal(parsedCalled.waitingCount, 0);
+
+  for (const invalid of [
+    null,
+    {},
+    entrySummary({ eventId: otherEventId }),
+    entrySummary({ waitingCount: 2 }),
+    entrySummary({ externalQueueEnabled: 'yes' }),
+    entrySummary({ pendingCall: { id: 'invalido', participationId: participantAId, displayName: 'Ana' } }),
+  ]) {
+    assert.throws(() => operations.parseStaffEntrySummary(invalid, eventId));
+  }
+});
+
+test('refreshEntryControl e pollEntryControl isolam falhas parciais e descartam respostas obsoletas', async () => {
+  let current = context();
+  let entryOutcome = entrySummary();
+  const requests = [];
+
+  const store = createStaffDashboardStore({
+    getContext: () => current,
+    client: {
+      get: (url) => {
+        if (url.endsWith('/stations')) return Promise.resolve(stations());
+        if (url.endsWith('/experiences')) return Promise.resolve({ eventId, experiences: [{ id: experienceId, name: 'Just Dance' }] });
+        if (entryOutcome instanceof Promise) return entryOutcome;
+        if (entryOutcome instanceof Error) return Promise.reject(entryOutcome);
+        return Promise.resolve(entryOutcome);
+      },
+    },
+  });
+
+  store.setContext(current);
+  await Promise.all([store.refreshStations(), store.refreshExperiences(), store.refreshEntryControl()]);
+  assert.equal(store.getSnapshot().entryStatus, 'ready');
+  assert.equal(store.getSnapshot().entry.waitingCount, 1);
+
+  // Polling silencioso atualiza chamada pendente sem apagar estações
+  entryOutcome = entrySummary({
+    externalQueueEnabled: false,
+    waitingCount: 0,
+    waiting: [],
+    pendingCall: { id: callId, participationId: participantAId, displayName: 'Bia', calledAt: '2026-11-17T15:02:00.000Z' },
+  });
+  await store.pollEntryControl();
+  assert.equal(store.getSnapshot().entry.externalQueueEnabled, false);
+  assert.equal(store.getSnapshot().entry.pendingCall.displayName, 'Bia');
+  assert.equal(store.getSnapshot().entryError, null);
+
+  // Falha de rede no polling preserva último resumo e marca stale
+  entryOutcome = Object.assign(new Error('offline'), { isNetworkError: true });
+  await store.pollEntryControl();
+  assert.equal(store.getSnapshot().entryStatus, 'ready');
+  assert.equal(store.getSnapshot().entry.pendingCall.displayName, 'Bia');
+  assert.equal(store.getSnapshot().entryError, 'stale');
+
+  // Falha parcial (500) em refreshEntryControl NÃO apaga stations nem experiences
+  entryOutcome = Object.assign(new Error('unavailable'), { status: 500 });
+  await store.refreshEntryControl();
+  assert.equal(store.getSnapshot().entryStatus, 'error');
+  assert.equal(store.getSnapshot().entryError, 'unavailable');
+  assert.equal(store.getSnapshot().stations.length, 1, 'falha parcial não apaga estações');
+  assert.equal(store.getSnapshot().experiences.length, 1, 'falha parcial não apaga experiências');
+
+  // Erro 401 em refreshEntryControl invalida todo o dashboard
+  entryOutcome = Object.assign(new Error('401'), { status: 401 });
+  await store.refreshEntryControl();
+  assert.equal(store.getSnapshot().stationError, 'session');
+  assert.equal(store.getSnapshot().stations.length, 0);
+
+  // Troca de evento descarta resposta obsoleta de entrada pendente
+  const storeAsync = createStaffDashboardStore({
+    getContext: () => current,
+    client: {
+      get: () => {
+        const req = deferred();
+        requests.push(req);
+        return req.promise;
+      },
+    },
+  });
+  storeAsync.setContext(current);
+  const oldReq = storeAsync.refreshEntryControl();
+  current = context(otherEventId, 'b', 2);
+  storeAsync.setContext(current);
+  requests[0].resolve(entrySummary());
+  await oldReq;
+  assert.equal(storeAsync.getSnapshot().entry, null);
+});

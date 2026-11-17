@@ -722,7 +722,7 @@ test('painel Staff real exibe estação e fila e limpa os dados ao receber 403',
   await app.press('Selecionar evento Evento autorizado');
   assert.ok(app.hasText('Painel operacional'));
   assert.ok(app.hasText('Estação real'));
-  assert.equal(app.hasText('Experiência real'), false, 'uma experiência não repete seu título no painel');
+  assert.equal(app.hasText('Experiência real'), true, 'painel exibe o nome da experiência no agrupamento');
   await app.press('Selecionar estação Estação real da experiência Experiência real');
   assert.ok(app.hasText('Pessoas em espera: 0'));
   assert.ok(!app.hasText('Rafael T.'));

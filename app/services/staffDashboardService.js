@@ -1,9 +1,10 @@
-import { fetchStaffExperiences, fetchStaffQueue, fetchStaffStations } from './staffOperationsService';
+import { fetchStaffEntrySummary, fetchStaffExperiences, fetchStaffQueue, fetchStaffStations } from './staffOperationsService';
 
 const same = (a, b) => Boolean(a && b && a.eventId === b.eventId && a.userId === b.userId &&
   a.epoch === b.epoch && a.revision === b.revision);
 const empty = () => ({ context: null, stationStatus: 'idle', stations: [], stationError: null,
   experienceStatus: 'idle', experiences: [], experienceError: null,
+  entryStatus: 'idle', entry: null, entryError: null,
   experienceId: null, queueStatus: 'idle', queue: null, queueError: null });
 const errorKind = (error) => error?.status === 401 ? 'session' :
   (error?.status === 403 || error?.status === 404) ? 'denied' : error?.isNetworkError ? 'network' : 'unavailable';
@@ -14,20 +15,54 @@ export function createStaffDashboardStore({ client, getContext }) {
   let generation = 0;
   let stationGeneration = 0;
   let experienceGeneration = 0;
+  let entryGeneration = 0;
   let queueGeneration = 0;
-  let silentStations = false, silentQueue = false;
+  let silentStations = false, silentQueue = false, silentEntry = false;
   const listeners = new Set();
   const publish = (next) => { state = next; listeners.forEach((listener) => listener(state)); };
   const isCurrent = (candidate = state.context) => same(state.context, candidate) && same(state.context, getContext());
   function setContext(context) {
-    generation += 1; stationGeneration += 1; experienceGeneration += 1; queueGeneration += 1;
+    generation += 1; stationGeneration += 1; experienceGeneration += 1; entryGeneration += 1; queueGeneration += 1;
     publish(context ? { ...empty(), context, stationStatus: 'loading', experienceStatus: 'loading' } : empty());
   }
   function denied(kind = 'denied') {
-    stationGeneration += 1; experienceGeneration += 1; queueGeneration += 1;
+    stationGeneration += 1; experienceGeneration += 1; entryGeneration += 1; queueGeneration += 1;
     publish({ ...state, stationStatus: 'error', stationError: kind, stations: [],
       experienceStatus: 'error', experienceError: kind, experiences: [],
+      entryStatus: 'error', entryError: kind, entry: null,
       experienceId: null, queueStatus: 'idle', queue: null, queueError: null });
+  }
+  async function refreshEntryControl() {
+    if (!isCurrent()) return;
+    const context = state.context, revision = generation, request = ++entryGeneration;
+    publish({ ...state, entryStatus: 'loading', entryError: null, entry: null });
+    try {
+      const entry = await fetchStaffEntrySummary(client, context.eventId);
+      if (revision !== generation || request !== entryGeneration || !isCurrent()) return;
+      publish({ ...state, entryStatus: 'ready', entry, entryError: null });
+    } catch (error) {
+      if (revision !== generation || request !== entryGeneration || !isCurrent()) return;
+      const kind = errorKind(error);
+      if (kind === 'session') return denied(kind);
+      publish({ ...state, entryStatus: 'error', entryError: kind, entry: null });
+    }
+  }
+  async function pollEntryControl() {
+    if (silentEntry || !isCurrent() || state.entryStatus !== 'ready') return;
+    const context = state.context, revision = generation, request = entryGeneration;
+    silentEntry = true;
+    try {
+      const entry = await fetchStaffEntrySummary(client, context.eventId);
+      if (revision === generation && request === entryGeneration && isCurrent(context)) {
+        publish({ ...state, entry, entryError: null });
+      }
+    } catch (error) {
+      if (revision !== generation || request !== entryGeneration || !isCurrent(context)) return;
+      const kind = errorKind(error);
+      if (kind === 'session') denied(kind);
+      else if (kind === 'denied') publish({ ...state, entryStatus: 'error', entryError: 'denied', entry: null });
+      else publish({ ...state, entryError: 'stale' });
+    } finally { silentEntry = false; }
   }
   async function refreshExperiences() {
     if (!isCurrent()) return;
@@ -113,6 +148,6 @@ export function createStaffDashboardStore({ client, getContext }) {
     queueGeneration += 1;
     if (isCurrent()) publish({ ...state, experienceId: null, queueStatus: 'idle', queue: null, queueError: null });
   }
-  return { getSnapshot: () => state, isCurrent, setContext, refreshStations, refreshExperiences, refreshQueue, pollStations, pollQueue, clearQueue,
+  return { getSnapshot: () => state, isCurrent, setContext, refreshStations, refreshExperiences, refreshEntryControl, refreshQueue, pollStations, pollEntryControl, pollQueue, clearQueue,
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); } };
 }

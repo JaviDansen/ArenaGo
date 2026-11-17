@@ -59,6 +59,37 @@ export function parseStaffQueue(body, eventId, experienceId) {
     firstWaitingQueueEntryId: body.firstWaitingQueueEntryId };
 }
 
+export function parseStaffEntrySummary(body, eventId) {
+  requireIds(eventId);
+  if (body?.eventId !== eventId || typeof body.externalQueueEnabled !== 'boolean'
+      || typeof body.canManage !== 'boolean'
+      || !Number.isSafeInteger(body.waitingCount) || body.waitingCount < 0
+      || !Array.isArray(body.waiting) || body.waiting.length !== body.waitingCount
+      || !(body.pendingCall === undefined || body.pendingCall === null
+        || (isUuid(body.pendingCall?.id) && isUuid(body.pendingCall?.participationId)
+          && typeof body.pendingCall?.displayName === 'string' && body.pendingCall.displayName.trim()))) {
+    throw bad('Resposta inválida do Controle de Entrada.');
+  }
+  const pendingCall = body.pendingCall ? {
+    id: body.pendingCall.id,
+    participationId: body.pendingCall.participationId,
+    displayName: body.pendingCall.displayName.trim(),
+    calledAt: body.pendingCall.calledAt ?? null,
+  } : null;
+  return {
+    eventId,
+    externalQueueEnabled: body.externalQueueEnabled,
+    canManage: body.canManage,
+    waitingCount: body.waitingCount,
+    pendingCall,
+  };
+}
+
+export async function fetchStaffEntrySummary(client, eventId) {
+  requireIds(eventId);
+  return parseStaffEntrySummary(await client.get(`/staff/events/${eventId}/entry-control`, { auth: true }), eventId);
+}
+
 export function parseCalledSession(body, { experienceId, stationId }) {
   requireIds(experienceId, stationId);
   const session = body?.serviceSession;
