@@ -46,7 +46,10 @@ function decodeCursor(value:string){
 }
 export const configurationQuery=z.object({limit:z.string().regex(/^[1-9]\d?$/).transform(Number).pipe(z.number().max(50)).optional().default(20),
   cursor:z.string().transform((value,ctx)=>{const cursor=decodeCursor(value);if(!cursor){ctx.addIssue({code:'custom',message:'Cursor inválido.'});return z.NEVER;}return cursor;}).optional(),
-  phase:effectivePhase.optional(),statusStored:z.enum(['scheduled','open','closing','closed']).optional()}).strict();
+  phase:effectivePhase.optional(),statusStored:z.enum(['scheduled','open','closing','closed']).optional(),
+  search:z.string().max(180).transform(value=>value.trim().replace(/\s+/gu,' '))
+    .refine(value=>!/[\u0000-\u001f\u007f]/u.test(value)&&Array.from(value).every(c=>!(c.length===1&&c.charCodeAt(0)>=0xd800&&c.charCodeAt(0)<=0xdfff)),'Busca inválida.').optional(),
+  excludeClosed:z.enum(['true','false']).transform(value=>value==='true').optional()}).strict();
 export type ConfigurationPage=z.infer<typeof configurationQuery>;
 const precise=z.custom<string>(isPreciseInstant);
 const checks=z.object({nameAndAccessCode:z.boolean(),validScheduleAndTimezone:z.boolean(),externalQueueConfigured:z.boolean(),hasExperienceWithAvailableStation:z.boolean(),hasVerifiedActiveStaff:z.boolean()}).strict();

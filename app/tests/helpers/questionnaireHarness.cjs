@@ -349,9 +349,16 @@ function createHarness(relativePath, options = {}) {
   };
 
   const internalModules = new Map();
+  const secureValues = new Map();
+  const secureStore = {
+    getItemAsync: async key => secureValues.get(key) ?? null,
+    setItemAsync: async (key, value) => { secureValues.set(key, value); },
+    deleteItemAsync: async key => { secureValues.delete(key); },
+  };
   function resolveInternalModule(fromRelativePath, name) {
     if (name === 'react') return react;
     if (name === 'react-native') return native;
+    if (name === 'expo-secure-store') return secureStore;
     if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView', useSafeAreaInsets: () => ({ bottom: 0, top: 0, left: 0, right: 0 }) };
     if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
     if (name === '@react-native-community/datetimepicker') return nativePicker;

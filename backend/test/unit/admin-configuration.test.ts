@@ -181,6 +181,35 @@ test("E08.13 listagem keyset usa ordenação estável, filtros e um snapshot sem
 test("E08.13 página final vazia não inventa cursor ou eventos",async()=>{
   const f=readFixture({events:[]});assert.deepEqual(await f.service.events(actor,configurationQuery.parse({})),{items:[],nextCursor:null});
 });
+test('ADMIN-01 search normaliza espaços, mantém compatibilidade e valida novos parâmetros',()=>{
+  assert.equal(configurationQuery.parse({search:'  Arena   Norte  '}).search,'Arena Norte');
+  assert.equal(configurationQuery.parse({}).search,undefined);
+  for(const search of ['\ud800','\udc00','x\ud800y','\ud800\ud800']) assert.equal(configurationQuery.safeParse({search}).success,false);
+  assert.equal(configurationQuery.parse({search:'Arena 😀'}).search,'Arena 😀');
+  assert.equal(configurationQuery.parse({excludeClosed:'false'}).excludeClosed,false);
+  for(const query of [{search:'x'.repeat(181)},{search:[]},{excludeClosed:'1'},{excludeClosed:true}]){
+    assert.equal(configurationQuery.safeParse(query).success,false);
+  }
+});
+for(const search of ['Arena Norte','ARENA-TEST','100%_\\literal',"x' OR true --"]){
+  test(`ADMIN-01 busca parametrizada ${search} antes do limite com cursor e fase`,async()=>{
+    const f=readFixture({events:[eventRow({effectivePhase:'not_ready'})]});
+    const result=await f.service.events(actor,configurationQuery.parse({search,excludeClosed:'true',phase:'not_ready',limit:'2',cursor:encodeConfigurationCursor(at,id(11))}));
+    const query=f.queries[2];
+    assert.ok(query.params.includes(search));assert.ok(!query.text.includes(search));
+    assert.ok(query.text.includes('strpos(lower('));
+    assert.ok(query.text.indexOf('p."effectivePhase"<>\'closed\'')<query.text.indexOf('LIMIT'));
+    assert.ok(query.text.includes('(e.created_at,e.id)<'));
+    assert.ok(query.text.includes('ORDER BY "createdAt" DESC,id DESC'));
+    assert.equal(result.items[0].effectivePhase,'not_ready');
+    assert.equal(result.nextCursor,null);
+  });
+}
+test('ADMIN-01 chamada anterior não exclui encerrados por padrão',async()=>{
+  const f=readFixture({events:[eventRow({effectivePhase:'closed'})]});
+  assert.equal((await f.service.events(actor,configurationQuery.parse({}))).items[0].effectivePhase,'closed');
+  assert.equal(f.queries[2].text.includes('p."effectivePhase"<>\'closed\''),false);
+});
 for(const mode of ["event","readiness","experiences"]as const)test(`E08.13 GET ${mode} inexistente falha sem detalhes de outro evento`,async()=>{
   const f=readFixture({absent:true});await assert.rejects(f.service[mode](actor,eventId),{kind:'resource_not_found'});assert.equal(f.queries.at(-1)?.text,'rollback');
 });
