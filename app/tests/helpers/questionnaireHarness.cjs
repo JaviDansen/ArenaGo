@@ -311,7 +311,7 @@ function createHarness(relativePath, options = {}) {
       }
     },
   };
-  const native = Object.fromEntries(['ActivityIndicator', 'Image', 'KeyboardAvoidingView', 'Modal', 'Pressable', 'ScrollView',
+  const native = Object.fromEntries(['ActivityIndicator', 'Image', 'KeyboardAvoidingView', 'Modal', 'Pressable', 'RefreshControl', 'ScrollView',
     'Text', 'TextInput', 'View', 'SafeAreaView'].map((name) => [name, name]));
   native.Platform = { OS: options.platform || 'ios' };
   native.Keyboard = { dismiss() {} };

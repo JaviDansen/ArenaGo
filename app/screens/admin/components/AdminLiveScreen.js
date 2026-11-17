@@ -6,7 +6,7 @@ import { adminReadOwner } from '../useAdminEvents';
 import { AdminIcon, liveColors as c } from './AdminLiveUI';
 import AdminBottomBar from './AdminBottomBar';
 
-export default function AdminLiveScreen({ title, subtitle, navigation, backLabel = 'Voltar', showTabs = false, children }) {
+export default function AdminLiveScreen({ title, subtitle, navigation, backLabel = 'Voltar', onBack, showTabs = false, refreshControl, children }) {
   const auth = useAuth();
   const owner = adminReadOwner(auth), live = useRef(auth), mounted = useRef(true);
   live.current = auth;
@@ -22,8 +22,8 @@ export default function AdminLiveScreen({ title, subtitle, navigation, backLabel
       }}><AdminIcon name="logout" color={c.text} size={20} /><Text style={styles.logoutText}>Sair da conta</Text></Pressable>
     </View>
     <KeyboardAvoidingView style={styles.safe} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-      <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={styles.content}>
-        {navigation ? <Pressable accessibilityRole="button" accessibilityLabel={backLabel} style={({ pressed }) => [styles.back, pressed && styles.backPressed]} onPress={() => navigation.goBack()}>
+      <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={styles.content} refreshControl={refreshControl}>
+        {navigation ? <Pressable accessibilityRole="button" accessibilityLabel={backLabel} style={({ pressed }) => [styles.back, pressed && styles.backPressed]} onPress={onBack ?? (() => navigation.goBack())}>
           <AdminIcon name="back" color={c.accent} size={22} /><Text style={styles.backText}>{backLabel}</Text></Pressable> : null}
         <Text style={styles.eyebrow}>ÁREA ADMINISTRATIVA</Text>
         <Text style={styles.title} accessibilityRole="header">{title}</Text>

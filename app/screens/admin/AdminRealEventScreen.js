@@ -1,34 +1,56 @@
-import { useEffect, useRef, useState } from 'react';
-import { useAuth } from '../../context/AuthContext';
-import { getAdminEvent, adminReadError } from '../../services/adminEventsService';
-import { adminReadOwner } from './useAdminEvents';
+import { useState } from 'react';
+import { Platform, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native';
+import { adminEventAreas } from './adminEventManagement';
+import useAdminEventPanel from './useAdminEventPanel';
 import AdminLiveScreen from './components/AdminLiveScreen';
-import AdminEventSummary from './components/AdminEventSummary';
-import AdminCard from './components/AdminCard';
+import AdminSelectedEvent from './components/AdminSelectedEvent';
 import AdminNotice from './components/AdminNotice';
 import AdminButton from './components/AdminButton';
+import { AdminIcon, AdminIconTile, liveColors as c, liveStyles as s } from './components/AdminLiveUI';
 
 export default function AdminRealEventScreen({ navigation, route }) {
-  const auth = useAuth(), owner = adminReadOwner(auth), id = route.params?.eventId;
-  const live = useRef(auth); live.current = auth;
-  const [result, setResult] = useState(null), [attempt, setAttempt] = useState(0);
-  useEffect(() => {
-    let active = true;
-    setResult(null);
-    const current = () => active && owner && adminReadOwner(live.current) === owner;
-    if (owner) getAdminEvent(auth.httpClient, id).then(event => {
-      if (current()) setResult({ owner, id, event });
-    }).catch(error => { if (current()) setResult({ owner, id, error: adminReadError(error) }); });
-    return () => { active = false; };
-  }, [auth.httpClient, owner, id, attempt]);
-  const visible = result?.owner === owner && result?.id === id ? result : null;
-  return <AdminLiveScreen title="Evento selecionado" navigation={navigation}>
-    {!visible ? <AdminNotice title="Carregando evento..." /> : visible.error ?
-      <AdminNotice tone="error" title="Evento indisponível" message={visible.error}>
-        <AdminButton label="Tentar novamente" onPress={() => setAttempt(value => value + 1)} />
-      </AdminNotice> : <>
-        <AdminCard><AdminEventSummary event={visible.event} /></AdminCard>
-        <AdminNotice title="Gerenciamento em implementação" message="As opções deste evento serão integradas na ADMIN-02." />
-      </>}
+  const eventId = route.params?.eventId;
+  const { event, readiness, pending, refreshing, blocked, detailError, readinessError, refresh } = useAdminEventPanel(navigation, eventId);
+  const [expandedReadiness, setExpandedReadiness] = useState(null);
+  const expanded = Boolean(readiness && expandedReadiness === readiness);
+  const openArea = area => navigation.navigate('AdminEventManagementInfo', { eventId: event.id, area });
+
+  return <AdminLiveScreen title="Painel do evento" subtitle="Gerencie as configurações e a operação deste evento."
+    navigation={navigation} backLabel="Voltar aos eventos" onBack={() => navigation.popTo('AdminEvents')} showTabs
+    refreshControl={<RefreshControl refreshing={Boolean(refreshing)} onRefresh={() => refresh(true)}
+      tintColor={c.accent} colors={[c.accent]} progressBackgroundColor={c.surface} />}>
+    {pending && <AdminNotice title="Carregando evento..." />}
+    {(event || readiness) && <AdminSelectedEvent event={event} readiness={readiness} expanded={expanded}
+      onToggle={() => setExpandedReadiness(expanded ? null : readiness)} onArea={event ? openArea : undefined} />}
+    {(blocked || detailError || readinessError) && <AdminNotice tone="error"
+      title={blocked || detailError ? 'Evento indisponível' : 'Prontidão indisponível'}
+      message={[blocked || detailError, readinessError].filter(Boolean).join('\n')}>
+      <AdminButton label="Tentar novamente" onPress={() => refresh()} />
+    </AdminNotice>}
+    {event && <>
+      <View style={styles.section}>
+        <Text accessibilityRole="header" style={styles.sectionTitle}>GERENCIAMENTO</Text>
+        {Platform.OS === 'web' && <Pressable accessibilityRole="button" accessibilityLabel="Atualizar evento" onPress={() => refresh(true)} style={styles.refresh}>
+          <Text style={styles.refreshText}>Atualizar</Text>
+        </Pressable>}
+      </View>
+      {Object.entries(adminEventAreas).map(([key, area]) => <Pressable key={key} testID={`admin-event-area-${key}`}
+        accessibilityRole="button" accessibilityLabel={area.title} accessibilityHint="Abre uma visão informativa"
+        onPress={() => openArea(key)} style={({ pressed }) => [s.card, s.row, styles.area, pressed && styles.pressed]}>
+        <AdminIconTile name={area.icon} />
+        <View style={s.grow}><Text style={styles.areaTitle}>{area.title}</Text><Text style={s.body}>{area.description}</Text></View>
+        <AdminIcon name="chevron" color={c.muted} size={18} />
+      </Pressable>)}
+    </>}
   </AdminLiveScreen>;
 }
+
+const styles = StyleSheet.create({
+  section: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginTop: 24, marginBottom: 2 },
+  sectionTitle: { color: c.muted, fontSize: 13, fontWeight: '700', letterSpacing: 1.3 },
+  refresh: { minHeight: 44, justifyContent: 'center' },
+  refreshText: { color: '#ddc4f2', fontWeight: '600' },
+  area: { marginTop: 10 },
+  areaTitle: { color: c.text, fontSize: 17, fontWeight: '700' },
+  pressed: { opacity: 0.75 },
+});

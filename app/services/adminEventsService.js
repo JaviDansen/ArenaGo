@@ -1,11 +1,20 @@
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 export const adminEventPhases = { scheduled: 'Agendado', not_ready: 'Não pronto', open: 'Aberto', closing: 'Encerrando', closed: 'Encerrado' };
+const readinessChecks = ['nameAndAccessCode', 'validScheduleAndTimezone', 'externalQueueConfigured',
+  'hasExperienceWithAvailableStation', 'hasVerifiedActiveStaff'];
+
+class InvalidAdminEventResponse extends Error {}
+
+function adminEventPath(eventId) {
+  if (typeof eventId !== 'string' || !UUID.test(eventId)) throw new Error('Identificador de evento inválido.');
+  return `/admin/events/${encodeURIComponent(eventId)}`;
+}
 
 export function parseAdminEvent(event) {
   if (!event || typeof event.id !== 'string' || !UUID.test(event.id) || typeof event.name !== 'string' || !event.name.trim() ||
       !Object.hasOwn(adminEventPhases, event.effectivePhase) || typeof event.timezone !== 'string' ||
       !Number.isFinite(Date.parse(event.startsAt)) || !Number.isFinite(Date.parse(event.officialEndsAt)) ||
-      typeof event.readiness?.ready !== 'boolean') throw new Error('Resposta de evento inválida.');
+      typeof event.readiness?.ready !== 'boolean') throw new InvalidAdminEventResponse('Resposta de evento inválida.');
   return event;
 }
 export function formatAdminDate(value, timezone) {
@@ -26,10 +35,28 @@ export async function listAdminEvents(client, { search = '', phase = 'all', curs
   return { items, nextCursor: body.nextCursor };
 }
 export async function getAdminEvent(client, eventId) {
-  if (!UUID.test(eventId)) throw new Error('Identificador de evento inválido.');
-  const event = parseAdminEvent((await client.get(`/admin/events/${encodeURIComponent(eventId)}`, { auth: true }))?.event);
-  if (event.id !== eventId) throw new Error('Evento retornado não corresponde à seleção.');
+  const event = parseAdminEvent((await client.get(adminEventPath(eventId), { auth: true }))?.event);
+  if (typeof event.effectivePhase !== 'string' || !event.timezone.trim() || typeof event.startsAt !== 'string' ||
+      typeof event.officialEndsAt !== 'string') throw new InvalidAdminEventResponse('Resposta de evento inválida.');
+  if (event.id !== eventId) throw new InvalidAdminEventResponse('Evento retornado não corresponde à seleção.');
   return event;
+}
+export async function getAdminEventReadiness(client, eventId) {
+  const result = await client.get(`${adminEventPath(eventId)}/readiness`, { auth: true });
+  if (result?.eventId !== eventId || typeof result.effectivePhase !== 'string' || !Object.hasOwn(adminEventPhases, result.effectivePhase) ||
+      !['scheduled', 'open', 'closing', 'closed'].includes(result.statusStored) ||
+      typeof result.ready !== 'boolean' || typeof result.acceptingNewParticipations !== 'boolean' ||
+      !Array.isArray(result.missing) || result.missing.some(code => typeof code !== 'string' || !code.trim()) ||
+      !readinessChecks.every(check => typeof result.checks?.[check] === 'boolean') ||
+      (result.ready && (result.missing.length > 0 || readinessChecks.some(check => !result.checks[check]))) ||
+      (result.observedAt !== undefined && (typeof result.observedAt !== 'string' || !Number.isFinite(Date.parse(result.observedAt))))) {
+    throw new InvalidAdminEventResponse('Resposta de prontidão inválida ou divergente da seleção.');
+  }
+  return result;
+}
+export function adminEventPanelError(error) {
+  if (error instanceof InvalidAdminEventResponse) return 'A resposta da API não pôde ser confirmada para este evento.';
+  return adminReadError(error);
 }
 export function adminReadError(error) {
   if (error?.status === 404) return 'Evento não encontrado ou indisponível.';

@@ -2,16 +2,21 @@ import { StyleSheet, Text, View } from 'react-native';
 import { adminEventPhases, formatAdminDate } from '../../../services/adminEventsService';
 import { adminColors as c } from './adminTheme';
 import { AdminIcon, AdminIconTile, liveColors, liveStyles as s } from './AdminLiveUI';
+
+export function AdminEventPhaseBadge({ phase }) {
+  const color = { open: '#00e5aa', scheduled: '#77d3ff', closing: '#ffe44c', not_ready: '#dac0ef' }[phase] || liveColors.muted;
+  return <Text style={[styles.badge, { borderColor: color, color }]}>{adminEventPhases[phase]}</Text>;
+}
+
 export default function AdminEventSummary({ event, compact = false }) {
   if (compact) {
-    const phaseColor = { open: '#00e5aa', scheduled: '#77d3ff', closing: '#ffe44c', not_ready: '#dac0ef' }[event.effectivePhase] || liveColors.muted;
     const ready = event.readiness.ready;
     return <>
       <View style={[s.row, { alignItems: 'flex-start' }]}>
         <AdminIconTile name="calendar" />
         <View style={s.grow}>
           <View style={styles.heading}><Text style={[s.title, styles.eventName]}>{event.name}</Text>
-            <Text style={[styles.badge, { borderColor: phaseColor, color: phaseColor }]}>{adminEventPhases[event.effectivePhase]}</Text></View>
+            <AdminEventPhaseBadge phase={event.effectivePhase} /></View>
           <Text style={styles.date}>Início: {formatAdminDate(event.startsAt, event.timezone)}</Text>
           <Text style={styles.date}>Até: {formatAdminDate(event.officialEndsAt, event.timezone)}</Text>
         </View>

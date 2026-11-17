@@ -5,6 +5,7 @@ import { adminReadOwner } from './useAdminEvents';
 import AdminHomeScreen from './AdminHomeScreen';
 import AdminRealEventsScreen from './AdminRealEventsScreen';
 import AdminRealEventScreen from './AdminRealEventScreen';
+import AdminEventManagementInfoScreen from './AdminEventManagementInfoScreen';
 import AdminPendingScreen from './AdminPendingScreen';
 import AdminBottomBar from './components/AdminBottomBar';
 
@@ -30,5 +31,6 @@ export default function AdminDemoNavigator() {
     <Stack.Screen name="AdminTabs" component={AdminTabs} />
     <Stack.Screen name="AdminEvents" component={AdminRealEventsScreen} />
     <Stack.Screen name="AdminRealEvent" component={AdminRealEventScreen} />
+    <Stack.Screen name="AdminEventManagementInfo" component={AdminEventManagementInfoScreen} />
   </Stack.Navigator>;
 }

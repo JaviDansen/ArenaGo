@@ -84,7 +84,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
       text: async () => JSON.stringify(value.body ?? value) };
   } });
   const passthrough = ({ children }) => children;
-  const native = Object.fromEntries(['ActivityIndicator', 'Image', 'KeyboardAvoidingView', 'Modal', 'Pressable', 'ScrollView', 'Text', 'TextInput', 'View'].map((name) => [name, name]));
+  const native = Object.fromEntries(['ActivityIndicator', 'Image', 'KeyboardAvoidingView', 'Modal', 'Pressable', 'RefreshControl', 'ScrollView', 'Text', 'TextInput', 'View'].map((name) => [name, name]));
   native.StyleSheet = { create: (styles) => styles };
   native.AppState = { currentState: 'active', addEventListener: () => ({ remove() {} }) };
   native.Platform = { OS: control.platformOS ?? 'web' };
@@ -256,6 +256,51 @@ test('Admin: restauração válida reutiliza telas, retornos internos e logout r
     assert.equal(app.calls.filter(url => url === '/auth/logout').length, 1);
     app.navigate('AdminArea', { screen: 'AdminPanel' });
     assert.equal(app.route(), 'Welcome');
+  } finally { app.dispose(); }
+});
+
+test('Admin: painel real retorna à mesma rota da lista e mantém informações no UUID selecionado', { skip }, async () => {
+  const eventId = 'abcdef00-0000-4000-8000-000000000001';
+  const detailPath = `/admin/events/${eventId}`;
+  const selected = { id: eventId, name: 'Evento Selecionado', effectivePhase: 'scheduled', timezone: 'America/Sao_Paulo',
+    startsAt: '2026-11-05T15:00:00Z', officialEndsAt: '2026-11-05T20:00:00Z', readiness: { ready: true } };
+  let readinessReads = 0;
+  const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control: { realAdmin: true,
+    http: async (route, options) => {
+      if (!route.startsWith('/admin/')) return undefined;
+      assert.equal(options.method, 'GET');
+      if (route === '/admin/events') return { items: [selected], nextCursor: null };
+      if (route === detailPath) return { event: selected };
+      if (route === `${detailPath}/readiness`) {
+        readinessReads++;
+        return { eventId, statusStored: 'scheduled', effectivePhase: 'scheduled', ready: true, missing: [],
+          checks: { nameAndAccessCode: true, validScheduleAndTimezone: true, externalQueueConfigured: true,
+            hasExperienceWithAvailableStation: true, hasVerifiedActiveStaff: true }, acceptingNewParticipations: false };
+      }
+      assert.fail(`Rota Admin inesperada: ${route}`);
+    },
+  } });
+  await app.mount();
+  try {
+    await app.press('Gerenciar eventos');
+    await app.press('Acessar evento Evento Selecionado');
+    assert.equal(app.activeRoute(), 'AdminRealEvent');
+    assert.ok(app.hasText('Pronto para operar'));
+    assert.equal(readinessReads, 1);
+    await app.press('Equipe Staff');
+    assert.equal(app.activeRoute(), 'AdminEventManagementInfo');
+    assert.ok(app.hasText('Evento Selecionado'));
+    assert.ok(app.hasText('Esta área ainda não permite alterações'));
+    assert.equal(readinessReads, 1);
+    await app.press('Voltar ao painel');
+    assert.equal(app.activeRoute(), 'AdminRealEvent');
+    assert.equal(readinessReads, 2);
+    await app.press('Voltar aos eventos');
+    assert.equal(app.activeRoute(), 'AdminEvents');
+    await app.press('Acessar evento Evento Selecionado');
+    await app.press('BI');
+    assert.equal(app.activeRoute(), 'BI');
+    assert.ok(app.hasText('Em implementação'));
   } finally { app.dispose(); }
 });
 
