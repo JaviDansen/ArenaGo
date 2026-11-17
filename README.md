@@ -65,7 +65,7 @@ Os comandos de build, lint, testes e preparação de banco estão no [README do 
 
 ## Documentação e evidências
 
-- [Planejamento](docs/PLANEJAMENTO_ARENAGO.md) e [arquitetura do backend](docs/ARQUITETURA_BACKEND_ARENAGO.md): contexto e contratos; confira no código o estado de implementação.
+- [Panorama](docs/PANORAMA_ARENAGO_IMPLEMENTACAO.md) e [arquitetura do backend](docs/ARQUITETURA_BACKEND_ARENAGO.md): decisões, estado do produto e contratos; confira no código o estado de implementação. O [documento histórico v0.7.12](docs/DOCUMENTO_ARENAGO_HISTORICO_V0_7_12.md) preserva o planejamento anterior.
 - [Navegação Admin autenticada](docs/ADMIN_AUTHENTICATED_NAVIGATION_IMPLEMENTACAO.md) e [TOTP no Expo](docs/EXPO_ADMIN_TOTP_IMPLEMENTACAO.md).
 - [Estatísticas reais do Perfil](docs/PROFILE_REAL_STATISTICS_IMPLEMENTACAO.md).
 - [Seleção e isolamento de papéis](docs/ROLE_ROUTING_STAFF_INTEGRATION_IMPLEMENTACAO.md).

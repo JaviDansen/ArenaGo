@@ -1,7 +1,7 @@
 # ArenaGo — Arquitetura Backend unificada e dicionário PostgreSQL
 
 **Versão:** v0.6.19 — atualização da retomada C-04/D09 na develop (13/11/2026).
-**Fonte funcional prevalente:** [Planejamento v0.7.12](PLANEJAMENTO_ARENAGO.md); decisões D01–D11 e C-01–C-15 preservadas.
+**Fonte funcional principal:** [Panorama do ArenaGo](PANORAMA_ARENAGO_IMPLEMENTACAO.md); decisões D01–D11 e C-01–C-15 preservadas. [Documento histórico v0.7.12](DOCUMENTO_ARENAGO_HISTORICO_V0_7_12.md).
 
 ## Estado consolidado — novembro de 2026
 
@@ -22,7 +22,7 @@ O código da develop implementa contratos HTTP de identidade, sessões, verifica
 ### Abertura v0.6.17 — registro histórico
 
 **Versão histórica:** v0.6.17 — desistência voluntária da fila interna, C-15; contrato futuro E07.3 (30/10/2026).
-**Fonte funcional prevalente:** `PLANEJAMENTO_ARENAGO.md` (v0.7.10).
+**Fonte funcional prevalente naquela revisão:** planejamento v0.7.10, então denominado `PLANEJAMENTO_ARENAGO.md`; a versão histórica v0.7.12 está em [documento arquivado](DOCUMENTO_ARENAGO_HISTORICO_V0_7_12.md).
 **Estado atual:** fundação NestJS/Drizzle e cinco migrações existentes; função TypeScript de normalização e consultas internas `EventsService.findById()`/`findByAccessCode()` implementadas. Nenhum endpoint HTTP de produto foi criado. Neon não foi criada.
 **Escopo desta revisão (30/10/2026):** complemento documental C-15 após a entrega inicial da E07.1, com saída isolada da fila interna reservada à E07.3. Preservados os registros históricos; nenhum código, teste ou migração alterado.
 

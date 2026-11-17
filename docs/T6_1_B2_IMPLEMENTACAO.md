@@ -8,7 +8,7 @@ Implementação restrita à emissão CLI da autorização e à configuração/co
 
 As validações abaixo foram executadas manualmente pelo responsável. A revisão desta entrega pelo Codex é estática. Não há homologação ou declaração de prontidão de produção.
 
-Referências de contrato: `PLANEJAMENTO_ARENAGO.md` §9.2, `ARQUITETURA_BACKEND_ARENAGO.md` §§2.2/4/14.4 e prompt aprovado da B2. A arquitetura citava rotas candidatas de verificação; esta entrega reserva `/confirm` para ativação inicial e não implementa `/verify` como login definitivo.
+Referências de contrato: [documento histórico v0.7.12](DOCUMENTO_ARENAGO_HISTORICO_V0_7_12.md) §9.2 (à época `PLANEJAMENTO_ARENAGO.md`), `ARQUITETURA_BACKEND_ARENAGO.md` §§2.2/4/14.4 e prompt aprovado da B2. A arquitetura citava rotas candidatas de verificação; esta entrega reserva `/confirm` para ativação inicial e não implementa `/verify` como login definitivo.
 
 ## Contrato CLI e elegibilidade
 

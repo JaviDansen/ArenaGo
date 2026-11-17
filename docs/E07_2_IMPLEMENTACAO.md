@@ -21,7 +21,7 @@ entrega inicial; não são o estado atual da validação.
 | `backend/test/unit/queue-state.test.ts` | 18 testes próprios E07.2. |
 | `backend/test/integration/queue-state.integration.test.ts` | 20 testes PostgreSQL próprios E07.2, ainda pendentes de execução. |
 | `docs/ARQUITETURA_BACKEND_ARENAGO.md` | §16.5 alinhada ao contrato interno, contagem inclusiva e projeção temporal. |
-| `docs/PLANEJAMENTO_ARENAGO.md` | Atualiza apenas o trabalho atual; preserva o histórico E07.1/C-15. |
+| `docs/DOCUMENTO_ARENAGO_HISTORICO_V0_7_12.md` (nome à época: `docs/PLANEJAMENTO_ARENAGO.md`) | Atualiza apenas o trabalho atual; preserva o histórico E07.1/C-15. |
 | `docs/E07_2_IMPLEMENTACAO.md` | Este registro. |
 | `qa-evidence/e07-2-changes.diff` | Patch contra o HEAD inicial, incluindo novos arquivos; exclui a si próprio e arquivos externos. |
 

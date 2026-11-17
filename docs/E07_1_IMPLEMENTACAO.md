@@ -13,7 +13,7 @@ Implementação de 30/10/2026 sobre `feature/events-participations`, base
 | `backend/src/participations/join-idempotency.ts` | Somente exporta o helper genérico existente; corpo e fluxo E03 preservados. |
 | `backend/test/unit/queue-entry.test.ts` | 18 testes unitários novos. |
 | `backend/test/integration/queue-entry.integration.test.ts` | 21 testes PostgreSQL, com concorrência e falhas fortalecidas após auditoria e novo cenário de corte antes do UPDATE. |
-| `docs/PLANEJAMENTO_ARENAGO.md` | Complemento documental C-15 aprovado após a implementação inicial: desistência da fila interna sem finalizar a participação. |
+| `docs/DOCUMENTO_ARENAGO_HISTORICO_V0_7_12.md` (nome à época: `docs/PLANEJAMENTO_ARENAGO.md`) | Complemento documental C-15 aprovado após a implementação inicial: desistência da fila interna sem finalizar a participação. |
 | `docs/ARQUITETURA_BACKEND_ARENAGO.md` | Corrige a delimitação da §16.2 para C-15/E07.3 e alinha a §16.4 à disponibilidade operacional C-14, sem definir rota HTTP nova. |
 | `docs/E07_1_IMPLEMENTACAO.md` | Este registro. |
 | `qa-evidence/e07-1-changes.diff` | Patch completo, incluindo novos arquivos; exclui o próprio artefato. |

@@ -22,7 +22,7 @@ As pendências descritas nas rodadas anteriores são históricas e foram mantida
 | `backend/test/unit/queue-withdrawal.test.ts` | 19 testes novos. |
 | `backend/test/integration/queue-withdrawal.integration.test.ts` | 27 testes PostgreSQL próprios, pendentes. |
 | `docs/ARQUITETURA_BACKEND_ARENAGO.md` | §16.2 registra o contrato interno implementado, sem HTTP. |
-| `docs/PLANEJAMENTO_ARENAGO.md` | Estado da implementação C-15 e trabalho atual; históricos preservados. |
+| `docs/DOCUMENTO_ARENAGO_HISTORICO_V0_7_12.md` (nome à época: `docs/PLANEJAMENTO_ARENAGO.md`) | Estado da implementação C-15 e trabalho atual; históricos preservados. |
 | `docs/E07_3_IMPLEMENTACAO.md` | Este relatório. |
 | `qa-evidence/e07-3-changes.diff` | Snapshot cumulativo contra HEAD, conforme a seção de evidência. |
 

@@ -1,0 +1,103 @@
+diff --git a/README.md b/README.md
+index 0fc8543..bdece04 100644
+--- a/README.md
++++ b/README.md
+@@ -65,7 +65,7 @@ Os comandos de build, lint, testes e preparação de banco estão no [README do
+ 
+ ## Documentação e evidências
+ 
+-- [Planejamento](docs/PLANEJAMENTO_ARENAGO.md) e [arquitetura do backend](docs/ARQUITETURA_BACKEND_ARENAGO.md): contexto e contratos; confira no código o estado de implementação.
++- [Panorama](docs/PANORAMA_ARENAGO_IMPLEMENTACAO.md) e [arquitetura do backend](docs/ARQUITETURA_BACKEND_ARENAGO.md): decisões, estado do produto e contratos; confira no código o estado de implementação. O [documento histórico v0.7.12](docs/DOCUMENTO_ARENAGO_HISTORICO_V0_7_12.md) preserva o planejamento anterior.
+ - [Navegação Admin autenticada](docs/ADMIN_AUTHENTICATED_NAVIGATION_IMPLEMENTACAO.md) e [TOTP no Expo](docs/EXPO_ADMIN_TOTP_IMPLEMENTACAO.md).
+ - [Estatísticas reais do Perfil](docs/PROFILE_REAL_STATISTICS_IMPLEMENTACAO.md).
+ - [Seleção e isolamento de papéis](docs/ROLE_ROUTING_STAFF_INTEGRATION_IMPLEMENTACAO.md).
+diff --git a/docs/ARQUITETURA_BACKEND_ARENAGO.md b/docs/ARQUITETURA_BACKEND_ARENAGO.md
+index b171834..1a4a981 100644
+--- a/docs/ARQUITETURA_BACKEND_ARENAGO.md
++++ b/docs/ARQUITETURA_BACKEND_ARENAGO.md
+@@ -1,7 +1,7 @@
+ # ArenaGo — Arquitetura Backend unificada e dicionário PostgreSQL
+ 
+ **Versão:** v0.6.19 — atualização da retomada C-04/D09 na develop (13/11/2026).
+-**Fonte funcional prevalente:** [Planejamento v0.7.12](PLANEJAMENTO_ARENAGO.md); decisões D01–D11 e C-01–C-15 preservadas.
++**Fonte funcional principal:** [Panorama do ArenaGo](PANORAMA_ARENAGO_IMPLEMENTACAO.md); decisões D01–D11 e C-01–C-15 preservadas. [Documento histórico v0.7.12](DOCUMENTO_ARENAGO_HISTORICO_V0_7_12.md).
+ 
+ ## Estado consolidado — novembro de 2026
+ 
+@@ -22,7 +22,7 @@ O código da develop implementa contratos HTTP de identidade, sessões, verifica
+ ### Abertura v0.6.17 — registro histórico
+ 
+ **Versão histórica:** v0.6.17 — desistência voluntária da fila interna, C-15; contrato futuro E07.3 (30/10/2026).
+-**Fonte funcional prevalente:** `PLANEJAMENTO_ARENAGO.md` (v0.7.10).
++**Fonte funcional prevalente naquela revisão:** planejamento v0.7.10, então denominado `PLANEJAMENTO_ARENAGO.md`; a versão histórica v0.7.12 está em [documento arquivado](DOCUMENTO_ARENAGO_HISTORICO_V0_7_12.md).
+ **Estado atual:** fundação NestJS/Drizzle e cinco migrações existentes; função TypeScript de normalização e consultas internas `EventsService.findById()`/`findByAccessCode()` implementadas. Nenhum endpoint HTTP de produto foi criado. Neon não foi criada.
+ **Escopo desta revisão (30/10/2026):** complemento documental C-15 após a entrega inicial da E07.1, com saída isolada da fila interna reservada à E07.3. Preservados os registros históricos; nenhum código, teste ou migração alterado.
+ 
+diff --git a/docs/E07_1_IMPLEMENTACAO.md b/docs/E07_1_IMPLEMENTACAO.md
+index d3e086d..811e8ce 100644
+--- a/docs/E07_1_IMPLEMENTACAO.md
++++ b/docs/E07_1_IMPLEMENTACAO.md
+@@ -13,7 +13,7 @@ Implementação de 30/10/2026 sobre `feature/events-participations`, base
+ | `backend/src/participations/join-idempotency.ts` | Somente exporta o helper genérico existente; corpo e fluxo E03 preservados. |
+ | `backend/test/unit/queue-entry.test.ts` | 18 testes unitários novos. |
+ | `backend/test/integration/queue-entry.integration.test.ts` | 21 testes PostgreSQL, com concorrência e falhas fortalecidas após auditoria e novo cenário de corte antes do UPDATE. |
+-| `docs/PLANEJAMENTO_ARENAGO.md` | Complemento documental C-15 aprovado após a implementação inicial: desistência da fila interna sem finalizar a participação. |
++| `docs/DOCUMENTO_ARENAGO_HISTORICO_V0_7_12.md` (nome à época: `docs/PLANEJAMENTO_ARENAGO.md`) | Complemento documental C-15 aprovado após a implementação inicial: desistência da fila interna sem finalizar a participação. |
+ | `docs/ARQUITETURA_BACKEND_ARENAGO.md` | Corrige a delimitação da §16.2 para C-15/E07.3 e alinha a §16.4 à disponibilidade operacional C-14, sem definir rota HTTP nova. |
+ | `docs/E07_1_IMPLEMENTACAO.md` | Este registro. |
+ | `qa-evidence/e07-1-changes.diff` | Patch completo, incluindo novos arquivos; exclui o próprio artefato. |
+diff --git a/docs/E07_2_IMPLEMENTACAO.md b/docs/E07_2_IMPLEMENTACAO.md
+index 329ccf2..00b1fc7 100644
+--- a/docs/E07_2_IMPLEMENTACAO.md
++++ b/docs/E07_2_IMPLEMENTACAO.md
+@@ -21,7 +21,7 @@ entrega inicial; não são o estado atual da validação.
+ | `backend/test/unit/queue-state.test.ts` | 18 testes próprios E07.2. |
+ | `backend/test/integration/queue-state.integration.test.ts` | 20 testes PostgreSQL próprios E07.2, ainda pendentes de execução. |
+ | `docs/ARQUITETURA_BACKEND_ARENAGO.md` | §16.5 alinhada ao contrato interno, contagem inclusiva e projeção temporal. |
+-| `docs/PLANEJAMENTO_ARENAGO.md` | Atualiza apenas o trabalho atual; preserva o histórico E07.1/C-15. |
++| `docs/DOCUMENTO_ARENAGO_HISTORICO_V0_7_12.md` (nome à época: `docs/PLANEJAMENTO_ARENAGO.md`) | Atualiza apenas o trabalho atual; preserva o histórico E07.1/C-15. |
+ | `docs/E07_2_IMPLEMENTACAO.md` | Este registro. |
+ | `qa-evidence/e07-2-changes.diff` | Patch contra o HEAD inicial, incluindo novos arquivos; exclui a si próprio e arquivos externos. |
+ 
+diff --git a/docs/E07_3_IMPLEMENTACAO.md b/docs/E07_3_IMPLEMENTACAO.md
+index 7009a58..1ac07e8 100644
+--- a/docs/E07_3_IMPLEMENTACAO.md
++++ b/docs/E07_3_IMPLEMENTACAO.md
+@@ -22,7 +22,7 @@ As pendências descritas nas rodadas anteriores são históricas e foram mantida
+ | `backend/test/unit/queue-withdrawal.test.ts` | 19 testes novos. |
+ | `backend/test/integration/queue-withdrawal.integration.test.ts` | 27 testes PostgreSQL próprios, pendentes. |
+ | `docs/ARQUITETURA_BACKEND_ARENAGO.md` | §16.2 registra o contrato interno implementado, sem HTTP. |
+-| `docs/PLANEJAMENTO_ARENAGO.md` | Estado da implementação C-15 e trabalho atual; históricos preservados. |
++| `docs/DOCUMENTO_ARENAGO_HISTORICO_V0_7_12.md` (nome à época: `docs/PLANEJAMENTO_ARENAGO.md`) | Estado da implementação C-15 e trabalho atual; históricos preservados. |
+ | `docs/E07_3_IMPLEMENTACAO.md` | Este relatório. |
+ | `qa-evidence/e07-3-changes.diff` | Snapshot cumulativo contra HEAD, conforme a seção de evidência. |
+ 
+diff --git a/docs/T6_1_B2_IMPLEMENTACAO.md b/docs/T6_1_B2_IMPLEMENTACAO.md
+index 0a48e1c..31cbbf8 100644
+--- a/docs/T6_1_B2_IMPLEMENTACAO.md
++++ b/docs/T6_1_B2_IMPLEMENTACAO.md
+@@ -8,7 +8,7 @@ Implementação restrita à emissão CLI da autorização e à configuração/co
+ 
+ As validações abaixo foram executadas manualmente pelo responsável. A revisão desta entrega pelo Codex é estática. Não há homologação ou declaração de prontidão de produção.
+ 
+-Referências de contrato: `PLANEJAMENTO_ARENAGO.md` §9.2, `ARQUITETURA_BACKEND_ARENAGO.md` §§2.2/4/14.4 e prompt aprovado da B2. A arquitetura citava rotas candidatas de verificação; esta entrega reserva `/confirm` para ativação inicial e não implementa `/verify` como login definitivo.
++Referências de contrato: [documento histórico v0.7.12](DOCUMENTO_ARENAGO_HISTORICO_V0_7_12.md) §9.2 (à época `PLANEJAMENTO_ARENAGO.md`), `ARQUITETURA_BACKEND_ARENAGO.md` §§2.2/4/14.4 e prompt aprovado da B2. A arquitetura citava rotas candidatas de verificação; esta entrega reserva `/confirm` para ativação inicial e não implementa `/verify` como login definitivo.
+ 
+ ## Contrato CLI e elegibilidade
+ 
+diff --git a/docs/PLANEJAMENTO_ARENAGO.md b/docs/DOCUMENTO_ARENAGO_HISTORICO_V0_7_12.md
+similarity index 100%
+rename from docs/PLANEJAMENTO_ARENAGO.md
+rename to docs/DOCUMENTO_ARENAGO_HISTORICO_V0_7_12.md
+diff --git a/docs/REORGANIZACAO_DOCUMENTAL_IMPLEMENTACAO.md b/docs/REORGANIZACAO_DOCUMENTAL_IMPLEMENTACAO.md
+new file mode 100644
+--- /dev/null
++++ b/docs/REORGANIZACAO_DOCUMENTAL_IMPLEMENTACAO.md
+@@ -0,0 +1,7 @@
++# Reorganização documental ArenaGo
++
++O Panorama permanece a referência principal de decisões, requisitos e diagnóstico do produto. O antigo planejamento v0.7.12 foi renomeado para `docs/DOCUMENTO_ARENAGO_HISTORICO_V0_7_12.md`, preservando seus bytes e registros. README e Arquitetura apontam para o Panorama; relatórios históricos indicam o arquivo arquivado e o nome usado na época. Patches históricos mantêm os caminhos originais para preservar sua aplicabilidade na base histórica.
++
++O Panorama já tinha alterações locais antes desta tarefa e foi preservado sem edição adicional. O novo planejamento não foi alterado. A renomeação foi feita no sistema de arquivos, sem staging: o Git poderá reconhecê-la como renomeação quando o responsável preparar o commit.
++
++Inspeções estáticas: estado Git, referências e SHA-256 do arquivo histórico. Nenhum teste, lint, typecheck, build, operação de banco ou validação manual pelo responsável foi executado nesta tarefa. Nenhum commit ou push foi realizado. A evidência única `qa-evidence/REORGANIZACAO_DOCUMENTAL-changes.diff` registra as alterações desta tarefa, sem incluir as alterações preexistentes do Panorama ou a si própria.

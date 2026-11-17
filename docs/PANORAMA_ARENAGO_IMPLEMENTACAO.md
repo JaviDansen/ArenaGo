@@ -19,7 +19,7 @@ Não foi calculado um percentual de conclusão. Sem uma lista fechada de critér
 ### Fontes e método
 
 - READMEs da [raiz](../README.md), [aplicativo](../app/README.md), [backend](../backend/README.md) e [QA independente](../qa/regression/README.md).
-- [Planejamento do produto](PLANEJAMENTO_ARENAGO.md), [arquitetura do backend](ARQUITETURA_BACKEND_ARENAGO.md) e relatórios por task de `docs/`, relacionados na seção 10.
+- Decisões de produto consolidadas nas §§3.5–3.8 a partir do planejamento histórico; [arquitetura do backend](ARQUITETURA_BACKEND_ARENAGO.md) e relatórios por task de `docs/`, relacionados na seção 10.
 - O Panorama original cita o documento externo `DIAGNOSTICO_ARENAGO_PLANO_DEMONSTRACAO_2026-12-04.md`, de 13/11/2026. Esse arquivo não foi disponibilizado nesta revisão; seus relatos são preservados com atribuição ao Panorama recebido, sem alegar leitura independente ou executar instruções nele mencionadas.
 - O Panorama recebido registra campanha de integração AUTO-QUEUE-01 com 125 testes focados e 822 na suíte completa. O registro é preservado como evidência documental herdada; os logs/conversa de execução não foram disponibilizados nesta revisão. O relatório versionado AUTO-QUEUE comprova documentalmente outra campanha: 87 focados/464 frontend.
 - Inspeção estática pontual do histórico Git, configuração do app, serviços de participação, Home/Arena, provedor Admin, inventário de controllers e journal de migrations. Não foi uma auditoria linha a linha de todo o código ou uma revisão exaustiva de cada teste.
@@ -104,7 +104,7 @@ Campanhas diferentes não devem ser somadas. Testes preparados não são testes 
 
 O ArenaGo organiza eventos presenciais de games, com ingresso, experiências atendidas em estações, filas compartilhadas e avaliação da participação. O Participante acompanha sua jornada; Staff opera os eventos para os quais recebeu concessão; Admin global administra estrutura, permissões e análise agregada. O backend é a autoridade de identidade, posição, elegibilidade, relógio, conclusão e persistência. O estado local serve à interface e à recuperação, sem definir ordem global.
 
-A fonte normativa desta seção é o [Planejamento antigo, §§1, 3, 6–9](PLANEJAMENTO_ARENAGO.md). As decisões abaixo continuam aprovadas; a coluna de estado distingue implementação de integração e comprovação. Detalhes SQL, DTOs e campanhas permanecem na [Arquitetura, §§15–20 e 27](ARQUITETURA_BACKEND_ARENAGO.md) e nos relatórios indicados. Código divergente não revoga uma decisão.
+As decisões aprovadas, consolidadas a partir do planejamento histórico, estão registradas nesta seção e na §3.6. A coluna de estado distingue implementação de integração e comprovação. Detalhes SQL, DTOs e campanhas permanecem na [Arquitetura, §§15–20 e 27](ARQUITETURA_BACKEND_ARENAGO.md) e nos relatórios indicados. Código divergente não revoga uma decisão.
 
 | Decisão | Regra preservada, incluindo condições e exceções | Estado e limite atual |
 | --- | --- | --- |
@@ -126,7 +126,7 @@ A fonte normativa desta seção é o [Planejamento antigo, §§1, 3, 6–9](PLAN
 
 ### 3.6 Complementos de negócio — C-01–C-15
 
-Fonte integral: [Planejamento, §9.3.1](PLANEJAMENTO_ARENAGO.md). Esta matriz completa as condições que antes estavam apenas mencionadas no inventário.
+Esta matriz registra os complementos aprovados e suas condições, consolidados do planejamento histórico.
 
 | Decisão | Condição ou restrição preservada | Situação e referência atual |
 | --- | --- | --- |
@@ -150,7 +150,7 @@ Fonte integral: [Planejamento, §9.3.1](PLANEJAMENTO_ARENAGO.md). Esta matriz co
 
 ### 3.7 Identidade, segurança e requisitos de acesso preservados — DA-03
 
-Fonte: [Planejamento, §§9.2 e 9.3.2](PLANEJAMENTO_ARENAGO.md); implementação e limites em [Arquitetura §27.1](ARQUITETURA_BACKEND_ARENAGO.md).
+Decisões de acesso consolidadas do planejamento histórico; implementação e limites em [Arquitetura §27.1](ARQUITETURA_BACKEND_ARENAGO.md).
 
 - Cadastro público cria conta comum; Participante tem acesso inicial sem confirmação de e-mail. Conceder Staff/Admin exige e-mail verificado; mudança de e-mail privilegiado exige confirmar o novo endereço. O app atualmente edita nome, não e-mail/papéis.
 - Senha aprovada: mínimo de oito caracteres, sem composição obrigatória, bloqueio de senhas muito comuns/comprometidas e hash adaptativo. Cadastro atual limita 8–128 caracteres e usa Argon2id/política local; isso não certifica cobertura universal de senhas comprometidas. Transporte de verificação de e-mail via Resend existe; não equivale à recuperação de senha.
@@ -163,7 +163,7 @@ Fonte: [Planejamento, §§9.2 e 9.3.2](PLANEJAMENTO_ARENAGO.md); implementação
 
 ### 3.8 BI, estatísticas, exportações e privacidade
 
-**BI administrativo é requisito aprovado do produto e parte importante do futuro planejamento.** As 14 telas Heliom apresentam fixtures, e o backend ainda não entrega o BI agregado completo. A definição dos dois indicadores abaixo já existe; não deve ser reaberta como se nada tivesse sido decidido. Faltam detalhamento dos contratos, filtros/gráficos, controles e integração. Fontes: [Planejamento, §§5 (RA-01), 9.3 e D10/C-07/C-09](PLANEJAMENTO_ARENAGO.md).
+**BI administrativo é requisito aprovado do produto e parte importante do futuro planejamento.** As 14 telas Heliom apresentam fixtures, e o backend ainda não entrega o BI agregado completo. A definição dos dois indicadores abaixo já existe; não deve ser reaberta como se nada tivesse sido decidido. Faltam detalhamento dos contratos, filtros/gráficos, controles e integração. As diretrizes RA-01, D10, C-07 e C-09 estão registradas aqui e nas §§3.5–3.6.
 
 | Medida | População e cálculo preservados | Disponibilidade |
 | --- | --- | --- |
@@ -214,12 +214,12 @@ Inventário exato de métodos, DTOs e diferenças: [Arquitetura §27.1–2](ARQU
 | AUTO-QUEUE antes da integração | 87 focados e 464 frontend, sem falhas; exit 0 | Relatório AUTO-QUEUE, execução autorizada atribuída ao Codex/Luna Medium; versão da feature |
 | Primeira validação da integração | 122 aprovados e 3 falhos de 125; exit 1 | Panorama original relata a execução: mocks de Home deixavam AuthContext JSX chegar ao require real; suíte completa não executada naquela tentativa. Logs originais não disponíveis nesta revisão |
 | Revalidação após corrigir os mocks | **125/125 focados e 822/822 frontend**, 0 falhos/cancelados/ignorados; exit 0 nos dois comandos | Panorama original atribui a Luna Medium uma execução autorizada durante o merge ainda aberto na feature. Registro herdado, sem logs/conversa originais nesta revisão; não foi execução no SHA final da develop |
-| C-04/D09 | 99/99 focados e 773/773 frontend | Relatório próprio; anterior à campanha AUTO-QUEUE integrada |
-| Perfil + navegação Admin | 755 frontend, 0 falhos/ignorados | Resultado do responsável consolidado nos READMEs |
-| Perfil isolado | 117 focados e 745 frontend na última campanha descrita | Relatório Perfil; casos SQL simulados não comprovam todas as bordas físicas |
-| Staff B1 | 141 focados; regressão final 533 aprovados, 0 falhos/ignorados | Relatório B1; falhas intermediárias de fixtures/inventário foram documentadas |
-| QA independente recuperado | 51/51 em duas cópias; guarda existente 14 aprovados | QA_RECOVERY; transporte/SQL simulados em partes, sem PostgreSQL real |
-| Backend por etapas | Campanhas unitárias e PostgreSQL documentadas em E05/E06/E07/E08/T6.1; por exemplo T6.1B2 registra 32/32 PostgreSQL dedicados e 1.255/1.255 na regressão compartilhada excluindo B1/B2 | Referências históricas com bancos e exclusões próprios. Não há nova execução integral do backend atual neste levantamento |
+| C-04/D09 | 99/99 focados e 773/773 frontend | [Relatório C-04/D09](RETURN_AFTER_CLOSURE_C04_D09_IMPLEMENTACAO.md), campanha histórica anterior à AUTO-QUEUE integrada; escopo e executores no relatório. |
+| Perfil + navegação Admin | 755 frontend, 0 falhos/ignorados | Resultado informado pelo responsável nos [READMEs](../README.md); campanha anterior, não certifica o HEAD atual. |
+| Perfil isolado | 117 focados e 745 frontend na última campanha descrita | [Relatório Perfil](PROFILE_REAL_STATISTICS_IMPLEMENTACAO.md); casos SQL simulados não comprovam todas as bordas físicas. |
+| Staff B1 | 141 focados; regressão final 533 aprovados, 0 falhos/ignorados | [Relatório B1](STAFF_B1_IMPLEMENTACAO.md); falhas intermediárias de fixtures/inventário foram documentadas. |
+| QA independente recuperado | 51/51 em duas cópias; guarda existente 14 aprovados | [QA_RECOVERY](QA_RECOVERY_IMPLEMENTACAO.md); transporte/SQL simulados em partes, sem PostgreSQL real. |
+| Backend por etapas | Campanhas unitárias e PostgreSQL documentadas em E05/E06/E07/E08/T6.1; por exemplo T6.1B2 registra 32/32 PostgreSQL dedicados e 1.255/1.255 na regressão compartilhada excluindo B1/B2 | [T6.1B2](T6_1_B2_IMPLEMENTACAO.md); campanhas históricas com bancos e exclusões próprios. Não há nova execução integral do backend atual neste levantamento. |
 
 Comandos registrados no Panorama original como usados na revalidação da integração, no diretório `app` (transcrição histórica, não executada nesta revisão):
 
@@ -267,7 +267,7 @@ O evento de homologação Neon descrito tem término em **27/11/2026 às 19h04 n
 | Mínimo de dois Admins aptos versus proteção do último | [T6.1-D, “Decisões sobre Admins”](T6_1_D_IMPLEMENTACAO.md) explica a proteção implementada de um e a ausência de distinção operacional automática. Requisito de dois antes de evento real continua vigente; credenciamento do segundo e controles precisam ser resolvidos. |
 | D10/C-07 versus histórico externo protegido | 0008 bloqueia DELETE/TRUNCATE e preserva vínculo com participação; anonimizar apenas ator não implementa exclusão completa. Política e procedimento compatíveis continuam pendentes, sem autorização para retirar proteções. |
 | Estatísticas do Perfil versus indicadores A/B | Perfil inclui finalização automática no tempo somado; BI separa última conclusão e saída voluntária. Não há equivalência nem nova definição de negócio (§3.8). |
-| Documento antigo chama Planejamento de fonte de verdade; pedido atual define Panorama principal | Panorama passa a ser diagnóstico/inventário principal. Planejamento histórico continua fonte das decisões aprovadas; Arquitetura/código/DDL indicam contratos/implementação e relatórios comprovam campanhas. Não modificar nem apagar documentos históricos. |
+| O documento histórico identificava-se como fonte das decisões aprovadas | As decisões e condições de produto foram consolidadas nas §§3.5–3.8 deste Panorama. Arquitetura/código/DDL descrevem contratos e implementação; relatórios documentam campanhas. |
 | Panorama original tinha P01–P11, prioridades e janelas de 13/11 a 04/12 | Esses elementos eram propostas, não regras aprovadas. Os temas de escopo, ambiente, build, contas, Admin, validação, contingência, acabamento, acesso, privacidade e BI foram preservados nas §§6–9; sequência/prioridades/calendário não são adotados nesta consolidação. |
 
 Os documentos históricos não foram reescritos nesta entrega. Para próximas atualizações, acrescentar data, base, resultado e escopo ao documento correspondente; evitar substituir indiscriminadamente toda ocorrência de “pendente”.
@@ -361,7 +361,7 @@ Para cada nova entrega, registrar: funcionalidade, estado anterior e novo, SHA/b
 | Grupo | Fontes principais | Uso neste panorama |
 | --- | --- | --- |
 | Visão consolidada | [README raiz](../README.md), [app](../app/README.md), [backend](../backend/README.md), [QA](../qa/regression/README.md) | Organização, integrações, ambiente, limites e campanhas históricas |
-| Contratos e decisões | [Planejamento](PLANEJAMENTO_ARENAGO.md), [Arquitetura](ARQUITETURA_BACKEND_ARENAGO.md), especialmente consolidação §27 | Regras e divergências; distinguir propostas antigas de entregas posteriores |
+| Contratos e decisões | §§3.5–3.8 deste Panorama e [Arquitetura](ARQUITETURA_BACKEND_ARENAGO.md), especialmente consolidação §27 | Decisões, contratos e divergências; distinguir propostas antigas de entregas posteriores |
 | Identidade/Admin | [Sessão estável](AUTH_STABLE_SESSION_BINDING_IMPLEMENTACAO.md), [TOTP Expo](EXPO_ADMIN_TOTP_IMPLEMENTACAO.md), [T6.1B2](T6_1_B2_IMPLEMENTACAO.md), [T6.1C](T6_1_C_IMPLEMENTACAO.md), [T6.1D](T6_1_D_IMPLEMENTACAO.md), [Admin autenticado](ADMIN_AUTHENTICATED_NAVIGATION_IMPLEMENTACAO.md), [Admin final](ADMIN_FINAL_IMPLEMENTACAO.md) | Acesso real, operações demonstrativas, limites de onboarding e recuperação |
 | Participante | [Etapa 1](EXPO_BACKEND_ETAPA1_IMPLEMENTACAO.md), [Etapa 2](EXPO_BACKEND_ETAPA2_IMPLEMENTACAO.md), [Etapa 3](EXPO_BACKEND_ETAPA3_IMPLEMENTACAO.md), [Etapa 4](EXPO_BACKEND_ETAPA4_IMPLEMENTACAO.md), [QR](ENTRY_QR_01_IMPLEMENTACAO.md), [Perfil](PROFILE_REAL_STATISTICS_IMPLEMENTACAO.md), [Avaliação](EXPO_PARTICIPACAO_FINALIZACAO_AVALIACAO_IMPLEMENTACAO.md), [C-04/D09](RETURN_AFTER_CLOSURE_C04_D09_IMPLEMENTACAO.md), [AUTO-QUEUE](AUTO_QUEUE_01_IMPLEMENTACAO.md) | Evolução da integração, campanhas e homologações |
 | Visual | [UI Participante](UI_PARTICIPANT_INTEGRATION_IMPLEMENTACAO.md), [Splash](SPLASH_01_IMPLEMENTACAO.md), [SDK58](EXPO_SDK_58_MIGRACAO.md) | Implementação visual, validação e distribuição ainda distinta de exportação |
