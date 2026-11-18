@@ -12,12 +12,19 @@ function Button({ label, onPress, disabled = false, danger = false }) {
     <Text style={styles.buttonText}>{label}</Text>
   </Pressable>;
 }
-export default function StaffEntryControlRealScreen({ event, isEventCurrent, onBack }) {
+export default function StaffEntryControlRealScreen({
+  event,
+  isEventCurrent,
+  accessDenied = false,
+  accessDeniedKind = 'denied',
+  onAccessDenied,
+  onBack,
+}) {
   const auth = useAuth(), live = useRef(null);
-  live.current = { auth, event, isEventCurrent };
+  live.current = { auth, event, isEventCurrent, accessDenied, onAccessDenied };
   const getContext = () => {
-    const { auth: current, event: selected, isEventCurrent: selectedIsCurrent } = live.current;
-    if (!current?.isAuthenticated || !current.isIdentityVerified() || !current.sessionId || !selectedIsCurrent() ||
+    const { auth: current, event: selected, isEventCurrent: selectedIsCurrent, accessDenied: revoked } = live.current;
+    if (revoked || !current?.isAuthenticated || !current.isIdentityVerified() || !current.sessionId || !selectedIsCurrent() ||
         !current.user?.roles?.includes('staff') || current.user.roles.includes('admin')) return null;
     return { userId: current.user.id, sessionId: current.sessionId, eventId: selected.id,
       epoch: current.getSessionEpoch(), revision: current.getIdentityRevision() };
@@ -38,14 +45,31 @@ export default function StaffEntryControlRealScreen({ event, isEventCurrent, onB
   useEffect(() => store.subscribe(setSnapshot), [store]);
   useEffect(() => {
     autoAttempt.current = null; setNotice(null);
-    store.setContext(getContext()); setDialog(null); void store.refresh();
+    store.setContext(getContext()); setDialog(null);
+    if (!live.current.accessDenied) void store.refresh();
     return () => { dialogRef.current = null; store.setContext(null); };
   }, [store, event.id, auth.user?.id, auth.sessionId, epoch, revision]);
-  useStaffPolling(store.isCurrent(snapshot.context) && snapshot.status === 'ready' && !snapshot.busy,
+  useEffect(() => {
+    if (!accessDenied) return;
+    dialogRef.current = null;
+    setDialog(null);
+    setNotice(null);
+    autoAttempt.current = null;
+    store.setContext(null);
+  }, [accessDenied, store]);
+  useEffect(() => {
+    if (snapshot.status === 'error' && (snapshot.error === 'denied' || snapshot.error === 'session') &&
+        store.isCurrent(snapshot.context)) {
+      dialogRef.current = null;
+      setDialog(null);
+      live.current.onAccessDenied?.(snapshot.error);
+    }
+  }, [snapshot.status, snapshot.error, snapshot.context, store]);
+  useStaffPolling(!accessDenied && store.isCurrent(snapshot.context) && snapshot.status === 'ready' && !snapshot.busy,
     () => store.poll(), 5000, `${event.id}:${epoch}:${revision}`);
   useEffect(() => {
     const intent = snapshot.pending, scope = snapshot.context;
-    if (intent?.phase !== 'terminal' || snapshot.status !== 'ready' || snapshot.busy || !store.isCurrent(scope) ||
+    if (accessDenied || intent?.phase !== 'terminal' || snapshot.status !== 'ready' || snapshot.busy || !store.isCurrent(scope) ||
         !['userId', 'sessionId', 'eventId'].every(key => intent[key] === scope[key]) ||
         autoAttempt.current === intent.key) return;
     autoAttempt.current = intent.key;
@@ -54,7 +78,21 @@ export default function StaffEntryControlRealScreen({ event, isEventCurrent, onB
       if (result.kind === 'done' && store.isCurrent(scope)) setNotice({ key: intent.key, outcome: intent.outcome, operation: intent.kind });
       if (result.kind === 'blocked') autoAttempt.current = null;
     })();
-  }, [snapshot, store]);
+  }, [accessDenied, snapshot, store]);
+  const errors = { session: 'Sessão inválida. Verifique sua sessão ou entre novamente.', denied: 'Acesso ao evento indisponível. Atualize seus eventos autorizados.',
+    network: 'Não foi possível conectar. Verifique sua conexão e atualize.', unavailable: 'Não foi possível consultar a fila de entrada. Tente atualizar.' };
+  if (accessDenied) {
+    return (
+      <View style={styles.content}>
+        <Text style={styles.title}>Controle de Entrada</Text>
+        <Text style={styles.text}>Fila de acesso ao evento</Text>
+        <Text accessibilityRole="alert" style={styles.warning}>
+          {accessDeniedKind === 'session' ? errors.session : errors.denied}
+        </Text>
+        <Button label="Voltar ao painel" onPress={onBack} />
+      </View>
+    );
+  }
   if (!store.isCurrent(snapshot.context)) return null;
   const ownPending = snapshot.pending && ['userId', 'sessionId', 'eventId'].every(key => snapshot.pending[key] === snapshot.context[key]);
   const pending = ownPending ? snapshot.pending : null;
@@ -71,9 +109,10 @@ export default function StaffEntryControlRealScreen({ event, isEventCurrent, onB
     if (!expected || dialogRef.current !== expected || !store.isCurrent(expected.context)) return;
     dialogRef.current = null; setDialog(null); setNotice(null); return store.mutate(expected.action);
   };
-  const refresh = () => { dialogRef.current = null; setDialog(null); autoAttempt.current = null; void store.refresh(); };
-  const errors = { session: 'Sessão inválida. Verifique sua sessão ou entre novamente.', denied: 'Acesso ao evento indisponível. Atualize seus eventos autorizados.',
-    network: 'Não foi possível conectar. Verifique sua conexão e atualize.', unavailable: 'Não foi possível consultar a fila de entrada. Tente atualizar.' };
+  const refresh = () => {
+    if (live.current.accessDenied) return;
+    dialogRef.current = null; setDialog(null); autoAttempt.current = null; void store.refresh();
+  };
   return <View style={styles.content}>
     <Text style={styles.title}>Controle de Entrada</Text>
     <Text style={styles.text}>Fila de acesso ao evento</Text>
@@ -128,7 +167,7 @@ export default function StaffEntryControlRealScreen({ event, isEventCurrent, onB
         : notice.outcome.code === 'ENTRY_NOT_FIRST' ? 'A fila mudou. Confira o primeiro participante na lista atualizada.' : 'A solicitação foi recusada pelo servidor. Confira o estado atualizado.'}</Text>}
     <Button label="Atualizar fila de entrada" disabled={snapshot.busy || snapshot.status === 'loading'} onPress={refresh} />
     <Button label="Voltar ao painel" onPress={onBack} />
-    <Modal transparent animationType="fade" visible={Boolean(dialog && store.isCurrent(dialog.context) && !snapshot.busy)}
+    <Modal transparent animationType="fade" visible={Boolean(!accessDenied && dialog && store.isCurrent(dialog.context) && !snapshot.busy)}
       onRequestClose={() => { dialogRef.current = null; setDialog(null); }}>
       <View style={styles.backdrop}><View style={styles.card} accessibilityViewIsModal>
         <Text style={styles.title}>{dialog?.action.kind !== 'toggle' ? ({call:'Chamar próximo participante?',confirm_call:'Confirmar entrada presencial?',absent:'Marcar ausência externa?',remove:'Remover da fila externa?'}[dialog?.action.kind] ?? '')

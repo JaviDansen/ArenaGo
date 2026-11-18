@@ -1,7 +1,11 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { loadModule } = require('./helpers/questionnaireHarness.cjs');
-const operations = loadModule('services/staffOperationsService.js', require).exports;
+const entryService = loadModule('services/staffEntryService.js', require).exports;
+const operations = loadModule('services/staffOperationsService.js', (name) => {
+  if (name === './staffEntryService.js' || name === './staffEntryService') return entryService;
+  return require(name);
+}).exports;
 const { createStaffDashboardStore } = loadModule('services/staffDashboardService.js', (name) => {
   if (name === './staffOperationsService') return operations;
   return require(name);
@@ -212,18 +216,28 @@ test('retorno da estação invalida consulta de fila ainda pendente', async () =
 const participantAId = '77777777-7777-4777-8777-777777777777';
 const participantBId = '99999999-9999-4999-8999-999999999999';
 const callId = '88888888-8888-4888-8888-888888888888';
-const entrySummary = (patch = {}) => ({
-  eventId,
-  externalQueueEnabled: true,
-  canManage: true,
-  observedAt: '2026-11-17T15:00:00.000Z',
-  waitingCount: 1,
-  waiting: [{ participationId: participantAId, displayName: 'Ana', position: 1 }],
-  pendingCall: null,
-  ...patch,
-});
+const entrySummary = (patch = {}) => {
+  const base = {
+    eventId,
+    externalQueueEnabled: true,
+    canManage: true,
+    observedAt: '2026-11-17T15:00:00.000Z',
+    waitingCount: 1,
+    waiting: [{ participationId: participantAId, displayName: 'Ana', position: 1 }],
+    pendingCall: null,
+    ...patch,
+  };
+  const hasCall = Boolean(base.pendingCall);
+  return {
+    canCall: base.canManage && base.externalQueueEnabled && !hasCall && base.waitingCount > 0,
+    canConfirm: base.canManage && base.externalQueueEnabled && hasCall,
+    canMarkAbsent: base.externalQueueEnabled && hasCall,
+    canRemove: base.externalQueueEnabled && hasCall,
+    ...base,
+  };
+};
 
-test('parseStaffEntrySummary valida fila externa ativa/inativa, pendingCall e consistência com waiting', () => {
+test('parseStaffEntrySummary reutiliza contrato oficial, exige campos obrigatórios e preserva janela residual', () => {
   const parsedWaiting = operations.parseStaffEntrySummary(entrySummary(), eventId);
   assert.equal(parsedWaiting.externalQueueEnabled, true);
   assert.equal(parsedWaiting.waitingCount, 1);
@@ -239,10 +253,6 @@ test('parseStaffEntrySummary valida fila externa ativa/inativa, pendingCall e co
         displayName: '  Carlos Silva  ',
         calledAt: '2026-11-17T15:01:00.000Z',
       },
-      canCall: false,
-      canConfirm: true,
-      canMarkAbsent: true,
-      canRemove: true,
     }),
     eventId,
   );
@@ -252,13 +262,54 @@ test('parseStaffEntrySummary valida fila externa ativa/inativa, pendingCall e co
   assert.equal(parsedCalled.pendingCall.calledAt, '2026-11-17T15:01:00.000Z');
   assert.equal(parsedCalled.waitingCount, 1);
 
+  const parsedInactive = operations.parseStaffEntrySummary(
+    entrySummary({
+      externalQueueEnabled: false,
+      waitingCount: 0,
+      waiting: [],
+      pendingCall: null,
+    }),
+    eventId,
+  );
+  assert.equal(parsedInactive.externalQueueEnabled, false);
+  assert.equal(parsedInactive.pendingCall, null);
+
+  // Regra da janela residual do backend: canManage=false não impede canMarkAbsent/canRemove quando há pendingCall
+  const parsedResidual = operations.parseStaffEntrySummary(
+    entrySummary({
+      externalQueueEnabled: true,
+      canManage: false,
+      waitingCount: 0,
+      waiting: [],
+      pendingCall: {
+        id: callId,
+        participationId: participantBId,
+        displayName: 'Carlos Residual',
+        calledAt: '2026-11-17T15:01:00.000Z',
+      },
+      canCall: false,
+      canConfirm: false,
+      canMarkAbsent: true,
+      canRemove: true,
+    }),
+    eventId,
+  );
+  assert.equal(parsedResidual.canManage, false);
+  assert.equal(parsedResidual.pendingCall.displayName, 'Carlos Residual');
+
   const withoutPendingCall = entrySummary();
   delete withoutPendingCall.pendingCall;
+  const withoutObservedAt = entrySummary();
+  delete withoutObservedAt.observedAt;
+  const withoutFlag = entrySummary();
+  delete withoutFlag.canRemove;
 
   for (const invalid of [
     null,
     {},
     withoutPendingCall,
+    withoutObservedAt,
+    withoutFlag,
     entrySummary({ pendingCall: undefined }),
     entrySummary({ eventId: otherEventId }),
     entrySummary({ waitingCount: 2 }),
@@ -283,12 +334,35 @@ test('parseStaffEntrySummary valida fila externa ativa/inativa, pendingCall e co
         { participationId: participantBId, displayName: 'Bia', position: 1 },
       ],
     }),
+    // Fila externa desativada é incompatível com chamada pendente ou fila aguardando
+    entrySummary({
+      externalQueueEnabled: false,
+      waitingCount: 0,
+      waiting: [],
+      pendingCall: { id: callId, participationId: participantBId, displayName: 'Bia', calledAt: '2026-11-17T15:02:00.000Z' },
+    }),
+    entrySummary({
+      externalQueueEnabled: false,
+      waitingCount: 1,
+      waiting: [{ participationId: participantAId, displayName: 'Ana', position: 1 }],
+      pendingCall: null,
+    }),
     entrySummary({
       pendingCall: { id: callId, participationId: participantBId, displayName: 'Carlos', calledAt: '2026-11-17T15:01:00.000Z' },
       canCall: true,
     }),
+    entrySummary({ waitingCount: 1, canCall: false }),
     entrySummary({ waitingCount: 0, waiting: [], canCall: true }),
     entrySummary({ canConfirm: true }),
+    entrySummary({
+      pendingCall: { id: callId, participationId: participantBId, displayName: 'Carlos', calledAt: '2026-11-17T15:01:00.000Z' },
+      canConfirm: false,
+    }),
+    entrySummary({
+      pendingCall: { id: callId, participationId: participantBId, displayName: 'Carlos', calledAt: '2026-11-17T15:01:00.000Z' },
+      canMarkAbsent: true,
+      canRemove: false,
+    }),
     entrySummary({ canCall: 'yes' }),
   ]) {
     assert.throws(() => operations.parseStaffEntrySummary(invalid, eventId));
@@ -314,19 +388,19 @@ test('refreshEntryControl e pollEntryControl isolam falhas parciais e descartam 
   });
 
   store.setContext(current);
-  await Promise.all([store.refreshStations(), store.refreshExperiences(), store.refreshEntryControl()]);
+  await store.refreshPanel();
   assert.equal(store.getSnapshot().entryStatus, 'ready');
   assert.equal(store.getSnapshot().entry.waitingCount, 1);
 
-  // Polling silencioso atualiza chamada pendente sem apagar estações
+  // Polling silencioso atualiza chamada pendente com fila ativa sem apagar estações
   entryOutcome = entrySummary({
-    externalQueueEnabled: false,
+    externalQueueEnabled: true,
     waitingCount: 0,
     waiting: [],
     pendingCall: { id: callId, participationId: participantBId, displayName: 'Bia', calledAt: '2026-11-17T15:02:00.000Z' },
   });
   await store.pollEntryControl();
-  assert.equal(store.getSnapshot().entry.externalQueueEnabled, false);
+  assert.equal(store.getSnapshot().entry.externalQueueEnabled, true);
   assert.equal(store.getSnapshot().entry.pendingCall.displayName, 'Bia');
   assert.equal(store.getSnapshot().entryError, null);
 
@@ -337,11 +411,24 @@ test('refreshEntryControl e pollEntryControl isolam falhas parciais e descartam 
   assert.equal(store.getSnapshot().entry.pendingCall.displayName, 'Bia');
   assert.equal(store.getSnapshot().entryError, 'stale');
 
+  // Retomada para fila desativada sem chamada pendente
+  entryOutcome = entrySummary({
+    externalQueueEnabled: false,
+    waitingCount: 0,
+    waiting: [],
+    pendingCall: null,
+  });
+  await store.pollEntryControl();
+  assert.equal(store.getSnapshot().entry.externalQueueEnabled, false);
+  assert.equal(store.getSnapshot().entry.pendingCall, null);
+  assert.equal(store.getSnapshot().entryError, null);
+
   // Falha parcial (500) em refreshEntryControl NÃO apaga stations nem experiences
   entryOutcome = Object.assign(new Error('unavailable'), { status: 500 });
   await store.refreshEntryControl();
   assert.equal(store.getSnapshot().entryStatus, 'error');
   assert.equal(store.getSnapshot().entryError, 'unavailable');
+  assert.equal(store.getSnapshot().accessLocked, false);
   assert.equal(store.getSnapshot().stations.length, 1, 'falha parcial não apaga estações');
   assert.equal(store.getSnapshot().experiences.length, 1, 'falha parcial não apaga experiências');
 
@@ -349,6 +436,7 @@ test('refreshEntryControl e pollEntryControl isolam falhas parciais e descartam 
   entryOutcome = Object.assign(new Error('401'), { status: 401 });
   await store.refreshEntryControl();
   assert.equal(store.getSnapshot().stationError, 'session');
+  assert.equal(store.getSnapshot().accessLocked, true);
   assert.equal(store.getSnapshot().stations.length, 0);
 
   // Troca de evento descarta resposta obsoleta de entrada pendente
@@ -397,7 +485,7 @@ test('pollEntryControl e pollStations recuperam automaticamente após falhas tra
   });
 
   store.setContext(current);
-  await Promise.all([store.refreshStations(), store.refreshExperiences(), store.refreshEntryControl()]);
+  await store.refreshPanel();
   assert.equal(store.getSnapshot().stationStatus, 'error');
   assert.equal(store.getSnapshot().stationError, 'unavailable');
   assert.equal(store.getSnapshot().entryStatus, 'error');
@@ -432,7 +520,7 @@ test('perda de autorização (403 e 404) em /entry-control limpa dados operacion
     // Caso A: 403/404 na carga inicial via refreshEntryControl invalida estações em voo e limpa dados
     const current = context();
     const stationsDeferred = deferred();
-    let entryOutcome = Object.assign(new Error(`http-${status}`), { status });
+    const entryOutcome = Object.assign(new Error(`http-${status}`), { status });
 
     const store = createStaffDashboardStore({
       getContext: () => current,
@@ -440,9 +528,7 @@ test('perda de autorização (403 e 404) em /entry-control limpa dados operacion
         get: (url) => {
           if (url.endsWith('/stations')) return stationsDeferred.promise;
           if (url.endsWith('/experiences')) return Promise.resolve({ eventId, experiences: [{ id: experienceId, name: 'Just Dance' }] });
-          if (url.endsWith('/entry-control')) {
-            return entryOutcome instanceof Error ? Promise.reject(entryOutcome) : Promise.resolve(entryOutcome);
-          }
+          if (url.endsWith('/entry-control')) return Promise.reject(entryOutcome);
           return Promise.reject(new Error(`URL inesperada: ${url}`));
         },
       },
@@ -455,6 +541,8 @@ test('perda de autorização (403 e 404) em /entry-control limpa dados operacion
     stationsDeferred.resolve(stations());
     await pendingStations;
 
+    assert.equal(store.getSnapshot().accessStatus, 'denied');
+    assert.equal(store.getSnapshot().accessLocked, true);
     assert.equal(store.getSnapshot().entryStatus, 'error');
     assert.equal(store.getSnapshot().entryError, 'denied');
     assert.equal(store.getSnapshot().stationError, 'denied');
@@ -462,26 +550,6 @@ test('perda de autorização (403 e 404) em /entry-control limpa dados operacion
     assert.equal(store.getSnapshot().stations.length, 0);
     assert.equal(store.getSnapshot().experiences.length, 0);
     assert.equal(store.getSnapshot().entry, null);
-
-    // Após revogação confirmada ('denied'), pollEntryControl e pollStations não continuam consultando
-    let extraPollCalls = 0;
-    const revokingStore = createStaffDashboardStore({
-      getContext: () => current,
-      client: {
-        get: (url) => {
-          if (url.endsWith('/stations')) return Promise.resolve(stations());
-          if (url.endsWith('/experiences')) return Promise.resolve({ eventId, experiences: [{ id: experienceId, name: 'Just Dance' }] });
-          if (url.endsWith('/entry-control')) {
-            extraPollCalls += 1;
-            return Promise.resolve(entrySummary());
-          }
-          return Promise.reject(new Error(`URL inesperada: ${url}`));
-        },
-      },
-    });
-    revokingStore.setContext(current);
-    await Promise.all([revokingStore.refreshStations(), revokingStore.refreshExperiences(), revokingStore.refreshEntryControl()]);
-    extraPollCalls = 0;
 
     // Caso B: revogação detectada durante pollEntryControl também limpa estações, experiências e entrada
     let pollStep = 0;
@@ -501,14 +569,12 @@ test('perda de autorização (403 e 404) em /entry-control limpa dados operacion
       },
     });
     storeRevokedOnPoll.setContext(current);
-    await Promise.all([
-      storeRevokedOnPoll.refreshStations(),
-      storeRevokedOnPoll.refreshExperiences(),
-      storeRevokedOnPoll.refreshEntryControl(),
-    ]);
+    await storeRevokedOnPoll.refreshPanel();
     assert.equal(storeRevokedOnPoll.getSnapshot().stations.length, 1);
 
     await storeRevokedOnPoll.pollEntryControl();
+    assert.equal(storeRevokedOnPoll.getSnapshot().accessLocked, true);
+    assert.equal(storeRevokedOnPoll.getSnapshot().accessStatus, 'denied');
     assert.equal(storeRevokedOnPoll.getSnapshot().entryError, 'denied');
     assert.equal(storeRevokedOnPoll.getSnapshot().stationError, 'denied');
     assert.equal(storeRevokedOnPoll.getSnapshot().experienceError, 'denied');
@@ -521,4 +587,141 @@ test('perda de autorização (403 e 404) em /entry-control limpa dados operacion
     await storeRevokedOnPoll.pollEntryControl();
     assert.equal(pollStep, 2);
   }
+});
+
+test('AUD-02: bloqueio de autorização sobrevive à revalidação, GET antigo 403/404 concorrente, 500 posterior e troca de evento/sessão', async () => {
+  // 1. Negativa seguida de atualização manual -> durante carregamento e se uma leitura retornar 500 permanece bloqueado
+  let current = context();
+  let mode = 'deny403';
+  const defStations = [];
+  const defExperiences = [];
+  const defEntry = [];
+
+  const store = createStaffDashboardStore({
+    getContext: () => current,
+    client: {
+      get: (url) => {
+        if (mode === 'deferred') {
+          const d = deferred();
+          if (url.endsWith('/stations')) defStations.push(d);
+          else if (url.endsWith('/experiences')) defExperiences.push(d);
+          else if (url.endsWith('/entry-control')) defEntry.push(d);
+          return d.promise;
+        }
+        if (mode === 'deny403') return Promise.reject(Object.assign(new Error('403'), { status: 403 }));
+        if (mode === 'err500') {
+          if (url.endsWith('/entry-control')) return Promise.reject(Object.assign(new Error('500'), { status: 500 }));
+          if (url.endsWith('/stations')) return Promise.resolve(stations());
+          return Promise.resolve({ eventId, experiences: [{ id: experienceId, name: 'Just Dance' }] });
+        }
+        if (url.endsWith('/stations')) return Promise.resolve(stations());
+        if (url.endsWith('/experiences')) return Promise.resolve({ eventId, experiences: [{ id: experienceId, name: 'Just Dance' }] });
+        return Promise.resolve(entrySummary());
+      },
+    },
+  });
+
+  store.setContext(current);
+  await store.refreshPanel();
+  assert.equal(store.getSnapshot().accessStatus, 'denied');
+  assert.equal(store.getSnapshot().accessLocked, true);
+
+  // Atualização manual enquanto pendente: mantém accessLocked=true e accessStatus='revalidating' mesmo após /stations resolver 200
+  mode = 'deferred';
+  const revalPromise = store.refreshPanel();
+  assert.equal(store.getSnapshot().accessStatus, 'revalidating');
+  assert.equal(store.getSnapshot().accessLocked, true);
+
+  defStations[0].resolve(stations());
+  defExperiences[0].resolve({ eventId, experiences: [{ id: experienceId, name: 'Just Dance' }] });
+  await Promise.resolve();
+  assert.equal(store.getSnapshot().accessLocked, true, 'não libera enquanto /entry-control ainda revalida');
+  assert.equal(store.getSnapshot().accessStatus, 'revalidating');
+  assert.equal(store.getSnapshot().stations.length, 0, 'não expõe estações antes de confirmação positiva completa');
+
+  // Atualização posterior retornando 500 NÃO pode desbloquear nem expor dados parciais
+  defEntry[0].reject(Object.assign(new Error('500'), { status: 500 }));
+  await revalPromise;
+  assert.equal(store.getSnapshot().accessLocked, true);
+  assert.equal(store.getSnapshot().accessStatus, 'denied');
+  assert.equal(store.getSnapshot().stations.length, 0);
+  assert.equal(store.getSnapshot().entry, null);
+
+  mode = 'err500';
+  await store.refreshPanel();
+  assert.equal(store.getSnapshot().accessLocked, true);
+  assert.equal(store.getSnapshot().accessStatus, 'denied');
+  assert.equal(store.getSnapshot().stations.length, 0);
+
+  // Recuperação SOMENTE após confirmação positiva 200 de todas as consultas
+  mode = 'ok';
+  await store.refreshPanel();
+  assert.equal(store.getSnapshot().accessLocked, false);
+  assert.equal(store.getSnapshot().accessStatus, 'granted');
+  assert.equal(store.getSnapshot().stations.length, 1);
+  assert.equal(store.getSnapshot().entry.waitingCount, 1);
+
+  // 2. GET antigo retornando 403/404 enquanto outro GET do mesmo contexto está em andamento invalida o GET em voo
+  const reqStations = [];
+  const reqEntry = [];
+  const concurrentStore = createStaffDashboardStore({
+    getContext: () => current,
+    client: {
+      get: (url) => {
+        const d = deferred();
+        if (url.endsWith('/stations')) reqStations.push(d);
+        else if (url.endsWith('/entry-control')) reqEntry.push(d);
+        else return Promise.resolve({ eventId, experiences: [{ id: experienceId, name: 'Just Dance' }] });
+        return d.promise;
+      },
+    },
+  });
+  concurrentStore.setContext(current);
+  const oldGet = concurrentStore.refreshEntryControl();
+  const newerGet = concurrentStore.refreshEntryControl();
+  const inFlightStations = concurrentStore.refreshStations();
+
+  // O GET antigo rejeita com 404 enquanto newerGet e inFlightStations ainda estão pendentes
+  reqEntry[0].reject(Object.assign(new Error('404'), { status: 404 }));
+  await oldGet;
+  // Mesmo se newerGet e inFlightStations resolverem 200 logo depois, respostas são descartadas e acesso permanece bloqueado
+  reqEntry[1].resolve(entrySummary());
+  reqStations[0].resolve(stations());
+  await Promise.all([newerGet, inFlightStations]);
+
+  assert.equal(concurrentStore.getSnapshot().accessLocked, true);
+  assert.equal(concurrentStore.getSnapshot().accessStatus, 'denied');
+  assert.equal(concurrentStore.getSnapshot().entry, null);
+  assert.equal(concurrentStore.getSnapshot().stations.length, 0);
+
+  // 3. Troca de evento e sessão durante revalidação reseta bloqueio para novo contexto e descarta atrasados
+  const oldRevokedDelay = deferred();
+  const switchStore = createStaffDashboardStore({
+    getContext: () => current,
+    client: {
+      get: (url) => {
+        if (url.includes(eventId)) return oldRevokedDelay.promise;
+        if (url.endsWith('/stations')) return Promise.resolve(stations(otherEventId));
+        if (url.endsWith('/experiences')) return Promise.resolve({ eventId: otherEventId, experiences: [{ id: experienceId, name: 'VR' }] });
+        return Promise.resolve({ ...entrySummary(), eventId: otherEventId });
+      },
+    },
+  });
+  switchStore.setContext(current);
+  const pendingOld = switchStore.refreshEntryControl();
+  current = context(otherEventId, 'b', 2);
+  switchStore.setContext(current);
+  oldRevokedDelay.reject(Object.assign(new Error('403'), { status: 403 }));
+  await pendingOld;
+  assert.equal(switchStore.getSnapshot().accessLocked, false, 'negativa atrasada de outro evento/sessão não bloqueia novo contexto');
+  await switchStore.refreshPanel();
+  assert.equal(switchStore.getSnapshot().accessStatus, 'granted');
+  assert.equal(switchStore.getSnapshot().stations[0].eventId ?? otherEventId, otherEventId);
+
+  // 4. reportAccessDenied propaga perda confirmada pela subtela de Entrada
+  switchStore.reportAccessDenied('denied');
+  assert.equal(switchStore.getSnapshot().accessLocked, true);
+  assert.equal(switchStore.getSnapshot().accessStatus, 'denied');
+  assert.equal(switchStore.getSnapshot().stations.length, 0);
+  assert.equal(switchStore.getSnapshot().entry, null);
 });

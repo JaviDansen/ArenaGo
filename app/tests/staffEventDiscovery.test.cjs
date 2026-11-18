@@ -393,7 +393,11 @@ function createStaffUiHarness({ initialAuth, onGet, onLogout }) {
   let authState = initialAuth;
 
   const eventsSvc = loadModule('services/staffEventsService.js', require).exports;
-  const opsSvc = loadModule('services/staffOperationsService.js', require).exports;
+  const entrySvc = loadModule('services/staffEntryService.js', require).exports;
+  const opsSvc = loadModule('services/staffOperationsService.js', (name) => {
+    if (name === './staffEntryService.js' || name === './staffEntryService') return entrySvc;
+    return require(name);
+  }).exports;
   const dashSvc = loadModule('services/staffDashboardService.js', (name) => {
     if (name === './staffOperationsService') return opsSvc;
     return require(name);
@@ -527,6 +531,17 @@ function createStaffUiHarness({ initialAuth, onGet, onLogout }) {
     },
     textOccurrences(exact) {
       return this.allTexts().filter((t) => t === exact).length;
+    },
+    metricValueFor(label) {
+      const cell = findAllByType('View').find((v) => {
+        const ch = [].concat(v.props?.children ?? [])
+          .filter((c) => c && typeof c === 'object' && c.type === 'Text');
+        return ch.length === 2 && textOf(ch[1]) === label;
+      });
+      assert.ok(cell, `célula do indicador "${label}" não encontrada`);
+      const ch = [].concat(cell.props.children)
+        .filter((c) => c && typeof c === 'object' && c.type === 'Text');
+      return textOf(ch[0]);
     },
     isDisabled(label) {
       const matches = findAllByType('Pressable')
@@ -693,11 +708,16 @@ test('STAFF-01 UI (10.2): Painel Operacional exibe resumo real, Controle de Entr
       }
       if (url === `/staff/events/${EV_A}/entry-control`) {
         if (failEntry) return Promise.reject(Object.assign(new Error('unavailable'), { status: 500 }));
+        const hasCall = Boolean(entryPendingCall);
         return Promise.resolve({
           eventId: EV_A,
           externalQueueEnabled,
           canManage: true,
           observedAt: '2026-11-17T15:00:00.000Z',
+          canCall: externalQueueEnabled && !hasCall && waitingCount > 0,
+          canConfirm: externalQueueEnabled && hasCall,
+          canMarkAbsent: externalQueueEnabled && hasCall,
+          canRemove: externalQueueEnabled && hasCall,
           waitingCount,
           waiting: waitingCount === 2
             ? [
@@ -729,6 +749,10 @@ test('STAFF-01 UI (10.2): Painel Operacional exibe resumo real, Controle de Entr
           externalQueueEnabled: false,
           canManage: true,
           observedAt: '2026-11-17T15:00:00.000Z',
+          canCall: false,
+          canConfirm: false,
+          canMarkAbsent: false,
+          canRemove: false,
           waitingCount: 0,
           waiting: [],
           pendingCall: null,
@@ -750,13 +774,10 @@ test('STAFF-01 UI (10.2): Painel Operacional exibe resumo real, Controle de Entr
     assert.ok(!rig.hasText('128'), 'não exibe contagem fictícia do mockup');
     assert.ok(!rig.hasText('05 de dez'), 'não exibe data fictícia do mockup');
 
-    // 2. Métricas reais do resumo (2 disponíveis de 3 estações, 1 em atendimento, 2 na fila externa)
-    assert.ok(rig.hasText('Estações ativas'));
-    assert.ok(rig.hasText('Em atendimento'));
-    assert.ok(rig.hasText('Fila externa'));
-    assert.equal(rig.textOccurrences('2/3'), 1, 'métrica real de estações ativas');
-    assert.equal(rig.textOccurrences('1'), 1, 'métrica real de estações em atendimento');
-    assert.equal(rig.textOccurrences('2'), 1, 'métrica real da fila externa');
+    // 2. Métricas reais verificadas diretamente no rótulo correspondente (AUD-05)
+    assert.equal(rig.metricValueFor('Estações ativas'), '2/3', 'métrica real de estações ativas');
+    assert.equal(rig.metricValueFor('Em atendimento'), '1', 'métrica real de estações em atendimento');
+    assert.equal(rig.metricValueFor('Fila externa'), '2', 'métrica real da fila externa');
     assert.ok(rig.pollingRegistrations.some((r) => r.intervalMs === 5000 && r.enabled === true));
 
     // 3. Controle de Entrada diferencia chamada pendente e fila ativa
@@ -787,6 +808,7 @@ test('STAFF-01 UI (10.2): Painel Operacional exibe resumo real, Controle de Entr
     await rig.settle();
     assert.ok(rig.hasText('Fila externa desativada · entrada direta'));
     assert.ok(rig.hasText('FILA INATIVA'));
+    assert.equal(rig.metricValueFor('Fila externa'), '0');
 
     // 6. Falha parcial em /entry-control mostra indisponível sem apagar experiências/estações e mantém card navegável
     failEntry = true;
@@ -794,6 +816,7 @@ test('STAFF-01 UI (10.2): Painel Operacional exibe resumo real, Controle de Entr
     await rig.settle();
     assert.ok(rig.hasText('Estado da fila externa indisponível'));
     assert.ok(rig.hasText('INDISPONÍVEL'));
+    assert.equal(rig.metricValueFor('Fila externa'), '—');
     assert.equal(rig.isDisabled('Controle de Entrada'), false);
     assert.ok(rig.hasText('Just Dance'), 'estações/experiências preservadas em falha parcial');
 
@@ -818,14 +841,22 @@ test('STAFF-01 UI (10.2): Painel Operacional exibe resumo real, Controle de Entr
   }
 });
 
-test('STAFF-01 UI (10.3): Recuperação automática de /entry-control, rejeição de pendingCall inválido e perda de autorização (403/404)', async () => {
+test('STAFF-01 UI (10.3): Recuperação automática de /entry-control, rejeição de payload inválido e bloqueio persistente após 403/404', async () => {
   let stationsMode = 'error500';
   let entryMode = 'error500';
+  let expCalls = 0;
+  let includeMissingExp = false;
+  let stationsIncludeUnknownExp = false;
+  const EXP_NEW = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
   const entryPayload = (patch = {}) => ({
     eventId: EV_A,
     externalQueueEnabled: true,
     canManage: true,
     observedAt: '2026-11-17T15:00:00.000Z',
+    canCall: true,
+    canConfirm: false,
+    canMarkAbsent: false,
+    canRemove: false,
     waitingCount: 1,
     waiting: [{ participationId: PART_WAIT_1, displayName: 'Ana', position: 1 }],
     pendingCall: null,
@@ -841,17 +872,18 @@ test('STAFF-01 UI (10.3): Recuperação automática de /entry-control, rejeiçã
         });
       }
       if (url === `/staff/events/${EV_A}/experiences`) {
-        return Promise.resolve({
-          eventId: EV_A,
-          experiences: [{ id: EXP_1, name: 'Just Dance' }],
-        });
+        expCalls += 1;
+        const list = [{ id: EXP_1, name: 'Just Dance' }];
+        if (includeMissingExp) list.push({ id: EXP_NEW, name: 'Nova Arena VR' });
+        return Promise.resolve({ eventId: EV_A, experiences: list });
       }
       if (url === `/staff/events/${EV_A}/stations`) {
         if (stationsMode === 'error500') return Promise.reject(Object.assign(new Error('stations-500'), { status: 500 }));
-        return Promise.resolve({
-          eventId: EV_A,
-          stations: [{ id: ST_1, experienceId: EXP_1, label: 'Estação 01', availability: 'available', pendingServiceSessionId: null }],
-        });
+        const list = [{ id: ST_1, experienceId: EXP_1, label: 'Estação 01', availability: 'available', pendingServiceSessionId: null }];
+        if (stationsIncludeUnknownExp) {
+          list.push({ id: ST_2, experienceId: EXP_NEW, label: 'Estação VR', availability: 'available', pendingServiceSessionId: null });
+        }
+        return Promise.resolve({ eventId: EV_A, stations: list });
       }
       if (url === `/staff/events/${EV_A}/entry-control`) {
         if (entryMode === 'error500') return Promise.reject(Object.assign(new Error('entry-500'), { status: 500 }));
@@ -864,6 +896,10 @@ test('STAFF-01 UI (10.3): Recuperação automática de /entry-control, rejeiçã
         }
         if (entryMode === 'inconsistentCall') {
           return Promise.resolve(entryPayload({
+            canCall: false,
+            canConfirm: true,
+            canMarkAbsent: true,
+            canRemove: true,
             pendingCall: {
               id: CALL_1,
               participationId: PART_WAIT_1,
@@ -894,6 +930,7 @@ test('STAFF-01 UI (10.3): Recuperação automática de /entry-control, rejeiçã
     await rig.triggerPolling(':entry:');
     assert.ok(rig.hasText('1 pessoa aguardando na entrada'));
     assert.ok(rig.hasText('FILA ATIVA'));
+    assert.equal(rig.metricValueFor('Fila externa'), '1');
 
     // 2. Respostas com pendingCall ausente ou inconsistente com waiting são rejeitadas como inválidas
     entryMode = 'missingPendingCall';
@@ -906,16 +943,32 @@ test('STAFF-01 UI (10.3): Recuperação automática de /entry-control, rejeiçã
     await rig.triggerPolling(':entry:');
     assert.ok(rig.hasText('Estado da fila externa indisponível'));
 
-    // Carrega painel saudável com estações visíveis antes de simular revogação
+    // 3. Revalidação controlada de experiência desconhecida sem loop infinito (AUD-04)
     stationsMode = 'ready';
+    stationsIncludeUnknownExp = true;
+    includeMissingExp = false;
     entryMode = 'ready';
+    expCalls = 0;
     await rig.press('Atualizar estações');
     await rig.settle();
-    assert.ok(rig.hasText('Just Dance'));
-    assert.ok(rig.hasText('Estação 01'));
-    assert.equal(rig.isDisabled('Controle de Entrada'), false);
+    // Uma chamada manual (/experiences) + 1 revalidação controlada de órfã = 2
+    assert.equal(expCalls, 2);
+    assert.ok(rig.hasText('Experiência não vinculada'));
+    assert.ok(rig.hasText('Estação VR'));
 
-    // 3. Perda de autorização (403 no polling) limpa dados protegidos da tela, bloqueia entrada e desliga polling
+    // Novos ciclos de polling de estações com a mesma inconsistência NÃO disparam novas leituras de /experiences
+    await rig.triggerPolling(':stations:');
+    await rig.triggerPolling(':stations:');
+    assert.equal(expCalls, 2, 'não entra em loop de consultas diante de inconsistência persistente');
+
+    // Ao atualizar manualmente quando a nova experiência passa a existir, vínculo é confirmado
+    includeMissingExp = true;
+    await rig.press('Atualizar estações');
+    await rig.settle();
+    assert.ok(rig.hasText('Nova Arena VR'));
+    assert.ok(!rig.hasText('Experiência não vinculada'));
+
+    // 4. Perda de autorização (403 no polling) limpa dados protegidos da tela, bloqueia entrada e desliga polling
     entryMode = 'forbidden403';
     await rig.triggerPolling(':entry:');
     assert.ok(!rig.hasText('Just Dance'), 'experiências protegidas removidas após 403');
@@ -925,13 +978,29 @@ test('STAFF-01 UI (10.3): Recuperação automática de /entry-control, rejeiçã
     assert.equal(rig.isDisabled('Controle de Entrada'), true);
     assert.equal(rig.latestPolling(':entry:')?.enabled, false);
 
-    // 404 na carga manual também revoga e bloqueia o Controle de Entrada
+    // 5. Atualização manual recebendo 500 posterior NÃO reabilita acesso negado (AUD-02)
+    entryMode = 'error500';
+    await rig.press('Atualizar estações');
+    await rig.settle();
+    assert.ok(!rig.hasText('Just Dance'));
+    assert.ok(rig.hasText('SEM ACESSO'));
+    assert.equal(rig.isDisabled('Controle de Entrada'), true);
+
+    // 404 na carga manual também mantém revogação e bloqueio
     entryMode = 'notfound404';
     await rig.press('Atualizar estações');
     await rig.settle();
     assert.ok(!rig.hasText('Just Dance'));
     assert.ok(rig.hasText('SEM ACESSO'));
     assert.equal(rig.isDisabled('Controle de Entrada'), true);
+
+    // Confirmação positiva 200 restaura painel e card
+    entryMode = 'ready';
+    await rig.press('Atualizar estações');
+    await rig.settle();
+    assert.ok(rig.hasText('Just Dance'));
+    assert.ok(rig.hasText('FILA ATIVA'));
+    assert.equal(rig.isDisabled('Controle de Entrada'), false);
   } finally {
     rig.dispose();
   }

@@ -1,9 +1,8 @@
 /** Operações reais de Staff. Sem navegação, estado fictício ou acesso direto ao banco. */
+import { parseEntryState } from './staffEntryService.js';
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const isUuid = (s) => typeof s === 'string' && UUID.test(s);
-const isInstant = (value) => typeof value === 'string'
-  && Number.isFinite(Date.parse(value))
-  && new Date(value).toISOString() === value;
 const bad = (message) => new Error(message);
 
 function requireIds(...ids) {
@@ -64,53 +63,20 @@ export function parseStaffQueue(body, eventId, experienceId) {
 
 export function parseStaffEntrySummary(body, eventId) {
   requireIds(eventId);
-  if (body?.eventId !== eventId || typeof body.externalQueueEnabled !== 'boolean'
-      || typeof body.canManage !== 'boolean'
-      || !Number.isSafeInteger(body.waitingCount) || body.waitingCount < 0
-      || !Array.isArray(body.waiting) || body.waiting.length !== body.waitingCount
-      || (body.observedAt !== undefined && !isInstant(body.observedAt))
-      || body.pendingCall === undefined) {
-    throw bad('Resposta inválida do Controle de Entrada.');
-  }
-  const seen = new Set();
-  for (let index = 0; index < body.waiting.length; index += 1) {
-    const row = body.waiting[index];
-    if (!isUuid(row?.participationId) || seen.has(row.participationId.toLowerCase())
-        || typeof row.displayName !== 'string' || !row.displayName.trim()
-        || row.position !== index + 1) {
-      throw bad('Resposta inválida do Controle de Entrada.');
-    }
-    seen.add(row.participationId.toLowerCase());
-  }
-  const call = body.pendingCall;
-  if (call !== null && (!isUuid(call?.id) || !isUuid(call?.participationId)
-      || seen.has(call.participationId.toLowerCase())
-      || typeof call?.displayName !== 'string' || !call.displayName.trim()
-      || !isInstant(call?.calledAt))) {
-    throw bad('Resposta inválida do Controle de Entrada.');
-  }
-  for (const flag of ['canCall', 'canConfirm', 'canMarkAbsent', 'canRemove']) {
-    if (body[flag] !== undefined && typeof body[flag] !== 'boolean') {
-      throw bad('Resposta inválida do Controle de Entrada.');
-    }
-  }
-  if ((body.canCall === true && (call !== null || !body.externalQueueEnabled || !body.canManage || body.waitingCount === 0))
-      || (body.canConfirm === true && (call === null || !body.externalQueueEnabled || !body.canManage))
-      || ((body.canMarkAbsent === true || body.canRemove === true) && (call === null || !body.externalQueueEnabled))) {
-    throw bad('Resposta inválida do Controle de Entrada.');
-  }
-  const pendingCall = call ? {
-    id: call.id,
-    participationId: call.participationId,
-    displayName: call.displayName.trim(),
-    calledAt: call.calledAt,
-  } : null;
+  const entry = parseEntryState(body, eventId);
+  const call = entry.pendingCall;
   return {
-    eventId,
-    externalQueueEnabled: body.externalQueueEnabled,
-    canManage: body.canManage,
-    waitingCount: body.waitingCount,
-    pendingCall,
+    eventId: entry.eventId,
+    externalQueueEnabled: entry.externalQueueEnabled,
+    canManage: entry.canManage,
+    observedAt: entry.observedAt,
+    waitingCount: entry.waitingCount,
+    pendingCall: call ? {
+      id: call.id,
+      participationId: call.participationId,
+      displayName: call.displayName.trim(),
+      calledAt: call.calledAt,
+    } : null,
   };
 }
 

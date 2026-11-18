@@ -82,10 +82,42 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
     return { ok: status >= 200 && status < 300, status, headers: { get: () => null },
       text: async () => JSON.stringify(value.body ?? value) };
   } });
+  const appStateListeners = new Set();
+  const focusListeners = new Set();
+  let screenFocused = true;
+  const origSetTimeout = globalThis.setTimeout;
+  const origClearTimeout = globalThis.clearTimeout;
+  const manualTimers = new Map();
+  let manualNow = 0;
+  let manualTimerSerial = 0;
+  if (control.manualTimers) {
+    globalThis.setTimeout = (fn, delay = 0, ...rest) => {
+      if (delay >= 500) {
+        const id = ++manualTimerSerial;
+        manualTimers.set(id, { fn: () => fn(...rest), due: manualNow + delay });
+        return { __manualId: id };
+      }
+      return origSetTimeout(fn, delay, ...rest);
+    };
+    globalThis.clearTimeout = (handle) => {
+      if (handle && typeof handle === 'object' && handle.__manualId) {
+        manualTimers.delete(handle.__manualId);
+        return;
+      }
+      origClearTimeout(handle);
+    };
+  }
+
   const passthrough = ({ children }) => children;
   const native = Object.fromEntries(['ActivityIndicator', 'KeyboardAvoidingView', 'Modal', 'Pressable', 'ScrollView', 'Text', 'TextInput', 'View'].map((name) => [name, name]));
   native.StyleSheet = { create: (styles) => styles };
-  native.AppState = { currentState: 'active', addEventListener: () => ({ remove() {} }) };
+  native.AppState = {
+    currentState: 'active',
+    addEventListener: (_, listener) => {
+      appStateListeners.add(listener);
+      return { remove: () => appStateListeners.delete(listener) };
+    },
+  };
   native.Platform = { OS: control.platformOS ?? 'web' };
   function FocusedStack(props) {
     const { state, descriptors, NavigationContent } = Navigation.useNavigationBuilder(StackRouter, props);
@@ -104,8 +136,24 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
       if (name === 'expo-secure-store') return control.secureStore ?? {};
       if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView', SafeAreaProvider: passthrough };
       if (name === '@react-navigation/native-stack') return { createNativeStackNavigator: Navigation.createNavigatorFactory(FocusedStack) };
-      if (name === '@react-navigation/native') return { useIsFocused: () => true, NavigationContainer: ({ children }) =>
-        React.createElement(Navigation.BaseNavigationContainer, { ref: navRef, onUnhandledAction: (action) => unhandled.push(action) }, children) };
+      if (name === '@react-navigation/native') {
+        return {
+          useIsFocused: () => {
+            const [, bump] = React.useState(0);
+            React.useEffect(() => {
+              const fn = () => bump((n) => n + 1);
+              focusListeners.add(fn);
+              return () => focusListeners.delete(fn);
+            }, []);
+            return screenFocused;
+          },
+          NavigationContainer: ({ children }) => React.createElement(
+            Navigation.BaseNavigationContainer,
+            { ref: navRef, onUnhandledAction: (action) => unhandled.push(action) },
+            children,
+          ),
+        };
+      }
       const target = path.posix.normalize(path.posix.join(directory, name));
       if (target === 'components/ui/AuthBackground') {
         return { AuthBackground: ({ children, ...props }) => React.createElement('View', props, children) };
@@ -172,12 +220,55 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
       assert.equal(buttons.length, 1, `botão ${label}`);
       await Renderer.act(async () => { await buttons[0].props.onPress(); });
     },
+    isDisabled(label) {
+      const buttons = tree.root.findAllByType('Pressable').filter((node) => node.props.accessibilityLabel === label);
+      assert.equal(buttons.length, 1, `botão ${label}`);
+      return Boolean(buttons[0].props.disabled);
+    },
+    metricValueFor(label) {
+      const flatten = (value) => Array.isArray(value) ? value.map(flatten).join('')
+        : value && typeof value === 'object' ? flatten(value.props?.children) : String(value ?? '');
+      const cell = tree.root.findAllByType('View').find((v) => {
+        const ch = (v.children ?? []).filter((c) => c && typeof c === 'object' && c.type === 'Text');
+        return ch.length === 2 && flatten(ch[1].props.children) === label;
+      });
+      assert.ok(cell, `indicador "${label}" não encontrado`);
+      const ch = cell.children.filter((c) => c && typeof c === 'object' && c.type === 'Text');
+      return flatten(ch[0].props.children);
+    },
+    async setFocus(nextFocused) {
+      screenFocused = nextFocused;
+      await Renderer.act(async () => {
+        for (const fn of [...focusListeners]) fn();
+      });
+    },
+    async setAppState(nextState) {
+      native.AppState.currentState = nextState;
+      await Renderer.act(async () => {
+        for (const listener of [...appStateListeners]) listener(nextState);
+      });
+    },
+    pendingTimersCount() { return manualTimers.size; },
+    async tickTimers(ms) {
+      manualNow += ms;
+      const due = [...manualTimers.entries()].filter(([, t]) => t.due <= manualNow);
+      for (const [id] of due) manualTimers.delete(id);
+      await Renderer.act(async () => {
+        for (const [, timer] of due) await timer.fn();
+        await new Promise((resolve) => origSetTimeout(resolve, 0));
+      });
+    },
     modal() { return tree.root.findByType('Modal'); },
     hasButton(label) { return tree.root.findAllByType('Pressable').some(node => node.props.accessibilityLabel === label); },
     handler(label) { return tree.root.findAllByType('Pressable').find(node => node.props.accessibilityLabel === label).props.onPress; },
     confirmHandler() { return tree.root.findAllByType('Pressable')
       .find((node) => node.props.accessibilityLabel === 'CONFIRMAR').props.onPress; },
-    dispose() { Renderer.act(() => tree.unmount()); },
+    dispose() {
+      try { if (tree) Renderer.act(() => tree.unmount()); } finally {
+        globalThis.setTimeout = origSetTimeout;
+        globalThis.clearTimeout = origClearTimeout;
+      }
+    },
   };
 }
 
@@ -1032,4 +1123,358 @@ test('401 terminal no Controle de Entrada remove lista nominal e área Staff', {
   await app.press('Selecionar evento Evento autorizado'); await app.press('Controle de Entrada'); assert.ok(app.hasText('1. Ana'));
   revoked = true; await app.press('Atualizar fila de entrada');
   assert.equal(app.route(), 'Login'); assert.ok(!app.hasText('1. Ana')); app.dispose();
+});
+
+test('AUD-01 + AUD-05: perda de autorização propaga entre painel e Controle de Entrada, fecha modal, invalida callbacks e preserva intenção persistida', { skip }, async () => {
+  const at = '2026-11-10T15:00:00.000Z';
+  const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
+
+  // Parte A: Controle de Entrada aberto detecta 403 em polling -> fecha modal, invalida callback e propaga bloqueio ao painel
+  let denyEntry = false;
+  let mutations = 0;
+  const app = createIntegration({
+    initialUser: staffUser,
+    control: {
+      realStaff: true,
+      manualTimers: true,
+      platformOS: 'android',
+      events: [staffEvent],
+      stations: [realStation],
+      experiences: [{ id: realExperienceId, name: 'Experiência real' }],
+      secureStore: { isAvailableAsync: async () => true, getItemAsync: async () => null, setItemAsync: async () => {} },
+      http: async (route, options) => {
+        if (!route.includes('/entry-control')) return undefined;
+        if (options.method !== 'GET') { mutations += 1; return { statusCode: 500, body: { code: 'UNEXPECTED' } }; }
+        if (denyEntry) return { statusCode: 403, body: { code: 'STAFF_EVENT_FORBIDDEN' } };
+        return {
+          eventId: staffEvent.id,
+          externalQueueEnabled: true,
+          canManage: true,
+          observedAt: at,
+          pendingCall: null,
+          canCall: true,
+          canConfirm: false,
+          canMarkAbsent: false,
+          canRemove: false,
+          waitingCount: 2,
+          waiting: [
+            { participationId: 'abcdef00-0000-4000-8000-000000000004', displayName: 'Ana', position: 1 },
+            { participationId: 'abcdef00-0000-4000-8000-000000000005', displayName: 'Bia', position: 2 },
+          ],
+        };
+      },
+    },
+  });
+  try {
+    await app.mount();
+    await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
+    await app.press('Selecionar evento Evento autorizado');
+    await app.press('Controle de Entrada');
+    assert.ok(app.hasText('1. Ana'));
+    assert.ok(app.hasText('2. Bia'));
+    await app.press('Desativar fila externa');
+    assert.equal(app.modal().props.visible, true);
+    const staleConfirm = app.handler('CONFIRMAR ALTERAÇÃO');
+
+    denyEntry = true;
+    await app.tickTimers(5000);
+    assert.ok(!app.hasText('1. Ana'));
+    assert.ok(!app.hasText('2. Bia'));
+    assert.equal(app.modal().props.visible, false);
+    await app.act(async () => staleConfirm());
+    assert.equal(mutations, 0, 'callback antigo não dispara mutação após 403');
+    assert.ok(app.hasText('Acesso ao evento indisponível'));
+    assert.equal(app.manager.getSnapshot().isAuthenticated, true, 'recusa no evento não invalida a sessão global');
+
+    await app.press('Voltar ao painel');
+    assert.ok(app.hasText('Painel operacional'));
+    assert.ok(!app.hasText('Estação real'));
+    assert.ok(app.hasText('SEM ACESSO'));
+    assert.equal(app.isDisabled('Controle de Entrada'), true);
+  } finally {
+    app.dispose();
+  }
+
+  // Parte B: Negativa identificada pelo painel em voo propaga à subtela aberta e preserva intenção dispatching persistida
+  const values = new Map();
+  let pendingStationsFlight = null;
+  let postOffline = false;
+  let posts = 0;
+  const appPanelRevoke = createIntegration({
+    initialUser: staffUser,
+    control: {
+      realStaff: true,
+      platformOS: 'android',
+      events: [staffEvent],
+      experiences: [{ id: realExperienceId, name: 'Experiência real' }],
+      secureStore: {
+        isAvailableAsync: async () => true,
+        getItemAsync: async (k) => values.get(k) ?? null,
+        setItemAsync: async (k, v) => { values.set(k, v); },
+      },
+      http: async (route, options) => {
+        if (route.endsWith('/stations')) {
+          if (pendingStationsFlight) return pendingStationsFlight.promise;
+          return { eventId: staffEvent.id, stations: [realStation] };
+        }
+        if (!route.includes('/entry-control')) return undefined;
+        if (options.method === 'POST') {
+          posts += 1;
+          if (postOffline) throw Object.assign(new Error('offline'), { isNetworkError: true });
+        }
+        return {
+          eventId: staffEvent.id,
+          externalQueueEnabled: true,
+          canManage: true,
+          observedAt: at,
+          pendingCall: null,
+          canCall: true,
+          canConfirm: false,
+          canMarkAbsent: false,
+          canRemove: false,
+          waitingCount: 1,
+          waiting: [{ participationId: 'abcdef00-0000-4000-8000-000000000004', displayName: 'Ana', position: 1 }],
+        };
+      },
+    },
+  });
+  try {
+    await appPanelRevoke.mount();
+    await appPanelRevoke.act(() => appPanelRevoke.manager.login({ email: staffUser.email, password: 'ficticia' }));
+    await appPanelRevoke.press('Selecionar evento Evento autorizado');
+    pendingStationsFlight = deferred();
+    await appPanelRevoke.press('Atualizar estações');
+    await appPanelRevoke.press('Controle de Entrada');
+    postOffline = true;
+    await appPanelRevoke.press('Chamar próximo');
+    assert.equal(posts, 1);
+    assert.ok([...values.values()].some((raw) => raw.includes('dispatching')));
+
+    // O GET em voo do painel (/stations) rejeita com 404 enquanto a subtela de Controle de Entrada está aberta
+    await appPanelRevoke.act(async () => {
+      pendingStationsFlight.resolve({ statusCode: 404, body: { code: 'RESOURCE_NOT_FOUND' } });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    assert.ok(!appPanelRevoke.hasText('1. Ana'), 'informação nominal removida imediatamente na subtela aberta');
+    assert.ok(appPanelRevoke.hasText('Acesso ao evento indisponível'));
+    assert.equal(appPanelRevoke.hasButton('Chamar próximo'), false);
+    assert.ok([...values.values()].some((raw) => raw.includes('dispatching')),
+      'intenção persistida necessária à recuperação segura permanece intacta');
+  } finally {
+    appPanelRevoke.dispose();
+  }
+});
+
+test('AUD-02 + AUD-05: bloqueio persiste em atualização manual, GET 403 concorrente, 500 posterior e troca de evento', { skip }, async () => {
+  const at = '2026-11-10T15:00:00.000Z';
+  const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
+  const secondEvent = { id: '22222222-2222-4222-8222-222222222222', name: 'Segundo Evento', status: 'open', effectivePhase: 'open' };
+  let mode = 'deny403';
+  const defEntry = [];
+  const defStations = [];
+
+  const app = createIntegration({
+    initialUser: staffUser,
+    control: {
+      realStaff: true,
+      events: [staffEvent, secondEvent],
+      experiences: [{ id: realExperienceId, name: 'Experiência real' }],
+      http: async (route) => {
+        if (route === `/staff/events/${secondEvent.id}/experiences`) {
+          return { eventId: secondEvent.id, experiences: [{ id: realExperienceId, name: 'Outra Arena' }] };
+        }
+        if (route === `/staff/events/${secondEvent.id}/stations`) {
+          return { eventId: secondEvent.id, stations: [{ ...realStation, label: 'Estação B' }] };
+        }
+        if (route === `/staff/events/${secondEvent.id}/entry-control`) {
+          return {
+            eventId: secondEvent.id, externalQueueEnabled: true, canManage: true, observedAt: at,
+            pendingCall: null, canCall: true, canConfirm: false, canMarkAbsent: false, canRemove: false,
+            waitingCount: 1, waiting: [{ participationId: 'abcdef00-0000-4000-8000-000000000004', displayName: 'Ana', position: 1 }],
+          };
+        }
+        if (mode === 'deny403' && route.endsWith('/entry-control')) {
+          return { statusCode: 403, body: { code: 'FORBIDDEN' } };
+        }
+        if (mode === 'deferred') {
+          if (route.endsWith('/stations')) { const d = deferred(); defStations.push(d); return d.promise; }
+          if (route.endsWith('/entry-control')) { const d = deferred(); defEntry.push(d); return d.promise; }
+        }
+        if (mode === 'err500' && route.endsWith('/entry-control')) {
+          return { statusCode: 500, body: { code: 'INTERNAL_SERVER_ERROR' } };
+        }
+        if (route.endsWith('/stations')) return { eventId: staffEvent.id, stations: [realStation] };
+        if (route.endsWith('/entry-control')) {
+          return {
+            eventId: staffEvent.id, externalQueueEnabled: true, canManage: true, observedAt: at,
+            pendingCall: null, canCall: true, canConfirm: false, canMarkAbsent: false, canRemove: false,
+            waitingCount: 1, waiting: [{ participationId: 'abcdef00-0000-4000-8000-000000000004', displayName: 'Ana', position: 1 }],
+          };
+        }
+        return undefined;
+      },
+    },
+  });
+
+  try {
+    await app.mount();
+    await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
+    await app.press('Selecionar evento Evento autorizado');
+    assert.ok(!app.hasText('Estação real'));
+    assert.ok(app.hasText('SEM ACESSO'));
+    assert.equal(app.isDisabled('Controle de Entrada'), true);
+
+    // Atualização manual pendente NÃO habilita card antes de confirmação positiva completa
+    mode = 'deferred';
+    await app.press('Atualizar estações');
+    assert.equal(app.isDisabled('Controle de Entrada'), true);
+    assert.ok(app.hasText('SEM ACESSO'));
+    await app.act(async () => {
+      defStations[0].resolve({ eventId: staffEvent.id, stations: [realStation] });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    assert.ok(!app.hasText('Estação real'), 'não expõe estações enquanto entrada ainda revalida');
+    assert.equal(app.isDisabled('Controle de Entrada'), true);
+
+    // 500 posterior na revalidação NÃO desbloqueia acesso negado
+    await app.act(async () => {
+      defEntry[0].resolve({ statusCode: 500, body: { code: 'INTERNAL_SERVER_ERROR' } });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    assert.ok(!app.hasText('Estação real'));
+    assert.equal(app.isDisabled('Controle de Entrada'), true);
+
+    mode = 'err500';
+    await app.press('Atualizar estações');
+    assert.equal(app.isDisabled('Controle de Entrada'), true);
+
+    // Confirmação positiva 200 restaura painel, métricas associadas aos rótulos e botão
+    mode = 'ok';
+    await app.press('Atualizar estações');
+    assert.ok(app.hasText('Estação real'));
+    assert.equal(app.metricValueFor('Estações ativas'), '1/1');
+    assert.equal(app.metricValueFor('Em atendimento'), '0');
+    assert.equal(app.metricValueFor('Fila externa'), '1');
+    assert.equal(app.isDisabled('Controle de Entrada'), false);
+
+    // Troca de evento após negativa mantém novo evento funcional sem herdar bloqueio
+    mode = 'deny403';
+    await app.press('Atualizar estações');
+    assert.equal(app.isDisabled('Controle de Entrada'), true);
+    await app.press('Voltar aos eventos');
+    await app.press('Selecionar evento Segundo Evento');
+    assert.ok(app.hasText('Estação B'));
+    assert.equal(app.isDisabled('Controle de Entrada'), false);
+  } finally {
+    app.dispose();
+  }
+});
+
+test('AUD-04 + AUD-05: retorno unificado, ciclo de vida foco/AppState no polling e experiência órfã controlada com React Navigation real', { skip }, async () => {
+  const at = '2026-11-10T15:00:00.000Z';
+  const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
+  const unknownExpId = '99999999-9999-4999-8999-999999999999';
+  const counts = { stations: 0, experiences: 0, entry: 0 };
+  let includeOrphanStation = false;
+  let resolveMissingExperience = false;
+
+  const app = createIntegration({
+    initialUser: staffUser,
+    control: {
+      realStaff: true,
+      manualTimers: true,
+      events: [staffEvent],
+      http: async (route) => {
+        if (route === `/staff/events/${staffEvent.id}/experiences`) {
+          counts.experiences += 1;
+          const list = [{ id: realExperienceId, name: 'Just Dance' }];
+          if (resolveMissingExperience) list.push({ id: unknownExpId, name: 'Arena VR' });
+          return { eventId: staffEvent.id, experiences: list };
+        }
+        if (route === `/staff/events/${staffEvent.id}/stations`) {
+          counts.stations += 1;
+          const list = [realStation];
+          if (includeOrphanStation) {
+            list.push({ id: '77777777-7777-4777-8777-777777777777', experienceId: unknownExpId,
+              label: 'Estação VR', availability: 'available', pendingServiceSessionId: null });
+          }
+          return { eventId: staffEvent.id, stations: list };
+        }
+        if (route === `/staff/events/${staffEvent.id}/entry-control`) {
+          counts.entry += 1;
+          return {
+            eventId: staffEvent.id, externalQueueEnabled: true, canManage: true, observedAt: at,
+            pendingCall: null, canCall: false, canConfirm: false, canMarkAbsent: false, canRemove: false,
+            waitingCount: 0, waiting: [],
+          };
+        }
+        return undefined;
+      },
+    },
+  });
+
+  try {
+    await app.mount();
+    await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
+    await app.press('Selecionar evento Evento autorizado');
+    assert.deepEqual(counts, { stations: 1, experiences: 1, entry: 1 });
+
+    // 1. Retorno de Controle de Entrada por botão interno e por retorno nativo (beforeRemove) executam revalidação equivalente
+    await app.press('Controle de Entrada');
+    await app.press('Voltar ao painel');
+    assert.deepEqual(counts, { stations: 2, experiences: 2, entry: 2 });
+
+    await app.press('Controle de Entrada');
+    app.back();
+    await app.act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    assert.ok(app.hasText('Painel operacional'));
+    assert.deepEqual(counts, { stations: 3, experiences: 3, entry: 3 });
+
+    // 2. Retorno de Estação por botão interno e por retorno nativo (beforeRemove) executam revalidação equivalente
+    await app.press('Selecionar estação Estação real da experiência Just Dance');
+    await app.press('Voltar ao painel');
+    assert.deepEqual(counts, { stations: 4, experiences: 4, entry: 4 });
+
+    await app.press('Selecionar estação Estação real da experiência Just Dance');
+    app.back();
+    await app.act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    assert.ok(app.hasText('Painel operacional'));
+    assert.deepEqual(counts, { stations: 5, experiences: 5, entry: 5 });
+
+    // 3. Perda de foco e segundo plano pausam polling; retomada reativa exatamente 1 ciclo de 5s
+    await app.setFocus(false);
+    await app.tickTimers(10000);
+    assert.deepEqual(counts, { stations: 5, experiences: 5, entry: 5 }, 'sem foco não consulta em polling');
+
+    await app.setFocus(true);
+    await app.setAppState('background');
+    await app.tickTimers(10000);
+    assert.deepEqual(counts, { stations: 5, experiences: 5, entry: 5 }, 'em segundo plano não consulta em polling');
+
+    await app.setAppState('active');
+    includeOrphanStation = true;
+    await app.tickTimers(5000);
+    await app.act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    // Polling atualizou estações (6) e entrada (6); estação órfã disparou exatamente 1 revalidação de experiências (6)
+    assert.equal(counts.stations, 6);
+    assert.equal(counts.entry, 6);
+    assert.equal(counts.experiences, 6);
+    assert.ok(app.hasText('Experiência não vinculada'));
+    assert.equal(app.hasButton('Selecionar estação Estação VR da experiência Arena VR'), false);
+
+    // Próximo ciclo de polling com inconsistência persistente NÃO dispara novas consultas de /experiences
+    await app.tickTimers(5000);
+    await app.act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    assert.equal(counts.stations, 7);
+    assert.equal(counts.experiences, 6, 'sem loop infinito diante de experiência ausente persistente');
+
+    // Quando a experiência passa a existir no servidor, atualização confirma e habilita a estação
+    resolveMissingExperience = true;
+    await app.press('Atualizar estações');
+    assert.ok(app.hasText('Arena VR'));
+    assert.ok(!app.hasText('Experiência não vinculada'));
+    assert.equal(app.hasButton('Selecionar estação Estação VR da experiência Arena VR'), true);
+  } finally {
+    app.dispose();
+  }
 });

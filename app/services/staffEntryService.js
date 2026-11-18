@@ -17,8 +17,10 @@ export function parseEntryState(body, eventId) {
       !(body.pendingCall === null || (validEntryId(body.pendingCall?.id) && validEntryId(body.pendingCall?.participationId) &&
         !seen.has(body.pendingCall.participationId.toLowerCase()) && typeof body.pendingCall.displayName === 'string' &&
         body.pendingCall.displayName.trim() && instant(body.pendingCall.calledAt)))) return invalid();
-  if ((body.canCall && (body.pendingCall || !body.externalQueueEnabled || !body.canManage || !waiting.length)) ||
-      (body.canConfirm && (!body.pendingCall || !body.externalQueueEnabled || !body.canManage)) ||
+  if (!body.externalQueueEnabled && (body.pendingCall !== null || waiting.length > 0)) return invalid();
+  if (body.canCall !== (body.canManage && body.externalQueueEnabled && !body.pendingCall && waiting.length > 0) ||
+      body.canConfirm !== (body.canManage && body.externalQueueEnabled && Boolean(body.pendingCall)) ||
+      body.canMarkAbsent !== body.canRemove ||
       ((body.canMarkAbsent || body.canRemove) && (!body.pendingCall || !body.externalQueueEnabled))) return invalid();
   return { pendingCall: body.pendingCall, canCall: body.canCall, canConfirm: body.canConfirm,
     canMarkAbsent: body.canMarkAbsent, canRemove: body.canRemove, eventId, externalQueueEnabled: body.externalQueueEnabled, canManage: body.canManage,

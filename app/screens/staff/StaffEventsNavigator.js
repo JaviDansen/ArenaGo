@@ -149,20 +149,22 @@ function Button({ label, accessibilityLabel = label, onPress, disabled = false, 
 }
 
 function describeEntrySummary(snapshot) {
+  if (snapshot.accessLocked || snapshot.entryError === 'denied' || snapshot.entryError === 'session') {
+    return {
+      subtitle: snapshot.accessStatus === 'revalidating'
+        ? 'Revalidando acesso ao evento...'
+        : 'Acesso ao evento indisponível',
+      badgeLabel: 'SEM ACESSO',
+      badgeTone: 'danger',
+      waitingText: '—',
+      hasPendingCall: false,
+    };
+  }
   if (snapshot.entryStatus === 'loading' || snapshot.entryStatus === 'idle') {
     return {
       subtitle: 'Consultando fila externa...',
       badgeLabel: 'CONSULTANDO',
       badgeTone: 'muted',
-      waitingText: '—',
-      hasPendingCall: false,
-    };
-  }
-  if (snapshot.entryError === 'denied' || snapshot.entryError === 'session') {
-    return {
-      subtitle: 'Acesso ao evento indisponível',
-      badgeLabel: 'SEM ACESSO',
-      badgeTone: 'danger',
       waitingText: '—',
       hasPendingCall: false,
     };
@@ -464,27 +466,60 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
   }
   const store = storeRef.current;
   const [snapshot, setSnapshot] = useState(store.getSnapshot());
+  const orphanSyncRef = useRef(null);
+  const prevSectionRef = useRef(section);
   const epoch = auth.getSessionEpoch();
   const revision = auth.getIdentityRevision();
   useEffect(() => store.subscribe(setSnapshot), [store]);
   useEffect(() => {
+    orphanSyncRef.current = null;
+    prevSectionRef.current = 'panel';
     store.setContext({ eventId: event.id, userId: auth.user.id, epoch, revision });
-    void store.refreshStations();
-    void store.refreshExperiences();
-    void store.refreshEntryControl();
+    void store.refreshPanel();
     setStationId(null);
     setSection('panel');
     return () => store.setContext(null);
   }, [store, event.id, auth.user.id, epoch, revision, setSection, setStationId]);
   useEffect(() => {
+    const prev = prevSectionRef.current;
+    prevSectionRef.current = section;
     if (section !== 'station') store.clearQueue();
+    if (prev !== 'panel' && section === 'panel') {
+      orphanSyncRef.current = null;
+      void store.revalidateOnReturn();
+    }
   }, [store, section]);
+  const experiencesById = new Map(snapshot.experiences.map((experience) => [experience.id, experience]));
+  const station = snapshot.stations.find((item) => item.id === stationId);
+  const stationExperience = station && experiencesById.get(station.experienceId);
+  const ready = !snapshot.accessLocked && snapshot.stationStatus === 'ready' && snapshot.experienceStatus === 'ready';
+  const orphanStations = ready
+    ? snapshot.stations.filter((item) => !experiencesById.has(item.experienceId))
+    : [];
+  const missingExperienceIds = orphanStations.length > 0
+    ? [...new Set(orphanStations.map((item) => item.experienceId))].sort()
+    : [];
+  const orphanSignature = missingExperienceIds.length > 0
+    ? `${event.id}:${epoch}:${revision}:${missingExperienceIds.join(',')}`
+    : null;
+  useEffect(() => {
+    if (!orphanSignature) {
+      orphanSyncRef.current = null;
+      return;
+    }
+    if (section !== 'panel' || !ready || snapshot.accessLocked) return;
+    if (orphanSyncRef.current === orphanSignature) return;
+    orphanSyncRef.current = orphanSignature;
+    void store.pollExperiences();
+  }, [section, ready, snapshot.accessLocked, orphanSignature, store]);
   const canPollStations = (section === 'panel' || section === 'station')
     && store.isCurrent(snapshot.context)
+    && !snapshot.accessLocked
     && (snapshot.stationStatus === 'ready'
       || (snapshot.stationStatus === 'error' && (snapshot.stationError === 'network' || snapshot.stationError === 'unavailable')));
   const canPollEntry = section === 'panel'
     && store.isCurrent(snapshot.context)
+    && !snapshot.accessLocked
     && (snapshot.entryStatus === 'ready'
       || (snapshot.entryStatus === 'error' && (snapshot.entryError === 'network' || snapshot.entryError === 'unavailable')));
   useStaffPolling(
@@ -500,7 +535,7 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
     `${event.id}:entry:${epoch}:${revision}`,
   );
   useStaffPolling(
-    section === 'station' && store.isCurrent(snapshot.context) && snapshot.queueStatus === 'ready',
+    section === 'station' && store.isCurrent(snapshot.context) && !snapshot.accessLocked && snapshot.queueStatus === 'ready',
     () => store.pollQueue(),
     5000,
     `${event.id}:${stationId}:${epoch}:${revision}`,
@@ -514,36 +549,30 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
     unavailable: 'Não foi possível carregar os dados. Tente novamente.',
     stale: 'Dados operacionais possivelmente desatualizados. Atualize antes de operar.',
   };
-  const experiencesById = new Map(snapshot.experiences.map((experience) => [experience.id, experience]));
-  const station = snapshot.stations.find((item) => item.id === stationId);
-  const stationExperience = station && experiencesById.get(station.experienceId);
-  const ready = snapshot.stationStatus === 'ready' && snapshot.experienceStatus === 'ready';
-  const accessLost = [snapshot.stationError, snapshot.experienceError, snapshot.entryError]
-    .some((err) => err === 'denied' || err === 'session');
+  const accessLost = Boolean(snapshot.accessLocked)
+    || [snapshot.stationError, snapshot.experienceError, snapshot.entryError]
+      .some((err) => err === 'denied' || err === 'session');
   const dashboardErrors = [...new Set([
+    snapshot.accessLocked ? (snapshot.accessStatus === 'session' ? 'session' : 'denied') : null,
     snapshot.stationStatus === 'error' ? snapshot.stationError : null,
     snapshot.experienceStatus === 'error' ? snapshot.experienceError : null,
     (snapshot.entryError === 'denied' || snapshot.entryError === 'session') ? snapshot.entryError : null,
   ].filter(Boolean))];
   const refresh = () => {
-    void store.refreshStations();
-    void store.refreshExperiences();
-    void store.refreshEntryControl();
+    orphanSyncRef.current = null;
+    void store.refreshPanel();
   };
 
   const eventMeta = getPhaseMeta(event);
   const entrySummary = describeEntrySummary(snapshot);
   const availableStationsCount = snapshot.stations.filter((item) => item.availability === 'available').length;
   const pendingStationsCount = snapshot.stations.filter((item) => Boolean(item.pendingServiceSessionId)).length;
-  const availableText = snapshot.stationStatus === 'ready'
+  const availableText = !snapshot.accessLocked && snapshot.stationStatus === 'ready'
     ? `${availableStationsCount}/${snapshot.stations.length}`
     : '—';
-  const pendingStationsText = snapshot.stationStatus === 'ready'
+  const pendingStationsText = !snapshot.accessLocked && snapshot.stationStatus === 'ready'
     ? String(pendingStationsCount)
     : '—';
-  const orphanStations = ready
-    ? snapshot.stations.filter((item) => !experiencesById.has(item.experienceId))
-    : [];
 
   return (
     <>
@@ -737,10 +766,12 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
       {section === 'entry' && (
         <StaffEntryControlRealScreen
           event={event}
-          isEventCurrent={() => staff.getSelected()?.id === event.id}
+          isEventCurrent={() => staff.getSelected()?.id === event.id && !store.isAccessLocked()}
+          accessDenied={accessLost}
+          accessDeniedKind={snapshot.accessStatus === 'session' ? 'session' : 'denied'}
+          onAccessDenied={(kind) => store.reportAccessDenied(kind)}
           onBack={() => {
             setSection('panel');
-            void store.refreshEntryControl();
           }}
         />
       )}
@@ -776,7 +807,7 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
                 event={event}
                 experience={stationExperience}
                 station={station}
-                isEventCurrent={() => staff.getSelected()?.id === event.id && stationId === station.id}
+                isEventCurrent={() => staff.getSelected()?.id === event.id && stationId === station.id && !store.isAccessLocked()}
                 onChanged={() => {
                   void (async () => {
                     await store.refreshStations();
@@ -790,7 +821,6 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
             label="Voltar ao painel"
             variant="secondary"
             onPress={() => {
-              store.clearQueue();
               setStationId(null);
               setSection('panel');
             }}
