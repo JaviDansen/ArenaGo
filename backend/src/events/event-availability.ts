@@ -1,14 +1,15 @@
 import { EventAccessCodeValidationError, normalizeEventAccessCode } from "./access-code";
 import type { EventOperationalCapacityResult } from "./event-operational-capacity";
 import type { EventEntryWindowResult } from "./event-entry-window";
+import { toEpochMicros, type EventInstant } from "./event-instant";
 
 /** Campos persistidos usados para avaliar a configuração estática conforme C-05. */
-export interface EventConfigurationReadinessInput {
+export interface EventConfigurationReadinessInput<T extends EventInstant = Date> {
   name: string;
   accessCodeNormalized: string;
-  startsAt: Date;
-  officialEndsAt: Date;
-  operationalDeadlineAt: Date;
+  startsAt: T;
+  officialEndsAt: T;
+  operationalDeadlineAt: T;
   timezone: string;
   externalQueueEnabled: boolean;
 }
@@ -51,7 +52,7 @@ export type EventAvailabilityResult =
       cutoffAt: Date;
     };
 
-const MAX_OPERATIONAL_EXTENSION_MS = 60 * 60 * 1000;
+const MAX_OPERATIONAL_EXTENSION_MICROS = 3_600_000_000n;
 
 function isValidIanaTimeZone(timezone: string): boolean {
   try {
@@ -73,7 +74,7 @@ function isValidIanaTimeZone(timezone: string): boolean {
  * ausência de configuração. Código persistido inválido apenas falha no check; nunca é reescrito.
  */
 export function evaluateEventConfigurationReadiness(
-  event: EventConfigurationReadinessInput,
+  event: EventConfigurationReadinessInput<EventInstant>,
 ): EventConfigurationReadinessResult {
   const missing: EventAvailabilityMissingCode[] = [];
   let canonicalCodeIsValid = false;
@@ -87,15 +88,15 @@ export function evaluateEventConfigurationReadiness(
   const nameAndAccessCode = event.name.trim().length > 0 && canonicalCodeIsValid;
   if (!nameAndAccessCode) missing.push("EVENT_NAME_OR_ACCESS_CODE_INVALID");
 
-  const startMs = event.startsAt.getTime();
-  const officialEndMs = event.officialEndsAt.getTime();
-  const operationalDeadlineMs = event.operationalDeadlineAt.getTime();
-  const validSchedule = Number.isFinite(startMs)
-    && Number.isFinite(officialEndMs)
-    && Number.isFinite(operationalDeadlineMs)
-    && startMs < officialEndMs
-    && operationalDeadlineMs >= officialEndMs
-    && operationalDeadlineMs <= officialEndMs + MAX_OPERATIONAL_EXTENSION_MS;
+  const start = toEpochMicros(event.startsAt);
+  const officialEnd = toEpochMicros(event.officialEndsAt);
+  const operationalDeadline = toEpochMicros(event.operationalDeadlineAt);
+  const validSchedule = start !== null
+    && officialEnd !== null
+    && operationalDeadline !== null
+    && start < officialEnd
+    && operationalDeadline >= officialEnd
+    && operationalDeadline <= officialEnd + MAX_OPERATIONAL_EXTENSION_MICROS;
   if (!validSchedule) missing.push("EVENT_SCHEDULE_INVALID");
 
   const validTimezone = isValidIanaTimeZone(event.timezone);

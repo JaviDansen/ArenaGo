@@ -16,6 +16,8 @@ const failures = {
   session_expired: [401, "SESSION_EXPIRED", "A sessão expirou."],
   admin_2fa_required: [401, "ADMIN_2FA_REQUIRED", "Sessão administrativa exige segundo fator (TOTP)."],
   event_time_change_closed: [409, "EVENT_TIME_CHANGE_CLOSED", "A janela para alterar os horários do evento terminou."],
+  event_start_change_locked: [409, "EVENT_START_CHANGE_LOCKED", "O início só pode ser alterado antes do horário vigente e sem participações registradas."],
+  event_schedule_stale: [409, "EVENT_SCHEDULE_STALE", "O evento foi atualizado. Consulte os dados antes de tentar novamente."],
   invalid_schedule: [400, "VALIDATION_ERROR", "O horário oficial deve ser futuro e posterior ao início do evento."],
   request_conflict: [409, "IDEMPOTENCY_KEY_REUSED", "A chave de idempotência já identifica outra intenção."],
   in_progress: [409, "IDEMPOTENCY_IN_PROGRESS", "A intenção informada está em processamento."],
@@ -37,6 +39,7 @@ export class AdminScheduleController {
     const result = await this.schedule.updateSchedule({ userId, sessionId, ...ids, ...change, idempotencyKey, expiresAt: this.idempotency.expiresAt() });
     if (result.kind === "completed" || result.kind === "replay") return { eventId: result.eventId,
       officialEndsAt: result.officialEndsAt, operationalDeadlineAt: result.operationalDeadlineAt,
+      ...(result.startsAt ? { startsAt: result.startsAt } : {}),
       ...(result.changedAt ? { changedAt: result.changedAt } : {}) };
     const [status, code, detail] = failures[result.kind];
     throw new ProblemException({ status, code, detail, typeSlug: code.toLowerCase().replaceAll("_", "-"),

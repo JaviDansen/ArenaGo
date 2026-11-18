@@ -111,7 +111,8 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
       if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView', SafeAreaProvider: passthrough };
       if (name === '@react-navigation/bottom-tabs') return { createBottomTabNavigator: Navigation.createNavigatorFactory(FocusedTabs) };
       if (name === '@react-navigation/native-stack') return { createNativeStackNavigator: Navigation.createNavigatorFactory(FocusedStack) };
-      if (name === '@react-navigation/native') return { useIsFocused: () => true, NavigationContainer: ({ children }) =>
+      if (name === '@react-native-community/datetimepicker') return { __esModule: true, default: 'DateTimePicker' };
+      if (name === '@react-navigation/native') return { useIsFocused: () => true, usePreventRemove: Navigation.usePreventRemove, NavigationContainer: ({ children }) =>
         React.createElement(Navigation.BaseNavigationContainer, { ref: navRef, onUnhandledAction: (action) => unhandled.push(action) }, children) };
       const target = path.posix.normalize(path.posix.join(directory, name));
       if (target === 'assets/images/logo-arenago.png') return { uri: target };
@@ -263,7 +264,8 @@ test('Admin: painel real retorna à mesma rota da lista e mantém informações 
   const eventId = 'abcdef00-0000-4000-8000-000000000001';
   const detailPath = `/admin/events/${eventId}`;
   const selected = { id: eventId, name: 'Evento Selecionado', effectivePhase: 'scheduled', timezone: 'America/Sao_Paulo',
-    startsAt: '2026-11-05T15:00:00Z', officialEndsAt: '2026-11-05T20:00:00Z', readiness: { ready: true } };
+    startsAt: '2090-11-05T15:00:00Z', officialEndsAt: '2090-11-05T20:00:00Z', readiness: { ready: true },
+    operationalDeadlineAt: '2090-11-05T20:30:00.000000Z', updatedAt: '2090-11-01T00:00:00.000000Z', accessCode: 'ARENA-TESTE' };
   let readinessReads = 0;
   const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control: { realAdmin: true,
     http: async (route, options) => {
@@ -295,6 +297,13 @@ test('Admin: painel real retorna à mesma rota da lista e mantém informações 
     await app.press('Voltar ao painel');
     assert.equal(app.activeRoute(), 'AdminRealEvent');
     assert.equal(readinessReads, 2);
+    await app.press('Informações e horários');
+    assert.equal(app.activeRoute(), 'AdminEventManagementInfo');
+    for (const text of ['Informações gerais', 'Datas e horários', 'Acesso ao evento', 'ARENA-TESTE']) assert.ok(app.hasText(text));
+    assert.equal(readinessReads, 3);
+    await app.press('Voltar ao painel');
+    assert.equal(app.activeRoute(), 'AdminRealEvent');
+    assert.equal(readinessReads, 4);
     await app.press('Voltar aos eventos');
     assert.equal(app.activeRoute(), 'AdminEvents');
     await app.press('Acessar evento Evento Selecionado');

@@ -8,6 +8,7 @@ import { events } from "../database/schema/events.schema";
 import { normalizeEventAccessCode } from "./access-code";
 import { evaluateEventEntryWindow } from "./event-entry-window";
 import type { EventEntryWindowResult } from "./event-entry-window";
+import { readEventInstant, type EventInstant } from "./event-instant";
 import { buildEventOperationalCapacityResult } from "./event-operational-capacity";
 import {
   buildEventAvailabilityResult,
@@ -17,6 +18,15 @@ import type { EventAvailabilityResult } from "./event-availability";
 
 type EventsDatabase = NodePgDatabase<typeof schema>;
 type Event = typeof events.$inferSelect;
+
+const entryWindowSelection = {
+  id: events.id,
+  startsAt: readEventInstant(events.startsAt),
+  officialEndsAt: readEventInstant(events.officialEndsAt),
+  operationalDeadlineAt: readEventInstant(events.operationalDeadlineAt),
+  closureRequestedAt: readEventInstant(events.closureRequestedAt),
+  adminDeadlineAt: events.adminDeadlineAt,
+};
 
 /** Resultado da avaliação temporal de um evento consultado pelo UUID. */
 export type EventEntryWindowLookupResult =
@@ -80,13 +90,17 @@ export class EventsService {
    * @param at Instante absoluto de referência, fornecido explicitamente pelo chamador.
    * @returns Resultado explícito para evento ausente ou janela temporal do evento encontrado.
    * @remarks É uma leitura informativa: não verifica prontidão, status administrativo nem
-   * reserva vaga. Reutiliza `findById()` e não altera o banco.
+   * reserva vaga nem altera o banco.
    */
   async evaluateEntryWindowById(
     eventId: string,
     at: Date,
   ): Promise<EventEntryWindowLookupResult> {
-    const event = await this.findById(eventId);
+    const [event] = await this.database
+      .select(entryWindowSelection)
+      .from(events)
+      .where(eq(events.id, eventId))
+      .limit(1);
 
     if (!event) {
       return { eventExists: false };
@@ -142,8 +156,24 @@ export class EventsService {
     at: Date,
     executor: DatabaseExecutor = this.database,
   ): Promise<EventAvailabilityResult> {
+    return this.evaluateEventAvailabilityAt(eventId, at, executor);
+  }
+
+  /** Aceita o epoch em microssegundos obtido pelo fluxo de ingresso. */
+  async evaluateEventAvailabilityAt(
+    eventId: string,
+    at: EventInstant,
+    executor: DatabaseExecutor = this.database,
+  ): Promise<EventAvailabilityResult> {
     const [event] = await executor
-      .select()
+      .select({
+        ...entryWindowSelection,
+        name: events.name,
+        accessCodeNormalized: events.accessCodeNormalized,
+        timezone: events.timezone,
+        externalQueueEnabled: events.externalQueueEnabled,
+        status: events.status,
+      })
       .from(events)
       .where(eq(events.id, eventId))
       .limit(1);

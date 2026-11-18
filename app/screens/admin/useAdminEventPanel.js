@@ -61,7 +61,7 @@ export default function useAdminEventPanel(navigation, eventId, includeReadiness
   return {
     ...(owner && snapshot?.scope === scope ? snapshot : { pending: true }),
     refresh(manual = false) {
-      if (control.current?.scope === scope) void control.current.refresh(manual);
+      if (control.current?.scope === scope) return control.current.refresh(manual);
     },
   };
 }

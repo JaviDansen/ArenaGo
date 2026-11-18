@@ -35,7 +35,7 @@ function loadModule(relativePath, requireModule, exposeFields = [], sourceOverri
       return requireModule ? requireModule(id) : require(id);
     } catch (err) {
       if (id === '@react-navigation/native') {
-        return { useIsFocused: () => true, useFocusEffect: (cb) => cb?.() };
+        return { useIsFocused: () => true, useFocusEffect: (cb) => cb?.(), usePreventRemove() {} };
       }
       if (err?.code === 'MODULE_NOT_FOUND' && typeof id === 'string' && id.startsWith('.')) {
         const resolved = path.resolve(path.dirname(filename), id);
@@ -314,6 +314,7 @@ function createHarness(relativePath, options = {}) {
   const native = Object.fromEntries(['ActivityIndicator', 'Image', 'KeyboardAvoidingView', 'Modal', 'Pressable', 'RefreshControl', 'ScrollView',
     'Text', 'TextInput', 'View', 'SafeAreaView'].map((name) => [name, name]));
   native.Platform = { OS: options.platform || 'ios' };
+  native.Clipboard = { setString: value => options.copyToClipboard?.(value) };
   native.Keyboard = { dismiss() {} };
   native.StyleSheet = {
     create: (value) => value,
@@ -332,6 +333,7 @@ function createHarness(relativePath, options = {}) {
     DateTimePickerAndroid: { open: (value) => nativePickerCalls.push(value) },
   };
   const navigation = {
+    dispatch(action) { navigationCalls.push({ type: 'dispatch', action }); },
     isFocused() { return focused; },
     addListener(event, listener) {
       if (!navigationListeners.has(event)) navigationListeners.set(event, new Set());
@@ -358,6 +360,12 @@ function createHarness(relativePath, options = {}) {
   function resolveInternalModule(fromRelativePath, name) {
     if (name === 'react') return react;
     if (name === 'react-native') return native;
+    if (name === 'expo-crypto') return { randomUUID: () => '00000000-0000-4000-8000-000000000001' };
+    if (name === '@react-navigation/native') return {
+      useIsFocused: () => focused,
+      useFocusEffect: cb => cb?.(),
+      usePreventRemove: options.preventRemove ?? (() => {}),
+    };
     if (name === 'expo-secure-store') return secureStore;
     if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView', useSafeAreaInsets: () => ({ bottom: 0, top: 0, left: 0, right: 0 }) };
     if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };

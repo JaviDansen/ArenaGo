@@ -177,3 +177,23 @@ test("perda e restauração de Staff/estação é dinâmica e status closed nunc
     assert.ok(closed.missing.includes("EVENT_CLOSED"));
   }
 });
+
+test("valida programação de um microssegundo e margem operacional sem truncar", () => {
+  const base = BigInt(Date.parse("2030-11-01T16:00:00.000Z")) * 1000n;
+  const event = {
+    ...makeEvent(),
+    startsAt: base + 123n,
+    officialEndsAt: base + 124n,
+    operationalDeadlineAt: base + 124n,
+  };
+
+  assert.equal(evaluateEventConfigurationReadiness(event).checks.validScheduleAndTimezone, true);
+  assert.equal(evaluateEventConfigurationReadiness({
+    ...event, operationalDeadlineAt: event.officialEndsAt + 3_600_000_000n,
+  }).checks.validScheduleAndTimezone, true);
+  for (const deadline of [event.officialEndsAt - 1n, event.officialEndsAt + 3_600_000_001n]) {
+    const invalid = evaluateEventConfigurationReadiness({ ...event, operationalDeadlineAt: deadline });
+    assert.equal(invalid.checks.validScheduleAndTimezone, false);
+    assert.deepEqual(invalid.missing, ["EVENT_SCHEDULE_INVALID"]);
+  }
+});

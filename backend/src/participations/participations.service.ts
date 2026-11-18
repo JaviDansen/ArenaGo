@@ -7,6 +7,7 @@ import type { DatabaseExecutor, DatabaseTransactionExecutor } from "../database/
 import * as schema from "../database/schema";
 import { EventsService } from "../events/events.service";
 import type { EventAvailabilityResult } from "../events/event-availability";
+import { epochMicrosText } from "../events/event-instant";
 import type { JoinEligibilityResult } from "./join-eligibility";
 import { combineJoinEligibility, recombineJoinEligibilityWithAvailability } from "./join-eligibility";
 import type { JsonValue } from "./join-idempotency";
@@ -277,7 +278,7 @@ export class ParticipationsService {
    *
    * @param userId ID interno fornecido por chamador confiável; não é obtido de request público.
    * @param eventId UUID do evento.
-   * @param at Instante absoluto de referência para avaliar a janela do evento.
+   * @param at Instante explícito de referência. Quando omitido, usa o relógio PostgreSQL.
    * @returns Elegibilidade informativa e todos os códigos de impedimento encontrados.
    * @remarks Somente leitura. Não valida sessão/autenticação nem exige e-mail verificado para
    * participante comum. Perfil, versão publicada, jogo e participação podem mudar após a leitura;
@@ -286,10 +287,13 @@ export class ParticipationsService {
   async evaluateJoinEligibility(
     userId: string,
     eventId: string,
-    at: Date,
+    at?: Date,
   ): Promise<JoinEligibilityResult> {
+    const availability = at === undefined
+      ? this.readJoinClock(this.database).then(({ micros }) => this.eventsService.evaluateEventAvailabilityAt(eventId, micros))
+      : this.eventsService.evaluateEventAvailabilityById(eventId, at);
     const [eventAvailability, userRows, profileRows, gameRows, currentParticipationRows] = await Promise.all([
-      this.eventsService.evaluateEventAvailabilityById(eventId, at),
+      availability,
       this.database
         .select({ id: schema.users.id, isActive: schema.users.isActive })
         .from(schema.users)
@@ -393,23 +397,10 @@ export class ParticipationsService {
       .for("update")
       .limit(1);
 
-    // `now()` fica fixo desde BEGIN; clock_timestamp() observa o relógio depois das esperas.
-    const clockRows = await tx.execute<{ observedAtMs: number }>(
-      sql`SELECT (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::double precision AS "observedAtMs"`,
-    );
-    const observedAtMs = clockRows.rows[0]?.observedAtMs;
-    if (typeof observedAtMs !== "number" || !Number.isFinite(observedAtMs)) {
-      throw new Error("PostgreSQL não retornou um epoch válido para avaliar o ingresso.");
-    }
-
-    const evaluatedAt = new Date(observedAtMs);
-    if (!Number.isFinite(evaluatedAt.getTime())) {
-      throw new Error("PostgreSQL retornou um epoch fora do intervalo de Date.");
-    }
-
-    const eventAvailability = await this.eventsService.evaluateEventAvailabilityById(
+    const observed = await this.readJoinClock(tx);
+    const eventAvailability = await this.eventsService.evaluateEventAvailabilityAt(
       eventId,
-      evaluatedAt,
+      observed.micros,
       tx satisfies DatabaseExecutor,
     );
 
@@ -455,7 +446,23 @@ export class ParticipationsService {
       hasCurrentParticipation: currentParticipationRows.length > 0,
     });
 
-    return { eligibility, evaluatedAt };
+    return { eligibility, evaluatedAt: new Date(observed.iso) };
+  }
+
+  private async readJoinClock(executor: DatabaseExecutor): Promise<{ micros: bigint; iso: string }> {
+    // clock_timestamp() lê depois das esperas. Ambas as representações vêm da mesma amostra.
+    const result = await executor.execute<{ micros: string; iso: string }>(sql`
+      WITH instant AS MATERIALIZED (SELECT clock_timestamp() AS at)
+      SELECT ${epochMicrosText(sql`at`)} AS micros,
+        to_char(at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS iso
+      FROM instant
+    `);
+    const row = result.rows[0];
+    if (!row || typeof row.micros !== "string" || !/^-?\d+$/.test(row.micros)
+      || typeof row.iso !== "string" || !Number.isFinite(Date.parse(row.iso))) {
+      throw new Error("PostgreSQL não retornou um instante válido para avaliar o ingresso.");
+    }
+    return { micros: BigInt(row.micros), iso: row.iso };
   }
 
   /** Cria participação, snapshot e resposta idempotente em uma única transação READ COMMITTED. */
@@ -506,22 +513,11 @@ export class ParticipationsService {
           .where(eq(schema.userGames.userId, input.userId))
           .orderBy(sql`${schema.games.name} COLLATE "C"`, asc(schema.games.id));
 
-        const [decision] = await tx.execute<{ decisionAtMs: number }>(
-          sql`SELECT (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::double precision AS "decisionAtMs"`,
-        ).then((result) => result.rows);
-        const decisionAtMs = decision?.decisionAtMs;
-        if (typeof decisionAtMs !== "number" || !Number.isFinite(decisionAtMs)) {
-          throw new Error("PostgreSQL não retornou o instante decisivo do ingresso.");
-        }
-        const decisionAt = new Date(decisionAtMs);
-        if (!Number.isFinite(decisionAt.getTime())) {
-          throw new Error("PostgreSQL retornou um instante decisivo fora do intervalo de Date.");
-        }
-
         // Revalida estado e corte oficial após as leituras que podem aguardar locks.
-        const finalAvailability = await this.eventsService.evaluateEventAvailabilityById(
+        const decision = await this.readJoinClock(tx);
+        const finalAvailability = await this.eventsService.evaluateEventAvailabilityAt(
           input.eventId,
-          decisionAt,
+          decision.micros,
           tx satisfies DatabaseExecutor,
         );
         if (!finalAvailability.eventExists || !finalAvailability.eventAcceptingNewEntries) {
@@ -550,6 +546,7 @@ export class ParticipationsService {
 
         const participationId = randomUUID();
         const status = event.externalQueueEnabled ? "waiting" : "active";
+        const decisionAt = sql`${decision.iso}::timestamptz`;
         await tx.insert(schema.participations).values({
           id: participationId,
           userId: input.userId,

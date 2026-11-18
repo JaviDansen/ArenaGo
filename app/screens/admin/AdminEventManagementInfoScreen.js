@@ -5,9 +5,15 @@ import AdminLiveScreen from './components/AdminLiveScreen';
 import AdminNotice from './components/AdminNotice';
 import AdminButton from './components/AdminButton';
 import { liveStyles as s } from './components/AdminLiveUI';
+import AdminEventSettingsScreen from './AdminEventSettingsScreen';
 
 export default function AdminEventManagementInfoScreen({ navigation, route }) {
   const { eventId, area } = route.params ?? {};
+  return area === 'schedule' ? <AdminEventSettingsScreen navigation={navigation} eventId={eventId} /> :
+    <AdminEventManagementPlaceholder navigation={navigation} eventId={eventId} area={area} />;
+}
+
+function AdminEventManagementPlaceholder({ navigation, eventId, area }) {
   const section = typeof area === 'string' && Object.hasOwn(adminEventAreas, area) ? adminEventAreas[area] : null;
   const { event, pending, blocked, detailError, refresh } = useAdminEventPanel(navigation, section ? eventId : undefined, false);
 

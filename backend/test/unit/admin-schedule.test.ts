@@ -14,7 +14,7 @@ const changedAt = "2026-11-03T15:00:00.123456Z";
 const state = { eventId: input.eventId, officialEndsAt: input.officialEndsAt, operationalDeadlineAt: input.operationalDeadlineAt };
 const old = { officialEndsAt: "2026-11-04T23:00:00.123456+00:00", operationalDeadlineAt: "2026-11-05T00:00:00.123456+00:00" };
 function fixture(options: { absent?: boolean; active?: boolean; admin?: boolean; session?: boolean; revoked?: boolean;
-  secondFactor?: boolean; expiredAt?: number; same?: boolean; outcome?: string;
+  secondFactor?: boolean; expiredAt?: number; same?: boolean; stale?: boolean; outcome?: string;
   reservation?: "replay" | "request_conflict" | "in_progress"; payload?: object | null; replayStatus?: number;
   fail?: "update" | "audit" | "complete"; auditCount?: number } = {}) {
   const queries: Array<{ text: string; params: unknown[] }> = [], marker = new Error("PRIVATE_E087_SQL");
@@ -33,7 +33,7 @@ function fixture(options: { absent?: boolean; active?: boolean; admin?: boolean;
       options.reservation === "request_conflict" ? "different" : scheduleFingerprint(input.eventId, input.officialEndsAt, input.operationalDeadlineAt, input.reason),
       options.reservation === "in_progress" ? "in_progress" : "completed", options.replayStatus ?? 200, input.eventId,
       options.payload === undefined ? { ...state, changedAt } : options.payload]] };
-    if (text.includes(" AS same")) return { rows: [{ same: options.same ?? false }] };
+    if (text.includes(" AS same")) return { rows: [{ same: options.same ?? false, stale: options.stale ?? false }] };
     if (text.includes("WITH decision AS MATERIALIZED")) { if (options.fail === "update") throw marker; return { rows: [{ outcome: options.outcome ?? "changed", changedAt, before: old }] }; }
     if (text.includes("INSERT INTO audit_logs")) { if (options.fail === "audit") throw marker; return { rows: options.auditCount === 0 ? [] : [{ id: "audit" }] }; }
     if (text.startsWith('update "idempotency_operations"')) { if (options.fail === "complete") throw marker; return { rows: [["reservation", 200, input.eventId, {}]] }; }
@@ -83,6 +83,43 @@ test("E08.7 escrita condiciona corte antigo, novo instante, estado Admin e sess�
     "e.admin_deadline_at IS NOT NULL", "::timestamptz <= e.starts_at", "::timestamptz <= d.at", "AND NOT p.closed AND NOT p.invalid", "p.at < a.expires_at", "interval '1 hour'"]) assert.ok(q.text.includes(text), text);
   for (const table of ["participations", "stations", "experiences", "queue_entries", "service_sessions"]) assert.equal(q.text.includes(table), false);
   assert.match(q.text, /SET official_ends_at=.*\n\s*operational_deadline_at=/);
+});
+const startChange = { startsAt: "2026-11-05T17:00:00.000Z", expectedUpdatedAt: "2026-11-03T15:00:00.123456Z" };
+test("ADMIN-03 corrige início após o lock do ingresso e audita início anterior e persistido", async () => {
+  const f = fixture();
+  assert.deepEqual(await f.service.updateSchedule({ ...input, ...startChange }), { kind: "completed", ...state, startsAt: startChange.startsAt, changedAt });
+  const lock = f.queries.findIndex(q => q.text.includes("SELECT id FROM events") && q.text.includes("FOR UPDATE"));
+  const decision = f.queries.findIndex(q => q.text.includes("WITH decision AS MATERIALIZED"));
+  assert.ok(lock > 0 && decision > lock);
+  const write = f.queries[decision];
+  assert.match(write.text, /clock_timestamp\(\)/);
+  assert.match(write.text, /d.at >= e.starts_at/);
+  assert.match(write.text, /EXISTS\(SELECT 1 FROM participations p WHERE p.event_id=e.id\)/);
+  assert.match(write.text, /AND NOT p.start_locked/);
+  assert.match(write.text, /starts_at=\$\d+::timestamptz/);
+  assert.match(write.text, /'startsAt',p.starts_at/);
+  assert.match(f.queries.find(q => q.text.includes("INSERT INTO audit_logs"))!.text, /'startsAt',e.starts_at/);
+  assert.ok(write.params.includes(startChange.startsAt));
+});
+test("ADMIN-03 reverte alteração após início, histórico, encerramento, versão concorrente ou datas inválidas", async () => {
+  for (const [options, kind] of [
+    [{ outcome: "start_locked" }, "event_start_change_locked"], [{ outcome: "closed" }, "event_time_change_closed"],
+    [{ stale: true }, "event_schedule_stale"], [{ outcome: "invalid" }, "invalid_schedule"],
+    [{ secondFactor: false }, "admin_2fa_required"],
+  ] as const) {
+    const f = fixture(options);
+    assert.deepEqual(await f.service.updateSchedule({ ...input, ...startChange }), { kind });
+    assert.equal(f.queries.at(-1)?.text, "rollback");
+    assert.ok(!f.queries.some(q => q.text.includes("INSERT INTO audit_logs")));
+  }
+});
+test("ADMIN-03 preserva extremos com microssegundos e rejeita margem acima do limite por um microssegundo", () => {
+  const body = { ...startChange, officialEndsAt: "2026-11-05T23:00:00.123456Z",
+    operationalDeadlineAt: "2026-11-06T00:00:00.123456Z", reason: input.reason };
+  assert.deepEqual(adminScheduleBody.parse(body), body);
+  assert.equal(adminScheduleBody.safeParse({ ...body, operationalDeadlineAt: "2026-11-06T00:00:00.123457Z" }).success, false);
+  assert.equal(adminScheduleBody.safeParse({ ...body, expectedUpdatedAt: undefined }).success, false);
+  assert.equal(adminScheduleBody.safeParse({ ...body, startsAt: "2026-02-30T11:00:00Z" }).success, false);
 });
 test("E08.7 autorização global compartilhada usa conta, concessão e sessão própria retidas", async () => {
   const f = fixture(); await f.service.updateSchedule(input);

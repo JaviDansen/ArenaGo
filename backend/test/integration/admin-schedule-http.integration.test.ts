@@ -13,9 +13,11 @@ import supertest from "supertest";
 import type * as schema from "../../src/database/schema";
 import type { ParticipationsService } from "../../src/participations/participations.service";
 import type { QueueEntryService } from "../../src/events/queue-entry.service";
+import type { EventsService } from "../../src/events/events.service";
 import { assertSafeTestDatabase } from "./test-db-guard";
 
 // Guarda executada ANTES de importar AppModule/providers; nunca consulta .env ou banco remoto.
+if (process.env.NODE_ENV !== "test") throw new Error("NODE_ENV=test é obrigatório para integração de programação.");
 const urls = ["DATABASE_URL", "DATABASE_DIRECT_URL", "EVENTS_TEST_DATABASE_URL"].map(name => {
   const value = assertSafeTestDatabase(process.env[name]), url = new URL(value);
   if (url.hostname !== "127.0.0.1" || url.port !== "55432" || url.pathname !== "/arenago_events_test" || url.search || url.hash || !url.username) throw new Error(`${name}: destino local explícito obrigatório.`);
@@ -28,6 +30,7 @@ process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = "60";
 process.env.ADMIN_IDEMPOTENCY_TTL_SECONDS = "60";
 const pool = new Pool({ connectionString: urls[0], ssl: false, max: 8, connectionTimeoutMillis: 2000, statement_timeout: 20000, lock_timeout: 16000 });
 let app: INestApplication, database: NodePgDatabase<typeof schema>, participations: ParticipationsService, queues: QueueEntryService;
+let eventsService: EventsService;
 let signAccess: (userId: string, sessionId: string, expired?: boolean) => string;
 let fingerprint: (eventId: string, official: string, operational: string, reason: string) => string;
 const operation = "admin_update_event_schedule", reason = "Programação autorizada pela organização";
@@ -36,15 +39,17 @@ before(async () => {
   assert.equal((await pool.query("SELECT current_database() AS name")).rows[0].name, "arenago_events_test");
   const { AppModule } = await import("../../src/app.module"), { DRIZZLE_DATABASE } = await import("../../src/database/database.module");
   const { ParticipationsService } = await import("../../src/participations/participations.service"), { QueueEntryService } = await import("../../src/events/queue-entry.service");
+  const { EventsService } = await import("../../src/events/events.service");
   fingerprint = (await import("../../src/events/admin-schedule.service")).scheduleFingerprint;
   const tokens = await import("../../src/auth/token.util");
   signAccess = (userId, sessionId, expired) => tokens.signAccessToken({ userId, sessionId }, expired ? { nowMs: Date.now() - 120000, ttlSeconds: 1 } : undefined);
   app = await NestFactory.create(AppModule, { logger: false }); app.setGlobalPrefix("api/v1"); await app.listen(0, "127.0.0.1");
   database = app.get(DRIZZLE_DATABASE); participations = app.get(ParticipationsService); queues = app.get(QueueEntryService);
+  eventsService = app.get(EventsService);
 });
 after(async () => {
   const errors: unknown[] = [];
-  try {
+  if (ids.events.length || ids.users.length) try {
     const c = await pool.connect();
     try {
       await c.query("BEGIN");
@@ -138,19 +143,25 @@ function problem(r: supertest.Response, status: number, code: string) {
   assert.equal(r.status, status, JSON.stringify(r.body)); assert.equal(r.body.status, status); assert.equal(r.body.code, code);
   assert.match(r.headers["content-type"], /application\/problem\+json/); assert.equal(JSON.stringify(r.body).includes("@example.test"), false);
 }
-async function blocked(pid: number) {
+async function blocked(pid: number, waitingFor?: RegExp) {
   const until = Date.now() + 6000;
-  while (Date.now() < until) { if ((await pool.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))", [pid])).rows[0].n > 0) return; await new Promise(done => setTimeout(done, 20)); }
+  while (Date.now() < until) {
+    const { rows } = await pool.query<{ query: string }>(
+      "SELECT query FROM pg_stat_activity WHERE wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid))", [pid],
+    );
+    if (rows.some(row => !waitingFor || waitingFor.test(row.query))) return;
+    await new Promise(done => setTimeout(done, 20));
+  }
   throw new Error("Espera real pelo lock não observada.");
 }
-async function ordered<A, B>(first: () => PromiseLike<A>, second: () => PromiseLike<B>, whileBlocked?: (pid: number) => Promise<void>): Promise<[A, B]> {
+async function ordered<A, B>(first: () => PromiseLike<A>, second: () => PromiseLike<B>, whileBlocked?: (pid: number) => Promise<void>, waitingFor?: RegExp): Promise<[A, B]> {
   const original = database.transaction.bind(database) as typeof database.transaction; let ready!: (pid: number) => void, release!: () => void;
   const reached = new Promise<number>(yes => { ready = yes; }), gate = new Promise<void>(yes => { release = yes; });
   database.transaction = (callback, config) => original(async tx => { const value = await callback(tx); ready((await tx.execute<{ pid: number }>(sql`SELECT pg_backend_pid() AS pid`)).rows[0].pid); await gate; return value; }, config);
   let a: Promise<A> | undefined, b: Promise<B> | undefined;
   try {
     a = Promise.resolve(first()); a.catch(() => undefined); const pid = await Promise.race([reached, a.then(() => { throw new Error("Primeira operação não manteve tx."); })]);
-    database.transaction = original; b = Promise.resolve(second()); b.catch(() => undefined); await blocked(pid); await whileBlocked?.(pid); release(); return await Promise.all([a, b]);
+    database.transaction = original; b = Promise.resolve(second()); b.catch(() => undefined); await blocked(pid, waitingFor); await whileBlocked?.(pid); release(); return await Promise.all([a, b]);
   } finally { database.transaction = original; release(); await Promise.allSettled([a, b]); }
 }
 async function lockWait(c: Context, request: () => PromiseLike<supertest.Response>, change: (client: PoolClient, pid: number) => Promise<void>, lock: "event" | "role" | "account" = "event") {
@@ -422,4 +433,261 @@ for (const operationName of ["E03", "E07.1", "E08.6"] as const) test(`E08.7 Post
     assert.equal(changed.status, 200); problem(queue, 409, "EVENT_REGISTRATION_CLOSED"); assert.equal((await state(c)).event.external_queue_enabled, true);
   }
   assert.equal((await audit(c)).length, 1);
+});
+
+const admin03EventLock = /\bfrom\s+"?events"?\s+[\s\S]*\bfor update\b/i;
+
+async function admin03Context(start: "future" | "elapsed" = "future") {
+  const c = await context();
+  const minutes = start === "future" ? 5 : -1;
+  await pool.query(`UPDATE events SET status='scheduled', starts_at=clock_timestamp()+$2::int*interval '1 minute'
+    WHERE id=$1`, [c.eventId, minutes]);
+  return c;
+}
+
+async function admin03Version(c: Context) {
+  const { rows } = await pool.query<{ version: string }>(`
+    SELECT to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS version
+    FROM events WHERE id=$1`, [c.eventId]);
+  return rows[0].version;
+}
+
+async function admin03Proposal(c: Context, minutes = 30) {
+  const { rows } = await pool.query<{ start: string }>(`
+    SELECT to_char((clock_timestamp()+$1::int*interval '1 minute') AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS start`, [minutes]);
+  return { ...await proposal(c), startsAt: rows[0].start, expectedUpdatedAt: await admin03Version(c) };
+}
+
+async function assertAdmin03Schedule(c: Context, body: Awaited<ReturnType<typeof admin03Proposal>>, changedAt: string) {
+  const { rows } = await pool.query(`SELECT starts_at=$2::timestamptz AND official_ends_at=$3::timestamptz
+    AND operational_deadline_at=$4::timestamptz AND updated_at=$5::timestamptz AS exact
+    FROM events WHERE id=$1`, [c.eventId, body.startsAt, body.officialEndsAt, body.operationalDeadlineAt, changedAt]);
+  assert.equal(rows[0].exact, true);
+}
+
+/** Observa as respostas reais do PostgreSQL sem alterar a consulta ou os instantes. */
+async function observeAdmin03Admission(c: Context, entrant: { userId: string }) {
+  const original = database.transaction.bind(database) as typeof database.transaction, dialect = new PgDialect();
+  const samples: string[] = [];
+  database.transaction = (callback, config) => original(async tx => {
+    const execute = tx.execute.bind(tx);
+    tx.execute = (async (...args: Parameters<typeof tx.execute>) => {
+      const result = await execute(...args);
+      const query = args[0], text = typeof query === "string" ? query : dialect.sqlToQuery(query.getSQL()).sql;
+      if (text.includes("WITH instant AS MATERIALIZED") && text.includes("clock_timestamp()")) {
+        const iso = result.rows[0]?.iso;
+        assert.ok(typeof iso === "string");
+        assert.match(iso, /\.\d{6}Z$/);
+        samples.push(iso);
+      }
+      return result;
+    }) as typeof tx.execute;
+    return callback(tx);
+  }, config);
+  try {
+    return { result: await admit(c, entrant), samples };
+  } finally {
+    database.transaction = original;
+  }
+}
+
+test("ADMIN-03 A: primeiro ingresso confirma antes do PATCH versionado", async () => {
+  const c = await admin03Context("elapsed");
+  const entrant = await readyEntrant(), body = await admin03Proposal(c), before = await state(c);
+  assert.equal(before.people, null);
+  const [joined, changed] = await ordered(() => admit(c, entrant), () => patch(c, body), undefined, admin03EventLock);
+  assert.equal(joined.kind, "created");
+  if (joined.kind !== "created") assert.fail("ingresso deveria confirmar");
+  problem(changed, 409, "EVENT_START_CHANGE_LOCKED");
+
+  const persisted = await state(c);
+  assert.deepEqual(persisted.event, { ...before.event, external_last_order: (BigInt(before.event.external_last_order) + 1n).toString() });
+  assert.deepEqual(persisted.people.map((p: { id: string }) => p.id), [joined.participationId]);
+  assert.equal(persisted.snapshots.length, 1);
+  assert.equal(persisted.audits, null);
+  assert.equal(persisted.idempotency, null);
+});
+
+test("ADMIN-03 B: PATCH confirma primeiro e ingresso bloqueado observa o novo início", async () => {
+  const c = await admin03Context();
+  const entrant = await readyEntrant(), body = await admin03Proposal(c);
+  const { rows } = await pool.query<{ start: string }>(`
+    UPDATE events SET starts_at=clock_timestamp()+interval '10 seconds' WHERE id=$1
+    RETURNING to_char(starts_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS start`, [c.eventId]);
+  const previous = await state(c);
+  const [changed, { result: joined, samples }] = await ordered(() => patch(c, body), () => observeAdmin03Admission(c, entrant), async pid => {
+    assert.deepEqual(await state(c), previous, "outra conexão ainda observa a programação anterior");
+    await waitPast(rows[0].start, pid);
+    const { rows: clock } = await pool.query("SELECT clock_timestamp() < $1::timestamptz AS future", [body.startsAt]);
+    assert.equal(clock[0].future, true);
+  }, admin03EventLock);
+
+  assert.equal(changed.status, 200);
+  await assertAdmin03Schedule(c, body, changed.body.changedAt);
+  if (joined.kind !== "blocked") assert.fail("ingresso deveria reavaliar o início");
+  assert.deepEqual(joined.eligibility.blockingReasons, ["EVENT_NOT_STARTED"]);
+  assert.equal(samples.length, 1, "a avaliação sob lock rejeita antes da avaliação final");
+  const { rows: comparison } = await pool.query(
+    "SELECT $1::timestamptz <= $2::timestamptz AND $2::timestamptz < $3::timestamptz AS between_starts",
+    [rows[0].start, samples[0], body.startsAt],
+  );
+  assert.equal(comparison[0].between_starts, true);
+  const persisted = await state(c);
+  assert.equal(persisted.people, null);
+  assert.equal(persisted.snapshots, null);
+  assert.equal(persisted.event.external_last_order, previous.event.external_last_order);
+  const logs = await audit(c);
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0].metadata.before.startsAt, previous.event.starts_at);
+  assert.equal(logs[0].metadata.after.startsAt, persisted.event.starts_at);
+  assert.equal((await pool.query("SELECT count(*)::int AS count FROM idempotency_operations WHERE actor_user_id=$1", [entrant.userId])).rows[0].count, 0);
+});
+
+test("ADMIN-03 C: início vigente futuro e participação terminal bloqueiam correção", async () => {
+  const c = await admin03Context();
+  await person(c, "finished");
+  const body = await admin03Proposal(c), previous = await state(c);
+  assert.deepEqual(previous.people.map((p: { status: string }) => p.status), ["finished"]);
+  const { rows } = await pool.query("SELECT starts_at > clock_timestamp() AS future FROM events WHERE id=$1", [c.eventId]);
+  assert.equal(rows[0].future, true, "somente o histórico deve impedir a mudança");
+  problem(await patch(c, body), 409, "EVENT_START_CHANGE_LOCKED");
+  assert.deepEqual(await state(c), previous);
+});
+
+test("ADMIN-03 D: duas chaves com a mesma versão disputam o lock e só a primeira confirma", async () => {
+  const c = await admin03Context(), first = await admin03Proposal(c), second = { ...first, startsAt: (await admin03Proposal(c, 40)).startsAt };
+  const firstKey = randomUUID(), secondKey = randomUUID();
+  const [confirmed, stale] = await ordered(() => patch(c, first, firstKey), () => patch(c, second, secondKey), undefined, admin03EventLock);
+
+  assert.equal(confirmed.status, 200);
+  assert.notEqual(confirmed.body.changedAt, first.expectedUpdatedAt);
+  problem(stale, 409, "EVENT_SCHEDULE_STALE");
+  await assertAdmin03Schedule(c, first, confirmed.body.changedAt);
+  assert.equal((await audit(c)).length, 1);
+  assert.deepEqual((await state(c)).idempotency.map((row: { idempotency_key: string; status: string }) => [row.idempotency_key, row.status]), [[firstKey, "completed"]]);
+});
+
+test("ADMIN-03 E: replay versionado preserva resposta histórica após nova programação", async () => {
+  const c = await admin03Context(), first = await admin03Proposal(c), key = randomUUID();
+  const confirmed = await patch(c, first, key);
+  assert.equal(confirmed.status, 200);
+  const second = await admin03Proposal(c, 40);
+  assert.equal(second.expectedUpdatedAt, confirmed.body.changedAt);
+  const later = await patch(c, second);
+  assert.equal(later.status, 200);
+  const current = await state(c);
+  assert.equal(current.idempotency.length, 2);
+  assert.equal((await audit(c)).length, 2);
+
+  const retry = await patch(c, first, key);
+  assert.equal(retry.status, 200);
+  assert.deepEqual(retry.body, confirmed.body);
+  problem(await patch(c, { ...first, reason: "Nova intenção de programação" }, key), 409, "IDEMPOTENCY_KEY_REUSED");
+  assert.deepEqual(await state(c), current);
+  await assertAdmin03Schedule(c, second, later.body.changedAt);
+});
+
+test("ADMIN-03 F: sessão revogada antes da escrita ou do replay não produz efeitos", async () => {
+  for (const afterWrite of [false, true]) {
+    const c = await admin03Context(), body = await admin03Proposal(c), key = randomUUID();
+    if (afterWrite) assert.equal((await patch(c, body, key)).status, 200);
+    await pool.query("UPDATE sessions SET revoked_at=clock_timestamp() WHERE id=$1", [c.admin.sessionId]);
+    const previous = await state(c);
+    problem(await patch(c, body, key), 401, "SESSION_REVOKED");
+    assert.deepEqual(await state(c), previous);
+    assert.equal((await audit(c)).length, afterWrite ? 1 : 0);
+  }
+});
+
+test("ADMIN-03 F: Admin e TOTP são revalidados após espera real no evento", async () => {
+  for (const revokeRole of [false, true]) {
+    const c = await admin03Context(), body = await admin03Proposal(c), previous = await state(c);
+    const response = await lockWait(c, () => patch(c, body), async client => {
+      if (revokeRole) {
+        await client.query("UPDATE user_roles SET revoked_at=clock_timestamp() WHERE id=$1", [c.admin.roleId]);
+      } else {
+        await client.query("UPDATE sessions SET admin_2fa_verified_at=NULL WHERE id=$1", [c.admin.sessionId]);
+      }
+    });
+    problem(response, revokeRole ? 403 : 401, revokeRole ? "ADMIN_REQUIRED" : "ADMIN_2FA_REQUIRED");
+    assert.deepEqual(await state(c), previous);
+  }
+});
+
+test("ADMIN-03 G: falha SQL entre auditoria e conclusão da intenção reverte a programação", async () => {
+  const c = await admin03Context(), body = await admin03Proposal(c), previous = await state(c), key = randomUUID();
+  const original = database.transaction.bind(database) as typeof database.transaction, dialect = new PgDialect();
+  let faultReached = false;
+  database.transaction = (callback, config) => original(async tx => {
+    const execute = tx.execute.bind(tx);
+    tx.execute = (async (...args: Parameters<typeof tx.execute>) => {
+      const result = await execute(...args);
+      const query = args[0], text = typeof query === "string" ? query : dialect.sqlToQuery(query.getSQL()).sql;
+      if (text.includes("INSERT INTO audit_logs")) {
+        const inside = await execute<{ changed: boolean; audited: boolean; pending: boolean }>(sql`
+          SELECT starts_at=${body.startsAt}::timestamptz AS changed,
+            EXISTS(SELECT 1 FROM audit_logs WHERE event_id=e.id AND action='event_schedule_changed') AS audited,
+            EXISTS(SELECT 1 FROM idempotency_operations WHERE actor_user_id=${c.admin.userId}
+              AND operation=${operation} AND idempotency_key=${key} AND status='in_progress') AS pending
+          FROM events e WHERE id=${c.eventId}`);
+        assert.deepEqual(inside.rows[0], { changed: true, audited: true, pending: true });
+        assert.deepEqual(await state(c), previous, "a conexão observadora não vê a escrita em andamento");
+        faultReached = true;
+        await execute(sql`SELECT 1/0`);
+      }
+      return result;
+    }) as typeof tx.execute;
+    return callback(tx);
+  }, config);
+  try {
+    problem(await patch(c, body, key), 500, "INTERNAL_SERVER_ERROR");
+  } finally {
+    database.transaction = original;
+  }
+  assert.equal(faultReached, true);
+  assert.deepEqual(await state(c), previous);
+});
+
+test("ADMIN-03 H: projeção PostgreSQL mantém início inclusivo e menor corte exclusivo no mesmo milissegundo", async () => {
+  const c = await admin03Context();
+  const start = "2030-05-11T00:00:00.123100Z", end = "2030-05-11T00:00:00.123103Z";
+  const deadline = "2030-05-11T00:01:00.123103Z";
+  await pool.query(`UPDATE events SET starts_at=$2::timestamptz,official_ends_at=$3::timestamptz,
+    operational_deadline_at=$4::timestamptz WHERE id=$1`, [c.eventId, start, end, deadline]);
+  const micros = BigInt(Date.parse("2030-05-11T00:00:00.123Z")) * 1000n;
+  async function assertWindow(offset: bigint, accepted: boolean, missing: string[]) {
+    const result = await eventsService.evaluateEventAvailabilityAt(c.eventId, micros + offset);
+    if (!result.eventExists) assert.fail("evento de teste ausente");
+    assert.equal(result.ready, true);
+    assert.equal(result.withinEntryWindow, accepted);
+    assert.equal(result.eventAcceptingNewEntries, accepted);
+    assert.deepEqual(result.missing, missing);
+  }
+  await assertWindow(99n, false, ["EVENT_NOT_STARTED"]);
+  await assertWindow(100n, true, []);
+  await assertWindow(102n, true, []);
+  await assertWindow(103n, false, ["EVENT_ENTRY_CLOSED"]);
+  for (const cutoff of ["2030-05-11T00:00:00.123102Z", "2030-05-11T00:00:00.123104Z"]) {
+    await pool.query(`UPDATE events SET closure_mode='controlled',closure_requested_at=$2::timestamptz,
+      admin_deadline_at=$2::timestamptz+interval '10 seconds' WHERE id=$1`, [c.eventId, cutoff]);
+    // Mantém o status scheduled na fixture para isolar o menor corte temporal da regra de status.
+    await assertWindow(101n, true, []);
+    if (cutoff.endsWith("102Z")) await assertWindow(102n, false, ["EVENT_ENTRY_CLOSED"]);
+    else await assertWindow(102n, true, []);
+    await assertWindow(103n, false, ["EVENT_ENTRY_CLOSED"]);
+  }
+});
+
+test("ADMIN-03 H: ingresso real e snapshot persistem a amostra exata da decisão", async () => {
+  const c = await admin03Context("elapsed"), entrant = await readyEntrant();
+  await pool.query("UPDATE events SET external_queue_enabled=false WHERE id=$1", [c.eventId]);
+  const { result: joined, samples } = await observeAdmin03Admission(c, entrant);
+  if (joined.kind !== "created") assert.fail("ingresso deveria confirmar");
+  assert.equal(samples.length, 2);
+  const { rows } = await pool.query(`SELECT p.joined_at=$2::timestamptz AS joined,
+    p.arena_entered_at=$2::timestamptz AS entered,s.captured_at=$2::timestamptz AS captured,
+    e.starts_at<=p.joined_at AND p.joined_at<e.official_ends_at AS within
+    FROM participations p JOIN participation_profile_snapshots s ON s.participation_id=p.id
+    JOIN events e ON e.id=p.event_id WHERE p.id=$1`, [joined.participationId, samples[1]]);
+  assert.deepEqual(rows, [{ joined: true, entered: true, captured: true, within: true }]);
 });

@@ -34,7 +34,7 @@ export default function AdminSelectedEvent({ event, readiness, expanded, onToggl
           <Text style={s.body}>{message}</Text>
           {area && (onArea ? <Pressable accessibilityRole="button" accessibilityLabel={`Consultar ${adminEventAreas[area].title}`}
             onPress={() => onArea(area)} style={styles.action}>
-            <Text style={styles.link}>{adminEventAreas[area].title} · Visão informativa</Text>
+            <Text style={styles.link}>{adminEventAreas[area].title}{area === 'schedule' ? '' : ' · Visão informativa'}</Text>
           </Pressable> : <Text style={s.body}>{adminEventAreas[area].title}</Text>)}
         </View>)}
       </> : <Text style={s.body}>Prontidão indisponível</Text>}

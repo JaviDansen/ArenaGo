@@ -54,6 +54,36 @@ export async function getAdminEventReadiness(client, eventId) {
   }
   return result;
 }
+function mutationOptions(idempotencyKey) {
+  return { auth: true, headers: { 'Idempotency-Key': idempotencyKey },
+    retryOnUnauthorized: false, outcomeUnknownOnNetworkError: true };
+}
+export async function renameAdminEvent(client, eventId, name, idempotencyKey) {
+  const result = await client.patch(adminEventPath(eventId), { name }, mutationOptions(idempotencyKey));
+  if (result?.event?.id !== eventId || result.event.name !== name) throw new InvalidAdminEventResponse('Renomeação não confirmada.');
+}
+export async function changeAdminSchedule(client, eventId, schedule, idempotencyKey) {
+  const { startsAt, officialEndsAt, operationalDeadlineAt, expectedUpdatedAt, reason } = schedule;
+  const result = await client.patch(`${adminEventPath(eventId)}/schedule`,
+    { officialEndsAt, operationalDeadlineAt, expectedUpdatedAt, reason, ...(startsAt ? { startsAt } : {}) }, mutationOptions(idempotencyKey));
+  if (result?.eventId !== eventId || result.officialEndsAt !== officialEndsAt ||
+      result.operationalDeadlineAt !== operationalDeadlineAt || (startsAt && result.startsAt !== startsAt)) {
+    throw new InvalidAdminEventResponse('Programação não confirmada.');
+  }
+}
+export function adminEventWriteError(error) {
+  if ([401, 403, 404].includes(error?.status)) return adminReadError(error);
+  switch (error?.code) {
+    case 'EVENT_CONFIGURATION_LOCKED': return 'Já existe participação registrada. O nome do evento não pode mais ser alterado.';
+    case 'EVENT_START_CHANGE_LOCKED': return 'O horário de início já foi alcançado ou existe participação registrada.';
+    case 'EVENT_OPERATION_ENDED':
+    case 'EVENT_TIME_CHANGE_CLOSED': return 'A janela de alteração terminou ou o encerramento já foi iniciado.';
+    case 'EVENT_SCHEDULE_STALE': return 'O evento mudou durante a edição. Consulte os horários atuais antes de editar novamente.';
+    case 'IDEMPOTENCY_IN_PROGRESS': return 'A alteração ainda pode estar em processamento. Confira os dados persistidos antes de reenviar.';
+    case 'VALIDATION_ERROR': return 'O servidor rejeitou os dados. Confira horários, margem e justificativa.';
+    default: return 'Não foi possível confirmar o salvamento. Confira os dados persistidos antes de editar novamente.';
+  }
+}
 export function adminEventPanelError(error) {
   if (error instanceof InvalidAdminEventResponse) return 'A resposta da API não pôde ser confirmada para este evento.';
   return adminReadError(error);

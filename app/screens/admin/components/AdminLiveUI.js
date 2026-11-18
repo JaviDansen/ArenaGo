@@ -12,6 +12,10 @@ export function AdminIcon({ name, color = c.accent, size = 24 }) {
   const part = (key, style) => <View key={key} style={[line, style]} />;
   let shapes;
   switch (name) {
+    case 'edit': shapes = [part('pencil', { left: 5, top: 4, width: 7, height: 17, borderRadius: 2, transform: [{ rotate: '43deg' }] }),
+      part('tip', { left: 3, top: 17, width: 4, height: 4, borderTopWidth: 0, borderRightWidth: 0 })]; break;
+    case 'qr': shapes = [[3, 3], [14, 3], [3, 14], [15, 15]].map(([left, top], index) =>
+      part(`qr${index}`, { left, top, width: index === 3 ? 6 : 7, height: index === 3 ? 6 : 7, borderRadius: 1 })); break;
     case 'calendar': shapes = [part('box', { left: 3, top: 5, width: 18, height: 17, borderRadius: 3 }),
       part('divider', { left: 3, top: 10, width: 18, borderWidth: 0, borderTopWidth: 1.6 }),
       ...[7, 16].map(left => part(`ring${left}`, { left, top: 2, height: 6, borderWidth: 0, borderLeftWidth: 1.6 })),

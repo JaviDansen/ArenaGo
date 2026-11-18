@@ -25,12 +25,26 @@ const instant = z.string().transform((value, ctx) => {
   if (iso === undefined) { ctx.addIssue({ code: "custom", message: "Instante ISO com fuso explícito e até três casas decimais obrigatório." }); return z.NEVER; }
   return iso;
 });
+const preciseUtc = z.string().refine(value => /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(value)
+  && normalizeScheduleInstant(value.replace(/(\.\d{3})\d{3}Z$/, "$1Z")) !== undefined);
+function micros(value: string) {
+  const at = Date.parse(value);
+  return Number.isFinite(at) ? BigInt(at) * 1000n + BigInt(/\.\d{3}(\d{3})Z$/.exec(value)?.[1] ?? 0) : null;
+}
 export const adminScheduleParams = z.object({ eventId: operationUuid }).strict();
 export const adminScheduleBody = z.object({
-  officialEndsAt: instant,
-  operationalDeadlineAt: instant,
+  officialEndsAt: z.union([instant, preciseUtc]),
+  operationalDeadlineAt: z.union([instant, preciseUtc]),
+  startsAt: instant.optional(),
+  expectedUpdatedAt: preciseUtc.optional(),
   reason: adminExternalQueueBody.shape.reason,
-}).strict().refine(value => {
-  const margin = Date.parse(value.operationalDeadlineAt) - Date.parse(value.officialEndsAt);
-  return margin >= 0 && margin <= 3_600_000;
-}, { message: "A margem operacional deve ser de zero a 60 minutos." });
+}).strict()
+  .refine(value => value.expectedUpdatedAt !== undefined || (value.startsAt === undefined
+    && !value.officialEndsAt.match(/\.\d{6}Z$/) && !value.operationalDeadlineAt.match(/\.\d{6}Z$/)),
+  { message: "A versão do evento é obrigatória para a correção de início ou programação com precisão estendida." })
+  .refine(value => {
+    const end = micros(value.officialEndsAt), deadline = micros(value.operationalDeadlineAt);
+    if (end === null || deadline === null) return false;
+    const margin = deadline - end;
+    return margin >= 0n && margin <= 3_600_000_000n;
+  }, { message: "A margem operacional deve ser de zero a 60 minutos." });

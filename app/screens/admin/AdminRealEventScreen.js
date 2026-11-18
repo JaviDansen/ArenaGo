@@ -35,7 +35,8 @@ export default function AdminRealEventScreen({ navigation, route }) {
         </Pressable>}
       </View>
       {Object.entries(adminEventAreas).map(([key, area]) => <Pressable key={key} testID={`admin-event-area-${key}`}
-        accessibilityRole="button" accessibilityLabel={area.title} accessibilityHint="Abre uma visão informativa"
+        accessibilityRole="button" accessibilityLabel={area.title}
+        accessibilityHint={key === 'schedule' ? 'Abre os dados e os horários do evento' : 'Abre uma visão informativa'}
         onPress={() => openArea(key)} style={({ pressed }) => [s.card, s.row, styles.area, pressed && styles.pressed]}>
         <AdminIconTile name={area.icon} />
         <View style={s.grow}><Text style={styles.areaTitle}>{area.title}</Text><Text style={s.body}>{area.description}</Text></View>
