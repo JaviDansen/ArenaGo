@@ -170,6 +170,9 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
       return route.name;
     },
     storedToken() { return token; },
+    inputValue(label) {
+      return tree.root.findAllByType('TextInput').find(node => node.props.accessibilityLabel === label)?.props.value;
+    },
     async input(label, value) {
       const field = tree.root.findAllByType('TextInput').find(node => node.props.accessibilityLabel === label);
       assert.ok(field, label);
@@ -177,6 +180,10 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
     },
     navigate(name, params) { Renderer.act(() => navRef.navigate(name, params)); },
     back() { Renderer.act(() => navRef.goBack()); },
+    popActive() {
+      const root = navRef.getRootState();
+      Renderer.act(() => navRef.dispatch({ type: 'POP', payload: { count: 1 }, target: root.routes[root.index].state.key }));
+    },
     hasText(text) { return tree.root.findAllByType('Text').some((node) => {
       const flatten = (value) => Array.isArray(value) ? value.map(flatten).join('')
         : value && typeof value === 'object' ? flatten(value.props?.children) : String(value ?? '');
@@ -189,6 +196,15 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
     },
     modal() { return tree.root.findByType('Modal'); },
     hasButton(label) { return tree.root.findAllByType('Pressable').some(node => node.props.accessibilityLabel === label); },
+    buttonProps(label) {
+      const buttons = tree.root.findAllByType('Pressable').filter(node => node.props.accessibilityLabel === label);
+      assert.equal(buttons.length, 1, `botão ${label}`);
+      return buttons[0].props;
+    },
+    async activateButton(label) {
+      const props = this.buttonProps(label);
+      if (!props.disabled) await Renderer.act(async () => { await props.onPress?.(); });
+    },
     handler(label) { return tree.root.findAllByType('Pressable').find(node => node.props.accessibilityLabel === label).props.onPress; },
     confirmHandler() { return tree.root.findAllByType('Pressable')
       .find((node) => node.props.accessibilityLabel === 'CONFIRMAR').props.onPress; },
@@ -366,7 +382,8 @@ test('ADMIN-05: painel pronto oferece retomada de estação salva com resposta p
   const eventId = 'abcdef00-0000-4000-8000-000000000001';
   const experienceId = 'abcdef00-0000-4000-8000-000000000002';
   const path = '/admin/events/' + eventId;
-  const station = { id: 'abcdef00-0000-4000-8000-000000000003', experienceId, label: 'Mesa', availability: 'available' };
+  const station = { id: 'abcdef00-0000-4000-8000-000000000003', experienceId, label: 'Mesa', availability: 'available',
+    pendingServiceSessionId: null };
   const writes = [];
   const event = { id: eventId, name: 'Evento com estação', accessCode: 'ESTACAO', timezone: 'UTC',
     startsAt: '2090-12-01T10:00:00Z', officialEndsAt: '2090-12-01T14:00:00Z', operationalDeadlineAt: '2090-12-01T14:00:00Z',
@@ -610,6 +627,361 @@ test('Admin: painel real retorna à mesma rota da lista e mantém informações 
     await app.press('BI');
     assert.equal(app.activeRoute(), 'BI');
     assert.ok(app.hasText('Em implementação'));
+  } finally { app.dispose(); }
+});
+
+test('ADMIN-04: painel abre estrutura por UUID, edita em contexto e reconsulta a prontidão no retorno', { skip }, async () => {
+  const id = n => 'abcdef00-0000-4000-8000-' + String(n).padStart(12, '0');
+  const eventId = id(1), base = '/admin/events/' + eventId;
+  const selected = { id: eventId, name: 'Encontro', effectivePhase: 'scheduled', timezone: 'America/Fortaleza',
+    startsAt: '2090-11-05T15:00:00Z', officialEndsAt: '2090-11-05T20:00:00Z', readiness: { ready: true } };
+  const station = { id: id(4), experienceId: id(3), label: 'Mesa', availability: 'available', pendingServiceSessionId: null };
+  const groups = [{ id: id(2), eventId, name: 'Oficina', stations: [] }, { id: id(3), eventId, name: 'Arena', stations: [station] }];
+  let reads = 0;
+  let eligibleStaff = true;
+  const writes = [];
+  const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control: { realAdmin: true,
+    http: async (route, options) => {
+      if (route === '/admin/events') return { items: [selected], nextCursor: null };
+      if (route === base) return { event: selected };
+      if (route === base + '/experiences') return { eventId, items: groups };
+      if (route === base + '/experiences/' + groups[1].id + '/stations' && options.method === 'POST') {
+        const body = JSON.parse(options.body);
+        writes.push([route, body]);
+        const created = { ...station, id: id(5), availability: 'available', label: body.label };
+        groups[1].stations.push(created);
+        return { station: created };
+      }
+      if (route === base + '/readiness') {
+        reads++;
+        const available = groups.some(group => group.stations.some(row => row.availability === 'available'));
+        const ready = available && eligibleStaff;
+        return { eventId, statusStored: 'scheduled', effectivePhase: 'scheduled', ready, acceptingNewParticipations: false,
+          missing: [...(!available ? ['EXPERIENCE_WITH_AVAILABLE_STATION'] : []), ...(!eligibleStaff ? ['VERIFIED_ACTIVE_STAFF'] : [])],
+          checks: { nameAndAccessCode: true, validScheduleAndTimezone: true, externalQueueConfigured: true,
+            hasExperienceWithAvailableStation: available, hasVerifiedActiveStaff: eligibleStaff } };
+      }
+      if (options.method === 'PATCH') {
+        writes.push([route, JSON.parse(options.body)]);
+        const target = groups[1].stations.find(row => route === '/staff/events/' + eventId + '/stations/' + row.id + '/availability');
+        if (target) {
+          target.availability = JSON.parse(options.body).availability;
+          return { stationId: target.id, availability: target.availability, pendingServiceSessionId: null };
+        }
+        assert.fail('PATCH fora da estação selecionada');
+      }
+    },
+  } });
+  try {
+    await app.mount();
+    await app.press('Gerenciar eventos');
+    await app.press('Acessar evento Encontro');
+    await app.press('Experiências e estações');
+    assert.ok(app.hasText('2 experiências · 1 estação'));
+    assert.equal(app.hasButton('Sair da conta'), false);
+    assert.equal(app.handler('Catálogo · Em breve'), undefined);
+    await app.press('Editar experiência Arena');
+    assert.equal(app.inputValue('Nome da experiência'), 'Arena');
+    await app.input('Nome da experiência', 'Rascunho');
+    await app.press('Cancelar');
+    await app.press('Mesa, Arena, Disponível');
+    assert.ok(app.hasText('Sem chamada pendente'));
+    await app.press('Editar identificação');
+    assert.equal(app.inputValue('Identificação da estação'), 'Mesa');
+    await app.press('Cancelar');
+    await app.press('Tornar indisponível');
+    await app.press('Cancelar');
+    assert.equal(writes.length, 0);
+    await app.press('Tornar indisponível');
+    await app.press('Confirmar');
+    assert.deepEqual(writes, [['/staff/events/' + eventId + '/stations/' + station.id + '/availability', { availability: 'unavailable' }]]);
+    assert.ok(app.hasText('Indisponível'));
+    await app.press('Voltar à estrutura');
+    assert.ok(app.hasButton('Mesa, Arena, Indisponível'));
+    const beforeReturn = reads;
+    await app.press('Voltar ao painel');
+    assert.equal(app.activeRoute(), 'AdminRealEvent');
+    assert.ok(reads > beforeReturn);
+    assert.ok(app.hasText('Encontro'));
+    assert.ok(app.hasButton('Configuração pendente'));
+    await app.press('Configuração pendente');
+    await app.press('Consultar Experiências e estações');
+    assert.ok(app.hasButton('Mesa, Arena, Indisponível'));
+    await app.press('Adicionar estação em Arena');
+    await app.input('Identificação da estação', 'Pista');
+    await app.press('Confirmar gravação');
+    assert.ok(app.hasText('Experiência selecionada'));
+    assert.ok(app.hasText('2 experiências · 2 estações'));
+    assert.ok(app.hasButton('Pista, Arena, Disponível'));
+    assert.ok(app.hasText('Pronto para operar'));
+    assert.equal(app.hasButton('Adicionar estação em Oficina'), false);
+    await app.press('Ver todas as experiências');
+    assert.ok(app.hasButton('Adicionar estação em Oficina'));
+    eligibleStaff = false;
+    await app.press('Atualizar');
+    assert.ok(app.hasText('Configuração pendente'));
+    assert.ok(app.hasButton('Pista, Arena, Disponível'));
+    eligibleStaff = true;
+    await app.press('Pista, Arena, Disponível');
+    await app.press('Tornar indisponível');
+    await app.press('Confirmar');
+    assert.ok(app.hasText('Configuração pendente'));
+    await app.press('Voltar ao painel');
+    assert.ok(app.hasButton('Equipe Staff'));
+    assert.ok(app.hasButton('Configuração pendente'));
+  } finally { app.dispose(); }
+});
+
+const reviewPendingStructure = 'Revisar operações pendentes de experiências e estações';
+function structureIntegration({ initialStation = false, write, read, platformOS = 'web' } = {}) {
+  const eventId = 'abcdef00-0000-4000-8000-000000000001';
+  const experienceId = 'abcdef00-0000-4000-8000-000000000002';
+  const station = { id: 'abcdef00-0000-4000-8000-000000000003', experienceId, label: 'Mesa', availability: 'available',
+    pendingServiceSessionId: null };
+  const group = { id: experienceId, eventId, name: 'Oficina', stations: initialStation ? [station] : [] };
+  const db = { phase: 'scheduled', name: 'Evento de estrutura', eligibleStaff: true };
+  const path = '/admin/events/' + eventId;
+  const stationPath = path + '/experiences/' + experienceId + '/stations';
+  const availabilityPath = '/staff/events/' + eventId + '/stations/' + station.id + '/availability';
+  const requests = [];
+  const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control: { realAdmin: true,
+    platformOS, http: async (route, options) => {
+      requests.push({ route, method: options.method, key: options.headers['Idempotency-Key'], body: options.body });
+      if (options.method === 'POST' && route === stationPath) {
+        return write ? write({ db, group, station, route, options }) : { statusCode: 201, body: { station } };
+      }
+      if (options.method === 'PATCH' && route === availabilityPath) return write({ db, group, station, route, options });
+      if (options.method !== 'GET') return;
+      const override = read?.({ route, path, group, eventId });
+      if (override) return override;
+      const available = group.stations.some(row => row.availability === 'available');
+      const ready = available && db.eligibleStaff;
+      const event = { id: eventId, name: db.name, accessCode: 'ESTRUTURA', timezone: 'UTC', effectivePhase: db.phase,
+        startsAt: '2090-12-01T10:00:00Z', officialEndsAt: '2090-12-01T14:00:00Z', operationalDeadlineAt: '2090-12-01T14:30:00Z',
+        externalQueueEnabled: false, readiness: { ready } };
+      if (route === '/admin/events') return { items: [event], nextCursor: null };
+      if (route === path) return { event };
+      if (route === path + '/experiences') return { eventId, items: [group] };
+      if (route === path + '/readiness') return { eventId, statusStored: db.phase, effectivePhase: db.phase, ready,
+        acceptingNewParticipations: false,
+        missing: [...(!available ? ['EXPERIENCE_WITH_AVAILABLE_STATION'] : []), ...(!db.eligibleStaff ? ['VERIFIED_ACTIVE_STAFF'] : [])],
+        checks: { nameAndAccessCode: true, validScheduleAndTimezone: true, externalQueueConfigured: true,
+          hasExperienceWithAvailableStation: available, hasVerifiedActiveStaff: db.eligibleStaff } };
+    } } });
+  async function openPanel() {
+    await app.press('Gerenciar eventos');
+    await app.press('Acessar evento ' + db.name);
+  }
+  async function fillStation(button, submit, label = station.label) {
+    await app.press(button);
+    await app.input('Identificação da estação', label);
+    await app.press(submit);
+  }
+  return { app, db, path, stationPath, availabilityPath, requests, openPanel, fillStation };
+}
+
+test('ADMIN-04: recuperação do wizard no painel pronto em closing, recusa do replay e consulta em closed', { skip }, async () => {
+  let posts = 0;
+  const h = structureIntegration({ initialStation: true, write: ({ db }) => {
+    if (++posts === 1) {
+      throw new Error('Resultado do POST desconhecido');
+    }
+    db.phase = 'closed';
+    return { statusCode: 409, body: { code: 'EVENT_OPERATION_ENDED' } };
+  } });
+  const { app, db, path, stationPath, requests } = h;
+  db.eligibleStaff = false;
+  try {
+    await app.mount();
+    await h.openPanel();
+    await app.press('Continuar configuração');
+    await h.fillStation('Adicionar estação a Oficina', 'Salvar estação', 'Estação nova');
+    db.eligibleStaff = true;
+    db.phase = 'closing';
+    await app.press('Voltar ao painel');
+    await app.press('Sair do fluxo');
+    assert.ok(app.hasText('Pronto para operar'));
+    assert.equal(app.hasButton('Continuar configuração'), false);
+    const offset = requests.length;
+    await app.press(reviewPendingStructure);
+    assert.ok(app.hasButton('Mesa, Oficina, Disponível'));
+    assert.equal(posts, 1);
+    assert.ok(requests.slice(offset).some(entry => entry.route === path + '/experiences' && entry.method === 'GET'));
+    await app.press('Repetir a mesma solicitação');
+    const writes = requests.filter(entry => entry.route === stationPath && entry.method === 'POST');
+    assert.equal(writes.length, 2);
+    assert.ok(writes[0].key);
+    assert.deepEqual(writes[1], writes[0]);
+    assert.ok(app.hasText('A operação do evento já terminou.'));
+    assert.ok(app.hasButton('Encerrar tentativa'));
+    assert.equal(app.hasButton('Repetir a mesma solicitação'), false);
+    assert.equal(app.handler('Adicionar estação em Oficina'), undefined);
+    await app.press('Consultar recurso');
+    await app.press('Encerrar tentativa');
+    assert.ok(app.hasText('pode ter sido salvo'));
+    await app.press('Confirmar');
+    await app.press('Voltar ao painel');
+    assert.equal(app.hasButton(reviewPendingStructure), false);
+    assert.equal(posts, 2);
+  } finally { app.dispose(); }
+});
+
+test('ADMIN-04: wizard reconhece operação da gestão e retoma com a chave e o corpo originais', { skip }, async () => {
+  let posts = 0;
+  const h = structureIntegration({ write: ({ group, station }) => {
+    group.stations = [station];
+    if (++posts === 1) throw new Error('Resposta perdida');
+    return { statusCode: 201, body: { station } };
+  } });
+  const { app, requests, stationPath } = h;
+  try {
+    await app.mount();
+    await h.openPanel();
+    await app.press('Experiências e estações');
+    await h.fillStation('Adicionar estação em Oficina', 'Confirmar gravação');
+    await app.press('Voltar ao painel');
+    assert.equal(app.hasText('Alterações não salvas'), false);
+    await app.press('Continuar configuração');
+    assert.ok(app.hasButton(reviewPendingStructure));
+    assert.equal(posts, 1);
+    await app.press(reviewPendingStructure);
+    assert.ok(app.hasButton('Repetir a mesma solicitação'));
+    await app.press('Voltar à configuração');
+    assert.equal(app.activeRoute(), 'AdminEventSetup');
+    await app.press('Repetir a mesma solicitação');
+    const writes = requests.filter(entry => entry.route === stationPath && entry.method === 'POST');
+    assert.equal(writes.length, 2);
+    assert.ok(writes[0].key);
+    assert.deepEqual(writes[1], writes[0]);
+    assert.equal(app.hasButton(reviewPendingStructure), false);
+  } finally { app.dispose(); }
+});
+
+test('ADMIN-04: rascunho protege retorno visual, ação Android e remoção programática da rota', { skip }, async () => {
+  let pendingRead;
+  const h = structureIntegration({ platformOS: 'android', read: ({ route, path, group, eventId }) => {
+    if (pendingRead && route === path + '/experiences') return pendingRead.promise.then(() => ({ eventId, items: [group] }));
+  }, write: ({ group, station, options }) => {
+    group.stations = [{ ...station, label: JSON.parse(options.body).label }];
+    return { statusCode: 201, body: { station: group.stations[0] } };
+  } });
+  const { app } = h;
+  try {
+    await app.mount();
+    await h.openPanel();
+    await app.press('Experiências e estações');
+    await app.press('Adicionar experiência');
+    await app.press('Voltar ao painel');
+    assert.equal(app.activeRoute(), 'AdminRealEvent');
+    for (const exit of [() => app.press('Voltar ao painel'), () => app.back(), () => app.popActive()]) {
+      await app.press('Experiências e estações');
+      await app.press('Editar experiência Oficina');
+      await app.input('Nome da experiência', 'Rascunho');
+      await exit();
+      assert.ok(app.hasText('Alterações não salvas'));
+      await app.press('Continuar editando');
+      assert.equal(app.inputValue('Nome da experiência'), 'Rascunho');
+      await exit();
+      await app.press('Descartar alterações');
+      assert.equal(app.activeRoute(), 'AdminRealEvent');
+      assert.ok(app.hasText(h.db.name));
+    }
+    assert.equal(h.requests.filter(entry => entry.method === 'PATCH').length, 0);
+    await app.press('Experiências e estações');
+    await app.press('Adicionar estação em Oficina');
+    await app.input('Identificação da estação', 'Rascunho descartado');
+    pendingRead = deferred();
+    const refresh = app.handler('Atualizar');
+    await app.act(async () => { refresh(); });
+    await app.press('Voltar ao painel');
+    await app.press('Descartar alterações');
+    await app.act(async () => { pendingRead.resolve(); });
+    pendingRead = null;
+    assert.equal(app.activeRoute(), 'AdminRealEvent');
+    await app.press('Experiências e estações');
+    assert.equal(app.inputValue('Identificação da estação'), undefined);
+    await h.fillStation('Adicionar estação em Oficina', 'Confirmar gravação', 'Salva');
+    await app.press('Voltar ao painel');
+    assert.equal(app.activeRoute(), 'AdminRealEvent');
+  } finally { app.dispose(); }
+});
+
+for (const switchAccount of [false, true]) {
+  test(`ADMIN-04: PATCH tardio no mesmo cliente após ${switchAccount ? 'troca de conta' : 'logout'}`, { skip }, async () => {
+    const response = deferred();
+    const h = structureIntegration({ initialStation: true, write: ({ options }) => {
+      if (options.method === 'POST') throw new Error('Resultado do cadastro desconhecido');
+      return response.promise;
+    } });
+    const { app, db, availabilityPath } = h;
+    try {
+      await app.mount();
+      const client = app.manager.client;
+      await h.openPanel();
+      await app.press('Experiências e estações');
+      await h.fillStation('Adicionar estação em Oficina', 'Confirmar gravação', 'Estação pendente');
+      assert.ok(app.hasButton('Repetir a mesma solicitação'));
+      await app.press('Mesa, Oficina, Disponível');
+      await app.press('Tornar indisponível');
+      const oldConfirm = app.handler('Confirmar');
+      await app.act(async () => { oldConfirm(); });
+      const writes = () => h.requests.filter(entry => entry.route === availabilityPath && entry.method === 'PATCH');
+      assert.equal(writes().length, 1);
+      assert.equal(app.hasButton('Voltar ao painel'), true);
+      assert.equal(app.buttonProps('Voltar ao painel').disabled, true);
+      assert.equal(app.buttonProps('Voltar ao painel').accessibilityState.disabled, true);
+      const routeBeforeBack = app.activeRoute();
+      await app.activateButton('Voltar ao painel');
+      assert.equal(app.activeRoute(), routeBeforeBack);
+      await app.act(() => app.manager.logout());
+      if (switchAccount) {
+        const other = { ...adminUser, id: 'admin-b', email: 'b@example.test',
+          sessionId: '20000000-0000-4000-8000-000000000002' };
+        app.setUser(other);
+        await app.act(() => app.manager.login({ email: other.email, password: 'password' }));
+        await app.act(() => app.manager.verifyAdminTwoFactor('123456'));
+        db.name = 'Evento da sessão seguinte';
+        await h.openPanel();
+        assert.equal(app.hasButton(reviewPendingStructure), false);
+        await app.press('Experiências e estações');
+      }
+      await app.act(async () => {
+        response.resolve({ stationId: availabilityPath.split('/').at(-2), availability: 'unavailable', pendingServiceSessionId: null });
+        oldConfirm();
+      });
+      assert.equal(app.manager.client, client);
+      assert.equal(writes().length, 1);
+      assert.equal(app.hasButton(reviewPendingStructure), false);
+      if (switchAccount) {
+        assert.ok(app.hasText(db.name));
+        assert.ok(app.hasButton('Mesa, Oficina, Disponível'));
+        assert.equal(app.hasButton('Repetir a mesma solicitação'), false);
+        assert.ok(!app.hasText('Estado solicitado confirmado'));
+      } else assert.equal(app.route(), 'Welcome');
+    } finally { app.dispose(); }
+  });
+}
+
+test('ADMIN-04: voltar é habilitado após PATCH concluído na mesma sessão', { skip }, async () => {
+  const response = deferred();
+  const h = structureIntegration({ initialStation: true, write: () => response.promise });
+  const { app, availabilityPath } = h;
+  try {
+    await app.mount();
+    await h.openPanel();
+    await app.press('Experiências e estações');
+    await app.press('Mesa, Oficina, Disponível');
+    await app.press('Tornar indisponível');
+    const confirm = app.handler('Confirmar');
+    await app.act(async () => { confirm(); });
+    assert.equal(app.buttonProps('Voltar ao painel').disabled, true);
+    await app.act(async () => {
+      response.resolve({ stationId: availabilityPath.split('/').at(-2), availability: 'unavailable', pendingServiceSessionId: null });
+    });
+    assert.equal(app.buttonProps('Voltar ao painel').disabled, false);
+    assert.equal(app.buttonProps('Voltar ao painel').accessibilityState.disabled, false);
+    await app.activateButton('Voltar ao painel');
+    assert.equal(app.activeRoute(), 'AdminRealEvent');
   } finally { app.dispose(); }
 });
 

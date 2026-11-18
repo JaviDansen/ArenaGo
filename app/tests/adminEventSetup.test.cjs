@@ -6,7 +6,9 @@ const events = loadModule('services/adminEventsService.js', require).exports;
 const schedule = loadModule('screens/admin/adminScheduleForm.js', require).exports;
 const forms = loadModule('screens/admin/adminCreationForm.js', () => schedule).exports;
 const setup = loadModule('services/adminEventSetupService.js', () => events).exports;
+const shared = loadModule('screens/admin/adminStructureIntents.js', () => setup).exports;
 const { createEventSetup } = loadModule('screens/admin/adminCreationFlow.js', name => {
+  if (name === './adminStructureIntents') return shared;
   if (name.endsWith('/adminEventsService')) return events;
   if (name.endsWith('/adminEventSetupService')) return setup;
   assert.equal(name, './adminCreationForm');
@@ -65,6 +67,30 @@ function fixture({ resume = false, post, get, now, isCurrent = () => true } = {}
   }
   return open();
 }
+
+test('wizard recupera o cadastro da gestão e preserva sua chave sem reenviar durante a leitura', async () => {
+  const h = fixture({ post: (url, body, db) => {
+    assert.equal(url, path + '/experiences');
+    db.items = [{ ...experience, stations: [] }];
+    return { experience };
+  } });
+  const record = { eventId, kind: 'addExperience', value: experience.name, key: id(9), attempts: 1 };
+  record.id = shared.structureIntentId(record);
+  const pending = new Map([[record.id, record]]);
+  const page = h.open(eventId, pending);
+  await page.settled();
+  page.flow.editSetup({ experience: experience.name });
+  await page.flow.run('experience');
+  assert.equal(page.writes.length, 0);
+  assert.equal(pending.get(record.id).key, id(9));
+  assert.match(page.flow.snapshot().message, /ficou sem confirmação/);
+  await page.settled();
+  await page.flow.retry();
+  assert.deepEqual(page.writes, [{ url: path + '/experiences', body: { name: experience.name }, key: id(9) }]);
+  assert.equal(pending.size, 0);
+  page.dispose();
+  h.dispose();
+});
 
 test('identidade aplica limites por caractere, valida ASCII antes da caixa e normaliza espaços externos', () => {
   for (const name of ['', 'a'.repeat(181), 'x\nxx', 'x\ud800']) assert.throws(() => forms.eventIdentity({ ...form, name }));
@@ -311,7 +337,7 @@ for (const kind of ['experience', 'station']) {
     const originals = reopened.flow.snapshot().items;
     assert.equal(originals.length, 1);
     assert.equal(originals[0].stations.length, kind === 'station' ? 1 : 0);
-    reopened.flow.editSetup({ experience: 'Outro', station: 'Outra', parent: experience.id });
+    reopened.flow.editSetup({ experience: experience.name, station: station.label, parent: experience.id });
     await reopened.flow.run(kind);
     await reopened.flow.refresh();
     assert.equal(h.writes.length, writesBefore);

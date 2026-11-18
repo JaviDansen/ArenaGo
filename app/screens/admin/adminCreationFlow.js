@@ -1,14 +1,16 @@
 import { getAdminEvent, getAdminEventReadiness } from '../../services/adminEventsService';
-import { addEventExperience, addEventStation, createAdminEvent, grantEventStaff, readEventStructure, revokeEventStaff } from '../../services/adminEventSetupService';
+import { createAdminEvent, grantEventStaff, readEventStructure, revokeEventStaff } from '../../services/adminEventSetupService';
 import { configurationName, confirmOfficialEnd, creationBody, eventIdentity, staffEmail } from './adminCreationForm';
+import { attemptStructureIntent, forgetStructureIntent, matchesStructureIntent, structureIntentId,
+  structureIntentsFor } from './adminStructureIntents';
 
 const emptyDate = () => ({ date: '', time: '' });
 const initialForm = () => ({ name: '', accessCode: '', timezone: 'America/Fortaleza', margin: '0',
   start: emptyDate(), end: emptyDate(), externalQueueEnabled: false });
 const endedPhase = phase => phase === 'closing' || phase === 'closed';
 const uncertainMessage = 'Resultado não confirmado. Consulte os dados ou repita explicitamente a mesma solicitação.';
-function structureRecoveryMessage({ kind, body }) {
-  const resource = kind === 'experience' ? `experiência “${body.name}”` : `estação “${body.label}”`;
+function structureRecoveryMessage({ kind, value }) {
+  const resource = kind === 'addExperience' ? `experiência “${value}”` : `estação “${value}”`;
   return `O cadastro da ${resource} ficou sem confirmação. Confira os dados salvos antes de repetir a solicitação.`;
 }
 
@@ -29,13 +31,17 @@ function writeMessage(error, operation) {
 }
 
 // One instance per mounted wizard, authenticated session and selected event.
-export function createEventSetup({ client, eventId = null, isCurrent, newKey, now = Date.now, structureIntents }) {
-  const recovered = eventId && structureIntents?.get(eventId);
+export function createEventSetup({ client, eventId = null, isCurrent, newKey, now = Date.now, structureIntents: sessionIntents }) {
+  const structureIntents = sessionIntents ?? new Map();
+  const pendingCreates = id => structureIntentsFor(structureIntents, id)
+    .filter(record => record.kind === 'addExperience' || record.kind === 'addStation');
+  const recovered = pendingCreates(eventId)[0];
   let state = { step: eventId ? 3 : 1, stepVersion: 0, eventId, form: initialForm(), edited: false, event: null, ended: false,
     items: [], readiness: null, grants: [], busy: false, loading: Boolean(eventId), blocked: false,
     readError: null, message: recovered ? structureRecoveryMessage(recovered) : null, uncertain: Boolean(recovered),
     experience: '', station: '', parent: null, email: '' };
   let active = false, generation = 0, intent = recovered ? structureAction(recovered) : null, lifecycle = 0;
+  let reviewed = new Map();
   const listeners = new Set();
   const current = () => active && isCurrent();
   const update = patch => {
@@ -44,11 +50,10 @@ export function createEventSetup({ client, eventId = null, isCurrent, newKey, no
     listeners.forEach(listener => listener(state));
   };
   const editable = () => current() && !state.busy && !state.blocked && !intent;
-  function clearIntent(action) {
-    const record = action.structure;
-    if (record && structureIntents?.get(record.eventId) === record) structureIntents.delete(record.eventId);
-    intent = null;
-  }
+  const canEditStructure = () => current() && !state.busy && !state.blocked && (!intent || (intent.structure && state.uncertain));
+  const canReview = (record = intent?.structure) => Boolean(record && reviewed.has(record) &&
+    reviewed.get(record) === record.attempts && !record.flight && structureIntents.get(record.id) === record);
+  function clearIntent() { intent = null; }
   function deny() {
     intent = null;
     generation++;
@@ -59,6 +64,8 @@ export function createEventSetup({ client, eventId = null, isCurrent, newKey, no
     if (!current() || !state.eventId || state.busy || state.blocked) return;
     const ticket = ++generation;
     const id = state.eventId;
+    reviewed = new Map();
+    const observed = pendingCreates(id).filter(record => !record.flight).map(record => [record, record.attempts]);
     update({ loading: true, readError: null, readiness: null });
     const results = await Promise.allSettled([
       getAdminEvent(client, id), readEventStructure(client, id), getAdminEventReadiness(client, id),
@@ -77,6 +84,15 @@ export function createEventSetup({ client, eventId = null, isCurrent, newKey, no
       update({ loading: false, event: null, items: [], readError: 'Os dados do evento estão incompletos.' });
       return;
     }
+    for (const [record, attempts] of observed) {
+      if (record.flight || attempts !== record.attempts || structureIntents.get(record.id) !== record) continue;
+      reviewed.set(record, attempts);
+      if (record.result && matchesStructureIntent(items, record)) forgetStructureIntent(structureIntents, record);
+    }
+    if (intent?.structure && structureIntents.get(intent.structure.id) !== intent.structure) {
+      intent = null;
+      update({ uncertain: false, message: null });
+    }
     update({ event, items, readiness, loading: false,
       ended: state.ended || endedPhase(event.effectivePhase) || endedPhase(readiness.effectivePhase) });
   }
@@ -89,10 +105,11 @@ export function createEventSetup({ client, eventId = null, isCurrent, newKey, no
   async function submit(action) {
     if (!current() || state.busy || state.blocked || state.ended || intent !== action) return;
     const retrying = state.uncertain;
+    if (action.structure && (action.structure.flight || structureIntents.get(action.structure.id) !== action.structure)) return refresh();
     if (action.kind === 'create') {
       try { confirmOfficialEnd(action.officialEndsAt, now()); }
       catch (error) {
-        if (!retrying) clearIntent(action);
+        if (!retrying) clearIntent();
         update({ message: retrying
           ? 'O término oficial foi alcançado e o resultado do envio anterior continua sem confirmação. Confira os registros antes de cadastrar outro evento. Eventos encerrados podem ficar fora da listagem.'
           : error.message });
@@ -105,29 +122,41 @@ export function createEventSetup({ client, eventId = null, isCurrent, newKey, no
     try {
       const result = await action.send();
       if (!current() || epoch !== lifecycle) return;
-      clearIntent(action);
+      if (action.structure) {
+        update({ busy: false });
+        await refresh();
+        if (!current() || epoch !== lifecycle || state.blocked) return;
+        const pending = structureIntents.get(action.structure.id) === action.structure;
+        update(pending ? { uncertain: true, message: structureRecoveryMessage(action.structure) } :
+          { ...action.confirmed(result), uncertain: false });
+        return;
+      }
+      clearIntent();
       update({ ...action.confirmed(result), busy: false });
       await refresh();
     } catch (error) {
       if (!current() || epoch !== lifecycle) return;
       if ([401, 403].includes(error?.status)) {
-        if (!retrying) clearIntent(action);
+        if (!retrying) clearIntent();
         deny();
         return;
       }
       if (error?.status === 404 && action.kind === 'revoke') {
-        clearIntent(action);
+        clearIntent();
         update({ busy: false, uncertain: false, grants: state.grants.filter(item => item.id !== action.grantId),
           message: 'Este vínculo Staff não está mais disponível.' });
         await refresh();
         return;
       }
-      const unknown = !error?.status || error.outcomeUnknown || error.status >= 500 || error.status === 408 ||
-        error.code === 'IDEMPOTENCY_IN_PROGRESS' || (retrying && error.status === 429);
-      if (!unknown) clearIntent(action);
+      const unknown = action.structure ? structureIntents.get(action.structure.id) === action.structure :
+        !error?.status || error.outcomeUnknown || error.status >= 500 || error.status === 408 ||
+          error.code === 'IDEMPOTENCY_IN_PROGRESS' || (retrying && error.status === 429);
+      if (!unknown) clearIntent();
       update({ busy: false, uncertain: Boolean(unknown), message: unknown
-        ? (action.structure ? structureRecoveryMessage(action.structure) : uncertainMessage)
+        ? (action.structure ? [error?.code === 'EVENT_OPERATION_ENDED' ? writeMessage(error, action.kind) : '',
+          structureRecoveryMessage(action.structure)].filter(Boolean).join(' ') : uncertainMessage)
         : writeMessage(error, action.kind) });
+      if (action.structure && unknown) await refresh();
     }
   }
   function write(kind, send, confirmed, details) {
@@ -136,15 +165,15 @@ export function createEventSetup({ client, eventId = null, isCurrent, newKey, no
     return submit(intent);
   }
   function structureAction(structure) {
-    const { kind, eventId: id, experienceId, body, key } = structure;
-    return kind === 'experience'
-      ? { kind, structure, send: () => addEventExperience(client, id, body.name, key),
-        confirmed: () => ({ experience: '', message: 'Experiência salva.' }) }
-      : { kind, structure, send: () => addEventStation(client, id, experienceId, body.label, key),
-        confirmed: () => ({ station: '', parent: null, message: 'Estação salva.' }) };
+    const isExperience = structure.kind === 'addExperience';
+    return { kind: isExperience ? 'experience' : 'station', structure,
+      send: () => attemptStructureIntent(client, structureIntents, structure),
+      confirmed: () => isExperience ? { experience: '', message: 'Experiência salva.' } :
+        { station: '', parent: null, message: 'Estação salva.' } };
   }
   function writeStructure(record) {
-    const saved = structureIntents?.get(record.eventId);
+    record.id = structureIntentId(record);
+    const saved = structureIntents.get(record.id);
     if (saved) {
       intent = structureAction(saved);
       update({ uncertain: true, message: structureRecoveryMessage(saved) });
@@ -152,7 +181,7 @@ export function createEventSetup({ client, eventId = null, isCurrent, newKey, no
     }
     const structure = { ...record, key: newKey() };
     intent = structureAction(structure);
-    structureIntents?.set(record.eventId, structure);
+    structureIntents.set(structure.id, structure);
     return submit(intent);
   }
   function confirmCreate(version) {
@@ -167,15 +196,16 @@ export function createEventSetup({ client, eventId = null, isCurrent, newKey, no
   }
   function run(kind, grantId) {
     const id = state.eventId;
-    if (!editable() || state.loading || state.readError || state.ended || !id || !state.event) return;
+    const structural = kind === 'experience' || kind === 'station';
+    if (!(structural ? canEditStructure() : editable()) || state.loading || state.readError || state.ended || !id || !state.event) return;
     try {
       if (kind === 'experience' && state.step === 3) {
         const name = configurationName(state.experience, 160);
-        return writeStructure({ kind, eventId: id, body: { name } });
+        return writeStructure({ kind: 'addExperience', eventId: id, value: name });
       }
       if (kind === 'station' && state.step === 3 && state.items.some(item => item.id === state.parent)) {
         const label = configurationName(state.station, 120);
-        return writeStructure({ kind, eventId: id, experienceId: state.parent, body: { label } });
+        return writeStructure({ kind: 'addStation', eventId: id, experienceId: state.parent, value: label });
       }
       if (kind === 'grant' && state.step === 4) {
         const email = staffEmail(state.email);
@@ -193,7 +223,8 @@ export function createEventSetup({ client, eventId = null, isCurrent, newKey, no
   }
   return {
     snapshot: () => state,
-    hasPendingStructure: () => Boolean(intent?.structure),
+    pendingStructure: () => intent?.structure,
+    canReviewStructure: () => canReview(),
     mount(listener) {
       active = true;
       listeners.add(listener);
@@ -204,7 +235,9 @@ export function createEventSetup({ client, eventId = null, isCurrent, newKey, no
     editForm(patch) {
       if (editable() && !state.eventId) update({ form: { ...state.form, ...patch }, edited: true, message: null });
     },
-    editSetup(patch) { if (editable() && state.eventId) update({ ...patch, message: null }); },
+    editSetup(patch) {
+      if ((Object.hasOwn(patch, 'email') ? editable() : canEditStructure()) && state.eventId) update({ ...patch, message: null });
+    },
     next(version) {
       if (version !== state.stepVersion || !editable() || state.loading || state.readError) return;
       if (!state.eventId && state.step === 2) return;
@@ -215,13 +248,16 @@ export function createEventSetup({ client, eventId = null, isCurrent, newKey, no
       step(state.step + 1);
     },
     back: () => step(state.step - 1), step, refresh, run, confirmCreate,
-    retry() {
-      if (intent && state.uncertain && !state.loading && (!intent.structure || !state.readError)) return submit(intent);
+    retry(record = intent?.structure ?? null) {
+      if (!intent || !state.uncertain || state.loading) return;
+      if (record !== (intent.structure ?? null)) return;
+      if (intent.structure && (state.readError || !canReview())) return refresh();
+      return submit(intent);
     },
-    discardStructureIntent() {
+    discardStructureIntent(record = intent?.structure) {
       if (!current() || state.blocked || state.ended || state.busy || state.loading || state.readError ||
-          !state.uncertain || !intent?.structure) return;
-      clearIntent(intent);
+          !state.uncertain || record !== intent?.structure || !canReview(record) || !forgetStructureIntent(structureIntents, record)) return;
+      clearIntent();
       update({ uncertain: false, experience: '', station: '', parent: null,
         message: 'A confirmação pendente foi descartada. O cadastro anterior ainda pode ter sido salvo. Confira a estrutura antes de cadastrar novamente.' });
     },

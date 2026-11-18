@@ -60,6 +60,33 @@ function eventGrant(value, eventId) {
   return value;
 }
 
+export async function renameExperience(client, eventId, experienceId, name, key) {
+  const path = `${adminEventPath(eventId)}/experiences/${adminIdentifier(experienceId)}`;
+  const result = await client.patch(path, { name }, mutationOptions(key));
+  const experience = experienceOf(result?.experience, eventId);
+  confirm(experience.id === experienceId && experience.name === name);
+  return experience;
+}
+
+export async function renameStation(client, eventId, experienceId, stationId, label, key) {
+  const path = `${adminEventPath(eventId)}/experiences/${adminIdentifier(experienceId)}/stations/${adminIdentifier(stationId)}`;
+  const result = await client.patch(path, { label }, mutationOptions(key));
+  const station = stationOf(result?.station, experienceId);
+  confirm(station.id === stationId && station.label === label);
+  return station;
+}
+
+export async function setStationAvailability(client, eventId, stationId, availability) {
+  confirm(['available', 'unavailable'].includes(availability));
+  const path = `/staff/events/${adminIdentifier(eventId)}/stations/${adminIdentifier(stationId)}/availability`;
+  const station = await client.patch(path, { availability }, {
+    auth: true, retryOnUnauthorized: false, outcomeUnknownOnNetworkError: true,
+  });
+  confirm(station?.stationId === stationId && station.availability === availability);
+  if (station.pendingServiceSessionId !== null) adminIdentifier(station.pendingServiceSessionId);
+  return station;
+}
+
 export async function grantEventStaff(client, eventId, email, key) {
   const result = await client.post('/admin/roles/grant', { role: 'staff', eventId: adminIdentifier(eventId), email }, mutationOptions(key));
   const grant = eventGrant(result?.grant, eventId);

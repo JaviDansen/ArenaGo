@@ -6,6 +6,7 @@ import { useAuth } from '../../context/AuthContext';
 import { adminReadOwner } from './useAdminEvents';
 import { createEventSetup } from './adminCreationFlow';
 import { AdminSetupIntents } from './adminSetupIntents';
+import { reviewStructureLabel, structureIntentsFor } from './adminStructureIntents';
 import AdminLiveScreen from './components/AdminLiveScreen';
 import AdminButton from './components/AdminButton';
 import AdminNotice from './components/AdminNotice';
@@ -49,7 +50,9 @@ export default function AdminEventSetupScreen({ navigation, route }) {
   const locked = state.busy || state.uncertain;
   const finished = state.step === 6;
   const persisted = Boolean(state.eventId);
-  const structurePending = state.uncertain && flow.hasPendingStructure();
+  const pendingRecord = flow.pendingStructure();
+  const structurePending = state.uncertain && Boolean(pendingRecord);
+  const canReviewStructure = state.event && structureIntentsFor(structureIntents, state.eventId).length > 0;
   const canConfirm = () => mountedFlow.current === flow && live.current.selected === selected &&
     live.current.auth.httpClient === client && adminReadOwner(live.current.auth) === owner && navigation.isFocused();
   function ask(title, message, confirmLabel, action) {
@@ -96,6 +99,10 @@ export default function AdminEventSetupScreen({ navigation, route }) {
     subtitle={finished ? 'Consulte a configuração salva e escolha a próxima ação.' : 'Fluxo guiado para cadastrar um novo evento.'}
     backLabel={headerLabel} backDisabled={state.busy} onBack={headerBack}>
     {!finished && !state.ended && <Progress step={state.step} />}
+    {canReviewStructure && <AdminButton label={reviewStructureLabel} variant="secondary" disabled={state.busy || state.loading}
+      onPress={() => {
+        if (canConfirm()) navigation.push('AdminEventManagementInfo', { eventId: state.eventId, area: 'experiences', returnToSetup: true });
+      }} />}
     {state.blocked ? <AdminNotice tone="error" title="Acesso indisponível" message="Sua sessão perdeu acesso a esta operação. Entre novamente." /> :
       state.ended ? <>
         <AdminNotice tone="warning" title="Evento salvo em encerramento"
@@ -104,21 +111,21 @@ export default function AdminEventSetupScreen({ navigation, route }) {
       </> : <>
       {state.message && <AdminNotice tone={state.uncertain ? 'warning' : 'info'} title={state.message} />}
       {state.uncertain && <AdminButton label="Repetir a mesma solicitação" variant="secondary"
-        disabled={state.loading || (structurePending && Boolean(state.readError))}
-        onPress={() => flow.retry()} />}
+        disabled={state.loading || (structurePending && !flow.canReviewStructure())}
+        onPress={() => { if (canConfirm()) void flow.retry(pendingRecord ?? null); }} />}
       {state.uncertain && persisted && !state.readError &&
         <AdminButton label="Consultar dados salvos" variant="ghost" disabled={state.loading} onPress={() => flow.refresh()} />}
-      {structurePending && !state.loading && !state.readError &&
+      {structurePending && !state.loading && flow.canReviewStructure() &&
         <AdminButton label="Encerrar a tentativa de confirmação" variant="ghost" onPress={() =>
           ask('Encerrar a tentativa de confirmação?', 'O cadastro anterior ainda pode ter sido salvo. Confira a estrutura do evento antes de fazer outro cadastro.',
-            'Encerrar tentativa', () => flow.discardStructureIntent())} />}
+            'Encerrar tentativa', () => flow.discardStructureIntent(pendingRecord))} />}
       {state.busy && <AdminNotice title="Salvando..." />}
       {needsData ? <AdminNotice tone={state.readError ? 'error' : 'info'} title={state.readError || 'Consultando o evento...'}>
         {state.readError && <AdminButton label="Tentar consulta novamente" onPress={() => flow.refresh()} />}
       </AdminNotice> : <>
         {state.step === 1 && <IdentityStep state={state} flow={flow} locked={locked} />}
         {state.step === 2 && <DatesStep state={state} flow={flow} locked={locked} />}
-        {state.step === 3 && <EventStructureStep state={state} flow={flow} locked={locked} />}
+        {state.step === 3 && <EventStructureStep state={state} flow={flow} locked={state.busy || (state.uncertain && !structurePending)} />}
         {state.step === 4 && <EventStaffStep state={state} flow={flow} locked={locked} confirmRevoke={confirmRevoke} />}
         {state.step >= 5 && <>
           <Text accessibilityRole="header" style={[s.title, styles.heading]}>{finished

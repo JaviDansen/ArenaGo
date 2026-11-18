@@ -268,7 +268,8 @@ function createHarness(relativePath, options = {}) {
       if (contextObj === AuthContextToken) {
         return authContextValue;
       }
-      return contextObj?._defaultValue ?? authContextValue;
+      return contextObj && Object.prototype.hasOwnProperty.call(contextObj, '_defaultValue')
+        ? contextObj._defaultValue : undefined;
     },
     useState(initial) {
       const index = cursor++;
@@ -372,7 +373,9 @@ function createHarness(relativePath, options = {}) {
     if (name === '@react-native-community/datetimepicker') return nativePicker;
     if (name === '../components/BirthDateInput' || name === '../../components/BirthDateInput') return { __esModule: true, default: 'BirthDateInput' };
     if (name === '../components/ScreenContainer' || name === '../../components/ScreenContainer') return { __esModule: true, default: 'ScreenContainer' };
-    if (name === '../context/AuthContext' || name === '../../context/AuthContext') {
+    const authModule = path.resolve(path.dirname(path.join(appDirectory, fromRelativePath)), name);
+    if (name.startsWith('.') && (authModule === path.join(appDirectory, 'context', 'AuthContext') ||
+      authModule === path.join(appDirectory, 'context', 'AuthContext.js'))) {
       return {
         AuthContext: AuthContextToken,
         useAuth: () => authContextValue,

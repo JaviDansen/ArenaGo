@@ -6,9 +6,12 @@ import AdminNotice from './components/AdminNotice';
 import AdminButton from './components/AdminButton';
 import { liveStyles as s } from './components/AdminLiveUI';
 import AdminEventSettingsScreen from './AdminEventSettingsScreen';
+import AdminStructureScreen from './AdminStructureScreen';
 
 export default function AdminEventManagementInfoScreen({ navigation, route }) {
-  const { eventId, area } = route.params ?? {};
+  const { eventId, area, returnToSetup } = route.params ?? {};
+  if (area === 'experiences') return <AdminStructureScreen navigation={navigation} eventId={eventId}
+    returnToSetup={returnToSetup === true} />;
   return area === 'schedule' ? <AdminEventSettingsScreen navigation={navigation} eventId={eventId} /> :
     <AdminEventManagementPlaceholder navigation={navigation} eventId={eventId} area={area} />;
 }
