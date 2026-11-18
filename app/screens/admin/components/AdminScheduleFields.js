@@ -49,7 +49,7 @@ export function ScheduleDateTime({ label, value, instant, timezone, onChange }) 
           placeholder={isDate ? 'DD/MM/AAAA' : 'HH:MM'} keyboardType={isDate ? undefined : 'numbers-and-punctuation'}>
           {nativeControl ? <Pressable accessibilityRole="button" accessibilityLabel={fieldLabel} onPress={() => choose(field)}
             style={[styles.input, styles.pickerButton]}>
-            <Text style={styles.label}>{value[field]}</Text>
+            <Text style={styles.label}>{value[field] || (isDate ? 'Selecionar data' : 'Selecionar hora')}</Text>
             <AdminIcon name={isDate ? 'calendar' : 'history'} size={20} />
           </Pressable> : null}
         </SettingsField>;

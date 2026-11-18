@@ -1,0 +1,2172 @@
+diff --git a/app/screens/admin/AdminDemoNavigator.js b/app/screens/admin/AdminDemoNavigator.js
+index 750df796771ddd8f085dbe292eadd4be85d16c6a..28959dde915d94f46e978dbca7d5ed788774458e 100644
+--- a/app/screens/admin/AdminDemoNavigator.js
++++ b/app/screens/admin/AdminDemoNavigator.js
+@@ -1,10 +1,13 @@
+ import { createNativeStackNavigator } from '@react-navigation/native-stack';
+ import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
++import { useMemo } from 'react';
+ import { useAuth } from '../../context/AuthContext';
+ import { adminReadOwner } from './useAdminEvents';
+ import AdminHomeScreen from './AdminHomeScreen';
+ import AdminRealEventsScreen from './AdminRealEventsScreen';
+ import AdminRealEventScreen from './AdminRealEventScreen';
++import AdminEventSetupScreen from './AdminEventSetupScreen';
++import { AdminSetupIntents } from './adminSetupIntents';
+ import AdminEventManagementInfoScreen from './AdminEventManagementInfoScreen';
+ import AdminPendingScreen from './AdminPendingScreen';
+ import AdminBottomBar from './components/AdminBottomBar';
+@@ -25,12 +28,17 @@ function AdminTabs() {
+ // Keep the entry name used by App.js. Demo sources remain available for later
+ // migrations, but none of their mutation routes are registered for real events.
+ export default function AdminDemoNavigator() {
+-  const owner = adminReadOwner(useAuth());
++  const auth = useAuth();
++  const owner = adminReadOwner(auth);
++  const setupIntents = useMemo(() => new Map(), [owner, auth.httpClient]);
+   if (!owner) return null;
+-  return <Stack.Navigator key={owner} initialRouteName="AdminTabs" screenOptions={{ headerShown: false }}>
+-    <Stack.Screen name="AdminTabs" component={AdminTabs} />
+-    <Stack.Screen name="AdminEvents" component={AdminRealEventsScreen} />
+-    <Stack.Screen name="AdminRealEvent" component={AdminRealEventScreen} />
+-    <Stack.Screen name="AdminEventManagementInfo" component={AdminEventManagementInfoScreen} />
+-  </Stack.Navigator>;
++  return <AdminSetupIntents.Provider value={setupIntents}>
++    <Stack.Navigator key={owner} initialRouteName="AdminTabs" screenOptions={{ headerShown: false }}>
++      <Stack.Screen name="AdminTabs" component={AdminTabs} />
++      <Stack.Screen name="AdminEvents" component={AdminRealEventsScreen} />
++      <Stack.Screen name="AdminRealEvent" component={AdminRealEventScreen} />
++      <Stack.Screen name="AdminEventManagementInfo" component={AdminEventManagementInfoScreen} />
++      <Stack.Screen name="AdminEventSetup" component={AdminEventSetupScreen} />
++    </Stack.Navigator>
++  </AdminSetupIntents.Provider>;
+ }
+diff --git a/app/screens/admin/AdminEventSettingsScreen.js b/app/screens/admin/AdminEventSettingsScreen.js
+index 8435e37062fd6424bc02c2ac0e26cee1521d260e..fe81c2538a693e4855c3747cdec23e67026ba661 100644
+--- a/app/screens/admin/AdminEventSettingsScreen.js
++++ b/app/screens/admin/AdminEventSettingsScreen.js
+@@ -7,6 +7,7 @@ import { adminEventWriteError, changeAdminSchedule, formatAdminDate, renameAdmin
+ import { adminReadOwner } from './useAdminEvents';
+ import useAdminEventPanel from './useAdminEventPanel';
+ import { eventScheduleDraft, prepareSchedule, previewOperationalDeadline, scheduleChanged } from './adminScheduleForm';
++import { configurationName } from './adminCreationForm';
+ import AdminLiveScreen from './components/AdminLiveScreen';
+ import AdminSelectedEvent from './components/AdminSelectedEvent';
+ import AdminButton from './components/AdminButton';
+@@ -15,14 +16,6 @@ import AdminEventAccess from './components/AdminEventAccess';
+ import { ScheduleDateTime, SettingsField, SettingsSection } from './components/AdminScheduleFields';
+ import { liveStyles as s } from './components/AdminLiveUI';
+ 
+-function validateName(value) {
+-  const name = value.trim();
+-  if (!name || Array.from(name).length > 180 || /[\u0000-\u001f\u007f\ud800-\udfff]/u.test(name)) {
+-    throw new Error('Informe um nome válido de até 180 caracteres.');
+-  }
+-  return name;
+-}
+-
+ export default function AdminEventSettingsScreen({ navigation, eventId }) {
+   const auth = useAuth();
+   const owner = adminReadOwner(auth);
+@@ -77,7 +70,7 @@ export default function AdminEventSettingsScreen({ navigation, eventId }) {
+   async function save() {
+     if (!isCurrent() || inFlight.current || !dirty || !event) return;
+     let payload;
+-    try { payload = draft.group === 'name' ? validateName(draft.name) : prepareSchedule(event, original, draft, Date.now()); }
++    try { payload = draft.group === 'name' ? configurationName(draft.name) : prepareSchedule(event, original, draft, Date.now()); }
+     catch (error) { update({ notice: { tone: 'error', message: error.message } }); return; }
+ 
+     const ticket = { generation: generation.current };
+diff --git a/app/screens/admin/AdminEventSetupScreen.js b/app/screens/admin/AdminEventSetupScreen.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..908c0cdd54d12ee7c8da5951c2db0028b99b55a3
+--- /dev/null
++++ b/app/screens/admin/AdminEventSetupScreen.js
+@@ -0,0 +1,156 @@
++import { useContext, useEffect, useMemo, useRef, useState } from 'react';
++import { StyleSheet, Text, View } from 'react-native';
++import { usePreventRemove } from '@react-navigation/native';
++import { randomUUID } from 'expo-crypto';
++import { useAuth } from '../../context/AuthContext';
++import { adminReadOwner } from './useAdminEvents';
++import { createEventSetup } from './adminCreationFlow';
++import { AdminSetupIntents } from './adminSetupIntents';
++import AdminLiveScreen from './components/AdminLiveScreen';
++import AdminButton from './components/AdminButton';
++import AdminNotice from './components/AdminNotice';
++import AdminConfirmDialog from './components/AdminConfirmDialog';
++import { liveStyles as s } from './components/AdminLiveUI';
++import { DatesStep, EventReview, EventStaffStep, EventStructureStep, IdentityStep, stepTitles } from './components/AdminSetupSteps';
++
++function Progress({ step }) {
++  return <View style={s.card} accessible accessibilityRole="progressbar" accessibilityLabel="Progresso do formulário"
++    accessibilityValue={{ min: 0, max: 5, now: step, text: `Etapa ${step} de 5` }}>
++    <View style={s.row}><Text style={[s.grow, styles.progressTitle]}>Etapa {step} de 5</Text>
++      <Text style={styles.percent}>{step * 20}% do fluxo</Text></View>
++    <View style={styles.track}><View style={[styles.fill, { width: `${step * 20}%` }]} /></View>
++  </View>;
++}
++
++export default function AdminEventSetupScreen({ navigation, route }) {
++  const auth = useAuth(), owner = adminReadOwner(auth), client = auth.httpClient;
++  const selected = route.params?.eventId;
++  const structureIntents = useContext(AdminSetupIntents);
++  const live = useRef(null);
++  live.current = { auth, selected };
++  const flow = useMemo(() => createEventSetup({ client, eventId: selected, newKey: randomUUID, structureIntents,
++    isCurrent: () => Boolean(owner && adminReadOwner(live.current.auth) === owner &&
++      live.current.auth.httpClient === client && live.current.selected === selected),
++  }), [client, owner, selected, structureIntents]);
++  const mountedFlow = useRef(null);
++  const [snapshot, setSnapshot] = useState(null);
++  const [dialog, setDialog] = useState(null);
++  const pendingDialog = useRef(null);
++  const state = snapshot?.flow === flow ? snapshot.state : flow.snapshot();
++  useEffect(() => {
++    mountedFlow.current = flow;
++    const dispose = flow.mount(value => setSnapshot({ flow, state: value }));
++    const remove = navigation.addListener('focus', flow.refresh);
++    return () => { mountedFlow.current = null; dispose(); remove(); };
++  }, [flow, navigation]);
++
++  const localSetup = Boolean(state.experience || state.station || state.email);
++  const dirty = !state.blocked && (state.edited || localSetup || state.uncertain);
++  const locked = state.busy || state.uncertain;
++  const finished = state.step === 6;
++  const persisted = Boolean(state.eventId);
++  const structurePending = state.uncertain && flow.hasPendingStructure();
++  const canConfirm = () => mountedFlow.current === flow && live.current.selected === selected &&
++    live.current.auth.httpClient === client && adminReadOwner(live.current.auth) === owner && navigation.isFocused();
++  function ask(title, message, confirmLabel, action) {
++    const request = { flow, title, message, confirmLabel, action };
++    pendingDialog.current = request;
++    setDialog(request);
++  }
++  function closeDialog(confirm) {
++    if (pendingDialog.current !== dialog) return;
++    pendingDialog.current = null;
++    setDialog(null);
++    if (confirm && canConfirm()) dialog.action();
++  }
++  usePreventRemove(Boolean(owner && (dirty || state.busy)), ({ data }) => {
++    if (!navigation.isFocused() || state.busy) return;
++    ask('Sair da configuração?', structurePending
++      ? 'O cadastro pode ter sido salvo. Ao reabrir este evento na mesma sessão, confira a estrutura e retome a solicitação pendente.'
++      : state.uncertain ? 'A solicitação pode ter sido salva. Confira o evento em Gerenciar Eventos antes de iniciar outra ação.'
++      : persisted ? 'Os campos não enviados serão descartados. Os dados já salvos permanecem no evento.'
++        : 'O formulário está somente neste aparelho e será descartado ao sair.',
++    'Sair do fluxo', () => navigation.dispatch(data.action));
++  });
++  function move(action) {
++    if (locked || !canConfirm() || flow.snapshot().stepVersion !== state.stepVersion) return;
++    if (!localSetup) { action(); return; }
++    ask('Descartar campos não enviados?', 'Os dados já salvos permanecem no evento.', 'Descartar e continuar', () => {
++      if (flow.snapshot().stepVersion !== state.stepVersion) return;
++      flow.editSetup({ experience: '', station: '', parent: null, email: '' });
++      action();
++    });
++  }
++  const home = () => navigation.popTo('AdminTabs', { screen: 'Home' });
++  const panel = () => navigation.popTo('AdminRealEvent', { eventId: state.eventId });
++  const origin = () => selected ? panel() : route.params?.origin === 'home' ? home() : navigation.popTo('AdminEvents');
++  const headerBack = finished || state.ended ? panel : state.uncertain || state.blocked ? origin : state.step > 1 ? () => move(flow.back) : origin;
++  const headerLabel = finished || state.ended ? 'Voltar ao painel' : !state.uncertain && !state.blocked && state.step > 1 ? 'Voltar uma etapa' :
++    selected ? 'Voltar ao painel' : route.params?.origin === 'home' ? 'Voltar para Home' : 'Voltar aos eventos';
++  const needsData = persisted && !state.blocked && (state.loading || state.readError || !state.event || !state.readiness);
++  const confirmRevoke = grant => ask('Revogar acesso Staff?', `${grant.email} perderá o acesso Staff a este evento. A prontidão pode mudar.`,
++    'Revogar acesso', () => flow.run('revoke', grant.id));
++  if (!owner) return null;
++  return <AdminLiveScreen key={state.step} navigation={navigation} mode="wizard" bottomSafeArea
++    title={finished || state.ended ? 'Evento criado' : 'Criar evento'}
++    subtitle={finished ? 'Consulte a configuração salva e escolha a próxima ação.' : 'Fluxo guiado para cadastrar um novo evento.'}
++    backLabel={headerLabel} backDisabled={state.busy} onBack={headerBack}>
++    {!finished && !state.ended && <Progress step={state.step} />}
++    {state.blocked ? <AdminNotice tone="error" title="Acesso indisponível" message="Sua sessão perdeu acesso a esta operação. Entre novamente." /> :
++      state.ended ? <>
++        <AdminNotice tone="warning" title="Evento salvo em encerramento"
++          message="O evento foi salvo, mas está encerrando ou já encerrou. Você pode consultar os dados no painel do evento." />
++        <AdminButton label="Abrir painel do evento" onPress={panel} />
++      </> : <>
++      {state.message && <AdminNotice tone={state.uncertain ? 'warning' : 'info'} title={state.message} />}
++      {state.uncertain && <AdminButton label="Repetir a mesma solicitação" variant="secondary"
++        disabled={state.loading || (structurePending && Boolean(state.readError))}
++        onPress={() => flow.retry()} />}
++      {state.uncertain && persisted && !state.readError &&
++        <AdminButton label="Consultar dados salvos" variant="ghost" disabled={state.loading} onPress={() => flow.refresh()} />}
++      {structurePending && !state.loading && !state.readError &&
++        <AdminButton label="Encerrar a tentativa de confirmação" variant="ghost" onPress={() =>
++          ask('Encerrar a tentativa de confirmação?', 'O cadastro anterior ainda pode ter sido salvo. Confira a estrutura do evento antes de fazer outro cadastro.',
++            'Encerrar tentativa', () => flow.discardStructureIntent())} />}
++      {state.busy && <AdminNotice title="Salvando..." />}
++      {needsData ? <AdminNotice tone={state.readError ? 'error' : 'info'} title={state.readError || 'Consultando o evento...'}>
++        {state.readError && <AdminButton label="Tentar consulta novamente" onPress={() => flow.refresh()} />}
++      </AdminNotice> : <>
++        {state.step === 1 && <IdentityStep state={state} flow={flow} locked={locked} />}
++        {state.step === 2 && <DatesStep state={state} flow={flow} locked={locked} />}
++        {state.step === 3 && <EventStructureStep state={state} flow={flow} locked={locked} />}
++        {state.step === 4 && <EventStaffStep state={state} flow={flow} locked={locked} confirmRevoke={confirmRevoke} />}
++        {state.step >= 5 && <>
++          <Text accessibilityRole="header" style={[s.title, styles.heading]}>{finished
++            ? state.readiness.ready ? 'Evento criado com sucesso' : 'Evento salvo com sucesso' : stepTitles[4]}</Text>
++          <EventReview state={state} finished={finished} goTo={step => move(() => flow.step(step))} />
++        </>}
++        {finished ? <>
++          <Text accessibilityRole="header" style={[s.title, styles.heading]}>Próximos passos</Text>
++          <AdminButton label="Abrir painel do evento" onPress={panel} />
++          <AdminButton label="Revisar equipe Staff" variant="secondary" onPress={() => flow.step(4)} />
++          <AdminButton label="Acompanhar operação do evento" variant="secondary"
++            onPress={() => navigation.replace('AdminEventManagementInfo', { eventId: state.eventId, area: 'operation' })} />
++          <AdminButton label="Voltar para a Home Admin" variant="ghost" onPress={home} />
++        </> : <>
++          {persisted ? <AdminButton label="Salvar e revisar depois" variant="secondary" disabled={locked}
++            onPress={() => move(() => flow.step(6))} /> :
++            <Text style={s.body}>O formulário permanece em memória enquanto este fluxo estiver aberto.</Text>}
++          <AdminButton label={state.step === 5 ? state.readiness.ready ? 'Concluir configuração' : 'Finalizar com pendências'
++            : state.step === 2 && !persisted ? 'Criar evento e continuar' : 'Continuar'}
++            disabled={locked} onPress={() => move(state.step === 2 && !persisted
++              ? () => flow.confirmCreate(state.stepVersion) : () => flow.next(state.stepVersion))} />
++        </>}
++      </>}
++    </>}
++    {dialog?.flow === flow && !state.blocked && <AdminConfirmDialog visible title={dialog.title} message={dialog.message}
++      confirmLabel={dialog.confirmLabel} cancelLabel="Cancelar"
++      onCancel={() => closeDialog(false)} onConfirm={() => closeDialog(true)} />}
++  </AdminLiveScreen>;
++}
++
++const styles = StyleSheet.create({
++  heading: { marginTop: 20 }, progressTitle: { color: '#fff', fontSize: 16, fontWeight: '700' },
++  percent: { color: '#39e5bc', fontWeight: '600' }, track: { marginTop: 12, height: 10, borderRadius: 5, backgroundColor: '#443151' },
++  fill: { height: 10, borderRadius: 5, backgroundColor: '#26dcb1' },
++});
+diff --git a/app/screens/admin/AdminHomeScreen.js b/app/screens/admin/AdminHomeScreen.js
+index e42e0cbf8df199a8f6e9a7d6494116bd1de3a83f..269b20ddc99652c240fc66024386912535a4e763 100644
+--- a/app/screens/admin/AdminHomeScreen.js
++++ b/app/screens/admin/AdminHomeScreen.js
+@@ -1,9 +1,9 @@
+ import { Pressable, StyleSheet, Text, View } from 'react-native';
+ import AdminLiveScreen from './components/AdminLiveScreen';
+-import { AdminIcon, AdminIconTile, AdminPendingActions, liveColors as c, liveStyles as s } from './components/AdminLiveUI';
++import { AdminIcon, AdminIconTile, AdminEventActions, liveColors as c, liveStyles as s } from './components/AdminLiveUI';
+ 
+ export default function AdminHomeScreen({ navigation }) {
+-  return <AdminLiveScreen title="Painel Administrativo" subtitle="Gerencie eventos, equipe e indicadores da plataforma.">
++  return <AdminLiveScreen mode="home" title="Painel Administrativo" subtitle="Gerencie eventos, equipe e indicadores da plataforma.">
+     <View style={s.card}>
+       <Pressable accessibilityRole="button" accessibilityLabel="Gerenciar eventos"
+         onPress={() => navigation.navigate('AdminEvents')} style={({ pressed }) => [s.row, styles.mainLink, pressed && styles.pressed]}>
+@@ -11,7 +11,7 @@ export default function AdminHomeScreen({ navigation }) {
+         <View style={s.grow}><Text style={s.title}>Gerenciar eventos</Text><Text style={s.body}>Consulte e acompanhe os eventos ativos.</Text></View>
+         <AdminIcon name="chevron" color={c.muted} size={18} />
+       </Pressable>
+-      <AdminPendingActions />
++      <AdminEventActions onCreate={() => navigation.navigate('AdminEventSetup', { origin: 'home' })} />
+     </View>
+     <View style={styles.columns}>
+       {[
+diff --git a/app/screens/admin/AdminPendingScreen.js b/app/screens/admin/AdminPendingScreen.js
+index 79934529c05f7888e1a3f0bf40b4392733ca2fa2..747fc3a3a7470febed145716659fd478fabff217 100644
+--- a/app/screens/admin/AdminPendingScreen.js
++++ b/app/screens/admin/AdminPendingScreen.js
+@@ -1,7 +1,8 @@
+ import AdminLiveScreen from './components/AdminLiveScreen';
+ import AdminNotice from './components/AdminNotice';
+-export default function AdminPendingScreen({ route }) {
+-  return <AdminLiveScreen title={route.name === 'BI' ? 'Visão geral' : 'Histórico de eventos'}>
++export default function AdminPendingScreen({ route, navigation }) {
++  return <AdminLiveScreen title={route.name === 'BI' ? 'Visão geral' : 'Histórico de eventos'}
++    backLabel="Voltar para Home" onBack={() => navigation.navigate('Home')}>
+     <AdminNotice title="Em implementação" message="Esta área estará disponível em uma próxima atualização." />
+   </AdminLiveScreen>;
+ }
+diff --git a/app/screens/admin/AdminRealEventScreen.js b/app/screens/admin/AdminRealEventScreen.js
+index e67f23cd5cbaf44e75d91a240692b76bfbac595b..9f8bd2e148813998134cc9f9278870cd1ba0c85e 100644
+--- a/app/screens/admin/AdminRealEventScreen.js
++++ b/app/screens/admin/AdminRealEventScreen.js
+@@ -1,6 +1,7 @@
+-import { useState } from 'react';
++import { useContext, useState } from 'react';
+ import { Platform, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native';
+ import { adminEventAreas } from './adminEventManagement';
++import { AdminSetupIntents } from './adminSetupIntents';
+ import useAdminEventPanel from './useAdminEventPanel';
+ import AdminLiveScreen from './components/AdminLiveScreen';
+ import AdminSelectedEvent from './components/AdminSelectedEvent';
+@@ -10,6 +11,7 @@ import { AdminIcon, AdminIconTile, liveColors as c, liveStyles as s } from './co
+ 
+ export default function AdminRealEventScreen({ navigation, route }) {
+   const eventId = route.params?.eventId;
++  const structureIntents = useContext(AdminSetupIntents);
+   const { event, readiness, pending, refreshing, blocked, detailError, readinessError, refresh } = useAdminEventPanel(navigation, eventId);
+   const [expandedReadiness, setExpandedReadiness] = useState(null);
+   const expanded = Boolean(readiness && expandedReadiness === readiness);
+@@ -28,6 +30,10 @@ export default function AdminRealEventScreen({ navigation, route }) {
+       <AdminButton label="Tentar novamente" onPress={() => refresh()} />
+     </AdminNotice>}
+     {event && <>
++      {((readiness && !readiness.ready) || structureIntents?.has?.(event.id)) &&
++        !['closed', 'closing'].includes(readiness?.effectivePhase ?? event.effectivePhase) &&
++        <AdminButton label="Continuar configuração" variant="secondary"
++          onPress={() => navigation.navigate('AdminEventSetup', { eventId: event.id })} />}
+       <View style={styles.section}>
+         <Text accessibilityRole="header" style={styles.sectionTitle}>GERENCIAMENTO</Text>
+         {Platform.OS === 'web' && <Pressable accessibilityRole="button" accessibilityLabel="Atualizar evento" onPress={() => refresh(true)} style={styles.refresh}>
+diff --git a/app/screens/admin/AdminRealEventsScreen.js b/app/screens/admin/AdminRealEventsScreen.js
+index 996996b86fb563cd7b5f475b38c44d33eaed3015..58dbca8be0663146e93fbbb940a3495ba13b8fcf 100644
+--- a/app/screens/admin/AdminRealEventsScreen.js
++++ b/app/screens/admin/AdminRealEventsScreen.js
+@@ -1,19 +1,21 @@
+-import { useState } from 'react';
++import { useEffect, useState } from 'react';
+ import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+ import useAdminEvents from './useAdminEvents';
+ import AdminLiveScreen from './components/AdminLiveScreen';
+ import AdminButton from './components/AdminButton';
+ import AdminNotice from './components/AdminNotice';
+ import AdminEventSummary from './components/AdminEventSummary';
+-import { AdminIcon, AdminPendingActions, liveColors as c, liveStyles as s } from './components/AdminLiveUI';
++import { AdminIcon, AdminEventActions, liveColors as c, liveStyles as s } from './components/AdminLiveUI';
+ const filters = [{ value: 'all', label: 'Todos' }, { value: 'scheduled', label: 'Agendados' }, { value: 'open', label: 'Abertos' }, { value: 'closing', label: 'Encerrando' }];
+ 
+ export default function AdminRealEventsScreen({ navigation }) {
+   const [search, setSearch] = useState(''), [phase, setPhase] = useState('all');
+   const { items, status, error, nextCursor, loader } = useAdminEvents(search, phase);
++  useEffect(() => navigation.addListener('focus', () => { void loader.setFilters({ search, phase }); }),
++    [navigation, loader, search, phase]);
+   return <AdminLiveScreen title="Gerenciar Eventos" subtitle="Consulte, busque e gerencie os eventos da plataforma."
+-    navigation={navigation} backLabel="Voltar ao painel" showTabs>
+-    <AdminPendingActions />
++    navigation={navigation} backLabel="Voltar para Home" onBack={() => navigation.popTo('AdminTabs', { screen: 'Home' })} showTabs>
++    <AdminEventActions onCreate={() => navigation.navigate('AdminEventSetup', { origin: 'events' })} />
+     <View style={styles.search}>
+       <AdminIcon name="search" color={c.muted} />
+       <TextInput accessibilityLabel="Pesquisar por nome ou código" placeholder="Pesquisar por nome ou código"
+diff --git a/app/screens/admin/adminCreationFlow.js b/app/screens/admin/adminCreationFlow.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..9888308a4962f129a578fba226b5909af255a221
+--- /dev/null
++++ b/app/screens/admin/adminCreationFlow.js
+@@ -0,0 +1,229 @@
++import { getAdminEvent, getAdminEventReadiness } from '../../services/adminEventsService';
++import { addEventExperience, addEventStation, createAdminEvent, grantEventStaff, readEventStructure, revokeEventStaff } from '../../services/adminEventSetupService';
++import { configurationName, confirmOfficialEnd, creationBody, eventIdentity, staffEmail } from './adminCreationForm';
++
++const emptyDate = () => ({ date: '', time: '' });
++const initialForm = () => ({ name: '', accessCode: '', timezone: 'America/Fortaleza', margin: '0',
++  start: emptyDate(), end: emptyDate(), externalQueueEnabled: false });
++const endedPhase = phase => phase === 'closing' || phase === 'closed';
++const uncertainMessage = 'Resultado não confirmado. Consulte os dados ou repita explicitamente a mesma solicitação.';
++function structureRecoveryMessage({ kind, body }) {
++  const resource = kind === 'experience' ? `experiência “${body.name}”` : `estação “${body.label}”`;
++  return `O cadastro da ${resource} ficou sem confirmação. Confira os dados salvos antes de repetir a solicitação.`;
++}
++
++function writeMessage(error, operation) {
++  const messages = {
++    ACCESS_CODE_ALREADY_USED: 'Este código já foi reservado. Escolha outro código na primeira etapa.',
++    ROLE_ALREADY_GRANTED: 'Este usuário já possui Staff neste evento.',
++    ROLE_TARGET_INELIGIBLE: 'O usuário precisa ter conta ativa e e-mail verificado.',
++    EVENT_CONFIGURATION_LOCKED: 'O evento já tem participação registrada e sua estrutura está protegida.',
++    EVENT_OPERATION_ENDED: 'O evento já encerrou a janela de configuração.',
++    IDEMPOTENCY_KEY_REUSED: 'Conflito de intenção. Consulte os registros antes de iniciar outra ação.',
++  };
++  if (messages[error?.code]) return messages[error.code];
++  if (error?.status === 404) return 'O recurso ou usuário não foi encontrado.';
++  if (operation === 'station') return 'A estação não foi salva. A experiência permanece cadastrada. Confira sua identificação.';
++  if (error?.status === 400) return 'O servidor rejeitou os dados. Revise os campos desta etapa.';
++  return 'A operação foi recusada. Confira os dados antes de tentar novamente.';
++}
++
++// One instance per mounted wizard, authenticated session and selected event.
++export function createEventSetup({ client, eventId = null, isCurrent, newKey, now = Date.now, structureIntents }) {
++  const recovered = eventId && structureIntents?.get(eventId);
++  let state = { step: eventId ? 3 : 1, stepVersion: 0, eventId, form: initialForm(), edited: false, event: null, ended: false,
++    items: [], readiness: null, grants: [], busy: false, loading: Boolean(eventId), blocked: false,
++    readError: null, message: recovered ? structureRecoveryMessage(recovered) : null, uncertain: Boolean(recovered),
++    experience: '', station: '', parent: null, email: '' };
++  let active = false, generation = 0, intent = recovered ? structureAction(recovered) : null, lifecycle = 0;
++  const listeners = new Set();
++  const current = () => active && isCurrent();
++  const update = patch => {
++    if (!current()) return;
++    state = { ...state, ...patch };
++    listeners.forEach(listener => listener(state));
++  };
++  const editable = () => current() && !state.busy && !state.blocked && !intent;
++  function clearIntent(action) {
++    const record = action.structure;
++    if (record && structureIntents?.get(record.eventId) === record) structureIntents.delete(record.eventId);
++    intent = null;
++  }
++  function deny() {
++    intent = null;
++    generation++;
++    update({ blocked: true, busy: false, loading: false, uncertain: false, event: null, readiness: null,
++      items: [], grants: [], form: initialForm(), email: '', experience: '', station: '', parent: null, message: null });
++  }
++  async function refresh() {
++    if (!current() || !state.eventId || state.busy || state.blocked) return;
++    const ticket = ++generation;
++    const id = state.eventId;
++    update({ loading: true, readError: null, readiness: null });
++    const results = await Promise.allSettled([
++      getAdminEvent(client, id), readEventStructure(client, id), getAdminEventReadiness(client, id),
++    ]);
++    if (!current() || ticket !== generation) return;
++    const failures = results.filter(result => result.status === 'rejected');
++    if (failures.some(result => [401, 403].includes(result.reason?.status))) { deny(); return; }
++    if (failures.length) {
++      update({ loading: false, event: null, items: [], readError: failures.some(result => result.reason?.status === 404)
++        ? 'Evento não encontrado ou indisponível.' : 'Não foi possível confirmar os dados e a prontidão do evento.' });
++      return;
++    }
++    const [event, items, readiness] = results.map(result => result.value);
++    if (typeof event.accessCode !== 'string' || !event.accessCode.trim() || typeof event.externalQueueEnabled !== 'boolean' ||
++        !Number.isFinite(Date.parse(event.operationalDeadlineAt))) {
++      update({ loading: false, event: null, items: [], readError: 'Os dados do evento estão incompletos.' });
++      return;
++    }
++    update({ event, items, readiness, loading: false,
++      ended: state.ended || endedPhase(event.effectivePhase) || endedPhase(readiness.effectivePhase) });
++  }
++  function step(next) {
++    if (!editable() || state.ended || next < 1 || next > 6 || (next > 2 && !state.eventId)) return;
++    if (next === 6 && (!state.readiness || state.loading || state.readError)) return;
++    update({ step: next, stepVersion: state.stepVersion + 1, message: null });
++    if (state.eventId) void refresh();
++  }
++  async function submit(action) {
++    if (!current() || state.busy || state.blocked || state.ended || intent !== action) return;
++    const retrying = state.uncertain;
++    if (action.kind === 'create') {
++      try { confirmOfficialEnd(action.officialEndsAt, now()); }
++      catch (error) {
++        if (!retrying) clearIntent(action);
++        update({ message: retrying
++          ? 'O término oficial foi alcançado e o resultado do envio anterior continua sem confirmação. Confira os registros antes de cadastrar outro evento. Eventos encerrados podem ficar fora da listagem.'
++          : error.message });
++        return;
++      }
++    }
++    const epoch = lifecycle;
++    generation++;
++    update({ busy: true, uncertain: false, message: null });
++    try {
++      const result = await action.send();
++      if (!current() || epoch !== lifecycle) return;
++      clearIntent(action);
++      update({ ...action.confirmed(result), busy: false });
++      await refresh();
++    } catch (error) {
++      if (!current() || epoch !== lifecycle) return;
++      if ([401, 403].includes(error?.status)) {
++        if (!retrying) clearIntent(action);
++        deny();
++        return;
++      }
++      if (error?.status === 404 && action.kind === 'revoke') {
++        clearIntent(action);
++        update({ busy: false, uncertain: false, grants: state.grants.filter(item => item.id !== action.grantId),
++          message: 'Este vínculo Staff não está mais disponível.' });
++        await refresh();
++        return;
++      }
++      const unknown = !error?.status || error.outcomeUnknown || error.status >= 500 || error.status === 408 ||
++        error.code === 'IDEMPOTENCY_IN_PROGRESS' || (retrying && error.status === 429);
++      if (!unknown) clearIntent(action);
++      update({ busy: false, uncertain: Boolean(unknown), message: unknown
++        ? (action.structure ? structureRecoveryMessage(action.structure) : uncertainMessage)
++        : writeMessage(error, action.kind) });
++    }
++  }
++  function write(kind, send, confirmed, details) {
++    const key = newKey();
++    intent = { kind, send: () => send(key), confirmed, ...details };
++    return submit(intent);
++  }
++  function structureAction(structure) {
++    const { kind, eventId: id, experienceId, body, key } = structure;
++    return kind === 'experience'
++      ? { kind, structure, send: () => addEventExperience(client, id, body.name, key),
++        confirmed: () => ({ experience: '', message: 'Experiência salva.' }) }
++      : { kind, structure, send: () => addEventStation(client, id, experienceId, body.label, key),
++        confirmed: () => ({ station: '', parent: null, message: 'Estação salva.' }) };
++  }
++  function writeStructure(record) {
++    const saved = structureIntents?.get(record.eventId);
++    if (saved) {
++      intent = structureAction(saved);
++      update({ uncertain: true, message: structureRecoveryMessage(saved) });
++      return refresh();
++    }
++    const structure = { ...record, key: newKey() };
++    intent = structureAction(structure);
++    structureIntents?.set(record.eventId, structure);
++    return submit(intent);
++  }
++  function confirmCreate(version) {
++    if (version !== state.stepVersion || state.step !== 2 || state.eventId || !editable()) return;
++    try {
++      const body = creationBody(state.form);
++      return write('create', key => createAdminEvent(client, body, key), event => ({
++        eventId: event.id, event, step: 3, stepVersion: state.stepVersion + 1, ended: endedPhase(event.effectivePhase),
++        edited: false, form: initialForm(), message: 'Evento salvo.',
++      }), { officialEndsAt: body.officialEndsAt });
++    } catch (error) { update({ message: error.message }); }
++  }
++  function run(kind, grantId) {
++    const id = state.eventId;
++    if (!editable() || state.loading || state.readError || state.ended || !id || !state.event) return;
++    try {
++      if (kind === 'experience' && state.step === 3) {
++        const name = configurationName(state.experience, 160);
++        return writeStructure({ kind, eventId: id, body: { name } });
++      }
++      if (kind === 'station' && state.step === 3 && state.items.some(item => item.id === state.parent)) {
++        const label = configurationName(state.station, 120);
++        return writeStructure({ kind, eventId: id, experienceId: state.parent, body: { label } });
++      }
++      if (kind === 'grant' && state.step === 4) {
++        const email = staffEmail(state.email);
++        return write(kind, key => grantEventStaff(client, id, email, key), grant => ({
++          email: '', grants: [...state.grants.filter(item => item.id !== grant.id), { ...grant, email }], message: 'Concessão confirmada.',
++        }));
++      }
++      if (kind === 'revoke' && state.step === 4) {
++        const grant = state.grants.find(item => item.id === grantId);
++        if (grant) return write(kind, key => revokeEventStaff(client, id, grant, key), () => ({
++          grants: state.grants.filter(item => item.id !== grantId), message: 'Revogação confirmada.',
++        }), { grantId });
++      }
++    } catch (error) { update({ message: error.message }); }
++  }
++  return {
++    snapshot: () => state,
++    hasPendingStructure: () => Boolean(intent?.structure),
++    mount(listener) {
++      active = true;
++      listeners.add(listener);
++      listener(state);
++      void refresh();
++      return () => { active = false; generation++; lifecycle++; listeners.delete(listener); };
++    },
++    editForm(patch) {
++      if (editable() && !state.eventId) update({ form: { ...state.form, ...patch }, edited: true, message: null });
++    },
++    editSetup(patch) { if (editable() && state.eventId) update({ ...patch, message: null }); },
++    next(version) {
++      if (version !== state.stepVersion || !editable() || state.loading || state.readError) return;
++      if (!state.eventId && state.step === 2) return;
++      if (!state.eventId && state.step === 1) {
++        try { update({ form: { ...state.form, ...eventIdentity(state.form) } }); }
++        catch (error) { update({ message: error.message }); return; }
++      }
++      step(state.step + 1);
++    },
++    back: () => step(state.step - 1), step, refresh, run, confirmCreate,
++    retry() {
++      if (intent && state.uncertain && !state.loading && (!intent.structure || !state.readError)) return submit(intent);
++    },
++    discardStructureIntent() {
++      if (!current() || state.blocked || state.ended || state.busy || state.loading || state.readError ||
++          !state.uncertain || !intent?.structure) return;
++      clearIntent(intent);
++      update({ uncertain: false, experience: '', station: '', parent: null,
++        message: 'A confirmação pendente foi descartada. O cadastro anterior ainda pode ter sido salvo. Confira a estrutura antes de cadastrar novamente.' });
++    },
++  };
++}
+diff --git a/app/screens/admin/adminCreationForm.js b/app/screens/admin/adminCreationForm.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..bfc1d1ae25f0ee663fdbc599bcd1256f466c0e66
+--- /dev/null
++++ b/app/screens/admin/adminCreationForm.js
+@@ -0,0 +1,52 @@
++import { resolveEventTime } from './adminScheduleForm';
++
++export function configurationName(value, limit = 180) {
++  const name = value.trim();
++  if (!name || Array.from(name).length > limit || /[\u0000-\u001f\u007f\ud800-\udfff]/u.test(name)) {
++    throw new Error(limit === 180 ? 'Informe um nome válido de até 180 caracteres.' :
++      'Informe uma identificação válida de até ' + limit + ' caracteres.');
++  }
++  return name;
++}
++
++export function eventIdentity(form) {
++  const name = configurationName(form.name);
++  const code = form.accessCode.trim();
++  if (code.length < 4 || code.length > 64 || !/^[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*$/.test(code)) {
++    throw new Error('Use de 4 a 64 letras ou números ASCII, com hífens apenas entre grupos.');
++  }
++  return { name, accessCode: code.toUpperCase() };
++}
++
++export function creationTimezone(value) {
++  const zone = value.trim();
++  if (zone && zone.length <= 80 && !/^[+-]/.test(zone)) {
++    try { return new Intl.DateTimeFormat('en', { timeZone: zone }).resolvedOptions().timeZone; }
++    catch { /* show the field error below */ }
++  }
++  throw new Error('Informe um fuso IANA válido, como America/Fortaleza.');
++}
++
++export function creationDeadline(end, margin) {
++  if (!/^\d{1,2}$/.test(margin) || Number(margin) > 60) throw new Error('Informe uma margem de 0 a 60 minutos.');
++  return new Date(Date.parse(end) + Number(margin) * 60_000).toISOString();
++}
++
++export function creationBody(form) {
++  const timezone = creationTimezone(form.timezone);
++  const startsAt = resolveEventTime(form.start, timezone);
++  const officialEndsAt = resolveEventTime(form.end, timezone);
++  if (startsAt >= officialEndsAt) throw new Error('O término oficial deve ser posterior ao início.');
++  return { ...eventIdentity(form), timezone, startsAt, officialEndsAt,
++    operationalDeadlineAt: creationDeadline(officialEndsAt, form.margin), externalQueueEnabled: form.externalQueueEnabled };
++}
++
++export function confirmOfficialEnd(officialEndsAt, now) {
++  if (Date.parse(officialEndsAt) <= now) throw new Error('O término oficial deve ser futuro para criar o evento neste fluxo.');
++}
++
++export function staffEmail(value) {
++  const email = value.trim().toLowerCase();
++  if (email.length > 255 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error('Informe um e-mail válido.');
++  return email;
++}
+diff --git a/app/screens/admin/adminEventManagement.js b/app/screens/admin/adminEventManagement.js
+index 20c2dcff213be93b435a0e5952baac9f6905cec4..8b0fe6873a3ef3ca68a6c99961453d6588b99687 100644
+--- a/app/screens/admin/adminEventManagement.js
++++ b/app/screens/admin/adminEventManagement.js
+@@ -16,7 +16,7 @@ const requirements = {
+ 
+ export function adminReadinessRequirements(missing) {
+   const items = [...new Set(missing)].filter(code => Object.hasOwn(requirements, code)).map(code => ({
+-    message: requirements[code][0], area: requirements[code][1],
++    code, message: requirements[code][0], area: requirements[code][1],
+   }));
+   if (!missing.length || missing.some(code => !Object.hasOwn(requirements, code))) {
+     items.push({ message: 'Há requisitos de configuração pendentes que não puderam ser detalhados.' });
+diff --git a/app/screens/admin/adminSetupIntents.js b/app/screens/admin/adminSetupIntents.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..a8e816987e51b614a17790b025388f3b776ae349
+--- /dev/null
++++ b/app/screens/admin/adminSetupIntents.js
+@@ -0,0 +1,4 @@
++import { createContext } from 'react';
++
++// The Admin navigator owns this map for the lifetime of its verified identity.
++export const AdminSetupIntents = createContext(null);
+diff --git a/app/screens/admin/components/AdminLiveScreen.js b/app/screens/admin/components/AdminLiveScreen.js
+index 8be2cb1f967af22951772f86a8dc62da4af4c9ca..d6bc07b28ffddf44e2528b70fd2e7a8301fb74f6 100644
+--- a/app/screens/admin/components/AdminLiveScreen.js
++++ b/app/screens/admin/components/AdminLiveScreen.js
+@@ -6,25 +6,30 @@ import { adminReadOwner } from '../useAdminEvents';
+ import { AdminIcon, liveColors as c } from './AdminLiveUI';
+ import AdminBottomBar from './AdminBottomBar';
+ 
+-export default function AdminLiveScreen({ title, subtitle, navigation, backLabel = 'Voltar', onBack, showTabs = false, refreshControl, children }) {
++export default function AdminLiveScreen({ title, subtitle, navigation, mode = 'detail', backLabel = 'Voltar', onBack, backDisabled = false,
++  bottomSafeArea = false, showTabs = false, refreshControl, children }) {
+   const auth = useAuth();
+   const owner = adminReadOwner(auth), live = useRef(auth), mounted = useRef(true);
+   live.current = auth;
+   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+-  return <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
++  function logout() {
++    if (!mounted.current || !owner || adminReadOwner(live.current) !== owner) return;
++    void live.current.logout();
++  }
++  return <SafeAreaView style={styles.safe} edges={bottomSafeArea ? ['top', 'left', 'right', 'bottom'] : ['top', 'left', 'right']}>
+     <View pointerEvents="none" accessible={false} accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.decoration}>
+       <View style={styles.orbitTop} /><View style={styles.orbitBottom} />
+     </View>
+     <View style={styles.header}>
++      {mode === 'home' ? <Pressable accessibilityRole="button" accessibilityLabel="Sair da conta" style={({ pressed }) => [styles.logout, pressed && styles.backPressed]}
++        onPress={logout}><AdminIcon name="logout" color={c.text} size={20} /><Text style={styles.logoutText}>Sair da conta</Text></Pressable> :
++        <Pressable accessibilityRole="button" accessibilityLabel={backLabel} accessibilityState={{ disabled: backDisabled }} disabled={backDisabled}
++          style={({ pressed }) => [styles.back, backDisabled && styles.disabled, pressed && styles.backPressed]} onPress={onBack}>
++          <AdminIcon name="back" color={c.accent} size={22} /><Text style={styles.backText}>{backLabel}</Text></Pressable>}
+       <Image source={require('../../../assets/images/logo-arenago.png')} style={styles.brand} resizeMode="contain" accessible accessibilityRole="image" accessibilityLabel="ArenaGO" />
+-      <Pressable accessibilityRole="button" accessibilityLabel="Sair da conta" style={({ pressed }) => [styles.logout, pressed && { opacity: 0.7 }]} onPress={() => {
+-        if (mounted.current && owner && adminReadOwner(live.current) === owner) void live.current.logout();
+-      }}><AdminIcon name="logout" color={c.text} size={20} /><Text style={styles.logoutText}>Sair da conta</Text></Pressable>
+     </View>
+     <KeyboardAvoidingView style={styles.safe} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+       <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={styles.content} refreshControl={refreshControl}>
+-        {navigation ? <Pressable accessibilityRole="button" accessibilityLabel={backLabel} style={({ pressed }) => [styles.back, pressed && styles.backPressed]} onPress={onBack ?? (() => navigation.goBack())}>
+-          <AdminIcon name="back" color={c.accent} size={22} /><Text style={styles.backText}>{backLabel}</Text></Pressable> : null}
+         <Text style={styles.eyebrow}>ÁREA ADMINISTRATIVA</Text>
+         <Text style={styles.title} accessibilityRole="header">{title}</Text>
+         {subtitle ? <Text style={styles.subtitle}>{subtitle}</Text> : null}
+@@ -39,15 +44,16 @@ const styles = StyleSheet.create({
+   decoration: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, overflow: 'hidden' },
+   orbitTop: { position: 'absolute', width: 680, height: 350, borderWidth: 1, borderColor: '#311042', borderRadius: 300, top: -290, right: -300, transform: [{ rotate: '35deg' }] },
+   orbitBottom: { position: 'absolute', width: 1000, height: 380, borderWidth: 1, borderColor: '#281036', borderRadius: 500, bottom: -250, left: -260, transform: [{ rotate: '-20deg' }] },
+-  header: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingVertical: 16, gap: 12 },
+-  brand: { width: 150, height: 48 },
++  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingVertical: 8, gap: 8 },
++  brand: { width: '38%', maxWidth: 150, height: 48, flexShrink: 1 },
+   logout: { flexDirection: 'row', gap: 7, alignItems: 'center', borderWidth: 1, borderColor: c.border, borderRadius: 16, minHeight: 44, paddingHorizontal: 12, paddingVertical: 8 },
+   logoutText: { color: c.text, fontSize: 13 },
+-  content: { paddingHorizontal: 20, paddingTop: 18, paddingBottom: 32, width: '100%', maxWidth: 840, alignSelf: 'center' },
++  content: { paddingHorizontal: 20, paddingTop: 4, paddingBottom: 32, width: '100%', maxWidth: 840, alignSelf: 'center' },
+   eyebrow: { color: c.muted, fontSize: 12, lineHeight: 18, fontWeight: '700', letterSpacing: 2, marginTop: 12 },
+   title: { color: c.text, fontSize: 28, lineHeight: 35, fontWeight: '700', marginTop: 8 },
+   subtitle: { color: c.muted, fontSize: 16, lineHeight: 24, marginTop: 10, marginBottom: 22 },
+-  back: { flexDirection: 'row', alignItems: 'center', gap: 10, alignSelf: 'flex-start', minHeight: 48, paddingRight: 12, marginBottom: 12 },
++  back: { flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 48, flexShrink: 1, paddingRight: 4 },
+   backPressed: { opacity: 0.7 },
+-  backText: { color: '#ddc4f2', fontSize: 15, fontWeight: '600' },
++  disabled: { opacity: 0.45 },
++  backText: { color: '#ddc4f2', fontSize: 15, fontWeight: '600', flexShrink: 1 },
+ });
+diff --git a/app/screens/admin/components/AdminLiveUI.js b/app/screens/admin/components/AdminLiveUI.js
+index f400ff3460a174a447d6950814d109514d4d233c..381facea7c90b2f648e76743f1d22388ae81fc7f 100644
+--- a/app/screens/admin/components/AdminLiveUI.js
++++ b/app/screens/admin/components/AdminLiveUI.js
+@@ -52,14 +52,16 @@ export function AdminIcon({ name, color = c.accent, size = 24 }) {
+ export function AdminIconTile({ name }) {
+   return <View style={liveStyles.iconTile}><AdminIcon name={name} size={28} /></View>;
+ }
+-export function AdminPendingActions() {
++export function AdminEventActions({ onCreate }) {
+   return <View style={liveStyles.actions}>
+-    {[['Criar evento', 'plus'], ['Catálogo de experiências', 'folder']].map(([label, icon]) =>
+-      <Pressable key={label} disabled accessibilityRole="button" accessibilityLabel={`${label} · Em implementação`}
+-        accessibilityState={{ disabled: true }} style={liveStyles.pendingAction}>
+-        <View style={liveStyles.row}><AdminIcon name={icon} /><Text style={liveStyles.actionLabel}>{label}</Text></View>
+-        <Text style={liveStyles.pending}>Em breve</Text>
+-      </Pressable>)}
++    <Pressable accessibilityRole="button" accessibilityLabel="Criar evento" onPress={onCreate} style={liveStyles.pendingAction}>
++      <View style={liveStyles.row}><AdminIcon name="plus" /><Text style={liveStyles.actionLabel}>Criar evento</Text></View>
++    </Pressable>
++    <Pressable disabled accessibilityRole="button" accessibilityLabel="Catálogo de experiências · Em implementação"
++      accessibilityState={{ disabled: true }} style={liveStyles.pendingAction}>
++      <View style={liveStyles.row}><AdminIcon name="folder" /><Text style={liveStyles.actionLabel}>Catálogo de experiências</Text></View>
++      <Text style={liveStyles.pending}>Em breve</Text>
++    </Pressable>
+   </View>;
+ }
+ export const liveStyles = StyleSheet.create({
+diff --git a/app/screens/admin/components/AdminScheduleFields.js b/app/screens/admin/components/AdminScheduleFields.js
+index e4332a5535f9b5ba047cbd26bc4f6665897d1fc7..97b1315e2516b53666b26a9b28b7f31ef91bd0e8 100644
+--- a/app/screens/admin/components/AdminScheduleFields.js
++++ b/app/screens/admin/components/AdminScheduleFields.js
+@@ -49,7 +49,7 @@ export function ScheduleDateTime({ label, value, instant, timezone, onChange })
+           placeholder={isDate ? 'DD/MM/AAAA' : 'HH:MM'} keyboardType={isDate ? undefined : 'numbers-and-punctuation'}>
+           {nativeControl ? <Pressable accessibilityRole="button" accessibilityLabel={fieldLabel} onPress={() => choose(field)}
+             style={[styles.input, styles.pickerButton]}>
+-            <Text style={styles.label}>{value[field]}</Text>
++            <Text style={styles.label}>{value[field] || (isDate ? 'Selecionar data' : 'Selecionar hora')}</Text>
+             <AdminIcon name={isDate ? 'calendar' : 'history'} size={20} />
+           </Pressable> : null}
+         </SettingsField>;
+diff --git a/app/screens/admin/components/AdminSetupSteps.js b/app/screens/admin/components/AdminSetupSteps.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..144f4a242166294b533c4142a2718357c0b7027c
+--- /dev/null
++++ b/app/screens/admin/components/AdminSetupSteps.js
+@@ -0,0 +1,138 @@
++import { StyleSheet, Switch, Text, View } from 'react-native';
++import { randomUUID } from 'expo-crypto';
++import { adminEventPhases, formatAdminDate } from '../../../services/adminEventsService';
++import { adminReadinessRequirements } from '../adminEventManagement';
++import { creationDeadline, creationTimezone } from '../adminCreationForm';
++import { resolveEventTime, scheduleFields } from '../adminScheduleForm';
++import AdminButton from './AdminButton';
++import AdminNotice from './AdminNotice';
++import { ScheduleDateTime, SettingsField, SettingsSection } from './AdminScheduleFields';
++import { AdminIcon, liveColors as c, liveStyles as s } from './AdminLiveUI';
++
++export const stepTitles = ['Dados do evento', 'Datas e funcionamento', 'Experiências e estações', 'Equipe Staff', 'Revisão e prontidão'];
++
++export function IdentityStep({ state, flow, locked }) {
++  const { form, event } = state;
++  const change = field => !locked && !event ? value => flow.editForm({ [field]: value }) : undefined;
++  return <SettingsSection title={stepTitles[0]} icon="edit">
++    <SettingsField label="Nome do evento" value={event?.name ?? form.name} onChangeText={change('name')} />
++    <SettingsField label="Código de acesso" value={event?.accessCode ?? form.accessCode} onChangeText={change('accessCode')} />
++    {!event && <AdminButton label="Gerar código" variant="secondary" disabled={locked}
++      onPress={() => flow.editForm({ accessCode: 'ARENA-' + randomUUID().slice(0, 8).toUpperCase() })} />}
++    <Text style={s.body}>{event ? 'Código definitivo deste evento.' : 'A disponibilidade do código é confirmada ao criar o evento. Depois disso, o código é definitivo.'}</Text>
++  </SettingsSection>;
++}
++
++export function DatesStep({ state, flow, locked }) {
++  const { form, event } = state;
++  const zone = event?.timezone ?? form.timezone;
++  let timezone;
++  try { timezone = creationTimezone(zone); } catch { /* Keep the timezone field editable. */ }
++  const change = field => !locked && !event ? value => flow.editForm({ [field]: value }) : undefined;
++  const margin = event ? String((Date.parse(event.operationalDeadlineAt) - Date.parse(event.officialEndsAt)) / 60000) : form.margin;
++  let deadline = event?.operationalDeadlineAt;
++  if (!event && timezone) {
++    try { deadline = creationDeadline(resolveEventTime(form.end, timezone), margin); } catch { /* Incomplete fields. */ }
++  }
++  return <SettingsSection title={stepTitles[1]} icon="calendar">
++    <SettingsField label="Fuso horário IANA" value={zone} onChangeText={change('timezone')} />
++    {timezone ? ['start', 'end'].map(field => {
++      const start = field === 'start', instant = event?.[start ? 'startsAt' : 'officialEndsAt'];
++      return <ScheduleDateTime key={field + timezone} label={start ? 'início' : 'término oficial'}
++        value={event ? scheduleFields(instant, timezone) : form[field]} instant={instant ?? Date.now()}
++        timezone={timezone} onChange={change(field)} />;
++    }) : <Text style={s.body}>Informe um fuso IANA válido para selecionar os horários.</Text>}
++    <SettingsField label="Margem operacional (minutos)" value={margin} keyboardType="number-pad" onChangeText={change('margin')} />
++    {deadline && <Text style={s.body}>Prazo operacional: {formatAdminDate(deadline, timezone)}</Text>}
++    <View style={s.row}><Text style={[s.body, s.grow]}>Fila externa</Text>
++      <Switch accessibilityLabel="Fila externa" value={event?.externalQueueEnabled ?? form.externalQueueEnabled}
++        disabled={Boolean(event || locked)} onValueChange={change('externalQueueEnabled')} /></View>
++    <Text style={s.body}>{event ? 'Programação salva. Alterações de horário estão disponíveis no painel do evento.'
++      : 'Ao continuar, o evento será criado. Você poderá concluir sua configuração depois.'}</Text>
++  </SettingsSection>;
++}
++
++export function EventStructureStep({ state, flow, locked }) {
++  return <>
++    <SettingsSection title={stepTitles[2]} icon="folder">
++      <Text style={s.title}>{state.event.name}</Text>
++      <SettingsField label="Nome da experiência" value={state.experience}
++        onChangeText={locked ? undefined : experience => flow.editSetup({ experience })} />
++      <AdminButton label="Adicionar experiência" variant="secondary" disabled={locked} onPress={() => flow.run('experience')} />
++      <AdminButton label="Catálogo de experiências · Em breve" variant="ghost" disabled />
++    </SettingsSection>
++    <Text style={s.body}>Se um cadastro anterior ficou sem confirmação, confira a estrutura salva antes de cadastrar novamente.</Text>
++    {!state.items.length && <AdminNotice title="Nenhuma experiência cadastrada" />}
++    {state.items.map(item => <SettingsSection key={item.id} title={item.name} icon="folder">
++      <Text style={s.body}>{item.stations.length} {item.stations.length === 1 ? 'estação' : 'estações'}</Text>
++      {item.stations.map(station => <View key={station.id} style={styles.summaryRow}>
++        <AdminIcon name="folder" size={20} />
++        <Text style={[styles.rowText, s.grow]}>{station.label}</Text>
++        <Text style={styles.detail}>{station.availability === 'available' ? 'Disponível' : 'Indisponível'}</Text>
++      </View>)}
++      {state.parent === item.id ? <>
++        <SettingsField label="Identificação da estação" value={state.station}
++          onChangeText={locked ? undefined : station => flow.editSetup({ station })} />
++        <AdminButton label="Salvar estação" disabled={locked} onPress={() => flow.run('station')} />
++        <AdminButton label="Cancelar estação" variant="ghost" disabled={locked} onPress={() => flow.editSetup({ parent: null, station: '' })} />
++      </> : <AdminButton label={`Adicionar estação a ${item.name}`} disabled={locked || Boolean(state.station)}
++        variant="secondary" onPress={() => flow.editSetup({ parent: item.id, station: '' })} />}
++    </SettingsSection>)}
++  </>;
++}
++
++export function EventStaffStep({ state, flow, locked, confirmRevoke }) {
++  return <SettingsSection title={stepTitles[3]} icon="users">
++    <SettingsField label="E-mail do usuário" keyboardType="email-address" value={state.email}
++      onChangeText={locked ? undefined : email => flow.editSetup({ email })} />
++    <AdminButton label="Conceder Staff" disabled={locked} onPress={() => flow.run('grant')} variant="secondary" />
++    <Text style={s.body}>O acesso vale apenas para este evento. A conta precisa estar ativa e ter e-mail verificado.</Text>
++    <Text style={s.title}>Concessões nesta sessão</Text>
++    {!state.grants.length && <Text style={s.body}>Nenhuma concessão registrada neste fluxo.</Text>}
++    {state.grants.map(grant => <View key={grant.id}>
++      <Text selectable style={s.body}>{grant.email}</Text>
++      <AdminButton label={`Revogar acesso de ${grant.email}`} disabled={locked} variant="ghost" onPress={() => confirmRevoke(grant)} />
++    </View>)}
++    <Text style={s.body}>{state.readiness?.checks.hasVerifiedActiveStaff ? 'O evento tem Staff elegível.' : 'O evento ainda precisa de Staff elegível.'}</Text>
++  </SettingsSection>;
++}
++
++export function EventReview({ state, goTo, finished }) {
++  const { event, readiness, items } = state;
++  const checks = readiness.checks;
++  const checklist = [
++    ['Dados do evento', checks.nameAndAccessCode], ['Datas e funcionamento', checks.validScheduleAndTimezone],
++    ['Configuração da fila externa', checks.externalQueueConfigured], ['Experiência com estação disponível', checks.hasExperienceWithAvailableStation],
++    ['Staff ativo e verificado', checks.hasVerifiedActiveStaff],
++  ];
++  return <>
++    <SettingsSection title={event.name} icon={finished && readiness.ready ? 'check' : 'calendar'}>
++      <Text style={s.body}>{formatAdminDate(event.startsAt, event.timezone)} — {formatAdminDate(event.officialEndsAt, event.timezone)}</Text>
++      <Text style={s.body}>{event.timezone} · Prazo operacional: {formatAdminDate(event.operationalDeadlineAt, event.timezone)}</Text>
++      {!finished && <Text style={s.body}>Margem operacional: {(Date.parse(event.operationalDeadlineAt) - Date.parse(event.officialEndsAt)) / 60000} min</Text>}
++      <Text style={s.body}>Código: {event.accessCode} · Fila externa {event.externalQueueEnabled ? 'ativa' : 'desativada'}</Text>
++      <Text style={s.body}>Fase: {adminEventPhases[readiness.effectivePhase]}</Text>
++    </SettingsSection>
++    {!finished && <SettingsSection title="Checklist" icon="info">
++      {checklist.map(([label, ok]) => <View key={label} style={styles.summaryRow}>
++        <AdminIcon name={ok ? 'check' : 'warning'} color={ok ? c.success : c.warning} size={20} />
++        <Text style={[styles.rowText, s.grow]}>{label}</Text><Text style={styles.detail}>{ok ? 'Concluído' : 'Pendente'}</Text>
++      </View>)}
++      <Text style={s.body}>Experiências: {items.length} · Estações: {items.reduce((sum, item) => sum + item.stations.length, 0)}</Text>
++    </SettingsSection>}
++    <AdminNotice tone={readiness.ready ? 'success' : 'warning'} title={readiness.ready ? 'Pronto para operar' : 'Configuração pendente'}
++      message={readiness.ready ? 'Os requisitos essenciais estão configurados.' : 'O evento está salvo. Você pode continuar a preparação depois.'} />
++    {!finished && !readiness.ready && adminReadinessRequirements(readiness.missing).map(item =>
++      <View key={item.message}><Text style={s.body}>{item.message}</Text>
++        {item.area && <AdminButton variant="ghost" label={`Revisar: ${item.message}`}
++          onPress={() => goTo(item.code === 'EVENT_NAME_OR_ACCESS_CODE_INVALID' ? 1 :
++            ({ schedule: 2, operation: 2, experiences: 3, staff: 4 })[item.area])} />}
++      </View>)}
++  </>;
++}
++
++const styles = StyleSheet.create({
++  summaryRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8, minHeight: 44,
++    backgroundColor: '#251a33', borderWidth: 1, borderColor: '#614475', borderRadius: 10, padding: 10 },
++  rowText: { color: c.text, fontSize: 15, fontWeight: '600' }, detail: { color: c.muted, fontSize: 13 },
++});
+diff --git a/app/services/adminEventSetupService.js b/app/services/adminEventSetupService.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..82cc3ada726cf01ca6d49e99cd94614a4e535f33
+--- /dev/null
++++ b/app/services/adminEventSetupService.js
+@@ -0,0 +1,77 @@
++import { adminEventPath, adminIdentifier, mutationOptions, parseAdminEvent } from './adminEventsService';
++
++function confirm(condition) {
++  if (!condition) throw new Error('Resposta administrativa divergente.');
++}
++
++export async function createAdminEvent(client, body, key) {
++  const response = await client.post('/admin/events', body, mutationOptions(key));
++  const event = parseAdminEvent(response?.event);
++  confirm(event.accessCode === body.accessCode && event.name === body.name &&
++    new Intl.DateTimeFormat('en', { timeZone: event.timezone }).resolvedOptions().timeZone === body.timezone &&
++    event.externalQueueEnabled === body.externalQueueEnabled &&
++    ['startsAt', 'officialEndsAt', 'operationalDeadlineAt'].every(field => Date.parse(event[field]) === Date.parse(body[field])));
++  return event;
++}
++
++function experienceOf(value, eventId) {
++  adminIdentifier(value?.id);
++  confirm(value.eventId === eventId && typeof value.name === 'string' && value.name.trim());
++  return value;
++}
++
++function stationOf(value, experienceId) {
++  adminIdentifier(value?.id);
++  confirm(value.experienceId === experienceId && typeof value.label === 'string' && value.label.trim() &&
++    ['available', 'unavailable'].includes(value.availability));
++  return value;
++}
++
++export async function readEventStructure(client, eventId) {
++  const result = await client.get(`${adminEventPath(eventId)}/experiences`, { auth: true });
++  confirm(result?.eventId === eventId && Array.isArray(result.items));
++  for (const item of result.items) {
++    experienceOf(item, eventId);
++    confirm(Array.isArray(item.stations));
++    for (const station of item.stations) stationOf(station, item.id);
++  }
++  return result.items;
++}
++
++export async function addEventExperience(client, eventId, name, key) {
++  const result = await client.post(`${adminEventPath(eventId)}/experiences`, { name }, mutationOptions(key));
++  const experience = experienceOf(result?.experience, eventId);
++  confirm(experience.name === name);
++  return experience;
++}
++
++export async function addEventStation(client, eventId, experienceId, label, key) {
++  const path = `${adminEventPath(eventId)}/experiences/${adminIdentifier(experienceId)}/stations`;
++  const result = await client.post(path, { label }, mutationOptions(key));
++  const station = stationOf(result?.station, experienceId);
++  confirm(station.label === label);
++  return station;
++}
++
++function eventGrant(value, eventId) {
++  adminIdentifier(value?.id);
++  adminIdentifier(value.userId);
++  confirm(value.role === 'staff' && value.eventId === eventId && Number.isFinite(Date.parse(value.grantedAt)));
++  return value;
++}
++
++export async function grantEventStaff(client, eventId, email, key) {
++  const result = await client.post('/admin/roles/grant', { role: 'staff', eventId: adminIdentifier(eventId), email }, mutationOptions(key));
++  const grant = eventGrant(result?.grant, eventId);
++  confirm(grant.revokedAt === null);
++  return grant;
++}
++
++export async function revokeEventStaff(client, eventId, grant, key) {
++  eventGrant(grant, eventId);
++  confirm(grant.revokedAt === null);
++  const result = await client.post('/admin/roles/revoke', { grantId: grant.id }, mutationOptions(key));
++  const revoked = eventGrant(result?.grant, eventId);
++  confirm(revoked.id === grant.id && revoked.userId === grant.userId && Number.isFinite(Date.parse(revoked.revokedAt)));
++  return revoked;
++}
+diff --git a/app/services/adminEventsService.js b/app/services/adminEventsService.js
+index 178ead087008d0fa35a91c7179c67a2a3a8d9c59..50943b4b771d9c102cf4bdcf1eb2c734dba462ca 100644
+--- a/app/services/adminEventsService.js
++++ b/app/services/adminEventsService.js
+@@ -5,9 +5,12 @@ const readinessChecks = ['nameAndAccessCode', 'validScheduleAndTimezone', 'exter
+ 
+ class InvalidAdminEventResponse extends Error {}
+ 
+-function adminEventPath(eventId) {
+-  if (typeof eventId !== 'string' || !UUID.test(eventId)) throw new Error('Identificador de evento inválido.');
+-  return `/admin/events/${encodeURIComponent(eventId)}`;
++export function adminIdentifier(value) {
++  if (typeof value !== 'string' || !UUID.test(value)) throw new Error('Identificador administrativo inválido.');
++  return value;
++}
++export function adminEventPath(eventId) {
++  return `/admin/events/${adminIdentifier(eventId)}`;
+ }
+ 
+ export function parseAdminEvent(event) {
+@@ -54,7 +57,7 @@ export async function getAdminEventReadiness(client, eventId) {
+   }
+   return result;
+ }
+-function mutationOptions(idempotencyKey) {
++export function mutationOptions(idempotencyKey) {
+   return { auth: true, headers: { 'Idempotency-Key': idempotencyKey },
+     retryOnUnauthorized: false, outcomeUnknownOnNetworkError: true };
+ }
+diff --git a/app/tests/adminEventSetup.test.cjs b/app/tests/adminEventSetup.test.cjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..a56db396005cd0a82f8551ce453bd88ef215a6cf
+--- /dev/null
++++ b/app/tests/adminEventSetup.test.cjs
+@@ -0,0 +1,387 @@
++const assert = require('node:assert/strict');
++const test = require('node:test');
++const { loadModule } = require('./helpers/questionnaireHarness.cjs');
++
++const events = loadModule('services/adminEventsService.js', require).exports;
++const schedule = loadModule('screens/admin/adminScheduleForm.js', require).exports;
++const forms = loadModule('screens/admin/adminCreationForm.js', () => schedule).exports;
++const setup = loadModule('services/adminEventSetupService.js', () => events).exports;
++const { createEventSetup } = loadModule('screens/admin/adminCreationFlow.js', name => {
++  if (name.endsWith('/adminEventsService')) return events;
++  if (name.endsWith('/adminEventSetupService')) return setup;
++  assert.equal(name, './adminCreationForm');
++  return forms;
++}).exports;
++
++const id = n => 'abcdef00-0000-4000-8000-' + String(n).padStart(12, '0');
++const eventId = id(1), path = '/admin/events/' + eventId;
++const form = { name: ' Encontro ', accessCode: ' abc-123 ', timezone: 'America/Fortaleza',
++  start: { date: '01/12/2090', time: '19:00' }, end: { date: '01/12/2090', time: '21:00' }, margin: '30', externalQueueEnabled: false };
++const event = { ...forms.creationBody(form), id: eventId, effectivePhase: 'scheduled', readiness: { ready: false } };
++const experience = { id: id(2), eventId, name: 'Oficina' };
++const station = { id: id(3), experienceId: experience.id, label: 'Mesa A', availability: 'available' };
++const grant = { id: id(4), userId: id(5), role: 'staff', eventId, grantedAt: '2090-11-01T12:00:00Z', revokedAt: null };
++const plain = value => JSON.parse(JSON.stringify(value));
++function fixture({ resume = false, post, get, now, isCurrent = () => true } = {}) {
++  const writes = [], reads = [];
++  const db = { items: [], staff: false };
++  const client = {
++    async get(url, options) {
++      assert.equal(options.auth, true);
++      reads.push(url);
++      if (get) { const result = await get(url); if (result !== undefined) return result; }
++      if (url === path) return { event };
++      if (url === path + '/experiences') return { eventId, items: db.items };
++      assert.equal(url, path + '/readiness');
++      const available = db.items.some(item => item.stations.some(row => row.availability === 'available'));
++      return { eventId, effectivePhase: 'scheduled', statusStored: 'scheduled', acceptingNewParticipations: false,
++        ready: available && db.staff, missing: [...(available ? [] : ['EXPERIENCE_WITH_AVAILABLE_STATION']),
++          ...(db.staff ? [] : ['VERIFIED_ACTIVE_STAFF'])], checks: { nameAndAccessCode: true, validScheduleAndTimezone: true,
++          externalQueueConfigured: true, hasExperienceWithAvailableStation: available, hasVerifiedActiveStaff: db.staff } };
++    },
++    async post(url, body, options) {
++      writes.push({ url, body: plain(body), key: options.headers['Idempotency-Key'] });
++      assert.equal(options.auth, true);
++      assert.equal(options.retryOnUnauthorized, false);
++      assert.equal(options.outcomeUnknownOnNetworkError, true);
++      return post(url, body, db);
++    },
++  };
++  let sequence = 0;
++  const sessionIntents = new Map();
++  function open(selected = resume ? eventId : null, structureIntents = sessionIntents) {
++    const flow = createEventSetup({ client, eventId: selected, isCurrent, now, structureIntents, newKey: () => id(++sequence) });
++    const dispose = flow.mount(() => {});
++    async function settled() {
++      for (let i = 0; i < 20; i++) {
++        if (!flow.snapshot().loading && !flow.snapshot().busy) return;
++        await new Promise(resolve => setImmediate(resolve));
++      }
++      assert.fail('Leitura ou escrita não terminou');
++    }
++    return { flow, reads, writes, dispose, settled, open,
++      next: () => flow.next(flow.snapshot().stepVersion),
++      create: () => flow.confirmCreate(flow.snapshot().stepVersion) };
++  }
++  return open();
++}
++
++test('identidade aplica limites por caractere, valida ASCII antes da caixa e normaliza espaços externos', () => {
++  for (const name of ['', 'a'.repeat(181), 'x\nxx', 'x\ud800']) assert.throws(() => forms.eventIdentity({ ...form, name }));
++  assert.equal(forms.configurationName('🎮'.repeat(180)), '🎮'.repeat(180));
++  for (const accessCode of ['abc', 'ßABC', '-ABC', 'ABC--D', 'ABC-', 'a'.repeat(65)]) {
++    assert.throws(() => forms.eventIdentity({ ...form, accessCode }));
++  }
++  assert.deepEqual(plain(forms.eventIdentity(form)), { name: 'Encontro', accessCode: 'ABC-123' });
++});
++
++test('programação usa fuso do evento, virada do dia, margens extremas e configuração explícita da fila', () => {
++  for (const [margin, deadline, externalQueueEnabled] of [['0', '00:00', false], ['60', '01:00', true]]) {
++    const body = forms.creationBody({ ...form, margin, externalQueueEnabled });
++    assert.equal(body.startsAt, '2090-12-01T22:00:00.000Z');
++    assert.equal(body.operationalDeadlineAt, '2090-12-02T' + deadline + ':00.000Z');
++    assert.equal(body.externalQueueEnabled, externalQueueEnabled);
++  }
++  for (const patch of [{ margin: '61' }, { margin: '-1' }, { end: form.start }, { timezone: 'Fuso/Inexistente' },
++    { timezone: 'America/New_York', start: { date: '08/03/2026', time: '02:30' } },
++    { timezone: 'America/New_York', start: { date: '01/11/2026', time: '01:30' } }]) {
++    assert.throws(() => forms.creationBody({ ...form, ...patch }));
++  }
++});
++
++test('criação em voo, timeout e retry explícito usam uma única intenção e bloqueiam edição e segundo POST na reentrada', async () => {
++  let reject, attempts = 0;
++  const h = fixture({ post: () => ++attempts === 1 ? new Promise((_, no) => { reject = no; }) : { event } });
++  h.flow.editForm(form);
++  h.next();
++  assert.equal(h.writes.length, 0);
++  const first = h.create();
++  h.create();
++  reject({ outcomeUnknown: true });
++  await first;
++  assert.equal(h.flow.snapshot().uncertain, true);
++  h.flow.editForm({ accessCode: 'DIFFERENT' });
++  h.create();
++  await h.flow.refresh();
++  assert.equal(h.writes.length, 1);
++  await h.flow.retry();
++  assert.equal(h.writes.length, 2);
++  assert.deepEqual(h.writes[0], h.writes[1]);
++  assert.equal(h.flow.snapshot().eventId, eventId);
++  h.flow.step(1); await h.settled();
++  h.flow.editForm({ name: 'Alterado' });
++  h.next(); await h.settled();
++  h.next(); await h.settled();
++  assert.equal(h.flow.snapshot().event.name, event.name);
++  assert.equal(h.writes.length, 2);
++});
++
++test('criação verifica o relógio no envio e aceita um início já passado com término futuro', async () => {
++  const starts = Date.parse(event.startsAt), ends = Date.parse(event.officialEndsAt);
++  const cases = [
++    [ends + 60_000, false], [ends, false], [starts + 60_000, true], [starts - 60_000, true],
++  ];
++  for (const [at, permitted] of cases) {
++    let clock = starts - 60_000;
++    const h = fixture({ now: () => clock, post: () => ({ event }) });
++    h.flow.editForm(form);
++    h.next();
++    clock = at;
++    await h.create();
++    assert.equal(h.writes.length, permitted ? 1 : 0);
++    if (permitted) assert.equal(h.flow.snapshot().eventId, eventId);
++    else assert.match(h.flow.snapshot().message, /término oficial deve ser futuro/);
++    h.dispose();
++  }
++});
++
++test('retry da criação após alcançar o término mantém o resultado anterior incerto', async () => {
++  let clock = Date.parse(event.startsAt);
++  const h = fixture({ now: () => clock, post: () => { throw { outcomeUnknown: true }; } });
++  h.flow.editForm(form);
++  h.next();
++  await h.create();
++  clock = Date.parse(event.officialEndsAt);
++  await h.flow.retry();
++  assert.equal(h.writes.length, 1);
++  assert.equal(h.flow.snapshot().uncertain, true);
++  assert.match(h.flow.snapshot().message, /resultado do envio anterior continua sem confirmação/);
++});
++
++test('código histórico em conflito preserva formulário e permite corrigir a intenção rejeitada', async () => {
++  const h = fixture({ post: () => { throw { status: 409, code: 'ACCESS_CODE_ALREADY_USED' }; } });
++  h.flow.editForm(form); h.next(); await h.create();
++  assert.match(h.flow.snapshot().message, /código já foi reservado/);
++  assert.equal(h.flow.snapshot().eventId, null);
++  h.flow.back(); h.flow.editForm({ accessCode: 'OUTRO' }); h.next(); await h.create();
++  assert.notEqual(h.writes[0].key, h.writes[1].key);
++  assert.equal(h.writes[1].body.accessCode, 'OUTRO');
++});
++
++test('persistência incremental, falha parcial, concessão e revogação atualizam os checks oficiais do mesmo evento', async () => {
++  let rejectStation = true, rejectStaff = true;
++  const h = fixture({ resume: true, post: (url, body, db) => {
++    if (url === path + '/experiences') {
++      assert.deepEqual(plain(body), { name: experience.name });
++      db.items = [{ ...experience, stations: [] }];
++      return { experience };
++    }
++    if (url === path + '/experiences/' + experience.id + '/stations') {
++      assert.deepEqual(plain(body), { label: station.label });
++      if (rejectStation) throw { status: 400 };
++      db.items = [{ ...experience, stations: [station] }];
++      return { station };
++    }
++    if (url === '/admin/roles/grant') {
++      assert.deepEqual(plain(body), { role: 'staff', eventId, email: 'equipe@example.test' });
++      if (rejectStaff) throw { status: 422, code: 'ROLE_TARGET_INELIGIBLE' };
++      db.staff = true;
++      return { grant };
++    }
++    assert.equal(url, '/admin/roles/revoke');
++    assert.deepEqual(plain(body), { grantId: grant.id });
++    db.staff = false;
++    return { grant: { ...grant, revokedAt: '2090-11-02T00:00:00Z' } };
++  } });
++  await h.settled();
++  h.flow.editSetup({ experience: experience.name });
++  await h.flow.run('experience');
++  h.flow.editSetup({ parent: experience.id, station: station.label });
++  await h.flow.run('station');
++  assert.equal(h.flow.snapshot().items[0].stations.length, 0);
++  assert.equal(h.flow.snapshot().items[0].id, experience.id);
++  rejectStation = false;
++  await h.flow.run('station');
++  assert.equal(h.flow.snapshot().items[0].stations[0].id, station.id);
++  assert.equal(h.flow.snapshot().readiness.checks.hasExperienceWithAvailableStation, true);
++  h.next(); await h.settled();
++  h.flow.editSetup({ email: ' Equipe@example.test ' });
++  await h.flow.run('grant');
++  assert.match(h.flow.snapshot().message, /verificado/);
++  assert.equal(h.flow.snapshot().grants.length, 0);
++  rejectStaff = false; await h.flow.run('grant');
++  assert.equal(h.flow.snapshot().grants[0].id, grant.id);
++  h.next(); await h.settled();
++  assert.equal(h.flow.snapshot().readiness.ready, true);
++  assert.equal(h.flow.snapshot().readiness.acceptingNewParticipations, false);
++  h.next(); await h.settled();
++  assert.equal(h.flow.snapshot().step, 6);
++  h.flow.step(4); await h.settled();
++  await h.flow.run('revoke', grant.id);
++  assert.equal(h.flow.snapshot().grants.length, 0);
++  assert.equal(h.flow.snapshot().readiness.ready, false);
++  assert.equal(h.writes.filter(write => write.url === path + '/experiences').length, 1);
++  assert.equal(new Set(h.writes.map(write => write.key)).size, h.writes.length);
++});
++
++test('UUIDs de outro evento ou experiência e concessões globais não são aceitos', async () => {
++  await assert.rejects(setup.readEventStructure({ get: () => ({ eventId, items: [{ ...experience, eventId: id(8), stations: [] }] }) }, eventId));
++  await assert.rejects(setup.addEventStation({ post: () => ({ station: { ...station, experienceId: id(8) } }) },
++    eventId, experience.id, station.label, id(9)));
++  let sent = 0;
++  await assert.rejects(setup.revokeEventStaff({ post: () => { sent++; } }, eventId, { ...grant, role: 'admin' }, id(9)));
++  assert.equal(sent, 0);
++  await assert.rejects(setup.grantEventStaff({ post: () => ({ grant: { ...grant, eventId: id(8) } }) }, eventId, 'staff@example.test', id(9)));
++});
++
++test('404 remove só o comprovante revogado e reconsulta a prontidão, com 401/403 tratados como bloqueio', async () => {
++  for (const status of [404, 401, 403]) {
++    const other = { ...grant, id: id(6), userId: id(7) };
++    const h = fixture({ resume: true, post: (url, body, db) => {
++      if (url === '/admin/roles/grant') {
++        db.staff = true;
++        return { grant: body.email === 'primeiro@example.test' ? grant : other };
++      }
++      assert.equal(url, '/admin/roles/revoke');
++      if (body.grantId === grant.id) throw { status, code: 'RESOURCE_NOT_FOUND' };
++      assert.equal(body.grantId, other.id);
++      db.staff = false;
++      return { grant: { ...other, revokedAt: event.startsAt } };
++    } });
++    await h.settled();
++    h.next();
++    await h.settled();
++    for (const email of ['primeiro@example.test', 'segundo@example.test']) {
++      h.flow.editSetup({ email });
++      await h.flow.run('grant');
++    }
++    assert.equal(h.flow.snapshot().grants.length, 2);
++    const readsBefore = h.reads.filter(url => url.endsWith('/readiness')).length;
++    await h.flow.run('revoke', grant.id);
++    if (status === 404) {
++      assert.deepEqual(plain(h.flow.snapshot().grants.map(item => item.id)), [other.id]);
++      assert.equal(h.reads.filter(url => url.endsWith('/readiness')).length, readsBefore + 1);
++      assert.match(h.flow.snapshot().message, /vínculo Staff não está mais disponível/);
++      await h.flow.run('revoke', other.id);
++      assert.equal(h.flow.snapshot().grants.length, 0);
++    } else {
++      assert.equal(h.flow.snapshot().blocked, true);
++      assert.equal(h.flow.snapshot().event, null);
++      assert.equal(h.flow.snapshot().grants.length, 0);
++      assert.equal(h.reads.filter(url => url.endsWith('/readiness')).length, readsBefore);
++    }
++    h.dispose();
++  }
++});
++
++for (const kind of ['experience', 'station']) {
++  test(`recupera a intenção de ${kind} na mesma sessão e repete apenas com confirmação explícita`, async () => {
++    let first = true, allowRead = true, unblock;
++    const route = kind === 'experience' ? path + '/experiences' : path + '/experiences/' + experience.id + '/stations';
++    const h = fixture({ resume: true, get: async url => {
++      if (!allowRead && url === path + '/experiences') await new Promise(resolve => { unblock = resolve; });
++    }, post: (url, body, db) => {
++      if (kind === 'station' && url === path + '/experiences') {
++        db.items = [{ ...experience, stations: [] }];
++        return { experience };
++      }
++      assert.equal(url, route);
++      assert.deepEqual(plain(body), kind === 'experience' ? { name: experience.name } : { label: station.label });
++      if (first) {
++        first = false;
++        db.items = [{ ...experience, stations: kind === 'station' ? [station] : [] }];
++        throw { outcomeUnknown: true };
++      }
++      return kind === 'experience' ? { experience } : { station };
++    } });
++    await h.settled();
++    h.flow.editSetup({ experience: experience.name });
++    if (kind === 'station') {
++      await h.flow.run('experience');
++      h.flow.editSetup({ parent: experience.id, station: station.label });
++    }
++    await h.flow.run(kind);
++    assert.equal(h.flow.snapshot().uncertain, true);
++    h.dispose();
++
++    const writesBefore = h.writes.length;
++    const other = h.open(eventId, new Map());
++    await other.settled();
++    assert.equal(other.flow.snapshot().uncertain, false);
++    assert.equal(other.flow.snapshot().items[0].id, experience.id);
++    other.dispose();
++    allowRead = false;
++    const reopened = h.open(eventId);
++    assert.equal(reopened.flow.snapshot().uncertain, true);
++    await reopened.flow.retry();
++    assert.equal(h.writes.length, writesBefore);
++    allowRead = true;
++    unblock();
++    await reopened.settled();
++    const originals = reopened.flow.snapshot().items;
++    assert.equal(originals.length, 1);
++    assert.equal(originals[0].stations.length, kind === 'station' ? 1 : 0);
++    reopened.flow.editSetup({ experience: 'Outro', station: 'Outra', parent: experience.id });
++    await reopened.flow.run(kind);
++    await reopened.flow.refresh();
++    assert.equal(h.writes.length, writesBefore);
++    await reopened.flow.retry();
++    assert.equal(h.writes.length, writesBefore + 1);
++    assert.deepEqual(h.writes.at(-1), h.writes.at(-2));
++    reopened.dispose();
++    const clean = h.open(eventId);
++    await clean.settled();
++    assert.equal(clean.flow.snapshot().uncertain, false);
++    clean.dispose();
++  });
++}
++
++test('encerrar a confirmação de estrutura libera uma nova ação explícita sem afirmar que o cadastro falhou', async () => {
++  const h = fixture({ resume: true, post: () => { throw { outcomeUnknown: true }; } });
++  await h.settled();
++  h.flow.editSetup({ experience: experience.name });
++  await h.flow.run('experience');
++  h.flow.discardStructureIntent();
++  assert.equal(h.writes.length, 1);
++  assert.equal(h.flow.snapshot().uncertain, false);
++  assert.match(h.flow.snapshot().message, /cadastro anterior ainda pode ter sido salvo/);
++  h.dispose();
++  const reopened = h.open(eventId);
++  await reopened.settled();
++  assert.equal(reopened.flow.snapshot().uncertain, false);
++  assert.equal(h.writes.length, 1);
++  reopened.flow.editSetup({ experience: 'Outra oficina' });
++  await reopened.flow.run('experience');
++  assert.notEqual(h.writes[1].key, h.writes[0].key);
++  reopened.dispose();
++});
++
++test('falha de prontidão impede confirmação e 403 suprime dados até nova sessão', async () => {
++  let status = 500;
++  const h = fixture({ resume: true, get: url => { if (url.endsWith('/readiness')) throw { status }; } });
++  await h.settled();
++  assert.ok(h.flow.snapshot().readError);
++  h.flow.step(6);
++  assert.equal(h.flow.snapshot().step, 3);
++  status = 403; await h.flow.refresh();
++  assert.equal(h.flow.snapshot().blocked, true);
++  assert.equal(h.flow.snapshot().event, null);
++  assert.equal(h.flow.snapshot().items.length, 0);
++});
++
++test('logout ou troca de sessão durante o POST descarta a resposta e não dispara novas leituras', async () => {
++  let owned = true, release;
++  const h = fixture({ isCurrent: () => owned, post: () => new Promise(resolve => { release = resolve; }) });
++  h.flow.editForm(form); h.next();
++  const pending = h.create();
++  owned = false; h.dispose(); release({ event }); await pending;
++  assert.equal(h.flow.snapshot().eventId, null);
++  assert.equal(h.reads.length, 0);
++});
++
++test('401 na escrita bloqueia o formulário e 404 na retomada oferece nova leitura sem criar outro evento', async () => {
++  const denied = fixture({ post: () => { throw { status: 401 }; } });
++  denied.flow.editForm(form); denied.next(); await denied.create();
++  assert.equal(denied.flow.snapshot().blocked, true);
++  assert.equal(denied.flow.snapshot().form.name, '');
++  await denied.flow.retry();
++  assert.equal(denied.writes.length, 1);
++  let missing = true;
++  const resumed = fixture({ resume: true, get: () => { if (missing) throw { status: 404 }; } });
++  await resumed.settled();
++  assert.equal(resumed.flow.snapshot().event, null);
++  assert.match(resumed.flow.snapshot().readError, /não encontrado/);
++  missing = false; await resumed.flow.refresh();
++  assert.equal(resumed.flow.snapshot().event.id, eventId);
++  assert.equal(resumed.writes.length, 0);
++});
+diff --git a/app/tests/adminNavigation.test.cjs b/app/tests/adminNavigation.test.cjs
+index 5e839395075935afccf096b2c6b7274a57c933ca..0160b3b984a7ced401ea8c300a9e636fedaaf2f8 100644
+--- a/app/tests/adminNavigation.test.cjs
++++ b/app/tests/adminNavigation.test.cjs
+@@ -114,20 +114,22 @@ test('Home não oferece atalho Admin nos estados de carregamento, erro ou pronto
+ test('navegador Admin registra apenas destinos reais e respeita identidade', () => {
+   let owner = 'admin:session:1';
+   const navigator = loadModule('screens/admin/AdminDemoNavigator.js', name => {
++    if (name === 'react') return { useMemo: factory => factory() };
+     if (name === 'react/jsx-runtime') return require('react/jsx-runtime');
+     if (name === '@react-navigation/native-stack') return { createNativeStackNavigator: () => ({ Navigator: StackNavigator, Screen: StackScreen }) };
+     if (name === '@react-navigation/bottom-tabs') return { createBottomTabNavigator: () => ({ Navigator: StackNavigator, Screen: StackScreen }) };
+     if (name === 'react-native') return { Text: 'Text' };
+     if (name === '../../context/AuthContext') return { useAuth: () => ({}) };
+     if (name === './useAdminEvents') return { adminReadOwner: () => owner };
++    if (name === './adminSetupIntents') return { AdminSetupIntents: { Provider: 'SetupIntentsProvider' } };
+     if (name === './components/adminTheme') return { adminColors: {} };
+     return { __esModule: true, default: ImportedScreen };
+   }).exports.default;
+-  const tree = navigator();
++  const tree = navigator().props.children;
+   assert.equal(tree.key, owner);
+-  assert.deepEqual(Array.from(tree.props.children, node => node.props.name), ['AdminTabs', 'AdminEvents', 'AdminRealEvent', 'AdminEventManagementInfo']);
++  assert.deepEqual(Array.from(tree.props.children, node => node.props.name), ['AdminTabs', 'AdminEvents', 'AdminRealEvent', 'AdminEventManagementInfo', 'AdminEventSetup']);
+   const tabs = tree.props.children[0].props.component();
+   assert.deepEqual(Array.from(tabs.props.children, node => node.props.name), ['Home', 'Histórico', 'BI']);
+-  owner = 'other:session:2'; assert.notEqual(navigator().key, tree.key);
++  owner = 'other:session:2'; assert.notEqual(navigator().props.children.key, tree.key);
+   owner = null; assert.equal(navigator(), null);
+ });
+diff --git a/app/tests/adminRealEvents.test.cjs b/app/tests/adminRealEvents.test.cjs
+index 65a5503bd0780847aa9bec6aa33ae23165239fef..2f227fa39e101f7976c37e4ab0db92975fb89edb 100644
+--- a/app/tests/adminRealEvents.test.cjs
++++ b/app/tests/adminRealEvents.test.cjs
+@@ -98,10 +98,14 @@ test('Home oferece navegação explícita, sem contadores ou formulários demo',
+   let exits = 0;
+   const h = createHarness('screens/admin/AdminHomeScreen.js', { authContext: verifiedAdminAuth({ logout: () => exits++ }) });
+   assert.ok(h.nodes.some(node => textOf(node).includes('Painel Administrativo')));
+-  for (const name of ['Criar evento', 'Catálogo de experiências']) {
+-    const button = h.nodes.find(node => node.type === 'Pressable' && node.props.accessibilityLabel?.startsWith(name));
+-    assert.equal(button.props.disabled, true);
+-  }
++  const logout = h.nodes.findIndex(node => node.type === 'Pressable' && node.props.accessibilityLabel === 'Sair da conta');
++  const logo = h.nodes.findIndex(node => node.type === 'Image' && node.props.accessibilityLabel === 'ArenaGO');
++  assert.ok(logout >= 0 && logo > logout);
++  assert.equal(h.nodes[logo].props.resizeMode, 'contain');
++  h.press('Criar evento');
++  assert.equal(h.navigationCalls.at(-1).name, 'AdminEventSetup');
++  const catalog = h.nodes.find(node => node.type === 'Pressable' && node.props.accessibilityLabel?.startsWith('Catálogo de experiências'));
++  assert.equal(catalog.props.disabled, true);
+   const users = h.nodes.find(node => node.type === 'View' && node.props.accessibilityLabel === 'Usuários e permissões · Em implementação');
+   assert.ok(users, 'gestão global permanece informativa');
+   assert.equal(users.props.onPress, undefined);
+@@ -112,6 +116,18 @@ test('Home oferece navegação explícita, sem contadores ou formulários demo',
+   h.press('Histórico de eventos'); h.press('Visão geral'); h.press('Sair da conta');
+   assert.equal(exits, 1); assert.equal(h.navigationCalls.at(-1).name, 'BI');
+ });
++test('cabeçalho interno coloca retorno antes do logo e não oferece logout', () => {
++  const h = createHarness('screens/admin/AdminRealEventsScreen.js', { authContext: verifiedAdminAuth({ httpClient: { get: async () => ({ items: [], nextCursor: null }) } }) });
++  try {
++    const back = h.nodes.findIndex(node => node.type === 'Pressable' && node.props.accessibilityLabel === 'Voltar para Home');
++    const logo = h.nodes.findIndex(node => node.type === 'Image' && node.props.accessibilityLabel === 'ArenaGO');
++    assert.ok(back >= 0 && logo > back);
++    assert.equal(h.nodes[logo].props.resizeMode, 'contain');
++    assert.ok(!h.nodes.some(node => node.type === 'Pressable' && node.props.accessibilityLabel === 'Sair da conta'));
++    h.press('Voltar para Home');
++    assert.deepEqual(plain(h.navigationCalls.at(-1)), { type: 'popTo', name: 'AdminTabs', params: { screen: 'Home' } });
++  } finally { h.unmount(); }
++});
+ test('lista monta HTTP real, estado vazio, not_ready e seleção por UUID', async () => {
+   const calls = []; let body = { items: [], nextCursor: null };
+   const auth = verifiedAdminAuth({ httpClient: { get: async url => { calls.push(url); return body; } } });
+diff --git a/app/tests/roleRoutingIntegration.test.cjs b/app/tests/roleRoutingIntegration.test.cjs
+index c6a11f76c69af3be790eabc12ab74ead818f47dc..00a6b59a524d7583bdabd93baf4467ef73925c7c 100644
+--- a/app/tests/roleRoutingIntegration.test.cjs
++++ b/app/tests/roleRoutingIntegration.test.cjs
+@@ -84,7 +84,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+       text: async () => JSON.stringify(value.body ?? value) };
+   } });
+   const passthrough = ({ children }) => children;
+-  const native = Object.fromEntries(['ActivityIndicator', 'Image', 'KeyboardAvoidingView', 'Modal', 'Pressable', 'RefreshControl', 'ScrollView', 'Text', 'TextInput', 'View'].map((name) => [name, name]));
++  const native = Object.fromEntries(['ActivityIndicator', 'Image', 'KeyboardAvoidingView', 'Modal', 'Pressable', 'RefreshControl', 'ScrollView', 'Switch', 'Text', 'TextInput', 'View'].map((name) => [name, name]));
+   native.StyleSheet = { create: (styles) => styles };
+   native.AppState = { currentState: 'active', addEventListener: () => ({ remove() {} }) };
+   native.Platform = { OS: control.platformOS ?? 'web' };
+@@ -125,7 +125,8 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+       if (control.realAdmin && target === 'screens/admin/adminDemoLatency') {
+         return { waitAdminDemoLatency: async () => {} };
+       }
+-      if (control.realAdmin && (target.startsWith('screens/admin/') || target === 'data/adminDemoData' || target === 'services/adminEventsService')) {
++      if (control.realAdmin && (target.startsWith('screens/admin/') || target === 'data/adminDemoData' ||
++        ['services/adminEventsService', 'services/adminEventSetupService'].includes(target))) {
+         return load(`${target}.js`);
+       }
+       if (control.realStaff && ['screens/staff/StaffEventsNavigator', 'services/staffEventsService',
+@@ -169,6 +170,11 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+       return route.name;
+     },
+     storedToken() { return token; },
++    async input(label, value) {
++      const field = tree.root.findAllByType('TextInput').find(node => node.props.accessibilityLabel === label);
++      assert.ok(field, label);
++      await Renderer.act(async () => field.props.onChangeText(value));
++    },
+     navigate(name, params) { Renderer.act(() => navRef.navigate(name, params)); },
+     back() { Renderer.act(() => navRef.goBack()); },
+     hasText(text) { return tree.root.findAllByType('Text').some((node) => {
+@@ -196,6 +202,288 @@ const participant = { id: 'a', name: 'A', email: 'a@example.test', emailVerified
+ 
+ const adminUser = { ...participant, roles: ['admin', 'staff', 'participante'], hasCompletedQuestionnaire: false };
+ 
++test('ADMIN-05: Home e listagem abrem o fluxo, cinco etapas preservam UUID e retomada lê o evento salvo', { skip }, async () => {
++  const eventId = 'abcdef00-0000-4000-8000-000000000001';
++  const path = `/admin/events/${eventId}`;
++  const writes = [];
++  let saved;
++  const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control: {
++    realAdmin: true, http: async (route, options) => {
++      if (!route.startsWith('/admin/')) return undefined;
++      if (options.method === 'POST') {
++        writes.push(route);
++        assert.equal(route, '/admin/events');
++        const body = JSON.parse(options.body);
++        saved = { ...body, id: eventId, effectivePhase: 'scheduled', readiness: { ready: false } };
++        return { statusCode: 201, body: { event: saved } };
++      }
++      if (route === '/admin/events') return { items: saved ? [saved] : [], nextCursor: null };
++      assert.ok(saved);
++      if (route === path) return { event: saved };
++      if (route === path + '/experiences') return { eventId, items: [] };
++      assert.equal(route, path + '/readiness');
++      return { eventId, statusStored: 'scheduled', effectivePhase: 'scheduled', ready: false,
++        acceptingNewParticipations: false, missing: ['EXPERIENCE_WITH_AVAILABLE_STATION', 'VERIFIED_ACTIVE_STAFF'],
++        checks: { nameAndAccessCode: true, validScheduleAndTimezone: true, externalQueueConfigured: true,
++          hasExperienceWithAvailableStation: false, hasVerifiedActiveStaff: false } };
++    },
++  } });
++  await app.mount();
++  try {
++    await app.press('Criar evento');
++    assert.equal(app.activeRoute(), 'AdminEventSetup');
++    assert.equal(app.hasButton('Sair da conta'), false);
++    await app.input('Nome do evento', 'Nome provisório');
++    await app.press('Voltar para Home');
++    assert.ok(app.hasText('Sair da configuração?'));
++    await app.press('Cancelar');
++    assert.equal(app.activeRoute(), 'AdminEventSetup');
++    await app.press('Voltar para Home');
++    await app.press('Sair do fluxo');
++    assert.equal(app.activeRoute(), 'Home');
++    await app.press('Gerenciar eventos');
++    assert.equal(app.activeRoute(), 'AdminEvents');
++    await app.press('Criar evento');
++    await app.press('Voltar aos eventos');
++    assert.equal(app.activeRoute(), 'AdminEvents');
++    await app.press('Criar evento');
++    assert.ok(app.hasText('20% do fluxo'));
++    await app.input('Nome do evento', 'Encontro de novembro');
++    await app.press('Gerar código');
++    await app.press('Continuar');
++    assert.ok(app.hasText('40% do fluxo'));
++    await app.input('Data de início', '25/11/2090');
++    await app.input('Hora de início', '14:00');
++    await app.input('Data de término oficial', '25/11/2090');
++    await app.input('Hora de término oficial', '18:00');
++    await app.press('Voltar uma etapa');
++    const advanceIdentity = app.handler('Continuar');
++    await app.act(async () => { advanceIdentity(); advanceIdentity(); });
++    assert.ok(app.hasText('40% do fluxo'));
++    assert.deepEqual(writes, []);
++    await app.press('Criar evento e continuar');
++    assert.ok(app.hasText('60% do fluxo'));
++    await app.press('Voltar uma etapa');
++    await app.press('Voltar uma etapa');
++    assert.ok(app.hasText(saved.accessCode));
++    assert.match(saved.accessCode, /^ARENA-[A-F0-9]{8}$/);
++    assert.ok(!app.hasButton('Gerar código'));
++    await app.press('Continuar');
++    await app.press('Continuar');
++    await app.press('Continuar');
++    assert.ok(app.hasText('80% do fluxo'));
++    await app.press('Voltar uma etapa');
++    assert.ok(app.hasText('60% do fluxo'));
++    await app.press('Continuar');
++    await app.press('Continuar');
++    assert.ok(app.hasText('100% do fluxo'));
++    await app.press('Voltar uma etapa');
++    assert.ok(app.hasText('80% do fluxo'));
++    await app.press('Continuar');
++    assert.ok(app.hasText('Configuração pendente'));
++    assert.ok(!app.hasText('Pronto para operar'));
++    await app.press('Salvar e revisar depois');
++    assert.ok(app.hasText('Evento salvo com sucesso'));
++    await app.press('Voltar ao painel');
++    assert.equal(app.activeRoute(), 'AdminRealEvent');
++    assert.ok(app.hasText(saved.name));
++    await app.press('Continuar configuração');
++    assert.ok(app.hasText('60% do fluxo'));
++    await app.press('Voltar uma etapa');
++    await app.press('Voltar uma etapa');
++    await app.press('Voltar ao painel');
++    await app.press('Voltar aos eventos');
++    assert.ok(app.hasButton('Acessar evento ' + saved.name));
++    assert.deepEqual(writes, ['/admin/events']);
++  } finally { app.dispose(); }
++});
++
++test('ADMIN-05: equipe confirma revogação, revisa os checks e conclui um evento pronto ainda agendado', { skip }, async () => {
++  const eventId = 'abcdef00-0000-4000-8000-000000000001';
++  const exp = 'abcdef00-0000-4000-8000-000000000002', station = 'abcdef00-0000-4000-8000-000000000003';
++  const path = '/admin/events/' + eventId, at = '2090-11-01T00:00:00Z';
++  const grant = { id: 'abcdef00-0000-4000-8000-000000000004', userId: 'abcdef00-0000-4000-8000-000000000005',
++    eventId, role: 'staff', grantedAt: at, revokedAt: null };
++  const email = 'equipe@example.test';
++  let staff = false, revocations = 0;
++  const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control: {
++    realAdmin: true, http: async (route, options) => {
++      if (!route.startsWith('/admin/')) return undefined;
++      const event = { id: eventId, name: 'Encontro das oficinas', timezone: 'UTC', accessCode: 'OFICINAS',
++        startsAt: '2090-12-01T10:00:00Z', officialEndsAt: '2090-12-01T14:00:00Z', operationalDeadlineAt: '2090-12-01T14:00:00Z',
++        externalQueueEnabled: false, readiness: { ready: staff }, effectivePhase: 'scheduled' };
++      if (route === '/admin/events') { assert.equal(options.method, 'GET'); return { items: [event], nextCursor: null }; }
++      if (route === path) return { event };
++      if (route === path + '/experiences') return { eventId, items: [{ id: exp, eventId, name: 'Oficina',
++        stations: [{ id: station, experienceId: exp, label: 'Mesa', availability: 'available' }] }] };
++      if (route === path + '/readiness') return { eventId, statusStored: 'scheduled', effectivePhase: 'scheduled',
++        acceptingNewParticipations: false, ready: staff, missing: staff ? [] : ['VERIFIED_ACTIVE_STAFF'],
++        checks: { nameAndAccessCode: true, validScheduleAndTimezone: true, externalQueueConfigured: true,
++          hasExperienceWithAvailableStation: true, hasVerifiedActiveStaff: staff } };
++      assert.equal(options.method, 'POST');
++      if (route === '/admin/roles/grant') {
++        assert.deepEqual(JSON.parse(options.body), { role: 'staff', eventId, email });
++        staff = true;
++        return { grant };
++      }
++      assert.equal(route, '/admin/roles/revoke');
++      assert.deepEqual(JSON.parse(options.body), { grantId: grant.id });
++      revocations++;
++      staff = false;
++      return { grant: { ...grant, revokedAt: at } };
++    },
++  } });
++  await app.mount();
++  try {
++    await app.press('Gerenciar eventos');
++    await app.press('Acessar evento Encontro das oficinas');
++    await app.press('Continuar configuração');
++    await app.press('Continuar');
++    await app.input('E-mail do usuário', email);
++    await app.press('Conceder Staff');
++    assert.ok(app.hasText('O evento tem Staff elegível.'));
++    await app.press('Revogar acesso de ' + email);
++    await app.press('Cancelar');
++    assert.equal(revocations, 0);
++    await app.press('Revogar acesso de ' + email);
++    await app.press('Revogar acesso');
++    assert.equal(revocations, 1);
++    assert.ok(app.hasText('O evento ainda precisa de Staff elegível.'));
++    await app.input('E-mail do usuário', email);
++    await app.press('Conceder Staff');
++    await app.press('Continuar');
++    assert.ok(app.hasText('Experiências: 1 · Estações: 1'));
++    assert.ok(app.hasText('Fase: Agendado'));
++    await app.press('Concluir configuração');
++    assert.ok(app.hasText('Evento criado com sucesso'));
++    assert.ok(app.hasText('Pronto para operar'));
++    await app.press('Voltar para a Home Admin');
++    assert.equal(app.activeRoute(), 'Home');
++  } finally { app.dispose(); }
++});
++
++test('ADMIN-05: painel pronto oferece retomada de estação salva com resposta perdida na mesma sessão', { skip }, async () => {
++  const eventId = 'abcdef00-0000-4000-8000-000000000001';
++  const experienceId = 'abcdef00-0000-4000-8000-000000000002';
++  const path = '/admin/events/' + eventId;
++  const station = { id: 'abcdef00-0000-4000-8000-000000000003', experienceId, label: 'Mesa', availability: 'available' };
++  const writes = [];
++  const event = { id: eventId, name: 'Evento com estação', accessCode: 'ESTACAO', timezone: 'UTC',
++    startsAt: '2090-12-01T10:00:00Z', officialEndsAt: '2090-12-01T14:00:00Z', operationalDeadlineAt: '2090-12-01T14:00:00Z',
++    externalQueueEnabled: false, effectivePhase: 'scheduled' };
++  const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control: {
++    realAdmin: true, http: async (route, options) => {
++      const ready = writes.length > 0;
++      const detail = { ...event, readiness: { ready } };
++      if (route === '/admin/events') return { items: [detail], nextCursor: null };
++      if (route === path) return { event: detail };
++      if (route === path + '/experiences') return { eventId, items: [{ id: experienceId, eventId, name: 'Oficina',
++        stations: ready ? [station] : [] }] };
++      if (route === path + '/readiness') return { eventId, statusStored: 'scheduled', effectivePhase: 'scheduled',
++        acceptingNewParticipations: false, ready, missing: ready ? [] : ['EXPERIENCE_WITH_AVAILABLE_STATION'],
++        checks: { nameAndAccessCode: true, validScheduleAndTimezone: true, externalQueueConfigured: true,
++          hasExperienceWithAvailableStation: ready, hasVerifiedActiveStaff: true } };
++      if (route === path + '/experiences/' + experienceId + '/stations') {
++        assert.equal(options.method, 'POST');
++        writes.push({ headers: { ...options.headers }, body: options.body });
++        if (writes.length === 1) throw new Error('Resposta perdida após commit');
++        return { statusCode: 201, body: { station } };
++      }
++    },
++  } });
++  await app.mount();
++  try {
++    await app.press('Gerenciar eventos');
++    await app.press('Acessar evento Evento com estação');
++    await app.press('Continuar configuração');
++    await app.press('Adicionar estação a Oficina');
++    await app.input('Identificação da estação', station.label);
++    await app.press('Salvar estação');
++    assert.ok(app.hasButton('Repetir a mesma solicitação'));
++    await app.press('Voltar ao painel');
++    await app.press('Sair do fluxo');
++    assert.equal(app.activeRoute(), 'AdminRealEvent');
++    assert.ok(app.hasText('Pronto para operar'));
++    await app.press('Continuar configuração');
++    assert.ok(app.hasText(station.label));
++    assert.equal(writes.length, 1);
++    await app.press('Repetir a mesma solicitação');
++    assert.equal(writes.length, 2);
++    assert.deepEqual(writes[1], writes[0]);
++    assert.ok(!app.hasButton('Repetir a mesma solicitação'));
++  } finally { app.dispose(); }
++});
++
++for (const scenario of ['encerrar sessão', 'trocar conta', 'closing', 'closed']) {
++  test(`ADMIN-05: confirmação após POST pendente — ${scenario}`, { skip }, async () => {
++    const eventId = 'abcdef00-0000-4000-8000-000000000001';
++    const path = '/admin/events/' + eventId;
++    const pending = deferred();
++    const ended = scenario === 'closing' || scenario === 'closed';
++    const phase = ended ? scenario : 'scheduled';
++    const name = 'Evento do POST pendente';
++    let saved, posts = 0;
++    const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control: {
++      realAdmin: true, http: async (route, options) => {
++        if (route === '/admin/events' && options.method === 'POST') {
++          posts++;
++          const body = JSON.parse(options.body);
++          await pending.promise;
++          saved = { ...body, id: eventId, effectivePhase: phase, readiness: { ready: ended } };
++          return { statusCode: 201, body: { event: saved } };
++        }
++        if (route === path) return { event: saved };
++        if (route === path + '/experiences') return { eventId, items: [] };
++        if (route === path + '/readiness') return { eventId, effectivePhase: phase, statusStored: phase,
++          acceptingNewParticipations: false, ready: ended, missing: ended ? [] : ['VERIFIED_ACTIVE_STAFF'],
++          checks: { nameAndAccessCode: true, validScheduleAndTimezone: true, externalQueueConfigured: true,
++            hasExperienceWithAvailableStation: true, hasVerifiedActiveStaff: ended } };
++      },
++    } });
++    await app.mount();
++    try {
++      await app.press('Criar evento');
++      await app.input('Nome do evento', name);
++      await app.input('Código de acesso', 'PENDENTE');
++      await app.press('Continuar');
++      await app.input('Data de início', '25/11/2090');
++      await app.input('Hora de início', '14:00');
++      await app.input('Data de término oficial', '25/11/2090');
++      await app.input('Hora de término oficial', '18:00');
++      const confirmCreate = app.handler('Criar evento e continuar');
++      await app.act(async () => { confirmCreate(); confirmCreate(); });
++      assert.equal(posts, 1);
++      assert.ok(app.hasText('Salvando...'));
++
++      assert.equal(app.hasButton('Sair da conta'), false);
++      if (scenario === 'trocar conta' || scenario === 'encerrar sessão') {
++        await app.act(() => app.manager.logout());
++        if (scenario === 'trocar conta') {
++          const other = { ...adminUser, id: 'admin-b', email: 'b@example.test',
++            sessionId: '20000000-0000-4000-8000-000000000002' };
++          app.setUser(other);
++          await app.act(() => app.manager.login({ email: other.email, password: 'password' }));
++          await app.act(() => app.manager.verifyAdminTwoFactor('123456'));
++          assert.equal(app.manager.getSnapshot().user.id, other.id);
++          assert.equal(app.activeRoute(), 'Home');
++        }
++        await app.act(async () => { pending.resolve(); });
++        assert.ok(!app.hasText(name));
++      } else {
++        await app.act(async () => { pending.resolve(); });
++          assert.ok(app.hasText('Evento salvo em encerramento'));
++          assert.ok(!app.hasText('Pronto para operar'));
++          await app.act(async () => { confirmCreate(); });
++          assert.equal(posts, 1);
++          await app.press('Abrir painel do evento');
++          assert.equal(app.activeRoute(), 'AdminRealEvent');
++          assert.ok(app.hasText(name));
++      }
++      assert.equal(posts, 1);
++    } finally { pending.resolve(); app.dispose(); }
++  });
++}
++
+ test('Admin: senha e desafio não abrem painel; TOTP e identidade confirmada abrem Heliom', { skip }, async () => {
+   const identity = deferred();
+   const control = { realAdmin: true, me: () => identity.promise };
+@@ -237,15 +525,19 @@ test('Admin: restauração válida reutiliza telas, retornos internos e logout r
+     await app.press('Gerenciar eventos');
+     assert.equal(app.activeRoute(), 'AdminEvents');
+     assert.ok(app.hasText('Nenhum evento encontrado'));
+-    await app.press('Voltar ao painel');
++    await app.press('Voltar para Home');
+     assert.equal(app.activeRoute(), 'Home');
+     await app.press('Gerenciar eventos');
+     await app.press('Histórico');
+     assert.equal(app.activeRoute(), 'Histórico');
+     assert.ok(app.hasText('Em implementação'));
++    assert.equal(app.hasButton('Sair da conta'), false);
++    await app.press('Voltar para Home');
++    assert.equal(app.activeRoute(), 'Home');
+     await app.press('BI');
+     assert.equal(app.activeRoute(), 'BI');
+-    await app.press('Home');
++    assert.equal(app.hasButton('Sair da conta'), false);
++    await app.press('Voltar para Home');
+     assert.equal(app.activeRoute(), 'Home');
+     for (const name of ['AdminCreateEvent', 'AdminEventDetail', 'AdminEventSchedule']) {
+       app.navigate(name); assert.equal(app.activeRoute(), 'Home');
+@@ -287,6 +579,7 @@ test('Admin: painel real retorna à mesma rota da lista e mantém informações
+     await app.press('Gerenciar eventos');
+     await app.press('Acessar evento Evento Selecionado');
+     assert.equal(app.activeRoute(), 'AdminRealEvent');
++    assert.equal(app.hasButton('Sair da conta'), false);
+     assert.ok(app.hasText('Pronto para operar'));
+     assert.equal(readinessReads, 1);
+     await app.press('Equipe Staff');
+@@ -299,9 +592,16 @@ test('Admin: painel real retorna à mesma rota da lista e mantém informações
+     assert.equal(readinessReads, 2);
+     await app.press('Informações e horários');
+     assert.equal(app.activeRoute(), 'AdminEventManagementInfo');
++    assert.equal(app.hasButton('Sair da conta'), false);
+     for (const text of ['Informações gerais', 'Datas e horários', 'Acesso ao evento', 'ARENA-TESTE']) assert.ok(app.hasText(text));
+     assert.equal(readinessReads, 3);
++    await app.press('Editar nome');
++    await app.input('Nome do evento', 'Alteração não salva');
++    await app.press('Voltar ao painel');
++    assert.ok(app.hasText('Alterações não salvas'));
++    await app.press('Permanecer editando');
+     await app.press('Voltar ao painel');
++    await app.press('Descartar alterações');
+     assert.equal(app.activeRoute(), 'AdminRealEvent');
+     assert.equal(readinessReads, 4);
+     await app.press('Voltar aos eventos');
+diff --git a/docs/ADMIN_05_IMPLEMENTACAO.md b/docs/ADMIN_05_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..8e0967c6e9a2717aaa1bc852f018649a5e8d4b90
+--- /dev/null
++++ b/docs/ADMIN_05_IMPLEMENTACAO.md
+@@ -0,0 +1,310 @@
++# ADMIN-05 — Criar evento
++
++## Preparação
++
++A branch `feature/admin-event-operations` parte de `develop` em `ae4815fd62237b746ceb2987e10ff37b1e21b50d`, com índice e árvore limpos na abertura. As cinco imagens das etapas e a imagem Evento criado orientam o layout.
++
++O fluxo usa o POST administrativo de eventos ao confirmar a programação. O UUID retornado identifica as leituras de detalhe, estrutura e prontidão e os comandos incrementais de experiência, estação e Staff. A primeira etapa mantém um formulário em memória. O catálogo global e as gestões avançadas de estrutura, equipe e operação pertencem às próximas tarefas.
++
++Os testes de interface e contrato usam respostas HTTP locais controladas. A execução fica para a campanha Luna Medium e a conferência em aparelho para o responsável.
++
++Foram consultados os relatórios ADMIN-01 a ADMIN-03, o Panorama ArenaGo, a seção de configuração administrativa da Arquitetura Backend e os controllers, DTOs, serviços e projeções em `backend/src/events` e `backend/src/auth`. A branch foi criada nesta execução a partir da referência local de `develop`, coincidente com `origin/develop` local.
++
++## Fluxo implementado
++
++| Tela | Comportamento |
++| --- | --- |
++| Dados do evento | Valida o nome em até 180 caracteres Unicode e o código em 4–64 caracteres ASCII, com hífens entre grupos. O botão sugere um código editável. A reserva definitiva ocorre no servidor. |
++| Datas e funcionamento | Os seletores da ADMIN-03 interpretam o início e o término no fuso IANA informado. Horas ambíguas ou inexistentes exigem outra escolha. A margem inicial é zero, editável até 60 minutos. O formulário mostra o prazo calculado e envia a fila externa como booleano explícito. O botão de criação reúne as duas etapas. |
++| Experiências e estações | Cada comando persiste um recurso. O cadastro de estação usa o UUID da experiência escolhida na estrutura oficial. Ao concluir cada escrita, o fluxo consulta novamente a API. Uma recusa no cadastro de estação preserva a experiência e permite corrigir sua identificação. |
++| Equipe Staff | O Admin concede Staff pelo e-mail normalizado. O backend verifica conta, e-mail e permissões. O fluxo guarda em memória os comprovantes de concessão recebidos para este evento. A revogação exige confirmação, usa o ID devolvido na concessão e é seguida de reconsulta da prontidão. |
++| Revisão e prontidão | Detalhe, estrutura e prontidão alimentam o resumo. A porcentagem indica a etapa do formulário. O checklist mostra os cinco checks oficiais, inclusive a configuração da fila externa, e os totais de experiências e estações da leitura. As pendências conhecidas remetem à etapa correspondente. |
++| Evento criado | O fluxo volta a consultar o evento antes de apresentar o resultado final. Exibe nome, código, programação, fuso, fase e prontidão atuais. Um evento incompleto recebe “Evento salvo com sucesso” e “Configuração pendente”. Há caminhos para painel, Staff, operação informativa e Home. |
++
++A Home e Gerenciar Eventos abrem a rota dedicada `AdminEventSetup`. A listagem volta a consultar o backend quando recupera o foco, respeitando busca e filtro. A partir de um painel com configuração pendente, o botão **Continuar configuração** passa o UUID ao fluxo. Na retomada, o fluxo começa pela estrutura e permite consultar as etapas anteriores em modo de leitura.
++
++As referências visuais orientaram a barra de progresso, os cartões e os botões das etapas. O cabeçalho, o logo oficial, os ícones, os campos de data, a confirmação de ações, a rolagem e o tratamento do teclado reutilizam componentes Admin. A tela dedicada inclui a área segura inferior.
++
++## Contratos utilizados
++
++Todas as rotas abaixo usam o prefixo `/api/v1` e o cliente HTTP da sessão autenticada.
++
++| Método e rota | Dados utilizados |
++| --- | --- |
++| `POST /admin/events` | Envia `name`, `accessCode`, `timezone`, `startsAt`, `officialEndsAt`, `operationalDeadlineAt` e `externalQueueEnabled`. A justificativa é opcional. Valida a resposta `{event}` e adota o UUID retornado. |
++| `GET /admin/events/:eventId` | Lê os dados e o código persistido. |
++| `GET /admin/events/:eventId/experiences` | Lê `{eventId, items}` e estações aninhadas. Confere os identificadores de evento e experiência. |
++| `POST /admin/events/:eventId/experiences` | Envia `{name}` e confere a experiência devolvida. |
++| `POST /admin/events/:eventId/experiences/:experienceId/stations` | Envia `{label}` e confere a estação devolvida e sua experiência. |
++| `POST /admin/roles/grant` | Envia `{role: 'staff', email, eventId}` e confere o vínculo retornado. |
++| `POST /admin/roles/revoke` | Envia `{grantId}` a partir de um comprovante do evento e confere o vínculo e a data da revogação. |
++| `GET /admin/events/:eventId/readiness` | Usa `ready`, `checks`, `missing` e `effectivePhase`. Prontidão e horário de abertura são apresentados separadamente. |
++
++## Persistência, sessão e recuperação
++
++- O projeto contém armazenamento específico para credenciais e intenções operacionais. Não foi identificado um armazenamento de rascunhos de formulário Admin isolado por conta. O texto inicial informa a duração do formulário em memória. A saída com campos pendentes permite cancelar ou descartar.
++- Depois do primeiro POST confirmado, o UUID identifica todas as operações da preparação. O código e os horários passam a ser somente leitura no fluxo. A edição de horários permanece no painel da ADMIN-03. **Salvar e revisar depois** mostra a confirmação do que já foi persistido. A saída mantém esses registros.
++- A sessão Admin verificada, a revisão de identidade e o cliente autenticado delimitam o estado da tela. Requisições de leitura têm controle de geração. Desmontagem ou mudança de sessão invalida resultados anteriores. A recuperação de foco realiza somente leituras.
++- Cada escrita usa uma chave por intenção e bloqueia outra submissão em voo. Timeout, resposta divergente, falha de rede ou processamento incerto preservam a chave e o corpo enquanto o fluxo estiver aberto. O reenvio é explícito. Na saída após resultado incerto, a interface orienta conferir o evento na listagem. Conflito de código permite corrigir a entrada e iniciar uma nova intenção.
++- Erros de acesso bloqueiam a apresentação dos dados. Uma falha de leitura deixa a prontidão indisponível e oferece nova consulta. A interface distingue conflito de código, concessão duplicada e conta inelegível.
++
++## Limites dos contratos
++
++O controller de papéis expõe concessão e revogação. A inspeção das rotas não identificou uma leitura administrativa da lista nominal de Staff por evento. A seção **Concessões nesta sessão** identifica exatamente o que pode ser revogado ali. Ao reabrir o fluxo, a API de prontidão informa se existe Staff elegível. A composição completa da equipe, sua contagem e a revogação de vínculos anteriores dependem de uma leitura autorizada futura na ADMIN-06.
++
++O catálogo global fica para ADMIN-08. A gestão avançada da estrutura permanece na ADMIN-04 e as ações operacionais na ADMIN-07. A confirmação omite localização, ausente no contrato. A implementação usa os serviços existentes e dispensa mudanças de backend, migrations e dependências.
++
++## Inventário
++
++| Área | Arquivos na árvore de trabalho |
++| --- | --- |
++| Novos em `app/screens/admin/` | `AdminEventSetupScreen.js`, `adminCreationFlow.js`, `adminCreationForm.js`, `components/AdminSetupSteps.js` |
++| Alterados em `app/screens/admin/` | `AdminDemoNavigator.js`, `AdminHomeScreen.js`, `AdminRealEventsScreen.js`, `AdminRealEventScreen.js`, `AdminEventSettingsScreen.js`, `adminEventManagement.js`, `components/AdminLiveScreen.js`, `components/AdminLiveUI.js`, `components/AdminScheduleFields.js` |
++| Serviços | Novo `app/services/adminEventSetupService.js` e alterado `app/services/adminEventsService.js` |
++| Testes | Novo `app/tests/adminEventSetup.test.cjs`. Alterados `app/tests/adminNavigation.test.cjs`, `app/tests/adminRealEvents.test.cjs` e `app/tests/roleRoutingIntegration.test.cjs` |
++| Documentação | Novo `docs/ADMIN_05_IMPLEMENTACAO.md` |
++
++## Verificações e campanha pendente
++
++Foi feita inspeção estática do diff, dos arquivos novos, das rotas registradas, dos DTOs, das chaves de escrita e do isolamento da sessão. O parser Babel local analisou 19 arquivos JS/CJS e a resolução estática encontrou os 91 imports declarados. A inspeção de espaços finais incluiu os arquivos novos. `git diff --check` terminou com código 0. O índice real está vazio.
++
++Foram preparados nove testes focados de formulário, contratos e controle do fluxo e dois cenários de integração do roteador. Os dois cenários percorrem o caminho com pendências e o caminho pronto, incluindo os dois pontos de entrada, progresso, retorno com UUID, Staff, cancelamento de revogação, confirmação e retomada. As expectativas anteriores de navegação foram ajustadas para a ação de criação agora disponível.
++
++## Primeira campanha de validação — Luna Medium
++
++Modelo selecionado pelo responsável: GPT-6 Luna — Medium. Comando executado em `app`, com `NODE_ENV=test`:
++
++```powershell
++$env:NODE_ENV = "test"
++node --test --test-reporter=spec tests/adminEventSetup.test.cjs tests/adminRealEvents.test.cjs tests/adminEventSettings.test.cjs tests/adminNavigation.test.cjs tests/authNavigation.test.cjs tests/roleRoutingIntegration.test.cjs
++```
++
++Resultado: **91 testes aprovados, 0 reprovados, 0 ignorados**, exit code **0**. O runner informou 91 testes e nenhuma suíte com falha. Os seis arquivos indicados no comando foram executados, incluindo ADMIN-03, criação ADMIN-05, navegação Admin, autenticação e roteamento de papéis.
++
++O mock integrado usa o transporte local do harness, com URL-base `127.0.0.1:3000`, e intercepta cada requisição sem abrir conexão. Os testes focados usam clientes HTTP falsos. Nenhuma fixture ou script acessa PostgreSQL, Neon ou serviço remoto, e nenhum teste realiza migration ou seed.
++
++### Cenários ADMIN-05 exercitados
++
++- Os testes integrados passam da Home e da listagem ao wizard, navegam entre etapas e retomam evento pelo UUID retornado. O teste focado confirma que o primeiro POST ocorre somente após a etapa 2, que o código fica bloqueado após criação e que voltar não duplica o evento.
++- Testes focados validam nome, código ASCII, geração compatível, fuso, virada de dia, margens 0 e 60, margem excessiva, hora local inválida ou ambígua e fila externa explícita.
++- O timeout simula resultado incerto. O teste confirma edição bloqueada, retry explícito, mesma chave e corpo, e bloqueio de segunda submissão enquanto há escrita. Falha definitiva de código duplicado mantém o formulário e a nova tentativa usa outra chave.
++- Testes focados verificam UUIDs de evento e experiência, persistência incremental, falha de estação sem apagar experiência, concessão vinculada ao evento, usuário inelegível, revogação e readiness atualizado. O cenário integrado confirma que cancelar a revogação não envia escrita.
++- A revisão usa os checks de readiness do servidor. Cobrem pendência e prontidão, fase agendada mesmo com `ready=true`, conclusão sem novo POST e abertura do Painel Individual pelo UUID correto.
++- A saída é coberta pelo cenário integrado. Logout e retorno pedem confirmação com campos locais, e cancelar mantém a tela aberta. Troca de proprietário durante POST é coberta no teste focado. As suítes anteriores cobrem logout, troca de conta e respostas atrasadas no painel.
++
++### Regressões e lacunas
++
++As suítes de ADMIN-01, ADMIN-02 e ADMIN-03 passaram nos mesmos 91 testes. Busca, filtros, paginação, seleção por UUID, detalhe, prontidão, conflitos, datas, QR, autenticação/TOTP, logout, pilhas por papel e sessão foram exercitados.
++
++O harness HTTP não prova isolamento transacional, autorização real, auditoria ou idempotência efetiva no PostgreSQL. Layout, teclado, seletores nativos, áreas de toque e continuidade visual em iOS/Android não foram homologados em aparelho. A API não oferece leitura nominal de Staff, então contagem completa e revogação de concessões anteriores à sessão ficam fora desta cobertura. Não há teste dedicado que atrase uma resposta GET do setup durante troca de UUID. A implementação usa geração e escopo de sessão para descartar respostas antigas. POST atrasado está coberto no teste focado.
++
++Durante a execução, React emitiu avisos de depreciação de `react-test-renderer` e avisos do harness integrado sobre componentes stub chamados `default` nas rotas de autenticação. Não houve falhas associadas. As buscas por `.only` e exclusões acidentais nos seis arquivos não encontraram ocorrências.
++
++Verificações posteriores: `git diff --check` exit 0, `git diff --cached --exit-code` exit 0 e índice sem staged. O inventário permanece com 13 arquivos rastreados modificados e sete novos, incluindo o relatório. Nenhum arquivo backend mudou. O patch não foi gerado. HEAD permanece em `ae4815fd62237b746ceb2987e10ff37b1e21b50d`, branch `feature/admin-event-operations`.
++
++A campanha focada passou. Revisão técnica e homologação visual e funcional em aparelho continuam pendentes antes da aprovação da ADMIN-05.
++
++## Auditoria técnica pós-implementação
++
++**Decisão: corrigir antes da homologação.** A leitura do código confirmou caminhos para disparar a criação sem tocar no botão da etapa 2, perder a recuperação de um evento recém-criado e perder a confirmação de logout enquanto a criação termina. Também há risco de duplicar uma experiência ou estação ao sair após uma resposta incerta. A auditoria não identificou um caminho de concessão global a partir do wizard ou exposição de dados de uma conta anterior. O resultado de 91 testes pertence à primeira campanha. Esta auditoria foi feita por inspeção estática, sem executar testes.
++
++### Defeitos confirmados
++
++| Gravidade e localização | Causa, cenário e impacto | Correção mínima e teste recomendado |
++| --- | --- | --- |
++| **Moderada. A confirmação da etapa 2 pode ser pulada.** `app/screens/admin/AdminEventSetupScreen.js:109–111` e `app/screens/admin/adminCreationFlow.js:148–155`. | O botão de avanço usa o mesmo callback nas duas etapas e `next()` lê a etapa mutável ao executar. Preencha a etapa 2, volte à etapa 1 e acione duas vezes o callback de “Continuar” antes que a tela atualize. A primeira chamada muda a etapa para 2. A segunda usa a programação que ficou no formulário e envia o POST, reservando o código de forma permanente. O bloqueio `busy` só atua depois que esse POST começa. | Vincular a ação à etapa que a exibiu e reservar o comando de criação para a ação explícita da etapa 2. Em teste de integração, invoque duas vezes o handler capturado da etapa 1 com programação válida preservada e confirme zero POSTs até pressionar “Criar evento e continuar”. |
++| **Moderada. O wizard pode salvar um evento já encerrado que some da listagem.** `app/screens/admin/adminCreationForm.js:35–41`, `backend/src/events/admin-configuration.dto.ts:27–30`, `backend/src/events/admin-configuration.service.ts:60–66`, `backend/src/events/admin-configuration.projection.ts:21–25` e `app/services/adminEventsService.js:28–37`. | Informe um intervalo completo no passado, incluindo o prazo operacional. A criação valida a ordem dos horários e a margem, portanto a API insere o evento com status armazenado `scheduled` e fase efetiva `closed`. As escritas da estrutura rejeitam o evento vencido, o painel omite “Continuar configuração” e Gerenciar Eventos exclui `closed`. Após sair, o fluxo normal não oferece a recuperação desse evento, embora o código já esteja reservado. A aba Histórico ainda é informativa. | No wizard, rejeitar uma janela oficial já encerrada antes do envio e tratar uma eventual resposta `closing`/`closed` como condição de encerramento, mantendo acesso ao painel pelo UUID confirmado. Se o produto precisa aceitar eventos históricos pelo wizard, definir um caminho de recuperação para eles. Cobrir horários passados e fronteira de vencimento com relógio controlado e fase realista nas respostas simuladas. Preservar as regras de alteração da ADMIN-03. |
++| **Moderada. O logout confirmado pode ser descartado.** `app/screens/admin/AdminEventSetupScreen.js:70–74,116–118`, `app/screens/admin/components/AdminLiveScreen.js:13–17,24–26` e `app/screens/admin/adminCreationFlow.js:106–110`. | Atrase o POST da etapa 2, abra “Sair da conta” durante a escrita, deixe o POST terminar e pressione “Confirmar saída”. O avanço para a etapa 3 remonta `AdminLiveScreen`, pois sua chave muda. O diálogo retido no componente pai ainda chama o logout do cabeçalho desmontado. A guarda `mounted.current` descarta a ação e o diálogo se fecha com a sessão ainda ativa. | Usar no diálogo uma ação de logout que pertença ao wizard e confira a sessão vigente ao confirmar. Testar confirmação com POST atrasado que resolve entre abrir e confirmar o diálogo e verificar término da sessão, sem efeito ao invocar um diálogo de outra sessão. |
++| **Baixa. Uma revogação externa deixa um comprovante com ação obsoleta.** `app/screens/admin/adminCreationFlow.js:86–94,127–131`, `app/screens/admin/components/AdminSetupSteps.js:89–95` e `backend/src/auth/admin-role-management.service.ts:154–158`. | Conceda Staff no wizard e revogue o mesmo vínculo em outra sessão autorizada. O comprovante local permanece. Ao tentar revogar, o backend responde 404 para o vínculo que já não está ativo. O erro mantém o botão e não atualiza a prontidão nessa tentativa. A próxima recuperação de foco atualiza a prontidão e o comprovante continua na lista. | Em 404 da revogação, retirar ou marcar aquele comprovante como indisponível e reconsultar prontidão, sem afirmar quem revogou ou quando. Testar o 404 com dois comprovantes e preservar o outro registro. |
++
++### Riscos residuais
++
++- **Moderado, duplicação de estrutura após sair com resultado incerto.** O `intent` conserva chave e corpo na instância corrente de `adminCreationFlow.js:26–32,86–100`. Reabrir a rota cria outra instância em `AdminEventSetupScreen.js:24–39`. Se o servidor tiver gravado uma experiência ou estação e a resposta se perder, a leitura de retomada mostra o que já estiver confirmado no servidor, mas não associa aquele item à intenção anterior. Se o usuário repetir o mesmo cadastro, inclusive antes de a escrita anterior ficar visível, o novo comando usa outra chave. A chave do servidor distingue as duas intenções, e `admin-configuration.mutation.ts:9–12` e `backend/drizzle/0004_event_operations.sql:1–21` permitem registros homônimos. A advertência de saída e a reconsulta reduzem o risco, mas não resolvem a ambiguidade. Recomenda-se conservar a intenção explicitamente recuperável ao reabrir o mesmo evento na mesma sessão, mantendo o reenvio manual com a chave original. Para saída de conta, definir como reconciliar sem carregar dados para outra sessão. Testar commit seguido de perda de resposta, leitura que ainda não enxerga a escrita, saída e retomada. Para eventos, o índice único impede duplicata do mesmo código mesmo com chave nova. Uma troca de código após perder uma confirmação pode criar um segundo evento operacionalmente equivalente.
++- **Baixo, divergência de leitura.** Detalhe, estrutura e prontidão são três snapshots autorizados e independentes. Uma mudança concorrente entre consultas pode mostrar contagem e checklist de instantes diferentes. As gerações do wizard impedem a publicação de uma rodada obsoleta, mas não tornam a rodada atômica. A revisão e a confirmação reconsultam os dados. Ver `adminCreationFlow.js:45–67,69–74` e `admin-configuration-query.service.ts:23–25,37–52`. Cobrir troca de UUID com GET pendente e, se for observado em uso, avaliar uma projeção única em tarefa própria.
++- **Baixo, diferenças de plataforma em datas.** A criação envia instantes UTC com milissegundos, compatíveis com `normalizeScheduleInstant`, enquanto o backend exibe microssegundos. O wizard só compara e apresenta datas persistidas, com perda de precisão submilissegundo no resumo da margem. As regras e a precisão de escrita da ADMIN-03 foram preservadas. Restam a homologação dos seletores e do suporte a `Intl` nos aparelhos, incluindo fuso diferente do dispositivo e transição de horário. Ver `adminCreationForm.js:21–41`, `adminScheduleForm.js:22–46,49–60`, `AdminSetupSteps.js:26–50,109–111` e `backend/src/events/admin-schedule.dto.ts:6–20`.
++
++### Contratos, isolamento e compatibilidade
++
++- No caminho ordinário, a etapa 2 só cria sem UUID. `busy` é marcado antes do transporte. Timeout e `IDEMPOTENCY_IN_PROGRESS` conservam chave e payload e a recuperação de foco só consulta. O servidor usa fingerprint, reserva e reapresentação do resultado na mesma operação autorizada. `ACCESS_CODE_ALREADY_USED` permite corrigir a entrada e emitir outra intenção. Com UUID persistido, voltar ou retomar apenas consulta o evento e mantém o código bloqueado. O backend restringe o PATCH do evento e a migration base protege a imutabilidade no banco. Ver `adminCreationFlow.js:69–110,144–158`, `admin-configuration.service.ts:35–66,91–98` e `backend/drizzle/0002_events_base.sql:25–40`.
++- O serviço fecha o escopo de estrutura por UUID e valida o vínculo retornado. Para estações, o backend confirma a experiência dentro do evento antes da escrita. Falha da estação preserva a experiência confirmada. As leituras retomam a estrutura por UUID, e as escritas do wizard são operações de adição, concessão ou revogação de Staff. Não há exclusão de evento, experiência ou estação. Ver `adminEventSetupService.js:17–53` e `admin-configuration.service.ts:39–46,75–90`.
++- O grant usa sempre `role: 'staff'` e o UUID do evento. Cliente e DTO aplicam a mesma normalização e restrição de e-mail. A API requer Admin global e sessão com segundo fator, valida conta ativa e e-mail verificado do alvo, rejeita concessão vigente duplicada e retorna um comprovante. O wizard confere o vínculo, pede confirmação e só revoga o `grantId` guardado para aquele evento. Concessões confirmadas e revogações bem-sucedidas disparam reconsulta. O checklist usa Staff ativo, verificado e com concessão vigente, sem inferir equipe completa do comprovante local. Ver `adminCreationForm.js:44–47`, `adminEventSetupService.js:56–76`, `admin-role-management.dto.ts:5–25`, `admin-role-management.service.ts:44–119,128–197` e `admin-configuration.projection.ts:14–20`.
++- O proprietário inclui conta, sessão, época e revisão de identidade. A pilha Admin usa essa identidade como chave. O wizard troca o fluxo por proprietário/cliente/UUID, descarta publicação fora da geração e remove os dados ao receber 401/403. As escritas não têm refresh e reenvio automáticos após 401. Uma resposta confirmada de outra sessão não pode preencher o wizard vigente. A janela de corrida no diálogo de logout é a exceção funcional descrita acima. Ver `useAdminEvents.js:6–9`, `AdminDemoNavigator.js:28–36`, `AdminEventSetupScreen.js:24–39` e `adminCreationFlow.js:32–67,75–90,137–142`.
++- A revisão usa `GET /readiness`, dados e contagens oficiais. A barra mostra etapa do formulário. Uma leitura parcial ou inválida suspende a confirmação e oferece retry. A fase efetiva é exibida separadamente, portanto um `ready=true` ainda pode corresponder a um evento agendado. A ação final reconsulta pelo UUID em vez de emitir outro POST. Home e listagem só ganham a entrada para a nova rota e a lista se atualiza no foco. A troca do validador de nome da ADMIN-03 conserva a regra e nenhum código de QR, TOTP ou dependência foi alterado. Os serviços de estrutura e Staff podem ser reaproveitados em ADMIN-04/06, mantendo as telas do wizard específicas desta entrega.
++
++### Testes e limites
++
++Os nove testes focados e os dois cenários integrados foram lidos. As assertions de envio concorrente na etapa 2, igualdade de corpo/chave no retry, vínculo de UUIDs, falha parcial, revogação confirmada e prontidão exercitam o comportamento alegado. O mock de criação integrado devolve o payload recebido com um UUID sintético e sempre marca a fase `scheduled`. Ele não simula o DTO completo, a projeção em microssegundos, a expiração da janela ou a confirmação perdida após gravação. O mock de estrutura persiste em memória, e o teste de sessão invalida o proprietário antes de liberar uma resposta POST, sem efetuar logout durante o diálogo do wizard. A expectativa antiga de “Criar evento” desabilitado foi substituída pela assertion de navegação, e o catálogo continua coberto como desabilitado.
++
++Priorizar os testes vinculados aos achados acima. Acrescentar respostas de contrato com campos de tempo em seis casas, transição para fase encerrada, `409 IDEMPOTENCY_IN_PROGRESS` e uma negativa de escrita Staff/estrutura seguida de mudança de conta. O histórico de 91 aprovações dá cobertura frontend com mocks. A leitura do código do backend fundamenta a análise de contratos e locks, sem confirmação em PostgreSQL ou Neon. A ausência da lista nominal Staff é aceita no escopo, assim como o rascunho anterior ao primeiro POST limitado à memória. Os comprovantes são apresentados como concessões do fluxo corrente e não como lista da equipe. Validação visual e funcional em aparelho permanece pendente.
++
++Foram examinados os 19 arquivos JS/CJS do inventário e este relatório, os testes de horários e autenticação, `useAdminEvents.js`, `adminScheduleForm.js`, o cliente HTTP e o contexto de sessão. A leitura de referência incluiu controllers, DTOs, serviços, respostas de erro, projeção e autorização de configuração Admin e papéis, normalização de acesso e datas, reserva idempotente e constraints de eventos e estrutura, além dos relatórios ADMIN-01 a ADMIN-03 e E08.13. A auditoria alterou somente este relatório.
++
++O estado conferido ao fim da auditoria foi branch `feature/admin-event-operations`, HEAD `ae4815fd62237b746ceb2987e10ff37b1e21b50d`, 13 arquivos rastreados modificados e sete novos. O índice estava vazio, `git diff --check` retornou 0 e a inspeção direta do relatório não encontrou espaços finais. A evidência `qa-evidence/ADMIN_05-changes.diff` ainda não existe.
++
++## Correções pós-auditoria — ADMIN-05
++
++A implementação das correções parte da mesma branch e do mesmo HEAD, com as alterações anteriores preservadas. A criação será vinculada ao botão da etapa 2, com verificação do término e recuperação pelo UUID confirmado. O logout usará o contexto de sessão do wizard, a revogação indisponível será reconciliada por comprovante e as intenções de estrutura terão recuperação explícita em memória dentro da sessão. Os 91 testes aprovados correspondem à versão anterior. A execução pós-correção fica para Luna Medium.
++
++| Achado | Correção implementada | Teste preparado |
++| --- | --- | --- |
++| Criação acionada pelo botão da etapa 1 | `AdminEventSetupScreen.js` e `adminCreationFlow.js` separam o avanço da confirmação. As ações são vinculadas à versão da etapa apresentada. O POST exige uma confirmação da etapa 2, UUID ainda ausente e fluxo sem escrita em andamento ou resultado incerto. | O teste de navegação captura o handler da etapa 1 depois de preencher os horários e voltar. Invoca duas vezes e exige zero POSTs até confirmar explicitamente na etapa 2. Os testes verificam UUID, bloqueio de segundo envio e igualdade de chave e payload no retry. |
++| Criação fora da janela oficial | `adminCreationForm.js` e `adminCreationFlow.js` validam o término ao enviar pelo relógio local. O início pode estar no passado. Uma confirmação com fase `closing` ou `closed` mantém o UUID, interrompe a configuração no wizard e abre o Painel Individual pelo UUID. | Relógio controlado verifica intervalo vencido, término igual ao instante da validação, início no passado com fim futuro e datas futuras. A integração simula `closing` e `closed` e confere o aviso, a ausência de prontidão no wizard, o painel correto e um único POST. |
++| Logout confirmado durante a transição | `AdminLiveScreen.js` encaminha o pedido para o wizard. `AdminEventSetupScreen.js` executa o logout do contexto atual após conferir instância, identidade, cliente e foco. O diálogo permanece válido após a remontagem interna do cabeçalho. Cancelar consome a confirmação. | O POST é mantido pendente enquanto o usuário abre o diálogo. Os casos cobrem resolução antes da confirmação, cancelamento, sessão encerrada e troca de conta antes da resposta e da invocação de uma confirmação antiga. |
++| Revogação Staff indisponível | O `404` da revogação limpa apenas o comprovante relacionado e reconsulta o servidor. O aviso informa que o vínculo deixou de estar disponível. `401` e `403` continuam bloqueando o fluxo e limpando os dados exibidos. | O teste usa dois comprovantes, verifica a remoção de apenas um, a nova leitura de prontidão e o uso do segundo comprovante. Verifica separadamente os dois códigos de autorização. |
++| Resultado incerto de experiência ou estação | A pilha Admin fornece um mapa em memória por identidade verificada e cliente, indexado pelo UUID do evento. O controlador reserva chave, corpo e identificadores antes do envio. Ao reabrir, consulta a estrutura e mantém a intenção recuperada para retry explícito com os mesmos dados. O painel oferece a retomada mesmo quando a estação já gravada tornou o evento pronto. O usuário pode encerrar a tentativa após consultar a estrutura e confirmar que o cadastro anterior pode ter sido salvo. | Os testes simulam persistência com perda de resposta para experiência e estação, fecham e reabrem a instância, verificam leitura antes do retry, preservação de chave e corpo e isolamento com outra sessão. A integração verifica a retomada real pelo Painel Individual com `ready=true`. Um teste adicional verifica o aviso e a liberação da próxima ação depois de encerrar a tentativa. |
++
++Após um timeout de criação sem UUID, se o término for alcançado, o wizard preserva o estado incerto e informa que o envio anterior pode ter sido concluído. Um novo envio da mesma intenção poderia criar o evento depois do término se a primeira chamada nunca tivesse chegado ao servidor. O teste prepara essa fronteira e exige que o retry após o término não emita outro POST. O relógio do aparelho é uma proteção de interface, e a fase que o backend devolver continua sendo a referência. As validações e escritas da ADMIN-03 foram preservadas.
++
++O mapa é descartado se a pilha Admin for desmontada, se mudar a identidade verificada ou se o processo for encerrado. Ele guarda dados da operação, sem tokens ou credenciais. Após perda da intenção, a tela orienta conferir a estrutura salva antes de outro cadastro. O contrato atual não permite associar automaticamente por chave um recurso cuja intenção foi perdida. A existência de homônimos e a possibilidade de gravação tardia impedem garantir uma única criação nesse caso. A equipe completa de Staff continua fora do escopo.
++
++**Arquivos desta rodada.** Em `app/screens/admin/`, foram ajustados `AdminDemoNavigator.js`, `AdminEventSetupScreen.js`, `AdminRealEventScreen.js`, `adminCreationFlow.js`, `adminCreationForm.js`, `components/AdminLiveScreen.js` e `components/AdminSetupSteps.js`. O novo `adminSetupIntents.js` declara o contexto da pilha. Os testes foram preparados em `app/tests/adminEventSetup.test.cjs`, `app/tests/adminNavigation.test.cjs` e `app/tests/roleRoutingIntegration.test.cjs`. O relatório registra a rodada no mesmo arquivo. Backend, contratos HTTP, dependências, filtros e migrations permanecem como na primeira implementação.
++
++Foram acrescentados seis testes focados e seis cenários de integração. O cenário integrado existente de criação foi ampliado e a verificação da composição do navegador foi adaptada ao provedor de intenções. A inspeção estática revisou as fases da API, o código `RESOURCE_NOT_FOUND`, os caminhos de sessão e o uso de idempotência existente. A sintaxe e os imports dos 11 arquivos JS/CJS desta rodada foram conferidos, incluindo 59 resoluções e 70 símbolos locais conferidos. `git diff --check` aprovou a revisão. Nesta rodada não houve execução de testes. A campanha de seis arquivos registrada acima fica para Luna Medium. A homologação visual e funcional continua pendente.
++Estado final da rodada: `feature/admin-event-operations`, HEAD `ae4815fd62237b746ceb2987e10ff37b1e21b50d`, 13 arquivos rastreados modificados e oito novos. Índice vazio. O patch definitivo ainda não existe.
++
++## Campanha de validação pós-correções — Luna Medium
++
++O responsável selecionou GPT-6 Luna — Medium para esta campanha. Antes de executar, foram conferidos `AGENTS.md`, este relatório, a branch, o HEAD, o índice Git, os scripts do `app/package.json` e os seis arquivos de teste. Não existe `app/AGENTS.md`. A inspeção confirmou que a campanha usa harnesses locais, clientes HTTP falsos e transporte simulado em `127.0.0.1`; não acessa banco, Neon ou serviços externos e não executa migrations ou seeds. Os testes não foram modificados nesta campanha.
++
++Comando executado em `app` (PowerShell):
++
++```powershell
++$env:NODE_ENV = "test"
++node --test --test-reporter=spec tests/adminEventSetup.test.cjs tests/adminRealEvents.test.cjs tests/adminEventSettings.test.cjs tests/adminNavigation.test.cjs tests/authNavigation.test.cjs tests/roleRoutingIntegration.test.cjs
++```
++
++Resultado do Node test runner: **103 testes, 103 aprovados, 0 reprovados, 0 ignorados**, exit code **0**. As seis entradas indicadas foram executadas. A contagem aumentou em relação aos 91 testes da campanha anterior; não foi presumida. Avisos observados: `react-test-renderer is deprecated` e stubs de telas com nome `default` no teste de integração de roteamento. São avisos do ambiente de teste; não causaram falha.
++
++### Resultado dos cenários pós-correção
++
++- **Criação pela etapa 2:** os testes do controlador cobrem submissões em voo e bloqueio de segundo POST. O teste de roteamento invoca repetidamente um callback antigo da etapa 1 e confirma que não cria o evento; a criação acontece por confirmação explícita da etapa 2.
++- **Janela e encerramento:** relógio controlado cobre término vencido, término exatamente no instante atual e início passado com término futuro. Casos integrados de `closing` e `closed` verificam UUID preservado, aviso, acesso ao painel do evento e ausência de nova criação.
++- **Logout:** integrações mantêm o POST pendente durante a abertura do diálogo e cobrem confirmar, cancelar e trocar de conta; a confirmação válida encerra a sessão, o cancelamento a preserva e a confirmação antiga não afeta a conta nova. Casos separados para fases `closing`/`closed` conferem UUID e acesso ao painel sem novo POST.
++- **Revogação Staff:** o teste focado simula 404 para uma concessão já revogada, preserva o outro comprovante, reconsulta prontidão e continua a tratar 401/403 como bloqueio.
++- **Intenções de experiência e estação:** testes focados simulam gravação com resposta perdida, desmontagem e retomada do mesmo evento na mesma sessão, leitura antes de retry, preservação de chave e corpo e reenvio somente explícito. Também verificam isolamento para um mapa de outra sessão e a perda da intenção quando a memória é descartada. A integração cobre retomada de estação salva quando a prontidão já passou a `ready=true`.
++
++### Regressões, lacunas e verificações estáticas
++
++Os mesmos seis arquivos exercitaram regressões da Home Admin, Gerenciar Eventos, Painel Individual, horários e QR Code da ADMIN-03, navegação, autenticação/TOTP, troca de conta e roteamento de papéis, além da criação, retomada, experiências, estações, Staff e checklist de prontidão. Todos os testes executados passaram.
++
++Essas verificações são frontend e usam mocks. Não provam a execução dos contratos reais do backend, transações PostgreSQL, idempotência entre instâncias nem comportamento após encerramento do processo. A recuperação de intenções de estrutura é deliberadamente limitada à memória da pilha/sessão. A homologação em aparelho continua pendente.
++
++Verificações adicionais executadas:
++
++| Comando | Resultado |
++| --- | --- |
++| `git diff --check` | Exit 0; sem erros de whitespace no diff rastreado. |
++| `git status --short` | Exit 0; 13 arquivos rastreados modificados e oito arquivos novos, conforme inventário anterior. |
++| `git diff --cached --exit-code` | Exit 0; índice Git real vazio. |
++| Busca por `.only` nos seis arquivos de teste | Nenhum caso `.only` encontrado. Os usos de `skip` no arquivo integrado são condicionais; o runner reportou zero ignorados. |
++
++Não houve correções nesta campanha. A documentação foi atualizada preservando o resultado histórico de 91 testes, que se refere à versão anterior às correções. Estado ao concluir: branch `feature/admin-event-operations`, HEAD `ae4815fd62237b746ceb2987e10ff37b1e21b50d`; alterações da ADMIN-05 preservadas; índice sem staging; `qa-evidence/ADMIN_05-changes.diff` ainda não gerado. Recomenda-se avançar para homologação visual e funcional em aparelho, mantendo pendente a revisão do responsável.
++
++## Padronização global do cabeçalho Admin — ajuste pós-homologação
++
++O responsável informou homologação funcional em aparelho da criação de evento, experiências, estação, concessões Staff, prontidão e conclusão antes deste ajuste. A campanha de 103 testes acima também é anterior à alteração do cabeçalho.
++
++O cabeçalho compartilhado `AdminLiveScreen` exibe o asset oficial `app/assets/images/logo-arenago.png` à direita, com `contain`, e ação à esquerda. A Home usa logout com a guarda de identidade e montagem existente. As outras telas fornecem retorno explícito, sem logout. O cabeçalho permanece acima da rolagem, respeita a área segura e usa menos espaçamento vertical; botão e texto podem se ajustar à largura disponível. A marca não é um botão.
++
++| Tela ou rota ativa | Ação no cabeçalho |
++| --- | --- |
++| Home (`AdminTabs`) | Sair da conta. |
++| Histórico e BI (`AdminTabs`) | Voltar para Home pela navegação de abas. |
++| Gerenciar Eventos (`AdminEvents`) | Voltar para Home. |
++| Painel Individual (`AdminRealEvent`) | Voltar aos eventos. |
++| Informações e horários e quatro áreas informativas (`AdminEventManagementInfo`) | Voltar ao painel com o UUID do evento. |
++| Criar Evento (`AdminEventSetup`) | Na primeira etapa, volta à origem Home/listagem, ou ao painel na retomada; etapas 2–5 voltam uma etapa. Resultado e evento em encerramento abrem o painel pelo UUID. |
++
++As rotas demonstrativas antigas continuam fora do navegador ativo. Home e listagem informam a origem do wizard explicitamente. O retorno inferior de etapa foi removido para não duplicar a ação do cabeçalho. Durante escrita, o retorno fica desabilitado. Em resultado incerto, o retorno leva à origem com a confirmação de saída já existente, preservando a intenção de estrutura recuperável na sessão; campos locais em mudança de etapa continuam sujeitos à confirmação. Informações e horários mantém `usePreventRemove`. As guardas de dono, cliente e geração do wizard e a autenticação central permanecem em uso. O diálogo de logout exclusivo do wizard foi retirado porque o logout agora está na Home.
++
++Arquivos desta rodada: `app/screens/admin/components/AdminLiveScreen.js`, `AdminHomeScreen.js`, `AdminPendingScreen.js`, `AdminRealEventsScreen.js`, `AdminEventSetupScreen.js`, `app/tests/adminRealEvents.test.cjs`, `app/tests/roleRoutingIntegration.test.cjs` e este relatório. Foram preparadas assertions de ordem da ação e logo, ausência de logout interno, retornos por origem e etapa, painel final, descarte em Informações e horários, navegação das abas e isolamento de respostas pendentes após logout ou troca de conta. Os testes anteriores de retry e intenção incerta continuam preparados.
++
++Inspeção estática: rotas registradas, destinos, proteções e asset rastreado foram conferidos; o parser Babel analisou os sete arquivos JS/CJS desta rodada e conferiu seus imports relativos. Uma primeira chamada do parser falhou por aspas do PowerShell; a chamada corrigida terminou com exit 0. `git diff --check` terminou com exit 0 no diff rastreado. Não foram executados testes nesta implementação com Terra. Permanecem para Luna Medium a campanha automatizada e, para o responsável, a conferência visual e funcional do novo cabeçalho em aparelho, inclusive fonte ampliada e telas pequenas. A ADMIN-05 não está aprovada por esta rodada; o changes não foi gerado.
++
++## Campanha de validação do cabeçalho Admin — Luna Medium
++
++O responsável selecionou GPT-6 Luna — Medium. Foram lidos `AGENTS.md` e este relatório, confirmados branch `feature/admin-event-operations`, HEAD `ae4815fd62237b746ceb2987e10ff37b1e21b50d`, árvore e índice. O comando do `app/package.json` é o Node test runner. A inspeção dos seis arquivos confirmou mocks locais e URL de loopback interceptada pelo harness, sem conexão real, banco, migrations ou serviços externos.
++
++Comando executado em `app` (PowerShell):
++
++```powershell
++$env:NODE_ENV = "test"
++node --test --test-reporter=spec tests/adminEventSetup.test.cjs tests/adminRealEvents.test.cjs tests/adminEventSettings.test.cjs tests/adminNavigation.test.cjs tests/authNavigation.test.cjs tests/roleRoutingIntegration.test.cjs
++```
++
++Resultado: **103 testes, 103 aprovados, 0 reprovados, 0 ignorados**, exit code **0**. Os seis arquivos foram executados. A contagem é a informada pelo runner.
++
++### Cobertura do cabeçalho e navegação
++
++- Home: assertion estrutural confere ação de logout antes do logo ArenaGO com `resizeMode="contain"`; a integração de restauração confirma logout real, remoção do token e retorno à área pública.
++- Telas internas: teste estrutural verifica que retorno precede o logo e que não há logout. A integração verifica destino Home da listagem, destino da lista no painel, retorno das áreas informativas, navegação das abas Histórico/BI e ausência de logout nessas telas.
++- Informações e horários: integração edita o nome, tenta retornar, confirma que aparece o diálogo de alterações não salvas, permanece na edição e depois descarta explicitamente. Os testes ADMIN-03 mantêm cobertura dos campos, programação, QR Code e gravação.
++- Wizard: integração confirma retorno da etapa 1 à Home ou listagem conforme a origem, percorre as etapas 2–5 pelos controles de cabeçalho, chega ao resultado e retorna ao Painel Individual. A quantidade de POST permanece em um. A tela final mantém ação para abrir o painel pelo UUID.
++- Sessão e operações pendentes: integrações cobrem logout e troca de conta durante POST, sem reapresentar o evento. O teste de intenção de estação confirma saída, retomada no mesmo evento, mesma chave/corpo no retry explícito e nenhum retry causado pelo retorno.
++- Os testes incluídos também exercitam busca, filtros, paginação, detalhe, readiness, horários e QR Code.
++
++As assertions verificam ordem dos elementos na árvore e `resizeMode`, não posição em pixels nem layout real. A conferência visual em aparelho, fontes ampliadas e telas pequenas permanece necessária. O conjunto de mocks também não valida backend ou comportamento transacional em PostgreSQL.
++
++### Avisos e verificações estáticas
++
++O runner emitiu avisos de depreciação de `react-test-renderer` e sobre stubs de rotas de autenticação chamados `default`; não houve falhas associadas. A busca por `.only` nos seis arquivos terminou com exit 1 por não encontrar correspondências.
++
++| Comando | Resultado |
++| --- | --- |
++| `git diff --check` | Exit 0. |
++| `git status --short` | Exit 0; 14 arquivos rastreados modificados e oito novos, incluindo este relatório não rastreado. |
++| `git diff --cached --exit-code` | Exit 0; índice vazio. |
++
++Não houve alterações de código durante a campanha. O resultado anterior de 103 testes também foi preservado como histórico da versão anterior ao cabeçalho. Estado final: branch e HEAD inalterados, alterações locais preservadas, sem staging e sem `qa-evidence/ADMIN_05-changes.diff`. A campanha frontend passou; a aprovação permanece pendente da homologação visual em aparelho e revisão do responsável.
++
++## Fechamento e homologação final da ADMIN-05
++
++O responsável declarou a ADMIN-05 aprovada para fechamento e informou homologação funcional real e homologação visual final. Essa confirmação inclui criação do evento, cadastro de experiências e estações, concessões Staff, prontidão e tela final. O wizard usa os contratos administrativos descritos em **Contratos utilizados**: cria o evento somente após confirmação da etapa 2, adota o UUID retornado para todas as operações seguintes e consulta detalhe, estrutura e prontidão oficiais.
++
++As correções pós-auditoria vinculam a criação à confirmação atual da etapa 2, verificam a janela de término, mantêm o UUID para fases `closing`/`closed`, protegem a confirmação de saída durante transições, reconciliam comprovante Staff revogado e preservam chave e corpo das intenções incertas de experiência/estação para retomada e retry explícito dentro da sessão. O cabeçalho compartilhado agora mostra logout à esquerda na Home e retorno contextual à esquerda nas demais rotas ativas, com o logo oficial à direita. O botão inferior duplicado do wizard foi removido.
++
++A campanha final de frontend com Luna Medium executou os seis arquivos listados na seção anterior: **103 aprovados, 0 falhos, 0 ignorados, exit code 0**. Os testes usam mocks locais e cobrem regressões de navegação e sessão. `git diff --check` passou; a busca por `.only` não encontrou ocorrências; `git diff --cached --exit-code` confirmou índice sem staged. Não foi executado teste transacional PostgreSQL nesta task.
++
++Limitações aceitas e escopo reservado:
++
++- A recuperação de intenções de estrutura depende da memória da pilha/sessão e não sobrevive ao encerramento do processo ou à troca de identidade.
++- A API disponível não oferece listagem nominal completa de Staff; esse gerenciamento fica para ADMIN-06.
++- A campanha automatizada usou mocks, sem comprovar transações PostgreSQL reais.
++- O catálogo global fica reservado para ADMIN-08.
++
++### Inventário final em relação ao commit-base
++
++Base: `ae4815fd62237b746ceb2987e10ff37b1e21b50d`. O inventário abaixo inclui 14 arquivos rastreados modificados e oito arquivos novos, totalizando **22 arquivos**. O logo `app/assets/images/logo-arenago.png` já existe inalterado no commit-base e, portanto, não é uma diferença da task.
++
++| Arquivo | Estado | Finalidade |
++| --- | --- | --- |
++| `app/screens/admin/AdminDemoNavigator.js` | Modificado | Registra rotas Admin ativas, provedor das intenções e navegação isolada por identidade. |
++| `app/screens/admin/AdminEventSettingsScreen.js` | Modificado | Tela ADMIN-03 de nome, programação e QR Code, integrada ao cabeçalho compartilhado. |
++| `app/screens/admin/AdminHomeScreen.js` | Modificado | Home Admin, ações de eventos e entrada contextual no wizard. |
++| `app/screens/admin/AdminPendingScreen.js` | Modificado | Placeholders de Histórico/BI com retorno à Home. |
++| `app/screens/admin/AdminRealEventScreen.js` | Modificado | Painel individual e acesso por UUID, incluindo retomada de configuração. |
++| `app/screens/admin/AdminRealEventsScreen.js` | Modificado | Listagem, busca, filtros, paginação, retorno à Home e entrada no wizard. |
++| `app/screens/admin/AdminEventSetupScreen.js` | Novo | Wizard, confirmações, revisão, saída e resultado da criação. |
++| `app/screens/admin/adminCreationFlow.js` | Novo | Estado, leituras, escrita, idempotência e isolamento do fluxo. |
++| `app/screens/admin/adminCreationForm.js` | Novo | Validação do formulário, código e programação. |
++| `app/screens/admin/adminSetupIntents.js` | Novo | Contexto em memória para intenções recuperáveis por sessão/evento. |
++| `app/screens/admin/adminEventManagement.js` | Modificado | Áreas administrativas associadas ao painel do evento. |
++| `app/screens/admin/components/AdminLiveScreen.js` | Modificado | Cabeçalho Admin compartilhado, logo, logout/retorno e layout. |
++| `app/screens/admin/components/AdminLiveUI.js` | Modificado | Componentes e ações visuais reutilizados nas telas Admin. |
++| `app/screens/admin/components/AdminScheduleFields.js` | Modificado | Seletores de data e horário reutilizados pela configuração. |
++| `app/screens/admin/components/AdminSetupSteps.js` | Novo | Conteúdo visual das cinco etapas e revisão do wizard. |
++| `app/services/adminEventSetupService.js` | Novo | Contratos de criação, estrutura e Staff do wizard. |
++| `app/services/adminEventsService.js` | Modificado | Consultas e serviços administrativos de eventos. |
++| `app/tests/adminEventSetup.test.cjs` | Novo | Validações, contratos, idempotência e controle do wizard. |
++| `app/tests/adminNavigation.test.cjs` | Modificado | Estrutura e destinos registrados do navegador Admin. |
++| `app/tests/adminRealEvents.test.cjs` | Modificado | Listagem, painel, cabeçalho e navegação Admin. |
++| `app/tests/roleRoutingIntegration.test.cjs` | Modificado | Integração de autenticação, sessão, navegação e wizard. |
++| `docs/ADMIN_05_IMPLEMENTACAO.md` | Novo | Relatório, auditorias, campanhas, homologação e fechamento da task. |
++
++O patch definitivo será gravado em `qa-evidence/ADMIN_05-changes.diff` e validado contra o commit-base sem alterar o índice Git real. Branch final `feature/admin-event-operations`; HEAD/base `ae4815fd62237b746ceb2987e10ff37b1e21b50d`.
++
++### Changes definitivo e validação
++
++O changes final está em `qa-evidence/ADMIN_05-changes.diff`. Contém os 22 caminhos do inventário, sem se incluir. O logo não aparece no patch: já está rastreado e inalterado na base. Não há diferenças binárias da task. A varredura de padrões de credenciais apontou somente valores literais genéricos (`password` e `ficticia`) usados pelas fixtures de teste; não identificou credenciais de ambiente.
++
++O patch foi criado a partir de índice e repositório temporários, pois o diretório `.git/objects` do checkout não permite escrita. Nenhum comando modificou o índice Git real. A verificação reversa (`git apply --reverse --check`) passou no working tree atual; a aplicação encaminhada foi verificada no índice isolado inicializado na base. `git apply --stat` reconheceu 22 arquivos, 1.754 inserções e 62 remoções. `git diff --check` terminou com exit 0; o relatório novo também foi inspecionado quanto a whitespace final. O inventário do patch corresponde aos 14 arquivos rastreados modificados e oito arquivos novos listados acima. A task fica pronta para o commit e push manuais do responsável.

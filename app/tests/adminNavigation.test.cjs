@@ -114,20 +114,22 @@ test('Home não oferece atalho Admin nos estados de carregamento, erro ou pronto
 test('navegador Admin registra apenas destinos reais e respeita identidade', () => {
   let owner = 'admin:session:1';
   const navigator = loadModule('screens/admin/AdminDemoNavigator.js', name => {
+    if (name === 'react') return { useMemo: factory => factory() };
     if (name === 'react/jsx-runtime') return require('react/jsx-runtime');
     if (name === '@react-navigation/native-stack') return { createNativeStackNavigator: () => ({ Navigator: StackNavigator, Screen: StackScreen }) };
     if (name === '@react-navigation/bottom-tabs') return { createBottomTabNavigator: () => ({ Navigator: StackNavigator, Screen: StackScreen }) };
     if (name === 'react-native') return { Text: 'Text' };
     if (name === '../../context/AuthContext') return { useAuth: () => ({}) };
     if (name === './useAdminEvents') return { adminReadOwner: () => owner };
+    if (name === './adminSetupIntents') return { AdminSetupIntents: { Provider: 'SetupIntentsProvider' } };
     if (name === './components/adminTheme') return { adminColors: {} };
     return { __esModule: true, default: ImportedScreen };
   }).exports.default;
-  const tree = navigator();
+  const tree = navigator().props.children;
   assert.equal(tree.key, owner);
-  assert.deepEqual(Array.from(tree.props.children, node => node.props.name), ['AdminTabs', 'AdminEvents', 'AdminRealEvent', 'AdminEventManagementInfo']);
+  assert.deepEqual(Array.from(tree.props.children, node => node.props.name), ['AdminTabs', 'AdminEvents', 'AdminRealEvent', 'AdminEventManagementInfo', 'AdminEventSetup']);
   const tabs = tree.props.children[0].props.component();
   assert.deepEqual(Array.from(tabs.props.children, node => node.props.name), ['Home', 'Histórico', 'BI']);
-  owner = 'other:session:2'; assert.notEqual(navigator().key, tree.key);
+  owner = 'other:session:2'; assert.notEqual(navigator().props.children.key, tree.key);
   owner = null; assert.equal(navigator(), null);
 });

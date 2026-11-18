@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useContext, useState } from 'react';
 import { Platform, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native';
 import { adminEventAreas } from './adminEventManagement';
+import { AdminSetupIntents } from './adminSetupIntents';
 import useAdminEventPanel from './useAdminEventPanel';
 import AdminLiveScreen from './components/AdminLiveScreen';
 import AdminSelectedEvent from './components/AdminSelectedEvent';
@@ -10,6 +11,7 @@ import { AdminIcon, AdminIconTile, liveColors as c, liveStyles as s } from './co
 
 export default function AdminRealEventScreen({ navigation, route }) {
   const eventId = route.params?.eventId;
+  const structureIntents = useContext(AdminSetupIntents);
   const { event, readiness, pending, refreshing, blocked, detailError, readinessError, refresh } = useAdminEventPanel(navigation, eventId);
   const [expandedReadiness, setExpandedReadiness] = useState(null);
   const expanded = Boolean(readiness && expandedReadiness === readiness);
@@ -28,6 +30,10 @@ export default function AdminRealEventScreen({ navigation, route }) {
       <AdminButton label="Tentar novamente" onPress={() => refresh()} />
     </AdminNotice>}
     {event && <>
+      {((readiness && !readiness.ready) || structureIntents?.has?.(event.id)) &&
+        !['closed', 'closing'].includes(readiness?.effectivePhase ?? event.effectivePhase) &&
+        <AdminButton label="Continuar configuração" variant="secondary"
+          onPress={() => navigation.navigate('AdminEventSetup', { eventId: event.id })} />}
       <View style={styles.section}>
         <Text accessibilityRole="header" style={styles.sectionTitle}>GERENCIAMENTO</Text>
         {Platform.OS === 'web' && <Pressable accessibilityRole="button" accessibilityLabel="Atualizar evento" onPress={() => refresh(true)} style={styles.refresh}>

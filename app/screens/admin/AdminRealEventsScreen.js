@@ -1,19 +1,21 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import useAdminEvents from './useAdminEvents';
 import AdminLiveScreen from './components/AdminLiveScreen';
 import AdminButton from './components/AdminButton';
 import AdminNotice from './components/AdminNotice';
 import AdminEventSummary from './components/AdminEventSummary';
-import { AdminIcon, AdminPendingActions, liveColors as c, liveStyles as s } from './components/AdminLiveUI';
+import { AdminIcon, AdminEventActions, liveColors as c, liveStyles as s } from './components/AdminLiveUI';
 const filters = [{ value: 'all', label: 'Todos' }, { value: 'scheduled', label: 'Agendados' }, { value: 'open', label: 'Abertos' }, { value: 'closing', label: 'Encerrando' }];
 
 export default function AdminRealEventsScreen({ navigation }) {
   const [search, setSearch] = useState(''), [phase, setPhase] = useState('all');
   const { items, status, error, nextCursor, loader } = useAdminEvents(search, phase);
+  useEffect(() => navigation.addListener('focus', () => { void loader.setFilters({ search, phase }); }),
+    [navigation, loader, search, phase]);
   return <AdminLiveScreen title="Gerenciar Eventos" subtitle="Consulte, busque e gerencie os eventos da plataforma."
-    navigation={navigation} backLabel="Voltar ao painel" showTabs>
-    <AdminPendingActions />
+    navigation={navigation} backLabel="Voltar para Home" onBack={() => navigation.popTo('AdminTabs', { screen: 'Home' })} showTabs>
+    <AdminEventActions onCreate={() => navigation.navigate('AdminEventSetup', { origin: 'events' })} />
     <View style={styles.search}>
       <AdminIcon name="search" color={c.muted} />
       <TextInput accessibilityLabel="Pesquisar por nome ou código" placeholder="Pesquisar por nome ou código"

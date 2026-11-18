@@ -1,9 +1,9 @@
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import AdminLiveScreen from './components/AdminLiveScreen';
-import { AdminIcon, AdminIconTile, AdminPendingActions, liveColors as c, liveStyles as s } from './components/AdminLiveUI';
+import { AdminIcon, AdminIconTile, AdminEventActions, liveColors as c, liveStyles as s } from './components/AdminLiveUI';
 
 export default function AdminHomeScreen({ navigation }) {
-  return <AdminLiveScreen title="Painel Administrativo" subtitle="Gerencie eventos, equipe e indicadores da plataforma.">
+  return <AdminLiveScreen mode="home" title="Painel Administrativo" subtitle="Gerencie eventos, equipe e indicadores da plataforma.">
     <View style={s.card}>
       <Pressable accessibilityRole="button" accessibilityLabel="Gerenciar eventos"
         onPress={() => navigation.navigate('AdminEvents')} style={({ pressed }) => [s.row, styles.mainLink, pressed && styles.pressed]}>
@@ -11,7 +11,7 @@ export default function AdminHomeScreen({ navigation }) {
         <View style={s.grow}><Text style={s.title}>Gerenciar eventos</Text><Text style={s.body}>Consulte e acompanhe os eventos ativos.</Text></View>
         <AdminIcon name="chevron" color={c.muted} size={18} />
       </Pressable>
-      <AdminPendingActions />
+      <AdminEventActions onCreate={() => navigation.navigate('AdminEventSetup', { origin: 'home' })} />
     </View>
     <View style={styles.columns}>
       {[

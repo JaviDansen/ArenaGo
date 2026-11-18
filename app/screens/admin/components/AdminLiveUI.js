@@ -52,14 +52,16 @@ export function AdminIcon({ name, color = c.accent, size = 24 }) {
 export function AdminIconTile({ name }) {
   return <View style={liveStyles.iconTile}><AdminIcon name={name} size={28} /></View>;
 }
-export function AdminPendingActions() {
+export function AdminEventActions({ onCreate }) {
   return <View style={liveStyles.actions}>
-    {[['Criar evento', 'plus'], ['Catálogo de experiências', 'folder']].map(([label, icon]) =>
-      <Pressable key={label} disabled accessibilityRole="button" accessibilityLabel={`${label} · Em implementação`}
-        accessibilityState={{ disabled: true }} style={liveStyles.pendingAction}>
-        <View style={liveStyles.row}><AdminIcon name={icon} /><Text style={liveStyles.actionLabel}>{label}</Text></View>
-        <Text style={liveStyles.pending}>Em breve</Text>
-      </Pressable>)}
+    <Pressable accessibilityRole="button" accessibilityLabel="Criar evento" onPress={onCreate} style={liveStyles.pendingAction}>
+      <View style={liveStyles.row}><AdminIcon name="plus" /><Text style={liveStyles.actionLabel}>Criar evento</Text></View>
+    </Pressable>
+    <Pressable disabled accessibilityRole="button" accessibilityLabel="Catálogo de experiências · Em implementação"
+      accessibilityState={{ disabled: true }} style={liveStyles.pendingAction}>
+      <View style={liveStyles.row}><AdminIcon name="folder" /><Text style={liveStyles.actionLabel}>Catálogo de experiências</Text></View>
+      <Text style={liveStyles.pending}>Em breve</Text>
+    </Pressable>
   </View>;
 }
 export const liveStyles = StyleSheet.create({

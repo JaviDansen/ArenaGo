@@ -98,10 +98,14 @@ test('Home oferece navegação explícita, sem contadores ou formulários demo',
   let exits = 0;
   const h = createHarness('screens/admin/AdminHomeScreen.js', { authContext: verifiedAdminAuth({ logout: () => exits++ }) });
   assert.ok(h.nodes.some(node => textOf(node).includes('Painel Administrativo')));
-  for (const name of ['Criar evento', 'Catálogo de experiências']) {
-    const button = h.nodes.find(node => node.type === 'Pressable' && node.props.accessibilityLabel?.startsWith(name));
-    assert.equal(button.props.disabled, true);
-  }
+  const logout = h.nodes.findIndex(node => node.type === 'Pressable' && node.props.accessibilityLabel === 'Sair da conta');
+  const logo = h.nodes.findIndex(node => node.type === 'Image' && node.props.accessibilityLabel === 'ArenaGO');
+  assert.ok(logout >= 0 && logo > logout);
+  assert.equal(h.nodes[logo].props.resizeMode, 'contain');
+  h.press('Criar evento');
+  assert.equal(h.navigationCalls.at(-1).name, 'AdminEventSetup');
+  const catalog = h.nodes.find(node => node.type === 'Pressable' && node.props.accessibilityLabel?.startsWith('Catálogo de experiências'));
+  assert.equal(catalog.props.disabled, true);
   const users = h.nodes.find(node => node.type === 'View' && node.props.accessibilityLabel === 'Usuários e permissões · Em implementação');
   assert.ok(users, 'gestão global permanece informativa');
   assert.equal(users.props.onPress, undefined);
@@ -111,6 +115,18 @@ test('Home oferece navegação explícita, sem contadores ou formulários demo',
   assert.equal(h.navigationCalls.at(-1).name, 'AdminEvents');
   h.press('Histórico de eventos'); h.press('Visão geral'); h.press('Sair da conta');
   assert.equal(exits, 1); assert.equal(h.navigationCalls.at(-1).name, 'BI');
+});
+test('cabeçalho interno coloca retorno antes do logo e não oferece logout', () => {
+  const h = createHarness('screens/admin/AdminRealEventsScreen.js', { authContext: verifiedAdminAuth({ httpClient: { get: async () => ({ items: [], nextCursor: null }) } }) });
+  try {
+    const back = h.nodes.findIndex(node => node.type === 'Pressable' && node.props.accessibilityLabel === 'Voltar para Home');
+    const logo = h.nodes.findIndex(node => node.type === 'Image' && node.props.accessibilityLabel === 'ArenaGO');
+    assert.ok(back >= 0 && logo > back);
+    assert.equal(h.nodes[logo].props.resizeMode, 'contain');
+    assert.ok(!h.nodes.some(node => node.type === 'Pressable' && node.props.accessibilityLabel === 'Sair da conta'));
+    h.press('Voltar para Home');
+    assert.deepEqual(plain(h.navigationCalls.at(-1)), { type: 'popTo', name: 'AdminTabs', params: { screen: 'Home' } });
+  } finally { h.unmount(); }
 });
 test('lista monta HTTP real, estado vazio, not_ready e seleção por UUID', async () => {
   const calls = []; let body = { items: [], nextCursor: null };

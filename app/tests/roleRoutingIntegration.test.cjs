@@ -84,7 +84,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
       text: async () => JSON.stringify(value.body ?? value) };
   } });
   const passthrough = ({ children }) => children;
-  const native = Object.fromEntries(['ActivityIndicator', 'Image', 'KeyboardAvoidingView', 'Modal', 'Pressable', 'RefreshControl', 'ScrollView', 'Text', 'TextInput', 'View'].map((name) => [name, name]));
+  const native = Object.fromEntries(['ActivityIndicator', 'Image', 'KeyboardAvoidingView', 'Modal', 'Pressable', 'RefreshControl', 'ScrollView', 'Switch', 'Text', 'TextInput', 'View'].map((name) => [name, name]));
   native.StyleSheet = { create: (styles) => styles };
   native.AppState = { currentState: 'active', addEventListener: () => ({ remove() {} }) };
   native.Platform = { OS: control.platformOS ?? 'web' };
@@ -125,7 +125,8 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
       if (control.realAdmin && target === 'screens/admin/adminDemoLatency') {
         return { waitAdminDemoLatency: async () => {} };
       }
-      if (control.realAdmin && (target.startsWith('screens/admin/') || target === 'data/adminDemoData' || target === 'services/adminEventsService')) {
+      if (control.realAdmin && (target.startsWith('screens/admin/') || target === 'data/adminDemoData' ||
+        ['services/adminEventsService', 'services/adminEventSetupService'].includes(target))) {
         return load(`${target}.js`);
       }
       if (control.realStaff && ['screens/staff/StaffEventsNavigator', 'services/staffEventsService',
@@ -169,6 +170,11 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
       return route.name;
     },
     storedToken() { return token; },
+    async input(label, value) {
+      const field = tree.root.findAllByType('TextInput').find(node => node.props.accessibilityLabel === label);
+      assert.ok(field, label);
+      await Renderer.act(async () => field.props.onChangeText(value));
+    },
     navigate(name, params) { Renderer.act(() => navRef.navigate(name, params)); },
     back() { Renderer.act(() => navRef.goBack()); },
     hasText(text) { return tree.root.findAllByType('Text').some((node) => {
@@ -195,6 +201,288 @@ const participant = { id: 'a', name: 'A', email: 'a@example.test', emailVerified
   roles: ['participante'], hasCompletedQuestionnaire: true };
 
 const adminUser = { ...participant, roles: ['admin', 'staff', 'participante'], hasCompletedQuestionnaire: false };
+
+test('ADMIN-05: Home e listagem abrem o fluxo, cinco etapas preservam UUID e retomada lê o evento salvo', { skip }, async () => {
+  const eventId = 'abcdef00-0000-4000-8000-000000000001';
+  const path = `/admin/events/${eventId}`;
+  const writes = [];
+  let saved;
+  const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control: {
+    realAdmin: true, http: async (route, options) => {
+      if (!route.startsWith('/admin/')) return undefined;
+      if (options.method === 'POST') {
+        writes.push(route);
+        assert.equal(route, '/admin/events');
+        const body = JSON.parse(options.body);
+        saved = { ...body, id: eventId, effectivePhase: 'scheduled', readiness: { ready: false } };
+        return { statusCode: 201, body: { event: saved } };
+      }
+      if (route === '/admin/events') return { items: saved ? [saved] : [], nextCursor: null };
+      assert.ok(saved);
+      if (route === path) return { event: saved };
+      if (route === path + '/experiences') return { eventId, items: [] };
+      assert.equal(route, path + '/readiness');
+      return { eventId, statusStored: 'scheduled', effectivePhase: 'scheduled', ready: false,
+        acceptingNewParticipations: false, missing: ['EXPERIENCE_WITH_AVAILABLE_STATION', 'VERIFIED_ACTIVE_STAFF'],
+        checks: { nameAndAccessCode: true, validScheduleAndTimezone: true, externalQueueConfigured: true,
+          hasExperienceWithAvailableStation: false, hasVerifiedActiveStaff: false } };
+    },
+  } });
+  await app.mount();
+  try {
+    await app.press('Criar evento');
+    assert.equal(app.activeRoute(), 'AdminEventSetup');
+    assert.equal(app.hasButton('Sair da conta'), false);
+    await app.input('Nome do evento', 'Nome provisório');
+    await app.press('Voltar para Home');
+    assert.ok(app.hasText('Sair da configuração?'));
+    await app.press('Cancelar');
+    assert.equal(app.activeRoute(), 'AdminEventSetup');
+    await app.press('Voltar para Home');
+    await app.press('Sair do fluxo');
+    assert.equal(app.activeRoute(), 'Home');
+    await app.press('Gerenciar eventos');
+    assert.equal(app.activeRoute(), 'AdminEvents');
+    await app.press('Criar evento');
+    await app.press('Voltar aos eventos');
+    assert.equal(app.activeRoute(), 'AdminEvents');
+    await app.press('Criar evento');
+    assert.ok(app.hasText('20% do fluxo'));
+    await app.input('Nome do evento', 'Encontro de novembro');
+    await app.press('Gerar código');
+    await app.press('Continuar');
+    assert.ok(app.hasText('40% do fluxo'));
+    await app.input('Data de início', '25/11/2090');
+    await app.input('Hora de início', '14:00');
+    await app.input('Data de término oficial', '25/11/2090');
+    await app.input('Hora de término oficial', '18:00');
+    await app.press('Voltar uma etapa');
+    const advanceIdentity = app.handler('Continuar');
+    await app.act(async () => { advanceIdentity(); advanceIdentity(); });
+    assert.ok(app.hasText('40% do fluxo'));
+    assert.deepEqual(writes, []);
+    await app.press('Criar evento e continuar');
+    assert.ok(app.hasText('60% do fluxo'));
+    await app.press('Voltar uma etapa');
+    await app.press('Voltar uma etapa');
+    assert.ok(app.hasText(saved.accessCode));
+    assert.match(saved.accessCode, /^ARENA-[A-F0-9]{8}$/);
+    assert.ok(!app.hasButton('Gerar código'));
+    await app.press('Continuar');
+    await app.press('Continuar');
+    await app.press('Continuar');
+    assert.ok(app.hasText('80% do fluxo'));
+    await app.press('Voltar uma etapa');
+    assert.ok(app.hasText('60% do fluxo'));
+    await app.press('Continuar');
+    await app.press('Continuar');
+    assert.ok(app.hasText('100% do fluxo'));
+    await app.press('Voltar uma etapa');
+    assert.ok(app.hasText('80% do fluxo'));
+    await app.press('Continuar');
+    assert.ok(app.hasText('Configuração pendente'));
+    assert.ok(!app.hasText('Pronto para operar'));
+    await app.press('Salvar e revisar depois');
+    assert.ok(app.hasText('Evento salvo com sucesso'));
+    await app.press('Voltar ao painel');
+    assert.equal(app.activeRoute(), 'AdminRealEvent');
+    assert.ok(app.hasText(saved.name));
+    await app.press('Continuar configuração');
+    assert.ok(app.hasText('60% do fluxo'));
+    await app.press('Voltar uma etapa');
+    await app.press('Voltar uma etapa');
+    await app.press('Voltar ao painel');
+    await app.press('Voltar aos eventos');
+    assert.ok(app.hasButton('Acessar evento ' + saved.name));
+    assert.deepEqual(writes, ['/admin/events']);
+  } finally { app.dispose(); }
+});
+
+test('ADMIN-05: equipe confirma revogação, revisa os checks e conclui um evento pronto ainda agendado', { skip }, async () => {
+  const eventId = 'abcdef00-0000-4000-8000-000000000001';
+  const exp = 'abcdef00-0000-4000-8000-000000000002', station = 'abcdef00-0000-4000-8000-000000000003';
+  const path = '/admin/events/' + eventId, at = '2090-11-01T00:00:00Z';
+  const grant = { id: 'abcdef00-0000-4000-8000-000000000004', userId: 'abcdef00-0000-4000-8000-000000000005',
+    eventId, role: 'staff', grantedAt: at, revokedAt: null };
+  const email = 'equipe@example.test';
+  let staff = false, revocations = 0;
+  const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control: {
+    realAdmin: true, http: async (route, options) => {
+      if (!route.startsWith('/admin/')) return undefined;
+      const event = { id: eventId, name: 'Encontro das oficinas', timezone: 'UTC', accessCode: 'OFICINAS',
+        startsAt: '2090-12-01T10:00:00Z', officialEndsAt: '2090-12-01T14:00:00Z', operationalDeadlineAt: '2090-12-01T14:00:00Z',
+        externalQueueEnabled: false, readiness: { ready: staff }, effectivePhase: 'scheduled' };
+      if (route === '/admin/events') { assert.equal(options.method, 'GET'); return { items: [event], nextCursor: null }; }
+      if (route === path) return { event };
+      if (route === path + '/experiences') return { eventId, items: [{ id: exp, eventId, name: 'Oficina',
+        stations: [{ id: station, experienceId: exp, label: 'Mesa', availability: 'available' }] }] };
+      if (route === path + '/readiness') return { eventId, statusStored: 'scheduled', effectivePhase: 'scheduled',
+        acceptingNewParticipations: false, ready: staff, missing: staff ? [] : ['VERIFIED_ACTIVE_STAFF'],
+        checks: { nameAndAccessCode: true, validScheduleAndTimezone: true, externalQueueConfigured: true,
+          hasExperienceWithAvailableStation: true, hasVerifiedActiveStaff: staff } };
+      assert.equal(options.method, 'POST');
+      if (route === '/admin/roles/grant') {
+        assert.deepEqual(JSON.parse(options.body), { role: 'staff', eventId, email });
+        staff = true;
+        return { grant };
+      }
+      assert.equal(route, '/admin/roles/revoke');
+      assert.deepEqual(JSON.parse(options.body), { grantId: grant.id });
+      revocations++;
+      staff = false;
+      return { grant: { ...grant, revokedAt: at } };
+    },
+  } });
+  await app.mount();
+  try {
+    await app.press('Gerenciar eventos');
+    await app.press('Acessar evento Encontro das oficinas');
+    await app.press('Continuar configuração');
+    await app.press('Continuar');
+    await app.input('E-mail do usuário', email);
+    await app.press('Conceder Staff');
+    assert.ok(app.hasText('O evento tem Staff elegível.'));
+    await app.press('Revogar acesso de ' + email);
+    await app.press('Cancelar');
+    assert.equal(revocations, 0);
+    await app.press('Revogar acesso de ' + email);
+    await app.press('Revogar acesso');
+    assert.equal(revocations, 1);
+    assert.ok(app.hasText('O evento ainda precisa de Staff elegível.'));
+    await app.input('E-mail do usuário', email);
+    await app.press('Conceder Staff');
+    await app.press('Continuar');
+    assert.ok(app.hasText('Experiências: 1 · Estações: 1'));
+    assert.ok(app.hasText('Fase: Agendado'));
+    await app.press('Concluir configuração');
+    assert.ok(app.hasText('Evento criado com sucesso'));
+    assert.ok(app.hasText('Pronto para operar'));
+    await app.press('Voltar para a Home Admin');
+    assert.equal(app.activeRoute(), 'Home');
+  } finally { app.dispose(); }
+});
+
+test('ADMIN-05: painel pronto oferece retomada de estação salva com resposta perdida na mesma sessão', { skip }, async () => {
+  const eventId = 'abcdef00-0000-4000-8000-000000000001';
+  const experienceId = 'abcdef00-0000-4000-8000-000000000002';
+  const path = '/admin/events/' + eventId;
+  const station = { id: 'abcdef00-0000-4000-8000-000000000003', experienceId, label: 'Mesa', availability: 'available' };
+  const writes = [];
+  const event = { id: eventId, name: 'Evento com estação', accessCode: 'ESTACAO', timezone: 'UTC',
+    startsAt: '2090-12-01T10:00:00Z', officialEndsAt: '2090-12-01T14:00:00Z', operationalDeadlineAt: '2090-12-01T14:00:00Z',
+    externalQueueEnabled: false, effectivePhase: 'scheduled' };
+  const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control: {
+    realAdmin: true, http: async (route, options) => {
+      const ready = writes.length > 0;
+      const detail = { ...event, readiness: { ready } };
+      if (route === '/admin/events') return { items: [detail], nextCursor: null };
+      if (route === path) return { event: detail };
+      if (route === path + '/experiences') return { eventId, items: [{ id: experienceId, eventId, name: 'Oficina',
+        stations: ready ? [station] : [] }] };
+      if (route === path + '/readiness') return { eventId, statusStored: 'scheduled', effectivePhase: 'scheduled',
+        acceptingNewParticipations: false, ready, missing: ready ? [] : ['EXPERIENCE_WITH_AVAILABLE_STATION'],
+        checks: { nameAndAccessCode: true, validScheduleAndTimezone: true, externalQueueConfigured: true,
+          hasExperienceWithAvailableStation: ready, hasVerifiedActiveStaff: true } };
+      if (route === path + '/experiences/' + experienceId + '/stations') {
+        assert.equal(options.method, 'POST');
+        writes.push({ headers: { ...options.headers }, body: options.body });
+        if (writes.length === 1) throw new Error('Resposta perdida após commit');
+        return { statusCode: 201, body: { station } };
+      }
+    },
+  } });
+  await app.mount();
+  try {
+    await app.press('Gerenciar eventos');
+    await app.press('Acessar evento Evento com estação');
+    await app.press('Continuar configuração');
+    await app.press('Adicionar estação a Oficina');
+    await app.input('Identificação da estação', station.label);
+    await app.press('Salvar estação');
+    assert.ok(app.hasButton('Repetir a mesma solicitação'));
+    await app.press('Voltar ao painel');
+    await app.press('Sair do fluxo');
+    assert.equal(app.activeRoute(), 'AdminRealEvent');
+    assert.ok(app.hasText('Pronto para operar'));
+    await app.press('Continuar configuração');
+    assert.ok(app.hasText(station.label));
+    assert.equal(writes.length, 1);
+    await app.press('Repetir a mesma solicitação');
+    assert.equal(writes.length, 2);
+    assert.deepEqual(writes[1], writes[0]);
+    assert.ok(!app.hasButton('Repetir a mesma solicitação'));
+  } finally { app.dispose(); }
+});
+
+for (const scenario of ['encerrar sessão', 'trocar conta', 'closing', 'closed']) {
+  test(`ADMIN-05: confirmação após POST pendente — ${scenario}`, { skip }, async () => {
+    const eventId = 'abcdef00-0000-4000-8000-000000000001';
+    const path = '/admin/events/' + eventId;
+    const pending = deferred();
+    const ended = scenario === 'closing' || scenario === 'closed';
+    const phase = ended ? scenario : 'scheduled';
+    const name = 'Evento do POST pendente';
+    let saved, posts = 0;
+    const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control: {
+      realAdmin: true, http: async (route, options) => {
+        if (route === '/admin/events' && options.method === 'POST') {
+          posts++;
+          const body = JSON.parse(options.body);
+          await pending.promise;
+          saved = { ...body, id: eventId, effectivePhase: phase, readiness: { ready: ended } };
+          return { statusCode: 201, body: { event: saved } };
+        }
+        if (route === path) return { event: saved };
+        if (route === path + '/experiences') return { eventId, items: [] };
+        if (route === path + '/readiness') return { eventId, effectivePhase: phase, statusStored: phase,
+          acceptingNewParticipations: false, ready: ended, missing: ended ? [] : ['VERIFIED_ACTIVE_STAFF'],
+          checks: { nameAndAccessCode: true, validScheduleAndTimezone: true, externalQueueConfigured: true,
+            hasExperienceWithAvailableStation: true, hasVerifiedActiveStaff: ended } };
+      },
+    } });
+    await app.mount();
+    try {
+      await app.press('Criar evento');
+      await app.input('Nome do evento', name);
+      await app.input('Código de acesso', 'PENDENTE');
+      await app.press('Continuar');
+      await app.input('Data de início', '25/11/2090');
+      await app.input('Hora de início', '14:00');
+      await app.input('Data de término oficial', '25/11/2090');
+      await app.input('Hora de término oficial', '18:00');
+      const confirmCreate = app.handler('Criar evento e continuar');
+      await app.act(async () => { confirmCreate(); confirmCreate(); });
+      assert.equal(posts, 1);
+      assert.ok(app.hasText('Salvando...'));
+
+      assert.equal(app.hasButton('Sair da conta'), false);
+      if (scenario === 'trocar conta' || scenario === 'encerrar sessão') {
+        await app.act(() => app.manager.logout());
+        if (scenario === 'trocar conta') {
+          const other = { ...adminUser, id: 'admin-b', email: 'b@example.test',
+            sessionId: '20000000-0000-4000-8000-000000000002' };
+          app.setUser(other);
+          await app.act(() => app.manager.login({ email: other.email, password: 'password' }));
+          await app.act(() => app.manager.verifyAdminTwoFactor('123456'));
+          assert.equal(app.manager.getSnapshot().user.id, other.id);
+          assert.equal(app.activeRoute(), 'Home');
+        }
+        await app.act(async () => { pending.resolve(); });
+        assert.ok(!app.hasText(name));
+      } else {
+        await app.act(async () => { pending.resolve(); });
+          assert.ok(app.hasText('Evento salvo em encerramento'));
+          assert.ok(!app.hasText('Pronto para operar'));
+          await app.act(async () => { confirmCreate(); });
+          assert.equal(posts, 1);
+          await app.press('Abrir painel do evento');
+          assert.equal(app.activeRoute(), 'AdminRealEvent');
+          assert.ok(app.hasText(name));
+      }
+      assert.equal(posts, 1);
+    } finally { pending.resolve(); app.dispose(); }
+  });
+}
 
 test('Admin: senha e desafio não abrem painel; TOTP e identidade confirmada abrem Heliom', { skip }, async () => {
   const identity = deferred();
@@ -237,15 +525,19 @@ test('Admin: restauração válida reutiliza telas, retornos internos e logout r
     await app.press('Gerenciar eventos');
     assert.equal(app.activeRoute(), 'AdminEvents');
     assert.ok(app.hasText('Nenhum evento encontrado'));
-    await app.press('Voltar ao painel');
+    await app.press('Voltar para Home');
     assert.equal(app.activeRoute(), 'Home');
     await app.press('Gerenciar eventos');
     await app.press('Histórico');
     assert.equal(app.activeRoute(), 'Histórico');
     assert.ok(app.hasText('Em implementação'));
+    assert.equal(app.hasButton('Sair da conta'), false);
+    await app.press('Voltar para Home');
+    assert.equal(app.activeRoute(), 'Home');
     await app.press('BI');
     assert.equal(app.activeRoute(), 'BI');
-    await app.press('Home');
+    assert.equal(app.hasButton('Sair da conta'), false);
+    await app.press('Voltar para Home');
     assert.equal(app.activeRoute(), 'Home');
     for (const name of ['AdminCreateEvent', 'AdminEventDetail', 'AdminEventSchedule']) {
       app.navigate(name); assert.equal(app.activeRoute(), 'Home');
@@ -287,6 +579,7 @@ test('Admin: painel real retorna à mesma rota da lista e mantém informações 
     await app.press('Gerenciar eventos');
     await app.press('Acessar evento Evento Selecionado');
     assert.equal(app.activeRoute(), 'AdminRealEvent');
+    assert.equal(app.hasButton('Sair da conta'), false);
     assert.ok(app.hasText('Pronto para operar'));
     assert.equal(readinessReads, 1);
     await app.press('Equipe Staff');
@@ -299,9 +592,16 @@ test('Admin: painel real retorna à mesma rota da lista e mantém informações 
     assert.equal(readinessReads, 2);
     await app.press('Informações e horários');
     assert.equal(app.activeRoute(), 'AdminEventManagementInfo');
+    assert.equal(app.hasButton('Sair da conta'), false);
     for (const text of ['Informações gerais', 'Datas e horários', 'Acesso ao evento', 'ARENA-TESTE']) assert.ok(app.hasText(text));
     assert.equal(readinessReads, 3);
+    await app.press('Editar nome');
+    await app.input('Nome do evento', 'Alteração não salva');
     await app.press('Voltar ao painel');
+    assert.ok(app.hasText('Alterações não salvas'));
+    await app.press('Permanecer editando');
+    await app.press('Voltar ao painel');
+    await app.press('Descartar alterações');
     assert.equal(app.activeRoute(), 'AdminRealEvent');
     assert.equal(readinessReads, 4);
     await app.press('Voltar aos eventos');

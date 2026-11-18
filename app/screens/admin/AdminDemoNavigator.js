@@ -1,10 +1,13 @@
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
+import { useMemo } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { adminReadOwner } from './useAdminEvents';
 import AdminHomeScreen from './AdminHomeScreen';
 import AdminRealEventsScreen from './AdminRealEventsScreen';
 import AdminRealEventScreen from './AdminRealEventScreen';
+import AdminEventSetupScreen from './AdminEventSetupScreen';
+import { AdminSetupIntents } from './adminSetupIntents';
 import AdminEventManagementInfoScreen from './AdminEventManagementInfoScreen';
 import AdminPendingScreen from './AdminPendingScreen';
 import AdminBottomBar from './components/AdminBottomBar';
@@ -25,12 +28,17 @@ function AdminTabs() {
 // Keep the entry name used by App.js. Demo sources remain available for later
 // migrations, but none of their mutation routes are registered for real events.
 export default function AdminDemoNavigator() {
-  const owner = adminReadOwner(useAuth());
+  const auth = useAuth();
+  const owner = adminReadOwner(auth);
+  const setupIntents = useMemo(() => new Map(), [owner, auth.httpClient]);
   if (!owner) return null;
-  return <Stack.Navigator key={owner} initialRouteName="AdminTabs" screenOptions={{ headerShown: false }}>
-    <Stack.Screen name="AdminTabs" component={AdminTabs} />
-    <Stack.Screen name="AdminEvents" component={AdminRealEventsScreen} />
-    <Stack.Screen name="AdminRealEvent" component={AdminRealEventScreen} />
-    <Stack.Screen name="AdminEventManagementInfo" component={AdminEventManagementInfoScreen} />
-  </Stack.Navigator>;
+  return <AdminSetupIntents.Provider value={setupIntents}>
+    <Stack.Navigator key={owner} initialRouteName="AdminTabs" screenOptions={{ headerShown: false }}>
+      <Stack.Screen name="AdminTabs" component={AdminTabs} />
+      <Stack.Screen name="AdminEvents" component={AdminRealEventsScreen} />
+      <Stack.Screen name="AdminRealEvent" component={AdminRealEventScreen} />
+      <Stack.Screen name="AdminEventManagementInfo" component={AdminEventManagementInfoScreen} />
+      <Stack.Screen name="AdminEventSetup" component={AdminEventSetupScreen} />
+    </Stack.Navigator>
+  </AdminSetupIntents.Provider>;
 }

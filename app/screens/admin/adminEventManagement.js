@@ -16,7 +16,7 @@ const requirements = {
 
 export function adminReadinessRequirements(missing) {
   const items = [...new Set(missing)].filter(code => Object.hasOwn(requirements, code)).map(code => ({
-    message: requirements[code][0], area: requirements[code][1],
+    code, message: requirements[code][0], area: requirements[code][1],
   }));
   if (!missing.length || missing.some(code => !Object.hasOwn(requirements, code))) {
     items.push({ message: 'Há requisitos de configuração pendentes que não puderam ser detalhados.' });

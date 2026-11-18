@@ -7,6 +7,7 @@ import { adminEventWriteError, changeAdminSchedule, formatAdminDate, renameAdmin
 import { adminReadOwner } from './useAdminEvents';
 import useAdminEventPanel from './useAdminEventPanel';
 import { eventScheduleDraft, prepareSchedule, previewOperationalDeadline, scheduleChanged } from './adminScheduleForm';
+import { configurationName } from './adminCreationForm';
 import AdminLiveScreen from './components/AdminLiveScreen';
 import AdminSelectedEvent from './components/AdminSelectedEvent';
 import AdminButton from './components/AdminButton';
@@ -14,14 +15,6 @@ import AdminNotice from './components/AdminNotice';
 import AdminEventAccess from './components/AdminEventAccess';
 import { ScheduleDateTime, SettingsField, SettingsSection } from './components/AdminScheduleFields';
 import { liveStyles as s } from './components/AdminLiveUI';
-
-function validateName(value) {
-  const name = value.trim();
-  if (!name || Array.from(name).length > 180 || /[\u0000-\u001f\u007f\ud800-\udfff]/u.test(name)) {
-    throw new Error('Informe um nome válido de até 180 caracteres.');
-  }
-  return name;
-}
 
 export default function AdminEventSettingsScreen({ navigation, eventId }) {
   const auth = useAuth();
@@ -77,7 +70,7 @@ export default function AdminEventSettingsScreen({ navigation, eventId }) {
   async function save() {
     if (!isCurrent() || inFlight.current || !dirty || !event) return;
     let payload;
-    try { payload = draft.group === 'name' ? validateName(draft.name) : prepareSchedule(event, original, draft, Date.now()); }
+    try { payload = draft.group === 'name' ? configurationName(draft.name) : prepareSchedule(event, original, draft, Date.now()); }
     catch (error) { update({ notice: { tone: 'error', message: error.message } }); return; }
 
     const ticket = { generation: generation.current };

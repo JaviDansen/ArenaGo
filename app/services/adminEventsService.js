@@ -5,9 +5,12 @@ const readinessChecks = ['nameAndAccessCode', 'validScheduleAndTimezone', 'exter
 
 class InvalidAdminEventResponse extends Error {}
 
-function adminEventPath(eventId) {
-  if (typeof eventId !== 'string' || !UUID.test(eventId)) throw new Error('Identificador de evento inválido.');
-  return `/admin/events/${encodeURIComponent(eventId)}`;
+export function adminIdentifier(value) {
+  if (typeof value !== 'string' || !UUID.test(value)) throw new Error('Identificador administrativo inválido.');
+  return value;
+}
+export function adminEventPath(eventId) {
+  return `/admin/events/${adminIdentifier(eventId)}`;
 }
 
 export function parseAdminEvent(event) {
@@ -54,7 +57,7 @@ export async function getAdminEventReadiness(client, eventId) {
   }
   return result;
 }
-function mutationOptions(idempotencyKey) {
+export function mutationOptions(idempotencyKey) {
   return { auth: true, headers: { 'Idempotency-Key': idempotencyKey },
     retryOnUnauthorized: false, outcomeUnknownOnNetworkError: true };
 }
