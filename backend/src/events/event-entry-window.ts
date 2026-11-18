@@ -1,12 +1,14 @@
+import { toEpochMicros, type EventInstant } from "./event-instant";
+
 /** Instantes de um evento relevantes para avaliar a janela temporal de ingresso. */
-export interface EventEntryWindowTimes {
-  startsAt: Date;
-  officialEndsAt: Date;
-  closureRequestedAt: Date | null;
+export interface EventEntryWindowTimes<T extends EventInstant = Date> {
+  startsAt: T;
+  officialEndsAt: T;
+  closureRequestedAt: T | null;
   /** Limite de operações residuais; não prolonga a janela de novos ingressos. */
-  operationalDeadlineAt: Date;
+  operationalDeadlineAt: T;
   /** Prazo administrativo residual; não prolonga a janela de novos ingressos. */
-  adminDeadlineAt: Date | null;
+  adminDeadlineAt: T | null;
 }
 
 /** Motivo pelo qual novas participações ainda não podem ser admitidas. */
@@ -31,16 +33,18 @@ export interface EventEntryWindowResult {
  * mantém esta função pura e permite testes determinísticos, sem relógio oculto.
  */
 export function evaluateEventEntryWindow(
-  event: EventEntryWindowTimes,
-  at: Date,
+  event: EventEntryWindowTimes<EventInstant>,
+  at: EventInstant,
 ): EventEntryWindowResult {
-  const cutoffMilliseconds = event.closureRequestedAt
-    ? Math.min(event.officialEndsAt.getTime(), event.closureRequestedAt.getTime())
-    : event.officialEndsAt.getTime();
-  const cutoffAt = new Date(cutoffMilliseconds);
-  const atMilliseconds = at.getTime();
+  const start = toEpochMicros(event.startsAt);
+  const officialEnd = toEpochMicros(event.officialEndsAt);
+  const closure = event.closureRequestedAt === null ? null : toEpochMicros(event.closureRequestedAt);
+  const cutoff = officialEnd !== null && closure !== null && closure < officialEnd ? closure : officialEnd;
+  const observed = toEpochMicros(at);
+  // A projeção Date faz parte do contrato. Toda comparação usa os valores exatos.
+  const cutoffAt = new Date(cutoff === null ? Number.NaN : Number((cutoff < 0n ? cutoff - 999n : cutoff) / 1000n));
 
-  if (atMilliseconds < event.startsAt.getTime()) {
+  if (observed !== null && start !== null && observed < start) {
     return {
       withinEntryWindow: false,
       blockReason: "EVENT_NOT_STARTED",
@@ -48,7 +52,7 @@ export function evaluateEventEntryWindow(
     };
   }
 
-  if (atMilliseconds >= cutoffMilliseconds) {
+  if (observed === null || start === null || cutoff === null || observed >= cutoff) {
     return {
       withinEntryWindow: false,
       blockReason: "EVENT_ENTRY_CLOSED",

@@ -73,6 +73,24 @@ test("E08.7 HTTP header de idempotência único obrigatório", async () => {
   for (const key of ["", " ", "x".repeat(129)]) problem(await patch().set("Idempotency-Key", key).send(body), 400, "VALIDATION_ERROR");
   problem(await patch().set({ "Idempotency-Key": ["a", "b"] }).send(body), 400, "VALIDATION_ERROR"); assert.equal(calls.length, 0);
 });
+test("ADMIN-03 HTTP aceita início versionado, recusa alterações de fuso e código, e retorna conflitos padronizados", async () => {
+  reset();
+  const startsAt = "2026-11-05T17:00:00.000Z", expectedUpdatedAt = "2026-11-03T10:00:00.123456Z";
+  const payload = { ...body, startsAt, expectedUpdatedAt };
+  result = { kind: "completed", ...state, startsAt };
+  const r = await patch().send(payload);
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body, { ...state, startsAt });
+  assert.equal(calls[0].expectedUpdatedAt, expectedUpdatedAt);
+  for (const extra of [{ timezone: "UTC" }, { accessCode: "TEST1234" }, { expectedUpdatedAt: undefined }]) {
+    problem(await patch().send({ ...payload, ...extra }), 400, "VALIDATION_ERROR");
+  }
+  assert.equal(calls.length, 1);
+  result = { kind: "event_start_change_locked" };
+  problem(await patch().send(payload), 409, "EVENT_START_CHANGE_LOCKED");
+  result = { kind: "event_schedule_stale" };
+  problem(await patch().send(payload), 409, "EVENT_SCHEDULE_STALE");
+});
 test("E08.7 HTTP catálogo de erros RFC 7807 inclui corte e horários inválidos", async () => {
   reset(); for (const [kind, status, code] of [
     ["resource_not_found", 404, "RESOURCE_NOT_FOUND"], ["admin_required", 403, "ADMIN_REQUIRED"], ["account_inactive", 401, "ACCOUNT_DEACTIVATED"],

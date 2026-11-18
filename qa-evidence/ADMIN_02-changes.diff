@@ -1,0 +1,807 @@
+diff --git a/app/screens/admin/AdminDemoNavigator.js b/app/screens/admin/AdminDemoNavigator.js
+index 0e90cd0e8ce8e16a285c3df800410d315d6d2209..750df796771ddd8f085dbe292eadd4be85d16c6a 100644
+--- a/app/screens/admin/AdminDemoNavigator.js
++++ b/app/screens/admin/AdminDemoNavigator.js
+@@ -5,6 +5,7 @@ import { adminReadOwner } from './useAdminEvents';
+ import AdminHomeScreen from './AdminHomeScreen';
+ import AdminRealEventsScreen from './AdminRealEventsScreen';
+ import AdminRealEventScreen from './AdminRealEventScreen';
++import AdminEventManagementInfoScreen from './AdminEventManagementInfoScreen';
+ import AdminPendingScreen from './AdminPendingScreen';
+ import AdminBottomBar from './components/AdminBottomBar';
+ 
+@@ -30,5 +31,6 @@ export default function AdminDemoNavigator() {
+     <Stack.Screen name="AdminTabs" component={AdminTabs} />
+     <Stack.Screen name="AdminEvents" component={AdminRealEventsScreen} />
+     <Stack.Screen name="AdminRealEvent" component={AdminRealEventScreen} />
++    <Stack.Screen name="AdminEventManagementInfo" component={AdminEventManagementInfoScreen} />
+   </Stack.Navigator>;
+ }
+diff --git a/app/screens/admin/AdminEventManagementInfoScreen.js b/app/screens/admin/AdminEventManagementInfoScreen.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..8f056e1287756a7c798eafe57b9f9ebb0b25c30c
+--- /dev/null
++++ b/app/screens/admin/AdminEventManagementInfoScreen.js
+@@ -0,0 +1,25 @@
++import { Text, View } from 'react-native';
++import { adminEventAreas } from './adminEventManagement';
++import useAdminEventPanel from './useAdminEventPanel';
++import AdminLiveScreen from './components/AdminLiveScreen';
++import AdminNotice from './components/AdminNotice';
++import AdminButton from './components/AdminButton';
++import { liveStyles as s } from './components/AdminLiveUI';
++
++export default function AdminEventManagementInfoScreen({ navigation, route }) {
++  const { eventId, area } = route.params ?? {};
++  const section = typeof area === 'string' && Object.hasOwn(adminEventAreas, area) ? adminEventAreas[area] : null;
++  const { event, pending, blocked, detailError, refresh } = useAdminEventPanel(navigation, section ? eventId : undefined, false);
++
++  return <AdminLiveScreen title={section?.title ?? 'Área indisponível'} navigation={navigation}
++    backLabel="Voltar ao painel" onBack={() => navigation.popTo('AdminRealEvent', { eventId })} showTabs>
++    {!section ? <AdminNotice title="Área indisponível" message="Selecione uma área no painel do evento." /> :
++      pending ? <AdminNotice title="Carregando evento..." /> :
++      event ? <View style={s.card}>
++        <Text style={s.title}>{event.name}</Text>
++        <Text style={s.body}>Esta área ainda não permite alterações. Volte ao painel para consultar a prontidão do evento.</Text>
++      </View> : <AdminNotice tone="error" title="Evento indisponível" message={blocked || detailError}>
++        <AdminButton label="Tentar novamente" onPress={() => refresh()} />
++      </AdminNotice>}
++  </AdminLiveScreen>;
++}
+diff --git a/app/screens/admin/AdminRealEventScreen.js b/app/screens/admin/AdminRealEventScreen.js
+index 978ec6444186b55a3f97c437d0784c3721afd9c4..0c71425fa550c3957ebcafaa9ef363c4a734dfbf 100644
+--- a/app/screens/admin/AdminRealEventScreen.js
++++ b/app/screens/admin/AdminRealEventScreen.js
+@@ -1,34 +1,56 @@
+-import { useEffect, useRef, useState } from 'react';
+-import { useAuth } from '../../context/AuthContext';
+-import { getAdminEvent, adminReadError } from '../../services/adminEventsService';
+-import { adminReadOwner } from './useAdminEvents';
++import { useState } from 'react';
++import { Platform, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native';
++import { adminEventAreas } from './adminEventManagement';
++import useAdminEventPanel from './useAdminEventPanel';
+ import AdminLiveScreen from './components/AdminLiveScreen';
+-import AdminEventSummary from './components/AdminEventSummary';
+-import AdminCard from './components/AdminCard';
++import AdminSelectedEvent from './components/AdminSelectedEvent';
+ import AdminNotice from './components/AdminNotice';
+ import AdminButton from './components/AdminButton';
++import { AdminIcon, AdminIconTile, liveColors as c, liveStyles as s } from './components/AdminLiveUI';
+ 
+ export default function AdminRealEventScreen({ navigation, route }) {
+-  const auth = useAuth(), owner = adminReadOwner(auth), id = route.params?.eventId;
+-  const live = useRef(auth); live.current = auth;
+-  const [result, setResult] = useState(null), [attempt, setAttempt] = useState(0);
+-  useEffect(() => {
+-    let active = true;
+-    setResult(null);
+-    const current = () => active && owner && adminReadOwner(live.current) === owner;
+-    if (owner) getAdminEvent(auth.httpClient, id).then(event => {
+-      if (current()) setResult({ owner, id, event });
+-    }).catch(error => { if (current()) setResult({ owner, id, error: adminReadError(error) }); });
+-    return () => { active = false; };
+-  }, [auth.httpClient, owner, id, attempt]);
+-  const visible = result?.owner === owner && result?.id === id ? result : null;
+-  return <AdminLiveScreen title="Evento selecionado" navigation={navigation}>
+-    {!visible ? <AdminNotice title="Carregando evento..." /> : visible.error ?
+-      <AdminNotice tone="error" title="Evento indisponível" message={visible.error}>
+-        <AdminButton label="Tentar novamente" onPress={() => setAttempt(value => value + 1)} />
+-      </AdminNotice> : <>
+-        <AdminCard><AdminEventSummary event={visible.event} /></AdminCard>
+-        <AdminNotice title="Gerenciamento em implementação" message="As opções deste evento serão integradas na ADMIN-02." />
+-      </>}
++  const eventId = route.params?.eventId;
++  const { event, readiness, pending, refreshing, blocked, detailError, readinessError, refresh } = useAdminEventPanel(navigation, eventId);
++  const [expandedReadiness, setExpandedReadiness] = useState(null);
++  const expanded = Boolean(readiness && expandedReadiness === readiness);
++  const openArea = area => navigation.navigate('AdminEventManagementInfo', { eventId: event.id, area });
++
++  return <AdminLiveScreen title="Painel do evento" subtitle="Gerencie as configurações e a operação deste evento."
++    navigation={navigation} backLabel="Voltar aos eventos" onBack={() => navigation.popTo('AdminEvents')} showTabs
++    refreshControl={<RefreshControl refreshing={Boolean(refreshing)} onRefresh={() => refresh(true)}
++      tintColor={c.accent} colors={[c.accent]} progressBackgroundColor={c.surface} />}>
++    {pending && <AdminNotice title="Carregando evento..." />}
++    {(event || readiness) && <AdminSelectedEvent event={event} readiness={readiness} expanded={expanded}
++      onToggle={() => setExpandedReadiness(expanded ? null : readiness)} onArea={event ? openArea : undefined} />}
++    {(blocked || detailError || readinessError) && <AdminNotice tone="error"
++      title={blocked || detailError ? 'Evento indisponível' : 'Prontidão indisponível'}
++      message={[blocked || detailError, readinessError].filter(Boolean).join('\n')}>
++      <AdminButton label="Tentar novamente" onPress={() => refresh()} />
++    </AdminNotice>}
++    {event && <>
++      <View style={styles.section}>
++        <Text accessibilityRole="header" style={styles.sectionTitle}>GERENCIAMENTO</Text>
++        {Platform.OS === 'web' && <Pressable accessibilityRole="button" accessibilityLabel="Atualizar evento" onPress={() => refresh(true)} style={styles.refresh}>
++          <Text style={styles.refreshText}>Atualizar</Text>
++        </Pressable>}
++      </View>
++      {Object.entries(adminEventAreas).map(([key, area]) => <Pressable key={key} testID={`admin-event-area-${key}`}
++        accessibilityRole="button" accessibilityLabel={area.title} accessibilityHint="Abre uma visão informativa"
++        onPress={() => openArea(key)} style={({ pressed }) => [s.card, s.row, styles.area, pressed && styles.pressed]}>
++        <AdminIconTile name={area.icon} />
++        <View style={s.grow}><Text style={styles.areaTitle}>{area.title}</Text><Text style={s.body}>{area.description}</Text></View>
++        <AdminIcon name="chevron" color={c.muted} size={18} />
++      </Pressable>)}
++    </>}
+   </AdminLiveScreen>;
+ }
++
++const styles = StyleSheet.create({
++  section: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginTop: 24, marginBottom: 2 },
++  sectionTitle: { color: c.muted, fontSize: 13, fontWeight: '700', letterSpacing: 1.3 },
++  refresh: { minHeight: 44, justifyContent: 'center' },
++  refreshText: { color: '#ddc4f2', fontWeight: '600' },
++  area: { marginTop: 10 },
++  areaTitle: { color: c.text, fontSize: 17, fontWeight: '700' },
++  pressed: { opacity: 0.75 },
++});
+diff --git a/app/screens/admin/adminEventManagement.js b/app/screens/admin/adminEventManagement.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..20c2dcff213be93b435a0e5952baac9f6905cec4
+--- /dev/null
++++ b/app/screens/admin/adminEventManagement.js
+@@ -0,0 +1,25 @@
++export const adminEventAreas = Object.freeze({
++  schedule: { title: 'Informações e horários', description: 'Dados do evento, horários e QR Code', icon: 'calendar' },
++  experiences: { title: 'Experiências e estações', description: 'Organize as experiências e suas estações', icon: 'folder' },
++  staff: { title: 'Equipe Staff', description: 'Concessões e autorizações deste evento', icon: 'users' },
++  operation: { title: 'Operação do evento', description: 'Fila externa, funcionamento e encerramento', icon: 'gauge' },
++  analytics: { title: 'BI do evento', description: 'Indicadores e resultados deste evento', icon: 'chart' },
++});
++
++const requirements = {
++  EVENT_NAME_OR_ACCESS_CODE_INVALID: ['Confira o nome e o código de acesso do evento.', 'schedule'],
++  EVENT_SCHEDULE_INVALID: ['Revise os horários e o fuso do evento.', 'schedule'],
++  EVENT_EXTERNAL_QUEUE_NOT_CONFIGURED: ['Defina a configuração da fila externa.', 'operation'],
++  EXPERIENCE_WITH_AVAILABLE_STATION: ['Cadastre pelo menos uma experiência com estação disponível.', 'experiences'],
++  VERIFIED_ACTIVE_STAFF: ['Autorize pelo menos um integrante Staff ativo e com e-mail verificado neste evento.', 'staff'],
++};
++
++export function adminReadinessRequirements(missing) {
++  const items = [...new Set(missing)].filter(code => Object.hasOwn(requirements, code)).map(code => ({
++    message: requirements[code][0], area: requirements[code][1],
++  }));
++  if (!missing.length || missing.some(code => !Object.hasOwn(requirements, code))) {
++    items.push({ message: 'Há requisitos de configuração pendentes que não puderam ser detalhados.' });
++  }
++  return items;
++}
+diff --git a/app/screens/admin/components/AdminEventSummary.js b/app/screens/admin/components/AdminEventSummary.js
+index 5423437121f76cabf00ba91666112e7de68bddd4..5ff9f577e4e0f5967aee2f442f91718ee4bdf3a9 100644
+--- a/app/screens/admin/components/AdminEventSummary.js
++++ b/app/screens/admin/components/AdminEventSummary.js
+@@ -2,16 +2,21 @@ import { StyleSheet, Text, View } from 'react-native';
+ import { adminEventPhases, formatAdminDate } from '../../../services/adminEventsService';
+ import { adminColors as c } from './adminTheme';
+ import { AdminIcon, AdminIconTile, liveColors, liveStyles as s } from './AdminLiveUI';
++
++export function AdminEventPhaseBadge({ phase }) {
++  const color = { open: '#00e5aa', scheduled: '#77d3ff', closing: '#ffe44c', not_ready: '#dac0ef' }[phase] || liveColors.muted;
++  return <Text style={[styles.badge, { borderColor: color, color }]}>{adminEventPhases[phase]}</Text>;
++}
++
+ export default function AdminEventSummary({ event, compact = false }) {
+   if (compact) {
+-    const phaseColor = { open: '#00e5aa', scheduled: '#77d3ff', closing: '#ffe44c', not_ready: '#dac0ef' }[event.effectivePhase] || liveColors.muted;
+     const ready = event.readiness.ready;
+     return <>
+       <View style={[s.row, { alignItems: 'flex-start' }]}>
+         <AdminIconTile name="calendar" />
+         <View style={s.grow}>
+           <View style={styles.heading}><Text style={[s.title, styles.eventName]}>{event.name}</Text>
+-            <Text style={[styles.badge, { borderColor: phaseColor, color: phaseColor }]}>{adminEventPhases[event.effectivePhase]}</Text></View>
++            <AdminEventPhaseBadge phase={event.effectivePhase} /></View>
+           <Text style={styles.date}>Início: {formatAdminDate(event.startsAt, event.timezone)}</Text>
+           <Text style={styles.date}>Até: {formatAdminDate(event.officialEndsAt, event.timezone)}</Text>
+         </View>
+diff --git a/app/screens/admin/components/AdminLiveScreen.js b/app/screens/admin/components/AdminLiveScreen.js
+index 154447d1ecef12e66d31e06827a686d7500cfa65..8be2cb1f967af22951772f86a8dc62da4af4c9ca 100644
+--- a/app/screens/admin/components/AdminLiveScreen.js
++++ b/app/screens/admin/components/AdminLiveScreen.js
+@@ -6,7 +6,7 @@ import { adminReadOwner } from '../useAdminEvents';
+ import { AdminIcon, liveColors as c } from './AdminLiveUI';
+ import AdminBottomBar from './AdminBottomBar';
+ 
+-export default function AdminLiveScreen({ title, subtitle, navigation, backLabel = 'Voltar', showTabs = false, children }) {
++export default function AdminLiveScreen({ title, subtitle, navigation, backLabel = 'Voltar', onBack, showTabs = false, refreshControl, children }) {
+   const auth = useAuth();
+   const owner = adminReadOwner(auth), live = useRef(auth), mounted = useRef(true);
+   live.current = auth;
+@@ -22,8 +22,8 @@ export default function AdminLiveScreen({ title, subtitle, navigation, backLabel
+       }}><AdminIcon name="logout" color={c.text} size={20} /><Text style={styles.logoutText}>Sair da conta</Text></Pressable>
+     </View>
+     <KeyboardAvoidingView style={styles.safe} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+-      <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={styles.content}>
+-        {navigation ? <Pressable accessibilityRole="button" accessibilityLabel={backLabel} style={({ pressed }) => [styles.back, pressed && styles.backPressed]} onPress={() => navigation.goBack()}>
++      <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={styles.content} refreshControl={refreshControl}>
++        {navigation ? <Pressable accessibilityRole="button" accessibilityLabel={backLabel} style={({ pressed }) => [styles.back, pressed && styles.backPressed]} onPress={onBack ?? (() => navigation.goBack())}>
+           <AdminIcon name="back" color={c.accent} size={22} /><Text style={styles.backText}>{backLabel}</Text></Pressable> : null}
+         <Text style={styles.eyebrow}>ÁREA ADMINISTRATIVA</Text>
+         <Text style={styles.title} accessibilityRole="header">{title}</Text>
+diff --git a/app/screens/admin/components/AdminSelectedEvent.js b/app/screens/admin/components/AdminSelectedEvent.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..776a1b67d2e8843a6026f12e5429c5940cbc8f21
+--- /dev/null
++++ b/app/screens/admin/components/AdminSelectedEvent.js
+@@ -0,0 +1,54 @@
++import { Pressable, StyleSheet, Text, View } from 'react-native';
++import { formatAdminDate } from '../../../services/adminEventsService';
++import { adminEventAreas, adminReadinessRequirements } from '../adminEventManagement';
++import { AdminEventPhaseBadge } from './AdminEventSummary';
++import { AdminIcon, AdminIconTile, liveColors as c, liveStyles as s } from './AdminLiveUI';
++
++export default function AdminSelectedEvent({ event, readiness, expanded, onToggle, onArea }) {
++  return <View style={s.card}>
++    <View style={styles.heading}>
++      <Text style={styles.caption}>EVENTO SELECIONADO</Text>
++      <AdminEventPhaseBadge phase={readiness?.effectivePhase ?? event?.effectivePhase} />
++    </View>
++    {event && <View style={[s.row, styles.details]}>
++      <AdminIconTile name="calendar" />
++      <View style={s.grow}>
++        <Text style={s.title}>{event.name}</Text>
++        <Text style={s.body}>Início: {formatAdminDate(event.startsAt, event.timezone)}</Text>
++        <Text style={s.body}>Término oficial: {formatAdminDate(event.officialEndsAt, event.timezone)}</Text>
++      </View>
++    </View>}
++    <View style={styles.divider}>
++      {readiness?.ready ? <View style={s.row}>
++        <AdminIcon name="check" color={c.success} size={20} />
++        <Text style={[styles.status, { color: c.success }]}>Pronto para operar</Text>
++      </View> : readiness ? <>
++        <Pressable accessibilityRole="button" accessibilityLabel="Configuração pendente"
++          accessibilityHint="Exibe ou oculta os requisitos faltantes" accessibilityState={{ expanded }}
++          onPress={onToggle} style={[s.row, styles.action]}>
++          <AdminIcon name="warning" color={c.warning} size={20} />
++          <Text style={[styles.status, { color: c.warning }]}>Configuração pendente</Text>
++          <Text style={styles.link}>{expanded ? 'Ocultar' : 'Ver requisitos'}</Text>
++        </Pressable>
++        {expanded && adminReadinessRequirements(readiness.missing).map(({ message, area }) => <View key={message} style={styles.requirement}>
++          <Text style={s.body}>{message}</Text>
++          {area && (onArea ? <Pressable accessibilityRole="button" accessibilityLabel={`Consultar ${adminEventAreas[area].title}`}
++            onPress={() => onArea(area)} style={styles.action}>
++            <Text style={styles.link}>{adminEventAreas[area].title} · Visão informativa</Text>
++          </Pressable> : <Text style={s.body}>{adminEventAreas[area].title}</Text>)}
++        </View>)}
++      </> : <Text style={s.body}>Prontidão indisponível</Text>}
++    </View>
++  </View>;
++}
++
++const styles = StyleSheet.create({
++  heading: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
++  caption: { color: c.muted, fontWeight: '700', fontSize: 12, letterSpacing: 1 },
++  details: { alignItems: 'flex-start', marginTop: 14 },
++  divider: { borderTopWidth: 1, borderColor: c.border, marginTop: 14, paddingTop: 10 },
++  status: { flex: 1, color: c.text, fontSize: 15, fontWeight: '700' },
++  action: { minHeight: 44, justifyContent: 'center', paddingVertical: 6 },
++  link: { color: '#ddc4f2', fontSize: 13, fontWeight: '600', flexShrink: 1 },
++  requirement: { borderTopWidth: 1, borderColor: '#42304f', paddingVertical: 6 },
++});
+diff --git a/app/screens/admin/useAdminEventPanel.js b/app/screens/admin/useAdminEventPanel.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..24459b1a1bf38996889f8d662b0e5b44152ffa9b
+--- /dev/null
++++ b/app/screens/admin/useAdminEventPanel.js
+@@ -0,0 +1,67 @@
++import { useEffect, useMemo, useRef, useState } from 'react';
++import { useAuth } from '../../context/AuthContext';
++import { adminEventPanelError, getAdminEvent, getAdminEventReadiness } from '../../services/adminEventsService';
++import { adminReadOwner } from './useAdminEvents';
++
++export default function useAdminEventPanel(navigation, eventId, includeReadiness = true) {
++  const auth = useAuth();
++  const owner = adminReadOwner(auth);
++  const client = auth.httpClient;
++  const scope = useMemo(() => ({}), [owner, client, eventId, includeReadiness]);
++  const live = useRef(scope);
++  live.current = scope;
++  const liveAuth = useRef(auth);
++  liveAuth.current = auth;
++  const control = useRef(null);
++  const [snapshot, setSnapshot] = useState(null);
++
++  useEffect(() => {
++    if (!owner) return undefined;
++    let subscribed = true;
++    let request = null;
++    const current = () => subscribed && live.current === scope && adminReadOwner(liveAuth.current) === owner && navigation.isFocused();
++    async function refresh(manual = false) {
++      if (!current() || request) return;
++      const ticket = {};
++      request = ticket;
++      setSnapshot({ scope, pending: true, refreshing: manual });
++      const [detail, readiness] = await Promise.allSettled([
++        getAdminEvent(client, eventId),
++        includeReadiness ? getAdminEventReadiness(client, eventId) : null,
++      ]);
++      if (!current() || request !== ticket) return;
++      request = null;
++      const errors = [detail, readiness].filter(result => result.status === 'rejected').map(result => result.reason);
++      // Denial in either request invalidates the entire view, including partial success.
++      const blocked = errors.find(error => [401, 403].includes(error?.status)) ?? errors.find(error => error?.status === 404);
++      if (blocked) {
++        setSnapshot({ scope, blocked: adminEventPanelError(blocked) });
++        return;
++      }
++      setSnapshot({ scope,
++        event: detail.value,
++        readiness: readiness.value,
++        detailError: detail.status === 'rejected' ? adminEventPanelError(detail.reason) : null,
++        readinessError: readiness.status === 'rejected' ? adminEventPanelError(readiness.reason) : null,
++      });
++    }
++    const onFocus = () => { void refresh(); };
++    const unsubscribeFocus = navigation.addListener('focus', onFocus);
++    const unsubscribeBlur = navigation.addListener('blur', () => { request = null; });
++    control.current = { scope, refresh };
++    onFocus();
++    return () => {
++      subscribed = false;
++      control.current = null;
++      unsubscribeFocus();
++      unsubscribeBlur();
++    };
++  }, [navigation, owner, client, eventId, includeReadiness, scope]);
++
++  return {
++    ...(owner && snapshot?.scope === scope ? snapshot : { pending: true }),
++    refresh(manual = false) {
++      if (control.current?.scope === scope) void control.current.refresh(manual);
++    },
++  };
++}
+diff --git a/app/services/adminEventsService.js b/app/services/adminEventsService.js
+index 21a2ef8184cc5eee814181fab5284aa2eb0583ed..d3e163e557eb0b07e2c3b866738fb2f1203da7f2 100644
+--- a/app/services/adminEventsService.js
++++ b/app/services/adminEventsService.js
+@@ -1,11 +1,20 @@
+ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+ export const adminEventPhases = { scheduled: 'Agendado', not_ready: 'Não pronto', open: 'Aberto', closing: 'Encerrando', closed: 'Encerrado' };
++const readinessChecks = ['nameAndAccessCode', 'validScheduleAndTimezone', 'externalQueueConfigured',
++  'hasExperienceWithAvailableStation', 'hasVerifiedActiveStaff'];
++
++class InvalidAdminEventResponse extends Error {}
++
++function adminEventPath(eventId) {
++  if (typeof eventId !== 'string' || !UUID.test(eventId)) throw new Error('Identificador de evento inválido.');
++  return `/admin/events/${encodeURIComponent(eventId)}`;
++}
+ 
+ export function parseAdminEvent(event) {
+   if (!event || typeof event.id !== 'string' || !UUID.test(event.id) || typeof event.name !== 'string' || !event.name.trim() ||
+       !Object.hasOwn(adminEventPhases, event.effectivePhase) || typeof event.timezone !== 'string' ||
+       !Number.isFinite(Date.parse(event.startsAt)) || !Number.isFinite(Date.parse(event.officialEndsAt)) ||
+-      typeof event.readiness?.ready !== 'boolean') throw new Error('Resposta de evento inválida.');
++      typeof event.readiness?.ready !== 'boolean') throw new InvalidAdminEventResponse('Resposta de evento inválida.');
+   return event;
+ }
+ export function formatAdminDate(value, timezone) {
+@@ -26,11 +35,29 @@ export async function listAdminEvents(client, { search = '', phase = 'all', curs
+   return { items, nextCursor: body.nextCursor };
+ }
+ export async function getAdminEvent(client, eventId) {
+-  if (!UUID.test(eventId)) throw new Error('Identificador de evento inválido.');
+-  const event = parseAdminEvent((await client.get(`/admin/events/${encodeURIComponent(eventId)}`, { auth: true }))?.event);
+-  if (event.id !== eventId) throw new Error('Evento retornado não corresponde à seleção.');
++  const event = parseAdminEvent((await client.get(adminEventPath(eventId), { auth: true }))?.event);
++  if (typeof event.effectivePhase !== 'string' || !event.timezone.trim() || typeof event.startsAt !== 'string' ||
++      typeof event.officialEndsAt !== 'string') throw new InvalidAdminEventResponse('Resposta de evento inválida.');
++  if (event.id !== eventId) throw new InvalidAdminEventResponse('Evento retornado não corresponde à seleção.');
+   return event;
+ }
++export async function getAdminEventReadiness(client, eventId) {
++  const result = await client.get(`${adminEventPath(eventId)}/readiness`, { auth: true });
++  if (result?.eventId !== eventId || typeof result.effectivePhase !== 'string' || !Object.hasOwn(adminEventPhases, result.effectivePhase) ||
++      !['scheduled', 'open', 'closing', 'closed'].includes(result.statusStored) ||
++      typeof result.ready !== 'boolean' || typeof result.acceptingNewParticipations !== 'boolean' ||
++      !Array.isArray(result.missing) || result.missing.some(code => typeof code !== 'string' || !code.trim()) ||
++      !readinessChecks.every(check => typeof result.checks?.[check] === 'boolean') ||
++      (result.ready && (result.missing.length > 0 || readinessChecks.some(check => !result.checks[check]))) ||
++      (result.observedAt !== undefined && (typeof result.observedAt !== 'string' || !Number.isFinite(Date.parse(result.observedAt))))) {
++    throw new InvalidAdminEventResponse('Resposta de prontidão inválida ou divergente da seleção.');
++  }
++  return result;
++}
++export function adminEventPanelError(error) {
++  if (error instanceof InvalidAdminEventResponse) return 'A resposta da API não pôde ser confirmada para este evento.';
++  return adminReadError(error);
++}
+ export function adminReadError(error) {
+   if (error?.status === 404) return 'Evento não encontrado ou indisponível.';
+   if ([401, 403].includes(error?.status)) return 'Sua sessão não permite esta consulta. Entre novamente.';
+diff --git a/app/tests/adminNavigation.test.cjs b/app/tests/adminNavigation.test.cjs
+index 985f99d9321449db4d41dd4fa1b6a3c0ca0e9cda..5e839395075935afccf096b2c6b7274a57c933ca 100644
+--- a/app/tests/adminNavigation.test.cjs
++++ b/app/tests/adminNavigation.test.cjs
+@@ -125,7 +125,7 @@ test('navegador Admin registra apenas destinos reais e respeita identidade', ()
+   }).exports.default;
+   const tree = navigator();
+   assert.equal(tree.key, owner);
+-  assert.deepEqual(Array.from(tree.props.children, node => node.props.name), ['AdminTabs', 'AdminEvents', 'AdminRealEvent']);
++  assert.deepEqual(Array.from(tree.props.children, node => node.props.name), ['AdminTabs', 'AdminEvents', 'AdminRealEvent', 'AdminEventManagementInfo']);
+   const tabs = tree.props.children[0].props.component();
+   assert.deepEqual(Array.from(tabs.props.children, node => node.props.name), ['Home', 'Histórico', 'BI']);
+   owner = 'other:session:2'; assert.notEqual(navigator().key, tree.key);
+diff --git a/app/tests/adminRealEvents.test.cjs b/app/tests/adminRealEvents.test.cjs
+index 8fce506b7b543a73aad5b30049afb7f8e75aa714..65a5503bd0780847aa9bec6aa33ae23165239fef 100644
+--- a/app/tests/adminRealEvents.test.cjs
++++ b/app/tests/adminRealEvents.test.cjs
+@@ -6,8 +6,17 @@ const service = loadModule('services/adminEventsService.js', require).exports;
+ const id = n => `abcdef00-0000-4000-8000-${String(n).padStart(12, '0')}`;
+ const event = (n = 1, phase = 'open') => ({ id: id(n), name: 'Arena Norte', effectivePhase: phase,
+   startsAt: '2026-11-05T15:00:00Z', officialEndsAt: '2026-11-05T20:00:00Z', timezone: 'America/Sao_Paulo', readiness: { ready: phase !== 'not_ready' } });
++const readiness = (n = 1, overrides = {}) => ({ eventId: id(n), statusStored: 'scheduled', effectivePhase: 'scheduled',
++  ready: true, missing: [], checks: { nameAndAccessCode: true, validScheduleAndTimezone: true,
++    externalQueueConfigured: true, hasExperienceWithAvailableStation: true, hasVerifiedActiveStaff: true },
++  acceptingNewParticipations: false, observedAt: '2026-11-05T12:00:00.000000Z', ...overrides });
+ const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
+ const plain = value => JSON.parse(JSON.stringify(value));
++const hasText = (h, expected) => h.nodes.some(node => textOf(node).includes(expected));
++const eventPath = n => `/admin/events/${id(n)}`;
++const panel = (get, n = 1) => createHarness('screens/admin/AdminRealEventScreen.js', {
++  props: { route: { params: { eventId: id(n) } } }, authContext: verifiedAdminAuth({ httpClient: { get } }),
++});
+ // Let pending promises and harness state updates settle until the expected UI
+ // appears. A finite number of event-loop turns prevents hanging tests.
+ async function waitForText(h, expected) {
+@@ -131,19 +140,177 @@ test('lista exibe falha de rede e recupera pelo botão de retry', async () => {
+   await waitForText(h, 'Nenhum evento encontrado');
+   assert.equal(count, 2); h.unmount();
+ });
+-test('detalhe real consulta somente UUID selecionado e trata recurso inacessível', async () => {
++test('painel consulta detalhe e prontidão pelo UUID, exibe dados oficiais e trata recurso inacessível', async () => {
+   const urls = [];
+-  const h = createHarness('screens/admin/AdminRealEventScreen.js', {
+-    props: { route: { params: { eventId: id(1) } } },
+-    authContext: verifiedAdminAuth({ httpClient: { get: async url => { urls.push(url); return { event: event() }; } } }),
++  const h = panel(async (url, options) => {
++    urls.push(url);
++    assert.equal(options.auth, true);
++    return url.endsWith('/readiness') ? readiness() : { event: { ...event(), officialEndsAt: '2026-11-06T05:00:00Z' } };
+   });
+   await waitForText(h, 'Arena Norte');
+-  assert.equal(urls[0], `/admin/events/${id(1)}`);
+-  assert.ok(h.nodes.some(node => textOf(node).includes('Arena Norte')));
+-  assert.ok(h.nodes.some(node => textOf(node).includes('ADMIN-02')));
++  assert.deepEqual(urls, [eventPath(1), `${eventPath(1)}/readiness`]);
++  assert.ok(hasText(h, 'Painel do evento'));
++  assert.ok(hasText(h, 'Pronto para operar'));
++  assert.ok(hasText(h, 'Agendado'));
++  assert.ok(!hasText(h, 'Aberto'));
++  assert.ok(!hasText(h, 'Local:'));
++  assert.match(textOf(h.nodes.find(node => node.type === 'Text' && textOf(node).startsWith('Início:'))), /05\/11\/2026.*12:00/);
++  assert.match(textOf(h.nodes.find(node => node.type === 'Text' && textOf(node).startsWith('Término oficial:'))), /06\/11\/2026.*02:00/);
++  assert.ok(!h.nodes.some(node => node.type === 'Pressable' && node.props.accessibilityLabel === 'Configuração pendente'));
++  const cards = h.nodes.filter(node => node.type === 'Pressable' && node.props.testID?.startsWith('admin-event-area-'));
++  const titles = ['Informações e horários', 'Experiências e estações', 'Equipe Staff', 'Operação do evento', 'BI do evento'];
++  assert.deepEqual(cards.map(node => node.props.accessibilityLabel), titles);
++  for (const [index, area] of ['schedule', 'experiences', 'staff', 'operation', 'analytics'].entries()) {
++    h.press(titles[index]);
++    assert.deepEqual(plain(h.navigationCalls.at(-1)), { type: 'navigate', name: 'AdminEventManagementInfo', params: { eventId: id(1), area } });
++  }
++  assert.deepEqual(h.nodes.filter(node => node.type === 'Pressable' && node.props.accessibilityRole === 'tab').map(node => node.props.accessibilityLabel), ['Home', 'Histórico', 'BI']);
++  h.press('Voltar aos eventos');
++  assert.equal(h.navigationCalls.at(-1).name, 'AdminEvents');
+   h.setAuthContext(verifiedAdminAuth({ user: { id: 'other' }, httpClient: { get: async () => { throw { status: 404 }; } } }));
+-  assert.ok(!h.nodes.some(node => textOf(node).includes('Arena Norte')));
++  assert.ok(!hasText(h, 'Arena Norte'));
+   await waitForText(h, 'Evento indisponível');
+-  assert.ok(h.nodes.some(node => textOf(node).includes('Evento indisponível')));
++  assert.ok(!hasText(h, 'GERENCIAMENTO'));
++  h.unmount();
++});
++
++test('serviço valida prontidão, identidade, formato e preserva erros HTTP do cliente', async () => {
++  let captured;
++  const get = async (url, options) => { captured = [url, options.auth]; return readiness(); };
++  await assert.rejects(service.getAdminEventReadiness({ get }, 'demo-id'), /inválido/);
++  assert.equal(captured, undefined);
++  assert.equal((await service.getAdminEventReadiness({ get }, id(1))).acceptingNewParticipations, false);
++  assert.deepEqual(captured, [`${eventPath(1)}/readiness`, true]);
++  for (const body of [readiness(2), null, readiness(1, { missing: [1] }), readiness(1, { checks: {} }),
++    readiness(1, { observedAt: 'ontem' }), readiness(1, { ready: 'true' }), readiness(1, { effectivePhase: ['open'] })]) {
++    await assert.rejects(service.getAdminEventReadiness({ get: async () => body }, id(1)), /prontidão inválida/);
++  }
++  await assert.rejects(service.getAdminEvent({ get: async () => ({ event: { ...event(), startsAt: null } }) }, id(1)), /evento inválida/);
++  for (const error of [{ status: 401 }, { status: 403 }, { status: 404 }, new Error('network')]) {
++    for (const read of [service.getAdminEvent, service.getAdminEventReadiness]) {
++      await assert.rejects(read({ get: async () => { throw error; } }, id(1)), actual => actual === error);
++    }
++  }
++});
++
++test('prontidão dedicada substitui snapshot antigo e orienta pendências conhecidas e desconhecidas', async () => {
++  const missing = ['EVENT_NAME_OR_ACCESS_CODE_INVALID', 'EVENT_SCHEDULE_INVALID', 'EVENT_EXTERNAL_QUEUE_NOT_CONFIGURED',
++    'EXPERIENCE_WITH_AVAILABLE_STATION', 'VERIFIED_ACTIVE_STAFF', 'FUTURE_CODE'];
++  const h = panel(async url => url.endsWith('/readiness') ? readiness(1, { ready: false, effectivePhase: 'not_ready', missing,
++    checks: Object.fromEntries(Object.keys(readiness().checks).map(key => [key, false])) }) : { event: event() });
++  await waitForText(h, 'Configuração pendente');
++  assert.ok(hasText(h, 'Não pronto'));
++  assert.ok(!hasText(h, 'Pronto para operar'));
++  h.act(() => h.press('Configuração pendente'));
++  for (const message of ['nome e o código', 'horários e o fuso', 'configuração da fila externa', 'estação disponível',
++    'ativo e com e-mail verificado', 'não puderam ser detalhados']) assert.ok(hasText(h, message), message);
++  assert.ok(!hasText(h, 'FUTURE_CODE'));
++  assert.ok(!hasText(h, 'online'));
++  h.press('Consultar Equipe Staff');
++  assert.deepEqual(plain(h.navigationCalls.at(-1).params), { eventId: id(1), area: 'staff' });
++  h.act(() => h.press('Configuração pendente'));
++  assert.ok(!hasText(h, 'ativo e com e-mail verificado'));
++  h.unmount();
++});
++
++test('falha parcial não inventa prontidão e retry agrupa toques repetidos', async () => {
++  let reads = 0;
++  const next = deferred();
++  const h = panel(async url => {
++    if (!url.endsWith('/readiness')) return { event: event() };
++    if (++reads === 1) throw new Error('network');
++    return next.promise;
++  });
++  await waitForText(h, 'Prontidão indisponível');
++  assert.ok(hasText(h, 'Arena Norte'));
++  assert.ok(!hasText(h, 'Configuração pendente') && !hasText(h, 'Pronto para operar'));
++  h.act(() => { h.press('Tentar novamente'); h.press('Tentar novamente'); });
++  assert.equal(reads, 2);
++  next.resolve(readiness(1, { effectivePhase: 'closed' }));
++  await waitForText(h, 'Encerrado');
++  assert.ok(hasText(h, 'Pronto para operar'));
++  h.unmount();
++});
++
++test('readiness válido fica disponível quando o detalhe falha sem negar acesso', async () => {
++  const h = panel(async url => {
++    if (url.endsWith('/readiness')) return readiness();
++    return { event: event(2) };
++  });
++  await waitForText(h, 'Pronto para operar');
++  assert.ok(hasText(h, 'A resposta da API não pôde ser confirmada'));
++  assert.ok(!hasText(h, 'Arena Norte') && !hasText(h, 'GERENCIAMENTO'));
++  h.unmount();
++});
++
++test('403 ou 404 na prontidão removem inclusive detalhe válido após atualizar', async () => {
++  for (const status of [401, 403, 404]) {
++    let allowed = true;
++    const h = panel(async url => {
++      if (!url.endsWith('/readiness')) return { event: event() };
++      if (!allowed) throw { status };
++      return readiness();
++    });
++    await waitForText(h, 'Arena Norte');
++    allowed = false;
++    h.act(() => h.nodes.find(node => node.type === 'ScrollView').props.refreshControl.props.onRefresh());
++    assert.ok(!hasText(h, 'Arena Norte'));
++    await waitForText(h, 'Evento indisponível');
++    assert.ok(!hasText(h, 'GERENCIAMENTO') && !hasText(h, 'Pronto para operar'));
++    h.unmount();
++  }
++});
++
++test('troca de UUID, sessão e logout descartam requisições em andamento', async () => {
++  const previous = deferred(), other = deferred(), outgoing = deferred();
++  const h = panel(url => url.startsWith(eventPath(1)) ? previous.promise : other.promise);
++  h.setProps({ route: { params: { eventId: id(2) } } });
++  previous.resolve({ event: event() });
++  await h.actAsync(() => new Promise(resolve => setImmediate(resolve)));
++  assert.ok(!hasText(h, 'Arena Norte') && hasText(h, 'Carregando evento'));
++  h.setAuthContext(verifiedAdminAuth({ user: { id: 'other' }, httpClient: { get: () => outgoing.promise } }));
++  other.resolve({ event: { ...event(2), name: 'Sessão anterior' } });
++  await h.actAsync(() => new Promise(resolve => setImmediate(resolve)));
++  assert.ok(!hasText(h, 'Sessão anterior') && hasText(h, 'Carregando evento'));
++  h.setAuthContext(verifiedAdminAuth({ isAuthenticated: false }));
++  outgoing.resolve({ event: { ...event(2), name: 'Saiu da conta' } });
++  await h.actAsync(() => new Promise(resolve => setImmediate(resolve)));
++  assert.ok(!hasText(h, 'Saiu da conta') && !hasText(h, 'GERENCIAMENTO'));
++  h.unmount();
++});
++
++test('recuperar foco consulta novamente e uma resposta anterior não sobrescreve a fase', async () => {
++  const older = deferred();
++  let reads = 0;
++  const h = panel(async url => url.endsWith('/readiness') ? (++reads === 1 ? older.promise : readiness(1, { effectivePhase: 'closed' })) : { event: event() });
++  h.setFocused(false);
++  h.setFocused(true);
++  await waitForText(h, 'Encerrado');
++  assert.equal(reads, 2);
++  older.resolve(readiness(1, { effectivePhase: 'open', acceptingNewParticipations: true }));
++  await h.actAsync(() => new Promise(resolve => setImmediate(resolve)));
++  assert.ok(hasText(h, 'Encerrado') && !hasText(h, 'Aberto'));
++  h.unmount();
++});
++
++test('destino informativo valida área e confirma evento com leitura autenticada', async () => {
++  const calls = [];
++  const h = createHarness('screens/admin/AdminEventManagementInfoScreen.js', {
++    props: { route: { params: { eventId: id(2), area: 'staff', name: 'Nome não confiável' } } },
++    authContext: verifiedAdminAuth({ httpClient: { get: async (url, options) => {
++      calls.push([url, options.auth]);
++      return { event: event(2) };
++    } } }),
++  });
++  await waitForText(h, 'Arena Norte');
++  assert.deepEqual(calls, [[eventPath(2), true]]);
++  assert.ok(hasText(h, 'Equipe Staff'));
++  assert.ok(!hasText(h, 'Nome não confiável'));
++  h.press('Voltar ao painel');
++  assert.deepEqual(plain(h.navigationCalls.at(-1)), { type: 'popTo', name: 'AdminRealEvent', params: { eventId: id(2) } });
++  h.setProps({ route: { params: { eventId: id(2), area: 'AdminDemo' } } });
++  await waitForText(h, 'Área indisponível');
++  assert.equal(calls.length, 1);
++  assert.ok(!hasText(h, 'Arena Norte'));
+   h.unmount();
+ });
+diff --git a/app/tests/helpers/questionnaireHarness.cjs b/app/tests/helpers/questionnaireHarness.cjs
+index b17b662404da143d1bc9a6bc8dd78d689cda09f5..fe34cbd435496d88e55ccceffbe47f30007dee4b 100644
+--- a/app/tests/helpers/questionnaireHarness.cjs
++++ b/app/tests/helpers/questionnaireHarness.cjs
+@@ -311,7 +311,7 @@ function createHarness(relativePath, options = {}) {
+       }
+     },
+   };
+-  const native = Object.fromEntries(['ActivityIndicator', 'Image', 'KeyboardAvoidingView', 'Modal', 'Pressable', 'ScrollView',
++  const native = Object.fromEntries(['ActivityIndicator', 'Image', 'KeyboardAvoidingView', 'Modal', 'Pressable', 'RefreshControl', 'ScrollView',
+     'Text', 'TextInput', 'View', 'SafeAreaView'].map((name) => [name, name]));
+   native.Platform = { OS: options.platform || 'ios' };
+   native.Keyboard = { dismiss() {} };
+diff --git a/app/tests/roleRoutingIntegration.test.cjs b/app/tests/roleRoutingIntegration.test.cjs
+index dc694ac9ce1ba2febc704edefc23b9bc9bbbbffc..3ff2e4a2dcd9e1dd9e371959dbd4ef74022e61e2 100644
+--- a/app/tests/roleRoutingIntegration.test.cjs
++++ b/app/tests/roleRoutingIntegration.test.cjs
+@@ -84,7 +84,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+       text: async () => JSON.stringify(value.body ?? value) };
+   } });
+   const passthrough = ({ children }) => children;
+-  const native = Object.fromEntries(['ActivityIndicator', 'Image', 'KeyboardAvoidingView', 'Modal', 'Pressable', 'ScrollView', 'Text', 'TextInput', 'View'].map((name) => [name, name]));
++  const native = Object.fromEntries(['ActivityIndicator', 'Image', 'KeyboardAvoidingView', 'Modal', 'Pressable', 'RefreshControl', 'ScrollView', 'Text', 'TextInput', 'View'].map((name) => [name, name]));
+   native.StyleSheet = { create: (styles) => styles };
+   native.AppState = { currentState: 'active', addEventListener: () => ({ remove() {} }) };
+   native.Platform = { OS: control.platformOS ?? 'web' };
+@@ -259,6 +259,51 @@ test('Admin: restauração válida reutiliza telas, retornos internos e logout r
+   } finally { app.dispose(); }
+ });
+ 
++test('Admin: painel real retorna à mesma rota da lista e mantém informações no UUID selecionado', { skip }, async () => {
++  const eventId = 'abcdef00-0000-4000-8000-000000000001';
++  const detailPath = `/admin/events/${eventId}`;
++  const selected = { id: eventId, name: 'Evento Selecionado', effectivePhase: 'scheduled', timezone: 'America/Sao_Paulo',
++    startsAt: '2026-11-05T15:00:00Z', officialEndsAt: '2026-11-05T20:00:00Z', readiness: { ready: true } };
++  let readinessReads = 0;
++  const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control: { realAdmin: true,
++    http: async (route, options) => {
++      if (!route.startsWith('/admin/')) return undefined;
++      assert.equal(options.method, 'GET');
++      if (route === '/admin/events') return { items: [selected], nextCursor: null };
++      if (route === detailPath) return { event: selected };
++      if (route === `${detailPath}/readiness`) {
++        readinessReads++;
++        return { eventId, statusStored: 'scheduled', effectivePhase: 'scheduled', ready: true, missing: [],
++          checks: { nameAndAccessCode: true, validScheduleAndTimezone: true, externalQueueConfigured: true,
++            hasExperienceWithAvailableStation: true, hasVerifiedActiveStaff: true }, acceptingNewParticipations: false };
++      }
++      assert.fail(`Rota Admin inesperada: ${route}`);
++    },
++  } });
++  await app.mount();
++  try {
++    await app.press('Gerenciar eventos');
++    await app.press('Acessar evento Evento Selecionado');
++    assert.equal(app.activeRoute(), 'AdminRealEvent');
++    assert.ok(app.hasText('Pronto para operar'));
++    assert.equal(readinessReads, 1);
++    await app.press('Equipe Staff');
++    assert.equal(app.activeRoute(), 'AdminEventManagementInfo');
++    assert.ok(app.hasText('Evento Selecionado'));
++    assert.ok(app.hasText('Esta área ainda não permite alterações'));
++    assert.equal(readinessReads, 1);
++    await app.press('Voltar ao painel');
++    assert.equal(app.activeRoute(), 'AdminRealEvent');
++    assert.equal(readinessReads, 2);
++    await app.press('Voltar aos eventos');
++    assert.equal(app.activeRoute(), 'AdminEvents');
++    await app.press('Acessar evento Evento Selecionado');
++    await app.press('BI');
++    assert.equal(app.activeRoute(), 'BI');
++    assert.ok(app.hasText('Em implementação'));
++  } finally { app.dispose(); }
++});
++
+ test('Admin: refresh e troca de conta invalidam logout antigo', { skip }, async () => {
+   const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control: { realAdmin: true } });
+   await app.mount();
+diff --git a/docs/ADMIN_02_IMPLEMENTACAO.md b/docs/ADMIN_02_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..bf811ab89c6db7440fb509c23e0577882a3cd5d9
+--- /dev/null
++++ b/docs/ADMIN_02_IMPLEMENTACAO.md
+@@ -0,0 +1,87 @@
++# ADMIN-02 — Painel Individual do Evento e Prontidão
++
++## Preparação
++
++- Branch `feature/admin-core-management`, base `e9d183b812f6b9a28f86da101e85508b99aeabb9`, working tree inicialmente limpo. ADMIN-01 incorporada nesse commit.
++- Consultados `AGENTS.md`, o relatório ADMIN-01, a auditoria ADMIN-00, o Panorama e a Arquitetura Backend. Referência visual encontrada como `Admin - Painel Individual do Evento.png` na pasta de referências Admin do responsável, sem o sufixo `(1)` citado no pedido.
++- Escopo: substituir o detalhe contextual por um painel de leitura do evento selecionado, com prontidão, cinco áreas informativas e atualização contextual. Usar a pilha, logo, tema e abas da ADMIN-01.
++- Arquivos identificados: `AdminRealEventScreen`, `AdminDemoNavigator`, `AdminLiveScreen`, `AdminLiveUI`, `AdminBottomBar`, `AdminEventSummary`, `useAdminEvents`, `adminEventsService` e testes de Admin e roteamento. No backend foram inspecionados controller, DTO, projeção e query service de configuração Admin.
++
++## Contratos e plano
++
++- `GET /api/v1/admin/events/:eventId` retorna `{event}` com UUID, nome, horários, fuso e fase efetiva. O DTO e a projeção não oferecem local. O painel omitirá essa linha.
++- `GET /api/v1/admin/events/:eventId/readiness` retorna diretamente `eventId`, `statusStored`, `effectivePhase`, `ready`, `missing`, `checks`, `acceptingNewParticipations` e `observedAt`. As duas rotas usam o guard de configuração Admin e a verificação de sessão com segundo fator. A projeção exige vínculo Staff ativo, usuário ativo e e-mail verificado, sem condição de presença ou vínculo com estação.
++- Plano: ler detalhe e prontidão em paralelo pelo cliente autenticado, validar ambos os UUIDs e publicar o resultado por evento, sessão e consulta. Consultar ao recuperar foco, atualizar sob demanda e oferecer retry. Apresentar falhas parciais e suprimir dados quando o acesso for negado. Mapear os cinco códigos da projeção para orientação em português e reutilizar o contexto do evento na rota informativa.
++- Limites: as duas respostas são snapshots independentes. A UI deve usar a observação dedicada para prontidão e não inferir aceite de participações a partir de `ready`. Edição, QR, experiências, concessões, operação e BI ficam para suas próprias tasks. Sem mudança de backend. Preparar testes com mocks e executar apenas inspeções estáticas nesta etapa, conforme pedido.
++
++## Implementação
++
++- A seleção da lista continua enviando o UUID à rota `AdminRealEvent`. O painel usa o cabeçalho com logo oficial, Voltar aos eventos com `popTo('AdminEvents')`, a barra Home | Histórico | BI e o selo de fase da ADMIN-01. O cartão mostra nome e horários em pt-BR no fuso IANA do evento, com datas de início e término separadas para explicitar a mudança de dia. O contrato atual não retorna local.
++- O cliente compartilhado usa `auth: true` nas duas leituras. O serviço valida o UUID antes da requisição e rejeita respostas divergentes ou malformadas. A prontidão e a fase efetiva vêm do endpoint de prontidão quando ele responde validamente. Se só o detalhe estiver disponível, o painel exibe sua fase efetiva e sinaliza prontidão indisponível. Se só a prontidão estiver disponível, mostra fase e prontidão sem nome ou cards. 401, 403 ou 404 em qualquer leitura ocultam ambas as respostas e deixam retorno e retry disponíveis. Não há inferência de pendência a partir de erro de transporte.
++- Um escopo vincula cada leitura a UUID, cliente, conta, sessão e revisão de identidade. Saída de foco ou desmontagem invalida a publicação anterior. A entrada em foco inicia uma nova leitura, com deduplicação de solicitações simultâneas dentro do escopo. A atualização manual usa gesto de puxar no nativo e ação Atualizar na web. Resultados de gerações anteriores não sobrescrevem a tela. A listagem anterior permanece na pilha em navegação normal. Posição de rolagem requer verificação em aparelho.
++- O estado de prontidão positiva é informativo. Em pendência, o indicador abre uma seção acessível. Os códigos `EVENT_NAME_OR_ACCESS_CODE_INVALID` e `EVENT_SCHEDULE_INVALID` apontam para Informações e horários. `EVENT_EXTERNAL_QUEUE_NOT_CONFIGURED` aponta para Operação do evento. `EXPERIENCE_WITH_AVAILABLE_STATION` aponta para Experiências e estações. `VERIFIED_ACTIVE_STAFF` aponta para Equipe Staff e descreve vínculo no evento, atividade e verificação de e-mail. Códigos desconhecidos recebem uma mensagem genérica. O painel não equipara prontidão à abertura ou ao aceite de participações.
++- Os cinco cards, em ordem, são Informações e horários, Experiências e estações, Equipe Staff, Operação do evento e BI do evento. A rota `AdminEventManagementInfo` usa uma lista fechada de áreas, recebe o UUID e confirma o nome por leitura autenticada do detalhe. O retorno ao painel reconsulta os dados. As áreas são informativas e os contratos de escrita permanecem reservados à ADMIN-03, ADMIN-04, ADMIN-06, ADMIN-07 e ADMIN-09. Criação do evento fica para ADMIN-05.
++
++## Arquivos
++
++- Criados em `app/screens/admin`: `AdminEventManagementInfoScreen.js`, `adminEventManagement.js`, `useAdminEventPanel.js` e `components/AdminSelectedEvent.js`.
++- Modificados em `app/screens/admin`: `AdminDemoNavigator.js`, `AdminRealEventScreen.js`, `components/AdminLiveScreen.js` e `components/AdminEventSummary.js`. O shell recebe opções de retorno e atualização, mantendo o comportamento padrão da ADMIN-01. O selo de fase foi extraído para reuso pela lista e pelo painel.
++- Modificado `app/services/adminEventsService.js`. Nenhuma alteração de backend, autenticação, dependências, módulos Staff ou Participante.
++- Cobertura preparada em `app/tests/adminRealEvents.test.cjs`, `adminNavigation.test.cjs` e `roleRoutingIntegration.test.cjs`. O ajuste em `app/tests/helpers/questionnaireHarness.cjs` adiciona `RefreshControl` à lista de componentes nativos simulados.
++
++## Verificação e pendências
++
++Revisadas as alterações e os contratos do backend. O parser Babel analisou 13 arquivos JS/CJS e verificou 46 imports. A conferência estática validou a assinatura PNG do logo, as referências de navegação, os quatro registros da pilha Admin e as três abas. `git diff --check` passou. A primeira checagem de nomes das abas no script de inspeção precisou ser repetida com escape Unicode para evitar a perda do acento na entrada do PowerShell.
++
++Os testes preparados cobrem UUID e erros de contrato, fases independentes da prontidão, Staff sem requisito de presença, mapeamento e fallback de pendências, falhas parciais, 401/403/404, retry, foco, troca de UUID e sessão, logout durante consulta, descarte de resposta atrasada, cinco destinos em ordem e retorno da rota informativa à listagem e às abas. Testes existentes da ADMIN-01 foram preservados, com a expectativa do antigo placeholder substituída por verificações do painel integrado.
++
++Campanha pendente para GPT-6 Luna Medium, após seleção manual e com mocks locais:
++
++```powershell
++# Em app
++$env:NODE_ENV = 'test'
++node --test --test-reporter=spec tests/adminRealEvents.test.cjs tests/adminNavigation.test.cjs tests/authNavigation.test.cjs tests/roleRoutingIntegration.test.cjs
++```
++
++As consultas são observações independentes. Durante uma atualização, a interface aguarda a conclusão das leituras antes de publicar o novo conjunto de dados. A integração de roteamento usa substitutos de views nativas, portanto a preservação visual da rolagem, o gesto de atualizar, a ergonomia e a fidelidade ao mockup precisam de conferência em aparelho. Nesta etapa não houve execução de testes automatizados, acesso a API ou banco real, build, staging ou geração de patch. O HEAD segue na base da tarefa e o working tree contém apenas os arquivos listados acima e este relatório. Aprovação da ADMIN-02 pendente.
++
++## Primeira campanha de validação — Luna Medium
++
++A campanha foi executada pelo Codex após seleção manual de GPT-6 Luna Medium, com `NODE_ENV=test`, em `app`. O comando efetivamente executado foi:
++
++```powershell
++$env:NODE_ENV = 'test'
++node --test --test-reporter=spec tests/adminRealEvents.test.cjs tests/adminNavigation.test.cjs tests/authNavigation.test.cjs tests/roleRoutingIntegration.test.cjs
++```
++
++- Exit code: `0`.
++- Resultado: 72 testes aprovados, 0 reprovados, 0 ignorados (72 totais); nenhum cancelado ou marcado como todo.
++- A suíte cobriu consultas autenticadas de detalhe e prontidão com UUID, validação de formatos e UUID divergente, datas em fuso IANA, fases e prontidão independentes, os cinco requisitos conhecidos e código desconhecido, ausência de requisito de Staff online, falhas parciais, 401/403/404, retry, foco, troca de UUID/sessão, logout com requisições pendentes e descarte de respostas antigas.
++- Também verificou as cinco áreas na ordem definida, navegação de cada card com UUID, rota informativa com confirmação autenticada do evento, retorno ao painel/lista, abas e roteamento de papéis. A regressão ADMIN-01 de lista, busca, filtros, cursor/paginação, seleção por UUID, autenticação/TOTP, logout e isolamento de sessão passou nesta campanha.
++- Não houve falha de teste nem regressão observada. Durante a execução apareceram avisos já emitidos pelo conjunto de testes: depreciação de `react-test-renderer` e telas substitutas com nome de componente `default`; não alteraram o resultado.
++
++Verificação estática adicional: `git diff --check` executado na raiz do repositório, exit code `0`. O Git emitiu avisos informativos de conversão LF/CRLF para arquivos modificados; nenhum erro de whitespace foi reportado. O índice permaneceu sem alterações staged.
++
++Limitações: os testes usam mocks locais e views nativas substitutas; não acessam banco/API real. Não foram executados build ou testes backend nesta campanha. A preservação de rolagem, gesto de atualização e fidelidade/ergonomia visual ainda dependem de revisão em aparelho. A ADMIN-02 permanece aguardando revisão visual e aprovação formal do responsável.
++
++Este registro complementa a seção anterior, que descrevia o estado antes da campanha e a aguardava; o histórico da implementação foi preservado.
++## Ajuste textual após revisão visual
++
++O responsável informou a aprovação visual da ADMIN-02. A descrição do card Informações e horários, em `app/screens/admin/adminEventManagement.js`, foi alterada de “Dados gerais, datas, código e QR Code” para “Dados do evento, horários e QR Code”. A busca estática não encontrou testes dependentes do texto anterior. `git diff --check` foi executado após o ajuste. A campanha de 72 testes registrada acima precedeu esta alteração textual; testes não foram executados novamente nesta etapa. A aprovação formal permanece pendente.
++## Fechamento e aprovação da ADMIN-02
++
++O painel individual e a leitura de prontidão foram implementados para o evento selecionado. As leituras autenticadas utilizam `GET /api/v1/admin/events/:eventId` e `GET /api/v1/admin/events/:eventId/readiness`, validam os UUIDs e as respostas, e apresentam fase, horários no fuso do evento e pendências sem confundir prontidão com aceite de participações. As observações dos dois endpoints são independentes.
++
++Os cinco cards — Informações e horários, Experiências e estações, Equipe Staff, Operação do evento e BI do evento — abrem destinos informativos com o UUID selecionado. A tela atualiza ao recuperar foco e por ação manual, oferece retry e trata falhas parciais. A identidade, sessão, UUID e geração da consulta limitam a publicação dos resultados; respostas obsoletas são descartadas e falhas 401/403/404 ocultam dados protegidos.
++
++A campanha frontend anterior à alteração textual executou 72 testes com 72 aprovações, nenhuma falha ou teste ignorado, exit code 0. O responsável informou aprovação visual. Depois da campanha, a descrição de Informações e horários passou a ser “Dados do evento, horários e QR Code”; não se repetiu a campanha por se tratar apenas de texto e a busca não encontrou testes dependentes da descrição anterior. As verificações estáticas anteriores incluem parser, imports e `git diff --check`. Não foram executados testes backend nem integração PostgreSQL nesta task.
++
++Inventário em relação à base `e9d183b812f6b9a28f86da101e85508b99aeabb9`:
++
++- Modificados: `app/screens/admin/AdminDemoNavigator.js`, `app/screens/admin/AdminRealEventScreen.js`, `app/screens/admin/components/AdminEventSummary.js`, `app/screens/admin/components/AdminLiveScreen.js`, `app/services/adminEventsService.js`, `app/tests/adminNavigation.test.cjs`, `app/tests/adminRealEvents.test.cjs`, `app/tests/helpers/questionnaireHarness.cjs` e `app/tests/roleRoutingIntegration.test.cjs`.
++- Criados: `app/screens/admin/AdminEventManagementInfoScreen.js`, `app/screens/admin/adminEventManagement.js`, `app/screens/admin/components/AdminSelectedEvent.js`, `app/screens/admin/useAdminEventPanel.js` e `docs/ADMIN_02_IMPLEMENTACAO.md`.
++- Evidência de alterações: `qa-evidence/ADMIN_02-changes.diff`, excluída do próprio patch.
++
++As áreas de gerenciamento são informativas. Edição, QR, experiências, concessões, operação e BI permanecem para tasks posteriores; criação do evento pertence à ADMIN-05. O contrato de detalhe não fornece local e as consultas são snapshots independentes. O responsável aprovou a revisão visual; a revisão final e o commit continuam sob sua responsabilidade.
++
++No fechamento, a branch é `feature/admin-core-management`, com HEAD na base informada; os arquivos da task permanecem no working tree e o índice real está vazio. O patch é preparado e conferido com índice isolado, sem staging no índice real.
+\ No newline at end of file

@@ -68,7 +68,7 @@ export class ParticipantAdmissionController {
     }
     const event = await this.events.findByAccessCode(normalized);
     if (!event) problem(HttpStatus.NOT_FOUND, "EVENT_NOT_FOUND", "Evento não encontrado para este código.");
-    const eligibility = await this.participations.evaluateJoinEligibility(userId, event.id, new Date());
+    const eligibility = await this.participations.evaluateJoinEligibility(userId, event.id);
     return {
       event: { id: event.id, name: event.name, timezone: event.timezone,
         startsAt: event.startsAt, officialEndsAt: event.officialEndsAt,
