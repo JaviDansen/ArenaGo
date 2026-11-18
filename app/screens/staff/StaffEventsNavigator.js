@@ -466,13 +466,11 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
   }
   const store = storeRef.current;
   const [snapshot, setSnapshot] = useState(store.getSnapshot());
-  const orphanSyncRef = useRef(null);
   const prevSectionRef = useRef(section);
   const epoch = auth.getSessionEpoch();
   const revision = auth.getIdentityRevision();
   useEffect(() => store.subscribe(setSnapshot), [store]);
   useEffect(() => {
-    orphanSyncRef.current = null;
     prevSectionRef.current = 'panel';
     store.setContext({ eventId: event.id, userId: auth.user.id, epoch, revision });
     void store.refreshPanel();
@@ -485,7 +483,6 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
     prevSectionRef.current = section;
     if (section !== 'station') store.clearQueue();
     if (prev !== 'panel' && section === 'panel') {
-      orphanSyncRef.current = null;
       void store.revalidateOnReturn();
     }
   }, [store, section]);
@@ -503,20 +500,19 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
     ? `${event.id}:${epoch}:${revision}:${missingExperienceIds.join(',')}`
     : null;
   useEffect(() => {
-    if (!orphanSignature) {
-      orphanSyncRef.current = null;
-      return;
-    }
-    if (section !== 'panel' || !ready || snapshot.accessLocked) return;
-    if (orphanSyncRef.current === orphanSignature) return;
-    orphanSyncRef.current = orphanSignature;
-    void store.pollExperiences();
-  }, [section, ready, snapshot.accessLocked, orphanSignature, store]);
+    if (section !== 'panel' || !ready || snapshot.accessLocked || !orphanSignature) return;
+    void store.syncOrphanExperiences();
+  }, [section, ready, snapshot.accessLocked, orphanSignature, snapshot.experiences, snapshot.experienceError, store]);
   const canPollStations = (section === 'panel' || section === 'station')
     && store.isCurrent(snapshot.context)
     && !snapshot.accessLocked
     && (snapshot.stationStatus === 'ready'
       || (snapshot.stationStatus === 'error' && (snapshot.stationError === 'network' || snapshot.stationError === 'unavailable')));
+  const canPollExperiences = section === 'panel'
+    && store.isCurrent(snapshot.context)
+    && !snapshot.accessLocked
+    && ((snapshot.experienceStatus === 'error' && (snapshot.experienceError === 'network' || snapshot.experienceError === 'unavailable'))
+      || snapshot.experienceError === 'stale');
   const canPollEntry = section === 'panel'
     && store.isCurrent(snapshot.context)
     && !snapshot.accessLocked
@@ -527,6 +523,12 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
     () => store.pollStations(),
     5000,
     `${event.id}:${section}:stations:${epoch}:${revision}`,
+  );
+  useStaffPolling(
+    canPollExperiences,
+    () => store.pollExperiences(),
+    5000,
+    `${event.id}:experiences:${epoch}:${revision}`,
   );
   useStaffPolling(
     canPollEntry,
@@ -559,7 +561,6 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
     (snapshot.entryError === 'denied' || snapshot.entryError === 'session') ? snapshot.entryError : null,
   ].filter(Boolean))];
   const refresh = () => {
-    orphanSyncRef.current = null;
     void store.refreshPanel();
   };
 
@@ -757,7 +758,7 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
           <Button
             label="Atualizar estações"
             variant="secondary"
-            disabled={snapshot.stationStatus === 'loading' || snapshot.experienceStatus === 'loading'}
+            disabled={snapshot.stationStatus === 'loading' || snapshot.experienceStatus === 'loading' || snapshot.entryStatus === 'loading'}
             onPress={refresh}
           />
         </>

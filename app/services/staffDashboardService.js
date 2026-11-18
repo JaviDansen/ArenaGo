@@ -26,10 +26,12 @@ export function createStaffDashboardStore({ client, getContext }) {
   let silentStations = false, silentExperiences = false, silentQueue = false, silentEntry = false;
   let accessLocked = false;
   let lockedKind = 'denied';
+  let revalidationRound = 0;
   let revalidationPending = new Set();
   let revalidationOk = new Set();
-  let revalidationTransientError = false;
+  let revalidationErrors = new Map();
   let stagedPatch = {};
+  let orphanCheckedSignatures = new Set();
 
   const listeners = new Set();
   const publish = (next) => { state = next; listeners.forEach((listener) => listener(state)); };
@@ -38,8 +40,41 @@ export function createStaffDashboardStore({ client, getContext }) {
   function resetRevalidation() {
     revalidationPending = new Set();
     revalidationOk = new Set();
-    revalidationTransientError = false;
+    revalidationErrors = new Map();
     stagedPatch = {};
+  }
+
+  function computeOrphanSignature(st = state) {
+    if (
+      accessLocked
+      || !st.context
+      || st.stationStatus !== 'ready'
+      || st.experienceStatus !== 'ready'
+      || !Array.isArray(st.stations)
+      || st.stations.length === 0
+    ) {
+      return null;
+    }
+    const knownIds = new Set((st.experiences ?? []).map((exp) => exp.id ?? exp.experienceId));
+    const missingIds = [
+      ...new Set(
+        st.stations
+          .filter((item) => !knownIds.has(item.experienceId))
+          .map((item) => item.experienceId)
+          .filter(Boolean),
+      ),
+    ].sort();
+    if (missingIds.length === 0) return null;
+    return `${st.context.eventId}:${st.context.epoch}:${st.context.revision}:${missingIds.join(',')}`;
+  }
+
+  function recordOrphanVerification(orphanSigAtStart, nextState = state) {
+    const orphanSigAfter = computeOrphanSignature(nextState);
+    if (!orphanSigAfter) {
+      orphanCheckedSignatures.clear();
+    } else if (orphanSigAtStart && orphanSigAtStart === orphanSigAfter) {
+      orphanCheckedSignatures.add(orphanSigAfter);
+    }
   }
 
   function setContext(context) {
@@ -47,7 +82,9 @@ export function createStaffDashboardStore({ client, getContext }) {
     silentStations = false; silentExperiences = false; silentQueue = false; silentEntry = false;
     accessLocked = false;
     lockedKind = 'denied';
+    revalidationRound += 1;
     resetRevalidation();
+    orphanCheckedSignatures.clear();
     publish(context ? {
       ...empty(),
       context,
@@ -64,7 +101,9 @@ export function createStaffDashboardStore({ client, getContext }) {
     silentStations = false; silentExperiences = false; silentQueue = false; silentEntry = false;
     accessLocked = true;
     lockedKind = kind === 'session' ? 'session' : 'denied';
+    revalidationRound += 1;
     resetRevalidation();
+    orphanCheckedSignatures.clear();
     publish({
       ...state,
       accessStatus: lockedKind,
@@ -81,6 +120,55 @@ export function createStaffDashboardStore({ client, getContext }) {
     denied(kind);
   }
 
+  function settleRevalidationRound() {
+    if (revalidationErrors.size === 0 && revalidationOk.size > 0) {
+      const resolved = { ...stagedPatch };
+      accessLocked = false;
+      lockedKind = 'denied';
+      resetRevalidation();
+      const nextState = {
+        ...state,
+        ...resolved,
+        accessStatus: 'granted',
+        accessLocked: false,
+      };
+      if (!computeOrphanSignature(nextState)) {
+        orphanCheckedSignatures.clear();
+      }
+      publish(nextState);
+      return;
+    }
+
+    const patch = {
+      accessStatus: lockedKind,
+      accessLocked: true,
+      stations: [],
+      experiences: [],
+      entry: null,
+      experienceId: null,
+      queueStatus: 'idle',
+      queue: null,
+      queueError: null,
+    };
+    if (revalidationOk.has('stations') || revalidationErrors.has('stations') || state.stationStatus === 'loading') {
+      patch.stationStatus = 'error';
+      patch.stationError = revalidationErrors.get('stations') ?? lockedKind;
+    }
+    if (revalidationOk.has('experiences') || revalidationErrors.has('experiences') || state.experienceStatus === 'loading') {
+      patch.experienceStatus = 'error';
+      patch.experienceError = revalidationErrors.get('experiences') ?? lockedKind;
+    }
+    if (revalidationOk.has('entry') || revalidationErrors.has('entry') || state.entryStatus === 'loading') {
+      patch.entryStatus = 'error';
+      patch.entryError = revalidationErrors.get('entry') ?? lockedKind;
+    }
+    resetRevalidation();
+    publish({
+      ...state,
+      ...patch,
+    });
+  }
+
   function beginRevalidation(domain, loadingPatch) {
     if (!accessLocked) {
       publish({
@@ -89,23 +177,27 @@ export function createStaffDashboardStore({ client, getContext }) {
         accessStatus: state.accessStatus === 'unknown' ? 'revalidating' : state.accessStatus,
         accessLocked: false,
       });
-      return;
+      return revalidationRound;
     }
     if (revalidationPending.size === 0) {
-      revalidationOk.clear();
-      revalidationTransientError = false;
-      stagedPatch = {};
+      revalidationRound += 1;
+      resetRevalidation();
+    } else {
+      revalidationOk.delete(domain);
+      revalidationErrors.delete(domain);
     }
     revalidationPending.add(domain);
+    const round = revalidationRound;
     publish({
       ...state,
       ...loadingPatch,
       accessStatus: 'revalidating',
       accessLocked: true,
     });
+    return round;
   }
 
-  function finishRevalidationSuccess(domain, successPatch) {
+  function finishRevalidationSuccess(domain, round, successPatch) {
     if (!accessLocked) {
       publish({
         ...state,
@@ -115,6 +207,7 @@ export function createStaffDashboardStore({ client, getContext }) {
       });
       return;
     }
+    if (round !== revalidationRound) return;
     revalidationPending.delete(domain);
     revalidationOk.add(domain);
     Object.assign(stagedPatch, successPatch);
@@ -122,41 +215,17 @@ export function createStaffDashboardStore({ client, getContext }) {
       publish({ ...state, accessStatus: 'revalidating', accessLocked: true });
       return;
     }
-    if (revalidationTransientError || revalidationOk.size === 0) {
-      resetRevalidation();
-      publish({
-        ...state,
-        accessStatus: lockedKind,
-        accessLocked: true,
-        stations: [],
-        experiences: [],
-        entry: null,
-        experienceId: null,
-        queueStatus: 'idle',
-        queue: null,
-        queueError: null,
-      });
-      return;
-    }
-    const resolved = { ...stagedPatch };
-    accessLocked = false;
-    lockedKind = 'denied';
-    resetRevalidation();
-    publish({
-      ...state,
-      ...resolved,
-      accessStatus: 'granted',
-      accessLocked: false,
-    });
+    settleRevalidationRound();
   }
 
-  function finishRevalidationError(domain, errorPatch) {
+  function finishRevalidationError(domain, round, kind, errorPatch) {
     if (!accessLocked) {
       publish({ ...state, ...errorPatch });
       return;
     }
+    if (round !== revalidationRound) return;
     revalidationPending.delete(domain);
-    revalidationTransientError = true;
+    revalidationErrors.set(domain, kind);
     stagedPatch = {};
     if (revalidationPending.size > 0) {
       publish({
@@ -167,37 +236,24 @@ export function createStaffDashboardStore({ client, getContext }) {
       });
       return;
     }
-    resetRevalidation();
-    publish({
-      ...state,
-      ...errorPatch,
-      accessStatus: lockedKind,
-      accessLocked: true,
-      stations: [],
-      experiences: [],
-      entry: null,
-      experienceId: null,
-      queueStatus: 'idle',
-      queue: null,
-      queueError: null,
-    });
+    settleRevalidationRound();
   }
 
   async function refreshEntryControl() {
     if (!isCurrent()) return;
     const context = state.context, revision = generation, request = ++entryGeneration;
     silentEntry = false;
-    beginRevalidation('entry', { entryStatus: 'loading', entryError: null, entry: null });
+    const round = beginRevalidation('entry', { entryStatus: 'loading', entryError: null, entry: null });
     try {
       const entry = await fetchStaffEntrySummary(client, context.eventId);
       if (revision !== generation || request !== entryGeneration || !isCurrent(context)) return;
-      finishRevalidationSuccess('entry', { entryStatus: 'ready', entry, entryError: null });
+      finishRevalidationSuccess('entry', round, { entryStatus: 'ready', entry, entryError: null });
     } catch (error) {
       if (revision !== generation || !isCurrent(context)) return;
       const kind = errorKind(error);
       if (kind === 'denied' || kind === 'session') return denied(kind);
       if (request !== entryGeneration) return;
-      finishRevalidationError('entry', { entryStatus: 'error', entryError: kind, entry: null });
+      finishRevalidationError('entry', round, kind, { entryStatus: 'error', entryError: kind, entry: null });
     }
   }
 
@@ -230,44 +286,76 @@ export function createStaffDashboardStore({ client, getContext }) {
     silentExperiences = false;
     queueGeneration += 1;
     silentQueue = false;
-    beginRevalidation('experiences', {
+    orphanCheckedSignatures.clear();
+    const orphanSigAtStart = computeOrphanSignature(state);
+    const round = beginRevalidation('experiences', {
       experienceStatus: 'loading', experienceError: null, experiences: [],
       experienceId: null, queueStatus: 'idle', queue: null, queueError: null,
     });
     try {
       const { experiences } = await fetchStaffExperiences(client, context.eventId);
       if (revision !== generation || request !== experienceGeneration || !isCurrent(context)) return;
-      finishRevalidationSuccess('experiences', { experienceStatus: 'ready', experiences, experienceError: null });
-    } catch (error) {
-      if (revision !== generation || !isCurrent(context)) return;
-      const kind = errorKind(error);
-      if (kind === 'denied' || kind === 'session') return denied(kind);
-      if (request !== experienceGeneration) return;
-      finishRevalidationError('experiences', { experienceStatus: 'error', experienceError: kind, experiences: [] });
-    }
-  }
-
-  async function pollExperiences() {
-    const canRetry = state.experienceStatus === 'error' && isRecoverableError(state.experienceError);
-    if (silentExperiences || accessLocked || !isCurrent() || (state.experienceStatus !== 'ready' && !canRetry)) return;
-    const context = state.context, revision = generation, request = experienceGeneration;
-    const hadReady = state.experienceStatus === 'ready';
-    silentExperiences = true;
-    try {
-      const { experiences } = await fetchStaffExperiences(client, context.eventId);
-      if (revision === generation && request === experienceGeneration && isCurrent(context) && !accessLocked) {
-        publish({ ...state, experienceStatus: 'ready', experiences, experienceError: null, accessStatus: 'granted', accessLocked: false });
+      finishRevalidationSuccess('experiences', round, { experienceStatus: 'ready', experiences, experienceError: null });
+      if (!accessLocked) {
+        recordOrphanVerification(orphanSigAtStart, state);
       }
     } catch (error) {
       if (revision !== generation || !isCurrent(context)) return;
       const kind = errorKind(error);
       if (kind === 'denied' || kind === 'session') return denied(kind);
-      if (request !== experienceGeneration || accessLocked) return;
+      if (request !== experienceGeneration) return;
+      finishRevalidationError('experiences', round, kind, { experienceStatus: 'error', experienceError: kind, experiences: [] });
+    }
+  }
+
+  async function pollExperiences() {
+    const canRetry = state.experienceStatus === 'error' && isRecoverableError(state.experienceError);
+    if (silentExperiences || accessLocked || !isCurrent() || (state.experienceStatus !== 'ready' && !canRetry)) return false;
+    const context = state.context, revision = generation, request = experienceGeneration;
+    const hadReady = state.experienceStatus === 'ready';
+    const orphanSigAtStart = computeOrphanSignature(state);
+    silentExperiences = true;
+    try {
+      const { experiences } = await fetchStaffExperiences(client, context.eventId);
+      if (revision === generation && request === experienceGeneration && isCurrent(context) && !accessLocked) {
+        const nextState = { ...state, experienceStatus: 'ready', experiences, experienceError: null, accessStatus: 'granted', accessLocked: false };
+        recordOrphanVerification(orphanSigAtStart, nextState);
+        publish(nextState);
+        return true;
+      }
+      return false;
+    } catch (error) {
+      if (revision !== generation || !isCurrent(context)) return false;
+      const kind = errorKind(error);
+      if (kind === 'denied' || kind === 'session') {
+        denied(kind);
+        return false;
+      }
+      if (request !== experienceGeneration || accessLocked) return false;
       if (hadReady) publish({ ...state, experienceError: 'stale' });
       else publish({ ...state, experienceStatus: 'error', experienceError: kind, experiences: [] });
+      return false;
     } finally {
       if (revision === generation && request === experienceGeneration) silentExperiences = false;
     }
+  }
+
+  function syncOrphanExperiences() {
+    if (silentExperiences || accessLocked || !isCurrent() || state.experienceStatus === 'loading') {
+      return Promise.resolve(false);
+    }
+    const sig = computeOrphanSignature(state);
+    if (!sig) {
+      orphanCheckedSignatures.clear();
+      return Promise.resolve(false);
+    }
+    if (orphanCheckedSignatures.has(sig)) {
+      return Promise.resolve(false);
+    }
+    if (state.experienceError === 'stale') {
+      return Promise.resolve(false);
+    }
+    return pollExperiences();
   }
 
   async function refreshStations() {
@@ -276,20 +364,23 @@ export function createStaffDashboardStore({ client, getContext }) {
     silentStations = false;
     queueGeneration += 1;
     silentQueue = false;
-    beginRevalidation('stations', {
+    const round = beginRevalidation('stations', {
       stationStatus: 'loading', stationError: null, stations: [],
       experienceId: null, queueStatus: 'idle', queue: null, queueError: null,
     });
     try {
       const { stations } = await fetchStaffStations(client, context.eventId);
       if (revision !== generation || request !== stationGeneration || !isCurrent(context)) return;
-      finishRevalidationSuccess('stations', { stationStatus: 'ready', stations, stationError: null });
+      finishRevalidationSuccess('stations', round, { stationStatus: 'ready', stations, stationError: null });
+      if (!accessLocked && !computeOrphanSignature(state)) {
+        orphanCheckedSignatures.clear();
+      }
     } catch (error) {
       if (revision !== generation || !isCurrent(context)) return;
       const kind = errorKind(error);
       if (kind === 'denied' || kind === 'session') return denied(kind);
       if (request !== stationGeneration) return;
-      finishRevalidationError('stations', { stationStatus: 'error', stationError: kind, stations: [] });
+      finishRevalidationError('stations', round, kind, { stationStatus: 'error', stationError: kind, stations: [] });
     }
   }
 
@@ -301,8 +392,13 @@ export function createStaffDashboardStore({ client, getContext }) {
     silentStations = true;
     try {
       const { stations } = await fetchStaffStations(client, context.eventId);
-      if (revision === generation && request === stationGeneration && isCurrent(context) && !accessLocked)
-        publish({ ...state, stationStatus: 'ready', stations, stationError: null, accessStatus: 'granted', accessLocked: false });
+      if (revision === generation && request === stationGeneration && isCurrent(context) && !accessLocked) {
+        const nextState = { ...state, stationStatus: 'ready', stations, stationError: null, accessStatus: 'granted', accessLocked: false };
+        if (!computeOrphanSignature(nextState)) {
+          orphanCheckedSignatures.clear();
+        }
+        publish(nextState);
+      }
     } catch (error) {
       if (revision !== generation || !isCurrent(context)) return;
       const kind = errorKind(error);
@@ -312,6 +408,43 @@ export function createStaffDashboardStore({ client, getContext }) {
       else publish({ ...state, stationStatus: 'error', stationError: kind, stations: [] });
     } finally {
       if (revision === generation && request === stationGeneration) silentStations = false;
+    }
+  }
+
+  async function verifyEventAccessFromQueue(context, revision, experienceId, queueReq) {
+    try {
+      const { stations } = await fetchStaffStations(client, context.eventId);
+      if (revision !== generation || !isCurrent(context) || accessLocked) return;
+      const keepQueueBlocked = queueReq === queueGeneration && state.experienceId === experienceId;
+      const nextState = {
+        ...state,
+        stationStatus: 'ready',
+        stations,
+        stationError: null,
+        accessStatus: 'granted',
+        accessLocked: false,
+        ...(keepQueueBlocked ? { queueStatus: 'error', queue: null, queueError: 'denied' } : {}),
+      };
+      if (!computeOrphanSignature(nextState)) {
+        orphanCheckedSignatures.clear();
+      }
+      publish(nextState);
+    } catch (verifyError) {
+      if (revision !== generation || !isCurrent(context)) return;
+      const verifyKind = errorKind(verifyError);
+      if (verifyKind === 'denied' || verifyKind === 'session') {
+        denied(verifyKind);
+        return;
+      }
+      if (!accessLocked && queueReq === queueGeneration && state.experienceId === experienceId) {
+        publish({
+          ...state,
+          queueStatus: 'error',
+          queue: null,
+          queueError: 'denied',
+          ...(state.stationStatus === 'ready' ? { stationError: 'stale' } : {}),
+        });
+      }
     }
   }
 
@@ -328,8 +461,14 @@ export function createStaffDashboardStore({ client, getContext }) {
     } catch (error) {
       if (revision !== generation || !isCurrent(context)) return;
       const kind = errorKind(error);
-      if (kind === 'denied' || kind === 'session') return denied(kind);
-      if (request !== queueGeneration || accessLocked) return;
+      if (kind === 'session') return denied('session');
+      if (request !== queueGeneration || state.experienceId !== experienceId || accessLocked) return;
+      if (error?.status === 403) return denied('denied');
+      if (error?.status === 404) {
+        publish({ ...state, queueStatus: 'error', queue: null, queueError: 'denied' });
+        await verifyEventAccessFromQueue(context, revision, experienceId, request);
+        return;
+      }
       publish({ ...state, queueStatus: 'error', queue: null, queueError: kind });
     }
   }
@@ -345,8 +484,14 @@ export function createStaffDashboardStore({ client, getContext }) {
     } catch (error) {
       if (revision !== generation || !isCurrent(context)) return;
       const kind = errorKind(error);
-      if (kind === 'denied' || kind === 'session') return denied(kind);
-      if (request !== queueGeneration || accessLocked) return;
+      if (kind === 'session') return denied('session');
+      if (request !== queueGeneration || state.experienceId !== experienceId || accessLocked) return;
+      if (error?.status === 403) return denied('denied');
+      if (error?.status === 404) {
+        publish({ ...state, queueStatus: 'error', queue: null, queueError: 'denied' });
+        await verifyEventAccessFromQueue(context, revision, experienceId, request);
+        return;
+      }
       publish({ ...state, queueError: 'stale' });
     } finally {
       if (revision === generation && request === queueGeneration) silentQueue = false;
@@ -360,6 +505,11 @@ export function createStaffDashboardStore({ client, getContext }) {
   }
 
   function refreshPanel() {
+    if (isCurrent() && accessLocked) {
+      revalidationRound += 1;
+      resetRevalidation();
+      orphanCheckedSignatures.clear();
+    }
     return Promise.all([refreshStations(), refreshExperiences(), refreshEntryControl()]);
   }
 
@@ -383,6 +533,7 @@ export function createStaffDashboardStore({ client, getContext }) {
     reportAccessDenied,
     refreshStations,
     refreshExperiences,
+    syncOrphanExperiences,
     refreshEntryControl,
     refreshPanel,
     revalidateOnReturn,

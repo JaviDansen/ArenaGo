@@ -143,7 +143,13 @@ test('troca de experiência descarta fila anterior e 404 limpa os dados do event
   requests[1].resolve(queue()); await old;
   assert.equal(store.getSnapshot().queue.experienceId, secondExperienceId);
   const denied = store.refreshQueue(secondExperienceId);
-  requests[3].reject(Object.assign(new Error('404'), { status: 404 })); await denied;
+  requests[3].reject(Object.assign(new Error('404'), { status: 404 }));
+  await Promise.resolve();
+  assert.equal(store.getSnapshot().queueStatus, 'error');
+  assert.equal(store.getSnapshot().queueError, 'denied');
+  assert.equal(store.getSnapshot().queue, null);
+  requests[4].reject(Object.assign(new Error('404'), { status: 404 }));
+  await denied;
   assert.equal(store.getSnapshot().stationError, 'denied');
   assert.equal(store.getSnapshot().queue, null);
   assert.equal(store.getSnapshot().stations.length, 0);
@@ -724,4 +730,336 @@ test('AUD-02: bloqueio de autorização sobrevive à revalidação, GET antigo 4
   assert.equal(switchStore.getSnapshot().accessStatus, 'denied');
   assert.equal(switchStore.getSnapshot().stations.length, 0);
   assert.equal(switchStore.getSnapshot().entry, null);
+});
+
+test('R3-01: revalidação parcial após negativa nunca deixa domínios presos em loading (200/200/500, 500/200/200, rede após dois 200, tentativas consecutivas e troca de contexto)', async () => {
+  let current = context();
+  let reqStations = [];
+  let reqExperiences = [];
+  let reqEntry = [];
+  let mode = 'deny403';
+
+  const store = createStaffDashboardStore({
+    getContext: () => current,
+    client: {
+      get: (url) => {
+        if (mode === 'deny403') return Promise.reject(Object.assign(new Error('403'), { status: 403 }));
+        const d = deferred();
+        if (url.endsWith('/stations')) reqStations.push(d);
+        else if (url.endsWith('/experiences')) reqExperiences.push(d);
+        else if (url.endsWith('/entry-control')) reqEntry.push(d);
+        return d.promise;
+      },
+    },
+  });
+
+  store.setContext(current);
+  await store.refreshPanel();
+  assert.equal(store.getSnapshot().accessLocked, true);
+
+  // 1. Revalidação após negativa com 200, 200, 500
+  mode = 'manual';
+  const attempt1 = store.refreshPanel();
+  assert.equal(store.getSnapshot().stationStatus, 'loading');
+  assert.equal(store.getSnapshot().experienceStatus, 'loading');
+  assert.equal(store.getSnapshot().entryStatus, 'loading');
+
+  reqStations[0].resolve(stations());
+  reqExperiences[0].resolve({ eventId, experiences: [{ id: experienceId, name: 'Just Dance' }] });
+  await Promise.resolve();
+  assert.equal(store.getSnapshot().accessLocked, true);
+  assert.equal(store.getSnapshot().stations.length, 0);
+
+  reqEntry[0].reject(Object.assign(new Error('500'), { status: 500 }));
+  await attempt1;
+  assert.equal(store.getSnapshot().accessLocked, true);
+  assert.equal(store.getSnapshot().accessStatus, 'denied');
+  assert.notEqual(store.getSnapshot().stationStatus, 'loading');
+  assert.notEqual(store.getSnapshot().experienceStatus, 'loading');
+  assert.notEqual(store.getSnapshot().entryStatus, 'loading');
+  assert.equal(store.getSnapshot().stationStatus, 'error');
+  assert.equal(store.getSnapshot().experienceStatus, 'error');
+  assert.equal(store.getSnapshot().entryStatus, 'error');
+  assert.equal(store.getSnapshot().entryError, 'unavailable');
+  assert.equal(store.getSnapshot().stations.length, 0);
+  assert.equal(store.getSnapshot().experiences.length, 0);
+  assert.equal(store.getSnapshot().entry, null);
+
+  // 2. Revalidação após negativa com 500, 200, 200 (falha ocorre primeiro)
+  reqStations = [];
+  reqExperiences = [];
+  reqEntry = [];
+  const attempt2 = store.refreshPanel();
+  reqStations[0].reject(Object.assign(new Error('500'), { status: 500 }));
+  await Promise.resolve();
+  reqExperiences[0].resolve({ eventId, experiences: [{ id: experienceId, name: 'Just Dance' }] });
+  reqEntry[0].resolve(entrySummary());
+  await attempt2;
+  assert.equal(store.getSnapshot().accessLocked, true);
+  assert.equal(store.getSnapshot().stationStatus, 'error');
+  assert.equal(store.getSnapshot().stationError, 'unavailable');
+  assert.equal(store.getSnapshot().experienceStatus, 'error');
+  assert.equal(store.getSnapshot().entryStatus, 'error');
+  assert.equal(store.getSnapshot().stations.length, 0);
+  assert.equal(store.getSnapshot().experiences.length, 0);
+  assert.equal(store.getSnapshot().entry, null);
+
+  // 3. Revalidação após negativa com falha de rede após dois 200
+  reqStations = [];
+  reqExperiences = [];
+  reqEntry = [];
+  const attempt3 = store.refreshPanel();
+  reqStations[0].resolve(stations());
+  reqEntry[0].resolve(entrySummary());
+  await Promise.resolve();
+  reqExperiences[0].reject(Object.assign(new Error('offline'), { isNetworkError: true }));
+  await attempt3;
+  assert.equal(store.getSnapshot().accessLocked, true);
+  assert.equal(store.getSnapshot().stationStatus, 'error');
+  assert.equal(store.getSnapshot().experienceStatus, 'error');
+  assert.equal(store.getSnapshot().experienceError, 'network');
+  assert.equal(store.getSnapshot().entryStatus, 'error');
+
+  // 4. Duas tentativas consecutivas de revalidação e recuperação completa quando os três retornam 200
+  reqStations = [];
+  reqExperiences = [];
+  reqEntry = [];
+  const waveA = store.refreshPanel();
+  const waveB = store.refreshPanel();
+  // Respostas atrasadas da waveA não interferem na waveB
+  reqStations[0].reject(Object.assign(new Error('500'), { status: 500 }));
+  reqExperiences[0].resolve({ eventId, experiences: [] });
+  reqEntry[0].resolve(entrySummary());
+  await waveA;
+
+  reqStations[1].resolve(stations());
+  reqExperiences[1].resolve({ eventId, experiences: [{ id: experienceId, name: 'Just Dance' }] });
+  reqEntry[1].resolve(entrySummary());
+  await waveB;
+
+  assert.equal(store.getSnapshot().accessLocked, false);
+  assert.equal(store.getSnapshot().accessStatus, 'granted');
+  assert.equal(store.getSnapshot().stationStatus, 'ready');
+  assert.equal(store.getSnapshot().experienceStatus, 'ready');
+  assert.equal(store.getSnapshot().entryStatus, 'ready');
+  assert.equal(store.getSnapshot().stations.length, 1);
+
+  // 5. Troca de evento e logout durante tentativa de revalidação
+  store.reportAccessDenied('denied');
+  reqStations = [];
+  reqExperiences = [];
+  reqEntry = [];
+  const inFlightSwitch = store.refreshPanel();
+  current = context(otherEventId, 'b', 2);
+  store.setContext(current);
+  reqStations[0].resolve(stations());
+  reqExperiences[0].resolve({ eventId, experiences: [{ id: experienceId, name: 'Just Dance' }] });
+  reqEntry[0].reject(Object.assign(new Error('500'), { status: 500 }));
+  await inFlightSwitch;
+  assert.equal(store.getSnapshot().accessLocked, false);
+  assert.equal(store.getSnapshot().context.eventId, otherEventId);
+
+  current = null;
+  store.setContext(null);
+  assert.equal(store.getSnapshot().stationStatus, 'idle');
+  assert.equal(store.getSnapshot().accessLocked, false);
+});
+
+test('R3-03: negativa 404 em fila abandonada é descartada e 404 na fila ativa diferencia experiência indisponível de perda de acesso ao evento', async () => {
+  const current = context();
+  let queueReqs = [];
+  let stationVerifyMode = 'ok';
+
+  const store = createStaffDashboardStore({
+    getContext: () => current,
+    client: {
+      get: (url) => {
+        if (url.endsWith('/queue')) {
+          const d = deferred();
+          queueReqs.push({ url, d });
+          return d.promise;
+        }
+        if (url.endsWith('/stations')) {
+          if (stationVerifyMode === 'deny403') {
+            return Promise.reject(Object.assign(new Error('403'), { status: 403 }));
+          }
+          const base = stations();
+          base.stations.push({ ...base.stations[0], id: secondStationId, experienceId: secondExperienceId });
+          return Promise.resolve(base);
+        }
+        if (url.endsWith('/experiences')) {
+          return Promise.resolve({
+            eventId,
+            experiences: [
+              { id: experienceId, name: 'Just Dance' },
+              { id: secondExperienceId, name: 'Street Fighter' },
+            ],
+          });
+        }
+        return Promise.resolve(entrySummary());
+      },
+    },
+  });
+
+  store.setContext(current);
+  await store.refreshPanel();
+  assert.equal(store.getSnapshot().accessLocked, false);
+  assert.equal(store.getSnapshot().stations.length, 2);
+
+  // 1. 404 tardio da fila após saída da estação (clearQueue) não bloqueia o evento
+  const abandonedExit = store.refreshQueue(experienceId);
+  store.clearQueue();
+  queueReqs[0].d.reject(Object.assign(new Error('404'), { status: 404 }));
+  await abandonedExit;
+  assert.equal(store.getSnapshot().accessLocked, false);
+  assert.equal(store.getSnapshot().stationStatus, 'ready');
+  assert.equal(store.getSnapshot().stations.length, 2);
+  assert.equal(store.getSnapshot().queueStatus, 'idle');
+
+  // 2. 404 tardio da fila anterior após troca de estação/experiência não afeta a nova fila nem bloqueia o evento
+  queueReqs = [];
+  const firstQueue = store.refreshQueue(experienceId);
+  const secondQueue = store.refreshQueue(secondExperienceId);
+  queueReqs[1].d.resolve({ ...queue(), experienceId: secondExperienceId });
+  await secondQueue;
+  queueReqs[0].d.reject(Object.assign(new Error('404'), { status: 404 }));
+  await firstQueue;
+  assert.equal(store.getSnapshot().accessLocked, false);
+  assert.equal(store.getSnapshot().queueStatus, 'ready');
+  assert.equal(store.getSnapshot().queue.experienceId, secondExperienceId);
+
+  // 3. 404 na fila ativa com acesso ao evento ainda válido bloqueia apenas a fila e preserva dados do painel
+  queueReqs = [];
+  stationVerifyMode = 'ok';
+  const active404ValidEvent = store.pollQueue(secondExperienceId);
+  queueReqs[0].d.reject(Object.assign(new Error('404'), { status: 404 }));
+  await active404ValidEvent;
+  assert.equal(store.getSnapshot().accessLocked, false);
+  assert.equal(store.getSnapshot().accessStatus, 'granted');
+  assert.equal(store.getSnapshot().stationStatus, 'ready');
+  assert.equal(store.getSnapshot().stations.length, 2);
+  assert.equal(store.getSnapshot().experienceStatus, 'ready');
+  assert.equal(store.getSnapshot().entryStatus, 'ready');
+  assert.equal(store.getSnapshot().queueStatus, 'error');
+  assert.equal(store.getSnapshot().queueError, 'denied');
+  assert.equal(store.getSnapshot().queue, null);
+
+  // 4. 404 na fila ativa com perda real de acesso ao evento (403 em /stations) bloqueia todo o evento
+  queueReqs = [];
+  stationVerifyMode = 'deny403';
+  const active404RevokedEvent = store.refreshQueue(secondExperienceId);
+  queueReqs[0].d.reject(Object.assign(new Error('404'), { status: 404 }));
+  await active404RevokedEvent;
+  assert.equal(store.getSnapshot().accessLocked, true);
+  assert.equal(store.getSnapshot().accessStatus, 'denied');
+  assert.equal(store.getSnapshot().stations.length, 0);
+  assert.equal(store.getSnapshot().experiences.length, 0);
+  assert.equal(store.getSnapshot().entry, null);
+  assert.equal(store.getSnapshot().queue, null);
+});
+
+test('R3-04: recuperação controlada de experiências desconhecidas (GET em voo, falha de rede, mesma assinatura e inexistente sem loop)', async () => {
+  let current = context();
+  const expReqs = [];
+  let stationList = stations().stations;
+
+  const store = createStaffDashboardStore({
+    getContext: () => current,
+    client: {
+      get: (url) => {
+        if (url.endsWith('/stations')) return Promise.resolve({ eventId: current.eventId, stations: stationList });
+        if (url.endsWith('/entry-control')) return Promise.resolve({ ...entrySummary(), eventId: current.eventId });
+        if (url.endsWith('/experiences')) {
+          const d = deferred();
+          expReqs.push(d);
+          return d.promise;
+        }
+        return Promise.resolve({});
+      },
+    },
+  });
+
+  store.setContext(current);
+  const initPromise = store.refreshPanel();
+  expReqs[0].resolve({ eventId, experiences: [{ id: experienceId, name: 'Just Dance' }] });
+  await initPromise;
+  assert.equal(store.getSnapshot().experienceStatus, 'ready');
+
+  // 1. Experiência desconhecida surge enquanto um GET /experiences já estava em andamento
+  const inFlightExp = store.pollExperiences();
+  assert.equal(expReqs.length, 2);
+
+  // Antes de expReqs[1] terminar, chega uma estação apontando para secondExperienceId (órfã)
+  stationList = [
+    ...stations().stations,
+    { ...stations().stations[0], id: secondStationId, experienceId: secondExperienceId, name: 'Estação Órfã' },
+  ];
+  await store.pollStations();
+
+  // syncOrphanExperiences chamado enquanto expReqs[1] está em voo não dispara requisição duplicada nem queima a assinatura
+  await store.syncOrphanExperiences();
+  assert.equal(expReqs.length, 2);
+
+  // expReqs[1] (iniciada antes da órfã existir) resolve sem secondExperienceId
+  expReqs[1].resolve({ eventId, experiences: [{ id: experienceId, name: 'Just Dance' }] });
+  await inFlightExp;
+
+  // Agora syncOrphanExperiences deve disparar 1 nova consulta para a assinatura órfã atual
+  const orphanRetry1 = store.syncOrphanExperiences();
+  assert.equal(expReqs.length, 3);
+
+  // 2. Falha inicial de rede ao tentar sincronizar a experiência desconhecida
+  expReqs[2].reject(Object.assign(new Error('offline'), { isNetworkError: true }));
+  await orphanRetry1;
+  assert.equal(store.getSnapshot().experienceError, 'stale');
+  // Enquanto stale, syncOrphanExperiences não entra em loop síncrono imediato; aguarda o polling de 5s
+  await store.syncOrphanExperiences();
+  assert.equal(expReqs.length, 3);
+
+  // 3. Recuperação posterior pelo polling de 5s mantendo a mesma assinatura e encontrando a experiência
+  const pollRecovery = store.pollExperiences();
+  assert.equal(expReqs.length, 4);
+  expReqs[3].resolve({
+    eventId,
+    experiences: [
+      { id: experienceId, name: 'Just Dance' },
+      { id: secondExperienceId, name: 'Street Fighter' },
+    ],
+  });
+  await pollRecovery;
+  assert.equal(store.getSnapshot().experienceError, null);
+  assert.equal(store.getSnapshot().experiences.length, 2);
+
+  // 4. Experiência persistentemente inexistente não gera loop infinito após resposta 200 válida
+  const unknownExpId = '99999999-9999-4999-8999-999999999999';
+  stationList = [
+    ...stationList,
+    { ...stations().stations[0], id: '88888888-8888-4888-8888-888888888888', experienceId: unknownExpId, name: 'Estação Fantasma' },
+  ];
+  await store.pollStations();
+
+  const ghostCheck = store.syncOrphanExperiences();
+  assert.equal(expReqs.length, 5);
+  expReqs[4].resolve({
+    eventId,
+    experiences: [
+      { id: experienceId, name: 'Just Dance' },
+      { id: secondExperienceId, name: 'Street Fighter' },
+    ],
+  });
+  await ghostCheck;
+
+  // Nova chamada com a mesma assinatura não dispara outra requisição (sem loop infinito)
+  await store.syncOrphanExperiences();
+  assert.equal(expReqs.length, 5);
+
+  // 5. Troca de evento durante tentativa descarta resposta antiga
+  const refreshBeforeSwitch = store.refreshExperiences();
+  assert.equal(expReqs.length, 6);
+  current = context(otherEventId, 'b', 2);
+  store.setContext(current);
+  expReqs[5].resolve({ eventId, experiences: [{ id: experienceId, name: 'Just Dance' }] });
+  await refreshBeforeSwitch;
+  assert.equal(store.getSnapshot().context.eventId, otherEventId);
+  assert.equal(store.getSnapshot().experiences.length, 0);
 });

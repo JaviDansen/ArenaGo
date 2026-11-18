@@ -845,6 +845,7 @@ test('STAFF-01 UI (10.3): Recuperação automática de /entry-control, rejeiçã
   let stationsMode = 'error500';
   let entryMode = 'error500';
   let expCalls = 0;
+  let expFailNextNetwork = false;
   let includeMissingExp = false;
   let stationsIncludeUnknownExp = false;
   const EXP_NEW = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
@@ -873,6 +874,10 @@ test('STAFF-01 UI (10.3): Recuperação automática de /entry-control, rejeiçã
       }
       if (url === `/staff/events/${EV_A}/experiences`) {
         expCalls += 1;
+        if (expFailNextNetwork) {
+          expFailNextNetwork = false;
+          return Promise.reject(Object.assign(new Error('exp-offline'), { isNetworkError: true }));
+        }
         const list = [{ id: EXP_1, name: 'Just Dance' }];
         if (includeMissingExp) list.push({ id: EXP_NEW, name: 'Nova Arena VR' });
         return Promise.resolve({ eventId: EV_A, experiences: list });
@@ -943,20 +948,29 @@ test('STAFF-01 UI (10.3): Recuperação automática de /entry-control, rejeiçã
     await rig.triggerPolling(':entry:');
     assert.ok(rig.hasText('Estado da fila externa indisponível'));
 
-    // 3. Revalidação controlada de experiência desconhecida sem loop infinito (AUD-04)
+    // 3. Revalidação controlada de experiência desconhecida sem loop infinito e com recuperação após falha (AUD-04 + R3-04)
     stationsMode = 'ready';
-    stationsIncludeUnknownExp = true;
+    stationsIncludeUnknownExp = false;
     includeMissingExp = false;
     entryMode = 'ready';
-    expCalls = 0;
     await rig.press('Atualizar estações');
     await rig.settle();
-    // Uma chamada manual (/experiences) + 1 revalidação controlada de órfã = 2
+
+    // Estação órfã surge no polling de estações e a primeira tentativa de sincronizar /experiences falha por rede
+    stationsIncludeUnknownExp = true;
+    expCalls = 0;
+    expFailNextNetwork = true;
+    await rig.triggerPolling(':stations:');
+    assert.equal(expCalls, 1, 'dispara 1 tentativa automática ao detectar experiência desconhecida');
+    assert.equal(rig.latestPolling(':experiences:')?.enabled, true, 'R3-04: habilita polling de recuperação de experiências após falha transitória');
+
+    // No ciclo de polling de 5s de :experiences: mantendo a mesma orphanSignature, a consulta é repetida; se ainda não existe (200 válido), para de consultar
+    await rig.triggerPolling(':experiences:');
     assert.equal(expCalls, 2);
     assert.ok(rig.hasText('Experiência não vinculada'));
     assert.ok(rig.hasText('Estação VR'));
 
-    // Novos ciclos de polling de estações com a mesma inconsistência NÃO disparam novas leituras de /experiences
+    // Novos ciclos de polling de estações com a mesma inconsistência já verificada por 200 NÃO disparam novas leituras de /experiences
     await rig.triggerPolling(':stations:');
     await rig.triggerPolling(':stations:');
     assert.equal(expCalls, 2, 'não entra em loop de consultas diante de inconsistência persistente');
@@ -978,13 +992,14 @@ test('STAFF-01 UI (10.3): Recuperação automática de /entry-control, rejeiçã
     assert.equal(rig.isDisabled('Controle de Entrada'), true);
     assert.equal(rig.latestPolling(':entry:')?.enabled, false);
 
-    // 5. Atualização manual recebendo 500 posterior NÃO reabilita acesso negado (AUD-02)
+    // 5. Atualização manual recebendo 500 posterior NÃO reabilita acesso negado (AUD-02) e NÃO deixa botão Atualizar estações travado (R3-01)
     entryMode = 'error500';
     await rig.press('Atualizar estações');
     await rig.settle();
     assert.ok(!rig.hasText('Just Dance'));
     assert.ok(rig.hasText('SEM ACESSO'));
     assert.equal(rig.isDisabled('Controle de Entrada'), true);
+    assert.equal(rig.isDisabled('Atualizar estações'), false, 'R3-01: Atualizar estações reabilita após revalidação parcial 200/200/500');
 
     // 404 na carga manual também mantém revogação e bloqueio
     entryMode = 'notfound404';

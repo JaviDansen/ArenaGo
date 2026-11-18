@@ -71,39 +71,71 @@ export const isDefinitiveEntryRejection = (error) => [400, 401, 403, 404].includ
 
 /** Sem replay de POST: um dispatching desconhecido só permite consultas. */
 export function createStaffEntryStore({ client, storage, createKey, getContext }) {
-  let state = empty(), generation = 0, readGeneration = 0, flight = null, silentFlight = false;
+  let state = empty(), generation = 0, readGeneration = 0, flight = null, silentFlight = false, revokedKind = null;
   const listeners = new Set();
   const publish = (patch) => { state = { ...state, ...patch }; listeners.forEach(fn => fn(state)); };
   const isCurrent = (context = state.context) => same(context, state.context) && same(context, getContext());
-  function setContext(context) { generation++; readGeneration++; state = empty(); publish({ context }); }
+  function setContext(context) {
+    generation++;
+    readGeneration++;
+    silentFlight = false;
+    revokedKind = null;
+    state = empty();
+    publish({ context });
+  }
   async function refresh() {
     const context = state.context, currentGeneration = generation, request = ++readGeneration;
+    silentFlight = false;
     if (!isCurrent(context)) return;
-    const current = () => generation === currentGeneration && request === readGeneration && isCurrent(context);
-    publish({ status: 'loading', data: null, error: null });
+    const sameScope = () => generation === currentGeneration && isCurrent(context);
+    const current = () => sameScope() && request === readGeneration;
+    publish({ status: 'loading', data: null, error: revokedKind });
     let pending = null, storageError = false;
     try { pending = active(await storage.get(context.userId)); } catch { storageError = true; }
-    if (!current()) return;
-    publish({ pending, storageError });
+    if (!sameScope()) return;
+    if (request === readGeneration) publish({ pending, storageError });
     try {
       const data = parseEntryState(await client.get(`/staff/events/${context.eventId}/entry-control`, { auth: true }), context.eventId);
-      if (current()) publish({ status: 'ready', data });
-    } catch (error) { if (current()) publish({ status: 'error', data: null, error: failure(error) }); }
+      if (!current()) return;
+      revokedKind = null;
+      publish({ status: 'ready', data, error: null });
+    } catch (error) {
+      if (!sameScope()) return;
+      const kind = failure(error);
+      if (kind === 'session' || kind === 'denied') {
+        revokedKind = kind === 'session' ? 'session' : 'denied';
+        readGeneration += 1;
+        silentFlight = false;
+        publish({ status: 'error', data: null, error: revokedKind, pending, storageError });
+        return;
+      }
+      if (!current()) return;
+      publish({ status: 'error', data: null, error: revokedKind ?? kind });
+    }
   }
   async function poll() {
-    if (silentFlight || flight || !isCurrent() || state.status !== 'ready') return;
+    if (silentFlight || flight || !isCurrent() || state.status !== 'ready' || revokedKind) return;
     const context = state.context, currentGeneration = generation, request = readGeneration;
+    const sameScope = () => generation === currentGeneration && isCurrent(context);
     silentFlight = true;
     try {
       const data = parseEntryState(await client.get(`/staff/events/${context.eventId}/entry-control`, { auth: true }), context.eventId);
-      if (currentGeneration === generation && request === readGeneration && isCurrent(context))
+      if (sameScope() && request === readGeneration && !revokedKind)
         publish({ data, error: null });
     } catch (error) {
-      if (currentGeneration !== generation || request !== readGeneration || !isCurrent(context)) return;
+      if (!sameScope()) return;
       const kind = failure(error);
-      if (kind === 'session' || kind === 'denied') publish({ status: 'error', data: null, error: kind });
-      else publish({ error: 'stale' });
-    } finally { silentFlight = false; }
+      if (kind === 'session' || kind === 'denied') {
+        revokedKind = kind === 'session' ? 'session' : 'denied';
+        readGeneration += 1;
+        publish({ status: 'error', data: null, error: revokedKind });
+        return;
+      }
+      if (request !== readGeneration || revokedKind) return;
+      publish({ error: 'stale' });
+    } finally {
+      if (generation === currentGeneration && request === readGeneration) silentFlight = false;
+    }
   }
   async function mutate(action) {
     if (flight) return { kind: 'busy' };

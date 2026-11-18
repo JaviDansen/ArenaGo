@@ -208,3 +208,106 @@ test('intenção confirm legada dispatching sobrevive sem conversão nem POST no
   const r=await rig({persisted});assert.equal(r.store.getSnapshot().pending.kind,'confirm');
   assert.equal((await r.store.mutate({kind:'call'})).kind,'blocked');assert.equal(r.calls.some(c=>c.method==='POST'),false);
 });
+
+test('R3-02: negativa 403/404 ou 401 em GET anterior não é descartada por refresh manual concorrente que falha com 500, em qualquer ordem, e respeita escopo', async () => {
+  // Cenário 1: GET A (poll ou refresh) pendente -> refresh manual inicia GET B -> GET A retorna 403 -> GET B retorna 500
+  {
+    const requests = [];
+    let current = { ...context };
+    const r = await rig({
+      get: () => {
+        const req = defer();
+        requests.push(req);
+        return req.promise;
+      },
+      current: () => current,
+    });
+    // rig() já disparou requests[0]; vamos resolver inicialmente para colocar store em ready
+    requests[0].resolve(body());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(r.store.getSnapshot().status, 'ready');
+
+    const getA = r.store.poll();
+    const getB = r.store.refresh();
+    assert.equal(requests.length, 3);
+
+    requests[1].reject({ status: 403, code: 'STAFF_EVENT_FORBIDDEN' });
+    await getA;
+    assert.equal(r.store.getSnapshot().status, 'error');
+    assert.equal(r.store.getSnapshot().error, 'denied');
+    assert.equal(r.store.getSnapshot().data, null);
+
+    requests[2].reject({ status: 500, code: 'INTERNAL_SERVER_ERROR' });
+    await getB;
+    assert.equal(r.store.getSnapshot().status, 'error');
+    assert.equal(r.store.getSnapshot().error, 'denied');
+    assert.equal(r.store.getSnapshot().data, null);
+  }
+
+  // Cenário 2 (ordem inversa): GET B retorna 500 primeiro -> GET A retorna 404 depois
+  {
+    const requests = [];
+    const current = { ...context };
+    const r = await rig({
+      get: () => {
+        const req = defer();
+        requests.push(req);
+        return req.promise;
+      },
+      current: () => current,
+    });
+    requests[0].resolve(body());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const getA = r.store.refresh();
+    const getB = r.store.refresh();
+    assert.equal(requests.length, 3);
+
+    requests[2].reject({ status: 500, code: 'INTERNAL_SERVER_ERROR' });
+    await getB;
+    assert.equal(r.store.getSnapshot().error, 'unavailable');
+
+    requests[1].reject({ status: 404, code: 'RESOURCE_NOT_FOUND' });
+    await getA;
+    assert.equal(r.store.getSnapshot().status, 'error');
+    assert.equal(r.store.getSnapshot().error, 'denied');
+    assert.equal(r.store.getSnapshot().data, null);
+  }
+
+  // Cenário 3: GET A retorna 401 (session) e GET B retorna 500 -> preserva session; troca de evento/logout descarta 403 antigo
+  {
+    const requests = [];
+    let current = { ...context };
+    const r = await rig({
+      get: () => {
+        const req = defer();
+        requests.push(req);
+        return req.promise;
+      },
+      current: () => current,
+    });
+    const getA = r.store.refresh();
+    const getB = r.store.refresh();
+    requests[1].reject({ status: 401, code: 'SESSION_REVOKED' });
+    await getA;
+    requests[2].reject({ status: 500, code: 'INTERNAL_SERVER_ERROR' });
+    await getB;
+    assert.equal(r.store.getSnapshot().error, 'session');
+
+    // Agora testa troca de evento e logout descartando 403 do escopo antigo
+    const oldEventReq = r.store.refresh();
+    current = { ...context, eventId: id(91) };
+    r.setContext(current);
+    requests[3].reject({ status: 403, code: 'STAFF_EVENT_FORBIDDEN' });
+    await oldEventReq;
+    assert.equal(r.store.getSnapshot().error, null);
+
+    const logoutReq = r.store.refresh();
+    current = null;
+    r.setContext(null);
+    requests[4].reject({ status: 403, code: 'STAFF_EVENT_FORBIDDEN' });
+    await logoutReq;
+    assert.equal(r.store.getSnapshot().status, 'idle');
+    assert.equal(r.store.getSnapshot().error, null);
+  }
+});

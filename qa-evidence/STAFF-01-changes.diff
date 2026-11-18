@@ -108,7 +108,7 @@ index d9ee9439..a67b4706 100644
        <View style={styles.backdrop}><View style={styles.card} accessibilityViewIsModal>
          <Text style={styles.title}>{dialog?.action.kind !== 'toggle' ? ({call:'Chamar próximo participante?',confirm_call:'Confirmar entrada presencial?',absent:'Marcar ausência externa?',remove:'Remover da fila externa?'}[dialog?.action.kind] ?? '')
 diff --git a/app/screens/staff/StaffEventsNavigator.js b/app/screens/staff/StaffEventsNavigator.js
-index 58b40b18..6dedef94 100644
+index 58b40b18..2527aba7 100644
 --- a/app/screens/staff/StaffEventsNavigator.js
 +++ b/app/screens/staff/StaffEventsNavigator.js
 @@ -12,8 +12,211 @@ import { useStaffPolling } from './useStaffPolling';
@@ -540,7 +540,7 @@ index 58b40b18..6dedef94 100644
        </ScrollView>
      </AuthBackground>
    );
-@@ -158,32 +455,93 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
+@@ -158,32 +455,95 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
          const { auth: current, staff: area } = live.current;
          const selected = area.getSelected();
          if (!selected || !current?.isAuthenticated || !current.user?.id || !current.isIdentityVerified()) return null;
@@ -557,13 +557,11 @@ index 58b40b18..6dedef94 100644
    }
    const store = storeRef.current;
    const [snapshot, setSnapshot] = useState(store.getSnapshot());
-+  const orphanSyncRef = useRef(null);
 +  const prevSectionRef = useRef(section);
    const epoch = auth.getSessionEpoch();
    const revision = auth.getIdentityRevision();
    useEffect(() => store.subscribe(setSnapshot), [store]);
    useEffect(() => {
-+    orphanSyncRef.current = null;
 +    prevSectionRef.current = 'panel';
      store.setContext({ eventId: event.id, userId: auth.user.id, epoch, revision });
 -    void store.refreshStations();
@@ -578,7 +576,6 @@ index 58b40b18..6dedef94 100644
 +    prevSectionRef.current = section;
      if (section !== 'station') store.clearQueue();
 +    if (prev !== 'panel' && section === 'panel') {
-+      orphanSyncRef.current = null;
 +      void store.revalidateOnReturn();
 +    }
    }, [store, section]);
@@ -600,20 +597,19 @@ index 58b40b18..6dedef94 100644
 +    ? `${event.id}:${epoch}:${revision}:${missingExperienceIds.join(',')}`
 +    : null;
 +  useEffect(() => {
-+    if (!orphanSignature) {
-+      orphanSyncRef.current = null;
-+      return;
-+    }
-+    if (section !== 'panel' || !ready || snapshot.accessLocked) return;
-+    if (orphanSyncRef.current === orphanSignature) return;
-+    orphanSyncRef.current = orphanSignature;
-+    void store.pollExperiences();
-+  }, [section, ready, snapshot.accessLocked, orphanSignature, store]);
++    if (section !== 'panel' || !ready || snapshot.accessLocked || !orphanSignature) return;
++    void store.syncOrphanExperiences();
++  }, [section, ready, snapshot.accessLocked, orphanSignature, snapshot.experiences, snapshot.experienceError, store]);
 +  const canPollStations = (section === 'panel' || section === 'station')
 +    && store.isCurrent(snapshot.context)
 +    && !snapshot.accessLocked
 +    && (snapshot.stationStatus === 'ready'
 +      || (snapshot.stationStatus === 'error' && (snapshot.stationError === 'network' || snapshot.stationError === 'unavailable')));
++  const canPollExperiences = section === 'panel'
++    && store.isCurrent(snapshot.context)
++    && !snapshot.accessLocked
++    && ((snapshot.experienceStatus === 'error' && (snapshot.experienceError === 'network' || snapshot.experienceError === 'unavailable'))
++      || snapshot.experienceError === 'stale');
 +  const canPollEntry = section === 'panel'
 +    && store.isCurrent(snapshot.context)
 +    && !snapshot.accessLocked
@@ -624,6 +620,12 @@ index 58b40b18..6dedef94 100644
 +    () => store.pollStations(),
 +    5000,
 +    `${event.id}:${section}:stations:${epoch}:${revision}`,
++  );
++  useStaffPolling(
++    canPollExperiences,
++    () => store.pollExperiences(),
++    5000,
++    `${event.id}:experiences:${epoch}:${revision}`,
 +  );
 +  useStaffPolling(
 +    canPollEntry,
@@ -642,7 +644,7 @@ index 58b40b18..6dedef94 100644
    const messages = {
      session: 'Não foi possível confirmar sua sessão. Entre novamente ou tente atualizar.',
      denied: 'Acesso ao evento ou à experiência indisponível. Atualize seus eventos autorizados.',
-@@ -191,73 +549,286 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
+@@ -191,73 +551,285 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
      unavailable: 'Não foi possível carregar os dados. Tente novamente.',
      stale: 'Dados operacionais possivelmente desatualizados. Atualize antes de operar.',
    };
@@ -719,7 +721,6 @@ index 58b40b18..6dedef94 100644
 -    </>}
 -  </>;
 +  const refresh = () => {
-+    orphanSyncRef.current = null;
 +    void store.refreshPanel();
 +  };
 +
@@ -917,7 +918,7 @@ index 58b40b18..6dedef94 100644
 +          <Button
 +            label="Atualizar estações"
 +            variant="secondary"
-+            disabled={snapshot.stationStatus === 'loading' || snapshot.experienceStatus === 'loading'}
++            disabled={snapshot.stationStatus === 'loading' || snapshot.experienceStatus === 'loading' || snapshot.entryStatus === 'loading'}
 +            onPress={refresh}
 +          />
 +        </>
@@ -992,7 +993,7 @@ index 58b40b18..6dedef94 100644
  }
  
  export default function StaffEventsNavigator() {
-@@ -273,16 +844,249 @@ export default function StaffEventsNavigator() {
+@@ -273,16 +845,249 @@ export default function StaffEventsNavigator() {
  
  const styles = StyleSheet.create({
    stackContent: { backgroundColor: '#0c0a17' },
@@ -1253,7 +1254,7 @@ index 58b40b18..6dedef94 100644
 +  logoutText: { color: '#ffffff', fontSize: 15, fontWeight: '700' },
  });
 diff --git a/app/services/staffDashboardService.js b/app/services/staffDashboardService.js
-index 4550d36c..fe6a32bb 100644
+index 4550d36c..34142251 100644
 --- a/app/services/staffDashboardService.js
 +++ b/app/services/staffDashboardService.js
 @@ -1,12 +1,19 @@
@@ -1279,7 +1280,7 @@ index 4550d36c..fe6a32bb 100644
  
  // O contexto é conferido novamente antes de publicar qualquer resultado.
  export function createStaffDashboardStore({ client, getContext }) {
-@@ -14,105 +21,377 @@ export function createStaffDashboardStore({ client, getContext }) {
+@@ -14,105 +21,528 @@ export function createStaffDashboardStore({ client, getContext }) {
    let generation = 0;
    let stationGeneration = 0;
    let experienceGeneration = 0;
@@ -1289,10 +1290,12 @@ index 4550d36c..fe6a32bb 100644
 +  let silentStations = false, silentExperiences = false, silentQueue = false, silentEntry = false;
 +  let accessLocked = false;
 +  let lockedKind = 'denied';
++  let revalidationRound = 0;
 +  let revalidationPending = new Set();
 +  let revalidationOk = new Set();
-+  let revalidationTransientError = false;
++  let revalidationErrors = new Map();
 +  let stagedPatch = {};
++  let orphanCheckedSignatures = new Set();
 +
    const listeners = new Set();
    const publish = (next) => { state = next; listeners.forEach((listener) => listener(state)); };
@@ -1301,8 +1304,41 @@ index 4550d36c..fe6a32bb 100644
 +  function resetRevalidation() {
 +    revalidationPending = new Set();
 +    revalidationOk = new Set();
-+    revalidationTransientError = false;
++    revalidationErrors = new Map();
 +    stagedPatch = {};
++  }
++
++  function computeOrphanSignature(st = state) {
++    if (
++      accessLocked
++      || !st.context
++      || st.stationStatus !== 'ready'
++      || st.experienceStatus !== 'ready'
++      || !Array.isArray(st.stations)
++      || st.stations.length === 0
++    ) {
++      return null;
++    }
++    const knownIds = new Set((st.experiences ?? []).map((exp) => exp.id ?? exp.experienceId));
++    const missingIds = [
++      ...new Set(
++        st.stations
++          .filter((item) => !knownIds.has(item.experienceId))
++          .map((item) => item.experienceId)
++          .filter(Boolean),
++      ),
++    ].sort();
++    if (missingIds.length === 0) return null;
++    return `${st.context.eventId}:${st.context.epoch}:${st.context.revision}:${missingIds.join(',')}`;
++  }
++
++  function recordOrphanVerification(orphanSigAtStart, nextState = state) {
++    const orphanSigAfter = computeOrphanSignature(nextState);
++    if (!orphanSigAfter) {
++      orphanCheckedSignatures.clear();
++    } else if (orphanSigAtStart && orphanSigAtStart === orphanSigAfter) {
++      orphanCheckedSignatures.add(orphanSigAfter);
++    }
 +  }
 +
    function setContext(context) {
@@ -1312,7 +1348,9 @@ index 4550d36c..fe6a32bb 100644
 +    silentStations = false; silentExperiences = false; silentQueue = false; silentEntry = false;
 +    accessLocked = false;
 +    lockedKind = 'denied';
++    revalidationRound += 1;
 +    resetRevalidation();
++    orphanCheckedSignatures.clear();
 +    publish(context ? {
 +      ...empty(),
 +      context,
@@ -1333,7 +1371,9 @@ index 4550d36c..fe6a32bb 100644
 +    silentStations = false; silentExperiences = false; silentQueue = false; silentEntry = false;
 +    accessLocked = true;
 +    lockedKind = kind === 'session' ? 'session' : 'denied';
++    revalidationRound += 1;
 +    resetRevalidation();
++    orphanCheckedSignatures.clear();
 +    publish({
 +      ...state,
 +      accessStatus: lockedKind,
@@ -1348,7 +1388,56 @@ index 4550d36c..fe6a32bb 100644
 +  function reportAccessDenied(kind = 'denied') {
 +    if (!isCurrent()) return;
 +    denied(kind);
-   }
++  }
++
++  function settleRevalidationRound() {
++    if (revalidationErrors.size === 0 && revalidationOk.size > 0) {
++      const resolved = { ...stagedPatch };
++      accessLocked = false;
++      lockedKind = 'denied';
++      resetRevalidation();
++      const nextState = {
++        ...state,
++        ...resolved,
++        accessStatus: 'granted',
++        accessLocked: false,
++      };
++      if (!computeOrphanSignature(nextState)) {
++        orphanCheckedSignatures.clear();
++      }
++      publish(nextState);
++      return;
++    }
++
++    const patch = {
++      accessStatus: lockedKind,
++      accessLocked: true,
++      stations: [],
++      experiences: [],
++      entry: null,
++      experienceId: null,
++      queueStatus: 'idle',
++      queue: null,
++      queueError: null,
++    };
++    if (revalidationOk.has('stations') || revalidationErrors.has('stations') || state.stationStatus === 'loading') {
++      patch.stationStatus = 'error';
++      patch.stationError = revalidationErrors.get('stations') ?? lockedKind;
++    }
++    if (revalidationOk.has('experiences') || revalidationErrors.has('experiences') || state.experienceStatus === 'loading') {
++      patch.experienceStatus = 'error';
++      patch.experienceError = revalidationErrors.get('experiences') ?? lockedKind;
++    }
++    if (revalidationOk.has('entry') || revalidationErrors.has('entry') || state.entryStatus === 'loading') {
++      patch.entryStatus = 'error';
++      patch.entryError = revalidationErrors.get('entry') ?? lockedKind;
++    }
++    resetRevalidation();
++    publish({
++      ...state,
++      ...patch,
++    });
++  }
 +
 +  function beginRevalidation(domain, loadingPatch) {
 +    if (!accessLocked) {
@@ -1358,23 +1447,27 @@ index 4550d36c..fe6a32bb 100644
 +        accessStatus: state.accessStatus === 'unknown' ? 'revalidating' : state.accessStatus,
 +        accessLocked: false,
 +      });
-+      return;
++      return revalidationRound;
 +    }
 +    if (revalidationPending.size === 0) {
-+      revalidationOk.clear();
-+      revalidationTransientError = false;
-+      stagedPatch = {};
++      revalidationRound += 1;
++      resetRevalidation();
++    } else {
++      revalidationOk.delete(domain);
++      revalidationErrors.delete(domain);
 +    }
 +    revalidationPending.add(domain);
++    const round = revalidationRound;
 +    publish({
 +      ...state,
 +      ...loadingPatch,
 +      accessStatus: 'revalidating',
 +      accessLocked: true,
 +    });
++    return round;
 +  }
 +
-+  function finishRevalidationSuccess(domain, successPatch) {
++  function finishRevalidationSuccess(domain, round, successPatch) {
 +    if (!accessLocked) {
 +      publish({
 +        ...state,
@@ -1384,6 +1477,7 @@ index 4550d36c..fe6a32bb 100644
 +      });
 +      return;
 +    }
++    if (round !== revalidationRound) return;
 +    revalidationPending.delete(domain);
 +    revalidationOk.add(domain);
 +    Object.assign(stagedPatch, successPatch);
@@ -1391,41 +1485,17 @@ index 4550d36c..fe6a32bb 100644
 +      publish({ ...state, accessStatus: 'revalidating', accessLocked: true });
 +      return;
 +    }
-+    if (revalidationTransientError || revalidationOk.size === 0) {
-+      resetRevalidation();
-+      publish({
-+        ...state,
-+        accessStatus: lockedKind,
-+        accessLocked: true,
-+        stations: [],
-+        experiences: [],
-+        entry: null,
-+        experienceId: null,
-+        queueStatus: 'idle',
-+        queue: null,
-+        queueError: null,
-+      });
-+      return;
-+    }
-+    const resolved = { ...stagedPatch };
-+    accessLocked = false;
-+    lockedKind = 'denied';
-+    resetRevalidation();
-+    publish({
-+      ...state,
-+      ...resolved,
-+      accessStatus: 'granted',
-+      accessLocked: false,
-+    });
++    settleRevalidationRound();
 +  }
 +
-+  function finishRevalidationError(domain, errorPatch) {
++  function finishRevalidationError(domain, round, kind, errorPatch) {
 +    if (!accessLocked) {
 +      publish({ ...state, ...errorPatch });
 +      return;
 +    }
++    if (round !== revalidationRound) return;
 +    revalidationPending.delete(domain);
-+    revalidationTransientError = true;
++    revalidationErrors.set(domain, kind);
 +    stagedPatch = {};
 +    if (revalidationPending.size > 0) {
 +      publish({
@@ -1436,37 +1506,24 @@ index 4550d36c..fe6a32bb 100644
 +      });
 +      return;
 +    }
-+    resetRevalidation();
-+    publish({
-+      ...state,
-+      ...errorPatch,
-+      accessStatus: lockedKind,
-+      accessLocked: true,
-+      stations: [],
-+      experiences: [],
-+      entry: null,
-+      experienceId: null,
-+      queueStatus: 'idle',
-+      queue: null,
-+      queueError: null,
-+    });
++    settleRevalidationRound();
 +  }
 +
 +  async function refreshEntryControl() {
 +    if (!isCurrent()) return;
 +    const context = state.context, revision = generation, request = ++entryGeneration;
 +    silentEntry = false;
-+    beginRevalidation('entry', { entryStatus: 'loading', entryError: null, entry: null });
++    const round = beginRevalidation('entry', { entryStatus: 'loading', entryError: null, entry: null });
 +    try {
 +      const entry = await fetchStaffEntrySummary(client, context.eventId);
 +      if (revision !== generation || request !== entryGeneration || !isCurrent(context)) return;
-+      finishRevalidationSuccess('entry', { entryStatus: 'ready', entry, entryError: null });
++      finishRevalidationSuccess('entry', round, { entryStatus: 'ready', entry, entryError: null });
 +    } catch (error) {
 +      if (revision !== generation || !isCurrent(context)) return;
 +      const kind = errorKind(error);
 +      if (kind === 'denied' || kind === 'session') return denied(kind);
 +      if (request !== entryGeneration) return;
-+      finishRevalidationError('entry', { entryStatus: 'error', entryError: kind, entry: null });
++      finishRevalidationError('entry', round, kind, { entryStatus: 'error', entryError: kind, entry: null });
 +    }
 +  }
 +
@@ -1491,7 +1548,7 @@ index 4550d36c..fe6a32bb 100644
 +    } finally {
 +      if (revision === generation && request === entryGeneration) silentEntry = false;
 +    }
-+  }
+   }
 +
    async function refreshExperiences() {
      if (!isCurrent()) return;
@@ -1501,7 +1558,9 @@ index 4550d36c..fe6a32bb 100644
 -    publish({ ...state, experienceStatus: 'loading', experienceError: null, experiences: [],
 -      experienceId: null, queueStatus: 'idle', queue: null, queueError: null });
 +    silentQueue = false;
-+    beginRevalidation('experiences', {
++    orphanCheckedSignatures.clear();
++    const orphanSigAtStart = computeOrphanSignature(state);
++    const round = beginRevalidation('experiences', {
 +      experienceStatus: 'loading', experienceError: null, experiences: [],
 +      experienceId: null, queueStatus: 'idle', queue: null, queueError: null,
 +    });
@@ -1510,7 +1569,10 @@ index 4550d36c..fe6a32bb 100644
 -      if (revision !== generation || request !== experienceGeneration || !isCurrent()) return;
 -      publish({ ...state, experienceStatus: 'ready', experiences });
 +      if (revision !== generation || request !== experienceGeneration || !isCurrent(context)) return;
-+      finishRevalidationSuccess('experiences', { experienceStatus: 'ready', experiences, experienceError: null });
++      finishRevalidationSuccess('experiences', round, { experienceStatus: 'ready', experiences, experienceError: null });
++      if (!accessLocked) {
++        recordOrphanVerification(orphanSigAtStart, state);
++      }
      } catch (error) {
 -      if (revision !== generation || request !== experienceGeneration || !isCurrent()) return;
 +      if (revision !== generation || !isCurrent(context)) return;
@@ -1518,31 +1580,58 @@ index 4550d36c..fe6a32bb 100644
        if (kind === 'denied' || kind === 'session') return denied(kind);
 -      publish({ ...state, experienceStatus: 'error', experienceError: kind, experiences: [] });
 +      if (request !== experienceGeneration) return;
-+      finishRevalidationError('experiences', { experienceStatus: 'error', experienceError: kind, experiences: [] });
++      finishRevalidationError('experiences', round, kind, { experienceStatus: 'error', experienceError: kind, experiences: [] });
      }
    }
 +
 +  async function pollExperiences() {
 +    const canRetry = state.experienceStatus === 'error' && isRecoverableError(state.experienceError);
-+    if (silentExperiences || accessLocked || !isCurrent() || (state.experienceStatus !== 'ready' && !canRetry)) return;
++    if (silentExperiences || accessLocked || !isCurrent() || (state.experienceStatus !== 'ready' && !canRetry)) return false;
 +    const context = state.context, revision = generation, request = experienceGeneration;
 +    const hadReady = state.experienceStatus === 'ready';
++    const orphanSigAtStart = computeOrphanSignature(state);
 +    silentExperiences = true;
 +    try {
 +      const { experiences } = await fetchStaffExperiences(client, context.eventId);
 +      if (revision === generation && request === experienceGeneration && isCurrent(context) && !accessLocked) {
-+        publish({ ...state, experienceStatus: 'ready', experiences, experienceError: null, accessStatus: 'granted', accessLocked: false });
++        const nextState = { ...state, experienceStatus: 'ready', experiences, experienceError: null, accessStatus: 'granted', accessLocked: false };
++        recordOrphanVerification(orphanSigAtStart, nextState);
++        publish(nextState);
++        return true;
 +      }
++      return false;
 +    } catch (error) {
-+      if (revision !== generation || !isCurrent(context)) return;
++      if (revision !== generation || !isCurrent(context)) return false;
 +      const kind = errorKind(error);
-+      if (kind === 'denied' || kind === 'session') return denied(kind);
-+      if (request !== experienceGeneration || accessLocked) return;
++      if (kind === 'denied' || kind === 'session') {
++        denied(kind);
++        return false;
++      }
++      if (request !== experienceGeneration || accessLocked) return false;
 +      if (hadReady) publish({ ...state, experienceError: 'stale' });
 +      else publish({ ...state, experienceStatus: 'error', experienceError: kind, experiences: [] });
++      return false;
 +    } finally {
 +      if (revision === generation && request === experienceGeneration) silentExperiences = false;
 +    }
++  }
++
++  function syncOrphanExperiences() {
++    if (silentExperiences || accessLocked || !isCurrent() || state.experienceStatus === 'loading') {
++      return Promise.resolve(false);
++    }
++    const sig = computeOrphanSignature(state);
++    if (!sig) {
++      orphanCheckedSignatures.clear();
++      return Promise.resolve(false);
++    }
++    if (orphanCheckedSignatures.has(sig)) {
++      return Promise.resolve(false);
++    }
++    if (state.experienceError === 'stale') {
++      return Promise.resolve(false);
++    }
++    return pollExperiences();
 +  }
 +
    async function refreshStations() {
@@ -1553,7 +1642,7 @@ index 4550d36c..fe6a32bb 100644
 -    publish({ ...state, stationStatus: 'loading', stationError: null, stations: [],
 -      experienceId: null, queueStatus: 'idle', queue: null, queueError: null });
 +    silentQueue = false;
-+    beginRevalidation('stations', {
++    const round = beginRevalidation('stations', {
 +      stationStatus: 'loading', stationError: null, stations: [],
 +      experienceId: null, queueStatus: 'idle', queue: null, queueError: null,
 +    });
@@ -1562,7 +1651,10 @@ index 4550d36c..fe6a32bb 100644
 -      if (revision !== generation || request !== stationGeneration || !isCurrent()) return;
 -      publish({ ...state, stationStatus: 'ready', stations });
 +      if (revision !== generation || request !== stationGeneration || !isCurrent(context)) return;
-+      finishRevalidationSuccess('stations', { stationStatus: 'ready', stations, stationError: null });
++      finishRevalidationSuccess('stations', round, { stationStatus: 'ready', stations, stationError: null });
++      if (!accessLocked && !computeOrphanSignature(state)) {
++        orphanCheckedSignatures.clear();
++      }
      } catch (error) {
 -      if (revision !== generation || request !== stationGeneration || !isCurrent()) return;
 +      if (revision !== generation || !isCurrent(context)) return;
@@ -1570,7 +1662,7 @@ index 4550d36c..fe6a32bb 100644
        if (kind === 'denied' || kind === 'session') return denied(kind);
 -      publish({ ...state, stationStatus: 'error', stationError: kind, stations: [] });
 +      if (request !== stationGeneration) return;
-+      finishRevalidationError('stations', { stationStatus: 'error', stationError: kind, stations: [] });
++      finishRevalidationError('stations', round, kind, { stationStatus: 'error', stationError: kind, stations: [] });
      }
    }
 +
@@ -1585,8 +1677,13 @@ index 4550d36c..fe6a32bb 100644
        const { stations } = await fetchStaffStations(client, context.eventId);
 -      if (revision === generation && request === stationGeneration && isCurrent(context))
 -        publish({ ...state, stations, stationError: null });
-+      if (revision === generation && request === stationGeneration && isCurrent(context) && !accessLocked)
-+        publish({ ...state, stationStatus: 'ready', stations, stationError: null, accessStatus: 'granted', accessLocked: false });
++      if (revision === generation && request === stationGeneration && isCurrent(context) && !accessLocked) {
++        const nextState = { ...state, stationStatus: 'ready', stations, stationError: null, accessStatus: 'granted', accessLocked: false };
++        if (!computeOrphanSignature(nextState)) {
++          orphanCheckedSignatures.clear();
++        }
++        publish(nextState);
++      }
      } catch (error) {
 -      if (revision !== generation || request !== stationGeneration || !isCurrent(context)) return;
 +      if (revision !== generation || !isCurrent(context)) return;
@@ -1602,6 +1699,43 @@ index 4550d36c..fe6a32bb 100644
 +      if (revision === generation && request === stationGeneration) silentStations = false;
 +    }
    }
++
++  async function verifyEventAccessFromQueue(context, revision, experienceId, queueReq) {
++    try {
++      const { stations } = await fetchStaffStations(client, context.eventId);
++      if (revision !== generation || !isCurrent(context) || accessLocked) return;
++      const keepQueueBlocked = queueReq === queueGeneration && state.experienceId === experienceId;
++      const nextState = {
++        ...state,
++        stationStatus: 'ready',
++        stations,
++        stationError: null,
++        accessStatus: 'granted',
++        accessLocked: false,
++        ...(keepQueueBlocked ? { queueStatus: 'error', queue: null, queueError: 'denied' } : {}),
++      };
++      if (!computeOrphanSignature(nextState)) {
++        orphanCheckedSignatures.clear();
++      }
++      publish(nextState);
++    } catch (verifyError) {
++      if (revision !== generation || !isCurrent(context)) return;
++      const verifyKind = errorKind(verifyError);
++      if (verifyKind === 'denied' || verifyKind === 'session') {
++        denied(verifyKind);
++        return;
++      }
++      if (!accessLocked && queueReq === queueGeneration && state.experienceId === experienceId) {
++        publish({
++          ...state,
++          queueStatus: 'error',
++          queue: null,
++          queueError: 'denied',
++          ...(state.stationStatus === 'ready' ? { stationError: 'stale' } : {}),
++        });
++      }
++    }
++  }
 +
    async function refreshQueue(experienceId = state.experienceId) {
 -    if (!isCurrent() || state.stationStatus !== 'ready' ||
@@ -1619,8 +1753,15 @@ index 4550d36c..fe6a32bb 100644
 -      if (revision !== generation || request !== queueGeneration || !isCurrent()) return;
 +      if (revision !== generation || !isCurrent(context)) return;
        const kind = errorKind(error);
-       if (kind === 'denied' || kind === 'session') return denied(kind);
-+      if (request !== queueGeneration || accessLocked) return;
+-      if (kind === 'denied' || kind === 'session') return denied(kind);
++      if (kind === 'session') return denied('session');
++      if (request !== queueGeneration || state.experienceId !== experienceId || accessLocked) return;
++      if (error?.status === 403) return denied('denied');
++      if (error?.status === 404) {
++        publish({ ...state, queueStatus: 'error', queue: null, queueError: 'denied' });
++        await verifyEventAccessFromQueue(context, revision, experienceId, request);
++        return;
++      }
        publish({ ...state, queueStatus: 'error', queue: null, queueError: kind });
      }
    }
@@ -1642,8 +1783,14 @@ index 4550d36c..fe6a32bb 100644
 -      if (kind === 'denied' || kind === 'session') denied(kind);
 -      else publish({ ...state, queueError: 'stale' });
 -    } finally { silentQueue = false; }
-+      if (kind === 'denied' || kind === 'session') return denied(kind);
-+      if (request !== queueGeneration || accessLocked) return;
++      if (kind === 'session') return denied('session');
++      if (request !== queueGeneration || state.experienceId !== experienceId || accessLocked) return;
++      if (error?.status === 403) return denied('denied');
++      if (error?.status === 404) {
++        publish({ ...state, queueStatus: 'error', queue: null, queueError: 'denied' });
++        await verifyEventAccessFromQueue(context, revision, experienceId, request);
++        return;
++      }
 +      publish({ ...state, queueError: 'stale' });
 +    } finally {
 +      if (revision === generation && request === queueGeneration) silentQueue = false;
@@ -1659,6 +1806,11 @@ index 4550d36c..fe6a32bb 100644
 -    subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); } };
 +
 +  function refreshPanel() {
++    if (isCurrent() && accessLocked) {
++      revalidationRound += 1;
++      resetRevalidation();
++      orphanCheckedSignatures.clear();
++    }
 +    return Promise.all([refreshStations(), refreshExperiences(), refreshEntryControl()]);
 +  }
 +
@@ -1682,6 +1834,7 @@ index 4550d36c..fe6a32bb 100644
 +    reportAccessDenied,
 +    refreshStations,
 +    refreshExperiences,
++    syncOrphanExperiences,
 +    refreshEntryControl,
 +    refreshPanel,
 +    revalidateOnReturn,
@@ -1695,7 +1848,7 @@ index 4550d36c..fe6a32bb 100644
 +  };
  }
 diff --git a/app/services/staffEntryService.js b/app/services/staffEntryService.js
-index 541a6f46..cbd5fef3 100644
+index 541a6f46..554563e4 100644
 --- a/app/services/staffEntryService.js
 +++ b/app/services/staffEntryService.js
 @@ -17,8 +17,10 @@ export function parseEntryState(body, eventId) {
@@ -1711,6 +1864,92 @@ index 541a6f46..cbd5fef3 100644
        ((body.canMarkAbsent || body.canRemove) && (!body.pendingCall || !body.externalQueueEnabled))) return invalid();
    return { pendingCall: body.pendingCall, canCall: body.canCall, canConfirm: body.canConfirm,
      canMarkAbsent: body.canMarkAbsent, canRemove: body.canRemove, eventId, externalQueueEnabled: body.externalQueueEnabled, canManage: body.canManage,
+@@ -69,39 +71,71 @@ export const isDefinitiveEntryRejection = (error) => [400, 401, 403, 404].includ
+ 
+ /** Sem replay de POST: um dispatching desconhecido só permite consultas. */
+ export function createStaffEntryStore({ client, storage, createKey, getContext }) {
+-  let state = empty(), generation = 0, readGeneration = 0, flight = null, silentFlight = false;
++  let state = empty(), generation = 0, readGeneration = 0, flight = null, silentFlight = false, revokedKind = null;
+   const listeners = new Set();
+   const publish = (patch) => { state = { ...state, ...patch }; listeners.forEach(fn => fn(state)); };
+   const isCurrent = (context = state.context) => same(context, state.context) && same(context, getContext());
+-  function setContext(context) { generation++; readGeneration++; state = empty(); publish({ context }); }
++  function setContext(context) {
++    generation++;
++    readGeneration++;
++    silentFlight = false;
++    revokedKind = null;
++    state = empty();
++    publish({ context });
++  }
+   async function refresh() {
+     const context = state.context, currentGeneration = generation, request = ++readGeneration;
++    silentFlight = false;
+     if (!isCurrent(context)) return;
+-    const current = () => generation === currentGeneration && request === readGeneration && isCurrent(context);
+-    publish({ status: 'loading', data: null, error: null });
++    const sameScope = () => generation === currentGeneration && isCurrent(context);
++    const current = () => sameScope() && request === readGeneration;
++    publish({ status: 'loading', data: null, error: revokedKind });
+     let pending = null, storageError = false;
+     try { pending = active(await storage.get(context.userId)); } catch { storageError = true; }
+-    if (!current()) return;
+-    publish({ pending, storageError });
++    if (!sameScope()) return;
++    if (request === readGeneration) publish({ pending, storageError });
+     try {
+       const data = parseEntryState(await client.get(`/staff/events/${context.eventId}/entry-control`, { auth: true }), context.eventId);
+-      if (current()) publish({ status: 'ready', data });
+-    } catch (error) { if (current()) publish({ status: 'error', data: null, error: failure(error) }); }
++      if (!current()) return;
++      revokedKind = null;
++      publish({ status: 'ready', data, error: null });
++    } catch (error) {
++      if (!sameScope()) return;
++      const kind = failure(error);
++      if (kind === 'session' || kind === 'denied') {
++        revokedKind = kind === 'session' ? 'session' : 'denied';
++        readGeneration += 1;
++        silentFlight = false;
++        publish({ status: 'error', data: null, error: revokedKind, pending, storageError });
++        return;
++      }
++      if (!current()) return;
++      publish({ status: 'error', data: null, error: revokedKind ?? kind });
++    }
+   }
+   async function poll() {
+-    if (silentFlight || flight || !isCurrent() || state.status !== 'ready') return;
++    if (silentFlight || flight || !isCurrent() || state.status !== 'ready' || revokedKind) return;
+     const context = state.context, currentGeneration = generation, request = readGeneration;
++    const sameScope = () => generation === currentGeneration && isCurrent(context);
+     silentFlight = true;
+     try {
+       const data = parseEntryState(await client.get(`/staff/events/${context.eventId}/entry-control`, { auth: true }), context.eventId);
+-      if (currentGeneration === generation && request === readGeneration && isCurrent(context))
++      if (sameScope() && request === readGeneration && !revokedKind)
+         publish({ data, error: null });
+     } catch (error) {
+-      if (currentGeneration !== generation || request !== readGeneration || !isCurrent(context)) return;
++      if (!sameScope()) return;
+       const kind = failure(error);
+-      if (kind === 'session' || kind === 'denied') publish({ status: 'error', data: null, error: kind });
+-      else publish({ error: 'stale' });
+-    } finally { silentFlight = false; }
++      if (kind === 'session' || kind === 'denied') {
++        revokedKind = kind === 'session' ? 'session' : 'denied';
++        readGeneration += 1;
++        publish({ status: 'error', data: null, error: revokedKind });
++        return;
++      }
++      if (request !== readGeneration || revokedKind) return;
++      publish({ error: 'stale' });
++    } finally {
++      if (generation === currentGeneration && request === readGeneration) silentFlight = false;
++    }
+   }
+   async function mutate(action) {
+     if (flight) return { kind: 'busy' };
 diff --git a/app/services/staffOperationsService.js b/app/services/staffOperationsService.js
 index 735cead6..54ef8fee 100644
 --- a/app/services/staffOperationsService.js
@@ -1754,7 +1993,7 @@ index 735cead6..54ef8fee 100644
    requireIds(experienceId, stationId);
    const session = body?.serviceSession;
 diff --git a/app/tests/roleRoutingIntegration.test.cjs b/app/tests/roleRoutingIntegration.test.cjs
-index a1cb6120..187b928a 100644
+index a1cb6120..64d27351 100644
 --- a/app/tests/roleRoutingIntegration.test.cjs
 +++ b/app/tests/roleRoutingIntegration.test.cjs
 @@ -82,10 +82,42 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
@@ -1801,12 +2040,13 @@ index a1cb6120..187b928a 100644
    native.Platform = { OS: control.platformOS ?? 'web' };
    function FocusedStack(props) {
      const { state, descriptors, NavigationContent } = Navigation.useNavigationBuilder(StackRouter, props);
-@@ -104,8 +136,24 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+@@ -104,9 +136,25 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
        if (name === 'expo-secure-store') return control.secureStore ?? {};
        if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView', SafeAreaProvider: passthrough };
        if (name === '@react-navigation/native-stack') return { createNativeStackNavigator: Navigation.createNavigatorFactory(FocusedStack) };
 -      if (name === '@react-navigation/native') return { useIsFocused: () => true, NavigationContainer: ({ children }) =>
 -        React.createElement(Navigation.BaseNavigationContainer, { ref: navRef, onUnhandledAction: (action) => unhandled.push(action) }, children) };
+-      const target = path.posix.normalize(path.posix.join(directory, name));
 +      if (name === '@react-navigation/native') {
 +        return {
 +          useIsFocused: () => {
@@ -1825,10 +2065,11 @@ index a1cb6120..187b928a 100644
 +          ),
 +        };
 +      }
-       const target = path.posix.normalize(path.posix.join(directory, name));
++      const target = path.posix.normalize(path.posix.join(directory, name)).replace(/\.js$/, '');
        if (target === 'components/ui/AuthBackground') {
          return { AuthBackground: ({ children, ...props }) => React.createElement('View', props, children) };
-@@ -172,12 +220,55 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+       }
+@@ -172,12 +220,56 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
        assert.equal(buttons.length, 1, `botão ${label}`);
        await Renderer.act(async () => { await buttons[0].props.onPress(); });
      },
@@ -1871,6 +2112,7 @@ index a1cb6120..187b928a 100644
 +      });
 +    },
      modal() { return tree.root.findByType('Modal'); },
++    modals() { return tree.root.findAllByType('Modal'); },
      hasButton(label) { return tree.root.findAllByType('Pressable').some(node => node.props.accessibilityLabel === label); },
      handler(label) { return tree.root.findAllByType('Pressable').find(node => node.props.accessibilityLabel === label).props.onPress; },
      confirmHandler() { return tree.root.findAllByType('Pressable')
@@ -1885,7 +2127,7 @@ index a1cb6120..187b928a 100644
    };
  }
  
-@@ -722,7 +813,7 @@ test('painel Staff real exibe estação e fila e limpa os dados ao receber 403',
+@@ -722,7 +814,7 @@ test('painel Staff real exibe estação e fila e limpa os dados ao receber 403',
    await app.press('Selecionar evento Evento autorizado');
    assert.ok(app.hasText('Painel operacional'));
    assert.ok(app.hasText('Estação real'));
@@ -1894,7 +2136,7 @@ index a1cb6120..187b928a 100644
    await app.press('Selecionar estação Estação real da experiência Experiência real');
    assert.ok(app.hasText('Pessoas em espera: 0'));
    assert.ok(!app.hasText('Rafael T.'));
-@@ -1033,3 +1124,357 @@ test('401 terminal no Controle de Entrada remove lista nominal e área Staff', {
+@@ -1033,3 +1125,515 @@ test('401 terminal no Controle de Entrada remove lista nominal e área Staff', {
    revoked = true; await app.press('Atualizar fila de entrada');
    assert.equal(app.route(), 'Login'); assert.ok(!app.hasText('1. Ana')); app.dispose();
  });
@@ -1954,7 +2196,8 @@ index a1cb6120..187b928a 100644
 +    await app.tickTimers(5000);
 +    assert.ok(!app.hasText('1. Ana'));
 +    assert.ok(!app.hasText('2. Bia'));
-+    assert.equal(app.modal().props.visible, false);
++    assert.equal(app.modals().every((m) => !m.props.visible), true);
++    assert.equal(app.modals().length, 0);
 +    await app.act(async () => staleConfirm());
 +    assert.equal(mutations, 0, 'callback antigo não dispara mutação após 403');
 +    assert.ok(app.hasText('Acesso ao evento indisponível'));
@@ -2195,43 +2438,45 @@ index a1cb6120..187b928a 100644
 +
 +    // 1. Retorno de Controle de Entrada por botão interno e por retorno nativo (beforeRemove) executam revalidação equivalente
 +    await app.press('Controle de Entrada');
++    assert.deepEqual(counts, { stations: 1, experiences: 1, entry: 2 }, 'abertura da subtela consulta apenas /entry-control');
 +    await app.press('Voltar ao painel');
-+    assert.deepEqual(counts, { stations: 2, experiences: 2, entry: 2 });
++    assert.deepEqual(counts, { stations: 2, experiences: 2, entry: 3 }, 'retorno por botão interno revalida painel completo (+1 em cada recurso)');
 +
 +    await app.press('Controle de Entrada');
++    assert.deepEqual(counts, { stations: 2, experiences: 2, entry: 4 }, 'nova abertura da subtela consulta apenas /entry-control');
 +    app.back();
 +    await app.act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 +    assert.ok(app.hasText('Painel operacional'));
-+    assert.deepEqual(counts, { stations: 3, experiences: 3, entry: 3 });
++    assert.deepEqual(counts, { stations: 3, experiences: 3, entry: 5 }, 'retorno nativo revalida painel completo (+1 em cada recurso)');
 +
 +    // 2. Retorno de Estação por botão interno e por retorno nativo (beforeRemove) executam revalidação equivalente
 +    await app.press('Selecionar estação Estação real da experiência Just Dance');
 +    await app.press('Voltar ao painel');
-+    assert.deepEqual(counts, { stations: 4, experiences: 4, entry: 4 });
++    assert.deepEqual(counts, { stations: 4, experiences: 4, entry: 6 });
 +
 +    await app.press('Selecionar estação Estação real da experiência Just Dance');
 +    app.back();
 +    await app.act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 +    assert.ok(app.hasText('Painel operacional'));
-+    assert.deepEqual(counts, { stations: 5, experiences: 5, entry: 5 });
++    assert.deepEqual(counts, { stations: 5, experiences: 5, entry: 7 });
 +
 +    // 3. Perda de foco e segundo plano pausam polling; retomada reativa exatamente 1 ciclo de 5s
 +    await app.setFocus(false);
 +    await app.tickTimers(10000);
-+    assert.deepEqual(counts, { stations: 5, experiences: 5, entry: 5 }, 'sem foco não consulta em polling');
++    assert.deepEqual(counts, { stations: 5, experiences: 5, entry: 7 }, 'sem foco não consulta em polling');
 +
 +    await app.setFocus(true);
 +    await app.setAppState('background');
 +    await app.tickTimers(10000);
-+    assert.deepEqual(counts, { stations: 5, experiences: 5, entry: 5 }, 'em segundo plano não consulta em polling');
++    assert.deepEqual(counts, { stations: 5, experiences: 5, entry: 7 }, 'em segundo plano não consulta em polling');
 +
 +    await app.setAppState('active');
 +    includeOrphanStation = true;
 +    await app.tickTimers(5000);
 +    await app.act(async () => { await new Promise((r) => setTimeout(r, 0)); });
-+    // Polling atualizou estações (6) e entrada (6); estação órfã disparou exatamente 1 revalidação de experiências (6)
++    // Polling atualizou estações (6) e entrada (8); estação órfã disparou exatamente 1 revalidação de experiências (6)
 +    assert.equal(counts.stations, 6);
-+    assert.equal(counts.entry, 6);
++    assert.equal(counts.entry, 8);
 +    assert.equal(counts.experiences, 6);
 +    assert.ok(app.hasText('Experiência não vinculada'));
 +    assert.equal(app.hasButton('Selecionar estação Estação VR da experiência Arena VR'), false);
@@ -2252,8 +2497,163 @@ index a1cb6120..187b928a 100644
 +    app.dispose();
 +  }
 +});
++
++test('R3-01, R3-02, R3-03 e R3-04: revalidação parcial não trava botão Atualizar estações, negativa concorrente na entrada propaga ao painel, 404 tardio de fila abandonada é ignorado e experiência desconhecida recupera após falha de rede', async () => {
++  const unknownExperienceId = '99999999-9999-4999-8999-999999999999';
++  const unknownStation = {
++    id: '88888888-8888-4888-8888-888888888888',
++    experienceId: unknownExperienceId,
++    label: 'Estação Nova',
++    availability: 'available',
++    pendingServiceSessionId: null,
++  };
++  let stationsMode = 'ok';
++  let experiencesMode = 'ok';
++  let entryMode = 'ok';
++  let includeUnknownStation = false;
++  let includeUnknownExperience = false;
++  let pendingQueueReq = null;
++  let pendingEntryReqs = [];
++
++  const app = createIntegration({
++    initialUser: staffUser,
++    control: {
++      realStaff: true,
++      events: [staffEvent],
++      http: async (route, options) => {
++        if (route.endsWith('/stations')) {
++          if (stationsMode === 'deny403') throw Object.assign(new Error('403'), { status: 403 });
++          if (stationsMode === 'err500') throw Object.assign(new Error('500'), { status: 500 });
++          const list = [realStation];
++          if (includeUnknownStation) list.push(unknownStation);
++          return { eventId: staffEvent.id, stations: list };
++        }
++        if (route.endsWith('/experiences')) {
++          if (experiencesMode === 'deny403') throw Object.assign(new Error('403'), { status: 403 });
++          if (experiencesMode === 'networkOnce') {
++            experiencesMode = 'ok';
++            throw Object.assign(new Error('offline'), { isNetworkError: true });
++          }
++          const list = [{ id: realExperienceId, name: 'Just Dance' }];
++          if (includeUnknownExperience) list.push({ id: unknownExperienceId, name: 'Beat Saber' });
++          return { eventId: staffEvent.id, experiences: list };
++        }
++        if (route.endsWith('/queue')) {
++          if (pendingQueueReq) return pendingQueueReq.promise;
++          return {
++            eventId: staffEvent.id,
++            experienceId: realExperienceId,
++            waitingCount: 0,
++            firstWaitingQueueEntryId: null,
++            waiting: [],
++            activeCall: null,
++          };
++        }
++        if (route.includes('/entry-control') && options.method === 'GET') {
++          if (entryMode === 'deferred') {
++            const d = deferred();
++            pendingEntryReqs.push(d);
++            return d.promise;
++          }
++          if (entryMode === 'deny403') throw Object.assign(new Error('403'), { status: 403 });
++          if (entryMode === 'err500') throw Object.assign(new Error('500'), { status: 500 });
++          return {
++            eventId: staffEvent.id,
++            externalQueueEnabled: true,
++            canManage: true,
++            observedAt: at,
++            pendingCall: null,
++            canCall: false,
++            canConfirm: false,
++            canMarkAbsent: false,
++            canRemove: false,
++            waitingCount: 0,
++            waiting: [],
++          };
++        }
++        return undefined;
++      },
++    },
++  });
++
++  try {
++    await app.mount();
++    await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
++    await app.press('Selecionar evento Evento autorizado');
++    assert.ok(app.hasText('Just Dance'));
++
++    // 1. R3-03: 404 tardio de fila já abandonada ao voltar ao painel não bloqueia o evento
++    pendingQueueReq = deferred();
++    await app.press('Selecionar estação Estação real da experiência Just Dance');
++    await app.press('Voltar ao painel');
++    await app.act(async () => {
++      pendingQueueReq.reject(Object.assign(new Error('404'), { status: 404 }));
++      await new Promise((r) => setTimeout(r, 0));
++    });
++    pendingQueueReq = null;
++    assert.ok(app.hasText('Just Dance'), '404 de fila abandonada não limpa painel');
++    assert.equal(app.isDisabled('Controle de Entrada'), false);
++
++    // 2. R3-02: na subtela Controle de Entrada, GET A pendente (403) + refresh manual GET B (500) propaga perda de acesso ao painel
++    await app.press('Controle de Entrada');
++    entryMode = 'deferred';
++    pendingEntryReqs = [];
++    // Polling dispara GET A
++    const tickA = app.tickTimers(5000);
++    // Operador dispara refresh manual que inicia GET B
++    const manualB = app.press('Atualizar');
++    assert.equal(pendingEntryReqs.length, 2);
++
++    // GET A retorna 403 e GET B retorna 500
++    await app.act(async () => {
++      pendingEntryReqs[0].reject(Object.assign(new Error('403'), { status: 403 }));
++      pendingEntryReqs[1].reject(Object.assign(new Error('500'), { status: 500 }));
++      await Promise.all([tickA, manualB]);
++    });
++    assert.ok(app.hasText('Acesso ao evento indisponível'));
++
++    await app.press('Voltar ao painel');
++    assert.ok(app.hasText('SEM ACESSO'));
++    assert.equal(app.isDisabled('Controle de Entrada'), true);
++
++    // 3. R3-01: revalidação parcial (200 em stations, 200 em experiences, 500 em entry-control) mantém bloqueio mas reabilita botão "Atualizar estações"
++    stationsMode = 'ok';
++    experiencesMode = 'ok';
++    entryMode = 'err500';
++    await app.press('Atualizar estações');
++    assert.ok(app.hasText('SEM ACESSO'));
++    assert.ok(!app.hasText('Just Dance'), 'não expõe dados parciais antes de confirmação completa');
++    assert.equal(app.isDisabled('Controle de Entrada'), true);
++    assert.equal(app.isDisabled('Atualizar estações'), false, 'botão Atualizar estações não fica preso em loading');
++
++    // Nova tentativa após falha parcial com os três retornando 200 restaura o painel
++    entryMode = 'ok';
++    await app.press('Atualizar estações');
++    assert.ok(app.hasText('Just Dance'));
++    assert.equal(app.isDisabled('Controle de Entrada'), false);
++    assert.equal(app.isDisabled('Atualizar estações'), false);
++
++    // 4. R3-04: estação com experiência desconhecida cuja sincronização inicial falha por rede se recupera no próximo ciclo de 5s mantendo a mesma assinatura
++    includeUnknownStation = true;
++    includeUnknownExperience = true;
++    experiencesMode = 'networkOnce';
++    await app.tickTimers(5000);
++    await app.act(async () => { await new Promise((r) => setTimeout(r, 0)); });
++    // Primeira tentativa automática falhou com erro de rede, então ainda exibe Experiência não vinculada
++    assert.ok(app.hasText('Experiência não vinculada'));
++
++    // Próximo ciclo de 5s reexecuta pollExperiences() para a mesma assinatura e encontra Beat Saber
++    await app.tickTimers(5000);
++    await app.act(async () => { await new Promise((r) => setTimeout(r, 0)); });
++    assert.ok(app.hasText('Beat Saber'));
++    assert.ok(!app.hasText('Experiência não vinculada'));
++    assert.equal(app.hasButton('Selecionar estação Estação Nova da experiência Beat Saber'), true);
++  } finally {
++    app.dispose();
++  }
++});
 diff --git a/app/tests/staffDashboard.test.cjs b/app/tests/staffDashboard.test.cjs
-index 9b89ac99..d3005674 100644
+index 9b89ac99..eaee6961 100644
 --- a/app/tests/staffDashboard.test.cjs
 +++ b/app/tests/staffDashboard.test.cjs
 @@ -1,7 +1,11 @@
@@ -2269,7 +2669,22 @@ index 9b89ac99..d3005674 100644
  const { createStaffDashboardStore } = loadModule('services/staffDashboardService.js', (name) => {
    if (name === './staffOperationsService') return operations;
    return require(name);
-@@ -208,3 +212,516 @@ test('retorno da estação invalida consulta de fila ainda pendente', async () =
+@@ -139,7 +143,13 @@ test('troca de experiência descarta fila anterior e 404 limpa os dados do event
+   requests[1].resolve(queue()); await old;
+   assert.equal(store.getSnapshot().queue.experienceId, secondExperienceId);
+   const denied = store.refreshQueue(secondExperienceId);
+-  requests[3].reject(Object.assign(new Error('404'), { status: 404 })); await denied;
++  requests[3].reject(Object.assign(new Error('404'), { status: 404 }));
++  await Promise.resolve();
++  assert.equal(store.getSnapshot().queueStatus, 'error');
++  assert.equal(store.getSnapshot().queueError, 'denied');
++  assert.equal(store.getSnapshot().queue, null);
++  requests[4].reject(Object.assign(new Error('404'), { status: 404 }));
++  await denied;
+   assert.equal(store.getSnapshot().stationError, 'denied');
+   assert.equal(store.getSnapshot().queue, null);
+   assert.equal(store.getSnapshot().stations.length, 0);
+@@ -208,3 +218,848 @@ test('retorno da estação invalida consulta de fila ainda pendente', async () =
    assert.equal(store.getSnapshot().queue, null);
    assert.equal(store.getSnapshot().experienceId, null);
  });
@@ -2786,11 +3201,454 @@ index 9b89ac99..d3005674 100644
 +  assert.equal(switchStore.getSnapshot().stations.length, 0);
 +  assert.equal(switchStore.getSnapshot().entry, null);
 +});
++
++test('R3-01: revalidação parcial após negativa nunca deixa domínios presos em loading (200/200/500, 500/200/200, rede após dois 200, tentativas consecutivas e troca de contexto)', async () => {
++  let current = context();
++  let reqStations = [];
++  let reqExperiences = [];
++  let reqEntry = [];
++  let mode = 'deny403';
++
++  const store = createStaffDashboardStore({
++    getContext: () => current,
++    client: {
++      get: (url) => {
++        if (mode === 'deny403') return Promise.reject(Object.assign(new Error('403'), { status: 403 }));
++        const d = deferred();
++        if (url.endsWith('/stations')) reqStations.push(d);
++        else if (url.endsWith('/experiences')) reqExperiences.push(d);
++        else if (url.endsWith('/entry-control')) reqEntry.push(d);
++        return d.promise;
++      },
++    },
++  });
++
++  store.setContext(current);
++  await store.refreshPanel();
++  assert.equal(store.getSnapshot().accessLocked, true);
++
++  // 1. Revalidação após negativa com 200, 200, 500
++  mode = 'manual';
++  const attempt1 = store.refreshPanel();
++  assert.equal(store.getSnapshot().stationStatus, 'loading');
++  assert.equal(store.getSnapshot().experienceStatus, 'loading');
++  assert.equal(store.getSnapshot().entryStatus, 'loading');
++
++  reqStations[0].resolve(stations());
++  reqExperiences[0].resolve({ eventId, experiences: [{ id: experienceId, name: 'Just Dance' }] });
++  await Promise.resolve();
++  assert.equal(store.getSnapshot().accessLocked, true);
++  assert.equal(store.getSnapshot().stations.length, 0);
++
++  reqEntry[0].reject(Object.assign(new Error('500'), { status: 500 }));
++  await attempt1;
++  assert.equal(store.getSnapshot().accessLocked, true);
++  assert.equal(store.getSnapshot().accessStatus, 'denied');
++  assert.notEqual(store.getSnapshot().stationStatus, 'loading');
++  assert.notEqual(store.getSnapshot().experienceStatus, 'loading');
++  assert.notEqual(store.getSnapshot().entryStatus, 'loading');
++  assert.equal(store.getSnapshot().stationStatus, 'error');
++  assert.equal(store.getSnapshot().experienceStatus, 'error');
++  assert.equal(store.getSnapshot().entryStatus, 'error');
++  assert.equal(store.getSnapshot().entryError, 'unavailable');
++  assert.equal(store.getSnapshot().stations.length, 0);
++  assert.equal(store.getSnapshot().experiences.length, 0);
++  assert.equal(store.getSnapshot().entry, null);
++
++  // 2. Revalidação após negativa com 500, 200, 200 (falha ocorre primeiro)
++  reqStations = [];
++  reqExperiences = [];
++  reqEntry = [];
++  const attempt2 = store.refreshPanel();
++  reqStations[0].reject(Object.assign(new Error('500'), { status: 500 }));
++  await Promise.resolve();
++  reqExperiences[0].resolve({ eventId, experiences: [{ id: experienceId, name: 'Just Dance' }] });
++  reqEntry[0].resolve(entrySummary());
++  await attempt2;
++  assert.equal(store.getSnapshot().accessLocked, true);
++  assert.equal(store.getSnapshot().stationStatus, 'error');
++  assert.equal(store.getSnapshot().stationError, 'unavailable');
++  assert.equal(store.getSnapshot().experienceStatus, 'error');
++  assert.equal(store.getSnapshot().entryStatus, 'error');
++  assert.equal(store.getSnapshot().stations.length, 0);
++  assert.equal(store.getSnapshot().experiences.length, 0);
++  assert.equal(store.getSnapshot().entry, null);
++
++  // 3. Revalidação após negativa com falha de rede após dois 200
++  reqStations = [];
++  reqExperiences = [];
++  reqEntry = [];
++  const attempt3 = store.refreshPanel();
++  reqStations[0].resolve(stations());
++  reqEntry[0].resolve(entrySummary());
++  await Promise.resolve();
++  reqExperiences[0].reject(Object.assign(new Error('offline'), { isNetworkError: true }));
++  await attempt3;
++  assert.equal(store.getSnapshot().accessLocked, true);
++  assert.equal(store.getSnapshot().stationStatus, 'error');
++  assert.equal(store.getSnapshot().experienceStatus, 'error');
++  assert.equal(store.getSnapshot().experienceError, 'network');
++  assert.equal(store.getSnapshot().entryStatus, 'error');
++
++  // 4. Duas tentativas consecutivas de revalidação e recuperação completa quando os três retornam 200
++  reqStations = [];
++  reqExperiences = [];
++  reqEntry = [];
++  const waveA = store.refreshPanel();
++  const waveB = store.refreshPanel();
++  // Respostas atrasadas da waveA não interferem na waveB
++  reqStations[0].reject(Object.assign(new Error('500'), { status: 500 }));
++  reqExperiences[0].resolve({ eventId, experiences: [] });
++  reqEntry[0].resolve(entrySummary());
++  await waveA;
++
++  reqStations[1].resolve(stations());
++  reqExperiences[1].resolve({ eventId, experiences: [{ id: experienceId, name: 'Just Dance' }] });
++  reqEntry[1].resolve(entrySummary());
++  await waveB;
++
++  assert.equal(store.getSnapshot().accessLocked, false);
++  assert.equal(store.getSnapshot().accessStatus, 'granted');
++  assert.equal(store.getSnapshot().stationStatus, 'ready');
++  assert.equal(store.getSnapshot().experienceStatus, 'ready');
++  assert.equal(store.getSnapshot().entryStatus, 'ready');
++  assert.equal(store.getSnapshot().stations.length, 1);
++
++  // 5. Troca de evento e logout durante tentativa de revalidação
++  store.reportAccessDenied('denied');
++  reqStations = [];
++  reqExperiences = [];
++  reqEntry = [];
++  const inFlightSwitch = store.refreshPanel();
++  current = context(otherEventId, 'b', 2);
++  store.setContext(current);
++  reqStations[0].resolve(stations());
++  reqExperiences[0].resolve({ eventId, experiences: [{ id: experienceId, name: 'Just Dance' }] });
++  reqEntry[0].reject(Object.assign(new Error('500'), { status: 500 }));
++  await inFlightSwitch;
++  assert.equal(store.getSnapshot().accessLocked, false);
++  assert.equal(store.getSnapshot().context.eventId, otherEventId);
++
++  current = null;
++  store.setContext(null);
++  assert.equal(store.getSnapshot().stationStatus, 'idle');
++  assert.equal(store.getSnapshot().accessLocked, false);
++});
++
++test('R3-03: negativa 404 em fila abandonada é descartada e 404 na fila ativa diferencia experiência indisponível de perda de acesso ao evento', async () => {
++  const current = context();
++  let queueReqs = [];
++  let stationVerifyMode = 'ok';
++
++  const store = createStaffDashboardStore({
++    getContext: () => current,
++    client: {
++      get: (url) => {
++        if (url.endsWith('/queue')) {
++          const d = deferred();
++          queueReqs.push({ url, d });
++          return d.promise;
++        }
++        if (url.endsWith('/stations')) {
++          if (stationVerifyMode === 'deny403') {
++            return Promise.reject(Object.assign(new Error('403'), { status: 403 }));
++          }
++          const base = stations();
++          base.stations.push({ ...base.stations[0], id: secondStationId, experienceId: secondExperienceId });
++          return Promise.resolve(base);
++        }
++        if (url.endsWith('/experiences')) {
++          return Promise.resolve({
++            eventId,
++            experiences: [
++              { id: experienceId, name: 'Just Dance' },
++              { id: secondExperienceId, name: 'Street Fighter' },
++            ],
++          });
++        }
++        return Promise.resolve(entrySummary());
++      },
++    },
++  });
++
++  store.setContext(current);
++  await store.refreshPanel();
++  assert.equal(store.getSnapshot().accessLocked, false);
++  assert.equal(store.getSnapshot().stations.length, 2);
++
++  // 1. 404 tardio da fila após saída da estação (clearQueue) não bloqueia o evento
++  const abandonedExit = store.refreshQueue(experienceId);
++  store.clearQueue();
++  queueReqs[0].d.reject(Object.assign(new Error('404'), { status: 404 }));
++  await abandonedExit;
++  assert.equal(store.getSnapshot().accessLocked, false);
++  assert.equal(store.getSnapshot().stationStatus, 'ready');
++  assert.equal(store.getSnapshot().stations.length, 2);
++  assert.equal(store.getSnapshot().queueStatus, 'idle');
++
++  // 2. 404 tardio da fila anterior após troca de estação/experiência não afeta a nova fila nem bloqueia o evento
++  queueReqs = [];
++  const firstQueue = store.refreshQueue(experienceId);
++  const secondQueue = store.refreshQueue(secondExperienceId);
++  queueReqs[1].d.resolve({ ...queue(), experienceId: secondExperienceId });
++  await secondQueue;
++  queueReqs[0].d.reject(Object.assign(new Error('404'), { status: 404 }));
++  await firstQueue;
++  assert.equal(store.getSnapshot().accessLocked, false);
++  assert.equal(store.getSnapshot().queueStatus, 'ready');
++  assert.equal(store.getSnapshot().queue.experienceId, secondExperienceId);
++
++  // 3. 404 na fila ativa com acesso ao evento ainda válido bloqueia apenas a fila e preserva dados do painel
++  queueReqs = [];
++  stationVerifyMode = 'ok';
++  const active404ValidEvent = store.pollQueue(secondExperienceId);
++  queueReqs[0].d.reject(Object.assign(new Error('404'), { status: 404 }));
++  await active404ValidEvent;
++  assert.equal(store.getSnapshot().accessLocked, false);
++  assert.equal(store.getSnapshot().accessStatus, 'granted');
++  assert.equal(store.getSnapshot().stationStatus, 'ready');
++  assert.equal(store.getSnapshot().stations.length, 2);
++  assert.equal(store.getSnapshot().experienceStatus, 'ready');
++  assert.equal(store.getSnapshot().entryStatus, 'ready');
++  assert.equal(store.getSnapshot().queueStatus, 'error');
++  assert.equal(store.getSnapshot().queueError, 'denied');
++  assert.equal(store.getSnapshot().queue, null);
++
++  // 4. 404 na fila ativa com perda real de acesso ao evento (403 em /stations) bloqueia todo o evento
++  queueReqs = [];
++  stationVerifyMode = 'deny403';
++  const active404RevokedEvent = store.refreshQueue(secondExperienceId);
++  queueReqs[0].d.reject(Object.assign(new Error('404'), { status: 404 }));
++  await active404RevokedEvent;
++  assert.equal(store.getSnapshot().accessLocked, true);
++  assert.equal(store.getSnapshot().accessStatus, 'denied');
++  assert.equal(store.getSnapshot().stations.length, 0);
++  assert.equal(store.getSnapshot().experiences.length, 0);
++  assert.equal(store.getSnapshot().entry, null);
++  assert.equal(store.getSnapshot().queue, null);
++});
++
++test('R3-04: recuperação controlada de experiências desconhecidas (GET em voo, falha de rede, mesma assinatura e inexistente sem loop)', async () => {
++  let current = context();
++  const expReqs = [];
++  let stationList = stations().stations;
++
++  const store = createStaffDashboardStore({
++    getContext: () => current,
++    client: {
++      get: (url) => {
++        if (url.endsWith('/stations')) return Promise.resolve({ eventId: current.eventId, stations: stationList });
++        if (url.endsWith('/entry-control')) return Promise.resolve({ ...entrySummary(), eventId: current.eventId });
++        if (url.endsWith('/experiences')) {
++          const d = deferred();
++          expReqs.push(d);
++          return d.promise;
++        }
++        return Promise.resolve({});
++      },
++    },
++  });
++
++  store.setContext(current);
++  const initPromise = store.refreshPanel();
++  expReqs[0].resolve({ eventId, experiences: [{ id: experienceId, name: 'Just Dance' }] });
++  await initPromise;
++  assert.equal(store.getSnapshot().experienceStatus, 'ready');
++
++  // 1. Experiência desconhecida surge enquanto um GET /experiences já estava em andamento
++  const inFlightExp = store.pollExperiences();
++  assert.equal(expReqs.length, 2);
++
++  // Antes de expReqs[1] terminar, chega uma estação apontando para secondExperienceId (órfã)
++  stationList = [
++    ...stations().stations,
++    { ...stations().stations[0], id: secondStationId, experienceId: secondExperienceId, name: 'Estação Órfã' },
++  ];
++  await store.pollStations();
++
++  // syncOrphanExperiences chamado enquanto expReqs[1] está em voo não dispara requisição duplicada nem queima a assinatura
++  await store.syncOrphanExperiences();
++  assert.equal(expReqs.length, 2);
++
++  // expReqs[1] (iniciada antes da órfã existir) resolve sem secondExperienceId
++  expReqs[1].resolve({ eventId, experiences: [{ id: experienceId, name: 'Just Dance' }] });
++  await inFlightExp;
++
++  // Agora syncOrphanExperiences deve disparar 1 nova consulta para a assinatura órfã atual
++  const orphanRetry1 = store.syncOrphanExperiences();
++  assert.equal(expReqs.length, 3);
++
++  // 2. Falha inicial de rede ao tentar sincronizar a experiência desconhecida
++  expReqs[2].reject(Object.assign(new Error('offline'), { isNetworkError: true }));
++  await orphanRetry1;
++  assert.equal(store.getSnapshot().experienceError, 'stale');
++  // Enquanto stale, syncOrphanExperiences não entra em loop síncrono imediato; aguarda o polling de 5s
++  await store.syncOrphanExperiences();
++  assert.equal(expReqs.length, 3);
++
++  // 3. Recuperação posterior pelo polling de 5s mantendo a mesma assinatura e encontrando a experiência
++  const pollRecovery = store.pollExperiences();
++  assert.equal(expReqs.length, 4);
++  expReqs[3].resolve({
++    eventId,
++    experiences: [
++      { id: experienceId, name: 'Just Dance' },
++      { id: secondExperienceId, name: 'Street Fighter' },
++    ],
++  });
++  await pollRecovery;
++  assert.equal(store.getSnapshot().experienceError, null);
++  assert.equal(store.getSnapshot().experiences.length, 2);
++
++  // 4. Experiência persistentemente inexistente não gera loop infinito após resposta 200 válida
++  const unknownExpId = '99999999-9999-4999-8999-999999999999';
++  stationList = [
++    ...stationList,
++    { ...stations().stations[0], id: '88888888-8888-4888-8888-888888888888', experienceId: unknownExpId, name: 'Estação Fantasma' },
++  ];
++  await store.pollStations();
++
++  const ghostCheck = store.syncOrphanExperiences();
++  assert.equal(expReqs.length, 5);
++  expReqs[4].resolve({
++    eventId,
++    experiences: [
++      { id: experienceId, name: 'Just Dance' },
++      { id: secondExperienceId, name: 'Street Fighter' },
++    ],
++  });
++  await ghostCheck;
++
++  // Nova chamada com a mesma assinatura não dispara outra requisição (sem loop infinito)
++  await store.syncOrphanExperiences();
++  assert.equal(expReqs.length, 5);
++
++  // 5. Troca de evento durante tentativa descarta resposta antiga
++  const refreshBeforeSwitch = store.refreshExperiences();
++  assert.equal(expReqs.length, 6);
++  current = context(otherEventId, 'b', 2);
++  store.setContext(current);
++  expReqs[5].resolve({ eventId, experiences: [{ id: experienceId, name: 'Just Dance' }] });
++  await refreshBeforeSwitch;
++  assert.equal(store.getSnapshot().context.eventId, otherEventId);
++  assert.equal(store.getSnapshot().experiences.length, 0);
++});
+diff --git a/app/tests/staffEntryControl.test.cjs b/app/tests/staffEntryControl.test.cjs
+index 9ee0bf5b..82a7873a 100644
+--- a/app/tests/staffEntryControl.test.cjs
++++ b/app/tests/staffEntryControl.test.cjs
+@@ -208,3 +208,106 @@ test('intenção confirm legada dispatching sobrevive sem conversão nem POST no
+   const r=await rig({persisted});assert.equal(r.store.getSnapshot().pending.kind,'confirm');
+   assert.equal((await r.store.mutate({kind:'call'})).kind,'blocked');assert.equal(r.calls.some(c=>c.method==='POST'),false);
+ });
++
++test('R3-02: negativa 403/404 ou 401 em GET anterior não é descartada por refresh manual concorrente que falha com 500, em qualquer ordem, e respeita escopo', async () => {
++  // Cenário 1: GET A (poll ou refresh) pendente -> refresh manual inicia GET B -> GET A retorna 403 -> GET B retorna 500
++  {
++    const requests = [];
++    let current = { ...context };
++    const r = await rig({
++      get: () => {
++        const req = defer();
++        requests.push(req);
++        return req.promise;
++      },
++      current: () => current,
++    });
++    // rig() já disparou requests[0]; vamos resolver inicialmente para colocar store em ready
++    requests[0].resolve(body());
++    await new Promise((resolve) => setTimeout(resolve, 0));
++    assert.equal(r.store.getSnapshot().status, 'ready');
++
++    const getA = r.store.poll();
++    const getB = r.store.refresh();
++    assert.equal(requests.length, 3);
++
++    requests[1].reject({ status: 403, code: 'STAFF_EVENT_FORBIDDEN' });
++    await getA;
++    assert.equal(r.store.getSnapshot().status, 'error');
++    assert.equal(r.store.getSnapshot().error, 'denied');
++    assert.equal(r.store.getSnapshot().data, null);
++
++    requests[2].reject({ status: 500, code: 'INTERNAL_SERVER_ERROR' });
++    await getB;
++    assert.equal(r.store.getSnapshot().status, 'error');
++    assert.equal(r.store.getSnapshot().error, 'denied');
++    assert.equal(r.store.getSnapshot().data, null);
++  }
++
++  // Cenário 2 (ordem inversa): GET B retorna 500 primeiro -> GET A retorna 404 depois
++  {
++    const requests = [];
++    const current = { ...context };
++    const r = await rig({
++      get: () => {
++        const req = defer();
++        requests.push(req);
++        return req.promise;
++      },
++      current: () => current,
++    });
++    requests[0].resolve(body());
++    await new Promise((resolve) => setTimeout(resolve, 0));
++
++    const getA = r.store.refresh();
++    const getB = r.store.refresh();
++    assert.equal(requests.length, 3);
++
++    requests[2].reject({ status: 500, code: 'INTERNAL_SERVER_ERROR' });
++    await getB;
++    assert.equal(r.store.getSnapshot().error, 'unavailable');
++
++    requests[1].reject({ status: 404, code: 'RESOURCE_NOT_FOUND' });
++    await getA;
++    assert.equal(r.store.getSnapshot().status, 'error');
++    assert.equal(r.store.getSnapshot().error, 'denied');
++    assert.equal(r.store.getSnapshot().data, null);
++  }
++
++  // Cenário 3: GET A retorna 401 (session) e GET B retorna 500 -> preserva session; troca de evento/logout descarta 403 antigo
++  {
++    const requests = [];
++    let current = { ...context };
++    const r = await rig({
++      get: () => {
++        const req = defer();
++        requests.push(req);
++        return req.promise;
++      },
++      current: () => current,
++    });
++    const getA = r.store.refresh();
++    const getB = r.store.refresh();
++    requests[1].reject({ status: 401, code: 'SESSION_REVOKED' });
++    await getA;
++    requests[2].reject({ status: 500, code: 'INTERNAL_SERVER_ERROR' });
++    await getB;
++    assert.equal(r.store.getSnapshot().error, 'session');
++
++    // Agora testa troca de evento e logout descartando 403 do escopo antigo
++    const oldEventReq = r.store.refresh();
++    current = { ...context, eventId: id(91) };
++    r.setContext(current);
++    requests[3].reject({ status: 403, code: 'STAFF_EVENT_FORBIDDEN' });
++    await oldEventReq;
++    assert.equal(r.store.getSnapshot().error, null);
++
++    const logoutReq = r.store.refresh();
++    current = null;
++    r.setContext(null);
++    requests[4].reject({ status: 403, code: 'STAFF_EVENT_FORBIDDEN' });
++    await logoutReq;
++    assert.equal(r.store.getSnapshot().status, 'idle');
++    assert.equal(r.store.getSnapshot().error, null);
++  }
++});
 diff --git a/app/tests/staffEventDiscovery.test.cjs b/app/tests/staffEventDiscovery.test.cjs
-index 972c4fc2..b57aa67a 100644
+index 972c4fc2..998c3d71 100644
 --- a/app/tests/staffEventDiscovery.test.cjs
 +++ b/app/tests/staffEventDiscovery.test.cjs
-@@ -110,3 +110,898 @@ test('consulta silenciosa preserva seleção e descarta resposta após troca de
+@@ -110,3 +110,913 @@ test('consulta silenciosa preserva seleção e descarta resposta após troca de
    waiting.resolve({ events: [event] }); await old;
    assert.equal(store.getSnapshot().selected, null);
  });
@@ -3529,6 +4387,7 @@ index 972c4fc2..b57aa67a 100644
 +  let stationsMode = 'error500';
 +  let entryMode = 'error500';
 +  let expCalls = 0;
++  let expFailNextNetwork = false;
 +  let includeMissingExp = false;
 +  let stationsIncludeUnknownExp = false;
 +  const EXP_NEW = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
@@ -3557,6 +4416,10 @@ index 972c4fc2..b57aa67a 100644
 +      }
 +      if (url === `/staff/events/${EV_A}/experiences`) {
 +        expCalls += 1;
++        if (expFailNextNetwork) {
++          expFailNextNetwork = false;
++          return Promise.reject(Object.assign(new Error('exp-offline'), { isNetworkError: true }));
++        }
 +        const list = [{ id: EXP_1, name: 'Just Dance' }];
 +        if (includeMissingExp) list.push({ id: EXP_NEW, name: 'Nova Arena VR' });
 +        return Promise.resolve({ eventId: EV_A, experiences: list });
@@ -3627,20 +4490,29 @@ index 972c4fc2..b57aa67a 100644
 +    await rig.triggerPolling(':entry:');
 +    assert.ok(rig.hasText('Estado da fila externa indisponível'));
 +
-+    // 3. Revalidação controlada de experiência desconhecida sem loop infinito (AUD-04)
++    // 3. Revalidação controlada de experiência desconhecida sem loop infinito e com recuperação após falha (AUD-04 + R3-04)
 +    stationsMode = 'ready';
-+    stationsIncludeUnknownExp = true;
++    stationsIncludeUnknownExp = false;
 +    includeMissingExp = false;
 +    entryMode = 'ready';
-+    expCalls = 0;
 +    await rig.press('Atualizar estações');
 +    await rig.settle();
-+    // Uma chamada manual (/experiences) + 1 revalidação controlada de órfã = 2
++
++    // Estação órfã surge no polling de estações e a primeira tentativa de sincronizar /experiences falha por rede
++    stationsIncludeUnknownExp = true;
++    expCalls = 0;
++    expFailNextNetwork = true;
++    await rig.triggerPolling(':stations:');
++    assert.equal(expCalls, 1, 'dispara 1 tentativa automática ao detectar experiência desconhecida');
++    assert.equal(rig.latestPolling(':experiences:')?.enabled, true, 'R3-04: habilita polling de recuperação de experiências após falha transitória');
++
++    // No ciclo de polling de 5s de :experiences: mantendo a mesma orphanSignature, a consulta é repetida; se ainda não existe (200 válido), para de consultar
++    await rig.triggerPolling(':experiences:');
 +    assert.equal(expCalls, 2);
 +    assert.ok(rig.hasText('Experiência não vinculada'));
 +    assert.ok(rig.hasText('Estação VR'));
 +
-+    // Novos ciclos de polling de estações com a mesma inconsistência NÃO disparam novas leituras de /experiences
++    // Novos ciclos de polling de estações com a mesma inconsistência já verificada por 200 NÃO disparam novas leituras de /experiences
 +    await rig.triggerPolling(':stations:');
 +    await rig.triggerPolling(':stations:');
 +    assert.equal(expCalls, 2, 'não entra em loop de consultas diante de inconsistência persistente');
@@ -3662,13 +4534,14 @@ index 972c4fc2..b57aa67a 100644
 +    assert.equal(rig.isDisabled('Controle de Entrada'), true);
 +    assert.equal(rig.latestPolling(':entry:')?.enabled, false);
 +
-+    // 5. Atualização manual recebendo 500 posterior NÃO reabilita acesso negado (AUD-02)
++    // 5. Atualização manual recebendo 500 posterior NÃO reabilita acesso negado (AUD-02) e NÃO deixa botão Atualizar estações travado (R3-01)
 +    entryMode = 'error500';
 +    await rig.press('Atualizar estações');
 +    await rig.settle();
 +    assert.ok(!rig.hasText('Just Dance'));
 +    assert.ok(rig.hasText('SEM ACESSO'));
 +    assert.equal(rig.isDisabled('Controle de Entrada'), true);
++    assert.equal(rig.isDisabled('Atualizar estações'), false, 'R3-01: Atualizar estações reabilita após revalidação parcial 200/200/500');
 +
 +    // 404 na carga manual também mantém revogação e bloqueio
 +    entryMode = 'notfound404';
@@ -3691,10 +4564,10 @@ index 972c4fc2..b57aa67a 100644
 +});
 diff --git a/docs/STAFF_01_SELECAO_EVENTOS_PAINEL.md b/docs/STAFF_01_SELECAO_EVENTOS_PAINEL.md
 new file mode 100644
-index 00000000..ec8e2242
+index 00000000..0af67eec
 --- /dev/null
 +++ b/docs/STAFF_01_SELECAO_EVENTOS_PAINEL.md
-@@ -0,0 +1,226 @@
+@@ -0,0 +1,255 @@
 +# ArenaGo — STAFF-01: Reformulação da Seleção de Eventos e Painel Operacional
 +
 +## 1. Identificação, Objetivo e Escopo
@@ -3870,11 +4743,22 @@ index 00000000..ec8e2242
 +   - **AUD-01 + Invalidação:** propagação imediata entre painel e `StaffEntryControlRealScreen` (nos dois sentidos), ocultação imediata de nomes de `waiting`, fechamento e neutralização de callbacks de modais antigos, preservação de intenções `dispatching` em `SecureStore` e preservação da sessão de login.
 +   - **AUD-02:** manutenção de `disabled` em `Controle de Entrada` durante revalidação manual em curso, em corrida com `403` antigo e em falha `500` posterior; desbloqueio exclusivo após confirmação positiva `200`, verificação de indicadores via `metricValueFor` e troca limpa para segundo evento.
 +   - **AUD-04 + Ciclo de vida/Foco/AppState:** revalidação equivalente no retorno de Controle de Entrada e de Estação tanto pelo botão interno quanto por `app.back()` (`beforeRemove` nativo); pausa/retomada real em `setFocus(false/true)` e `setAppState('background'/'active')`; revalidação controlada (1 consulta `/experiences`) para experiência desconhecida sem loop infinito e habilitação da estação após confirmação.
-+2. **`app/tests/staffDashboard.test.cjs` (Testes unitários de serviço e store):**
++   - **R3-01 a R3-05 (Auditoria Rodada 3):**
++     - `R3-05`: resolução normalizada de caminhos com extensão `.js` (`target.replace(/\.js$/, '')`) carregando `services/staffEntryService.js` real com `parseEntryState`; verificação segura de modais desmontados após revogação (`app.modals()`); separação explícita da leitura disparada na abertura de `Controle de Entrada` (`entry: +1`) em relação à revalidação disparada no retorno ao painel (`stations: +1, experiences: +1, entry: +1`).
++     - `R3-01`: revalidação parcial (`200, 200, 500`) mantendo bloqueio de acesso sem deixar `stationStatus`/`experienceStatus`/`entryStatus` em `'loading'` e reabilitando `"Atualizar estações"`.
++     - `R3-02`: negativa `403` em `GET A` concorrente com `GET B` manual (`500`) em `StaffEntryControlRealScreen`, propagando a perda de acesso ao painel.
++     - `R3-03`: descarte de `404` tardio de fila operacional já abandonada ao retornar ao painel.
++     - `R3-04`: recuperação automática de experiência desconhecida no ciclo de 5s após falha transitória de rede na primeira tentativa, mantendo a mesma `orphanSignature`.
++2. **`app/tests/staffEntryControl.test.cjs` (Testes unitários da store do Controle de Entrada):**
++   - **R3-02:** preservação de negativa `403`/`404` (`denied`) e `401` (`session`) de `GET A` quando um `refresh()` manual inicia `GET B` que falha com `500` (em ambas as ordens de chegada), com invalidação da geração de leitura em voo e descarte de erros de escopo antigo após troca de evento ou logout.
++3. **`app/tests/staffDashboard.test.cjs` (Testes unitários de serviço e store do Painel):**
 +   - Cobertura completa de `AUD-03` em `parseStaffEntrySummary` (campos obrigatórios `observedAt` e flags, rejeição de `!externalQueueEnabled` com `pendingCall`/`waiting`, e preservação explícita da janela residual com `canManage: false`).
 +   - Todos os 6 cenários de `AUD-02` + recuperação independente de `pollEntryControl()`/`pollStations()` + `reportAccessDenied()`.
-+3. **`app/tests/staffEventDiscovery.test.cjs` (Harness JSX local sem `skip` + métricas vinculadas aos rótulos):**
-+   - `STAFF-01 UI (10.1)`, `(10.2)` com `metricValueFor` e `(10.3)` cobrindo recuperação de `/entry-control`, rejeição de payload inválido, órfã controlada sem loop infinito e persistência de bloqueio após `403`/`500`/`404`. *(Escopo documental explícito: este arquivo usa harness próprio para rodar sem dependências externas, sendo complementado pelas suítes com React e React Navigation reais em `roleRoutingIntegration.test.cjs`.)*
++   - **R3-01:** revalidação após negativa com `200, 200, 500`, `500, 200, 200`, falha de rede após dois `200`, garantia de que nenhum domínio permanece em `'loading'`, duas ondas consecutivas de revalidação, recuperação completa com três `200`, troca de evento e logout durante tentativa.
++   - **R3-03:** descarte de `404` tardio de fila após `clearQueue()` e após troca de estação/experiência; em fila ativa com `404`, bloqueio imediato apenas da fila e confirmação em `/stations` diferenciando experiência inexistente (`200` em `/stations`, preservando painel) de perda real de acesso ao evento (`403`/`404` em `/stations`, bloqueando todo o evento).
++   - **R3-04:** experiência desconhecida surgindo com `GET /experiences` já em andamento, falha inicial de rede, recuperação posterior mantendo a mesma assinatura, experiência encontrada em consulta subsequente, experiência persistentemente inexistente sem loop infinito e troca de evento durante tentativa.
++4. **`app/tests/staffEventDiscovery.test.cjs` (Harness JSX local sem `skip` + métricas vinculadas aos rótulos):**
++   - `STAFF-01 UI (10.1)`, `(10.2)` com `metricValueFor` e `(10.3)` cobrindo recuperação de `/entry-control`, rejeição de payload inválido, órfã controlada com recuperação após falha de rede (`R3-04`) sem loop infinito, persistência de bloqueio após `403`/`500`/`404` e reabilitação do botão `"Atualizar estações"` após revalidação parcial (`R3-01`). *(Escopo documental explícito: todas as verificações automatizadas acima ocorrem em ambiente simulado Node.js e não substituem a homologação nativa em dispositivo físico / Expo Go.)*
 +
 +*(Nota: Conforme `AGENTS.md`, nenhum teste automatizado foi executado durante esta etapa de implementação/correção; os resultados reais deverão ser registrados somente após execução comprovada com GPT-6 Luna — Medium.)*
 +
@@ -3882,7 +4766,8 @@ index 00000000..ec8e2242
 +
 +## 11. Validações Manuais e Ambientes
 +
-+- **Homologação física / Expo Go (Android e iOS):** Pendente de execução pelo responsável após validação automatizada da entrega corrigida.
++- **Verificação automatizada em ambiente simulado:** Executada exclusivamente pelo modelo designado (**GPT-6 Luna — Medium**) sobre Node.js (`node --test` / `npm test`).
++- **Homologação nativa em dispositivo físico / Expo Go (Android e iOS):** Pendente de execução manual pelo responsável após validação automatizada da entrega corrigida.
 +- **Limitação explícita:** Nenhuma simulação automatizada equivale à homologação presencial em dispositivo real.
 +
 +---
@@ -3891,12 +4776,28 @@ index 00000000..ec8e2242
 +
 +- **17/11/2026 — Entrega inicial (`8184e76f`):** Adaptação da UI à base `origin/develop` (`ae2ba16b`) com `effectivePhase`, `useStaffPolling`, `AuthBackground`, navegação direta `'panel' -> 'station'` e preservação dos seletores de integração.
 +- **17/11/2026 — Primeira revisão técnica (`fa5e8814`):** Correções iniciais de recuperação do Controle de Entrada, exigência de `pendingCall`, limpeza em `403`/`404`, remoção de `skip` em `staffEventDiscovery.test.cjs` e correção de fixture duplicada.
-+- **18/11/2026 — Auditoria Independente do Codex (sobre `fa5e8814`):**
-+  1. **`AUD-01` — Propagação da perda de autorização:** Diagnosticado que negação no painel em voo não atingia `StaffEntryControlRealScreen` já aberto, nem `403`/`404` dentro da subtela atualizava o painel imediatamente. **Correção:** `StaffEntryControlRealScreen` recebeu `accessDenied`, `accessDeniedKind` e `onAccessDenied`, ligados diretamente a `store.isAccessLocked()` e `store.reportAccessDenied(kind)` em `StaffEventsNavigator.js`; `accessDenied` limpa contexto em memória, fecha modais e invalida callbacks sem apagar recibos persistidos no `SecureStore`, enquanto falhas de estação/evento continuam diferenciadas de invalidação de sessão (`401`).
-+  2. **`AUD-02` — Preservação do bloqueio durante revalidação:** Diagnosticado que `refresh*` zerava erros antes da resposta HTTP (desbloqueando o card durante `'loading'` ou após `'500'`) e descartava `403`/`404` de GET anterior no mesmo contexto se outro GET houvesse iniciado. **Correção:** introduzidos `accessStatus` (`'unknown' | 'revalidating' | 'granted' | 'denied' | 'session'`) e `accessLocked` com barreira de revalidação e staging em `staffDashboardService.js`; respostas `403`/`404`/`401` do mesmo `context`/`revision` acionam `denied()` mesmo se superadas por geração de requisição em voo, e o desbloqueio só ocorre após confirmação positiva `200`.
-+  3. **`AUD-03` — Alinhamento do parser com o contrato real:** Diagnosticado que `parseStaffEntrySummary` duplicava lógica, aceitava ausência de `observedAt`/flags e admitia fixture com fila inativa e `pendingCall`. **Correção:** `parseStaffEntrySummary` passou a reutilizar `parseEntryState` em `./staffEntryService.js`; `parseEntryState` passou a validar ausência de `pendingCall`/`waiting` quando `!externalQueueEnabled` (alinhado ao trigger `0008_external_entry_calls.sql` e `setExternalQueueEnabledWithTx`) e as derivações exatas de `canCall`, `canConfirm`, `canMarkAbsent === canRemove`, preservando a janela residual com `canManage: false`. Fixtures inválidas foram corrigidas.
-+  4. **`AUD-04` — Atualização ao retornar e órfãs:** Diagnosticado que retorno pelo botão do Controle de Entrada só atualizava entrada e retornos por `Voltar do sistema` / `Estação` não revalidavam o painel; além disso, estações com `experienceId` ausente não disparavam consulta controlada de `/experiences`. **Correção:** criado `store.revalidateOnReturn()` acionado uniformemente na transição de `'entry'` ou `'station'` para `'panel'` (cobrindo botão interno, botão Voltar do sistema e gesto `beforeRemove`) preservando estado durante leitura em segundo plano; adicionado `pollExperiences()` com disparo único por assinatura `orphanSignature` para evitar loops infinitos mantendo cards não confirmados sem navegação.
-+  5. **`AUD-05` — Confiabilidade dos testes:** Adicionados cenários com React, `react-test-renderer`, `@react-navigation/core` e `useStaffPolling.js` reais em `roleRoutingIntegration.test.cjs` cobrindo retorno nativo, ciclo de vida, foco, segundo plano, concorrência de polling/manual, propagação e callbacks antigos, além de asserções `metricValueFor` vinculando cada número ao respectivo rótulo.
++- **18/11/2026 — Auditoria Independente do Codex — Rodada 2 (`3451de55` sobre `fa5e8814`):**
++  1. **`AUD-01` — Propagação da perda de autorização:** `StaffEntryControlRealScreen` conectado a `store.isAccessLocked()` e `store.reportAccessDenied(kind)`.
++  2. **`AUD-02` — Preservação do bloqueio durante revalidação:** Barreira de revalidação em `staffDashboardService.js` exigindo confirmação positiva antes de desbloquear o evento.
++  3. **`AUD-03` — Alinhamento do parser com o contrato real:** Reutilização direta de `parseEntryState` em `parseStaffEntrySummary` com validação de invariantes do contrato real.
++  4. **`AUD-04` — Atualização ao retornar e órfãs:** `store.revalidateOnReturn()` nas transições de subtela para painel e verificação controlada de experiências órfãs.
++  5. **`AUD-05` — Confiabilidade dos testes:** Cobertura de integração real em `roleRoutingIntegration.test.cjs` e `metricValueFor`.
++- **18/11/2026 — Auditoria Independente do Codex — Rodada 3 (sobre `3451de55`):**
++  1. **`R3-01` — Painel bloqueado após revalidação parcial (`app/services/staffDashboardService.js`, `app/screens/staff/StaffEventsNavigator.js`):**
++     - **Diagnóstico:** Quando `accessLocked === true` e uma rodada de revalidação (`refreshPanel()`) obtinha respostas parciais `200` combinadas com falha transitória (`500` ou erro de rede), `finishRevalidationSuccess` guardava `stationStatus: 'ready'` / `experienceStatus: 'ready'` apenas em `stagedPatch` (para não expor dados antes da confirmação completa). Ao encerrar a rodada com erro, `stagedPatch` era descartado sem retirar os domínios que já haviam respondido `200` do estado `'loading'`, deixando o botão `"Atualizar estações"` permanentemente desabilitado.
++     - **Correção:** Adicionado controle de rodada (`revalidationRound`, `revalidationPending`, `revalidationOk`, `revalidationErrors`) com finalização atômica em `settleRevalidationRound()`. Se qualquer domínio falhar na rodada de revalidação, todos os domínios participantes saem de `'loading'` para `'error'` sem expor dados parciais e mantendo `accessLocked = true`, reabilitando `"Atualizar estações"` para novas tentativas.
++  2. **`R3-02` — Negativa descartada por consulta concorrente (`app/services/staffEntryService.js`):**
++     - **Diagnóstico:** Em `createStaffEntryStore`, `refresh()` incrementava `readGeneration`, fazendo `current()` (`request === readGeneration`) falhar para um `GET A` anterior. Se `GET A` retornasse `403`/`404` (`denied`) ou `401` (`session`) e o `GET B` mais recente falhasse com `500`, a negativa de autorização era descartada antes de classificar o erro e nunca chegava ao painel via `onAccessDenied`.
++     - **Correção:** Introduzidos `sameScope()` (`generation === currentGeneration && isCurrent(context)`) e `revokedKind`. Nos blocos `catch` de `refresh()` e `poll()`, respostas `401`/`403`/`404` do mesmo escopo são tratadas antes do filtro `request === readGeneration`, registrando `revokedKind`, invalidando leituras concorrentes em voo (`readGeneration += 1`) e preservando o bloqueio mesmo se outro GET concorrente retornar `500`, enquanto respostas de eventos/sessões anteriores continuam descartadas.
++  3. **`R3-03` — Negativa ambígua de fila operacional (`app/services/staffDashboardService.js`):**
++     - **Diagnóstico:** Em `refreshQueue()` e `pollQueue()`, `if (kind === 'denied' || kind === 'session') return denied(kind)` executava antes de verificar `request === queueGeneration && state.experienceId === experienceId`, permitindo que um `404` tardio de fila já abandonada bloqueasse todo o evento. Além disso, no backend (`StaffQueriesService.getQueue`), `404` é retornado tanto quando o acesso ao evento é negado (`!access`) quanto quando a experiência não existe no evento (`!row`).
++     - **Correção:** Respostas de filas abandonadas (`request !== queueGeneration || state.experienceId !== experienceId`) são descartadas antes de classificar `403`/`404`. Na fila ativa, `403` bloqueia o evento imediatamente, enquanto `404` bloqueia de imediato a fila (`queueStatus: 'error', queue: null, queueError: 'denied'`) e executa confirmação em recurso de escopo do evento (`verifyEventAccessFromQueue` via `fetchStaffStations`), bloqueando o evento inteiro somente se `/stations` confirmar `401`/`403`/`404`.
++  4. **`R3-04` — Recuperação de experiências desconhecidas (`app/services/staffDashboardService.js`, `app/screens/staff/StaffEventsNavigator.js`):**
++     - **Diagnóstico:** `orphanSyncRef.current = orphanSignature` era gravado antes de confirmar se `pollExperiences()` realmente iniciou ou concluiu com `200`, impedindo novas tentativas com a mesma assinatura se houvesse um GET já em voo ou falha transitória de rede/`500`. Também faltava polling de recuperação de 5s para `/experiences` em estado de erro recuperável ou `'stale'`.
++     - **Correção:** Centralizado o controle de assinaturas órfãs na store (`computeOrphanSignature`, `orphanCheckedSignatures`, `recordOrphanVerification`, `syncOrphanExperiences`), marcando uma assinatura como verificada somente quando uma leitura iniciada sob aquela assinatura conclui com `200` válido, e adicionado `useStaffPolling` de 5s (`canPollExperiences`) em `StaffEventsNavigator.js` para recuperar `/experiences` após falhas transitórias sem gerar loop infinito quando a experiência realmente não existe.
++  5. **`R3-05` — Correções da integração automatizada (`app/tests/roleRoutingIntegration.test.cjs`):**
++     - **Diagnóstico:** (A) `staffOperationsService.js` importa `./staffEntryService.js` com extensão `.js`, mas o resolvedor do teste comparava `target` sem `.js`, caindo no stub genérico sem `parseEntryState`; (B) o teste chamava `app.modal()` após `accessDenied = true`, quando `StaffEntryControlRealScreen` desmonta o `<Modal>` da árvore; (C) o teste `AUD-04 + AUD-05` não separava o `GET /entry-control` disparado ao abrir `Controle de Entrada` dos 3 GETs disparados ao retornar ao painel.
++     - **Correção:** Normalizado `target` removendo sufixo `.js` no resolvedor de `roleRoutingIntegration.test.cjs`, adicionado `app.modals()` para validar ausência de modal visível/montado após revogação e separadas as asserções de contagem de GETs na abertura da subtela e no retorno ao painel.
 +
 +---
 +
@@ -3913,11 +4814,12 @@ index 00000000..ec8e2242
 +
 +- **Commit-base (`origin/develop`):** `ae2ba16b289daeff21fa09db7ca95613d6d79a6e` (`docs: consolida panorama e arquiva planejamento antigo`)
 +- **Commit 1 publicado (`feature/staff-operacional-v2`):** `8184e76f` (`8184e76` — `Reformulação da Seleção de Eventos e Painel Operacional`)
-+- **Commit 2 publicado (`feature/staff-operacional-v2`):** `fa5e8814` (`fa5e881` — `correçoes da primeira revisao tecnica`, objeto da auditoria independente do Codex)
-+- **Correções da auditoria independente (`AUD-01`..`AUD-05`):** Preparadas no working tree da branch `feature/staff-operacional-v2`, aguardando validação com GPT-6 Luna — Medium e publicação pelo responsável via VSCode.
++- **Commit 2 publicado (`feature/staff-operacional-v2`):** `fa5e8814` (`fa5e881` — `correçoes da primeira revisao tecnica`)
++- **Commit 3 publicado (`feature/staff-operacional-v2`):** `3451de55` (`3451de55eac301ff1f519b2296ed674b1ad19765` — `correçoes da auditoria do codex`, objeto da Auditoria Rodada 3)
++- **Correções da Auditoria Rodada 3 (`R3-01`..`R3-05`):** Aplicadas no working tree da branch `feature/staff-operacional-v2`, aguardando validação com GPT-6 Luna — Medium e publicação pelo responsável via VSCode.
 +
 +---
 +
 +## 15. Estado Final da Entrega
 +
-+Correções da **auditoria independente do Codex (`AUD-01` a `AUD-05`)** aplicadas na branch `feature/staff-operacional-v2`, com documentação e `qa-evidence/STAFF-01-changes.diff` atualizados. Aguardando validação automatizada pelo executor autorizado (**GPT-6 Luna — Medium**), publicação pelo responsável e nova revisão para aprovação formal da **STAFF-01**.
++Correções da **Auditoria Independente Rodada 3 (`R3-01` a `R3-05`)** aplicadas na branch `feature/staff-operacional-v2`, com documentação e `qa-evidence/STAFF-01-changes.diff` atualizados. Aguardando validação automatizada pelo executor autorizado (**GPT-6 Luna — Medium**), publicação pelo responsável e aprovação formal da **STAFF-01**.

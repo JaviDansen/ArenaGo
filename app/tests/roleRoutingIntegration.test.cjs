@@ -154,7 +154,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
           ),
         };
       }
-      const target = path.posix.normalize(path.posix.join(directory, name));
+      const target = path.posix.normalize(path.posix.join(directory, name)).replace(/\.js$/, '');
       if (target === 'components/ui/AuthBackground') {
         return { AuthBackground: ({ children, ...props }) => React.createElement('View', props, children) };
       }
@@ -259,6 +259,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
       });
     },
     modal() { return tree.root.findByType('Modal'); },
+    modals() { return tree.root.findAllByType('Modal'); },
     hasButton(label) { return tree.root.findAllByType('Pressable').some(node => node.props.accessibilityLabel === label); },
     handler(label) { return tree.root.findAllByType('Pressable').find(node => node.props.accessibilityLabel === label).props.onPress; },
     confirmHandler() { return tree.root.findAllByType('Pressable')
@@ -1180,7 +1181,8 @@ test('AUD-01 + AUD-05: perda de autorização propaga entre painel e Controle de
     await app.tickTimers(5000);
     assert.ok(!app.hasText('1. Ana'));
     assert.ok(!app.hasText('2. Bia'));
-    assert.equal(app.modal().props.visible, false);
+    assert.equal(app.modals().every((m) => !m.props.visible), true);
+    assert.equal(app.modals().length, 0);
     await app.act(async () => staleConfirm());
     assert.equal(mutations, 0, 'callback antigo não dispara mutação após 403');
     assert.ok(app.hasText('Acesso ao evento indisponível'));
@@ -1421,43 +1423,45 @@ test('AUD-04 + AUD-05: retorno unificado, ciclo de vida foco/AppState no polling
 
     // 1. Retorno de Controle de Entrada por botão interno e por retorno nativo (beforeRemove) executam revalidação equivalente
     await app.press('Controle de Entrada');
+    assert.deepEqual(counts, { stations: 1, experiences: 1, entry: 2 }, 'abertura da subtela consulta apenas /entry-control');
     await app.press('Voltar ao painel');
-    assert.deepEqual(counts, { stations: 2, experiences: 2, entry: 2 });
+    assert.deepEqual(counts, { stations: 2, experiences: 2, entry: 3 }, 'retorno por botão interno revalida painel completo (+1 em cada recurso)');
 
     await app.press('Controle de Entrada');
+    assert.deepEqual(counts, { stations: 2, experiences: 2, entry: 4 }, 'nova abertura da subtela consulta apenas /entry-control');
     app.back();
     await app.act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     assert.ok(app.hasText('Painel operacional'));
-    assert.deepEqual(counts, { stations: 3, experiences: 3, entry: 3 });
+    assert.deepEqual(counts, { stations: 3, experiences: 3, entry: 5 }, 'retorno nativo revalida painel completo (+1 em cada recurso)');
 
     // 2. Retorno de Estação por botão interno e por retorno nativo (beforeRemove) executam revalidação equivalente
     await app.press('Selecionar estação Estação real da experiência Just Dance');
     await app.press('Voltar ao painel');
-    assert.deepEqual(counts, { stations: 4, experiences: 4, entry: 4 });
+    assert.deepEqual(counts, { stations: 4, experiences: 4, entry: 6 });
 
     await app.press('Selecionar estação Estação real da experiência Just Dance');
     app.back();
     await app.act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     assert.ok(app.hasText('Painel operacional'));
-    assert.deepEqual(counts, { stations: 5, experiences: 5, entry: 5 });
+    assert.deepEqual(counts, { stations: 5, experiences: 5, entry: 7 });
 
     // 3. Perda de foco e segundo plano pausam polling; retomada reativa exatamente 1 ciclo de 5s
     await app.setFocus(false);
     await app.tickTimers(10000);
-    assert.deepEqual(counts, { stations: 5, experiences: 5, entry: 5 }, 'sem foco não consulta em polling');
+    assert.deepEqual(counts, { stations: 5, experiences: 5, entry: 7 }, 'sem foco não consulta em polling');
 
     await app.setFocus(true);
     await app.setAppState('background');
     await app.tickTimers(10000);
-    assert.deepEqual(counts, { stations: 5, experiences: 5, entry: 5 }, 'em segundo plano não consulta em polling');
+    assert.deepEqual(counts, { stations: 5, experiences: 5, entry: 7 }, 'em segundo plano não consulta em polling');
 
     await app.setAppState('active');
     includeOrphanStation = true;
     await app.tickTimers(5000);
     await app.act(async () => { await new Promise((r) => setTimeout(r, 0)); });
-    // Polling atualizou estações (6) e entrada (6); estação órfã disparou exatamente 1 revalidação de experiências (6)
+    // Polling atualizou estações (6) e entrada (8); estação órfã disparou exatamente 1 revalidação de experiências (6)
     assert.equal(counts.stations, 6);
-    assert.equal(counts.entry, 6);
+    assert.equal(counts.entry, 8);
     assert.equal(counts.experiences, 6);
     assert.ok(app.hasText('Experiência não vinculada'));
     assert.equal(app.hasButton('Selecionar estação Estação VR da experiência Arena VR'), false);
@@ -1474,6 +1478,161 @@ test('AUD-04 + AUD-05: retorno unificado, ciclo de vida foco/AppState no polling
     assert.ok(app.hasText('Arena VR'));
     assert.ok(!app.hasText('Experiência não vinculada'));
     assert.equal(app.hasButton('Selecionar estação Estação VR da experiência Arena VR'), true);
+  } finally {
+    app.dispose();
+  }
+});
+
+test('R3-01, R3-02, R3-03 e R3-04: revalidação parcial não trava botão Atualizar estações, negativa concorrente na entrada propaga ao painel, 404 tardio de fila abandonada é ignorado e experiência desconhecida recupera após falha de rede', async () => {
+  const unknownExperienceId = '99999999-9999-4999-8999-999999999999';
+  const unknownStation = {
+    id: '88888888-8888-4888-8888-888888888888',
+    experienceId: unknownExperienceId,
+    label: 'Estação Nova',
+    availability: 'available',
+    pendingServiceSessionId: null,
+  };
+  let stationsMode = 'ok';
+  let experiencesMode = 'ok';
+  let entryMode = 'ok';
+  let includeUnknownStation = false;
+  let includeUnknownExperience = false;
+  let pendingQueueReq = null;
+  let pendingEntryReqs = [];
+
+  const app = createIntegration({
+    initialUser: staffUser,
+    control: {
+      realStaff: true,
+      events: [staffEvent],
+      http: async (route, options) => {
+        if (route.endsWith('/stations')) {
+          if (stationsMode === 'deny403') throw Object.assign(new Error('403'), { status: 403 });
+          if (stationsMode === 'err500') throw Object.assign(new Error('500'), { status: 500 });
+          const list = [realStation];
+          if (includeUnknownStation) list.push(unknownStation);
+          return { eventId: staffEvent.id, stations: list };
+        }
+        if (route.endsWith('/experiences')) {
+          if (experiencesMode === 'deny403') throw Object.assign(new Error('403'), { status: 403 });
+          if (experiencesMode === 'networkOnce') {
+            experiencesMode = 'ok';
+            throw Object.assign(new Error('offline'), { isNetworkError: true });
+          }
+          const list = [{ id: realExperienceId, name: 'Just Dance' }];
+          if (includeUnknownExperience) list.push({ id: unknownExperienceId, name: 'Beat Saber' });
+          return { eventId: staffEvent.id, experiences: list };
+        }
+        if (route.endsWith('/queue')) {
+          if (pendingQueueReq) return pendingQueueReq.promise;
+          return {
+            eventId: staffEvent.id,
+            experienceId: realExperienceId,
+            waitingCount: 0,
+            firstWaitingQueueEntryId: null,
+            waiting: [],
+            activeCall: null,
+          };
+        }
+        if (route.includes('/entry-control') && options.method === 'GET') {
+          if (entryMode === 'deferred') {
+            const d = deferred();
+            pendingEntryReqs.push(d);
+            return d.promise;
+          }
+          if (entryMode === 'deny403') throw Object.assign(new Error('403'), { status: 403 });
+          if (entryMode === 'err500') throw Object.assign(new Error('500'), { status: 500 });
+          return {
+            eventId: staffEvent.id,
+            externalQueueEnabled: true,
+            canManage: true,
+            observedAt: at,
+            pendingCall: null,
+            canCall: false,
+            canConfirm: false,
+            canMarkAbsent: false,
+            canRemove: false,
+            waitingCount: 0,
+            waiting: [],
+          };
+        }
+        return undefined;
+      },
+    },
+  });
+
+  try {
+    await app.mount();
+    await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
+    await app.press('Selecionar evento Evento autorizado');
+    assert.ok(app.hasText('Just Dance'));
+
+    // 1. R3-03: 404 tardio de fila já abandonada ao voltar ao painel não bloqueia o evento
+    pendingQueueReq = deferred();
+    await app.press('Selecionar estação Estação real da experiência Just Dance');
+    await app.press('Voltar ao painel');
+    await app.act(async () => {
+      pendingQueueReq.reject(Object.assign(new Error('404'), { status: 404 }));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    pendingQueueReq = null;
+    assert.ok(app.hasText('Just Dance'), '404 de fila abandonada não limpa painel');
+    assert.equal(app.isDisabled('Controle de Entrada'), false);
+
+    // 2. R3-02: na subtela Controle de Entrada, GET A pendente (403) + refresh manual GET B (500) propaga perda de acesso ao painel
+    await app.press('Controle de Entrada');
+    entryMode = 'deferred';
+    pendingEntryReqs = [];
+    // Polling dispara GET A
+    const tickA = app.tickTimers(5000);
+    // Operador dispara refresh manual que inicia GET B
+    const manualB = app.press('Atualizar');
+    assert.equal(pendingEntryReqs.length, 2);
+
+    // GET A retorna 403 e GET B retorna 500
+    await app.act(async () => {
+      pendingEntryReqs[0].reject(Object.assign(new Error('403'), { status: 403 }));
+      pendingEntryReqs[1].reject(Object.assign(new Error('500'), { status: 500 }));
+      await Promise.all([tickA, manualB]);
+    });
+    assert.ok(app.hasText('Acesso ao evento indisponível'));
+
+    await app.press('Voltar ao painel');
+    assert.ok(app.hasText('SEM ACESSO'));
+    assert.equal(app.isDisabled('Controle de Entrada'), true);
+
+    // 3. R3-01: revalidação parcial (200 em stations, 200 em experiences, 500 em entry-control) mantém bloqueio mas reabilita botão "Atualizar estações"
+    stationsMode = 'ok';
+    experiencesMode = 'ok';
+    entryMode = 'err500';
+    await app.press('Atualizar estações');
+    assert.ok(app.hasText('SEM ACESSO'));
+    assert.ok(!app.hasText('Just Dance'), 'não expõe dados parciais antes de confirmação completa');
+    assert.equal(app.isDisabled('Controle de Entrada'), true);
+    assert.equal(app.isDisabled('Atualizar estações'), false, 'botão Atualizar estações não fica preso em loading');
+
+    // Nova tentativa após falha parcial com os três retornando 200 restaura o painel
+    entryMode = 'ok';
+    await app.press('Atualizar estações');
+    assert.ok(app.hasText('Just Dance'));
+    assert.equal(app.isDisabled('Controle de Entrada'), false);
+    assert.equal(app.isDisabled('Atualizar estações'), false);
+
+    // 4. R3-04: estação com experiência desconhecida cuja sincronização inicial falha por rede se recupera no próximo ciclo de 5s mantendo a mesma assinatura
+    includeUnknownStation = true;
+    includeUnknownExperience = true;
+    experiencesMode = 'networkOnce';
+    await app.tickTimers(5000);
+    await app.act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    // Primeira tentativa automática falhou com erro de rede, então ainda exibe Experiência não vinculada
+    assert.ok(app.hasText('Experiência não vinculada'));
+
+    // Próximo ciclo de 5s reexecuta pollExperiences() para a mesma assinatura e encontra Beat Saber
+    await app.tickTimers(5000);
+    await app.act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    assert.ok(app.hasText('Beat Saber'));
+    assert.ok(!app.hasText('Experiência não vinculada'));
+    assert.equal(app.hasButton('Selecionar estação Estação Nova da experiência Beat Saber'), true);
   } finally {
     app.dispose();
   }
