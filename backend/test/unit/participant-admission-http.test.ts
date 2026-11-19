@@ -31,7 +31,7 @@ let eligibility: JoinEligibilityResult = eligible;
 let result: CreateParticipationResult = created;
 let infrastructureError: Error | undefined;
 const codes: string[] = [];
-const eligibilityCalls: Array<{ userId: string; eventId: string; at: Date }> = [];
+const eligibilityCalls: Array<{ userId: string; eventId: string; at?: Date }> = [];
 const joins: CreateParticipationInput[] = [];
 
 @Module({ controllers: [ParticipantAdmissionController], providers: [
@@ -47,7 +47,7 @@ const joins: CreateParticipationInput[] = [];
     codes.push(code); if (infrastructureError) throw infrastructureError; return foundEvent;
   } } },
   { provide: ParticipationsService, useValue: {
-    evaluateJoinEligibility: async (actor: string, target: string, at: Date) => {
+    evaluateJoinEligibility: async (actor: string, target: string, at?: Date) => {
       eligibilityCalls.push({ userId: actor, eventId: target, at }); return eligibility;
     },
     createParticipation: async (input: CreateParticipationInput) => {
@@ -84,7 +84,8 @@ test("Etapa 3 HTTP lookup normaliza código, usa identidade autenticada e expõe
   reset(); const response = await lookup().send({ accessCode: "  arena-2026  " });
   assert.equal(response.status, 200); assert.deepEqual(codes, ["ARENA-2026"]);
   assert.equal(eligibilityCalls.length, 1); assert.equal(eligibilityCalls[0].userId, userId);
-  assert.equal(eligibilityCalls[0].eventId, eventId); assert.ok(eligibilityCalls[0].at instanceof Date);
+  assert.equal(eligibilityCalls[0].eventId, eventId);
+  assert.equal(eligibilityCalls[0].at, undefined, "a consulta usa o relógio do PostgreSQL no serviço");
   assert.deepEqual(response.body, { event: { id: eventId, name: event.name, timezone: event.timezone,
     startsAt: startsAt.toISOString(), officialEndsAt: event.officialEndsAt.toISOString(),
     operationalDeadlineAt: event.operationalDeadlineAt.toISOString(), externalQueueEnabled: true },

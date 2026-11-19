@@ -89,3 +89,33 @@ test("não modifica os horários recebidos nem compartilha a referência do cort
   );
   assert.equal(event.officialEndsAt.toISOString(), "2030-05-10T18:00:00.000Z");
 });
+
+test("janela que cruza meia-noite respeita início inclusivo e corte exclusivo no microssegundo", () => {
+  const midnight = BigInt(Date.parse("2030-05-11T00:00:00.000Z")) * 1000n;
+  const event = {
+    ...dates(),
+    startsAt: midnight - 2n,
+    officialEndsAt: midnight + 2n,
+  };
+
+  assert.equal(evaluateEventEntryWindow(event, midnight - 3n).blockReason, "EVENT_NOT_STARTED");
+  assert.equal(evaluateEventEntryWindow(event, midnight - 2n).withinEntryWindow, true);
+  assert.equal(evaluateEventEntryWindow(event, midnight - 1n).withinEntryWindow, true);
+  assert.equal(evaluateEventEntryWindow(event, at("2030-05-11T00:00:00.000Z")).withinEntryWindow, true);
+  assert.equal(evaluateEventEntryWindow(event, midnight + 1n).withinEntryWindow, true);
+  assert.equal(evaluateEventEntryWindow(event, midnight + 2n).blockReason, "EVENT_ENTRY_CLOSED");
+});
+
+test("fechamento antecipado mantém corte exclusivo mesmo no mesmo milissegundo do oficial", () => {
+  const base = BigInt(Date.parse("2030-05-10T18:00:00.000Z")) * 1000n;
+  const event = {
+    ...dates(),
+    officialEndsAt: base + 345n,
+    closureRequestedAt: base + 123n,
+    adminDeadlineAt: at("2030-05-10T18:30:00.000Z"),
+  };
+
+  assert.equal(evaluateEventEntryWindow(event, base + 122n).withinEntryWindow, true);
+  assert.equal(evaluateEventEntryWindow(event, base + 123n).blockReason, "EVENT_ENTRY_CLOSED");
+  assert.equal(evaluateEventEntryWindow(event, base + 344n).blockReason, "EVENT_ENTRY_CLOSED");
+});

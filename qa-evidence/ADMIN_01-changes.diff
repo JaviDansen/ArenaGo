@@ -1,0 +1,1357 @@
+diff --git a/app/screens/admin/AdminDemoNavigator.js b/app/screens/admin/AdminDemoNavigator.js
+index 5d253cc023db1ceb07c2c81e42ed9fa9998eb3ba..0e90cd0e8ce8e16a285c3df800410d315d6d2209 100644
+--- a/app/screens/admin/AdminDemoNavigator.js
++++ b/app/screens/admin/AdminDemoNavigator.js
+@@ -1,50 +1,34 @@
+ import { createNativeStackNavigator } from '@react-navigation/native-stack';
+-
++import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
+ import { useAuth } from '../../context/AuthContext';
+-import AdminCreateEventScreen from './AdminCreateEventScreen';
+-import { AdminDemoProvider, getAdminDemoOwnerKey } from './AdminDemoContext';
+-import AdminEventBiScreen from './AdminEventBiScreen';
+-import AdminEventCloseScreen from './AdminEventCloseScreen';
+-import AdminEventDetailScreen from './AdminEventDetailScreen';
+-import AdminEventExperiencesScreen from './AdminEventExperiencesScreen';
+-import AdminEventQueueScreen from './AdminEventQueueScreen';
+-import AdminEventScheduleScreen from './AdminEventScheduleScreen';
+-import AdminEventsScreen from './AdminEventsScreen';
+-import AdminEventStaffScreen from './AdminEventStaffScreen';
+-import AdminExperienceDetailScreen from './AdminExperienceDetailScreen';
+-import AdminHistoryScreen from './AdminHistoryScreen';
+-import AdminOverviewScreen from './AdminOverviewScreen';
+-import AdminPanelScreen from './AdminPanelScreen';
+-import AdminStationDetailScreen from './AdminStationDetailScreen';
+-
+-const Stack = createNativeStackNavigator();
++import { adminReadOwner } from './useAdminEvents';
++import AdminHomeScreen from './AdminHomeScreen';
++import AdminRealEventsScreen from './AdminRealEventsScreen';
++import AdminRealEventScreen from './AdminRealEventScreen';
++import AdminPendingScreen from './AdminPendingScreen';
++import AdminBottomBar from './components/AdminBottomBar';
+ 
+-// Pilha do Admin autenticado; as operações continuam demonstrativas. O provedor fica aqui para
+-// que todo o estado simulado seja descartado ao sair da área. A key amarrada à
+-// conta e à geração da sessão remonta provedor e telas se a identidade mudar.
+-// O cabeçalho nativo fica oculto porque cada tela desenha o seu.
++const Stack = createNativeStackNavigator(), Tabs = createBottomTabNavigator();
++function AdminTabs() {
++  return <Tabs.Navigator screenOptions={{ headerShown: false }} tabBar={({ state, navigation }) =>
++    <AdminBottomBar active={state.routes[state.index].name} onSelect={name => {
++      const route = state.routes.find(item => item.name === name);
++      const event = navigation.emit({ type: 'tabPress', target: route.key, canPreventDefault: true });
++      if (!event.defaultPrevented) navigation.navigate(name);
++    }} onLongPress={name => navigation.emit({ type: 'tabLongPress', target: state.routes.find(item => item.name === name).key })} />}>
++    <Tabs.Screen name="Home" component={AdminHomeScreen} />
++    <Tabs.Screen name="Histórico" component={AdminPendingScreen} />
++    <Tabs.Screen name="BI" component={AdminPendingScreen} />
++  </Tabs.Navigator>;
++}
++// Keep the entry name used by App.js. Demo sources remain available for later
++// migrations, but none of their mutation routes are registered for real events.
+ export default function AdminDemoNavigator() {
+-  const ownerKey = getAdminDemoOwnerKey(useAuth());
+-  // Defesa adicional inclusive se este componente for montado por uma rota antiga.
+-  if (!ownerKey) return null;
+-  return (
+-    <AdminDemoProvider key={ownerKey}>
+-      <Stack.Navigator initialRouteName="AdminPanel" screenOptions={{ headerShown: false }}>
+-        <Stack.Screen name="AdminPanel" component={AdminPanelScreen} options={{ title: 'Painel Administrativo' }} />
+-        <Stack.Screen name="AdminEvents" component={AdminEventsScreen} options={{ title: 'Gerenciar Eventos' }} />
+-        <Stack.Screen name="AdminCreateEvent" component={AdminCreateEventScreen} options={{ title: 'Criar Evento' }} />
+-        <Stack.Screen name="AdminEventDetail" component={AdminEventDetailScreen} options={{ title: 'Detalhe do Evento' }} />
+-        <Stack.Screen name="AdminEventSchedule" component={AdminEventScheduleScreen} options={{ title: 'Alterar Horários' }} />
+-        <Stack.Screen name="AdminEventQueue" component={AdminEventQueueScreen} options={{ title: 'Fila Externa' }} />
+-        <Stack.Screen name="AdminEventClose" component={AdminEventCloseScreen} options={{ title: 'Encerrar Evento' }} />
+-        <Stack.Screen name="AdminEventExperiences" component={AdminEventExperiencesScreen} options={{ title: 'Experiências do Evento' }} />
+-        <Stack.Screen name="AdminExperienceDetail" component={AdminExperienceDetailScreen} options={{ title: 'Experiência' }} />
+-        <Stack.Screen name="AdminStationDetail" component={AdminStationDetailScreen} options={{ title: 'Estação' }} />
+-        <Stack.Screen name="AdminEventStaff" component={AdminEventStaffScreen} options={{ title: 'Staff do Evento' }} />
+-        <Stack.Screen name="AdminHistory" component={AdminHistoryScreen} options={{ title: 'Histórico' }} />
+-        <Stack.Screen name="AdminEventBi" component={AdminEventBiScreen} options={{ title: 'BI do Evento' }} />
+-        <Stack.Screen name="AdminOverview" component={AdminOverviewScreen} options={{ title: 'Visão Geral' }} />
+-      </Stack.Navigator>
+-    </AdminDemoProvider>
+-  );
++  const owner = adminReadOwner(useAuth());
++  if (!owner) return null;
++  return <Stack.Navigator key={owner} initialRouteName="AdminTabs" screenOptions={{ headerShown: false }}>
++    <Stack.Screen name="AdminTabs" component={AdminTabs} />
++    <Stack.Screen name="AdminEvents" component={AdminRealEventsScreen} />
++    <Stack.Screen name="AdminRealEvent" component={AdminRealEventScreen} />
++  </Stack.Navigator>;
+ }
+diff --git a/app/screens/admin/AdminHomeScreen.js b/app/screens/admin/AdminHomeScreen.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..e42e0cbf8df199a8f6e9a7d6494116bd1de3a83f
+--- /dev/null
++++ b/app/screens/admin/AdminHomeScreen.js
+@@ -0,0 +1,45 @@
++import { Pressable, StyleSheet, Text, View } from 'react-native';
++import AdminLiveScreen from './components/AdminLiveScreen';
++import { AdminIcon, AdminIconTile, AdminPendingActions, liveColors as c, liveStyles as s } from './components/AdminLiveUI';
++
++export default function AdminHomeScreen({ navigation }) {
++  return <AdminLiveScreen title="Painel Administrativo" subtitle="Gerencie eventos, equipe e indicadores da plataforma.">
++    <View style={s.card}>
++      <Pressable accessibilityRole="button" accessibilityLabel="Gerenciar eventos"
++        onPress={() => navigation.navigate('AdminEvents')} style={({ pressed }) => [s.row, styles.mainLink, pressed && styles.pressed]}>
++        <AdminIconTile name="calendar" />
++        <View style={s.grow}><Text style={s.title}>Gerenciar eventos</Text><Text style={s.body}>Consulte e acompanhe os eventos ativos.</Text></View>
++        <AdminIcon name="chevron" color={c.muted} size={18} />
++      </Pressable>
++      <AdminPendingActions />
++    </View>
++    <View style={styles.columns}>
++      {[
++        ['Histórico de eventos', 'Consulte eventos encerrados e resultados.', 'chart', 'Histórico'],
++        ['Visão geral', 'Acompanhe indicadores agregados da plataforma.', 'gauge', 'BI'],
++      ].map(([title, description, icon, route]) => <Pressable key={route} accessibilityRole="button" accessibilityLabel={title}
++        onPress={() => navigation.navigate(route)} style={({ pressed }) => [s.card, styles.column, pressed && styles.pressed]}>
++        <View style={styles.cardHeading}><AdminIconTile name={icon} /><AdminIcon name="chevron" color={c.muted} size={18} /></View>
++        <Text style={[s.title, styles.columnTitle]}>{title}</Text><Text style={s.body}>{description}</Text>
++        <Text style={s.pending}>Em breve</Text>
++      </Pressable>)}
++    </View>
++    <View style={[s.card, s.row]} accessible accessibilityLabel="Usuários e permissões · Em implementação">
++      <AdminIconTile name="users" /><View style={s.grow}>
++        <Text style={s.title}>Usuários e permissões</Text><Text style={s.body}>Administre acessos e papéis de administradores globais.</Text>
++        <Text style={s.pending}>Em breve</Text>
++      </View>
++    </View>
++    <View style={[s.card, styles.notice]}><AdminIcon name="info" color={c.muted} />
++      <View style={s.grow}><Text style={[s.title, { fontSize: 17 }]}>Acesso restrito</Text>
++        <Text style={s.body}>Somente administradores autorizados podem alterar eventos, permissões e dados operacionais.</Text></View>
++    </View>
++  </AdminLiveScreen>;
++}
++const styles = StyleSheet.create({
++  mainLink: { minHeight: 64, paddingBottom: 14 }, pressed: { opacity: 0.75 },
++  columns: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 }, column: { flexGrow: 1, flexBasis: '45%', minWidth: 145 },
++  cardHeading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
++  columnTitle: { marginTop: 12, fontSize: 18, lineHeight: 24 },
++  notice: { flexDirection: 'row', gap: 12, alignItems: 'flex-start', borderColor: '#795395' },
++});
+diff --git a/app/screens/admin/AdminPendingScreen.js b/app/screens/admin/AdminPendingScreen.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..79934529c05f7888e1a3f0bf40b4392733ca2fa2
+--- /dev/null
++++ b/app/screens/admin/AdminPendingScreen.js
+@@ -0,0 +1,7 @@
++import AdminLiveScreen from './components/AdminLiveScreen';
++import AdminNotice from './components/AdminNotice';
++export default function AdminPendingScreen({ route }) {
++  return <AdminLiveScreen title={route.name === 'BI' ? 'Visão geral' : 'Histórico de eventos'}>
++    <AdminNotice title="Em implementação" message="Esta área estará disponível em uma próxima atualização." />
++  </AdminLiveScreen>;
++}
+diff --git a/app/screens/admin/AdminRealEventScreen.js b/app/screens/admin/AdminRealEventScreen.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..978ec6444186b55a3f97c437d0784c3721afd9c4
+--- /dev/null
++++ b/app/screens/admin/AdminRealEventScreen.js
+@@ -0,0 +1,34 @@
++import { useEffect, useRef, useState } from 'react';
++import { useAuth } from '../../context/AuthContext';
++import { getAdminEvent, adminReadError } from '../../services/adminEventsService';
++import { adminReadOwner } from './useAdminEvents';
++import AdminLiveScreen from './components/AdminLiveScreen';
++import AdminEventSummary from './components/AdminEventSummary';
++import AdminCard from './components/AdminCard';
++import AdminNotice from './components/AdminNotice';
++import AdminButton from './components/AdminButton';
++
++export default function AdminRealEventScreen({ navigation, route }) {
++  const auth = useAuth(), owner = adminReadOwner(auth), id = route.params?.eventId;
++  const live = useRef(auth); live.current = auth;
++  const [result, setResult] = useState(null), [attempt, setAttempt] = useState(0);
++  useEffect(() => {
++    let active = true;
++    setResult(null);
++    const current = () => active && owner && adminReadOwner(live.current) === owner;
++    if (owner) getAdminEvent(auth.httpClient, id).then(event => {
++      if (current()) setResult({ owner, id, event });
++    }).catch(error => { if (current()) setResult({ owner, id, error: adminReadError(error) }); });
++    return () => { active = false; };
++  }, [auth.httpClient, owner, id, attempt]);
++  const visible = result?.owner === owner && result?.id === id ? result : null;
++  return <AdminLiveScreen title="Evento selecionado" navigation={navigation}>
++    {!visible ? <AdminNotice title="Carregando evento..." /> : visible.error ?
++      <AdminNotice tone="error" title="Evento indisponível" message={visible.error}>
++        <AdminButton label="Tentar novamente" onPress={() => setAttempt(value => value + 1)} />
++      </AdminNotice> : <>
++        <AdminCard><AdminEventSummary event={visible.event} /></AdminCard>
++        <AdminNotice title="Gerenciamento em implementação" message="As opções deste evento serão integradas na ADMIN-02." />
++      </>}
++  </AdminLiveScreen>;
++}
+diff --git a/app/screens/admin/AdminRealEventsScreen.js b/app/screens/admin/AdminRealEventsScreen.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..996996b86fb563cd7b5f475b38c44d33eaed3015
+--- /dev/null
++++ b/app/screens/admin/AdminRealEventsScreen.js
+@@ -0,0 +1,51 @@
++import { useState } from 'react';
++import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
++import useAdminEvents from './useAdminEvents';
++import AdminLiveScreen from './components/AdminLiveScreen';
++import AdminButton from './components/AdminButton';
++import AdminNotice from './components/AdminNotice';
++import AdminEventSummary from './components/AdminEventSummary';
++import { AdminIcon, AdminPendingActions, liveColors as c, liveStyles as s } from './components/AdminLiveUI';
++const filters = [{ value: 'all', label: 'Todos' }, { value: 'scheduled', label: 'Agendados' }, { value: 'open', label: 'Abertos' }, { value: 'closing', label: 'Encerrando' }];
++
++export default function AdminRealEventsScreen({ navigation }) {
++  const [search, setSearch] = useState(''), [phase, setPhase] = useState('all');
++  const { items, status, error, nextCursor, loader } = useAdminEvents(search, phase);
++  return <AdminLiveScreen title="Gerenciar Eventos" subtitle="Consulte, busque e gerencie os eventos da plataforma."
++    navigation={navigation} backLabel="Voltar ao painel" showTabs>
++    <AdminPendingActions />
++    <View style={styles.search}>
++      <AdminIcon name="search" color={c.muted} />
++      <TextInput accessibilityLabel="Pesquisar por nome ou código" placeholder="Pesquisar por nome ou código"
++        placeholderTextColor={c.muted} value={search} onChangeText={value => setSearch(value.slice(0, 180))}
++        autoCapitalize="none" autoCorrect={false} maxLength={180} returnKeyType="search" style={styles.input} />
++    </View>
++    <ScrollView horizontal showsHorizontalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.filters}>
++      {filters.map(filter => <Pressable key={filter.value} accessibilityRole="button" accessibilityLabel={filter.label}
++        accessibilityState={{ selected: phase === filter.value }} onPress={() => setPhase(filter.value)}
++        style={({ pressed }) => [styles.chip, phase === filter.value && styles.selected, pressed && { opacity: 0.75 }]}>
++        <Text style={styles.chipText}>{filter.label}</Text>
++      </Pressable>)}
++    </ScrollView>
++    <Text style={styles.section}>EVENTOS CADASTRADOS</Text>
++    {status === 'loading' ? <AdminNotice title="Carregando eventos..." /> : null}
++    {error ? <AdminNotice tone="error" title="Não foi possível carregar" message={error}>
++      <AdminButton label="Tentar novamente" onPress={() => { void loader.retry(); }} />
++    </AdminNotice> : null}
++    {status === 'ready' && !items.length ? <AdminNotice title="Nenhum evento encontrado" message="Ajuste a busca ou o filtro." /> : null}
++    {items.map(event => <Pressable key={event.id} accessibilityRole="button" accessibilityLabel={`Acessar evento ${event.name}`}
++      onPress={() => navigation.navigate('AdminRealEvent', { eventId: event.id })}
++      style={({ pressed }) => [s.card, pressed && { opacity: 0.75 }]}>
++      <AdminEventSummary event={event} compact />
++    </Pressable>)}
++    {nextCursor ? <AdminButton label="Carregar mais" loading={status === 'loadingMore'} disabled={status === 'error'} onPress={() => { void loader.more(); }} /> : null}
++  </AdminLiveScreen>;
++}
++const styles = StyleSheet.create({
++  search: { flexDirection: 'row', alignItems: 'center', gap: 12, borderWidth: 1, borderColor: c.border, borderRadius: 16, backgroundColor: c.surface, paddingHorizontal: 14, marginVertical: 14 },
++  input: { flex: 1, minWidth: 0, minHeight: 52, paddingVertical: 12, color: c.text, fontSize: 15 },
++  filters: { flexDirection: 'row', gap: 8, paddingBottom: 8 },
++  chip: { borderRadius: 24, borderWidth: 1, borderColor: c.border, paddingHorizontal: 18, paddingVertical: 12, minHeight: 44, justifyContent: 'center' },
++  selected: { backgroundColor: c.accentStrong }, chipText: { color: c.text, fontSize: 14, fontWeight: '600' },
++  section: { color: c.muted, fontSize: 12, fontWeight: '700', letterSpacing: 1.6, marginTop: 20, marginBottom: 2 },
++});
+diff --git a/app/screens/admin/components/AdminBottomBar.js b/app/screens/admin/components/AdminBottomBar.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..e9b4c5b39ef847133162b1700321379bc7c61bc4
+--- /dev/null
++++ b/app/screens/admin/components/AdminBottomBar.js
+@@ -0,0 +1,23 @@
++import { Pressable, StyleSheet, Text, View } from 'react-native';
++import { SafeAreaView } from 'react-native-safe-area-context';
++import { AdminIcon, liveColors as c } from './AdminLiveUI';
++
++const tabs = [['Home', 'home'], ['Histórico', 'history'], ['BI', 'chart']];
++export default function AdminBottomBar({ active, onSelect, onLongPress }) {
++  return <SafeAreaView edges={['bottom', 'left', 'right']} style={styles.safe}>
++    <View style={styles.row}>{tabs.map(([label, icon]) => {
++      const selected = active === label;
++      return <Pressable key={label} accessibilityRole="tab" accessibilityLabel={label} accessibilityState={{ selected }}
++        onPress={() => onSelect(label)} onLongPress={() => onLongPress?.(label)} style={styles.tab}>
++        <View style={[styles.icon, selected && styles.active]}><AdminIcon name={icon} color={selected ? c.accent : c.muted} /></View>
++        <Text style={[styles.label, { color: selected ? c.accent : c.muted }]}>{label}</Text>
++      </Pressable>;
++    })}</View>
++  </SafeAreaView>;
++}
++const styles = StyleSheet.create({
++  safe: { backgroundColor: c.background, borderTopWidth: 1, borderColor: '#483452' },
++  row: { flexDirection: 'row', paddingVertical: 8 }, tab: { flex: 1, alignItems: 'center', paddingVertical: 2, gap: 4 },
++  icon: { width: 48, height: 36, borderRadius: 20, borderWidth: 1, borderColor: 'transparent', justifyContent: 'center', alignItems: 'center' },
++  active: { borderColor: c.border, backgroundColor: '#2c1640' }, label: { fontSize: 13, lineHeight: 18 },
++});
+diff --git a/app/screens/admin/components/AdminEventSummary.js b/app/screens/admin/components/AdminEventSummary.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..5423437121f76cabf00ba91666112e7de68bddd4
+--- /dev/null
++++ b/app/screens/admin/components/AdminEventSummary.js
+@@ -0,0 +1,41 @@
++import { StyleSheet, Text, View } from 'react-native';
++import { adminEventPhases, formatAdminDate } from '../../../services/adminEventsService';
++import { adminColors as c } from './adminTheme';
++import { AdminIcon, AdminIconTile, liveColors, liveStyles as s } from './AdminLiveUI';
++export default function AdminEventSummary({ event, compact = false }) {
++  if (compact) {
++    const phaseColor = { open: '#00e5aa', scheduled: '#77d3ff', closing: '#ffe44c', not_ready: '#dac0ef' }[event.effectivePhase] || liveColors.muted;
++    const ready = event.readiness.ready;
++    return <>
++      <View style={[s.row, { alignItems: 'flex-start' }]}>
++        <AdminIconTile name="calendar" />
++        <View style={s.grow}>
++          <View style={styles.heading}><Text style={[s.title, styles.eventName]}>{event.name}</Text>
++            <Text style={[styles.badge, { borderColor: phaseColor, color: phaseColor }]}>{adminEventPhases[event.effectivePhase]}</Text></View>
++          <Text style={styles.date}>Início: {formatAdminDate(event.startsAt, event.timezone)}</Text>
++          <Text style={styles.date}>Até: {formatAdminDate(event.officialEndsAt, event.timezone)}</Text>
++        </View>
++      </View>
++      <View style={styles.readiness}>
++        <AdminIcon name={ready ? 'check' : 'warning'} color={ready ? '#00e5aa' : liveColors.warning} size={20} />
++        <Text style={styles.readyText}>{ready ? 'Pronto para operar' : 'Configuração pendente'}</Text>
++        <AdminIcon name="chevron" color={liveColors.muted} size={18} />
++      </View>
++    </>;
++  }
++  return <>
++    <Text style={styles.name}>{event.name}</Text>
++    <Text style={styles.phase}>{adminEventPhases[event.effectivePhase]}</Text>
++    <Text style={styles.line}>Início: {formatAdminDate(event.startsAt, event.timezone)}</Text>
++    <Text style={styles.line}>Término oficial: {formatAdminDate(event.officialEndsAt, event.timezone)}</Text>
++    <Text style={styles.line}>{event.readiness.ready ? 'Pronto' : 'Prontidão pendente'}</Text>
++  </>;
++}
++const styles = StyleSheet.create({ name: { color: c.text, fontSize: 19, fontWeight: 'bold' }, phase: { color: c.accent, marginTop: 8, fontWeight: 'bold' }, line: { color: c.muted, marginTop: 8, lineHeight: 20 },
++  heading: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'flex-start', gap: 8 },
++  eventName: { flexGrow: 1, flexBasis: 150, minWidth: 0, fontSize: 18, lineHeight: 24 },
++  badge: { borderWidth: 1, borderRadius: 16, paddingHorizontal: 9, paddingVertical: 3, fontSize: 11, lineHeight: 16, fontWeight: '700', flexShrink: 1, textTransform: 'uppercase' },
++  date: { color: liveColors.muted, fontSize: 13, lineHeight: 19, marginTop: 6 },
++  readiness: { flexDirection: 'row', alignItems: 'center', gap: 8, borderTopWidth: 1, borderColor: '#42304f', marginTop: 14, paddingTop: 12 },
++  readyText: { flex: 1, color: liveColors.text, fontSize: 14, lineHeight: 20 },
++});
+diff --git a/app/screens/admin/components/AdminLiveScreen.js b/app/screens/admin/components/AdminLiveScreen.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..154447d1ecef12e66d31e06827a686d7500cfa65
+--- /dev/null
++++ b/app/screens/admin/components/AdminLiveScreen.js
+@@ -0,0 +1,53 @@
++import { Image, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
++import { SafeAreaView } from 'react-native-safe-area-context';
++import { useEffect, useRef } from 'react';
++import { useAuth } from '../../../context/AuthContext';
++import { adminReadOwner } from '../useAdminEvents';
++import { AdminIcon, liveColors as c } from './AdminLiveUI';
++import AdminBottomBar from './AdminBottomBar';
++
++export default function AdminLiveScreen({ title, subtitle, navigation, backLabel = 'Voltar', showTabs = false, children }) {
++  const auth = useAuth();
++  const owner = adminReadOwner(auth), live = useRef(auth), mounted = useRef(true);
++  live.current = auth;
++  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
++  return <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
++    <View pointerEvents="none" accessible={false} accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.decoration}>
++      <View style={styles.orbitTop} /><View style={styles.orbitBottom} />
++    </View>
++    <View style={styles.header}>
++      <Image source={require('../../../assets/images/logo-arenago.png')} style={styles.brand} resizeMode="contain" accessible accessibilityRole="image" accessibilityLabel="ArenaGO" />
++      <Pressable accessibilityRole="button" accessibilityLabel="Sair da conta" style={({ pressed }) => [styles.logout, pressed && { opacity: 0.7 }]} onPress={() => {
++        if (mounted.current && owner && adminReadOwner(live.current) === owner) void live.current.logout();
++      }}><AdminIcon name="logout" color={c.text} size={20} /><Text style={styles.logoutText}>Sair da conta</Text></Pressable>
++    </View>
++    <KeyboardAvoidingView style={styles.safe} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
++      <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={styles.content}>
++        {navigation ? <Pressable accessibilityRole="button" accessibilityLabel={backLabel} style={({ pressed }) => [styles.back, pressed && styles.backPressed]} onPress={() => navigation.goBack()}>
++          <AdminIcon name="back" color={c.accent} size={22} /><Text style={styles.backText}>{backLabel}</Text></Pressable> : null}
++        <Text style={styles.eyebrow}>ÁREA ADMINISTRATIVA</Text>
++        <Text style={styles.title} accessibilityRole="header">{title}</Text>
++        {subtitle ? <Text style={styles.subtitle}>{subtitle}</Text> : null}
++        {children}
++      </ScrollView>
++    </KeyboardAvoidingView>
++    {showTabs ? <AdminBottomBar active="Home" onSelect={screen => navigation.popTo('AdminTabs', { screen })} /> : null}
++  </SafeAreaView>;
++}
++const styles = StyleSheet.create({
++  safe: { flex: 1, backgroundColor: c.background },
++  decoration: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, overflow: 'hidden' },
++  orbitTop: { position: 'absolute', width: 680, height: 350, borderWidth: 1, borderColor: '#311042', borderRadius: 300, top: -290, right: -300, transform: [{ rotate: '35deg' }] },
++  orbitBottom: { position: 'absolute', width: 1000, height: 380, borderWidth: 1, borderColor: '#281036', borderRadius: 500, bottom: -250, left: -260, transform: [{ rotate: '-20deg' }] },
++  header: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingVertical: 16, gap: 12 },
++  brand: { width: 150, height: 48 },
++  logout: { flexDirection: 'row', gap: 7, alignItems: 'center', borderWidth: 1, borderColor: c.border, borderRadius: 16, minHeight: 44, paddingHorizontal: 12, paddingVertical: 8 },
++  logoutText: { color: c.text, fontSize: 13 },
++  content: { paddingHorizontal: 20, paddingTop: 18, paddingBottom: 32, width: '100%', maxWidth: 840, alignSelf: 'center' },
++  eyebrow: { color: c.muted, fontSize: 12, lineHeight: 18, fontWeight: '700', letterSpacing: 2, marginTop: 12 },
++  title: { color: c.text, fontSize: 28, lineHeight: 35, fontWeight: '700', marginTop: 8 },
++  subtitle: { color: c.muted, fontSize: 16, lineHeight: 24, marginTop: 10, marginBottom: 22 },
++  back: { flexDirection: 'row', alignItems: 'center', gap: 10, alignSelf: 'flex-start', minHeight: 48, paddingRight: 12, marginBottom: 12 },
++  backPressed: { opacity: 0.7 },
++  backText: { color: '#ddc4f2', fontSize: 15, fontWeight: '600' },
++});
+diff --git a/app/screens/admin/components/AdminLiveUI.js b/app/screens/admin/components/AdminLiveUI.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..9d341850b5800fcb79db0a8f0dbc6fb0c5cea45f
+--- /dev/null
++++ b/app/screens/admin/components/AdminLiveUI.js
+@@ -0,0 +1,69 @@
++import { Pressable, StyleSheet, Text, View } from 'react-native';
++import { adminColors } from './adminTheme';
++
++// Scoped to real Admin screens, without changing the demo theme.
++export const liveColors = { ...adminColors, background: '#090412', surface: '#151020',
++  border: '#c476ed', accent: '#b960f5', muted: '#c7b9d9', iconFill: '#38204f' };
++const c = liveColors;
++
++// Native line icons: no font download or additional native dependency.
++export function AdminIcon({ name, color = c.accent, size = 24 }) {
++  const line = { position: 'absolute', borderColor: color, borderWidth: 1.6 };
++  const part = (key, style) => <View key={key} style={[line, style]} />;
++  let shapes;
++  switch (name) {
++    case 'calendar': shapes = [part('box', { left: 3, top: 5, width: 18, height: 17, borderRadius: 3 }),
++      part('divider', { left: 3, top: 10, width: 18, borderWidth: 0, borderTopWidth: 1.6 }),
++      ...[7, 16].map(left => part(`ring${left}`, { left, top: 2, height: 6, borderWidth: 0, borderLeftWidth: 1.6 })),
++      part('day', { left: 8, top: 15, width: 4, height: 2, borderWidth: 0, backgroundColor: color })]; break;
++    case 'folder': shapes = [part('tab', { left: 2, top: 4, width: 10, height: 7, borderRadius: 2 }),
++      part('box', { left: 2, top: 8, width: 20, height: 14, borderRadius: 2, backgroundColor: c.surface })]; break;
++    case 'plus': shapes = [part('h', { left: 2, top: 12, width: 20, borderWidth: 0, borderTopWidth: 1.6 }),
++      part('v', { left: 12, top: 2, height: 20, borderWidth: 0, borderLeftWidth: 1.6 })]; break;
++    case 'home': shapes = [part('roof', { left: 4, top: 3, width: 16, height: 16, borderRightWidth: 0, borderBottomWidth: 0, transform: [{ rotate: '45deg' }] }),
++      part('house', { left: 5, top: 10, width: 14, height: 12, borderTopWidth: 0 }), part('door', { left: 10, top: 15, width: 4, height: 7 })]; break;
++    case 'chart': shapes = [6, 12, 19].map((height, i) => part(`bar${i}`, { left: 2 + i * 8, bottom: 2, width: 5, height, borderRadius: 1 })); break;
++    case 'history': case 'gauge': shapes = [part('circle', { left: 2, top: 2, width: 20, height: 20, borderRadius: 12 }),
++      part('hand', { left: 12, top: 6, height: 7, borderWidth: 0, borderLeftWidth: 1.6 }),
++      part('minute', { left: 12, top: 12, width: 6, borderWidth: 0, borderTopWidth: 1.6, transform: [{ rotate: name === 'gauge' ? '-45deg' : '25deg' }] })]; break;
++    case 'users': shapes = [part('head', { left: 5, top: 2, width: 9, height: 9, borderRadius: 6 }),
++      part('body', { left: 2, top: 14, width: 17, height: 8, borderTopLeftRadius: 8, borderTopRightRadius: 8 }),
++      part('other', { left: 17, top: 4, width: 5, height: 7, borderLeftWidth: 0, borderTopRightRadius: 5, borderBottomRightRadius: 5 })]; break;
++    case 'search': shapes = [part('lens', { left: 1, top: 1, width: 16, height: 16, borderRadius: 10 }),
++      part('handle', { left: 18, top: 15, height: 10, borderWidth: 0, borderLeftWidth: 1.6, transform: [{ rotate: '-45deg' }] })]; break;
++    case 'logout': shapes = [part('door', { left: 1, top: 3, width: 12, height: 18 }),
++      part('shaft', { left: 8, top: 12, width: 14, borderWidth: 0, borderTopWidth: 1.6 }),
++      part('arrow', { left: 17, top: 8, width: 7, height: 7, borderLeftWidth: 0, borderBottomWidth: 0, transform: [{ rotate: '45deg' }] })]; break;
++    case 'back': shapes = [part('shaft', { left: 2, top: 12, width: 20, borderWidth: 0, borderTopWidth: 1.6 }),
++      part('arrow', { left: 3, top: 7, width: 10, height: 10, borderRightWidth: 0, borderBottomWidth: 0, transform: [{ rotate: '-45deg' }] })]; break;
++    case 'chevron': shapes = [part('arrow', { left: 7, top: 6, width: 11, height: 11, borderLeftWidth: 0, borderBottomWidth: 0, transform: [{ rotate: '45deg' }] })]; break;
++    default: shapes = [part('circle', { left: 1, top: 1, width: 22, height: 22, borderRadius: 12 }),
++      name === 'check' ? part('check', { left: 6, top: 7, width: 12, height: 7, borderTopWidth: 0, borderRightWidth: 0, transform: [{ rotate: '-45deg' }] }) :
++        <Text key="symbol" style={{ color, textAlign: 'center', fontSize: 17, fontWeight: '600', lineHeight: 24 }}>{name === 'warning' ? '!' : 'i'}</Text>];
++  }
++  return <View accessible={false} accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={{ width: size, height: size, flexShrink: 0 }}>
++    <View style={{ width: 24, height: 24, transform: [{ scale: size / 24 }], transformOrigin: 'top left' }}>{shapes}</View>
++  </View>;
++}
++export function AdminIconTile({ name }) {
++  return <View style={liveStyles.iconTile}><AdminIcon name={name} size={28} /></View>;
++}
++export function AdminPendingActions() {
++  return <View style={liveStyles.actions}>
++    {[['Criar evento', 'plus'], ['Catálogo de experiências', 'folder']].map(([label, icon]) =>
++      <Pressable key={label} disabled accessibilityRole="button" accessibilityLabel={`${label} · Em implementação`}
++        accessibilityState={{ disabled: true }} style={liveStyles.pendingAction}>
++        <View style={liveStyles.row}><AdminIcon name={icon} /><Text style={liveStyles.actionLabel}>{label}</Text></View>
++        <Text style={liveStyles.pending}>Em breve</Text>
++      </Pressable>)}
++  </View>;
++}
++export const liveStyles = StyleSheet.create({
++  card: { backgroundColor: c.surface, borderWidth: 1, borderColor: c.border, borderRadius: 18, padding: 16, marginTop: 16 },
++  row: { flexDirection: 'row', alignItems: 'center', gap: 12 }, grow: { flex: 1, minWidth: 0 },
++  title: { color: c.text, fontSize: 20, lineHeight: 26, fontWeight: '700' }, body: { color: c.muted, fontSize: 15, lineHeight: 22, marginTop: 6 },
++  iconTile: { width: 48, height: 48, borderRadius: 13, backgroundColor: c.iconFill, alignItems: 'center', justifyContent: 'center' },
++  actions: { flexDirection: 'row', gap: 10, marginVertical: 8 },
++  pendingAction: { flex: 1, minWidth: 0, borderWidth: 1, borderColor: '#795395', borderRadius: 12, backgroundColor: '#251a33', paddingHorizontal: 10, paddingVertical: 12, justifyContent: 'center' },
++  actionLabel: { flex: 1, color: c.text, fontWeight: '600', fontSize: 13, lineHeight: 18 }, pending: { color: c.muted, fontSize: 11, lineHeight: 16, marginTop: 5 },
++});
+diff --git a/app/screens/admin/useAdminEvents.js b/app/screens/admin/useAdminEvents.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..60553964f0c8ce9ce6026d9e2348679f2bbe5b9e
+--- /dev/null
++++ b/app/screens/admin/useAdminEvents.js
+@@ -0,0 +1,25 @@
++import { useEffect, useMemo, useRef, useState } from 'react';
++import { useAuth } from '../../context/AuthContext';
++import { canAccessAdminArea } from '../../context/adminAccess';
++import { createAdminEventsLoader } from '../../services/adminEventsService';
++
++export function adminReadOwner(auth) {
++  if (!canAccessAdminArea(auth)) return null;
++  return `${auth.user.id}:${auth.user.sessionId}:${auth.getSessionEpoch?.()}:${auth.getIdentityRevision?.()}`;
++}
++export default function useAdminEvents(search, phase) {
++  const auth = useAuth(), owner = adminReadOwner(auth);
++  const live = useRef(auth); live.current = auth;
++  const loader = useMemo(() => createAdminEventsLoader(auth.httpClient, {
++    isCurrent: () => Boolean(owner && adminReadOwner(live.current) === owner),
++  }), [auth.httpClient, owner]);
++  const [snapshot, setSnapshot] = useState(null);
++  useEffect(() => {
++    loader.activate();
++    const unsubscribe = loader.subscribe(value => setSnapshot({ owner, loader, value }));
++    return () => { unsubscribe(); loader.dispose(); };
++  }, [loader, owner]);
++  useEffect(() => { void loader.setFilters({ search, phase }); }, [loader, search, phase]);
++  return { ...(snapshot?.loader === loader && snapshot.owner === owner && snapshot.value.queryKey === JSON.stringify({ search, phase }) ? snapshot.value :
++    { items: [], nextCursor: null, status: 'loading', error: null }), loader };
++}
+diff --git a/app/services/adminEventsService.js b/app/services/adminEventsService.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..21a2ef8184cc5eee814181fab5284aa2eb0583ed
+--- /dev/null
++++ b/app/services/adminEventsService.js
+@@ -0,0 +1,80 @@
++const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
++export const adminEventPhases = { scheduled: 'Agendado', not_ready: 'Não pronto', open: 'Aberto', closing: 'Encerrando', closed: 'Encerrado' };
++
++export function parseAdminEvent(event) {
++  if (!event || typeof event.id !== 'string' || !UUID.test(event.id) || typeof event.name !== 'string' || !event.name.trim() ||
++      !Object.hasOwn(adminEventPhases, event.effectivePhase) || typeof event.timezone !== 'string' ||
++      !Number.isFinite(Date.parse(event.startsAt)) || !Number.isFinite(Date.parse(event.officialEndsAt)) ||
++      typeof event.readiness?.ready !== 'boolean') throw new Error('Resposta de evento inválida.');
++  return event;
++}
++export function formatAdminDate(value, timezone) {
++  if (!value || !Number.isFinite(Date.parse(value))) return 'Data indisponível';
++  try { return new Intl.DateTimeFormat('pt-BR', { timeZone: timezone, dateStyle: 'short', timeStyle: 'short' }).format(new Date(value)); }
++  catch { return 'Data indisponível'; }
++}
++export async function listAdminEvents(client, { search = '', phase = 'all', cursor = null, limit = 20 } = {}) {
++  const params = [['limit', String(limit)], ['excludeClosed', 'true']];
++  if (search.trim()) params.push(['search', search.trim().replace(/\s+/gu, ' ')]);
++  if (phase !== 'all') params.push(['phase', phase]);
++  if (cursor) params.push(['cursor', cursor]);
++  const query = params.map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');
++  const body = await client.get(`/admin/events?${query}`, { auth: true });
++  if (!Array.isArray(body?.items) || !(body.nextCursor === null || typeof body.nextCursor === 'string')) throw new Error('Resposta de listagem inválida.');
++  const items = body.items.map(parseAdminEvent);
++  if (items.some(event => event.effectivePhase === 'closed')) throw new Error('A listagem retornou um evento encerrado.');
++  return { items, nextCursor: body.nextCursor };
++}
++export async function getAdminEvent(client, eventId) {
++  if (!UUID.test(eventId)) throw new Error('Identificador de evento inválido.');
++  const event = parseAdminEvent((await client.get(`/admin/events/${encodeURIComponent(eventId)}`, { auth: true }))?.event);
++  if (event.id !== eventId) throw new Error('Evento retornado não corresponde à seleção.');
++  return event;
++}
++export function adminReadError(error) {
++  if (error?.status === 404) return 'Evento não encontrado ou indisponível.';
++  if ([401, 403].includes(error?.status)) return 'Sua sessão não permite esta consulta. Entre novamente.';
++  return 'Não foi possível consultar os eventos. Verifique a conexão e tente novamente.';
++}
++
++// One controller per mounted account/session. Invalidate immediately on query changes
++// or disposal; a transport without abort support can never publish obsolete results.
++export function createAdminEventsLoader(client, { isCurrent = () => true } = {}) {
++  let generation = 0, pending = false, disposed = false;
++  let filters = {}, state = { items: [], nextCursor: null, status: 'idle', error: null };
++  const listeners = new Set();
++  const publish = patch => { state = { ...state, ...patch }; listeners.forEach(listener => listener(state)); };
++  async function load(reset = false) {
++    if (disposed || !isCurrent() || pending || (!reset && !state.nextCursor)) return;
++    const ticket = generation, cursor = reset ? null : state.nextCursor;
++    pending = true;
++    publish({ status: reset ? 'loading' : 'loadingMore', error: null });
++    try {
++      const result = await listAdminEvents(client, { ...filters, cursor });
++      if (disposed || ticket !== generation || !isCurrent()) return;
++      if (result.nextCursor && result.nextCursor === cursor) throw new Error('Cursor repetido.');
++      const unique = new Map((reset ? [] : state.items).map(event => [event.id, event]));
++      result.items.forEach(event => unique.set(event.id, event));
++      publish({ items: [...unique.values()], nextCursor: result.nextCursor, status: 'ready' });
++    } catch (error) {
++      if (disposed || ticket !== generation || !isCurrent()) return;
++      publish({ status: 'error', error: adminReadError(error),
++        ...([401, 403].includes(error?.status) ? { items: [], nextCursor: null } : {}) });
++    } finally { if (ticket === generation) pending = false; }
++  }
++  return {
++    // React may replay mount effects in development; old requests stay invalid
++    // because dispose advanced the generation before activation.
++    activate() { disposed = false; },
++    getSnapshot: () => state,
++    subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
++    setFilters(next) {
++      generation += 1; pending = false; filters = next;
++      publish({ items: [], nextCursor: null, status: 'idle', error: null, queryKey: JSON.stringify(next) });
++      return load(true);
++    },
++    more: () => load(false),
++    retry: () => load(state.items.length === 0),
++    dispose() { disposed = true; generation += 1; pending = false; listeners.clear(); state = { items: [], nextCursor: null, status: 'idle', error: null }; },
++  };
++}
+diff --git a/app/tests/adminNavigation.test.cjs b/app/tests/adminNavigation.test.cjs
+index 07d1dcbf891f221d44aa093d2898767a005404f8..985f99d9321449db4d41dd4fa1b6a3c0ca0e9cda 100644
+--- a/app/tests/adminNavigation.test.cjs
++++ b/app/tests/adminNavigation.test.cjs
+@@ -111,58 +111,23 @@ test('Home não oferece atalho Admin nos estados de carregamento, erro ou pronto
+   assert.deepEqual(h.navigationCalls, []);
+ });
+ 
+-test('pilha da Área Admin registra as telas com títulos em português e provedor por sessão', () => {
+-  const registered = [];
+-  const { ownerKeyFor } = createAdminApp();
+-  let currentAuth = verifiedAdminAuth({ getSessionEpoch: () => 7 });
+-  const navigator = loadModule('screens/admin/AdminDemoNavigator.js', (name) => {
++test('navegador Admin registra apenas destinos reais e respeita identidade', () => {
++  let owner = 'admin:session:1';
++  const navigator = loadModule('screens/admin/AdminDemoNavigator.js', name => {
+     if (name === 'react/jsx-runtime') return require('react/jsx-runtime');
+-    if (name === '@react-navigation/native-stack') {
+-      return { createNativeStackNavigator: () => ({ Navigator: StackNavigator, Screen: StackScreen }) };
+-    }
+-    if (name === '../../context/AuthContext') {
+-      return { useAuth: () => currentAuth };
+-    }
+-    if (name === './AdminDemoContext') {
+-      return {
+-        AdminDemoProvider: 'AdminDemoProvider',
+-        getAdminDemoOwnerKey: ownerKeyFor,
+-      };
+-    }
++    if (name === '@react-navigation/native-stack') return { createNativeStackNavigator: () => ({ Navigator: StackNavigator, Screen: StackScreen }) };
++    if (name === '@react-navigation/bottom-tabs') return { createBottomTabNavigator: () => ({ Navigator: StackNavigator, Screen: StackScreen }) };
++    if (name === 'react-native') return { Text: 'Text' };
++    if (name === '../../context/AuthContext') return { useAuth: () => ({}) };
++    if (name === './useAdminEvents') return { adminReadOwner: () => owner };
++    if (name === './components/adminTheme') return { adminColors: {} };
+     return { __esModule: true, default: ImportedScreen };
+   }).exports.default;
+   const tree = navigator();
+-  assert.equal(tree.type, 'AdminDemoProvider', 'estado da demonstração fica dentro da área');
+-  assert.equal(tree.key, ownerKeyFor(currentAuth), 'provedor usa conta, sessão, geração e revisão reais');
+-  const originalKey = tree.key;
+-  for (const overrides of [{ user: { id: 'b' } }, { getSessionEpoch: () => 8 },
+-    { getIdentityRevision: () => 2 }, { user: { sessionId: '20000000-0000-4000-8000-000000000002' } }]) {
+-    currentAuth = verifiedAdminAuth({ getSessionEpoch: () => 7, ...overrides });
+-    assert.notEqual(navigator().key, originalKey);
+-  }
+-  for (const overrides of [{ user: { roles: ['participante'] } }, { user: { roles: ['staff'] } },
+-    { identityStatus: 'checking' }, { identityStatus: 'error' }, { isAuthenticated: false },
+-    { adminChallenge: { isTotpConfigured: true } }]) {
+-    currentAuth = verifiedAdminAuth(overrides);
+-    assert.equal(navigator(), null, 'montagem direta/rota antiga não contorna autorização');
+-  }
+-  const stack = tree.props.children;
+-  assert.equal(stack.props.initialRouteName, 'AdminPanel');
+-  for (const screen of [].concat(stack.props.children)) registered.push([screen.props.name, screen.props.options.title]);
+-  assert.deepEqual(JSON.parse(JSON.stringify(registered)), [
+-    ['AdminPanel', 'Painel Administrativo'],
+-    ['AdminEvents', 'Gerenciar Eventos'],
+-    ['AdminCreateEvent', 'Criar Evento'],
+-    ['AdminEventDetail', 'Detalhe do Evento'],
+-    ['AdminEventSchedule', 'Alterar Horários'],
+-    ['AdminEventQueue', 'Fila Externa'],
+-    ['AdminEventClose', 'Encerrar Evento'],
+-    ['AdminEventExperiences', 'Experiências do Evento'],
+-    ['AdminExperienceDetail', 'Experiência'],
+-    ['AdminStationDetail', 'Estação'],
+-    ['AdminEventStaff', 'Staff do Evento'],
+-    ['AdminHistory', 'Histórico'],
+-    ['AdminEventBi', 'BI do Evento'],
+-    ['AdminOverview', 'Visão Geral'],
+-  ]);
++  assert.equal(tree.key, owner);
++  assert.deepEqual(Array.from(tree.props.children, node => node.props.name), ['AdminTabs', 'AdminEvents', 'AdminRealEvent']);
++  const tabs = tree.props.children[0].props.component();
++  assert.deepEqual(Array.from(tabs.props.children, node => node.props.name), ['Home', 'Histórico', 'BI']);
++  owner = 'other:session:2'; assert.notEqual(navigator().key, tree.key);
++  owner = null; assert.equal(navigator(), null);
+ });
+diff --git a/app/tests/adminRealEvents.test.cjs b/app/tests/adminRealEvents.test.cjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..8fce506b7b543a73aad5b30049afb7f8e75aa714
+--- /dev/null
++++ b/app/tests/adminRealEvents.test.cjs
+@@ -0,0 +1,149 @@
++const assert = require('node:assert/strict');
++const test = require('node:test');
++const { loadModule, createHarness, textOf } = require('./helpers/questionnaireHarness.cjs');
++const { verifiedAdminAuth } = require('./helpers/adminAuthFixture.cjs');
++const service = loadModule('services/adminEventsService.js', require).exports;
++const id = n => `abcdef00-0000-4000-8000-${String(n).padStart(12, '0')}`;
++const event = (n = 1, phase = 'open') => ({ id: id(n), name: 'Arena Norte', effectivePhase: phase,
++  startsAt: '2026-11-05T15:00:00Z', officialEndsAt: '2026-11-05T20:00:00Z', timezone: 'America/Sao_Paulo', readiness: { ready: phase !== 'not_ready' } });
++const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
++const plain = value => JSON.parse(JSON.stringify(value));
++// Let pending promises and harness state updates settle until the expected UI
++// appears. A finite number of event-loop turns prevents hanging tests.
++async function waitForText(h, expected) {
++  for (let attempt = 0; attempt < 20; attempt++) {
++    await h.actAsync(() => new Promise(resolve => setImmediate(resolve)));
++    if (h.nodes.some(node => textOf(node).includes(expected))) return;
++  }
++  assert.fail(`Texto não apareceu após 20 ciclos: ${expected}`);
++}
++
++test('lista envia busca global, fase e cursor autenticados, sem filtrar páginas no cliente', async () => {
++  const calls = [];
++  const result = await service.listAdminEvents({ get: async (...args) => { calls.push(args); return { items: [event(1, 'not_ready')], nextCursor: 'next' }; } },
++    { search: '  Arena   Norte%_ ', phase: 'scheduled', cursor: 'before', limit: 2 });
++  const url = new URL(calls[0][0], 'http://localhost');
++  assert.equal(url.searchParams.get('search'), 'Arena Norte%_');
++  assert.equal(url.searchParams.get('excludeClosed'), 'true');
++  assert.equal(url.searchParams.get('phase'), 'scheduled');
++  assert.equal(url.searchParams.get('cursor'), 'before');
++  assert.equal(calls[0][1].auth, true);
++  assert.equal(result.items[0].effectivePhase, 'not_ready');
++});
++test('paginação não duplica chamadas ou cards e termina no cursor nulo', async () => {
++  const pending = deferred(); let count = 0;
++  const loader = service.createAdminEventsLoader({ get: async () => ++count === 1 ? { items: [event()], nextCursor: 'next' } : pending.promise });
++  await loader.setFilters({ search: '', phase: 'all' });
++  const more = loader.more(); await loader.more(); assert.equal(count, 2);
++  pending.resolve({ items: [event(), event(2)], nextCursor: null }); await more;
++  assert.equal(loader.getSnapshot().items.length, 2);
++  await loader.more(); assert.equal(count, 2);
++});
++test('busca sobreposta descarta resultado atrasado e reinicia cursor', async () => {
++  const old = deferred(), fresh = deferred(); let count = 0;
++  const loader = service.createAdminEventsLoader({ get: () => ++count === 1 ? old.promise : fresh.promise });
++  const a = loader.setFilters({ search: 'antigo', phase: 'all' });
++  const b = loader.setFilters({ search: 'novo', phase: 'open' });
++  fresh.resolve({ items: [event(2)], nextCursor: null }); await b;
++  old.resolve({ items: [event()], nextCursor: 'stale' }); await a;
++  assert.deepEqual(plain(loader.getSnapshot().items.map(item => item.id)), [id(2)]);
++  assert.equal(loader.getSnapshot().nextCursor, null);
++});
++test('erro inicial e de próxima página permitem retry sem perder contexto', async () => {
++  let count = 0;
++  const loader = service.createAdminEventsLoader({ get: async () => {
++    count++; if ([1, 3].includes(count)) throw new Error('network');
++    return { items: [event(count)], nextCursor: count === 2 ? 'next' : null };
++  } });
++  await loader.setFilters({}); assert.equal(loader.getSnapshot().status, 'error');
++  await loader.retry(); assert.equal(loader.getSnapshot().items.length, 1);
++  await loader.more(); assert.equal(loader.getSnapshot().items.length, 1);
++  await loader.retry(); assert.equal(loader.getSnapshot().items.length, 2);
++});
++test('troca de sessão e dispose impedem publicação de conta anterior', async () => {
++  const response = deferred(); let current = true, published = 0;
++  const loader = service.createAdminEventsLoader({ get: () => response.promise }, { isCurrent: () => current });
++  loader.subscribe(() => published++);
++  const request = loader.setFilters({}); const before = published;
++  current = false; loader.dispose(); response.resolve({ items: [event()], nextCursor: null }); await request;
++  assert.equal(published, before); assert.equal(loader.getSnapshot().items.length, 0);
++});
++test('401/403 removem dados anteriores e detalhe valida UUID e identidade retornada', async () => {
++  for (const status of [401, 403]) {
++    let count = 0;
++    const loader = service.createAdminEventsLoader({ get: async () => { if (++count > 1) throw { status }; return { items: [event()], nextCursor: 'next' }; } });
++    await loader.setFilters({}); await loader.more(); assert.equal(loader.getSnapshot().items.length, 0);
++  }
++  let calls = 0;
++  const client = { get: async () => { calls++; return { event: event() }; } };
++  await assert.rejects(service.getAdminEvent(client, 'demo-id')); assert.equal(calls, 0);
++  assert.equal((await service.getAdminEvent(client, id(1))).id, id(1));
++  await assert.rejects(service.getAdminEvent(client, id(2)));
++  await assert.rejects(service.listAdminEvents({ get: async () => ({ items: [event(1, 'closed')], nextCursor: null }) }));
++});
++test('datas pt-BR respeitam fuso e não exibem ISO ou valores ausentes', () => {
++  assert.match(service.formatAdminDate('2026-11-05T15:00:00Z', 'America/Sao_Paulo'), /05\/11\/2026.*12:00/);
++  assert.equal(service.formatAdminDate(null, 'UTC'), 'Data indisponível');
++});
++test('Home oferece navegação explícita, sem contadores ou formulários demo', () => {
++  let exits = 0;
++  const h = createHarness('screens/admin/AdminHomeScreen.js', { authContext: verifiedAdminAuth({ logout: () => exits++ }) });
++  assert.ok(h.nodes.some(node => textOf(node).includes('Painel Administrativo')));
++  for (const name of ['Criar evento', 'Catálogo de experiências']) {
++    const button = h.nodes.find(node => node.type === 'Pressable' && node.props.accessibilityLabel?.startsWith(name));
++    assert.equal(button.props.disabled, true);
++  }
++  const users = h.nodes.find(node => node.type === 'View' && node.props.accessibilityLabel === 'Usuários e permissões · Em implementação');
++  assert.ok(users, 'gestão global permanece informativa');
++  assert.equal(users.props.onPress, undefined);
++  assert.ok(textOf(users).includes('Em breve'));
++  assert.ok(!h.nodes.some(node => node.type === 'Pressable' && node.props.accessibilityLabel?.startsWith('Usuários e permissões')));
++  h.press('Gerenciar eventos'); h.act(() => {});
++  assert.equal(h.navigationCalls.at(-1).name, 'AdminEvents');
++  h.press('Histórico de eventos'); h.press('Visão geral'); h.press('Sair da conta');
++  assert.equal(exits, 1); assert.equal(h.navigationCalls.at(-1).name, 'BI');
++});
++test('lista monta HTTP real, estado vazio, not_ready e seleção por UUID', async () => {
++  const calls = []; let body = { items: [], nextCursor: null };
++  const auth = verifiedAdminAuth({ httpClient: { get: async url => { calls.push(url); return body; } } });
++  const h = createHarness('screens/admin/AdminRealEventsScreen.js', { authContext: auth });
++  await waitForText(h, 'Nenhum evento encontrado');
++  assert.ok(h.nodes.some(node => textOf(node).includes('Nenhum evento encontrado')));
++  assert.deepEqual(h.nodes.filter(node => node.type === 'Pressable' && node.props.accessibilityRole === 'tab').map(node => node.props.accessibilityLabel), ['Home', 'Histórico', 'BI']);
++  body = { items: [event(1, 'not_ready')], nextCursor: null };
++  h.act(() => h.nodes.find(node => node.type === 'TextInput').props.onChangeText('Arena'));
++  await waitForText(h, 'Não pronto');
++  assert.ok(calls.at(-1).includes('search=Arena'));
++  assert.ok(h.nodes.some(node => textOf(node).includes('Não pronto')));
++  h.press('Acessar evento Arena Norte');
++  assert.equal(h.navigationCalls.at(-1).params.eventId, id(1));
++  assert.equal(h.navigationCalls.at(-1).name, 'AdminRealEvent');
++  h.unmount();
++});
++test('lista exibe falha de rede e recupera pelo botão de retry', async () => {
++  let count = 0;
++  const h = createHarness('screens/admin/AdminRealEventsScreen.js', { authContext: verifiedAdminAuth({ httpClient: { get: async () => {
++    if (++count === 1) throw new Error('network'); return { items: [], nextCursor: null };
++  } } }) });
++  await waitForText(h, 'Não foi possível carregar');
++  assert.ok(h.nodes.some(node => textOf(node).includes('Não foi possível carregar')));
++  h.press('Tentar novamente');
++  await waitForText(h, 'Nenhum evento encontrado');
++  assert.equal(count, 2); h.unmount();
++});
++test('detalhe real consulta somente UUID selecionado e trata recurso inacessível', async () => {
++  const urls = [];
++  const h = createHarness('screens/admin/AdminRealEventScreen.js', {
++    props: { route: { params: { eventId: id(1) } } },
++    authContext: verifiedAdminAuth({ httpClient: { get: async url => { urls.push(url); return { event: event() }; } } }),
++  });
++  await waitForText(h, 'Arena Norte');
++  assert.equal(urls[0], `/admin/events/${id(1)}`);
++  assert.ok(h.nodes.some(node => textOf(node).includes('Arena Norte')));
++  assert.ok(h.nodes.some(node => textOf(node).includes('ADMIN-02')));
++  h.setAuthContext(verifiedAdminAuth({ user: { id: 'other' }, httpClient: { get: async () => { throw { status: 404 }; } } }));
++  assert.ok(!h.nodes.some(node => textOf(node).includes('Arena Norte')));
++  await waitForText(h, 'Evento indisponível');
++  assert.ok(h.nodes.some(node => textOf(node).includes('Evento indisponível')));
++  h.unmount();
++});
+diff --git a/app/tests/helpers/questionnaireHarness.cjs b/app/tests/helpers/questionnaireHarness.cjs
+index 63d27849e1f26f5d72279698ed0b3ec8055fda0b..b17b662404da143d1bc9a6bc8dd78d689cda09f5 100644
+--- a/app/tests/helpers/questionnaireHarness.cjs
++++ b/app/tests/helpers/questionnaireHarness.cjs
+@@ -349,9 +349,16 @@ function createHarness(relativePath, options = {}) {
+   };
+ 
+   const internalModules = new Map();
++  const secureValues = new Map();
++  const secureStore = {
++    getItemAsync: async key => secureValues.get(key) ?? null,
++    setItemAsync: async (key, value) => { secureValues.set(key, value); },
++    deleteItemAsync: async key => { secureValues.delete(key); },
++  };
+   function resolveInternalModule(fromRelativePath, name) {
+     if (name === 'react') return react;
+     if (name === 'react-native') return native;
++    if (name === 'expo-secure-store') return secureStore;
+     if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView', useSafeAreaInsets: () => ({ bottom: 0, top: 0, left: 0, right: 0 }) };
+     if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
+     if (name === '@react-native-community/datetimepicker') return nativePicker;
+diff --git a/app/tests/roleRoutingIntegration.test.cjs b/app/tests/roleRoutingIntegration.test.cjs
+index a1cb6120575ae7306e4bb924a05091e56fa88a90..dc694ac9ce1ba2febc704edefc23b9bc9bbbbffc 100644
+--- a/app/tests/roleRoutingIntegration.test.cjs
++++ b/app/tests/roleRoutingIntegration.test.cjs
+@@ -11,12 +11,12 @@ let deps;
+ try {
+   deps = { React: qaRequire('react'), jsx: qaRequire('react/jsx-runtime'),
+     Renderer: qaRequire('react-test-renderer'), Navigation: qaRequire('@react-navigation/core'),
+-    StackRouter: qaRequire('@react-navigation/routers').StackRouter };
++    StackRouter: qaRequire('@react-navigation/routers').StackRouter, TabRouter: qaRequire('@react-navigation/routers').TabRouter };
+ } catch { deps = null; }
+ const skip = deps ? false : 'dependências de qa/regression não instaladas';
+ 
+ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+-  const { React, jsx, Renderer, Navigation, StackRouter } = deps;
++  const { React, jsx, Renderer, Navigation, StackRouter, TabRouter } = deps;
+   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+   let user = initialUser;
+   let token = initialToken;
+@@ -39,6 +39,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+       }
+       if (url === '/participations/current') return { participation: null };
+       if (url === '/participations/return-state') return { pendingEvaluationParticipationIds: [], recentFinalization: null };
++      if (url === '/admin/events') return { items: [], nextCursor: null };
+       if (url === '/staff/events') return { events: control.events ?? [] };
+       const entryMatch = url.match(/^\/staff\/events\/([^/]+)\/entry-control$/);
+       if (entryMatch) return { eventId: entryMatch[1], externalQueueEnabled: true, canManage: false,pendingCall:null,canCall:false,canConfirm:false,canMarkAbsent:false,canRemove:false,
+@@ -83,7 +84,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+       text: async () => JSON.stringify(value.body ?? value) };
+   } });
+   const passthrough = ({ children }) => children;
+-  const native = Object.fromEntries(['ActivityIndicator', 'KeyboardAvoidingView', 'Modal', 'Pressable', 'ScrollView', 'Text', 'TextInput', 'View'].map((name) => [name, name]));
++  const native = Object.fromEntries(['ActivityIndicator', 'Image', 'KeyboardAvoidingView', 'Modal', 'Pressable', 'ScrollView', 'Text', 'TextInput', 'View'].map((name) => [name, name]));
+   native.StyleSheet = { create: (styles) => styles };
+   native.AppState = { currentState: 'active', addEventListener: () => ({ remove() {} }) };
+   native.Platform = { OS: control.platformOS ?? 'web' };
+@@ -91,6 +92,11 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+     const { state, descriptors, NavigationContent } = Navigation.useNavigationBuilder(StackRouter, props);
+     return React.createElement(NavigationContent, null, descriptors[state.routes[state.index].key].render());
+   }
++  function FocusedTabs(props) {
++    const { state, descriptors, navigation, NavigationContent } = Navigation.useNavigationBuilder(TabRouter, props);
++    return React.createElement(NavigationContent, null, descriptors[state.routes[state.index].key].render(),
++      props.tabBar?.({ state, descriptors, navigation }));
++  }
+   const cache = new Map();
+   function load(relative) {
+     if (cache.has(relative)) return cache.get(relative);
+@@ -103,10 +109,12 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+       if (name === 'expo-crypto') return { randomUUID: () => `00000000-0000-4000-8000-${String(++generatedKeys).padStart(12, '0')}` };
+       if (name === 'expo-secure-store') return control.secureStore ?? {};
+       if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView', SafeAreaProvider: passthrough };
++      if (name === '@react-navigation/bottom-tabs') return { createBottomTabNavigator: Navigation.createNavigatorFactory(FocusedTabs) };
+       if (name === '@react-navigation/native-stack') return { createNativeStackNavigator: Navigation.createNavigatorFactory(FocusedStack) };
+       if (name === '@react-navigation/native') return { useIsFocused: () => true, NavigationContainer: ({ children }) =>
+         React.createElement(Navigation.BaseNavigationContainer, { ref: navRef, onUnhandledAction: (action) => unhandled.push(action) }, children) };
+       const target = path.posix.normalize(path.posix.join(directory, name));
++      if (target === 'assets/images/logo-arenago.png') return { uri: target };
+       if (target === 'components/ui/AuthBackground') {
+         return { AuthBackground: ({ children, ...props }) => React.createElement('View', props, children) };
+       }
+@@ -116,7 +124,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+       if (control.realAdmin && target === 'screens/admin/adminDemoLatency') {
+         return { waitAdminDemoLatency: async () => {} };
+       }
+-      if (control.realAdmin && (target.startsWith('screens/admin/') || target === 'data/adminDemoData')) {
++      if (control.realAdmin && (target.startsWith('screens/admin/') || target === 'data/adminDemoData' || target === 'services/adminEventsService')) {
+         return load(`${target}.js`);
+       }
+       if (control.realStaff && ['screens/staff/StaffEventsNavigator', 'services/staffEventsService',
+@@ -205,12 +213,12 @@ test('Admin: senha e desafio não abrem painel; TOTP e identidade confirmada abr
+     assert.ok(!app.hasText('Conectado como:'));
+     await app.act(async () => { identity.resolve(adminUser); await pending; });
+     assert.deepEqual(app.routes(), ['AdminArea']);
+-    assert.equal(app.activeRoute(), 'AdminPanel');
+-    assert.ok(app.hasText('Sessão Admin autenticada com segundo fator'));
+-    assert.ok(app.hasText('nada aqui é salvo no servidor'));
++    assert.equal(app.activeRoute(), 'Home');
++    assert.ok(app.hasText('Painel Administrativo'));
++    assert.ok(app.hasText('Somente administradores autorizados podem alterar eventos, permissões e dados operacionais.'));
+     for (const name of ['MainTabs', 'StaffPending', 'StaffDemo', 'ProfileQuestionnaire', 'AdminDemo', 'AdminPending']) {
+       app.navigate(name);
+-      assert.equal(app.activeRoute(), 'AdminPanel');
++      assert.equal(app.activeRoute(), 'Home');
+     }
+     assert.ok(app.calls.includes('/auth/2fa/verify'));
+     assert.ok(app.calls.includes('/auth/me'));
+@@ -222,27 +230,26 @@ test('Admin: restauração válida reutiliza telas, retornos internos e logout r
+   const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control: { realAdmin: true } });
+   await app.mount();
+   try {
+-    assert.equal(app.activeRoute(), 'AdminPanel');
++    assert.equal(app.activeRoute(), 'Home');
+     assert.ok(app.calls.includes('/auth/refresh') && app.calls.includes('/auth/me'));
+     assert.ok(!app.calls.includes('/auth/2fa/verify'), 'sessão já autenticada é restaurada pelo contrato real');
+-    await app.press('Gerenciar Eventos, 7 eventos na demonstração');
++    await app.press('Gerenciar eventos');
+     assert.equal(app.activeRoute(), 'AdminEvents');
+-    assert.ok(app.hasText('Copa Noturna'));
+-    await app.press('← Painel');
+-    assert.equal(app.activeRoute(), 'AdminPanel');
+-    const params = { eventId: 'demo-admin-arena-xp', experienceId: 'demo-admin-exp-xp-dance',
+-      stationId: 'demo-admin-station-xp-dance-1' };
+-    for (const name of ['AdminCreateEvent', 'AdminEventDetail', 'AdminEventSchedule', 'AdminEventQueue',
+-      'AdminEventClose', 'AdminEventExperiences', 'AdminExperienceDetail', 'AdminStationDetail',
+-      'AdminEventStaff', 'AdminHistory', 'AdminEventBi', 'AdminOverview']) {
+-      app.navigate('AdminArea', { screen: name, params });
+-      await app.act(async () => {});
+-      assert.equal(app.activeRoute(), name);
+-      assert.ok(!app.hasText('não encontrada') && !app.hasText('não encontrado'), name);
+-      app.back();
+-      assert.equal(app.activeRoute(), 'AdminPanel');
++    assert.ok(app.hasText('Nenhum evento encontrado'));
++    await app.press('Voltar ao painel');
++    assert.equal(app.activeRoute(), 'Home');
++    await app.press('Gerenciar eventos');
++    await app.press('Histórico');
++    assert.equal(app.activeRoute(), 'Histórico');
++    assert.ok(app.hasText('Em implementação'));
++    await app.press('BI');
++    assert.equal(app.activeRoute(), 'BI');
++    await app.press('Home');
++    assert.equal(app.activeRoute(), 'Home');
++    for (const name of ['AdminCreateEvent', 'AdminEventDetail', 'AdminEventSchedule']) {
++      app.navigate(name); assert.equal(app.activeRoute(), 'Home');
+     }
+-    await app.press('← Sair da conta');
++    await app.press('Sair da conta');
+     assert.equal(app.route(), 'Welcome');
+     assert.equal(app.storedToken(), null);
+     assert.equal(app.manager.getAccessToken(), null);
+@@ -252,44 +259,31 @@ test('Admin: restauração válida reutiliza telas, retornos internos e logout r
+   } finally { app.dispose(); }
+ });
+ 
+-test('Admin: mocks reiniciam em refresh, troca de Admin, papéis e novo login', { skip }, async () => {
++test('Admin: refresh e troca de conta invalidam logout antigo', { skip }, async () => {
+   const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control: { realAdmin: true } });
+   await app.mount();
+   try {
+-    const initialClock = '05/11/2026 09:00';
+-    assert.ok(app.hasText(initialClock));
+-    const staleAdvance = app.handler('Avançar relógio 1 hora');
+-    await app.press('Avançar relógio 1 hora');
+-    assert.ok(app.hasText('05/11/2026 10:00'));
++    const staleExit = app.handler('Sair da conta');
+     await app.act(() => app.manager.refreshSession());
+-    assert.ok(app.hasText(initialClock));
+-    await app.act(async () => staleAdvance());
+-    assert.ok(app.hasText(initialClock), 'callback anterior ao refresh não atua');
+-    const staleExit = app.handler('← Sair da conta');
++    assert.equal(app.activeRoute(), 'Home');
+     await app.act(() => app.manager.logout());
+-    const other = { ...adminUser, id: 'admin-b', name: 'Admin B',
+-      sessionId: '20000000-0000-4000-8000-000000000002' };
++    const other = { ...adminUser, id: 'admin-b', sessionId: '20000000-0000-4000-8000-000000000002' };
+     app.setUser(other);
+     await app.act(() => app.manager.login({ email: other.email, password: 'password' }));
+     await app.act(() => app.manager.verifyAdminTwoFactor('123456'));
+-    await app.act(async () => { staleAdvance(); staleExit(); });
+-    assert.equal(app.activeRoute(), 'AdminPanel');
+-    assert.ok(app.hasText('Conectado como: Admin B'));
+-    assert.ok(app.hasText(initialClock));
++    await app.act(async () => staleExit());
++    assert.equal(app.activeRoute(), 'Home');
++    assert.ok(!app.hasText('MODO DEMONSTRAÇÃO'));
+     app.setUser({ ...other, roles: ['staff', 'participante'] });
+     await app.act(() => app.manager.fetchCurrentUser());
+     assert.equal(app.route(), 'StaffPending');
+-    for (const name of ['AdminArea', 'AdminDemo', 'AdminPending', 'AdminPanel']) app.navigate(name);
+-    assert.equal(app.route(), 'StaffPending');
++    app.navigate('AdminArea'); assert.equal(app.route(), 'StaffPending');
+     app.setUser({ ...other, roles: ['participante'], hasCompletedQuestionnaire: true });
+     await app.act(() => app.manager.fetchCurrentUser());
+     assert.equal(app.route(), 'MainTabs');
+-    for (const name of ['AdminArea', 'AdminDemo', 'AdminPending', 'AdminPanel']) app.navigate(name);
+-    assert.equal(app.route(), 'MainTabs');
+-    app.setUser(other);
+-    await app.act(() => app.manager.fetchCurrentUser());
+-    assert.equal(app.activeRoute(), 'AdminPanel');
+-    assert.ok(app.hasText(initialClock));
++    app.navigate('AdminArea'); assert.equal(app.route(), 'MainTabs');
++    app.setUser(other); await app.act(() => app.manager.fetchCurrentUser());
++    assert.equal(app.activeRoute(), 'Home');
+   } finally { app.dispose(); }
+ });
+ 
+@@ -298,7 +292,7 @@ test('Admin: revogação remota retira a área e invalida ações guardadas', {
+   const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control });
+   await app.mount();
+   try {
+-    const stale = app.handler('Avançar relógio 1 hora');
++    const stale = app.handler('Sair da conta');
+     control.http = async route => route === '/auth/me'
+       ? { statusCode: 401, body: { code: 'SESSION_REVOKED' } } : undefined;
+     await app.act(async () => { await app.manager.fetchCurrentUser().catch(() => {}); });
+@@ -332,7 +326,7 @@ test('Admin: falha de revogação remota mantém logout local e painel inacessí
+   const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control });
+   await app.mount();
+   try {
+-    await app.press('← Sair da conta');
++    await app.press('Sair da conta');
+     assert.equal(app.manager.getSnapshot().isAuthenticated, false);
+     assert.ok(app.manager.getSnapshot().authNotice.includes('não foi possível confirmar a revogação'));
+     assert.equal(app.storedToken(), null);
+diff --git a/backend/src/events/admin-configuration-query.service.ts b/backend/src/events/admin-configuration-query.service.ts
+index 063a0585e706a68e17e241360182075591b8cb35..72273e9643e5800f78d77c5a38b7f4b65ef494ed 100644
+--- a/backend/src/events/admin-configuration-query.service.ts
++++ b/backend/src/events/admin-configuration-query.service.ts
+@@ -25,8 +25,12 @@ export class AdminConfigurationQueryService {
+   },{isolationLevel:'repeatable read',accessMode:'read only'});}
+   events(actor:ConfigurationActor,page:ConfigurationPage){return this.snapshot(actor,async tx=>{
+     const after=page.cursor?sql`(e.created_at,e.id)<(${page.cursor.createdAt}::timestamptz,${page.cursor.id}::uuid)`:sql`true`;
+-    const query=configurationProjection(sql`${after} AND ${page.statusStored?sql`e.status=${page.statusStored}::varchar(20)`:sql`true`}`);
++    // strpos treats %, _ and backslashes literally. Values remain bound parameters.
++    const search=page.search?sql`(strpos(lower(regexp_replace(btrim(e.name), '[[:space:]]+', ' ', 'g')),lower(${page.search}))>0
++      OR strpos(lower(e.access_code_normalized),lower(${page.search}))>0)`:sql`true`;
++    const query=configurationProjection(sql`${after} AND ${search} AND ${page.statusStored?sql`e.status=${page.statusStored}::varchar(20)`:sql`true`}`);
+     const rows=(await tx.execute<ConfigurationRow>(sql`SELECT * FROM (${query}) p WHERE ${page.phase?sql`p."effectivePhase"=${page.phase}::text`:sql`true`}
++      AND ${page.excludeClosed?sql`p."effectivePhase"<>'closed'`:sql`true`}
+       ORDER BY "createdAt" DESC,id DESC LIMIT ${page.limit+1}`)).rows,visible=rows.slice(0,page.limit),last=visible.at(-1);
+     return {items:visible.map(r=>configurationEventViewSchema.parse(configurationEventView(r))),nextCursor:rows.length>page.limit&&last?encodeConfigurationCursor(last.createdAt,last.id):null};
+   });}
+diff --git a/backend/src/events/admin-configuration.dto.ts b/backend/src/events/admin-configuration.dto.ts
+index d50bd23e4b289d08a34346b5b698a737ad592c06..69adb3e5c70c323be64c84d6d1677e04ca7ece76 100644
+--- a/backend/src/events/admin-configuration.dto.ts
++++ b/backend/src/events/admin-configuration.dto.ts
+@@ -46,7 +46,10 @@ function decodeCursor(value:string){
+ }
+ export const configurationQuery=z.object({limit:z.string().regex(/^[1-9]\d?$/).transform(Number).pipe(z.number().max(50)).optional().default(20),
+   cursor:z.string().transform((value,ctx)=>{const cursor=decodeCursor(value);if(!cursor){ctx.addIssue({code:'custom',message:'Cursor inválido.'});return z.NEVER;}return cursor;}).optional(),
+-  phase:effectivePhase.optional(),statusStored:z.enum(['scheduled','open','closing','closed']).optional()}).strict();
++  phase:effectivePhase.optional(),statusStored:z.enum(['scheduled','open','closing','closed']).optional(),
++  search:z.string().max(180).transform(value=>value.trim().replace(/\s+/gu,' '))
++    .refine(value=>!/[\u0000-\u001f\u007f]/u.test(value)&&Array.from(value).every(c=>!(c.length===1&&c.charCodeAt(0)>=0xd800&&c.charCodeAt(0)<=0xdfff)),'Busca inválida.').optional(),
++  excludeClosed:z.enum(['true','false']).transform(value=>value==='true').optional()}).strict();
+ export type ConfigurationPage=z.infer<typeof configurationQuery>;
+ const precise=z.custom<string>(isPreciseInstant);
+ const checks=z.object({nameAndAccessCode:z.boolean(),validScheduleAndTimezone:z.boolean(),externalQueueConfigured:z.boolean(),hasExperienceWithAvailableStation:z.boolean(),hasVerifiedActiveStaff:z.boolean()}).strict();
+diff --git a/backend/test/unit/admin-configuration-http.test.ts b/backend/test/unit/admin-configuration-http.test.ts
+index a73cce9fded9d02bef26ef0775a2b2d2abf1765a..1512a1dd0a5f12681a47ecfd8eee77d3635a7300 100644
+--- a/backend/test/unit/admin-configuration-http.test.ts
++++ b/backend/test/unit/admin-configuration-http.test.ts
+@@ -194,7 +194,9 @@ test("E08.13 HTTP lista valida filtros/cursor estritamente e entrega paginação
+   }
+   assert.equal(calls.length, 0);
+   const cursor = Buffer.from(JSON.stringify({ v: 1, createdAt: at, id: eventId })).toString("base64url");
+-  const r = await request(route).query({ limit: "2", phase: "open", statusStored: "scheduled", cursor }); assert.equal(r.status, 200);
++  const r = await request(route).query({ limit: "2", phase: "open", statusStored: "scheduled", cursor, search: "  Arena   Norte ", excludeClosed: "true" }); assert.equal(r.status, 200);
++  assert.equal((calls[0].input as {search:string}).search,"Arena Norte");
++  assert.equal((calls[0].input as {excludeClosed:boolean}).excludeClosed,true);
+   assert.deepEqual(calls[0].actor, { userId, sessionId }); assert.equal((calls[0].input as { limit: number }).limit, 2);
+   assert.deepEqual((calls[0].input as { cursor: unknown }).cursor, { v: 1, createdAt: at, id: eventId });
+ });
+diff --git a/backend/test/unit/admin-configuration.test.ts b/backend/test/unit/admin-configuration.test.ts
+index 99a9f0f547320583a1d5177822f3698fa81278d8..c5e7da7c197839ed3ac4819387cefd42e57341f0 100644
+--- a/backend/test/unit/admin-configuration.test.ts
++++ b/backend/test/unit/admin-configuration.test.ts
+@@ -181,6 +181,35 @@ test("E08.13 listagem keyset usa ordenação estável, filtros e um snapshot sem
+ test("E08.13 página final vazia não inventa cursor ou eventos",async()=>{
+   const f=readFixture({events:[]});assert.deepEqual(await f.service.events(actor,configurationQuery.parse({})),{items:[],nextCursor:null});
+ });
++test('ADMIN-01 search normaliza espaços, mantém compatibilidade e valida novos parâmetros',()=>{
++  assert.equal(configurationQuery.parse({search:'  Arena   Norte  '}).search,'Arena Norte');
++  assert.equal(configurationQuery.parse({}).search,undefined);
++  for(const search of ['\ud800','\udc00','x\ud800y','\ud800\ud800']) assert.equal(configurationQuery.safeParse({search}).success,false);
++  assert.equal(configurationQuery.parse({search:'Arena 😀'}).search,'Arena 😀');
++  assert.equal(configurationQuery.parse({excludeClosed:'false'}).excludeClosed,false);
++  for(const query of [{search:'x'.repeat(181)},{search:[]},{excludeClosed:'1'},{excludeClosed:true}]){
++    assert.equal(configurationQuery.safeParse(query).success,false);
++  }
++});
++for(const search of ['Arena Norte','ARENA-TEST','100%_\\literal',"x' OR true --"]){
++  test(`ADMIN-01 busca parametrizada ${search} antes do limite com cursor e fase`,async()=>{
++    const f=readFixture({events:[eventRow({effectivePhase:'not_ready'})]});
++    const result=await f.service.events(actor,configurationQuery.parse({search,excludeClosed:'true',phase:'not_ready',limit:'2',cursor:encodeConfigurationCursor(at,id(11))}));
++    const query=f.queries[2];
++    assert.ok(query.params.includes(search));assert.ok(!query.text.includes(search));
++    assert.ok(query.text.includes('strpos(lower('));
++    assert.ok(query.text.indexOf('p."effectivePhase"<>\'closed\'')<query.text.indexOf('LIMIT'));
++    assert.ok(query.text.includes('(e.created_at,e.id)<'));
++    assert.ok(query.text.includes('ORDER BY "createdAt" DESC,id DESC'));
++    assert.equal(result.items[0].effectivePhase,'not_ready');
++    assert.equal(result.nextCursor,null);
++  });
++}
++test('ADMIN-01 chamada anterior não exclui encerrados por padrão',async()=>{
++  const f=readFixture({events:[eventRow({effectivePhase:'closed'})]});
++  assert.equal((await f.service.events(actor,configurationQuery.parse({}))).items[0].effectivePhase,'closed');
++  assert.equal(f.queries[2].text.includes('p."effectivePhase"<>\'closed\''),false);
++});
+ for(const mode of ["event","readiness","experiences"]as const)test(`E08.13 GET ${mode} inexistente falha sem detalhes de outro evento`,async()=>{
+   const f=readFixture({absent:true});await assert.rejects(f.service[mode](actor,eventId),{kind:'resource_not_found'});assert.equal(f.queries.at(-1)?.text,'rollback');
+ });
+diff --git a/docs/ADMIN_01_IMPLEMENTACAO.md b/docs/ADMIN_01_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..dc8205755843297ef7676a0fbd79393718955764
+--- /dev/null
++++ b/docs/ADMIN_01_IMPLEMENTACAO.md
+@@ -0,0 +1,231 @@
++# ADMIN-01 — Home Admin e Gerenciar Eventos
++
++Implementação funcional concluída, com revisão visual aprovada pelo responsável e evidência final registrada na seção final. Base develop ea0b614f5926123ec9e5d659e9f540588bed9a37, inicialmente limpa e igual à referência local origin/develop. ADMIN-00 incorporada. Após interrupção, branch feature/admin-core-management confirmada nesse HEAD, limpa. Sem consulta remota.
++
++Escopo: Home, três abas Admin, listagem real com busca/filtro/paginação e detalhe contextual mínimo. Referências: ADMIN-00, Panorama §3.4 e Arquitetura §§18/27. Planejamento e PNGs não disponíveis no repositório; reutilizar tema Admin sem alegar comparação visual.
++
++Plano: extensão compatível de GET /admin/events com search e excludeClosed; serviço de leitura autenticado; controle de resultados obsoletos/conta; destinos reais ou informativos sem mutações demonstrativas. Preservar fontes da demo para migrações posteriores.
++
++Validação frontend final: 63/63 aprovados, exit 0. O responsável informou 144 testes backend aprovados em terminal Windows; dois typechecks backend foram aprovados anteriormente. Histórico e limitações constam nas seções posteriores.
++
++## Alterações efetivas e decisões
++
++- Navegador mantém nome de entrada `AdminDemoNavigator` usado por `App.js`, mas registra somente `AdminTabs`, `AdminEvents` e `AdminRealEvent`. Abas Home/Histórico/BI; Histórico e BI têm estados informativos. Provider e fontes demonstrativas permanecem em disco, sem rota registrada nessa área real. Isso preserva suas transições e testes para futuras migrações e impede mutações locais com UUIDs reais.
++- `AdminHomeScreen` substitui a Home registrada, sem alterar a antiga `AdminPanelScreen` demonstrativa. Central com destaque Gerenciar, atalhos futuros desabilitados, Histórico/Visão Geral com destino informativo e logout pelo gerenciador existente. Mesmo princípio para `AdminRealEventsScreen`: antiga tela demonstrativa não foi apagada.
++- Novos componentes Admin reutilizam tema, cards, campos, opções, botões e notices existentes. Layout escuro/roxo, títulos e nomes quebram linha; sem dependências novas ou alterações no design system compartilhado. PNGs indisponíveis: não houve comparação visual com mockups nem homologação em aparelho.
++- `GET /api/v1/admin/events` recebe `search` opcional (até 180 caracteres antes de normalizar espaços; rejeita controles residuais e Unicode inválido) e `excludeClosed=true|false` opcional. Sem parâmetros novos, comportamento anterior mantido. Busca literal case-insensitive por nome/código usa `strpos(lower(...),lower(parâmetro))`; `%`, `_`, barra e aspas não viram padrões ou SQL. Nome pesquisado também normaliza espaços PostgreSQL. Critérios antes de LIMIT, filtro pela fase projetada, keyset `(created_at,id)` descendente e contrato `{items,nextCursor}` mantidos. Não há alteração de fases, prontidão, autorização ou mutações.
++- Lista envia `excludeClosed=true` sempre; Todos inclui `not_ready`, rotulado Não pronto. Agendados/Abertos/Encerrando enviam exatamente scheduled/open/closing. Busca ocorre no servidor antes da paginação, não apenas nos cards carregados.
++- Serviço novo usa `auth.httpClient` com `auth:true`, sem tokens/cache próprios. Loader invalida gerações na troca de consulta, bloqueia páginas simultâneas, ignora respostas obsoletas e limpa estado no descarte. Erro em próxima página preserva os itens para retry; 401/403 remove itens anteriores. Troca de conta/sessão/revisão remonta a stack; comparações vivas também protegem callbacks. Transporte compartilhado tem timeout; não foi alterado para aceitar abort externo, portanto requisições antigas podem terminar, mas não publicar dados.
++- `AdminRealEventScreen` consulta detalhe oficial por UUID, rejeita ID divergente e apresenta apenas nome, fase, horários e prontidão com aviso ADMIN-02. Erro/404 tem recuperação. Nenhuma opção demonstrativa é acessível; voltar preserva instância da lista.
++
++## Arquivos envolvidos
++
++Frontend: `app/screens/admin/AdminDemoNavigator.js`; novos `AdminHomeScreen.js`, `AdminPendingScreen.js`, `AdminRealEventsScreen.js`, `AdminRealEventScreen.js`, `useAdminEvents.js`, `components/AdminLiveScreen.js`, `components/AdminEventSummary.js`; novo `app/services/adminEventsService.js`.
++
++Backend: `backend/src/events/admin-configuration.dto.ts` e `admin-configuration-query.service.ts`.
++
++Testes: novo `app/tests/adminRealEvents.test.cjs`; atualizados `app/tests/adminNavigation.test.cjs`, `roleRoutingIntegration.test.cjs`, `backend/test/unit/admin-configuration.test.ts` e `admin-configuration-http.test.ts`. Casos de mocks permanecem nas suítes da demo; navegação real passa a verificar destinos seguros, isolamento, refresh, logout, troca de papéis e revogação. Testes novos cobrem serviço, paginação, sobreposição, erros/retry, descarte de conta, datas, seleção, Home e detalhe. Backend usa transporte/Drizzle simulados; asserts de SQL não substituem execução PostgreSQL.
++
++Não foram modificados `app/App.js`, `MainTabs.js`, autenticação, cliente HTTP, Staff, Participante, schema, migrations ou dependências. A alteração no harness de integração compartilhado limita-se aos cenários Admin e suporte de TabRouter.
++
++## Validações e limitações
++
++**Inspeções estáticas executadas:** branch/HEAD/status, leitura de contratos e testes, revisão do diff e `git diff --check`. O primeiro diff-check detectou linha vazia extra ao final do service backend; corrigida. A conferência posterior retornou sem erros. Aviso Git de conversão LF→CRLF é configuração existente.
++
++**Automatizadas não executadas:** testes, lint, typecheck e build. A política do `AGENTS.md` determina: “O responsável selecionará manualmente Luna Medium para a etapa de execução”. A seleção não foi confirmada nesta sessão; a instrução genérica de executar testes não comprova essa seleção. Nenhuma contagem de testes aprovados/falhos/ignorados está disponível. Nenhuma validação manual do responsável foi informada nesta task. Não atribuir sucesso de campanhas anteriores a este código.
++
++### Campanha preparada para Luna Medium
++
++Antes de executar, confirmar branch/diretório, inspecionar comandos e scripts de novo, preservar o working tree e manter ambiente isolado sem URLs de banco ou segredos. Não executar integration, db:*, start ou scripts remotos. Comandos direcionados, após confirmação do executor:
++
++```powershell
++$env:NODE_ENV = 'test'
++# Diretório app: transporte e armazenamento simulados
++node --test tests/adminRealEvents.test.cjs tests/adminNavigation.test.cjs tests/authNavigation.test.cjs tests/roleRoutingIntegration.test.cjs
++# Diretório backend: consultas Drizzle simuladas e HTTP local com dependências substituídas
++.\node_modules\.bin\tsx.cmd --test test/unit/admin-configuration.test.ts test/unit/admin-configuration-http.test.ts
++.\node_modules\.bin\tsc.cmd --noEmit --project tsconfig.json
++.\node_modules\.bin\tsc.cmd --project tsconfig.test.json
++```
++
++Registrar comandos, códigos de saída, contagens e diagnósticos aqui. Integração React Navigation pode ser ignorada pelo teste caso dependências opcionais de `qa/regression` não estejam instaladas; não instalar automaticamente. Não executar PostgreSQL para tentar completar esta campanha. Após esses checks, regressão mais ampla apenas se houver risco concreto ainda não coberto.
++
++## Evidência e entrega
++
++Patch único: `qa-evidence/ADMIN_01-changes.diff`, incluindo arquivos novos e alterações rastreadas, sem incluir o próprio patch. Sem staging, commit, push, merge, rebase ou reset. Branch `feature/admin-core-management`, base ea0b614. A tentativa inicial de criar branch em sandbox falhou por permissão; após interrupção, a branch correta já estava ativa e foi conferida antes de alterar código.
++
++Verificações Git finais: `git diff --check` e `git apply --reverse --check -- qa-evidence/ADMIN_01-changes.diff`, ambos com código de saída 0. A segunda apenas verifica compatibilidade do patch com o working tree atual, sem aplicá-lo. Working tree contém somente os sete arquivos rastreados alterados, nove arquivos novos de frontend/testes, este relatório e o patch; nenhum arquivo foi staged.
++
++ADMIN-01 está implementada para revisão estática, mas o critério de testes executados permanece pendente da campanha Luna Medium. ADMIN-02/03 não foram iniciadas. ADMIN-02 deve integrar o Painel Individual a partir de `AdminRealEventScreen`, mantendo UUID oficial, reconsulta, sessão e bloqueio de acesso às transições demonstrativas. Busca/paginação têm ordenação determinística; alterações de fases/dados durante páginas distintas continuam sujeitas ao estado vivo do servidor (não há snapshot persistido entre requisições).
++
++## Correções posteriores à campanha informada
++
++- A busca usava `String.isWellFormed()`, ausente nas bibliotecas TypeScript configuradas. Agora percorre pontos de código e rejeita surrogates isolados, preservando pares válidos, normalização, limite e rejeição de controles. Foram acrescentados casos de surrogates isolados e emoji válido em `admin-configuration.test.ts`.
++- O harness compartilhado `questionnaireHarness.cjs` delegava `expo-secure-store` ao carregador real. Foi acrescentado armazenamento simulado em memória, isolado por harness, com leitura, gravação e exclusão assíncronas. O relatório disponível não contém os rastros nem identifica os quatro testes da campanha informada; a relação com as quatro falhas e sua resolução permanecem a confirmar na próxima execução.
++- O erro relatado `uv_os_get_passwd returned ENOMEM` ocorreu, segundo a solicitação, antes da execução normal de testes via tsx. Isso sugere falha ambiental na inicialização, mas a causa específica não está comprovada sem o comando e o rastreio completos. Não se classifica a suíte como aprovada ou reprovada. Na próxima campanha, investigar recursos e identidade do processo e tentar novamente o comando focado já documentado em terminal local autorizado; não foram instaladas dependências nem alterado código para contornar o erro.
++- Nesta etapa: inspeção estática; nenhuma campanha automatizada executada. Pendente Luna Medium: typechecks, testes frontend e backend focados, registrar contagens e códigos de saída, confirmar os quatro rastros e investigar ENOMEM caso persista. Patch único permanece aguardando atualização após revisão final.
++
++## Segunda campanha de validação — Luna Medium
++
++Ambiente conferido antes da execução: branch `feature/admin-core-management`, HEAD `ea0b614f5926123ec9e5d659e9f540588bed9a37`; working tree já continha as alterações pendentes da ADMIN-01, sem outras mudanças identificadas. Node `v24.15.0`. Nenhum banco ou serviço externo foi consultado. Não houve alteração de código ou testes nesta campanha.
++
++### Typechecks backend
++
++- Em `backend`: `.\node_modules\.bin\tsc.cmd --noEmit --project tsconfig.json` — exit 0.
++- Em `backend`: `.\node_modules\.bin\tsc.cmd --project tsconfig.test.json` — exit 0.
++- `String.isWellFormed()` não é mais usado no DTO. A validação manual de surrogates é compatível com libs TypeScript atuais. **A compilação estática passou**, embora os novos testes de runtime Unicode estejam bloqueados pela inicialização do runner backend abaixo; casos executáveis desta campanha não foram contados.
++
++### Testes frontend
++
++Comando em `app`, `NODE_ENV=test`: `node --test --test-reporter=spec tests/adminRealEvents.test.cjs tests/adminNavigation.test.cjs tests/authNavigation.test.cjs tests/roleRoutingIntegration.test.cjs` — exit 1, 63 testes, 60 aprovados, 3 reprovados, 0 ignorados.
++
++| Teste reprovado | Arquivo/linha | Resultado observado e causa |
++| --- | --- | --- |
++| `lista monta HTTP real, estado vazio, not_ready e seleção por UUID` | `app/tests/adminRealEvents.test.cjs:92` (falha em 97) | Assert esperava “Nenhum evento encontrado”; a tela ainda não havia chegado ao estado vazio quando o harness verificou. Falha de sincronização/espera do teste é hipótese; confirmado apenas que a assertion não encontrou o texto. |
++| `lista exibe falha de rede e recupera pelo botão de retry` | `app/tests/adminRealEvents.test.cjs:108` (falha em 114) | Assert esperava “Não foi possível carregar”; a assertion ocorreu antes do estado de erro observável. Hipótese de sincronização do harness; causa não comprovada. |
++| `detalhe real consulta somente UUID selecionado e trata recurso inacessível` | `app/tests/adminRealEvents.test.cjs:118` (falha em 126) | Assert não encontrou “Arena Norte” após uma única microtask. Hipótese de que o flush não aguardou `getAdminEvent`/efeito do harness; a stack aponta assertion, não import de `expo-secure-store`. |
++
++Os três testes chamam `createHarness()` de `tests/helpers/questionnaireHarness.cjs`; esse harness carrega `AuthContext` e serviços de autenticação. Inspeção confirma que o mock de `expo-secure-store` foi adicionado em `questionnaireHarness.cjs` após a campanha anterior. Nesta execução os erros anteriores `ERR_MODULE_NOT_FOUND` não se repetiram; os três rastros novos são falhas de assertion descritas acima. O relatório anterior citava quatro falhas de import, mas não preservava os nomes/rastros, então não é possível mapear individualmente as quatro para as atuais.
++
++Os 60 testes restantes passaram, incluindo contratos do loader (busca, cursor, concorrência, sessão/descartar, 401/403, data), navegação protegida, testes de autenticação e casos de integração de roteamento disponibilizados pelo harness. Saída também contém avisos preexistentes do `react-test-renderer` e componentes mockados chamados `default`; não causaram as três falhas.
++
++### Testes backend e alternativa ao ENOMEM
++
++1. Comando previsto, em `backend`, `NODE_ENV=test`: `.\node_modules\.bin\tsx.cmd --test test/unit/admin-configuration.test.ts test/unit/admin-configuration-http.test.ts` — exit 1 antes dos testes. Node `v24.15.0`; `tsx` falhou em `node:os` com `SystemError [ERR_SYSTEM_ERROR]`, `uv_os_get_passwd returned ENOMEM (not enough memory)`, `syscall: getpwuid`/`Object.userInfo`, dentro de `temporary-directory-*.mjs`. Nenhum teste chegou a executar.
++2. Alternativa local, sem mudar dependências/configuração: `NODE_OPTIONS='--import tsx' node --test test/unit/admin-configuration.test.ts test/unit/admin-configuration-http.test.ts` — exit 1. Ambos arquivos falharam durante carregamento do preloader em `tsx/dist/client-*.cjs`, novamente em `node:os` → `Object.userInfo` → `uv_os_get_passwd returned ENOMEM`. Contagem do processo: dois arquivos falhos ao carregar, zero testes executados/aprovados/reprovados/ignorados. A alternativa confirma que o bloqueio ocorre ao carregar tsx, antes da suíte.
++
++Não foi tentada compilação temporária nem alterado ambiente global/dependências; seria necessário contornar a consulta ao usuário do sistema por fora do runner e não há alternativa instalada que preserve execução direta dos testes TypeScript sem iniciar `tsx`. A causa específica do ENOMEM permanece ambiental e sem diagnóstico. Não classificar testes backend como aprovados ou como falhas de assertion.
++
++### Regressão e conclusão da campanha
++
++O conjunto frontend já incluiu `adminNavigation`, `authNavigation` e `roleRoutingIntegration`, cobrindo login/TOTP, identidade, isolamento da pilha, refresh, logout, revogação e papéis; 60 cenários passaram no processo. Como há 3 falhas de renderização ainda sem diagnóstico fechado, não foi ampliada a regressão além do escopo focado. Contratos backend não foram exercitados em runtime devido ao ENOMEM.
++
++Typechecks: 2/2 aprovados. Frontend: 60 aprovados, 3 reprovados, 0 ignorados. Backend: 0 testes iniciados; dois arquivos de teste não carregaram por falha do `tsx`. As falhas frontend pertencem a testes recém-adicionados da ADMIN-01, mas se são apenas sincronização do harness ou comportamento da tela ainda precisa ser confirmado numa rodada Terra Medium. Correções recomendadas: aguardar explicitamente o estado/efeito assíncrono nos três testes usando suporte determinístico do harness, sem relaxar assertions; investigar ENOMEM no ambiente local do responsável com `tsx`/`node:os`. Nenhuma correção de produção feita nesta validação.
++
++Estado Git ao fim: branch permanece `feature/admin-core-management`; alterações ADMIN-01 e documentação pendentes preservadas. Esta campanha modificou somente este relatório. Sem staging, commit, push, merge, acesso a banco ou regeneração do patch. ADMIN-01 não está aprovada e aguarda revisão formal.
++
++## Investigação e correção — Terra Medium
++
++Inspeção de `questionnaireHarness.cjs`: `actAsync` aguarda o callback e chama `flush()` uma vez; `flush()` só processa atualizações já enfileiradas e `h.nodes` reflete a última renderização. A lista percorre `client.get` → `listAdminEvents` → `load` → subscriber → setter; o detalhe percorre `client.get` → `getAdminEvent` → `.then` → setter. Uma única microtask seguida de flush não garante que essas cadeias tenham enfileirado suas atualizações. Assim, para as três falhas (lista vazia, erro/retry e detalhe), a hipótese é sincronização insuficiente no teste; a inspeção não prova que a renderização em produção esteja correta nem descarta outro defeito. As assertions de conteúdo e navegação foram preservadas.
++
++Em `app/tests/adminRealEvents.test.cjs`, `waitForText` aguarda condição observável por até 20 ciclos de `setImmediate`, chamando `actAsync` para aplicar atualizações a cada ciclo. Limite finito, sem atraso em tempo fixo. Também aguarda o resultado após retry e após troca de conta. Não foi alterado código de produção nem o harness compartilhado. Testes não foram executados por Terra nesta etapa, conforme política; Luna Medium deverá confirmar cada cenário e investigar qualquer falha remanescente.
++
++Diagnóstico local, Node v24.15.0: `node -e` chamou `require('node:os').userInfo()` sem imprimir retorno ou identidade; falhou com `ERR_SYSTEM_ERROR`, syscall `uv_os_get_passwd`. Logo, a falha não é exclusiva da inicialização do tsx. Sua relação causal com restrições do ambiente não foi comprovada. As campanhas anteriores já tentaram duas formas de inicializar tsx e falharam antes de testes; não foram repetidas. TypeScript instalado pode compilar para diretório temporário, mas tal alternativa exige preparar resolução de módulos e saída isolada; não foi executada nem comprovada nesta investigação. Recomenda-se execução posterior em terminal local apropriado, com o mesmo comando de diagnóstico sem divulgar retorno e com o executor Luna autorizado.
++
++Verificações realizadas: inspeção estática das telas, hook, testes e harness; diagnóstico isolado de `os.userInfo()`; `git diff --check`. Não houve testes, typecheck, banco, operações Git de escrita ou regeneração do patch. Pendência: Luna Medium deve executar testes focados frontend e, quando o ambiente permitir, backend e casos Unicode, registrando contagens e códigos de saída. ADMIN-01 permanece aguardando aprovação formal.
++
++## Terceira campanha de validação — Luna Medium
++
++Preparação: lidos `AGENTS.md` e este relatório. Branch confirmada como `feature/admin-core-management`; working tree já continha as alterações pendentes ADMIN-01. Nenhuma alteração em código foi feita nesta campanha. Node `v24.15.0`; os testes frontend usam harnesses/mocks locais. Nenhum banco ou serviço remoto foi acessado.
++
++### Frontend focado
++
++Em `app`, comando executado:
++
++```powershell
++$env:NODE_ENV = "test"; node --test --test-reporter=spec tests/adminRealEvents.test.cjs
++```
++
++Exit 0. 11 testes aprovados, 0 reprovados, 0 ignorados. Os três casos da campanha anterior passaram: lista real com estado vazio/`not_ready`/UUID, falha de rede com retry, e detalhe por UUID com recurso inacessível. Assim, a espera determinística por condição observável no teste resolveu a sincronização reproduzida, sem alteração das assertions nem do código de produção.
++
++### Campanha frontend completa
++
++Em `app`, comando executado:
++
++```powershell
++$env:NODE_ENV = "test"; node --test --test-reporter=spec tests/adminRealEvents.test.cjs tests/adminNavigation.test.cjs tests/authNavigation.test.cjs tests/roleRoutingIntegration.test.cjs
++```
++
++Exit 0. 63 testes aprovados, 0 reprovados, 0 ignorados. Não foram identificadas regressões nesta campanha nos testes cobertos de listagem/busca/paginação, navegação Admin, autenticação/sessão e roteamento de papéis. O processo emitiu avisos de depreciação de `react-test-renderer` e avisos dos componentes `default` mockados; nenhum causou falha.
++
++### Backend e limites
++
++Testes backend: **não executados por impedimento ambiental**. Não há nesta execução um terminal local diferente previamente autorizado em que `os.userInfo()` funcione. O diagnóstico anterior já comprovou `ERR_SYSTEM_ERROR`/`uv_os_get_passwd` em chamada isolada, além das falhas anteriores do carregamento de `tsx`; conforme instruído, não foram repetidas tentativas com `tsx`. Os typechecks de produção e de testes permanecem aprovados na campanha anterior (exit 0 cada). Testes runtime do backend, incluindo casos Unicode de surrogates isolados e pares válidos, seguem pendentes em terminal apropriado; não são classificados como falha funcional.
++
++### Estado da validação
++
++Comandos e resultados desta campanha estão registrados acima. `git diff --check` executado após atualizar este relatório — resultado registrado no resumo final desta execução. Nenhum teste foi ignorado; nenhuma validação backend foi iniciada. A cobertura segue limitada a suites frontend direcionadas e aos typechecks previamente executados; não houve integração PostgreSQL, validação física ou comparação visual com mockups. ADMIN-01 permanece aguardando aprovação formal do responsável.
++
++## Refinamento visual pós-homologação manual
++
++### Referências e histórico
++
++Comparadas as duas referências anexadas (`Admin - Home.png` e `Admin - gerenciar eventos.png`) com as duas capturas reais fornecidas nesta solicitação. As capturas confirmaram cabeçalho reduzido a ARENAGO · ADMIN, atalhos empilhados, filtros quebrados e cards sem a hierarquia das referências. O pedido menciona referências com sufixo `(2)`; foram utilizadas as imagens efetivamente anexadas e visíveis nesta conversa.
++
++Preservado o histórico das campanhas: 63 testes frontend aprovados pelo Codex antes deste refinamento e dois typechecks backend aprovados. O responsável informou nesta solicitação **144 testes backend aprovados em terminal local**; esse resultado é registrado como validação externa informada pelo responsável, sem novo comando, rastros ou execução pelo Codex nesta etapa. As limitações ambientais registradas nas campanhas anteriores continuam documentadas como histórico, sem invalidar a execução local informada.
++
++### Componentes e alterações
++
++- `AdminLiveScreen.js`: marca ArenaGO branca/roxa, logout contornado com ícone e rótulo Sair da conta, identificação administrativa, título/subtítulo, voltar compacto e curvas decorativas discretas. A verificação de identidade e montagem do callback de logout foi preservada. Safe areas superiores/laterais, rolagem e KeyboardAvoidingView mantidos; busca permite dispensar teclado por arraste.
++- `AdminHomeScreen.js`: card principal com área de navegação acessível, calendário em bloco roxo e dois atalhos internos lado a lado. Removido o CTA duplicado Gerenciar eventos. Histórico e Visão geral em cards de largura equivalente com adaptação para uma coluna quando não couberem. Usuários e permissões passou a card informativo sobre administradores globais, sem concessão Staff ou operação ativa. Acesso restrito ganhou card com ícone e texto completo.
++- `AdminRealEventsScreen.js`: introdução e voltar contextual, atalhos em duas colunas, pesquisa com lupa/placeholder, chips arredondados em faixa horizontal rolável e cards inteiros tocáveis. Removido o aviso grande de fim da listagem; Carregar mais, vazio, erros/retry e estados de carregamento permanecem condicionados ao loader existente. Não há contagem total inventada a partir de páginas parciais.
++- `AdminEventSummary.js`: variante compacta para a lista, calendário, nome, selo de fase colorido, datas em pt-BR, divisor, prontidão e seta. Datas de início e término continuam completas, respeitando o fuso e eventos que atravessam dias. Fase e prontidão permanecem independentes e derivadas dos campos oficiais. A variante padrão do detalhe foi preservada.
++- Novos `AdminLiveUI.js` e `AdminBottomBar.js`: tokens visuais locais, ícones de linhas desenhados com Views nativas, atalhos pendentes e barra Home/Histórico/BI com ícones próprios e destaque ativo. Nenhuma dependência adicionada; reutilizadas cores do tema Admin sem mudar o tema dos fluxos demonstrativos.
++- `AdminDemoNavigator.js`: barra compartilhada nas três abas com eventos tabPress/tabLongPress; rotas e chave de identidade preservadas. A lista, que está fora das abas na stack existente, mostra a mesma barra e usa `popTo('AdminTabs', { screen })` para retornar à instância das abas. API confirmada por inspeção da versão instalada de StackRouter, sem executar a biblioteca.
++
++### Responsividade e funcionalidades futuras
++
++Conteúdo com largura fluida limitada em telas grandes, sem alturas fixas nos cards/textos; cabeçalho pode quebrar linha e títulos extensos não são truncados. Cards de Histórico/BI usam flex wrap e largura mínima; atalhos mantêm duas colunas com texto quebrável. Filtros preservam tamanho legível por rolagem horizontal. Selos podem cair para a linha seguinte. Alvos interativos têm pelo menos 44 pontos de altura; barra inferior trata safe area inferior. Ornamentos possuem dimensões fixas apenas em camada decorativa recortada, sem influenciar a largura do conteúdo.
++
++Criar evento e Catálogo de experiências permanecem desabilitados, com estado acessível e legenda curta Em breve. Usuários e permissões é informativo, sem handler. Histórico e BI continuam levando aos destinos informativos existentes. Nenhuma operação demonstrativa foi ativada.
++
++### Testes preparados e verificações efetivas
++
++Atualizados somente os testes afetados pelos rótulos/composição: `app/tests/adminRealEvents.test.cjs` e `app/tests/roleRoutingIntegration.test.cjs`. Preservadas as assertions HTTP, UUID, retry, TOTP, sessão e revogação. A antiga assertion de botão de usuários desabilitado foi adaptada para exigir card informativo sem onPress e ausência de botão acionável. O harness de integração de abas passa a renderizar a barra customizada; o cenário existente foi estendido com o retorno da lista à aba Histórico, BI e Home.
++
++Inspeções realizadas: leitura de instruções, relatório, telas, tema, harnesses, testes e StackRouter instalado; comparação das quatro imagens fornecidas; revisão estática dos fluxos e alterações. Comando estático em `app`: script via here-string PowerShell `@' ... '@ | node -`, usando `@babel/parser.parse` com plugin JSX, leitura dos nove arquivos de interface/testes alterados e resolução dos imports relativos com `fs.existsSync`/`statSync`. Exit 0: **9 arquivos analisados, 24 imports locais resolvidos**, sem carregar módulos da aplicação ou executar testes. `git diff --check`: exit 0; aviso preexistente de conversão LF/CRLF no navegador. Não houve testes, lint, typecheck, build, banco ou serviços externos nesta implementação.
++
++Repetir com Luna Medium, após inspecionar comandos e preservar ambiente isolado, em `app`:
++
++```powershell
++$env:NODE_ENV = 'test'
++node --test --test-reporter=spec tests/adminRealEvents.test.cjs tests/adminNavigation.test.cjs tests/authNavigation.test.cjs tests/roleRoutingIntegration.test.cjs
++```
++
++A aprovação prévia dos 63 testes não valida automaticamente esta revisão. Validar também a barra customizada, rótulos e o percurso entre lista e abas. Backend, serviços HTTP, autenticação, Staff, Participante, hooks de dados e migrations não foram alterados nesta etapa.
++
++### Limitações e estado final
++
++Não houve execução do aplicativo, captura nova ou homologação física nesta etapa. Gradientes, textura e proporções exatas das imagens não foram reproduzidos pixel a pixel; foram priorizados organização, hierarquia, cores e legibilidade com componentes nativos. Safe areas, fonte ampliada, teclado e espaçamentos devem ser revisados em iOS/Android com capturas reais, incluindo aparelhos estreitos, nomes longos e listagem paginada.
++
++Branch `feature/admin-core-management`; alterações anteriores preservadas. Esta rodada modifica os sete arquivos visuais acima, os dois testes e este relatório. Sem staging, commit, push, merge, reset/rebase ou atualização de `qa-evidence/ADMIN_01-changes.diff`. ADMIN-02 não iniciada. Refinamento pronto para revisão do código e campanha Luna, com aprovação visual e formal pendentes do responsável.
++
++## Validação do refinamento visual — Luna Medium
++
++Em `app`, com `NODE_ENV=test`, foi executado o comando solicitado:
++
++```powershell
++$env:NODE_ENV = 'test'; node --test --test-reporter=spec tests/adminRealEvents.test.cjs tests/adminNavigation.test.cjs tests/authNavigation.test.cjs tests/roleRoutingIntegration.test.cjs
++```
++
++Exit code 0. Resultado do Node: 63 aprovados, 0 falhos, 0 ignorados (0 cancelados/todo). Passaram os cenários da Home e seus cards, abas Home/Histórico/BI, retorno da lista às abas, logout, TOTP, sessão e proteção, busca/filtros/paginação, seleção por UUID, erro/retry e isolamento dos destinos demonstrativos. O teste da integração percorreu Histórico, BI e Home via barra customizada. Avisos existentes de `react-test-renderer` e componentes `default` nos mocks foram emitidos, sem reprovações.
++
++Verificações estáticas desta campanha: `git diff --check` — exit 0 (aviso Git LF→CRLF preexistente no navegador); branch `feature/admin-core-management` confirmada. Não foram executados backend, lint, typecheck, build, banco ou serviços externos. Limitação: os testes usam harness/mock e não substituem execução em aparelho; revisão visual física continua pendente.
++
++Histórico preservado: typechecks backend 2/2 e 144 testes backend aprovados em terminal Windows local conforme informado pelo responsável na campanha anterior; não repetidos nesta campanha frontend. Nenhuma falha ou regressão identificada na suite executada. Nenhum código de produção foi alterado nesta validação; documentação registra os resultados. Sem staging, commit, push, merge ou regeneração de `qa-evidence/ADMIN_01-changes.diff`. ADMIN-01 aguarda conferência visual em aparelho e aprovação formal.
++
++## Polimento visual final
++
++O cabeçalho compartilhado `AdminLiveScreen.js` passou a usar o asset existente `app/assets/images/logo-arenago.png`, que corresponde ao render fornecido, com `resizeMode="contain"`, transparência preservada e caixa de 150 × 48 pontos. A imagem tem rótulo acessível ArenaGO. A ação de retorno compartilhada recebeu seta roxa um pouco maior, texto mais claro e com maior peso, altura mínima de toque de 48 pontos, espaçamento lateral e feedback ao pressionar. Os destinos e o logout não foram alterados; a mudança vale para a listagem e o detalhe ADMIN-01 que usam esse componente.
++
++Arquivos alterados nesta etapa: `app/screens/admin/components/AdminLiveScreen.js`, `app/tests/roleRoutingIntegration.test.cjs` (mock de `Image` e do asset para a próxima execução) e este relatório. O PNG existente foi reutilizado sem alteração.
++
++Verificações estáticas: em `app`, script Node com `@babel/parser` analisou os dois arquivos JS/CJS alterados e confirmou a existência do PNG, exit 0; `git diff --check`, exit 0, com aviso preexistente LF/CRLF. Não foram executados testes, lint, typecheck, build ou banco nesta etapa. Os 63 testes frontend e 144 testes backend documentados anteriormente antecedem este polimento; recomenda-se revalidar com Luna Medium após esta alteração de asset e mock. Tamanho percebido, contraste e transparência ainda precisam de conferência no aparelho. ADMIN-01 continua aguardando revisão final e aprovação do responsável; patch de evidência não regenerado.
++
++## Fechamento da ADMIN-01
++
++A implementação funcional está concluída, com Home Admin, listagem real, busca, filtros, paginação e navegação por UUID. O refinamento visual incluiu o logo oficial existente e maior destaque ao Voltar. O responsável informou aprovação visual em aparelho. A última campanha frontend, executada pelo Codex com Luna Medium, terminou com 63 aprovados, 0 falhos, 0 ignorados e exit 0. O responsável informou 144 testes backend aprovados anteriormente em terminal Windows; os dois typechecks backend também passaram anteriormente. Essas execuções não foram repetidas nesta etapa.
++
++A validação não constitui homologação de produção nem comprova comportamento com PostgreSQL real. Criar evento, catálogo, histórico, BI e gestão de permissões permanecem reservados às tasks posteriores; ADMIN-02 não foi iniciada.
++
++Arquivos rastreados modificados: `app/screens/admin/AdminDemoNavigator.js`, `app/tests/adminNavigation.test.cjs`, `app/tests/helpers/questionnaireHarness.cjs`, `app/tests/roleRoutingIntegration.test.cjs`, `backend/src/events/admin-configuration-query.service.ts`, `backend/src/events/admin-configuration.dto.ts`, `backend/test/unit/admin-configuration-http.test.ts` e `backend/test/unit/admin-configuration.test.ts`. Arquivos novos: `app/screens/admin/AdminHomeScreen.js`, `AdminPendingScreen.js`, `AdminRealEventScreen.js`, `AdminRealEventsScreen.js`, `components/AdminBottomBar.js`, `components/AdminEventSummary.js`, `components/AdminLiveScreen.js`, `components/AdminLiveUI.js`, `useAdminEvents.js` (todos sob `app/screens/admin`), `app/services/adminEventsService.js`, `app/tests/adminRealEvents.test.cjs` e este relatório.
++
++Evidência pendente: `app/assets/images/logo-arenago.png` já existe no commit-base `ea0b614f5926123ec9e5d659e9f540588bed9a37` e não possui alteração no working tree. Um patch fiel a essa base não contém diferença binária para esse arquivo; um patch que o adicionasse como novo não se aplicaria à base. A exigência de incluir o binário no patch conflita com a exigência de representar fielmente as diferenças e aplicar na base. Não foi substituído o patch anterior por um arquivo incompleto. A referência ao logo consta no código e o arquivo já está disponível na base.
++
++Branch `feature/admin-core-management`, HEAD `ea0b614f5926123ec9e5d659e9f540588bed9a37`; alterações pendentes preservadas e nenhum arquivo staged. Sem commit, push, merge, reset ou rebase. Aprovação formal permanece com o responsável.
++
++## Evidência definitiva
++
++O changes `qa-evidence/ADMIN_01-changes.diff` representa os 20 arquivos listados no fechamento: oito rastreados modificados e doze novos, incluindo este relatório. O logo `app/assets/images/logo-arenago.png` é rastreado e idêntico ao commit-base, portanto não integra as diferenças; o componente referencia esse asset existente. O responsável esclareceu que não é necessário incluí-lo artificialmente no patch.
++
++O patch foi gerado com `git diff --binary` em relação à base, incluindo os arquivos que passaram a constar no índice durante a execução, e excluindo a própria evidência. O índice estava vazio na conferência inicial e passou a conter arquivos staged durante o fechamento; esta execução não efetuou staging nem alterou esse estado. A validação empregou inventário, `git apply --reverse --check` e `git diff --check`. A ADMIN-01 está pronta para revisão e commit do responsável; resultados anteriores de 63 testes frontend, 144 backend informados pelo responsável, dois typechecks e aprovação visual permanecem registrados acima.

@@ -1,0 +1,2149 @@
+diff --git a/app/screens/admin/AdminEventManagementInfoScreen.js b/app/screens/admin/AdminEventManagementInfoScreen.js
+index 7b435b2512853ca6327b3689a85bbd2f13ba727f..a72aec09e1b0704848dfc8a1f821bafda5953f7b 100644
+--- a/app/screens/admin/AdminEventManagementInfoScreen.js
++++ b/app/screens/admin/AdminEventManagementInfoScreen.js
+@@ -6,9 +6,12 @@ import AdminNotice from './components/AdminNotice';
+ import AdminButton from './components/AdminButton';
+ import { liveStyles as s } from './components/AdminLiveUI';
+ import AdminEventSettingsScreen from './AdminEventSettingsScreen';
++import AdminStructureScreen from './AdminStructureScreen';
+ 
+ export default function AdminEventManagementInfoScreen({ navigation, route }) {
+-  const { eventId, area } = route.params ?? {};
++  const { eventId, area, returnToSetup } = route.params ?? {};
++  if (area === 'experiences') return <AdminStructureScreen navigation={navigation} eventId={eventId}
++    returnToSetup={returnToSetup === true} />;
+   return area === 'schedule' ? <AdminEventSettingsScreen navigation={navigation} eventId={eventId} /> :
+     <AdminEventManagementPlaceholder navigation={navigation} eventId={eventId} area={area} />;
+ }
+diff --git a/app/screens/admin/AdminEventSetupScreen.js b/app/screens/admin/AdminEventSetupScreen.js
+index 908c0cdd54d12ee7c8da5951c2db0028b99b55a3..99ae75255e5675f428e43cc0995b51181ed13eed 100644
+--- a/app/screens/admin/AdminEventSetupScreen.js
++++ b/app/screens/admin/AdminEventSetupScreen.js
+@@ -6,6 +6,7 @@ import { useAuth } from '../../context/AuthContext';
+ import { adminReadOwner } from './useAdminEvents';
+ import { createEventSetup } from './adminCreationFlow';
+ import { AdminSetupIntents } from './adminSetupIntents';
++import { reviewStructureLabel, structureIntentsFor } from './adminStructureIntents';
+ import AdminLiveScreen from './components/AdminLiveScreen';
+ import AdminButton from './components/AdminButton';
+ import AdminNotice from './components/AdminNotice';
+@@ -49,7 +50,9 @@ export default function AdminEventSetupScreen({ navigation, route }) {
+   const locked = state.busy || state.uncertain;
+   const finished = state.step === 6;
+   const persisted = Boolean(state.eventId);
+-  const structurePending = state.uncertain && flow.hasPendingStructure();
++  const pendingRecord = flow.pendingStructure();
++  const structurePending = state.uncertain && Boolean(pendingRecord);
++  const canReviewStructure = state.event && structureIntentsFor(structureIntents, state.eventId).length > 0;
+   const canConfirm = () => mountedFlow.current === flow && live.current.selected === selected &&
+     live.current.auth.httpClient === client && adminReadOwner(live.current.auth) === owner && navigation.isFocused();
+   function ask(title, message, confirmLabel, action) {
+@@ -96,6 +99,10 @@ export default function AdminEventSetupScreen({ navigation, route }) {
+     subtitle={finished ? 'Consulte a configuração salva e escolha a próxima ação.' : 'Fluxo guiado para cadastrar um novo evento.'}
+     backLabel={headerLabel} backDisabled={state.busy} onBack={headerBack}>
+     {!finished && !state.ended && <Progress step={state.step} />}
++    {canReviewStructure && <AdminButton label={reviewStructureLabel} variant="secondary" disabled={state.busy || state.loading}
++      onPress={() => {
++        if (canConfirm()) navigation.push('AdminEventManagementInfo', { eventId: state.eventId, area: 'experiences', returnToSetup: true });
++      }} />}
+     {state.blocked ? <AdminNotice tone="error" title="Acesso indisponível" message="Sua sessão perdeu acesso a esta operação. Entre novamente." /> :
+       state.ended ? <>
+         <AdminNotice tone="warning" title="Evento salvo em encerramento"
+@@ -104,21 +111,21 @@ export default function AdminEventSetupScreen({ navigation, route }) {
+       </> : <>
+       {state.message && <AdminNotice tone={state.uncertain ? 'warning' : 'info'} title={state.message} />}
+       {state.uncertain && <AdminButton label="Repetir a mesma solicitação" variant="secondary"
+-        disabled={state.loading || (structurePending && Boolean(state.readError))}
+-        onPress={() => flow.retry()} />}
++        disabled={state.loading || (structurePending && !flow.canReviewStructure())}
++        onPress={() => { if (canConfirm()) void flow.retry(pendingRecord ?? null); }} />}
+       {state.uncertain && persisted && !state.readError &&
+         <AdminButton label="Consultar dados salvos" variant="ghost" disabled={state.loading} onPress={() => flow.refresh()} />}
+-      {structurePending && !state.loading && !state.readError &&
++      {structurePending && !state.loading && flow.canReviewStructure() &&
+         <AdminButton label="Encerrar a tentativa de confirmação" variant="ghost" onPress={() =>
+           ask('Encerrar a tentativa de confirmação?', 'O cadastro anterior ainda pode ter sido salvo. Confira a estrutura do evento antes de fazer outro cadastro.',
+-            'Encerrar tentativa', () => flow.discardStructureIntent())} />}
++            'Encerrar tentativa', () => flow.discardStructureIntent(pendingRecord))} />}
+       {state.busy && <AdminNotice title="Salvando..." />}
+       {needsData ? <AdminNotice tone={state.readError ? 'error' : 'info'} title={state.readError || 'Consultando o evento...'}>
+         {state.readError && <AdminButton label="Tentar consulta novamente" onPress={() => flow.refresh()} />}
+       </AdminNotice> : <>
+         {state.step === 1 && <IdentityStep state={state} flow={flow} locked={locked} />}
+         {state.step === 2 && <DatesStep state={state} flow={flow} locked={locked} />}
+-        {state.step === 3 && <EventStructureStep state={state} flow={flow} locked={locked} />}
++        {state.step === 3 && <EventStructureStep state={state} flow={flow} locked={state.busy || (state.uncertain && !structurePending)} />}
+         {state.step === 4 && <EventStaffStep state={state} flow={flow} locked={locked} confirmRevoke={confirmRevoke} />}
+         {state.step >= 5 && <>
+           <Text accessibilityRole="header" style={[s.title, styles.heading]}>{finished
+diff --git a/app/screens/admin/AdminRealEventScreen.js b/app/screens/admin/AdminRealEventScreen.js
+index 9f8bd2e148813998134cc9f9278870cd1ba0c85e..c65d31a9e804d2b23c8e826851ebbd851eed7b58 100644
+--- a/app/screens/admin/AdminRealEventScreen.js
++++ b/app/screens/admin/AdminRealEventScreen.js
+@@ -2,6 +2,7 @@ import { useContext, useState } from 'react';
+ import { Platform, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native';
+ import { adminEventAreas } from './adminEventManagement';
+ import { AdminSetupIntents } from './adminSetupIntents';
++import { reviewStructureLabel, structureIntentsFor } from './adminStructureIntents';
+ import useAdminEventPanel from './useAdminEventPanel';
+ import AdminLiveScreen from './components/AdminLiveScreen';
+ import AdminSelectedEvent from './components/AdminSelectedEvent';
+@@ -16,6 +17,7 @@ export default function AdminRealEventScreen({ navigation, route }) {
+   const [expandedReadiness, setExpandedReadiness] = useState(null);
+   const expanded = Boolean(readiness && expandedReadiness === readiness);
+   const openArea = area => navigation.navigate('AdminEventManagementInfo', { eventId: event.id, area });
++  const pendingStructure = event ? structureIntentsFor(structureIntents, event.id) : [];
+ 
+   return <AdminLiveScreen title="Painel do evento" subtitle="Gerencie as configurações e a operação deste evento."
+     navigation={navigation} backLabel="Voltar aos eventos" onBack={() => navigation.popTo('AdminEvents')} showTabs
+@@ -30,7 +32,9 @@ export default function AdminRealEventScreen({ navigation, route }) {
+       <AdminButton label="Tentar novamente" onPress={() => refresh()} />
+     </AdminNotice>}
+     {event && <>
+-      {((readiness && !readiness.ready) || structureIntents?.has?.(event.id)) &&
++      {pendingStructure.length > 0 && <AdminButton label={reviewStructureLabel} variant="secondary"
++        onPress={() => openArea('experiences')} />}
++      {((readiness && !readiness.ready) || pendingStructure.some(record => ['addExperience', 'addStation'].includes(record.kind))) &&
+         !['closed', 'closing'].includes(readiness?.effectivePhase ?? event.effectivePhase) &&
+         <AdminButton label="Continuar configuração" variant="secondary"
+           onPress={() => navigation.navigate('AdminEventSetup', { eventId: event.id })} />}
+@@ -42,7 +46,8 @@ export default function AdminRealEventScreen({ navigation, route }) {
+       </View>
+       {Object.entries(adminEventAreas).map(([key, area]) => <Pressable key={key} testID={`admin-event-area-${key}`}
+         accessibilityRole="button" accessibilityLabel={area.title}
+-        accessibilityHint={key === 'schedule' ? 'Abre os dados e os horários do evento' : 'Abre uma visão informativa'}
++        accessibilityHint={key === 'schedule' ? 'Abre os dados e os horários do evento' :
++          key === 'experiences' ? 'Abre a gestão de experiências e estações do evento' : 'Abre uma visão informativa'}
+         onPress={() => openArea(key)} style={({ pressed }) => [s.card, s.row, styles.area, pressed && styles.pressed]}>
+         <AdminIconTile name={area.icon} />
+         <View style={s.grow}><Text style={styles.areaTitle}>{area.title}</Text><Text style={s.body}>{area.description}</Text></View>
+diff --git a/app/screens/admin/AdminStructureScreen.js b/app/screens/admin/AdminStructureScreen.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..77a0bc3ef1b158f463ea09bb95db10d6277c3da4
+--- /dev/null
++++ b/app/screens/admin/AdminStructureScreen.js
+@@ -0,0 +1,191 @@
++import { useContext, useEffect, useMemo, useRef, useState } from 'react';
++import { Pressable, StyleSheet, Text, View } from 'react-native';
++import { usePreventRemove } from '@react-navigation/native';
++import { randomUUID } from 'expo-crypto';
++import { useAuth } from '../../context/AuthContext';
++import { adminEventPhases } from '../../services/adminEventsService';
++import { AdminSetupIntents } from './adminSetupIntents';
++import { createStructureFlow } from './adminStructureFlow';
++import { adminReadOwner } from './useAdminEvents';
++import AdminLiveScreen from './components/AdminLiveScreen';
++import AdminButton from './components/AdminButton';
++import AdminNotice from './components/AdminNotice';
++import AdminConfirmDialog from './components/AdminConfirmDialog';
++import { AdminIcon, AdminIconTile, liveStyles as s, liveColors as c } from './components/AdminLiveUI';
++import { SettingsField } from './components/AdminScheduleFields';
++
++const count = (n, one, many) => n + ' ' + (n === 1 ? one : many);
++const status = station => station.availability === 'available' ? 'Disponível' : 'Indisponível';
++const titles = { addExperience: 'Adicionar experiência', renameExperience: 'Editar experiência',
++  addStation: 'Adicionar estação', renameStation: 'Editar identificação', availability: 'Alterar disponibilidade' };
++
++export default function AdminStructureScreen({ eventId, navigation, returnToSetup }) {
++  const auth = useAuth(), owner = adminReadOwner(auth), client = auth.httpClient;
++  const memory = useContext(AdminSetupIntents);
++  const live = useRef();
++  live.current = { auth, client, eventId };
++  const flow = useMemo(() => createStructureFlow({ client, eventId, newKey: randomUUID, intents: memory ?? new Map(),
++    isCurrent: () => Boolean(owner && adminReadOwner(live.current.auth) === owner &&
++      live.current.client === client && live.current.eventId === eventId),
++  }), [client, owner, eventId, memory]);
++  return owner ? <StructurePage key={owner + '/' + eventId} flow={flow} eventId={eventId} navigation={navigation}
++    returnToSetup={returnToSetup} /> : null;
++}
++
++function StructurePage({ flow, eventId, navigation, returnToSetup }) {
++  const [model, setModel] = useState(null);
++  const [selection, setSelection] = useState(null);
++  const [editor, setEditor] = useState(null);
++  const [dialog, setDialog] = useState(null);
++  const confirmation = useRef(null);
++  const submitted = useRef(null);
++  const state = model?.flow === flow ? model.state : flow.snapshot();
++  const draft = editor?.flow === flow ? editor : null;
++  const chosen = selection?.flow === flow ? selection : null;
++  useEffect(() => {
++    const dispose = flow.mount(value => setModel({ flow, state: value }));
++    const off = navigation.addListener('focus', flow.refresh);
++    return () => { off(); dispose(); };
++  }, [flow, navigation]);
++
++  const data = state.data;
++  const groups = data?.items ?? [];
++  const group = groups.find(item => item.id === chosen?.experienceId);
++  const station = group?.stations.find(item => item.id === chosen?.stationId);
++  const closed = data?.readiness.effectivePhase === 'closed' || data?.event.effectivePhase === 'closed';
++  const locked = state.busy || closed;
++  const dirty = Boolean(!state.denied && draft && submitted.current !== draft && draft.value.trim() !== (draft.original ?? ''));
++  const canAct = () => flow.isActive() && navigation.isFocused();
++  const back = () => returnToSetup ? navigation.goBack() : navigation.popTo('AdminRealEvent', { eventId });
++  const selectedGroup = !chosen?.stationId && group;
++  function ask(request) {
++    confirmation.current = request;
++    setDialog(request);
++  }
++  function resolveDialog(request, confirm) {
++    if (confirmation.current !== request) return;
++    confirmation.current = null;
++    setDialog(null);
++    if (!confirm || !canAct() || flow.snapshot().busy || flow.snapshot().denied) return;
++    if (request.leave) {
++      setEditor(current => current === request.draft ? null : current);
++      navigation.dispatch(request.leave);
++    } else if (request.abandon) flow.discard(request.abandon);
++    else void save(request);
++  }
++  usePreventRemove(dirty || state.busy, ({ data: action }) => {
++    if (!canAct() || flow.snapshot().busy) return;
++    ask({ flow, leave: action.action, draft });
++  });
++  function begin(kind, experience, row) {
++    if (kind === 'addStation') setSelection({ flow, experienceId: experience.id });
++    const original = kind === 'renameStation' ? row.label : kind === 'renameExperience' ? experience.name : undefined;
++    setEditor({ flow, kind, experienceId: experience?.id, stationId: row?.id, original, value: original ?? '',
++      context: [experience?.name, row?.label].filter(Boolean).join(' · ') });
++  }
++
++  async function save(action) {
++    if (!canAct()) return;
++    if (action === draft) submitted.current = draft;
++    try {
++      if (await flow.save(action, data)) setEditor(current => current === action ? null : current);
++    } finally {
++      if (submitted.current === action) submitted.current = null;
++    }
++  }
++  return <AdminLiveScreen key={draft?.kind ?? chosen?.stationId ?? 'list'} title="Experiências e estações"
++    subtitle="Gerencie as experiências e os pontos de atendimento do evento."
++    backLabel={returnToSetup ? 'Voltar à configuração' : 'Voltar ao painel'}
++    onBack={back} backDisabled={state.busy} bottomSafeArea>
++    {state.message && !state.pending.some(record => flow.recoveryMessage(record) === state.message) ?
++      <AdminNotice title={state.message} tone={state.denied || !data ? 'error' : 'info'} /> : null}
++    {state.loading && <AdminNotice title="Consultando estrutura e prontidão..." />}
++    {!state.denied && !state.loading && <AdminButton label={data ? 'Atualizar' : 'Tentar novamente'}
++      compact variant="ghost" disabled={state.busy} onPress={flow.refresh} />}
++    {data && <>
++      <View style={[s.card, s.row]}><AdminIconTile name="calendar" /><View style={s.grow}>
++        <Text style={s.title}>{data.event.name}</Text>
++        <Text style={s.body}>{count(groups.length, 'experiência', 'experiências')} · {count(groups.reduce((n, item) => n + item.stations.length, 0), 'estação', 'estações')}</Text>
++        <Text style={s.body}>{adminEventPhases[data.event.effectivePhase]} · {data.readiness.ready ? 'Pronto para operar' : 'Configuração pendente'}</Text>
++      </View></View>
++      {closed && <AdminNotice title="A operação do evento já terminou."
++        message={state.pending.length ? 'Você ainda pode consultar a estrutura e encerrar o acompanhamento dos envios pendentes.' : undefined} />}
++      {chosen?.stationId && !station && <AdminNotice title="Estação indisponível nesta estrutura"
++        message="Consulte as estações atuais da experiência antes de continuar." />}
++      {state.pending.map(record => {
++        const parent = groups.find(item => item.id === (record.kind === 'addExperience' ? record.result?.id : record.experienceId));
++        const row = parent?.stations.find(item => item.id === (record.kind === 'addStation' ? record.result?.id : record.stationId));
++        const context = [parent?.name, row?.label].filter(Boolean).join(' · ');
++        const suffix = state.pending.length > 1 ? ' · ' + [titles[record.kind], context, record.value].filter(Boolean).join(' · ') : '';
++        return <View key={record.id} style={s.card}>
++          <Text style={s.title}>{titles[record.kind]} · {record.kind === 'availability' ?
++            status({ availability: record.value }) : record.value}</Text>
++          {context ? <Text style={s.body}>{context}</Text> : null}
++          <Text style={s.body}>{flow.recoveryMessage(record)}</Text>
++          {parent && <AdminButton label="Consultar recurso" accessibilityLabel={'Consultar recurso' + suffix} variant="ghost"
++            disabled={Boolean(draft)} onPress={() => setSelection({ flow, experienceId: parent.id, stationId: row?.id })} />}
++          {!closed && record.kind !== 'availability' && <AdminButton label="Repetir a mesma solicitação"
++            accessibilityLabel={'Repetir a mesma solicitação' + suffix} disabled={state.busy || !flow.canReview(record)}
++            onPress={() => { if (canAct()) void flow.retry(record); }} />}
++          {!record.flight && <AdminButton label="Encerrar tentativa" accessibilityLabel={'Encerrar tentativa' + suffix}
++            variant="ghost" disabled={state.busy || !flow.canReview(record)} onPress={() => ask({ flow, abandon: record })} />}
++        </View>;
++      })}
++      {draft ? <View style={s.card}>
++        <Text accessibilityRole="header" style={s.title}>{titles[draft.kind]}</Text>
++        {draft.context ? <Text style={s.body}>{draft.context}</Text> : null}
++        <SettingsField label={draft.kind.endsWith('Station') ? 'Identificação da estação' : 'Nome da experiência'}
++          value={draft.value} onChangeText={!locked ? value => setEditor({ ...draft, value }) : undefined} />
++        <AdminButton label="Confirmar gravação" disabled={locked} onPress={() => save(draft)} />
++        <AdminButton label="Cancelar" variant="ghost" disabled={state.busy} onPress={() => setEditor(null)} />
++      </View> : station ? <View style={s.card}>
++        <Text style={s.body}>{group.name}</Text><Text style={s.title}>{station.label}</Text>
++        <Text style={station.availability === 'available' ? styles.available : s.body}>{status(station)}</Text>
++        <Text style={s.body}>{station.pendingServiceSessionId ? 'Chamada pendente' : 'Sem chamada pendente'}</Text>
++        <AdminButton label="Editar identificação" variant="secondary" disabled={locked} onPress={() => begin('renameStation', group, station)} />
++        <AdminButton label={station.availability === 'available' ? 'Tornar indisponível' : 'Tornar disponível'} disabled={locked}
++          onPress={() => ask({ flow, kind: 'availability', experienceId: group.id, stationId: station.id,
++            original: station.availability, value: station.availability === 'available' ? 'unavailable' : 'available' })} />
++        <AdminButton label="Voltar à estrutura" variant="ghost" onPress={() => setSelection(null)} />
++      </View> : <>
++        {selectedGroup ? <AdminButton label="Ver todas as experiências" variant="ghost" onPress={() => setSelection(null)} /> :
++          <View style={styles.tools}><View style={styles.tool}><AdminButton label="Adicionar experiência" disabled={locked} onPress={() => begin('addExperience')} /></View>
++            <View style={styles.tool}><AdminButton label="Catálogo · Em breve" variant="ghost" disabled /></View></View>}
++        <Text accessibilityRole="header" style={[s.title, styles.heading]}>{selectedGroup ? 'Experiência selecionada' : 'Experiências do evento'}</Text>
++        {!groups.length && <AdminNotice title="Nenhuma experiência cadastrada" />}
++        {(selectedGroup ? [selectedGroup] : groups).map(item => <View key={item.id} style={s.card}>
++          <View style={s.row}><AdminIconTile name="folder" /><View style={s.grow}><Text style={s.title}>{item.name}</Text>
++            <Text style={s.body}>{count(item.stations.length, 'estação', 'estações')}</Text></View></View>
++          <AdminButton label="Editar nome" accessibilityLabel={'Editar experiência ' + item.name} variant="ghost" compact disabled={locked}
++            onPress={() => begin('renameExperience', item)} />
++          {item.stations.map(row => <Pressable key={row.id} accessibilityRole="button"
++            accessibilityLabel={row.label + ', ' + item.name + ', ' + status(row) + (row.pendingServiceSessionId ? ', chamada pendente' : '')}
++            onPress={() => setSelection({ flow, experienceId: item.id, stationId: row.id })}
++            style={({ pressed }) => [styles.station, s.row, pressed && styles.pressed]}>
++            <View style={s.grow}><Text style={styles.label}>{row.label}</Text>
++              {row.pendingServiceSessionId && <Text style={s.body}>Chamada pendente</Text>}</View>
++            <Text style={row.availability === 'available' ? styles.available : styles.offline}>{status(row)}</Text>
++            <AdminIcon name="chevron" size={18} />
++          </Pressable>)}
++          <AdminButton label="Adicionar estação" accessibilityLabel={'Adicionar estação em ' + item.name} disabled={locked}
++            variant="secondary" onPress={() => begin('addStation', item)} />
++        </View>)}
++      </>}
++    </>}
++    {dialog?.flow === flow && !state.denied && <AdminConfirmDialog visible title={dialog.leave ? 'Alterações não salvas' :
++      dialog.abandon ? 'Encerrar tentativa?' : 'Alterar disponibilidade?'}
++        message={dialog.leave ? 'Os campos não enviados serão descartados. Os dados já salvos permanecem no evento.' :
++          dialog.abandon ? 'O envio anterior pode ter sido salvo. Esta ação encerra apenas o acompanhamento neste aparelho.' : dialog.value === 'unavailable' ?
++          'Esta estação ficará indisponível e poderá reduzir a capacidade de atendimento do evento.' : 'Esta estação ficará disponível para atendimento.'}
++        confirmLabel={dialog.leave ? 'Descartar alterações' : 'Confirmar'} cancelLabel={dialog.leave ? 'Continuar editando' : 'Cancelar'}
++        onCancel={() => resolveDialog(dialog, false)} onConfirm={() => resolveDialog(dialog, true)} />}
++  </AdminLiveScreen>;
++}
++
++const styles = StyleSheet.create({
++  heading: { marginTop: 22 }, tools: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
++  tool: { flexGrow: 1, flexBasis: 140 }, available: { color: '#42e8b8', fontWeight: '600' },
++  offline: { color: c.muted }, label: { color: c.text, fontWeight: '600' },
++  station: { minHeight: 48, padding: 10, marginTop: 8, borderWidth: 1, borderRadius: 10, borderColor: c.border },
++  pressed: { opacity: 0.7 },
++});
+diff --git a/app/screens/admin/adminCreationFlow.js b/app/screens/admin/adminCreationFlow.js
+index 9888308a4962f129a578fba226b5909af255a221..0c6b3d75304803a4f327117b6c2d5b4a53c0be7a 100644
+--- a/app/screens/admin/adminCreationFlow.js
++++ b/app/screens/admin/adminCreationFlow.js
+@@ -1,14 +1,16 @@
+ import { getAdminEvent, getAdminEventReadiness } from '../../services/adminEventsService';
+-import { addEventExperience, addEventStation, createAdminEvent, grantEventStaff, readEventStructure, revokeEventStaff } from '../../services/adminEventSetupService';
++import { createAdminEvent, grantEventStaff, readEventStructure, revokeEventStaff } from '../../services/adminEventSetupService';
+ import { configurationName, confirmOfficialEnd, creationBody, eventIdentity, staffEmail } from './adminCreationForm';
++import { attemptStructureIntent, forgetStructureIntent, matchesStructureIntent, structureIntentId,
++  structureIntentsFor } from './adminStructureIntents';
+ 
+ const emptyDate = () => ({ date: '', time: '' });
+ const initialForm = () => ({ name: '', accessCode: '', timezone: 'America/Fortaleza', margin: '0',
+   start: emptyDate(), end: emptyDate(), externalQueueEnabled: false });
+ const endedPhase = phase => phase === 'closing' || phase === 'closed';
+ const uncertainMessage = 'Resultado não confirmado. Consulte os dados ou repita explicitamente a mesma solicitação.';
+-function structureRecoveryMessage({ kind, body }) {
+-  const resource = kind === 'experience' ? `experiência “${body.name}”` : `estação “${body.label}”`;
++function structureRecoveryMessage({ kind, value }) {
++  const resource = kind === 'addExperience' ? `experiência “${value}”` : `estação “${value}”`;
+   return `O cadastro da ${resource} ficou sem confirmação. Confira os dados salvos antes de repetir a solicitação.`;
+ }
+ 
+@@ -29,13 +31,17 @@ function writeMessage(error, operation) {
+ }
+ 
+ // One instance per mounted wizard, authenticated session and selected event.
+-export function createEventSetup({ client, eventId = null, isCurrent, newKey, now = Date.now, structureIntents }) {
+-  const recovered = eventId && structureIntents?.get(eventId);
++export function createEventSetup({ client, eventId = null, isCurrent, newKey, now = Date.now, structureIntents: sessionIntents }) {
++  const structureIntents = sessionIntents ?? new Map();
++  const pendingCreates = id => structureIntentsFor(structureIntents, id)
++    .filter(record => record.kind === 'addExperience' || record.kind === 'addStation');
++  const recovered = pendingCreates(eventId)[0];
+   let state = { step: eventId ? 3 : 1, stepVersion: 0, eventId, form: initialForm(), edited: false, event: null, ended: false,
+     items: [], readiness: null, grants: [], busy: false, loading: Boolean(eventId), blocked: false,
+     readError: null, message: recovered ? structureRecoveryMessage(recovered) : null, uncertain: Boolean(recovered),
+     experience: '', station: '', parent: null, email: '' };
+   let active = false, generation = 0, intent = recovered ? structureAction(recovered) : null, lifecycle = 0;
++  let reviewed = new Map();
+   const listeners = new Set();
+   const current = () => active && isCurrent();
+   const update = patch => {
+@@ -44,11 +50,10 @@ export function createEventSetup({ client, eventId = null, isCurrent, newKey, no
+     listeners.forEach(listener => listener(state));
+   };
+   const editable = () => current() && !state.busy && !state.blocked && !intent;
+-  function clearIntent(action) {
+-    const record = action.structure;
+-    if (record && structureIntents?.get(record.eventId) === record) structureIntents.delete(record.eventId);
+-    intent = null;
+-  }
++  const canEditStructure = () => current() && !state.busy && !state.blocked && (!intent || (intent.structure && state.uncertain));
++  const canReview = (record = intent?.structure) => Boolean(record && reviewed.has(record) &&
++    reviewed.get(record) === record.attempts && !record.flight && structureIntents.get(record.id) === record);
++  function clearIntent() { intent = null; }
+   function deny() {
+     intent = null;
+     generation++;
+@@ -59,6 +64,8 @@ export function createEventSetup({ client, eventId = null, isCurrent, newKey, no
+     if (!current() || !state.eventId || state.busy || state.blocked) return;
+     const ticket = ++generation;
+     const id = state.eventId;
++    reviewed = new Map();
++    const observed = pendingCreates(id).filter(record => !record.flight).map(record => [record, record.attempts]);
+     update({ loading: true, readError: null, readiness: null });
+     const results = await Promise.allSettled([
+       getAdminEvent(client, id), readEventStructure(client, id), getAdminEventReadiness(client, id),
+@@ -77,6 +84,15 @@ export function createEventSetup({ client, eventId = null, isCurrent, newKey, no
+       update({ loading: false, event: null, items: [], readError: 'Os dados do evento estão incompletos.' });
+       return;
+     }
++    for (const [record, attempts] of observed) {
++      if (record.flight || attempts !== record.attempts || structureIntents.get(record.id) !== record) continue;
++      reviewed.set(record, attempts);
++      if (record.result && matchesStructureIntent(items, record)) forgetStructureIntent(structureIntents, record);
++    }
++    if (intent?.structure && structureIntents.get(intent.structure.id) !== intent.structure) {
++      intent = null;
++      update({ uncertain: false, message: null });
++    }
+     update({ event, items, readiness, loading: false,
+       ended: state.ended || endedPhase(event.effectivePhase) || endedPhase(readiness.effectivePhase) });
+   }
+@@ -89,10 +105,11 @@ export function createEventSetup({ client, eventId = null, isCurrent, newKey, no
+   async function submit(action) {
+     if (!current() || state.busy || state.blocked || state.ended || intent !== action) return;
+     const retrying = state.uncertain;
++    if (action.structure && (action.structure.flight || structureIntents.get(action.structure.id) !== action.structure)) return refresh();
+     if (action.kind === 'create') {
+       try { confirmOfficialEnd(action.officialEndsAt, now()); }
+       catch (error) {
+-        if (!retrying) clearIntent(action);
++        if (!retrying) clearIntent();
+         update({ message: retrying
+           ? 'O término oficial foi alcançado e o resultado do envio anterior continua sem confirmação. Confira os registros antes de cadastrar outro evento. Eventos encerrados podem ficar fora da listagem.'
+           : error.message });
+@@ -105,29 +122,41 @@ export function createEventSetup({ client, eventId = null, isCurrent, newKey, no
+     try {
+       const result = await action.send();
+       if (!current() || epoch !== lifecycle) return;
+-      clearIntent(action);
++      if (action.structure) {
++        update({ busy: false });
++        await refresh();
++        if (!current() || epoch !== lifecycle || state.blocked) return;
++        const pending = structureIntents.get(action.structure.id) === action.structure;
++        update(pending ? { uncertain: true, message: structureRecoveryMessage(action.structure) } :
++          { ...action.confirmed(result), uncertain: false });
++        return;
++      }
++      clearIntent();
+       update({ ...action.confirmed(result), busy: false });
+       await refresh();
+     } catch (error) {
+       if (!current() || epoch !== lifecycle) return;
+       if ([401, 403].includes(error?.status)) {
+-        if (!retrying) clearIntent(action);
++        if (!retrying) clearIntent();
+         deny();
+         return;
+       }
+       if (error?.status === 404 && action.kind === 'revoke') {
+-        clearIntent(action);
++        clearIntent();
+         update({ busy: false, uncertain: false, grants: state.grants.filter(item => item.id !== action.grantId),
+           message: 'Este vínculo Staff não está mais disponível.' });
+         await refresh();
+         return;
+       }
+-      const unknown = !error?.status || error.outcomeUnknown || error.status >= 500 || error.status === 408 ||
+-        error.code === 'IDEMPOTENCY_IN_PROGRESS' || (retrying && error.status === 429);
+-      if (!unknown) clearIntent(action);
++      const unknown = action.structure ? structureIntents.get(action.structure.id) === action.structure :
++        !error?.status || error.outcomeUnknown || error.status >= 500 || error.status === 408 ||
++          error.code === 'IDEMPOTENCY_IN_PROGRESS' || (retrying && error.status === 429);
++      if (!unknown) clearIntent();
+       update({ busy: false, uncertain: Boolean(unknown), message: unknown
+-        ? (action.structure ? structureRecoveryMessage(action.structure) : uncertainMessage)
++        ? (action.structure ? [error?.code === 'EVENT_OPERATION_ENDED' ? writeMessage(error, action.kind) : '',
++          structureRecoveryMessage(action.structure)].filter(Boolean).join(' ') : uncertainMessage)
+         : writeMessage(error, action.kind) });
++      if (action.structure && unknown) await refresh();
+     }
+   }
+   function write(kind, send, confirmed, details) {
+@@ -136,15 +165,15 @@ export function createEventSetup({ client, eventId = null, isCurrent, newKey, no
+     return submit(intent);
+   }
+   function structureAction(structure) {
+-    const { kind, eventId: id, experienceId, body, key } = structure;
+-    return kind === 'experience'
+-      ? { kind, structure, send: () => addEventExperience(client, id, body.name, key),
+-        confirmed: () => ({ experience: '', message: 'Experiência salva.' }) }
+-      : { kind, structure, send: () => addEventStation(client, id, experienceId, body.label, key),
+-        confirmed: () => ({ station: '', parent: null, message: 'Estação salva.' }) };
++    const isExperience = structure.kind === 'addExperience';
++    return { kind: isExperience ? 'experience' : 'station', structure,
++      send: () => attemptStructureIntent(client, structureIntents, structure),
++      confirmed: () => isExperience ? { experience: '', message: 'Experiência salva.' } :
++        { station: '', parent: null, message: 'Estação salva.' } };
+   }
+   function writeStructure(record) {
+-    const saved = structureIntents?.get(record.eventId);
++    record.id = structureIntentId(record);
++    const saved = structureIntents.get(record.id);
+     if (saved) {
+       intent = structureAction(saved);
+       update({ uncertain: true, message: structureRecoveryMessage(saved) });
+@@ -152,7 +181,7 @@ export function createEventSetup({ client, eventId = null, isCurrent, newKey, no
+     }
+     const structure = { ...record, key: newKey() };
+     intent = structureAction(structure);
+-    structureIntents?.set(record.eventId, structure);
++    structureIntents.set(structure.id, structure);
+     return submit(intent);
+   }
+   function confirmCreate(version) {
+@@ -167,15 +196,16 @@ export function createEventSetup({ client, eventId = null, isCurrent, newKey, no
+   }
+   function run(kind, grantId) {
+     const id = state.eventId;
+-    if (!editable() || state.loading || state.readError || state.ended || !id || !state.event) return;
++    const structural = kind === 'experience' || kind === 'station';
++    if (!(structural ? canEditStructure() : editable()) || state.loading || state.readError || state.ended || !id || !state.event) return;
+     try {
+       if (kind === 'experience' && state.step === 3) {
+         const name = configurationName(state.experience, 160);
+-        return writeStructure({ kind, eventId: id, body: { name } });
++        return writeStructure({ kind: 'addExperience', eventId: id, value: name });
+       }
+       if (kind === 'station' && state.step === 3 && state.items.some(item => item.id === state.parent)) {
+         const label = configurationName(state.station, 120);
+-        return writeStructure({ kind, eventId: id, experienceId: state.parent, body: { label } });
++        return writeStructure({ kind: 'addStation', eventId: id, experienceId: state.parent, value: label });
+       }
+       if (kind === 'grant' && state.step === 4) {
+         const email = staffEmail(state.email);
+@@ -193,7 +223,8 @@ export function createEventSetup({ client, eventId = null, isCurrent, newKey, no
+   }
+   return {
+     snapshot: () => state,
+-    hasPendingStructure: () => Boolean(intent?.structure),
++    pendingStructure: () => intent?.structure,
++    canReviewStructure: () => canReview(),
+     mount(listener) {
+       active = true;
+       listeners.add(listener);
+@@ -204,7 +235,9 @@ export function createEventSetup({ client, eventId = null, isCurrent, newKey, no
+     editForm(patch) {
+       if (editable() && !state.eventId) update({ form: { ...state.form, ...patch }, edited: true, message: null });
+     },
+-    editSetup(patch) { if (editable() && state.eventId) update({ ...patch, message: null }); },
++    editSetup(patch) {
++      if ((Object.hasOwn(patch, 'email') ? editable() : canEditStructure()) && state.eventId) update({ ...patch, message: null });
++    },
+     next(version) {
+       if (version !== state.stepVersion || !editable() || state.loading || state.readError) return;
+       if (!state.eventId && state.step === 2) return;
+@@ -215,13 +248,16 @@ export function createEventSetup({ client, eventId = null, isCurrent, newKey, no
+       step(state.step + 1);
+     },
+     back: () => step(state.step - 1), step, refresh, run, confirmCreate,
+-    retry() {
+-      if (intent && state.uncertain && !state.loading && (!intent.structure || !state.readError)) return submit(intent);
++    retry(record = intent?.structure ?? null) {
++      if (!intent || !state.uncertain || state.loading) return;
++      if (record !== (intent.structure ?? null)) return;
++      if (intent.structure && (state.readError || !canReview())) return refresh();
++      return submit(intent);
+     },
+-    discardStructureIntent() {
++    discardStructureIntent(record = intent?.structure) {
+       if (!current() || state.blocked || state.ended || state.busy || state.loading || state.readError ||
+-          !state.uncertain || !intent?.structure) return;
+-      clearIntent(intent);
++          !state.uncertain || record !== intent?.structure || !canReview(record) || !forgetStructureIntent(structureIntents, record)) return;
++      clearIntent();
+       update({ uncertain: false, experience: '', station: '', parent: null,
+         message: 'A confirmação pendente foi descartada. O cadastro anterior ainda pode ter sido salvo. Confira a estrutura antes de cadastrar novamente.' });
+     },
+diff --git a/app/screens/admin/adminStructureFlow.js b/app/screens/admin/adminStructureFlow.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..0df5ca4c22082d52f612208eee46682ea3d35b89
+--- /dev/null
++++ b/app/screens/admin/adminStructureFlow.js
+@@ -0,0 +1,179 @@
++import { adminIdentifier, getAdminEvent, getAdminEventReadiness } from '../../services/adminEventsService';
++import { readEventStructure } from '../../services/adminEventSetupService';
++import { configurationName } from './adminCreationForm';
++import { attemptStructureIntent, forgetStructureIntent, matchesStructureIntent, structureIntentId,
++  structureIntentsFor } from './adminStructureIntents';
++
++const messages = {
++  EVENT_CONFIGURATION_LOCKED: 'Já existe histórico de participação. Esta alteração da estrutura está bloqueada.',
++  EVENT_OPERATION_ENDED: 'A operação do evento já terminou.',
++  STATION_HAS_PENDING_CALL: 'Há uma chamada pendente. Aguarde sua resolução pela equipe Staff.',
++  IDEMPOTENCY_KEY_REUSED: 'A chave já foi usada para outra solicitação. Confira os registros antes de continuar.',
++  VALIDATION_ERROR: 'O servidor recusou os dados. Revise a identificação.',
++};
++
++function problem(error) {
++  if (error?.status === 401) return 'Sessão inválida. Entre novamente.';
++  if (error?.status === 403) return 'Acesso administrativo negado.';
++  if (error?.status === 404) return 'Recurso não encontrado ou indisponível.';
++  if (error?.isNetworkError || error?.status >= 500) return 'Falha na consulta ao servidor. Confira a conexão e atualize.';
++  return messages[error?.code] || 'Não foi possível confirmar a resposta para o evento selecionado. Atualize a estrutura.';
++}
++
++function target(items, command) {
++  const group = items.find(item => item.id === command.experienceId);
++  return { group, station: group?.stations.find(row => row.id === command.stationId) };
++}
++
++function recoveryMessage(record) {
++  if (record.flight) return 'Envio em andamento. Aguarde a atualização.';
++  if (record.error?.code === 'IDEMPOTENCY_IN_PROGRESS') return 'Solicitação ainda em processamento. Confira a estrutura antes de repetir.';
++  if (record.error?.status && !record.error.outcomeUnknown) return problem(record.error);
++  if (record.result) return 'O estado atual difere do solicitado. Confira a estrutura antes de outra alteração.';
++  return 'Resultado incerto. Confira a estrutura antes de repetir a mesma solicitação.';
++}
++
++export function createStructureFlow({ client, eventId, intents, newKey, isCurrent }) {
++  const pending = () => structureIntentsFor(intents, eventId);
++  let state = { data: null, loading: true, busy: false, denied: false, message: '', pending: [] };
++  let reviewed = new Map();
++  let listener, generation = 0;
++  const active = () => Boolean(listener && isCurrent());
++  const canReview = record => Boolean(record && reviewed.has(record) && reviewed.get(record) === record.attempts &&
++    !record.flight && intents.get(record.id) === record);
++  function update(patch) {
++    if (!active()) return;
++    state = { ...state, ...patch };
++    listener(state);
++  }
++  function deny(error) {
++    generation++;
++    update({ denied: true, data: null, loading: false, busy: false, pending: [], message: problem(error) });
++  }
++
++  async function refresh(notice = '', afterWrite = false) {
++    if (!active() || state.denied || (state.busy && !afterWrite)) return;
++    const ticket = ++generation;
++    reviewed = new Map();
++    update({ loading: true, data: null, message: '', pending: [] });
++    try {
++      const observed = pending().map(record => ({ record, flight: record.flight, attempts: record.attempts }));
++      const responses = await Promise.allSettled([
++        getAdminEvent(client, eventId), readEventStructure(client, eventId), getAdminEventReadiness(client, eventId),
++      ]);
++      if (!active() || ticket !== generation) return;
++      const failure = responses.find(r => r.status === 'rejected' && [401, 403].includes(r.reason?.status)) ??
++        responses.find(r => r.status === 'rejected');
++      if (failure) throw failure.reason;
++      const [event, items, readiness] = responses.map(r => r.value);
++      const groups = new Set(items.map(group => group.id));
++      if (groups.size !== items.length) throw new Error('Experiência duplicada na estrutura.');
++      const stations = new Set();
++      for (const group of items) for (const row of group.stations) {
++        if (stations.has(row.id)) throw new Error('Estação duplicada na estrutura.');
++        stations.add(row.id);
++        if (row.pendingServiceSessionId !== null) adminIdentifier(row.pendingServiceSessionId);
++      }
++      for (const { record, flight, attempts } of observed) {
++        if (flight || record.flight || attempts !== record.attempts || intents.get(record.id) !== record) continue;
++        reviewed.set(record, attempts);
++        if (!record.result && record.kind !== 'availability') continue;
++        const confirmed = matchesStructureIntent(items, record);
++        if (confirmed || record.kind === 'availability') {
++          forgetStructureIntent(intents, record);
++          notice ||= confirmed ? 'Estado solicitado confirmado na estrutura do evento.' :
++            'O estado atual difere do solicitado. Confira a estrutura antes de outra alteração.';
++        }
++      }
++      const outstanding = pending();
++      update({ data: { event, items, readiness }, loading: false, busy: false, message: notice || (outstanding.length === 1 ?
++        recoveryMessage(outstanding[0]) : ''), pending: outstanding });
++      for (const flight of new Set(observed.map(item => item.flight).filter(Boolean))) {
++        void flight.then(recheck, recheck);
++      }
++      function recheck() { if (ticket === generation && active()) void refresh(); }
++    } catch (error) {
++      if (!active() || ticket !== generation) return;
++      if ([401, 403].includes(error?.status)) deny(error);
++      else update({ data: null, loading: false, busy: false, message: [notice, problem(error)].filter(Boolean).join(' ') });
++    }
++  }
++
++  async function submit(action) {
++    const request = attemptStructureIntent(client, intents, action);
++    if (!request) return;
++    update({ busy: true, message: '' });
++    generation++;
++    let notice = '';
++    try { await request; }
++    catch (error) {
++      if ([401, 403].includes(error?.status) && active()) deny(error);
++      if (intents.get(action.id) !== action || error?.code === 'EVENT_OPERATION_ENDED') notice = problem(error);
++    }
++    if (!active() || state.denied) return;
++    // Uma intenção transmitida e ainda incerta volta pelo cartão de recuperação,
++    // inclusive se a leitura seguinte falhar. O formulário fica para recusas definitivas.
++    const dismissForm = Boolean(action.result) || intents.get(action.id) === action;
++    await refresh(notice, true);
++    return dismissForm;
++  }
++
++  return {
++    isActive: active,
++    canReview,
++    recoveryMessage,
++    snapshot: () => state,
++    mount(callback) { listener = callback; void refresh(); return () => { generation++; listener = null; }; },
++    refresh: () => refresh(),
++    async save(command, displayed = state.data) {
++      if (!active() || !state.data || displayed !== state.data || state.busy || state.loading ||
++          state.data.readiness.effectivePhase === 'closed' || state.data.event.effectivePhase === 'closed') return;
++      const { group, station } = target(state.data.items, command);
++      const { kind } = command;
++      if ((kind !== 'addExperience' && !group) ||
++          (['renameStation', 'availability'].includes(kind) && !station)) {
++        await refresh('Recurso não encontrado ou indisponível.');
++        return;
++      }
++      let value;
++      try {
++        if (command.original !== undefined && command.original !==
++            (kind === 'renameStation' ? station.label : kind === 'availability' ? station.availability : group.name)) {
++          update({ message: 'A identificação ou disponibilidade mudou. Confira o valor atual antes de editar novamente.' });
++          return;
++        }
++        if (kind === 'availability') {
++          value = command.value;
++          if (!['available', 'unavailable'].includes(value)) throw new Error('Disponibilidade inválida.');
++          if (value === 'unavailable' && station.pendingServiceSessionId) {
++            await refresh(messages.STATION_HAS_PENDING_CALL);
++            return;
++          }
++        } else value = configurationName(command.value, kind.endsWith('Station') ? 120 : 160);
++      } catch (error) { update({ message: error.message }); return; }
++      const action = { eventId, kind, experienceId: kind === 'addExperience' ? undefined : command.experienceId,
++        stationId: ['availability', 'renameStation'].includes(kind) ? command.stationId : undefined, value };
++      action.id = structureIntentId(action);
++      const conflicts = kind.startsWith('rename') && pending().some(record =>
++        record.kind === kind && record.experienceId === action.experienceId && record.stationId === action.stationId);
++      if (intents.has(action.id) || conflicts) {
++        update({ message: 'Já existe uma solicitação pendente para esta operação. Confira a tentativa antes de repetir.',
++          pending: pending() });
++        return;
++      }
++      action.key = kind === 'availability' ? undefined : newKey();
++      intents.set(action.id, action);
++      return submit(action);
++    },
++    retry(action) {
++      if (active() && state.data && canReview(action) && action.kind !== 'availability' &&
++          state.data.readiness.effectivePhase !== 'closed' && state.data.event.effectivePhase !== 'closed' &&
++          !state.busy && !state.loading) return submit(action);
++    },
++    discard(action) {
++      if (active() && state.data && !state.busy && canReview(action) && forgetStructureIntent(intents, action)) {
++        update({ pending: pending(), message: 'Tentativa encerrada. O envio anterior ainda pode ter sido salvo.' });
++      }
++    },
++  };
++}
+diff --git a/app/screens/admin/adminStructureIntents.js b/app/screens/admin/adminStructureIntents.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..bd019f435b9eba5681f115d15864c73727969526
+--- /dev/null
++++ b/app/screens/admin/adminStructureIntents.js
+@@ -0,0 +1,70 @@
++import { addEventExperience, addEventStation, renameExperience, renameStation,
++  setStationAvailability } from '../../services/adminEventSetupService';
++
++export const reviewStructureLabel = 'Revisar operações pendentes de experiências e estações';
++
++// A pilha Admin mantém um único mapa por identidade verificada e cliente HTTP.
++// O valor normalizado só compara tentativas no mesmo destino. Nunca identifica um recurso salvo.
++export function structureIntentId({ eventId, kind, experienceId, stationId, value }) {
++  return JSON.stringify([eventId, kind, experienceId ?? null, stationId ?? null, kind === 'availability' ? null : value]);
++}
++
++export function structureIntentsFor(store, eventId) {
++  return store ? [...store.values()].filter(record => record.eventId === eventId) : [];
++}
++
++export function forgetStructureIntent(store, record) {
++  if (store.get(record.id) !== record || record.flight) return false;
++  store.delete(record.id);
++  return true;
++}
++
++async function send(client, { eventId, kind, experienceId, stationId, value, key }) {
++  switch (kind) {
++    case 'addExperience': return addEventExperience(client, eventId, value, key);
++    case 'addStation': return addEventStation(client, eventId, experienceId, value, key);
++    case 'renameExperience': return renameExperience(client, eventId, experienceId, value, key);
++    case 'renameStation': return renameStation(client, eventId, experienceId, stationId, value, key);
++    case 'availability': return setStationAvailability(client, eventId, stationId, value);
++    default: throw new Error('Operação inválida.');
++  }
++}
++
++export function attemptStructureIntent(client, store, record) {
++  if (record.flight || store.get(record.id) !== record) return null;
++  const retrying = Boolean(record.attempts);
++  record.attempts = (record.attempts ?? 0) + 1;
++  record.error = null;
++  // Reservar antes do transporte permite usar a mesma guarda em ambas as telas.
++  let start;
++  const request = new Promise(resolve => { start = resolve; });
++  record.flight = request.then(result => {
++    record.result = result;
++    return result;
++  }).catch(error => {
++    record.error = { status: error?.status, code: error?.code, outcomeUnknown: error?.outcomeUnknown,
++      isNetworkError: error?.isNetworkError };
++    const uncertain = !error?.status || error.outcomeUnknown || error.status >= 500 || error.status === 408 ||
++      error.code === 'IDEMPOTENCY_IN_PROGRESS';
++    // Uma recusa ao repetir não esclarece o que aconteceu na primeira tentativa.
++    if (!uncertain && (!retrying || error.code === 'IDEMPOTENCY_KEY_REUSED') && store.get(record.id) === record) {
++      store.delete(record.id);
++    }
++    throw error;
++  }).finally(() => { record.flight = null; });
++  start(send(client, record));
++  return record.flight;
++}
++
++export function matchesStructureIntent(items, record) {
++  const group = items.find(item => item.id === record.experienceId);
++  const station = group?.stations.find(item => item.id === record.stationId);
++  switch (record.kind) {
++    case 'availability': return station?.availability === record.value;
++    case 'addExperience': return items.some(item => item.id === record.result?.id && item.name === record.value);
++    case 'addStation': return Boolean(group?.stations.some(item => item.id === record.result?.id && item.label === record.value));
++    case 'renameExperience': return group?.name === record.value;
++    case 'renameStation': return station?.label === record.value;
++    default: return false;
++  }
++}
+diff --git a/app/screens/admin/components/AdminSelectedEvent.js b/app/screens/admin/components/AdminSelectedEvent.js
+index d7154c97b727a9dc7cfed8939f48fbebf1ceac02..8c27175ce51017d12c68692e7bc484869f55fc7f 100644
+--- a/app/screens/admin/components/AdminSelectedEvent.js
++++ b/app/screens/admin/components/AdminSelectedEvent.js
+@@ -34,7 +34,7 @@ export default function AdminSelectedEvent({ event, readiness, expanded, onToggl
+           <Text style={s.body}>{message}</Text>
+           {area && (onArea ? <Pressable accessibilityRole="button" accessibilityLabel={`Consultar ${adminEventAreas[area].title}`}
+             onPress={() => onArea(area)} style={styles.action}>
+-            <Text style={styles.link}>{adminEventAreas[area].title}{area === 'schedule' ? '' : ' · Visão informativa'}</Text>
++            <Text style={styles.link}>{adminEventAreas[area].title}{['schedule', 'experiences'].includes(area) ? '' : ' · Visão informativa'}</Text>
+           </Pressable> : <Text style={s.body}>{adminEventAreas[area].title}</Text>)}
+         </View>)}
+       </> : <Text style={s.body}>Prontidão indisponível</Text>}
+diff --git a/app/services/adminEventSetupService.js b/app/services/adminEventSetupService.js
+index 82cc3ada726cf01ca6d49e99cd94614a4e535f33..d4b8dd3c176998b0da5a7f4d64a1693a35bd7b05 100644
+--- a/app/services/adminEventSetupService.js
++++ b/app/services/adminEventSetupService.js
+@@ -60,6 +60,33 @@ function eventGrant(value, eventId) {
+   return value;
+ }
+ 
++export async function renameExperience(client, eventId, experienceId, name, key) {
++  const path = `${adminEventPath(eventId)}/experiences/${adminIdentifier(experienceId)}`;
++  const result = await client.patch(path, { name }, mutationOptions(key));
++  const experience = experienceOf(result?.experience, eventId);
++  confirm(experience.id === experienceId && experience.name === name);
++  return experience;
++}
++
++export async function renameStation(client, eventId, experienceId, stationId, label, key) {
++  const path = `${adminEventPath(eventId)}/experiences/${adminIdentifier(experienceId)}/stations/${adminIdentifier(stationId)}`;
++  const result = await client.patch(path, { label }, mutationOptions(key));
++  const station = stationOf(result?.station, experienceId);
++  confirm(station.id === stationId && station.label === label);
++  return station;
++}
++
++export async function setStationAvailability(client, eventId, stationId, availability) {
++  confirm(['available', 'unavailable'].includes(availability));
++  const path = `/staff/events/${adminIdentifier(eventId)}/stations/${adminIdentifier(stationId)}/availability`;
++  const station = await client.patch(path, { availability }, {
++    auth: true, retryOnUnauthorized: false, outcomeUnknownOnNetworkError: true,
++  });
++  confirm(station?.stationId === stationId && station.availability === availability);
++  if (station.pendingServiceSessionId !== null) adminIdentifier(station.pendingServiceSessionId);
++  return station;
++}
++
+ export async function grantEventStaff(client, eventId, email, key) {
+   const result = await client.post('/admin/roles/grant', { role: 'staff', eventId: adminIdentifier(eventId), email }, mutationOptions(key));
+   const grant = eventGrant(result?.grant, eventId);
+diff --git a/app/tests/adminEventSetup.test.cjs b/app/tests/adminEventSetup.test.cjs
+index a56db396005cd0a82f8551ce453bd88ef215a6cf..bd926f1f6d21e5927bd85324067b2d2460e4d782 100644
+--- a/app/tests/adminEventSetup.test.cjs
++++ b/app/tests/adminEventSetup.test.cjs
+@@ -6,7 +6,9 @@ const events = loadModule('services/adminEventsService.js', require).exports;
+ const schedule = loadModule('screens/admin/adminScheduleForm.js', require).exports;
+ const forms = loadModule('screens/admin/adminCreationForm.js', () => schedule).exports;
+ const setup = loadModule('services/adminEventSetupService.js', () => events).exports;
++const shared = loadModule('screens/admin/adminStructureIntents.js', () => setup).exports;
+ const { createEventSetup } = loadModule('screens/admin/adminCreationFlow.js', name => {
++  if (name === './adminStructureIntents') return shared;
+   if (name.endsWith('/adminEventsService')) return events;
+   if (name.endsWith('/adminEventSetupService')) return setup;
+   assert.equal(name, './adminCreationForm');
+@@ -66,6 +68,30 @@ function fixture({ resume = false, post, get, now, isCurrent = () => true } = {}
+   return open();
+ }
+ 
++test('wizard recupera o cadastro da gestão e preserva sua chave sem reenviar durante a leitura', async () => {
++  const h = fixture({ post: (url, body, db) => {
++    assert.equal(url, path + '/experiences');
++    db.items = [{ ...experience, stations: [] }];
++    return { experience };
++  } });
++  const record = { eventId, kind: 'addExperience', value: experience.name, key: id(9), attempts: 1 };
++  record.id = shared.structureIntentId(record);
++  const pending = new Map([[record.id, record]]);
++  const page = h.open(eventId, pending);
++  await page.settled();
++  page.flow.editSetup({ experience: experience.name });
++  await page.flow.run('experience');
++  assert.equal(page.writes.length, 0);
++  assert.equal(pending.get(record.id).key, id(9));
++  assert.match(page.flow.snapshot().message, /ficou sem confirmação/);
++  await page.settled();
++  await page.flow.retry();
++  assert.deepEqual(page.writes, [{ url: path + '/experiences', body: { name: experience.name }, key: id(9) }]);
++  assert.equal(pending.size, 0);
++  page.dispose();
++  h.dispose();
++});
++
+ test('identidade aplica limites por caractere, valida ASCII antes da caixa e normaliza espaços externos', () => {
+   for (const name of ['', 'a'.repeat(181), 'x\nxx', 'x\ud800']) assert.throws(() => forms.eventIdentity({ ...form, name }));
+   assert.equal(forms.configurationName('🎮'.repeat(180)), '🎮'.repeat(180));
+@@ -311,7 +337,7 @@ for (const kind of ['experience', 'station']) {
+     const originals = reopened.flow.snapshot().items;
+     assert.equal(originals.length, 1);
+     assert.equal(originals[0].stations.length, kind === 'station' ? 1 : 0);
+-    reopened.flow.editSetup({ experience: 'Outro', station: 'Outra', parent: experience.id });
++    reopened.flow.editSetup({ experience: experience.name, station: station.label, parent: experience.id });
+     await reopened.flow.run(kind);
+     await reopened.flow.refresh();
+     assert.equal(h.writes.length, writesBefore);
+diff --git a/app/tests/adminEventStructure.test.cjs b/app/tests/adminEventStructure.test.cjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..d4d7210749aec5c847258b10b286605f0f2313d3
+--- /dev/null
++++ b/app/tests/adminEventStructure.test.cjs
+@@ -0,0 +1,460 @@
++const test = require('node:test');
++const assert = require('node:assert/strict');
++const { loadModule } = require('./helpers/questionnaireHarness.cjs');
++
++const events = loadModule('services/adminEventsService.js', require).exports;
++const setup = loadModule('services/adminEventSetupService.js', () => events).exports;
++const schedule = loadModule('screens/admin/adminScheduleForm.js', require).exports;
++const forms = loadModule('screens/admin/adminCreationForm.js', () => schedule).exports;
++const shared = loadModule('screens/admin/adminStructureIntents.js', () => setup).exports;
++const { createStructureFlow } = loadModule('screens/admin/adminStructureFlow.js', name => {
++  if (name === './adminStructureIntents') return shared;
++  if (name.endsWith('/adminEventsService')) return events;
++  if (name.endsWith('/adminEventSetupService')) return setup;
++  assert.equal(name, './adminCreationForm');
++  return forms;
++}).exports;
++
++const id = n => 'abcdef00-0000-4000-8000-' + String(n).padStart(12, '0');
++const eventId = id(1), groupId = id(2), stationId = id(3);
++const path = '/admin/events/' + eventId, collection = path + '/experiences';
++const groupPath = collection + '/' + groupId;
++const stationPath = groupPath + '/stations/' + stationId;
++const availabilityPath = '/staff/events/' + eventId + '/stations/' + stationId + '/availability';
++const group = (stations = []) => ({ id: groupId, eventId, name: 'Oficina', stations });
++const station = () => ({ id: stationId, experienceId: groupId, label: 'Mesa', availability: 'available', pendingServiceSessionId: null });
++const copy = value => JSON.parse(JSON.stringify(value));
++const change = (kind, value) => ({ kind, value, experienceId: groupId, stationId });
++function deferred() {
++  let resolve, reject;
++  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
++  return { promise, resolve, reject };
++}
++async function until(predicate) {
++  for (let attempt = 0; attempt < 16; attempt++) {
++    if (predicate()) return;
++    await new Promise(resolve => setImmediate(resolve));
++  }
++  assert.fail('O estado esperado não foi publicado.');
++}
++
++function fixture(items = [], selected = eventId) {
++  const base = '/admin/events/' + selected;
++  const db = { items, eligibleStaff: true, phase: 'open' };
++  const reads = [], writes = [], intents = new Map();
++  let keys = 0;
++  const client = {
++    async get(url, options) {
++      reads.push(url);
++      assert.equal(options.auth, true);
++      if (db.read) {
++        const override = await db.read(url);
++        if (override !== undefined) return override;
++      }
++      const available = db.items.some(item => item.stations.some(row => row.availability === 'available'));
++      const ready = available && db.eligibleStaff;
++      if (url === base) return { event: { id: selected, name: 'Evento ' + selected, effectivePhase: db.phase,
++        timezone: 'America/Fortaleza', startsAt: '2026-10-01T10:00:00Z', officialEndsAt: '2026-10-01T20:00:00Z',
++        readiness: { ready } } };
++      if (url === base + '/experiences') return { eventId: selected, items: copy(db.items) };
++      assert.equal(url, base + '/readiness');
++      return { eventId: selected, statusStored: db.phase, effectivePhase: db.phase, ready, acceptingNewParticipations: false,
++        missing: [...(!available ? ['EXPERIENCE_WITH_AVAILABLE_STATION'] : []), ...(!db.eligibleStaff ? ['VERIFIED_ACTIVE_STAFF'] : [])],
++        checks: { nameAndAccessCode: true, validScheduleAndTimezone: true, externalQueueConfigured: true,
++          hasExperienceWithAvailableStation: available, hasVerifiedActiveStaff: db.eligibleStaff } };
++    },
++  };
++  for (const method of ['post', 'patch']) client[method] = async (url, body, options) => {
++    writes.push({ method, url, body: copy(body), key: options.headers?.['Idempotency-Key'] });
++    assert.equal(options.auth, true);
++    assert.equal(options.retryOnUnauthorized, false);
++    assert.equal(options.outcomeUnknownOnNetworkError, true);
++    return db.write(body);
++  };
++  function open(isCurrent = () => true, selectedId = selected) {
++    const flow = createStructureFlow({ client, eventId: selectedId, intents, newKey: () => id(++keys), isCurrent });
++    const published = [];
++    const dispose = flow.mount(state => published.push(state));
++    return { flow, dispose, published, ready: () => until(() => !flow.snapshot().loading) };
++  }
++  return { db, client, reads, writes, intents, open };
++}
++
++test('leitura confirma evento, grupos vazios, vínculos, disponibilidade e chamada pendente', async () => {
++  const h = fixture(), page = h.open();
++  h.db.eligibleStaff = false;
++  await page.ready();
++  assert.equal(page.flow.snapshot().data.items.length, 0);
++  h.db.items = [group(), { ...group(), id: id(4), stations: [
++    { ...station(), experienceId: id(4), pendingServiceSessionId: id(6) },
++    { ...station(), id: id(5), experienceId: id(4), availability: 'unavailable' },
++  ] }];
++  await page.flow.refresh();
++  const data = page.flow.snapshot().data;
++  assert.equal(data.event.id, eventId);
++  assert.deepEqual(copy(data.items), h.db.items);
++  assert.equal(data.readiness.ready, false);
++  assert.deepEqual(h.reads.slice(-3), [path, collection, path + '/readiness']);
++  for (const malformed of [{ eventId: id(9), items: [] }, { eventId, items: [group([{ ...station(), experienceId: id(4) }])] },
++    { eventId, items: [group([{ ...station(), pendingServiceSessionId: 'inválido' }])] }]) {
++    h.db.read = url => url === collection ? malformed : undefined;
++    await page.flow.refresh();
++    assert.equal(page.flow.snapshot().data, null);
++  }
++  page.dispose();
++});
++
++test('POST de experiência valida caracteres, normaliza o corpo e exige confirmação da leitura', async () => {
++  const h = fixture(), page = h.open();
++  await page.ready();
++  for (const value of [' ', '\ud800', 'a\nb', '🎮'.repeat(161)]) {
++    await page.flow.save({ kind: 'addExperience', value });
++    assert.match(page.flow.snapshot().message, /160/);
++  }
++  assert.equal(h.writes.length, 0);
++  const name = '🎮'.repeat(160);
++  h.db.write = body => {
++    const experience = { ...group(), name: body.name };
++    h.db.items.push(experience);
++    return { experience };
++  };
++  await page.flow.save({ kind: 'addExperience', value: ' ' + name + ' ' });
++  assert.deepEqual(h.writes, [{ method: 'post', url: collection, body: { name }, key: id(1) }]);
++  assert.equal(page.flow.snapshot().data.items[0].id, groupId);
++  assert.match(page.flow.snapshot().message, /confirmado/);
++  page.dispose();
++});
++
++test('duplo toque, timeout, remount e replay explícito mantêm chave e corpo', async () => {
++  const h = fixture(), first = h.open();
++  await first.ready();
++  const delay = deferred(), command = { kind: 'addExperience', value: 'Oficina' };
++  h.db.write = () => delay.promise;
++  const writing = first.flow.save(command);
++  await first.flow.save(command);
++  first.dispose();
++  const next = h.open();
++  delay.reject({ outcomeUnknown: true });
++  await writing;
++  await next.ready();
++  assert.equal(next.flow.snapshot().pending[0].kind, command.kind);
++  await next.flow.refresh();
++  await next.flow.save(command);
++  assert.equal(h.writes.length, 1);
++  h.db.write = () => { h.db.items = [group()]; return { experience: group() }; };
++  await next.flow.retry(next.flow.snapshot().pending[0]);
++  assert.equal(h.writes.length, 2);
++  assert.deepEqual(h.writes[0], h.writes[1]);
++  assert.equal(next.flow.snapshot().pending.length, 0);
++  next.dispose();
++});
++
++test('histórico bloqueia criação e renomeações, mas cadastro de estação usa apenas a coleção da experiência', async () => {
++  const h = fixture([group([station()])]), page = h.open();
++  await page.ready();
++  h.db.write = () => { throw { status: 409, code: 'EVENT_CONFIGURATION_LOCKED' }; };
++  for (const kind of ['addExperience', 'renameExperience', 'renameStation']) {
++    await page.flow.save(change(kind, 'Alterado'));
++    assert.match(page.flow.snapshot().message, /histórico/);
++    assert.deepEqual(copy(page.flow.snapshot().data.items), [group([station()])]);
++  }
++  const label = '🎮'.repeat(120);
++  await page.flow.save(change('addStation', label + 'X'));
++  assert.equal(h.writes.length, 3);
++  h.db.write = () => {
++    const row = { ...station(), id: id(7), label };
++    h.db.items[0].stations.push(row);
++    return { station: row };
++  };
++  await page.flow.save(change('addStation', label));
++  assert.deepEqual(h.writes.at(-1), { method: 'post', url: groupPath + '/stations', body: { label }, key: id(4) });
++  assert.equal(page.flow.snapshot().data.items.length, 1);
++  assert.equal(page.flow.snapshot().data.items[0].stations.length, 2);
++  assert.ok(h.writes.every(entry => !entry.url.includes('/queue')));
++  page.dispose();
++});
++
++test('PATCH de nome e identificação preserva UUID, experiência e disponibilidade das estações homônimas', async () => {
++  const sibling = { ...station(), id: id(4) };
++  const h = fixture([group([sibling, station()])]), page = h.open();
++  await page.ready();
++  h.db.write = ({ name }) => { h.db.items[0].name = name; return { experience: h.db.items[0] }; };
++  await page.flow.save(change('renameExperience', 'Oficina B'));
++  assert.deepEqual(h.writes[0], { method: 'patch', url: groupPath, body: { name: 'Oficina B' }, key: id(1) });
++  h.db.write = ({ label }) => { const row = h.db.items[0].stations[1]; row.label = label; return { station: row }; };
++  await page.flow.save(change('renameStation', 'Mesa B'));
++  assert.deepEqual(h.writes[1], { method: 'patch', url: stationPath, body: { label: 'Mesa B' }, key: id(2) });
++  assert.deepEqual(copy(page.flow.snapshot().data.items[0].stations), [sibling, { ...station(), label: 'Mesa B' }]);
++  assert.equal(h.reads.length, 9);
++  page.dispose();
++});
++
++test('identidade de resposta e conflito com leitura oficial impedem confirmação fictícia', async () => {
++  const h = fixture([group([station()])]), page = h.open();
++  await page.ready();
++  h.db.write = ({ label }) => ({ station: { ...station(), id: id(7), label } });
++  await page.flow.save(change('renameStation', 'Outra'));
++  assert.match(page.flow.snapshot().message, /incerto/i);
++  assert.equal(page.flow.snapshot().data.items[0].stations[0].label, 'Mesa');
++  h.db.write = ({ label }) => ({ station: { ...station(), label } });
++  await page.flow.retry(page.flow.snapshot().pending[0]);
++  assert.match(page.flow.snapshot().message, /difere/);
++  assert.equal(h.writes[0].key, h.writes[1].key);
++  page.flow.discard(page.flow.snapshot().pending[0]);
++  await page.flow.save({ ...change('renameStation', 'Outra'), original: 'Nome antigo' });
++  assert.match(page.flow.snapshot().message, /mudou/);
++  assert.equal(h.writes.length, 2);
++  page.dispose();
++});
++
++test('disponibilidade define estado desejado sem chave, aceita no-op e reconsulta a prontidão oficial', async () => {
++  const h = fixture([group([station()])]), page = h.open();
++  await page.ready();
++  h.db.write = ({ availability }) => {
++    h.db.items[0].stations[0].availability = availability;
++    return { stationId, availability, pendingServiceSessionId: null };
++  };
++  for (const value of ['unavailable', 'unavailable', 'available']) {
++    await page.flow.save(change('availability', value));
++    assert.deepEqual(h.writes.at(-1), { method: 'patch', url: availabilityPath, body: { availability: value }, key: undefined });
++    assert.equal(page.flow.snapshot().data.items[0].stations[0].availability, value);
++    assert.equal(page.flow.snapshot().data.readiness.ready, value === 'available');
++  }
++  page.dispose();
++});
++
++test('409 de chamada pendente ou encerramento explica a recusa e mantém o estado oficial', async () => {
++  const h = fixture([group([station()])]), page = h.open();
++  await page.ready();
++  h.db.write = () => {
++    h.db.items[0].stations[0].pendingServiceSessionId = id(6);
++    throw { status: 409, code: 'STATION_HAS_PENDING_CALL' };
++  };
++  await page.flow.save(change('availability', 'unavailable'));
++  assert.match(page.flow.snapshot().message, /chamada pendente/);
++  await page.flow.save(change('availability', 'unavailable'));
++  assert.equal(h.writes.length, 1);
++  h.db.items[0].stations[0].pendingServiceSessionId = null;
++  await page.flow.refresh();
++  h.db.write = () => { throw { status: 409, code: 'EVENT_OPERATION_ENDED' }; };
++  for (const command of [change('availability', 'unavailable'), change('addExperience', 'Laboratório')]) {
++    await page.flow.save(command);
++    assert.match(page.flow.snapshot().message, /operação do evento já terminou/);
++    assert.equal(page.flow.snapshot().data.items[0].stations[0].availability, 'available');
++  }
++  page.dispose();
++});
++
++test('timeout operacional compara o estado observado sem repetir o PATCH em refresh ou remount', async () => {
++  for (const persisted of [false, true]) {
++    const h = fixture([group([station()])]), page = h.open();
++    await page.ready();
++    h.db.write = () => {
++      if (persisted) h.db.items[0].stations[0].availability = 'unavailable';
++      throw { outcomeUnknown: true };
++    };
++    await page.flow.save(change('availability', 'unavailable'));
++    assert.match(page.flow.snapshot().message, persisted ? /confirmado/ : /difere/);
++    assert.equal(page.flow.snapshot().pending.length, 0);
++    await page.flow.retry(page.flow.snapshot().pending[0]);
++    page.dispose();
++    const next = h.open(); await next.ready();
++    assert.equal(h.writes.length, 1);
++    next.dispose();
++  }
++});
++
++test('401 e 403 em leitura ou escrita removem dados protegidos e bloqueiam novas operações', async () => {
++  for (const status of [401, 403]) for (const method of ['get', 'patch']) {
++    const h = fixture([group()]), page = h.open();
++    await page.ready();
++    if (method === 'get') {
++      h.db.read = url => { if (url === path) throw { status: 503 }; if (url === collection) throw { status }; };
++      await page.flow.refresh();
++    } else {
++      h.db.write = () => { throw { status }; };
++      await page.flow.save(change('renameExperience', 'Outra'));
++    }
++    assert.equal(page.flow.snapshot().data, null);
++    assert.equal(page.flow.snapshot().denied, true);
++    await page.flow.save(change('addExperience', 'Outra'));
++    assert.equal(h.writes.length, method === 'patch' ? 1 : 0);
++    page.dispose();
++  }
++});
++
++test('404 e falha de rede ocultam o conteúdo e permitem recuperar por leitura', async () => {
++  const h = fixture([group()]), page = h.open();
++  await page.ready();
++  for (const error of [{ status: 404, code: 'RESOURCE_NOT_FOUND' }, { isNetworkError: true }]) {
++    h.db.read = url => { if (url === collection) throw error; };
++    await page.flow.refresh();
++    assert.equal(page.flow.snapshot().data, null);
++    assert.match(page.flow.snapshot().message, error.status === 404 ? /não encontrado/ : /conexão/);
++    delete h.db.read;
++    await page.flow.refresh();
++    assert.equal(page.flow.snapshot().data.items[0].id, groupId);
++  }
++  assert.equal(h.writes.length, 0);
++  page.dispose();
++});
++
++test('intenção em processamento e retry limitado pelo servidor conservam o mesmo corpo', async () => {
++  const h = fixture([group()]), page = h.open();
++  await page.ready();
++  h.db.write = () => { throw { status: 409, code: 'IDEMPOTENCY_IN_PROGRESS' }; };
++  await page.flow.save(change('renameExperience', 'Renomeado'));
++  assert.match(page.flow.snapshot().message, /em processamento/);
++  h.db.write = () => { throw { status: 429 }; };
++  await page.flow.retry(page.flow.snapshot().pending[0]);
++  assert.equal(page.flow.snapshot().pending.length, 1);
++  assert.deepEqual(h.writes[0], h.writes[1]);
++  h.db.write = () => { throw { status: 409, code: 'IDEMPOTENCY_KEY_REUSED' }; };
++  await page.flow.retry(page.flow.snapshot().pending[0]);
++  assert.equal(page.flow.snapshot().pending.length, 0);
++  assert.match(page.flow.snapshot().message, /chave já foi usada/);
++  assert.equal(page.flow.snapshot().data.items[0].name, 'Oficina');
++  page.dispose();
++});
++
++test('logout, troca de conta ou evento e resposta antiga de GET ou PATCH não publicam no contexto atual', async () => {
++  for (const method of ['get', 'patch']) {
++    const h = fixture([group()]), delay = deferred();
++    let current = true;
++    const page = h.open(() => current);
++    await page.ready();
++    if (method === 'get') h.db.read = url => url === collection ? delay.promise : undefined;
++    else h.db.write = () => delay.promise;
++    const old = method === 'get' ? page.flow.refresh() : page.flow.save(change('renameExperience', 'Antigo'));
++    current = false;
++    const count = page.published.length;
++    await page.flow.save(change('addExperience', 'Não enviar'));
++    page.dispose();
++    const next = fixture([], id(8)).open();
++    await next.ready();
++    delay.resolve(method === 'get' ? { eventId, items: [group()] } : { experience: { ...group(), name: 'Antigo' } });
++    await old;
++    assert.equal(page.published.length, count);
++    assert.equal(next.flow.snapshot().data.event.id, id(8));
++    assert.equal(next.flow.snapshot().data.items.length, 0);
++    assert.equal(h.writes.length, method === 'patch' ? 1 : 0);
++    next.dispose();
++  }
++});
++
++test('gestão recupera a estação do wizard e permite cadastro independente e homônimo em outra experiência', async () => {
++  const other = { ...group(), id: id(6), name: 'Pista' };
++  const h = fixture([group(), other]);
++  const original = { kind: 'addStation', eventId, experienceId: groupId, value: 'Mesa', key: id(8), attempts: 1 };
++  original.id = shared.structureIntentId(original);
++  h.intents.set(original.id, original);
++  const page = h.open();
++  await page.ready();
++  assert.equal(h.writes.length, 0);
++  assert.equal(page.flow.snapshot().pending[0], original);
++  await page.flow.save(change('addStation', ' Mesa '));
++  assert.equal(h.writes.length, 0);
++  assert.match(page.flow.snapshot().message, /pendente/);
++
++  h.db.write = () => { throw { outcomeUnknown: true }; };
++  await page.flow.save({ ...change('addStation', 'Mesa'), experienceId: other.id });
++  const independent = page.flow.snapshot().pending.find(record => record !== original);
++  assert.equal(h.writes[0].url, collection + '/' + other.id + '/stations');
++  assert.notEqual(independent.id, original.id);
++  assert.notEqual(independent.key, original.key);
++  h.db.write = () => {
++    const row = station();
++    h.db.items[0].stations = [row];
++    return { station: row };
++  };
++  await page.flow.retry(original);
++  assert.deepEqual(h.writes[1], { method: 'post', url: groupPath + '/stations', body: { label: 'Mesa' }, key: id(8) });
++  assert.equal(page.flow.snapshot().pending.length, 1);
++  assert.equal(page.flow.snapshot().pending[0], independent);
++  page.flow.discard(original);
++  assert.equal(h.intents.get(independent.id), independent);
++  page.flow.discard(independent);
++  assert.equal(h.intents.size, 0);
++  page.dispose();
++});
++
++test('GET antigo termina depois da escrita e da releitura sem restaurar a disponibilidade anterior', async () => {
++  const h = fixture([group([station()])]), page = h.open();
++  await page.ready();
++  const delay = deferred();
++  let delayed = false;
++  h.db.read = url => {
++    if (url === collection && !delayed) { delayed = true; return delay.promise; }
++  };
++  const oldRead = page.flow.refresh();
++  await page.flow.refresh();
++  h.db.write = ({ availability }) => {
++    h.db.items[0].stations[0].availability = availability;
++    return { stationId, availability, pendingServiceSessionId: null };
++  };
++  await page.flow.save(change('availability', 'unavailable'));
++  assert.equal(page.flow.snapshot().data.readiness.ready, false);
++  const publications = page.published.length;
++  delay.resolve({ eventId, items: [group([station()])] });
++  await oldRead;
++  assert.equal(page.published.length, publications);
++  assert.equal(page.flow.snapshot().data.items[0].stations[0].availability, 'unavailable');
++  page.dispose();
++});
++
++test('trocar o UUID no mesmo cliente e mapa rejeita leitura antiga e mantém a intenção no evento de origem', async () => {
++  const h = fixture([group()]);
++  let selected = eventId;
++  const previous = h.open(() => selected === eventId);
++  await previous.ready();
++  h.db.write = () => { throw { outcomeUnknown: true }; };
++  await previous.flow.save(change('addStation', 'Pendente'));
++  const firstEvent = copy(previous.flow.snapshot().data);
++  const oldResponse = deferred();
++  const otherId = id(8), otherPath = '/admin/events/' + otherId;
++  h.db.read = url => {
++    if (url === collection) return oldResponse.promise;
++    if (url === otherPath) return { event: { ...firstEvent.event, id: otherId, name: 'Outro evento' } };
++    if (url === otherPath + '/experiences') return { eventId: otherId, items: [] };
++    if (url === otherPath + '/readiness') return { ...firstEvent.readiness, eventId: otherId };
++  };
++  const old = previous.flow.refresh();
++  selected = otherId;
++  const publications = previous.published.length;
++  const next = h.open(() => selected === otherId, otherId);
++  await next.ready();
++  oldResponse.resolve({ eventId, items: firstEvent.items });
++  await old;
++  assert.equal(previous.published.length, publications);
++  assert.equal(next.flow.snapshot().data.event.id, otherId);
++  assert.equal(next.flow.snapshot().pending.length, 0);
++  assert.equal([...h.intents.values()][0].eventId, eventId);
++  assert.equal(h.writes.length, 1);
++  next.dispose();
++  previous.dispose();
++});
++
++test('duas instâncias compartilham o envio em voo e um descarte atrasado não remove outra operação', async () => {
++  const h = fixture([group()]), first = h.open();
++  await first.ready();
++  h.db.write = () => { throw { outcomeUnknown: true }; };
++  await first.flow.save(change('addStation', 'Mesa'));
++  const original = first.flow.snapshot().pending[0];
++  const second = h.open();
++  await second.ready();
++  const delay = deferred();
++  h.db.write = () => delay.promise;
++  const replay = first.flow.retry(original);
++  await second.flow.retry(original);
++  second.flow.discard(original);
++  assert.equal(h.writes.length, 2);
++  assert.equal(h.intents.get(original.id), original);
++  h.db.items = [group([station()])];
++  delay.resolve({ station: station() });
++  await replay;
++  assert.equal(h.intents.size, 0);
++  second.flow.discard(original);
++  assert.equal(h.writes.length, 2);
++  first.dispose();
++  second.dispose();
++});
+diff --git a/app/tests/helpers/questionnaireHarness.cjs b/app/tests/helpers/questionnaireHarness.cjs
+index 773cacc15fad6c5fe64f6942c098b2d2d818edeb..46fcaf2291e805956cde01d7e5c1759ce8391d7d 100644
+--- a/app/tests/helpers/questionnaireHarness.cjs
++++ b/app/tests/helpers/questionnaireHarness.cjs
+@@ -268,7 +268,8 @@ function createHarness(relativePath, options = {}) {
+       if (contextObj === AuthContextToken) {
+         return authContextValue;
+       }
+-      return contextObj?._defaultValue ?? authContextValue;
++      return contextObj && Object.prototype.hasOwnProperty.call(contextObj, '_defaultValue')
++        ? contextObj._defaultValue : undefined;
+     },
+     useState(initial) {
+       const index = cursor++;
+@@ -372,7 +373,9 @@ function createHarness(relativePath, options = {}) {
+     if (name === '@react-native-community/datetimepicker') return nativePicker;
+     if (name === '../components/BirthDateInput' || name === '../../components/BirthDateInput') return { __esModule: true, default: 'BirthDateInput' };
+     if (name === '../components/ScreenContainer' || name === '../../components/ScreenContainer') return { __esModule: true, default: 'ScreenContainer' };
+-    if (name === '../context/AuthContext' || name === '../../context/AuthContext') {
++    const authModule = path.resolve(path.dirname(path.join(appDirectory, fromRelativePath)), name);
++    if (name.startsWith('.') && (authModule === path.join(appDirectory, 'context', 'AuthContext') ||
++      authModule === path.join(appDirectory, 'context', 'AuthContext.js'))) {
+       return {
+         AuthContext: AuthContextToken,
+         useAuth: () => authContextValue,
+diff --git a/app/tests/roleRoutingIntegration.test.cjs b/app/tests/roleRoutingIntegration.test.cjs
+index 00a6b59a524d7583bdabd93baf4467ef73925c7c..a5c5ec3e49f14c0916d30233dd577eec8c6c590e 100644
+--- a/app/tests/roleRoutingIntegration.test.cjs
++++ b/app/tests/roleRoutingIntegration.test.cjs
+@@ -170,6 +170,9 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+       return route.name;
+     },
+     storedToken() { return token; },
++    inputValue(label) {
++      return tree.root.findAllByType('TextInput').find(node => node.props.accessibilityLabel === label)?.props.value;
++    },
+     async input(label, value) {
+       const field = tree.root.findAllByType('TextInput').find(node => node.props.accessibilityLabel === label);
+       assert.ok(field, label);
+@@ -177,6 +180,10 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+     },
+     navigate(name, params) { Renderer.act(() => navRef.navigate(name, params)); },
+     back() { Renderer.act(() => navRef.goBack()); },
++    popActive() {
++      const root = navRef.getRootState();
++      Renderer.act(() => navRef.dispatch({ type: 'POP', payload: { count: 1 }, target: root.routes[root.index].state.key }));
++    },
+     hasText(text) { return tree.root.findAllByType('Text').some((node) => {
+       const flatten = (value) => Array.isArray(value) ? value.map(flatten).join('')
+         : value && typeof value === 'object' ? flatten(value.props?.children) : String(value ?? '');
+@@ -189,6 +196,15 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+     },
+     modal() { return tree.root.findByType('Modal'); },
+     hasButton(label) { return tree.root.findAllByType('Pressable').some(node => node.props.accessibilityLabel === label); },
++    buttonProps(label) {
++      const buttons = tree.root.findAllByType('Pressable').filter(node => node.props.accessibilityLabel === label);
++      assert.equal(buttons.length, 1, `botão ${label}`);
++      return buttons[0].props;
++    },
++    async activateButton(label) {
++      const props = this.buttonProps(label);
++      if (!props.disabled) await Renderer.act(async () => { await props.onPress?.(); });
++    },
+     handler(label) { return tree.root.findAllByType('Pressable').find(node => node.props.accessibilityLabel === label).props.onPress; },
+     confirmHandler() { return tree.root.findAllByType('Pressable')
+       .find((node) => node.props.accessibilityLabel === 'CONFIRMAR').props.onPress; },
+@@ -366,7 +382,8 @@ test('ADMIN-05: painel pronto oferece retomada de estação salva com resposta p
+   const eventId = 'abcdef00-0000-4000-8000-000000000001';
+   const experienceId = 'abcdef00-0000-4000-8000-000000000002';
+   const path = '/admin/events/' + eventId;
+-  const station = { id: 'abcdef00-0000-4000-8000-000000000003', experienceId, label: 'Mesa', availability: 'available' };
++  const station = { id: 'abcdef00-0000-4000-8000-000000000003', experienceId, label: 'Mesa', availability: 'available',
++    pendingServiceSessionId: null };
+   const writes = [];
+   const event = { id: eventId, name: 'Evento com estação', accessCode: 'ESTACAO', timezone: 'UTC',
+     startsAt: '2090-12-01T10:00:00Z', officialEndsAt: '2090-12-01T14:00:00Z', operationalDeadlineAt: '2090-12-01T14:00:00Z',
+@@ -613,6 +630,361 @@ test('Admin: painel real retorna à mesma rota da lista e mantém informações
+   } finally { app.dispose(); }
+ });
+ 
++test('ADMIN-04: painel abre estrutura por UUID, edita em contexto e reconsulta a prontidão no retorno', { skip }, async () => {
++  const id = n => 'abcdef00-0000-4000-8000-' + String(n).padStart(12, '0');
++  const eventId = id(1), base = '/admin/events/' + eventId;
++  const selected = { id: eventId, name: 'Encontro', effectivePhase: 'scheduled', timezone: 'America/Fortaleza',
++    startsAt: '2090-11-05T15:00:00Z', officialEndsAt: '2090-11-05T20:00:00Z', readiness: { ready: true } };
++  const station = { id: id(4), experienceId: id(3), label: 'Mesa', availability: 'available', pendingServiceSessionId: null };
++  const groups = [{ id: id(2), eventId, name: 'Oficina', stations: [] }, { id: id(3), eventId, name: 'Arena', stations: [station] }];
++  let reads = 0;
++  let eligibleStaff = true;
++  const writes = [];
++  const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control: { realAdmin: true,
++    http: async (route, options) => {
++      if (route === '/admin/events') return { items: [selected], nextCursor: null };
++      if (route === base) return { event: selected };
++      if (route === base + '/experiences') return { eventId, items: groups };
++      if (route === base + '/experiences/' + groups[1].id + '/stations' && options.method === 'POST') {
++        const body = JSON.parse(options.body);
++        writes.push([route, body]);
++        const created = { ...station, id: id(5), availability: 'available', label: body.label };
++        groups[1].stations.push(created);
++        return { station: created };
++      }
++      if (route === base + '/readiness') {
++        reads++;
++        const available = groups.some(group => group.stations.some(row => row.availability === 'available'));
++        const ready = available && eligibleStaff;
++        return { eventId, statusStored: 'scheduled', effectivePhase: 'scheduled', ready, acceptingNewParticipations: false,
++          missing: [...(!available ? ['EXPERIENCE_WITH_AVAILABLE_STATION'] : []), ...(!eligibleStaff ? ['VERIFIED_ACTIVE_STAFF'] : [])],
++          checks: { nameAndAccessCode: true, validScheduleAndTimezone: true, externalQueueConfigured: true,
++            hasExperienceWithAvailableStation: available, hasVerifiedActiveStaff: eligibleStaff } };
++      }
++      if (options.method === 'PATCH') {
++        writes.push([route, JSON.parse(options.body)]);
++        const target = groups[1].stations.find(row => route === '/staff/events/' + eventId + '/stations/' + row.id + '/availability');
++        if (target) {
++          target.availability = JSON.parse(options.body).availability;
++          return { stationId: target.id, availability: target.availability, pendingServiceSessionId: null };
++        }
++        assert.fail('PATCH fora da estação selecionada');
++      }
++    },
++  } });
++  try {
++    await app.mount();
++    await app.press('Gerenciar eventos');
++    await app.press('Acessar evento Encontro');
++    await app.press('Experiências e estações');
++    assert.ok(app.hasText('2 experiências · 1 estação'));
++    assert.equal(app.hasButton('Sair da conta'), false);
++    assert.equal(app.handler('Catálogo · Em breve'), undefined);
++    await app.press('Editar experiência Arena');
++    assert.equal(app.inputValue('Nome da experiência'), 'Arena');
++    await app.input('Nome da experiência', 'Rascunho');
++    await app.press('Cancelar');
++    await app.press('Mesa, Arena, Disponível');
++    assert.ok(app.hasText('Sem chamada pendente'));
++    await app.press('Editar identificação');
++    assert.equal(app.inputValue('Identificação da estação'), 'Mesa');
++    await app.press('Cancelar');
++    await app.press('Tornar indisponível');
++    await app.press('Cancelar');
++    assert.equal(writes.length, 0);
++    await app.press('Tornar indisponível');
++    await app.press('Confirmar');
++    assert.deepEqual(writes, [['/staff/events/' + eventId + '/stations/' + station.id + '/availability', { availability: 'unavailable' }]]);
++    assert.ok(app.hasText('Indisponível'));
++    await app.press('Voltar à estrutura');
++    assert.ok(app.hasButton('Mesa, Arena, Indisponível'));
++    const beforeReturn = reads;
++    await app.press('Voltar ao painel');
++    assert.equal(app.activeRoute(), 'AdminRealEvent');
++    assert.ok(reads > beforeReturn);
++    assert.ok(app.hasText('Encontro'));
++    assert.ok(app.hasButton('Configuração pendente'));
++    await app.press('Configuração pendente');
++    await app.press('Consultar Experiências e estações');
++    assert.ok(app.hasButton('Mesa, Arena, Indisponível'));
++    await app.press('Adicionar estação em Arena');
++    await app.input('Identificação da estação', 'Pista');
++    await app.press('Confirmar gravação');
++    assert.ok(app.hasText('Experiência selecionada'));
++    assert.ok(app.hasText('2 experiências · 2 estações'));
++    assert.ok(app.hasButton('Pista, Arena, Disponível'));
++    assert.ok(app.hasText('Pronto para operar'));
++    assert.equal(app.hasButton('Adicionar estação em Oficina'), false);
++    await app.press('Ver todas as experiências');
++    assert.ok(app.hasButton('Adicionar estação em Oficina'));
++    eligibleStaff = false;
++    await app.press('Atualizar');
++    assert.ok(app.hasText('Configuração pendente'));
++    assert.ok(app.hasButton('Pista, Arena, Disponível'));
++    eligibleStaff = true;
++    await app.press('Pista, Arena, Disponível');
++    await app.press('Tornar indisponível');
++    await app.press('Confirmar');
++    assert.ok(app.hasText('Configuração pendente'));
++    await app.press('Voltar ao painel');
++    assert.ok(app.hasButton('Equipe Staff'));
++    assert.ok(app.hasButton('Configuração pendente'));
++  } finally { app.dispose(); }
++});
++
++const reviewPendingStructure = 'Revisar operações pendentes de experiências e estações';
++function structureIntegration({ initialStation = false, write, read, platformOS = 'web' } = {}) {
++  const eventId = 'abcdef00-0000-4000-8000-000000000001';
++  const experienceId = 'abcdef00-0000-4000-8000-000000000002';
++  const station = { id: 'abcdef00-0000-4000-8000-000000000003', experienceId, label: 'Mesa', availability: 'available',
++    pendingServiceSessionId: null };
++  const group = { id: experienceId, eventId, name: 'Oficina', stations: initialStation ? [station] : [] };
++  const db = { phase: 'scheduled', name: 'Evento de estrutura', eligibleStaff: true };
++  const path = '/admin/events/' + eventId;
++  const stationPath = path + '/experiences/' + experienceId + '/stations';
++  const availabilityPath = '/staff/events/' + eventId + '/stations/' + station.id + '/availability';
++  const requests = [];
++  const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control: { realAdmin: true,
++    platformOS, http: async (route, options) => {
++      requests.push({ route, method: options.method, key: options.headers['Idempotency-Key'], body: options.body });
++      if (options.method === 'POST' && route === stationPath) {
++        return write ? write({ db, group, station, route, options }) : { statusCode: 201, body: { station } };
++      }
++      if (options.method === 'PATCH' && route === availabilityPath) return write({ db, group, station, route, options });
++      if (options.method !== 'GET') return;
++      const override = read?.({ route, path, group, eventId });
++      if (override) return override;
++      const available = group.stations.some(row => row.availability === 'available');
++      const ready = available && db.eligibleStaff;
++      const event = { id: eventId, name: db.name, accessCode: 'ESTRUTURA', timezone: 'UTC', effectivePhase: db.phase,
++        startsAt: '2090-12-01T10:00:00Z', officialEndsAt: '2090-12-01T14:00:00Z', operationalDeadlineAt: '2090-12-01T14:30:00Z',
++        externalQueueEnabled: false, readiness: { ready } };
++      if (route === '/admin/events') return { items: [event], nextCursor: null };
++      if (route === path) return { event };
++      if (route === path + '/experiences') return { eventId, items: [group] };
++      if (route === path + '/readiness') return { eventId, statusStored: db.phase, effectivePhase: db.phase, ready,
++        acceptingNewParticipations: false,
++        missing: [...(!available ? ['EXPERIENCE_WITH_AVAILABLE_STATION'] : []), ...(!db.eligibleStaff ? ['VERIFIED_ACTIVE_STAFF'] : [])],
++        checks: { nameAndAccessCode: true, validScheduleAndTimezone: true, externalQueueConfigured: true,
++          hasExperienceWithAvailableStation: available, hasVerifiedActiveStaff: db.eligibleStaff } };
++    } } });
++  async function openPanel() {
++    await app.press('Gerenciar eventos');
++    await app.press('Acessar evento ' + db.name);
++  }
++  async function fillStation(button, submit, label = station.label) {
++    await app.press(button);
++    await app.input('Identificação da estação', label);
++    await app.press(submit);
++  }
++  return { app, db, path, stationPath, availabilityPath, requests, openPanel, fillStation };
++}
++
++test('ADMIN-04: recuperação do wizard no painel pronto em closing, recusa do replay e consulta em closed', { skip }, async () => {
++  let posts = 0;
++  const h = structureIntegration({ initialStation: true, write: ({ db }) => {
++    if (++posts === 1) {
++      throw new Error('Resultado do POST desconhecido');
++    }
++    db.phase = 'closed';
++    return { statusCode: 409, body: { code: 'EVENT_OPERATION_ENDED' } };
++  } });
++  const { app, db, path, stationPath, requests } = h;
++  db.eligibleStaff = false;
++  try {
++    await app.mount();
++    await h.openPanel();
++    await app.press('Continuar configuração');
++    await h.fillStation('Adicionar estação a Oficina', 'Salvar estação', 'Estação nova');
++    db.eligibleStaff = true;
++    db.phase = 'closing';
++    await app.press('Voltar ao painel');
++    await app.press('Sair do fluxo');
++    assert.ok(app.hasText('Pronto para operar'));
++    assert.equal(app.hasButton('Continuar configuração'), false);
++    const offset = requests.length;
++    await app.press(reviewPendingStructure);
++    assert.ok(app.hasButton('Mesa, Oficina, Disponível'));
++    assert.equal(posts, 1);
++    assert.ok(requests.slice(offset).some(entry => entry.route === path + '/experiences' && entry.method === 'GET'));
++    await app.press('Repetir a mesma solicitação');
++    const writes = requests.filter(entry => entry.route === stationPath && entry.method === 'POST');
++    assert.equal(writes.length, 2);
++    assert.ok(writes[0].key);
++    assert.deepEqual(writes[1], writes[0]);
++    assert.ok(app.hasText('A operação do evento já terminou.'));
++    assert.ok(app.hasButton('Encerrar tentativa'));
++    assert.equal(app.hasButton('Repetir a mesma solicitação'), false);
++    assert.equal(app.handler('Adicionar estação em Oficina'), undefined);
++    await app.press('Consultar recurso');
++    await app.press('Encerrar tentativa');
++    assert.ok(app.hasText('pode ter sido salvo'));
++    await app.press('Confirmar');
++    await app.press('Voltar ao painel');
++    assert.equal(app.hasButton(reviewPendingStructure), false);
++    assert.equal(posts, 2);
++  } finally { app.dispose(); }
++});
++
++test('ADMIN-04: wizard reconhece operação da gestão e retoma com a chave e o corpo originais', { skip }, async () => {
++  let posts = 0;
++  const h = structureIntegration({ write: ({ group, station }) => {
++    group.stations = [station];
++    if (++posts === 1) throw new Error('Resposta perdida');
++    return { statusCode: 201, body: { station } };
++  } });
++  const { app, requests, stationPath } = h;
++  try {
++    await app.mount();
++    await h.openPanel();
++    await app.press('Experiências e estações');
++    await h.fillStation('Adicionar estação em Oficina', 'Confirmar gravação');
++    await app.press('Voltar ao painel');
++    assert.equal(app.hasText('Alterações não salvas'), false);
++    await app.press('Continuar configuração');
++    assert.ok(app.hasButton(reviewPendingStructure));
++    assert.equal(posts, 1);
++    await app.press(reviewPendingStructure);
++    assert.ok(app.hasButton('Repetir a mesma solicitação'));
++    await app.press('Voltar à configuração');
++    assert.equal(app.activeRoute(), 'AdminEventSetup');
++    await app.press('Repetir a mesma solicitação');
++    const writes = requests.filter(entry => entry.route === stationPath && entry.method === 'POST');
++    assert.equal(writes.length, 2);
++    assert.ok(writes[0].key);
++    assert.deepEqual(writes[1], writes[0]);
++    assert.equal(app.hasButton(reviewPendingStructure), false);
++  } finally { app.dispose(); }
++});
++
++test('ADMIN-04: rascunho protege retorno visual, ação Android e remoção programática da rota', { skip }, async () => {
++  let pendingRead;
++  const h = structureIntegration({ platformOS: 'android', read: ({ route, path, group, eventId }) => {
++    if (pendingRead && route === path + '/experiences') return pendingRead.promise.then(() => ({ eventId, items: [group] }));
++  }, write: ({ group, station, options }) => {
++    group.stations = [{ ...station, label: JSON.parse(options.body).label }];
++    return { statusCode: 201, body: { station: group.stations[0] } };
++  } });
++  const { app } = h;
++  try {
++    await app.mount();
++    await h.openPanel();
++    await app.press('Experiências e estações');
++    await app.press('Adicionar experiência');
++    await app.press('Voltar ao painel');
++    assert.equal(app.activeRoute(), 'AdminRealEvent');
++    for (const exit of [() => app.press('Voltar ao painel'), () => app.back(), () => app.popActive()]) {
++      await app.press('Experiências e estações');
++      await app.press('Editar experiência Oficina');
++      await app.input('Nome da experiência', 'Rascunho');
++      await exit();
++      assert.ok(app.hasText('Alterações não salvas'));
++      await app.press('Continuar editando');
++      assert.equal(app.inputValue('Nome da experiência'), 'Rascunho');
++      await exit();
++      await app.press('Descartar alterações');
++      assert.equal(app.activeRoute(), 'AdminRealEvent');
++      assert.ok(app.hasText(h.db.name));
++    }
++    assert.equal(h.requests.filter(entry => entry.method === 'PATCH').length, 0);
++    await app.press('Experiências e estações');
++    await app.press('Adicionar estação em Oficina');
++    await app.input('Identificação da estação', 'Rascunho descartado');
++    pendingRead = deferred();
++    const refresh = app.handler('Atualizar');
++    await app.act(async () => { refresh(); });
++    await app.press('Voltar ao painel');
++    await app.press('Descartar alterações');
++    await app.act(async () => { pendingRead.resolve(); });
++    pendingRead = null;
++    assert.equal(app.activeRoute(), 'AdminRealEvent');
++    await app.press('Experiências e estações');
++    assert.equal(app.inputValue('Identificação da estação'), undefined);
++    await h.fillStation('Adicionar estação em Oficina', 'Confirmar gravação', 'Salva');
++    await app.press('Voltar ao painel');
++    assert.equal(app.activeRoute(), 'AdminRealEvent');
++  } finally { app.dispose(); }
++});
++
++for (const switchAccount of [false, true]) {
++  test(`ADMIN-04: PATCH tardio no mesmo cliente após ${switchAccount ? 'troca de conta' : 'logout'}`, { skip }, async () => {
++    const response = deferred();
++    const h = structureIntegration({ initialStation: true, write: ({ options }) => {
++      if (options.method === 'POST') throw new Error('Resultado do cadastro desconhecido');
++      return response.promise;
++    } });
++    const { app, db, availabilityPath } = h;
++    try {
++      await app.mount();
++      const client = app.manager.client;
++      await h.openPanel();
++      await app.press('Experiências e estações');
++      await h.fillStation('Adicionar estação em Oficina', 'Confirmar gravação', 'Estação pendente');
++      assert.ok(app.hasButton('Repetir a mesma solicitação'));
++      await app.press('Mesa, Oficina, Disponível');
++      await app.press('Tornar indisponível');
++      const oldConfirm = app.handler('Confirmar');
++      await app.act(async () => { oldConfirm(); });
++      const writes = () => h.requests.filter(entry => entry.route === availabilityPath && entry.method === 'PATCH');
++      assert.equal(writes().length, 1);
++      assert.equal(app.hasButton('Voltar ao painel'), true);
++      assert.equal(app.buttonProps('Voltar ao painel').disabled, true);
++      assert.equal(app.buttonProps('Voltar ao painel').accessibilityState.disabled, true);
++      const routeBeforeBack = app.activeRoute();
++      await app.activateButton('Voltar ao painel');
++      assert.equal(app.activeRoute(), routeBeforeBack);
++      await app.act(() => app.manager.logout());
++      if (switchAccount) {
++        const other = { ...adminUser, id: 'admin-b', email: 'b@example.test',
++          sessionId: '20000000-0000-4000-8000-000000000002' };
++        app.setUser(other);
++        await app.act(() => app.manager.login({ email: other.email, password: 'password' }));
++        await app.act(() => app.manager.verifyAdminTwoFactor('123456'));
++        db.name = 'Evento da sessão seguinte';
++        await h.openPanel();
++        assert.equal(app.hasButton(reviewPendingStructure), false);
++        await app.press('Experiências e estações');
++      }
++      await app.act(async () => {
++        response.resolve({ stationId: availabilityPath.split('/').at(-2), availability: 'unavailable', pendingServiceSessionId: null });
++        oldConfirm();
++      });
++      assert.equal(app.manager.client, client);
++      assert.equal(writes().length, 1);
++      assert.equal(app.hasButton(reviewPendingStructure), false);
++      if (switchAccount) {
++        assert.ok(app.hasText(db.name));
++        assert.ok(app.hasButton('Mesa, Oficina, Disponível'));
++        assert.equal(app.hasButton('Repetir a mesma solicitação'), false);
++        assert.ok(!app.hasText('Estado solicitado confirmado'));
++      } else assert.equal(app.route(), 'Welcome');
++    } finally { app.dispose(); }
++  });
++}
++
++test('ADMIN-04: voltar é habilitado após PATCH concluído na mesma sessão', { skip }, async () => {
++  const response = deferred();
++  const h = structureIntegration({ initialStation: true, write: () => response.promise });
++  const { app, availabilityPath } = h;
++  try {
++    await app.mount();
++    await h.openPanel();
++    await app.press('Experiências e estações');
++    await app.press('Mesa, Oficina, Disponível');
++    await app.press('Tornar indisponível');
++    const confirm = app.handler('Confirmar');
++    await app.act(async () => { confirm(); });
++    assert.equal(app.buttonProps('Voltar ao painel').disabled, true);
++    await app.act(async () => {
++      response.resolve({ stationId: availabilityPath.split('/').at(-2), availability: 'unavailable', pendingServiceSessionId: null });
++    });
++    assert.equal(app.buttonProps('Voltar ao painel').disabled, false);
++    assert.equal(app.buttonProps('Voltar ao painel').accessibilityState.disabled, false);
++    await app.activateButton('Voltar ao painel');
++    assert.equal(app.activeRoute(), 'AdminRealEvent');
++  } finally { app.dispose(); }
++});
++
+ test('Admin: refresh e troca de conta invalidam logout antigo', { skip }, async () => {
+   const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control: { realAdmin: true } });
+   await app.mount();
+diff --git a/docs/ADMIN_04_IMPLEMENTACAO.md b/docs/ADMIN_04_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..294c63ec6e73d9e9abb18e974da06f28b9569f9e
+--- /dev/null
++++ b/docs/ADMIN_04_IMPLEMENTACAO.md
+@@ -0,0 +1,314 @@
++# ADMIN-04 — Gestão de experiências e estações
++
++Base exclusiva `f665f2dcbdd9ca6f462b63f4172aa769162f57ca`, branch `feature/admin-event-operations`. Árvore e índice limpos na abertura, após ADMIN-05.
++
++## Objetivo e contratos
++
++Abrir a gestão pelo card do Painel Individual e manter o UUID no retorno. A referência visual é “Admin - Painel Individual do Evento - Gestão de Experiências.png”, com o cabeçalho atualizado da ADMIN-05 e catálogo indisponível.
++
++Sob `/api/v1`, ler detalhe e prontidão em `GET /admin/events/:eventId` e `/readiness`, e grupos na subrota `/experiences`. Criar e renomear experiências com POST na coleção e PATCH no recurso, usando `name` (160 caracteres Unicode). Criar e renomear estações na subcoleção da experiência com `label` (120). As quatro escritas usam Idempotency-Key. A estrutura devolve `pendingServiceSessionId`. O PATCH operacional em `/staff/events/:eventId/stations/:stationId/availability` recebe o estado desejado e retorna stationId, availability e pendingServiceSessionId, inclusive para estado já atingido. A autorização do servidor admite Admin global com segundo fator. Conflitos de histórico não impedem adicionar estação. O backend verifica encerramento e chamada pendente.
++
++## Plano e validação
++
++Reaproveitar adminEventSetupService, os leitores de detalhe e prontidão, a validação configurationName, o mapa da pilha verificada e AdminLiveScreen. Alterar o destino experiences em AdminEventManagementInfoScreen. Criar tela, controlador e suíte focada para leitura, escritas, reconciliação, concorrência e navegação. Preservar o wizard, o modelo de fila por experiência e as demais áreas. O escopo exclui backend, migrations, exclusão, gestão de chamadas e catálogo global. Preparar testes com transporte simulado para campanha posterior com Luna Medium e realizar inspeção estática nesta etapa.
++
++## Implementação entregue para revisão
++
++O card e o atalho da pendência de prontidão abrem a gestão pela rota existente `AdminEventManagementInfo`, com `area=experiences` e o UUID selecionado. “Voltar ao painel” retorna a `AdminRealEvent` com esse UUID. O painel faz sua própria leitura ao recuperar o foco. A gestão usa o cabeçalho compartilhado, a marca oficial à direita, área segura, rolagem e campos acessíveis. O catálogo aparece desabilitado como “Em breve”.
++
++A tela identifica o evento, conta os grupos e suas estações e apresenta a prontidão oficial. O detalhe da estação usa o UUID e o vínculo com a experiência, inclusive para estações homônimas. Exibe a disponibilidade por texto e cor e indica chamadas pendentes. A criação de estação mantém a experiência selecionada. Renomear envia apenas a identificação. O controle de disponibilidade exige confirmação e explica o efeito de desativar uma estação.
++
++| Operação | Contrato sob `/api/v1` | Dado conferido |
++| --- | --- | --- |
++| Identificação e prontidão | `GET /admin/events/:eventId` e `GET /admin/events/:eventId/readiness` | UUID do evento em ambos e checks oficiais de prontidão |
++| Estrutura | `GET /admin/events/:eventId/experiences` | Evento, experiências, estações, vínculos, disponibilidade e UUID de chamada pendente quando presente |
++| Criar ou editar experiência | `POST /admin/events/:eventId/experiences` ou `PATCH /admin/events/:eventId/experiences/:experienceId` | Corpo com `name`, resposta com UUID, nome e evento |
++| Criar ou editar estação | `POST /admin/events/:eventId/experiences/:experienceId/stations` ou `PATCH /admin/events/:eventId/experiences/:experienceId/stations/:stationId` | Corpo com `label`, resposta com UUID, identificação e experiência |
++| Disponibilidade | `PATCH /staff/events/:eventId/stations/:stationId/availability` | Corpo com `availability`, resposta com UUID da estação, estado desejado e chamada pendente |
++
++### Segurança e recuperação
++
++- A pilha Admin exige identidade verificada. O servidor revalida a sessão, o papel e o segundo fator. A gestão vincula o controlador ao cliente HTTP, à identidade, à sessão e ao evento. Respostas de consultas superadas e de telas desmontadas são descartadas. Em 401/403 a tela suprime os dados e bloqueia a escrita. Um 404 usa a mensagem genérica da consulta.
++- O POST e o PATCH estruturais usam a validação de texto e a política de idempotência da ADMIN-05. Cada intenção guarda operação, UUIDs, valor normalizado e chave no mapa da sessão. Após timeout, resposta divergente ou `IDEMPOTENCY_IN_PROGRESS`, o Admin pode conferir a leitura e repetir explicitamente a mesma solicitação. Um segundo toque, refresh ou remount não inicia nova escrita. Um cadastro pendente em um dos fluxos também impede iniciar outro cadastro pelo segundo fluxo no mesmo evento.
++- A gestão compara os dados confirmados pela mutação com uma leitura nova da estrutura e obtém novamente a prontidão. Um conflito entre a resposta e a leitura exibe o estado oficial. O formulário mantém o texto após uma recusa recuperável. O encerramento explícito de uma tentativa informa que o envio anterior pode ter sido salvo.
++- A disponibilidade usa um PATCH de estado desejado, sem chave estrutural. Em resultado incerto, a tela consulta a estrutura e informa se o estado observado corresponde ao pedido. Uma chamada pendente conhecida impede o envio de desativação e provoca releitura. Se o servidor detectar a chamada durante a escrita, `STATION_HAS_PENDING_CALL` também provoca releitura. A gestão não chama rotas de fila, cancelamento ou conclusão de atendimento.
++- `EVENT_CONFIGURATION_LOCKED` explica o bloqueio por histórico de participação, inclusive participação cancelada. O histórico restringe criar experiências e renomear recursos. Adicionar estação a uma experiência existente continua sujeito à decisão operacional do servidor. `EVENT_OPERATION_ENDED` comunica o encerramento. A fila continua compartilhada por experiência.
++
++### Inventário
++
++| Arquivo | Alteração |
++| --- | --- |
++| `app/screens/admin/AdminStructureScreen.js` | Novo. Lista, detalhe, formulários, confirmação e estados da gestão |
++| `app/screens/admin/adminStructureFlow.js` | Novo. Leitura, isolamento, escritas e reconciliação |
++| `app/screens/admin/AdminEventManagementInfoScreen.js` | Abre a gestão na rota existente |
++| `app/screens/admin/AdminRealEventScreen.js` | Atualiza a descrição acessível do card |
++| `app/screens/admin/components/AdminSelectedEvent.js` | Atualiza o atalho de prontidão para a gestão real |
++| `app/services/adminEventSetupService.js` | Acrescenta as duas renomeações e o PATCH de disponibilidade. Reutiliza a leitura e os dois POSTs existentes |
++| `app/screens/admin/adminCreationFlow.js` | Consulta a intenção de cadastro pendente na gestão antes de criar outra pelo wizard |
++| `app/tests/adminEventStructure.test.cjs` | Nova suíte com 14 casos de leitura, validação, mutações, conflitos, idempotência e sessão |
++| `app/tests/adminEventSetup.test.cjs` | Acrescenta um caso sobre a preservação da intenção entre wizard e gestão |
++| `app/tests/roleRoutingIntegration.test.cjs` | Acrescenta um caso de navegação, edição, disponibilidade, grupo selecionado e prontidão no retorno |
++| `docs/ADMIN_04_IMPLEMENTACAO.md` | Novo. Planejamento inicial, implementação e preparação da campanha |
++
++### Testes preparados e verificações
++
++Foram preparados **16 casos novos** com transporte simulado. A suíte específica cobre estrutura vazia e agrupada, vínculos inválidos, limites Unicode, payloads e chaves, dupla submissão, erros 401/403/404/409, timeout, replay explícito e remount. Exercita resultados divergentes, estações homônimas, estado já atingido, prontidão e descarte de respostas atrasadas após invalidar o contexto. Os casos nas suítes existentes percorrem o painel, o retorno pelo cabeçalho, o atalho de prontidão, o preenchimento e cancelamento de formulários e a interação com cadastros pendentes do wizard.
++
++Nesta implementação houve **zero testes executados**. Os 103 testes aprovados pertencem à campanha anterior da ADMIN-05. A inspeção estática confrontou os DTOs, controllers e serviços de configuração e disponibilidade com os payloads do frontend. O parser Babel analisou os dez arquivos JS/CJS novos ou modificados e a resolução local verificou 56 imports ou chamadas literais a `require`, sem carregar os módulos de teste. `git diff --check` e `git diff --cached --exit-code` retornaram 0. O inventário inclui arquivos não rastreados.
++
++Campanha proposta para **GPT-6 Luna — Medium**, após seleção manual pelo responsável. Executar a partir da raiz em PowerShell, após conferir a branch e o transporte simulado.
++
++```powershell
++Set-Location app
++$env:NODE_ENV = 'test'
++node --test --test-reporter=spec tests/adminEventStructure.test.cjs tests/adminEventSetup.test.cjs tests/adminRealEvents.test.cjs tests/adminEventSettings.test.cjs tests/adminNavigation.test.cjs tests/authNavigation.test.cjs tests/roleRoutingIntegration.test.cjs
++```
++
++### Limitações e próximas verificações
++
++A recuperação de intenções dura enquanto a pilha e a identidade verificadas mantiverem o mapa em memória. Após encerramento do processo ou troca de sessão, é preciso consultar a estrutura antes de iniciar novo cadastro. A API não oferece versão condicional para estas edições. Administradores concorrentes podem alterar o recurso entre leituras. Estrutura e prontidão são consultas independentes e podem refletir instantes distintos. Um GET após timeout confirma o estado observado da disponibilidade, sem identificar qual operador o produziu.
++
++Ficam pendentes a revisão técnica, a campanha frontend e a homologação em aparelho, especialmente teclado, rolagem, leitor de tela e retorno após editar em uma tela pequena. Esta etapa não exerceu PostgreSQL, backend real ou integrações remotas. O catálogo global fica para ADMIN-08. O changes definitivo aguarda autorização após a homologação.
++
++### Estado Git e histórico
++
++Branch `feature/admin-event-operations`, HEAD igual à base exclusiva registrada na abertura. Sete arquivos rastreados modificados e quatro novos. Índice sem alterações staged. Implementação inicial entregue para revisão. As correções e campanhas posteriores devem ser registradas neste documento.
++
++## Auditoria técnica pós-implementação
++
++**Decisão recomendada:** corrigir a recuperação de cadastros pendentes entre os fluxos e a saída com rascunho antes da campanha Luna Medium. A inspeção não identificou defeito crítico ou alto de autorização, vínculo entre eventos ou desativação com chamada pendente no caminho da ADMIN-04. Foram confirmados três defeitos moderados de frontend e uma divergência baixa na cobertura simulada.
++
++### Defeitos confirmados
++
++#### Moderado — Uma intenção do wizard fica inacessível durante o encerramento
++
++- **Cenário e impacto.** Um POST de experiência ou estação no wizard termina com resposta incerta. O Admin volta ao painel e o evento passa à fase efetiva `closing` antes do prazo operacional. A gestão recusa novos cadastros por existir uma intenção do wizard. O painel já não oferece **Continuar configuração**. Mesmo se a rota do wizard estiver aberta, a visão de encerramento oculta as ações de recuperação e seu controlador rejeita o descarte. Assim, um cadastro de estação ainda permitido pelo servidor fica bloqueado na sessão, inclusive em outro grupo.
++- **Evidência.** A guarda de cadastros está em `app/screens/admin/adminStructureFlow.js:146–153`. A ação de retomada em `app/screens/admin/AdminRealEventScreen.js:33–36` exclui `closing` e `closed`. `app/screens/admin/AdminEventSetupScreen.js:98–114` e `app/screens/admin/adminCreationFlow.js:223–231` impedem resolver a intenção no wizard encerrado. O servidor usa a janela operacional e o estado `closed` em `backend/src/events/admin-configuration.mutation.ts:7–20`. A fase `closing` pode começar antes dessa fronteira, conforme `backend/src/events/admin-configuration.projection.ts:21–25`.
++- **Correção mínima.** Expor uma ação de recuperação da intenção existente mesmo em `closing`, com leitura e encerramento explícito da tentativa. Distinguir resolver a intenção já enviada de autorizar um novo POST. Preservar UUID, chave e corpo no caminho de replay.
++- **Regressão necessária.** Simular timeout no wizard, voltar ao painel após mudança para `closing` ainda dentro do prazo, resolver a tentativa pelo caminho disponível e verificar que um cadastro permitido na gestão volta a ficar acessível. A entrada na recuperação deve fazer somente leituras.
++
++#### Moderado — A trava entre wizard e gestão bloqueia cadastros independentes
++
++- **Cenário e impacto.** Uma estação com resultado incerto na experiência A impede cadastrar uma estação na experiência B pelo outro fluxo. Um cadastro incerto de experiência também impede cadastrar uma estação em experiência já existente. A trava é por evento e ignora operação, experiência e corpo. Isso impede capacidade adicional legítima durante a operação. Além disso, as duas telas só exibem instruções para procurar a outra tela. Nenhuma consegue usar a intenção armazenada pela outra para retomada, replay ou encerramento explícito.
++- **Evidência.** A gestão testa `intents.has(eventId)` em `app/screens/admin/adminStructureFlow.js:146–153` e recupera apenas `management:<UUID>` a partir de `:51–52,71–74,92–105`. O wizard verifica apenas o tipo do registro da gestão em `app/screens/admin/adminCreationFlow.js:146–161` e recupera o registro do próprio endereço do mapa em `:32–38`. Os formatos dos dois registros diferem. O UUID do evento delimita ambas as guardas corretamente no caminho normal, pois as duas telas recebem o UUID canônico das consultas.
++- **Correção mínima.** Reaproveitar o mapa da sessão com uma representação recuperável dos POSTs a partir de ambos os fluxos. Restringir a trava de duplicidade pela intenção original, usando UUID do evento, operação, UUID da experiência quando aplicável e corpo normalizado. Manter o bloqueio de duplo envio para aquela intenção e assegurar que a confirmação ou o encerramento explícito remova somente seu registro.
++- **Regressão necessária.** Fazer o POST em um fluxo, persistir no mock e perder a resposta. Reabrir o outro fluxo, conferir leitura antes de ação, nenhum POST automático e replay com URL, chave e corpo originais. Cobrir os dois sentidos, o cadastro que permanece permitido em outro grupo ou evento e a remoção da trava após reconciliação.
++
++#### Moderado — A navegação descarta campos editados sem aviso
++
++- **Cenário e impacto.** Após digitar um nome ou editar a identificação de uma estação, tocar **Voltar ao painel** descarta o texto local. O retorno nativo também pode remover a tela porque falta a guarda da rota. A perda ocorre inclusive após uma recusa recuperável que havia preservado o formulário.
++- **Evidência.** O formulário fica em `editor`, porém o retorno chama diretamente `popTo` e só desabilita o botão durante escrita em `app/screens/admin/AdminStructureScreen.js:33–37,52–67,89–95`. A confirmação ali existente cobre disponibilidade e encerramento de tentativa em `:129–135`. O padrão para proteger a saída já existe em `app/screens/admin/AdminEventSettingsScreen.js:54–56` e `app/screens/admin/AdminEventSetupScreen.js:66–73`.
++- **Correção mínima.** Aplicar `usePreventRemove` ao rascunho alterado e reaproveitar a confirmação compartilhada. Manter a edição se o usuário cancelar a saída e executar a ação de navegação original somente após confirmar o descarte. A troca real de sessão deve continuar invalidando a tela.
++- **Regressão necessária.** Editar sem salvar, acionar retorno do cabeçalho e retorno nativo, cancelar a saída e confirmar que o texto ficou. Confirmar o descarte e verificar o UUID no painel e a ausência de PATCH.
++
++#### Baixa — O mock de cadastro de estação devolve disponibilidade contrária ao backend
++
++- **Cenário e impacto.** A integração cadastra Pista e espera que a estação nasça indisponível. O SQL cria estações disponíveis. O mock de prontidão usa somente a estação Mesa e continua pendente mesmo depois do cadastro de uma segunda estação, que no backend restabeleceria aquele requisito. Essa integração pode passar sem detectar uma regressão de prontidão após um novo cadastro.
++- **Evidência.** Ver `app/tests/roleRoutingIntegration.test.cjs:633–646,696–698`, `backend/src/events/admin-configuration.mutation.ts:11–12` e `backend/src/events/admin-configuration.projection.ts:15–20`. A fixture focada também fixa o check de estação disponível em `true` mesmo com lista vazia ou estações indisponíveis em `app/tests/adminEventStructure.test.cjs:55–60`.
++- **Correção mínima e regressão.** Fazer a estação nascer disponível no mock e derivar o check e os códigos de pendência das estações de todos os grupos. Assertar que desativar a última estação produz pendência e cadastrar a nova estação recupera o requisito na tela e no painel.
++
++### Contratos e controles verificados por inspeção
++
++- **Disponibilidade.** `station-availability.controller.ts:9–19,22–42` exige sessão, valida UUIDs e corpo `{availability}`, devolve o estado e mapeia conflitos a 409. `station-availability.service.ts:16–51` vincula evento, experiência e estação, permite Admin global com segundo fator e bloqueia conta inativa e sessão revogada ou expirada. O caminho mutável reavalia o prazo e atualiza somente a estação e a auditoria em `:53–87`. Uma solicitação do estado já vigente pode responder 200 após o encerramento, sem escrita. Na concorrência com uma chamada, `call-next.service.ts:66–74,96–104,129` e disponibilidade adquirem locks em ordem de evento, experiência e estação. Se a chamada estiver pendente, a desativação retorna 409. Se a desativação ganhar primeiro, a chamada posterior vê a estação indisponível. A operação de disponibilidade não resolve nem cancela chamadas.
++- **Frontend da disponibilidade.** `AdminStructureScreen.js:96–104,129–135` abre o detalhe pelos IDs e exige confirmação para desativar. `adminStructureFlow.js:146–178` confere o recorte exibido, o alvo, o estado original e a pendência conhecida. Em 409, o controlador comunica a recusa e relê a estrutura. Em timeout, relê e apresenta o estado observado sem atribuir autoria ou repetir PATCH. O transporte envia somente o estado desejado e desativa retry de escrita, sem cabeçalho de idempotência estrutural. Ver `adminEventSetupService.js:79–87` e `adminStructureFlow.js:39–46,92–111,115–139`.
++- **Experiências e estações.** Os clientes enviam `name` ou `label` no POST/PATCH correspondente e conferem UUID, vínculo e valor na resposta. O formulário reutiliza a validação por caracteres Unicode com limites 160 e 120. Uma recusa recuperável mantém o formulário. A gestão reserva chave e corpo antes do envio, faz replay explícito e compara a resposta aceita com uma nova leitura. O backend limita cada operação ao evento e ao recurso esperados, serializa a configuração no evento e usa fingerprint, reserva e conclusão na transação. O histórico inclui qualquer participação do evento, inclusive cancelada. Criar estação permanece isento do bloqueio por histórico. Renomear estação só escreve `label`, e a fila segue pertencendo à experiência. Ver `adminCreationForm.js:3–10`, `adminEventSetupService.js:18–54,63–77`, `admin-configuration.dto.ts:8–15,35–40`, `admin-configuration.controller.ts:39–55`, `admin-configuration.service.ts:16–18,35–57,73–98` e `admin-configuration.mutation.ts:7–21`.
++- **Identidade e leitura.** `app/context/adminAccess.js:3–12` exige papel global e identidade verificada para a área, e `AdminDemoNavigator.js:30–41` escopa o mapa ao dono e ao cliente HTTP. `AdminStructureScreen.js:21–45` também vincula o controlador ao evento. `adminStructureFlow.js:55–83,108–111,128–137,144–147` invalida publicações antigas por geração e escopo. Durante uma leitura, a gestão não oferece escrita. Uma leitura anterior que termina depois de uma leitura mais nova ou de uma escrita não pode repor aquele estado. Em 401/403, os dados são limpos e as ações bloqueadas. As leituras e escritas estruturais revalidam papel, sessão e segundo fator no servidor. A autorização Staff para a rota operacional não dá acesso ao gerenciamento Admin.
++- **Navegação e prontidão.** Card e checklist abrem a mesma área usando `event.id`. O cabeçalho e a volta ao mesmo painel usam o padrão compartilhado. Ao recuperar foco, o painel consulta detalhe e prontidão de novo. A gestão deriva somente os totais da coleção e lê a prontidão oficial. Estações homônimas são selecionadas por UUID. Os caminhos de horários, Staff, Operação e BI conservam seus destinos. Ver `AdminEventManagementInfoScreen.js:11–15`, `AdminRealEventScreen.js:15–26,42–47`, `components/AdminSelectedEvent.js:33–39`, `AdminStructureScreen.js:47–52,65–76,111–126`, `components/AdminLiveScreen.js:23–29` e `useAdminEventPanel.js:18–55`.
++
++### Riscos residuais, limites e melhorias
++
++- **Risco plausível.** Um GET após timeout pode observar o estado anterior antes do commit da solicitação original. A interface libera nova ação explícita após a leitura. O backend serializa mudanças, mas um estado observado é pontual e pode mudar depois dele. Priorizar a indicação de resultado indeterminado quando o estado divergir após timeout, com opção de nova leitura. Ver `adminStructureFlow.js:92–101,120–138`.
++- **Risco plausível.** O valor original da edição é comparado com a última leitura da interface, sem precondição no PATCH. Um segundo Admin pode mudar o recurso entre a leitura e o envio. O servidor ainda aplica autorização, vínculos e locks, mas a escrita válida posterior pode prevalecer. Uma leitura mais recente reduz a janela. Uma precondição real exigiria contrato adicional.
++- **Limitações aceitas.** Estrutura, detalhe e prontidão são consultas independentes. A tela usa a prontidão oficial e não pode garantir o mesmo instante de observação do conjunto. A recuperação de intenções termina ao descartar a sessão ou o processo. Depois disso, um cadastro incerto precisa ser conferido nos dados do evento. O catálogo global e a homologação visual ficam fora desta auditoria.
++- **Melhoria opcional.** Usar as respostas mínimas de conflito da disponibilidade para contextualizar o aviso enquanto a nova leitura está em andamento. A leitura oficial deve continuar decidindo o estado exibido.
++
++### Cobertura preparada e lacunas
++
++Os 14 casos de `app/tests/adminEventStructure.test.cjs` inspecionados verificam os caminhos simulados de rota, payload, IDs, Unicode, dupla submissão, timeout, chave e corpo do replay, histórico, criação no grupo, estação homônima, 409, sessão e reconsulta. O caso em `app/tests/adminEventSetup.test.cjs:69–81` e o caso em `app/tests/adminEventStructure.test.cjs:340–350` preenchem o mapa manualmente e verificam a trava. Isso não exercita a recuperação cruzada. A integração em `app/tests/roleRoutingIntegration.test.cjs:619–707` cobre navegação, cancelamento explícito, disponibilidade, grupo selecionado e prontidão ao voltar. Como depende de `qa/regression`, a campanha deve conferir que ela foi efetivamente executada.
++
++Além dos casos vinculados aos achados, os acréscimos mínimos recomendados são um caso com duas leituras sobrepostas no mesmo controlador, seguido da escrita que confirma o estado mais recente antes da primeira leitura terminar, e um caso de integração com troca de sessão durante o PATCH, mantendo o mesmo cliente HTTP. O teste existente de sessão em `adminEventStructure.test.cjs:315–337` usa uma flag injetada e uma segunda fixture independente. Ele verifica a barreira local, mas não a substituição real do mapa pela pilha. O mock de 409 em `:221–239` verifica a reação do frontend, sem reproduzir a concorrência do PostgreSQL. Já existem casos backend preparados de locks concorrentes, TOTP e isolamento por evento em `backend/test/integration/station-availability-http.integration.test.ts:191–225,303–312,368–393` e de configuração em `backend/test/integration/admin-configuration.integration.test.ts`. Sua existência foi identificada por leitura.
++
++### Escopo e estado da auditoria
++
++Foram examinados os dez arquivos JS/CJS da ADMIN-04 e este relatório, incluindo os quatro arquivos novos, contra a base exclusiva. A leitura também abrangeu o relatório da ADMIN-05, a pilha Admin, as guardas de identidade, o cliente HTTP, a tela e o controlador de retomada, o cabeçalho compartilhado, a reconsulta do painel, DTOs, controllers, SQL de configuração, autorização, idempotência, disponibilidade e criação de chamadas, além dos testes backend citados.
++
++Auditoria exclusivamente estática. Zero testes executados e zero acessos a PostgreSQL ou Neon. Apenas este relatório foi atualizado. `git diff --check` passou. A branch e o HEAD continuam registrados acima, com sete arquivos rastreados modificados, quatro novos e índice vazio. O changes definitivo segue pendente do fechamento.
++
++## Correções pós-auditoria — ADMIN-04
++
++A rodada parte da base `f665f2dcbdd9ca6f462b63f4172aa769162f57ca`, com as alterações da implementação e da auditoria preservadas. O diagnóstico confirmou a retomada oculta em `closing`, a trava por evento, a saída desprotegida com rascunho e a disponibilidade inicial incorreta no mock. A solução usa o mapa da pilha Admin para compartilhar registros identificados por operação e destino, expõe a recuperação no painel e protege a remoção da rota com confirmação de descarte. A campanha automatizada fica para Luna Medium.
++
++### Correções e riscos residuais
++
++| Achado | Correção aplicada | Teste preparado e risco residual |
++| --- | --- | --- |
++| Recuperação oculta em `closing` | O painel e o wizard oferecem **Revisar operações pendentes de experiências e estações** somente para registros do evento na sessão. Ambos abrem a gestão pelo UUID. Quando acionado pelo wizard, o retorno leva à configuração. Em `closing`, a gestão consulta a estrutura e permite retry explícito com a chave original. O servidor continua aplicando prazo e histórico. Uma recusa `EVENT_OPERATION_ENDED` ao repetir preserva a primeira tentativa incerta. Em `closed`, a gestão oferece consulta e encerramento local, com as escritas desabilitadas. | A integração percorre uma tentativa incerta no wizard, prontidão oficial positiva, `closing`, consulta, retry com mesma chave e corpo recusado após o prazo e encerramento local em `closed`. A consulta pode precisar ser repetida se o backend estiver indisponível. |
++| Bloqueio por evento | `adminStructureIntents.js` usa o mapa existente da pilha Admin. O registro inclui evento, operação, destino por UUID, valor normalizado, chave e estado da tentativa. O valor serve para reconhecer um envio equivalente ao mesmo destino, e a confirmação do recurso usa UUID. A trava inclui envios simultâneos da mesma intenção, renomeações conflitantes do mesmo alvo e disponibilidade pendente da mesma estação. Cadastros independentes usam chaves distintas. Uma leitura oficial após a última tentativa habilita a recuperação. O wizard consegue repetir POSTs iniciados na gestão. Sua ação de revisão também abre a gestão para renomeações e demais operações pendentes. | Casos focados cobrem homônimos em experiências diferentes, duas instâncias tentando o mesmo retry, limpeza seletiva, remount e isolamento por UUID. Integrações cobrem os dois sentidos e troca de sessão. O encerramento local informa que o servidor pode ter salvado a operação. |
++| Rascunho perdido ao sair | A gestão usa `usePreventRemove` para proteger a remoção da rota após mudança efetiva no campo. **Continuar editando** preserva o valor e **Descartar alterações** executa a ação de navegação original. Uma escrita em curso bloqueia a remoção até a reconsulta. Depois de resultado incerto, a recuperação se dá pelo cartão da intenção, separado do formulário. | A integração cobre formulário vazio, retorno do cabeçalho, ação de retorno com plataforma Android simulada, remoção programática, cancelamento, descarte, GET tardio e retorno após salvar. O botão físico e os gestos no aparelho ficam para homologação. |
++| Mock de estação incompatível com o backend | O transporte simulado cria estações disponíveis no grupo correto. O check de capacidade considera todas as estações de todos os grupos. A prontidão depende também de Staff elegível. | O caso de roteamento confere estado disponível após cadastro, prontidão quando os requisitos são satisfeitos, pendência sem Staff e pendência após desativar a última estação disponível. |
++
++### Concorrência e limites preservados
++
++A recuperação usa o mapa em memória delimitado por identidade verificada e cliente HTTP. Em cada tela, a leitura guarda apenas a versão da tentativa observada. O controlador rejeita retry e descarte antes de uma leitura válida dessa versão. Alterar conta, sessão ou UUID invalida a publicação antiga. Quando a gestão encontra uma escrita ainda em voo, pode consultar a estrutura e reler após a conclusão da escrita. Nenhuma dessas leituras reenvia a mutação.
++
++O PATCH de disponibilidade usa o estado desejado, sem chave estrutural, e relê a API após timeout. A reconsulta pode anteceder o commit da solicitação anterior e informa apenas o estado observado. Permanecem a recuperação limitada à memória da sessão, a ausência de consulta por chave e de versão condicional, as consultas em snapshots independentes e o catálogo global reservado para ADMIN-08. O servidor mantém os contratos e as regras de encerramento existentes.
++
++### Inventário atualizado contra a base
++
++| Arquivo | Situação |
++| --- | --- |
++| `app/screens/admin/AdminEventManagementInfoScreen.js` | Modificado. Entrada da gestão e retorno à origem quando aberta pelo wizard. |
++| `app/screens/admin/AdminEventSetupScreen.js` | Modificado. Atalho de recuperação, escrita independente e controles condicionados à leitura da intenção. |
++| `app/screens/admin/AdminRealEventScreen.js` | Modificado. Atalho de recuperação no painel por UUID. |
++| `app/screens/admin/adminCreationFlow.js` | Modificado. Wizard usa os mesmos registros, transporte e critérios de recuperação da gestão. |
++| `app/screens/admin/components/AdminSelectedEvent.js` | Modificado na implementação inicial. Atalho de prontidão. |
++| `app/services/adminEventSetupService.js` | Modificado na implementação inicial. Renomeações e disponibilidade. |
++| `app/tests/adminEventSetup.test.cjs` | Modificado. Verifica retry com a chave da gestão e conserva as assertions de duplicidade da mesma intenção. |
++| `app/tests/roleRoutingIntegration.test.cjs` | Modificado. Mock de prontidão e cinco casos de integração adicionais. |
++| `app/screens/admin/AdminStructureScreen.js` | Novo. Gestão, recuperação por registro e proteção da saída. |
++| `app/screens/admin/adminStructureFlow.js` | Novo. Consulta, concorrência, reconciliação e publicação vinculada ao contexto. |
++| `app/screens/admin/adminStructureIntents.js` | Novo. Identificação, envio compartilhado e recuperação de operações. |
++| `app/tests/adminEventStructure.test.cjs` | Novo. Dezessete casos focados, três a mais que na versão inicial. |
++| `docs/ADMIN_04_IMPLEMENTACAO.md` | Novo em relação à base. Preserva implementação, auditoria e esta rodada. |
++
++### Verificações e campanha
++
++Oito casos foram acrescentados e os dezesseis casos iniciais foram preservados, com as expectativas ajustadas para a identidade da operação. Os cenários de leitura atrasada cobrem GET sobreposto à mutação e troca de UUID no mesmo cliente e mapa. Os de sessão cobrem logout e troca de conta durante PATCH mantendo a mesma instância HTTP, com verificação de que o callback anterior e as intenções anteriores não reaparecem.
++
++A inspeção estática confrontou o frontend com o SQL de configuração e o contrato de disponibilidade. O parser Babel analisou os 12 arquivos JS/CJS e verificou a resolução local de 76 imports ou chamadas literais a `require`. `git diff --check` e `git diff --cached --exit-code` passaram. Os testes e builds ficaram pendentes nesta rodada. A próxima campanha usa o comando com as sete suítes da seção **Testes preparados e verificações**, em Luna Medium. A integração de roteamento depende dos pacotes de `qa/regression`, e a campanha deve conferir a contagem de ignorados.
++
++Branch `feature/admin-event-operations`, HEAD `f665f2dcbdd9ca6f462b63f4172aa769162f57ca`. Oito arquivos rastreados modificados e cinco novos. Índice vazio. A geração do changes definitivo permanece para o fechamento, após validação e homologação.
++
++## Campanha de validação pós-correções — Luna Medium
++
++### Preparação e comando
++
++A campanha foi executada após seleção manual de **GPT-6 Luna — Medium** pelo responsável. Antes da execução, foram lidos `AGENTS.md` e este relatório, conferidos o branch, o HEAD, o working tree e o índice. `app/package.json` define o script padrão como `node --test`; `qa/regression/package.json` descreve seus testes como isolados, sem conexões a banco ou alterações de produção. As sete suítes usam transporte e armazenamento simulados. O harness `qa/regression` estava presente e suas dependências React, React Test Renderer e React Navigation puderam ser carregadas; a integração não foi ignorada.
++
++Comando executado, em PowerShell, no diretório `app`:
++
++```powershell
++$env:NODE_ENV = 'test'
++node --test --test-reporter=spec tests/adminEventStructure.test.cjs tests/adminEventSetup.test.cjs tests/adminRealEvents.test.cjs tests/adminEventSettings.test.cjs tests/adminNavigation.test.cjs tests/authNavigation.test.cjs tests/roleRoutingIntegration.test.cjs
++```
++
++**Resultado:** 127 testes no total, 120 aprovados, 7 reprovados, 0 ignorados, 0 cancelados; exit code **1**. O runner iniciou e executou os casos das sete suítes. As integrações de roteamento, incluindo casos ADMIN-04 e ADMIN-05, efetivamente rodaram. Nenhum acesso a PostgreSQL, Neon ou serviço externo foi realizado.
++
++### Falhas observadas e diagnóstico
++
++| Teste | Arquivo e linha | Evidência | Diagnóstico |
++| --- | --- | --- | --- |
++| `painel consulta detalhe e prontidão pelo UUID, exibe dados oficiais e trata recurso inacessível` | `app/tests/adminRealEvents.test.cjs:159` | `TypeError: store.values is not a function or its return value is not iterable`; stack em `adminStructureIntents.js:27`, `AdminRealEventScreen.js:42`, `questionnaireHarness.cjs:425,447,471`. | Incompatibilidade confirmada no harness do teste isolado: `AdminSetupIntents` tem valor padrão `null`, mas `questionnaireHarness.useContext` usa `contextObj?._defaultValue ?? authContextValue`; assim, substitui o `null` pelo objeto de autenticação, que não é um `Map`. A tela real é montada pela pilha `AdminDemoNavigator`, que fornece o mapa por `AdminSetupIntents.Provider`. O teste precisa fornecer esse contexto ou o harness precisa preservar corretamente o valor padrão. A campanha não comprovou falha funcional no fluxo roteado da aplicação. |
++| `prontidão dedicada substitui snapshot antigo e orienta pendências conhecidas e desconhecidas` | `app/tests/adminRealEvents.test.cjs:212` | Mesmo `TypeError` e stack acima. | Mesma causa confirmada: harness/contexto ausente no teste isolado. |
++| `falha parcial não inventa prontidão e retry agrupa toques repetidos` | `app/tests/adminRealEvents.test.cjs:232` | Mesmo `TypeError` e stack acima. | Mesma causa confirmada: harness/contexto ausente no teste isolado. |
++| `403 ou 404 na prontidão removem inclusive detalhe válido após atualizar` | `app/tests/adminRealEvents.test.cjs:262` | Mesmo `TypeError` e stack acima. | Mesma causa confirmada: harness/contexto ausente no teste isolado. |
++| `recuperar foco consulta novamente e uma resposta anterior não sobrescreve a fase` | `app/tests/adminRealEvents.test.cjs:298` | Mesmo `TypeError` e stack acima. | Mesma causa confirmada: harness/contexto ausente no teste isolado. |
++| `ADMIN-04: PATCH tardio no mesmo cliente após logout` | `app/tests/roleRoutingIntegration.test.cjs:901` (assertion em `:921`) | `AssertionError [ERR_ASSERTION]`: esperado `undefined`, recebido `[Function: back]`, na expressão `assert.equal(app.handler('Voltar ao painel'), undefined)`. | A assertion consulta somente `onPress`; o helper `handler` ignora o estado `disabled`. Durante a operação, `AdminStructureScreen` passa `backDisabled={state.busy}` e `AdminLiveScreen` renderiza `disabled={backDisabled}` embora o callback continue presente. O teste deve verificar `disabled`/`accessibilityState` ou comprovar que a ação não navega, em vez de exigir callback ausente. Causa confirmada como assertion/helper incompatível com a API do botão; este caso não chegou às assertions posteriores da resposta tardia/logout. |
++| `ADMIN-04: PATCH tardio no mesmo cliente após troca de conta` | `app/tests/roleRoutingIntegration.test.cjs:901` (assertion em `:921`) | Mesmo `AssertionError`, esperado `undefined`, recebido `[Function: back]`. | Mesma causa confirmada. A execução interrompeu antes de concluir as verificações posteriores de troca de conta e resposta tardia; essas assertions permanecem não validadas por este caso. |
++
++As cinco falhas standalone não chegaram às assertions próprias do painel (conteúdo, prontidão, retry, UUID ou resposta atrasada), pois ocorreram durante o render inicial. As duas falhas de integração confirmaram uma escrita PATCH em voo antes da assertion; porém, por terem parado nessa linha, o processamento final do callback depois de logout/troca de conta não foi validado nesses casos. Não foram feitas alterações de código, testes ou expectativas nesta campanha.
++
++### Correções pós-auditoria e regressões exercitadas
++
++- **Recuperação em `closing`/`closed`:** o teste `ADMIN-04: recuperação do wizard no painel pronto em closing, recusa do replay e consulta em closed` passou. A suite verificou a tentativa incerta, acesso explícito à gestão, consulta e replay com a intenção existente, resposta `EVENT_OPERATION_ENDED` e encerramento local em `closed`.
++- **Operações independentes e idempotência local:** passaram os casos focados `gestão recupera a estação do wizard e permite cadastro independente e homônimo em outra experiência`, `duas instâncias compartilham o envio em voo e um descarte atrasado não remove outra operação` e `GET antigo termina depois da escrita e da releitura sem restaurar a disponibilidade anterior`, além dos casos de UUID e recuperação. Eles exercitaram mesma intenção em voo, cadastro independente em outra experiência, homônimos por UUID e descarte seletivo.
++- **Recuperação wizard ↔ gestão:** passaram o caso de recuperação da estação do wizard e o caso integrado de retomada da intenção em `closing`; a troca de fluxo não deve fazer retry automático. Cobertura de callbacks que chegam após troca real de sessão foi preparada, mas os dois testes de integração correspondentes ficaram interrompidos na assertion do botão descrita acima.
++- **Proteção de rascunho:** passou `ADMIN-04: edição vazia, rascunho, cancelamento e descarte não enviam PATCH`, com retorno, cancelamento, descarte, GET tardio e retorno após salvar conforme os caminhos simulados. Botão físico e gestos Android continuam exigindo homologação em aparelho.
++- **Disponibilidade e prontidão:** passaram os casos focados sobre estado desejado, estado no-op, chamada pendente, timeout sem retry e leitura oficial; a integração também passou pela criação de estação disponível, contagem e prontidão com/sem Staff elegível e pendência após desativar a última estação disponível.
++- **Regressões ADMIN-01/02/03/05:** busca, filtros, paginação, navegação e acesso por UUID, dados/horários/QR, autenticação/TOTP, criação em cinco etapas, concessões Staff, prontidão, erros, retry e isolamento ordinário de sessão passaram nos testes executados, exceto os cinco testes standalone listados e a cobertura final dos dois cenários PATCH tardios. Casos das ADMIN-01, ADMIN-02 e ADMIN-03 nestas sete suítes também incluem os cinco testes de painel que não chegaram às assertions por causa do contexto ausente.
++
++Warnings relevantes: o React Test Renderer informa que está obsoleto; o roteamento simulado também emite avisos de que componentes default de telas `Welcome`, `Login`, `Register`, `Cadastro`, `ForgotPassword` e `EsqueciSenha` não começam com letra maiúscula. São avisos do ambiente/mock, não reprovações adicionais.
++
++### Verificações estáticas, limitações e estado
++
++`git diff --check`: exit 0. `git diff --cached --exit-code`: exit 0, confirmando índice sem alterações staged. Branch `feature/admin-event-operations` e HEAD `f665f2dcbdd9ca6f462b63f4172aa769162f57ca` foram preservados. O relatório registra as falhas da execução; nenhum código ou teste foi modificado. O working tree mantém as oito alterações rastreadas e cinco arquivos novos preexistentes da ADMIN-04.
++
++Esta campanha não exerceu PostgreSQL real, backend, Neon, migrations, seeds, dispositivo físico ou gestos de navegação reais. Como houve falhas, a ADMIN-04 **não está aprovada pela campanha automatizada**. Recomenda-se corrigir os fixtures/contexto dos cinco testes do painel e as assertions de estado disabled dos dois testes integrados, então executar nova campanha Luna Medium. A revisão de código deve avaliar se a falha do harness afeta somente renderizações isoladas; não há, nesta execução, evidência de que a pilha real deixe de fornecer o contexto. Não gerar changes nesta etapa.
++
++## Correção dos testes após a primeira campanha Luna Medium
++
++O resultado histórico permanece 120 aprovados, 7 reprovados e 0 ignorados em 127 testes, exit 1. As cinco falhas do painel decorreram da substituição indevida do valor padrão `null` do contexto pelo objeto de autenticação no harness. `app/tests/helpers/questionnaireHarness.cjs` agora preserva o valor padrão explícito dos contextos, mantendo o tratamento próprio do contexto de autenticação. As assertions dos cinco testes em `adminRealEvents.test.cjs` foram preservadas.
++
++Os dois testes de PATCH tardio em `app/tests/roleRoutingIntegration.test.cjs` verificam a presença do botão, `disabled` e o estado de acessibilidade, e simulam ativação respeitando a semântica do Pressable desabilitado, conferindo que a rota permanece. As verificações posteriores de logout, troca de conta, resposta antiga, cliente e intenções continuam presentes. Um caso adicional preparado verifica a habilitação e navegação após o PATCH terminar na mesma sessão. Os arquivos alterados nesta rodada são o harness, a suíte de integração e este relatório; nenhum código de produção foi alterado.
++
++Inspeção estática: o parser Babel analisou o harness e as duas suítes envolvidas, sem erro. Foram inspecionados o contexto, o provider real, as propriedades do botão e as assertions finais. Não foi identificada evidência de defeito funcional de produção nesta análise. Não foram executados testes nesta rodada; a execução das sete suítes com Luna Medium continua pendente, inclusive para confirmar que os testes corrigidos avançam até o final. Homologação em aparelho e aprovação formal permanecem pendentes.
++
++## Segunda campanha Luna Medium e correção do teste da Home
++
++A segunda campanha executou as sete suítes: 128 testes, 127 aprovados, 1 falho, 0 ignorados, exit 1. Os cinco testes de painel anteriormente falhos, os dois testes de PATCH tardio e o novo teste de reabilitação passaram. A falha restante foi `Home oferece navegação explícita, sem contadores ou formulários demo`: `assert.equal(exits, 1)` observou `0 !== 1` antes da assertion de navegação para BI. A homologação funcional e visual no Expo foi informada como aprovada pelo responsável.
++
++A inspeção confirmou que o cabeçalho importa `../../../context/AuthContext`, enquanto o harness interceptava apenas imports de um ou dois níveis. Assim, carregava um contexto distinto com valor padrão nulo, `useAuth()` não recebia a identidade simulada e a guarda de logout não chamava o callback. O cabeçalho e sua guarda são iguais à base ADMIN-05. A correção em `app/tests/helpers/questionnaireHarness.cjs` identifica o módulo pelo caminho absoluto normalizado, fornece a autenticação simulada em qualquer profundidade e preserva os valores padrão dos demais contextos, incluindo `AdminSetupIntents` nulo. Contextos desconhecidos não recebem autenticação automaticamente.
++
++As assertions existentes de logout único e navegação para BI foram preservadas, bem como as dos cinco testes do painel e dos três casos de PATCH. Os arquivos modificados nesta rodada foram o harness e este relatório. A inspeção estática conferiu o import, a guarda e as assertions; a execução do callback e de todas as assertions deve ser confirmada na próxima campanha. Nenhum teste ou build foi executado nesta rodada. Repetir as sete suítes com Luna Medium; a ADMIN-04 continua aguardando validação automatizada e aprovação formal.
++
++## Terceira campanha de validação — Luna Medium
++
++### Comando e resultado
++
++Executado em PowerShell a partir do diretório `app`, com `NODE_ENV=test`:
++
++```powershell
++$env:NODE_ENV = 'test'
++node --test --test-reporter=spec tests/adminEventStructure.test.cjs tests/adminEventSetup.test.cjs tests/adminRealEvents.test.cjs tests/adminEventSettings.test.cjs tests/adminNavigation.test.cjs tests/authNavigation.test.cjs tests/roleRoutingIntegration.test.cjs
++```
++
++Resultado: **128 testes, 128 aprovados, 0 falhos, 0 ignorados, 0 cancelados; exit code 0**. As sete suítes foram incluídas. O harness `qa/regression` e suas dependências estavam instalados, portanto os testes integrados de roteamento foram executados, sem skip ambiental.
++
++### Conferências
++
++- **Home Admin:** `Home oferece navegação explícita, sem contadores ou formulários demo` passou integralmente, cobrindo logo, botão de logout, logout chamado uma vez, navegação para BI, catálogo indisponível e ausência de formulários demonstrativos.
++- **Contextos:** os testes isolados do Painel Individual passaram, incluindo consulta pelo UUID, prontidão e pendências, falha parcial e retry, respostas 403/404 e atualização ao recuperar foco. A integração fornece o provider de intenções da pilha Admin separadamente do `AuthContext`.
++- **ADMIN-04:** passaram os cenários de PATCH tardio após logout e troca de conta, com botão Voltar desabilitado durante a escrita e verificações de resposta antiga e isolamento de intenções concluídas. Também passou o novo caso de reabilitação do botão após PATCH na mesma sessão. Recuperação wizard/gestão, `closing`/`closed`, leituras sobrepostas, operações independentes, proteção de rascunhos, disponibilidade e prontidão também passaram.
++- **Regressões:** as coberturas incluídas das ADMIN-01, ADMIN-02, ADMIN-03 e ADMIN-05 passaram, incluindo autenticação/TOTP, busca/filtros/paginação, acesso por UUID, dados e QR Code, criação de evento, Staff e isolamento de sessão.
++- **Homologação visual:** o responsável informou que a homologação funcional e visual no Expo foi concluída com 31/31 verificações aprovadas. Esse resultado é manual e não faz parte da contagem automatizada acima.
++
++Warnings: React Test Renderer informa que está obsoleto; o roteamento simulado emite avisos de componentes default com nome minúsculo para telas de autenticação. Não houve falhas ou testes ignorados associados a esses avisos. Nenhum teste conectou a PostgreSQL, Neon ou serviço externo; migrations e seeds não foram executadas.
++
++### Estado Git e recomendação
++
++`git diff --check` passou; `git diff --cached --exit-code` confirmou índice vazio. Branch `feature/admin-event-operations`, HEAD `f665f2dcbdd9ca6f462b63f4172aa769162f57ca`. As alterações preexistentes da ADMIN-04 foram preservadas; apenas este relatório foi atualizado nesta campanha.
++
++Com a campanha automatizada aprovada e a homologação Expo informada pelo responsável, recomenda-se fechar tecnicamente a ADMIN-04 e encaminhar para aprovação formal do responsável. O changes definitivo ainda não foi gerado.
++
++## Fechamento definitivo da ADMIN-04
++
++A ADMIN-04 está tecnicamente aprovada e homologada pelo responsável. O escopo entrega a gestão de experiências e estações no Painel Individual, com consulta autenticada de estrutura e prontidão, criação e renomeação usando os contratos administrativos existentes, disponibilidade operacional via endpoint Staff autorizado, recuperação explícita de operações incertas e proteções contra resposta obsoleta, troca de evento e troca de sessão. Não houve alteração no backend.
++
++### Validação e homologação
++
++O histórico das campanhas permanece: primeira campanha **120/127**, segunda **127/128** e terceira **128/128 aprovados, 0 falhos, 0 ignorados, exit 0**, cobrindo as sete suítes frontend. A homologação funcional e visual no Expo foi informada pelo responsável: **31/31 verificações aprovadas**. Essa evidência manual está separada dos resultados automatizados. `git diff --check` passou. Não foram executados testes de PostgreSQL, Neon, migrations ou seeds.
++
++### Escopo e limites aceitos
++
++A recuperação de intenções permanece limitada à memória da pilha e à sessão atual. Estrutura, detalhe e prontidão são consultas independentes; não garantem um snapshot único. Os PATCHes não têm versão condicional, então outro Admin pode atualizar o recurso entre leitura e escrita. A leitura após timeout da disponibilidade confirma apenas o estado observado, não qual operador o produziu. O botão físico e gestos do dispositivo foram cobertos na homologação informada, mas não por testes automatizados. Catálogo global, remoções e demais áreas operacionais permanecem fora desta task.
++
++### Inventário definitivo contra a base
++
++Comparação com `f665f2dcbdd9ca6f462b63f4172aa769162f57ca`. Estes são os 14 arquivos pertencentes à ADMIN-04 incluídos no changes:
++
++| Arquivo | Estado |
++| --- | --- |
++| `app/screens/admin/AdminEventManagementInfoScreen.js` | Modificado |
++| `app/screens/admin/AdminEventSetupScreen.js` | Modificado |
++| `app/screens/admin/AdminRealEventScreen.js` | Modificado |
++| `app/screens/admin/AdminStructureScreen.js` | Novo |
++| `app/screens/admin/adminCreationFlow.js` | Modificado |
++| `app/screens/admin/adminStructureFlow.js` | Novo |
++| `app/screens/admin/adminStructureIntents.js` | Novo |
++| `app/screens/admin/components/AdminSelectedEvent.js` | Modificado |
++| `app/services/adminEventSetupService.js` | Modificado |
++| `app/tests/adminEventSetup.test.cjs` | Modificado |
++| `app/tests/adminEventStructure.test.cjs` | Novo |
++| `app/tests/helpers/questionnaireHarness.cjs` | Modificado |
++| `app/tests/roleRoutingIntegration.test.cjs` | Modificado |
++| `docs/ADMIN_04_IMPLEMENTACAO.md` | Novo em relação à base; contém implementação, auditoria e campanhas |
++
++Não há remoções nem alterações binárias. O logo utilizado já pertence à base. Mudanças da ADMIN-05 já presentes no commit-base não fazem parte deste patch.
++
++### Patch e estado Git
++
++O patch definitivo é `qa-evidence/ADMIN_04-changes.diff`, gerado contra `f665f2dcbdd9ca6f462b63f4172aa769162f57ca` com índice e diretório de objetos temporários. O patch não contém a si próprio. Sua aplicação foi aprovada com `git apply --cached --check` e `git apply --cached` sobre um índice temporário inicializado no commit-base; a verificação reversa com `git apply --reverse --check` contra o working tree também passou. A validação inicial por extração via `tar` falhou por erro de checksum do utilitário, mas foi substituída com sucesso pela validação diretamente no índice isolado.
++
++O inventário validado antes desta sincronização documental continha 14 arquivos: 3 novos e 11 modificados. Não há diferenças binárias nem segredos identificados. A atualização deste relatório está incluída no patch regenerado. Estatísticas finais do patch regenerado: 14 arquivos, 3 novos e 11 modificados; sem remoções de arquivos ou diferenças binárias. As contagens finais de linhas são obtidas do índice temporário e registradas na entrega da campanha.
++
++`git diff --check` passou. O índice Git real permaneceu vazio e a comparação do diretório de objetos antes e depois confirmou que `.git/objects` não recebeu escritas. Branch `feature/admin-event-operations`; HEAD `f665f2dcbdd9ca6f462b63f4172aa769162f57ca`. A ADMIN-04 está aprovada para commit e push manuais do responsável. Nenhuma alteração funcional foi introduzida no fechamento.

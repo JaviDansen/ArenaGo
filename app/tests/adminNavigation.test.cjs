@@ -111,58 +111,25 @@ test('Home não oferece atalho Admin nos estados de carregamento, erro ou pronto
   assert.deepEqual(h.navigationCalls, []);
 });
 
-test('pilha da Área Admin registra as telas com títulos em português e provedor por sessão', () => {
-  const registered = [];
-  const { ownerKeyFor } = createAdminApp();
-  let currentAuth = verifiedAdminAuth({ getSessionEpoch: () => 7 });
-  const navigator = loadModule('screens/admin/AdminDemoNavigator.js', (name) => {
+test('navegador Admin registra apenas destinos reais e respeita identidade', () => {
+  let owner = 'admin:session:1';
+  const navigator = loadModule('screens/admin/AdminDemoNavigator.js', name => {
+    if (name === 'react') return { useMemo: factory => factory() };
     if (name === 'react/jsx-runtime') return require('react/jsx-runtime');
-    if (name === '@react-navigation/native-stack') {
-      return { createNativeStackNavigator: () => ({ Navigator: StackNavigator, Screen: StackScreen }) };
-    }
-    if (name === '../../context/AuthContext') {
-      return { useAuth: () => currentAuth };
-    }
-    if (name === './AdminDemoContext') {
-      return {
-        AdminDemoProvider: 'AdminDemoProvider',
-        getAdminDemoOwnerKey: ownerKeyFor,
-      };
-    }
+    if (name === '@react-navigation/native-stack') return { createNativeStackNavigator: () => ({ Navigator: StackNavigator, Screen: StackScreen }) };
+    if (name === '@react-navigation/bottom-tabs') return { createBottomTabNavigator: () => ({ Navigator: StackNavigator, Screen: StackScreen }) };
+    if (name === 'react-native') return { Text: 'Text' };
+    if (name === '../../context/AuthContext') return { useAuth: () => ({}) };
+    if (name === './useAdminEvents') return { adminReadOwner: () => owner };
+    if (name === './adminSetupIntents') return { AdminSetupIntents: { Provider: 'SetupIntentsProvider' } };
+    if (name === './components/adminTheme') return { adminColors: {} };
     return { __esModule: true, default: ImportedScreen };
   }).exports.default;
-  const tree = navigator();
-  assert.equal(tree.type, 'AdminDemoProvider', 'estado da demonstração fica dentro da área');
-  assert.equal(tree.key, ownerKeyFor(currentAuth), 'provedor usa conta, sessão, geração e revisão reais');
-  const originalKey = tree.key;
-  for (const overrides of [{ user: { id: 'b' } }, { getSessionEpoch: () => 8 },
-    { getIdentityRevision: () => 2 }, { user: { sessionId: '20000000-0000-4000-8000-000000000002' } }]) {
-    currentAuth = verifiedAdminAuth({ getSessionEpoch: () => 7, ...overrides });
-    assert.notEqual(navigator().key, originalKey);
-  }
-  for (const overrides of [{ user: { roles: ['participante'] } }, { user: { roles: ['staff'] } },
-    { identityStatus: 'checking' }, { identityStatus: 'error' }, { isAuthenticated: false },
-    { adminChallenge: { isTotpConfigured: true } }]) {
-    currentAuth = verifiedAdminAuth(overrides);
-    assert.equal(navigator(), null, 'montagem direta/rota antiga não contorna autorização');
-  }
-  const stack = tree.props.children;
-  assert.equal(stack.props.initialRouteName, 'AdminPanel');
-  for (const screen of [].concat(stack.props.children)) registered.push([screen.props.name, screen.props.options.title]);
-  assert.deepEqual(JSON.parse(JSON.stringify(registered)), [
-    ['AdminPanel', 'Painel Administrativo'],
-    ['AdminEvents', 'Gerenciar Eventos'],
-    ['AdminCreateEvent', 'Criar Evento'],
-    ['AdminEventDetail', 'Detalhe do Evento'],
-    ['AdminEventSchedule', 'Alterar Horários'],
-    ['AdminEventQueue', 'Fila Externa'],
-    ['AdminEventClose', 'Encerrar Evento'],
-    ['AdminEventExperiences', 'Experiências do Evento'],
-    ['AdminExperienceDetail', 'Experiência'],
-    ['AdminStationDetail', 'Estação'],
-    ['AdminEventStaff', 'Staff do Evento'],
-    ['AdminHistory', 'Histórico'],
-    ['AdminEventBi', 'BI do Evento'],
-    ['AdminOverview', 'Visão Geral'],
-  ]);
+  const tree = navigator().props.children;
+  assert.equal(tree.key, owner);
+  assert.deepEqual(Array.from(tree.props.children, node => node.props.name), ['AdminTabs', 'AdminEvents', 'AdminRealEvent', 'AdminEventManagementInfo', 'AdminEventSetup']);
+  const tabs = tree.props.children[0].props.component();
+  assert.deepEqual(Array.from(tabs.props.children, node => node.props.name), ['Home', 'Histórico', 'BI']);
+  owner = 'other:session:2'; assert.notEqual(navigator().props.children.key, tree.key);
+  owner = null; assert.equal(navigator(), null);
 });

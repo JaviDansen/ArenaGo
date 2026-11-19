@@ -6,6 +6,8 @@ export interface AdminScheduleInput {
   eventId: string;
   officialEndsAt: string;
   operationalDeadlineAt: string;
+  startsAt?: string;
+  expectedUpdatedAt?: string;
   reason: string;
   idempotencyKey: string;
   expiresAt: Date;
@@ -14,8 +16,10 @@ export interface AdminScheduleState {
   eventId: string;
   officialEndsAt: string;
   operationalDeadlineAt: string;
+  startsAt?: string;
   /** Texto PostgreSQL UTC com seis casas; preserva microssegundos de updated_at. */
   changedAt?: string;
 }
 export type AdminScheduleResult = ({ kind: "completed" | "replay" } & AdminScheduleState)
-  | { kind: AdminAuthFailure | "resource_not_found" | "event_time_change_closed" | "invalid_schedule" | "request_conflict" | "in_progress" };
+  | { kind: AdminAuthFailure | "resource_not_found" | "event_time_change_closed" | "event_start_change_locked"
+    | "event_schedule_stale" | "invalid_schedule" | "request_conflict" | "in_progress" };

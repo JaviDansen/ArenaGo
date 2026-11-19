@@ -194,7 +194,9 @@ test("E08.13 HTTP lista valida filtros/cursor estritamente e entrega paginação
   }
   assert.equal(calls.length, 0);
   const cursor = Buffer.from(JSON.stringify({ v: 1, createdAt: at, id: eventId })).toString("base64url");
-  const r = await request(route).query({ limit: "2", phase: "open", statusStored: "scheduled", cursor }); assert.equal(r.status, 200);
+  const r = await request(route).query({ limit: "2", phase: "open", statusStored: "scheduled", cursor, search: "  Arena   Norte ", excludeClosed: "true" }); assert.equal(r.status, 200);
+  assert.equal((calls[0].input as {search:string}).search,"Arena Norte");
+  assert.equal((calls[0].input as {excludeClosed:boolean}).excludeClosed,true);
   assert.deepEqual(calls[0].actor, { userId, sessionId }); assert.equal((calls[0].input as { limit: number }).limit, 2);
   assert.deepEqual((calls[0].input as { cursor: unknown }).cursor, { v: 1, createdAt: at, id: eventId });
 });

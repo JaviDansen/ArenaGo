@@ -25,8 +25,12 @@ export class AdminConfigurationQueryService {
   },{isolationLevel:'repeatable read',accessMode:'read only'});}
   events(actor:ConfigurationActor,page:ConfigurationPage){return this.snapshot(actor,async tx=>{
     const after=page.cursor?sql`(e.created_at,e.id)<(${page.cursor.createdAt}::timestamptz,${page.cursor.id}::uuid)`:sql`true`;
-    const query=configurationProjection(sql`${after} AND ${page.statusStored?sql`e.status=${page.statusStored}::varchar(20)`:sql`true`}`);
+    // strpos treats %, _ and backslashes literally. Values remain bound parameters.
+    const search=page.search?sql`(strpos(lower(regexp_replace(btrim(e.name), '[[:space:]]+', ' ', 'g')),lower(${page.search}))>0
+      OR strpos(lower(e.access_code_normalized),lower(${page.search}))>0)`:sql`true`;
+    const query=configurationProjection(sql`${after} AND ${search} AND ${page.statusStored?sql`e.status=${page.statusStored}::varchar(20)`:sql`true`}`);
     const rows=(await tx.execute<ConfigurationRow>(sql`SELECT * FROM (${query}) p WHERE ${page.phase?sql`p."effectivePhase"=${page.phase}::text`:sql`true`}
+      AND ${page.excludeClosed?sql`p."effectivePhase"<>'closed'`:sql`true`}
       ORDER BY "createdAt" DESC,id DESC LIMIT ${page.limit+1}`)).rows,visible=rows.slice(0,page.limit),last=visible.at(-1);
     return {items:visible.map(r=>configurationEventViewSchema.parse(configurationEventView(r))),nextCursor:rows.length>page.limit&&last?encodeConfigurationCursor(last.createdAt,last.id):null};
   });}
