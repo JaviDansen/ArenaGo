@@ -115,7 +115,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
       if (name === '@react-navigation/native') return { useIsFocused: () => true, usePreventRemove: Navigation.usePreventRemove, NavigationContainer: ({ children }) =>
         React.createElement(Navigation.BaseNavigationContainer, { ref: navRef, onUnhandledAction: (action) => unhandled.push(action) }, children) };
       const target = path.posix.normalize(path.posix.join(directory, name));
-      if (target === 'assets/images/logo-arenago.png') return { uri: target };
+      if (target === 'assets/images/logo-arenago.png' || target === 'assets/images/logo-arenago-admin.png') return { uri: target };
       if (target === 'components/ui/AuthBackground') {
         return { AuthBackground: ({ children, ...props }) => React.createElement('View', props, children) };
       }

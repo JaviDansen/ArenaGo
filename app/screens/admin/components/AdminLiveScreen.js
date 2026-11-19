@@ -26,7 +26,7 @@ export default function AdminLiveScreen({ title, subtitle, navigation, mode = 'd
         <Pressable accessibilityRole="button" accessibilityLabel={backLabel} accessibilityState={{ disabled: backDisabled }} disabled={backDisabled}
           style={({ pressed }) => [styles.back, backDisabled && styles.disabled, pressed && styles.backPressed]} onPress={onBack}>
           <AdminIcon name="back" color={c.accent} size={22} /><Text style={styles.backText}>{backLabel}</Text></Pressable>}
-      <Image source={require('../../../assets/images/logo-arenago.png')} style={styles.brand} resizeMode="contain" accessible accessibilityRole="image" accessibilityLabel="ArenaGO" />
+      <Image source={require('../../../assets/images/logo-arenago-admin.png')} style={styles.brand} resizeMode="contain" accessible accessibilityRole="image" accessibilityLabel="ArenaGO" />
     </View>
     <KeyboardAvoidingView style={styles.safe} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={styles.content} refreshControl={refreshControl}>

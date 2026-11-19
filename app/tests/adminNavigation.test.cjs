@@ -5,6 +5,27 @@ const { createHarness, loadModule, textOf, createParticipantThemeStub } = requir
 const { verifiedAdminAuth } = require('./helpers/adminAuthFixture.cjs');
 const { createAdminApp } = require('./helpers/adminHarness.cjs');
 
+test('BRAND-01: Admin usa logo exclusiva e splash e autenticação mantêm assets originais', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const root = path.resolve(__dirname, '..');
+  const read = file => fs.readFileSync(path.join(root, file), 'utf8');
+  const admin = read('screens/admin/components/AdminLiveScreen.js');
+  assert.match(admin, /require\(['"]\.\.\/\.\.\/\.\.\/assets\/images\/logo-arenago-admin\.png['"]\)/);
+  assert.match(admin, /resizeMode="contain"/);
+  assert.match(read('screens/splash/AnimatedSplashScreen.js'), /assets\/images\/logo-arenago\.png/);
+  assert.match(read('screens/auth/AuthSessionGate.js'), /assets\/images\/logo-arenago\.png/);
+  const config = JSON.parse(read('app.json')).expo.plugins.find(p => Array.isArray(p) && p[0] === 'expo-splash-screen')[1];
+  assert.equal(config.image, './assets/splash-icon.png');
+  assert.equal(config.dark.image, './assets/splash-icon.png');
+  const asset = fs.readFileSync(path.join(root, 'assets/images/logo-arenago-admin.png'));
+  assert.equal(asset.readUInt32BE(16), 2048);
+  assert.equal(asset.readUInt32BE(20), 682);
+  assert.equal(asset[25], 6);
+  assert.ok(fs.existsSync(path.join(root, 'assets/images/logo-arenago.png')));
+  assert.ok(fs.existsSync(path.join(root, 'assets/splash-icon.png')));
+});
+
 let authState;
 function StackNavigator() {}
 function StackScreen() {}
