@@ -165,6 +165,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
       }
       const target = path.posix.normalize(path.posix.join(directory, name)).replace(/\.js$/, '');
       if (target === 'assets/images/logo-arenago.png') return { uri: target };
+      if (control.realStaff && target === 'assets/images/logo-arenago-staff.png') return { uri: target };
       if (target === 'components/ui/AuthBackground') {
         return { AuthBackground: ({ children, ...props }) => React.createElement('View', props, children) };
       }
@@ -181,7 +182,9 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
       if (control.realStaff && ['screens/staff/StaffEventsNavigator', 'services/staffEventsService',
         'screens/staff/StaffEntryControlRealScreen', 'services/staffEntryService', 'services/staffEntryIntentStorage',
         'screens/staff/StaffStationOperationalScreen', 'services/staffIntentStorage',
-        'services/staffDashboardService', 'services/staffOperationsService', 'screens/staff/useStaffPolling'].includes(target)) {
+        'services/staffDashboardService', 'services/staffOperationsService', 'screens/staff/useStaffPolling',
+        'screens/staff/components/StaffLiveScreen', 'screens/admin/components/AdminLiveUI',
+        'screens/admin/components/adminTheme'].includes(target)) {
         return load(`${target}.js`);
       }
       if (target === 'screens/event-entry/EventEntryScreen' && control.modalFixture) {
@@ -2147,6 +2150,8 @@ test('AUD-04 + AUD-05: retorno unificado, ciclo de vida foco/AppState no polling
     assert.deepEqual(counts, { stations: 1, experiences: 1, entry: 2 }, 'abertura da subtela consulta apenas /entry-control');
     await app.press('Voltar ao painel');
     assert.deepEqual(counts, { stations: 2, experiences: 2, entry: 3 }, 'retorno por botão interno revalida painel completo (+1 em cada recurso)');
+    assert.equal(app.hasButton('Voltar aos eventos'), true);
+    assert.equal(app.hasButton('Sair da conta'), false);
 
     await app.press('Controle de Entrada');
     assert.deepEqual(counts, { stations: 2, experiences: 2, entry: 4 }, 'nova abertura da subtela consulta apenas /entry-control');
@@ -2154,6 +2159,7 @@ test('AUD-04 + AUD-05: retorno unificado, ciclo de vida foco/AppState no polling
     await app.act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     assert.ok(app.hasText('Painel operacional'));
     assert.deepEqual(counts, { stations: 3, experiences: 3, entry: 5 }, 'retorno nativo revalida painel completo (+1 em cada recurso)');
+    assert.equal(app.hasButton('Voltar aos eventos'), true);
 
     // 2. Retorno de Estação por botão interno e por retorno nativo (beforeRemove) executam revalidação equivalente
     await app.press('Selecionar estação Estação real da experiência Just Dance');
@@ -2165,6 +2171,7 @@ test('AUD-04 + AUD-05: retorno unificado, ciclo de vida foco/AppState no polling
     await app.act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     assert.ok(app.hasText('Painel operacional'));
     assert.deepEqual(counts, { stations: 5, experiences: 5, entry: 7 });
+    assert.equal(app.hasButton('Voltar aos eventos'), true);
 
     // 3. Perda de foco e segundo plano pausam polling; retomada reativa exatamente 1 ciclo de 5s
     await app.setFocus(false);

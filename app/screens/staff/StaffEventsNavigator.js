@@ -1,7 +1,6 @@
-import { createContext, useContext, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { AuthBackground } from '../../components/ui/AuthBackground';
 
 import { useAuth } from '../../context/AuthContext';
 import { createStaffEventsStore } from '../../services/staffEventsService';
@@ -9,6 +8,8 @@ import { createStaffDashboardStore } from '../../services/staffDashboardService'
 import StaffEntryControlRealScreen from './StaffEntryControlRealScreen';
 import StaffStationOperationalScreen from './StaffStationOperationalScreen';
 import { useStaffPolling } from './useStaffPolling';
+import { AdminIcon, AdminIconTile, liveColors as c, liveStyles as live } from '../admin/components/AdminLiveUI';
+import StaffLiveScreen from './components/StaffLiveScreen';
 
 const Stack = createNativeStackNavigator();
 const StaffEventsContext = createContext(null);
@@ -45,8 +46,8 @@ const TONE_STYLES = {
     text: { color: '#34D399' },
   },
   brand: {
-    pill: { backgroundColor: 'rgba(139, 92, 246, 0.16)', borderColor: '#8B5CF6' },
-    text: { color: '#C4B5FD' },
+    pill: { backgroundColor: c.infoSurface, borderColor: c.info },
+    text: { color: c.info },
   },
   warning: {
     pill: { backgroundColor: 'rgba(245, 158, 11, 0.14)', borderColor: '#F59E0B' },
@@ -62,20 +63,6 @@ const TONE_STYLES = {
   },
 };
 
-function StaffBrandHeader() {
-  return (
-    <View style={styles.brandHeader}>
-      <View style={styles.brandRow}>
-        <Text style={styles.brandArena}>Arena</Text>
-        <Text style={styles.brandGo}>GO</Text>
-      </View>
-      <View style={styles.rolePill}>
-        <Text style={styles.rolePillText}>STAFF</Text>
-      </View>
-    </View>
-  );
-}
-
 function StatusPill({ label, tone = 'muted', uppercase = false }) {
   const toneStyle = TONE_STYLES[tone] ?? TONE_STYLES.muted;
   return (
@@ -87,27 +74,9 @@ function StatusPill({ label, tone = 'muted', uppercase = false }) {
   );
 }
 
-function CalendarIcon() {
-  return (
-    <View style={styles.iconBox}>
-      <View style={styles.calendarPins}>
-        <View style={styles.calendarPin} />
-        <View style={styles.calendarPin} />
-      </View>
-      <View style={styles.calendarFrame}>
-        <View style={styles.calendarHeaderBar} />
-        <View style={styles.calendarDotsRow}>
-          <View style={styles.calendarDot} />
-          <View style={styles.calendarDot} />
-        </View>
-      </View>
-    </View>
-  );
-}
-
 function EntryScannerIcon() {
   return (
-    <View style={styles.iconBox}>
+    <View style={live.iconTile} accessible={false} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
       <View style={styles.scannerFrame}>
         <View style={styles.scannerLine} />
       </View>
@@ -117,7 +86,7 @@ function EntryScannerIcon() {
 
 function GamepadIcon() {
   return (
-    <View style={styles.stationIconBox}>
+    <View style={live.iconTile} accessible={false} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
       <View style={styles.gamepadBody}>
         <Text style={styles.gamepadPlus}>+</Text>
         <View style={styles.gamepadDots}>
@@ -135,12 +104,14 @@ function Button({ label, accessibilityLabel = label, onPress, disabled = false, 
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={accessibilityLabel}
+      accessibilityState={{ disabled }}
       disabled={disabled}
       onPress={disabled ? undefined : onPress}
-      style={[
+      style={({ pressed }) => [
         styles.button,
         isSecondary && styles.buttonSecondary,
         disabled && styles.disabled,
+        pressed && styles.pressed,
       ]}
     >
       <Text style={[styles.buttonText, isSecondary && styles.buttonSecondaryText]}>{label}</Text>
@@ -265,6 +236,7 @@ function StaffEventsProvider({ children }) {
     clearSelection: store.clearSelection,
     isCurrent: store.isCurrent,
     getSelected: () => store.isCurrent() ? store.getSnapshot().selected : null,
+    logout: () => { if (store.isCurrent(snapshot.identity)) void authRef.current.logout(); },
   };
   return <StaffEventsContext.Provider value={value}>{children}</StaffEventsContext.Provider>;
 }
@@ -272,7 +244,6 @@ function StaffEventsProvider({ children }) {
 function StaffEventsScreen({ navigation }) {
   const staff = useContext(StaffEventsContext);
   useStaffPolling(staff.status === 'ready', staff.refreshSilent, 60000);
-  const auth = useAuth();
   const messages = {
     session: 'Não foi possível confirmar sua sessão. Entre novamente ou tente atualizar.',
     network: 'Não foi possível conectar ao servidor. Verifique sua conexão e tente novamente.',
@@ -280,111 +251,95 @@ function StaffEventsScreen({ navigation }) {
   };
 
   return (
-    <AuthBackground testID="staff-events-background" variant="login">
-      <ScrollView contentContainerStyle={styles.content}>
-        <StaffBrandHeader />
+    <StaffLiveScreen testID="staff-events-background" actionLabel="Sair da conta" onAction={staff.logout} logout>
+      <View style={styles.headerBlock}>
+        <Text style={styles.eyebrow}>ÁREA OPERACIONAL</Text>
+        <Text style={styles.screenTitle} accessibilityRole="header">Eventos Staff</Text>
+        <Text style={styles.description}>
+          Selecione um evento autorizado para começar a operação.
+        </Text>
+      </View>
 
-        <View style={styles.headerBlock}>
-          <Text style={styles.eyebrow}>ÁREA OPERACIONAL</Text>
-          <Text style={styles.screenTitle}>Eventos Staff</Text>
-          <Text style={styles.description}>
-            Selecione um evento autorizado para começar a operação.
+      <Text style={styles.sectionLabel}>SEUS EVENTOS</Text>
+
+      {staff.status === 'loading' && (
+        <View accessibilityRole="progressbar" style={styles.stateCard}>
+          <ActivityIndicator color={c.accent} />
+          <Text style={styles.message}>Carregando eventos...</Text>
+        </View>
+      )}
+
+      {staff.status === 'error' && (
+        <View style={styles.errorCard}>
+          <StatusPill label="Falha na consulta" tone="danger" uppercase />
+          <Text accessibilityRole="alert" style={styles.alertMessage}>
+            {messages[staff.error]}
           </Text>
         </View>
+      )}
 
-        <Text style={styles.sectionLabel}>SEUS EVENTOS</Text>
-
-        {staff.status === 'loading' && (
-          <View accessibilityRole="progressbar" style={styles.stateCard}>
-            <ActivityIndicator color="#a78bfa" />
-            <Text style={styles.message}>Carregando eventos...</Text>
-          </View>
-        )}
-
-        {staff.status === 'error' && (
-          <View style={styles.errorCard}>
-            <StatusPill label="Falha na consulta" tone="danger" uppercase />
-            <Text accessibilityRole="alert" style={styles.alertMessage}>
-              {messages[staff.error]}
-            </Text>
-          </View>
-        )}
-
-        {staff.error === 'stale' && (
-          <View style={styles.warningCard}>
-            <Text accessibilityRole="alert" style={styles.warningMessage}>
-              A lista pode estar desatualizada. Atualize os eventos.
-            </Text>
-          </View>
-        )}
-
-        {staff.status === 'ready' && staff.events.length === 0 && (
-          <View style={styles.emptyCard}>
-            <Text style={styles.cardTitle}>Nenhum evento autorizado</Text>
-            <Text style={styles.message}>Nenhum evento autorizado para esta conta.</Text>
-          </View>
-        )}
-
-        {staff.status === 'ready' && staff.events.map((event) => {
-          const meta = getPhaseMeta(event);
-          return (
-            <Pressable
-              key={event.id}
-              accessibilityRole="button"
-              accessibilityLabel={`Selecionar evento ${event.name}`}
-              style={styles.eventCard}
-              onPress={() => {
-                if (staff.select(event.id)) navigation.navigate('StaffEventHome');
-              }}
-            >
-              <CalendarIcon />
-              <View style={styles.cardBody}>
-                <Text style={styles.eventName}>{event.name}</Text>
-                {Number.isSafeInteger(event.stationCount) && (
-                  <Text style={styles.cardSubtitle}>
-                    {event.stationCount} {event.stationCount === 1 ? 'Estação' : 'Estações'}
-                  </Text>
-                )}
-                {typeof event.periodLabel === 'string' && event.periodLabel.trim() ? (
-                  <Text style={styles.cardSubtitle}>{event.periodLabel}</Text>
-                ) : null}
-                {typeof event.location === 'string' && event.location.trim() ? (
-                  <Text style={styles.cardSubtitle}>{event.location}</Text>
-                ) : null}
-                <View style={styles.eventMetaRow}>
-                  <StatusPill label={phaseLabel(event)} tone={meta.tone} uppercase />
-                  <Text style={styles.eventStatusText}>{meta.operationalText}</Text>
-                </View>
-              </View>
-              <Text style={styles.chevron}>›</Text>
-            </Pressable>
-          );
-        })}
-
-        <Text style={styles.helperNote}>
-          Aqui aparecem somente eventos em que sua conta possui autorização Staff.
-        </Text>
-
-        <Button
-          label="Atualizar eventos"
-          variant="secondary"
-          disabled={staff.status === 'loading'}
-          onPress={() => { void staff.refresh(); }}
-        />
-
-        <View style={styles.footerSpacer}>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Sair da conta"
-            style={styles.logoutLink}
-            onPress={() => { if (staff.isCurrent()) void auth.logout(); }}
-          >
-            <Text style={styles.logoutArrow}>↪</Text>
-            <Text style={styles.logoutText}>Sair da conta</Text>
-          </Pressable>
+      {staff.error === 'stale' && (
+        <View style={styles.warningCard}>
+          <Text accessibilityRole="alert" style={styles.warningMessage}>
+            A lista pode estar desatualizada. Atualize os eventos.
+          </Text>
         </View>
-      </ScrollView>
-    </AuthBackground>
+      )}
+
+      {staff.status === 'ready' && staff.events.length === 0 && (
+        <View style={styles.emptyCard}>
+          <Text style={styles.cardTitle}>Nenhum evento autorizado</Text>
+          <Text style={styles.message}>Nenhum evento autorizado para esta conta.</Text>
+        </View>
+      )}
+
+      {staff.status === 'ready' && staff.events.map((event) => {
+        const meta = getPhaseMeta(event);
+        return (
+          <Pressable
+            key={event.id}
+            accessibilityRole="button"
+            accessibilityLabel={`Selecionar evento ${event.name}`}
+            style={({ pressed }) => [styles.listCard, live.row, pressed && styles.pressed]}
+            onPress={() => {
+              if (staff.select(event.id)) navigation.navigate('StaffEventHome');
+            }}
+          >
+            <AdminIconTile name="calendar" />
+            <View style={styles.cardBody}>
+              <Text style={styles.eventName}>{event.name}</Text>
+              {Number.isSafeInteger(event.stationCount) && (
+                <Text style={styles.cardSubtitle}>
+                  {event.stationCount} {event.stationCount === 1 ? 'Estação' : 'Estações'}
+                </Text>
+              )}
+              {typeof event.periodLabel === 'string' && event.periodLabel.trim() ? (
+                <Text style={styles.cardSubtitle}>{event.periodLabel}</Text>
+              ) : null}
+              {typeof event.location === 'string' && event.location.trim() ? (
+                <Text style={styles.cardSubtitle}>{event.location}</Text>
+              ) : null}
+              <View style={styles.eventMetaRow}>
+                <StatusPill label={phaseLabel(event)} tone={meta.tone} uppercase />
+                <Text style={styles.eventStatusText}>{meta.operationalText}</Text>
+              </View>
+            </View>
+            <AdminIcon name="chevron" color={c.muted} size={18} />
+          </Pressable>
+        );
+      })}
+
+      <Text style={styles.helperNote}>
+        Aqui aparecem somente eventos em que sua conta possui autorização Staff.
+      </Text>
+
+      <Button
+        label="Atualizar eventos"
+        variant="secondary"
+        disabled={staff.status === 'loading'}
+        onPress={() => { void staff.refresh(); }}
+      />
+    </StaffLiveScreen>
   );
 }
 
@@ -393,53 +348,48 @@ function StaffEventHomeScreen({ navigation }) {
   useStaffPolling(Boolean(staff.selected && staff.status === 'ready'), staff.refreshSilent, 60000, staff.selected?.id);
   const [section, setSection] = useState('panel');
   const [stationId, setStationId] = useState(null);
+  const returnToPanel = useCallback(() => {
+    setStationId(null);
+    setSection('panel');
+  }, []);
   useEffect(() => navigation.addListener('beforeRemove', (action) => {
     if (staff.getSelected() && section !== 'panel') {
       action.preventDefault();
-      setStationId(null);
-      setSection('panel');
+      returnToPanel();
     } else staff.clearSelection();
-  }), [navigation, staff.clearSelection, staff.getSelected, section]);
+  }), [navigation, staff.clearSelection, staff.getSelected, section, returnToPanel]);
   const selected = staff.isCurrent() ? staff.selected : null;
+  const isSubsection = Boolean(selected && section !== 'panel');
+
+  function goBack() {
+    if (isSubsection && staff.getSelected()) {
+      returnToPanel();
+      return;
+    }
+    staff.clearSelection();
+    if (navigation.canGoBack()) navigation.goBack();
+    else navigation.navigate('StaffEvents');
+  }
 
   return (
-    <AuthBackground testID="staff-event-home-background" variant="login">
-      <ScrollView contentContainerStyle={styles.content}>
-        <StaffBrandHeader />
-
-        {(!selected || section === 'panel') && (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Voltar aos eventos"
-            style={styles.backLink}
-            onPress={() => {
-              staff.clearSelection();
-              if (navigation.canGoBack()) navigation.goBack();
-              else navigation.navigate('StaffEvents');
-            }}
-          >
-            <Text style={styles.backLinkArrow}>←</Text>
-            <Text style={styles.backLinkText}>Voltar aos eventos</Text>
-          </Pressable>
-        )}
-
-        {selected ? (
-          <StaffEventDashboard
-            event={selected}
-            staff={staff}
-            section={section}
-            setSection={setSection}
-            stationId={stationId}
-            setStationId={setStationId}
-          />
-        ) : (
-          <View style={styles.emptyCard}>
-            <Text style={styles.cardTitle}>Selecione um evento</Text>
-            <Text style={styles.message}>Atualize a lista para confirmar os eventos autorizados.</Text>
-          </View>
-        )}
-      </ScrollView>
-    </AuthBackground>
+    <StaffLiveScreen testID="staff-event-home-background"
+      actionLabel={isSubsection ? 'Voltar ao painel' : 'Voltar aos eventos'} onAction={goBack}>
+      {selected ? (
+        <StaffEventDashboard
+          event={selected}
+          staff={staff}
+          section={section}
+          setSection={setSection}
+          stationId={stationId}
+          setStationId={setStationId}
+        />
+      ) : (
+        <View style={styles.emptyCard}>
+          <Text style={styles.cardTitle}>Selecione um evento</Text>
+          <Text style={styles.message}>Atualize a lista para confirmar os eventos autorizados.</Text>
+        </View>
+      )}
+    </StaffLiveScreen>
   );
 }
 
@@ -590,19 +540,17 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
 
       {section === 'panel' && (
         <>
-          <View style={styles.panelTitleRow}>
-            <Text style={styles.screenTitle}>Painel operacional</Text>
-            <StatusPill label={phaseLabel(event)} tone={eventMeta.tone} uppercase />
+          <View>
+            <Text style={styles.eyebrow}>ÁREA OPERACIONAL</Text>
+            <Text style={styles.screenTitle} accessibilityRole="header">Painel operacional</Text>
           </View>
-
-          <Text style={styles.sectionLabel}>RESUMO DO EVENTO</Text>
 
           <View style={styles.heroCard}>
             <View style={styles.heroTopRow}>
-              <CalendarIcon />
+              <AdminIconTile name="calendar" />
               <View style={styles.heroInfo}>
-                <Text style={styles.heroPhaseEyebrow}>Status: {phaseLabel(event)}</Text>
                 <Text style={styles.heroEventName}>{event.name}</Text>
+                <StatusPill label={`Status: ${phaseLabel(event)}`} tone={eventMeta.tone} />
                 <Text style={styles.cardSubtitle}>{eventMeta.operationalText}</Text>
                 {typeof event.periodLabel === 'string' && event.periodLabel.trim() ? (
                   <Text style={styles.cardSubtitle}>{event.periodLabel}</Text>
@@ -614,7 +562,6 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
             </View>
 
             <View style={styles.heroDivider} />
-            <Text style={styles.metricsHeading}>Resumo operacional</Text>
 
             <View style={styles.metricsGrid}>
               <View style={styles.metricCell}>
@@ -637,22 +584,25 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="Controle de Entrada"
+            accessibilityState={{ disabled: accessLost }}
             disabled={accessLost}
-            style={[styles.entryCard, accessLost && styles.disabled]}
+            style={({ pressed }) => [styles.operationCard, accessLost && styles.disabled, pressed && styles.pressed]}
             onPress={accessLost ? undefined : () => setSection('entry')}
           >
-            <EntryScannerIcon />
-            <View style={styles.cardBody}>
-              <Text style={styles.eventName}>Controle de Entrada</Text>
-              <Text style={styles.cardSubtitle}>{entrySummary.subtitle}</Text>
+            <View style={styles.operationRow}>
+              <EntryScannerIcon />
+              <View style={styles.cardBody}>
+                <Text style={styles.eventName}>Controle de Entrada</Text>
+                <Text style={styles.cardSubtitle}>{entrySummary.subtitle}</Text>
+                <View style={styles.operationBadges}>
+                  <StatusPill label={entrySummary.badgeLabel} tone={entrySummary.badgeTone} uppercase />
+                  {entrySummary.hasPendingCall && (
+                    <StatusPill label="Chamada pendente" tone="warning" uppercase />
+                  )}
+                </View>
+              </View>
+              <AdminIcon name="chevron" color={c.muted} size={18} />
             </View>
-            <View style={styles.entryBadges}>
-              <StatusPill label={entrySummary.badgeLabel} tone={entrySummary.badgeTone} uppercase />
-              {entrySummary.hasPendingCall && (
-                <StatusPill label="Chamada pendente" tone="warning" uppercase />
-              )}
-            </View>
-            <Text style={styles.chevron}>›</Text>
           </Pressable>
 
           <View style={styles.sectionHeaderRow}>
@@ -666,13 +616,13 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
 
           {snapshot.stationStatus === 'loading' && (
             <View style={styles.stateCard}>
-              <ActivityIndicator color="#a78bfa" />
+              <ActivityIndicator color={c.accent} />
               <Text style={styles.message}>Carregando estações...</Text>
             </View>
           )}
           {snapshot.experienceStatus === 'loading' && (
             <View style={styles.stateCard}>
-              <ActivityIndicator color="#a78bfa" />
+              <ActivityIndicator color={c.accent} />
               <Text style={styles.message}>Carregando experiências...</Text>
             </View>
           )}
@@ -705,29 +655,31 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
                       key={item.id}
                       accessibilityRole="button"
                       accessibilityLabel={`Selecionar estação ${item.label} da experiência ${experience.name}`}
-                      style={styles.stationCard}
+                      style={({ pressed }) => [styles.operationCard, pressed && styles.pressed]}
                       onPress={() => {
                         setStationId(item.id);
                         setSection('station');
                         void store.refreshQueue(item.experienceId);
                       }}
                     >
-                      <GamepadIcon />
-                      <View style={styles.cardBody}>
-                        <Text style={styles.eventName}>{item.label}</Text>
-                        <Text style={styles.cardSubtitle}>
-                          {hasPending ? 'Atendimento pendente nesta estação' : 'Sem atendimento pendente'}
-                        </Text>
+                      <View style={styles.operationRow}>
+                        <GamepadIcon />
+                        <View style={styles.cardBody}>
+                          <Text style={styles.eventName}>{item.label}</Text>
+                          <Text style={styles.cardSubtitle}>
+                            {hasPending ? 'Atendimento pendente nesta estação' : 'Sem atendimento pendente'}
+                          </Text>
+                          <View style={styles.operationBadges}>
+                            <StatusPill
+                              label={isAvailable ? 'Disponível' : 'Indisponível'}
+                              tone={isAvailable ? 'success' : 'danger'}
+                              uppercase
+                            />
+                            {hasPending && <StatusPill label="Chamado" tone="warning" uppercase />}
+                          </View>
+                        </View>
+                        <AdminIcon name="chevron" color={c.muted} size={18} />
                       </View>
-                      <View style={styles.entryBadges}>
-                        <StatusPill
-                          label={isAvailable ? 'Disponível' : 'Indisponível'}
-                          tone={isAvailable ? 'success' : 'danger'}
-                          uppercase
-                        />
-                        {hasPending && <StatusPill label="Chamado" tone="warning" uppercase />}
-                      </View>
-                      <Text style={styles.chevron}>›</Text>
                     </Pressable>
                   );
                 })}
@@ -739,17 +691,17 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
             <View style={styles.experienceGroup}>
               <Text style={styles.experienceGroupTitle}>Experiência não vinculada</Text>
               {orphanStations.map((item) => (
-                <View key={item.id} style={styles.stationCard}>
+                <View key={item.id} style={[styles.listCard, live.row]}>
                   <GamepadIcon />
                   <View style={styles.cardBody}>
                     <Text style={styles.eventName}>{item.label}</Text>
                     <Text style={styles.cardSubtitle}>Dados da experiência indisponíveis</Text>
+                    <StatusPill
+                      label={item.availability === 'available' ? 'Disponível' : 'Indisponível'}
+                      tone={item.availability === 'available' ? 'success' : 'danger'}
+                      uppercase
+                    />
                   </View>
-                  <StatusPill
-                    label={item.availability === 'available' ? 'Disponível' : 'Indisponível'}
-                    tone={item.availability === 'available' ? 'success' : 'danger'}
-                    uppercase
-                  />
                 </View>
               ))}
             </View>
@@ -771,9 +723,6 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
           accessDenied={accessLost}
           accessDeniedKind={snapshot.accessStatus === 'session' ? 'session' : 'denied'}
           onAccessDenied={(kind) => store.reportAccessDenied(kind)}
-          onBack={() => {
-            setSection('panel');
-          }}
         />
       )}
 
@@ -818,14 +767,6 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
               />
             </>
           )}
-          <Button
-            label="Voltar ao painel"
-            variant="secondary"
-            onPress={() => {
-              setStationId(null);
-              setSection('panel');
-            }}
-          />
         </>
       )}
     </>
@@ -844,250 +785,61 @@ export default function StaffEventsNavigator() {
 }
 
 const styles = StyleSheet.create({
-  stackContent: { backgroundColor: '#0c0a17' },
-  content: { flexGrow: 1, paddingHorizontal: 20, paddingTop: 14, paddingBottom: 28, gap: 14 },
-  brandHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 4,
-  },
-  brandRow: { flexDirection: 'row', alignItems: 'center' },
-  brandArena: { color: '#ffffff', fontSize: 24, fontWeight: '800', letterSpacing: -0.5 },
-  brandGo: { color: '#8B5CF6', fontSize: 24, fontWeight: '800', letterSpacing: -0.5 },
-  rolePill: {
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: '#6D28D9',
-    backgroundColor: 'rgba(124, 58, 237, 0.16)',
-    paddingHorizontal: 14,
-    paddingVertical: 5,
-  },
-  rolePillText: { color: '#C4B5FD', fontSize: 12, fontWeight: '700', letterSpacing: 1 },
-  headerBlock: { gap: 6, marginTop: 4 },
-  eyebrow: { color: '#C4B5FD', fontSize: 12, fontWeight: '700', letterSpacing: 1.2 },
-  screenTitle: { color: '#ffffff', fontSize: 26, fontWeight: '800', letterSpacing: -0.4 },
-  description: { color: '#A5A1C2', fontSize: 15, lineHeight: 22 },
-  sectionLabel: {
-    color: '#A78BFA',
-    fontSize: 12,
-    fontWeight: '700',
-    letterSpacing: 1.1,
-    marginTop: 4,
-  },
-  sectionHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginTop: 4,
-  },
-  sectionCount: { color: '#C4B5FD', fontSize: 13, fontWeight: '600' },
-  panelTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 10,
-  },
-  eventCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 14,
-    backgroundColor: '#130F24',
-    borderColor: '#36275E',
-    borderWidth: 1,
-    borderRadius: 18,
-    padding: 16,
-  },
-  heroCard: {
-    backgroundColor: '#130F24',
-    borderColor: '#3D2B6B',
-    borderWidth: 1,
-    borderRadius: 18,
-    padding: 16,
-    gap: 14,
-  },
-  heroTopRow: { flexDirection: 'row', alignItems: 'center', gap: 14 },
-  heroInfo: { flex: 1, gap: 4 },
-  heroPhaseEyebrow: { color: '#A5A1C2', fontSize: 13, fontWeight: '600' },
-  heroEventName: { color: '#ffffff', fontSize: 19, fontWeight: '800' },
-  heroDivider: { height: 1, backgroundColor: '#271E44' },
-  metricsHeading: { color: '#ffffff', fontSize: 14, fontWeight: '700' },
+  stackContent: { backgroundColor: c.background },
+  headerBlock: { marginBottom: 8 },
+  eyebrow: { color: c.muted, fontSize: 12, lineHeight: 18, fontWeight: '700', letterSpacing: 2, marginTop: 12 },
+  screenTitle: { color: c.text, fontSize: 28, lineHeight: 35, fontWeight: '700', marginTop: 8 },
+  description: { color: c.muted, fontSize: 16, lineHeight: 24, marginTop: 10 },
+  sectionLabel: { color: c.muted, fontSize: 12, fontWeight: '700', letterSpacing: 1.6, marginTop: 8 },
+  sectionHeaderRow: { ...live.row, flexWrap: 'wrap', justifyContent: 'space-between', marginTop: 4 },
+  sectionCount: { color: c.muted, fontSize: 13, fontWeight: '600' },
+  listCard: { ...live.card, marginTop: 0, minHeight: 64 },
+  operationCard: { ...live.card, marginTop: 0, minHeight: 64, paddingVertical: 12 },
+  operationRow: { ...live.row, gap: 10 },
+  operationBadges: { flexDirection: 'row', flexWrap: 'wrap', gap: 4 },
+  heroCard: { ...live.card, marginTop: 0, gap: 14 },
+  heroTopRow: live.row,
+  heroInfo: { ...live.grow, gap: 4 },
+  heroEventName: live.title,
+  heroDivider: { height: 1, backgroundColor: '#795395' },
   metricsGrid: { flexDirection: 'row', alignItems: 'center' },
-  metricCell: { flex: 1, alignItems: 'center', gap: 4 },
-  metricDivider: { width: 1, height: 32, backgroundColor: '#271E44' },
-  metricValue: { color: '#ffffff', fontSize: 20, fontWeight: '800' },
-  metricLabel: { color: '#A5A1C2', fontSize: 12, textAlign: 'center' },
-  entryCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    backgroundColor: '#130F24',
-    borderColor: '#36275E',
-    borderWidth: 1,
-    borderRadius: 16,
-    padding: 14,
-  },
-  entryBadges: { alignItems: 'flex-end', gap: 6 },
-  stationCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    backgroundColor: '#110E20',
-    borderColor: '#2B204A',
-    borderWidth: 1,
-    borderRadius: 16,
-    padding: 14,
-  },
-  cardBody: { flex: 1, gap: 4 },
-  cardTitle: { color: '#ffffff', fontSize: 16, fontWeight: '700' },
-  eventName: { color: '#ffffff', fontSize: 16, fontWeight: '700' },
-  cardSubtitle: { color: '#A5A1C2', fontSize: 13, lineHeight: 18 },
+  metricCell: { ...live.grow, alignItems: 'center', paddingHorizontal: 4, gap: 4 },
+  metricDivider: { width: 1, height: 32, backgroundColor: '#795395' },
+  metricValue: { color: c.text, fontSize: 20, fontWeight: '700' },
+  metricLabel: { color: c.muted, fontSize: 12, textAlign: 'center' },
+  cardBody: { ...live.grow, gap: 4 },
+  cardTitle: { color: c.text, fontSize: 16, fontWeight: '700' },
+  eventName: { color: c.text, fontSize: 17, lineHeight: 22, fontWeight: '700' },
+  cardSubtitle: { color: c.muted, fontSize: 14, lineHeight: 20 },
   eventMetaRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginTop: 4 },
-  eventStatusText: { color: '#D1CDE8', fontSize: 13, fontWeight: '500' },
-  chevron: { color: '#A78BFA', fontSize: 22, fontWeight: '600', paddingLeft: 2 },
-  statusPill: {
-    borderRadius: 999,
-    borderWidth: 1,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    alignSelf: 'flex-start',
-  },
+  eventStatusText: { color: c.muted, fontSize: 13, fontWeight: '500' },
+  statusPill: { borderRadius: 24, borderWidth: 1, paddingHorizontal: 10, paddingVertical: 4,
+    alignSelf: 'flex-start', maxWidth: '100%' },
   statusPillText: { fontSize: 11, fontWeight: '700', letterSpacing: 0.6 },
   uppercase: { textTransform: 'uppercase' },
   experienceGroup: { gap: 10 },
-  experienceGroupTitle: { color: '#ffffff', fontSize: 16, fontWeight: '700', marginTop: 2 },
-  iconBox: {
-    width: 44,
-    height: 44,
-    borderRadius: 12,
-    backgroundColor: '#241744',
-    borderWidth: 1,
-    borderColor: '#3F2A75',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  calendarPins: { flexDirection: 'row', gap: 8, marginBottom: 1 },
-  calendarPin: { width: 2, height: 4, borderRadius: 1, backgroundColor: '#C4B5FD' },
-  calendarFrame: {
-    width: 18,
-    height: 15,
-    borderRadius: 3,
-    borderWidth: 1.5,
-    borderColor: '#C4B5FD',
-    overflow: 'hidden',
-  },
-  calendarHeaderBar: { height: 4, backgroundColor: '#C4B5FD' },
-  calendarDotsRow: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-around',
-    paddingHorizontal: 2,
-  },
-  calendarDot: { width: 3, height: 3, borderRadius: 1.5, backgroundColor: '#C4B5FD' },
-  scannerFrame: {
-    width: 18,
-    height: 18,
-    borderRadius: 4,
-    borderWidth: 1.5,
-    borderColor: '#C4B5FD',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  scannerLine: { width: 10, height: 2, backgroundColor: '#C4B5FD', borderRadius: 1 },
-  stationIconBox: {
-    width: 42,
-    height: 42,
-    borderRadius: 12,
-    backgroundColor: '#1B1433',
-    borderWidth: 1,
-    borderColor: '#322459',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  gamepadBody: {
-    width: 24,
-    height: 14,
-    borderRadius: 7,
-    borderWidth: 1.5,
-    borderColor: '#C4B5FD',
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 4,
-  },
-  gamepadPlus: { color: '#C4B5FD', fontSize: 10, fontWeight: '800', lineHeight: 11 },
+  experienceGroupTitle: { color: c.text, fontSize: 16, fontWeight: '700', marginTop: 2 },
+  scannerFrame: { width: 18, height: 18, borderRadius: 4, borderWidth: 1.5, borderColor: c.accent,
+    alignItems: 'center', justifyContent: 'center' },
+  scannerLine: { width: 10, height: 2, backgroundColor: c.accent, borderRadius: 1 },
+  gamepadBody: { width: 24, height: 14, borderRadius: 7, borderWidth: 1.5, borderColor: c.accent,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 4 },
+  gamepadPlus: { color: c.accent, fontSize: 10, fontWeight: '800', lineHeight: 11 },
   gamepadDots: { flexDirection: 'row', gap: 2 },
-  gamepadDot: { width: 3, height: 3, borderRadius: 1.5, backgroundColor: '#C4B5FD' },
-  stateCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    backgroundColor: '#130F24',
-    borderColor: '#2D214C',
-    borderWidth: 1,
-    borderRadius: 14,
-    padding: 16,
-  },
-  emptyCard: {
-    backgroundColor: '#130F24',
-    borderColor: '#2D214C',
-    borderWidth: 1,
-    borderRadius: 14,
-    padding: 16,
-    gap: 6,
-  },
-  errorCard: {
-    backgroundColor: 'rgba(239, 68, 68, 0.10)',
-    borderColor: '#991B1B',
-    borderWidth: 1,
-    borderRadius: 14,
-    padding: 14,
-    gap: 8,
-  },
-  warningCard: {
-    backgroundColor: 'rgba(245, 158, 11, 0.12)',
-    borderColor: '#B45309',
-    borderWidth: 1,
-    borderRadius: 14,
-    padding: 12,
-  },
-  message: { color: '#CBD5E1', fontSize: 14, lineHeight: 20 },
-  alertMessage: { color: '#FECACA', fontSize: 14, lineHeight: 20 },
-  warningMessage: { color: '#FDE68A', fontSize: 13, lineHeight: 19 },
-  helperNote: { color: '#94A3B8', fontSize: 13, lineHeight: 19 },
-  button: {
-    backgroundColor: '#7C3AED',
-    borderRadius: 14,
-    paddingVertical: 15,
-    paddingHorizontal: 16,
-    alignItems: 'center',
-  },
-  buttonSecondary: {
-    backgroundColor: '#17122B',
-    borderWidth: 1,
-    borderColor: '#4C3384',
-  },
+  gamepadDot: { width: 3, height: 3, borderRadius: 1.5, backgroundColor: c.accent },
+  stateCard: { ...live.card, ...live.row, marginTop: 0 },
+  emptyCard: { ...live.card, marginTop: 0, gap: 6 },
+  errorCard: { ...live.card, marginTop: 0, backgroundColor: c.dangerSurface, borderColor: c.danger, gap: 8 },
+  warningCard: { ...live.card, marginTop: 0, backgroundColor: c.warningSurface, borderColor: c.warning },
+  message: { color: c.muted, fontSize: 15, lineHeight: 22 },
+  alertMessage: { color: '#fecaca', fontSize: 14, lineHeight: 20 },
+  warningMessage: { color: '#fde68a', fontSize: 13, lineHeight: 19 },
+  helperNote: { color: c.muted, fontSize: 13, lineHeight: 19 },
+  button: { backgroundColor: c.accentStrong, borderRadius: 12, minHeight: 48, paddingVertical: 12,
+    paddingHorizontal: 16, alignItems: 'center', justifyContent: 'center' },
+  buttonSecondary: { backgroundColor: '#251a33', borderWidth: 1, borderColor: c.border },
   disabled: { opacity: 0.55 },
-  buttonText: { color: '#ffffff', fontSize: 15, fontWeight: '700' },
-  buttonSecondaryText: { color: '#E9D5FF' },
-  backLink: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    alignSelf: 'flex-start',
-    gap: 8,
-    paddingVertical: 4,
-  },
-  backLinkArrow: { color: '#E2E8F0', fontSize: 16, fontWeight: '700' },
-  backLinkText: { color: '#E2E8F0', fontSize: 14, fontWeight: '600' },
-  footerSpacer: { marginTop: 'auto', paddingTop: 16 },
-  logoutLink: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    alignSelf: 'flex-start',
-    gap: 8,
-    paddingVertical: 8,
-  },
-  logoutArrow: { color: '#E2E8F0', fontSize: 16, fontWeight: '700' },
-  logoutText: { color: '#ffffff', fontSize: 15, fontWeight: '700' },
+  pressed: { opacity: 0.75 },
+  buttonText: { color: c.onAccent, fontSize: 15, fontWeight: '700', textAlign: 'center' },
+  buttonSecondaryText: { color: c.text },
 });

@@ -406,7 +406,7 @@ function createStaffUiHarness({ initialAuth, onGet, onLogout }) {
   }).exports;
 
   const native = Object.fromEntries(
-    ['ActivityIndicator', 'Modal', 'Pressable', 'ScrollView', 'Text', 'TextInput', 'View'].map((n) => [n, n]),
+    ['ActivityIndicator', 'Image', 'Modal', 'Pressable', 'SafeAreaView', 'ScrollView', 'Text', 'TextInput', 'View'].map((n) => [n, n]),
   );
   native.StyleSheet = { create: (s) => s };
   native.AppState = { currentState: 'active', addEventListener: () => ({ remove() {} }) };
@@ -423,23 +423,27 @@ function createStaffUiHarness({ initialAuth, onGet, onLogout }) {
     },
   });
 
-  const EntryStub = ({ event, onBack }) => jsx.jsxs('View', {
-    children: [
-      jsx.jsx('Text', { children: `EntryControl:${event.id}` }),
-      jsx.jsx('Pressable', {
-        accessibilityRole: 'button',
-        accessibilityLabel: 'Voltar do controle',
-        onPress: onBack,
-        children: jsx.jsx('Text', { children: 'Voltar ao painel' }),
-      }),
-    ],
-  });
+  const EntryStub = ({ event }) => jsx.jsx('Text', { children: `EntryControl:${event.id}` });
 
   const StationStub = ({ event, experience, station }) => jsx.jsx('View', {
     children: jsx.jsx('Text', { children: `StationOp:${event.id}:${experience.id}:${station.id}` }),
   });
 
   const AuthCtx = React.createContext(null);
+
+  const staffLogo = { uri: 'assets/images/logo-arenago-staff.png' };
+  const adminTheme = loadModule('screens/admin/components/adminTheme.js', require).exports;
+  const resolveVisual = (name) => {
+    if (name === 'react/jsx-runtime') return jsx;
+    if (name === 'react-native') return native;
+    if (name === 'react-native-safe-area-context') return { SafeAreaView: native.SafeAreaView };
+    if (name === './adminTheme') return adminTheme;
+    if (name === '../../../assets/images/logo-arenago-staff.png') return staffLogo;
+    if (name.endsWith('/AdminLiveUI')) return liveUI;
+    return require(name);
+  };
+  const liveUI = loadModule('screens/admin/components/AdminLiveUI.js', resolveVisual).exports;
+  const staffLiveScreen = loadModule('screens/staff/components/StaffLiveScreen.js', resolveVisual).exports;
 
   const { default: StaffEventsNavigator } = loadModule('screens/staff/StaffEventsNavigator.js', (name) => {
     if (name === 'react') return React;
@@ -451,9 +455,8 @@ function createStaffUiHarness({ initialAuth, onGet, onLogout }) {
     if (name === '@react-navigation/native') {
       return { useIsFocused: () => true };
     }
-    if (name === '../../components/ui/AuthBackground') {
-      return { AuthBackground: ({ children, ...props }) => jsx.jsx('View', { ...props, children }) };
-    }
+    if (name === './components/StaffLiveScreen') return staffLiveScreen;
+    if (name === '../admin/components/AdminLiveUI') return liveUI;
     if (name === '../../context/AuthContext') {
       return { AuthContext: AuthCtx, useAuth: () => React.useContext(AuthCtx) };
     }
@@ -499,6 +502,23 @@ function createStaffUiHarness({ initialAuth, onGet, onLogout }) {
 
   return {
     pollingRegistrations,
+    assertHeader(actionLabel) {
+      const headers = findAllByType('View').filter((node) => node.props.testID === 'staff-live-header');
+      assert.equal(headers.length, 1);
+      const [action, logo] = headers[0].props.children;
+      assert.equal(action.type, 'Pressable');
+      assert.equal(action.props.accessibilityRole, 'button');
+      assert.equal(action.props.accessibilityLabel, actionLabel);
+      assert.equal(logo.type, 'Image');
+      assert.equal(logo.props.accessibilityRole, 'image');
+      assert.equal(logo.props.accessibilityLabel, 'ArenaGO');
+      assert.equal(logo.props.resizeMode, 'contain');
+      assert.equal(logo.props.source, staffLogo);
+      const headerActions = findAllByType('Pressable').filter((node) =>
+        ['Sair da conta', 'Voltar aos eventos', 'Voltar ao painel'].includes(node.props.accessibilityLabel));
+      assert.deepEqual(headerActions.map((node) => node.props.accessibilityLabel), [actionLabel]);
+      return action.props.onPress;
+    },
     latestPolling(scopeFragment) {
       for (let i = pollingRegistrations.length - 1; i >= 0; i -= 1) {
         const reg = pollingRegistrations[i];
@@ -620,11 +640,12 @@ test('STAFF-01 UI (10.1): Seleção de Eventos cobre carregamento, erro vs vazio
   });
 
   try {
-    // 1. Estado de carregamento inicial e marca ArenaGO / STAFF / Eventos Staff
+    // 1. Cabeçalho com a imagem oficial e uma única ação de logout
     await rig.mount();
-    assert.ok(rig.hasText('Arena'));
-    assert.ok(rig.hasText('GO'));
-    assert.ok(rig.hasText('STAFF'));
+    const staleLogout = rig.assertHeader('Sair da conta');
+    assert.equal(rig.textOccurrences('Arena'), 0);
+    assert.equal(rig.textOccurrences('GO'), 0);
+    assert.equal(rig.textOccurrences('STAFF'), 0);
     assert.ok(rig.hasText('Eventos Staff'));
     assert.ok(rig.hasText('Carregando eventos...'));
     assert.ok(!rig.hasText('Nenhum evento autorizado para esta conta.'));
@@ -632,6 +653,9 @@ test('STAFF-01 UI (10.1): Seleção de Eventos cobre carregamento, erro vs vazio
     // Troca de conta enquanto requisição da conta u-1 estava pendente -> resposta atrasada descartada
     scenario = 'network';
     await rig.updateAuth(makeAuthIdentity('u-2', 2, 1));
+    assert.equal(typeof staleLogout, 'function');
+    staleLogout();
+    assert.equal(logoutCalls, 0, 'logout de sessão antiga é descartado');
     eventsDeferreds[0].resolve({
       events: [{ id: EV_A, name: 'Evento Conta Antiga', status: 'open', effectivePhase: 'open' }],
     });
@@ -657,7 +681,7 @@ test('STAFF-01 UI (10.1): Seleção de Eventos cobre carregamento, erro vs vazio
     assert.ok(rig.hasText('Não está pronto'));
     assert.ok(!rig.hasText('4 Estações'), 'não exibe contagem fictícia quando contrato não informa');
 
-    // 5. Polling de 60s configurado na seleção e logout funcionando no rodapé
+    // 5. Polling de 60s configurado na seleção e logout funcionando no cabeçalho
     assert.ok(rig.pollingRegistrations.some((r) => r.intervalMs === 60000 && r.enabled === true));
     await rig.press('Sair da conta');
     assert.equal(logoutCalls, 1);
@@ -771,6 +795,7 @@ test('STAFF-01 UI (10.2): Painel Operacional exibe resumo real, Controle de Entr
     await rig.mount();
     await rig.press('Selecionar evento Arena Neon UNDB');
     await rig.settle();
+    rig.assertHeader('Voltar aos eventos');
     assert.deepEqual(initialReads.sort(), ['entry-control', 'experiences', 'stations']);
 
     // 1. Nome do evento não repetido e ausência de dados fictícios dos mockups
@@ -807,10 +832,11 @@ test('STAFF-01 UI (10.2): Painel Operacional exibe resumo real, Controle de Entr
     // 5. Navegar ao Controle de Entrada e voltar atualizando o resumo para fila desativada sem chamada pendente
     await rig.press('Controle de Entrada');
     assert.ok(rig.hasText(`EntryControl:${EV_A}`));
+    rig.assertHeader('Voltar ao painel');
     externalQueueEnabled = false;
     entryPendingCall = null;
     waitingCount = 0;
-    await rig.press('Voltar do controle');
+    await rig.press('Voltar ao painel');
     await rig.settle();
     assert.ok(rig.hasText('Fila externa desativada · entrada direta'));
     assert.ok(rig.hasText('FILA INATIVA'));
@@ -829,6 +855,7 @@ test('STAFF-01 UI (10.2): Painel Operacional exibe resumo real, Controle de Entr
     // 7. Navegar para a estação correta de Street Fighter e retornar ao painel
     await rig.press('Selecionar estação Estação 01 da experiência Street Fighter');
     await rig.settle();
+    rig.assertHeader('Voltar ao painel');
     assert.ok(rig.hasText(`StationOp:${EV_A}:${EXP_2}:${ST_3}`));
     await rig.press('Voltar ao painel');
     assert.ok(rig.hasText('Painel operacional'));
@@ -836,6 +863,7 @@ test('STAFF-01 UI (10.2): Painel Operacional exibe resumo real, Controle de Entr
     // 8. Trocar para evento B sem misturar estações ou dados do evento A
     failEntry = false;
     await rig.press('Voltar aos eventos');
+    rig.assertHeader('Sair da conta');
     await rig.press('Selecionar evento Torneio Fechado');
     await rig.settle();
     assert.ok(rig.hasText('Status: Encerrado'));

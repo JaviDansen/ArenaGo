@@ -18,7 +18,6 @@ export default function StaffEntryControlRealScreen({
   accessDenied = false,
   accessDeniedKind = 'denied',
   onAccessDenied,
-  onBack,
 }) {
   const auth = useAuth(), live = useRef(null);
   live.current = { auth, event, isEventCurrent, accessDenied, onAccessDenied };
@@ -89,7 +88,6 @@ export default function StaffEntryControlRealScreen({
         <Text accessibilityRole="alert" style={styles.warning}>
           {accessDeniedKind === 'session' ? errors.session : errors.denied}
         </Text>
-        <Button label="Voltar ao painel" onPress={onBack} />
       </View>
     );
   }
@@ -166,7 +164,6 @@ export default function StaffEntryControlRealScreen({
           : `Fila ${notice.outcome.result.externalQueueEnabled ? 'reativada' : 'desativada'}. Participantes liberados: ${notice.outcome.result.releasedCount}.`
         : notice.outcome.code === 'ENTRY_NOT_FIRST' ? 'A fila mudou. Confira o primeiro participante na lista atualizada.' : 'A solicitação foi recusada pelo servidor. Confira o estado atualizado.'}</Text>}
     <Button label="Atualizar fila de entrada" disabled={snapshot.busy || snapshot.status === 'loading'} onPress={refresh} />
-    <Button label="Voltar ao painel" onPress={onBack} />
     <Modal transparent animationType="fade" visible={Boolean(!accessDenied && dialog && store.isCurrent(dialog.context) && !snapshot.busy)}
       onRequestClose={() => { dialogRef.current = null; setDialog(null); }}>
       <View style={styles.backdrop}><View style={styles.card} accessibilityViewIsModal>

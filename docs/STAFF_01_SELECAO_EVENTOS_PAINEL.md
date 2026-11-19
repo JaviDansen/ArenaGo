@@ -1,5 +1,9 @@
 # ArenaGo — STAFF-01: Reformulação da Seleção de Eventos e Painel Operacional
 
+A continuação visual está registrada em [STAFF-01 | Padronização visual do Staff](STAFF_01_PADRONIZACAO_VISUAL.md).
+
+**Acompanhamento atual:** implementação, correções, campanha automatizada e homologação visual e funcional Android informada pelo responsável concluídas. Revisão final, commit, push, conferência no GitHub e aprovação formal permanecem pendentes. A STAFF-02 aguarda aprovação formal. O histórico de auditorias, correções e campanhas abaixo foi preservado.
+
 ## 1. Identificação, Objetivo e Escopo
 
 - **Projeto:** ArenaGo — ProgramacaoMobile
@@ -235,9 +239,11 @@ As quatro falhas da primeira campanha foram resolvidas: (1) o teste do painel ag
 
 ## 11. Validações Manuais e Ambientes
 
-- **Verificação automatizada em ambiente simulado:** Segunda campanha concluída e aprovada, conforme resultados e avisos registrados na seção 10.
-- **Homologação nativa em dispositivo físico / Expo Go (Android e iOS):** Pendente de execução manual pelo responsável após validação automatizada da entrega corrigida.
-- **Limitação explícita:** Nenhuma simulação automatizada equivale à homologação presencial em dispositivo real.
+- **Validação automatizada mais recente:** A segunda campanha após a padronização visual aprovou as dez suítes prioritárias e a suíte completa (`npm.cmd test`): 919 aprovados, 0 falhos, 0 ignorados e 0 cancelados. Códigos de saída 0. As campanhas anteriores permanecem registradas na seção 10, inclusive a campanha com 843 testes.
+- **Homologação visual Android:** Concluída manualmente pelo responsável no emulador Android com Expo. Foram conferidos o padrão visual Admin, cabeçalho, logo transparente, cards, indicadores, agrupamento de estações e rolagem.
+- **Homologação funcional Android:** Concluída manualmente pelo responsável no emulador Android com Expo. Foram confirmadas a abertura do Controle de Entrada e de uma Estação, o retorno pelo cabeçalho e pelo botão físico/sistema e a preservação do Painel.
+- **Dispositivo físico e iOS:** Não confirmados. Não há registro de execução nessas plataformas.
+- **Natureza do registro:** A homologação Android é informação manual do responsável, não teste executado pelo Codex. Os resultados automatizados simulados não substituem homologação física.
 
 ---
 
@@ -283,10 +289,10 @@ As quatro falhas da primeira campanha foram resolvidas: (1) o teste do painel ag
 
 ## 13. Pendências e Limitações
 
-1. **Validação automatizada concluída e aprovada:** segunda campanha executada com GPT-6 Luna Medium, incluindo 843 testes aprovados na suíte completa, sem falhas ou testes ignorados. Permanecem pendentes a homologação física, a revisão final e a aprovação formal da STAFF-01.
-2. Revisão, commit e push da correção final pelo responsável na branch `feature/staff-operacional-v2`.
-3. Homologação física em Android e iOS (Expo Go / build local) pendente pelo responsável.
-4. `STAFF-02`, `STAFF-04` e `STAFF-05` permanecem reservadas para suas respectivas entregas futuras.
+1. Testes em dispositivo físico e homologação iOS não foram confirmados.
+2. Revisão final dos arquivos, commit e push pelo responsável, conferência da publicação no GitHub e aprovação formal de encerramento permanecem pendentes.
+3. A padronização visual e a logo transparente estão implementadas localmente e aguardam publicação.
+4. `STAFF-02`, `STAFF-04` e `STAFF-05` permanecem reservadas para suas respectivas entregas futuras. A STAFF-02 aguarda a aprovação formal da STAFF-01.
 
 ---
 
@@ -297,10 +303,12 @@ As quatro falhas da primeira campanha foram resolvidas: (1) o teste do painel ag
 - **Commit 2 publicado (`feature/staff-operacional-v2`):** `fa5e8814` (`fa5e881` — `correçoes da primeira revisao tecnica`)
 - **Commit 3 publicado (`feature/staff-operacional-v2`):** `3451de55` (`3451de55eac301ff1f519b2296ed674b1ad19765` — `correçoes da auditoria do codex`, objeto da Auditoria Rodada 3)
 - **Commit 4 publicado (`feature/staff-operacional-v2`):** `bbd9bf4c44a9ca1a91f35b772e4c44a1aeedf7ba` (`correçao 3`), com as correções `R3-01` a `R3-05`.
-- **Correção final da verificação após `404` da fila:** Aplicada localmente para revisão do responsável.
+- **Correção final da STAFF-01 publicada:** `4a4bd9197952beb76ae34eb9faf90adc1133d51b`.
+- **Integração da `develop` publicada:** merge `18925ba5682621d121e21d5573f8b8ed56b98bfd`.
+- **Padronização visual Staff e logo transparente:** implementadas localmente após o merge, aguardando publicação.
 
 ---
 
 ## 15. Estado Final da Entrega
 
-Correção da verificação de acesso e ajustes da primeira campanha disponíveis localmente na branch `feature/staff-operacional-v2`. A validação automatizada está concluída e aprovada. Permanecem pendentes a homologação em aparelho, a revisão final, o commit e push pelo responsável e a aprovação formal da **STAFF-01**.
+Correções da implementação visual disponíveis localmente na branch `feature/staff-operacional-v2`, sobre o merge publicado `18925ba`. A validação automatizada mais recente está concluída e aprovada com 919 testes. A homologação visual e funcional Android foi informada como concluída pelo responsável no emulador com Expo. Testes em dispositivo físico e homologação iOS não foram confirmados. A logo Staff usa o PNG transparente oficial. Revisão final, commit, push, conferência no GitHub e aprovação formal da **STAFF-01** permanecem pendentes.

@@ -43,7 +43,7 @@ function createRealApp(initialAuth) {
     return React.createElement(NavigationContent, null, descriptors[state.routes[state.index].key].render());
   }
   const nativeStack = { createNativeStackNavigator: Navigation.createNavigatorFactory(FocusedStack) };
-  const native = Object.fromEntries(['ActivityIndicator', 'KeyboardAvoidingView', 'Pressable', 'ScrollView',
+  const native = Object.fromEntries(['ActivityIndicator', 'Image', 'KeyboardAvoidingView', 'Pressable', 'ScrollView',
     'Text', 'TextInput', 'View'].map((name) => [name, name]));
   native.Modal = ({ visible, children }) => (visible ? React.createElement('Modal', null, children) : null);
   native.StyleSheet = { create: (styles) => styles };
@@ -87,6 +87,14 @@ function createRealApp(initialAuth) {
       }
       assert.ok(name.startsWith('.'), `import inesperado: ${name}`);
       const target = path.posix.normalize(path.posix.join(directory, name));
+      if (target === 'screens/admin/components/AdminLiveUI' || target === 'screens/admin/components/adminTheme') {
+        return load(`${target}.js`);
+      }
+      if (target === 'assets/images/logo-arenago-staff.png') {
+        return { uri: require.resolve(`../${target}`) };
+      }
+      assert.ok(!['screens/staff/components/StaffLiveScreen.js', 'screens/admin/components/AdminLiveUI.js']
+        .includes(relativePath), `import visual inesperado em ${relativePath}: ${name}`);
       if (target === 'theme') return createParticipantThemeStub();
       if (target === 'context/AuthContext') return authModule;
       if (target === 'context/ParticipationContext') return { ParticipationProvider: passthrough };
