@@ -1484,6 +1484,8 @@ test('AUD-04 + AUD-05: retorno unificado, ciclo de vida foco/AppState no polling
 });
 
 test('R3-01, R3-02, R3-03 e R3-04: revalidação parcial não trava botão Atualizar estações, negativa concorrente na entrada propaga ao painel, 404 tardio de fila abandonada é ignorado e experiência desconhecida recupera após falha de rede', async () => {
+  const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
+  const at = '2026-11-10T15:00:00.000Z';
   const unknownExperienceId = '99999999-9999-4999-8999-999999999999';
   const unknownStation = {
     id: '88888888-8888-4888-8888-888888888888',
@@ -1492,32 +1494,33 @@ test('R3-01, R3-02, R3-03 e R3-04: revalidação parcial não trava botão Atual
     availability: 'available',
     pendingServiceSessionId: null,
   };
-  let stationsMode = 'ok';
-  let experiencesMode = 'ok';
+  let failNextExperienceRead = false;
+  let experienceReads = 0;
   let entryMode = 'ok';
   let includeUnknownStation = false;
   let includeUnknownExperience = false;
   let pendingQueueReq = null;
-  let pendingEntryReqs = [];
+  const pendingEntryReqs = [];
 
   const app = createIntegration({
     initialUser: staffUser,
     control: {
       realStaff: true,
+      manualTimers: true,
+      platformOS: 'android',
+      secureStore: { isAvailableAsync: async () => true, getItemAsync: async () => null, setItemAsync: async () => {} },
       events: [staffEvent],
       http: async (route, options) => {
         if (route.endsWith('/stations')) {
-          if (stationsMode === 'deny403') throw Object.assign(new Error('403'), { status: 403 });
-          if (stationsMode === 'err500') throw Object.assign(new Error('500'), { status: 500 });
           const list = [realStation];
           if (includeUnknownStation) list.push(unknownStation);
           return { eventId: staffEvent.id, stations: list };
         }
         if (route.endsWith('/experiences')) {
-          if (experiencesMode === 'deny403') throw Object.assign(new Error('403'), { status: 403 });
-          if (experiencesMode === 'networkOnce') {
-            experiencesMode = 'ok';
-            throw Object.assign(new Error('offline'), { isNetworkError: true });
+          experienceReads += 1;
+          if (failNextExperienceRead) {
+            failNextExperienceRead = false;
+            throw new Error('offline');
           }
           const list = [{ id: realExperienceId, name: 'Just Dance' }];
           if (includeUnknownExperience) list.push({ id: unknownExperienceId, name: 'Beat Saber' });
@@ -1525,14 +1528,7 @@ test('R3-01, R3-02, R3-03 e R3-04: revalidação parcial não trava botão Atual
         }
         if (route.endsWith('/queue')) {
           if (pendingQueueReq) return pendingQueueReq.promise;
-          return {
-            eventId: staffEvent.id,
-            experienceId: realExperienceId,
-            waitingCount: 0,
-            firstWaitingQueueEntryId: null,
-            waiting: [],
-            activeCall: null,
-          };
+          return undefined;
         }
         if (route.includes('/entry-control') && options.method === 'GET') {
           if (entryMode === 'deferred') {
@@ -1540,8 +1536,7 @@ test('R3-01, R3-02, R3-03 e R3-04: revalidação parcial não trava botão Atual
             pendingEntryReqs.push(d);
             return d.promise;
           }
-          if (entryMode === 'deny403') throw Object.assign(new Error('403'), { status: 403 });
-          if (entryMode === 'err500') throw Object.assign(new Error('500'), { status: 500 });
+          if (entryMode === 'err500') return { statusCode: 500, body: { code: 'INTERNAL_SERVER_ERROR' } };
           return {
             eventId: staffEvent.id,
             externalQueueEnabled: true,
@@ -1570,10 +1565,10 @@ test('R3-01, R3-02, R3-03 e R3-04: revalidação parcial não trava botão Atual
     // 1. R3-03: 404 tardio de fila já abandonada ao voltar ao painel não bloqueia o evento
     pendingQueueReq = deferred();
     await app.press('Selecionar estação Estação real da experiência Just Dance');
+    assert.ok(app.hasText('Carregando fila...'));
     await app.press('Voltar ao painel');
     await app.act(async () => {
-      pendingQueueReq.reject(Object.assign(new Error('404'), { status: 404 }));
-      await new Promise((r) => setTimeout(r, 0));
+      pendingQueueReq.resolve({ statusCode: 404, body: { code: 'RESOURCE_NOT_FOUND' } });
     });
     pendingQueueReq = null;
     assert.ok(app.hasText('Just Dance'), '404 de fila abandonada não limpa painel');
@@ -1582,18 +1577,16 @@ test('R3-01, R3-02, R3-03 e R3-04: revalidação parcial não trava botão Atual
     // 2. R3-02: na subtela Controle de Entrada, GET A pendente (403) + refresh manual GET B (500) propaga perda de acesso ao painel
     await app.press('Controle de Entrada');
     entryMode = 'deferred';
-    pendingEntryReqs = [];
-    // Polling dispara GET A
-    const tickA = app.tickTimers(5000);
-    // Operador dispara refresh manual que inicia GET B
-    const manualB = app.press('Atualizar');
+    await app.tickTimers(5000);
+    assert.equal(pendingEntryReqs.length, 1, 'o polling inicia o GET A');
+    await app.press('Atualizar fila de entrada');
     assert.equal(pendingEntryReqs.length, 2);
 
-    // GET A retorna 403 e GET B retorna 500
     await app.act(async () => {
-      pendingEntryReqs[0].reject(Object.assign(new Error('403'), { status: 403 }));
-      pendingEntryReqs[1].reject(Object.assign(new Error('500'), { status: 500 }));
-      await Promise.all([tickA, manualB]);
+      pendingEntryReqs[0].resolve({ statusCode: 403, body: { code: 'STAFF_EVENT_FORBIDDEN' } });
+    });
+    await app.act(async () => {
+      pendingEntryReqs[1].resolve({ statusCode: 500, body: { code: 'INTERNAL_SERVER_ERROR' } });
     });
     assert.ok(app.hasText('Acesso ao evento indisponível'));
 
@@ -1602,8 +1595,6 @@ test('R3-01, R3-02, R3-03 e R3-04: revalidação parcial não trava botão Atual
     assert.equal(app.isDisabled('Controle de Entrada'), true);
 
     // 3. R3-01: revalidação parcial (200 em stations, 200 em experiences, 500 em entry-control) mantém bloqueio mas reabilita botão "Atualizar estações"
-    stationsMode = 'ok';
-    experiencesMode = 'ok';
     entryMode = 'err500';
     await app.press('Atualizar estações');
     assert.ok(app.hasText('SEM ACESSO'));
@@ -1621,19 +1612,22 @@ test('R3-01, R3-02, R3-03 e R3-04: revalidação parcial não trava botão Atual
     // 4. R3-04: estação com experiência desconhecida cuja sincronização inicial falha por rede se recupera no próximo ciclo de 5s mantendo a mesma assinatura
     includeUnknownStation = true;
     includeUnknownExperience = true;
-    experiencesMode = 'networkOnce';
+    failNextExperienceRead = true;
+    const readsBeforeOrphan = experienceReads;
     await app.tickTimers(5000);
-    await app.act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     // Primeira tentativa automática falhou com erro de rede, então ainda exibe Experiência não vinculada
+    assert.equal(experienceReads, readsBeforeOrphan + 1);
     assert.ok(app.hasText('Experiência não vinculada'));
 
     // Próximo ciclo de 5s reexecuta pollExperiences() para a mesma assinatura e encontra Beat Saber
     await app.tickTimers(5000);
-    await app.act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    assert.equal(experienceReads, readsBeforeOrphan + 2);
     assert.ok(app.hasText('Beat Saber'));
     assert.ok(!app.hasText('Experiência não vinculada'));
     assert.equal(app.hasButton('Selecionar estação Estação Nova da experiência Beat Saber'), true);
   } finally {
+    pendingQueueReq?.resolve({ statusCode: 500 });
+    for (const request of pendingEntryReqs) request.resolve({ statusCode: 500 });
     app.dispose();
   }
 });

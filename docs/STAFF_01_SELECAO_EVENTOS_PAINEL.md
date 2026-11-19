@@ -122,12 +122,13 @@ Antes de qualquer alteração na interface, os arquivos atuais na base `ae2ba16b
 | `docs/STAFF_01_SELECAO_EVENTOS_PAINEL.md` | Novo / Atualizado | Documentação técnica completa da STAFF-01, incluindo entrega inicial, primeira revisão técnica e auditoria independente do Codex (`AUD-01`..`AUD-05`) |
 | `app/services/staffEntryService.js` | Modificado | `parseEntryState` alinhado integralmente ao backend: fila externa desativada exige `pendingCall === null` e `waiting.length === 0`, derivação exata de `canCall`/`canConfirm` e igualdade `canMarkAbsent === canRemove` preservando a janela residual (`canManage: false`) |
 | `app/services/staffOperationsService.js` | Modificado | `parseStaffEntrySummary` passou a delegar diretamente para `parseEntryState` de `./staffEntryService.js`, eliminando duplicação de invariantes e exigindo `observedAt` e todas as flags operacionais |
-| `app/services/staffDashboardService.js` | Modificado | Máquina explícita de autorização (`accessStatus`, `accessLocked`), manutenção do bloqueio durante revalidação manual e após `500` posterior, tratamento de `403`/`404` antigo concorrente no mesmo contexto, `reportAccessDenied`, `refreshPanel()`, `revalidateOnReturn()` e `pollExperiences()` |
+| `app/services/staffDashboardService.js` | Modificado | Máquina de autorização, revalidação do painel e recuperação de experiências. A confirmação após `404` da fila só altera o estado quando o endpoint de evento confirma negativa no contexto vigente. Limpar uma fila já vazia preserva o snapshot e ainda invalida leituras em voo |
 | `app/screens/staff/StaffEntryControlRealScreen.js` | Modificado | Propagação bidirecional de perda de autorização do evento (`accessDenied`, `accessDeniedKind`, `onAccessDenied`), limpeza de dados nominais/modais/callbacks e preservação integral de intenções persistidas no armazenamento seguro |
 | `app/screens/staff/StaffEventsNavigator.js` | Modificado | Reformulação visual das telas, polling de 5s independente/auto-recuperável, retorno unificado para Controle de Entrada e Estações (botão interno, botão do sistema e gesto via `beforeRemove`), revalidação controlada para experiências desconhecidas sem loops infinitos e bloqueio consistente durante `accessLocked` |
-| `app/tests/roleRoutingIntegration.test.cjs` | Modificado | Linha 725 atualizada para agrupamento de experiência única; harness real estendido com `setFocus`, `setAppState`, controle determinístico de timers, `isDisabled` e `metricValueFor`, além de suítes reais para `AUD-01`..`AUD-05` |
-| `app/tests/staffDashboard.test.cjs` | Modificado | Cobertura completa de `AUD-01`..`AUD-04`: `parseStaffEntrySummary` estrito com janela residual, remoção de fixture impossível (`externalQueueEnabled: false` com `pendingCall`) e todos os cenários concorrentes de `AUD-02` |
-| `app/tests/staffEventDiscovery.test.cjs` | Modificado | Reconciliador autossuficiente sem `skip`, asserções `metricValueFor` vinculadas aos rótulos e cobertura de recuperação de entrada, payload inválido, revalidação controlada de órfãs e persistência de bloqueio |
+| `app/tests/roleRoutingIntegration.test.cjs` | Modificado | Integração com React e React Navigation reais para AUD-01 a AUD-05 e cenários R3, com identidade Staff local ao teste, respostas HTTP simuladas e avanço explícito dos ciclos de polling |
+| `app/tests/staffDashboard.test.cjs` | Modificado | Cobertura do parser, revalidação e concorrência no painel. Preserva cinco regressões de confirmação de acesso após 404 da fila e verifica a transição para bloqueio de evento sem depender da ordem de microtarefas |
+| `app/tests/staffEntryControl.test.cjs` | Modificado | Casos de negativas concorrentes com carga inicial concluída e sinal explícito de início de cada GET controlado |
+| `app/tests/staffEventDiscovery.test.cjs` | Modificado | Reconciliador autossuficiente com setters de `useState` estáveis, contagem de leituras na abertura do painel e cobertura de recuperação de entrada, payload inválido, experiências órfãs e persistência de bloqueio |
 | `qa-evidence/STAFF-01-changes.diff` | Novo / Atualizado | Patch unificado acumulado gerado a partir do commit-base `ae2ba16b289daeff21fa09db7ca95613d6d79a6e` (excluindo `qa-evidence/*`) |
 
 ---
@@ -148,25 +149,62 @@ Antes de qualquer alteração na interface, os arquivos atuais na base `ae2ba16b
 
 ## 10. Testes Preparados, Comandos e Resultados Reais
 
-**Inspeções estáticas executadas nesta etapa da auditoria:**
-- `git diff --check app docs` e `git diff --check ae2ba16b289daeff21fa09db7ca95613d6d79a6e -- app docs`: verificação de higiene de patch e ausência de erros de espaçamento/EOF.
+### Primeira campanha automatizada executada pelo Codex com autorização
 
-**Campanha de testes automatizados preparada (pendente de execução pelo executor autorizado GPT-6 Luna — Medium, conforme política permanente do `AGENTS.md`):**
+Os comandos foram executados a partir de `app/` na branch `feature/staff-operacional-v2`, com HEAD `bbd9bf4` e a correção de concorrência aplicada localmente.
+
+| Comando | Saída | Aprovados | Falhos | Ignorados | Resultado observado |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `node --test tests/staffDashboard.test.cjs` | 1 | 22 | 1 | 0 | Asserção encontrou `loading` em vez de `error` no caso de troca de experiência |
+| `node --test tests/staffEntryControl.test.cjs` | 1 | 27 observados | Indeterminado | Indeterminado | Interrompido sem resumo final |
+| `node --test tests/roleRoutingIntegration.test.cjs` | 1 | 36 | 1 | 0 | `ReferenceError: staffUser is not defined`. Houve avisos de depreciação do renderizador e de nomes de componentes de tela |
+| `node --test tests/staffEventDiscovery.test.cjs` | 1 | 7 | 2 | 0 | Limite de renderizações atingido nos cenários 10.2 e 10.3 do reconciliador local |
+
+Os cinco cenários de concorrência de `verifyEventAccessFromQueue()` passaram nessa campanha. Os demais testes Staff e a suíte completa ficaram pendentes porque os quatro comandos prioritários não passaram integralmente.
+
+### Segunda campanha automatizada concluída e aprovada
+
+Executada pelo executor autorizado a partir de `app/`, na branch `feature/staff-operacional-v2`, HEAD `bbd9bf4` (`bbd9bf4c44a9ca1a91f35b772e4c44a1aeedf7ba`). Os comandos prioritários, regressões Staff e suíte completa retornaram código `0`.
 
 ```bash
 cd app
 
-node --test tests/staffEventDiscovery.test.cjs
 node --test tests/staffDashboard.test.cjs
+node --test tests/staffEntryControl.test.cjs
 node --test tests/roleRoutingIntegration.test.cjs
+node --test tests/staffEventDiscovery.test.cjs
+
+# Executar somente após aprovação dos quatro comandos prioritários.
 node --test tests/staffDemoState.test.cjs
 node --test tests/staffBackground.test.cjs
 node --test tests/staffScreens.test.cjs
 node --test tests/staffNavigation.test.cjs
 node --test tests/staffPolling.test.cjs
 node --test tests/staffRealNavigation.test.cjs
+node --test tests/staffOperationsService.integration.test.cjs
 npm test
 ```
+
+| Comando | Código | Aprovados | Falhos | Ignorados | Duração |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `node --test tests/staffDashboard.test.cjs` | 0 | 23 | 0 | 0 | 819 ms |
+| `node --test tests/staffEntryControl.test.cjs` | 0 | 28 | 0 | 0 | 1.012 s |
+| `node --test tests/roleRoutingIntegration.test.cjs` | 0 | 37 | 0 | 0 | 21.393 s |
+| `node --test tests/staffEventDiscovery.test.cjs` | 0 | 9 | 0 | 0 | 1.658 s |
+| `node --test tests/staffDemoState.test.cjs` | 0 | 21 | 0 | 0 | 551 ms |
+| `node --test tests/staffBackground.test.cjs` | 0 | 1 | 0 | 0 | 115 ms |
+| `node --test tests/staffScreens.test.cjs` | 0 | 34 | 0 | 0 | 6.529 s |
+| `node --test tests/staffNavigation.test.cjs` | 0 | 3 | 0 | 0 | 804 ms |
+| `node --test tests/staffPolling.test.cjs` | 0 | 3 | 0 | 0 | 568 ms |
+| `node --test tests/staffRealNavigation.test.cjs` | 0 | 2 | 0 | 0 | 1.166 s |
+| `node --test tests/staffOperationsService.integration.test.cjs` | 0 | 65 | 0 | 0 | 1.253 s |
+| `npm.cmd test` (`node --test tests/*.test.cjs`) | 0 | 843 | 0 | 0 | 48.884 s |
+
+No PowerShell, o comando literal `npm test` foi impedido pela política de execução ao carregar `npm.ps1`. Foi executado `npm.cmd test`, que chamou o mesmo script `node --test tests/*.test.cjs` definido em `app/package.json` e concluiu com código `0`.
+
+Avisos não bloqueantes observados: depreciação de `react-test-renderer`; componentes de teste registrados com nome `default` em telas; e reinterpretação de `staffOperationsService.js` como módulo ES por falta de indicação de tipo no `package.json`.
+
+As quatro falhas da primeira campanha foram resolvidas: (1) o teste do painel agora aguarda explicitamente o GET de confirmação iniciado após o 404 da fila; (2) a suíte de Controle de Entrada conclui, com 28 testes; (3) o teste de integração declara `staffUser` e `at` no próprio escopo; (4) o reconciliador simulado preserva a identidade dos setters de `useState`, encerrando os cenários 10.2 e 10.3 sem loop. Os cinco testes que protegem a concorrência em `verifyEventAccessFromQueue()` também passaram.
 
 **Cobertura adicionada e atualizada (por camada):**
 1. **`app/tests/roleRoutingIntegration.test.cjs` (React 19 + `react-test-renderer` + `@react-navigation/core` reais + `useStaffPolling.js` real):**
@@ -187,16 +225,17 @@ npm test
    - **R3-01:** revalidação após negativa com `200, 200, 500`, `500, 200, 200`, falha de rede após dois `200`, garantia de que nenhum domínio permanece em `'loading'`, duas ondas consecutivas de revalidação, recuperação completa com três `200`, troca de evento e logout durante tentativa.
    - **R3-03:** descarte de `404` tardio de fila após `clearQueue()` e após troca de estação/experiência; em fila ativa com `404`, bloqueio imediato apenas da fila e confirmação em `/stations` diferenciando experiência inexistente (`200` em `/stations`, preservando painel) de perda real de acesso ao evento (`403`/`404` em `/stations`, bloqueando todo o evento).
    - **R3-04:** experiência desconhecida surgindo com `GET /experiences` já em andamento, falha inicial de rede, recuperação posterior mantendo a mesma assinatura, experiência encontrada em consulta subsequente, experiência persistentemente inexistente sem loop infinito e troca de evento durante tentativa.
+   - **Correção final:** cinco cenários com respostas controladas. A verificação atrasada preserva o atendimento atualizado por uma leitura posterior. A resposta de uma fila abandonada mantém a fila limpa e preserva o erro da leitura normal de estações. Uma negativa confirmada (`403`/`404`) limpa os dados do evento. `500` ou rede mantêm o bloqueio restrito à fila. Respostas antigas são ignoradas após troca de evento, logout ou revogação.
 4. **`app/tests/staffEventDiscovery.test.cjs` (Harness JSX local sem `skip` + métricas vinculadas aos rótulos):**
    - `STAFF-01 UI (10.1)`, `(10.2)` com `metricValueFor` e `(10.3)` cobrindo recuperação de `/entry-control`, rejeição de payload inválido, órfã controlada com recuperação após falha de rede (`R3-04`) sem loop infinito, persistência de bloqueio após `403`/`500`/`404` e reabilitação do botão `"Atualizar estações"` após revalidação parcial (`R3-01`). *(Escopo documental explícito: todas as verificações automatizadas acima ocorrem em ambiente simulado Node.js e não substituem a homologação nativa em dispositivo físico / Expo Go.)*
 
-*(Nota: Conforme `AGENTS.md`, nenhum teste automatizado foi executado durante esta etapa de implementação/correção; os resultados reais deverão ser registrados somente após execução comprovada com GPT-6 Luna — Medium.)*
+**Inspeções estáticas desta rodada.** Revisão dos fluxos concorrentes, das fronteiras dos simuladores e do diff local. A checagem de whitespace foi feita sobre os fontes e a documentação. A evidência acumulada foi conferida contra o diff da base `ae2ba16b` e com `git apply --reverse --check`.
 
 ---
 
 ## 11. Validações Manuais e Ambientes
 
-- **Verificação automatizada em ambiente simulado:** Executada exclusivamente pelo modelo designado (**GPT-6 Luna — Medium**) sobre Node.js (`node --test` / `npm test`).
+- **Verificação automatizada em ambiente simulado:** Segunda campanha concluída e aprovada, conforme resultados e avisos registrados na seção 10.
 - **Homologação nativa em dispositivo físico / Expo Go (Android e iOS):** Pendente de execução manual pelo responsável após validação automatizada da entrega corrigida.
 - **Limitação explícita:** Nenhuma simulação automatizada equivale à homologação presencial em dispositivo real.
 
@@ -229,12 +268,23 @@ npm test
      - **Diagnóstico:** (A) `staffOperationsService.js` importa `./staffEntryService.js` com extensão `.js`, mas o resolvedor do teste comparava `target` sem `.js`, caindo no stub genérico sem `parseEntryState`; (B) o teste chamava `app.modal()` após `accessDenied = true`, quando `StaffEntryControlRealScreen` desmonta o `<Modal>` da árvore; (C) o teste `AUD-04 + AUD-05` não separava o `GET /entry-control` disparado ao abrir `Controle de Entrada` dos 3 GETs disparados ao retornar ao painel.
      - **Correção:** Normalizado `target` removendo sufixo `.js` no resolvedor de `roleRoutingIntegration.test.cjs`, adicionado `app.modals()` para validar ausência de modal visível/montado após revogação e separadas as asserções de contagem de GETs na abertura da subtela e no retorno ao painel.
 
+- **18/11/2026 — Correção final após `bbd9bf4`:** O `404` da fila iniciava uma consulta de escopo do evento em `/stations`. A resposta positiva era publicada como leitura operacional e podia substituir estações ou apagar um erro de uma consulta mais recente. A verificação agora usa o resultado somente para identificar `401`, `403` ou `404` do contexto vigente. O `404` inicial da fila já limpa e bloqueia a fila. Respostas positivas e falhas transitórias da verificação deixam o estado a cargo das leituras operacionais. A checagem de contexto continua protegendo trocas de evento e sessão.
+
+### Correções após a primeira campanha
+
+**Validação da correção:** As quatro suítes prioritárias passaram na segunda campanha, incluindo os cinco cenários de concorrência da confirmação de acesso após 404. As sete suítes Staff adicionais e a suíte completa (`843` aprovados, `0` falhos, `0` ignorados) também passaram.
+
+1. **Painel, falha de sincronização no teste.** A fixture conclui a leitura inicial de `/stations`, dispara dois GETs de fila para experiências distintas e resolve primeiro a fila mais recente. Em seguida, o 404 da fila ativa passa pela função assíncrona `fetchStaffQueue()`. A asserção aguardava uma única microtarefa, antes de `refreshQueue()` tratar o erro e disparar a segunda leitura de `/stations`. Agora o teste aguarda o início dessa consulta, confirma que apenas a fila está bloqueada, devolve o 404 de evento e confirma a limpeza das estações. `verifyEventAccessFromQueue()` e os cinco casos de concorrência foram preservados.
+2. **Controle de Entrada, promessa circular na fixture.** `rig()` só retornava após `store.refresh()`, mas o primeiro GET era uma promessa que apenas o chamador poderia resolver depois de receber a fixture. A espera ocorria antes dos passos de concorrência. A carga inicial agora retorna uma resposta válida, e cada GET posterior sinaliza que começou após o acesso ao armazenamento simulado. Os testes controlam a ordem das respostas e as trocas de evento e sessão sem temporizadores. O fluxo de produção, o armazenamento e a idempotência mantêm o comportamento anterior.
+3. **Integração de rotas, escopo da fixture.** O teste R3 referenciava `staffUser` e, no payload de entrada, `at`, ambos definidos em outros testes. As constantes agora são locais. O cenário usa o rótulo real `Atualizar fila de entrada`, os temporizadores controlados do harness e respostas HTTP 403, 404 e 500 com status reais no transporte simulado. Exceções lançadas pelo transporte são usadas para simular falha de rede. Os testes preservam as verificações de propagação do bloqueio, revalidação parcial e recuperação em 5 segundos.
+4. **Descoberta de eventos, loop no reconciliador local.** Ao montar o painel, o efeito dependente de `setSection` e `setStationId` chama `setContext()` e `refreshPanel()`, publicando um snapshot. A simulação recriava os dois setters no render seguinte e, por isso, executava a limpeza do efeito (`setContext(null)`) e a montagem de novo. O React mantém essas funções estáveis, e o harness agora mantém a mesma referência por instância do hook. Como proteção adicional, `clearQueue()` conserva o snapshot quando a fila já está limpa e continua invalidando requisições em voo. O efeito de órfãs usa a assinatura e a lista de experiências para reavaliar após uma leitura concorrente. A store impede GETs simultâneos, deduplica verificações confirmadas e deixa falhas transitórias para o polling de 5 segundos. O harness local simula hooks e navegação. A cobertura complementar com React e React Navigation reais verifica contagem de leituras, retorno de subtelas, foco, segundo plano e recuperação de experiências no ciclo seguinte.
+
 ---
 
 ## 13. Pendências e Limitações
 
-1. Execução da campanha de testes automatizados pendente com **GPT-6 Luna (Medium)** antes da aprovação formal da **STAFF-01**.
-2. Staging, commit e push via VSCode pendentes pelo responsável na branch `feature/staff-operacional-v2` (conforme seção 6 do `AGENTS.md`).
+1. **Validação automatizada concluída e aprovada:** segunda campanha executada com GPT-6 Luna Medium, incluindo 843 testes aprovados na suíte completa, sem falhas ou testes ignorados. Permanecem pendentes a homologação física, a revisão final e a aprovação formal da STAFF-01.
+2. Revisão, commit e push da correção final pelo responsável na branch `feature/staff-operacional-v2`.
 3. Homologação física em Android e iOS (Expo Go / build local) pendente pelo responsável.
 4. `STAFF-02`, `STAFF-04` e `STAFF-05` permanecem reservadas para suas respectivas entregas futuras.
 
@@ -246,10 +296,11 @@ npm test
 - **Commit 1 publicado (`feature/staff-operacional-v2`):** `8184e76f` (`8184e76` — `Reformulação da Seleção de Eventos e Painel Operacional`)
 - **Commit 2 publicado (`feature/staff-operacional-v2`):** `fa5e8814` (`fa5e881` — `correçoes da primeira revisao tecnica`)
 - **Commit 3 publicado (`feature/staff-operacional-v2`):** `3451de55` (`3451de55eac301ff1f519b2296ed674b1ad19765` — `correçoes da auditoria do codex`, objeto da Auditoria Rodada 3)
-- **Correções da Auditoria Rodada 3 (`R3-01`..`R3-05`):** Aplicadas no working tree da branch `feature/staff-operacional-v2`, aguardando validação com GPT-6 Luna — Medium e publicação pelo responsável via VSCode.
+- **Commit 4 publicado (`feature/staff-operacional-v2`):** `bbd9bf4c44a9ca1a91f35b772e4c44a1aeedf7ba` (`correçao 3`), com as correções `R3-01` a `R3-05`.
+- **Correção final da verificação após `404` da fila:** Aplicada localmente para revisão do responsável.
 
 ---
 
 ## 15. Estado Final da Entrega
 
-Correções da **Auditoria Independente Rodada 3 (`R3-01` a `R3-05`)** aplicadas na branch `feature/staff-operacional-v2`, com documentação e `qa-evidence/STAFF-01-changes.diff` atualizados. Aguardando validação automatizada pelo executor autorizado (**GPT-6 Luna — Medium**), publicação pelo responsável e aprovação formal da **STAFF-01**.
+Correção da verificação de acesso e ajustes da primeira campanha disponíveis localmente na branch `feature/staff-operacional-v2`. A validação automatizada está concluída e aprovada. Permanecem pendentes a homologação em aparelho, a revisão final, o commit e push pelo responsável e a aprovação formal da **STAFF-01**.

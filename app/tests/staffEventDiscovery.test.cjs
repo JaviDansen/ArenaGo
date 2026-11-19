@@ -250,18 +250,20 @@ function createUiRuntime(jsxRuntime) {
       const inst = activeInst;
       const idx = activeCursor++;
       if (!(idx in inst.slots)) {
-        inst.slots[idx] = typeof initial === 'function' ? initial() : initial;
-      }
-      const setter = (update) => {
-        if (!inst.mounted && !renderingNow) return;
-        const nextVal = typeof update === 'function' ? update(inst.slots[idx]) : update;
-        if (!Object.is(inst.slots[idx], nextVal)) {
-          inst.slots[idx] = nextVal;
+        // O React mantém o mesmo setter durante toda a vida do hook.
+        const slot = { value: typeof initial === 'function' ? initial() : initial };
+        slot.set = (update) => {
+          if (!inst.mounted && !renderingNow) return;
+          const nextVal = typeof update === 'function' ? update(slot.value) : update;
+          if (Object.is(slot.value, nextVal)) return;
+          slot.value = nextVal;
           dirty = true;
           if (!renderingNow && batchDepth === 0) flushWork();
-        }
-      };
-      return [inst.slots[idx], setter];
+        };
+        inst.slots[idx] = slot;
+      }
+      const { value, set } = inst.slots[idx];
+      return [value, set];
     },
     useRef(initial) {
       const inst = activeInst;
@@ -666,6 +668,7 @@ test('STAFF-01 UI (10.1): Seleção de Eventos cobre carregamento, erro vs vazio
 
 test('STAFF-01 UI (10.2): Painel Operacional exibe resumo real, Controle de Entrada, agrupamento de estações, falha parcial e navegação sem mistura de eventos', async () => {
   let failEntry = false;
+  const initialReads = [];
   let entryPendingCall = {
     id: CALL_1,
     participationId: PART_CALLED,
@@ -678,6 +681,8 @@ test('STAFF-01 UI (10.2): Painel Operacional exibe resumo real, Controle de Entr
   const rig = createStaffUiHarness({
     initialAuth: makeAuthIdentity('u-1', 1, 1),
     onGet: (url) => {
+      const eventPrefix = `/staff/events/${EV_A}/`;
+      if (url.startsWith(eventPrefix)) initialReads.push(url.slice(eventPrefix.length));
       if (url === '/staff/events') {
         return Promise.resolve({
           events: [
@@ -766,6 +771,7 @@ test('STAFF-01 UI (10.2): Painel Operacional exibe resumo real, Controle de Entr
     await rig.mount();
     await rig.press('Selecionar evento Arena Neon UNDB');
     await rig.settle();
+    assert.deepEqual(initialReads.sort(), ['entry-control', 'experiences', 'stations']);
 
     // 1. Nome do evento não repetido e ausência de dados fictícios dos mockups
     assert.equal(rig.textOccurrences('Arena Neon UNDB'), 1, 'nome do evento aparece uma única vez no painel');

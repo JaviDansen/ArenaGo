@@ -130,8 +130,13 @@ test('respostas inválidas e filas concorrentes não substituem a leitura mais r
 
 test('troca de experiência descarta fila anterior e 404 limpa os dados do evento', async () => {
   const current = context(), requests = [];
-  const store = createStaffDashboardStore({ getContext: () => current, client: { get: () => {
-    const request = deferred(); requests.push(request); return request.promise;
+  const verificationStarted = deferred();
+  const stationsPath = `/staff/events/${current.eventId}/stations`;
+  const store = createStaffDashboardStore({ getContext: () => current, client: { get: (path) => {
+    const request = { ...deferred(), path };
+    requests.push(request);
+    if (path === stationsPath && requests.length > 1) verificationStarted.resolve(request);
+    return request.promise;
   } } });
   store.setContext(current);
   const load = store.refreshStations();
@@ -143,12 +148,18 @@ test('troca de experiência descarta fila anterior e 404 limpa os dados do event
   requests[1].resolve(queue()); await old;
   assert.equal(store.getSnapshot().queue.experienceId, secondExperienceId);
   const denied = store.refreshQueue(secondExperienceId);
+  assert.equal(requests[3].path, `/staff/events/${current.eventId}/experiences/${secondExperienceId}/queue`);
   requests[3].reject(Object.assign(new Error('404'), { status: 404 }));
-  await Promise.resolve();
+  const verification = await Promise.race([
+    verificationStarted.promise,
+    denied.then(() => assert.fail('O 404 da fila deve iniciar a verificação de acesso ao evento')),
+  ]);
   assert.equal(store.getSnapshot().queueStatus, 'error');
   assert.equal(store.getSnapshot().queueError, 'denied');
   assert.equal(store.getSnapshot().queue, null);
-  requests[4].reject(Object.assign(new Error('404'), { status: 404 }));
+  assert.equal(store.getSnapshot().stationStatus, 'ready');
+  assert.equal(store.getSnapshot().stations.length, 2);
+  verification.reject(Object.assign(new Error('404'), { status: 404 }));
   await denied;
   assert.equal(store.getSnapshot().stationError, 'denied');
   assert.equal(store.getSnapshot().queue, null);
@@ -214,6 +225,9 @@ test('retorno da estação invalida consulta de fila ainda pendente', async () =
   store.setContext(current);
   const load = store.refreshStations(); requests[0].resolve(stations()); await load;
   const pending = store.refreshQueue(experienceId); store.clearQueue();
+  const cleared = store.getSnapshot();
+  store.clearQueue();
+  assert.strictEqual(store.getSnapshot(), cleared);
   requests[1].resolve(queue()); await pending;
   assert.equal(store.getSnapshot().queue, null);
   assert.equal(store.getSnapshot().experienceId, null);
@@ -956,6 +970,153 @@ test('R3-03: negativa 404 em fila abandonada é descartada e 404 na fila ativa d
   assert.equal(store.getSnapshot().experiences.length, 0);
   assert.equal(store.getSnapshot().entry, null);
   assert.equal(store.getSnapshot().queue, null);
+});
+
+async function startQueueAccessVerification({ poll = false } = {}) {
+  let current = context();
+  let stationResult = stations();
+  let queueDenied = false;
+  let verificationPending = false;
+  const verificationStarted = deferred();
+  const verification = deferred();
+  const store = createStaffDashboardStore({
+    getContext: () => current,
+    client: {
+      async get(url) {
+        if (url.endsWith('/queue')) {
+          if (!queueDenied) return queue(current.eventId);
+          verificationPending = true;
+          throw Object.assign(new Error('Fila indisponível'), { status: 404 });
+        }
+        if (url.endsWith('/stations')) {
+          if (verificationPending) {
+            verificationPending = false;
+            verificationStarted.resolve();
+            return verification.promise;
+          }
+          return stationResult;
+        }
+        if (url.endsWith('/experiences')) {
+          return { eventId: current.eventId, experiences: [{ id: experienceId, name: 'Just Dance' }] };
+        }
+        if (url.endsWith('/entry-control')) return entrySummary({ eventId: current.eventId });
+        throw new Error(`GET inesperado: ${url}`);
+      },
+    },
+  });
+
+  store.setContext(current);
+  await store.refreshPanel();
+  if (poll) await store.refreshQueue(experienceId);
+  queueDenied = true;
+  const queueRead = poll ? store.pollQueue() : store.refreshQueue(experienceId);
+  await Promise.race([
+    verificationStarted.promise,
+    queueRead.then(() => assert.fail('O 404 da fila deve iniciar a verificação de acesso ao evento')),
+  ]);
+  return {
+    store, verification, queueRead,
+    setStations(next) { stationResult = next; },
+    setContext(next) { current = next; store.setContext(next); },
+  };
+}
+
+test('verificação de acesso atrasada após 404 preserva estações atualizadas no retorno ao painel', async () => {
+  const { store, verification, queueRead, setStations } = await startQueueAccessVerification();
+  const newer = stations();
+  newer.stations[0].pendingServiceSessionId = secondStationId;
+
+  store.clearQueue();
+  setStations(newer);
+  await store.revalidateOnReturn();
+  assert.equal(store.getSnapshot().stations[0].pendingServiceSessionId, secondStationId);
+
+  verification.resolve(stations());
+  await queueRead;
+  assert.equal(store.getSnapshot().stations[0].pendingServiceSessionId, secondStationId);
+  assert.equal(store.getSnapshot().stationStatus, 'ready');
+  assert.equal(store.getSnapshot().stationError, null);
+});
+
+test('verificação positiva após abandonar a fila preserva a fila limpa e o erro da leitura normal', async () => {
+  const { store, verification, queueRead, setStations } = await startQueueAccessVerification();
+  store.clearQueue();
+  setStations({ eventId, stations: null });
+  await store.refreshStations();
+  const snapshot = store.getSnapshot();
+  assert.equal(snapshot.stationStatus, 'error');
+  assert.equal(snapshot.stationError, 'unavailable');
+  assert.equal(snapshot.queueStatus, 'idle');
+  assert.equal(snapshot.experienceId, null);
+  assert.equal(snapshot.queue, null);
+  assert.equal(snapshot.accessLocked, false);
+
+  verification.resolve(stations());
+  await queueRead;
+  assert.equal(store.getSnapshot(), snapshot);
+});
+
+test('negativa confirmada na verificação de escopo do evento limpa os dados protegidos', async () => {
+  for (const status of [403, 404]) {
+    const { store, verification, queueRead } = await startQueueAccessVerification();
+    assert.equal(store.getSnapshot().queueError, 'denied');
+    assert.equal(store.getSnapshot().accessLocked, false);
+
+    verification.reject(Object.assign(new Error('Acesso ao evento negado'), { status }));
+    await queueRead;
+    const snapshot = store.getSnapshot();
+    assert.equal(snapshot.accessStatus, 'denied');
+    assert.equal(snapshot.accessLocked, true);
+    assert.equal(snapshot.stations.length, 0);
+    assert.equal(snapshot.experiences.length, 0);
+    assert.equal(snapshot.entry, null);
+    assert.equal(snapshot.queue, null);
+  }
+});
+
+test('falha transitória na verificação mantém só a fila bloqueada e preserva as estações', async () => {
+  for (const details of [{ status: 500 }, { isNetworkError: true }]) {
+    const { store, verification, queueRead } = await startQueueAccessVerification({ poll: true });
+    const snapshot = store.getSnapshot();
+    assert.equal(snapshot.queueStatus, 'error');
+    assert.equal(snapshot.queueError, 'denied');
+    assert.equal(snapshot.queue, null);
+    assert.equal(snapshot.accessStatus, 'granted');
+    assert.equal(snapshot.accessLocked, false);
+    assert.equal(snapshot.stationError, null);
+
+    verification.reject(Object.assign(new Error('Falha transitória'), details));
+    await queueRead;
+    assert.equal(store.getSnapshot(), snapshot);
+  }
+});
+
+test('verificação antiga preserva o novo evento, o logout e a revogação do contexto vigente', async () => {
+  const switched = await startQueueAccessVerification();
+  switched.setContext(context(otherEventId));
+  switched.setStations(stations(otherEventId));
+  await switched.store.refreshPanel();
+  const nextEvent = switched.store.getSnapshot();
+  assert.equal(nextEvent.context.eventId, otherEventId);
+  assert.equal(nextEvent.stationStatus, 'ready');
+  switched.verification.reject(Object.assign(new Error('Evento anterior'), { status: 404 }));
+  await switched.queueRead;
+  assert.equal(switched.store.getSnapshot(), nextEvent);
+
+  const loggedOut = await startQueueAccessVerification();
+  loggedOut.setContext(null);
+  const empty = loggedOut.store.getSnapshot();
+  loggedOut.verification.resolve(stations());
+  await loggedOut.queueRead;
+  assert.equal(loggedOut.store.getSnapshot(), empty);
+
+  const revoked = await startQueueAccessVerification();
+  revoked.store.reportAccessDenied();
+  const locked = revoked.store.getSnapshot();
+  assert.equal(locked.accessLocked, true);
+  revoked.verification.resolve(stations());
+  await revoked.queueRead;
+  assert.equal(revoked.store.getSnapshot(), locked);
 });
 
 test('R3-04: recuperação controlada de experiências desconhecidas (GET em voo, falha de rede, mesma assinatura e inexistente sem loop)', async () => {

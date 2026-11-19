@@ -411,39 +411,15 @@ export function createStaffDashboardStore({ client, getContext }) {
     }
   }
 
-  async function verifyEventAccessFromQueue(context, revision, experienceId, queueReq) {
+  async function verifyEventAccessFromQueue(context, revision) {
     try {
-      const { stations } = await fetchStaffStations(client, context.eventId);
-      if (revision !== generation || !isCurrent(context) || accessLocked) return;
-      const keepQueueBlocked = queueReq === queueGeneration && state.experienceId === experienceId;
-      const nextState = {
-        ...state,
-        stationStatus: 'ready',
-        stations,
-        stationError: null,
-        accessStatus: 'granted',
-        accessLocked: false,
-        ...(keepQueueBlocked ? { queueStatus: 'error', queue: null, queueError: 'denied' } : {}),
-      };
-      if (!computeOrphanSignature(nextState)) {
-        orphanCheckedSignatures.clear();
-      }
-      publish(nextState);
+      // O 404 já bloqueou a fila. Esta leitura só verifica se a negativa vale para o evento.
+      await fetchStaffStations(client, context.eventId);
     } catch (verifyError) {
       if (revision !== generation || !isCurrent(context)) return;
       const verifyKind = errorKind(verifyError);
       if (verifyKind === 'denied' || verifyKind === 'session') {
         denied(verifyKind);
-        return;
-      }
-      if (!accessLocked && queueReq === queueGeneration && state.experienceId === experienceId) {
-        publish({
-          ...state,
-          queueStatus: 'error',
-          queue: null,
-          queueError: 'denied',
-          ...(state.stationStatus === 'ready' ? { stationError: 'stale' } : {}),
-        });
       }
     }
   }
@@ -466,7 +442,7 @@ export function createStaffDashboardStore({ client, getContext }) {
       if (error?.status === 403) return denied('denied');
       if (error?.status === 404) {
         publish({ ...state, queueStatus: 'error', queue: null, queueError: 'denied' });
-        await verifyEventAccessFromQueue(context, revision, experienceId, request);
+        await verifyEventAccessFromQueue(context, revision);
         return;
       }
       publish({ ...state, queueStatus: 'error', queue: null, queueError: kind });
@@ -489,7 +465,7 @@ export function createStaffDashboardStore({ client, getContext }) {
       if (error?.status === 403) return denied('denied');
       if (error?.status === 404) {
         publish({ ...state, queueStatus: 'error', queue: null, queueError: 'denied' });
-        await verifyEventAccessFromQueue(context, revision, experienceId, request);
+        await verifyEventAccessFromQueue(context, revision);
         return;
       }
       publish({ ...state, queueError: 'stale' });
@@ -501,7 +477,9 @@ export function createStaffDashboardStore({ client, getContext }) {
   function clearQueue() {
     queueGeneration += 1;
     silentQueue = false;
-    if (isCurrent()) publish({ ...state, experienceId: null, queueStatus: 'idle', queue: null, queueError: null });
+    if (!isCurrent()) return;
+    if (state.experienceId === null && state.queueStatus === 'idle' && state.queue === null && state.queueError === null) return;
+    publish({ ...state, experienceId: null, queueStatus: 'idle', queue: null, queueError: null });
   }
 
   function refreshPanel() {
