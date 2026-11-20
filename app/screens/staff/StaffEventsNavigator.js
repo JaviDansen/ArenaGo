@@ -728,40 +728,42 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
 
       {section === 'station' && (
         <>
+          {!accessLost && (snapshot.stationStatus === 'loading' || snapshot.experienceStatus === 'loading') && (
+            <View accessibilityRole="progressbar" style={styles.stateCard}>
+              <ActivityIndicator color={c.accent} />
+              <Text style={styles.message}>Carregando estação...</Text>
+            </View>
+          )}
+          {ready && (!station || !stationExperience) && (
+            <View style={styles.emptyCard}>
+              <Text style={styles.cardTitle}>Estação indisponível</Text>
+              <Text style={styles.message}>
+                A estação selecionada não está disponível neste evento. Volte ao painel para atualizar.
+              </Text>
+            </View>
+          )}
           {ready && station && stationExperience && (
             <>
-              <Text style={styles.eventName}>{station.label}</Text>
-              <Text style={styles.message}>Experiência: {stationExperience.name}</Text>
-              <Text style={styles.message}>Disponibilidade: {station.availability === 'available' ? 'Disponível' : 'Indisponível'}</Text>
-              <Text style={styles.message}>Atendimento pendente: {station.pendingServiceSessionId ? 'Sim' : 'Não'}</Text>
-              <Text style={styles.message}>Fila compartilhada da experiência</Text>
-              {snapshot.experienceId === station.experienceId && snapshot.queueStatus === 'loading' && (
-                <Text style={styles.message}>Carregando fila...</Text>
-              )}
               {snapshot.experienceId === station.experienceId && snapshot.queueStatus === 'error' && (
-                <Text accessibilityRole="alert" style={styles.alertMessage}>{messages[snapshot.queueError]}</Text>
-              )}
-              {snapshot.experienceId === station.experienceId && snapshot.queueStatus === 'ready' && (
-                <View style={styles.emptyCard}>
-                  <Text style={styles.eventName}>Fila de {stationExperience.name}</Text>
-                  <Text style={styles.message}>Pessoas em espera: {snapshot.queue.waitingCount}</Text>
-                  <Text style={styles.message}>
-                    Janela operacional para chamadas: {snapshot.queue.canCallWaitingEntries ? 'Aberta' : 'Fechada'}
-                  </Text>
+                <View style={styles.errorCard}>
+                  <Text accessibilityRole="alert" style={styles.alertMessage}>{messages[snapshot.queueError]}</Text>
                 </View>
-              )}
-              {snapshot.experienceId === station.experienceId && snapshot.queueStatus !== 'loading' && (
-                <Button label="Atualizar fila" onPress={() => { void store.refreshQueue(); }} />
               )}
               <StaffStationOperationalScreen
                 event={event}
                 experience={stationExperience}
                 station={station}
                 isEventCurrent={() => staff.getSelected()?.id === event.id && stationId === station.id && !store.isAccessLocked()}
+                accessDenied={accessLost}
+                accessDeniedKind={snapshot.accessStatus === 'session' ? 'session' : 'denied'}
+                onAccessDenied={(kind) => store.reportAccessDenied(kind)}
+                onRefresh={() => store.refreshQueue(station.experienceId)}
                 onChanged={() => {
                   void (async () => {
-                    await store.refreshStations();
-                    await store.refreshQueue(station.experienceId);
+                    if (store.getSnapshot().stationStatus === 'ready') await store.pollStations();
+                    else await store.refreshStations();
+                    if (store.getSnapshot().queueStatus === 'ready') await store.pollQueue(station.experienceId);
+                    else await store.refreshQueue(station.experienceId);
                   })();
                 }}
               />

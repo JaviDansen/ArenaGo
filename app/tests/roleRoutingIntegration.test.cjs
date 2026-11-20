@@ -181,10 +181,10 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
       }
       if (control.realStaff && ['screens/staff/StaffEventsNavigator', 'services/staffEventsService',
         'screens/staff/StaffEntryControlRealScreen', 'services/staffEntryService', 'services/staffEntryIntentStorage',
-        'screens/staff/StaffStationOperationalScreen', 'services/staffIntentStorage',
-        'services/staffDashboardService', 'services/staffOperationsService', 'screens/staff/useStaffPolling',
-        'screens/staff/components/StaffLiveScreen', 'screens/admin/components/AdminLiveUI',
-        'screens/admin/components/adminTheme'].includes(target)) {
+        'screens/staff/StaffStationOperationalScreen', 'screens/staff/components/StaffStationSections',
+        'services/staffIntentStorage', 'services/staffDashboardService', 'services/staffOperationsService',
+        'screens/staff/useStaffPolling', 'screens/staff/components/StaffLiveScreen',
+        'screens/admin/components/AdminLiveUI', 'screens/admin/components/adminTheme'].includes(target)) {
         return load(`${target}.js`);
       }
       if (target === 'screens/event-entry/EventEntryScreen' && control.modalFixture) {
@@ -1339,23 +1339,30 @@ test('tela real remove chamado somente após confirmação e atualiza estação 
     await app.mount(); await app.act(() => app.manager.login({ email: participant.email, password: 'ficticia' }));
     await app.press('Selecionar evento Evento autorizado');
     await app.press('Selecionar estação Estação real da experiência Experiência real');
-    assert.ok(app.hasText('Participante chamado: Ana'));
-    assert.ok(app.hasText('Aguardando nesta experiência: 3'));
+    assert.ok(app.hasText('ATENDIMENTO ATUAL'));
+    assert.ok(app.hasText('Ana'));
+    assert.ok(app.hasText('Em atendimento'));
+    assert.ok(app.hasText('FILA DA EXPERIÊNCIA'));
+    assert.ok(app.hasText('3 aguardando'));
+    assert.ok(app.hasText('Fila compartilhada entre as estações'));
+    assert.equal(app.hasButton('Chamar próximo'), false);
     for (const [position, name] of [[1, 'Bia'], [2, 'Caio'], [3, 'Dora']]) {
-      assert.ok(app.hasText(`${position}. ${name}`));
+      assert.ok(app.hasText(String(position)));
+      assert.ok(app.hasText(name));
       assert.ok(!app.hasText(`Remover ${name} da fila`));
     }
-    assert.ok(app.hasText('Concluir atendimento'));
-    assert.ok(app.hasText('Registrar ausência'));
-    assert.ok(app.hasText('Remover da fila'));
-    await app.press('Concluir atendimento'); assert.equal(app.modal().props.visible, true);
+    assert.ok(app.hasButton('Concluir experiência'));
+    assert.ok(app.hasButton('Marcar ausência'));
+    assert.ok(app.hasButton('Remover da fila'));
+    await app.press('Concluir experiência'); assert.equal(app.modal().props.visible, true);
     await app.press('CANCELAR OPERAÇÃO'); assert.equal(posts, 0);
-    await app.press('Registrar ausência'); assert.equal(app.modal().props.visible, true);
+    await app.press('Marcar ausência'); assert.equal(app.modal().props.visible, true);
     await app.press('CANCELAR OPERAÇÃO'); assert.equal(posts, 0);
     await app.press('Remover da fila'); assert.equal(posts, 0);
     await app.press('CANCELAR OPERAÇÃO'); assert.equal(posts, 0);
     await app.press('Remover da fila'); await app.press('CONFIRMAR OPERAÇÃO');
-    assert.equal(posts, 1); assert.ok(!app.hasText('Participante chamado: Ana'));
+    assert.equal(posts, 1); assert.ok(!app.hasText('Em atendimento'));
+    assert.ok(app.hasText('Nenhum participante chamado'));
     assert.ok(app.hasText('Operação confirmada pelo servidor.'));
     assert.equal(app.hasButton('Entendi o resultado'), false);
     await app.press('Atualizar atendimento'); assert.equal(posts, 1);
@@ -1386,14 +1393,18 @@ test('painel real apresenta estações por experiência e abre atendimento diret
   assert.ok(app.hasButton('Selecionar estação Estação real da experiência PlayStation'));
   assert.equal(app.hasButton('Estações'), false);
   await app.press('Selecionar estação Estação real da experiência Just Dance');
-  assert.ok(app.hasText('Fila compartilhada da experiência'));
+  assert.ok(app.hasText('Fila compartilhada entre as estações'));
+  assert.equal(app.hasButton('Atualizar fila'), false, 'sem botão duplicado de atualização');
   await app.press('Voltar ao painel'); await app.press('Selecionar estação Console 2 da experiência Just Dance');
-  assert.ok(app.hasText('Fila de Just Dance'));
+  assert.ok(app.hasText('Console 2'));
+  assert.ok(app.hasText('Just Dance'));
+  assert.ok(app.hasText('FILA DA EXPERIÊNCIA'));
   assert.equal(app.calls.filter((url) => url === `/staff/events/${staffEvent.id}/experiences/${realExperienceId}/queue`).length, 2);
   app.back();
   assert.ok(app.hasText('Painel operacional'));
   await app.press('Selecionar estação Estação real da experiência PlayStation');
-  assert.ok(app.hasText('Fila de PlayStation'));
+  assert.ok(app.hasText('PlayStation'));
+  assert.ok(app.hasText('FILA DA EXPERIÊNCIA'));
   assert.ok(app.calls.includes(`/staff/events/${staffEvent.id}/experiences/${secondExperienceId}/stations/${secondExperienceStation.id}/operational-state`));
   await app.press('Voltar ao painel');
   await app.press('Controle de Entrada'); assert.ok(app.hasText('Fila de acesso ao evento'));
@@ -1540,10 +1551,11 @@ test('painel Staff real exibe estação e fila e limpa os dados ao receber 403',
   assert.ok(app.hasText('Estação real'));
   assert.equal(app.hasText('Experiência real'), true, 'painel exibe o nome da experiência no agrupamento');
   await app.press('Selecionar estação Estação real da experiência Experiência real');
-  assert.ok(app.hasText('Pessoas em espera: 0'));
+  assert.ok(app.hasText('0 aguardando'));
+  assert.ok(app.hasText('Fila vazia'));
   assert.ok(!app.hasText('Rafael T.'));
   denied = true;
-  await app.press('Atualizar fila');
+  await app.press('Atualizar atendimento');
   assert.ok(app.hasText('Acesso ao evento ou à experiência indisponível'));
   assert.ok(!app.hasText('Estação real'));
   assert.equal(app.hasButton('Chamar próximo'), false);
@@ -2228,6 +2240,7 @@ test('R3-01, R3-02, R3-03 e R3-04: revalidação parcial não trava botão Atual
   let includeUnknownStation = false;
   let includeUnknownExperience = false;
   let pendingQueueReq = null;
+  let queueReads = 0;
   const pendingEntryReqs = [];
 
   const app = createIntegration({
@@ -2255,6 +2268,7 @@ test('R3-01, R3-02, R3-03 e R3-04: revalidação parcial não trava botão Atual
           return { eventId: staffEvent.id, experiences: list };
         }
         if (route.endsWith('/queue')) {
+          queueReads += 1;
           if (pendingQueueReq) return pendingQueueReq.promise;
           return undefined;
         }
@@ -2293,7 +2307,8 @@ test('R3-01, R3-02, R3-03 e R3-04: revalidação parcial não trava botão Atual
     // 1. R3-03: 404 tardio de fila já abandonada ao voltar ao painel não bloqueia o evento
     pendingQueueReq = deferred();
     await app.press('Selecionar estação Estação real da experiência Just Dance');
-    assert.ok(app.hasText('Carregando fila...'));
+    assert.equal(queueReads, 1, 'leitura de fila iniciada antes do retorno ao painel');
+    assert.ok(app.hasText('Estação real'));
     await app.press('Voltar ao painel');
     await app.act(async () => {
       pendingQueueReq.resolve({ statusCode: 404, body: { code: 'RESOURCE_NOT_FOUND' } });
@@ -2356,6 +2371,241 @@ test('R3-01, R3-02, R3-03 e R3-04: revalidação parcial não trava botão Atual
   } finally {
     pendingQueueReq?.resolve({ statusCode: 500 });
     for (const request of pendingEntryReqs) request.resolve({ statusCode: 500 });
+    app.dispose();
+  }
+});
+
+test('STAFF-02: estados A e B da Estação, fila compartilhada, conclusão, ausência (reinserção e corte), indisponibilidade e negativa 403 propagada', { skip }, async () => {
+  const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
+  const secure = new Map();
+  const secondStation = {
+    id: '55555555-5555-4555-8555-555555555555',
+    experienceId: realExperienceId,
+    label: 'Estação 02',
+    availability: 'unavailable',
+    pendingServiceSessionId: null,
+  };
+  const primaryStation = {
+    ...realStation,
+    label: 'Estação Alpha',
+    availability: 'available',
+    pendingServiceSessionId: null,
+  };
+  const entryA = '77777777-7777-4777-8777-777777777771';
+  const entryB = '77777777-7777-4777-8777-777777777772';
+  const entryC = '77777777-7777-4777-8777-777777777773';
+  const entryRequeued = '77777777-7777-4777-8777-777777777779';
+  const sessionA = '88888888-8888-4888-8888-888888888881';
+  const sessionB = '88888888-8888-4888-8888-888888888882';
+  const sessionC = '88888888-8888-4888-8888-888888888883';
+
+  let waiting = [
+    { queueEntryId: entryA, displayName: 'Mariana Costa', position: 1 },
+    { queueEntryId: entryB, displayName: 'Lucas Ferreira', position: 2 },
+    { queueEntryId: entryC, displayName: 'Rafael Oliveira', position: 3 },
+  ];
+  let pendingCall = null;
+  let requeueOnAbsent = true;
+  let denyOperational = false;
+  const posts = [];
+
+  const syncStations = () => [
+    { ...primaryStation, pendingServiceSessionId: pendingCall?.serviceSessionId ?? null },
+    secondStation,
+  ];
+  const makeOperational = (stationObj) => {
+    const isPrimary = stationObj.id === primaryStation.id;
+    const activePending = isPrimary ? pendingCall : null;
+    const isAvailable = stationObj.availability === 'available';
+    return {
+      eventId: staffEvent.id,
+      experienceId: realExperienceId,
+      stationId: stationObj.id,
+      availability: stationObj.availability,
+      canCall: isAvailable && !activePending && waiting.length > 0,
+      waitingCount: waiting.length,
+      waiting: waiting.map((row, idx) => ({ ...row, position: idx + 1 })),
+      pending: activePending,
+    };
+  };
+
+  const control = {
+    realStaff: true,
+    manualTimers: true,
+    platformOS: 'ios',
+    events: [{ ...staffEvent, name: 'Torneio Real UNDB' }],
+    experiences: [{ id: realExperienceId, name: 'Just Dance Pro' }],
+    secureStore: {
+      isAvailableAsync: async () => true,
+      getItemAsync: async (k) => secure.get(k) ?? null,
+      setItemAsync: async (k, v) => { secure.set(k, v); },
+      deleteItemAsync: async (k) => { secure.delete(k); },
+    },
+    http: async (route, options) => {
+      if (route.endsWith('/stations')) return { eventId: staffEvent.id, stations: syncStations() };
+      if (route.endsWith('/queue')) {
+        return {
+          eventId: staffEvent.id,
+          experienceId: realExperienceId,
+          waitingCount: waiting.length,
+          canCallWaitingEntries: waiting.length > 0,
+          firstWaitingQueueEntryId: waiting[0]?.queueEntryId ?? null,
+        };
+      }
+      if (route.endsWith('/operational-state')) {
+        if (denyOperational) return { statusCode: 403, body: { code: 'STAFF_EVENT_FORBIDDEN' } };
+        const st = route.includes(secondStation.id) ? secondStation : primaryStation;
+        return makeOperational(st);
+      }
+      if (options.method === 'POST' && route.endsWith('/call-next')) {
+        posts.push('call-next');
+        const next = waiting.shift();
+        const sid = posts.length === 1 ? sessionA : posts.length === 3 ? sessionB : sessionC;
+        pendingCall = {
+          serviceSessionId: sid,
+          queueEntryId: next.queueEntryId,
+          displayName: next.displayName,
+          calledAt: new Date(Date.now() - 23_000).toISOString(),
+        };
+        return {
+          statusCode: 201,
+          body: {
+            serviceSession: {
+              id: sid,
+              queueEntryId: next.queueEntryId,
+              experienceId: realExperienceId,
+              station: { id: primaryStation.id, label: primaryStation.label },
+              status: 'pending',
+              calledAt: pendingCall.calledAt,
+            },
+          },
+        };
+      }
+      if (options.method === 'POST' && route.endsWith('/complete')) {
+        posts.push('complete');
+        const sid = pendingCall.serviceSessionId;
+        pendingCall = null;
+        return {
+          body: {
+            serviceSession: { id: sid, status: 'completed', resolvedAt: new Date().toISOString() },
+            queueEntry: { status: 'closed', closeReason: 'completed' },
+            participation: { status: 'active', currentQueueEntryId: null },
+          },
+        };
+      }
+      if (options.method === 'POST' && route.endsWith('/absent')) {
+        posts.push('absent');
+        const prev = pendingCall;
+        pendingCall = null;
+        if (requeueOnAbsent) {
+          waiting.push({ queueEntryId: entryRequeued, displayName: prev.displayName, position: waiting.length + 1 });
+          return {
+            body: {
+              serviceSession: { id: prev.serviceSessionId, status: 'absent' },
+              previousQueueEntry: { id: prev.queueEntryId, status: 'closed', closeReason: 'absent' },
+              requeued: true,
+              newQueueEntry: { id: entryRequeued, status: 'waiting', queueOrder: '4', position: waiting.length },
+            },
+          };
+        }
+        return {
+          body: {
+            serviceSession: { id: prev.serviceSessionId, status: 'absent' },
+            previousQueueEntry: { id: prev.queueEntryId, status: 'closed', closeReason: 'absent' },
+            requeued: false,
+            newQueueEntry: null,
+          },
+        };
+      }
+      return undefined;
+    },
+  };
+
+  const app = createIntegration({ initialUser: staffUser, control });
+  try {
+    await app.mount();
+    await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
+    await app.press('Selecionar evento Torneio Real UNDB');
+    await app.press('Selecionar estação Estação Alpha da experiência Just Dance Pro');
+
+    // Estado A: estação disponível com fila FIFO real e sem valores fictícios dos mockups
+    assert.ok(app.hasText('Estação Alpha'));
+    assert.ok(app.hasText('DISPONÍVEL'));
+    assert.ok(app.hasText('Just Dance Pro'));
+    assert.ok(app.hasText('Torneio Real UNDB'));
+    assert.ok(!app.hasText('Street Fighter'), 'não usa nome fixo do mockup');
+    assert.ok(!app.hasText('BEAST Arena'), 'não usa evento fixo do mockup');
+    assert.ok(app.hasText('FILA DA EXPERIÊNCIA'));
+    assert.ok(app.hasText('3 aguardando'));
+    assert.ok(app.hasText('Mariana Costa'));
+    assert.ok(app.hasText('Lucas Ferreira'));
+    assert.ok(app.hasText('Rafael Oliveira'));
+    assert.ok(app.hasText('Fila compartilhada entre as estações'));
+    assert.ok(app.hasText('ATENDIMENTO ATUAL'));
+    assert.ok(app.hasText('Nenhum participante chamado'));
+    assert.ok(app.hasText('Fila e atendimento atualizados automaticamente'));
+    assert.equal(app.isDisabled('Chamar próximo'), false);
+    assert.equal(app.hasButton('Atualizar fila'), false, 'sem botão duplicado de atualizar');
+    assert.equal(app.hasButton('Voltar ao painel'), true);
+
+    // Transição A -> B: Chamar próximo exibe Mariana Costa em atendimento e remove da lista de espera
+    await app.press('Chamar próximo');
+    assert.ok(app.hasText('Mariana Costa'));
+    assert.ok(app.hasText('Em atendimento'));
+    assert.ok(app.hasText('Chamado há 00:'));
+    assert.ok(app.hasText('2 aguardando'));
+    assert.equal(app.hasButton('Chamar próximo'), false, 'não exibe Chamar próximo durante atendimento pendente');
+    assert.ok(app.hasButton('Concluir experiência'));
+    assert.ok(app.hasButton('Marcar ausência'));
+    assert.ok(app.hasButton('Remover da fila'));
+
+    // Concluir experiência exige confirmação e libera estação para Estado A
+    await app.press('Concluir experiência');
+    assert.equal(app.modal().props.visible, true);
+    await app.press('CONFIRMAR OPERAÇÃO');
+    assert.ok(app.hasText('Operação confirmada pelo servidor.'));
+    assert.ok(app.hasText('Nenhum participante chamado'));
+    assert.equal(app.isDisabled('Chamar próximo'), false);
+
+    // Chamar próximo (Lucas Ferreira) e Marcar ausência com reinserção no fim da fila
+    await app.press('Chamar próximo');
+    assert.ok(app.hasText('Lucas Ferreira'));
+    assert.ok(app.hasText('Em atendimento'));
+    requeueOnAbsent = true;
+    await app.press('Marcar ausência');
+    await app.press('CONFIRMAR OPERAÇÃO');
+    assert.ok(app.hasText('Ausência registrada; participante retornou ao fim da fila.'));
+    assert.ok(app.hasText('2 aguardando'));
+    assert.ok(app.hasText('Rafael Oliveira'));
+    assert.ok(app.hasText('Lucas Ferreira'));
+
+    // Chamar próximo (Rafael Oliveira) e Marcar ausência após corte (sem reinserção)
+    await app.press('Chamar próximo');
+    requeueOnAbsent = false;
+    await app.press('Marcar ausência');
+    await app.press('CONFIRMAR OPERAÇÃO');
+    assert.ok(app.hasText('Ausência registrada; participante não retornou à fila após o corte.'));
+    assert.ok(app.hasText('1 aguardando'));
+
+    // Segunda estação da mesma experiência (INDISPONÍVEL) compartilha a mesma fila e bloqueia Chamar próximo
+    await app.press('Voltar ao painel');
+    await app.press('Selecionar estação Estação 02 da experiência Just Dance Pro');
+    assert.ok(app.hasText('Estação 02'));
+    assert.ok(app.hasText('INDISPONÍVEL'));
+    assert.ok(app.hasText('1 aguardando'));
+    assert.ok(app.hasText('Lucas Ferreira'));
+    assert.equal(app.isDisabled('Chamar próximo'), true);
+
+    // Negativa 403 em /operational-state limpa dados nominais e propaga bloqueio ao painel
+    denyOperational = true;
+    await app.tickTimers(5000);
+    assert.ok(!app.hasText('Lucas Ferreira'));
+    assert.ok(app.hasText('Acesso ao evento ou à experiência indisponível'));
+    await app.press('Voltar ao painel');
+    assert.ok(app.hasText('SEM ACESSO'));
+    assert.equal(app.isDisabled('Controle de Entrada'), true);
+    assert.deepEqual(posts, ['call-next', 'complete', 'call-next', 'absent', 'call-next', 'absent']);
+  } finally {
     app.dispose();
   }
 });

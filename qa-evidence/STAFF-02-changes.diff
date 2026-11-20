@@ -1,0 +1,2399 @@
+diff --git a/app/screens/staff/StaffEventsNavigator.js b/app/screens/staff/StaffEventsNavigator.js
+index 5399e4d..f6c99d5 100644
+--- a/app/screens/staff/StaffEventsNavigator.js
++++ b/app/screens/staff/StaffEventsNavigator.js
+@@ -728,40 +728,42 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
+ 
+       {section === 'station' && (
+         <>
++          {!accessLost && (snapshot.stationStatus === 'loading' || snapshot.experienceStatus === 'loading') && (
++            <View accessibilityRole="progressbar" style={styles.stateCard}>
++              <ActivityIndicator color={c.accent} />
++              <Text style={styles.message}>Carregando estação...</Text>
++            </View>
++          )}
++          {ready && (!station || !stationExperience) && (
++            <View style={styles.emptyCard}>
++              <Text style={styles.cardTitle}>Estação indisponível</Text>
++              <Text style={styles.message}>
++                A estação selecionada não está disponível neste evento. Volte ao painel para atualizar.
++              </Text>
++            </View>
++          )}
+           {ready && station && stationExperience && (
+             <>
+-              <Text style={styles.eventName}>{station.label}</Text>
+-              <Text style={styles.message}>Experiência: {stationExperience.name}</Text>
+-              <Text style={styles.message}>Disponibilidade: {station.availability === 'available' ? 'Disponível' : 'Indisponível'}</Text>
+-              <Text style={styles.message}>Atendimento pendente: {station.pendingServiceSessionId ? 'Sim' : 'Não'}</Text>
+-              <Text style={styles.message}>Fila compartilhada da experiência</Text>
+-              {snapshot.experienceId === station.experienceId && snapshot.queueStatus === 'loading' && (
+-                <Text style={styles.message}>Carregando fila...</Text>
+-              )}
+               {snapshot.experienceId === station.experienceId && snapshot.queueStatus === 'error' && (
+-                <Text accessibilityRole="alert" style={styles.alertMessage}>{messages[snapshot.queueError]}</Text>
+-              )}
+-              {snapshot.experienceId === station.experienceId && snapshot.queueStatus === 'ready' && (
+-                <View style={styles.emptyCard}>
+-                  <Text style={styles.eventName}>Fila de {stationExperience.name}</Text>
+-                  <Text style={styles.message}>Pessoas em espera: {snapshot.queue.waitingCount}</Text>
+-                  <Text style={styles.message}>
+-                    Janela operacional para chamadas: {snapshot.queue.canCallWaitingEntries ? 'Aberta' : 'Fechada'}
+-                  </Text>
++                <View style={styles.errorCard}>
++                  <Text accessibilityRole="alert" style={styles.alertMessage}>{messages[snapshot.queueError]}</Text>
+                 </View>
+               )}
+-              {snapshot.experienceId === station.experienceId && snapshot.queueStatus !== 'loading' && (
+-                <Button label="Atualizar fila" onPress={() => { void store.refreshQueue(); }} />
+-              )}
+               <StaffStationOperationalScreen
+                 event={event}
+                 experience={stationExperience}
+                 station={station}
+                 isEventCurrent={() => staff.getSelected()?.id === event.id && stationId === station.id && !store.isAccessLocked()}
++                accessDenied={accessLost}
++                accessDeniedKind={snapshot.accessStatus === 'session' ? 'session' : 'denied'}
++                onAccessDenied={(kind) => store.reportAccessDenied(kind)}
++                onRefresh={() => store.refreshQueue(station.experienceId)}
+                 onChanged={() => {
+                   void (async () => {
+-                    await store.refreshStations();
+-                    await store.refreshQueue(station.experienceId);
++                    if (store.getSnapshot().stationStatus === 'ready') await store.pollStations();
++                    else await store.refreshStations();
++                    if (store.getSnapshot().queueStatus === 'ready') await store.pollQueue(station.experienceId);
++                    else await store.refreshQueue(station.experienceId);
+                   })();
+                 }}
+               />
+diff --git a/app/screens/staff/StaffStationOperationalScreen.js b/app/screens/staff/StaffStationOperationalScreen.js
+index 9ab7cc3..2ea59de 100644
+--- a/app/screens/staff/StaffStationOperationalScreen.js
++++ b/app/screens/staff/StaffStationOperationalScreen.js
+@@ -1,46 +1,106 @@
+ import { useEffect, useRef, useState } from 'react';
+-import { ActivityIndicator, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
++import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+ import { randomUUID } from 'expo-crypto';
+ import { useAuth } from '../../context/AuthContext';
+ import { createStaffOperationsCoordinator, fetchStaffStationState } from '../../services/staffOperationsService';
+ import { defaultStaffIntentStorage } from '../../services/staffIntentStorage';
++import { liveColors as c, liveStyles as live } from '../admin/components/AdminLiveUI';
++import {
++  CurrentServiceCard,
++  ExperienceQueueCard,
++  StationConfirmModal,
++  StationHeaderCard,
++} from './components/StaffStationSections';
+ import { useStaffPolling } from './useStaffPolling';
+ 
+ const same = (a, b) => Boolean(a && b && ['userId', 'sessionId', 'eventId', 'stationId', 'epoch', 'revision']
+-  .every(key => a[key] === b[key]));
+-function Button({ label, onPress, disabled = false }) {
+-  return <Pressable accessibilityRole="button" accessibilityLabel={label} disabled={disabled}
+-    onPress={disabled ? undefined : onPress} style={[styles.button, disabled && styles.disabled]}>
+-    <Text style={styles.buttonText}>{label}</Text>
+-  </Pressable>;
++  .every((key) => a[key] === b[key]));
++
++function ActionButton({ label, onPress, disabled = false, variant = 'primary' }) {
++  const isSecondary = variant === 'secondary';
++  return (
++    <Pressable
++      accessibilityRole="button"
++      accessibilityLabel={label}
++      accessibilityState={{ disabled }}
++      disabled={disabled}
++      onPress={disabled ? undefined : onPress}
++      style={({ pressed }) => [
++        styles.button,
++        isSecondary && styles.buttonSecondary,
++        disabled && styles.disabled,
++        pressed && !disabled && styles.pressed,
++      ]}
++    >
++      <Text style={[styles.buttonText, isSecondary && styles.buttonSecondaryText]}>{label}</Text>
++    </Pressable>
++  );
+ }
+ 
+-export default function StaffStationOperationalScreen({ event, experience, station, isEventCurrent, onChanged }) {
++export default function StaffStationOperationalScreen({
++  event,
++  experience,
++  station,
++  isEventCurrent,
++  onChanged,
++  onRefresh,
++  accessDenied = false,
++  accessDeniedKind = 'denied',
++  onAccessDenied,
++  getNow,
++}) {
+   const auth = useAuth();
+   const mounted = useRef(true);
+-  const live = useRef(null);
+-  live.current = { auth, event, experience, station, isEventCurrent };
++  const liveRef = useRef(null);
++  liveRef.current = { auth, event, experience, station, isEventCurrent, onRefresh, accessDenied, onAccessDenied };
++
+   const getContext = () => {
+-    const current = live.current;
++    const current = liveRef.current;
+     const account = current.auth;
+-    if (!mounted.current || !account?.isAuthenticated || !account.isIdentityVerified() || !account.sessionId ||
+-        !current.isEventCurrent() || !account.user?.roles?.includes('staff') || account.user.roles.includes('admin')) return null;
+-    return { userId: account.user.id, sessionId: account.sessionId, eventId: current.event.id,
+-      stationId: current.station.id, epoch: account.getSessionEpoch(), revision: account.getIdentityRevision() };
++    if (
++      !mounted.current
++      || current.accessDenied
++      || !account?.isAuthenticated
++      || !account.isIdentityVerified()
++      || !account.sessionId
++      || !current.isEventCurrent()
++      || !account.user?.roles?.includes('staff')
++      || account.user.roles.includes('admin')
++    ) return null;
++    return {
++      userId: account.user.id,
++      sessionId: account.sessionId,
++      eventId: current.event.id,
++      stationId: current.station.id,
++      epoch: account.getSessionEpoch(),
++      revision: account.getIdentityRevision(),
++    };
+   };
++
+   const coordinatorRef = useRef(null);
+   if (!coordinatorRef.current && defaultStaffIntentStorage.isPersistent) {
+     coordinatorRef.current = createStaffOperationsCoordinator({
+-      client: { get: (...args) => live.current.auth.httpClient.get(...args),
+-        post: (...args) => live.current.auth.httpClient.post(...args) },
+-      storage: defaultStaffIntentStorage, createKey: randomUUID,
+-      isCurrent: (context, scope) => same(context, getContext()) &&
+-        (!scope || scope.stationId === context.stationId && scope.eventId === context.eventId),
++      client: {
++        get: (...args) => liveRef.current.auth.httpClient.get(...args),
++        post: (...args) => liveRef.current.auth.httpClient.post(...args),
++      },
++      storage: defaultStaffIntentStorage,
++      createKey: randomUUID,
++      isCurrent: (context, scope) => same(context, getContext())
++        && (!scope || (scope.stationId === context.stationId && scope.eventId === context.eventId)),
+     });
+   }
+   const coordinator = coordinatorRef.current;
+-  const [view, setView] = useState({ scope: null, status: 'loading', data: null, error: null,
+-    pending: null, busy: false, feedback: null });
++
++  const [view, setView] = useState({
++    scope: null,
++    status: 'loading',
++    data: null,
++    error: null,
++    pending: null,
++    busy: false,
++    feedback: null,
++  });
+   const viewRef = useRef(view);
+   viewRef.current = view;
+   const [dialog, setDialog] = useState(null);
+@@ -50,71 +110,153 @@ export default function StaffStationOperationalScreen({ event, experience, stati
+   const autoAttempt = useRef(null);
+   const acknowledging = useRef(false);
+   const generation = useRef(0);
+-  const epoch = auth.getSessionEpoch(), revision = auth.getIdentityRevision();
++  const epoch = auth.getSessionEpoch();
++  const revision = auth.getIdentityRevision();
+   const context = getContext();
+ 
+   async function refresh(preserveFeedback = false) {
+     const initial = getContext();
+     const request = ++generation.current;
+-    dialogRef.current = null; setDialog(null);
+-    if (!initial) { setView({ scope: null, status: 'loading', data: null, error: null, pending: null, busy: false, feedback: null }); return; }
+-    setView(previous => ({ ...previous, scope: initial, status: 'loading', data: null, error: null,
+-      feedback: preserveFeedback ? previous.feedback : null }));
++    dialogRef.current = null;
++    setDialog(null);
++    if (!initial) {
++      setView({ scope: null, status: 'loading', data: null, error: null, pending: null, busy: false, feedback: null });
++      return;
++    }
++    setView((previous) => ({
++      ...previous,
++      scope: initial,
++      status: 'loading',
++      data: null,
++      error: null,
++      feedback: preserveFeedback ? previous.feedback : null,
++    }));
+     const current = () => request === generation.current && same(initial, getContext());
+     let stage = 'read';
+     try {
+       const data = coordinator
+         ? await coordinator.readStationState(initial, experience.id, station.id)
+-        : await fetchStaffStationState(live.current.auth.httpClient, event.id, experience.id, station.id);
++        : await fetchStaffStationState(liveRef.current.auth.httpClient, event.id, experience.id, station.id);
+       if (!current()) return;
+       let pending = null;
+-      if (coordinator) { stage = 'pending'; pending = await coordinator.pending(initial); }
++      if (coordinator) {
++        stage = 'pending';
++        pending = await coordinator.pending(initial);
++      }
+       if (!current()) return;
+-      setView(previous => ({ ...previous, status: 'ready', data, pending, error: null }));
++      setView((previous) => ({ ...previous, status: 'ready', data, pending, error: null }));
+     } catch (error) {
+-      if (!current()) return;
+-      const kind = error?.status === 401 ? 'session' : [403, 404].includes(error?.status) ? 'denied'
+-        : error?.isNetworkError ? 'network' : 'unavailable';
+-      setView(previous => ({ ...previous, status: 'error', data: null,
+-        pending: stage === 'pending' ? { kind: 'storage_error' } : null, error: kind }));
++      if (!same(initial, getContext())) return;
++      if (error?.status === 401 || error?.status === 403) {
++        generation.current += 1;
++        dialogRef.current = null;
++        setDialog(null);
++        const kind = error.status === 401 ? 'session' : 'denied';
++        setView((previous) => ({ ...previous, status: 'error', data: null, pending: null, error: kind }));
++        liveRef.current.onAccessDenied?.(kind);
++        return;
++      }
++      if (request !== generation.current) return;
++      const kind = error?.status === 404 ? 'denied' : error?.isNetworkError ? 'network' : 'unavailable';
++      setView((previous) => ({
++        ...previous,
++        status: 'error',
++        data: null,
++        pending: stage === 'pending' ? { kind: 'storage_error' } : null,
++        error: kind,
++      }));
+     }
+   }
+ 
+   async function poll() {
+-    const scope = getContext(), request = generation.current;
+-    if (!scope || viewRef.current.status !== 'ready' || viewRef.current.busy || dialogRef.current ||
+-        dispatching.current || acknowledging.current) return;
++    const scope = getContext();
++    const request = generation.current;
++    if (
++      !scope
++      || viewRef.current.status !== 'ready'
++      || viewRef.current.busy
++      || dialogRef.current
++      || dispatching.current
++      || acknowledging.current
++    ) return;
+     try {
+       const data = coordinator
+         ? await coordinator.readStationState(scope, experience.id, station.id)
+-        : await fetchStaffStationState(live.current.auth.httpClient, event.id, experience.id, station.id);
+-      if (request === generation.current && same(scope, getContext()))
+-        setView(previous => ({ ...previous, data, error: null }));
++        : await fetchStaffStationState(liveRef.current.auth.httpClient, event.id, experience.id, station.id);
++      if (request === generation.current && same(scope, getContext())) {
++        setView((previous) => ({ ...previous, data, error: null }));
++      }
+     } catch (error) {
+-      if (request !== generation.current || !same(scope, getContext())) return;
+-      const kind = error?.status === 401 ? 'session' : [403, 404].includes(error?.status) ? 'denied' : 'stale';
+-      setView(previous => kind === 'stale' ? { ...previous, error: kind }
+-        : { ...previous, data: null, status: 'error', error: kind });
++      if (!same(scope, getContext())) return;
++      if (error?.status === 401 || error?.status === 403) {
++        generation.current += 1;
++        dialogRef.current = null;
++        setDialog(null);
++        const kind = error.status === 401 ? 'session' : 'denied';
++        setView((previous) => ({ ...previous, data: null, status: 'error', pending: null, error: kind }));
++        liveRef.current.onAccessDenied?.(kind);
++        return;
++      }
++      if (request !== generation.current) return;
++      const kind = error?.status === 404 ? 'denied' : 'stale';
++      setView((previous) => (kind === 'stale'
++        ? { ...previous, error: kind }
++        : { ...previous, data: null, status: 'error', error: kind }));
+     }
+   }
+ 
+-  useStaffPolling(Boolean(context && view.status === 'ready' && !view.busy), poll, 5000,
+-    `${event.id}:${station.id}:${epoch}:${revision}`);
++  useStaffPolling(
++    Boolean(!accessDenied && context && view.status === 'ready' && !view.busy),
++    poll,
++    5000,
++    `${event.id}:${station.id}:${epoch}:${revision}`,
++  );
+ 
+   useEffect(() => {
+     mounted.current = true;
+     autoAttempt.current = null;
+-    void refresh();
+-    return () => { mounted.current = false; generation.current++; dialogRef.current = null; };
++    if (!liveRef.current.accessDenied) void refresh();
++    return () => {
++      mounted.current = false;
++      generation.current += 1;
++      dialogRef.current = null;
++    };
+   }, [event.id, experience.id, station.id, auth.user?.id, auth.sessionId, epoch, revision]);
+ 
+   useEffect(() => {
+-    const pending = view.pending, scope = view.scope;
+-    if (!coordinator || view.status !== 'ready' || view.busy || pending?.kind !== 'terminal_pending' || !pending.receiptId ||
+-        !same(scope, getContext()) || autoAttempt.current === pending.receiptId || acknowledging.current) return;
++    if (!accessDenied) return;
++    generation.current += 1;
++    dialogRef.current = null;
++    setDialog(null);
++    autoAttempt.current = null;
++    setView({
++      scope: null,
++      status: 'error',
++      data: null,
++      error: accessDeniedKind === 'session' ? 'session' : 'denied',
++      pending: null,
++      busy: false,
++      feedback: null,
++    });
++  }, [accessDenied, accessDeniedKind]);
++
++  useEffect(() => {
++    const pending = view.pending;
++    const scope = view.scope;
++    if (
++      accessDenied
++      || !coordinator
++      || view.status !== 'ready'
++      || view.busy
++      || pending?.kind !== 'terminal_pending'
++      || !pending.receiptId
++      || !same(scope, getContext())
++      || autoAttempt.current === pending.receiptId
++      || acknowledging.current
++    ) return;
+     autoAttempt.current = pending.receiptId;
+     acknowledging.current = true;
+-    setView(previous => ({ ...previous, busy: true }));
++    setView((previous) => ({ ...previous, busy: true }));
+     void (async () => {
+       const target = { ...scope, serviceSessionId: pending.serviceSessionId ?? null };
+       let verified = false;
+@@ -129,134 +271,347 @@ export default function StaffStationOperationalScreen({ event, experience, stati
+       } catch { /* A releitura manterá o bloqueio se o armazenamento falhar. */ }
+       acknowledging.current = false;
+       if (same(scope, getContext())) {
+-        if (verified) setView(previous => ({ ...previous, feedback: pending.outcome }));
+-        setView(previous => ({ ...previous, busy: false }));
++        if (verified) setView((previous) => ({ ...previous, feedback: pending.outcome }));
++        setView((previous) => ({ ...previous, busy: false }));
+         await refresh(true);
+       } else if (getContext()) void refresh();
+     })();
+-  }, [view.pending, view.scope, coordinator]);
++  }, [accessDenied, view.pending, view.scope, coordinator]);
++
++  const blocked = !same(view.scope, context)
++    || view.busy
++    || view.status !== 'ready'
++    || view.error === 'stale'
++    || !coordinator
++    || dispatching.current
++    || acknowledging.current
++    || (view.pending && view.pending.kind !== 'none');
+ 
+-  const blocked = !same(view.scope, context) || view.busy || view.status !== 'ready' || view.error === 'stale' || !coordinator ||
+-    dispatching.current || acknowledging.current || (view.pending && view.pending.kind !== 'none');
+-  const open = action => {
++  const open = (action) => {
+     if (!blocked && context) setDialog({ action, context, observed: view.data });
+   };
++
+   async function dispatch(expected, fromDialog = false) {
+-    if (!expected || dispatching.current || acknowledging.current || !coordinator || (fromDialog && dialogRef.current !== expected) ||
+-        (!fromDialog && (expected.action.kind !== 'call' || dialogRef.current)) ||
+-        !same(expected.context, getContext()) ||
+-        !same(viewRef.current.scope, getContext()) || viewRef.current.busy || viewRef.current.status !== 'ready' ||
+-        viewRef.current.error === 'stale' ||
+-        (viewRef.current.pending && viewRef.current.pending.kind !== 'none')) return;
+-    if (expected.action.kind === 'call' && (!viewRef.current.data?.canCall ||
+-        viewRef.current.data.pending || viewRef.current.data.waitingCount === 0 ||
+-        viewRef.current.data.availability !== 'available')) return;
++    if (
++      !expected
++      || dispatching.current
++      || acknowledging.current
++      || !coordinator
++      || (fromDialog && dialogRef.current !== expected)
++      || (!fromDialog && (expected.action.kind !== 'call' || dialogRef.current))
++      || !same(expected.context, getContext())
++      || !same(viewRef.current.scope, getContext())
++      || viewRef.current.busy
++      || viewRef.current.status !== 'ready'
++      || viewRef.current.error === 'stale'
++      || (viewRef.current.pending && viewRef.current.pending.kind !== 'none')
++    ) return;
++    if (
++      expected.action.kind === 'call'
++      && (
++        !viewRef.current.data?.canCall
++        || viewRef.current.data.pending
++        || viewRef.current.data.waitingCount === 0
++        || viewRef.current.data.availability !== 'available'
++      )
++    ) return;
+     dispatching.current = true;
+-    dialogRef.current = null; setDialog(null);
++    dialogRef.current = null;
++    setDialog(null);
+     const scope = expected.context;
+-    setView(previous => ({ ...previous, busy: true, feedback: null }));
++    setView((previous) => ({ ...previous, busy: true, feedback: null }));
+     try {
+       let result;
+       try {
+         const action = expected.action;
+-        result = action.kind === 'call' ? await coordinator.callNext(scope, experience.id, station.id)
+-          : action.kind === 'complete' ? await coordinator.complete(scope, action.serviceSessionId, station.id)
+-            : action.kind === 'absent' ? await coordinator.absent(scope, action.serviceSessionId, station.id)
++        result = action.kind === 'call'
++          ? await coordinator.callNext(scope, experience.id, station.id)
++          : action.kind === 'complete'
++            ? await coordinator.complete(scope, action.serviceSessionId, station.id)
++            : action.kind === 'absent'
++              ? await coordinator.absent(scope, action.serviceSessionId, station.id)
+               : await coordinator.removeCalled(scope, experience.id, station.id, action.serviceSessionId);
+-      } catch { result = { kind: 'storage_error' }; }
++      } catch {
++        result = { kind: 'storage_error' };
++      }
+       if (!same(scope, getContext())) return;
+-      setView(previous => ({ ...previous, busy: false, feedback: result }));
++      setView((previous) => ({ ...previous, busy: false, feedback: result }));
+       await refresh(true);
+       if (same(scope, getContext())) onChanged();
+-    } finally { dispatching.current = false; }
++    } finally {
++      dispatching.current = false;
++    }
+   }
+ 
+   async function resolvePending(expected, scope) {
+     const pending = viewRef.current.pending;
+-    if (!coordinator || acknowledging.current || !same(scope, getContext()) || viewRef.current.busy || !pending || !expected ||
+-        pending.kind !== expected.kind || !expected.receiptId || pending.receiptId !== expected.receiptId) return;
+-    setView(previous => ({ ...previous, busy: true }));
++    if (
++      !coordinator
++      || acknowledging.current
++      || !same(scope, getContext())
++      || viewRef.current.busy
++      || !pending
++      || !expected
++      || pending.kind !== expected.kind
++      || !expected.receiptId
++      || pending.receiptId !== expected.receiptId
++    ) return;
++    setView((previous) => ({ ...previous, busy: true }));
+     try {
+       if (pending.kind === 'reserved') await coordinator.cancelReserved(scope, expected.receiptId);
+     } catch { /* A intenção permanece bloqueada; nova leitura mostra o estado persistido. */ }
+     if (same(scope, getContext())) {
+-      setView(previous => ({ ...previous, busy: false }));
++      setView((previous) => ({ ...previous, busy: false }));
+       await refresh();
+     }
+   }
+ 
++  const messages = {
++    session: 'Sessão inválida. Entre novamente.',
++    denied: 'Acesso à estação indisponível.',
++    network: 'Falha de conexão. Atualize a estação.',
++    unavailable: 'Não foi possível consultar a estação.',
++    stale: 'Dados da estação possivelmente desatualizados. Atualize antes de operar.',
++  };
++
++  if (accessDenied) {
++    return (
++      <View style={styles.content}>
++        <View style={styles.errorCard}>
++          <Text accessibilityRole="alert" style={styles.alertMessage}>
++            {accessDeniedKind === 'session' ? messages.session : messages.denied}
++          </Text>
++        </View>
++      </View>
++    );
++  }
++
+   if (!context) return null;
+-  if (!same(view.scope, context)) return <View style={styles.content}>
+-    <Text style={styles.text}>Verificando atendimento da estação...</Text></View>;
+-  const messages = { session: 'Sessão inválida. Entre novamente.', denied: 'Acesso à estação indisponível.',
+-    network: 'Falha de conexão. Atualize a estação.', unavailable: 'Não foi possível consultar a estação.',
+-    stale: 'Dados da estação possivelmente desatualizados. Atualize antes de operar.' };
++  if (!same(view.scope, context)) {
++    return (
++      <View style={styles.content}>
++        <View accessibilityRole="progressbar" style={styles.stateCard}>
++          <ActivityIndicator color={c.accent} />
++          <Text style={styles.message}>Verificando atendimento da estação...</Text>
++        </View>
++      </View>
++    );
++  }
++
+   const data = view.data;
+   const pending = view.pending;
+-  return <View style={styles.content}>
+-    <Text style={styles.title}>Atendimento da estação</Text>
+-    <Text style={styles.text}>{experience.name} · {station.label}</Text>
+-    {view.status === 'loading' && <View accessibilityRole="progressbar"><ActivityIndicator color="#a78bfa" />
+-      <Text style={styles.text}>Carregando atendimento...</Text></View>}
+-    {view.status === 'error' && <Text accessibilityRole="alert" style={styles.warning}>{messages[view.error]}</Text>}
+-    {view.error === 'stale' && <Text accessibilityRole="alert" style={styles.warning}>{messages.stale}</Text>}
+-    {view.feedback?.kind === 'confirmed' && <Text accessibilityRole="alert" style={styles.success}>
+-      {view.feedback.result?.status === 'absent'
+-        ? view.feedback.result.requeued ? 'Ausência registrada; participante retornou ao fim da fila.'
+-          : 'Ausência registrada; participante não retornou à fila após o corte.'
+-        : 'Operação confirmada pelo servidor.'}</Text>}
+-    {view.feedback?.kind === 'rejected' && <Text accessibilityRole="alert" style={styles.warning}>
+-      Operação recusada pelo servidor. Atualize o atendimento antes de decidir a próxima ação.</Text>}
+-    {['uncertain', 'pending_reconciliation', 'confirmed_cleanup_pending', 'rejected_cleanup_pending',
+-      'storage_error'].includes(view.feedback?.kind) && <Text accessibilityRole="alert" style={styles.warning}>
+-      O resultado exige verificação ou reconciliação. Não repita a operação.</Text>}
+-    {data && <>
+-      <Text style={styles.text}>Estação: {data.availability === 'available' ? 'Disponível' : 'Indisponível'}</Text>
+-      <Text style={styles.text}>Aguardando nesta experiência: {data.waitingCount}</Text>
+-      {data.pending ? <View style={styles.card}>
+-        <Text style={styles.title}>Participante chamado: {data.pending.displayName}</Text>
+-        <Text style={styles.text}>Resolva a chamada antes da próxima: conclua, registre ausência ou remova da fila.</Text>
+-        <Button label="Concluir atendimento" disabled={blocked} onPress={() => open({ kind: 'complete', serviceSessionId: data.pending.serviceSessionId })} />
+-        <Button label="Registrar ausência" disabled={blocked} onPress={() => open({ kind: 'absent', serviceSessionId: data.pending.serviceSessionId })} />
+-        <Button label="Remover da fila" disabled={blocked} onPress={() => open({ kind: 'remove_called', serviceSessionId: data.pending.serviceSessionId })} />
+-      </View> : <Button label="Chamar próximo" disabled={blocked || !data.canCall || data.waitingCount === 0}
+-        onPress={() => dispatch({ action: { kind: 'call' }, context })} />}
+-      {data.waitingCount === 0 && <Text style={styles.text}>Nenhuma pessoa aguardando nesta experiência.</Text>}
+-      {data.waiting.map(person => <View key={person.queueEntryId} style={styles.card}>
+-        <Text style={styles.text}>{person.position}. {person.displayName}</Text>
+-      </View>)}
+-    </>}
+-    {!coordinator && <Text style={styles.warning}>Operações indisponíveis sem armazenamento seguro neste dispositivo.</Text>}
+-    {pending?.kind === 'pending_other' && <Text style={styles.warning}>Há uma operação pendente em outra sessão, evento ou estação desta conta.</Text>}
+-    {pending?.kind === 'pending_reconciliation' && <Text style={styles.warning}>Resultado incerto. Não repita a operação; peça reconciliação ao responsável.</Text>}
+-    {pending?.kind === 'reserved' && <><Text style={styles.warning}>Solicitação registrada, ainda não enviada.</Text>
+-      <Button label="Descartar solicitação não enviada" disabled={view.busy} onPress={() => resolvePending(pending, context)} /></>}
+-    {pending?.kind === 'terminal_pending' && <Text accessibilityRole="alert" style={styles.warning}>
+-      Resultado registrado; reconhecimento seguro pendente. As operações permanecem bloqueadas.</Text>}
+-    {pending?.kind === 'storage_error' && <Text style={styles.warning}>Não foi possível verificar a intenção persistida. Operações bloqueadas.</Text>}
+-    <Button label="Atualizar atendimento" disabled={view.busy || view.status === 'loading'}
+-      onPress={() => { autoAttempt.current = null; void refresh(); }} />
+-    <Modal transparent animationType="fade" visible={Boolean(dialog && same(dialog.context, getContext()) && !view.busy)}
+-      onRequestClose={() => { dialogRef.current = null; setDialog(null); }}>
+-      <View style={styles.backdrop}><View style={styles.card} accessibilityViewIsModal>
+-        <Text style={styles.title}>{dialog?.action.kind === 'call' ? 'Chamar o próximo participante?'
+-          : dialog?.action.kind === 'complete' ? 'Concluir atendimento?'
+-            : dialog?.action.kind === 'absent' ? 'Registrar ausência?'
+-              : 'Remover pessoa da fila?'}</Text>
+-        <Text style={styles.text}>Confirme a operação presencial. Uma resposta incerta bloqueará novas ações até reconciliação.</Text>
+-        <Button label="CONFIRMAR OPERAÇÃO" onPress={() => dispatch(dialog, true)} />
+-        <Button label="CANCELAR OPERAÇÃO" onPress={() => { dialogRef.current = null; setDialog(null); }} />
+-      </View></View>
+-    </Modal>
+-  </View>;
++  const effectiveAvailability = data?.availability ?? station.availability;
++  const callDisabled = blocked
++    || !data?.canCall
++    || Boolean(data?.pending)
++    || (data?.waitingCount ?? 0) === 0
++    || data?.availability !== 'available';
++  const showUnavailableHint = Boolean(data && !data.pending && data.availability === 'unavailable');
++  const showCallClosedHint = Boolean(data && !data.pending && data.availability === 'available' && !data.canCall && data.waitingCount > 0);
++  const pollingDotStyle = view.status === 'ready' && !view.error
++    ? styles.pollingDotActive
++    : view.error === 'stale'
++      ? styles.pollingDotStale
++      : styles.pollingDotMuted;
++
++  return (
++    <View style={styles.content}>
++      <StationHeaderCard
++        stationLabel={station.label}
++        experienceName={experience.name}
++        eventName={event.name}
++        availability={effectiveAvailability}
++      />
++
++      {view.status === 'loading' && (
++        <View accessibilityRole="progressbar" style={styles.stateCard}>
++          <ActivityIndicator color={c.accent} />
++          <Text style={styles.message}>Carregando atendimento...</Text>
++        </View>
++      )}
++
++      {view.status === 'error' && (
++        <View style={styles.errorCard}>
++          <Text accessibilityRole="alert" style={styles.alertMessage}>{messages[view.error]}</Text>
++        </View>
++      )}
++
++      {view.error === 'stale' && (
++        <View style={styles.warningCard}>
++          <Text accessibilityRole="alert" style={styles.warningMessage}>{messages.stale}</Text>
++        </View>
++      )}
++
++      {view.feedback?.kind === 'confirmed' && (
++        <View style={styles.successCard}>
++          <Text accessibilityRole="alert" style={styles.successMessage}>
++            {view.feedback.result?.status === 'absent'
++              ? view.feedback.result.requeued
++                ? 'Ausência registrada; participante retornou ao fim da fila.'
++                : 'Ausência registrada; participante não retornou à fila após o corte.'
++              : 'Operação confirmada pelo servidor.'}
++          </Text>
++        </View>
++      )}
++
++      {view.feedback?.kind === 'rejected' && (
++        <View style={styles.warningCard}>
++          <Text accessibilityRole="alert" style={styles.warningMessage}>
++            Operação recusada pelo servidor. Atualize o atendimento antes de decidir a próxima ação.
++          </Text>
++        </View>
++      )}
++
++      {['uncertain', 'pending_reconciliation', 'confirmed_cleanup_pending', 'rejected_cleanup_pending', 'storage_error']
++        .includes(view.feedback?.kind) && (
++        <View style={styles.warningCard}>
++          <Text accessibilityRole="alert" style={styles.warningMessage}>
++            O resultado exige verificação ou reconciliação. Não repita a operação.
++          </Text>
++        </View>
++      )}
++
++      {data && (
++        <>
++          <ExperienceQueueCard
++            waitingCount={data.waitingCount}
++            waiting={data.waiting}
++          />
++
++          {!data.pending && (
++            <View style={styles.callBlock}>
++              <ActionButton
++                label="Chamar próximo"
++                disabled={callDisabled}
++                onPress={() => dispatch({ action: { kind: 'call' }, context })}
++              />
++              {showUnavailableHint && (
++                <Text style={styles.helperNote}>
++                  Estação indisponível no momento. A fila da experiência continua visível para consulta.
++                </Text>
++              )}
++              {showCallClosedHint && (
++                <Text style={styles.helperNote}>
++                  Novas chamadas não estão liberadas pelo servidor neste momento.
++                </Text>
++              )}
++            </View>
++          )}
++
++          <CurrentServiceCard
++            pending={data.pending}
++            blocked={blocked}
++            onComplete={(serviceSessionId) => open({ kind: 'complete', serviceSessionId })}
++            onAbsent={(serviceSessionId) => open({ kind: 'absent', serviceSessionId })}
++            onRemove={(serviceSessionId) => open({ kind: 'remove_called', serviceSessionId })}
++            getNow={getNow}
++          />
++        </>
++      )}
++
++      {!coordinator && (
++        <View style={styles.warningCard}>
++          <Text style={styles.warningMessage}>
++            Operações indisponíveis sem armazenamento seguro neste dispositivo.
++          </Text>
++        </View>
++      )}
++
++      {pending?.kind === 'pending_other' && (
++        <View style={styles.warningCard}>
++          <Text style={styles.warningMessage}>
++            Há uma operação pendente em outra sessão, evento ou estação desta conta.
++          </Text>
++        </View>
++      )}
++
++      {pending?.kind === 'pending_reconciliation' && (
++        <View style={styles.warningCard}>
++          <Text style={styles.warningMessage}>
++            Resultado incerto. Não repita a operação; peça reconciliação ao responsável.
++          </Text>
++        </View>
++      )}
++
++      {pending?.kind === 'reserved' && (
++        <View style={styles.warningCard}>
++          <Text style={styles.warningMessage}>Solicitação registrada, ainda não enviada.</Text>
++          <ActionButton
++            label="Descartar solicitação não enviada"
++            variant="secondary"
++            disabled={view.busy}
++            onPress={() => resolvePending(pending, context)}
++          />
++        </View>
++      )}
++
++      {pending?.kind === 'terminal_pending' && (
++        <View style={styles.warningCard}>
++          <Text accessibilityRole="alert" style={styles.warningMessage}>
++            Resultado registrado; reconhecimento seguro pendente. As operações permanecem bloqueadas.
++          </Text>
++        </View>
++      )}
++
++      {pending?.kind === 'storage_error' && (
++        <View style={styles.warningCard}>
++          <Text style={styles.warningMessage}>
++            Não foi possível verificar a intenção persistida. Operações bloqueadas.
++          </Text>
++        </View>
++      )}
++
++      <View style={styles.pollingRow}>
++        <View style={[styles.pollingDot, pollingDotStyle]} />
++        <Text style={styles.pollingText}>Fila e atendimento atualizados automaticamente</Text>
++      </View>
++
++      <ActionButton
++        label="Atualizar atendimento"
++        variant="secondary"
++        disabled={view.busy || view.status === 'loading'}
++        onPress={() => {
++          autoAttempt.current = null;
++          return Promise.all([refresh(), Promise.resolve(liveRef.current.onRefresh?.())]);
++        }}
++      />
++
++      <StationConfirmModal
++        visible={Boolean(dialog && !accessDenied && same(dialog.context, getContext()) && !view.busy)}
++        dialog={dialog}
++        onConfirm={() => dispatch(dialog, true)}
++        onCancel={() => {
++          dialogRef.current = null;
++          setDialog(null);
++        }}
++      />
++    </View>
++  );
+ }
+ 
+ const styles = StyleSheet.create({
+-  content: { gap: 14 }, title: { color: '#fff', fontSize: 19, fontWeight: '800' },
+-  text: { color: '#cbd5e1', fontSize: 15, lineHeight: 22 },
+-  card: { gap: 10, padding: 16, borderRadius: 14, backgroundColor: '#191330', borderWidth: 1, borderColor: '#34265a' },
+-  button: { padding: 15, borderRadius: 14, backgroundColor: '#7c3aed', alignItems: 'center' },
+-  buttonText: { color: '#fff', fontWeight: '700' }, disabled: { opacity: 0.45 },
+-  warning: { color: '#fbbf24', lineHeight: 22 }, success: { color: '#86efac', lineHeight: 22 },
+-  backdrop: { flex: 1, justifyContent: 'center', padding: 24, backgroundColor: 'rgba(0,0,0,0.7)' },
++  content: { gap: 12 },
++  callBlock: { gap: 6, marginTop: 2 },
++  stateCard: { ...live.card, ...live.row, marginTop: 0 },
++  errorCard: { ...live.card, marginTop: 0, backgroundColor: c.dangerSurface, borderColor: c.danger, gap: 8 },
++  warningCard: { ...live.card, marginTop: 0, backgroundColor: c.warningSurface, borderColor: c.warning, gap: 10 },
++  successCard: { ...live.card, marginTop: 0, backgroundColor: c.successSurface, borderColor: '#10B981', gap: 8 },
++  message: { color: c.muted, fontSize: 15, lineHeight: 22, flexShrink: 1 },
++  alertMessage: { color: '#FECACA', fontSize: 14, lineHeight: 20 },
++  warningMessage: { color: '#FDE68A', fontSize: 14, lineHeight: 20 },
++  successMessage: { color: '#A7F3D0', fontSize: 14, lineHeight: 20 },
++  helperNote: { color: c.muted, fontSize: 13, lineHeight: 19 },
++  pollingRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 2 },
++  pollingDot: { width: 8, height: 8, borderRadius: 4, flexShrink: 0 },
++  pollingDotActive: { backgroundColor: '#10B981' },
++  pollingDotStale: { backgroundColor: '#F59E0B' },
++  pollingDotMuted: { backgroundColor: '#64748B' },
++  pollingText: { color: c.muted, fontSize: 13, lineHeight: 18, flex: 1 },
++  button: { backgroundColor: c.accentStrong, borderRadius: 14, minHeight: 52, paddingVertical: 14,
++    paddingHorizontal: 18, alignItems: 'center', justifyContent: 'center' },
++  buttonSecondary: { backgroundColor: '#251A33', borderWidth: 1, borderColor: c.border, minHeight: 48, paddingVertical: 12 },
++  disabled: { opacity: 0.45 },
++  pressed: { opacity: 0.75 },
++  buttonText: { color: c.onAccent, fontSize: 16, fontWeight: '700', textAlign: 'center' },
++  buttonSecondaryText: { color: c.text, fontSize: 15 },
+ });
+diff --git a/app/tests/roleRoutingIntegration.test.cjs b/app/tests/roleRoutingIntegration.test.cjs
+index 7913696..bf8238b 100644
+--- a/app/tests/roleRoutingIntegration.test.cjs
++++ b/app/tests/roleRoutingIntegration.test.cjs
+@@ -181,10 +181,10 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+       }
+       if (control.realStaff && ['screens/staff/StaffEventsNavigator', 'services/staffEventsService',
+         'screens/staff/StaffEntryControlRealScreen', 'services/staffEntryService', 'services/staffEntryIntentStorage',
+-        'screens/staff/StaffStationOperationalScreen', 'services/staffIntentStorage',
+-        'services/staffDashboardService', 'services/staffOperationsService', 'screens/staff/useStaffPolling',
+-        'screens/staff/components/StaffLiveScreen', 'screens/admin/components/AdminLiveUI',
+-        'screens/admin/components/adminTheme'].includes(target)) {
++        'screens/staff/StaffStationOperationalScreen', 'screens/staff/components/StaffStationSections',
++        'services/staffIntentStorage', 'services/staffDashboardService', 'services/staffOperationsService',
++        'screens/staff/useStaffPolling', 'screens/staff/components/StaffLiveScreen',
++        'screens/admin/components/AdminLiveUI', 'screens/admin/components/adminTheme'].includes(target)) {
+         return load(`${target}.js`);
+       }
+       if (target === 'screens/event-entry/EventEntryScreen' && control.modalFixture) {
+@@ -1339,23 +1339,30 @@ test('tela real remove chamado somente após confirmação e atualiza estação
+     await app.mount(); await app.act(() => app.manager.login({ email: participant.email, password: 'ficticia' }));
+     await app.press('Selecionar evento Evento autorizado');
+     await app.press('Selecionar estação Estação real da experiência Experiência real');
+-    assert.ok(app.hasText('Participante chamado: Ana'));
+-    assert.ok(app.hasText('Aguardando nesta experiência: 3'));
++    assert.ok(app.hasText('ATENDIMENTO ATUAL'));
++    assert.ok(app.hasText('Ana'));
++    assert.ok(app.hasText('Em atendimento'));
++    assert.ok(app.hasText('FILA DA EXPERIÊNCIA'));
++    assert.ok(app.hasText('3 aguardando'));
++    assert.ok(app.hasText('Fila compartilhada entre as estações'));
++    assert.equal(app.hasButton('Chamar próximo'), false);
+     for (const [position, name] of [[1, 'Bia'], [2, 'Caio'], [3, 'Dora']]) {
+-      assert.ok(app.hasText(`${position}. ${name}`));
++      assert.ok(app.hasText(String(position)));
++      assert.ok(app.hasText(name));
+       assert.ok(!app.hasText(`Remover ${name} da fila`));
+     }
+-    assert.ok(app.hasText('Concluir atendimento'));
+-    assert.ok(app.hasText('Registrar ausência'));
+-    assert.ok(app.hasText('Remover da fila'));
+-    await app.press('Concluir atendimento'); assert.equal(app.modal().props.visible, true);
++    assert.ok(app.hasButton('Concluir experiência'));
++    assert.ok(app.hasButton('Marcar ausência'));
++    assert.ok(app.hasButton('Remover da fila'));
++    await app.press('Concluir experiência'); assert.equal(app.modal().props.visible, true);
+     await app.press('CANCELAR OPERAÇÃO'); assert.equal(posts, 0);
+-    await app.press('Registrar ausência'); assert.equal(app.modal().props.visible, true);
++    await app.press('Marcar ausência'); assert.equal(app.modal().props.visible, true);
+     await app.press('CANCELAR OPERAÇÃO'); assert.equal(posts, 0);
+     await app.press('Remover da fila'); assert.equal(posts, 0);
+     await app.press('CANCELAR OPERAÇÃO'); assert.equal(posts, 0);
+     await app.press('Remover da fila'); await app.press('CONFIRMAR OPERAÇÃO');
+-    assert.equal(posts, 1); assert.ok(!app.hasText('Participante chamado: Ana'));
++    assert.equal(posts, 1); assert.ok(!app.hasText('Em atendimento'));
++    assert.ok(app.hasText('Nenhum participante chamado'));
+     assert.ok(app.hasText('Operação confirmada pelo servidor.'));
+     assert.equal(app.hasButton('Entendi o resultado'), false);
+     await app.press('Atualizar atendimento'); assert.equal(posts, 1);
+@@ -1386,14 +1393,18 @@ test('painel real apresenta estações por experiência e abre atendimento diret
+   assert.ok(app.hasButton('Selecionar estação Estação real da experiência PlayStation'));
+   assert.equal(app.hasButton('Estações'), false);
+   await app.press('Selecionar estação Estação real da experiência Just Dance');
+-  assert.ok(app.hasText('Fila compartilhada da experiência'));
++  assert.ok(app.hasText('Fila compartilhada entre as estações'));
++  assert.equal(app.hasButton('Atualizar fila'), false, 'sem botão duplicado de atualização');
+   await app.press('Voltar ao painel'); await app.press('Selecionar estação Console 2 da experiência Just Dance');
+-  assert.ok(app.hasText('Fila de Just Dance'));
++  assert.ok(app.hasText('Console 2'));
++  assert.ok(app.hasText('Just Dance'));
++  assert.ok(app.hasText('FILA DA EXPERIÊNCIA'));
+   assert.equal(app.calls.filter((url) => url === `/staff/events/${staffEvent.id}/experiences/${realExperienceId}/queue`).length, 2);
+   app.back();
+   assert.ok(app.hasText('Painel operacional'));
+   await app.press('Selecionar estação Estação real da experiência PlayStation');
+-  assert.ok(app.hasText('Fila de PlayStation'));
++  assert.ok(app.hasText('PlayStation'));
++  assert.ok(app.hasText('FILA DA EXPERIÊNCIA'));
+   assert.ok(app.calls.includes(`/staff/events/${staffEvent.id}/experiences/${secondExperienceId}/stations/${secondExperienceStation.id}/operational-state`));
+   await app.press('Voltar ao painel');
+   await app.press('Controle de Entrada'); assert.ok(app.hasText('Fila de acesso ao evento'));
+@@ -1540,10 +1551,11 @@ test('painel Staff real exibe estação e fila e limpa os dados ao receber 403',
+   assert.ok(app.hasText('Estação real'));
+   assert.equal(app.hasText('Experiência real'), true, 'painel exibe o nome da experiência no agrupamento');
+   await app.press('Selecionar estação Estação real da experiência Experiência real');
+-  assert.ok(app.hasText('Pessoas em espera: 0'));
++  assert.ok(app.hasText('0 aguardando'));
++  assert.ok(app.hasText('Fila vazia'));
+   assert.ok(!app.hasText('Rafael T.'));
+   denied = true;
+-  await app.press('Atualizar fila');
++  await app.press('Atualizar atendimento');
+   assert.ok(app.hasText('Acesso ao evento ou à experiência indisponível'));
+   assert.ok(!app.hasText('Estação real'));
+   assert.equal(app.hasButton('Chamar próximo'), false);
+@@ -2228,6 +2240,7 @@ test('R3-01, R3-02, R3-03 e R3-04: revalidação parcial não trava botão Atual
+   let includeUnknownStation = false;
+   let includeUnknownExperience = false;
+   let pendingQueueReq = null;
++  let queueReads = 0;
+   const pendingEntryReqs = [];
+ 
+   const app = createIntegration({
+@@ -2255,6 +2268,7 @@ test('R3-01, R3-02, R3-03 e R3-04: revalidação parcial não trava botão Atual
+           return { eventId: staffEvent.id, experiences: list };
+         }
+         if (route.endsWith('/queue')) {
++          queueReads += 1;
+           if (pendingQueueReq) return pendingQueueReq.promise;
+           return undefined;
+         }
+@@ -2293,7 +2307,8 @@ test('R3-01, R3-02, R3-03 e R3-04: revalidação parcial não trava botão Atual
+     // 1. R3-03: 404 tardio de fila já abandonada ao voltar ao painel não bloqueia o evento
+     pendingQueueReq = deferred();
+     await app.press('Selecionar estação Estação real da experiência Just Dance');
+-    assert.ok(app.hasText('Carregando fila...'));
++    assert.equal(queueReads, 1, 'leitura de fila iniciada antes do retorno ao painel');
++    assert.ok(app.hasText('Estação real'));
+     await app.press('Voltar ao painel');
+     await app.act(async () => {
+       pendingQueueReq.resolve({ statusCode: 404, body: { code: 'RESOURCE_NOT_FOUND' } });
+@@ -2359,3 +2374,238 @@ test('R3-01, R3-02, R3-03 e R3-04: revalidação parcial não trava botão Atual
+     app.dispose();
+   }
+ });
++
++test('STAFF-02: estados A e B da Estação, fila compartilhada, conclusão, ausência (reinserção e corte), indisponibilidade e negativa 403 propagada', { skip }, async () => {
++  const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
++  const secure = new Map();
++  const secondStation = {
++    id: '55555555-5555-4555-8555-555555555555',
++    experienceId: realExperienceId,
++    label: 'Estação 02',
++    availability: 'unavailable',
++    pendingServiceSessionId: null,
++  };
++  const primaryStation = {
++    ...realStation,
++    label: 'Estação Alpha',
++    availability: 'available',
++    pendingServiceSessionId: null,
++  };
++  const entryA = '77777777-7777-4777-8777-777777777771';
++  const entryB = '77777777-7777-4777-8777-777777777772';
++  const entryC = '77777777-7777-4777-8777-777777777773';
++  const entryRequeued = '77777777-7777-4777-8777-777777777779';
++  const sessionA = '88888888-8888-4888-8888-888888888881';
++  const sessionB = '88888888-8888-4888-8888-888888888882';
++  const sessionC = '88888888-8888-4888-8888-888888888883';
++
++  let waiting = [
++    { queueEntryId: entryA, displayName: 'Mariana Costa', position: 1 },
++    { queueEntryId: entryB, displayName: 'Lucas Ferreira', position: 2 },
++    { queueEntryId: entryC, displayName: 'Rafael Oliveira', position: 3 },
++  ];
++  let pendingCall = null;
++  let requeueOnAbsent = true;
++  let denyOperational = false;
++  const posts = [];
++
++  const syncStations = () => [
++    { ...primaryStation, pendingServiceSessionId: pendingCall?.serviceSessionId ?? null },
++    secondStation,
++  ];
++  const makeOperational = (stationObj) => {
++    const isPrimary = stationObj.id === primaryStation.id;
++    const activePending = isPrimary ? pendingCall : null;
++    const isAvailable = stationObj.availability === 'available';
++    return {
++      eventId: staffEvent.id,
++      experienceId: realExperienceId,
++      stationId: stationObj.id,
++      availability: stationObj.availability,
++      canCall: isAvailable && !activePending && waiting.length > 0,
++      waitingCount: waiting.length,
++      waiting: waiting.map((row, idx) => ({ ...row, position: idx + 1 })),
++      pending: activePending,
++    };
++  };
++
++  const control = {
++    realStaff: true,
++    manualTimers: true,
++    platformOS: 'ios',
++    events: [{ ...staffEvent, name: 'Torneio Real UNDB' }],
++    experiences: [{ id: realExperienceId, name: 'Just Dance Pro' }],
++    secureStore: {
++      isAvailableAsync: async () => true,
++      getItemAsync: async (k) => secure.get(k) ?? null,
++      setItemAsync: async (k, v) => { secure.set(k, v); },
++      deleteItemAsync: async (k) => { secure.delete(k); },
++    },
++    http: async (route, options) => {
++      if (route.endsWith('/stations')) return { eventId: staffEvent.id, stations: syncStations() };
++      if (route.endsWith('/queue')) {
++        return {
++          eventId: staffEvent.id,
++          experienceId: realExperienceId,
++          waitingCount: waiting.length,
++          canCallWaitingEntries: waiting.length > 0,
++          firstWaitingQueueEntryId: waiting[0]?.queueEntryId ?? null,
++        };
++      }
++      if (route.endsWith('/operational-state')) {
++        if (denyOperational) return { statusCode: 403, body: { code: 'STAFF_EVENT_FORBIDDEN' } };
++        const st = route.includes(secondStation.id) ? secondStation : primaryStation;
++        return makeOperational(st);
++      }
++      if (options.method === 'POST' && route.endsWith('/call-next')) {
++        posts.push('call-next');
++        const next = waiting.shift();
++        const sid = posts.length === 1 ? sessionA : posts.length === 3 ? sessionB : sessionC;
++        pendingCall = {
++          serviceSessionId: sid,
++          queueEntryId: next.queueEntryId,
++          displayName: next.displayName,
++          calledAt: new Date(Date.now() - 23_000).toISOString(),
++        };
++        return {
++          statusCode: 201,
++          body: {
++            serviceSession: {
++              id: sid,
++              queueEntryId: next.queueEntryId,
++              experienceId: realExperienceId,
++              station: { id: primaryStation.id, label: primaryStation.label },
++              status: 'pending',
++              calledAt: pendingCall.calledAt,
++            },
++          },
++        };
++      }
++      if (options.method === 'POST' && route.endsWith('/complete')) {
++        posts.push('complete');
++        const sid = pendingCall.serviceSessionId;
++        pendingCall = null;
++        return {
++          body: {
++            serviceSession: { id: sid, status: 'completed', resolvedAt: new Date().toISOString() },
++            queueEntry: { status: 'closed', closeReason: 'completed' },
++            participation: { status: 'active', currentQueueEntryId: null },
++          },
++        };
++      }
++      if (options.method === 'POST' && route.endsWith('/absent')) {
++        posts.push('absent');
++        const prev = pendingCall;
++        pendingCall = null;
++        if (requeueOnAbsent) {
++          waiting.push({ queueEntryId: entryRequeued, displayName: prev.displayName, position: waiting.length + 1 });
++          return {
++            body: {
++              serviceSession: { id: prev.serviceSessionId, status: 'absent' },
++              previousQueueEntry: { id: prev.queueEntryId, status: 'closed', closeReason: 'absent' },
++              requeued: true,
++              newQueueEntry: { id: entryRequeued, status: 'waiting', queueOrder: '4', position: waiting.length },
++            },
++          };
++        }
++        return {
++          body: {
++            serviceSession: { id: prev.serviceSessionId, status: 'absent' },
++            previousQueueEntry: { id: prev.queueEntryId, status: 'closed', closeReason: 'absent' },
++            requeued: false,
++            newQueueEntry: null,
++          },
++        };
++      }
++      return undefined;
++    },
++  };
++
++  const app = createIntegration({ initialUser: staffUser, control });
++  try {
++    await app.mount();
++    await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
++    await app.press('Selecionar evento Torneio Real UNDB');
++    await app.press('Selecionar estação Estação Alpha da experiência Just Dance Pro');
++
++    // Estado A: estação disponível com fila FIFO real e sem valores fictícios dos mockups
++    assert.ok(app.hasText('Estação Alpha'));
++    assert.ok(app.hasText('DISPONÍVEL'));
++    assert.ok(app.hasText('Just Dance Pro'));
++    assert.ok(app.hasText('Torneio Real UNDB'));
++    assert.ok(!app.hasText('Street Fighter'), 'não usa nome fixo do mockup');
++    assert.ok(!app.hasText('BEAST Arena'), 'não usa evento fixo do mockup');
++    assert.ok(app.hasText('FILA DA EXPERIÊNCIA'));
++    assert.ok(app.hasText('3 aguardando'));
++    assert.ok(app.hasText('Mariana Costa'));
++    assert.ok(app.hasText('Lucas Ferreira'));
++    assert.ok(app.hasText('Rafael Oliveira'));
++    assert.ok(app.hasText('Fila compartilhada entre as estações'));
++    assert.ok(app.hasText('ATENDIMENTO ATUAL'));
++    assert.ok(app.hasText('Nenhum participante chamado'));
++    assert.ok(app.hasText('Fila e atendimento atualizados automaticamente'));
++    assert.equal(app.isDisabled('Chamar próximo'), false);
++    assert.equal(app.hasButton('Atualizar fila'), false, 'sem botão duplicado de atualizar');
++    assert.equal(app.hasButton('Voltar ao painel'), true);
++
++    // Transição A -> B: Chamar próximo exibe Mariana Costa em atendimento e remove da lista de espera
++    await app.press('Chamar próximo');
++    assert.ok(app.hasText('Mariana Costa'));
++    assert.ok(app.hasText('Em atendimento'));
++    assert.ok(app.hasText('Chamado há 00:'));
++    assert.ok(app.hasText('2 aguardando'));
++    assert.equal(app.hasButton('Chamar próximo'), false, 'não exibe Chamar próximo durante atendimento pendente');
++    assert.ok(app.hasButton('Concluir experiência'));
++    assert.ok(app.hasButton('Marcar ausência'));
++    assert.ok(app.hasButton('Remover da fila'));
++
++    // Concluir experiência exige confirmação e libera estação para Estado A
++    await app.press('Concluir experiência');
++    assert.equal(app.modal().props.visible, true);
++    await app.press('CONFIRMAR OPERAÇÃO');
++    assert.ok(app.hasText('Operação confirmada pelo servidor.'));
++    assert.ok(app.hasText('Nenhum participante chamado'));
++    assert.equal(app.isDisabled('Chamar próximo'), false);
++
++    // Chamar próximo (Lucas Ferreira) e Marcar ausência com reinserção no fim da fila
++    await app.press('Chamar próximo');
++    assert.ok(app.hasText('Lucas Ferreira'));
++    assert.ok(app.hasText('Em atendimento'));
++    requeueOnAbsent = true;
++    await app.press('Marcar ausência');
++    await app.press('CONFIRMAR OPERAÇÃO');
++    assert.ok(app.hasText('Ausência registrada; participante retornou ao fim da fila.'));
++    assert.ok(app.hasText('2 aguardando'));
++    assert.ok(app.hasText('Rafael Oliveira'));
++    assert.ok(app.hasText('Lucas Ferreira'));
++
++    // Chamar próximo (Rafael Oliveira) e Marcar ausência após corte (sem reinserção)
++    await app.press('Chamar próximo');
++    requeueOnAbsent = false;
++    await app.press('Marcar ausência');
++    await app.press('CONFIRMAR OPERAÇÃO');
++    assert.ok(app.hasText('Ausência registrada; participante não retornou à fila após o corte.'));
++    assert.ok(app.hasText('1 aguardando'));
++
++    // Segunda estação da mesma experiência (INDISPONÍVEL) compartilha a mesma fila e bloqueia Chamar próximo
++    await app.press('Voltar ao painel');
++    await app.press('Selecionar estação Estação 02 da experiência Just Dance Pro');
++    assert.ok(app.hasText('Estação 02'));
++    assert.ok(app.hasText('INDISPONÍVEL'));
++    assert.ok(app.hasText('1 aguardando'));
++    assert.ok(app.hasText('Lucas Ferreira'));
++    assert.equal(app.isDisabled('Chamar próximo'), true);
++
++    // Negativa 403 em /operational-state limpa dados nominais e propaga bloqueio ao painel
++    denyOperational = true;
++    await app.tickTimers(5000);
++    assert.ok(!app.hasText('Lucas Ferreira'));
++    assert.ok(app.hasText('Acesso ao evento ou à experiência indisponível'));
++    await app.press('Voltar ao painel');
++    assert.ok(app.hasText('SEM ACESSO'));
++    assert.equal(app.isDisabled('Controle de Entrada'), true);
++    assert.deepEqual(posts, ['call-next', 'complete', 'call-next', 'absent', 'call-next', 'absent']);
++  } finally {
++    app.dispose();
++  }
++});
+diff --git a/app/screens/staff/components/StaffStationSections.js b/app/screens/staff/components/StaffStationSections.js
+new file mode 100644
+--- /dev/null
++++ b/app/screens/staff/components/StaffStationSections.js
+@@ -0,0 +1,418 @@
++import { useEffect, useRef, useState } from 'react';
++import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
++import { AdminIcon, liveColors as c, liveStyles as live } from '../../admin/components/AdminLiveUI';
++
++const MAX_RELIABLE_ELAPSED_MS = 24 * 60 * 60 * 1000;
++const MAX_NEGATIVE_SKEW_MS = 60 * 1000;
++const defaultGetNow = () => Date.now();
++
++export function formatElapsedSinceCall(calledAt, nowMs = Date.now()) {
++  if (typeof calledAt !== 'string' || !calledAt.trim()) {
++    return { label: 'Chamada pendente', live: false };
++  }
++  const calledMs = Date.parse(calledAt);
++  if (!Number.isFinite(calledMs) || !Number.isFinite(nowMs)) {
++    return { label: 'Chamada pendente', live: false };
++  }
++  const diffMs = nowMs - calledMs;
++  if (diffMs < -MAX_NEGATIVE_SKEW_MS || diffMs > MAX_RELIABLE_ELAPSED_MS) {
++    return { label: 'Chamada pendente', live: false };
++  }
++  const totalSeconds = Math.max(0, Math.floor(diffMs / 1000));
++  const hours = Math.floor(totalSeconds / 3600);
++  const minutes = Math.floor((totalSeconds % 3600) / 60);
++  const seconds = totalSeconds % 60;
++  const pad = (value) => String(value).padStart(2, '0');
++  const formatted = hours > 0
++    ? `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`
++    : `${pad(minutes)}:${pad(seconds)}`;
++  return { label: `Chamado há ${formatted}`, live: true };
++}
++
++function StationGamepadIcon() {
++  return (
++    <View style={styles.gamepadBody} accessible={false} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
++      <Text style={styles.gamepadPlus}>+</Text>
++      <View style={styles.gamepadDots}>
++        <View style={styles.gamepadDot} />
++        <View style={styles.gamepadDot} />
++      </View>
++    </View>
++  );
++}
++
++function StationUserTile() {
++  return (
++    <View style={styles.userTile} accessible={false} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
++      <View style={styles.userHead} />
++      <View style={styles.userShoulders} />
++    </View>
++  );
++}
++
++function ActionIcon({ kind, color }) {
++  if (kind === 'complete') {
++    return (
++      <View style={styles.actionIconBox} accessible={false} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
++        <View style={[styles.checkMark, { borderColor: color }]} />
++      </View>
++    );
++  }
++  if (kind === 'absent') {
++    return (
++      <View style={styles.actionIconBox} accessible={false} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
++        <View style={[styles.calendarBox, { borderColor: color }]}>
++          <View style={[styles.calendarBar, { backgroundColor: color }]} />
++          <Text style={[styles.calendarCross, { color }]}>×</Text>
++        </View>
++      </View>
++    );
++  }
++  if (kind === 'remove') {
++    return (
++      <View style={styles.actionIconBox} accessible={false} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
++        <View style={[styles.trashLid, { backgroundColor: color }]} />
++        <View style={[styles.trashCan, { borderColor: color }]}>
++          <View style={[styles.trashLine, { backgroundColor: color }]} />
++          <View style={[styles.trashLine, { backgroundColor: color }]} />
++        </View>
++      </View>
++    );
++  }
++  return null;
++}
++
++export function StationStatusBadge({ availability }) {
++  const isAvailable = availability === 'available';
++  return (
++    <View style={[styles.statusPill, isAvailable ? styles.pillSuccess : styles.pillDanger]}>
++      <Text style={[styles.statusPillText, isAvailable ? styles.pillSuccessText : styles.pillDangerText]}>
++        {isAvailable ? 'DISPONÍVEL' : 'INDISPONÍVEL'}
++      </Text>
++    </View>
++  );
++}
++
++export function StationHeaderCard({ stationLabel, experienceName, eventName, availability }) {
++  return (
++    <View style={styles.headerSection}>
++      <View style={styles.headerTopRow}>
++        <Text style={styles.stationTitle} accessibilityRole="header">{stationLabel}</Text>
++        <StationStatusBadge availability={availability} />
++      </View>
++      <View style={styles.experienceRow}>
++        <StationGamepadIcon />
++        <Text style={styles.experienceName}>{experienceName}</Text>
++      </View>
++      <Text style={styles.eventName}>{eventName}</Text>
++    </View>
++  );
++}
++
++export function ExperienceQueueCard({ waitingCount, waiting }) {
++  return (
++    <View style={styles.sectionBlock}>
++      <View style={styles.sectionHeaderRow}>
++        <Text style={styles.sectionLabel}>FILA DA EXPERIÊNCIA</Text>
++        <Text style={styles.sectionCount}>{waitingCount} aguardando</Text>
++      </View>
++
++      <View style={styles.card}>
++        {waiting.length === 0 ? (
++          <View style={styles.emptyQueueBox}>
++            <Text style={styles.emptyTitle}>Fila vazia</Text>
++            <Text style={styles.emptySubtitle}>Nenhuma pessoa aguardando nesta experiência.</Text>
++          </View>
++        ) : (
++          <View>
++            {waiting.map((person, index) => (
++              <View key={person.queueEntryId}>
++                {index > 0 && <View style={styles.rowDivider} />}
++                <View style={styles.queueRow}>
++                  <View style={styles.positionBadge}>
++                    <Text style={styles.positionNumber}>{person.position}</Text>
++                  </View>
++                  <View style={live.grow}>
++                    <Text style={styles.participantName}>{person.displayName}</Text>
++                    <Text style={styles.participantState}>Aguardando</Text>
++                  </View>
++                </View>
++              </View>
++            ))}
++          </View>
++        )}
++
++        <View style={styles.sharedInfoBox} accessible accessibilityLabel="Fila compartilhada entre as estações">
++          <AdminIcon name="users" color={c.accent} size={20} />
++          <Text style={styles.sharedInfoText}>Fila compartilhada entre as estações</Text>
++        </View>
++      </View>
++    </View>
++  );
++}
++
++export function ElapsedCallBadge({ calledAt, getNow = defaultGetNow }) {
++  const getNowRef = useRef(getNow);
++  getNowRef.current = getNow;
++  const [nowMs, setNowMs] = useState(() => getNowRef.current());
++  const elapsed = formatElapsedSinceCall(calledAt, nowMs);
++
++  useEffect(() => {
++    const initialNow = getNowRef.current();
++    setNowMs(initialNow);
++    if (!formatElapsedSinceCall(calledAt, initialNow).live) return undefined;
++    const timer = setInterval(() => {
++      setNowMs(getNowRef.current());
++    }, 1000);
++    if (timer && typeof timer.unref === 'function') timer.unref();
++    return () => clearInterval(timer);
++  }, [calledAt]);
++
++  return (
++    <View style={styles.elapsedPill}>
++      <AdminIcon name="history" color={c.muted} size={14} />
++      <Text style={styles.elapsedText}>{elapsed.label}</Text>
++    </View>
++  );
++}
++
++function SemanticActionButton({ label, kind, variant, disabled, onPress }) {
++  const tone = SEMANTIC_BUTTONS[variant] ?? SEMANTIC_BUTTONS.primary;
++  return (
++    <Pressable
++      accessibilityRole="button"
++      accessibilityLabel={label}
++      accessibilityState={{ disabled }}
++      disabled={disabled}
++      onPress={disabled ? undefined : onPress}
++      style={({ pressed }) => [
++        styles.semanticButton,
++        tone.box,
++        disabled && styles.disabled,
++        pressed && !disabled && styles.pressed,
++      ]}
++    >
++      {kind ? <ActionIcon kind={kind} color={tone.iconColor} /> : null}
++      <Text style={[styles.semanticButtonText, tone.text]}>{label}</Text>
++    </Pressable>
++  );
++}
++
++export function CurrentServiceCard({ pending, blocked, onComplete, onAbsent, onRemove, getNow }) {
++  return (
++    <View style={styles.sectionBlock}>
++      <Text style={styles.sectionLabel}>ATENDIMENTO ATUAL</Text>
++
++      {!pending ? (
++        <View style={styles.card}>
++          <Text style={styles.emptyTitle}>Nenhum participante chamado</Text>
++          <Text style={styles.emptySubtitle}>
++            Após chamar, resolva o atendimento antes da próxima chamada.
++          </Text>
++        </View>
++      ) : (
++        <View style={styles.card}>
++          <View style={styles.calledHeaderRow}>
++            <View style={styles.calledIdentity}>
++              <StationUserTile />
++              <View style={live.grow}>
++                <Text style={styles.calledName}>{pending.displayName}</Text>
++                <Text style={styles.calledStatus}>Em atendimento</Text>
++              </View>
++            </View>
++            <ElapsedCallBadge calledAt={pending.calledAt} getNow={getNow} />
++          </View>
++
++          <View style={styles.cardDivider} />
++
++          <Text style={styles.actionPrompt}>Selecione a ação para este participante:</Text>
++
++          <View style={styles.actionsColumn}>
++            <SemanticActionButton
++              label="Concluir experiência"
++              kind="complete"
++              variant="success"
++              disabled={blocked}
++              onPress={() => onComplete(pending.serviceSessionId)}
++            />
++            <SemanticActionButton
++              label="Marcar ausência"
++              kind="absent"
++              variant="warning"
++              disabled={blocked}
++              onPress={() => onAbsent(pending.serviceSessionId)}
++            />
++            <SemanticActionButton
++              label="Remover da fila"
++              kind="remove"
++              variant="danger"
++              disabled={blocked}
++              onPress={() => onRemove(pending.serviceSessionId)}
++            />
++          </View>
++        </View>
++      )}
++    </View>
++  );
++}
++
++function describeDialog(kind) {
++  switch (kind) {
++    case 'complete':
++      return {
++        title: 'Concluir experiência?',
++        description: 'Confirma a conclusão desta experiência para o participante chamado? A participação no evento continua ativa.',
++        variant: 'success',
++      };
++    case 'absent':
++      return {
++        title: 'Marcar ausência?',
++        description: 'O participante será marcado como ausente e seguirá a regra vigente do servidor (reinserção ao fim da fila ou encerramento após o corte).',
++        variant: 'warning',
++      };
++    case 'remove_called':
++      return {
++        title: 'Remover da fila?',
++        description: 'Remove o participante chamado apenas desta fila de experiência, sem concluir a experiência, sem marcar ausência e sem cancelar o evento.',
++        variant: 'danger',
++      };
++    default:
++      return {
++        title: 'Chamar o próximo participante?',
++        description: 'Confirme a operação presencial para esta estação.',
++        variant: 'primary',
++      };
++  }
++}
++
++export function StationConfirmModal({ visible, dialog, onConfirm, onCancel }) {
++  const meta = describeDialog(dialog?.action?.kind);
++  return (
++    <Modal transparent animationType="fade" visible={visible} onRequestClose={onCancel}>
++      <View style={styles.backdrop}>
++        <View style={styles.modalCard} accessibilityViewIsModal>
++          <Text style={styles.modalTitle} accessibilityRole="header">{meta.title}</Text>
++          <Text style={styles.modalText}>{meta.description}</Text>
++          <Text style={styles.modalNote}>
++            Uma resposta incerta bloqueará novas ações até reconciliação.
++          </Text>
++          <View style={styles.actionsColumn}>
++            <SemanticActionButton
++              label="CONFIRMAR OPERAÇÃO"
++              variant={meta.variant}
++              disabled={false}
++              onPress={onConfirm}
++            />
++            <SemanticActionButton
++              label="CANCELAR OPERAÇÃO"
++              variant="secondary"
++              disabled={false}
++              onPress={onCancel}
++            />
++          </View>
++        </View>
++      </View>
++    </Modal>
++  );
++}
++
++const SEMANTIC_BUTTONS = {
++  primary: {
++    box: { backgroundColor: c.accentStrong, borderWidth: 1, borderColor: c.accent },
++    text: { color: c.onAccent },
++    iconColor: c.onAccent,
++  },
++  secondary: {
++    box: { backgroundColor: '#251A33', borderWidth: 1, borderColor: c.border },
++    text: { color: c.text },
++    iconColor: c.text,
++  },
++  success: {
++    box: { backgroundColor: 'rgba(16, 185, 129, 0.14)', borderWidth: 1.5, borderColor: '#10B981' },
++    text: { color: c.text },
++    iconColor: '#34D399',
++  },
++  warning: {
++    box: { backgroundColor: 'rgba(245, 158, 11, 0.12)', borderWidth: 1.5, borderColor: '#F59E0B' },
++    text: { color: c.text },
++    iconColor: '#FCD34D',
++  },
++  danger: {
++    box: { backgroundColor: 'rgba(239, 68, 68, 0.14)', borderWidth: 1.5, borderColor: '#EF4444' },
++    text: { color: c.text },
++    iconColor: '#FCA5A5',
++  },
++};
++
++const styles = StyleSheet.create({
++  headerSection: { gap: 4, marginTop: 2 },
++  headerTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 },
++  stationTitle: { color: c.text, fontSize: 28, lineHeight: 34, fontWeight: '700', flexShrink: 1 },
++  experienceRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 },
++  experienceName: { color: c.text, fontSize: 16, lineHeight: 22, fontWeight: '700', flexShrink: 1 },
++  eventName: { color: c.muted, fontSize: 14, lineHeight: 20 },
++  statusPill: { borderRadius: 24, borderWidth: 1, paddingHorizontal: 12, paddingVertical: 5, alignSelf: 'flex-start', maxWidth: '100%' },
++  statusPillText: { fontSize: 11, fontWeight: '700', letterSpacing: 0.7, textTransform: 'uppercase' },
++  pillSuccess: { backgroundColor: 'rgba(16, 185, 129, 0.14)', borderColor: '#10B981' },
++  pillSuccessText: { color: '#34D399' },
++  pillDanger: { backgroundColor: 'rgba(239, 68, 68, 0.14)', borderColor: '#EF4444' },
++  pillDangerText: { color: '#FCA5A5' },
++  gamepadBody: { width: 24, height: 14, borderRadius: 7, borderWidth: 1.5, borderColor: c.accent,
++    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 4, flexShrink: 0 },
++  gamepadPlus: { color: c.accent, fontSize: 10, fontWeight: '800', lineHeight: 11 },
++  gamepadDots: { flexDirection: 'row', gap: 2 },
++  gamepadDot: { width: 3, height: 3, borderRadius: 1.5, backgroundColor: c.accent },
++  sectionBlock: { gap: 8, marginTop: 4 },
++  sectionHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 },
++  sectionLabel: { color: c.accent, fontSize: 13, lineHeight: 18, fontWeight: '700', letterSpacing: 1.3 },
++  sectionCount: { color: c.muted, fontSize: 14, lineHeight: 18, fontWeight: '600' },
++  card: { ...live.card, marginTop: 0, gap: 10 },
++  emptyQueueBox: { gap: 4, paddingVertical: 4 },
++  emptyTitle: { color: c.text, fontSize: 17, lineHeight: 23, fontWeight: '700' },
++  emptySubtitle: { color: c.muted, fontSize: 14, lineHeight: 20 },
++  queueRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10 },
++  rowDivider: { height: 1, backgroundColor: 'rgba(196, 118, 237, 0.25)' },
++  positionBadge: { width: 36, height: 36, borderRadius: 10, backgroundColor: '#5B2E91',
++    alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
++  positionNumber: { color: c.onAccent, fontSize: 15, fontWeight: '700' },
++  participantName: { color: c.text, fontSize: 16, lineHeight: 22, fontWeight: '700' },
++  participantState: { color: c.muted, fontSize: 13, lineHeight: 18 },
++  sharedInfoBox: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: c.iconFill,
++    borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, marginTop: 4 },
++  sharedInfoText: { color: '#E9D8FD', fontSize: 13, lineHeight: 18, fontWeight: '500', flex: 1 },
++  calledHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 },
++  calledIdentity: { flexDirection: 'row', alignItems: 'center', gap: 12, flex: 1, minWidth: 160 },
++  userTile: { width: 44, height: 44, borderRadius: 12, backgroundColor: c.iconFill,
++    alignItems: 'center', justifyContent: 'center', flexShrink: 0, gap: 3 },
++  userHead: { width: 10, height: 10, borderRadius: 5, borderWidth: 1.6, borderColor: c.accent },
++  userShoulders: { width: 18, height: 8, borderTopLeftRadius: 8, borderTopRightRadius: 8,
++    borderWidth: 1.6, borderBottomWidth: 0, borderColor: c.accent },
++  calledName: { color: c.text, fontSize: 18, lineHeight: 24, fontWeight: '700' },
++  calledStatus: { color: c.muted, fontSize: 14, lineHeight: 20 },
++  elapsedPill: { flexDirection: 'row', alignItems: 'center', gap: 6, borderRadius: 20, borderWidth: 1,
++    borderColor: 'rgba(196, 118, 237, 0.45)', backgroundColor: '#1E152E', paddingHorizontal: 10, paddingVertical: 5,
++    maxWidth: '100%' },
++  elapsedText: { color: c.muted, fontSize: 12, lineHeight: 16, fontWeight: '600', flexShrink: 1 },
++  cardDivider: { height: 1, backgroundColor: 'rgba(196, 118, 237, 0.28)' },
++  actionPrompt: { color: c.muted, fontSize: 14, lineHeight: 20 },
++  actionsColumn: { gap: 10 },
++  semanticButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10,
++    minHeight: 48, borderRadius: 14, paddingHorizontal: 16, paddingVertical: 12 },
++  semanticButtonText: { fontSize: 15, lineHeight: 20, fontWeight: '700', textAlign: 'center', flexShrink: 1 },
++  actionIconBox: { width: 20, height: 20, alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
++  checkMark: { width: 12, height: 7, borderLeftWidth: 2, borderBottomWidth: 2, transform: [{ rotate: '-45deg' }], marginBottom: 3 },
++  calendarBox: { width: 16, height: 15, borderRadius: 3, borderWidth: 1.5, alignItems: 'center', justifyContent: 'flex-end', overflow: 'hidden' },
++  calendarBar: { position: 'absolute', top: 0, left: 0, right: 0, height: 4 },
++  calendarCross: { fontSize: 10, fontWeight: '800', lineHeight: 11 },
++  trashLid: { width: 14, height: 2, borderRadius: 1, marginBottom: 1.5 },
++  trashCan: { width: 12, height: 12, borderWidth: 1.5, borderTopWidth: 0, borderBottomLeftRadius: 2, borderBottomRightRadius: 2,
++    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-evenly', paddingVertical: 2 },
++  trashLine: { width: 1.5, height: 6, borderRadius: 1 },
++  backdrop: { flex: 1, justifyContent: 'center', padding: 24, backgroundColor: 'rgba(9, 4, 18, 0.8)' },
++  modalCard: { backgroundColor: c.surface, borderWidth: 1, borderColor: c.border, borderRadius: 18, padding: 20, gap: 12 },
++  modalTitle: { color: c.text, fontSize: 19, lineHeight: 25, fontWeight: '700' },
++  modalText: { color: c.muted, fontSize: 15, lineHeight: 22 },
++  modalNote: { color: '#FCD34D', fontSize: 13, lineHeight: 19 },
++  disabled: { opacity: 0.45 },
++  pressed: { opacity: 0.75 },
++});
+diff --git a/app/tests/staffStationOperational.test.cjs b/app/tests/staffStationOperational.test.cjs
+new file mode 100644
+--- /dev/null
++++ b/app/tests/staffStationOperational.test.cjs
+@@ -0,0 +1,587 @@
++const assert = require('node:assert/strict');
++const path = require('node:path');
++const test = require('node:test');
++const { createRequire } = require('node:module');
++const { loadModule } = require('./helpers/questionnaireHarness.cjs');
++
++const qaRequire = createRequire(path.resolve(__dirname, '../../qa/regression/package.json'));
++let deps = null;
++try {
++  deps = {
++    React: qaRequire('react'),
++    jsx: qaRequire('react/jsx-runtime'),
++    Renderer: qaRequire('react-test-renderer'),
++  };
++} catch {
++  deps = null;
++}
++const skip = deps ? false : 'dependências de qa/regression não instaladas';
++
++const EV_A = '11111111-1111-4111-8111-111111111111';
++const EV_B = '22222222-2222-4222-8222-222222222222';
++const EXP_1 = '33333333-3333-4333-8333-333333333333';
++const ST_1 = '44444444-4444-4444-8444-444444444444';
++const ST_2 = '55555555-5555-4555-8555-555555555555';
++const USER_1 = 'abcdef00-0000-4000-8000-000000000001';
++const SESSION_1 = '10000000-0000-4000-8000-000000000001';
++const ENTRY_1 = '77777777-7777-4777-8777-777777777771';
++const ENTRY_2 = '77777777-7777-4777-8777-777777777772';
++const ENTRY_3 = '77777777-7777-4777-8777-777777777773';
++const SESS_1 = '88888888-8888-4888-8888-888888888881';
++
++const deferred = () => {
++  let resolve;
++  let reject;
++  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
++  return { promise, resolve, reject };
++};
++
++// ============================================================================
++// 1. Testes unitários puros do indicador seguro de tempo desde a chamada
++// ============================================================================
++
++const pureSections = (() => {
++  const nativeStub = Object.fromEntries(['Modal', 'Pressable', 'Text', 'View'].map((n) => [n, n]));
++  nativeStub.StyleSheet = { create: (s) => s };
++  const adminTheme = loadModule('screens/admin/components/adminTheme.js', require).exports;
++  const adminLiveUi = loadModule('screens/admin/components/AdminLiveUI.js', (name) => {
++    if (name === 'react/jsx-runtime') return require('react/jsx-runtime');
++    if (name === 'react-native') return nativeStub;
++    if (name === './adminTheme') return adminTheme;
++    return require(name);
++  }).exports;
++  return loadModule('screens/staff/components/StaffStationSections.js', (name) => {
++    if (name === 'react') return require('react');
++    if (name === 'react/jsx-runtime') return require('react/jsx-runtime');
++    if (name === 'react-native') return nativeStub;
++    if (name === '../../admin/components/AdminLiveUI') return adminLiveUi;
++    return require(name);
++  }).exports;
++})();
++
++test('STAFF-02: formatElapsedSinceCall formata MM:SS, HH:MM:SS e usa fallback seguro sem alterar regras temporais', () => {
++  const calledAt = '2026-11-19T15:00:00.000Z';
++  const baseMs = Date.parse(calledAt);
++
++  assert.deepEqual(pureSections.formatElapsedSinceCall(calledAt, baseMs + 23_000), {
++    label: 'Chamado há 00:23',
++    live: true,
++  });
++  assert.deepEqual(pureSections.formatElapsedSinceCall(calledAt, baseMs + 3_725_000), {
++    label: 'Chamado há 01:02:05',
++    live: true,
++  });
++  // Pequeno desvio negativo de relógio (< 60s) limita em 00:00
++  assert.deepEqual(pureSections.formatElapsedSinceCall(calledAt, baseMs - 10_000), {
++    label: 'Chamado há 00:00',
++    live: true,
++  });
++  // Desvio negativo grande (> 60s), tempo excessivo (> 24h) ou timestamp inválido caem no fallback seguro
++  assert.deepEqual(pureSections.formatElapsedSinceCall(calledAt, baseMs - 120_000), {
++    label: 'Chamada pendente',
++    live: false,
++  });
++  assert.deepEqual(pureSections.formatElapsedSinceCall(calledAt, baseMs + 25 * 60 * 60 * 1000), {
++    label: 'Chamada pendente',
++    live: false,
++  });
++  assert.deepEqual(pureSections.formatElapsedSinceCall('invalido', baseMs), {
++    label: 'Chamada pendente',
++    live: false,
++  });
++  assert.deepEqual(pureSections.formatElapsedSinceCall(null, baseMs), {
++    label: 'Chamada pendente',
++    live: false,
++  });
++});
++
++// ============================================================================
++// 2. Harness real React + React Test Renderer para StaffStationOperationalScreen
++// ============================================================================
++
++function createStationHarness({
++  initialEvent = { id: EV_A, name: 'Arena Oficial UNDB' },
++  initialExperience = { id: EXP_1, name: 'Simulador F1' },
++  initialStation = { id: ST_1, experienceId: EXP_1, label: 'Cabine 01', availability: 'available', pendingServiceSessionId: null },
++  initialAuth = {
++    isAuthenticated: true,
++    user: { id: USER_1, roles: ['staff'] },
++    sessionId: SESSION_1,
++    isIdentityVerified: () => true,
++    getSessionEpoch: () => 1,
++    getIdentityRevision: () => 1,
++  },
++  onGet,
++  onPost,
++  onChanged = () => {},
++  onRefresh = () => {},
++  onAccessDenied = () => {},
++  secureInitial = new Map(),
++  secureAvailable = true,
++  getNow = () => Date.parse('2026-11-19T15:00:23.000Z'),
++} = {}) {
++  const { React, jsx, Renderer } = deps;
++  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
++
++  const secureValues = new Map(secureInitial);
++  let keySerial = 0;
++  let pollingRegistration = null;
++  let authState = initialAuth;
++  let eventProp = initialEvent;
++  let experienceProp = initialExperience;
++  let stationProp = initialStation;
++  let accessDeniedProp = false;
++  let eventCurrentFlag = true;
++
++  const native = Object.fromEntries(
++    ['ActivityIndicator', 'Modal', 'Pressable', 'Text', 'View'].map((name) => [name, name]),
++  );
++  native.StyleSheet = { create: (styles) => styles };
++  native.Platform = { OS: 'ios' };
++
++  const AuthCtx = React.createContext(null);
++  const authModule = { AuthContext: AuthCtx, useAuth: () => React.useContext(AuthCtx) };
++
++  const entrySvc = loadModule('services/staffEntryService.js', require).exports;
++  const opsSvc = loadModule('services/staffOperationsService.js', (name) => {
++    if (name === './staffEntryService.js' || name === './staffEntryService') return entrySvc;
++    return require(name);
++  }).exports;
++  const intentStorageSvc = loadModule('services/staffIntentStorage.js', (name) => {
++    if (name === 'react-native') return native;
++    if (name === 'expo-secure-store') {
++      return {
++        isAvailableAsync: async () => secureAvailable,
++        getItemAsync: async (key) => secureValues.get(key) ?? null,
++        setItemAsync: async (key, value) => { secureValues.set(key, value); },
++        deleteItemAsync: async (key) => { secureValues.delete(key); },
++      };
++    }
++    return require(name);
++  }).exports;
++
++  const adminTheme = loadModule('screens/admin/components/adminTheme.js', require).exports;
++  const adminLiveUi = loadModule('screens/admin/components/AdminLiveUI.js', (name) => {
++    if (name === 'react/jsx-runtime') return jsx;
++    if (name === 'react-native') return native;
++    if (name === './adminTheme') return adminTheme;
++    return require(name);
++  }).exports;
++  const stationSections = loadModule('screens/staff/components/StaffStationSections.js', (name) => {
++    if (name === 'react') return React;
++    if (name === 'react/jsx-runtime') return jsx;
++    if (name === 'react-native') return native;
++    if (name === '../../admin/components/AdminLiveUI') return adminLiveUi;
++    return require(name);
++  }).exports;
++
++  const StaffStationOperationalScreen = loadModule('screens/staff/StaffStationOperationalScreen.js', (name) => {
++    if (name === 'react') return React;
++    if (name === 'react/jsx-runtime') return jsx;
++    if (name === 'react-native') return native;
++    if (name === 'expo-crypto') {
++      return { randomUUID: () => `50000000-0000-4000-8000-${String(++keySerial).padStart(12, '0')}` };
++    }
++    if (name === '../../context/AuthContext') return authModule;
++    if (name === '../../services/staffOperationsService') return opsSvc;
++    if (name === '../../services/staffIntentStorage') return intentStorageSvc;
++    if (name === '../admin/components/AdminLiveUI') return adminLiveUi;
++    if (name === './components/StaffStationSections') return stationSections;
++    if (name === './useStaffPolling') {
++      return {
++        useStaffPolling(enabled, read, intervalMs, scope) {
++          pollingRegistration = { enabled, read, intervalMs, scope };
++        },
++      };
++    }
++    return require(name);
++  }).exports.default;
++
++  const httpClient = {
++    get: (url, opts) => onGet(url, opts),
++    post: (url, body, opts) => onPost(url, body, opts),
++  };
++
++  const renderEl = () => React.createElement(
++    AuthCtx.Provider,
++    { value: { ...authState, httpClient } },
++    React.createElement(StaffStationOperationalScreen, {
++      event: eventProp,
++      experience: experienceProp,
++      station: stationProp,
++      isEventCurrent: () => eventCurrentFlag,
++      onChanged,
++      onRefresh,
++      accessDenied: accessDeniedProp,
++      onAccessDenied,
++      getNow,
++    }),
++  );
++
++  let tree = null;
++  const flatten = (value) => (Array.isArray(value)
++    ? value.map(flatten).join('')
++    : value && typeof value === 'object'
++      ? flatten(value.props?.children)
++      : String(value ?? ''));
++
++  return {
++    secureValues,
++    getPolling: () => pollingRegistration,
++    async mount() {
++      await Renderer.act(async () => {
++        tree = Renderer.create(renderEl());
++      });
++    },
++    async rerender(patch = {}) {
++      if ('auth' in patch) authState = patch.auth;
++      if ('event' in patch) eventProp = patch.event;
++      if ('experience' in patch) experienceProp = patch.experience;
++      if ('station' in patch) stationProp = patch.station;
++      if ('accessDenied' in patch) accessDeniedProp = patch.accessDenied;
++      if ('eventCurrent' in patch) eventCurrentFlag = patch.eventCurrent;
++      await Renderer.act(async () => {
++        tree.update(renderEl());
++      });
++    },
++    async act(work) {
++      await Renderer.act(work);
++    },
++    allTexts() {
++      return tree.root.findAllByType('Text').map((n) => flatten(n.props.children));
++    },
++    hasText(fragment) {
++      return this.allTexts().some((t) => t.includes(fragment));
++    },
++    pressables(label) {
++      return tree.root.findAllByType('Pressable').filter((n) => n.props.accessibilityLabel === label);
++    },
++    hasButton(label) {
++      return this.pressables(label).length > 0;
++    },
++    isDisabled(label) {
++      const found = this.pressables(label);
++      assert.equal(found.length, 1, `botão único esperado: ${label}`);
++      return Boolean(found[0].props.disabled);
++    },
++    handler(label) {
++      const found = this.pressables(label);
++      assert.equal(found.length, 1, `handler único esperado: ${label}`);
++      return found[0].props.onPress;
++    },
++    async press(label) {
++      const found = this.pressables(label);
++      assert.equal(found.length, 1, `botão único esperado: ${label}`);
++      await Renderer.act(async () => {
++        await found[0].props.onPress?.();
++      });
++    },
++    modals() {
++      return tree.root.findAllByType('Modal');
++    },
++    async triggerPoll() {
++      assert.ok(pollingRegistration && pollingRegistration.enabled, 'polling deve estar habilitado');
++      await Renderer.act(async () => {
++        await pollingRegistration.read();
++      });
++    },
++    dispose() {
++      if (tree) Renderer.act(() => tree.unmount());
++    },
++  };
++}
++
++test('STAFF-02: apresentação dos Estados A/B, ordem FIFO exata do servidor, fila vazia, estação indisponível e encerramento operacional', { skip }, async () => {
++  const initialRead = deferred();
++  let stateResponse = null;
++
++  const h = createStationHarness({
++    onGet: (url) => {
++      if (url.endsWith('/operational-state')) {
++        return stateResponse ? Promise.resolve(stateResponse) : initialRead.promise;
++      }
++      return Promise.resolve({});
++    },
++  });
++
++  try {
++    // 1. Carregamento inicial sem dados inventados
++    await h.mount();
++    assert.ok(h.hasText('Cabine 01'));
++    assert.ok(h.hasText('Simulador F1'));
++    assert.ok(h.hasText('Arena Oficial UNDB'));
++    assert.ok(h.hasText('Carregando atendimento...'));
++    assert.ok(!h.hasText('Fila vazia'));
++    assert.ok(!h.hasText('Street Fighter'));
++    assert.ok(!h.hasText('BEAST Arena'));
++
++    // 2. Estado A com fila FIFO não-alfabética e nomes longos
++    const longName = 'Zélia Maria Aparecida da Conceição Cavalcante Júnior';
++    stateResponse = {
++      eventId: EV_A,
++      experienceId: EXP_1,
++      stationId: ST_1,
++      availability: 'available',
++      canCall: true,
++      waitingCount: 3,
++      waiting: [
++        { queueEntryId: ENTRY_1, displayName: longName, position: 1 },
++        { queueEntryId: ENTRY_2, displayName: 'Alberto Silva', position: 2 },
++        { queueEntryId: ENTRY_3, displayName: 'Bruno Rocha', position: 3 },
++      ],
++      pending: null,
++    };
++    await h.act(async () => { initialRead.resolve(stateResponse); });
++
++    assert.ok(h.hasText('DISPONÍVEL'));
++    assert.ok(h.hasText('FILA DA EXPERIÊNCIA'));
++    assert.ok(h.hasText('3 aguardando'));
++    assert.ok(h.hasText('Fila compartilhada entre as estações'));
++    assert.equal(h.hasButton('Fila compartilhada entre as estações'), false, 'informação compartilhada não é clicável');
++    assert.ok(h.hasText('ATENDIMENTO ATUAL'));
++    assert.ok(h.hasText('Nenhum participante chamado'));
++    assert.ok(h.hasText('Fila e atendimento atualizados automaticamente'));
++    assert.equal(h.isDisabled('Chamar próximo'), false);
++
++    // Ordem FIFO oficial preservada (Zélia antes de Alberto antes de Bruno)
++    const texts = h.allTexts();
++    const idxZelia = texts.indexOf(longName);
++    const idxAlberto = texts.indexOf('Alberto Silva');
++    const idxBruno = texts.indexOf('Bruno Rocha');
++    assert.ok(idxZelia > -1 && idxAlberto > idxZelia && idxBruno > idxAlberto, 'ordem FIFO exata preservada');
++
++    // 3. Estado A com fila vazia (não confunde vazio com erro de conexão)
++    stateResponse = {
++      ...stateResponse,
++      canCall: false,
++      waitingCount: 0,
++      waiting: [],
++    };
++    await h.press('Atualizar atendimento');
++    assert.ok(h.hasText('0 aguardando'));
++    assert.ok(h.hasText('Fila vazia'));
++    assert.ok(h.hasText('Nenhuma pessoa aguardando nesta experiência.'));
++    assert.ok(!h.hasText('Falha de conexão'));
++    assert.equal(h.isDisabled('Chamar próximo'), true);
++
++    // 4. Estação indisponível mantém fila visível e bloqueia Chamar próximo
++    stateResponse = {
++      ...stateResponse,
++      availability: 'unavailable',
++      canCall: false,
++      waitingCount: 1,
++      waiting: [{ queueEntryId: ENTRY_2, displayName: 'Alberto Silva', position: 1 }],
++    };
++    await h.press('Atualizar atendimento');
++    assert.ok(h.hasText('INDISPONÍVEL'));
++    assert.ok(h.hasText('1 aguardando'));
++    assert.ok(h.hasText('Alberto Silva'));
++    assert.equal(h.isDisabled('Chamar próximo'), true);
++
++    // 5. Encerramento operacional (disponível + fila > 0 + canCall=false) mantém Chamar próximo desabilitado
++    stateResponse = {
++      ...stateResponse,
++      availability: 'available',
++      canCall: false,
++      waitingCount: 1,
++      waiting: [{ queueEntryId: ENTRY_2, displayName: 'Alberto Silva', position: 1 }],
++    };
++    await h.press('Atualizar atendimento');
++    assert.ok(h.hasText('DISPONÍVEL'));
++    assert.equal(h.isDisabled('Chamar próximo'), true);
++    assert.ok(h.hasText('Novas chamadas não estão liberadas'));
++
++    // 6. Estado B com atendimento pendente exibe tempo decorrido confiável e ações sem Chamar próximo
++    stateResponse = {
++      ...stateResponse,
++      availability: 'available',
++      canCall: false,
++      waitingCount: 1,
++      waiting: [{ queueEntryId: ENTRY_3, displayName: 'Bruno Rocha', position: 1 }],
++      pending: {
++        serviceSessionId: SESS_1,
++        queueEntryId: ENTRY_2,
++        displayName: 'Alberto Silva',
++        calledAt: '2026-11-19T15:00:00.000Z',
++      },
++    };
++    await h.press('Atualizar atendimento');
++    assert.ok(h.hasText('Alberto Silva'));
++    assert.ok(h.hasText('Em atendimento'));
++    assert.ok(h.hasText('Chamado há 00:23'));
++    assert.equal(h.hasButton('Chamar próximo'), false);
++    assert.equal(h.isDisabled('Concluir experiência'), false);
++    assert.equal(h.isDisabled('Marcar ausência'), false);
++    assert.equal(h.isDisabled('Remover da fila'), false);
++    // Participante chamado não aparece duplicado na lista de espera
++    assert.equal(h.allTexts().filter((t) => t === 'Alberto Silva').length, 1);
++  } finally {
++    h.dispose();
++  }
++});
++
++test('STAFF-02: resposta tardia em troca de estação/evento, logout com modal aberto, falha stale, polling sem POST e recibos persistidos', { skip }, async () => {
++  const reqs = [];
++  let postCount = 0;
++  let deniedKinds = [];
++  const slot = `arenago.staff.operation.${USER_1}`;
++
++  const h = createStationHarness({
++    onGet: (url) => {
++      const d = deferred();
++      reqs.push({ url, d });
++      return d.promise;
++    },
++    onPost: async () => {
++      postCount += 1;
++      return {};
++    },
++    onAccessDenied: (kind) => deniedKinds.push(kind),
++  });
++
++  try {
++    await h.mount();
++    assert.equal(reqs.length, 1);
++
++    // 1. Troca de estação descarta resposta tardia da estação anterior
++    await h.rerender({
++      station: { id: ST_2, experienceId: EXP_1, label: 'Cabine 02', availability: 'available', pendingServiceSessionId: null },
++    });
++    assert.equal(reqs.length, 2);
++
++    await h.act(async () => {
++      reqs[1].d.resolve({
++        eventId: EV_A, experienceId: EXP_1, stationId: ST_2, availability: 'available', canCall: false,
++        waitingCount: 1, waiting: [{ queueEntryId: ENTRY_2, displayName: 'Pessoa Estação 02', position: 1 }],
++        pending: { serviceSessionId: SESS_1, queueEntryId: ENTRY_1, displayName: 'Chamado 02', calledAt: '2026-11-19T15:00:00.000Z' },
++      });
++    });
++    await h.act(async () => {
++      reqs[0].d.resolve({
++        eventId: EV_A, experienceId: EXP_1, stationId: ST_1, availability: 'available', canCall: true,
++        waitingCount: 1, waiting: [{ queueEntryId: ENTRY_3, displayName: 'Pessoa Estação Antiga', position: 1 }],
++        pending: null,
++      });
++    });
++    assert.ok(h.hasText('Cabine 02'));
++    assert.ok(h.hasText('Pessoa Estação 02'));
++    assert.ok(!h.hasText('Pessoa Estação Antiga'));
++
++    // 2. Falha transitória no polling marca stale, bloqueia todas as ações e não envia POST
++    await h.act(async () => {
++      const pollPromise = h.getPolling().read();
++      assert.equal(reqs.length, 3);
++      reqs[2].d.reject(Object.assign(new Error('offline'), { isNetworkError: true }));
++      await pollPromise;
++    });
++    assert.ok(h.hasText('Dados da estação possivelmente desatualizados'));
++    assert.equal(h.isDisabled('Concluir experiência'), true);
++    assert.equal(h.isDisabled('Marcar ausência'), true);
++    assert.equal(h.isDisabled('Remover da fila'), true);
++    assert.equal(postCount, 0);
++
++    // Recuperação pelo próximo polling limpa stale sem disparar POST
++    await h.act(async () => {
++      const pollRecover = h.getPolling().read();
++      assert.equal(reqs.length, 4);
++      reqs[3].d.resolve({
++        eventId: EV_A, experienceId: EXP_1, stationId: ST_2, availability: 'available', canCall: false,
++        waitingCount: 1, waiting: [{ queueEntryId: ENTRY_2, displayName: 'Pessoa Estação 02', position: 1 }],
++        pending: { serviceSessionId: SESS_1, queueEntryId: ENTRY_1, displayName: 'Chamado 02', calledAt: '2026-11-19T15:00:00.000Z' },
++      });
++      await pollRecover;
++    });
++    assert.equal(h.isDisabled('Concluir experiência'), false);
++    assert.equal(postCount, 0);
++
++    // 3. Abrir modal e receber accessDenied (propagação do painel) fecha modal, limpa nomes e bloqueia callback antigo
++    await h.press('Concluir experiência');
++    assert.equal(h.modals()[0].props.visible, true);
++    const staleConfirm = h.handler('CONFIRMAR OPERAÇÃO');
++    await h.rerender({ accessDenied: true });
++    assert.ok(!h.hasText('Chamado 02'));
++    assert.ok(!h.hasText('Pessoa Estação 02'));
++    assert.equal(h.modals().length, 0);
++    await h.act(async () => staleConfirm());
++    assert.equal(postCount, 0);
++
++    // Reabilita acesso e troca para outro evento: intenção reservada persistida bloqueia operações
++    await h.rerender({
++      accessDenied: false,
++      event: { id: EV_B, name: 'Evento B' },
++      station: { id: ST_1, experienceId: EXP_1, label: 'Cabine B1', availability: 'available', pendingServiceSessionId: null },
++    });
++    const evBIdx = reqs.length - 1;
++    h.secureValues.set(slot, JSON.stringify({
++      kind: 'call', userId: USER_1, sessionId: SESSION_1, eventId: EV_B,
++      experienceId: EXP_1, stationId: ST_1, serviceSessionId: null,
++      key: '50000000-0000-4000-8000-000000000099', phase: 'reserved',
++    }));
++    await h.act(async () => {
++      reqs[evBIdx].d.resolve({
++        eventId: EV_B, experienceId: EXP_1, stationId: ST_1, availability: 'available', canCall: true,
++        waitingCount: 1, waiting: [{ queueEntryId: ENTRY_1, displayName: 'Pessoa Evento B', position: 1 }],
++        pending: null,
++      });
++    });
++    assert.ok(h.hasText('Solicitação registrada, ainda não enviada.'));
++    assert.equal(h.isDisabled('Chamar próximo'), true);
++    assert.ok(h.hasButton('Descartar solicitação não enviada'));
++
++    // Intenção pendente de outra estação também bloqueia novas mutações na estação atual
++    h.secureValues.set(slot, JSON.stringify({
++      kind: 'call', userId: USER_1, sessionId: SESSION_1, eventId: EV_B,
++      experienceId: EXP_1, stationId: ST_2, serviceSessionId: null,
++      key: '50000000-0000-4000-8000-000000000098', phase: 'dispatching',
++    }));
++    await h.act(async () => {
++      const refreshOther = h.handler('Atualizar atendimento')();
++      const idxOther = reqs.length - 1;
++      reqs[idxOther].d.resolve({
++        eventId: EV_B, experienceId: EXP_1, stationId: ST_1, availability: 'available', canCall: true,
++        waitingCount: 1, waiting: [{ queueEntryId: ENTRY_1, displayName: 'Pessoa Evento B', position: 1 }],
++        pending: null,
++      });
++      await refreshOther;
++    });
++    assert.ok(h.hasText('Há uma operação pendente em outra sessão, evento ou estação desta conta.'));
++    assert.equal(h.isDisabled('Chamar próximo'), true);
++    h.secureValues.delete(slot);
++
++    // 4. 404 na estação limpa dados nominais mas não aciona onAccessDenied global (coerência com R3-03)
++    await h.act(async () => {
++      const refresh404 = h.handler('Atualizar atendimento')();
++      const idx404 = reqs.length - 1;
++      reqs[idx404].d.reject(Object.assign(new Error('not-found'), { status: 404 }));
++      await refresh404;
++    });
++    assert.ok(!h.hasText('Pessoa Evento B'));
++    assert.ok(h.hasText('Acesso à estação indisponível.'));
++    assert.deepEqual(deniedKinds, []);
++
++    // 5. 403 na estação limpa dados nominais E propaga onAccessDenied('denied')
++    await h.act(async () => {
++      const refresh403 = h.handler('Atualizar atendimento')();
++      const idx403 = reqs.length - 1;
++      reqs[idx403].d.reject(Object.assign(new Error('forbidden'), { status: 403 }));
++      await refresh403;
++    });
++    assert.deepEqual(deniedKinds, ['denied']);
++
++    // 6. Logout desmonta contexto operacional sem manter dados ou permitir mutações
++    await h.rerender({
++      auth: {
++        isAuthenticated: false,
++        user: null,
++        sessionId: null,
++        isIdentityVerified: () => false,
++        getSessionEpoch: () => 2,
++        getIdentityRevision: () => 2,
++      },
++    });
++    assert.ok(!h.hasText('Pessoa Evento B'));
++    assert.equal(h.hasButton('Chamar próximo'), false);
++  } finally {
++    h.dispose();
++  }
++});
+diff --git a/docs/STAFF_02_ESTACAO_FILA_ATENDIMENTO.md b/docs/STAFF_02_ESTACAO_FILA_ATENDIMENTO.md
+new file mode 100644
+--- /dev/null
++++ b/docs/STAFF_02_ESTACAO_FILA_ATENDIMENTO.md
+@@ -0,0 +1,189 @@
++# ArenaGo — STAFF-02 | Reformulação da Estação, Fila e Atendimento
++
++## 1. Identificação da Task e Commit-Base
++
++- **Projeto:** ArenaGo — ProgramacaoMobile
++- **Task:** STAFF-02 — Reformulação da Estação, Fila e Atendimento
++- **Responsável pela implementação:** Kaled
++- **Prioridade:** P0
++- **Branch obrigatória:** `feature/staff-operacional-v2`
++- **Commit-base (`HEAD` de referência):** `95b8b80f3c0142af30c25e9483291d75677a085d` (`style(staff): padroniza interface com Admin e conclui homologação da STAFF-01`)
++- **Status:** Implementação e inspeção estática concluídas; aguardando campanha automatizada com **GPT-6 Luna — Medium**, publicação via VSCode pelo responsável e homologação no Expo.
++
++### Seleção de modelos e níveis de raciocínio (conforme `AGENTS.md`)
++
++- **Implementação (`STAFF-02`):** Recomendado **GPT-6.1 Sol — High** (integração visual/funcional em tela operacional com coordenador idempotente, persistência em `SecureStore`, bloqueios de concorrência, propagação de autorização e atualização de harnesses reais).
++- **Execução da campanha de validações automatizadas:** **GPT-6 Luna — Medium** (executor padrão designado pelo `AGENTS.md`; nenhum teste automatizado foi executado durante esta etapa de implementação).
++
++---
++
++## 2. Diagnóstico do Código Anterior
++
++Antes de qualquer alteração visual ou funcional, o estado na base `95b8b80` foi inspecionado:
++
++1. **Navegação e duplicidade em `app/screens/staff/StaffEventsNavigator.js` (`section === 'station'`):**
++   - `StaffEventHomeScreen` já utilizava `StaffLiveScreen` com o padrão aprovado da STAFF-01 (`Voltar ao painel` à esquerda + logo `logo-arenago-staff.png` à direita, fundo `#090412`, órbitas decorativas, `SafeAreaView` e `ScrollView`), além de `beforeRemove` e `store.revalidateOnReturn()`.
++   - Contudo, dentro de `section === 'station'`, `StaffEventDashboard` renderizava um cabeçalho e card de fila duplicados (`station.label`, `Experiência: ...`, `Disponibilidade: ...`, `Atendimento pendente: ...`, `Fila compartilhada da experiência`, `Fila de <experiência>`, `Pessoas em espera`, `Janela operacional` e um botão adicional `Atualizar fila`), logo acima de `StaffStationOperationalScreen`, que renderizava novamente título, estação, contagem e um segundo botão `Atualizar atendimento`.
++   - Além disso, o callback `onChanged` disparava `store.refreshStations()` diretamente, o que podia transitar `stationStatus` para `'loading'` temporariamente em redes com latência real e desmontar `StaffStationOperationalScreen` logo após a confirmação da operação, perdendo o banner de feedback.
++2. **Tela operacional `app/screens/staff/StaffStationOperationalScreen.js`:**
++   - Já possuía toda a arquitetura segura de leitura (`operational-state`), polling de 5s (`useStaffPolling`), coordenador (`createStaffOperationsCoordinator`), persistência em `SecureStore` (`defaultStaffIntentStorage`), `Idempotency-Key`, reserva/despacho/recibo terminal, reconciliação automática de `terminal_pending`, cancelamento de `reserved`, proteção contra duplo toque e modal de confirmação para `complete`, `absent` e `remove_called`.
++   - Visualmente, não seguia os tokens aprovados da STAFF-01 nem os mockups 03 e 04, usava os rótulos antigos (`Concluir atendimento` e `Registrar ausência`), não apresentava o indicador seguro de tempo desde a chamada (`pending.calledAt`), não exibia a faixa não clicável `Fila compartilhada entre as estações` nem o rodapé discreto `Fila e atendimento atualizados automaticamente`, e não propagava `403`/`401` diretamente ao bloqueio de acesso do painel.
++3. **Serviços e contratos (`staffOperationsService.js`, `staffDashboardService.js`, `staffIntentStorage.js`, `useStaffPolling.js`):**
++   - Já suportavam todos os campos e operações exigidos pela STAFF-02 sem qualquer alteração no backend ou em migrations.
++
++---
++
++## 3. Referências Visuais (Mockups 03 e 04)
++
++- **Tela 03 (`ArenaGO_Staff_03_Estacao_Fila.png`) — Estado A (`pending === null`):**
++  - Identificação superior com `station.label`, badge semântico de disponibilidade (`DISPONÍVEL` / `INDISPONÍVEL`), nome da experiência (`experience.name`) com ícone de controle e nome do evento (`event.name`).
++  - Seção `FILA DA EXPERIÊNCIA` com contagem oficial `N aguardando`, lista FIFO em card estruturado (badge numérico de posição, `displayName`, status `Aguardando`) ou estado vazio real (`Fila vazia` / `Nenhuma pessoa aguardando nesta experiência.`), finalizada pela faixa informativa não clicável `Fila compartilhada entre as estações`.
++  - Botão primário destacado `Chamar próximo` habilitado apenas quando todas as condições oficiais forem satisfeitas.
++  - Seção `ATENDIMENTO ATUAL` com card vazio `Nenhum participante chamado` e orientação curta para resolver o atendimento antes da próxima chamada.
++  - Rodapé discreto `Fila e atendimento atualizados automaticamente` e botão único secundário `Atualizar atendimento`.
++- **Tela 04 (`ArenaGO_Staff_04_Atendimento.png`) — Estado B (`pending !== null`):**
++  - Mesma identificação superior e seção `FILA DA EXPERIÊNCIA` exibindo somente a fila remanescente devolvida pelo servidor (sem duplicar o participante chamado nem decrementar por suposição).
++  - Ausência do botão `Chamar próximo` enquanto houver chamada pendente.
++  - Seção `ATENDIMENTO ATUAL` com avatar de participante, `pending.displayName`, `Em atendimento`, pílula segura de tempo decorrido (`Chamado há MM:SS` / `HH:MM:SS`, com fallback seguro `Chamada pendente`), prompt `Selecione a ação para este participante:` e três botões semânticos distintos:
++    - `Concluir experiência` (verde/sucesso)
++    - `Marcar ausência` (âmbar/alerta)
++    - `Remover da fila` (vermelho/perigo)
++
++---
++
++## 4. Adaptações ao Padrão Visual da STAFF-01
++
++Seguindo a regra de precedência visual da STAFF-02:
++- **Cabeçalho compartilhado (`StaffLiveScreen`):** `Voltar ao painel` à esquerda + logo oficial transparente `app/assets/images/logo-arenago-staff.png` à direita, com `SafeAreaView`, `ScrollView` e fundo `#090412` com órbitas decorativas.
++- **Cabeçalhos antigos dos mockups não replicados:** sem texto `ArenaGO` à esquerda, sem badge `STAFF` no topo e sem segundo botão `Voltar` inferior.
++- **Tokens reutilizados de `AdminLiveUI.js` (`liveColors`) e `adminTheme.js`:**
++  - Fundo `#090412`, superfície `#151020`, borda `#C476ED`, acento principal `#B960F5`, acento forte `#7C3AED`, texto secundário `#C7B9D9`, fundo de ícones `#38204F`.
++  - Cores semânticas preservadas distintas do roxo decorativo: verde (`#10B981` / `#34D399`) para disponibilidade e conclusão, âmbar (`#F59E0B` / `#FCD34D`) para ausência/alertas/stale/intenções pendentes, e vermelho (`#EF4444` / `#FCA5A5`) para indisponibilidade, remoção e erros de acesso.
++
++---
++
++## 5. Mapeamento entre Dados do Backend e Elementos Visuais
++
++| Elemento Visual | Origem Real no Contrato | Regra Aplicada |
++|---|---|---|
++| Título da estação | `station.label` | Dado real do evento selecionado; sem valores fixos |
++| Badge de disponibilidade | `data?.availability ?? station.availability` | `available` -> `DISPONÍVEL`; `unavailable` -> `INDISPONÍVEL` (independente da fila) |
++| Experiência | `experience.name` | Exibida com ícone vetorial nativo |
++| Evento | `event.name` | Sem inventar local, data ou horário |
++| Contagem da fila | `data.waitingCount` | Exibido como `${data.waitingCount} aguardando` |
++| Linhas da fila | `data.waiting` (`queueEntryId`, `position`, `displayName`) | Ordem FIFO exata do servidor; sem ordenação local ou remoção individual de espera |
++| Faixa compartilhada | Fixo informativo (`View` não clicável) | `Fila compartilhada entre as estações` |
++| Botão `Chamar próximo` | `data.canCall && !data.pending && data.waitingCount > 0 && data.availability === 'available' && !blocked` | Exibido apenas no Estado A (`!data.pending`); fluxo direto protegido via `coordinator.callNext` |
++| Participante em atendimento | `data.pending.displayName` e `data.pending.serviceSessionId` | Ações sempre vinculadas a `serviceSessionId`, nunca ao nome |
++| Tempo desde a chamada | `data.pending.calledAt` | Calculado em `formatElapsedSinceCall`; `Chamado há MM:SS` (`HH:MM:SS` se >= 1h) ou fallback `Chamada pendente` para desvios `< -60s` ou `> 24h`; sem ausência automática |
++| Ações de resolução | `coordinator.complete`, `coordinator.absent`, `coordinator.removeCalled` | Preservam modal de confirmação (`CONFIRMAR OPERAÇÃO` / `CANCELAR OPERAÇÃO`) |
++| Feedback real de ausência | `view.feedback.result.requeued` | Diferencia reinserção no fim da fila vs encerramento após o corte temporal |
++
++---
++
++## 6. Componentes Criados e Alterados
++
++- **Criado:** [app/screens/staff/components/StaffStationSections.js](file:///C:/Users/kaled/.gemini/antigravity/worktrees/ProgramacaoMobile/auth_and_sessions/app/screens/staff/components/StaffStationSections.js)
++  - Helper puro `formatElapsedSinceCall(calledAt, nowMs)` com proteção contra relógio dessincronizado e sem impacto no estado operacional.
++  - Componentes apresentacionais `StationStatusBadge`, `StationHeaderCard`, `ExperienceQueueCard`, `ElapsedCallBadge`, `CurrentServiceCard` e `StationConfirmModal`, com ícones vetoriais nativos sem dependências externas e layout responsivo (`flexWrap`, `minWidth: 0`, `flexShrink: 1`, `minHeight: 48/52`).
++- **Alterado:** [app/screens/staff/StaffStationOperationalScreen.js](file:///C:/Users/kaled/.gemini/antigravity/worktrees/ProgramacaoMobile/auth_and_sessions/app/screens/staff/StaffStationOperationalScreen.js)
++  - Reorganização visual completa nos padrões STAFF-01 e mockups 03/04, estados especiais explícitos (carregamento, vazio, indisponível, encerramento operacional, stale, erro de rede, acesso negado, intenções persistidas), propagação segura de `403`/`401` via `onAccessDenied`, suporte reativo a `accessDenied` (fechando modais e limpando dados nominais sem apagar recibos do `SecureStore`) e integração de atualização única via `onRefresh`.
++- **Alterado (mínimo de integração):** [app/screens/staff/StaffEventsNavigator.js](file:///C:/Users/kaled/.gemini/antigravity/worktrees/ProgramacaoMobile/auth_and_sessions/app/screens/staff/StaffEventsNavigator.js)
++  - Removido o bloco visual e o botão `Atualizar fila` duplicados em `section === 'station'`, consolidando a apresentação na tela operacional, mantendo `store.refreshQueue`, `store.pollQueue`, `store.clearQueue`, `beforeRemove` e `revalidateOnReturn`, passando `accessDenied`/`onAccessDenied`/`onRefresh` e usando `pollStations`/`pollQueue` em `onChanged` para evitar desmontagem transitória e perda do feedback após mutações confirmadas.
++
++---
++
++## 7. Decisões de Navegação
++
++- Preservado o fluxo `Eventos Staff → Painel Operacional → Estação` sem rota intermediária.
++- Retorno ao Painel exclusivamente pelo cabeçalho (`Voltar ao painel`) ou retorno nativo (`beforeRemove`), limpando `stationId`, executando `store.clearQueue()` e acionando `store.revalidateOnReturn()` sem perder o evento selecionado nem disparar mutações.
++- Home e Painel Operacional homologados na STAFF-01 não foram alterados visualmente.
++
++---
++
++## 8. Preservação dos Contratos e da Idempotência
++
++- **Arquivos preservados intactos (zero alterações):** `app/services/staffOperationsService.js`, `app/services/staffDashboardService.js`, `app/services/staffIntentStorage.js`, `app/screens/staff/useStaffPolling.js`, `app/screens/staff/components/StaffLiveScreen.js`, todo o módulo `admin`, todo o módulo `participant` e todo o `backend/`.
++- **Rotas preservadas:**
++  - `GET /api/v1/staff/events/:eventId/experiences/:experienceId/stations/:stationId/operational-state`
++  - `POST /api/v1/staff/events/:eventId/experiences/:experienceId/stations/:stationId/call-next`
++  - `POST /api/v1/staff/events/:eventId/service-sessions/:serviceSessionId/complete`
++  - `POST /api/v1/staff/events/:eventId/service-sessions/:serviceSessionId/absent`
++  - `POST /api/v1/staff/events/:eventId/service-sessions/:serviceSessionId/remove`
++- **Garantias mantidas:** `Idempotency-Key`, reserva persistida antes do `POST`, estado `dispatching`, bloqueio em resultado incerto/timeout, reconciliação automática de `terminal_pending`, cancelamento explícito de `reserved`, proteção contra duplo toque e diálogos de confirmação para `complete`, `absent` e `remove_called`.
++
++---
++
++## 9. Cobertura de Testes
++
++1. **Nova suíte dedicada:** [app/tests/staffStationOperational.test.cjs](file:///C:/Users/kaled/.gemini/antigravity/worktrees/ProgramacaoMobile/auth_and_sessions/app/tests/staffStationOperational.test.cjs)
++   - Testes unitários puros de `formatElapsedSinceCall` (`MM:SS`, `HH:MM:SS`, pequeno desvio negativo, desvio > 60s, > 24h e entradas inválidas).
++   - Testes de renderização real (`react` + `react-test-renderer`) cobrindo: carregamento inicial sem dados inventados; Estado A com fila FIFO não-alfabética e nomes longos; faixa `Fila compartilhada entre as estações` não clicável; fila vazia sem erro de conexão; estação `INDISPONÍVEL` mantendo fila visível e bloqueando chamada; encerramento operacional (`canCall: false`); Estado B com tempo decorrido e sem duplicação do chamado; descarte de resposta tardia em troca de estação/evento; falha transitória `stale` bloqueando mutações e recuperando via polling sem `POST`; propagação de `accessDenied` fechando modal e neutralizando callback antigo; intenções `reserved` e `pending_other` bloqueando mutações; diferenciação `404` vs `403` (coerente com `R3-03`); e logout desmontando contexto operacional.
++2. **Suíte de integração real atualizada:** [app/tests/roleRoutingIntegration.test.cjs](file:///C:/Users/kaled/.gemini/antigravity/worktrees/ProgramacaoMobile/auth_and_sessions/app/tests/roleRoutingIntegration.test.cjs)
++   - Whitelist `control.realStaff` atualizada explicitamente com `'screens/staff/components/StaffStationSections'`.
++   - Cenários preexistentes preservados integralmente e alinhados aos novos rótulos obrigatórios (`Concluir experiência`, `Marcar ausência`, `Fila compartilhada entre as estações`, `Atualizar atendimento` sem duplicidade de `Atualizar fila`).
++   - Novo cenário completo de integração **STAFF-02** exercitando Estados A e B, transição via `Chamar próximo`, `Concluir experiência`, `Marcar ausência` (com reinserção e após o corte), fila compartilhada em segunda estação `INDISPONÍVEL` e propagação de `403` de `/operational-state` para `SEM ACESSO` no Painel.
++
++---
++
++## 10. Resultados Efetivamente Executados
++
++### Inspeções estáticas executadas nesta etapa
++- Confirmação de branch `feature/staff-operacional-v2` e commit-base `95b8b80f3c0142af30c25e9483291d75677a085d`, sem merge/rebase em andamento.
++- Revisão estática de imports, dependências de `useEffect` (estabilização de `defaultGetNow` + `useRef` em `ElapsedCallBadge`), contratos HTTP, bloqueios de concorrência, `SecureStore` e consistência de harnesses.
++- Geração do patch exclusivo [qa-evidence/STAFF-02-changes.diff](file:///C:/Users/kaled/.gemini/antigravity/worktrees/ProgramacaoMobile/auth_and_sessions/qa-evidence/STAFF-02-changes.diff) relativo a `95b8b80f3c0142af30c25e9483291d75677a085d` e verificação estática `git diff --check` + validação de compatibilidade com `git apply --check` (a registrar após execução abaixo).
++
++### Validações automatizadas NÃO executadas nesta etapa (pendentes com GPT-6 Luna — Medium)
++Conforme `AGENTS.md`, **nenhum teste automatizado foi executado durante esta etapa de implementação**. Campanha preparada para execução por **GPT-6 Luna — Medium** após confirmação do responsável:
++
++```powershell
++cd app
++node --test tests/staffStationOperational.test.cjs
++node --test tests/staffOperationsService.integration.test.cjs
++node --test tests/roleRoutingIntegration.test.cjs
++node --test tests/staffDashboard.test.cjs
++node --test tests/staffEventDiscovery.test.cjs
++node --test tests/staffScreens.test.cjs
++node --test tests/staffNavigation.test.cjs
++node --test tests/staffRealNavigation.test.cjs
++node --test tests/staffPolling.test.cjs
++node --test tests/staffBackground.test.cjs
++node --test tests/staffDemoState.test.cjs
++npm.cmd test
++```
++
++*(Script `app/package.json -> "test"` inspecionado: executa exclusivamente `node --test tests/*.test.cjs`, sem migrations, seeds, banco real ou operações destrutivas.)*
++
++---
++
++## 11. Riscos e Limitações
++
++- **Validação automatizada ainda pendente:** Embora toda a revisão estática tenha sido feita, a execução real da suíte Node.js depende da etapa de validação com **GPT-6 Luna — Medium**.
++- **Homologação física pendente:** Comportamento visual exato em telas pequenas Android/iOS, fontes ampliadas pelo sistema operacional, SafeAreas físicas e gesto nativo de retorno exigem validação presencial no Expo Go pelo responsável.
++- **Relógio do dispositivo no indicador `Chamado há MM:SS`:** Se o relógio do aparelho divergir mais de 60s para trás ou mais de 24h para frente do timestamp `calledAt` do servidor, a UI usa o fallback seguro `Chamada pendente` sem afetar regras temporais do backend.
++
++---
++
++## 12. Pendências de Homologação (Expo e Publicação)
++
++- **Cenário A (sem chamada):** Estação disponível com fila, contagem/posição FIFO reais, `Fila compartilhada entre as estações`, `Chamar próximo` habilitado e card `Nenhum participante chamado`.
++- **Cenário B (com chamada):** Participante chamado em `ATENDIMENTO ATUAL`, tempo decorrido, fila remanescente sem duplicação, ausência de `Chamar próximo` e botões `Concluir experiência`, `Marcar ausência` e `Remover da fila` com diálogos e feedback real.
++- **Cenários complementares:** Fila vazia, estação `INDISPONÍVEL`, nomes longos, retorno ao painel (cabeçalho e gesto/botão do sistema), atualização automática (5s) e erro de rede/acesso.
++- **Publicação Git:** Conforme seção 6 do `AGENTS.md`, `git add`, `git commit` e `git push` permanecem sob responsabilidade do usuário via VSCode na branch `feature/staff-operacional-v2` (mensagem sugerida: `feat(staff): reformula telas de estação, fila e atendimento`).
++
++---
++
++## 13. Histórico de Correções Posteriores
++
++- **19/11/2026 (Preparação):** Criação inicial de `docs/STAFF_02_ESTACAO_FILA_ATENDIMENTO.md` antes das alterações de código.
++- **19/11/2026 (Implementação inicial):** Criação de `StaffStationSections.js`, reformulação de `StaffStationOperationalScreen.js`, consolidação em `StaffEventsNavigator.js`, criação de `staffStationOperational.test.cjs`, atualização de `roleRoutingIntegration.test.cjs` e geração de `qa-evidence/STAFF-02-changes.diff`.
++- **Revisão estática preventiva durante implementação:**
++  1. Estabilizada a referência padrão `defaultGetNow` + `useRef` em `ElapsedCallBadge` para evitar recriação de `setInterval` a cada segundo.
++  2. Ajustado `onChanged` em `StaffEventsNavigator.js` para usar `pollStations()` / `pollQueue()` quando o estado já está `'ready'`, evitando desmontagem transitória da tela da estação e perda do banner de feedback em redes com latência real.
++  3. Tornada assíncrona a ação `Atualizar atendimento` (`Promise.all([refresh(), Promise.resolve(onRefresh?.())])`) para sincronizar deterministicamente a leitura da estação e da fila.
++
++---
++
++## 14. Estado Final da Entrega
++
++Implementação da **STAFF-02** concluída na branch `feature/staff-operacional-v2` sobre a base `95b8b80f3c0142af30c25e9483291d75677a085d`, sem iniciar `STAFF-03`, `STAFF-04`, `STAFF-05` ou quaisquer outras tasks. Aguardando validação automatizada com **GPT-6 Luna — Medium**, commit/push pelo responsável via VSCode e homologação no Expo.
