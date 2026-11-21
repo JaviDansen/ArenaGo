@@ -1224,3 +1224,149 @@ test('R3-04: recuperação controlada de experiências desconhecidas (GET em voo
   assert.equal(store.getSnapshot().context.eventId, otherEventId);
   assert.equal(store.getSnapshot().experiences.length, 0);
 });
+
+test('STAFF02-AUD-01: verifyStationAccess limpa cache nominal imediatamente, separa verificação (Caso A/B/C) e descarta respostas tardias', async () => {
+  let current = context();
+  let stationsDeferred = null;
+  let experiencesDeferred = null;
+  let entryDeferred = null;
+  let stationCalls = 0;
+
+  const store = createStaffDashboardStore({
+    getContext: () => current,
+    client: {
+      get: (url) => {
+        if (url.endsWith('/stations')) {
+          stationCalls += 1;
+          if (stationsDeferred) return stationsDeferred.promise;
+          return Promise.resolve(stations(current.eventId));
+        }
+        if (url.endsWith('/experiences')) {
+          if (experiencesDeferred) return experiencesDeferred.promise;
+          return Promise.resolve({ eventId: current.eventId, experiences: [{ id: experienceId, name: 'Just Dance' }] });
+        }
+        if (url.endsWith('/entry-control')) {
+          if (entryDeferred) return entryDeferred.promise;
+          return Promise.resolve(entrySummary({
+            eventId: current.eventId,
+            waitingCount: 0,
+            waiting: [],
+            canCall: false,
+            pendingCall: {
+              id: callId,
+              participationId: participantBId,
+              displayName: 'Carlos Nominal Cache',
+              calledAt: '2026-11-17T15:01:00.000Z',
+            },
+          }));
+        }
+        return Promise.resolve({});
+      },
+    },
+  });
+
+  // Carrega painel com dados nominais em cache
+  store.setContext(current);
+  await store.refreshPanel();
+  assert.equal(store.getSnapshot().entry.pendingCall.displayName, 'Carlos Nominal Cache');
+  assert.equal(store.getSnapshot().stations.length, 1);
+
+  // Caso A: verifyStationAccess limpa cache imediatamente antes de /stations resolver e NÃO publica a lista de verificação
+  stationsDeferred = deferred();
+  const callsBeforeVerify = stationCalls;
+  const caseA = store.verifyStationAccess({ stationId, experienceId });
+  assert.equal(stationCalls, callsBeforeVerify + 1);
+  assert.equal(store.getSnapshot().verifyingAccess, true);
+  assert.equal(store.getSnapshot().accessUncertain, true);
+  assert.equal(store.getSnapshot().entry, null, 'dados nominais removidos enquanto verificação está pendente');
+  assert.equal(store.getSnapshot().stations.length, 0);
+  assert.equal(store.getSnapshot().experiences.length, 0);
+
+  // revalidateOnReturn durante verificação pendente não dispara leituras concorrentes prematuras
+  await store.revalidateOnReturn();
+  assert.equal(stationCalls, callsBeforeVerify + 1);
+
+  // /stations resolve 200 (Caso A) -> libera incerteza de evento sem publicar dados de verificação como atualização do painel
+  stationsDeferred.resolve(stations(current.eventId));
+  const resA = await caseA;
+  assert.equal(resA.outcome, 'local_denied');
+  assert.equal(store.getSnapshot().accessLocked, false);
+  assert.equal(store.getSnapshot().verifyingAccess, false);
+  assert.equal(store.getSnapshot().accessUncertain, false);
+  assert.equal(store.getSnapshot().stations.length, 0, 'consulta de verificação não publica dados operacionais do painel');
+  assert.equal(store.getSnapshot().entry, null);
+
+  // Caso C: /stations falha com 500/rede -> mantém cache limpo, accessUncertain=true, barra poll/parcial e recupera no refreshPanel completo
+  stationsDeferred = null;
+  await store.refreshPanel();
+  assert.equal(store.getSnapshot().entry.pendingCall.displayName, 'Carlos Nominal Cache');
+
+  for (const errDetails of [{ status: 500 }, { isNetworkError: true }]) {
+    stationsDeferred = deferred();
+    const caseC = store.verifyStationAccess({ stationId, experienceId });
+    stationsDeferred.reject(Object.assign(new Error('transient'), errDetails));
+    const resC = await caseC;
+    assert.equal(resC.outcome, 'uncertain');
+    assert.equal(store.getSnapshot().accessLocked, false);
+    assert.equal(store.getSnapshot().verifyingAccess, false);
+    assert.equal(store.getSnapshot().accessUncertain, true);
+    assert.equal(store.getSnapshot().entry, null);
+    assert.equal(store.getSnapshot().stations.length, 0);
+
+    // refreshPanel parcial (entry=200 antes de stations falhar 500) não expõe dados parciais enquanto accessUncertain=true
+    stationsDeferred = deferred();
+    experiencesDeferred = null;
+    entryDeferred = null;
+    const partialRetry = store.refreshPanel();
+    await Promise.resolve();
+    assert.equal(store.getSnapshot().entry, null, 'não expõe entry antes da confirmação completa');
+    stationsDeferred.reject(Object.assign(new Error('still-500'), { status: 500 }));
+    await partialRetry;
+    assert.equal(store.getSnapshot().accessUncertain, true);
+    assert.equal(store.getSnapshot().entry, null);
+    assert.notEqual(store.getSnapshot().entryStatus, 'loading');
+  }
+
+  // Recuperação completa 200 libera acessoUncertain
+  stationsDeferred = null;
+  await store.refreshPanel();
+  assert.equal(store.getSnapshot().accessUncertain, false);
+  assert.equal(store.getSnapshot().accessStatus, 'granted');
+  assert.equal(store.getSnapshot().stations.length, 1);
+
+  // Caso B: /stations responde 401, 403 ou 404 -> bloqueia evento/sessão e mantém tudo limpo
+  for (const [status, expectedOutcome, expectedStatus] of [
+    [403, 'event_denied', 'denied'],
+    [404, 'event_denied', 'denied'],
+    [401, 'session', 'session'],
+  ]) {
+    current = context(eventId, 'a', current.revision + 1);
+    store.setContext(current);
+    await store.refreshPanel();
+    stationsDeferred = deferred();
+    const caseB = store.verifyStationAccess({ stationId, experienceId });
+    stationsDeferred.reject(Object.assign(new Error(String(status)), { status }));
+    const resB = await caseB;
+    assert.equal(resB.outcome, expectedOutcome);
+    assert.equal(store.getSnapshot().accessLocked, true);
+    assert.equal(store.getSnapshot().accessStatus, expectedStatus);
+    assert.equal(store.getSnapshot().verifyingAccess, false);
+    assert.equal(store.getSnapshot().accessUncertain, false);
+    assert.equal(store.getSnapshot().entry, null);
+    assert.equal(store.getSnapshot().stations.length, 0);
+  }
+
+  // Resposta tardia de verifyStationAccess após troca de evento é descartada
+  current = context(eventId, 'a', current.revision + 1);
+  store.setContext(current);
+  await store.refreshPanel();
+  stationsDeferred = deferred();
+  const staleVerify = store.verifyStationAccess({ stationId, experienceId });
+  current = context(otherEventId, 'a', 1);
+  store.setContext(current);
+  stationsDeferred.reject(Object.assign(new Error('403-old'), { status: 403 }));
+  const resStale = await staleVerify;
+  assert.equal(resStale.outcome, 'stale');
+  assert.equal(store.getSnapshot().context.eventId, otherEventId);
+  assert.equal(store.getSnapshot().accessLocked, false);
+});

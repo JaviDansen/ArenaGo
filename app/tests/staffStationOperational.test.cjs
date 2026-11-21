@@ -15,7 +15,7 @@ try {
 } catch {
   deps = null;
 }
-const skip = deps ? false : 'dependências de qa/regression não instaladas';
+const skip = deps ? false : 'dependências de qa/regression não instaladas (npm ci em qa/regression)';
 
 const EV_A = '11111111-1111-4111-8111-111111111111';
 const EV_B = '22222222-2222-4222-8222-222222222222';
@@ -29,6 +29,9 @@ const ENTRY_2 = '77777777-7777-4777-8777-777777777772';
 const ENTRY_3 = '77777777-7777-4777-8777-777777777773';
 const SESS_1 = '88888888-8888-4888-8888-888888888881';
 
+// Normaliza objetos criados dentro do contexto VM para o contexto do teste (STAFF02-AUD-04).
+const plain = (value) => JSON.parse(JSON.stringify(value));
+
 const deferred = () => {
   let resolve;
   let reject;
@@ -41,7 +44,7 @@ const deferred = () => {
 // ============================================================================
 
 const pureSections = (() => {
-  const nativeStub = Object.fromEntries(['Modal', 'Pressable', 'Text', 'View'].map((n) => [n, n]));
+  const nativeStub = Object.fromEntries(['Modal', 'Pressable', 'ScrollView', 'Text', 'View'].map((n) => [n, n]));
   nativeStub.StyleSheet = { create: (s) => s };
   const adminTheme = loadModule('screens/admin/components/adminTheme.js', require).exports;
   const adminLiveUi = loadModule('screens/admin/components/AdminLiveUI.js', (name) => {
@@ -54,6 +57,7 @@ const pureSections = (() => {
     if (name === 'react') return require('react');
     if (name === 'react/jsx-runtime') return require('react/jsx-runtime');
     if (name === 'react-native') return nativeStub;
+    if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView' };
     if (name === '../../admin/components/AdminLiveUI') return adminLiveUi;
     return require(name);
   }).exports;
@@ -63,36 +67,22 @@ test('STAFF-02: formatElapsedSinceCall formata MM:SS, HH:MM:SS e usa fallback se
   const calledAt = '2026-11-19T15:00:00.000Z';
   const baseMs = Date.parse(calledAt);
 
-  assert.deepEqual(pureSections.formatElapsedSinceCall(calledAt, baseMs + 23_000), {
-    label: 'Chamado há 00:23',
-    live: true,
-  });
-  assert.deepEqual(pureSections.formatElapsedSinceCall(calledAt, baseMs + 3_725_000), {
-    label: 'Chamado há 01:02:05',
-    live: true,
-  });
+  const check = (inputAt, nowMs, expected) => {
+    const result = pureSections.formatElapsedSinceCall(inputAt, nowMs);
+    assert.equal(result.label, expected.label);
+    assert.equal(result.live, expected.live);
+    assert.deepEqual(plain(result), expected);
+  };
+
+  check(calledAt, baseMs + 23_000, { label: 'Chamado há 00:23', live: true });
+  check(calledAt, baseMs + 3_725_000, { label: 'Chamado há 01:02:05', live: true });
   // Pequeno desvio negativo de relógio (< 60s) limita em 00:00
-  assert.deepEqual(pureSections.formatElapsedSinceCall(calledAt, baseMs - 10_000), {
-    label: 'Chamado há 00:00',
-    live: true,
-  });
+  check(calledAt, baseMs - 10_000, { label: 'Chamado há 00:00', live: true });
   // Desvio negativo grande (> 60s), tempo excessivo (> 24h) ou timestamp inválido caem no fallback seguro
-  assert.deepEqual(pureSections.formatElapsedSinceCall(calledAt, baseMs - 120_000), {
-    label: 'Chamada pendente',
-    live: false,
-  });
-  assert.deepEqual(pureSections.formatElapsedSinceCall(calledAt, baseMs + 25 * 60 * 60 * 1000), {
-    label: 'Chamada pendente',
-    live: false,
-  });
-  assert.deepEqual(pureSections.formatElapsedSinceCall('invalido', baseMs), {
-    label: 'Chamada pendente',
-    live: false,
-  });
-  assert.deepEqual(pureSections.formatElapsedSinceCall(null, baseMs), {
-    label: 'Chamada pendente',
-    live: false,
-  });
+  check(calledAt, baseMs - 120_000, { label: 'Chamada pendente', live: false });
+  check(calledAt, baseMs + 25 * 60 * 60 * 1000, { label: 'Chamada pendente', live: false });
+  check('invalido', baseMs, { label: 'Chamada pendente', live: false });
+  check(null, baseMs, { label: 'Chamada pendente', live: false });
 });
 
 // ============================================================================
@@ -116,6 +106,7 @@ function createStationHarness({
   onChanged = () => {},
   onRefresh = () => {},
   onAccessDenied = () => {},
+  onStationNotFound,
   secureInitial = new Map(),
   secureAvailable = true,
   getNow = () => Date.parse('2026-11-19T15:00:23.000Z'),
@@ -131,13 +122,24 @@ function createStationHarness({
   let experienceProp = initialExperience;
   let stationProp = initialStation;
   let accessDeniedProp = false;
+  let accessDeniedKindProp = 'denied';
   let eventCurrentFlag = true;
+  let focused = true;
+  const focusListeners = new Set();
+  const appStateListeners = new Set();
 
   const native = Object.fromEntries(
-    ['ActivityIndicator', 'Modal', 'Pressable', 'Text', 'View'].map((name) => [name, name]),
+    ['ActivityIndicator', 'Modal', 'Pressable', 'ScrollView', 'Text', 'View'].map((name) => [name, name]),
   );
   native.StyleSheet = { create: (styles) => styles };
   native.Platform = { OS: 'ios' };
+  native.AppState = {
+    currentState: 'active',
+    addEventListener: (_, listener) => {
+      appStateListeners.add(listener);
+      return { remove: () => appStateListeners.delete(listener) };
+    },
+  };
 
   const AuthCtx = React.createContext(null);
   const authModule = { AuthContext: AuthCtx, useAuth: () => React.useContext(AuthCtx) };
@@ -171,6 +173,7 @@ function createStationHarness({
     if (name === 'react') return React;
     if (name === 'react/jsx-runtime') return jsx;
     if (name === 'react-native') return native;
+    if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView' };
     if (name === '../../admin/components/AdminLiveUI') return adminLiveUi;
     return require(name);
   }).exports;
@@ -179,6 +182,19 @@ function createStationHarness({
     if (name === 'react') return React;
     if (name === 'react/jsx-runtime') return jsx;
     if (name === 'react-native') return native;
+    if (name === '@react-navigation/native') {
+      return {
+        useIsFocused: () => {
+          const [, bump] = React.useState(0);
+          React.useEffect(() => {
+            const fn = () => bump((n) => n + 1);
+            focusListeners.add(fn);
+            return () => focusListeners.delete(fn);
+          }, []);
+          return focused;
+        },
+      };
+    }
     if (name === 'expo-crypto') {
       return { randomUUID: () => `50000000-0000-4000-8000-${String(++keySerial).padStart(12, '0')}` };
     }
@@ -213,7 +229,9 @@ function createStationHarness({
       onChanged,
       onRefresh,
       accessDenied: accessDeniedProp,
+      accessDeniedKind: accessDeniedKindProp,
       onAccessDenied,
+      onStationNotFound,
       getNow,
     }),
   );
@@ -239,9 +257,22 @@ function createStationHarness({
       if ('experience' in patch) experienceProp = patch.experience;
       if ('station' in patch) stationProp = patch.station;
       if ('accessDenied' in patch) accessDeniedProp = patch.accessDenied;
+      if ('accessDeniedKind' in patch) accessDeniedKindProp = patch.accessDeniedKind;
       if ('eventCurrent' in patch) eventCurrentFlag = patch.eventCurrent;
       await Renderer.act(async () => {
         tree.update(renderEl());
+      });
+    },
+    async setFocused(nextFocused) {
+      focused = nextFocused;
+      await Renderer.act(async () => {
+        for (const fn of [...focusListeners]) fn();
+      });
+    },
+    async setAppState(nextState) {
+      native.AppState.currentState = nextState;
+      await Renderer.act(async () => {
+        for (const fn of [...appStateListeners]) fn(nextState);
       });
     },
     async act(work) {
@@ -252,6 +283,18 @@ function createStationHarness({
     },
     hasText(fragment) {
       return this.allTexts().some((t) => t.includes(fragment));
+    },
+    hasExactText(exact) {
+      return this.allTexts().some((t) => t.trim() === exact);
+    },
+    hasQueueRow(position, name, status = 'Aguardando') {
+      return tree.root.findAllByType('View').some((node) => {
+        const texts = node.findAllByType('Text').map((t) => flatten(t.props.children).trim());
+        return texts.length === 3
+          && texts[0] === String(position)
+          && texts[1] === name
+          && texts[2] === status;
+      });
     },
     pressables(label) {
       return tree.root.findAllByType('Pressable').filter((n) => n.props.accessibilityLabel === label);
@@ -291,7 +334,7 @@ function createStationHarness({
   };
 }
 
-test('STAFF-02: apresentação dos Estados A/B, ordem FIFO exata do servidor, fila vazia, estação indisponível e encerramento operacional', { skip }, async () => {
+test('STAFF-02: apresentação dos Estados A/B, ordem FIFO exata com linhas posicionais, fila vazia, indisponível e indicador de polling', { skip }, async () => {
   const initialRead = deferred();
   let stateResponse = null;
 
@@ -305,17 +348,20 @@ test('STAFF-02: apresentação dos Estados A/B, ordem FIFO exata do servidor, fi
   });
 
   try {
-    // 1. Carregamento inicial sem dados inventados
+    // 1. Carregamento inicial sem dados inventados; polling pausado durante loading
     await h.mount();
-    assert.ok(h.hasText('Cabine 01'));
-    assert.ok(h.hasText('Simulador F1'));
-    assert.ok(h.hasText('Arena Oficial UNDB'));
-    assert.ok(h.hasText('Carregando atendimento...'));
+    assert.ok(h.hasExactText('Cabine 01'));
+    assert.ok(h.hasExactText('Simulador F1'));
+    assert.ok(h.hasExactText('Arena Oficial UNDB'));
+    assert.ok(h.hasExactText('Carregando atendimento...'));
+    assert.ok(h.hasText('Atualização temporariamente pausada'));
+    assert.ok(!h.hasText('Atualização automática ativa'));
+    assert.equal(h.getPolling().enabled, false);
     assert.ok(!h.hasText('Fila vazia'));
     assert.ok(!h.hasText('Street Fighter'));
     assert.ok(!h.hasText('BEAST Arena'));
 
-    // 2. Estado A com fila FIFO não-alfabética e nomes longos
+    // 2. Estado A com fila FIFO não-alfabética, nomes longos e validação posicional
     const longName = 'Zélia Maria Aparecida da Conceição Cavalcante Júnior';
     stateResponse = {
       eventId: EV_A,
@@ -333,22 +379,31 @@ test('STAFF-02: apresentação dos Estados A/B, ordem FIFO exata do servidor, fi
     };
     await h.act(async () => { initialRead.resolve(stateResponse); });
 
-    assert.ok(h.hasText('DISPONÍVEL'));
-    assert.ok(h.hasText('FILA DA EXPERIÊNCIA'));
-    assert.ok(h.hasText('3 aguardando'));
-    assert.ok(h.hasText('Fila compartilhada entre as estações'));
+    assert.equal(h.hasExactText('DISPONÍVEL'), true);
+    assert.equal(h.hasExactText('INDISPONÍVEL'), false);
+    assert.equal(h.hasExactText('FILA DA EXPERIÊNCIA'), true);
+    assert.equal(h.hasExactText('3 aguardando'), true);
+    assert.equal(h.hasQueueRow(1, longName), true);
+    assert.equal(h.hasQueueRow(2, 'Alberto Silva'), true);
+    assert.equal(h.hasQueueRow(3, 'Bruno Rocha'), true);
+    assert.equal(h.hasExactText('Fila compartilhada entre as estações'), true);
     assert.equal(h.hasButton('Fila compartilhada entre as estações'), false, 'informação compartilhada não é clicável');
-    assert.ok(h.hasText('ATENDIMENTO ATUAL'));
-    assert.ok(h.hasText('Nenhum participante chamado'));
-    assert.ok(h.hasText('Fila e atendimento atualizados automaticamente'));
+    assert.equal(h.hasExactText('ATENDIMENTO ATUAL'), true);
+    assert.equal(h.hasExactText('Nenhum participante chamado'), true);
+    assert.ok(h.hasText('Atualização automática ativa'));
+    assert.equal(h.getPolling().enabled, true);
     assert.equal(h.isDisabled('Chamar próximo'), false);
 
-    // Ordem FIFO oficial preservada (Zélia antes de Alberto antes de Bruno)
-    const texts = h.allTexts();
-    const idxZelia = texts.indexOf(longName);
-    const idxAlberto = texts.indexOf('Alberto Silva');
-    const idxBruno = texts.indexOf('Bruno Rocha');
-    assert.ok(idxZelia > -1 && idxAlberto > idxZelia && idxBruno > idxAlberto, 'ordem FIFO exata preservada');
+    // Pausa por perda de foco e segundo plano reflete imediatamente no indicador
+    await h.setFocused(false);
+    assert.ok(h.hasText('Atualização temporariamente pausada'));
+    assert.ok(!h.hasText('Atualização automática ativa'));
+    await h.setFocused(true);
+    assert.ok(h.hasText('Atualização automática ativa'));
+    await h.setAppState('background');
+    assert.ok(h.hasText('Atualização temporariamente pausada'));
+    await h.setAppState('active');
+    assert.ok(h.hasText('Atualização automática ativa'));
 
     // 3. Estado A com fila vazia (não confunde vazio com erro de conexão)
     stateResponse = {
@@ -358,13 +413,13 @@ test('STAFF-02: apresentação dos Estados A/B, ordem FIFO exata do servidor, fi
       waiting: [],
     };
     await h.press('Atualizar atendimento');
-    assert.ok(h.hasText('0 aguardando'));
-    assert.ok(h.hasText('Fila vazia'));
-    assert.ok(h.hasText('Nenhuma pessoa aguardando nesta experiência.'));
+    assert.equal(h.hasExactText('0 aguardando'), true);
+    assert.equal(h.hasExactText('Fila vazia'), true);
+    assert.equal(h.hasExactText('Nenhuma pessoa aguardando nesta experiência.'), true);
     assert.ok(!h.hasText('Falha de conexão'));
     assert.equal(h.isDisabled('Chamar próximo'), true);
 
-    // 4. Estação indisponível mantém fila visível e bloqueia Chamar próximo
+    // 4. Estação indisponível usa badge exato INDISPONÍVEL e bloqueia Chamar próximo
     stateResponse = {
       ...stateResponse,
       availability: 'unavailable',
@@ -373,9 +428,9 @@ test('STAFF-02: apresentação dos Estados A/B, ordem FIFO exata do servidor, fi
       waiting: [{ queueEntryId: ENTRY_2, displayName: 'Alberto Silva', position: 1 }],
     };
     await h.press('Atualizar atendimento');
-    assert.ok(h.hasText('INDISPONÍVEL'));
-    assert.ok(h.hasText('1 aguardando'));
-    assert.ok(h.hasText('Alberto Silva'));
+    assert.equal(h.hasExactText('INDISPONÍVEL'), true);
+    assert.equal(h.hasExactText('DISPONÍVEL'), false);
+    assert.equal(h.hasQueueRow(1, 'Alberto Silva'), true);
     assert.equal(h.isDisabled('Chamar próximo'), true);
 
     // 5. Encerramento operacional (disponível + fila > 0 + canCall=false) mantém Chamar próximo desabilitado
@@ -387,11 +442,11 @@ test('STAFF-02: apresentação dos Estados A/B, ordem FIFO exata do servidor, fi
       waiting: [{ queueEntryId: ENTRY_2, displayName: 'Alberto Silva', position: 1 }],
     };
     await h.press('Atualizar atendimento');
-    assert.ok(h.hasText('DISPONÍVEL'));
+    assert.equal(h.hasExactText('DISPONÍVEL'), true);
     assert.equal(h.isDisabled('Chamar próximo'), true);
     assert.ok(h.hasText('Novas chamadas não estão liberadas'));
 
-    // 6. Estado B com atendimento pendente exibe tempo decorrido confiável e ações sem Chamar próximo
+    // 6. Estado B com atendimento pendente exibe modal responsivo SafeArea + ScrollView e pausa polling enquanto modal abre
     stateResponse = {
       ...stateResponse,
       availability: 'available',
@@ -406,21 +461,35 @@ test('STAFF-02: apresentação dos Estados A/B, ordem FIFO exata do servidor, fi
       },
     };
     await h.press('Atualizar atendimento');
-    assert.ok(h.hasText('Alberto Silva'));
-    assert.ok(h.hasText('Em atendimento'));
-    assert.ok(h.hasText('Chamado há 00:23'));
+    assert.equal(h.hasExactText('Alberto Silva'), true);
+    assert.equal(h.hasExactText('Em atendimento'), true);
+    assert.equal(h.hasExactText('Chamado há 00:23'), true);
+    assert.equal(h.hasQueueRow(1, 'Bruno Rocha'), true);
     assert.equal(h.hasButton('Chamar próximo'), false);
     assert.equal(h.isDisabled('Concluir experiência'), false);
     assert.equal(h.isDisabled('Marcar ausência'), false);
     assert.equal(h.isDisabled('Remover da fila'), false);
-    // Participante chamado não aparece duplicado na lista de espera
     assert.equal(h.allTexts().filter((t) => t === 'Alberto Silva').length, 1);
+
+    // STAFF02-AUD-07 + STAFF02-AUD-05: abrir modal pausa polling no indicador/hook e envolve conteúdo em SafeAreaView + ScrollView
+    await h.press('Concluir experiência');
+    const modal = h.modals()[0];
+    assert.equal(modal.props.visible, true);
+    assert.equal(modal.findAllByType('SafeAreaView').length, 1);
+    assert.equal(modal.findAllByType('ScrollView').length, 1);
+    assert.equal(h.getPolling().enabled, false);
+    assert.ok(h.hasText('Atualização temporariamente pausada'));
+    assert.ok(!h.hasText('Atualização automática ativa'));
+    await h.act(async () => { modal.props.onRequestClose(); });
+    assert.equal(h.modals()[0].props.visible, false);
+    assert.equal(h.getPolling().enabled, true);
+    assert.ok(h.hasText('Atualização automática ativa'));
   } finally {
     h.dispose();
   }
 });
 
-test('STAFF-02: resposta tardia em troca de estação/evento, logout com modal aberto, falha stale, polling sem POST e recibos persistidos', { skip }, async () => {
+test('STAFF-02 + STAFF02-AUD-01/05: troca de estação/evento, stale/erro no indicador, verificação contextual 404 (200 vs 403/404/401/500), modal aberto e SecureStore', { skip }, async () => {
   const reqs = [];
   let postCount = 0;
   let deniedKinds = [];
@@ -463,11 +532,11 @@ test('STAFF-02: resposta tardia em troca de estação/evento, logout com modal a
         pending: null,
       });
     });
-    assert.ok(h.hasText('Cabine 02'));
-    assert.ok(h.hasText('Pessoa Estação 02'));
+    assert.equal(h.hasExactText('Cabine 02'), true);
+    assert.equal(h.hasExactText('Chamado 02'), true);
     assert.ok(!h.hasText('Pessoa Estação Antiga'));
 
-    // 2. Falha transitória no polling marca stale, bloqueia todas as ações e não envia POST
+    // 2. Falha transitória no polling marca stale + indicador 'Dados desatualizados' sem enviar POST
     await h.act(async () => {
       const pollPromise = h.getPolling().read();
       assert.equal(reqs.length, 3);
@@ -475,12 +544,14 @@ test('STAFF-02: resposta tardia em troca de estação/evento, logout com modal a
       await pollPromise;
     });
     assert.ok(h.hasText('Dados da estação possivelmente desatualizados'));
+    assert.ok(h.hasText('Dados desatualizados'));
+    assert.ok(!h.hasText('Atualização automática ativa'));
     assert.equal(h.isDisabled('Concluir experiência'), true);
     assert.equal(h.isDisabled('Marcar ausência'), true);
     assert.equal(h.isDisabled('Remover da fila'), true);
     assert.equal(postCount, 0);
 
-    // Recuperação pelo próximo polling limpa stale sem disparar POST
+    // Recuperação pelo próximo polling limpa stale e volta indicador ativo
     await h.act(async () => {
       const pollRecover = h.getPolling().read();
       assert.equal(reqs.length, 4);
@@ -492,83 +563,111 @@ test('STAFF-02: resposta tardia em troca de estação/evento, logout com modal a
       await pollRecover;
     });
     assert.equal(h.isDisabled('Concluir experiência'), false);
+    assert.ok(h.hasText('Atualização automática ativa'));
     assert.equal(postCount, 0);
 
-    // 3. Abrir modal e receber accessDenied (propagação do painel) fecha modal, limpa nomes e bloqueia callback antigo
+    // 3. Poll em voo recebe 404 com modal aberto -> fecha modal, invalida callback antigo, consulta /stations = 200 (Caso A), preserva SecureStore e zero POST
+    const reservedRecord = JSON.stringify({
+      kind: 'call', userId: USER_1, sessionId: SESSION_1, eventId: EV_A,
+      experienceId: EXP_1, stationId: ST_2, serviceSessionId: null,
+      key: '50000000-0000-4000-8000-000000000091', phase: 'dispatching',
+    });
+    h.secureValues.set(slot, reservedRecord);
+    let poll404;
+    let idxOp404;
+    await h.act(async () => {
+      poll404 = h.getPolling().read();
+      idxOp404 = reqs.length - 1;
+    });
     await h.press('Concluir experiência');
     assert.equal(h.modals()[0].props.visible, true);
     const staleConfirm = h.handler('CONFIRMAR OPERAÇÃO');
-    await h.rerender({ accessDenied: true });
+
+    let idxVerifyStations;
+    await h.act(async () => {
+      reqs[idxOp404].d.reject(Object.assign(new Error('not-found'), { status: 404 }));
+      await new Promise((r) => setTimeout(r, 0));
+      idxVerifyStations = reqs.length - 1;
+    });
+    assert.match(reqs[idxVerifyStations].url, /\/stations$/);
+    assert.ok(h.hasText('Verificando acesso à estação...'));
     assert.ok(!h.hasText('Chamado 02'));
     assert.ok(!h.hasText('Pessoa Estação 02'));
-    assert.equal(h.modals().length, 0);
-    await h.act(async () => staleConfirm());
-    assert.equal(postCount, 0);
+    assert.equal(h.modals().every((m) => !m.props.visible), true);
 
-    // Reabilita acesso e troca para outro evento: intenção reservada persistida bloqueia operações
+    await h.act(async () => { await staleConfirm(); });
+    assert.equal(postCount, 0, 'callback antigo neutralizado após 404');
+
+    await h.act(async () => {
+      reqs[idxVerifyStations].d.resolve({ eventId: EV_A, stations: [] });
+      await poll404;
+    });
+    assert.equal(h.hasExactText('Acesso à estação indisponível.'), true);
+    assert.deepEqual(deniedKinds, [], 'Caso A (/stations=200) mantém negativa local à estação sem bloquear evento');
+    assert.ok(!h.hasText('Atualização automática ativa'));
+    assert.ok(!h.hasText('Dados desatualizados'));
+    assert.equal(h.secureValues.get(slot), reservedRecord, 'intenção persistida preservada no SecureStore');
+    h.secureValues.delete(slot);
+
+    // 4. Caso C: 404 em /operational-state com verificação /stations retornando 500 -> bloqueia, mostra erro e permite atualizar
+    await h.act(async () => {
+      const refresh500 = h.handler('Atualizar atendimento')();
+      const idxOp = reqs.length - 1;
+      reqs[idxOp].d.reject(Object.assign(new Error('not-found'), { status: 404 }));
+      await new Promise((r) => setTimeout(r, 0));
+      const idxVer = reqs.length - 1;
+      assert.match(reqs[idxVer].url, /\/stations$/);
+      reqs[idxVer].d.reject(Object.assign(new Error('server-error'), { status: 500 }));
+      await refresh500;
+    });
+    assert.equal(h.hasExactText('Não foi possível consultar a estação.'), true);
+    assert.deepEqual(deniedKinds, []);
+
+    // 5. Caso B: 404 em /operational-state com /stations retornando 403 -> propaga onAccessDenied('denied')
+    await h.act(async () => {
+      const refreshVerify403 = h.handler('Atualizar atendimento')();
+      const idxOp = reqs.length - 1;
+      reqs[idxOp].d.reject(Object.assign(new Error('not-found'), { status: 404 }));
+      await new Promise((r) => setTimeout(r, 0));
+      const idxVer = reqs.length - 1;
+      reqs[idxVer].d.reject(Object.assign(new Error('forbidden'), { status: 403 }));
+      await refreshVerify403;
+    });
+    assert.deepEqual(deniedKinds, ['denied']);
+
+    // 6. Erro inicial 500 indica 'Atualização indisponível' e reabilita acesso em novo evento B com intenção bloqueante
     await h.rerender({
-      accessDenied: false,
       event: { id: EV_B, name: 'Evento B' },
       station: { id: ST_1, experienceId: EXP_1, label: 'Cabine B1', availability: 'available', pendingServiceSessionId: null },
     });
-    const evBIdx = reqs.length - 1;
+    await h.act(async () => {
+      const idxB500 = reqs.length - 1;
+      reqs[idxB500].d.reject(Object.assign(new Error('unavailable'), { status: 500 }));
+    });
+    assert.ok(h.hasText('Atualização indisponível'));
+    assert.ok(!h.hasText('Atualização automática ativa'));
+
     h.secureValues.set(slot, JSON.stringify({
       kind: 'call', userId: USER_1, sessionId: SESSION_1, eventId: EV_B,
       experienceId: EXP_1, stationId: ST_1, serviceSessionId: null,
       key: '50000000-0000-4000-8000-000000000099', phase: 'reserved',
     }));
     await h.act(async () => {
-      reqs[evBIdx].d.resolve({
+      const retryB = h.handler('Atualizar atendimento')();
+      const idxB = reqs.length - 1;
+      reqs[idxB].d.resolve({
         eventId: EV_B, experienceId: EXP_1, stationId: ST_1, availability: 'available', canCall: true,
         waitingCount: 1, waiting: [{ queueEntryId: ENTRY_1, displayName: 'Pessoa Evento B', position: 1 }],
         pending: null,
       });
+      await retryB;
     });
     assert.ok(h.hasText('Solicitação registrada, ainda não enviada.'));
     assert.equal(h.isDisabled('Chamar próximo'), true);
     assert.ok(h.hasButton('Descartar solicitação não enviada'));
-
-    // Intenção pendente de outra estação também bloqueia novas mutações na estação atual
-    h.secureValues.set(slot, JSON.stringify({
-      kind: 'call', userId: USER_1, sessionId: SESSION_1, eventId: EV_B,
-      experienceId: EXP_1, stationId: ST_2, serviceSessionId: null,
-      key: '50000000-0000-4000-8000-000000000098', phase: 'dispatching',
-    }));
-    await h.act(async () => {
-      const refreshOther = h.handler('Atualizar atendimento')();
-      const idxOther = reqs.length - 1;
-      reqs[idxOther].d.resolve({
-        eventId: EV_B, experienceId: EXP_1, stationId: ST_1, availability: 'available', canCall: true,
-        waitingCount: 1, waiting: [{ queueEntryId: ENTRY_1, displayName: 'Pessoa Evento B', position: 1 }],
-        pending: null,
-      });
-      await refreshOther;
-    });
-    assert.ok(h.hasText('Há uma operação pendente em outra sessão, evento ou estação desta conta.'));
-    assert.equal(h.isDisabled('Chamar próximo'), true);
     h.secureValues.delete(slot);
 
-    // 4. 404 na estação limpa dados nominais mas não aciona onAccessDenied global (coerência com R3-03)
-    await h.act(async () => {
-      const refresh404 = h.handler('Atualizar atendimento')();
-      const idx404 = reqs.length - 1;
-      reqs[idx404].d.reject(Object.assign(new Error('not-found'), { status: 404 }));
-      await refresh404;
-    });
-    assert.ok(!h.hasText('Pessoa Evento B'));
-    assert.ok(h.hasText('Acesso à estação indisponível.'));
-    assert.deepEqual(deniedKinds, []);
-
-    // 5. 403 na estação limpa dados nominais E propaga onAccessDenied('denied')
-    await h.act(async () => {
-      const refresh403 = h.handler('Atualizar atendimento')();
-      const idx403 = reqs.length - 1;
-      reqs[idx403].d.reject(Object.assign(new Error('forbidden'), { status: 403 }));
-      await refresh403;
-    });
-    assert.deepEqual(deniedKinds, ['denied']);
-
-    // 6. Logout desmonta contexto operacional sem manter dados ou permitir mutações
+    // 7. Logout desmonta contexto operacional sem manter dados ou permitir mutações
     await h.rerender({
       auth: {
         isAuthenticated: false,
@@ -581,6 +680,7 @@ test('STAFF-02: resposta tardia em troca de estação/evento, logout com modal a
     });
     assert.ok(!h.hasText('Pessoa Evento B'));
     assert.equal(h.hasButton('Chamar próximo'), false);
+    assert.equal(postCount, 0);
   } finally {
     h.dispose();
   }

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { AdminIcon, liveColors as c, liveStyles as live } from '../../admin/components/AdminLiveUI';
 
 const MAX_RELIABLE_ELAPSED_MS = 24 * 60 * 60 * 1000;
@@ -289,29 +290,39 @@ export function StationConfirmModal({ visible, dialog, onConfirm, onCancel }) {
   const meta = describeDialog(dialog?.action?.kind);
   return (
     <Modal transparent animationType="fade" visible={visible} onRequestClose={onCancel}>
-      <View style={styles.backdrop}>
-        <View style={styles.modalCard} accessibilityViewIsModal>
-          <Text style={styles.modalTitle} accessibilityRole="header">{meta.title}</Text>
-          <Text style={styles.modalText}>{meta.description}</Text>
-          <Text style={styles.modalNote}>
-            Uma resposta incerta bloqueará novas ações até reconciliação.
-          </Text>
-          <View style={styles.actionsColumn}>
-            <SemanticActionButton
-              label="CONFIRMAR OPERAÇÃO"
-              variant={meta.variant}
-              disabled={false}
-              onPress={onConfirm}
-            />
-            <SemanticActionButton
-              label="CANCELAR OPERAÇÃO"
-              variant="secondary"
-              disabled={false}
-              onPress={onCancel}
-            />
+      <SafeAreaView style={styles.modalSafe} edges={['top', 'right', 'bottom', 'left']}>
+        <View style={styles.backdrop}>
+          <View style={styles.modalCard} accessibilityViewIsModal>
+            <ScrollView
+              style={styles.modalScroll}
+              contentContainerStyle={styles.modalScrollContent}
+              keyboardShouldPersistTaps="handled"
+              bounces={false}
+              showsVerticalScrollIndicator
+            >
+              <Text style={styles.modalTitle} accessibilityRole="header">{meta.title}</Text>
+              <Text style={styles.modalText}>{meta.description}</Text>
+              <Text style={styles.modalNote}>
+                Uma resposta incerta bloqueará novas ações até reconciliação.
+              </Text>
+              <View style={styles.actionsColumn}>
+                <SemanticActionButton
+                  label="CONFIRMAR OPERAÇÃO"
+                  variant={meta.variant}
+                  disabled={false}
+                  onPress={onConfirm}
+                />
+                <SemanticActionButton
+                  label="CANCELAR OPERAÇÃO"
+                  variant="secondary"
+                  disabled={false}
+                  onPress={onCancel}
+                />
+              </View>
+            </ScrollView>
           </View>
         </View>
-      </View>
+      </SafeAreaView>
     </Modal>
   );
 }
@@ -381,7 +392,7 @@ const styles = StyleSheet.create({
     borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, marginTop: 4 },
   sharedInfoText: { color: '#E9D8FD', fontSize: 13, lineHeight: 18, fontWeight: '500', flex: 1 },
   calledHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 },
-  calledIdentity: { flexDirection: 'row', alignItems: 'center', gap: 12, flex: 1, minWidth: 160 },
+  calledIdentity: { flexDirection: 'row', alignItems: 'center', gap: 12, flex: 1, minWidth: 0 },
   userTile: { width: 44, height: 44, borderRadius: 12, backgroundColor: c.iconFill,
     alignItems: 'center', justifyContent: 'center', flexShrink: 0, gap: 3 },
   userHead: { width: 10, height: 10, borderRadius: 5, borderWidth: 1.6, borderColor: c.accent },
@@ -408,8 +419,11 @@ const styles = StyleSheet.create({
   trashCan: { width: 12, height: 12, borderWidth: 1.5, borderTopWidth: 0, borderBottomLeftRadius: 2, borderBottomRightRadius: 2,
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-evenly', paddingVertical: 2 },
   trashLine: { width: 1.5, height: 6, borderRadius: 1 },
-  backdrop: { flex: 1, justifyContent: 'center', padding: 24, backgroundColor: 'rgba(9, 4, 18, 0.8)' },
-  modalCard: { backgroundColor: c.surface, borderWidth: 1, borderColor: c.border, borderRadius: 18, padding: 20, gap: 12 },
+  modalSafe: { flex: 1, backgroundColor: 'rgba(9, 4, 18, 0.8)' },
+  backdrop: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 },
+  modalCard: { width: '100%', maxWidth: 460, maxHeight: '100%', backgroundColor: c.surface, borderWidth: 1, borderColor: c.border, borderRadius: 18, overflow: 'hidden' },
+  modalScroll: { flexGrow: 0, flexShrink: 1 },
+  modalScrollContent: { padding: 20, gap: 12 },
   modalTitle: { color: c.text, fontSize: 19, lineHeight: 25, fontWeight: '700' },
   modalText: { color: c.muted, fontSize: 15, lineHeight: 22 },
   modalNote: { color: '#FCD34D', fontSize: 13, lineHeight: 19 },

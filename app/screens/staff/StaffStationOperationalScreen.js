@@ -1,8 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, AppState, Pressable, StyleSheet, Text, View } from 'react-native';
+import { useIsFocused } from '@react-navigation/native';
 import { randomUUID } from 'expo-crypto';
 import { useAuth } from '../../context/AuthContext';
-import { createStaffOperationsCoordinator, fetchStaffStationState } from '../../services/staffOperationsService';
+import {
+  createStaffOperationsCoordinator,
+  fetchStaffStationState,
+  fetchStaffStations,
+} from '../../services/staffOperationsService';
 import { defaultStaffIntentStorage } from '../../services/staffIntentStorage';
 import { liveColors as c, liveStyles as live } from '../admin/components/AdminLiveUI';
 import {
@@ -47,12 +52,34 @@ export default function StaffStationOperationalScreen({
   accessDenied = false,
   accessDeniedKind = 'denied',
   onAccessDenied,
+  onStationNotFound,
   getNow,
 }) {
   const auth = useAuth();
+  const focused = useIsFocused();
+  const [appState, setAppState] = useState(() => AppState?.currentState ?? 'active');
   const mounted = useRef(true);
   const liveRef = useRef(null);
-  liveRef.current = { auth, event, experience, station, isEventCurrent, onRefresh, accessDenied, onAccessDenied };
+  liveRef.current = {
+    auth,
+    event,
+    experience,
+    station,
+    isEventCurrent,
+    onRefresh,
+    onChanged,
+    accessDenied,
+    onAccessDenied,
+    onStationNotFound,
+  };
+
+  useEffect(() => {
+    if (typeof AppState?.addEventListener !== 'function') return undefined;
+    const subscription = AppState.addEventListener('change', (next) => {
+      setAppState(next);
+    });
+    return () => subscription?.remove?.();
+  }, []);
 
   const getContext = () => {
     const current = liveRef.current;
@@ -114,6 +141,47 @@ export default function StaffStationOperationalScreen({
   const revision = auth.getIdentityRevision();
   const context = getContext();
 
+  async function handleStationNotFound(originScope, originGeneration) {
+    const verifyFn = liveRef.current.onStationNotFound;
+    let outcome;
+    if (verifyFn) {
+      outcome = await verifyFn({
+        stationId: originScope.stationId,
+        experienceId: experience.id,
+      });
+    } else {
+      try {
+        await fetchStaffStations(liveRef.current.auth.httpClient, originScope.eventId);
+        outcome = { outcome: 'local_denied', kind: 'denied' };
+      } catch (verifyError) {
+        if (verifyError?.status === 401) {
+          outcome = { outcome: 'session', kind: 'session' };
+        } else if (verifyError?.status === 403 || verifyError?.status === 404) {
+          outcome = { outcome: 'event_denied', kind: 'denied' };
+        } else {
+          const verifyKind = verifyError?.isNetworkError ? 'network' : 'unavailable';
+          outcome = { outcome: 'uncertain', kind: verifyKind };
+        }
+      }
+    }
+    if (!mounted.current || originGeneration !== generation.current || !same(originScope, getContext())) return;
+    if (outcome?.outcome === 'stale') return;
+    if (outcome?.outcome === 'session' || outcome?.outcome === 'event_denied') {
+      const denyKind = outcome.outcome === 'session' ? 'session' : 'denied';
+      setView((previous) => ({ ...previous, status: 'error', data: null, pending: null, error: denyKind }));
+      if (!verifyFn) {
+        liveRef.current.onAccessDenied?.(denyKind);
+      }
+      return;
+    }
+    if (outcome?.outcome === 'uncertain') {
+      const errKind = outcome.kind === 'network' ? 'network' : 'unavailable';
+      setView((previous) => ({ ...previous, status: 'error', data: null, pending: null, error: errKind }));
+      return;
+    }
+    setView((previous) => ({ ...previous, status: 'error', data: null, pending: null, error: 'denied' }));
+  }
+
   async function refresh(preserveFeedback = false) {
     const initial = getContext();
     const request = ++generation.current;
@@ -121,7 +189,7 @@ export default function StaffStationOperationalScreen({
     setDialog(null);
     if (!initial) {
       setView({ scope: null, status: 'loading', data: null, error: null, pending: null, busy: false, feedback: null });
-      return;
+      return false;
     }
     setView((previous) => ({
       ...previous,
@@ -137,16 +205,17 @@ export default function StaffStationOperationalScreen({
       const data = coordinator
         ? await coordinator.readStationState(initial, experience.id, station.id)
         : await fetchStaffStationState(liveRef.current.auth.httpClient, event.id, experience.id, station.id);
-      if (!current()) return;
+      if (!current()) return false;
       let pending = null;
       if (coordinator) {
         stage = 'pending';
         pending = await coordinator.pending(initial);
       }
-      if (!current()) return;
+      if (!current()) return false;
       setView((previous) => ({ ...previous, status: 'ready', data, pending, error: null }));
+      return true;
     } catch (error) {
-      if (!same(initial, getContext())) return;
+      if (!same(initial, getContext())) return false;
       if (error?.status === 401 || error?.status === 403) {
         generation.current += 1;
         dialogRef.current = null;
@@ -154,10 +223,18 @@ export default function StaffStationOperationalScreen({
         const kind = error.status === 401 ? 'session' : 'denied';
         setView((previous) => ({ ...previous, status: 'error', data: null, pending: null, error: kind }));
         liveRef.current.onAccessDenied?.(kind);
-        return;
+        return false;
       }
-      if (request !== generation.current) return;
-      const kind = error?.status === 404 ? 'denied' : error?.isNetworkError ? 'network' : 'unavailable';
+      if (request !== generation.current) return false;
+      if (error?.status === 404) {
+        const nextGen = ++generation.current;
+        dialogRef.current = null;
+        setDialog(null);
+        setView((previous) => ({ ...previous, status: 'error', data: null, pending: null, error: 'verifying' }));
+        await handleStationNotFound(initial, nextGen);
+        return false;
+      }
+      const kind = error?.isNetworkError ? 'network' : 'unavailable';
       setView((previous) => ({
         ...previous,
         status: 'error',
@@ -165,6 +242,7 @@ export default function StaffStationOperationalScreen({
         pending: stage === 'pending' ? { kind: 'storage_error' } : null,
         error: kind,
       }));
+      return false;
     }
   }
 
@@ -198,15 +276,32 @@ export default function StaffStationOperationalScreen({
         return;
       }
       if (request !== generation.current) return;
-      const kind = error?.status === 404 ? 'denied' : 'stale';
-      setView((previous) => (kind === 'stale'
-        ? { ...previous, error: kind }
-        : { ...previous, data: null, status: 'error', error: kind }));
+      if (error?.status === 404) {
+        const nextGen = ++generation.current;
+        dialogRef.current = null;
+        setDialog(null);
+        setView((previous) => ({ ...previous, data: null, status: 'error', pending: null, error: 'verifying' }));
+        await handleStationNotFound(scope, nextGen);
+        return;
+      }
+      setView((previous) => ({ ...previous, error: 'stale' }));
     }
   }
 
+  const hasModalOpen = Boolean(dialog && !accessDenied && same(dialog.context, context) && !view.busy);
+  const pollingEnabled = Boolean(
+    !accessDenied
+    && context
+    && same(view.scope, context)
+    && view.status === 'ready'
+    && !view.busy
+    && !hasModalOpen
+    && !dispatching.current
+    && !acknowledging.current,
+  );
+
   useStaffPolling(
-    Boolean(!accessDenied && context && view.status === 'ready' && !view.busy),
+    pollingEnabled,
     poll,
     5000,
     `${event.id}:${station.id}:${epoch}:${revision}`,
@@ -288,7 +383,7 @@ export default function StaffStationOperationalScreen({
     || (view.pending && view.pending.kind !== 'none');
 
   const open = (action) => {
-    if (!blocked && context) setDialog({ action, context, observed: view.data });
+    if (!blocked && context) setDialog({ action, context, observed: view.data, readGen: generation.current });
   };
 
   async function dispatch(expected, fromDialog = false) {
@@ -297,6 +392,7 @@ export default function StaffStationOperationalScreen({
       || dispatching.current
       || acknowledging.current
       || !coordinator
+      || expected.readGen !== generation.current
       || (fromDialog && dialogRef.current !== expected)
       || (!fromDialog && (expected.action.kind !== 'call' || dialogRef.current))
       || !same(expected.context, getContext())
@@ -336,8 +432,8 @@ export default function StaffStationOperationalScreen({
       }
       if (!same(scope, getContext())) return;
       setView((previous) => ({ ...previous, busy: false, feedback: result }));
-      await refresh(true);
-      if (same(scope, getContext())) onChanged();
+      const refreshedOk = await refresh(true);
+      if (refreshedOk && same(scope, getContext())) liveRef.current.onChanged?.();
     } finally {
       dispatching.current = false;
     }
@@ -367,6 +463,7 @@ export default function StaffStationOperationalScreen({
   }
 
   const messages = {
+    verifying: 'Verificando acesso à estação...',
     session: 'Sessão inválida. Entre novamente.',
     denied: 'Acesso à estação indisponível.',
     network: 'Falha de conexão. Atualize a estação.',
@@ -408,11 +505,26 @@ export default function StaffStationOperationalScreen({
     || data?.availability !== 'available';
   const showUnavailableHint = Boolean(data && !data.pending && data.availability === 'unavailable');
   const showCallClosedHint = Boolean(data && !data.pending && data.availability === 'available' && !data.canCall && data.waitingCount > 0);
-  const pollingDotStyle = view.status === 'ready' && !view.error
-    ? styles.pollingDotActive
-    : view.error === 'stale'
-      ? styles.pollingDotStale
-      : styles.pollingDotMuted;
+  const pollingIndicator = (() => {
+    if (accessDenied || (view.status === 'error' && (view.error === 'denied' || view.error === 'session'))) {
+      return null;
+    }
+    if (view.error === 'stale') {
+      return { dotStyle: styles.pollingDotStale, text: 'Dados desatualizados · tentando atualizar a cada 5s' };
+    }
+    if (view.status === 'error') {
+      return {
+        dotStyle: styles.pollingDotMuted,
+        text: view.error === 'verifying'
+          ? 'Atualização indisponível · verificando autorização'
+          : 'Atualização indisponível · aguardando recuperação',
+      };
+    }
+    if (!pollingEnabled || !focused || appState !== 'active') {
+      return { dotStyle: styles.pollingDotStale, text: 'Atualização temporariamente pausada' };
+    }
+    return { dotStyle: styles.pollingDotActive, text: 'Atualização automática ativa · a cada 5s' };
+  })();
 
   return (
     <View style={styles.content}>
@@ -430,7 +542,14 @@ export default function StaffStationOperationalScreen({
         </View>
       )}
 
-      {view.status === 'error' && (
+      {view.status === 'error' && view.error === 'verifying' && (
+        <View accessibilityRole="progressbar" style={styles.stateCard}>
+          <ActivityIndicator color={c.accent} />
+          <Text style={styles.message}>{messages.verifying}</Text>
+        </View>
+      )}
+
+      {view.status === 'error' && view.error !== 'verifying' && (
         <View style={styles.errorCard}>
           <Text accessibilityRole="alert" style={styles.alertMessage}>{messages[view.error]}</Text>
         </View>
@@ -483,7 +602,7 @@ export default function StaffStationOperationalScreen({
               <ActionButton
                 label="Chamar próximo"
                 disabled={callDisabled}
-                onPress={() => dispatch({ action: { kind: 'call' }, context })}
+                onPress={() => dispatch({ action: { kind: 'call' }, context, readGen: generation.current })}
               />
               {showUnavailableHint && (
                 <Text style={styles.helperNote}>
@@ -561,23 +680,26 @@ export default function StaffStationOperationalScreen({
         </View>
       )}
 
-      <View style={styles.pollingRow}>
-        <View style={[styles.pollingDot, pollingDotStyle]} />
-        <Text style={styles.pollingText}>Fila e atendimento atualizados automaticamente</Text>
-      </View>
+      {pollingIndicator && (
+        <View style={styles.pollingRow}>
+          <View style={[styles.pollingDot, pollingIndicator.dotStyle]} />
+          <Text style={styles.pollingText}>{pollingIndicator.text}</Text>
+        </View>
+      )}
 
       <ActionButton
         label="Atualizar atendimento"
         variant="secondary"
-        disabled={view.busy || view.status === 'loading'}
-        onPress={() => {
+        disabled={view.busy || view.status === 'loading' || view.error === 'verifying'}
+        onPress={async () => {
           autoAttempt.current = null;
-          return Promise.all([refresh(), Promise.resolve(liveRef.current.onRefresh?.())]);
+          const refreshedOk = await refresh();
+          if (refreshedOk) await liveRef.current.onRefresh?.();
         }}
       />
 
       <StationConfirmModal
-        visible={Boolean(dialog && !accessDenied && same(dialog.context, getContext()) && !view.busy)}
+        visible={hasModalOpen}
         dialog={dialog}
         onConfirm={() => dispatch(dialog, true)}
         onCancel={() => {

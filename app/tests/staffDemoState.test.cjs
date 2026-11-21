@@ -219,13 +219,24 @@ const demoStaffScreens = [
   'components/StaffDemoTools.js', 'components/StaffHeader.js', 'components/StaffMissingSession.js',
   'components/StaffNotice.js', 'components/StaffScreen.js', 'components/staffTheme.js',
 ];
-const realStaffScreens = ['StaffEventsNavigator.js', 'StaffEntryControlRealScreen.js', 'StaffStationOperationalScreen.js',
-  'components/StaffLiveScreen.js', 'useStaffPolling.js'];
+const realStaffScreens = [
+  'StaffEventsNavigator.js',
+  'StaffEntryControlRealScreen.js',
+  'StaffStationOperationalScreen.js',
+  'components/StaffLiveScreen.js',
+  'components/StaffStationSections.js',
+  'useStaffPolling.js',
+];
 
 test('estação operacional real não carrega estado demonstrativo', () => {
   const source = readFileSync(path.join(appDirectory, 'screens', 'staff', 'StaffStationOperationalScreen.js'), 'utf8');
   assert.match(source, /staffOperationsService/);
   assert.doesNotMatch(source, /staffDemoState|staffDemoData|StaffDemoContext|StaffStationScreen/);
+  const sectionsSource = readFileSync(
+    path.join(appDirectory, 'screens', 'staff', 'components', 'StaffStationSections.js'),
+    'utf8',
+  );
+  assert.doesNotMatch(sectionsSource, /staffDemoState|staffDemoData|StaffDemoContext|StaffStationScreen/);
 });
 
 test('arquivos Staff são classificados como demonstração ou fluxo real', () => {

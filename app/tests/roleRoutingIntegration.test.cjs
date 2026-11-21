@@ -241,6 +241,26 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
         : value && typeof value === 'object' ? flatten(value.props?.children) : String(value ?? '');
       return flatten(node.props.children).includes(text);
     }); },
+    hasExactText(text) { return tree.root.findAllByType('Text').some((node) => {
+      const flatten = (value) => Array.isArray(value) ? value.map(flatten).join('')
+        : value && typeof value === 'object' ? flatten(value.props?.children) : String(value ?? '');
+      return flatten(node.props.children) === String(text);
+    }); },
+    hasQueueRow(position, displayName, status = 'Aguardando') {
+      const flatten = (value) => Array.isArray(value) ? value.map(flatten).join('')
+        : value && typeof value === 'object' ? flatten(value.props?.children) : String(value ?? '');
+      return tree.root.findAllByType('View').some((row) => {
+        const ch = (row.children ?? []).filter((node) => node && typeof node === 'object' && node.type === 'View');
+        if (ch.length !== 2) return false;
+        const leftTexts = ch[0].findAllByType('Text').map((t) => flatten(t.props.children));
+        const rightTexts = ch[1].findAllByType('Text').map((t) => flatten(t.props.children));
+        return leftTexts.length === 1
+          && leftTexts[0] === String(position)
+          && rightTexts.length === 2
+          && rightTexts.includes(displayName)
+          && rightTexts.includes(status);
+      });
+    },
     async press(label) {
       const buttons = tree.root.findAllByType('Pressable').filter((node) => node.props.accessibilityLabel === label);
       assert.equal(buttons.length, 1, `botão ${label}`);
@@ -2375,9 +2395,11 @@ test('R3-01, R3-02, R3-03 e R3-04: revalidação parcial não trava botão Atual
   }
 });
 
-test('STAFF-02: estados A e B da Estação, fila compartilhada, conclusão, ausência (reinserção e corte), indisponibilidade e negativa 403 propagada', { skip }, async () => {
+test('STAFF-02: estados A e B da Estação, fila compartilhada, proteção a duplo toque, conclusão, ausência (reinserção e corte), indisponibilidade e negativa 403 propagada', { skip }, async () => {
   const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
   const secure = new Map();
+  const opKey = `arenago.staff.operation.${staffUser.id.toLowerCase()}`;
+  const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   const secondStation = {
     id: '55555555-5555-4555-8555-555555555555',
     experienceId: realExperienceId,
@@ -2407,7 +2429,9 @@ test('STAFF-02: estados A e B da Estação, fila compartilhada, conclusão, aus�
   let pendingCall = null;
   let requeueOnAbsent = true;
   let denyOperational = false;
+  let pendingCallDeferred = null;
   const posts = [];
+  const postLog = [];
 
   const syncStations = () => [
     { ...primaryStation, pendingServiceSessionId: pendingCall?.serviceSessionId ?? null },
@@ -2459,6 +2483,12 @@ test('STAFF-02: estados A e B da Estação, fila compartilhada, conclusão, aus�
       }
       if (options.method === 'POST' && route.endsWith('/call-next')) {
         posts.push('call-next');
+        postLog.push({ route, idempotencyKey: options.headers?.['Idempotency-Key'] ?? null });
+        if (pendingCallDeferred) {
+          const d = pendingCallDeferred;
+          pendingCallDeferred = null;
+          await d.promise;
+        }
         const next = waiting.shift();
         const sid = posts.length === 1 ? sessionA : posts.length === 3 ? sessionB : sessionC;
         pendingCall = {
@@ -2483,6 +2513,7 @@ test('STAFF-02: estados A e B da Estação, fila compartilhada, conclusão, aus�
       }
       if (options.method === 'POST' && route.endsWith('/complete')) {
         posts.push('complete');
+        postLog.push({ route, idempotencyKey: options.headers?.['Idempotency-Key'] ?? null });
         const sid = pendingCall.serviceSessionId;
         pendingCall = null;
         return {
@@ -2495,6 +2526,7 @@ test('STAFF-02: estados A e B da Estação, fila compartilhada, conclusão, aus�
       }
       if (options.method === 'POST' && route.endsWith('/absent')) {
         posts.push('absent');
+        postLog.push({ route, idempotencyKey: options.headers?.['Idempotency-Key'] ?? null });
         const prev = pendingCall;
         pendingCall = null;
         if (requeueOnAbsent) {
@@ -2529,31 +2561,52 @@ test('STAFF-02: estados A e B da Estação, fila compartilhada, conclusão, aus�
     await app.press('Selecionar estação Estação Alpha da experiência Just Dance Pro');
 
     // Estado A: estação disponível com fila FIFO real e sem valores fictícios dos mockups
-    assert.ok(app.hasText('Estação Alpha'));
-    assert.ok(app.hasText('DISPONÍVEL'));
-    assert.ok(app.hasText('Just Dance Pro'));
-    assert.ok(app.hasText('Torneio Real UNDB'));
+    assert.ok(app.hasExactText('Estação Alpha'));
+    assert.ok(app.hasExactText('DISPONÍVEL'));
+    assert.equal(app.hasExactText('INDISPONÍVEL'), false);
+    assert.ok(app.hasExactText('Just Dance Pro'));
+    assert.ok(app.hasExactText('Torneio Real UNDB'));
     assert.ok(!app.hasText('Street Fighter'), 'não usa nome fixo do mockup');
     assert.ok(!app.hasText('BEAST Arena'), 'não usa evento fixo do mockup');
-    assert.ok(app.hasText('FILA DA EXPERIÊNCIA'));
-    assert.ok(app.hasText('3 aguardando'));
-    assert.ok(app.hasText('Mariana Costa'));
-    assert.ok(app.hasText('Lucas Ferreira'));
-    assert.ok(app.hasText('Rafael Oliveira'));
+    assert.ok(app.hasExactText('FILA DA EXPERIÊNCIA'));
+    assert.ok(app.hasExactText('3 aguardando'));
+    assert.ok(app.hasQueueRow(1, 'Mariana Costa'));
+    assert.ok(app.hasQueueRow(2, 'Lucas Ferreira'));
+    assert.ok(app.hasQueueRow(3, 'Rafael Oliveira'));
     assert.ok(app.hasText('Fila compartilhada entre as estações'));
-    assert.ok(app.hasText('ATENDIMENTO ATUAL'));
-    assert.ok(app.hasText('Nenhum participante chamado'));
-    assert.ok(app.hasText('Fila e atendimento atualizados automaticamente'));
+    assert.ok(app.hasExactText('ATENDIMENTO ATUAL'));
+    assert.ok(app.hasExactText('Nenhum participante chamado'));
+    assert.ok(app.hasExactText('Atualização automática ativa · a cada 5s'));
     assert.equal(app.isDisabled('Chamar próximo'), false);
     assert.equal(app.hasButton('Atualizar fila'), false, 'sem botão duplicado de atualizar');
     assert.equal(app.hasButton('Voltar ao painel'), true);
 
-    // Transição A -> B: Chamar próximo exibe Mariana Costa em atendimento e remove da lista de espera
-    await app.press('Chamar próximo');
-    assert.ok(app.hasText('Mariana Costa'));
-    assert.ok(app.hasText('Em atendimento'));
+    // Transição A -> B com duplo toque bloqueado em voo e limpeza de recibo após ack no SecureStore
+    pendingCallDeferred = deferred();
+    let callPromise;
+    await app.act(async () => {
+      const tap = app.handler('Chamar próximo');
+      callPromise = Promise.all([tap(), tap()]);
+      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    assert.equal(posts.length, 1, 'duplo toque não envia segundo POST');
+    assert.equal(app.isDisabled('Chamar próximo'), true);
+    assert.equal(JSON.parse(secure.get(opKey)).phase, 'dispatching');
+    await app.act(async () => {
+      pendingCallDeferred.resolve();
+      await callPromise;
+    });
+    assert.equal(secure.get(opKey) ?? null, null, 'intenção principal removida após ack');
+    assert.equal(secure.get(`${opKey}.receipt`) ?? null, null);
+    assert.equal(secure.get(`${opKey}.ack`) ?? null, null);
+
+    assert.ok(app.hasExactText('Mariana Costa'));
+    assert.ok(app.hasExactText('Em atendimento'));
     assert.ok(app.hasText('Chamado há 00:'));
-    assert.ok(app.hasText('2 aguardando'));
+    assert.ok(app.hasExactText('2 aguardando'));
+    assert.ok(app.hasQueueRow(1, 'Lucas Ferreira'));
+    assert.ok(app.hasQueueRow(2, 'Rafael Oliveira'));
     assert.equal(app.hasButton('Chamar próximo'), false, 'não exibe Chamar próximo durante atendimento pendente');
     assert.ok(app.hasButton('Concluir experiência'));
     assert.ok(app.hasButton('Marcar ausência'));
@@ -2564,20 +2617,20 @@ test('STAFF-02: estados A e B da Estação, fila compartilhada, conclusão, aus�
     assert.equal(app.modal().props.visible, true);
     await app.press('CONFIRMAR OPERAÇÃO');
     assert.ok(app.hasText('Operação confirmada pelo servidor.'));
-    assert.ok(app.hasText('Nenhum participante chamado'));
+    assert.ok(app.hasExactText('Nenhum participante chamado'));
     assert.equal(app.isDisabled('Chamar próximo'), false);
 
     // Chamar próximo (Lucas Ferreira) e Marcar ausência com reinserção no fim da fila
     await app.press('Chamar próximo');
-    assert.ok(app.hasText('Lucas Ferreira'));
-    assert.ok(app.hasText('Em atendimento'));
+    assert.ok(app.hasExactText('Lucas Ferreira'));
+    assert.ok(app.hasExactText('Em atendimento'));
     requeueOnAbsent = true;
     await app.press('Marcar ausência');
     await app.press('CONFIRMAR OPERAÇÃO');
     assert.ok(app.hasText('Ausência registrada; participante retornou ao fim da fila.'));
-    assert.ok(app.hasText('2 aguardando'));
-    assert.ok(app.hasText('Rafael Oliveira'));
-    assert.ok(app.hasText('Lucas Ferreira'));
+    assert.ok(app.hasExactText('2 aguardando'));
+    assert.ok(app.hasQueueRow(1, 'Rafael Oliveira'));
+    assert.ok(app.hasQueueRow(2, 'Lucas Ferreira'));
 
     // Chamar próximo (Rafael Oliveira) e Marcar ausência após corte (sem reinserção)
     await app.press('Chamar próximo');
@@ -2585,26 +2638,636 @@ test('STAFF-02: estados A e B da Estação, fila compartilhada, conclusão, aus�
     await app.press('Marcar ausência');
     await app.press('CONFIRMAR OPERAÇÃO');
     assert.ok(app.hasText('Ausência registrada; participante não retornou à fila após o corte.'));
-    assert.ok(app.hasText('1 aguardando'));
+    assert.ok(app.hasExactText('1 aguardando'));
+    assert.ok(app.hasQueueRow(1, 'Lucas Ferreira'));
 
     // Segunda estação da mesma experiência (INDISPONÍVEL) compartilha a mesma fila e bloqueia Chamar próximo
     await app.press('Voltar ao painel');
     await app.press('Selecionar estação Estação 02 da experiência Just Dance Pro');
-    assert.ok(app.hasText('Estação 02'));
-    assert.ok(app.hasText('INDISPONÍVEL'));
-    assert.ok(app.hasText('1 aguardando'));
-    assert.ok(app.hasText('Lucas Ferreira'));
+    assert.ok(app.hasExactText('Estação 02'));
+    assert.ok(app.hasExactText('INDISPONÍVEL'));
+    assert.equal(app.hasExactText('DISPONÍVEL'), false);
+    assert.ok(app.hasExactText('1 aguardando'));
+    assert.ok(app.hasQueueRow(1, 'Lucas Ferreira'));
     assert.equal(app.isDisabled('Chamar próximo'), true);
 
     // Negativa 403 em /operational-state limpa dados nominais e propaga bloqueio ao painel
     denyOperational = true;
     await app.tickTimers(5000);
     assert.ok(!app.hasText('Lucas Ferreira'));
+    assert.ok(!app.hasText('Atualização'));
     assert.ok(app.hasText('Acesso ao evento ou à experiência indisponível'));
     await app.press('Voltar ao painel');
-    assert.ok(app.hasText('SEM ACESSO'));
+    assert.ok(app.hasExactText('SEM ACESSO'));
     assert.equal(app.isDisabled('Controle de Entrada'), true);
     assert.deepEqual(posts, ['call-next', 'complete', 'call-next', 'absent', 'call-next', 'absent']);
+    assert.equal(postLog.length, 6);
+    assert.equal(postLog[0].route, `/staff/events/${staffEvent.id}/experiences/${realExperienceId}/stations/${primaryStation.id}/call-next`);
+    assert.equal(postLog[1].route, `/staff/events/${staffEvent.id}/service-sessions/${sessionA}/complete`);
+    assert.equal(postLog[3].route, `/staff/events/${staffEvent.id}/service-sessions/${sessionB}/absent`);
+    assert.equal(postLog[5].route, `/staff/events/${staffEvent.id}/service-sessions/${sessionC}/absent`);
+    assert.ok(postLog.every((entry) => uuidRe.test(entry.idempotencyKey)), 'toda mutação envia Idempotency-Key UUID');
+  } finally {
+    pendingCallDeferred?.resolve();
+    app.dispose();
+  }
+});
+
+test('STAFF02-AUD-01: 404 contextual em operational-state protege cache nominal ao voltar ao painel, cobre casos A/B/C, invalida modal e preserva SecureStore', { skip }, async () => {
+  const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
+  const event1 = { ...staffEvent, id: staffEvent.id, name: 'Torneio Primário' };
+  const event2 = { ...staffEvent, id: '66666666-6666-4666-8666-666666666666', name: 'Torneio Secundário' };
+  const exp1 = { id: realExperienceId, name: 'Just Dance Pro' };
+  const station1 = { ...realStation, id: realStation.id, label: 'Estação Alpha', availability: 'available', pendingServiceSessionId: null };
+  const station2 = { ...realStation, id: '55555555-5555-4555-8555-555555555556', label: 'Estação Secundária', availability: 'available', pendingServiceSessionId: null };
+  const secure = new Map();
+  const opKey = `arenago.staff.operation.${staffUser.id.toLowerCase()}`;
+  let deleteCalls = 0;
+  let postCount = 0;
+  let station1Label = 'Estação Alpha';
+  let operational404 = false;
+  let verifyDeferred = null;
+  let panelExpDeferred = null;
+  let stations500 = false;
+  let stations404 = false;
+  let stations401 = false;
+  let panelEntry500 = false;
+
+  const entryNominal = (eventId) => ({
+    eventId,
+    externalQueueEnabled: true,
+    canManage: true,
+    observedAt: '2026-11-10T15:00:00.000Z',
+    waitingCount: 2,
+    waiting: [],
+    pendingCall: eventId === event1.id ? {
+      id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      participationId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      displayName: 'JulianaEntrada',
+      calledAt: '2026-11-10T14:58:00.000Z',
+    } : null,
+  });
+
+  const operationalPayload = (eventId, st) => ({
+    eventId,
+    experienceId: exp1.id,
+    stationId: st.id,
+    availability: 'available',
+    canCall: false,
+    waitingCount: 1,
+    waiting: [{ queueEntryId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', displayName: 'PedroFila', position: 1 }],
+    pending: {
+      serviceSessionId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      queueEntryId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+      displayName: 'LucasCalled',
+      calledAt: new Date(Date.now() - 10_000).toISOString(),
+    },
+  });
+
+  const app = createIntegration({
+    initialUser: staffUser,
+    control: {
+      realStaff: true,
+      manualTimers: true,
+      platformOS: 'ios',
+      events: [event1, event2],
+      experiences: [exp1],
+      secureStore: {
+        isAvailableAsync: async () => true,
+        getItemAsync: async (k) => secure.get(k) ?? null,
+        setItemAsync: async (k, v) => { secure.set(k, v); },
+        deleteItemAsync: async (k) => { deleteCalls += 1; secure.delete(k); },
+      },
+      http: async (route, options) => {
+        if (options.method === 'POST' && !route.startsWith('/auth/')) {
+          postCount += 1;
+          return { statusCode: 500, body: { code: 'UNEXPECTED_POST' } };
+        }
+        if (route === `/staff/events/${event1.id}/stations`) {
+          if (verifyDeferred) {
+            const d = verifyDeferred;
+            verifyDeferred = null;
+            return d.promise;
+          }
+          if (stations401) return { statusCode: 401, body: { code: 'SESSION_REVOKED' } };
+          if (stations404) return { statusCode: 404, body: { code: 'RESOURCE_NOT_FOUND' } };
+          if (stations500) return { statusCode: 500, body: { code: 'INTERNAL_SERVER_ERROR' } };
+          return { eventId: event1.id, stations: [{ ...station1, label: station1Label }] };
+        }
+        if (route === `/staff/events/${event2.id}/stations`) {
+          return { eventId: event2.id, stations: [station2] };
+        }
+        if (route === `/staff/events/${event1.id}/experiences` && panelExpDeferred) {
+          const d = panelExpDeferred;
+          panelExpDeferred = null;
+          return d.promise;
+        }
+        if (route.endsWith('/entry-control')) {
+          if (panelEntry500 && route.includes(event1.id)) {
+            return { statusCode: 500, body: { code: 'INTERNAL_SERVER_ERROR' } };
+          }
+          return entryNominal(route.includes(event2.id) ? event2.id : event1.id);
+        }
+        if (route.endsWith('/queue')) {
+          const eid = route.includes(event2.id) ? event2.id : event1.id;
+          return {
+            eventId: eid,
+            experienceId: exp1.id,
+            waitingCount: 1,
+            canCallWaitingEntries: true,
+            firstWaitingQueueEntryId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+          };
+        }
+        if (route.endsWith('/operational-state')) {
+          if (route.includes(event1.id) && operational404) {
+            return { statusCode: 404, body: { code: 'RESOURCE_NOT_FOUND' } };
+          }
+          const eid = route.includes(event2.id) ? event2.id : event1.id;
+          const st = route.includes(event2.id) ? station2 : { ...station1, label: station1Label };
+          return operationalPayload(eid, st);
+        }
+        return undefined;
+      },
+    },
+  });
+
+  try {
+    await app.mount();
+    await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
+    await app.press('Selecionar evento Torneio Primário');
+    assert.ok(app.hasText('JulianaEntrada'));
+    assert.ok(app.hasText('Estação Alpha'));
+    assert.equal(app.isDisabled('Controle de Entrada'), false);
+
+    // Abre estação e abre modal de confirmação antes de receber 404 em polling
+    await app.press('Selecionar estação Estação Alpha da experiência Just Dance Pro');
+    assert.ok(app.hasExactText('LucasCalled'));
+    assert.ok(app.hasQueueRow(1, 'PedroFila'));
+    await app.press('Concluir experiência');
+    assert.equal(app.modal().props.visible, true);
+    const staleConfirm = app.buttonProps('CONFIRMAR OPERAÇÃO').onPress;
+
+    operational404 = true;
+    verifyDeferred = deferred();
+    await app.tickTimers(5000);
+    assert.ok(!app.hasText('LucasCalled'));
+    assert.ok(!app.hasText('PedroFila'));
+    assert.ok(app.modals().every((m) => !m.props.visible), '404 fecha modal aberto');
+    assert.ok(app.hasText('Verificando acesso à estação...'));
+    await app.act(async () => { await staleConfirm(); });
+    assert.equal(postCount, 0, 'callback antigo de confirmação não envia POST após 404');
+
+    // Retorna ao Painel antes do retorno de GET /stations -> cache nominal não reaparece
+    await app.press('Voltar ao painel');
+    assert.ok(!app.hasText('JulianaEntrada'), 'nome em cache da entrada não vaza durante verificação');
+    assert.ok(!app.hasText('Estação Alpha'));
+    assert.ok(app.hasText('Verificando acesso ao evento...'));
+    assert.ok(app.hasExactText('VERIFICANDO'));
+    assert.equal(app.metricValueFor('Estações ativas'), '—');
+    assert.equal(app.metricValueFor('Em atendimento'), '—');
+    assert.equal(app.metricValueFor('Fila externa'), '—');
+    assert.equal(app.isDisabled('Controle de Entrada'), true);
+    assert.equal(app.isDisabled('Atualizar estações'), true);
+
+    // Caso A (200 no fallback): não publica lista de verificação direto no Painel e reabre com nova rodada limpa
+    station1Label = 'Estação Recuperada';
+    panelExpDeferred = deferred();
+    await app.act(async () => {
+      verifyDeferred.resolve({ eventId: event1.id, stations: [{ ...station1, label: 'Estação Só Verificação' }] });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.ok(!app.hasText('Estação Só Verificação'), 'fallback 200 não publica stations direto na UI');
+    assert.ok(!app.hasText('JulianaEntrada'));
+    await app.act(async () => {
+      panelExpDeferred.resolve({ eventId: event1.id, experiences: [exp1] });
+    });
+    assert.ok(app.hasText('Estação Recuperada'));
+    assert.ok(app.hasText('JulianaEntrada'));
+    assert.equal(app.isDisabled('Controle de Entrada'), false);
+
+    // Caso C (500 em fallback): oculta dados nominais, bloqueia exposição parcial e recupera via Atualizar estações
+    operational404 = true;
+    stations500 = true;
+    await app.press('Selecionar estação Estação Recuperada da experiência Just Dance Pro');
+    assert.ok(!app.hasText('LucasCalled'));
+    assert.ok(app.hasText('Não foi possível consultar a estação.'));
+    assert.ok(app.hasText('Atualização indisponível · aguardando recuperação'));
+
+    stations500 = false;
+    panelEntry500 = true;
+    await app.press('Voltar ao painel');
+    assert.ok(!app.hasText('JulianaEntrada'), 'erro parcial em revalidação mantém ocultação nominal');
+    assert.ok(!app.hasText('Estação Recuperada'));
+    assert.ok(app.hasExactText('INDISPONÍVEL'));
+    assert.equal(app.isDisabled('Controle de Entrada'), true);
+    assert.equal(app.isDisabled('Atualizar estações'), false);
+
+    panelEntry500 = false;
+    await app.press('Atualizar estações');
+    assert.ok(app.hasText('Estação Recuperada'));
+    assert.ok(app.hasText('JulianaEntrada'));
+    assert.equal(app.isDisabled('Controle de Entrada'), false);
+
+    // Troca de evento enquanto verificação está pendente descarta negativa tardia do evento anterior
+    verifyDeferred = deferred();
+    await app.press('Selecionar estação Estação Recuperada da experiência Just Dance Pro');
+    await app.press('Voltar ao painel');
+    await app.press('Voltar aos eventos');
+    await app.press('Selecionar evento Torneio Secundário');
+    await app.act(async () => {
+      verifyDeferred.resolve({ statusCode: 403, body: { code: 'STAFF_EVENT_FORBIDDEN' } });
+    });
+    assert.ok(app.hasText('Estação Secundária'));
+    assert.equal(app.hasExactText('SEM ACESSO'), false);
+    assert.equal(app.isDisabled('Controle de Entrada'), false);
+
+    // Caso B (404 em fallback) + preservação de intenção pendente no SecureStore
+    await app.press('Voltar aos eventos');
+    operational404 = false;
+    await app.press('Selecionar evento Torneio Primário');
+    assert.ok(app.hasText('Estação Recuperada'));
+    const otherIntent = {
+      key: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+      userId: staffUser.id,
+      sessionId: staffUser.sessionId,
+      eventId: event2.id,
+      stationId: station2.id,
+      experienceId: exp1.id,
+      serviceSessionId: null,
+      kind: 'call',
+      phase: 'reserved',
+    };
+    secure.set(opKey, JSON.stringify(otherIntent));
+    operational404 = true;
+    stations404 = true;
+    await app.press('Selecionar estação Estação Recuperada da experiência Just Dance Pro');
+    assert.ok(!app.hasText('LucasCalled'));
+    assert.ok(app.hasText('Acesso à estação indisponível.'));
+    assert.ok(!app.hasText('Atualização'));
+    assert.equal(deleteCalls, 0, '404 não apaga intenção persistida no SecureStore');
+    assert.equal(JSON.parse(secure.get(opKey)).eventId, event2.id);
+    await app.press('Voltar ao painel');
+    assert.ok(app.hasExactText('SEM ACESSO'));
+    assert.ok(!app.hasText('JulianaEntrada'));
+    assert.equal(app.isDisabled('Controle de Entrada'), true);
+
+    // Caso B (401 no fallback): invalida sessão com segurança e remove UI Staff
+    await app.press('Voltar aos eventos');
+    operational404 = false;
+    stations404 = false;
+    await app.press('Selecionar evento Torneio Primário');
+    operational404 = true;
+    stations401 = true;
+    await app.press('Selecionar estação Estação Recuperada da experiência Just Dance Pro');
+    assert.equal(app.route(), 'Login');
+    assert.equal(app.manager.getSnapshot().isAuthenticated, false);
+    assert.ok(!app.hasText('JulianaEntrada'));
+    assert.equal(postCount, 0);
+  } finally {
+    verifyDeferred?.resolve({ statusCode: 500 });
+    panelExpDeferred?.resolve({ statusCode: 500 });
+    app.dispose();
+  }
+});
+
+test('STAFF02-AUD-02: saída rápida (A -> Painel e A -> Painel -> B) descarta atualização pós-operação em voo e preserva fila da Estação B', { skip }, async () => {
+  const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
+  const expA = { id: '31111111-1111-4111-8111-111111111111', name: 'Exp Alpha' };
+  const expB = { id: '32222222-2222-4222-8222-222222222222', name: 'Exp Beta' };
+  const stationA = { id: '41111111-1111-4111-8111-111111111111', experienceId: expA.id, label: 'Estação A', availability: 'available', pendingServiceSessionId: null };
+  const stationB = { id: '42222222-2222-4222-8222-222222222222', experienceId: expB.id, label: 'Estação B', availability: 'available', pendingServiceSessionId: null };
+  const secure = new Map();
+  let queueAReads = 0;
+  let queueBReads = 0;
+  let pendingA = null;
+  let deferNextStationsPoll = false;
+  let stationsPollDeferred = null;
+
+  const app = createIntegration({
+    initialUser: staffUser,
+    control: {
+      realStaff: true,
+      manualTimers: true,
+      platformOS: 'android',
+      events: [staffEvent],
+      experiences: [expA, expB],
+      secureStore: {
+        isAvailableAsync: async () => true,
+        getItemAsync: async (k) => secure.get(k) ?? null,
+        setItemAsync: async (k, v) => { secure.set(k, v); },
+        deleteItemAsync: async (k) => { secure.delete(k); },
+      },
+      http: async (route, options) => {
+        if (route.endsWith('/stations')) {
+          if (deferNextStationsPoll) {
+            deferNextStationsPoll = false;
+            stationsPollDeferred = deferred();
+            return stationsPollDeferred.promise;
+          }
+          return {
+            eventId: staffEvent.id,
+            stations: [
+              { ...stationA, pendingServiceSessionId: pendingA?.serviceSessionId ?? null },
+              stationB,
+            ],
+          };
+        }
+        if (route.includes(expA.id) && route.endsWith('/queue')) {
+          queueAReads += 1;
+          return {
+            eventId: staffEvent.id,
+            experienceId: expA.id,
+            waitingCount: 1,
+            canCallWaitingEntries: true,
+            firstWaitingQueueEntryId: '77777777-7777-4777-8777-777777777701',
+          };
+        }
+        if (route.includes(expB.id) && route.endsWith('/queue')) {
+          queueBReads += 1;
+          return {
+            eventId: staffEvent.id,
+            experienceId: expB.id,
+            waitingCount: 1,
+            canCallWaitingEntries: true,
+            firstWaitingQueueEntryId: '77777777-7777-4777-8777-777777777702',
+          };
+        }
+        if (route.includes(stationA.id) && route.endsWith('/operational-state')) {
+          return {
+            eventId: staffEvent.id,
+            experienceId: expA.id,
+            stationId: stationA.id,
+            availability: 'available',
+            canCall: !pendingA,
+            waitingCount: 1,
+            waiting: [{ queueEntryId: '77777777-7777-4777-8777-777777777701', displayName: 'Alice A', position: 1 }],
+            pending: pendingA,
+          };
+        }
+        if (route.includes(stationB.id) && route.endsWith('/operational-state')) {
+          return {
+            eventId: staffEvent.id,
+            experienceId: expB.id,
+            stationId: stationB.id,
+            availability: 'available',
+            canCall: true,
+            waitingCount: 1,
+            waiting: [{ queueEntryId: '77777777-7777-4777-8777-777777777702', displayName: 'Beatriz B', position: 1 }],
+            pending: null,
+          };
+        }
+        if (options.method === 'POST' && route.endsWith('/call-next')) {
+          pendingA = {
+            serviceSessionId: '88888888-8888-4888-8888-888888888801',
+            queueEntryId: '77777777-7777-4777-8777-777777777701',
+            displayName: 'Alice A',
+            calledAt: new Date(Date.now() - 5000).toISOString(),
+          };
+          deferNextStationsPoll = true;
+          return {
+            statusCode: 201,
+            body: {
+              serviceSession: {
+                id: pendingA.serviceSessionId,
+                queueEntryId: pendingA.queueEntryId,
+                experienceId: expA.id,
+                station: { id: stationA.id, label: stationA.label },
+                status: 'pending',
+                calledAt: pendingA.calledAt,
+              },
+            },
+          };
+        }
+        if (options.method === 'POST' && route.endsWith('/complete')) {
+          const sid = pendingA.serviceSessionId;
+          pendingA = null;
+          deferNextStationsPoll = true;
+          return {
+            body: {
+              serviceSession: { id: sid, status: 'completed', resolvedAt: new Date().toISOString() },
+              queueEntry: { status: 'closed', closeReason: 'completed' },
+              participation: { status: 'active', currentQueueEntryId: null },
+            },
+          };
+        }
+        return undefined;
+      },
+    },
+  });
+
+  try {
+    await app.mount();
+    await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
+    await app.press('Selecionar evento Evento autorizado');
+
+    // Fluxo A -> Painel com onChanged().pollStations() ainda em voo
+    await app.press('Selecionar estação Estação A da experiência Exp Alpha');
+    await app.press('Chamar próximo');
+    assert.ok(stationsPollDeferred, 'onChanged aguardando pollStations de A');
+    const queueABeforeReturn = queueAReads;
+    await app.press('Voltar ao painel');
+    await app.act(async () => {
+      stationsPollDeferred.resolve({ eventId: staffEvent.id, stations: [stationA, stationB] });
+      stationsPollDeferred = null;
+    });
+    assert.equal(queueAReads, queueABeforeReturn, 'A -> Painel descarta pollQueue tardio da experiência A');
+
+    // Fluxo A -> Painel -> B com onChanged().pollStations() ainda em voo
+    await app.press('Selecionar estação Estação A da experiência Exp Alpha');
+    await app.press('Concluir experiência');
+    await app.press('CONFIRMAR OPERAÇÃO');
+    assert.ok(stationsPollDeferred, 'onChanged após conclusão aguardando pollStations de A');
+    const queueABeforeSwitch = queueAReads;
+
+    await app.press('Voltar ao painel');
+    await app.press('Selecionar estação Estação B da experiência Exp Beta');
+    assert.ok(app.hasExactText('Estação B'));
+    assert.ok(app.hasQueueRow(1, 'Beatriz B'));
+    assert.equal(queueBReads >= 1, true);
+
+    await app.act(async () => {
+      stationsPollDeferred.resolve({ eventId: staffEvent.id, stations: [stationA, stationB] });
+      stationsPollDeferred = null;
+    });
+    assert.equal(queueAReads, queueABeforeSwitch, 'A -> Painel -> B não dispara pollQueue residual para Exp A');
+    assert.ok(app.hasExactText('Estação B'));
+    assert.ok(app.hasQueueRow(1, 'Beatriz B'));
+    assert.ok(app.hasExactText('1 aguardando'));
+  } finally {
+    stationsPollDeferred?.resolve({ eventId: staffEvent.id, stations: [stationA, stationB] });
+    app.dispose();
+  }
+});
+
+test('STAFF02-AUD-05 + AUD-06: indicador de polling espelha modal, foco, AppState e erro transitório, testa Remover da fila e bloqueio em erro incerto', { skip }, async () => {
+  const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
+  const secure = new Map();
+  const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const station = { ...realStation, label: 'Estação Pulso', availability: 'available', pendingServiceSessionId: null };
+  let operationalReads = 0;
+  let operationalMode = 'ok';
+  let callShouldNetworkFail = false;
+  let postLog = [];
+  let waiting = [{ queueEntryId: '77777777-7777-4777-8777-777777777711', displayName: 'Carla Nogueira', position: 1 }];
+  let pendingCall = null;
+
+  const app = createIntegration({
+    initialUser: staffUser,
+    control: {
+      realStaff: true,
+      manualTimers: true,
+      platformOS: 'android',
+      events: [staffEvent],
+      experiences: [{ id: realExperienceId, name: 'Ritmo Live' }],
+      secureStore: {
+        isAvailableAsync: async () => true,
+        getItemAsync: async (k) => secure.get(k) ?? null,
+        setItemAsync: async (k, v) => { secure.set(k, v); },
+        deleteItemAsync: async (k) => { secure.delete(k); },
+      },
+      http: async (route, options) => {
+        if (route.endsWith('/stations')) {
+          return { eventId: staffEvent.id, stations: [{ ...station, pendingServiceSessionId: pendingCall?.serviceSessionId ?? null }] };
+        }
+        if (route.endsWith('/queue')) {
+          return {
+            eventId: staffEvent.id,
+            experienceId: realExperienceId,
+            waitingCount: waiting.length,
+            canCallWaitingEntries: waiting.length > 0,
+            firstWaitingQueueEntryId: waiting[0]?.queueEntryId ?? null,
+          };
+        }
+        if (route.endsWith('/operational-state')) {
+          operationalReads += 1;
+          if (operationalMode === '500') return { statusCode: 500, body: { code: 'INTERNAL_SERVER_ERROR' } };
+          if (operationalMode === '403') return { statusCode: 403, body: { code: 'STAFF_EVENT_FORBIDDEN' } };
+          return {
+            eventId: staffEvent.id,
+            experienceId: realExperienceId,
+            stationId: station.id,
+            availability: 'available',
+            canCall: !pendingCall && waiting.length > 0,
+            waitingCount: waiting.length,
+            waiting: waiting.map((row, idx) => ({ ...row, position: idx + 1 })),
+            pending: pendingCall,
+          };
+        }
+        if (options.method === 'POST' && route.endsWith('/call-next')) {
+          postLog.push({ route, idempotencyKey: options.headers?.['Idempotency-Key'] ?? null });
+          if (callShouldNetworkFail) throw new Error('offline');
+          const next = waiting.shift();
+          pendingCall = {
+            serviceSessionId: '88888888-8888-4888-8888-888888888811',
+            queueEntryId: next.queueEntryId,
+            displayName: next.displayName,
+            calledAt: new Date(Date.now() - 8000).toISOString(),
+          };
+          return {
+            statusCode: 201,
+            body: {
+              serviceSession: {
+                id: pendingCall.serviceSessionId,
+                queueEntryId: next.queueEntryId,
+                experienceId: realExperienceId,
+                station: { id: station.id, label: station.label },
+                status: 'pending',
+                calledAt: pendingCall.calledAt,
+              },
+            },
+          };
+        }
+        if (options.method === 'POST' && route.endsWith('/remove')) {
+          postLog.push({ route, idempotencyKey: options.headers?.['Idempotency-Key'] ?? null });
+          const sid = pendingCall.serviceSessionId;
+          pendingCall = null;
+          return {
+            body: {
+              serviceSession: { id: sid, status: 'canceled', cancelReason: 'staff_queue_removed', resolvedAt: new Date().toISOString() },
+              queueEntry: { status: 'closed', closeReason: 'staff_queue_removed' },
+              participation: { status: 'active', currentQueueEntryId: null },
+            },
+          };
+        }
+        return undefined;
+      },
+    },
+  });
+
+  try {
+    await app.mount();
+    await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
+    await app.press('Selecionar evento Evento autorizado');
+    await app.press('Selecionar estação Estação Pulso da experiência Ritmo Live');
+
+    assert.equal(operationalReads, 1);
+    assert.ok(app.hasExactText('Atualização automática ativa · a cada 5s'));
+    await app.tickTimers(5000);
+    assert.equal(operationalReads, 2);
+
+    // Remover da fila + pausa de polling durante modal aberto
+    await app.press('Chamar próximo');
+    assert.ok(app.hasExactText('Carla Nogueira'));
+    await app.press('Remover da fila');
+    assert.equal(app.modal().props.visible, true);
+    assert.ok(app.hasExactText('Atualização temporariamente pausada'));
+    assert.equal(app.hasText('Atualização automática ativa'), false);
+    const readsDuringModal = operationalReads;
+    await app.tickTimers(5000);
+    assert.equal(operationalReads, readsDuringModal, 'modal aberto pausa polling de operational-state');
+
+    await app.press('CONFIRMAR OPERAÇÃO');
+    assert.ok(app.hasText('Operação confirmada pelo servidor.'));
+    assert.ok(app.hasExactText('Atualização automática ativa · a cada 5s'));
+    assert.equal(postLog[1].route, `/staff/events/${staffEvent.id}/service-sessions/88888888-8888-4888-8888-888888888811/remove`);
+    assert.ok(uuidRe.test(postLog[1].idempotencyKey));
+
+    // Perda de foco e segundo plano pausam polling; retomada reativa
+    await app.setFocus(false);
+    assert.ok(app.hasExactText('Atualização temporariamente pausada'));
+    const readsBeforeBlur = operationalReads;
+    await app.tickTimers(5000);
+    assert.equal(operationalReads, readsBeforeBlur);
+
+    await app.setFocus(true);
+    assert.ok(app.hasExactText('Atualização automática ativa · a cada 5s'));
+    await app.tickTimers(5000);
+    assert.equal(operationalReads, readsBeforeBlur + 1);
+
+    await app.setAppState('background');
+    assert.ok(app.hasExactText('Atualização temporariamente pausada'));
+    const readsBeforeBg = operationalReads;
+    await app.tickTimers(5000);
+    assert.equal(operationalReads, readsBeforeBg);
+
+    await app.setAppState('active');
+    assert.ok(app.hasExactText('Atualização automática ativa · a cada 5s'));
+    await app.tickTimers(5000);
+    assert.equal(operationalReads, readsBeforeBg + 1);
+
+    // Erro transitório em polling sinaliza dados desatualizados e recupera ao voltar 200
+    operationalMode = '500';
+    await app.tickTimers(5000);
+    assert.ok(app.hasExactText('Dados desatualizados · tentando atualizar a cada 5s'));
+    operationalMode = 'ok';
+    await app.tickTimers(5000);
+    assert.ok(app.hasExactText('Atualização automática ativa · a cada 5s'));
+
+    // Erro de rede durante mutação coloca estado incerto bloqueando repetição sem POST duplicado
+    waiting = [{ queueEntryId: '77777777-7777-4777-8777-777777777712', displayName: 'Diego Costa', position: 1 }];
+    await app.press('Atualizar atendimento');
+    callShouldNetworkFail = true;
+    await app.press('Chamar próximo');
+    assert.ok(app.hasText('O resultado exige verificação ou reconciliação. Não repita a operação.'));
+    assert.equal(app.isDisabled('Chamar próximo'), true);
+    assert.equal(postLog.length, 3);
+
+    // Negativa 403 em polling oculta totalmente o indicador de polling
+    operationalMode = '403';
+    await app.tickTimers(5000);
+    assert.ok(!app.hasText('Atualização'));
+    assert.ok(app.hasText('Acesso ao evento ou à experiência indisponível'));
   } finally {
     app.dispose();
   }

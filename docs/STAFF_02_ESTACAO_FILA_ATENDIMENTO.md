@@ -7,27 +7,28 @@
 - **Responsável pela implementação:** Kaled
 - **Prioridade:** P0
 - **Branch obrigatória:** `feature/staff-operacional-v2`
-- **Commit-base (`HEAD` de referência):** `95b8b80f3c0142af30c25e9483291d75677a085d` (`style(staff): padroniza interface com Admin e conclui homologação da STAFF-01`)
-- **Status:** Implementação e inspeção estática concluídas; aguardando campanha automatizada com **GPT-6 Luna — Medium**, publicação via VSCode pelo responsável e homologação no Expo.
+- **Commit-base (`HEAD` de referência da STAFF-02):** `95b8b80f3c0142af30c25e9483291d75677a085d` (`style(staff): padroniza interface com Admin e conclui homologação da STAFF-01`)
+- **Commit da entrega inicial publicada:** `5cde6a57874bad816213a0e3be8234dd6b51173b` (`Reformulação da Estação, Fila e Atendimento`)
+- **Status atual:** Correções da **Auditoria Independente — Rodada 1** (`STAFF02-AUD-01` a `STAFF02-AUD-08`) implementadas sobre `5cde6a5`; aguardando execução da campanha automatizada por **GPT-6 Luna — Medium** e homologação presencial no Expo Go.
 
-### Seleção de modelos e níveis de raciocínio (conforme `AGENTS.md`)
+### Seleção de modelos e níveis de raciocínio (conforme [AGENTS.md](../AGENTS.md))
 
-- **Implementação (`STAFF-02`):** Recomendado **GPT-6.1 Sol — High** (integração visual/funcional em tela operacional com coordenador idempotente, persistência em `SecureStore`, bloqueios de concorrência, propagação de autorização e atualização de harnesses reais).
-- **Execução da campanha de validações automatizadas:** **GPT-6 Luna — Medium** (executor padrão designado pelo `AGENTS.md`; nenhum teste automatizado foi executado durante esta etapa de implementação).
+- **Correções da Auditoria Rodada 1 (`STAFF02-AUD-01` a `STAFF02-AUD-08`):** Concluídas neste ciclo sem alteração de contratos backend, migrations ou módulos Admin/Participante.
+- **Execução da campanha de validações automatizadas:** Recomendado **GPT-6 Luna — Medium** (executor padrão designado pelo [AGENTS.md](../AGENTS.md)); nenhuma suíte automatizada (`node --test` / `npm test`) foi executada durante a etapa de implementação.
 
 ---
 
-## 2. Diagnóstico do Código Anterior
+## 2. Diagnóstico do Código Anterior (Base `95b8b80`)
 
-Antes de qualquer alteração visual ou funcional, o estado na base `95b8b80` foi inspecionado:
+Antes de qualquer alteração visual ou funcional na entrega inicial (`5cde6a5`), o estado na base `95b8b80` foi inspecionado:
 
 1. **Navegação e duplicidade em `app/screens/staff/StaffEventsNavigator.js` (`section === 'station'`):**
-   - `StaffEventHomeScreen` já utilizava `StaffLiveScreen` com o padrão aprovado da STAFF-01 (`Voltar ao painel` à esquerda + logo `logo-arenago-staff.png` à direita, fundo `#090412`, órbitas decorativas, `SafeAreaView` e `ScrollView`), além de `beforeRemove` e `store.revalidateOnReturn()`.
+   - `StaffEventHomeScreen` já utilizava `StaffLiveScreen` com o padrão aprovado da STAFF-01 ([STAFF_01_PADRONIZACAO_VISUAL.md](./STAFF_01_PADRONIZACAO_VISUAL.md): `Voltar ao painel` à esquerda + logo `logo-arenago-staff.png` à direita, fundo `#090412`, órbitas decorativas, `SafeAreaView` e `ScrollView`), além de `beforeRemove` e `store.revalidateOnReturn()`.
    - Contudo, dentro de `section === 'station'`, `StaffEventDashboard` renderizava um cabeçalho e card de fila duplicados (`station.label`, `Experiência: ...`, `Disponibilidade: ...`, `Atendimento pendente: ...`, `Fila compartilhada da experiência`, `Fila de <experiência>`, `Pessoas em espera`, `Janela operacional` e um botão adicional `Atualizar fila`), logo acima de `StaffStationOperationalScreen`, que renderizava novamente título, estação, contagem e um segundo botão `Atualizar atendimento`.
    - Além disso, o callback `onChanged` disparava `store.refreshStations()` diretamente, o que podia transitar `stationStatus` para `'loading'` temporariamente em redes com latência real e desmontar `StaffStationOperationalScreen` logo após a confirmação da operação, perdendo o banner de feedback.
 2. **Tela operacional `app/screens/staff/StaffStationOperationalScreen.js`:**
    - Já possuía toda a arquitetura segura de leitura (`operational-state`), polling de 5s (`useStaffPolling`), coordenador (`createStaffOperationsCoordinator`), persistência em `SecureStore` (`defaultStaffIntentStorage`), `Idempotency-Key`, reserva/despacho/recibo terminal, reconciliação automática de `terminal_pending`, cancelamento de `reserved`, proteção contra duplo toque e modal de confirmação para `complete`, `absent` e `remove_called`.
-   - Visualmente, não seguia os tokens aprovados da STAFF-01 nem os mockups 03 e 04, usava os rótulos antigos (`Concluir atendimento` e `Registrar ausência`), não apresentava o indicador seguro de tempo desde a chamada (`pending.calledAt`), não exibia a faixa não clicável `Fila compartilhada entre as estações` nem o rodapé discreto `Fila e atendimento atualizados automaticamente`, e não propagava `403`/`401` diretamente ao bloqueio de acesso do painel.
+   - Visualmente, não seguia os tokens aprovados da STAFF-01 nem os mockups 03 e 04, usava rótulos antigos, não apresentava indicador de tempo desde a chamada (`pending.calledAt`), não exibia a faixa não clicável `Fila compartilhada entre as estações` e não propagava `403`/`401` diretamente ao bloqueio de acesso do painel.
 3. **Serviços e contratos (`staffOperationsService.js`, `staffDashboardService.js`, `staffIntentStorage.js`, `useStaffPolling.js`):**
    - Já suportavam todos os campos e operações exigidos pela STAFF-02 sem qualquer alteração no backend ou em migrations.
 
@@ -40,7 +41,7 @@ Antes de qualquer alteração visual ou funcional, o estado na base `95b8b80` fo
   - Seção `FILA DA EXPERIÊNCIA` com contagem oficial `N aguardando`, lista FIFO em card estruturado (badge numérico de posição, `displayName`, status `Aguardando`) ou estado vazio real (`Fila vazia` / `Nenhuma pessoa aguardando nesta experiência.`), finalizada pela faixa informativa não clicável `Fila compartilhada entre as estações`.
   - Botão primário destacado `Chamar próximo` habilitado apenas quando todas as condições oficiais forem satisfeitas.
   - Seção `ATENDIMENTO ATUAL` com card vazio `Nenhum participante chamado` e orientação curta para resolver o atendimento antes da próxima chamada.
-  - Rodapé discreto `Fila e atendimento atualizados automaticamente` e botão único secundário `Atualizar atendimento`.
+  - Indicação de atualização automática e botão único secundário `Atualizar atendimento`.
 - **Tela 04 (`ArenaGO_Staff_04_Atendimento.png`) — Estado B (`pending !== null`):**
   - Mesma identificação superior e seção `FILA DA EXPERIÊNCIA` exibindo somente a fila remanescente devolvida pelo servidor (sem duplicar o participante chamado nem decrementar por suposição).
   - Ausência do botão `Chamar próximo` enquanto houver chamada pendente.
@@ -53,10 +54,10 @@ Antes de qualquer alteração visual ou funcional, o estado na base `95b8b80` fo
 
 ## 4. Adaptações ao Padrão Visual da STAFF-01
 
-Seguindo a regra de precedência visual da STAFF-02:
-- **Cabeçalho compartilhado (`StaffLiveScreen`):** `Voltar ao painel` à esquerda + logo oficial transparente `app/assets/images/logo-arenago-staff.png` à direita, com `SafeAreaView`, `ScrollView` e fundo `#090412` com órbitas decorativas.
+Seguindo a regra de precedência visual da STAFF-02 e [STAFF_01_PADRONIZACAO_VISUAL.md](./STAFF_01_PADRONIZACAO_VISUAL.md):
+- **Cabeçalho compartilhado (`StaffLiveScreen`):** `Voltar ao painel` à esquerda + logo oficial transparente [logo-arenago-staff.png](../app/assets/images/logo-arenago-staff.png) à direita, com `SafeAreaView`, `ScrollView` e fundo `#090412` com órbitas decorativas.
 - **Cabeçalhos antigos dos mockups não replicados:** sem texto `ArenaGO` à esquerda, sem badge `STAFF` no topo e sem segundo botão `Voltar` inferior.
-- **Tokens reutilizados de `AdminLiveUI.js` (`liveColors`) e `adminTheme.js`:**
+- **Tokens reutilizados de [AdminLiveUI.js](../app/screens/admin/components/AdminLiveUI.js) (`liveColors`) e [adminTheme.js](../app/screens/admin/components/adminTheme.js):**
   - Fundo `#090412`, superfície `#151020`, borda `#C476ED`, acento principal `#B960F5`, acento forte `#7C3AED`, texto secundário `#C7B9D9`, fundo de ícones `#38204F`.
   - Cores semânticas preservadas distintas do roxo decorativo: verde (`#10B981` / `#34D399`) para disponibilidade e conclusão, âmbar (`#F59E0B` / `#FCD34D`) para ausência/alertas/stale/intenções pendentes, e vermelho (`#EF4444` / `#FCA5A5`) para indisponibilidade, remoção e erros de acesso.
 
@@ -81,15 +82,15 @@ Seguindo a regra de precedência visual da STAFF-02:
 
 ---
 
-## 6. Componentes Criados e Alterados
+## 6. Componentes Criados e Alterados (Entrega Inicial `5cde6a5`)
 
-- **Criado:** [app/screens/staff/components/StaffStationSections.js](file:///C:/Users/kaled/.gemini/antigravity/worktrees/ProgramacaoMobile/auth_and_sessions/app/screens/staff/components/StaffStationSections.js)
+- **Criado:** [StaffStationSections.js](../app/screens/staff/components/StaffStationSections.js)
   - Helper puro `formatElapsedSinceCall(calledAt, nowMs)` com proteção contra relógio dessincronizado e sem impacto no estado operacional.
-  - Componentes apresentacionais `StationStatusBadge`, `StationHeaderCard`, `ExperienceQueueCard`, `ElapsedCallBadge`, `CurrentServiceCard` e `StationConfirmModal`, com ícones vetoriais nativos sem dependências externas e layout responsivo (`flexWrap`, `minWidth: 0`, `flexShrink: 1`, `minHeight: 48/52`).
-- **Alterado:** [app/screens/staff/StaffStationOperationalScreen.js](file:///C:/Users/kaled/.gemini/antigravity/worktrees/ProgramacaoMobile/auth_and_sessions/app/screens/staff/StaffStationOperationalScreen.js)
-  - Reorganização visual completa nos padrões STAFF-01 e mockups 03/04, estados especiais explícitos (carregamento, vazio, indisponível, encerramento operacional, stale, erro de rede, acesso negado, intenções persistidas), propagação segura de `403`/`401` via `onAccessDenied`, suporte reativo a `accessDenied` (fechando modais e limpando dados nominais sem apagar recibos do `SecureStore`) e integração de atualização única via `onRefresh`.
-- **Alterado (mínimo de integração):** [app/screens/staff/StaffEventsNavigator.js](file:///C:/Users/kaled/.gemini/antigravity/worktrees/ProgramacaoMobile/auth_and_sessions/app/screens/staff/StaffEventsNavigator.js)
-  - Removido o bloco visual e o botão `Atualizar fila` duplicados em `section === 'station'`, consolidando a apresentação na tela operacional, mantendo `store.refreshQueue`, `store.pollQueue`, `store.clearQueue`, `beforeRemove` e `revalidateOnReturn`, passando `accessDenied`/`onAccessDenied`/`onRefresh` e usando `pollStations`/`pollQueue` em `onChanged` para evitar desmontagem transitória e perda do feedback após mutações confirmadas.
+  - Componentes apresentacionais `StationStatusBadge`, `StationHeaderCard`, `ExperienceQueueCard`, `ElapsedCallBadge`, `CurrentServiceCard` e `StationConfirmModal`, com ícones vetoriais nativos sem dependências externas.
+- **Alterado:** [StaffStationOperationalScreen.js](../app/screens/staff/StaffStationOperationalScreen.js)
+  - Reorganização visual nos padrões STAFF-01 e mockups 03/04, propagação segura de `403`/`401` via `onAccessDenied`, suporte reativo a `accessDenied` e integração de atualização via `onRefresh`.
+- **Alterado (integração):** [StaffEventsNavigator.js](../app/screens/staff/StaffEventsNavigator.js)
+  - Consolidação visual em `section === 'station'`, removendo duplicidades e preservando `beforeRemove`, `revalidateOnReturn`, `refreshQueue`, `pollQueue` e `clearQueue`.
 
 ---
 
@@ -97,14 +98,13 @@ Seguindo a regra de precedência visual da STAFF-02:
 
 - Preservado o fluxo `Eventos Staff → Painel Operacional → Estação` sem rota intermediária.
 - Retorno ao Painel exclusivamente pelo cabeçalho (`Voltar ao painel`) ou retorno nativo (`beforeRemove`), limpando `stationId`, executando `store.clearQueue()` e acionando `store.revalidateOnReturn()` sem perder o evento selecionado nem disparar mutações.
-- Home e Painel Operacional homologados na STAFF-01 não foram alterados visualmente.
+- Home e Painel Operacional homologados na STAFF-01 preservados fora das proteções estritamente necessárias à autorização.
 
 ---
 
 ## 8. Preservação dos Contratos e da Idempotência
 
-- **Arquivos preservados intactos (zero alterações):** `app/services/staffOperationsService.js`, `app/services/staffDashboardService.js`, `app/services/staffIntentStorage.js`, `app/screens/staff/useStaffPolling.js`, `app/screens/staff/components/StaffLiveScreen.js`, todo o módulo `admin`, todo o módulo `participant` e todo o `backend/`.
-- **Rotas preservadas:**
+- **Contratos HTTP preservados (sem alterações no backend):**
   - `GET /api/v1/staff/events/:eventId/experiences/:experienceId/stations/:stationId/operational-state`
   - `POST /api/v1/staff/events/:eventId/experiences/:experienceId/stations/:stationId/call-next`
   - `POST /api/v1/staff/events/:eventId/service-sessions/:serviceSessionId/complete`
@@ -114,76 +114,93 @@ Seguindo a regra de precedência visual da STAFF-02:
 
 ---
 
-## 9. Cobertura de Testes
+## 9. Correções da Auditoria Independente — Rodada 1
 
-1. **Nova suíte dedicada:** [app/tests/staffStationOperational.test.cjs](file:///C:/Users/kaled/.gemini/antigravity/worktrees/ProgramacaoMobile/auth_and_sessions/app/tests/staffStationOperational.test.cjs)
-   - Testes unitários puros de `formatElapsedSinceCall` (`MM:SS`, `HH:MM:SS`, pequeno desvio negativo, desvio > 60s, > 24h e entradas inválidas).
-   - Testes de renderização real (`react` + `react-test-renderer`) cobrindo: carregamento inicial sem dados inventados; Estado A com fila FIFO não-alfabética e nomes longos; faixa `Fila compartilhada entre as estações` não clicável; fila vazia sem erro de conexão; estação `INDISPONÍVEL` mantendo fila visível e bloqueando chamada; encerramento operacional (`canCall: false`); Estado B com tempo decorrido e sem duplicação do chamado; descarte de resposta tardia em troca de estação/evento; falha transitória `stale` bloqueando mutações e recuperando via polling sem `POST`; propagação de `accessDenied` fechando modal e neutralizando callback antigo; intenções `reserved` e `pending_other` bloqueando mutações; diferenciação `404` vs `403` (coerente com `R3-03`); e logout desmontando contexto operacional.
-2. **Suíte de integração real atualizada:** [app/tests/roleRoutingIntegration.test.cjs](file:///C:/Users/kaled/.gemini/antigravity/worktrees/ProgramacaoMobile/auth_and_sessions/app/tests/roleRoutingIntegration.test.cjs)
-   - Whitelist `control.realStaff` atualizada explicitamente com `'screens/staff/components/StaffStationSections'`.
-   - Cenários preexistentes preservados integralmente e alinhados aos novos rótulos obrigatórios (`Concluir experiência`, `Marcar ausência`, `Fila compartilhada entre as estações`, `Atualizar atendimento` sem duplicidade de `Atualizar fila`).
-   - Novo cenário completo de integração **STAFF-02** exercitando Estados A e B, transição via `Chamar próximo`, `Concluir experiência`, `Marcar ausência` (com reinserção e após o corte), fila compartilhada em segunda estação `INDISPONÍVEL` e propagação de `403` de `/operational-state` para `SEM ACESSO` no Painel.
+Auditoria estática realizada sobre o commit publicado `5cde6a57874bad816213a0e3be8234dd6b51173b` identificou os oito achados abaixo. Esta seção registra o plano e a execução das correções antes de qualquer alteração em código.
 
----
+### 9.1. Quadro de achados e plano de correção
 
-## 10. Resultados Efetivamente Executados
+| ID | Prioridade | Classificação | Resumo do Diagnóstico | Plano de Correção e Verificação |
+|---|---|---|---|---|
+| `STAFF02-AUD-01` | P0 | Defeito em código de produção | `GET .../operational-state` pode retornar `404` por perda de acesso ao evento ou remoção local da estação/experiência; ao limpar apenas na Estação sem invalidar cache nominal do Painel (`entry`, `stations`, `experiences`), o retorno ao Painel podia expor nomes em cache durante revalidação. | Limpar imediatamente cache nominal no store do Painel ao receber `404` da Estação, entrar em verificação segura via `GET /staff/events/:eventId/stations` vinculada a conta/sessão/evento/estação/revisão/geração, manter Estação e modais fechados/bloqueados (preservando `SecureStore`), diferenciar Casos A (`200` restrito à estação sem publicar dados de verificação como atualização do Painel), B (`401`/`403`/`404` bloqueio de evento/sessão) e C (`500`/rede/timeout mantendo ocultação e bloqueio sem loops), e cobrir todos os 12 cenários de regressão. |
+| `STAFF02-AUD-02` | P1 | Defeito em código de produção | `onChanged` em `StaffEventsNavigator.js` executa atualização de estações assíncrona e depois chama `pollQueue`/`refreshQueue(station.experienceId)` sem revalidar contexto após cada `await`, permitindo corrida `A → Painel → B` que sobrescreve a fila de `B`. | Vincular `onChanged` (e `onRefresh`) a escopo completo imutável capturado na origem (identidade, sessão, epoch, revisão, evento, seção `'station'`, `stationId`, `experienceId`, `accessLocked` e contador monotônico de visita à estação) e revalidar após cada `await` antes de tocar na fila. Cobrir `A → Painel`, `A → Painel → B` e troca de conta/evento. |
+| `STAFF02-AUD-03` | P1 | Ajuste de teste (inventário) | Novo componente [StaffStationSections.js](../app/screens/staff/components/StaffStationSections.js) não estava listado em `realStaffScreens` de [staffDemoState.test.cjs](../app/tests/staffDemoState.test.cjs). | Registrar `'components/StaffStationSections.js'` explicitamente em `realStaffScreens`, preservando comparação exata e isolamento de `StaffDemo`. |
+| `STAFF02-AUD-04` | P1 | Ajuste de teste (VM) | `formatElapsedSinceCall` retorna objeto criado em contexto VM distinto no harness, podendo falhar em `assert.deepEqual` estrito de protótipos entre realms em [staffStationOperational.test.cjs](../app/tests/staffStationOperational.test.cjs). | Comparar campos primitivos `label` e `live` (ou normalizar para o contexto do teste) sem alterar a função de produção nem enfraquecer cenários. |
+| `STAFF02-AUD-05` | P2 | Defeito em código de produção | Rodapé mostrava indicador verde `"Fila e atendimento atualizados automaticamente"` mesmo com modal aberto, operação em andamento, polling pausado por foco/`AppState`, leitura stale, erro transitório ou acesso negado. | Derivar indicador visual diretamente das condições que governam `useStaffPolling` e a operação (suprimindo indicação ativa em acesso negado, diferenciando ativa / pausada / desatualizada / indisponível) sem criar timers ou consultas extras, e validar correlação com GETs nos testes. |
+| `STAFF02-AUD-06` | P2 | Reforço de testes | Faltavam cenários de `404` contextual na Estação, polling real com foco/`AppState` dentro da tela da Estação, asserções exatas de badges e linhas posicionais FIFO, e validação completa de rotas/headers/`SecureStore` em mutações. | Reforçar [staffStationOperational.test.cjs](../app/tests/staffStationOperational.test.cjs) e [roleRoutingIntegration.test.cjs](../app/tests/roleRoutingIntegration.test.cjs) com `hasExactText`, `hasQueueRow`, `useStaffPolling` real + foco/`AppState` na Estação, `404` contextual, rotas/idempotency/receipts e documentação das dependências de `qa/regression`. |
+| `STAFF02-AUD-07` | P2 | Mitigação de risco visual | `StationConfirmModal` podia cortar conteúdo ou botões em telas baixas ou fontes ampliadas. | Envolver o diálogo em `SafeAreaView` + container limitado (`maxHeight: '100%'`) + `ScrollView` interno rolável mantendo aparência, `onRequestClose` e zero cliques acidentais, preservando diálogos e preparando conferência no Expo. |
+| `STAFF02-AUD-08` | P3 | Correção documental | Links locais absolutos de estação de trabalho e registro desatualizado sobre `5cde6a5`. | Substituir links por caminhos relativos portáveis, registrar publicação de `5cde6a5` e documentar integralmente esta Rodada 1. |
 
-### Inspeções estáticas executadas nesta etapa
-- Confirmação de branch `feature/staff-operacional-v2` e commit-base `95b8b80f3c0142af30c25e9483291d75677a085d`, sem merge/rebase em andamento.
-- Revisão estática de imports, dependências de `useEffect` (estabilização de `defaultGetNow` + `useRef` em `ElapsedCallBadge`), contratos HTTP, bloqueios de concorrência, `SecureStore` e consistência de harnesses.
-- Geração do patch exclusivo [qa-evidence/STAFF-02-changes.diff](file:///C:/Users/kaled/.gemini/antigravity/worktrees/ProgramacaoMobile/auth_and_sessions/qa-evidence/STAFF-02-changes.diff) relativo a `95b8b80f3c0142af30c25e9483291d75677a085d` e verificação estática `git diff --check` + validação de compatibilidade com `git apply --check` (a registrar após execução abaixo).
+### 9.2. Correções efetivamente implementadas (`STAFF02-AUD-01` a `STAFF02-AUD-08`)
 
-### Validações automatizadas NÃO executadas nesta etapa (pendentes com GPT-6 Luna — Medium)
-Conforme `AGENTS.md`, **nenhum teste automatizado foi executado durante esta etapa de implementação**. Campanha preparada para execução por **GPT-6 Luna — Medium** após confirmação do responsável:
-
-```powershell
-cd app
-node --test tests/staffStationOperational.test.cjs
-node --test tests/staffOperationsService.integration.test.cjs
-node --test tests/roleRoutingIntegration.test.cjs
-node --test tests/staffDashboard.test.cjs
-node --test tests/staffEventDiscovery.test.cjs
-node --test tests/staffScreens.test.cjs
-node --test tests/staffNavigation.test.cjs
-node --test tests/staffRealNavigation.test.cjs
-node --test tests/staffPolling.test.cjs
-node --test tests/staffBackground.test.cjs
-node --test tests/staffDemoState.test.cjs
-npm.cmd test
-```
-
-*(Script `app/package.json -> "test"` inspecionado: executa exclusivamente `node --test tests/*.test.cjs`, sem migrations, seeds, banco real ou operações destrutivas.)*
-
----
-
-## 11. Riscos e Limitações
-
-- **Validação automatizada ainda pendente:** Embora toda a revisão estática tenha sido feita, a execução real da suíte Node.js depende da etapa de validação com **GPT-6 Luna — Medium**.
-- **Homologação física pendente:** Comportamento visual exato em telas pequenas Android/iOS, fontes ampliadas pelo sistema operacional, SafeAreas físicas e gesto nativo de retorno exigem validação presencial no Expo Go pelo responsável.
-- **Relógio do dispositivo no indicador `Chamado há MM:SS`:** Se o relógio do aparelho divergir mais de 60s para trás ou mais de 24h para frente do timestamp `calledAt` do servidor, a UI usa o fallback seguro `Chamada pendente` sem afetar regras temporais do backend.
+1. **`STAFF02-AUD-01` (P0 — Revogação por `404` e proteção de cache nominal):**
+   - [staffDashboardService.js](../app/services/staffDashboardService.js): incluídos os estados `verifyingAccess` e `accessUncertain`, o contador `stationVerifyGeneration` e o método `verifyStationAccess({ stationId, experienceId })`, que invalida leituras em voo (`stationGeneration`, `experienceGeneration`, `entryGeneration`, `queueGeneration`, `orphanCheckedSignatures`), zera imediatamente dados nominais em cache (`stations: []`, `experiences: []`, `entry: null`, `queue: null`), verifica o evento via `fetchStaffStations(client, originContext.eventId)` sem publicar sua lista em `state.stations` e trata os **Casos A (`200`)**, **B (`401`/`403`/`404`)** e **C (`500`/rede/timeout)**. Bloqueadores de exposição parcial mantidos em `beginRevalidation`, `finishRevalidationSuccess`, `finishRevalidationError` e `settleRevalidationRound` via `accessLocked || accessUncertain`, além de guardas em `refreshStations`, `pollStations`, `pollExperiences`, `syncOrphanExperiences`, `pollEntryControl`, `refreshQueue`, `pollQueue`, `revalidateOnReturn` e `refreshPanel`.
+   - [StaffStationOperationalScreen.js](../app/screens/staff/StaffStationOperationalScreen.js): adicionada `handleStationNotFound(originScope, originGeneration)` e tratamento de `404` em `refresh` e `poll` — limpando `data` e `pending` imediatamente, fechando o modal (`dialogRef.current = null; setDialog(null)`), incrementando `generation.current` sincronamente (invalidando callbacks anteriores em `dispatch` com zero `POST`s extras) e preservando `SecureStore` intacto. Diferencia localmente `local_denied` (`'Acesso à estação indisponível.'`), `uncertain` (`'Não foi possível consultar a estação.'` / `'Falha de conexão. Atualize a estação.'`), `denied` e `session`.
+   - [StaffEventsNavigator.js](../app/screens/staff/StaffEventsNavigator.js): `entryBlocked` bloqueia `Controle de Entrada` também sob `verifyingAccess` e `accessUncertain`, `describeEntrySummary` exibe `VERIFICANDO` / `INDISPONÍVEL` sem vazar `entry.pendingCall`, métricas exibem `'—'`, o painel exibe `'Verificando acesso ao evento...'` durante a verificação, `useStaffPolling` de painel/fila é desabilitado sob `verifyingAccess || accessUncertain`, `activeStationMetaRef` preserva a tela da estação montada durante a verificação, e o retorno ao painel após Caso A (`200`) aciona `refreshPanel()` automaticamente para recomposição limpa.
+2. **`STAFF02-AUD-02` (P1 — Corrida pós-operação em `onChanged`):**
+   - [StaffEventsNavigator.js](../app/screens/staff/StaffEventsNavigator.js): adicionados `stationVisitGenRef`, `openStation`, `captureStationScope` e `isSameStationScope`, revalidados antes e após cada `await` em `onChanged` e `onRefresh`, descartando atualizações tardias de `A → Painel` e `A → Painel → B` e trocas de evento/sessão/identidade.
+3. **`STAFF02-AUD-03` (P1 — Inventário Staff):**
+   - [staffDemoState.test.cjs](../app/tests/staffDemoState.test.cjs): `'components/StaffStationSections.js'` registrado em `realStaffScreens`, com asserção garantindo ausência de dependências demonstrativas.
+4. **`STAFF02-AUD-04` (P1 — Comparação VM em `formatElapsedSinceCall`):**
+   - [staffStationOperational.test.cjs](../app/tests/staffStationOperational.test.cjs): normalização `plain(...)` aplicada sobre os objetos retornados por `formatElapsedSinceCall` para comparações entre contextos VM.
+5. **`STAFF02-AUD-05` (P2 — Indicador de polling fidedigno):**
+   - [StaffStationOperationalScreen.js](../app/screens/staff/StaffStationOperationalScreen.js): `pollingEnabled` exige `!accessDenied && context && same(view.scope, context) && view.status === 'ready' && !view.busy && !hasModalOpen && !dispatching.current && !acknowledging.current`, e `pollingIndicator` reflete diretamente `useIsFocused()`, `AppState`, `pollingEnabled`, `view.error === 'stale'` e `view.status === 'error'`, omitindo-se totalmente em `accessDenied` ou erro `'denied'`/`'session'`. Nenhum timer ou leitura HTTP extra foi criado.
+6. **`STAFF02-AUD-06` (P2 — Reforço de testes e documentação de dependências):**
+   - [staffDashboard.test.cjs](../app/tests/staffDashboard.test.cjs): novo teste unitário de `verifyStationAccess` cobrindo limpeza imediata, não publicação da lista de verificação em `state.stations`, Casos A/B/C, barreira contra exposição parcial e descarte de verificação tardia na troca de evento.
+   - [staffStationOperational.test.cjs](../app/tests/staffStationOperational.test.cjs): adicionados `hasExactText`, `hasQueueRow`, cobertura do ciclo `useStaffPolling`, estados de `pollingIndicator`, modal `SafeAreaView` + `ScrollView` + `onRequestClose`, `404` Casos A/B/C com modal aberto, neutralização de callback e preservação de `SecureStore`.
+   - [roleRoutingIntegration.test.cjs](../app/tests/roleRoutingIntegration.test.cjs): adicionados `hasExactText` e `hasQueueRow`; teste `STAFF-02` reforçado com duplo toque em voo, `Idempotency-Key` UUID em todas as rotas de mutação, limpeza de recibos em `SecureStore`, linhas posicionais exatas e indicador de polling; novos testes reais cobrindo integralmente `STAFF02-AUD-01`, `STAFF02-AUD-02` (`A → Painel` e `A → Painel → B`) e `STAFF02-AUD-05 + AUD-06` (`Remover da fila`, `useStaffPolling` real + `useIsFocused` + `AppState`, erro transitório `stale`, `uncertain` sem segundo `POST` e ocultação do indicador em `403`).
+7. **`STAFF02-AUD-07` (P2 — Responsividade do `StationConfirmModal`):**
+   - [StaffStationSections.js](../app/screens/staff/components/StaffStationSections.js): `StationConfirmModal` envolto em `SafeAreaView` (`edges={['top', 'right', 'bottom', 'left']}`), `modalCard` limitado com `maxWidth: 460`, `maxHeight: '100%'` e `overflow: 'hidden'`, conteúdo interno em `ScrollView` (`keyboardShouldPersistTaps="handled"`, `bounces={false}`, `showsVerticalScrollIndicator`), `onRequestClose={onCancel}` preservado (sem fechamento por toque em backdrop) e `minWidth: 0` mantido em `calledIdentity`.
+8. **`STAFF02-AUD-08` (P3 — Documentação e links portáveis):**
+   - Remoção integral de links locais absolutos de estação de trabalho neste documento, registro explícito de `5cde6a57874bad816213a0e3be8234dd6b51173b` e documentação completa da Rodada 1.
 
 ---
 
-## 12. Pendências de Homologação (Expo e Publicação)
+## 10. Dependências e Cobertura de Testes
 
-- **Cenário A (sem chamada):** Estação disponível com fila, contagem/posição FIFO reais, `Fila compartilhada entre as estações`, `Chamar próximo` habilitado e card `Nenhum participante chamado`.
-- **Cenário B (com chamada):** Participante chamado em `ATENDIMENTO ATUAL`, tempo decorrido, fila remanescente sem duplicação, ausência de `Chamar próximo` e botões `Concluir experiência`, `Marcar ausência` e `Remover da fila` com diálogos e feedback real.
-- **Cenários complementares:** Fila vazia, estação `INDISPONÍVEL`, nomes longos, retorno ao painel (cabeçalho e gesto/botão do sistema), atualização automática (5s) e erro de rede/acesso.
-- **Publicação Git:** Conforme seção 6 do `AGENTS.md`, `git add`, `git commit` e `git push` permanecem sob responsabilidade do usuário via VSCode na branch `feature/staff-operacional-v2` (mensagem sugerida: `feat(staff): reformula telas de estação, fila e atendimento`).
+### Requisitos para execução da campanha automatizada
+- Suites que usam React 19, `react-test-renderer` e React Navigation reais ([staffStationOperational.test.cjs](../app/tests/staffStationOperational.test.cjs), [roleRoutingIntegration.test.cjs](../app/tests/roleRoutingIntegration.test.cjs), [staffPolling.test.cjs](../app/tests/staffPolling.test.cjs) e [staffRealNavigation.test.cjs](../app/tests/staffRealNavigation.test.cjs)) resolvem essas dependências isoladas a partir de [qa/regression/package.json](../qa/regression/package.json) (`react@19.3.0`, `react-test-renderer@19.3.0`, `@react-navigation/core@7.22.1`, `@react-navigation/routers@7.6.4`).
+- Portanto, tanto `app/node_modules` quanto `qa/regression/node_modules` devem estar instalados antes da execução com **GPT-6 Luna — Medium**. Testes críticos ignorados (`skipped`) por falta de dependências invalidam a aprovação da campanha.
 
 ---
 
-## 13. Histórico de Correções Posteriores
+## 11. Resultados Efetivamente Executados e Campanha Pendente
 
-- **19/11/2026 (Preparação):** Criação inicial de `docs/STAFF_02_ESTACAO_FILA_ATENDIMENTO.md` antes das alterações de código.
-- **19/11/2026 (Implementação inicial):** Criação de `StaffStationSections.js`, reformulação de `StaffStationOperationalScreen.js`, consolidação em `StaffEventsNavigator.js`, criação de `staffStationOperational.test.cjs`, atualização de `roleRoutingIntegration.test.cjs` e geração de `qa-evidence/STAFF-02-changes.diff`.
-- **Revisão estática preventiva durante implementação:**
-  1. Estabilizada a referência padrão `defaultGetNow` + `useRef` em `ElapsedCallBadge` para evitar recriação de `setInterval` a cada segundo.
-  2. Ajustado `onChanged` em `StaffEventsNavigator.js` para usar `pollStations()` / `pollQueue()` quando o estado já está `'ready'`, evitando desmontagem transitória da tela da estação e perda do banner de feedback em redes com latência real.
-  3. Tornada assíncrona a ação `Atualizar atendimento` (`Promise.all([refresh(), Promise.resolve(onRefresh?.())])`) para sincronizar deterministicamente a leitura da estação e da fila.
+### 11.1. Verificações executadas nesta etapa de implementação (estáticas / não executoras de testes)
+- **Inspeção estática e checagem de sintaxe `.cjs` (`node --check`):** realizada nos quatro arquivos de teste modificados ([roleRoutingIntegration.test.cjs](../app/tests/roleRoutingIntegration.test.cjs), [staffStationOperational.test.cjs](../app/tests/staffStationOperational.test.cjs), [staffDashboard.test.cjs](../app/tests/staffDashboard.test.cjs) e [staffDemoState.test.cjs](../app/tests/staffDemoState.test.cjs)) sem executar casos de teste.
+- **Integridade de patch acumulado (`qa-evidence/STAFF-02-changes.diff`):** patch gerado a partir da base `95b8b80f3c0142af30c25e9483291d75677a085d` e validado estaticamente com `git diff --check` e `git apply --check --reverse qa-evidence/STAFF-02-changes.diff` ao final das edições.
+
+### 11.2. Validações automatizadas NÃO executadas nesta etapa (pendentes para **GPT-6 Luna — Medium**)
+Conforme o [AGENTS.md](../AGENTS.md), nenhuma suíte `node --test` ou `npm test` foi executada pelo modelo de implementação. Selecionar manualmente **GPT-6 Luna — Medium** e executar em sequência na raiz do workspace (`feature/staff-operacional-v2`):
+1. `node --test app/tests/staffDemoState.test.cjs`
+2. `node --test app/tests/staffDashboard.test.cjs`
+3. `node --test app/tests/staffStationOperational.test.cjs`
+4. `node --test --test-name-pattern="STAFF02|STAFF-02|R3-" app/tests/roleRoutingIntegration.test.cjs`
+5. `node --test app/tests/roleRoutingIntegration.test.cjs`
+6. `npm --prefix app test`
+7. `npm --prefix qa/regression test`
+
+*(Critério de aprovação: zero falhas, zero testes ignorados por ausência de `qa/regression/node_modules` e zero avisos inesperados em todos os comandos aplicáveis.)*
+
+---
+
+## 12. Riscos e Limitações
+
+- Homologação presencial no Expo Go (incluindo Android pequeno, fonte ampliada do sistema e orientação horizontal para conferir `STAFF02-AUD-07` e o cronômetro `Chamado há MM:SS`) pendente de validação pelo responsável.
+- Execução da campanha automatizada completa pendente com **GPT-6 Luna — Medium** na Seção 11.2.
+- O indicador `Chamado há MM:SS` usa proteção contra desvios de relógio (`< -60s` ou `> 24h`), exibindo fallback `Chamada pendente` sem influenciar regras temporais do servidor.
+
+---
+
+## 13. Histórico de Publicações e Revisões
+
+- **19/11/2026:** Criação do documento de diagnóstico e plano inicial da STAFF-02.
+- **20/11/2026 — Commit `5cde6a57874bad816213a0e3be8234dd6b51173b`:** Publicação inicial da reformulação visual da Estação, Fila e Atendimento na branch `feature/staff-operacional-v2`.
+- **20/11/2026 — Rodada 1 (Auditoria Independente — plano):** Registro dos achados `STAFF02-AUD-01` a `STAFF02-AUD-08` e plano de correção antes das modificações em código.
+- **20/11/2026 — Rodada 1 (Auditoria Independente — conclusão da implementação):** Correções concluídas em código, reforço dos testes unitários e de integração real, remoção de links locais e atualização do patch acumulado [STAFF-02-changes.diff](../qa-evidence/STAFF-02-changes.diff).
 
 ---
 
 ## 14. Estado Final da Entrega
 
-Implementação da **STAFF-02** concluída na branch `feature/staff-operacional-v2` sobre a base `95b8b80f3c0142af30c25e9483291d75677a085d`, sem iniciar `STAFF-03`, `STAFF-04`, `STAFF-05` ou quaisquer outras tasks. Aguardando validação automatizada com **GPT-6 Luna — Medium**, commit/push pelo responsável via VSCode e homologação no Expo.
+Correções da **Auditoria Independente — Rodada 1** (`STAFF02-AUD-01` a `STAFF02-AUD-08`) concluídas na branch `feature/staff-operacional-v2` (sobre `5cde6a57874bad816213a0e3be8234dd6b51173b`, base acumulada da STAFF-02 `95b8b80f3c0142af30c25e9483291d75677a085d`). Nenhum arquivo de backend, migration ou módulo externo à STAFF-02 foi alterado, e nenhum comando Git de staging/commit/push foi executado. Aguardando execução da campanha de testes com **GPT-6 Luna — Medium** e commit pelo responsável via VSCode.
