@@ -2406,12 +2406,14 @@ test('STAFF-02: estados A e B da Estação, fila compartilhada, proteção a dup
     label: 'Estação 02',
     availability: 'unavailable',
     pendingServiceSessionId: null,
+    pendingCalledAt: null,
   };
   const primaryStation = {
     ...realStation,
     label: 'Estação Alpha',
     availability: 'available',
     pendingServiceSessionId: null,
+    pendingCalledAt: null,
   };
   const entryA = '77777777-7777-4777-8777-777777777771';
   const entryB = '77777777-7777-4777-8777-777777777772';
@@ -2434,7 +2436,11 @@ test('STAFF-02: estados A e B da Estação, fila compartilhada, proteção a dup
   const postLog = [];
 
   const syncStations = () => [
-    { ...primaryStation, pendingServiceSessionId: pendingCall?.serviceSessionId ?? null },
+    {
+      ...primaryStation,
+      pendingServiceSessionId: pendingCall?.serviceSessionId ?? null,
+      pendingCalledAt: pendingCall?.calledAt ?? null,
+    },
     secondStation,
   ];
   const makeOperational = (stationObj) => {
@@ -2471,7 +2477,9 @@ test('STAFF-02: estados A e B da Estação, fila compartilhada, proteção a dup
         return {
           eventId: staffEvent.id,
           experienceId: realExperienceId,
+          observedAt: '2026-11-10T15:00:00.000Z',
           waitingCount: waiting.length,
+          acceptingNewEntries: true,
           canCallWaitingEntries: waiting.length > 0,
           firstWaitingQueueEntryId: waiting[0]?.queueEntryId ?? null,
         };
@@ -2678,8 +2686,8 @@ test('STAFF02-AUD-01: 404 contextual em operational-state protege cache nominal 
   const event1 = { ...staffEvent, id: staffEvent.id, name: 'Torneio Primário' };
   const event2 = { ...staffEvent, id: '66666666-6666-4666-8666-666666666666', name: 'Torneio Secundário' };
   const exp1 = { id: realExperienceId, name: 'Just Dance Pro' };
-  const station1 = { ...realStation, id: realStation.id, label: 'Estação Alpha', availability: 'available', pendingServiceSessionId: null };
-  const station2 = { ...realStation, id: '55555555-5555-4555-8555-555555555556', label: 'Estação Secundária', availability: 'available', pendingServiceSessionId: null };
+  const station1 = { ...realStation, id: realStation.id, label: 'Estação Alpha', availability: 'available', pendingServiceSessionId: null, pendingCalledAt: null };
+  const station2 = { ...realStation, id: '55555555-5555-4555-8555-555555555556', label: 'Estação Secundária', availability: 'available', pendingServiceSessionId: null, pendingCalledAt: null };
   const secure = new Map();
   const opKey = `arenago.staff.operation.${staffUser.id.toLowerCase()}`;
   let deleteCalls = 0;
@@ -2693,20 +2701,41 @@ test('STAFF02-AUD-01: 404 contextual em operational-state protege cache nominal 
   let stations401 = false;
   let panelEntry500 = false;
 
-  const entryNominal = (eventId) => ({
-    eventId,
-    externalQueueEnabled: true,
-    canManage: true,
-    observedAt: '2026-11-10T15:00:00.000Z',
-    waitingCount: 2,
-    waiting: [],
-    pendingCall: eventId === event1.id ? {
+  const entryWaiting = [
+    {
+      participationId: '12121212-1212-4121-8121-121212121211',
+      displayName: 'Fila Entrada Um',
+      position: 1,
+    },
+    {
+      participationId: '12121212-1212-4121-8121-121212121212',
+      displayName: 'Fila Entrada Dois',
+      position: 2,
+    },
+  ];
+
+  const entryNominal = (eventId) => {
+    const pendingCall = eventId === event1.id ? {
       id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
       participationId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
       displayName: 'JulianaEntrada',
       calledAt: '2026-11-10T14:58:00.000Z',
-    } : null,
-  });
+    } : null;
+    const hasPending = Boolean(pendingCall);
+    return {
+      eventId,
+      externalQueueEnabled: true,
+      canManage: true,
+      observedAt: '2026-11-10T15:00:00.000Z',
+      pendingCall,
+      canCall: !hasPending,
+      canConfirm: hasPending,
+      canMarkAbsent: hasPending,
+      canRemove: hasPending,
+      waitingCount: entryWaiting.length,
+      waiting: entryWaiting,
+    };
+  };
 
   const operationalPayload = (eventId, st) => ({
     eventId,
@@ -2773,7 +2802,9 @@ test('STAFF02-AUD-01: 404 contextual em operational-state protege cache nominal 
           return {
             eventId: eid,
             experienceId: exp1.id,
+            observedAt: '2026-11-10T15:00:00.000Z',
             waitingCount: 1,
+            acceptingNewEntries: true,
             canCallWaitingEntries: true,
             firstWaitingQueueEntryId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
           };
@@ -2795,7 +2826,8 @@ test('STAFF02-AUD-01: 404 contextual em operational-state protege cache nominal 
     await app.mount();
     await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
     await app.press('Selecionar evento Torneio Primário');
-    assert.ok(app.hasText('JulianaEntrada'));
+    assert.ok(app.hasText('Chamada pendente: JulianaEntrada · 2 aguardando'));
+    assert.equal(app.metricValueFor('Fila externa'), '2');
     assert.ok(app.hasText('Estação Alpha'));
     assert.equal(app.isDisabled('Controle de Entrada'), false);
 
@@ -2833,7 +2865,7 @@ test('STAFF02-AUD-01: 404 contextual em operational-state protege cache nominal 
     station1Label = 'Estação Recuperada';
     panelExpDeferred = deferred();
     await app.act(async () => {
-      verifyDeferred.resolve({ eventId: event1.id, stations: [{ ...station1, label: 'Estação Só Verificação' }] });
+      verifyDeferred.resolve({ eventId: event1.id, stations: [{ ...station1, label: 'Estação Só Verificação', pendingCalledAt: null }] });
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -2935,11 +2967,12 @@ test('STAFF02-AUD-02: saída rápida (A -> Painel e A -> Painel -> B) descarta a
   const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
   const expA = { id: '31111111-1111-4111-8111-111111111111', name: 'Exp Alpha' };
   const expB = { id: '32222222-2222-4222-8222-222222222222', name: 'Exp Beta' };
-  const stationA = { id: '41111111-1111-4111-8111-111111111111', experienceId: expA.id, label: 'Estação A', availability: 'available', pendingServiceSessionId: null };
-  const stationB = { id: '42222222-2222-4222-8222-222222222222', experienceId: expB.id, label: 'Estação B', availability: 'available', pendingServiceSessionId: null };
+  const stationA = { id: '41111111-1111-4111-8111-111111111111', experienceId: expA.id, label: 'Estação A', availability: 'available', pendingServiceSessionId: null, pendingCalledAt: null };
+  const stationB = { id: '42222222-2222-4222-8222-222222222222', experienceId: expB.id, label: 'Estação B', availability: 'available', pendingServiceSessionId: null, pendingCalledAt: null };
   const secure = new Map();
   let queueAReads = 0;
   let queueBReads = 0;
+  let waitingA = [{ queueEntryId: '77777777-7777-4777-8777-777777777701', displayName: 'Alice A', position: 1 }];
   let pendingA = null;
   let deferNextStationsPoll = false;
   let stationsPollDeferred = null;
@@ -2968,7 +3001,11 @@ test('STAFF02-AUD-02: saída rápida (A -> Painel e A -> Painel -> B) descarta a
           return {
             eventId: staffEvent.id,
             stations: [
-              { ...stationA, pendingServiceSessionId: pendingA?.serviceSessionId ?? null },
+              {
+                ...stationA,
+                pendingServiceSessionId: pendingA?.serviceSessionId ?? null,
+                pendingCalledAt: pendingA?.calledAt ?? null,
+              },
               stationB,
             ],
           };
@@ -2978,9 +3015,11 @@ test('STAFF02-AUD-02: saída rápida (A -> Painel e A -> Painel -> B) descarta a
           return {
             eventId: staffEvent.id,
             experienceId: expA.id,
-            waitingCount: 1,
-            canCallWaitingEntries: true,
-            firstWaitingQueueEntryId: '77777777-7777-4777-8777-777777777701',
+            observedAt: '2026-11-10T15:00:00.000Z',
+            waitingCount: waitingA.length,
+            acceptingNewEntries: true,
+            canCallWaitingEntries: waitingA.length > 0,
+            firstWaitingQueueEntryId: waitingA[0]?.queueEntryId ?? null,
           };
         }
         if (route.includes(expB.id) && route.endsWith('/queue')) {
@@ -2988,7 +3027,9 @@ test('STAFF02-AUD-02: saída rápida (A -> Painel e A -> Painel -> B) descarta a
           return {
             eventId: staffEvent.id,
             experienceId: expB.id,
+            observedAt: '2026-11-10T15:00:00.000Z',
             waitingCount: 1,
+            acceptingNewEntries: true,
             canCallWaitingEntries: true,
             firstWaitingQueueEntryId: '77777777-7777-4777-8777-777777777702',
           };
@@ -2999,9 +3040,9 @@ test('STAFF02-AUD-02: saída rápida (A -> Painel e A -> Painel -> B) descarta a
             experienceId: expA.id,
             stationId: stationA.id,
             availability: 'available',
-            canCall: !pendingA,
-            waitingCount: 1,
-            waiting: [{ queueEntryId: '77777777-7777-4777-8777-777777777701', displayName: 'Alice A', position: 1 }],
+            canCall: !pendingA && waitingA.length > 0,
+            waitingCount: waitingA.length,
+            waiting: waitingA.map((row, idx) => ({ ...row, position: idx + 1 })),
             pending: pendingA,
           };
         }
@@ -3018,10 +3059,11 @@ test('STAFF02-AUD-02: saída rápida (A -> Painel e A -> Painel -> B) descarta a
           };
         }
         if (options.method === 'POST' && route.endsWith('/call-next')) {
+          const next = waitingA.shift();
           pendingA = {
             serviceSessionId: '88888888-8888-4888-8888-888888888801',
-            queueEntryId: '77777777-7777-4777-8777-777777777701',
-            displayName: 'Alice A',
+            queueEntryId: next.queueEntryId,
+            displayName: next.displayName,
             calledAt: new Date(Date.now() - 5000).toISOString(),
           };
           deferNextStationsPoll = true;
@@ -3030,7 +3072,7 @@ test('STAFF02-AUD-02: saída rápida (A -> Painel e A -> Painel -> B) descarta a
             body: {
               serviceSession: {
                 id: pendingA.serviceSessionId,
-                queueEntryId: pendingA.queueEntryId,
+                queueEntryId: next.queueEntryId,
                 experienceId: expA.id,
                 station: { id: stationA.id, label: stationA.label },
                 status: 'pending',
@@ -3128,13 +3170,22 @@ test('STAFF02-AUD-05 + AUD-06: indicador de polling espelha modal, foco, AppStat
       },
       http: async (route, options) => {
         if (route.endsWith('/stations')) {
-          return { eventId: staffEvent.id, stations: [{ ...station, pendingServiceSessionId: pendingCall?.serviceSessionId ?? null }] };
+          return {
+            eventId: staffEvent.id,
+            stations: [{
+              ...station,
+              pendingServiceSessionId: pendingCall?.serviceSessionId ?? null,
+              pendingCalledAt: pendingCall?.calledAt ?? null,
+            }],
+          };
         }
         if (route.endsWith('/queue')) {
           return {
             eventId: staffEvent.id,
             experienceId: realExperienceId,
+            observedAt: '2026-11-10T15:00:00.000Z',
             waitingCount: waiting.length,
+            acceptingNewEntries: true,
             canCallWaitingEntries: waiting.length > 0,
             firstWaitingQueueEntryId: waiting[0]?.queueEntryId ?? null,
           };

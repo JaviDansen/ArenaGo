@@ -9,7 +9,8 @@
 - **Branch obrigatória:** `feature/staff-operacional-v2`
 - **Commit-base (`HEAD` de referência da STAFF-02):** `95b8b80f3c0142af30c25e9483291d75677a085d` (`style(staff): padroniza interface com Admin e conclui homologação da STAFF-01`)
 - **Commit da entrega inicial publicada:** `5cde6a57874bad816213a0e3be8234dd6b51173b` (`Reformulação da Estação, Fila e Atendimento`)
-- **Status atual:** Correções da **Auditoria Independente — Rodada 1** (`STAFF02-AUD-01` a `STAFF02-AUD-08`) implementadas sobre `5cde6a5`; aguardando execução da campanha automatizada por **GPT-6 Luna — Medium** e homologação presencial no Expo Go.
+- **Commit da Rodada 1 publicado:** `d6765f1dec3b14f40be4d955e4791c88f1c56735` (`Correções da Auditoria Independente — Rodada 1`)
+- **Status atual:** Ajuste contratual das fixtures de integração concluído sobre `d6765f1` (sem alterações em código de produção); aguardando execução da campanha automatizada por **GPT-6 Luna — Medium** e homologação presencial no Expo Go.
 
 ### Seleção de modelos e níveis de raciocínio (conforme [AGENTS.md](../AGENTS.md))
 
@@ -154,6 +155,21 @@ Auditoria estática realizada sobre o commit publicado `5cde6a57874bad816213a0e3
 8. **`STAFF02-AUD-08` (P3 — Documentação e links portáveis):**
    - Remoção integral de links locais absolutos de estação de trabalho neste documento, registro explícito de `5cde6a57874bad816213a0e3be8234dd6b51173b` e documentação completa da Rodada 1.
 
+### 9.3. Revisão adicional pós-push `d6765f1` — Alinhamento contratual das fixtures
+
+Após a publicação do commit `d6765f1dec3b14f40be4d955e4791c88f1c56735`, foi realizada revisão objetiva de todas as fixtures adicionadas na STAFF-02 ([roleRoutingIntegration.test.cjs](../app/tests/roleRoutingIntegration.test.cjs), [staffStationOperational.test.cjs](../app/tests/staffStationOperational.test.cjs) e [staffDashboard.test.cjs](../app/tests/staffDashboard.test.cjs)) contra os parsers oficiais ([parseEntryState](../app/services/staffEntryService.js) e [staffOperationsService.js](../app/services/staffOperationsService.js)) e controladores backend ([staff-queries.controller.ts](../backend/src/events/staff-queries.controller.ts), [staff-station-state.service.ts](../backend/src/events/staff-station-state.service.ts), [staff-entry.service.ts](../backend/src/participations/staff-entry.service.ts), [staff-operations.controller.ts](../backend/src/events/staff-operations.controller.ts) e [staff-called-removal.controller.ts](../backend/src/events/staff-called-removal.controller.ts)):
+
+1. **Correção da fixture `entryNominal` no teste `STAFF02-AUD-01` ([roleRoutingIntegration.test.cjs](../app/tests/roleRoutingIntegration.test.cjs)):**
+   - **Problema identificado:** declarava `waitingCount: 2` com `waiting: []` (violando `waitingCount === waiting.length` em `parseEntryState`) e omitia os booleanos obrigatórios `canCall`, `canConfirm`, `canMarkAbsent` e `canRemove`. Como consequência, `parseStaffEntrySummary` rejeitava o payload no painel antes mesmo do fluxo de verificação de `404`.
+   - **Correção aplicada:** incluídos dois participantes válidos e distintos em `entryWaiting` (`position: 1` e `2`, `participationId` UUIDs disjuntos de `pendingCall.participationId`), adicionados os booleanos consistentes com `canManage: true`, `externalQueueEnabled: true` e presença de `pendingCall` (`canCall: !hasPending`, `canConfirm: hasPending`, `canMarkAbsent: hasPending`, `canRemove: hasPending`), preservando `'JulianaEntrada'` em `pendingCall` e reforçando a asserção inicial do resumo nominal (`'Chamada pendente: JulianaEntrada · 2 aguardando'` e métrica `'Fila externa'` igual a `'2'`).
+2. **Consistência de transição pós-`call-next` no teste `STAFF02-AUD-02` ([roleRoutingIntegration.test.cjs](../app/tests/roleRoutingIntegration.test.cjs)):**
+   - **Problema identificado:** após `POST .../call-next` mover `'Alice A'` para `pendingA`, os mocks de `GET .../operational-state` e `GET .../experiences/:experienceId/queue` ainda retornavam o mesmo `queueEntryId` em `waiting` e `firstWaitingQueueEntryId`.
+   - **Correção aplicada:** transição dinâmica de `waitingA` via `waitingA.shift()` no `POST /call-next`, mantendo fila remanescente, `waitingCount`, `canCallWaitingEntries`, `firstWaitingQueueEntryId` e `canCall` coerentes com o snapshot oficial do servidor.
+3. **Completude dos DTOs oficiais de `/stations` e `/queue` nas fixtures da STAFF-02 ([roleRoutingIntegration.test.cjs](../app/tests/roleRoutingIntegration.test.cjs)):**
+   - Adicionados `pendingCalledAt` nos payloads de `/stations` e `observedAt` + `acceptingNewEntries` nos payloads de `/queue` nos testes `STAFF-02`, `STAFF02-AUD-01`, `STAFF02-AUD-02` e `STAFF02-AUD-05 + AUD-06`, espelhando [staff-queries.controller.ts](../backend/src/events/staff-queries.controller.ts).
+4. **Demais arquivos verificados:**
+   - Fixtures de [staffStationOperational.test.cjs](../app/tests/staffStationOperational.test.cjs) e [staffDashboard.test.cjs](../app/tests/staffDashboard.test.cjs) validadas estaticamente em conformidade com os parsers e contratos oficiais; nenhum defeito de produção foi encontrado, permanecendo inalterados todos os parsers e serviços/telas em `d6765f1`.
+
 ---
 
 ## 10. Dependências e Cobertura de Testes
@@ -167,8 +183,8 @@ Auditoria estática realizada sobre o commit publicado `5cde6a57874bad816213a0e3
 ## 11. Resultados Efetivamente Executados e Campanha Pendente
 
 ### 11.1. Verificações executadas nesta etapa de implementação (estáticas / não executoras de testes)
-- **Inspeção estática e checagem de sintaxe `.cjs` (`node --check`):** realizada nos quatro arquivos de teste modificados ([roleRoutingIntegration.test.cjs](../app/tests/roleRoutingIntegration.test.cjs), [staffStationOperational.test.cjs](../app/tests/staffStationOperational.test.cjs), [staffDashboard.test.cjs](../app/tests/staffDashboard.test.cjs) e [staffDemoState.test.cjs](../app/tests/staffDemoState.test.cjs)) sem executar casos de teste.
-- **Integridade de patch acumulado (`qa-evidence/STAFF-02-changes.diff`):** patch gerado a partir da base `95b8b80f3c0142af30c25e9483291d75677a085d` e validado estaticamente com `git diff --check` e `git apply --check --reverse qa-evidence/STAFF-02-changes.diff` ao final das edições.
+- **Inspeção estática e checagem de sintaxe `.cjs` (`node --check`):** realizada nos quatro arquivos de teste da entrega ([roleRoutingIntegration.test.cjs](../app/tests/roleRoutingIntegration.test.cjs), [staffStationOperational.test.cjs](../app/tests/staffStationOperational.test.cjs), [staffDashboard.test.cjs](../app/tests/staffDashboard.test.cjs) e [staffDemoState.test.cjs](../app/tests/staffDemoState.test.cjs)) sem executar casos de teste.
+- **Integridade de patch acumulado (`qa-evidence/STAFF-02-changes.diff`):** patch regerado a partir da base fixa `95b8b80f3c0142af30c25e9483291d75677a085d` e validado estaticamente com `git diff --check -- app docs` e `git apply --check --reverse qa-evidence/STAFF-02-changes.diff` ao final das edições.
 
 ### 11.2. Validações automatizadas NÃO executadas nesta etapa (pendentes para **GPT-6 Luna — Medium**)
 Conforme o [AGENTS.md](../AGENTS.md), nenhuma suíte `node --test` ou `npm test` foi executada pelo modelo de implementação. Selecionar manualmente **GPT-6 Luna — Medium** e executar em sequência na raiz do workspace (`feature/staff-operacional-v2`):
@@ -197,10 +213,11 @@ Conforme o [AGENTS.md](../AGENTS.md), nenhuma suíte `node --test` ou `npm test`
 - **19/11/2026:** Criação do documento de diagnóstico e plano inicial da STAFF-02.
 - **20/11/2026 — Commit `5cde6a57874bad816213a0e3be8234dd6b51173b`:** Publicação inicial da reformulação visual da Estação, Fila e Atendimento na branch `feature/staff-operacional-v2`.
 - **20/11/2026 — Rodada 1 (Auditoria Independente — plano):** Registro dos achados `STAFF02-AUD-01` a `STAFF02-AUD-08` e plano de correção antes das modificações em código.
-- **20/11/2026 — Rodada 1 (Auditoria Independente — conclusão da implementação):** Correções concluídas em código, reforço dos testes unitários e de integração real, remoção de links locais e atualização do patch acumulado [STAFF-02-changes.diff](../qa-evidence/STAFF-02-changes.diff).
+- **20/11/2026 — Commit `d6765f1dec3b14f40be4d955e4791c88f1c56735`:** Publicação das correções da **Auditoria Independente — Rodada 1** (`STAFF02-AUD-01` a `STAFF02-AUD-08`), reforço dos testes e patch acumulado na branch `feature/staff-operacional-v2`.
+- **21/11/2026 — Ajuste final pós-push `d6765f1`:** Revisão contratual das fixtures da STAFF-02, correção de `entryNominal` (`STAFF02-AUD-01`), consistência de fila em `STAFF02-AUD-02`, completude de campos DTO em `/stations` e `/queue` nos mocks e regeneração integral do patch acumulado [STAFF-02-changes.diff](../qa-evidence/STAFF-02-changes.diff) desde `95b8b80`.
 
 ---
 
 ## 14. Estado Final da Entrega
 
-Correções da **Auditoria Independente — Rodada 1** (`STAFF02-AUD-01` a `STAFF02-AUD-08`) concluídas na branch `feature/staff-operacional-v2` (sobre `5cde6a57874bad816213a0e3be8234dd6b51173b`, base acumulada da STAFF-02 `95b8b80f3c0142af30c25e9483291d75677a085d`). Nenhum arquivo de backend, migration ou módulo externo à STAFF-02 foi alterado, e nenhum comando Git de staging/commit/push foi executado. Aguardando execução da campanha de testes com **GPT-6 Luna — Medium** e commit pelo responsável via VSCode.
+Ajuste final pós-push `d6765f1dec3b14f40be4d955e4791c88f1c56735` concluído na branch `feature/staff-operacional-v2` (base acumulada da STAFF-02 `95b8b80f3c0142af30c25e9483291d75677a085d`), corrigindo as fixtures de integração sem alterar código de produção, parsers, backend, migrations ou módulos externos à STAFF-02 e sem executar comandos Git de staging/commit/push. Aguardando execução da campanha automatizada com **GPT-6 Luna — Medium** e commit pelo responsável via VSCode.
