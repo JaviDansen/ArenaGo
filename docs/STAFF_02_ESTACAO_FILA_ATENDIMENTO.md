@@ -186,18 +186,16 @@ Após a publicação do commit `d6765f1dec3b14f40be4d955e4791c88f1c56735`, foi r
 - **Inspeção estática e checagem de sintaxe `.cjs` (`node --check`):** realizada nos quatro arquivos de teste da entrega ([roleRoutingIntegration.test.cjs](../app/tests/roleRoutingIntegration.test.cjs), [staffStationOperational.test.cjs](../app/tests/staffStationOperational.test.cjs), [staffDashboard.test.cjs](../app/tests/staffDashboard.test.cjs) e [staffDemoState.test.cjs](../app/tests/staffDemoState.test.cjs)) sem executar casos de teste.
 - **Integridade de patch acumulado (`qa-evidence/STAFF-02-changes.diff`):** patch regerado a partir da base fixa `95b8b80f3c0142af30c25e9483291d75677a085d` e validado estaticamente com `git diff --check -- app docs` e `git apply --check --reverse qa-evidence/STAFF-02-changes.diff` ao final das edições.
 
-### 11.2. Validações automatizadas pendentes após a correção do fixture
-A primeira campanha foi interrompida na segunda suíte (ver Seção 13.1). O modelo de implementação corrigiu o fixture por inspeção estática. Selecionar manualmente **GPT-6 Luna — Medium** para a nova campanha, usar o checkout da branch `feature/staff-operacional-v2` que contém esta correção e executar as suítes prioritárias em sequência na raiz, com `NODE_ENV=test` e as dependências verificadas:
-1. `node --test app/tests/staffDemoState.test.cjs`
-2. `node --test app/tests/staffDashboard.test.cjs`
-3. `node --test app/tests/staffStationOperational.test.cjs`
-4. `node --test --test-name-pattern="STAFF02|STAFF-02|R3-" app/tests/roleRoutingIntegration.test.cjs`
-5. `node --test app/tests/roleRoutingIntegration.test.cjs`
-6. `node --test app/tests/staffOperationsService.integration.test.cjs`
-7. `node --test app/tests/staffPolling.test.cjs`
-8. `node --test app/tests/staffRealNavigation.test.cjs`
+### 11.2. Validações automatizadas pendentes após as correções de integração
+A segunda campanha foi interrompida na integração filtrada (Seção 13.2). Selecionar manualmente **GPT-6 Luna Medium**, usar o checkout da branch `feature/staff-operacional-v2` com as correções e retomar na raiz, com `NODE_ENV=test` e as dependências verificadas.
 
-Se as prioridades passarem, executar `npm --prefix app test` e `npm --prefix qa/regression test` se o script de regressão for aplicável e seguro. O filtro do passo 4 é apenas diagnóstico e o passo 5 continua obrigatório.
+1. `node --test --test-name-pattern="STAFF02|STAFF-02|R3-" app/tests/roleRoutingIntegration.test.cjs`
+2. `node --test app/tests/roleRoutingIntegration.test.cjs`
+3. `node --test app/tests/staffOperationsService.integration.test.cjs`
+4. `node --test app/tests/staffPolling.test.cjs`
+5. `node --test app/tests/staffRealNavigation.test.cjs`
+
+Se as prioridades passarem, executar `npm --prefix app test` e `npm --prefix qa/regression test`, com os scripts previamente inspecionados. A regressão de `app` inclui as suítes de demonstração, Dashboard e Estação já aprovadas isoladamente em campanhas anteriores. O filtro é diagnóstico e a suíte integral continua obrigatória. Interromper a campanha se houver falha.
 
 *(Critério de aprovação: zero falhas, zero testes ignorados por ausência de `qa/regression/node_modules` e zero avisos inesperados em todos os comandos aplicáveis.)*
 
@@ -234,8 +232,23 @@ O fixture passou a consumir cada resposta programada uma única vez. O teste ver
 
 A campanha foi interrompida antes de executar `staffStationOperational`, o filtro e a suíte integral de `roleRoutingIntegration`, `staffOperationsService.integration`, `staffPolling`, `staffRealNavigation` e as regressões de `app` e `qa/regression`. A STAFF-02 permanece bloqueada até nova validação com Luna Medium.
 
+### 13.2. Segunda campanha automatizada — duas falhas de integração
+
+A campanha com **GPT-6 Luna Medium** foi executada sobre `6682363ad1a2cbf0500a007c903edfb7f3af37da`.
+
+| Suíte | Código de saída | Aprovados | Falhos | Ignorados | Cancelados |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `staffDashboard.test.cjs` | 0 | 24 | 0 | 0 | 0 |
+| `staffStationOperational.test.cjs` | 0 | 3 | 0 | 0 | 0 |
+| `roleRoutingIntegration.test.cjs` com filtro STAFF-02/R3 | 1 | 3 | 2 | 0 | 0 |
+
+- **Chamar próximo.** O mock consumia e zerava `pendingCallDeferred` antes de o teste tentar chamar `.resolve()`, causando um `TypeError`. O teste agora retém a referência da resposta, confirma que o mock a consumiu e a libera mesmo se uma asserção falhar. Antes de liberá-la, verifica que houve um único POST, que a intenção está em `dispatching` e que a fila ainda não avançou. As verificações de idempotência, limpeza do SecureStore, FIFO, conclusão e ausência foram preservadas.
+- **404 durante o modal.** O teste avançava o relógio após abrir o modal, quando o polling já estava pausado. Agora ele verifica a pausa e a retomada, conta o GET de `/operational-state` e retém sua resposta até o modal abrir novamente. O consumo de uma segunda resposta controlada, no GET de `/stations`, comprova que o aplicativo reagiu ao `404 RESOURCE_NOT_FOUND` entregue pelo harness. O cenário conserva as verificações de ocultação dos nomes, fechamento do modal, invalidação do callback e ausência de POST. A recuperação espera uma leitura nova de `/entry-control` para conferir o cache nominal. A negativa tardia continua sendo entregue após a troca de evento.
+
+A campanha parou na integração filtrada. A nova execução do filtro, a suíte integral de integração, as outras prioridades e as duas regressões completas permanecem pendentes. As correções desta rodada passaram apenas por inspeção estática.
+
 ---
 
 ## 14. Estado Final da Entrega
 
-A revisão contratual posterior a `d6765f1` está publicada em `fbc9481`. A correção do fixture da AUD-01 foi preparada localmente sobre `fbc9481` em `feature/staff-operacional-v2`. A evidência acumulada parte de `95b8b80f3c0142af30c25e9483291d75677a085d`. Aguardam nova campanha automatizada com **GPT-6 Luna Medium**, homologação no Expo e publicação pelo responsável via VSCode.
+A revisão contratual posterior a `d6765f1` está publicada em `fbc9481`. A correção do fixture do Dashboard foi publicada em `6682363` e passou na segunda campanha. As duas correções de integração estão preparadas localmente sobre `6682363` em `feature/staff-operacional-v2`. A evidência acumulada parte de `95b8b80f3c0142af30c25e9483291d75677a085d`. A STAFF-02 permanece bloqueada até a validação com **GPT-6 Luna Medium**. A decisão sobre homologação no Expo e publicação cabe ao responsável pelo projeto.

@@ -2590,21 +2590,31 @@ test('STAFF-02: estados A e B da Estação, fila compartilhada, proteção a dup
     assert.equal(app.hasButton('Voltar ao painel'), true);
 
     // Transição A -> B com duplo toque bloqueado em voo e limpeza de recibo após ack no SecureStore
-    pendingCallDeferred = deferred();
-    let callPromise;
-    await app.act(async () => {
-      const tap = app.handler('Chamar próximo');
-      callPromise = Promise.all([tap(), tap()]);
-      await new Promise((r) => setTimeout(r, 0));
-      await new Promise((r) => setTimeout(r, 0));
-    });
-    assert.equal(posts.length, 1, 'duplo toque não envia segundo POST');
-    assert.equal(app.isDisabled('Chamar próximo'), true);
-    assert.equal(JSON.parse(secure.get(opKey)).phase, 'dispatching');
-    await app.act(async () => {
-      pendingCallDeferred.resolve();
-      await callPromise;
-    });
+    const callGate = deferred();
+    pendingCallDeferred = callGate;
+    let callResults;
+    try {
+      await app.act(async () => {
+        const tap = app.handler('Chamar próximo');
+        callResults = Promise.allSettled([tap(), tap()]);
+        await new Promise((r) => setTimeout(r, 0));
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      assert.equal(posts.length, 1, 'duplo toque não envia segundo POST');
+      assert.equal(pendingCallDeferred, null, 'o mock do POST consumiu a resposta controlada');
+      assert.equal(app.isDisabled('Chamar próximo'), true);
+      assert.equal(JSON.parse(secure.get(opKey)).phase, 'dispatching');
+      assert.equal(pendingCall, null, 'o servidor simulado ainda não confirmou a chamada');
+      assert.ok(app.hasQueueRow(1, 'Mariana Costa'));
+    } finally {
+      await app.act(async () => {
+        callGate.resolve();
+        await callResults;
+      });
+    }
+    for (const result of await callResults) {
+      if (result.status === 'rejected') throw result.reason;
+    }
     assert.equal(secure.get(opKey) ?? null, null, 'intenção principal removida após ack');
     assert.equal(secure.get(`${opKey}.receipt`) ?? null, null);
     assert.equal(secure.get(`${opKey}.ack`) ?? null, null);
@@ -2692,14 +2702,21 @@ test('STAFF02-AUD-01: 404 contextual em operational-state protege cache nominal 
   const opKey = `arenago.staff.operation.${staffUser.id.toLowerCase()}`;
   let deleteCalls = 0;
   let postCount = 0;
+  const primaryOperationalRoute = `/staff/events/${event1.id}/experiences/${exp1.id}/stations/${station1.id}/operational-state`;
+  let operationalReads = 0;
+  let operationalDeferred = null;
   let station1Label = 'Estação Alpha';
   let operational404 = false;
   let verifyDeferred = null;
-  let panelExpDeferred = null;
+  let panelEntryDeferred = null;
   let stations500 = false;
   let stations404 = false;
   let stations401 = false;
   let panelEntry500 = false;
+  const operationalGate = deferred();
+  const verifyGate = deferred();
+  const panelEntryGate = deferred();
+  const lateVerifyGate = deferred();
 
   const entryWaiting = [
     {
@@ -2786,12 +2803,12 @@ test('STAFF02-AUD-01: 404 contextual em operational-state protege cache nominal 
         if (route === `/staff/events/${event2.id}/stations`) {
           return { eventId: event2.id, stations: [station2] };
         }
-        if (route === `/staff/events/${event1.id}/experiences` && panelExpDeferred) {
-          const d = panelExpDeferred;
-          panelExpDeferred = null;
-          return d.promise;
-        }
         if (route.endsWith('/entry-control')) {
+          if (route === `/staff/events/${event1.id}/entry-control` && panelEntryDeferred) {
+            const d = panelEntryDeferred;
+            panelEntryDeferred = null;
+            return d.promise;
+          }
           if (panelEntry500 && route.includes(event1.id)) {
             return { statusCode: 500, body: { code: 'INTERNAL_SERVER_ERROR' } };
           }
@@ -2810,6 +2827,14 @@ test('STAFF02-AUD-01: 404 contextual em operational-state protege cache nominal 
           };
         }
         if (route.endsWith('/operational-state')) {
+          if (options.method === 'GET' && route === primaryOperationalRoute) {
+            operationalReads += 1;
+            if (operationalDeferred) {
+              const d = operationalDeferred;
+              operationalDeferred = null;
+              return d.promise;
+            }
+          }
           if (route.includes(event1.id) && operational404) {
             return { statusCode: 404, body: { code: 'RESOURCE_NOT_FOUND' } };
           }
@@ -2831,17 +2856,39 @@ test('STAFF02-AUD-01: 404 contextual em operational-state protege cache nominal 
     assert.ok(app.hasText('Estação Alpha'));
     assert.equal(app.isDisabled('Controle de Entrada'), false);
 
-    // Abre estação e abre modal de confirmação antes de receber 404 em polling
+    // Modal aberto pausa novas leituras e mantém os dados da leitura anterior.
     await app.press('Selecionar estação Estação Alpha da experiência Just Dance Pro');
     assert.ok(app.hasExactText('LucasCalled'));
     assert.ok(app.hasQueueRow(1, 'PedroFila'));
+    assert.ok(app.hasExactText('Atualização automática ativa · a cada 5s'));
+    assert.equal(operationalReads, 1, 'a leitura inicial chegou ao harness');
+    const readsBeforeModal = operationalReads;
+    await app.press('Concluir experiência');
+    assert.equal(app.modal().props.visible, true);
+    assert.ok(app.hasExactText('Atualização temporariamente pausada'));
+    await app.tickTimers(5000);
+    assert.equal(operationalReads, readsBeforeModal, 'modal aberto não inicia outro GET operacional');
+    assert.equal(postCount, 0, 'modal aberto não envia POST automaticamente');
+    assert.ok(app.hasExactText('LucasCalled'));
+    assert.ok(app.hasQueueRow(1, 'PedroFila'));
+    await app.press('CANCELAR OPERAÇÃO');
+    assert.ok(app.modals().every((m) => !m.props.visible));
+    assert.ok(app.hasExactText('Atualização automática ativa · a cada 5s'));
+
+    // O polling retoma. Só abrir o modal novamente depois de o GET entrar em voo.
+    operationalDeferred = operationalGate;
+    await app.tickTimers(5000);
+    assert.equal(operationalReads, readsBeforeModal + 1, 'polling retomado iniciou o GET operacional');
+    assert.equal(operationalDeferred, null, 'o GET consumiu a resposta controlada');
     await app.press('Concluir experiência');
     assert.equal(app.modal().props.visible, true);
     const staleConfirm = app.buttonProps('CONFIRMAR OPERAÇÃO').onPress;
 
-    operational404 = true;
-    verifyDeferred = deferred();
-    await app.tickTimers(5000);
+    verifyDeferred = verifyGate;
+    await app.act(async () => {
+      operationalGate.resolve({ statusCode: 404, body: { code: 'RESOURCE_NOT_FOUND' } });
+    });
+    assert.equal(verifyDeferred, null, 'o 404 entregue pelo GET iniciou a verificação em /stations');
     assert.ok(!app.hasText('LucasCalled'));
     assert.ok(!app.hasText('PedroFila'));
     assert.ok(app.modals().every((m) => !m.props.visible), '404 fecha modal aberto');
@@ -2863,16 +2910,15 @@ test('STAFF02-AUD-01: 404 contextual em operational-state protege cache nominal 
 
     // Caso A (200 no fallback): não publica lista de verificação direto no Painel e reabre com nova rodada limpa
     station1Label = 'Estação Recuperada';
-    panelExpDeferred = deferred();
+    panelEntryDeferred = panelEntryGate;
     await app.act(async () => {
-      verifyDeferred.resolve({ eventId: event1.id, stations: [{ ...station1, label: 'Estação Só Verificação', pendingCalledAt: null }] });
-      await Promise.resolve();
-      await Promise.resolve();
+      verifyGate.resolve({ eventId: event1.id, stations: [{ ...station1, label: 'Estação Só Verificação', pendingCalledAt: null }] });
     });
+    assert.equal(panelEntryDeferred, null, 'a recuperação requisitou dados nominais novos');
     assert.ok(!app.hasText('Estação Só Verificação'), 'fallback 200 não publica stations direto na UI');
     assert.ok(!app.hasText('JulianaEntrada'));
     await app.act(async () => {
-      panelExpDeferred.resolve({ eventId: event1.id, experiences: [exp1] });
+      panelEntryGate.resolve(entryNominal(event1.id));
     });
     assert.ok(app.hasText('Estação Recuperada'));
     assert.ok(app.hasText('JulianaEntrada'));
@@ -2902,15 +2948,18 @@ test('STAFF02-AUD-01: 404 contextual em operational-state protege cache nominal 
     assert.equal(app.isDisabled('Controle de Entrada'), false);
 
     // Troca de evento enquanto verificação está pendente descarta negativa tardia do evento anterior
-    verifyDeferred = deferred();
+    verifyDeferred = lateVerifyGate;
     await app.press('Selecionar estação Estação Recuperada da experiência Just Dance Pro');
+    assert.equal(verifyDeferred, null, 'o evento anterior iniciou a verificação antes da troca');
     await app.press('Voltar ao painel');
     await app.press('Voltar aos eventos');
     await app.press('Selecionar evento Torneio Secundário');
     await app.act(async () => {
-      verifyDeferred.resolve({ statusCode: 403, body: { code: 'STAFF_EVENT_FORBIDDEN' } });
+      lateVerifyGate.resolve({ statusCode: 403, body: { code: 'STAFF_EVENT_FORBIDDEN' } });
     });
     assert.ok(app.hasText('Estação Secundária'));
+    assert.ok(!app.hasText('Estação Recuperada'));
+    assert.ok(!app.hasText('JulianaEntrada'));
     assert.equal(app.hasExactText('SEM ACESSO'), false);
     assert.equal(app.isDisabled('Controle de Entrada'), false);
 
@@ -2935,7 +2984,9 @@ test('STAFF02-AUD-01: 404 contextual em operational-state protege cache nominal 
     stations404 = true;
     await app.press('Selecionar estação Estação Recuperada da experiência Just Dance Pro');
     assert.ok(!app.hasText('LucasCalled'));
-    assert.ok(app.hasText('Acesso à estação indisponível.'));
+    assert.ok(!app.hasText('PedroFila'));
+    assert.equal(app.hasButton('Concluir experiência'), false);
+    assert.ok(app.hasText('Acesso ao evento ou à experiência indisponível.'));
     assert.ok(!app.hasText('Atualização'));
     assert.equal(deleteCalls, 0, '404 não apaga intenção persistida no SecureStore');
     assert.equal(JSON.parse(secure.get(opKey)).eventId, event2.id);
@@ -2957,9 +3008,10 @@ test('STAFF02-AUD-01: 404 contextual em operational-state protege cache nominal 
     assert.ok(!app.hasText('JulianaEntrada'));
     assert.equal(postCount, 0);
   } finally {
-    verifyDeferred?.resolve({ statusCode: 500 });
-    panelExpDeferred?.resolve({ statusCode: 500 });
     app.dispose();
+    for (const gate of [operationalGate, verifyGate, panelEntryGate, lateVerifyGate]) {
+      gate.resolve({ statusCode: 500 });
+    }
   }
 });
 
