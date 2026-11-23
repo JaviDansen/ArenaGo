@@ -31,8 +31,34 @@ const calls:Array<{ mode:string; input:Record<string,unknown> }>=[];
     editAuthenticated:(input:Record<string,unknown>, context: MutationSession) => { authenticatedInput(context, undefined); calls.push({mode:"edit",input});if(failure)throw failure;return result;} } },
 ] })class HttpModule{}
 let app:INestApplication;
-before(async()=>{app=await NestFactory.create(HttpModule,{logger:false});app.setGlobalPrefix("api/v1");app.useGlobalFilters(new ProblemDetailsExceptionFilter());await app.listen(0,"127.0.0.1");});
-after(async()=>{await app?.close();});
+const evaluationTtlSeconds = 73;
+const testTtls = {
+  EVALUATION_IDEMPOTENCY_TTL_SECONDS: String(evaluationTtlSeconds),
+  ADMIN_IDEMPOTENCY_TTL_SECONDS: "60",
+  STAFF_IDEMPOTENCY_TTL_SECONDS: "60",
+  PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS: "60",
+};
+const previousTtls = new Map<string, string | undefined>();
+before(async () => {
+  for (const [name, value] of Object.entries(testTtls)) {
+    previousTtls.set(name, process.env[name]);
+    process.env[name] = value;
+  }
+  app = await NestFactory.create(HttpModule, { logger: false });
+  app.setGlobalPrefix("api/v1");
+  app.useGlobalFilters(new ProblemDetailsExceptionFilter());
+  await app.listen(0, "127.0.0.1");
+});
+after(async () => {
+  try {
+    await app?.close();
+  } finally {
+    for (const [name, value] of previousTtls) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
 function request(mode:"submit"|"edit",token="participant",key="opaque,key"){
   const r=mode==="submit"?supertest(app.getHttpServer()).post(`/api/v1/participations/${pid}/evaluation`):supertest(app.getHttpServer()).patch(`/api/v1/evaluations/${eid}`);
   return r.set("Authorization",`Bearer ${token}`).set("Idempotency-Key",key);
@@ -40,11 +66,14 @@ function request(mode:"submit"|"edit",token="participant",key="opaque,key"){
 function reset(){calls.length=0;failure=undefined;result={kind:"created",evaluation:value};}
 function problem(r:supertest.Response,status:number,code:string){assert.equal(r.status,status);assert.equal(r.body.code,code);assert.equal(r.body.status,status);assert.match(r.headers["content-type"],/application\/problem\+json/);}
 for(const mode of ["submit","edit"]as const){
-  test(`E08.11 HTTP ${mode} responde contrato e usa somente ator autenticado`,async()=>{
-    reset();const start=Date.now(),r=await request(mode).query({userId:id(99)}).send({rating:5,comment:" "});
+  test(`E08.11 HTTP ${mode} responde contrato e usa somente ator autenticado`,async t=>{
+    reset();
+    const now = Date.parse(at);
+    t.mock.method(Date, "now", () => now);
+    const r=await request(mode).query({userId:id(99)}).send({rating:5,comment:" "});
     assert.equal(r.status,mode==="submit"?201:200);assert.deepEqual(r.body,{evaluation:value});assert.equal(calls[0].input.userId,uid);
     assert.equal(calls[0].input.idempotencyKey,"opaque,key");assert.deepEqual(calls[0].input.payload,{rating:5,comment:null});
-    const expires=calls[0].input.expiresAt as Date;assert.ok(expires.getTime()>=start+60000&&expires.getTime()<=Date.now()+60000);
+    assert.deepEqual(calls[0].input.expiresAt, new Date(now + evaluationTtlSeconds * 1000));
   });
   test(`E08.11 HTTP ${mode} replay mantém status original e resposta histórica`,async()=>{
     reset();result={kind:"replay",evaluation:value};const r=await request(mode).send({rating:5});assert.equal(r.status,mode==="submit"?201:200);assert.deepEqual(r.body,{evaluation:value});
