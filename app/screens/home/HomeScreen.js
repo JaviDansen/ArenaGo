@@ -4,9 +4,16 @@ import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from
 
 import { AuthBackground, Badge, Button, Card } from '../../components/ui';
 import { AuthContext } from '../../context/AuthContext';
-import { colors, spacing, typography } from '../../theme';
+import { colors, radii, spacing, typography } from '../../theme';
+import { describePendingEvaluation, describeRecentParticipation } from '../../utils/homeOverview';
 
-export default function HomeScreen({ navigation, returnState, mode = 'ready', message, onRetry }) {
+const TUTORIAL_STEPS = [
+  { icon: '📷', title: 'Acesse o evento', text: 'Escaneie o QR Code ou digite o código.' },
+  { icon: '🎮', title: 'Participe das experiências', text: 'Entre nas filas e aguarde sua vez.' },
+  { icon: '⭐', title: 'Avalie a sua experiência', text: 'Ao final, conte como foi participar.' },
+];
+
+export default function HomeScreen({ navigation, returnState, overview, mode = 'ready', message, onRetry }) {
   const auth = useContext(AuthContext);
   const hasPendingQuestionnaire =
     auth?.user != null && auth.user.hasCompletedQuestionnaire === false;
@@ -18,10 +25,7 @@ export default function HomeScreen({ navigation, returnState, mode = 'ready', me
       <StatusBar style="light" />
       {mode === 'loading' || mode === 'error' ? (
         <View style={styles.stateScreen}>
-          <View style={styles.brandRow}>
-            <Text style={styles.brandArena}>Arena</Text>
-            <Text style={styles.brandGo}>GO</Text>
-          </View>
+          <Brand />
           <Card variant="elevated" style={styles.stateCard}>
             {mode === 'loading' ? (
               <>
@@ -45,16 +49,12 @@ export default function HomeScreen({ navigation, returnState, mode = 'ready', me
           showsVerticalScrollIndicator={false}
         >
           <View style={styles.topBar}>
-            <View style={styles.brandRow}>
-              <Text style={styles.brandArena}>Arena</Text>
-              <Text style={styles.brandGo}>GO</Text>
-            </View>
-            <Badge label="ONLINE" variant="brand" />
+            <Brand />
           </View>
 
           <View style={styles.greetingSection}>
-            <Text style={styles.welcome}>
-              {firstName ? `Olá, ${firstName}!` : 'Bem-vindo ao ArenaGo!'}
+            <Text style={styles.welcome} numberOfLines={2} accessibilityRole="header">
+              {firstName ? `Olá, ${firstName}!` : 'Olá!'}
             </Text>
             <Text style={styles.description}>
               Acompanhe suas experiências e gerencie sua participação nos eventos presenciais.
@@ -65,22 +65,6 @@ export default function HomeScreen({ navigation, returnState, mode = 'ready', me
             <Card variant="elevated" style={styles.noticeCard}>
               <Badge label="PARTICIPAÇÃO ENCERRADA" variant="success" />
               <Text style={styles.noticeText}>Sua participação recente foi encerrada.</Text>
-            </Card>
-          ) : null}
-          {returnState?.pendingEvaluationParticipationIds?.length > 0 ? (
-            <Card variant="elevated" style={styles.noticeCard}>
-              <Badge label="AVALIAÇÃO PENDENTE" variant="warning" />
-              <Text style={styles.noticeText}>
-                Você possui {returnState.pendingEvaluationParticipationIds.length} avaliação(ões) pendente(s).
-              </Text>
-              <Pressable
-                onPress={() => navigation.navigate('Eventos')}
-                accessibilityRole="button"
-                accessibilityLabel="Abrir avaliações pendentes na aba Eventos"
-                style={styles.inlineAction}
-              >
-                <Text style={styles.inlineActionText}>Ver eventos e avaliações →</Text>
-              </Pressable>
             </Card>
           ) : null}
 
@@ -114,27 +98,150 @@ export default function HomeScreen({ navigation, returnState, mode = 'ready', me
             />
           </Card>
 
-          <View style={styles.sectionBlock}>
-            <Text style={styles.sectionLabel}>STATUS DE PARTICIPAÇÃO</Text>
-            <Card variant="default" style={styles.participationCard} testID="home-empty-participation-card">
-              <Badge label="SEM PARTICIPAÇÃO ATIVA" variant="default" />
-              <Text style={styles.participationTitle}>Nenhuma participação ativa no momento</Text>
-              <Text style={styles.participationSubtitle}>
-                Você não está aguardando em uma fila nem em atendimento. Use o botão acima quando estiver em um evento.
-              </Text>
-              <Pressable
-                style={styles.inlineAction}
-                onPress={() => navigation.navigate('Eventos')}
-                accessibilityRole="button"
-                accessibilityLabel="Consultar histórico de eventos"
-              >
-                <Text style={styles.inlineActionText}>Consultar histórico na aba Eventos →</Text>
-              </Pressable>
-            </Card>
-          </View>
+          <PendingEvaluationCard overview={overview} navigation={navigation} />
+          <OverviewSection overview={overview} navigation={navigation} />
         </ScrollView>
       )}
     </AuthBackground>
+  );
+}
+
+function Brand() {
+  return (
+    <View style={styles.brandRow} accessibilityLabel="ArenaGo">
+      <Text style={styles.brandArena}>Arena</Text>
+      <Text style={styles.brandGo}>GO</Text>
+    </View>
+  );
+}
+
+function PendingEvaluationCard({ overview, navigation }) {
+  if (overview?.status !== 'history') return null;
+  const pending = describePendingEvaluation(overview.pending, overview.recent);
+  if (!pending) return null;
+  const open = pending.kind === 'single'
+    ? () => navigation.navigate('RealEvaluation', {
+      participationId: pending.item.participationId, historyItem: pending.item,
+    })
+    : () => navigation.navigate('Eventos');
+  return (
+    <Pressable
+      onPress={open}
+      style={({ pressed }) => [styles.pendingCard, pressed && styles.pressed]}
+      accessibilityRole="button"
+      accessibilityLabel={`Avaliação pendente. ${pending.text}`}
+      accessibilityHint={pending.kind === 'single' ? 'Abre a avaliação desta participação' : 'Abre a aba Eventos'}
+      testID="home-pending-evaluation-card"
+    >
+      <View style={styles.pendingIcon}><Text style={styles.iconText}>⭐</Text></View>
+      <View style={styles.flexText}>
+        <Text style={styles.pendingTitle}>Avaliação pendente</Text>
+        <Text style={styles.pendingText}>{pending.text}</Text>
+      </View>
+      <Text style={styles.chevron} importantForAccessibility="no">›</Text>
+    </Pressable>
+  );
+}
+
+function OverviewSection({ overview, navigation }) {
+  if (!overview) return null;
+
+  if (overview.status === 'loading') {
+    return (
+      <Card variant="default" style={styles.overviewStateCard} testID="home-overview-loading">
+        <ActivityIndicator size="small" color={colors.brand.primaryLight} />
+        <Text style={styles.stateText}>Carregando suas participações...</Text>
+      </Card>
+    );
+  }
+
+  if (overview.status === 'error') {
+    return (
+      <Card variant="default" style={styles.overviewStateCard} testID="home-overview-error">
+        <Badge label="HISTÓRICO INDISPONÍVEL" variant="danger" />
+        <Text style={styles.stateText}>
+          {overview.error === 'network'
+            ? 'Não foi possível conectar ao servidor para consultar suas participações.'
+            : overview.error === 'authorization'
+              ? 'Não foi possível autorizar a consulta das suas participações.'
+              : 'Não foi possível consultar suas participações agora.'}
+        </Text>
+        <Button title="Tentar novamente" variant="secondary" onPress={overview.retry} style={styles.stateAction} />
+      </Card>
+    );
+  }
+
+  if (overview.status === 'empty') {
+    return (
+      <View testID="home-first-access">
+        <Text style={styles.sectionTitle} accessibilityRole="header">Como funciona?</Text>
+        <Text style={styles.sectionSubtitle}>Veja o passo a passo para participar de um evento:</Text>
+        <Card variant="default" style={styles.tutorialCard}>
+          {TUTORIAL_STEPS.map((step, index) => (
+            <View
+              key={step.title}
+              style={[styles.stepRow, index > 0 && styles.stepDivider]}
+              accessible
+              accessibilityLabel={`Passo ${index + 1}: ${step.title}. ${step.text}`}
+            >
+              <View style={styles.stepIcon}><Text style={styles.iconText}>{step.icon}</Text></View>
+              <View style={styles.flexText}>
+                <Text style={styles.stepTitle}>{index + 1}. {step.title}</Text>
+                <Text style={styles.stepText}>{step.text}</Text>
+              </View>
+            </View>
+          ))}
+        </Card>
+        <View style={styles.emptyState} testID="home-empty-history">
+          <Text style={styles.emptyIcon} importantForAccessibility="no">🎮</Text>
+          <Text style={styles.emptyTitle}>Você ainda não participou de nenhum evento.</Text>
+          <Text style={styles.emptyText}>Quando participar, suas experiências aparecerão aqui.</Text>
+        </View>
+      </View>
+    );
+  }
+
+  if (overview.status !== 'history') return null;
+  const recent = describeRecentParticipation(overview.recent);
+  return (
+    <View testID="home-recent-section">
+      <View style={styles.sectionHeader}>
+        <Text style={styles.sectionTitle} accessibilityRole="header">Evento recente</Text>
+        <Pressable
+          onPress={() => navigation.navigate('Eventos')}
+          style={styles.seeAll}
+          accessibilityRole="button"
+          accessibilityLabel="Ver todos os eventos"
+          testID="home-see-all-events"
+        >
+          <Text style={styles.seeAllText}>Ver todos</Text>
+        </Pressable>
+      </View>
+      <Pressable
+        onPress={() => navigation.navigate('ParticipationDetails', {
+          participationId: overview.recent.participationId, historyItem: overview.recent,
+        })}
+        style={({ pressed }) => [styles.recentCard, pressed && styles.pressed]}
+        accessibilityRole="button"
+        accessibilityLabel={[recent.eventName, recent.date, recent.time, recent.statusLabel].filter(Boolean).join(', ')}
+        accessibilityHint="Abre os detalhes desta participação"
+        testID="home-recent-event-card"
+      >
+        <View style={styles.recentIcon}><Text style={styles.iconText}>🎮</Text></View>
+        <View style={styles.flexText}>
+          <Text style={styles.recentName} numberOfLines={2}>{recent.eventName}</Text>
+          {recent.date ? (
+            <Text style={styles.recentMeta}>
+              📅 {recent.date}{recent.time ? `   🕒 ${recent.time}` : ''}
+            </Text>
+          ) : null}
+          <View style={styles.recentBadge}>
+            <Badge label={recent.statusLabel.toUpperCase()} variant={recent.statusVariant} />
+          </View>
+        </View>
+        <Text style={styles.chevron} importantForAccessibility="no">›</Text>
+      </Pressable>
+    </View>
   );
 }
 
@@ -219,7 +326,7 @@ const styles = StyleSheet.create({
     marginTop: spacing.md,
   },
   heroCard: {
-    marginBottom: spacing.xxl,
+    marginBottom: spacing.xl,
   },
   heroTitle: {
     ...typography.titleLarge,
@@ -234,35 +341,166 @@ const styles = StyleSheet.create({
   eventButton: {
     marginTop: spacing.xl,
   },
-  sectionBlock: {
+  pressed: {
+    opacity: 0.8,
+  },
+  pendingCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    minHeight: 64,
+    gap: spacing.md,
+    padding: spacing.lg,
     marginBottom: spacing.xl,
+    borderRadius: radii.lg,
+    borderWidth: 1,
+    borderColor: colors.semantic.warning,
+    backgroundColor: colors.semantic.warningBg,
   },
-  sectionLabel: {
-    ...typography.tag,
-    color: colors.text.muted,
-    marginBottom: spacing.md,
+  pendingIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: radii.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.background.elevated,
   },
-  participationCard: {
-    alignItems: 'flex-start',
-  },
-  participationTitle: {
+  pendingTitle: {
     ...typography.titleSmall,
     color: colors.text.primary,
-    marginTop: spacing.md,
   },
-  participationSubtitle: {
+  pendingText: {
     ...typography.body,
     color: colors.text.secondary,
-    marginTop: spacing.sm,
+    marginTop: spacing.xxs,
   },
-  inlineAction: {
+  iconText: {
+    fontSize: 20,
+  },
+  flexText: {
+    flex: 1,
+    minWidth: 0,
+  },
+  chevron: {
+    color: colors.brand.primaryLight,
+    fontSize: 28,
+    fontWeight: '600',
+  },
+  overviewStateCard: {
+    alignItems: 'flex-start',
+    gap: spacing.md,
+    marginBottom: spacing.xl,
+  },
+  sectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.md,
+  },
+  sectionTitle: {
+    ...typography.titleMedium,
+    color: colors.text.primary,
+  },
+  sectionSubtitle: {
+    ...typography.body,
+    color: colors.text.secondary,
+    marginTop: spacing.xs,
+    marginBottom: spacing.md,
+  },
+  seeAll: {
     minHeight: 48,
+    minWidth: 48,
     justifyContent: 'center',
-    marginTop: spacing.sm,
+    alignItems: 'flex-end',
   },
-  inlineActionText: {
+  seeAllText: {
     ...typography.body,
     color: colors.brand.primaryLight,
     fontWeight: '700',
+  },
+  tutorialCard: {
+    paddingVertical: spacing.sm,
+  },
+  stepRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    paddingVertical: spacing.md,
+  },
+  stepDivider: {
+    borderTopWidth: 1,
+    borderTopColor: colors.border.subtle,
+  },
+  stepIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: radii.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.brand.primaryDim,
+    borderWidth: 1,
+    borderColor: colors.brand.primary,
+  },
+  stepTitle: {
+    ...typography.titleSmall,
+    color: colors.text.primary,
+  },
+  stepText: {
+    ...typography.body,
+    color: colors.text.secondary,
+    marginTop: spacing.xxs,
+  },
+  emptyState: {
+    alignItems: 'center',
+    paddingVertical: spacing.xxl,
+    paddingHorizontal: spacing.lg,
+  },
+  emptyIcon: {
+    fontSize: 32,
+    marginBottom: spacing.md,
+  },
+  emptyTitle: {
+    ...typography.titleSmall,
+    color: colors.text.primary,
+    textAlign: 'center',
+  },
+  emptyText: {
+    ...typography.body,
+    color: colors.text.secondary,
+    textAlign: 'center',
+    marginTop: spacing.xs,
+  },
+  recentCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    marginTop: spacing.sm,
+    padding: spacing.lg,
+    borderRadius: radii.lg,
+    borderWidth: 1,
+    borderColor: colors.border.subtle,
+    backgroundColor: colors.background.surface,
+  },
+  recentIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: radii.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.brand.primaryDim,
+    borderWidth: 1,
+    borderColor: colors.brand.primary,
+  },
+  recentName: {
+    ...typography.titleSmall,
+    color: colors.text.primary,
+  },
+  recentMeta: {
+    ...typography.bodySmall,
+    color: colors.text.secondary,
+    marginTop: spacing.xs,
+  },
+  recentBadge: {
+    flexDirection: 'row',
+    marginTop: spacing.sm,
   },
 });

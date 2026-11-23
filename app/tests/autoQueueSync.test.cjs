@@ -1167,6 +1167,7 @@ test('HomeFlowScreen: ExternalQueueScreen dispara polling de 5s e suspende em se
       if (name === '../arena/ActiveArenaScreen') return { __esModule: true, default: 'ActiveArenaScreen' };
       if (name === '../arena/ArenaQueueScreen') return { __esModule: true, default: 'ArenaQueueScreen' };
       if (name === './HomeScreen') return { __esModule: true, default: 'HomeScreen' };
+      if (name === './useHomeOverview') return { useHomeOverview: () => ({ status: 'loading', retry() {} }) };
       return require(name);
     });
 
@@ -1242,6 +1243,7 @@ test('HomeFlowScreen (Cenário 9): ExternalQueueScreen exibe aviso discreto de c
     if (name === '../arena/ActiveArenaScreen') return { __esModule: true, default: 'ActiveArenaScreen' };
     if (name === '../arena/ArenaQueueScreen') return { __esModule: true, default: 'ArenaQueueScreen' };
     if (name === './HomeScreen') return { __esModule: true, default: 'HomeScreen' };
+    if (name === './useHomeOverview') return { useHomeOverview: () => ({ status: 'loading', retry() {} }) };
     return require(name);
   });
 
@@ -1546,6 +1548,7 @@ test('HomeFlowScreen: ExternalQueueScreen suspende polling ao perder foco e reto
       if (name === '../arena/ActiveArenaScreen') return { __esModule: true, default: 'ActiveArenaScreen' };
       if (name === '../arena/ArenaQueueScreen') return { __esModule: true, default: 'ArenaQueueScreen' };
       if (name === './HomeScreen') return { __esModule: true, default: 'HomeScreen' };
+      if (name === './useHomeOverview') return { useHomeOverview: () => ({ status: 'loading', retry() {} }) };
       return require(name);
     });
 

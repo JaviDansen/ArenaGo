@@ -38,6 +38,7 @@ function renderHomeFlow(participation, extra = {}) {
       return { __esModule: true, default: 'ArenaQueueScreen' };
     }
     if (name === './HomeScreen') return { __esModule: true, default: 'HomeScreen' };
+    if (name === './useHomeOverview') return { useHomeOverview: () => ({ status: 'loading', retry() {} }) };
     return require(name);
   });
   const rendered = screen.exports.default({ navigation });

@@ -1,0 +1,1777 @@
+diff --git a/app/screens/event-entry/EventConfirmationScreen.js b/app/screens/event-entry/EventConfirmationScreen.js
+index b236704..0f17210 100644
+--- a/app/screens/event-entry/EventConfirmationScreen.js
++++ b/app/screens/event-entry/EventConfirmationScreen.js
+@@ -4,21 +4,31 @@ import { ScrollView, StyleSheet, Text, View } from 'react-native';
+ 
+ import { AuthBackground, Badge, Button, Card, ScreenHeader } from '../../components/ui';
+ import { ParticipationContext } from '../../context/ParticipationContext';
+-import { colors, spacing, typography } from '../../theme';
++import { colors, radii, spacing, typography } from '../../theme';
++import {
++  blockingAction, describeBlockingReasons, describeEventAvailability, describeExternalQueue,
++} from '../../utils/eventEntryPresentation';
++import { describeEventSchedule } from '../../utils/eventTime';
+ 
+ export default function EventConfirmationScreen({ navigation, route }) {
+-  const { admission, confirmEventEntry, retryEntrySync, isCurrentAdmission } = useContext(ParticipationContext);
++  const { admission, confirmEventEntry, retryEntrySync, isCurrentAdmission, refreshParticipation } =
++    useContext(ParticipationContext);
+   const { event, eligibility } = route.params;
+   const inFlight = useRef(false);
+   const current = admission?.event?.id === event.id;
+   const busy = current && ['joining', 'looking_up'].includes(admission.status);
+   const confirmed = current && admission.confirmedParticipationId;
++  const uncertain = current && admission.status === 'uncertain';
+   const blocked = !eligibility?.eligible;
++  const schedule = describeEventSchedule(event);
++  const availability = describeEventAvailability(eligibility);
++  const action = blocked ? blockingAction(eligibility?.blockingReasons) : null;
+ 
+   async function handleConfirmEntry() {
+     if (inFlight.current || busy || blocked || !isCurrentAdmission()) return;
+     inFlight.current = true;
+     try {
++      // Após resultado incerto, confirm reutiliza a mesma intenção e chave salvas.
+       const result = confirmed ? await retryEntrySync() : await confirmEventEntry(event.id);
+       if (result?.kind === 'complete' && isCurrentAdmission()) {
+         navigation.reset({ index: 0, routes: [{ name: 'MainTabs' }] });
+@@ -28,8 +38,16 @@ export default function EventConfirmationScreen({ navigation, route }) {
+     }
+   }
+ 
++  function goHome() {
++    if (typeof refreshParticipation === 'function') void refreshParticipation();
++    navigation.reset({ index: 0, routes: [{ name: 'MainTabs' }] });
++  }
++
+   const message = !current ? 'Consulte novamente o evento para confirmar o ingresso.' : admission?.error;
+   const disabled = busy || blocked || !current || admission.status === 'complete';
++  const buttonTitle = busy ? 'Aguarde...'
++    : confirmed ? 'Atualizar participação'
++      : uncertain ? 'Verificar ingresso' : 'Confirmar entrada';
+ 
+   return (
+     <AuthBackground variant="login" overlayOpacity={0.65} testID="event-confirmation-background">
+@@ -40,31 +58,57 @@ export default function EventConfirmationScreen({ navigation, route }) {
+         showsVerticalScrollIndicator={false}
+       >
+         <View style={styles.heroSection}>
+-          <Badge label="EVENTO ENCONTRADO" variant="success" />
+-          <Text style={styles.title}>Confira os dados do evento</Text>
++          <Badge label="EVENTO ENCONTRADO" variant="brand" />
++          <Text style={styles.eventName} numberOfLines={3} accessibilityRole="header">{event.name}</Text>
++          <View style={styles.statusRow} accessible accessibilityLabel={`Situação do evento: ${availability.label}`}>
++            <Badge label={availability.label} variant={availability.variant} />
++          </View>
+         </View>
+ 
+         <Card variant="highlight" style={styles.eventCard} testID="event-confirmation-card">
+-          <Text style={styles.eventName}>{event.name}</Text>
+-          <View style={styles.details}>
+-            <Detail label="Fuso horário" value={event.timezone} />
+-            <Detail label="Início" value={event.startsAt} />
+-            <Detail label="Término oficial" value={event.officialEndsAt} />
+-            <Detail label="Prazo operacional" value={event.operationalDeadlineAt} />
+-            <Detail label="Fila externa" value={event.externalQueueEnabled ? 'Habilitada' : 'Não habilitada'} />
+-          </View>
++          <Text style={styles.cardTitle}>Horários do evento</Text>
++          <Detail icon="📅" label="Data" value={schedule.date} />
++          <Detail icon="🕒" label="Início" value={schedule.start} />
++          <Detail icon="🚪" label="Entradas até" value={schedule.entriesUntil} />
++          <Detail icon="🏁" label="Encerramento final" value={schedule.finalDeadline} />
++          <Detail icon="🌎" label="Fuso horário" value={schedule.zoneLabel} />
+         </Card>
+ 
+         {blocked ? (
+-          <View style={styles.errorCard} accessibilityRole="alert">
++          <View style={styles.blockedCard} accessibilityRole="alert" testID="event-confirmation-blocked">
+             <Badge label="ENTRADA INDISPONÍVEL" variant="danger" />
+-            <Text style={styles.errorText}>Ingresso indisponível: {eligibility.blockingReasons.join(', ')}</Text>
++            {describeBlockingReasons(eligibility?.blockingReasons).map(text => (
++              <Text key={text} style={styles.blockedText}>{text}</Text>
++            ))}
++            {action === 'questionnaire' ? (
++              <Button
++                title="Completar questionário"
++                variant="secondary"
++                onPress={() => navigation.navigate('ProfileQuestionnaire')}
++                style={styles.blockedAction}
++              />
++            ) : null}
++            {action === 'home' ? (
++              <Button title="Voltar ao início" variant="secondary" onPress={goHome} style={styles.blockedAction} />
++            ) : null}
+           </View>
++        ) : (
++          <View style={styles.queueCard} testID="event-confirmation-queue-info">
++            <Text style={styles.queueTitle}>
++              {event.externalQueueEnabled ? 'Fila de entrada ativa' : 'Entrada direta na Arena'}
++            </Text>
++            <Text style={styles.queueText}>{describeExternalQueue(event.externalQueueEnabled)}</Text>
++          </View>
++        )}
++
++        {message ? (
++          <Text style={[styles.messageText, uncertain && styles.warningText]} accessibilityRole="alert">
++            {message}
++          </Text>
+         ) : null}
+-        {message ? <Text style={styles.errorText} accessibilityRole="alert">{message}</Text> : null}
+ 
+         <Button
+-          title={busy ? 'Aguarde...' : confirmed ? 'Atualizar participação' : 'Confirmar entrada'}
++          title={buttonTitle}
+           variant="primary"
+           onPress={handleConfirmEntry}
+           disabled={disabled}
+@@ -77,11 +121,15 @@ export default function EventConfirmationScreen({ navigation, route }) {
+   );
+ }
+ 
+-function Detail({ label, value }) {
++function Detail({ icon, label, value }) {
++  if (!value) return null;
+   return (
+-    <View style={styles.detailRow}>
+-      <Text style={styles.detailLabel}>{label}</Text>
+-      <Text style={styles.detailValue}>{String(value || 'Não informado')}</Text>
++    <View style={styles.detailRow} accessible accessibilityLabel={`${label}: ${value}`}>
++      <Text style={styles.detailIcon} importantForAccessibility="no">{icon}</Text>
++      <View style={styles.detailTextBlock}>
++        <Text style={styles.detailLabel}>{label}</Text>
++        <Text style={styles.detailValue}>{value}</Text>
++      </View>
+     </View>
+   );
+ }
+@@ -96,26 +144,40 @@ const styles = StyleSheet.create({
+   heroSection: {
+     marginBottom: spacing.xl,
+   },
+-  title: {
++  eventName: {
+     ...typography.titleLarge,
+     color: colors.text.primary,
+     marginTop: spacing.md,
+   },
++  statusRow: {
++    flexDirection: 'row',
++    marginTop: spacing.md,
++  },
+   eventCard: {
+     alignItems: 'stretch',
+   },
+-  eventName: {
+-    ...typography.titleMedium,
++  cardTitle: {
++    ...typography.titleSmall,
+     color: colors.text.primary,
+-  },
+-  details: {
+-    marginTop: spacing.lg,
++    marginBottom: spacing.sm,
+   },
+   detailRow: {
++    flexDirection: 'row',
++    alignItems: 'center',
++    gap: spacing.md,
+     borderTopWidth: 1,
+     borderTopColor: colors.border.subtle,
+     paddingVertical: spacing.md,
+   },
++  detailIcon: {
++    fontSize: 18,
++    width: 24,
++    textAlign: 'center',
++  },
++  detailTextBlock: {
++    flex: 1,
++    minWidth: 0,
++  },
+   detailLabel: {
+     ...typography.caption,
+     color: colors.text.muted,
+@@ -125,19 +187,47 @@ const styles = StyleSheet.create({
+     color: colors.text.primary,
+     marginTop: spacing.xxs,
+   },
+-  errorCard: {
++  queueCard: {
++    marginTop: spacing.lg,
++    padding: spacing.lg,
++    borderRadius: radii.lg,
++    borderWidth: 1,
++    borderColor: colors.brand.primary,
++    backgroundColor: colors.brand.primaryDim,
++  },
++  queueTitle: {
++    ...typography.titleSmall,
++    color: colors.text.primary,
++  },
++  queueText: {
++    ...typography.body,
++    color: colors.text.secondary,
++    marginTop: spacing.xs,
++  },
++  blockedCard: {
+     backgroundColor: colors.semantic.dangerBg,
+     borderColor: colors.semantic.danger,
+     borderWidth: 1,
+-    borderRadius: 12,
++    borderRadius: radii.lg,
+     padding: spacing.lg,
+     marginTop: spacing.lg,
+   },
+-  errorText: {
++  blockedText: {
+     ...typography.body,
+     color: '#FF9AAE',
+     marginTop: spacing.md,
+   },
++  blockedAction: {
++    marginTop: spacing.lg,
++  },
++  messageText: {
++    ...typography.body,
++    color: '#FF9AAE',
++    marginTop: spacing.lg,
++  },
++  warningText: {
++    color: colors.semantic.warning,
++  },
+   confirmButton: {
+     marginTop: spacing.xxl,
+   },
+diff --git a/app/screens/home/HomeFlowScreen.js b/app/screens/home/HomeFlowScreen.js
+index 5884c60..d5b8a88 100644
+--- a/app/screens/home/HomeFlowScreen.js
++++ b/app/screens/home/HomeFlowScreen.js
+@@ -11,6 +11,7 @@ import ArenaQueueScreen from '../arena/ArenaQueueScreen';
+ import HomeScreen from './HomeScreen';
+ import { useAuth } from '../../context/AuthContext';
+ import { fetchReturnEvaluationHistoryItem } from '../../services/participationHistoryService';
++import { useHomeOverview } from './useHomeOverview';
+ 
+ function ExternalQueueScreen({ participation, onRefresh, syncStale = false }) {
+   const { syncCurrentParticipation } = useContext(ParticipationContext) || {};
+@@ -116,6 +117,15 @@ export default function HomeFlowScreen({ navigation }) {
+     auth?.isAuthenticated, auth?.identityStatus, auth?.isInitializing,
+     canPresentReturnEvaluation, claimReturnEvaluation, navigation]);
+ 
++  const visibleReturnState = returnCheck && returnState && returnCheck.returned === returnState && returnCheck.version === returnStateVersion
++    && returnCheck.unavailable ? { ...returnState, pendingEvaluationParticipationIds:
++      returnState.pendingEvaluationParticipationIds.filter(id => id !== returnState.recentFinalization?.participationId) }
++    : returnState;
++  const overview = useHomeOverview({
++    auth, enabled: status === 'ready' && !participation, focused,
++    returnState: visibleReturnState, returnStateVersion,
++  });
++
+   if (status === 'loading') {
+     return <HomeScreen mode="loading" />;
+   }
+@@ -144,11 +154,7 @@ export default function HomeFlowScreen({ navigation }) {
+         message="Não foi possível confirmar a avaliação da participação encerrada. Tente novamente."
+         onRetry={refreshParticipation} />;
+     }
+-    const visibleReturnState = returnCheck && returnState && returnCheck.returned === returnState && returnCheck.version === returnStateVersion
+-      && returnCheck.unavailable ? { ...returnState, pendingEvaluationParticipationIds:
+-        returnState.pendingEvaluationParticipationIds.filter(id => id !== returnState.recentFinalization?.participationId) }
+-      : returnState;
+-    return <HomeScreen navigation={navigation} returnState={visibleReturnState} />;
++    return <HomeScreen navigation={navigation} returnState={visibleReturnState} overview={overview} />;
+   }
+ 
+   if (participation.status === 'waiting') {
+diff --git a/app/screens/home/HomeScreen.js b/app/screens/home/HomeScreen.js
+index c0fcd69..28ae2ff 100644
+--- a/app/screens/home/HomeScreen.js
++++ b/app/screens/home/HomeScreen.js
+@@ -4,9 +4,16 @@ import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from
+ 
+ import { AuthBackground, Badge, Button, Card } from '../../components/ui';
+ import { AuthContext } from '../../context/AuthContext';
+-import { colors, spacing, typography } from '../../theme';
++import { colors, radii, spacing, typography } from '../../theme';
++import { describePendingEvaluation, describeRecentParticipation } from '../../utils/homeOverview';
+ 
+-export default function HomeScreen({ navigation, returnState, mode = 'ready', message, onRetry }) {
++const TUTORIAL_STEPS = [
++  { icon: '📷', title: 'Acesse o evento', text: 'Escaneie o QR Code ou digite o código.' },
++  { icon: '🎮', title: 'Participe das experiências', text: 'Entre nas filas e aguarde sua vez.' },
++  { icon: '⭐', title: 'Avalie a sua experiência', text: 'Ao final, conte como foi participar.' },
++];
++
++export default function HomeScreen({ navigation, returnState, overview, mode = 'ready', message, onRetry }) {
+   const auth = useContext(AuthContext);
+   const hasPendingQuestionnaire =
+     auth?.user != null && auth.user.hasCompletedQuestionnaire === false;
+@@ -18,10 +25,7 @@ export default function HomeScreen({ navigation, returnState, mode = 'ready', me
+       <StatusBar style="light" />
+       {mode === 'loading' || mode === 'error' ? (
+         <View style={styles.stateScreen}>
+-          <View style={styles.brandRow}>
+-            <Text style={styles.brandArena}>Arena</Text>
+-            <Text style={styles.brandGo}>GO</Text>
+-          </View>
++          <Brand />
+           <Card variant="elevated" style={styles.stateCard}>
+             {mode === 'loading' ? (
+               <>
+@@ -45,16 +49,12 @@ export default function HomeScreen({ navigation, returnState, mode = 'ready', me
+           showsVerticalScrollIndicator={false}
+         >
+           <View style={styles.topBar}>
+-            <View style={styles.brandRow}>
+-              <Text style={styles.brandArena}>Arena</Text>
+-              <Text style={styles.brandGo}>GO</Text>
+-            </View>
+-            <Badge label="ONLINE" variant="brand" />
++            <Brand />
+           </View>
+ 
+           <View style={styles.greetingSection}>
+-            <Text style={styles.welcome}>
+-              {firstName ? `Olá, ${firstName}!` : 'Bem-vindo ao ArenaGo!'}
++            <Text style={styles.welcome} numberOfLines={2} accessibilityRole="header">
++              {firstName ? `Olá, ${firstName}!` : 'Olá!'}
+             </Text>
+             <Text style={styles.description}>
+               Acompanhe suas experiências e gerencie sua participação nos eventos presenciais.
+@@ -67,22 +67,6 @@ export default function HomeScreen({ navigation, returnState, mode = 'ready', me
+               <Text style={styles.noticeText}>Sua participação recente foi encerrada.</Text>
+             </Card>
+           ) : null}
+-          {returnState?.pendingEvaluationParticipationIds?.length > 0 ? (
+-            <Card variant="elevated" style={styles.noticeCard}>
+-              <Badge label="AVALIAÇÃO PENDENTE" variant="warning" />
+-              <Text style={styles.noticeText}>
+-                Você possui {returnState.pendingEvaluationParticipationIds.length} avaliação(ões) pendente(s).
+-              </Text>
+-              <Pressable
+-                onPress={() => navigation.navigate('Eventos')}
+-                accessibilityRole="button"
+-                accessibilityLabel="Abrir avaliações pendentes na aba Eventos"
+-                style={styles.inlineAction}
+-              >
+-                <Text style={styles.inlineActionText}>Ver eventos e avaliações →</Text>
+-              </Pressable>
+-            </Card>
+-          ) : null}
+ 
+           {hasPendingQuestionnaire ? (
+             <Card variant="elevated" style={styles.noticeCard} testID="home-pending-questionnaire-banner">
+@@ -114,30 +98,153 @@ export default function HomeScreen({ navigation, returnState, mode = 'ready', me
+             />
+           </Card>
+ 
+-          <View style={styles.sectionBlock}>
+-            <Text style={styles.sectionLabel}>STATUS DE PARTICIPAÇÃO</Text>
+-            <Card variant="default" style={styles.participationCard} testID="home-empty-participation-card">
+-              <Badge label="SEM PARTICIPAÇÃO ATIVA" variant="default" />
+-              <Text style={styles.participationTitle}>Nenhuma participação ativa no momento</Text>
+-              <Text style={styles.participationSubtitle}>
+-                Você não está aguardando em uma fila nem em atendimento. Use o botão acima quando estiver em um evento.
+-              </Text>
+-              <Pressable
+-                style={styles.inlineAction}
+-                onPress={() => navigation.navigate('Eventos')}
+-                accessibilityRole="button"
+-                accessibilityLabel="Consultar histórico de eventos"
+-              >
+-                <Text style={styles.inlineActionText}>Consultar histórico na aba Eventos →</Text>
+-              </Pressable>
+-            </Card>
+-          </View>
++          <PendingEvaluationCard overview={overview} navigation={navigation} />
++          <OverviewSection overview={overview} navigation={navigation} />
+         </ScrollView>
+       )}
+     </AuthBackground>
+   );
+ }
+ 
++function Brand() {
++  return (
++    <View style={styles.brandRow} accessibilityLabel="ArenaGo">
++      <Text style={styles.brandArena}>Arena</Text>
++      <Text style={styles.brandGo}>GO</Text>
++    </View>
++  );
++}
++
++function PendingEvaluationCard({ overview, navigation }) {
++  if (overview?.status !== 'history') return null;
++  const pending = describePendingEvaluation(overview.pending, overview.recent);
++  if (!pending) return null;
++  const open = pending.kind === 'single'
++    ? () => navigation.navigate('RealEvaluation', {
++      participationId: pending.item.participationId, historyItem: pending.item,
++    })
++    : () => navigation.navigate('Eventos');
++  return (
++    <Pressable
++      onPress={open}
++      style={({ pressed }) => [styles.pendingCard, pressed && styles.pressed]}
++      accessibilityRole="button"
++      accessibilityLabel={`Avaliação pendente. ${pending.text}`}
++      accessibilityHint={pending.kind === 'single' ? 'Abre a avaliação desta participação' : 'Abre a aba Eventos'}
++      testID="home-pending-evaluation-card"
++    >
++      <View style={styles.pendingIcon}><Text style={styles.iconText}>⭐</Text></View>
++      <View style={styles.flexText}>
++        <Text style={styles.pendingTitle}>Avaliação pendente</Text>
++        <Text style={styles.pendingText}>{pending.text}</Text>
++      </View>
++      <Text style={styles.chevron} importantForAccessibility="no">›</Text>
++    </Pressable>
++  );
++}
++
++function OverviewSection({ overview, navigation }) {
++  if (!overview) return null;
++
++  if (overview.status === 'loading') {
++    return (
++      <Card variant="default" style={styles.overviewStateCard} testID="home-overview-loading">
++        <ActivityIndicator size="small" color={colors.brand.primaryLight} />
++        <Text style={styles.stateText}>Carregando suas participações...</Text>
++      </Card>
++    );
++  }
++
++  if (overview.status === 'error') {
++    return (
++      <Card variant="default" style={styles.overviewStateCard} testID="home-overview-error">
++        <Badge label="HISTÓRICO INDISPONÍVEL" variant="danger" />
++        <Text style={styles.stateText}>
++          {overview.error === 'network'
++            ? 'Não foi possível conectar ao servidor para consultar suas participações.'
++            : overview.error === 'authorization'
++              ? 'Não foi possível autorizar a consulta das suas participações.'
++              : 'Não foi possível consultar suas participações agora.'}
++        </Text>
++        <Button title="Tentar novamente" variant="secondary" onPress={overview.retry} style={styles.stateAction} />
++      </Card>
++    );
++  }
++
++  if (overview.status === 'empty') {
++    return (
++      <View testID="home-first-access">
++        <Text style={styles.sectionTitle} accessibilityRole="header">Como funciona?</Text>
++        <Text style={styles.sectionSubtitle}>Veja o passo a passo para participar de um evento:</Text>
++        <Card variant="default" style={styles.tutorialCard}>
++          {TUTORIAL_STEPS.map((step, index) => (
++            <View
++              key={step.title}
++              style={[styles.stepRow, index > 0 && styles.stepDivider]}
++              accessible
++              accessibilityLabel={`Passo ${index + 1}: ${step.title}. ${step.text}`}
++            >
++              <View style={styles.stepIcon}><Text style={styles.iconText}>{step.icon}</Text></View>
++              <View style={styles.flexText}>
++                <Text style={styles.stepTitle}>{index + 1}. {step.title}</Text>
++                <Text style={styles.stepText}>{step.text}</Text>
++              </View>
++            </View>
++          ))}
++        </Card>
++        <View style={styles.emptyState} testID="home-empty-history">
++          <Text style={styles.emptyIcon} importantForAccessibility="no">🎮</Text>
++          <Text style={styles.emptyTitle}>Você ainda não participou de nenhum evento.</Text>
++          <Text style={styles.emptyText}>Quando participar, suas experiências aparecerão aqui.</Text>
++        </View>
++      </View>
++    );
++  }
++
++  if (overview.status !== 'history') return null;
++  const recent = describeRecentParticipation(overview.recent);
++  return (
++    <View testID="home-recent-section">
++      <View style={styles.sectionHeader}>
++        <Text style={styles.sectionTitle} accessibilityRole="header">Evento recente</Text>
++        <Pressable
++          onPress={() => navigation.navigate('Eventos')}
++          style={styles.seeAll}
++          accessibilityRole="button"
++          accessibilityLabel="Ver todos os eventos"
++          testID="home-see-all-events"
++        >
++          <Text style={styles.seeAllText}>Ver todos</Text>
++        </Pressable>
++      </View>
++      <Pressable
++        onPress={() => navigation.navigate('ParticipationDetails', {
++          participationId: overview.recent.participationId, historyItem: overview.recent,
++        })}
++        style={({ pressed }) => [styles.recentCard, pressed && styles.pressed]}
++        accessibilityRole="button"
++        accessibilityLabel={[recent.eventName, recent.date, recent.time, recent.statusLabel].filter(Boolean).join(', ')}
++        accessibilityHint="Abre os detalhes desta participação"
++        testID="home-recent-event-card"
++      >
++        <View style={styles.recentIcon}><Text style={styles.iconText}>🎮</Text></View>
++        <View style={styles.flexText}>
++          <Text style={styles.recentName} numberOfLines={2}>{recent.eventName}</Text>
++          {recent.date ? (
++            <Text style={styles.recentMeta}>
++              📅 {recent.date}{recent.time ? `   🕒 ${recent.time}` : ''}
++            </Text>
++          ) : null}
++          <View style={styles.recentBadge}>
++            <Badge label={recent.statusLabel.toUpperCase()} variant={recent.statusVariant} />
++          </View>
++        </View>
++        <Text style={styles.chevron} importantForAccessibility="no">›</Text>
++      </Pressable>
++    </View>
++  );
++}
++
+ const styles = StyleSheet.create({
+   stateScreen: {
+     flex: 1,
+@@ -219,7 +326,7 @@ const styles = StyleSheet.create({
+     marginTop: spacing.md,
+   },
+   heroCard: {
+-    marginBottom: spacing.xxl,
++    marginBottom: spacing.xl,
+   },
+   heroTitle: {
+     ...typography.titleLarge,
+@@ -234,35 +341,166 @@ const styles = StyleSheet.create({
+   eventButton: {
+     marginTop: spacing.xl,
+   },
+-  sectionBlock: {
++  pressed: {
++    opacity: 0.8,
++  },
++  pendingCard: {
++    flexDirection: 'row',
++    alignItems: 'center',
++    minHeight: 64,
++    gap: spacing.md,
++    padding: spacing.lg,
+     marginBottom: spacing.xl,
++    borderRadius: radii.lg,
++    borderWidth: 1,
++    borderColor: colors.semantic.warning,
++    backgroundColor: colors.semantic.warningBg,
+   },
+-  sectionLabel: {
+-    ...typography.tag,
+-    color: colors.text.muted,
+-    marginBottom: spacing.md,
++  pendingIcon: {
++    width: 40,
++    height: 40,
++    borderRadius: radii.md,
++    alignItems: 'center',
++    justifyContent: 'center',
++    backgroundColor: colors.background.elevated,
++  },
++  pendingTitle: {
++    ...typography.titleSmall,
++    color: colors.text.primary,
++  },
++  pendingText: {
++    ...typography.body,
++    color: colors.text.secondary,
++    marginTop: spacing.xxs,
++  },
++  iconText: {
++    fontSize: 20,
++  },
++  flexText: {
++    flex: 1,
++    minWidth: 0,
++  },
++  chevron: {
++    color: colors.brand.primaryLight,
++    fontSize: 28,
++    fontWeight: '600',
+   },
+-  participationCard: {
++  overviewStateCard: {
+     alignItems: 'flex-start',
++    gap: spacing.md,
++    marginBottom: spacing.xl,
+   },
+-  participationTitle: {
+-    ...typography.titleSmall,
++  sectionHeader: {
++    flexDirection: 'row',
++    alignItems: 'center',
++    justifyContent: 'space-between',
++    gap: spacing.md,
++  },
++  sectionTitle: {
++    ...typography.titleMedium,
+     color: colors.text.primary,
+-    marginTop: spacing.md,
+   },
+-  participationSubtitle: {
++  sectionSubtitle: {
+     ...typography.body,
+     color: colors.text.secondary,
+-    marginTop: spacing.sm,
++    marginTop: spacing.xs,
++    marginBottom: spacing.md,
+   },
+-  inlineAction: {
++  seeAll: {
+     minHeight: 48,
++    minWidth: 48,
+     justifyContent: 'center',
+-    marginTop: spacing.sm,
++    alignItems: 'flex-end',
+   },
+-  inlineActionText: {
++  seeAllText: {
+     ...typography.body,
+     color: colors.brand.primaryLight,
+     fontWeight: '700',
+   },
++  tutorialCard: {
++    paddingVertical: spacing.sm,
++  },
++  stepRow: {
++    flexDirection: 'row',
++    alignItems: 'center',
++    gap: spacing.md,
++    paddingVertical: spacing.md,
++  },
++  stepDivider: {
++    borderTopWidth: 1,
++    borderTopColor: colors.border.subtle,
++  },
++  stepIcon: {
++    width: 44,
++    height: 44,
++    borderRadius: radii.md,
++    alignItems: 'center',
++    justifyContent: 'center',
++    backgroundColor: colors.brand.primaryDim,
++    borderWidth: 1,
++    borderColor: colors.brand.primary,
++  },
++  stepTitle: {
++    ...typography.titleSmall,
++    color: colors.text.primary,
++  },
++  stepText: {
++    ...typography.body,
++    color: colors.text.secondary,
++    marginTop: spacing.xxs,
++  },
++  emptyState: {
++    alignItems: 'center',
++    paddingVertical: spacing.xxl,
++    paddingHorizontal: spacing.lg,
++  },
++  emptyIcon: {
++    fontSize: 32,
++    marginBottom: spacing.md,
++  },
++  emptyTitle: {
++    ...typography.titleSmall,
++    color: colors.text.primary,
++    textAlign: 'center',
++  },
++  emptyText: {
++    ...typography.body,
++    color: colors.text.secondary,
++    textAlign: 'center',
++    marginTop: spacing.xs,
++  },
++  recentCard: {
++    flexDirection: 'row',
++    alignItems: 'center',
++    gap: spacing.md,
++    marginTop: spacing.sm,
++    padding: spacing.lg,
++    borderRadius: radii.lg,
++    borderWidth: 1,
++    borderColor: colors.border.subtle,
++    backgroundColor: colors.background.surface,
++  },
++  recentIcon: {
++    width: 48,
++    height: 48,
++    borderRadius: radii.md,
++    alignItems: 'center',
++    justifyContent: 'center',
++    backgroundColor: colors.brand.primaryDim,
++    borderWidth: 1,
++    borderColor: colors.brand.primary,
++  },
++  recentName: {
++    ...typography.titleSmall,
++    color: colors.text.primary,
++  },
++  recentMeta: {
++    ...typography.bodySmall,
++    color: colors.text.secondary,
++    marginTop: spacing.xs,
++  },
++  recentBadge: {
++    flexDirection: 'row',
++    marginTop: spacing.sm,
++  },
+ });
+diff --git a/app/screens/home/useHomeOverview.js b/app/screens/home/useHomeOverview.js
+new file mode 100644
+index 0000000..7010f84
+--- /dev/null
++++ b/app/screens/home/useHomeOverview.js
+@@ -0,0 +1,60 @@
++import { useEffect, useRef, useState } from 'react';
++
++import {
++  fetchParticipationHistory,
++  fetchPendingEvaluationHistoryItem,
++} from '../../services/participationHistoryService.js';
++import { loadHomeOverview, pendingEvaluationIds } from '../../utils/homeOverview.js';
++
++const LOADING = { status: 'loading', recent: null, pending: null, error: null };
++
++function errorKind(error) {
++  if (error?.status === 401 || error?.status === 403) return 'authorization';
++  if (error?.isNetworkError || error?.isTimeout) return 'network';
++  return 'unavailable';
++}
++
++/**
++ * Visão da Home para a conta e sessão atuais. Recarrega ao focar a aba e quando o
++ * provider publica um novo estado de retorno; respostas de outra conta/sessão são descartadas.
++ */
++export function useHomeOverview({ auth, enabled, focused, returnState, returnStateVersion }) {
++  const userId = auth?.isAuthenticated ? auth.user?.id ?? null : null;
++  const epoch = userId ? auth.getSessionEpoch?.() ?? null : null;
++  const client = auth?.httpClient ?? null;
++  const verified = auth?.isIdentityVerified?.() === true;
++  const key = userId && client && verified ? `${userId}#${epoch}` : null;
++  const pendingIds = pendingEvaluationIds(returnState);
++  const pendingKey = pendingIds.join(',');
++
++  const generation = useRef(0);
++  const [reload, setReload] = useState(0);
++  const [state, setState] = useState({ key: null, ...LOADING });
++
++  useEffect(() => {
++    const requestId = ++generation.current;
++    if (!enabled || !focused || !key) return () => { generation.current += 1; };
++    const isCurrent = () => requestId === generation.current;
++    // Mantém os dados da mesma conta enquanto recarrega; outra conta começa do zero.
++    setState(previous => (previous.key === key && previous.status !== 'error'
++      ? { ...previous, refreshing: true } : { key, ...LOADING }));
++    loadHomeOverview(client, {
++      pendingIds,
++      isCurrent,
++      fetchHistory: fetchParticipationHistory,
++      fetchPendingItem: fetchPendingEvaluationHistoryItem,
++    }).then(result => {
++      if (!isCurrent() || !result) return;
++      setState({ key, status: result.recent ? 'history' : 'empty', recent: result.recent,
++        pending: result.pending, error: null });
++    }).catch(error => {
++      if (!isCurrent()) return;
++      setState({ key, status: 'error', recent: null, pending: null, error: errorKind(error) });
++    });
++    return () => { generation.current += 1; };
++    // pendingIds é representado por pendingKey.
++  }, [enabled, focused, key, client, returnStateVersion, pendingKey, reload]);
++
++  const current = state.key === key && key !== null ? state : { key, ...LOADING };
++  return { ...current, retry: () => setReload(value => value + 1) };
++}
+diff --git a/app/tests/adminNavigation.test.cjs b/app/tests/adminNavigation.test.cjs
+index 2546b9a..61657b2 100644
+--- a/app/tests/adminNavigation.test.cjs
++++ b/app/tests/adminNavigation.test.cjs
+@@ -109,9 +109,11 @@ test('AdminArea reutiliza a pilha Heliom e as rotas antigas não são registrada
+ test('Início permite entrada em evento sem oferecer atalhos Admin ou Staff demonstrativos', () => {
+   const h = createHarness('screens/home/HomeScreen.js', {
+     authContext: { user: { id: 'u-1', hasCompletedQuestionnaire: true } },
++    // PARTICIPANTE-01: o card fixo "sem participação" virou o estado de conta sem histórico.
++    props: { overview: { status: 'empty', recent: null, pending: null, retry() {} } },
+   });
+   assert.ok(!h.nodes.some((node) => node.type === 'Pressable' && /Admin/.test(textOf(node))));
+-  for (const testID of ['home-background', 'home-event-entry-card', 'home-empty-participation-card']) {
++  for (const testID of ['home-background', 'home-event-entry-card', 'home-first-access', 'home-empty-history']) {
+     assert.ok(h.nodes.some((node) => node.props.testID === testID), `${testID} preservado`);
+   }
+   assert.ok(!h.nodes.some((node) => node.type === 'Pressable' && /Staff/.test(textOf(node))));
+diff --git a/app/tests/autoQueueSync.test.cjs b/app/tests/autoQueueSync.test.cjs
+index e3bf391..933adde 100644
+--- a/app/tests/autoQueueSync.test.cjs
++++ b/app/tests/autoQueueSync.test.cjs
+@@ -1167,6 +1167,7 @@ test('HomeFlowScreen: ExternalQueueScreen dispara polling de 5s e suspende em se
+       if (name === '../arena/ActiveArenaScreen') return { __esModule: true, default: 'ActiveArenaScreen' };
+       if (name === '../arena/ArenaQueueScreen') return { __esModule: true, default: 'ArenaQueueScreen' };
+       if (name === './HomeScreen') return { __esModule: true, default: 'HomeScreen' };
++      if (name === './useHomeOverview') return { useHomeOverview: () => ({ status: 'loading', retry() {} }) };
+       return require(name);
+     });
+ 
+@@ -1242,6 +1243,7 @@ test('HomeFlowScreen (Cenário 9): ExternalQueueScreen exibe aviso discreto de c
+     if (name === '../arena/ActiveArenaScreen') return { __esModule: true, default: 'ActiveArenaScreen' };
+     if (name === '../arena/ArenaQueueScreen') return { __esModule: true, default: 'ArenaQueueScreen' };
+     if (name === './HomeScreen') return { __esModule: true, default: 'HomeScreen' };
++    if (name === './useHomeOverview') return { useHomeOverview: () => ({ status: 'loading', retry() {} }) };
+     return require(name);
+   });
+ 
+@@ -1546,6 +1548,7 @@ test('HomeFlowScreen: ExternalQueueScreen suspende polling ao perder foco e reto
+       if (name === '../arena/ActiveArenaScreen') return { __esModule: true, default: 'ActiveArenaScreen' };
+       if (name === '../arena/ArenaQueueScreen') return { __esModule: true, default: 'ArenaQueueScreen' };
+       if (name === './HomeScreen') return { __esModule: true, default: 'HomeScreen' };
++      if (name === './useHomeOverview') return { useHomeOverview: () => ({ status: 'loading', retry() {} }) };
+       return require(name);
+     });
+ 
+diff --git a/app/tests/eventEntry.test.cjs b/app/tests/eventEntry.test.cjs
+index b2a6f1f..c811f3b 100644
+--- a/app/tests/eventEntry.test.cjs
++++ b/app/tests/eventEntry.test.cjs
+@@ -228,7 +228,9 @@ test('ineligibilidade mostra motivo real e impede POST', async () => {
+   };
+   const rig = screenRig('screens/event-entry/EventConfirmationScreen.js', context,
+     { event, eligibility: { eligible: false, blockingReasons: ['PROFILE_INCOMPLETE'] } });
+-  assert.match(rig.text(), /PROFILE_INCOMPLETE/);
++  // PARTICIPANTE-01: o motivo real aparece traduzido, sem o código técnico.
++  assert.match(rig.text(), /Complete o questionário de perfil antes de entrar no evento/);
++  assert.doesNotMatch(rig.text(), /PROFILE_INCOMPLETE/);
+   assert.equal(rig.button('Confirmar entrada').props.disabled, true);
+   await rig.button('Confirmar entrada').props.onPress?.();
+   assert.equal(count, 0);
+@@ -773,3 +775,89 @@ test('ENTRY-QR-01: HomeScreen exibe texto atualizado com menção a QR Code e di
+   entryButton.props.onPress();
+   assert.deepEqual(calls, ['EventEntry']);
+ });
++
++// -------------------------------------------------------------
++// PARTICIPANTE-01 — apresentação do evento encontrado
++// -------------------------------------------------------------
++
++test('P01-14/22: evento encontrado mostra horários formatados no fuso do evento, sem ISO cru', () => {
++  const context = { admission: { status: 'ready', event }, isCurrentAdmission: () => true };
++  const rig = screenRig('screens/event-entry/EventConfirmationScreen.js', context, { event, eligibility: eligible });
++  const text = rig.text();
++  assert.match(text, /Arena real/);
++  assert.match(text, /ENTRADAS ABERTAS/);
++  assert.match(text, /08\/11\/2026/);
++  assert.match(text, /07:00/); // 10:00Z em America/Sao_Paulo
++  assert.match(text, /17:00/); // término oficial
++  assert.match(text, /Horário de Brasília \(America\/Sao_Paulo\)/);
++  assert.doesNotMatch(text, /2026-11-08T/);
++});
++
++test('P01-19/20: informação da fila externa segue a configuração real do evento', () => {
++  const context = { admission: { status: 'ready', event }, isCurrentAdmission: () => true };
++  const withQueue = screenRig('screens/event-entry/EventConfirmationScreen.js', context, { event, eligibility: eligible });
++  assert.match(withQueue.text(), /Fila de entrada ativa/);
++  const direct = { ...event, externalQueueEnabled: false };
++  const directRig = screenRig('screens/event-entry/EventConfirmationScreen.js',
++    { admission: { status: 'ready', event: direct }, isCurrentAdmission: () => true }, { event: direct, eligibility: eligible });
++  assert.match(directRig.text(), /Entrada direta na Arena/);
++});
++
++test('P01-16: evento ainda não iniciado é recusado sem POST e sem usar o relógio do aparelho', async () => {
++  let posts = 0;
++  const context = {
++    admission: { status: 'ready', event }, isCurrentAdmission: () => true,
++    confirmEventEntry: async () => { posts++; return { kind: 'complete' }; },
++  };
++  const rig = screenRig('screens/event-entry/EventConfirmationScreen.js', context,
++    { event, eligibility: { eligible: false, blockingReasons: ['EVENT_NOT_STARTED'] } });
++  assert.match(rig.text(), /AINDA NÃO INICIADO/);
++  assert.match(rig.text(), /O evento ainda não começou/);
++  assert.equal(rig.button('Confirmar entrada').props.disabled, true);
++  await rig.button('Confirmar entrada').props.onPress?.();
++  assert.equal(posts, 0);
++});
++
++test('P01-18: participação já existente oferece voltar ao início sem criar outra', async () => {
++  let posts = 0, refreshes = 0;
++  const context = {
++    admission: { status: 'ready', event }, isCurrentAdmission: () => true,
++    confirmEventEntry: async () => { posts++; return { kind: 'complete' }; },
++    refreshParticipation: async () => { refreshes++; },
++  };
++  const rig = screenRig('screens/event-entry/EventConfirmationScreen.js', context,
++    { event, eligibility: { eligible: false, blockingReasons: ['PARTICIPATION_ALREADY_CURRENT'] } });
++  assert.match(rig.text(), /Você já está participando de um evento/);
++  await rig.button('Voltar ao início').props.onPress();
++  assert.equal(posts, 0);
++  assert.equal(refreshes, 1);
++  assert.deepEqual(structuredClone(rig.calls), [{ reset: { index: 0, routes: [{ name: 'MainTabs' }] } }]);
++});
++
++test('P01-17: questionário incompleto leva ao questionário sem tentar o ingresso', async () => {
++  let posts = 0;
++  const context = {
++    admission: { status: 'ready', event }, isCurrentAdmission: () => true,
++    confirmEventEntry: async () => { posts++; return { kind: 'complete' }; },
++  };
++  const rig = screenRig('screens/event-entry/EventConfirmationScreen.js', context,
++    { event, eligibility: { eligible: false, blockingReasons: ['PROFILE_INCOMPLETE'] } });
++  await rig.button('Completar questionário').props.onPress();
++  assert.equal(posts, 0);
++  assert.deepEqual(structuredClone(rig.calls), [{ name: 'ProfileQuestionnaire', value: undefined }]);
++});
++
++test('P01-21: resultado incerto oferece verificar o mesmo ingresso, sem nova intenção na tela', async () => {
++  const confirmations = [];
++  const context = {
++    admission: { status: 'uncertain', event, error: 'O tempo de resposta terminou. O resultado pode ter sido confirmado; tente novamente com segurança.' },
++    isCurrentAdmission: () => true,
++    confirmEventEntry: async (eventId) => { confirmations.push(eventId); return { kind: 'complete' }; },
++  };
++  const rig = screenRig('screens/event-entry/EventConfirmationScreen.js', context, { event, eligibility: eligible });
++  assert.match(rig.text(), /O resultado pode ter sido confirmado/);
++  await rig.button('Verificar ingresso').props.onPress();
++  // A mesma chave persistida é reutilizada pelo store (ver eventAdmissionService.test).
++  assert.deepEqual(confirmations, [event.id]);
++  assert.deepEqual(structuredClone(rig.calls), [{ reset: { index: 0, routes: [{ name: 'MainTabs' }] } }]);
++});
+diff --git a/app/tests/homeFlow.test.cjs b/app/tests/homeFlow.test.cjs
+index 2e96ed5..2aa299b 100644
+--- a/app/tests/homeFlow.test.cjs
++++ b/app/tests/homeFlow.test.cjs
+@@ -38,6 +38,7 @@ function renderHomeFlow(participation, extra = {}) {
+       return { __esModule: true, default: 'ArenaQueueScreen' };
+     }
+     if (name === './HomeScreen') return { __esModule: true, default: 'HomeScreen' };
++    if (name === './useHomeOverview') return { useHomeOverview: () => ({ status: 'loading', retry() {} }) };
+     return require(name);
+   });
+   const rendered = screen.exports.default({ navigation });
+diff --git a/app/tests/homeReturnEvaluation.test.cjs b/app/tests/homeReturnEvaluation.test.cjs
+index 190bae9..947dc6c 100644
+--- a/app/tests/homeReturnEvaluation.test.cjs
++++ b/app/tests/homeReturnEvaluation.test.cjs
+@@ -58,6 +58,7 @@ function rig({ current = null, returnState = returned, read } = {}) {
+     if (name === '../../context/ParticipationContext') return { ParticipationContext: {} };
+     if (name === '../../services/participationHistoryService') return history;
+     if (name === '../../components/ui') return {};
++    if (name === './useHomeOverview') return { useHomeOverview: () => ({ status: 'loading', retry() {} }) };
+     if (name.startsWith('../arena/') || name === './HomeScreen') return { __esModule: true, default: name.split('/').at(-1) };
+     return require(name);
+   }).exports;
+diff --git a/app/tests/participante01Home.test.cjs b/app/tests/participante01Home.test.cjs
+new file mode 100644
+index 0000000..3c8ff83
+--- /dev/null
++++ b/app/tests/participante01Home.test.cjs
+@@ -0,0 +1,399 @@
++// PARTICIPANTE-01 — Home do Participante e formatação de horários do ingresso.
++const assert = require('node:assert/strict');
++const test = require('node:test');
++
++// Os módulos rodam em outro contexto vm; comparar pelo conteúdo.
++const same = (actual, expected, message) => assert.deepEqual(structuredClone(actual), expected, message);
++const { createHarness, loadModule, textOf } = require('./helpers/questionnaireHarness.cjs');
++
++const eventTime = loadModule('utils/eventTime.js', require).exports;
++const overviewUtils = loadModule('utils/homeOverview.js', name =>
++  name === './eventTime.js' ? eventTime : require(name)).exports;
++const entryPresentation = loadModule('utils/eventEntryPresentation.js', require).exports;
++
++const ids = {
++  recent: '11111111-1111-4111-8111-111111111111',
++  older: '22222222-2222-4222-8222-222222222222',
++  event: '33333333-3333-4333-8333-333333333333',
++  userA: '44444444-4444-4444-8444-444444444444',
++  userB: '55555555-5555-4555-8555-555555555555',
++};
++
++function historyItem(overrides = {}) {
++  return {
++    participationId: ids.recent,
++    event: { id: ids.event, name: 'Arena Games Festival' },
++    status: 'finished',
++    joinedAt: '2026-11-08T13:00:00.000000Z',
++    arenaEnteredAt: '2026-11-08T13:05:00.000000Z',
++    finishedAt: '2026-11-08T15:00:00.000000Z',
++    completedServicesCount: 2,
++    evaluation: { eligible: true, submitted: false, pending: true },
++    ...overrides,
++  };
++}
++
++function renderHome(overview, user = { id: ids.userA, name: 'Maria Souza', hasCompletedQuestionnaire: true }) {
++  const h = createHarness('screens/home/HomeScreen.js', {
++    authContext: { isAuthenticated: true, user },
++    props: { overview },
++  });
++  const text = () => h.nodes.map(node => (node.type === 'Text' ? textOf(node) : '')).join(' | ');
++  const byTestId = testID => h.nodes.find(node => node.props?.testID === testID);
++  return { h, text, byTestId };
++}
++
++// ---------------------------------------------------------------- horários
++
++test('P01-22: horários do evento usam o fuso IANA informado, não o do aparelho', () => {
++  const iso = '2026-11-08T13:00:00.000Z';
++  same(eventTime.formatInstantParts(iso, 'America/Sao_Paulo'),
++    { date: '08/11/2026', time: '10:00', zone: 'America/Sao_Paulo' });
++  assert.equal(eventTime.formatInstantParts(iso, 'America/Manaus').time, '09:00');
++  assert.equal(eventTime.formatInstantParts(iso, 'America/Noronha').time, '11:00');
++});
++
++test('P01-22: fuso desconhecido cai para UTC explícito e instante inválido não é exibido', () => {
++  same(eventTime.formatInstantParts('2026-11-08T13:00:00.000Z', 'Mars/Base'),
++    { date: '08/11/2026', time: '13:00', zone: 'UTC' });
++  assert.equal(eventTime.describeTimeZone('Mars/Base'), 'UTC');
++  assert.equal(eventTime.formatInstantParts('não é data', 'America/Sao_Paulo'), null);
++  assert.equal(eventTime.describeTimeZone('America/Sao_Paulo'), 'Horário de Brasília (America/Sao_Paulo)');
++});
++
++test('P01-22: evento que atravessa a meia-noite mostra a data completa do encerramento', () => {
++  const schedule = eventTime.describeEventSchedule({
++    timezone: 'America/Sao_Paulo',
++    startsAt: '2026-11-08T22:00:00.000Z', // 19:00 de 08/11
++    officialEndsAt: '2026-11-09T04:00:00.000Z', // 01:00 de 09/11
++    operationalDeadlineAt: '2026-11-09T05:00:00.000Z', // 02:00 de 09/11
++  });
++  same(schedule, {
++    date: '08/11/2026', start: '19:00', entriesUntil: '09/11/2026 às 01:00',
++    finalDeadline: '02:00', zoneLabel: 'Horário de Brasília (America/Sao_Paulo)',
++  });
++  const sameDay = eventTime.describeEventSchedule({
++    timezone: 'America/Sao_Paulo', startsAt: '2026-11-08T13:00:00.000Z',
++    officialEndsAt: '2026-11-08T20:00:00.000Z', operationalDeadlineAt: '2026-11-08T21:00:00.000Z',
++  });
++  assert.equal(sameDay.entriesUntil, '17:00');
++  assert.equal(sameDay.finalDeadline, '18:00');
++});
++
++// ---------------------------------------------------------------- textos do ingresso
++
++test('P01-15/16/17/18: motivos de bloqueio aparecem em português, sem códigos técnicos', () => {
++  const messages = entryPresentation.describeBlockingReasons(['EVENT_NOT_READY', 'PROFILE_INCOMPLETE']);
++  same(messages, [
++    'Complete o questionário de perfil antes de entrar no evento.',
++    'O evento ainda não está pronto para receber participantes.',
++  ]);
++  for (const code of ['EVENT_NOT_FOUND', 'USER_NOT_FOUND', 'USER_INACTIVE', 'PARTICIPATION_ALREADY_CURRENT',
++    'PROFILE_INCOMPLETE', 'EVENT_NOT_STARTED', 'EVENT_REGISTRATION_CLOSED', 'EVENT_NOT_READY', 'CODIGO_NOVO']) {
++    const [message] = entryPresentation.describeBlockingReasons([code]);
++    assert.doesNotMatch(message, /[A-Z]{3,}_[A-Z_]+/, `${code} não vaza código`);
++  }
++  same(entryPresentation.describeBlockingReasons([]), ['O evento não está disponível para entrada agora.']);
++});
++
++test('situação do evento deriva só da elegibilidade do servidor', () => {
++  const label = eligibility => entryPresentation.describeEventAvailability(eligibility).label;
++  assert.equal(label({ eligible: true, blockingReasons: [] }), 'ENTRADAS ABERTAS');
++  assert.equal(label({ eligible: false, blockingReasons: ['EVENT_NOT_STARTED'] }), 'AINDA NÃO INICIADO');
++  assert.equal(label({ eligible: false, blockingReasons: ['EVENT_REGISTRATION_CLOSED'] }), 'ENTRADAS ENCERRADAS');
++  assert.equal(label({ eligible: false, blockingReasons: ['EVENT_NOT_READY'] }), 'EM PREPARAÇÃO');
++  assert.equal(label({ eligible: false, blockingReasons: ['PROFILE_INCOMPLETE'] }), 'ENTRADA INDISPONÍVEL');
++  assert.equal(entryPresentation.blockingAction(['PARTICIPATION_ALREADY_CURRENT', 'PROFILE_INCOMPLETE']), 'home');
++  assert.equal(entryPresentation.blockingAction(['PROFILE_INCOMPLETE']), 'questionnaire');
++  assert.equal(entryPresentation.blockingAction(['EVENT_NOT_STARTED']), null);
++});
++
++// ---------------------------------------------------------------- regras da Home
++
++test('P01-01/02: visão geral distingue conta sem histórico e com histórico', async () => {
++  const fetchPendingItem = async () => assert.fail('sem pendência não consulta elegibilidade');
++  const empty = await overviewUtils.loadHomeOverview({}, {
++    fetchHistory: async (_, options) => { same(options, { limit: 1 }); return { items: [], nextCursor: null }; },
++    fetchPendingItem,
++  });
++  same(empty, { recent: null, pending: null });
++  const item = historyItem();
++  const filled = await overviewUtils.loadHomeOverview({}, {
++    fetchHistory: async () => ({ items: [item], nextCursor: 'x' }), fetchPendingItem,
++  });
++  assert.equal(filled.recent, item);
++});
++
++test('P01-04/05: pendência única só é oferecida após confirmação do servidor', async () => {
++  const older = historyItem({ participationId: ids.older, event: { id: ids.event, name: 'Copa Indie' } });
++  const confirmed = await overviewUtils.loadHomeOverview({}, {
++    pendingIds: [ids.older],
++    fetchHistory: async () => ({ items: [historyItem()], nextCursor: null }),
++    fetchPendingItem: async (_, id) => { assert.equal(id, ids.older); return older; },
++  });
++  same(confirmed.pending, { kind: 'single', item: older });
++  const card = overviewUtils.describePendingEvaluation(confirmed.pending, confirmed.recent);
++  assert.equal(card.text, 'Você ainda pode avaliar sua participação em Copa Indie.');
++
++  // Já enviada, expirada ou inelegível: o serviço devolve null e nada é oferecido.
++  const submitted = await overviewUtils.loadHomeOverview({}, {
++    pendingIds: [ids.recent],
++    fetchHistory: async () => ({ items: [historyItem()], nextCursor: null }),
++    fetchPendingItem: async () => null,
++  });
++  assert.equal(submitted.pending, null);
++
++  // Falha na confirmação esconde só o card, nunca o histórico.
++  const failed = await overviewUtils.loadHomeOverview({}, {
++    pendingIds: [ids.recent],
++    fetchHistory: async () => ({ items: [historyItem()], nextCursor: null }),
++    fetchPendingItem: async () => { throw Object.assign(new Error('offline'), { isNetworkError: true }); },
++  });
++  assert.equal(failed.pending, null);
++  assert.ok(failed.recent);
++});
++
++test('várias pendências seguem a política existente: lista na aba Eventos', async () => {
++  const result = await overviewUtils.loadHomeOverview({}, {
++    pendingIds: [ids.recent, ids.older],
++    fetchHistory: async () => ({ items: [historyItem()], nextCursor: null }),
++    fetchPendingItem: async () => assert.fail('várias pendências não escolhem uma por conta própria'),
++  });
++  same(result.pending, { kind: 'multiple', count: 2 });
++  same(overviewUtils.pendingEvaluationIds({ pendingEvaluationParticipationIds: [ids.recent, ids.recent, 'x'] }),
++    [ids.recent]);
++});
++
++test('P01-11: leitura que deixou de ser atual é descartada', async () => {
++  let current = true;
++  const result = await overviewUtils.loadHomeOverview({}, {
++    isCurrent: () => current,
++    fetchHistory: async () => { current = false; return { items: [historyItem()], nextCursor: null }; },
++    fetchPendingItem: async () => assert.fail('não continua após troca de sessão'),
++    pendingIds: [ids.recent],
++  });
++  assert.equal(result, null);
++});
++
++test('evento recente apresenta a semântica real do status, sem inventar local', () => {
++  const finished = overviewUtils.describeRecentParticipation(historyItem());
++  assert.equal(finished.eventName, 'Arena Games Festival');
++  assert.match(finished.date, /^\d{2}\/\d{2}\/2026$/);
++  assert.match(finished.time, /^\d{2}:\d{2}$/);
++  assert.equal(finished.statusLabel, 'Encerrada');
++  assert.ok(!('location' in finished));
++  const canceled = overviewUtils.describeRecentParticipation(historyItem({
++    status: 'canceled', arenaEnteredAt: null, completedServicesCount: 0,
++  }));
++  assert.equal(canceled.statusLabel, 'Cancelada');
++  assert.equal(canceled.statusVariant, 'danger');
++});
++
++// ---------------------------------------------------------------- tela da Home
++
++test('P01-01: conta sem histórico mostra tutorial e estado vazio; botão abre o ingresso real', () => {
++  const { h, text, byTestId } = renderHome({ status: 'empty', recent: null, pending: null, retry() {} });
++  assert.match(text(), /Olá, Maria!/);
++  assert.match(text(), /Como funciona\?/);
++  for (const step of ['Acesse o evento', 'Participe das experiências', 'Avalie a sua experiência']) {
++    assert.match(text(), new RegExp(step));
++  }
++  assert.match(text(), /Você ainda não participou de nenhum evento\./);
++  assert.ok(!byTestId('home-recent-section'));
++  assert.ok(!byTestId('home-pending-evaluation-card'));
++  const entry = h.nodes.find(node => node.type === 'Pressable' && textOf(node) === 'Entrar em um evento');
++  entry.props.onPress();
++  same(h.navigationCalls.map(call => call.name), ['EventEntry']);
++});
++
++test('P01-09: carregando ou com falha não mostra estado vazio nem tutorial', () => {
++  const loading = renderHome({ status: 'loading', recent: null, pending: null, retry() {} });
++  assert.ok(loading.byTestId('home-overview-loading'));
++  assert.doesNotMatch(loading.text(), /ainda não participou|Como funciona/);
++
++  let retries = 0;
++  const failed = renderHome({ status: 'error', error: 'network', recent: null, pending: null, retry() { retries += 1; } });
++  assert.ok(failed.byTestId('home-overview-error'));
++  assert.doesNotMatch(failed.text(), /ainda não participou|Como funciona|Evento recente/);
++  assert.match(failed.text(), /Não foi possível conectar ao servidor/);
++  failed.h.nodes.find(node => node.type === 'Pressable' && textOf(node) === 'Tentar novamente').props.onPress();
++  assert.equal(retries, 1);
++});
++
++test('P01-02/03/07/08: com histórico mostra o evento recente, abre a participação certa e Ver todos leva a Eventos', () => {
++  const recent = historyItem({ evaluation: { eligible: true, submitted: true, pending: false } });
++  const { h, text, byTestId } = renderHome({ status: 'history', recent, pending: null, retry() {} });
++  assert.match(text(), /Evento recente/);
++  assert.match(text(), /Arena Games Festival/);
++  assert.doesNotMatch(text(), /Como funciona|ainda não participou/);
++  assert.ok(!byTestId('home-pending-evaluation-card'), 'sem pendência, sem card');
++
++  byTestId('home-recent-event-card').props.onPress();
++  byTestId('home-see-all-events').props.onPress();
++  same(h.navigationCalls.map(({ name, params }) => ({ name, params })), [
++    { name: 'ParticipationDetails', params: { participationId: ids.recent, historyItem: recent } },
++    { name: 'Eventos', params: undefined },
++  ]);
++});
++
++test('P01-04: avaliação pendente abre a avaliação da participação pendente, não a mais recente', () => {
++  const recent = historyItem();
++  const pendingItem = historyItem({ participationId: ids.older, event: { id: ids.event, name: 'Copa Indie' } });
++  const { h, text, byTestId } = renderHome({
++    status: 'history', recent, pending: { kind: 'single', item: pendingItem }, retry() {},
++  });
++  assert.match(text(), /Avaliação pendente/);
++  assert.match(text(), /Copa Indie/);
++  byTestId('home-pending-evaluation-card').props.onPress();
++  same(h.navigationCalls.map(({ name, params }) => ({ name, params })), [
++    { name: 'RealEvaluation', params: { participationId: ids.older, historyItem: pendingItem } },
++  ]);
++
++  const sameRecent = renderHome({ status: 'history', recent, pending: { kind: 'single', item: recent }, retry() {} });
++  assert.match(sameRecent.text(), /no último evento/);
++  const many = renderHome({ status: 'history', recent, pending: { kind: 'multiple', count: 3 }, retry() {} });
++  many.byTestId('home-pending-evaluation-card').props.onPress();
++  same(many.h.navigationCalls.map(call => call.name), ['Eventos']);
++});
++
++test('P01-23: saudação usa só o primeiro nome, limita linhas e tem fallback', () => {
++  const long = renderHome({ status: 'empty', retry() {} },
++    { id: ids.userA, name: '  Bartolomeuzinhoextremamentecomprido de Souza  ', hasCompletedQuestionnaire: true });
++  const greeting = long.h.nodes.find(node => node.type === 'Text' && /^Olá/.test(textOf(node)));
++  assert.equal(textOf(greeting), 'Olá, Bartolomeuzinhoextremamentecomprido!');
++  assert.equal(greeting.props.numberOfLines, 2);
++  const noName = renderHome({ status: 'empty', retry() {} }, { id: ids.userA, hasCompletedQuestionnaire: true });
++  assert.match(noName.text(), /Olá!/);
++  const longEvent = renderHome({ status: 'history', recent: historyItem({
++    event: { id: ids.event, name: 'Evento com um nome muito longo '.repeat(6) } }), pending: null, retry() {} });
++  const name = longEvent.h.nodes.find(node => node.type === 'Text' && /Evento com um nome/.test(textOf(node)));
++  assert.equal(name.props.numberOfLines, 2);
++});
++
++test('questionário pendente continua visível na Home reformulada', () => {
++  const { byTestId } = renderHome({ status: 'empty', retry() {} },
++    { id: ids.userA, name: 'Ana', hasCompletedQuestionnaire: false });
++  assert.ok(byTestId('home-pending-questionnaire-banner'));
++});
++
++// ---------------------------------------------------------------- hook (isolamento por sessão)
++
++function deferred() {
++  let resolve, reject;
++  const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
++  return { promise, resolve, reject };
++}
++
++function hookRig(services) {
++  const slots = [];
++  let cursor = 0;
++  let effects = [];
++  const cleanups = [];
++  const react = {
++    useRef(initial) { const i = cursor++; if (!(i in slots)) slots[i] = { current: initial }; return slots[i]; },
++    useState(initial) {
++      const i = cursor++;
++      if (!(i in slots)) slots[i] = initial;
++      return [slots[i], value => { slots[i] = typeof value === 'function' ? value(slots[i]) : value; }];
++    },
++    useEffect(callback, deps) {
++      const i = cursor++;
++      const previous = slots[i];
++      if (!previous || deps.some((value, k) => !Object.is(value, previous[k]))) {
++        slots[i] = deps;
++        effects.push({ i, callback });
++      }
++    },
++  };
++  const module = loadModule('screens/home/useHomeOverview.js', name => {
++    if (name === 'react') return react;
++    if (name === '../../services/participationHistoryService.js') return services;
++    if (name === '../../utils/homeOverview.js') return overviewUtils;
++    return require(name);
++  }).exports;
++  let last;
++  function render(params) {
++    cursor = 0;
++    last = module.useHomeOverview(params);
++    for (const { i, callback } of effects.splice(0)) {
++      if (typeof cleanups[i] === 'function') cleanups[i]();
++      const cleanup = callback();
++      cleanups[i] = typeof cleanup === 'function' ? cleanup : null;
++    }
++    cursor = 0;
++    last = module.useHomeOverview(params);
++    effects = [];
++    return last;
++  }
++  return { render, get last() { return last; } };
++}
++
++function authFor(userId, epoch = 1, verified = true) {
++  return {
++    isAuthenticated: true, user: { id: userId }, httpClient: { id: `client-${userId}` },
++    getSessionEpoch: () => epoch, isIdentityVerified: () => verified,
++  };
++}
++
++test('P01-12: sem identidade verificada a Home fica carregando e não consulta o histórico', () => {
++  let reads = 0;
++  const rig = hookRig({ fetchParticipationHistory: async () => { reads += 1; return { items: [], nextCursor: null }; },
++    fetchPendingEvaluationHistoryItem: async () => null });
++  const result = rig.render({ auth: authFor(ids.userA, 1, false), enabled: true, focused: true, returnState: null, returnStateVersion: 1 });
++  assert.equal(result.status, 'loading');
++  assert.equal(reads, 0);
++});
++
++test('P01-10/11: troca de conta descarta a resposta atrasada da conta anterior', async () => {
++  const pending = { [ids.userA]: deferred(), [ids.userB]: deferred() };
++  const rig = hookRig({
++    fetchParticipationHistory: client => pending[client.id.replace('client-', '')].promise,
++    fetchPendingEvaluationHistoryItem: async () => null,
++  });
++  const base = { enabled: true, focused: true, returnState: { pendingEvaluationParticipationIds: [] }, returnStateVersion: 1 };
++  assert.equal(rig.render({ ...base, auth: authFor(ids.userA) }).status, 'loading');
++  assert.equal(rig.render({ ...base, auth: authFor(ids.userB) }).status, 'loading');
++
++  pending[ids.userA].resolve({ items: [historyItem()], nextCursor: null });
++  await new Promise(resolve => setImmediate(resolve));
++  const afterStale = rig.render({ ...base, auth: authFor(ids.userB) });
++  assert.equal(afterStale.status, 'loading', 'histórico da conta A não aparece para B');
++  assert.equal(afterStale.recent, null);
++
++  pending[ids.userB].resolve({ items: [], nextCursor: null });
++  await new Promise(resolve => setImmediate(resolve));
++  assert.equal(rig.render({ ...base, auth: authFor(ids.userB) }).status, 'empty');
++  // Voltar para A (novo login) começa do zero, sem reaproveitar dados de B.
++  assert.equal(rig.render({ ...base, auth: authFor(ids.userA, 2) }).status, 'loading');
++});
++
++test('P01-09: falha de rede vira estado de erro com nova tentativa, nunca histórico vazio', async () => {
++  let attempt = 0;
++  const rig = hookRig({
++    fetchParticipationHistory: async () => {
++      attempt += 1;
++      if (attempt === 1) throw Object.assign(new Error('offline'), { isNetworkError: true });
++      return { items: [historyItem()], nextCursor: null };
++    },
++    fetchPendingEvaluationHistoryItem: async () => null,
++  });
++  const params = { auth: authFor(ids.userA), enabled: true, focused: true, returnState: null, returnStateVersion: 1 };
++  rig.render(params);
++  await new Promise(resolve => setImmediate(resolve));
++  const failed = rig.render(params);
++  assert.equal(failed.status, 'error');
++  assert.equal(failed.error, 'network');
++  failed.retry();
++  rig.render(params);
++  await new Promise(resolve => setImmediate(resolve));
++  assert.equal(rig.render(params).status, 'history');
++  assert.equal(attempt, 2);
++});
++
++test('participação corrente desabilita a leitura da Home', () => {
++  let reads = 0;
++  const rig = hookRig({ fetchParticipationHistory: async () => { reads += 1; return { items: [], nextCursor: null }; },
++    fetchPendingEvaluationHistoryItem: async () => null });
++  rig.render({ auth: authFor(ids.userA), enabled: false, focused: true, returnState: null, returnStateVersion: 1 });
++  assert.equal(reads, 0);
++});
+diff --git a/app/utils/eventEntryPresentation.js b/app/utils/eventEntryPresentation.js
+new file mode 100644
+index 0000000..8d49e78
+--- /dev/null
++++ b/app/utils/eventEntryPresentation.js
+@@ -0,0 +1,63 @@
++/**
++ * Textos do evento encontrado a partir dos códigos estruturados do lookup.
++ * A elegibilidade é sempre a do servidor; nada aqui usa o relógio do aparelho.
++ */
++
++// Mesma prioridade usada pelo backend ao recusar o ingresso.
++const PRIORITY = [
++  'EVENT_NOT_FOUND', 'USER_NOT_FOUND', 'USER_INACTIVE', 'PARTICIPATION_ALREADY_CURRENT',
++  'PROFILE_INCOMPLETE', 'EVENT_NOT_STARTED', 'EVENT_REGISTRATION_CLOSED', 'EVENT_NOT_READY',
++];
++
++const REASONS = {
++  EVENT_NOT_FOUND: 'Nenhum evento foi encontrado para esse código.',
++  USER_NOT_FOUND: 'Não foi possível confirmar sua conta. Entre novamente.',
++  USER_INACTIVE: 'Sua conta não está ativa para participar de eventos.',
++  PARTICIPATION_ALREADY_CURRENT: 'Você já está participando de um evento. Volte ao início para continuar a participação atual.',
++  PROFILE_INCOMPLETE: 'Complete o questionário de perfil antes de entrar no evento.',
++  EVENT_NOT_STARTED: 'O evento ainda não começou. As entradas abrem no horário de início.',
++  EVENT_REGISTRATION_CLOSED: 'As entradas neste evento foram encerradas.',
++  EVENT_NOT_READY: 'O evento ainda não está pronto para receber participantes.',
++};
++
++const UNKNOWN_REASON = 'O evento não está disponível para entrada agora.';
++
++export function sortBlockingReasons(reasons) {
++  const list = Array.isArray(reasons) ? [...new Set(reasons)] : [];
++  const rank = code => {
++    const index = PRIORITY.indexOf(code);
++    return index === -1 ? PRIORITY.length : index;
++  };
++  return list.sort((a, b) => rank(a) - rank(b));
++}
++
++export function describeBlockingReasons(reasons) {
++  const messages = sortBlockingReasons(reasons).map(code => REASONS[code] ?? UNKNOWN_REASON);
++  return [...new Set(messages.length ? messages : [UNKNOWN_REASON])];
++}
++
++/** Situação do evento para o participante, derivada só da elegibilidade do servidor. */
++export function describeEventAvailability(eligibility) {
++  if (eligibility?.eligible) {
++    return { label: 'ENTRADAS ABERTAS', variant: 'success' };
++  }
++  const reasons = eligibility?.blockingReasons ?? [];
++  if (reasons.includes('EVENT_NOT_STARTED')) return { label: 'AINDA NÃO INICIADO', variant: 'warning' };
++  if (reasons.includes('EVENT_REGISTRATION_CLOSED')) return { label: 'ENTRADAS ENCERRADAS', variant: 'danger' };
++  if (reasons.includes('EVENT_NOT_READY')) return { label: 'EM PREPARAÇÃO', variant: 'warning' };
++  return { label: 'ENTRADA INDISPONÍVEL', variant: 'danger' };
++}
++
++export function describeExternalQueue(enabled) {
++  return enabled
++    ? 'Ao confirmar, você entra na fila de entrada e aguarda a liberação da equipe do evento.'
++    : 'Ao confirmar, sua entrada na Arena é liberada logo em seguida.';
++}
++
++/** Ações auxiliares oferecidas para bloqueios que o participante pode resolver. */
++export function blockingAction(reasons) {
++  const list = Array.isArray(reasons) ? reasons : [];
++  if (list.includes('PARTICIPATION_ALREADY_CURRENT')) return 'home';
++  if (list.includes('PROFILE_INCOMPLETE')) return 'questionnaire';
++  return null;
++}
+diff --git a/app/utils/eventTime.js b/app/utils/eventTime.js
+new file mode 100644
+index 0000000..9005ba6
+--- /dev/null
++++ b/app/utils/eventTime.js
+@@ -0,0 +1,79 @@
++/**
++ * Formatação de instantes do servidor para exibição em pt-BR.
++ * Com fuso IANA informado, a data/hora é mostrada nesse fuso; sem fuso, no do aparelho.
++ * Nunca decide disponibilidade: isso é sempre do backend.
++ */
++
++const DATE_OPTIONS = { day: '2-digit', month: '2-digit', year: 'numeric' };
++const TIME_OPTIONS = { hour: '2-digit', minute: '2-digit', hour12: false };
++
++const ZONE_NAMES = {
++  'America/Sao_Paulo': 'Horário de Brasília',
++};
++
++function toDate(iso) {
++  if (typeof iso !== 'string') return null;
++  const ms = Date.parse(iso);
++  return Number.isFinite(ms) ? new Date(ms) : null;
++}
++
++/** Retorna o fuso utilizável ou null quando o ambiente não o reconhece. */
++export function resolveTimeZone(timeZone) {
++  if (typeof timeZone !== 'string' || !timeZone.trim()) return null;
++  try {
++    new Intl.DateTimeFormat('pt-BR', { timeZone }).format(0);
++    return timeZone;
++  } catch {
++    return null;
++  }
++}
++
++function format(date, options, timeZone) {
++  // Alguns motores devolvem "24:00" para meia-noite com hour12:false.
++  return new Intl.DateTimeFormat('pt-BR', timeZone ? { ...options, timeZone } : options)
++    .format(date).replace(/^24:/, '00:');
++}
++
++/**
++ * @param {string} iso instante do servidor
++ * @param {string} [timeZone] fuso IANA do evento; ausente = fuso do aparelho
++ * @returns {{ date: string, time: string, zone: string|null }|null}
++ */
++export function formatInstantParts(iso, timeZone) {
++  const date = toDate(iso);
++  if (!date) return null;
++  if (timeZone === undefined) {
++    return { date: format(date, DATE_OPTIONS), time: format(date, TIME_OPTIONS), zone: null };
++  }
++  // Fuso informado mas desconhecido: UTC explícito, nunca o fuso do aparelho.
++  const zone = resolveTimeZone(timeZone) ?? 'UTC';
++  return { date: format(date, DATE_OPTIONS, zone), time: format(date, TIME_OPTIONS, zone), zone };
++}
++
++export function describeTimeZone(timeZone) {
++  const zone = resolveTimeZone(timeZone);
++  if (!zone) return 'UTC';
++  return ZONE_NAMES[zone] ? `${ZONE_NAMES[zone]} (${zone})` : zone;
++}
++
++/**
++ * Horários do evento no fuso do evento. Um horário em dia diferente do anterior
++ * mostra a data completa (eventos que atravessam a meia-noite).
++ */
++export function describeEventSchedule(event) {
++  const zone = event?.timezone;
++  const start = formatInstantParts(event?.startsAt, zone);
++  const official = formatInstantParts(event?.officialEndsAt, zone);
++  const deadline = formatInstantParts(event?.operationalDeadlineAt, zone);
++  const relative = (part, reference) => {
++    if (!part) return null;
++    return reference && reference.date === part.date ? part.time : `${part.date} às ${part.time}`;
++  };
++  return {
++    date: start?.date ?? null,
++    start: start ? start.time : null,
++    entriesUntil: relative(official, start),
++    finalDeadline: relative(deadline, official ?? start),
++    zoneLabel: describeTimeZone(zone),
++  };
++}
+diff --git a/app/utils/homeOverview.js b/app/utils/homeOverview.js
+new file mode 100644
+index 0000000..9ae5776
+--- /dev/null
++++ b/app/utils/homeOverview.js
+@@ -0,0 +1,80 @@
++/**
++ * Regras da Home do Participante: histórico recente e avaliação pendente.
++ * Todos os dados vêm do backend; nada aqui cria ou altera participações.
++ */
++import { formatInstantParts } from './eventTime.js';
++
++const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
++
++const STATUS_PRESENTATION = {
++  waiting: { label: 'Aguardando entrada', variant: 'brand' },
++  active: { label: 'Em andamento', variant: 'success' },
++  finished: { label: 'Encerrada', variant: 'default' },
++  canceled: { label: 'Cancelada', variant: 'danger' },
++};
++
++export function pendingEvaluationIds(returnState) {
++  const ids = returnState?.pendingEvaluationParticipationIds;
++  if (!Array.isArray(ids)) return [];
++  return [...new Set(ids.filter(id => typeof id === 'string' && UUID.test(id)))];
++}
++
++/**
++ * Lê a participação mais recente e confirma a pendência indicada pelo servidor.
++ * Uma pendência única só é oferecida depois de confirmada por elegibilidade e histórico;
++ * várias pendências seguem a política existente (lista na aba Eventos).
++ * Falha na confirmação da pendência não esconde o histórico, apenas o card.
++ */
++export async function loadHomeOverview(client, {
++  pendingIds = [], isCurrent = () => true, fetchHistory, fetchPendingItem,
++}) {
++  const page = await fetchHistory(client, { limit: 1 });
++  if (!isCurrent()) return null;
++  const recent = page.items[0] ?? null;
++
++  let pending = null;
++  if (pendingIds.length === 1) {
++    try {
++      const item = await fetchPendingItem(client, pendingIds[0], { isCurrent });
++      if (!isCurrent()) return null;
++      if (item) pending = { kind: 'single', item };
++    } catch {
++      if (!isCurrent()) return null;
++    }
++  } else if (pendingIds.length > 1) {
++    pending = { kind: 'multiple', count: pendingIds.length };
++  }
++  return { recent, pending };
++}
++
++export function describeRecentParticipation(item) {
++  if (!item) return null;
++  const when = formatInstantParts(item.arenaEnteredAt ?? item.joinedAt);
++  const status = STATUS_PRESENTATION[item.status] ?? { label: 'Situação indisponível', variant: 'default' };
++  return {
++    participationId: item.participationId,
++    eventName: item.event.name,
++    date: when?.date ?? null,
++    time: when?.time ?? null,
++    statusLabel: status.label,
++    statusVariant: status.variant,
++  };
++}
++
++export function describePendingEvaluation(pending, recent) {
++  if (!pending) return null;
++  if (pending.kind === 'multiple') {
++    return {
++      kind: 'multiple',
++      text: `Você tem ${pending.count} avaliações pendentes. Escolha qual participação deseja avaliar.`,
++    };
++  }
++  const isRecent = recent?.participationId === pending.item.participationId;
++  return {
++    kind: 'single',
++    item: pending.item,
++    text: isRecent
++      ? 'Você ainda pode avaliar sua participação no último evento.'
++      : `Você ainda pode avaliar sua participação em ${pending.item.event.name}.`,
++  };
++}
+diff --git a/docs/PARTICIPANTE_01_HOME_INGRESSO_IMPLEMENTACAO.md b/docs/PARTICIPANTE_01_HOME_INGRESSO_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..62a22fa
+--- /dev/null
++++ b/docs/PARTICIPANTE_01_HOME_INGRESSO_IMPLEMENTACAO.md
+@@ -0,0 +1,160 @@
++# PARTICIPANTE-01 — Home e jornada de ingresso
++
++**Task:** PARTICIPANTE-01 de 05 — Reformulação da Home e jornada de ingresso
++**Responsável pela implementação:** Heliom
++**Módulo:** Participante (frontend Expo)
++**Branch:** `feature/heliom-participante-ux`
++**Origem:** `origin/develop` em `5758fe1dcda104f6bfacf3ddb922a3711b088298` (19/11/2026, "style(admin): atualizar logo exclusiva do cabecalho")
++**Estado atual:** entregue para revisão (aguardando análise do responsável; não aprovada)
++
++## 1. Objetivo e escopo
++
++Reformular a Home do Participante (conta sem histórico e conta com histórico) e a apresentação do evento encontrado/confirmação de ingresso, mantendo os contratos reais do backend. Não faz parte desta task: Minha Arena, Perfil, edição de avaliação, push, polling operacional, regras Staff/Admin, backend, schema ou migrations.
++
++## 2. Diagnóstico inicial (develop `5758fe1`)
++
++### 2.1 Home
++
++- `app/screens/home/HomeFlowScreen.js` escolhe a tela pela participação corrente (`ParticipationContext`): carregando/erro → `HomeScreen` em modo de estado; participação `waiting`/`active` do servidor → fila externa ou `RealArenaScreen`; sem participação → `HomeScreen`. Também faz a apresentação automática da avaliação após encerramento (C-04/D09) com `canPresentReturnEvaluation`/`claimReturnEvaluation`.
++- `app/screens/home/HomeScreen.js` já tem saudação pelo primeiro nome de `auth.user.name`, o card "ACESSO À ARENA / Pronto para jogar? / Entrar em um evento", aviso de questionário pendente, aviso de finalização recente e aviso de avaliações pendentes (apenas contagem, levando à aba Eventos).
++- A Home **não consulta o histórico**: sempre exibe "Nenhuma participação ativa no momento", tanto para contas novas como para contas com histórico. Não existe minitutorial nem card de evento recente.
++
++### 2.2 Ingresso
++
++- `EventEntryScreen.js`: digitação do código e leitura de QR (`expo-camera`), ambos chamam `lookupEvent` e navegam para `EventConfirmation` com `{ event, eligibility }`.
++- `EventConfirmationScreen.js`: mostra fuso, início, término e prazo como **texto ISO cru** e os bloqueios como **códigos técnicos** (`EVENT_NOT_STARTED, ...`). A confirmação usa `confirmEventEntry` (chave idempotente persistida por intenção) e `retryEntrySync`.
++- `services/eventAdmissionService.js`: lookup, POST idempotente, estados `looking_up/ready/joining/confirmed_unsynced/uncertain/complete/error` e mensagens em português por status/código (`describeAdmissionError`).
++
++### 2.3 Componentes e serviços reutilizados
++
++`AuthContext` (`useAuth`: `user`, `isAuthenticated`, `getSessionEpoch`, `isIdentityVerified`, `httpClient`), `ParticipationContext`, `participationHistoryService` (`fetchParticipationHistory`, `fetchPendingEvaluationHistoryItem`), `components/ui` (`AuthBackground`, `Card`, `Badge`, `Button`, `ScreenHeader`), tema (`colors`, `spacing`, `typography`, `radii`).
++
++## 3. Contratos de API utilizados (verificados no código do backend)
++
++| Rota | Uso | Campos relevantes |
++|---|---|---|
++| `GET /participations/current` | Participação corrente (já usada pelo provider) | `participation: null \| { id, eventId, status, externalQueue }` |
++| `GET /participations/return-state` | Retorno após encerramento e pendências | `recentFinalization`, `pendingEvaluationParticipationIds` |
++| `GET /participations/history?limit&cursor` | Histórico da conta, mais recente primeiro (cursor por `joinedAt`, `id`) | `participationId`, `event: { id, name }`, `status`, `joinedAt`, `arenaEnteredAt`, `finishedAt`, `completedServicesCount`, `evaluation: { eligible, submitted, pending }` |
++| `GET /participations/:id/evaluation-eligibility` | Confirmação da pendência antes de oferecer avaliação | `eligible`, `submitted`, `pending` |
++| `POST /events/lookup` | Evento encontrado | `event: { id, name, timezone, startsAt, officialEndsAt, operationalDeadlineAt, externalQueueEnabled }`, `eligibility: { eligible, blockingReasons[] }` |
++| `POST /participations` (Idempotency-Key) | Ingresso | `{ participationId }` |
++
++**Limite do contrato:** o histórico entrega somente `id` e `name` do evento. Não há data/fuso/local do evento nem rota GET de evento para o Participante (Panorama §3.9). Por isso o card "Evento recente" usa a data/hora da própria participação e **omite o local**. Incluir fuso/local no histórico seria mudança de contrato compartilhado e fica registrada como decisão pendente, não implementada.
++
++## 4. Estratégia técnica
++
++1. **Visão geral da Home em hook próprio** (`useHomeOverview`): lê a primeira página do histórico (`limit` pequeno) e, quando o servidor indicar exatamente uma pendência, confirma-a com `fetchPendingEvaluationHistoryItem`. Isolamento por `userId` + época da sessão + `httpClient`, com geração para descartar respostas antigas; recarrega ao focar a aba e quando o provider publica um novo `returnStateVersion` (retorno ao primeiro plano já dispara esse refresh). Sem novo polling.
++2. **Estados da Home**: `loading` (sem estado vazio prematuro), `error` (aviso com "Tentar novamente", sem tutorial nem vazio), `empty` (minitutorial + "Você ainda não participou de nenhum evento."), `history` (Evento recente + "Ver todos" → aba Eventos).
++3. **Avaliação pendente**: uma pendência confirmada → card que abre `RealEvaluation` com a participação correta; várias pendências → card com a contagem que leva à aba Eventos (política existente). A apresentação automática C-04 do `HomeFlowScreen` não é alterada.
++4. **Evento recente**: abre `ParticipationDetails` com `participationId` e o item do histórico (identifica a participação, não só o evento). Status apresentado conforme a semântica real (`waiting`, `active`, `finished`, `canceled`).
++5. **Confirmação de ingresso**: datas formatadas em pt-BR no fuso IANA do evento (com `Intl`, sem usar o fuso do aparelho), tratamento de eventos que atravessam a meia-noite, motivos de bloqueio traduzidos a partir dos códigos estruturados, mesmo fluxo de confirmação/idempotência.
++
++## 5. Arquivos previstos
++
++- `app/screens/home/HomeScreen.js` (layout), `app/screens/home/HomeFlowScreen.js` (repasse dos dados), novo `app/screens/home/useHomeOverview.js` e `app/utils/homeOverview.js` (regras puras).
++- `app/screens/event-entry/EventConfirmationScreen.js`, novo `app/utils/eventTime.js` (formatação por fuso).
++- Testes novos/adaptados em `app/tests/`.
++
++## 6. Riscos de regressão conhecidos
++
++- Testes de `HomeFlow`/`homeReturnEvaluation` dependem da estrutura de `HomeScreen`.
++- Apresentação automática de avaliação (C-04) e fila externa não podem mudar.
++- Respostas atrasadas do histórico após logout/troca de conta.
++- Formatação de fuso no Hermes: `Intl.DateTimeFormat` com `timeZone` precisa de fallback seguro (UTC explícito, nunca o fuso do aparelho).
++
++## 7. Referências visuais
++
++As imagens `ArenaGO_01_Home_Inicial_Padronizada(3).png` e `ArenaGO_03_Home_Apos_Evento_Padronizada(3).png` não estavam disponíveis no computador de implementação no início da task. A implementação segue a descrição textual da task; a comparação visual com os mockups fica pendente até as imagens serem anexadas.
++
++## 8. Linha de base de testes
++
++`npm test` em `app/` na base `5758fe1` antes de qualquer alteração: **899 aprovados, 0 falhas, 0 ignorados** (node --test, Windows, Node 24).
++
++---
++
++## 9. Entrega (23/11/2026)
++
++### 9.1 Funcionalidades implementadas
++
++**Home**
++
++- Saudação "Olá, [primeiro nome]!" a partir de `auth.user.name`, limitada a 2 linhas; sem nome, "Olá!".
++- Card "ACESSO À ARENA / Pronto para jogar? / Entrar em um evento" mantido e ligado ao fluxo real `EventEntry`.
++- **Conta sem histórico** (histórico confirmado vazio pelo servidor): seção "Como funciona?" com os 3 passos e o estado vazio "Você ainda não participou de nenhum evento.".
++- **Conta com histórico:** seção "Evento recente" com nome do evento, data, horário e situação real da participação (Aguardando entrada / Em andamento / Encerrada / Cancelada), indicador de navegação e "Ver todos" para a aba **Eventos**. O card abre `ParticipationDetails` com o `participationId` e o item do histórico.
++- **Avaliação pendente:** card abaixo do card de ingresso. Uma pendência confirmada abre `RealEvaluation` da participação pendente (que pode não ser a mais recente; o texto se adapta). Várias pendências mostram a contagem e levam à aba Eventos, que era a política existente.
++- **Carregando / falha:** cartão de carregamento ou de "histórico indisponível" com "Tentar novamente". Nenhum desses estados mostra o estado vazio nem o tutorial.
++- Avisos já existentes preservados: questionário pendente e participação encerrada recentemente.
++
++**Ingresso (evento encontrado)**
++
++- Nome do evento em destaque e situação derivada só da elegibilidade do servidor: Entradas abertas / Ainda não iniciado / Entradas encerradas / Em preparação / Entrada indisponível.
++- Horários em pt-BR **no fuso IANA do evento**: data, início, "Entradas até" (horário oficial) e "Encerramento final" (prazo operacional). Quando um horário cai em outro dia, a data completa aparece, cobrindo eventos que atravessam a meia-noite. O fuso aparece descrito ("Horário de Brasília (America/Sao_Paulo)").
++- Explicação da fila externa conforme `externalQueueEnabled`.
++- Motivos de bloqueio em português a partir dos códigos estruturados, sem exibir os códigos. Para `PROFILE_INCOMPLETE` há o botão "Completar questionário"; para `PARTICIPATION_ALREADY_CURRENT`, o botão "Voltar ao início", que recarrega a participação corrente e volta às abas sem criar outra.
++- Resultado incerto (`uncertain`): o botão passa a "Verificar ingresso" e chama o mesmo `confirmEventEntry`, que reutiliza a intenção e a `Idempotency-Key` salvas. Não há nova intenção.
++
++### 9.2 Arquivos
++
++| Arquivo | Tipo | Conteúdo |
++|---|---|---|
++| `app/screens/home/HomeScreen.js` | modificado | Novo layout e estados (tutorial, vazio, recente, pendência, carregando/erro) |
++| `app/screens/home/HomeFlowScreen.js` | modificado | Usa `useHomeOverview` e repassa `overview`; `visibleReturnState` calculado antes dos retornos (mesma expressão) |
++| `app/screens/home/useHomeOverview.js` | novo | Leitura da Home isolada por conta/sessão, com descarte de respostas antigas |
++| `app/utils/homeOverview.js` | novo | Regras puras: carga, pendência, descrição do evento recente |
++| `app/utils/eventTime.js` | novo | Formatação pt-BR por fuso IANA e horários do evento |
++| `app/utils/eventEntryPresentation.js` | novo | Textos de bloqueio, situação do evento e fila externa |
++| `app/screens/event-entry/EventConfirmationScreen.js` | modificado | Nova apresentação do evento encontrado |
++| `app/tests/participante01Home.test.cjs` | novo | 20 testes (regras, telas e hook) |
++| `app/tests/eventEntry.test.cjs` | modificado | +6 testes da confirmação; 1 teste adaptado (ver 9.4) |
++| `app/tests/homeFlow.test.cjs`, `homeReturnEvaluation.test.cjs`, `autoQueueSync.test.cjs` | modificados | Stub de `./useHomeOverview` nos harnesses que simulam os hooks (5 linhas) |
++| `app/tests/adminNavigation.test.cjs` | modificado | Checagem do card antigo trocada pelos novos `testID` (ver 9.4) |
++
++Nenhuma alteração em backend, contratos, serviços de sessão/participação/ingresso, navegação de papéis, schema ou migrations.
++
++### 9.3 Decisões técnicas
++
++- **Primeira página do histórico com `limit=1`:** a ordenação do backend (`joinedAt` desc, `id`) já define o registro mais recente; basta saber se existe e qual é.
++- **Pendência confirmada antes de aparecer:** `return-state` indica os IDs, e `fetchPendingEvaluationHistoryItem` (já existente) confere elegibilidade e histórico. Se essa confirmação falhar, o card não aparece e o histórico continua visível.
++- **Sem novo polling:** a Home relê ao focar a aba e quando o provider publica um novo `returnStateVersion` (login, retorno ao primeiro plano, refresh). O polling de posição não muda essa versão.
++- **Fuso:** `Intl.DateTimeFormat` com `timeZone`. Se o fuso informado não for reconhecido, a data aparece em UTC explícito, nunca no fuso do aparelho. O app não usa o relógio local para liberar ou bloquear o ingresso.
++- **Evento recente sem fuso do evento:** o histórico não traz fuso. A data e a hora da participação (`arenaEnteredAt` ou `joinedAt`) aparecem no fuso do aparelho, como já faz a tela de detalhes.
++- **Badge "ONLINE" removido do cabeçalho da Home:** era fixo e não refletia nenhum estado real.
++- **Fallback da saudação:** "Bem-vindo ao ArenaGo!" passou a "Olá!", em linha com o novo cabeçalho.
++
++### 9.4 Testes adaptados (sem remover proteção)
++
++- `eventEntry.test.cjs` › "ineligibilidade mostra motivo real e impede POST": antes exigia o texto `PROFILE_INCOMPLETE` na tela. A task proíbe exibir códigos técnicos, então agora exige a mensagem em português **e** a ausência do código. A garantia de não haver POST foi mantida.
++- `adminNavigation.test.cjs` › "Início permite entrada em evento...": exigia o `testID` do card antigo "sem participação ativa", que a task substitui. Agora renderiza a Home sem histórico e exige `home-first-access` e `home-empty-history`. As demais garantias (sem atalhos Admin/Staff, botão de ingresso) foram mantidas.
++- Harnesses de `HomeFlowScreen`: simulam `./useHomeOverview` como já simulavam `./HomeScreen` e os serviços.
++
++### 9.5 Testes executados
++
++Ambiente: Windows 10, Node 24.19.0, `app/` com `node_modules` do lockfile da develop.
++
++| Comando | Resultado |
++|---|---|
++| `npm test` (base `5758fe1`, antes) | 899/899, 0 falhas, 0 ignorados |
++| `npm test` (entrega) | **925/925**, 0 falhas, 0 cancelados, 0 ignorados |
++| `node --test tests/participante01Home.test.cjs` | 20/20 |
++| `node --test tests/eventEntry.test.cjs` | 30/30 |
++| `npx expo export --platform ios` | exit 0, bytecode Hermes gerado (`.hbc` 2,9 MB) |
++| `npx expo export --platform android` | exit 0, bytecode Hermes gerado (`.hbc` 2,9 MB) |
++| `git diff --check` | sem problemas |
++
++Observação de ambiente: `expo export --platform ios --platform android` na **mesma** chamada fez o `hermesc.exe` encerrar com exceção nativa (exit 3765269347). O mesmo bundle compilou com `hermesc` direto (exit 0), e cada plataforma isolada exportou normalmente. Não foi tratado como defeito do código.
++
++**Cobertura da matriz 11.1 por testes automatizados:** P01-01, 02, 03, 04, 05, 06, 07, 08, 09, 10, 11, 12 (sem identidade verificada não há leitura), 13 (leitura desabilitada com participação corrente; seleção de tela coberta pelos testes de HomeFlow existentes), 14, 15, 16, 17, 18, 19, 20, 21 (tela; a reutilização da chave é coberta por `eventAdmissionService.test`), 22 e 23 (limites de linhas e nomes longos).
++
++### 9.6 Não executado / pendências de validação
++
++- **P01-24 (Android e iOS físicos):** não executado nesta entrega. Os testes usam componentes simulados e não substituem a homologação no aparelho: rolagem, área segura, fonte ampliada, teclado e comportamento de `Intl` com `timeZone` no Hermes do aparelho.
++- **Comparação com os mockups:** as imagens 01 e 03 não estavam no computador de implementação. A comparação visual e eventuais ajustes finos (espaçamentos, ícones) ficam pendentes até o envio das imagens. Os textos seguem literalmente a task.
++- **Ícones:** emojis (📷 🎮 ⭐ 📅 🕒), porque o app não tem biblioteca de ícones instalada e adicionar uma dependência estaria fora do escopo.
++- **Lint/typecheck:** o `app/package.json` não tem scripts de lint ou typecheck; nada foi executado nesse sentido.
++
++### 9.7 Limitações e decisões pendentes (não implementadas)
++
++- **Local e fuso no histórico:** o contrato `GET /participations/history` traz só `event.id` e `event.name`. Exibir local e horário no fuso do evento na Home exige acrescentar campos ao histórico (contrato compartilhado, backend). Fica aguardando decisão do responsável.
++- **Várias avaliações pendentes:** mantida a política existente (contagem → aba Eventos). Abrir diretamente uma delas exigiria definir um critério de escolha.

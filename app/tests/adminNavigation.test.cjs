@@ -109,9 +109,11 @@ test('AdminArea reutiliza a pilha Heliom e as rotas antigas não são registrada
 test('Início permite entrada em evento sem oferecer atalhos Admin ou Staff demonstrativos', () => {
   const h = createHarness('screens/home/HomeScreen.js', {
     authContext: { user: { id: 'u-1', hasCompletedQuestionnaire: true } },
+    // PARTICIPANTE-01: o card fixo "sem participação" virou o estado de conta sem histórico.
+    props: { overview: { status: 'empty', recent: null, pending: null, retry() {} } },
   });
   assert.ok(!h.nodes.some((node) => node.type === 'Pressable' && /Admin/.test(textOf(node))));
-  for (const testID of ['home-background', 'home-event-entry-card', 'home-empty-participation-card']) {
+  for (const testID of ['home-background', 'home-event-entry-card', 'home-first-access', 'home-empty-history']) {
     assert.ok(h.nodes.some((node) => node.props.testID === testID), `${testID} preservado`);
   }
   assert.ok(!h.nodes.some((node) => node.type === 'Pressable' && /Staff/.test(textOf(node))));

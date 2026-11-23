@@ -11,6 +11,7 @@ import ArenaQueueScreen from '../arena/ArenaQueueScreen';
 import HomeScreen from './HomeScreen';
 import { useAuth } from '../../context/AuthContext';
 import { fetchReturnEvaluationHistoryItem } from '../../services/participationHistoryService';
+import { useHomeOverview } from './useHomeOverview';
 
 function ExternalQueueScreen({ participation, onRefresh, syncStale = false }) {
   const { syncCurrentParticipation } = useContext(ParticipationContext) || {};
@@ -116,6 +117,15 @@ export default function HomeFlowScreen({ navigation }) {
     auth?.isAuthenticated, auth?.identityStatus, auth?.isInitializing,
     canPresentReturnEvaluation, claimReturnEvaluation, navigation]);
 
+  const visibleReturnState = returnCheck && returnState && returnCheck.returned === returnState && returnCheck.version === returnStateVersion
+    && returnCheck.unavailable ? { ...returnState, pendingEvaluationParticipationIds:
+      returnState.pendingEvaluationParticipationIds.filter(id => id !== returnState.recentFinalization?.participationId) }
+    : returnState;
+  const overview = useHomeOverview({
+    auth, enabled: status === 'ready' && !participation, focused,
+    returnState: visibleReturnState, returnStateVersion,
+  });
+
   if (status === 'loading') {
     return <HomeScreen mode="loading" />;
   }
@@ -144,11 +154,7 @@ export default function HomeFlowScreen({ navigation }) {
         message="Não foi possível confirmar a avaliação da participação encerrada. Tente novamente."
         onRetry={refreshParticipation} />;
     }
-    const visibleReturnState = returnCheck && returnState && returnCheck.returned === returnState && returnCheck.version === returnStateVersion
-      && returnCheck.unavailable ? { ...returnState, pendingEvaluationParticipationIds:
-        returnState.pendingEvaluationParticipationIds.filter(id => id !== returnState.recentFinalization?.participationId) }
-      : returnState;
-    return <HomeScreen navigation={navigation} returnState={visibleReturnState} />;
+    return <HomeScreen navigation={navigation} returnState={visibleReturnState} overview={overview} />;
   }
 
   if (participation.status === 'waiting') {

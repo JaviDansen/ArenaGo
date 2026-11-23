@@ -58,6 +58,7 @@ function rig({ current = null, returnState = returned, read } = {}) {
     if (name === '../../context/ParticipationContext') return { ParticipationContext: {} };
     if (name === '../../services/participationHistoryService') return history;
     if (name === '../../components/ui') return {};
+    if (name === './useHomeOverview') return { useHomeOverview: () => ({ status: 'loading', retry() {} }) };
     if (name.startsWith('../arena/') || name === './HomeScreen') return { __esModule: true, default: name.split('/').at(-1) };
     return require(name);
   }).exports;
