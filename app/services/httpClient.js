@@ -120,8 +120,9 @@ async function parseResponseBody(response) {
   if (typeof response.json === 'function') {
     try {
       return await response.json();
-    } catch {
-      return null;
+    } catch (error) {
+      if (error?.name === 'SyntaxError') return null;
+      throw error;
     }
   }
   return null;
@@ -197,19 +198,21 @@ export function createHttpClient(config = {}) {
       headers['Content-Type'] = 'application/json';
     }
 
-    const requestEpoch =
-      options._requestEpoch !== undefined
-        ? options._requestEpoch
-        : typeof authHandlers.getSessionEpoch === 'function'
-        ? authHandlers.getSessionEpoch()
-        : null;
+    // A response belongs to the auth handlers and provider that sent the request.
+    const requestAuthHandlers = authHandlers;
+    const requestAuthScope = requestAuthHandlers.getAuthScope?.();
+    const hasCurrentAuthScope = () => authHandlers === requestAuthHandlers && requestAuthScope !== null &&
+      requestAuthHandlers.getAuthScope?.() === requestAuthScope;
+    const requestEpoch = options._requestEpoch !== undefined
+      ? options._requestEpoch
+      : requestAuthHandlers.getSessionEpoch?.() ?? null;
 
     const explicitToken =
       typeof options.accessToken === 'string' && options.accessToken.trim().length > 0
         ? options.accessToken.trim()
         : null;
     const resolvedToken =
-      explicitToken ?? (requiresAuth && authHandlers.getAccessToken ? authHandlers.getAccessToken() : null);
+      explicitToken ?? (requiresAuth ? requestAuthHandlers.getAccessToken?.() ?? null : null);
 
     if (requiresAuth && resolvedToken) {
       headers.Authorization = `Bearer ${resolvedToken}`;
@@ -221,26 +224,33 @@ export function createHttpClient(config = {}) {
     let didTimeout = false;
     let timeoutId = null;
 
-    if (controller && timeoutMs > 0) {
+    const deadline = timeoutMs > 0 ? new Promise((_, reject) => {
       timeoutId = setTimeout(() => {
         didTimeout = true;
-        controller.abort();
+        reject(new Error('Request timeout'));
+        controller?.abort();
       }, timeoutMs);
-    }
+    }) : null;
 
-    let response;
-    try {
-      response = await fetchImpl(url, {
+    let receivedHeaders = false;
+    const mutating = method !== 'GET' && method !== 'HEAD';
+    async function readResponse() {
+      const response = await fetchImpl(url, {
         method,
         headers,
         body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
-        signal: controller ? controller.signal : undefined,
+        signal: controller?.signal,
       });
-    } catch (networkErr) {
-      if (timeoutId !== null) {
-        clearTimeout(timeoutId);
-      }
+      if (didTimeout) return null;
+      receivedHeaders = true;
+      return { response, parsedBody: await parseResponseBody(response) };
+    }
 
+    let result;
+    try {
+      const reading = readResponse();
+      result = await (deadline ? Promise.race([reading, deadline]) : reading);
+    } catch (networkErr) {
       const isAbortTimeout =
         didTimeout ||
         networkErr?.name === 'AbortError' ||
@@ -255,7 +265,7 @@ export function createHttpClient(config = {}) {
           title: 'Tempo limite excedido',
           detail:
             'O servidor demorou para responder e não foi possível confirmar o resultado da solicitação.',
-          outcomeUnknown: method !== 'GET' && method !== 'HEAD',
+          outcomeUnknown: mutating && (receivedHeaders || networkErr?.requestNotSent !== true),
           cause: networkErr,
         });
       }
@@ -268,7 +278,7 @@ export function createHttpClient(config = {}) {
         detail:
           'Não foi possível conectar ao servidor. Verifique sua conexão com a internet e tente novamente.',
         outcomeUnknown: Boolean(
-          networkErr?.outcomeUnknown ||
+          networkErr?.outcomeUnknown || (mutating && receivedHeaders) ||
             (options.outcomeUnknownOnNetworkError && networkErr?.requestNotSent !== true)
         ),
         cause: networkErr,
@@ -279,9 +289,13 @@ export function createHttpClient(config = {}) {
       }
     }
 
-    const parsedBody = await parseResponseBody(response);
+    const { response, parsedBody } = result;
 
     if (response.ok) {
+      if (options.expectedStatus !== undefined && response.status !== options.expectedStatus) {
+        throw new ApiError({ status: response.status, code: 'UNEXPECTED_HTTP_STATUS',
+          detail: 'O servidor retornou um status diferente do esperado.', outcomeUnknown: mutating });
+      }
       return parsedBody;
     }
 
@@ -318,7 +332,7 @@ export function createHttpClient(config = {}) {
     // Intercepção de 401 em rotas autenticadas:
     // - Se o servidor confirmou revogação/expiração definitiva da sessão, notifica e não tenta refresh.
     // - Caso contrário, aciona o refresh single-flight e repete a requisição protegida no máximo 1 vez.
-    if (status === 401 && requiresAuth && options.retryOnUnauthorized !== false) {
+    if (status === 401 && requiresAuth && options.retryOnUnauthorized !== false && hasCurrentAuthScope()) {
       const authContextInfo = {
         path: normalizedPath,
         method,
@@ -351,7 +365,7 @@ export function createHttpClient(config = {}) {
 
         if (
           typeof refreshedAccessToken === 'string' &&
-          refreshedAccessToken.length > 0 &&
+          refreshedAccessToken.length > 0 && hasCurrentAuthScope() &&
           (requestEpoch === null || currentEpochAfterRefresh === requestEpoch)
         ) {
           return request(normalizedPath, {

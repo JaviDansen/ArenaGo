@@ -7,6 +7,13 @@ const schedule = loadModule('screens/admin/adminScheduleForm.js', require).expor
 const forms = loadModule('screens/admin/adminCreationForm.js', () => schedule).exports;
 const setup = loadModule('services/adminEventSetupService.js', () => events).exports;
 const shared = loadModule('screens/admin/adminStructureIntents.js', () => setup).exports;
+const staff = loadModule('screens/admin/adminStaffSession.js', name => {
+  if (name === '../../context/adminAccess') return loadModule('context/adminAccess.js', require).exports;
+  if (name.endsWith('/adminEventSetupService')) return setup;
+  if (name.endsWith('/adminEventsService')) return events;
+  assert.equal(name, './adminCreationForm');
+  return forms;
+}).exports;
 const { createEventSetup } = loadModule('screens/admin/adminCreationFlow.js', name => {
   if (name === './adminStructureIntents') return shared;
   if (name.endsWith('/adminEventsService')) return events;
@@ -51,8 +58,9 @@ function fixture({ resume = false, post, get, now, isCurrent = () => true } = {}
   };
   let sequence = 0;
   const sessionIntents = new Map();
+  const staffSession = staff.createStaffSession(client, () => id(++sequence), isCurrent);
   function open(selected = resume ? eventId : null, structureIntents = sessionIntents) {
-    const flow = createEventSetup({ client, eventId: selected, isCurrent, now, structureIntents, newKey: () => id(++sequence) });
+    const flow = createEventSetup({ client, eventId: selected, isCurrent, now, structureIntents, staffSession, newKey: () => id(++sequence) });
     const dispose = flow.mount(() => {});
     async function settled() {
       for (let i = 0; i < 20; i++) {
@@ -61,7 +69,7 @@ function fixture({ resume = false, post, get, now, isCurrent = () => true } = {}
       }
       assert.fail('Leitura ou escrita não terminou');
     }
-    return { flow, reads, writes, dispose, settled, open,
+    return { flow, reads, writes, dispose, settled, open, staffSession,
       next: () => flow.next(flow.snapshot().stepVersion),
       create: () => flow.confirmCreate(flow.snapshot().stepVersion) };
   }
@@ -223,7 +231,7 @@ test('persistência incremental, falha parcial, concessão e revogação atualiz
   h.next(); await h.settled();
   h.flow.editSetup({ email: ' Equipe@example.test ' });
   await h.flow.run('grant');
-  assert.match(h.flow.snapshot().message, /verificado/);
+  assert.match(h.flow.snapshot().feedback[0].message, /verificado/);
   assert.equal(h.flow.snapshot().grants.length, 0);
   rejectStaff = false; await h.flow.run('grant');
   assert.equal(h.flow.snapshot().grants[0].id, grant.id);
@@ -250,7 +258,7 @@ test('UUIDs de outro evento ou experiência e concessões globais não são acei
   await assert.rejects(setup.grantEventStaff({ post: () => ({ grant: { ...grant, eventId: id(8) } }) }, eventId, 'staff@example.test', id(9)));
 });
 
-test('404 remove só o comprovante revogado e reconsulta a prontidão, com 401/403 tratados como bloqueio', async () => {
+test('404 preserva só o vínculo afetado como não confirmado e reconsulta a prontidão, com 401/403 tratados como bloqueio', async () => {
   for (const status of [404, 401, 403]) {
     const other = { ...grant, id: id(6), userId: id(7) };
     const h = fixture({ resume: true, post: (url, body, db) => {
@@ -275,11 +283,12 @@ test('404 remove só o comprovante revogado e reconsulta a prontidão, com 401/4
     const readsBefore = h.reads.filter(url => url.endsWith('/readiness')).length;
     await h.flow.run('revoke', grant.id);
     if (status === 404) {
-      assert.deepEqual(plain(h.flow.snapshot().grants.map(item => item.id)), [other.id]);
+      assert.deepEqual(plain(h.flow.snapshot().grants.map(item => [item.id, Boolean(item.unconfirmed)])),
+        [[grant.id, true], [other.id, false]]);
       assert.equal(h.reads.filter(url => url.endsWith('/readiness')).length, readsBefore + 1);
-      assert.match(h.flow.snapshot().message, /vínculo Staff não está mais disponível/);
+      assert.match(h.flow.snapshot().feedback.find(item => item.kind === 'revoke').message, /vínculo ou o evento/);
       await h.flow.run('revoke', other.id);
-      assert.equal(h.flow.snapshot().grants.length, 0);
+      assert.deepEqual(plain(h.flow.snapshot().grants.map(item => item.id)), [grant.id]);
     } else {
       assert.equal(h.flow.snapshot().blocked, true);
       assert.equal(h.flow.snapshot().event, null);
@@ -410,4 +419,23 @@ test('401 na escrita bloqueia o formulário e 404 na retomada oferece nova leitu
   missing = false; await resumed.flow.refresh();
   assert.equal(resumed.flow.snapshot().event.id, eventId);
   assert.equal(resumed.writes.length, 0);
+});
+
+test('uma confirmação Staff da gestão não sobrescreve o aviso estrutural do wizard', async () => {
+  const h = fixture({ resume: true, post: url => {
+    if (url === '/admin/roles/grant') return { grant };
+    assert.equal(url, path + '/experiences');
+    throw { status: 408, code: 'REQUEST_TIMEOUT' };
+  } });
+  try {
+    await h.settled();
+    h.flow.editSetup({ experience: 'Oficina' });
+    await h.flow.run('experience');
+    const warning = h.flow.snapshot().message;
+    assert.match(warning, /ficou sem confirmação/);
+    await h.staffSession.send(eventId, 'grant', 'staff@example.test');
+    assert.equal(h.flow.snapshot().message, warning);
+    assert.equal(h.flow.snapshot().feedback[0].message, 'Concessão confirmada.');
+    assert.ok(h.flow.pendingStructure());
+  } finally { h.dispose(); }
 });

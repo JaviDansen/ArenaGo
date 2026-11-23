@@ -73,6 +73,15 @@ export function createAuthSessionManager(options = {}) {
     listeners.add(options.onStateChange);
   }
 
+  // Standalone managers start active. A mounted provider owns its auth scope.
+  let providerScope = {};
+  function attachProvider(scope) {
+    providerScope = scope;
+    return () => {
+      if (providerScope === scope) providerScope = null;
+    };
+  }
+
   let sessionEpoch = 0;
   let accessToken = null;
   let inFlightRefreshPromise = null;
@@ -182,7 +191,8 @@ export function createAuthSessionManager(options = {}) {
    *   com `refreshToken !== null`), preserva/reafirma a credencial da nova sessão sem apagá-la.
    */
   async function writeRefreshTokenForEpoch(refreshToken, targetEpoch) {
-    if (sessionEpoch !== targetEpoch) {
+    const scope = providerScope;
+    if (!scope || sessionEpoch !== targetEpoch) {
       return false;
     }
 
@@ -192,12 +202,13 @@ export function createAuthSessionManager(options = {}) {
     };
 
     return enqueueStorageOp(async () => {
-      if (sessionEpoch !== targetEpoch || desiredCredentialState.epoch !== targetEpoch) {
+      if (providerScope !== scope || sessionEpoch !== targetEpoch || desiredCredentialState.epoch !== targetEpoch) {
         return false;
       }
 
       await tokenStorage.setRefreshToken(refreshToken);
 
+      if (providerScope !== scope) return false;
       if (sessionEpoch !== targetEpoch) {
         if (desiredCredentialState.refreshToken === null) {
           try {
@@ -228,6 +239,8 @@ export function createAuthSessionManager(options = {}) {
    *   já tiver sido iniciada antes ou durante a limpeza, NÃO apaga (ou restaura) o token da sessão nova.
    */
   async function clearRefreshTokenForEpoch(targetEpoch) {
+    const scope = providerScope;
+    if (!scope) return false;
     if (targetEpoch >= desiredCredentialState.epoch) {
       desiredCredentialState = {
         epoch: targetEpoch,
@@ -243,8 +256,10 @@ export function createAuthSessionManager(options = {}) {
         return false;
       }
 
+      if (providerScope !== scope) return false;
       await tokenStorage.clearRefreshToken();
 
+      if (providerScope !== scope) return false;
       if (
         desiredCredentialState.epoch > targetEpoch &&
         desiredCredentialState.refreshToken !== null
@@ -294,7 +309,7 @@ export function createAuthSessionManager(options = {}) {
   }
 
   function getAccessToken() {
-    return accessToken;
+    return providerScope ? accessToken : null;
   }
 
   function getSessionEpoch() {
@@ -303,7 +318,7 @@ export function createAuthSessionManager(options = {}) {
 
   function getIdentityRevision() { return identityRevision; }
   function isIdentityVerified() {
-    return state.isAuthenticated && !state.isInitializing && state.identityStatus === 'verified';
+    return Boolean(providerScope && state.isAuthenticated && !state.isInitializing && state.identityStatus === 'verified');
   }
 
   function clearAdminChallenge({ resetFlight = true } = {}) {
@@ -333,6 +348,7 @@ export function createAuthSessionManager(options = {}) {
   }
 
   async function handleSessionInvalidated(error, context = {}) {
+    if (!providerScope) return;
     if (
       context?.requestEpoch !== undefined &&
       context.requestEpoch !== null &&
@@ -376,12 +392,15 @@ export function createAuthSessionManager(options = {}) {
    * Chamadas concorrentes dentro da mesma geração de sessão aguardam a mesma Promise.
    */
   function refreshSession() {
+    const scope = providerScope;
+    if (!scope) return Promise.resolve(null);
     if (privateAdminChallenge || state.adminChallenge || state.sessionStatus === 'authenticating') return Promise.resolve(null);
     if (inFlightRefreshPromise) {
       return inFlightRefreshPromise;
     }
 
     const epochAtStart = sessionEpoch;
+    const isCurrent = () => providerScope === scope && sessionEpoch === epochAtStart;
     let refreshConfirmed = false;
     identityRequestGeneration += 1;
     emitState({ identityStatus: 'checking' });
@@ -392,25 +411,25 @@ export function createAuthSessionManager(options = {}) {
           const pending = pendingRotation;
           try {
             const saved = await writeRefreshTokenForEpoch(pending.refreshToken, epochAtStart);
-            if (!saved || sessionEpoch !== epochAtStart) return null;
+            if (!saved || !isCurrent()) return null;
           } catch (error) {
-            if (sessionEpoch !== epochAtStart) return null;
+            if (!isCurrent()) return null;
             emitState({ identityStatus: 'error', isInitializing: false,
               sessionStatus: 'identity_error', storageError: 'Não foi possível salvar a sessão renovada.',
               networkError: 'Não foi possível salvar a sessão renovada. Tente novamente.' });
             throw error;
           }
-          if (sessionEpoch !== epochAtStart) return null;
+          if (!isCurrent()) return null;
           accessToken = pending.accessToken;
           pendingRotation = null;
           const user = await fetchCurrentUser({ retryOnUnauthorized: false, fromRefresh: true });
-          if (sessionEpoch !== epochAtStart || !user) return null;
+          if (!isCurrent() || !user) return null;
           return { accessToken: pending.accessToken, refreshToken: pending.refreshToken,
             expiresIn: pending.expiresIn, user };
         }
         const storageRead = await readRefreshTokenState();
 
-        if (sessionEpoch !== epochAtStart) {
+        if (!isCurrent()) {
           return null;
         }
 
@@ -470,7 +489,7 @@ export function createAuthSessionManager(options = {}) {
             title: 'Sessão não encontrada',
             detail: 'Nenhuma credencial de renovação disponível. Faça login novamente.',
           });
-          if (sessionEpoch === epochAtStart) {
+          if (isCurrent()) {
             await handleSessionInvalidated(missingError, { targetEpoch: epochAtStart });
           }
           throw missingError;
@@ -479,7 +498,7 @@ export function createAuthSessionManager(options = {}) {
         // Sem esse registro prévio, um encerramento após o POST e antes da
         // gravação do novo token poderia reenviar o token já consumido.
         const marked = await writeRefreshTokenForEpoch(REFRESH_PENDING_MARKER, epochAtStart);
-        if (!marked || sessionEpoch !== epochAtStart) return null;
+        if (!marked || !isCurrent()) return null;
 
         try {
           const response = await client.post(
@@ -493,7 +512,7 @@ export function createAuthSessionManager(options = {}) {
           );
 
           // Se houve logout ou novo login enquanto o refresh estava em trânsito, descarta a resposta antiga.
-          if (sessionEpoch !== epochAtStart) {
+          if (!isCurrent()) {
             return null;
           }
 
@@ -524,7 +543,7 @@ export function createAuthSessionManager(options = {}) {
           // Se o logout (ou novo login) ocorreu durante a gravação assíncrona no SecureStore,
           // writeRefreshTokenForEpoch já reconciliou o armazenamento e retornou false:
           // jamais expor accessToken ou entregar resposta obsoleta às requisições que aguardavam.
-          if (!persisted || sessionEpoch !== epochAtStart) {
+          if (!persisted || !isCurrent()) {
             return null;
           }
 
@@ -534,7 +553,7 @@ export function createAuthSessionManager(options = {}) {
           // A resposta de refresh não contém papéis. Confirme-os com o novo token
           // antes de liberar a requisição que provocou a renovação.
           const liveUser = await fetchCurrentUser({ retryOnUnauthorized: false, fromRefresh: true });
-          if (sessionEpoch !== epochAtStart || !liveUser) return null;
+          if (!isCurrent() || !liveUser) return null;
 
           return {
             accessToken: response.accessToken,
@@ -543,7 +562,7 @@ export function createAuthSessionManager(options = {}) {
             user: liveUser,
           };
         } catch (error) {
-          if (sessionEpoch !== epochAtStart) {
+          if (!isCurrent()) {
             return null;
           }
           // Falhas na leitura de identidade após a rotação confirmada não são
@@ -580,7 +599,7 @@ export function createAuthSessionManager(options = {}) {
               // Ignora falha de limpeza
             }
 
-            if (sessionEpoch === uncertainEpoch) {
+            if (providerScope === scope && sessionEpoch === uncertainEpoch) {
               emitState({
                 user: null,
                 isAuthenticated: false,
@@ -607,6 +626,7 @@ export function createAuthSessionManager(options = {}) {
           // o token original. Nos demais casos o marcador impede seu reuso.
           if (error?.isNetworkError && error?.cause?.requestNotSent === true) {
             await writeRefreshTokenForEpoch(storedRefreshToken, epochAtStart);
+            if (!isCurrent()) return null;
           }
 
           // Falha de transporte apenas quando comprovadamente a requisição não chegou a ser enviada:
@@ -621,7 +641,7 @@ export function createAuthSessionManager(options = {}) {
           throw error;
         }
       } finally {
-        if (sessionEpoch === epochAtStart && state.identityStatus === 'checking') {
+        if (isCurrent() && state.identityStatus === 'checking') {
           if (accessToken || state.isAuthenticated) {
             emitState({ identityStatus: 'error', isInitializing: false,
               sessionStatus: 'identity_error', networkError: 'Não foi possível confirmar sua sessão.' });
@@ -643,13 +663,15 @@ export function createAuthSessionManager(options = {}) {
    * Consulta GET /api/v1/auth/me confirmando a sessão ativa e dados vivos no PostgreSQL.
    */
   async function fetchCurrentUser(options = {}) {
+    const scope = providerScope;
+    if (!scope) return null;
     const epochAtStart = sessionEpoch;
     if (inFlightRefreshPromise && !options.fromRefresh) {
       const refreshed = await inFlightRefreshPromise;
-      return sessionEpoch === epochAtStart && refreshed ? refreshed.user : null;
+      return providerScope === scope && sessionEpoch === epochAtStart && refreshed ? refreshed.user : null;
     }
     const requestGeneration = ++identityRequestGeneration;
-    const isCurrent = () => sessionEpoch === epochAtStart && requestGeneration === identityRequestGeneration;
+    const isCurrent = () => providerScope === scope && sessionEpoch === epochAtStart && requestGeneration === identityRequestGeneration;
     try {
       // O retry de /me é coordenado aqui: o refresh faz sua própria consulta,
       // evitando dependência circular entre /me e a renovação single-flight.
@@ -683,7 +705,7 @@ export function createAuthSessionManager(options = {}) {
           'INVALID_REFRESH_TOKEN', 'ACCOUNT_DEACTIVATED'].includes(error.code);
         if (!terminal && options.retryOnUnauthorized !== false && !options._retriedAfterRefresh) {
           const refreshed = await refreshSession();
-          return sessionEpoch === epochAtStart && refreshed ? refreshed.user : null;
+          return providerScope === scope && sessionEpoch === epochAtStart && refreshed ? refreshed.user : null;
         }
         await handleSessionInvalidated(error, { targetEpoch: epochAtStart });
         throw error;
@@ -703,6 +725,8 @@ export function createAuthSessionManager(options = {}) {
    * 4. Confirma os dados vivos da conta via GET /api/v1/auth/me.
    */
   function restoreSession() {
+    const scope = providerScope;
+    if (!scope) return Promise.resolve({ status: 'aborted', user: null });
     if (privateAdminChallenge || state.adminChallenge || state.sessionStatus === 'authenticating') {
       return Promise.resolve({ status: state.sessionStatus, user: null });
     }
@@ -722,6 +746,7 @@ export function createAuthSessionManager(options = {}) {
 
         const storageRead = await readRefreshTokenState();
 
+        if (providerScope !== scope) return { status: 'aborted', user: null };
         if (sessionEpoch !== epochAtStart) {
           return { status: 'aborted', user: state.user };
         }
@@ -766,6 +791,7 @@ export function createAuthSessionManager(options = {}) {
         let liveUser;
         if (!accessToken || pendingRotation?.epoch === epochAtStart || storedRefreshToken === REFRESH_PENDING_MARKER) {
           const refreshed = await refreshSession();
+          if (providerScope !== scope) return { status: 'aborted', user: null };
           if (sessionEpoch !== epochAtStart || !refreshed) {
             const status = ['revoked', 'expired', 'uncertain_refresh'].includes(state.sessionStatus)
               ? state.sessionStatus : 'aborted';
@@ -776,6 +802,7 @@ export function createAuthSessionManager(options = {}) {
           liveUser = await fetchCurrentUser();
         }
 
+        if (providerScope !== scope) return { status: 'aborted', user: null };
         if (sessionEpoch !== epochAtStart || !liveUser) {
           return { status: 'aborted', user: state.user };
         }
@@ -788,6 +815,7 @@ export function createAuthSessionManager(options = {}) {
           nextRoute: resolvedRoute,
         };
       } catch (error) {
+        if (providerScope !== scope) return { status: 'aborted', user: null };
         if (
           sessionEpoch !== epochAtStart &&
           state.sessionStatus !== 'revoked' &&
@@ -1171,6 +1199,8 @@ export function createAuthSessionManager(options = {}) {
    * - Distingue revogação remota confirmada (`remoteRevoked: true`) de encerramento local sob falha de rede (`remoteRevoked: false`).
    */
   async function logout() {
+    const scope = providerScope;
+    if (!scope) return { localLoggedOut: false, remoteRevoked: false, status: 'provider_detached' };
     sessionEpoch += 1;
     pendingRotation = null;
     const logoutEpoch = sessionEpoch;
@@ -1194,6 +1224,7 @@ export function createAuthSessionManager(options = {}) {
 
     await clearRefreshTokenForEpoch(logoutEpoch);
 
+    if (providerScope !== scope) return { localLoggedOut: true, remoteRevoked: false, status: 'provider_detached' };
     if (!tokenToRevoke) {
       return {
         localLoggedOut: true,
@@ -1220,7 +1251,7 @@ export function createAuthSessionManager(options = {}) {
     } catch (error) {
       const warning =
         'Sua sessão foi encerrada neste dispositivo, mas não foi possível confirmar a revogação no servidor por falha de comunicação.';
-      if (sessionEpoch === logoutEpoch) {
+      if (providerScope === scope && sessionEpoch === logoutEpoch) {
         emitState({
           authNotice: warning,
         });
@@ -1247,6 +1278,7 @@ export function createAuthSessionManager(options = {}) {
   client.setAuthHandlers({
     getAccessToken,
     getSessionEpoch,
+    getAuthScope: () => providerScope,
     onUnauthorized: async (ctx = {}) => {
       if (
         ctx.requestEpoch !== undefined &&
@@ -1273,6 +1305,7 @@ export function createAuthSessionManager(options = {}) {
   }
 
   return {
+    attachProvider,
     subscribe,
     getSnapshot,
     getAccessToken,

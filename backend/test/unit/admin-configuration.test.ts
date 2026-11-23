@@ -145,19 +145,20 @@ test("E08.13 DTO administrativo omite campos internos e dados pessoais da proje�
 const actor={userId,sessionId};
 const experience={id:experienceId,eventId,name:"Experiência",queueAcceptingEntries:true,lastQueueOrder:"9007199254740993",createdAt:at,updatedAt:at};
 const station={id:stationId,experienceId,label:"Estação",availability:"available",pendingServiceSessionId:null,createdAt:at,updatedAt:at};
-type ReadOptions={active?:boolean;admin?:boolean;valid?:boolean;revoked?:boolean;expired?:boolean;secondFactor?:boolean;
-  absent?:boolean;events?:ConfigurationRow[];experiences?:typeof experience[];stations?:typeof station[]};
+type ReadOptions={active?:boolean;admin?:boolean;valid?:boolean;revoked?:boolean;expired?:boolean;secondFactor?:boolean;emailVerified?:boolean;
+  absent?:boolean;events?:ConfigurationRow[];experiences?:typeof experience[];stations?:typeof station[];staff?:object[]};
 function readFixture(options:ReadOptions={}){
   const queries:Array<{text:string;params:unknown[]}>=[];
   const database=drizzle({async query(config:{text:string},params:unknown[]=[]){
     const text=config.text;queries.push({text,params});
     if(/^(begin|commit|rollback)/.test(text))return {rows:[]};
     if(text.includes('SELECT u.is_active AS active'))return {rows:[{active:options.active??true,admin:options.admin??true,valid:options.valid??true,
-      revoked:options.revoked??false,expired:options.expired??false,secondFactor:options.secondFactor??true}]};
+      revoked:options.revoked??false,expired:options.expired??false,secondFactor:options.secondFactor??true,emailVerified:options.emailVerified??true}]};
     if(text.startsWith('SELECT id FROM events'))return {rows:options.absent?[]:[{id:eventId}]};
     if(text.startsWith('WITH observation')||text.startsWith('SELECT * FROM (WITH observation'))return {rows:options.absent?[]:options.events??[eventRow()]};
     if(text.startsWith('SELECT id,event_id'))return {rows:options.experiences??[experience]};
     if(text.startsWith('SELECT s.id,s.experience_id'))return {rows:options.stations??[station]};
+    if(text.includes('FROM user_roles r JOIN users u'))return {rows:options.staff??[]};
     throw Error('SQL unitário inesperado: '+text);
   }}as unknown as Client,{schema});
   return {service:new AdminConfigurationQueryService(database),queries};
@@ -178,6 +179,36 @@ test("E08.13 listagem keyset usa ordenação estável, filtros e um snapshot sem
   assert.ok(query.text.includes('(e.created_at,e.id)<'));assert.ok(query.text.includes('ORDER BY "createdAt" DESC,id DESC'));
   assert.equal(f.queries.some(q=>/FOR UPDATE|FOR SHARE|INSERT |UPDATE |DELETE /.test(q.text)),false);assert.equal(f.queries.at(-1)?.text,'commit');
 });
+test("ADMIN-06 lê vínculos ativos do evento em ordem estável e devolve somente os campos públicos da lista", async () => {
+  const item = { grantId: id(20), userId: id(21), name: "Staff", email: "staff@example.test", grantedAt: at, eligible: false };
+  const f = readFixture({ staff: [{ ...item, passwordHash: "privado" }] });
+  assert.deepEqual(await f.service.staff(actor, eventId), { eventId, items: [item] });
+  const query = f.queries.find(q => q.text.includes("FROM user_roles r JOIN users u"));
+  assert.ok(query);
+  assert.deepEqual(query.params, [eventId]);
+  assert.match(query.text, /r.event_id = .* AND r.role = 'staff' AND r.revoked_at IS NULL/);
+  assert.match(query.text, /ORDER BY r.granted_at ASC, r.id ASC/);
+  assert.equal(f.queries[0].text, "begin isolation level repeatable read read only");
+  assert.equal(f.queries.at(-1)?.text, "commit");
+});
+
+test("ADMIN-06 bloqueia e-mail não verificado e TOTP ausente antes de ler o evento ou a equipe", async () => {
+  for (const [options, kind] of [
+    [{ emailVerified: false }, "actor_email_unverified"],
+    [{ secondFactor: false }, "admin_2fa_required"],
+    [{ admin: false }, "admin_required"],
+  ] as const) {
+    const f = readFixture(options);
+    await assert.rejects(f.service.staff(actor, eventId), { kind });
+    assert.equal(f.queries.length, 3);
+    assert.equal(f.queries.at(-1)?.text, "rollback");
+  }
+  const absent = readFixture({ absent: true });
+  await assert.rejects(absent.service.staff(actor, eventId), { kind: "resource_not_found" });
+  assert.equal(absent.queries.length, 4);
+  assert.deepEqual(await readFixture().service.staff(actor, eventId), { eventId, items: [] });
+});
+
 test("E08.13 página final vazia não inventa cursor ou eventos",async()=>{
   const f=readFixture({events:[]});assert.deepEqual(await f.service.events(actor,configurationQuery.parse({})),{items:[],nextCursor:null});
 });

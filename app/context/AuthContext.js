@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useRef, useState } from 'react';
+import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createAuthSessionManager } from '../services/authService';
 import { httpClient as defaultHttpClient } from '../services/httpClient';
 import { defaultTokenStorage } from '../services/tokenStorage';
@@ -22,11 +22,37 @@ export function AuthProvider({
       });
   }
   const manager = managerRef.current;
+  const staffBinding = useRef(null);
+  const lifetime = useRef({ active: true });
+  const isProviderActive = () => lifetime.current.active;
+  useLayoutEffect(() => {
+    const scope = lifetime.current;
+    scope.active = true;
+    const detach = manager.attachProvider?.(scope);
+    return () => {
+      scope.active = false;
+      detach?.();
+      // Strict Mode can immediately reattach this same provider.
+      void Promise.resolve().then(() => {
+        if (!scope.active) {
+          staffBinding.current?.sync();
+          staffBinding.current = null;
+        }
+      });
+    };
+  }, [manager]);
+  function getAdminStaffSession(createBinding) {
+    if (!isProviderActive()) return null;
+    staffBinding.current ??= createBinding(manager, isProviderActive);
+    return staffBinding.current.get();
+  }
 
   const [snapshot, setSnapshot] = useState(() => manager.getSnapshot());
 
   useEffect(() => {
     const unsubscribe = manager.subscribe((nextState) => {
+      if (!isProviderActive()) return;
+      staffBinding.current?.sync();
       setSnapshot(nextState);
     });
     if (autoRestore) {
@@ -65,6 +91,7 @@ export function AuthProvider({
     markQuestionnaireCompleted: manager.markQuestionnaireCompleted,
     clearNotices: manager.clearNotices,
     httpClient: manager.client,
+    getAdminStaffSession,
   };
 
   return <AuthContext.Provider value={contextValue}>{children}</AuthContext.Provider>;

@@ -4,6 +4,8 @@ import { after, before, test } from "node:test";
 import { Module, type INestApplication } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 import type { Pool } from "pg";
+import type { SQL } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
 import supertest from "supertest";
 import { AuthService } from "../../src/auth/auth.service";
 import { SessionAuthGuard } from "../../src/auth/session-auth.guard";
@@ -25,6 +27,7 @@ import { AdminCloseService } from "../../src/events/admin-close.service";
 
 const id = (n: number) => `abcdef00-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const eventId = id(1), experienceId = id(2), stationId = id(3), userId = id(4), sessionId = id(5), staffId = id(6);
+const unverifiedId = id(7), withoutTotpId = id(8);
 const at = "2026-11-05T15:00:00.123456Z";
 const event = { id: eventId, name: "Evento", accessCode: "EVENT-01", statusStored: "scheduled", effectivePhase: "scheduled" };
 const experience = { id: experienceId, eventId, name: "Experiência", queueAcceptingEntries: true, lastQueueOrder: "0" };
@@ -38,6 +41,7 @@ const calls: Call[] = [], oldCalls: string[] = [];
 let failure: Error | undefined;
 let result: { kind: "created" | "changed" | "unchanged" | "replay"; body: object; httpStatus: 200 | 201 };
 let readResult: object;
+let staffQueryFixture: AdminConfigurationQueryService | undefined;
 
 const readiness = { eventId, statusStored: "scheduled", effectivePhase: "scheduled", ready: false, missing: ["VERIFIED_ACTIVE_STAFF"],
   checks: { nameAndAccessCode: true, validScheduleAndTimezone: true, externalQueueConfigured: true, hasExperienceWithAvailableStation: true, hasVerifiedActiveStaff: false }, acceptingNewParticipations: false };
@@ -64,6 +68,9 @@ function record(method: string, actor: Actor, input?: unknown) {
   { provide: AuthService, useValue: { async authenticateBearerToken(token: string) {
     if (token === "no-2fa") throw new ProblemException({ status: 401, code: "ADMIN_2FA_REQUIRED", typeSlug: "admin-2fa-required", title: "2FA obrigatório", detail: "Segundo fator obrigatório." });
     if (token === "revoked") throw new ProblemException({ status: 401, code: "SESSION_REVOKED", typeSlug: "session-revoked", title: "Sessão revogada", detail: "Sessão revogada." });
+    if (token === "staff-list-unverified" || token === "staff-list-no-totp") {
+      return { userId: token === "staff-list-unverified" ? unverifiedId : withoutTotpId, sessionId, roles: ["admin"] };
+    }
     if (token !== "unit-admin" && token !== "staff") throw new ProblemException({ status: 401, code: "INVALID_ACCESS_TOKEN", typeSlug: "invalid-access-token", title: "Token inválido", detail: "Token inválido." });
     return { userId: token === "staff" ? staffId : userId, sessionId, roles: token === "staff" ? ["staff"] : ["admin"] };
   } } },
@@ -73,6 +80,11 @@ function record(method: string, actor: Actor, input?: unknown) {
     event: async (actor: Actor, target: string) => { record("event", actor, target); return readResult; },
     readiness: async (actor: Actor, target: string) => { record("readiness", actor, target); return readResult; },
     experiences: async (actor: Actor, target: string) => { record("experiences", actor, target); return readResult; },
+    staff: async (actor: Actor, target: string) => {
+      if (staffQueryFixture) return staffQueryFixture.staff(actor, target);
+      record("staff", actor, target);
+      return readResult;
+    },
   } },
   { provide: AdminScheduleService, useValue: { async updateSchedule() { oldCalls.push("schedule"); return { kind: "completed", eventId, officialEndsAt: createBody.officialEndsAt, operationalDeadlineAt: createBody.operationalDeadlineAt, changedAt: at }; } } },
   { provide: AdminExternalQueueService, useValue: { async setExternalQueue() { oldCalls.push("external-queue"); return { kind: "completed", eventId, externalQueueEnabled: false, releasedCount: 0, changedAt: at }; } } },
@@ -98,12 +110,63 @@ function problem(r: supertest.Response, status: number, code: string) {
   assert.equal(r.status, status, JSON.stringify(r.body)); assert.equal(r.body.status, status); assert.equal(r.body.code, code); assert.match(r.headers["content-type"], /application\/problem\+json/);
 }
 
+routes.push({ name: "staff", method: "get", path: `/admin/events/${eventId}/staff`, response: { eventId, items: [] }, status: 200 });
+
+test("ADMIN-06 HTTP aplica a autorização real do GET Staff antes de revelar a existência do evento", async () => {
+  const dialect = new PgDialect();
+  const statements: Array<{ sql: string; params: unknown[] }> = [];
+  const missingId = id(91);
+  const database = {
+    async transaction(read: (tx: { execute: (query: SQL) => Promise<{ rows: object[] }> }) => Promise<unknown>) {
+      return read({ async execute(query) {
+        const statement = dialect.sqlToQuery(query);
+        statements.push(statement);
+        if (statement.sql.includes("SELECT u.is_active AS active")) {
+          assert.equal(statement.params[0], sessionId);
+          const actorId = statement.params[1];
+          return { rows: [{ active: true, admin: actorId !== staffId, valid: true, revoked: false, expired: false,
+            secondFactor: actorId !== withoutTotpId, emailVerified: actorId !== unverifiedId }] };
+        }
+        if (statement.sql.startsWith("SELECT id FROM events")) {
+          return { rows: statement.params[0] === eventId ? [{ id: eventId }] : [] };
+        }
+        assert.match(statement.sql, /FROM user_roles r JOIN users u/);
+        return { rows: [] };
+      } });
+    },
+  };
+  staffQueryFixture = new AdminConfigurationQueryService(database as unknown as
+    ConstructorParameters<typeof AdminConfigurationQueryService>[0]);
+  try {
+    const route = routes.at(-1)!;
+    const missingPath = route.path.replace(eventId, missingId);
+    for (const [token, actorId, status, code] of [
+      ["staff-list-unverified", unverifiedId, 403, "ADMIN_EMAIL_UNVERIFIED"],
+      ["staff-list-no-totp", withoutTotpId, 401, "ADMIN_2FA_REQUIRED"],
+      ["staff", staffId, 403, "ADMIN_REQUIRED"],
+    ] as const) {
+      statements.length = 0;
+      const existing = await request(route, route.path, token).query({ userId, sessionId: id(92) });
+      const missing = await request(route, missingPath, token);
+      problem(existing, status, code);
+      problem(missing, status, code);
+      assert.deepEqual(existing.body, missing.body);
+      assert.deepEqual(statements.map(statement => statement.params), [[sessionId, actorId], [sessionId, actorId]]);
+    }
+    assert.deepEqual((await request(route)).body, { eventId, items: [] });
+    problem(await request(route, missingPath), 404, "RESOURCE_NOT_FOUND");
+  } finally {
+    staffQueryFixture = undefined;
+  }
+});
+
 for (const route of routes) {
   test(`E08.13 HTTP ${route.name} responde contrato e usa exclusivamente ator/sessão autenticados`, async () => {
     reset(route); const start = Date.now();
     const req = request(route); if (route.method === "get") req.unset("Idempotency-Key"); else req.query({ userId: id(90), sessionId: id(91) });
     const r = await req.send(route.body); assert.equal(r.status, route.status, JSON.stringify(r.body)); assert.deepEqual(r.body, route.response); assert.equal(calls.length, 1);
     assert.deepEqual(calls[0].actor, { userId, sessionId }); assert.equal(oldCalls.length, 0);
+    if (route.name === "staff") assert.equal(r.headers["cache-control"], "no-store");
     if (route.operation) {
       const input = calls[0].input as MutationInput; assert.equal(calls[0].method, "mutate"); assert.equal(input.operation, route.operation);
       assert.equal(input.idempotencyKey, "opaque,key"); assert.ok(input.expiresAt.getTime() >= start + 60000 && input.expiresAt.getTime() <= Date.now() + 60000);

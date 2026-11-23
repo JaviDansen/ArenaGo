@@ -7,7 +7,9 @@ import AdminHomeScreen from './AdminHomeScreen';
 import AdminRealEventsScreen from './AdminRealEventsScreen';
 import AdminRealEventScreen from './AdminRealEventScreen';
 import AdminEventSetupScreen from './AdminEventSetupScreen';
-import { AdminSetupIntents } from './adminSetupIntents';
+import { randomUUID } from 'expo-crypto';
+import { bindStaffSession } from './adminStaffSession';
+import { AdminStaffSession, AdminSetupIntents } from './adminSetupIntents';
 import AdminEventManagementInfoScreen from './AdminEventManagementInfoScreen';
 import AdminPendingScreen from './AdminPendingScreen';
 import AdminBottomBar from './components/AdminBottomBar';
@@ -32,13 +34,16 @@ export default function AdminDemoNavigator() {
   const owner = adminReadOwner(auth);
   const setupIntents = useMemo(() => new Map(), [owner, auth.httpClient]);
   if (!owner) return null;
+  const staff = auth.getAdminStaffSession?.((manager, isProviderActive) => bindStaffSession(manager, randomUUID, isProviderActive));
   return <AdminSetupIntents.Provider value={setupIntents}>
-    <Stack.Navigator key={owner} initialRouteName="AdminTabs" screenOptions={{ headerShown: false }}>
-      <Stack.Screen name="AdminTabs" component={AdminTabs} />
-      <Stack.Screen name="AdminEvents" component={AdminRealEventsScreen} />
-      <Stack.Screen name="AdminRealEvent" component={AdminRealEventScreen} />
-      <Stack.Screen name="AdminEventManagementInfo" component={AdminEventManagementInfoScreen} />
-      <Stack.Screen name="AdminEventSetup" component={AdminEventSetupScreen} />
-    </Stack.Navigator>
+    <AdminStaffSession.Provider value={staff}>
+      <Stack.Navigator key={owner} initialRouteName="AdminTabs" screenOptions={{ headerShown: false }}>
+        <Stack.Screen name="AdminTabs" component={AdminTabs} />
+        <Stack.Screen name="AdminEvents" component={AdminRealEventsScreen} />
+        <Stack.Screen name="AdminRealEvent" component={AdminRealEventScreen} />
+        <Stack.Screen name="AdminEventManagementInfo" component={AdminEventManagementInfoScreen} />
+        <Stack.Screen name="AdminEventSetup" component={AdminEventSetupScreen} />
+      </Stack.Navigator>
+    </AdminStaffSession.Provider>
   </AdminSetupIntents.Provider>;
 }

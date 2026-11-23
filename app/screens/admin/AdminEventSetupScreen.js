@@ -5,7 +5,8 @@ import { randomUUID } from 'expo-crypto';
 import { useAuth } from '../../context/AuthContext';
 import { adminReadOwner } from './useAdminEvents';
 import { createEventSetup } from './adminCreationFlow';
-import { AdminSetupIntents } from './adminSetupIntents';
+import { staffEmail } from './adminCreationForm';
+import { AdminStaffSession, AdminSetupIntents } from './adminSetupIntents';
 import { reviewStructureLabel, structureIntentsFor } from './adminStructureIntents';
 import AdminLiveScreen from './components/AdminLiveScreen';
 import AdminButton from './components/AdminButton';
@@ -26,13 +27,14 @@ function Progress({ step }) {
 export default function AdminEventSetupScreen({ navigation, route }) {
   const auth = useAuth(), owner = adminReadOwner(auth), client = auth.httpClient;
   const selected = route.params?.eventId;
+  const staffSession = useContext(AdminStaffSession);
   const structureIntents = useContext(AdminSetupIntents);
   const live = useRef(null);
   live.current = { auth, selected };
-  const flow = useMemo(() => createEventSetup({ client, eventId: selected, newKey: randomUUID, structureIntents,
+  const flow = useMemo(() => createEventSetup({ client, eventId: selected, newKey: randomUUID, structureIntents, staffSession,
     isCurrent: () => Boolean(owner && adminReadOwner(live.current.auth) === owner &&
       live.current.auth.httpClient === client && live.current.selected === selected),
-  }), [client, owner, selected, structureIntents]);
+  }), [client, owner, selected, structureIntents, staffSession]);
   const mountedFlow = useRef(null);
   const [snapshot, setSnapshot] = useState(null);
   const [dialog, setDialog] = useState(null);
@@ -91,7 +93,15 @@ export default function AdminEventSetupScreen({ navigation, route }) {
   const headerLabel = finished || state.ended ? 'Voltar ao painel' : !state.uncertain && !state.blocked && state.step > 1 ? 'Voltar uma etapa' :
     selected ? 'Voltar ao painel' : route.params?.origin === 'home' ? 'Voltar para Home' : 'Voltar aos eventos';
   const needsData = persisted && !state.blocked && (state.loading || state.readError || !state.event || !state.readiness);
-  const confirmRevoke = grant => ask('Revogar acesso Staff?', `${grant.email} perderá o acesso Staff a este evento. A prontidão pode mudar.`,
+  const confirmGrant = () => {
+    let email;
+    try { email = staffEmail(state.email); }
+    catch (error) { flow.reportStaffError(error.message); return; }
+    ask('Conceder acesso Staff?', email + ' receberá acesso Staff ao evento ' + state.event.name + '.', 'Confirmar concessão', () => {
+      if (flow.snapshot().email === state.email) void flow.run('grant');
+    });
+  };
+  const confirmRevoke = grant => ask('Revogar acesso Staff?', `${grant.email} perderá o acesso Staff ao evento ${state.event.name}. A prontidão pode mudar.`,
     'Revogar acesso', () => flow.run('revoke', grant.id));
   if (!owner) return null;
   return <AdminLiveScreen key={state.step} navigation={navigation} mode="wizard" bottomSafeArea
@@ -103,7 +113,7 @@ export default function AdminEventSetupScreen({ navigation, route }) {
       onPress={() => {
         if (canConfirm()) navigation.push('AdminEventManagementInfo', { eventId: state.eventId, area: 'experiences', returnToSetup: true });
       }} />}
-    {state.blocked ? <AdminNotice tone="error" title="Acesso indisponível" message="Sua sessão perdeu acesso a esta operação. Entre novamente." /> :
+    {state.blocked ? <AdminNotice tone="error" title="Acesso indisponível" message={state.message || "Sua sessão perdeu acesso a esta operação. Entre novamente."} /> :
       state.ended ? <>
         <AdminNotice tone="warning" title="Evento salvo em encerramento"
           message="O evento foi salvo, mas está encerrando ou já encerrou. Você pode consultar os dados no painel do evento." />
@@ -126,7 +136,10 @@ export default function AdminEventSetupScreen({ navigation, route }) {
         {state.step === 1 && <IdentityStep state={state} flow={flow} locked={locked} />}
         {state.step === 2 && <DatesStep state={state} flow={flow} locked={locked} />}
         {state.step === 3 && <EventStructureStep state={state} flow={flow} locked={state.busy || (state.uncertain && !structurePending)} />}
-        {state.step === 4 && <EventStaffStep state={state} flow={flow} locked={locked} confirmRevoke={confirmRevoke} />}
+        {state.step === 4 && (staffSession ?
+          <EventStaffStep state={state} flow={flow} locked={locked} confirmGrant={confirmGrant} confirmRevoke={confirmRevoke}
+            retryStaff={record => { if (canConfirm()) void flow.retryStaff(record); }} /> :
+          <AdminNotice tone="warning" title="Gestão Staff indisponível para esta sessão." />)}
         {state.step >= 5 && <>
           <Text accessibilityRole="header" style={[s.title, styles.heading]}>{finished
             ? state.readiness.ready ? 'Evento criado com sucesso' : 'Evento salvo com sucesso' : stepTitles[4]}</Text>

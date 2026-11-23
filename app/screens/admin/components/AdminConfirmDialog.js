@@ -10,6 +10,7 @@ export default function AdminConfirmDialog({
   message,
   note,
   confirmLabel = 'CONFIRMAR',
+  confirmDisabled = false,
   cancelLabel = 'CANCELAR',
   variant = 'primary',
   onConfirm,
@@ -22,7 +23,7 @@ export default function AdminConfirmDialog({
           <Text style={styles.title} accessibilityRole="header">{title}</Text>
           {message ? <Text style={styles.message}>{message}</Text> : null}
           {note ? <Text style={styles.note}>{note}</Text> : null}
-          <AdminButton label={confirmLabel} variant={variant} onPress={onConfirm} />
+          <AdminButton label={confirmLabel} variant={variant} disabled={confirmDisabled} onPress={onConfirm} />
           <AdminButton label={cancelLabel} variant="secondary" onPress={onCancel} />
         </View>
       </View>

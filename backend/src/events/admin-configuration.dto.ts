@@ -35,6 +35,14 @@ export const configurationBodies={create_event:createEventBody,update_event:upda
   update_experience:experienceBody,create_station:stationBody,update_station:stationBody};
 export type ConfigOperation=keyof typeof configurationBodies;
 export const configurationEventParams=z.object({eventId:operationUuid}).strict();
+export const configurationStaffMember = z.object({
+  grantId: operationUuid,
+  userId: operationUuid,
+  name: z.string(),
+  email: z.string(),
+  grantedAt: z.string().datetime({ offset: true }),
+  eligible: z.boolean(),
+});
 export const configurationExperienceParams=configurationEventParams.extend({experienceId:operationUuid}).strict();
 export const configurationStationParams=configurationExperienceParams.extend({stationId:operationUuid}).strict();
 export const effectivePhase=z.enum(['scheduled','not_ready','open','closing','closed']);

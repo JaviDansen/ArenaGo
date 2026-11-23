@@ -20,8 +20,8 @@ export default function useAdminEventPanel(navigation, eventId, includeReadiness
     let subscribed = true;
     let request = null;
     const current = () => subscribed && live.current === scope && adminReadOwner(liveAuth.current) === owner && navigation.isFocused();
-    async function refresh(manual = false) {
-      if (!current() || request) return;
+    async function refresh(manual = false, supersede = false) {
+      if (!current() || (request && !supersede)) return;
       const ticket = {};
       request = ticket;
       setSnapshot({ scope, pending: true, refreshing: manual });
@@ -60,8 +60,8 @@ export default function useAdminEventPanel(navigation, eventId, includeReadiness
 
   return {
     ...(owner && snapshot?.scope === scope ? snapshot : { pending: true }),
-    refresh(manual = false) {
-      if (control.current?.scope === scope) return control.current.refresh(manual);
+    refresh(manual = false, supersede = false) {
+      if (control.current?.scope === scope) return control.current.refresh(manual, supersede);
     },
   };
 }

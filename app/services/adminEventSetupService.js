@@ -53,11 +53,31 @@ export async function addEventStation(client, eventId, experienceId, label, key)
   return station;
 }
 
+function grantTimestamp(value) {
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) &&
+    Number.isFinite(Date.parse(value));
+}
+
 function eventGrant(value, eventId) {
   adminIdentifier(value?.id);
   adminIdentifier(value.userId);
-  confirm(value.role === 'staff' && value.eventId === eventId && Number.isFinite(Date.parse(value.grantedAt)));
+  confirm(value.role === 'staff' && value.eventId === eventId && grantTimestamp(value.grantedAt));
   return value;
+}
+
+export async function readEventStaff(client, eventId) {
+  const result = await client.get(`${adminEventPath(eventId)}/staff`, { auth: true });
+  confirm(result?.eventId === eventId && Array.isArray(result.items));
+  const grants = new Set(), users = new Set();
+  return result.items.map(member => {
+    const { grantId, userId, name, email, grantedAt, eligible } = member;
+    const grant = eventGrant({ id: grantId, userId, role: 'staff', eventId, grantedAt, revokedAt: null }, eventId);
+    confirm(typeof name === 'string' && typeof email === 'string' && typeof eligible === 'boolean' &&
+      !grants.has(grantId.toLowerCase()) && !users.has(userId.toLowerCase()));
+    grants.add(grantId.toLowerCase());
+    users.add(userId.toLowerCase());
+    return { ...grant, name, email, eligible };
+  });
 }
 
 export async function renameExperience(client, eventId, experienceId, name, key) {
@@ -88,7 +108,8 @@ export async function setStationAvailability(client, eventId, stationId, availab
 }
 
 export async function grantEventStaff(client, eventId, email, key) {
-  const result = await client.post('/admin/roles/grant', { role: 'staff', eventId: adminIdentifier(eventId), email }, mutationOptions(key));
+  const result = await client.post('/admin/roles/grant', { role: 'staff', eventId: adminIdentifier(eventId), email },
+    { ...mutationOptions(key), expectedStatus: 201 });
   const grant = eventGrant(result?.grant, eventId);
   confirm(grant.revokedAt === null);
   return grant;
@@ -97,8 +118,8 @@ export async function grantEventStaff(client, eventId, email, key) {
 export async function revokeEventStaff(client, eventId, grant, key) {
   eventGrant(grant, eventId);
   confirm(grant.revokedAt === null);
-  const result = await client.post('/admin/roles/revoke', { grantId: grant.id }, mutationOptions(key));
+  const result = await client.post('/admin/roles/revoke', { grantId: grant.id }, { ...mutationOptions(key), expectedStatus: 200 });
   const revoked = eventGrant(result?.grant, eventId);
-  confirm(revoked.id === grant.id && revoked.userId === grant.userId && Number.isFinite(Date.parse(revoked.revokedAt)));
+  confirm(revoked.id === grant.id && revoked.userId === grant.userId && grantTimestamp(revoked.revokedAt));
   return revoked;
 }

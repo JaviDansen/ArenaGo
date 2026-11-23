@@ -1,7 +1,7 @@
 import { useContext, useState } from 'react';
 import { Platform, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native';
 import { adminEventAreas } from './adminEventManagement';
-import { AdminSetupIntents } from './adminSetupIntents';
+import { AdminStaffSession, AdminSetupIntents } from './adminSetupIntents';
 import { reviewStructureLabel, structureIntentsFor } from './adminStructureIntents';
 import useAdminEventPanel from './useAdminEventPanel';
 import AdminLiveScreen from './components/AdminLiveScreen';
@@ -12,11 +12,13 @@ import { AdminIcon, AdminIconTile, liveColors as c, liveStyles as s } from './co
 
 export default function AdminRealEventScreen({ navigation, route }) {
   const eventId = route.params?.eventId;
+  const staffSession = useContext(AdminStaffSession);
   const structureIntents = useContext(AdminSetupIntents);
   const { event, readiness, pending, refreshing, blocked, detailError, readinessError, refresh } = useAdminEventPanel(navigation, eventId);
   const [expandedReadiness, setExpandedReadiness] = useState(null);
   const expanded = Boolean(readiness && expandedReadiness === readiness);
   const openArea = area => navigation.navigate('AdminEventManagementInfo', { eventId: event.id, area });
+  const staff = event && staffSession?.snapshot(event.id);
   const pendingStructure = event ? structureIntentsFor(structureIntents, event.id) : [];
 
   return <AdminLiveScreen title="Painel do evento" subtitle="Gerencie as configurações e a operação deste evento."
@@ -34,7 +36,7 @@ export default function AdminRealEventScreen({ navigation, route }) {
     {event && <>
       {pendingStructure.length > 0 && <AdminButton label={reviewStructureLabel} variant="secondary"
         onPress={() => openArea('experiences')} />}
-      {((readiness && !readiness.ready) || pendingStructure.some(record => ['addExperience', 'addStation'].includes(record.kind))) &&
+      {((readiness && !readiness.ready) || staff?.attempts.length > 0 || staff?.grants.length > 0 || pendingStructure.some(record => ['addExperience', 'addStation'].includes(record.kind))) &&
         !['closed', 'closing'].includes(readiness?.effectivePhase ?? event.effectivePhase) &&
         <AdminButton label="Continuar configuração" variant="secondary"
           onPress={() => navigation.navigate('AdminEventSetup', { eventId: event.id })} />}
@@ -47,7 +49,8 @@ export default function AdminRealEventScreen({ navigation, route }) {
       {Object.entries(adminEventAreas).map(([key, area]) => <Pressable key={key} testID={`admin-event-area-${key}`}
         accessibilityRole="button" accessibilityLabel={area.title}
         accessibilityHint={key === 'schedule' ? 'Abre os dados e os horários do evento' :
-          key === 'experiences' ? 'Abre a gestão de experiências e estações do evento' : 'Abre uma visão informativa'}
+          key === 'experiences' ? 'Abre a gestão de experiências e estações do evento' :
+          key === 'staff' ? 'Abre a gestão da equipe Staff do evento' : 'Abre uma visão informativa'}
         onPress={() => openArea(key)} style={({ pressed }) => [s.card, s.row, styles.area, pressed && styles.pressed]}>
         <AdminIconTile name={area.icon} />
         <View style={s.grow}><Text style={styles.areaTitle}>{area.title}</Text><Text style={s.body}>{area.description}</Text></View>
