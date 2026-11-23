@@ -1227,10 +1227,18 @@ test('R3-04: recuperação controlada de experiências desconhecidas (GET em voo
 
 test('STAFF02-AUD-01: verifyStationAccess limpa cache nominal imediatamente, separa verificação (Caso A/B/C) e descarta respostas tardias', async () => {
   let current = context();
-  let stationsDeferred = null;
-  let experiencesDeferred = null;
-  let entryDeferred = null;
+  let nextStationsResponse = null;
   let stationCalls = 0;
+  let postCalls = 0;
+
+  function startWithControlledStations(startRequest) {
+    assert.equal(nextStationsResponse, null, 'não deve haver resposta de /stations pendente de consumo');
+    const response = deferred();
+    nextStationsResponse = response;
+    const result = startRequest();
+    assert.equal(nextStationsResponse, null, 'a requisição deve consumir a resposta de /stations programada');
+    return { response, result };
+  }
 
   const store = createStaffDashboardStore({
     getContext: () => current,
@@ -1238,15 +1246,14 @@ test('STAFF02-AUD-01: verifyStationAccess limpa cache nominal imediatamente, sep
       get: (url) => {
         if (url.endsWith('/stations')) {
           stationCalls += 1;
-          if (stationsDeferred) return stationsDeferred.promise;
-          return Promise.resolve(stations(current.eventId));
+          const response = nextStationsResponse;
+          nextStationsResponse = null;
+          return response?.promise ?? Promise.resolve(stations(current.eventId));
         }
         if (url.endsWith('/experiences')) {
-          if (experiencesDeferred) return experiencesDeferred.promise;
           return Promise.resolve({ eventId: current.eventId, experiences: [{ id: experienceId, name: 'Just Dance' }] });
         }
         if (url.endsWith('/entry-control')) {
-          if (entryDeferred) return entryDeferred.promise;
           return Promise.resolve(entrySummary({
             eventId: current.eventId,
             waitingCount: 0,
@@ -1262,6 +1269,10 @@ test('STAFF02-AUD-01: verifyStationAccess limpa cache nominal imediatamente, sep
         }
         return Promise.resolve({});
       },
+      post: async () => {
+        postCalls += 1;
+        throw new Error('POST inesperado durante a verificação de acesso');
+      },
     },
   });
 
@@ -1272,9 +1283,9 @@ test('STAFF02-AUD-01: verifyStationAccess limpa cache nominal imediatamente, sep
   assert.equal(store.getSnapshot().stations.length, 1);
 
   // Caso A: verifyStationAccess limpa cache imediatamente antes de /stations resolver e NÃO publica a lista de verificação
-  stationsDeferred = deferred();
+  const verify = () => store.verifyStationAccess({ stationId, experienceId });
   const callsBeforeVerify = stationCalls;
-  const caseA = store.verifyStationAccess({ stationId, experienceId });
+  const { response: responseA, result: caseA } = startWithControlledStations(verify);
   assert.equal(stationCalls, callsBeforeVerify + 1);
   assert.equal(store.getSnapshot().verifyingAccess, true);
   assert.equal(store.getSnapshot().accessUncertain, true);
@@ -1287,7 +1298,7 @@ test('STAFF02-AUD-01: verifyStationAccess limpa cache nominal imediatamente, sep
   assert.equal(stationCalls, callsBeforeVerify + 1);
 
   // /stations resolve 200 (Caso A) -> libera incerteza de evento sem publicar dados de verificação como atualização do painel
-  stationsDeferred.resolve(stations(current.eventId));
+  responseA.resolve(stations(current.eventId));
   const resA = await caseA;
   assert.equal(resA.outcome, 'local_denied');
   assert.equal(store.getSnapshot().accessLocked, false);
@@ -1297,14 +1308,12 @@ test('STAFF02-AUD-01: verifyStationAccess limpa cache nominal imediatamente, sep
   assert.equal(store.getSnapshot().entry, null);
 
   // Caso C: /stations falha com 500/rede -> mantém cache limpo, accessUncertain=true, barra poll/parcial e recupera no refreshPanel completo
-  stationsDeferred = null;
   await store.refreshPanel();
   assert.equal(store.getSnapshot().entry.pendingCall.displayName, 'Carlos Nominal Cache');
 
   for (const errDetails of [{ status: 500 }, { isNetworkError: true }]) {
-    stationsDeferred = deferred();
-    const caseC = store.verifyStationAccess({ stationId, experienceId });
-    stationsDeferred.reject(Object.assign(new Error('transient'), errDetails));
+    const { response, result: caseC } = startWithControlledStations(verify);
+    response.reject(Object.assign(new Error('transient'), errDetails));
     const resC = await caseC;
     assert.equal(resC.outcome, 'uncertain');
     assert.equal(store.getSnapshot().accessLocked, false);
@@ -1314,13 +1323,10 @@ test('STAFF02-AUD-01: verifyStationAccess limpa cache nominal imediatamente, sep
     assert.equal(store.getSnapshot().stations.length, 0);
 
     // refreshPanel parcial (entry=200 antes de stations falhar 500) não expõe dados parciais enquanto accessUncertain=true
-    stationsDeferred = deferred();
-    experiencesDeferred = null;
-    entryDeferred = null;
-    const partialRetry = store.refreshPanel();
+    const { response: retryResponse, result: partialRetry } = startWithControlledStations(() => store.refreshPanel());
     await Promise.resolve();
     assert.equal(store.getSnapshot().entry, null, 'não expõe entry antes da confirmação completa');
-    stationsDeferred.reject(Object.assign(new Error('still-500'), { status: 500 }));
+    retryResponse.reject(Object.assign(new Error('still-500'), { status: 500 }));
     await partialRetry;
     assert.equal(store.getSnapshot().accessUncertain, true);
     assert.equal(store.getSnapshot().entry, null);
@@ -1328,7 +1334,6 @@ test('STAFF02-AUD-01: verifyStationAccess limpa cache nominal imediatamente, sep
   }
 
   // Recuperação completa 200 libera acessoUncertain
-  stationsDeferred = null;
   await store.refreshPanel();
   assert.equal(store.getSnapshot().accessUncertain, false);
   assert.equal(store.getSnapshot().accessStatus, 'granted');
@@ -1343,9 +1348,12 @@ test('STAFF02-AUD-01: verifyStationAccess limpa cache nominal imediatamente, sep
     current = context(eventId, 'a', current.revision + 1);
     store.setContext(current);
     await store.refreshPanel();
-    stationsDeferred = deferred();
-    const caseB = store.verifyStationAccess({ stationId, experienceId });
-    stationsDeferred.reject(Object.assign(new Error(String(status)), { status }));
+    assert.equal(store.getSnapshot().accessStatus, 'granted', `painel reinicializado antes da verificação com ${status}`);
+    assert.equal(store.getSnapshot().accessLocked, false);
+    assert.equal(store.getSnapshot().entry.pendingCall.displayName, 'Carlos Nominal Cache');
+
+    const { response, result: caseB } = startWithControlledStations(verify);
+    response.reject(Object.assign(new Error(String(status)), { status }));
     const resB = await caseB;
     assert.equal(resB.outcome, expectedOutcome);
     assert.equal(store.getSnapshot().accessLocked, true);
@@ -1356,17 +1364,22 @@ test('STAFF02-AUD-01: verifyStationAccess limpa cache nominal imediatamente, sep
     assert.equal(store.getSnapshot().stations.length, 0);
   }
 
-  // Resposta tardia de verifyStationAccess após troca de evento é descartada
-  current = context(eventId, 'a', current.revision + 1);
-  store.setContext(current);
-  await store.refreshPanel();
-  stationsDeferred = deferred();
-  const staleVerify = store.verifyStationAccess({ stationId, experienceId });
-  current = context(otherEventId, 'a', 1);
-  store.setContext(current);
-  stationsDeferred.reject(Object.assign(new Error('403-old'), { status: 403 }));
-  const resStale = await staleVerify;
-  assert.equal(resStale.outcome, 'stale');
-  assert.equal(store.getSnapshot().context.eventId, otherEventId);
-  assert.equal(store.getSnapshot().accessLocked, false);
+  // Uma negativa tardia pertence ao evento e à conta de origem.
+  for (const nextContext of [context(otherEventId, 'a'), context(eventId, 'b')]) {
+    current = context(eventId, 'a', current.revision + 1);
+    store.setContext(current);
+    await store.refreshPanel();
+    const { response, result: staleVerify } = startWithControlledStations(verify);
+
+    current = nextContext;
+    store.setContext(current);
+    response.reject(Object.assign(new Error('403-old'), { status: 403 }));
+    const resStale = await staleVerify;
+    assert.equal(resStale.outcome, 'stale');
+    assert.equal(store.getSnapshot().context.eventId, nextContext.eventId);
+    assert.equal(store.getSnapshot().context.userId, nextContext.userId);
+    assert.equal(store.getSnapshot().accessLocked, false);
+    assert.equal(store.getSnapshot().entry, null);
+  }
+  assert.equal(postCalls, 0, 'a verificação de acesso não envia POST');
 });

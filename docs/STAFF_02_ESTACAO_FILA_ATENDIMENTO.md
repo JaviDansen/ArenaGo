@@ -186,15 +186,18 @@ Após a publicação do commit `d6765f1dec3b14f40be4d955e4791c88f1c56735`, foi r
 - **Inspeção estática e checagem de sintaxe `.cjs` (`node --check`):** realizada nos quatro arquivos de teste da entrega ([roleRoutingIntegration.test.cjs](../app/tests/roleRoutingIntegration.test.cjs), [staffStationOperational.test.cjs](../app/tests/staffStationOperational.test.cjs), [staffDashboard.test.cjs](../app/tests/staffDashboard.test.cjs) e [staffDemoState.test.cjs](../app/tests/staffDemoState.test.cjs)) sem executar casos de teste.
 - **Integridade de patch acumulado (`qa-evidence/STAFF-02-changes.diff`):** patch regerado a partir da base fixa `95b8b80f3c0142af30c25e9483291d75677a085d` e validado estaticamente com `git diff --check -- app docs` e `git apply --check --reverse qa-evidence/STAFF-02-changes.diff` ao final das edições.
 
-### 11.2. Validações automatizadas NÃO executadas nesta etapa (pendentes para **GPT-6 Luna — Medium**)
-Conforme o [AGENTS.md](../AGENTS.md), nenhuma suíte `node --test` ou `npm test` foi executada pelo modelo de implementação. Selecionar manualmente **GPT-6 Luna — Medium** e executar em sequência na raiz do workspace (`feature/staff-operacional-v2`):
+### 11.2. Validações automatizadas pendentes após a correção do fixture
+A primeira campanha foi interrompida na segunda suíte (ver Seção 13.1). O modelo de implementação corrigiu o fixture por inspeção estática. Selecionar manualmente **GPT-6 Luna — Medium** para a nova campanha, usar o checkout da branch `feature/staff-operacional-v2` que contém esta correção e executar as suítes prioritárias em sequência na raiz, com `NODE_ENV=test` e as dependências verificadas:
 1. `node --test app/tests/staffDemoState.test.cjs`
 2. `node --test app/tests/staffDashboard.test.cjs`
 3. `node --test app/tests/staffStationOperational.test.cjs`
 4. `node --test --test-name-pattern="STAFF02|STAFF-02|R3-" app/tests/roleRoutingIntegration.test.cjs`
 5. `node --test app/tests/roleRoutingIntegration.test.cjs`
-6. `npm --prefix app test`
-7. `npm --prefix qa/regression test`
+6. `node --test app/tests/staffOperationsService.integration.test.cjs`
+7. `node --test app/tests/staffPolling.test.cjs`
+8. `node --test app/tests/staffRealNavigation.test.cjs`
+
+Se as prioridades passarem, executar `npm --prefix app test` e `npm --prefix qa/regression test` se o script de regressão for aplicável e seguro. O filtro do passo 4 é apenas diagnóstico e o passo 5 continua obrigatório.
 
 *(Critério de aprovação: zero falhas, zero testes ignorados por ausência de `qa/regression/node_modules` e zero avisos inesperados em todos os comandos aplicáveis.)*
 
@@ -216,8 +219,23 @@ Conforme o [AGENTS.md](../AGENTS.md), nenhuma suíte `node --test` ou `npm test`
 - **20/11/2026 — Commit `d6765f1dec3b14f40be4d955e4791c88f1c56735`:** Publicação das correções da **Auditoria Independente — Rodada 1** (`STAFF02-AUD-01` a `STAFF02-AUD-08`), reforço dos testes e patch acumulado na branch `feature/staff-operacional-v2`.
 - **21/11/2026 — Ajuste final pós-push `d6765f1`:** Revisão contratual das fixtures da STAFF-02, correção de `entryNominal` (`STAFF02-AUD-01`), consistência de fila em `STAFF02-AUD-02`, completude de campos DTO em `/stations` e `/queue` nos mocks e regeneração integral do patch acumulado [STAFF-02-changes.diff](../qa-evidence/STAFF-02-changes.diff) desde `95b8b80`.
 
+### 13.1. Primeira campanha automatizada — falha na AUD-01
+
+A campanha com **GPT-6 Luna Medium** foi executada sobre `fbc9481843c49e5a55249459efc6c47b8b20dc82`.
+
+| Suíte | Código de saída | Aprovados | Falhos |
+| --- | ---: | ---: | ---: |
+| `staffDemoState.test.cjs` | 0 | 21 de 21 | 0 |
+| `staffDashboard.test.cjs` | 1 | 23 | 1 |
+
+No teste `STAFF02-AUD-01` de [staffDashboard.test.cjs](../app/tests/staffDashboard.test.cjs), a asserção na linha 1350 do commit testado esperava `session` para HTTP 401 e recebeu `event_denied`. O runner também registrou uma rejeição `Error: 401` sem tratamento. A inspeção confirmou que `refreshPanel()` pegava a Promise rejeitada de `/stations` da iteração anterior e restabelecia o bloqueio de acesso. `verifyStationAccess()` retornava o bloqueio antes de consumir a nova Promise programada para o 401.
+
+O fixture passou a consumir cada resposta programada uma única vez. O teste verifica o consumo antes de resolver ou rejeitar a Promise e confirma que o painel voltou ao estado autorizado antes de cada verificação de 403, 404 ou 401. O contrato de `verifyStationAccess()` preserva a distinção entre sessão e evento. A correção é restrita ao teste e mantém as expectativas de autorização.
+
+A campanha foi interrompida antes de executar `staffStationOperational`, o filtro e a suíte integral de `roleRoutingIntegration`, `staffOperationsService.integration`, `staffPolling`, `staffRealNavigation` e as regressões de `app` e `qa/regression`. A STAFF-02 permanece bloqueada até nova validação com Luna Medium.
+
 ---
 
 ## 14. Estado Final da Entrega
 
-Ajuste final pós-push `d6765f1dec3b14f40be4d955e4791c88f1c56735` concluído na branch `feature/staff-operacional-v2` (base acumulada da STAFF-02 `95b8b80f3c0142af30c25e9483291d75677a085d`), corrigindo as fixtures de integração sem alterar código de produção, parsers, backend, migrations ou módulos externos à STAFF-02 e sem executar comandos Git de staging/commit/push. Aguardando execução da campanha automatizada com **GPT-6 Luna — Medium** e commit pelo responsável via VSCode.
+A revisão contratual posterior a `d6765f1` está publicada em `fbc9481`. A correção do fixture da AUD-01 foi preparada localmente sobre `fbc9481` em `feature/staff-operacional-v2`. A evidência acumulada parte de `95b8b80f3c0142af30c25e9483291d75677a085d`. Aguardam nova campanha automatizada com **GPT-6 Luna Medium**, homologação no Expo e publicação pelo responsável via VSCode.

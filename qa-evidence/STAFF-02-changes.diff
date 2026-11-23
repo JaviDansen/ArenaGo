@@ -1,5 +1,5 @@
 diff --git a/app/screens/staff/StaffEventsNavigator.js b/app/screens/staff/StaffEventsNavigator.js
-index 5399e4d..73a0a82 100644
+index 5399e4d03fdc5fd96b42fd7d552e834aa20a03d7..73a0a8218ae54251d4a8908123405d6865693b5c 100644
 --- a/app/screens/staff/StaffEventsNavigator.js
 +++ b/app/screens/staff/StaffEventsNavigator.js
 @@ -131,6 +131,24 @@ function describeEntrySummary(snapshot) {
@@ -425,7 +425,7 @@ index 5399e4d..73a0a82 100644
                  }}
                />
 diff --git a/app/screens/staff/StaffStationOperationalScreen.js b/app/screens/staff/StaffStationOperationalScreen.js
-index 9ab7cc3..38147f3 100644
+index 9ab7cc3af93ed117a49f6edd44684a3b548401e2..38147f38b556b440ca4322199c083e8550998a56 100644
 --- a/app/screens/staff/StaffStationOperationalScreen.js
 +++ b/app/screens/staff/StaffStationOperationalScreen.js
 @@ -1,46 +1,133 @@
@@ -1315,7 +1315,7 @@ index 9ab7cc3..38147f3 100644
  });
 diff --git a/app/screens/staff/components/StaffStationSections.js b/app/screens/staff/components/StaffStationSections.js
 new file mode 100644
-index 0000000..1460207
+index 0000000000000000000000000000000000000000..146020784e3f3a37876e1b8e53c2ef5b6067b2b7
 --- /dev/null
 +++ b/app/screens/staff/components/StaffStationSections.js
 @@ -0,0 +1,432 @@
@@ -1752,7 +1752,7 @@ index 0000000..1460207
 +  pressed: { opacity: 0.75 },
 +});
 diff --git a/app/services/staffDashboardService.js b/app/services/staffDashboardService.js
-index 029f3f0..a878f86 100644
+index 029f3f02d2a103a99502afcd27ad1c17f3ed88e1..a878f8605e165e80755dcd64023d327abfcd882f 100644
 --- a/app/services/staffDashboardService.js
 +++ b/app/services/staffDashboardService.js
 @@ -6,6 +6,8 @@ const empty = () => ({
@@ -2245,7 +2245,7 @@ index 029f3f0..a878f86 100644
      refreshExperiences,
      syncOrphanExperiences,
 diff --git a/app/tests/roleRoutingIntegration.test.cjs b/app/tests/roleRoutingIntegration.test.cjs
-index 7913696..ffec857 100644
+index 7913696e425cce693e66a43eb63751da64e3c597..ffec857c9acb4322b6e8eafd893f7af761386649 100644
 --- a/app/tests/roleRoutingIntegration.test.cjs
 +++ b/app/tests/roleRoutingIntegration.test.cjs
 @@ -181,10 +181,10 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
@@ -3326,20 +3326,28 @@ index 7913696..ffec857 100644
 +  }
 +});
 diff --git a/app/tests/staffDashboard.test.cjs b/app/tests/staffDashboard.test.cjs
-index 5d6ca6c..9a8d5cf 100644
+index 5d6ca6cd1b85fd4d76e7a28843db7dad7cdbe7aa..7a97ab47e4f5d4d186519c85bef1496fbb038707 100644
 --- a/app/tests/staffDashboard.test.cjs
 +++ b/app/tests/staffDashboard.test.cjs
-@@ -1224,3 +1224,149 @@ test('R3-04: recuperação controlada de experiências desconhecidas (GET em voo
+@@ -1224,3 +1224,162 @@ test('R3-04: recuperação controlada de experiências desconhecidas (GET em voo
    assert.equal(store.getSnapshot().context.eventId, otherEventId);
    assert.equal(store.getSnapshot().experiences.length, 0);
  });
 +
 +test('STAFF02-AUD-01: verifyStationAccess limpa cache nominal imediatamente, separa verificação (Caso A/B/C) e descarta respostas tardias', async () => {
 +  let current = context();
-+  let stationsDeferred = null;
-+  let experiencesDeferred = null;
-+  let entryDeferred = null;
++  let nextStationsResponse = null;
 +  let stationCalls = 0;
++  let postCalls = 0;
++
++  function startWithControlledStations(startRequest) {
++    assert.equal(nextStationsResponse, null, 'não deve haver resposta de /stations pendente de consumo');
++    const response = deferred();
++    nextStationsResponse = response;
++    const result = startRequest();
++    assert.equal(nextStationsResponse, null, 'a requisição deve consumir a resposta de /stations programada');
++    return { response, result };
++  }
 +
 +  const store = createStaffDashboardStore({
 +    getContext: () => current,
@@ -3347,15 +3355,14 @@ index 5d6ca6c..9a8d5cf 100644
 +      get: (url) => {
 +        if (url.endsWith('/stations')) {
 +          stationCalls += 1;
-+          if (stationsDeferred) return stationsDeferred.promise;
-+          return Promise.resolve(stations(current.eventId));
++          const response = nextStationsResponse;
++          nextStationsResponse = null;
++          return response?.promise ?? Promise.resolve(stations(current.eventId));
 +        }
 +        if (url.endsWith('/experiences')) {
-+          if (experiencesDeferred) return experiencesDeferred.promise;
 +          return Promise.resolve({ eventId: current.eventId, experiences: [{ id: experienceId, name: 'Just Dance' }] });
 +        }
 +        if (url.endsWith('/entry-control')) {
-+          if (entryDeferred) return entryDeferred.promise;
 +          return Promise.resolve(entrySummary({
 +            eventId: current.eventId,
 +            waitingCount: 0,
@@ -3371,6 +3378,10 @@ index 5d6ca6c..9a8d5cf 100644
 +        }
 +        return Promise.resolve({});
 +      },
++      post: async () => {
++        postCalls += 1;
++        throw new Error('POST inesperado durante a verificação de acesso');
++      },
 +    },
 +  });
 +
@@ -3381,9 +3392,9 @@ index 5d6ca6c..9a8d5cf 100644
 +  assert.equal(store.getSnapshot().stations.length, 1);
 +
 +  // Caso A: verifyStationAccess limpa cache imediatamente antes de /stations resolver e NÃO publica a lista de verificação
-+  stationsDeferred = deferred();
++  const verify = () => store.verifyStationAccess({ stationId, experienceId });
 +  const callsBeforeVerify = stationCalls;
-+  const caseA = store.verifyStationAccess({ stationId, experienceId });
++  const { response: responseA, result: caseA } = startWithControlledStations(verify);
 +  assert.equal(stationCalls, callsBeforeVerify + 1);
 +  assert.equal(store.getSnapshot().verifyingAccess, true);
 +  assert.equal(store.getSnapshot().accessUncertain, true);
@@ -3396,7 +3407,7 @@ index 5d6ca6c..9a8d5cf 100644
 +  assert.equal(stationCalls, callsBeforeVerify + 1);
 +
 +  // /stations resolve 200 (Caso A) -> libera incerteza de evento sem publicar dados de verificação como atualização do painel
-+  stationsDeferred.resolve(stations(current.eventId));
++  responseA.resolve(stations(current.eventId));
 +  const resA = await caseA;
 +  assert.equal(resA.outcome, 'local_denied');
 +  assert.equal(store.getSnapshot().accessLocked, false);
@@ -3406,14 +3417,12 @@ index 5d6ca6c..9a8d5cf 100644
 +  assert.equal(store.getSnapshot().entry, null);
 +
 +  // Caso C: /stations falha com 500/rede -> mantém cache limpo, accessUncertain=true, barra poll/parcial e recupera no refreshPanel completo
-+  stationsDeferred = null;
 +  await store.refreshPanel();
 +  assert.equal(store.getSnapshot().entry.pendingCall.displayName, 'Carlos Nominal Cache');
 +
 +  for (const errDetails of [{ status: 500 }, { isNetworkError: true }]) {
-+    stationsDeferred = deferred();
-+    const caseC = store.verifyStationAccess({ stationId, experienceId });
-+    stationsDeferred.reject(Object.assign(new Error('transient'), errDetails));
++    const { response, result: caseC } = startWithControlledStations(verify);
++    response.reject(Object.assign(new Error('transient'), errDetails));
 +    const resC = await caseC;
 +    assert.equal(resC.outcome, 'uncertain');
 +    assert.equal(store.getSnapshot().accessLocked, false);
@@ -3423,13 +3432,10 @@ index 5d6ca6c..9a8d5cf 100644
 +    assert.equal(store.getSnapshot().stations.length, 0);
 +
 +    // refreshPanel parcial (entry=200 antes de stations falhar 500) não expõe dados parciais enquanto accessUncertain=true
-+    stationsDeferred = deferred();
-+    experiencesDeferred = null;
-+    entryDeferred = null;
-+    const partialRetry = store.refreshPanel();
++    const { response: retryResponse, result: partialRetry } = startWithControlledStations(() => store.refreshPanel());
 +    await Promise.resolve();
 +    assert.equal(store.getSnapshot().entry, null, 'não expõe entry antes da confirmação completa');
-+    stationsDeferred.reject(Object.assign(new Error('still-500'), { status: 500 }));
++    retryResponse.reject(Object.assign(new Error('still-500'), { status: 500 }));
 +    await partialRetry;
 +    assert.equal(store.getSnapshot().accessUncertain, true);
 +    assert.equal(store.getSnapshot().entry, null);
@@ -3437,7 +3443,6 @@ index 5d6ca6c..9a8d5cf 100644
 +  }
 +
 +  // Recuperação completa 200 libera acessoUncertain
-+  stationsDeferred = null;
 +  await store.refreshPanel();
 +  assert.equal(store.getSnapshot().accessUncertain, false);
 +  assert.equal(store.getSnapshot().accessStatus, 'granted');
@@ -3452,9 +3457,12 @@ index 5d6ca6c..9a8d5cf 100644
 +    current = context(eventId, 'a', current.revision + 1);
 +    store.setContext(current);
 +    await store.refreshPanel();
-+    stationsDeferred = deferred();
-+    const caseB = store.verifyStationAccess({ stationId, experienceId });
-+    stationsDeferred.reject(Object.assign(new Error(String(status)), { status }));
++    assert.equal(store.getSnapshot().accessStatus, 'granted', `painel reinicializado antes da verificação com ${status}`);
++    assert.equal(store.getSnapshot().accessLocked, false);
++    assert.equal(store.getSnapshot().entry.pendingCall.displayName, 'Carlos Nominal Cache');
++
++    const { response, result: caseB } = startWithControlledStations(verify);
++    response.reject(Object.assign(new Error(String(status)), { status }));
 +    const resB = await caseB;
 +    assert.equal(resB.outcome, expectedOutcome);
 +    assert.equal(store.getSnapshot().accessLocked, true);
@@ -3465,22 +3473,27 @@ index 5d6ca6c..9a8d5cf 100644
 +    assert.equal(store.getSnapshot().stations.length, 0);
 +  }
 +
-+  // Resposta tardia de verifyStationAccess após troca de evento é descartada
-+  current = context(eventId, 'a', current.revision + 1);
-+  store.setContext(current);
-+  await store.refreshPanel();
-+  stationsDeferred = deferred();
-+  const staleVerify = store.verifyStationAccess({ stationId, experienceId });
-+  current = context(otherEventId, 'a', 1);
-+  store.setContext(current);
-+  stationsDeferred.reject(Object.assign(new Error('403-old'), { status: 403 }));
-+  const resStale = await staleVerify;
-+  assert.equal(resStale.outcome, 'stale');
-+  assert.equal(store.getSnapshot().context.eventId, otherEventId);
-+  assert.equal(store.getSnapshot().accessLocked, false);
++  // Uma negativa tardia pertence ao evento e à conta de origem.
++  for (const nextContext of [context(otherEventId, 'a'), context(eventId, 'b')]) {
++    current = context(eventId, 'a', current.revision + 1);
++    store.setContext(current);
++    await store.refreshPanel();
++    const { response, result: staleVerify } = startWithControlledStations(verify);
++
++    current = nextContext;
++    store.setContext(current);
++    response.reject(Object.assign(new Error('403-old'), { status: 403 }));
++    const resStale = await staleVerify;
++    assert.equal(resStale.outcome, 'stale');
++    assert.equal(store.getSnapshot().context.eventId, nextContext.eventId);
++    assert.equal(store.getSnapshot().context.userId, nextContext.userId);
++    assert.equal(store.getSnapshot().accessLocked, false);
++    assert.equal(store.getSnapshot().entry, null);
++  }
++  assert.equal(postCalls, 0, 'a verificação de acesso não envia POST');
 +});
 diff --git a/app/tests/staffDemoState.test.cjs b/app/tests/staffDemoState.test.cjs
-index d86de78..82d7c40 100644
+index d86de785df85bbf43a63e8319d44f0f5e8a44419..82d7c407bddb714eaa71ec368d674673fa6e2623 100644
 --- a/app/tests/staffDemoState.test.cjs
 +++ b/app/tests/staffDemoState.test.cjs
 @@ -219,13 +219,24 @@ const demoStaffScreens = [
@@ -3512,7 +3525,7 @@ index d86de78..82d7c40 100644
  test('arquivos Staff são classificados como demonstração ou fluxo real', () => {
 diff --git a/app/tests/staffStationOperational.test.cjs b/app/tests/staffStationOperational.test.cjs
 new file mode 100644
-index 0000000..bfd4b2e
+index 0000000000000000000000000000000000000000..bfd4b2e7881e4769d3a36b75d9be9c749b4e8b11
 --- /dev/null
 +++ b/app/tests/staffStationOperational.test.cjs
 @@ -0,0 +1,687 @@
@@ -4205,10 +4218,10 @@ index 0000000..bfd4b2e
 +});
 diff --git a/docs/STAFF_02_ESTACAO_FILA_ATENDIMENTO.md b/docs/STAFF_02_ESTACAO_FILA_ATENDIMENTO.md
 new file mode 100644
-index 0000000..227cd54
+index 0000000000000000000000000000000000000000..8ceca7f292b23ba1998fc666f42d3f6b839cb27d
 --- /dev/null
 +++ b/docs/STAFF_02_ESTACAO_FILA_ATENDIMENTO.md
-@@ -0,0 +1,223 @@
+@@ -0,0 +1,241 @@
 +# ArenaGo — STAFF-02 | Reformulação da Estação, Fila e Atendimento
 +
 +## 1. Identificação da Task e Commit-Base
@@ -4397,15 +4410,18 @@ index 0000000..227cd54
 +- **Inspeção estática e checagem de sintaxe `.cjs` (`node --check`):** realizada nos quatro arquivos de teste da entrega ([roleRoutingIntegration.test.cjs](../app/tests/roleRoutingIntegration.test.cjs), [staffStationOperational.test.cjs](../app/tests/staffStationOperational.test.cjs), [staffDashboard.test.cjs](../app/tests/staffDashboard.test.cjs) e [staffDemoState.test.cjs](../app/tests/staffDemoState.test.cjs)) sem executar casos de teste.
 +- **Integridade de patch acumulado (`qa-evidence/STAFF-02-changes.diff`):** patch regerado a partir da base fixa `95b8b80f3c0142af30c25e9483291d75677a085d` e validado estaticamente com `git diff --check -- app docs` e `git apply --check --reverse qa-evidence/STAFF-02-changes.diff` ao final das edições.
 +
-+### 11.2. Validações automatizadas NÃO executadas nesta etapa (pendentes para **GPT-6 Luna — Medium**)
-+Conforme o [AGENTS.md](../AGENTS.md), nenhuma suíte `node --test` ou `npm test` foi executada pelo modelo de implementação. Selecionar manualmente **GPT-6 Luna — Medium** e executar em sequência na raiz do workspace (`feature/staff-operacional-v2`):
++### 11.2. Validações automatizadas pendentes após a correção do fixture
++A primeira campanha foi interrompida na segunda suíte (ver Seção 13.1). O modelo de implementação corrigiu o fixture por inspeção estática. Selecionar manualmente **GPT-6 Luna — Medium** para a nova campanha, usar o checkout da branch `feature/staff-operacional-v2` que contém esta correção e executar as suítes prioritárias em sequência na raiz, com `NODE_ENV=test` e as dependências verificadas:
 +1. `node --test app/tests/staffDemoState.test.cjs`
 +2. `node --test app/tests/staffDashboard.test.cjs`
 +3. `node --test app/tests/staffStationOperational.test.cjs`
 +4. `node --test --test-name-pattern="STAFF02|STAFF-02|R3-" app/tests/roleRoutingIntegration.test.cjs`
 +5. `node --test app/tests/roleRoutingIntegration.test.cjs`
-+6. `npm --prefix app test`
-+7. `npm --prefix qa/regression test`
++6. `node --test app/tests/staffOperationsService.integration.test.cjs`
++7. `node --test app/tests/staffPolling.test.cjs`
++8. `node --test app/tests/staffRealNavigation.test.cjs`
++
++Se as prioridades passarem, executar `npm --prefix app test` e `npm --prefix qa/regression test` se o script de regressão for aplicável e seguro. O filtro do passo 4 é apenas diagnóstico e o passo 5 continua obrigatório.
 +
 +*(Critério de aprovação: zero falhas, zero testes ignorados por ausência de `qa/regression/node_modules` e zero avisos inesperados em todos os comandos aplicáveis.)*
 +
@@ -4427,8 +4443,23 @@ index 0000000..227cd54
 +- **20/11/2026 — Commit `d6765f1dec3b14f40be4d955e4791c88f1c56735`:** Publicação das correções da **Auditoria Independente — Rodada 1** (`STAFF02-AUD-01` a `STAFF02-AUD-08`), reforço dos testes e patch acumulado na branch `feature/staff-operacional-v2`.
 +- **21/11/2026 — Ajuste final pós-push `d6765f1`:** Revisão contratual das fixtures da STAFF-02, correção de `entryNominal` (`STAFF02-AUD-01`), consistência de fila em `STAFF02-AUD-02`, completude de campos DTO em `/stations` e `/queue` nos mocks e regeneração integral do patch acumulado [STAFF-02-changes.diff](../qa-evidence/STAFF-02-changes.diff) desde `95b8b80`.
 +
++### 13.1. Primeira campanha automatizada — falha na AUD-01
++
++A campanha com **GPT-6 Luna Medium** foi executada sobre `fbc9481843c49e5a55249459efc6c47b8b20dc82`.
++
++| Suíte | Código de saída | Aprovados | Falhos |
++| --- | ---: | ---: | ---: |
++| `staffDemoState.test.cjs` | 0 | 21 de 21 | 0 |
++| `staffDashboard.test.cjs` | 1 | 23 | 1 |
++
++No teste `STAFF02-AUD-01` de [staffDashboard.test.cjs](../app/tests/staffDashboard.test.cjs), a asserção na linha 1350 do commit testado esperava `session` para HTTP 401 e recebeu `event_denied`. O runner também registrou uma rejeição `Error: 401` sem tratamento. A inspeção confirmou que `refreshPanel()` pegava a Promise rejeitada de `/stations` da iteração anterior e restabelecia o bloqueio de acesso. `verifyStationAccess()` retornava o bloqueio antes de consumir a nova Promise programada para o 401.
++
++O fixture passou a consumir cada resposta programada uma única vez. O teste verifica o consumo antes de resolver ou rejeitar a Promise e confirma que o painel voltou ao estado autorizado antes de cada verificação de 403, 404 ou 401. O contrato de `verifyStationAccess()` preserva a distinção entre sessão e evento. A correção é restrita ao teste e mantém as expectativas de autorização.
++
++A campanha foi interrompida antes de executar `staffStationOperational`, o filtro e a suíte integral de `roleRoutingIntegration`, `staffOperationsService.integration`, `staffPolling`, `staffRealNavigation` e as regressões de `app` e `qa/regression`. A STAFF-02 permanece bloqueada até nova validação com Luna Medium.
++
 +---
 +
 +## 14. Estado Final da Entrega
 +
-+Ajuste final pós-push `d6765f1dec3b14f40be4d955e4791c88f1c56735` concluído na branch `feature/staff-operacional-v2` (base acumulada da STAFF-02 `95b8b80f3c0142af30c25e9483291d75677a085d`), corrigindo as fixtures de integração sem alterar código de produção, parsers, backend, migrations ou módulos externos à STAFF-02 e sem executar comandos Git de staging/commit/push. Aguardando execução da campanha automatizada com **GPT-6 Luna — Medium** e commit pelo responsável via VSCode.
++A revisão contratual posterior a `d6765f1` está publicada em `fbc9481`. A correção do fixture da AUD-01 foi preparada localmente sobre `fbc9481` em `feature/staff-operacional-v2`. A evidência acumulada parte de `95b8b80f3c0142af30c25e9483291d75677a085d`. Aguardam nova campanha automatizada com **GPT-6 Luna Medium**, homologação no Expo e publicação pelo responsável via VSCode.
