@@ -2617,7 +2617,13 @@ test('STAFF-02: estados A e B da Estação, fila compartilhada, proteção a dup
     }
     assert.equal(secure.get(opKey) ?? null, null, 'intenção principal removida após ack');
     assert.equal(secure.get(`${opKey}.receipt`) ?? null, null);
-    assert.equal(secure.get(`${opKey}.ack`) ?? null, null);
+    const acknowledgement = JSON.parse(secure.get(`${opKey}.ack`));
+    assert.equal(acknowledgement.status, 'completed');
+    assert.equal(acknowledgement.receipt.phase, 'terminal');
+    assert.equal(acknowledgement.receipt.kind, 'call');
+    assert.equal(acknowledgement.receipt.outcome.kind, 'confirmed');
+    assert.equal(acknowledgement.receipt.outcome.result.id, sessionA);
+    assert.equal(acknowledgement.receipt.key, postLog[0].idempotencyKey);
 
     assert.ok(app.hasExactText('Mariana Costa'));
     assert.ok(app.hasExactText('Em atendimento'));

@@ -2245,7 +2245,7 @@ index 029f3f02d2a103a99502afcd27ad1c17f3ed88e1..a878f8605e165e80755dcd64023d327a
      refreshExperiences,
      syncOrphanExperiences,
 diff --git a/app/tests/roleRoutingIntegration.test.cjs b/app/tests/roleRoutingIntegration.test.cjs
-index 7913696e425cce693e66a43eb63751da64e3c597..587620c334f4fe7da2bd2fd2b0007c9c071061b9 100644
+index 7913696e425cce693e66a43eb63751da64e3c597..1e47b9af4f12a4f841c3a11f49e6b15068bbd6b7 100644
 --- a/app/tests/roleRoutingIntegration.test.cjs
 +++ b/app/tests/roleRoutingIntegration.test.cjs
 @@ -181,10 +181,10 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
@@ -2392,7 +2392,7 @@ index 7913696e425cce693e66a43eb63751da64e3c597..587620c334f4fe7da2bd2fd2b0007c9c
      await app.press('Voltar ao painel');
      await app.act(async () => {
        pendingQueueReq.resolve({ statusCode: 404, body: { code: 'RESOURCE_NOT_FOUND' } });
-@@ -2359,3 +2394,984 @@ test('R3-01, R3-02, R3-03 e R3-04: revalidação parcial não trava botão Atual
+@@ -2359,3 +2394,990 @@ test('R3-01, R3-02, R3-03 e R3-04: revalidação parcial não trava botão Atual
      app.dispose();
    }
  });
@@ -2619,7 +2619,13 @@ index 7913696e425cce693e66a43eb63751da64e3c597..587620c334f4fe7da2bd2fd2b0007c9c
 +    }
 +    assert.equal(secure.get(opKey) ?? null, null, 'intenção principal removida após ack');
 +    assert.equal(secure.get(`${opKey}.receipt`) ?? null, null);
-+    assert.equal(secure.get(`${opKey}.ack`) ?? null, null);
++    const acknowledgement = JSON.parse(secure.get(`${opKey}.ack`));
++    assert.equal(acknowledgement.status, 'completed');
++    assert.equal(acknowledgement.receipt.phase, 'terminal');
++    assert.equal(acknowledgement.receipt.kind, 'call');
++    assert.equal(acknowledgement.receipt.outcome.kind, 'confirmed');
++    assert.equal(acknowledgement.receipt.outcome.result.id, sessionA);
++    assert.equal(acknowledgement.receipt.key, postLog[0].idempotencyKey);
 +
 +    assert.ok(app.hasExactText('Mariana Costa'));
 +    assert.ok(app.hasExactText('Em atendimento'));
@@ -4270,10 +4276,10 @@ index 0000000000000000000000000000000000000000..bfd4b2e7881e4769d3a36b75d9be9c74
 +});
 diff --git a/docs/STAFF_02_ESTACAO_FILA_ATENDIMENTO.md b/docs/STAFF_02_ESTACAO_FILA_ATENDIMENTO.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..2f99f4d35b7a943795ceb2102c2e9ea09fca5e7c
+index 0000000000000000000000000000000000000000..7263856bb1e61bd2e895c82108e29fea55c3050a
 --- /dev/null
 +++ b/docs/STAFF_02_ESTACAO_FILA_ATENDIMENTO.md
-@@ -0,0 +1,254 @@
+@@ -0,0 +1,260 @@
 +# ArenaGo — STAFF-02 | Reformulação da Estação, Fila e Atendimento
 +
 +## 1. Identificação da Task e Commit-Base
@@ -4463,7 +4469,7 @@ index 0000000000000000000000000000000000000000..2f99f4d35b7a943795ceb2102c2e9ea0
 +- **Integridade de patch acumulado (`qa-evidence/STAFF-02-changes.diff`):** patch regerado a partir da base fixa `95b8b80f3c0142af30c25e9483291d75677a085d` e validado estaticamente com `git diff --check -- app docs` e `git apply --check --reverse qa-evidence/STAFF-02-changes.diff` ao final das edições.
 +
 +### 11.2. Validações automatizadas pendentes após as correções de integração
-+A segunda campanha foi interrompida na integração filtrada (Seção 13.2). Selecionar manualmente **GPT-6 Luna Medium**, usar o checkout da branch `feature/staff-operacional-v2` com as correções e retomar na raiz, com `NODE_ENV=test` e as dependências verificadas.
++A terceira campanha foi interrompida na integração filtrada (Seção 13.3). Selecionar manualmente **GPT-6 Luna Medium**, usar o checkout da branch `feature/staff-operacional-v2` com as correções e retomar na raiz, com `NODE_ENV=test` e as dependências verificadas.
 +
 +1. `node --test --test-name-pattern="STAFF02|STAFF-02|R3-" app/tests/roleRoutingIntegration.test.cjs`
 +2. `node --test app/tests/roleRoutingIntegration.test.cjs`
@@ -4523,8 +4529,14 @@ index 0000000000000000000000000000000000000000..2f99f4d35b7a943795ceb2102c2e9ea0
 +
 +A campanha parou na integração filtrada. A nova execução do filtro, a suíte integral de integração, as outras prioridades e as duas regressões completas permanecem pendentes. As correções desta rodada passaram apenas por inspeção estática.
 +
++### 13.3. Terceira campanha automatizada — marcador de reconhecimento
++
++A integração filtrada executada com GPT-6 Luna Medium sobre `d19491bb6b802ea7278ea20bdabaf83ff090fcb5` retornou código 1, com 4 testes aprovados, 1 falho, 0 ignorados e 0 cancelados. O teste STAFF-02 esperava que `.ack` fosse removido após o reconhecimento de `call-next`, mas o contrato de `staffIntentStorage.js` mantém o marcador com status `completed` após remover a intenção principal e o recibo terminal. Os testes de `staffOperationsService.integration.test.cjs` também verificam esse marcador.
++
++A asserção foi ajustada para verificar o marcador concluído, o recibo terminal e confirmado, a sessão e a chave de idempotência do primeiro POST. As verificações de remoção da intenção principal e do recibo foram preservadas. A alteração foi inspecionada estaticamente e aguarda nova campanha com Luna Medium após publicação.
++
 +---
 +
 +## 14. Estado Final da Entrega
 +
-+A revisão contratual posterior a `d6765f1` está publicada em `fbc9481`. A correção do fixture do Dashboard foi publicada em `6682363` e passou na segunda campanha. As duas correções de integração estão preparadas localmente sobre `6682363` em `feature/staff-operacional-v2`. A evidência acumulada parte de `95b8b80f3c0142af30c25e9483291d75677a085d`. A STAFF-02 permanece bloqueada até a validação com **GPT-6 Luna Medium**. A decisão sobre homologação no Expo e publicação cabe ao responsável pelo projeto.
++A revisão contratual posterior a `d6765f1` está publicada em `fbc9481`. A correção do fixture do Dashboard foi publicada em `6682363` e passou na segunda campanha. As correções de integração foram publicadas em `d19491b`. O ajuste da expectativa do marcador está preparado localmente sobre esse commit em `feature/staff-operacional-v2`. A evidência acumulada parte de `95b8b80f3c0142af30c25e9483291d75677a085d`. A STAFF-02 permanece bloqueada até a validação com **GPT-6 Luna Medium**. A decisão sobre homologação no Expo e publicação cabe ao responsável pelo projeto.

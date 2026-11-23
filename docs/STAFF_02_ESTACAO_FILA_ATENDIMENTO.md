@@ -187,7 +187,7 @@ Após a publicação do commit `d6765f1dec3b14f40be4d955e4791c88f1c56735`, foi r
 - **Integridade de patch acumulado (`qa-evidence/STAFF-02-changes.diff`):** patch regerado a partir da base fixa `95b8b80f3c0142af30c25e9483291d75677a085d` e validado estaticamente com `git diff --check -- app docs` e `git apply --check --reverse qa-evidence/STAFF-02-changes.diff` ao final das edições.
 
 ### 11.2. Validações automatizadas pendentes após as correções de integração
-A segunda campanha foi interrompida na integração filtrada (Seção 13.2). Selecionar manualmente **GPT-6 Luna Medium**, usar o checkout da branch `feature/staff-operacional-v2` com as correções e retomar na raiz, com `NODE_ENV=test` e as dependências verificadas.
+A terceira campanha foi interrompida na integração filtrada (Seção 13.3). Selecionar manualmente **GPT-6 Luna Medium**, usar o checkout da branch `feature/staff-operacional-v2` com as correções e retomar na raiz, com `NODE_ENV=test` e as dependências verificadas.
 
 1. `node --test --test-name-pattern="STAFF02|STAFF-02|R3-" app/tests/roleRoutingIntegration.test.cjs`
 2. `node --test app/tests/roleRoutingIntegration.test.cjs`
@@ -247,8 +247,14 @@ A campanha com **GPT-6 Luna Medium** foi executada sobre `6682363ad1a2cbf0500a00
 
 A campanha parou na integração filtrada. A nova execução do filtro, a suíte integral de integração, as outras prioridades e as duas regressões completas permanecem pendentes. As correções desta rodada passaram apenas por inspeção estática.
 
+### 13.3. Terceira campanha automatizada — marcador de reconhecimento
+
+A integração filtrada executada com GPT-6 Luna Medium sobre `d19491bb6b802ea7278ea20bdabaf83ff090fcb5` retornou código 1, com 4 testes aprovados, 1 falho, 0 ignorados e 0 cancelados. O teste STAFF-02 esperava que `.ack` fosse removido após o reconhecimento de `call-next`, mas o contrato de `staffIntentStorage.js` mantém o marcador com status `completed` após remover a intenção principal e o recibo terminal. Os testes de `staffOperationsService.integration.test.cjs` também verificam esse marcador.
+
+A asserção foi ajustada para verificar o marcador concluído, o recibo terminal e confirmado, a sessão e a chave de idempotência do primeiro POST. As verificações de remoção da intenção principal e do recibo foram preservadas. A alteração foi inspecionada estaticamente e aguarda nova campanha com Luna Medium após publicação.
+
 ---
 
 ## 14. Estado Final da Entrega
 
-A revisão contratual posterior a `d6765f1` está publicada em `fbc9481`. A correção do fixture do Dashboard foi publicada em `6682363` e passou na segunda campanha. As duas correções de integração estão preparadas localmente sobre `6682363` em `feature/staff-operacional-v2`. A evidência acumulada parte de `95b8b80f3c0142af30c25e9483291d75677a085d`. A STAFF-02 permanece bloqueada até a validação com **GPT-6 Luna Medium**. A decisão sobre homologação no Expo e publicação cabe ao responsável pelo projeto.
+A revisão contratual posterior a `d6765f1` está publicada em `fbc9481`. A correção do fixture do Dashboard foi publicada em `6682363` e passou na segunda campanha. As correções de integração foram publicadas em `d19491b`. O ajuste da expectativa do marcador está preparado localmente sobre esse commit em `feature/staff-operacional-v2`. A evidência acumulada parte de `95b8b80f3c0142af30c25e9483291d75677a085d`. A STAFF-02 permanece bloqueada até a validação com **GPT-6 Luna Medium**. A decisão sobre homologação no Expo e publicação cabe ao responsável pelo projeto.
