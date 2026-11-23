@@ -1,5 +1,5 @@
 diff --git a/app/screens/staff/StaffEventsNavigator.js b/app/screens/staff/StaffEventsNavigator.js
-index 5399e4d03fdc5fd96b42fd7d552e834aa20a03d7..73a0a8218ae54251d4a8908123405d6865693b5c 100644
+index 5399e4d..73a0a82 100644
 --- a/app/screens/staff/StaffEventsNavigator.js
 +++ b/app/screens/staff/StaffEventsNavigator.js
 @@ -131,6 +131,24 @@ function describeEntrySummary(snapshot) {
@@ -425,7 +425,7 @@ index 5399e4d03fdc5fd96b42fd7d552e834aa20a03d7..73a0a8218ae54251d4a8908123405d68
                  }}
                />
 diff --git a/app/screens/staff/StaffStationOperationalScreen.js b/app/screens/staff/StaffStationOperationalScreen.js
-index 9ab7cc3af93ed117a49f6edd44684a3b548401e2..38147f38b556b440ca4322199c083e8550998a56 100644
+index 9ab7cc3..38147f3 100644
 --- a/app/screens/staff/StaffStationOperationalScreen.js
 +++ b/app/screens/staff/StaffStationOperationalScreen.js
 @@ -1,46 +1,133 @@
@@ -1315,7 +1315,7 @@ index 9ab7cc3af93ed117a49f6edd44684a3b548401e2..38147f38b556b440ca4322199c083e85
  });
 diff --git a/app/screens/staff/components/StaffStationSections.js b/app/screens/staff/components/StaffStationSections.js
 new file mode 100644
-index 0000000000000000000000000000000000000000..146020784e3f3a37876e1b8e53c2ef5b6067b2b7
+index 0000000..1460207
 --- /dev/null
 +++ b/app/screens/staff/components/StaffStationSections.js
 @@ -0,0 +1,432 @@
@@ -1752,7 +1752,7 @@ index 0000000000000000000000000000000000000000..146020784e3f3a37876e1b8e53c2ef5b
 +  pressed: { opacity: 0.75 },
 +});
 diff --git a/app/services/staffDashboardService.js b/app/services/staffDashboardService.js
-index 029f3f02d2a103a99502afcd27ad1c17f3ed88e1..a878f8605e165e80755dcd64023d327abfcd882f 100644
+index 029f3f0..a878f86 100644
 --- a/app/services/staffDashboardService.js
 +++ b/app/services/staffDashboardService.js
 @@ -6,6 +6,8 @@ const empty = () => ({
@@ -2245,7 +2245,7 @@ index 029f3f02d2a103a99502afcd27ad1c17f3ed88e1..a878f8605e165e80755dcd64023d327a
      refreshExperiences,
      syncOrphanExperiences,
 diff --git a/app/tests/roleRoutingIntegration.test.cjs b/app/tests/roleRoutingIntegration.test.cjs
-index 7913696e425cce693e66a43eb63751da64e3c597..1e47b9af4f12a4f841c3a11f49e6b15068bbd6b7 100644
+index 7913696..1e47b9a 100644
 --- a/app/tests/roleRoutingIntegration.test.cjs
 +++ b/app/tests/roleRoutingIntegration.test.cjs
 @@ -181,10 +181,10 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
@@ -3384,7 +3384,7 @@ index 7913696e425cce693e66a43eb63751da64e3c597..1e47b9af4f12a4f841c3a11f49e6b150
 +  }
 +});
 diff --git a/app/tests/staffDashboard.test.cjs b/app/tests/staffDashboard.test.cjs
-index 5d6ca6cd1b85fd4d76e7a28843db7dad7cdbe7aa..7a97ab47e4f5d4d186519c85bef1496fbb038707 100644
+index 5d6ca6c..7a97ab4 100644
 --- a/app/tests/staffDashboard.test.cjs
 +++ b/app/tests/staffDashboard.test.cjs
 @@ -1224,3 +1224,162 @@ test('R3-04: recuperação controlada de experiências desconhecidas (GET em voo
@@ -3551,7 +3551,7 @@ index 5d6ca6cd1b85fd4d76e7a28843db7dad7cdbe7aa..7a97ab47e4f5d4d186519c85bef1496f
 +  assert.equal(postCalls, 0, 'a verificação de acesso não envia POST');
 +});
 diff --git a/app/tests/staffDemoState.test.cjs b/app/tests/staffDemoState.test.cjs
-index d86de785df85bbf43a63e8319d44f0f5e8a44419..82d7c407bddb714eaa71ec368d674673fa6e2623 100644
+index d86de78..82d7c40 100644
 --- a/app/tests/staffDemoState.test.cjs
 +++ b/app/tests/staffDemoState.test.cjs
 @@ -219,13 +219,24 @@ const demoStaffScreens = [
@@ -3583,7 +3583,7 @@ index d86de785df85bbf43a63e8319d44f0f5e8a44419..82d7c407bddb714eaa71ec368d674673
  test('arquivos Staff são classificados como demonstração ou fluxo real', () => {
 diff --git a/app/tests/staffStationOperational.test.cjs b/app/tests/staffStationOperational.test.cjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..bfd4b2e7881e4769d3a36b75d9be9c749b4e8b11
+index 0000000..bfd4b2e
 --- /dev/null
 +++ b/app/tests/staffStationOperational.test.cjs
 @@ -0,0 +1,687 @@
@@ -4276,10 +4276,10 @@ index 0000000000000000000000000000000000000000..bfd4b2e7881e4769d3a36b75d9be9c74
 +});
 diff --git a/docs/STAFF_02_ESTACAO_FILA_ATENDIMENTO.md b/docs/STAFF_02_ESTACAO_FILA_ATENDIMENTO.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..7263856bb1e61bd2e895c82108e29fea55c3050a
+index 0000000..e2b6531
 --- /dev/null
 +++ b/docs/STAFF_02_ESTACAO_FILA_ATENDIMENTO.md
-@@ -0,0 +1,260 @@
+@@ -0,0 +1,290 @@
 +# ArenaGo — STAFF-02 | Reformulação da Estação, Fila e Atendimento
 +
 +## 1. Identificação da Task e Commit-Base
@@ -4539,4 +4539,98 @@ index 0000000000000000000000000000000000000000..7263856bb1e61bd2e895c82108e29fea
 +
 +## 14. Estado Final da Entrega
 +
-+A revisão contratual posterior a `d6765f1` está publicada em `fbc9481`. A correção do fixture do Dashboard foi publicada em `6682363` e passou na segunda campanha. As correções de integração foram publicadas em `d19491b`. O ajuste da expectativa do marcador está preparado localmente sobre esse commit em `feature/staff-operacional-v2`. A evidência acumulada parte de `95b8b80f3c0142af30c25e9483291d75677a085d`. A STAFF-02 permanece bloqueada até a validação com **GPT-6 Luna Medium**. A decisão sobre homologação no Expo e publicação cabe ao responsável pelo projeto.
++A revisão contratual posterior a `d6765f1` está publicada em `fbc9481`. A correção do fixture do Dashboard foi publicada em `6682363`; as correções de integração foram publicadas em `d19491b`. Os ajustes seguintes do harness e das fixtures estão locais sobre `f1ae8bf` e foram aprovados na campanha automatizada final descrita na Seção 13.7. A evidência acumulada parte de `95b8b80f3c0142af30c25e9483291d75677a085d`. A homologação manual no Expo e a aprovação formal da STAFF-02 permanecem pendentes e cabem ao responsável pelo projeto.
++
++### 13.4. Campanha após recuperação do ambiente e ajuste do harness de QA
++
++No HEAD `f1ae8bf3745f3f8b10744c92bbfa38652f23b121`, a integração filtrada executada a partir da raiz falhou com 0 aprovados e 5 falhos por resolução do plugin Babel antes dos cenários funcionais. Executada a partir de `app/`, com `NODE_ENV=test`, passou com 5 aprovados. A integração completa passou com 56, os serviços Staff com 65 e a regressão de `app` com 927 aprovados, todos sem falhas, ignorados ou cancelamentos. Dashboard (24), Estação (3), polling (3) e navegação real (2) também passaram.
++
++A regressão independente `qa/regression` retornou código 1: 29 aprovados, 3 falhos, 0 ignorados e 0 cancelados. Os arquivos `navigation.test.cjs`, `questionnaire-ui.test.cjs` e `session-isolation.test.cjs` falharam antes das asserções porque o mapa de imports do harness não incluía `../../context/adminAccess`, importado por `AuthSessionGate.js`.
++
++O harness passou a carregar o módulo real `app/context/adminAccess.js` por `loadJs` e a fornecê-lo exclusivamente à chave requerida pelo gate. O resolvedor controlado permanece fail-closed, e a regra real de autorização Admin é preservada. Esta alteração recebeu apenas inspeção estática; a regressão independente permanece pendente de nova execução por GPT-6 Luna Medium. A STAFF-02 não está aprovada nem homologada.
++
++### 13.5. Nova execução da regressão independente e ajuste das fixtures
++
++Após o ajuste do import Admin, `npm --prefix qa/regression test` retornou código 1, com 29 aprovados, 22 falhos, nenhum ignorado ou cancelado (2.995 ms). Os 22 casos chegaram à inicialização de sessão e falharam com “Não foi possível iniciar a sessão com a resposta recebida do servidor”, antes dos comportamentos pretendidos. A inspeção identificou que as respostas fictícias das contas A e B não forneciam `roles` nem `sessionId` conforme os contratos atuais de login e `/auth/me`.
++
++As duas contas do harness receberam `roles: ['participante']` e UUIDs de sessão distintos e estáveis, mantendo os IDs públicos A e B. Login e `/auth/me` continuam usando o mesmo usuário do servidor simulado, e a validação real de identidade permanece em vigor. O ajuste recebeu apenas inspeção estática; sua confirmação e a regressão independente continuam pendentes de execução por GPT-6 Luna Medium. A STAFF-02 permanece sem aprovação ou homologação.
++
++### 13.6. Regressão independente: mapeamento de imports
++
++Após a atualização das fixtures, a regressão independente retornou código 1, com 29 aprovados, 22 falhos, zero ignorados e cancelados (3.255 ms). Os 22 cenários pararam na inicialização ao carregar `App.js`, devido ao import não mapeado `./screens/auth/RolePendingScreen`.
++
++A inspeção dos imports de `App.js` identificou também `StaffEventsNavigator` e o carregamento condicional de `AdminDemoNavigator`. Os três receberam placeholders explícitos no harness de Participante. Os módulos reais de autenticação, autorização, gate e questionário foram preservados. Os imports diretos dos módulos carregados por `loadJs` foram inspecionados; `react-native` também foi fornecido explicitamente à tipografia. Uma verificação por AST exige mapeamento explícito de cada import estático de `App.js`; imports inesperados continuam bloqueados por `controlledRequire`.
++
++As alterações foram apenas inspecionadas estaticamente e aguardam execução da regressão por GPT-6 Luna Medium. A STAFF-02 permanece sem aprovação e homologação.
++
++### 13.7. Campanha automatizada final — aprovada
++
++Em 23/11/2026, a campanha automatizada final foi aprovada. O filtro STAFF-02/R3 passou com 5 testes; a integração completa passou com 56; os serviços Staff passaram com 65; a regressão completa de `app` passou com 927. A regressão independente `qa/regression` passou com 51 testes, zero falhas, zero ignorados e zero cancelamentos, código de saída 0.
++
++As falhas anteriores foram resolvidas progressivamente: a dependência real `adminAccess` foi mapeada no harness; as fixtures A/B receberam papéis e UUIDs de sessão válidos e distintos; os imports de telas ausentes foram mapeados explicitamente e foi adicionada uma verificação estática dos imports de `App.js`. Na execução final, os testes de navegação, questionário e isolamento de sessão completaram suas asserções sem falha.
++
++A validação automatizada está concluída e aprovada. A homologação manual no Expo e a aprovação formal da STAFF-02 continuam pendentes. Os resultados acima foram confirmados pelo responsável e não foram executados novamente nesta consolidação documental.
+diff --git a/qa/regression/helpers/react-app.cjs b/qa/regression/helpers/react-app.cjs
+index 82eb9ce..d6738e8 100644
+--- a/qa/regression/helpers/react-app.cjs
++++ b/qa/regression/helpers/react-app.cjs
+@@ -3,7 +3,7 @@ const React = require('react');
+ const Renderer = require('react-test-renderer');
+ const Navigation = require('@react-navigation/core');
+ const { StackRouter } = require('@react-navigation/routers');
+-const { read, loadJs } = require('./source.cjs');
++const { read, loadJs, appRequire } = require('./source.cjs');
+ 
+ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+ const { act } = Renderer;
+@@ -38,12 +38,13 @@ const authContext = loadJs('app/context/AuthContext.js', {
+   '../services/httpClient': httpImports,
+   '../services/tokenStorage': tokenImports,
+ });
++const adminAccess = loadJs('app/context/adminAccess.js', {});
+ const birthDate = loadJs('app/utils/birthDate.js', {});
+ const validation = loadJs('app/utils/validation.js', { './birthDate': birthDate });
+ // Render the real visual container and real theme; only native views/assets
+ // are represented as host nodes. Questionnaire hooks and events stay real.
+ const colors = loadJs('app/theme/colors.js', {});
+-const typography = loadJs('app/theme/typography.js', {});
++const typography = loadJs('app/theme/typography.js', { 'react-native': native });
+ const spacing = loadJs('app/theme/spacing.js', {});
+ const radii = loadJs('app/theme/radii.js', {});
+ const theme = loadJs('app/theme/index.js', {
+@@ -72,6 +73,7 @@ const gate = loadJs('app/screens/auth/AuthSessionGate.js', {
+   'react-native-safe-area-context': { SafeAreaView: 'SafeAreaView' },
+   '../../context/AuthContext': authContext,
+   '../../assets/images/logo-arenago.png': { uri: 'fixture:logo' },
++  '../../context/adminAccess': adminAccess,
+ });
+ 
+ function FocusedStack(props) {
+@@ -89,6 +91,8 @@ async function mount({ routed = false, catalog = [], deferCatalog = false } = {}
+   const requests = { profile: [], search: [], put: [], catalog: [] };
+   const users = new Map(['A', 'B'].map(id => [id, {
+     id, name: 'User ' + id, email: id.toLowerCase() + '@example.test',
++    roles: ['participante'],
++    sessionId: id === 'A' ? '00000000-0000-4000-8000-000000000001' : '00000000-0000-4000-8000-000000000002',
+     hasCompletedQuestionnaire: false,
+   }]));
+   let serverUser = null;
+@@ -184,7 +188,18 @@ async function mount({ routed = false, catalog = [], deferCatalog = false } = {}
+     './screens/participation/ParticipationRealDetailsScreen',
+     './screens/participation/RealEvaluationScreen', './screens/splash/SplashScreenGate',
+     './screens/auth/RegisterScreen', './screens/auth/WelcomeScreen',
++    './screens/auth/RolePendingScreen', './screens/staff/StaffEventsNavigator',
++    './screens/admin/AdminDemoNavigator',
+   ]) imports[path] = { __esModule: true, default: Placeholder };
++  const appAst = appRequire('@babel/core').parseSync(read('app/App.js'), {
++    configFile: false, babelrc: false, parserOpts: { plugins: ['jsx'] },
++  });
++  for (const declaration of appAst.program.body) {
++    if (declaration.type === 'ImportDeclaration') {
++      assert.ok(Object.hasOwn(imports, declaration.source.value),
++        'Missing explicit App.js import: ' + declaration.source.value);
++    }
++  }
+   const app = loadJs('app/App.js', imports);
+   const navigation = {
+     reset(payload) { calls.push({ type: 'reset', payload }); },

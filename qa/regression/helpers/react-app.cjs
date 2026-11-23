@@ -3,7 +3,7 @@ const React = require('react');
 const Renderer = require('react-test-renderer');
 const Navigation = require('@react-navigation/core');
 const { StackRouter } = require('@react-navigation/routers');
-const { read, loadJs } = require('./source.cjs');
+const { read, loadJs, appRequire } = require('./source.cjs');
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const { act } = Renderer;
@@ -38,12 +38,13 @@ const authContext = loadJs('app/context/AuthContext.js', {
   '../services/httpClient': httpImports,
   '../services/tokenStorage': tokenImports,
 });
+const adminAccess = loadJs('app/context/adminAccess.js', {});
 const birthDate = loadJs('app/utils/birthDate.js', {});
 const validation = loadJs('app/utils/validation.js', { './birthDate': birthDate });
 // Render the real visual container and real theme; only native views/assets
 // are represented as host nodes. Questionnaire hooks and events stay real.
 const colors = loadJs('app/theme/colors.js', {});
-const typography = loadJs('app/theme/typography.js', {});
+const typography = loadJs('app/theme/typography.js', { 'react-native': native });
 const spacing = loadJs('app/theme/spacing.js', {});
 const radii = loadJs('app/theme/radii.js', {});
 const theme = loadJs('app/theme/index.js', {
@@ -72,6 +73,7 @@ const gate = loadJs('app/screens/auth/AuthSessionGate.js', {
   'react-native-safe-area-context': { SafeAreaView: 'SafeAreaView' },
   '../../context/AuthContext': authContext,
   '../../assets/images/logo-arenago.png': { uri: 'fixture:logo' },
+  '../../context/adminAccess': adminAccess,
 });
 
 function FocusedStack(props) {
@@ -89,6 +91,8 @@ async function mount({ routed = false, catalog = [], deferCatalog = false } = {}
   const requests = { profile: [], search: [], put: [], catalog: [] };
   const users = new Map(['A', 'B'].map(id => [id, {
     id, name: 'User ' + id, email: id.toLowerCase() + '@example.test',
+    roles: ['participante'],
+    sessionId: id === 'A' ? '00000000-0000-4000-8000-000000000001' : '00000000-0000-4000-8000-000000000002',
     hasCompletedQuestionnaire: false,
   }]));
   let serverUser = null;
@@ -184,7 +188,18 @@ async function mount({ routed = false, catalog = [], deferCatalog = false } = {}
     './screens/participation/ParticipationRealDetailsScreen',
     './screens/participation/RealEvaluationScreen', './screens/splash/SplashScreenGate',
     './screens/auth/RegisterScreen', './screens/auth/WelcomeScreen',
+    './screens/auth/RolePendingScreen', './screens/staff/StaffEventsNavigator',
+    './screens/admin/AdminDemoNavigator',
   ]) imports[path] = { __esModule: true, default: Placeholder };
+  const appAst = appRequire('@babel/core').parseSync(read('app/App.js'), {
+    configFile: false, babelrc: false, parserOpts: { plugins: ['jsx'] },
+  });
+  for (const declaration of appAst.program.body) {
+    if (declaration.type === 'ImportDeclaration') {
+      assert.ok(Object.hasOwn(imports, declaration.source.value),
+        'Missing explicit App.js import: ' + declaration.source.value);
+    }
+  }
   const app = loadJs('app/App.js', imports);
   const navigation = {
     reset(payload) { calls.push({ type: 'reset', payload }); },

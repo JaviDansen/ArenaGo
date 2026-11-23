@@ -257,4 +257,34 @@ A asserção foi ajustada para verificar o marcador concluído, o recibo termina
 
 ## 14. Estado Final da Entrega
 
-A revisão contratual posterior a `d6765f1` está publicada em `fbc9481`. A correção do fixture do Dashboard foi publicada em `6682363` e passou na segunda campanha. As correções de integração foram publicadas em `d19491b`. O ajuste da expectativa do marcador está preparado localmente sobre esse commit em `feature/staff-operacional-v2`. A evidência acumulada parte de `95b8b80f3c0142af30c25e9483291d75677a085d`. A STAFF-02 permanece bloqueada até a validação com **GPT-6 Luna Medium**. A decisão sobre homologação no Expo e publicação cabe ao responsável pelo projeto.
+A revisão contratual posterior a `d6765f1` está publicada em `fbc9481`. A correção do fixture do Dashboard foi publicada em `6682363`; as correções de integração foram publicadas em `d19491b`. Os ajustes seguintes do harness e das fixtures estão locais sobre `f1ae8bf` e foram aprovados na campanha automatizada final descrita na Seção 13.7. A evidência acumulada parte de `95b8b80f3c0142af30c25e9483291d75677a085d`. A homologação manual no Expo e a aprovação formal da STAFF-02 permanecem pendentes e cabem ao responsável pelo projeto.
+
+### 13.4. Campanha após recuperação do ambiente e ajuste do harness de QA
+
+No HEAD `f1ae8bf3745f3f8b10744c92bbfa38652f23b121`, a integração filtrada executada a partir da raiz falhou com 0 aprovados e 5 falhos por resolução do plugin Babel antes dos cenários funcionais. Executada a partir de `app/`, com `NODE_ENV=test`, passou com 5 aprovados. A integração completa passou com 56, os serviços Staff com 65 e a regressão de `app` com 927 aprovados, todos sem falhas, ignorados ou cancelamentos. Dashboard (24), Estação (3), polling (3) e navegação real (2) também passaram.
+
+A regressão independente `qa/regression` retornou código 1: 29 aprovados, 3 falhos, 0 ignorados e 0 cancelados. Os arquivos `navigation.test.cjs`, `questionnaire-ui.test.cjs` e `session-isolation.test.cjs` falharam antes das asserções porque o mapa de imports do harness não incluía `../../context/adminAccess`, importado por `AuthSessionGate.js`.
+
+O harness passou a carregar o módulo real `app/context/adminAccess.js` por `loadJs` e a fornecê-lo exclusivamente à chave requerida pelo gate. O resolvedor controlado permanece fail-closed, e a regra real de autorização Admin é preservada. Esta alteração recebeu apenas inspeção estática; a regressão independente permanece pendente de nova execução por GPT-6 Luna Medium. A STAFF-02 não está aprovada nem homologada.
+
+### 13.5. Nova execução da regressão independente e ajuste das fixtures
+
+Após o ajuste do import Admin, `npm --prefix qa/regression test` retornou código 1, com 29 aprovados, 22 falhos, nenhum ignorado ou cancelado (2.995 ms). Os 22 casos chegaram à inicialização de sessão e falharam com “Não foi possível iniciar a sessão com a resposta recebida do servidor”, antes dos comportamentos pretendidos. A inspeção identificou que as respostas fictícias das contas A e B não forneciam `roles` nem `sessionId` conforme os contratos atuais de login e `/auth/me`.
+
+As duas contas do harness receberam `roles: ['participante']` e UUIDs de sessão distintos e estáveis, mantendo os IDs públicos A e B. Login e `/auth/me` continuam usando o mesmo usuário do servidor simulado, e a validação real de identidade permanece em vigor. O ajuste recebeu apenas inspeção estática; sua confirmação e a regressão independente continuam pendentes de execução por GPT-6 Luna Medium. A STAFF-02 permanece sem aprovação ou homologação.
+
+### 13.6. Regressão independente: mapeamento de imports
+
+Após a atualização das fixtures, a regressão independente retornou código 1, com 29 aprovados, 22 falhos, zero ignorados e cancelados (3.255 ms). Os 22 cenários pararam na inicialização ao carregar `App.js`, devido ao import não mapeado `./screens/auth/RolePendingScreen`.
+
+A inspeção dos imports de `App.js` identificou também `StaffEventsNavigator` e o carregamento condicional de `AdminDemoNavigator`. Os três receberam placeholders explícitos no harness de Participante. Os módulos reais de autenticação, autorização, gate e questionário foram preservados. Os imports diretos dos módulos carregados por `loadJs` foram inspecionados; `react-native` também foi fornecido explicitamente à tipografia. Uma verificação por AST exige mapeamento explícito de cada import estático de `App.js`; imports inesperados continuam bloqueados por `controlledRequire`.
+
+As alterações foram apenas inspecionadas estaticamente e aguardam execução da regressão por GPT-6 Luna Medium. A STAFF-02 permanece sem aprovação e homologação.
+
+### 13.7. Campanha automatizada final — aprovada
+
+Em 23/11/2026, a campanha automatizada final foi aprovada. O filtro STAFF-02/R3 passou com 5 testes; a integração completa passou com 56; os serviços Staff passaram com 65; a regressão completa de `app` passou com 927. A regressão independente `qa/regression` passou com 51 testes, zero falhas, zero ignorados e zero cancelamentos, código de saída 0.
+
+As falhas anteriores foram resolvidas progressivamente: a dependência real `adminAccess` foi mapeada no harness; as fixtures A/B receberam papéis e UUIDs de sessão válidos e distintos; os imports de telas ausentes foram mapeados explicitamente e foi adicionada uma verificação estática dos imports de `App.js`. Na execução final, os testes de navegação, questionário e isolamento de sessão completaram suas asserções sem falha.
+
+A validação automatizada está concluída e aprovada. A homologação manual no Expo e a aprovação formal da STAFF-02 continuam pendentes. Os resultados acima foram confirmados pelo responsável e não foram executados novamente nesta consolidação documental.
