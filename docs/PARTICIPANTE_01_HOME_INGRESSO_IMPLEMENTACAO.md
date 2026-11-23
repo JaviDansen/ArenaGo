@@ -158,3 +158,10 @@ Observação de ambiente: `expo export --platform ios --platform android` na **m
 
 - **Local e fuso no histórico:** o contrato `GET /participations/history` traz só `event.id` e `event.name`. Exibir local e horário no fuso do evento na Home exige acrescentar campos ao histórico (contrato compartilhado, backend). Fica aguardando decisão do responsável.
 - **Várias avaliações pendentes:** mantida a política existente (contagem → aba Eventos). Abrir diretamente uma delas exigiria definir um critério de escolha.
+
+### 9.8 Git
+
+- Branch: `feature/heliom-participante-ux` (criada de `origin/develop` `5758fe1dcda104f6bfacf3ddb922a3711b088298`).
+- Commit de implementação: `b27c5f547c08ae3eaa73edc0d3994ffc7d7ab75a` — código, testes, este documento e `qa-evidence/PARTICIPANTE_01-changes.diff` (diff da implementação contra a base, verificado com `git apply --check`).
+- Commit seguinte: somente este registro de Git no documento.
+- Sem merge na `develop`, sem force push. Task 02 não iniciada.
