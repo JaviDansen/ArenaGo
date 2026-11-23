@@ -4276,7 +4276,7 @@ index 0000000..bfd4b2e
 +});
 diff --git a/docs/STAFF_02_ESTACAO_FILA_ATENDIMENTO.md b/docs/STAFF_02_ESTACAO_FILA_ATENDIMENTO.md
 new file mode 100644
-index 0000000..e2b6531
+index 0000000..3aff25d
 --- /dev/null
 +++ b/docs/STAFF_02_ESTACAO_FILA_ATENDIMENTO.md
 @@ -0,0 +1,290 @@
@@ -4462,14 +4462,14 @@ index 0000000..e2b6531
 +
 +---
 +
-+## 11. Resultados Efetivamente Executados e Campanha Pendente
++## 11. Resultados Efetivamente Executados e Validação Concluída
 +
 +### 11.1. Verificações executadas nesta etapa de implementação (estáticas / não executoras de testes)
 +- **Inspeção estática e checagem de sintaxe `.cjs` (`node --check`):** realizada nos quatro arquivos de teste da entrega ([roleRoutingIntegration.test.cjs](../app/tests/roleRoutingIntegration.test.cjs), [staffStationOperational.test.cjs](../app/tests/staffStationOperational.test.cjs), [staffDashboard.test.cjs](../app/tests/staffDashboard.test.cjs) e [staffDemoState.test.cjs](../app/tests/staffDemoState.test.cjs)) sem executar casos de teste.
 +- **Integridade de patch acumulado (`qa-evidence/STAFF-02-changes.diff`):** patch regerado a partir da base fixa `95b8b80f3c0142af30c25e9483291d75677a085d` e validado estaticamente com `git diff --check -- app docs` e `git apply --check --reverse qa-evidence/STAFF-02-changes.diff` ao final das edições.
 +
-+### 11.2. Validações automatizadas pendentes após as correções de integração
-+A terceira campanha foi interrompida na integração filtrada (Seção 13.3). Selecionar manualmente **GPT-6 Luna Medium**, usar o checkout da branch `feature/staff-operacional-v2` com as correções e retomar na raiz, com `NODE_ENV=test` e as dependências verificadas.
++### 11.2. Campanha automatizada final aprovada
++Em 23/11/2026, a campanha automatizada final foi concluída e aprovada, conforme resultados registrados na Seção 13.7. Os históricos das campanhas anteriores e seus diagnósticos permanecem nas seções 13.1 a 13.6.
 +
 +1. `node --test --test-name-pattern="STAFF02|STAFF-02|R3-" app/tests/roleRoutingIntegration.test.cjs`
 +2. `node --test app/tests/roleRoutingIntegration.test.cjs`
@@ -4477,16 +4477,14 @@ index 0000000..e2b6531
 +4. `node --test app/tests/staffPolling.test.cjs`
 +5. `node --test app/tests/staffRealNavigation.test.cjs`
 +
-+Se as prioridades passarem, executar `npm --prefix app test` e `npm --prefix qa/regression test`, com os scripts previamente inspecionados. A regressão de `app` inclui as suítes de demonstração, Dashboard e Estação já aprovadas isoladamente em campanhas anteriores. O filtro é diagnóstico e a suíte integral continua obrigatória. Interromper a campanha se houver falha.
-+
-+*(Critério de aprovação: zero falhas, zero testes ignorados por ausência de `qa/regression/node_modules` e zero avisos inesperados em todos os comandos aplicáveis.)*
++Os resultados finais confirmados foram: filtro STAFF-02/R3 5/5, integração completa 56/56, serviços Staff 65/65, regressão `app` 927/927 e regressão `qa/regression` 51/51. A regressão independente teve código de saída 0, sem falhas, ignorados ou cancelamentos.
 +
 +---
 +
 +## 12. Riscos e Limitações
 +
-+- Homologação presencial no Expo Go (incluindo Android pequeno, fonte ampliada do sistema e orientação horizontal para conferir `STAFF02-AUD-07` e o cronômetro `Chamado há MM:SS`) pendente de validação pelo responsável.
-+- Execução da campanha automatizada completa pendente com **GPT-6 Luna — Medium** na Seção 11.2.
++- Homologação manual no Expo confirmada como concluída pelo responsável em 23/11/2026. Não foram registrados detalhes adicionais de aparelhos, cenários ou evidências.
++- Aprovação formal da STAFF-02 confirmada pelo responsável em 23/11/2026.
 +- O indicador `Chamado há MM:SS` usa proteção contra desvios de relógio (`< -60s` ou `> 24h`), exibindo fallback `Chamada pendente` sem influenciar regras temporais do servidor.
 +
 +---
@@ -4569,7 +4567,9 @@ index 0000000..e2b6531
 +
 +As falhas anteriores foram resolvidas progressivamente: a dependência real `adminAccess` foi mapeada no harness; as fixtures A/B receberam papéis e UUIDs de sessão válidos e distintos; os imports de telas ausentes foram mapeados explicitamente e foi adicionada uma verificação estática dos imports de `App.js`. Na execução final, os testes de navegação, questionário e isolamento de sessão completaram suas asserções sem falha.
 +
-+A validação automatizada está concluída e aprovada. A homologação manual no Expo e a aprovação formal da STAFF-02 continuam pendentes. Os resultados acima foram confirmados pelo responsável e não foram executados novamente nesta consolidação documental.
++A validação automatizada está concluída e aprovada. O responsável confirmou a homologação manual no Expo e a aprovação formal da STAFF-02 em 23/11/2026. Os resultados foram fornecidos pelo responsável e não foram executados novamente nesta consolidação documental.
++
++**STAFF-02 — CONCLUÍDA E APROVADA PELO RESPONSÁVEL EM 23/11/2026.**
 diff --git a/qa/regression/helpers/react-app.cjs b/qa/regression/helpers/react-app.cjs
 index 82eb9ce..d6738e8 100644
 --- a/qa/regression/helpers/react-app.cjs
