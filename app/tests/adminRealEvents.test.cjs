@@ -312,7 +312,7 @@ test('recuperar foco consulta novamente e uma resposta anterior não sobrescreve
 test('destino informativo valida área e confirma evento com leitura autenticada', async () => {
   const calls = [];
   const h = createHarness('screens/admin/AdminEventManagementInfoScreen.js', {
-    props: { route: { params: { eventId: id(2), area: 'operation', name: 'Nome não confiável' } } },
+    props: { route: { params: { eventId: id(2), area: 'analytics', name: 'Nome não confiável' } } },
     authContext: verifiedAdminAuth({ httpClient: { get: async (url, options) => {
       calls.push([url, options.auth]);
       return { event: event(2) };
@@ -320,7 +320,7 @@ test('destino informativo valida área e confirma evento com leitura autenticada
   });
   await waitForText(h, 'Arena Norte');
   assert.deepEqual(calls, [[eventPath(2), true]]);
-  assert.ok(hasText(h, 'Operação do evento'));
+  assert.ok(hasText(h, 'BI do evento'));
   assert.ok(!hasText(h, 'Nome não confiável'));
   h.press('Voltar ao painel');
   assert.deepEqual(plain(h.navigationCalls.at(-1)), { type: 'popTo', name: 'AdminRealEvent', params: { eventId: id(2) } });

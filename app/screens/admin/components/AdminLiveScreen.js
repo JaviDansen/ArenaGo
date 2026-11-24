@@ -6,7 +6,7 @@ import { adminReadOwner } from '../useAdminEvents';
 import { AdminIcon, liveColors as c } from './AdminLiveUI';
 import AdminBottomBar from './AdminBottomBar';
 
-export default function AdminLiveScreen({ title, subtitle, navigation, mode = 'detail', backLabel = 'Voltar', onBack, backDisabled = false,
+export default function AdminLiveScreen({ title, subtitle, eyebrow = 'ÁREA ADMINISTRATIVA', navigation, mode = 'detail', backLabel = 'Voltar', onBack, backDisabled = false,
   bottomSafeArea = false, showTabs = false, refreshControl, children }) {
   const auth = useAuth();
   const owner = adminReadOwner(auth), live = useRef(auth), mounted = useRef(true);
@@ -30,7 +30,7 @@ export default function AdminLiveScreen({ title, subtitle, navigation, mode = 'd
     </View>
     <KeyboardAvoidingView style={styles.safe} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={styles.content} refreshControl={refreshControl}>
-        <Text style={styles.eyebrow}>ÁREA ADMINISTRATIVA</Text>
+        <Text style={styles.eyebrow}>{eyebrow}</Text>
         <Text style={styles.title} accessibilityRole="header">{title}</Text>
         {subtitle ? <Text style={styles.subtitle}>{subtitle}</Text> : null}
         {children}

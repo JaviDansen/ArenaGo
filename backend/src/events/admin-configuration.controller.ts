@@ -36,6 +36,12 @@ export class AdminConfigurationController {
     const { eventId } = validateOperationParams(configurationEventParams, params);
     return executeConfiguration(() => this.queries.staff({ userId, sessionId }, eventId));
   }
+  @Get(':eventId/operation')
+  @Header('Cache-Control', 'no-store')
+  operation(@CurrentUserId() userId: string, @CurrentUser('sessionId') sessionId: string, @Param() params: unknown) {
+    const { eventId } = validateOperationParams(configurationEventParams, params);
+    return executeConfiguration(() => this.queries.operation({ userId, sessionId }, eventId));
+  }
   @Get(':eventId')
   @HttpCode(200)
   event(@CurrentUserId() userId:string,@CurrentUser('sessionId') sessionId:string,@Param() params:unknown){const {eventId}=validateOperationParams(configurationEventParams,params);return executeConfiguration(()=>this.queries.event({userId,sessionId},eventId));}

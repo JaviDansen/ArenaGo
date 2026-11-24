@@ -80,6 +80,7 @@ function record(method: string, actor: Actor, input?: unknown) {
     event: async (actor: Actor, target: string) => { record("event", actor, target); return readResult; },
     readiness: async (actor: Actor, target: string) => { record("readiness", actor, target); return readResult; },
     experiences: async (actor: Actor, target: string) => { record("experiences", actor, target); return readResult; },
+    operation: async (actor: Actor, target: string) => { record("operation", actor, target); return readResult; },
     staff: async (actor: Actor, target: string) => {
       if (staffQueryFixture) return staffQueryFixture.staff(actor, target);
       record("staff", actor, target);
@@ -111,6 +112,25 @@ function problem(r: supertest.Response, status: number, code: string) {
 }
 
 routes.push({ name: "staff", method: "get", path: `/admin/events/${eventId}/staff`, response: { eventId, items: [] }, status: 200 });
+
+test("ADMIN-07 GET Operação usa somente ator/sessão autenticados e não é armazenável em cache", async () => {
+  const route: Route = { name: "operation", method: "get", path: `/admin/events/${eventId}/operation`,
+    response: { eventId, activeParticipants: 8, externalWaitingParticipants: 0 }, status: 200 };
+  reset(route);
+  const response = await request(route).unset("Idempotency-Key").query({ userId: id(88), sessionId: id(89) });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers["cache-control"], "no-store");
+  assert.deepEqual(response.body, route.response);
+  assert.deepEqual(calls, [{ method: "operation", actor: { userId, sessionId }, input: eventId }]);
+  reset(route);
+  problem(await request(route, route.path, "no-2fa"), 401, "ADMIN_2FA_REQUIRED");
+  assert.equal(calls.length, 0);
+  problem(await request(route, route.path, "staff"), 403, "ADMIN_REQUIRED");
+  reset(route);
+  failure = new AdminConfigurationError("resource_not_found");
+  problem(await request(route), 404, "RESOURCE_NOT_FOUND");
+  problem(await request(route, "/admin/events/not-a-uuid/operation"), 400, "VALIDATION_ERROR");
+});
 
 test("ADMIN-06 HTTP aplica a autorização real do GET Staff antes de revelar a existência do evento", async () => {
   const dialect = new PgDialect();

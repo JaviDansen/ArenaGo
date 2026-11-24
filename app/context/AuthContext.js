@@ -22,7 +22,7 @@ export function AuthProvider({
       });
   }
   const manager = managerRef.current;
-  const staffBinding = useRef(null);
+  const adminBindings = useRef(new Map());
   const lifetime = useRef({ active: true });
   const isProviderActive = () => lifetime.current.active;
   useLayoutEffect(() => {
@@ -35,16 +35,17 @@ export function AuthProvider({
       // Strict Mode can immediately reattach this same provider.
       void Promise.resolve().then(() => {
         if (!scope.active) {
-          staffBinding.current?.sync();
-          staffBinding.current = null;
+          adminBindings.current.forEach(binding => binding.sync());
+          adminBindings.current.clear();
         }
       });
     };
   }, [manager]);
-  function getAdminStaffSession(createBinding) {
+  function getAdminSession(kind, createBinding) {
     if (!isProviderActive()) return null;
-    staffBinding.current ??= createBinding(manager, isProviderActive);
-    return staffBinding.current.get();
+    const bindings = adminBindings.current;
+    if (!bindings.has(kind)) bindings.set(kind, createBinding(manager, isProviderActive));
+    return bindings.get(kind).get();
   }
 
   const [snapshot, setSnapshot] = useState(() => manager.getSnapshot());
@@ -52,7 +53,7 @@ export function AuthProvider({
   useEffect(() => {
     const unsubscribe = manager.subscribe((nextState) => {
       if (!isProviderActive()) return;
-      staffBinding.current?.sync();
+      adminBindings.current.forEach(binding => binding.sync());
       setSnapshot(nextState);
     });
     if (autoRestore) {
@@ -91,7 +92,8 @@ export function AuthProvider({
     markQuestionnaireCompleted: manager.markQuestionnaireCompleted,
     clearNotices: manager.clearNotices,
     httpClient: manager.client,
-    getAdminStaffSession,
+    getAdminStaffSession: createBinding => getAdminSession('staff', createBinding),
+    getAdminOperationSession: createBinding => getAdminSession('operation', createBinding),
   };
 
   return <AuthContext.Provider value={contextValue}>{children}</AuthContext.Provider>;

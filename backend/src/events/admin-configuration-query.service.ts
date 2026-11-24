@@ -4,7 +4,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { DRIZZLE_DATABASE } from "../database/database.module";
 import type { DatabaseTransactionExecutor } from "../database/database-executor";
 import type * as schema from "../database/schema";
-import { configurationEventViewSchema,configurationExperienceViewSchema,configurationStationViewSchema,configurationStaffMember,encodeConfigurationCursor,type ConfigurationPage } from "./admin-configuration.dto";
+import { configurationEventViewSchema,configurationExperienceViewSchema,configurationOperationViewSchema,configurationStationViewSchema,configurationStaffMember,encodeConfigurationCursor,type ConfigurationPage } from "./admin-configuration.dto";
 import { configurationEventView,configurationProjection,experienceSelection,readinessView,stationSelection,type ConfigurationRow } from "./admin-configuration.projection";
 import { failConfiguration } from "./admin-configuration.problem";
 
@@ -68,5 +68,35 @@ export class AdminConfigurationQueryService {
         ORDER BY r.granted_at ASC, r.id ASC`);
       return { eventId, items: rows.map(row => configurationStaffMember.parse(row)) };
     }, true);
+  }
+  operation(actor: ConfigurationActor, eventId: string) {
+    return this.snapshot(actor, async tx => {
+      const projection = configurationProjection(sql`e.id=${eventId}::uuid`);
+      const { rows: [row] } = await tx.execute<ConfigurationRow & {
+        activeParticipants: string;
+        externalWaitingParticipants: string;
+      }>(sql`
+        SELECT p.*, counts.*
+        FROM (${projection}) p
+        CROSS JOIN LATERAL (
+          SELECT count(*) FILTER (WHERE a.status='active')::text AS "activeParticipants",
+            count(*) FILTER (WHERE a.status='waiting')::text AS "externalWaitingParticipants"
+          FROM participations a
+          WHERE a.event_id=p.id AND a.status IN ('active','waiting')
+        ) counts`);
+      if (!row) failConfiguration("resource_not_found");
+      return configurationOperationViewSchema.parse({
+        eventId: row.id, name: row.name, timezone: row.timezone, effectivePhase: row.effectivePhase,
+        observedAt: row.observedAt, startsAt: row.startsAt,
+        officialEndsAt: row.officialEndsAt, operationalDeadlineAt: row.operationalDeadlineAt,
+        closureMode: row.closureMode, closureRequestedAt: row.closureRequestedAt, adminDeadlineAt: row.adminDeadlineAt,
+        externalQueueEnabled: row.externalQueueEnabled,
+        activeParticipants: /^\d+$/.test(row.activeParticipants) ? Number(row.activeParticipants) : NaN,
+        externalWaitingParticipants: /^\d+$/.test(row.externalWaitingParticipants) ? Number(row.externalWaitingParticipants) : NaN,
+        canSetExternalQueue: row.acceptingNewParticipations && row.effectivePhase === "open",
+        canClose: ["scheduled", "not_ready", "open"].includes(row.effectivePhase)
+          && row.closureMode === null && row.closureRequestedAt === null && row.adminDeadlineAt === null,
+      });
+    });
   }
 }

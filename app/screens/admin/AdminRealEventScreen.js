@@ -50,7 +50,8 @@ export default function AdminRealEventScreen({ navigation, route }) {
         accessibilityRole="button" accessibilityLabel={area.title}
         accessibilityHint={key === 'schedule' ? 'Abre os dados e os horários do evento' :
           key === 'experiences' ? 'Abre a gestão de experiências e estações do evento' :
-          key === 'staff' ? 'Abre a gestão da equipe Staff do evento' : 'Abre uma visão informativa'}
+          key === 'staff' ? 'Abre a gestão da equipe Staff do evento' :
+          key === 'operation' ? 'Abre os controles operacionais do evento' : 'Abre uma visão informativa'}
         onPress={() => openArea(key)} style={({ pressed }) => [s.card, s.row, styles.area, pressed && styles.pressed]}>
         <AdminIconTile name={area.icon} />
         <View style={s.grow}><Text style={styles.areaTitle}>{area.title}</Text><Text style={s.body}>{area.description}</Text></View>

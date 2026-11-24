@@ -60,6 +60,24 @@ export const configurationQuery=z.object({limit:z.string().regex(/^[1-9]\d?$/).t
   excludeClosed:z.enum(['true','false']).transform(value=>value==='true').optional()}).strict();
 export type ConfigurationPage=z.infer<typeof configurationQuery>;
 const precise=z.custom<string>(isPreciseInstant);
+export const configurationOperationViewSchema = z.object({
+  eventId: operationUuid,
+  name: z.string(),
+  timezone: z.string(),
+  effectivePhase,
+  observedAt: precise,
+  startsAt: precise,
+  officialEndsAt: precise,
+  operationalDeadlineAt: precise,
+  closureMode: z.enum(['immediate', 'controlled']).nullable(),
+  closureRequestedAt: precise.nullable(),
+  adminDeadlineAt: precise.nullable(),
+  externalQueueEnabled: z.boolean(),
+  activeParticipants: z.number().int().nonnegative(),
+  externalWaitingParticipants: z.number().int().nonnegative(),
+  canSetExternalQueue: z.boolean(),
+  canClose: z.boolean(),
+}).strict();
 const checks=z.object({nameAndAccessCode:z.boolean(),validScheduleAndTimezone:z.boolean(),externalQueueConfigured:z.boolean(),hasExperienceWithAvailableStation:z.boolean(),hasVerifiedActiveStaff:z.boolean()}).strict();
 export const configurationEventViewSchema=z.object({id:operationUuid,name:z.string(),accessCode:z.string(),timezone:z.string(),startsAt:precise,officialEndsAt:precise,operationalDeadlineAt:precise,
   statusStored:z.enum(['scheduled','open','closing','closed']),closureMode:z.enum(['immediate','controlled']).nullable(),closureRequestedAt:precise.nullable(),adminDeadlineAt:precise.nullable(),

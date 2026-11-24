@@ -20,13 +20,17 @@ const messages = {
 const unavailableGrant = 'Não foi possível confirmar o estado desta concessão. O vínculo ou o evento pode não estar disponível.';
 
 export function bindStaffSession(manager, newKey, isProviderActive = () => true) {
+  return bindAdminSession(manager, newKey, isProviderActive, createStaffSession);
+}
+
+export function bindAdminSession(manager, newKey, isProviderActive, createSession, requireVerifiedEmail = true) {
   let entry;
   function scope() {
     if (!isProviderActive()) return null;
     const auth = manager.getSnapshot();
     const { user } = auth;
     if (!auth.isAuthenticated || !user?.id || !user.sessionId || !Array.isArray(user.roles) || !user.roles.includes('admin') ||
-        user.emailVerified !== true || auth.adminChallenge) return null;
+        (requireVerifiedEmail && user.emailVerified !== true) || auth.adminChallenge) return null;
     const verified = canAccessAdminArea({ ...auth, isIdentityVerified: manager.isIdentityVerified });
     const suspended = auth.isInitializing || ['checking', 'error'].includes(auth.identityStatus);
     if (!verified && !suspended) return null;
@@ -49,7 +53,7 @@ export function bindStaffSession(manager, newKey, isProviderActive = () => true)
       if (!entry) {
         const owner = live;
         const current = () => entry === owner && matches(owner, scope());
-        owner.store = createStaffSession(owner.client, newKey, () => current() && scope().verified, {
+        owner.store = createSession(owner.client, newKey, () => current() && scope().verified, {
           canSettle: current,
           revision: manager.getIdentityRevision,
           renew: revision => {

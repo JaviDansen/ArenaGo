@@ -5,15 +5,15 @@ import AdminButton from './AdminButton';
 import { AdminIcon, AdminIconTile, liveColors as c, liveStyles as s } from './AdminLiveUI';
 import { resolveEventTime, scheduleFields } from '../adminScheduleForm';
 
-export function SettingsSection({ title, icon, children }) {
+export function SettingsSection({ title, icon, iconColor, children }) {
   return <View style={s.card}>
-    <View style={s.row}><AdminIconTile name={icon} /><Text accessibilityRole="header" style={[s.grow, s.title]}>{title}</Text></View>
+    <View style={s.row}><AdminIconTile name={icon} color={iconColor} /><Text accessibilityRole="header" style={[s.grow, s.title]}>{title}</Text></View>
     <View style={styles.fields}>{children}</View>
   </View>;
 }
 
-export function SettingsField({ label, value, onChangeText, children, placeholder, keyboardType, paired }) {
-  return <View style={[styles.field, paired && styles.pairItem]}>
+export function SettingsField({ label, value, onChangeText, children, placeholder, keyboardType, style }) {
+  return <View style={[styles.field, style]}>
     <Text style={styles.label}>{label}</Text>
     {onChangeText ? <TextInput accessibilityLabel={label} value={value} onChangeText={onChangeText}
       style={styles.input} placeholder={placeholder} placeholderTextColor={c.muted} keyboardType={keyboardType} /> :
@@ -23,8 +23,9 @@ export function SettingsField({ label, value, onChangeText, children, placeholde
   </View>;
 }
 
-export function ScheduleDateTime({ label, value, instant, timezone, onChange }) {
+export function ScheduleDateTime({ label, value, instant, timezone, onChange, wideFields = false }) {
   const [picker, setPicker] = useState(null);
+  const fieldStyle = [styles.pairItem, wideFields && styles.widePairItem];
   function choose(mode) {
     let at;
     try { at = new Date(resolveEventTime(value, timezone)); } catch { at = new Date(instant); }
@@ -44,12 +45,14 @@ export function ScheduleDateTime({ label, value, instant, timezone, onChange }) 
         const isDate = field === 'date';
         const fieldLabel = `${isDate ? 'Data' : 'Hora'} de ${label}`;
         const nativeControl = onChange && Platform.OS !== 'web';
-        return <SettingsField key={field} label={fieldLabel} value={value[field]} paired
+        return <SettingsField key={field} label={fieldLabel} value={value[field]} style={fieldStyle}
           onChangeText={onChange && !nativeControl ? text => onChange({ ...value, [field]: text }) : undefined}
           placeholder={isDate ? 'DD/MM/AAAA' : 'HH:MM'} keyboardType={isDate ? undefined : 'numbers-and-punctuation'}>
           {nativeControl ? <Pressable accessibilityRole="button" accessibilityLabel={fieldLabel} onPress={() => choose(field)}
             style={[styles.input, styles.pickerButton]}>
-            <Text style={styles.label}>{value[field] || (isDate ? 'Selecionar data' : 'Selecionar hora')}</Text>
+            <Text style={[styles.label, wideFields && styles.wrapLabel]}>
+              {value[field] || (isDate ? 'Selecionar data' : 'Selecionar hora')}
+            </Text>
             <AdminIcon name={isDate ? 'calendar' : 'history'} size={20} />
           </Pressable> : null}
         </SettingsField>;
@@ -68,8 +71,10 @@ const styles = StyleSheet.create({
   fields: { marginTop: 12, gap: 10 },
   field: { minWidth: 0, gap: 5 },
   pairItem: { flexGrow: 1, flexBasis: 120 },
+  widePairItem: { flexBasis: 170, maxWidth: '100%' },
   pair: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
   label: { color: c.text, fontSize: 15 },
+  wrapLabel: { flexShrink: 1 },
   input: { minHeight: 44, justifyContent: 'center', color: c.text, fontSize: 16, backgroundColor: c.background,
     borderRadius: 9, borderWidth: 1, borderColor: '#a189ba', paddingHorizontal: 12, paddingVertical: 8 },
   readOnly: { backgroundColor: '#252033', borderColor: '#54465f' },

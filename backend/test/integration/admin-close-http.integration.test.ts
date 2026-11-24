@@ -1,7 +1,6 @@
 import "reflect-metadata";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { devNull } from "node:os";
 import { after, before, test } from "node:test";
 import { NestFactory } from "@nestjs/core";
 import type { INestApplication } from "@nestjs/common";
@@ -13,27 +12,20 @@ import supertest from "supertest";
 import type * as schema from "../../src/database/schema";
 import type { ParticipationsService } from "../../src/participations/participations.service";
 import type { QueueEntryService } from "../../src/events/queue-entry.service";
-import { assertSafeTestDatabase } from "./test-db-guard";
+import { adminEventOperationsTestHooks } from "./admin-event-operations-db-guard";
 
-// Guarda executada ANTES de importar AppModule/providers; nunca consulta .env ou banco remoto.
-const urls = ["DATABASE_URL", "DATABASE_DIRECT_URL", "EVENTS_TEST_DATABASE_URL"].map(name => {
-  const value = assertSafeTestDatabase(process.env[name]), url = new URL(value);
-  if (url.hostname !== "127.0.0.1" || url.port !== "55432" || url.pathname !== "/arenago_events_test" || url.search || url.hash || !url.username) throw new Error(`${name}: destino local explícito obrigatório.`);
-  return value;
-});
-if (urls.some(value => value !== urls[0])) throw new Error("As três URLs precisam ser idênticas.");
-process.env.DOTENV_CONFIG_PATH = devNull;
-process.env.STAFF_IDEMPOTENCY_TTL_SECONDS = "60";
-process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = "60";
-process.env.ADMIN_IDEMPOTENCY_TTL_SECONDS = "60";
-const pool = new Pool({ connectionString: urls[0], ssl: false, max: 8, connectionTimeoutMillis: 2000, statement_timeout: 20000, lock_timeout: 16000 });
+let pool: Pool;
 let app: INestApplication, database: NodePgDatabase<typeof schema>, participations: ParticipationsService, queues: QueueEntryService;
 let signAccess: (userId: string, sessionId: string, expired?: boolean) => string;
 let fingerprint: typeof import("../../src/events/admin-close.service").closeFingerprint;
 const operation = "admin_close_event", reason = "Encerramento autorizado pela organização";
 const ids = { events: [] as string[], users: [] as string[], versions: [] as string[], games: [] as string[] };
-before(async () => {
-  assert.equal((await pool.query("SELECT current_database() AS name")).rows[0].name, "arenago_events_test");
+const hooks = adminEventOperationsTestHooks(async connectionString => {
+  process.env.STAFF_IDEMPOTENCY_TTL_SECONDS = "60";
+  process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = "60";
+  process.env.ADMIN_IDEMPOTENCY_TTL_SECONDS = "60";
+  pool = new Pool({ connectionString, ssl: false, max: 8, connectionTimeoutMillis: 2000,
+    statement_timeout: 20000, lock_timeout: 16000 });
   const { AppModule } = await import("../../src/app.module"), { DRIZZLE_DATABASE } = await import("../../src/database/database.module");
   const { ParticipationsService } = await import("../../src/participations/participations.service"), { QueueEntryService } = await import("../../src/events/queue-entry.service");
   fingerprint = (await import("../../src/events/admin-close.service")).closeFingerprint;
@@ -41,8 +33,8 @@ before(async () => {
   signAccess = (userId, sessionId, expired) => tokens.signAccessToken({ userId, sessionId }, expired ? { nowMs: Date.now() - 120000, ttlSeconds: 1 } : undefined);
   app = await NestFactory.create(AppModule, { logger: false }); app.setGlobalPrefix("api/v1"); await app.listen(0, "127.0.0.1");
   database = app.get(DRIZZLE_DATABASE); participations = app.get(ParticipationsService); queues = app.get(QueueEntryService);
-});
-after(async () => {
+}, async () => {
+  if (!pool) return;
   const errors: unknown[] = [];
   try {
     const c = await pool.connect();
@@ -71,6 +63,8 @@ after(async () => {
   for (const r of await Promise.allSettled([app?.close(), pool.end()])) if (r.status === "rejected") errors.push(r.reason);
   if (errors.length) throw new AggregateError(errors, "Limpeza E08.8 falhou.");
 });
+before(hooks.start);
+after(hooks.finish);
 async function account() {
   const userId = randomUUID(), sessionId = randomUUID(); ids.users.push(userId);
   await pool.query(`INSERT INTO users(id,name,email,password_hash,email_verified_at,created_at,updated_at)
@@ -229,9 +223,24 @@ async function assertNoOpen(c: Context) {
     (SELECT count(*)::int FROM evaluations v JOIN participations p ON p.id=v.participation_id WHERE p.event_id=$1) AS evaluations`, [c.eventId])).rows[0];
   assert.deepEqual(r, { people: 0, queues: 0, pending: 0, evaluations: 0 });
 }
+async function operationSummary(c: Context) {
+  const response = await supertest(app.getHttpServer()).get(`/api/v1/admin/events/${c.eventId}/operation`)
+    .set("Authorization", `Bearer ${c.admin.token}`);
+  assert.equal(response.status, 200);
+  assert.equal(response.body.eventId, c.eventId);
+  return response.body;
+}
+
 test("E08.8 PostgreSQL imediato encerra tudo atomicamente sem alterar completed/histórico/snapshots/outro evento", async () => {
   const c = await context(), other = await context(), data = await rich(c); await rich(other); const before = await state(c), otherBefore = await state(other), r = await close(c); assert.equal(r.status, 200);
   assert.deepEqual(Object.keys(r.body).sort(), ["closureMode", "effectiveOperationalDeadlineAt", "eventId", "externalWaitingFinalized", "newEntriesClosedAt", "status"]); assert.equal(r.body.status, "closed"); assert.equal(r.body.closureMode, "immediate"); assert.equal(r.body.externalWaitingFinalized, 1); assert.equal(r.body.newEntriesClosedAt, r.body.effectiveOperationalDeadlineAt); assert.match(r.body.newEntriesClosedAt, /\.\d{6}Z$/);
+  const summary = await operationSummary(c);
+  assert.equal(summary.effectivePhase, "closed");
+  assert.equal(summary.closureMode, "immediate");
+  assert.equal(summary.canClose, false);
+  assert.equal(summary.canSetExternalQueue, false);
+  assert.equal(summary.activeParticipants, 0);
+  assert.equal(summary.externalWaitingParticipants, 0);
   await assertNoOpen(c); const after = await state(c); for (const key of ["snapshots", "experiences", "stations"]) assert.deepEqual(after[key], before[key]); assert.deepEqual(await state(other), otherBefore);
   for (const p of before.people) { const next = after.people.find((n: { id: string }) => n.id === p.id); if (["finished", "canceled"].includes(p.status)) assert.deepEqual(next, p); else { assert.equal(next.status, "finished"); assert.equal(next.finish_reason, "admin_immediate"); assert.equal(next.current_queue_entry_id, null); assert.equal(Date.parse(next.finished_at), Date.parse(r.body.newEntriesClosedAt)); assert.equal(next.external_queue_order, p.external_queue_order); assert.equal(next.arena_entered_at, p.arena_entered_at); } }
   for (const s of before.services) { const next = after.services.find((n: { id: string }) => n.id === s.id); if (s.status !== "pending") assert.deepEqual(next, s); else { assert.equal(next.status, "canceled"); assert.equal(next.cancel_reason, "admin_immediate"); assert.equal(next.resolved_by_user_id, c.admin.userId); } }
@@ -244,7 +253,17 @@ test("E08.8 PostgreSQL imediato encerra tudo atomicamente sem alterar completed/
   assert.equal((await pool.query("SELECT occurred_at=$2::timestamptz AS exact FROM audit_logs WHERE id=$1", [a.id, r.body.newEntriesClosedAt])).rows[0].exact, true);
 });
 test("E08.8 PostgreSQL controlado fecha waiting externas e preserva active com/sem fila e pending", async () => {
-  const c = await context(), data = await rich(c), before = await state(c), body = await controlled(), r = await close(c, body); assert.equal(r.status, 200); assert.equal(r.body.status, "closing"); assert.equal(r.body.externalWaitingFinalized, 1); assert.equal(Date.parse(r.body.effectiveOperationalDeadlineAt), Date.parse(body.controlledUntilAt));
+  const c = await context(), data = await rich(c), before = await state(c), beforeSummary = await operationSummary(c);
+  const body = await controlled(), r = await close(c, body); assert.equal(r.status, 200); assert.equal(r.body.status, "closing"); assert.equal(r.body.externalWaitingFinalized, 1); assert.equal(Date.parse(r.body.effectiveOperationalDeadlineAt), Date.parse(body.controlledUntilAt));
+  const summary = await operationSummary(c);
+  assert.equal(summary.effectivePhase, "closing");
+  assert.equal(summary.closureMode, "controlled");
+  assert.equal(summary.adminDeadlineAt, r.body.effectiveOperationalDeadlineAt);
+  assert.equal(summary.canClose, false);
+  assert.equal(summary.canSetExternalQueue, false);
+  assert.ok(beforeSummary.activeParticipants > 0);
+  assert.equal(summary.activeParticipants, beforeSummary.activeParticipants);
+  assert.equal(summary.externalWaitingParticipants, 0);
   const controlledAt = (await pool.query(`SELECT count(*)::int AS total,
     count(*) FILTER (WHERE p.finished_at=e.closure_requested_at AND p.finish_reason='admin_controlled_external_wait_closed')::int AS exact
     FROM participations p JOIN events e ON e.id=p.event_id WHERE p.id=$1`, [data.outside.participationId])).rows[0];

@@ -127,7 +127,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
         return { waitAdminDemoLatency: async () => {} };
       }
       if (control.realAdmin && (target.startsWith('screens/admin/') || target === 'data/adminDemoData' ||
-        ['services/adminEventsService', 'services/adminEventSetupService'].includes(target))) {
+        ['services/adminEventsService', 'services/adminEventSetupService', 'services/adminEventOperationService'].includes(target))) {
         return load(`${target}.js`);
       }
       if (control.realStaff && ['screens/staff/StaffEventsNavigator', 'services/staffEventsService',
@@ -201,6 +201,11 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
         : value && typeof value === 'object' ? flatten(value.props?.children) : String(value ?? '');
       return flatten(node.props.children).includes(text);
     }); },
+    textsInView(testID) {
+      const views = tree.root.findAllByType('View').filter(node => node.props.testID === testID);
+      assert.equal(views.length, 1, testID);
+      return views[0].findAllByType('Text').map(node => String(node.props.children));
+    },
     async press(label) {
       const buttons = tree.root.findAllByType('Pressable').filter((node) => node.props.accessibilityLabel === label);
       assert.equal(buttons.length, 1, `botão ${label}`);
@@ -332,6 +337,336 @@ const participant = { id: 'a', name: 'A', email: 'a@example.test', emailVerified
   roles: ['participante'], hasCompletedQuestionnaire: true };
 
 const adminUser = { ...participant, roles: ['admin', 'staff', 'participante'], hasCompletedQuestionnaire: false };
+
+const operationAt = '2090-11-23T13:00:00.000000Z';
+function operationView(n, overrides = {}) {
+  return { eventId: 'abcdef00-0000-4000-8000-' + String(n).padStart(12, '0'), name: 'Arena Operação ' + n,
+    timezone: 'America/Sao_Paulo', effectivePhase: 'open', observedAt: operationAt, startsAt: '2090-11-23T12:00:00Z',
+    officialEndsAt: '2090-11-23T13:40:00Z', operationalDeadlineAt: '2090-11-23T13:55:00Z',
+    closureMode: null, closureRequestedAt: null, adminDeadlineAt: null, externalQueueEnabled: true, activeParticipants: 0,
+    externalWaitingParticipants: 3, canSetExternalQueue: true, canClose: true, ...overrides };
+}
+function operationHarness(views, onWrite, onRead = view => view) {
+  const writes = [], reads = [];
+  const eventFrom = view => ({ ...view, id: view.eventId, readiness: { ready: true } });
+  const readiness = view => ({
+    eventId: view.eventId, effectivePhase: view.effectivePhase,
+    statusStored: ['closed', 'closing', 'open'].includes(view.effectivePhase) ? view.effectivePhase : 'scheduled',
+    ready: true, missing: [], observedAt: view.observedAt, acceptingNewParticipations: view.canSetExternalQueue,
+    checks: { nameAndAccessCode: true, validScheduleAndTimezone: true, externalQueueConfigured: true,
+      hasExperienceWithAvailableStation: true, hasVerifiedActiveStaff: true },
+  });
+  const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control: { realAdmin: true,
+    async http(route, options) {
+      if (route === '/admin/events') return { items: views.filter(v => v.effectivePhase !== 'closed').map(eventFrom), nextCursor: null };
+      const view = views.find(v => route === '/admin/events/' + v.eventId || route.startsWith('/admin/events/' + v.eventId + '/'));
+      if (!view) return undefined;
+      const path = '/admin/events/' + view.eventId;
+      if (route === path) return { event: eventFrom(view) };
+      if (route === path + '/readiness') return readiness(view);
+      if (route === path + '/operation') {
+        assert.equal(options.method, 'GET');
+        assert.ok(options.headers.Authorization);
+        reads.push(view.eventId);
+        return onRead(view);
+      }
+      assert.ok(['/external-queue', '/close'].some(suffix => route === path + suffix));
+      const mutation = { route, method: options.method, body: JSON.parse(options.body), key: options.headers['Idempotency-Key'] };
+      assert.ok(mutation.key);
+      writes.push(mutation);
+      return onWrite(view, mutation);
+    },
+  } });
+  return { app, writes, reads, async enter(view) {
+    await app.press('Gerenciar eventos');
+    await app.press('Acessar evento ' + view.name);
+    await app.press('Operação do evento');
+  } };
+}
+
+test('ADMIN-07 navega para o evento selecionado, valida justificativa, cancela e reconsulta após alternar a fila', async () => {
+  const a = operationView(1), b = operationView(2);
+  const { app, writes, reads, enter } = operationHarness([a, b], (view, request) => {
+    assert.equal(view, b);
+    assert.equal(request.method, 'PATCH');
+    const releasedCount = request.body.enabled ? 0 : view.externalWaitingParticipants;
+    view.externalQueueEnabled = request.body.enabled;
+    view.activeParticipants += releasedCount;
+    view.externalWaitingParticipants -= releasedCount;
+    return { eventId: view.eventId, externalQueueEnabled: view.externalQueueEnabled, releasedCount, changedAt: operationAt };
+  });
+  await app.mount();
+  try {
+    await enter(b);
+    assert.deepEqual(reads, [b.eventId]);
+    assert.ok(app.hasText('PAINEL DO EVENTO'));
+    assert.ok(app.hasText(b.name));
+    assert.deepEqual(app.textsInView('operation-phase'), ['Aberto']);
+    assert.ok(app.hasText('Pronto para operar'));
+    assert.deepEqual(app.textsInView('operation-active'), ['0', 'Participantes ativos']);
+    assert.deepEqual(app.textsInView('operation-waiting'), ['3', 'Na fila externa']);
+    assert.deepEqual(app.textsInView('operation-queue-state'), ['ATIVA']);
+    for (const label of ['Home', 'Histórico', 'BI']) assert.equal(app.buttonProps(label).accessibilityRole, 'tab');
+    assert.equal(app.hasButton('Sair da conta'), false);
+    const operationScroll = app.scrollContainingButton('Desativar fila externa');
+    assert.ok(operationScroll);
+    assert.equal(app.scrollContainingButton('Encerrar imediatamente'), operationScroll);
+    assert.equal(app.scrollContainingButton('Encerramento controlado'), operationScroll);
+    assert.equal(app.hasText(a.name), false);
+    await app.press('Desativar fila externa');
+    await app.press('Revisar operação');
+    assert.ok(app.hasText('Informe uma justificativa'));
+    await app.input('Justificativa', 'Acesso direto para a Arena');
+    await app.press('Revisar operação');
+    assert.ok(app.hasText('Confirmar: Desativar fila externa?'));
+    await app.press('Voltar à edição');
+    await app.press('Cancelar operação');
+    assert.equal(writes.length, 0);
+    await app.press('Desativar fila externa');
+    await app.input('Justificativa', 'Acesso direto para a Arena');
+    await app.press('Revisar operação');
+    const confirm = app.handler('Confirmar operação');
+    await app.act(async () => { confirm(); confirm(); });
+    assert.deepEqual(writes.map(w => w.body), [{ enabled: false, reason: 'Acesso direto para a Arena' }]);
+    assert.ok(app.hasText('Pessoas liberadas: 3'));
+    assert.deepEqual(app.textsInView('operation-active'), ['3', 'Participantes ativos']);
+    assert.deepEqual(app.textsInView('operation-waiting'), ['0', 'Na fila externa']);
+    assert.deepEqual(app.textsInView('operation-queue-state'), ['INATIVA']);
+    await app.press('Ativar fila externa');
+    await app.input('Justificativa', 'Organizar próximos ingressos');
+    await app.press('Revisar operação');
+    await app.press('Confirmar operação');
+    assert.equal(writes.length, 2);
+    assert.notEqual(writes[0].key, writes[1].key);
+    assert.deepEqual(app.textsInView('operation-queue-state'), ['ATIVA']);
+    assert.deepEqual(app.textsInView('operation-active'), ['3', 'Participantes ativos']);
+    assert.deepEqual(reads, [b.eventId, b.eventId, b.eventId]);
+  } finally { app.dispose(); }
+});
+
+test('ADMIN-07 perda de resposta exige reenvio explícito após reentrada, mesmo com fila já desativada', async () => {
+  const view = operationView(1);
+  let attempts = 0;
+  const { app, writes, enter } = operationHarness([view], () => {
+    if (++attempts === 1) {
+      Object.assign(view, { externalQueueEnabled: false, activeParticipants: 3, externalWaitingParticipants: 0 });
+      throw Object.assign(new Error('Resposta indisponível'), { name: 'AbortError' });
+    }
+    return { eventId: view.eventId, externalQueueEnabled: false, releasedCount: 3, changedAt: operationAt };
+  });
+  await app.mount();
+  try {
+    await enter(view);
+    await app.press('Desativar fila externa');
+    await app.input('Justificativa', 'Liberar entrada');
+    await app.press('Revisar operação');
+    await app.press('Confirmar operação');
+    assert.ok(app.hasText('Resultado ainda não confirmado'));
+    assert.deepEqual(app.textsInView('operation-queue-state'), ['INATIVA']);
+    assert.equal(app.hasText('Resposta confirmada'), false);
+    await app.press('Voltar ao painel');
+    await app.press('Operação do evento');
+    assert.equal(writes.length, 1);
+    assert.equal(app.hasButton('Ativar fila externa'), false);
+    await app.press('Reenviar a mesma solicitação');
+    assert.equal(writes.length, 2);
+    assert.deepEqual(writes[1], writes[0]);
+    assert.ok(app.hasText('Resposta confirmada'));
+  } finally { app.dispose(); }
+});
+
+test('ADMIN-07 recusa definitiva no reenvio libera nova revisão após expirar o prazo controlado', async () => {
+  const view = operationView(1);
+  let attempts = 0;
+  const { app, writes, reads, enter } = operationHarness([view], () => {
+    attempts++;
+    if (attempts === 1) {
+      view.observedAt = '2090-11-23T13:31:00.000000Z';
+      throw Object.assign(new Error('Resposta indisponível'), { name: 'AbortError' });
+    }
+    assert.equal(attempts, 2);
+    return { statusCode: 409, body: { code: 'CLOSURE_DEADLINE_INVALID' } };
+  });
+  await app.mount();
+  try {
+    await enter(view);
+    async function reviewAt(time) {
+      await app.press('Encerramento controlado');
+      await app.input('Justificativa', 'Encerrar a operação');
+      await app.input('Data de encerramento', '23/11/2090');
+      await app.input('Hora de encerramento', time);
+      await app.press('Revisar operação');
+      assert.ok(app.hasButton('Confirmar operação'));
+    }
+    await reviewAt('10:30');
+    assert.equal(writes.length, 0);
+    await app.press('Confirmar operação');
+    assert.equal(writes.length, 1);
+    assert.deepEqual(reads, [view.eventId, view.eventId]);
+    assert.ok(app.hasText('Resultado ainda não confirmado'));
+    assert.equal(app.hasText('Resposta confirmada'), false);
+    assert.equal(app.hasButton('Encerramento controlado'), false);
+    await app.press('Reenviar a mesma solicitação');
+    assert.deepEqual(writes, [writes[0], writes[0]]);
+    assert.deepEqual(reads, [view.eventId, view.eventId, view.eventId]);
+    assert.ok(app.hasText('Operação recusada'));
+    assert.ok(app.hasText('O prazo solicitado não está dentro dos limites atuais.'));
+    assert.equal(app.hasText('Resultado ainda não confirmado'), false);
+    assert.equal(app.hasText('Resposta confirmada'), false);
+    assert.equal(app.hasButton('Reenviar a mesma solicitação'), false);
+    await reviewAt('10:35');
+    assert.equal(writes.length, 2);
+  } finally { app.dispose(); }
+});
+
+for (const mode of ['immediate', 'controlled']) {
+  test('ADMIN-07 confirma o encerramento ' + mode + ' e lê do servidor o estado posterior', async () => {
+    const view = operationView(1);
+    const controlled = mode === 'controlled';
+    const { app, writes, enter } = operationHarness([view], (_, request) => {
+      assert.equal(request.method, 'POST');
+      assert.ok(request.route.endsWith('/close'));
+      const deadline = controlled ? '2090-11-23T13:30:00.000000Z' : operationAt;
+      Object.assign(view, { closureMode: mode, closureRequestedAt: operationAt, adminDeadlineAt: deadline,
+        effectivePhase: controlled ? 'closing' : 'closed', canClose: false, canSetExternalQueue: false, externalWaitingParticipants: 0 });
+      return { eventId: view.eventId, closureMode: mode, status: view.effectivePhase, newEntriesClosedAt: operationAt,
+        effectiveOperationalDeadlineAt: deadline, externalWaitingFinalized: 3 };
+    });
+    await app.mount();
+    try {
+      await enter(view);
+      assert.ok(app.hasText('Ambas as opções de encerramento exigem justificativa e confirmação.'));
+      await app.press(controlled ? 'Encerramento controlado' : 'Encerrar imediatamente');
+      await app.input('Justificativa', 'Encerrar a operação');
+      if (controlled) {
+        await app.input('Data de encerramento', '23/11/2090');
+        await app.input('Hora de encerramento', '11:05');
+        await app.press('Revisar operação');
+        assert.ok(app.hasText('dentro do limite operacional'));
+        assert.equal(writes.length, 0);
+        await app.input('Hora de encerramento', '10:30');
+      }
+      await app.press('Revisar operação');
+      assert.equal(writes.length, 0);
+      await app.press('Confirmar operação');
+      assert.equal(writes.length, 1);
+      assert.deepEqual(writes[0].body, { mode, reason: 'Encerrar a operação',
+        ...(controlled ? { controlledUntilAt: '2090-11-23T13:30:00.000Z' } : {}) });
+      assert.deepEqual(app.textsInView('operation-phase'), [controlled ? 'Encerrando' : 'Encerrado']);
+      assert.equal(app.hasText('Pronto para operar'), false);
+      assert.ok(app.hasText('Pessoas finalizadas na espera externa: 3'));
+      assert.equal(app.hasButton('Encerrar imediatamente'), false);
+      assert.equal(app.hasButton('Encerramento controlado'), false);
+      assert.equal(app.hasButton('Desativar fila externa'), false);
+      if (controlled) {
+        assert.ok(app.hasText('Prazo do encerramento controlado'));
+        view.effectivePhase = 'closed';
+        await app.press('Voltar ao painel');
+        await app.press('Operação do evento');
+        assert.deepEqual(app.textsInView('operation-phase'), ['Encerrado']);
+        assert.equal(writes.length, 1);
+      }
+    } finally { app.dispose(); }
+  });
+}
+
+test('ADMIN-07 mostra indisponibilidade, erro de rede e recusa sem apresentar controles', async () => {
+  const view = operationView(1, { effectivePhase: 'scheduled', canSetExternalQueue: false, activeParticipants: undefined });
+  let stage = 'offline';
+  const { app, enter, writes } = operationHarness([view], () => assert.fail('Escrita inesperada'), snapshot => {
+    if (stage === 'offline') throw new Error('Sem rede');
+    if (stage === 'absent') return { statusCode: 404, body: { code: 'RESOURCE_NOT_FOUND' } };
+    if (stage === 'denied') return { statusCode: 403, body: { code: 'ADMIN_REQUIRED' } };
+    return snapshot;
+  });
+  await app.mount();
+  try {
+    await enter(view);
+    assert.ok(app.hasText('Dados operacionais indisponíveis'));
+    assert.equal(app.hasButton('Encerrar imediatamente'), false);
+    stage = 'absent';
+    await app.press('Tentar novamente');
+    assert.ok(app.hasText('Evento não encontrado ou indisponível'));
+    stage = 'available';
+    await app.press('Tentar novamente');
+    assert.deepEqual(app.textsInView('operation-phase'), ['Agendado']);
+    assert.deepEqual(app.textsInView('operation-active'), ['Indisponível', 'Participantes ativos']);
+    assert.deepEqual(app.textsInView('operation-waiting'), ['3', 'Na fila externa']);
+    assert.equal(app.hasText('Pronto para operar'), false);
+    assert.equal(app.hasButton('Desativar fila externa'), false);
+    Object.assign(view, { effectivePhase: 'not_ready', externalQueueEnabled: false });
+    await app.press('Atualizar operação');
+    assert.deepEqual(app.textsInView('operation-phase'), ['Não pronto']);
+    assert.ok(app.hasText('Configuração pendente'));
+    assert.equal(app.hasText('Pronto para operar'), false);
+    assert.equal(app.hasButton('Ativar fila externa'), false);
+    stage = 'denied';
+    await app.press('Atualizar operação');
+    assert.ok(app.hasText('Sessão sem autorização'));
+    assert.equal(app.hasText(view.name), false);
+    assert.equal(app.hasButton('Encerrar imediatamente'), false);
+    assert.equal(writes.length, 0);
+  } finally { app.dispose(); }
+});
+
+test('ADMIN-07 separa recibo confirmado de falha posterior na consulta', async () => {
+  const view = operationView(1);
+  let offline = false;
+  const { app, enter, writes } = operationHarness([view], () => {
+    offline = true;
+    Object.assign(view, { externalQueueEnabled: false, activeParticipants: 3, externalWaitingParticipants: 0 });
+    return { eventId: view.eventId, externalQueueEnabled: false, releasedCount: 3, changedAt: operationAt };
+  }, current => {
+    if (offline) throw new Error('Consulta indisponível após gravação');
+    return current;
+  });
+  await app.mount();
+  try {
+    await enter(view);
+    await app.press('Desativar fila externa');
+    await app.input('Justificativa', 'Entrada direta');
+    await app.press('Revisar operação');
+    await app.press('Confirmar operação');
+    assert.ok(app.hasText('Resposta confirmada'));
+    assert.ok(app.hasText('Dados operacionais indisponíveis'));
+    assert.equal(app.hasButton('Ativar fila externa'), false);
+    offline = false;
+    await app.press('Tentar novamente');
+    assert.deepEqual(app.textsInView('operation-queue-state'), ['INATIVA']);
+    assert.equal(writes.length, 1);
+  } finally { app.dispose(); }
+});
+
+test('ADMIN-07 resposta de escrita tardia não afeta outro evento ou provedor', async () => {
+  const a = operationView(1), b = operationView(2), response = deferred();
+  const { app, writes, enter } = operationHarness([a, b], () => response.promise);
+  await app.mount();
+  try {
+    await enter(a);
+    await app.press('Desativar fila externa');
+    await app.input('Justificativa', 'Ação restrita ao evento A');
+    await app.press('Revisar operação');
+    const obsolete = app.handler('Confirmar operação');
+    await app.press('Confirmar operação');
+    assert.ok(app.hasText('Operação administrativa em andamento'));
+    await app.press('Voltar ao painel');
+    await app.press('Voltar aos eventos');
+    await app.press('Acessar evento ' + b.name);
+    await app.press('Operação do evento');
+    assert.ok(app.hasText(b.name));
+    assert.equal(app.hasText('Operação administrativa em andamento'), false);
+    await app.replaceProvider({ ...adminUser, id: 'admin-replacement', sessionId: '10000000-0000-4000-8000-000000000002' });
+    await enter(b);
+    await app.act(async () => {
+      obsolete();
+      response.resolve({ eventId: a.eventId, externalQueueEnabled: false, releasedCount: 3, changedAt: operationAt });
+    });
+    assert.equal(writes.length, 1);
+    assert.ok(app.hasText(b.name));
+    assert.equal(app.hasText('Resposta confirmada'), false);
+    assert.ok(app.hasButton('Desativar fila externa'));
+  } finally { app.dispose(); }
+});
 
 test('ADMIN-05: Home e listagem abrem o fluxo, cinco etapas preservam UUID e retomada lê o evento salvo', async () => {
   const eventId = 'abcdef00-0000-4000-8000-000000000001';
