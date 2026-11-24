@@ -81,20 +81,62 @@ export function EventStructureStep({ state, flow, locked }) {
   </>;
 }
 
-export function EventStaffStep({ state, flow, locked, confirmRevoke }) {
+export function EventStaffForm({ state, flow, locked, confirmGrant, children }) {
   return <SettingsSection title={stepTitles[3]} icon="users">
     <SettingsField label="E-mail do usuário" keyboardType="email-address" value={state.email}
       onChangeText={locked ? undefined : email => flow.editSetup({ email })} />
-    <AdminButton label="Conceder Staff" disabled={locked} onPress={() => flow.run('grant')} variant="secondary" />
+    {state.staffError && <AdminNotice tone="error" title={state.staffError} />}
+    <AdminButton label="Conceder Staff" disabled={locked || state.attempts.some(r => r.kind === 'grant' && r.email === state.email.trim().toLowerCase())} onPress={confirmGrant} variant="secondary" />
     <Text style={s.body}>O acesso vale apenas para este evento. A conta precisa estar ativa e ter e-mail verificado.</Text>
-    <Text style={s.title}>Concessões nesta sessão</Text>
-    {!state.grants.length && <Text style={s.body}>Nenhuma concessão registrada neste fluxo.</Text>}
+    {children}
+  </SettingsSection>;
+}
+
+export function EventStaffStep({ state, flow, locked, confirmGrant, confirmRevoke, retryStaff }) {
+  return <EventStaffForm {...{ state, flow, locked, confirmGrant }}>
+    <Text style={s.title}>Concessões conhecidas nesta sessão</Text>
+    <Text style={s.body}>Esta lista mostra apenas as concessões registradas nesta sessão. O evento pode possuir outros integrantes Staff.</Text>
+    {!state.grants.length && <Text style={s.body}>Nenhuma concessão conhecida nesta sessão.</Text>}
     {state.grants.map(grant => <View key={grant.id}>
       <Text selectable style={s.body}>{grant.email}</Text>
-      <AdminButton label={`Revogar acesso de ${grant.email}`} disabled={locked} variant="ghost" onPress={() => confirmRevoke(grant)} />
+      {grant.unconfirmed ? <Text style={s.body}>Estado atual não confirmado</Text> :
+      <AdminButton label={`Revogar acesso de ${grant.email}`} disabled={locked || state.attempts.some(r => r.kind === 'revoke' && r.target === grant.id)} variant="ghost" onPress={() => confirmRevoke(grant)} />}
     </View>)}
-    <Text style={s.body}>{state.readiness?.checks.hasVerifiedActiveStaff ? 'O evento tem Staff elegível.' : 'O evento ainda precisa de Staff elegível.'}</Text>
-  </SettingsSection>;
+    <StaffOperationStatus {...{ state, locked, retryStaff }} />
+    <StaffReadiness state={state} />
+  </EventStaffForm>;
+}
+
+export function StaffOperationStatus({ state, locked, retryStaff, relatedFeedback = state.feedback }) {
+  return <>
+    {state.attempts.map(record => {
+      const revocation = record.kind === 'revoke';
+      const repeat = (revocation ? 'Repetir revogação para ' : 'Repetir concessão para ') + record.email;
+      const sameRecipient = revocation && state.attempts.some(other =>
+        other.kind === 'revoke' && other.email === record.email && other.target !== record.target);
+      return <View key={record.key}>
+        <Text style={s.body}>{revocation ? 'Revogação' : 'Concessão'} para {record.email}
+          {sameRecipient ? ' · Vínculo ' + record.target : ''} · {
+          record.status === 'sending' ? 'Em andamento' : record.status === 'conflict' ? 'Conflito de chave' :
+            record.status === 'unavailable' ? 'Estado não confirmado' : 'Resultado incerto'}</Text>
+        {record.status === 'unknown' && <AdminButton
+          label={sameRecipient ? repeat + ' · Vínculo ' + record.target : repeat} variant="secondary"
+          disabled={locked} onPress={() => retryStaff(record)} />}
+      </View>;
+    })}
+    {state.feedback.map(result => <AdminNotice key={result.id} tone={result.tone}
+      title={(result.kind === 'grant' ? 'Concessão' : 'Revogação') + ' para ' + result.email + (result.retry ? ' · Reenvio com a mesma chave' : '')}
+      message={result.message}>
+      {result.grantId && relatedFeedback.some(other => other.email === result.email && other.grantId !== result.grantId) &&
+        <Text style={s.body}>Vínculo {result.grantId}</Text>}
+    </AdminNotice>)}
+  </>;
+}
+
+export function StaffReadiness({ state }) {
+  return (
+    <Text style={s.body}>{!state.readiness ? 'Prontidão Staff indisponível.' : state.readiness.checks.hasVerifiedActiveStaff ? 'O evento tem Staff elegível.' : 'O evento ainda precisa de Staff elegível.'}</Text>
+  );
 }
 
 export function EventReview({ state, goTo, finished }) {

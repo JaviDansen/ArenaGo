@@ -1,0 +1,461 @@
+diff --git a/app/screens/admin/AdminRealEventScreen.js b/app/screens/admin/AdminRealEventScreen.js
+index 3c66220dd763316b41b194666ca0a68a76c867e4..ff205e9a3a05dc0b37b533c32ca58162d132015f 100644
+--- a/app/screens/admin/AdminRealEventScreen.js
++++ b/app/screens/admin/AdminRealEventScreen.js
+@@ -1,6 +1,9 @@
+ import { useContext, useState } from 'react';
+ import { Platform, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native';
++import { randomUUID } from 'expo-crypto';
++import { useAuth } from '../../context/AuthContext';
+ import { adminEventAreas } from './adminEventManagement';
++import { bindOperationSession } from './adminOperationSession';
+ import { AdminStaffSession, AdminSetupIntents } from './adminSetupIntents';
+ import { reviewStructureLabel, structureIntentsFor } from './adminStructureIntents';
+ import useAdminEventPanel from './useAdminEventPanel';
+@@ -12,9 +15,13 @@ import { AdminIcon, AdminIconTile, liveColors as c, liveStyles as s } from './co
+
+ export default function AdminRealEventScreen({ navigation, route }) {
+   const eventId = route.params?.eventId;
++  const auth = useAuth();
+   const staffSession = useContext(AdminStaffSession);
++  const operationSession = auth.getAdminOperationSession?.((manager, active) =>
++    bindOperationSession(manager, randomUUID, active));
+   const structureIntents = useContext(AdminSetupIntents);
+-  const { event, readiness, pending, refreshing, blocked, detailError, readinessError, refresh } = useAdminEventPanel(navigation, eventId);
++  const { event, readiness, pending, refreshing, blocked, detailError, readinessError, refresh } =
++    useAdminEventPanel(navigation, eventId, true, { staffSession, operationSession });
+   const [expandedReadiness, setExpandedReadiness] = useState(null);
+   const expanded = Boolean(readiness && expandedReadiness === readiness);
+   const openArea = area => navigation.navigate('AdminEventManagementInfo', { eventId: event.id, area });
+diff --git a/app/screens/admin/adminOperationSession.js b/app/screens/admin/adminOperationSession.js
+index ff784451442094e11880c2e5afbecbcf0b6d1079..3d36bd7c3c175b7de50bc67d0d4682f88a880880 100644
+--- a/app/screens/admin/adminOperationSession.js
++++ b/app/screens/admin/adminOperationSession.js
+@@ -48,8 +48,8 @@ function definitivelyRefused(request, error, recovery) {
+ export function createOperationSession(client, newKey, isCurrent, { canSettle = isCurrent, revision, renew } = {}) {
+   const events = new Map(), listeners = new Set();
+   let denied = null;
+-  function publish(eventId, reload = false) {
+-    if (isCurrent()) listeners.forEach(listener => listener(eventId, reload));
++  function publish(eventId, reload = false, outcome) {
++    if (isCurrent()) listeners.forEach(listener => listener(eventId, reload, outcome));
+   }
+   function snapshot(eventId) {
+     if (!isCurrent()) return {};
+@@ -77,7 +77,7 @@ export function createOperationSession(client, newKey, isCurrent, { canSettle =
+       const result = await sendAdminEventOperation(client, request);
+       if (!current()) return;
+       events.set(eventId, { receipt: { kind: request.kind, timezone: request.timezone, result } });
+-      publish(eventId, true);
++      publish(eventId, true, 'confirmed');
+     } catch (error) {
+       if (!current()) return;
+       if (error?.status === 401 && error.code === 'ACCESS_TOKEN_EXPIRED') {
+diff --git a/app/screens/admin/adminStaffSession.js b/app/screens/admin/adminStaffSession.js
+index 2507e4688687c40a20e4e82009e436385cabd266..edfef6d15711b0d6b4a1d226df81b423c2fd5f57 100644
+--- a/app/screens/admin/adminStaffSession.js
++++ b/app/screens/admin/adminStaffSession.js
+@@ -73,9 +73,9 @@ export function createStaffSession(client, newKey, isCurrent, { canSettle = isCu
+   const listeners = new Set();
+   let denied = '';
+
+-  function publish(eventId, refresh = false) {
++  function publish(eventId, refresh = false, outcome) {
+     if (!isCurrent()) return;
+-    return Promise.all([...listeners].map(listener => listener(eventId, refresh)));
++    return Promise.all([...listeners].map(listener => listener(eventId, refresh, outcome)));
+   }
+   function snapshot(id) {
+     if (!isCurrent()) return { grants: [], attempts: [], feedback: [], denied: '' };
+@@ -168,7 +168,7 @@ export function createStaffSession(client, newKey, isCurrent, { canSettle = isCu
+
+     event.intents.delete(slot);
+     report(grant ? 'Revogação confirmada.' : 'Concessão confirmada.', 'success');
+-    await publish(eventId, true);
++    await publish(eventId, true, 'confirmed');
+     return true;
+   }
+   return {
+diff --git a/app/screens/admin/useAdminEventPanel.js b/app/screens/admin/useAdminEventPanel.js
+index 202c2429b2b85b23c510c0f0d88001744f6e8f31..056651bd81ce2102dfd584efd3bfa6795aa5d0f7 100644
+--- a/app/screens/admin/useAdminEventPanel.js
++++ b/app/screens/admin/useAdminEventPanel.js
+@@ -3,7 +3,7 @@ import { useAuth } from '../../context/AuthContext';
+ import { adminEventPanelError, getAdminEvent, getAdminEventReadiness } from '../../services/adminEventsService';
+ import { adminReadOwner } from './useAdminEvents';
+
+-export default function useAdminEventPanel(navigation, eventId, includeReadiness = true) {
++export default function useAdminEventPanel(navigation, eventId, includeReadiness = true, { staffSession, operationSession } = {}) {
+   const auth = useAuth();
+   const owner = adminReadOwner(auth);
+   const client = auth.httpClient;
+@@ -48,6 +48,12 @@ export default function useAdminEventPanel(navigation, eventId, includeReadiness
+     const onFocus = () => { void refresh(); };
+     const unsubscribeFocus = navigation.addListener('focus', onFocus);
+     const unsubscribeBlur = navigation.addListener('blur', () => { request = null; });
++    function onMutation(id, _reload, outcome) {
++      // While blurred, the next focus already reads the persisted state.
++      if (id === eventId && outcome === 'confirmed') void refresh(false, true);
++    }
++    const unsubscribeStaff = staffSession?.subscribe(onMutation);
++    const unsubscribeOperation = operationSession?.subscribe(onMutation);
+     control.current = { scope, refresh };
+     onFocus();
+     return () => {
+@@ -55,8 +61,10 @@ export default function useAdminEventPanel(navigation, eventId, includeReadiness
+       control.current = null;
+       unsubscribeFocus();
+       unsubscribeBlur();
++      unsubscribeStaff?.();
++      unsubscribeOperation?.();
+     };
+-  }, [navigation, owner, client, eventId, includeReadiness, scope]);
++  }, [navigation, owner, client, eventId, includeReadiness, scope, staffSession, operationSession]);
+
+   return {
+     ...(owner && snapshot?.scope === scope ? snapshot : { pending: true }),
+diff --git a/app/tests/roleRoutingIntegration.test.cjs b/app/tests/roleRoutingIntegration.test.cjs
+index 06d3301564886c0288f809e227b0a23b13d438dd..e3607faff4ff12d34da39a9f1484cba7d4fe2981 100644
+--- a/app/tests/roleRoutingIntegration.test.cjs
++++ b/app/tests/roleRoutingIntegration.test.cjs
+@@ -346,8 +346,8 @@ function operationView(n, overrides = {}) {
+     closureMode: null, closureRequestedAt: null, adminDeadlineAt: null, externalQueueEnabled: true, activeParticipants: 0,
+     externalWaitingParticipants: 3, canSetExternalQueue: true, canClose: true, ...overrides };
+ }
+-function operationHarness(views, onWrite, onRead = view => view) {
+-  const writes = [], reads = [];
++function operationHarness(views, onWrite, onRead = view => view, onPanelRead = (_, response) => response) {
++  const writes = [], reads = [], panelReads = [];
+   const eventFrom = view => ({ ...view, id: view.eventId, readiness: { ready: true } });
+   const readiness = view => ({
+     eventId: view.eventId, effectivePhase: view.effectivePhase,
+@@ -362,8 +362,10 @@ function operationHarness(views, onWrite, onRead = view => view) {
+       const view = views.find(v => route === '/admin/events/' + v.eventId || route.startsWith('/admin/events/' + v.eventId + '/'));
+       if (!view) return undefined;
+       const path = '/admin/events/' + view.eventId;
+-      if (route === path) return { event: eventFrom(view) };
+-      if (route === path + '/readiness') return readiness(view);
++      if (route === path || route === path + '/readiness') {
++        panelReads.push(route);
++        return onPanelRead(route, route === path ? { event: eventFrom(view) } : readiness(view));
++      }
+       if (route === path + '/operation') {
+         assert.equal(options.method, 'GET');
+         assert.ok(options.headers.Authorization);
+@@ -377,13 +379,221 @@ function operationHarness(views, onWrite, onRead = view => view) {
+       return onWrite(view, mutation);
+     },
+   } });
+-  return { app, writes, reads, async enter(view) {
++  return { app, writes, reads, panelReads, async enter(view) {
+     await app.press('Gerenciar eventos');
+     await app.press('Acessar evento ' + view.name);
+     await app.press('Operação do evento');
+   } };
+ }
+
++function pendingPanelClosure({ onPanelRead, mode = 'immediate' } = {}) {
++  const a = operationView(1), b = operationView(2), write = deferred();
++  const rig = operationHarness([a, b], () => write.promise, undefined, onPanelRead);
++  const path = '/admin/events/' + a.eventId;
++  return {
++    ...rig, a, b, write,
++    readsFor: view => rig.panelReads.filter(route => ['/admin/events/' + view.eventId, '/admin/events/' + view.eventId + '/readiness'].includes(route)),
++    async confirm() {
++      await rig.enter(a);
++      await rig.app.press(mode === 'immediate' ? 'Encerrar imediatamente' : 'Encerramento controlado');
++      await rig.app.input('Justificativa', 'Encerrar a operação');
++      if (mode === 'controlled') {
++        await rig.app.input('Data de encerramento', '23/11/2090');
++        await rig.app.input('Hora de encerramento', '10:30');
++      }
++      await rig.app.press('Revisar operação');
++      await rig.app.press('Confirmar operação');
++      assert.equal(rig.writes.length, 1);
++      assert.equal(rig.writes[0].route, path + '/close');
++      assert.equal(rig.writes[0].method, 'POST');
++    },
++    async finish() {
++      const deadline = mode === 'controlled' ? '2090-11-23T13:30:00.000000Z' : operationAt;
++      await rig.app.act(async () => {
++        Object.assign(a, { effectivePhase: mode === 'controlled' ? 'closing' : 'closed', closureMode: mode,
++          closureRequestedAt: operationAt, adminDeadlineAt: deadline, canClose: false, canSetExternalQueue: false });
++        write.resolve({ eventId: a.eventId, closureMode: mode, status: a.effectivePhase, newEntriesClosedAt: operationAt,
++          effectiveOperationalDeadlineAt: deadline, externalWaitingFinalized: 3 });
++      });
++    },
++  };
++}
++
++test('F1-R01: fechamento confirmado após voltar atualiza o painel com uma única escrita', async () => {
++  const rig = pendingPanelClosure();
++  const { app, a, writes } = rig;
++  await app.mount();
++  try {
++    await rig.confirm();
++    await app.press('Voltar ao painel');
++    assert.equal(app.activeRoute(), 'AdminRealEvent');
++    assert.ok(app.hasText('Aberto'));
++    const before = rig.readsFor(a);
++    assert.equal(before.length, 4);
++    await rig.finish();
++    assert.deepEqual(rig.readsFor(a), [...before, ...before.slice(-2)]);
++    assert.ok(app.hasText('Encerrado'));
++    assert.ok(!app.hasText('Aberto'));
++    assert.equal(writes.length, 1);
++  } finally { app.dispose(); }
++});
++
++test('F1-R02: revogar o último Staff após voltar atualiza a prontidão oficial', async () => {
++  const write = deferred(), at = operationAt, email = 'ultimo-staff@example.test';
++  const rig = structureIntegration({ initialStation: true, write: () => write.promise });
++  const { app, db, requests } = rig;
++  const grant = { id: operationView(21).eventId, userId: operationView(22).eventId,
++    eventId: rig.path.split('/').at(-1), role: 'staff', grantedAt: at, revokedAt: null };
++  db.roster = [staffMember(grant, email)];
++  const panelReads = () => requests.filter(({ method, route }) =>
++    method === 'GET' && [rig.path, rig.path + '/readiness'].includes(route)).map(({ route }) => route);
++  await app.mount();
++  try {
++    await rig.openPanel();
++    await app.press('Equipe Staff');
++    await app.press('Revogar acesso de ' + email);
++    await app.press('Revogar acesso');
++    await app.press('Voltar ao painel');
++    assert.equal(app.activeRoute(), 'AdminRealEvent');
++    assert.ok(app.hasText('Pronto para operar'));
++    const before = panelReads();
++    assert.equal(before.length, 6);
++    await app.act(async () => {
++      db.roster = [];
++      db.eligibleStaff = false;
++      write.resolve({ grant: { ...grant, revokedAt: at } });
++    });
++    assert.deepEqual(panelReads(), [...before, rig.path, rig.path + '/readiness']);
++    assert.ok(app.hasButton('Configuração pendente'));
++    assert.ok(!app.hasText('Pronto para operar'));
++    await app.press('Configuração pendente');
++    assert.ok(app.hasText('Autorize pelo menos um integrante Staff ativo'));
++    const writes = requests.filter(({ route, method }) => route.startsWith('/admin/') && method !== 'GET');
++    assert.equal(writes.length, 1);
++    assert.equal(writes[0].route, '/admin/roles/revoke');
++    assert.equal(writes[0].method, 'POST');
++    assert.deepEqual(JSON.parse(writes[0].body), { grantId: grant.id });
++    assert.ok(writes[0].key);
++  } finally { app.dispose(); }
++});
++
++test('F1-R03: detalhe e prontidão anteriores não substituem a leitura posterior', async () => {
++  const held = new Map();
++  let hold = false;
++  const rig = pendingPanelClosure({ onPanelRead(route, response) {
++    if (!hold) return response;
++    const pending = deferred();
++    held.set(route, { ...pending, response });
++    return pending.promise;
++  } });
++  const { app, a, writes } = rig;
++  await app.mount();
++  try {
++    await rig.confirm();
++    hold = true;
++    await app.press('Voltar ao painel');
++    assert.equal(held.size, 2);
++    assert.ok(app.hasText('Carregando evento...'));
++    hold = false;
++    // Marca o detalhe novo independentemente do selo, que usa a prontidão.
++    a.name = 'Nome da leitura mais recente';
++    await rig.finish();
++    assert.equal(rig.readsFor(a).length, 6);
++    assert.ok(app.hasText(a.name));
++    assert.ok(app.hasText('Encerrado'));
++    await app.act(async () => {
++      for (const pending of held.values()) pending.resolve(pending.response);
++    });
++    assert.ok(app.hasText(a.name));
++    assert.ok(app.hasText('Encerrado'));
++    assert.ok(!app.hasText('Arena Operação 1'));
++    assert.ok(!app.hasText('Aberto'));
++    assert.equal(rig.readsFor(a).length, 6);
++    assert.equal(writes.length, 1);
++  } finally {
++    for (const pending of held.values()) pending.resolve(pending.response);
++    app.dispose();
++  }
++});
++
++for (const replaceSession of [false, true]) {
++  test(replaceSession ? 'F1-R05: sessão substituída ignora conclusão antiga para o mesmo UUID' :
++    'F1-R04/R08: conclusão de A não recarrega B e A lê o estado ao remontar', async () => {
++    const rig = pendingPanelClosure({ mode: 'controlled' });
++    const { app, a, b, writes } = rig;
++    await app.mount();
++    try {
++      await rig.confirm();
++      if (replaceSession) {
++        await app.replaceProvider({ ...adminUser, id: 'admin-f1', sessionId: operationView(93).eventId });
++        await app.press('Gerenciar eventos');
++        await app.press('Acessar evento ' + a.name);
++      } else {
++        await app.press('Voltar ao painel');
++        await app.press('Voltar aos eventos');
++        await app.press('Acessar evento ' + b.name);
++      }
++      const displayed = replaceSession ? a : b;
++      const before = [...rig.panelReads];
++      await rig.finish();
++      assert.deepEqual(rig.panelReads, before);
++      assert.ok(app.hasText(displayed.name));
++      assert.ok(app.hasText('Aberto'));
++      assert.ok(!app.hasText('Encerrando'));
++      if (!replaceSession) {
++        await app.press('Voltar aos eventos');
++        await app.press('Acessar evento ' + a.name);
++        assert.deepEqual(rig.panelReads, [...before, '/admin/events/' + a.eventId, '/admin/events/' + a.eventId + '/readiness']);
++        assert.ok(app.hasText('Encerrando'));
++      }
++      assert.equal(writes.length, 1);
++    } finally { app.dispose(); }
++  });
++}
++
++for (const ambiguous of [true, false]) {
++  test('F1-R06: ' + (ambiguous ? 'resultado incerto preserva a intenção' : 'recusa definitiva libera a ação'), async () => {
++    const rig = pendingPanelClosure();
++    const { app, a, write, writes } = rig;
++    await app.mount();
++    try {
++      await rig.confirm();
++      await app.press('Voltar ao painel');
++      const before = [...rig.panelReads];
++      await app.act(async () => {
++        if (ambiguous) write.reject(new Error('Resposta indisponível'));
++        else write.resolve({ statusCode: 409, body: { code: 'EVENT_ALREADY_CLOSED' } });
++      });
++      assert.deepEqual(rig.panelReads, before);
++      assert.ok(app.hasText('Aberto'));
++      await app.press('Operação do evento');
++      assert.equal(app.hasButton('Reenviar a mesma solicitação'), ambiguous);
++      assert.equal(app.hasText('Resultado ainda não confirmado'), ambiguous);
++      assert.equal(app.hasText('Operação recusada'), !ambiguous);
++      assert.ok(!app.hasText('Resposta confirmada'));
++      assert.equal(writes.length, 1);
++      assert.equal(rig.readsFor(a).length, 4);
++    } finally { app.dispose(); }
++  });
++}
++
++test('F1-R07/R08: conclusão fora de foco conserva uma única leitura no retorno', async () => {
++  const rig = pendingPanelClosure();
++  const { app, a, writes } = rig;
++  await app.mount();
++  try {
++    await rig.confirm();
++    assert.equal(rig.readsFor(a).length, 2);
++    await rig.finish();
++    assert.ok(app.hasText('Resposta confirmada'));
++    assert.equal(rig.readsFor(a).length, 2);
++    await app.press('Voltar ao painel');
++    assert.ok(app.hasText('Encerrado'));
++    assert.equal(rig.readsFor(a).length, 4);
++    assert.equal(writes.length, 1);
++  } finally { app.dispose(); }
++});
++
+ test('ADMIN-07 navega para o evento selecionado, valida justificativa, cancela e reconsulta após alternar a fila', async () => {
+   const a = operationView(1), b = operationView(2);
+   const { app, writes, reads, enter } = operationHarness([a, b], (view, request) => {
+diff --git a/docs/ADMIN_F1_FIX_01_IMPLEMENTACAO.md b/docs/ADMIN_F1_FIX_01_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..2f929b9fc5a4506f3fcadcdf7cf3ed8363d6870f
+--- /dev/null
++++ b/docs/ADMIN_F1_FIX_01_IMPLEMENTACAO.md
+@@ -0,0 +1,88 @@
++# ADMIN-F1-FIX-01 — Atualização do Painel Individual após mutações
++
++## Contexto e diagnóstico preliminar
++
++A auditoria da Fase 1 identificou que o Painel Individual pode exibir dados anteriores a um encerramento ou a uma revogação Staff quando o administrador retorna enquanto a escrita ainda está em andamento. A consulta por foco pode terminar antes da escrita. A sessão administrativa publica a conclusão, mas atualmente apenas as telas filhas usam essas notificações para reconsultar seus dados.
++
++A base é `6acaf37feb452f6999c3e5296b636bcdd58958dd` na branch `feature/admin-event-operations`. O escopo é a atualização do Painel Individual para o achado F1-01. Os relatórios e evidências das entregas anteriores permanecem como histórico. Referências de implementação e revisão: [ADMIN-02](ADMIN_02_IMPLEMENTACAO.md), [ADMIN-06](ADMIN_06_IMPLEMENTACAO.md) e [ADMIN-07](ADMIN_07_IMPLEMENTACAO.md).
++
++## Implementação
++
++As sessões Staff e Operação sinalizam a confirmação após validar o recibo e conferir se o envio ainda pertence ao contexto original. Os assinantes existentes das telas filhas continuam recebendo os avisos de releitura que já usavam para tratar sucesso, recusa e resultado incerto. Somente o Painel Individual usa a confirmação para invalidar detalhe e prontidão.
++
++O painel assina as duas sessões existentes no provedor de autenticação, limita a notificação ao UUID selecionado e remove os assinantes no encerramento do efeito. A invalidação no painel focado substitui o identificador lógico de qualquer leitura anterior e inicia um par de GETs. As respostas anteriores perdem permissão de publicar. Durante a perda de foco, a consulta oficial do próximo foco cobre as confirmações ocorridas nesse intervalo. Edição e estrutura continuam com seus fluxos próprios de leitura. A recuperação explícita das intenções e as chaves de idempotência continuam nas sessões de origem.
++
++## Critérios de aceite
++
++- Atualizar fase e prontidão quando um encerramento ou uma revogação terminar depois do retorno ao painel.
++- Preservar as respostas mais recentes de detalhe e prontidão diante de respostas fora de ordem.
++- Isolar as notificações e resultados por evento e contexto de autenticação.
++- Preservar uma única escrita, a recuperação explícita e o tratamento de falhas existente.
++- Remover assinaturas ao desmontar e consultar pelo foco sem ciclos de atualização.
++- Registrar as verificações e consolidar o patch da task.
++
++## Verificações da implementação — Sol High
++
++Em `app`, com `NODE_ENV=test` e transporte simulado pelo harness de roteamento:
++
++```powershell
++node --test --test-reporter=spec --test-name-pattern='^F1-R' tests/roleRoutingIntegration.test.cjs
++node --test --test-reporter=spec tests/adminRealEvents.test.cjs tests/adminEventStaff.test.cjs tests/adminEventOperation.test.cjs tests/adminEventSetup.test.cjs tests/roleRoutingIntegration.test.cjs
++node --check tests/roleRoutingIntegration.test.cjs
++```
++
++| Execução | Aprovados | Falhos | Ignorados | Exit code |
++| --- | ---: | ---: | ---: | ---: |
++| Casos F1 antes da alteração funcional | 5 | 3 | 0 | 1 |
++| Casos F1 após a correção | 8 | 0 | 0 | 0 |
++| Cinco suítes diretamente afetadas, incluindo os casos F1 | 164 | 0 | 0 | 0 |
++
++Antes da correção, F1-R01 e F1-R02 receberam o estado anterior na volta ao painel, mas o harness registrou a ausência dos dois GETs após confirmar a escrita. F1-R03 também falhou pela ausência das novas leituras enquanto o par anterior permanecia pendente. Após a correção, os casos conferiram atualização de fase e prontidão, descarte dos dois resultados antigos, uma única escrita em cada cenário, isolamento para outro UUID e uma sessão substituída, tratamento de resultado incerto e recusa, além de retorno ao foco e remontagem sem consultas extras. Os testes das sessões também exercitaram a preservação da chave e do corpo no reenvio explícito.
++
++`node --check` retornou 0 para o CJS modificado. A leitura sintática dos quatro módulos JS com `@babel/parser` (`sourceType: module`, plugin JSX) e `git diff --check HEAD` retornaram 0. O harness emitiu avisos de depreciação do React Test Renderer e de nomes de componentes simulados. O Git emitiu aviso de conversão LF/CRLF da cópia de trabalho.
++
++## Validação independente — Luna Medium
++
++**Parecer A — Correção validada.** As campanhas foram executadas em `app` com `NODE_ENV=test` e transporte simulado. As duas primeiras usaram os comandos direcionados acima e a regressão completa usou `npm.cmd test`.
++
++| Campanha | Aprovados | Falhos | Cancelados | Ignorados | Exit code |
++| --- | ---: | ---: | ---: | ---: | ---: |
++| Oito casos F1 isolados | 8 | 0 | 0 | 0 | 0 |
++| Cinco suítes diretamente afetadas | 164 | 0 | 0 | 0 | 0 |
++| Frontend completo | 986 | 0 | 0 | 0 | 0 |
++
++O total corresponde aos 978 testes anteriores mais oito casos F1. As campanhas direcionadas estão incluídas na regressão completa. A validação confirmou o uso dos endpoints oficiais, o descarte de respostas obsoletas, o isolamento por evento, sessão e provedor e o retorno ao foco. Confirmou também que resultados ambíguos preservam a intenção e que a atualização automática não repete a escrita. Os testes de sessão conferiram a preservação da chave de idempotência e do corpo no reenvio explícito. A remoção das assinaturas no fim do efeito foi confirmada por inspeção.
++
++As verificações de sintaxe, de whitespace, de aplicação isolada e de reversão do patch passaram. Os avisos de depreciação do React Test Renderer, nomes de componentes simulados, tipo de módulo e conversão LF/CRLF foram registrados como não bloqueantes.
++
++## Revisão final do F1-01 — Astra High
++
++**Parecer A — Fase 1 apta para merge.** A revisão estática confirmou que os dois cenários que bloqueavam a integração foram resolvidos:
++
++- **Encerramento tardio.** O painel exibe o evento aberto enquanto a escrita está pendente. Após o recibo confirmado, novas consultas oficiais de detalhe e prontidão atualizam a fase para encerrado. O teste verifica uma única escrita.
++- **Revogação tardia do último Staff elegível.** O painel exibe a prontidão anterior até o recibo da revogação. Em seguida, as consultas oficiais exibem configuração pendente e o motivo correspondente. O teste verifica uma única escrita com o `grantId` selecionado.
++- **Respostas obsoletas.** Após `Promise.allSettled`, o painel verifica o ticket antes de interpretar o resultado de detalhe ou prontidão. Sucesso e rejeição antigos são descartados pela mesma guarda. O caso de uma rejeição GET antiga após a invalidação foi avaliado por inspeção estática, sem execução de um teste dedicado. A lacuna de cobertura foi classificada como não bloqueante.
++
++O Astra não identificou impedimentos técnicos remanescentes para a integração em `develop` e não recomendou repetir campanhas antes do merge.
++
++## Limitações e decisões de escopo
++
++A concorrência foi exercitada de forma determinística pelo harness frontend. O responsável aceitou essa evidência automatizada para a correção localizada. A correção não passou por nova homologação em aparelho. Não houve alteração de backend, campanha backend ou PostgreSQL, nem acesso a banco ou serviço externo durante as campanhas de testes.
++
++Os achados F1-02 (LF/CRLF dos patches), F1-03 (cobertura de chamadas externas pendentes), F1-04 (referência temporal do aparelho na edição) e F1-05 (aquisição de locks anterior a parte da autorização) mantêm suas classificações não bloqueantes. A sincronização automática do Participante fica para outra branch. A INFRA-01 permanece uma task independente, posterior à integração em `develop`.
++
++## Aprovação formal e publicação
++
++O responsável aprovou formalmente a ADMIN-F1-FIX-01 e autorizou staging, commit e push dos sete arquivos do inventário em `origin/feature/admin-event-operations`. A validação independente da Luna e a revisão final do Astra sustentam o fechamento técnico da Fase 1, sem bloqueantes identificados. O merge em `develop` depende de autorização separada.
++
++Na conferência anterior à publicação, `develop` local e no `origin` apontavam para `5758fe1dcda104f6bfacf3ddb922a3711b088298`. A branch de entrega e sua referência no `origin` apontavam para a base da correção, `6acaf37feb452f6999c3e5296b636bcdd58958dd`. O índice real estava vazio e o working tree continha apenas os sete arquivos do inventário.
++
++## Inventário
++
++- `app/screens/admin/AdminRealEventScreen.js` e `app/screens/admin/useAdminEventPanel.js` — assinatura, revisão do estado e ciclo de vida.
++- `app/screens/admin/adminStaffSession.js` e `app/screens/admin/adminOperationSession.js` — notificação de recibo confirmado no canal existente.
++- `app/tests/roleRoutingIntegration.test.cjs` — oito casos de regressão F1 com respostas controladas.
++- `docs/ADMIN_F1_FIX_01_IMPLEMENTACAO.md` — diagnóstico, implementação e evidências.
++- `qa-evidence/ADMIN_F1_FIX_01-changes.diff` — patch consolidado dos seis arquivos anteriores sobre o HEAD indicado.
++
++O patch anterior à consolidação continha seis arquivos, 293 inserções e 14 remoções. Na implementação e na validação independente, a aplicação em índice e diretório de objetos temporários sobre a base reconstruiu os seis blobs, e a verificação reversa contra o working tree passou. A publicação incorpora este fechamento documental à evidência consolidada.

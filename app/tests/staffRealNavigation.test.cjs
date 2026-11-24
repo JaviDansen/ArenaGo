@@ -1,7 +1,7 @@
 // Isolamento da navegação do participante com React Navigation REAL.
 // O app não tem renderizador de testes e não
 // ganha dependência nova: reaproveita, só para leitura, as dependências travadas
-// do qa/regression (mesmas versões do lockfile do app). Sem elas, o teste é pulado.
+// do qa/regression (mesmas versões do lockfile do app).
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const test = require('node:test');
@@ -18,10 +18,9 @@ try {
     Navigation: qaRequire('@react-navigation/core'),
     StackRouter: qaRequire('@react-navigation/routers').StackRouter,
   };
-} catch {
-  deps = null;
+} catch (cause) {
+  throw new Error('Falha ao carregar o harness obrigatório de navegação Staff. Confira as dependências em qa/regression (npm ci).', { cause });
 }
-const skip = deps ? false : 'dependências do qa/regression não instaladas (npm ci em qa/regression)';
 
 function versionsMatchApp() {
   const locked = require('../package-lock.json').packages;
@@ -138,8 +137,7 @@ const accountA = { isAuthenticated: true, user: { id: 'a', name: 'Conta A', hasC
 const accountB = { isAuthenticated: true, user: { id: 'b', name: 'Conta B', hasCompletedQuestionnaire: true },
   getSessionEpoch: () => 2 };
 
-test('React Navigation real: participante não consegue navegar para StaffDemo',
-  { skip }, async () => {
+test('React Navigation real: participante não consegue navegar para StaffDemo', async () => {
     versionsMatchApp();
     const app = createRealApp(accountA);
     assert.deepEqual(app.rootRoutes(), ['MainTabs']);
@@ -154,7 +152,7 @@ test('React Navigation real: participante não consegue navegar para StaffDemo',
     app.dispose();
   });
 
-test('React Navigation real: troca direta A → B remonta a pilha e mantém StaffDemo inacessível', { skip }, async () => {
+test('React Navigation real: troca direta A → B remonta a pilha e mantém StaffDemo inacessível', async () => {
   const app = createRealApp(accountA);
   app.navigate('EventEntry');
   assert.deepEqual(app.rootRoutes(), ['MainTabs', 'EventEntry']);

@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useRef, useState } from 'react';
+import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createAuthSessionManager } from '../services/authService';
 import { httpClient as defaultHttpClient } from '../services/httpClient';
 import { defaultTokenStorage } from '../services/tokenStorage';
@@ -22,11 +22,38 @@ export function AuthProvider({
       });
   }
   const manager = managerRef.current;
+  const adminBindings = useRef(new Map());
+  const lifetime = useRef({ active: true });
+  const isProviderActive = () => lifetime.current.active;
+  useLayoutEffect(() => {
+    const scope = lifetime.current;
+    scope.active = true;
+    const detach = manager.attachProvider?.(scope);
+    return () => {
+      scope.active = false;
+      detach?.();
+      // Strict Mode can immediately reattach this same provider.
+      void Promise.resolve().then(() => {
+        if (!scope.active) {
+          adminBindings.current.forEach(binding => binding.sync());
+          adminBindings.current.clear();
+        }
+      });
+    };
+  }, [manager]);
+  function getAdminSession(kind, createBinding) {
+    if (!isProviderActive()) return null;
+    const bindings = adminBindings.current;
+    if (!bindings.has(kind)) bindings.set(kind, createBinding(manager, isProviderActive));
+    return bindings.get(kind).get();
+  }
 
   const [snapshot, setSnapshot] = useState(() => manager.getSnapshot());
 
   useEffect(() => {
     const unsubscribe = manager.subscribe((nextState) => {
+      if (!isProviderActive()) return;
+      adminBindings.current.forEach(binding => binding.sync());
       setSnapshot(nextState);
     });
     if (autoRestore) {
@@ -65,6 +92,8 @@ export function AuthProvider({
     markQuestionnaireCompleted: manager.markQuestionnaireCompleted,
     clearNotices: manager.clearNotices,
     httpClient: manager.client,
+    getAdminStaffSession: createBinding => getAdminSession('staff', createBinding),
+    getAdminOperationSession: createBinding => getAdminSession('operation', createBinding),
   };
 
   return <AuthContext.Provider value={contextValue}>{children}</AuthContext.Provider>;

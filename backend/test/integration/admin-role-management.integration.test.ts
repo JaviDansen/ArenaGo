@@ -1,16 +1,21 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { devNull } from "node:os";
+import { resolve } from "node:path";
 import { after, afterEach, before, test } from "node:test";
 import { NestFactory } from "@nestjs/core";
 import type { INestApplication } from "@nestjs/common";
 import { Pool } from "pg";
 import { sql, type SQL } from "drizzle-orm";
+import { readMigrationFiles } from "drizzle-orm/migrator";
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import supertest from "supertest";
 import type * as schema from "../../src/database/schema";
-import { assertAdminRoleManagementTestDatabaseUrls } from "./admin-role-management-db-guard";
+import {
+  assertAdminRoleManagementTestDatabaseUrls,
+  startAdminRoleManagementAfterPreflight,
+} from "./admin-role-management-db-guard";
 
 // A guarda é avaliada antes de importar o módulo da aplicação e de abrir escritas.
 const connectionString = assertAdminRoleManagementTestDatabaseUrls(process.env);
@@ -21,7 +26,12 @@ process.env.ADMIN_IDEMPOTENCY_TTL_SECONDS = "60";
 process.env.EVALUATION_IDEMPOTENCY_TTL_SECONDS = "60";
 process.env.EVENT_CLOSURE_JOB_TEST_ENABLED = "false";
 
-const pool = new Pool({ connectionString, application_name: `t61d-roles-${randomUUID()}`, max: 8 });
+const pool = new Pool({ connectionString, application_name: `t61d-roles-${randomUUID()}`, max: 8,
+  connectionTimeoutMillis: 5_000, ssl: false });
+let poolClosing: Promise<void> | undefined;
+function closeFixturePool() {
+  return poolClosing ??= pool.end();
+}
 const ownedUsers = new Set<string>(), ownedEvents = new Set<string>(), ownedExperiences = new Set<string>();
 const ownedVersions = new Set<string>(), ownedGames = new Set<string>();
 let app: INestApplication;
@@ -89,6 +99,9 @@ function send(actor: Account | undefined, path: string, body: object, key: strin
 }
 function grant(actor: Account, body: object, key?: string) { return send(actor, "/admin/roles/grant", body, key); }
 function revoke(actor: Account, grantId: string, key?: string) { return send(actor, "/admin/roles/revoke", { grantId }, key); }
+function staffList(actor: Account, eventId: string, application = app) {
+  return supertest(application.getHttpServer()).get(`/api/v1/admin/events/${eventId}/staff`).set("Authorization", `Bearer ${actor.token}`);
+}
 function problem(response: { status: number; body: Record<string, unknown> }, status: number, code: string) {
   assert.equal(response.status, status, JSON.stringify(response.body)); assert.equal(response.body.code, code);
 }
@@ -122,25 +135,25 @@ async function simultaneousRoleRequests<T>(start: () => [Promise<T>, Promise<T>]
 }
 
 before(async () => {
-  const dbName = await pool.query<{ name: string }>("SELECT current_database() AS name");
-  if (dbName.rows[0]?.name !== "arenago_roles_test") throw new Error("[SEGURANÇA BLOQUEADA] Banco de destino incorreto.");
-  const required = await pool.query<{ ready: boolean }>(`SELECT bool_and(to_regclass('public.' || name) IS NOT NULL) AS ready
-    FROM unnest(ARRAY['users','user_roles','sessions','refresh_tokens','user_totp_credentials','user_backup_codes',
-      'totp_activation_tokens','email_verification_tokens','password_reset_tokens','admin_2fa_challenges','audit_logs',
-      'idempotency_operations','events','experiences','stations','participations','queue_entries','service_sessions',
-      'evaluations','participation_profile_snapshots','profiles','questionnaire_versions','games','user_games']) AS required(name)`);
-  if (!required.rows[0]?.ready) throw new Error("[SEGURANÇA BLOQUEADA] Schema/migrations da autenticação e idempotência ausentes.");
-  const historicalAdmins = await pool.query<{ count: number }>("SELECT count(*)::int AS count FROM user_roles WHERE role='admin'");
-  if (historicalAdmins.rows[0]?.count !== 0) throw new Error("[SEGURANÇA BLOQUEADA] A prova do último Admin exige banco dedicado sem Admins preexistentes; nenhum registro será removido.");
-  const { AppModule } = await import("../../src/app.module");
-  const token = await import("../../src/auth/token.util"); signAccessToken = token.signAccessToken;
-  app = await NestFactory.create(AppModule, { logger: false });
-  app.setGlobalPrefix("api/v1"); await app.listen(0, "127.0.0.1");
-  const { ParticipationsService } = await import("../../src/participations/participations.service");
-  participationWriter = app.get(ParticipationsService);
+  const expectedMigrations = readMigrationFiles({ migrationsFolder: resolve(__dirname, "../../drizzle") })
+    .map(migration => String(migration.folderMillis));
+  await startAdminRoleManagementAfterPreflight({ connect: () => pool.connect(), end: closeFixturePool },
+    expectedMigrations, async () => {
+      const { environment } = await import("../../src/config/environment");
+      if (environment.NODE_ENV !== "test" || environment.DATABASE_URL !== connectionString
+        || environment.DATABASE_DIRECT_URL !== connectionString) {
+        throw new Error("[SEGURANÇA BLOQUEADA] A configuração do Nest diverge do destino verificado.");
+      }
+      const { AppModule } = await import("../../src/app.module");
+      const token = await import("../../src/auth/token.util"); signAccessToken = token.signAccessToken;
+      app = await NestFactory.create(AppModule, { logger: false });
+      app.setGlobalPrefix("api/v1"); await app.listen(0, "127.0.0.1");
+      const { ParticipationsService } = await import("../../src/participations/participations.service");
+      participationWriter = app.get(ParticipationsService);
+    });
 });
 
-afterEach(async () => {
+async function cleanupOwnedFixtures() {
   const users = [...ownedUsers], events = [...ownedEvents];
   if (!users.length && !events.length) return;
   const client = await pool.connect();
@@ -178,13 +191,167 @@ afterEach(async () => {
     if (transactionOpen) await client.query("ROLLBACK").catch(cleanupError => { throw new AggregateError([error, cleanupError], "Rollback da limpeza falhou."); });
     throw error;
   } finally { client.release(); }
-});
+}
+afterEach(cleanupOwnedFixtures);
 
 after(async () => {
   const errors: unknown[] = [];
   try { await app?.close(); } catch (error) { errors.push(error); }
-  try { await pool.end(); } catch (error) { errors.push(error); }
+  try { await closeFixturePool(); } catch { errors.push(new Error("Falha ao encerrar o pool da integração.")); }
   if (errors.length) throw new AggregateError(errors, "Encerramento da integração T6.1-D falhou.");
+});
+
+test("ADMIN-06 PostgreSQL lista apenas vínculos ativos do evento, inclusive contas inelegíveis", async () => {
+  const admin = await account({ admin: true }), targetEvent = await event(), otherEvent = await event();
+  const active = await account({ staffEventId: targetEvent });
+  const unverified = await account({ staffEventId: targetEvent, verified: false });
+  const inactive = await account({ staffEventId: targetEvent, active: false });
+  const removed = await account({ staffEventId: targetEvent });
+  const unrelatedStaff = await account({ staffEventId: otherEvent });
+  const participant = await account();
+  assert.equal((await revoke(admin, removed.staffRoleIds[0])).status, 200);
+
+  const response = await staffList(admin, targetEvent);
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+  assert.equal(response.headers["cache-control"], "no-store");
+  assert.equal(response.body.eventId, targetEvent);
+  assert.deepEqual(response.body.items.map((item: { grantId: string }) => item.grantId),
+    [active, unverified, inactive].map(user => user.staffRoleIds[0]));
+  for (const [index, user] of [active, unverified, inactive].entries()) {
+    const member = response.body.items[index];
+    assert.ok(Number.isFinite(Date.parse(member.grantedAt)));
+    assert.deepEqual(member, { grantId: user.staffRoleIds[0], userId: user.id, name: "T6.1-D fixture",
+      email: user.email, grantedAt: member.grantedAt, eligible: index === 0 });
+  }
+  assert.equal((await revoke(admin, unverified.staffRoleIds[0])).status, 200);
+  const afterRevoke = await staffList(admin, targetEvent);
+  assert.equal(afterRevoke.status, 200);
+  assert.deepEqual(afterRevoke.body.items.map((item: { grantId: string }) => item.grantId),
+    [active.staffRoleIds[0], inactive.staffRoleIds[0]]);
+  problem(await staffList(admin, randomUUID()), 404, "RESOURCE_NOT_FOUND");
+  problem(await staffList(participant, targetEvent), 403, "ADMIN_REQUIRED");
+  problem(await staffList(unrelatedStaff, targetEvent), 403, "ADMIN_REQUIRED");
+  problem(await staffList(await account({ admin: true, admin2fa: false }), targetEvent), 401, "ADMIN_2FA_REQUIRED");
+});
+
+test("ADMIN-06 PostgreSQL GET Staff reflete concessão e revogação pelos endpoints reais", async () => {
+  const admin = await account({ admin: true }), target = await account(), eventId = await event();
+  const created = await grant(admin, { role: "staff", email: target.email, eventId });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  const grantId = created.body.grant.id;
+
+  const listed = await staffList(admin, eventId);
+  assert.equal(listed.status, 200, JSON.stringify(listed.body));
+  const [member] = listed.body.items;
+  assert.equal(new Date(member.grantedAt).toISOString(), created.body.grant.grantedAt);
+  assert.deepEqual(listed.body, { eventId, items: [{ grantId, userId: target.id, name: "T6.1-D fixture",
+    email: target.email, grantedAt: member.grantedAt, eligible: true }] });
+
+  const revoked = await revoke(admin, member.grantId);
+  assert.equal(revoked.status, 200, JSON.stringify(revoked.body));
+  assert.equal(revoked.body.grant.id, grantId);
+  const afterRevoke = await staffList(admin, eventId);
+  assert.equal(afterRevoke.status, 200, JSON.stringify(afterRevoke.body));
+  assert.deepEqual(afterRevoke.body, { eventId, items: [] });
+});
+
+test("ADMIN-06 PostgreSQL GET Staff distingue equipe vazia de evento inexistente", async () => {
+  const admin = await account({ admin: true }), eventId = await event();
+  const response = await staffList(admin, eventId);
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+  assert.equal(response.headers["cache-control"], "no-store");
+  assert.deepEqual(response.body, { eventId, items: [] });
+  problem(await staffList(admin, randomUUID()), 404, "RESOURCE_NOT_FOUND");
+});
+
+test("ADMIN-06 PostgreSQL GET Staff desempata concessões de mesmo instante pelo UUID", async () => {
+  const admin = await account({ admin: true }), eventId = await event();
+  const first = await account(), second = await account();
+  const [lowerId, higherId] = [randomUUID(), randomUUID()].sort();
+  const grantedAt = "2026-01-02T03:04:05.123456Z";
+  await pool.query(`INSERT INTO user_roles(id,user_id,role,event_id,granted_by,granted_at)
+    VALUES($1,$2,'staff',$3,$4,$5::timestamptz), ($6,$7,'staff',$3,$4,$5::timestamptz)`,
+  [higherId, first.id, eventId, admin.id, grantedAt, lowerId, second.id]);
+
+  const response = await staffList(admin, eventId);
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+  assert.equal(response.body.eventId, eventId);
+  assert.deepEqual(response.body.items.map((item: { grantId: string; grantedAt: string }) => [item.grantId, item.grantedAt]),
+    [[lowerId, grantedAt], [higherId, grantedAt]]);
+});
+
+test("ADMIN-06 PostgreSQL GET Staff recupera a concessão em uma nova instância Nest", async () => {
+  const admin = await account({ admin: true }), target = await account(), eventId = await event();
+  const created = await grant(admin, { role: "staff", email: target.email, eventId });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  const original = await staffList(admin, eventId);
+  assert.equal(original.status, 200, JSON.stringify(original.body));
+  assert.equal(original.body.eventId, eventId);
+  assert.deepEqual(original.body.items.map((item: { grantId: string }) => item.grantId), [created.body.grant.id]);
+
+  const { AppModule } = await import("../../src/app.module");
+  const { POSTGRES_POOL } = await import("../../src/database/database.module");
+  const freshApp = await NestFactory.create(AppModule, { logger: false });
+  try {
+    freshApp.setGlobalPrefix("api/v1");
+    await freshApp.listen(0, "127.0.0.1");
+    assert.notEqual(freshApp.get(POSTGRES_POOL), app.get(POSTGRES_POOL));
+    const response = await staffList(admin, eventId, freshApp);
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+    assert.deepEqual(response.body, original.body);
+  } finally {
+    await freshApp.close();
+  }
+});
+
+test("ADMIN-06 PostgreSQL GET Staff recusa Admin sem e-mail verificado sem revelar a existência do evento", async () => {
+  const admin = await account({ admin: true, verified: false }), eventId = await event();
+  await account({ staffEventId: eventId });
+  const existing = await staffList(admin, eventId);
+  const absent = await staffList(admin, randomUUID());
+  problem(existing, 403, "ADMIN_EMAIL_UNVERIFIED");
+  problem(absent, 403, "ADMIN_EMAIL_UNVERIFIED");
+  assert.deepEqual(existing.body, absent.body);
+});
+
+test("ADMIN-06 PostgreSQL GET Staff recupera 80 vínculos persistidos e limpa as fixtures", async t => {
+  const admin = await account({ admin: true }), eventId = await event(), otherEventId = await event();
+  await account({ staffEventId: otherEventId });
+  const expected = new Map<string, Account>();
+  for (let i = 0; i < 80; i++) {
+    const member = await account({ staffEventId: eventId });
+    expected.set(member.staffRoleIds[0], member);
+  }
+  assert.equal(expected.size, 80);
+
+  const startedAt = performance.now();
+  const response = await staffList(admin, eventId);
+  t.diagnostic(`GET Staff com 80 vínculos: ${(performance.now() - startedAt).toFixed(1)} ms no executor local.`);
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+  assert.equal(response.headers["cache-control"], "no-store");
+  assert.deepEqual(Object.keys(response.body).sort(), ["eventId", "items"]);
+  assert.equal(response.body.eventId, eventId);
+  assert.ok(Array.isArray(response.body.items));
+  assert.equal(response.body.items.length, 80);
+  for (const item of response.body.items) {
+    const member = expected.get(item.grantId);
+    assert.ok(member, `Vínculo inesperado ou duplicado: ${item.grantId}`);
+    assert.match(item.grantedAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/);
+    assert.ok(Number.isFinite(Date.parse(item.grantedAt)));
+    assert.deepEqual(item, { grantId: member.staffRoleIds[0], userId: member.id, name: "T6.1-D fixture",
+      email: member.email, grantedAt: item.grantedAt, eligible: true });
+    expected.delete(item.grantId);
+  }
+  assert.equal(expected.size, 0);
+
+  const users = [...ownedUsers], events = [...ownedEvents];
+  await cleanupOwnedFixtures();
+  const residue = await pool.query(`SELECT
+    EXISTS (SELECT 1 FROM users WHERE id=ANY($1::uuid[])) AS users,
+    EXISTS (SELECT 1 FROM user_roles WHERE user_id=ANY($1::uuid[]) OR event_id=ANY($2::uuid[])) AS roles,
+    EXISTS (SELECT 1 FROM sessions WHERE user_id=ANY($1::uuid[])) AS sessions,
+    EXISTS (SELECT 1 FROM events WHERE id=ANY($2::uuid[])) AS events`, [users, events]);
+  assert.deepEqual(residue.rows, [{ users: false, roles: false, sessions: false, events: false }]);
 });
 
 test("T6.1-D PostgreSQL concede Admin global com email normalizado sem remover papel participante", async () => {

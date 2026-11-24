@@ -1,4 +1,4 @@
-import { Body,Controller,Get,HttpCode,Inject,Param,Patch,Post,Query,Req } from "@nestjs/common";
+import { Body,Controller,Get,Header,HttpCode,Inject,Param,Patch,Post,Query,Req } from "@nestjs/common";
 import { CurrentUserId,RequireSessionAuth } from "../auth/current-user.decorator";
 import { CurrentUser } from "../auth/current-user.decorator";
 import type { AuthenticatedRequest } from "../auth/session-auth.guard";
@@ -30,6 +30,18 @@ export class AdminConfigurationController {
   @Get(':eventId/experiences')
   @HttpCode(200)
   experiences(@CurrentUserId() userId:string,@CurrentUser('sessionId') sessionId:string,@Param() params:unknown){const {eventId}=validateOperationParams(configurationEventParams,params);return executeConfiguration(()=>this.queries.experiences({userId,sessionId},eventId));}
+  @Get(':eventId/staff')
+  @Header('Cache-Control', 'no-store')
+  staff(@CurrentUserId() userId: string, @CurrentUser('sessionId') sessionId: string, @Param() params: unknown) {
+    const { eventId } = validateOperationParams(configurationEventParams, params);
+    return executeConfiguration(() => this.queries.staff({ userId, sessionId }, eventId));
+  }
+  @Get(':eventId/operation')
+  @Header('Cache-Control', 'no-store')
+  operation(@CurrentUserId() userId: string, @CurrentUser('sessionId') sessionId: string, @Param() params: unknown) {
+    const { eventId } = validateOperationParams(configurationEventParams, params);
+    return executeConfiguration(() => this.queries.operation({ userId, sessionId }, eventId));
+  }
   @Get(':eventId')
   @HttpCode(200)
   event(@CurrentUserId() userId:string,@CurrentUser('sessionId') sessionId:string,@Param() params:unknown){const {eventId}=validateOperationParams(configurationEventParams,params);return executeConfiguration(()=>this.queries.event({userId,sessionId},eventId));}

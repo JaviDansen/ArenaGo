@@ -893,7 +893,7 @@ test('TOTP: AuthContext disponibiliza verificação e cancelamento sem expor o t
   const module = loadModule('context/AuthContext.js', (name) => {
     if (name === 'react') return {
       createContext: () => ({ Provider: 'Provider' }), useContext: () => null,
-      useRef: (value) => ({ current: value }), useEffect() {},
+      useRef: (value) => ({ current: value }), useEffect() {}, useLayoutEffect() {},
       useState: (initial) => [typeof initial === 'function' ? initial() : initial, () => {}],
     };
     if (name === '../services/authService') return { createAuthSessionManager: () => rig.manager };

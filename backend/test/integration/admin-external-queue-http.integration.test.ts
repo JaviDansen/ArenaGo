@@ -1,7 +1,6 @@
 import "reflect-metadata";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { devNull } from "node:os";
 import { after, before, test } from "node:test";
 import { NestFactory } from "@nestjs/core";
 import type { INestApplication } from "@nestjs/common";
@@ -13,27 +12,20 @@ import type { PoolClient } from "pg";
 import supertest from "supertest";
 import type * as schema from "../../src/database/schema";
 import type { ParticipationsService } from "../../src/participations/participations.service";
-import { assertSafeTestDatabase } from "./test-db-guard";
+import { adminEventOperationsTestHooks } from "./admin-event-operations-db-guard";
 
-// Barreira ANTES de importar AppModule/providers. Não usa .env ou banco remoto.
-const urls=["DATABASE_URL","DATABASE_DIRECT_URL","EVENTS_TEST_DATABASE_URL"].map(name=>{
-  const value=assertSafeTestDatabase(process.env[name]),url=new URL(value);
-  if(url.hostname!=="127.0.0.1"||url.port!=="55432"||url.pathname!=="/arenago_events_test"||url.search||url.hash||!url.username)throw new Error(`${name}: destino local explícito obrigatório.`);
-  return value;
-});
-if(urls.some(value=>value!==urls[0]))throw new Error("As três URLs explícitas precisam ser idênticas.");
-process.env.DOTENV_CONFIG_PATH=devNull;
-process.env.STAFF_IDEMPOTENCY_TTL_SECONDS="60";
-process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS="60";
-process.env.ADMIN_IDEMPOTENCY_TTL_SECONDS="60";
-const pool=new Pool({connectionString:urls[0],ssl:false,max:6,connectionTimeoutMillis:2000,statement_timeout:15000,lock_timeout:12000});
+let pool: Pool;
 let app:INestApplication,database:NodePgDatabase<typeof schema>,participations:ParticipationsService;
 let signAccess:(userId:string,sessionId:string,expired?:boolean)=>string;
 let fingerprint:(eventId:string,enabled:boolean,reason:string)=>string;
 const operation="admin_set_external_queue",reason="Acesso direto autorizado pela organização";
 const ids={events:[]as string[],users:[]as string[],versions:[]as string[],games:[]as string[]};
-before(async()=>{
-  assert.equal((await pool.query("SELECT current_database() AS name")).rows[0].name,"arenago_events_test");
+const hooks = adminEventOperationsTestHooks(async connectionString => {
+  process.env.STAFF_IDEMPOTENCY_TTL_SECONDS = "60";
+  process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = "60";
+  process.env.ADMIN_IDEMPOTENCY_TTL_SECONDS = "60";
+  pool = new Pool({ connectionString, ssl: false, max: 6, connectionTimeoutMillis: 2000,
+    statement_timeout: 15000, lock_timeout: 12000 });
   const {AppModule}=await import("../../src/app.module");
   const {DRIZZLE_DATABASE}=await import("../../src/database/database.module");
   const {ParticipationsService}=await import("../../src/participations/participations.service");
@@ -42,8 +34,8 @@ before(async()=>{
   signAccess=(userId,sessionId,expired)=>tokens.signAccessToken({userId,sessionId},expired?{nowMs:Date.now()-120000,ttlSeconds:1}:undefined);
   app=await NestFactory.create(AppModule,{logger:false});app.setGlobalPrefix("api/v1");await app.listen(0,"127.0.0.1");
   database=app.get(DRIZZLE_DATABASE);participations=app.get(ParticipationsService);
-});
-after(async()=>{
+}, async () => {
+  if (!pool) return;
   const errors:unknown[]=[];
   try{
     const c=await pool.connect();try{
@@ -70,6 +62,8 @@ after(async()=>{
   for(const r of await Promise.allSettled([app?.close(),pool.end()]))if(r.status==="rejected")errors.push(r.reason);
   if(errors.length)throw new AggregateError(errors,"Limpeza E08.6 falhou.");
 });
+before(hooks.start);
+after(hooks.finish);
 async function account(){
   const userId=randomUUID(),sessionId=randomUUID();ids.users.push(userId);
   await pool.query(`INSERT INTO users(id,name,email,password_hash,email_verified_at,created_at,updated_at)
@@ -148,6 +142,45 @@ async function waitPastCutoff(c:Context,pid:number){
   while(Date.now()<until){if((await pool.query("SELECT clock_timestamp()>=official_ends_at AS ended FROM events WHERE id=$1",[c.eventId])).rows[0].ended){crossed=true;break;}await new Promise(done=>setTimeout(done,100));}
   assert.equal(crossed,true);await blocked(pid);
 }
+
+function operationSummary(c: Context, actor: { token: string } = c.admin, eventId = c.eventId) {
+  return supertest(app.getHttpServer()).get(`/api/v1/admin/events/${eventId}/operation`).set("Authorization", `Bearer ${actor.token}`);
+}
+
+test("ADMIN-07 PostgreSQL consulta contadores isolados e observa a alternância D06", async () => {
+  const c = await context(), other = await context();
+  await person(c, "waiting");
+  await person(c, "active");
+  await person(c, "finished");
+  await person(other, "waiting");
+  await person(other, "waiting");
+  const unknown = randomUUID();
+  for (const eventId of [c.eventId, unknown]) problem(await operationSummary(c, c.staff, eventId), 403, "ADMIN_REQUIRED");
+  problem(await operationSummary(c, c.admin, unknown), 404, "RESOURCE_NOT_FOUND");
+
+  const expectCounts = async (event: Context, active: number, waiting: number, enabled: boolean) => {
+    const response = await operationSummary(event);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers["cache-control"], "no-store");
+    assert.equal(response.body.eventId, event.eventId);
+    assert.equal(response.body.activeParticipants, active);
+    assert.equal(response.body.externalWaitingParticipants, waiting);
+    assert.equal(response.body.externalQueueEnabled, enabled);
+    assert.equal(response.body.canSetExternalQueue, true);
+    assert.equal(response.body.canClose, true);
+    assert.equal(Object.hasOwn(response.body, "email"), false);
+    assert.equal(Object.hasOwn(response.body, "items"), false);
+  };
+  await expectCounts(c, 1, 1, true);
+  await expectCounts(other, 0, 2, true);
+  const changed = await patch(c);
+  assert.equal(changed.status, 200);
+  assert.equal(changed.body.releasedCount, 1);
+  await expectCounts(c, 2, 0, false);
+  assert.equal((await patch(c, true)).status, 200);
+  await expectCounts(c, 2, 0, true);
+  await expectCounts(other, 0, 2, true);
+});
 
 test("E08.6 PostgreSQL HTTP desliga e libera waiting com auditoria e instante comuns",async()=>{
   const c=await context(),people=[await person(c),await person(c),await person(c)];for(const p of people)await snapshotProfile(p.participationId);

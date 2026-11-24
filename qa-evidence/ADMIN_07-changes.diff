@@ -1,0 +1,2681 @@
+diff --git a/app/context/AuthContext.js b/app/context/AuthContext.js
+index 824703a2c7eb62148337b2d0513f90568970b9ad..81edf9262a45ed6b1b7bdee1c49a00f93e35b980 100644
+--- a/app/context/AuthContext.js
++++ b/app/context/AuthContext.js
+@@ -22,7 +22,7 @@ export function AuthProvider({
+       });
+   }
+   const manager = managerRef.current;
+-  const staffBinding = useRef(null);
++  const adminBindings = useRef(new Map());
+   const lifetime = useRef({ active: true });
+   const isProviderActive = () => lifetime.current.active;
+   useLayoutEffect(() => {
+@@ -35,16 +35,17 @@ export function AuthProvider({
+       // Strict Mode can immediately reattach this same provider.
+       void Promise.resolve().then(() => {
+         if (!scope.active) {
+-          staffBinding.current?.sync();
+-          staffBinding.current = null;
++          adminBindings.current.forEach(binding => binding.sync());
++          adminBindings.current.clear();
+         }
+       });
+     };
+   }, [manager]);
+-  function getAdminStaffSession(createBinding) {
++  function getAdminSession(kind, createBinding) {
+     if (!isProviderActive()) return null;
+-    staffBinding.current ??= createBinding(manager, isProviderActive);
+-    return staffBinding.current.get();
++    const bindings = adminBindings.current;
++    if (!bindings.has(kind)) bindings.set(kind, createBinding(manager, isProviderActive));
++    return bindings.get(kind).get();
+   }
+
+   const [snapshot, setSnapshot] = useState(() => manager.getSnapshot());
+@@ -52,7 +53,7 @@ export function AuthProvider({
+   useEffect(() => {
+     const unsubscribe = manager.subscribe((nextState) => {
+       if (!isProviderActive()) return;
+-      staffBinding.current?.sync();
++      adminBindings.current.forEach(binding => binding.sync());
+       setSnapshot(nextState);
+     });
+     if (autoRestore) {
+@@ -91,7 +92,8 @@ export function AuthProvider({
+     markQuestionnaireCompleted: manager.markQuestionnaireCompleted,
+     clearNotices: manager.clearNotices,
+     httpClient: manager.client,
+-    getAdminStaffSession,
++    getAdminStaffSession: createBinding => getAdminSession('staff', createBinding),
++    getAdminOperationSession: createBinding => getAdminSession('operation', createBinding),
+   };
+
+   return <AuthContext.Provider value={contextValue}>{children}</AuthContext.Provider>;
+diff --git a/app/screens/admin/AdminEventManagementInfoScreen.js b/app/screens/admin/AdminEventManagementInfoScreen.js
+index 672a757d086d5dd8c43044358e8c8dccfa63be1f..1b7dda77ac25c895df69026433a09adea1015e1c 100644
+--- a/app/screens/admin/AdminEventManagementInfoScreen.js
++++ b/app/screens/admin/AdminEventManagementInfoScreen.js
+@@ -7,11 +7,13 @@ import AdminButton from './components/AdminButton';
+ import { liveStyles as s } from './components/AdminLiveUI';
+ import AdminEventSettingsScreen from './AdminEventSettingsScreen';
+ import AdminRealEventStaffScreen from './AdminRealEventStaffScreen';
++import AdminEventOperationScreen from './AdminEventOperationScreen';
+ import AdminStructureScreen from './AdminStructureScreen';
+
+ export default function AdminEventManagementInfoScreen({ navigation, route }) {
+   const { eventId, area, returnToSetup } = route.params ?? {};
+   if (area === 'staff') return <AdminRealEventStaffScreen key={eventId} eventId={eventId} navigation={navigation} />;
++  if (area === 'operation') return <AdminEventOperationScreen key={eventId} eventId={eventId} navigation={navigation} />;
+   if (area === 'experiences') return <AdminStructureScreen navigation={navigation} eventId={eventId}
+     returnToSetup={returnToSetup === true} />;
+   return area === 'schedule' ? <AdminEventSettingsScreen navigation={navigation} eventId={eventId} /> :
+diff --git a/app/screens/admin/AdminRealEventScreen.js b/app/screens/admin/AdminRealEventScreen.js
+index c1ff58be6ac738056c8b70d5dcb5e003eebb8052..3c66220dd763316b41b194666ca0a68a76c867e4 100644
+--- a/app/screens/admin/AdminRealEventScreen.js
++++ b/app/screens/admin/AdminRealEventScreen.js
+@@ -50,7 +50,8 @@ export default function AdminRealEventScreen({ navigation, route }) {
+         accessibilityRole="button" accessibilityLabel={area.title}
+         accessibilityHint={key === 'schedule' ? 'Abre os dados e os horários do evento' :
+           key === 'experiences' ? 'Abre a gestão de experiências e estações do evento' :
+-          key === 'staff' ? 'Abre a gestão da equipe Staff do evento' : 'Abre uma visão informativa'}
++          key === 'staff' ? 'Abre a gestão da equipe Staff do evento' :
++          key === 'operation' ? 'Abre os controles operacionais do evento' : 'Abre uma visão informativa'}
+         onPress={() => openArea(key)} style={({ pressed }) => [s.card, s.row, styles.area, pressed && styles.pressed]}>
+         <AdminIconTile name={area.icon} />
+         <View style={s.grow}><Text style={styles.areaTitle}>{area.title}</Text><Text style={s.body}>{area.description}</Text></View>
+diff --git a/app/screens/admin/adminStaffSession.js b/app/screens/admin/adminStaffSession.js
+index 540c68e05881d22261dab5392ff998fd5ffafb3e..2507e4688687c40a20e4e82009e436385cabd266 100644
+--- a/app/screens/admin/adminStaffSession.js
++++ b/app/screens/admin/adminStaffSession.js
+@@ -20,13 +20,17 @@ const messages = {
+ const unavailableGrant = 'Não foi possível confirmar o estado desta concessão. O vínculo ou o evento pode não estar disponível.';
+
+ export function bindStaffSession(manager, newKey, isProviderActive = () => true) {
++  return bindAdminSession(manager, newKey, isProviderActive, createStaffSession);
++}
++
++export function bindAdminSession(manager, newKey, isProviderActive, createSession, requireVerifiedEmail = true) {
+   let entry;
+   function scope() {
+     if (!isProviderActive()) return null;
+     const auth = manager.getSnapshot();
+     const { user } = auth;
+     if (!auth.isAuthenticated || !user?.id || !user.sessionId || !Array.isArray(user.roles) || !user.roles.includes('admin') ||
+-        user.emailVerified !== true || auth.adminChallenge) return null;
++        (requireVerifiedEmail && user.emailVerified !== true) || auth.adminChallenge) return null;
+     const verified = canAccessAdminArea({ ...auth, isIdentityVerified: manager.isIdentityVerified });
+     const suspended = auth.isInitializing || ['checking', 'error'].includes(auth.identityStatus);
+     if (!verified && !suspended) return null;
+@@ -49,7 +53,7 @@ export function bindStaffSession(manager, newKey, isProviderActive = () => true)
+       if (!entry) {
+         const owner = live;
+         const current = () => entry === owner && matches(owner, scope());
+-        owner.store = createStaffSession(owner.client, newKey, () => current() && scope().verified, {
++        owner.store = createSession(owner.client, newKey, () => current() && scope().verified, {
+           canSettle: current,
+           revision: manager.getIdentityRevision,
+           renew: revision => {
+diff --git a/app/screens/admin/components/AdminLiveScreen.js b/app/screens/admin/components/AdminLiveScreen.js
+index a4869797918485767adc3e74d47842efd569eea2..59db4d07223823a8931232ae5f68657e8bbf429f 100644
+--- a/app/screens/admin/components/AdminLiveScreen.js
++++ b/app/screens/admin/components/AdminLiveScreen.js
+@@ -6,7 +6,7 @@ import { adminReadOwner } from '../useAdminEvents';
+ import { AdminIcon, liveColors as c } from './AdminLiveUI';
+ import AdminBottomBar from './AdminBottomBar';
+
+-export default function AdminLiveScreen({ title, subtitle, navigation, mode = 'detail', backLabel = 'Voltar', onBack, backDisabled = false,
++export default function AdminLiveScreen({ title, subtitle, eyebrow = 'ÁREA ADMINISTRATIVA', navigation, mode = 'detail', backLabel = 'Voltar', onBack, backDisabled = false,
+   bottomSafeArea = false, showTabs = false, refreshControl, children }) {
+   const auth = useAuth();
+   const owner = adminReadOwner(auth), live = useRef(auth), mounted = useRef(true);
+@@ -30,7 +30,7 @@ export default function AdminLiveScreen({ title, subtitle, navigation, mode = 'd
+     </View>
+     <KeyboardAvoidingView style={styles.safe} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+       <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={styles.content} refreshControl={refreshControl}>
+-        <Text style={styles.eyebrow}>ÁREA ADMINISTRATIVA</Text>
++        <Text style={styles.eyebrow}>{eyebrow}</Text>
+         <Text style={styles.title} accessibilityRole="header">{title}</Text>
+         {subtitle ? <Text style={styles.subtitle}>{subtitle}</Text> : null}
+         {children}
+diff --git a/app/screens/admin/components/AdminLiveUI.js b/app/screens/admin/components/AdminLiveUI.js
+index 381facea7c90b2f648e76743f1d22388ae81fc7f..a52409476ccb35c22ab4d73532880ed2e1f64f33 100644
+--- a/app/screens/admin/components/AdminLiveUI.js
++++ b/app/screens/admin/components/AdminLiveUI.js
+@@ -27,6 +27,20 @@ export function AdminIcon({ name, color = c.accent, size = 24 }) {
+     case 'home': shapes = [part('roof', { left: 4, top: 3, width: 16, height: 16, borderRightWidth: 0, borderBottomWidth: 0, transform: [{ rotate: '45deg' }] }),
+       part('house', { left: 5, top: 10, width: 14, height: 12, borderTopWidth: 0 }), part('door', { left: 10, top: 15, width: 4, height: 7 })]; break;
+     case 'chart': shapes = [6, 12, 19].map((height, i) => part(`bar${i}`, { left: 2 + i * 8, bottom: 2, width: 5, height, borderRadius: 1 })); break;
++    case 'layers': shapes = [
++      part('top', { left: 5, top: 2, width: 14, height: 14, transform: [{ scaleY: 0.65 }, { rotate: '45deg' }] }),
++      ...[6, 10].map(top => part(`layer${top}`, { left: 5, top, width: 14, height: 14, borderTopWidth: 0, borderLeftWidth: 0,
++        transform: [{ scaleY: 0.65 }, { rotate: '45deg' }] })),
++    ]; break;
++    case 'pause': shapes = [8, 15].map(left => part(`bar${left}`, { left, top: 4, height: 16, borderWidth: 0, borderLeftWidth: 2 })); break;
++    case 'play': shapes = [<View key="triangle" style={{ position: 'absolute', left: 8, top: 4, width: 0, height: 0,
++      borderLeftWidth: 12, borderTopWidth: 8, borderBottomWidth: 8, borderLeftColor: color,
++      borderTopColor: 'transparent', borderBottomColor: 'transparent' }} />]; break;
++    case 'stop': shapes = [part('square', { left: 4, top: 4, width: 16, height: 16, borderRadius: 2 })]; break;
++    case 'power': shapes = [
++      part('ring', { left: 3, top: 4, width: 18, height: 18, borderRadius: 10, borderTopColor: 'transparent' }),
++      part('stem', { left: 11, top: 1, height: 10, borderWidth: 0, borderLeftWidth: 2 }),
++    ]; break;
+     case 'history': case 'gauge': shapes = [part('circle', { left: 2, top: 2, width: 20, height: 20, borderRadius: 12 }),
+       part('hand', { left: 12, top: 6, height: 7, borderWidth: 0, borderLeftWidth: 1.6 }),
+       part('minute', { left: 12, top: 12, width: 6, borderWidth: 0, borderTopWidth: 1.6, transform: [{ rotate: name === 'gauge' ? '-45deg' : '25deg' }] })]; break;
+@@ -49,8 +63,8 @@ export function AdminIcon({ name, color = c.accent, size = 24 }) {
+     <View style={{ width: 24, height: 24, transform: [{ scale: size / 24 }], transformOrigin: 'top left' }}>{shapes}</View>
+   </View>;
+ }
+-export function AdminIconTile({ name }) {
+-  return <View style={liveStyles.iconTile}><AdminIcon name={name} size={28} /></View>;
++export function AdminIconTile({ name, color }) {
++  return <View style={liveStyles.iconTile}><AdminIcon name={name} color={color} size={28} /></View>;
+ }
+ export function AdminEventActions({ onCreate }) {
+   return <View style={liveStyles.actions}>
+diff --git a/app/screens/admin/components/AdminScheduleFields.js b/app/screens/admin/components/AdminScheduleFields.js
+index 97b1315e2516b53666b26a9b28b7f31ef91bd0e8..ebf933e455b5992ad997290a4089e3b24faa970c 100644
+--- a/app/screens/admin/components/AdminScheduleFields.js
++++ b/app/screens/admin/components/AdminScheduleFields.js
+@@ -5,15 +5,15 @@ import AdminButton from './AdminButton';
+ import { AdminIcon, AdminIconTile, liveColors as c, liveStyles as s } from './AdminLiveUI';
+ import { resolveEventTime, scheduleFields } from '../adminScheduleForm';
+
+-export function SettingsSection({ title, icon, children }) {
++export function SettingsSection({ title, icon, iconColor, children }) {
+   return <View style={s.card}>
+-    <View style={s.row}><AdminIconTile name={icon} /><Text accessibilityRole="header" style={[s.grow, s.title]}>{title}</Text></View>
++    <View style={s.row}><AdminIconTile name={icon} color={iconColor} /><Text accessibilityRole="header" style={[s.grow, s.title]}>{title}</Text></View>
+     <View style={styles.fields}>{children}</View>
+   </View>;
+ }
+
+-export function SettingsField({ label, value, onChangeText, children, placeholder, keyboardType, paired }) {
+-  return <View style={[styles.field, paired && styles.pairItem]}>
++export function SettingsField({ label, value, onChangeText, children, placeholder, keyboardType, style }) {
++  return <View style={[styles.field, style]}>
+     <Text style={styles.label}>{label}</Text>
+     {onChangeText ? <TextInput accessibilityLabel={label} value={value} onChangeText={onChangeText}
+       style={styles.input} placeholder={placeholder} placeholderTextColor={c.muted} keyboardType={keyboardType} /> :
+@@ -23,8 +23,9 @@ export function SettingsField({ label, value, onChangeText, children, placeholde
+   </View>;
+ }
+
+-export function ScheduleDateTime({ label, value, instant, timezone, onChange }) {
++export function ScheduleDateTime({ label, value, instant, timezone, onChange, wideFields = false }) {
+   const [picker, setPicker] = useState(null);
++  const fieldStyle = [styles.pairItem, wideFields && styles.widePairItem];
+   function choose(mode) {
+     let at;
+     try { at = new Date(resolveEventTime(value, timezone)); } catch { at = new Date(instant); }
+@@ -44,12 +45,14 @@ export function ScheduleDateTime({ label, value, instant, timezone, onChange })
+         const isDate = field === 'date';
+         const fieldLabel = `${isDate ? 'Data' : 'Hora'} de ${label}`;
+         const nativeControl = onChange && Platform.OS !== 'web';
+-        return <SettingsField key={field} label={fieldLabel} value={value[field]} paired
++        return <SettingsField key={field} label={fieldLabel} value={value[field]} style={fieldStyle}
+           onChangeText={onChange && !nativeControl ? text => onChange({ ...value, [field]: text }) : undefined}
+           placeholder={isDate ? 'DD/MM/AAAA' : 'HH:MM'} keyboardType={isDate ? undefined : 'numbers-and-punctuation'}>
+           {nativeControl ? <Pressable accessibilityRole="button" accessibilityLabel={fieldLabel} onPress={() => choose(field)}
+             style={[styles.input, styles.pickerButton]}>
+-            <Text style={styles.label}>{value[field] || (isDate ? 'Selecionar data' : 'Selecionar hora')}</Text>
++            <Text style={[styles.label, wideFields && styles.wrapLabel]}>
++              {value[field] || (isDate ? 'Selecionar data' : 'Selecionar hora')}
++            </Text>
+             <AdminIcon name={isDate ? 'calendar' : 'history'} size={20} />
+           </Pressable> : null}
+         </SettingsField>;
+@@ -68,8 +71,10 @@ const styles = StyleSheet.create({
+   fields: { marginTop: 12, gap: 10 },
+   field: { minWidth: 0, gap: 5 },
+   pairItem: { flexGrow: 1, flexBasis: 120 },
++  widePairItem: { flexBasis: 170, maxWidth: '100%' },
+   pair: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
+   label: { color: c.text, fontSize: 15 },
++  wrapLabel: { flexShrink: 1 },
+   input: { minHeight: 44, justifyContent: 'center', color: c.text, fontSize: 16, backgroundColor: c.background,
+     borderRadius: 9, borderWidth: 1, borderColor: '#a189ba', paddingHorizontal: 12, paddingVertical: 8 },
+   readOnly: { backgroundColor: '#252033', borderColor: '#54465f' },
+diff --git a/app/screens/admin/components/AdminSelectedEvent.js b/app/screens/admin/components/AdminSelectedEvent.js
+index 5dffefffe2b7955cac9c2736f0ca5fbaed9014cf..ac68e42f7b4db355c59c82f3a7d8cb8ac3bf8b08 100644
+--- a/app/screens/admin/components/AdminSelectedEvent.js
++++ b/app/screens/admin/components/AdminSelectedEvent.js
+@@ -34,7 +34,7 @@ export default function AdminSelectedEvent({ event, readiness, expanded, onToggl
+           <Text style={s.body}>{message}</Text>
+           {area && (onArea ? <Pressable accessibilityRole="button" accessibilityLabel={`Consultar ${adminEventAreas[area].title}`}
+             onPress={() => onArea(area)} style={styles.action}>
+-            <Text style={styles.link}>{adminEventAreas[area].title}{['schedule', 'experiences', 'staff'].includes(area) ? '' : ' · Visão informativa'}</Text>
++            <Text style={styles.link}>{adminEventAreas[area].title}{['schedule', 'experiences', 'staff', 'operation'].includes(area) ? '' : ' · Visão informativa'}</Text>
+           </Pressable> : <Text style={s.body}>{adminEventAreas[area].title}</Text>)}
+         </View>)}
+       </> : <Text style={s.body}>Prontidão indisponível</Text>}
+diff --git a/app/tests/adminRealEvents.test.cjs b/app/tests/adminRealEvents.test.cjs
+index ce93c3fe1a653a4455d988f916b1cab0e80c284c..a40842f5a79d864f85131619a8a78fa8edfc83e1 100644
+--- a/app/tests/adminRealEvents.test.cjs
++++ b/app/tests/adminRealEvents.test.cjs
+@@ -312,7 +312,7 @@ test('recuperar foco consulta novamente e uma resposta anterior não sobrescreve
+ test('destino informativo valida área e confirma evento com leitura autenticada', async () => {
+   const calls = [];
+   const h = createHarness('screens/admin/AdminEventManagementInfoScreen.js', {
+-    props: { route: { params: { eventId: id(2), area: 'operation', name: 'Nome não confiável' } } },
++    props: { route: { params: { eventId: id(2), area: 'analytics', name: 'Nome não confiável' } } },
+     authContext: verifiedAdminAuth({ httpClient: { get: async (url, options) => {
+       calls.push([url, options.auth]);
+       return { event: event(2) };
+@@ -320,7 +320,7 @@ test('destino informativo valida área e confirma evento com leitura autenticada
+   });
+   await waitForText(h, 'Arena Norte');
+   assert.deepEqual(calls, [[eventPath(2), true]]);
+-  assert.ok(hasText(h, 'Operação do evento'));
++  assert.ok(hasText(h, 'BI do evento'));
+   assert.ok(!hasText(h, 'Nome não confiável'));
+   h.press('Voltar ao painel');
+   assert.deepEqual(plain(h.navigationCalls.at(-1)), { type: 'popTo', name: 'AdminRealEvent', params: { eventId: id(2) } });
+diff --git a/app/tests/roleRoutingIntegration.test.cjs b/app/tests/roleRoutingIntegration.test.cjs
+index 00dd13df38c5f8ffe48049116a063269c7208612..06d3301564886c0288f809e227b0a23b13d438dd 100644
+--- a/app/tests/roleRoutingIntegration.test.cjs
++++ b/app/tests/roleRoutingIntegration.test.cjs
+@@ -127,7 +127,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+         return { waitAdminDemoLatency: async () => {} };
+       }
+       if (control.realAdmin && (target.startsWith('screens/admin/') || target === 'data/adminDemoData' ||
+-        ['services/adminEventsService', 'services/adminEventSetupService'].includes(target))) {
++        ['services/adminEventsService', 'services/adminEventSetupService', 'services/adminEventOperationService'].includes(target))) {
+         return load(`${target}.js`);
+       }
+       if (control.realStaff && ['screens/staff/StaffEventsNavigator', 'services/staffEventsService',
+@@ -201,6 +201,11 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+         : value && typeof value === 'object' ? flatten(value.props?.children) : String(value ?? '');
+       return flatten(node.props.children).includes(text);
+     }); },
++    textsInView(testID) {
++      const views = tree.root.findAllByType('View').filter(node => node.props.testID === testID);
++      assert.equal(views.length, 1, testID);
++      return views[0].findAllByType('Text').map(node => String(node.props.children));
++    },
+     async press(label) {
+       const buttons = tree.root.findAllByType('Pressable').filter((node) => node.props.accessibilityLabel === label);
+       assert.equal(buttons.length, 1, `botão ${label}`);
+@@ -333,6 +338,336 @@ const participant = { id: 'a', name: 'A', email: 'a@example.test', emailVerified
+
+ const adminUser = { ...participant, roles: ['admin', 'staff', 'participante'], hasCompletedQuestionnaire: false };
+
++const operationAt = '2090-11-23T13:00:00.000000Z';
++function operationView(n, overrides = {}) {
++  return { eventId: 'abcdef00-0000-4000-8000-' + String(n).padStart(12, '0'), name: 'Arena Operação ' + n,
++    timezone: 'America/Sao_Paulo', effectivePhase: 'open', observedAt: operationAt, startsAt: '2090-11-23T12:00:00Z',
++    officialEndsAt: '2090-11-23T13:40:00Z', operationalDeadlineAt: '2090-11-23T13:55:00Z',
++    closureMode: null, closureRequestedAt: null, adminDeadlineAt: null, externalQueueEnabled: true, activeParticipants: 0,
++    externalWaitingParticipants: 3, canSetExternalQueue: true, canClose: true, ...overrides };
++}
++function operationHarness(views, onWrite, onRead = view => view) {
++  const writes = [], reads = [];
++  const eventFrom = view => ({ ...view, id: view.eventId, readiness: { ready: true } });
++  const readiness = view => ({
++    eventId: view.eventId, effectivePhase: view.effectivePhase,
++    statusStored: ['closed', 'closing', 'open'].includes(view.effectivePhase) ? view.effectivePhase : 'scheduled',
++    ready: true, missing: [], observedAt: view.observedAt, acceptingNewParticipations: view.canSetExternalQueue,
++    checks: { nameAndAccessCode: true, validScheduleAndTimezone: true, externalQueueConfigured: true,
++      hasExperienceWithAvailableStation: true, hasVerifiedActiveStaff: true },
++  });
++  const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control: { realAdmin: true,
++    async http(route, options) {
++      if (route === '/admin/events') return { items: views.filter(v => v.effectivePhase !== 'closed').map(eventFrom), nextCursor: null };
++      const view = views.find(v => route === '/admin/events/' + v.eventId || route.startsWith('/admin/events/' + v.eventId + '/'));
++      if (!view) return undefined;
++      const path = '/admin/events/' + view.eventId;
++      if (route === path) return { event: eventFrom(view) };
++      if (route === path + '/readiness') return readiness(view);
++      if (route === path + '/operation') {
++        assert.equal(options.method, 'GET');
++        assert.ok(options.headers.Authorization);
++        reads.push(view.eventId);
++        return onRead(view);
++      }
++      assert.ok(['/external-queue', '/close'].some(suffix => route === path + suffix));
++      const mutation = { route, method: options.method, body: JSON.parse(options.body), key: options.headers['Idempotency-Key'] };
++      assert.ok(mutation.key);
++      writes.push(mutation);
++      return onWrite(view, mutation);
++    },
++  } });
++  return { app, writes, reads, async enter(view) {
++    await app.press('Gerenciar eventos');
++    await app.press('Acessar evento ' + view.name);
++    await app.press('Operação do evento');
++  } };
++}
++
++test('ADMIN-07 navega para o evento selecionado, valida justificativa, cancela e reconsulta após alternar a fila', async () => {
++  const a = operationView(1), b = operationView(2);
++  const { app, writes, reads, enter } = operationHarness([a, b], (view, request) => {
++    assert.equal(view, b);
++    assert.equal(request.method, 'PATCH');
++    const releasedCount = request.body.enabled ? 0 : view.externalWaitingParticipants;
++    view.externalQueueEnabled = request.body.enabled;
++    view.activeParticipants += releasedCount;
++    view.externalWaitingParticipants -= releasedCount;
++    return { eventId: view.eventId, externalQueueEnabled: view.externalQueueEnabled, releasedCount, changedAt: operationAt };
++  });
++  await app.mount();
++  try {
++    await enter(b);
++    assert.deepEqual(reads, [b.eventId]);
++    assert.ok(app.hasText('PAINEL DO EVENTO'));
++    assert.ok(app.hasText(b.name));
++    assert.deepEqual(app.textsInView('operation-phase'), ['Aberto']);
++    assert.ok(app.hasText('Pronto para operar'));
++    assert.deepEqual(app.textsInView('operation-active'), ['0', 'Participantes ativos']);
++    assert.deepEqual(app.textsInView('operation-waiting'), ['3', 'Na fila externa']);
++    assert.deepEqual(app.textsInView('operation-queue-state'), ['ATIVA']);
++    for (const label of ['Home', 'Histórico', 'BI']) assert.equal(app.buttonProps(label).accessibilityRole, 'tab');
++    assert.equal(app.hasButton('Sair da conta'), false);
++    const operationScroll = app.scrollContainingButton('Desativar fila externa');
++    assert.ok(operationScroll);
++    assert.equal(app.scrollContainingButton('Encerrar imediatamente'), operationScroll);
++    assert.equal(app.scrollContainingButton('Encerramento controlado'), operationScroll);
++    assert.equal(app.hasText(a.name), false);
++    await app.press('Desativar fila externa');
++    await app.press('Revisar operação');
++    assert.ok(app.hasText('Informe uma justificativa'));
++    await app.input('Justificativa', 'Acesso direto para a Arena');
++    await app.press('Revisar operação');
++    assert.ok(app.hasText('Confirmar: Desativar fila externa?'));
++    await app.press('Voltar à edição');
++    await app.press('Cancelar operação');
++    assert.equal(writes.length, 0);
++    await app.press('Desativar fila externa');
++    await app.input('Justificativa', 'Acesso direto para a Arena');
++    await app.press('Revisar operação');
++    const confirm = app.handler('Confirmar operação');
++    await app.act(async () => { confirm(); confirm(); });
++    assert.deepEqual(writes.map(w => w.body), [{ enabled: false, reason: 'Acesso direto para a Arena' }]);
++    assert.ok(app.hasText('Pessoas liberadas: 3'));
++    assert.deepEqual(app.textsInView('operation-active'), ['3', 'Participantes ativos']);
++    assert.deepEqual(app.textsInView('operation-waiting'), ['0', 'Na fila externa']);
++    assert.deepEqual(app.textsInView('operation-queue-state'), ['INATIVA']);
++    await app.press('Ativar fila externa');
++    await app.input('Justificativa', 'Organizar próximos ingressos');
++    await app.press('Revisar operação');
++    await app.press('Confirmar operação');
++    assert.equal(writes.length, 2);
++    assert.notEqual(writes[0].key, writes[1].key);
++    assert.deepEqual(app.textsInView('operation-queue-state'), ['ATIVA']);
++    assert.deepEqual(app.textsInView('operation-active'), ['3', 'Participantes ativos']);
++    assert.deepEqual(reads, [b.eventId, b.eventId, b.eventId]);
++  } finally { app.dispose(); }
++});
++
++test('ADMIN-07 perda de resposta exige reenvio explícito após reentrada, mesmo com fila já desativada', async () => {
++  const view = operationView(1);
++  let attempts = 0;
++  const { app, writes, enter } = operationHarness([view], () => {
++    if (++attempts === 1) {
++      Object.assign(view, { externalQueueEnabled: false, activeParticipants: 3, externalWaitingParticipants: 0 });
++      throw Object.assign(new Error('Resposta indisponível'), { name: 'AbortError' });
++    }
++    return { eventId: view.eventId, externalQueueEnabled: false, releasedCount: 3, changedAt: operationAt };
++  });
++  await app.mount();
++  try {
++    await enter(view);
++    await app.press('Desativar fila externa');
++    await app.input('Justificativa', 'Liberar entrada');
++    await app.press('Revisar operação');
++    await app.press('Confirmar operação');
++    assert.ok(app.hasText('Resultado ainda não confirmado'));
++    assert.deepEqual(app.textsInView('operation-queue-state'), ['INATIVA']);
++    assert.equal(app.hasText('Resposta confirmada'), false);
++    await app.press('Voltar ao painel');
++    await app.press('Operação do evento');
++    assert.equal(writes.length, 1);
++    assert.equal(app.hasButton('Ativar fila externa'), false);
++    await app.press('Reenviar a mesma solicitação');
++    assert.equal(writes.length, 2);
++    assert.deepEqual(writes[1], writes[0]);
++    assert.ok(app.hasText('Resposta confirmada'));
++  } finally { app.dispose(); }
++});
++
++test('ADMIN-07 recusa definitiva no reenvio libera nova revisão após expirar o prazo controlado', async () => {
++  const view = operationView(1);
++  let attempts = 0;
++  const { app, writes, reads, enter } = operationHarness([view], () => {
++    attempts++;
++    if (attempts === 1) {
++      view.observedAt = '2090-11-23T13:31:00.000000Z';
++      throw Object.assign(new Error('Resposta indisponível'), { name: 'AbortError' });
++    }
++    assert.equal(attempts, 2);
++    return { statusCode: 409, body: { code: 'CLOSURE_DEADLINE_INVALID' } };
++  });
++  await app.mount();
++  try {
++    await enter(view);
++    async function reviewAt(time) {
++      await app.press('Encerramento controlado');
++      await app.input('Justificativa', 'Encerrar a operação');
++      await app.input('Data de encerramento', '23/11/2090');
++      await app.input('Hora de encerramento', time);
++      await app.press('Revisar operação');
++      assert.ok(app.hasButton('Confirmar operação'));
++    }
++    await reviewAt('10:30');
++    assert.equal(writes.length, 0);
++    await app.press('Confirmar operação');
++    assert.equal(writes.length, 1);
++    assert.deepEqual(reads, [view.eventId, view.eventId]);
++    assert.ok(app.hasText('Resultado ainda não confirmado'));
++    assert.equal(app.hasText('Resposta confirmada'), false);
++    assert.equal(app.hasButton('Encerramento controlado'), false);
++    await app.press('Reenviar a mesma solicitação');
++    assert.deepEqual(writes, [writes[0], writes[0]]);
++    assert.deepEqual(reads, [view.eventId, view.eventId, view.eventId]);
++    assert.ok(app.hasText('Operação recusada'));
++    assert.ok(app.hasText('O prazo solicitado não está dentro dos limites atuais.'));
++    assert.equal(app.hasText('Resultado ainda não confirmado'), false);
++    assert.equal(app.hasText('Resposta confirmada'), false);
++    assert.equal(app.hasButton('Reenviar a mesma solicitação'), false);
++    await reviewAt('10:35');
++    assert.equal(writes.length, 2);
++  } finally { app.dispose(); }
++});
++
++for (const mode of ['immediate', 'controlled']) {
++  test('ADMIN-07 confirma o encerramento ' + mode + ' e lê do servidor o estado posterior', async () => {
++    const view = operationView(1);
++    const controlled = mode === 'controlled';
++    const { app, writes, enter } = operationHarness([view], (_, request) => {
++      assert.equal(request.method, 'POST');
++      assert.ok(request.route.endsWith('/close'));
++      const deadline = controlled ? '2090-11-23T13:30:00.000000Z' : operationAt;
++      Object.assign(view, { closureMode: mode, closureRequestedAt: operationAt, adminDeadlineAt: deadline,
++        effectivePhase: controlled ? 'closing' : 'closed', canClose: false, canSetExternalQueue: false, externalWaitingParticipants: 0 });
++      return { eventId: view.eventId, closureMode: mode, status: view.effectivePhase, newEntriesClosedAt: operationAt,
++        effectiveOperationalDeadlineAt: deadline, externalWaitingFinalized: 3 };
++    });
++    await app.mount();
++    try {
++      await enter(view);
++      assert.ok(app.hasText('Ambas as opções de encerramento exigem justificativa e confirmação.'));
++      await app.press(controlled ? 'Encerramento controlado' : 'Encerrar imediatamente');
++      await app.input('Justificativa', 'Encerrar a operação');
++      if (controlled) {
++        await app.input('Data de encerramento', '23/11/2090');
++        await app.input('Hora de encerramento', '11:05');
++        await app.press('Revisar operação');
++        assert.ok(app.hasText('dentro do limite operacional'));
++        assert.equal(writes.length, 0);
++        await app.input('Hora de encerramento', '10:30');
++      }
++      await app.press('Revisar operação');
++      assert.equal(writes.length, 0);
++      await app.press('Confirmar operação');
++      assert.equal(writes.length, 1);
++      assert.deepEqual(writes[0].body, { mode, reason: 'Encerrar a operação',
++        ...(controlled ? { controlledUntilAt: '2090-11-23T13:30:00.000Z' } : {}) });
++      assert.deepEqual(app.textsInView('operation-phase'), [controlled ? 'Encerrando' : 'Encerrado']);
++      assert.equal(app.hasText('Pronto para operar'), false);
++      assert.ok(app.hasText('Pessoas finalizadas na espera externa: 3'));
++      assert.equal(app.hasButton('Encerrar imediatamente'), false);
++      assert.equal(app.hasButton('Encerramento controlado'), false);
++      assert.equal(app.hasButton('Desativar fila externa'), false);
++      if (controlled) {
++        assert.ok(app.hasText('Prazo do encerramento controlado'));
++        view.effectivePhase = 'closed';
++        await app.press('Voltar ao painel');
++        await app.press('Operação do evento');
++        assert.deepEqual(app.textsInView('operation-phase'), ['Encerrado']);
++        assert.equal(writes.length, 1);
++      }
++    } finally { app.dispose(); }
++  });
++}
++
++test('ADMIN-07 mostra indisponibilidade, erro de rede e recusa sem apresentar controles', async () => {
++  const view = operationView(1, { effectivePhase: 'scheduled', canSetExternalQueue: false, activeParticipants: undefined });
++  let stage = 'offline';
++  const { app, enter, writes } = operationHarness([view], () => assert.fail('Escrita inesperada'), snapshot => {
++    if (stage === 'offline') throw new Error('Sem rede');
++    if (stage === 'absent') return { statusCode: 404, body: { code: 'RESOURCE_NOT_FOUND' } };
++    if (stage === 'denied') return { statusCode: 403, body: { code: 'ADMIN_REQUIRED' } };
++    return snapshot;
++  });
++  await app.mount();
++  try {
++    await enter(view);
++    assert.ok(app.hasText('Dados operacionais indisponíveis'));
++    assert.equal(app.hasButton('Encerrar imediatamente'), false);
++    stage = 'absent';
++    await app.press('Tentar novamente');
++    assert.ok(app.hasText('Evento não encontrado ou indisponível'));
++    stage = 'available';
++    await app.press('Tentar novamente');
++    assert.deepEqual(app.textsInView('operation-phase'), ['Agendado']);
++    assert.deepEqual(app.textsInView('operation-active'), ['Indisponível', 'Participantes ativos']);
++    assert.deepEqual(app.textsInView('operation-waiting'), ['3', 'Na fila externa']);
++    assert.equal(app.hasText('Pronto para operar'), false);
++    assert.equal(app.hasButton('Desativar fila externa'), false);
++    Object.assign(view, { effectivePhase: 'not_ready', externalQueueEnabled: false });
++    await app.press('Atualizar operação');
++    assert.deepEqual(app.textsInView('operation-phase'), ['Não pronto']);
++    assert.ok(app.hasText('Configuração pendente'));
++    assert.equal(app.hasText('Pronto para operar'), false);
++    assert.equal(app.hasButton('Ativar fila externa'), false);
++    stage = 'denied';
++    await app.press('Atualizar operação');
++    assert.ok(app.hasText('Sessão sem autorização'));
++    assert.equal(app.hasText(view.name), false);
++    assert.equal(app.hasButton('Encerrar imediatamente'), false);
++    assert.equal(writes.length, 0);
++  } finally { app.dispose(); }
++});
++
++test('ADMIN-07 separa recibo confirmado de falha posterior na consulta', async () => {
++  const view = operationView(1);
++  let offline = false;
++  const { app, enter, writes } = operationHarness([view], () => {
++    offline = true;
++    Object.assign(view, { externalQueueEnabled: false, activeParticipants: 3, externalWaitingParticipants: 0 });
++    return { eventId: view.eventId, externalQueueEnabled: false, releasedCount: 3, changedAt: operationAt };
++  }, current => {
++    if (offline) throw new Error('Consulta indisponível após gravação');
++    return current;
++  });
++  await app.mount();
++  try {
++    await enter(view);
++    await app.press('Desativar fila externa');
++    await app.input('Justificativa', 'Entrada direta');
++    await app.press('Revisar operação');
++    await app.press('Confirmar operação');
++    assert.ok(app.hasText('Resposta confirmada'));
++    assert.ok(app.hasText('Dados operacionais indisponíveis'));
++    assert.equal(app.hasButton('Ativar fila externa'), false);
++    offline = false;
++    await app.press('Tentar novamente');
++    assert.deepEqual(app.textsInView('operation-queue-state'), ['INATIVA']);
++    assert.equal(writes.length, 1);
++  } finally { app.dispose(); }
++});
++
++test('ADMIN-07 resposta de escrita tardia não afeta outro evento ou provedor', async () => {
++  const a = operationView(1), b = operationView(2), response = deferred();
++  const { app, writes, enter } = operationHarness([a, b], () => response.promise);
++  await app.mount();
++  try {
++    await enter(a);
++    await app.press('Desativar fila externa');
++    await app.input('Justificativa', 'Ação restrita ao evento A');
++    await app.press('Revisar operação');
++    const obsolete = app.handler('Confirmar operação');
++    await app.press('Confirmar operação');
++    assert.ok(app.hasText('Operação administrativa em andamento'));
++    await app.press('Voltar ao painel');
++    await app.press('Voltar aos eventos');
++    await app.press('Acessar evento ' + b.name);
++    await app.press('Operação do evento');
++    assert.ok(app.hasText(b.name));
++    assert.equal(app.hasText('Operação administrativa em andamento'), false);
++    await app.replaceProvider({ ...adminUser, id: 'admin-replacement', sessionId: '10000000-0000-4000-8000-000000000002' });
++    await enter(b);
++    await app.act(async () => {
++      obsolete();
++      response.resolve({ eventId: a.eventId, externalQueueEnabled: false, releasedCount: 3, changedAt: operationAt });
++    });
++    assert.equal(writes.length, 1);
++    assert.ok(app.hasText(b.name));
++    assert.equal(app.hasText('Resposta confirmada'), false);
++    assert.ok(app.hasButton('Desativar fila externa'));
++  } finally { app.dispose(); }
++});
++
+ test('ADMIN-05: Home e listagem abrem o fluxo, cinco etapas preservam UUID e retomada lê o evento salvo', async () => {
+   const eventId = 'abcdef00-0000-4000-8000-000000000001';
+   const path = `/admin/events/${eventId}`;
+diff --git a/backend/src/events/admin-configuration-query.service.ts b/backend/src/events/admin-configuration-query.service.ts
+index 81ee5111bad7c1b7955e41c5e47b97e7f632cab4..49740bc2453c751568890f0edb2b1024fb0c5e3e 100644
+--- a/backend/src/events/admin-configuration-query.service.ts
++++ b/backend/src/events/admin-configuration-query.service.ts
+@@ -4,7 +4,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
+ import { DRIZZLE_DATABASE } from "../database/database.module";
+ import type { DatabaseTransactionExecutor } from "../database/database-executor";
+ import type * as schema from "../database/schema";
+-import { configurationEventViewSchema,configurationExperienceViewSchema,configurationStationViewSchema,configurationStaffMember,encodeConfigurationCursor,type ConfigurationPage } from "./admin-configuration.dto";
++import { configurationEventViewSchema,configurationExperienceViewSchema,configurationOperationViewSchema,configurationStationViewSchema,configurationStaffMember,encodeConfigurationCursor,type ConfigurationPage } from "./admin-configuration.dto";
+ import { configurationEventView,configurationProjection,experienceSelection,readinessView,stationSelection,type ConfigurationRow } from "./admin-configuration.projection";
+ import { failConfiguration } from "./admin-configuration.problem";
+
+@@ -69,4 +69,34 @@ export class AdminConfigurationQueryService {
+       return { eventId, items: rows.map(row => configurationStaffMember.parse(row)) };
+     }, true);
+   }
++  operation(actor: ConfigurationActor, eventId: string) {
++    return this.snapshot(actor, async tx => {
++      const projection = configurationProjection(sql`e.id=${eventId}::uuid`);
++      const { rows: [row] } = await tx.execute<ConfigurationRow & {
++        activeParticipants: string;
++        externalWaitingParticipants: string;
++      }>(sql`
++        SELECT p.*, counts.*
++        FROM (${projection}) p
++        CROSS JOIN LATERAL (
++          SELECT count(*) FILTER (WHERE a.status='active')::text AS "activeParticipants",
++            count(*) FILTER (WHERE a.status='waiting')::text AS "externalWaitingParticipants"
++          FROM participations a
++          WHERE a.event_id=p.id AND a.status IN ('active','waiting')
++        ) counts`);
++      if (!row) failConfiguration("resource_not_found");
++      return configurationOperationViewSchema.parse({
++        eventId: row.id, name: row.name, timezone: row.timezone, effectivePhase: row.effectivePhase,
++        observedAt: row.observedAt, startsAt: row.startsAt,
++        officialEndsAt: row.officialEndsAt, operationalDeadlineAt: row.operationalDeadlineAt,
++        closureMode: row.closureMode, closureRequestedAt: row.closureRequestedAt, adminDeadlineAt: row.adminDeadlineAt,
++        externalQueueEnabled: row.externalQueueEnabled,
++        activeParticipants: /^\d+$/.test(row.activeParticipants) ? Number(row.activeParticipants) : NaN,
++        externalWaitingParticipants: /^\d+$/.test(row.externalWaitingParticipants) ? Number(row.externalWaitingParticipants) : NaN,
++        canSetExternalQueue: row.acceptingNewParticipations && row.effectivePhase === "open",
++        canClose: ["scheduled", "not_ready", "open"].includes(row.effectivePhase)
++          && row.closureMode === null && row.closureRequestedAt === null && row.adminDeadlineAt === null,
++      });
++    });
++  }
+ }
+diff --git a/backend/src/events/admin-configuration.controller.ts b/backend/src/events/admin-configuration.controller.ts
+index a54b1bd74eb47f133005f69d7041c33c4def4bcb..ff61581d9d607fed400255cacfd224643d07953b 100644
+--- a/backend/src/events/admin-configuration.controller.ts
++++ b/backend/src/events/admin-configuration.controller.ts
+@@ -36,6 +36,12 @@ export class AdminConfigurationController {
+     const { eventId } = validateOperationParams(configurationEventParams, params);
+     return executeConfiguration(() => this.queries.staff({ userId, sessionId }, eventId));
+   }
++  @Get(':eventId/operation')
++  @Header('Cache-Control', 'no-store')
++  operation(@CurrentUserId() userId: string, @CurrentUser('sessionId') sessionId: string, @Param() params: unknown) {
++    const { eventId } = validateOperationParams(configurationEventParams, params);
++    return executeConfiguration(() => this.queries.operation({ userId, sessionId }, eventId));
++  }
+   @Get(':eventId')
+   @HttpCode(200)
+   event(@CurrentUserId() userId:string,@CurrentUser('sessionId') sessionId:string,@Param() params:unknown){const {eventId}=validateOperationParams(configurationEventParams,params);return executeConfiguration(()=>this.queries.event({userId,sessionId},eventId));}
+diff --git a/backend/src/events/admin-configuration.dto.ts b/backend/src/events/admin-configuration.dto.ts
+index e25cd0b11232c3b9a67b9ec25f7de3bd5e151147..c40d1c18f69aa51f2ff64c1266680607dbb63fde 100644
+--- a/backend/src/events/admin-configuration.dto.ts
++++ b/backend/src/events/admin-configuration.dto.ts
+@@ -60,6 +60,24 @@ export const configurationQuery=z.object({limit:z.string().regex(/^[1-9]\d?$/).t
+   excludeClosed:z.enum(['true','false']).transform(value=>value==='true').optional()}).strict();
+ export type ConfigurationPage=z.infer<typeof configurationQuery>;
+ const precise=z.custom<string>(isPreciseInstant);
++export const configurationOperationViewSchema = z.object({
++  eventId: operationUuid,
++  name: z.string(),
++  timezone: z.string(),
++  effectivePhase,
++  observedAt: precise,
++  startsAt: precise,
++  officialEndsAt: precise,
++  operationalDeadlineAt: precise,
++  closureMode: z.enum(['immediate', 'controlled']).nullable(),
++  closureRequestedAt: precise.nullable(),
++  adminDeadlineAt: precise.nullable(),
++  externalQueueEnabled: z.boolean(),
++  activeParticipants: z.number().int().nonnegative(),
++  externalWaitingParticipants: z.number().int().nonnegative(),
++  canSetExternalQueue: z.boolean(),
++  canClose: z.boolean(),
++}).strict();
+ const checks=z.object({nameAndAccessCode:z.boolean(),validScheduleAndTimezone:z.boolean(),externalQueueConfigured:z.boolean(),hasExperienceWithAvailableStation:z.boolean(),hasVerifiedActiveStaff:z.boolean()}).strict();
+ export const configurationEventViewSchema=z.object({id:operationUuid,name:z.string(),accessCode:z.string(),timezone:z.string(),startsAt:precise,officialEndsAt:precise,operationalDeadlineAt:precise,
+   statusStored:z.enum(['scheduled','open','closing','closed']),closureMode:z.enum(['immediate','controlled']).nullable(),closureRequestedAt:precise.nullable(),adminDeadlineAt:precise.nullable(),
+diff --git a/backend/test/integration/admin-close-http.integration.test.ts b/backend/test/integration/admin-close-http.integration.test.ts
+index d191a2cf91320896dff2acce2985714707c7fb17..3ea1540bc8b7022ada20575a9d5417f4e04044b9 100644
+--- a/backend/test/integration/admin-close-http.integration.test.ts
++++ b/backend/test/integration/admin-close-http.integration.test.ts
+@@ -1,7 +1,6 @@
+ import "reflect-metadata";
+ import assert from "node:assert/strict";
+ import { randomUUID } from "node:crypto";
+-import { devNull } from "node:os";
+ import { after, before, test } from "node:test";
+ import { NestFactory } from "@nestjs/core";
+ import type { INestApplication } from "@nestjs/common";
+@@ -13,27 +12,20 @@ import supertest from "supertest";
+ import type * as schema from "../../src/database/schema";
+ import type { ParticipationsService } from "../../src/participations/participations.service";
+ import type { QueueEntryService } from "../../src/events/queue-entry.service";
+-import { assertSafeTestDatabase } from "./test-db-guard";
++import { adminEventOperationsTestHooks } from "./admin-event-operations-db-guard";
+
+-// Guarda executada ANTES de importar AppModule/providers; nunca consulta .env ou banco remoto.
+-const urls = ["DATABASE_URL", "DATABASE_DIRECT_URL", "EVENTS_TEST_DATABASE_URL"].map(name => {
+-  const value = assertSafeTestDatabase(process.env[name]), url = new URL(value);
+-  if (url.hostname !== "127.0.0.1" || url.port !== "55432" || url.pathname !== "/arenago_events_test" || url.search || url.hash || !url.username) throw new Error(`${name}: destino local explícito obrigatório.`);
+-  return value;
+-});
+-if (urls.some(value => value !== urls[0])) throw new Error("As três URLs precisam ser idênticas.");
+-process.env.DOTENV_CONFIG_PATH = devNull;
+-process.env.STAFF_IDEMPOTENCY_TTL_SECONDS = "60";
+-process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = "60";
+-process.env.ADMIN_IDEMPOTENCY_TTL_SECONDS = "60";
+-const pool = new Pool({ connectionString: urls[0], ssl: false, max: 8, connectionTimeoutMillis: 2000, statement_timeout: 20000, lock_timeout: 16000 });
++let pool: Pool;
+ let app: INestApplication, database: NodePgDatabase<typeof schema>, participations: ParticipationsService, queues: QueueEntryService;
+ let signAccess: (userId: string, sessionId: string, expired?: boolean) => string;
+ let fingerprint: typeof import("../../src/events/admin-close.service").closeFingerprint;
+ const operation = "admin_close_event", reason = "Encerramento autorizado pela organização";
+ const ids = { events: [] as string[], users: [] as string[], versions: [] as string[], games: [] as string[] };
+-before(async () => {
+-  assert.equal((await pool.query("SELECT current_database() AS name")).rows[0].name, "arenago_events_test");
++const hooks = adminEventOperationsTestHooks(async connectionString => {
++  process.env.STAFF_IDEMPOTENCY_TTL_SECONDS = "60";
++  process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = "60";
++  process.env.ADMIN_IDEMPOTENCY_TTL_SECONDS = "60";
++  pool = new Pool({ connectionString, ssl: false, max: 8, connectionTimeoutMillis: 2000,
++    statement_timeout: 20000, lock_timeout: 16000 });
+   const { AppModule } = await import("../../src/app.module"), { DRIZZLE_DATABASE } = await import("../../src/database/database.module");
+   const { ParticipationsService } = await import("../../src/participations/participations.service"), { QueueEntryService } = await import("../../src/events/queue-entry.service");
+   fingerprint = (await import("../../src/events/admin-close.service")).closeFingerprint;
+@@ -41,8 +33,8 @@ before(async () => {
+   signAccess = (userId, sessionId, expired) => tokens.signAccessToken({ userId, sessionId }, expired ? { nowMs: Date.now() - 120000, ttlSeconds: 1 } : undefined);
+   app = await NestFactory.create(AppModule, { logger: false }); app.setGlobalPrefix("api/v1"); await app.listen(0, "127.0.0.1");
+   database = app.get(DRIZZLE_DATABASE); participations = app.get(ParticipationsService); queues = app.get(QueueEntryService);
+-});
+-after(async () => {
++}, async () => {
++  if (!pool) return;
+   const errors: unknown[] = [];
+   try {
+     const c = await pool.connect();
+@@ -71,6 +63,8 @@ after(async () => {
+   for (const r of await Promise.allSettled([app?.close(), pool.end()])) if (r.status === "rejected") errors.push(r.reason);
+   if (errors.length) throw new AggregateError(errors, "Limpeza E08.8 falhou.");
+ });
++before(hooks.start);
++after(hooks.finish);
+ async function account() {
+   const userId = randomUUID(), sessionId = randomUUID(); ids.users.push(userId);
+   await pool.query(`INSERT INTO users(id,name,email,password_hash,email_verified_at,created_at,updated_at)
+@@ -229,9 +223,24 @@ async function assertNoOpen(c: Context) {
+     (SELECT count(*)::int FROM evaluations v JOIN participations p ON p.id=v.participation_id WHERE p.event_id=$1) AS evaluations`, [c.eventId])).rows[0];
+   assert.deepEqual(r, { people: 0, queues: 0, pending: 0, evaluations: 0 });
+ }
++async function operationSummary(c: Context) {
++  const response = await supertest(app.getHttpServer()).get(`/api/v1/admin/events/${c.eventId}/operation`)
++    .set("Authorization", `Bearer ${c.admin.token}`);
++  assert.equal(response.status, 200);
++  assert.equal(response.body.eventId, c.eventId);
++  return response.body;
++}
++
+ test("E08.8 PostgreSQL imediato encerra tudo atomicamente sem alterar completed/histórico/snapshots/outro evento", async () => {
+   const c = await context(), other = await context(), data = await rich(c); await rich(other); const before = await state(c), otherBefore = await state(other), r = await close(c); assert.equal(r.status, 200);
+   assert.deepEqual(Object.keys(r.body).sort(), ["closureMode", "effectiveOperationalDeadlineAt", "eventId", "externalWaitingFinalized", "newEntriesClosedAt", "status"]); assert.equal(r.body.status, "closed"); assert.equal(r.body.closureMode, "immediate"); assert.equal(r.body.externalWaitingFinalized, 1); assert.equal(r.body.newEntriesClosedAt, r.body.effectiveOperationalDeadlineAt); assert.match(r.body.newEntriesClosedAt, /\.\d{6}Z$/);
++  const summary = await operationSummary(c);
++  assert.equal(summary.effectivePhase, "closed");
++  assert.equal(summary.closureMode, "immediate");
++  assert.equal(summary.canClose, false);
++  assert.equal(summary.canSetExternalQueue, false);
++  assert.equal(summary.activeParticipants, 0);
++  assert.equal(summary.externalWaitingParticipants, 0);
+   await assertNoOpen(c); const after = await state(c); for (const key of ["snapshots", "experiences", "stations"]) assert.deepEqual(after[key], before[key]); assert.deepEqual(await state(other), otherBefore);
+   for (const p of before.people) { const next = after.people.find((n: { id: string }) => n.id === p.id); if (["finished", "canceled"].includes(p.status)) assert.deepEqual(next, p); else { assert.equal(next.status, "finished"); assert.equal(next.finish_reason, "admin_immediate"); assert.equal(next.current_queue_entry_id, null); assert.equal(Date.parse(next.finished_at), Date.parse(r.body.newEntriesClosedAt)); assert.equal(next.external_queue_order, p.external_queue_order); assert.equal(next.arena_entered_at, p.arena_entered_at); } }
+   for (const s of before.services) { const next = after.services.find((n: { id: string }) => n.id === s.id); if (s.status !== "pending") assert.deepEqual(next, s); else { assert.equal(next.status, "canceled"); assert.equal(next.cancel_reason, "admin_immediate"); assert.equal(next.resolved_by_user_id, c.admin.userId); } }
+@@ -244,7 +253,17 @@ test("E08.8 PostgreSQL imediato encerra tudo atomicamente sem alterar completed/
+   assert.equal((await pool.query("SELECT occurred_at=$2::timestamptz AS exact FROM audit_logs WHERE id=$1", [a.id, r.body.newEntriesClosedAt])).rows[0].exact, true);
+ });
+ test("E08.8 PostgreSQL controlado fecha waiting externas e preserva active com/sem fila e pending", async () => {
+-  const c = await context(), data = await rich(c), before = await state(c), body = await controlled(), r = await close(c, body); assert.equal(r.status, 200); assert.equal(r.body.status, "closing"); assert.equal(r.body.externalWaitingFinalized, 1); assert.equal(Date.parse(r.body.effectiveOperationalDeadlineAt), Date.parse(body.controlledUntilAt));
++  const c = await context(), data = await rich(c), before = await state(c), beforeSummary = await operationSummary(c);
++  const body = await controlled(), r = await close(c, body); assert.equal(r.status, 200); assert.equal(r.body.status, "closing"); assert.equal(r.body.externalWaitingFinalized, 1); assert.equal(Date.parse(r.body.effectiveOperationalDeadlineAt), Date.parse(body.controlledUntilAt));
++  const summary = await operationSummary(c);
++  assert.equal(summary.effectivePhase, "closing");
++  assert.equal(summary.closureMode, "controlled");
++  assert.equal(summary.adminDeadlineAt, r.body.effectiveOperationalDeadlineAt);
++  assert.equal(summary.canClose, false);
++  assert.equal(summary.canSetExternalQueue, false);
++  assert.ok(beforeSummary.activeParticipants > 0);
++  assert.equal(summary.activeParticipants, beforeSummary.activeParticipants);
++  assert.equal(summary.externalWaitingParticipants, 0);
+   const controlledAt = (await pool.query(`SELECT count(*)::int AS total,
+     count(*) FILTER (WHERE p.finished_at=e.closure_requested_at AND p.finish_reason='admin_controlled_external_wait_closed')::int AS exact
+     FROM participations p JOIN events e ON e.id=p.event_id WHERE p.id=$1`, [data.outside.participationId])).rows[0];
+diff --git a/backend/test/integration/admin-external-queue-http.integration.test.ts b/backend/test/integration/admin-external-queue-http.integration.test.ts
+index 967f54f3474d6c2f7c2361afed859f0a78977000..78153fb7c0d58d87c59a27f109884294b2062128 100644
+--- a/backend/test/integration/admin-external-queue-http.integration.test.ts
++++ b/backend/test/integration/admin-external-queue-http.integration.test.ts
+@@ -1,7 +1,6 @@
+ import "reflect-metadata";
+ import assert from "node:assert/strict";
+ import { randomUUID } from "node:crypto";
+-import { devNull } from "node:os";
+ import { after, before, test } from "node:test";
+ import { NestFactory } from "@nestjs/core";
+ import type { INestApplication } from "@nestjs/common";
+@@ -13,27 +12,20 @@ import type { PoolClient } from "pg";
+ import supertest from "supertest";
+ import type * as schema from "../../src/database/schema";
+ import type { ParticipationsService } from "../../src/participations/participations.service";
+-import { assertSafeTestDatabase } from "./test-db-guard";
++import { adminEventOperationsTestHooks } from "./admin-event-operations-db-guard";
+
+-// Barreira ANTES de importar AppModule/providers. Não usa .env ou banco remoto.
+-const urls=["DATABASE_URL","DATABASE_DIRECT_URL","EVENTS_TEST_DATABASE_URL"].map(name=>{
+-  const value=assertSafeTestDatabase(process.env[name]),url=new URL(value);
+-  if(url.hostname!=="127.0.0.1"||url.port!=="55432"||url.pathname!=="/arenago_events_test"||url.search||url.hash||!url.username)throw new Error(`${name}: destino local explícito obrigatório.`);
+-  return value;
+-});
+-if(urls.some(value=>value!==urls[0]))throw new Error("As três URLs explícitas precisam ser idênticas.");
+-process.env.DOTENV_CONFIG_PATH=devNull;
+-process.env.STAFF_IDEMPOTENCY_TTL_SECONDS="60";
+-process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS="60";
+-process.env.ADMIN_IDEMPOTENCY_TTL_SECONDS="60";
+-const pool=new Pool({connectionString:urls[0],ssl:false,max:6,connectionTimeoutMillis:2000,statement_timeout:15000,lock_timeout:12000});
++let pool: Pool;
+ let app:INestApplication,database:NodePgDatabase<typeof schema>,participations:ParticipationsService;
+ let signAccess:(userId:string,sessionId:string,expired?:boolean)=>string;
+ let fingerprint:(eventId:string,enabled:boolean,reason:string)=>string;
+ const operation="admin_set_external_queue",reason="Acesso direto autorizado pela organização";
+ const ids={events:[]as string[],users:[]as string[],versions:[]as string[],games:[]as string[]};
+-before(async()=>{
+-  assert.equal((await pool.query("SELECT current_database() AS name")).rows[0].name,"arenago_events_test");
++const hooks = adminEventOperationsTestHooks(async connectionString => {
++  process.env.STAFF_IDEMPOTENCY_TTL_SECONDS = "60";
++  process.env.PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = "60";
++  process.env.ADMIN_IDEMPOTENCY_TTL_SECONDS = "60";
++  pool = new Pool({ connectionString, ssl: false, max: 6, connectionTimeoutMillis: 2000,
++    statement_timeout: 15000, lock_timeout: 12000 });
+   const {AppModule}=await import("../../src/app.module");
+   const {DRIZZLE_DATABASE}=await import("../../src/database/database.module");
+   const {ParticipationsService}=await import("../../src/participations/participations.service");
+@@ -42,8 +34,8 @@ before(async()=>{
+   signAccess=(userId,sessionId,expired)=>tokens.signAccessToken({userId,sessionId},expired?{nowMs:Date.now()-120000,ttlSeconds:1}:undefined);
+   app=await NestFactory.create(AppModule,{logger:false});app.setGlobalPrefix("api/v1");await app.listen(0,"127.0.0.1");
+   database=app.get(DRIZZLE_DATABASE);participations=app.get(ParticipationsService);
+-});
+-after(async()=>{
++}, async () => {
++  if (!pool) return;
+   const errors:unknown[]=[];
+   try{
+     const c=await pool.connect();try{
+@@ -70,6 +62,8 @@ after(async()=>{
+   for(const r of await Promise.allSettled([app?.close(),pool.end()]))if(r.status==="rejected")errors.push(r.reason);
+   if(errors.length)throw new AggregateError(errors,"Limpeza E08.6 falhou.");
+ });
++before(hooks.start);
++after(hooks.finish);
+ async function account(){
+   const userId=randomUUID(),sessionId=randomUUID();ids.users.push(userId);
+   await pool.query(`INSERT INTO users(id,name,email,password_hash,email_verified_at,created_at,updated_at)
+@@ -149,6 +143,45 @@ async function waitPastCutoff(c:Context,pid:number){
+   assert.equal(crossed,true);await blocked(pid);
+ }
+
++function operationSummary(c: Context, actor: { token: string } = c.admin, eventId = c.eventId) {
++  return supertest(app.getHttpServer()).get(`/api/v1/admin/events/${eventId}/operation`).set("Authorization", `Bearer ${actor.token}`);
++}
++
++test("ADMIN-07 PostgreSQL consulta contadores isolados e observa a alternância D06", async () => {
++  const c = await context(), other = await context();
++  await person(c, "waiting");
++  await person(c, "active");
++  await person(c, "finished");
++  await person(other, "waiting");
++  await person(other, "waiting");
++  const unknown = randomUUID();
++  for (const eventId of [c.eventId, unknown]) problem(await operationSummary(c, c.staff, eventId), 403, "ADMIN_REQUIRED");
++  problem(await operationSummary(c, c.admin, unknown), 404, "RESOURCE_NOT_FOUND");
++
++  const expectCounts = async (event: Context, active: number, waiting: number, enabled: boolean) => {
++    const response = await operationSummary(event);
++    assert.equal(response.status, 200);
++    assert.equal(response.headers["cache-control"], "no-store");
++    assert.equal(response.body.eventId, event.eventId);
++    assert.equal(response.body.activeParticipants, active);
++    assert.equal(response.body.externalWaitingParticipants, waiting);
++    assert.equal(response.body.externalQueueEnabled, enabled);
++    assert.equal(response.body.canSetExternalQueue, true);
++    assert.equal(response.body.canClose, true);
++    assert.equal(Object.hasOwn(response.body, "email"), false);
++    assert.equal(Object.hasOwn(response.body, "items"), false);
++  };
++  await expectCounts(c, 1, 1, true);
++  await expectCounts(other, 0, 2, true);
++  const changed = await patch(c);
++  assert.equal(changed.status, 200);
++  assert.equal(changed.body.releasedCount, 1);
++  await expectCounts(c, 2, 0, false);
++  assert.equal((await patch(c, true)).status, 200);
++  await expectCounts(c, 2, 0, true);
++  await expectCounts(other, 0, 2, true);
++});
++
+ test("E08.6 PostgreSQL HTTP desliga e libera waiting com auditoria e instante comuns",async()=>{
+   const c=await context(),people=[await person(c),await person(c),await person(c)];for(const p of people)await snapshotProfile(p.participationId);
+   const before=await state(c),r=await patch(c);assert.equal(r.status,200);assert.equal(r.body.releasedCount,3);assert.equal(r.body.externalQueueEnabled,false);assert.match(r.body.changedAt,/Z$/);
+diff --git a/backend/test/unit/admin-configuration-http.test.ts b/backend/test/unit/admin-configuration-http.test.ts
+index 36abc8d13907f17762f5c866c2d4d932ab39ed13..05384974b6c34209ca90789422f89aafeb230dfe 100644
+--- a/backend/test/unit/admin-configuration-http.test.ts
++++ b/backend/test/unit/admin-configuration-http.test.ts
+@@ -80,6 +80,7 @@ function record(method: string, actor: Actor, input?: unknown) {
+     event: async (actor: Actor, target: string) => { record("event", actor, target); return readResult; },
+     readiness: async (actor: Actor, target: string) => { record("readiness", actor, target); return readResult; },
+     experiences: async (actor: Actor, target: string) => { record("experiences", actor, target); return readResult; },
++    operation: async (actor: Actor, target: string) => { record("operation", actor, target); return readResult; },
+     staff: async (actor: Actor, target: string) => {
+       if (staffQueryFixture) return staffQueryFixture.staff(actor, target);
+       record("staff", actor, target);
+@@ -112,6 +113,25 @@ function problem(r: supertest.Response, status: number, code: string) {
+
+ routes.push({ name: "staff", method: "get", path: `/admin/events/${eventId}/staff`, response: { eventId, items: [] }, status: 200 });
+
++test("ADMIN-07 GET Operação usa somente ator/sessão autenticados e não é armazenável em cache", async () => {
++  const route: Route = { name: "operation", method: "get", path: `/admin/events/${eventId}/operation`,
++    response: { eventId, activeParticipants: 8, externalWaitingParticipants: 0 }, status: 200 };
++  reset(route);
++  const response = await request(route).unset("Idempotency-Key").query({ userId: id(88), sessionId: id(89) });
++  assert.equal(response.status, 200);
++  assert.equal(response.headers["cache-control"], "no-store");
++  assert.deepEqual(response.body, route.response);
++  assert.deepEqual(calls, [{ method: "operation", actor: { userId, sessionId }, input: eventId }]);
++  reset(route);
++  problem(await request(route, route.path, "no-2fa"), 401, "ADMIN_2FA_REQUIRED");
++  assert.equal(calls.length, 0);
++  problem(await request(route, route.path, "staff"), 403, "ADMIN_REQUIRED");
++  reset(route);
++  failure = new AdminConfigurationError("resource_not_found");
++  problem(await request(route), 404, "RESOURCE_NOT_FOUND");
++  problem(await request(route, "/admin/events/not-a-uuid/operation"), 400, "VALIDATION_ERROR");
++});
++
+ test("ADMIN-06 HTTP aplica a autorização real do GET Staff antes de revelar a existência do evento", async () => {
+   const dialect = new PgDialect();
+   const statements: Array<{ sql: string; params: unknown[] }> = [];
+diff --git a/backend/test/unit/admin-configuration.test.ts b/backend/test/unit/admin-configuration.test.ts
+index 85031aa7ad5d498a086007358b3d5e5255e93900..4a5c9be9fb450c3e67747dd1bae4a3d68e391ec3 100644
+--- a/backend/test/unit/admin-configuration.test.ts
++++ b/backend/test/unit/admin-configuration.test.ts
+@@ -146,7 +146,8 @@ const actor={userId,sessionId};
+ const experience={id:experienceId,eventId,name:"Experiência",queueAcceptingEntries:true,lastQueueOrder:"9007199254740993",createdAt:at,updatedAt:at};
+ const station={id:stationId,experienceId,label:"Estação",availability:"available",pendingServiceSessionId:null,createdAt:at,updatedAt:at};
+ type ReadOptions={active?:boolean;admin?:boolean;valid?:boolean;revoked?:boolean;expired?:boolean;secondFactor?:boolean;emailVerified?:boolean;
+-  absent?:boolean;events?:ConfigurationRow[];experiences?:typeof experience[];stations?:typeof station[];staff?:object[]};
++  absent?:boolean;events?:ConfigurationRow[];experiences?:typeof experience[];stations?:typeof station[];staff?:object[];
++  operation?:object; failOperation?:boolean};
+ function readFixture(options:ReadOptions={}){
+   const queries:Array<{text:string;params:unknown[]}>=[];
+   const database=drizzle({async query(config:{text:string},params:unknown[]=[]){
+@@ -154,6 +155,10 @@ function readFixture(options:ReadOptions={}){
+     if(/^(begin|commit|rollback)/.test(text))return {rows:[]};
+     if(text.includes('SELECT u.is_active AS active'))return {rows:[{active:options.active??true,admin:options.admin??true,valid:options.valid??true,
+       revoked:options.revoked??false,expired:options.expired??false,secondFactor:options.secondFactor??true,emailVerified:options.emailVerified??true}]};
++    if (text.trimStart().startsWith('SELECT p.*, counts.*')) {
++      if (options.failOperation) throw new Error('consulta interrompida');
++      return { rows: options.absent ? [] : [options.operation] };
++    }
+     if(text.startsWith('SELECT id FROM events'))return {rows:options.absent?[]:[{id:eventId}]};
+     if(text.startsWith('WITH observation')||text.startsWith('SELECT * FROM (WITH observation'))return {rows:options.absent?[]:options.events??[eventRow()]};
+     if(text.startsWith('SELECT id,event_id'))return {rows:options.experiences??[experience]};
+@@ -209,6 +214,50 @@ test("ADMIN-06 bloqueia e-mail não verificado e TOTP ausente antes de ler o eve
+   assert.deepEqual(await readFixture().service.staff(actor, eventId), { eventId, items: [] });
+ });
+
++test("ADMIN-07 agrega ativa e espera externa no mesmo snapshot sem devolver dados pessoais", async () => {
++  const f = readFixture({ operation: { ...eventRow(), activeParticipants: "2", externalWaitingParticipants: "0",
++    email: "private@example.test", passwordHash: "fixture" } });
++  const result = await f.service.operation(actor, eventId);
++  assert.deepEqual(result, { eventId, name: "Arena de testes", timezone: "America/Sao_Paulo", effectivePhase: "open",
++    observedAt: at, startsAt: at, officialEndsAt: at, operationalDeadlineAt: at,
++    closureMode: null, closureRequestedAt: null, adminDeadlineAt: null, externalQueueEnabled: true,
++    activeParticipants: 2, externalWaitingParticipants: 0, canSetExternalQueue: true, canClose: true });
++  const query = f.queries[2];
++  assert.ok(query.params.includes(eventId));
++  assert.match(query.text, /e\.id=\$\d+::uuid/);
++  assert.match(query.text, /a\.event_id=p\.id AND a\.status IN \('active','waiting'\)/);
++  assert.match(query.text, /count\(\*\) FILTER \(WHERE a\.status='active'\)/);
++  assert.match(query.text, /count\(\*\) FILTER \(WHERE a\.status='waiting'\)/);
++  assert.equal(f.queries[0].text, "begin isolation level repeatable read read only");
++  assert.equal(f.queries.at(-1)?.text, "commit");
++});
++
++test("ADMIN-07 verifica Admin e TOTP antes da consulta de evento, e reverte falhas", async () => {
++  for (const [options, kind] of [[{ admin: false }, "admin_required"], [{ secondFactor: false }, "admin_2fa_required"]] as const) {
++    const f = readFixture({ ...options, absent: true });
++    await assert.rejects(f.service.operation(actor, eventId), { kind });
++    assert.equal(f.queries.length, 3);
++    assert.equal(f.queries.at(-1)?.text, "rollback");
++  }
++  const absent = readFixture({ absent: true });
++  await assert.rejects(absent.service.operation(actor, eventId), { kind: "resource_not_found" });
++  const invalid = readFixture({ operation: { ...eventRow(), activeParticipants: null, externalWaitingParticipants: "0" } });
++  await assert.rejects(invalid.service.operation(actor, eventId));
++  const broken = readFixture({ failOperation: true });
++  await assert.rejects(broken.service.operation(actor, eventId));
++  for (const f of [absent, invalid, broken]) assert.equal(f.queries.at(-1)?.text, "rollback");
++});
++
++test("ADMIN-07 permite fechamento inicial sem prontidão e bloqueia ações durante o fechamento", async () => {
++  for (const [phase, canClose] of [["scheduled", true], ["not_ready", true], ["closing", false], ["closed", false]] as const) {
++    const f = readFixture({ operation: { ...eventRow({ effectivePhase: phase, acceptingNewParticipations: false }),
++      activeParticipants: "0", externalWaitingParticipants: "0" } });
++    const result = await f.service.operation(actor, eventId);
++    assert.equal(result.canSetExternalQueue, false);
++    assert.equal(result.canClose, canClose);
++  }
++});
++
+ test("E08.13 página final vazia não inventa cursor ou eventos",async()=>{
+   const f=readFixture({events:[]});assert.deepEqual(await f.service.events(actor,configurationQuery.parse({})),{items:[],nextCursor:null});
+ });
+diff --git a/app/screens/admin/AdminEventOperationScreen.js b/app/screens/admin/AdminEventOperationScreen.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..bb5d6f19ba7e039540ca26cdefd93d8574e34072
+--- /dev/null
++++ b/app/screens/admin/AdminEventOperationScreen.js
+@@ -0,0 +1,248 @@
++import { useEffect, useRef, useState } from 'react';
++import { Text } from 'react-native';
++import { randomUUID } from 'expo-crypto';
++import { useAuth } from '../../context/AuthContext';
++import { adminIdentifier, formatAdminDate } from '../../services/adminEventsService';
++import { readAdminEventOperation } from '../../services/adminEventOperationService';
++import { adminReadOwner } from './useAdminEvents';
++import { bindOperationSession, operationError } from './adminOperationSession';
++import { allowedEventOperations, observedOperationNow, operationClock, prepareEventOperation } from './adminOperationForm';
++import AdminLiveScreen from './components/AdminLiveScreen';
++import AdminNotice from './components/AdminNotice';
++import AdminButton from './components/AdminButton';
++import AdminConfirmDialog from './components/AdminConfirmDialog';
++import { OperationCloseCard, OperationEventCard, OperationMetrics, OperationQueueCard } from './components/AdminOperationCards';
++import { ScheduleDateTime, SettingsField, SettingsSection } from './components/AdminScheduleFields';
++import { liveColors as c, liveStyles as s } from './components/AdminLiveUI';
++
++function useOperationSnapshot(navigation, eventId, owner, session) {
++  const auth = useAuth(), client = auth.httpClient;
++  const live = useRef(null), control = useRef(null);
++  const [snapshot, setSnapshot] = useState(null);
++  live.current = { auth, client, owner, eventId, session };
++
++  useEffect(() => {
++    const scope = { client, owner, eventId, session };
++    let mounted = true, started = false, generation = 0, published = null;
++    const current = () => mounted && navigation.isFocused() && live.current?.client === client &&
++      adminReadOwner(live.current?.auth) === owner && live.current?.eventId === eventId && live.current?.session === session;
++    function publish(value) {
++      published = { scope, ...value };
++      setSnapshot(published);
++    }
++    async function refresh() {
++      if (!current() || session.snapshot(eventId).denied) return;
++      const ticket = ++generation;
++      publish({ loading: true });
++      try {
++        const view = await readAdminEventOperation(client, eventId);
++        if (current() && ticket === generation) publish({ view, receivedAt: operationClock() });
++      } catch (error) {
++        if (current() && ticket === generation) publish({ error: operationError(error), denied: [401, 403].includes(error?.status) });
++      }
++    }
++    function focus() {
++      if (started || !current()) return;
++      started = true;
++      void refresh();
++    }
++    control.current = { refresh, isCurrent: value => current() && value === published && Boolean(published?.view) };
++    const offFocus = navigation.addListener('focus', focus);
++    const offBlur = navigation.addListener('blur', () => {
++      started = false;
++      generation++;
++      published = null;
++    });
++    focus();
++    return () => {
++      mounted = false;
++      control.current = null;
++      offFocus();
++      offBlur();
++    };
++  }, [navigation, client, owner, eventId, session]);
++
++  const scope = snapshot?.scope;
++  return {
++    snapshot: scope && scope.owner === owner && scope.client === client && scope.eventId === eventId &&
++      scope.session === session ? snapshot : { loading: true },
++    refresh: () => control.current?.refresh(),
++    isCurrent: value => control.current?.isCurrent(value) === true,
++  };
++}
++
++function consequences(draft) {
++  if (draft.kind === 'queue') return draft.enabled
++    ? 'A fila externa será usada por novos ingressos elegíveis. Quem já entrou continua ativo.'
++    : 'As pessoas que aguardam na fila externa passam a ativas. Novos ingressos elegíveis entram sem espera externa.';
++  return draft.mode === 'immediate'
++    ? 'Novos ingressos serão bloqueados. O servidor encerrará participações e filas abertas e cancelará chamadas pendentes, preservando atendimentos concluídos.'
++    : 'Novos ingressos e inscrições internas serão bloqueados e a espera externa será finalizada. Só operações internas admissíveis já existentes poderão continuar até o prazo.';
++}
++
++function actionTitle(draft) {
++  if (draft.kind === 'queue') return draft.enabled ? 'Ativar fila externa' : 'Desativar fila externa';
++  return draft.mode === 'immediate' ? 'Encerrar imediatamente' : 'Encerramento controlado';
++}
++
++function receiptText(receipt, timezone) {
++  const { kind, result } = receipt;
++  if (kind === 'queue') {
++    const action = result.externalQueueEnabled ? 'Fila externa ativa' : 'Fila externa desativada';
++    const at = result.changedAt ? ` Alteração registrada em ${formatAdminDate(result.changedAt, timezone)}.` : '';
++    return `${action}. Pessoas liberadas: ${result.releasedCount}.${at}`;
++  }
++  const action = result.closureMode === 'immediate' ? 'Encerramento imediato' : 'Encerramento controlado';
++  return `${action} registrado. Corte de ingressos: ${formatAdminDate(result.newEntriesClosedAt, timezone)}. ` +
++    `Prazo efetivo: ${formatAdminDate(result.effectiveOperationalDeadlineAt, timezone)}. ` +
++    `Pessoas finalizadas na espera externa: ${result.externalWaitingFinalized}.`;
++}
++
++export default function AdminEventOperationScreen({ navigation, eventId }) {
++  const auth = useAuth(), owner = adminReadOwner(auth);
++  let valid = false;
++  try { adminIdentifier(eventId); valid = true; } catch { /* Uma rota incompleta não inicia leitura. */ }
++  const session = owner && valid && auth.getAdminOperationSession?.((manager, active) =>
++    bindOperationSession(manager, randomUUID, active));
++  if (session) return <EventOperation key={owner + ':' + eventId} {...{ navigation, eventId, owner, session }} />;
++  return <AdminLiveScreen title="Operação do evento" eyebrow="PAINEL DO EVENTO" navigation={navigation} backLabel="Voltar ao painel"
++    onBack={() => valid ? navigation.popTo('AdminRealEvent', { eventId }) : navigation.goBack()} showTabs>
++    <AdminNotice tone="error" title={valid ? 'Acesso administrativo indisponível' : 'Evento não encontrado ou indisponível.'} />
++  </AdminLiveScreen>;
++}
++
++function EventOperation({ navigation, eventId, owner, session }) {
++  const { snapshot, refresh, isCurrent } = useOperationSnapshot(navigation, eventId, owner, session);
++  const { view } = snapshot;
++  const [, render] = useState(0);
++  const [draft, setDraft] = useState(null), [error, setError] = useState(null);
++  const [confirmation, setConfirmation] = useState(null);
++  const live = useRef(null);
++  live.current = { draft, confirmation, snapshot, refresh, isCurrent };
++  const state = session.snapshot(eventId);
++  const { intent, receipt } = state;
++  const blocked = state.denied || (snapshot.denied && snapshot.error);
++
++  useEffect(() => {
++    const unsubscribe = session.subscribe((id, reload) => {
++      if (id && id !== eventId) return;
++      render(n => n + 1);
++      if (reload && navigation.isFocused()) void live.current.refresh();
++    });
++    const offBlur = navigation.addListener('blur', () => {
++      live.current = { ...live.current, draft: null, confirmation: null };
++      setDraft(null);
++      setConfirmation(null);
++      setError(null);
++    });
++    return () => { unsubscribe(); offBlur(); };
++  }, [navigation, session, eventId]);
++
++  useEffect(() => {
++    if (!view || blocked || view.effectivePhase === 'closed') return undefined;
++    const now = observedOperationNow(snapshot);
++    const next = [view.startsAt, view.officialEndsAt, view.adminDeadlineAt ?? view.operationalDeadlineAt]
++      .map(at => Date.parse(at)).filter(at => at > now).sort((a, b) => a - b)[0];
++    if (!next) return undefined;
++    const timer = setTimeout(() => { void live.current.refresh(); }, Math.min(next - now + 250, 2_147_483_647));
++    return () => clearTimeout(timer);
++  }, [snapshot, view, blocked]);
++
++  const now = view ? observedOperationNow(snapshot) : 0;
++  const allowed = view ? allowedEventOperations(view, now) : {};
++  const formVisible = draft && allowed[draft.kind] && !blocked && !intent;
++  const confirmationVisible = Boolean(confirmation && formVisible && confirmation.snapshot === snapshot);
++  const isImmediate = draft?.mode === 'immediate';
++  const formIcon = draft?.kind === 'queue' ? (draft.enabled ? 'gauge' : 'pause') : isImmediate ? 'stop' : 'history';
++  function open(selection) {
++    if (!isCurrent(snapshot) || session.snapshot(eventId).intent || !allowedEventOperations(view, observedOperationNow(snapshot))[selection.kind]) return;
++    setDraft({ ...selection, reason: '', deadline: { date: '', time: '' } });
++    setConfirmation(null);
++    setError(null);
++  }
++  function edit(patch) {
++    if (live.current.draft !== draft) return;
++    setDraft({ ...draft, ...patch });
++    setError(null);
++  }
++  function cancel() {
++    live.current = { ...live.current, draft: null, confirmation: null };
++    setDraft(null);
++    setConfirmation(null);
++    setError(null);
++  }
++  function review() {
++    if (!formVisible || live.current.draft !== draft || !isCurrent(snapshot) || session.snapshot(eventId).intent) return;
++    try {
++      prepareEventOperation(view, draft, observedOperationNow(snapshot));
++      setConfirmation({ draft, snapshot });
++      setError(null);
++    } catch (invalid) { setError(invalid.message); }
++  }
++  function confirm() {
++    if (!confirmationVisible || live.current.confirmation !== confirmation || live.current.draft !== confirmation.draft ||
++        !isCurrent(confirmation.snapshot) || session.snapshot(eventId).intent) return;
++    try {
++      const command = prepareEventOperation(view, confirmation.draft, observedOperationNow(snapshot));
++      cancel();
++      void session.start(eventId, { ...command, timezone: view.timezone });
++    } catch (invalid) {
++      setConfirmation(null);
++      setError(invalid.message);
++    }
++  }
++  function retry() {
++    if (!view || blocked || !isCurrent(snapshot) || session.snapshot(eventId).intent !== intent) return;
++    void session.retry(eventId, intent);
++  }
++
++  return <AdminLiveScreen title="Operação do evento" eyebrow="PAINEL DO EVENTO"
++    subtitle="Acompanhe o funcionamento e gerencie os controles do evento."
++    navigation={navigation} backLabel="Voltar ao painel" onBack={() => navigation.popTo('AdminRealEvent', { eventId })} showTabs>
++    {blocked ? <AdminNotice tone="error" title="Sessão sem autorização" message={blocked} /> : <>
++      {intent?.status === 'sending' && <AdminNotice title="Operação administrativa em andamento" />}
++      {intent && intent.status !== 'sending' && <AdminNotice tone="warning" title="Resultado ainda não confirmado" message={state.error}>
++        <Text style={s.body}>Solicitação: {actionTitle({ kind: intent.kind, ...intent.body })}.</Text>
++        <Text style={s.body}>A consulta mostra o estado persistido. A coincidência com a ação solicitada não confirma a operação.</Text>
++        {intent.status === 'unknown' && view && <AdminButton label="Reenviar a mesma solicitação" onPress={retry} variant="secondary" />}
++      </AdminNotice>}
++      {!intent && state.error && <AdminNotice tone="error" title="Operação recusada" message={state.error} />}
++      {receipt && <AdminNotice tone="success" title="Resposta confirmada"
++        message={receiptText(receipt, view?.timezone ?? receipt.timezone ?? 'UTC')} />}
++      {snapshot.loading ? <AdminNotice title="Carregando operação..." /> : !view ?
++        <AdminNotice tone="error" title="Dados operacionais indisponíveis" message={snapshot.error}>
++          <AdminButton label="Tentar novamente" onPress={refresh} />
++        </AdminNotice> : <>
++          <OperationEventCard view={view} onRefresh={refresh} />
++          <OperationMetrics view={view} />
++          <OperationQueueCard enabled={view.externalQueueEnabled} unavailable={!allowed.queue}
++            onToggle={allowed.queue && !intent ? () => open({ kind: 'queue', enabled: !view.externalQueueEnabled }) : undefined} />
++          <OperationCloseCard onSelect={allowed.close && !intent ? mode => open({ kind: 'close', mode }) : undefined}
++            unavailableMessage={allowed.close ? undefined : view.effectivePhase === 'closing' || view.effectivePhase === 'closed'
++              ? 'O encerramento já está em curso ou concluído. O estado é atualizado pelo servidor.'
++              : 'O encerramento administrativo está indisponível nesta situação.'} />
++          {formVisible && <SettingsSection title={actionTitle(draft)} icon={formIcon} iconColor={isImmediate ? c.danger : undefined}>
++            {isImmediate ? <AdminNotice tone="warning" title="Ação crítica" message={consequences(draft)} />
++              : <Text style={s.body}>{consequences(draft)}</Text>}
++            {draft.mode === 'controlled' && <>
++              <Text style={s.body}>Escolha um prazo futuro no fuso {view.timezone}. Máximo de uma hora, limitado a {formatAdminDate(view.operationalDeadlineAt, view.timezone)}.</Text>
++              <ScheduleDateTime label="encerramento" timezone={view.timezone} instant={view.observedAt} value={draft.deadline} wideFields
++                onChange={deadline => edit({ deadline })} />
++            </>}
++            <SettingsField label="Justificativa" value={draft.reason} onChangeText={reason => edit({ reason })} />
++            {error && <AdminNotice tone="error" title={error} />}
++            <AdminButton label="Revisar operação" onPress={review} />
++            <AdminButton label="Cancelar operação" onPress={cancel} variant="secondary" />
++          </SettingsSection>}
++          {confirmationVisible && <AdminConfirmDialog visible title={`Confirmar: ${actionTitle(draft)}?`}
++            message={`${view.name}: ${consequences(draft)}`}
++            note={draft.mode === 'controlled' ? `Prazo solicitado: ${draft.deadline.date} às ${draft.deadline.time} (${view.timezone}).` : undefined}
++            confirmLabel="Confirmar operação" cancelLabel="Voltar à edição" variant={draft.kind === 'close' ? 'danger' : 'primary'}
++            onConfirm={confirm} onCancel={() => {
++              live.current = { ...live.current, confirmation: null };
++              setConfirmation(null);
++            }} />}
++        </>}
++    </>}
++  </AdminLiveScreen>;
++}
+diff --git a/app/screens/admin/adminOperationForm.js b/app/screens/admin/adminOperationForm.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..cb8ea6f22b12749c0ec9cfdde650a81758c5b471
+--- /dev/null
++++ b/app/screens/admin/adminOperationForm.js
+@@ -0,0 +1,41 @@
++import { resolveEventTime } from './adminScheduleForm';
++
++const hour = 3_600_000;
++export const operationClock = () => globalThis.performance?.now?.() ?? Date.now();
++
++export function observedOperationNow(snapshot, tick = operationClock()) {
++  return Date.parse(snapshot.view.observedAt) + Math.max(0, tick - snapshot.receivedAt);
++}
++
++export function allowedEventOperations(view, now) {
++  const beforeCut = Number.isFinite(now) && now < Date.parse(view.officialEndsAt) &&
++    now < Date.parse(view.operationalDeadlineAt);
++  const fresh = beforeCut && view.closureMode === null && view.closureRequestedAt === null && view.adminDeadlineAt === null;
++  return {
++    queue: fresh && view.canSetExternalQueue && view.effectivePhase === 'open',
++    close: fresh && view.canClose && ['scheduled', 'not_ready', 'open'].includes(view.effectivePhase),
++  };
++}
++
++export function prepareEventOperation(snapshot, draft, now) {
++  const allowed = allowedEventOperations(snapshot, now);
++  const reason = draft.reason.trim();
++  if (!reason || reason.length > 500 || /[\u0000-\u001f\u007f]/.test(reason)) {
++    throw new Error('Informe uma justificativa válida de até 500 caracteres.');
++  }
++  if (draft.kind === 'queue' && allowed.queue && draft.enabled === !snapshot.externalQueueEnabled) {
++    return { kind: 'queue', body: { enabled: draft.enabled, reason } };
++  }
++  if (draft.kind === 'close' && allowed.close) {
++    if (draft.mode === 'immediate') return { kind: 'close', body: { mode: 'immediate', reason } };
++    if (draft.mode === 'controlled') {
++      const controlledUntilAt = resolveEventTime(draft.deadline, snapshot.timezone);
++      const deadline = Date.parse(controlledUntilAt);
++      if (deadline <= now || deadline > now + hour || deadline > Date.parse(snapshot.operationalDeadlineAt)) {
++        throw new Error('Escolha um prazo futuro, de até uma hora, dentro do limite operacional do evento.');
++      }
++      return { kind: 'close', body: { mode: 'controlled', reason, controlledUntilAt } };
++    }
++  }
++  throw new Error('A operação já não está disponível. Atualize o evento.');
++}
+diff --git a/app/screens/admin/adminOperationSession.js b/app/screens/admin/adminOperationSession.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..ff784451442094e11880c2e5afbecbcf0b6d1079
+--- /dev/null
++++ b/app/screens/admin/adminOperationSession.js
+@@ -0,0 +1,114 @@
++import { adminIdentifier } from '../../services/adminEventsService';
++import { sendAdminEventOperation } from '../../services/adminEventOperationService';
++import { bindAdminSession } from './adminStaffSession';
++
++const messages = {
++  ACCOUNT_DEACTIVATED: 'A conta administrativa foi desativada.',
++  INVALID_SESSION: 'Sessão inválida. Entre novamente.',
++  SESSION_REVOKED: 'Sessão revogada. Entre novamente.',
++  SESSION_EXPIRED: 'Sessão expirada. Entre novamente.',
++  ADMIN_REQUIRED: 'O acesso de Admin global é obrigatório.',
++  ADMIN_2FA_REQUIRED: 'Confirme o segundo fator administrativo.',
++  RESOURCE_NOT_FOUND: 'Evento não encontrado ou indisponível.',
++  EVENT_ALREADY_CLOSED: 'O encerramento já foi iniciado ou o evento está encerrado.',
++  EVENT_REGISTRATION_CLOSED: 'A janela para alterar a fila externa terminou.',
++  EVENT_UNAVAILABLE: 'O evento não está disponível para esta operação.',
++  CLOSURE_DEADLINE_INVALID: 'O prazo solicitado não está dentro dos limites atuais. Consulte o evento.',
++  VALIDATION_ERROR: 'O servidor rejeitou os dados. Confira a justificativa e o prazo, quando aplicável.',
++  IDEMPOTENCY_KEY_REUSED: 'A chave identifica outra operação. Confira o estado do evento com o responsável.',
++  IDEMPOTENCY_IN_PROGRESS: 'A solicitação ainda está em processamento.',
++};
++
++export function operationError(error) {
++  if (Object.hasOwn(messages, error?.code)) return messages[error.code];
++  if ([401, 403].includes(error?.status)) return 'Sua sessão não permite esta operação. Entre novamente.';
++  if (error?.status === 404) return messages.RESOURCE_NOT_FOUND;
++  return 'Não foi possível obter uma resposta confiável. Confira a conexão e consulte o evento.';
++}
++
++export function bindOperationSession(manager, newKey, providerActive) {
++  return bindAdminSession(manager, newKey, providerActive, createOperationSession, false);
++}
++
++function definitivelyRefused(request, error, recovery) {
++  if (!recovery && !error?.outcomeUnknown) {
++    if (error?.status === 400 && error.code === 'VALIDATION_ERROR') return true;
++    if (error?.status === 404 && error.code === 'RESOURCE_NOT_FOUND') return true;
++  }
++  if (error?.status !== 409 || error.outcomeUnknown) return false;
++  // Os conflitos de encerramento abaixo só ocorrem depois da procura por replay.
++  if (request.kind === 'queue') {
++    // A janela e a prontidão da fila podem voltar a admitir uma requisição atrasada.
++    return !recovery && ['EVENT_REGISTRATION_CLOSED', 'EVENT_UNAVAILABLE'].includes(error.code);
++  }
++  return error.code === 'EVENT_ALREADY_CLOSED' ||
++    (request.body.mode === 'controlled' && error.code === 'CLOSURE_DEADLINE_INVALID');
++}
++
++export function createOperationSession(client, newKey, isCurrent, { canSettle = isCurrent, revision, renew } = {}) {
++  const events = new Map(), listeners = new Set();
++  let denied = null;
++  function publish(eventId, reload = false) {
++    if (isCurrent()) listeners.forEach(listener => listener(eventId, reload));
++  }
++  function snapshot(eventId) {
++    if (!isCurrent()) return {};
++    return { ...events.get(eventId), denied };
++  }
++  async function send(eventId, intent, recovery) {
++    if (!isCurrent() || denied) return;
++    adminIdentifier(eventId);
++    const previous = events.get(eventId)?.intent;
++    if (recovery ? previous !== recovery || recovery.status !== 'unknown' : previous) return;
++    const request = Object.freeze({
++      eventId, kind: intent.kind, body: Object.freeze({ ...intent.body }),
++      key: recovery?.key ?? newKey(), status: 'sending', timezone: intent.timezone,
++    });
++    const requestRevision = revision?.();
++    events.set(eventId, { intent: request });
++    publish(eventId);
++    const current = () => canSettle() && !denied && events.get(eventId)?.intent === request;
++    const track = (status, error) => {
++      events.set(eventId, { intent: Object.freeze({ ...request, status }), error });
++    };
++    try {
++      if (!current()) return;
++      if (!isCurrent()) { track('unknown'); return; }
++      const result = await sendAdminEventOperation(client, request);
++      if (!current()) return;
++      events.set(eventId, { receipt: { kind: request.kind, timezone: request.timezone, result } });
++      publish(eventId, true);
++    } catch (error) {
++      if (!current()) return;
++      if (error?.status === 401 && error.code === 'ACCESS_TOKEN_EXPIRED') {
++        track('unknown', 'A sessão precisa ser revalidada. O reenvio exige uma ação explícita.');
++        publish(eventId);
++        try { await renew?.(requestRevision); }
++        catch { /* A autenticação apresenta a falha de renovação. */ }
++        publish(eventId, true);
++        return;
++      }
++      const message = operationError(error);
++      if ([401, 403].includes(error?.status)) {
++        denied = message;
++        events.clear();
++        publish(null);
++        return;
++      }
++      if (error?.status === 409 && error.code === 'IDEMPOTENCY_KEY_REUSED' && !error.outcomeUnknown) {
++        track('conflict', message);
++      } else if (definitivelyRefused(request, error, recovery)) {
++        events.set(eventId, { error: message });
++      } else {
++        track('unknown', message);
++      }
++      publish(eventId, true);
++    }
++  }
++  return {
++    snapshot,
++    subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
++    start: (eventId, intent) => send(eventId, intent),
++    retry: (eventId, record) => send(eventId, record, record),
++  };
++}
+diff --git a/app/screens/admin/components/AdminOperationCards.js b/app/screens/admin/components/AdminOperationCards.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..1e00c7dab52cd75fe97280d2211ee6dc3ab2ffb5
+--- /dev/null
++++ b/app/screens/admin/components/AdminOperationCards.js
+@@ -0,0 +1,157 @@
++import { Pressable, StyleSheet, Text, View } from 'react-native';
++import { formatAdminDate } from '../../../services/adminEventsService';
++import AdminButton from './AdminButton';
++import { AdminEventPhaseBadge } from './AdminEventSummary';
++import { AdminIcon, AdminIconTile, liveColors as c, liveStyles as s } from './AdminLiveUI';
++
++export function OperationEventCard({ view, onRefresh }) {
++  const ready = view.effectivePhase === 'open';
++  const pending = view.effectivePhase === 'not_ready';
++  return <View style={[s.card, styles.card]}>
++    <View style={s.row}>
++      <AdminIconTile name="calendar" />
++      <View style={[s.grow, styles.eventIdentity]}>
++        <View style={styles.wrap}>
++          <Text style={[s.title, styles.eventName]}>{view.name}</Text>
++          <View testID="operation-phase" style={styles.fit}>
++            <AdminEventPhaseBadge phase={view.effectivePhase} />
++          </View>
++        </View>
++        {(ready || pending) && <View style={styles.statusRow}>
++          <AdminIcon name={ready ? 'check' : 'warning'} color={ready ? c.success : c.warning} size={18} />
++          <Text style={[styles.detail, s.grow]}>{ready ? 'Pronto para operar' : 'Configuração pendente'}</Text>
++        </View>}
++      </View>
++    </View>
++    <View style={styles.eventFoot}>
++      <View style={styles.deadlines}>
++        <Text style={styles.detail}>Limite operacional original: {formatAdminDate(view.operationalDeadlineAt, view.timezone)}</Text>
++        {view.closureMode === 'controlled' && view.adminDeadlineAt && <Text style={styles.detail}>
++          Prazo do encerramento controlado: {formatAdminDate(view.adminDeadlineAt, view.timezone)}
++        </Text>}
++      </View>
++      <View style={styles.fit}>
++        <AdminButton label="Atualizar operação" onPress={onRefresh} variant="ghost" compact />
++      </View>
++    </View>
++  </View>;
++}
++
++function OperationMetric({ id, label, value, icon }) {
++  return <View testID={id} style={styles.metric}>
++    <View style={styles.metricTile}><AdminIcon name={icon} size={24} /></View>
++    <View style={s.grow}>
++      <Text style={value == null ? styles.detail : styles.metricValue}>{value ?? 'Indisponível'}</Text>
++      <Text style={styles.metricLabel}>{label}</Text>
++    </View>
++  </View>;
++}
++
++export function OperationMetrics({ view }) {
++  return <View style={[s.card, styles.card]}>
++    <Text accessibilityRole="header" style={s.title}>Resumo operacional</Text>
++    <View style={styles.metrics}>
++      <OperationMetric id="operation-active" label="Participantes ativos" value={view.activeParticipants} icon="users" />
++      <OperationMetric id="operation-waiting" label="Na fila externa" value={view.externalWaitingParticipants} icon="layers" />
++    </View>
++    {view.effectivePhase === 'closed' && (view.activeParticipants > 0 || view.externalWaitingParticipants > 0) &&
++      <Text style={s.body}>O evento está encerrado. A contagem ainda reflete registros abertos no último snapshot.</Text>}
++  </View>;
++}
++
++export function OperationQueueCard({ enabled, onToggle, unavailable }) {
++  const color = enabled ? c.success : c.muted;
++  const label = enabled ? 'Desativar fila externa' : 'Ativar fila externa';
++  return <View style={[s.card, styles.card]}>
++    <View style={styles.sectionLead}>
++      <AdminIcon name="layers" size={26} />
++      <View style={s.grow}>
++        <View style={styles.wrap}>
++          <Text accessibilityRole="header" style={[s.title, styles.sectionTitle]}>Fila externa</Text>
++          <View testID="operation-queue-state" style={styles.fit}>
++            <Text style={[styles.badge, { color, borderColor: color }]}>{enabled ? 'ATIVA' : 'INATIVA'}</Text>
++          </View>
++        </View>
++        <Text style={styles.detail}>Organiza a espera de novos participantes para entrar na Arena.</Text>
++      </View>
++    </View>
++    {onToggle && <Pressable accessibilityRole="button" accessibilityLabel={label} onPress={onToggle}
++      style={({ pressed }) => [styles.queueAction, pressed && styles.pressed]}>
++      <AdminIcon name={enabled ? 'pause' : 'play'} color={c.onAccent} size={22} />
++      <Text style={styles.queueLabel}>{label}</Text>
++    </Pressable>}
++    {unavailable && <Text style={s.body}>A alteração da fila está indisponível nesta situação.</Text>}
++  </View>;
++}
++
++function ClosureAction({ title, description, icon, critical, onPress }) {
++  return <Pressable accessibilityRole="button" accessibilityLabel={title} accessibilityHint={description} onPress={onPress}
++    style={({ pressed }) => [styles.closureAction, pressed && styles.pressed]}>
++    <View style={[s.iconTile, critical && styles.criticalTile]}>
++      <AdminIcon name={icon} color={critical ? c.danger : c.accent} size={26} />
++    </View>
++    <View style={s.grow}>
++      <Text style={styles.actionTitle}>{title}</Text>
++      <Text style={styles.detail}>{description}</Text>
++    </View>
++    <AdminIcon name="chevron" color={c.muted} size={18} />
++  </Pressable>;
++}
++
++export function OperationCloseCard({ onSelect, unavailableMessage }) {
++  return <>
++    <View style={[s.card, styles.card]}>
++      <View style={styles.sectionLead}>
++        <AdminIcon name="power" color={c.danger} size={26} />
++        <View style={s.grow}>
++          <Text accessibilityRole="header" style={s.title}>Encerramento do evento</Text>
++          <Text style={styles.detail}>Finalize a operação agora ou defina um prazo para concluir os atendimentos permitidos.</Text>
++        </View>
++      </View>
++      {onSelect && <View style={styles.closureActions}>
++        <ClosureAction title="Encerrar imediatamente" icon="stop" critical onPress={() => onSelect('immediate')}
++          description="Interrompe a operação, resolve filas e chamadas pendentes e finaliza as participações." />
++        <ClosureAction title="Encerramento controlado" icon="history" onPress={() => onSelect('controlled')}
++          description="Bloqueia novas entradas e permite concluir operações admissíveis até o horário definido, dentro do prazo operacional." />
++      </View>}
++      {unavailableMessage && <Text style={s.body}>{unavailableMessage}</Text>}
++    </View>
++    <View style={[s.row, styles.notice]}>
++      <AdminIcon name="info" color={c.accent} size={21} />
++      <Text style={[styles.detail, s.grow]}>Ambas as opções de encerramento exigem justificativa e confirmação.</Text>
++    </View>
++  </>;
++}
++
++const styles = StyleSheet.create({
++  card: { marginTop: 12, padding: 14 },
++  eventIdentity: { borderLeftWidth: 1, borderLeftColor: c.muted, paddingLeft: 12 },
++  wrap: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 7 },
++  eventName: { flexGrow: 1, flexBasis: 118, minWidth: 0 },
++  statusRow: { flexDirection: 'row', alignItems: 'center', gap: 7, marginTop: 4 },
++  eventFoot: { borderTopWidth: 1, borderColor: c.border, marginTop: 10, paddingTop: 4, flexDirection: 'row',
++    flexWrap: 'wrap', alignItems: 'center', justifyContent: 'flex-end', columnGap: 8 },
++  deadlines: { flexGrow: 1, flexBasis: 136, minWidth: 0 },
++  fit: { maxWidth: '100%' },
++  detail: { color: c.muted, fontSize: 13, lineHeight: 18 },
++  metrics: { flexDirection: 'row', flexWrap: 'wrap', gap: 9, marginTop: 10 },
++  metric: { flexDirection: 'row', alignItems: 'center', gap: 8, flexGrow: 1, flexBasis: 138, minWidth: 0,
++    minHeight: 68, padding: 9, backgroundColor: c.surfaceRaised, borderColor: c.border, borderWidth: 1, borderRadius: 12 },
++  metricTile: { width: 34, height: 36, borderRadius: 9, alignItems: 'center', justifyContent: 'center', backgroundColor: c.iconFill },
++  metricValue: { color: c.text, fontSize: 26, lineHeight: 31, fontWeight: '800', fontVariant: ['tabular-nums'] },
++  metricLabel: { color: c.text, fontSize: 12, lineHeight: 16 },
++  sectionLead: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
++  sectionTitle: { flexGrow: 1, flexBasis: 106, minWidth: 0 },
++  badge: { borderWidth: 1, borderRadius: 16, paddingHorizontal: 9, paddingVertical: 3, fontSize: 11, lineHeight: 16,
++    fontWeight: '700', flexShrink: 1 },
++  queueAction: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, minHeight: 48, marginTop: 12,
++    paddingVertical: 10, paddingHorizontal: 12, borderRadius: 12, borderWidth: 1, borderColor: c.border, backgroundColor: '#7124b0' },
++  queueLabel: { color: c.onAccent, flexShrink: 1, fontSize: 15, fontWeight: '700', textAlign: 'center' },
++  closureActions: { marginTop: 12, gap: 8 },
++  closureAction: { flexDirection: 'row', alignItems: 'center', gap: 10, minHeight: 56, padding: 10,
++    borderRadius: 12, borderWidth: 1, borderColor: c.border, backgroundColor: c.surfaceRaised },
++  criticalTile: { backgroundColor: c.dangerSurface },
++  actionTitle: { color: c.text, fontSize: 15, lineHeight: 20, fontWeight: '700', marginBottom: 2 },
++  pressed: { opacity: 0.74 },
++  notice: { marginTop: 12, padding: 11, borderRadius: 12, borderWidth: 1, borderColor: c.accent, backgroundColor: c.surfaceRaised },
++});
+diff --git a/app/services/adminEventOperationService.js b/app/services/adminEventOperationService.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..128153e015ca50857f563413f77ae494f0112fc3
+--- /dev/null
++++ b/app/services/adminEventOperationService.js
+@@ -0,0 +1,59 @@
++import { adminEventPath, adminEventPhases, mutationOptions } from './adminEventsService';
++
++const explicitInstant = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/;
++const instant = value => typeof value === 'string' && explicitInstant.test(value) && Number.isFinite(Date.parse(value));
++const count = value => Number.isSafeInteger(value) && value >= 0;
++
++function instantMicros(value) {
++  const remainder = /\.\d{3}(\d{1,3})(?:Z|[+-]\d{2}:\d{2})$/.exec(value)?.[1];
++  return BigInt(Date.parse(value)) * 1000n + BigInt(remainder?.padEnd(3, '0') ?? 0);
++}
++
++function validTimezone(value) {
++  if (typeof value !== 'string' || !value.trim() || /^[+-]/.test(value)) return false;
++  try { new Intl.DateTimeFormat('pt-BR', { timeZone: value }); return true; }
++  catch { return false; }
++}
++
++export async function readAdminEventOperation(client, eventId) {
++  const result = await client.get(`${adminEventPath(eventId)}/operation`, { auth: true });
++  if (result?.eventId !== eventId || typeof result.name !== 'string' || !result.name.trim() ||
++      !validTimezone(result.timezone) || typeof result.effectivePhase !== 'string' ||
++      !Object.hasOwn(adminEventPhases, result.effectivePhase) ||
++      !['observedAt', 'startsAt', 'officialEndsAt', 'operationalDeadlineAt'].every(field => instant(result[field])) ||
++      ![null, 'immediate', 'controlled'].includes(result.closureMode) ||
++      !['closureRequestedAt', 'adminDeadlineAt'].every(field => result[field] === null || instant(result[field])) ||
++      !['externalQueueEnabled', 'canSetExternalQueue', 'canClose'].every(field => typeof result[field] === 'boolean')) {
++    throw new Error('A resposta de operação não pôde ser confirmada para este evento.');
++  }
++  return {
++    ...result,
++    activeParticipants: count(result.activeParticipants) ? result.activeParticipants : null,
++    externalWaitingParticipants: count(result.externalWaitingParticipants) ? result.externalWaitingParticipants : null,
++  };
++}
++
++export async function sendAdminEventOperation(client, { eventId, kind, body, key }) {
++  const path = adminEventPath(eventId), options = { ...mutationOptions(key), expectedStatus: 200 };
++  if (kind === 'queue') {
++    const result = await client.patch(`${path}/external-queue`, body, options);
++    if (result?.eventId !== eventId || result.externalQueueEnabled !== body.enabled || !count(result.releasedCount) ||
++        (body.enabled && result.releasedCount !== 0) ||
++        (result.changedAt === undefined ? result.releasedCount !== 0 : !instant(result.changedAt))) {
++      throw new Error('O resultado da alteração da fila não pôde ser confirmado.');
++    }
++    return result;
++  }
++  if (kind !== 'close') throw new Error('Operação desconhecida.');
++  const result = await client.post(`${path}/close`, body, options);
++  const immediate = body.mode === 'immediate';
++  if (result?.eventId !== eventId || result.closureMode !== body.mode || result.status !== (immediate ? 'closed' : 'closing') ||
++      !instant(result.newEntriesClosedAt) || !instant(result.effectiveOperationalDeadlineAt) ||
++      !count(result.externalWaitingFinalized) ||
++      (immediate ? instantMicros(result.effectiveOperationalDeadlineAt) > instantMicros(result.newEntriesClosedAt) :
++        !instant(body.controlledUntilAt) || instantMicros(result.effectiveOperationalDeadlineAt) !== instantMicros(body.controlledUntilAt) ||
++        instantMicros(result.newEntriesClosedAt) >= instantMicros(result.effectiveOperationalDeadlineAt))) {
++    throw new Error('O resultado do encerramento não pôde ser confirmado.');
++  }
++  return result;
++}
+diff --git a/app/tests/adminEventOperation.test.cjs b/app/tests/adminEventOperation.test.cjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..f377aea3a7483fa3493e201df767a35bfb526333
+--- /dev/null
++++ b/app/tests/adminEventOperation.test.cjs
+@@ -0,0 +1,197 @@
++const assert = require('node:assert/strict');
++const path = require('node:path').posix;
++const test = require('node:test');
++const { loadModule } = require('./helpers/questionnaireHarness.cjs');
++
++const modules = new Map();
++function load(file) {
++  if (!modules.has(file)) {
++    modules.set(file, loadModule(file, name =>
++      name.startsWith('.') ? load(path.join(path.dirname(file), name + '.js')) : require(name)).exports);
++  }
++  return modules.get(file);
++}
++const { readAdminEventOperation, sendAdminEventOperation } = load('services/adminEventOperationService.js');
++const { allowedEventOperations, observedOperationNow, prepareEventOperation } = load('screens/admin/adminOperationForm.js');
++const { bindOperationSession, createOperationSession } = load('screens/admin/adminOperationSession.js');
++const plain = value => JSON.parse(JSON.stringify(value));
++const id = n => 'abcdef00-0000-4000-8000-' + String(n).padStart(12, '0');
++const eventId = id(1), otherId = id(2);
++const at = '2090-11-23T13:00:00.000000Z';
++const view = overrides => ({ eventId, name: 'Arena teste', timezone: 'America/Sao_Paulo',
++  effectivePhase: 'open', observedAt: at, startsAt: '2090-11-23T12:00:00Z',
++  officialEndsAt: '2090-11-23T13:45:00Z', operationalDeadlineAt: '2090-11-23T14:15:00Z',
++  closureMode: null, closureRequestedAt: null, adminDeadlineAt: null, externalQueueEnabled: true,
++  activeParticipants: 0, externalWaitingParticipants: 4, canSetExternalQueue: true, canClose: true, ...overrides });
++const queue = { kind: 'queue', body: { enabled: false, reason: 'Entrada direta' } };
++const queueReceipt = (target = eventId) => ({ eventId: target, externalQueueEnabled: false, releasedCount: 4, changedAt: at });
++const controlled = (time, date = '23/11/2090') => ({ kind: 'close', mode: 'controlled', reason: '  Prazo de operação  ', deadline: { date, time } });
++const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
++
++test('ADMIN-07 GET usa o UUID autenticado e distingue zero de indicador indisponível', async () => {
++  const get = async (url, options) => {
++    assert.equal(url, '/admin/events/' + eventId + '/operation');
++    assert.equal(options.auth, true);
++    return view({ externalWaitingParticipants: undefined });
++  };
++  const result = await readAdminEventOperation({ get }, eventId);
++  assert.equal(result.activeParticipants, 0);
++  assert.equal(result.externalWaitingParticipants, null);
++  await assert.rejects(readAdminEventOperation({ get: async () => view({ eventId: otherId }) }, eventId), /não pôde ser confirmada/);
++  await assert.rejects(readAdminEventOperation({ get: async () => assert.fail('GET para UUID inválido') }, 'inválido'), /Identificador/);
++});
++
++test('ADMIN-07 converte o prazo no fuso do evento e valida hora, data e limite original', () => {
++  const now = observedOperationNow({ view: view(), receivedAt: 18 }, 30);
++  assert.equal(now, Date.parse(at) + 12);
++  assert.deepEqual(plain(prepareEventOperation(view(), controlled('10:30'), now)), {
++    kind: 'close', body: { mode: 'controlled', reason: 'Prazo de operação', controlledUntilAt: '2090-11-23T13:30:00.000Z' },
++  });
++  for (const draft of [controlled('09:59'), controlled('11:01'), controlled('10:30', '30/02/2090'),
++    { ...controlled('10:30'), reason: ' ' }, { ...controlled('10:30'), reason: 'quebra\nde linha' }]) {
++    assert.throws(() => prepareEventOperation(view(), draft, now));
++  }
++  assert.throws(() => prepareEventOperation(view({ operationalDeadlineAt: '2090-11-23T13:50:00Z' }), controlled('10:51'), now), /limite operacional/);
++});
++
++test('ADMIN-07 exige flags oficiais e bloqueia alterações após o corte ou encerramento', () => {
++  const now = Date.parse(at);
++  assert.deepEqual(plain(allowedEventOperations(view(), now)), { queue: true, close: true });
++  assert.deepEqual(plain(allowedEventOperations(view({ canSetExternalQueue: false, canClose: false }), now)), { queue: false, close: false });
++  assert.deepEqual(plain(allowedEventOperations(view({ effectivePhase: 'scheduled' }), now)), { queue: false, close: true });
++  for (const data of [view({ effectivePhase: 'closing' }), view({ effectivePhase: 'closed' }),
++    view({ officialEndsAt: at }), view({ closureMode: 'controlled' })]) {
++    assert.deepEqual(plain(allowedEventOperations(data, now)), { queue: false, close: false });
++  }
++  assert.throws(() => prepareEventOperation(view(), { kind: 'queue', enabled: false, reason: '' }, now), /justificativa/);
++});
++
++test('ADMIN-07 valida recibos e usa o contrato HTTP com uma chave e sem retry automático', async () => {
++  const calls = [];
++  const client = {
++    async patch(...args) { calls.push(args); return queueReceipt(); },
++    async post(...args) { calls.push(args); return { eventId, closureMode: 'immediate', status: 'closed',
++      newEntriesClosedAt: at, effectiveOperationalDeadlineAt: at, externalWaitingFinalized: 2 }; },
++  };
++  await sendAdminEventOperation(client, { eventId, ...queue, key: 'queue-id' });
++  await sendAdminEventOperation(client, { eventId, kind: 'close', body: { mode: 'immediate', reason: 'Chuva' }, key: 'close-id' });
++  assert.deepEqual(calls.map(([url, body, options]) => [url, plain(body), plain(options)]),
++    [['/admin/events/' + eventId + '/external-queue', queue.body, { auth: true, headers: { 'Idempotency-Key': 'queue-id' },
++      retryOnUnauthorized: false, outcomeUnknownOnNetworkError: true, expectedStatus: 200 }],
++    ['/admin/events/' + eventId + '/close', { mode: 'immediate', reason: 'Chuva' }, { auth: true, headers: { 'Idempotency-Key': 'close-id' },
++      retryOnUnauthorized: false, outcomeUnknownOnNetworkError: true, expectedStatus: 200 }]]);
++  await assert.rejects(sendAdminEventOperation({ patch: async () => queueReceipt(otherId) },
++    { eventId, ...queue, key: 'unconfirmed' }), /não pôde ser confirmado/);
++});
++
++test('ADMIN-07 reserva antes do transporte, não duplica escrita e recupera timeout com a mesma chave e corpo', async () => {
++  const calls = [], changes = [];
++  let keys = 0;
++  const session = createOperationSession({ async patch(url, body, options) {
++    calls.push({ url, body: plain(body), key: options.headers['Idempotency-Key'] });
++    if (calls.length === 1) throw { status: 408, code: 'REQUEST_TIMEOUT', outcomeUnknown: true };
++    return queueReceipt();
++  } }, () => 'key-' + ++keys, () => true);
++  session.subscribe((event, reload) => changes.push({ event, reload }));
++  const expected = session.start(eventId, queue);
++  await session.start(eventId, { kind: 'close', body: { mode: 'immediate', reason: 'Repetido' } });
++  await expected;
++  const uncertain = session.snapshot(eventId).intent;
++  assert.equal(uncertain.status, 'unknown');
++  assert.equal(session.snapshot(eventId).receipt, undefined);
++  assert.equal(calls.length, 1);
++  assert.equal(changes.at(-1).reload, true);
++  await session.start(eventId, queue);
++  assert.equal(calls.length, 1);
++  await session.retry(otherId, uncertain);
++  assert.equal(calls.length, 1);
++  await session.retry(eventId, uncertain);
++  assert.deepEqual(calls[0], calls[1]);
++  assert.equal(keys, 1);
++  assert.equal(session.snapshot(eventId).receipt.result.releasedCount, 4);
++  assert.equal(session.snapshot(otherId).receipt, undefined);
++});
++
++test('ADMIN-07 conflito de chave bloqueia reenvio e falha definitiva permite nova confirmação', async () => {
++  let count = 0;
++  const session = createOperationSession({ async patch() {
++    count++;
++    throw count === 1 ? { status: 409, code: 'EVENT_REGISTRATION_CLOSED' } :
++      { status: 409, code: 'IDEMPOTENCY_KEY_REUSED' };
++  } }, () => 'key-' + count, () => true);
++  await session.start(eventId, queue);
++  assert.equal(session.snapshot(eventId).intent, undefined);
++  assert.match(session.snapshot(eventId).error, /janela/);
++  await session.start(eventId, queue);
++  const conflict = session.snapshot(eventId).intent;
++  assert.equal(conflict.status, 'conflict');
++  await session.retry(eventId, conflict);
++  assert.equal(count, 2);
++});
++
++test('ADMIN-07 preserva a intenção quando o reenvio não distingue o resultado original', async () => {
++  for (const response of [
++    { status: 409, code: 'IDEMPOTENCY_IN_PROGRESS' },
++    { status: 400, code: 'VALIDATION_ERROR' },
++    { status: 404, code: 'RESOURCE_NOT_FOUND' },
++    { status: 429, code: 'HTTP_429' },
++    { status: 500, code: 'CLOSURE_DEADLINE_INVALID' },
++    { status: 409, code: 'CLOSURE_DEADLINE_INVALID', outcomeUnknown: true },
++    { status: 409, code: 'EVENT_REGISTRATION_CLOSED' }, // Não pertence ao POST de encerramento.
++  ]) {
++    const calls = [];
++    const command = prepareEventOperation(view(), controlled('10:30'), Date.parse(at));
++    const expectedCall = { url: '/admin/events/' + eventId + '/close', body: plain(command.body), key: 'mesma-chave' };
++    const session = createOperationSession({ async post(url, body, options) {
++      calls.push({ url, body: plain(body), key: options.headers['Idempotency-Key'] });
++      throw calls.length === 1 ? { status: 408, outcomeUnknown: true } : response;
++    } }, () => 'mesma-chave', () => true);
++    await session.start(eventId, command);
++    assert.equal(session.snapshot(eventId).intent.status, 'unknown');
++    assert.equal(calls.length, 1);
++    await session.retry(eventId, session.snapshot(eventId).intent);
++    assert.equal(calls.length, 2, response.code);
++    assert.deepEqual(calls[0], expectedCall, response.code);
++    assert.deepEqual(calls[1], expectedCall, response.code);
++    const { intent } = session.snapshot(eventId);
++    assert.equal(intent.status, 'unknown', response.code);
++    assert.equal(intent.key, expectedCall.key, response.code);
++    assert.deepEqual(plain(intent.body), expectedCall.body, response.code);
++    assert.equal(session.snapshot(eventId).receipt, undefined);
++    await session.start(eventId, command);
++    assert.equal(calls.length, 2);
++  }
++});
++
++test('ADMIN-07 mantém intenção após expiração sem reenvio e descarta resposta após troca de sessão', async () => {
++  let current = { isAuthenticated: true, sessionStatus: 'authenticated', identityStatus: 'verified',
++    user: { id: id(10), sessionId: id(11), roles: ['admin'] } };
++  let epoch = 0, renewals = 0, calls = 0, keys = 0;
++  const hold = deferred();
++  const manager = { getSnapshot: () => current, getIdentityRevision: () => 0, getSessionEpoch: () => epoch,
++    isIdentityVerified: () => current.identityStatus === 'verified', async refreshSession() { renewals++; },
++    client: { async patch() {
++      calls++;
++      if (calls === 1) throw { status: 401, code: 'ACCESS_TOKEN_EXPIRED' };
++      return hold.promise;
++    } } };
++  const binding = bindOperationSession(manager, () => 'key-' + ++keys, () => true);
++  const original = binding.get();
++  await original.start(eventId, queue);
++  assert.equal(renewals, 1);
++  assert.equal(calls, 1);
++  current = { ...current, identityStatus: 'checking' };
++  binding.sync();
++  assert.equal(binding.get(), null);
++  current = { ...current, identityStatus: 'verified' };
++  assert.equal(binding.get(), original);
++  const flight = original.retry(eventId, original.snapshot(eventId).intent);
++  epoch++;
++  current = { ...current, user: { ...current.user, sessionId: id(12) } };
++  binding.sync();
++  hold.resolve(queueReceipt());
++  await flight;
++  assert.equal(keys, 1);
++  assert.equal(original.snapshot(eventId).receipt, undefined);
++  assert.equal(binding.get().snapshot(eventId).receipt, undefined);
++});
+diff --git a/backend/test/integration/admin-event-operations-db-guard.ts b/backend/test/integration/admin-event-operations-db-guard.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..99946af94fb1b2138b264bc267bac91522ff627f
+--- /dev/null
++++ b/backend/test/integration/admin-event-operations-db-guard.ts
+@@ -0,0 +1,180 @@
++import { devNull } from "node:os";
++import { resolve } from "node:path";
++import { readMigrationFiles } from "drizzle-orm/migrator";
++import { Pool } from "pg";
++import { eventClosureConfiguration } from "../../src/events/event-closure.policy";
++
++const databaseName = "arenago_events_test";
++const address = "127.0.0.1";
++const port = 55432;
++const urls = ["DATABASE_URL", "DATABASE_DIRECT_URL", "EVENTS_TEST_DATABASE_URL"] as const;
++const fixtureTables = [
++  "users", "sessions", "user_roles", "profiles", "user_games", "events", "experiences", "stations",
++  "participations", "participation_profile_snapshots", "queue_entries", "service_sessions",
++  "external_entry_calls", "evaluations", "audit_logs", "idempotency_operations",
++];
++const requiredTables = [...fixtureTables, "questionnaire_versions", "games", "staff_idempotency_epochs"];
++
++interface PreflightClient {
++  query(statement: string): Promise<{ rows: Record<string, unknown>[] }>;
++  release(): void;
++}
++
++interface PreflightPool {
++  connect(): Promise<PreflightClient>;
++  end(): Promise<void>;
++}
++
++function blocked(reason: string) {
++  return new Error(`[SEGURANÇA BLOQUEADA] ${reason}`);
++}
++
++function declaredTarget(env: NodeJS.ProcessEnv) {
++  if (env.NODE_ENV !== "test") throw blocked("A integração D06/D09 exige NODE_ENV=test.");
++  let schedulerEnabled: boolean;
++  try {
++    schedulerEnabled = eventClosureConfiguration(env).enabled;
++  } catch {
++    throw blocked("Configuração inválida do scheduler de encerramento.");
++  }
++  if (schedulerEnabled) throw blocked("O scheduler de encerramento deve estar desativado.");
++
++  const connectionString = env.DATABASE_URL;
++  if (!connectionString || connectionString.trim() !== connectionString ||
++      urls.some(name => env[name] !== connectionString)) {
++    throw blocked("As três URLs de banco devem estar presentes e ser textualmente idênticas.");
++  }
++  let target: URL;
++  let role: string;
++  try {
++    target = new URL(connectionString);
++    role = decodeURIComponent(target.username);
++  } catch {
++    throw blocked("URI ou role PostgreSQL inválida.");
++  }
++  if (!["postgres:", "postgresql:"].includes(target.protocol) || target.hostname !== address ||
++      target.port !== String(port) || target.pathname !== `/${databaseName}` || !role ||
++      !target.password || /[?#\s]/u.test(connectionString)) {
++    throw blocked("Use 127.0.0.1:55432/arenago_events_test, com credenciais explícitas e sem parâmetros.");
++  }
++  return { connectionString, role };
++}
++
++async function query(client: PreflightClient, statement: string, phase: string) {
++  try {
++    return (await client.query(statement)).rows;
++  } catch {
++    throw blocked(`Falha na consulta de ${phase} do PostgreSQL dedicado.`);
++  }
++}
++
++function checkoutMigrations() {
++  try {
++    const migrations = readMigrationFiles({ migrationsFolder: resolve(__dirname, "../../drizzle") });
++    if (migrations.length !== 8) throw new Error();
++    return migrations;
++  } catch {
++    throw blocked("O checkout deve conter as oito migrations da campanha, de 0001 a 0008.");
++  }
++}
++
++async function verify(client: PreflightClient, role: string, expected: ReturnType<typeof checkoutMigrations>) {
++  const [identity] = await query(client, `SELECT current_database() AS database_name,
++    current_user AS current_role, session_user AS session_role,
++    pg_catalog.host(pg_catalog.inet_server_addr()) AS server_address,
++    pg_catalog.inet_server_port() AS server_port,
++    r.rolsuper, r.rolcreatedb, r.rolcreaterole, r.rolreplication, r.rolbypassrls,
++    EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members m WHERE m.member = r.oid) AS role_membership
++    FROM pg_catalog.pg_roles r WHERE r.rolname = session_user`, "identidade");
++  if (identity?.database_name !== databaseName || identity.server_address !== address || identity.server_port !== port) {
++    throw blocked("Banco, endereço ou porta efetiva diverge do destino dedicado.");
++  }
++  if (identity.current_role !== role || identity.session_role !== role) {
++    throw blocked("current_user e session_user devem corresponder à role declarada na URI.");
++  }
++  if ([identity.rolsuper, identity.rolcreatedb, identity.rolcreaterole, identity.rolreplication,
++    identity.rolbypassrls, identity.role_membership].some(value => value !== false)) {
++    throw blocked("A role dedicada deve estar sem privilégios administrativos ou vínculo com outras roles.");
++  }
++
++  const [schema] = await query(client, `SELECT count(*) = ${requiredTables.length} AS ready
++    FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
++    WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')
++      AND c.relname IN (${requiredTables.map(table => `'${table}'`).join(", ")})`, "tabelas");
++  if (schema?.ready !== true) throw blocked("Tabelas necessárias à integração ausentes.");
++
++  const migrations = await query(client, `SELECT created_at::text AS migration, hash
++    FROM drizzle.__drizzle_migrations ORDER BY created_at`, "histórico de migrations");
++  if (migrations.length !== expected.length || migrations.some((row, index) =>
++    row.migration !== String(expected[index].folderMillis) || row.hash !== expected[index].hash)) {
++    throw blocked("Histórico ou hashes de migrations diferentes do checkout.");
++  }
++
++  const [initial] = await query(client, `SELECT (${fixtureTables.map(table =>
++    `EXISTS (SELECT 1 FROM public.${table})`).join(" OR ")}) AS occupied`, "estado inicial");
++  if (initial?.occupied !== false) throw blocked("Há dados operacionais preexistentes nas tabelas de fixtures.");
++}
++
++async function preflight(pool: PreflightPool, role: string, expected: ReturnType<typeof checkoutMigrations>) {
++  try {
++    let client: PreflightClient;
++    try {
++      client = await pool.connect();
++    } catch {
++      throw blocked("Não foi possível conectar para pré-verificar o PostgreSQL dedicado.");
++    }
++    try {
++      await query(client, "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY", "abertura da transação somente leitura");
++      try {
++        await verify(client, role, expected);
++      } finally {
++        await query(client, "ROLLBACK", "encerramento da transação somente leitura");
++      }
++    } finally {
++      try {
++        client.release();
++      } catch {
++        throw blocked("Falha ao liberar a conexão de pré-verificação.");
++      }
++    }
++  } finally {
++    try {
++      await pool.end();
++    } catch {
++      throw blocked("Falha ao encerrar o pool de pré-verificação.");
++    }
++  }
++}
++
++export function adminEventOperationsTestHooks(
++  initialize: (connectionString: string) => Promise<void>,
++  cleanup: () => Promise<void>,
++  createPreflightPool: (connectionString: string) => PreflightPool = connectionString => new Pool({
++    connectionString, ssl: false, max: 1, connectionTimeoutMillis: 2000, statement_timeout: 5000,
++  }),
++  env: NodeJS.ProcessEnv = process.env,
++) {
++  let authorized = false;
++  return {
++    async start() {
++      const { connectionString, role } = declaredTarget(env);
++      const migrations = checkoutMigrations();
++      let pool: PreflightPool;
++      try {
++        pool = createPreflightPool(connectionString);
++      } catch {
++        throw blocked("Não foi possível preparar o pool de pré-verificação.");
++      }
++      await preflight(pool, role, migrations);
++      if (declaredTarget(env).connectionString !== connectionString) {
++        throw blocked("O destino declarado mudou durante a pré-verificação.");
++      }
++      env.DOTENV_CONFIG_PATH = devNull;
++      authorized = true;
++      await initialize(connectionString);
++    },
++    async finish() {
++      if (authorized) await cleanup();
++    },
++  };
++}
+diff --git a/backend/test/unit/admin-event-operations-db-guard.test.ts b/backend/test/unit/admin-event-operations-db-guard.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..55fc0847a85c58133ee9b3be44046ffd77df2d2a
+--- /dev/null
++++ b/backend/test/unit/admin-event-operations-db-guard.test.ts
+@@ -0,0 +1,147 @@
++import assert from "node:assert/strict";
++import { devNull } from "node:os";
++import { resolve } from "node:path";
++import test from "node:test";
++import { readMigrationFiles } from "drizzle-orm/migrator";
++import { adminEventOperationsTestHooks } from "../integration/admin-event-operations-db-guard";
++
++const secret = "mock-secret-never-echo";
++const uri = `postgresql://event_runner:${secret}@127.0.0.1:55432/arenago_events_test`;
++const migrationRows = readMigrationFiles({ migrationsFolder: resolve(__dirname, "../../drizzle") })
++  .map(migration => ({ migration: String(migration.folderMillis), hash: migration.hash }));
++const identity = {
++  database_name: "arenago_events_test", current_role: "event_runner", session_role: "event_runner",
++  server_address: "127.0.0.1", server_port: 55432, rolsuper: false, rolcreatedb: false,
++  rolcreaterole: false, rolreplication: false, rolbypassrls: false, role_membership: false,
++};
++
++function harness({
++  envOverrides = {}, identityOverrides = {}, migrations = migrationRows,
++  ready = true, occupied = false, failAt,
++}: {
++  envOverrides?: NodeJS.ProcessEnv;
++  identityOverrides?: Partial<typeof identity>;
++  migrations?: typeof migrationRows;
++  ready?: boolean;
++  occupied?: boolean;
++  failAt?: string;
++} = {}) {
++  const env = { NODE_ENV: "test", DATABASE_URL: uri, DATABASE_DIRECT_URL: uri,
++    EVENTS_TEST_DATABASE_URL: uri, DOTENV_CONFIG_PATH: "development.env", ...envOverrides };
++  const calls: string[] = [];
++  const fail = (step: string) => {
++    calls.push(step);
++    if (step === failAt) throw new Error(`Driver interno: ${uri}`);
++  };
++  const hooks = adminEventOperationsTestHooks(async target => {
++    assert.equal(target, uri);
++    assert.equal(env.DOTENV_CONFIG_PATH, devNull);
++    fail("bootstrap");
++  }, async () => fail("cleanup"), target => {
++    assert.equal(target, uri);
++    fail("pool");
++    return {
++      async connect() {
++        fail("connect");
++        return {
++          async query(sql) {
++            if (sql === "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY" || sql === "ROLLBACK") {
++              fail(sql);
++              return { rows: [] };
++            }
++            assert.match(sql, /^SELECT /);
++            if (sql.includes("current_database()")) {
++              fail("identity");
++              return { rows: [{ ...identity, ...identityOverrides }] };
++            }
++            if (sql.includes("pg_catalog.pg_class")) {
++              fail("tables");
++              return { rows: [{ ready }] };
++            }
++            if (sql.includes("drizzle.__drizzle_migrations")) {
++              fail("migrations");
++              return { rows: migrations };
++            }
++            assert.match(sql, /FROM public\.external_entry_calls/);
++            fail("initial");
++            return { rows: [{ occupied }] };
++          },
++          release() { fail("release"); },
++        };
++      },
++      async end() { fail("end"); },
++    };
++  }, env);
++  return { hooks, calls, env };
++}
++
++const alternate = (url: string) => ({
++  DATABASE_URL: url, DATABASE_DIRECT_URL: url, EVENTS_TEST_DATABASE_URL: url,
++});
++for (const [name, envOverrides, reason] of [
++  ["rejeita ambiente de produção", { NODE_ENV: "production" }, /NODE_ENV=test/],
++  ["rejeita scheduler habilitado", { EVENT_CLOSURE_JOB_TEST_ENABLED: "true" }, /scheduler.*desativado/],
++  ["rejeita política inválida", { EVENT_CLOSURE_JOB_TEST_ENABLED: "1" }, /Configuração inválida/],
++  ["rejeita URL ausente", { EVENTS_TEST_DATABASE_URL: undefined }, /textualmente idênticas/],
++  ["rejeita URLs divergentes", { DATABASE_DIRECT_URL: uri + "?host=other" }, /textualmente idênticas/],
++  ["rejeita banco ADMIN-06", alternate(uri.replace("arenago_events_test", "arenago_roles_test")), /destino|127\.0\.0\.1/],
++  ["rejeita porta diferente", alternate(uri.replace(":55432", ":5432")), /127\.0\.0\.1/],
++  ["rejeita host remoto", alternate(uri.replace("127.0.0.1", "remote.example.test")), /127\.0\.0\.1/],
++] as const) {
++  test(`ADMIN-07 guarda ${name} antes de abrir o pool`, async () => {
++    const { hooks, calls, env } = harness({ envOverrides });
++    await assert.rejects(hooks.start, reason);
++    await hooks.finish();
++    assert.deepEqual(calls, []);
++    assert.equal(env.DOTENV_CONFIG_PATH, "development.env");
++  });
++}
++
++for (const [name, options, reason] of [
++  ["banco efetivo", { identityOverrides: { database_name: "other" } }, /destino dedicado/],
++  ["porta efetiva", { identityOverrides: { server_port: 5432 } }, /destino dedicado/],
++  ["endereço efetivo", { identityOverrides: { server_address: "::1" } }, /destino dedicado/],
++  ["usuário efetivo", { identityOverrides: { current_role: "other" } }, /current_user e session_user/],
++  ["usuário da sessão", { identityOverrides: { session_role: "other" } }, /current_user e session_user/],
++  ["superusuário", { identityOverrides: { rolsuper: true } }, /privilégios administrativos/],
++  ["membro de outra role", { identityOverrides: { role_membership: true } }, /vínculo com outras roles/],
++  ["tabela ausente", { ready: false }, /Tabelas necessárias/],
++  ["migration ausente", { migrations: migrationRows.slice(0, 7) }, /Histórico ou hashes/],
++  ["migration divergente", { migrations: migrationRows.map(row => ({ ...row, hash: "other" })) }, /Histórico ou hashes/],
++  ["dados preexistentes", { occupied: true }, /dados operacionais preexistentes/],
++] as const) {
++  test(`ADMIN-07 guarda rejeita ${name} antes do bootstrap`, async () => {
++    const { hooks, calls } = harness(options);
++    await assert.rejects(hooks.start, reason);
++    await hooks.finish();
++    assert.deepEqual(calls.slice(-3), ["ROLLBACK", "release", "end"]);
++    assert.equal(calls.includes("bootstrap") || calls.includes("cleanup"), false);
++  });
++}
++
++for (const failAt of ["pool", "connect", "identity", "ROLLBACK", "release", "end"]) {
++  test(`ADMIN-07 guarda sanitiza falha em ${failAt} e impede bootstrap e limpeza`, async () => {
++    const { hooks, calls } = harness({ failAt });
++    await assert.rejects(hooks.start, error => {
++      assert.ok(error instanceof Error);
++      assert.match(error.message, /SEGURANÇA BLOQUEADA/);
++      assert.equal(String(error).includes(secret), false);
++      assert.equal(error.cause, undefined);
++      return true;
++    });
++    await hooks.finish();
++    if (failAt !== "pool") assert.equal(calls.at(-1), "end");
++    if (!["pool", "connect"].includes(failAt)) assert.deepEqual(calls.slice(-2), ["release", "end"]);
++    assert.equal(calls.includes("bootstrap") || calls.includes("cleanup"), false);
++  });
++}
++
++for (const enabled of [undefined, "false"]) {
++  test(`ADMIN-07 guarda encerra a pré-verificação antes do bootstrap com scheduler ${enabled ?? "omitido"}`, async () => {
++    const { hooks, calls } = harness({ envOverrides: { EVENT_CLOSURE_JOB_TEST_ENABLED: enabled } });
++    await hooks.start();
++    await hooks.finish();
++    assert.deepEqual(calls, ["pool", "connect", "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
++      "identity", "tables", "migrations", "initial", "ROLLBACK", "release", "end", "bootstrap", "cleanup"]);
++  });
++}
+diff --git a/docs/ADMIN_07_IMPLEMENTACAO.md b/docs/ADMIN_07_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..00a6f88083f984215e3a9f458c0722d74a85387d
+--- /dev/null
++++ b/docs/ADMIN_07_IMPLEMENTACAO.md
+@@ -0,0 +1,413 @@
++# ADMIN-07 — Operação do evento e encerramentos
++
++## Escopo e decisões iniciais
++
++Branch `feature/admin-event-operations`, base local e remota confirmada em `95a550943b326e2fdd6f52dcb6100576f6d6d570`, com índice vazio. Os três utilitários de homologação da ADMIN-06 não estavam presentes neste checkout na inspeção inicial.
++
++- Substituir o destino informativo de Operação na pilha Admin existente. Reutilizar o sistema visual, a identidade verificada, o formulário de datas com fuso do evento e os contratos HTTP existentes.
++- Adicionar uma leitura administrativa por evento. As consultas atuais não retornam os dois totais; as rotas Staff de fila têm outro escopo de autorização e não são fonte para esta área.
++- Usar os comandos existentes de fila externa (D06) e fechamento (D07/D09), que decidem autorização, cortes, idempotência, auditoria e efeitos sobre Staff e Participante. C-04, C-12 e C-14 permanecem regras do domínio.
++- Guardar uma intenção de operação por evento no escopo autenticado e preservar a chave e o corpo para recuperação explícita. A consulta real mostra a situação atual; coincidência de estado sozinha não confirma autoria de uma operação incerta.
++- O backend ainda recusa outra intenção de fechamento após o início do controlado. Antecipação, mudança de prazo e reabertura ficam fora da ADMIN-07.
++
++Referências lidas: [panorama e decisões](PANORAMA_ARENAGO_IMPLEMENTACAO.md), [arquitetura D06/D07/D09](ARQUITETURA_BACKEND_ARENAGO.md) e controllers/DTOs em `backend/src/events`.
++
++## Implementação e contratos
++
++A área **Painel Individual do Evento → Operação do evento** abre a tela real para o UUID selecionado, na mesma pilha e com as abas existentes. A tela usa o cabeçalho, os cards, os botões e o diálogo de confirmação do Admin. BI continua no destino informativo.
++
++| Contrato | Uso |
++| --- | --- |
++| `GET /api/v1/admin/events/:eventId/operation` | Leitura nova com `Cache-Control: no-store`, Admin global e TOTP. Revalida conta e sessão antes de consultar o evento. Fase, configuração, instante observado, prazos, indicadores e disponibilidade das ações são devolvidos no mesmo snapshot somente leitura. |
++| `PATCH /api/v1/admin/events/:eventId/external-queue` | Contrato existente com `{ enabled, reason }`. Valida evento, estado e contagem retornados. `changedAt` é opcional no no-op. |
++| `POST /api/v1/admin/events/:eventId/close` | Contrato existente com `{ mode, reason }` e `controlledUntilAt` somente no modo controlado. O recibo traz modo, fase no momento da confirmação, corte de ingressos, prazo efetivo e quantidade finalizada da espera externa. |
++
++A consulta reutiliza a projeção administrativa e agrega somente participações `active` e `waiting` do evento, em campos distintos. Não retorna identificação dos participantes, histórico individual ou código de acesso. Zero é exibido quando retornado no snapshot. Um indicador ausente ou inválido aparece como indisponível. Se a fase já for encerrada e ainda houver registros abertos persistidos, a tela qualifica o significado da contagem enquanto o backend conclui a transição.
++
++A fila externa só oferece mudanças quando a leitura indica disponibilidade e o evento está antes do corte. Desativar libera os `waiting` pelo comando D06. A reconciliação de chamadas pendentes integra a mesma escrita via trigger já existente da migration `0008`. Reativar altera novos ingressos elegíveis e preserva quem já está ativo.
++
++O encerramento imediato informa o efeito sobre ingressos, filas, chamadas e participações. O controlado exige prazo no fuso do evento, futuro, limitado a uma hora a partir do instante estimado do servidor e ao prazo operacional original. O servidor valida novamente o instante efetivo após os locks. A espera externa é finalizada pelo servidor no início do controlado e as operações internas admissíveis já existentes podem prosseguir. D07/C-04, C-12 e C-14 seguem nos serviços existentes. A UI bloqueia novas ações de encerramento quando a fase efetiva já é `closing` ou `closed`. Não há ação de antecipar, reabrir ou alterar o prazo de um encerramento em curso. A divergência conhecida de D09 permanece aberta para decisão separada.
++
++As duas escritas exigem justificativa de até 500 caracteres e uma confirmação contextual. O componente revalida o snapshot, o prazo e o foco antes de enviar. Reconsultas ocorrem ao entrar, recuperar foco, solicitar atualização ou chegar a uma transição temporal prevista. O estado do servidor continua sendo a fonte da fase efetiva. A tela não decreta fechamento com base no relógio local.
++
++## Idempotência e recuperação
++
++A sessão de operação reutiliza o vínculo de identidade administrativa mantido pelo `AuthProvider`, com um registro próprio por evento. Staff mantém seu registro e os critérios anteriores. A intenção é reservada antes do transporte e guarda chave e corpo imutáveis. Enquanto houver envio, resultado incerto ou conflito de chave, uma nova intenção no mesmo evento fica bloqueada. Nenhuma escrita é repetida automaticamente.
++
++Timeout, resultado em processamento e resposta incompatível disparam uma nova leitura do estado e mantêm a intenção recuperável. O reenvio explícito exige leitura válida do mesmo evento e usa a chave e o corpo originais. Um estado coincidente na leitura não confirma autoria. Um recibo válido é exibido separadamente e permanece visível se a reconsulta falhar por conectividade. A perda de acesso oculta os dados e ações. Uma revalidação transitória conserva a intenção da mesma sessão, enquanto logout, perda efetiva de papel ou troca de sessão, conta ou cliente descartam os resultados antigos. O registro fica em memória durante a vida do provedor. Após encerramento do app, a recuperação disponível é a consulta do estado persistido.
++
++## Arquivos da entrega
++
++| Área | Arquivos |
++| --- | --- |
++| Tela, formulário e registro | `app/screens/admin/AdminEventOperationScreen.js`, `app/screens/admin/adminOperationForm.js`, `app/screens/admin/adminOperationSession.js`, `app/screens/admin/components/AdminOperationCards.js` |
++| Apresentação compartilhada do Admin | `app/screens/admin/components/AdminLiveScreen.js`, `app/screens/admin/components/AdminLiveUI.js` |
++| Integração com navegação e sessão | `app/context/AuthContext.js`, `app/screens/admin/AdminEventManagementInfoScreen.js`, `app/screens/admin/AdminRealEventScreen.js`, `app/screens/admin/adminStaffSession.js`, `app/screens/admin/components/AdminSelectedEvent.js` |
++| Cliente e leitura persistida | `app/services/adminEventOperationService.js`, `backend/src/events/admin-configuration.controller.ts`, `backend/src/events/admin-configuration-query.service.ts`, `backend/src/events/admin-configuration.dto.ts` |
++| Testes frontend | `app/tests/adminEventOperation.test.cjs`, `app/tests/adminRealEvents.test.cjs`, `app/tests/roleRoutingIntegration.test.cjs` |
++| Testes backend | `backend/test/unit/admin-configuration.test.ts`, `backend/test/unit/admin-configuration-http.test.ts`, `backend/test/integration/admin-external-queue-http.integration.test.ts`, `backend/test/integration/admin-close-http.integration.test.ts` |
++| Relatório e evidência | Este relatório e `qa-evidence/ADMIN_07-changes.diff`. O patch não inclui a si próprio. |
++
++## Evidências e validações pendentes
++
++- **Inspeção estática nesta rodada:** parser Babel em 12 arquivos JS/JSX/CJS e parser TypeScript em sete TS, com 102 referências relativas conferidas. `git diff --check` passou. A evidência usa o HEAD indicado na abertura. A conferência do patch consiste em inventário, varredura de segredos, aplicação em modo de checagem contra a base e verificação reversa contra o working tree, sem tocar no índice real.
++- **Testes preparados:** cliente HTTP, prazo e fuso, ausência de contagem fictícia, idempotência, falhas e isolamento de sessão no frontend. A integração simulada de navegação cobre cancelar, ativar/desativar, imediato/controlado, reentrada, mensagens, reconsulta e respostas antigas. Backend cobre autorização, validação do UUID, TOTP, falha de consulta, snapshot e projeção mínima. Nas suítes D06/D09 foram preparados casos e asserções da leitura antes e depois das escritas, com isolamento entre eventos.
++- **Execuções automatizadas, validação pelo responsável e Expo Go:** pendentes para esta versão. Nenhuma suíte, typecheck, migration, seed ou banco foi executado nesta rodada.
++
++### Campanha Luna Medium sem banco
++
++Com as dependências já instaladas, rodar a partir de `app`:
++
++```powershell
++$env:NODE_ENV = 'test'
++node --test --test-reporter=spec tests/adminEventOperation.test.cjs tests/adminRealEvents.test.cjs tests/roleRoutingIntegration.test.cjs tests/adminEventSettings.test.cjs tests/adminEventStructure.test.cjs tests/adminEventStaff.test.cjs tests/auth.test.cjs tests/httpClientTimeout.test.cjs
++```
++
++O harness de navegação usa as dependências do snapshot de `qa/regression`. Expandir a campanha para `npm.cmd test` em `app` e registrar a contagem, falhas, skips e código de saída.
++
++Em um PowerShell separado, em `backend`, usar configuração de teste isolada e endpoints locais sem serviço para os testes simulados. Conferir que a sonda `os.userInfo()` funciona no Node compatível antes de invocar `tsx`. Não imprimir o retorno da sonda.
++
++```powershell
++$env:NODE_ENV = 'test'
++$env:DOTENV_CONFIG_PATH = 'NUL'
++$env:DATABASE_URL = 'postgresql://unit:unit@127.0.0.1:1/arenago_unit'
++$env:DATABASE_DIRECT_URL = $env:DATABASE_URL
++$env:EVENTS_TEST_DATABASE_URL = $env:DATABASE_URL
++$env:ADMIN_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:STAFF_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS = '60'
++$env:EVALUATION_IDEMPOTENCY_TTL_SECONDS = '60'
++Remove-Item Env:RESEND_API_KEY, Env:RESEND_FROM, Env:EMAIL_VERIFICATION_CONFIRMATION_URL -ErrorAction SilentlyContinue
++npm.cmd run typecheck:test
++& .\node_modules\.bin\tsc.cmd --noEmit --incremental false
++& .\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test --test-concurrency=1 test/unit/admin-configuration.test.ts test/unit/admin-configuration-http.test.ts test/unit/admin-external-queue.test.ts test/unit/admin-external-queue-http.test.ts test/unit/admin-close.test.ts test/unit/admin-close-http.test.ts
++```
++
++### PostgreSQL e Expo Go
++
++Exigir autorização própria para a campanha. As duas suítes existentes D06/D09 aceitam `127.0.0.1:55432/arenago_events_test`. Antes da execução, conferir por leitura o listener PostgreSQL local, a identidade do banco e da role, as três URLs idênticas, as migrations já aplicadas e o estado anterior. Usar apenas uma instância dedicada e descartável. Configurar `NODE_ENV=test`, `DOTENV_CONFIG_PATH=NUL`, os quatro TTLs de teste e o scheduler de fechamento desabilitado. O `AppModule` pode inserir dados canônicos de jogos e questionário. Conferir a limpeza por UUID após a execução e restaurar o ambiente. Nenhuma instância Neon ou base com dados de homologação persistentes faz parte desse plano.
++
++```powershell
++& .\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test --test-concurrency=1 test/integration/admin-external-queue-http.integration.test.ts test/integration/admin-close-http.integration.test.ts
++```
++
++A campanha cobre fila ocupada, reativação sem retorno à espera, imediato com chamadas internas pendentes e atendimento concluído, controlado com operação interna residual, auditoria, idempotência, concorrência e rollback. O caso físico com chamada externa pendente deve ser conferido em ambiente autorizado, assim como o corte visto pelo Participante, a resolução residual pelo Staff, o prazo no fuso do evento e o retorno à tela após queda de rede.
++
++O aceite depende dos resultados dessas validações e da revisão do responsável.
++
++## Refinamento visual da Operação do evento
++
++A referência fornecida na rodada de refinamento organiza a operação em quatro cards. A versão inicial usava seções genéricas, contagens em texto corrido e botões de encerramento independentes, incluindo um botão vermelho preenchido. O ajuste planejado aproxima a hierarquia da referência com identificação horizontal do evento, indicadores em cartões, badge e ação roxa da fila e itens de encerramento com descrições, ícones e chevrons.
++
++O cabeçalho compartilhará a marca e o retorno do Admin, com o sobretítulo **PAINEL DO EVENTO**. A barra de abas existente continua sendo a referência de navegação. O snapshot oficial continua sendo a única fonte dos estados e números da tela. A projeção do servidor só usa `open` se o evento estiver pronto e usa `not_ready` quando, após o início previsto, há configuração pendente. As demais fases não permitem deduzir prontidão, portanto o card exibirá somente a fase e os prazos nesses casos.
++
++### Ajustes realizados
++
++- O cabeçalho recebeu o sobretítulo e o subtítulo próprios da Operação. O layout compartilhado mantém o retorno à esquerda, a marca Admin à direita e logout na Home. A barra segue com as três abas Home, Histórico e BI.
++- `AdminOperationCards` reutiliza `AdminIcon`, `AdminIconTile`, `AdminEventPhaseBadge`, `AdminButton` e os estilos e cores do Admin. O card do evento combina calendário, nome com quebra, badge da fase e prontidão quando inferível pelo contrato atual. Os prazos e a atualização manual permanecem no rodapé do card.
++- As duas contagens oficiais aparecem em indicadores independentes, com zero preservado e rótulo **Indisponível** para valores ausentes. A disposição lado a lado se adapta por quebra de linha conforme o espaço. A ressalva para registros abertos em evento encerrado foi preservada.
++- A fila tem badge de estado, descrição e ação roxa disponível conforme os mesmos controles. As duas opções de encerramento viraram linhas com descrição, ícone e chevron. A ação imediata usa destaque vermelho no ícone. O aviso sobre justificativa e confirmação fica abaixo do card.
++- As consultas, sessão, condições de exibição das ações, formulário, confirmações, idempotência e recuperação continuam na tela existente. Nenhuma chamada ou contrato foi acrescentado. As ações e o formulário continuam no mesmo `ScrollView`, acima das abas fixas.
++
++### Arquivos e verificações desta rodada
++
++- Apresentação em `app/screens/admin/AdminEventOperationScreen.js`, `app/screens/admin/components/AdminOperationCards.js` (novo), `app/screens/admin/components/AdminLiveScreen.js` e `app/screens/admin/components/AdminLiveUI.js`. Assertivas ajustadas em `app/tests/roleRoutingIntegration.test.cjs`. Relatório e evidência consolidados nos caminhos originais.
++- Os testes de integração simulada agora conferem valores e rótulos dentro dos respectivos indicadores, badges de fase e fila, prontidão ausente quando a fase não confirmar, abas e ancestrais de rolagem das ações. As verificações de UUID, métodos, justificativas, confirmação, prazo, bloqueios, isolamento e idempotência foram preservadas.
++- Inspeção estática com resultado satisfatório: parser de 15 arquivos JS/JSX/CJS e sete TS, resolução de 113 referências relativas, comparação dos trechos de consulta, sessão, retornos de estado e formulário com a evidência anterior e `git diff --check`. A evidência usa a mesma base e representa 23 arquivos, sem incluir o próprio patch. Foi conferida por `git apply --cached --check --whitespace=error` em índice isolado e por `git apply --reverse --check` contra o working tree. O índice real permaneceu vazio.
++- Nenhuma suíte automatizada foi executada na rodada visual. Na campanha com Luna Medium, a partir de `app`, usar `NODE_ENV=test` e `node --test --test-reporter=spec --test-name-pattern 'ADMIN-07' tests/roleRoutingIntegration.test.cjs` para a integração focada, além da regressão já documentada.
++- A abertura anterior no Expo Go foi informada pelo responsável e antecede este refinamento. A comparação visual em aparelho segue pendente, incluindo legibilidade e contraste, quebra de nome e indicadores, interação, rolagem até o aviso, área segura da barra e comportamento em iPhones e Android com larguras e escalas de texto diferentes.
++
++### Acabamento visual dos formulários
++
++O responsável informou ter aprovado a composição principal no Expo Go. Nesta rodada, os ajustes se concentraram nos formulários que aparecem após escolher uma ação.
++
++- **Desativar fila externa** usa o ícone de pausa. **Encerrar imediatamente** usa o ícone de parada em vermelho e apresenta as consequências existentes em um aviso discreto de ação crítica, no estilo de atenção do Admin. **Encerramento controlado** usa o relógio.
++- No encerramento controlado, data e hora passam a ocupar linhas separadas quando o espaço do card é insuficiente para os dois campos lado a lado. Os textos dos seletores podem quebrar linha e a área de toque de 44 pontos foi preservada. O ajuste de largura é específico desse formulário.
++- Arquivos de interface alterados: `app/screens/admin/AdminEventOperationScreen.js`, `app/screens/admin/components/AdminScheduleFields.js` e `app/screens/admin/components/AdminLiveUI.js`. A composição principal, os seletores nativos, as validações, o fluxo de confirmação e o envio das operações foram preservados.
++- Inspeção estática de sintaxe JSX e imports relativos, comparação com a evidência anterior, `git diff --check` e verificações de aplicação e reversão do patch. A evidência continua na base `95a550943b326e2fdd6f52dcb6100576f6d6d570` e representa 24 arquivos da ADMIN-07. O índice real permaneceu vazio.
++- Esta rodada teve revisão estática. A aprovação visual final dos formulários em aparelho fica com o responsável.
++
++## Correções delimitadas após a auditoria crítica
++
++### Pré-verificação PostgreSQL para D06 e D09
++
++A auditoria confirmou que as suítes podiam iniciar o Nest sem checar o ambiente de teste, o scheduler ou os privilégios da conexão efetiva. A guarda compartilhada segue o padrão de identidade da ADMIN-06 e fecha o pool de pré-verificação antes de permitir a importação do `AppModule`.
++
++1. Exige `NODE_ENV=test`, as três URLs textualmente idênticas e o destino `127.0.0.1:55432/arenago_events_test` com credenciais explícitas e sem parâmetros. A política real do scheduler é validada antes de abrir o pool. Em ambiente de teste, a opção `EVENT_CLOSURE_JOB_TEST_ENABLED` ausente ou igual a `false` mantém o scheduler desligado. O valor `true` e opções inválidas bloqueiam a suíte.
++2. Abre uma conexão em transação `REPEATABLE READ READ ONLY`. Compara banco, endereço, porta, `current_user` e `session_user` com o destino declarado. Exige uma role dedicada sem `SUPERUSER`, `CREATEDB`, `CREATEROLE`, `REPLICATION`, `BYPASSRLS` ou associação a outras roles.
++3. Confere tabelas físicas, a ordem e os hashes do histórico Drizzle para as oito migrations do checkout e a ausência de registros nas tabelas operacionais usadas pelas fixtures. Jogos e versões de questionário podem conter dados de referência. Os hashes correspondem ao conteúdo dos arquivos SQL usados pelo Drizzle, inclusive seus finais de linha.
++4. Encerra a transação, libera o cliente, fecha o pool e reconfirma a configuração declarada. A suíte redireciona o dotenv para o dispositivo nulo antes de iniciar uma conexão de fixtures e importar o Nest. Falhas da guarda usam mensagens sem detalhes do driver ou credenciais. O hook de limpeza só é habilitado após a guarda. A limpeza existente segue os UUIDs das fixtures, incluindo quando o bootstrap falha após a autorização. A inicialização ainda pode inserir jogos e versões de questionário canônicos.
++
++A futura campanha depende de autorização específica e da identificação independente do processo que escuta a porta `55432`. As consultas do PostgreSQL, sozinhas, não detectam todo túnel ou encaminhamento. O destino deve ser local, dedicado e descartável. `arenago_roles_test` não é aceito.
++
++### Recuperação de recusa definitiva
++
++A condição anterior tratava todo erro no reenvio como resultado desconhecido. Em D09, o servidor autoriza, reserva ou procura replay pela chave e pelo fingerprint, revalida a sessão e só então decide se o evento já foi encerrado ou se o prazo está fora do limite. Se a mesma intenção já tiver sido confirmada, o serviço devolve o recibo gravado antes de verificar o prazo novamente. `409 CLOSURE_DEADLINE_INVALID` no modo controlado e `409 EVENT_ALREADY_CLOSED` são recusas definitivas nesse contrato. A sessão libera o formulário, apresenta o motivo já padronizado e solicita nova confirmação antes de qualquer nova escrita.
++
++Erros ambíguos, status inesperados, falhas de transporte e `IDEMPOTENCY_IN_PROGRESS` ainda preservam a intenção. Uma validação ou um 404 durante a recuperação também conserva a chave e o corpo. As recusas de prontidão e janela da fila só encerram a intenção na primeira tentativa, pois essas condições podem mudar e permitir uma chamada atrasada. Conflito de chave e bloqueio de acesso seguem seus fluxos próprios. A reconsulta ajuda o operador a decidir e o estado lido, por si só, continua insuficiente para atribuir sucesso à intenção.
++
++### Pontos reservados para avaliação posterior
++
++- D06 e D09 ainda adquirem locks de domínio antes da autorização transacional de Admin. A contenção é possível e ainda não foi medida sob carga. Uma futura análise pode avaliar uma pré-checagem de Admin antes dos locks e manter a autorização transacional como decisão final.
++- A divergência de precisão entre `called_at` no PostgreSQL e o `Date` usado na liberação D06 continua uma hipótese. Para a campanha futura, preparar uma fixture transacional descartável com chamada pendente em um instante com microssegundos não nulos. Comparar a resolução com `called_at` usando um caso em que a liberação arredondada cai no mesmo milissegundo e um controle no milissegundo seguinte. Verificar status, auditoria e rollback, sem aguardar uma corrida casual do relógio. A fixture deve ficar em transação revertida ou em banco isolado próprio, pois o histórico de chamadas externas bloqueia exclusão de registros.
++- Antecipação e reabertura do encerramento continuam fora da entrega.
++
++### Validação e histórico
++
++A campanha da versão anterior registrou 976/976 testes frontend e typechecks backend aprovados. A suíte backend local do responsável obteve 1.316/1.316 após o `ENOMEM` observado na inicialização do `tsx` na outra estação de execução. Esses resultados antecedem as correções acima.
++
++O teste simulado da guarda cobre política e URLs, identidade e privilégios, migrations e estado inicial, sanitização de falhas e ordem entre fechamento do pool, bootstrap e limpeza. Os testes da sessão e da rota reproduzem timeout, reconsulta, reenvio com a chave e o corpo originais, recusa, mensagem e nova revisão. Também cobrem respostas que ainda exigem preservar a intenção.
++
++Nesta rodada de implementação, a validação foi estática. Foram conferidos sintaxe e imports relativos, `git diff --check` e a aplicação e reversão da evidência Git. A execução de testes e typechecks fica para a etapa Luna Medium. Nenhuma conexão PostgreSQL foi aberta.
++
++Na validação autorizada com Luna Medium, em `app`, executar a regressão focada com `node --test --test-reporter=spec --test-name-pattern 'ADMIN-07' tests/adminEventOperation.test.cjs tests/roleRoutingIntegration.test.cjs`. No backend, seguir a configuração isolada da seção de validação sem banco, executar `npm.cmd run typecheck:test`, o typecheck de produção e incluir `test/unit/admin-event-operations-db-guard.test.ts` na seleção do `tsx`. A validação simulada e a auditoria posterior não substituem a autorização independente para PostgreSQL.
++
++O patch atualizado em `qa-evidence/ADMIN_07-changes.diff` contém as correções, seus testes e o relatório, sobre a mesma base da ADMIN-07.
++
++### Ajuste da comparação no teste de reenvio ambíguo
++
++Na campanha pós-auditoria com Luna Medium, o frontend registrou 977 aprovados de 978, com uma falha, nenhum teste ignorado e código de saída 1. O cenário de recusa definitiva após o reenvio do encerramento controlado passou. A falha em `adminEventOperation.test.cjs` foi reproduzida isoladamente. Os dois typechecks do backend passaram, e a suíte unitária/HTTP ficou pendente após a sonda de `os.userInfo()` retornar `ERR_SYSTEM_ERROR` antes da execução.
++
++O stack apontou para `assert.deepEqual(plain(session.snapshot(eventId).intent.body), command.body)`. O harness executa o módulo em um contexto separado do Node. O primeiro operando foi convertido em um objeto do contexto do teste, enquanto `command.body` conservou o protótipo do contexto do módulo. A comparação estrita considera o protótipo e falhou mesmo com conteúdo idêntico. A comparação anterior com `[calls[0], calls[0]]` já havia sido superada.
++
++O teste captura o corpo esperado como JSON antes do primeiro envio. Depois do reenvio explícito, exige exatamente duas chamadas e compara separadamente a rota, a chave de idempotência e todo o corpo de cada chamada com a expectativa original. Também confere que a intenção continua com status `unknown`, a mesma chave e o mesmo corpo, sem recibo de sucesso. As contagens antes do reenvio e após uma nova tentativa de início continuam protegendo contra envios adicionais, e os sete casos da matriz foram preservados.
++
++Nesta rodada, a revisão é estática. A regressão frontend e a suíte unitária/HTTP do backend ficam para a campanha com Luna Medium, com o backend em ambiente local compatível. A homologação funcional permanece pendente.
++
++## Reorganização do PostgreSQL local para D06 e D09
++
++O responsável informou a aprovação visual, 978/978 testes frontend, 1.343/1.343 testes backend e os dois typechecks aprovados. A integração D06/D09 continua pendente. A autorização desta etapa cobre somente o PostgreSQL local em `127.0.0.1:55432`, para as operações abaixo.
++
++| Banco | Operação autorizada | Referência ou finalidade |
++| --- | --- | --- |
++| `arenago_staff_a4_20261112` | Excluir | Destino fixo de `prepare-staff-a4-homologation.cjs` e dos procedimentos Staff A4. |
++| `arenago_staff_homolog_20261111` | Excluir | Destino fixo de `external-entry-calls-schema.integration.test.ts`. Essa suíte ficará sem seu destino até revisão específica. |
++| `arenago_staff_homolog_geral_20261111` | Excluir | Destino fixo de `prepare-staff-homologation.cjs` e dos procedimentos Staff geral. |
++| `arenago_test` | Excluir | A guarda compartilhada ainda aceita esse nome. Configurações locais que o selecionem deixarão de conectar. |
++| `arenago_events_test` | Excluir e recriar com as migrations 0001 a 0008 | Nome fixo das guardas D06/D09 e destino de outras suítes de eventos. |
++| `arenago_roles_test` | Preservar | Destino exclusivo da guarda de gestão de papéis da ADMIN-06. |
++| `arenago_homologacao` | Preservar | Homologação manual local. |
++
++O inventário acima foi informado pelo responsável. A inspeção manual anterior também encontrou sete migrations em `arenago_events_test`, sem `external_entry_calls`, com resíduos operacionais e permissões incompletas em duas tabelas. Nesta sessão, `netstat` identificou o listener IPv4 local no processo `postgres` de PID 10908, o serviço `postgresql-x64-18` estava ativo e o cliente `psql` informou a versão 18.6. O responsável havia identificado o executável em `C:\Program Files\PostgreSQL\18\bin\postgres.exe`. Nesta sessão o Windows não expôs o caminho do processo e a consulta `portproxy` não exibiu regras.
++
++**Parecer C — preparação bloqueada por falta de credencial administrativa local autorizada nesta sessão.** Nenhuma conexão SQL foi aberta. Proprietários, conexões ativas, privilégios, estado atual das tabelas e inventário final aguardam conferência autenticada. Nenhum banco foi excluído ou recriado, nenhuma role foi modificada e nenhuma migration, seed, inicialização Nest ou suíte de integração foi executada. Os bancos designados para preservação não foram acessados. As configurações locais e remotas ficaram intactas.
++
++### Operação manual no PowerShell local
++
++Use um PowerShell dedicado sem perfil. Confira que o PID atual do listener corresponde ao executável local antes de autenticar. Se o caminho estiver indisponível, faça a conferência no terminal Windows com acesso ao processo. Use somente credenciais locais conhecidas e digite as senhas nos prompts ocultos.
++
++```powershell
++Get-NetTCPConnection -State Listen -LocalAddress 127.0.0.1 -LocalPort 55432 |
++  ForEach-Object { Get-Process -Id $_.OwningProcess | Select-Object Id, ProcessName, Path }
++netsh interface portproxy show all
++$psql = 'C:\Program Files\PostgreSQL\18\bin\psql.exe'
++Get-ChildItem Env: | Where-Object Name -like 'PG*' | Remove-Item
++$env:PGSSLMODE = 'disable'
++$env:PGCONNECT_TIMEOUT = '5'
++$adminRole = Read-Host 'Role administrativa local autorizada'
++if ($adminRole -notmatch '^[a-z_][a-z0-9_]*$') { throw 'Nome de role inválido.' }
++& $psql -X -W -h 127.0.0.1 -p 55432 -U $adminRole -d postgres
++```
++
++Na sessão administrativa, confira identidade, versão, proprietários e uso dos bancos. A conta administrativa deve conseguir ver as conexões dos demais processos. Registre os proprietários e a identidade dos dois bancos preservados para comparação no final.
++
++```sql
++BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
++SELECT current_database(), current_user, session_user,
++       inet_server_addr(), inet_server_port(), current_setting('server_version');
++SELECT oid, datname, pg_get_userbyid(datdba) AS owner, datallowconn
++FROM pg_database WHERE datname LIKE 'arenago%' ORDER BY datname;
++SELECT datname, pid, usename, application_name, client_addr, state, backend_type
++FROM pg_stat_activity
++WHERE datname IN ('arenago_staff_a4_20261112', 'arenago_staff_homolog_20261111',
++                  'arenago_staff_homolog_geral_20261111', 'arenago_test', 'arenago_events_test')
++ORDER BY datname, pid;
++SELECT rolname, rolcanlogin, rolsuper, rolcreatedb, rolcreaterole,
++       rolreplication, rolbypassrls,
++       EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.member = r.oid) AS member_of_role
++FROM pg_roles r WHERE rolname IN (session_user, 'arenago');
++SELECT d.datname, pg_get_userbyid(d.datdba) AS owner,
++       has_database_privilege(r.oid, d.oid, 'CONNECT') AS can_connect,
++       has_database_privilege(r.oid, d.oid, 'CREATE') AS can_create_schema
++FROM pg_database d CROSS JOIN pg_roles r
++WHERE d.datname LIKE 'arenago%' AND r.rolname = 'arenago' ORDER BY d.datname;
++ROLLBACK;
++```
++
++Confirme `postgres` como banco administrativo, a role esperada nas duas identidades e o endpoint `127.0.0.1:55432`. Confira o inventário contra a autorização. Identifique processos locais da aplicação pela configuração ativa e por `pg_stat_activity`. Se houver sessão ativa, interrompa a operação sobre o banco correspondente e combine a parada normal do processo. Antes de recriar, confirme que `arenago` pode autenticar com a credencial conhecida, tem `LOGIN`, possui todos os cinco atributos administrativos como falsos e não é membro de outras roles. Avalie o uso da mesma role pelos bancos preservados e pela aplicação. Se a reutilização comprometer o isolamento ou exigir alteração global, pare antes de excluir `arenago_events_test` e solicite autorização específica.
++
++Na mesma sessão administrativa já conferida, execute as instruções autorizadas uma a uma. Interrompa se houver erro. Os comandos usam nomes literais e a forma padrão de `DROP DATABASE`, que recusa a exclusão se ainda houver conexões.
++
++```sql
++DROP DATABASE arenago_staff_a4_20261112;
++DROP DATABASE arenago_staff_homolog_20261111;
++DROP DATABASE arenago_staff_homolog_geral_20261111;
++DROP DATABASE arenago_test;
++DROP DATABASE arenago_events_test;
++CREATE DATABASE arenago_events_test WITH OWNER arenago TEMPLATE template0;
++REVOKE CONNECT, TEMPORARY ON DATABASE arenago_events_test FROM PUBLIC;
++```
++
++Repita a consulta ao catálogo e confira a continuidade de OID e proprietário dos dois bancos preservados. Saia com `\q`. Abra uma sessão no banco recriado, agora como `arenago`, e confirme por leitura identidade, endereço, porta e proprietário antes da migration.
++
++```powershell
++& $psql -X -W -h 127.0.0.1 -p 55432 -U arenago -d arenago_events_test -v ON_ERROR_STOP=1 -c "
++BEGIN READ ONLY;
++SELECT current_database(), current_user, session_user, inet_server_addr(), inet_server_port(),
++       pg_get_userbyid(datdba) AS owner FROM pg_database WHERE datname = current_database();
++ROLLBACK;"
++if ($LASTEXITCODE -ne 0) { throw 'A conferência da role dedicada falhou.' }
++```
++
++### Migrations e conferência do banco recriado
++
++O comando oficial é `npm.cmd run db:migrate`, em `backend`. `drizzle.config.ts` lê primeiro `DATABASE_DIRECT_URL`, carrega dotenv e usa a pasta `drizzle`. O leitor instalado do Drizzle confirmou as oito entradas do journal em ordem, de `0001_identity_profile` a `0008_external_entry_calls`, e calculou os hashes do checkout para compará-los após a execução. As migrations criam tabelas, constraints, índices e funções e triggers PL/pgSQL. Não foi encontrada exigência de extensão ou de superusuário. Rodar como proprietária do banco permite que `arenago` seja também proprietária dos objetos. Uma falha deve interromper a preparação sem ajuste manual de schema ou journal.
++
++Após conferir a conexão acima, no mesmo PowerShell dedicado, restrinja o ambiente e informe a senha da role por prompt. A URI é montada localmente com o destino literal e não deve ser impressa ou persistida. Mantenha o terminal aberto somente até as conferências da preparação.
++
++```powershell
++Set-Location C:\DoJob\ProgramacaoMobile\backend
++Get-ChildItem Env: | Where-Object { $_.Name -match '^(DATABASE_|DRIZZLE_|DOTENV_CONFIG_|EVENTS_TEST_DATABASE_URL$|NODE_OPTIONS$|RESEND_|EMAIL_VERIFICATION_CONFIRMATION_URL$)' } | Remove-Item
++$env:NODE_ENV = 'test'
++$env:DOTENV_CONFIG_PATH = 'NUL'
++$env:EVENT_CLOSURE_JOB_TEST_ENABLED = 'false'
++$env:EVENT_CLOSURE_INTERVAL_MS = '30000'
++$secret = Read-Host 'Senha local de arenago' -AsSecureString
++try {
++  if ($secret.Length -eq 0) { throw 'Senha obrigatória.' }
++  $env:DATABASE_URL = 'postgresql://arenago:' +
++    [uri]::EscapeDataString([System.Net.NetworkCredential]::new('arenago', $secret).Password) +
++    '@127.0.0.1:55432/arenago_events_test'
++} finally { $secret.Dispose(); Remove-Variable secret }
++$env:DATABASE_DIRECT_URL = $env:DATABASE_URL
++$env:EVENTS_TEST_DATABASE_URL = $env:DATABASE_URL
++npm.cmd run db:migrate
++if ($LASTEXITCODE -ne 0) { throw 'Migration interrompida. Inspecione a causa antes de tentar novamente.' }
++```
++
++Use o hook real da guarda com callbacks vazios. O comando importa a guarda e executa a transação somente leitura, sem invocar a suíte ou o Nest. A guarda compara endereço, porta, banco, usuário, sessão, atributos e associações da role, as 19 tabelas exigidas, as oito entradas e hashes, e exige que as 16 tabelas operacionais de fixtures estejam vazias. Se o `tsx` falhar antes de carregar, use um terminal Windows com o Node compatível e a sonda de `os.userInfo()` funcional. Registre qualquer bloqueio sem atribuir aprovação à guarda.
++
++```powershell
++& .\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json -e "import { adminEventOperationsTestHooks } from './test/integration/admin-event-operations-db-guard'; adminEventOperationsTestHooks(async () => {}, async () => {}).start().then(() => console.log('Guarda D06/D09 aprovada'), err => { console.error(err.message); process.exitCode = 1; });"
++if ($LASTEXITCODE -ne 0) { throw 'A guarda da ADMIN-07 não foi confirmada.' }
++& $psql -X -W -h 127.0.0.1 -p 55432 -U arenago -d arenago_events_test
++```
++
++Na sessão de `arenago`, tire o snapshot inicial. Registre o journal efetivo, os proprietários e os privilégios de DML, os mecanismos da migration 0008 e as contagens de todas as tabelas públicas, incluindo os catálogos de jogos e questionário. Em um banco recriado sem bootstrap, espera-se que as tabelas públicas estejam vazias, salvo caso alguma migration insira dados de referência. A contagem real é a evidência.
++
++```sql
++\set ON_ERROR_STOP on
++BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
++SELECT current_database(), current_user, session_user, inet_server_addr(), inet_server_port();
++SELECT created_at, hash FROM drizzle.__drizzle_migrations ORDER BY created_at;
++SELECT c.relname, pg_get_userbyid(c.relowner) AS owner,
++       has_table_privilege(c.oid, 'SELECT') AS sel, has_table_privilege(c.oid, 'INSERT') AS ins,
++       has_table_privilege(c.oid, 'UPDATE') AS upd, has_table_privilege(c.oid, 'DELETE') AS del
++FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
++WHERE n.nspname = 'public' AND c.relkind IN ('r','p') ORDER BY c.relname;
++SELECT conname FROM pg_constraint WHERE conrelid = 'public.external_entry_calls'::regclass;
++SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'external_entry_calls';
++SELECT tgrelid::regclass AS relation, tgname, tgenabled FROM pg_trigger
++WHERE NOT tgisinternal AND tgrelid IN ('public.external_entry_calls'::regclass,
++  'public.events'::regclass, 'public.participations'::regclass) ORDER BY tgrelid, tgname;
++SELECT format('SELECT %L AS table_name, count(*) AS rows FROM %I.%I',
++              tablename, schemaname, tablename)
++FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename
++\gexec
++ROLLBACK;
++```
++
++Após sair do `psql`, feche o PowerShell dedicado para descartar as credenciais do processo. Para uma campanha posterior especificamente autorizada, repita a conferência do listener e a pré-verificação da guarda. Monte as mesmas três URLs locais, preserve o scheduler desligado e configure `ADMIN_IDEMPOTENCY_TTL_SECONDS`, `STAFF_IDEMPOTENCY_TTL_SECONDS`, `PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS` e `EVALUATION_IDEMPOTENCY_TTL_SECONDS` em `60`. Use o comando serial da seção PostgreSQL e Expo Go, com previsão estática de 41 casos D06 e 70 D09. Compare a identidade, o journal e as contagens após a campanha. As suítes limpam por UUID em transação. O bootstrap pode acrescentar dados canônicos de jogos e questionário, e o histórico de chamadas externas é protegido contra exclusão. Qualquer resíduo operacional exige diagnóstico separado antes de reutilizar o banco.
++
++A centralização de destinos e guardas fica na INFRA-01. A ADMIN-07 ainda depende da preparação efetiva, da campanha PostgreSQL autorizada e da decisão do responsável sobre homologação.
++
++## Consolidação final da implementação e homologação
++
++Esta seção registra o estado final de Operação do Evento e Encerramentos. As seções anteriores preservam as evidências de cada rodada, inclusive a auditoria crítica, as falhas intermediárias e o impedimento de preparar o banco pela sessão do Codex. O responsável concluiu a preparação no PowerShell local e informou os resultados das campanhas PostgreSQL e da homologação no Expo Go.
++
++### Regressão automatizada final
++
++| Campanha | Aprovados | Falhas | Ignorados | Exit code |
++| --- | ---: | ---: | ---: | ---: |
++| Frontend | 978 | 0 | 0 | 0 |
++| Backend unitário | 1.343 | 0 | 0 | 0 |
++| Integração PostgreSQL D06 | 41 | 0 | 0 | 0 |
++| Integração PostgreSQL D09 | 70 | 0 | 0 | 0 |
++| **Total** | **2.432** | **0** | **0** | — |
++
++Os typechecks de produção e de testes foram aprovados. O total soma as quatro campanhas finais e exclui reexecuções isoladas, typechecks e verificações manuais.
++
++- A campanha frontend pós-auditoria anterior registrou 977/978, com falha na comparação estrita de objetos de contextos distintos do Node e exit code 1. Após a correção da assertion, o caso passou isoladamente e a regressão completa com `npm.cmd test` em `app` passou com 978/978. O caso percorreu os sete itens da matriz de recuperação. Conferiu rota, chave e corpo nas duas tentativas e a preservação da intenção `unknown` sem recibo ou novo envio. [Caso de reenvio ambíguo](../app/tests/adminEventOperation.test.cjs#L132).
++- O histórico do backend inclui uma tentativa bloqueada antes de carregar os testes por `ERR_SYSTEM_ERROR` em `os.userInfo()` e `ENOMEM` na inicialização do `tsx`. Nas tentativas com configuração incompleta do processo, a configuração exigida pelo backend também impediu uma execução válida. Esses bloqueios não demonstraram regressão funcional. No PowerShell local, o responsável resolveu a configuração com uma URL PostgreSQL fictícia em porta local sem serviço e com os quatro TTLs de idempotência definidos explicitamente em 60 segundos. `queue-entry-di.test.ts` passou isoladamente e a suíte unitária completa terminou com 1.343/1.343. O código não precisou ser alterado para resolver os bloqueios de ambiente.
++
++### Reorganização e preparação do PostgreSQL local
++
++O responsável executou manualmente as operações administrativas autorizadas. Confirmou PostgreSQL 18.6, serviço `postgresql-x64-18`, listener `127.0.0.1:55432` e o processo `postgres.exe` da instalação local. Autenticou-se com a role administrativa e conferiu que os bancos destinados à exclusão não tinham conexões ativas.
++
++| Operação confirmada | Bancos |
++| --- | --- |
++| Excluídos | `arenago_staff_a4_20261112`, `arenago_staff_homolog_20261111`, `arenago_staff_homolog_geral_20261111`, `arenago_test` |
++| Excluído e recriado com o mesmo nome | `arenago_events_test` |
++| Preservados | `arenago_homologacao`, `arenago_roles_test` |
++
++O inventário final ficou com três bancos ArenaGO, ante sete. Nenhuma role foi excluída nem teve privilégios globais alterados. O banco `arenago_events_test` foi recriado com `TEMPLATE template0` e a role proprietária `arenago`. A consulta de identidade confirmou o banco, as duas identidades da sessão e o endereço e porta efetivos. A role tinha `LOGIN`, sem `SUPERUSER`, `CREATEDB`, `CREATEROLE`, `REPLICATION`, `BYPASSRLS` ou associação a outras roles.
++
++Em `backend`, `npm.cmd run db:migrate` aplicou as migrations `0001` a `0008`, com exit code 0. Os oito hashes SHA-256 registrados corresponderam aos arquivos do checkout. As 26 tabelas públicas, inclusive `external_entry_calls`, foram criadas sob propriedade de `arenago` e estavam inicialmente vazias. Nenhum seed foi executado. A recriação resolveu os resíduos operacionais, o schema incompleto e a propriedade inconsistente das tabelas constatados na inspeção anterior.
++
++### Integração PostgreSQL real e reutilização
++
++O responsável executou as suítes separadamente no PowerShell local, a partir de `backend`. Usou `NODE_ENV=test`, `DOTENV_CONFIG_PATH=NUL` e `EVENT_CLOSURE_JOB_TEST_ENABLED=false`. As variáveis `DATABASE_URL`, `DATABASE_DIRECT_URL` e `EVENTS_TEST_DATABASE_URL` eram textualmente idênticas e indicavam o destino local dedicado. `ADMIN_IDEMPOTENCY_TTL_SECONDS`, `STAFF_IDEMPOTENCY_TTL_SECONDS`, `PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS` e `EVALUATION_IDEMPOTENCY_TTL_SECONDS` estavam em 60 segundos.
++
++```powershell
++& .\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test --test-concurrency=1 test/integration/admin-external-queue-http.integration.test.ts
++```
++
++**D06:** 41 aprovados, 0 falhos, 0 ignorados, exit code 0, duração de 26.351,8558 ms.
++
++```powershell
++& .\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test --test-concurrency=1 test/integration/admin-close-http.integration.test.ts
++```
++
++**D09:** 70 aprovados, 0 falhos, 0 ignorados, exit code 0, duração de 60.510,1741 ms.
++
++As duas suítes passaram pela guarda obrigatória antes de inicializar o `AppModule`. Os testes PostgreSQL exercitaram as consultas e os efeitos persistidos. D06 conferiu os contadores por evento antes e após alternar a fila, a liberação da espera, o isolamento do outro evento e casos de replay, auditoria, concorrência e rollback. D09 conferiu os estados e contadores após os dois modos, a preservação do histórico e de operações internas admitidas no controlado, além de validação temporal, idempotência, serialização e rollback nos casos preparados. A suíte sem banco cobriu contratos e fluxos simulados. [D06](../backend/test/integration/admin-external-queue-http.integration.test.ts#L150) e [D09](../backend/test/integration/admin-close-http.integration.test.ts#L234).
++
++O responsável conferiu as contagens em transações somente leitura.
++
++| Tabelas | Antes de D06 | Após D06 | Após D09 |
++| --- | ---: | ---: | ---: |
++| `games` | 0 | 20 | 20 |
++| `questionnaire_versions` | 0 | 1 | 1 |
++| Demais 24 tabelas públicas, cada uma | 0 | 0 | 0 |
++
++Os jogos e a versão do questionário são efeitos esperados da inicialização do Nest. As contagens mostram ausência de resíduos operacionais após ambas as suítes. D09 reutilizou o mesmo banco de D06, sem recriação ou limpeza manual intermediária. O resultado apoia a padronização futura para essas duas suítes. Cada suíte adicional ainda precisa de avaliação de isolamento e limpeza. `arenago_events_test` fica reservado para integração automatizada.
++
++### Homologação funcional no Expo Go
++
++O responsável aprovou as **23 verificações funcionais** em ambiente de homologação. Elas são independentes da contagem automatizada.
++
++| Bloco | Resultado | Verificações aprovadas |
++| --- | ---: | --- |
++| HF-01 — Consulta operacional | 4/4 | Acesso pela gestão do evento. Conferência de status, horários e indicadores. Contagem de participantes ativos e aguardando ingresso. Atualização ao retornar à tela. |
++| HF-02 — Controle da fila externa | 6/6 | Justificativa obrigatória. Cancelamento sem alteração. Desativação. Efeito sobre quem aguarda. Reativação. Persistência após sair e voltar. |
++| HF-03 — Encerramento controlado | 6/6 | Justificativa obrigatória. Limites de data e hora. Cancelamento da confirmação. Confirmação válida. Novo estado e prazo operacional. Disponibilidade das ações posteriores. |
++| HF-04 — Encerramento imediato | 7/7 | Alerta e confirmação. Cancelamento sem alteração. Confirmação do imediato. Estado encerrado. Indicadores após encerrar. Bloqueio de operações incompatíveis. Persistência ao sair e voltar. |
++
++Durante a homologação, dois participantes que ainda não haviam participado de experiências permaneceram temporariamente na tela do evento após o encerramento. Nenhum conseguiu ingressar em estação. Após atualização manual, ambos saíram corretamente da tela. A observação caracteriza uma limitação de sincronização da interface do Participante, sem operação incompatível bem-sucedida no cenário relatado. O relato não comprova o mecanismo técnico responsável. A melhoria é futura e não bloqueia a ADMIN-07. Avaliar revalidação periódica do estado da participação, atualização automática no prazo operacional, tratamento das respostas indicativas de encerramento e comunicação com redirecionamento apropriado.
++
++### Limitações residuais e INFRA-01
++
++- **Risco de contenção:** D06/D09 ainda podem adquirir locks de domínio antes de determinadas verificações transacionais de autorização. A campanha passou nos cenários preparados e não mediu a contenção sob carga.
++- **Hipótese temporal:** permanece aberta a possibilidade de divergência de precisão entre `called_at` e o instante de liberação em D06. A campanha não reproduziu a condição específica descrita pela auditoria.
++- **Lacuna de cobertura:** os testes exercitaram concorrência de ingresso, fechamento, autorização e operações internas nos cenários preparados. A concorrência com chamadas externas pendentes ainda exige casos próprios.
++- **Limitação conhecida do contrato:** antecipar, alterar o prazo ou reabrir um encerramento controlado já iniciado está fora do escopo. O backend continua recusando uma segunda intenção de encerramento nessa situação.
++
++A INFRA-01 deverá avaliar o reaproveitamento de `arenago_events_test`, a centralização das guardas, a padronização das variáveis de ambiente e a automação da preparação e conferência. O desenho deve prever restauração segura do estado-base, revisão de limpeza das fixtures, tratamento dos históricos protegidos e adaptação das guardas legadas aos destinos que permanecem. A eventual exclusão de `arenago_roles_test` depende da migração das suítes de gestão de papéis e de autorização própria. A política de infraestrutura no `AGENTS.md` será tratada nessa task.
++
++### Fechamento documental
++
++O patch consolidado representa 26 arquivos sobre a base `95a550943b326e2fdd6f52dcb6100576f6d6d570`, com o relatório final e sem incluir o próprio patch. Esta rodada consolida evidências existentes. A ADMIN-07 está documentalmente pronta para aprovação formal pelo responsável e posterior commit e push mediante autorização.
++
++### Aprovação formal do responsável
++
++Em 24/11/2026, o responsável aprovou formalmente a ADMIN-07 — Operação do Evento e Encerramentos, com base nas evidências consolidadas de 2.432 testes automatizados, nos dois typechecks, nas 23 verificações funcionais no Expo Go e na auditoria independente. Também aceitou as limitações residuais documentadas como não bloqueantes e autorizou o staging, o commit e o push dos arquivos exclusivos da task para `origin/feature/admin-event-operations`.

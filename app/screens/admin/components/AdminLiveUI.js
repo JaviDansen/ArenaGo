@@ -27,6 +27,20 @@ export function AdminIcon({ name, color = c.accent, size = 24 }) {
     case 'home': shapes = [part('roof', { left: 4, top: 3, width: 16, height: 16, borderRightWidth: 0, borderBottomWidth: 0, transform: [{ rotate: '45deg' }] }),
       part('house', { left: 5, top: 10, width: 14, height: 12, borderTopWidth: 0 }), part('door', { left: 10, top: 15, width: 4, height: 7 })]; break;
     case 'chart': shapes = [6, 12, 19].map((height, i) => part(`bar${i}`, { left: 2 + i * 8, bottom: 2, width: 5, height, borderRadius: 1 })); break;
+    case 'layers': shapes = [
+      part('top', { left: 5, top: 2, width: 14, height: 14, transform: [{ scaleY: 0.65 }, { rotate: '45deg' }] }),
+      ...[6, 10].map(top => part(`layer${top}`, { left: 5, top, width: 14, height: 14, borderTopWidth: 0, borderLeftWidth: 0,
+        transform: [{ scaleY: 0.65 }, { rotate: '45deg' }] })),
+    ]; break;
+    case 'pause': shapes = [8, 15].map(left => part(`bar${left}`, { left, top: 4, height: 16, borderWidth: 0, borderLeftWidth: 2 })); break;
+    case 'play': shapes = [<View key="triangle" style={{ position: 'absolute', left: 8, top: 4, width: 0, height: 0,
+      borderLeftWidth: 12, borderTopWidth: 8, borderBottomWidth: 8, borderLeftColor: color,
+      borderTopColor: 'transparent', borderBottomColor: 'transparent' }} />]; break;
+    case 'stop': shapes = [part('square', { left: 4, top: 4, width: 16, height: 16, borderRadius: 2 })]; break;
+    case 'power': shapes = [
+      part('ring', { left: 3, top: 4, width: 18, height: 18, borderRadius: 10, borderTopColor: 'transparent' }),
+      part('stem', { left: 11, top: 1, height: 10, borderWidth: 0, borderLeftWidth: 2 }),
+    ]; break;
     case 'history': case 'gauge': shapes = [part('circle', { left: 2, top: 2, width: 20, height: 20, borderRadius: 12 }),
       part('hand', { left: 12, top: 6, height: 7, borderWidth: 0, borderLeftWidth: 1.6 }),
       part('minute', { left: 12, top: 12, width: 6, borderWidth: 0, borderTopWidth: 1.6, transform: [{ rotate: name === 'gauge' ? '-45deg' : '25deg' }] })]; break;
@@ -49,8 +63,8 @@ export function AdminIcon({ name, color = c.accent, size = 24 }) {
     <View style={{ width: 24, height: 24, transform: [{ scale: size / 24 }], transformOrigin: 'top left' }}>{shapes}</View>
   </View>;
 }
-export function AdminIconTile({ name }) {
-  return <View style={liveStyles.iconTile}><AdminIcon name={name} size={28} /></View>;
+export function AdminIconTile({ name, color }) {
+  return <View style={liveStyles.iconTile}><AdminIcon name={name} color={color} size={28} /></View>;
 }
 export function AdminEventActions({ onCreate }) {
   return <View style={liveStyles.actions}>

@@ -12,8 +12,9 @@ try {
   deps = { React: qaRequire('react'), jsx: qaRequire('react/jsx-runtime'),
     Renderer: qaRequire('react-test-renderer'), Navigation: qaRequire('@react-navigation/core'),
     StackRouter: qaRequire('@react-navigation/routers').StackRouter, TabRouter: qaRequire('@react-navigation/routers').TabRouter };
-} catch { deps = null; }
-const skip = deps ? false : 'dependências de qa/regression não instaladas';
+} catch (cause) {
+  throw new Error('Falha ao carregar o harness obrigatório de roteamento. Confira as dependências em qa/regression (npm ci).', { cause });
+}
 
 function createIntegration({ initialToken = null, initialUser, control = {} }) {
   const { React, jsx, Renderer, Navigation, StackRouter, TabRouter } = deps;
@@ -126,7 +127,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
         return { waitAdminDemoLatency: async () => {} };
       }
       if (control.realAdmin && (target.startsWith('screens/admin/') || target === 'data/adminDemoData' ||
-        ['services/adminEventsService', 'services/adminEventSetupService'].includes(target))) {
+        ['services/adminEventsService', 'services/adminEventSetupService', 'services/adminEventOperationService'].includes(target))) {
         return load(`${target}.js`);
       }
       if (control.realStaff && ['screens/staff/StaffEventsNavigator', 'services/staffEventsService',
@@ -151,7 +152,8 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
     cache.set(relative, exports);
     return exports;
   }
-  const manager = load('services/authService.js').createAuthSessionManager({ client, tokenStorage: storage });
+  const { createAuthSessionManager } = load('services/authService.js');
+  const manager = createAuthSessionManager({ client, tokenStorage: storage });
   const Gate = load('screens/auth/AuthSessionGate.js').default;
   const { AppNavigation } = load('App.js');
   let tree;
@@ -160,6 +162,16 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
     setUser(value) { user = value; },
     async mount() { await Renderer.act(async () => { tree = Renderer.create(React.createElement(Gate,
       { sessionManager: manager }, React.createElement(AppNavigation))); }); },
+    async replaceProvider(nextUser) {
+      user = nextUser;
+      token = 'refresh-replacement';
+      const nextManager = createAuthSessionManager({ client, tokenStorage: storage });
+      await Renderer.act(async () => {
+        tree.update(React.createElement(Gate, { key: 'replacement', sessionManager: nextManager },
+          React.createElement(AppNavigation)));
+      });
+      return nextManager;
+    },
     async act(work) { await Renderer.act(work); },
     route() { const state = navRef.getRootState(); return state.routes[state.index].name; },
     routes() { return navRef.getRootState().routes.map((route) => route.name); },
@@ -189,6 +201,11 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
         : value && typeof value === 'object' ? flatten(value.props?.children) : String(value ?? '');
       return flatten(node.props.children).includes(text);
     }); },
+    textsInView(testID) {
+      const views = tree.root.findAllByType('View').filter(node => node.props.testID === testID);
+      assert.equal(views.length, 1, testID);
+      return views[0].findAllByType('Text').map(node => String(node.props.children));
+    },
     async press(label) {
       const buttons = tree.root.findAllByType('Pressable').filter((node) => node.props.accessibilityLabel === label);
       assert.equal(buttons.length, 1, `botão ${label}`);
@@ -201,6 +218,11 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
       assert.equal(buttons.length, 1, `botão ${label}`);
       return buttons[0].props;
     },
+    scrollContainingButton(label) {
+      let node = tree.root.findAllByType('Pressable').find(button => button.props.accessibilityLabel === label);
+      while (node && node.type !== 'ScrollView') node = node.parent;
+      return node;
+    },
     async activateButton(label) {
       const props = this.buttonProps(label);
       if (!props.disabled) await Renderer.act(async () => { await props.onPress?.(); });
@@ -212,13 +234,651 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
   };
 }
 
+function staffMember(grant, email, eligible = true, name = 'Pessoa Staff') {
+  return { grantId: grant.id, userId: grant.userId, name, email, grantedAt: grant.grantedAt, eligible };
+}
+
+test('ADMIN-06: gestão e wizard recuperam operações Staff nos dois sentidos e preservam o rascunho no retorno', async () => {
+  const id = n => 'abcdef00-0000-4000-8000-' + String(n).padStart(12, '0');
+  const eventId = id(1), path = '/admin/events/' + eventId, email = 'staff@example.test';
+  const at = '2090-11-01T00:00:00Z', writes = [];
+  const grant = { id: id(2), userId: id(3), eventId, role: 'staff', grantedAt: at, revokedAt: null };
+  const event = { id: eventId, name: 'Evento Staff', timezone: 'UTC', accessCode: 'STAFF', startsAt: at,
+    officialEndsAt: '2090-11-02T00:00:00Z', operationalDeadlineAt: '2090-11-02T00:00:00Z',
+    effectivePhase: 'scheduled', readiness: { ready: false }, externalQueueEnabled: false };
+  let eligible = false, unavailable = false;
+  const applied = new Map(), replays = [];
+  const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control: {
+    realAdmin: true, http: async (route, options) => {
+      if (!route.startsWith('/admin/')) return undefined;
+      if (route === '/admin/events') return { items: [event], nextCursor: null };
+      if (route === path) return { event };
+      if (route === path + '/experiences') return { eventId, items: [] };
+      if (route === path + '/staff') return { eventId, items: eligible ? [staffMember(grant, email)] : [] };
+      if (route === path + '/readiness') {
+        if (unavailable) return { statusCode: 503, body: {} };
+        return { eventId, statusStored: 'scheduled', effectivePhase: 'scheduled', acceptingNewParticipations: false,
+          ready: false, missing: ['EXPERIENCE_WITH_AVAILABLE_STATION', ...(eligible ? [] : ['VERIFIED_ACTIVE_STAFF'])],
+          checks: { nameAndAccessCode: true, validScheduleAndTimezone: true, externalQueueConfigured: true,
+            hasExperienceWithAvailableStation: false, hasVerifiedActiveStaff: eligible } };
+      }
+      assert.ok(['/admin/roles/grant', '/admin/roles/revoke'].includes(route));
+      assert.equal(options.method, 'POST');
+      const key = options.headers['Idempotency-Key'];
+      assert.ok(key);
+      const request = { route, key, body: options.body };
+      writes.push(request);
+      if (applied.has(key)) {
+        const previous = applied.get(key);
+        assert.deepEqual(request, previous.request);
+        replays.push(key);
+        return previous.response;
+      }
+      eligible = route.endsWith('/grant');
+      const response = { statusCode: eligible ? 201 : 200, body: { grant: eligible ? grant : { ...grant, revokedAt: at } } };
+      applied.set(key, { request, response });
+      throw new Error('Resposta perdida após aplicação');
+    },
+  } });
+  await app.mount();
+  try {
+    await app.press('Gerenciar eventos');
+    await app.press('Acessar evento Evento Staff');
+    await app.press('Configuração pendente');
+    unavailable = true;
+    await app.press('Consultar Equipe Staff');
+    assert.ok(app.hasText('Prontidão Staff indisponível.'));
+    unavailable = false;
+    await app.press('Tentar novamente');
+    await app.input('E-mail do usuário', email);
+    app.back();
+    assert.ok(app.hasText('Descartar e-mail não enviado?'));
+    await app.press('Cancelar');
+    assert.equal(app.inputValue('E-mail do usuário'), email);
+    await app.press('Conceder Staff');
+    assert.equal(writes.length, 0);
+    await app.press('Confirmar concessão');
+    assert.ok(app.hasText('Resultado incerto'));
+    assert.ok(app.hasText('Nenhum Staff vinculado a este evento'));
+    const previousRetry = app.handler('Repetir concessão para ' + email);
+    await app.press('Voltar ao painel');
+    await app.press('Descartar alterações');
+    await app.press('Continuar configuração');
+    await app.press('Continuar');
+    assert.ok(app.hasText('O evento tem Staff elegível.'));
+    assert.equal(writes.length, 1);
+    const retryFromSetup = app.handler('Repetir concessão para ' + email);
+    await app.act(async () => { retryFromSetup(); previousRetry(); retryFromSetup(); });
+    assert.equal(writes.length, 2);
+    assert.deepEqual(writes[1], writes[0]);
+    await app.press('Revogar acesso de ' + email);
+    await app.press('Revogar acesso');
+    assert.ok(app.hasText('Resultado incerto'));
+    await app.act(async () => app.back());
+    await app.press('Equipe Staff');
+    assert.ok(app.hasText('O evento ainda precisa de Staff elegível.'));
+    assert.equal(writes.length, 3);
+    unavailable = true;
+    await app.press('Repetir revogação para ' + email);
+    assert.deepEqual(writes[3], writes[2]);
+    assert.equal(writes.length, 4);
+    assert.equal(applied.size, 2);
+    assert.deepEqual(replays, [writes[0].key, writes[2].key]);
+    assert.ok(app.hasText('Prontidão Staff indisponível.'));
+    assert.deepEqual(JSON.parse(writes[3].body), { grantId: grant.id });
+    assert.ok(app.hasText('Revogação confirmada.'));
+    assert.ok(app.hasText('Nenhum Staff vinculado a este evento'));
+    assert.equal(app.hasButton('Revogar acesso de ' + email), false);
+  } finally { app.dispose(); }
+});
+
 const participant = { id: 'a', name: 'A', email: 'a@example.test', emailVerified: true,
   sessionId: '10000000-0000-4000-8000-000000000001',
   roles: ['participante'], hasCompletedQuestionnaire: true };
 
 const adminUser = { ...participant, roles: ['admin', 'staff', 'participante'], hasCompletedQuestionnaire: false };
 
-test('ADMIN-05: Home e listagem abrem o fluxo, cinco etapas preservam UUID e retomada lê o evento salvo', { skip }, async () => {
+const operationAt = '2090-11-23T13:00:00.000000Z';
+function operationView(n, overrides = {}) {
+  return { eventId: 'abcdef00-0000-4000-8000-' + String(n).padStart(12, '0'), name: 'Arena Operação ' + n,
+    timezone: 'America/Sao_Paulo', effectivePhase: 'open', observedAt: operationAt, startsAt: '2090-11-23T12:00:00Z',
+    officialEndsAt: '2090-11-23T13:40:00Z', operationalDeadlineAt: '2090-11-23T13:55:00Z',
+    closureMode: null, closureRequestedAt: null, adminDeadlineAt: null, externalQueueEnabled: true, activeParticipants: 0,
+    externalWaitingParticipants: 3, canSetExternalQueue: true, canClose: true, ...overrides };
+}
+function operationHarness(views, onWrite, onRead = view => view, onPanelRead = (_, response) => response) {
+  const writes = [], reads = [], panelReads = [];
+  const eventFrom = view => ({ ...view, id: view.eventId, readiness: { ready: true } });
+  const readiness = view => ({
+    eventId: view.eventId, effectivePhase: view.effectivePhase,
+    statusStored: ['closed', 'closing', 'open'].includes(view.effectivePhase) ? view.effectivePhase : 'scheduled',
+    ready: true, missing: [], observedAt: view.observedAt, acceptingNewParticipations: view.canSetExternalQueue,
+    checks: { nameAndAccessCode: true, validScheduleAndTimezone: true, externalQueueConfigured: true,
+      hasExperienceWithAvailableStation: true, hasVerifiedActiveStaff: true },
+  });
+  const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control: { realAdmin: true,
+    async http(route, options) {
+      if (route === '/admin/events') return { items: views.filter(v => v.effectivePhase !== 'closed').map(eventFrom), nextCursor: null };
+      const view = views.find(v => route === '/admin/events/' + v.eventId || route.startsWith('/admin/events/' + v.eventId + '/'));
+      if (!view) return undefined;
+      const path = '/admin/events/' + view.eventId;
+      if (route === path || route === path + '/readiness') {
+        panelReads.push(route);
+        return onPanelRead(route, route === path ? { event: eventFrom(view) } : readiness(view));
+      }
+      if (route === path + '/operation') {
+        assert.equal(options.method, 'GET');
+        assert.ok(options.headers.Authorization);
+        reads.push(view.eventId);
+        return onRead(view);
+      }
+      assert.ok(['/external-queue', '/close'].some(suffix => route === path + suffix));
+      const mutation = { route, method: options.method, body: JSON.parse(options.body), key: options.headers['Idempotency-Key'] };
+      assert.ok(mutation.key);
+      writes.push(mutation);
+      return onWrite(view, mutation);
+    },
+  } });
+  return { app, writes, reads, panelReads, async enter(view) {
+    await app.press('Gerenciar eventos');
+    await app.press('Acessar evento ' + view.name);
+    await app.press('Operação do evento');
+  } };
+}
+
+function pendingPanelClosure({ onPanelRead, mode = 'immediate' } = {}) {
+  const a = operationView(1), b = operationView(2), write = deferred();
+  const rig = operationHarness([a, b], () => write.promise, undefined, onPanelRead);
+  const path = '/admin/events/' + a.eventId;
+  return {
+    ...rig, a, b, write,
+    readsFor: view => rig.panelReads.filter(route => ['/admin/events/' + view.eventId, '/admin/events/' + view.eventId + '/readiness'].includes(route)),
+    async confirm() {
+      await rig.enter(a);
+      await rig.app.press(mode === 'immediate' ? 'Encerrar imediatamente' : 'Encerramento controlado');
+      await rig.app.input('Justificativa', 'Encerrar a operação');
+      if (mode === 'controlled') {
+        await rig.app.input('Data de encerramento', '23/11/2090');
+        await rig.app.input('Hora de encerramento', '10:30');
+      }
+      await rig.app.press('Revisar operação');
+      await rig.app.press('Confirmar operação');
+      assert.equal(rig.writes.length, 1);
+      assert.equal(rig.writes[0].route, path + '/close');
+      assert.equal(rig.writes[0].method, 'POST');
+    },
+    async finish() {
+      const deadline = mode === 'controlled' ? '2090-11-23T13:30:00.000000Z' : operationAt;
+      await rig.app.act(async () => {
+        Object.assign(a, { effectivePhase: mode === 'controlled' ? 'closing' : 'closed', closureMode: mode,
+          closureRequestedAt: operationAt, adminDeadlineAt: deadline, canClose: false, canSetExternalQueue: false });
+        write.resolve({ eventId: a.eventId, closureMode: mode, status: a.effectivePhase, newEntriesClosedAt: operationAt,
+          effectiveOperationalDeadlineAt: deadline, externalWaitingFinalized: 3 });
+      });
+    },
+  };
+}
+
+test('F1-R01: fechamento confirmado após voltar atualiza o painel com uma única escrita', async () => {
+  const rig = pendingPanelClosure();
+  const { app, a, writes } = rig;
+  await app.mount();
+  try {
+    await rig.confirm();
+    await app.press('Voltar ao painel');
+    assert.equal(app.activeRoute(), 'AdminRealEvent');
+    assert.ok(app.hasText('Aberto'));
+    const before = rig.readsFor(a);
+    assert.equal(before.length, 4);
+    await rig.finish();
+    assert.deepEqual(rig.readsFor(a), [...before, ...before.slice(-2)]);
+    assert.ok(app.hasText('Encerrado'));
+    assert.ok(!app.hasText('Aberto'));
+    assert.equal(writes.length, 1);
+  } finally { app.dispose(); }
+});
+
+test('F1-R02: revogar o último Staff após voltar atualiza a prontidão oficial', async () => {
+  const write = deferred(), at = operationAt, email = 'ultimo-staff@example.test';
+  const rig = structureIntegration({ initialStation: true, write: () => write.promise });
+  const { app, db, requests } = rig;
+  const grant = { id: operationView(21).eventId, userId: operationView(22).eventId,
+    eventId: rig.path.split('/').at(-1), role: 'staff', grantedAt: at, revokedAt: null };
+  db.roster = [staffMember(grant, email)];
+  const panelReads = () => requests.filter(({ method, route }) =>
+    method === 'GET' && [rig.path, rig.path + '/readiness'].includes(route)).map(({ route }) => route);
+  await app.mount();
+  try {
+    await rig.openPanel();
+    await app.press('Equipe Staff');
+    await app.press('Revogar acesso de ' + email);
+    await app.press('Revogar acesso');
+    await app.press('Voltar ao painel');
+    assert.equal(app.activeRoute(), 'AdminRealEvent');
+    assert.ok(app.hasText('Pronto para operar'));
+    const before = panelReads();
+    assert.equal(before.length, 6);
+    await app.act(async () => {
+      db.roster = [];
+      db.eligibleStaff = false;
+      write.resolve({ grant: { ...grant, revokedAt: at } });
+    });
+    assert.deepEqual(panelReads(), [...before, rig.path, rig.path + '/readiness']);
+    assert.ok(app.hasButton('Configuração pendente'));
+    assert.ok(!app.hasText('Pronto para operar'));
+    await app.press('Configuração pendente');
+    assert.ok(app.hasText('Autorize pelo menos um integrante Staff ativo'));
+    const writes = requests.filter(({ route, method }) => route.startsWith('/admin/') && method !== 'GET');
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].route, '/admin/roles/revoke');
+    assert.equal(writes[0].method, 'POST');
+    assert.deepEqual(JSON.parse(writes[0].body), { grantId: grant.id });
+    assert.ok(writes[0].key);
+  } finally { app.dispose(); }
+});
+
+test('F1-R03: detalhe e prontidão anteriores não substituem a leitura posterior', async () => {
+  const held = new Map();
+  let hold = false;
+  const rig = pendingPanelClosure({ onPanelRead(route, response) {
+    if (!hold) return response;
+    const pending = deferred();
+    held.set(route, { ...pending, response });
+    return pending.promise;
+  } });
+  const { app, a, writes } = rig;
+  await app.mount();
+  try {
+    await rig.confirm();
+    hold = true;
+    await app.press('Voltar ao painel');
+    assert.equal(held.size, 2);
+    assert.ok(app.hasText('Carregando evento...'));
+    hold = false;
+    // Marca o detalhe novo independentemente do selo, que usa a prontidão.
+    a.name = 'Nome da leitura mais recente';
+    await rig.finish();
+    assert.equal(rig.readsFor(a).length, 6);
+    assert.ok(app.hasText(a.name));
+    assert.ok(app.hasText('Encerrado'));
+    await app.act(async () => {
+      for (const pending of held.values()) pending.resolve(pending.response);
+    });
+    assert.ok(app.hasText(a.name));
+    assert.ok(app.hasText('Encerrado'));
+    assert.ok(!app.hasText('Arena Operação 1'));
+    assert.ok(!app.hasText('Aberto'));
+    assert.equal(rig.readsFor(a).length, 6);
+    assert.equal(writes.length, 1);
+  } finally {
+    for (const pending of held.values()) pending.resolve(pending.response);
+    app.dispose();
+  }
+});
+
+for (const replaceSession of [false, true]) {
+  test(replaceSession ? 'F1-R05: sessão substituída ignora conclusão antiga para o mesmo UUID' :
+    'F1-R04/R08: conclusão de A não recarrega B e A lê o estado ao remontar', async () => {
+    const rig = pendingPanelClosure({ mode: 'controlled' });
+    const { app, a, b, writes } = rig;
+    await app.mount();
+    try {
+      await rig.confirm();
+      if (replaceSession) {
+        await app.replaceProvider({ ...adminUser, id: 'admin-f1', sessionId: operationView(93).eventId });
+        await app.press('Gerenciar eventos');
+        await app.press('Acessar evento ' + a.name);
+      } else {
+        await app.press('Voltar ao painel');
+        await app.press('Voltar aos eventos');
+        await app.press('Acessar evento ' + b.name);
+      }
+      const displayed = replaceSession ? a : b;
+      const before = [...rig.panelReads];
+      await rig.finish();
+      assert.deepEqual(rig.panelReads, before);
+      assert.ok(app.hasText(displayed.name));
+      assert.ok(app.hasText('Aberto'));
+      assert.ok(!app.hasText('Encerrando'));
+      if (!replaceSession) {
+        await app.press('Voltar aos eventos');
+        await app.press('Acessar evento ' + a.name);
+        assert.deepEqual(rig.panelReads, [...before, '/admin/events/' + a.eventId, '/admin/events/' + a.eventId + '/readiness']);
+        assert.ok(app.hasText('Encerrando'));
+      }
+      assert.equal(writes.length, 1);
+    } finally { app.dispose(); }
+  });
+}
+
+for (const ambiguous of [true, false]) {
+  test('F1-R06: ' + (ambiguous ? 'resultado incerto preserva a intenção' : 'recusa definitiva libera a ação'), async () => {
+    const rig = pendingPanelClosure();
+    const { app, a, write, writes } = rig;
+    await app.mount();
+    try {
+      await rig.confirm();
+      await app.press('Voltar ao painel');
+      const before = [...rig.panelReads];
+      await app.act(async () => {
+        if (ambiguous) write.reject(new Error('Resposta indisponível'));
+        else write.resolve({ statusCode: 409, body: { code: 'EVENT_ALREADY_CLOSED' } });
+      });
+      assert.deepEqual(rig.panelReads, before);
+      assert.ok(app.hasText('Aberto'));
+      await app.press('Operação do evento');
+      assert.equal(app.hasButton('Reenviar a mesma solicitação'), ambiguous);
+      assert.equal(app.hasText('Resultado ainda não confirmado'), ambiguous);
+      assert.equal(app.hasText('Operação recusada'), !ambiguous);
+      assert.ok(!app.hasText('Resposta confirmada'));
+      assert.equal(writes.length, 1);
+      assert.equal(rig.readsFor(a).length, 4);
+    } finally { app.dispose(); }
+  });
+}
+
+test('F1-R07/R08: conclusão fora de foco conserva uma única leitura no retorno', async () => {
+  const rig = pendingPanelClosure();
+  const { app, a, writes } = rig;
+  await app.mount();
+  try {
+    await rig.confirm();
+    assert.equal(rig.readsFor(a).length, 2);
+    await rig.finish();
+    assert.ok(app.hasText('Resposta confirmada'));
+    assert.equal(rig.readsFor(a).length, 2);
+    await app.press('Voltar ao painel');
+    assert.ok(app.hasText('Encerrado'));
+    assert.equal(rig.readsFor(a).length, 4);
+    assert.equal(writes.length, 1);
+  } finally { app.dispose(); }
+});
+
+test('ADMIN-07 navega para o evento selecionado, valida justificativa, cancela e reconsulta após alternar a fila', async () => {
+  const a = operationView(1), b = operationView(2);
+  const { app, writes, reads, enter } = operationHarness([a, b], (view, request) => {
+    assert.equal(view, b);
+    assert.equal(request.method, 'PATCH');
+    const releasedCount = request.body.enabled ? 0 : view.externalWaitingParticipants;
+    view.externalQueueEnabled = request.body.enabled;
+    view.activeParticipants += releasedCount;
+    view.externalWaitingParticipants -= releasedCount;
+    return { eventId: view.eventId, externalQueueEnabled: view.externalQueueEnabled, releasedCount, changedAt: operationAt };
+  });
+  await app.mount();
+  try {
+    await enter(b);
+    assert.deepEqual(reads, [b.eventId]);
+    assert.ok(app.hasText('PAINEL DO EVENTO'));
+    assert.ok(app.hasText(b.name));
+    assert.deepEqual(app.textsInView('operation-phase'), ['Aberto']);
+    assert.ok(app.hasText('Pronto para operar'));
+    assert.deepEqual(app.textsInView('operation-active'), ['0', 'Participantes ativos']);
+    assert.deepEqual(app.textsInView('operation-waiting'), ['3', 'Na fila externa']);
+    assert.deepEqual(app.textsInView('operation-queue-state'), ['ATIVA']);
+    for (const label of ['Home', 'Histórico', 'BI']) assert.equal(app.buttonProps(label).accessibilityRole, 'tab');
+    assert.equal(app.hasButton('Sair da conta'), false);
+    const operationScroll = app.scrollContainingButton('Desativar fila externa');
+    assert.ok(operationScroll);
+    assert.equal(app.scrollContainingButton('Encerrar imediatamente'), operationScroll);
+    assert.equal(app.scrollContainingButton('Encerramento controlado'), operationScroll);
+    assert.equal(app.hasText(a.name), false);
+    await app.press('Desativar fila externa');
+    await app.press('Revisar operação');
+    assert.ok(app.hasText('Informe uma justificativa'));
+    await app.input('Justificativa', 'Acesso direto para a Arena');
+    await app.press('Revisar operação');
+    assert.ok(app.hasText('Confirmar: Desativar fila externa?'));
+    await app.press('Voltar à edição');
+    await app.press('Cancelar operação');
+    assert.equal(writes.length, 0);
+    await app.press('Desativar fila externa');
+    await app.input('Justificativa', 'Acesso direto para a Arena');
+    await app.press('Revisar operação');
+    const confirm = app.handler('Confirmar operação');
+    await app.act(async () => { confirm(); confirm(); });
+    assert.deepEqual(writes.map(w => w.body), [{ enabled: false, reason: 'Acesso direto para a Arena' }]);
+    assert.ok(app.hasText('Pessoas liberadas: 3'));
+    assert.deepEqual(app.textsInView('operation-active'), ['3', 'Participantes ativos']);
+    assert.deepEqual(app.textsInView('operation-waiting'), ['0', 'Na fila externa']);
+    assert.deepEqual(app.textsInView('operation-queue-state'), ['INATIVA']);
+    await app.press('Ativar fila externa');
+    await app.input('Justificativa', 'Organizar próximos ingressos');
+    await app.press('Revisar operação');
+    await app.press('Confirmar operação');
+    assert.equal(writes.length, 2);
+    assert.notEqual(writes[0].key, writes[1].key);
+    assert.deepEqual(app.textsInView('operation-queue-state'), ['ATIVA']);
+    assert.deepEqual(app.textsInView('operation-active'), ['3', 'Participantes ativos']);
+    assert.deepEqual(reads, [b.eventId, b.eventId, b.eventId]);
+  } finally { app.dispose(); }
+});
+
+test('ADMIN-07 perda de resposta exige reenvio explícito após reentrada, mesmo com fila já desativada', async () => {
+  const view = operationView(1);
+  let attempts = 0;
+  const { app, writes, enter } = operationHarness([view], () => {
+    if (++attempts === 1) {
+      Object.assign(view, { externalQueueEnabled: false, activeParticipants: 3, externalWaitingParticipants: 0 });
+      throw Object.assign(new Error('Resposta indisponível'), { name: 'AbortError' });
+    }
+    return { eventId: view.eventId, externalQueueEnabled: false, releasedCount: 3, changedAt: operationAt };
+  });
+  await app.mount();
+  try {
+    await enter(view);
+    await app.press('Desativar fila externa');
+    await app.input('Justificativa', 'Liberar entrada');
+    await app.press('Revisar operação');
+    await app.press('Confirmar operação');
+    assert.ok(app.hasText('Resultado ainda não confirmado'));
+    assert.deepEqual(app.textsInView('operation-queue-state'), ['INATIVA']);
+    assert.equal(app.hasText('Resposta confirmada'), false);
+    await app.press('Voltar ao painel');
+    await app.press('Operação do evento');
+    assert.equal(writes.length, 1);
+    assert.equal(app.hasButton('Ativar fila externa'), false);
+    await app.press('Reenviar a mesma solicitação');
+    assert.equal(writes.length, 2);
+    assert.deepEqual(writes[1], writes[0]);
+    assert.ok(app.hasText('Resposta confirmada'));
+  } finally { app.dispose(); }
+});
+
+test('ADMIN-07 recusa definitiva no reenvio libera nova revisão após expirar o prazo controlado', async () => {
+  const view = operationView(1);
+  let attempts = 0;
+  const { app, writes, reads, enter } = operationHarness([view], () => {
+    attempts++;
+    if (attempts === 1) {
+      view.observedAt = '2090-11-23T13:31:00.000000Z';
+      throw Object.assign(new Error('Resposta indisponível'), { name: 'AbortError' });
+    }
+    assert.equal(attempts, 2);
+    return { statusCode: 409, body: { code: 'CLOSURE_DEADLINE_INVALID' } };
+  });
+  await app.mount();
+  try {
+    await enter(view);
+    async function reviewAt(time) {
+      await app.press('Encerramento controlado');
+      await app.input('Justificativa', 'Encerrar a operação');
+      await app.input('Data de encerramento', '23/11/2090');
+      await app.input('Hora de encerramento', time);
+      await app.press('Revisar operação');
+      assert.ok(app.hasButton('Confirmar operação'));
+    }
+    await reviewAt('10:30');
+    assert.equal(writes.length, 0);
+    await app.press('Confirmar operação');
+    assert.equal(writes.length, 1);
+    assert.deepEqual(reads, [view.eventId, view.eventId]);
+    assert.ok(app.hasText('Resultado ainda não confirmado'));
+    assert.equal(app.hasText('Resposta confirmada'), false);
+    assert.equal(app.hasButton('Encerramento controlado'), false);
+    await app.press('Reenviar a mesma solicitação');
+    assert.deepEqual(writes, [writes[0], writes[0]]);
+    assert.deepEqual(reads, [view.eventId, view.eventId, view.eventId]);
+    assert.ok(app.hasText('Operação recusada'));
+    assert.ok(app.hasText('O prazo solicitado não está dentro dos limites atuais.'));
+    assert.equal(app.hasText('Resultado ainda não confirmado'), false);
+    assert.equal(app.hasText('Resposta confirmada'), false);
+    assert.equal(app.hasButton('Reenviar a mesma solicitação'), false);
+    await reviewAt('10:35');
+    assert.equal(writes.length, 2);
+  } finally { app.dispose(); }
+});
+
+for (const mode of ['immediate', 'controlled']) {
+  test('ADMIN-07 confirma o encerramento ' + mode + ' e lê do servidor o estado posterior', async () => {
+    const view = operationView(1);
+    const controlled = mode === 'controlled';
+    const { app, writes, enter } = operationHarness([view], (_, request) => {
+      assert.equal(request.method, 'POST');
+      assert.ok(request.route.endsWith('/close'));
+      const deadline = controlled ? '2090-11-23T13:30:00.000000Z' : operationAt;
+      Object.assign(view, { closureMode: mode, closureRequestedAt: operationAt, adminDeadlineAt: deadline,
+        effectivePhase: controlled ? 'closing' : 'closed', canClose: false, canSetExternalQueue: false, externalWaitingParticipants: 0 });
+      return { eventId: view.eventId, closureMode: mode, status: view.effectivePhase, newEntriesClosedAt: operationAt,
+        effectiveOperationalDeadlineAt: deadline, externalWaitingFinalized: 3 };
+    });
+    await app.mount();
+    try {
+      await enter(view);
+      assert.ok(app.hasText('Ambas as opções de encerramento exigem justificativa e confirmação.'));
+      await app.press(controlled ? 'Encerramento controlado' : 'Encerrar imediatamente');
+      await app.input('Justificativa', 'Encerrar a operação');
+      if (controlled) {
+        await app.input('Data de encerramento', '23/11/2090');
+        await app.input('Hora de encerramento', '11:05');
+        await app.press('Revisar operação');
+        assert.ok(app.hasText('dentro do limite operacional'));
+        assert.equal(writes.length, 0);
+        await app.input('Hora de encerramento', '10:30');
+      }
+      await app.press('Revisar operação');
+      assert.equal(writes.length, 0);
+      await app.press('Confirmar operação');
+      assert.equal(writes.length, 1);
+      assert.deepEqual(writes[0].body, { mode, reason: 'Encerrar a operação',
+        ...(controlled ? { controlledUntilAt: '2090-11-23T13:30:00.000Z' } : {}) });
+      assert.deepEqual(app.textsInView('operation-phase'), [controlled ? 'Encerrando' : 'Encerrado']);
+      assert.equal(app.hasText('Pronto para operar'), false);
+      assert.ok(app.hasText('Pessoas finalizadas na espera externa: 3'));
+      assert.equal(app.hasButton('Encerrar imediatamente'), false);
+      assert.equal(app.hasButton('Encerramento controlado'), false);
+      assert.equal(app.hasButton('Desativar fila externa'), false);
+      if (controlled) {
+        assert.ok(app.hasText('Prazo do encerramento controlado'));
+        view.effectivePhase = 'closed';
+        await app.press('Voltar ao painel');
+        await app.press('Operação do evento');
+        assert.deepEqual(app.textsInView('operation-phase'), ['Encerrado']);
+        assert.equal(writes.length, 1);
+      }
+    } finally { app.dispose(); }
+  });
+}
+
+test('ADMIN-07 mostra indisponibilidade, erro de rede e recusa sem apresentar controles', async () => {
+  const view = operationView(1, { effectivePhase: 'scheduled', canSetExternalQueue: false, activeParticipants: undefined });
+  let stage = 'offline';
+  const { app, enter, writes } = operationHarness([view], () => assert.fail('Escrita inesperada'), snapshot => {
+    if (stage === 'offline') throw new Error('Sem rede');
+    if (stage === 'absent') return { statusCode: 404, body: { code: 'RESOURCE_NOT_FOUND' } };
+    if (stage === 'denied') return { statusCode: 403, body: { code: 'ADMIN_REQUIRED' } };
+    return snapshot;
+  });
+  await app.mount();
+  try {
+    await enter(view);
+    assert.ok(app.hasText('Dados operacionais indisponíveis'));
+    assert.equal(app.hasButton('Encerrar imediatamente'), false);
+    stage = 'absent';
+    await app.press('Tentar novamente');
+    assert.ok(app.hasText('Evento não encontrado ou indisponível'));
+    stage = 'available';
+    await app.press('Tentar novamente');
+    assert.deepEqual(app.textsInView('operation-phase'), ['Agendado']);
+    assert.deepEqual(app.textsInView('operation-active'), ['Indisponível', 'Participantes ativos']);
+    assert.deepEqual(app.textsInView('operation-waiting'), ['3', 'Na fila externa']);
+    assert.equal(app.hasText('Pronto para operar'), false);
+    assert.equal(app.hasButton('Desativar fila externa'), false);
+    Object.assign(view, { effectivePhase: 'not_ready', externalQueueEnabled: false });
+    await app.press('Atualizar operação');
+    assert.deepEqual(app.textsInView('operation-phase'), ['Não pronto']);
+    assert.ok(app.hasText('Configuração pendente'));
+    assert.equal(app.hasText('Pronto para operar'), false);
+    assert.equal(app.hasButton('Ativar fila externa'), false);
+    stage = 'denied';
+    await app.press('Atualizar operação');
+    assert.ok(app.hasText('Sessão sem autorização'));
+    assert.equal(app.hasText(view.name), false);
+    assert.equal(app.hasButton('Encerrar imediatamente'), false);
+    assert.equal(writes.length, 0);
+  } finally { app.dispose(); }
+});
+
+test('ADMIN-07 separa recibo confirmado de falha posterior na consulta', async () => {
+  const view = operationView(1);
+  let offline = false;
+  const { app, enter, writes } = operationHarness([view], () => {
+    offline = true;
+    Object.assign(view, { externalQueueEnabled: false, activeParticipants: 3, externalWaitingParticipants: 0 });
+    return { eventId: view.eventId, externalQueueEnabled: false, releasedCount: 3, changedAt: operationAt };
+  }, current => {
+    if (offline) throw new Error('Consulta indisponível após gravação');
+    return current;
+  });
+  await app.mount();
+  try {
+    await enter(view);
+    await app.press('Desativar fila externa');
+    await app.input('Justificativa', 'Entrada direta');
+    await app.press('Revisar operação');
+    await app.press('Confirmar operação');
+    assert.ok(app.hasText('Resposta confirmada'));
+    assert.ok(app.hasText('Dados operacionais indisponíveis'));
+    assert.equal(app.hasButton('Ativar fila externa'), false);
+    offline = false;
+    await app.press('Tentar novamente');
+    assert.deepEqual(app.textsInView('operation-queue-state'), ['INATIVA']);
+    assert.equal(writes.length, 1);
+  } finally { app.dispose(); }
+});
+
+test('ADMIN-07 resposta de escrita tardia não afeta outro evento ou provedor', async () => {
+  const a = operationView(1), b = operationView(2), response = deferred();
+  const { app, writes, enter } = operationHarness([a, b], () => response.promise);
+  await app.mount();
+  try {
+    await enter(a);
+    await app.press('Desativar fila externa');
+    await app.input('Justificativa', 'Ação restrita ao evento A');
+    await app.press('Revisar operação');
+    const obsolete = app.handler('Confirmar operação');
+    await app.press('Confirmar operação');
+    assert.ok(app.hasText('Operação administrativa em andamento'));
+    await app.press('Voltar ao painel');
+    await app.press('Voltar aos eventos');
+    await app.press('Acessar evento ' + b.name);
+    await app.press('Operação do evento');
+    assert.ok(app.hasText(b.name));
+    assert.equal(app.hasText('Operação administrativa em andamento'), false);
+    await app.replaceProvider({ ...adminUser, id: 'admin-replacement', sessionId: '10000000-0000-4000-8000-000000000002' });
+    await enter(b);
+    await app.act(async () => {
+      obsolete();
+      response.resolve({ eventId: a.eventId, externalQueueEnabled: false, releasedCount: 3, changedAt: operationAt });
+    });
+    assert.equal(writes.length, 1);
+    assert.ok(app.hasText(b.name));
+    assert.equal(app.hasText('Resposta confirmada'), false);
+    assert.ok(app.hasButton('Desativar fila externa'));
+  } finally { app.dispose(); }
+});
+
+test('ADMIN-05: Home e listagem abrem o fluxo, cinco etapas preservam UUID e retomada lê o evento salvo', async () => {
   const eventId = 'abcdef00-0000-4000-8000-000000000001';
   const path = `/admin/events/${eventId}`;
   const writes = [];
@@ -314,7 +974,7 @@ test('ADMIN-05: Home e listagem abrem o fluxo, cinco etapas preservam UUID e ret
   } finally { app.dispose(); }
 });
 
-test('ADMIN-05: equipe confirma revogação, revisa os checks e conclui um evento pronto ainda agendado', { skip }, async () => {
+test('ADMIN-05: equipe confirma revogação, revisa os checks e conclui um evento pronto ainda agendado', async () => {
   const eventId = 'abcdef00-0000-4000-8000-000000000001';
   const exp = 'abcdef00-0000-4000-8000-000000000002', station = 'abcdef00-0000-4000-8000-000000000003';
   const path = '/admin/events/' + eventId, at = '2090-11-01T00:00:00Z';
@@ -332,6 +992,7 @@ test('ADMIN-05: equipe confirma revogação, revisa os checks e conclui um event
       if (route === path) return { event };
       if (route === path + '/experiences') return { eventId, items: [{ id: exp, eventId, name: 'Oficina',
         stations: [{ id: station, experienceId: exp, label: 'Mesa', availability: 'available' }] }] };
+      if (route === path + '/staff') return { eventId, items: staff ? [staffMember(grant, email)] : [] };
       if (route === path + '/readiness') return { eventId, statusStored: 'scheduled', effectivePhase: 'scheduled',
         acceptingNewParticipations: false, ready: staff, missing: staff ? [] : ['VERIFIED_ACTIVE_STAFF'],
         checks: { nameAndAccessCode: true, validScheduleAndTimezone: true, externalQueueConfigured: true,
@@ -339,8 +1000,10 @@ test('ADMIN-05: equipe confirma revogação, revisa os checks e conclui um event
       assert.equal(options.method, 'POST');
       if (route === '/admin/roles/grant') {
         assert.deepEqual(JSON.parse(options.body), { role: 'staff', eventId, email });
+        assert.equal(staff, false);
+        grant.id = 'abcdef00-0000-4000-8000-' + String(10 + revocations).padStart(12, '0');
         staff = true;
-        return { grant };
+        return { statusCode: 201, body: { grant } };
       }
       assert.equal(route, '/admin/roles/revoke');
       assert.deepEqual(JSON.parse(options.body), { grantId: grant.id });
@@ -357,6 +1020,7 @@ test('ADMIN-05: equipe confirma revogação, revisa os checks e conclui um event
     await app.press('Continuar');
     await app.input('E-mail do usuário', email);
     await app.press('Conceder Staff');
+    await app.press('Confirmar concessão');
     assert.ok(app.hasText('O evento tem Staff elegível.'));
     await app.press('Revogar acesso de ' + email);
     await app.press('Cancelar');
@@ -367,6 +1031,7 @@ test('ADMIN-05: equipe confirma revogação, revisa os checks e conclui um event
     assert.ok(app.hasText('O evento ainda precisa de Staff elegível.'));
     await app.input('E-mail do usuário', email);
     await app.press('Conceder Staff');
+    await app.press('Confirmar concessão');
     await app.press('Continuar');
     assert.ok(app.hasText('Experiências: 1 · Estações: 1'));
     assert.ok(app.hasText('Fase: Agendado'));
@@ -375,10 +1040,26 @@ test('ADMIN-05: equipe confirma revogação, revisa os checks e conclui um event
     assert.ok(app.hasText('Pronto para operar'));
     await app.press('Voltar para a Home Admin');
     assert.equal(app.activeRoute(), 'Home');
+    await app.press('Gerenciar eventos');
+    await app.press('Acessar evento Encontro das oficinas');
+    await app.press('Equipe Staff');
+    assert.ok(app.hasButton('Revogar acesso de ' + email));
+    await app.press('Revogar acesso de ' + email);
+    await app.press('Revogar acesso');
+    assert.equal(revocations, 2);
+    assert.ok(app.hasText('Nenhum Staff vinculado a este evento'));
+    await app.input('E-mail do usuário', email);
+    await app.press('Conceder Staff');
+    await app.press('Confirmar concessão');
+    await app.press('Voltar ao painel');
+    await app.press('Continuar configuração');
+    await app.press('Continuar');
+    assert.ok(app.hasButton('Revogar acesso de ' + email));
+    assert.ok(app.hasText('O evento tem Staff elegível.'));
   } finally { app.dispose(); }
 });
 
-test('ADMIN-05: painel pronto oferece retomada de estação salva com resposta perdida na mesma sessão', { skip }, async () => {
+test('ADMIN-05: painel pronto oferece retomada de estação salva com resposta perdida na mesma sessão', async () => {
   const eventId = 'abcdef00-0000-4000-8000-000000000001';
   const experienceId = 'abcdef00-0000-4000-8000-000000000002';
   const path = '/admin/events/' + eventId;
@@ -432,7 +1113,7 @@ test('ADMIN-05: painel pronto oferece retomada de estação salva com resposta p
 });
 
 for (const scenario of ['encerrar sessão', 'trocar conta', 'closing', 'closed']) {
-  test(`ADMIN-05: confirmação após POST pendente — ${scenario}`, { skip }, async () => {
+  test(`ADMIN-05: confirmação após POST pendente — ${scenario}`, async () => {
     const eventId = 'abcdef00-0000-4000-8000-000000000001';
     const path = '/admin/events/' + eventId;
     const pending = deferred();
@@ -501,7 +1182,7 @@ for (const scenario of ['encerrar sessão', 'trocar conta', 'closing', 'closed']
   });
 }
 
-test('Admin: senha e desafio não abrem painel; TOTP e identidade confirmada abrem Heliom', { skip }, async () => {
+test('Admin: senha e desafio não abrem painel; TOTP e identidade confirmada abrem Heliom', async () => {
   const identity = deferred();
   const control = { realAdmin: true, me: () => identity.promise };
   const app = createIntegration({ initialUser: adminUser, control });
@@ -532,7 +1213,7 @@ test('Admin: senha e desafio não abrem painel; TOTP e identidade confirmada abr
   } finally { app.dispose(); }
 });
 
-test('Admin: restauração válida reutiliza telas, retornos internos e logout real', { skip }, async () => {
+test('Admin: restauração válida reutiliza telas, retornos internos e logout real', async () => {
   const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control: { realAdmin: true } });
   await app.mount();
   try {
@@ -569,7 +1250,7 @@ test('Admin: restauração válida reutiliza telas, retornos internos e logout r
   } finally { app.dispose(); }
 });
 
-test('Admin: painel real retorna à mesma rota da lista e mantém informações no UUID selecionado', { skip }, async () => {
+test('Admin: painel real retorna à mesma rota da lista e mantém informações no UUID selecionado', async () => {
   const eventId = 'abcdef00-0000-4000-8000-000000000001';
   const detailPath = `/admin/events/${eventId}`;
   const selected = { id: eventId, name: 'Evento Selecionado', effectivePhase: 'scheduled', timezone: 'America/Sao_Paulo',
@@ -582,6 +1263,7 @@ test('Admin: painel real retorna à mesma rota da lista e mantém informações 
       assert.equal(options.method, 'GET');
       if (route === '/admin/events') return { items: [selected], nextCursor: null };
       if (route === detailPath) return { event: selected };
+      if (route === detailPath + '/staff') return { eventId, items: [] };
       if (route === `${detailPath}/readiness`) {
         readinessReads++;
         return { eventId, statusStored: 'scheduled', effectivePhase: 'scheduled', ready: true, missing: [],
@@ -602,16 +1284,19 @@ test('Admin: painel real retorna à mesma rota da lista e mantém informações 
     await app.press('Equipe Staff');
     assert.equal(app.activeRoute(), 'AdminEventManagementInfo');
     assert.ok(app.hasText('Evento Selecionado'));
-    assert.ok(app.hasText('Esta área ainda não permite alterações'));
-    assert.equal(readinessReads, 1);
+    assert.ok(app.hasText('Staff do evento'));
+    assert.ok(app.hasText('Nenhum Staff vinculado a este evento'));
+    assert.ok(app.hasText('O evento tem Staff elegível.'));
+    assert.equal(app.hasButton('Sair da conta'), false);
+    assert.equal(readinessReads, 2);
     await app.press('Voltar ao painel');
     assert.equal(app.activeRoute(), 'AdminRealEvent');
-    assert.equal(readinessReads, 2);
+    assert.equal(readinessReads, 3);
     await app.press('Informações e horários');
     assert.equal(app.activeRoute(), 'AdminEventManagementInfo');
     assert.equal(app.hasButton('Sair da conta'), false);
     for (const text of ['Informações gerais', 'Datas e horários', 'Acesso ao evento', 'ARENA-TESTE']) assert.ok(app.hasText(text));
-    assert.equal(readinessReads, 3);
+    assert.equal(readinessReads, 4);
     await app.press('Editar nome');
     await app.input('Nome do evento', 'Alteração não salva');
     await app.press('Voltar ao painel');
@@ -620,7 +1305,7 @@ test('Admin: painel real retorna à mesma rota da lista e mantém informações 
     await app.press('Voltar ao painel');
     await app.press('Descartar alterações');
     assert.equal(app.activeRoute(), 'AdminRealEvent');
-    assert.equal(readinessReads, 4);
+    assert.equal(readinessReads, 5);
     await app.press('Voltar aos eventos');
     assert.equal(app.activeRoute(), 'AdminEvents');
     await app.press('Acessar evento Evento Selecionado');
@@ -630,7 +1315,7 @@ test('Admin: painel real retorna à mesma rota da lista e mantém informações 
   } finally { app.dispose(); }
 });
 
-test('ADMIN-04: painel abre estrutura por UUID, edita em contexto e reconsulta a prontidão no retorno', { skip }, async () => {
+test('ADMIN-04: painel abre estrutura por UUID, edita em contexto e reconsulta a prontidão no retorno', async () => {
   const id = n => 'abcdef00-0000-4000-8000-' + String(n).padStart(12, '0');
   const eventId = id(1), base = '/admin/events/' + eventId;
   const selected = { id: eventId, name: 'Encontro', effectivePhase: 'scheduled', timezone: 'America/Fortaleza',
@@ -733,26 +1418,27 @@ test('ADMIN-04: painel abre estrutura por UUID, edita em contexto e reconsulta a
 });
 
 const reviewPendingStructure = 'Revisar operações pendentes de experiências e estações';
-function structureIntegration({ initialStation = false, write, read, platformOS = 'web' } = {}) {
+function structureIntegration({ initialStation = false, write, read, me, platformOS = 'web' } = {}) {
   const eventId = 'abcdef00-0000-4000-8000-000000000001';
   const experienceId = 'abcdef00-0000-4000-8000-000000000002';
   const station = { id: 'abcdef00-0000-4000-8000-000000000003', experienceId, label: 'Mesa', availability: 'available',
     pendingServiceSessionId: null };
   const group = { id: experienceId, eventId, name: 'Oficina', stations: initialStation ? [station] : [] };
-  const db = { phase: 'scheduled', name: 'Evento de estrutura', eligibleStaff: true };
+  const db = { phase: 'scheduled', name: 'Evento de estrutura', eligibleStaff: true, roster: [] };
   const path = '/admin/events/' + eventId;
   const stationPath = path + '/experiences/' + experienceId + '/stations';
   const availabilityPath = '/staff/events/' + eventId + '/stations/' + station.id + '/availability';
   const requests = [];
   const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control: { realAdmin: true,
-    platformOS, http: async (route, options) => {
+    platformOS, me, http: async (route, options) => {
       requests.push({ route, method: options.method, key: options.headers['Idempotency-Key'], body: options.body });
+      if (options.method === 'POST' && ['/admin/roles/grant', '/admin/roles/revoke'].includes(route)) return write({ db, route, options });
       if (options.method === 'POST' && route === stationPath) {
         return write ? write({ db, group, station, route, options }) : { statusCode: 201, body: { station } };
       }
       if (options.method === 'PATCH' && route === availabilityPath) return write({ db, group, station, route, options });
       if (options.method !== 'GET') return;
-      const override = read?.({ route, path, group, eventId });
+      const override = read?.({ route, path, group, eventId, db });
       if (override) return override;
       const available = group.stations.some(row => row.availability === 'available');
       const ready = available && db.eligibleStaff;
@@ -762,6 +1448,7 @@ function structureIntegration({ initialStation = false, write, read, platformOS 
       if (route === '/admin/events') return { items: [event], nextCursor: null };
       if (route === path) return { event };
       if (route === path + '/experiences') return { eventId, items: [group] };
+      if (route === path + '/staff') return { eventId, items: db.roster };
       if (route === path + '/readiness') return { eventId, statusStored: db.phase, effectivePhase: db.phase, ready,
         acceptingNewParticipations: false,
         missing: [...(!available ? ['EXPERIENCE_WITH_AVAILABLE_STATION'] : []), ...(!db.eligibleStaff ? ['VERIFIED_ACTIVE_STAFF'] : [])],
@@ -780,7 +1467,367 @@ function structureIntegration({ initialStation = false, write, read, platformOS 
   return { app, db, path, stationPath, availabilityPath, requests, openPanel, fillStation };
 }
 
-test('ADMIN-04: recuperação do wizard no painel pronto em closing, recusa do replay e consulta em closed', { skip }, async () => {
+test('ADMIN-06: equipe persistida reaparece, mostra erro de consulta separado de vazio e permite revogar conta inelegível', async () => {
+  const eventId = 'abcdef00-0000-4000-8000-000000000001';
+  const email = 'staff-antigo@example.test';
+  const at = '2090-11-01T00:00:00Z';
+  const grant = { id: 'abcdef00-0000-4000-8000-000000000051', userId: 'abcdef00-0000-4000-8000-000000000052',
+    eventId, role: 'staff', grantedAt: at, revokedAt: null };
+  let failRead = false, revocations = 0, revoked = false;
+  const finish = deferred(), rosterAfterRevoke = deferred();
+  const rig = structureIntegration({
+    platformOS: 'ios',
+    read({ route, path }) {
+      if (route !== path + '/staff') return;
+      if (failRead) return { statusCode: 503, body: {} };
+      if (revoked) return rosterAfterRevoke.promise;
+    },
+    async write({ db, route, options }) {
+      assert.equal(route, '/admin/roles/revoke');
+      assert.deepEqual(JSON.parse(options.body), { grantId: grant.id });
+      revocations++;
+      await finish.promise;
+      db.roster = [];
+      revoked = true;
+      return { grant: { ...grant, revokedAt: at } };
+    },
+  });
+  const { app } = rig;
+  const revokeButton = 'Revogar acesso de ' + email;
+  const rosterReads = () => rig.requests.filter(request => request.route === rig.path + '/staff').length;
+  rig.db.roster = [staffMember(grant, email, false, 'Staff Antigo')];
+  await app.mount();
+  try {
+    await rig.openPanel();
+    assert.equal(rosterReads(), 0);
+    await app.press('Equipe Staff');
+    assert.equal(rosterReads(), 1);
+    assert.ok(app.hasText('Staff Antigo'));
+    assert.ok(app.hasText('Vínculo ativo · conta inelegível'));
+    assert.ok(!app.hasText('Acesso ativo'));
+    assert.ok(!app.hasText('Concessões conhecidas nesta sessão'));
+    const scroll = app.scrollContainingButton('Conceder Staff');
+    assert.ok(scroll);
+    assert.equal(scroll, app.scrollContainingButton(revokeButton));
+    assert.equal(scroll.props.keyboardShouldPersistTaps, 'handled');
+    assert.ok(!app.scrollContainingButton('Home'));
+    await app.press('Voltar ao painel');
+    assert.equal(rosterReads(), 1);
+    failRead = true;
+    await app.press('Equipe Staff');
+    assert.equal(rosterReads(), 2);
+    assert.ok(app.hasText('Não foi possível consultar a equipe Staff.'));
+    assert.ok(!app.hasText('Nenhum Staff vinculado a este evento'));
+    assert.ok(!app.hasText(email));
+    failRead = false;
+    await app.press('Tentar consultar a equipe novamente');
+    assert.ok(app.hasText('Staff Antigo'));
+    assert.equal(rosterReads(), 3);
+    await app.press(revokeButton);
+    assert.equal(revocations, 0);
+    await app.press('Revogar acesso');
+    assert.equal(app.buttonProps(revokeButton).accessibilityState.busy, true);
+    await app.activateButton(revokeButton);
+    assert.equal(revocations, 1);
+    assert.equal(rosterReads(), 3);
+    assert.ok(app.hasText('Staff Antigo'));
+    assert.ok(!app.hasText('Nenhum Staff vinculado a este evento'));
+    await app.act(async () => { finish.resolve(); });
+    assert.equal(rosterReads(), 4);
+    assert.ok(app.hasText('Atualizando a equipe Staff...'));
+    assert.ok(!app.hasText('Nenhum Staff vinculado a este evento'));
+    await app.act(async () => { rosterAfterRevoke.resolve({ eventId, items: [] }); });
+    assert.ok(!app.hasText('Staff Antigo'));
+    assert.ok(app.hasText('Revogação confirmada.'));
+    assert.ok(app.hasText('Nenhum Staff vinculado a este evento'));
+    await app.press('Home');
+    assert.equal(app.activeRoute(), 'Home');
+    assert.equal(rosterReads(), 4);
+  } finally {
+    finish.resolve();
+    rosterAfterRevoke.resolve({ eventId, items: [] });
+    app.dispose();
+  }
+});
+
+for (const outcome of ['ativo', 'ausente', 'substituído', 'falha recuperável', 'troca de sessão', 'cancelado durante leitura']) {
+  test('ADMIN-06: confirmação de revogação durante atualização da equipe — ' + outcome, async () => {
+    const id = n => 'abcdef00-0000-4000-8000-' + String(n).padStart(12, '0');
+    const eventId = id(1), at = '2090-11-01T00:00:00Z', email = 'vinculo-antigo@example.test';
+    const grant = { id: id(51), userId: id(52), eventId, role: 'staff', grantedAt: at, revokedAt: null };
+    const otherGrant = { ...grant, id: id(53), userId: id(54) };
+    const replacement = { ...grant, id: id(55) };
+    const initialMember = staffMember(grant, email);
+    const writeFinished = deferred(), refreshing = deferred(), retry = deferred();
+    let hold = null;
+    let revocationAttempts = 0;
+    const rig = structureIntegration({
+      read({ route, path }) {
+        if (route !== path + '/staff' || !hold) return;
+        const reading = hold;
+        hold = null;
+        return reading.promise;
+      },
+      async write({ db, route }) {
+        if (route === '/admin/roles/grant') {
+          await writeFinished.promise;
+          return { statusCode: 201, body: { grant: otherGrant } };
+        }
+        if (++revocationAttempts === 1) return { statusCode: 503, body: {} };
+        db.roster = [];
+        const revokedGrant = outcome === 'substituído' ? replacement : grant;
+        return { statusCode: 200, body: { grant: { ...revokedGrant, revokedAt: at } } };
+      },
+    });
+    const revokes = () => rig.requests.filter(({ method, route }) => method === 'POST' && route === '/admin/roles/revoke')
+      .map(({ body, key }) => ({ body: JSON.parse(body), key }));
+    const { app } = rig;
+    rig.db.roster = [initialMember];
+    await app.mount();
+    try {
+      await rig.openPanel();
+      await app.press('Equipe Staff');
+      await app.input('E-mail do usuário', 'outro@example.test');
+      await app.press('Conceder Staff');
+      await app.press('Confirmar concessão');
+      const grants = rig.requests.filter(({ method, route }) => method === 'POST' && route === '/admin/roles/grant');
+      assert.deepEqual(grants.map(({ body }) => JSON.parse(body)), [
+        { role: 'staff', eventId, email: 'outro@example.test' },
+      ]);
+      await app.press('Revogar acesso de ' + email);
+      const staleConfirm = app.handler('Revogar acesso');
+      await app.act(async () => {
+        hold = refreshing;
+        writeFinished.resolve();
+      });
+      assert.equal(hold, null);
+      assert.ok(app.hasText('Aguarde a verificação do vínculo.'));
+      assert.equal(app.buttonProps('Revogar acesso').accessibilityState.disabled, true);
+      await app.act(async () => { staleConfirm(); staleConfirm(); });
+      assert.deepEqual(revokes(), []);
+      assert.ok(!app.hasText('Nenhum Staff vinculado a este evento'));
+
+      if (outcome === 'cancelado durante leitura') {
+        await app.press('Cancelar');
+        assert.ok(!app.hasText('Revogar acesso Staff?'));
+        await app.act(async () => { refreshing.resolve({ eventId, items: [initialMember] }); });
+        await app.act(async () => { staleConfirm(); });
+        assert.ok(!app.hasText('Revogar acesso Staff?'));
+        assert.ok(app.hasButton('Revogar acesso de ' + email));
+        assert.deepEqual(revokes(), []);
+        return;
+      }
+
+      if (outcome === 'troca de sessão') {
+        rig.db.roster = [];
+        await app.replaceProvider({ ...adminUser, id: 'admin-b', email: 'admin-b@example.test', sessionId: id(93) });
+        await rig.openPanel();
+        await app.press('Equipe Staff');
+        await app.act(async () => {
+          refreshing.resolve({ eventId, items: [initialMember] });
+          staleConfirm();
+        });
+        assert.deepEqual(revokes(), []);
+        assert.ok(!app.hasText(email));
+        assert.ok(!app.hasText('Revogar acesso Staff?'));
+        assert.ok(app.hasText('Nenhum Staff vinculado a este evento'));
+        return;
+      }
+
+      if (outcome === 'falha recuperável') {
+        await app.act(async () => { refreshing.resolve({ statusCode: 503, body: {} }); });
+        assert.ok(app.hasText('Não foi possível verificar o vínculo.'));
+        assert.ok(app.hasText(email));
+        assert.ok(!app.hasText('Nenhum Staff vinculado a este evento'));
+        assert.deepEqual(revokes(), []);
+        hold = retry;
+        await app.press('Atualizar equipe Staff');
+        assert.ok(app.hasText('Aguarde a verificação do vínculo.'));
+        await app.act(async () => { retry.resolve({ eventId, items: [initialMember] }); });
+      } else {
+        const items = outcome === 'ausente' ? [] :
+          outcome === 'substituído' ? [staffMember(replacement, email)] : [initialMember];
+        await app.act(async () => { refreshing.resolve({ eventId, items }); });
+      }
+      assert.deepEqual(revokes(), []);
+      if (outcome === 'ausente' || outcome === 'substituído') {
+        assert.ok(app.hasText('O acesso selecionado já não consta na equipe Staff.'));
+        assert.ok(!app.hasText('Revogação confirmada.'));
+        await app.act(async () => { staleConfirm(); });
+        await app.press('Voltar à equipe');
+        assert.ok(!app.hasText('Revogar acesso Staff?'));
+        assert.equal(app.hasButton('Revogar acesso de ' + email), outcome === 'substituído');
+        assert.deepEqual(revokes(), []);
+        if (outcome === 'ausente') return;
+        await app.press('Revogar acesso de ' + email);
+        assert.ok(app.hasText('Revogar acesso Staff?'));
+        await app.act(async () => { staleConfirm(); });
+        assert.deepEqual(revokes(), []);
+      }
+      const confirm = app.handler('Revogar acesso');
+      await app.act(async () => { confirm(); confirm(); });
+      const attempts = revokes();
+      assert.equal(attempts.length, 1);
+      const [firstAttempt] = attempts;
+      assert.deepEqual(firstAttempt.body, { grantId: outcome === 'substituído' ? replacement.id : grant.id });
+      assert.ok(firstAttempt.key);
+      assert.ok(app.hasText('Resultado incerto'));
+      assert.ok(app.hasButton('Revogar acesso de ' + email));
+      await app.press('Repetir revogação para ' + email);
+      assert.deepEqual(revokes(), [firstAttempt, firstAttempt]);
+      assert.ok(app.hasText('Revogação confirmada.'));
+      assert.ok(app.hasText('Nenhum Staff vinculado a este evento'));
+    } finally {
+      writeFinished.resolve();
+      refreshing.resolve({ eventId, items: [] });
+      retry.resolve({ eventId, items: [] });
+      app.dispose();
+    }
+  });
+}
+
+test('ADMIN-06: equipe maior mantém formulário e ações nominais na mesma rolagem', async t => {
+  const id = n => 'abcdef00-0000-4000-8000-' + String(n).padStart(12, '0');
+  const at = '2090-11-01T00:00:00Z';
+  const eventId = id(1);
+  const rig = structureIntegration({ platformOS: 'ios', write({ db, route, options }) {
+    if (route !== '/admin/roles/revoke') return { statusCode: 500, body: {} };
+    const { grantId } = JSON.parse(options.body);
+    const member = db.roster.find(item => item.grantId === grantId);
+    if (!member) return { statusCode: 404, body: {} };
+    db.roster = db.roster.filter(item => item.grantId !== grantId);
+    return { statusCode: 200, body: { grant: { id: grantId, userId: member.userId, eventId,
+      role: 'staff', grantedAt: member.grantedAt, revokedAt: at } } };
+  } });
+  const { app } = rig;
+  const roster = Array.from({ length: 80 }, (_, i) => staffMember(
+    { id: id(100 + i), userId: id(200 + i), grantedAt: at }, 'equipe-' + (i + 1) + '@example.test'));
+  rig.db.roster = [...roster];
+  const button = member => 'Revogar acesso de ' + member.email;
+  const postTrace = requests => requests.filter(({ method }) => method === 'POST').map(({ method, route, body }) => {
+    const payload = JSON.parse(body ?? '{}');
+    return { method, pathname: '/api/v1' + route, bodyFields: Object.keys(payload),
+      ...(route === '/admin/roles/revoke' && { grantId: payload.grantId }) };
+  });
+  const staffWrites = requests => requests.filter(({ method, route }) =>
+    method === 'POST' && (route === '/admin/roles/revoke' || route === '/admin/roles/grant'));
+  await app.mount();
+  try {
+    assert.deepEqual(postTrace(rig.requests), [
+      { method: 'POST', pathname: '/api/v1/auth/refresh', bodyFields: ['refreshToken'] },
+    ], 'POSTs durante a montagem com credencial persistida');
+    await rig.openPanel();
+    await app.press('Equipe Staff');
+    const scroll = app.scrollContainingButton('Conceder Staff');
+    assert.ok(scroll);
+    assert.ok(!app.hasText('Acesso ativo'));
+    assert.ok(!app.hasText('Vínculo ativo · conta inelegível'));
+    for (const member of roster) {
+      const label = button(member);
+      assert.equal(app.scrollContainingButton(label), scroll);
+      const props = app.buttonProps(label);
+      assert.equal(props.accessibilityRole, 'button');
+      assert.equal(props.accessibilityState.disabled, false);
+      assert.ok(props.style({ pressed: false }).some(style => style?.minHeight >= 44));
+    }
+    const first = roster[0], last = roster.at(-1);
+    await app.press(button(last));
+    assert.ok(app.hasText(last.email + ' · ' + rig.db.name));
+    const beforeCancel = rig.requests.length;
+    const postsBeforeCancel = postTrace(rig.requests);
+    assert.equal(staffWrites(rig.requests).length, 0,
+      `POSTs antes de cancelar: ${JSON.stringify(postsBeforeCancel)}`);
+    await app.press('Cancelar');
+    const postsAfterCancel = postTrace(rig.requests.slice(beforeCancel));
+    t.diagnostic(JSON.stringify({ beforeCancel: { count: postsBeforeCancel.length, posts: postsBeforeCancel },
+      afterCancel: { count: postsAfterCancel.length, posts: postsAfterCancel } }));
+    assert.equal(staffWrites(rig.requests.slice(beforeCancel)).length, 0,
+      `POSTs ao cancelar: ${JSON.stringify(postsAfterCancel)}`);
+    assert.ok(!app.hasText('Revogar acesso Staff?'));
+    assert.deepEqual(rig.db.roster, roster);
+    for (const member of roster) assert.ok(app.hasButton(button(member)));
+    const rosterReads = () => rig.requests.filter(({ method, route }) => method === 'GET' && route === rig.path + '/staff');
+    assert.equal(rosterReads().length, 1);
+
+    for (const [index, member] of [first, last].entries()) {
+      const beforeSelection = rig.requests.length;
+      await app.press(button(member));
+      assert.ok(app.hasText(member.email + ' · ' + rig.db.name));
+      assert.equal(staffWrites(rig.requests.slice(beforeSelection)).length, 0);
+      const beforeConfirm = rig.requests.length;
+      await app.press('Revogar acesso');
+      const writes = staffWrites(rig.requests.slice(beforeConfirm));
+      assert.deepEqual(writes.map(({ method, route, body }) => ({ method, route, body: JSON.parse(body) })), [
+        { method: 'POST', route: '/admin/roles/revoke', body: { grantId: member.grantId } },
+      ]);
+      assert.equal(rosterReads().length, 2 + index);
+      assert.ok(!app.hasButton(button(member)));
+      assert.ok(app.hasButton(button(roster[1])));
+      if (member === first) assert.ok(app.hasButton(button(last)));
+    }
+  } finally { app.dispose(); }
+});
+
+test('ADMIN-06: concessão em evento encerrado e resposta tardia após troca de Admin no mesmo cliente', async () => {
+  const response = deferred();
+  const oldRoster = deferred(), currentRoster = deferred();
+  const email = 'anterior@example.test';
+  let oldSession = true;
+  const h = structureIntegration({ write: () => response.promise,
+    read: ({ route, path }) => route === path + '/staff' ? (oldSession ? oldRoster.promise : currentRoster.promise) : undefined });
+  const { app, requests, db } = h;
+  try {
+    await app.mount();
+    await h.openPanel();
+    db.phase = 'closed';
+    await app.press('Equipe Staff');
+    assert.ok(app.hasText(db.name));
+    assert.ok(!app.hasText('Encerrado'));
+    await app.input('E-mail do usuário', email);
+    await app.press('Conceder Staff');
+    const oldConfirm = app.handler('Confirmar concessão');
+    await app.act(async () => { oldConfirm(); });
+    assert.ok(app.hasText('Em andamento'));
+    const client = app.manager.client;
+    await app.act(() => app.manager.logout());
+    const other = { ...adminUser, id: 'admin-b', email: 'b@example.test', sessionId: '20000000-0000-4000-8000-000000000002' };
+    app.setUser(other);
+    await app.act(() => app.manager.login({ email: other.email, password: 'password' }));
+    await app.act(() => app.manager.verifyAdminTwoFactor('123456'));
+    oldSession = false;
+    db.phase = 'scheduled';
+    await h.openPanel();
+    await app.press('Equipe Staff');
+    assert.ok(app.hasText('Consultando a equipe Staff...'));
+    await app.act(async () => {
+      response.resolve({ statusCode: 201, body: { grant: { id: 'abcdef00-0000-4000-8000-000000000009',
+        eventId: h.path.split('/').at(-1), userId: 'abcdef00-0000-4000-8000-000000000008', role: 'staff',
+        grantedAt: '2090-11-01T00:00:00Z', revokedAt: null } } });
+      oldRoster.resolve({ eventId: h.path.split('/').at(-1), items: [{
+        grantId: 'abcdef00-0000-4000-8000-000000000059', userId: 'abcdef00-0000-4000-8000-000000000058',
+        name: 'Dados da sessão anterior', email, grantedAt: '2090-11-01T00:00:00Z', eligible: true,
+      }] });
+      oldConfirm();
+    });
+    assert.equal(app.manager.client, client);
+    assert.equal(requests.filter(r => r.route === '/admin/roles/grant').length, 1);
+    assert.equal(requests.filter(r => r.route === h.path + '/staff').length, 2);
+    assert.ok(app.hasText('Consultando a equipe Staff...'));
+    assert.ok(!app.hasText('Nenhum Staff vinculado a este evento'));
+    assert.equal(app.hasText(email), false);
+    assert.equal(app.hasText('Concessão confirmada.'), false);
+    await app.act(async () => { currentRoster.resolve({ eventId: h.path.split('/').at(-1), items: [] }); });
+    assert.ok(app.hasText('Nenhum Staff vinculado a este evento'));
+  } finally {
+    const empty = { eventId: h.path.split('/').at(-1), items: [] };
+    response.resolve({ statusCode: 503, body: {} });
+    oldRoster.resolve(empty);
+    currentRoster.resolve(empty);
+    app.dispose();
+  }
+});
+
+test('ADMIN-04: recuperação do wizard no painel pronto em closing, recusa do replay e consulta em closed', async () => {
   let posts = 0;
   const h = structureIntegration({ initialStation: true, write: ({ db }) => {
     if (++posts === 1) {
@@ -826,7 +1873,7 @@ test('ADMIN-04: recuperação do wizard no painel pronto em closing, recusa do r
   } finally { app.dispose(); }
 });
 
-test('ADMIN-04: wizard reconhece operação da gestão e retoma com a chave e o corpo originais', { skip }, async () => {
+test('ADMIN-04: wizard reconhece operação da gestão e retoma com a chave e o corpo originais', async () => {
   let posts = 0;
   const h = structureIntegration({ write: ({ group, station }) => {
     group.stations = [station];
@@ -857,7 +1904,7 @@ test('ADMIN-04: wizard reconhece operação da gestão e retoma com a chave e o 
   } finally { app.dispose(); }
 });
 
-test('ADMIN-04: rascunho protege retorno visual, ação Android e remoção programática da rota', { skip }, async () => {
+test('ADMIN-04: rascunho protege retorno visual, ação Android e remoção programática da rota', async () => {
   let pendingRead;
   const h = structureIntegration({ platformOS: 'android', read: ({ route, path, group, eventId }) => {
     if (pendingRead && route === path + '/experiences') return pendingRead.promise.then(() => ({ eventId, items: [group] }));
@@ -907,7 +1954,7 @@ test('ADMIN-04: rascunho protege retorno visual, ação Android e remoção prog
 });
 
 for (const switchAccount of [false, true]) {
-  test(`ADMIN-04: PATCH tardio no mesmo cliente após ${switchAccount ? 'troca de conta' : 'logout'}`, { skip }, async () => {
+  test(`ADMIN-04: PATCH tardio no mesmo cliente após ${switchAccount ? 'troca de conta' : 'logout'}`, async () => {
     const response = deferred();
     const h = structureIntegration({ initialStation: true, write: ({ options }) => {
       if (options.method === 'POST') throw new Error('Resultado do cadastro desconhecido');
@@ -962,7 +2009,7 @@ for (const switchAccount of [false, true]) {
   });
 }
 
-test('ADMIN-04: voltar é habilitado após PATCH concluído na mesma sessão', { skip }, async () => {
+test('ADMIN-04: voltar é habilitado após PATCH concluído na mesma sessão', async () => {
   const response = deferred();
   const h = structureIntegration({ initialStation: true, write: () => response.promise });
   const { app, availabilityPath } = h;
@@ -985,7 +2032,7 @@ test('ADMIN-04: voltar é habilitado após PATCH concluído na mesma sessão', {
   } finally { app.dispose(); }
 });
 
-test('Admin: refresh e troca de conta invalidam logout antigo', { skip }, async () => {
+test('Admin: refresh e troca de conta invalidam logout antigo', async () => {
   const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control: { realAdmin: true } });
   await app.mount();
   try {
@@ -1013,7 +2060,7 @@ test('Admin: refresh e troca de conta invalidam logout antigo', { skip }, async 
   } finally { app.dispose(); }
 });
 
-test('Admin: revogação remota retira a área e invalida ações guardadas', { skip }, async () => {
+test('Admin: revogação remota retira a área e invalida ações guardadas', async () => {
   const control = { realAdmin: true };
   const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control });
   await app.mount();
@@ -1033,7 +2080,7 @@ test('Admin: revogação remota retira a área e invalida ações guardadas', { 
   } finally { app.dispose(); }
 });
 
-test('Admin: restauração recusada por falta de segundo fator não monta painel', { skip }, async () => {
+test('Admin: restauração recusada por falta de segundo fator não monta painel', async () => {
   const control = { realAdmin: true, http: async route => route === '/auth/refresh'
     ? { statusCode: 401, body: { code: 'ADMIN_2FA_REQUIRED' } } : undefined };
   const app = createIntegration({ initialToken: 'stored-without-2fa', initialUser: adminUser, control });
@@ -1046,7 +2093,7 @@ test('Admin: restauração recusada por falta de segundo fator não monta painel
   } finally { app.dispose(); }
 });
 
-test('Admin: falha de revogação remota mantém logout local e painel inacessível', { skip }, async () => {
+test('Admin: falha de revogação remota mantém logout local e painel inacessível', async () => {
   const control = { realAdmin: true, http: async route => route === '/auth/logout'
     ? { statusCode: 503, body: { code: 'SERVICE_UNAVAILABLE' } } : undefined };
   const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control });
@@ -1062,7 +2109,7 @@ test('Admin: falha de revogação remota mantém logout local e painel inacessí
   } finally { app.dispose(); }
 });
 
-test('integra sessão real, papéis, TOTP, provedores e isolamento da navegação', { skip }, async () => {
+test('integra sessão real, papéis, TOTP, provedores e isolamento da navegação', async () => {
   const app = createIntegration({ initialUser: participant });
   await app.mount();
   await app.act(() => app.manager.login({ email: participant.email, password: 'password' }));
@@ -1103,7 +2150,7 @@ test('integra sessão real, papéis, TOTP, provedores e isolamento da navegaçã
   app.dispose();
 });
 
-test('restauração real mantém questionário obrigatório para participante', { skip }, async () => {
+test('restauração real mantém questionário obrigatório para participante', async () => {
   const app = createIntegration({ initialToken: 'stored', initialUser: { ...participant, hasCompletedQuestionnaire: false } });
   await app.mount();
   assert.equal(app.route(), 'ProfileQuestionnaire');
@@ -1123,7 +2170,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-test('401 real no cliente renova, revalida Staff e substitui a navegação', { skip }, async () => {
+test('401 real no cliente renova, revalida Staff e substitui a navegação', async () => {
   const control = { http: async (route, options) => {
     if (route !== '/protected') return undefined;
     return options.headers.Authorization === 'Bearer access'
@@ -1141,7 +2188,7 @@ test('401 real no cliente renova, revalida Staff e substitui a navegação', { s
   app.dispose();
 });
 
-test('provedores recuperam rotação com falha de gravação sem novo POST', { skip }, async () => {
+test('provedores recuperam rotação com falha de gravação sem novo POST', async () => {
   let fail = true;
   const control = { failWrite: (value) => fail && value === 'new-refresh-1' };
   const app = createIntegration({ initialToken: 'stored', initialUser: { ...participant, roles: ['staff'] }, control });
@@ -1154,7 +2201,7 @@ test('provedores recuperam rotação com falha de gravação sem novo POST', { s
   app.dispose();
 });
 
-test('logout durante /me de login deixa navegação pública e descarta resposta', { skip }, async () => {
+test('logout durante /me de login deixa navegação pública e descarta resposta', async () => {
   const entered = deferred(), response = deferred();
   const control = { me: () => { entered.resolve(); return response.promise; } };
   const app = createIntegration({ initialUser: participant, control });
@@ -1171,7 +2218,7 @@ test('logout durante /me de login deixa navegação pública e descarta resposta
   app.dispose();
 });
 
-test('modal protegido fica invisível e callback antigo não executa durante erro de identidade', { skip }, async () => {
+test('modal protegido fica invisível e callback antigo não executa durante erro de identidade', async () => {
   const entered = deferred(), response = deferred();
   const control = { modalFixture: true, confirmed: 0 };
   const app = createIntegration({ initialUser: participant, control });
@@ -1196,7 +2243,7 @@ test('modal protegido fica invisível e callback antigo não executa durante err
 
 const staffEvent = { id: '11111111-1111-4111-8111-111111111111', name: 'Evento autorizado', status: 'open', effectivePhase: 'open' };
 
-test('lista e painel exibem a fase efetiva em vez do status persistido', { skip }, async () => {
+test('lista e painel exibem a fase efetiva em vez do status persistido', async () => {
   for (const [effectivePhase, label] of [['scheduled', 'Agendado'], ['open', 'Aberto'],
     ['not_ready', 'Não está pronto'], ['closing', 'Em encerramento'], ['closed', 'Encerrado']]) {
     const app = createIntegration({ initialUser: { ...participant, roles: ['staff'] },
@@ -1213,7 +2260,7 @@ const realExperienceId = '33333333-3333-4333-8333-333333333333';
 const realStation = { id: '44444444-4444-4444-8444-444444444444', experienceId: realExperienceId,
   label: 'Estação real', availability: 'available', pendingServiceSessionId: null, pendingCalledAt: null };
 
-test('tela real remove chamado somente após confirmação e atualiza estação sem reenvio', { skip }, async () => {
+test('tela real remove chamado somente após confirmação e atualiza estação sem reenvio', async () => {
   const secure = new Map(); let posts = 0;
   const serviceId = '88888888-8888-4888-8888-888888888888';
   const entryId = '77777777-7777-4777-8777-777777777777';
@@ -1266,7 +2313,7 @@ test('tela real remove chamado somente após confirmação e atualiza estação 
   } finally { app.dispose(); }
 });
 
-test('painel real apresenta estações por experiência e abre atendimento diretamente', { skip }, async () => {
+test('painel real apresenta estações por experiência e abre atendimento diretamente', async () => {
   const otherStation = { ...realStation, id: '55555555-5555-4555-8555-555555555555', label: 'Console 2' };
   const secondExperienceId = '77777777-7777-4777-8777-777777777777';
   const secondExperienceStation = { ...realStation, id: '88888888-8888-4888-8888-888888888888',
@@ -1304,7 +2351,7 @@ test('painel real apresenta estações por experiência e abre atendimento diret
   app.dispose();
 });
 
-test('estação real chama diretamente pelo backend com intenção persistida e sem duplo envio', { skip }, async () => {
+test('estação real chama diretamente pelo backend com intenção persistida e sem duplo envio', async () => {
   const secure = new Map(); let posts = 0;
   const calledId = '77777777-7777-4777-8777-777777777777';
   const control = { realStaff: true, platformOS: 'ios', events: [staffEvent], stations: [realStation],
@@ -1339,7 +2386,7 @@ test('estação real chama diretamente pelo backend com intenção persistida e 
   app.dispose();
 });
 
-test('chamada direta da estação não reenvia após resposta incerta nem após atualizar', { skip }, async () => {
+test('chamada direta da estação não reenvia após resposta incerta nem após atualizar', async () => {
   const secure = new Map(); let posts = 0;
   const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
   const control = { realStaff: true, platformOS: 'ios', events: [staffEvent], stations: [realStation],
@@ -1370,7 +2417,7 @@ test('chamada direta da estação não reenvia após resposta incerta nem após 
   } finally { app.dispose(); }
 });
 
-test('chamada direta da estação capturada antes do logout não envia POST', { skip }, async () => {
+test('chamada direta da estação capturada antes do logout não envia POST', async () => {
   let posts = 0;
   const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
   const control = { realStaff: true, platformOS: 'ios', events: [staffEvent], stations: [realStation],
@@ -1392,7 +2439,7 @@ test('chamada direta da estação capturada antes do logout não envia POST', { 
   } finally { app.dispose(); }
 });
 
-test('tela da estação recupera reconhecimento automático após exclusão ambígua', { skip }, async () => {
+test('tela da estação recupera reconhecimento automático após exclusão ambígua', async () => {
   const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
   const keyA = '50000000-0000-4000-8000-000000000001';
   const serviceId = '88888888-8888-4888-8888-888888888888', entryId = '77777777-7777-4777-8777-777777777777';
@@ -1429,7 +2476,7 @@ test('tela da estação recupera reconhecimento automático após exclusão amb�
   restarted.dispose();
 });
 
-test('painel Staff real exibe estação e fila e limpa os dados ao receber 403', { skip }, async () => {
+test('painel Staff real exibe estação e fila e limpa os dados ao receber 403', async () => {
   let denied = false;
   const control = { realStaff: true, events: [staffEvent], stations: [realStation],
     experiences: [{ id: realExperienceId, name: 'Experiência real' }], http: async (route) => {
@@ -1457,7 +2504,7 @@ test('painel Staff real exibe estação e fila e limpa os dados ao receber 403',
   app.dispose();
 });
 
-test('401 recuperável nas estações renova e revalida a sessão Staff', { skip }, async () => {
+test('401 recuperável nas estações renova e revalida a sessão Staff', async () => {
   let attempts = 0;
   const control = { realStaff: true, events: [staffEvent], stations: [realStation], http: async (route, options) => {
     if (!route.endsWith('/stations')) return undefined;
@@ -1477,7 +2524,7 @@ test('401 recuperável nas estações renova e revalida a sessão Staff', { skip
   app.dispose();
 });
 
-test('401 terminal nas estações invalida sessão e remove o painel Staff', { skip }, async () => {
+test('401 terminal nas estações invalida sessão e remove o painel Staff', async () => {
   const control = { realStaff: true, events: [staffEvent], http: async (route) =>
     route.endsWith('/stations') ? { statusCode: 401, body: { code: 'SESSION_REVOKED' } } : undefined };
   const app = createIntegration({ initialUser: { ...participant, roles: ['staff'] }, control });
@@ -1490,7 +2537,7 @@ test('401 terminal nas estações invalida sessão e remove o painel Staff', { s
   app.dispose();
 });
 
-test('trocar evento Staff descarta estações e preserva status scheduled e closed', { skip }, async () => {
+test('trocar evento Staff descarta estações e preserva status scheduled e closed', async () => {
   const closedEvent = { id: '22222222-2222-4222-8222-222222222222', name: 'Evento encerrado', status: 'closed', effectivePhase: 'closed' };
   const control = { realStaff: true, events: [{ ...staffEvent, status: 'scheduled', effectivePhase: 'scheduled' }, closedEvent],
     experiences: [{ id: realExperienceId, name: 'Experiência real' }],
@@ -1513,7 +2560,7 @@ test('trocar evento Staff descarta estações e preserva status scheduled e clos
   app.dispose();
 });
 
-test('Staff real consulta eventos, seleciona, volta e não aceita rota com ID manual', { skip }, async () => {
+test('Staff real consulta eventos, seleciona, volta e não aceita rota com ID manual', async () => {
   const control = { realStaff: true, events: [staffEvent] };
   const app = createIntegration({ initialUser: { ...participant, roles: ['participante', 'staff'] }, control });
   await app.mount();
@@ -1535,7 +2582,7 @@ test('Staff real consulta eventos, seleciona, volta e não aceita rota com ID ma
   app.dispose();
 });
 
-test('Staff real trata erro de rede, atualização manual e troca de conta sem reaproveitar seleção', { skip }, async () => {
+test('Staff real trata erro de rede, atualização manual e troca de conta sem reaproveitar seleção', async () => {
   let offline = true;
   const control = { realStaff: true, events: [staffEvent], http: async (route) => {
     if (route === '/staff/events' && offline) throw new Error('offline');
@@ -1560,7 +2607,7 @@ test('Staff real trata erro de rede, atualização manual e troca de conta sem r
   app.dispose();
 });
 
-test('revalidação limpa evento selecionado e revogação Staff remove a pilha real', { skip }, async () => {
+test('revalidação limpa evento selecionado e revogação Staff remove a pilha real', async () => {
   const control = { realStaff: true, events: [staffEvent] };
   const app = createIntegration({ initialUser: { ...participant, roles: ['staff'] }, control });
   await app.mount();
@@ -1580,7 +2627,7 @@ test('revalidação limpa evento selecionado e revogação Staff remove a pilha 
   app.dispose();
 });
 
-test('401 terminal na lista Staff usa o gerenciador real e remove a área protegida', { skip }, async () => {
+test('401 terminal na lista Staff usa o gerenciador real e remove a área protegida', async () => {
   const control = { realStaff: true, http: async (route) => route === '/staff/events'
     ? { statusCode: 401, body: { code: 'SESSION_REVOKED' } } : undefined };
   const app = createIntegration({ initialUser: { ...participant, roles: ['staff'] }, control });
@@ -1594,7 +2641,7 @@ test('401 terminal na lista Staff usa o gerenciador real e remove a área proteg
   app.dispose();
 });
 
-test('401 recuperável na lista Staff renova sessão e obtém eventos com a identidade revalidada', { skip }, async () => {
+test('401 recuperável na lista Staff renova sessão e obtém eventos com a identidade revalidada', async () => {
   let attempts = 0;
   const control = { realStaff: true, http: async (route, options) => {
     if (route !== '/staff/events') return undefined;
@@ -1613,7 +2660,7 @@ test('401 recuperável na lista Staff renova sessão e obtém eventos com a iden
   app.dispose();
 });
 
-test('Controle de Entrada real confirma primeiro, desativa, reativa e volta preservando evento', { skip }, async () => {
+test('Controle de Entrada real confirma primeiro, desativa, reativa e volta preservando evento', async () => {
   const values = new Map(), requests = [], at = '2026-11-10T15:00:00.000Z';
   const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
   let pendingCall=null; let enabled = true, waiting = [{ participationId: 'abcdef00-0000-4000-8000-000000000004', displayName: 'Ana', position: 1 },
@@ -1668,7 +2715,7 @@ test('Controle de Entrada real confirma primeiro, desativa, reativa e volta pres
   app.dispose();
 });
 
-test('chamada direta capturada antes do logout não envia operação na sessão seguinte', { skip }, async () => {
+test('chamada direta capturada antes do logout não envia operação na sessão seguinte', async () => {
   const values = new Map(), at = '2026-11-10T15:00:00.000Z'; let mutations = 0;
   const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
   const control = { realStaff: true, platformOS: 'android', events: [staffEvent],
@@ -1686,7 +2733,7 @@ test('chamada direta capturada antes do logout não envia operação na sessão 
   assert.equal(mutations, 0); assert.ok(!app.hasText('1. Ana')); app.dispose();
 });
 
-test('chamada direta externa mantém intenção incerta e não repete POST após atualização', { skip }, async () => {
+test('chamada direta externa mantém intenção incerta e não repete POST após atualização', async () => {
   const values = new Map(), at = '2026-11-10T15:00:00.000Z'; let posts = 0;
   const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
   const control = { realStaff: true, platformOS: 'android', events: [staffEvent],
@@ -1713,7 +2760,7 @@ test('chamada direta externa mantém intenção incerta e não repete POST após
   } finally { app.dispose(); }
 });
 
-test('recusa definitiva da entrada é reconhecida sem toque e preserva feedback', { skip }, async () => {
+test('recusa definitiva da entrada é reconhecida sem toque e preserva feedback', async () => {
   const values = new Map(), at = '2026-11-10T15:00:00.000Z'; let posts = 0;
   const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
   const control = { realStaff: true, platformOS: 'android', events: [staffEvent],
@@ -1738,7 +2785,7 @@ test('recusa definitiva da entrada é reconhecida sem toque e preserva feedback'
   } finally { app.dispose(); }
 });
 
-test('401 terminal no Controle de Entrada remove lista nominal e área Staff', { skip }, async () => {
+test('401 terminal no Controle de Entrada remove lista nominal e área Staff', async () => {
   let revoked = false;
   const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
   const app = createIntegration({ initialUser: staffUser, control: { realStaff: true, events: [staffEvent],
@@ -1752,4 +2799,479 @@ test('401 terminal no Controle de Entrada remove lista nominal e área Staff', {
   await app.press('Selecionar evento Evento autorizado'); await app.press('Controle de Entrada'); assert.ok(app.hasText('1. Ana'));
   revoked = true; await app.press('Atualizar fila de entrada');
   assert.equal(app.route(), 'Login'); assert.ok(!app.hasText('1. Ana')); app.dispose();
+});
+
+for (const scenario of ['timeout', 'token expirado', 'resposta tardia', 'logout com novo sessionId']) {
+  test('ADMIN-06: continuidade pela autenticação real do app com ' + scenario, async () => {
+    const checking = deferred(), identity = deferred(), response = deferred();
+    const email = 'renovacao@example.test';
+    const successful = { statusCode: 201, body: { grant: { id: 'abcdef00-0000-4000-8000-000000000019',
+      userId: 'abcdef00-0000-4000-8000-000000000020', role: 'staff',
+      eventId: 'abcdef00-0000-4000-8000-000000000001', grantedAt: '2090-11-01T00:00:00Z', revokedAt: null } } };
+    const applied = new Map();
+    const replays = [];
+    let verifyLater = false, expireRead = false, posts = 0, freshLogin = false;
+    const rig = structureIntegration({
+      read({ route, path }) {
+        if (!expireRead || route !== path + '/readiness') return;
+        expireRead = false;
+        return { statusCode: 401, body: { code: 'ACCESS_TOKEN_EXPIRED' } };
+      },
+      me(user) {
+        if (!verifyLater) return user;
+        checking.resolve();
+        return identity.promise;
+      },
+      async write({ db, options }) {
+        const key = options.headers['Idempotency-Key'];
+        const attempt = ++posts;
+        if (attempt === 1) {
+          if (scenario === 'token expirado') return { statusCode: 401, body: { code: 'ACCESS_TOKEN_EXPIRED' } };
+          applied.set(key, options.body);
+          if (scenario === 'resposta tardia' || scenario === 'logout com novo sessionId') {
+            const result = await response.promise;
+            if (scenario === 'resposta tardia') db.roster = [staffMember(result.body.grant, email)];
+            return result;
+          }
+          throw new Error('Timeout após aplicar mutação');
+        }
+        if (applied.has(key)) {
+          assert.equal(options.body, applied.get(key));
+          replays.push(key);
+        } else {
+          assert.ok(scenario === 'token expirado' || freshLogin);
+          applied.set(key, options.body);
+        }
+        return successful;
+      },
+    });
+    const { app } = rig;
+    const writes = () => rig.requests.filter(item => item.route === '/admin/roles/grant');
+    async function openStaff() {
+      await rig.openPanel();
+      await app.press('Equipe Staff');
+    }
+    try {
+      await app.mount();
+      const before = app.manager.getSnapshot().user;
+      const epoch = app.manager.getSessionEpoch();
+      await openStaff();
+      await app.input('E-mail do usuário', email);
+      await app.press('Conceder Staff');
+      const confirm = app.handler('Confirmar concessão');
+      if (scenario === 'token expirado') verifyLater = true;
+      await app.act(async () => { confirm(); confirm(); });
+      assert.equal(writes().length, 1);
+      assert.ok(!app.hasText('Concessão confirmada.'));
+      let refresh;
+      if (scenario !== 'token expirado') {
+        verifyLater = true;
+        await app.act(async () => {
+          expireRead = scenario === 'timeout';
+          refresh = expireRead ? app.manager.client.get(rig.path + '/readiness', { auth: true }) : app.manager.refreshSession();
+          await checking.promise;
+        });
+      } else {
+        await checking.promise;
+      }
+      assert.equal(app.manager.getSnapshot().identityStatus, 'checking');
+      assert.equal(app.hasButton('Conceder Staff'), false);
+      assert.ok(!app.hasText(email));
+      await app.act(async () => {
+        confirm();
+        if (scenario === 'resposta tardia') response.resolve(successful);
+      });
+      assert.equal(writes().length, 1);
+      assert.ok(!app.hasText('Concessão confirmada.'));
+
+      if (scenario === 'logout com novo sessionId') {
+        await app.act(() => app.manager.logout());
+        verifyLater = false;
+        await app.act(async () => { identity.resolve(before); await refresh; });
+        const next = { ...before, sessionId: '10000000-0000-4000-8000-000000000021' };
+        app.setUser(next);
+        await app.act(() => app.manager.login({ email: next.email, password: 'password' }));
+        await app.act(() => app.manager.verifyAdminTwoFactor('123456'));
+        await openStaff();
+        await app.act(async () => { response.resolve(successful); });
+        assert.equal(app.manager.getSnapshot().user.id, before.id);
+        assert.notEqual(app.manager.getSnapshot().user.sessionId, before.sessionId);
+        assert.ok(app.hasText('Nenhum Staff vinculado a este evento'));
+        assert.equal(app.hasButton('Repetir concessão para ' + email), false);
+        freshLogin = true;
+        await app.input('E-mail do usuário', email);
+        await app.press('Conceder Staff');
+        await app.press('Confirmar concessão');
+        assert.notEqual(writes()[1].key, writes()[0].key);
+        return;
+      }
+
+      await app.act(async () => { identity.resolve(before); if (refresh) await refresh; });
+      assert.equal(app.manager.getSessionEpoch(), epoch);
+      assert.equal(app.manager.getSnapshot().user.sessionId, before.sessionId);
+      await openStaff();
+      assert.equal(writes().length, 1);
+      if (scenario === 'resposta tardia') {
+        assert.ok(app.hasButton('Revogar acesso de ' + email));
+        assert.ok(app.hasText('Concessão confirmada.'));
+      } else {
+        assert.ok(app.hasText('Resultado incerto'));
+        await app.press('Repetir concessão para ' + email);
+        assert.deepEqual(writes()[1], writes()[0]);
+        assert.equal(applied.size, 1);
+        assert.deepEqual(replays, scenario === 'timeout' ? [writes()[0].key] : []);
+        assert.ok(app.hasText('Concessão confirmada.'));
+      }
+    } finally { app.dispose(); }
+  });
+}
+
+test('ADMIN-06: revogação e concessão concorrentes preservam lista e prontidão da leitura mais nova', async () => {
+  const firstRead = deferred(), oldRead = deferred(), revocation = deferred(), nextGrant = deferred();
+  const firstRosterRead = deferred(), oldRoster = deferred();
+  const eventId = 'abcdef00-0000-4000-8000-000000000001';
+  const at = '2090-11-01T00:00:00Z', first = 'primeiro@example.test', second = 'segundo@example.test';
+  const grant = { id: 'abcdef00-0000-4000-8000-000000000024', userId: 'abcdef00-0000-4000-8000-000000000025',
+    eventId, role: 'staff', grantedAt: at, revokedAt: null };
+  let race = false, reads = 0, rosterReads = 0;
+  const rig = structureIntegration({
+    async write({ db, route, options }) {
+      if (route === '/admin/roles/revoke') {
+        assert.deepEqual(JSON.parse(options.body), { grantId: grant.id });
+        const result = await revocation.promise;
+        db.roster = db.roster.filter(member => member.grantId !== grant.id);
+        return result;
+      }
+      if (JSON.parse(options.body).email === first) {
+        db.roster = [staffMember(grant, first)];
+        return { statusCode: 201, body: { grant } };
+      }
+      const result = await nextGrant.promise;
+      db.roster = [...db.roster, staffMember(result.body.grant, second)];
+      return result;
+    },
+    read({ route, path }) {
+      if (race && route === path + '/readiness' && ++reads === 1) {
+        firstRead.resolve();
+        return oldRead.promise;
+      }
+      if (race && route === path + '/staff' && ++rosterReads === 1) {
+        firstRosterRead.resolve();
+        return oldRoster.promise;
+      }
+    },
+  });
+  const { app } = rig;
+  async function grantTo(email) {
+    await app.input('E-mail do usuário', email);
+    await app.press('Conceder Staff');
+    await app.press('Confirmar concessão');
+  }
+  try {
+    await app.mount();
+    await rig.openPanel();
+    await app.press('Equipe Staff');
+    await grantTo(first);
+    assert.ok(app.hasButton('Revogar acesso de ' + first));
+    await app.input('E-mail do usuário', 'inválido');
+    await app.press('Conceder Staff');
+    assert.ok(app.hasText('Informe um e-mail válido.'));
+    await app.press('Revogar acesso de ' + first);
+    await app.press('Revogar acesso');
+    assert.ok(!app.hasText('Informe um e-mail válido.'));
+    assert.ok(!app.hasText('Revogação confirmada.'));
+    await grantTo(second);
+    race = true;
+    await app.act(async () => {
+      revocation.resolve({ statusCode: 200, body: { grant: { ...grant, revokedAt: at } } });
+      await Promise.all([firstRead.promise, firstRosterRead.promise]);
+    });
+    await app.act(async () => {
+      nextGrant.resolve({ statusCode: 201, body: { grant: { ...grant, id: 'abcdef00-0000-4000-8000-000000000026',
+        userId: 'abcdef00-0000-4000-8000-000000000027' } } });
+    });
+    assert.ok(app.hasText('Revogação confirmada.'));
+    assert.ok(app.hasText('Concessão confirmada.'));
+    assert.ok(app.hasText('O evento tem Staff elegível.'));
+    await app.act(async () => {
+      oldRead.resolve({ eventId, statusStored: 'scheduled', effectivePhase: 'scheduled', ready: false,
+        acceptingNewParticipations: false, missing: ['VERIFIED_ACTIVE_STAFF'],
+        checks: { nameAndAccessCode: true, validScheduleAndTimezone: true, externalQueueConfigured: true,
+          hasExperienceWithAvailableStation: true, hasVerifiedActiveStaff: false } });
+      oldRoster.resolve({ eventId, items: [] });
+    });
+    assert.equal(reads, 2);
+    assert.equal(rosterReads, 2);
+    assert.ok(app.hasText('O evento tem Staff elegível.'));
+    assert.equal(app.hasButton('Revogar acesso de ' + first), false);
+    assert.ok(app.hasButton('Revogar acesso de ' + second));
+  } finally { app.dispose(); }
+});
+
+test('ADMIN-06: concessão tardia de A não altera a gestão de B', async () => {
+  const response = deferred();
+  const oldRoster = deferred(), currentRoster = deferred();
+  const event = n => ({ id: 'abcdef00-0000-4000-8000-00000000000' + n, name: 'Evento ' + n, timezone: 'UTC',
+    startsAt: '2090-11-01T12:00:00Z', officialEndsAt: '2090-11-01T14:00:00Z', effectivePhase: 'scheduled',
+    readiness: { ready: false } });
+  const events = [event(1), event(2)], email = 'somente-a@example.test', writes = [];
+  const rosterReads = [];
+  let rosterA = [];
+  const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control: { realAdmin: true,
+    async http(route, options) {
+      if (route === '/admin/events') return { items: events, nextCursor: null };
+      if (route === '/admin/roles/revoke') {
+        writes.push(JSON.parse(options.body));
+        return { statusCode: 500, body: {} };
+      }
+      if (route === '/admin/roles/grant') {
+        writes.push(JSON.parse(options.body));
+        const result = await response.promise;
+        rosterA = [staffMember(result.body.grant, email)];
+        return result;
+      }
+      const selected = events.find(item => route.startsWith('/admin/events/' + item.id));
+      if (!selected) return undefined;
+      if (route.endsWith('/staff')) {
+        const firstRead = !rosterReads.includes(selected.id);
+        rosterReads.push(selected.id);
+        if (selected === events[1]) return currentRoster.promise;
+        return firstRead ? oldRoster.promise : { eventId: selected.id, items: rosterA };
+      }
+      if (route.endsWith('/readiness')) return { eventId: selected.id, statusStored: 'scheduled', effectivePhase: 'scheduled',
+        ready: false, acceptingNewParticipations: false, missing: ['VERIFIED_ACTIVE_STAFF'],
+        checks: { nameAndAccessCode: true, validScheduleAndTimezone: true, externalQueueConfigured: true,
+          hasExperienceWithAvailableStation: true, hasVerifiedActiveStaff: false } };
+      return { event: selected };
+    },
+  } });
+  async function open(n) {
+    await app.press('Acessar evento Evento ' + n);
+    await app.press('Equipe Staff');
+  }
+  await app.mount();
+  try {
+    await app.press('Gerenciar eventos');
+    await open(1);
+    assert.deepEqual(rosterReads, [events[0].id]);
+    assert.ok(app.hasText('Consultando a equipe Staff...'));
+    assert.ok(!app.hasText('Nenhum Staff vinculado a este evento'));
+    await app.input('E-mail do usuário', email);
+    await app.press('Conceder Staff');
+    await app.press('Confirmar concessão');
+    assert.ok(app.hasText('Em andamento'));
+    await app.press('Voltar ao painel');
+    await app.press('Descartar alterações');
+    await app.press('Voltar aos eventos');
+    await open(2);
+    assert.deepEqual(rosterReads, [events[0].id, events[1].id]);
+    assert.ok(app.hasText('Consultando a equipe Staff...'));
+    await app.act(async () => {
+      response.resolve({ statusCode: 201, body: { grant: { id: 'abcdef00-0000-4000-8000-000000000022',
+        userId: 'abcdef00-0000-4000-8000-000000000023', eventId: events[0].id, role: 'staff',
+        grantedAt: '2090-11-01T12:00:00Z', revokedAt: null } } });
+    });
+    assert.ok(app.hasText('Evento 2'));
+    await app.act(async () => { oldRoster.resolve({ eventId: events[0].id, items: rosterA }); });
+    assert.deepEqual(rosterReads, [events[0].id, events[1].id]);
+    assert.ok(app.hasText('Consultando a equipe Staff...'));
+    assert.ok(!app.hasText('Nenhum Staff vinculado a este evento'));
+    assert.ok(!app.hasText('Concessão confirmada.'));
+    assert.ok(!app.hasText(email));
+    await app.act(async () => { currentRoster.resolve({ eventId: events[1].id, items: [] }); });
+    assert.ok(!app.hasText('Consultando a equipe Staff...'));
+    assert.ok(app.hasText('Nenhum Staff vinculado a este evento'));
+    assert.ok(!app.hasText(email));
+    await app.press('Voltar ao painel');
+    await app.press('Voltar aos eventos');
+    await open(1);
+    assert.deepEqual(rosterReads, [events[0].id, events[1].id, events[0].id]);
+    assert.ok(app.hasButton('Revogar acesso de ' + email));
+    await app.press('Revogar acesso de ' + email);
+    const previousConfirm = app.handler('Revogar acesso');
+    await app.press('Voltar ao painel');
+    await app.press('Voltar aos eventos');
+    await open(2);
+    await app.act(async () => { previousConfirm(); });
+    assert.ok(!app.hasText(email));
+    assert.ok(!app.hasText('Revogar acesso Staff?'));
+    assert.ok(app.hasText('Nenhum Staff vinculado a este evento'));
+    assert.deepEqual(writes, [{ role: 'staff', eventId: events[0].id, email }]);
+  } finally {
+    response.resolve({ statusCode: 503, body: {} });
+    oldRoster.resolve({ eventId: events[0].id, items: [] });
+    currentRoster.resolve({ eventId: events[1].id, items: [] });
+    app.dispose();
+  }
+});
+
+for (const sameUser of [false, true]) {
+  for (const outcome of ['401 recuperável', 'sucesso', 'timeout']) {
+    test('ADMIN-06: POST tardio após substituir AuthProvider, ' + outcome + ', ' + (sameUser ? 'mesmo usuário' : 'outro usuário'), async () => {
+      const latePost = deferred(), lateRead = deferred(), readArrived = deferred();
+      const email = 'sessao-anterior@example.test';
+      let holdRead = false;
+      const rig = structureIntegration({
+        read({ route, path }) {
+          if (holdRead && route === path + '/readiness') {
+            holdRead = false;
+            readArrived.resolve();
+            return lateRead.promise;
+          }
+        },
+        async write() {
+          const result = await latePost.promise;
+          if (outcome === 'timeout') throw Object.assign(new Error('Tempo esgotado após o envio'), { name: 'AbortError' });
+          return result;
+        },
+      });
+      const { app } = rig;
+      const prior = app.manager;
+      const priorSubscriptions = new Set();
+      const subscribe = prior.subscribe;
+      prior.subscribe = listener => {
+        priorSubscriptions.add(listener);
+        const unsubscribe = subscribe(listener);
+        return () => {
+          priorSubscriptions.delete(listener);
+          unsubscribe();
+        };
+      };
+      await app.mount();
+      try {
+        await rig.openPanel();
+        await app.press('Equipe Staff');
+        await app.input('E-mail do usuário', email);
+        await app.press('Conceder Staff');
+        const oldConfirm = app.handler('Confirmar concessão');
+        await app.act(() => { oldConfirm(); });
+        assert.ok(app.hasText('Em andamento'));
+        assert.equal(priorSubscriptions.size, 1);
+        const priorSnapshot = prior.getSnapshot();
+        const epoch = prior.getSessionEpoch();
+        assert.ok(prior.getAccessToken());
+
+        holdRead = true;
+        const oldRead = prior.client.get(rig.path + '/readiness', { auth: true });
+        const rejected = assert.rejects(oldRead, error => error.code === 'SESSION_REVOKED');
+        await readArrived.promise;
+
+        const replacementUser = { ...priorSnapshot.user, id: sameUser ? priorSnapshot.user.id : 'admin-b',
+          email: sameUser ? priorSnapshot.user.email : 'admin-b@example.test',
+          sessionId: '10000000-0000-4000-8000-000000000099' };
+        const replacement = await app.replaceProvider(replacementUser);
+        assert.equal(priorSubscriptions.size, 0);
+        assert.equal(replacement.client, prior.client);
+        assert.equal(replacement.getSnapshot().user.sessionId, replacementUser.sessionId);
+        await rig.openPanel();
+        await app.press('Equipe Staff');
+        const requests = () => rig.requests.filter(item => item.route === '/admin/roles/grant').length;
+        const refreshes = () => app.calls.filter(path => path === '/auth/refresh').length;
+        const logouts = () => app.calls.filter(path => path === '/auth/logout').length;
+        const requestCount = requests(), refreshCount = refreshes(), logoutCount = logouts();
+        const replacementSnapshot = replacement.getSnapshot();
+        const replacementStoredToken = app.storedToken();
+
+        await app.act(async () => {
+          latePost.resolve(outcome === '401 recuperável' ? { statusCode: 401, body: { code: 'ACCESS_TOKEN_EXPIRED' } } :
+            { statusCode: 201, body: { grant: { id: 'abcdef00-0000-4000-8000-000000000028',
+              userId: 'abcdef00-0000-4000-8000-000000000029', eventId: rig.path.split('/').at(-1),
+              role: 'staff', grantedAt: '2090-11-01T00:00:00Z', revokedAt: null } } });
+          lateRead.resolve({ statusCode: 401, body: { code: 'SESSION_REVOKED' } });
+          await rejected;
+          oldConfirm();
+          const staleLogout = await prior.logout();
+          assert.equal(staleLogout.localLoggedOut, false);
+        });
+
+        assert.equal(requestCount, 1);
+        assert.equal(requests(), requestCount);
+        assert.equal(refreshes(), refreshCount);
+        assert.equal(logouts(), logoutCount);
+        assert.equal(prior.getSnapshot(), priorSnapshot);
+        assert.equal(prior.getSessionEpoch(), epoch);
+        assert.equal(prior.getAccessToken(), null);
+        assert.equal(prior.isIdentityVerified(), false);
+        assert.equal(replacement.getSnapshot(), replacementSnapshot);
+        assert.equal(app.storedToken(), replacementStoredToken);
+        assert.ok(app.hasText('Nenhum Staff vinculado a este evento'));
+        assert.ok(!app.hasText(email));
+        assert.equal(app.hasButton('Repetir concessão para ' + email), false);
+      } finally {
+        latePost.resolve({ statusCode: 503, body: {} });
+        lateRead.resolve({ statusCode: 401, body: { code: 'SESSION_REVOKED' } });
+        app.dispose();
+      }
+    });
+  }
+}
+
+test('ADMIN-06: o replay de X preserva a confirmação do vínculo Y entre gestão e wizard', async () => {
+  const email = 'mesmo-destinatario@example.test';
+  const eventId = 'abcdef00-0000-4000-8000-000000000001';
+  const at = '2090-11-01T00:00:00Z';
+  const original = { id: 'abcdef00-0000-4000-8000-000000000031',
+    userId: 'abcdef00-0000-4000-8000-000000000032', eventId, role: 'staff', grantedAt: at, revokedAt: null };
+  const replacement = { ...original, id: 'abcdef00-0000-4000-8000-000000000033' };
+  const revocations = [];
+  const applications = [];
+  const rig = structureIntegration({
+    write({ db, route, options }) {
+      const key = options.headers['Idempotency-Key'];
+      const body = JSON.parse(options.body);
+      if (route.endsWith('/grant')) {
+        assert.deepEqual(body, { role: 'staff', eventId, email });
+        const grant = applications.includes(original.id) ? replacement : original;
+        applications.push(grant.id);
+        db.eligibleStaff = true;
+        db.roster = [staffMember(grant, email)];
+        return { statusCode: 201, body: { grant } };
+      }
+      assert.deepEqual(body, { grantId: original.id });
+      revocations.push(key);
+      if (revocations.length === 1) {
+        applications.push('revogar:' + original.id);
+        db.eligibleStaff = false;
+        db.roster = [];
+        throw new Error('Resposta perdida depois de revogar X');
+      }
+      assert.equal(key, revocations[0]);
+      return { statusCode: 200, body: { grant: { ...original, revokedAt: at } } };
+    },
+  });
+  const { app } = rig;
+  async function grant() {
+    await app.input('E-mail do usuário', email);
+    await app.press('Conceder Staff');
+    await app.press('Confirmar concessão');
+  }
+  await app.mount();
+  try {
+    await rig.openPanel();
+    await app.press('Continuar configuração');
+    await app.press('Continuar');
+    await grant();
+    assert.ok(app.hasText('Concessão confirmada.'));
+    await app.act(async () => app.back());
+
+    await app.press('Equipe Staff');
+    await app.press('Revogar acesso de ' + email);
+    await app.press('Revogar acesso');
+    assert.ok(app.hasButton('Repetir revogação para ' + email));
+    assert.ok(!app.hasText('Revogação confirmada.'));
+    await grant();
+    await app.press('Repetir revogação para ' + email);
+    assert.deepEqual(applications, [original.id, 'revogar:' + original.id, replacement.id]);
+    assert.equal(revocations.length, 2);
+    assert.ok(app.hasText('Revogação confirmada.'));
+    assert.ok(app.hasText('Concessão confirmada.'));
+    assert.ok(app.hasText(replacement.id));
+
+    await app.press('Voltar ao painel');
+    await app.press('Continuar configuração');
+    await app.press('Continuar');
+    assert.ok(app.hasText('Revogação confirmada.'));
+    assert.ok(app.hasText('Concessão confirmada.'));
+    assert.ok(app.hasText(replacement.id));
+  } finally { app.dispose(); }
 });
