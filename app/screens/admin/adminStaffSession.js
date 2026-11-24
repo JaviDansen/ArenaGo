@@ -73,9 +73,9 @@ export function createStaffSession(client, newKey, isCurrent, { canSettle = isCu
   const listeners = new Set();
   let denied = '';
 
-  function publish(eventId, refresh = false) {
+  function publish(eventId, refresh = false, outcome) {
     if (!isCurrent()) return;
-    return Promise.all([...listeners].map(listener => listener(eventId, refresh)));
+    return Promise.all([...listeners].map(listener => listener(eventId, refresh, outcome)));
   }
   function snapshot(id) {
     if (!isCurrent()) return { grants: [], attempts: [], feedback: [], denied: '' };
@@ -168,7 +168,7 @@ export function createStaffSession(client, newKey, isCurrent, { canSettle = isCu
 
     event.intents.delete(slot);
     report(grant ? 'Revogação confirmada.' : 'Concessão confirmada.', 'success');
-    await publish(eventId, true);
+    await publish(eventId, true, 'confirmed');
     return true;
   }
   return {

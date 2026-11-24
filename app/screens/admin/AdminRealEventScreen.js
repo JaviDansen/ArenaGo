@@ -1,6 +1,9 @@
 import { useContext, useState } from 'react';
 import { Platform, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native';
+import { randomUUID } from 'expo-crypto';
+import { useAuth } from '../../context/AuthContext';
 import { adminEventAreas } from './adminEventManagement';
+import { bindOperationSession } from './adminOperationSession';
 import { AdminStaffSession, AdminSetupIntents } from './adminSetupIntents';
 import { reviewStructureLabel, structureIntentsFor } from './adminStructureIntents';
 import useAdminEventPanel from './useAdminEventPanel';
@@ -12,9 +15,13 @@ import { AdminIcon, AdminIconTile, liveColors as c, liveStyles as s } from './co
 
 export default function AdminRealEventScreen({ navigation, route }) {
   const eventId = route.params?.eventId;
+  const auth = useAuth();
   const staffSession = useContext(AdminStaffSession);
+  const operationSession = auth.getAdminOperationSession?.((manager, active) =>
+    bindOperationSession(manager, randomUUID, active));
   const structureIntents = useContext(AdminSetupIntents);
-  const { event, readiness, pending, refreshing, blocked, detailError, readinessError, refresh } = useAdminEventPanel(navigation, eventId);
+  const { event, readiness, pending, refreshing, blocked, detailError, readinessError, refresh } =
+    useAdminEventPanel(navigation, eventId, true, { staffSession, operationSession });
   const [expandedReadiness, setExpandedReadiness] = useState(null);
   const expanded = Boolean(readiness && expandedReadiness === readiness);
   const openArea = area => navigation.navigate('AdminEventManagementInfo', { eventId: event.id, area });

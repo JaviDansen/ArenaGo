@@ -346,8 +346,8 @@ function operationView(n, overrides = {}) {
     closureMode: null, closureRequestedAt: null, adminDeadlineAt: null, externalQueueEnabled: true, activeParticipants: 0,
     externalWaitingParticipants: 3, canSetExternalQueue: true, canClose: true, ...overrides };
 }
-function operationHarness(views, onWrite, onRead = view => view) {
-  const writes = [], reads = [];
+function operationHarness(views, onWrite, onRead = view => view, onPanelRead = (_, response) => response) {
+  const writes = [], reads = [], panelReads = [];
   const eventFrom = view => ({ ...view, id: view.eventId, readiness: { ready: true } });
   const readiness = view => ({
     eventId: view.eventId, effectivePhase: view.effectivePhase,
@@ -362,8 +362,10 @@ function operationHarness(views, onWrite, onRead = view => view) {
       const view = views.find(v => route === '/admin/events/' + v.eventId || route.startsWith('/admin/events/' + v.eventId + '/'));
       if (!view) return undefined;
       const path = '/admin/events/' + view.eventId;
-      if (route === path) return { event: eventFrom(view) };
-      if (route === path + '/readiness') return readiness(view);
+      if (route === path || route === path + '/readiness') {
+        panelReads.push(route);
+        return onPanelRead(route, route === path ? { event: eventFrom(view) } : readiness(view));
+      }
       if (route === path + '/operation') {
         assert.equal(options.method, 'GET');
         assert.ok(options.headers.Authorization);
@@ -377,12 +379,220 @@ function operationHarness(views, onWrite, onRead = view => view) {
       return onWrite(view, mutation);
     },
   } });
-  return { app, writes, reads, async enter(view) {
+  return { app, writes, reads, panelReads, async enter(view) {
     await app.press('Gerenciar eventos');
     await app.press('Acessar evento ' + view.name);
     await app.press('Operação do evento');
   } };
 }
+
+function pendingPanelClosure({ onPanelRead, mode = 'immediate' } = {}) {
+  const a = operationView(1), b = operationView(2), write = deferred();
+  const rig = operationHarness([a, b], () => write.promise, undefined, onPanelRead);
+  const path = '/admin/events/' + a.eventId;
+  return {
+    ...rig, a, b, write,
+    readsFor: view => rig.panelReads.filter(route => ['/admin/events/' + view.eventId, '/admin/events/' + view.eventId + '/readiness'].includes(route)),
+    async confirm() {
+      await rig.enter(a);
+      await rig.app.press(mode === 'immediate' ? 'Encerrar imediatamente' : 'Encerramento controlado');
+      await rig.app.input('Justificativa', 'Encerrar a operação');
+      if (mode === 'controlled') {
+        await rig.app.input('Data de encerramento', '23/11/2090');
+        await rig.app.input('Hora de encerramento', '10:30');
+      }
+      await rig.app.press('Revisar operação');
+      await rig.app.press('Confirmar operação');
+      assert.equal(rig.writes.length, 1);
+      assert.equal(rig.writes[0].route, path + '/close');
+      assert.equal(rig.writes[0].method, 'POST');
+    },
+    async finish() {
+      const deadline = mode === 'controlled' ? '2090-11-23T13:30:00.000000Z' : operationAt;
+      await rig.app.act(async () => {
+        Object.assign(a, { effectivePhase: mode === 'controlled' ? 'closing' : 'closed', closureMode: mode,
+          closureRequestedAt: operationAt, adminDeadlineAt: deadline, canClose: false, canSetExternalQueue: false });
+        write.resolve({ eventId: a.eventId, closureMode: mode, status: a.effectivePhase, newEntriesClosedAt: operationAt,
+          effectiveOperationalDeadlineAt: deadline, externalWaitingFinalized: 3 });
+      });
+    },
+  };
+}
+
+test('F1-R01: fechamento confirmado após voltar atualiza o painel com uma única escrita', async () => {
+  const rig = pendingPanelClosure();
+  const { app, a, writes } = rig;
+  await app.mount();
+  try {
+    await rig.confirm();
+    await app.press('Voltar ao painel');
+    assert.equal(app.activeRoute(), 'AdminRealEvent');
+    assert.ok(app.hasText('Aberto'));
+    const before = rig.readsFor(a);
+    assert.equal(before.length, 4);
+    await rig.finish();
+    assert.deepEqual(rig.readsFor(a), [...before, ...before.slice(-2)]);
+    assert.ok(app.hasText('Encerrado'));
+    assert.ok(!app.hasText('Aberto'));
+    assert.equal(writes.length, 1);
+  } finally { app.dispose(); }
+});
+
+test('F1-R02: revogar o último Staff após voltar atualiza a prontidão oficial', async () => {
+  const write = deferred(), at = operationAt, email = 'ultimo-staff@example.test';
+  const rig = structureIntegration({ initialStation: true, write: () => write.promise });
+  const { app, db, requests } = rig;
+  const grant = { id: operationView(21).eventId, userId: operationView(22).eventId,
+    eventId: rig.path.split('/').at(-1), role: 'staff', grantedAt: at, revokedAt: null };
+  db.roster = [staffMember(grant, email)];
+  const panelReads = () => requests.filter(({ method, route }) =>
+    method === 'GET' && [rig.path, rig.path + '/readiness'].includes(route)).map(({ route }) => route);
+  await app.mount();
+  try {
+    await rig.openPanel();
+    await app.press('Equipe Staff');
+    await app.press('Revogar acesso de ' + email);
+    await app.press('Revogar acesso');
+    await app.press('Voltar ao painel');
+    assert.equal(app.activeRoute(), 'AdminRealEvent');
+    assert.ok(app.hasText('Pronto para operar'));
+    const before = panelReads();
+    assert.equal(before.length, 6);
+    await app.act(async () => {
+      db.roster = [];
+      db.eligibleStaff = false;
+      write.resolve({ grant: { ...grant, revokedAt: at } });
+    });
+    assert.deepEqual(panelReads(), [...before, rig.path, rig.path + '/readiness']);
+    assert.ok(app.hasButton('Configuração pendente'));
+    assert.ok(!app.hasText('Pronto para operar'));
+    await app.press('Configuração pendente');
+    assert.ok(app.hasText('Autorize pelo menos um integrante Staff ativo'));
+    const writes = requests.filter(({ route, method }) => route.startsWith('/admin/') && method !== 'GET');
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].route, '/admin/roles/revoke');
+    assert.equal(writes[0].method, 'POST');
+    assert.deepEqual(JSON.parse(writes[0].body), { grantId: grant.id });
+    assert.ok(writes[0].key);
+  } finally { app.dispose(); }
+});
+
+test('F1-R03: detalhe e prontidão anteriores não substituem a leitura posterior', async () => {
+  const held = new Map();
+  let hold = false;
+  const rig = pendingPanelClosure({ onPanelRead(route, response) {
+    if (!hold) return response;
+    const pending = deferred();
+    held.set(route, { ...pending, response });
+    return pending.promise;
+  } });
+  const { app, a, writes } = rig;
+  await app.mount();
+  try {
+    await rig.confirm();
+    hold = true;
+    await app.press('Voltar ao painel');
+    assert.equal(held.size, 2);
+    assert.ok(app.hasText('Carregando evento...'));
+    hold = false;
+    // Marca o detalhe novo independentemente do selo, que usa a prontidão.
+    a.name = 'Nome da leitura mais recente';
+    await rig.finish();
+    assert.equal(rig.readsFor(a).length, 6);
+    assert.ok(app.hasText(a.name));
+    assert.ok(app.hasText('Encerrado'));
+    await app.act(async () => {
+      for (const pending of held.values()) pending.resolve(pending.response);
+    });
+    assert.ok(app.hasText(a.name));
+    assert.ok(app.hasText('Encerrado'));
+    assert.ok(!app.hasText('Arena Operação 1'));
+    assert.ok(!app.hasText('Aberto'));
+    assert.equal(rig.readsFor(a).length, 6);
+    assert.equal(writes.length, 1);
+  } finally {
+    for (const pending of held.values()) pending.resolve(pending.response);
+    app.dispose();
+  }
+});
+
+for (const replaceSession of [false, true]) {
+  test(replaceSession ? 'F1-R05: sessão substituída ignora conclusão antiga para o mesmo UUID' :
+    'F1-R04/R08: conclusão de A não recarrega B e A lê o estado ao remontar', async () => {
+    const rig = pendingPanelClosure({ mode: 'controlled' });
+    const { app, a, b, writes } = rig;
+    await app.mount();
+    try {
+      await rig.confirm();
+      if (replaceSession) {
+        await app.replaceProvider({ ...adminUser, id: 'admin-f1', sessionId: operationView(93).eventId });
+        await app.press('Gerenciar eventos');
+        await app.press('Acessar evento ' + a.name);
+      } else {
+        await app.press('Voltar ao painel');
+        await app.press('Voltar aos eventos');
+        await app.press('Acessar evento ' + b.name);
+      }
+      const displayed = replaceSession ? a : b;
+      const before = [...rig.panelReads];
+      await rig.finish();
+      assert.deepEqual(rig.panelReads, before);
+      assert.ok(app.hasText(displayed.name));
+      assert.ok(app.hasText('Aberto'));
+      assert.ok(!app.hasText('Encerrando'));
+      if (!replaceSession) {
+        await app.press('Voltar aos eventos');
+        await app.press('Acessar evento ' + a.name);
+        assert.deepEqual(rig.panelReads, [...before, '/admin/events/' + a.eventId, '/admin/events/' + a.eventId + '/readiness']);
+        assert.ok(app.hasText('Encerrando'));
+      }
+      assert.equal(writes.length, 1);
+    } finally { app.dispose(); }
+  });
+}
+
+for (const ambiguous of [true, false]) {
+  test('F1-R06: ' + (ambiguous ? 'resultado incerto preserva a intenção' : 'recusa definitiva libera a ação'), async () => {
+    const rig = pendingPanelClosure();
+    const { app, a, write, writes } = rig;
+    await app.mount();
+    try {
+      await rig.confirm();
+      await app.press('Voltar ao painel');
+      const before = [...rig.panelReads];
+      await app.act(async () => {
+        if (ambiguous) write.reject(new Error('Resposta indisponível'));
+        else write.resolve({ statusCode: 409, body: { code: 'EVENT_ALREADY_CLOSED' } });
+      });
+      assert.deepEqual(rig.panelReads, before);
+      assert.ok(app.hasText('Aberto'));
+      await app.press('Operação do evento');
+      assert.equal(app.hasButton('Reenviar a mesma solicitação'), ambiguous);
+      assert.equal(app.hasText('Resultado ainda não confirmado'), ambiguous);
+      assert.equal(app.hasText('Operação recusada'), !ambiguous);
+      assert.ok(!app.hasText('Resposta confirmada'));
+      assert.equal(writes.length, 1);
+      assert.equal(rig.readsFor(a).length, 4);
+    } finally { app.dispose(); }
+  });
+}
+
+test('F1-R07/R08: conclusão fora de foco conserva uma única leitura no retorno', async () => {
+  const rig = pendingPanelClosure();
+  const { app, a, writes } = rig;
+  await app.mount();
+  try {
+    await rig.confirm();
+    assert.equal(rig.readsFor(a).length, 2);
+    await rig.finish();
+    assert.ok(app.hasText('Resposta confirmada'));
+    assert.equal(rig.readsFor(a).length, 2);
+    await app.press('Voltar ao painel');
+    assert.ok(app.hasText('Encerrado'));
+    assert.equal(rig.readsFor(a).length, 4);
+    assert.equal(writes.length, 1);
+  } finally { app.dispose(); }
+});
 
 test('ADMIN-07 navega para o evento selecionado, valida justificativa, cancela e reconsulta após alternar a fila', async () => {
   const a = operationView(1), b = operationView(2);

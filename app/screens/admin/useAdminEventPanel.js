@@ -3,7 +3,7 @@ import { useAuth } from '../../context/AuthContext';
 import { adminEventPanelError, getAdminEvent, getAdminEventReadiness } from '../../services/adminEventsService';
 import { adminReadOwner } from './useAdminEvents';
 
-export default function useAdminEventPanel(navigation, eventId, includeReadiness = true) {
+export default function useAdminEventPanel(navigation, eventId, includeReadiness = true, { staffSession, operationSession } = {}) {
   const auth = useAuth();
   const owner = adminReadOwner(auth);
   const client = auth.httpClient;
@@ -48,6 +48,12 @@ export default function useAdminEventPanel(navigation, eventId, includeReadiness
     const onFocus = () => { void refresh(); };
     const unsubscribeFocus = navigation.addListener('focus', onFocus);
     const unsubscribeBlur = navigation.addListener('blur', () => { request = null; });
+    function onMutation(id, _reload, outcome) {
+      // While blurred, the next focus already reads the persisted state.
+      if (id === eventId && outcome === 'confirmed') void refresh(false, true);
+    }
+    const unsubscribeStaff = staffSession?.subscribe(onMutation);
+    const unsubscribeOperation = operationSession?.subscribe(onMutation);
     control.current = { scope, refresh };
     onFocus();
     return () => {
@@ -55,8 +61,10 @@ export default function useAdminEventPanel(navigation, eventId, includeReadiness
       control.current = null;
       unsubscribeFocus();
       unsubscribeBlur();
+      unsubscribeStaff?.();
+      unsubscribeOperation?.();
     };
-  }, [navigation, owner, client, eventId, includeReadiness, scope]);
+  }, [navigation, owner, client, eventId, includeReadiness, scope, staffSession, operationSession]);
 
   return {
     ...(owner && snapshot?.scope === scope ? snapshot : { pending: true }),

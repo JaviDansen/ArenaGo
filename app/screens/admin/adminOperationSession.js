@@ -48,8 +48,8 @@ function definitivelyRefused(request, error, recovery) {
 export function createOperationSession(client, newKey, isCurrent, { canSettle = isCurrent, revision, renew } = {}) {
   const events = new Map(), listeners = new Set();
   let denied = null;
-  function publish(eventId, reload = false) {
-    if (isCurrent()) listeners.forEach(listener => listener(eventId, reload));
+  function publish(eventId, reload = false, outcome) {
+    if (isCurrent()) listeners.forEach(listener => listener(eventId, reload, outcome));
   }
   function snapshot(eventId) {
     if (!isCurrent()) return {};
@@ -77,7 +77,7 @@ export function createOperationSession(client, newKey, isCurrent, { canSettle = 
       const result = await sendAdminEventOperation(client, request);
       if (!current()) return;
       events.set(eventId, { receipt: { kind: request.kind, timezone: request.timezone, result } });
-      publish(eventId, true);
+      publish(eventId, true, 'confirmed');
     } catch (error) {
       if (!current()) return;
       if (error?.status === 401 && error.code === 'ACCESS_TOKEN_EXPIRED') {
