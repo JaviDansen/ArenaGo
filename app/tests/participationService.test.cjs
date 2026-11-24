@@ -150,3 +150,122 @@ test('claim recusa leitura antiga, participação corrente, demo e identidade tr
   r.identity(identityB);
   assert.equal(r.store.claimReturnEvaluation(recent), false);
 });
+
+test('STAFF-03 syncCurrentSilent detecta surgimento, troca de callId e remoção de externalEntryCall sem mudança de posição', async () => {
+  const calledAt1 = '2026-11-10T15:00:00.123456Z';
+  const calledAt2 = '2026-11-10T15:05:00.123456Z';
+  let currentParticipation = {
+    id: 'p-1',
+    eventId: 'e-1',
+    status: 'waiting',
+    externalQueue: { position: 1, observedAt: calledAt1 },
+    externalEntryCall: null,
+  };
+  const snapshots = [];
+  const r = rig((path) => Promise.resolve(path.endsWith('/current') ? { participation: currentParticipation } : returned));
+  r.store.subscribe((snap) => snapshots.push(snap));
+  r.store.setIdentity(identityA);
+  await r.store.refresh();
+  assert.equal(r.store.getSnapshot().participation.externalEntryCall, null);
+
+  const countBefore = snapshots.length;
+  // Mesmo sem mudar posição (1), chamada externa deve disparar atualização silenciosa
+  currentParticipation = {
+    ...currentParticipation,
+    externalEntryCall: {
+      callId: 'call-1',
+      participationId: 'p-1',
+      eventId: 'e-1',
+      kind: 'external_entry',
+      status: 'pending',
+      calledAt: calledAt1,
+    },
+  };
+  await r.store.syncCurrentSilent();
+  assert.equal(snapshots.length, countBefore + 1);
+  assert.equal(r.store.getSnapshot().participation.externalEntryCall.callId, 'call-1');
+
+  // Polling repetido idêntico não deve republicar desnecessariamente
+  await r.store.syncCurrentSilent();
+  assert.equal(snapshots.length, countBefore + 1);
+
+  // Remoção / ausência requeue limpa chamada externa mesmo em waiting posição 1
+  currentParticipation = {
+    ...currentParticipation,
+    externalEntryCall: null,
+  };
+  await r.store.syncCurrentSilent();
+  assert.equal(snapshots.length, countBefore + 2);
+  assert.equal(r.store.getSnapshot().participation.externalEntryCall, null);
+
+  // Nova chamada gera novo callId distinto na mesma participação
+  currentParticipation = {
+    ...currentParticipation,
+    externalEntryCall: {
+      callId: 'call-2',
+      participationId: 'p-1',
+      eventId: 'e-1',
+      kind: 'external_entry',
+      status: 'pending',
+      calledAt: calledAt2,
+    },
+  };
+  await r.store.syncCurrentSilent();
+  assert.equal(snapshots.length, countBefore + 3);
+  assert.equal(r.store.getSnapshot().participation.externalEntryCall.callId, 'call-2');
+
+  // Confirmação -> active sem externalEntryCall
+  currentParticipation = {
+    id: 'p-1',
+    eventId: 'e-1',
+    status: 'active',
+    externalQueue: null,
+    externalEntryCall: null,
+  };
+  await r.store.syncCurrentSilent();
+  assert.equal(r.store.getSnapshot().participation.status, 'active');
+  assert.equal(r.store.getSnapshot().participation.externalEntryCall, null);
+});
+
+test('STAFF-03 rejeita externalEntryCall inconsistente no refresh e ignora leitura malformada no polling silencioso', async () => {
+  const validCall = {
+    callId: 'call-1',
+    participationId: 'p-1',
+    eventId: 'e-1',
+    kind: 'external_entry',
+    status: 'pending',
+    calledAt: '2026-11-10T15:00:00.123456Z',
+  };
+  const validWaiting = {
+    id: 'p-1',
+    eventId: 'e-1',
+    status: 'waiting',
+    externalQueue: { position: 1, observedAt: '2026-11-10T15:00:00.123456Z' },
+    externalEntryCall: validCall,
+  };
+
+  for (const malformed of [
+    { id: 'p-1', eventId: 'e-1', status: 'active', externalQueue: null, externalEntryCall: validCall },
+    { ...validWaiting, externalEntryCall: { ...validCall, participationId: 'p-other' } },
+    { ...validWaiting, externalEntryCall: { ...validCall, eventId: 'e-other' } },
+    { ...validWaiting, externalEntryCall: { ...validCall, status: 'confirmed' } },
+    { ...validWaiting, externalEntryCall: { ...validCall, kind: 'station' } },
+    { ...validWaiting, externalEntryCall: { ...validCall, calledAt: 'invalido' } },
+  ]) {
+    const r = rig((path) => Promise.resolve(path.endsWith('/current') ? { participation: malformed } : returned));
+    r.store.setIdentity(identityA);
+    await r.store.refresh();
+    assert.equal(r.store.getSnapshot().status, 'error');
+    assert.equal(r.store.getSnapshot().error, 'unavailable');
+  }
+
+  let next = validWaiting;
+  const rSilent = rig((path) => Promise.resolve(path.endsWith('/current') ? { participation: next } : returned));
+  rSilent.store.setIdentity(identityA);
+  await rSilent.store.refresh();
+  assert.equal(rSilent.store.getSnapshot().participation.externalEntryCall.callId, 'call-1');
+
+  next = { ...validWaiting, externalEntryCall: { ...validCall, participationId: 'p-other' } };
+  await rSilent.store.syncCurrentSilent();
+  assert.equal(rSilent.store.getSnapshot().participation.externalEntryCall.callId, 'call-1');
+});

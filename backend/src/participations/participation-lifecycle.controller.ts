@@ -1,5 +1,5 @@
 import { mutationSession } from "../auth/mutation-session";
-import { Body, Controller, Get, HttpCode, Inject, Param, Post, Req } from "@nestjs/common";
+import { Body, Controller, Get, Header, HttpCode, Inject, Param, Post, Req } from "@nestjs/common";
 import { CurrentUserId, RequireSessionAuth } from "../auth/current-user.decorator";
 import type { AuthenticatedRequest } from "../auth/session-auth.guard";
 import { ProblemException } from "../common/errors/problem.exception";
@@ -27,9 +27,11 @@ export class ParticipationLifecycleController {
     @Inject(ParticipantQueueIdempotencyPolicy) private readonly policy:ParticipantQueueIdempotencyPolicy){}
   @Get("current")
   @HttpCode(200)
+  @Header("Cache-Control", "no-store")
   async current(@CurrentUserId() userId:string){return {participation:await this.queries.current(userId)};}
   @Get(":participationId")
   @HttpCode(200)
+  @Header("Cache-Control", "no-store")
   async byId(@CurrentUserId() userId:string,@Param() params:unknown){
     const {participationId}=validateOperationParams(lifecycleParams,params),participation=await this.queries.byId(userId,participationId);
     if(!participation)missing();return {participation};

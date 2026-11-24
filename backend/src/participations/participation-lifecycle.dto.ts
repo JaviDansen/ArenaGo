@@ -4,15 +4,25 @@ import { isPreciseInstant } from "../evaluations/evaluation-read.dto";
 
 const instant = z.custom<string>(isPreciseInstant);
 export const lifecycleParams = z.object({ participationId: operationUuid }).strict();
+export const externalEntryCallView = z.object({
+  callId: operationUuid,
+  participationId: operationUuid,
+  eventId: operationUuid,
+  kind: z.literal("external_entry"),
+  status: z.literal("pending"),
+  calledAt: instant,
+}).strict();
 export const participationView = z.object({
   id: operationUuid, eventId: operationUuid,
   status: z.enum(["waiting", "active", "finished", "canceled"]),
   joinedAt: instant, arenaEnteredAt: instant.nullable(), finishedAt: instant.nullable(), finishReason: z.string().nullable(),
   externalQueue: z.object({ position: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), observedAt: instant }).strict().nullable(),
+  externalEntryCall: externalEntryCallView.nullable().default(null),
 }).strict();
 export const finishedParticipationView = participationView.extend({
   completedServicesCount: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   evaluationEligibility: z.object({ eligible: z.boolean(), hasSubmitted: z.boolean() }).strict(),
 }).strict();
+export type ExternalEntryCallView = z.infer<typeof externalEntryCallView>;
 export type ParticipationView = z.infer<typeof participationView>;
 export type FinishedParticipationView = z.infer<typeof finishedParticipationView>;

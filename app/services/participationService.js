@@ -10,6 +10,40 @@ function validateReturnState(returned) {
   }
 }
 
+function isValidExternalEntryCall(call, participation) {
+  if (call === undefined || call === null) return true;
+  if (!call || typeof call !== 'object' || Array.isArray(call)) return false;
+  if (participation.status !== 'waiting') return false;
+  if (typeof call.callId !== 'string' || !call.callId.trim()) return false;
+  if (call.kind !== 'external_entry' || call.status !== 'pending') return false;
+  if (typeof call.calledAt !== 'string' || !Number.isFinite(Date.parse(call.calledAt))) return false;
+  if (call.participationId !== undefined && call.participationId !== participation.id) return false;
+  if (call.eventId !== undefined && call.eventId !== participation.eventId) return false;
+  return true;
+}
+
+function isValidCurrentParticipationResponse(current) {
+  if (!current || !Object.prototype.hasOwnProperty.call(current, 'participation')) return false;
+  const participation = current.participation;
+  if (participation === null) return true;
+  if (!participation || typeof participation.id !== 'string' ||
+      typeof participation.eventId !== 'string' ||
+      !['waiting', 'active'].includes(participation.status)) {
+    return false;
+  }
+  if (participation.status === 'waiting' &&
+      (!Number.isSafeInteger(participation.externalQueue?.position) || participation.externalQueue.position < 1)) {
+    return false;
+  }
+  return isValidExternalEntryCall(participation.externalEntryCall, participation);
+}
+
+function externalCallSignature(participation) {
+  const call = participation?.externalEntryCall;
+  if (!call) return null;
+  return `${call.callId}:${call.status}:${call.calledAt}`;
+}
+
 export function createParticipationStore({ client = httpClient, getIdentity }) {
   let state = empty();
   let generation = 0;
@@ -68,13 +102,10 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
         client.get('/participations/return-state', { auth: true }),
       ]);
       if (requestGeneration !== generation || !matches(identity)) return;
-      const participation = current?.participation;
-      if (!current || !Object.prototype.hasOwnProperty.call(current, 'participation') ||
-          (participation !== null && (!participation || typeof participation.id !== 'string' ||
-            typeof participation.eventId !== 'string' || !['waiting', 'active'].includes(participation.status) ||
-            (participation.status === 'waiting' && (!Number.isSafeInteger(participation.externalQueue?.position) || participation.externalQueue.position < 1))))) {
+      if (!isValidCurrentParticipationResponse(current)) {
         throw new Error('Resposta inválida de participação.');
       }
+      const participation = current.participation;
       validateReturnState(returned);
       publish({ ...state, status: 'ready', participation, returnState: returned, returnStateVersion: requestGeneration, demoParticipation: null, error: null, syncStale: false });
     } catch (error) {
@@ -96,13 +127,10 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
         const current = await client.get('/participations/current', { auth: true });
         if (requestGeneration !== generation || !matches(identity)) return;
 
-        const participation = current?.participation;
-        if (!current || !Object.prototype.hasOwnProperty.call(current, 'participation') ||
-            (participation !== null && (!participation || typeof participation.id !== 'string' ||
-              typeof participation.eventId !== 'string' || !['waiting', 'active'].includes(participation.status) ||
-              (participation.status === 'waiting' && (!Number.isSafeInteger(participation.externalQueue?.position) || participation.externalQueue.position < 1))))) {
+        if (!isValidCurrentParticipationResponse(current)) {
           return;
         }
+        const participation = current.participation;
 
         const prev = state.participation;
         let returned = state.returnState;
@@ -119,7 +147,8 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
         }
         const changed = !prev || prev.id !== participation?.id ||
           prev.status !== participation?.status ||
-          prev.externalQueue?.position !== participation?.externalQueue?.position;
+          prev.externalQueue?.position !== participation?.externalQueue?.position ||
+          externalCallSignature(prev) !== externalCallSignature(participation);
 
         if (changed || state.status !== 'ready' || state.syncStale) {
           publish({

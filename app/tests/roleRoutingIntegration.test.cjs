@@ -180,7 +180,8 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
         return load(`${target}.js`);
       }
       if (control.realStaff && ['screens/staff/StaffEventsNavigator', 'services/staffEventsService',
-        'screens/staff/StaffEntryControlRealScreen', 'services/staffEntryService', 'services/staffEntryIntentStorage',
+        'screens/staff/StaffEntryControlRealScreen', 'screens/staff/components/StaffEntrySections',
+        'services/staffEntryService', 'services/staffEntryIntentStorage',
         'screens/staff/StaffStationOperationalScreen', 'screens/staff/components/StaffStationSections',
         'services/staffIntentStorage', 'services/staffDashboardService', 'services/staffOperationsService',
         'screens/staff/useStaffPolling', 'screens/staff/components/StaffLiveScreen',
@@ -259,6 +260,21 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
           && rightTexts.length === 2
           && rightTexts.includes(displayName)
           && rightTexts.includes(status);
+      });
+    },
+    hasEntryQueueRow(position, displayName) {
+      const flatten = (value) => Array.isArray(value) ? value.map(flatten).join('')
+        : value && typeof value === 'object' ? flatten(value.props?.children) : String(value ?? '');
+      return tree.root.findAllByType('View').some((row) => {
+        const ch = (row.children ?? []).filter((node) => node && typeof node === 'object' && node.type === 'View');
+        if (ch.length < 2 || ch.length > 3) return false;
+        const leftTexts = ch[0].findAllByType('Text').map((t) => flatten(t.props.children));
+        const rightTexts = ch[1].findAllByType('Text').map((t) => flatten(t.props.children));
+        return leftTexts.length === 1
+          && leftTexts[0] === String(position)
+          && rightTexts.length === 2
+          && rightTexts.includes(displayName)
+          && (rightTexts.includes('Próximo da fila externa') || rightTexts.includes('Aguardando chamada'));
       });
     },
     async press(label) {
@@ -1769,20 +1785,26 @@ test('Controle de Entrada real confirma primeiro, desativa, reativa e volta pres
   const app = createIntegration({ initialUser: staffUser, control }); await app.mount();
   await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
   await app.press('Selecionar evento Evento autorizado'); await app.press('Controle de Entrada');
-  assert.ok(app.hasText('1. Ana')); assert.ok(!app.hasText('Confirmar entrada de Ana'));
+  assert.ok(app.hasEntryQueueRow(1, 'Ana')); assert.ok(app.hasEntryQueueRow(2, 'Bia'));
+  assert.ok(app.hasExactText('PRÓXIMO')); assert.ok(!app.hasText('Confirmar entrada de Ana'));
   const call = app.handler('Chamar próximo');
   await app.act(async () => { await Promise.all([call(), call()]); });
   assert.equal(app.modal().props.visible, false);
   assert.equal(requests.filter(r => r.method === 'POST').length, 1);
   assert.equal(app.hasButton('Entendi'), false);
-  assert.ok(app.hasText('Participante chamado: Ana'));
+  assert.ok(app.hasExactText('Ana'));
+  assert.ok(app.hasExactText('CHAMADA PENDENTE'));
+  assert.ok(!app.hasEntryQueueRow(1, 'Ana'));
+  assert.ok(app.hasEntryQueueRow(1, 'Bia'));
   assert.ok(app.hasText('Confirmar entrada')); assert.ok(app.hasText('Marcar ausência')); assert.ok(app.hasText('Remover da fila'));
   await app.press('Marcar ausência'); assert.equal(app.modal().props.visible, true);
   await app.press('CANCELAR ALTERAÇÃO');
   await app.press('Remover da fila'); assert.equal(app.modal().props.visible, true);
   await app.press('CANCELAR ALTERAÇÃO');
   await app.press('Confirmar entrada'); await app.press('CONFIRMAR ALTERAÇÃO');
-  assert.ok(app.hasText('Entrada confirmada pelo servidor')); assert.ok(app.hasText('1. Bia'));
+  assert.ok(app.hasText('Entrada confirmada pelo servidor'));
+  assert.ok(app.hasEntryQueueRow(1, 'Bia'));
+  assert.ok(!app.hasText('Ana'));
   await app.press('Desativar fila externa'); assert.equal(app.modal().props.visible, true);
   await app.press('CANCELAR ALTERAÇÃO'); assert.equal(requests.filter(r => r.method === 'PATCH').length, 0);
   await app.press('Desativar fila externa'); await app.press('CONFIRMAR ALTERAÇÃO');
@@ -1811,7 +1833,7 @@ test('chamada direta capturada antes do logout não envia operação na sessão 
   await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
   await app.press('Selecionar evento Evento autorizado'); await app.press('Controle de Entrada');
   const old = app.handler('Chamar próximo'); await app.act(() => app.manager.logout()); await app.act(async () => old());
-  assert.equal(mutations, 0); assert.ok(!app.hasText('1. Ana')); app.dispose();
+  assert.equal(mutations, 0); assert.ok(!app.hasText('Ana')); app.dispose();
 });
 
 test('chamada direta externa mantém intenção incerta e não repete POST após atualização', { skip }, async () => {
@@ -1877,9 +1899,9 @@ test('401 terminal no Controle de Entrada remove lista nominal e área Staff', {
           { participationId: 'abcdef00-0000-4000-8000-000000000004', displayName: 'Ana', position: 1 }] };
     } } });
   await app.mount(); await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
-  await app.press('Selecionar evento Evento autorizado'); await app.press('Controle de Entrada'); assert.ok(app.hasText('1. Ana'));
+  await app.press('Selecionar evento Evento autorizado'); await app.press('Controle de Entrada'); assert.ok(app.hasEntryQueueRow(1, 'Ana'));
   revoked = true; await app.press('Atualizar fila de entrada');
-  assert.equal(app.route(), 'Login'); assert.ok(!app.hasText('1. Ana')); app.dispose();
+  assert.equal(app.route(), 'Login'); assert.ok(!app.hasText('Ana')); app.dispose();
 });
 
 test('AUD-01 + AUD-05: perda de autorização propaga entre painel e Controle de Entrada, fecha modal, invalida callbacks e preserva intenção persistida', { skip }, async () => {
@@ -1927,16 +1949,16 @@ test('AUD-01 + AUD-05: perda de autorização propaga entre painel e Controle de
     await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
     await app.press('Selecionar evento Evento autorizado');
     await app.press('Controle de Entrada');
-    assert.ok(app.hasText('1. Ana'));
-    assert.ok(app.hasText('2. Bia'));
+    assert.ok(app.hasEntryQueueRow(1, 'Ana'));
+    assert.ok(app.hasEntryQueueRow(2, 'Bia'));
     await app.press('Desativar fila externa');
     assert.equal(app.modal().props.visible, true);
     const staleConfirm = app.handler('CONFIRMAR ALTERAÇÃO');
 
     denyEntry = true;
     await app.tickTimers(5000);
-    assert.ok(!app.hasText('1. Ana'));
-    assert.ok(!app.hasText('2. Bia'));
+    assert.ok(!app.hasText('Ana'));
+    assert.ok(!app.hasText('Bia'));
     assert.equal(app.modals().every((m) => !m.props.visible), true);
     assert.equal(app.modals().length, 0);
     await app.act(async () => staleConfirm());
@@ -2013,7 +2035,7 @@ test('AUD-01 + AUD-05: perda de autorização propaga entre painel e Controle de
       pendingStationsFlight.resolve({ statusCode: 404, body: { code: 'RESOURCE_NOT_FOUND' } });
       await new Promise((r) => setTimeout(r, 0));
     });
-    assert.ok(!appPanelRevoke.hasText('1. Ana'), 'informação nominal removida imediatamente na subtela aberta');
+    assert.ok(!appPanelRevoke.hasText('Ana'), 'informação nominal removida imediatamente na subtela aberta');
     assert.ok(appPanelRevoke.hasText('Acesso ao evento indisponível'));
     assert.equal(appPanelRevoke.hasButton('Chamar próximo'), false);
     assert.ok([...values.values()].some((raw) => raw.includes('dispatching')),
@@ -3377,6 +3399,193 @@ test('STAFF02-AUD-05 + AUD-06: indicador de polling espelha modal, foco, AppStat
     await app.tickTimers(5000);
     assert.ok(!app.hasText('Atualização'));
     assert.ok(app.hasText('Acesso ao evento ou à experiência indisponível'));
+  } finally {
+    app.dispose();
+  }
+});
+
+test('STAFF-03 integração Staff <-> Participante: chamada externa propaga callId, ausência limpa e nova chamada entrega novo callId até confirmação', { skip }, async () => {
+  const at1 = '2026-11-10T15:00:00.000Z';
+  const at2 = '2026-11-10T15:05:00.000Z';
+  const call1Id = 'cccccccc-cccc-4ccc-8ccc-000000000001';
+  const call2Id = 'cccccccc-cccc-4ccc-8ccc-000000000002';
+  const partId = 'abcdef00-0000-4000-8000-000000000004';
+  const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
+  const secureValues = new Map();
+
+  let status = 'waiting';
+  let pendingCall = null;
+  let callSerial = 0;
+
+  const currentProjection = () => {
+    if (status === 'waiting') {
+      return {
+        participation: {
+          id: partId,
+          eventId: staffEvent.id,
+          status: 'waiting',
+          joinedAt: '2026-11-10T14:55:00.000000Z',
+          arenaEnteredAt: null,
+          finishedAt: null,
+          finishReason: null,
+          externalQueue: { position: 1, observedAt: at1 },
+          externalEntryCall: pendingCall
+            ? {
+                callId: pendingCall.id,
+                participationId: partId,
+                eventId: staffEvent.id,
+                kind: 'external_entry',
+                status: 'pending',
+                calledAt: `${pendingCall.calledAt.slice(0, -1)}000Z`,
+              }
+            : null,
+        },
+      };
+    }
+    return {
+      participation: {
+        id: partId,
+        eventId: staffEvent.id,
+        status: 'active',
+        joinedAt: '2026-11-10T14:55:00.000000Z',
+        arenaEnteredAt: '2026-11-10T15:06:00.000000Z',
+        finishedAt: null,
+        finishReason: null,
+        externalQueue: null,
+        externalEntryCall: null,
+      },
+    };
+  };
+
+  const { createParticipationStore } = loadModule('services/participationService.js', (name) =>
+    (name === './httpClient' ? { httpClient: {} } : require(name))).exports;
+  const participantStore = createParticipationStore({
+    getIdentity: () => ({ userId: 'participant-user', epoch: 1 }),
+    client: {
+      async get(route) {
+        if (route === '/participations/current') return currentProjection();
+        if (route === '/participations/return-state') {
+          return { recentFinalization: null, pendingEvaluationParticipationIds: [] };
+        }
+        throw new Error(`GET participante inesperado: ${route}`);
+      },
+    },
+  });
+
+  const app = createIntegration({
+    initialUser: staffUser,
+    control: {
+      realStaff: true,
+      platformOS: 'android',
+      events: [staffEvent],
+      secureStore: {
+        isAvailableAsync: async () => true,
+        getItemAsync: async (key) => secureValues.get(key) ?? null,
+        setItemAsync: async (key, value) => { secureValues.set(key, value); },
+      },
+      http: async (route, options) => {
+        if (!route.includes('/entry-control')) return undefined;
+        const waiting = status === 'waiting' && !pendingCall
+          ? [{ participationId: partId, displayName: 'Ana', position: 1 }]
+          : [];
+        if (options.method === 'GET') {
+          return {
+            eventId: staffEvent.id,
+            externalQueueEnabled: true,
+            canManage: true,
+            observedAt: at1,
+            pendingCall,
+            canCall: !pendingCall && waiting.length > 0,
+            canConfirm: Boolean(pendingCall),
+            canMarkAbsent: Boolean(pendingCall),
+            canRemove: Boolean(pendingCall),
+            waitingCount: waiting.length,
+            waiting,
+          };
+        }
+        if (route.endsWith('/call-next')) {
+          callSerial += 1;
+          const id = callSerial === 1 ? call1Id : call2Id;
+          const calledAt = callSerial === 1 ? at1 : at2;
+          pendingCall = { id, participationId: partId, displayName: 'Ana', calledAt };
+          return {
+            eventId: staffEvent.id,
+            call: { id, participationId: partId, status: 'pending', calledAt, resolvedAt: null },
+            participation: { id: partId, status: 'waiting', arenaEnteredAt: null, finishReason: null, externalQueueOrder: '1' },
+            requeued: false,
+          };
+        }
+        if (route.endsWith('/absent')) {
+          const prev = pendingCall;
+          pendingCall = null;
+          return {
+            eventId: staffEvent.id,
+            call: { id: prev.id, participationId: partId, status: 'absent', calledAt: prev.calledAt, resolvedAt: at2 },
+            participation: { id: partId, status: 'waiting', arenaEnteredAt: null, finishReason: null, externalQueueOrder: '2' },
+            requeued: true,
+          };
+        }
+        if (route.endsWith('/confirm')) {
+          const prev = pendingCall;
+          pendingCall = null;
+          status = 'active';
+          return {
+            eventId: staffEvent.id,
+            call: { id: prev.id, participationId: partId, status: 'confirmed', calledAt: prev.calledAt, resolvedAt: at2 },
+            participation: { id: partId, status: 'active', arenaEnteredAt: at2, finishReason: null, externalQueueOrder: '2' },
+            requeued: false,
+          };
+        }
+        throw new Error(`Mutação Staff inesperada: ${route}`);
+      },
+    },
+  });
+
+  try {
+    participantStore.setIdentity({ userId: 'participant-user', epoch: 1 });
+    await participantStore.refresh();
+    assert.equal(participantStore.getSnapshot().participation.status, 'waiting');
+    assert.equal(participantStore.getSnapshot().participation.externalEntryCall, null);
+
+    await app.mount();
+    await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
+    await app.press('Selecionar evento Evento autorizado');
+    await app.press('Controle de Entrada');
+    assert.ok(app.hasEntryQueueRow(1, 'Ana'));
+
+    // 1. Staff chama -> Participante recebe call1Id sem mudança de posição
+    await app.press('Chamar próximo');
+    assert.ok(app.hasExactText('Ana'));
+    assert.ok(app.hasExactText('CHAMADA PENDENTE'));
+    await participantStore.syncCurrentSilent();
+    assert.equal(participantStore.getSnapshot().participation.externalQueue.position, 1);
+    assert.equal(participantStore.getSnapshot().participation.externalEntryCall.callId, call1Id);
+    assert.equal(participantStore.getSnapshot().participation.externalEntryCall.kind, 'external_entry');
+    assert.equal(participantStore.getSnapshot().participation.externalEntryCall.status, 'pending');
+
+    // 2. Staff marca ausência (requeue) -> chamada externa limpa e Ana retorna à fila
+    await app.press('Marcar ausência');
+    await app.press('CONFIRMAR ALTERAÇÃO');
+    assert.ok(app.hasText('Ausência registrada pelo servidor.'));
+    assert.ok(app.hasEntryQueueRow(1, 'Ana'));
+    await participantStore.syncCurrentSilent();
+    assert.equal(participantStore.getSnapshot().participation.status, 'waiting');
+    assert.equal(participantStore.getSnapshot().participation.externalEntryCall, null);
+
+    // 3. Nova chamada gera novo callId distinto (call2Id) detectado pelo polling silencioso
+    await app.press('Chamar próximo');
+    await participantStore.syncCurrentSilent();
+    assert.equal(participantStore.getSnapshot().participation.externalEntryCall.callId, call2Id);
+    assert.notEqual(participantStore.getSnapshot().participation.externalEntryCall.callId, call1Id);
+
+    // 4. Confirmação -> participante passa para active com externalEntryCall null
+    await app.press('Confirmar entrada');
+    await app.press('CONFIRMAR ALTERAÇÃO');
+    assert.ok(app.hasText('Entrada confirmada pelo servidor.'));
+    await participantStore.syncCurrentSilent();
+    assert.equal(participantStore.getSnapshot().participation.status, 'active');
+    assert.equal(participantStore.getSnapshot().participation.externalQueue, null);
+    assert.equal(participantStore.getSnapshot().participation.externalEntryCall, null);
   } finally {
     app.dispose();
   }

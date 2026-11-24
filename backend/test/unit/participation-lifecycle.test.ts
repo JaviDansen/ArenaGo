@@ -199,3 +199,98 @@ for (const intent of ["conflict", "in_progress"] as const) test(`E08-EST01 finis
   await assert.rejects(f.service.finishAuthenticated(input, auth.context), error => assertSessionRefusal(error, "SESSION_REVOKED"));
   assertSessionTransaction(auth.queries, false);
 });
+
+// STAFF-03: Projeção externalEntryCall para o Participante autenticado
+const cid = id(8), cid2 = id(9), callAt = "2026-11-04T15:02:00.654321Z";
+function waitingRowWithCall(callId = cid, overrides: Partial<ParticipationProjectionRow> = {}): ParticipationProjectionRow {
+  return {
+    ...projection("waiting"),
+    externalCallId: callId,
+    externalCallParticipationId: pid,
+    externalCallEventId: eventId,
+    externalCallStatus: "pending",
+    externalCallCalledAt: callAt,
+    ...overrides,
+  };
+}
+
+test("STAFF-03 projeção expõe externalEntryCall válida apenas em waiting e valida integridade estrita", () => {
+  const called = publicParticipation(waitingRowWithCall());
+  assert.deepEqual(called.externalEntryCall, {
+    callId: cid,
+    participationId: pid,
+    eventId,
+    kind: "external_entry",
+    status: "pending",
+    calledAt: callAt,
+  });
+  assert.equal(called.externalQueue?.position, 3);
+  assert.equal(Object.hasOwn(called, "userId"), false);
+  assert.equal(Object.hasOwn(called.externalEntryCall as object, "staffUserId"), false);
+
+  assert.equal(publicParticipation(projection("waiting")).externalEntryCall, null);
+  assert.equal(publicParticipation(projection("active")).externalEntryCall, null);
+  assert.equal(publicParticipation(projection("finished")).externalEntryCall, null);
+  assert.equal(publicParticipation(projection("canceled")).externalEntryCall, null);
+
+  for (const corrupted of [
+    waitingRowWithCall(cid, { status: "active", arenaEnteredAt: at, position: null }),
+    waitingRowWithCall(cid, { status: "finished", finishedAt: at, finishReason: "voluntary", position: null }),
+    waitingRowWithCall(cid, { externalCallStatus: "confirmed" }),
+    waitingRowWithCall(cid, { externalCallParticipationId: id(99) }),
+    waitingRowWithCall(cid, { externalCallEventId: id(99) }),
+    waitingRowWithCall(cid, { externalCallCalledAt: null }),
+    waitingRowWithCall(cid, { externalCallId: null }),
+  ]) {
+    assert.throws(() => publicParticipation(corrupted), { message: "PARTICIPATION_EXTERNAL_CALL_INTEGRITY" });
+  }
+});
+
+test("STAFF-03 SQL participationProjection faz LEFT JOIN estrito sem mutação e respeita queue enabled e encerramento", () => {
+  const q = new PgDialect().sqlToQuery(participationProjection(uid));
+  assert.match(q.sql, /e\.external_queue_enabled AS event_external_queue_enabled/);
+  assert.match(q.sql, /LEFT JOIN external_entry_calls c/);
+  assert.match(q.sql, /c\.participation_id=scoped\.id AND c\.event_id=scoped\.event_id AND c\.status='pending'/);
+  assert.match(q.sql, /scoped\.status='waiting' AND NOT scoped\.ended AND scoped\.event_external_queue_enabled/);
+  assert.equal(/FOR UPDATE|INSERT |UPDATE |DELETE /.test(q.sql), false);
+  assert.equal((q.sql.match(/clock_timestamp\(\)/g) || []).length, 1);
+});
+
+test("STAFF-03 ParticipationQueryService.current e byId acompanham chamada, ausência-requeue, nova chamada, confirmação e término sem N+1", async () => {
+  let row: ParticipationProjectionRow | null = waitingRowWithCall(cid);
+  const queries: string[] = [];
+  const db = drizzle({
+    async query(config: { text: string }) {
+      queries.push(config.text);
+      return { rows: config.text.startsWith("WITH observation") && row ? [row] : [] };
+    },
+  } as unknown as Client, { schema });
+  const service = new ParticipationQueryService(db);
+
+  const r1 = await service.current(uid);
+  assert.equal(r1?.externalEntryCall?.callId, cid);
+  assert.equal(queries.length, 3);
+  assert.equal(queries[0], "begin isolation level repeatable read read only");
+  assert.equal(queries[2], "commit");
+
+  row = { ...projection("waiting"), position: "4" };
+  const afterAbsent = await service.current(uid);
+  assert.equal(afterAbsent?.externalQueue?.position, 4);
+  assert.equal(afterAbsent?.externalEntryCall, null);
+
+  row = { ...waitingRowWithCall(cid2), position: "1" };
+  const secondCall = await service.byId(uid, pid);
+  assert.equal(secondCall?.externalEntryCall?.callId, cid2);
+  assert.notEqual(secondCall?.externalEntryCall?.callId, cid);
+
+  row = projection("active");
+  const confirmed = await service.current(uid);
+  assert.equal(confirmed?.status, "active");
+  assert.equal(confirmed?.externalEntryCall, null);
+
+  row = projection("canceled");
+  assert.equal(await service.current(uid), null);
+  const canceledDetail = await service.byId(uid, pid);
+  assert.equal(canceledDetail?.status, "canceled");
+  assert.equal(canceledDetail?.externalEntryCall, null);
+});

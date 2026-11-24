@@ -1,53 +1,101 @@
 import { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, AppState, StyleSheet, Text, View } from 'react-native';
+import { useIsFocused } from '@react-navigation/native';
 import { randomUUID } from 'expo-crypto';
 import { useAuth } from '../../context/AuthContext';
 import { createStaffEntryStore } from '../../services/staffEntryService';
 import { defaultStaffEntryIntentStorage } from '../../services/staffEntryIntentStorage';
+import { liveColors as c, liveStyles as live } from '../admin/components/AdminLiveUI';
+import {
+  EntryActionButton,
+  EntryConfirmModal,
+  EntryCurrentCallCard,
+  EntryHeaderCard,
+  EntryQueueListCard,
+  EntryQueueToggleCard,
+  EntrySummaryCard,
+} from './components/StaffEntrySections';
 import { useStaffPolling } from './useStaffPolling';
 
-function Button({ label, onPress, disabled = false, danger = false }) {
-  return <Pressable accessibilityRole="button" accessibilityLabel={label} disabled={disabled}
-    onPress={disabled ? undefined : onPress} style={[styles.button, danger && styles.danger, disabled && styles.disabled]}>
-    <Text style={styles.buttonText}>{label}</Text>
-  </Pressable>;
-}
 export default function StaffEntryControlRealScreen({
   event,
   isEventCurrent,
   accessDenied = false,
   accessDeniedKind = 'denied',
   onAccessDenied,
+  getNow,
 }) {
-  const auth = useAuth(), live = useRef(null);
-  live.current = { auth, event, isEventCurrent, accessDenied, onAccessDenied };
+  const auth = useAuth();
+  const focused = useIsFocused();
+  const [appState, setAppState] = useState(() => AppState?.currentState ?? 'active');
+  const liveRef = useRef(null);
+  liveRef.current = { auth, event, isEventCurrent, accessDenied, onAccessDenied };
+
+  useEffect(() => {
+    if (typeof AppState?.addEventListener !== 'function') return undefined;
+    const subscription = AppState.addEventListener('change', (next) => {
+      setAppState(next);
+    });
+    return () => subscription?.remove?.();
+  }, []);
+
   const getContext = () => {
-    const { auth: current, event: selected, isEventCurrent: selectedIsCurrent, accessDenied: revoked } = live.current;
-    if (revoked || !current?.isAuthenticated || !current.isIdentityVerified() || !current.sessionId || !selectedIsCurrent() ||
-        !current.user?.roles?.includes('staff') || current.user.roles.includes('admin')) return null;
-    return { userId: current.user.id, sessionId: current.sessionId, eventId: selected.id,
-      epoch: current.getSessionEpoch(), revision: current.getIdentityRevision() };
+    const { auth: current, event: selected, isEventCurrent: selectedIsCurrent, accessDenied: revoked } = liveRef.current;
+    if (
+      revoked
+      || !current?.isAuthenticated
+      || !current.isIdentityVerified()
+      || !current.sessionId
+      || !selectedIsCurrent()
+      || !current.user?.roles?.includes('staff')
+      || current.user.roles.includes('admin')
+    ) return null;
+    return {
+      userId: current.user.id,
+      sessionId: current.sessionId,
+      eventId: selected.id,
+      epoch: current.getSessionEpoch(),
+      revision: current.getIdentityRevision(),
+    };
   };
+
   const storeRef = useRef(null);
-  if (!storeRef.current) storeRef.current = createStaffEntryStore({
-    client: { get: (...args) => live.current.auth.httpClient.get(...args),
-      post: (...args) => live.current.auth.httpClient.post(...args), patch: (...args) => live.current.auth.httpClient.patch(...args) },
-    storage: defaultStaffEntryIntentStorage, createKey: randomUUID, getContext,
-  });
+  if (!storeRef.current) {
+    storeRef.current = createStaffEntryStore({
+      client: {
+        get: (...args) => liveRef.current.auth.httpClient.get(...args),
+        post: (...args) => liveRef.current.auth.httpClient.post(...args),
+        patch: (...args) => liveRef.current.auth.httpClient.patch(...args),
+      },
+      storage: defaultStaffEntryIntentStorage,
+      createKey: randomUUID,
+      getContext,
+    });
+  }
   const store = storeRef.current;
   const [snapshot, setSnapshot] = useState(store.getSnapshot());
   const [notice, setNotice] = useState(null);
   const autoAttempt = useRef(null);
-  const [dialog, setDialog] = useState(null), dialogRef = useRef(null);
+  const [dialog, setDialog] = useState(null);
+  const dialogRef = useRef(null);
   dialogRef.current = dialog;
-  const epoch = auth.getSessionEpoch(), revision = auth.getIdentityRevision();
+  const epoch = auth.getSessionEpoch();
+  const revision = auth.getIdentityRevision();
+
   useEffect(() => store.subscribe(setSnapshot), [store]);
+
   useEffect(() => {
-    autoAttempt.current = null; setNotice(null);
-    store.setContext(getContext()); setDialog(null);
-    if (!live.current.accessDenied) void store.refresh();
-    return () => { dialogRef.current = null; store.setContext(null); };
+    autoAttempt.current = null;
+    setNotice(null);
+    store.setContext(getContext());
+    setDialog(null);
+    if (!liveRef.current.accessDenied) void store.refresh();
+    return () => {
+      dialogRef.current = null;
+      store.setContext(null);
+    };
   }, [store, event.id, auth.user?.id, auth.sessionId, epoch, revision]);
+
   useEffect(() => {
     if (!accessDenied) return;
     dialogRef.current = null;
@@ -56,132 +104,330 @@ export default function StaffEntryControlRealScreen({
     autoAttempt.current = null;
     store.setContext(null);
   }, [accessDenied, store]);
+
   useEffect(() => {
-    if (snapshot.status === 'error' && (snapshot.error === 'denied' || snapshot.error === 'session') &&
-        store.isCurrent(snapshot.context)) {
+    if (
+      snapshot.status === 'error'
+      && (snapshot.error === 'denied' || snapshot.error === 'session')
+      && store.isCurrent(snapshot.context)
+    ) {
       dialogRef.current = null;
       setDialog(null);
-      live.current.onAccessDenied?.(snapshot.error);
+      liveRef.current.onAccessDenied?.(snapshot.error);
     }
   }, [snapshot.status, snapshot.error, snapshot.context, store]);
-  useStaffPolling(!accessDenied && store.isCurrent(snapshot.context) && snapshot.status === 'ready' && !snapshot.busy,
-    () => store.poll(), 5000, `${event.id}:${epoch}:${revision}`);
+
+  const pollingEnabled = !accessDenied && store.isCurrent(snapshot.context) && snapshot.status === 'ready' && !snapshot.busy;
+  useStaffPolling(pollingEnabled, () => store.poll(), 5000, `${event.id}:${epoch}:${revision}`);
+
   useEffect(() => {
-    const intent = snapshot.pending, scope = snapshot.context;
-    if (accessDenied || intent?.phase !== 'terminal' || snapshot.status !== 'ready' || snapshot.busy || !store.isCurrent(scope) ||
-        !['userId', 'sessionId', 'eventId'].every(key => intent[key] === scope[key]) ||
-        autoAttempt.current === intent.key) return;
+    const intent = snapshot.pending;
+    const scope = snapshot.context;
+    if (
+      accessDenied
+      || intent?.phase !== 'terminal'
+      || snapshot.status !== 'ready'
+      || snapshot.busy
+      || !store.isCurrent(scope)
+      || !['userId', 'sessionId', 'eventId'].every((key) => intent[key] === scope[key])
+      || autoAttempt.current === intent.key
+    ) return;
     autoAttempt.current = intent.key;
     void (async () => {
       const result = await store.acknowledge(intent.key);
-      if (result.kind === 'done' && store.isCurrent(scope)) setNotice({ key: intent.key, outcome: intent.outcome, operation: intent.kind });
+      if (result.kind === 'done' && store.isCurrent(scope)) {
+        setNotice({ key: intent.key, outcome: intent.outcome, operation: intent.kind });
+      }
       if (result.kind === 'blocked') autoAttempt.current = null;
     })();
   }, [accessDenied, snapshot, store]);
-  const errors = { session: 'Sessão inválida. Verifique sua sessão ou entre novamente.', denied: 'Acesso ao evento indisponível. Atualize seus eventos autorizados.',
-    network: 'Não foi possível conectar. Verifique sua conexão e atualize.', unavailable: 'Não foi possível consultar a fila de entrada. Tente atualizar.' };
+
+  const errors = {
+    session: 'Sessão inválida. Verifique sua sessão ou entre novamente.',
+    denied: 'Acesso ao evento indisponível. Atualize seus eventos autorizados.',
+    network: 'Não foi possível conectar. Verifique sua conexão e atualize.',
+    unavailable: 'Não foi possível consultar a fila de entrada. Tente atualizar.',
+  };
+
   if (accessDenied) {
     return (
       <View style={styles.content}>
-        <Text style={styles.title}>Controle de Entrada</Text>
-        <Text style={styles.text}>Fila de acesso ao evento</Text>
-        <Text accessibilityRole="alert" style={styles.warning}>
-          {accessDeniedKind === 'session' ? errors.session : errors.denied}
-        </Text>
+        <EntryHeaderCard eventName={event?.name} externalQueueEnabled={null} />
+        <View style={styles.errorCard}>
+          <Text accessibilityRole="alert" style={styles.alertMessage}>
+            {accessDeniedKind === 'session' ? errors.session : errors.denied}
+          </Text>
+        </View>
       </View>
     );
   }
+
   if (!store.isCurrent(snapshot.context)) return null;
-  const ownPending = snapshot.pending && ['userId', 'sessionId', 'eventId'].every(key => snapshot.pending[key] === snapshot.context[key]);
+
+  const ownPending = snapshot.pending
+    && ['userId', 'sessionId', 'eventId'].every((key) => snapshot.pending[key] === snapshot.context[key]);
   const pending = ownPending ? snapshot.pending : null;
-  const disabled = snapshot.busy || snapshot.status !== 'ready' || snapshot.error === 'stale' || !snapshot.data ||
-    Boolean(snapshot.pending) || snapshot.storageError || !defaultStaffEntryIntentStorage.isPersistent;
+  const disabled = snapshot.busy
+    || snapshot.status !== 'ready'
+    || snapshot.error === 'stale'
+    || !snapshot.data
+    || Boolean(snapshot.pending)
+    || snapshot.storageError
+    || !defaultStaffEntryIntentStorage.isPersistent;
+
   const runDirect = (action) => {
-    if (disabled || dialogRef.current || !store.isCurrent(snapshot.context) ||
-        (action.kind === 'call' ? !snapshot.data.canCall
-          : action.kind !== 'toggle' || action.enabled !== true || !snapshot.data.canManage || snapshot.data.externalQueueEnabled)) return;
-    setNotice(null); return store.mutate(action);
+    if (
+      disabled
+      || dialogRef.current
+      || !store.isCurrent(snapshot.context)
+      || (action.kind === 'call'
+        ? !snapshot.data.canCall
+        : action.kind !== 'toggle' || action.enabled !== true || !snapshot.data.canManage || snapshot.data.externalQueueEnabled)
+    ) return;
+    setNotice(null);
+    return store.mutate(action);
   };
-  const open = (action) => { if (!disabled && store.isCurrent()) setDialog({ action, context: snapshot.context }); };
+
+  const open = (action, targetName = null) => {
+    if (!disabled && store.isCurrent()) setDialog({ action, targetName, context: snapshot.context });
+  };
+
   const confirm = (expected) => {
     if (!expected || dialogRef.current !== expected || !store.isCurrent(expected.context)) return;
-    dialogRef.current = null; setDialog(null); setNotice(null); return store.mutate(expected.action);
+    dialogRef.current = null;
+    setDialog(null);
+    setNotice(null);
+    return store.mutate(expected.action);
   };
-  const refresh = () => {
-    if (live.current.accessDenied) return;
-    dialogRef.current = null; setDialog(null); autoAttempt.current = null; void store.refresh();
-  };
-  return <View style={styles.content}>
-    <Text style={styles.title}>Controle de Entrada</Text>
-    <Text style={styles.text}>Fila de acesso ao evento</Text>
-    {snapshot.status === 'loading' && <View accessibilityRole="progressbar"><ActivityIndicator color="#a78bfa" /><Text style={styles.text}>Carregando fila de entrada...</Text></View>}
-    {snapshot.status === 'error' && <Text accessibilityRole="alert" style={styles.warning}>{errors[snapshot.error]}</Text>}
-    {snapshot.error === 'stale' && <Text accessibilityRole="alert" style={styles.warning}>Dados de entrada possivelmente desatualizados. Atualize antes de operar.</Text>}
-    {snapshot.data && <>
-      <View style={styles.card}>
-        <Text style={styles.title}>Fila {snapshot.data.externalQueueEnabled ? 'ATIVA' : 'INATIVA'}</Text>
-        <Text style={styles.text}>Aguardando: {snapshot.data.waitingCount}</Text>
-        <Text style={styles.text}>{snapshot.data.externalQueueEnabled
-          ? 'Chame o próximo participante para conferir sua entrada presencial.'
-          : 'Novas participações entram diretamente no evento. Reativar não recoloca quem já foi liberado na fila.'}</Text>
-        <Button label={snapshot.data.externalQueueEnabled ? 'Desativar fila externa' : 'Reativar fila externa'}
-          danger={snapshot.data.externalQueueEnabled} disabled={disabled || !snapshot.data.canManage}
-          onPress={() => snapshot.data.externalQueueEnabled
-            ? open({ kind: 'toggle', enabled: false }) : runDirect({ kind: 'toggle', enabled: true })} />
-      </View>
-      {!snapshot.data.canManage && <Text style={styles.warning}>O evento não permite entradas ou alterações da fila neste momento.</Text>}
-      {snapshot.data.pendingCall ? <View style={styles.card}>
-        <Text style={styles.title}>Participante chamado: {snapshot.data.pendingCall.displayName}</Text>
-        <Button label="Confirmar entrada" disabled={disabled || !snapshot.data.canConfirm}
-          onPress={() => open({ kind: 'confirm_call', callId: snapshot.data.pendingCall.id })} />
-        <Button label="Marcar ausência" disabled={disabled || !snapshot.data.canMarkAbsent}
-          onPress={() => open({ kind: 'absent', callId: snapshot.data.pendingCall.id })} />
-        <Button label="Remover da fila" danger disabled={disabled || !snapshot.data.canRemove}
-          onPress={() => open({ kind: 'remove', callId: snapshot.data.pendingCall.id })} />
-      </View> : <Button label="Chamar próximo" disabled={disabled || !snapshot.data.canCall} onPress={() => runDirect({ kind: 'call' })} />}
-      <Text style={styles.title}>Participantes aguardando</Text>
-      {snapshot.data.waiting.length === 0 && <Text style={styles.text}>Ninguém está aguardando na fila de entrada.</Text>}
-      {snapshot.data.waiting.map((person, index) => <View key={person.participationId} style={styles.card}>
-        <Text style={styles.text}>{person.position}. {person.displayName}{index === 0 && !snapshot.data.pendingCall ? ' · Próximo' : ''}</Text>
 
-      </View>)}
-    </>}
-    {snapshot.storageError && <Text accessibilityRole="alert" style={styles.warning}>Não foi possível verificar o registro seguro da solicitação. Atualize antes de continuar.</Text>}
-    {snapshot.knownOutcome?.kind === 'confirmed' && pending?.phase !== 'terminal' && <Text style={styles.success}>O servidor confirmou a alteração, mas o registro local não foi confirmado. Não repita a operação; procure o responsável.</Text>}
-    {!defaultStaffEntryIntentStorage.isPersistent && <Text style={styles.warning}>As alterações de entrada estão disponíveis somente no aplicativo com armazenamento seguro.</Text>}
-    {snapshot.pending && !ownPending && <Text style={styles.warning}>Há uma solicitação de entrada pendente em outro evento ou sessão desta conta. Procure o responsável antes de continuar.</Text>}
-    {pending?.phase === 'dispatching' && <Text accessibilityRole="alert" style={styles.warning}>O resultado de uma solicitação ainda não foi confirmado. Não repita a operação. As alterações estão bloqueadas até verificação pelo responsável.</Text>}
-    {pending?.phase === 'reserved' && <>
-      <Text style={styles.warning}>Há uma solicitação registrada que ainda não foi enviada.</Text>
-      <Button label="Descartar solicitação não enviada" disabled={snapshot.busy} onPress={() => { void store.cancelReserved(pending.key); }} />
-    </>}
-    {pending?.phase === 'terminal' && <Text accessibilityRole="alert" style={styles.warning}>
-      Resultado registrado; verificando o reconhecimento seguro. As alterações permanecem bloqueadas até a confirmação local.</Text>}
-    {notice && !snapshot.pending && !snapshot.storageError && <Text accessibilityRole="alert"
-      style={notice.outcome.kind === 'confirmed' ? styles.success : styles.warning}>
-      {notice.outcome.kind === 'confirmed'
-        ? notice.operation !== 'toggle' ? ({call:'Participante chamado pelo servidor.',confirm_call:'Entrada confirmada pelo servidor.',absent:'Ausência registrada pelo servidor.',remove:'Participante removido da espera externa.'}[notice.operation] ?? 'Entrada confirmada pelo servidor.')
-          : `Fila ${notice.outcome.result.externalQueueEnabled ? 'reativada' : 'desativada'}. Participantes liberados: ${notice.outcome.result.releasedCount}.`
-        : notice.outcome.code === 'ENTRY_NOT_FIRST' ? 'A fila mudou. Confira o primeiro participante na lista atualizada.' : 'A solicitação foi recusada pelo servidor. Confira o estado atualizado.'}</Text>}
-    <Button label="Atualizar fila de entrada" disabled={snapshot.busy || snapshot.status === 'loading'} onPress={refresh} />
-    <Modal transparent animationType="fade" visible={Boolean(!accessDenied && dialog && store.isCurrent(dialog.context) && !snapshot.busy)}
-      onRequestClose={() => { dialogRef.current = null; setDialog(null); }}>
-      <View style={styles.backdrop}><View style={styles.card} accessibilityViewIsModal>
-        <Text style={styles.title}>{dialog?.action.kind !== 'toggle' ? ({call:'Chamar próximo participante?',confirm_call:'Confirmar entrada presencial?',absent:'Marcar ausência externa?',remove:'Remover da fila externa?'}[dialog?.action.kind] ?? '')
-          : dialog?.action.enabled ? 'Reativar fila externa?' : 'Desativar fila externa?'}</Text>
-        <Text style={styles.text}>{dialog?.action.kind !== 'toggle' ? 'Confirme a ação para a chamada externa apresentada. A remoção cancela somente a espera no evento.'
-          : dialog?.action.enabled ? 'Somente novas participações aguardarão. Quem já entrou permanece ativo.'
-            : `Todos os ${snapshot.data?.waitingCount ?? 0} participantes aguardando serão liberados. Isso não encerra o evento nem altera filas de experiências.`}</Text>
-        <Button label="CONFIRMAR ALTERAÇÃO" onPress={() => confirm(dialog)} />
-        <Button label="CANCELAR ALTERAÇÃO" onPress={() => { dialogRef.current = null; setDialog(null); }} />
-      </View></View>
-    </Modal>
-  </View>;
+  const refresh = () => {
+    if (liveRef.current.accessDenied) return;
+    dialogRef.current = null;
+    setDialog(null);
+    autoAttempt.current = null;
+    void store.refresh();
+  };
+
+  const noticeText = (() => {
+    if (!notice || snapshot.pending || snapshot.storageError) return null;
+    if (notice.outcome.kind === 'confirmed') {
+      if (notice.operation !== 'toggle') {
+        return {
+          call: 'Participante chamado pelo servidor.',
+          confirm_call: 'Entrada confirmada pelo servidor.',
+          absent: 'Ausência registrada pelo servidor.',
+          remove: 'Participante removido da espera externa.',
+        }[notice.operation] ?? 'Entrada confirmada pelo servidor.';
+      }
+      return `Fila ${notice.outcome.result.externalQueueEnabled ? 'reativada' : 'desativada'}. Participantes liberados: ${notice.outcome.result.releasedCount}.`;
+    }
+    return notice.outcome.code === 'ENTRY_NOT_FIRST'
+      ? 'A fila mudou. Confira o primeiro participante na lista atualizada.'
+      : 'A solicitação foi recusada pelo servidor. Confira o estado atualizado.';
+  })();
+
+  const pollingIndicator = (() => {
+    if (accessDenied || (snapshot.status === 'error' && (snapshot.error === 'denied' || snapshot.error === 'session'))) {
+      return null;
+    }
+    if (snapshot.error === 'stale') {
+      return { dotStyle: styles.pollingDotStale, text: 'Dados desatualizados · tentando atualizar a cada 5s' };
+    }
+    if (snapshot.status === 'error') {
+      return { dotStyle: styles.pollingDotMuted, text: 'Atualização indisponível · aguardando recuperação' };
+    }
+    if (!pollingEnabled || !focused || appState !== 'active') {
+      return { dotStyle: styles.pollingDotStale, text: 'Atualização temporariamente pausada' };
+    }
+    return { dotStyle: styles.pollingDotActive, text: 'Atualização automática ativa · a cada 5s' };
+  })();
+
+  const data = snapshot.data;
+
+  return (
+    <View style={styles.content}>
+      <EntryHeaderCard
+        eventName={event?.name}
+        externalQueueEnabled={data ? data.externalQueueEnabled : null}
+      />
+
+      {snapshot.status === 'loading' && (
+        <View accessibilityRole="progressbar" style={styles.stateCard}>
+          <ActivityIndicator color={c.accent} />
+          <Text style={styles.message}>Carregando fila de entrada...</Text>
+        </View>
+      )}
+
+      {snapshot.status === 'error' && (
+        <View style={styles.errorCard}>
+          <Text accessibilityRole="alert" style={styles.alertMessage}>
+            {errors[snapshot.error] ?? errors.unavailable}
+          </Text>
+        </View>
+      )}
+
+      {snapshot.error === 'stale' && (
+        <View style={styles.warningCard}>
+          <Text accessibilityRole="alert" style={styles.warningMessage}>
+            Dados de entrada possivelmente desatualizados. Atualize antes de operar.
+          </Text>
+        </View>
+      )}
+
+      {snapshot.storageError && (
+        <View style={styles.warningCard}>
+          <Text accessibilityRole="alert" style={styles.warningMessage}>
+            Não foi possível verificar o registro seguro da solicitação. Atualize antes de continuar.
+          </Text>
+        </View>
+      )}
+
+      {snapshot.knownOutcome?.kind === 'confirmed' && pending?.phase !== 'terminal' && (
+        <View style={styles.successCard}>
+          <Text style={styles.successMessage}>
+            O servidor confirmou a alteração, mas o registro local não foi confirmado. Não repita a operação; procure o responsável.
+          </Text>
+        </View>
+      )}
+
+      {!defaultStaffEntryIntentStorage.isPersistent && (
+        <View style={styles.warningCard}>
+          <Text style={styles.warningMessage}>
+            As alterações de entrada estão disponíveis somente no aplicativo com armazenamento seguro.
+          </Text>
+        </View>
+      )}
+
+      {snapshot.pending && !ownPending && (
+        <View style={styles.warningCard}>
+          <Text style={styles.warningMessage}>
+            Há uma solicitação de entrada pendente em outro evento ou sessão desta conta. Procure o responsável antes de continuar.
+          </Text>
+        </View>
+      )}
+
+      {pending?.phase === 'dispatching' && (
+        <View style={styles.warningCard}>
+          <Text accessibilityRole="alert" style={styles.warningMessage}>
+            O resultado de uma solicitação ainda não foi confirmado. Não repita a operação. As alterações estão bloqueadas até verificação pelo responsável.
+          </Text>
+        </View>
+      )}
+
+      {pending?.phase === 'reserved' && (
+        <View style={styles.warningCard}>
+          <Text style={styles.warningMessage}>Há uma solicitação registrada que ainda não foi enviada.</Text>
+          <EntryActionButton
+            label="Descartar solicitação não enviada"
+            variant="secondary"
+            disabled={snapshot.busy}
+            onPress={() => { void store.cancelReserved(pending.key); }}
+          />
+        </View>
+      )}
+
+      {pending?.phase === 'terminal' && (
+        <View style={styles.warningCard}>
+          <Text accessibilityRole="alert" style={styles.warningMessage}>
+            Resultado registrado; verificando o reconhecimento seguro. As alterações permanecem bloqueadas até a confirmação local.
+          </Text>
+        </View>
+      )}
+
+      {noticeText && (
+        <View style={notice.outcome.kind === 'confirmed' ? styles.successCard : styles.warningCard}>
+          <Text accessibilityRole="alert" style={notice.outcome.kind === 'confirmed' ? styles.successMessage : styles.warningMessage}>
+            {noticeText}
+          </Text>
+        </View>
+      )}
+
+      {data && (
+        <>
+          <EntrySummaryCard
+            externalQueueEnabled={data.externalQueueEnabled}
+            waitingCount={data.waitingCount}
+            hasPendingCall={Boolean(data.pendingCall)}
+            canManage={data.canManage}
+          />
+
+          <EntryCurrentCallCard
+            pendingCall={data.pendingCall}
+            canCall={data.canCall}
+            canConfirm={data.canConfirm}
+            canMarkAbsent={data.canMarkAbsent}
+            canRemove={data.canRemove}
+            disabled={disabled}
+            hasWaiting={data.waiting.length > 0}
+            externalQueueEnabled={data.externalQueueEnabled}
+            onCallNext={() => runDirect({ kind: 'call' })}
+            onConfirmEntry={() => open({ kind: 'confirm_call', callId: data.pendingCall.id }, data.pendingCall.displayName)}
+            onMarkAbsent={() => open({ kind: 'absent', callId: data.pendingCall.id }, data.pendingCall.displayName)}
+            onRemoveFromQueue={() => open({ kind: 'remove', callId: data.pendingCall.id }, data.pendingCall.displayName)}
+            getNow={getNow}
+          />
+
+          <EntryQueueListCard
+            waiting={data.waiting}
+            waitingCount={data.waitingCount}
+            externalQueueEnabled={data.externalQueueEnabled}
+            hasPendingCall={Boolean(data.pendingCall)}
+          />
+
+          <EntryQueueToggleCard
+            externalQueueEnabled={data.externalQueueEnabled}
+            waitingCount={data.waitingCount}
+            canManage={data.canManage}
+            disabled={disabled}
+            onDisableQueue={() => open({ kind: 'toggle', enabled: false })}
+            onEnableQueue={() => runDirect({ kind: 'toggle', enabled: true })}
+          />
+        </>
+      )}
+
+      {pollingIndicator && (
+        <View style={styles.pollingRow}>
+          <View style={[styles.pollingDot, pollingIndicator.dotStyle]} />
+          <Text style={styles.pollingText}>{pollingIndicator.text}</Text>
+        </View>
+      )}
+
+      <EntryActionButton
+        label="Atualizar fila de entrada"
+        variant="secondary"
+        disabled={snapshot.busy || snapshot.status === 'loading'}
+        onPress={refresh}
+      />
+
+      <EntryConfirmModal
+        visible={Boolean(!accessDenied && dialog && store.isCurrent(dialog.context) && !snapshot.busy)}
+        dialog={dialog}
+        pendingCall={data?.pendingCall ?? null}
+        waitingCount={data?.waitingCount ?? 0}
+        onConfirm={() => confirm(dialog)}
+        onCancel={() => {
+          dialogRef.current = null;
+          setDialog(null);
+        }}
+      />
+    </View>
+  );
 }
+
 const styles = StyleSheet.create({
-  content: { gap: 14 }, title: { color: '#fff', fontSize: 20, fontWeight: '800' }, text: { color: '#cbd5e1', fontSize: 15, lineHeight: 22 },
-  card: { gap: 12, padding: 16, borderRadius: 14, backgroundColor: '#191330', borderWidth: 1, borderColor: '#34265a' },
-  button: { padding: 16, borderRadius: 14, backgroundColor: '#7c3aed', alignItems: 'center' }, danger: { backgroundColor: '#9f2345' },
-  buttonText: { color: '#fff', fontWeight: '700' }, disabled: { opacity: 0.45 }, warning: { color: '#fbbf24', lineHeight: 22 },
-  success: { color: '#86efac', lineHeight: 22 }, backdrop: { flex: 1, justifyContent: 'center', padding: 24, backgroundColor: 'rgba(0,0,0,0.7)' },
+  content: { gap: 12 },
+  stateCard: { ...live.card, ...live.row, marginTop: 0 },
+  errorCard: { ...live.card, marginTop: 0, backgroundColor: c.dangerSurface, borderColor: c.danger, gap: 8 },
+  warningCard: { ...live.card, marginTop: 0, backgroundColor: c.warningSurface, borderColor: c.warning, gap: 10 },
+  successCard: { ...live.card, marginTop: 0, backgroundColor: c.successSurface, borderColor: '#10B981', gap: 8 },
+  message: { color: c.muted, fontSize: 15, lineHeight: 22, flexShrink: 1 },
+  alertMessage: { color: '#FECACA', fontSize: 14, lineHeight: 20 },
+  warningMessage: { color: '#FDE68A', fontSize: 14, lineHeight: 20 },
+  successMessage: { color: '#A7F3D0', fontSize: 14, lineHeight: 20 },
+  pollingRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 2 },
+  pollingDot: { width: 8, height: 8, borderRadius: 4, flexShrink: 0 },
+  pollingDotActive: { backgroundColor: '#10B981' },
+  pollingDotStale: { backgroundColor: '#F59E0B' },
+  pollingDotMuted: { backgroundColor: '#64748B' },
+  pollingText: { color: c.muted, fontSize: 13, lineHeight: 18, flex: 1 },
 });

@@ -1,0 +1,3092 @@
+diff --git a/app/screens/staff/StaffEntryControlRealScreen.js b/app/screens/staff/StaffEntryControlRealScreen.js
+index 87b95e5..174013c 100644
+--- a/app/screens/staff/StaffEntryControlRealScreen.js
++++ b/app/screens/staff/StaffEntryControlRealScreen.js
+@@ -1,53 +1,101 @@
+ import { useEffect, useRef, useState } from 'react';
+-import { ActivityIndicator, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
++import { ActivityIndicator, AppState, StyleSheet, Text, View } from 'react-native';
++import { useIsFocused } from '@react-navigation/native';
+ import { randomUUID } from 'expo-crypto';
+ import { useAuth } from '../../context/AuthContext';
+ import { createStaffEntryStore } from '../../services/staffEntryService';
+ import { defaultStaffEntryIntentStorage } from '../../services/staffEntryIntentStorage';
++import { liveColors as c, liveStyles as live } from '../admin/components/AdminLiveUI';
++import {
++  EntryActionButton,
++  EntryConfirmModal,
++  EntryCurrentCallCard,
++  EntryHeaderCard,
++  EntryQueueListCard,
++  EntryQueueToggleCard,
++  EntrySummaryCard,
++} from './components/StaffEntrySections';
+ import { useStaffPolling } from './useStaffPolling';
+ 
+-function Button({ label, onPress, disabled = false, danger = false }) {
+-  return <Pressable accessibilityRole="button" accessibilityLabel={label} disabled={disabled}
+-    onPress={disabled ? undefined : onPress} style={[styles.button, danger && styles.danger, disabled && styles.disabled]}>
+-    <Text style={styles.buttonText}>{label}</Text>
+-  </Pressable>;
+-}
+ export default function StaffEntryControlRealScreen({
+   event,
+   isEventCurrent,
+   accessDenied = false,
+   accessDeniedKind = 'denied',
+   onAccessDenied,
++  getNow,
+ }) {
+-  const auth = useAuth(), live = useRef(null);
+-  live.current = { auth, event, isEventCurrent, accessDenied, onAccessDenied };
++  const auth = useAuth();
++  const focused = useIsFocused();
++  const [appState, setAppState] = useState(() => AppState?.currentState ?? 'active');
++  const liveRef = useRef(null);
++  liveRef.current = { auth, event, isEventCurrent, accessDenied, onAccessDenied };
++
++  useEffect(() => {
++    if (typeof AppState?.addEventListener !== 'function') return undefined;
++    const subscription = AppState.addEventListener('change', (next) => {
++      setAppState(next);
++    });
++    return () => subscription?.remove?.();
++  }, []);
++
+   const getContext = () => {
+-    const { auth: current, event: selected, isEventCurrent: selectedIsCurrent, accessDenied: revoked } = live.current;
+-    if (revoked || !current?.isAuthenticated || !current.isIdentityVerified() || !current.sessionId || !selectedIsCurrent() ||
+-        !current.user?.roles?.includes('staff') || current.user.roles.includes('admin')) return null;
+-    return { userId: current.user.id, sessionId: current.sessionId, eventId: selected.id,
+-      epoch: current.getSessionEpoch(), revision: current.getIdentityRevision() };
++    const { auth: current, event: selected, isEventCurrent: selectedIsCurrent, accessDenied: revoked } = liveRef.current;
++    if (
++      revoked
++      || !current?.isAuthenticated
++      || !current.isIdentityVerified()
++      || !current.sessionId
++      || !selectedIsCurrent()
++      || !current.user?.roles?.includes('staff')
++      || current.user.roles.includes('admin')
++    ) return null;
++    return {
++      userId: current.user.id,
++      sessionId: current.sessionId,
++      eventId: selected.id,
++      epoch: current.getSessionEpoch(),
++      revision: current.getIdentityRevision(),
++    };
+   };
++
+   const storeRef = useRef(null);
+-  if (!storeRef.current) storeRef.current = createStaffEntryStore({
+-    client: { get: (...args) => live.current.auth.httpClient.get(...args),
+-      post: (...args) => live.current.auth.httpClient.post(...args), patch: (...args) => live.current.auth.httpClient.patch(...args) },
+-    storage: defaultStaffEntryIntentStorage, createKey: randomUUID, getContext,
+-  });
++  if (!storeRef.current) {
++    storeRef.current = createStaffEntryStore({
++      client: {
++        get: (...args) => liveRef.current.auth.httpClient.get(...args),
++        post: (...args) => liveRef.current.auth.httpClient.post(...args),
++        patch: (...args) => liveRef.current.auth.httpClient.patch(...args),
++      },
++      storage: defaultStaffEntryIntentStorage,
++      createKey: randomUUID,
++      getContext,
++    });
++  }
+   const store = storeRef.current;
+   const [snapshot, setSnapshot] = useState(store.getSnapshot());
+   const [notice, setNotice] = useState(null);
+   const autoAttempt = useRef(null);
+-  const [dialog, setDialog] = useState(null), dialogRef = useRef(null);
++  const [dialog, setDialog] = useState(null);
++  const dialogRef = useRef(null);
+   dialogRef.current = dialog;
+-  const epoch = auth.getSessionEpoch(), revision = auth.getIdentityRevision();
++  const epoch = auth.getSessionEpoch();
++  const revision = auth.getIdentityRevision();
++
+   useEffect(() => store.subscribe(setSnapshot), [store]);
++
+   useEffect(() => {
+-    autoAttempt.current = null; setNotice(null);
+-    store.setContext(getContext()); setDialog(null);
+-    if (!live.current.accessDenied) void store.refresh();
+-    return () => { dialogRef.current = null; store.setContext(null); };
++    autoAttempt.current = null;
++    setNotice(null);
++    store.setContext(getContext());
++    setDialog(null);
++    if (!liveRef.current.accessDenied) void store.refresh();
++    return () => {
++      dialogRef.current = null;
++      store.setContext(null);
++    };
+   }, [store, event.id, auth.user?.id, auth.sessionId, epoch, revision]);
++
+   useEffect(() => {
+     if (!accessDenied) return;
+     dialogRef.current = null;
+@@ -56,132 +104,330 @@ export default function StaffEntryControlRealScreen({
+     autoAttempt.current = null;
+     store.setContext(null);
+   }, [accessDenied, store]);
++
+   useEffect(() => {
+-    if (snapshot.status === 'error' && (snapshot.error === 'denied' || snapshot.error === 'session') &&
+-        store.isCurrent(snapshot.context)) {
++    if (
++      snapshot.status === 'error'
++      && (snapshot.error === 'denied' || snapshot.error === 'session')
++      && store.isCurrent(snapshot.context)
++    ) {
+       dialogRef.current = null;
+       setDialog(null);
+-      live.current.onAccessDenied?.(snapshot.error);
++      liveRef.current.onAccessDenied?.(snapshot.error);
+     }
+   }, [snapshot.status, snapshot.error, snapshot.context, store]);
+-  useStaffPolling(!accessDenied && store.isCurrent(snapshot.context) && snapshot.status === 'ready' && !snapshot.busy,
+-    () => store.poll(), 5000, `${event.id}:${epoch}:${revision}`);
++
++  const pollingEnabled = !accessDenied && store.isCurrent(snapshot.context) && snapshot.status === 'ready' && !snapshot.busy;
++  useStaffPolling(pollingEnabled, () => store.poll(), 5000, `${event.id}:${epoch}:${revision}`);
++
+   useEffect(() => {
+-    const intent = snapshot.pending, scope = snapshot.context;
+-    if (accessDenied || intent?.phase !== 'terminal' || snapshot.status !== 'ready' || snapshot.busy || !store.isCurrent(scope) ||
+-        !['userId', 'sessionId', 'eventId'].every(key => intent[key] === scope[key]) ||
+-        autoAttempt.current === intent.key) return;
++    const intent = snapshot.pending;
++    const scope = snapshot.context;
++    if (
++      accessDenied
++      || intent?.phase !== 'terminal'
++      || snapshot.status !== 'ready'
++      || snapshot.busy
++      || !store.isCurrent(scope)
++      || !['userId', 'sessionId', 'eventId'].every((key) => intent[key] === scope[key])
++      || autoAttempt.current === intent.key
++    ) return;
+     autoAttempt.current = intent.key;
+     void (async () => {
+       const result = await store.acknowledge(intent.key);
+-      if (result.kind === 'done' && store.isCurrent(scope)) setNotice({ key: intent.key, outcome: intent.outcome, operation: intent.kind });
++      if (result.kind === 'done' && store.isCurrent(scope)) {
++        setNotice({ key: intent.key, outcome: intent.outcome, operation: intent.kind });
++      }
+       if (result.kind === 'blocked') autoAttempt.current = null;
+     })();
+   }, [accessDenied, snapshot, store]);
+-  const errors = { session: 'Sessão inválida. Verifique sua sessão ou entre novamente.', denied: 'Acesso ao evento indisponível. Atualize seus eventos autorizados.',
+-    network: 'Não foi possível conectar. Verifique sua conexão e atualize.', unavailable: 'Não foi possível consultar a fila de entrada. Tente atualizar.' };
++
++  const errors = {
++    session: 'Sessão inválida. Verifique sua sessão ou entre novamente.',
++    denied: 'Acesso ao evento indisponível. Atualize seus eventos autorizados.',
++    network: 'Não foi possível conectar. Verifique sua conexão e atualize.',
++    unavailable: 'Não foi possível consultar a fila de entrada. Tente atualizar.',
++  };
++
+   if (accessDenied) {
+     return (
+       <View style={styles.content}>
+-        <Text style={styles.title}>Controle de Entrada</Text>
+-        <Text style={styles.text}>Fila de acesso ao evento</Text>
+-        <Text accessibilityRole="alert" style={styles.warning}>
+-          {accessDeniedKind === 'session' ? errors.session : errors.denied}
+-        </Text>
++        <EntryHeaderCard eventName={event?.name} externalQueueEnabled={null} />
++        <View style={styles.errorCard}>
++          <Text accessibilityRole="alert" style={styles.alertMessage}>
++            {accessDeniedKind === 'session' ? errors.session : errors.denied}
++          </Text>
++        </View>
+       </View>
+     );
+   }
++
+   if (!store.isCurrent(snapshot.context)) return null;
+-  const ownPending = snapshot.pending && ['userId', 'sessionId', 'eventId'].every(key => snapshot.pending[key] === snapshot.context[key]);
++
++  const ownPending = snapshot.pending
++    && ['userId', 'sessionId', 'eventId'].every((key) => snapshot.pending[key] === snapshot.context[key]);
+   const pending = ownPending ? snapshot.pending : null;
+-  const disabled = snapshot.busy || snapshot.status !== 'ready' || snapshot.error === 'stale' || !snapshot.data ||
+-    Boolean(snapshot.pending) || snapshot.storageError || !defaultStaffEntryIntentStorage.isPersistent;
++  const disabled = snapshot.busy
++    || snapshot.status !== 'ready'
++    || snapshot.error === 'stale'
++    || !snapshot.data
++    || Boolean(snapshot.pending)
++    || snapshot.storageError
++    || !defaultStaffEntryIntentStorage.isPersistent;
++
+   const runDirect = (action) => {
+-    if (disabled || dialogRef.current || !store.isCurrent(snapshot.context) ||
+-        (action.kind === 'call' ? !snapshot.data.canCall
+-          : action.kind !== 'toggle' || action.enabled !== true || !snapshot.data.canManage || snapshot.data.externalQueueEnabled)) return;
+-    setNotice(null); return store.mutate(action);
++    if (
++      disabled
++      || dialogRef.current
++      || !store.isCurrent(snapshot.context)
++      || (action.kind === 'call'
++        ? !snapshot.data.canCall
++        : action.kind !== 'toggle' || action.enabled !== true || !snapshot.data.canManage || snapshot.data.externalQueueEnabled)
++    ) return;
++    setNotice(null);
++    return store.mutate(action);
+   };
+-  const open = (action) => { if (!disabled && store.isCurrent()) setDialog({ action, context: snapshot.context }); };
++
++  const open = (action, targetName = null) => {
++    if (!disabled && store.isCurrent()) setDialog({ action, targetName, context: snapshot.context });
++  };
++
+   const confirm = (expected) => {
+     if (!expected || dialogRef.current !== expected || !store.isCurrent(expected.context)) return;
+-    dialogRef.current = null; setDialog(null); setNotice(null); return store.mutate(expected.action);
++    dialogRef.current = null;
++    setDialog(null);
++    setNotice(null);
++    return store.mutate(expected.action);
+   };
++
+   const refresh = () => {
+-    if (live.current.accessDenied) return;
+-    dialogRef.current = null; setDialog(null); autoAttempt.current = null; void store.refresh();
++    if (liveRef.current.accessDenied) return;
++    dialogRef.current = null;
++    setDialog(null);
++    autoAttempt.current = null;
++    void store.refresh();
+   };
+-  return <View style={styles.content}>
+-    <Text style={styles.title}>Controle de Entrada</Text>
+-    <Text style={styles.text}>Fila de acesso ao evento</Text>
+-    {snapshot.status === 'loading' && <View accessibilityRole="progressbar"><ActivityIndicator color="#a78bfa" /><Text style={styles.text}>Carregando fila de entrada...</Text></View>}
+-    {snapshot.status === 'error' && <Text accessibilityRole="alert" style={styles.warning}>{errors[snapshot.error]}</Text>}
+-    {snapshot.error === 'stale' && <Text accessibilityRole="alert" style={styles.warning}>Dados de entrada possivelmente desatualizados. Atualize antes de operar.</Text>}
+-    {snapshot.data && <>
+-      <View style={styles.card}>
+-        <Text style={styles.title}>Fila {snapshot.data.externalQueueEnabled ? 'ATIVA' : 'INATIVA'}</Text>
+-        <Text style={styles.text}>Aguardando: {snapshot.data.waitingCount}</Text>
+-        <Text style={styles.text}>{snapshot.data.externalQueueEnabled
+-          ? 'Chame o próximo participante para conferir sua entrada presencial.'
+-          : 'Novas participações entram diretamente no evento. Reativar não recoloca quem já foi liberado na fila.'}</Text>
+-        <Button label={snapshot.data.externalQueueEnabled ? 'Desativar fila externa' : 'Reativar fila externa'}
+-          danger={snapshot.data.externalQueueEnabled} disabled={disabled || !snapshot.data.canManage}
+-          onPress={() => snapshot.data.externalQueueEnabled
+-            ? open({ kind: 'toggle', enabled: false }) : runDirect({ kind: 'toggle', enabled: true })} />
+-      </View>
+-      {!snapshot.data.canManage && <Text style={styles.warning}>O evento não permite entradas ou alterações da fila neste momento.</Text>}
+-      {snapshot.data.pendingCall ? <View style={styles.card}>
+-        <Text style={styles.title}>Participante chamado: {snapshot.data.pendingCall.displayName}</Text>
+-        <Button label="Confirmar entrada" disabled={disabled || !snapshot.data.canConfirm}
+-          onPress={() => open({ kind: 'confirm_call', callId: snapshot.data.pendingCall.id })} />
+-        <Button label="Marcar ausência" disabled={disabled || !snapshot.data.canMarkAbsent}
+-          onPress={() => open({ kind: 'absent', callId: snapshot.data.pendingCall.id })} />
+-        <Button label="Remover da fila" danger disabled={disabled || !snapshot.data.canRemove}
+-          onPress={() => open({ kind: 'remove', callId: snapshot.data.pendingCall.id })} />
+-      </View> : <Button label="Chamar próximo" disabled={disabled || !snapshot.data.canCall} onPress={() => runDirect({ kind: 'call' })} />}
+-      <Text style={styles.title}>Participantes aguardando</Text>
+-      {snapshot.data.waiting.length === 0 && <Text style={styles.text}>Ninguém está aguardando na fila de entrada.</Text>}
+-      {snapshot.data.waiting.map((person, index) => <View key={person.participationId} style={styles.card}>
+-        <Text style={styles.text}>{person.position}. {person.displayName}{index === 0 && !snapshot.data.pendingCall ? ' · Próximo' : ''}</Text>
+-
+-      </View>)}
+-    </>}
+-    {snapshot.storageError && <Text accessibilityRole="alert" style={styles.warning}>Não foi possível verificar o registro seguro da solicitação. Atualize antes de continuar.</Text>}
+-    {snapshot.knownOutcome?.kind === 'confirmed' && pending?.phase !== 'terminal' && <Text style={styles.success}>O servidor confirmou a alteração, mas o registro local não foi confirmado. Não repita a operação; procure o responsável.</Text>}
+-    {!defaultStaffEntryIntentStorage.isPersistent && <Text style={styles.warning}>As alterações de entrada estão disponíveis somente no aplicativo com armazenamento seguro.</Text>}
+-    {snapshot.pending && !ownPending && <Text style={styles.warning}>Há uma solicitação de entrada pendente em outro evento ou sessão desta conta. Procure o responsável antes de continuar.</Text>}
+-    {pending?.phase === 'dispatching' && <Text accessibilityRole="alert" style={styles.warning}>O resultado de uma solicitação ainda não foi confirmado. Não repita a operação. As alterações estão bloqueadas até verificação pelo responsável.</Text>}
+-    {pending?.phase === 'reserved' && <>
+-      <Text style={styles.warning}>Há uma solicitação registrada que ainda não foi enviada.</Text>
+-      <Button label="Descartar solicitação não enviada" disabled={snapshot.busy} onPress={() => { void store.cancelReserved(pending.key); }} />
+-    </>}
+-    {pending?.phase === 'terminal' && <Text accessibilityRole="alert" style={styles.warning}>
+-      Resultado registrado; verificando o reconhecimento seguro. As alterações permanecem bloqueadas até a confirmação local.</Text>}
+-    {notice && !snapshot.pending && !snapshot.storageError && <Text accessibilityRole="alert"
+-      style={notice.outcome.kind === 'confirmed' ? styles.success : styles.warning}>
+-      {notice.outcome.kind === 'confirmed'
+-        ? notice.operation !== 'toggle' ? ({call:'Participante chamado pelo servidor.',confirm_call:'Entrada confirmada pelo servidor.',absent:'Ausência registrada pelo servidor.',remove:'Participante removido da espera externa.'}[notice.operation] ?? 'Entrada confirmada pelo servidor.')
+-          : `Fila ${notice.outcome.result.externalQueueEnabled ? 'reativada' : 'desativada'}. Participantes liberados: ${notice.outcome.result.releasedCount}.`
+-        : notice.outcome.code === 'ENTRY_NOT_FIRST' ? 'A fila mudou. Confira o primeiro participante na lista atualizada.' : 'A solicitação foi recusada pelo servidor. Confira o estado atualizado.'}</Text>}
+-    <Button label="Atualizar fila de entrada" disabled={snapshot.busy || snapshot.status === 'loading'} onPress={refresh} />
+-    <Modal transparent animationType="fade" visible={Boolean(!accessDenied && dialog && store.isCurrent(dialog.context) && !snapshot.busy)}
+-      onRequestClose={() => { dialogRef.current = null; setDialog(null); }}>
+-      <View style={styles.backdrop}><View style={styles.card} accessibilityViewIsModal>
+-        <Text style={styles.title}>{dialog?.action.kind !== 'toggle' ? ({call:'Chamar próximo participante?',confirm_call:'Confirmar entrada presencial?',absent:'Marcar ausência externa?',remove:'Remover da fila externa?'}[dialog?.action.kind] ?? '')
+-          : dialog?.action.enabled ? 'Reativar fila externa?' : 'Desativar fila externa?'}</Text>
+-        <Text style={styles.text}>{dialog?.action.kind !== 'toggle' ? 'Confirme a ação para a chamada externa apresentada. A remoção cancela somente a espera no evento.'
+-          : dialog?.action.enabled ? 'Somente novas participações aguardarão. Quem já entrou permanece ativo.'
+-            : `Todos os ${snapshot.data?.waitingCount ?? 0} participantes aguardando serão liberados. Isso não encerra o evento nem altera filas de experiências.`}</Text>
+-        <Button label="CONFIRMAR ALTERAÇÃO" onPress={() => confirm(dialog)} />
+-        <Button label="CANCELAR ALTERAÇÃO" onPress={() => { dialogRef.current = null; setDialog(null); }} />
+-      </View></View>
+-    </Modal>
+-  </View>;
++
++  const noticeText = (() => {
++    if (!notice || snapshot.pending || snapshot.storageError) return null;
++    if (notice.outcome.kind === 'confirmed') {
++      if (notice.operation !== 'toggle') {
++        return {
++          call: 'Participante chamado pelo servidor.',
++          confirm_call: 'Entrada confirmada pelo servidor.',
++          absent: 'Ausência registrada pelo servidor.',
++          remove: 'Participante removido da espera externa.',
++        }[notice.operation] ?? 'Entrada confirmada pelo servidor.';
++      }
++      return `Fila ${notice.outcome.result.externalQueueEnabled ? 'reativada' : 'desativada'}. Participantes liberados: ${notice.outcome.result.releasedCount}.`;
++    }
++    return notice.outcome.code === 'ENTRY_NOT_FIRST'
++      ? 'A fila mudou. Confira o primeiro participante na lista atualizada.'
++      : 'A solicitação foi recusada pelo servidor. Confira o estado atualizado.';
++  })();
++
++  const pollingIndicator = (() => {
++    if (accessDenied || (snapshot.status === 'error' && (snapshot.error === 'denied' || snapshot.error === 'session'))) {
++      return null;
++    }
++    if (snapshot.error === 'stale') {
++      return { dotStyle: styles.pollingDotStale, text: 'Dados desatualizados · tentando atualizar a cada 5s' };
++    }
++    if (snapshot.status === 'error') {
++      return { dotStyle: styles.pollingDotMuted, text: 'Atualização indisponível · aguardando recuperação' };
++    }
++    if (!pollingEnabled || !focused || appState !== 'active') {
++      return { dotStyle: styles.pollingDotStale, text: 'Atualização temporariamente pausada' };
++    }
++    return { dotStyle: styles.pollingDotActive, text: 'Atualização automática ativa · a cada 5s' };
++  })();
++
++  const data = snapshot.data;
++
++  return (
++    <View style={styles.content}>
++      <EntryHeaderCard
++        eventName={event?.name}
++        externalQueueEnabled={data ? data.externalQueueEnabled : null}
++      />
++
++      {snapshot.status === 'loading' && (
++        <View accessibilityRole="progressbar" style={styles.stateCard}>
++          <ActivityIndicator color={c.accent} />
++          <Text style={styles.message}>Carregando fila de entrada...</Text>
++        </View>
++      )}
++
++      {snapshot.status === 'error' && (
++        <View style={styles.errorCard}>
++          <Text accessibilityRole="alert" style={styles.alertMessage}>
++            {errors[snapshot.error] ?? errors.unavailable}
++          </Text>
++        </View>
++      )}
++
++      {snapshot.error === 'stale' && (
++        <View style={styles.warningCard}>
++          <Text accessibilityRole="alert" style={styles.warningMessage}>
++            Dados de entrada possivelmente desatualizados. Atualize antes de operar.
++          </Text>
++        </View>
++      )}
++
++      {snapshot.storageError && (
++        <View style={styles.warningCard}>
++          <Text accessibilityRole="alert" style={styles.warningMessage}>
++            Não foi possível verificar o registro seguro da solicitação. Atualize antes de continuar.
++          </Text>
++        </View>
++      )}
++
++      {snapshot.knownOutcome?.kind === 'confirmed' && pending?.phase !== 'terminal' && (
++        <View style={styles.successCard}>
++          <Text style={styles.successMessage}>
++            O servidor confirmou a alteração, mas o registro local não foi confirmado. Não repita a operação; procure o responsável.
++          </Text>
++        </View>
++      )}
++
++      {!defaultStaffEntryIntentStorage.isPersistent && (
++        <View style={styles.warningCard}>
++          <Text style={styles.warningMessage}>
++            As alterações de entrada estão disponíveis somente no aplicativo com armazenamento seguro.
++          </Text>
++        </View>
++      )}
++
++      {snapshot.pending && !ownPending && (
++        <View style={styles.warningCard}>
++          <Text style={styles.warningMessage}>
++            Há uma solicitação de entrada pendente em outro evento ou sessão desta conta. Procure o responsável antes de continuar.
++          </Text>
++        </View>
++      )}
++
++      {pending?.phase === 'dispatching' && (
++        <View style={styles.warningCard}>
++          <Text accessibilityRole="alert" style={styles.warningMessage}>
++            O resultado de uma solicitação ainda não foi confirmado. Não repita a operação. As alterações estão bloqueadas até verificação pelo responsável.
++          </Text>
++        </View>
++      )}
++
++      {pending?.phase === 'reserved' && (
++        <View style={styles.warningCard}>
++          <Text style={styles.warningMessage}>Há uma solicitação registrada que ainda não foi enviada.</Text>
++          <EntryActionButton
++            label="Descartar solicitação não enviada"
++            variant="secondary"
++            disabled={snapshot.busy}
++            onPress={() => { void store.cancelReserved(pending.key); }}
++          />
++        </View>
++      )}
++
++      {pending?.phase === 'terminal' && (
++        <View style={styles.warningCard}>
++          <Text accessibilityRole="alert" style={styles.warningMessage}>
++            Resultado registrado; verificando o reconhecimento seguro. As alterações permanecem bloqueadas até a confirmação local.
++          </Text>
++        </View>
++      )}
++
++      {noticeText && (
++        <View style={notice.outcome.kind === 'confirmed' ? styles.successCard : styles.warningCard}>
++          <Text accessibilityRole="alert" style={notice.outcome.kind === 'confirmed' ? styles.successMessage : styles.warningMessage}>
++            {noticeText}
++          </Text>
++        </View>
++      )}
++
++      {data && (
++        <>
++          <EntrySummaryCard
++            externalQueueEnabled={data.externalQueueEnabled}
++            waitingCount={data.waitingCount}
++            hasPendingCall={Boolean(data.pendingCall)}
++            canManage={data.canManage}
++          />
++
++          <EntryCurrentCallCard
++            pendingCall={data.pendingCall}
++            canCall={data.canCall}
++            canConfirm={data.canConfirm}
++            canMarkAbsent={data.canMarkAbsent}
++            canRemove={data.canRemove}
++            disabled={disabled}
++            hasWaiting={data.waiting.length > 0}
++            externalQueueEnabled={data.externalQueueEnabled}
++            onCallNext={() => runDirect({ kind: 'call' })}
++            onConfirmEntry={() => open({ kind: 'confirm_call', callId: data.pendingCall.id }, data.pendingCall.displayName)}
++            onMarkAbsent={() => open({ kind: 'absent', callId: data.pendingCall.id }, data.pendingCall.displayName)}
++            onRemoveFromQueue={() => open({ kind: 'remove', callId: data.pendingCall.id }, data.pendingCall.displayName)}
++            getNow={getNow}
++          />
++
++          <EntryQueueListCard
++            waiting={data.waiting}
++            waitingCount={data.waitingCount}
++            externalQueueEnabled={data.externalQueueEnabled}
++            hasPendingCall={Boolean(data.pendingCall)}
++          />
++
++          <EntryQueueToggleCard
++            externalQueueEnabled={data.externalQueueEnabled}
++            waitingCount={data.waitingCount}
++            canManage={data.canManage}
++            disabled={disabled}
++            onDisableQueue={() => open({ kind: 'toggle', enabled: false })}
++            onEnableQueue={() => runDirect({ kind: 'toggle', enabled: true })}
++          />
++        </>
++      )}
++
++      {pollingIndicator && (
++        <View style={styles.pollingRow}>
++          <View style={[styles.pollingDot, pollingIndicator.dotStyle]} />
++          <Text style={styles.pollingText}>{pollingIndicator.text}</Text>
++        </View>
++      )}
++
++      <EntryActionButton
++        label="Atualizar fila de entrada"
++        variant="secondary"
++        disabled={snapshot.busy || snapshot.status === 'loading'}
++        onPress={refresh}
++      />
++
++      <EntryConfirmModal
++        visible={Boolean(!accessDenied && dialog && store.isCurrent(dialog.context) && !snapshot.busy)}
++        dialog={dialog}
++        pendingCall={data?.pendingCall ?? null}
++        waitingCount={data?.waitingCount ?? 0}
++        onConfirm={() => confirm(dialog)}
++        onCancel={() => {
++          dialogRef.current = null;
++          setDialog(null);
++        }}
++      />
++    </View>
++  );
+ }
++
+ const styles = StyleSheet.create({
+-  content: { gap: 14 }, title: { color: '#fff', fontSize: 20, fontWeight: '800' }, text: { color: '#cbd5e1', fontSize: 15, lineHeight: 22 },
+-  card: { gap: 12, padding: 16, borderRadius: 14, backgroundColor: '#191330', borderWidth: 1, borderColor: '#34265a' },
+-  button: { padding: 16, borderRadius: 14, backgroundColor: '#7c3aed', alignItems: 'center' }, danger: { backgroundColor: '#9f2345' },
+-  buttonText: { color: '#fff', fontWeight: '700' }, disabled: { opacity: 0.45 }, warning: { color: '#fbbf24', lineHeight: 22 },
+-  success: { color: '#86efac', lineHeight: 22 }, backdrop: { flex: 1, justifyContent: 'center', padding: 24, backgroundColor: 'rgba(0,0,0,0.7)' },
++  content: { gap: 12 },
++  stateCard: { ...live.card, ...live.row, marginTop: 0 },
++  errorCard: { ...live.card, marginTop: 0, backgroundColor: c.dangerSurface, borderColor: c.danger, gap: 8 },
++  warningCard: { ...live.card, marginTop: 0, backgroundColor: c.warningSurface, borderColor: c.warning, gap: 10 },
++  successCard: { ...live.card, marginTop: 0, backgroundColor: c.successSurface, borderColor: '#10B981', gap: 8 },
++  message: { color: c.muted, fontSize: 15, lineHeight: 22, flexShrink: 1 },
++  alertMessage: { color: '#FECACA', fontSize: 14, lineHeight: 20 },
++  warningMessage: { color: '#FDE68A', fontSize: 14, lineHeight: 20 },
++  successMessage: { color: '#A7F3D0', fontSize: 14, lineHeight: 20 },
++  pollingRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 2 },
++  pollingDot: { width: 8, height: 8, borderRadius: 4, flexShrink: 0 },
++  pollingDotActive: { backgroundColor: '#10B981' },
++  pollingDotStale: { backgroundColor: '#F59E0B' },
++  pollingDotMuted: { backgroundColor: '#64748B' },
++  pollingText: { color: c.muted, fontSize: 13, lineHeight: 18, flex: 1 },
+ });
+diff --git a/app/services/participationService.js b/app/services/participationService.js
+index 08e7461..8b60a7a 100644
+--- a/app/services/participationService.js
++++ b/app/services/participationService.js
+@@ -10,6 +10,40 @@ function validateReturnState(returned) {
+   }
+ }
+ 
++function isValidExternalEntryCall(call, participation) {
++  if (call === undefined || call === null) return true;
++  if (!call || typeof call !== 'object' || Array.isArray(call)) return false;
++  if (participation.status !== 'waiting') return false;
++  if (typeof call.callId !== 'string' || !call.callId.trim()) return false;
++  if (call.kind !== 'external_entry' || call.status !== 'pending') return false;
++  if (typeof call.calledAt !== 'string' || !Number.isFinite(Date.parse(call.calledAt))) return false;
++  if (call.participationId !== undefined && call.participationId !== participation.id) return false;
++  if (call.eventId !== undefined && call.eventId !== participation.eventId) return false;
++  return true;
++}
++
++function isValidCurrentParticipationResponse(current) {
++  if (!current || !Object.prototype.hasOwnProperty.call(current, 'participation')) return false;
++  const participation = current.participation;
++  if (participation === null) return true;
++  if (!participation || typeof participation.id !== 'string' ||
++      typeof participation.eventId !== 'string' ||
++      !['waiting', 'active'].includes(participation.status)) {
++    return false;
++  }
++  if (participation.status === 'waiting' &&
++      (!Number.isSafeInteger(participation.externalQueue?.position) || participation.externalQueue.position < 1)) {
++    return false;
++  }
++  return isValidExternalEntryCall(participation.externalEntryCall, participation);
++}
++
++function externalCallSignature(participation) {
++  const call = participation?.externalEntryCall;
++  if (!call) return null;
++  return `${call.callId}:${call.status}:${call.calledAt}`;
++}
++
+ export function createParticipationStore({ client = httpClient, getIdentity }) {
+   let state = empty();
+   let generation = 0;
+@@ -68,13 +102,10 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
+         client.get('/participations/return-state', { auth: true }),
+       ]);
+       if (requestGeneration !== generation || !matches(identity)) return;
+-      const participation = current?.participation;
+-      if (!current || !Object.prototype.hasOwnProperty.call(current, 'participation') ||
+-          (participation !== null && (!participation || typeof participation.id !== 'string' ||
+-            typeof participation.eventId !== 'string' || !['waiting', 'active'].includes(participation.status) ||
+-            (participation.status === 'waiting' && (!Number.isSafeInteger(participation.externalQueue?.position) || participation.externalQueue.position < 1))))) {
++      if (!isValidCurrentParticipationResponse(current)) {
+         throw new Error('Resposta inválida de participação.');
+       }
++      const participation = current.participation;
+       validateReturnState(returned);
+       publish({ ...state, status: 'ready', participation, returnState: returned, returnStateVersion: requestGeneration, demoParticipation: null, error: null, syncStale: false });
+     } catch (error) {
+@@ -96,13 +127,10 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
+         const current = await client.get('/participations/current', { auth: true });
+         if (requestGeneration !== generation || !matches(identity)) return;
+ 
+-        const participation = current?.participation;
+-        if (!current || !Object.prototype.hasOwnProperty.call(current, 'participation') ||
+-            (participation !== null && (!participation || typeof participation.id !== 'string' ||
+-              typeof participation.eventId !== 'string' || !['waiting', 'active'].includes(participation.status) ||
+-              (participation.status === 'waiting' && (!Number.isSafeInteger(participation.externalQueue?.position) || participation.externalQueue.position < 1))))) {
++        if (!isValidCurrentParticipationResponse(current)) {
+           return;
+         }
++        const participation = current.participation;
+ 
+         const prev = state.participation;
+         let returned = state.returnState;
+@@ -119,7 +147,8 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
+         }
+         const changed = !prev || prev.id !== participation?.id ||
+           prev.status !== participation?.status ||
+-          prev.externalQueue?.position !== participation?.externalQueue?.position;
++          prev.externalQueue?.position !== participation?.externalQueue?.position ||
++          externalCallSignature(prev) !== externalCallSignature(participation);
+ 
+         if (changed || state.status !== 'ready' || state.syncStale) {
+           publish({
+diff --git a/app/tests/participationService.test.cjs b/app/tests/participationService.test.cjs
+index 06c0af9..0397c10 100644
+--- a/app/tests/participationService.test.cjs
++++ b/app/tests/participationService.test.cjs
+@@ -150,3 +150,122 @@ test('claim recusa leitura antiga, participação corrente, demo e identidade tr
+   r.identity(identityB);
+   assert.equal(r.store.claimReturnEvaluation(recent), false);
+ });
++
++test('STAFF-03 syncCurrentSilent detecta surgimento, troca de callId e remoção de externalEntryCall sem mudança de posição', async () => {
++  const calledAt1 = '2026-11-10T15:00:00.123456Z';
++  const calledAt2 = '2026-11-10T15:05:00.123456Z';
++  let currentParticipation = {
++    id: 'p-1',
++    eventId: 'e-1',
++    status: 'waiting',
++    externalQueue: { position: 1, observedAt: calledAt1 },
++    externalEntryCall: null,
++  };
++  const snapshots = [];
++  const r = rig((path) => Promise.resolve(path.endsWith('/current') ? { participation: currentParticipation } : returned));
++  r.store.subscribe((snap) => snapshots.push(snap));
++  r.store.setIdentity(identityA);
++  await r.store.refresh();
++  assert.equal(r.store.getSnapshot().participation.externalEntryCall, null);
++
++  const countBefore = snapshots.length;
++  // Mesmo sem mudar posição (1), chamada externa deve disparar atualização silenciosa
++  currentParticipation = {
++    ...currentParticipation,
++    externalEntryCall: {
++      callId: 'call-1',
++      participationId: 'p-1',
++      eventId: 'e-1',
++      kind: 'external_entry',
++      status: 'pending',
++      calledAt: calledAt1,
++    },
++  };
++  await r.store.syncCurrentSilent();
++  assert.equal(snapshots.length, countBefore + 1);
++  assert.equal(r.store.getSnapshot().participation.externalEntryCall.callId, 'call-1');
++
++  // Polling repetido idêntico não deve republicar desnecessariamente
++  await r.store.syncCurrentSilent();
++  assert.equal(snapshots.length, countBefore + 1);
++
++  // Remoção / ausência requeue limpa chamada externa mesmo em waiting posição 1
++  currentParticipation = {
++    ...currentParticipation,
++    externalEntryCall: null,
++  };
++  await r.store.syncCurrentSilent();
++  assert.equal(snapshots.length, countBefore + 2);
++  assert.equal(r.store.getSnapshot().participation.externalEntryCall, null);
++
++  // Nova chamada gera novo callId distinto na mesma participação
++  currentParticipation = {
++    ...currentParticipation,
++    externalEntryCall: {
++      callId: 'call-2',
++      participationId: 'p-1',
++      eventId: 'e-1',
++      kind: 'external_entry',
++      status: 'pending',
++      calledAt: calledAt2,
++    },
++  };
++  await r.store.syncCurrentSilent();
++  assert.equal(snapshots.length, countBefore + 3);
++  assert.equal(r.store.getSnapshot().participation.externalEntryCall.callId, 'call-2');
++
++  // Confirmação -> active sem externalEntryCall
++  currentParticipation = {
++    id: 'p-1',
++    eventId: 'e-1',
++    status: 'active',
++    externalQueue: null,
++    externalEntryCall: null,
++  };
++  await r.store.syncCurrentSilent();
++  assert.equal(r.store.getSnapshot().participation.status, 'active');
++  assert.equal(r.store.getSnapshot().participation.externalEntryCall, null);
++});
++
++test('STAFF-03 rejeita externalEntryCall inconsistente no refresh e ignora leitura malformada no polling silencioso', async () => {
++  const validCall = {
++    callId: 'call-1',
++    participationId: 'p-1',
++    eventId: 'e-1',
++    kind: 'external_entry',
++    status: 'pending',
++    calledAt: '2026-11-10T15:00:00.123456Z',
++  };
++  const validWaiting = {
++    id: 'p-1',
++    eventId: 'e-1',
++    status: 'waiting',
++    externalQueue: { position: 1, observedAt: '2026-11-10T15:00:00.123456Z' },
++    externalEntryCall: validCall,
++  };
++
++  for (const malformed of [
++    { id: 'p-1', eventId: 'e-1', status: 'active', externalQueue: null, externalEntryCall: validCall },
++    { ...validWaiting, externalEntryCall: { ...validCall, participationId: 'p-other' } },
++    { ...validWaiting, externalEntryCall: { ...validCall, eventId: 'e-other' } },
++    { ...validWaiting, externalEntryCall: { ...validCall, status: 'confirmed' } },
++    { ...validWaiting, externalEntryCall: { ...validCall, kind: 'station' } },
++    { ...validWaiting, externalEntryCall: { ...validCall, calledAt: 'invalido' } },
++  ]) {
++    const r = rig((path) => Promise.resolve(path.endsWith('/current') ? { participation: malformed } : returned));
++    r.store.setIdentity(identityA);
++    await r.store.refresh();
++    assert.equal(r.store.getSnapshot().status, 'error');
++    assert.equal(r.store.getSnapshot().error, 'unavailable');
++  }
++
++  let next = validWaiting;
++  const rSilent = rig((path) => Promise.resolve(path.endsWith('/current') ? { participation: next } : returned));
++  rSilent.store.setIdentity(identityA);
++  await rSilent.store.refresh();
++  assert.equal(rSilent.store.getSnapshot().participation.externalEntryCall.callId, 'call-1');
++
++  next = { ...validWaiting, externalEntryCall: { ...validCall, participationId: 'p-other' } };
++  await rSilent.store.syncCurrentSilent();
++  assert.equal(rSilent.store.getSnapshot().participation.externalEntryCall.callId, 'call-1');
++});
+diff --git a/app/tests/roleRoutingIntegration.test.cjs b/app/tests/roleRoutingIntegration.test.cjs
+index 1e47b9a..517d3d5 100644
+--- a/app/tests/roleRoutingIntegration.test.cjs
++++ b/app/tests/roleRoutingIntegration.test.cjs
+@@ -180,7 +180,8 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+         return load(`${target}.js`);
+       }
+       if (control.realStaff && ['screens/staff/StaffEventsNavigator', 'services/staffEventsService',
+-        'screens/staff/StaffEntryControlRealScreen', 'services/staffEntryService', 'services/staffEntryIntentStorage',
++        'screens/staff/StaffEntryControlRealScreen', 'screens/staff/components/StaffEntrySections',
++        'services/staffEntryService', 'services/staffEntryIntentStorage',
+         'screens/staff/StaffStationOperationalScreen', 'screens/staff/components/StaffStationSections',
+         'services/staffIntentStorage', 'services/staffDashboardService', 'services/staffOperationsService',
+         'screens/staff/useStaffPolling', 'screens/staff/components/StaffLiveScreen',
+@@ -261,6 +262,21 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+           && rightTexts.includes(status);
+       });
+     },
++    hasEntryQueueRow(position, displayName) {
++      const flatten = (value) => Array.isArray(value) ? value.map(flatten).join('')
++        : value && typeof value === 'object' ? flatten(value.props?.children) : String(value ?? '');
++      return tree.root.findAllByType('View').some((row) => {
++        const ch = (row.children ?? []).filter((node) => node && typeof node === 'object' && node.type === 'View');
++        if (ch.length < 2 || ch.length > 3) return false;
++        const leftTexts = ch[0].findAllByType('Text').map((t) => flatten(t.props.children));
++        const rightTexts = ch[1].findAllByType('Text').map((t) => flatten(t.props.children));
++        return leftTexts.length === 1
++          && leftTexts[0] === String(position)
++          && rightTexts.length === 2
++          && rightTexts.includes(displayName)
++          && (rightTexts.includes('Próximo da fila externa') || rightTexts.includes('Aguardando chamada'));
++      });
++    },
+     async press(label) {
+       const buttons = tree.root.findAllByType('Pressable').filter((node) => node.props.accessibilityLabel === label);
+       assert.equal(buttons.length, 1, `botão ${label}`);
+@@ -1769,20 +1785,26 @@ test('Controle de Entrada real confirma primeiro, desativa, reativa e volta pres
+   const app = createIntegration({ initialUser: staffUser, control }); await app.mount();
+   await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
+   await app.press('Selecionar evento Evento autorizado'); await app.press('Controle de Entrada');
+-  assert.ok(app.hasText('1. Ana')); assert.ok(!app.hasText('Confirmar entrada de Ana'));
++  assert.ok(app.hasEntryQueueRow(1, 'Ana')); assert.ok(app.hasEntryQueueRow(2, 'Bia'));
++  assert.ok(app.hasExactText('PRÓXIMO')); assert.ok(!app.hasText('Confirmar entrada de Ana'));
+   const call = app.handler('Chamar próximo');
+   await app.act(async () => { await Promise.all([call(), call()]); });
+   assert.equal(app.modal().props.visible, false);
+   assert.equal(requests.filter(r => r.method === 'POST').length, 1);
+   assert.equal(app.hasButton('Entendi'), false);
+-  assert.ok(app.hasText('Participante chamado: Ana'));
++  assert.ok(app.hasExactText('Ana'));
++  assert.ok(app.hasExactText('CHAMADA PENDENTE'));
++  assert.ok(!app.hasEntryQueueRow(1, 'Ana'));
++  assert.ok(app.hasEntryQueueRow(1, 'Bia'));
+   assert.ok(app.hasText('Confirmar entrada')); assert.ok(app.hasText('Marcar ausência')); assert.ok(app.hasText('Remover da fila'));
+   await app.press('Marcar ausência'); assert.equal(app.modal().props.visible, true);
+   await app.press('CANCELAR ALTERAÇÃO');
+   await app.press('Remover da fila'); assert.equal(app.modal().props.visible, true);
+   await app.press('CANCELAR ALTERAÇÃO');
+   await app.press('Confirmar entrada'); await app.press('CONFIRMAR ALTERAÇÃO');
+-  assert.ok(app.hasText('Entrada confirmada pelo servidor')); assert.ok(app.hasText('1. Bia'));
++  assert.ok(app.hasText('Entrada confirmada pelo servidor'));
++  assert.ok(app.hasEntryQueueRow(1, 'Bia'));
++  assert.ok(!app.hasText('Ana'));
+   await app.press('Desativar fila externa'); assert.equal(app.modal().props.visible, true);
+   await app.press('CANCELAR ALTERAÇÃO'); assert.equal(requests.filter(r => r.method === 'PATCH').length, 0);
+   await app.press('Desativar fila externa'); await app.press('CONFIRMAR ALTERAÇÃO');
+@@ -1811,7 +1833,7 @@ test('chamada direta capturada antes do logout não envia operação na sessão
+   await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
+   await app.press('Selecionar evento Evento autorizado'); await app.press('Controle de Entrada');
+   const old = app.handler('Chamar próximo'); await app.act(() => app.manager.logout()); await app.act(async () => old());
+-  assert.equal(mutations, 0); assert.ok(!app.hasText('1. Ana')); app.dispose();
++  assert.equal(mutations, 0); assert.ok(!app.hasText('Ana')); app.dispose();
+ });
+ 
+ test('chamada direta externa mantém intenção incerta e não repete POST após atualização', { skip }, async () => {
+@@ -1877,9 +1899,9 @@ test('401 terminal no Controle de Entrada remove lista nominal e área Staff', {
+           { participationId: 'abcdef00-0000-4000-8000-000000000004', displayName: 'Ana', position: 1 }] };
+     } } });
+   await app.mount(); await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
+-  await app.press('Selecionar evento Evento autorizado'); await app.press('Controle de Entrada'); assert.ok(app.hasText('1. Ana'));
++  await app.press('Selecionar evento Evento autorizado'); await app.press('Controle de Entrada'); assert.ok(app.hasEntryQueueRow(1, 'Ana'));
+   revoked = true; await app.press('Atualizar fila de entrada');
+-  assert.equal(app.route(), 'Login'); assert.ok(!app.hasText('1. Ana')); app.dispose();
++  assert.equal(app.route(), 'Login'); assert.ok(!app.hasText('Ana')); app.dispose();
+ });
+ 
+ test('AUD-01 + AUD-05: perda de autorização propaga entre painel e Controle de Entrada, fecha modal, invalida callbacks e preserva intenção persistida', { skip }, async () => {
+@@ -1927,16 +1949,16 @@ test('AUD-01 + AUD-05: perda de autorização propaga entre painel e Controle de
+     await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
+     await app.press('Selecionar evento Evento autorizado');
+     await app.press('Controle de Entrada');
+-    assert.ok(app.hasText('1. Ana'));
+-    assert.ok(app.hasText('2. Bia'));
++    assert.ok(app.hasEntryQueueRow(1, 'Ana'));
++    assert.ok(app.hasEntryQueueRow(2, 'Bia'));
+     await app.press('Desativar fila externa');
+     assert.equal(app.modal().props.visible, true);
+     const staleConfirm = app.handler('CONFIRMAR ALTERAÇÃO');
+ 
+     denyEntry = true;
+     await app.tickTimers(5000);
+-    assert.ok(!app.hasText('1. Ana'));
+-    assert.ok(!app.hasText('2. Bia'));
++    assert.ok(!app.hasText('Ana'));
++    assert.ok(!app.hasText('Bia'));
+     assert.equal(app.modals().every((m) => !m.props.visible), true);
+     assert.equal(app.modals().length, 0);
+     await app.act(async () => staleConfirm());
+@@ -2013,7 +2035,7 @@ test('AUD-01 + AUD-05: perda de autorização propaga entre painel e Controle de
+       pendingStationsFlight.resolve({ statusCode: 404, body: { code: 'RESOURCE_NOT_FOUND' } });
+       await new Promise((r) => setTimeout(r, 0));
+     });
+-    assert.ok(!appPanelRevoke.hasText('1. Ana'), 'informação nominal removida imediatamente na subtela aberta');
++    assert.ok(!appPanelRevoke.hasText('Ana'), 'informação nominal removida imediatamente na subtela aberta');
+     assert.ok(appPanelRevoke.hasText('Acesso ao evento indisponível'));
+     assert.equal(appPanelRevoke.hasButton('Chamar próximo'), false);
+     assert.ok([...values.values()].some((raw) => raw.includes('dispatching')),
+@@ -3381,3 +3403,190 @@ test('STAFF02-AUD-05 + AUD-06: indicador de polling espelha modal, foco, AppStat
+     app.dispose();
+   }
+ });
++
++test('STAFF-03 integração Staff <-> Participante: chamada externa propaga callId, ausência limpa e nova chamada entrega novo callId até confirmação', { skip }, async () => {
++  const at1 = '2026-11-10T15:00:00.000Z';
++  const at2 = '2026-11-10T15:05:00.000Z';
++  const call1Id = 'cccccccc-cccc-4ccc-8ccc-000000000001';
++  const call2Id = 'cccccccc-cccc-4ccc-8ccc-000000000002';
++  const partId = 'abcdef00-0000-4000-8000-000000000004';
++  const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
++  const secureValues = new Map();
++
++  let status = 'waiting';
++  let pendingCall = null;
++  let callSerial = 0;
++
++  const currentProjection = () => {
++    if (status === 'waiting') {
++      return {
++        participation: {
++          id: partId,
++          eventId: staffEvent.id,
++          status: 'waiting',
++          joinedAt: '2026-11-10T14:55:00.000000Z',
++          arenaEnteredAt: null,
++          finishedAt: null,
++          finishReason: null,
++          externalQueue: { position: 1, observedAt: at1 },
++          externalEntryCall: pendingCall
++            ? {
++                callId: pendingCall.id,
++                participationId: partId,
++                eventId: staffEvent.id,
++                kind: 'external_entry',
++                status: 'pending',
++                calledAt: `${pendingCall.calledAt.slice(0, -1)}000Z`,
++              }
++            : null,
++        },
++      };
++    }
++    return {
++      participation: {
++        id: partId,
++        eventId: staffEvent.id,
++        status: 'active',
++        joinedAt: '2026-11-10T14:55:00.000000Z',
++        arenaEnteredAt: '2026-11-10T15:06:00.000000Z',
++        finishedAt: null,
++        finishReason: null,
++        externalQueue: null,
++        externalEntryCall: null,
++      },
++    };
++  };
++
++  const { createParticipationStore } = loadModule('services/participationService.js', (name) =>
++    (name === './httpClient' ? { httpClient: {} } : require(name))).exports;
++  const participantStore = createParticipationStore({
++    getIdentity: () => ({ userId: 'participant-user', epoch: 1 }),
++    client: {
++      async get(route) {
++        if (route === '/participations/current') return currentProjection();
++        if (route === '/participations/return-state') {
++          return { recentFinalization: null, pendingEvaluationParticipationIds: [] };
++        }
++        throw new Error(`GET participante inesperado: ${route}`);
++      },
++    },
++  });
++
++  const app = createIntegration({
++    initialUser: staffUser,
++    control: {
++      realStaff: true,
++      platformOS: 'android',
++      events: [staffEvent],
++      secureStore: {
++        isAvailableAsync: async () => true,
++        getItemAsync: async (key) => secureValues.get(key) ?? null,
++        setItemAsync: async (key, value) => { secureValues.set(key, value); },
++      },
++      http: async (route, options) => {
++        if (!route.includes('/entry-control')) return undefined;
++        const waiting = status === 'waiting' && !pendingCall
++          ? [{ participationId: partId, displayName: 'Ana', position: 1 }]
++          : [];
++        if (options.method === 'GET') {
++          return {
++            eventId: staffEvent.id,
++            externalQueueEnabled: true,
++            canManage: true,
++            observedAt: at1,
++            pendingCall,
++            canCall: !pendingCall && waiting.length > 0,
++            canConfirm: Boolean(pendingCall),
++            canMarkAbsent: Boolean(pendingCall),
++            canRemove: Boolean(pendingCall),
++            waitingCount: waiting.length,
++            waiting,
++          };
++        }
++        if (route.endsWith('/call-next')) {
++          callSerial += 1;
++          const id = callSerial === 1 ? call1Id : call2Id;
++          const calledAt = callSerial === 1 ? at1 : at2;
++          pendingCall = { id, participationId: partId, displayName: 'Ana', calledAt };
++          return {
++            eventId: staffEvent.id,
++            call: { id, participationId: partId, status: 'pending', calledAt, resolvedAt: null },
++            participation: { id: partId, status: 'waiting', arenaEnteredAt: null, finishReason: null, externalQueueOrder: '1' },
++            requeued: false,
++          };
++        }
++        if (route.endsWith('/absent')) {
++          const prev = pendingCall;
++          pendingCall = null;
++          return {
++            eventId: staffEvent.id,
++            call: { id: prev.id, participationId: partId, status: 'absent', calledAt: prev.calledAt, resolvedAt: at2 },
++            participation: { id: partId, status: 'waiting', arenaEnteredAt: null, finishReason: null, externalQueueOrder: '2' },
++            requeued: true,
++          };
++        }
++        if (route.endsWith('/confirm')) {
++          const prev = pendingCall;
++          pendingCall = null;
++          status = 'active';
++          return {
++            eventId: staffEvent.id,
++            call: { id: prev.id, participationId: partId, status: 'confirmed', calledAt: prev.calledAt, resolvedAt: at2 },
++            participation: { id: partId, status: 'active', arenaEnteredAt: at2, finishReason: null, externalQueueOrder: '2' },
++            requeued: false,
++          };
++        }
++        throw new Error(`Mutação Staff inesperada: ${route}`);
++      },
++    },
++  });
++
++  try {
++    participantStore.setIdentity({ userId: 'participant-user', epoch: 1 });
++    await participantStore.refresh();
++    assert.equal(participantStore.getSnapshot().participation.status, 'waiting');
++    assert.equal(participantStore.getSnapshot().participation.externalEntryCall, null);
++
++    await app.mount();
++    await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
++    await app.press('Selecionar evento Evento autorizado');
++    await app.press('Controle de Entrada');
++    assert.ok(app.hasEntryQueueRow(1, 'Ana'));
++
++    // 1. Staff chama -> Participante recebe call1Id sem mudança de posição
++    await app.press('Chamar próximo');
++    assert.ok(app.hasExactText('Ana'));
++    assert.ok(app.hasExactText('CHAMADA PENDENTE'));
++    await participantStore.syncCurrentSilent();
++    assert.equal(participantStore.getSnapshot().participation.externalQueue.position, 1);
++    assert.equal(participantStore.getSnapshot().participation.externalEntryCall.callId, call1Id);
++    assert.equal(participantStore.getSnapshot().participation.externalEntryCall.kind, 'external_entry');
++    assert.equal(participantStore.getSnapshot().participation.externalEntryCall.status, 'pending');
++
++    // 2. Staff marca ausência (requeue) -> chamada externa limpa e Ana retorna à fila
++    await app.press('Marcar ausência');
++    await app.press('CONFIRMAR ALTERAÇÃO');
++    assert.ok(app.hasText('Ausência registrada pelo servidor.'));
++    assert.ok(app.hasEntryQueueRow(1, 'Ana'));
++    await participantStore.syncCurrentSilent();
++    assert.equal(participantStore.getSnapshot().participation.status, 'waiting');
++    assert.equal(participantStore.getSnapshot().participation.externalEntryCall, null);
++
++    // 3. Nova chamada gera novo callId distinto (call2Id) detectado pelo polling silencioso
++    await app.press('Chamar próximo');
++    await participantStore.syncCurrentSilent();
++    assert.equal(participantStore.getSnapshot().participation.externalEntryCall.callId, call2Id);
++    assert.notEqual(participantStore.getSnapshot().participation.externalEntryCall.callId, call1Id);
++
++    // 4. Confirmação -> participante passa para active com externalEntryCall null
++    await app.press('Confirmar entrada');
++    await app.press('CONFIRMAR ALTERAÇÃO');
++    assert.ok(app.hasText('Entrada confirmada pelo servidor.'));
++    await participantStore.syncCurrentSilent();
++    assert.equal(participantStore.getSnapshot().participation.status, 'active');
++    assert.equal(participantStore.getSnapshot().participation.externalQueue, null);
++    assert.equal(participantStore.getSnapshot().participation.externalEntryCall, null);
++  } finally {
++    app.dispose();
++  }
++});
+diff --git a/app/tests/staffDemoState.test.cjs b/app/tests/staffDemoState.test.cjs
+index 82d7c40..9f4b9a0 100644
+--- a/app/tests/staffDemoState.test.cjs
++++ b/app/tests/staffDemoState.test.cjs
+@@ -223,6 +223,7 @@ const realStaffScreens = [
+   'StaffEventsNavigator.js',
+   'StaffEntryControlRealScreen.js',
+   'StaffStationOperationalScreen.js',
++  'components/StaffEntrySections.js',
+   'components/StaffLiveScreen.js',
+   'components/StaffStationSections.js',
+   'useStaffPolling.js',
+@@ -239,6 +240,17 @@ test('estação operacional real não carrega estado demonstrativo', () => {
+   assert.doesNotMatch(sectionsSource, /staffDemoState|staffDemoData|StaffDemoContext|StaffStationScreen/);
+ });
+ 
++test('controle de entrada real não carrega estado demonstrativo', () => {
++  const source = readFileSync(path.join(appDirectory, 'screens', 'staff', 'StaffEntryControlRealScreen.js'), 'utf8');
++  assert.match(source, /staffEntryService/);
++  assert.doesNotMatch(source, /staffDemoState|staffDemoData|StaffDemoContext|StaffEntryControlScreen/);
++  const sectionsSource = readFileSync(
++    path.join(appDirectory, 'screens', 'staff', 'components', 'StaffEntrySections.js'),
++    'utf8',
++  );
++  assert.doesNotMatch(sectionsSource, /staffDemoState|staffDemoData|StaffDemoContext|StaffEntryControlScreen/);
++});
++
+ test('arquivos Staff são classificados como demonstração ou fluxo real', () => {
+   const staffDirectory = path.join(appDirectory, 'screens', 'staff');
+   const files = [];
+diff --git a/backend/src/participations/participation-lifecycle.controller.ts b/backend/src/participations/participation-lifecycle.controller.ts
+index 1ef3b69..e19ccff 100644
+--- a/backend/src/participations/participation-lifecycle.controller.ts
++++ b/backend/src/participations/participation-lifecycle.controller.ts
+@@ -1,5 +1,5 @@
+ import { mutationSession } from "../auth/mutation-session";
+-import { Body, Controller, Get, HttpCode, Inject, Param, Post, Req } from "@nestjs/common";
++import { Body, Controller, Get, Header, HttpCode, Inject, Param, Post, Req } from "@nestjs/common";
+ import { CurrentUserId, RequireSessionAuth } from "../auth/current-user.decorator";
+ import type { AuthenticatedRequest } from "../auth/session-auth.guard";
+ import { ProblemException } from "../common/errors/problem.exception";
+@@ -27,9 +27,11 @@ export class ParticipationLifecycleController {
+     @Inject(ParticipantQueueIdempotencyPolicy) private readonly policy:ParticipantQueueIdempotencyPolicy){}
+   @Get("current")
+   @HttpCode(200)
++  @Header("Cache-Control", "no-store")
+   async current(@CurrentUserId() userId:string){return {participation:await this.queries.current(userId)};}
+   @Get(":participationId")
+   @HttpCode(200)
++  @Header("Cache-Control", "no-store")
+   async byId(@CurrentUserId() userId:string,@Param() params:unknown){
+     const {participationId}=validateOperationParams(lifecycleParams,params),participation=await this.queries.byId(userId,participationId);
+     if(!participation)missing();return {participation};
+diff --git a/backend/src/participations/participation-lifecycle.dto.ts b/backend/src/participations/participation-lifecycle.dto.ts
+index 7bd7fd5..55934e3 100644
+--- a/backend/src/participations/participation-lifecycle.dto.ts
++++ b/backend/src/participations/participation-lifecycle.dto.ts
+@@ -4,15 +4,25 @@ import { isPreciseInstant } from "../evaluations/evaluation-read.dto";
+ 
+ const instant = z.custom<string>(isPreciseInstant);
+ export const lifecycleParams = z.object({ participationId: operationUuid }).strict();
++export const externalEntryCallView = z.object({
++  callId: operationUuid,
++  participationId: operationUuid,
++  eventId: operationUuid,
++  kind: z.literal("external_entry"),
++  status: z.literal("pending"),
++  calledAt: instant,
++}).strict();
+ export const participationView = z.object({
+   id: operationUuid, eventId: operationUuid,
+   status: z.enum(["waiting", "active", "finished", "canceled"]),
+   joinedAt: instant, arenaEnteredAt: instant.nullable(), finishedAt: instant.nullable(), finishReason: z.string().nullable(),
+   externalQueue: z.object({ position: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), observedAt: instant }).strict().nullable(),
++  externalEntryCall: externalEntryCallView.nullable().default(null),
+ }).strict();
+ export const finishedParticipationView = participationView.extend({
+   completedServicesCount: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+   evaluationEligibility: z.object({ eligible: z.boolean(), hasSubmitted: z.boolean() }).strict(),
+ }).strict();
++export type ExternalEntryCallView = z.infer<typeof externalEntryCallView>;
+ export type ParticipationView = z.infer<typeof participationView>;
+ export type FinishedParticipationView = z.infer<typeof finishedParticipationView>;
+diff --git a/backend/src/participations/participation-query.service.ts b/backend/src/participations/participation-query.service.ts
+index 66a7068..6f72b0a 100644
+--- a/backend/src/participations/participation-query.service.ts
++++ b/backend/src/participations/participation-query.service.ts
+@@ -10,6 +10,7 @@ import { participationView, type ParticipationView } from "./participation-lifec
+ export function participationProjection(userId: string, participationId?: string, at: SQL = sql`clock_timestamp()`): SQL {
+   return sql`WITH observation AS MATERIALIZED (SELECT ${at} AS at), scoped AS MATERIALIZED (
+     SELECT p.*,d.at,${effectiveEventDeadline()} AS deadline,
++      e.external_queue_enabled AS event_external_queue_enabled,
+       COALESCE(p.status IN ('waiting','active') AND (e.status='closed' OR ${effectiveEventDeadline()}<=d.at
+         OR (p.status='waiting' AND e.closure_mode='controlled' AND e.closure_requested_at<=d.at)),false) AS ended,
+       CASE WHEN e.closure_mode='immediate' AND e.status='closed' AND e.operational_deadline_at>e.admin_deadline_at THEN 'admin_immediate'
+@@ -21,27 +22,50 @@ export function participationProjection(userId: string, participationId?: string
+         ELSE ${effectiveEventDeadline()} END AS terminal_at
+     FROM participations p JOIN events e ON e.id=p.event_id CROSS JOIN observation d
+     WHERE p.user_id=${userId}::uuid AND ${participationId ? sql`p.id=${participationId}::uuid` : sql`p.status IN ('waiting','active')`}
+-  ) SELECT id,event_id AS "eventId",CASE WHEN ended THEN 'finished' ELSE status END AS status,
+-    to_char(joined_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "joinedAt",
+-    to_char(arena_entered_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "arenaEnteredAt",
+-    to_char((CASE WHEN ended THEN terminal_at ELSE finished_at END) AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "finishedAt",
+-    CASE WHEN ended THEN terminal_reason ELSE finish_reason END AS "finishReason",
+-    CASE WHEN status='waiting' AND NOT ended THEN (SELECT count(*)::text FROM participations q
++  ) SELECT scoped.id,scoped.event_id AS "eventId",CASE WHEN scoped.ended THEN 'finished' ELSE scoped.status END AS status,
++    to_char(scoped.joined_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "joinedAt",
++    to_char(scoped.arena_entered_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "arenaEnteredAt",
++    to_char((CASE WHEN scoped.ended THEN scoped.terminal_at ELSE scoped.finished_at END) AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "finishedAt",
++    CASE WHEN scoped.ended THEN scoped.terminal_reason ELSE scoped.finish_reason END AS "finishReason",
++    CASE WHEN scoped.status='waiting' AND NOT scoped.ended THEN (SELECT count(*)::text FROM participations q
+       WHERE q.event_id=scoped.event_id AND q.status='waiting' AND q.external_queue_order<=scoped.external_queue_order) END AS position,
+-    to_char(at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "observedAt"
+-    FROM scoped`;
++    c.id AS "externalCallId",c.participation_id AS "externalCallParticipationId",c.event_id AS "externalCallEventId",
++    c.status AS "externalCallStatus",
++    CASE WHEN c.called_at IS NULL THEN NULL ELSE to_char(c.called_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') END AS "externalCallCalledAt",
++    to_char(scoped.at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "observedAt"
++    FROM scoped LEFT JOIN external_entry_calls c
++      ON c.participation_id=scoped.id AND c.event_id=scoped.event_id AND c.status='pending'
++        AND scoped.status='waiting' AND NOT scoped.ended AND scoped.event_external_queue_enabled`;
+ }
+ export interface ParticipationProjectionRow extends Record<string, unknown> {
+   id: string; eventId: string; status: string; joinedAt: string; arenaEnteredAt: string | null;
+   finishedAt: string | null; finishReason: string | null; position: string | null; observedAt: string;
++  externalCallId?: string | null; externalCallParticipationId?: string | null; externalCallEventId?: string | null;
++  externalCallStatus?: string | null; externalCallCalledAt?: string | null;
+ }
+ export function publicParticipation(row: ParticipationProjectionRow): ParticipationView {
+   if (row.status === "waiting" && (!row.position || !/^[1-9]\d*$/.test(row.position) || BigInt(row.position)>BigInt(Number.MAX_SAFE_INTEGER))) {
+     throw new Error("PARTICIPATION_POSITION_INTEGRITY");
+   }
++  const hasExternalCall = [row.externalCallId, row.externalCallCalledAt, row.externalCallStatus,
++    row.externalCallParticipationId, row.externalCallEventId].some((item) => item !== undefined && item !== null);
++  if (hasExternalCall && (row.status !== "waiting" || !row.externalCallId || !row.externalCallCalledAt ||
++      (row.externalCallStatus !== undefined && row.externalCallStatus !== "pending") ||
++      (row.externalCallParticipationId !== undefined && row.externalCallParticipationId !== row.id) ||
++      (row.externalCallEventId !== undefined && row.externalCallEventId !== row.eventId))) {
++    throw new Error("PARTICIPATION_EXTERNAL_CALL_INTEGRITY");
++  }
+   const value = participationView.parse({ id: row.id, eventId: row.eventId, status: row.status, joinedAt: row.joinedAt,
+     arenaEnteredAt: row.arenaEnteredAt, finishedAt: row.finishedAt, finishReason: row.finishReason,
+-    externalQueue: row.status === "waiting" ? { position: Number(row.position), observedAt: row.observedAt } : null });
++    externalQueue: row.status === "waiting" ? { position: Number(row.position), observedAt: row.observedAt } : null,
++    externalEntryCall: hasExternalCall ? {
++      callId: row.externalCallId,
++      participationId: row.id,
++      eventId: row.eventId,
++      kind: "external_entry",
++      status: "pending",
++      calledAt: row.externalCallCalledAt,
++    } : null });
+   if ((value.status === "waiting" || value.status === "active") ? value.finishedAt !== null || value.finishReason !== null
+     : value.finishedAt === null || value.finishReason === null) throw new Error("PARTICIPATION_TERMINAL_INTEGRITY");
+   return value;
+diff --git a/backend/test/unit/participation-lifecycle-http.test.ts b/backend/test/unit/participation-lifecycle-http.test.ts
+index b17eb86..3f38f9e 100644
+--- a/backend/test/unit/participation-lifecycle-http.test.ts
++++ b/backend/test/unit/participation-lifecycle-http.test.ts
+@@ -96,3 +96,55 @@ test("E08.12 DI Nest resolve serviços reais e reutiliza TTL explícito sem cone
+ function authenticatedInput<T>(context: MutationSession, result: T): T {
+   assert.deepEqual(context, { userId: uid, sessionId: id(4) }); return result;
+ }
++
++test("STAFF-03 HTTP /current e /:participationId emitem Cache-Control: no-store e expõem externalEntryCall apenas ao titular", async () => {
++  reset();
++  const pendingCall = {
++    callId: id(55),
++    participationId: pid,
++    eventId: id(3),
++    kind: "external_entry" as const,
++    status: "pending" as const,
++    calledAt: "2026-11-04T15:02:00.123456Z",
++  };
++  const waitingWithCall = {
++    id: pid,
++    eventId: id(3),
++    status: "waiting" as const,
++    joinedAt: at,
++    arenaEnteredAt: null,
++    finishedAt: null,
++    finishReason: null,
++    externalQueue: { position: 1, observedAt: at },
++    externalEntryCall: pendingCall,
++  };
++  const previousExternalQueue = value.externalQueue;
++  Object.assign(value, waitingWithCall);
++  try {
++    for (const mode of ["current", "byId"] as const) {
++      const res = await request(mode);
++      assert.equal(res.status, 200);
++      assert.equal(res.headers["cache-control"], "no-store");
++      assert.deepEqual(res.body.participation.externalEntryCall, pendingCall);
++      assert.equal(Object.hasOwn(res.body.participation, "userId"), false);
++      assert.equal(Object.hasOwn(res.body.participation.externalEntryCall, "staffUserId"), false);
++    }
++    found = false;
++    const absentCurrent = await request("current");
++    assert.equal(absentCurrent.status, 200);
++    assert.equal(absentCurrent.headers["cache-control"], "no-store");
++    assert.deepEqual(absentCurrent.body, { participation: null });
++  } finally {
++    Object.assign(value, {
++      id: pid,
++      eventId: id(3),
++      status: "active" as const,
++      joinedAt: at,
++      arenaEnteredAt: at,
++      finishedAt: null,
++      finishReason: null,
++      externalQueue: previousExternalQueue,
++    });
++    delete (value as Record<string, unknown>).externalEntryCall;
++  }
++});
+diff --git a/backend/test/unit/participation-lifecycle.test.ts b/backend/test/unit/participation-lifecycle.test.ts
+index ba887df..a774113 100644
+--- a/backend/test/unit/participation-lifecycle.test.ts
++++ b/backend/test/unit/participation-lifecycle.test.ts
+@@ -199,3 +199,98 @@ for (const intent of ["conflict", "in_progress"] as const) test(`E08-EST01 finis
+   await assert.rejects(f.service.finishAuthenticated(input, auth.context), error => assertSessionRefusal(error, "SESSION_REVOKED"));
+   assertSessionTransaction(auth.queries, false);
+ });
++
++// STAFF-03: Projeção externalEntryCall para o Participante autenticado
++const cid = id(8), cid2 = id(9), callAt = "2026-11-04T15:02:00.654321Z";
++function waitingRowWithCall(callId = cid, overrides: Partial<ParticipationProjectionRow> = {}): ParticipationProjectionRow {
++  return {
++    ...projection("waiting"),
++    externalCallId: callId,
++    externalCallParticipationId: pid,
++    externalCallEventId: eventId,
++    externalCallStatus: "pending",
++    externalCallCalledAt: callAt,
++    ...overrides,
++  };
++}
++
++test("STAFF-03 projeção expõe externalEntryCall válida apenas em waiting e valida integridade estrita", () => {
++  const called = publicParticipation(waitingRowWithCall());
++  assert.deepEqual(called.externalEntryCall, {
++    callId: cid,
++    participationId: pid,
++    eventId,
++    kind: "external_entry",
++    status: "pending",
++    calledAt: callAt,
++  });
++  assert.equal(called.externalQueue?.position, 3);
++  assert.equal(Object.hasOwn(called, "userId"), false);
++  assert.equal(Object.hasOwn(called.externalEntryCall as object, "staffUserId"), false);
++
++  assert.equal(publicParticipation(projection("waiting")).externalEntryCall, null);
++  assert.equal(publicParticipation(projection("active")).externalEntryCall, null);
++  assert.equal(publicParticipation(projection("finished")).externalEntryCall, null);
++  assert.equal(publicParticipation(projection("canceled")).externalEntryCall, null);
++
++  for (const corrupted of [
++    waitingRowWithCall(cid, { status: "active", arenaEnteredAt: at, position: null }),
++    waitingRowWithCall(cid, { status: "finished", finishedAt: at, finishReason: "voluntary", position: null }),
++    waitingRowWithCall(cid, { externalCallStatus: "confirmed" }),
++    waitingRowWithCall(cid, { externalCallParticipationId: id(99) }),
++    waitingRowWithCall(cid, { externalCallEventId: id(99) }),
++    waitingRowWithCall(cid, { externalCallCalledAt: null }),
++    waitingRowWithCall(cid, { externalCallId: null }),
++  ]) {
++    assert.throws(() => publicParticipation(corrupted), { message: "PARTICIPATION_EXTERNAL_CALL_INTEGRITY" });
++  }
++});
++
++test("STAFF-03 SQL participationProjection faz LEFT JOIN estrito sem mutação e respeita queue enabled e encerramento", () => {
++  const q = new PgDialect().sqlToQuery(participationProjection(uid));
++  assert.match(q.sql, /e\.external_queue_enabled AS event_external_queue_enabled/);
++  assert.match(q.sql, /LEFT JOIN external_entry_calls c/);
++  assert.match(q.sql, /c\.participation_id=scoped\.id AND c\.event_id=scoped\.event_id AND c\.status='pending'/);
++  assert.match(q.sql, /scoped\.status='waiting' AND NOT scoped\.ended AND scoped\.event_external_queue_enabled/);
++  assert.equal(/FOR UPDATE|INSERT |UPDATE |DELETE /.test(q.sql), false);
++  assert.equal((q.sql.match(/clock_timestamp\(\)/g) || []).length, 1);
++});
++
++test("STAFF-03 ParticipationQueryService.current e byId acompanham chamada, ausência-requeue, nova chamada, confirmação e término sem N+1", async () => {
++  let row: ParticipationProjectionRow | null = waitingRowWithCall(cid);
++  const queries: string[] = [];
++  const db = drizzle({
++    async query(config: { text: string }) {
++      queries.push(config.text);
++      return { rows: config.text.startsWith("WITH observation") && row ? [row] : [] };
++    },
++  } as unknown as Client, { schema });
++  const service = new ParticipationQueryService(db);
++
++  const r1 = await service.current(uid);
++  assert.equal(r1?.externalEntryCall?.callId, cid);
++  assert.equal(queries.length, 3);
++  assert.equal(queries[0], "begin isolation level repeatable read read only");
++  assert.equal(queries[2], "commit");
++
++  row = { ...projection("waiting"), position: "4" };
++  const afterAbsent = await service.current(uid);
++  assert.equal(afterAbsent?.externalQueue?.position, 4);
++  assert.equal(afterAbsent?.externalEntryCall, null);
++
++  row = { ...waitingRowWithCall(cid2), position: "1" };
++  const secondCall = await service.byId(uid, pid);
++  assert.equal(secondCall?.externalEntryCall?.callId, cid2);
++  assert.notEqual(secondCall?.externalEntryCall?.callId, cid);
++
++  row = projection("active");
++  const confirmed = await service.current(uid);
++  assert.equal(confirmed?.status, "active");
++  assert.equal(confirmed?.externalEntryCall, null);
++
++  row = projection("canceled");
++  assert.equal(await service.current(uid), null);
++  const canceledDetail = await service.byId(uid, pid);
++  assert.equal(canceledDetail?.status, "canceled");
++  assert.equal(canceledDetail?.externalEntryCall, null);
++});
+diff --git a/app/screens/staff/components/StaffEntrySections.js b/app/screens/staff/components/StaffEntrySections.js
+new file mode 100644
+index 0000000..3c199cc
+--- /dev/null
++++ b/app/screens/staff/components/StaffEntrySections.js
+@@ -0,0 +1,561 @@
++import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
++import { SafeAreaView } from 'react-native-safe-area-context';
++import { AdminIcon, liveColors as c, liveStyles as live } from '../../admin/components/AdminLiveUI';
++import { ElapsedCallBadge } from './StaffStationSections';
++
++const pad2 = (value) => String(value).padStart(2, '0');
++
++export function formatEntryCallTimestamp(calledAt, options = {}) {
++  if (typeof calledAt !== 'string' || !calledAt.trim()) return null;
++  const parsedMs = Date.parse(calledAt);
++  if (!Number.isFinite(parsedMs)) return null;
++  const date = new Date(parsedMs);
++  let formatted = null;
++  try {
++    const formatter = new Intl.DateTimeFormat('pt-BR', {
++      hour: '2-digit',
++      minute: '2-digit',
++      hour12: false,
++      ...(options?.timeZone ? { timeZone: options.timeZone } : {}),
++    });
++    const candidate = formatter.format(date);
++    if (/^\d{2}:\d{2}$/.test(candidate)) formatted = candidate;
++  } catch {
++    formatted = null;
++  }
++  if (!formatted) {
++    formatted = `${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
++  }
++  return `Chamado às ${formatted}`;
++}
++
++function EntryUserTile() {
++  return (
++    <View style={styles.userTile} accessible={false} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
++      <View style={styles.userHead} />
++      <View style={styles.userShoulders} />
++    </View>
++  );
++}
++
++function EntryActionIcon({ kind, color }) {
++  if (kind === 'confirm') {
++    return (
++      <View style={styles.actionIconBox} accessible={false} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
++        <View style={[styles.checkMark, { borderColor: color }]} />
++      </View>
++    );
++  }
++  if (kind === 'absent') {
++    return (
++      <View style={styles.actionIconBox} accessible={false} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
++        <View style={[styles.calendarBox, { borderColor: color }]}>
++          <View style={[styles.calendarBar, { backgroundColor: color }]} />
++          <Text style={[styles.calendarCross, { color }]}>×</Text>
++        </View>
++      </View>
++    );
++  }
++  if (kind === 'remove') {
++    return (
++      <View style={styles.actionIconBox} accessible={false} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
++        <View style={[styles.trashLid, { backgroundColor: color }]} />
++        <View style={[styles.trashCan, { borderColor: color }]}>
++          <View style={[styles.trashLine, { backgroundColor: color }]} />
++          <View style={[styles.trashLine, { backgroundColor: color }]} />
++        </View>
++      </View>
++    );
++  }
++  return null;
++}
++
++export function EntryActionButton({ label, kind = null, variant = 'primary', disabled = false, onPress }) {
++  const tone = SEMANTIC_BUTTONS[variant] ?? SEMANTIC_BUTTONS.primary;
++  return (
++    <Pressable
++      accessibilityRole="button"
++      accessibilityLabel={label}
++      accessibilityState={{ disabled }}
++      disabled={disabled}
++      onPress={disabled ? undefined : onPress}
++      style={({ pressed }) => [
++        styles.semanticButton,
++        tone.box,
++        disabled && styles.disabled,
++        pressed && !disabled && styles.pressed,
++      ]}
++    >
++      {kind ? <EntryActionIcon kind={kind} color={tone.iconColor} /> : null}
++      <Text style={[styles.semanticButtonText, tone.text]}>{label}</Text>
++    </Pressable>
++  );
++}
++
++export function EntryStatusBadge({ enabled }) {
++  const isActive = Boolean(enabled);
++  return (
++    <View style={[styles.statusPill, isActive ? styles.pillSuccess : styles.pillDanger]}>
++      <Text style={[styles.statusPillText, isActive ? styles.pillSuccessText : styles.pillDangerText]}>
++        {isActive ? 'FILA ATIVA' : 'FILA INATIVA'}
++      </Text>
++    </View>
++  );
++}
++
++export function EntryHeaderCard({ eventName, externalQueueEnabled = null }) {
++  return (
++    <View style={styles.headerSection}>
++      <View style={styles.headerTopRow}>
++        <Text style={styles.screenTitle} accessibilityRole="header">Controle de Entrada</Text>
++        {typeof externalQueueEnabled === 'boolean' ? <EntryStatusBadge enabled={externalQueueEnabled} /> : null}
++      </View>
++      {eventName ? (
++        <View style={styles.eventRow}>
++          <View style={styles.eventIconTile} accessible={false} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
++            <AdminIcon name="calendar" color={c.accent} size={15} />
++          </View>
++          <Text style={styles.eventName}>{eventName}</Text>
++        </View>
++      ) : null}
++      <Text style={styles.headerSubtitle}>Fila de acesso ao evento</Text>
++    </View>
++  );
++}
++
++export function EntrySummaryCard({ externalQueueEnabled, waitingCount, hasPendingCall, canManage }) {
++  return (
++    <View style={styles.sectionBlock}>
++      <Text style={styles.sectionLabel}>RESUMO OPERACIONAL</Text>
++      <View style={styles.card}>
++        <View style={styles.metricsRow}>
++          <View style={styles.metricTile}>
++            <Text style={styles.metricValue}>{waitingCount}</Text>
++            <Text style={styles.metricCaption}>Aguardando na fila</Text>
++          </View>
++          <View style={styles.metricTile}>
++            <Text style={styles.metricValue}>{hasPendingCall ? '1 chamada' : 'Livre'}</Text>
++            <Text style={styles.metricCaption}>{externalQueueEnabled ? 'Fila externa ativa' : 'Fila externa inativa'}</Text>
++          </View>
++        </View>
++
++        <Text style={styles.summaryDescription}>
++          {externalQueueEnabled
++            ? 'Chame o próximo participante para conferir sua entrada presencial.'
++            : 'Novas participações entram diretamente no evento. Reativar não recoloca quem já foi liberado na fila.'}
++        </Text>
++
++        {!canManage && (
++          <View style={styles.inlineWarningBox}>
++            <Text style={styles.inlineWarningText}>
++              O evento não permite entradas ou alterações da fila neste momento.
++            </Text>
++          </View>
++        )}
++      </View>
++    </View>
++  );
++}
++
++export function EntryCurrentCallCard({
++  pendingCall,
++  canCall,
++  canConfirm,
++  canMarkAbsent,
++  canRemove,
++  disabled,
++  hasWaiting,
++  externalQueueEnabled,
++  onCallNext,
++  onConfirmEntry,
++  onMarkAbsent,
++  onRemoveFromQueue,
++  getNow,
++}) {
++  const timestampLabel = pendingCall ? formatEntryCallTimestamp(pendingCall.calledAt) : null;
++  const hasCutoffRestriction = Boolean(pendingCall && !disabled && canConfirm && (!canMarkAbsent || !canRemove));
++
++  return (
++    <View style={styles.sectionBlock}>
++      <Text style={styles.sectionLabel}>CHAMADA EXTERNA ATUAL</Text>
++
++      {!pendingCall ? (
++        <View style={styles.card}>
++          <View style={styles.emptyCallHeader}>
++            <EntryUserTile />
++            <View style={live.grow}>
++              <Text style={styles.emptyTitle}>Nenhum participante chamado</Text>
++              <Text style={styles.emptySubtitle}>
++                {externalQueueEnabled
++                  ? hasWaiting
++                    ? 'Chame o próximo da fila externa para iniciar a conferência presencial.'
++                    : 'Aguardando participantes na fila externa do evento.'
++                  : 'Reative a fila externa abaixo para voltar a chamar participantes na entrada.'}
++              </Text>
++            </View>
++          </View>
++
++          <EntryActionButton
++            label="Chamar próximo"
++            variant="primary"
++            disabled={disabled || !canCall}
++            onPress={onCallNext}
++          />
++        </View>
++      ) : (
++        <View style={styles.pendingCard}>
++          <View style={styles.calledHeaderRow}>
++            <View style={styles.calledIdentity}>
++              <EntryUserTile />
++              <View style={live.grow}>
++                <Text style={styles.calledName}>{pendingCall.displayName}</Text>
++                <Text style={styles.calledStatus}>Aguardando conferência na entrada</Text>
++              </View>
++            </View>
++            <View style={styles.pendingBadge}>
++              <Text style={styles.pendingBadgeText}>CHAMADA PENDENTE</Text>
++            </View>
++          </View>
++
++          <View style={styles.timePillsRow}>
++            {timestampLabel ? (
++              <View style={styles.timestampPill}>
++                <Text style={styles.timestampPillText}>{timestampLabel}</Text>
++              </View>
++            ) : null}
++            <ElapsedCallBadge calledAt={pendingCall.calledAt} getNow={getNow} />
++          </View>
++
++          <View style={styles.cardDivider} />
++
++          <Text style={styles.actionPrompt}>Selecione a decisão para o participante chamado:</Text>
++
++          <View style={styles.actionsColumn}>
++            <EntryActionButton
++              label="Confirmar entrada"
++              kind="confirm"
++              variant="success"
++              disabled={disabled || !canConfirm}
++              onPress={onConfirmEntry}
++            />
++            <EntryActionButton
++              label="Marcar ausência"
++              kind="absent"
++              variant="warning"
++              disabled={disabled || !canMarkAbsent}
++              onPress={onMarkAbsent}
++            />
++            <EntryActionButton
++              label="Remover da fila"
++              kind="remove"
++              variant="danger"
++              disabled={disabled || !canRemove}
++              onPress={onRemoveFromQueue}
++            />
++          </View>
++
++          {hasCutoffRestriction && (
++            <View style={styles.sharedInfoBox}>
++              <Text style={styles.sharedInfoText}>
++                Confirmação presencial liberada. Ausência e remoção não estão permitidas no estado atual do evento.
++              </Text>
++            </View>
++          )}
++        </View>
++      )}
++    </View>
++  );
++}
++
++export function EntryQueueListCard({ waiting, waitingCount, externalQueueEnabled, hasPendingCall }) {
++  return (
++    <View style={styles.sectionBlock}>
++      <View style={styles.sectionHeaderRow}>
++        <Text style={styles.sectionLabel}>FILA EXTERNA</Text>
++        <Text style={styles.sectionCount}>{waitingCount} aguardando</Text>
++      </View>
++
++      <View style={styles.card}>
++        {waiting.length === 0 ? (
++          <View style={styles.emptyQueueBox}>
++            <Text style={styles.emptyTitle}>Ninguém está aguardando na fila de entrada.</Text>
++            <Text style={styles.emptySubtitle}>
++              {externalQueueEnabled
++                ? 'Novos participantes aparecerão nesta lista em ordem oficial de chegada.'
++                : 'A fila externa está desativada no momento.'}
++            </Text>
++          </View>
++        ) : (
++          <View>
++            {waiting.map((person, index) => {
++              const isNext = index === 0 && !hasPendingCall;
++              return (
++                <View key={person.participationId}>
++                  {index > 0 && <View style={styles.rowDivider} />}
++                  <View style={styles.queueRow}>
++                    <View style={styles.positionBadge}>
++                      <Text style={styles.positionNumber}>{person.position}</Text>
++                    </View>
++                    <View style={live.grow}>
++                      <Text style={styles.participantName}>{person.displayName}</Text>
++                      <Text style={styles.participantState}>
++                        {isNext ? 'Próximo da fila externa' : 'Aguardando chamada'}
++                      </Text>
++                    </View>
++                    {isNext && (
++                      <View style={styles.nextPill}>
++                        <Text style={styles.nextPillText}>PRÓXIMO</Text>
++                      </View>
++                    )}
++                  </View>
++                </View>
++              );
++            })}
++          </View>
++        )}
++
++        <View style={styles.sharedInfoBox} accessible accessibilityLabel="Ordem FIFO controlada pelo servidor">
++          <AdminIcon name="users" color={c.accent} size={18} />
++          <Text style={styles.sharedInfoText}>
++            A ordem da fila externa é mantida exclusivamente pelo servidor.
++          </Text>
++        </View>
++      </View>
++    </View>
++  );
++}
++
++export function EntryQueueToggleCard({
++  externalQueueEnabled,
++  waitingCount,
++  canManage,
++  disabled,
++  onDisableQueue,
++  onEnableQueue,
++}) {
++  return (
++    <View style={styles.sectionBlock}>
++      <Text style={styles.sectionLabel}>CONTROLE DA FILA</Text>
++      <View style={styles.card}>
++        <Text style={styles.emptyTitle}>
++          {externalQueueEnabled ? 'Desativar fila de entrada' : 'Reativar fila de entrada'}
++        </Text>
++        <Text style={styles.emptySubtitle}>
++          {externalQueueEnabled
++            ? `Ao desativar, os ${waitingCount} participantes aguardando serão liberados sem encerrar o evento.`
++            : 'Ao reativar, apenas novas participações passarão a aguardar chamada externa.'}
++        </Text>
++        <EntryActionButton
++          label={externalQueueEnabled ? 'Desativar fila externa' : 'Reativar fila externa'}
++          variant={externalQueueEnabled ? 'danger' : 'primary'}
++          disabled={disabled || !canManage}
++          onPress={externalQueueEnabled ? onDisableQueue : onEnableQueue}
++        />
++      </View>
++    </View>
++  );
++}
++
++function describeEntryDialog(action, waitingCount) {
++  if (!action) {
++    return { title: '', description: '', variant: 'primary', showsTarget: false };
++  }
++  if (action.kind === 'toggle') {
++    return action.enabled
++      ? {
++          title: 'Reativar fila externa?',
++          description: 'Somente novas participações aguardarão. Quem já entrou permanece ativo.',
++          variant: 'primary',
++          showsTarget: false,
++        }
++      : {
++          title: 'Desativar fila externa?',
++          description: `Todos os ${waitingCount} participantes aguardando serão liberados. Isso não encerra o evento nem altera filas de experiências.`,
++          variant: 'danger',
++          showsTarget: false,
++        };
++  }
++  const metas = {
++    call: { title: 'Chamar próximo participante?', variant: 'primary', showsTarget: false },
++    confirm_call: { title: 'Confirmar entrada presencial?', variant: 'success', showsTarget: true },
++    absent: { title: 'Marcar ausência externa?', variant: 'warning', showsTarget: true },
++    remove: { title: 'Remover da fila externa?', variant: 'danger', showsTarget: true },
++  };
++  const chosen = metas[action.kind] ?? { title: '', variant: 'primary', showsTarget: false };
++  return {
++    title: chosen.title,
++    description: 'Confirme a ação para a chamada externa apresentada. A remoção cancela somente a espera no evento.',
++    variant: chosen.variant,
++    showsTarget: chosen.showsTarget,
++  };
++}
++
++export function EntryConfirmModal({ visible, dialog, pendingCall, waitingCount, onConfirm, onCancel }) {
++  const meta = describeEntryDialog(dialog?.action, waitingCount);
++  const participantLabel = meta.showsTarget ? dialog?.targetName || pendingCall?.displayName : null;
++
++  return (
++    <Modal transparent animationType="fade" visible={visible} onRequestClose={onCancel}>
++      <SafeAreaView style={styles.modalSafe} edges={['top', 'right', 'bottom', 'left']}>
++        <View style={styles.backdrop}>
++          <View style={styles.modalCard} accessibilityViewIsModal>
++            <ScrollView
++              style={styles.modalScroll}
++              contentContainerStyle={styles.modalScrollContent}
++              keyboardShouldPersistTaps="handled"
++              bounces={false}
++              showsVerticalScrollIndicator
++            >
++              <Text style={styles.modalTitle} accessibilityRole="header">{meta.title}</Text>
++              {participantLabel ? (
++                <View style={styles.modalParticipantBox}>
++                  <Text style={styles.modalParticipantCaption}>Participante selecionado</Text>
++                  <Text style={styles.modalParticipantName}>{participantLabel}</Text>
++                </View>
++              ) : null}
++              <Text style={styles.modalText}>{meta.description}</Text>
++              <Text style={styles.modalNote}>
++                Uma resposta incerta bloqueará novas alterações até verificação.
++              </Text>
++              <View style={styles.actionsColumn}>
++                <EntryActionButton
++                  label="CONFIRMAR ALTERAÇÃO"
++                  variant={meta.variant}
++                  disabled={false}
++                  onPress={onConfirm}
++                />
++                <EntryActionButton
++                  label="CANCELAR ALTERAÇÃO"
++                  variant="secondary"
++                  disabled={false}
++                  onPress={onCancel}
++                />
++              </View>
++            </ScrollView>
++          </View>
++        </View>
++      </SafeAreaView>
++    </Modal>
++  );
++}
++
++const SEMANTIC_BUTTONS = {
++  primary: {
++    box: { backgroundColor: c.accentStrong, borderWidth: 1, borderColor: c.accent },
++    text: { color: c.onAccent },
++    iconColor: c.onAccent,
++  },
++  secondary: {
++    box: { backgroundColor: '#251A33', borderWidth: 1, borderColor: c.border },
++    text: { color: c.text },
++    iconColor: c.text,
++  },
++  success: {
++    box: { backgroundColor: 'rgba(16, 185, 129, 0.14)', borderWidth: 1.5, borderColor: '#10B981' },
++    text: { color: c.text },
++    iconColor: '#34D399',
++  },
++  warning: {
++    box: { backgroundColor: 'rgba(245, 158, 11, 0.12)', borderWidth: 1.5, borderColor: '#F59E0B' },
++    text: { color: c.text },
++    iconColor: '#FCD34D',
++  },
++  danger: {
++    box: { backgroundColor: 'rgba(239, 68, 68, 0.14)', borderWidth: 1.5, borderColor: '#EF4444' },
++    text: { color: c.text },
++    iconColor: '#FCA5A5',
++  },
++};
++
++const styles = StyleSheet.create({
++  headerSection: { gap: 4, marginTop: 2 },
++  headerTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 },
++  screenTitle: { color: c.text, fontSize: 28, lineHeight: 34, fontWeight: '700', flexShrink: 1 },
++  eventRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 },
++  eventIconTile: { width: 26, height: 26, borderRadius: 8, backgroundColor: c.iconFill,
++    alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
++  eventName: { color: c.text, fontSize: 16, lineHeight: 22, fontWeight: '700', flexShrink: 1 },
++  headerSubtitle: { color: c.muted, fontSize: 14, lineHeight: 20 },
++  statusPill: { borderRadius: 24, borderWidth: 1, paddingHorizontal: 12, paddingVertical: 5, alignSelf: 'flex-start', maxWidth: '100%' },
++  statusPillText: { fontSize: 11, fontWeight: '700', letterSpacing: 0.7, textTransform: 'uppercase' },
++  pillSuccess: { backgroundColor: 'rgba(16, 185, 129, 0.14)', borderColor: '#10B981' },
++  pillSuccessText: { color: '#34D399' },
++  pillDanger: { backgroundColor: 'rgba(239, 68, 68, 0.14)', borderColor: '#EF4444' },
++  pillDangerText: { color: '#FCA5A5' },
++  sectionBlock: { gap: 8, marginTop: 4 },
++  sectionHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 },
++  sectionLabel: { color: c.accent, fontSize: 13, lineHeight: 18, fontWeight: '700', letterSpacing: 1.3 },
++  sectionCount: { color: c.muted, fontSize: 14, lineHeight: 18, fontWeight: '600' },
++  card: { ...live.card, marginTop: 0, gap: 10 },
++  pendingCard: { ...live.card, marginTop: 0, gap: 12, backgroundColor: '#1B122C', borderWidth: 1.5, borderColor: c.border },
++  metricsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
++  metricTile: { flexGrow: 1, flexBasis: 130, backgroundColor: '#1E152E', borderRadius: 12, padding: 12,
++    borderWidth: 1, borderColor: 'rgba(196, 118, 237, 0.28)', gap: 2 },
++  metricValue: { color: c.text, fontSize: 20, lineHeight: 26, fontWeight: '700' },
++  metricCaption: { color: c.muted, fontSize: 12, lineHeight: 16 },
++  summaryDescription: { color: c.muted, fontSize: 14, lineHeight: 20 },
++  inlineWarningBox: { backgroundColor: c.warningSurface, borderWidth: 1, borderColor: c.warning, borderRadius: 12, padding: 12 },
++  inlineWarningText: { color: '#FDE68A', fontSize: 13, lineHeight: 19 },
++  emptyCallHeader: { flexDirection: 'row', alignItems: 'center', gap: 12 },
++  emptyQueueBox: { gap: 4, paddingVertical: 4 },
++  emptyTitle: { color: c.text, fontSize: 17, lineHeight: 23, fontWeight: '700' },
++  emptySubtitle: { color: c.muted, fontSize: 14, lineHeight: 20 },
++  queueRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10 },
++  rowDivider: { height: 1, backgroundColor: 'rgba(196, 118, 237, 0.25)' },
++  positionBadge: { width: 36, height: 36, borderRadius: 10, backgroundColor: '#5B2E91',
++    alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
++  positionNumber: { color: c.onAccent, fontSize: 15, fontWeight: '700' },
++  participantName: { color: c.text, fontSize: 16, lineHeight: 22, fontWeight: '700' },
++  participantState: { color: c.muted, fontSize: 13, lineHeight: 18 },
++  nextPill: { borderRadius: 16, borderWidth: 1, borderColor: c.border, backgroundColor: c.iconFill,
++    paddingHorizontal: 10, paddingVertical: 4, flexShrink: 0 },
++  nextPillText: { color: c.accent, fontSize: 11, fontWeight: '700', letterSpacing: 0.6 },
++  sharedInfoBox: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: c.iconFill,
++    borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, marginTop: 4 },
++  sharedInfoText: { color: '#E9D8FD', fontSize: 13, lineHeight: 18, fontWeight: '500', flex: 1 },
++  calledHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 },
++  calledIdentity: { flexDirection: 'row', alignItems: 'center', gap: 12, flex: 1, minWidth: 160 },
++  userTile: { width: 44, height: 44, borderRadius: 12, backgroundColor: c.iconFill,
++    alignItems: 'center', justifyContent: 'center', flexShrink: 0, gap: 3 },
++  userHead: { width: 10, height: 10, borderRadius: 5, borderWidth: 1.6, borderColor: c.accent },
++  userShoulders: { width: 18, height: 8, borderTopLeftRadius: 8, borderTopRightRadius: 8,
++    borderWidth: 1.6, borderBottomWidth: 0, borderColor: c.accent },
++  calledName: { color: c.text, fontSize: 18, lineHeight: 24, fontWeight: '700' },
++  calledStatus: { color: c.muted, fontSize: 13, lineHeight: 18 },
++  pendingBadge: { borderRadius: 16, borderWidth: 1, borderColor: '#F59E0B', backgroundColor: 'rgba(245, 158, 11, 0.14)',
++    paddingHorizontal: 10, paddingVertical: 4, alignSelf: 'flex-start' },
++  pendingBadgeText: { color: '#FCD34D', fontSize: 11, fontWeight: '700', letterSpacing: 0.6 },
++  timePillsRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8 },
++  timestampPill: { borderRadius: 20, borderWidth: 1, borderColor: 'rgba(196, 118, 237, 0.45)',
++    backgroundColor: '#251A33', paddingHorizontal: 10, paddingVertical: 5, maxWidth: '100%' },
++  timestampPillText: { color: c.text, fontSize: 12, lineHeight: 16, fontWeight: '600' },
++  cardDivider: { height: 1, backgroundColor: 'rgba(196, 118, 237, 0.28)' },
++  actionPrompt: { color: c.muted, fontSize: 14, lineHeight: 20 },
++  actionsColumn: { gap: 10 },
++  semanticButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10,
++    minHeight: 48, borderRadius: 14, paddingHorizontal: 16, paddingVertical: 12 },
++  semanticButtonText: { fontSize: 15, lineHeight: 20, fontWeight: '700', textAlign: 'center', flexShrink: 1 },
++  actionIconBox: { width: 20, height: 20, alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
++  checkMark: { width: 12, height: 7, borderLeftWidth: 2, borderBottomWidth: 2, transform: [{ rotate: '-45deg' }], marginBottom: 3 },
++  calendarBox: { width: 16, height: 15, borderRadius: 3, borderWidth: 1.5, alignItems: 'center', justifyContent: 'flex-end', overflow: 'hidden' },
++  calendarBar: { position: 'absolute', top: 0, left: 0, right: 0, height: 4 },
++  calendarCross: { fontSize: 10, fontWeight: '800', lineHeight: 11 },
++  trashLid: { width: 14, height: 2, borderRadius: 1, marginBottom: 1.5 },
++  trashCan: { width: 12, height: 12, borderWidth: 1.5, borderTopWidth: 0, borderBottomLeftRadius: 2, borderBottomRightRadius: 2,
++    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-evenly', paddingVertical: 2 },
++  trashLine: { width: 1.5, height: 6, borderRadius: 1 },
++  modalSafe: { flex: 1, backgroundColor: 'rgba(9, 4, 18, 0.8)' },
++  backdrop: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 },
++  modalCard: { width: '100%', maxWidth: 460, maxHeight: '100%', backgroundColor: c.surface, borderWidth: 1, borderColor: c.border, borderRadius: 18, overflow: 'hidden' },
++  modalScroll: { flexGrow: 0, flexShrink: 1 },
++  modalScrollContent: { padding: 20, gap: 12 },
++  modalTitle: { color: c.text, fontSize: 19, lineHeight: 25, fontWeight: '700' },
++  modalParticipantBox: { backgroundColor: '#1E152E', borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10,
++    borderWidth: 1, borderColor: 'rgba(196, 118, 237, 0.35)', gap: 2 },
++  modalParticipantCaption: { color: c.muted, fontSize: 12, lineHeight: 16 },
++  modalParticipantName: { color: c.text, fontSize: 16, lineHeight: 22, fontWeight: '700' },
++  modalText: { color: c.muted, fontSize: 15, lineHeight: 22 },
++  modalNote: { color: '#FCD34D', fontSize: 13, lineHeight: 19 },
++  disabled: { opacity: 0.45 },
++  pressed: { opacity: 0.75 },
++});
+diff --git a/app/tests/staffEntryControlScreen.test.cjs b/app/tests/staffEntryControlScreen.test.cjs
+new file mode 100644
+index 0000000..57a63da
+--- /dev/null
++++ b/app/tests/staffEntryControlScreen.test.cjs
+@@ -0,0 +1,577 @@
++const assert = require('node:assert/strict');
++const path = require('node:path');
++const test = require('node:test');
++const { createRequire } = require('node:module');
++const { loadModule } = require('./helpers/questionnaireHarness.cjs');
++
++const qaRequire = createRequire(path.resolve(__dirname, '../../qa/regression/package.json'));
++let deps = null;
++try {
++  deps = {
++    React: qaRequire('react'),
++    jsx: qaRequire('react/jsx-runtime'),
++    Renderer: qaRequire('react-test-renderer'),
++  };
++} catch {
++  deps = null;
++}
++const skip = deps ? false : 'dependências de qa/regression não instaladas (npm ci em qa/regression)';
++
++const EV_A = '11111111-1111-4111-8111-111111111111';
++const USER_1 = 'abcdef00-0000-4000-8000-000000000001';
++const SESSION_1 = '10000000-0000-4000-8000-000000000001';
++const PART_1 = '77777777-7777-4777-8777-777777777771';
++const PART_2 = '77777777-7777-4777-8777-777777777772';
++const CALL_1 = '88888888-8888-4888-8888-888888888881';
++const CALL_2 = '88888888-8888-4888-8888-888888888882';
++const AT = '2026-11-19T15:00:00.000Z';
++
++const deferred = () => {
++  let resolve;
++  let reject;
++  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
++  return { promise, resolve, reject };
++};
++
++// ============================================================================
++// 1. Testes unitários do helper puro de horário formatado da chamada
++// ============================================================================
++
++const pureEntrySections = (() => {
++  const nativeStub = Object.fromEntries(['Modal', 'Pressable', 'ScrollView', 'Text', 'View'].map((n) => [n, n]));
++  nativeStub.StyleSheet = { create: (s) => s };
++  const adminTheme = loadModule('screens/admin/components/adminTheme.js', require).exports;
++  const adminLiveUi = loadModule('screens/admin/components/AdminLiveUI.js', (name) => {
++    if (name === 'react/jsx-runtime') return require('react/jsx-runtime');
++    if (name === 'react-native') return nativeStub;
++    if (name === './adminTheme') return adminTheme;
++    return require(name);
++  }).exports;
++  const stationSections = loadModule('screens/staff/components/StaffStationSections.js', (name) => {
++    if (name === 'react') return require('react');
++    if (name === 'react/jsx-runtime') return require('react/jsx-runtime');
++    if (name === 'react-native') return nativeStub;
++    if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView' };
++    if (name === '../../admin/components/AdminLiveUI') return adminLiveUi;
++    return require(name);
++  }).exports;
++  return loadModule('screens/staff/components/StaffEntrySections.js', (name) => {
++    if (name === 'react') return require('react');
++    if (name === 'react/jsx-runtime') return require('react/jsx-runtime');
++    if (name === 'react-native') return nativeStub;
++    if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView' };
++    if (name === '../../admin/components/AdminLiveUI') return adminLiveUi;
++    if (name === './StaffStationSections') return stationSections;
++    return require(name);
++  }).exports;
++})();
++
++test('STAFF-03: formatEntryCallTimestamp formata instante ISO válido e descarta entradas inválidas', () => {
++  assert.equal(pureEntrySections.formatEntryCallTimestamp('2026-11-19T15:30:12.000Z', { timeZone: 'UTC' }), 'Chamado às 15:30');
++  assert.equal(pureEntrySections.formatEntryCallTimestamp('2026-11-19T15:05:00.123456Z', { timeZone: 'America/Sao_Paulo' }), 'Chamado às 12:05');
++  assert.equal(pureEntrySections.formatEntryCallTimestamp('', { timeZone: 'UTC' }), null);
++  assert.equal(pureEntrySections.formatEntryCallTimestamp('invalido', { timeZone: 'UTC' }), null);
++  assert.equal(pureEntrySections.formatEntryCallTimestamp(null), null);
++});
++
++// ============================================================================
++// 2. Harness real React + React Test Renderer para StaffEntryControlRealScreen
++// ============================================================================
++
++function createEntryScreenHarness({
++  initialEvent = { id: EV_A, name: 'Arena Oficial UNDB' },
++  initialAuth = {
++    isAuthenticated: true,
++    user: { id: USER_1, roles: ['staff'] },
++    sessionId: SESSION_1,
++    isIdentityVerified: () => true,
++    getSessionEpoch: () => 1,
++    getIdentityRevision: () => 1,
++  },
++  onGet,
++  onPost,
++  onPatch,
++  onAccessDenied = () => {},
++  secureInitial = new Map(),
++  secureAvailable = true,
++  platformOS = 'android',
++  getNow = () => Date.parse('2026-11-19T15:00:23.000Z'),
++} = {}) {
++  const { React, jsx, Renderer } = deps;
++  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
++
++  const secureValues = new Map(secureInitial);
++  let deleteCalls = 0;
++  let keySerial = 0;
++  let pollingRegistration = null;
++  let authState = initialAuth;
++  let eventProp = initialEvent;
++  let accessDeniedProp = false;
++  let accessDeniedKindProp = 'denied';
++  let eventCurrentFlag = true;
++  let focused = true;
++  const focusListeners = new Set();
++  const appStateListeners = new Set();
++
++  const native = Object.fromEntries(
++    ['ActivityIndicator', 'Modal', 'Pressable', 'ScrollView', 'Text', 'View'].map((name) => [name, name]),
++  );
++  native.StyleSheet = { create: (styles) => styles };
++  native.Platform = { OS: platformOS };
++  native.AppState = {
++    currentState: 'active',
++    addEventListener: (_, listener) => {
++      appStateListeners.add(listener);
++      return { remove: () => appStateListeners.delete(listener) };
++    },
++  };
++
++  const AuthCtx = React.createContext(null);
++  const authModule = { AuthContext: AuthCtx, useAuth: () => React.useContext(AuthCtx) };
++
++  const entrySvc = loadModule('services/staffEntryService.js', require).exports;
++  const entryStorageSvc = loadModule('services/staffEntryIntentStorage.js', (name) => {
++    if (name === 'react-native') return native;
++    if (name === 'expo-secure-store') {
++      return {
++        isAvailableAsync: async () => secureAvailable,
++        getItemAsync: async (key) => secureValues.get(key) ?? null,
++        setItemAsync: async (key, value) => { secureValues.set(key, value); },
++        deleteItemAsync: async (key) => { deleteCalls += 1; secureValues.delete(key); },
++      };
++    }
++    if (name === './staffEntryService') return entrySvc;
++    return require(name);
++  }).exports;
++
++  const adminTheme = loadModule('screens/admin/components/adminTheme.js', require).exports;
++  const adminLiveUi = loadModule('screens/admin/components/AdminLiveUI.js', (name) => {
++    if (name === 'react/jsx-runtime') return jsx;
++    if (name === 'react-native') return native;
++    if (name === './adminTheme') return adminTheme;
++    return require(name);
++  }).exports;
++  const stationSections = loadModule('screens/staff/components/StaffStationSections.js', (name) => {
++    if (name === 'react') return React;
++    if (name === 'react/jsx-runtime') return jsx;
++    if (name === 'react-native') return native;
++    if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView' };
++    if (name === '../../admin/components/AdminLiveUI') return adminLiveUi;
++    return require(name);
++  }).exports;
++  const entrySections = loadModule('screens/staff/components/StaffEntrySections.js', (name) => {
++    if (name === 'react') return React;
++    if (name === 'react/jsx-runtime') return jsx;
++    if (name === 'react-native') return native;
++    if (name === 'react-native-safe-area-context') return { SafeAreaView: 'SafeAreaView' };
++    if (name === '../../admin/components/AdminLiveUI') return adminLiveUi;
++    if (name === './StaffStationSections') return stationSections;
++    return require(name);
++  }).exports;
++
++  const StaffEntryControlRealScreen = loadModule('screens/staff/StaffEntryControlRealScreen.js', (name) => {
++    if (name === 'react') return React;
++    if (name === 'react/jsx-runtime') return jsx;
++    if (name === 'react-native') return native;
++    if (name === '@react-navigation/native') {
++      return {
++        useIsFocused: () => {
++          const [, bump] = React.useState(0);
++          React.useEffect(() => {
++            const fn = () => bump((n) => n + 1);
++            focusListeners.add(fn);
++            return () => focusListeners.delete(fn);
++          }, []);
++          return focused;
++        },
++      };
++    }
++    if (name === 'expo-crypto') {
++      return { randomUUID: () => `50000000-0000-4000-8000-${String(++keySerial).padStart(12, '0')}` };
++    }
++    if (name === '../../context/AuthContext') return authModule;
++    if (name === '../../services/staffEntryService') return entrySvc;
++    if (name === '../../services/staffEntryIntentStorage') return entryStorageSvc;
++    if (name === '../admin/components/AdminLiveUI') return adminLiveUi;
++    if (name === './components/StaffEntrySections') return entrySections;
++    if (name === './useStaffPolling') {
++      return {
++        useStaffPolling(enabled, read, intervalMs, scope) {
++          pollingRegistration = { enabled, read, intervalMs, scope };
++        },
++      };
++    }
++    return require(name);
++  }).exports.default;
++
++  const httpClient = {
++    get: (url, opts) => onGet(url, opts),
++    post: (url, body, opts) => onPost(url, body, opts),
++    patch: (url, body, opts) => onPatch(url, body, opts),
++  };
++
++  const renderEl = () => React.createElement(
++    AuthCtx.Provider,
++    { value: { ...authState, httpClient } },
++    React.createElement(StaffEntryControlRealScreen, {
++      event: eventProp,
++      isEventCurrent: () => eventCurrentFlag,
++      accessDenied: accessDeniedProp,
++      accessDeniedKind: accessDeniedKindProp,
++      onAccessDenied,
++      getNow,
++    }),
++  );
++
++  let tree = null;
++  const flatten = (value) => (Array.isArray(value)
++    ? value.map(flatten).join('')
++    : value && typeof value === 'object'
++      ? flatten(value.props?.children)
++      : String(value ?? ''));
++
++  return {
++    secureValues,
++    getDeleteCalls: () => deleteCalls,
++    getPolling: () => pollingRegistration,
++    async mount() {
++      await Renderer.act(async () => {
++        tree = Renderer.create(renderEl());
++      });
++    },
++    async rerender(patch = {}) {
++      if ('auth' in patch) authState = patch.auth;
++      if ('event' in patch) eventProp = patch.event;
++      if ('accessDenied' in patch) accessDeniedProp = patch.accessDenied;
++      if ('accessDeniedKind' in patch) accessDeniedKindProp = patch.accessDeniedKind;
++      if ('eventCurrent' in patch) eventCurrentFlag = patch.eventCurrent;
++      await Renderer.act(async () => {
++        tree.update(renderEl());
++      });
++    },
++    async setFocused(nextFocused) {
++      focused = nextFocused;
++      await Renderer.act(async () => {
++        for (const fn of [...focusListeners]) fn();
++      });
++    },
++    async setAppState(nextState) {
++      native.AppState.currentState = nextState;
++      await Renderer.act(async () => {
++        for (const fn of [...appStateListeners]) fn(nextState);
++      });
++    },
++    async act(work) {
++      await Renderer.act(work);
++    },
++    allTexts() {
++      return tree.root.findAllByType('Text').map((n) => flatten(n.props.children));
++    },
++    hasText(fragment) {
++      return this.allTexts().some((t) => t.includes(fragment));
++    },
++    hasExactText(exact) {
++      return this.allTexts().some((t) => t.trim() === exact);
++    },
++    hasEntryRow(position, displayName, isNext = false) {
++      return tree.root.findAllByType('View').some((row) => {
++        const children = (row.children ?? []).filter((n) => n && typeof n === 'object' && n.type === 'View');
++        if (children.length < 2 || children.length > 3) return false;
++        const left = children[0].findAllByType('Text').map((n) => flatten(n.props.children).trim());
++        const right = children[1].findAllByType('Text').map((n) => flatten(n.props.children).trim());
++        const badge = children[2] ? children[2].findAllByType('Text').map((n) => flatten(n.props.children).trim()) : [];
++        return left.length === 1
++          && left[0] === String(position)
++          && right.includes(displayName)
++          && (isNext ? badge.includes('PRÓXIMO') : badge.length === 0);
++      });
++    },
++    pressables(label) {
++      return tree.root.findAllByType('Pressable').filter((n) => n.props.accessibilityLabel === label);
++    },
++    hasButton(label) {
++      return this.pressables(label).length > 0;
++    },
++    isDisabled(label) {
++      const matches = this.pressables(label);
++      assert.equal(matches.length, 1, `botão esperado: ${label}`);
++      return Boolean(matches[0].props.disabled);
++    },
++    handler(label) {
++      const matches = this.pressables(label);
++      assert.equal(matches.length, 1, `handler esperado: ${label}`);
++      return matches[0].props.onPress;
++    },
++    async press(label) {
++      const fn = this.handler(label);
++      assert.ok(fn, `botão ${label} não deve estar desabilitado ao pressionar`);
++      await Renderer.act(async () => {
++        await fn();
++      });
++    },
++    modals() {
++      return tree.root.findAllByType('Modal');
++    },
++    safeViews() {
++      return tree.root.findAllByType('SafeAreaView');
++    },
++    scrollViews() {
++      return tree.root.findAllByType('ScrollView');
++    },
++    unmount() {
++      tree.unmount();
++    },
++  };
++}
++
++function buildState({
++  enabled = true,
++  canManage = true,
++  pendingCall = null,
++  waiting = [],
++  canCall = enabled && canManage && !pendingCall && waiting.length > 0,
++  canConfirm = enabled && canManage && Boolean(pendingCall),
++  canMarkAbsent = enabled && canManage && Boolean(pendingCall),
++  canRemove = enabled && canManage && Boolean(pendingCall),
++} = {}) {
++  return {
++    eventId: EV_A,
++    externalQueueEnabled: enabled,
++    canManage,
++    observedAt: AT,
++    pendingCall,
++    canCall,
++    canConfirm,
++    canMarkAbsent,
++    canRemove,
++    waitingCount: waiting.length,
++    waiting,
++  };
++}
++
++test('STAFF-03 tela Controle de Entrada: fila vazia, fila inativa, resumo e polling honesto', { skip }, async () => {
++  let serverState = buildState({ enabled: true, waiting: [] });
++  const h = createEntryScreenHarness({
++    onGet: async () => serverState,
++  });
++
++  await h.mount();
++  assert.ok(h.hasExactText('Controle de Entrada'));
++  assert.ok(h.hasExactText('Arena Oficial UNDB'));
++  assert.ok(h.hasExactText('FILA ATIVA'));
++  assert.ok(h.hasText('Ninguém está aguardando na fila de entrada.'));
++  assert.ok(h.hasExactText('Nenhum participante chamado'));
++  assert.equal(h.isDisabled('Chamar próximo'), true);
++  assert.equal(h.isDisabled('Desativar fila externa'), false);
++  assert.ok(h.hasExactText('Atualização automática ativa · a cada 5s'));
++  assert.equal(h.getPolling().enabled, true);
++
++  await h.setFocused(false);
++  assert.ok(h.hasExactText('Atualização temporariamente pausada'));
++  await h.setFocused(true);
++  assert.ok(h.hasExactText('Atualização automática ativa · a cada 5s'));
++
++  await h.setAppState('background');
++  assert.ok(h.hasExactText('Atualização temporariamente pausada'));
++  await h.setAppState('active');
++  assert.ok(h.hasExactText('Atualização automática ativa · a cada 5s'));
++
++  // Fila inativa -> FILA INATIVA e Reativar habilitado
++  serverState = buildState({ enabled: false, waiting: [] });
++  await h.press('Atualizar fila de entrada');
++  assert.ok(h.hasExactText('FILA INATIVA'));
++  assert.equal(h.isDisabled('Chamar próximo'), true);
++  assert.equal(h.isDisabled('Reativar fila externa'), false);
++  h.unmount();
++});
++
++test('STAFF-03 tela Controle de Entrada: chamada destacada sem duplicidade, clique duplo e confirmação', { skip }, async () => {
++  const requests = [];
++  let waiting = [
++    { participationId: PART_1, displayName: 'Mariana Costa', position: 1 },
++    { participationId: PART_2, displayName: 'Lucas Ferreira', position: 2 },
++  ];
++  let pendingCall = null;
++  const h = createEntryScreenHarness({
++    getNow: () => Date.parse('2026-11-19T15:00:23.000Z'),
++    onGet: async () => buildState({ enabled: true, pendingCall, waiting }),
++    onPost: async (route, _body, opts) => {
++      requests.push({ route, key: opts?.headers?.['Idempotency-Key'] });
++      if (route.endsWith('/call-next')) {
++        const person = waiting.shift();
++        waiting = waiting.map((item, idx) => ({ ...item, position: idx + 1 }));
++        pendingCall = { id: CALL_1, participationId: person.participationId, displayName: person.displayName, calledAt: AT };
++        return {
++          eventId: EV_A,
++          call: { id: CALL_1, participationId: person.participationId, status: 'pending', calledAt: AT, resolvedAt: null },
++          participation: { id: person.participationId, status: 'waiting', arenaEnteredAt: null, finishReason: null, externalQueueOrder: '1' },
++          requeued: false,
++        };
++      }
++      if (route.endsWith('/confirm')) {
++        const personId = pendingCall.participationId;
++        pendingCall = null;
++        return {
++          eventId: EV_A,
++          call: { id: CALL_1, participationId: personId, status: 'confirmed', calledAt: AT, resolvedAt: AT },
++          participation: { id: personId, status: 'active', arenaEnteredAt: AT, finishReason: null, externalQueueOrder: '1' },
++          requeued: false,
++        };
++      }
++      throw new Error(`POST inesperado: ${route}`);
++    },
++  });
++
++  await h.mount();
++  assert.equal(h.hasEntryRow(1, 'Mariana Costa', true), true);
++  assert.equal(h.hasEntryRow(2, 'Lucas Ferreira', false), true);
++  assert.equal(h.isDisabled('Chamar próximo'), false);
++
++  // Clique duplo em "Chamar próximo" gera exatamente 1 POST
++  const callHandler = h.handler('Chamar próximo');
++  await h.act(async () => {
++    await Promise.all([callHandler(), callHandler()]);
++  });
++  assert.equal(requests.length, 1);
++  assert.equal(h.modals()[0].props.visible, false);
++
++  // Participante chamada aparece em destaque no card de chamada e não duplicada na fila
++  assert.ok(h.hasExactText('Mariana Costa'));
++  assert.ok(h.hasExactText('CHAMADA PENDENTE'));
++  assert.ok(h.hasExactText('Chamado há 00:23'));
++  assert.ok(h.hasText('Chamado às '));
++  assert.equal(h.hasEntryRow(1, 'Mariana Costa', false), false);
++  assert.equal(h.hasEntryRow(1, 'Mariana Costa', true), false);
++  assert.equal(h.hasEntryRow(1, 'Lucas Ferreira', false), true);
++  assert.equal(h.hasButton('Chamar próximo'), false);
++
++  // Modal de confirmação preserva SafeAreaView + ScrollView e nome do participante
++  await h.press('Confirmar entrada');
++  assert.equal(h.modals()[0].props.visible, true);
++  assert.ok(h.safeViews().length >= 1);
++  assert.ok(h.scrollViews().length >= 1);
++  assert.ok(h.hasExactText('Confirmar entrada presencial?'));
++  await h.press('CONFIRMAR ALTERAÇÃO');
++
++  assert.equal(requests.length, 2);
++  assert.ok(h.hasText('Entrada confirmada pelo servidor.'));
++  assert.equal(h.hasEntryRow(1, 'Lucas Ferreira', true), true);
++  assert.equal(h.hasText('Mariana Costa'), false);
++  h.unmount();
++});
++
++test('STAFF-03 tela Controle de Entrada respeita flags independentes do servidor (cutoff parcial e !canManage)', { skip }, async () => {
++  const calledState = buildState({
++    enabled: true,
++    canManage: true,
++    pendingCall: { id: CALL_1, participationId: PART_1, displayName: 'Ana Clara', calledAt: AT },
++    waiting: [{ participationId: PART_2, displayName: 'Lucas Ferreira', position: 1 }],
++    canCall: false,
++    canConfirm: true,
++    canMarkAbsent: false,
++    canRemove: false,
++  });
++  let serverState = calledState;
++  const h = createEntryScreenHarness({
++    onGet: async () => serverState,
++  });
++
++  await h.mount();
++  assert.equal(h.isDisabled('Confirmar entrada'), false);
++  assert.equal(h.isDisabled('Marcar ausência'), true);
++  assert.equal(h.isDisabled('Remover da fila'), true);
++  assert.ok(h.hasText('Confirmação presencial liberada. Ausência e remoção não estão permitidas no estado atual do evento.'));
++
++  serverState = buildState({
++    enabled: true,
++    canManage: false,
++    pendingCall: { id: CALL_1, participationId: PART_1, displayName: 'Ana Clara', calledAt: AT },
++    waiting: [],
++    canCall: false,
++    canConfirm: false,
++    canMarkAbsent: false,
++    canRemove: false,
++  });
++  await h.press('Atualizar fila de entrada');
++  assert.equal(h.isDisabled('Confirmar entrada'), true);
++  assert.equal(h.isDisabled('Desativar fila externa'), true);
++  assert.ok(h.hasText('O evento não permite entradas ou alterações da fila neste momento.'));
++  h.unmount();
++});
++
++test('STAFF-03 modal seguro, incerteza dispatching e limpeza imediata em revogação 403/401', { skip }, async () => {
++  let mode = 'ok';
++  let deniedReason = null;
++  let posts = 0;
++  const initial = buildState({
++    enabled: true,
++    pendingCall: { id: CALL_2, participationId: PART_1, displayName: 'Pedro Henrique', calledAt: AT },
++    waiting: [{ participationId: PART_2, displayName: 'Beatriz Alves', position: 1 }],
++  });
++
++  const h = createEntryScreenHarness({
++    onGet: async () => {
++      if (mode === '403') throw { status: 403, code: 'STAFF_EVENT_FORBIDDEN' };
++      if (mode === '401') throw { status: 401, code: 'SESSION_REVOKED' };
++      return initial;
++    },
++    onPost: async () => {
++      posts += 1;
++      throw Object.assign(new Error('offline'), { isNetworkError: true });
++    },
++    onAccessDenied: (kind) => {
++      deniedReason = kind;
++      void h.rerender({ accessDenied: true, accessDeniedKind: kind });
++    },
++  });
++
++  await h.mount();
++  await h.press('Marcar ausência');
++  assert.equal(h.modals()[0].props.visible, true);
++
++  // Perda de rede durante confirmação gera estado incerto bloqueante sem apagar intenção
++  await h.press('CONFIRMAR ALTERAÇÃO');
++  assert.equal(posts, 1);
++  assert.ok(h.hasText('O resultado de uma solicitação ainda não foi confirmado'));
++  assert.equal(h.isDisabled('Confirmar entrada'), true);
++  assert.equal(h.isDisabled('Desativar fila externa'), true);
++  assert.equal(h.secureValues.size > 0, true);
++  assert.equal(h.getDeleteCalls(), 0);
++
++  // 403 limpa imediatamente dados nominais e preserva intenção persistida em SecureStore
++  mode = '403';
++  await h.press('Atualizar fila de entrada');
++  assert.equal(deniedReason, 'denied');
++  assert.equal(h.hasText('Pedro Henrique'), false);
++  assert.equal(h.hasText('Beatriz Alves'), false);
++  assert.ok(h.hasText('Acesso ao evento indisponível'));
++  assert.equal(h.secureValues.size > 0, true);
++  assert.equal(h.getDeleteCalls(), 0);
++  h.unmount();
++
++  // 401 também fecha modal aberto e descarta callbacks pendentes antes da entrega
++  let denied401 = null;
++  let postMutations = 0;
++  const h401 = createEntryScreenHarness({
++    onGet: async () => (denied401 === 'trigger' ? Promise.reject({ status: 401, code: 'SESSION_REVOKED' }) : initial),
++    onPost: async () => { postMutations += 1; },
++    onAccessDenied: (kind) => {
++      denied401 = kind;
++      void h401.rerender({ accessDenied: true, accessDeniedKind: kind });
++    },
++  });
++  await h401.mount();
++  await h401.press('Remover da fila');
++  assert.equal(h401.modals()[0].props.visible, true);
++  const staleConfirm = h401.handler('CONFIRMAR ALTERAÇÃO');
++
++  denied401 = 'trigger';
++  await h401.act(async () => { await h401.getPolling().read(); });
++  assert.equal(denied401, 'session');
++  assert.equal(h401.modals().length, 0);
++  await h401.act(async () => { await staleConfirm(); });
++  assert.equal(postMutations, 0);
++  assert.equal(h401.hasText('Pedro Henrique'), false);
++  assert.ok(h401.hasText('Sessão inválida'));
++  h401.unmount();
++});
+diff --git a/backend/test/integration/staff03-external-call-projection.integration.test.ts b/backend/test/integration/staff03-external-call-projection.integration.test.ts
+new file mode 100644
+index 0000000..f47748e
+--- /dev/null
++++ b/backend/test/integration/staff03-external-call-projection.integration.test.ts
+@@ -0,0 +1,207 @@
++import assert from "node:assert/strict";
++import { randomUUID } from "node:crypto";
++import { test } from "node:test";
++import { sql } from "drizzle-orm";
++import { drizzle } from "drizzle-orm/node-postgres";
++import { Client } from "pg";
++import * as schema from "../../src/database/schema";
++import { participationProjection, publicParticipation, type ParticipationProjectionRow } from "../../src/participations/participation-query.service";
++import { assertSafeStaffEntryCallsSchemaDatabase } from "./test-db-guard";
++
++// Executa apenas em campanha PostgreSQL explícita; nunca persiste fixtures nem apaga dados históricos.
++function authorizedDatabaseUrl(): string {
++  if (process.env.NODE_ENV !== "test" || process.env.STAFF03_POSTGRES_PROJECTION_TEST !== "authorized-local") {
++    throw new Error("Campanha PostgreSQL da STAFF-03 exige autorização explícita e NODE_ENV=test.");
++  }
++  const urls = ["DATABASE_URL", "DATABASE_DIRECT_URL", "EVENTS_TEST_DATABASE_URL"].map((name) =>
++    assertSafeStaffEntryCallsSchemaDatabase(process.env[name]),
++  );
++  const parsed = new URL(urls[0]);
++  if (
++    urls.some((value) => value !== urls[0])
++    || parsed.hostname !== "127.0.0.1"
++    || parsed.port !== "55432"
++    || parsed.pathname !== "/arenago_staff_homolog_20261111"
++    || parsed.search
++    || parsed.hash
++  ) {
++    throw new Error("Configuração PostgreSQL da STAFF-03 exige 127.0.0.1:55432/arenago_staff_homolog_20261111.");
++  }
++  return urls[0];
++}
++
++test("STAFF-03 PostgreSQL: projeção externalEntryCall integra ciclo de chamadas, triggers 0008, corte, D06 e encerramento sem persistir fixtures", async () => {
++  const connectionString = authorizedDatabaseUrl();
++  const client = new Client({ connectionString, connectionTimeoutMillis: 2000, statement_timeout: 5000 });
++  const observer = new Client({ connectionString, connectionTimeoutMillis: 2000, statement_timeout: 5000 });
++
++  const staffId = randomUUID();
++  const user1Id = randomUUID();
++  const user2Id = randomUUID();
++  const event1Id = randomUUID();
++  const event2Id = randomUUID();
++  const p1Id = randomUUID();
++  const p2Id = randomUUID();
++  const pOtherId = randomUUID();
++  const call1Id = randomUUID();
++  const call2Id = randomUUID();
++
++  await client.connect();
++  try {
++    await observer.connect();
++    assert.deepEqual(
++      (await client.query("SELECT current_database() AS name, inet_server_port() AS port")).rows[0],
++      { name: "arenago_staff_homolog_20261111", port: 55432 },
++    );
++    assert.ok(
++      (await client.query("SELECT to_regclass('public.external_entry_calls') AS name")).rows[0].name,
++      "Migration 0008_external_entry_calls precisa estar aplicada no banco de validação.",
++    );
++
++    const db = drizzle(client as unknown as ConstructorParameters<typeof drizzle>[0], { schema });
++    const project = async (userId: string, participationId?: string, at?: ReturnType<typeof sql>) => {
++      const rows = (await db.execute<ParticipationProjectionRow>(participationProjection(userId, participationId, at))).rows;
++      return rows.map((row) => publicParticipation(row));
++    };
++
++    await client.query("BEGIN");
++    try {
++      for (const uid of [staffId, user1Id, user2Id]) {
++        await client.query(
++          "INSERT INTO users(id,name,email,password_hash,email_verified_at,created_at,updated_at) VALUES($1,'STAFF-03 PG',$2,'non-auth-hash',clock_timestamp(),clock_timestamp(),clock_timestamp())",
++          [uid, `${uid}@example.test`],
++        );
++      }
++      for (const eid of [event1Id, event2Id]) {
++        await client.query(
++          `INSERT INTO events(id,name,access_code_normalized,timezone,starts_at,official_ends_at,operational_deadline_at,status,external_queue_enabled,external_last_order,created_at,updated_at)
++           VALUES($1,'Evento STAFF-03 PG',$2,'America/Sao_Paulo',clock_timestamp()-interval '1 hour',clock_timestamp()+interval '1 hour',clock_timestamp()+interval '90 minutes','open',true,10,clock_timestamp(),clock_timestamp())`,
++          [eid, eid.toUpperCase()],
++        );
++      }
++      await client.query("INSERT INTO user_roles(id,user_id,role,event_id,granted_at) VALUES($1,$2,'staff',$3,clock_timestamp())", [randomUUID(), staffId, event1Id]);
++
++      await client.query("INSERT INTO participations(id,user_id,event_id,status,joined_at,external_queue_order) VALUES($1,$2,$3,'waiting',clock_timestamp(),1)", [p1Id, user1Id, event1Id]);
++      await client.query("INSERT INTO participations(id,user_id,event_id,status,joined_at,external_queue_order) VALUES($1,$2,$3,'waiting',clock_timestamp(),2)", [p2Id, user2Id, event1Id]);
++      await client.query("INSERT INTO participations(id,user_id,event_id,status,joined_at,external_queue_order) VALUES($1,$2,$3,'waiting',clock_timestamp(),1)", [pOtherId, user1Id, event2Id]);
++
++      // 1. Sem chamada externa pendente -> externalEntryCall null
++      const initial = await project(user1Id, p1Id);
++      assert.equal(initial.length, 1);
++      assert.equal(initial[0].status, "waiting");
++      assert.equal(initial[0].externalQueue?.position, 1);
++      assert.equal(initial[0].externalEntryCall, null);
++
++      // 2. Staff chama p1 -> p1 recebe externalEntryCall; p2 e outro evento permanecem isolados
++      await client.query(
++        "INSERT INTO external_entry_calls(id,event_id,participation_id,called_by_user_id,called_at,status) VALUES($1,$2,$3,$4,clock_timestamp(),'pending')",
++        [call1Id, event1Id, p1Id, staffId],
++      );
++      await client.query("SET CONSTRAINTS ALL IMMEDIATE");
++
++      const calledView = await project(user1Id, p1Id);
++      assert.equal(calledView[0].externalEntryCall?.callId, call1Id);
++      assert.equal(calledView[0].externalEntryCall?.participationId, p1Id);
++      assert.equal(calledView[0].externalEntryCall?.eventId, event1Id);
++      assert.equal(calledView[0].externalEntryCall?.kind, "external_entry");
++      assert.equal(calledView[0].externalEntryCall?.status, "pending");
++      assert.match(calledView[0].externalEntryCall?.calledAt ?? "", /\.\d{6}Z$/);
++      assert.equal(JSON.stringify(calledView[0]).includes(staffId), false);
++      assert.equal(JSON.stringify(calledView[0]).includes(user1Id), false);
++
++      assert.equal((await project(user2Id, p2Id))[0].externalEntryCall, null);
++      assert.equal((await project(user1Id, pOtherId))[0].externalEntryCall, null);
++      assert.equal((await project(user2Id, p1Id)).length, 0);
++
++      // 3. Confirmação -> active sem chamada pendente
++      await client.query("SAVEPOINT sp_confirm");
++      await client.query("UPDATE participations SET status='active', arena_entered_at=clock_timestamp() WHERE id=$1", [p1Id]);
++      await client.query("UPDATE external_entry_calls SET status='confirmed', resolved_by_user_id=$1, resolved_at=(SELECT arena_entered_at FROM participations WHERE id=$2), resolution_reason='staff_entry_confirmed' WHERE id=$3", [staffId, p1Id, call1Id]);
++      await client.query("SET CONSTRAINTS ALL IMMEDIATE");
++      const activeView = await project(user1Id, p1Id);
++      assert.equal(activeView[0].status, "active");
++      assert.equal(activeView[0].externalQueue, null);
++      assert.equal(activeView[0].externalEntryCall, null);
++      await client.query("ROLLBACK TO SAVEPOINT sp_confirm");
++      await client.query("RELEASE SAVEPOINT sp_confirm");
++
++      // 4. Ausência com reinserção + segunda chamada -> limpa call1 e gera call2 distinta
++      await client.query("SAVEPOINT sp_absent_requeue");
++      await client.query("UPDATE participations SET external_queue_order=3 WHERE id=$1", [p1Id]);
++      await client.query("UPDATE external_entry_calls SET status='absent', resolved_by_user_id=$1, resolved_at=clock_timestamp(), resolution_reason='staff_entry_absent_requeued' WHERE id=$2", [staffId, call1Id]);
++      await client.query("SET CONSTRAINTS ALL IMMEDIATE");
++      const requeuedView = await project(user1Id, p1Id);
++      assert.equal(requeuedView[0].status, "waiting");
++      assert.equal(requeuedView[0].externalQueue?.position, 2);
++      assert.equal(requeuedView[0].externalEntryCall, null);
++
++      await client.query(
++        "INSERT INTO external_entry_calls(id,event_id,participation_id,called_by_user_id,called_at,status) VALUES($1,$2,$3,$4,clock_timestamp(),'pending')",
++        [call2Id, event1Id, p1Id, staffId],
++      );
++      await client.query("SET CONSTRAINTS ALL IMMEDIATE");
++      const secondCallView = await project(user1Id, p1Id);
++      assert.equal(secondCallView[0].externalEntryCall?.callId, call2Id);
++      assert.notEqual(secondCallView[0].externalEntryCall?.callId, call1Id);
++      await client.query("ROLLBACK TO SAVEPOINT sp_absent_requeue");
++      await client.query("RELEASE SAVEPOINT sp_absent_requeue");
++
++      // 5. Ausência após corte -> finished sem externalEntryCall
++      await client.query("SAVEPOINT sp_absent_cutoff");
++      await client.query("UPDATE participations SET status='finished', finished_at=clock_timestamp(), finish_reason='external_absence_after_entry_cutoff' WHERE id=$1", [p1Id]);
++      await client.query("UPDATE external_entry_calls SET status='absent', resolved_by_user_id=$1, resolved_at=(SELECT finished_at FROM participations WHERE id=$2), resolution_reason='external_absence_after_entry_cutoff' WHERE id=$3", [staffId, p1Id, call1Id]);
++      await client.query("SET CONSTRAINTS ALL IMMEDIATE");
++      const cutoffView = await project(user1Id, p1Id);
++      assert.equal(cutoffView[0].status, "finished");
++      assert.equal(cutoffView[0].externalEntryCall, null);
++      await client.query("ROLLBACK TO SAVEPOINT sp_absent_cutoff");
++      await client.query("RELEASE SAVEPOINT sp_absent_cutoff");
++
++      // 6. Remoção pelo Staff -> canceled sem externalEntryCall
++      await client.query("SAVEPOINT sp_removed");
++      await client.query("UPDATE participations SET status='canceled', finished_at=clock_timestamp(), finish_reason='staff_external_wait_removed' WHERE id=$1", [p1Id]);
++      await client.query("UPDATE external_entry_calls SET status='removed', resolved_by_user_id=$1, resolved_at=(SELECT finished_at FROM participations WHERE id=$2), resolution_reason='staff_external_wait_removed' WHERE id=$3", [staffId, p1Id, call1Id]);
++      await client.query("SET CONSTRAINTS ALL IMMEDIATE");
++      const removedView = await project(user1Id, p1Id);
++      assert.equal(removedView[0].status, "canceled");
++      assert.equal(removedView[0].externalEntryCall, null);
++      await client.query("ROLLBACK TO SAVEPOINT sp_removed");
++      await client.query("RELEASE SAVEPOINT sp_removed");
++
++      // 7. Desativação da fila D06 -> trigger resolve chamada pendente e projeção vira active sem externalEntryCall
++      await client.query("SAVEPOINT sp_d06");
++      await client.query("UPDATE events SET external_queue_enabled=false WHERE id=$1", [event1Id]);
++      await client.query("UPDATE participations SET status='active', arena_entered_at=clock_timestamp() WHERE id=$1", [p1Id]);
++      await client.query("SET CONSTRAINTS ALL IMMEDIATE");
++      const d06View = await project(user1Id, p1Id);
++      assert.equal(d06View[0].status, "active");
++      assert.equal(d06View[0].externalEntryCall, null);
++      await client.query("ROLLBACK TO SAVEPOINT sp_d06");
++      await client.query("RELEASE SAVEPOINT sp_d06");
++
++      // 8. Cancelamento voluntário -> trigger resolve chamada pendente e detalhe retorna canceled sem externalEntryCall
++      await client.query("SAVEPOINT sp_cancel");
++      await client.query("UPDATE participations SET status='canceled', finished_at=clock_timestamp(), finish_reason='external_wait_withdrawal' WHERE id=$1", [p1Id]);
++      await client.query("SET CONSTRAINTS ALL IMMEDIATE");
++      const canceledView = await project(user1Id, p1Id);
++      assert.equal(canceledView[0].status, "canceled");
++      assert.equal(canceledView[0].externalEntryCall, null);
++      await client.query("ROLLBACK TO SAVEPOINT sp_cancel");
++      await client.query("RELEASE SAVEPOINT sp_cancel");
++
++      // 9. Prazo operacional vencido antes da finalização física -> projeção read-only oculta externalEntryCall
++      const futureAt = sql`clock_timestamp() + interval '3 hours'`;
++      const endedProjection = await project(user1Id, p1Id, futureAt);
++      assert.equal(endedProjection[0].status, "finished");
++      assert.equal(endedProjection[0].externalQueue, null);
++      assert.equal(endedProjection[0].externalEntryCall, null);
++    } finally {
++      await client.query("ROLLBACK");
++    }
++
++    assert.equal((await observer.query("SELECT id FROM events WHERE id=$1", [event1Id])).rows.length, 0);
++    assert.equal((await observer.query("SELECT id FROM external_entry_calls WHERE id=$1", [call1Id])).rows.length, 0);
++  } finally {
++    await Promise.allSettled([observer.end(), client.end()]);
++  }
++});
+diff --git a/docs/STAFF_03_CONTROLE_ENTRADA_CHAMADA_EXTERNA.md b/docs/STAFF_03_CONTROLE_ENTRADA_CHAMADA_EXTERNA.md
+new file mode 100644
+index 0000000..1903e7a
+--- /dev/null
++++ b/docs/STAFF_03_CONTROLE_ENTRADA_CHAMADA_EXTERNA.md
+@@ -0,0 +1,322 @@
++# ArenaGo — STAFF-03 | Controle de Entrada e Integração da Chamada Externa
++
++## 1. Objetivo e Escopo da STAFF-03
++
++- **Projeto:** ArenaGo — ProgramacaoMobile (`JaviDansen/ArenaGo`)
++- **Task:** STAFF-03 — Controle de Entrada e Integração da Chamada Externa
++- **Responsável pela implementação:** Kaled
++- **Prioridade:** P0
++- **Branch obrigatória:** `feature/staff-operacional-v2`
++- **Commit-base de referência (`HEAD`):** `efe21a8492a056d08a8c61799f7a66636c830a63` (`docs(staff): registra encerramento formal da STAFF-02`)
++- **Status atual:** Implementação e suíte de testes preparadas na branch `feature/staff-operacional-v2` (base `efe21a8492a056d08a8c61799f7a66636c830a63`). Pendentes: execução automatizada com **GPT-6 Luna — Medium** conforme [AGENTS.md](../AGENTS.md), integração visual no app do Participante pelo Heliom, homologação no Expo Go e revisão formal do responsável.
++
++### Objetivos principais
++1. **Entrega A — Reformulação do Controle de Entrada (App Staff):** modernizar visualmente e funcionalmente [StaffEntryControlRealScreen.js](../app/screens/staff/StaffEntryControlRealScreen.js) na identidade aprovada nas STAFF-01 e STAFF-02, preservando integralmente contratos HTTP, polling, autorização por evento, fila FIFO do servidor, modais responsivos e persistência de intenções no `SecureStore`.
++2. **Entrega B — Contrato de Chamada Externa para o Participante (Backend + Propagação em Store):** estender a projeção autenticada da participação em `GET /api/v1/participations/current` e `GET /api/v1/participations/:participationId` para expor com segurança `externalEntryCall` (identificada por `callId` estável) somente ao titular autenticado, além de atualizar a detecção de mudança silenciosa em [participationService.js](../app/services/participationService.js) sem modificar as telas visuais do Participante (frente do Heliom).
++3. **Entrega C — Documentação, Evidências e Campanha de Testes:** documentar o contrato definitivo para o Heliom, reforçar suítes unitárias e de integração simulada (backend + app), gerar [qa-evidence/STAFF-03-changes.diff](../qa-evidence/STAFF-03-changes.diff) sobre `efe21a8492a056d08a8c61799f7a66636c830a63` e preparar o roteiro de homologação presencial no Expo Go e instruções exatas para execução com **GPT-6 Luna — Medium**.
++
++### Seleção de modelos e níveis de raciocínio (conforme [AGENTS.md](../AGENTS.md))
++- **Implementação da STAFF-03:** **GPT-6.1 Sol — High** (envolve projeção SQL transacional somente leitura, invariantes estritos de isolamento/privacidade em backend, reformulação visual completa no módulo Staff, propagação reativa na store do Participante e cobertura de regressões concorrentes).
++- **Revisão crítica opcional de backend/segurança:** **GPT-6 Astra — High** sobre [participation-query.service.ts](../backend/src/participations/participation-query.service.ts) e [participation-lifecycle.dto.ts](../backend/src/participations/participation-lifecycle.dto.ts).
++- **Execução da campanha de validações automatizadas:** **GPT-6 Luna — Medium** (executor padrão designado pelo [AGENTS.md](../AGENTS.md); nenhum teste `node --test`, `npm test` ou contra PostgreSQL será executado pelo modelo de implementação).
++
++---
++
++## 2. Estado Inicial Encontrado no Repositório (`efe21a8`)
++
++1. **Backend — Persistência e Fluxo Staff já existentes:**
++   - A tabela `external_entry_calls` ([0008_external_entry_calls.sql](../backend/drizzle/0008_external_entry_calls.sql) e [participations.schema.ts](../backend/src/database/schema/participations.schema.ts)) já garante unicidade de chamada `pending` por evento (`uq_external_calls_pending_event`) e por participação (`uq_external_calls_pending_participation`), imutabilidade terminal (`protect_external_entry_call`), cancelamento sistêmico por trigger ao sair de `waiting` (`resolve_external_call_on_participation`, cobrindo D06 desligamento da fila externa, desistência `cancel`, encerramento administrativo imediato/controlado e finalização automática) e integridade transacional diferida (`check_external_call_integrity`).
++   - Os serviços [staff-entry-call.service.ts](../backend/src/participations/staff-entry-call.service.ts), [staff-entry.service.ts](../backend/src/participations/staff-entry.service.ts) e [staff-entry.controller.ts](../backend/src/participations/staff-entry.controller.ts) já expõem todas as rotas operacionais `/api/v1/staff/events/:eventId/entry-control*` com `Idempotency-Key`, FIFO do servidor, cortes temporais e auditoria.
++2. **Backend — Projeção do Participante (`GET /participations/current` e `GET /participations/:participationId`):**
++   - [participation-lifecycle.controller.ts](../backend/src/participations/participation-lifecycle.controller.ts) delega exclusivamente a [ParticipationQueryService](../backend/src/participations/participation-query.service.ts) (`participationProjection` + `publicParticipation`), validado por [participationView](../backend/src/participations/participation-lifecycle.dto.ts).
++   - Atualmente, `participationView` retorna apenas `id`, `eventId`, `status`, `joinedAt`, `arenaEnteredAt`, `finishedAt`, `finishReason` e `externalQueue` (`position`, `observedAt`), **sem consultar `external_entry_calls`**.
++   - As rotas `GET /participations/current` e `GET /participations/:participationId` não declaravam cabeçalho explícito `Cache-Control: no-store`.
++   - Observação adicional: [ParticipationsService](../backend/src/participations/participations.service.ts) ainda contém métodos legados internos (`getCurrentParticipation`/`getParticipationById`) cobertos por testes específicos de leitura E04 que validam as chaves exatas antigas; os endpoints HTTP públicos oficiais usam `ParticipationQueryService`.
++3. **Aplicativo Participante — Store e Contexto:**
++   - [ParticipationContext.js](../app/context/ParticipationContext.js) e [participationService.js](../app/services/participationService.js) consomem `GET /participations/current` (em carregamento inicial, retomada do `AppState` e `syncCurrentSilent`).
++   - **Lacuna identificada no app Participante:** `syncCurrentSilent` em [participationService.js](../app/services/participationService.js#L120-L123) calculava `changed` comparando apenas `id`, `status` e `externalQueue?.position`. Se o Staff chamasse o participante na posição `1` (`status: 'waiting'`), `id`, `status` e `position` continuariam iguais e a atualização silenciosa ignoraria a chegada de `externalEntryCall`!
++4. **Aplicativo Staff — Controle de Entrada:**
++   - [StaffEventsNavigator.js](../app/screens/staff/StaffEventsNavigator.js) envolve [StaffEntryControlRealScreen.js](../app/screens/staff/StaffEntryControlRealScreen.js) em [StaffLiveScreen.js](../app/screens/staff/components/StaffLiveScreen.js) (`Voltar ao painel` + logo transparente).
++   - [StaffEntryControlRealScreen.js](../app/screens/staff/StaffEntryControlRealScreen.js) possui lógica robusta em [staffEntryService.js](../app/services/staffEntryService.js) e [staffEntryIntentStorage.js](../app/services/staffEntryIntentStorage.js), mas apresentava visual legado (cores `#191330`/`#34265a`, sem card de resumo operacional estruturado, sem priorização visual da chamada pendente com horário, itens da fila em texto simples `1. Ana`, sem indicador fiel de polling, modal sem `SafeAreaView` + `ScrollView` e sem separação clara entre botões semânticos de confirmar/ausência/remover/desativar).
++   - **Inventário estático Staff:** [staffDemoState.test.cjs](../app/tests/staffDemoState.test.cjs) exige que todo arquivo `.js` dentro de `app/screens/staff/` esteja listado em `realStaffScreens` ou `demoStaffScreens`.
++
++---
++
++## 3. Contratos Existentes e Lacunas Identificadas
++
++| Área | Situação em `efe21a8` | Lacuna / Ação STAFF-03 |
++|---|---|---|
++| Projeção HTTP Participante | `ParticipationView` sem campo de chamada externa | Estender de forma aditiva com `externalEntryCall` (`callId`, `participationId`, `eventId`, `kind: 'external_entry'`, `status: 'pending'`, `calledAt`) ou `null`. |
++| SQL `participationProjection` | Não faz join com `external_entry_calls` | Adicionar `LEFT JOIN external_entry_calls c` qualificando `scoped.*`, filtrando `c.status='pending'`, `c.participation_id=scoped.id`, `c.event_id=scoped.event_id`, `scoped.status='waiting'` e `NOT scoped.ended`, mantendo snapshot único `repeatable read` `read only` sem N+1. |
++| Headers de resposta Participante | `GET /current` e `GET /:id` sem `Cache-Control: no-store` | Adicionar `@Header('Cache-Control', 'no-store')` em ambos os `@Get` de `ParticipationLifecycleController`. |
++| `participationService.js` | `syncCurrentSilent` não detectava mudança de `externalEntryCall` | Validar estrutura quando presente e comparar `externalEntryCall.{callId,status,calledAt}` em `changed` (compatível com fixtures antigas em que o campo é `null` ou omitido). |
++| `StaffEntryControlRealScreen.js` | Layout legado e feedback pouco hierarquizado | Reformular com tokens STAFF-01/STAFF-02 via [StaffEntrySections.js](../app/screens/staff/components/StaffEntrySections.js), mantendo todos os contratos de `staffEntryService.js` e `staffEntryIntentStorage.js` e registrando no inventário de `staffDemoState.test.cjs`. |
++
++---
++
++## 4. Proposta Definitiva e Contrato de Integração com o Heliom
++
++Esta especificação é a fonte oficial para que **Heliom** implemente o aviso e eventuais alertas no aplicativo do Participante sem suposições.
++
++### 4.1. Endpoints definitivos
++- **Principal (uso contínuo / polling / carga inicial):** `GET /api/v1/participations/current`
++- **Consulta por participação específica:** `GET /api/v1/participations/:participationId`
++- **Autenticação obrigatória:** `Authorization: Bearer <accessToken>` (sessão ativa verificada; `401` em ausência, token inválido, sessão revogada/expirada ou admin sem 2FA).
++- **Autorização e privacidade:** o titular é extraído exclusivamente de `@CurrentUserId()` (token/sessão). Nunca aceita `userId` em query/body/params. Em `GET /:participationId`, participação inexistente ou de outra conta retorna identicamente `404 RESOURCE_NOT_FOUND`. Nunca expõe `calledByUserId`, `resolvedByUserId`, nomes de terceiros, credenciais ou `externalQueueOrder`.
++- **Cabeçalho HTTP de resposta:** `Cache-Control: no-store`.
++
++### 4.2. Formato exato do campo `externalEntryCall` (aditivo em `participation`)
++
++Quando `participation` estiver presente no payload:
++- **Tipo:** objeto `ExternalEntryCallView | null` (nunca omitido pela API; retorna explicitamente `null` quando não há chamada externa ativa).
++- **Campos do objeto `externalEntryCall` (todos obrigatórios quando não `null`):**
++  - `callId` (`string` UUID): identificador único e estável desta ocorrência em `external_entry_calls`.
++  - `participationId` (`string` UUID): idêntico a `participation.id`.
++  - `eventId` (`string` UUID): idêntico a `participation.eventId`.
++  - `kind` (`'external_entry'`): literal fixo que identifica tratar-se de chamada do **Controle de Entrada**, diferenciando-a inequivocamente de chamadas de estação/experiência dentro da Arena.
++  - `status` (`'pending'`): apenas chamadas externas pendentes aguardando comparecimento presencial são projetadas em `externalEntryCall`.
++  - `calledAt` (`string` ISO-8601 UTC com 6 casas de microssegundos, ex.: `"2026-11-24T15:00:00.123456Z"`): instante oficial da chamada registrado pelo PostgreSQL.
++
++### 4.3. Exemplos completos de resposta HTTP (`200 OK`)
++
++**Caso 1 — Participante na fila externa com chamada pendente (deve exibir o aviso ao Participante):**
++```json
++{
++  "participation": {
++    "id": "22222222-2222-4222-8222-222222222222",
++    "eventId": "11111111-1111-4111-8111-111111111111",
++    "status": "waiting",
++    "joinedAt": "2026-11-24T14:50:00.000000Z",
++    "arenaEnteredAt": null,
++    "finishedAt": null,
++    "finishReason": null,
++    "externalQueue": {
++      "position": 1,
++      "observedAt": "2026-11-24T15:00:05.000000Z"
++    },
++    "externalEntryCall": {
++      "callId": "66666666-6666-4666-8666-666666666666",
++      "participationId": "22222222-2222-4222-8222-222222222222",
++      "eventId": "11111111-1111-4111-8111-111111111111",
++      "kind": "external_entry",
++      "status": "pending",
++      "calledAt": "2026-11-24T15:00:00.123456Z"
++    }
++  }
++}
++```
++
++**Caso 2 — Participante aguardando na fila externa sem chamada ativa:**
++```json
++{
++  "participation": {
++    "id": "22222222-2222-4222-8222-222222222222",
++    "eventId": "11111111-1111-4111-8111-111111111111",
++    "status": "waiting",
++    "joinedAt": "2026-11-24T14:50:00.000000Z",
++    "arenaEnteredAt": null,
++    "finishedAt": null,
++    "finishReason": null,
++    "externalQueue": {
++      "position": 2,
++      "observedAt": "2026-11-24T15:00:05.000000Z"
++    },
++    "externalEntryCall": null
++  }
++}
++```
++
++**Caso 3 — Entrada confirmada pelo Staff (ou liberação por desativação da fila D06):**
++- Em `GET /participations/current` e `GET /participations/:participationId`:
++```json
++{
++  "participation": {
++    "id": "22222222-2222-4222-8222-222222222222",
++    "eventId": "11111111-1111-4111-8111-111111111111",
++    "status": "active",
++    "joinedAt": "2026-11-24T14:50:00.000000Z",
++    "arenaEnteredAt": "2026-11-24T15:01:10.000000Z",
++    "finishedAt": null,
++    "finishReason": null,
++    "externalQueue": null,
++    "externalEntryCall": null
++  }
++}
++```
++
++**Caso 4 — Ausência antes do corte (participante reinserido no fim da fila externa):**
++- Ocorrência anterior vai para `absent`, `participation.status` continua `"waiting"`, `externalQueue.position` reflete o fim da fila e `externalEntryCall` volta imediatamente para `null` (como no Caso 2, sem reapresentar a chamada antiga).
++- Se o Staff voltar a chamar essa mesma participação posteriormente, será criado um **novo registro** com um **novo `callId`** distinto do anterior, reativando `externalEntryCall` como objeto `pending`.
++
++**Caso 5 — Ausência após o corte / Remoção pelo Staff / Desistência / Encerramento do evento:**
++- Em `GET /api/v1/participations/current`: retorna `{ "participation": null }` (pois estados terminais não são correntes).
++- Em `GET /api/v1/participations/:participationId`:
++```json
++{
++  "participation": {
++    "id": "22222222-2222-4222-8222-222222222222",
++    "eventId": "11111111-1111-4111-8111-111111111111",
++    "status": "finished",
++    "joinedAt": "2026-11-24T14:50:00.000000Z",
++    "arenaEnteredAt": null,
++    "finishedAt": "2026-11-24T15:05:00.000000Z",
++    "finishReason": "external_absence_after_entry_cutoff",
++    "externalQueue": null,
++    "externalEntryCall": null
++  }
++}
++```
++*(No caso de remoção pelo Staff, `status` é `"canceled"` e `finishReason` é `"staff_external_wait_removed"`; na desistência voluntária, `"canceled"` e `"external_wait_withdrawal"`; no encerramento controlado, `"finished"` e `"admin_controlled_external_wait_closed"`; todos com `"externalEntryCall": null`.)*
++
++### 4.4. Regras de consumo para a interface do Heliom
++1. **Exibição da mensagem obrigatória:** apresentar **“É sua vez! Dirija-se ao Controle de Entrada.”** somente quando:
++   - `participation?.status === 'waiting'` **e**
++   - `participation?.externalEntryCall?.kind === 'external_entry'` **e**
++   - `participation?.externalEntryCall?.status === 'pending'` **e**
++   - `participation.externalEntryCall.participationId === participation.id` **e**
++   - `participation.externalEntryCall.eventId === participation.eventId`.
++2. **Semântica de `callId` (chave estável e deduplicação de alertas):**
++   - Utilizar `callId` em chave isolada por sessão/participação (ex.: `${userId}:${epoch}:external:${participation.id}:${callId}`) para distinguir primeira chamada, re-renderização/polling repetido da mesma chamada (não vibrar de novo), chamada resolvida e **nova chamada após ausência + reinserção** (`callId` diferente).
++   - Nunca usar apenas `externalQueue.position === 1` ou booleano local para inferir chamada, nem suprimir futuras chamadas após ausência.
++3. **Diferenciação de chamada de estação:**
++   - Chamadas externas vêm em `participation.externalEntryCall` com `kind: 'external_entry'` (enquanto `participation.status === 'waiting'`).
++   - Chamadas de estação pertencem às filas internas de experiências quando `participation.status === 'active'` (`/participations/:participationId/queue`). Os dois avisos são mutuamente exclusivos pelo próprio ciclo de estado.
++4. **Reconexão, retorno do segundo plano e erros:**
++   - `ParticipationContext` já reexecuta `refresh()` automaticamente ao retomar `AppState === 'active'` e atualiza `participation` em `syncCurrentSilent()` quando `externalEntryCall` muda (`callId`, `status` ou `calledAt`).
++   - Ao retomar do segundo plano ou abrir o app com chamada já `pending`, exibir o banner/aviso visual imediatamente, porém respeitar a política de alerta sonoro/vibração sem disparar alerta retroativo indevido (análoga a [queueAlertService.js](../app/services/queueAlertService.js)).
++   - Em `401` / `403`, limpar o estado do Participante; em falha de conexão/rede (`syncStale`), preservar o último estado conhecido com sinalização transitória sem fabricar nem cancelar chamada localmente.
++
++---
++
++## 5. Decisões de Arquitetura e Justificativas
++
++1. **Extensão aditiva em `ParticipationQueryService` em vez de novo endpoint ou migration:** reutiliza `external_entry_calls` (`0008`), evita duplicação de consultas de rede no polling do Participante e mantém o mesmo snapshot transacional `REPEATABLE READ` `READ ONLY` para `status`, `position`, `ended` e `externalEntryCall`.
++2. **Proteção dupla SQL + DTO (`ended` e `status === 'waiting'`):** impede que uma janela expirada antes do scheduler físico exiba chamada pendente fantasma.
++3. **Preservação integral de `staffEntryService.js` e `staffEntryIntentStorage.js`:** garante que nenhuma regra de idempotência, `callId`, `Idempotency-Key`, D06 ou isolamento de sessões/eventos seja enfraquecida na reformulação da tela Staff.
++4. **Componentização alinhada à STAFF-02 (`StaffEntrySections.js`):** aplica tokens de [AdminLiveUI.js](../app/screens/admin/components/AdminLiveUI.js) e [StaffStationSections.js](../app/screens/staff/components/StaffStationSections.js), evitando duplicar o header compartilhado de [StaffLiveScreen.js](../app/screens/staff/components/StaffLiveScreen.js) e mantendo compatibilidade de modais acessíveis com `SafeAreaView` e `ScrollView`.
++5. **Projeção exclusivamente observacional no Participante:** nenhuma rota de leitura do Participante altera linhas no banco nem aciona retentativas de mutação Staff.
++
++---
++
++## 6. Modificações de Interface (Aplicativo Staff e Store Participante)
++
++1. **[StaffEntrySections.js](../app/screens/staff/components/StaffEntrySections.js)** (novo componente modular):
++   - Aplica integralmente a paleta ArenaGO escura (`#090412` / `#151020`), bordas e acentos roxo-violeta de [AdminLiveUI.js](../app/screens/admin/components/AdminLiveUI.js) e reutiliza `ElapsedCallBadge` de [StaffStationSections.js](../app/screens/staff/components/StaffStationSections.js).
++   - `formatEntryCallTimestamp`: formata o instante ISO da chamada externa no padrão legível `"Chamado às HH:MM"` com fallback seguro sem alterar timestamps oficiais.
++   - `EntryHeaderCard` e `EntryStatusBadge`: cabeçalho claro com título, contexto do evento e badge semântica `FILA ATIVA` / `FILA INATIVA`.
++   - `EntrySummaryCard`: card de resumo operacional com contadores (`waitingCount` aguardando, chamada pendente / livre), estado da fila externa e alerta explícito quando `canManage === false`.
++   - `EntryCurrentCallCard`: card prioritário destacado para a chamada pendente (`displayName`, badge `CHAMADA PENDENTE`, `Chamado às HH:MM` + `ElapsedCallBadge`) e botões semânticos independentes para `Confirmar entrada` (`canConfirm`), `Marcar ausência` (`canMarkAbsent`) e `Remover da fila` (`canRemove`), com nota informativa automática quando houver restrição de corte; quando não há chamada pendente, apresenta estado vazio claro e botão principal `Chamar próximo` (`canCall`).
++   - `EntryQueueListCard`: fila oficial em ordem FIFO com badge numérico por posição, rótulo `PRÓXIMO` para o primeiro participante quando não há chamada pendente, zero duplicidade do participante chamado e estado vazio amigável (`"Ninguém está aguardando na fila de entrada."`).
++   - `EntryQueueToggleCard`: card dedicado ao controle D06 (`Desativar fila externa` / `Reativar fila externa`) com resumo objetivo do impacto antes do toque.
++   - `EntryConfirmModal`: modal responsivo com `SafeAreaView`, `maxHeight: '100%'` e `ScrollView`, exibindo o nome do participante selecionado em ações sobre a chamada pendente e a contagem de participantes liberados ao desativar a fila.
++
++2. **[StaffEntryControlRealScreen.js](../app/screens/staff/StaffEntryControlRealScreen.js)**:
++   - Preserva integralmente `createStaffEntryStore`, `defaultStaffEntryIntentStorage`, `getContext`, `dialogRef`, `autoAttempt`, `useStaffPolling` (5s), guarda contra duplo toque em `Chamar próximo`, limpeza imediata de dados nominais em `401`/`403`/`404` e preservação da intenção no `SecureStore`.
++   - Integra `useIsFocused()` e `AppState` ao indicador honesto de sincronização automática (`Atualização automática ativa · a cada 5s`, `Atualização temporariamente pausada`, `Dados desatualizados · tentando atualizar a cada 5s` e `Atualização indisponível · aguardando recuperação`).
++
++3. **[participationService.js](../app/services/participationService.js)**:
++   - Extrai `isValidExternalEntryCall`, `isValidCurrentParticipationResponse` e `externalCallSignature`.
++   - Garante compatibilidade retroativa com mocks que omitem ou enviam `externalEntryCall: null` e valida integridade (`waiting`, `kind === 'external_entry'`, `status === 'pending'`, `calledAt` válido, mesmo `participationId` e `eventId`).
++   - Atualiza `syncCurrentSilent()` para detectar mudanças em `externalEntryCall` (`null ↔ pending` e troca de `callId` após ausência/reinserção) mesmo quando `id`, `status` e `externalQueue.position` não se alteram.
++
++---
++
++## 7. Modificações de Backend
++
++1. **[participation-lifecycle.dto.ts](../backend/src/participations/participation-lifecycle.dto.ts)**:
++   - Define `externalEntryCallView` (`callId`, `participationId`, `eventId`, `kind: "external_entry"`, `status: "pending"`, `calledAt` com precisão de microssegundos) e exporta `ExternalEntryCallView`.
++   - Estende `participationView` com `externalEntryCall: externalEntryCallView.nullable().default(null)`.
++
++2. **[participation-query.service.ts](../backend/src/participations/participation-query.service.ts)**:
++   - Atualiza `participationProjection` qualificando todas as colunas de `scoped.*`, projetando `e.external_queue_enabled AS event_external_queue_enabled` e realizando `LEFT JOIN external_entry_calls c ON c.participation_id=scoped.id AND c.event_id=scoped.event_id AND c.status='pending' AND scoped.status='waiting' AND NOT scoped.ended AND scoped.event_external_queue_enabled`.
++   - Preserva snapshot único em `REPEATABLE READ` + `READ ONLY`, `clock_timestamp()` único e ausência de N+1 ou mutações.
++   - Atualiza `ParticipationProjectionRow` e `publicParticipation` com verificação defensiva (`PARTICIPATION_EXTERNAL_CALL_INTEGRITY`) para rejeitar projeções inconsistentes sem vazar credenciais ou identificadores do Staff.
++
++3. **[participation-lifecycle.controller.ts](../backend/src/participations/participation-lifecycle.controller.ts)**:
++   - Adiciona `@Header("Cache-Control", "no-store")` nos endpoints `@Get("current")` e `@Get(":participationId")`.
++
++---
++
++## 8. Arquivos Efetivamente Alterados
++
++- **Backend:**
++  - [participation-lifecycle.dto.ts](../backend/src/participations/participation-lifecycle.dto.ts)
++  - [participation-query.service.ts](../backend/src/participations/participation-query.service.ts)
++  - [participation-lifecycle.controller.ts](../backend/src/participations/participation-lifecycle.controller.ts)
++  - [participation-lifecycle.test.ts](../backend/test/unit/participation-lifecycle.test.ts)
++  - [participation-lifecycle-http.test.ts](../backend/test/unit/participation-lifecycle-http.test.ts)
++  - [staff03-external-call-projection.integration.test.ts](../backend/test/integration/staff03-external-call-projection.integration.test.ts) *(novo)*
++- **App (Staff, Store Participante e Testes):**
++  - [StaffEntrySections.js](../app/screens/staff/components/StaffEntrySections.js) *(novo)*
++  - [StaffEntryControlRealScreen.js](../app/screens/staff/StaffEntryControlRealScreen.js)
++  - [participationService.js](../app/services/participationService.js)
++  - [participationService.test.cjs](../app/tests/participationService.test.cjs)
++  - [staffEntryControlScreen.test.cjs](../app/tests/staffEntryControlScreen.test.cjs) *(novo)*
++  - [staffDemoState.test.cjs](../app/tests/staffDemoState.test.cjs)
++  - [roleRoutingIntegration.test.cjs](../app/tests/roleRoutingIntegration.test.cjs)
++- **Documentação e Evidências:**
++  - [STAFF_03_CONTROLE_ENTRADA_CHAMADA_EXTERNA.md](./STAFF_03_CONTROLE_ENTRADA_CHAMADA_EXTERNA.md)
++  - [STAFF-03-changes.diff](../qa-evidence/STAFF-03-changes.diff) *(patch acumulado a partir de `efe21a8492a056d08a8c61799f7a66636c830a63`, excluindo a si próprio)*
++
++---
++
++## 9. Testes e Resultados Reais
++
++### 9.1. Inspeções estáticas realizadas na etapa de implementação (sem execução de suítes)
++- Verificação sintática (`node --check`) dos arquivos `.cjs` e revisão estática dos módulos `.ts`/`.js` criados ou modificados.
++- Conferência de integridade de patch via `git diff --check -- app backend docs`, `git apply --stat qa-evidence/STAFF-03-changes.diff` e `git apply --check --reverse qa-evidence/STAFF-03-changes.diff`.
++- Validação de inventário Staff (`realStaffScreens` + ausência de imports de demonstração) e uso exclusivo de links relativos na documentação.
++
++### 9.2. Validações automatizadas pendentes para **GPT-6 Luna — Medium** (NÃO EXECUTADAS ainda)
++Conforme [AGENTS.md](../AGENTS.md), o modelo de implementação **não** executou testes automatizados, lint, typecheck, build ou acesso ao PostgreSQL. Comandos ordenados para execução pelo responsável com **GPT-6 Luna — Medium**:
++
++1. **Testes unitários e de integração simulada do App (`app/`):**
++   - `node --test app/tests/participationService.test.cjs app/tests/staffDemoState.test.cjs app/tests/staffEntryControl.test.cjs app/tests/staffEntryControlScreen.test.cjs app/tests/staffRealNavigation.test.cjs app/tests/roleRoutingIntegration.test.cjs`
++   - Cobertura completa do app: `node --test app/tests/*.test.cjs`
++2. **Testes unitários e HTTP simulados do Backend (`backend/`):**
++   - `npm --prefix backend run typecheck:test`
++   - `npm --prefix backend run lint`
++   - `npm --prefix backend run build`
++   - `npm --prefix backend test`
++3. **Integração PostgreSQL (SOMENTE com autorização explícita do responsável, `NODE_ENV=test`, migration `0008` aplicada em `127.0.0.1:55432/arenago_staff_homolog_20261111` e três URLs idênticas confirmadas, executando a partir de `backend/`):**
++   - `npx tsx --tsconfig tsconfig.test.json --test test/integration/staff03-external-call-projection.integration.test.ts` (exige `STAFF03_POSTGRES_PROJECTION_TEST=authorized-local`)
++   - Regressões relacionadas (mesmos critérios de autorização e banco): `test/integration/participations-read.integration.test.ts`, `test/integration/participation-lifecycle.integration.test.ts` e `test/integration/external-entry-calls-schema.integration.test.ts`.
++
++---
++
++## 10. Riscos, Limitações e Pendências
++
++- **Frente do Heliom:** a exibição visual no aplicativo do Participante (*“É sua vez! Dirija-se ao Controle de Entrada.”*), vibração dedicada e homologação conjunta ponta a ponta dependem da implementação pelo Heliom usando o contrato da Seção 4.
++- **Execução automatizada e homologação no Expo Go:** pendentes de execução autorizada com **GPT-6 Luna — Medium** e conferência presencial pelo responsável antes da aprovação final.
++- **Não executar migrations, seeds ou testes contra PostgreSQL real** sem autorização explícita e verificação do ambiente (`NODE_ENV=test` e banco dedicado).
++
++---
++
++## 11. Dependências com Heliom
++
++1. Entregar ao Heliom a Seção 4 completa logo no início desta task (`GET /api/v1/participations/current` + `externalEntryCall` + regras de `callId` + texto obrigatório).
++2. Confirmar que [participationService.js](../app/services/participationService.js) já propaga reativamente alterações de `externalEntryCall` em `ParticipationContext`.
++3. Não editar nenhuma tela do Participante nesta task.
++
++---
++
++## 12. Roteiro e Evidências de Homologação (Expo Go)
++
++1. Preparar evento com `externalQueueEnabled = true` em janela ativa e um Participante real aguardando na fila externa (posição 1).
++2. No app Staff, acessar `Eventos Staff → Painel Operacional → Controle de Entrada` e conferir cabeçalho, resumo operacional, status `FILA ATIVA` e participante na posição `1` com badge `PRÓXIMO`.
++3. Acionar **Chamar próximo** e verificar no card destacado da chamada pendente: nome do participante, badge de chamada pendente, horário e botões (`Confirmar entrada`, `Marcar ausência`, `Remover da fila`), enquanto a fila restante não duplica o chamado e **Chamar próximo** fica oculto/indisponível.
++4. Consultar `GET /api/v1/participations/current` com o token do Participante (e inspecionar o payload na integração conjunta com a tela do Heliom), confirmando presença de `externalEntryCall` com `callId`, `kind: "external_entry"`, `status: "pending"`, `calledAt`, `participationId` e `eventId` corretos.
++5. Testar **Marcar ausência** antes do corte: verificar reinserção ao final da fila, desaparecimento temporário da chamada (`externalEntryCall: null`) e geração de novo `callId` distinto ao chamar novamente.
++6. Testar **Confirmar entrada**: verificar retorno para fila sem pendente e saída da fila externa do Participante (`status: "active"`, `externalEntryCall: null`).
++7. Repetir fluxo para **Remover da fila** (`status: "canceled"`, `externalEntryCall: null`) e **Desativar / Reativar fila externa** (D06 liberando fila e reativação sem recolocar liberados).
++8. Testar reconexão, troca de evento, perda de autorização e visualização em dispositivo menor/fonte ampliada com rolagem nos modais de confirmação.
++
++---
++
++## 13. Histórico de Revisões, Correções e Commits
++
++- **24/11/2026:** Criação inicial do documento `STAFF_03_CONTROLE_ENTRADA_CHAMADA_EXTERNA.md` na branch `feature/staff-operacional-v2` (base `efe21a8492a056d08a8c61799f7a66636c830a63`) antes de qualquer alteração em código, formalizando o contrato da chamada externa para o Heliom e o plano técnico da STAFF-03.
++- **24/11/2026:** Conclusão da implementação e cobertura de testes da STAFF-03:
++  - Backend: projeção `externalEntryCall` em `ParticipationQueryService` / `participationView` + `@Header("Cache-Control", "no-store")` em `GET /participations/current` e `GET /participations/:participationId`.
++  - App Staff & Participante: novo `StaffEntrySections.js`, reformulação visual/funcional de `StaffEntryControlRealScreen.js` e detecção reativa de `externalEntryCall` em `participationService.js`.
++  - Testes adicionados em unit/HTTP/simulação e integração PostgreSQL dedicada (`staff03-external-call-projection.integration.test.ts`), além de atualização de `qa-evidence/STAFF-03-changes.diff`. Validação automatizada aguardando execução autorizada com **GPT-6 Luna — Medium**.

@@ -96,3 +96,55 @@ test("E08.12 DI Nest resolve serviços reais e reutiliza TTL explícito sem cone
 function authenticatedInput<T>(context: MutationSession, result: T): T {
   assert.deepEqual(context, { userId: uid, sessionId: id(4) }); return result;
 }
+
+test("STAFF-03 HTTP /current e /:participationId emitem Cache-Control: no-store e expõem externalEntryCall apenas ao titular", async () => {
+  reset();
+  const pendingCall = {
+    callId: id(55),
+    participationId: pid,
+    eventId: id(3),
+    kind: "external_entry" as const,
+    status: "pending" as const,
+    calledAt: "2026-11-04T15:02:00.123456Z",
+  };
+  const waitingWithCall = {
+    id: pid,
+    eventId: id(3),
+    status: "waiting" as const,
+    joinedAt: at,
+    arenaEnteredAt: null,
+    finishedAt: null,
+    finishReason: null,
+    externalQueue: { position: 1, observedAt: at },
+    externalEntryCall: pendingCall,
+  };
+  const previousExternalQueue = value.externalQueue;
+  Object.assign(value, waitingWithCall);
+  try {
+    for (const mode of ["current", "byId"] as const) {
+      const res = await request(mode);
+      assert.equal(res.status, 200);
+      assert.equal(res.headers["cache-control"], "no-store");
+      assert.deepEqual(res.body.participation.externalEntryCall, pendingCall);
+      assert.equal(Object.hasOwn(res.body.participation, "userId"), false);
+      assert.equal(Object.hasOwn(res.body.participation.externalEntryCall, "staffUserId"), false);
+    }
+    found = false;
+    const absentCurrent = await request("current");
+    assert.equal(absentCurrent.status, 200);
+    assert.equal(absentCurrent.headers["cache-control"], "no-store");
+    assert.deepEqual(absentCurrent.body, { participation: null });
+  } finally {
+    Object.assign(value, {
+      id: pid,
+      eventId: id(3),
+      status: "active" as const,
+      joinedAt: at,
+      arenaEnteredAt: at,
+      finishedAt: null,
+      finishReason: null,
+      externalQueue: previousExternalQueue,
+    });
+    delete (value as Record<string, unknown>).externalEntryCall;
+  }
+});
