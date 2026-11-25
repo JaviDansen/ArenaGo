@@ -1,13 +1,20 @@
 import { mutationSession } from "../auth/mutation-session";
-import { Body, Controller, Get, Header, HttpCode, Inject, Param, Post, Req } from "@nestjs/common";
-import { CurrentUserId, RequireSessionAuth } from "../auth/current-user.decorator";
-import type { AuthenticatedRequest } from "../auth/session-auth.guard";
+import { Body, Controller, Get, HttpCode, Inject, Param, Post, Req, UseGuards, type CanActivate, type ExecutionContext } from "@nestjs/common";
+import { CurrentUserId } from "../auth/current-user.decorator";
+import { SessionAuthGuard, type AuthenticatedRequest } from "../auth/session-auth.guard";
 import { ProblemException } from "../common/errors/problem.exception";
 import { emptyOperationBody, validateOperationBody, validateOperationIdempotencyKey, validateOperationParams } from "../common/http/operation-validation";
 import { ParticipantQueueIdempotencyPolicy } from "../events/participant-queue-idempotency.policy";
 import { lifecycleParams } from "./participation-lifecycle.dto";
 import { ParticipationQueryService } from "./participation-query.service";
 import { ParticipationLifecycleService, type LifecycleFailure, type LifecycleResult } from "./participation-lifecycle.service";
+
+const participationNoStoreGuard: CanActivate = {
+  canActivate(context: ExecutionContext) {
+    context.switchToHttp().getResponse<{ setHeader(name: string, value: string): void }>().setHeader("Cache-Control", "no-store");
+    return true;
+  },
+};
 
 function missing(): never { throw new ProblemException({status:404,code:"RESOURCE_NOT_FOUND",typeSlug:"resource-not-found",title:"Recurso não encontrado",detail:"Recurso não encontrado."}); }
 function response(result: LifecycleResult){
@@ -20,18 +27,16 @@ function response(result: LifecycleResult){
     detail:"A operação não pode ser aplicada ao estado atual da participação.",extensions:result.participation?{participation:result.participation}:undefined});
 }
 @Controller("participations")
-@RequireSessionAuth()
+@UseGuards(participationNoStoreGuard, SessionAuthGuard)
 export class ParticipationLifecycleController {
   constructor(@Inject(ParticipationQueryService) private readonly queries:ParticipationQueryService,
     @Inject(ParticipationLifecycleService) private readonly writes:ParticipationLifecycleService,
     @Inject(ParticipantQueueIdempotencyPolicy) private readonly policy:ParticipantQueueIdempotencyPolicy){}
   @Get("current")
   @HttpCode(200)
-  @Header("Cache-Control", "no-store")
   async current(@CurrentUserId() userId:string){return {participation:await this.queries.current(userId)};}
   @Get(":participationId")
   @HttpCode(200)
-  @Header("Cache-Control", "no-store")
   async byId(@CurrentUserId() userId:string,@Param() params:unknown){
     const {participationId}=validateOperationParams(lifecycleParams,params),participation=await this.queries.byId(userId,participationId);
     if(!participation)missing();return {participation};

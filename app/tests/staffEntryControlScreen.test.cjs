@@ -74,6 +74,13 @@ test('STAFF-03: formatEntryCallTimestamp formata instante ISO válido e descarta
   assert.equal(pureEntrySections.formatEntryCallTimestamp(null), null);
 });
 
+test('STAFF03-AUD-03: getDisableAffectedCount soma waitingCount e eventual chamada pendente', () => {
+  assert.equal(pureEntrySections.getDisableAffectedCount(0, null), 0);
+  assert.equal(pureEntrySections.getDisableAffectedCount(2, null), 2);
+  assert.equal(pureEntrySections.getDisableAffectedCount(2, { id: CALL_1 }), 3);
+  assert.equal(pureEntrySections.getDisableAffectedCount(0, { id: CALL_1 }), 1);
+});
+
 // ============================================================================
 // 2. Harness real React + React Test Renderer para StaffEntryControlRealScreen
 // ============================================================================
@@ -460,42 +467,272 @@ test('STAFF-03 tela Controle de Entrada: chamada destacada sem duplicidade, cliq
   h.unmount();
 });
 
-test('STAFF-03 tela Controle de Entrada respeita flags independentes do servidor (cutoff parcial e !canManage)', { skip }, async () => {
-  const calledState = buildState({
-    enabled: true,
-    canManage: true,
-    pendingCall: { id: CALL_1, participationId: PART_1, displayName: 'Ana Clara', calledAt: AT },
-    waiting: [{ participationId: PART_2, displayName: 'Lucas Ferreira', position: 1 }],
-    canCall: false,
-    canConfirm: true,
-    canMarkAbsent: false,
-    canRemove: false,
-  });
-  let serverState = calledState;
+test('STAFF03-AUD-05 tela Controle de Entrada cobre combinações reais de flags, indisponibilidade e estado stale', { skip }, async () => {
+  let mode = 'all_allowed';
   const h = createEntryScreenHarness({
-    onGet: async () => serverState,
+    onGet: async () => {
+      if (mode === 'unavailable') throw { status: 503, code: 'SERVICE_UNAVAILABLE' };
+      if (mode === 'network') throw Object.assign(new Error('offline'), { isNetworkError: true });
+      if (mode === 'all_allowed') {
+        return buildState({
+          enabled: true,
+          canManage: true,
+          pendingCall: { id: CALL_1, participationId: PART_1, displayName: 'Ana Clara', calledAt: AT },
+          waiting: [{ participationId: PART_2, displayName: 'Lucas Ferreira', position: 1 }],
+          canCall: false,
+          canConfirm: true,
+          canMarkAbsent: true,
+          canRemove: true,
+        });
+      }
+      if (mode === 'residual') {
+        return buildState({
+          enabled: true,
+          canManage: false,
+          pendingCall: { id: CALL_1, participationId: PART_1, displayName: 'Ana Clara', calledAt: AT },
+          waiting: [{ participationId: PART_2, displayName: 'Lucas Ferreira', position: 1 }],
+          canCall: false,
+          canConfirm: false,
+          canMarkAbsent: true,
+          canRemove: true,
+        });
+      }
+      if (mode === 'all_blocked') {
+        return buildState({
+          enabled: true,
+          canManage: false,
+          pendingCall: { id: CALL_1, participationId: PART_1, displayName: 'Ana Clara', calledAt: AT },
+          waiting: [],
+          canCall: false,
+          canConfirm: false,
+          canMarkAbsent: false,
+          canRemove: false,
+        });
+      }
+      return buildState({ enabled: false, canManage: true, pendingCall: null, waiting: [] });
+    },
+  });
+
+  // 1. Todas as operações permitidas
+  await h.mount();
+  assert.equal(h.isDisabled('Confirmar entrada'), false);
+  assert.equal(h.isDisabled('Marcar ausência'), false);
+  assert.equal(h.isDisabled('Remover da fila'), false);
+  assert.equal(h.hasText('A confirmação de entrada está indisponível.'), false);
+
+  // 2. Janela residual: confirmação bloqueada, ausência e remoção permitidas
+  mode = 'residual';
+  await h.press('Atualizar fila de entrada');
+  assert.equal(h.isDisabled('Confirmar entrada'), true);
+  assert.equal(h.isDisabled('Marcar ausência'), false);
+  assert.equal(h.isDisabled('Remover da fila'), false);
+  assert.equal(h.isDisabled('Desativar fila externa'), true);
+  assert.ok(h.hasText('A confirmação de entrada está indisponível. Ainda é possível registrar ausência ou remover o participante chamado.'));
+  assert.ok(h.hasText('O evento não permite entradas ou alterações da fila neste momento.'));
+
+  // 3. Dados desatualizados (stale) bloqueiam todas as operações
+  mode = 'network';
+  await h.act(async () => { await h.getPolling().read(); });
+  assert.ok(h.hasText('Dados de entrada possivelmente desatualizados. Atualize antes de operar.'));
+  assert.equal(h.isDisabled('Confirmar entrada'), true);
+  assert.equal(h.isDisabled('Marcar ausência'), true);
+  assert.equal(h.isDisabled('Remover da fila'), true);
+
+  // 4. Todas as operações bloqueadas pelo servidor
+  mode = 'all_blocked';
+  await h.press('Atualizar fila de entrada');
+  assert.equal(h.isDisabled('Confirmar entrada'), true);
+  assert.equal(h.isDisabled('Marcar ausência'), true);
+  assert.equal(h.isDisabled('Remover da fila'), true);
+  assert.ok(h.hasText('As ações sobre a chamada externa estão indisponíveis no estado atual do evento.'));
+
+  // 5. Fila inativa
+  mode = 'inactive';
+  await h.press('Atualizar fila de entrada');
+  assert.ok(h.hasExactText('FILA INATIVA'));
+  assert.equal(h.isDisabled('Chamar próximo'), true);
+  assert.equal(h.isDisabled('Reativar fila externa'), false);
+
+  // 6. Indisponibilidade operacional
+  mode = 'unavailable';
+  await h.press('Atualizar fila de entrada');
+  assert.ok(h.hasText('Não foi possível consultar a fila de entrada. Tente atualizar.'));
+  h.unmount();
+});
+
+test('STAFF03-AUD-03 card D06 e modal de desativação refletem affectedCount observado em todos os 4 cenários e preservam releasedCount do servidor', { skip }, async () => {
+  const PART_3 = '77777777-7777-4777-8777-777777777773';
+  const scenarios = [
+    {
+      label: '0 aguardando, sem chamada',
+      state: buildState({ enabled: true, waiting: [], pendingCall: null }),
+      expectedText: 'No estado observado, 0 participantes serão liberados.',
+      releasedCount: 0,
+    },
+    {
+      label: '2 aguardando, sem chamada',
+      state: buildState({
+        enabled: true,
+        waiting: [
+          { participationId: PART_1, displayName: 'Bruno', position: 1 },
+          { participationId: PART_2, displayName: 'Carlos', position: 2 },
+        ],
+        pendingCall: null,
+      }),
+      expectedText: 'No estado observado, 2 participantes aguardando serão liberados.',
+      releasedCount: 2,
+    },
+    {
+      label: '2 aguardando + 1 chamada pendente = 3',
+      state: buildState({
+        enabled: true,
+        waiting: [
+          { participationId: PART_2, displayName: 'Bruno', position: 1 },
+          { participationId: PART_3, displayName: 'Carlos', position: 2 },
+        ],
+        pendingCall: { id: CALL_1, participationId: PART_1, displayName: 'Ana', calledAt: AT },
+      }),
+      expectedText: 'No estado observado, 3 participantes (2 aguardando e 1 em chamada pendente) serão liberados.',
+      releasedCount: 3,
+    },
+    {
+      label: '0 aguardando + 1 chamada pendente = 1',
+      state: buildState({
+        enabled: true,
+        waiting: [],
+        pendingCall: { id: CALL_1, participationId: PART_1, displayName: 'Ana', calledAt: AT },
+      }),
+      expectedText: 'No estado observado, 1 participante (incluindo a chamada pendente) será liberado.',
+      releasedCount: 1,
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    let current = scenario.state;
+    const h = createEntryScreenHarness({
+      onGet: async () => current,
+      onPatch: async (_route, payload) => {
+        current = buildState({ enabled: payload.enabled, waiting: [], pendingCall: null });
+        return { eventId: EV_A, externalQueueEnabled: payload.enabled, releasedCount: scenario.releasedCount, changedAt: AT };
+      },
+    });
+    await h.mount();
+    assert.ok(h.hasText(scenario.expectedText), `card deve exibir contagem correta (${scenario.label})`);
+    assert.ok(h.hasText('quantidade final será confirmada pelo servidor'));
+    if (scenario.state.pendingCall) {
+      // Não duplica pessoa chamada na lista FIFO nem altera waitingCount
+      assert.equal(h.hasEntryRow(1, 'Ana', false), false);
+      assert.equal(h.hasEntryRow(1, 'Ana', true), false);
+      assert.ok(h.hasExactText(`${scenario.state.waitingCount} aguardando`));
+    }
+    await h.press('Desativar fila externa');
+    assert.equal(h.modals()[0].props.visible, true);
+    assert.ok(h.hasText(scenario.expectedText), `modal deve exibir contagem correta (${scenario.label})`);
+    await h.press('CONFIRMAR ALTERAÇÃO');
+    assert.ok(h.hasText(`Participantes liberados: ${scenario.releasedCount}.`));
+    h.unmount();
+  }
+});
+
+test('STAFF03-AUD-04 invalida modal obsoleto ao trocar chamada, perder permissão, chegar leitura em voo ou mudar contagem D06', { skip }, async () => {
+  let posts = 0;
+  let patches = 0;
+  let serverState = buildState({
+    enabled: true,
+    pendingCall: { id: CALL_1, participationId: PART_1, displayName: 'Ana', calledAt: AT },
+    waiting: [{ participationId: PART_2, displayName: 'Bruno', position: 1 }],
+  });
+  let inFlightRead = null;
+
+  const h = createEntryScreenHarness({
+    onGet: async () => (inFlightRead ? inFlightRead.promise : serverState),
+    onPost: async () => { posts += 1; throw new Error('não deveria enviar POST obsoleto'); },
+    onPatch: async () => { patches += 1; throw new Error('não deveria enviar PATCH obsoleto'); },
   });
 
   await h.mount();
-  assert.equal(h.isDisabled('Confirmar entrada'), false);
-  assert.equal(h.isDisabled('Marcar ausência'), true);
-  assert.equal(h.isDisabled('Remover da fila'), true);
-  assert.ok(h.hasText('Confirmação presencial liberada. Ausência e remoção não estão permitidas no estado atual do evento.'));
+
+  // Cenário 1: Staff A abre confirmação de Ana; Staff B resolve Ana e chama Bruno -> modal fecha e callback antigo gera 0 POSTs
+  await h.press('Confirmar entrada');
+  assert.equal(h.modals()[0].props.visible, true);
+  const staleAnaConfirm = h.handler('CONFIRMAR ALTERAÇÃO');
 
   serverState = buildState({
     enabled: true,
+    pendingCall: { id: CALL_2, participationId: PART_2, displayName: 'Bruno', calledAt: AT },
+    waiting: [],
+  });
+  await h.act(async () => { await h.getPolling().read(); });
+  assert.equal(h.modals()[0].props.visible, false);
+  assert.ok(h.hasText('A chamada externa ou as permissões mudaram. Confira o estado atualizado antes de confirmar.'));
+  assert.ok(h.hasExactText('Bruno'));
+  await h.act(async () => { await staleAnaConfirm(); });
+  assert.equal(posts, 0);
+  assert.equal(h.getPolling().enabled, true);
+
+  // Cenário 2: Leitura iniciada em voo ANTES da abertura do modal chega depois com mudança de permissão (corte)
+  inFlightRead = deferred();
+  const pendingPoll = h.getPolling().read();
+  await h.press('Confirmar entrada');
+  assert.equal(h.modals()[0].props.visible, true);
+  const staleCutoffConfirm = h.handler('CONFIRMAR ALTERAÇÃO');
+
+  const cutoffState = buildState({
+    enabled: true,
     canManage: false,
-    pendingCall: { id: CALL_1, participationId: PART_1, displayName: 'Ana Clara', calledAt: AT },
+    pendingCall: { id: CALL_2, participationId: PART_2, displayName: 'Bruno', calledAt: AT },
     waiting: [],
     canCall: false,
     canConfirm: false,
-    canMarkAbsent: false,
-    canRemove: false,
+    canMarkAbsent: true,
+    canRemove: true,
+  });
+  const resolveFlight = inFlightRead.resolve;
+  inFlightRead = null;
+  serverState = cutoffState;
+  await h.act(async () => {
+    resolveFlight(cutoffState);
+    await pendingPoll;
+  });
+  assert.equal(h.modals()[0].props.visible, false);
+  assert.ok(h.hasText('A chamada externa ou as permissões mudaram. Confira o estado atualizado antes de confirmar.'));
+  await h.act(async () => { await staleCutoffConfirm(); });
+  assert.equal(posts, 0);
+
+  // Cenário 3: Modal de desativação D06 aberto com 1 afetado -> fila ganha novo participante (2 afetados) -> modal fecha sem PATCH
+  serverState = buildState({
+    enabled: true,
+    canManage: true,
+    pendingCall: null,
+    waiting: [{ participationId: PART_1, displayName: 'Ana', position: 1 }],
   });
   await h.press('Atualizar fila de entrada');
-  assert.equal(h.isDisabled('Confirmar entrada'), true);
-  assert.equal(h.isDisabled('Desativar fila externa'), true);
-  assert.ok(h.hasText('O evento não permite entradas ou alterações da fila neste momento.'));
+  await h.press('Desativar fila externa');
+  assert.equal(h.modals()[0].props.visible, true);
+  const staleToggleConfirm = h.handler('CONFIRMAR ALTERAÇÃO');
+
+  serverState = buildState({
+    enabled: true,
+    canManage: true,
+    pendingCall: null,
+    waiting: [
+      { participationId: PART_1, displayName: 'Ana', position: 1 },
+      { participationId: PART_2, displayName: 'Bruno', position: 2 },
+    ],
+  });
+  await h.act(async () => { await h.getPolling().read(); });
+  assert.equal(h.modals()[0].props.visible, false);
+  assert.ok(h.hasText('A quantidade de participantes na fila externa mudou. Confira o estado atualizado antes de desativar.'));
+  await h.act(async () => { await staleToggleConfirm(); });
+  assert.equal(patches, 0);
+
+  // Cenário 4: Cancelar modal não executa mutação e polling permanece ativo
+  await h.press('Desativar fila externa');
+  assert.equal(h.modals()[0].props.visible, true);
+  await h.press('CANCELAR ALTERAÇÃO');
+  assert.equal(h.modals()[0].props.visible, false);
+  assert.equal(patches, 0);
+  assert.equal(h.getPolling().enabled, true);
   h.unmount();
 });
 

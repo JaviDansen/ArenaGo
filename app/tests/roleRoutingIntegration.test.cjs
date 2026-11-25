@@ -3590,3 +3590,79 @@ test('STAFF-03 integração Staff <-> Participante: chamada externa propaga call
     app.dispose();
   }
 });
+
+test('STAFF03-AUD-04 integração com timer real: substituição da chamada durante modal fecha diálogo e bloqueia callback obsoleto', { skip }, async () => {
+  const at1 = '2026-11-10T15:00:00.000Z';
+  const at2 = '2026-11-10T15:01:00.000Z';
+  const call1Id = 'dddddddd-dddd-4ddd-8ddd-000000000001';
+  const call2Id = 'dddddddd-dddd-4ddd-8ddd-000000000002';
+  const partAna = 'abcdef00-0000-4000-8000-000000000004';
+  const partBruno = 'abcdef00-0000-4000-8000-000000000005';
+  const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
+  const secureValues = new Map();
+  let mutations = 0;
+  let pendingCall = { id: call1Id, participationId: partAna, displayName: 'Ana', calledAt: at1 };
+  let waiting = [{ participationId: partBruno, displayName: 'Bruno', position: 1 }];
+
+  const app = createIntegration({
+    initialUser: staffUser,
+    control: {
+      realStaff: true,
+      manualTimers: true,
+      platformOS: 'android',
+      events: [staffEvent],
+      secureStore: {
+        isAvailableAsync: async () => true,
+        getItemAsync: async (key) => secureValues.get(key) ?? null,
+        setItemAsync: async (key, value) => { secureValues.set(key, value); },
+      },
+      http: async (route, options) => {
+        if (!route.includes('/entry-control')) return undefined;
+        if (options.method !== 'GET') {
+          mutations += 1;
+          return { statusCode: 500, body: { code: 'UNEXPECTED' } };
+        }
+        return {
+          eventId: staffEvent.id,
+          externalQueueEnabled: true,
+          canManage: true,
+          observedAt: at2,
+          pendingCall,
+          canCall: false,
+          canConfirm: Boolean(pendingCall),
+          canMarkAbsent: Boolean(pendingCall),
+          canRemove: Boolean(pendingCall),
+          waitingCount: waiting.length,
+          waiting,
+        };
+      },
+    },
+  });
+
+  try {
+    await app.mount();
+    await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
+    await app.press('Selecionar evento Evento autorizado');
+    await app.press('Controle de Entrada');
+    assert.ok(app.hasExactText('Ana'));
+    assert.ok(app.hasText('No estado observado, 2 participantes (1 aguardando e 1 em chamada pendente) serão liberados.'));
+
+    await app.press('Confirmar entrada');
+    assert.equal(app.modal().props.visible, true);
+    const staleConfirm = app.handler('CONFIRMAR ALTERAÇÃO');
+
+    // Outro Staff resolve Ana e chama Bruno antes da confirmação do Staff A
+    pendingCall = { id: call2Id, participationId: partBruno, displayName: 'Bruno', calledAt: at2 };
+    waiting = [];
+    await app.tickTimers(5000);
+
+    assert.equal(app.modal().props.visible, false);
+    assert.ok(app.hasText('A chamada externa ou as permissões mudaram. Confira o estado atualizado antes de confirmar.'));
+    assert.ok(app.hasExactText('Bruno'));
+    assert.ok(!app.hasExactText('Ana'));
+    await app.act(async () => staleConfirm());
+    assert.equal(mutations, 0);
+  } finally {
+    app.dispose();
+  }
+});

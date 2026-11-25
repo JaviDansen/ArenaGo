@@ -14,8 +14,75 @@ import {
   EntryQueueListCard,
   EntryQueueToggleCard,
   EntrySummaryCard,
+  getDisableAffectedCount,
 } from './components/StaffEntrySections';
 import { useStaffPolling } from './useStaffPolling';
+
+function evaluateEntryDialog(candidate, currentSnapshot, currentStore) {
+  if (
+    !candidate
+    || !currentStore.isCurrent(candidate.context)
+    || currentSnapshot.status !== 'ready'
+    || currentSnapshot.busy
+    || Boolean(currentSnapshot.pending)
+    || currentSnapshot.storageError
+    || !currentSnapshot.data
+  ) {
+    return { valid: false, reason: 'state' };
+  }
+  if (currentSnapshot.error === 'stale') {
+    return { valid: false, reason: 'stale' };
+  }
+  const currentData = currentSnapshot.data;
+  const action = candidate.action;
+  if (action.kind === 'toggle') {
+    if (!currentData.canManage || currentData.externalQueueEnabled === action.enabled) {
+      return { valid: false, reason: 'toggle_state' };
+    }
+    if (action.enabled === false) {
+      const currentAffected = getDisableAffectedCount(currentData.waitingCount, currentData.pendingCall);
+      const currentHasPending = Boolean(currentData.pendingCall);
+      if (
+        currentAffected !== candidate.observedAffectedCount
+        || currentHasPending !== candidate.observedHasPendingCall
+      ) {
+        return { valid: false, reason: 'toggle_count' };
+      }
+    }
+    return { valid: true, reason: null };
+  }
+  if (['confirm_call', 'absent', 'remove'].includes(action.kind)) {
+    const permissionKey = {
+      confirm_call: 'canConfirm',
+      absent: 'canMarkAbsent',
+      remove: 'canRemove',
+    }[action.kind];
+    if (
+      !currentData.externalQueueEnabled
+      || !currentData.pendingCall
+      || currentData.pendingCall.id !== action.callId
+      || currentData.pendingCall.participationId !== candidate.observedParticipationId
+      || !currentData[permissionKey]
+    ) {
+      return { valid: false, reason: 'call_changed' };
+    }
+    return { valid: true, reason: null };
+  }
+  return { valid: false, reason: 'state' };
+}
+
+function staleMessageForReason(reason) {
+  if (reason === 'stale') {
+    return 'Não foi possível confirmar se o estado da fila permanece atual. Atualize antes de confirmar.';
+  }
+  if (reason === 'toggle_count') {
+    return 'A quantidade de participantes na fila externa mudou. Confira o estado atualizado antes de desativar.';
+  }
+  if (reason === 'toggle_state') {
+    return 'O estado ou as permissões da fila externa mudaram. Confira a tela atualizada antes de confirmar.';
+  }
+  return 'A chamada externa ou as permissões mudaram. Confira o estado atualizado antes de confirmar.';
+}
 
 export default function StaffEntryControlRealScreen({
   event,
@@ -75,6 +142,7 @@ export default function StaffEntryControlRealScreen({
   const store = storeRef.current;
   const [snapshot, setSnapshot] = useState(store.getSnapshot());
   const [notice, setNotice] = useState(null);
+  const [staleDialogMessage, setStaleDialogMessage] = useState(null);
   const autoAttempt = useRef(null);
   const [dialog, setDialog] = useState(null);
   const dialogRef = useRef(null);
@@ -87,6 +155,7 @@ export default function StaffEntryControlRealScreen({
   useEffect(() => {
     autoAttempt.current = null;
     setNotice(null);
+    setStaleDialogMessage(null);
     store.setContext(getContext());
     setDialog(null);
     if (!liveRef.current.accessDenied) void store.refresh();
@@ -101,6 +170,7 @@ export default function StaffEntryControlRealScreen({
     dialogRef.current = null;
     setDialog(null);
     setNotice(null);
+    setStaleDialogMessage(null);
     autoAttempt.current = null;
     store.setContext(null);
   }, [accessDenied, store]);
@@ -113,10 +183,31 @@ export default function StaffEntryControlRealScreen({
     ) {
       dialogRef.current = null;
       setDialog(null);
+      setStaleDialogMessage(null);
       liveRef.current.onAccessDenied?.(snapshot.error);
     }
   }, [snapshot.status, snapshot.error, snapshot.context, store]);
 
+  useEffect(() => {
+    if (!dialog) return;
+    if (accessDenied) {
+      dialogRef.current = null;
+      setDialog(null);
+      return;
+    }
+    const check = evaluateEntryDialog(dialog, snapshot, store);
+    if (check.valid) return;
+    dialogRef.current = null;
+    setDialog(null);
+    if (snapshot.status === 'error' && (snapshot.error === 'denied' || snapshot.error === 'session')) {
+      return;
+    }
+    setNotice(null);
+    setStaleDialogMessage(staleMessageForReason(check.reason));
+  }, [accessDenied, dialog, snapshot, store]);
+
+  // Mantém polling de 5s ativo também durante modais porque StaffEventsNavigator não consulta
+  // /entry-control nesta subtela; qualquer mudança de chamada, permissão, contagem ou 401/403 invalida o modal.
   const pollingEnabled = !accessDenied && store.isCurrent(snapshot.context) && snapshot.status === 'ready' && !snapshot.busy;
   useStaffPolling(pollingEnabled, () => store.poll(), 5000, `${event.id}:${epoch}:${revision}`);
 
@@ -176,27 +267,64 @@ export default function StaffEntryControlRealScreen({
     || !defaultStaffEntryIntentStorage.isPersistent;
 
   const runDirect = (action) => {
+    const latest = store.getSnapshot();
     if (
-      disabled
+      liveRef.current.accessDenied
+      || disabled
       || dialogRef.current
-      || !store.isCurrent(snapshot.context)
+      || latest.busy
+      || latest.status !== 'ready'
+      || latest.error === 'stale'
+      || !latest.data
+      || Boolean(latest.pending)
+      || latest.storageError
+      || !store.isCurrent(latest.context)
       || (action.kind === 'call'
-        ? !snapshot.data.canCall
-        : action.kind !== 'toggle' || action.enabled !== true || !snapshot.data.canManage || snapshot.data.externalQueueEnabled)
+        ? !latest.data.canCall || Boolean(latest.data.pendingCall)
+        : action.kind !== 'toggle' || action.enabled !== true || !latest.data.canManage || latest.data.externalQueueEnabled)
     ) return;
     setNotice(null);
+    setStaleDialogMessage(null);
     return store.mutate(action);
   };
 
   const open = (action, targetName = null) => {
-    if (!disabled && store.isCurrent()) setDialog({ action, targetName, context: snapshot.context });
+    const latest = store.getSnapshot();
+    if (disabled || !store.isCurrent(latest.context) || !latest.data) return;
+    const candidate = {
+      action,
+      targetName,
+      context: latest.context,
+      observedParticipationId: latest.data.pendingCall?.participationId ?? null,
+      observedWaitingCount: latest.data.waitingCount,
+      observedHasPendingCall: Boolean(latest.data.pendingCall),
+      observedAffectedCount: getDisableAffectedCount(latest.data.waitingCount, latest.data.pendingCall),
+    };
+    const check = evaluateEntryDialog(candidate, latest, store);
+    if (!check.valid) {
+      setNotice(null);
+      setStaleDialogMessage(staleMessageForReason(check.reason));
+      return;
+    }
+    setStaleDialogMessage(null);
+    setDialog(candidate);
   };
 
   const confirm = (expected) => {
-    if (!expected || dialogRef.current !== expected || !store.isCurrent(expected.context)) return;
+    if (!expected || liveRef.current.accessDenied || dialogRef.current !== expected) return;
+    const latest = store.getSnapshot();
+    const check = evaluateEntryDialog(expected, latest, store);
     dialogRef.current = null;
     setDialog(null);
+    if (!check.valid) {
+      if (!(latest.status === 'error' && (latest.error === 'denied' || latest.error === 'session'))) {
+        setNotice(null);
+        setStaleDialogMessage(staleMessageForReason(check.reason));
+      }
+      return;
+    }
     setNotice(null);
+    setStaleDialogMessage(null);
     return store.mutate(expected.action);
   };
 
@@ -204,6 +332,7 @@ export default function StaffEntryControlRealScreen({
     if (liveRef.current.accessDenied) return;
     dialogRef.current = null;
     setDialog(null);
+    setStaleDialogMessage(null);
     autoAttempt.current = null;
     void store.refresh();
   };
@@ -243,6 +372,7 @@ export default function StaffEntryControlRealScreen({
   })();
 
   const data = snapshot.data;
+  const dialogVisible = Boolean(!accessDenied && dialog && evaluateEntryDialog(dialog, snapshot, store).valid);
 
   return (
     <View style={styles.content}>
@@ -270,6 +400,14 @@ export default function StaffEntryControlRealScreen({
         <View style={styles.warningCard}>
           <Text accessibilityRole="alert" style={styles.warningMessage}>
             Dados de entrada possivelmente desatualizados. Atualize antes de operar.
+          </Text>
+        </View>
+      )}
+
+      {staleDialogMessage && (
+        <View style={styles.warningCard}>
+          <Text accessibilityRole="alert" style={styles.warningMessage}>
+            {staleDialogMessage}
           </Text>
         </View>
       )}
@@ -377,6 +515,7 @@ export default function StaffEntryControlRealScreen({
           <EntryQueueToggleCard
             externalQueueEnabled={data.externalQueueEnabled}
             waitingCount={data.waitingCount}
+            hasPendingCall={Boolean(data.pendingCall)}
             canManage={data.canManage}
             disabled={disabled}
             onDisableQueue={() => open({ kind: 'toggle', enabled: false })}
@@ -400,7 +539,7 @@ export default function StaffEntryControlRealScreen({
       />
 
       <EntryConfirmModal
-        visible={Boolean(!accessDenied && dialog && store.isCurrent(dialog.context) && !snapshot.busy)}
+        visible={dialogVisible}
         dialog={dialog}
         pendingCall={data?.pendingCall ?? null}
         waitingCount={data?.waitingCount ?? 0}

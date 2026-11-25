@@ -16,19 +16,47 @@ import { ParticipantQueueIdempotencyPolicy } from "../../src/events/participant-
 import { EvaluationReadController } from "../../src/evaluations/evaluation-read.controller";
 import { EvaluationReadService } from "../../src/evaluations/evaluation-read.service";
 import { ParticipationLifecycleController } from "../../src/participations/participation-lifecycle.controller";
+import type { ParticipationView } from "../../src/participations/participation-lifecycle.dto";
 import { ParticipationLifecycleService, type LifecycleResult, type LifecycleFailure } from "../../src/participations/participation-lifecycle.service";
 import { ParticipationQueryService } from "../../src/participations/participation-query.service";
 
-const id=(n:number)=>`abcdef00-0000-4000-8000-${String(n).padStart(12,"0")}`,uid=id(1),pid=id(2),at="2026-11-04T15:00:00.123456Z";
-const value={id:pid,eventId:id(3),status:"active" as const,joinedAt:at,arenaEnteredAt:at,finishedAt:null,finishReason:null,externalQueue:null};
-const calls:Array<{mode:string;input:unknown}>=[];let result:LifecycleResult={kind:"changed",participation:value},found=true,failure=false;
+const id=(n:number)=>`abcdef00-0000-4000-8000-${String(n).padStart(12,"0")}`,uid=id(1),uidB=id(50),pid=id(2),pidB=id(52),at="2026-11-04T15:00:00.123456Z";
+const value: ParticipationView = {
+  id: pid,
+  eventId: id(3),
+  status: "active",
+  joinedAt: at,
+  arenaEnteredAt: at,
+  finishedAt: null,
+  finishReason: null,
+  externalQueue: null,
+  externalEntryCall: null,
+};
+const calls:Array<{mode:string;input:unknown}>=[];
+let result:LifecycleResult={kind:"changed",participation:value},found=true,failure=false;
+let recordsByUser = new Map<string, ParticipationView>([[uid, value]]);
 @Module({controllers:[EvaluationReadController,ParticipationLifecycleController],providers:[SessionAuthGuard,ParticipantQueueIdempotencyPolicy,
   {provide:AuthService,useValue:{async authenticateBearerToken(token:string){
     if(token==="admin-no-2fa")throw new ProblemException({status:401,code:"ADMIN_2FA_REQUIRED",typeSlug:"admin-2fa-required",title:"2FA",detail:"Segundo fator obrigatório."});
+    if(token==="participant-b")return {userId:uidB,sessionId:id(51),roles:[]};
     if(!["participant","staff","admin"].includes(token))throw new ProblemException({status:401,code:"SESSION_REVOKED",typeSlug:"session-revoked",title:"Sessão inválida",detail:"Sessão inválida."});
     return {userId:uid,sessionId:id(4),roles:token==="participant"?[]:[token]};
   }}},
-  {provide:ParticipationQueryService,useValue:{current:(userId:string)=>{calls.push({mode:"current",input:userId});return found?value:null;},byId:(userId:string,participationId:string)=>{calls.push({mode:"byId",input:{userId,participationId}});return found?value:null;}}},
+  {provide:ParticipationQueryService,useValue:{
+    current:(userId:string)=>{
+      calls.push({mode:"current",input:userId});
+      if(!found)return null;
+      const owned=recordsByUser.get(userId);
+      if(!owned||(owned.status!=="waiting"&&owned.status!=="active"))return null;
+      return owned;
+    },
+    byId:(userId:string,participationId:string)=>{
+      calls.push({mode:"byId",input:{userId,participationId}});
+      if(!found)return null;
+      const owned=recordsByUser.get(userId);
+      return owned && owned.id===participationId ? owned : null;
+    },
+  }},
   {provide:ParticipationLifecycleService,useValue:{cancelAuthenticated:(input:unknown, context: MutationSession) => { authenticatedInput(context, undefined); calls.push({mode:"cancel",input});if(failure)throw Error("PARTICIPATION_LIFECYCLE_INTERNAL_ERROR");return result;},finishAuthenticated:(input:unknown, context: MutationSession) => { authenticatedInput(context, undefined); calls.push({mode:"finish",input});if(failure)throw Error("PARTICIPATION_LIFECYCLE_INTERNAL_ERROR");return result;}}},
   {provide:EvaluationReadService,useValue:{getHistory:()=>({items:[],nextCursor:null}),getReturnState:()=>({recentFinalization:null,pendingEvaluationParticipationIds:[]}),getPending:()=>({items:[]})}},
 ]})class HttpModule{}
@@ -39,7 +67,7 @@ function request(mode:"current"|"byId"|"cancel"|"finish",token="participant",res
   const r=mode==="current"?supertest(app.getHttpServer()).get('/api/v1/participations/current'):mode==="byId"?supertest(app.getHttpServer()).get(`/api/v1/participations/${resource}`):supertest(app.getHttpServer()).post(`/api/v1/participations/${resource}/${mode}`);
   return r.set("Authorization",`Bearer ${token}`).set("Idempotency-Key","opaque,key");
 }
-function reset(){calls.length=0;result={kind:"changed",participation:value};found=true;failure=false;}
+function reset(){calls.length=0;result={kind:"changed",participation:value};found=true;failure=false;recordsByUser=new Map([[uid,value]]);}
 function problem(r:supertest.Response,status:number,code:string){assert.equal(r.status,status);assert.equal(r.body.code,code);assert.match(r.headers['content-type'],/application\/problem\+json/);}
 for(const mode of ["current","byId","cancel","finish"]as const){
   test(`E08.12 HTTP ${mode} exige Bearer/sessão e 2FA existente`,async()=>{
@@ -81,6 +109,7 @@ for(const [kind,code]of Object.entries({access_denied:"RESOURCE_NOT_FOUND",not_w
 });
 test("E08.12 HTTP conflito de estado traz somente a participação própria atualizada",async()=>{
   reset();result={kind:"not_waiting",participation:value};const r=await request("cancel").send({});problem(r,409,"PARTICIPATION_NOT_WAITING");assert.deepEqual(r.body.participation,value);
+  assert.equal(r.headers["cache-control"],"no-store");
 });
 test("E08.12 HTTP Staff/Admin agem como participantes próprios sem prerrogativa adicional",async()=>{
   reset();for(const actor of ["staff","admin"])for(const mode of ["current","byId","cancel","finish"]as const)assert.equal((await request(mode,actor).send(mode==="cancel"||mode==="finish"?{}:undefined)).status,200);
@@ -97,7 +126,8 @@ function authenticatedInput<T>(context: MutationSession, result: T): T {
   assert.deepEqual(context, { userId: uid, sessionId: id(4) }); return result;
 }
 
-test("STAFF-03 HTTP /current e /:participationId emitem Cache-Control: no-store e expõem externalEntryCall apenas ao titular", async () => {
+// Teste HTTP com serviços simulados (isolamento físico PostgreSQL é verificado em suíte de integração dedicada).
+test("STAFF-03 HTTP isolamento entre titulares distintos A e B, no-store em sucesso/erro e proteção de identidade", async () => {
   reset();
   const pendingCall = {
     callId: id(55),
@@ -107,10 +137,10 @@ test("STAFF-03 HTTP /current e /:participationId emitem Cache-Control: no-store 
     status: "pending" as const,
     calledAt: "2026-11-04T15:02:00.123456Z",
   };
-  const waitingWithCall = {
+  const waitingA: ParticipationView = {
     id: pid,
     eventId: id(3),
-    status: "waiting" as const,
+    status: "waiting",
     joinedAt: at,
     arenaEnteredAt: null,
     finishedAt: null,
@@ -118,33 +148,61 @@ test("STAFF-03 HTTP /current e /:participationId emitem Cache-Control: no-store 
     externalQueue: { position: 1, observedAt: at },
     externalEntryCall: pendingCall,
   };
-  const previousExternalQueue = value.externalQueue;
-  Object.assign(value, waitingWithCall);
-  try {
-    for (const mode of ["current", "byId"] as const) {
-      const res = await request(mode);
-      assert.equal(res.status, 200);
-      assert.equal(res.headers["cache-control"], "no-store");
-      assert.deepEqual(res.body.participation.externalEntryCall, pendingCall);
-      assert.equal(Object.hasOwn(res.body.participation, "userId"), false);
-      assert.equal(Object.hasOwn(res.body.participation.externalEntryCall, "staffUserId"), false);
-    }
-    found = false;
-    const absentCurrent = await request("current");
-    assert.equal(absentCurrent.status, 200);
-    assert.equal(absentCurrent.headers["cache-control"], "no-store");
-    assert.deepEqual(absentCurrent.body, { participation: null });
-  } finally {
-    Object.assign(value, {
-      id: pid,
-      eventId: id(3),
-      status: "active" as const,
-      joinedAt: at,
-      arenaEnteredAt: at,
-      finishedAt: null,
-      finishReason: null,
-      externalQueue: previousExternalQueue,
-    });
-    delete (value as Record<string, unknown>).externalEntryCall;
+  const waitingB: ParticipationView = {
+    id: pidB,
+    eventId: id(3),
+    status: "waiting",
+    joinedAt: at,
+    arenaEnteredAt: null,
+    finishedAt: null,
+    finishReason: null,
+    externalQueue: { position: 2, observedAt: at },
+    externalEntryCall: null,
+  };
+  recordsByUser = new Map([[uid, waitingA]]);
+
+  // 1. Consulta corrente e por ID do titular A retorna sua chamada sem expor dados privados/Staff
+  for (const mode of ["current", "byId"] as const) {
+    const resA = await request(mode, "participant", pid);
+    assert.equal(resA.status, 200);
+    assert.equal(resA.headers["cache-control"], "no-store");
+    assert.deepEqual(resA.body.participation.externalEntryCall, pendingCall);
+    assert.equal(Object.hasOwn(resA.body.participation, "userId"), false);
+    assert.equal(Object.hasOwn(resA.body.participation.externalEntryCall, "staffUserId"), false);
+    assert.equal(Object.hasOwn(resA.body.participation.externalEntryCall, "calledByUserId"), false);
   }
+
+  // 2. Consulta corrente do usuário B sem participação própria não recebe chamada de A, mesmo enviando ?userId=uid
+  calls.length = 0;
+  const currentBEmpty = await request("current", "participant-b").query({ userId: uid });
+  assert.equal(currentBEmpty.status, 200);
+  assert.equal(currentBEmpty.headers["cache-control"], "no-store");
+  assert.deepEqual(currentBEmpty.body, { participation: null });
+  assert.equal(calls[0].input, uidB);
+
+  // 3. Mesmo quando B tem participação própria na mesma fila, B vê somente externalEntryCall: null
+  recordsByUser.set(uidB, waitingB);
+  const currentBOwn = await request("current", "participant-b").query({ userId: uid });
+  assert.equal(currentBOwn.status, 200);
+  assert.equal(currentBOwn.body.participation.id, pidB);
+  assert.equal(currentBOwn.body.participation.externalEntryCall, null);
+
+  // 4. Consulta de B ao participationId de A retorna 404 neutro idêntico a recurso inexistente + no-store
+  const foreignRead = await request("byId", "participant-b", pid).query({ userId: uid });
+  const missingRead = await request("byId", "participant-b", id(99));
+  problem(foreignRead, 404, "RESOURCE_NOT_FOUND");
+  problem(missingRead, 404, "RESOURCE_NOT_FOUND");
+  assert.deepEqual(foreignRead.body, missingRead.body);
+  assert.equal(foreignRead.headers["cache-control"], "no-store");
+  assert.equal(missingRead.headers["cache-control"], "no-store");
+
+  // 5. Sessão ausente ou revogada recebe 401 com no-store sem chegar ao serviço de consulta
+  calls.length = 0;
+  const anonymous = await request("current").unset("Authorization");
+  problem(anonymous, 401, "MISSING_ACCESS_TOKEN");
+  assert.equal(anonymous.headers["cache-control"], "no-store");
+  const revoked = await request("current", "revoked");
+  problem(revoked, 401, "SESSION_REVOKED");
+  assert.equal(revoked.headers["cache-control"], "no-store");
+  assert.equal(calls.length, 0);
 });

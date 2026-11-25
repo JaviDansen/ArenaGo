@@ -7,6 +7,7 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import type { Client } from "pg";
 import * as schema from "../../src/database/schema";
 import { ParticipationLifecycleService, lifecycleFingerprint, VOLUNTARY_QUEUE_REASON } from "../../src/participations/participation-lifecycle.service";
+import { finishedParticipationView, participationView } from "../../src/participations/participation-lifecycle.dto";
 import { ParticipationQueryService, participationProjection, publicParticipation, type ParticipationProjectionRow } from "../../src/participations/participation-query.service";
 
 const id=(n:number)=>`abcdef00-0000-4000-8000-${String(n).padStart(12,"0")}`;
@@ -237,14 +238,115 @@ test("STAFF-03 projeção expõe externalEntryCall válida apenas em waiting e v
     waitingRowWithCall(cid, { status: "active", arenaEnteredAt: at, position: null }),
     waitingRowWithCall(cid, { status: "finished", finishedAt: at, finishReason: "voluntary", position: null }),
     waitingRowWithCall(cid, { externalCallStatus: "confirmed" }),
+    waitingRowWithCall(cid, { externalCallStatus: undefined }),
+    waitingRowWithCall(cid, { externalCallStatus: null }),
     waitingRowWithCall(cid, { externalCallParticipationId: id(99) }),
+    waitingRowWithCall(cid, { externalCallParticipationId: undefined }),
+    waitingRowWithCall(cid, { externalCallParticipationId: null }),
     waitingRowWithCall(cid, { externalCallEventId: id(99) }),
+    waitingRowWithCall(cid, { externalCallEventId: undefined }),
+    waitingRowWithCall(cid, { externalCallEventId: null }),
     waitingRowWithCall(cid, { externalCallCalledAt: null }),
+    waitingRowWithCall(cid, { externalCallCalledAt: undefined }),
     waitingRowWithCall(cid, { externalCallId: null }),
+    waitingRowWithCall(cid, { externalCallId: undefined }),
   ]) {
     assert.throws(() => publicParticipation(corrupted), { message: "PARTICIPATION_EXTERNAL_CALL_INTEGRITY" });
   }
 });
+
+test("STAFF03-AUD-02 DTO participationView e finishedParticipationView rejeitam externalEntryCall parcial, malformada ou inconsistente", () => {
+  const validCall = {
+    callId: cid,
+    participationId: pid,
+    eventId,
+    kind: "external_entry" as const,
+    status: "pending" as const,
+    calledAt: callAt,
+  };
+  const baseWaiting = {
+    id: pid,
+    eventId,
+    status: "waiting" as const,
+    joinedAt: at,
+    arenaEnteredAt: null,
+    finishedAt: null,
+    finishReason: null,
+    externalQueue: { position: 1, observedAt: at },
+  };
+  assert.equal(participationView.parse(baseWaiting).externalEntryCall, null);
+  assert.equal(participationView.parse({ ...baseWaiting, externalEntryCall: null }).externalEntryCall, null);
+  assert.deepEqual(participationView.parse({ ...baseWaiting, externalEntryCall: validCall }).externalEntryCall, validCall);
+
+  const invalidCalls: unknown[] = [
+    { ...validCall, callId: "call-1" },
+    { ...validCall, participationId: undefined },
+    { ...validCall, eventId: undefined },
+    { ...validCall, participationId: id(99) },
+    { ...validCall, eventId: id(99) },
+    { ...validCall, kind: "station" },
+    { ...validCall, status: "confirmed" },
+    { ...validCall, calledAt: "2026-11-04T15:02:00.000Z" },
+    { ...validCall, calledAt: "2026-02-30T15:02:00.000000Z" },
+    { ...validCall, calledAt: "2026-11-04T15:02:00.123456-03:00" },
+    { ...validCall, staffUserId: id(77) },
+  ];
+  for (const bad of invalidCalls) {
+    assert.throws(() => participationView.parse({ ...baseWaiting, externalEntryCall: bad }));
+  }
+  assert.throws(() => participationView.parse({
+    ...baseWaiting,
+    status: "active",
+    arenaEnteredAt: at,
+    externalQueue: null,
+    externalEntryCall: validCall,
+  }));
+  assert.throws(() => finishedParticipationView.parse({
+    ...baseWaiting,
+    status: "finished",
+    finishedAt: at,
+    finishReason: "voluntary",
+    externalQueue: null,
+    externalEntryCall: validCall,
+    completedServicesCount: 1,
+    evaluationEligibility: { eligible: true, hasSubmitted: false },
+  }));
+});
+
+for (const mode of ["cancel", "finish"] as const) {
+  test(`STAFF03-AUD-07 replay idempotente histórico de ${mode} sem campo externalEntryCall normaliza para null`, async () => {
+    const legacyParticipation: Record<string, unknown> = {
+      id: pid,
+      eventId,
+      status: mode === "cancel" ? "canceled" : "finished",
+      joinedAt: at,
+      arenaEnteredAt: mode === "cancel" ? null : at,
+      finishedAt: at,
+      finishReason: mode === "cancel" ? "external_wait_withdrawal" : "voluntary",
+      externalQueue: null,
+      ...(mode === "finish" ? { completedServicesCount: 1, evaluationEligibility: { eligible: true, hasSubmitted: false } } : {}),
+    };
+    const db = drizzle({
+      async query(config: { text: string }) {
+        const text = config.text;
+        if (/^(begin|commit|rollback)/.test(text)) return { rows: [] };
+        if (text.startsWith("SELECT event_id AS")) return { rows: [{ eventId }] };
+        if (text.includes('insert into "idempotency_operations"')) return { rows: [] };
+        if (text.includes('from "idempotency_operations"')) {
+          return { rows: [["intent", lifecycleFingerprint(mode, uid, pid), "completed", 200, pid, { participation: legacyParticipation }]] };
+        }
+        if (text.startsWith("SELECT id FROM events")) return { rows: [{ id: eventId }] };
+        if (text.startsWith("SELECT q.id,q.experience_id")) return { rows: [] };
+        if (text.startsWith("SELECT status,current_queue_entry_id")) return { rows: [{ status: mode === "cancel" ? "canceled" : "finished", currentId: null }] };
+        throw Error("Unexpected SQL: " + text);
+      },
+    } as unknown as Client, { schema });
+    const result = await new ParticipationLifecycleService(db)[mode](input);
+    assert.equal(result.kind, "replay");
+    if (result.kind !== "replay") assert.fail();
+    assert.equal(result.participation.externalEntryCall, null);
+  });
+}
 
 test("STAFF-03 SQL participationProjection faz LEFT JOIN estrito sem mutação e respeita queue enabled e encerramento", () => {
   const q = new PgDialect().sqlToQuery(participationProjection(uid));

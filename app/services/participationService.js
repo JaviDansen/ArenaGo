@@ -1,6 +1,20 @@
 import { httpClient } from './httpClient';
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const PRECISE_UTC_INSTANT_RE = /^(?!0000)\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/;
+const EXTERNAL_CALL_KEYS = new Set(['callId', 'participationId', 'eventId', 'kind', 'status', 'calledAt']);
+
 const empty = () => ({ userId: null, epoch: null, status: 'idle', participation: null, returnState: null, returnStateVersion: 0, demoParticipation: null, error: null, syncStale: false });
+
+function isValidUuid(value) {
+  return typeof value === 'string' && UUID_RE.test(value);
+}
+
+function isValidPreciseUtcInstant(value) {
+  if (typeof value !== 'string' || !PRECISE_UTC_INSTANT_RE.test(value)) return false;
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 23) === value.slice(0, 23);
+}
 
 function validateReturnState(returned) {
   if (!returned || !Array.isArray(returned.pendingEvaluationParticipationIds) ||
@@ -13,13 +27,19 @@ function validateReturnState(returned) {
 function isValidExternalEntryCall(call, participation) {
   if (call === undefined || call === null) return true;
   if (!call || typeof call !== 'object' || Array.isArray(call)) return false;
+  const keys = Object.keys(call);
+  if (keys.length !== EXTERNAL_CALL_KEYS.size || !keys.every((key) => EXTERNAL_CALL_KEYS.has(key))) {
+    return false;
+  }
   if (participation.status !== 'waiting') return false;
-  if (typeof call.callId !== 'string' || !call.callId.trim()) return false;
+  if (!isValidUuid(call.callId) || !isValidUuid(call.participationId) || !isValidUuid(call.eventId)) {
+    return false;
+  }
+  if (call.participationId !== participation.id || call.eventId !== participation.eventId) {
+    return false;
+  }
   if (call.kind !== 'external_entry' || call.status !== 'pending') return false;
-  if (typeof call.calledAt !== 'string' || !Number.isFinite(Date.parse(call.calledAt))) return false;
-  if (call.participationId !== undefined && call.participationId !== participation.id) return false;
-  if (call.eventId !== undefined && call.eventId !== participation.eventId) return false;
-  return true;
+  return isValidPreciseUtcInstant(call.calledAt);
 }
 
 function isValidCurrentParticipationResponse(current) {
@@ -95,7 +115,7 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
     const identity = state.userId === null ? null : { userId: state.userId, epoch: state.epoch };
     if (!matches(identity)) return;
     const requestGeneration = ++generation;
-    publish({ ...state, status: 'loading', error: null, participation: null, returnState: null, demoParticipation: null });
+    publish({ ...state, status: 'loading', error: null, participation: null, returnState: null, demoParticipation: null, syncStale: false });
     try {
       const [current, returned] = await Promise.all([
         client.get('/participations/current', { auth: true }),
@@ -110,8 +130,20 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
       publish({ ...state, status: 'ready', participation, returnState: returned, returnStateVersion: requestGeneration, demoParticipation: null, error: null, syncStale: false });
     } catch (error) {
       if (requestGeneration !== generation || !matches(identity)) return;
-      publish({ ...state, status: 'error', participation: null, returnState: null, demoParticipation: null, syncStale: false,
-        error: error?.status === 401 || error?.status === 403 ? 'authorization' : error?.isNetworkError ? 'network' : 'unavailable' });
+      const isAuthorizationError = error?.status === 401 || error?.status === 403;
+      if (isAuthorizationError) {
+        generation += 1;
+        presentedReturnEvaluations.clear();
+      }
+      publish({
+        ...state,
+        status: 'error',
+        participation: null,
+        returnState: null,
+        demoParticipation: null,
+        syncStale: false,
+        error: isAuthorizationError ? 'authorization' : error?.isNetworkError ? 'network' : 'unavailable',
+      });
     }
   }
 
@@ -128,6 +160,12 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
         if (requestGeneration !== generation || !matches(identity)) return;
 
         if (!isValidCurrentParticipationResponse(current)) {
+          if (!state.syncStale) {
+            publish({
+              ...state,
+              syncStale: true,
+            });
+          }
           return;
         }
         const participation = current.participation;
@@ -137,7 +175,7 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
         let returnStateVersion = state.returnStateVersion;
         if (prev && participation === null) {
           // Publicação atômica: se esta leitura falhar, manter a participação confirmada
-          // e tentar reconciliar a transição novamente no próximo ciclo.
+          // (salvo em negativa 401/403) e tentar reconciliar a transição novamente no próximo ciclo.
           returned = await client.get('/participations/return-state', { auth: true });
           if (requestGeneration !== generation || !matches(identity)) return;
           validateReturnState(returned);
@@ -145,10 +183,13 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
           // posição não altera a versão nem o conjunto de avaliações consumidas.
           returnStateVersion = requestGeneration;
         }
-        const changed = !prev || prev.id !== participation?.id ||
-          prev.status !== participation?.status ||
-          prev.externalQueue?.position !== participation?.externalQueue?.position ||
-          externalCallSignature(prev) !== externalCallSignature(participation);
+        const changed = Boolean(prev) !== Boolean(participation)
+          || (Boolean(prev) && (
+            prev.id !== participation.id
+            || prev.status !== participation.status
+            || prev.externalQueue?.position !== participation.externalQueue?.position
+            || externalCallSignature(prev) !== externalCallSignature(participation)
+          ));
 
         if (changed || state.status !== 'ready' || state.syncStale) {
           publish({
@@ -161,9 +202,24 @@ export function createParticipationStore({ client = httpClient, getIdentity }) {
             syncStale: false,
           });
         }
-      } catch {
-        // Preserva o último estado válido se a conexão falhar e sinaliza instabilidade temporária
-        if (requestGeneration === generation && matches(identity) && state.participation && !state.syncStale) {
+      } catch (error) {
+        if (requestGeneration !== generation || !matches(identity)) return;
+        if (error?.status === 401 || error?.status === 403) {
+          generation += 1;
+          presentedReturnEvaluations.clear();
+          publish({
+            ...state,
+            status: 'error',
+            participation: null,
+            returnState: null,
+            demoParticipation: null,
+            syncStale: false,
+            error: 'authorization',
+          });
+          return;
+        }
+        // Falha transitória ou resposta inválida de retorno: preserva último estado confirmado e sinaliza syncStale.
+        if (!state.syncStale) {
           publish({
             ...state,
             syncStale: true,

@@ -49,10 +49,14 @@ export function publicParticipation(row: ParticipationProjectionRow): Participat
   }
   const hasExternalCall = [row.externalCallId, row.externalCallCalledAt, row.externalCallStatus,
     row.externalCallParticipationId, row.externalCallEventId].some((item) => item !== undefined && item !== null);
-  if (hasExternalCall && (row.status !== "waiting" || !row.externalCallId || !row.externalCallCalledAt ||
-      (row.externalCallStatus !== undefined && row.externalCallStatus !== "pending") ||
-      (row.externalCallParticipationId !== undefined && row.externalCallParticipationId !== row.id) ||
-      (row.externalCallEventId !== undefined && row.externalCallEventId !== row.eventId))) {
+  if (hasExternalCall && (
+    row.status !== "waiting"
+    || !row.externalCallId
+    || !row.externalCallCalledAt
+    || row.externalCallStatus !== "pending"
+    || row.externalCallParticipationId !== row.id
+    || row.externalCallEventId !== row.eventId
+  )) {
     throw new Error("PARTICIPATION_EXTERNAL_CALL_INTEGRITY");
   }
   const value = participationView.parse({ id: row.id, eventId: row.eventId, status: row.status, joinedAt: row.joinedAt,
@@ -60,10 +64,10 @@ export function publicParticipation(row: ParticipationProjectionRow): Participat
     externalQueue: row.status === "waiting" ? { position: Number(row.position), observedAt: row.observedAt } : null,
     externalEntryCall: hasExternalCall ? {
       callId: row.externalCallId,
-      participationId: row.id,
-      eventId: row.eventId,
+      participationId: row.externalCallParticipationId,
+      eventId: row.externalCallEventId,
       kind: "external_entry",
-      status: "pending",
+      status: row.externalCallStatus,
       calledAt: row.externalCallCalledAt,
     } : null });
   if ((value.status === "waiting" || value.status === "active") ? value.finishedAt !== null || value.finishReason !== null

@@ -7,8 +7,9 @@
 - **Responsável pela implementação:** Kaled
 - **Prioridade:** P0
 - **Branch obrigatória:** `feature/staff-operacional-v2`
-- **Commit-base de referência (`HEAD`):** `efe21a8492a056d08a8c61799f7a66636c830a63` (`docs(staff): registra encerramento formal da STAFF-02`)
-- **Status atual:** Implementação e suíte de testes preparadas na branch `feature/staff-operacional-v2` (base `efe21a8492a056d08a8c61799f7a66636c830a63`). Pendentes: execução automatizada com **GPT-6 Luna — Medium** conforme [AGENTS.md](../AGENTS.md), integração visual no app do Participante pelo Heliom, homologação no Expo Go e revisão formal do responsável.
+- **Commit-base de referência (`HEAD` original):** `efe21a8492a056d08a8c61799f7a66636c830a63` (`docs(staff): registra encerramento formal da STAFF-02`)
+- **Commit auditado (Rodada 1):** `29029f0328ecb02bf6e016abda1b2c4ed371dffe` (`Controle de Entrada e Integração da Chamada Externa`)
+- **Status atual:** Correções dos sete achados da Auditoria Independente — Rodada 1 (`STAFF03-AUD-01` a `STAFF03-AUD-07`) implementadas na branch `feature/staff-operacional-v2` (acumuladas desde `efe21a8492a056d08a8c61799f7a66636c830a63`). **Ainda não aprovada nem homologada**; pendentes publicação para nova auditoria independente, execução automatizada com **GPT-6 Luna — Medium** conforme [AGENTS.md](../AGENTS.md), integração visual do Participante pelo Heliom e homologação no Expo Go.
 
 ### Objetivos principais
 1. **Entrega A — Reformulação do Controle de Entrada (App Staff):** modernizar visualmente e funcionalmente [StaffEntryControlRealScreen.js](../app/screens/staff/StaffEntryControlRealScreen.js) na identidade aprovada nas STAFF-01 e STAFF-02, preservando integralmente contratos HTTP, polling, autorização por evento, fila FIFO do servidor, modais responsivos e persistência de intenções no `SecureStore`.
@@ -169,22 +170,26 @@ Quando `participation` estiver presente no payload:
 *(No caso de remoção pelo Staff, `status` é `"canceled"` e `finishReason` é `"staff_external_wait_removed"`; na desistência voluntária, `"canceled"` e `"external_wait_withdrawal"`; no encerramento controlado, `"finished"` e `"admin_controlled_external_wait_closed"`; todos com `"externalEntryCall": null`.)*
 
 ### 4.4. Regras de consumo para a interface do Heliom
-1. **Exibição da mensagem obrigatória:** apresentar **“É sua vez! Dirija-se ao Controle de Entrada.”** somente quando:
+1. **Exibição da mensagem obrigatória e validação defensiva:** apresentar **“É sua vez! Dirija-se ao Controle de Entrada.”** somente quando o payload validado satisfizer integralmente:
    - `participation?.status === 'waiting'` **e**
-   - `participation?.externalEntryCall?.kind === 'external_entry'` **e**
-   - `participation?.externalEntryCall?.status === 'pending'` **e**
+   - `participation?.externalEntryCall` é um objeto completo com os 6 campos obrigatórios (`callId`, `participationId`, `eventId`, `kind`, `status`, `calledAt`), sem campos extras inesperados **e**
+   - `callId`, `participationId` e `eventId` são UUIDs válidos **e**
    - `participation.externalEntryCall.participationId === participation.id` **e**
-   - `participation.externalEntryCall.eventId === participation.eventId`.
+   - `participation.externalEntryCall.eventId === participation.eventId` **e**
+   - `participation.externalEntryCall.kind === 'external_entry'` **e**
+   - `participation.externalEntryCall.status === 'pending'` **e**
+   - `calledAt` está em formato ISO-8601 UTC com precisão de microssegundos (`YYYY-MM-DDTHH:MM:SS.ffffffZ`).
 2. **Semântica de `callId` (chave estável e deduplicação de alertas):**
    - Utilizar `callId` em chave isolada por sessão/participação (ex.: `${userId}:${epoch}:external:${participation.id}:${callId}`) para distinguir primeira chamada, re-renderização/polling repetido da mesma chamada (não vibrar de novo), chamada resolvida e **nova chamada após ausência + reinserção** (`callId` diferente).
    - Nunca usar apenas `externalQueue.position === 1` ou booleano local para inferir chamada, nem suprimir futuras chamadas após ausência.
 3. **Diferenciação de chamada de estação:**
    - Chamadas externas vêm em `participation.externalEntryCall` com `kind: 'external_entry'` (enquanto `participation.status === 'waiting'`).
    - Chamadas de estação pertencem às filas internas de experiências quando `participation.status === 'active'` (`/participations/:participationId/queue`). Os dois avisos são mutuamente exclusivos pelo próprio ciclo de estado.
-4. **Reconexão, retorno do segundo plano e erros:**
-   - `ParticipationContext` já reexecuta `refresh()` automaticamente ao retomar `AppState === 'active'` e atualiza `participation` em `syncCurrentSilent()` quando `externalEntryCall` muda (`callId`, `status` ou `calledAt`).
-   - Ao retomar do segundo plano ou abrir o app com chamada já `pending`, exibir o banner/aviso visual imediatamente, porém respeitar a política de alerta sonoro/vibração sem disparar alerta retroativo indevido (análoga a [queueAlertService.js](../app/services/queueAlertService.js)).
-   - Em `401` / `403`, limpar o estado do Participante; em falha de conexão/rede (`syncStale`), preservar o último estado conhecido com sinalização transitória sem fabricar nem cancelar chamada localmente.
+4. **Tratamento de `syncStale`, respostas inválidas, `401`/`403` e reconexão:**
+   - **Falha transitória de rede ou resposta malformada (`syncStale: true`):** [participationService.js](../app/services/participationService.js) preserva o último estado confirmado sem fabricar nem apagar a participação, mas **sinaliza `syncStale: true`** (inclusive quando um payload malformado é rejeitado). A interface do Heliom **nunca** deve tratar um estado marcado com `syncStale: true` como uma nova chamada ou disparar novo alerta/vibração; deve indicar visualmente que os dados podem estar desatualizados até a próxima leitura válida (`syncStale: false`).
+   - **Negativas de autorização (`HTTP 401` / `HTTP 403`):** tanto em `refresh()` quanto em `syncCurrentSilent()` (incluindo leitura de `/participations/return-state` durante transição), a store limpa imediatamente `participation`, `returnState` e `demoParticipation`, avança a geração para descartar respostas atrasadas e publica `status: 'error'`, `error: 'authorization'`, `syncStale: false`. O aviso de chamada externa desaparece imediatamente e não é mascarado como falha transitória de rede.
+   - **Reconexão e retorno do segundo plano:** `ParticipationContext` reexecuta `refresh()` automaticamente ao retomar `AppState === 'active'` e `syncCurrentSilent()` detecta mudanças em `externalEntryCall` (`callId`, `status` ou `calledAt`). Ao retomar do segundo plano com chamada já `pending`, exibir o banner imediatamente respeitando deduplicação por `callId` sem disparar alerta retroativo indevido (análoga a [queueAlertService.js](../app/services/queueAlertService.js)).
+   - **Isolamento entre contas/sessões:** trocas de `userId` ou `epoch` invalidam leituras em voo; respostas atrasadas de uma conta A nunca alteram o estado da conta B.
 
 ---
 
@@ -267,20 +272,32 @@ Quando `participation` estiver presente no payload:
 - Conferência de integridade de patch via `git diff --check -- app backend docs`, `git apply --stat qa-evidence/STAFF-03-changes.diff` e `git apply --check --reverse qa-evidence/STAFF-03-changes.diff`.
 - Validação de inventário Staff (`realStaffScreens` + ausência de imports de demonstração) e uso exclusivo de links relativos na documentação.
 
-### 9.2. Validações automatizadas pendentes para **GPT-6 Luna — Medium** (NÃO EXECUTADAS ainda)
-Conforme [AGENTS.md](../AGENTS.md), o modelo de implementação **não** executou testes automatizados, lint, typecheck, build ou acesso ao PostgreSQL. Comandos ordenados para execução pelo responsável com **GPT-6 Luna — Medium**:
+### 9.2. Campanha automatizada pendente para **GPT-6 Luna — Medium** (NÃO EXECUTADA nesta rodada)
+Conforme [AGENTS.md](../AGENTS.md), o modelo de implementação **não** executou testes automatizados, lint, typecheck, build ou acesso ao PostgreSQL. Comandos ordenados a partir dos diretórios corretos (garantindo resolução Babel a partir de `app/` e scripts isolados em `backend/` e `qa/regression/`):
 
-1. **Testes unitários e de integração simulada do App (`app/`):**
-   - `node --test app/tests/participationService.test.cjs app/tests/staffDemoState.test.cjs app/tests/staffEntryControl.test.cjs app/tests/staffEntryControlScreen.test.cjs app/tests/staffRealNavigation.test.cjs app/tests/roleRoutingIntegration.test.cjs`
-   - Cobertura completa do app: `node --test app/tests/*.test.cjs`
-2. **Testes unitários e HTTP simulados do Backend (`backend/`):**
-   - `npm --prefix backend run typecheck:test`
-   - `npm --prefix backend run lint`
-   - `npm --prefix backend run build`
-   - `npm --prefix backend test`
-3. **Integração PostgreSQL (SOMENTE com autorização explícita do responsável, `NODE_ENV=test`, migration `0008` aplicada em `127.0.0.1:55432/arenago_staff_homolog_20261111` e três URLs idênticas confirmadas, executando a partir de `backend/`):**
-   - `npx tsx --tsconfig tsconfig.test.json --test test/integration/staff03-external-call-projection.integration.test.ts` (exige `STAFF03_POSTGRES_PROJECTION_TEST=authorized-local`)
+1. **Testes focados da STAFF-03 no App (executar a partir de `app/`):**
+   - `Push-Location app`
+   - `node --test tests/participationService.test.cjs tests/staffDemoState.test.cjs tests/staffEntryControl.test.cjs tests/staffEntryControlScreen.test.cjs tests/staffRealNavigation.test.cjs tests/roleRoutingIntegration.test.cjs`
+   - `Pop-Location`
+2. **Typecheck de produção e testes, lint, build e testes unitários/HTTP do Backend (executar a partir de `backend/`):**
+   - `Push-Location backend`
+   - `npm run typecheck:test`
+   - `npm run lint`
+   - `npm run build`
+   - `npm test`
+   - `Pop-Location`
+3. **Regressão completa do aplicativo (executar a partir de `app/`):**
+   - `Push-Location app`
+   - `node --test tests/*.test.cjs`
+   - `Pop-Location`
+4. **Regressão independente em `qa/regression` (executar a partir de `qa/regression/`):**
+   - `Push-Location qa/regression`
+   - `node run.cjs`
+   - `Pop-Location`
+5. **Integração PostgreSQL dedicada (SOMENTE com autorização explícita do responsável, `NODE_ENV=test`, `current_database() = arenago_staff_homolog_20261111`, migration `0008` aplicada em `127.0.0.1:55432`, três URLs idênticas confirmadas e `STAFF03_POSTGRES_PROJECTION_TEST=authorized-local`, executando a partir de `backend/`):**
+   - `npx tsx --tsconfig tsconfig.test.json --test test/integration/staff03-external-call-projection.integration.test.ts`
    - Regressões relacionadas (mesmos critérios de autorização e banco): `test/integration/participations-read.integration.test.ts`, `test/integration/participation-lifecycle.integration.test.ts` e `test/integration/external-entry-calls-schema.integration.test.ts`.
+6. **Homologação funcional e visual no Expo Go** (roteiro da Seção 12).
 
 ---
 
@@ -308,15 +325,93 @@ Conforme [AGENTS.md](../AGENTS.md), o modelo de implementação **não** executo
 4. Consultar `GET /api/v1/participations/current` com o token do Participante (e inspecionar o payload na integração conjunta com a tela do Heliom), confirmando presença de `externalEntryCall` com `callId`, `kind: "external_entry"`, `status: "pending"`, `calledAt`, `participationId` e `eventId` corretos.
 5. Testar **Marcar ausência** antes do corte: verificar reinserção ao final da fila, desaparecimento temporário da chamada (`externalEntryCall: null`) e geração de novo `callId` distinto ao chamar novamente.
 6. Testar **Confirmar entrada**: verificar retorno para fila sem pendente e saída da fila externa do Participante (`status: "active"`, `externalEntryCall: null`).
-7. Repetir fluxo para **Remover da fila** (`status: "canceled"`, `externalEntryCall: null`) e **Desativar / Reativar fila externa** (D06 liberando fila e reativação sem recolocar liberados).
-8. Testar reconexão, troca de evento, perda de autorização e visualização em dispositivo menor/fonte ampliada com rolagem nos modais de confirmação.
+7. Repetir fluxo para **Remover da fila** (`status: "canceled"`, `externalEntryCall: null`) e **Desativar / Reativar fila externa** (conferir no card D06 e no modal que a contagem observada inclui `waitingCount + (pendingCall ? 1 : 0)` e que o aviso pós-operação exibe exclusivamente `releasedCount` confirmado pelo servidor).
+8. Validar **janela residual após corte de entrada**: confirmar que `Confirmar entrada` fica desabilitado enquanto `Marcar ausência` e `Remover da fila` continuam habilitados com orientação neutra coerente.
+9. Validar **invalidação de modal obsoleto**: abrir modal de confirmação em um dispositivo Staff enquanto outro Staff resolve/substitui a chamada ou enquanto a contagem da fila muda, conferindo fechamento automático com aviso contextual e zero mutações sobre a chamada seguinte.
+10. Testar reconexão, troca de evento, perda de autorização (`401`/`403`) tanto no Staff quanto no Participante e visualização em dispositivo menor/fonte ampliada com rolagem nos modais de confirmação.
 
 ---
 
 ## 13. Histórico de Revisões, Correções e Commits
 
 - **24/11/2026:** Criação inicial do documento `STAFF_03_CONTROLE_ENTRADA_CHAMADA_EXTERNA.md` na branch `feature/staff-operacional-v2` (base `efe21a8492a056d08a8c61799f7a66636c830a63`) antes de qualquer alteração em código, formalizando o contrato da chamada externa para o Heliom e o plano técnico da STAFF-03.
-- **24/11/2026:** Conclusão da implementação e cobertura de testes da STAFF-03:
-  - Backend: projeção `externalEntryCall` em `ParticipationQueryService` / `participationView` + `@Header("Cache-Control", "no-store")` em `GET /participations/current` e `GET /participations/:participationId`.
-  - App Staff & Participante: novo `StaffEntrySections.js`, reformulação visual/funcional de `StaffEntryControlRealScreen.js` e detecção reativa de `externalEntryCall` em `participationService.js`.
-  - Testes adicionados em unit/HTTP/simulação e integração PostgreSQL dedicada (`staff03-external-call-projection.integration.test.ts`), além de atualização de `qa-evidence/STAFF-03-changes.diff`. Validação automatizada aguardando execução autorizada com **GPT-6 Luna — Medium**.
+- **24/11/2026:** Conclusão da implementação inicial e cobertura de testes da STAFF-03 (publicada no commit `29029f0328ecb02bf6e016abda1b2c4ed371dffe`).
+- **25/11/2026:** Abertura da seção **Auditoria Independente — Rodada 1** antes das correções de código, registrando os sete achados (`STAFF03-AUD-01` a `STAFF03-AUD-07`), causas confirmadas e plano de correção.
+
+---
+
+## Auditoria Independente — Rodada 1
+
+Auditoria estática independente realizada sobre o commit `29029f0328ecb02bf6e016abda1b2c4ed371dffe` (base original da STAFF-03: `efe21a8492a056d08a8c61799f7a66636c830a63`). Todos os sete achados abaixo foram confirmados por inspeção direta do código antes de qualquer alteração.
+
+### Resumo dos achados, riscos e plano de correção
+
+| ID | Prioridade | Causa técnica confirmada | Risco | Plano de correção |
+|---|---|---|---|---|
+| `STAFF03-AUD-01` | P1 | Em [participationService.js](../app/services/participationService.js), `syncCurrentSilent()` retornava silenciosamente sem publicar `syncStale: true` quando `isValidCurrentParticipationResponse()` falhava, e o `catch` genérico mantinha a participação anterior (e `externalEntryCall`) mesmo diante de HTTP `401`/`403` em `/current` ou `/return-state`. | Chamada externa revogada ou desatualizada poderia permanecer ativa na interface do Participante como se estivesse atualizada. | Diferenciar em `syncCurrentSilent()`: (A) falha transitória preserva estado + `syncStale: true`; (B) resposta inválida não substitui estado + sinaliza `syncStale: true`; (C) HTTP `401`/`403` (em `/current` ou `/return-state`) limpa `participation`, `returnState`, `demoParticipation`, avança `generation` e publica `status: 'error'`, `error: 'authorization'`, `syncStale: false`. |
+| `STAFF03-AUD-02` | P1 | O parser de [participationService.js](../app/services/participationService.js) aceitava `externalEntryCall` sem `participationId`/`eventId`, aceitava strings arbitrárias em `callId` e usava apenas `Date.parse`. No backend, `publicParticipation()` em [participation-query.service.ts](../backend/src/participations/participation-query.service.ts) permitia campos `undefined` e reconstruía `participationId`/`eventId`/`status` em vez de exigi-los da linha projetada. | Objetos parciais ou malformados passavam pela validação, podendo vincular uma chamada a contexto inconsistente. | Exigir no app os 6 campos obrigatórios (sem extras), validação UUID para `callId`/`participationId`/`eventId`, correspondência estrita com `participation.id` e `participation.eventId`, `kind === 'external_entry'`, `status === 'pending'`, `participation.status === 'waiting'` e timestamp UTC com microssegundos (`YYYY-MM-DDTHH:MM:SS.ffffffZ`). No backend, exigir todos os campos projetados em `publicParticipation()` sem reconstrução artificial e adicionar `.superRefine()` compartilhado em [participation-lifecycle.dto.ts](../backend/src/participations/participation-lifecycle.dto.ts) mantendo compatibilidade com respostas sem `externalEntryCall` ou `null`. |
+| `STAFF03-AUD-03` | P1 | [StaffEntrySections.js](../app/screens/staff/components/StaffEntrySections.js) e [StaffEntryControlRealScreen.js](../app/screens/staff/StaffEntryControlRealScreen.js) exibiam apenas `waitingCount` no card de controle D06 e no modal de desativação, omitindo a pessoa em `pendingCall`, que também é liberada pelo backend em D06. | Staff recebia contagem subestimada (ex.: 2 em vez de 3 quando há 2 aguardando e 1 chamado). | Calcular `affectedCount = waitingCount + (pendingCall ? 1 : 0)` para o card D06 e o modal de desativação, esclarecendo que se trata do estado observado antes da execução; preservar `waitingCount` e lista FIFO sem duplicação e exibir exclusivamente `releasedCount` confirmado pelo servidor após a operação. |
+| `STAFF03-AUD-04` | P1 | [StaffEntryControlRealScreen.js](../app/screens/staff/StaffEntryControlRealScreen.js) não invalidava nem fechava o modal quando `pendingCall`, permissões ou contagem observada mudavam por polling ou leitura em voo, nem apresentava feedback contextual ao invalidar. | Modal antigo para participante A permanecia aberto após resolução/substituição por participante B, ou modal de desativação exibia contagem obsoleta. | Associar o diálogo ao escopo, `callId` original, permissões observadas e `affectedCount` observado; invalidar e fechar automaticamente o modal via `useEffect` e revalidação síncrona em `confirm()` com aviso contextual quando ocorrer mudança na chamada, permissões, fila ou contagem, neutralizando callbacks antigos com zero mutações. **Observação técnica documentada sobre polling durante modal:** em [StaffEventsNavigator.js](../app/screens/staff/StaffEventsNavigator.js) (linhas 551 e 565), quando `section === 'entry'`, o navegador não executa polling de `/stations` nem de `/entry-control`; somente `StaffEntryControlRealScreen` realiza o polling de 5s. Além disso, a regressão aprovada `AUD-01 + AUD-05` em [roleRoutingIntegration.test.cjs](../app/tests/roleRoutingIntegration.test.cjs) (linhas 1932–1944) exige que `GET /entry-control` no ciclo de 5s detecte `403` com o modal de desativação aberto. Portanto, mantém-se o polling ativo durante modais em `StaffEntryControlRealScreen`, acoplado à invalidação automática imediata do diálogo em qualquer mudança de chamada/permissão/contagem/autorização e mantendo o indicador honesto de polling alinhado ao estado real. |
+| `STAFF03-AUD-05` | P2 | `hasCutoffRestriction` em [StaffEntrySections.js](../app/screens/staff/components/StaffEntrySections.js) verificava `canConfirm && (!canMarkAbsent || !canRemove)`, exatamente o inverso do contrato real em [staff-entry.service.ts](../backend/src/participations/staff-entry.service.ts) (linhas 90–101), onde na janela residual após o corte ocorre `canManage: false`, `canCall: false`, `canConfirm: false`, `canMarkAbsent: true`, `canRemove: true`. | Mensagem incorreta para o Staff e cenário de teste invertido. | Corrigir condição para `!canConfirm && (canMarkAbsent || canRemove)` com mensagem neutra (*"A confirmação de entrada está indisponível. Ainda é possível registrar ausência ou remover o participante chamado."*) e mensagem separada quando todas as ações estiverem bloqueadas; cobrir os 6 estados reais em [staffEntryControlScreen.test.cjs](../app/tests/staffEntryControlScreen.test.cjs). |
+| `STAFF03-AUD-06` | P1 | Em [staff03-external-call-projection.integration.test.ts](../backend/test/integration/staff03-external-call-projection.integration.test.ts): (1) criava duas participações `waiting` para o mesmo `user1Id`, violando `uq_participations_one_current_user`; (2) atualizava `participations` antes de `external_entry_calls` em cenários de resolução explícita, colidindo com `resolve_external_call_on_participation`; (3) chamava `SET CONSTRAINTS ALL IMMEDIATE` sem restaurar `SET CONSTRAINTS ALL DEFERRED` antes dos cenários compostos. | Bloqueio de validação da campanha PostgreSQL quando autorizada. | Reorganizar a fixture com `user3Id` para evento 2 + participação terminal histórica de `user1Id`; espelhar a ordem real de escrita de [staff-entry-call.service.ts](../backend/src/participations/staff-entry-call.service.ts) (`external_entry_calls` primeiro, `participations` copiando `c.resolved_at` com `resolution_reason` real); encapsular cada cenário em `SAVEPOINT` com `SET CONSTRAINTS ALL DEFERRED` → transições → `SET CONSTRAINTS ALL IMMEDIATE` → projeção → `ROLLBACK TO SAVEPOINT`; adicionar encerramentos controlado e imediato sem alterar migration `0008` nem persistir dados. |
+| `STAFF03-AUD-07` | P1 | Em [participation-lifecycle-http.test.ts](../backend/test/unit/participation-lifecycle-http.test.ts), a fixture `value` atribuída a `LifecycleResult` omitia `externalEntryCall: null` (incompatibilidade de tipagem com `ParticipationView`), e o teste HTTP de isolamento reutilizava um único `userId` e um booleano `found`. | Falha de `typecheck:test` no backend e comprovação insuficiente de isolamento HTTP entre contas distintas. | Incluir `externalEntryCall: null` na fixture tipada `value`; verificar compatibilidade de replay histórico via `.default(null)` no DTO com teste dedicado em [participation-lifecycle.test.ts](../backend/test/unit/participation-lifecycle.test.ts); aplicar guarda `Cache-Control: no-store` no [participation-lifecycle.controller.ts](../backend/src/participations/participation-lifecycle.controller.ts) cobrindo respostas de sucesso e erro; reestruturar o teste HTTP com dois titulares distintos (`uid` e `uidB`), mapa de titularidade real, checagem de query `?userId=`, `404` neutro e `401` em sessão revogada. |
+
+### Registro detalhado pós-correção (Rodada 1)
+
+- **`STAFF03-AUD-01` (P1 — Estado de chamada desatualizado no Participante):**
+  - **Causa confirmada:** `syncCurrentSilent()` em [participationService.js](../app/services/participationService.js) retornava sem marcar `syncStale: true` em payload inválido e o `catch` genérico mantinha a participação anterior mesmo em HTTP `401`/`403`.
+  - **Solução aplicada:** diferenciados explicitamente (A) falha transitória (preserva estado + `syncStale: true`), (B) payload inválido em `/current` ou `/return-state` (rejeita dados inválidos + `syncStale: true`), e (C) HTTP `401`/`403` em `/current` ou `/return-state` (limpa `participation`, `returnState`, `demoParticipation`, limpa `presentedReturnEvaluations`, incrementa `generation` e publica `status: 'error'`, `error: 'authorization'`, `syncStale: false`). Também incrementada `generation` em `401`/`403` de `refresh()`.
+  - **Arquivos modificados:** [participationService.js](../app/services/participationService.js), [participationService.test.cjs](../app/tests/participationService.test.cjs), [STAFF_03_CONTROLE_ENTRADA_CHAMADA_EXTERNA.md](./STAFF_03_CONTROLE_ENTRADA_CHAMADA_EXTERNA.md).
+  - **Testes preparados:** `STAFF03-AUD-01 syncCurrentSilent diferencia falha transitória, payload malformado (syncStale) e 401/403 (limpeza total)` (incluindo `/return-state` e isolamento conta A/B).
+  - **Verificação realizada:** revisão estática e `node --check` em `participationService.test.cjs`.
+  - **Limitações / pendências:** execução automatizada pendente com GPT-6 Luna — Medium e consumo visual pelo Heliom.
+
+- **`STAFF03-AUD-02` (P1 — Validação incompleta do contrato da chamada externa):**
+  - **Causa confirmada:** `isValidExternalEntryCall` aceitava ausência de `participationId`/`eventId`, `callId` não-UUID e `Date.parse` genérico; `publicParticipation()` no backend permitia campos `undefined` e reconstruía vínculos a partir de `row.id`/`row.eventId`.
+  - **Solução aplicada:** no app, exigidas exatamente as 6 chaves do contrato, validação UUID estrita para `callId`/`participationId`/`eventId`, vínculo exato com `participation.id`/`eventId`, `kind === 'external_entry'`, `status === 'pending'`, `participation.status === 'waiting'` e UTC com 6 casas de microssegundos validado no calendário (`YYYY-MM-DDTHH:MM:SS.ffffffZ`), mantendo compatibilidade com `undefined`/`null`. No backend, exigidos todos os campos projetados em `publicParticipation()` sem reconstrução artificial e adicionada validação cruzada `.superRefine()` em `participationView` e `finishedParticipationView`.
+  - **Arquivos modificados:** [participationService.js](../app/services/participationService.js), [participation-query.service.ts](../backend/src/participations/participation-query.service.ts), [participation-lifecycle.dto.ts](../backend/src/participations/participation-lifecycle.dto.ts), [participationService.test.cjs](../app/tests/participationService.test.cjs), [participation-lifecycle.test.ts](../backend/test/unit/participation-lifecycle.test.ts).
+  - **Testes preparados:** todos os cenários positivos/negativos no app (com UUIDs reais) e no backend (`publicParticipation`, `participationView` e `finishedParticipationView`).
+  - **Verificação realizada:** revisão estática e `node --check` nos `.cjs`.
+  - **Limitações / pendências:** execução de `npm run typecheck:test` e suítes unitárias com GPT-6 Luna — Medium.
+
+- **`STAFF03-AUD-03` (P1 — Contagem incorreta ao desativar a fila externa):**
+  - **Causa confirmada:** card D06 e modal de desativação exibiam apenas `waitingCount`, omitindo a pessoa em `pendingCall`.
+  - **Solução aplicada:** exportado `getDisableAffectedCount(waitingCount, pendingCall)` (`waitingCount + (pendingCall ? 1 : 0)`) e aplicado em `EntryQueueToggleCard` e `EntryConfirmModal` (via `describeObservedDisableImpact`), explicitando que a contagem é do estado observado antes da execução e preservando `waitingCount`, lista FIFO sem duplicação e `releasedCount` confirmado pelo servidor após a operação.
+  - **Arquivos modificados:** [StaffEntrySections.js](../app/screens/staff/components/StaffEntrySections.js), [StaffEntryControlRealScreen.js](../app/screens/staff/StaffEntryControlRealScreen.js), [staffEntryControlScreen.test.cjs](../app/tests/staffEntryControlScreen.test.cjs), [roleRoutingIntegration.test.cjs](../app/tests/roleRoutingIntegration.test.cjs).
+  - **Testes preparados:** teste unitário puro de `getDisableAffectedCount` e renderização real dos 4 cenários (`0`, `2`, `3`, `1` afetados) com verificação de `releasedCount`.
+  - **Verificação realizada:** revisão estática e `node --check` nos `.cjs`.
+  - **Limitações / pendências:** execução automatizada com GPT-6 Luna — Medium e conferência visual no Expo Go.
+
+- **`STAFF03-AUD-04` (P1 — Modal de confirmação obsoleto):**
+  - **Causa confirmada:** a tela não invalidava o diálogo quando `pendingCall`, permissões ou contagem observada mudavam enquanto o modal estava aberto nem apresentava aviso contextual.
+  - **Solução aplicada:** implementada `evaluateEntryDialog` verificando escopo, `callId`, `participationId`, permissões específicas (`canConfirm`/`canMarkAbsent`/`canRemove`/`canManage`), estado `stale` e `observedAffectedCount`/`observedHasPendingCall` em `open()`, na visibilidade do modal, reativamente via `useEffect` e sincronamente em `confirm()`, fechando automaticamente o diálogo com aviso contextual e garantindo zero mutações para callbacks antigos. Justificativa técnica documentada para manter o polling de 5s ativo na subtela durante modais: `StaffEventsNavigator.js` (linhas 551 e 565) não faz polling de `/entry-control` nem `/stations` quando `section === 'entry'`, e a regressão aprovada `AUD-01 + AUD-05` (`roleRoutingIntegration.test.cjs:1932-1944`) exige detecção de `403` no ciclo de 5s com modal aberto.
+  - **Arquivos modificados:** [StaffEntryControlRealScreen.js](../app/screens/staff/StaffEntryControlRealScreen.js), [staffEntryControlScreen.test.cjs](../app/tests/staffEntryControlScreen.test.cjs), [roleRoutingIntegration.test.cjs](../app/tests/roleRoutingIntegration.test.cjs).
+  - **Testes preparados:** troca Ana → Bruno em polling, leitura em voo iniciada antes do modal com mudança de permissão (corte), mudança de contagem D06 durante modal, cancelamento sem mutação e teste integrado com `manualTimers`.
+  - **Verificação realizada:** revisão estática e `node --check` nos `.cjs`.
+  - **Limitações / pendências:** execução automatizada com GPT-6 Luna — Medium e validação em dois dispositivos no Expo Go.
+
+- **`STAFF03-AUD-05` (P2 — Mensagem de restrição temporal invertida):**
+  - **Causa confirmada:** `hasCutoffRestriction` testava `canConfirm && (!canMarkAbsent || !canRemove)`, invertendo o contrato de [staff-entry.service.ts](../backend/src/participations/staff-entry.service.ts) (janela residual tem `canManage: false`, `canCall: false`, `canConfirm: false`, `canMarkAbsent: true`, `canRemove: true`).
+  - **Solução aplicada:** substituído por `showConfirmUnavailableNote` (`!canConfirm && (canMarkAbsent || canRemove)`) exibindo a orientação neutra *"A confirmação de entrada está indisponível. Ainda é possível registrar ausência ou remover o participante chamado."* e `showAllActionsUnavailableNote` quando todas estiverem bloqueadas, mantendo botões independentes pelas flags oficiais.
+  - **Arquivos modificados:** [StaffEntrySections.js](../app/screens/staff/components/StaffEntrySections.js), [staffEntryControlScreen.test.cjs](../app/tests/staffEntryControlScreen.test.cjs).
+  - **Testes preparados:** `STAFF03-AUD-05` cobrindo todas permitidas, janela residual (`!canConfirm && canMarkAbsent && canRemove`), todas bloqueadas, fila inativa, indisponibilidade (`503`) e estado `stale`.
+  - **Verificação realizada:** revisão estática e `node --check` nos `.cjs`.
+  - **Limitações / pendências:** execução automatizada com GPT-6 Luna — Medium e conferência no Expo Go.
+
+- **`STAFF03-AUD-06` (P1 — Fixture PostgreSQL incompatível com o schema):**
+  - **Causa confirmada:** (1) duas participações `waiting` para o mesmo `user1Id` violando `uq_participations_one_current_user`; (2) atualização de `participations` antes de `external_entry_calls` colidindo com `resolve_external_call_on_participation`; (3) `SET CONSTRAINTS ALL IMMEDIATE` sem restauração para `DEFERRED`.
+  - **Solução aplicada:** introduzidos `user3Id` para evento 2 e `p1HistoricalId` (`finished`) para `user1Id`; adotada exatamente a ordem de escrita de [staff-entry-call.service.ts](../backend/src/participations/staff-entry-call.service.ts) (`external_entry_calls` primeiro com `resolution_reason` real, seguido de `participations` copiando `c.resolved_at`); encapsulados os cenários em `withScenario` (`SAVEPOINT` + `SET CONSTRAINTS ALL DEFERRED` → transições → `SET CONSTRAINTS ALL IMMEDIATE` → `ROLLBACK TO SAVEPOINT` + `DEFERRED`); adicionados encerramentos controlado e imediato preservando migration `0008`, guards do ambiente e rollback integral.
+  - **Arquivos modificados:** [staff03-external-call-projection.integration.test.ts](../backend/test/integration/staff03-external-call-projection.integration.test.ts).
+  - **Testes preparados:** 11 cenários físicos SQL/projeção/triggers da migration `0008` (claramente distinguidos dos testes HTTP de controller).
+  - **Verificação realizada:** revisão estática integral contra `0008_external_entry_calls.sql`, `participations.schema.ts` e `staff-entry-call.service.ts`.
+  - **Limitações / pendências:** execução PostgreSQL bloqueada até autorização explícita do responsável com GPT-6 Luna — Medium em `arenago_staff_homolog_20261111`.
+
+- **`STAFF03-AUD-07` (P1 — Tipagem e isolamento das fixtures HTTP):**
+  - **Causa confirmada:** fixture `value` em [participation-lifecycle-http.test.ts](../backend/test/unit/participation-lifecycle-http.test.ts) omitia `externalEntryCall: null` frente a `LifecycleResult` / `ParticipationView`, e o teste HTTP de isolamento reutilizava um único `userId` e um booleano `found`.
+  - **Solução aplicada:** `value` tipada explicitamente como `ParticipationView` com `externalEntryCall: null`; replay histórico sem `externalEntryCall` validado e coberto em [participation-lifecycle.test.ts](../backend/test/unit/participation-lifecycle.test.ts) (normalizado via `.default(null)`); guarda `participationNoStoreGuard` aplicada no [participation-lifecycle.controller.ts](../backend/src/participations/participation-lifecycle.controller.ts) emitindo `Cache-Control: no-store` em sucesso e erro (`401`/`404`/`409`/`500`); teste HTTP reestruturado com dois titulares distintos (`uid` e `uidB` via `participant-b`), mapa real de titularidade `recordsByUser`, verificação de `?userId=`, `404` neutro, `401` revogado e ausência de vazamento de campos de Staff.
+  - **Arquivos modificados:** [participation-lifecycle.controller.ts](../backend/src/participations/participation-lifecycle.controller.ts), [participation-lifecycle.dto.ts](../backend/src/participations/participation-lifecycle.dto.ts), [participation-lifecycle-http.test.ts](../backend/test/unit/participation-lifecycle-http.test.ts), [participation-lifecycle.test.ts](../backend/test/unit/participation-lifecycle.test.ts).
+  - **Testes preparados:** `STAFF03-AUD-07` replay histórico em `participation-lifecycle.test.ts` e isolamento HTTP entre titulares A e B + `no-store` em `participation-lifecycle-http.test.ts`.
+  - **Verificação realizada:** revisão estática de todos os consumidores de `ParticipationView`, `FinishedParticipationView`, `LifecycleResult` e `participationView`.
+  - **Limitações / pendências:** execução de `npm run typecheck:test`, `npm run lint`, `npm run build` e `npm test` com GPT-6 Luna — Medium.
+
+- **25/11/2026 (Rodada 1 concluída para nova auditoria):** Todas as correções dos sete achados aplicadas, documentação atualizada e evidência acumulada [STAFF-03-changes.diff](../qa-evidence/STAFF-03-changes.diff) regenerada a partir de `efe21a8492a056d08a8c61799f7a66636c830a63`. Aguardando publicação por Kaled, nova auditoria independente e execução da campanha automatizada por **GPT-6 Luna — Medium**.

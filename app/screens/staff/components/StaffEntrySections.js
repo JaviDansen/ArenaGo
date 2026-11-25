@@ -5,6 +5,11 @@ import { ElapsedCallBadge } from './StaffStationSections';
 
 const pad2 = (value) => String(value).padStart(2, '0');
 
+export function getDisableAffectedCount(waitingCount, pendingCall) {
+  const safeWaiting = Number.isSafeInteger(waitingCount) && waitingCount > 0 ? waitingCount : 0;
+  return safeWaiting + (pendingCall ? 1 : 0);
+}
+
 export function formatEntryCallTimestamp(calledAt, options = {}) {
   if (typeof calledAt !== 'string' || !calledAt.trim()) return null;
   const parsedMs = Date.parse(calledAt);
@@ -173,7 +178,12 @@ export function EntryCurrentCallCard({
   getNow,
 }) {
   const timestampLabel = pendingCall ? formatEntryCallTimestamp(pendingCall.calledAt) : null;
-  const hasCutoffRestriction = Boolean(pendingCall && !disabled && canConfirm && (!canMarkAbsent || !canRemove));
+  const showConfirmUnavailableNote = Boolean(
+    pendingCall && !disabled && !canConfirm && (canMarkAbsent || canRemove),
+  );
+  const showAllActionsUnavailableNote = Boolean(
+    pendingCall && !disabled && !canConfirm && !canMarkAbsent && !canRemove,
+  );
 
   return (
     <View style={styles.sectionBlock}>
@@ -254,10 +264,18 @@ export function EntryCurrentCallCard({
             />
           </View>
 
-          {hasCutoffRestriction && (
+          {showConfirmUnavailableNote && (
             <View style={styles.sharedInfoBox}>
               <Text style={styles.sharedInfoText}>
-                Confirmação presencial liberada. Ausência e remoção não estão permitidas no estado atual do evento.
+                A confirmação de entrada está indisponível. Ainda é possível registrar ausência ou remover o participante chamado.
+              </Text>
+            </View>
+          )}
+
+          {showAllActionsUnavailableNote && (
+            <View style={styles.sharedInfoBox}>
+              <Text style={styles.sharedInfoText}>
+                As ações sobre a chamada externa estão indisponíveis no estado atual do evento.
               </Text>
             </View>
           )}
@@ -325,9 +343,25 @@ export function EntryQueueListCard({ waiting, waitingCount, externalQueueEnabled
   );
 }
 
+function describeObservedDisableImpact(waitingCount, hasPendingCall) {
+  const affectedCount = getDisableAffectedCount(waitingCount, hasPendingCall);
+  if (affectedCount === 0) {
+    return 'No estado observado, 0 participantes serão liberados. Outros participantes podem entrar ou sair antes da execução, e a quantidade final será confirmada pelo servidor.';
+  }
+  if (affectedCount === 1) {
+    return hasPendingCall
+      ? 'No estado observado, 1 participante (incluindo a chamada pendente) será liberado. Outros participantes podem entrar ou sair antes da execução, e a quantidade final será confirmada pelo servidor.'
+      : 'No estado observado, 1 participante aguardando será liberado. Outros participantes podem entrar ou sair antes da execução, e a quantidade final será confirmada pelo servidor.';
+  }
+  return hasPendingCall
+    ? `No estado observado, ${affectedCount} participantes (${waitingCount} aguardando e 1 em chamada pendente) serão liberados. Outros participantes podem entrar ou sair antes da execução, e a quantidade final será confirmada pelo servidor.`
+    : `No estado observado, ${affectedCount} participantes aguardando serão liberados. Outros participantes podem entrar ou sair antes da execução, e a quantidade final será confirmada pelo servidor.`;
+}
+
 export function EntryQueueToggleCard({
   externalQueueEnabled,
   waitingCount,
+  hasPendingCall = false,
   canManage,
   disabled,
   onDisableQueue,
@@ -342,7 +376,7 @@ export function EntryQueueToggleCard({
         </Text>
         <Text style={styles.emptySubtitle}>
           {externalQueueEnabled
-            ? `Ao desativar, os ${waitingCount} participantes aguardando serão liberados sem encerrar o evento.`
+            ? `${describeObservedDisableImpact(waitingCount, hasPendingCall)} Isso não encerra o evento.`
             : 'Ao reativar, apenas novas participações passarão a aguardar chamada externa.'}
         </Text>
         <EntryActionButton
@@ -356,11 +390,14 @@ export function EntryQueueToggleCard({
   );
 }
 
-function describeEntryDialog(action, waitingCount) {
+function describeEntryDialog(dialog, waitingCount, hasPendingCall) {
+  const action = dialog?.action;
   if (!action) {
     return { title: '', description: '', variant: 'primary', showsTarget: false };
   }
   if (action.kind === 'toggle') {
+    const observedWaiting = dialog?.observedWaitingCount ?? waitingCount;
+    const observedPending = dialog?.observedHasPendingCall ?? hasPendingCall;
     return action.enabled
       ? {
           title: 'Reativar fila externa?',
@@ -370,7 +407,7 @@ function describeEntryDialog(action, waitingCount) {
         }
       : {
           title: 'Desativar fila externa?',
-          description: `Todos os ${waitingCount} participantes aguardando serão liberados. Isso não encerra o evento nem altera filas de experiências.`,
+          description: `${describeObservedDisableImpact(observedWaiting, observedPending)} Isso não encerra o evento nem altera filas de experiências.`,
           variant: 'danger',
           showsTarget: false,
         };
@@ -391,7 +428,7 @@ function describeEntryDialog(action, waitingCount) {
 }
 
 export function EntryConfirmModal({ visible, dialog, pendingCall, waitingCount, onConfirm, onCancel }) {
-  const meta = describeEntryDialog(dialog?.action, waitingCount);
+  const meta = describeEntryDialog(dialog, waitingCount, Boolean(pendingCall));
   const participantLabel = meta.showsTarget ? dialog?.targetName || pendingCall?.displayName : null;
 
   return (
