@@ -324,3 +324,11 @@ Não executada: não há aparelho Android/iOS, simulador ou emulador neste ambie
 - **Novo patch da revisão:** `qa-evidence/PARTICIPANTE_01_R01-changes.diff` — base `7149f53803da9282560c988c87e3da8162ef7b58` (HEAD auditado), escopo: todas as alterações de código, testes e documentação desta revisão (exceto o próprio patch), finalidade: revisão isolada das correções R01. Verificado com `git apply --check` sobre `7149f53`.
 - **Alterações de contratos:** nenhuma (backend, schema, migrações, retenção de idempotência e autenticação intactos).
 - **Integração:** `develop` não incorporada; sem merge na `develop`; sem force push. PARTICIPANTE-02 não iniciada.
+
+### 10.15 Commits da revisão
+
+- `e82678a22903ac8ebc0debb3772f29b40cb82710` — `fix(participante): corrigir ingresso e home apos auditoria P01` (código, testes, este documento e `qa-evidence/PARTICIPANTE_01_R01-changes.diff`). É o SHA testado em 10.11: o conteúdo do working tree testado é idêntico ao deste commit.
+- Commit seguinte: somente este registro de commits no documento.
+- Push para `origin/feature/heliom-participante-ux` sem force; o SHA final da branch é o do commit de registro, informado no resumo da entrega.
+
+**Estado da task:** Entregue para revalidação — não aprovada.
