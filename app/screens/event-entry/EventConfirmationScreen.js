@@ -1,37 +1,111 @@
+import { useIsFocused } from '@react-navigation/native';
 import { StatusBar } from 'expo-status-bar';
-import { useContext, useRef } from 'react';
-import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useContext, useEffect, useRef } from 'react';
+import { AppState, ScrollView, StyleSheet, Text, View } from 'react-native';
 
-import { AuthBackground, Badge, Button, Card, ScreenHeader } from '../../components/ui';
+import { AuthBackground, Badge, Button, Card, LineIcon, ScreenHeader } from '../../components/ui';
 import { ParticipationContext } from '../../context/ParticipationContext';
 import { colors, radii, spacing, typography } from '../../theme';
 import {
-  blockingAction, describeBlockingReasons, describeEventAvailability, describeExternalQueue,
+  blockingAction, describeBlockingReasons, describeEventAvailability, describeQueueConfiguration,
+  describeScheduleNotice,
 } from '../../utils/eventEntryPresentation';
 import { describeEventSchedule } from '../../utils/eventTime';
 
+const MAIN_TABS = { index: 0, routes: [{ name: 'MainTabs' }] };
+
+/**
+ * Confirmação de ingresso. `route.params` é só o contexto inicial (qual evento foi consultado);
+ * a situação exibida e a liberação do botão vêm do store de ingresso, revalidado no servidor
+ * ao voltar o foco, ao voltar ao primeiro plano, manualmente e após recusas definitivas.
+ */
 export default function EventConfirmationScreen({ navigation, route }) {
-  const { admission, confirmEventEntry, retryEntrySync, isCurrentAdmission, refreshParticipation } =
-    useContext(ParticipationContext);
-  const { event, eligibility } = route.params;
+  const {
+    admission, confirmEventEntry, retryEntrySync, revalidateEventEntry, reconcileEntryIntent,
+    isCurrentAdmission, refreshParticipation,
+  } = useContext(ParticipationContext);
+  const initial = route?.params ?? {};
+  const eventId = initial.event?.id;
   const inFlight = useRef(false);
-  const current = admission?.event?.id === event.id;
+  const focused = useIsFocused();
+  const wasFocused = useRef(focused);
+  const live = useRef(null);
+
+  const current = Boolean(eventId) && admission?.event?.id === eventId;
+  const event = current ? admission.event : initial.event;
+  const eligibilityStatus = current ? admission.eligibilityStatus ?? 'none' : 'none';
+  const officialEligibility = current && eligibilityStatus === 'fresh' ? admission.eligibility ?? null : null;
+  const revalidating = eligibilityStatus === 'revalidating';
   const busy = current && ['joining', 'looking_up'].includes(admission.status);
-  const confirmed = current && admission.confirmedParticipationId;
+  const confirmed = current && Boolean(admission.confirmedParticipationId);
   const uncertain = current && admission.status === 'uncertain';
-  const blocked = !eligibility?.eligible;
+  const pendingIntent = current ? admission.pendingIntent ?? null : null;
+  const recovery = current ? admission.recovery ?? { status: 'idle', message: null } : null;
+  const recovering = recovery?.status === 'checking';
+  // Intenção incerta do mesmo evento: o próprio "Verificar ingresso" repete a chave original.
+  const sameEventRetry = Boolean(pendingIntent?.sameEvent && !pendingIntent.confirmed && officialEligibility?.eligible);
+  const showRecovery = Boolean(pendingIntent) && !sameEventRetry;
+  const blocked = Boolean(officialEligibility && !officialEligibility.eligible);
+  const canConfirm = Boolean(officialEligibility?.eligible) && !busy && !recovering && !showRecovery
+    && admission?.status !== 'complete';
+
   const schedule = describeEventSchedule(event);
-  const availability = describeEventAvailability(eligibility);
-  const action = blocked ? blockingAction(eligibility?.blockingReasons) : null;
+  const availability = officialEligibility ? describeEventAvailability(officialEligibility)
+    : revalidating ? { label: 'ATUALIZANDO SITUAÇÃO', variant: 'default' }
+      : { label: 'SITUAÇÃO NÃO CONFIRMADA', variant: 'warning' };
+  const queue = describeQueueConfiguration(event, officialEligibility);
+  const scheduleNotice = describeScheduleNotice(officialEligibility);
+  const action = blocked ? blockingAction(officialEligibility.blockingReasons) : null;
+
+  function revalidate() {
+    if (!current || typeof revalidateEventEntry !== 'function') return Promise.resolve(null);
+    return revalidateEventEntry();
+  }
+  live.current = { revalidate, focused };
+
+  // Volta de foco (ex.: retorno do questionário): revalidar no servidor, nunca pelos parâmetros.
+  useEffect(() => {
+    const previous = wasFocused.current;
+    wasFocused.current = focused;
+    if (focused && previous === false) void live.current.revalidate();
+  }, [focused]);
+
+  // Retorno ao primeiro plano com a tela visível.
+  useEffect(() => {
+    if (typeof AppState?.addEventListener !== 'function') return undefined;
+    let previous = AppState.currentState;
+    const subscription = AppState.addEventListener('change', (next) => {
+      if (next === 'active' && previous !== 'active' && live.current.focused) void live.current.revalidate();
+      previous = next;
+    });
+    return () => subscription?.remove?.();
+  }, []);
 
   async function handleConfirmEntry() {
-    if (inFlight.current || busy || blocked || !isCurrentAdmission()) return;
+    if (inFlight.current || !canConfirm || !isCurrentAdmission()) return;
     inFlight.current = true;
     try {
       // Após resultado incerto, confirm reutiliza a mesma intenção e chave salvas.
       const result = confirmed ? await retryEntrySync() : await confirmEventEntry(event.id);
-      if (result?.kind === 'complete' && isCurrentAdmission()) {
-        navigation.reset({ index: 0, routes: [{ name: 'MainTabs' }] });
+      if (!isCurrentAdmission()) return;
+      if (result?.kind === 'complete') navigation.reset(MAIN_TABS);
+      else if (result?.kind === 'historical' || result?.revalidate) await revalidate();
+    } finally {
+      inFlight.current = false;
+    }
+  }
+
+  async function handleReconcile() {
+    if (inFlight.current || recovering || typeof reconcileEntryIntent !== 'function') return;
+    inFlight.current = true;
+    try {
+      const result = await reconcileEntryIntent();
+      if (!isCurrentAdmission()) return;
+      if (result?.kind === 'resolved' && result.outcome === 'current') {
+        if (typeof refreshParticipation === 'function') void refreshParticipation();
+        navigation.reset(MAIN_TABS);
+      } else if (result?.kind === 'resolved') {
+        await revalidate();
       }
     } finally {
       inFlight.current = false;
@@ -40,14 +114,15 @@ export default function EventConfirmationScreen({ navigation, route }) {
 
   function goHome() {
     if (typeof refreshParticipation === 'function') void refreshParticipation();
-    navigation.reset({ index: 0, routes: [{ name: 'MainTabs' }] });
+    navigation.reset(MAIN_TABS);
   }
 
   const message = !current ? 'Consulte novamente o evento para confirmar o ingresso.' : admission?.error;
-  const disabled = busy || blocked || !current || admission.status === 'complete';
+  const historical = current && admission.outcome === 'historical';
   const buttonTitle = busy ? 'Aguarde...'
     : confirmed ? 'Atualizar participação'
-      : uncertain ? 'Verificar ingresso' : 'Confirmar entrada';
+      : uncertain || sameEventRetry ? 'Verificar ingresso' : 'Confirmar entrada';
+  const showRefresh = current && !busy && (eligibilityStatus === 'error' || blocked || revalidating);
 
   return (
     <AuthBackground variant="login" overlayOpacity={0.65} testID="event-confirmation-background">
@@ -59,32 +134,24 @@ export default function EventConfirmationScreen({ navigation, route }) {
       >
         <View style={styles.heroSection}>
           <Badge label="EVENTO ENCONTRADO" variant="brand" />
-          <Text style={styles.eventName} numberOfLines={3} accessibilityRole="header">{event.name}</Text>
-          <View style={styles.statusRow} accessible accessibilityLabel={`Situação do evento: ${availability.label}`}>
+          <Text style={styles.eventName} numberOfLines={3} accessibilityRole="header">{event?.name}</Text>
+          <View style={styles.statusRow} accessible accessibilityLabel={`Situação do evento: ${availability.label}`}
+            testID="event-confirmation-status">
             <Badge label={availability.label} variant={availability.variant} />
           </View>
         </View>
 
-        <Card variant="highlight" style={styles.eventCard} testID="event-confirmation-card">
-          <Text style={styles.cardTitle}>Horários do evento</Text>
-          <Detail icon="📅" label="Data" value={schedule.date} />
-          <Detail icon="🕒" label="Início" value={schedule.start} />
-          <Detail icon="🚪" label="Entradas até" value={schedule.entriesUntil} />
-          <Detail icon="🏁" label="Encerramento final" value={schedule.finalDeadline} />
-          <Detail icon="🌎" label="Fuso horário" value={schedule.zoneLabel} />
-        </Card>
-
         {blocked ? (
           <View style={styles.blockedCard} accessibilityRole="alert" testID="event-confirmation-blocked">
             <Badge label="ENTRADA INDISPONÍVEL" variant="danger" />
-            {describeBlockingReasons(eligibility?.blockingReasons).map(text => (
+            {describeBlockingReasons(officialEligibility.blockingReasons).map(text => (
               <Text key={text} style={styles.blockedText}>{text}</Text>
             ))}
             {action === 'questionnaire' ? (
               <Button
                 title="Completar questionário"
                 variant="secondary"
-                onPress={() => navigation.navigate('ProfileQuestionnaire')}
+                onPress={() => navigation.navigate('ProfileQuestionnaire', { mode: 'edit', returnTo: 'EventConfirmation' })}
                 style={styles.blockedAction}
               />
             ) : null}
@@ -92,26 +159,78 @@ export default function EventConfirmationScreen({ navigation, route }) {
               <Button title="Voltar ao início" variant="secondary" onPress={goHome} style={styles.blockedAction} />
             ) : null}
           </View>
-        ) : (
-          <View style={styles.queueCard} testID="event-confirmation-queue-info">
-            <Text style={styles.queueTitle}>
-              {event.externalQueueEnabled ? 'Fila de entrada ativa' : 'Entrada direta na Arena'}
+        ) : null}
+
+        {showRecovery ? (
+          <View style={styles.recoveryCard} accessibilityRole="alert" testID="event-confirmation-recovery">
+            <Badge label="TENTATIVA ANTERIOR" variant="warning" />
+            <Text style={styles.recoveryText}>
+              {pendingIntent.unreadable
+                ? 'Não foi possível ler uma tentativa de ingresso guardada neste aparelho.'
+                : pendingIntent.sameEvent
+                  ? 'Existe uma tentativa de ingresso anterior neste evento cujo resultado ainda não foi confirmado.'
+                  : 'Existe uma tentativa de ingresso anterior, em outro evento, cujo resultado ainda não foi confirmado. Verifique-a antes de entrar neste evento.'}
             </Text>
-            <Text style={styles.queueText}>{describeExternalQueue(event.externalQueueEnabled)}</Text>
+            <Text style={styles.recoveryHint}>A verificação consulta o servidor e não cria um novo ingresso.</Text>
+            {recovery?.message ? (
+              <Text style={styles.recoveryMessage} testID="event-confirmation-recovery-message">{recovery.message}</Text>
+            ) : null}
+            <Button
+              title={recovering ? 'Verificando...' : 'Verificar tentativa anterior'}
+              variant="secondary"
+              onPress={handleReconcile}
+              disabled={recovering || busy}
+              style={styles.blockedAction}
+              testID="event-confirmation-reconcile-button"
+            />
           </View>
-        )}
+        ) : null}
+
+        {queue ? (
+          <View style={styles.queueCard} testID="event-confirmation-queue-info">
+            <LineIcon name={event.externalQueueEnabled ? 'queue' : 'door'} color={colors.brand.primaryLight} size={22} />
+            <View style={styles.flexText}>
+              <Text style={styles.queueTitle}>{queue.title}</Text>
+              <Text style={styles.queueText}>{queue.text}</Text>
+            </View>
+          </View>
+        ) : null}
+
+        <Card variant="highlight" style={styles.eventCard} testID="event-confirmation-card">
+          <Text style={styles.cardTitle}>Programação do evento</Text>
+          {scheduleNotice ? (
+            <Text style={styles.scheduleNotice} testID="event-confirmation-schedule-notice">{scheduleNotice}</Text>
+          ) : null}
+          <Detail icon="calendar" label="Data programada" value={schedule.date} />
+          <Detail icon="clock" label="Início programado" value={schedule.start} />
+          <Detail icon="door" label="Encerramento programado das entradas" value={schedule.entriesUntil} />
+          <Detail icon="flag" label="Limite operacional programado" value={schedule.finalDeadline} />
+          <Detail icon="globe" label="Fuso horário do evento" value={schedule.zoneLabel} />
+        </Card>
 
         {message ? (
-          <Text style={[styles.messageText, uncertain && styles.warningText]} accessibilityRole="alert">
+          <Text style={[styles.messageText, (uncertain || historical) && styles.warningText]} accessibilityRole="alert"
+            testID="event-confirmation-message">
             {message}
           </Text>
+        ) : null}
+
+        {showRefresh ? (
+          <Button
+            title={revalidating ? 'Atualizando situação...' : 'Atualizar situação do evento'}
+            variant="secondary"
+            onPress={() => { void revalidate(); }}
+            disabled={revalidating}
+            style={styles.refreshButton}
+            testID="event-confirmation-refresh-button"
+          />
         ) : null}
 
         <Button
           title={buttonTitle}
           variant="primary"
           onPress={handleConfirmEntry}
-          disabled={disabled}
+          disabled={!canConfirm}
           style={styles.confirmButton}
           testID="event-confirmation-confirm-button"
         />
@@ -125,7 +244,7 @@ function Detail({ icon, label, value }) {
   if (!value) return null;
   return (
     <View style={styles.detailRow} accessible accessibilityLabel={`${label}: ${value}`}>
-      <Text style={styles.detailIcon} importantForAccessibility="no">{icon}</Text>
+      <LineIcon name={icon} color={colors.brand.primaryLight} size={20} style={styles.detailIcon} />
       <View style={styles.detailTextBlock}>
         <Text style={styles.detailLabel}>{label}</Text>
         <Text style={styles.detailValue}>{value}</Text>
@@ -142,7 +261,7 @@ const styles = StyleSheet.create({
     paddingBottom: spacing.xxxl,
   },
   heroSection: {
-    marginBottom: spacing.xl,
+    marginBottom: spacing.lg,
   },
   eventName: {
     ...typography.titleLarge,
@@ -155,10 +274,16 @@ const styles = StyleSheet.create({
   },
   eventCard: {
     alignItems: 'stretch',
+    marginTop: spacing.lg,
   },
   cardTitle: {
     ...typography.titleSmall,
     color: colors.text.primary,
+    marginBottom: spacing.sm,
+  },
+  scheduleNotice: {
+    ...typography.bodySmall,
+    color: colors.semantic.warning,
     marginBottom: spacing.sm,
   },
   detailRow: {
@@ -170,9 +295,7 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.md,
   },
   detailIcon: {
-    fontSize: 18,
-    width: 24,
-    textAlign: 'center',
+    marginHorizontal: 2,
   },
   detailTextBlock: {
     flex: 1,
@@ -187,7 +310,14 @@ const styles = StyleSheet.create({
     color: colors.text.primary,
     marginTop: spacing.xxs,
   },
+  flexText: {
+    flex: 1,
+    minWidth: 0,
+  },
   queueCard: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.md,
     marginTop: spacing.lg,
     padding: spacing.lg,
     borderRadius: radii.lg,
@@ -210,7 +340,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderRadius: radii.lg,
     padding: spacing.lg,
-    marginTop: spacing.lg,
   },
   blockedText: {
     ...typography.body,
@@ -220,6 +349,29 @@ const styles = StyleSheet.create({
   blockedAction: {
     marginTop: spacing.lg,
   },
+  recoveryCard: {
+    backgroundColor: colors.semantic.warningBg,
+    borderColor: colors.semantic.warning,
+    borderWidth: 1,
+    borderRadius: radii.lg,
+    padding: spacing.lg,
+    marginTop: spacing.lg,
+  },
+  recoveryText: {
+    ...typography.body,
+    color: colors.text.primary,
+    marginTop: spacing.md,
+  },
+  recoveryHint: {
+    ...typography.bodySmall,
+    color: colors.text.secondary,
+    marginTop: spacing.xs,
+  },
+  recoveryMessage: {
+    ...typography.body,
+    color: colors.semantic.warning,
+    marginTop: spacing.md,
+  },
   messageText: {
     ...typography.body,
     color: '#FF9AAE',
@@ -227,6 +379,9 @@ const styles = StyleSheet.create({
   },
   warningText: {
     color: colors.semantic.warning,
+  },
+  refreshButton: {
+    marginTop: spacing.lg,
   },
   confirmButton: {
     marginTop: spacing.xxl,

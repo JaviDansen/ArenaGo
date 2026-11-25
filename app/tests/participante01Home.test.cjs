@@ -110,69 +110,66 @@ test('situação do evento deriva só da elegibilidade do servidor', () => {
 
 // ---------------------------------------------------------------- regras da Home
 
-test('P01-01/02: visão geral distingue conta sem histórico e com histórico', async () => {
-  const fetchPendingItem = async () => assert.fail('sem pendência não consulta elegibilidade');
-  const empty = await overviewUtils.loadHomeOverview({}, {
+test('P01-01/02: histórico recente distingue conta sem histórico e com histórico', async () => {
+  const empty = await overviewUtils.loadRecentParticipation({}, {
     fetchHistory: async (_, options) => { same(options, { limit: 1 }); return { items: [], nextCursor: null }; },
-    fetchPendingItem,
   });
-  same(empty, { recent: null, pending: null });
+  assert.equal(empty, null);
   const item = historyItem();
-  const filled = await overviewUtils.loadHomeOverview({}, {
-    fetchHistory: async () => ({ items: [item], nextCursor: 'x' }), fetchPendingItem,
+  const filled = await overviewUtils.loadRecentParticipation({}, {
+    fetchHistory: async () => ({ items: [item], nextCursor: 'x' }),
   });
-  assert.equal(filled.recent, item);
+  assert.equal(filled, item);
 });
 
-test('P01-04/05: pendência única só é oferecida após confirmação do servidor', async () => {
+test('P01-04/05 (R01): pendência única só é oferecida após confirmação do servidor', async () => {
   const older = historyItem({ participationId: ids.older, event: { id: ids.event, name: 'Copa Indie' } });
-  const confirmed = await overviewUtils.loadHomeOverview({}, {
-    pendingIds: [ids.older],
-    fetchHistory: async () => ({ items: [historyItem()], nextCursor: null }),
+  same(overviewUtils.initialPendingState([ids.older]), { status: 'checking', item: null, count: 1, error: null });
+  const confirmed = await overviewUtils.confirmSinglePending({}, ids.older, {
     fetchPendingItem: async (_, id) => { assert.equal(id, ids.older); return older; },
   });
-  same(confirmed.pending, { kind: 'single', item: older });
-  const card = overviewUtils.describePendingEvaluation(confirmed.pending, confirmed.recent);
+  same(confirmed, { status: 'single', item: older, count: 1, error: null });
+  const card = overviewUtils.describePendingEvaluation(confirmed, historyItem());
   assert.equal(card.text, 'Você ainda pode avaliar sua participação em Copa Indie.');
+  assert.equal(card.actionable, true);
 
-  // Já enviada, expirada ou inelegível: o serviço devolve null e nada é oferecido.
-  const submitted = await overviewUtils.loadHomeOverview({}, {
-    pendingIds: [ids.recent],
-    fetchHistory: async () => ({ items: [historyItem()], nextCursor: null }),
-    fetchPendingItem: async () => null,
-  });
-  assert.equal(submitted.pending, null);
+  // Já enviada, expirada ou inelegível: ausência confirmada pelo servidor.
+  const submitted = await overviewUtils.confirmSinglePending({}, ids.recent, { fetchPendingItem: async () => null });
+  same(submitted, { status: 'none', item: null, count: 0, error: null });
+  assert.equal(overviewUtils.describePendingEvaluation(submitted, historyItem()), null);
 
-  // Falha na confirmação esconde só o card, nunca o histórico.
-  const failed = await overviewUtils.loadHomeOverview({}, {
-    pendingIds: [ids.recent],
-    fetchHistory: async () => ({ items: [historyItem()], nextCursor: null }),
-    fetchPendingItem: async () => { throw Object.assign(new Error('offline'), { isNetworkError: true }); },
-  });
-  assert.equal(failed.pending, null);
-  assert.ok(failed.recent);
+  // R01-13: falha não é ausência — é propagada para virar estado de erro.
+  await assert.rejects(overviewUtils.confirmSinglePending({}, ids.recent, {
+    fetchPendingItem: async () => { throw Object.assign(new Error('timeout'), { isNetworkError: true, isTimeout: true }); },
+  }), /timeout/);
+  const failedCard = overviewUtils.describePendingEvaluation({ status: 'error', item: null, count: 1, error: 'network' });
+  assert.equal(failedCard.kind, 'error');
+  assert.equal(failedCard.actionable, false);
+  assert.equal(overviewUtils.describePendingEvaluation({ status: 'checking', item: null, count: 1 }).actionable, false);
 });
 
-test('várias pendências seguem a política existente: lista na aba Eventos', async () => {
-  const result = await overviewUtils.loadHomeOverview({}, {
-    pendingIds: [ids.recent, ids.older],
-    fetchHistory: async () => ({ items: [historyItem()], nextCursor: null }),
-    fetchPendingItem: async () => assert.fail('várias pendências não escolhem uma por conta própria'),
-  });
-  same(result.pending, { kind: 'multiple', count: 2 });
+test('várias pendências seguem a política existente: lista na aba Eventos', () => {
+  same(overviewUtils.initialPendingState([ids.recent, ids.older]), { status: 'multiple', item: null, count: 2, error: null });
+  same(overviewUtils.initialPendingState([]), { status: 'none', item: null, count: 0, error: null });
   same(overviewUtils.pendingEvaluationIds({ pendingEvaluationParticipationIds: [ids.recent, ids.recent, 'x'] }),
     [ids.recent]);
+  const card = overviewUtils.describePendingEvaluation({ status: 'multiple', count: 2 });
+  assert.equal(card.kind, 'multiple');
 });
 
 test('P01-11: leitura que deixou de ser atual é descartada', async () => {
   let current = true;
-  const result = await overviewUtils.loadHomeOverview({}, {
+  const recent = await overviewUtils.loadRecentParticipation({}, {
     isCurrent: () => current,
     fetchHistory: async () => { current = false; return { items: [historyItem()], nextCursor: null }; },
-    fetchPendingItem: async () => assert.fail('não continua após troca de sessão'),
-    pendingIds: [ids.recent],
   });
-  assert.equal(result, null);
+  assert.equal(recent, undefined);
+  current = true;
+  const pending = await overviewUtils.confirmSinglePending({}, ids.recent, {
+    isCurrent: () => current,
+    fetchPendingItem: async () => { current = false; return historyItem(); },
+  });
+  assert.equal(pending, undefined);
 });
 
 test('evento recente apresenta a semântica real do status, sem inventar local', () => {
@@ -240,7 +237,7 @@ test('P01-04: avaliação pendente abre a avaliação da participação pendente
   const recent = historyItem();
   const pendingItem = historyItem({ participationId: ids.older, event: { id: ids.event, name: 'Copa Indie' } });
   const { h, text, byTestId } = renderHome({
-    status: 'history', recent, pending: { kind: 'single', item: pendingItem }, retry() {},
+    status: 'history', recent, pending: { status: 'single', item: pendingItem, count: 1 }, retry() {},
   });
   assert.match(text(), /Avaliação pendente/);
   assert.match(text(), /Copa Indie/);
@@ -249,9 +246,9 @@ test('P01-04: avaliação pendente abre a avaliação da participação pendente
     { name: 'RealEvaluation', params: { participationId: ids.older, historyItem: pendingItem } },
   ]);
 
-  const sameRecent = renderHome({ status: 'history', recent, pending: { kind: 'single', item: recent }, retry() {} });
+  const sameRecent = renderHome({ status: 'history', recent, pending: { status: 'single', item: recent, count: 1 }, retry() {} });
   assert.match(sameRecent.text(), /no último evento/);
-  const many = renderHome({ status: 'history', recent, pending: { kind: 'multiple', count: 3 }, retry() {} });
+  const many = renderHome({ status: 'history', recent, pending: { status: 'multiple', count: 3 }, retry() {} });
   many.byTestId('home-pending-evaluation-card').props.onPress();
   same(many.h.navigationCalls.map(call => call.name), ['Eventos']);
 });
@@ -328,9 +325,15 @@ function hookRig(services) {
   return { render, get last() { return last; } };
 }
 
+// O AuthContext real mantém a mesma instância de httpClient durante a sessão; um cliente novo
+// representa outro contexto HTTP e (corretamente) dispara nova leitura. Por isso o cliente é
+// estável por conta/época aqui.
+const clients = new Map();
 function authFor(userId, epoch = 1, verified = true) {
+  const clientKey = `${userId}#${epoch}`;
+  if (!clients.has(clientKey)) clients.set(clientKey, { id: `client-${userId}` });
   return {
-    isAuthenticated: true, user: { id: userId }, httpClient: { id: `client-${userId}` },
+    isAuthenticated: true, user: { id: userId }, httpClient: clients.get(clientKey),
     getSessionEpoch: () => epoch, isIdentityVerified: () => verified,
   };
 }
@@ -396,4 +399,42 @@ test('participação corrente desabilita a leitura da Home', () => {
     fetchPendingEvaluationHistoryItem: async () => null });
   rig.render({ auth: authFor(ids.userA), enabled: false, focused: true, returnState: null, returnStateVersion: 1 });
   assert.equal(reads, 0);
+});
+
+// ---------------------------------------------------------------- R01 (AUD-P01-04/05 na tela)
+
+test('R01-13: falha na avaliação mantém o histórico, não abre avaliação e oferece nova tentativa', () => {
+  let retries = 0;
+  const { h, text, byTestId } = renderHome({ status: 'history', recent: historyItem(),
+    pending: { status: 'error', item: null, count: 1, error: 'network' }, retry() {}, retryPending() { retries += 1; } });
+  assert.ok(byTestId('home-recent-section'), 'histórico preservado');
+  assert.ok(byTestId('home-pending-evaluation-error'));
+  assert.ok(!byTestId('home-pending-evaluation-card'), 'sem ação de avaliação sem confirmação');
+  assert.match(text(), /Não foi possível verificar sua avaliação pendente/);
+  byTestId('home-pending-evaluation-retry').props.onPress();
+  assert.equal(retries, 1);
+  assert.equal(h.navigationCalls.length, 0);
+});
+
+test('R01-16: verificação em andamento não oferece CTA; histórico em atualização segue visível', () => {
+  const { h, byTestId } = renderHome({ status: 'history', recent: historyItem(), refreshing: true,
+    pending: { status: 'checking', item: null, count: 1 }, retry() {}, retryPending() {} });
+  assert.ok(byTestId('home-pending-evaluation-checking'));
+  assert.ok(!byTestId('home-pending-evaluation-card'));
+  assert.ok(byTestId('home-recent-refreshing'));
+  assert.ok(byTestId('home-recent-event-card'));
+  assert.equal(h.navigationCalls.length, 0);
+});
+
+test('R01: Home usa ícones de linha (sem emojis) e rotula o horário como da participação', () => {
+  const withHistory = renderHome({ status: 'history', recent: historyItem(),
+    pending: { status: 'single', item: historyItem(), count: 1 }, retry() {} });
+  const empty = renderHome({ status: 'empty', recent: null, pending: { status: 'none' }, retry() {} });
+  for (const view of [withHistory, empty]) {
+    assert.doesNotMatch(view.text(), /[\u{1F300}-\u{1FAFF}\u{2600}-\u{26FF}]/u);
+  }
+  assert.match(withHistory.text(), /Sua entrada na Arena: 08\/11\/2026 às/);
+  const icons = empty.h.nodes.map(node => node.props?.iconName
+    ?? (typeof node.type === 'function' && node.type.name === 'LineIcon' ? node.props.name : null)).filter(Boolean);
+  for (const name of ['qr', 'gamepad', 'star']) assert.ok(icons.includes(name), `ícone ${name}`);
 });

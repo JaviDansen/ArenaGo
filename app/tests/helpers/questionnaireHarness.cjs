@@ -117,6 +117,7 @@ function createParticipantUiStubs() {
       { type: 'TextInput', props: { ...props, value, onChangeText } },
       error ? text(error, { accessibilityRole: 'alert' }) : null,
     ]),
+    LineIcon: ({ name, color, size, ...props }) => view(null, { ...props, iconName: name, color, size }),
     ScreenHeader: ({ title, subtitle, onBack, showBack = true, ...props }) => view([
       showBack && onBack ? {
         type: 'Pressable',
@@ -346,6 +347,7 @@ function createHarness(relativePath, options = {}) {
     goBack() { assert.equal(insideUpdater, false); navigationCalls.push({ type: 'back' }); },
     replace(name) { assert.equal(insideUpdater, false); navigationCalls.push({ type: 'replace', name }); },
   };
+  if (options.canGoBack !== undefined) navigation.canGoBack = () => options.canGoBack;
   if (!options.fallbackNavigation) navigation.reset = (payload) => {
     assert.equal(insideUpdater, false);
     navigationCalls.push({ type: 'reset', payload });

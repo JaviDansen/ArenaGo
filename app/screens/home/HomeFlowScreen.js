@@ -107,7 +107,7 @@ export default function HomeFlowScreen({ navigation }) {
           if (!claimReturnEvaluation(returnState, returnStateVersion)) return;
           root.navigate('RealEvaluation', { participationId: item.participationId, historyItem: item });
         }
-        setReturnCheck({ returned: returnState, version: returnStateVersion, status: 'ready', unavailable: !item });
+        setReturnCheck({ returned: returnState, version: returnStateVersion, status: 'ready', unavailable: !item, item: item ?? null });
       }).catch(() => {
         if (isCurrent()) setReturnCheck({ returned: returnState, version: returnStateVersion, status: 'error' });
       });
@@ -121,9 +121,15 @@ export default function HomeFlowScreen({ navigation }) {
     && returnCheck.unavailable ? { ...returnState, pendingEvaluationParticipationIds:
       returnState.pendingEvaluationParticipationIds.filter(id => id !== returnState.recentFinalization?.participationId) }
     : returnState;
+  // Leitura já confirmada pela retomada C-04/D09 nesta versão do retorno: a Home a reaproveita.
+  const knownPending = returnCheck?.item && returnCheck.returned === returnState && returnCheck.version === returnStateVersion
+    ? { version: returnStateVersion, participationId: returnCheck.item.participationId, item: returnCheck.item } : null;
+  const returnCheckPending = Boolean(canPresentReturnEvaluation?.(returnState, returnStateVersion))
+    && (!returnCheck || returnCheck.returned !== returnState || returnCheck.version !== returnStateVersion
+      || returnCheck.status === 'loading');
   const overview = useHomeOverview({
     auth, enabled: status === 'ready' && !participation, focused,
-    returnState: visibleReturnState, returnStateVersion,
+    returnState: visibleReturnState, returnStateVersion, knownPending, pendingDeferred: returnCheckPending,
   });
 
   if (status === 'loading') {

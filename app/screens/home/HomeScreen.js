@@ -2,15 +2,15 @@ import { StatusBar } from 'expo-status-bar';
 import { useContext } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
-import { AuthBackground, Badge, Button, Card } from '../../components/ui';
+import { AuthBackground, Badge, Button, Card, LineIcon } from '../../components/ui';
 import { AuthContext } from '../../context/AuthContext';
 import { colors, radii, spacing, typography } from '../../theme';
 import { describePendingEvaluation, describeRecentParticipation } from '../../utils/homeOverview';
 
 const TUTORIAL_STEPS = [
-  { icon: '📷', title: 'Acesse o evento', text: 'Escaneie o QR Code ou digite o código.' },
-  { icon: '🎮', title: 'Participe das experiências', text: 'Entre nas filas e aguarde sua vez.' },
-  { icon: '⭐', title: 'Avalie a sua experiência', text: 'Ao final, conte como foi participar.' },
+  { icon: 'qr', title: 'Acesse o evento', text: 'Escaneie o QR Code ou digite o código.' },
+  { icon: 'gamepad', title: 'Participe das experiências', text: 'Entre nas filas e aguarde sua vez.' },
+  { icon: 'star', title: 'Avalie a sua experiência', text: 'Ao final, conte como foi participar.' },
 ];
 
 export default function HomeScreen({ navigation, returnState, overview, mode = 'ready', message, onRetry }) {
@@ -116,9 +116,34 @@ function Brand() {
 }
 
 function PendingEvaluationCard({ overview, navigation }) {
-  if (overview?.status !== 'history') return null;
+  if (!overview || overview.status === 'empty') return null;
   const pending = describePendingEvaluation(overview.pending, overview.recent);
   if (!pending) return null;
+  const icon = (
+    <View style={styles.pendingIcon}>
+      <LineIcon name="star" color={colors.brand.primaryLight} size={22} />
+    </View>
+  );
+  if (!pending.actionable) {
+    // Verificação em andamento ou falha: nenhuma ação de avaliação sem confirmação do servidor.
+    return (
+      <View style={[styles.pendingCard, styles.pendingCardMuted]} testID={`home-pending-evaluation-${pending.kind}`}
+        accessibilityRole={pending.kind === 'error' ? 'alert' : undefined}>
+        {icon}
+        <View style={styles.pendingDivider} />
+        <View style={styles.flexText}>
+          <Text style={styles.pendingTitle}>Avaliação pendente</Text>
+          <Text style={styles.pendingText}>{pending.text}</Text>
+          {pending.kind === 'checking' ? (
+            <ActivityIndicator size="small" color={colors.brand.primaryLight} style={styles.pendingSpinner} />
+          ) : (
+            <Button title="Tentar novamente" variant="secondary" size="sm" onPress={overview.retryPending}
+              style={styles.pendingRetry} testID="home-pending-evaluation-retry" />
+          )}
+        </View>
+      </View>
+    );
+  }
   const open = pending.kind === 'single'
     ? () => navigation.navigate('RealEvaluation', {
       participationId: pending.item.participationId, historyItem: pending.item,
@@ -133,7 +158,8 @@ function PendingEvaluationCard({ overview, navigation }) {
       accessibilityHint={pending.kind === 'single' ? 'Abre a avaliação desta participação' : 'Abre a aba Eventos'}
       testID="home-pending-evaluation-card"
     >
-      <View style={styles.pendingIcon}><Text style={styles.iconText}>⭐</Text></View>
+      {icon}
+      <View style={styles.pendingDivider} />
       <View style={styles.flexText}>
         <Text style={styles.pendingTitle}>Avaliação pendente</Text>
         <Text style={styles.pendingText}>{pending.text}</Text>
@@ -184,7 +210,7 @@ function OverviewSection({ overview, navigation }) {
               accessible
               accessibilityLabel={`Passo ${index + 1}: ${step.title}. ${step.text}`}
             >
-              <View style={styles.stepIcon}><Text style={styles.iconText}>{step.icon}</Text></View>
+              <View style={styles.stepIcon}><LineIcon name={step.icon} color={colors.brand.primaryLight} size={22} /></View>
               <View style={styles.flexText}>
                 <Text style={styles.stepTitle}>{index + 1}. {step.title}</Text>
                 <Text style={styles.stepText}>{step.text}</Text>
@@ -193,7 +219,7 @@ function OverviewSection({ overview, navigation }) {
           ))}
         </Card>
         <View style={styles.emptyState} testID="home-empty-history">
-          <Text style={styles.emptyIcon} importantForAccessibility="no">🎮</Text>
+          <LineIcon name="gamepad" color={colors.text.muted} size={34} style={styles.emptyIcon} />
           <Text style={styles.emptyTitle}>Você ainda não participou de nenhum evento.</Text>
           <Text style={styles.emptyText}>Quando participar, suas experiências aparecerão aqui.</Text>
         </View>
@@ -206,7 +232,13 @@ function OverviewSection({ overview, navigation }) {
   return (
     <View testID="home-recent-section">
       <View style={styles.sectionHeader}>
-        <Text style={styles.sectionTitle} accessibilityRole="header">Evento recente</Text>
+        <View style={styles.sectionTitleRow}>
+          <Text style={styles.sectionTitle} accessibilityRole="header">Evento recente</Text>
+          {overview.refreshing ? (
+            <ActivityIndicator size="small" color={colors.brand.primaryLight} testID="home-recent-refreshing"
+              accessibilityLabel="Atualizando participações" />
+          ) : null}
+        </View>
         <Pressable
           onPress={() => navigation.navigate('Eventos')}
           style={styles.seeAll}
@@ -223,17 +255,21 @@ function OverviewSection({ overview, navigation }) {
         })}
         style={({ pressed }) => [styles.recentCard, pressed && styles.pressed]}
         accessibilityRole="button"
-        accessibilityLabel={[recent.eventName, recent.date, recent.time, recent.statusLabel].filter(Boolean).join(', ')}
+        accessibilityLabel={[recent.eventName, recent.date ? `${recent.timeLabel} em ${recent.date}` : null, recent.time,
+          recent.statusLabel].filter(Boolean).join(', ')}
         accessibilityHint="Abre os detalhes desta participação"
         testID="home-recent-event-card"
       >
-        <View style={styles.recentIcon}><Text style={styles.iconText}>🎮</Text></View>
+        <View style={styles.recentIcon}><LineIcon name="gamepad" color={colors.brand.primaryLight} size={24} /></View>
         <View style={styles.flexText}>
           <Text style={styles.recentName} numberOfLines={2}>{recent.eventName}</Text>
           {recent.date ? (
-            <Text style={styles.recentMeta}>
-              📅 {recent.date}{recent.time ? `   🕒 ${recent.time}` : ''}
-            </Text>
+            <View style={styles.recentMetaRow} testID="home-recent-participation-time">
+              <LineIcon name="calendar" color={colors.text.secondary} size={14} />
+              <Text style={styles.recentMeta}>
+                {recent.timeLabel}: {recent.date}{recent.time ? ` às ${recent.time}` : ''}
+              </Text>
+            </View>
           ) : null}
           <View style={styles.recentBadge}>
             <Badge label={recent.statusLabel.toUpperCase()} variant={recent.statusVariant} />
@@ -347,22 +383,42 @@ const styles = StyleSheet.create({
   pendingCard: {
     flexDirection: 'row',
     alignItems: 'center',
-    minHeight: 64,
+    minHeight: 72,
     gap: spacing.md,
     padding: spacing.lg,
     marginBottom: spacing.xl,
     borderRadius: radii.lg,
     borderWidth: 1,
-    borderColor: colors.semantic.warning,
-    backgroundColor: colors.semantic.warningBg,
+    borderColor: colors.brand.primary,
+    backgroundColor: colors.brand.primaryDim,
+  },
+  pendingCardMuted: {
+    borderColor: colors.border.subtle,
+    backgroundColor: colors.background.surface,
   },
   pendingIcon: {
-    width: 40,
-    height: 40,
+    width: 44,
+    height: 44,
     borderRadius: radii.md,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: colors.background.elevated,
+    backgroundColor: colors.brand.primaryDim,
+    borderWidth: 1,
+    borderColor: colors.brand.primary,
+  },
+  pendingDivider: {
+    width: 1,
+    alignSelf: 'stretch',
+    backgroundColor: colors.brand.primary,
+    opacity: 0.5,
+  },
+  pendingSpinner: {
+    alignSelf: 'flex-start',
+    marginTop: spacing.sm,
+  },
+  pendingRetry: {
+    alignSelf: 'flex-start',
+    marginTop: spacing.sm,
   },
   pendingTitle: {
     ...typography.titleSmall,
@@ -372,9 +428,6 @@ const styles = StyleSheet.create({
     ...typography.body,
     color: colors.text.secondary,
     marginTop: spacing.xxs,
-  },
-  iconText: {
-    fontSize: 20,
   },
   flexText: {
     flex: 1,
@@ -395,6 +448,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: spacing.md,
+  },
+  sectionTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
   },
   sectionTitle: {
     ...typography.titleMedium,
@@ -455,7 +513,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.lg,
   },
   emptyIcon: {
-    fontSize: 32,
     marginBottom: spacing.md,
   },
   emptyTitle: {
@@ -494,10 +551,16 @@ const styles = StyleSheet.create({
     ...typography.titleSmall,
     color: colors.text.primary,
   },
+  recentMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    marginTop: spacing.xs,
+  },
   recentMeta: {
     ...typography.bodySmall,
     color: colors.text.secondary,
-    marginTop: spacing.xs,
+    flexShrink: 1,
   },
   recentBadge: {
     flexDirection: 'row',

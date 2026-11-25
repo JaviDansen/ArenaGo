@@ -10,6 +10,11 @@ const event = {
   operationalDeadlineAt: '2026-11-08T21:00:00.000Z', externalQueueEnabled: true,
 };
 const eligible = { eligible: true, blockingReasons: [] };
+// R01: a confirmação só considera a elegibilidade publicada pelo store (consulta/revalidação oficial).
+const official = (eligibility = eligible, extra = {}) => ({
+  status: 'ready', event, eligibility, eligibilityStatus: 'fresh', pendingIntent: null,
+  recovery: { status: 'idle', message: null }, error: null, ...extra,
+});
 
 function screenRig(path, context, params = {}, options = {}) {
   const state = [], calls = [], cleanups = [];
@@ -57,7 +62,7 @@ function screenRig(path, context, params = {}, options = {}) {
     if (name === 'react') return react;
     if (name === 'react-native') return {
       ActivityIndicator: 'ActivityIndicator', KeyboardAvoidingView: 'KeyboardAvoidingView',
-      Platform: { OS: 'android' }, Pressable: 'Pressable', ScrollView: 'ScrollView',
+      Platform: { OS: 'android' }, Pressable: 'Pressable', ScrollView: 'ScrollView', AppState: options.appState,
       Text: 'Text', TextInput: 'TextInput', View: 'View',
       StyleSheet: { create: (styles) => styles, absoluteFill: { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0 } },
       Linking: {
@@ -223,7 +228,7 @@ test('consulta inexistente e resposta tardia após logout não navegam', async (
 test('ineligibilidade mostra motivo real e impede POST', async () => {
   let count = 0;
   const context = {
-    admission: { status: 'ready', event }, isCurrentAdmission: () => true,
+    admission: official({ eligible: false, blockingReasons: ['PROFILE_INCOMPLETE'] }), isCurrentAdmission: () => true,
     confirmEventEntry: async () => { count++; return { kind: 'complete' }; },
   };
   const rig = screenRig('screens/event-entry/EventConfirmationScreen.js', context,
@@ -240,7 +245,7 @@ test('ineligibilidade mostra motivo real e impede POST', async () => {
 test('ingresso confirmado navega uma vez; toque duplo não duplica POST', async () => {
   let resolve, count = 0;
   const context = {
-    admission: { status: 'ready', event }, isCurrentAdmission: () => true,
+    admission: official(), isCurrentAdmission: () => true,
     confirmEventEntry: () => { count++; return new Promise((done) => { resolve = done; }); },
   };
   const rig = screenRig('screens/event-entry/EventConfirmationScreen.js', context, { event, eligibility: eligible });
@@ -257,7 +262,7 @@ test('ingresso confirmado navega uma vez; toque duplo não duplica POST', async 
 test('ingresso confirmado sem sincronização só repete GET', async () => {
   let posts = 0, reads = 0;
   const context = {
-    admission: { status: 'confirmed_unsynced', event, confirmedParticipationId: '22222222-2222-4222-8222-222222222222',
+    admission: { ...official(), status: 'confirmed_unsynced', confirmedParticipationId: '22222222-2222-4222-8222-222222222222',
       error: 'Atualize sem repetir o ingresso.' }, isCurrentAdmission: () => true,
     confirmEventEntry: async () => { posts++; return { kind: 'complete' }; },
     retryEntrySync: async () => { reads++; return { kind: 'complete' }; },
@@ -272,13 +277,13 @@ test('ingresso confirmado sem sincronização só repete GET', async () => {
 
 test('erro HTTP na confirmação preserva a tela e informa o problema', async () => {
   const context = {
-    admission: { status: 'ready', event }, isCurrentAdmission: () => true,
+    admission: official(), isCurrentAdmission: () => true,
     confirmEventEntry: async () => ({ kind: 'error', message: 'Evento encerrado' }),
   };
   const rig = screenRig('screens/event-entry/EventConfirmationScreen.js', context, { event, eligibility: eligible });
   await rig.button('Confirmar entrada').props.onPress();
   assert.deepEqual(rig.calls, []);
-  context.admission = { status: 'error', event, error: 'Evento encerrado' };
+  context.admission = official(eligible, { status: 'error', error: 'Evento encerrado' });
   rig.render();
   assert.match(rig.text(), /Evento encerrado/);
 });
@@ -781,7 +786,7 @@ test('ENTRY-QR-01: HomeScreen exibe texto atualizado com menção a QR Code e di
 // -------------------------------------------------------------
 
 test('P01-14/22: evento encontrado mostra horários formatados no fuso do evento, sem ISO cru', () => {
-  const context = { admission: { status: 'ready', event }, isCurrentAdmission: () => true };
+  const context = { admission: official(), isCurrentAdmission: () => true };
   const rig = screenRig('screens/event-entry/EventConfirmationScreen.js', context, { event, eligibility: eligible });
   const text = rig.text();
   assert.match(text, /Arena real/);
@@ -794,19 +799,19 @@ test('P01-14/22: evento encontrado mostra horários formatados no fuso do evento
 });
 
 test('P01-19/20: informação da fila externa segue a configuração real do evento', () => {
-  const context = { admission: { status: 'ready', event }, isCurrentAdmission: () => true };
+  const context = { admission: official(), isCurrentAdmission: () => true };
   const withQueue = screenRig('screens/event-entry/EventConfirmationScreen.js', context, { event, eligibility: eligible });
   assert.match(withQueue.text(), /Fila de entrada ativa/);
   const direct = { ...event, externalQueueEnabled: false };
   const directRig = screenRig('screens/event-entry/EventConfirmationScreen.js',
-    { admission: { status: 'ready', event: direct }, isCurrentAdmission: () => true }, { event: direct, eligibility: eligible });
+    { admission: { ...official(), event: direct }, isCurrentAdmission: () => true }, { event: direct, eligibility: eligible });
   assert.match(directRig.text(), /Entrada direta na Arena/);
 });
 
 test('P01-16: evento ainda não iniciado é recusado sem POST e sem usar o relógio do aparelho', async () => {
   let posts = 0;
   const context = {
-    admission: { status: 'ready', event }, isCurrentAdmission: () => true,
+    admission: official({ eligible: false, blockingReasons: ['EVENT_NOT_STARTED'] }), isCurrentAdmission: () => true,
     confirmEventEntry: async () => { posts++; return { kind: 'complete' }; },
   };
   const rig = screenRig('screens/event-entry/EventConfirmationScreen.js', context,
@@ -821,7 +826,7 @@ test('P01-16: evento ainda não iniciado é recusado sem POST e sem usar o reló
 test('P01-18: participação já existente oferece voltar ao início sem criar outra', async () => {
   let posts = 0, refreshes = 0;
   const context = {
-    admission: { status: 'ready', event }, isCurrentAdmission: () => true,
+    admission: official({ eligible: false, blockingReasons: ['PARTICIPATION_ALREADY_CURRENT'] }), isCurrentAdmission: () => true,
     confirmEventEntry: async () => { posts++; return { kind: 'complete' }; },
     refreshParticipation: async () => { refreshes++; },
   };
@@ -837,20 +842,22 @@ test('P01-18: participação já existente oferece voltar ao início sem criar o
 test('P01-17: questionário incompleto leva ao questionário sem tentar o ingresso', async () => {
   let posts = 0;
   const context = {
-    admission: { status: 'ready', event }, isCurrentAdmission: () => true,
+    admission: official({ eligible: false, blockingReasons: ['PROFILE_INCOMPLETE'] }), isCurrentAdmission: () => true,
     confirmEventEntry: async () => { posts++; return { kind: 'complete' }; },
   };
   const rig = screenRig('screens/event-entry/EventConfirmationScreen.js', context,
     { event, eligibility: { eligible: false, blockingReasons: ['PROFILE_INCOMPLETE'] } });
   await rig.button('Completar questionário').props.onPress();
   assert.equal(posts, 0);
-  assert.deepEqual(structuredClone(rig.calls), [{ name: 'ProfileQuestionnaire', value: undefined }]);
+  // R01-12: o questionário volta para esta jornada; o parâmetro só define o destino da navegação.
+  assert.deepEqual(structuredClone(rig.calls),
+    [{ name: 'ProfileQuestionnaire', value: { mode: 'edit', returnTo: 'EventConfirmation' } }]);
 });
 
 test('P01-21: resultado incerto oferece verificar o mesmo ingresso, sem nova intenção na tela', async () => {
   const confirmations = [];
   const context = {
-    admission: { status: 'uncertain', event, error: 'O tempo de resposta terminou. O resultado pode ter sido confirmado; tente novamente com segurança.' },
+    admission: { ...official(), status: 'uncertain', error: 'O tempo de resposta terminou. O resultado pode ter sido confirmado; tente novamente com segurança.' },
     isCurrentAdmission: () => true,
     confirmEventEntry: async (eventId) => { confirmations.push(eventId); return { kind: 'complete' }; },
   };
@@ -860,4 +867,203 @@ test('P01-21: resultado incerto oferece verificar o mesmo ingresso, sem nova int
   // A mesma chave persistida é reutilizada pelo store (ver eventAdmissionService.test).
   assert.deepEqual(confirmations, [event.id]);
   assert.deepEqual(structuredClone(rig.calls), [{ reset: { index: 0, routes: [{ name: 'MainTabs' }] } }]);
+});
+
+
+// -------------------------------------------------------------
+// PARTICIPANTE-01 R01 — revalidação, recuperação, fila e horários
+// -------------------------------------------------------------
+
+function confirmationRig(admission, extra = {}, options = {}) {
+  const log = { revalidations: 0, reconciles: 0, posts: 0, refreshes: 0 };
+  const context = {
+    admission, isCurrentAdmission: () => true,
+    confirmEventEntry: async () => { log.posts++; return extra.confirmResult ?? { kind: 'complete' }; },
+    retryEntrySync: async () => ({ kind: 'complete' }),
+    revalidateEventEntry: async () => { log.revalidations++; return extra.revalidateResult ?? { kind: 'found' }; },
+    reconcileEntryIntent: async () => { log.reconciles++; return extra.reconcileResult ?? { kind: 'resolved', outcome: 'none' }; },
+    refreshParticipation: async () => { log.refreshes++; },
+  };
+  const rig = screenRig('screens/event-entry/EventConfirmationScreen.js', context,
+    { event: admission.event ?? event, eligibility: eligible }, options);
+  return { rig, context, log };
+}
+
+test('R01-09/10: parâmetros da rota não liberam o ingresso; só a elegibilidade oficial publicada', async () => {
+  // Rota diz "elegível", mas o store revalidou e o evento fechou.
+  const closed = confirmationRig(official({ eligible: false, blockingReasons: ['EVENT_REGISTRATION_CLOSED'] }));
+  assert.match(closed.rig.text(), /ENTRADAS ENCERRADAS/);
+  assert.equal(closed.rig.button('Confirmar entrada').props.disabled, true);
+  await closed.rig.button('Confirmar entrada').props.onPress?.();
+  assert.equal(closed.log.posts, 0);
+  // Store sem elegibilidade confirmada (outra operação / sem consulta): nada é liberado.
+  const unknown = confirmationRig({ status: 'ready', event, eligibilityStatus: 'none', eligibility: null });
+  assert.match(unknown.rig.text(), /SITUAÇÃO NÃO CONFIRMADA/);
+  assert.equal(unknown.rig.button('Confirmar entrada').props.disabled, true);
+  // Evento abriu após a consulta: a revalidação oficial libera.
+  const opened = confirmationRig(official());
+  assert.equal(opened.rig.button('Confirmar entrada').props.disabled, false);
+});
+
+test('R01-09/23: durante a revalidação a autorização antiga não é apresentada nem usada', async () => {
+  const { rig, log } = confirmationRig(official(eligible, { eligibilityStatus: 'revalidating' }));
+  assert.match(rig.text(), /ATUALIZANDO SITUAÇÃO/);
+  assert.doesNotMatch(rig.text(), /ENTRADAS ABERTAS/);
+  assert.equal(rig.button('Confirmar entrada').props.disabled, true);
+  await rig.button('Confirmar entrada').props.onPress?.();
+  assert.equal(log.posts, 0);
+  assert.equal(rig.button('Atualizando situação...').props.disabled, true);
+});
+
+test('R01-11: falha na revalidação mantém o botão bloqueado e oferece atualização manual', async () => {
+  const { rig, log } = confirmationRig(official(eligible, {
+    eligibilityStatus: 'error', error: 'Não foi possível atualizar a situação do evento. Tente novamente antes de confirmar.' }));
+  assert.match(rig.text(), /SITUAÇÃO NÃO CONFIRMADA/);
+  assert.equal(rig.button('Confirmar entrada').props.disabled, true);
+  await rig.button('Atualizar situação do evento').props.onPress();
+  assert.equal(log.revalidations, 1);
+});
+
+test('R01-12/23: retorno de foco e ao primeiro plano revalidam no servidor; a montagem inicial não repete a consulta', async () => {
+  let appListener = null, removed = 0;
+  const appState = { currentState: 'active', addEventListener(_, listener) {
+    appListener = listener; return { remove() { removed++; } }; } };
+  const { rig, log } = confirmationRig(official({ eligible: false, blockingReasons: ['PROFILE_INCOMPLETE'] }), {}, { appState });
+  assert.equal(log.revalidations, 0, 'montagem usa a consulta recém-feita');
+  rig.setFocused(false); // abriu o questionário
+  assert.equal(log.revalidations, 0);
+  rig.setFocused(true); // voltou do questionário
+  assert.equal(log.revalidations, 1);
+  rig.render();
+  assert.equal(log.revalidations, 1, 'sem consultas redundantes por renderização');
+  appListener('background');
+  appListener('active');
+  assert.equal(log.revalidations, 2);
+  rig.unmount();
+  assert.ok(removed >= 1);
+});
+
+test('R01-10: recusa definitiva no POST revalida a apresentação', async () => {
+  const { rig, log } = confirmationRig(official(), {
+    confirmResult: { kind: 'error', message: 'As entradas neste evento foram encerradas.', revalidate: true } });
+  await rig.button('Confirmar entrada').props.onPress();
+  assert.equal(log.posts, 1);
+  assert.equal(log.revalidations, 1);
+  assert.deepEqual(rig.calls, []);
+});
+
+test('R01-05/08: tentativa anterior de outro evento bloqueia novo ingresso e oferece verificação sem criar outra', async () => {
+  const { rig, log } = confirmationRig(official(eligible, {
+    pendingIntent: { eventId: '99999999-9999-4999-8999-999999999999', sameEvent: false, confirmed: false } }), {
+    reconcileResult: { kind: 'resolved', outcome: 'historical' } });
+  assert.ok(rig.card('event-confirmation-recovery'));
+  assert.match(rig.text(), /em outro evento/);
+  assert.match(rig.text(), /não cria um novo ingresso/);
+  assert.equal(rig.button('Confirmar entrada').props.disabled, true);
+  await rig.button('Confirmar entrada').props.onPress?.();
+  assert.equal(log.posts, 0);
+  await rig.button('Verificar tentativa anterior').props.onPress();
+  assert.equal(log.reconciles, 1);
+  assert.equal(log.revalidations, 1, 'após resolver, a elegibilidade é reconsultada');
+  assert.deepEqual(rig.calls, []);
+});
+
+test('R01-05: mesma tentativa com participação corrente (ALREADY_CURRENT) é recuperada e leva à participação', async () => {
+  const { rig, log } = confirmationRig(official({ eligible: false, blockingReasons: ['PARTICIPATION_ALREADY_CURRENT'] }, {
+    pendingIntent: { eventId: event.id, sameEvent: true, confirmed: false } }), {
+    reconcileResult: { kind: 'resolved', outcome: 'current' } });
+  assert.match(rig.text(), /neste evento cujo resultado ainda não foi confirmado/);
+  await rig.button('Verificar tentativa anterior').props.onPress();
+  assert.equal(log.reconciles, 1);
+  assert.equal(log.refreshes, 1);
+  assert.equal(log.posts, 0);
+  assert.deepEqual(structuredClone(rig.calls), [{ reset: { index: 0, routes: [{ name: 'MainTabs' }] } }]);
+});
+
+test('R01-07/08: verificação em andamento ou bloqueada não libera ingresso nem mostra sucesso', async () => {
+  const pendingIntent = { eventId: event.id, sameEvent: true, confirmed: true };
+  const checking = confirmationRig(official(eligible, { pendingIntent, recovery: { status: 'checking', message: null } }));
+  assert.equal(checking.rig.button('Verificando...').props.disabled, true);
+  assert.equal(checking.rig.button('Confirmar entrada').props.disabled, true);
+  const blocked = confirmationRig(official(eligible, { pendingIntent,
+    recovery: { status: 'blocked', message: 'O servidor não confirmou a participação da tentativa anterior.' } }));
+  assert.match(blocked.rig.text(), /não confirmou a participação/);
+  assert.equal(blocked.rig.button('Confirmar entrada').props.disabled, true);
+});
+
+test('R01-02: intenção incerta do mesmo evento com entradas abertas usa o próprio botão (mesma chave)', async () => {
+  const { rig, log } = confirmationRig(official(eligible, {
+    pendingIntent: { eventId: event.id, sameEvent: true, confirmed: false } }));
+  assert.ok(!rig.card('event-confirmation-recovery'));
+  await rig.button('Verificar ingresso').props.onPress();
+  assert.equal(log.posts, 1);
+});
+
+test('R01-20: fila externa aparece também com evento indisponível, sem sugerir ingresso possível', () => {
+  const notStarted = confirmationRig(official({ eligible: false, blockingReasons: ['EVENT_NOT_STARTED'] }));
+  assert.ok(notStarted.rig.card('event-confirmation-queue-info'));
+  assert.match(notStarted.rig.text(), /Evento com fila de entrada/);
+  assert.match(notStarted.rig.text(), /Ainda não é possível ingressar/);
+  assert.doesNotMatch(notStarted.rig.text(), /Ao confirmar, você entra na fila/);
+
+  const direct = { ...event, externalQueueEnabled: false };
+  const directBlocked = confirmationRig({ ...official({ eligible: false, blockingReasons: ['EVENT_NOT_READY'] }), event: direct });
+  assert.match(directBlocked.rig.text(), /Entrada direta na Arena/);
+  assert.match(directBlocked.rig.text(), /não usa fila de entrada/);
+  assert.match(directBlocked.rig.text(), /Ainda não é possível ingressar/);
+
+  const directOpen = confirmationRig({ ...official(), event: direct });
+  assert.match(directOpen.rig.text(), /Ao confirmar, sua entrada na Arena é liberada/);
+
+  const queueClosed = confirmationRig(official({ eligible: false, blockingReasons: ['EVENT_REGISTRATION_CLOSED'] }));
+  assert.match(queueClosed.rig.text(), /Não é mais possível entrar na fila/);
+});
+
+test('R01-21: encerramento antecipado — horários aparecem como programação, nunca como prazo vigente', () => {
+  // Admin encerrou às 12:00 BRT, antes do horário programado (17:00): o servidor só informa o estado.
+  const { rig } = confirmationRig(official({ eligible: false, blockingReasons: ['EVENT_REGISTRATION_CLOSED'] }));
+  const text = rig.text();
+  assert.ok(rig.card('event-confirmation-schedule-notice'));
+  assert.match(text, /programação original e não valem mais como prazo/);
+  assert.match(text, /Encerramento programado das entradas/);
+  assert.match(text, /Limite operacional programado/);
+  assert.doesNotMatch(text, /Entradas até/);
+  // O estado oficial tem destaque próprio (situação + cartão de indisponibilidade).
+  assert.ok(rig.card('event-confirmation-blocked'));
+  assert.match(rig.card('event-confirmation-status').props.accessibilityLabel, /ENTRADAS ENCERRADAS/);
+  // Evento aberto não recebe o aviso.
+  assert.ok(!confirmationRig(official()).rig.card('event-confirmation-schedule-notice'));
+});
+
+test('R01-21: datas em fusos diferentes e virada de meia-noite seguem o fuso do evento', () => {
+  const manaus = { ...event, timezone: 'America/Manaus',
+    startsAt: '2026-11-09T02:00:00.000Z', officialEndsAt: '2026-11-09T05:00:00.000Z',
+    operationalDeadlineAt: '2026-11-09T06:00:00.000Z' };
+  const { rig } = confirmationRig({ ...official(), event: manaus });
+  const text = rig.text();
+  assert.match(text, /08\/11\/2026/); // 22:00 de 08/11 em Manaus (UTC-4)
+  assert.match(text, /22:00/);
+  assert.match(text, /09\/11\/2026 às 01:00/);
+  assert.match(text, /America\/Manaus/);
+});
+
+test('R01-22: toques repetidos na verificação da tentativa anterior geram uma única chamada', async () => {
+  let release, count = 0;
+  const admission = official(eligible, { pendingIntent: { eventId: event.id, sameEvent: false, confirmed: false } });
+  const context = { admission, isCurrentAdmission: () => true,
+    reconcileEntryIntent: () => { count++; return new Promise(done => { release = done; }); },
+    revalidateEventEntry: async () => ({ kind: 'found' }) };
+  const rig = screenRig('screens/event-entry/EventConfirmationScreen.js', context, { event, eligibility: eligible });
+  const button = rig.button('Verificar tentativa anterior');
+  const first = button.props.onPress();
+  await button.props.onPress();
+  await button.props.onPress();
+  assert.equal(count, 1);
+  release({ kind: 'uncertain', message: 'x' });
+  await first;
+});
+
+test('R01: ícones da confirmação são de linha, sem emojis permanentes', () => {
+  const { rig } = confirmationRig(official());
+  assert.doesNotMatch(rig.text(), /[\u{1F300}-\u{1FAFF}\u{2600}-\u{26FF}]/u);
 });

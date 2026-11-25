@@ -26,7 +26,10 @@ export function ParticipationProvider({ children }) {
   const admissionRef = useRef(null);
   if (!admissionRef.current) {
     admissionRef.current = createEventAdmissionStore({
-      client: { post: (...args) => authRef.current.httpClient.post(...args) },
+      client: {
+        post: (...args) => authRef.current.httpClient.post(...args),
+        get: (...args) => authRef.current.httpClient.get(...args),
+      },
       getIdentity,
       refreshParticipation: () => store.refresh(),
       getParticipationSnapshot: () => store.getSnapshot(),
@@ -80,6 +83,8 @@ export function ParticipationProvider({ children }) {
     admission: currentAdmission ? admissionSnapshot : null,
     lookupEvent: admissionStore.lookup,
     confirmEventEntry: admissionStore.confirm,
+    revalidateEventEntry: admissionStore.revalidate,
+    reconcileEntryIntent: admissionStore.reconcile,
     retryEntrySync: admissionStore.retrySync,
     isCurrentAdmission: admissionStore.isCurrent,
   };

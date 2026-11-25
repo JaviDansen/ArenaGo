@@ -20,3 +20,4 @@ export {
   resolveDefaultBackgroundForVariant,
 } from './AuthBackground.js';
 export { DesignSystemPreview } from './DesignSystemPreview.js';
+export { LineIcon, LINE_ICON_NAMES } from './LineIcon.js';

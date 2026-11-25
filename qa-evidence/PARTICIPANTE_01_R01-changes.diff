@@ -1,0 +1,3297 @@
+diff --git a/app/components/ui/LineIcon.js b/app/components/ui/LineIcon.js
+new file mode 100644
+index 0000000..23dd714
+--- /dev/null
++++ b/app/components/ui/LineIcon.js
+@@ -0,0 +1,259 @@
++import { StyleSheet, View } from 'react-native';
++
++/**
++ * Ícones de linha desenhados com Views nativas (mesmo padrão de `navigation/MainTabs.js`).
++ * Sem dependência de fonte de ícones ou SVG; aparência idêntica em Android e iOS.
++ * Desenho em grade de 20dp com traço de 1.8dp; `size` escala o conjunto.
++ */
++const BASE = 20;
++const STROKE = 1.8;
++
++const DRAWINGS = {
++  qr: (color) => (
++    <>
++      {[[1, 1], [11, 1], [1, 11]].map(([left, top]) => (
++        <View key={`${left}-${top}`} style={[styles.qrFinder, { left, top, borderColor: color }]}>
++          <View style={[styles.qrDot, { backgroundColor: color }]} />
++        </View>
++      ))}
++      <View style={[styles.qrCell, { left: 12, top: 12, backgroundColor: color }]} />
++      <View style={[styles.qrCell, { left: 16, top: 16, backgroundColor: color }]} />
++      <View style={[styles.qrCell, { left: 16, top: 12, backgroundColor: color }]} />
++    </>
++  ),
++  gamepad: (color) => (
++    <View style={[styles.padBody, { borderColor: color }]}>
++      <View style={[styles.padCrossH, { backgroundColor: color }]} />
++      <View style={[styles.padCrossV, { backgroundColor: color }]} />
++      <View style={[styles.padButton, { right: 3.5, top: 3, backgroundColor: color }]} />
++      <View style={[styles.padButton, { right: 1.5, top: 6, backgroundColor: color }]} />
++    </View>
++  ),
++  // Estrela de 5 pontas com três triângulos de borda (sem glifo de fonte: igual em Android e iOS).
++  star: (color) => (
++    <View style={[styles.starMain, { borderBottomColor: color }]}>
++      <View style={[styles.starTop, { borderBottomColor: color }]} />
++      <View style={[styles.starSide, { borderBottomColor: color }]} />
++    </View>
++  ),
++  calendar: (color) => (
++    <>
++      <View style={[styles.calendarPin, { left: 5, backgroundColor: color }]} />
++      <View style={[styles.calendarPin, { right: 5, backgroundColor: color }]} />
++      <View style={[styles.calendarBody, { borderColor: color }]}>
++        <View style={[styles.calendarLine, { backgroundColor: color }]} />
++      </View>
++    </>
++  ),
++  clock: (color) => (
++    <View style={[styles.ring, { borderColor: color }]}>
++      <View style={[styles.clockHour, { backgroundColor: color }]} />
++      <View style={[styles.clockMinute, { backgroundColor: color }]} />
++    </View>
++  ),
++  door: (color) => (
++    <View style={[styles.door, { borderColor: color }]}>
++      <View style={[styles.doorKnob, { backgroundColor: color }]} />
++    </View>
++  ),
++  flag: (color) => (
++    <>
++      <View style={[styles.flagPole, { backgroundColor: color }]} />
++      <View style={[styles.flagCloth, { borderColor: color }]} />
++    </>
++  ),
++  globe: (color) => (
++    <View style={[styles.ring, { borderColor: color }]}>
++      <View style={[styles.globeMeridian, { borderColor: color }]} />
++      <View style={[styles.globeEquator, { backgroundColor: color }]} />
++    </View>
++  ),
++  queue: (color) => (
++    <>
++      {[3, 9, 15].map((left) => (
++        <View key={left} style={[styles.queuePerson, { left }]}>
++          <View style={[styles.queueHead, { borderColor: color }]} />
++          <View style={[styles.queueBody, { borderColor: color }]} />
++        </View>
++      ))}
++    </>
++  ),
++  alert: (color) => (
++    <View style={[styles.ring, { borderColor: color }]}>
++      <View style={[styles.alertBar, { backgroundColor: color }]} />
++      <View style={[styles.alertDot, { backgroundColor: color }]} />
++    </View>
++  ),
++  refresh: (color) => (
++    <View style={[styles.refreshArc, { borderColor: color }]}>
++      <View style={[styles.refreshHead, { borderLeftColor: color }]} />
++    </View>
++  ),
++};
++
++export const LINE_ICON_NAMES = Object.keys(DRAWINGS);
++
++export function LineIcon({ name, color = '#FFFFFF', size = BASE, style, testID }) {
++  const draw = DRAWINGS[name];
++  if (!draw) return null;
++  const scale = size / BASE;
++  return (
++    <View
++      style={[{ width: size, height: size }, style]}
++      accessibilityElementsHidden
++      importantForAccessibility="no-hide-descendants"
++      testID={testID}
++    >
++      <View style={[styles.canvas, scale !== 1 && { transform: [{ scale }] },
++        scale !== 1 && { left: (size - BASE) / 2, top: (size - BASE) / 2 }]}>
++        {draw(color)}
++      </View>
++    </View>
++  );
++}
++
++const styles = StyleSheet.create({
++  canvas: {
++    position: 'absolute',
++    left: 0,
++    top: 0,
++    width: BASE,
++    height: BASE,
++    alignItems: 'center',
++    justifyContent: 'center',
++  },
++  starMain: {
++    width: 0,
++    height: 0,
++    marginTop: 4,
++    borderLeftWidth: 9,
++    borderRightWidth: 9,
++    borderBottomWidth: 6.3,
++    borderLeftColor: 'transparent',
++    borderRightColor: 'transparent',
++    transform: [{ rotate: '35deg' }],
++  },
++  starTop: {
++    position: 'absolute',
++    top: -4.05,
++    left: -5.85,
++    width: 0,
++    height: 0,
++    borderLeftWidth: 2.7,
++    borderRightWidth: 2.7,
++    borderBottomWidth: 7.2,
++    borderLeftColor: 'transparent',
++    borderRightColor: 'transparent',
++    transform: [{ rotate: '-35deg' }],
++  },
++  starSide: {
++    position: 'absolute',
++    top: 0.27,
++    left: -9.45,
++    width: 0,
++    height: 0,
++    borderLeftWidth: 9,
++    borderRightWidth: 9,
++    borderBottomWidth: 6.3,
++    borderLeftColor: 'transparent',
++    borderRightColor: 'transparent',
++    transform: [{ rotate: '-70deg' }],
++  },
++  qrFinder: {
++    position: 'absolute',
++    width: 8,
++    height: 8,
++    borderWidth: STROKE,
++    borderRadius: 1.5,
++    alignItems: 'center',
++    justifyContent: 'center',
++  },
++  qrDot: { width: 2, height: 2 },
++  qrCell: { position: 'absolute', width: 3, height: 3 },
++  padBody: {
++    width: 19,
++    height: 12,
++    borderWidth: STROKE,
++    borderRadius: 6,
++  },
++  padCrossH: { position: 'absolute', left: 2.5, top: 3.6, width: 6, height: STROKE, borderRadius: 1 },
++  padCrossV: { position: 'absolute', left: 4.6, top: 1.5, width: STROKE, height: 6, borderRadius: 1 },
++  padButton: { position: 'absolute', width: 2.4, height: 2.4, borderRadius: 1.2 },
++  calendarPin: { position: 'absolute', top: 1, width: 2, height: 4, borderRadius: 1, zIndex: 2 },
++  calendarBody: {
++    position: 'absolute',
++    bottom: 1.5,
++    width: 17,
++    height: 15,
++    borderWidth: STROKE,
++    borderRadius: 3,
++  },
++  calendarLine: { position: 'absolute', top: 3, left: 0, right: 0, height: STROKE },
++  ring: {
++    width: 17,
++    height: 17,
++    borderRadius: 8.5,
++    borderWidth: STROKE,
++    alignItems: 'center',
++    justifyContent: 'center',
++  },
++  clockHour: { position: 'absolute', left: 6.8, top: 3, width: STROKE, height: 5.5, borderRadius: 1 },
++  clockMinute: { position: 'absolute', left: 6.8, top: 6.8, width: 4.5, height: STROKE, borderRadius: 1 },
++  door: {
++    width: 12,
++    height: 17,
++    borderWidth: STROKE,
++    borderTopLeftRadius: 2,
++    borderTopRightRadius: 2,
++  },
++  doorKnob: { position: 'absolute', right: 1.5, top: 7, width: 2.2, height: 2.2, borderRadius: 1.1 },
++  flagPole: { position: 'absolute', left: 3, top: 1.5, width: STROKE, height: 17, borderRadius: 1 },
++  flagCloth: {
++    position: 'absolute',
++    left: 4.5,
++    top: 2,
++    width: 12,
++    height: 8,
++    borderWidth: STROKE,
++    borderLeftWidth: 0,
++    borderTopRightRadius: 1.5,
++    borderBottomRightRadius: 1.5,
++  },
++  globeMeridian: { width: 7, height: 15, borderRadius: 3.5, borderWidth: STROKE - 0.4 },
++  globeEquator: { position: 'absolute', left: 0, right: 0, top: 6.8, height: STROKE - 0.4 },
++  queuePerson: { position: 'absolute', top: 3, width: 3, alignItems: 'center' },
++  queueHead: { width: 4.6, height: 4.6, borderRadius: 2.3, borderWidth: STROKE - 0.3 },
++  queueBody: {
++    marginTop: 1.5,
++    width: 5.5,
++    height: 6,
++    borderTopLeftRadius: 3,
++    borderTopRightRadius: 3,
++    borderWidth: STROKE - 0.3,
++    borderBottomWidth: 0,
++  },
++  alertBar: { width: STROKE, height: 6, borderRadius: 1, marginTop: -2 },
++  alertDot: { width: STROKE + 0.2, height: STROKE + 0.2, borderRadius: 1, marginTop: 1.5 },
++  refreshArc: {
++    width: 15,
++    height: 15,
++    borderRadius: 7.5,
++    borderWidth: STROKE,
++    borderRightColor: 'transparent',
++  },
++  refreshHead: {
++    position: 'absolute',
++    right: -3,
++    top: 0.5,
++    width: 0,
++    height: 0,
++    borderTopWidth: 3.5,
++    borderBottomWidth: 3.5,
++    borderLeftWidth: 4.5,
++    borderTopColor: 'transparent',
++    borderBottomColor: 'transparent',
++    transform: [{ rotate: '90deg' }],
++  },
++});
++
++export default LineIcon;
+diff --git a/app/components/ui/index.js b/app/components/ui/index.js
+index 911a408..585afdd 100644
+--- a/app/components/ui/index.js
++++ b/app/components/ui/index.js
+@@ -20,3 +20,4 @@ export {
+   resolveDefaultBackgroundForVariant,
+ } from './AuthBackground.js';
+ export { DesignSystemPreview } from './DesignSystemPreview.js';
++export { LineIcon, LINE_ICON_NAMES } from './LineIcon.js';
+diff --git a/app/context/ParticipationContext.js b/app/context/ParticipationContext.js
+index 88b83a1..155052a 100644
+--- a/app/context/ParticipationContext.js
++++ b/app/context/ParticipationContext.js
+@@ -26,7 +26,10 @@ export function ParticipationProvider({ children }) {
+   const admissionRef = useRef(null);
+   if (!admissionRef.current) {
+     admissionRef.current = createEventAdmissionStore({
+-      client: { post: (...args) => authRef.current.httpClient.post(...args) },
++      client: {
++        post: (...args) => authRef.current.httpClient.post(...args),
++        get: (...args) => authRef.current.httpClient.get(...args),
++      },
+       getIdentity,
+       refreshParticipation: () => store.refresh(),
+       getParticipationSnapshot: () => store.getSnapshot(),
+@@ -80,6 +83,8 @@ export function ParticipationProvider({ children }) {
+     admission: currentAdmission ? admissionSnapshot : null,
+     lookupEvent: admissionStore.lookup,
+     confirmEventEntry: admissionStore.confirm,
++    revalidateEventEntry: admissionStore.revalidate,
++    reconcileEntryIntent: admissionStore.reconcile,
+     retryEntrySync: admissionStore.retrySync,
+     isCurrentAdmission: admissionStore.isCurrent,
+   };
+diff --git a/app/screens/event-entry/EventConfirmationScreen.js b/app/screens/event-entry/EventConfirmationScreen.js
+index 0f17210..ba4cb8a 100644
+--- a/app/screens/event-entry/EventConfirmationScreen.js
++++ b/app/screens/event-entry/EventConfirmationScreen.js
+@@ -1,37 +1,111 @@
++import { useIsFocused } from '@react-navigation/native';
+ import { StatusBar } from 'expo-status-bar';
+-import { useContext, useRef } from 'react';
+-import { ScrollView, StyleSheet, Text, View } from 'react-native';
++import { useContext, useEffect, useRef } from 'react';
++import { AppState, ScrollView, StyleSheet, Text, View } from 'react-native';
+ 
+-import { AuthBackground, Badge, Button, Card, ScreenHeader } from '../../components/ui';
++import { AuthBackground, Badge, Button, Card, LineIcon, ScreenHeader } from '../../components/ui';
+ import { ParticipationContext } from '../../context/ParticipationContext';
+ import { colors, radii, spacing, typography } from '../../theme';
+ import {
+-  blockingAction, describeBlockingReasons, describeEventAvailability, describeExternalQueue,
++  blockingAction, describeBlockingReasons, describeEventAvailability, describeQueueConfiguration,
++  describeScheduleNotice,
+ } from '../../utils/eventEntryPresentation';
+ import { describeEventSchedule } from '../../utils/eventTime';
+ 
++const MAIN_TABS = { index: 0, routes: [{ name: 'MainTabs' }] };
++
++/**
++ * Confirmação de ingresso. `route.params` é só o contexto inicial (qual evento foi consultado);
++ * a situação exibida e a liberação do botão vêm do store de ingresso, revalidado no servidor
++ * ao voltar o foco, ao voltar ao primeiro plano, manualmente e após recusas definitivas.
++ */
+ export default function EventConfirmationScreen({ navigation, route }) {
+-  const { admission, confirmEventEntry, retryEntrySync, isCurrentAdmission, refreshParticipation } =
+-    useContext(ParticipationContext);
+-  const { event, eligibility } = route.params;
++  const {
++    admission, confirmEventEntry, retryEntrySync, revalidateEventEntry, reconcileEntryIntent,
++    isCurrentAdmission, refreshParticipation,
++  } = useContext(ParticipationContext);
++  const initial = route?.params ?? {};
++  const eventId = initial.event?.id;
+   const inFlight = useRef(false);
+-  const current = admission?.event?.id === event.id;
++  const focused = useIsFocused();
++  const wasFocused = useRef(focused);
++  const live = useRef(null);
++
++  const current = Boolean(eventId) && admission?.event?.id === eventId;
++  const event = current ? admission.event : initial.event;
++  const eligibilityStatus = current ? admission.eligibilityStatus ?? 'none' : 'none';
++  const officialEligibility = current && eligibilityStatus === 'fresh' ? admission.eligibility ?? null : null;
++  const revalidating = eligibilityStatus === 'revalidating';
+   const busy = current && ['joining', 'looking_up'].includes(admission.status);
+-  const confirmed = current && admission.confirmedParticipationId;
++  const confirmed = current && Boolean(admission.confirmedParticipationId);
+   const uncertain = current && admission.status === 'uncertain';
+-  const blocked = !eligibility?.eligible;
++  const pendingIntent = current ? admission.pendingIntent ?? null : null;
++  const recovery = current ? admission.recovery ?? { status: 'idle', message: null } : null;
++  const recovering = recovery?.status === 'checking';
++  // Intenção incerta do mesmo evento: o próprio "Verificar ingresso" repete a chave original.
++  const sameEventRetry = Boolean(pendingIntent?.sameEvent && !pendingIntent.confirmed && officialEligibility?.eligible);
++  const showRecovery = Boolean(pendingIntent) && !sameEventRetry;
++  const blocked = Boolean(officialEligibility && !officialEligibility.eligible);
++  const canConfirm = Boolean(officialEligibility?.eligible) && !busy && !recovering && !showRecovery
++    && admission?.status !== 'complete';
++
+   const schedule = describeEventSchedule(event);
+-  const availability = describeEventAvailability(eligibility);
+-  const action = blocked ? blockingAction(eligibility?.blockingReasons) : null;
++  const availability = officialEligibility ? describeEventAvailability(officialEligibility)
++    : revalidating ? { label: 'ATUALIZANDO SITUAÇÃO', variant: 'default' }
++      : { label: 'SITUAÇÃO NÃO CONFIRMADA', variant: 'warning' };
++  const queue = describeQueueConfiguration(event, officialEligibility);
++  const scheduleNotice = describeScheduleNotice(officialEligibility);
++  const action = blocked ? blockingAction(officialEligibility.blockingReasons) : null;
++
++  function revalidate() {
++    if (!current || typeof revalidateEventEntry !== 'function') return Promise.resolve(null);
++    return revalidateEventEntry();
++  }
++  live.current = { revalidate, focused };
++
++  // Volta de foco (ex.: retorno do questionário): revalidar no servidor, nunca pelos parâmetros.
++  useEffect(() => {
++    const previous = wasFocused.current;
++    wasFocused.current = focused;
++    if (focused && previous === false) void live.current.revalidate();
++  }, [focused]);
++
++  // Retorno ao primeiro plano com a tela visível.
++  useEffect(() => {
++    if (typeof AppState?.addEventListener !== 'function') return undefined;
++    let previous = AppState.currentState;
++    const subscription = AppState.addEventListener('change', (next) => {
++      if (next === 'active' && previous !== 'active' && live.current.focused) void live.current.revalidate();
++      previous = next;
++    });
++    return () => subscription?.remove?.();
++  }, []);
+ 
+   async function handleConfirmEntry() {
+-    if (inFlight.current || busy || blocked || !isCurrentAdmission()) return;
++    if (inFlight.current || !canConfirm || !isCurrentAdmission()) return;
+     inFlight.current = true;
+     try {
+       // Após resultado incerto, confirm reutiliza a mesma intenção e chave salvas.
+       const result = confirmed ? await retryEntrySync() : await confirmEventEntry(event.id);
+-      if (result?.kind === 'complete' && isCurrentAdmission()) {
+-        navigation.reset({ index: 0, routes: [{ name: 'MainTabs' }] });
++      if (!isCurrentAdmission()) return;
++      if (result?.kind === 'complete') navigation.reset(MAIN_TABS);
++      else if (result?.kind === 'historical' || result?.revalidate) await revalidate();
++    } finally {
++      inFlight.current = false;
++    }
++  }
++
++  async function handleReconcile() {
++    if (inFlight.current || recovering || typeof reconcileEntryIntent !== 'function') return;
++    inFlight.current = true;
++    try {
++      const result = await reconcileEntryIntent();
++      if (!isCurrentAdmission()) return;
++      if (result?.kind === 'resolved' && result.outcome === 'current') {
++        if (typeof refreshParticipation === 'function') void refreshParticipation();
++        navigation.reset(MAIN_TABS);
++      } else if (result?.kind === 'resolved') {
++        await revalidate();
+       }
+     } finally {
+       inFlight.current = false;
+@@ -40,14 +114,15 @@ export default function EventConfirmationScreen({ navigation, route }) {
+ 
+   function goHome() {
+     if (typeof refreshParticipation === 'function') void refreshParticipation();
+-    navigation.reset({ index: 0, routes: [{ name: 'MainTabs' }] });
++    navigation.reset(MAIN_TABS);
+   }
+ 
+   const message = !current ? 'Consulte novamente o evento para confirmar o ingresso.' : admission?.error;
+-  const disabled = busy || blocked || !current || admission.status === 'complete';
++  const historical = current && admission.outcome === 'historical';
+   const buttonTitle = busy ? 'Aguarde...'
+     : confirmed ? 'Atualizar participação'
+-      : uncertain ? 'Verificar ingresso' : 'Confirmar entrada';
++      : uncertain || sameEventRetry ? 'Verificar ingresso' : 'Confirmar entrada';
++  const showRefresh = current && !busy && (eligibilityStatus === 'error' || blocked || revalidating);
+ 
+   return (
+     <AuthBackground variant="login" overlayOpacity={0.65} testID="event-confirmation-background">
+@@ -59,32 +134,24 @@ export default function EventConfirmationScreen({ navigation, route }) {
+       >
+         <View style={styles.heroSection}>
+           <Badge label="EVENTO ENCONTRADO" variant="brand" />
+-          <Text style={styles.eventName} numberOfLines={3} accessibilityRole="header">{event.name}</Text>
+-          <View style={styles.statusRow} accessible accessibilityLabel={`Situação do evento: ${availability.label}`}>
++          <Text style={styles.eventName} numberOfLines={3} accessibilityRole="header">{event?.name}</Text>
++          <View style={styles.statusRow} accessible accessibilityLabel={`Situação do evento: ${availability.label}`}
++            testID="event-confirmation-status">
+             <Badge label={availability.label} variant={availability.variant} />
+           </View>
+         </View>
+ 
+-        <Card variant="highlight" style={styles.eventCard} testID="event-confirmation-card">
+-          <Text style={styles.cardTitle}>Horários do evento</Text>
+-          <Detail icon="📅" label="Data" value={schedule.date} />
+-          <Detail icon="🕒" label="Início" value={schedule.start} />
+-          <Detail icon="🚪" label="Entradas até" value={schedule.entriesUntil} />
+-          <Detail icon="🏁" label="Encerramento final" value={schedule.finalDeadline} />
+-          <Detail icon="🌎" label="Fuso horário" value={schedule.zoneLabel} />
+-        </Card>
+-
+         {blocked ? (
+           <View style={styles.blockedCard} accessibilityRole="alert" testID="event-confirmation-blocked">
+             <Badge label="ENTRADA INDISPONÍVEL" variant="danger" />
+-            {describeBlockingReasons(eligibility?.blockingReasons).map(text => (
++            {describeBlockingReasons(officialEligibility.blockingReasons).map(text => (
+               <Text key={text} style={styles.blockedText}>{text}</Text>
+             ))}
+             {action === 'questionnaire' ? (
+               <Button
+                 title="Completar questionário"
+                 variant="secondary"
+-                onPress={() => navigation.navigate('ProfileQuestionnaire')}
++                onPress={() => navigation.navigate('ProfileQuestionnaire', { mode: 'edit', returnTo: 'EventConfirmation' })}
+                 style={styles.blockedAction}
+               />
+             ) : null}
+@@ -92,26 +159,78 @@ export default function EventConfirmationScreen({ navigation, route }) {
+               <Button title="Voltar ao início" variant="secondary" onPress={goHome} style={styles.blockedAction} />
+             ) : null}
+           </View>
+-        ) : (
+-          <View style={styles.queueCard} testID="event-confirmation-queue-info">
+-            <Text style={styles.queueTitle}>
+-              {event.externalQueueEnabled ? 'Fila de entrada ativa' : 'Entrada direta na Arena'}
++        ) : null}
++
++        {showRecovery ? (
++          <View style={styles.recoveryCard} accessibilityRole="alert" testID="event-confirmation-recovery">
++            <Badge label="TENTATIVA ANTERIOR" variant="warning" />
++            <Text style={styles.recoveryText}>
++              {pendingIntent.unreadable
++                ? 'Não foi possível ler uma tentativa de ingresso guardada neste aparelho.'
++                : pendingIntent.sameEvent
++                  ? 'Existe uma tentativa de ingresso anterior neste evento cujo resultado ainda não foi confirmado.'
++                  : 'Existe uma tentativa de ingresso anterior, em outro evento, cujo resultado ainda não foi confirmado. Verifique-a antes de entrar neste evento.'}
+             </Text>
+-            <Text style={styles.queueText}>{describeExternalQueue(event.externalQueueEnabled)}</Text>
++            <Text style={styles.recoveryHint}>A verificação consulta o servidor e não cria um novo ingresso.</Text>
++            {recovery?.message ? (
++              <Text style={styles.recoveryMessage} testID="event-confirmation-recovery-message">{recovery.message}</Text>
++            ) : null}
++            <Button
++              title={recovering ? 'Verificando...' : 'Verificar tentativa anterior'}
++              variant="secondary"
++              onPress={handleReconcile}
++              disabled={recovering || busy}
++              style={styles.blockedAction}
++              testID="event-confirmation-reconcile-button"
++            />
+           </View>
+-        )}
++        ) : null}
++
++        {queue ? (
++          <View style={styles.queueCard} testID="event-confirmation-queue-info">
++            <LineIcon name={event.externalQueueEnabled ? 'queue' : 'door'} color={colors.brand.primaryLight} size={22} />
++            <View style={styles.flexText}>
++              <Text style={styles.queueTitle}>{queue.title}</Text>
++              <Text style={styles.queueText}>{queue.text}</Text>
++            </View>
++          </View>
++        ) : null}
++
++        <Card variant="highlight" style={styles.eventCard} testID="event-confirmation-card">
++          <Text style={styles.cardTitle}>Programação do evento</Text>
++          {scheduleNotice ? (
++            <Text style={styles.scheduleNotice} testID="event-confirmation-schedule-notice">{scheduleNotice}</Text>
++          ) : null}
++          <Detail icon="calendar" label="Data programada" value={schedule.date} />
++          <Detail icon="clock" label="Início programado" value={schedule.start} />
++          <Detail icon="door" label="Encerramento programado das entradas" value={schedule.entriesUntil} />
++          <Detail icon="flag" label="Limite operacional programado" value={schedule.finalDeadline} />
++          <Detail icon="globe" label="Fuso horário do evento" value={schedule.zoneLabel} />
++        </Card>
+ 
+         {message ? (
+-          <Text style={[styles.messageText, uncertain && styles.warningText]} accessibilityRole="alert">
++          <Text style={[styles.messageText, (uncertain || historical) && styles.warningText]} accessibilityRole="alert"
++            testID="event-confirmation-message">
+             {message}
+           </Text>
+         ) : null}
+ 
++        {showRefresh ? (
++          <Button
++            title={revalidating ? 'Atualizando situação...' : 'Atualizar situação do evento'}
++            variant="secondary"
++            onPress={() => { void revalidate(); }}
++            disabled={revalidating}
++            style={styles.refreshButton}
++            testID="event-confirmation-refresh-button"
++          />
++        ) : null}
++
+         <Button
+           title={buttonTitle}
+           variant="primary"
+           onPress={handleConfirmEntry}
+-          disabled={disabled}
++          disabled={!canConfirm}
+           style={styles.confirmButton}
+           testID="event-confirmation-confirm-button"
+         />
+@@ -125,7 +244,7 @@ function Detail({ icon, label, value }) {
+   if (!value) return null;
+   return (
+     <View style={styles.detailRow} accessible accessibilityLabel={`${label}: ${value}`}>
+-      <Text style={styles.detailIcon} importantForAccessibility="no">{icon}</Text>
++      <LineIcon name={icon} color={colors.brand.primaryLight} size={20} style={styles.detailIcon} />
+       <View style={styles.detailTextBlock}>
+         <Text style={styles.detailLabel}>{label}</Text>
+         <Text style={styles.detailValue}>{value}</Text>
+@@ -142,7 +261,7 @@ const styles = StyleSheet.create({
+     paddingBottom: spacing.xxxl,
+   },
+   heroSection: {
+-    marginBottom: spacing.xl,
++    marginBottom: spacing.lg,
+   },
+   eventName: {
+     ...typography.titleLarge,
+@@ -155,12 +274,18 @@ const styles = StyleSheet.create({
+   },
+   eventCard: {
+     alignItems: 'stretch',
++    marginTop: spacing.lg,
+   },
+   cardTitle: {
+     ...typography.titleSmall,
+     color: colors.text.primary,
+     marginBottom: spacing.sm,
+   },
++  scheduleNotice: {
++    ...typography.bodySmall,
++    color: colors.semantic.warning,
++    marginBottom: spacing.sm,
++  },
+   detailRow: {
+     flexDirection: 'row',
+     alignItems: 'center',
+@@ -170,9 +295,7 @@ const styles = StyleSheet.create({
+     paddingVertical: spacing.md,
+   },
+   detailIcon: {
+-    fontSize: 18,
+-    width: 24,
+-    textAlign: 'center',
++    marginHorizontal: 2,
+   },
+   detailTextBlock: {
+     flex: 1,
+@@ -187,7 +310,14 @@ const styles = StyleSheet.create({
+     color: colors.text.primary,
+     marginTop: spacing.xxs,
+   },
++  flexText: {
++    flex: 1,
++    minWidth: 0,
++  },
+   queueCard: {
++    flexDirection: 'row',
++    alignItems: 'flex-start',
++    gap: spacing.md,
+     marginTop: spacing.lg,
+     padding: spacing.lg,
+     borderRadius: radii.lg,
+@@ -210,7 +340,6 @@ const styles = StyleSheet.create({
+     borderWidth: 1,
+     borderRadius: radii.lg,
+     padding: spacing.lg,
+-    marginTop: spacing.lg,
+   },
+   blockedText: {
+     ...typography.body,
+@@ -220,6 +349,29 @@ const styles = StyleSheet.create({
+   blockedAction: {
+     marginTop: spacing.lg,
+   },
++  recoveryCard: {
++    backgroundColor: colors.semantic.warningBg,
++    borderColor: colors.semantic.warning,
++    borderWidth: 1,
++    borderRadius: radii.lg,
++    padding: spacing.lg,
++    marginTop: spacing.lg,
++  },
++  recoveryText: {
++    ...typography.body,
++    color: colors.text.primary,
++    marginTop: spacing.md,
++  },
++  recoveryHint: {
++    ...typography.bodySmall,
++    color: colors.text.secondary,
++    marginTop: spacing.xs,
++  },
++  recoveryMessage: {
++    ...typography.body,
++    color: colors.semantic.warning,
++    marginTop: spacing.md,
++  },
+   messageText: {
+     ...typography.body,
+     color: '#FF9AAE',
+@@ -228,6 +380,9 @@ const styles = StyleSheet.create({
+   warningText: {
+     color: colors.semantic.warning,
+   },
++  refreshButton: {
++    marginTop: spacing.lg,
++  },
+   confirmButton: {
+     marginTop: spacing.xxl,
+   },
+diff --git a/app/screens/home/HomeFlowScreen.js b/app/screens/home/HomeFlowScreen.js
+index d5b8a88..99f510b 100644
+--- a/app/screens/home/HomeFlowScreen.js
++++ b/app/screens/home/HomeFlowScreen.js
+@@ -107,7 +107,7 @@ export default function HomeFlowScreen({ navigation }) {
+           if (!claimReturnEvaluation(returnState, returnStateVersion)) return;
+           root.navigate('RealEvaluation', { participationId: item.participationId, historyItem: item });
+         }
+-        setReturnCheck({ returned: returnState, version: returnStateVersion, status: 'ready', unavailable: !item });
++        setReturnCheck({ returned: returnState, version: returnStateVersion, status: 'ready', unavailable: !item, item: item ?? null });
+       }).catch(() => {
+         if (isCurrent()) setReturnCheck({ returned: returnState, version: returnStateVersion, status: 'error' });
+       });
+@@ -121,9 +121,15 @@ export default function HomeFlowScreen({ navigation }) {
+     && returnCheck.unavailable ? { ...returnState, pendingEvaluationParticipationIds:
+       returnState.pendingEvaluationParticipationIds.filter(id => id !== returnState.recentFinalization?.participationId) }
+     : returnState;
++  // Leitura já confirmada pela retomada C-04/D09 nesta versão do retorno: a Home a reaproveita.
++  const knownPending = returnCheck?.item && returnCheck.returned === returnState && returnCheck.version === returnStateVersion
++    ? { version: returnStateVersion, participationId: returnCheck.item.participationId, item: returnCheck.item } : null;
++  const returnCheckPending = Boolean(canPresentReturnEvaluation?.(returnState, returnStateVersion))
++    && (!returnCheck || returnCheck.returned !== returnState || returnCheck.version !== returnStateVersion
++      || returnCheck.status === 'loading');
+   const overview = useHomeOverview({
+     auth, enabled: status === 'ready' && !participation, focused,
+-    returnState: visibleReturnState, returnStateVersion,
++    returnState: visibleReturnState, returnStateVersion, knownPending, pendingDeferred: returnCheckPending,
+   });
+ 
+   if (status === 'loading') {
+diff --git a/app/screens/home/HomeScreen.js b/app/screens/home/HomeScreen.js
+index 28ae2ff..ace9f73 100644
+--- a/app/screens/home/HomeScreen.js
++++ b/app/screens/home/HomeScreen.js
+@@ -2,15 +2,15 @@ import { StatusBar } from 'expo-status-bar';
+ import { useContext } from 'react';
+ import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+ 
+-import { AuthBackground, Badge, Button, Card } from '../../components/ui';
++import { AuthBackground, Badge, Button, Card, LineIcon } from '../../components/ui';
+ import { AuthContext } from '../../context/AuthContext';
+ import { colors, radii, spacing, typography } from '../../theme';
+ import { describePendingEvaluation, describeRecentParticipation } from '../../utils/homeOverview';
+ 
+ const TUTORIAL_STEPS = [
+-  { icon: '📷', title: 'Acesse o evento', text: 'Escaneie o QR Code ou digite o código.' },
+-  { icon: '🎮', title: 'Participe das experiências', text: 'Entre nas filas e aguarde sua vez.' },
+-  { icon: '⭐', title: 'Avalie a sua experiência', text: 'Ao final, conte como foi participar.' },
++  { icon: 'qr', title: 'Acesse o evento', text: 'Escaneie o QR Code ou digite o código.' },
++  { icon: 'gamepad', title: 'Participe das experiências', text: 'Entre nas filas e aguarde sua vez.' },
++  { icon: 'star', title: 'Avalie a sua experiência', text: 'Ao final, conte como foi participar.' },
+ ];
+ 
+ export default function HomeScreen({ navigation, returnState, overview, mode = 'ready', message, onRetry }) {
+@@ -116,9 +116,34 @@ function Brand() {
+ }
+ 
+ function PendingEvaluationCard({ overview, navigation }) {
+-  if (overview?.status !== 'history') return null;
++  if (!overview || overview.status === 'empty') return null;
+   const pending = describePendingEvaluation(overview.pending, overview.recent);
+   if (!pending) return null;
++  const icon = (
++    <View style={styles.pendingIcon}>
++      <LineIcon name="star" color={colors.brand.primaryLight} size={22} />
++    </View>
++  );
++  if (!pending.actionable) {
++    // Verificação em andamento ou falha: nenhuma ação de avaliação sem confirmação do servidor.
++    return (
++      <View style={[styles.pendingCard, styles.pendingCardMuted]} testID={`home-pending-evaluation-${pending.kind}`}
++        accessibilityRole={pending.kind === 'error' ? 'alert' : undefined}>
++        {icon}
++        <View style={styles.pendingDivider} />
++        <View style={styles.flexText}>
++          <Text style={styles.pendingTitle}>Avaliação pendente</Text>
++          <Text style={styles.pendingText}>{pending.text}</Text>
++          {pending.kind === 'checking' ? (
++            <ActivityIndicator size="small" color={colors.brand.primaryLight} style={styles.pendingSpinner} />
++          ) : (
++            <Button title="Tentar novamente" variant="secondary" size="sm" onPress={overview.retryPending}
++              style={styles.pendingRetry} testID="home-pending-evaluation-retry" />
++          )}
++        </View>
++      </View>
++    );
++  }
+   const open = pending.kind === 'single'
+     ? () => navigation.navigate('RealEvaluation', {
+       participationId: pending.item.participationId, historyItem: pending.item,
+@@ -133,7 +158,8 @@ function PendingEvaluationCard({ overview, navigation }) {
+       accessibilityHint={pending.kind === 'single' ? 'Abre a avaliação desta participação' : 'Abre a aba Eventos'}
+       testID="home-pending-evaluation-card"
+     >
+-      <View style={styles.pendingIcon}><Text style={styles.iconText}>⭐</Text></View>
++      {icon}
++      <View style={styles.pendingDivider} />
+       <View style={styles.flexText}>
+         <Text style={styles.pendingTitle}>Avaliação pendente</Text>
+         <Text style={styles.pendingText}>{pending.text}</Text>
+@@ -184,7 +210,7 @@ function OverviewSection({ overview, navigation }) {
+               accessible
+               accessibilityLabel={`Passo ${index + 1}: ${step.title}. ${step.text}`}
+             >
+-              <View style={styles.stepIcon}><Text style={styles.iconText}>{step.icon}</Text></View>
++              <View style={styles.stepIcon}><LineIcon name={step.icon} color={colors.brand.primaryLight} size={22} /></View>
+               <View style={styles.flexText}>
+                 <Text style={styles.stepTitle}>{index + 1}. {step.title}</Text>
+                 <Text style={styles.stepText}>{step.text}</Text>
+@@ -193,7 +219,7 @@ function OverviewSection({ overview, navigation }) {
+           ))}
+         </Card>
+         <View style={styles.emptyState} testID="home-empty-history">
+-          <Text style={styles.emptyIcon} importantForAccessibility="no">🎮</Text>
++          <LineIcon name="gamepad" color={colors.text.muted} size={34} style={styles.emptyIcon} />
+           <Text style={styles.emptyTitle}>Você ainda não participou de nenhum evento.</Text>
+           <Text style={styles.emptyText}>Quando participar, suas experiências aparecerão aqui.</Text>
+         </View>
+@@ -206,7 +232,13 @@ function OverviewSection({ overview, navigation }) {
+   return (
+     <View testID="home-recent-section">
+       <View style={styles.sectionHeader}>
+-        <Text style={styles.sectionTitle} accessibilityRole="header">Evento recente</Text>
++        <View style={styles.sectionTitleRow}>
++          <Text style={styles.sectionTitle} accessibilityRole="header">Evento recente</Text>
++          {overview.refreshing ? (
++            <ActivityIndicator size="small" color={colors.brand.primaryLight} testID="home-recent-refreshing"
++              accessibilityLabel="Atualizando participações" />
++          ) : null}
++        </View>
+         <Pressable
+           onPress={() => navigation.navigate('Eventos')}
+           style={styles.seeAll}
+@@ -223,17 +255,21 @@ function OverviewSection({ overview, navigation }) {
+         })}
+         style={({ pressed }) => [styles.recentCard, pressed && styles.pressed]}
+         accessibilityRole="button"
+-        accessibilityLabel={[recent.eventName, recent.date, recent.time, recent.statusLabel].filter(Boolean).join(', ')}
++        accessibilityLabel={[recent.eventName, recent.date ? `${recent.timeLabel} em ${recent.date}` : null, recent.time,
++          recent.statusLabel].filter(Boolean).join(', ')}
+         accessibilityHint="Abre os detalhes desta participação"
+         testID="home-recent-event-card"
+       >
+-        <View style={styles.recentIcon}><Text style={styles.iconText}>🎮</Text></View>
++        <View style={styles.recentIcon}><LineIcon name="gamepad" color={colors.brand.primaryLight} size={24} /></View>
+         <View style={styles.flexText}>
+           <Text style={styles.recentName} numberOfLines={2}>{recent.eventName}</Text>
+           {recent.date ? (
+-            <Text style={styles.recentMeta}>
+-              📅 {recent.date}{recent.time ? `   🕒 ${recent.time}` : ''}
+-            </Text>
++            <View style={styles.recentMetaRow} testID="home-recent-participation-time">
++              <LineIcon name="calendar" color={colors.text.secondary} size={14} />
++              <Text style={styles.recentMeta}>
++                {recent.timeLabel}: {recent.date}{recent.time ? ` às ${recent.time}` : ''}
++              </Text>
++            </View>
+           ) : null}
+           <View style={styles.recentBadge}>
+             <Badge label={recent.statusLabel.toUpperCase()} variant={recent.statusVariant} />
+@@ -347,22 +383,42 @@ const styles = StyleSheet.create({
+   pendingCard: {
+     flexDirection: 'row',
+     alignItems: 'center',
+-    minHeight: 64,
++    minHeight: 72,
+     gap: spacing.md,
+     padding: spacing.lg,
+     marginBottom: spacing.xl,
+     borderRadius: radii.lg,
+     borderWidth: 1,
+-    borderColor: colors.semantic.warning,
+-    backgroundColor: colors.semantic.warningBg,
++    borderColor: colors.brand.primary,
++    backgroundColor: colors.brand.primaryDim,
++  },
++  pendingCardMuted: {
++    borderColor: colors.border.subtle,
++    backgroundColor: colors.background.surface,
+   },
+   pendingIcon: {
+-    width: 40,
+-    height: 40,
++    width: 44,
++    height: 44,
+     borderRadius: radii.md,
+     alignItems: 'center',
+     justifyContent: 'center',
+-    backgroundColor: colors.background.elevated,
++    backgroundColor: colors.brand.primaryDim,
++    borderWidth: 1,
++    borderColor: colors.brand.primary,
++  },
++  pendingDivider: {
++    width: 1,
++    alignSelf: 'stretch',
++    backgroundColor: colors.brand.primary,
++    opacity: 0.5,
++  },
++  pendingSpinner: {
++    alignSelf: 'flex-start',
++    marginTop: spacing.sm,
++  },
++  pendingRetry: {
++    alignSelf: 'flex-start',
++    marginTop: spacing.sm,
+   },
+   pendingTitle: {
+     ...typography.titleSmall,
+@@ -373,9 +429,6 @@ const styles = StyleSheet.create({
+     color: colors.text.secondary,
+     marginTop: spacing.xxs,
+   },
+-  iconText: {
+-    fontSize: 20,
+-  },
+   flexText: {
+     flex: 1,
+     minWidth: 0,
+@@ -396,6 +449,11 @@ const styles = StyleSheet.create({
+     justifyContent: 'space-between',
+     gap: spacing.md,
+   },
++  sectionTitleRow: {
++    flexDirection: 'row',
++    alignItems: 'center',
++    gap: spacing.sm,
++  },
+   sectionTitle: {
+     ...typography.titleMedium,
+     color: colors.text.primary,
+@@ -455,7 +513,6 @@ const styles = StyleSheet.create({
+     paddingHorizontal: spacing.lg,
+   },
+   emptyIcon: {
+-    fontSize: 32,
+     marginBottom: spacing.md,
+   },
+   emptyTitle: {
+@@ -494,10 +551,16 @@ const styles = StyleSheet.create({
+     ...typography.titleSmall,
+     color: colors.text.primary,
+   },
++  recentMetaRow: {
++    flexDirection: 'row',
++    alignItems: 'center',
++    gap: spacing.xs,
++    marginTop: spacing.xs,
++  },
+   recentMeta: {
+     ...typography.bodySmall,
+     color: colors.text.secondary,
+-    marginTop: spacing.xs,
++    flexShrink: 1,
+   },
+   recentBadge: {
+     flexDirection: 'row',
+diff --git a/app/screens/home/useHomeOverview.js b/app/screens/home/useHomeOverview.js
+index 7010f84..90b0380 100644
+--- a/app/screens/home/useHomeOverview.js
++++ b/app/screens/home/useHomeOverview.js
+@@ -4,9 +4,11 @@ import {
+   fetchParticipationHistory,
+   fetchPendingEvaluationHistoryItem,
+ } from '../../services/participationHistoryService.js';
+-import { loadHomeOverview, pendingEvaluationIds } from '../../utils/homeOverview.js';
++import {
++  confirmSinglePending, initialPendingState, loadRecentParticipation, pendingEvaluationIds,
++} from '../../utils/homeOverview.js';
+ 
+-const LOADING = { status: 'loading', recent: null, pending: null, error: null };
++const HISTORY_LOADING = { status: 'loading', recent: null, error: null, refreshing: false };
+ 
+ function errorKind(error) {
+   if (error?.status === 401 || error?.status === 403) return 'authorization';
+@@ -15,10 +17,23 @@ function errorKind(error) {
+ }
+ 
+ /**
+- * Visão da Home para a conta e sessão atuais. Recarrega ao focar a aba e quando o
+- * provider publica um novo estado de retorno; respostas de outra conta/sessão são descartadas.
++ * Visão da Home para a conta e sessão atuais, em dois estados independentes:
++ *
++ * - histórico: `loading | empty | history | error`. Um histórico já confirmado da mesma conta e
++ *   sessão continua visível (`refreshing`) durante a revalidação; um vazio anterior não continua
++ *   sendo afirmado — volta a `loading` até o servidor confirmar de novo.
++ * - avaliação pendente: `none | checking | single | multiple | error`. Cada mudança de contexto
++ *   (conta, sessão, versão do retorno, IDs pendentes) ou nova leitura invalida a ação anterior
++ *   até a confirmação; falha nunca vira ausência.
++ *
++ * Cada leitura tem geração própria: respostas fora de ordem, de outra conta/sessão ou após perda
++ * de foco/desmontagem são descartadas. `knownPending` reaproveita a confirmação já feita pela
++ * retomada C-04/D09 para a mesma versão do retorno, sem repetir a consulta; `pendingDeferred`
++ * adia a checagem enquanto essa retomada ainda está consultando.
+  */
+-export function useHomeOverview({ auth, enabled, focused, returnState, returnStateVersion }) {
++export function useHomeOverview({
++  auth, enabled, focused, returnState, returnStateVersion, knownPending = null, pendingDeferred = false,
++}) {
+   const userId = auth?.isAuthenticated ? auth.user?.id ?? null : null;
+   const epoch = userId ? auth.getSessionEpoch?.() ?? null : null;
+   const client = auth?.httpClient ?? null;
+@@ -26,35 +41,67 @@ export function useHomeOverview({ auth, enabled, focused, returnState, returnSta
+   const key = userId && client && verified ? `${userId}#${epoch}` : null;
+   const pendingIds = pendingEvaluationIds(returnState);
+   const pendingKey = pendingIds.join(',');
++  const pendingContext = key ? `${key}|${returnStateVersion}|${pendingKey}` : null;
++  const known = knownPending && pendingIds.length === 1 && knownPending.version === returnStateVersion
++    && knownPending.participationId === pendingIds[0] && knownPending.item?.participationId === pendingIds[0]
++    ? knownPending.item : null;
+ 
+-  const generation = useRef(0);
+-  const [reload, setReload] = useState(0);
+-  const [state, setState] = useState({ key: null, ...LOADING });
++  const historyGeneration = useRef(0);
++  const pendingGeneration = useRef(0);
++  const [historyReload, setHistoryReload] = useState(0);
++  const [pendingReload, setPendingReload] = useState(0);
++  const [history, setHistory] = useState({ key: null, ...HISTORY_LOADING });
++  const [pending, setPending] = useState({ context: null, reload: -1, status: 'checking', item: null, count: 0, error: null });
+ 
+   useEffect(() => {
+-    const requestId = ++generation.current;
+-    if (!enabled || !focused || !key) return () => { generation.current += 1; };
+-    const isCurrent = () => requestId === generation.current;
+-    // Mantém os dados da mesma conta enquanto recarrega; outra conta começa do zero.
+-    setState(previous => (previous.key === key && previous.status !== 'error'
+-      ? { ...previous, refreshing: true } : { key, ...LOADING }));
+-    loadHomeOverview(client, {
+-      pendingIds,
+-      isCurrent,
+-      fetchHistory: fetchParticipationHistory,
+-      fetchPendingItem: fetchPendingEvaluationHistoryItem,
+-    }).then(result => {
+-      if (!isCurrent() || !result) return;
+-      setState({ key, status: result.recent ? 'history' : 'empty', recent: result.recent,
+-        pending: result.pending, error: null });
++    const requestId = ++historyGeneration.current;
++    if (!enabled || !focused || !key) return () => { historyGeneration.current += 1; };
++    const isCurrent = () => requestId === historyGeneration.current;
++    // Só um histórico confirmado da mesma conta/sessão permanece visível durante a atualização.
++    setHistory(previous => (previous.key === key && previous.status === 'history'
++      ? { ...previous, refreshing: true } : { key, ...HISTORY_LOADING }));
++    loadRecentParticipation(client, { fetchHistory: fetchParticipationHistory, isCurrent }).then(recent => {
++      if (!isCurrent() || recent === undefined) return;
++      setHistory({ key, status: recent ? 'history' : 'empty', recent, error: null, refreshing: false });
+     }).catch(error => {
+       if (!isCurrent()) return;
+-      setState({ key, status: 'error', recent: null, pending: null, error: errorKind(error) });
++      setHistory({ key, ...HISTORY_LOADING, status: 'error', error: errorKind(error) });
+     });
+-    return () => { generation.current += 1; };
+-    // pendingIds é representado por pendingKey.
+-  }, [enabled, focused, key, client, returnStateVersion, pendingKey, reload]);
++    return () => { historyGeneration.current += 1; };
++  }, [enabled, focused, key, client, returnStateVersion, historyReload]);
++
++  useEffect(() => {
++    const requestId = ++pendingGeneration.current;
++    const stop = () => { pendingGeneration.current += 1; };
++    // Retomada C-04/D09 ainda consultando a mesma pendência: aguardar e reaproveitar o resultado dela.
++    if (!enabled || !focused || !key || pendingIds.length !== 1 || pendingDeferred) return stop;
++    const isCurrent = () => requestId === pendingGeneration.current;
++    const publish = value => { if (isCurrent()) setPending({ context: pendingContext, reload: pendingReload, ...value }); };
++    if (known) {
++      publish({ status: 'single', item: known, count: 1, error: null });
++      return stop;
++    }
++    // Invalida a ação anterior antes de consultar de novo.
++    publish(initialPendingState(pendingIds));
++    confirmSinglePending(client, pendingIds[0], { fetchPendingItem: fetchPendingEvaluationHistoryItem, isCurrent })
++      .then(result => { if (result) publish(result); })
++      .catch(error => publish({ status: 'error', item: null, count: 1, error: errorKind(error) }));
++    return stop;
++    // pendingIds é representado por pendingKey/pendingContext.
++  }, [enabled, focused, key, client, returnStateVersion, pendingKey, pendingReload, known, pendingDeferred]);
++
++  const historyView = history.key === key && key !== null ? history : { key, ...HISTORY_LOADING };
++  // Sem identidade verificada nada é afirmado: nem ausência nem pendência.
++  const pendingView = !key ? { status: 'checking', item: null, count: 0, error: null }
++    : pendingIds.length !== 1 ? initialPendingState(pendingIds)
++      : pending.context === pendingContext && pending.reload === pendingReload
++        ? { status: pending.status, item: pending.item, count: pending.count, error: pending.error }
++        : initialPendingState(pendingIds);
+ 
+-  const current = state.key === key && key !== null ? state : { key, ...LOADING };
+-  return { ...current, retry: () => setReload(value => value + 1) };
++  return {
++    ...historyView,
++    pending: pendingView,
++    retry: () => setHistoryReload(value => value + 1),
++    retryPending: () => setPendingReload(value => value + 1),
++  };
+ }
+diff --git a/app/screens/profile/ProfileQuestionnaireScreen.js b/app/screens/profile/ProfileQuestionnaireScreen.js
+index c98131a..0d29609 100644
+--- a/app/screens/profile/ProfileQuestionnaireScreen.js
++++ b/app/screens/profile/ProfileQuestionnaireScreen.js
+@@ -145,6 +145,10 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
+   const currentUserIdRef = useRef(auth?.user?.id);
+   currentUserIdRef.current = auth?.user?.id;
+ 
++  // Aberto pela confirmação de ingresso: voltar à mesma jornada, que revalida tudo no servidor.
++  // O parâmetro só decide o destino da navegação; nunca serve de prova de questionário concluído.
++  const returnsToEventEntry = isEditMode && route?.params?.returnTo === 'EventConfirmation';
++
+   function returnToProfile(saved = false) {
+     if (!saved && isSubmittingRef.current) return;
+     if (!authRef.current?.isAuthenticated) return;
+@@ -152,6 +156,10 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
+       navigation?.navigate?.('ProfileQuestionnaire', { mode: undefined });
+       return;
+     }
++    if (returnsToEventEntry && navigation?.canGoBack?.()) {
++      navigation.goBack();
++      return;
++    }
+     const params = { screen: 'Perfil', params: { questionnaireSaved: saved } };
+     if (typeof navigation?.popTo === 'function') {
+       navigation.popTo('MainTabs', params);
+diff --git a/app/services/eventAdmissionService.js b/app/services/eventAdmissionService.js
+index 301d2b3..abb25fa 100644
+--- a/app/services/eventAdmissionService.js
++++ b/app/services/eventAdmissionService.js
+@@ -45,7 +45,44 @@ export function parseParticipationCreationResponse(body) {
+ 
+ function validIntent(value, userId) {
+   return value && value.userId === userId && validUuid(value.eventId) && validUuid(value.key) &&
+-    (value.confirmedParticipationId === null || validUuid(value.confirmedParticipationId));
++    (value.confirmedParticipationId === null || validUuid(value.confirmedParticipationId)) &&
++    // createdAt é informativo (R01); intenções gravadas antes dele continuam válidas.
++    (value.createdAt === undefined || (typeof value.createdAt === 'string' && Number.isFinite(Date.parse(value.createdAt))));
++}
++
++const PARTICIPATION_STATUS = new Set(['waiting', 'active', 'finished', 'canceled']);
++
++/** Leitura autoritativa de uma participação da própria conta (GET /participations/:id). */
++export function parseOwnedParticipationResponse(body, participationId) {
++  const participation = body?.participation;
++  if (!participation || participation.id !== participationId || !validUuid(participation.eventId) ||
++      !PARTICIPATION_STATUS.has(participation.status)) {
++    throw responseError();
++  }
++  return { id: participation.id, eventId: participation.eventId, status: participation.status,
++    finishedAt: participation.finishedAt ?? null, finishReason: participation.finishReason ?? null };
++}
++
++/**
++ * Códigos que o backend só devolve depois de reservar a chave sem encontrar registro anterior
++ * (o replay de `reserveJoinIntentWithTx` precede a elegibilidade e o rollback desfaz a reserva).
++ * Para a chave enviada, eles provam que o POST não foi aplicado; a intenção pode ser liberada.
++ */
++const NOT_APPLIED_CODES = new Set([
++  'VALIDATION_ERROR', 'EVENT_NOT_FOUND', 'PARTICIPATION_ALREADY_CURRENT', 'PROFILE_INCOMPLETE',
++  'EVENT_NOT_STARTED', 'EVENT_REGISTRATION_CLOSED', 'EVENT_NOT_READY',
++]);
++
++/** Classifica a falha do POST de ingresso para a chave enviada. */
++export function classifyJoinFailure(error) {
++  if (error?.code === 'ADMISSION_OTHER_EVENT_PENDING') return 'other_pending';
++  if (error?.isNetworkError || error?.isTimeout || !error?.status || error.status >= 500 ||
++      error?.code === 'IDEMPOTENCY_IN_PROGRESS' || error?.code === 'INVALID_ADMISSION_RESPONSE') return 'uncertain';
++  if (error.status === 401 || error.status === 403) return 'session';
++  if (error.code === 'IDEMPOTENCY_KEY_REUSED') return 'conflict';
++  if ([400, 404, 409, 422].includes(error.status) && NOT_APPLIED_CODES.has(error.code)) return 'not_applied';
++  // Outros 4xx sem semântica conhecida não provam nada sobre a chave: preservar.
++  return 'unknown';
+ }
+ 
+ /** Persiste somente a intenção e sua chave, isoladas pelo UUID da conta; nenhum token é salvo. */
+@@ -124,7 +161,36 @@ export function describeAdmissionError(error, operation = 'lookup') {
+   }
+ }
+ 
+-/** Orquestra a consulta, o POST idempotente e a leitura definitiva da participação por sessão. */
++const MESSAGES = {
++  otherPending: 'Há uma tentativa de ingresso anterior nesta conta que ainda não foi resolvida. Verifique essa tentativa antes de iniciar outra.',
++  previousBusy: 'Aguarde a conclusão da tentativa de ingresso anterior.',
++  unsynced: 'Ingresso confirmado, mas a participação ainda não pôde ser sincronizada. Atualize sem repetir o ingresso.',
++  unsyncedAfterError: 'Ingresso confirmado. Não foi possível atualizar a participação agora; tente sincronizar novamente.',
++  historical: 'Sua tentativa anterior foi registrada e essa participação já foi encerrada. Você pode iniciar um novo ingresso.',
++  recoveryUncertain: 'Não foi possível confirmar a tentativa anterior agora. Ela continua guardada com segurança; tente verificar novamente.',
++  recoverySession: 'Sua sessão não permitiu verificar a tentativa anterior. Entre novamente e tente outra vez.',
++  recoveryConflict: 'A tentativa anterior não pôde ser confirmada com segurança. Procure o suporte do evento; nenhum novo ingresso foi criado.',
++  recoveryInconsistent: 'O servidor não confirmou a participação da tentativa anterior. Procure o suporte do evento; nenhum novo ingresso foi criado.',
++  recoveryStorage: 'Não foi possível ler a tentativa anterior guardada neste aparelho. Nenhum novo ingresso foi criado.',
++  revalidateFailed: 'Não foi possível atualizar a situação do evento. Tente novamente antes de confirmar.',
++  revalidateOtherEvent: 'Este código agora corresponde a outro evento. Consulte o evento novamente.',
++};
++
++/** Resumo público da intenção persistida; a chave idempotente nunca sai do store. */
++function describeIntent(intent, eventId) {
++  if (!intent) return null;
++  return { eventId: intent.eventId, sameEvent: intent.eventId === eventId,
++    confirmed: Boolean(intent.confirmedParticipationId) };
++}
++
++/**
++ * Orquestra a consulta, o POST idempotente e a leitura definitiva da participação por sessão.
++ *
++ * Cada consulta (`lookup`) abre uma nova operação: estado de confirmação, erros e resultados de
++ * sincronização de operações anteriores não são herdados, e respostas tardias delas não publicam
++ * nada. A intenção persistida (chave idempotente) pertence à conta, não à operação, e só é
++ * liberada por resolução autoritativa do servidor.
++ */
+ export function createEventAdmissionStore({
+   client = httpClient,
+   getIdentity,
+@@ -132,147 +198,323 @@ export function createEventAdmissionStore({
+   getParticipationSnapshot,
+   intentStorage = defaultAdmissionIntentStorage,
+   createKey = () => Crypto.randomUUID(),
++  now = () => new Date(),
+ }) {
+-  const empty = (identity = null) => ({ userId: identity?.userId ?? null, epoch: identity?.epoch ?? null,
+-    status: 'idle', event: null, eligibility: null, error: null, confirmedParticipationId: null });
+-  let state = empty(), generation = 0, lookupSequence = 0;
+-  let joinFlight = null, syncFlight = null;
++  const empty = (identity = null, operation = 0) => ({ userId: identity?.userId ?? null, epoch: identity?.epoch ?? null,
++    operation, status: 'idle', event: null, eligibility: null, eligibilityStatus: 'none', error: null,
++    confirmedParticipationId: null, outcome: null, pendingIntent: null,
++    recovery: { status: 'idle', message: null } });
++  let state = empty(), generation = 0, operation = 0, lookupSequence = 0;
++  let accessCode = null;
++  // Voos são marcados com a operação que os criou; outra operação nunca recebe seu resultado.
++  let joinFlight = null, syncFlight = null, recoveryFlight = null, revalidateFlight = null;
+   const listeners = new Set();
+   const publish = (next) => { state = next; listeners.forEach((listener) => listener(state)); };
+-  const matches = (identity, version) => {
++  const capture = () => state.userId === null ? null
++    : { userId: state.userId, epoch: state.epoch, version: generation, operation };
++  const identityMatches = (ctx) => {
+     const current = getIdentity();
+-    return Boolean(identity && current && version === generation &&
+-      identity.userId === current.userId && identity.epoch === current.epoch &&
+-      state.userId === identity.userId && state.epoch === identity.epoch);
++    return Boolean(ctx && current && ctx.version === generation &&
++      ctx.userId === current.userId && ctx.epoch === current.epoch &&
++      state.userId === ctx.userId && state.epoch === ctx.epoch);
++  };
++  const matches = (ctx) => identityMatches(ctx) && ctx.operation === operation && state.operation === operation;
++  const update = (ctx, patch) => {
++    if (!matches(ctx)) return false;
++    publish({ ...state, ...patch });
++    return true;
+   };
+-  const capture = () => state.userId === null ? null : { userId: state.userId, epoch: state.epoch };
+ 
+   function setIdentity(identity) {
+-    generation += 1; lookupSequence += 1;
+-    joinFlight = null; syncFlight = null;
+-    publish(empty(identity));
++    generation += 1; lookupSequence += 1; operation += 1;
++    accessCode = null;
++    joinFlight = null; syncFlight = null; recoveryFlight = null; revalidateFlight = null;
++    publish(empty(identity, operation));
+   }
+ 
+-  async function lookup(accessCode) {
+-    const identity = capture(), version = generation, sequence = ++lookupSequence;
+-    if (!matches(identity, version)) return { kind: 'stale' };
+-    const code = typeof accessCode === 'string' ? accessCode.trim() : '';
+-    if (!code) {
++  async function readPendingIntent(ctx) {
++    try { return { intent: await intentStorage.get(ctx.userId), failed: false }; }
++    catch { return { intent: null, failed: true }; }
++  }
++
++  async function lookup(code) {
++    if (state.userId === null) return { kind: 'stale' };
++    // Nova consulta = nova operação: nada da operação anterior é herdado.
++    operation += 1;
++    const ctx = capture(), sequence = ++lookupSequence;
++    if (!identityMatches(ctx)) return { kind: 'stale' };
++    const normalized = typeof code === 'string' ? code.trim() : '';
++    accessCode = null;
++    if (!normalized) {
+       const message = 'Digite o código do evento.';
+-      publish({ ...state, status: 'error', event: null, eligibility: null, error: message });
++      publish({ ...empty(ctx, operation), status: 'error', error: message });
+       return { kind: 'error', message };
+     }
+-    publish({ ...state, status: 'looking_up', event: null, eligibility: null, error: null });
++    publish({ ...empty(ctx, operation), status: 'looking_up' });
+     try {
+-      const result = parseEventLookupResponse(await client.post('/events/lookup', { accessCode: code }, { auth: true }));
+-      if (!matches(identity, version) || sequence !== lookupSequence) return { kind: 'stale' };
+-      publish({ ...state, status: 'ready', ...result, error: null });
++      const result = parseEventLookupResponse(await client.post('/events/lookup', { accessCode: normalized }, { auth: true }));
++      if (!matches(ctx) || sequence !== lookupSequence) return { kind: 'stale' };
++      const pending = await readPendingIntent(ctx);
++      if (!matches(ctx) || sequence !== lookupSequence) return { kind: 'stale' };
++      accessCode = normalized;
++      publish({ ...state, status: 'ready', ...result, eligibilityStatus: 'fresh', error: null,
++        pendingIntent: pending.failed ? { unreadable: true } : describeIntent(pending.intent, result.event.id) });
+       return { kind: 'found', ...result };
+     } catch (error) {
+-      if (!matches(identity, version) || sequence !== lookupSequence) return { kind: 'stale' };
++      if (!matches(ctx) || sequence !== lookupSequence) return { kind: 'stale' };
+       const message = describeAdmissionError(error, 'lookup');
+       publish({ ...state, status: 'error', event: null, eligibility: null, error: message });
+       return { kind: 'error', message };
+     }
+   }
+ 
+-  async function synchronize(identity, version, confirmedId, eventId) {
+-    if (syncFlight) return syncFlight;
+-    const pending = (async () => {
+-      try { await refreshParticipation(); }
+-      catch { /* O estado de leitura já informa a falha; o ingresso continua confirmado. */ }
+-      if (!matches(identity, version)) return { kind: 'stale' };
+-      const snapshot = getParticipationSnapshot();
+-      if (snapshot.userId === identity.userId && snapshot.epoch === identity.epoch &&
+-          snapshot.status === 'ready' && snapshot.participation?.id === confirmedId &&
+-          snapshot.participation.eventId === eventId &&
+-          ['active', 'waiting'].includes(snapshot.participation.status)) {
+-        publish({ ...state, status: 'complete', confirmedParticipationId: confirmedId, error: null });
+-        try {
+-          const intent = await intentStorage.get(identity.userId);
+-          if (intent?.confirmedParticipationId === confirmedId) await intentStorage.clear(identity.userId, intent.key);
+-        } catch { /* Uma intenção residual só permite replay; a leitura do servidor confirmou o ingresso. */ }
+-        if (!matches(identity, version)) return { kind: 'stale' };
+-        return { kind: 'complete', participation: snapshot.participation };
++  /**
++   * Revalida a elegibilidade do mesmo evento pelo contrato real (`POST /events/lookup`).
++   * Não abre nova operação: confirmação e recuperação em curso desta operação são preservadas.
++   */
++  function revalidate() {
++    const ctx = capture();
++    if (!matches(ctx) || !state.event?.id || !accessCode) return Promise.resolve({ kind: 'unavailable' });
++    if (revalidateFlight?.operation === operation) return revalidateFlight.promise;
++    if (joinFlight?.operation === operation) return Promise.resolve({ kind: 'busy' });
++    const eventId = state.event.id, code = accessCode;
++    const promise = (async () => {
++      update(ctx, { eligibilityStatus: 'revalidating' });
++      try {
++        const result = parseEventLookupResponse(await client.post('/events/lookup', { accessCode: code }, { auth: true }));
++        if (!matches(ctx)) return { kind: 'stale' };
++        if (result.event.id !== eventId) {
++          update(ctx, { eligibilityStatus: 'error', eligibility: null, error: MESSAGES.revalidateOtherEvent });
++          return { kind: 'other_event' };
++        }
++        const pending = await readPendingIntent(ctx);
++        if (!matches(ctx)) return { kind: 'stale' };
++        const terminal = ['joining', 'complete'].includes(state.status);
++        update(ctx, { event: result.event, eligibility: result.eligibility, eligibilityStatus: 'fresh',
++          // Erro de uma tentativa recusada deixa de valer quando o servidor reapresenta o estado.
++          error: state.status === 'error' || state.status === 'ready' ? null : state.error,
++          status: terminal || state.status === 'uncertain' || state.status === 'confirmed_unsynced' ? state.status : 'ready',
++          pendingIntent: pending.failed ? { unreadable: true } : describeIntent(pending.intent, eventId) });
++        return { kind: 'found', ...result };
++      } catch (error) {
++        if (!matches(ctx)) return { kind: 'stale' };
++        update(ctx, { eligibilityStatus: 'error',
++          error: error?.status === 401 || error?.status === 403 ? describeAdmissionError(error) : MESSAGES.revalidateFailed });
++        return { kind: 'error' };
+       }
+-      const message = 'Ingresso confirmado, mas a participação ainda não pôde ser sincronizada. Atualize sem repetir o ingresso.';
+-      publish({ ...state, status: 'confirmed_unsynced', confirmedParticipationId: confirmedId, error: message });
+-      return { kind: 'confirmed_unsynced' };
+     })();
+-    syncFlight = pending;
+-    try { return await pending; }
+-    finally { if (syncFlight === pending) syncFlight = null; }
++    const flight = { operation, promise };
++    revalidateFlight = flight;
++    return promise.finally(() => { if (revalidateFlight === flight) revalidateFlight = null; });
++  }
++
++  async function readOwnedParticipation(participationId) {
++    if (typeof client.get !== 'function') throw responseError();
++    return parseOwnedParticipationResponse(
++      await client.get(`/participations/${participationId}`, { auth: true }), participationId);
++  }
++
++  async function clearIntent(userId, intentKey) {
++    try { await intentStorage.clear(userId, intentKey); return true; }
++    catch { return false; /* Preserva a chave caso o armazenamento não confirme sua remoção. */ }
++  }
++
++  /**
++   * Resolve um ingresso cujo identificador foi confirmado pelo servidor (resposta 201 ou replay).
++   * Corrente → `complete`; encerrada/cancelada (GET /participations/:id) → `historical`.
++   * Somente esses dois desfechos liberam a intenção persistida.
++   */
++  async function settleConfirmed(ctx, confirmedId, eventId) {
++    try { await refreshParticipation(); }
++    catch { /* O estado de leitura já informa a falha; o ingresso continua confirmado. */ }
++    if (!identityMatches(ctx)) return { kind: 'stale' };
++    const snapshot = getParticipationSnapshot();
++    const ownSnapshot = snapshot.userId === ctx.userId && snapshot.epoch === ctx.epoch && snapshot.status === 'ready';
++    let participation = null;
++    if (ownSnapshot && snapshot.participation?.id === confirmedId && snapshot.participation.eventId === eventId &&
++        ['active', 'waiting'].includes(snapshot.participation.status)) {
++      participation = snapshot.participation;
++    } else if (ownSnapshot) {
++      // /current não mostra esta participação: a ausência não é prova; consultar a própria participação.
++      try { participation = await readOwnedParticipation(confirmedId); }
++      catch { participation = null; }
++      if (!identityMatches(ctx)) return { kind: 'stale' };
++      if (participation && participation.eventId !== eventId) return { kind: 'inconsistent' };
++    }
++    if (!participation) return { kind: 'confirmed_unsynced' };
++    const historical = ['finished', 'canceled'].includes(participation.status);
++    try {
++      const intent = await intentStorage.get(ctx.userId);
++      if (intent?.confirmedParticipationId === confirmedId) await intentStorage.clear(ctx.userId, intent.key);
++    } catch { /* Uma intenção residual só permite replay; a leitura do servidor confirmou o desfecho. */ }
++    if (!identityMatches(ctx)) return { kind: 'stale' };
++    return { kind: historical ? 'historical' : 'complete', participation };
++  }
++
++  function publishSettled(ctx, confirmedId, settled) {
++    if (settled.kind === 'complete') {
++      update(ctx, { status: 'complete', confirmedParticipationId: confirmedId, outcome: 'current', error: null });
++    } else if (settled.kind === 'historical') {
++      // A participação desta intenção terminou: não há o que sincronizar; um novo ingresso volta a ser possível.
++      update(ctx, { status: 'ready', confirmedParticipationId: null, outcome: 'historical', error: MESSAGES.historical });
++    } else if (settled.kind === 'inconsistent') {
++      update(ctx, { status: 'error', confirmedParticipationId: null, error: MESSAGES.recoveryInconsistent });
++    } else if (settled.kind === 'confirmed_unsynced') {
++      update(ctx, { status: 'confirmed_unsynced', confirmedParticipationId: confirmedId, error: MESSAGES.unsynced });
++    }
++  }
++
++  function synchronize(ctx, confirmedId, eventId) {
++    if (syncFlight?.operation === ctx.operation && syncFlight.confirmedId === confirmedId) return syncFlight.promise;
++    const promise = (async () => {
++      const settled = await settleConfirmed(ctx, confirmedId, eventId);
++      if (settled.kind === 'stale' || !matches(ctx)) return { kind: 'stale' };
++      publishSettled(ctx, confirmedId, settled);
++      return settled.kind === 'inconsistent' ? { kind: 'error', message: MESSAGES.recoveryInconsistent } : settled;
++    })();
++    const flight = { operation: ctx.operation, confirmedId, promise };
++    syncFlight = flight;
++    return promise.finally(() => { if (syncFlight === flight) syncFlight = null; });
+   }
+ 
+   async function retrySync() {
+-    const identity = capture(), version = generation;
+-    if (!matches(identity, version)) return { kind: 'stale' };
++    const ctx = capture();
++    if (!matches(ctx)) return { kind: 'stale' };
+     const confirmedId = state.confirmedParticipationId;
+     if (!confirmedId || !state.event?.id) return { kind: 'error' };
+-    return synchronize(identity, version, confirmedId, state.event.id);
++    return synchronize(ctx, confirmedId, state.event.id);
++  }
++
++  async function refreshPendingIntent(ctx) {
++    const pending = await readPendingIntent(ctx);
++    update(ctx, { pendingIntent: pending.failed ? { unreadable: true } : describeIntent(pending.intent, state.event?.id) });
+   }
+ 
+   function confirm(eventId) {
+-    if (joinFlight) return joinFlight;
+-    const identity = capture(), version = generation;
+-    if (!matches(identity, version) || state.event?.id !== eventId || !state.eligibility?.eligible) {
++    const ctx = capture();
++    if (joinFlight?.operation === operation) return joinFlight.promise;
++    if (!matches(ctx) || state.event?.id !== eventId || !state.eligibility?.eligible || state.eligibilityStatus !== 'fresh') {
+       return Promise.resolve({ kind: 'error', message: 'Este evento não está disponível para ingresso.' });
+     }
++    // Uma tentativa de outra operação ainda em voo deve terminar antes (sem compartilhar resultado).
++    if (joinFlight || recoveryFlight) return Promise.resolve({ kind: 'error', message: MESSAGES.previousBusy });
+     if (state.confirmedParticipationId) return retrySync();
+-    const pending = (async () => {
++    const promise = (async () => {
+       let intent;
+       let confirmedId = null;
+-      publish({ ...state, status: 'joining', error: null });
++      update(ctx, { status: 'joining', error: null, outcome: null });
+       try {
+-        intent = await intentStorage.get(identity.userId);
+-        if (!matches(identity, version)) return { kind: 'stale' };
++        intent = await intentStorage.get(ctx.userId);
++        if (!matches(ctx)) return { kind: 'stale' };
+         if (intent && intent.eventId !== eventId) {
+-          const error = new Error('Há outra tentativa de ingresso pendente nesta conta. Confira essa tentativa antes de iniciar outra.');
++          const error = new Error(MESSAGES.otherPending);
+           error.code = 'ADMISSION_OTHER_EVENT_PENDING';
+           throw error;
+         }
+         if (!intent) {
+           const key = createKey();
+           if (!validUuid(key)) throw new Error('Não foi possível gerar uma chave segura para o ingresso.');
+-          intent = { userId: identity.userId, eventId, key, confirmedParticipationId: null };
++          intent = { userId: ctx.userId, eventId, key, confirmedParticipationId: null, createdAt: now().toISOString() };
+           await intentStorage.set(intent);
+         }
+-        if (!matches(identity, version)) return { kind: 'stale' };
++        if (!matches(ctx)) return { kind: 'stale' };
+         confirmedId = intent.confirmedParticipationId;
+         if (!confirmedId) {
++          // Intenção nova ou incerta do mesmo evento: mesma chave e mesmo corpo ⇒ replay seguro.
+           const response = await client.post('/participations', { eventId }, {
+             auth: true, headers: { 'Idempotency-Key': intent.key }, outcomeUnknownOnNetworkError: true,
+           });
+           confirmedId = parseParticipationCreationResponse(response);
++          // Persistir antes de checar a operação: a prova do servidor não pode se perder.
+           await intentStorage.set({ ...intent, confirmedParticipationId: confirmedId });
+         }
+-        if (!matches(identity, version)) return { kind: 'stale' };
+-        publish({ ...state, status: 'confirmed_unsynced', confirmedParticipationId: confirmedId, error: null });
+-        return synchronize(identity, version, confirmedId, eventId);
++        if (!matches(ctx)) return { kind: 'stale' };
++        update(ctx, { status: 'confirmed_unsynced', confirmedParticipationId: confirmedId, error: null });
++        return synchronize(ctx, confirmedId, eventId);
+       } catch (error) {
+-        if (!matches(identity, version)) return { kind: 'stale' };
++        if (!matches(ctx)) return { kind: 'stale' };
+         if (confirmedId) {
+-          const message = 'Ingresso confirmado. Não foi possível atualizar a participação agora; tente sincronizar novamente.';
+-          publish({ ...state, status: 'confirmed_unsynced', confirmedParticipationId: confirmedId, error: message });
++          update(ctx, { status: 'confirmed_unsynced', confirmedParticipationId: confirmedId, error: MESSAGES.unsyncedAfterError });
+           return { kind: 'confirmed_unsynced' };
+         }
+-        const uncertain = Boolean(error?.isNetworkError || error?.status >= 500 ||
+-          error?.code === 'IDEMPOTENCY_IN_PROGRESS' || error?.code === 'INVALID_ADMISSION_RESPONSE');
+-        if (intent && !uncertain && error?.status && error.status < 500 &&
+-            error.code !== 'PARTICIPATION_ALREADY_CURRENT' && error.code !== 'IDEMPOTENCY_KEY_REUSED') {
+-          try { await intentStorage.clear(identity.userId, intent.key); }
+-          catch { /* Preserva a chave caso o armazenamento não confirme sua remoção. */ }
++        const failure = classifyJoinFailure(error);
++        if (intent && failure === 'not_applied') {
++          await clearIntent(ctx.userId, intent.key);
++          if (!matches(ctx)) return { kind: 'stale' };
++        }
++        const message = failure === 'other_pending' ? error.message : describeAdmissionError(error, 'join');
++        const uncertain = failure === 'uncertain';
++        update(ctx, { status: uncertain ? 'uncertain' : 'error', error: message });
++        if (failure === 'other_pending' || failure === 'not_applied') await refreshPendingIntent(ctx);
++        return { kind: uncertain ? 'uncertain' : 'error', message,
++          // Recusa definitiva do servidor: a apresentação deve ser revalidada.
++          revalidate: failure === 'not_applied' };
++      }
++    })();
++    const flight = { operation, promise };
++    joinFlight = flight;
++    return promise.finally(() => { if (joinFlight === flight) joinFlight = null; });
++  }
++
++  /**
++   * Reconcilia a intenção persistida (de qualquer evento) sem criar nova chave.
++   * Sem identificador confirmado, repete o POST original (mesma chave e mesmo corpo): o backend
++   * devolve o resultado gravado ou prova que a chave não foi aplicada. Nunca presume sucesso.
++   */
++  function reconcile() {
++    const ctx = capture();
++    if (!matches(ctx)) return Promise.resolve({ kind: 'stale' });
++    if (recoveryFlight?.operation === operation) return recoveryFlight.promise;
++    if (joinFlight) return Promise.resolve({ kind: 'error', message: MESSAGES.previousBusy });
++    const promise = (async () => {
++      update(ctx, { recovery: { status: 'checking', message: null } });
++      const finish = async (status, message, extra = {}) => {
++        if (!matches(ctx)) return { kind: 'stale' };
++        await refreshPendingIntent(ctx);
++        update(ctx, { recovery: { status, message } });
++        return { kind: status, message, ...extra };
++      };
++      let intent;
++      try { intent = await intentStorage.get(ctx.userId); }
++      catch { return finish('blocked', MESSAGES.recoveryStorage); }
++      if (!identityMatches(ctx)) return { kind: 'stale' };
++      if (!intent) return finish('resolved', null, { outcome: 'none' });
++      let confirmedId = intent.confirmedParticipationId;
++      if (!confirmedId) {
++        try {
++          const response = await client.post('/participations', { eventId: intent.eventId }, {
++            auth: true, headers: { 'Idempotency-Key': intent.key }, outcomeUnknownOnNetworkError: true,
++          });
++          confirmedId = parseParticipationCreationResponse(response);
++          await intentStorage.set({ ...intent, confirmedParticipationId: confirmedId });
++        } catch (error) {
++          if (!identityMatches(ctx)) return { kind: 'stale' };
++          if (confirmedId) return finish('uncertain', MESSAGES.recoveryUncertain);
++          const failure = classifyJoinFailure(error);
++          if (failure === 'not_applied') {
++            // O servidor provou que a chave original não foi aplicada: nenhuma participação foi criada por ela.
++            const cleared = await clearIntent(ctx.userId, intent.key);
++            return cleared ? finish('resolved', null, { outcome: 'not_applied' })
++              : finish('blocked', MESSAGES.recoveryStorage);
++          }
++          if (failure === 'session') return finish('blocked', MESSAGES.recoverySession);
++          if (failure === 'conflict') return finish('blocked', MESSAGES.recoveryConflict);
++          return finish('uncertain', MESSAGES.recoveryUncertain);
+         }
+-        const message = error?.code === 'ADMISSION_OTHER_EVENT_PENDING' ? error.message :
+-          describeAdmissionError(error, 'join');
+-        publish({ ...state, status: uncertain ? 'uncertain' : 'error', error: message });
+-        return { kind: uncertain ? 'uncertain' : 'error', message };
+       }
++      if (!identityMatches(ctx)) return { kind: 'stale' };
++      const settled = await settleConfirmed(ctx, confirmedId, intent.eventId);
++      if (settled.kind === 'stale') return { kind: 'stale' };
++      if (settled.kind === 'inconsistent') return finish('blocked', MESSAGES.recoveryInconsistent);
++      if (settled.kind === 'confirmed_unsynced') return finish('uncertain', MESSAGES.recoveryUncertain);
++      return finish('resolved', settled.kind === 'historical' ? MESSAGES.historical : null,
++        { outcome: settled.kind === 'complete' ? 'current' : 'historical', participation: settled.participation });
+     })();
+-    joinFlight = pending;
+-    return pending.finally(() => { if (joinFlight === pending) joinFlight = null; });
++    const flight = { operation, promise };
++    recoveryFlight = flight;
++    return promise.finally(() => { if (recoveryFlight === flight) recoveryFlight = null; });
+   }
+ 
+   return { getSnapshot: () => state, subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+-    setIdentity, lookup, confirm, retrySync, isCurrent: () => matches(capture(), generation) };
++    setIdentity, lookup, revalidate, confirm, retrySync, reconcile, isCurrent: () => matches(capture()) };
+ }
+diff --git a/app/tests/eventEntry.test.cjs b/app/tests/eventEntry.test.cjs
+index c811f3b..d6acab3 100644
+--- a/app/tests/eventEntry.test.cjs
++++ b/app/tests/eventEntry.test.cjs
+@@ -10,6 +10,11 @@ const event = {
+   operationalDeadlineAt: '2026-11-08T21:00:00.000Z', externalQueueEnabled: true,
+ };
+ const eligible = { eligible: true, blockingReasons: [] };
++// R01: a confirmação só considera a elegibilidade publicada pelo store (consulta/revalidação oficial).
++const official = (eligibility = eligible, extra = {}) => ({
++  status: 'ready', event, eligibility, eligibilityStatus: 'fresh', pendingIntent: null,
++  recovery: { status: 'idle', message: null }, error: null, ...extra,
++});
+ 
+ function screenRig(path, context, params = {}, options = {}) {
+   const state = [], calls = [], cleanups = [];
+@@ -57,7 +62,7 @@ function screenRig(path, context, params = {}, options = {}) {
+     if (name === 'react') return react;
+     if (name === 'react-native') return {
+       ActivityIndicator: 'ActivityIndicator', KeyboardAvoidingView: 'KeyboardAvoidingView',
+-      Platform: { OS: 'android' }, Pressable: 'Pressable', ScrollView: 'ScrollView',
++      Platform: { OS: 'android' }, Pressable: 'Pressable', ScrollView: 'ScrollView', AppState: options.appState,
+       Text: 'Text', TextInput: 'TextInput', View: 'View',
+       StyleSheet: { create: (styles) => styles, absoluteFill: { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0 } },
+       Linking: {
+@@ -223,7 +228,7 @@ test('consulta inexistente e resposta tardia após logout não navegam', async (
+ test('ineligibilidade mostra motivo real e impede POST', async () => {
+   let count = 0;
+   const context = {
+-    admission: { status: 'ready', event }, isCurrentAdmission: () => true,
++    admission: official({ eligible: false, blockingReasons: ['PROFILE_INCOMPLETE'] }), isCurrentAdmission: () => true,
+     confirmEventEntry: async () => { count++; return { kind: 'complete' }; },
+   };
+   const rig = screenRig('screens/event-entry/EventConfirmationScreen.js', context,
+@@ -240,7 +245,7 @@ test('ineligibilidade mostra motivo real e impede POST', async () => {
+ test('ingresso confirmado navega uma vez; toque duplo não duplica POST', async () => {
+   let resolve, count = 0;
+   const context = {
+-    admission: { status: 'ready', event }, isCurrentAdmission: () => true,
++    admission: official(), isCurrentAdmission: () => true,
+     confirmEventEntry: () => { count++; return new Promise((done) => { resolve = done; }); },
+   };
+   const rig = screenRig('screens/event-entry/EventConfirmationScreen.js', context, { event, eligibility: eligible });
+@@ -257,7 +262,7 @@ test('ingresso confirmado navega uma vez; toque duplo não duplica POST', async
+ test('ingresso confirmado sem sincronização só repete GET', async () => {
+   let posts = 0, reads = 0;
+   const context = {
+-    admission: { status: 'confirmed_unsynced', event, confirmedParticipationId: '22222222-2222-4222-8222-222222222222',
++    admission: { ...official(), status: 'confirmed_unsynced', confirmedParticipationId: '22222222-2222-4222-8222-222222222222',
+       error: 'Atualize sem repetir o ingresso.' }, isCurrentAdmission: () => true,
+     confirmEventEntry: async () => { posts++; return { kind: 'complete' }; },
+     retryEntrySync: async () => { reads++; return { kind: 'complete' }; },
+@@ -272,13 +277,13 @@ test('ingresso confirmado sem sincronização só repete GET', async () => {
+ 
+ test('erro HTTP na confirmação preserva a tela e informa o problema', async () => {
+   const context = {
+-    admission: { status: 'ready', event }, isCurrentAdmission: () => true,
++    admission: official(), isCurrentAdmission: () => true,
+     confirmEventEntry: async () => ({ kind: 'error', message: 'Evento encerrado' }),
+   };
+   const rig = screenRig('screens/event-entry/EventConfirmationScreen.js', context, { event, eligibility: eligible });
+   await rig.button('Confirmar entrada').props.onPress();
+   assert.deepEqual(rig.calls, []);
+-  context.admission = { status: 'error', event, error: 'Evento encerrado' };
++  context.admission = official(eligible, { status: 'error', error: 'Evento encerrado' });
+   rig.render();
+   assert.match(rig.text(), /Evento encerrado/);
+ });
+@@ -781,7 +786,7 @@ test('ENTRY-QR-01: HomeScreen exibe texto atualizado com menção a QR Code e di
+ // -------------------------------------------------------------
+ 
+ test('P01-14/22: evento encontrado mostra horários formatados no fuso do evento, sem ISO cru', () => {
+-  const context = { admission: { status: 'ready', event }, isCurrentAdmission: () => true };
++  const context = { admission: official(), isCurrentAdmission: () => true };
+   const rig = screenRig('screens/event-entry/EventConfirmationScreen.js', context, { event, eligibility: eligible });
+   const text = rig.text();
+   assert.match(text, /Arena real/);
+@@ -794,19 +799,19 @@ test('P01-14/22: evento encontrado mostra horários formatados no fuso do evento
+ });
+ 
+ test('P01-19/20: informação da fila externa segue a configuração real do evento', () => {
+-  const context = { admission: { status: 'ready', event }, isCurrentAdmission: () => true };
++  const context = { admission: official(), isCurrentAdmission: () => true };
+   const withQueue = screenRig('screens/event-entry/EventConfirmationScreen.js', context, { event, eligibility: eligible });
+   assert.match(withQueue.text(), /Fila de entrada ativa/);
+   const direct = { ...event, externalQueueEnabled: false };
+   const directRig = screenRig('screens/event-entry/EventConfirmationScreen.js',
+-    { admission: { status: 'ready', event: direct }, isCurrentAdmission: () => true }, { event: direct, eligibility: eligible });
++    { admission: { ...official(), event: direct }, isCurrentAdmission: () => true }, { event: direct, eligibility: eligible });
+   assert.match(directRig.text(), /Entrada direta na Arena/);
+ });
+ 
+ test('P01-16: evento ainda não iniciado é recusado sem POST e sem usar o relógio do aparelho', async () => {
+   let posts = 0;
+   const context = {
+-    admission: { status: 'ready', event }, isCurrentAdmission: () => true,
++    admission: official({ eligible: false, blockingReasons: ['EVENT_NOT_STARTED'] }), isCurrentAdmission: () => true,
+     confirmEventEntry: async () => { posts++; return { kind: 'complete' }; },
+   };
+   const rig = screenRig('screens/event-entry/EventConfirmationScreen.js', context,
+@@ -821,7 +826,7 @@ test('P01-16: evento ainda não iniciado é recusado sem POST e sem usar o reló
+ test('P01-18: participação já existente oferece voltar ao início sem criar outra', async () => {
+   let posts = 0, refreshes = 0;
+   const context = {
+-    admission: { status: 'ready', event }, isCurrentAdmission: () => true,
++    admission: official({ eligible: false, blockingReasons: ['PARTICIPATION_ALREADY_CURRENT'] }), isCurrentAdmission: () => true,
+     confirmEventEntry: async () => { posts++; return { kind: 'complete' }; },
+     refreshParticipation: async () => { refreshes++; },
+   };
+@@ -837,20 +842,22 @@ test('P01-18: participação já existente oferece voltar ao início sem criar o
+ test('P01-17: questionário incompleto leva ao questionário sem tentar o ingresso', async () => {
+   let posts = 0;
+   const context = {
+-    admission: { status: 'ready', event }, isCurrentAdmission: () => true,
++    admission: official({ eligible: false, blockingReasons: ['PROFILE_INCOMPLETE'] }), isCurrentAdmission: () => true,
+     confirmEventEntry: async () => { posts++; return { kind: 'complete' }; },
+   };
+   const rig = screenRig('screens/event-entry/EventConfirmationScreen.js', context,
+     { event, eligibility: { eligible: false, blockingReasons: ['PROFILE_INCOMPLETE'] } });
+   await rig.button('Completar questionário').props.onPress();
+   assert.equal(posts, 0);
+-  assert.deepEqual(structuredClone(rig.calls), [{ name: 'ProfileQuestionnaire', value: undefined }]);
++  // R01-12: o questionário volta para esta jornada; o parâmetro só define o destino da navegação.
++  assert.deepEqual(structuredClone(rig.calls),
++    [{ name: 'ProfileQuestionnaire', value: { mode: 'edit', returnTo: 'EventConfirmation' } }]);
+ });
+ 
+ test('P01-21: resultado incerto oferece verificar o mesmo ingresso, sem nova intenção na tela', async () => {
+   const confirmations = [];
+   const context = {
+-    admission: { status: 'uncertain', event, error: 'O tempo de resposta terminou. O resultado pode ter sido confirmado; tente novamente com segurança.' },
++    admission: { ...official(), status: 'uncertain', error: 'O tempo de resposta terminou. O resultado pode ter sido confirmado; tente novamente com segurança.' },
+     isCurrentAdmission: () => true,
+     confirmEventEntry: async (eventId) => { confirmations.push(eventId); return { kind: 'complete' }; },
+   };
+@@ -861,3 +868,202 @@ test('P01-21: resultado incerto oferece verificar o mesmo ingresso, sem nova int
+   assert.deepEqual(confirmations, [event.id]);
+   assert.deepEqual(structuredClone(rig.calls), [{ reset: { index: 0, routes: [{ name: 'MainTabs' }] } }]);
+ });
++
++
++// -------------------------------------------------------------
++// PARTICIPANTE-01 R01 — revalidação, recuperação, fila e horários
++// -------------------------------------------------------------
++
++function confirmationRig(admission, extra = {}, options = {}) {
++  const log = { revalidations: 0, reconciles: 0, posts: 0, refreshes: 0 };
++  const context = {
++    admission, isCurrentAdmission: () => true,
++    confirmEventEntry: async () => { log.posts++; return extra.confirmResult ?? { kind: 'complete' }; },
++    retryEntrySync: async () => ({ kind: 'complete' }),
++    revalidateEventEntry: async () => { log.revalidations++; return extra.revalidateResult ?? { kind: 'found' }; },
++    reconcileEntryIntent: async () => { log.reconciles++; return extra.reconcileResult ?? { kind: 'resolved', outcome: 'none' }; },
++    refreshParticipation: async () => { log.refreshes++; },
++  };
++  const rig = screenRig('screens/event-entry/EventConfirmationScreen.js', context,
++    { event: admission.event ?? event, eligibility: eligible }, options);
++  return { rig, context, log };
++}
++
++test('R01-09/10: parâmetros da rota não liberam o ingresso; só a elegibilidade oficial publicada', async () => {
++  // Rota diz "elegível", mas o store revalidou e o evento fechou.
++  const closed = confirmationRig(official({ eligible: false, blockingReasons: ['EVENT_REGISTRATION_CLOSED'] }));
++  assert.match(closed.rig.text(), /ENTRADAS ENCERRADAS/);
++  assert.equal(closed.rig.button('Confirmar entrada').props.disabled, true);
++  await closed.rig.button('Confirmar entrada').props.onPress?.();
++  assert.equal(closed.log.posts, 0);
++  // Store sem elegibilidade confirmada (outra operação / sem consulta): nada é liberado.
++  const unknown = confirmationRig({ status: 'ready', event, eligibilityStatus: 'none', eligibility: null });
++  assert.match(unknown.rig.text(), /SITUAÇÃO NÃO CONFIRMADA/);
++  assert.equal(unknown.rig.button('Confirmar entrada').props.disabled, true);
++  // Evento abriu após a consulta: a revalidação oficial libera.
++  const opened = confirmationRig(official());
++  assert.equal(opened.rig.button('Confirmar entrada').props.disabled, false);
++});
++
++test('R01-09/23: durante a revalidação a autorização antiga não é apresentada nem usada', async () => {
++  const { rig, log } = confirmationRig(official(eligible, { eligibilityStatus: 'revalidating' }));
++  assert.match(rig.text(), /ATUALIZANDO SITUAÇÃO/);
++  assert.doesNotMatch(rig.text(), /ENTRADAS ABERTAS/);
++  assert.equal(rig.button('Confirmar entrada').props.disabled, true);
++  await rig.button('Confirmar entrada').props.onPress?.();
++  assert.equal(log.posts, 0);
++  assert.equal(rig.button('Atualizando situação...').props.disabled, true);
++});
++
++test('R01-11: falha na revalidação mantém o botão bloqueado e oferece atualização manual', async () => {
++  const { rig, log } = confirmationRig(official(eligible, {
++    eligibilityStatus: 'error', error: 'Não foi possível atualizar a situação do evento. Tente novamente antes de confirmar.' }));
++  assert.match(rig.text(), /SITUAÇÃO NÃO CONFIRMADA/);
++  assert.equal(rig.button('Confirmar entrada').props.disabled, true);
++  await rig.button('Atualizar situação do evento').props.onPress();
++  assert.equal(log.revalidations, 1);
++});
++
++test('R01-12/23: retorno de foco e ao primeiro plano revalidam no servidor; a montagem inicial não repete a consulta', async () => {
++  let appListener = null, removed = 0;
++  const appState = { currentState: 'active', addEventListener(_, listener) {
++    appListener = listener; return { remove() { removed++; } }; } };
++  const { rig, log } = confirmationRig(official({ eligible: false, blockingReasons: ['PROFILE_INCOMPLETE'] }), {}, { appState });
++  assert.equal(log.revalidations, 0, 'montagem usa a consulta recém-feita');
++  rig.setFocused(false); // abriu o questionário
++  assert.equal(log.revalidations, 0);
++  rig.setFocused(true); // voltou do questionário
++  assert.equal(log.revalidations, 1);
++  rig.render();
++  assert.equal(log.revalidations, 1, 'sem consultas redundantes por renderização');
++  appListener('background');
++  appListener('active');
++  assert.equal(log.revalidations, 2);
++  rig.unmount();
++  assert.ok(removed >= 1);
++});
++
++test('R01-10: recusa definitiva no POST revalida a apresentação', async () => {
++  const { rig, log } = confirmationRig(official(), {
++    confirmResult: { kind: 'error', message: 'As entradas neste evento foram encerradas.', revalidate: true } });
++  await rig.button('Confirmar entrada').props.onPress();
++  assert.equal(log.posts, 1);
++  assert.equal(log.revalidations, 1);
++  assert.deepEqual(rig.calls, []);
++});
++
++test('R01-05/08: tentativa anterior de outro evento bloqueia novo ingresso e oferece verificação sem criar outra', async () => {
++  const { rig, log } = confirmationRig(official(eligible, {
++    pendingIntent: { eventId: '99999999-9999-4999-8999-999999999999', sameEvent: false, confirmed: false } }), {
++    reconcileResult: { kind: 'resolved', outcome: 'historical' } });
++  assert.ok(rig.card('event-confirmation-recovery'));
++  assert.match(rig.text(), /em outro evento/);
++  assert.match(rig.text(), /não cria um novo ingresso/);
++  assert.equal(rig.button('Confirmar entrada').props.disabled, true);
++  await rig.button('Confirmar entrada').props.onPress?.();
++  assert.equal(log.posts, 0);
++  await rig.button('Verificar tentativa anterior').props.onPress();
++  assert.equal(log.reconciles, 1);
++  assert.equal(log.revalidations, 1, 'após resolver, a elegibilidade é reconsultada');
++  assert.deepEqual(rig.calls, []);
++});
++
++test('R01-05: mesma tentativa com participação corrente (ALREADY_CURRENT) é recuperada e leva à participação', async () => {
++  const { rig, log } = confirmationRig(official({ eligible: false, blockingReasons: ['PARTICIPATION_ALREADY_CURRENT'] }, {
++    pendingIntent: { eventId: event.id, sameEvent: true, confirmed: false } }), {
++    reconcileResult: { kind: 'resolved', outcome: 'current' } });
++  assert.match(rig.text(), /neste evento cujo resultado ainda não foi confirmado/);
++  await rig.button('Verificar tentativa anterior').props.onPress();
++  assert.equal(log.reconciles, 1);
++  assert.equal(log.refreshes, 1);
++  assert.equal(log.posts, 0);
++  assert.deepEqual(structuredClone(rig.calls), [{ reset: { index: 0, routes: [{ name: 'MainTabs' }] } }]);
++});
++
++test('R01-07/08: verificação em andamento ou bloqueada não libera ingresso nem mostra sucesso', async () => {
++  const pendingIntent = { eventId: event.id, sameEvent: true, confirmed: true };
++  const checking = confirmationRig(official(eligible, { pendingIntent, recovery: { status: 'checking', message: null } }));
++  assert.equal(checking.rig.button('Verificando...').props.disabled, true);
++  assert.equal(checking.rig.button('Confirmar entrada').props.disabled, true);
++  const blocked = confirmationRig(official(eligible, { pendingIntent,
++    recovery: { status: 'blocked', message: 'O servidor não confirmou a participação da tentativa anterior.' } }));
++  assert.match(blocked.rig.text(), /não confirmou a participação/);
++  assert.equal(blocked.rig.button('Confirmar entrada').props.disabled, true);
++});
++
++test('R01-02: intenção incerta do mesmo evento com entradas abertas usa o próprio botão (mesma chave)', async () => {
++  const { rig, log } = confirmationRig(official(eligible, {
++    pendingIntent: { eventId: event.id, sameEvent: true, confirmed: false } }));
++  assert.ok(!rig.card('event-confirmation-recovery'));
++  await rig.button('Verificar ingresso').props.onPress();
++  assert.equal(log.posts, 1);
++});
++
++test('R01-20: fila externa aparece também com evento indisponível, sem sugerir ingresso possível', () => {
++  const notStarted = confirmationRig(official({ eligible: false, blockingReasons: ['EVENT_NOT_STARTED'] }));
++  assert.ok(notStarted.rig.card('event-confirmation-queue-info'));
++  assert.match(notStarted.rig.text(), /Evento com fila de entrada/);
++  assert.match(notStarted.rig.text(), /Ainda não é possível ingressar/);
++  assert.doesNotMatch(notStarted.rig.text(), /Ao confirmar, você entra na fila/);
++
++  const direct = { ...event, externalQueueEnabled: false };
++  const directBlocked = confirmationRig({ ...official({ eligible: false, blockingReasons: ['EVENT_NOT_READY'] }), event: direct });
++  assert.match(directBlocked.rig.text(), /Entrada direta na Arena/);
++  assert.match(directBlocked.rig.text(), /não usa fila de entrada/);
++  assert.match(directBlocked.rig.text(), /Ainda não é possível ingressar/);
++
++  const directOpen = confirmationRig({ ...official(), event: direct });
++  assert.match(directOpen.rig.text(), /Ao confirmar, sua entrada na Arena é liberada/);
++
++  const queueClosed = confirmationRig(official({ eligible: false, blockingReasons: ['EVENT_REGISTRATION_CLOSED'] }));
++  assert.match(queueClosed.rig.text(), /Não é mais possível entrar na fila/);
++});
++
++test('R01-21: encerramento antecipado — horários aparecem como programação, nunca como prazo vigente', () => {
++  // Admin encerrou às 12:00 BRT, antes do horário programado (17:00): o servidor só informa o estado.
++  const { rig } = confirmationRig(official({ eligible: false, blockingReasons: ['EVENT_REGISTRATION_CLOSED'] }));
++  const text = rig.text();
++  assert.ok(rig.card('event-confirmation-schedule-notice'));
++  assert.match(text, /programação original e não valem mais como prazo/);
++  assert.match(text, /Encerramento programado das entradas/);
++  assert.match(text, /Limite operacional programado/);
++  assert.doesNotMatch(text, /Entradas até/);
++  // O estado oficial tem destaque próprio (situação + cartão de indisponibilidade).
++  assert.ok(rig.card('event-confirmation-blocked'));
++  assert.match(rig.card('event-confirmation-status').props.accessibilityLabel, /ENTRADAS ENCERRADAS/);
++  // Evento aberto não recebe o aviso.
++  assert.ok(!confirmationRig(official()).rig.card('event-confirmation-schedule-notice'));
++});
++
++test('R01-21: datas em fusos diferentes e virada de meia-noite seguem o fuso do evento', () => {
++  const manaus = { ...event, timezone: 'America/Manaus',
++    startsAt: '2026-11-09T02:00:00.000Z', officialEndsAt: '2026-11-09T05:00:00.000Z',
++    operationalDeadlineAt: '2026-11-09T06:00:00.000Z' };
++  const { rig } = confirmationRig({ ...official(), event: manaus });
++  const text = rig.text();
++  assert.match(text, /08\/11\/2026/); // 22:00 de 08/11 em Manaus (UTC-4)
++  assert.match(text, /22:00/);
++  assert.match(text, /09\/11\/2026 às 01:00/);
++  assert.match(text, /America\/Manaus/);
++});
++
++test('R01-22: toques repetidos na verificação da tentativa anterior geram uma única chamada', async () => {
++  let release, count = 0;
++  const admission = official(eligible, { pendingIntent: { eventId: event.id, sameEvent: false, confirmed: false } });
++  const context = { admission, isCurrentAdmission: () => true,
++    reconcileEntryIntent: () => { count++; return new Promise(done => { release = done; }); },
++    revalidateEventEntry: async () => ({ kind: 'found' }) };
++  const rig = screenRig('screens/event-entry/EventConfirmationScreen.js', context, { event, eligibility: eligible });
++  const button = rig.button('Verificar tentativa anterior');
++  const first = button.props.onPress();
++  await button.props.onPress();
++  await button.props.onPress();
++  assert.equal(count, 1);
++  release({ kind: 'uncertain', message: 'x' });
++  await first;
++});
++
++test('R01: ícones da confirmação são de linha, sem emojis permanentes', () => {
++  const { rig } = confirmationRig(official());
++  assert.doesNotMatch(rig.text(), /[\u{1F300}-\u{1FAFF}\u{2600}-\u{26FF}]/u);
++});
+diff --git a/app/tests/helpers/questionnaireHarness.cjs b/app/tests/helpers/questionnaireHarness.cjs
+index 46fcaf2..00203aa 100644
+--- a/app/tests/helpers/questionnaireHarness.cjs
++++ b/app/tests/helpers/questionnaireHarness.cjs
+@@ -117,6 +117,7 @@ function createParticipantUiStubs() {
+       { type: 'TextInput', props: { ...props, value, onChangeText } },
+       error ? text(error, { accessibilityRole: 'alert' }) : null,
+     ]),
++    LineIcon: ({ name, color, size, ...props }) => view(null, { ...props, iconName: name, color, size }),
+     ScreenHeader: ({ title, subtitle, onBack, showBack = true, ...props }) => view([
+       showBack && onBack ? {
+         type: 'Pressable',
+@@ -346,6 +347,7 @@ function createHarness(relativePath, options = {}) {
+     goBack() { assert.equal(insideUpdater, false); navigationCalls.push({ type: 'back' }); },
+     replace(name) { assert.equal(insideUpdater, false); navigationCalls.push({ type: 'replace', name }); },
+   };
++  if (options.canGoBack !== undefined) navigation.canGoBack = () => options.canGoBack;
+   if (!options.fallbackNavigation) navigation.reset = (payload) => {
+     assert.equal(insideUpdater, false);
+     navigationCalls.push({ type: 'reset', payload });
+diff --git a/app/tests/homeReturnEvaluation.test.cjs b/app/tests/homeReturnEvaluation.test.cjs
+index 947dc6c..cf02eb6 100644
+--- a/app/tests/homeReturnEvaluation.test.cjs
++++ b/app/tests/homeReturnEvaluation.test.cjs
+@@ -16,7 +16,7 @@ const returned = { recentFinalization: { participationId: ID, eventId: EVENT,
+ const tick = () => new Promise(resolve => setImmediate(resolve));
+ function deferred() { let resolve; const promise = new Promise(ok => { resolve = ok; }); return { promise, resolve }; }
+ 
+-function rig({ current = null, returnState = returned, read } = {}) {
++function rig({ current = null, returnState = returned, read, realHook = false } = {}) {
+   let identity = { userId: 'a', epoch: 1 }, verified = true, focused = true;
+   let cursor = 0, dirty = false, tree;
+   const hooks = [], effects = [], calls = [], reads = [];
+@@ -58,7 +58,18 @@ function rig({ current = null, returnState = returned, read } = {}) {
+     if (name === '../../context/ParticipationContext') return { ParticipationContext: {} };
+     if (name === '../../services/participationHistoryService') return history;
+     if (name === '../../components/ui') return {};
+-    if (name === './useHomeOverview') return { useHomeOverview: () => ({ status: 'loading', retry() {} }) };
++    if (name === './useHomeOverview') {
++      if (!realHook) return { useHomeOverview: () => ({ status: 'loading', retry() {} }) };
++      // R01-19: hook real da Home, com o mesmo React simulado e o serviço real de histórico.
++      const eventTime = loadModule('utils/eventTime.js', require).exports;
++      const overviewUtils = loadModule('utils/homeOverview.js', dep => dep === './eventTime.js' ? eventTime : require(dep)).exports;
++      return loadModule('screens/home/useHomeOverview.js', dep => {
++        if (dep === 'react') return react;
++        if (dep === '../../services/participationHistoryService.js') return history;
++        if (dep === '../../utils/homeOverview.js') return overviewUtils;
++        return require(dep);
++      }).exports;
++    }
+     if (name.startsWith('../arena/') || name === './HomeScreen') return { __esModule: true, default: name.split('/').at(-1) };
+     return require(name);
+   }).exports;
+@@ -203,3 +214,28 @@ test('participação ativa e fila externa impedem apresentação de finalizaçã
+     assert.equal(r.tree.type === 'RealArenaScreen' || r.tree.type.name === 'ExternalQueueScreen', true);
+   }
+ });
++
++// ---------------------------------------------------------------- PARTICIPANTE-01 R01
++
++test('R01-19: retomada C-04/D09 com o hook real da Home preserva a apresentação única e não repete a consulta', async () => {
++  const r = rig({ realHook: true }); await r.start(); await r.settle();
++  assert.equal(r.calls.length, 1, 'apresentação automática uma única vez');
++  assert.equal(r.calls[0].name, 'RealEvaluation');
++  const eligibilityReads = () => r.reads.filter(path => path.endsWith('/evaluation-eligibility')).length;
++  assert.equal(eligibilityReads(), 1);
++
++  r.later(); await r.settle(); // "Avaliar mais tarde"
++  assert.equal(r.calls.length, 1, 'não reapresenta no mesmo ciclo de retomada');
++  const overview = r.tree.props.overview;
++  assert.equal(r.tree.type, 'HomeScreen');
++  assert.equal(overview.status, 'history');
++  assert.equal(overview.pending.status, 'single');
++  assert.equal(overview.pending.item, item, 'reaproveita a leitura confirmada pela retomada');
++  assert.equal(eligibilityReads(), 1, 'sem segunda consulta da mesma pendência na mesma versão');
++
++  // Nova versão do retorno (refresh): leitura válida anterior não é reaproveitada.
++  await r.refresh(); await r.settle();
++  assert.equal(r.calls.length, 1);
++  assert.equal(eligibilityReads(), 2);
++  assert.equal(r.tree.props.overview.pending.status, 'single');
++});
+diff --git a/app/tests/participante01Home.test.cjs b/app/tests/participante01Home.test.cjs
+index 3c8ff83..a8b45eb 100644
+--- a/app/tests/participante01Home.test.cjs
++++ b/app/tests/participante01Home.test.cjs
+@@ -110,69 +110,66 @@ test('situação do evento deriva só da elegibilidade do servidor', () => {
+ 
+ // ---------------------------------------------------------------- regras da Home
+ 
+-test('P01-01/02: visão geral distingue conta sem histórico e com histórico', async () => {
+-  const fetchPendingItem = async () => assert.fail('sem pendência não consulta elegibilidade');
+-  const empty = await overviewUtils.loadHomeOverview({}, {
++test('P01-01/02: histórico recente distingue conta sem histórico e com histórico', async () => {
++  const empty = await overviewUtils.loadRecentParticipation({}, {
+     fetchHistory: async (_, options) => { same(options, { limit: 1 }); return { items: [], nextCursor: null }; },
+-    fetchPendingItem,
+   });
+-  same(empty, { recent: null, pending: null });
++  assert.equal(empty, null);
+   const item = historyItem();
+-  const filled = await overviewUtils.loadHomeOverview({}, {
+-    fetchHistory: async () => ({ items: [item], nextCursor: 'x' }), fetchPendingItem,
++  const filled = await overviewUtils.loadRecentParticipation({}, {
++    fetchHistory: async () => ({ items: [item], nextCursor: 'x' }),
+   });
+-  assert.equal(filled.recent, item);
++  assert.equal(filled, item);
+ });
+ 
+-test('P01-04/05: pendência única só é oferecida após confirmação do servidor', async () => {
++test('P01-04/05 (R01): pendência única só é oferecida após confirmação do servidor', async () => {
+   const older = historyItem({ participationId: ids.older, event: { id: ids.event, name: 'Copa Indie' } });
+-  const confirmed = await overviewUtils.loadHomeOverview({}, {
+-    pendingIds: [ids.older],
+-    fetchHistory: async () => ({ items: [historyItem()], nextCursor: null }),
++  same(overviewUtils.initialPendingState([ids.older]), { status: 'checking', item: null, count: 1, error: null });
++  const confirmed = await overviewUtils.confirmSinglePending({}, ids.older, {
+     fetchPendingItem: async (_, id) => { assert.equal(id, ids.older); return older; },
+   });
+-  same(confirmed.pending, { kind: 'single', item: older });
+-  const card = overviewUtils.describePendingEvaluation(confirmed.pending, confirmed.recent);
++  same(confirmed, { status: 'single', item: older, count: 1, error: null });
++  const card = overviewUtils.describePendingEvaluation(confirmed, historyItem());
+   assert.equal(card.text, 'Você ainda pode avaliar sua participação em Copa Indie.');
+-
+-  // Já enviada, expirada ou inelegível: o serviço devolve null e nada é oferecido.
+-  const submitted = await overviewUtils.loadHomeOverview({}, {
+-    pendingIds: [ids.recent],
+-    fetchHistory: async () => ({ items: [historyItem()], nextCursor: null }),
+-    fetchPendingItem: async () => null,
+-  });
+-  assert.equal(submitted.pending, null);
+-
+-  // Falha na confirmação esconde só o card, nunca o histórico.
+-  const failed = await overviewUtils.loadHomeOverview({}, {
+-    pendingIds: [ids.recent],
+-    fetchHistory: async () => ({ items: [historyItem()], nextCursor: null }),
+-    fetchPendingItem: async () => { throw Object.assign(new Error('offline'), { isNetworkError: true }); },
+-  });
+-  assert.equal(failed.pending, null);
+-  assert.ok(failed.recent);
++  assert.equal(card.actionable, true);
++
++  // Já enviada, expirada ou inelegível: ausência confirmada pelo servidor.
++  const submitted = await overviewUtils.confirmSinglePending({}, ids.recent, { fetchPendingItem: async () => null });
++  same(submitted, { status: 'none', item: null, count: 0, error: null });
++  assert.equal(overviewUtils.describePendingEvaluation(submitted, historyItem()), null);
++
++  // R01-13: falha não é ausência — é propagada para virar estado de erro.
++  await assert.rejects(overviewUtils.confirmSinglePending({}, ids.recent, {
++    fetchPendingItem: async () => { throw Object.assign(new Error('timeout'), { isNetworkError: true, isTimeout: true }); },
++  }), /timeout/);
++  const failedCard = overviewUtils.describePendingEvaluation({ status: 'error', item: null, count: 1, error: 'network' });
++  assert.equal(failedCard.kind, 'error');
++  assert.equal(failedCard.actionable, false);
++  assert.equal(overviewUtils.describePendingEvaluation({ status: 'checking', item: null, count: 1 }).actionable, false);
+ });
+ 
+-test('várias pendências seguem a política existente: lista na aba Eventos', async () => {
+-  const result = await overviewUtils.loadHomeOverview({}, {
+-    pendingIds: [ids.recent, ids.older],
+-    fetchHistory: async () => ({ items: [historyItem()], nextCursor: null }),
+-    fetchPendingItem: async () => assert.fail('várias pendências não escolhem uma por conta própria'),
+-  });
+-  same(result.pending, { kind: 'multiple', count: 2 });
++test('várias pendências seguem a política existente: lista na aba Eventos', () => {
++  same(overviewUtils.initialPendingState([ids.recent, ids.older]), { status: 'multiple', item: null, count: 2, error: null });
++  same(overviewUtils.initialPendingState([]), { status: 'none', item: null, count: 0, error: null });
+   same(overviewUtils.pendingEvaluationIds({ pendingEvaluationParticipationIds: [ids.recent, ids.recent, 'x'] }),
+     [ids.recent]);
++  const card = overviewUtils.describePendingEvaluation({ status: 'multiple', count: 2 });
++  assert.equal(card.kind, 'multiple');
+ });
+ 
+ test('P01-11: leitura que deixou de ser atual é descartada', async () => {
+   let current = true;
+-  const result = await overviewUtils.loadHomeOverview({}, {
++  const recent = await overviewUtils.loadRecentParticipation({}, {
+     isCurrent: () => current,
+     fetchHistory: async () => { current = false; return { items: [historyItem()], nextCursor: null }; },
+-    fetchPendingItem: async () => assert.fail('não continua após troca de sessão'),
+-    pendingIds: [ids.recent],
+   });
+-  assert.equal(result, null);
++  assert.equal(recent, undefined);
++  current = true;
++  const pending = await overviewUtils.confirmSinglePending({}, ids.recent, {
++    isCurrent: () => current,
++    fetchPendingItem: async () => { current = false; return historyItem(); },
++  });
++  assert.equal(pending, undefined);
+ });
+ 
+ test('evento recente apresenta a semântica real do status, sem inventar local', () => {
+@@ -240,7 +237,7 @@ test('P01-04: avaliação pendente abre a avaliação da participação pendente
+   const recent = historyItem();
+   const pendingItem = historyItem({ participationId: ids.older, event: { id: ids.event, name: 'Copa Indie' } });
+   const { h, text, byTestId } = renderHome({
+-    status: 'history', recent, pending: { kind: 'single', item: pendingItem }, retry() {},
++    status: 'history', recent, pending: { status: 'single', item: pendingItem, count: 1 }, retry() {},
+   });
+   assert.match(text(), /Avaliação pendente/);
+   assert.match(text(), /Copa Indie/);
+@@ -249,9 +246,9 @@ test('P01-04: avaliação pendente abre a avaliação da participação pendente
+     { name: 'RealEvaluation', params: { participationId: ids.older, historyItem: pendingItem } },
+   ]);
+ 
+-  const sameRecent = renderHome({ status: 'history', recent, pending: { kind: 'single', item: recent }, retry() {} });
++  const sameRecent = renderHome({ status: 'history', recent, pending: { status: 'single', item: recent, count: 1 }, retry() {} });
+   assert.match(sameRecent.text(), /no último evento/);
+-  const many = renderHome({ status: 'history', recent, pending: { kind: 'multiple', count: 3 }, retry() {} });
++  const many = renderHome({ status: 'history', recent, pending: { status: 'multiple', count: 3 }, retry() {} });
+   many.byTestId('home-pending-evaluation-card').props.onPress();
+   same(many.h.navigationCalls.map(call => call.name), ['Eventos']);
+ });
+@@ -328,9 +325,15 @@ function hookRig(services) {
+   return { render, get last() { return last; } };
+ }
+ 
++// O AuthContext real mantém a mesma instância de httpClient durante a sessão; um cliente novo
++// representa outro contexto HTTP e (corretamente) dispara nova leitura. Por isso o cliente é
++// estável por conta/época aqui.
++const clients = new Map();
+ function authFor(userId, epoch = 1, verified = true) {
++  const clientKey = `${userId}#${epoch}`;
++  if (!clients.has(clientKey)) clients.set(clientKey, { id: `client-${userId}` });
+   return {
+-    isAuthenticated: true, user: { id: userId }, httpClient: { id: `client-${userId}` },
++    isAuthenticated: true, user: { id: userId }, httpClient: clients.get(clientKey),
+     getSessionEpoch: () => epoch, isIdentityVerified: () => verified,
+   };
+ }
+@@ -397,3 +400,41 @@ test('participação corrente desabilita a leitura da Home', () => {
+   rig.render({ auth: authFor(ids.userA), enabled: false, focused: true, returnState: null, returnStateVersion: 1 });
+   assert.equal(reads, 0);
+ });
++
++// ---------------------------------------------------------------- R01 (AUD-P01-04/05 na tela)
++
++test('R01-13: falha na avaliação mantém o histórico, não abre avaliação e oferece nova tentativa', () => {
++  let retries = 0;
++  const { h, text, byTestId } = renderHome({ status: 'history', recent: historyItem(),
++    pending: { status: 'error', item: null, count: 1, error: 'network' }, retry() {}, retryPending() { retries += 1; } });
++  assert.ok(byTestId('home-recent-section'), 'histórico preservado');
++  assert.ok(byTestId('home-pending-evaluation-error'));
++  assert.ok(!byTestId('home-pending-evaluation-card'), 'sem ação de avaliação sem confirmação');
++  assert.match(text(), /Não foi possível verificar sua avaliação pendente/);
++  byTestId('home-pending-evaluation-retry').props.onPress();
++  assert.equal(retries, 1);
++  assert.equal(h.navigationCalls.length, 0);
++});
++
++test('R01-16: verificação em andamento não oferece CTA; histórico em atualização segue visível', () => {
++  const { h, byTestId } = renderHome({ status: 'history', recent: historyItem(), refreshing: true,
++    pending: { status: 'checking', item: null, count: 1 }, retry() {}, retryPending() {} });
++  assert.ok(byTestId('home-pending-evaluation-checking'));
++  assert.ok(!byTestId('home-pending-evaluation-card'));
++  assert.ok(byTestId('home-recent-refreshing'));
++  assert.ok(byTestId('home-recent-event-card'));
++  assert.equal(h.navigationCalls.length, 0);
++});
++
++test('R01: Home usa ícones de linha (sem emojis) e rotula o horário como da participação', () => {
++  const withHistory = renderHome({ status: 'history', recent: historyItem(),
++    pending: { status: 'single', item: historyItem(), count: 1 }, retry() {} });
++  const empty = renderHome({ status: 'empty', recent: null, pending: { status: 'none' }, retry() {} });
++  for (const view of [withHistory, empty]) {
++    assert.doesNotMatch(view.text(), /[\u{1F300}-\u{1FAFF}\u{2600}-\u{26FF}]/u);
++  }
++  assert.match(withHistory.text(), /Sua entrada na Arena: 08\/11\/2026 às/);
++  const icons = empty.h.nodes.map(node => node.props?.iconName
++    ?? (typeof node.type === 'function' && node.type.name === 'LineIcon' ? node.props.name : null)).filter(Boolean);
++  for (const name of ['qr', 'gamepad', 'star']) assert.ok(icons.includes(name), `ícone ${name}`);
++});
+diff --git a/app/tests/participante01Revisao01.test.cjs b/app/tests/participante01Revisao01.test.cjs
+new file mode 100644
+index 0000000..b887e9d
+--- /dev/null
++++ b/app/tests/participante01Revisao01.test.cjs
+@@ -0,0 +1,724 @@
++// PARTICIPANTE-01 — Revisão 01: correções após auditoria (AUD-P01-01..05).
++const assert = require('node:assert/strict');
++const test = require('node:test');
++const { createHarness, loadModule } = require('./helpers/questionnaireHarness.cjs');
++
++const service = loadModule('services/eventAdmissionService.js', (name) => {
++  if (name === 'react-native') return { Platform: { OS: 'web' } };
++  if (name === 'expo-crypto') return { randomUUID: () => assert.fail('chave criada só pelo createKey do teste') };
++  if (name === 'expo-secure-store') return {};
++  if (name === './httpClient') return { httpClient: {} };
++  return require(name);
++}).exports;
++
++const USER_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
++const USER_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
++const EVENT_A = '11111111-1111-4111-8111-111111111111';
++const EVENT_B = '12121212-1212-4212-8212-121212121212';
++const tick = () => new Promise(resolve => setImmediate(resolve));
++const uuid = (prefix, n) => `${prefix}${String(n).padStart(7, '0')}-0000-4000-8000-000000000000`;
++function deferred() {
++  let resolve, reject;
++  const promise = new Promise((ok, fail) => { resolve = ok; reject = fail; });
++  return { promise, resolve, reject };
++}
++
++/**
++ * Backend simulado fiel ao contrato real (participations.service / join-idempotency):
++ * - a chave é reservada ANTES da elegibilidade; chave já concluída ⇒ replay do resultado gravado;
++ * - recusa de elegibilidade faz rollback da reserva (a chave não fica gravada);
++ * - mesma chave com outro evento ⇒ IDEMPOTENCY_KEY_REUSED;
++ * - GET /participations/:id devolve o status efetivo de uma participação da própria conta.
++ */
++function backend() {
++  const db = { participations: [], keys: new Map(), creations: 0, joinPosts: [], lookups: 0, events: {
++    ABC: { id: EVENT_A, state: 'open', queue: true }, XYZ: { id: EVENT_B, state: 'open', queue: false } } };
++  let dropNextJoinResponse = false, failNext = null, holdJoin = null, holdLookup = null;
++  const eventById = id => Object.values(db.events).find(event => event.id === id);
++  const current = userId => db.participations.find(p => p.userId === userId && ['waiting', 'active'].includes(p.status)) ?? null;
++  const reasons = (userId, event) => {
++    const list = [];
++    if (current(userId)) list.push('PARTICIPATION_ALREADY_CURRENT');
++    if (event.state === 'not_started') list.push('EVENT_NOT_STARTED');
++    if (event.state === 'closed') list.push('EVENT_REGISTRATION_CLOSED');
++    if (event.state === 'not_ready') list.push('EVENT_NOT_READY');
++    return list;
++  };
++  const clientFor = (getUser) => ({
++    async post(path, body, options) {
++      const userId = getUser();
++      if (path === '/events/lookup') {
++        db.lookups += 1;
++        if (holdLookup) { const gate = holdLookup; holdLookup = null; await gate.promise; }
++        const event = db.events[body.accessCode];
++        if (!event) throw { status: 404, code: 'EVENT_NOT_FOUND' };
++        const blocking = reasons(userId, event);
++        return { event: { id: event.id, name: `Evento ${body.accessCode}`, timezone: 'America/Sao_Paulo',
++          startsAt: '2026-11-08T10:00:00.000Z', officialEndsAt: '2026-11-08T20:00:00.000Z',
++          operationalDeadlineAt: '2026-11-08T21:00:00.000Z', externalQueueEnabled: event.queue },
++        eligibility: { eligible: blocking.length === 0, blockingReasons: blocking } };
++      }
++      assert.equal(path, '/participations');
++      const key = options.headers['Idempotency-Key'];
++      db.joinPosts.push({ userId, eventId: body.eventId, key });
++      if (holdJoin) { const gate = holdJoin; holdJoin = null; await gate.promise; }
++      if (failNext) { const error = failNext; failNext = null; throw error; }
++      const record = db.keys.get(`${userId}#${key}`);
++      if (record) {
++        if (record.eventId !== body.eventId) throw { status: 409, code: 'IDEMPOTENCY_KEY_REUSED' };
++        return { participationId: record.participationId };
++      }
++      const event = eventById(body.eventId);
++      if (!event) throw { status: 404, code: 'EVENT_NOT_FOUND' };
++      const blocking = reasons(userId, event);
++      if (blocking.length) throw { status: 409, code: blocking[0] };
++      db.creations += 1;
++      const participation = { id: uuid('2', db.creations), userId, eventId: event.id, status: event.queue ? 'waiting' : 'active' };
++      db.participations.push(participation);
++      db.keys.set(`${userId}#${key}`, { eventId: event.id, participationId: participation.id });
++      if (dropNextJoinResponse) { dropNextJoinResponse = false; throw { isNetworkError: true, isTimeout: true, outcomeUnknown: true }; }
++      return { participationId: participation.id };
++    },
++    async get(path) {
++      const userId = getUser();
++      const id = path.split('/').at(-1);
++      const participation = db.participations.find(p => p.id === id && p.userId === userId);
++      if (!participation) throw { status: 404, code: 'PARTICIPATION_NOT_FOUND' };
++      return { participation: { id: participation.id, eventId: participation.eventId, status: participation.status,
++        joinedAt: '2026-11-08T13:00:00.000000Z', arenaEnteredAt: null,
++        finishedAt: participation.status === 'finished' ? '2026-11-08T15:00:00.000000Z' : null,
++        finishReason: participation.status === 'finished' ? 'admin_immediate' : null, externalQueue: null } };
++    },
++  });
++  return {
++    db, current, clientFor,
++    finish(id) { db.participations.find(p => p.id === id).status = 'finished'; },
++    dropNextJoinResponse() { dropNextJoinResponse = true; },
++    failNext(error) { failNext = error; },
++    holdJoin() { holdJoin = deferred(); return holdJoin; },
++    holdLookup() { holdLookup = deferred(); return holdLookup; },
++  };
++}
++
++let keySequence = 0;
++
++/** Store real ligado ao backend simulado; `reopen()` simula fechar e abrir o app (mesmo armazenamento). */
++function app(server = backend(), { storage = service.createAdmissionIntentStorage({ platformOS: 'web' }), userId = USER_A } = {}) {
++  let identity = { userId, epoch: 1 };
++  let snapshotReady = true, getFails = false;
++  const client = server.clientFor(() => identity?.userId);
++  const store = service.createEventAdmissionStore({
++    client: { post: client.post, get: async (...args) => { if (getFails) throw { isNetworkError: true }; return client.get(...args); } },
++    getIdentity: () => identity,
++    refreshParticipation: async () => {},
++    getParticipationSnapshot: () => ({ userId: identity?.userId, epoch: identity?.epoch,
++      status: snapshotReady ? 'ready' : 'error', participation: snapshotReady ? server.current(identity?.userId) : null }),
++    intentStorage: storage,
++    createKey: () => uuid('3', ++keySequence),
++  });
++  store.setIdentity(identity);
++  return {
++    store, server, storage,
++    keysUsed: () => server.db.joinPosts.map(post => post.key),
++    setSnapshotReady(value) { snapshotReady = value; },
++    setGetFails(value) { getFails = value; },
++    switchTo(nextUser) { identity = nextUser ? { userId: nextUser, epoch: identity.epoch + 1 } : null; store.setIdentity(identity); },
++    reopen() { return app(server, { storage, userId: identity.userId }); },
++  };
++}
++
++// ---------------------------------------------------------------- AUD-P01-01
++
++test('R01-01: ingresso em A, finalização e ingresso em B na mesma sessão, com intenções e chaves próprias', async () => {
++  const a = app();
++  await a.store.lookup('ABC');
++  assert.equal((await a.store.confirm(EVENT_A)).kind, 'complete');
++  const participationA = a.server.current(USER_A).id;
++  assert.equal(await a.storage.get(USER_A), null, 'intenção de A resolvida');
++  a.server.finish(participationA);
++
++  const found = await a.store.lookup('XYZ');
++  assert.equal(found.kind, 'found');
++  const state = a.store.getSnapshot();
++  assert.equal(state.confirmedParticipationId, null, 'B não herda a confirmação de A');
++  assert.equal(state.outcome, null);
++  assert.equal(state.error, null);
++  assert.equal(state.status, 'ready');
++  assert.equal(state.pendingIntent, null);
++
++  assert.equal((await a.store.confirm(EVENT_B)).kind, 'complete');
++  const [joinA, joinB] = a.server.db.joinPosts;
++  assert.equal(joinA.eventId, EVENT_A);
++  assert.equal(joinB.eventId, EVENT_B);
++  assert.notEqual(joinA.key, joinB.key, 'B tem sua própria chave idempotente');
++  assert.equal(a.server.db.creations, 2);
++  assert.notEqual(a.store.getSnapshot().confirmedParticipationId, participationA);
++  assert.equal(a.store.getSnapshot().confirmedParticipationId, a.server.current(USER_A).id);
++});
++
++test('R01-02: reingresso permitido no mesmo evento cria nova intenção independente', async () => {
++  const a = app();
++  await a.store.lookup('ABC');
++  await a.store.confirm(EVENT_A);
++  a.server.finish(a.server.current(USER_A).id);
++  await a.store.lookup('ABC');
++  assert.equal(a.store.getSnapshot().confirmedParticipationId, null);
++  assert.equal((await a.store.confirm(EVENT_A)).kind, 'complete');
++  const keys = a.keysUsed();
++  assert.equal(keys.length, 2);
++  assert.notEqual(keys[0], keys[1]);
++  assert.equal(a.server.db.creations, 2);
++});
++
++test('R01-02: intenção residual do mesmo evento já encerrado é reconhecida como histórica, sem criar outra', async () => {
++  const a = app();
++  await a.store.lookup('ABC');
++  await a.store.confirm(EVENT_A);
++  const first = a.server.current(USER_A).id;
++  a.server.finish(first);
++  // Simula falha ao remover a intenção: ela continua no aparelho com a chave de A.
++  const key = a.keysUsed()[0];
++  await a.storage.set({ userId: USER_A, eventId: EVENT_A, key, confirmedParticipationId: null });
++  await a.store.lookup('ABC');
++  const replay = await a.store.confirm(EVENT_A);
++  assert.equal(replay.kind, 'historical');
++  assert.equal(a.server.db.creations, 1, 'replay não cria participação');
++  assert.equal(a.keysUsed()[1], key, 'mesma chave da operação original');
++  assert.equal(await a.storage.get(USER_A), null);
++  await a.store.revalidate();
++  assert.equal((await a.store.confirm(EVENT_A)).kind, 'complete');
++  assert.equal(a.server.db.creations, 2);
++  assert.notEqual(a.keysUsed()[2], key);
++});
++
++test('R01-03: resposta tardia de A não altera o estado de B; ingresso concorrente não compartilha resultado', async () => {
++  const a = app();
++  await a.store.lookup('ABC');
++  const gate = a.server.holdJoin();
++  const joinA = a.store.confirm(EVENT_A);
++  await tick();
++  await a.store.lookup('XYZ');
++  const stateB = a.store.getSnapshot();
++  assert.equal(stateB.event.id, EVENT_B);
++  assert.deepEqual(structuredClone(stateB.pendingIntent), { eventId: EVENT_A, sameEvent: false, confirmed: false });
++  const concurrent = await a.store.confirm(EVENT_B);
++  assert.equal(concurrent.kind, 'error');
++  assert.match(concurrent.message, /Aguarde a conclusão/);
++  assert.equal(a.server.db.joinPosts.length, 1, 'B não reaproveita nem dispara POST durante o voo de A');
++
++  gate.resolve();
++  assert.equal((await joinA).kind, 'stale');
++  const after = a.store.getSnapshot();
++  assert.equal(after.event.id, EVENT_B);
++  assert.equal(after.confirmedParticipationId, null, 'identificador de A não vaza para B');
++  assert.equal(after.status, 'ready');
++  // A confirmação de A foi persistida (a prova do servidor não se perde) e B exige verificá-la.
++  assert.equal((await a.storage.get(USER_A)).confirmedParticipationId, a.server.current(USER_A).id);
++  const recovered = await a.store.reconcile();
++  assert.equal(recovered.kind, 'resolved');
++  assert.equal(recovered.outcome, 'current');
++  assert.equal(a.server.db.creations, 1);
++});
++
++test('R01-03: lookup tardio de A não sobrescreve a consulta de B', async () => {
++  const a = app();
++  const gate = a.server.holdLookup();
++  const lookupA = a.store.lookup('ABC');
++  await tick();
++  await a.store.lookup('XYZ');
++  gate.resolve();
++  assert.equal((await lookupA).kind, 'stale');
++  assert.equal(a.store.getSnapshot().event.id, EVENT_B);
++});
++
++test('R01-03: consultar outro evento não elimina intenção realmente incerta', async () => {
++  const a = app();
++  await a.store.lookup('ABC');
++  a.server.failNext({ isNetworkError: true });
++  assert.equal((await a.store.confirm(EVENT_A)).kind, 'uncertain');
++  const before = await a.storage.get(USER_A);
++  await a.store.lookup('XYZ');
++  assert.deepEqual(await a.storage.get(USER_A), before);
++  assert.equal(a.store.getSnapshot().pendingIntent.sameEvent, false);
++  const blocked = await a.store.confirm(EVENT_B);
++  assert.equal(blocked.kind, 'error');
++  assert.match(blocked.message, /tentativa de ingresso anterior/);
++  assert.equal(a.server.db.joinPosts.length, 1, 'nenhum POST para B');
++});
++
++// ---------------------------------------------------------------- AUD-P01-02
++
++test('R01-04/05: POST aplicado com resposta perdida, reabertura, ALREADY_CURRENT, recuperação e ingresso em B', async () => {
++  const first = app();
++  await first.store.lookup('ABC');
++  first.server.dropNextJoinResponse();
++  assert.equal((await first.store.confirm(EVENT_A)).kind, 'uncertain');
++  const original = await first.storage.get(USER_A);
++  assert.equal(original.eventId, EVENT_A);
++  assert.equal(original.confirmedParticipationId, null);
++  assert.equal(first.server.db.creations, 1, 'o servidor aplicou o POST');
++
++  const reopened = first.reopen();
++  await reopened.store.lookup('ABC');
++  const snapshot = reopened.store.getSnapshot();
++  assert.deepEqual(structuredClone(snapshot.eligibility.blockingReasons), ['PARTICIPATION_ALREADY_CURRENT']);
++  assert.deepEqual(structuredClone(snapshot.pendingIntent), { eventId: EVENT_A, sameEvent: true, confirmed: false });
++
++  const recovered = await reopened.store.reconcile();
++  assert.equal(recovered.kind, 'resolved');
++  assert.equal(recovered.outcome, 'current');
++  assert.equal(recovered.participation.id, reopened.server.current(USER_A).id);
++  assert.equal(reopened.server.db.creations, 1, 'uma única criação em A');
++  const posts = reopened.server.db.joinPosts;
++  assert.equal(posts.length, 2);
++  assert.equal(posts[1].key, original.key, 'replay com a chave original');
++  assert.equal(posts[1].eventId, EVENT_A, 'replay com o mesmo corpo (fingerprint)');
++  assert.equal(await reopened.storage.get(USER_A), null, 'intenção resolvida com prova do servidor');
++
++  reopened.server.finish(recovered.participation.id);
++  await reopened.store.lookup('XYZ');
++  assert.equal(reopened.store.getSnapshot().pendingIntent, null);
++  assert.equal((await reopened.store.confirm(EVENT_B)).kind, 'complete');
++  assert.notEqual(reopened.server.db.joinPosts[2].key, original.key, 'B tem nova intenção');
++  assert.equal(reopened.server.db.creations, 2);
++});
++
++test('R01-06: recuperação com participação já finalizada é tratada como resultado histórico', async () => {
++  const a = app();
++  await a.store.lookup('ABC');
++  a.server.dropNextJoinResponse();
++  await a.store.confirm(EVENT_A);
++  a.server.finish(a.server.db.participations[0].id);
++  await a.store.lookup('XYZ');
++  const blocked = await a.store.confirm(EVENT_B);
++  assert.equal(blocked.kind, 'error', 'sem verificação, B continua bloqueado');
++  const recovered = await a.store.reconcile();
++  assert.equal(recovered.kind, 'resolved');
++  assert.equal(recovered.outcome, 'historical');
++  assert.equal(recovered.participation.status, 'finished');
++  assert.equal(a.store.getSnapshot().confirmedParticipationId, null, 'participação encerrada não vira corrente');
++  assert.equal(await a.storage.get(USER_A), null);
++  await a.store.revalidate();
++  assert.equal((await a.store.confirm(EVENT_B)).kind, 'complete');
++  assert.equal(a.server.db.creations, 2);
++});
++
++test('R01-06: confirmação cuja participação terminou antes da sincronização não fica presa em "Atualizar"', async () => {
++  const a = app();
++  await a.store.lookup('ABC');
++  a.setSnapshotReady(false);
++  assert.equal((await a.store.confirm(EVENT_A)).kind, 'confirmed_unsynced');
++  a.server.finish(a.server.db.participations[0].id);
++  a.setSnapshotReady(true);
++  assert.equal((await a.store.retrySync()).kind, 'historical');
++  assert.equal(await a.storage.get(USER_A), null);
++  assert.equal(a.server.db.joinPosts.length, 1, 'ressincronização não repete o POST');
++});
++
++test('R01-07: falhas durante a reconciliação preservam a intenção e não criam outra chave', async () => {
++  const a = app();
++  await a.store.lookup('ABC');
++  a.server.dropNextJoinResponse();
++  await a.store.confirm(EVENT_A);
++  const original = await a.storage.get(USER_A);
++
++  a.server.failNext({ isNetworkError: true, isTimeout: true });
++  const network = await a.store.reconcile();
++  assert.equal(network.kind, 'uncertain');
++  assert.deepEqual(await a.storage.get(USER_A), original);
++
++  a.server.failNext({ status: 503, code: 'INTERNAL' });
++  assert.equal((await a.store.reconcile()).kind, 'uncertain');
++
++  // Replay ok, mas a leitura da própria participação falha: sem prova do desfecho, nada é liberado.
++  a.server.finish(a.server.db.participations[0].id);
++  a.setGetFails(true);
++  const unreadable = await a.store.reconcile();
++  assert.equal(unreadable.kind, 'uncertain');
++  const kept = await a.storage.get(USER_A);
++  assert.equal(kept.key, original.key);
++  assert.equal(kept.confirmedParticipationId, a.server.db.participations[0].id, 'prova do replay persistida');
++
++  a.setGetFails(false);
++  assert.equal((await a.store.reconcile()).outcome, 'historical');
++  assert.equal(a.server.db.creations, 1);
++  assert.ok(a.keysUsed().every(key => key === original.key));
++});
++
++test('R01-08: sem prova suficiente a intenção fica bloqueada explicitamente, sem sucesso presumido', async () => {
++  for (const [error, pattern] of [
++    [{ status: 409, code: 'IDEMPOTENCY_KEY_REUSED' }, /Procure o suporte/],
++    [{ status: 401, code: 'SESSION_EXPIRED' }, /Entre novamente/],
++    [{ status: 403, code: 'USER_INACTIVE' }, /Entre novamente/],
++  ]) {
++    const a = app();
++    await a.store.lookup('ABC');
++    a.server.failNext({ isNetworkError: true });
++    await a.store.confirm(EVENT_A);
++    const original = await a.storage.get(USER_A);
++    a.server.failNext(error);
++    const result = await a.store.reconcile();
++    assert.equal(result.kind, 'blocked');
++    assert.match(result.message, pattern);
++    assert.deepEqual(await a.storage.get(USER_A), original);
++    assert.equal(a.store.getSnapshot().recovery.status, 'blocked');
++    assert.equal(a.server.db.creations, 0);
++  }
++
++  // Armazenamento ilegível: nenhuma chave nova é criada.
++  const broken = { get: async () => { throw new Error('corrompido'); }, set: async () => assert.fail('não grava'), clear: async () => {} };
++  const b = app(backend(), { storage: broken });
++  await b.store.lookup('ABC');
++  assert.deepEqual(structuredClone(b.store.getSnapshot().pendingIntent), { unreadable: true });
++  assert.equal((await b.store.reconcile()).kind, 'blocked');
++  assert.equal((await b.store.confirm(EVENT_A)).kind, 'uncertain');
++  assert.equal(b.server.db.joinPosts.length, 0);
++});
++
++test('R01-08: o servidor prova que a chave não foi aplicada — intenção liberada sem nenhuma criação', async () => {
++  const server = backend();
++  const a = app(server);
++  await a.store.lookup('ABC');
++  a.server.failNext({ isNetworkError: true }); // falhou antes de chegar ao servidor
++  await a.store.confirm(EVENT_A);
++  // Enquanto isso, outro aparelho da conta ingressou em B.
++  server.db.participations.push({ id: uuid('9', 1), userId: USER_A, eventId: EVENT_B, status: 'active' });
++  const result = await a.store.reconcile();
++  assert.equal(result.kind, 'resolved');
++  assert.equal(result.outcome, 'not_applied');
++  assert.equal(await a.storage.get(USER_A), null);
++  assert.equal(server.db.creations, 0);
++});
++
++test('R01-18: troca de conta durante a reconciliação descarta a resposta e isola a intenção', async () => {
++  const storage = service.createAdmissionIntentStorage({ platformOS: 'web' });
++  const a = app(backend(), { storage });
++  await a.store.lookup('ABC');
++  a.server.failNext({ isNetworkError: true });
++  await a.store.confirm(EVENT_A);
++  const gate = a.server.holdJoin();
++  const pending = a.store.reconcile();
++  await tick();
++  a.switchTo(USER_B);
++  gate.resolve();
++  assert.equal((await pending).kind, 'stale');
++  assert.equal(a.store.getSnapshot().userId, USER_B);
++  assert.equal(a.store.getSnapshot().recovery.status, 'idle');
++  assert.equal(await storage.get(USER_B), null);
++  assert.ok(await storage.get(USER_A), 'intenção de A não é apagada pela troca de conta');
++});
++
++test('R01-22: toques repetidos — um único POST de ingresso e uma única reconciliação', async () => {
++  const a = app();
++  await a.store.lookup('ABC');
++  const gate = a.server.holdJoin();
++  const taps = [a.store.confirm(EVENT_A), a.store.confirm(EVENT_A), a.store.confirm(EVENT_A)];
++  await tick();
++  gate.resolve();
++  const results = await Promise.all(taps);
++  assert.ok(results.every(result => result.kind === 'complete'));
++  assert.equal(a.server.db.joinPosts.length, 1);
++
++  const b = app();
++  await b.store.lookup('ABC');
++  b.server.dropNextJoinResponse();
++  await b.store.confirm(EVENT_A);
++  const hold = b.server.holdJoin();
++  const recon = [b.store.reconcile(), b.store.reconcile()];
++  await tick();
++  hold.resolve();
++  await Promise.all(recon);
++  assert.equal(b.server.db.joinPosts.length, 2, 'POST original + um único replay');
++  assert.equal(b.server.db.creations, 1);
++});
++
++// ---------------------------------------------------------------- AUD-P01-03
++
++test('R01-09/10/11: revalidação oficial atualiza abertura, encerramento e prontidão', async () => {
++  const a = app();
++  a.server.db.events.ABC.state = 'not_started';
++  await a.store.lookup('ABC');
++  assert.equal(a.store.getSnapshot().eligibility.eligible, false);
++  assert.equal((await a.store.confirm(EVENT_A)).kind, 'error');
++  assert.equal(a.server.db.joinPosts.length, 0);
++
++  a.server.db.events.ABC.state = 'open';
++  await a.store.revalidate();
++  assert.equal(a.store.getSnapshot().eligibility.eligible, true);
++  assert.equal(a.store.getSnapshot().eligibilityStatus, 'fresh');
++
++  a.server.db.events.ABC.state = 'not_ready';
++  await a.store.revalidate();
++  assert.deepEqual(structuredClone(a.store.getSnapshot().eligibility.blockingReasons), ['EVENT_NOT_READY']);
++  a.server.db.events.ABC.state = 'open';
++  await a.store.revalidate();
++
++  // Fecha entre a revalidação e o toque: recusa definitiva, intenção liberada, apresentação deve revalidar.
++  a.server.db.events.ABC.state = 'closed';
++  const refused = await a.store.confirm(EVENT_A);
++  assert.equal(refused.kind, 'error');
++  assert.equal(refused.revalidate, true);
++  assert.equal(await a.storage.get(USER_A), null, 'recusa de elegibilidade prova que a chave não foi aplicada');
++  await a.store.revalidate();
++  assert.deepEqual(structuredClone(a.store.getSnapshot().eligibility.blockingReasons), ['EVENT_REGISTRATION_CLOSED']);
++  assert.equal(a.server.db.creations, 0);
++});
++
++test('R01-09: durante a revalidação o ingresso fica bloqueado; respostas de outra operação são descartadas', async () => {
++  const a = app();
++  await a.store.lookup('ABC');
++  const gate = a.server.holdLookup();
++  const pending = a.store.revalidate();
++  await tick();
++  assert.equal(a.store.getSnapshot().eligibilityStatus, 'revalidating');
++  assert.equal((await a.store.confirm(EVENT_A)).kind, 'error');
++  const lookupsBefore = a.server.db.lookups;
++  void a.store.revalidate(); void a.store.revalidate();
++  assert.equal(a.server.db.lookups, lookupsBefore, 'sem consultas concorrentes redundantes');
++  await a.store.lookup('XYZ'); // nova operação
++  gate.resolve();
++  assert.equal((await pending).kind, 'stale');
++  assert.equal(a.store.getSnapshot().event.id, EVENT_B);
++  assert.equal(a.server.db.joinPosts.length, 0);
++});
++
++test('R01-12: perfil completado — revalidação libera o mesmo evento', async () => {
++  let complete = false;
++  // Simula PROFILE_INCOMPLETE até o questionário ser salvo no servidor.
++  const store = service.createEventAdmissionStore({
++    client: { post: async (path, body) => {
++      if (path === '/events/lookup') return { event: { id: EVENT_A, name: 'A', timezone: 'America/Sao_Paulo',
++        startsAt: '2026-11-08T10:00:00.000Z', officialEndsAt: '2026-11-08T20:00:00.000Z',
++        operationalDeadlineAt: '2026-11-08T21:00:00.000Z', externalQueueEnabled: true },
++      eligibility: complete ? { eligible: true, blockingReasons: [] } : { eligible: false, blockingReasons: ['PROFILE_INCOMPLETE'] } };
++      return assert.fail(`sem POST ${path} ${body}`);
++    } },
++    getIdentity: () => ({ userId: USER_A, epoch: 1 }),
++    refreshParticipation: async () => {}, getParticipationSnapshot: () => ({}),
++    intentStorage: service.createAdmissionIntentStorage({ platformOS: 'web' }),
++  });
++  store.setIdentity({ userId: USER_A, epoch: 1 });
++  await store.lookup('ABC');
++  assert.equal(store.getSnapshot().eligibility.eligible, false);
++  complete = true;
++  await store.revalidate();
++  assert.equal(store.getSnapshot().eligibility.eligible, true);
++  assert.equal(store.getSnapshot().event.id, EVENT_A);
++});
++
++test('R01-12: questionário aberto pela confirmação volta para a jornada do evento', async () => {
++  const answers = { hasCompleted: true,
++    aboutYou: { birthDate: '1998-12-31', gender: 'Feminino', otherGender: null, education: 'Superior' },
++    yourGames: ['Minecraft'], gamesMarket: { marketKnowledge: 'Conheço um pouco.', marketInterest: 'Sim, tenho interesse.' } };
++  const run = async (params, canGoBack) => {
++    let marked = 0;
++    const h = createHarness('screens/profile/ProfileQuestionnaireScreen.js', {
++      authContext: { isAuthenticated: true, user: { id: 'A', name: 'Ana', hasCompletedQuestionnaire: true },
++        httpClient: { async get(path) { return path.startsWith('/games') ? { games: [] } : answers; },
++          async put() { return { message: 'ok' }; } },
++        markQuestionnaireCompleted() { marked++; }, async fetchCurrentUser() {} },
++      fields: ['handleFinishQuestionnaire'], props: { route: { params } }, canGoBack,
++    });
++    await h.actAsync(() => new Promise(resolve => setImmediate(resolve)));
++    h.act(() => h.press('Avançar para a próxima etapa'));
++    h.act(() => h.press('Avançar para a Etapa 3'));
++    h.act(c => c.handleFinishQuestionnaire());
++    await h.actAsync(() => new Promise(resolve => setImmediate(resolve)));
++    assert.equal(marked, 1);
++    const calls = h.navigationCalls;
++    h.unmount();
++    return calls;
++  };
++  const journey = await run({ mode: 'edit', returnTo: 'EventConfirmation' }, true);
++  assert.deepEqual(journey.map(call => call.type), ['back']);
++  // Edição a partir do Perfil continua voltando ao Perfil.
++  const profile = await run({ mode: 'edit' }, true);
++  assert.equal(profile[0].type, 'popTo');
++  assert.equal(profile[0].params.screen, 'Perfil');
++});
++
++// ---------------------------------------------------------------- AUD-P01-04/05 (hook da Home)
++
++const eventTime = loadModule('utils/eventTime.js', require).exports;
++const overviewUtils = loadModule('utils/homeOverview.js', name => name === './eventTime.js' ? eventTime : require(name)).exports;
++const P1 = '44444444-4444-4444-8444-444444444441';
++const P2 = '44444444-4444-4444-8444-444444444442';
++const historyItem = (id = P1, extra = {}) => ({ participationId: id, event: { id: EVENT_A, name: `Evento ${id.slice(-1)}` },
++  status: 'finished', joinedAt: '2026-11-08T13:00:00.000000Z', arenaEnteredAt: null,
++  finishedAt: '2026-11-08T15:00:00.000000Z', completedServicesCount: 1,
++  evaluation: { eligible: true, submitted: false, pending: true }, ...extra });
++
++function hookRig(services) {
++  const slots = [], cleanups = [];
++  let cursor = 0, effects = [];
++  const react = {
++    useRef(initial) { const i = cursor++; if (!(i in slots)) slots[i] = { current: initial }; return slots[i]; },
++    useState(initial) {
++      const i = cursor++;
++      if (!(i in slots)) slots[i] = initial;
++      return [slots[i], value => { slots[i] = typeof value === 'function' ? value(slots[i]) : value; }];
++    },
++    useEffect(callback, deps) {
++      const i = cursor++, previous = slots[i];
++      if (!previous || deps.some((value, k) => !Object.is(value, previous[k]))) { slots[i] = deps; effects.push({ i, callback }); }
++    },
++  };
++  const module = loadModule('screens/home/useHomeOverview.js', name => {
++    if (name === 'react') return react;
++    if (name === '../../services/participationHistoryService.js') return services;
++    if (name === '../../utils/homeOverview.js') return overviewUtils;
++    return require(name);
++  }).exports;
++  return function render(params) {
++    cursor = 0; module.useHomeOverview(params);
++    for (const { i, callback } of effects.splice(0)) {
++      if (typeof cleanups[i] === 'function') cleanups[i]();
++      const cleanup = callback();
++      cleanups[i] = typeof cleanup === 'function' ? cleanup : null;
++    }
++    cursor = 0; const result = module.useHomeOverview(params); effects = [];
++    return result;
++  };
++}
++const clients = new Map();
++const authFor = (userId, epoch = 1) => {
++  const key = `${userId}#${epoch}`;
++  if (!clients.has(key)) clients.set(key, { id: key });
++  return { isAuthenticated: true, user: { id: userId }, httpClient: clients.get(key), getSessionEpoch: () => epoch, isIdentityVerified: () => true };
++};
++const returned = ids => ({ pendingEvaluationParticipationIds: ids, recentFinalization: null });
++
++test('R01-13/14: histórico publicado sem esperar a avaliação; timeout vira erro com retry funcional', async () => {
++  const eligibility = [deferred(), deferred()];
++  let pendingCalls = 0;
++  const render = hookRig({
++    fetchParticipationHistory: async () => ({ items: [historyItem()], nextCursor: null }),
++    fetchPendingEvaluationHistoryItem: () => eligibility[pendingCalls++].promise,
++  });
++  const params = { auth: authFor(USER_A), enabled: true, focused: true, returnState: returned([P1]), returnStateVersion: 1 };
++  render(params);
++  await tick();
++  const early = render(params);
++  assert.equal(early.status, 'history', 'histórico não espera a consulta secundária');
++  assert.equal(early.pending.status, 'checking');
++  assert.equal(overviewUtils.describePendingEvaluation(early.pending, early.recent).actionable, false);
++
++  eligibility[0].reject(Object.assign(new Error('timeout'), { isNetworkError: true, isTimeout: true }));
++  await tick(); await tick();
++  const failed = render(params);
++  assert.equal(failed.status, 'history', 'histórico preservado');
++  assert.equal(failed.pending.status, 'error', 'falha não é apresentada como ausência');
++  assert.equal(failed.pending.error, 'network');
++
++  failed.retryPending();
++  const retrying = render(params);
++  assert.equal(retrying.pending.status, 'checking');
++  assert.equal(pendingCalls, 2);
++  eligibility[1].resolve(historyItem());
++  await tick();
++  const restored = render(params);
++  assert.equal(restored.pending.status, 'single');
++  assert.equal(restored.pending.item.participationId, P1);
++  assert.equal(restored.status, 'history');
++});
++
++test('R01-14: avaliação inelegível, já enviada ou múltipla é representada sem consulta indevida', async () => {
++  let calls = 0;
++  const render = hookRig({
++    fetchParticipationHistory: async () => ({ items: [historyItem()], nextCursor: null }),
++    fetchPendingEvaluationHistoryItem: async () => { calls++; return null; },
++  });
++  const base = { auth: authFor(USER_A), enabled: true, focused: true, returnStateVersion: 1 };
++  render({ ...base, returnState: returned([P1]) });
++  await tick();
++  assert.equal(render({ ...base, returnState: returned([P1]) }).pending.status, 'none', 'inelegível/enviada: ausência confirmada');
++  const multiple = render({ ...base, returnState: returned([P1, P2]) });
++  assert.equal(multiple.pending.status, 'multiple');
++  assert.equal(multiple.pending.count, 2);
++  assert.equal(calls, 1, 'várias pendências não consultam uma por conta própria');
++});
++
++test('R01-15: histórico vazio não continua afirmado durante revalidação; histórico novo substitui', async () => {
++  let page = { items: [], nextCursor: null };
++  const gate = [];
++  const render = hookRig({
++    fetchParticipationHistory: () => { const d = deferred(); gate.push(d); return d.promise; },
++    fetchPendingEvaluationHistoryItem: async () => null,
++  });
++  const params = v => ({ auth: authFor(USER_A), enabled: true, focused: true, returnState: returned([]), returnStateVersion: v });
++  render(params(1));
++  gate[0].resolve(page); await tick();
++  assert.equal(render(params(1)).status, 'empty');
++  const revalidating = render(params(2));
++  assert.equal(revalidating.status, 'loading', 'sem afirmar ausência enquanto verifica');
++  page = { items: [historyItem()], nextCursor: null };
++  gate[1].resolve(page); await tick();
++  const filled = render(params(2));
++  assert.equal(filled.status, 'history');
++  // Histórico confirmado permanece visível (sem flicker) durante a próxima atualização.
++  const refreshing = render(params(3));
++  assert.equal(refreshing.status, 'history');
++  assert.equal(refreshing.refreshing, true);
++  assert.equal(refreshing.recent.participationId, P1);
++});
++
++test('R01-16: avaliação que deixou de ser pendente tem a ação invalidada até a nova confirmação', async () => {
++  const answers = [deferred(), deferred()];
++  let n = 0;
++  const render = hookRig({
++    fetchParticipationHistory: async () => ({ items: [historyItem()], nextCursor: null }),
++    fetchPendingEvaluationHistoryItem: () => answers[n++].promise,
++  });
++  const params = v => ({ auth: authFor(USER_A), enabled: true, focused: true, returnState: returned([P1]), returnStateVersion: v });
++  render(params(1));
++  answers[0].resolve(historyItem()); await tick();
++  assert.equal(render(params(1)).pending.status, 'single');
++  // Avaliação enviada em outro contexto → nova versão do retorno.
++  const invalidated = render(params(2));
++  assert.equal(invalidated.pending.status, 'checking');
++  assert.equal(invalidated.pending.item, null, 'CTA anterior não fica habilitado');
++  answers[1].resolve(null); await tick();
++  assert.equal(render(params(2)).pending.status, 'none');
++});
++
++test('R01-17: respostas fora de ordem na mesma conta — vale apenas a mais recente', async () => {
++  const pages = [deferred(), deferred()];
++  let n = 0;
++  const render = hookRig({
++    fetchParticipationHistory: () => pages[n++].promise,
++    fetchPendingEvaluationHistoryItem: async () => null,
++  });
++  const params = v => ({ auth: authFor(USER_A), enabled: true, focused: true, returnState: returned([]), returnStateVersion: v });
++  render(params(1));
++  render(params(2));
++  pages[1].resolve({ items: [historyItem(P2)], nextCursor: null }); await tick();
++  pages[0].resolve({ items: [], nextCursor: null }); await tick();
++  const result = render(params(2));
++  assert.equal(result.status, 'history');
++  assert.equal(result.recent.participationId, P2, 'resposta antiga não sobrescreve a mais recente');
++});
++
++test('R01-18: troca de conta e logout não exibem dados da conta anterior', async () => {
++  const pages = { [USER_A]: deferred(), [USER_B]: deferred() };
++  const render = hookRig({
++    fetchParticipationHistory: client => pages[client.id.split('#')[0]].promise,
++    fetchPendingEvaluationHistoryItem: async () => historyItem(),
++  });
++  const base = { enabled: true, focused: true, returnState: returned([P1]), returnStateVersion: 1 };
++  render({ ...base, auth: authFor(USER_A) });
++  render({ ...base, auth: authFor(USER_B) });
++  pages[USER_A].resolve({ items: [historyItem()], nextCursor: null }); await tick();
++  const b = render({ ...base, auth: authFor(USER_B) });
++  assert.equal(b.status, 'loading');
++  assert.equal(b.recent, null);
++  const loggedOut = render({ ...base, auth: { isAuthenticated: false } });
++  assert.equal(loggedOut.status, 'loading');
++  assert.equal(loggedOut.pending.item, null);
++});
++
++test('R01: horário do evento recente é identificado como horário da participação', () => {
++  const ingress = overviewUtils.describeRecentParticipation(historyItem());
++  assert.equal(ingress.timeLabel, 'Seu ingresso');
++  const entered = overviewUtils.describeRecentParticipation(historyItem(P1, { arenaEnteredAt: '2026-11-08T13:05:00.000000Z' }));
++  assert.equal(entered.timeLabel, 'Sua entrada na Arena');
++});
+diff --git a/app/utils/eventEntryPresentation.js b/app/utils/eventEntryPresentation.js
+index 8d49e78..cc019e2 100644
+--- a/app/utils/eventEntryPresentation.js
++++ b/app/utils/eventEntryPresentation.js
+@@ -49,9 +49,57 @@ export function describeEventAvailability(eligibility) {
+ }
+ 
+ export function describeExternalQueue(enabled) {
+-  return enabled
+-    ? 'Ao confirmar, você entra na fila de entrada e aguarda a liberação da equipe do evento.'
+-    : 'Ao confirmar, sua entrada na Arena é liberada logo em seguida.';
++  return describeQueueConfiguration({ externalQueueEnabled: enabled }, { eligible: true, blockingReasons: [] }).text;
++}
++
++/**
++ * Configuração oficial da fila externa, adaptada à situação oficial do evento.
++ * Nunca sugere que o ingresso é possível quando o servidor diz o contrário.
++ * @param eligibility elegibilidade confirmada; `null` quando está sendo revalidada.
++ */
++export function describeQueueConfiguration(event, eligibility) {
++  if (typeof event?.externalQueueEnabled !== 'boolean') return null;
++  const queue = event.externalQueueEnabled;
++  const title = queue ? 'Evento com fila de entrada' : 'Entrada direta na Arena';
++  const reasons = Array.isArray(eligibility?.blockingReasons) ? eligibility.blockingReasons : [];
++  let text;
++  if (!eligibility) {
++    text = queue
++      ? 'Este evento usa fila de entrada: após o ingresso, você aguarda a liberação da equipe do evento.'
++      : 'Este evento não usa fila de entrada: após o ingresso, a entrada na Arena é liberada em seguida.';
++  } else if (eligibility.eligible) {
++    return {
++      title: queue ? 'Fila de entrada ativa' : title,
++      text: queue
++        ? 'Ao confirmar, você entra na fila de entrada e aguarda a liberação da equipe do evento.'
++        : 'Ao confirmar, sua entrada na Arena é liberada logo em seguida.',
++    };
++  } else if (reasons.includes('EVENT_REGISTRATION_CLOSED')) {
++    text = queue
++      ? 'As entradas foram encerradas. Não é mais possível entrar na fila deste evento.'
++      : 'As entradas foram encerradas. Não é mais possível entrar neste evento.';
++  } else if (reasons.includes('EVENT_NOT_STARTED') || reasons.includes('EVENT_NOT_READY')) {
++    text = queue
++      ? 'Quando as entradas forem abertas, quem confirmar entra na fila de entrada e aguarda a liberação da equipe. Ainda não é possível ingressar.'
++      : 'Este evento não usa fila de entrada. Quando as entradas forem abertas, a entrada na Arena é liberada logo após a confirmação. Ainda não é possível ingressar.';
++  } else {
++    text = queue
++      ? 'Este evento usa fila de entrada: após um ingresso permitido, você aguarda a liberação da equipe do evento.'
++      : 'Este evento não usa fila de entrada: após um ingresso permitido, a entrada na Arena é liberada em seguida.';
++  }
++  return { title, text };
++}
++
++/**
++ * Aviso sobre a programação quando a situação oficial a contradiz (ex.: encerramento
++ * administrativo antes do horário programado). O contrato não informa o horário efetivo.
++ */
++export function describeScheduleNotice(eligibility) {
++  const reasons = Array.isArray(eligibility?.blockingReasons) ? eligibility.blockingReasons : [];
++  if (eligibility && !eligibility.eligible && reasons.includes('EVENT_REGISTRATION_CLOSED')) {
++    return 'As entradas já foram encerradas. Os horários abaixo são a programação original e não valem mais como prazo.';
++  }
++  return null;
+ }
+ 
+ /** Ações auxiliares oferecidas para bloqueios que o participante pode resolver. */
+diff --git a/app/utils/homeOverview.js b/app/utils/homeOverview.js
+index 9ae5776..dbbce8c 100644
+--- a/app/utils/homeOverview.js
++++ b/app/utils/homeOverview.js
+@@ -19,62 +19,79 @@ export function pendingEvaluationIds(returnState) {
+   return [...new Set(ids.filter(id => typeof id === 'string' && UUID.test(id)))];
+ }
+ 
++/** Lê a participação mais recente (primeira página do histórico, ordenada pelo servidor). */
++export async function loadRecentParticipation(client, { fetchHistory, isCurrent = () => true }) {
++  const page = await fetchHistory(client, { limit: 1 });
++  if (!isCurrent()) return undefined;
++  return page.items[0] ?? null;
++}
++
+ /**
+- * Lê a participação mais recente e confirma a pendência indicada pelo servidor.
+- * Uma pendência única só é oferecida depois de confirmada por elegibilidade e histórico;
+- * várias pendências seguem a política existente (lista na aba Eventos).
+- * Falha na confirmação da pendência não esconde o histórico, apenas o card.
++ * Estado da avaliação pendente derivável sem nova leitura: 0 ou várias pendências vêm do
++ * `return-state` do servidor; uma única precisa ser confirmada (elegibilidade + histórico).
+  */
+-export async function loadHomeOverview(client, {
+-  pendingIds = [], isCurrent = () => true, fetchHistory, fetchPendingItem,
+-}) {
+-  const page = await fetchHistory(client, { limit: 1 });
+-  if (!isCurrent()) return null;
+-  const recent = page.items[0] ?? null;
++export function initialPendingState(pendingIds) {
++  if (pendingIds.length === 0) return { status: 'none', item: null, count: 0, error: null };
++  if (pendingIds.length > 1) return { status: 'multiple', item: null, count: pendingIds.length, error: null };
++  return { status: 'checking', item: null, count: 1, error: null };
++}
+ 
+-  let pending = null;
+-  if (pendingIds.length === 1) {
+-    try {
+-      const item = await fetchPendingItem(client, pendingIds[0], { isCurrent });
+-      if (!isCurrent()) return null;
+-      if (item) pending = { kind: 'single', item };
+-    } catch {
+-      if (!isCurrent()) return null;
+-    }
+-  } else if (pendingIds.length > 1) {
+-    pending = { kind: 'multiple', count: pendingIds.length };
+-  }
+-  return { recent, pending };
++/**
++ * Confirma a pendência única. `null` do serviço = já enviada, expirada ou inelegível (ausência
++ * confirmada). Falhas são propagadas: o chamador não pode tratá-las como ausência.
++ */
++export async function confirmSinglePending(client, participationId, { fetchPendingItem, isCurrent = () => true }) {
++  const item = await fetchPendingItem(client, participationId, { isCurrent });
++  if (!isCurrent()) return undefined;
++  return item ? { status: 'single', item, count: 1, error: null } : { status: 'none', item: null, count: 0, error: null };
+ }
+ 
+ export function describeRecentParticipation(item) {
+   if (!item) return null;
++  // O histórico não traz período/fuso do evento: o horário exibido é o da própria participação.
+   const when = formatInstantParts(item.arenaEnteredAt ?? item.joinedAt);
++  const timeLabel = item.arenaEnteredAt ? 'Sua entrada na Arena' : 'Seu ingresso';
+   const status = STATUS_PRESENTATION[item.status] ?? { label: 'Situação indisponível', variant: 'default' };
+   return {
+     participationId: item.participationId,
+     eventName: item.event.name,
+     date: when?.date ?? null,
+     time: when?.time ?? null,
++    timeLabel,
+     statusLabel: status.label,
+     statusVariant: status.variant,
+   };
+ }
+ 
+ export function describePendingEvaluation(pending, recent) {
+-  if (!pending) return null;
+-  if (pending.kind === 'multiple') {
++  const status = pending?.status;
++  if (status === 'multiple') {
+     return {
+       kind: 'multiple',
++      actionable: true,
+       text: `Você tem ${pending.count} avaliações pendentes. Escolha qual participação deseja avaliar.`,
+     };
+   }
+-  const isRecent = recent?.participationId === pending.item.participationId;
+-  return {
+-    kind: 'single',
+-    item: pending.item,
+-    text: isRecent
+-      ? 'Você ainda pode avaliar sua participação no último evento.'
+-      : `Você ainda pode avaliar sua participação em ${pending.item.event.name}.`,
+-  };
++  if (status === 'single' && pending.item) {
++    const isRecent = recent?.participationId === pending.item.participationId;
++    return {
++      kind: 'single',
++      actionable: true,
++      item: pending.item,
++      text: isRecent
++        ? 'Você ainda pode avaliar sua participação no último evento.'
++        : `Você ainda pode avaliar sua participação em ${pending.item.event.name}.`,
++    };
++  }
++  if (status === 'checking') {
++    return { kind: 'checking', actionable: false, text: 'Verificando se há avaliação pendente...' };
++  }
++  if (status === 'error') {
++    return {
++      kind: 'error',
++      actionable: false,
++      text: 'Não foi possível verificar sua avaliação pendente agora.',
++    };
++  }
++  return null;
+ }
+diff --git a/docs/PARTICIPANTE_01_HOME_INGRESSO_IMPLEMENTACAO.md b/docs/PARTICIPANTE_01_HOME_INGRESSO_IMPLEMENTACAO.md
+index de75a3b..543766a 100644
+--- a/docs/PARTICIPANTE_01_HOME_INGRESSO_IMPLEMENTACAO.md
++++ b/docs/PARTICIPANTE_01_HOME_INGRESSO_IMPLEMENTACAO.md
+@@ -5,7 +5,7 @@
+ **Módulo:** Participante (frontend Expo)
+ **Branch:** `feature/heliom-participante-ux`
+ **Origem:** `origin/develop` em `5758fe1dcda104f6bfacf3ddb922a3711b088298` (19/11/2026, "style(admin): atualizar logo exclusiva do cabecalho")
+-**Estado atual:** entregue para revisão (aguardando análise do responsável; não aprovada)
++**Estado atual:** Revisão 01 entregue para revalidação (não aprovada). Ver §10.
+ 
+ ## 1. Objetivo e escopo
+ 
+@@ -165,3 +165,162 @@ Observação de ambiente: `expo export --platform ios --platform android` na **m
+ - Commit de implementação: `b27c5f547c08ae3eaa73edc0d3994ffc7d7ab75a` — código, testes, este documento e `qa-evidence/PARTICIPANTE_01-changes.diff` (diff da implementação contra a base, verificado com `git apply --check`).
+ - Commit seguinte: somente este registro de Git no documento.
+ - Sem merge na `develop`, sem force push. Task 02 não iniciada.
++
++---
++
++## 10. Revisão 01 — Correções após auditoria técnica
++
++**Estado:** entregue para revalidação (não aprovada).
++**HEAD auditado:** `7149f53803da9282560c988c87e3da8162ef7b58` (commit principal auditado `b27c5f547c08ae3eaa73edc0d3994ffc7d7ab75a`, base `5758fe1dcda104f6bfacf3ddb922a3711b088298`).
++**Ambiente desta revisão:** macOS 12.7.6 (x86_64), Node v24.22.3 (binário oficial, verificado por SHA-256), dependências do `app/` instaladas com `npm ci --ignore-scripts` a partir do lockfile da branch.
++
++### 10.1 Preparação
++
++- Branch local criada a partir de `origin/feature/heliom-participante-ux`; `origin` apontava exatamente para `7149f53` (sem commits posteriores à auditoria).
++- Divergência confirmada: 2 commits próprios da feature e 5 exclusivos da `develop` (base `5758fe1`). A `develop` **não** foi incorporada (§12 da task).
++- Linha de base neste ambiente, no HEAD auditado (`npm test`): 925 testes, 872 aprovados, 0 falhas, 0 cancelados, 53 ignorados. Os 53 ignorados são suítes de integração condicionadas a ambiente (PostgreSQL/variáveis), não relacionadas a esta task; a entrega anterior registrou 0 ignorados em Windows com outro ambiente.
++- O documento indicado na task (`ProgramacaoMobile/docs/...`) corresponde, neste repositório, a `docs/PARTICIPANTE_01_HOME_INGRESSO_IMPLEMENTACAO.md` (não há pasta `ProgramacaoMobile`).
++
++### 10.2 Diagnóstico do contrato de backend usado nas correções (somente leitura, sem alteração)
++
++| Fonte | Fato verificado | Uso na correção |
++|---|---|---|
++| `backend/src/participations/join-idempotency.ts` (`reserveIdempotencyOperationWithTx`) | A chave é reservada **antes** da elegibilidade. Chave concluída ⇒ `replay` do resultado gravado (`resultReference`); outra requisição com a mesma chave e outro `eventId` ⇒ `request_conflict` (`IDEMPOTENCY_KEY_REUSED`). | Replay com a **mesma chave e o mesmo corpo** recupera o identificador da operação original sem criar nada. |
++| `participations.service.ts` (`createParticipation` + `JoinEligibilityRollback`) | Recusa de elegibilidade faz rollback da transação inteira, inclusive da reserva da chave. | Recusa de elegibilidade (`409/422/404/400` com código conhecido) para a chave enviada **prova** que ela não foi aplicada ⇒ a intenção pode ser liberada. |
++| `participation-lifecycle.controller.ts` + `participation-query.service.ts` | `GET /participations/:id` devolve a participação **da própria conta** com status efetivo (`finished` quando o evento encerrou), ou 404. | Distingue participação corrente de participação já encerrada (cenário B) sem usar a ausência em `/current` como prova. |
++| `idempotency.schema.ts`, `common/http/idempotency-ttl.ts` | `expires_at` é gravado (TTL por `PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS`), mas **não existe expurgo nem verificação de expiração no replay** ("não implementa retenção nem expurgo"). | Hoje o replay é autoritativo. **Limitação registrada** em 10.9: se um expurgo for introduzido, o replay de uma chave expurgada passaria a ser avaliado como novo ingresso. |
++
++Nenhum arquivo de backend, contrato, schema, migração ou retenção foi alterado.
++
++### 10.3 AUD-P01-01 — Isolamento do ingresso por evento e intenção (P1)
++
++- **Causa confirmada:** `lookup` publicava `{ ...state, status: 'looking_up', ... }`, herdando `confirmedParticipationId`, erros e status da consulta anterior; `joinFlight`/`syncFlight` eram globais ao store e a geração só mudava com conta/sessão. Uma resposta tardia de A publicava sobre o estado de B.
++- **Comportamento anterior:** após ingressar e encerrar A, a consulta de B mostrava "Atualizar participação" e `retrySync` tentava sincronizar a participação de A com o evento B.
++- **Correção:** cada `lookup` abre uma nova **operação** (`state.operation`); o estado é reconstruído do zero (sem `confirmedParticipationId`, `outcome`, erro ou recuperação herdados). Toda publicação assíncrona exige identidade + sessão + geração + operação atuais. Voos (`joinFlight`, `syncFlight`, `recoveryFlight`, `revalidateFlight`) são marcados com a operação que os criou e nunca são compartilhados com outra; um ingresso de outra operação ainda em voo bloqueia o novo com mensagem explícita, sem disparar POST. A confirmação devolvida pelo servidor continua sendo persistida na intenção mesmo quando a resposta chega tarde (a prova não se perde), mas não publica nada em B. A nova intenção registra `createdAt` (campo informativo; intenções antigas continuam válidas).
++- **Arquivos:** `app/services/eventAdmissionService.js`, `app/context/ParticipationContext.js`.
++- **Testes:** `participante01Revisao01.test.cjs` — R01-01, R01-02 (2 testes), R01-03 (3 testes), R01-22.
++- **Status:** corrigido.
++
++### 10.4 AUD-P01-02 — Reconciliação segura de ingresso com resposta perdida (P1)
++
++- **Causa confirmada:** com a resposta do POST perdida, a intenção ficava sem `confirmedParticipationId`; a nova consulta devolvia `PARTICIPATION_ALREADY_CURRENT`, a tela bloqueava o botão (único caminho de replay) e "Voltar ao início" não resolvia a intenção; além disso, a recusa `PARTICIPATION_ALREADY_CURRENT` era explicitamente excluída da liberação. Depois de encerrar a participação, qualquer outro evento recebia `ADMISSION_OTHER_EVENT_PENDING` indefinidamente. Uma intenção com identificador confirmado cuja participação já tinha terminado também ficava presa em `confirmed_unsynced`.
++- **Correção:**
++  - Novo `reconcile()` (exposto como `reconcileEntryIntent`): caminho próprio de recuperação, independente da elegibilidade de um novo ingresso. Lê a intenção da conta (de qualquer evento) e, sem identificador confirmado, repete o POST original com **a mesma `Idempotency-Key` e o mesmo corpo** (`{ eventId }` original). Nunca gera chave nova.
++  - `settleConfirmed()`: com o identificador provado pelo servidor, (A) participação corrente em `/current` com o mesmo id e evento ⇒ `complete`; senão (B) `GET /participations/:id` ⇒ `finished/canceled` do mesmo evento ⇒ resultado **histórico**; status corrente ⇒ `complete`. Só esses desfechos liberam a intenção. Evento divergente ⇒ bloqueio explícito.
++  - `classifyJoinFailure()`: `not_applied` (códigos de elegibilidade/validação, que pelo contrato só ocorrem com a chave não gravada) ⇒ libera; `uncertain` (rede, timeout, 5xx, `IDEMPOTENCY_IN_PROGRESS`, resposta inválida) ⇒ preserva; `session` (401/403) e `conflict` (`IDEMPOTENCY_KEY_REUSED`) ⇒ preserva e bloqueia; 4xx desconhecido ⇒ preserva. Mudança deliberada: 401/403 deixaram de liberar a intenção (antes liberavam) e `PARTICIPATION_ALREADY_CURRENT` passou a liberar, ambos justificados pela ordem reserva→elegibilidade do backend.
++  - A intenção nunca é apagada por fechar o app, renovar sessão, trocar de conta, consultar outro evento, falha de leitura ou passagem de tempo.
++  - Na confirmação, o cartão "Tentativa anterior" aparece sempre que existe intenção não resolvida (de outro evento, confirmada, ilegível ou do mesmo evento bloqueado), com "Verificar tentativa anterior"; o ingresso novo fica desabilitado até a resolução. Intenção incerta do mesmo evento com entradas abertas continua usando o próprio botão ("Verificar ingresso", mesma chave).
++- **Arquivos:** `app/services/eventAdmissionService.js`, `app/context/ParticipationContext.js`, `app/screens/event-entry/EventConfirmationScreen.js`.
++- **Testes:** R01-04/05 (cenário completo dos 8 passos com reabertura do app), R01-06 (2 testes), R01-07, R01-08 (2 testes), R01-18 (troca de conta durante a reconciliação), R01-22; na tela: R01-05 (2), R01-07/08, R01-02, R01-22.
++- **Limitações:** ver 10.9 (expurgo futuro; pacote de rede muito atrasado).
++- **Status:** corrigido.
++
++### 10.5 AUD-P01-03 — Revalidação da elegibilidade do evento (P1)
++
++- **Causa confirmada:** `EventConfirmationScreen` lia `route.params.eligibility` como autoridade permanente; "Completar questionário" navegava sem contexto de retorno e, ao salvar, o questionário fazia `reset` para `MainTabs`, perdendo a jornada.
++- **Correção:**
++  - O store guarda (só em memória, por operação) o código consultado e expõe `revalidate()` (`revalidateEventEntry`), que repete `POST /events/lookup` — contrato real, autenticado — sem abrir nova operação. Estado `eligibilityStatus`: `fresh | revalidating | error`. Resposta de outro evento, sessão ou operação é descartada; chamadas concorrentes compartilham o mesmo voo; não revalida durante o POST de ingresso.
++  - A tela usa a rota só para identificar o evento; situação, cartões e botão derivam de `admission.eligibility` com `eligibilityStatus === 'fresh'`. Durante a revalidação mostra "ATUALIZANDO SITUAÇÃO" e bloqueia o botão; em falha, "SITUAÇÃO NÃO CONFIRMADA" + "Atualizar situação do evento". Nada é liberado pelo relógio do aparelho.
++  - Gatilhos: volta de foco (não na montagem inicial, que usa a consulta recém-feita), retorno ao primeiro plano com a tela focada, botão manual, recusa definitiva do POST (`revalidate: true`), resultado histórico e resolução da tentativa anterior. Sem polling.
++  - "Completar questionário" abre `ProfileQuestionnaire` com `{ mode: 'edit', returnTo: 'EventConfirmation' }`. Ao salvar ou cancelar, o questionário volta (`goBack`) para a confirmação, que revalida no servidor (identidade da sessão + perfil avaliado pelo backend). O parâmetro só decide o destino da navegação, nunca prova conclusão. O fluxo só existe em modo edição — usuários com questionário obrigatório pendente ficam na pilha própria e nunca chegam à confirmação —, e a edição a partir do Perfil continua voltando ao Perfil.
++- **Arquivos:** `app/services/eventAdmissionService.js`, `app/context/ParticipationContext.js`, `app/screens/event-entry/EventConfirmationScreen.js`, `app/screens/profile/ProfileQuestionnaireScreen.js`.
++- **Testes:** store R01-09/10/11, R01-09 (descarte e voo único), R01-12 (revalidação após perfil completo; retorno do questionário vs. edição pelo Perfil); tela R01-09/10, R01-09/23, R01-11, R01-12/23 (foco e `AppState`), R01-10 (recusa definitiva).
++- **Status:** corrigido.
++
++### 10.6 AUD-P01-04 — Separação entre histórico e avaliação pendente (P2)
++
++- **Causa confirmada:** `loadHomeOverview` capturava a falha da elegibilidade e devolvia `pending: null` (ausência silenciosa), e o histórico só era publicado depois da consulta da pendência.
++- **Correção:** `useHomeOverview` passou a ter dois ciclos independentes, cada um com sua geração: histórico (`loading | empty | history | error`, com `refreshing`) e avaliação pendente (`none | checking | single | multiple | error`). 0 ou várias pendências derivam do `return-state` do servidor; uma única é confirmada por `fetchPendingEvaluationHistoryItem`. Falha ⇒ `error`, card sem ação de avaliação e "Tentar novamente" (`retryPending`), histórico preservado. Várias pendências ⇒ aba Eventos (política mantida).
++- **C-04/D09:** `HomeFlowScreen` guarda o item confirmado pela retomada e o repassa (`knownPending`) para a mesma versão do retorno; enquanto a retomada ainda consulta, o hook adia só a pendência (`pendingDeferred`). Não foram alterados `returnStateVersion`, `canPresentReturnEvaluation`, `claimReturnEvaluation`, a correlação com a finalização recente nem "Avaliar mais tarde". O teste com o hook real detectou e eliminou uma consulta duplicada da mesma pendência.
++- **Teste revisado:** o antigo "Falha na confirmação esconde só o card" (que aceitava a falha silenciosa) foi substituído: a falha agora deve ser propagada e virar estado de erro.
++- **Arquivos:** `app/screens/home/useHomeOverview.js`, `app/utils/homeOverview.js`, `app/screens/home/HomeScreen.js`, `app/screens/home/HomeFlowScreen.js`.
++- **Testes:** R01-13/14, R01-14, R01-19 (hook real em `homeReturnEvaluation.test.cjs`), R01-13 e R01-16 de tela.
++- **Status:** corrigido.
++
++### 10.7 AUD-P01-05 — Estados obsoletos durante revalidação da Home (P2)
++
++- **Causa confirmada:** o hook mantinha `{ ...previous, refreshing: true }` para qualquer estado não-erro da mesma conta, inclusive `empty` e a pendência anterior.
++- **Correção:** só um histórico **confirmado** da mesma conta/sessão/cliente permanece visível durante atualização (indicador discreto no título); vazio anterior volta a `loading` até nova confirmação. A pendência é ligada ao contexto `conta#sessão|versão|IDs` e ao ciclo de nova tentativa; mudança de contexto ou nova leitura invalida a ação (`checking`, sem item) até a confirmação. Respostas fora de ordem da mesma conta são descartadas pela geração de cada leitura.
++- **Ajuste de harness:** os testes do hook passaram a manter o mesmo `httpClient` por conta/época (como o `AuthContext` real); um cliente novo a cada render representava outro contexto HTTP e disparava, corretamente, nova leitura.
++- **Testes:** R01-15, R01-16, R01-17, R01-18 (hook) e R01-16 (tela).
++- **Status:** corrigido.
++
++### 10.8 AUD-P01-06 — Fila externa e horários programados (P2)
++
++- **Causa confirmada:** o cartão de fila só aparecia quando elegível, e "Entradas até"/"Encerramento final" soavam como prazos vigentes mesmo com encerramento administrativo.
++- **Correção:** `describeQueueConfiguration(event, eligibility)` apresenta a configuração oficial em todos os estados, com texto adaptado (aberto, ainda não iniciado/em preparação, encerrado, outros bloqueios, situação em revalidação), sem sugerir ingresso possível quando o servidor nega. O cartão passou a "Programação do evento" com "Data programada", "Início programado", "Encerramento programado das entradas", "Limite operacional programado" e "Fuso horário do evento"; o estado oficial aparece antes e, com `EVENT_REGISTRATION_CLOSED`, um aviso diz que os horários são a programação original e não valem mais como prazo. Nenhum horário ou motivo novo é inventado (o contrato não informa o horário efetivo do encerramento).
++- **Arquivos:** `app/utils/eventEntryPresentation.js`, `app/screens/event-entry/EventConfirmationScreen.js`.
++- **Testes:** R01-20 (fila habilitada/desabilitada, aberto, não iniciado, em preparação, encerrado), R01-21 (encerramento antecipado; fusos diferentes e meia-noite em `America/Manaus`), além dos testes de fuso já existentes.
++- **Status:** corrigido.
++
++### 10.9 Limitações e pontos para alinhamento (não implementados)
++
++- **Retenção de idempotência:** o replay só é seguro enquanto o registro da chave existir. Hoje não há expurgo; se for introduzido (ou se o replay passar a respeitar `expires_at`), uma chave expurgada seria tratada como novo ingresso e poderia criar participação. Antes de qualquer política de retenção, é necessário alinhar um sinal explícito do backend para "chave expirada/desconhecida" (fora do escopo; não alterado).
++- **Pacote original muito atrasado:** se o POST original ainda estiver em trânsito quando o replay recebe uma recusa de elegibilidade e a intenção é liberada, ele pode ser processado depois. A exclusividade de participação corrente do backend impede duas participações correntes; o efeito seria uma participação inesperada visível em `/current`. Risco teórico, registrado.
++- **Local e fuso no histórico** e **escolha entre várias pendências** continuam como em 9.7.
++
++### 10.10 Fidelidade visual e ícones
++
++- Emojis permanentes (📷 🎮 ⭐ 📅 🕒 🚪 🏁 🌎) substituídos por `components/ui/LineIcon.js`: ícones desenhados com `View` (mesmo padrão de `navigation/MainTabs.js`), traço de 1,8 dp, sem fonte de ícones, SVG ou nova dependência, idênticos em Android e iOS (`qr`, `gamepad`, `star`, `calendar`, `clock`, `door`, `flag`, `globe`, `queue`, `alert`, `refresh`).
++- Card de avaliação pendente com identidade roxa (`brand.primary`/`primaryDim`), ícone de estrela em caixa própria e divisor vertical entre ícone e conteúdo; estados "verificando" e "erro" em versão neutra, sem ação de avaliação.
++- Evento recente: ícone de controle, e o horário passou a ser rotulado como da participação ("Sua entrada na Arena" ou "Seu ingresso"), não como horário oficial do evento; local continua omitido.
++- **Comparação com os mockups:** PENDENTE. `ArenaGO_01_Home_Inicial_Padronizada(3).png` e `ArenaGO_03_Home_Apos_Evento_Padronizada(3).png` não estavam disponíveis neste computador durante a revisão (foram solicitados). Os ajustes acima seguem a lista do item 9 da task; espaçamentos, cores e posições finos ainda precisam ser conferidos contra as imagens.
++- **Capturas reais:** não produzidas — não há simulador, emulador nem aparelho neste ambiente. Nenhuma imagem gerada ou mockup foi usada como evidência.
++
++### 10.11 Testes executados nesta revisão
++
++Ambiente: macOS 12.7.6 x86_64, Node v24.22.3, `app/` e `qa/regression/` com `npm ci --ignore-scripts` pelos lockfiles. Nenhum banco, migração ou serviço externo. Executado pelo assistente com autorização do responsável nesta sessão.
++
++| Comando (em `app/`) | SHA testado | Total | Aprov. | Falhas | Cancel. | Ignor. | Exit |
++|---|---|---|---|---|---|---|---|
++| `npm test` — linha de base, sem deps de `qa/regression` | `7149f53` | 925 | 872 | 0 | 0 | 53 | 0 |
++| `npm test` — revisão, sem deps de `qa/regression` | working tree sobre `7149f53` | 968 | 915 | 0 | 0 | 53 | 0 |
++| `npm test` — revisão, **com** deps de `qa/regression` | working tree sobre `7149f53` (idêntico ao commit da revisão) | **968** | **968** | 0 | 0 | 0 | 0 |
++| Suíte focada (abaixo) | idem | **332** | **332** | 0 | 0 | 0 | 0 |
++| `npx expo export --platform android` | idem | — | — | — | — | — | 0 (Hermes `.hbc` 2,9 MB) |
++| `npx expo export --platform ios` | idem | — | — | — | — | — | 0 |
++| `git diff --check` (código e documentação) | idem | — | — | — | — | — | sem problemas |
++
++Os 53 ignorados das duas primeiras linhas são suítes que exigem as dependências de `qa/regression` (`staffRealNavigation`, `roleRoutingIntegration` etc., `skip` explícito no próprio teste); com elas instaladas, nenhum teste é ignorado. O número de 925 da entrega anterior não foi reaproveitado.
++
++Suíte focada: `node --test tests/participante01Home.test.cjs tests/homeReturnEvaluation.test.cjs tests/eventEntry.test.cjs tests/eventAdmissionService.test.cjs tests/participante01Revisao01.test.cjs tests/homeFlow.test.cjs tests/participationProvider.test.cjs tests/participationService.test.cjs tests/auth.test.cjs tests/authNavigation.test.cjs tests/adminNavigation.test.cjs tests/roleRoutingIntegration.test.cjs tests/autoQueueSync.test.cjs tests/profileEditing.test.cjs`.
++
++Testes novos: `tests/participante01Revisao01.test.cjs` (25, com backend simulado fiel à ordem reserva→elegibilidade, rollback, replay e `GET /participations/:id`), 14 em `eventEntry.test.cjs`, 3 em `participante01Home.test.cjs`, 1 em `homeReturnEvaluation.test.cjs` (hook real). As asserções verificam estados do store, requisições, `eventId`, chaves idempotentes, número de criações no servidor e conteúdo do armazenamento de intenções, não só textos.
++
++Testes adaptados (sem enfraquecer proteções): fixtures da confirmação passaram a publicar a elegibilidade no store (`official(...)`), pois a rota deixou de ser autoridade; P01-17 agora exige `{ mode: 'edit', returnTo: 'EventConfirmation' }`; os testes de `loadHomeOverview` foram substituídos pelos das novas funções (a falha silenciosa deixou de ser aceita); harness: stub `LineIcon`, `canGoBack` opcional, `AppState` opcional no `screenRig` e `httpClient` estável por conta/época no hook.
++
++### 10.12 Matriz de regressão R01
++
++| ID | Cobertura |
++|---|---|
++| R01-01 | store: ingresso A → finalização → B (chaves e intenções distintas, 2 criações) |
++| R01-02 | store: reingresso no mesmo evento; intenção residual de evento encerrado tratada como histórica; tela: "Verificar ingresso" com mesma chave |
++| R01-03 | store: POST tardio de A durante B; lookup tardio; consulta de outro evento preserva intenção incerta |
++| R01-04 / R01-05 | store: resposta perdida → reabertura → `ALREADY_CURRENT` → replay com a chave original → 1 criação → B com nova chave; tela: recuperação leva à participação corrente |
++| R01-06 | store: recuperação com participação encerrada (histórico); confirmação presa em "Atualizar" resolvida como histórico |
++| R01-07 | store: rede, 5xx e falha do GET durante reconciliação preservam intenção e chave |
++| R01-08 | store: `KEY_REUSED`, 401, 403 e armazenamento ilegível bloqueiam explicitamente; prova de não aplicação libera sem criar |
++| R01-09 / R01-10 / R01-11 | store: abertura, preparação, encerramento e recusa definitiva; tela: rota não libera, revalidação bloqueia, erro oferece atualização |
++| R01-12 | store: revalidação após perfil completo; questionário volta à confirmação (e à aba Perfil quando aberto pelo Perfil); tela: foco revalida |
++| R01-13 / R01-14 | hook: histórico antes da avaliação, timeout → erro → retry → card; tela: erro sem CTA e com retry |
++| R01-15 | hook: vazio não reafirmado; histórico confirmado visível em atualização |
++| R01-16 | hook: nova versão invalida CTA; tela: "verificando" sem CTA |
++| R01-17 | hook: respostas fora de ordem na mesma conta |
++| R01-18 | hook: troca de conta e logout; store: troca de conta durante reconciliação |
++| R01-19 | `homeReturnEvaluation`: HomeFlow + hook real, apresentação única, sem consulta duplicada na mesma versão |
++| R01-20 | tela: fila habilitada/desabilitada em aberto, não iniciado, em preparação e encerrado |
++| R01-21 | tela: encerramento antecipado (aviso, rótulos "programado"); fusos e meia-noite |
++| R01-22 | store: toques repetidos em confirmar e reconciliar; tela: verificação com toque repetido |
++| R01-23 | tela: retorno ao primeiro plano (`AppState`) e foco revalidam sem consultas redundantes |
++| R01-24 | testes ENTRY-QR-01 e de código manual existentes em `eventEntry.test.cjs` (inalterados, aprovados) |
++
++### 10.13 Validação física — PENDENTE
++
++Não executada: não há aparelho Android/iOS, simulador ou emulador neste ambiente. Pendentes no aparelho: Home inicial, Home com histórico, avaliação pendente, QR Code, código manual, confirmação (elegível/indisponível/recuperação), retorno do questionário, ingressos sucessivos, reabertura, perda de conexão, fonte ampliada, áreas seguras, formatação de horários e o desenho dos novos ícones (em especial a estrela feita com triângulos de borda). A geração dos bundles Expo não substitui essa homologação.
++
++### 10.14 Evidências de diff e Git
++
++- **Avisos de whitespace do patch versionado:** causa confirmada — num diff unificado, linhas de contexto em branco são gravadas como `" "`, que o `git diff --check` aponta como espaço final *dentro do arquivo `.diff`* (42 avisos em `qa-evidence/PARTICIPANTE_01-changes.diff`). O patch histórico **não** foi alterado; ele continua representando `5758fe1` → `b27c5f5` (código da entrega inicial) e **não** representa o HEAD corrigido. Para patches, a verificação adequada é `git apply --check` contra a base declarada.
++- **Novo patch da revisão:** `qa-evidence/PARTICIPANTE_01_R01-changes.diff` — base `7149f53803da9282560c988c87e3da8162ef7b58` (HEAD auditado), escopo: todas as alterações de código, testes e documentação desta revisão (exceto o próprio patch), finalidade: revisão isolada das correções R01. Verificado com `git apply --check` sobre `7149f53`.
++- **Alterações de contratos:** nenhuma (backend, schema, migrações, retenção de idempotência e autenticação intactos).
++- **Integração:** `develop` não incorporada; sem merge na `develop`; sem force push. PARTICIPANTE-02 não iniciada.

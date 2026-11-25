@@ -16,7 +16,7 @@ const returned = { recentFinalization: { participationId: ID, eventId: EVENT,
 const tick = () => new Promise(resolve => setImmediate(resolve));
 function deferred() { let resolve; const promise = new Promise(ok => { resolve = ok; }); return { promise, resolve }; }
 
-function rig({ current = null, returnState = returned, read } = {}) {
+function rig({ current = null, returnState = returned, read, realHook = false } = {}) {
   let identity = { userId: 'a', epoch: 1 }, verified = true, focused = true;
   let cursor = 0, dirty = false, tree;
   const hooks = [], effects = [], calls = [], reads = [];
@@ -58,7 +58,18 @@ function rig({ current = null, returnState = returned, read } = {}) {
     if (name === '../../context/ParticipationContext') return { ParticipationContext: {} };
     if (name === '../../services/participationHistoryService') return history;
     if (name === '../../components/ui') return {};
-    if (name === './useHomeOverview') return { useHomeOverview: () => ({ status: 'loading', retry() {} }) };
+    if (name === './useHomeOverview') {
+      if (!realHook) return { useHomeOverview: () => ({ status: 'loading', retry() {} }) };
+      // R01-19: hook real da Home, com o mesmo React simulado e o serviço real de histórico.
+      const eventTime = loadModule('utils/eventTime.js', require).exports;
+      const overviewUtils = loadModule('utils/homeOverview.js', dep => dep === './eventTime.js' ? eventTime : require(dep)).exports;
+      return loadModule('screens/home/useHomeOverview.js', dep => {
+        if (dep === 'react') return react;
+        if (dep === '../../services/participationHistoryService.js') return history;
+        if (dep === '../../utils/homeOverview.js') return overviewUtils;
+        return require(dep);
+      }).exports;
+    }
     if (name.startsWith('../arena/') || name === './HomeScreen') return { __esModule: true, default: name.split('/').at(-1) };
     return require(name);
   }).exports;
@@ -202,4 +213,29 @@ test('participação ativa e fila externa impedem apresentação de finalizaçã
     assert.equal(r.reads.length, 2);
     assert.equal(r.tree.type === 'RealArenaScreen' || r.tree.type.name === 'ExternalQueueScreen', true);
   }
+});
+
+// ---------------------------------------------------------------- PARTICIPANTE-01 R01
+
+test('R01-19: retomada C-04/D09 com o hook real da Home preserva a apresentação única e não repete a consulta', async () => {
+  const r = rig({ realHook: true }); await r.start(); await r.settle();
+  assert.equal(r.calls.length, 1, 'apresentação automática uma única vez');
+  assert.equal(r.calls[0].name, 'RealEvaluation');
+  const eligibilityReads = () => r.reads.filter(path => path.endsWith('/evaluation-eligibility')).length;
+  assert.equal(eligibilityReads(), 1);
+
+  r.later(); await r.settle(); // "Avaliar mais tarde"
+  assert.equal(r.calls.length, 1, 'não reapresenta no mesmo ciclo de retomada');
+  const overview = r.tree.props.overview;
+  assert.equal(r.tree.type, 'HomeScreen');
+  assert.equal(overview.status, 'history');
+  assert.equal(overview.pending.status, 'single');
+  assert.equal(overview.pending.item, item, 'reaproveita a leitura confirmada pela retomada');
+  assert.equal(eligibilityReads(), 1, 'sem segunda consulta da mesma pendência na mesma versão');
+
+  // Nova versão do retorno (refresh): leitura válida anterior não é reaproveitada.
+  await r.refresh(); await r.settle();
+  assert.equal(r.calls.length, 1);
+  assert.equal(eligibilityReads(), 2);
+  assert.equal(r.tree.props.overview.pending.status, 'single');
 });

@@ -49,9 +49,57 @@ export function describeEventAvailability(eligibility) {
 }
 
 export function describeExternalQueue(enabled) {
-  return enabled
-    ? 'Ao confirmar, você entra na fila de entrada e aguarda a liberação da equipe do evento.'
-    : 'Ao confirmar, sua entrada na Arena é liberada logo em seguida.';
+  return describeQueueConfiguration({ externalQueueEnabled: enabled }, { eligible: true, blockingReasons: [] }).text;
+}
+
+/**
+ * Configuração oficial da fila externa, adaptada à situação oficial do evento.
+ * Nunca sugere que o ingresso é possível quando o servidor diz o contrário.
+ * @param eligibility elegibilidade confirmada; `null` quando está sendo revalidada.
+ */
+export function describeQueueConfiguration(event, eligibility) {
+  if (typeof event?.externalQueueEnabled !== 'boolean') return null;
+  const queue = event.externalQueueEnabled;
+  const title = queue ? 'Evento com fila de entrada' : 'Entrada direta na Arena';
+  const reasons = Array.isArray(eligibility?.blockingReasons) ? eligibility.blockingReasons : [];
+  let text;
+  if (!eligibility) {
+    text = queue
+      ? 'Este evento usa fila de entrada: após o ingresso, você aguarda a liberação da equipe do evento.'
+      : 'Este evento não usa fila de entrada: após o ingresso, a entrada na Arena é liberada em seguida.';
+  } else if (eligibility.eligible) {
+    return {
+      title: queue ? 'Fila de entrada ativa' : title,
+      text: queue
+        ? 'Ao confirmar, você entra na fila de entrada e aguarda a liberação da equipe do evento.'
+        : 'Ao confirmar, sua entrada na Arena é liberada logo em seguida.',
+    };
+  } else if (reasons.includes('EVENT_REGISTRATION_CLOSED')) {
+    text = queue
+      ? 'As entradas foram encerradas. Não é mais possível entrar na fila deste evento.'
+      : 'As entradas foram encerradas. Não é mais possível entrar neste evento.';
+  } else if (reasons.includes('EVENT_NOT_STARTED') || reasons.includes('EVENT_NOT_READY')) {
+    text = queue
+      ? 'Quando as entradas forem abertas, quem confirmar entra na fila de entrada e aguarda a liberação da equipe. Ainda não é possível ingressar.'
+      : 'Este evento não usa fila de entrada. Quando as entradas forem abertas, a entrada na Arena é liberada logo após a confirmação. Ainda não é possível ingressar.';
+  } else {
+    text = queue
+      ? 'Este evento usa fila de entrada: após um ingresso permitido, você aguarda a liberação da equipe do evento.'
+      : 'Este evento não usa fila de entrada: após um ingresso permitido, a entrada na Arena é liberada em seguida.';
+  }
+  return { title, text };
+}
+
+/**
+ * Aviso sobre a programação quando a situação oficial a contradiz (ex.: encerramento
+ * administrativo antes do horário programado). O contrato não informa o horário efetivo.
+ */
+export function describeScheduleNotice(eligibility) {
+  const reasons = Array.isArray(eligibility?.blockingReasons) ? eligibility.blockingReasons : [];
+  if (eligibility && !eligibility.eligible && reasons.includes('EVENT_REGISTRATION_CLOSED')) {
+    return 'As entradas já foram encerradas. Os horários abaixo são a programação original e não valem mais como prazo.';
+  }
+  return null;
 }
 
 /** Ações auxiliares oferecidas para bloqueios que o participante pode resolver. */

@@ -145,11 +145,19 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
   const currentUserIdRef = useRef(auth?.user?.id);
   currentUserIdRef.current = auth?.user?.id;
 
+  // Aberto pela confirmação de ingresso: voltar à mesma jornada, que revalida tudo no servidor.
+  // O parâmetro só decide o destino da navegação; nunca serve de prova de questionário concluído.
+  const returnsToEventEntry = isEditMode && route?.params?.returnTo === 'EventConfirmation';
+
   function returnToProfile(saved = false) {
     if (!saved && isSubmittingRef.current) return;
     if (!authRef.current?.isAuthenticated) return;
     if (authRef.current?.user?.hasCompletedQuestionnaire === false) {
       navigation?.navigate?.('ProfileQuestionnaire', { mode: undefined });
+      return;
+    }
+    if (returnsToEventEntry && navigation?.canGoBack?.()) {
+      navigation.goBack();
       return;
     }
     const params = { screen: 'Perfil', params: { questionnaireSaved: saved } };
