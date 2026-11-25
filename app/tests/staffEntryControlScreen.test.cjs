@@ -467,7 +467,9 @@ test('STAFF-03 tela Controle de Entrada: chamada destacada sem duplicidade, cliq
   h.unmount();
 });
 
-test('STAFF03-AUD-05 tela Controle de Entrada cobre combinações reais de flags, indisponibilidade e estado stale', { skip }, async () => {
+test('STAFF03-AUD-05 + STAFF03-AUD-08 tela Controle de Entrada mantém comunicação coerente entre resumo operacional e chamada em todos os estados', { skip }, async () => {
+  const summaryRestrictedMsg = 'O ingresso de novos participantes e alterações da fila externa estão indisponíveis. As ações sobre chamadas pendentes dependem das permissões atuais.';
+  const legacyContradictoryMsg = 'O evento não permite entradas ou alterações da fila neste momento.';
   let mode = 'all_allowed';
   const h = createEntryScreenHarness({
     onGet: async () => {
@@ -513,24 +515,27 @@ test('STAFF03-AUD-05 tela Controle de Entrada cobre combinações reais de flags
     },
   });
 
-  // 1. Todas as operações permitidas
+  // 1. Operação normal: sem aviso indevido de indisponibilidade no resumo ou na chamada
   await h.mount();
   assert.equal(h.isDisabled('Confirmar entrada'), false);
   assert.equal(h.isDisabled('Marcar ausência'), false);
   assert.equal(h.isDisabled('Remover da fila'), false);
   assert.equal(h.hasText('A confirmação de entrada está indisponível.'), false);
+  assert.equal(h.hasText(summaryRestrictedMsg), false);
+  assert.equal(h.hasText(legacyContradictoryMsg), false);
 
-  // 2. Janela residual: confirmação bloqueada, ausência e remoção permitidas
+  // 2. Janela residual: resumo e card da chamada comunicam restrição sem contradição
   mode = 'residual';
   await h.press('Atualizar fila de entrada');
   assert.equal(h.isDisabled('Confirmar entrada'), true);
   assert.equal(h.isDisabled('Marcar ausência'), false);
   assert.equal(h.isDisabled('Remover da fila'), false);
   assert.equal(h.isDisabled('Desativar fila externa'), true);
+  assert.ok(h.hasText(summaryRestrictedMsg));
   assert.ok(h.hasText('A confirmação de entrada está indisponível. Ainda é possível registrar ausência ou remover o participante chamado.'));
-  assert.ok(h.hasText('O evento não permite entradas ou alterações da fila neste momento.'));
+  assert.equal(h.hasText(legacyContradictoryMsg), false);
 
-  // 3. Dados desatualizados (stale) bloqueiam todas as operações
+  // 3. Dados desatualizados (stale) preservam aviso de desatualização e bloqueiam ações
   mode = 'network';
   await h.act(async () => { await h.getPolling().read(); });
   assert.ok(h.hasText('Dados de entrada possivelmente desatualizados. Atualize antes de operar.'));
@@ -538,18 +543,21 @@ test('STAFF03-AUD-05 tela Controle de Entrada cobre combinações reais de flags
   assert.equal(h.isDisabled('Marcar ausência'), true);
   assert.equal(h.isDisabled('Remover da fila'), true);
 
-  // 4. Todas as operações bloqueadas pelo servidor
+  // 4. Todas as ações bloqueadas pelo servidor: resumo e card refletem bloqueio integral
   mode = 'all_blocked';
   await h.press('Atualizar fila de entrada');
   assert.equal(h.isDisabled('Confirmar entrada'), true);
   assert.equal(h.isDisabled('Marcar ausência'), true);
   assert.equal(h.isDisabled('Remover da fila'), true);
+  assert.ok(h.hasText(summaryRestrictedMsg));
   assert.ok(h.hasText('As ações sobre a chamada externa estão indisponíveis no estado atual do evento.'));
+  assert.equal(h.hasText(legacyContradictoryMsg), false);
 
-  // 5. Fila inativa
+  // 5. Fila inativa com gestão permitida: sem aviso indevido de !canManage
   mode = 'inactive';
   await h.press('Atualizar fila de entrada');
   assert.ok(h.hasExactText('FILA INATIVA'));
+  assert.equal(h.hasText(summaryRestrictedMsg), false);
   assert.equal(h.isDisabled('Chamar próximo'), true);
   assert.equal(h.isDisabled('Reativar fila externa'), false);
 

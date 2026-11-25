@@ -153,7 +153,7 @@ export function EntrySummaryCard({ externalQueueEnabled, waitingCount, hasPendin
         {!canManage && (
           <View style={styles.inlineWarningBox}>
             <Text style={styles.inlineWarningText}>
-              O evento não permite entradas ou alterações da fila neste momento.
+              O ingresso de novos participantes e alterações da fila externa estão indisponíveis. As ações sobre chamadas pendentes dependem das permissões atuais.
             </Text>
           </View>
         )}

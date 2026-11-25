@@ -701,7 +701,7 @@ index 87b95e5..9f781a5 100644
  });
 diff --git a/app/screens/staff/components/StaffEntrySections.js b/app/screens/staff/components/StaffEntrySections.js
 new file mode 100644
-index 0000000..4597c50
+index 0000000..d0e59c0
 --- /dev/null
 +++ b/app/screens/staff/components/StaffEntrySections.js
 @@ -0,0 +1,598 @@
@@ -860,7 +860,7 @@ index 0000000..4597c50
 +        {!canManage && (
 +          <View style={styles.inlineWarningBox}>
 +            <Text style={styles.inlineWarningText}>
-+              O evento não permite entradas ou alterações da fila neste momento.
++              O ingresso de novos participantes e alterações da fila externa estão indisponíveis. As ações sobre chamadas pendentes dependem das permissões atuais.
 +            </Text>
 +          </View>
 +        )}
@@ -2183,10 +2183,10 @@ index 82d7c40..9f4b9a0 100644
    const files = [];
 diff --git a/app/tests/staffEntryControlScreen.test.cjs b/app/tests/staffEntryControlScreen.test.cjs
 new file mode 100644
-index 0000000..7af2ded
+index 0000000..485e09a
 --- /dev/null
 +++ b/app/tests/staffEntryControlScreen.test.cjs
-@@ -0,0 +1,814 @@
+@@ -0,0 +1,822 @@
 +const assert = require('node:assert/strict');
 +const path = require('node:path');
 +const test = require('node:test');
@@ -2656,7 +2656,9 @@ index 0000000..7af2ded
 +  h.unmount();
 +});
 +
-+test('STAFF03-AUD-05 tela Controle de Entrada cobre combinações reais de flags, indisponibilidade e estado stale', { skip }, async () => {
++test('STAFF03-AUD-05 + STAFF03-AUD-08 tela Controle de Entrada mantém comunicação coerente entre resumo operacional e chamada em todos os estados', { skip }, async () => {
++  const summaryRestrictedMsg = 'O ingresso de novos participantes e alterações da fila externa estão indisponíveis. As ações sobre chamadas pendentes dependem das permissões atuais.';
++  const legacyContradictoryMsg = 'O evento não permite entradas ou alterações da fila neste momento.';
 +  let mode = 'all_allowed';
 +  const h = createEntryScreenHarness({
 +    onGet: async () => {
@@ -2702,24 +2704,27 @@ index 0000000..7af2ded
 +    },
 +  });
 +
-+  // 1. Todas as operações permitidas
++  // 1. Operação normal: sem aviso indevido de indisponibilidade no resumo ou na chamada
 +  await h.mount();
 +  assert.equal(h.isDisabled('Confirmar entrada'), false);
 +  assert.equal(h.isDisabled('Marcar ausência'), false);
 +  assert.equal(h.isDisabled('Remover da fila'), false);
 +  assert.equal(h.hasText('A confirmação de entrada está indisponível.'), false);
++  assert.equal(h.hasText(summaryRestrictedMsg), false);
++  assert.equal(h.hasText(legacyContradictoryMsg), false);
 +
-+  // 2. Janela residual: confirmação bloqueada, ausência e remoção permitidas
++  // 2. Janela residual: resumo e card da chamada comunicam restrição sem contradição
 +  mode = 'residual';
 +  await h.press('Atualizar fila de entrada');
 +  assert.equal(h.isDisabled('Confirmar entrada'), true);
 +  assert.equal(h.isDisabled('Marcar ausência'), false);
 +  assert.equal(h.isDisabled('Remover da fila'), false);
 +  assert.equal(h.isDisabled('Desativar fila externa'), true);
++  assert.ok(h.hasText(summaryRestrictedMsg));
 +  assert.ok(h.hasText('A confirmação de entrada está indisponível. Ainda é possível registrar ausência ou remover o participante chamado.'));
-+  assert.ok(h.hasText('O evento não permite entradas ou alterações da fila neste momento.'));
++  assert.equal(h.hasText(legacyContradictoryMsg), false);
 +
-+  // 3. Dados desatualizados (stale) bloqueiam todas as operações
++  // 3. Dados desatualizados (stale) preservam aviso de desatualização e bloqueiam ações
 +  mode = 'network';
 +  await h.act(async () => { await h.getPolling().read(); });
 +  assert.ok(h.hasText('Dados de entrada possivelmente desatualizados. Atualize antes de operar.'));
@@ -2727,18 +2732,21 @@ index 0000000..7af2ded
 +  assert.equal(h.isDisabled('Marcar ausência'), true);
 +  assert.equal(h.isDisabled('Remover da fila'), true);
 +
-+  // 4. Todas as operações bloqueadas pelo servidor
++  // 4. Todas as ações bloqueadas pelo servidor: resumo e card refletem bloqueio integral
 +  mode = 'all_blocked';
 +  await h.press('Atualizar fila de entrada');
 +  assert.equal(h.isDisabled('Confirmar entrada'), true);
 +  assert.equal(h.isDisabled('Marcar ausência'), true);
 +  assert.equal(h.isDisabled('Remover da fila'), true);
++  assert.ok(h.hasText(summaryRestrictedMsg));
 +  assert.ok(h.hasText('As ações sobre a chamada externa estão indisponíveis no estado atual do evento.'));
++  assert.equal(h.hasText(legacyContradictoryMsg), false);
 +
-+  // 5. Fila inativa
++  // 5. Fila inativa com gestão permitida: sem aviso indevido de !canManage
 +  mode = 'inactive';
 +  await h.press('Atualizar fila de entrada');
 +  assert.ok(h.hasExactText('FILA INATIVA'));
++  assert.equal(h.hasText(summaryRestrictedMsg), false);
 +  assert.equal(h.isDisabled('Chamar próximo'), true);
 +  assert.equal(h.isDisabled('Reativar fila externa'), false);
 +
@@ -3164,10 +3172,10 @@ index 66a7068..5c00ef4 100644
    return value;
 diff --git a/backend/test/integration/staff03-external-call-projection.integration.test.ts b/backend/test/integration/staff03-external-call-projection.integration.test.ts
 new file mode 100644
-index 0000000..31c716f
+index 0000000..f0c9e6d
 --- /dev/null
 +++ b/backend/test/integration/staff03-external-call-projection.integration.test.ts
-@@ -0,0 +1,322 @@
+@@ -0,0 +1,468 @@
 +import assert from "node:assert/strict";
 +import { randomUUID } from "node:crypto";
 +import { test } from "node:test";
@@ -3179,7 +3187,9 @@ index 0000000..31c716f
 +import { assertSafeStaffEntryCallsSchemaDatabase } from "./test-db-guard";
 +
 +// Suíte física PostgreSQL (SQL, projeção read-only e triggers da migration 0008).
-+// Não substitui testes HTTP de controllers/serviços; exige autorização explícita e executa integralmente sob ROLLBACK.
++// Valida a projeção e a integridade física do estado persistido no banco; não substitui testes HTTP
++// de controllers nem testes de decisão temporal de StaffEntryCallService. Exige autorização explícita
++// e executa integralmente sob ROLLBACK.
 +function authorizedDatabaseUrl(): string {
 +  if (process.env.NODE_ENV !== "test" || process.env.STAFF03_POSTGRES_PROJECTION_TEST !== "authorized-local") {
 +    throw new Error("Campanha PostgreSQL da STAFF-03 exige autorização explícita e NODE_ENV=test.");
@@ -3201,7 +3211,7 @@ index 0000000..31c716f
 +  return urls[0];
 +}
 +
-+test("STAFF-03 PostgreSQL: projeção externalEntryCall integra ciclo de chamadas, triggers 0008, corte, D06 e encerramentos sem persistir fixtures", async () => {
++test("STAFF-03 PostgreSQL: projeção externalEntryCall integra ciclo FIFO, triggers 0008, corte, D06 e encerramentos sem persistir fixtures", async () => {
 +  const connectionString = authorizedDatabaseUrl();
 +  const client = new Client({ connectionString, connectionTimeoutMillis: 2000, statement_timeout: 5000 });
 +  const observer = new Client({ connectionString, connectionTimeoutMillis: 2000, statement_timeout: 5000 });
@@ -3217,6 +3227,7 @@ index 0000000..31c716f
 +  const p2Id = randomUUID();
 +  const p3OtherEventId = randomUUID();
 +  const call1Id = randomUUID();
++  const callBId = randomUUID();
 +  const call2Id = randomUUID();
 +
 +  await client.connect();
@@ -3243,6 +3254,12 @@ index 0000000..31c716f
 +      const value = publicParticipation(rows[0]);
 +      return value.status !== "waiting" && value.status !== "active" ? null : value;
 +    };
++    const captureObservedInstant = async () => {
++      const at = (await client.query<{ at: string }>(
++        "SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS at",
++      )).rows[0].at;
++      return { iso: at, expr: sql`${at}::timestamptz` };
++    };
 +
 +    const withScenario = async (savepoint: string, work: () => Promise<void>) => {
 +      await client.query(`SAVEPOINT ${savepoint}`);
@@ -3266,11 +3283,12 @@ index 0000000..31c716f
 +          [uid, `${uid}@example.test`],
 +        );
 +      }
-+      for (const eid of [event1Id, event2Id]) {
++      // external_last_order coerente com as ordens atribuídas às participações iniciais de cada evento.
++      for (const [eid, lastOrder] of [[event1Id, 2], [event2Id, 1]] as const) {
 +        await client.query(
 +          `INSERT INTO events(id,name,access_code_normalized,timezone,starts_at,official_ends_at,operational_deadline_at,status,external_queue_enabled,external_last_order,created_at,updated_at)
-+           VALUES($1,'Evento STAFF-03 PG',$2,'America/Sao_Paulo',clock_timestamp()-interval '1 hour',clock_timestamp()+interval '1 hour',clock_timestamp()+interval '90 minutes','open',true,10,clock_timestamp(),clock_timestamp())`,
-+          [eid, eid.toUpperCase()],
++           VALUES($1,'Evento STAFF-03 PG',$2,'America/Sao_Paulo',clock_timestamp()-interval '1 hour',clock_timestamp()+interval '1 hour',clock_timestamp()+interval '90 minutes','open',true,$3,clock_timestamp(),clock_timestamp())`,
++          [eid, eid.toUpperCase(), lastOrder],
 +        );
 +      }
 +      await client.query(
@@ -3297,13 +3315,17 @@ index 0000000..31c716f
 +      );
 +
 +      // 1. Sem chamada externa pendente -> current e byId retornam externalEntryCall: null
-+      const initialCurrent = await projectCurrent(user1Id);
++      const initialRef = await captureObservedInstant();
++      const initialCurrent = await projectCurrent(user1Id, initialRef.expr);
++      const initialDetail = (await projectById(user1Id, p1Id, initialRef.expr))[0];
++      assert.deepEqual(initialCurrent, initialDetail);
 +      assert.equal(initialCurrent?.id, p1Id);
 +      assert.equal(initialCurrent?.status, "waiting");
 +      assert.equal(initialCurrent?.externalQueue?.position, 1);
++      assert.equal(initialCurrent?.externalQueue?.observedAt, initialRef.iso);
 +      assert.equal(initialCurrent?.externalEntryCall, null);
 +
-+      // 2. Staff chama p1 -> p1 recebe externalEntryCall; user2 (mesmo evento), user3 (outro evento) e histórico de user1 ficam isolados
++      // 2. Staff chama p1 -> comparação determinística com instante único (AUD-06.1) + isolamento por conta/evento
 +      await client.query(
 +        "INSERT INTO external_entry_calls(id,event_id,participation_id,called_by_user_id,called_at,status) VALUES($1,$2,$3,$4,clock_timestamp(),'pending')",
 +        [call1Id, event1Id, p1Id, staffId],
@@ -3311,9 +3333,13 @@ index 0000000..31c716f
 +      await client.query("SET CONSTRAINTS ALL IMMEDIATE");
 +      await client.query("SET CONSTRAINTS ALL DEFERRED");
 +
-+      const calledCurrent = await projectCurrent(user1Id);
-+      const calledDetail = (await projectById(user1Id, p1Id))[0];
++      const calledRef = await captureObservedInstant();
++      const calledCurrent = await projectCurrent(user1Id, calledRef.expr);
++      const calledDetail = (await projectById(user1Id, p1Id, calledRef.expr))[0];
 +      assert.deepEqual(calledCurrent, calledDetail);
++      assert.equal(calledDetail.status, "waiting");
++      assert.equal(calledDetail.externalQueue?.position, 1);
++      assert.equal(calledDetail.externalQueue?.observedAt, calledRef.iso);
 +      assert.equal(calledDetail.externalEntryCall?.callId, call1Id);
 +      assert.equal(calledDetail.externalEntryCall?.participationId, p1Id);
 +      assert.equal(calledDetail.externalEntryCall?.eventId, event1Id);
@@ -3322,6 +3348,14 @@ index 0000000..31c716f
 +      assert.match(calledDetail.externalEntryCall?.calledAt ?? "", /\.\d{6}Z$/);
 +      assert.equal(JSON.stringify(calledDetail).includes(staffId), false);
 +      assert.equal(JSON.stringify(calledDetail).includes(user1Id), false);
++
++      // Valida também o caminho padrão de produção (clock_timestamp() próprio da projeção) sem comparar observedAt entre consultas separadas
++      const liveCalledCurrent = await projectCurrent(user1Id);
++      assert.equal(liveCalledCurrent?.id, p1Id);
++      assert.equal(liveCalledCurrent?.status, "waiting");
++      assert.equal(liveCalledCurrent?.externalQueue?.position, 1);
++      assert.match(liveCalledCurrent?.externalQueue?.observedAt ?? "", /\.\d{6}Z$/);
++      assert.deepEqual(liveCalledCurrent?.externalEntryCall, calledDetail.externalEntryCall);
 +
 +      assert.equal((await projectCurrent(user2Id))?.externalEntryCall, null);
 +      assert.equal((await projectCurrent(user3Id))?.externalEntryCall, null);
@@ -3346,47 +3380,145 @@ index 0000000..31c716f
 +        assert.equal(activeCurrent?.externalEntryCall, null);
 +      });
 +
-+      // 4. Ausência com reinserção + nova chamada -> limpa call1 e entrega call2 distinta
++      // 4. Ausência com reinserção + avanço legítimo da fila FIFO (AUD-06.2) -> nova chamada gera call2 distinta
 +      await withScenario("sp_absent_requeue", async () => {
 +        await client.query(
 +          "UPDATE external_entry_calls SET status='absent', resolved_by_user_id=$1, resolved_at=clock_timestamp(), resolution_reason='staff_external_absent' WHERE id=$2",
 +          [staffId, call1Id],
 +        );
-+        await client.query("UPDATE participations SET external_queue_order=3 WHERE id=$1", [p1Id]);
++        const nextOrder = (await client.query<{ order: string }>(
++          "UPDATE events SET external_last_order=external_last_order+1 WHERE id=$1 RETURNING external_last_order::text AS \"order\"",
++          [event1Id],
++        )).rows[0].order;
++        assert.equal(nextOrder, "3");
++        await client.query(
++          "UPDATE participations SET external_queue_order=$1::bigint WHERE id=$2",
++          [nextOrder, p1Id],
++        );
 +        await client.query("SET CONSTRAINTS ALL IMMEDIATE");
 +        await client.query("SET CONSTRAINTS ALL DEFERRED");
 +
-+        const requeued = await projectCurrent(user1Id);
-+        assert.equal(requeued?.status, "waiting");
-+        assert.equal(requeued?.externalQueue?.position, 2);
-+        assert.equal(requeued?.externalEntryCall, null);
++        // Participante A (p1Id) passou legitimamente para o fim da fila (posição 2); participante B (p2Id) assumiu posição 1
++        const requeuedA = await projectCurrent(user1Id);
++        assert.equal(requeuedA?.status, "waiting");
++        assert.equal(requeuedA?.externalQueue?.position, 2);
++        assert.equal(requeuedA?.externalEntryCall, null);
++        const firstB = await projectCurrent(user2Id);
++        assert.equal(firstB?.status, "waiting");
++        assert.equal(firstB?.externalQueue?.position, 1);
++        assert.equal(firstB?.externalEntryCall, null);
 +
++        // Resolver participante B (posição 1) seguindo a ordem operacional FIFO antes de chamar A novamente
++        await client.query(
++          "INSERT INTO external_entry_calls(id,event_id,participation_id,called_by_user_id,called_at,status) VALUES($1,$2,$3,$4,clock_timestamp(),'pending')",
++          [callBId, event1Id, p2Id, staffId],
++        );
++        await client.query("SET CONSTRAINTS ALL IMMEDIATE");
++        await client.query("SET CONSTRAINTS ALL DEFERRED");
++        assert.equal((await projectCurrent(user2Id))?.externalEntryCall?.callId, callBId);
++
++        await client.query(
++          "UPDATE external_entry_calls SET status='confirmed', resolved_by_user_id=$1, resolved_at=clock_timestamp(), resolution_reason='staff_entry_confirmed' WHERE id=$2",
++          [staffId, callBId],
++        );
++        await client.query(
++          "UPDATE participations p SET status='active', arena_entered_at=c.resolved_at FROM external_entry_calls c WHERE p.id=c.participation_id AND c.id=$1",
++          [callBId],
++        );
++        await client.query("SET CONSTRAINTS ALL IMMEDIATE");
++        await client.query("SET CONSTRAINTS ALL DEFERRED");
++
++        assert.equal((await projectCurrent(user2Id))?.status, "active");
++        const backToFirstA = await projectCurrent(user1Id);
++        assert.equal(backToFirstA?.status, "waiting");
++        assert.equal(backToFirstA?.externalQueue?.position, 1);
++        assert.equal(backToFirstA?.externalEntryCall, null);
++
++        // Agora A é legitimamente o primeiro da fila FIFO e recebe a nova ocorrência call2Id
 +        await client.query(
 +          "INSERT INTO external_entry_calls(id,event_id,participation_id,called_by_user_id,called_at,status) VALUES($1,$2,$3,$4,clock_timestamp(),'pending')",
 +          [call2Id, event1Id, p1Id, staffId],
 +        );
 +        await client.query("SET CONSTRAINTS ALL IMMEDIATE");
-+        const secondCall = await projectCurrent(user1Id);
-+        assert.equal(secondCall?.externalEntryCall?.callId, call2Id);
-+        assert.notEqual(secondCall?.externalEntryCall?.callId, call1Id);
++
++        const secondRef = await captureObservedInstant();
++        const secondCurrent = await projectCurrent(user1Id, secondRef.expr);
++        const secondDetail = (await projectById(user1Id, p1Id, secondRef.expr))[0];
++        assert.deepEqual(secondCurrent, secondDetail);
++        assert.equal(secondDetail.externalQueue?.position, 1);
++        assert.equal(secondDetail.externalEntryCall?.callId, call2Id);
++        assert.notEqual(secondDetail.externalEntryCall?.callId, call1Id);
++
++        // Ocorrência anterior permanece terminal e não reaparece
++        const oldCall = (await client.query<{ status: string; resolution_reason: string }>(
++          "SELECT status, resolution_reason FROM external_entry_calls WHERE id=$1",
++          [call1Id],
++        )).rows[0];
++        assert.deepEqual(oldCall, { status: "absent", resolution_reason: "staff_external_absent" });
 +      });
 +
-+      // 5. Ausência após o corte (ordem do StaffEntryCallService: external_entry_calls -> participations)
++      // 5. Ausência após o corte oficial e antes do prazo operacional (AUD-06.3)
++      // Nota explícita: este bloco prepara o estado temporal diretamente em SQL para validar a projeção
++      // e a integridade das constraints/triggers da migration 0008; a decisão temporal de StaffEntryCallService
++      // (requeued: false após corte) é coberta pela suíte unitária em backend/test/unit/staff-entry-call.test.ts.
 +      await withScenario("sp_absent_cutoff", async () => {
++        // Ajusta janela do evento de forma determinística ancorada em call1.called_at:
++        // starts_at <= called_at < official_ends_at (+1s) <= resolved_at (+5m) < operational_deadline_at (+30m)
 +        await client.query(
-+          "UPDATE external_entry_calls SET status='absent', resolved_by_user_id=$1, resolved_at=clock_timestamp(), resolution_reason='staff_external_absent' WHERE id=$2",
++          `UPDATE events e
++           SET official_ends_at = c.called_at + interval '1 second',
++               operational_deadline_at = c.called_at + interval '30 minutes'
++           FROM external_entry_calls c
++           WHERE e.id = c.event_id AND c.id = $1`,
++          [call1Id],
++        );
++        await client.query(
++          `UPDATE external_entry_calls
++           SET status='absent',
++               resolved_by_user_id=$1,
++               resolved_at=called_at + interval '5 minutes',
++               resolution_reason='staff_external_absent'
++           WHERE id=$2`,
 +          [staffId, call1Id],
 +        );
 +        await client.query(
-+          "UPDATE participations p SET status='finished', finished_at=c.resolved_at, finish_reason='external_absence_after_entry_cutoff' FROM external_entry_calls c WHERE p.id=c.participation_id AND c.id=$1",
++          `UPDATE participations p
++           SET status='finished',
++               finished_at=c.resolved_at,
++               finish_reason='external_absence_after_entry_cutoff'
++           FROM external_entry_calls c
++           WHERE p.id=c.participation_id AND c.id=$1`,
 +          [call1Id],
 +        );
 +        await client.query("SET CONSTRAINTS ALL IMMEDIATE");
-+        assert.equal(await projectCurrent(user1Id), null);
-+        const cutoffDetail = (await projectById(user1Id, p1Id))[0];
++
++        const windowCheck = (await client.query<{ valid_window: boolean; last_order: string }>(
++          `SELECT (e.starts_at <= c.called_at
++            AND c.called_at < e.official_ends_at
++            AND e.official_ends_at <= c.resolved_at
++            AND c.resolved_at < e.operational_deadline_at) AS valid_window,
++            e.external_last_order::text AS last_order
++           FROM events e JOIN external_entry_calls c ON c.event_id = e.id
++           WHERE c.id = $1`,
++          [call1Id],
++        )).rows[0];
++        assert.equal(windowCheck.valid_window, true);
++        assert.equal(windowCheck.last_order, "2", "Ausência após corte não reinseriu nem incrementou external_last_order.");
++
++        // Projeta em instante posterior ao corte e ainda anterior ao prazo operacional (+5m01s < +30m)
++        const afterCutoffAt = sql`(SELECT resolved_at + interval '1 second' FROM external_entry_calls WHERE id=${call1Id}::uuid)`;
++        assert.equal(await projectCurrent(user1Id, afterCutoffAt), null);
++        const cutoffDetail = (await projectById(user1Id, p1Id, afterCutoffAt))[0];
 +        assert.equal(cutoffDetail.status, "finished");
 +        assert.equal(cutoffDetail.finishReason, "external_absence_after_entry_cutoff");
++        assert.equal(cutoffDetail.externalQueue, null);
 +        assert.equal(cutoffDetail.externalEntryCall, null);
++
++        // Evento ainda está na janela residual: p2Id segue aguardando sem ter sido expirado por operational_deadline_at
++        const remainingB = await projectCurrent(user2Id, afterCutoffAt);
++        assert.equal(remainingB?.status, "waiting");
++        assert.equal(remainingB?.externalQueue?.position, 1);
++        assert.equal(remainingB?.externalEntryCall, null);
 +      });
 +
 +      // 6. Remoção pelo Staff (ordem do StaffEntryCallService: external_entry_calls -> participations)
@@ -3420,19 +3552,25 @@ index 0000000..31c716f
 +        assert.equal((await projectById(user1Id, p1Id))[0].externalEntryCall, null);
 +      });
 +
-+      // 8. Desativação D06 -> trigger cancela chamada com external_queue_disabled e projeção vira active
++      // 8. Desativação D06 -> libera toda a fila externa do evento e trigger cancela chamada pendente
 +      await withScenario("sp_d06", async () => {
 +        await client.query("UPDATE events SET external_queue_enabled=false WHERE id=$1", [event1Id]);
-+        await client.query("UPDATE participations SET status='active', arena_entered_at=clock_timestamp() WHERE id=$1", [p1Id]);
++        await client.query(
++          "UPDATE participations SET status='active', arena_entered_at=clock_timestamp() WHERE event_id=$1 AND status='waiting'",
++          [event1Id],
++        );
 +        await client.query("SET CONSTRAINTS ALL IMMEDIATE");
 +        const callRow = (await client.query("SELECT status, resolution_reason FROM external_entry_calls WHERE id=$1", [call1Id])).rows[0];
 +        assert.deepEqual(callRow, { status: "canceled", resolution_reason: "external_queue_disabled" });
-+        const d06Current = await projectCurrent(user1Id);
-+        assert.equal(d06Current?.status, "active");
-+        assert.equal(d06Current?.externalEntryCall, null);
++        const d06User1 = await projectCurrent(user1Id);
++        const d06User2 = await projectCurrent(user2Id);
++        assert.equal(d06User1?.status, "active");
++        assert.equal(d06User1?.externalEntryCall, null);
++        assert.equal(d06User2?.status, "active");
++        assert.equal(d06User2?.externalEntryCall, null);
 +      });
 +
-+      // 9. Encerramento efetivo antes da regularização física (somente leitura)
++      // 9. Encerramento efetivo por prazo operacional vencido antes da regularização física (somente leitura)
 +      const futureAt = sql`clock_timestamp() + interval '3 hours'`;
 +      assert.equal(await projectCurrent(user1Id, futureAt), null);
 +      const endedProjection = (await projectById(user1Id, p1Id, futureAt))[0];
@@ -3440,40 +3578,56 @@ index 0000000..31c716f
 +      assert.equal(endedProjection.externalQueue, null);
 +      assert.equal(endedProjection.externalEntryCall, null);
 +
-+      // 10. Encerramento administrativo controlado -> trigger cancela chamada pendente e projeção oculta externalEntryCall
++      // 10. Encerramento administrativo controlado -> instante único + trigger cancela chamada pendente e oculta externalEntryCall
 +      await withScenario("sp_controlled_closure", async () => {
 +        await client.query(
-+          "UPDATE events SET status='closing', closure_mode='controlled', closure_requested_at=clock_timestamp(), admin_deadline_at=clock_timestamp()+interval '15 minutes' WHERE id=$1",
++          `WITH now_at AS (SELECT clock_timestamp() AS at)
++           UPDATE events e
++           SET status='closing',
++               closure_mode='controlled',
++               closure_requested_at=now_at.at,
++               admin_deadline_at=now_at.at + interval '15 minutes'
++           FROM now_at
++           WHERE e.id=$1`,
 +          [event1Id],
 +        );
 +        await client.query(
-+          "UPDATE participations p SET status='finished', finished_at=e.closure_requested_at, finish_reason='admin_controlled_external_wait_closed' FROM events e WHERE p.event_id=e.id AND p.id=$1",
-+          [p1Id],
++          "UPDATE participations p SET status='finished', finished_at=e.closure_requested_at, finish_reason='admin_controlled_external_wait_closed' FROM events e WHERE p.event_id=e.id AND e.id=$1 AND p.status='waiting'",
++          [event1Id],
 +        );
 +        await client.query("SET CONSTRAINTS ALL IMMEDIATE");
 +        const callRow = (await client.query("SELECT status, resolution_reason FROM external_entry_calls WHERE id=$1", [call1Id])).rows[0];
 +        assert.deepEqual(callRow, { status: "canceled", resolution_reason: "admin_controlled_external_wait_closed" });
 +        assert.equal(await projectCurrent(user1Id), null);
++        assert.equal(await projectCurrent(user2Id), null);
 +        const detail = (await projectById(user1Id, p1Id))[0];
 +        assert.equal(detail.status, "finished");
 +        assert.equal(detail.finishReason, "admin_controlled_external_wait_closed");
 +        assert.equal(detail.externalEntryCall, null);
 +      });
 +
-+      // 11. Encerramento administrativo imediato -> trigger cancela chamada pendente e projeção oculta externalEntryCall
++      // 11. Encerramento administrativo imediato -> instante único + trigger cancela chamada pendente e oculta externalEntryCall
 +      await withScenario("sp_immediate_closure", async () => {
 +        await client.query(
-+          "WITH now_at AS (SELECT clock_timestamp() AS at) UPDATE events e SET status='closed', closure_mode='immediate', closure_requested_at=now_at.at, admin_deadline_at=now_at.at FROM now_at WHERE e.id=$1",
++          `WITH now_at AS (SELECT clock_timestamp() AS at)
++           UPDATE events e
++           SET status='closed',
++               closure_mode='immediate',
++               closure_requested_at=now_at.at,
++               admin_deadline_at=now_at.at
++           FROM now_at
++           WHERE e.id=$1`,
 +          [event1Id],
 +        );
 +        await client.query(
-+          "UPDATE participations p SET status='finished', finished_at=e.admin_deadline_at, finish_reason='admin_immediate' FROM events e WHERE p.event_id=e.id AND p.id=$1",
-+          [p1Id],
++          "UPDATE participations p SET status='finished', finished_at=e.admin_deadline_at, finish_reason='admin_immediate' FROM events e WHERE p.event_id=e.id AND e.id=$1 AND p.status='waiting'",
++          [event1Id],
 +        );
 +        await client.query("SET CONSTRAINTS ALL IMMEDIATE");
 +        const callRow = (await client.query("SELECT status, resolution_reason FROM external_entry_calls WHERE id=$1", [call1Id])).rows[0];
 +        assert.deepEqual(callRow, { status: "canceled", resolution_reason: "admin_immediate" });
 +        assert.equal(await projectCurrent(user1Id), null);
++        assert.equal(await projectCurrent(user2Id), null);
 +        const detail = (await projectById(user1Id, p1Id))[0];
 +        assert.equal(detail.status, "finished");
 +        assert.equal(detail.finishReason, "admin_immediate");
@@ -3485,7 +3639,7 @@ index 0000000..31c716f
 +
 +    assert.equal((await observer.query("SELECT id FROM users WHERE id=ANY($1::uuid[])", [[staffId, user1Id, user2Id, user3Id]])).rows.length, 0);
 +    assert.equal((await observer.query("SELECT id FROM events WHERE id=ANY($1::uuid[])", [[event1Id, event2Id]])).rows.length, 0);
-+    assert.equal((await observer.query("SELECT id FROM external_entry_calls WHERE id=ANY($1::uuid[])", [[call1Id, call2Id]])).rows.length, 0);
++    assert.equal((await observer.query("SELECT id FROM external_entry_calls WHERE id=ANY($1::uuid[])", [[call1Id, callBId, call2Id]])).rows.length, 0);
 +  } finally {
 +    await Promise.allSettled([observer.end(), client.end()]);
 +  }
@@ -3862,10 +4016,10 @@ index ba887df..184e77a 100644
 +});
 diff --git a/docs/STAFF_03_CONTROLE_ENTRADA_CHAMADA_EXTERNA.md b/docs/STAFF_03_CONTROLE_ENTRADA_CHAMADA_EXTERNA.md
 new file mode 100644
-index 0000000..16848c5
+index 0000000..d0b1dc4
 --- /dev/null
 +++ b/docs/STAFF_03_CONTROLE_ENTRADA_CHAMADA_EXTERNA.md
-@@ -0,0 +1,417 @@
+@@ -0,0 +1,463 @@
 +# ArenaGo — STAFF-03 | Controle de Entrada e Integração da Chamada Externa
 +
 +## 1. Objetivo e Escopo da STAFF-03
@@ -3876,8 +4030,8 @@ index 0000000..16848c5
 +- **Prioridade:** P0
 +- **Branch obrigatória:** `feature/staff-operacional-v2`
 +- **Commit-base de referência (`HEAD` original):** `efe21a8492a056d08a8c61799f7a66636c830a63` (`docs(staff): registra encerramento formal da STAFF-02`)
-+- **Commit auditado (Rodada 1):** `29029f0328ecb02bf6e016abda1b2c4ed371dffe` (`Controle de Entrada e Integração da Chamada Externa`)
-+- **Status atual:** Correções dos sete achados da Auditoria Independente — Rodada 1 (`STAFF03-AUD-01` a `STAFF03-AUD-07`) implementadas na branch `feature/staff-operacional-v2` (acumuladas desde `efe21a8492a056d08a8c61799f7a66636c830a63`). **Ainda não aprovada nem homologada**; pendentes publicação para nova auditoria independente, execução automatizada com **GPT-6 Luna — Medium** conforme [AGENTS.md](../AGENTS.md), integração visual do Participante pelo Heliom e homologação no Expo Go.
++- **Commits auditados:** `29029f0328ecb02bf6e016abda1b2c4ed371dffe` (Rodada 1) e `330cc28548234072891a4321be27f939ef8ab2eb` (Rodada 2)
++- **Status atual:** Correções pontuais da Auditoria Independente — Rodada 2 (`STAFF03-AUD-06` e `STAFF03-AUD-08`) aplicadas na branch `feature/staff-operacional-v2` (base acumulada `efe21a8492a056d08a8c61799f7a66636c830a63`). **Ainda não aprovada, testada nem homologada**; aguardando publicação para nova auditoria independente, execução da campanha automatizada por **GPT-6 Luna — Medium** conforme [AGENTS.md](../AGENTS.md), integração visual pelo Heliom e homologação no Expo Go.
 +
 +### Objetivos principais
 +1. **Entrega A — Reformulação do Controle de Entrada (App Staff):** modernizar visualmente e funcionalmente [StaffEntryControlRealScreen.js](../app/screens/staff/StaffEntryControlRealScreen.js) na identidade aprovada nas STAFF-01 e STAFF-02, preservando integralmente contratos HTTP, polling, autorização por evento, fila FIFO do servidor, modais responsivos e persistência de intenções no `SecureStore`.
@@ -4282,4 +4436,50 @@ index 0000000..16848c5
 +  - **Verificação realizada:** revisão estática de todos os consumidores de `ParticipationView`, `FinishedParticipationView`, `LifecycleResult` e `participationView`.
 +  - **Limitações / pendências:** execução de `npm run typecheck:test`, `npm run lint`, `npm run build` e `npm test` com GPT-6 Luna — Medium.
 +
-+- **25/11/2026 (Rodada 1 concluída para nova auditoria):** Todas as correções dos sete achados aplicadas, documentação atualizada e evidência acumulada [STAFF-03-changes.diff](../qa-evidence/STAFF-03-changes.diff) regenerada a partir de `efe21a8492a056d08a8c61799f7a66636c830a63`. Aguardando publicação por Kaled, nova auditoria independente e execução da campanha automatizada por **GPT-6 Luna — Medium**.
++- **25/11/2026 (Rodada 1 concluída para nova auditoria):** Todas as correções dos sete achados aplicadas, documentação atualizada e evidência acumulada [STAFF-03-changes.diff](../qa-evidence/STAFF-03-changes.diff) regenerada a partir de `efe21a8492a056d08a8c61799f7a66636c830a63` (publicada no commit `330cc28548234072891a4321be27f939ef8ab2eb`).
++- **25/11/2026 (Rodada 2 aberta antes das alterações de código):** Registrado o parecer da segunda auditoria independente (`AUD-01`, `AUD-02`, `AUD-03`, `AUD-04`, `AUD-05` na chamada atual e `AUD-07` considerados corrigidos por inspeção estática; `AUD-06` parcialmente corrigido; novo achado `AUD-08`) e definido o plano pontual de correção antes de editar código.
++
++---
++
++## Auditoria Independente — Rodada 2
++
++Segunda auditoria estática independente realizada sobre o commit `330cc28548234072891a4321be27f939ef8ab2eb` (base acumulada da STAFF-03: `efe21a8492a056d08a8c61799f7a66636c830a63`).
++
++### Parecer da segunda auditoria
++
++| Achado | Parecer da Rodada 2 |
++|---|---|
++| `STAFF03-AUD-01` | Corrigido (preservar integralmente) |
++| `STAFF03-AUD-02` | Corrigido (preservar integralmente) |
++| `STAFF03-AUD-03` | Corrigido (preservar integralmente) |
++| `STAFF03-AUD-04` | Corrigido com justificativa técnica aceita (manter polling ativo durante modais com invalidação automática) |
++| `STAFF03-AUD-05` | Corrigido na chamada atual (preservar integralmente) |
++| `STAFF03-AUD-06` | Parcialmente corrigido — 3 pendências pontuais na fixture PostgreSQL |
++| `STAFF03-AUD-07` | Corrigido (preservar integralmente) |
++| `STAFF03-AUD-08` | Novo achado P2 — mensagem contraditória no `EntrySummaryCard` quando `canManage === false` |
++
++### Pendências registradas e plano de correção (Rodada 2)
++
++| Achado | Prioridade | Causa técnica confirmada | Plano de correção |
++|---|---|---|---|
++| `STAFF03-AUD-06.1` | P1 | Em [staff03-external-call-projection.integration.test.ts](../backend/test/integration/staff03-external-call-projection.integration.test.ts), `projectCurrent(user1Id)` e `projectById(user1Id, p1Id)` rodavam separadamente usando `clock_timestamp()` distinto para `externalQueue.observedAt`, tornando `assert.deepEqual(calledCurrent, calledDetail)` suscetível a falha por microssegundos. | Capturar um único instante `observedRef` no PostgreSQL e passá-lo pelo parâmetro `at` de `participationProjection()` nas duas consultas comparadas, além de conferir separadamente que a consulta padrão (sem `at` fixo) emite `observedAt` com 6 casas de microssegundos e os mesmos dados da chamada. |
++| `STAFF03-AUD-06.2` | P1 | No cenário `sp_absent_requeue`, `p1Id` era chamado novamente enquanto `p2Id` permanecia na posição 1, e `external_last_order` do evento (`10`) ficava incoerente com as ordens atribuídas (`1`, `2`, `3`). | Alinhar `external_last_order` inicial com as filas criadas (`2` no evento 1 e `1` no evento 2); incrementar `external_last_order` ao reinserir `p1Id` no fim da fila (`position: 2`); resolver legitimamente `p2Id` (chamada `callBId` + confirmação para `active`); confirmar que `p1Id` voltou à posição `1`; então criar `call2Id !== call1Id` respeitando a ordem FIFO real e mantendo `call1Id` em `absent`. |
++| `STAFF03-AUD-06.3` | P1 | O cenário `sp_absent_cutoff` marcava `external_absence_after_entry_cutoff` sem configurar `official_ends_at` anterior a `resolved_at` e anterior a `operational_deadline_at`. | Configurar dentro do savepoint `official_ends_at = called_at + 1s`, `operational_deadline_at = called_at + 30m` e `resolved_at = called_at + 5m` (respeitando `ck_events_time` e `ck_external_calls_resolution`), provando `starts_at <= called_at < official_ends_at <= resolved_at < operational_deadline_at`, projetando antes de `operational_deadline_at` sem reinserção e documentando explicitamente que o teste SQL valida projeção/integridade física do estado persistido (enquanto a decisão temporal do serviço é validada nos unitários de `StaffEntryCallService`). Também padronizar D06 e encerramentos controlado/imediato para atualizar toda a espera do evento e usar um único `clock_timestamp()` no encerramento controlado. |
++| `STAFF03-AUD-08` | P2 | `EntrySummaryCard` em [StaffEntrySections.js](../app/screens/staff/components/StaffEntrySections.js) exibia *"O evento não permite entradas ou alterações da fila neste momento."* para `!canManage`, contradizendo a janela residual em que `canMarkAbsent` e `canRemove` continuam autorizados no card da chamada atual. | Substituir por mensagem coerente com o significado real de `canManage` (*"O ingresso de novos participantes e alterações da fila externa estão indisponíveis. As ações sobre chamadas pendentes dependem das permissões atuais."*) e ampliar [staffEntryControlScreen.test.cjs](../app/tests/staffEntryControlScreen.test.cjs) para validar ausência de contradição entre resumo e card da chamada nos 5 cenários exigidos. |
++
++### Registro detalhado pós-correção (Rodada 2)
++
++- **`STAFF03-AUD-06.1` (Comparação temporal determinística):**
++  - **Solução aplicada:** adicionado helper `captureObservedInstant()` em [staff03-external-call-projection.integration.test.ts](../backend/test/integration/staff03-external-call-projection.integration.test.ts) para reutilizar um único instante `at` via `participationProjection()` ao comparar `projectCurrent` e `projectById` (nos blocos inicial, chamada 1 e chamada 2), mantendo também uma leitura adicional no caminho padrão de produção (`clock_timestamp()`) verificando formato de microssegundos e igualdade dos campos determinísticos de `externalEntryCall` sem comparar `observedAt` entre execuções distintas.
++  - **Verificação realizada:** revisão estática de todos os `assert.deepEqual` da suíte (nenhuma comparação instável remanescente).
++- **`STAFF03-AUD-06.2` (Nova chamada em ordem FIFO legítima e `external_last_order` coerente):**
++  - **Solução aplicada:** alinhados os valores iniciais de `external_last_order` (`2` no evento 1 e `1` no evento 2); no cenário `sp_absent_requeue`, `p1Id` é reinserido incrementando `external_last_order` para `3` (`position: 2`), `p2Id` assume legitimamente a posição `1`, passa por chamada (`callBId`) + confirmação para `active`, devolvendo `p1Id` legitimamente à posição `1`, e só então `call2Id !== call1Id` é criada mantendo `call1Id` em `absent`.
++  - **Verificação realizada:** conferência estática da ordem de atualização e de `uq_external_calls_pending_*`, `check_external_call_integrity` e `observer` cobrindo `[call1Id, callBId, call2Id]`.
++- **`STAFF03-AUD-06.3` (Cenário temporal após o corte oficial e antes do prazo operacional):**
++  - **Solução aplicada:** em `sp_absent_cutoff`, a janela do evento é ancorada deterministicamente em `call1.called_at` (`official_ends_at = called_at + 1s`, `operational_deadline_at = called_at + 30m`, `resolved_at = called_at + 5m`), respeitando integralmente `ck_events_time` e `ck_external_calls_resolution`, verificando em SQL `starts_at <= called_at < official_ends_at <= resolved_at < operational_deadline_at`, ausência de incremento em `external_last_order` (`'2'`), projeção terminal de `user1Id` e permanência de `user2Id` em `waiting` na janela residual. Documentado explicitamente no teste e nesta seção que o cenário SQL valida projeção e integridade do estado persistido no PostgreSQL, enquanto a decisão temporal do serviço (`requeued: false`) é validada em [staff-entry-call.test.ts](../backend/test/unit/staff-entry-call.test.ts).
++  - **Conferência adicional (AUD-06.4):** D06 (`sp_d06`) e encerramentos controlado/imediato (`sp_controlled_closure`, `sp_immediate_closure`) atualizados para cobrir toda a fila `waiting` do evento (`user1Id` e `user2Id`) com `WITH now_at AS (SELECT clock_timestamp() AS at)` garantindo instante único também no encerramento controlado.
++- **`STAFF03-AUD-08` (Mensagem contraditória no resumo operacional):**
++  - **Solução aplicada:** `EntrySummaryCard` em [StaffEntrySections.js](../app/screens/staff/components/StaffEntrySections.js) passou a exibir *"O ingresso de novos participantes e alterações da fila externa estão indisponíveis. As ações sobre chamadas pendentes dependem das permissões atuais."* quando `!canManage`, eliminando contradição com `EntryCurrentCallCard` na janela residual sem presumir corte oficial nem alterar permissões do backend.
++  - **Testes atualizados:** [staffEntryControlScreen.test.cjs](../app/tests/staffEntryControlScreen.test.cjs) atualizado (`STAFF03-AUD-05 + STAFF03-AUD-08`) cobrindo operação normal, janela residual, todas as ações bloqueadas, dados desatualizados (`stale`), fila inativa e indisponibilidade operacional (`503`), validando explicitamente a ausência da redação contraditória anterior.
++- **Verificações estáticas e limitações remanescentes:** executadas apenas verificações estáticas permitidas pelo [AGENTS.md](../AGENTS.md) (`git diff --check`, `git apply --stat`, `git apply --check --reverse`, `node --check` nos `.cjs`, conferência de links relativos e ausência de auto-referência no patch). Nenhuma suíte automatizada (`node --test`, `npm test`, `typecheck`, `lint`, `build`, `qa/regression` ou PostgreSQL) foi executada nesta rodada; campanha completa pendente com **GPT-6 Luna — Medium** e posterior homologação no Expo Go.
++- **25/11/2026 (Rodada 2 concluída para nova auditoria):** Correções de `STAFF03-AUD-06` e `STAFF03-AUD-08` aplicadas sem reabrir os seis achados aprovados na Rodada 1; [STAFF-03-changes.diff](../qa-evidence/STAFF-03-changes.diff) regenerado desde `efe21a8492a056d08a8c61799f7a66636c830a63`. Aguardando publicação por Kaled e nova auditoria independente.

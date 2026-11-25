@@ -8,8 +8,8 @@
 - **Prioridade:** P0
 - **Branch obrigatória:** `feature/staff-operacional-v2`
 - **Commit-base de referência (`HEAD` original):** `efe21a8492a056d08a8c61799f7a66636c830a63` (`docs(staff): registra encerramento formal da STAFF-02`)
-- **Commit auditado (Rodada 1):** `29029f0328ecb02bf6e016abda1b2c4ed371dffe` (`Controle de Entrada e Integração da Chamada Externa`)
-- **Status atual:** Correções dos sete achados da Auditoria Independente — Rodada 1 (`STAFF03-AUD-01` a `STAFF03-AUD-07`) implementadas na branch `feature/staff-operacional-v2` (acumuladas desde `efe21a8492a056d08a8c61799f7a66636c830a63`). **Ainda não aprovada nem homologada**; pendentes publicação para nova auditoria independente, execução automatizada com **GPT-6 Luna — Medium** conforme [AGENTS.md](../AGENTS.md), integração visual do Participante pelo Heliom e homologação no Expo Go.
+- **Commits auditados:** `29029f0328ecb02bf6e016abda1b2c4ed371dffe` (Rodada 1) e `330cc28548234072891a4321be27f939ef8ab2eb` (Rodada 2)
+- **Status atual:** Correções pontuais da Auditoria Independente — Rodada 2 (`STAFF03-AUD-06` e `STAFF03-AUD-08`) aplicadas na branch `feature/staff-operacional-v2` (base acumulada `efe21a8492a056d08a8c61799f7a66636c830a63`). **Ainda não aprovada, testada nem homologada**; aguardando publicação para nova auditoria independente, execução da campanha automatizada por **GPT-6 Luna — Medium** conforme [AGENTS.md](../AGENTS.md), integração visual pelo Heliom e homologação no Expo Go.
 
 ### Objetivos principais
 1. **Entrega A — Reformulação do Controle de Entrada (App Staff):** modernizar visualmente e funcionalmente [StaffEntryControlRealScreen.js](../app/screens/staff/StaffEntryControlRealScreen.js) na identidade aprovada nas STAFF-01 e STAFF-02, preservando integralmente contratos HTTP, polling, autorização por evento, fila FIFO do servidor, modais responsivos e persistência de intenções no `SecureStore`.
@@ -414,4 +414,50 @@ Auditoria estática independente realizada sobre o commit `29029f0328ecb02bf6e01
   - **Verificação realizada:** revisão estática de todos os consumidores de `ParticipationView`, `FinishedParticipationView`, `LifecycleResult` e `participationView`.
   - **Limitações / pendências:** execução de `npm run typecheck:test`, `npm run lint`, `npm run build` e `npm test` com GPT-6 Luna — Medium.
 
-- **25/11/2026 (Rodada 1 concluída para nova auditoria):** Todas as correções dos sete achados aplicadas, documentação atualizada e evidência acumulada [STAFF-03-changes.diff](../qa-evidence/STAFF-03-changes.diff) regenerada a partir de `efe21a8492a056d08a8c61799f7a66636c830a63`. Aguardando publicação por Kaled, nova auditoria independente e execução da campanha automatizada por **GPT-6 Luna — Medium**.
+- **25/11/2026 (Rodada 1 concluída para nova auditoria):** Todas as correções dos sete achados aplicadas, documentação atualizada e evidência acumulada [STAFF-03-changes.diff](../qa-evidence/STAFF-03-changes.diff) regenerada a partir de `efe21a8492a056d08a8c61799f7a66636c830a63` (publicada no commit `330cc28548234072891a4321be27f939ef8ab2eb`).
+- **25/11/2026 (Rodada 2 aberta antes das alterações de código):** Registrado o parecer da segunda auditoria independente (`AUD-01`, `AUD-02`, `AUD-03`, `AUD-04`, `AUD-05` na chamada atual e `AUD-07` considerados corrigidos por inspeção estática; `AUD-06` parcialmente corrigido; novo achado `AUD-08`) e definido o plano pontual de correção antes de editar código.
+
+---
+
+## Auditoria Independente — Rodada 2
+
+Segunda auditoria estática independente realizada sobre o commit `330cc28548234072891a4321be27f939ef8ab2eb` (base acumulada da STAFF-03: `efe21a8492a056d08a8c61799f7a66636c830a63`).
+
+### Parecer da segunda auditoria
+
+| Achado | Parecer da Rodada 2 |
+|---|---|
+| `STAFF03-AUD-01` | Corrigido (preservar integralmente) |
+| `STAFF03-AUD-02` | Corrigido (preservar integralmente) |
+| `STAFF03-AUD-03` | Corrigido (preservar integralmente) |
+| `STAFF03-AUD-04` | Corrigido com justificativa técnica aceita (manter polling ativo durante modais com invalidação automática) |
+| `STAFF03-AUD-05` | Corrigido na chamada atual (preservar integralmente) |
+| `STAFF03-AUD-06` | Parcialmente corrigido — 3 pendências pontuais na fixture PostgreSQL |
+| `STAFF03-AUD-07` | Corrigido (preservar integralmente) |
+| `STAFF03-AUD-08` | Novo achado P2 — mensagem contraditória no `EntrySummaryCard` quando `canManage === false` |
+
+### Pendências registradas e plano de correção (Rodada 2)
+
+| Achado | Prioridade | Causa técnica confirmada | Plano de correção |
+|---|---|---|---|
+| `STAFF03-AUD-06.1` | P1 | Em [staff03-external-call-projection.integration.test.ts](../backend/test/integration/staff03-external-call-projection.integration.test.ts), `projectCurrent(user1Id)` e `projectById(user1Id, p1Id)` rodavam separadamente usando `clock_timestamp()` distinto para `externalQueue.observedAt`, tornando `assert.deepEqual(calledCurrent, calledDetail)` suscetível a falha por microssegundos. | Capturar um único instante `observedRef` no PostgreSQL e passá-lo pelo parâmetro `at` de `participationProjection()` nas duas consultas comparadas, além de conferir separadamente que a consulta padrão (sem `at` fixo) emite `observedAt` com 6 casas de microssegundos e os mesmos dados da chamada. |
+| `STAFF03-AUD-06.2` | P1 | No cenário `sp_absent_requeue`, `p1Id` era chamado novamente enquanto `p2Id` permanecia na posição 1, e `external_last_order` do evento (`10`) ficava incoerente com as ordens atribuídas (`1`, `2`, `3`). | Alinhar `external_last_order` inicial com as filas criadas (`2` no evento 1 e `1` no evento 2); incrementar `external_last_order` ao reinserir `p1Id` no fim da fila (`position: 2`); resolver legitimamente `p2Id` (chamada `callBId` + confirmação para `active`); confirmar que `p1Id` voltou à posição `1`; então criar `call2Id !== call1Id` respeitando a ordem FIFO real e mantendo `call1Id` em `absent`. |
+| `STAFF03-AUD-06.3` | P1 | O cenário `sp_absent_cutoff` marcava `external_absence_after_entry_cutoff` sem configurar `official_ends_at` anterior a `resolved_at` e anterior a `operational_deadline_at`. | Configurar dentro do savepoint `official_ends_at = called_at + 1s`, `operational_deadline_at = called_at + 30m` e `resolved_at = called_at + 5m` (respeitando `ck_events_time` e `ck_external_calls_resolution`), provando `starts_at <= called_at < official_ends_at <= resolved_at < operational_deadline_at`, projetando antes de `operational_deadline_at` sem reinserção e documentando explicitamente que o teste SQL valida projeção/integridade física do estado persistido (enquanto a decisão temporal do serviço é validada nos unitários de `StaffEntryCallService`). Também padronizar D06 e encerramentos controlado/imediato para atualizar toda a espera do evento e usar um único `clock_timestamp()` no encerramento controlado. |
+| `STAFF03-AUD-08` | P2 | `EntrySummaryCard` em [StaffEntrySections.js](../app/screens/staff/components/StaffEntrySections.js) exibia *"O evento não permite entradas ou alterações da fila neste momento."* para `!canManage`, contradizendo a janela residual em que `canMarkAbsent` e `canRemove` continuam autorizados no card da chamada atual. | Substituir por mensagem coerente com o significado real de `canManage` (*"O ingresso de novos participantes e alterações da fila externa estão indisponíveis. As ações sobre chamadas pendentes dependem das permissões atuais."*) e ampliar [staffEntryControlScreen.test.cjs](../app/tests/staffEntryControlScreen.test.cjs) para validar ausência de contradição entre resumo e card da chamada nos 5 cenários exigidos. |
+
+### Registro detalhado pós-correção (Rodada 2)
+
+- **`STAFF03-AUD-06.1` (Comparação temporal determinística):**
+  - **Solução aplicada:** adicionado helper `captureObservedInstant()` em [staff03-external-call-projection.integration.test.ts](../backend/test/integration/staff03-external-call-projection.integration.test.ts) para reutilizar um único instante `at` via `participationProjection()` ao comparar `projectCurrent` e `projectById` (nos blocos inicial, chamada 1 e chamada 2), mantendo também uma leitura adicional no caminho padrão de produção (`clock_timestamp()`) verificando formato de microssegundos e igualdade dos campos determinísticos de `externalEntryCall` sem comparar `observedAt` entre execuções distintas.
+  - **Verificação realizada:** revisão estática de todos os `assert.deepEqual` da suíte (nenhuma comparação instável remanescente).
+- **`STAFF03-AUD-06.2` (Nova chamada em ordem FIFO legítima e `external_last_order` coerente):**
+  - **Solução aplicada:** alinhados os valores iniciais de `external_last_order` (`2` no evento 1 e `1` no evento 2); no cenário `sp_absent_requeue`, `p1Id` é reinserido incrementando `external_last_order` para `3` (`position: 2`), `p2Id` assume legitimamente a posição `1`, passa por chamada (`callBId`) + confirmação para `active`, devolvendo `p1Id` legitimamente à posição `1`, e só então `call2Id !== call1Id` é criada mantendo `call1Id` em `absent`.
+  - **Verificação realizada:** conferência estática da ordem de atualização e de `uq_external_calls_pending_*`, `check_external_call_integrity` e `observer` cobrindo `[call1Id, callBId, call2Id]`.
+- **`STAFF03-AUD-06.3` (Cenário temporal após o corte oficial e antes do prazo operacional):**
+  - **Solução aplicada:** em `sp_absent_cutoff`, a janela do evento é ancorada deterministicamente em `call1.called_at` (`official_ends_at = called_at + 1s`, `operational_deadline_at = called_at + 30m`, `resolved_at = called_at + 5m`), respeitando integralmente `ck_events_time` e `ck_external_calls_resolution`, verificando em SQL `starts_at <= called_at < official_ends_at <= resolved_at < operational_deadline_at`, ausência de incremento em `external_last_order` (`'2'`), projeção terminal de `user1Id` e permanência de `user2Id` em `waiting` na janela residual. Documentado explicitamente no teste e nesta seção que o cenário SQL valida projeção e integridade do estado persistido no PostgreSQL, enquanto a decisão temporal do serviço (`requeued: false`) é validada em [staff-entry-call.test.ts](../backend/test/unit/staff-entry-call.test.ts).
+  - **Conferência adicional (AUD-06.4):** D06 (`sp_d06`) e encerramentos controlado/imediato (`sp_controlled_closure`, `sp_immediate_closure`) atualizados para cobrir toda a fila `waiting` do evento (`user1Id` e `user2Id`) com `WITH now_at AS (SELECT clock_timestamp() AS at)` garantindo instante único também no encerramento controlado.
+- **`STAFF03-AUD-08` (Mensagem contraditória no resumo operacional):**
+  - **Solução aplicada:** `EntrySummaryCard` em [StaffEntrySections.js](../app/screens/staff/components/StaffEntrySections.js) passou a exibir *"O ingresso de novos participantes e alterações da fila externa estão indisponíveis. As ações sobre chamadas pendentes dependem das permissões atuais."* quando `!canManage`, eliminando contradição com `EntryCurrentCallCard` na janela residual sem presumir corte oficial nem alterar permissões do backend.
+  - **Testes atualizados:** [staffEntryControlScreen.test.cjs](../app/tests/staffEntryControlScreen.test.cjs) atualizado (`STAFF03-AUD-05 + STAFF03-AUD-08`) cobrindo operação normal, janela residual, todas as ações bloqueadas, dados desatualizados (`stale`), fila inativa e indisponibilidade operacional (`503`), validando explicitamente a ausência da redação contraditória anterior.
+- **Verificações estáticas e limitações remanescentes:** executadas apenas verificações estáticas permitidas pelo [AGENTS.md](../AGENTS.md) (`git diff --check`, `git apply --stat`, `git apply --check --reverse`, `node --check` nos `.cjs`, conferência de links relativos e ausência de auto-referência no patch). Nenhuma suíte automatizada (`node --test`, `npm test`, `typecheck`, `lint`, `build`, `qa/regression` ou PostgreSQL) foi executada nesta rodada; campanha completa pendente com **GPT-6 Luna — Medium** e posterior homologação no Expo Go.
+- **25/11/2026 (Rodada 2 concluída para nova auditoria):** Correções de `STAFF03-AUD-06` e `STAFF03-AUD-08` aplicadas sem reabrir os seis achados aprovados na Rodada 1; [STAFF-03-changes.diff](../qa-evidence/STAFF-03-changes.diff) regenerado desde `efe21a8492a056d08a8c61799f7a66636c830a63`. Aguardando publicação por Kaled e nova auditoria independente.
