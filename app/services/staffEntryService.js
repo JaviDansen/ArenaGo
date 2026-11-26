@@ -63,7 +63,7 @@ export function parseEntryResult(body, intent) {
 const same = (a, b) => Boolean(a && b && ['userId', 'sessionId', 'eventId', 'epoch', 'revision'].every(key => a[key] === b[key]));
 const owns = (intent, context) => intent && ['userId', 'sessionId', 'eventId'].every(key => intent[key] === context[key]);
 const active = (intent) => intent && !['acknowledged', 'cancelled'].includes(intent.phase) ? intent : null;
-const empty = () => ({ context: null, status: 'idle', data: null, error: null, busy: false, pending: null, storageError: false, feedback: null, knownOutcome: null });
+const empty = () => ({ context: null, status: 'idle', data: null, error: null, busy: false, busyKind: null, pending: null, storageError: false, feedback: null, knownOutcome: null });
 const failure = (error) => error?.status === 401 ? 'session' : [403, 404].includes(error?.status) ? 'denied'
   : error?.isNetworkError || error?.isTimeout ? 'network' : 'unavailable';
 export const isDefinitiveEntryRejection = (error) => [400, 401, 403, 404].includes(error?.status) ||
@@ -148,8 +148,8 @@ export function createStaffEntryStore({ client, storage, createKey, getContext }
   }
   async function mutate(action) {
     if (flight) return { kind: 'busy' };
-    const context = state.context;
-    if (!isCurrent(context) || state.status !== 'ready' || state.error === 'stale' || !state.data || state.storageError || state.pending ||
+    const context = state.context, currentGeneration = generation;
+    if (revokedKind || !isCurrent(context) || state.status !== 'ready' || state.error === 'stale' || !state.data || state.storageError || state.pending ||
         storage.isPersistent !== true || !['userId', 'sessionId', 'eventId'].every(key => validEntryId(context[key]))) return { kind: 'blocked' };
     const data = state.data, call = data.pendingCall;
     if (action.kind === 'toggle' ? !data.canManage || typeof action.enabled !== 'boolean' || action.enabled === data.externalQueueEnabled
@@ -163,19 +163,30 @@ export function createStaffEntryStore({ client, storage, createKey, getContext }
     if (!validEntryId(intent.key)) throw new Error('Chave de entrada inválida.');
     readGeneration += 1;
     silentFlight = false;
-    publish({ busy: true, feedback: null, knownOutcome: null });
+    publish({ busy: true, busyKind: 'preparing', feedback: null, knownOutcome: null });
+    const sameOperationScope = () => generation === currentGeneration && isCurrent(context);
     const work = async () => {
       let knownOutcome = null;
       let authFailure = null;
       try {
         const reserved = await storage.reserve(intent);
-        if (!isCurrent(context)) return { kind: 'stale' };
+        if (!sameOperationScope() || revokedKind) {
+          if (reserved?.created) { try { await storage.cancelReserved(intent); } catch {} }
+          return revokedKind && sameOperationScope()
+            ? { kind: 'rejected', status: revokedKind === 'session' ? 401 : 403, code: null }
+            : { kind: 'stale' };
+        }
         if (!reserved.created) { publish({ pending: active(reserved.intent) }); return { kind: 'blocked' }; }
-        publish({ pending: intent });
+        publish({ pending: intent, busyKind: 'dispatching' });
         const dispatched = await storage.dispatch(intent);
-        if (!isCurrent(context)) return { kind: 'stale' };
+        if (!sameOperationScope() || revokedKind) {
+          if (dispatched && sameOperationScope()) publish({ pending: { ...intent, phase: 'dispatching' } });
+          return revokedKind && sameOperationScope()
+            ? { kind: 'rejected', status: revokedKind === 'session' ? 401 : 403, code: null }
+            : { kind: 'stale' };
+        }
         if (!dispatched) return { kind: 'blocked' };
-        publish({ pending: { ...intent, phase: 'dispatching' } });
+        publish({ pending: { ...intent, phase: 'dispatching' }, busyKind: 'mutating' });
         let outcome;
         try {
           const options = { auth: true, retryOnUnauthorized: false, outcomeUnknownOnNetworkError: true,
@@ -188,8 +199,8 @@ export function createStaffEntryStore({ client, storage, createKey, getContext }
           outcome = { kind: 'confirmed', result: parseEntryResult(body, intent) };
         } catch (error) {
           if (!isDefinitiveEntryRejection(error)) {
-            if (isCurrent(context)) publish({ feedback: 'uncertain' });
-            return { kind: isCurrent(context) ? 'uncertain' : 'stale' };
+            if (sameOperationScope()) publish({ feedback: 'uncertain' });
+            return { kind: sameOperationScope() ? 'uncertain' : 'stale' };
           }
           outcome = { kind: 'rejected', status: error.status, code: typeof error.code === 'string' ? error.code : null };
         }
@@ -197,7 +208,7 @@ export function createStaffEntryStore({ client, storage, createKey, getContext }
         knownOutcome = outcome;
         if (outcome.kind === 'rejected' && (outcome.status === 401 || outcome.status === 403)) {
           authFailure = outcome.status === 401 ? 'session' : 'denied';
-          if (isCurrent(context)) {
+          if (sameOperationScope()) {
             revokedKind = authFailure;
             readGeneration += 1;
             silentFlight = false;
@@ -205,7 +216,7 @@ export function createStaffEntryStore({ client, storage, createKey, getContext }
           }
         }
         await storage.finish(intent, outcome);
-        if (!isCurrent(context)) return { kind: 'stale' };
+        if (!sameOperationScope()) return { kind: 'stale' };
         if (authFailure) {
           publish({
             pending: { ...intent, phase: 'terminal', outcome },
@@ -219,7 +230,7 @@ export function createStaffEntryStore({ client, storage, createKey, getContext }
         }
         return { kind: outcome.kind, status: outcome.status };
       } catch {
-        if (!isCurrent(context)) return { kind: 'stale' };
+        if (!sameOperationScope()) return { kind: 'stale' };
         publish({
           storageError: true,
           feedback: 'storage',
@@ -228,9 +239,9 @@ export function createStaffEntryStore({ client, storage, createKey, getContext }
         });
         return { kind: 'storage_error' };
       } finally {
-        if (isCurrent(context)) {
-          publish({ busy: false });
-          if (!authFailure) await refresh();
+        if (sameOperationScope()) {
+          publish({ busy: false, busyKind: null });
+          if (!authFailure && !revokedKind) await refresh();
         }
       }
     };
@@ -238,23 +249,24 @@ export function createStaffEntryStore({ client, storage, createKey, getContext }
     try { return await flight; } finally { flight = null; }
   }
   async function resolveLocal(key, cancel = false) {
-    const context = state.context, intent = state.pending;
+    const context = state.context, currentGeneration = generation, intent = state.pending;
     if (flight || state.busy || !isCurrent(context) || !owns(intent, context) || intent.key !== key ||
         intent.phase !== (cancel ? 'reserved' : 'terminal')) return { kind: 'blocked' };
-    publish({ busy: true });
+    const sameOperationScope = () => generation === currentGeneration && isCurrent(context);
+    publish({ busy: true, busyKind: cancel ? 'cancelling' : 'acknowledging' });
     try {
       let writeFailed = false;
       try { await storage[cancel ? 'cancelReserved' : 'acknowledge'](intent); }
       catch { writeFailed = true; }
       const persisted = await storage.get(context.userId);
-      if (!isCurrent(context)) return { kind: 'stale' };
+      if (!sameOperationScope()) return { kind: 'stale' };
       const verified = persisted?.key === key && persisted.phase === (cancel ? 'cancelled' : 'acknowledged') &&
         owns(persisted, context);
       if (verified) publish({ pending: null, feedback: null, storageError: false, knownOutcome: null });
       if (writeFailed && !verified) publish({ storageError: true });
       return { kind: verified ? 'done' : writeFailed ? 'storage_error' : 'blocked' };
-    } catch { if (isCurrent(context)) publish({ storageError: true }); return { kind: isCurrent(context) ? 'storage_error' : 'stale' }; }
-    finally { if (isCurrent(context)) { publish({ busy: false }); await refresh(); } }
+    } catch { if (sameOperationScope()) publish({ storageError: true }); return { kind: sameOperationScope() ? 'storage_error' : 'stale' }; }
+    finally { if (sameOperationScope()) { publish({ busy: false, busyKind: null }); await refresh(); } }
   }
   return { getSnapshot: () => state, setContext, isCurrent, refresh, poll, mutate,
     acknowledge: key => resolveLocal(key), cancelReserved: key => resolveLocal(key, true),

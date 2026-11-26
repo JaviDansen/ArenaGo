@@ -554,3 +554,195 @@ test('STAFF04-AUD-04: 404 RESOURCE_NOT_FOUND na resolução de chamada mantém e
   assert.equal(store.getSnapshot().error, 'denied');
   assert.equal(store.getSnapshot().data, null);
 });
+
+test('STAFF04-AUD-04 e AUD-03 (store): GET 401/403 concorrente durante reserve/dispatch bloqueia POST, isola busyKind por contexto e grava finish lento', async () => {
+  // 1. Troca de contexto enquanto acknowledge está em voo não limpa busyKind do novo contexto
+  {
+    const slotA = new Map();
+    const slotB = new Map();
+    const ackDeferred = defer();
+    const reserveBDeferred = defer();
+    const ackStarted = defer();
+    const makeIndependentStorage = () => ({
+      isPersistent: true,
+      async get(user) { return (user === context.userId ? slotA : slotB).get(user) ?? null; },
+      async reserve(intent) {
+        const m = intent.userId === context.userId ? slotA : slotB;
+        if (intent.userId !== context.userId) await reserveBDeferred.promise;
+        m.set(intent.userId, intent);
+        return { created: true, intent };
+      },
+      async dispatch(intent) {
+        const m = intent.userId === context.userId ? slotA : slotB;
+        m.set(intent.userId, { ...intent, phase: 'dispatching' });
+        return true;
+      },
+      async finish(intent, outcome) {
+        const m = intent.userId === context.userId ? slotA : slotB;
+        m.set(intent.userId, { ...intent, phase: 'terminal', outcome });
+        return true;
+      },
+      async acknowledge(intent) {
+        ackStarted.resolve();
+        await ackDeferred.promise;
+        const m = intent.userId === context.userId ? slotA : slotB;
+        m.set(intent.userId, { ...intent, phase: 'acknowledged' });
+        return true;
+      },
+      async cancelReserved(intent) {
+        const m = intent.userId === context.userId ? slotA : slotB;
+        m.set(intent.userId, { ...intent, phase: 'cancelled' });
+        return true;
+      },
+    });
+    const ctxA = { ...context };
+    const ctxB = { ...context, userId: id(99), sessionId: id(98), eventId: id(88), epoch: 2, revision: 1 };
+    let cur = ctxA;
+    slotA.set(ctxA.userId, { ...ctxA, key: id(21), kind: 'call', participationId: null, callId: null, enabled: null, phase: 'terminal', outcome: { kind: 'confirmed', result: callResult() } });
+    const store = api.createStaffEntryStore({
+      client: {
+        get: async () => ({ ...body(), eventId: cur.eventId }),
+        post: async () => callResult(),
+        patch: async () => ({ eventId: cur.eventId, externalQueueEnabled: true, releasedCount: 0, changedAt: at }),
+      },
+      storage: makeIndependentStorage(),
+      getContext: () => cur,
+      createKey: () => id(40),
+    });
+    store.setContext(ctxA);
+    await store.refresh();
+    const oldAck = store.acknowledge(id(21));
+    await ackStarted.promise;
+    assert.equal(store.getSnapshot().busyKind, 'acknowledging');
+
+    cur = ctxB;
+    store.setContext(ctxB);
+    await store.refresh();
+    assert.equal(store.getSnapshot().busy, false);
+    assert.equal(store.getSnapshot().busyKind, null);
+
+    const newMutate = store.mutate({ kind: 'call' });
+    assert.equal(store.getSnapshot().busy, true);
+    assert.equal(store.getSnapshot().busyKind, 'preparing');
+
+    // Reconhecimento antigo finaliza sem limpar busyKind do contexto B
+    ackDeferred.resolve();
+    await oldAck;
+    assert.equal(store.getSnapshot().busy, true);
+    assert.equal(store.getSnapshot().busyKind, 'preparing');
+
+    reserveBDeferred.resolve();
+    await newMutate;
+    assert.equal(store.getSnapshot().busy, false);
+    assert.equal(store.getSnapshot().busyKind, null);
+  }
+
+  // 2. GET 403/401 concorrente durante reserve() cancela APENAS reserved e não dispara dispatch() nem POST
+  for (const [httpStatus, expectedError] of [[403, 'denied'], [401, 'session']]) {
+    const reserveGate = defer();
+    let dispatchCalls = 0;
+    let postCalls = 0;
+    const saved = new Map();
+    const baseStorage = {
+      isPersistent: true,
+      async get(user) { return saved.get(user) ?? null; },
+      async reserve(intent) {
+        await reserveGate.promise;
+        saved.set(intent.userId, intent);
+        return { created: true, intent };
+      },
+      async dispatch(intent) {
+        dispatchCalls += 1;
+        saved.set(intent.userId, { ...intent, phase: 'dispatching' });
+        return true;
+      },
+      async finish() {},
+      async acknowledge() {},
+      async cancelReserved(intent) {
+        saved.set(intent.userId, { ...intent, phase: 'cancelled' });
+        return true;
+      },
+    };
+    let pollGate = null;
+    const store = api.createStaffEntryStore({
+      client: {
+        get: async () => (pollGate ? pollGate.promise : body()),
+        post: async () => { postCalls += 1; return callResult(); },
+        patch: async () => ({}),
+      },
+      storage: baseStorage,
+      getContext: () => context,
+      createKey: () => id(55),
+    });
+    store.setContext(context);
+    await store.refresh();
+
+    pollGate = defer();
+    const pPoll = store.poll();
+    const pMutate = store.mutate({ kind: 'call' });
+    pollGate.reject(Object.assign(new Error('auth-lost'), { status: httpStatus }));
+    await pPoll;
+    assert.equal(store.getSnapshot().status, 'error');
+    assert.equal(store.getSnapshot().error, expectedError);
+    assert.equal(store.getSnapshot().data, null);
+
+    reserveGate.resolve();
+    const outcome = await pMutate;
+    assert.equal(outcome.kind, 'rejected');
+    assert.equal(outcome.status, httpStatus);
+    assert.equal(dispatchCalls, 0);
+    assert.equal(postCalls, 0);
+    assert.equal(saved.get(context.userId).phase, 'cancelled');
+  }
+
+  // 3. GET 403 concorrente durante dispatch() preserva dispatching de forma conservadora e aborta POST
+  {
+    const dispatchGate = defer();
+    let postCalls = 0;
+    const saved = new Map();
+    const baseStorage = {
+      isPersistent: true,
+      async get(user) { return saved.get(user) ?? null; },
+      async reserve(intent) {
+        saved.set(intent.userId, intent);
+        return { created: true, intent };
+      },
+      async dispatch(intent) {
+        saved.set(intent.userId, { ...intent, phase: 'dispatching' });
+        await dispatchGate.promise;
+        return true;
+      },
+      async finish() {},
+      async acknowledge() {},
+      async cancelReserved() { return false; },
+    };
+    let pollGate = null;
+    const store = api.createStaffEntryStore({
+      client: {
+        get: async () => (pollGate ? pollGate.promise : body()),
+        post: async () => { postCalls += 1; return callResult(); },
+        patch: async () => ({}),
+      },
+      storage: baseStorage,
+      getContext: () => context,
+      createKey: () => id(56),
+    });
+    store.setContext(context);
+    await store.refresh();
+
+    pollGate = defer();
+    const pPoll = store.poll();
+    const pMutate = store.mutate({ kind: 'call' });
+    await Promise.resolve();
+    await Promise.resolve();
+    pollGate.reject(Object.assign(new Error('forbidden'), { status: 403 }));
+    await pPoll;
+
+    dispatchGate.resolve();
+    await pMutate;
+    assert.equal(postCalls, 0);
+    assert.equal(saved.get(context.userId).phase, 'dispatching');
+    assert.equal(store.getSnapshot().status, 'error');
+    assert.equal(store.getSnapshot().error, 'denied');
+  }
+});

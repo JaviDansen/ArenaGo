@@ -267,7 +267,14 @@ export function classifyStaffOperationError(error) {
   return { kind: 'pending_reconciliation', status, code };
 }
 
-export function createStaffOperationsCoordinator({ client, storage, createKey, isCurrent, onStage = null }) {
+export function createStaffOperationsCoordinator({
+  client,
+  storage,
+  createKey,
+  isCurrent,
+  onStage = null,
+  onAuthError = null,
+}) {
   if (typeof isCurrent !== 'function' || typeof createKey !== 'function' || storage?.isPersistent !== true ||
       ['get', 'reserve', 'dispatch', 'recordTerminal', 'cancelReserved', 'clear', 'acknowledge']
         .some((name) => typeof storage?.[name] !== 'function'))
@@ -309,11 +316,24 @@ export function createStaffOperationsCoordinator({ client, storage, createKey, i
         const timeout = Boolean(error?.isTimeout);
         const network = Boolean(error?.isNetworkError || timeout);
         const transient = network || status === null || status >= 500;
+        const code = typeof error?.code === 'string' ? error.code : null;
+        if ((status === 401 || status === 403) && typeof onAuthError === 'function') {
+          try {
+            onAuthError({
+              kind: status === 401 ? 'session' : 'denied',
+              status,
+              code,
+              phase: 'precondition',
+              context,
+              desired,
+            });
+          } catch { /* Não mascarar a recusa prévia classificada. */ }
+        }
         return {
           kind: 'rejected',
           phase: 'precondition',
           status,
-          code: typeof error?.code === 'string' ? error.code : null,
+          code,
           network,
           timeout,
           transient,
@@ -337,6 +357,7 @@ export function createStaffOperationsCoordinator({ client, storage, createKey, i
     if (!isCurrent(context, desired)) return { kind: 'stale' };
     if (!dispatched) return { kind: 'pending_reconciliation' };
     let outcome;
+    let revokedByCurrentAuth = false;
     try {
       if (typeof onStage === 'function') onStage('mutating', context, desired);
       const result = await operation(intent.key);
@@ -345,22 +366,38 @@ export function createStaffOperationsCoordinator({ client, storage, createKey, i
       const classification = classifyStaffOperationError(error);
       if (classification.kind !== 'rejected') return isCurrent(context, desired) ? classification : { kind: 'stale' };
       outcome = classification;
+      if ((outcome.status === 401 || outcome.status === 403) && isCurrent(context, desired)) {
+        revokedByCurrentAuth = true;
+        if (typeof onAuthError === 'function') {
+          try {
+            onAuthError({
+              kind: outcome.status === 401 ? 'session' : 'denied',
+              status: outcome.status,
+              code: outcome.code,
+              phase: 'mutating',
+              context,
+              desired,
+              receiptId: intent.key,
+            });
+          } catch { /* Não interromper persistência do resultado histórico. */ }
+        }
+      }
     }
-    // A resposta histórica pertence à intenção original mesmo após logout.
+    // A resposta histórica pertence à intenção original mesmo após logout ou bloqueio imediato de autorização.
     try { await storage.recordTerminal(context.userId, intent.key, outcome); }
     catch {
-      if (!isCurrent(context, desired)) return { kind: 'stale' };
+      if (!revokedByCurrentAuth && !isCurrent(context, desired)) return { kind: 'stale' };
       return outcome.kind === 'confirmed' ? { kind: 'confirmed_cleanup_pending', result: outcome.result, receiptId: intent.key }
         : { kind: 'rejected_cleanup_pending', status: outcome.status, code: outcome.code, receiptId: intent.key };
     }
-    if (!isCurrent(context, desired)) return { kind: 'stale' };
+    if (!revokedByCurrentAuth && !isCurrent(context, desired)) return { kind: 'stale' };
     try { await storage.clear(context.userId, intent.key); }
     catch {
-      if (!isCurrent(context, desired)) return { kind: 'stale' };
+      if (!revokedByCurrentAuth && !isCurrent(context, desired)) return { kind: 'stale' };
       return outcome.kind === 'confirmed' ? { kind: 'confirmed_cleanup_pending', result: outcome.result, receiptId: intent.key }
         : { kind: 'rejected_cleanup_pending', status: outcome.status, code: outcome.code, receiptId: intent.key };
     }
-    return isCurrent(context, desired) ? { ...outcome, receiptId: intent.key } : { kind: 'stale' };
+    return (revokedByCurrentAuth || isCurrent(context, desired)) ? { ...outcome, receiptId: intent.key } : { kind: 'stale' };
   }
   function single(work, context, scope) {
     if (inflight) return Promise.resolve({ kind: 'busy' });

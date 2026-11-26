@@ -4230,13 +4230,18 @@ test('STAFF04-AUD-04 integração ponta a ponta: 403 em mutação de Estação e
   const partAna = 'abcdef00-0000-4000-8000-000000000041';
   const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000012', roles: ['staff'] };
 
-  // Cenário A: 403 no POST /call-next da Estação com GETs posteriores falhando 503
+  // Cenário A: 403 no POST /call-next da Estação com GETs posteriores falhando 503 e verificação rigorosa do contrato de 3 chaves
   {
     const secureValues = new Map();
-    let deleteCalls = 0;
+    const primaryKey = `arenago.staff.operation.${staffUser.id}`;
+    const receiptKey = `${primaryKey}.receipt`;
+    const ackKey = `${primaryKey}.ack`;
+    const deletedKeys = [];
     let getsFail503 = false;
     let postRevokeGets = 0;
     let posted = false;
+    let stationPostCount = 0;
+    let sentIdempotencyKey = null;
 
     const app = createIntegration({
       initialUser: staffUser,
@@ -4249,7 +4254,13 @@ test('STAFF04-AUD-04 integração ponta a ponta: 403 em mutação de Estação e
           isAvailableAsync: async () => true,
           getItemAsync: async (key) => secureValues.get(key) ?? null,
           setItemAsync: async (key, value) => { secureValues.set(key, value); },
-          deleteItemAsync: async (key) => { deleteCalls += 1; secureValues.delete(key); },
+          deleteItemAsync: async (key) => {
+            deletedKeys.push({
+              key,
+              hadReceiptBeforeDelete: secureValues.has(receiptKey),
+            });
+            secureValues.delete(key);
+          },
         },
         http: async (route, options) => {
           if (route === '/staff/events') return { events: [staffEvent] };
@@ -4286,6 +4297,8 @@ test('STAFF04-AUD-04 integração ponta a ponta: 403 em mutação de Estação e
             return { eventId: staffEvent.id, externalQueueEnabled: true, canManage: true, observedAt: at, pendingCall: null, canCall: false, canConfirm: false, canMarkAbsent: false, canRemove: false, waitingCount: 0, waiting: [] };
           }
           if (route.endsWith('/call-next') && options.method === 'POST') {
+            stationPostCount += 1;
+            sentIdempotencyKey = options.headers['Idempotency-Key'];
             posted = true;
             getsFail503 = true;
             return { statusCode: 403, body: { code: 'STAFF_EVENT_FORBIDDEN' } };
@@ -4304,10 +4317,19 @@ test('STAFF04-AUD-04 integração ponta a ponta: 403 em mutação de Estação e
 
       await app.press('Chamar próximo');
       assert.ok(!app.hasText('Diego Costa'));
-      assert.ok(app.hasText('Acesso à estação indisponível.'));
+      assert.ok(app.hasText('Acesso ao evento ou à experiência indisponível.'));
       assert.equal(postRevokeGets, 0);
-      assert.equal(deleteCalls, 0);
-      assert.equal(secureValues.size > 0, true);
+      assert.equal(stationPostCount, 1);
+
+      // Contrato de 3 chaves: limpeza legítima atinge apenas a primária APÓS .receipt salvo
+      assert.deepEqual(deletedKeys, [{ key: primaryKey, hadReceiptBeforeDelete: true }]);
+      assert.equal(secureValues.has(primaryKey), false);
+      const savedReceipt = JSON.parse(secureValues.get(receiptKey));
+      assert.equal(savedReceipt.phase, 'terminal');
+      assert.equal(savedReceipt.key, sentIdempotencyKey);
+      assert.equal(savedReceipt.outcome.kind, 'rejected');
+      assert.equal(savedReceipt.outcome.status, 403);
+      assert.equal(secureValues.has(ackKey), false);
 
       await app.tickTimers(5000);
       assert.equal(postRevokeGets, 0);
@@ -4319,6 +4341,7 @@ test('STAFF04-AUD-04 integração ponta a ponta: 403 em mutação de Estação e
       await app.press('Atualizar estações');
       assert.ok(app.hasText('SEM ACESSO'));
       assert.equal(app.isDisabled('Controle de Entrada'), true);
+      assert.equal(stationPostCount, 1);
     } finally {
       app.dispose();
     }
@@ -4406,5 +4429,259 @@ test('STAFF04-AUD-04 integração ponta a ponta: 403 em mutação de Estação e
     } finally {
       app.dispose();
     }
+  }
+});
+
+test('STAFF04-AUD-06 + AUD-04 (integrado): agendador único de 60s em todas as subtelas, resposta lenta, foco/background, troca de evento/identidade e lock pré-persistência', { skip }, async () => {
+  const at = '2026-11-10T15:00:00.000Z';
+  const eventA = { ...staffEvent, id: '11111111-1111-4111-8111-111111111151', name: 'Evento A Unico', effectivePhase: 'open' };
+  const eventB = { ...staffEvent, id: '22222222-2222-4222-8222-222222222252', name: 'Evento B Unico', effectivePhase: 'open' };
+  const expA = '33333333-3333-4333-8333-333333333351';
+  const stationA = '44444444-4444-4444-8444-444444444451';
+  const expB = '33333333-3333-4333-8333-333333333352';
+  const stationB = '44444444-4444-4444-8444-444444444452';
+  const entryA = '77777777-7777-4777-8777-777777777751';
+  const entryB = '77777777-7777-4777-8777-777777777752';
+  const staffA = { ...participant, id: 'abcdef00-0000-4000-8000-000000000051', sessionId: '10000000-0000-4000-8000-000000000051', roles: ['staff'] };
+  const staffB = { ...participant, id: 'abcdef00-0000-4000-8000-000000000052', email: 'staff-b-aud06@example.test', sessionId: '20000000-0000-4000-8000-000000000052', roles: ['staff'] };
+
+  const secureValues = new Map();
+  let receiptWriteGate = null;
+  let eventsGets = 0;
+  let eventsMode = 'ok';
+  let deferNextEvents = false;
+  let slowEventsResolve = null;
+  let slowPhase = 'open';
+  let activeAccount = 'A';
+  let op404Stations500 = false;
+  const origSetTimeout = globalThis.setTimeout;
+
+  const app = createIntegration({
+    initialUser: staffA,
+    control: {
+      realStaff: true,
+      manualTimers: true,
+      platformOS: 'android',
+      events: [eventA, eventB],
+      secureStore: {
+        isAvailableAsync: async () => true,
+        getItemAsync: async (key) => secureValues.get(key) ?? null,
+        setItemAsync: async (key, value) => {
+          if (receiptWriteGate && key.endsWith('.receipt')) {
+            const g = receiptWriteGate;
+            await g.promise;
+          }
+          secureValues.set(key, value);
+        },
+        deleteItemAsync: async (key) => { secureValues.delete(key); },
+      },
+      http: async (route, options) => {
+        if (route === '/staff/events') {
+          eventsGets += 1;
+          if (eventsMode === '403') return { statusCode: 403, body: { code: 'STAFF_EVENT_FORBIDDEN' } };
+          const list = activeAccount === 'A'
+            ? [{ ...eventA, effectivePhase: slowPhase }, eventB]
+            : [eventB];
+          if (deferNextEvents) {
+            deferNextEvents = false;
+            return new Promise((done) => {
+              slowEventsResolve = () => done({ events: list });
+            });
+          }
+          return { events: list };
+        }
+        const evMatch = route.match(/^\/staff\/events\/([^/]+)\/(.+)$/);
+        if (evMatch) {
+          const [, evId, sub] = evMatch;
+          const isB = evId === eventB.id;
+          const curExp = isB ? expB : expA;
+          const curSt = isB ? stationB : stationA;
+          const curLabel = isB ? 'Cabine B' : 'Cabine A';
+          const curExpName = isB ? 'Arena B' : 'Arena A';
+          const curEntry = isB ? entryB : entryA;
+          if (sub === 'experiences') {
+            if (op404Stations500) return { statusCode: 500, body: { code: 'INTERNAL_SERVER_ERROR' } };
+            return { eventId: evId, experiences: [{ id: curExp, name: curExpName }] };
+          }
+          if (sub === 'stations') {
+            if (op404Stations500) return { statusCode: 500, body: { code: 'INTERNAL_SERVER_ERROR' } };
+            return {
+              eventId: evId,
+              stations: [{ id: curSt, experienceId: curExp, label: curLabel, availability: 'available', pendingServiceSessionId: null, pendingCalledAt: null }],
+            };
+          }
+          if (sub === 'entry-control') {
+            if (op404Stations500) return { statusCode: 500, body: { code: 'INTERNAL_SERVER_ERROR' } };
+            return {
+              eventId: evId,
+              externalQueueEnabled: true,
+              canManage: true,
+              observedAt: at,
+              pendingCall: null,
+              canCall: false,
+              canConfirm: false,
+              canMarkAbsent: false,
+              canRemove: false,
+              waitingCount: 0,
+              waiting: [],
+            };
+          }
+          if (sub === `experiences/${curExp}/queue`) {
+            return { eventId: evId, experienceId: curExp, waitingCount: 1, canCallWaitingEntries: true, firstWaitingQueueEntryId: curEntry, acceptingNewEntries: true };
+          }
+          if (sub === `experiences/${curExp}/stations/${curSt}/operational-state`) {
+            if (op404Stations500) return { statusCode: 404, body: { code: 'RESOURCE_NOT_FOUND' } };
+            return {
+              eventId: evId,
+              experienceId: curExp,
+              stationId: curSt,
+              availability: 'available',
+              canCall: true,
+              waitingCount: 1,
+              waiting: [{ queueEntryId: curEntry, displayName: isB ? 'Participante B' : 'Participante A', position: 1 }],
+              pending: null,
+            };
+          }
+          if (sub === `experiences/${curExp}/stations/${curSt}/call-next` && options.method === 'POST') {
+            return { statusCode: 403, body: { code: 'STAFF_EVENT_FORBIDDEN' } };
+          }
+        }
+        return undefined;
+      },
+    },
+  });
+
+  try {
+    await app.mount();
+    await app.act(() => app.manager.login({ email: staffA.email, password: 'ficticia' }));
+    await app.press(`Selecionar evento ${eventA.name}`);
+
+    // 1 e 2: ciclo normal de 60s executa exatamente 1 GET /staff/events por ciclo (sem duplicação nem redundância sequencial)
+    assert.ok(app.hasExactText('Eventos e fase: atualização automática ativa · a cada 60s'));
+    let before = eventsGets;
+    await app.tickTimers(60000);
+    assert.equal(eventsGets, before + 1);
+    before = eventsGets;
+    await app.tickTimers(60000);
+    assert.equal(eventsGets, before + 1);
+
+    // 3: resposta lenta em /staff/events não sobrepõe ao cruzar outro ciclo de 60s e retoma ciclo único
+    deferNextEvents = true;
+    before = eventsGets;
+    await app.tickTimers(60000);
+    assert.equal(eventsGets, before + 1);
+    await app.tickTimers(60000);
+    assert.equal(eventsGets, before + 1, 'resposta lenta bloqueia novo ciclo concorrente de 60s');
+    slowPhase = 'closing';
+    await app.act(async () => {
+      slowEventsResolve();
+      await new Promise((resolve) => origSetTimeout(resolve, 0));
+    });
+    assert.ok(app.hasText('Status: Encerrando'));
+    before = eventsGets;
+    await app.tickTimers(60000);
+    assert.equal(eventsGets, before + 1);
+
+    // 4: navegação Painel -> Controle de Entrada -> Painel -> Estação -> Painel preserva cobertura única de 60s
+    await app.press('Controle de Entrada');
+    before = eventsGets;
+    await app.tickTimers(60000);
+    assert.equal(eventsGets, before + 1, 'Entrada preserva exatamente 1 ciclo de 60s para eventos');
+    await app.press('Voltar ao painel');
+
+    await app.press('Selecionar estação Cabine A da experiência Arena A');
+    before = eventsGets;
+    await app.tickTimers(60000);
+    assert.equal(eventsGets, before + 1, 'Estação preserva exatamente 1 ciclo de 60s para eventos');
+    await app.press('Voltar ao painel');
+
+    // 5 e 6: foco e segundo plano pausam eventos/fase e retomam com correspondência no indicador
+    await app.setFocus(false);
+    assert.ok(app.hasExactText('Eventos e fase: atualização temporariamente pausada'));
+    before = eventsGets;
+    await app.tickTimers(120000);
+    assert.equal(eventsGets, before);
+    await app.setFocus(true);
+    assert.ok(app.hasExactText('Eventos e fase: atualização automática ativa · a cada 60s'));
+    await app.tickTimers(60000);
+    assert.equal(eventsGets, before + 1);
+
+    await app.setAppState('background');
+    assert.ok(app.hasExactText('Eventos e fase: atualização temporariamente pausada'));
+    before = eventsGets;
+    await app.tickTimers(120000);
+    assert.equal(eventsGets, before);
+    await app.setAppState('active');
+    assert.ok(app.hasExactText('Eventos e fase: atualização automática ativa · a cada 60s'));
+    await app.tickTimers(60000);
+    assert.equal(eventsGets, before + 1);
+
+    // 7: troca de evento e identidade mantém ciclo único isolado
+    await app.press('Voltar aos eventos');
+    await app.press(`Selecionar evento ${eventB.name}`);
+    before = eventsGets;
+    await app.tickTimers(60000);
+    assert.equal(eventsGets, before + 1);
+
+    await app.press('Voltar aos eventos');
+    await app.press('Sair da conta');
+    activeAccount = 'B';
+    app.setUser(staffB);
+    await app.act(() => app.manager.login({ email: staffB.email, password: 'ficticia' }));
+    await app.press(`Selecionar evento ${eventB.name}`);
+    before = eventsGets;
+    await app.tickTimers(60000);
+    assert.equal(eventsGets, before + 1);
+
+    // 9 e 10: acesso operacional incerto desliga agendador de eventos e exibe recuperação manual
+    await app.press('Selecionar estação Cabine B da experiência Arena B');
+    op404Stations500 = true;
+    await app.press('Atualizar atendimento');
+    await app.press('Voltar ao painel');
+    assert.ok(app.hasExactText('Eventos e fase: atualização indisponível · aguardando recuperação manual'));
+    before = eventsGets;
+    await app.tickTimers(120000);
+    assert.equal(eventsGets, before, 'acesso incerto não executa consultas automáticas de 60s');
+
+    // Recupera manualmente -> volta a ativo 60s; 403 encerra e limpa painel
+    op404Stations500 = false;
+    await app.press('Atualizar estações');
+    assert.ok(app.hasExactText('Eventos e fase: atualização automática ativa · a cada 60s'));
+
+    eventsMode = '403';
+    await app.tickTimers(60000);
+    assert.ok(!app.hasText('Cabine B'));
+    assert.ok(app.hasText('Acesso Staff indisponível para esta conta. Volte aos eventos ou procure o responsável.'));
+    before = eventsGets;
+    await app.tickTimers(120000);
+    assert.equal(eventsGets, before);
+
+    // AUD-04 integrado com persistência pendente: 403 em POST /call-next trava ANTES de .receipt finalizar
+    eventsMode = 'ok';
+    await app.press('Voltar aos eventos');
+    await app.press('Atualizar eventos');
+    await app.press(`Selecionar evento ${eventB.name}`);
+    await app.press('Selecionar estação Cabine B da experiência Arena B');
+    assert.ok(app.hasQueueRow(1, 'Participante B'));
+
+    let resolveReceipt;
+    receiptWriteGate = { promise: new Promise((yes) => { resolveReceipt = yes; }) };
+    let callPromise;
+    await app.act(async () => {
+      callPromise = app.handler('Chamar próximo')();
+    });
+    assert.ok(!app.hasText('Participante B'), 'dados nominais removidos mesmo antes de .receipt concluir');
+    assert.ok(app.hasText('Acesso ao evento ou à experiência indisponível.'));
+    const bReceiptKey = `arenago.staff.operation.${staffB.id}.receipt`;
+    assert.equal(secureValues.has(bReceiptKey), false);
+
+    await app.act(async () => {
+      resolveReceipt();
+      await callPromise;
+    });
+    assert.equal(JSON.parse(secureValues.get(bReceiptKey)).outcome.status, 403);
+    assert.equal(secureValues.has(`arenago.staff.operation.${staffB.id}`), false);
+  } finally {
+    app.dispose();
   }
 });

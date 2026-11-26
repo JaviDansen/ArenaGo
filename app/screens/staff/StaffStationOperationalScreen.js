@@ -119,11 +119,27 @@ export default function StaffStationOperationalScreen({
       },
       storage: defaultStaffIntentStorage,
       createKey: randomUUID,
-      isCurrent: (context, scope) => same(context, getContext())
+      isCurrent: (context, scope) => !revokedKindRef.current
+        && same(context, getContext())
         && (!scope || (scope.stationId === context.stationId && scope.eventId === context.eventId)),
       onStage: (stage, originScope) => {
-        if (!mounted.current || !same(originScope, getContext())) return;
+        if (!mounted.current || revokedKindRef.current || !same(originScope, getContext())) return;
         setView((previous) => (previous.busy ? { ...previous, busyKind: stage } : previous));
+      },
+      onAuthError: (info) => {
+        if (!info?.context || !same(info.context, getContext())) return;
+        const feedback = info.phase === 'precondition'
+          ? {
+              kind: 'rejected',
+              phase: 'precondition',
+              status: info.status ?? null,
+              code: info.code ?? null,
+              network: false,
+              timeout: false,
+              transient: false,
+            }
+          : null;
+        revokeStationAccess(info.kind, info.context, feedback);
       },
     });
   }
@@ -158,6 +174,7 @@ export default function StaffStationOperationalScreen({
 
   function revokeStationAccess(kind, originScope, nextFeedback = null) {
     if (!mounted.current || !same(originScope, getContext())) return false;
+    const alreadyRevoked = Boolean(revokedKindRef.current);
     const denyKind = kind === 'session' ? 'session' : 'denied';
     revokedKindRef.current = denyKind;
     generation.current += 1;
@@ -176,7 +193,7 @@ export default function StaffStationOperationalScreen({
       busyKind: null,
       feedback: nextFeedback,
     }));
-    liveRef.current.onAccessDenied?.(denyKind);
+    if (!alreadyRevoked) liveRef.current.onAccessDenied?.(denyKind);
     return true;
   }
 
@@ -532,7 +549,7 @@ export default function StaffStationOperationalScreen({
       } catch {
         result = { kind: 'storage_error' };
       }
-      if (!same(scope, getContext())) return;
+      const alreadyRevokedBeforeReturn = Boolean(revokedKindRef.current);
       if (
         (result?.kind === 'rejected' || result?.kind === 'rejected_cleanup_pending')
         && (result.status === 401 || result.status === 403)
@@ -540,12 +557,25 @@ export default function StaffStationOperationalScreen({
         const preservedFeedback = (result.phase === 'precondition' || result.kind === 'rejected_cleanup_pending')
           ? result
           : null;
+        if (!same(scope, getContext())) {
+          if (
+            alreadyRevokedBeforeReturn
+            && preservedFeedback
+            && mounted.current
+            && liveRef.current.event?.id === scope.eventId
+            && liveRef.current.auth?.user?.id === scope.userId
+          ) {
+            setView((previous) => ({ ...previous, busy: false, busyKind: null, feedback: preservedFeedback }));
+          }
+          return;
+        }
         revokeStationAccess(result.status === 401 ? 'session' : 'denied', scope, preservedFeedback);
         return;
       }
+      if (!same(scope, getContext()) || revokedKindRef.current) return;
       setView((previous) => ({ ...previous, busy: false, busyKind: null, feedback: result }));
       const refreshedOk = await refresh(true);
-      if (refreshedOk && same(scope, getContext()) && (result?.kind === 'confirmed' || result?.kind === 'confirmed_cleanup_pending')) {
+      if (refreshedOk && !revokedKindRef.current && same(scope, getContext()) && (result?.kind === 'confirmed' || result?.kind === 'confirmed_cleanup_pending')) {
         liveRef.current.onChanged?.();
       }
     } finally {

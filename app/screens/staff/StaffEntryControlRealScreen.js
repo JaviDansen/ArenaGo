@@ -149,6 +149,7 @@ export default function StaffEntryControlRealScreen({
   const [notice, setNotice] = useState(null);
   const [staleDialogMessage, setStaleDialogMessage] = useState(null);
   const [busyStage, setBusyStage] = useState(null);
+  const busyTokenRef = useRef(0);
   const autoAttempt = useRef(null);
   const [dialog, setDialog] = useState(null);
   const dialogRef = useRef(null);
@@ -160,6 +161,7 @@ export default function StaffEntryControlRealScreen({
 
   useEffect(() => {
     autoAttempt.current = null;
+    busyTokenRef.current += 1;
     setNotice(null);
     setStaleDialogMessage(null);
     setBusyStage(null);
@@ -167,6 +169,7 @@ export default function StaffEntryControlRealScreen({
     setDialog(null);
     if (!liveRef.current.accessDenied) void store.refresh();
     return () => {
+      busyTokenRef.current += 1;
       dialogRef.current = null;
       store.setContext(null);
     };
@@ -174,6 +177,7 @@ export default function StaffEntryControlRealScreen({
 
   useEffect(() => {
     if (!accessDenied) return;
+    busyTokenRef.current += 1;
     dialogRef.current = null;
     setDialog(null);
     setNotice(null);
@@ -237,6 +241,7 @@ export default function StaffEntryControlRealScreen({
       || autoAttempt.current === intent.key
     ) return;
     autoAttempt.current = intent.key;
+    const busyToken = ++busyTokenRef.current;
     setBusyStage('acknowledging');
     void (async () => {
       try {
@@ -244,9 +249,11 @@ export default function StaffEntryControlRealScreen({
         if (result.kind === 'done' && store.isCurrent(scope)) {
           setNotice({ key: intent.key, outcome: intent.outcome, operation: intent.kind });
         }
-        if (result.kind === 'blocked') autoAttempt.current = null;
+        if (result.kind === 'blocked' && store.isCurrent(scope)) autoAttempt.current = null;
       } finally {
-        setBusyStage(null);
+        if (busyTokenRef.current === busyToken && store.isCurrent(scope)) {
+          setBusyStage(null);
+        }
       }
     })();
   }, [accessDenied, snapshot, store]);
@@ -303,8 +310,14 @@ export default function StaffEntryControlRealScreen({
     ) return;
     setNotice(null);
     setStaleDialogMessage(null);
-    setBusyStage('mutating');
-    return store.mutate(action);
+    const busyToken = ++busyTokenRef.current;
+    const originScope = latest.context;
+    setBusyStage('preparing');
+    return Promise.resolve(store.mutate(action)).finally(() => {
+      if (busyTokenRef.current === busyToken && store.isCurrent(originScope)) {
+        setBusyStage(null);
+      }
+    });
   };
 
   const open = (action, targetName = null) => {
@@ -344,8 +357,14 @@ export default function StaffEntryControlRealScreen({
     }
     setNotice(null);
     setStaleDialogMessage(null);
-    setBusyStage('mutating');
-    return store.mutate(expected.action);
+    const busyToken = ++busyTokenRef.current;
+    const originScope = expected.context;
+    setBusyStage('preparing');
+    return Promise.resolve(store.mutate(expected.action)).finally(() => {
+      if (busyTokenRef.current === busyToken && store.isCurrent(originScope)) {
+        setBusyStage(null);
+      }
+    });
   };
 
   const refresh = () => {
@@ -392,11 +411,14 @@ export default function StaffEntryControlRealScreen({
         <View accessibilityRole="progressbar" style={styles.stateCard}>
           <ActivityIndicator color={c.accent} />
           <Text style={styles.message}>
-            {busyStage === 'cancelling' || pending?.phase === 'reserved'
-              ? 'Descartando solicitação não enviada...'
-              : busyStage === 'acknowledging' || pending?.phase === 'terminal'
-                ? 'Finalizando reconhecimento seguro local...'
-                : 'Processando operação no servidor...'}
+            {(() => {
+              const stage = snapshot.busyKind ?? busyStage;
+              if (stage === 'preparing') return 'Preparando solicitação com segurança...';
+              if (stage === 'dispatching') return 'Registrando envio seguro...';
+              if (stage === 'cancelling') return 'Descartando solicitação não enviada...';
+              if (stage === 'acknowledging') return 'Finalizando reconhecimento seguro local...';
+              return 'Processando operação no servidor...';
+            })()}
           </Text>
         </View>
       )}
@@ -481,8 +503,14 @@ export default function StaffEntryControlRealScreen({
             variant="secondary"
             disabled={snapshot.busy}
             onPress={() => {
+              const busyToken = ++busyTokenRef.current;
+              const originScope = snapshot.context;
               setBusyStage('cancelling');
-              void store.cancelReserved(pending.key);
+              void Promise.resolve(store.cancelReserved(pending.key)).finally(() => {
+                if (busyTokenRef.current === busyToken && store.isCurrent(originScope)) {
+                  setBusyStage(null);
+                }
+              });
             }}
           />
         </View>

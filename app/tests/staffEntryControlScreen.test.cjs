@@ -99,6 +99,7 @@ function createEntryScreenHarness({
   onPost,
   onPatch,
   onAccessDenied = () => {},
+  onSecureSet,
   onSecureDelete,
   secureInitial = new Map(),
   secureAvailable = true,
@@ -144,7 +145,10 @@ function createEntryScreenHarness({
       return {
         isAvailableAsync: async () => secureAvailable,
         getItemAsync: async (key) => secureValues.get(key) ?? null,
-        setItemAsync: async (key, value) => { secureValues.set(key, value); },
+        setItemAsync: async (key, value) => {
+          if (onSecureSet) await onSecureSet(key, value);
+          secureValues.set(key, value);
+        },
         deleteItemAsync: async (key) => {
           if (onSecureDelete) await onSecureDelete(key);
           deleteCalls += 1;
@@ -1191,15 +1195,27 @@ test('STAFF-04 tela Controle de Entrada: recuperação automática após erro in
   h.unmount();
 });
 
-test('STAFF04-AUD-03: StaffEntryControlRealScreen distingue cancelamento local, reconhecimento local e processamento no servidor', { skip }, async () => {
+test('STAFF04-AUD-03: StaffEntryControlRealScreen distingue preparação, despacho, servidor, reconhecimento e descarte com promessas controladas', { skip }, async () => {
+  const EV_B = '22222222-2222-4222-8222-222222222222';
   const entrySlot = `arenago.staff.entry.${USER_1}`;
-  let deleteDeferred = null;
+  let secureSetGates = [];
   let postDeferred = null;
-  let currentState = buildState({
-    enabled: true,
-    pendingCall: { id: CALL_1, participationId: PART_1, displayName: 'Ana Clara', calledAt: AT },
+  let postCalls = 0;
+  let activeEventId = EV_A;
+  const makeStateFor = (evId, withCall = true) => ({
+    eventId: evId,
+    externalQueueEnabled: true,
+    canManage: true,
+    observedAt: AT,
+    pendingCall: withCall ? { id: CALL_1, participationId: PART_1, displayName: 'Ana Clara', calledAt: AT } : null,
+    waitingCount: 1,
     waiting: [{ participationId: PART_2, displayName: 'Lucas Ferreira', position: 1 }],
+    canCall: !withCall,
+    canConfirm: withCall,
+    canMarkAbsent: withCall,
+    canRemove: withCall,
   });
+  let currentState = makeStateFor(EV_A, true);
 
   const reservedSeed = new Map([
     [entrySlot, JSON.stringify({
@@ -1217,21 +1233,30 @@ test('STAFF04-AUD-03: StaffEntryControlRealScreen distingue cancelamento local, 
 
   const h = createEntryScreenHarness({
     secureInitial: reservedSeed,
-    onSecureDelete: async () => {
-      if (deleteDeferred) {
-        const d = deleteDeferred;
-        deleteDeferred = null;
-        await d.promise;
+    onSecureSet: async (_, raw) => {
+      const parsed = JSON.parse(raw);
+      const gate = secureSetGates.find((g) => g.phase === parsed.phase);
+      if (gate) {
+        secureSetGates = secureSetGates.filter((g) => g !== gate);
+        await gate.deferred.promise;
+        if (gate.fail) throw gate.fail;
       }
     },
-    onGet: async () => currentState,
+    onGet: async () => ({ ...currentState, eventId: activeEventId }),
     onPost: async () => {
+      postCalls += 1;
       if (postDeferred) {
         const d = postDeferred;
         postDeferred = null;
         return d.promise;
       }
-      return {};
+      currentState = makeStateFor(activeEventId, false);
+      return {
+        eventId: activeEventId,
+        call: { id: CALL_1, participationId: PART_1, status: 'confirmed', calledAt: AT, resolvedAt: AT },
+        participation: { id: PART_1, status: 'active', arenaEnteredAt: AT, finishReason: null, externalQueueOrder: '1' },
+        requeued: false,
+      };
     },
   });
 
@@ -1239,32 +1264,62 @@ test('STAFF04-AUD-03: StaffEntryControlRealScreen distingue cancelamento local, 
 
   await h.mount();
 
-  // 1. Cancelling: mensagem explícita de descarte local (sem afirmar envio ao servidor)
-  deleteDeferred = deferred();
-  const pendingDeleteAck = deleteDeferred;
+  // 1. Cancelamento efetivo de intenção reservada exibe mensagem específica de descarte
+  const cancelGate = deferred();
+  secureSetGates.push({ phase: 'cancelled', deferred: cancelGate });
   let pCancel;
   await h.act(async () => {
     pCancel = h.handler('Descartar solicitação não enviada')();
   });
   assert.ok(h.hasExactText('Descartando solicitação não enviada...'));
   assert.equal(h.hasText('Processando operação no servidor...'), false);
+  assert.equal(h.hasText('Preparando solicitação com segurança...'), false);
   await h.act(async () => {
-    pendingDeleteAck.resolve();
+    cancelGate.resolve();
     await pCancel;
   });
+  await flush();
+  assert.equal(h.hasText('Descartando solicitação não enviada...'), false);
 
-  // 2. Acknowledging vs Mutating: POST retorna terminal -> deleteDeferred segura etapa de reconhecimento local
+  // 2. Nova solicitação: reserve pendente -> 'Preparando solicitação com segurança...'
+  //    dispatch pendente (com pending.phase === 'reserved') -> 'Registrando envio seguro...' (NÃO descarte!)
+  //    POST pendente -> 'Processando operação no servidor...'
+  //    acknowledge pendente -> 'Finalizando reconhecimento seguro local...'
+  const reserveGate = deferred();
+  const dispatchGate = deferred();
+  const ackGate = deferred();
+  secureSetGates.push(
+    { phase: 'reserved', deferred: reserveGate },
+    { phase: 'dispatching', deferred: dispatchGate },
+    { phase: 'acknowledged', deferred: ackGate },
+  );
   postDeferred = deferred();
-  deleteDeferred = deferred();
-  const ackDeleteDeferred = deleteDeferred;
+
   await h.press('Confirmar entrada');
   let pMutate;
   await h.act(async () => {
     pMutate = h.handler('CONFIRMAR ALTERAÇÃO')();
   });
-  assert.ok(h.hasExactText('Processando operação no servidor...'));
+  assert.ok(h.hasExactText('Preparando solicitação com segurança...'));
+  assert.equal(h.hasText('Descartando solicitação não enviada...'), false);
+  assert.equal(postCalls, 0);
 
-  currentState = buildState({ enabled: true, pendingCall: null, waiting: [{ participationId: PART_2, displayName: 'Lucas Ferreira', position: 1 }] });
+  await h.act(async () => {
+    reserveGate.resolve();
+  });
+  assert.equal(JSON.parse(h.secureValues.get(entrySlot)).phase, 'reserved');
+  assert.ok(h.hasExactText('Registrando envio seguro...'));
+  assert.equal(h.hasText('Descartando solicitação não enviada...'), false);
+  assert.equal(postCalls, 0);
+
+  await h.act(async () => {
+    dispatchGate.resolve();
+  });
+  assert.equal(JSON.parse(h.secureValues.get(entrySlot)).phase, 'dispatching');
+  assert.ok(h.hasExactText('Processando operação no servidor...'));
+  assert.equal(postCalls, 1);
+
+  currentState = makeStateFor(EV_A, false);
   await h.act(async () => {
     postDeferred.resolve({
       eventId: EV_A,
@@ -1275,15 +1330,55 @@ test('STAFF04-AUD-03: StaffEntryControlRealScreen distingue cancelamento local, 
     await pMutate;
   });
   assert.ok(h.hasExactText('Finalizando reconhecimento seguro local...'));
+
   await h.act(async () => {
-    ackDeleteDeferred.resolve();
+    ackGate.resolve();
   });
   await flush();
   assert.ok(h.hasText('Entrada confirmada pelo servidor.'));
+
+  // 3. Falha durante persistência (reserve falha) limpa busy e permite operação posterior normalmente
+  const failingReserve = deferred();
+  secureSetGates.push({ phase: 'reserved', deferred: failingReserve, fail: new Error('write-fail') });
+  currentState = makeStateFor(EV_A, true);
+  await h.press('Atualizar fila de entrada');
+  await h.press('Confirmar entrada');
+  let pFailMutate;
+  await h.act(async () => {
+    pFailMutate = h.handler('CONFIRMAR ALTERAÇÃO')();
+  });
+  assert.ok(h.hasExactText('Preparando solicitação com segurança...'));
+  await h.act(async () => {
+    failingReserve.resolve();
+    await pFailMutate;
+  });
+  await flush();
+  assert.equal(h.hasText('Preparando solicitação com segurança...'), false);
+  assert.ok(h.hasText('Não foi possível verificar o registro seguro da solicitação.'));
+
+  // Após atualizar e limpar erro de persistência, nova operação percorre os estágios normais
+  h.secureValues.delete(entrySlot);
+  await h.press('Atualizar fila de entrada');
+  const nextAckGate = deferred();
+  secureSetGates.push({ phase: 'acknowledged', deferred: nextAckGate });
+  await h.press('Confirmar entrada');
+  await h.press('CONFIRMAR ALTERAÇÃO');
+  assert.ok(h.hasExactText('Finalizando reconhecimento seguro local...'));
+
+  // 4. Troca de contexto durante reconhecimento pendente isola busyStage e notice do contexto antigo
+  activeEventId = EV_B;
+  currentState = makeStateFor(EV_B, true);
+  await h.rerender({ event: { id: EV_B, name: 'Arena Evento B' } });
+  await h.act(async () => {
+    nextAckGate.resolve();
+  });
+  await flush();
+  assert.equal(h.hasText('Entrada confirmada pelo servidor.'), false);
+  assert.equal(h.hasText('Finalizando reconhecimento seguro local...'), false);
   h.unmount();
 });
 
-test('STAFF04-AUD-04: 401/403 em mutação na tela Controle de Entrada revoga imediatamente sem GET extra; 404 com GET 200 preserva acesso', { skip }, async () => {
+test('STAFF04-AUD-04: 401/403 em mutação na tela Controle de Entrada revoga antes de storage.finish terminar; 404 com GET 200 preserva acesso', { skip }, async () => {
   const flush = (h) => h.act(async () => { await new Promise((r) => setTimeout(r, 0)); });
   const pendingState = buildState({
     enabled: true,
@@ -1291,7 +1386,7 @@ test('STAFF04-AUD-04: 401/403 em mutação na tela Controle de Entrada revoga im
     waiting: [{ participationId: PART_2, displayName: 'Lucas Ferreira', position: 1 }],
   });
 
-  // 1. 403 e 401 em mutação notificam onAccessDenied e limpam dados imediatamente com 0 GETs pós-POST
+  // 1. 403 e 401 em mutação notificam onAccessDenied e limpam dados ANTES da gravação local terminal finalizar
   for (const [httpStatus, code, expectedKind, expectedAlert] of [
     [403, 'STAFF_EVENT_FORBIDDEN', 'denied', 'Acesso ao evento indisponível'],
     [401, 'SESSION_REVOKED', 'session', 'Sessão inválida'],
@@ -1299,10 +1394,14 @@ test('STAFF04-AUD-04: 401/403 em mutação na tela Controle de Entrada revoga im
     let deniedKind = null;
     let posted = false;
     let getsAfterPost = 0;
+    const finishGate = deferred();
     const h = createEntryScreenHarness({
       onAccessDenied: (kind) => {
         deniedKind = kind;
         void h.rerender({ accessDenied: true, accessDeniedKind: kind });
+      },
+      onSecureSet: async (_, raw) => {
+        if (JSON.parse(raw).phase === 'terminal') await finishGate.promise;
       },
       onGet: async () => {
         if (posted) getsAfterPost += 1;
@@ -1315,15 +1414,27 @@ test('STAFF04-AUD-04: 401/403 em mutação na tela Controle de Entrada revoga im
     });
     await h.mount();
     await h.press('Confirmar entrada');
-    await h.press('CONFIRMAR ALTERAÇÃO');
+    let pendingConfirm;
+    await h.act(async () => {
+      pendingConfirm = h.handler('CONFIRMAR ALTERAÇÃO')();
+    });
     await flush(h);
+
+    // ANTES de storage.finish resolver: interface e trava já estão bloqueadas sem GET adicional
     assert.equal(deniedKind, expectedKind);
     assert.equal(getsAfterPost, 0, `${httpStatus}: não dispara GET extra após negativa em mutação`);
     assert.equal(h.hasText('Ana Clara'), false);
     assert.equal(h.hasText('Lucas Ferreira'), false);
     assert.ok(h.hasText(expectedAlert));
+    assert.equal(h.getPolling().enabled, false);
+
+    // Após finish resolver: resultado terminal fica gravado na intenção original
+    await h.act(async () => {
+      finishGate.resolve();
+      await pendingConfirm;
+    });
     assert.equal(h.getDeleteCalls(), 0, `${httpStatus}: recibo preservado no SecureStore`);
-    assert.equal(h.secureValues.size > 0, true);
+    assert.equal(JSON.parse(h.secureValues.get(`arenago.staff.entry.${USER_1}`)).outcome.status, httpStatus);
     h.unmount();
   }
 

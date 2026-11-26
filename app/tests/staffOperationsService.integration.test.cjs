@@ -1063,3 +1063,200 @@ test('STAFF04-AUD-03: falha transitória na pré-condição preserva phase preco
     assert.equal(posts, 1);
   }
 });
+
+test('STAFF04-AUD-04 (coordenador): onAuthError dispara antes de recordTerminal/clear, reage a falha local e trava reserve/dispatch concorrente', async () => {
+  const { createStaffOperationsCoordinator } = await service;
+  const defer = () => { let resolve, reject; const promise = new Promise((y, n) => { resolve = y; reject = n; }); return { promise, resolve, reject }; };
+
+  // 1. 401 e 403 em POST disparam onAuthError antes de recordTerminal concluir, preservando .receipt e clear() final
+  for (const [httpStatus, code, expectedKind] of [[401, 'SESSION_REVOKED', 'session'], [403, 'STAFF_EVENT_FORBIDDEN', 'denied']]) {
+    const events = [];
+    const rig = secureStaffRig();
+    const baseSetItem = rig.values;
+    const recordDeferred = defer();
+    const clearDeferred = defer();
+    let locked = false;
+    const instrumentedStorage = {
+      ...rig.storage,
+      async recordTerminal(u, k, outcome) {
+        events.push('recordTerminal:start');
+        await recordDeferred.promise;
+        const r = await rig.storage.recordTerminal(u, k, outcome);
+        events.push('recordTerminal:done');
+        return r;
+      },
+      async clear(u, k) {
+        events.push('clear:start');
+        await clearDeferred.promise;
+        await rig.storage.clear(u, k);
+        events.push('clear:done');
+      },
+    };
+    const manager = createStaffOperationsCoordinator({
+      client: {
+        async get(url) { return url.endsWith('/stations') ? stations() : queue(); },
+        async post() {
+          events.push(`post:${httpStatus}`);
+          throw Object.assign(new Error('auth-lost'), { status: httpStatus, code });
+        },
+      },
+      storage: instrumentedStorage,
+      isCurrent: () => !locked,
+      createKey: () => key,
+      onAuthError: (info) => {
+        locked = true;
+        events.push(`onAuthError:${info.kind}`);
+      },
+    });
+
+    const pCall = manager.callNext(context, experienceId, stationId);
+    for (let i = 0; i < 6 && !events.includes('recordTerminal:start'); i += 1) await Promise.resolve();
+    assert.deepEqual(events.slice(0, 3), [`post:${httpStatus}`, `onAuthError:${expectedKind}`, 'recordTerminal:start']);
+    assert.equal(locked, true, 'trava síncrona ativada antes do fim de recordTerminal');
+
+    recordDeferred.resolve();
+    for (let i = 0; i < 6 && !events.includes('clear:start'); i += 1) await Promise.resolve();
+    assert.ok(baseSetItem.has(`arenago.staff.operation.${userId}.receipt`));
+    assert.ok(baseSetItem.has(`arenago.staff.operation.${userId}`), 'primária ainda presente enquanto clear pende');
+
+    clearDeferred.resolve();
+    const result = await pCall;
+    assert.equal(result.kind, 'rejected');
+    assert.equal(result.status, httpStatus);
+    assert.equal(baseSetItem.has(`arenago.staff.operation.${userId}`), false, 'primária limpa após clear');
+    assert.equal(JSON.parse(baseSetItem.get(`arenago.staff.operation.${userId}.receipt`)).outcome.status, httpStatus);
+  }
+
+  // 2. Recibo gravado + falha de clear() retorna rejected_cleanup_pending sem perder .receipt e mantendo onAuthError prévio
+  {
+    const rig = secureStaffRig();
+    let authEvents = 0;
+    const manager = createStaffOperationsCoordinator({
+      client: {
+        async get(url) { return url.endsWith('/stations') ? stations() : queue(); },
+        async post() { throw Object.assign(new Error('403'), { status: 403, code: 'STAFF_EVENT_FORBIDDEN' }); },
+      },
+      storage: { ...rig.storage, async clear() { throw new Error('clear-failed'); } },
+      isCurrent: () => authEvents === 0,
+      createKey: () => key,
+      onAuthError: () => { authEvents += 1; },
+    });
+    const out = await manager.callNext(context, experienceId, stationId);
+    assert.equal(authEvents, 1);
+    assert.equal(out.kind, 'rejected_cleanup_pending');
+    assert.equal(out.status, 403);
+    assert.equal(rig.values.has(`arenago.staff.operation.${userId}.receipt`), true);
+    assert.equal(rig.values.has(`arenago.staff.operation.${userId}`), true);
+  }
+
+  // 3. GET 401/403 concorrente durante reserve() cancela APENAS reserved e não despacha nem posta
+  {
+    const rig = secureStaffRig();
+    const reserveGate = defer();
+    let current = true;
+    let dispatchCalled = 0;
+    let posts = 0;
+    const manager = createStaffOperationsCoordinator({
+      client: {
+        async get(url) { return url.endsWith('/stations') ? stations() : queue(); },
+        async post() { posts += 1; return called(); },
+      },
+      storage: {
+        ...rig.storage,
+        async reserve(intent) {
+          const r = await rig.storage.reserve(intent);
+          await reserveGate.promise;
+          return r;
+        },
+        async dispatch(u, k) { dispatchCalled += 1; return rig.storage.dispatch(u, k); },
+      },
+      isCurrent: () => current,
+      createKey: () => key,
+    });
+    const pCall = manager.callNext(context, experienceId, stationId);
+    await new Promise((r) => setTimeout(r, 10));
+    current = false;
+    reserveGate.resolve();
+    assert.equal((await pCall).kind, 'stale');
+    assert.equal(dispatchCalled, 0);
+    assert.equal(posts, 0);
+    assert.equal(rig.values.has(`arenago.staff.operation.${userId}`), false);
+  }
+
+  // 4. GET 401/403 concorrente durante dispatch() preserva dispatching de forma conservadora e aborta POST
+  {
+    const rig = secureStaffRig();
+    const dispatchGate = defer();
+    let current = true;
+    let posts = 0;
+    const manager = createStaffOperationsCoordinator({
+      client: {
+        async get(url) { return url.endsWith('/stations') ? stations() : queue(); },
+        async post() { posts += 1; return called(); },
+      },
+      storage: {
+        ...rig.storage,
+        async dispatch(u, k) {
+          const ok = await rig.storage.dispatch(u, k);
+          await dispatchGate.promise;
+          return ok;
+        },
+      },
+      isCurrent: () => current,
+      createKey: () => key,
+    });
+    const pCall = manager.callNext(context, experienceId, stationId);
+    await new Promise((r) => setTimeout(r, 10));
+    current = false;
+    dispatchGate.resolve();
+    assert.equal((await pCall).kind, 'stale');
+    assert.equal(posts, 0);
+    assert.equal(JSON.parse(rig.values.get(`arenago.staff.operation.${userId}`)).phase, 'dispatching');
+  }
+
+  // 5. Troca de conta durante recordTerminal/clear após 403 ainda grava .receipt para conta antiga sem bloquear nova conta
+  {
+    const rig = secureStaffRig();
+    const recordDeferred = defer();
+    let activeUser = userId;
+    const otherUser = '20000000-0000-4000-8000-000000000002';
+    const keyUser2 = '50000000-0000-4000-8000-000000000002';
+    let postCount = 0;
+    const storageUser1 = {
+      ...rig.storage,
+      async recordTerminal(u, k, o) {
+        if (u === userId) await recordDeferred.promise;
+        return rig.storage.recordTerminal(u, k, o);
+      },
+    };
+    const m1 = createStaffOperationsCoordinator({
+      client: {
+        async get(url) { return url.endsWith('/stations') ? stations() : queue(); },
+        async post() { postCount += 1; throw Object.assign(new Error('403'), { status: 403 }); },
+      },
+      storage: storageUser1,
+      isCurrent: (c) => c.userId === activeUser,
+      createKey: () => key,
+      onAuthError: () => { activeUser = otherUser; },
+    });
+    const pUser1 = m1.callNext(context, experienceId, stationId);
+    await new Promise((r) => setTimeout(r, 10));
+    const m2 = createStaffOperationsCoordinator({
+      client: {
+        async get(url) { return url.endsWith('/stations') ? stations() : queue(); },
+        async post() { postCount += 1; return called(); },
+      },
+      storage: rig.storage,
+      isCurrent: (c) => c.userId === activeUser,
+      createKey: () => keyUser2,
+    });
+    const resUser2 = await m2.callNext({ ...context, userId: otherUser }, experienceId, stationId);
+    assert.equal(resUser2.kind, 'confirmed');
+    recordDeferred.resolve();
+    const resUser1 = await pUser1;
+    assert.equal(resUser1.status, 403);
+    assert.equal(JSON.parse(rig.values.get(`arenago.staff.operation.${userId}.receipt`)).outcome.status, 403);
+    assert.equal(JSON.parse(rig.values.get(`arenago.staff.operation.${otherUser}.receipt`)).outcome.kind, 'confirmed');
+    assert.equal(postCount, 2);
+  }
+});

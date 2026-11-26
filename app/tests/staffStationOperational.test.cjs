@@ -108,6 +108,7 @@ function createStationHarness({
   onAccessDenied = () => {},
   onStationNotFound,
   onSecureSet,
+  onSecureDelete,
   secureInitial = new Map(),
   secureAvailable = true,
   getNow = () => Date.parse('2026-11-19T15:00:23.000Z'),
@@ -160,7 +161,10 @@ function createStationHarness({
           if (onSecureSet) await onSecureSet(key, value);
           secureValues.set(key, value);
         },
-        deleteItemAsync: async (key) => { secureValues.delete(key); },
+        deleteItemAsync: async (key) => {
+          if (onSecureDelete) await onSecureDelete(key);
+          secureValues.delete(key);
+        },
       };
     }
     return require(name);
@@ -1279,9 +1283,12 @@ test('STAFF04-AUD-04: 401/403 em pré-condição, mutação e cleanup_pending re
       assert.equal(opGetsAfterPost, 0);
       assert.equal(h.hasText('Ana Clara'), false);
       assert.ok(h.hasText('Sessão inválida. Entre novamente.'));
-      const saved = JSON.parse(h.secureValues.get(`arenago.staff.operation.${USER_1}`));
-      assert.equal(saved.phase, 'terminal');
-      assert.equal(saved.outcome.status, 401);
+      assert.equal(h.secureValues.has(`arenago.staff.operation.${USER_1}`), false, 'chave primária removida após recibo gravado e clear concluído');
+      const receipt = JSON.parse(h.secureValues.get(`arenago.staff.operation.${USER_1}.receipt`));
+      assert.equal(receipt.phase, 'terminal');
+      assert.equal(receipt.outcome.kind, 'rejected');
+      assert.equal(receipt.outcome.status, 401);
+      assert.equal(h.secureValues.has(`arenago.staff.operation.${USER_1}.ack`), false);
     } finally {
       h.dispose();
     }
@@ -1297,9 +1304,8 @@ test('STAFF04-AUD-04: 401/403 em pré-condição, mutação e cleanup_pending re
         deniedKind = kind;
         void h.rerender({ accessDenied: true, accessDeniedKind: kind });
       },
-      onSecureSet: async (_, raw) => {
-        const parsed = JSON.parse(raw);
-        if (parsed.phase === 'terminal') throw new Error('secure-write-failed');
+      onSecureSet: async (key, raw) => {
+        if (key.endsWith('.receipt') || JSON.parse(raw).phase === 'terminal') throw new Error('secure-write-failed');
       },
       onGet: async (url) => {
         if (posted && url.endsWith('/operational-state')) opGetsAfterPost += 1;
@@ -1324,6 +1330,8 @@ test('STAFF04-AUD-04: 401/403 em pré-condição, mutação e cleanup_pending re
       assert.equal(h.hasText('Ana Clara'), false);
       const saved = JSON.parse(h.secureValues.get(`arenago.staff.operation.${USER_1}`));
       assert.equal(saved.phase, 'dispatching');
+      assert.equal(h.secureValues.has(`arenago.staff.operation.${USER_1}.receipt`), false);
+      assert.equal(h.secureValues.has(`arenago.staff.operation.${USER_1}.ack`), false);
     } finally {
       h.dispose();
     }
@@ -1364,6 +1372,323 @@ test('STAFF04-AUD-04: 401/403 em pré-condição, mutação e cleanup_pending re
       assert.equal(deniedKind, null);
       assert.ok(h.hasText('O atendimento ou recurso informado não foi encontrado no servidor.'));
     } finally {
+      h.dispose();
+    }
+  }
+});
+
+test('STAFF04-AUD-04 e AUD-07 (Estação): trava de UI/polling ANTES de recordTerminal/clear concluir, troca de conta e GET 401/403 entre reserve e dispatch', { skip }, async () => {
+  const flush = (h) => h.act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+  const primaryKey = `arenago.staff.operation.${USER_1}`;
+  const receiptKey = `${primaryKey}.receipt`;
+  const USER_2 = 'abcdef00-0000-4000-8000-000000000002';
+  const SESSION_2 = '10000000-0000-4000-8000-000000000002';
+  const baseState = {
+    eventId: EV_A,
+    experienceId: EXP_1,
+    stationId: ST_1,
+    availability: 'available',
+    canCall: true,
+    waitingCount: 1,
+    waiting: [{ queueEntryId: ENTRY_1, displayName: 'Ana Clara', position: 1 }],
+    pending: null,
+  };
+  const pendingState = {
+    ...baseState,
+    canCall: false,
+    waitingCount: 0,
+    waiting: [],
+    pending: {
+      serviceSessionId: SESS_1,
+      queueEntryId: ENTRY_1,
+      displayName: 'Ana Clara',
+      calledAt: '2026-11-19T15:00:00.000Z',
+    },
+  };
+
+  // A. POST recebe 401/403 com recordTerminal() e clear() deliberadamente pendentes: trava já antes de resolver armazenamento
+  for (const [httpStatus, code, expectedKind, expectedText] of [
+    [401, 'SESSION_REVOKED', 'session', 'Sessão inválida. Entre novamente.'],
+    [403, 'STAFF_EVENT_FORBIDDEN', 'denied', 'Acesso à estação indisponível.'],
+  ]) {
+    let deniedKind = null;
+    let deniedCalls = 0;
+    let getsAfterPost = 0;
+    let posted = false;
+    const recordGate = deferred();
+    const clearGate = deferred();
+    const deletedKeys = [];
+    let staleHandler = null;
+
+    const h = createStationHarness({
+      onAccessDenied: (kind) => {
+        deniedCalls += 1;
+        deniedKind = kind;
+        void h.rerender({ accessDenied: true, accessDeniedKind: kind });
+      },
+      onSecureSet: async (key) => {
+        if (key === receiptKey) await recordGate.promise;
+      },
+      onSecureDelete: async (key) => {
+        deletedKeys.push(key);
+        if (key === primaryKey) await clearGate.promise;
+      },
+      onGet: async (url) => {
+        if (posted && url.endsWith('/operational-state')) getsAfterPost += 1;
+        if (url.endsWith('/stations')) {
+          return { eventId: EV_A, stations: [{ id: ST_1, experienceId: EXP_1, label: 'Cabine 01', availability: 'available', pendingServiceSessionId: SESS_1 }] };
+        }
+        return pendingState;
+      },
+      onPost: async () => {
+        posted = true;
+        throw Object.assign(new Error('auth-denied'), { status: httpStatus, code });
+      },
+    });
+    try {
+      await h.mount();
+      await h.press('Concluir experiência');
+      staleHandler = h.handler('CONFIRMAR OPERAÇÃO');
+      let inflightOp;
+      await h.act(async () => {
+        inflightOp = staleHandler();
+      });
+
+      // Antes de recordTerminal resolver: UI limpa, modal fechado, onAccessDenied já notificado
+      assert.equal(deniedCalls, 1);
+      assert.equal(deniedKind, expectedKind);
+      assert.equal(getsAfterPost, 0);
+      assert.equal(h.hasText('Ana Clara'), false);
+      assert.ok(h.hasText(expectedText));
+      assert.equal(h.modals().length, 0);
+      assert.equal(h.getPolling().enabled, false);
+      assert.equal(h.secureValues.has(receiptKey), false);
+      assert.equal(JSON.parse(h.secureValues.get(primaryKey)).phase, 'dispatching');
+
+      // Resolve recordTerminal -> .receipt escrito, mas clear() ainda pendente
+      await h.act(async () => {
+        recordGate.resolve();
+      });
+      assert.equal(JSON.parse(h.secureValues.get(receiptKey)).outcome.status, httpStatus);
+      assert.equal(h.secureValues.has(primaryKey), true, 'chave primária ainda presente antes de clear concluir');
+
+      // Resolve clear() -> chave primária limpa legitimamente e .receipt preservado
+      await h.act(async () => {
+        clearGate.resolve();
+        await inflightOp;
+      });
+      await flush(h);
+      assert.equal(deniedCalls, 1, 'não duplica onAccessDenied no retorno tardio');
+      assert.deepEqual(deletedKeys, [primaryKey]);
+      assert.equal(h.secureValues.has(primaryKey), false);
+      assert.equal(JSON.parse(h.secureValues.get(receiptKey)).outcome.status, httpStatus);
+      assert.equal(getsAfterPost, 0);
+    } finally {
+      recordGate.resolve();
+      clearGate.resolve();
+      h.dispose();
+    }
+  }
+
+  // B. Troca de conta durante persistência de recusa 403 mantém .receipt da conta 1 e libera conta 2
+  {
+    const recordGate = deferred();
+    let user2State = false;
+    const h = createStationHarness({
+      onAccessDenied: (kind) => {
+        void h.rerender({ accessDenied: true, accessDeniedKind: kind });
+      },
+      onSecureSet: async (key) => {
+        if (key === receiptKey) await recordGate.promise;
+      },
+      onGet: async (url) => {
+        if (url.endsWith('/stations')) {
+          return { eventId: EV_A, stations: [{ id: ST_1, experienceId: EXP_1, label: 'Cabine 01', availability: 'available', pendingServiceSessionId: null }] };
+        }
+        if (url.endsWith('/queue')) {
+          return { eventId: EV_A, experienceId: EXP_1, waitingCount: 1, canCallWaitingEntries: true, firstWaitingQueueEntryId: ENTRY_1 };
+        }
+        return user2State
+          ? { ...baseState, waiting: [{ queueEntryId: ENTRY_1, displayName: 'Participante Conta 2', position: 1 }] }
+          : baseState;
+      },
+      onPost: async () => {
+        throw Object.assign(new Error('403'), { status: 403, code: 'STAFF_EVENT_FORBIDDEN' });
+      },
+    });
+    try {
+      await h.mount();
+      let opPromise;
+      await h.act(async () => {
+        opPromise = h.handler('Chamar próximo')();
+      });
+      assert.equal(h.hasText('Ana Clara'), false);
+
+      user2State = true;
+      await h.rerender({
+        accessDenied: false,
+        auth: {
+          isAuthenticated: true,
+          user: { id: USER_2, roles: ['staff'] },
+          sessionId: SESSION_2,
+          isIdentityVerified: () => true,
+          getSessionEpoch: () => 2,
+          getIdentityRevision: () => 2,
+        },
+      });
+      await h.act(async () => {
+        recordGate.resolve();
+        await opPromise;
+      });
+      await flush(h);
+      assert.equal(JSON.parse(h.secureValues.get(receiptKey)).outcome.status, 403);
+      assert.ok(h.hasQueueRow(1, 'Participante Conta 2'));
+      assert.equal(h.isDisabled('Chamar próximo'), false);
+    } finally {
+      recordGate.resolve();
+      h.dispose();
+    }
+  }
+
+  // C. GET 403 durante reserve() cancela APENAS reserved e não dispara dispatch() nem POST; GET 200 atrasado e 503 posterior ficam bloqueados
+  {
+    let mode = 'ok';
+    let postCalls = 0;
+    let dispatchWritten = false;
+    let pollDeferred = null;
+    const reserveGate = deferred();
+    let holdNextReserve = false;
+    let deniedKind = null;
+    const deletedKeys = [];
+    const h = createStationHarness({
+      onAccessDenied: (kind) => {
+        deniedKind = kind;
+        void h.rerender({ accessDenied: true, accessDeniedKind: kind });
+      },
+      onSecureSet: async (key, raw) => {
+        const parsed = JSON.parse(raw);
+        if (parsed.phase === 'dispatching') dispatchWritten = true;
+        if (holdNextReserve && key === primaryKey && parsed.phase === 'reserved') {
+          holdNextReserve = false;
+          await reserveGate.promise;
+        }
+      },
+      onSecureDelete: async (key) => { deletedKeys.push(key); },
+      onGet: async (url) => {
+        if (url.endsWith('/stations')) {
+          return { eventId: EV_A, stations: [{ id: ST_1, experienceId: EXP_1, label: 'Cabine 01', availability: 'available', pendingServiceSessionId: null }] };
+        }
+        if (url.endsWith('/queue')) {
+          return { eventId: EV_A, experienceId: EXP_1, waitingCount: 1, canCallWaitingEntries: true, firstWaitingQueueEntryId: ENTRY_1 };
+        }
+        if (mode === 'poll_deferred') {
+          pollDeferred = deferred();
+          return pollDeferred.promise;
+        }
+        if (mode === '503') throw Object.assign(new Error('503'), { status: 503 });
+        return baseState;
+      },
+      onPost: async () => { postCalls += 1; return {}; },
+    });
+    try {
+      await h.mount();
+      mode = 'poll_deferred';
+      let pPoll;
+      await h.act(async () => { pPoll = h.getPolling().read(); });
+      const slowPoll = pollDeferred;
+
+      mode = 'ok';
+      holdNextReserve = true;
+      let pCall;
+      await h.act(async () => { pCall = h.handler('Chamar próximo')(); });
+
+      // Enquanto reserve pende, GET anterior recebe 403 -> trava UI imediatamente
+      await h.act(async () => {
+        slowPoll.reject(Object.assign(new Error('403'), { status: 403 }));
+        await pPoll;
+      });
+      assert.equal(deniedKind, 'denied');
+      assert.equal(h.hasText('Ana Clara'), false);
+
+      // Finaliza reserve -> cancela APENAS reserved sem chegar a dispatch nem POST
+      await h.act(async () => {
+        reserveGate.resolve();
+        await pCall;
+      });
+      assert.equal(postCalls, 0);
+      assert.equal(dispatchWritten, false);
+      assert.deepEqual(deletedKeys, [primaryKey]);
+      assert.equal(h.secureValues.has(primaryKey), false);
+    } finally {
+      reserveGate.resolve();
+      h.dispose();
+    }
+  }
+
+  // D. GET 401 durante dispatch() preserva dispatching de forma conservadora e aborta POST
+  {
+    let mode = 'ok';
+    let postCalls = 0;
+    let pollDeferred = null;
+    const dispatchGate = deferred();
+    let holdNextDispatch = false;
+    let deniedKind = null;
+    const deletedKeys = [];
+    const h = createStationHarness({
+      onAccessDenied: (kind) => {
+        deniedKind = kind;
+        void h.rerender({ accessDenied: true, accessDeniedKind: kind });
+      },
+      onSecureSet: async (key, raw) => {
+        const parsed = JSON.parse(raw);
+        if (holdNextDispatch && key === primaryKey && parsed.phase === 'dispatching') {
+          holdNextDispatch = false;
+          await dispatchGate.promise;
+        }
+      },
+      onSecureDelete: async (key) => { deletedKeys.push(key); },
+      onGet: async (url) => {
+        if (url.endsWith('/stations')) {
+          return { eventId: EV_A, stations: [{ id: ST_1, experienceId: EXP_1, label: 'Cabine 01', availability: 'available', pendingServiceSessionId: null }] };
+        }
+        if (url.endsWith('/queue')) {
+          return { eventId: EV_A, experienceId: EXP_1, waitingCount: 1, canCallWaitingEntries: true, firstWaitingQueueEntryId: ENTRY_1 };
+        }
+        if (mode === 'poll_deferred') {
+          pollDeferred = deferred();
+          return pollDeferred.promise;
+        }
+        return baseState;
+      },
+      onPost: async () => { postCalls += 1; return {}; },
+    });
+    try {
+      await h.mount();
+      mode = 'poll_deferred';
+      let pPoll;
+      await h.act(async () => { pPoll = h.getPolling().read(); });
+      const slowPoll = pollDeferred;
+
+      mode = 'ok';
+      holdNextDispatch = true;
+      let pCall;
+      await h.act(async () => { pCall = h.handler('Chamar próximo')(); });
+
+      await h.act(async () => {
+        slowPoll.reject(Object.assign(new Error('401'), { status: 401 }));
+        await pPoll;
+      });
+      assert.equal(deniedKind, 'session');
+
+      await h.act(async () => {
+        dispatchGate.resolve();
+        await pCall;
+      });
+      assert.equal(postCalls, 0);
+      assert.deepEqual(deletedKeys, []);
+      assert.equal(JSON.parse(h.secureValues.get(primaryKey)).phase, 'dispatching');
+    } finally {
+      dispatchGate.resolve();
       h.dispose();
     }
   }

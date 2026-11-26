@@ -389,7 +389,6 @@ function StaffEventsScreen({ navigation }) {
 
 function StaffEventHomeScreen({ navigation }) {
   const staff = useContext(StaffEventsContext);
-  useStaffPolling(Boolean(staff.selected && staff.status === 'ready' && !staff.accessLocked), staff.refreshSilent, 60000, staff.selected?.id);
   const [section, setSection] = useState('panel');
   const [stationId, setStationId] = useState(null);
   const stationVisitGenRef = useRef(0);
@@ -639,8 +638,7 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
     5000,
     `${event.id}:${stationId}:${epoch}:${revision}`,
   );
-  const eventPhasePollingEnabled = section === 'panel'
-    && store.isCurrent(snapshot.context)
+  const eventPhasePollingEnabled = store.isCurrent(snapshot.context)
     && !accessLost
     && !snapshot.accessUncertain
     && !snapshot.verifyingAccess
@@ -756,6 +754,7 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
   });
   const eventPhaseIndicator = resolveStaffPollingIndicator({
     hidden: accessLost,
+    verifying: Boolean(snapshot.verifyingAccess),
     loading: staff.status === 'loading',
     pollingEnabled: eventPhasePollingEnabled,
     visible: focused && appState === 'active',

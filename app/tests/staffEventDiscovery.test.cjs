@@ -1499,3 +1499,85 @@ test('STAFF04-AUD-05: Painel Operacional separa indicador de 5s do indicador de 
     rig.dispose();
   }
 });
+
+test('STAFF04-AUD-06: evento selecionado consolida exatamente um agendador de 60s entre Painel, Entrada e Estação', async () => {
+  const rig = createStaffUiHarness({
+    initialAuth: makeAuthIdentity('u-1', 1, 1),
+    onGet: (url) => {
+      if (url === '/staff/events') {
+        return Promise.resolve({
+          events: [{ id: EV_A, name: 'Arena Unica 60s', status: 'open', effectivePhase: 'open' }],
+        });
+      }
+      if (url === `/staff/events/${EV_A}/stations`) {
+        return Promise.resolve({
+          eventId: EV_A,
+          stations: [{ id: ST_1, experienceId: EXP_1, label: 'Estação 01', availability: 'available', pendingServiceSessionId: null }],
+        });
+      }
+      if (url === `/staff/events/${EV_A}/experiences`) {
+        return Promise.resolve({ eventId: EV_A, experiences: [{ id: EXP_1, name: 'Just Dance' }] });
+      }
+      if (url === `/staff/events/${EV_A}/entry-control`) {
+        return Promise.resolve({
+          eventId: EV_A,
+          externalQueueEnabled: true,
+          canManage: true,
+          observedAt: '2026-11-17T15:00:00.000Z',
+          canCall: false,
+          canConfirm: false,
+          canMarkAbsent: false,
+          canRemove: false,
+          waitingCount: 0,
+          waiting: [],
+          pendingCall: null,
+        });
+      }
+      if (url === `/staff/events/${EV_A}/experiences/${EXP_1}/queue`) {
+        return Promise.resolve({
+          eventId: EV_A,
+          experienceId: EXP_1,
+          waitingCount: 0,
+          canCallWaitingEntries: false,
+          firstWaitingQueueEntryId: null,
+        });
+      }
+      return Promise.reject(new Error(`URL inesperada: ${url}`));
+    },
+  });
+
+  const latestByScopeFrom = (startIndex) => {
+    const slice = rig.pollingRegistrations.slice(startIndex);
+    const sixty = slice.filter((r) => r.intervalMs === 60000);
+    const scopes = new Set(sixty.map((r) => String(r.scope)));
+    return { sixty, scopes };
+  };
+
+  try {
+    await rig.mount();
+    const beforeEnter = rig.pollingRegistrations.length;
+    await rig.press('Selecionar evento Arena Unica 60s');
+    await rig.settle();
+
+    // No evento selecionado, apenas um escopo ':events:' de 60s existe (nunca staff.selected.id duplicado)
+    const panelBatch = latestByScopeFrom(beforeEnter);
+    assert.deepEqual([...panelBatch.scopes], [`${EV_A}:events:1:1`]);
+    assert.equal(rig.latestPolling(`${EV_A}:events:1:1`)?.enabled, true);
+
+    // Continua habilitado como único agendador ao navegar para Controle de Entrada e Estação
+    const beforeEntry = rig.pollingRegistrations.length;
+    await rig.press('Controle de Entrada');
+    const entryBatch = latestByScopeFrom(beforeEntry);
+    assert.deepEqual([...entryBatch.scopes], [`${EV_A}:events:1:1`]);
+    assert.equal(rig.latestPolling(`${EV_A}:events:1:1`)?.enabled, true);
+
+    await rig.press('Voltar ao painel');
+    const beforeStation = rig.pollingRegistrations.length;
+    await rig.press('Selecionar estação Estação 01 da experiência Just Dance');
+    const stationBatch = latestByScopeFrom(beforeStation);
+    assert.deepEqual([...stationBatch.scopes], [`${EV_A}:events:1:1`]);
+    assert.equal(rig.latestPolling(`${EV_A}:events:1:1`)?.enabled, true);
+  } finally {
+    rig.dispose();
+  }
+});
