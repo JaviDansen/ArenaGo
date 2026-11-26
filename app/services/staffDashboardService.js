@@ -14,7 +14,7 @@ const empty = () => ({
   experienceId: null, queueStatus: 'idle', queue: null, queueError: null,
 });
 const errorKind = (error) => error?.status === 401 ? 'session' :
-  (error?.status === 403 || error?.status === 404) ? 'denied' : error?.isNetworkError ? 'network' : 'unavailable';
+  (error?.status === 403 || error?.status === 404) ? 'denied' : (error?.isNetworkError || error?.isTimeout) ? 'network' : 'unavailable';
 const isRecoverableError = (kind) => kind === 'network' || kind === 'unavailable';
 
 // O contexto é conferido novamente antes de publicar qualquer resultado.
@@ -489,13 +489,14 @@ export function createStaffDashboardStore({ client, getContext }) {
   }
 
   async function pollQueue(experienceId = state.experienceId) {
-    if (silentQueue || accessLocked || verifyingAccess || accessUncertain || !isCurrent() || state.queueStatus !== 'ready' || state.experienceId !== experienceId) return;
-    const context = state.context, revision = generation, request = queueGeneration;
+    const canRetry = state.queueStatus === 'error' && isRecoverableError(state.queueError);
+    if (silentQueue || accessLocked || verifyingAccess || accessUncertain || !isCurrent() || (state.queueStatus !== 'ready' && !canRetry) || state.experienceId !== experienceId) return;
+    const context = state.context, revision = generation, request = queueGeneration, wasReady = state.queueStatus === 'ready';
     silentQueue = true;
     try {
       const queue = await fetchStaffQueue(client, context.eventId, experienceId);
       if (revision === generation && request === queueGeneration && isCurrent(context) && state.experienceId === experienceId && !accessLocked && !verifyingAccess && !accessUncertain)
-        publish({ ...state, queue, queueError: null });
+        publish({ ...state, queueStatus: 'ready', queue, queueError: null });
     } catch (error) {
       if (revision !== generation || !isCurrent(context)) return;
       const kind = errorKind(error);
@@ -507,7 +508,8 @@ export function createStaffDashboardStore({ client, getContext }) {
         await verifyEventAccessFromQueue(context, revision);
         return;
       }
-      publish({ ...state, queueError: 'stale' });
+      if (wasReady) publish({ ...state, queueError: 'stale' });
+      else publish({ ...state, queueStatus: 'error', queue: null, queueError: kind });
     } finally {
       if (revision === generation && request === queueGeneration) silentQueue = false;
     }

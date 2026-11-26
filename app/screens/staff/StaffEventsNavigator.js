@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, AppState, Pressable, StyleSheet, Text, View } from 'react-native';
+import { useIsFocused } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 
 import { useAuth } from '../../context/AuthContext';
@@ -10,6 +11,7 @@ import StaffStationOperationalScreen from './StaffStationOperationalScreen';
 import { useStaffPolling } from './useStaffPolling';
 import { AdminIcon, AdminIconTile, liveColors as c, liveStyles as live } from '../admin/components/AdminLiveUI';
 import StaffLiveScreen from './components/StaffLiveScreen';
+import { resolveStaffPollingIndicator, StaffPollingStatusPill } from './components/StaffSyncFeedback';
 
 const Stack = createNativeStackNavigator();
 const StaffEventsContext = createContext(null);
@@ -261,9 +263,28 @@ function StaffEventsProvider({ children }) {
 
 function StaffEventsScreen({ navigation }) {
   const staff = useContext(StaffEventsContext);
-  useStaffPolling(staff.status === 'ready', staff.refreshSilent, 60000);
+  const focused = useIsFocused();
+  const [appState, setAppState] = useState(() => AppState?.currentState ?? 'active');
+  useEffect(() => {
+    const subscription = AppState?.addEventListener?.('change', setAppState);
+    return () => subscription?.remove?.();
+  }, []);
+  const recoverableEventsError = staff.status === 'error'
+    && (staff.error === 'network' || staff.error === 'unavailable');
+  const canPollEvents = staff.status === 'ready' || recoverableEventsError;
+  useStaffPolling(canPollEvents, staff.refreshSilent, 60000);
+  const eventsPollingIndicator = resolveStaffPollingIndicator({
+    hidden: staff.status === 'error' && (staff.error === 'session' || staff.error === 'denied'),
+    loading: staff.status === 'loading' || staff.status === 'idle',
+    pollingEnabled: canPollEvents,
+    visible: focused && appState === 'active',
+    stale: staff.error === 'stale',
+    recoverableError: recoverableEventsError,
+    intervalSeconds: 60,
+  });
   const messages = {
     session: 'Não foi possível confirmar sua sessão. Entre novamente ou tente atualizar.',
+    denied: 'Acesso Staff indisponível para esta conta. Atualize os eventos ou procure o responsável.',
     network: 'Não foi possível conectar ao servidor. Verifique sua conexão e tente novamente.',
     unavailable: 'Não foi possível carregar os eventos autorizados. Tente novamente.',
   };
@@ -291,7 +312,7 @@ function StaffEventsScreen({ navigation }) {
         <View style={styles.errorCard}>
           <StatusPill label="Falha na consulta" tone="danger" uppercase />
           <Text accessibilityRole="alert" style={styles.alertMessage}>
-            {messages[staff.error]}
+            {messages[staff.error] ?? messages.unavailable}
           </Text>
         </View>
       )}
@@ -350,6 +371,8 @@ function StaffEventsScreen({ navigation }) {
       <Text style={styles.helperNote}>
         Aqui aparecem somente eventos em que sua conta possui autorização Staff.
       </Text>
+
+      <StaffPollingStatusPill indicator={eventsPollingIndicator} />
 
       <Button
         label="Atualizar eventos"
@@ -426,6 +449,12 @@ function StaffEventHomeScreen({ navigation }) {
 
 function StaffEventDashboard({ event, staff, section, setSection, stationId, setStationId, openStation, stationVisitGenRef }) {
   const auth = useAuth();
+  const focused = useIsFocused();
+  const [appState, setAppState] = useState(() => AppState?.currentState ?? 'active');
+  useEffect(() => {
+    const subscription = AppState?.addEventListener?.('change', setAppState);
+    return () => subscription?.remove?.();
+  }, []);
   const live = useRef({ auth, staff, section, stationId, stationExperienceId: null, eventId: event.id });
   const activeStationMetaRef = useRef(null);
   const storeRef = useRef(null);
@@ -593,7 +622,8 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
       && !snapshot.accessLocked
       && !snapshot.verifyingAccess
       && !snapshot.accessUncertain
-      && snapshot.queueStatus === 'ready',
+      && (snapshot.queueStatus === 'ready'
+        || (snapshot.queueStatus === 'error' && (snapshot.queueError === 'network' || snapshot.queueError === 'unavailable'))),
     () => store.pollQueue(),
     5000,
     `${event.id}:${stationId}:${epoch}:${revision}`,
@@ -673,6 +703,34 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
   const pendingStationsText = !snapshot.accessLocked && !snapshot.verifyingAccess && !snapshot.accessUncertain && snapshot.stationStatus === 'ready'
     ? String(pendingStationsCount)
     : '—';
+  const panelLoading = snapshot.stationStatus === 'loading'
+    || snapshot.experienceStatus === 'loading'
+    || snapshot.entryStatus === 'loading'
+    || snapshot.stationStatus === 'idle'
+    || snapshot.experienceStatus === 'idle'
+    || snapshot.entryStatus === 'idle';
+  const panelStale = snapshot.stationError === 'stale'
+    || snapshot.experienceError === 'stale'
+    || snapshot.entryError === 'stale'
+    || staff.error === 'stale';
+  const panelRecoverableError = !accessLost
+    && !snapshot.verifyingAccess
+    && !snapshot.accessUncertain
+    && ((snapshot.stationStatus === 'error' && (snapshot.stationError === 'network' || snapshot.stationError === 'unavailable'))
+      || (snapshot.experienceStatus === 'error' && (snapshot.experienceError === 'network' || snapshot.experienceError === 'unavailable'))
+      || (snapshot.entryStatus === 'error' && (snapshot.entryError === 'network' || snapshot.entryError === 'unavailable')));
+  const panelPollingEnabled = canPollStations || canPollExperiences || canPollEntry;
+  const panelPollingIndicator = resolveStaffPollingIndicator({
+    hidden: accessLost,
+    verifying: Boolean(snapshot.verifyingAccess),
+    loading: panelLoading,
+    pollingEnabled: panelPollingEnabled,
+    visible: focused && appState === 'active',
+    stale: panelStale,
+    recoverableError: panelRecoverableError,
+    unavailableError: Boolean(snapshot.accessUncertain),
+    intervalSeconds: 5,
+  });
 
   return (
     <>
@@ -687,7 +745,7 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
           <Text style={styles.message}>Verificando acesso ao evento...</Text>
         </View>
       )}
-      {(snapshot.queueError === 'stale' || (section === 'panel' && (snapshot.stationError === 'stale' || snapshot.entryError === 'stale'))) && (
+      {(snapshot.queueError === 'stale' || (section === 'panel' && panelStale)) && (
         <View style={styles.warningCard}>
           <Text accessibilityRole="alert" style={styles.warningMessage}>{messages.stale}</Text>
         </View>
@@ -860,6 +918,8 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
               ))}
             </View>
           )}
+
+          <StaffPollingStatusPill indicator={panelPollingIndicator} />
 
           <Button
             label="Atualizar estações"

@@ -408,8 +408,17 @@ function createStaffUiHarness({ initialAuth, onGet, onLogout }) {
   const native = Object.fromEntries(
     ['ActivityIndicator', 'Image', 'Modal', 'Pressable', 'SafeAreaView', 'ScrollView', 'Text', 'TextInput', 'View'].map((n) => [n, n]),
   );
+  let focused = true;
+  const focusListeners = new Set();
+  const appStateListeners = new Set();
   native.StyleSheet = { create: (s) => s };
-  native.AppState = { currentState: 'active', addEventListener: () => ({ remove() {} }) };
+  native.AppState = {
+    currentState: 'active',
+    addEventListener: (_, listener) => {
+      appStateListeners.add(listener);
+      return { remove: () => appStateListeners.delete(listener) };
+    },
+  };
 
   const client = {
     get: (url, opts) => onGet(url, opts),
@@ -444,6 +453,7 @@ function createStaffUiHarness({ initialAuth, onGet, onLogout }) {
   };
   const liveUI = loadModule('screens/admin/components/AdminLiveUI.js', resolveVisual).exports;
   const staffLiveScreen = loadModule('screens/staff/components/StaffLiveScreen.js', resolveVisual).exports;
+  const staffSyncFeedback = loadModule('screens/staff/components/StaffSyncFeedback.js', resolveVisual).exports;
 
   const { default: StaffEventsNavigator } = loadModule('screens/staff/StaffEventsNavigator.js', (name) => {
     if (name === 'react') return React;
@@ -453,9 +463,20 @@ function createStaffUiHarness({ initialAuth, onGet, onLogout }) {
       return { createNativeStackNavigator };
     }
     if (name === '@react-navigation/native') {
-      return { useIsFocused: () => true };
+      return {
+        useIsFocused: () => {
+          const [, bump] = React.useState(0);
+          React.useEffect(() => {
+            const fn = () => bump((n) => n + 1);
+            focusListeners.add(fn);
+            return () => focusListeners.delete(fn);
+          }, []);
+          return focused;
+        },
+      };
     }
     if (name === './components/StaffLiveScreen') return staffLiveScreen;
+    if (name === './components/StaffSyncFeedback') return staffSyncFeedback;
     if (name === '../admin/components/AdminLiveUI') return liveUI;
     if (name === '../../context/AuthContext') {
       return { AuthContext: AuthCtx, useAuth: () => React.useContext(AuthCtx) };
@@ -526,12 +547,39 @@ function createStaffUiHarness({ initialAuth, onGet, onLogout }) {
       }
       return null;
     },
+    latestEventsPolling() {
+      for (let i = pollingRegistrations.length - 1; i >= 0; i -= 1) {
+        const reg = pollingRegistrations[i];
+        if (reg.intervalMs === 60000 && reg.scope === undefined) return reg;
+      }
+      return null;
+    },
+    async triggerEventsPolling() {
+      const reg = this.latestEventsPolling();
+      assert.ok(reg, 'polling de eventos esperado');
+      assert.equal(reg.enabled, true, 'polling de eventos deve estar habilitado');
+      await runtime.act(async () => {
+        await reg.read();
+      });
+    },
     async triggerPolling(scopeFragment) {
       const reg = this.latestPolling(scopeFragment);
       assert.ok(reg, `polling esperado para "${scopeFragment}"`);
       assert.equal(reg.enabled, true, `polling "${scopeFragment}" deve estar habilitado`);
       await runtime.act(async () => {
         await reg.read();
+      });
+    },
+    async setFocused(nextFocused) {
+      focused = nextFocused;
+      await runtime.act(async () => {
+        for (const fn of [...focusListeners]) fn();
+      });
+    },
+    async setAppState(nextState) {
+      native.AppState.currentState = nextState;
+      await runtime.act(async () => {
+        for (const fn of [...appStateListeners]) fn(nextState);
       });
     },
     async mount() {
@@ -1050,6 +1098,156 @@ test('STAFF-01 UI (10.3): Recuperação automática de /entry-control, rejeiçã
     assert.ok(rig.hasText('Just Dance'));
     assert.ok(rig.hasText('FILA ATIVA'));
     assert.equal(rig.isDisabled('Controle de Entrada'), false);
+  } finally {
+    rig.dispose();
+  }
+});
+
+test('STAFF-04: staffEventsService distingue 403/timeout/503 e recupera automaticamente via refreshSilent após falha inicial transitória', async () => {
+  const current = identity();
+  let mode = 'timeout';
+  let calls = 0;
+  const store = createStaffEventsStore({
+    client: {
+      get: async () => {
+        calls += 1;
+        if (mode === 'timeout') throw Object.assign(new Error('timeout'), { isTimeout: true });
+        if (mode === '503') throw Object.assign(new Error('503'), { status: 503 });
+        if (mode === 'malformed') return { events: 'invalido' };
+        if (mode === '403') throw Object.assign(new Error('forbidden'), { status: 403 });
+        if (mode === '401') throw Object.assign(new Error('session'), { status: 401 });
+        return { events: [event] };
+      },
+    },
+    getIdentity: () => current,
+  });
+
+  store.setIdentity(current);
+  await store.refresh();
+  assert.equal(store.getSnapshot().status, 'error');
+  assert.equal(store.getSnapshot().error, 'network', 'timeout classifica como network');
+
+  mode = '503';
+  await store.refreshSilent();
+  assert.equal(store.getSnapshot().status, 'error');
+  assert.equal(store.getSnapshot().error, 'unavailable');
+
+  mode = 'malformed';
+  await store.refreshSilent();
+  assert.equal(store.getSnapshot().status, 'error');
+  assert.equal(store.getSnapshot().error, 'unavailable');
+
+  mode = 'ok';
+  await store.refreshSilent();
+  assert.equal(store.getSnapshot().status, 'ready');
+  assert.equal(store.getSnapshot().error, null);
+  assert.equal(store.getSnapshot().events.length, 1);
+
+  // 403 classifica como denied e impede novas tentativas silenciosas
+  mode = '403';
+  await store.refreshSilent();
+  const callsAfter403 = calls;
+  assert.equal(store.getSnapshot().status, 'error');
+  assert.equal(store.getSnapshot().error, 'denied');
+  assert.equal(store.getSnapshot().events.length, 0);
+  await store.refreshSilent();
+  assert.equal(calls, callsAfter403, 'refreshSilent não repete após 403');
+
+  // 401 também classifica como session e impede novas tentativas silenciosas
+  mode = '401';
+  await store.refresh();
+  const callsAfter401 = calls;
+  assert.equal(store.getSnapshot().error, 'session');
+  await store.refreshSilent();
+  assert.equal(calls, callsAfter401, 'refreshSilent não repete após 401');
+});
+
+test('STAFF-04 UI: indicadores honestos de polling (60s/5s), recuperação automática na Seleção de Eventos e pausa por foco/segundo plano no Painel', async () => {
+  let eventsMode = '503';
+  let stationsMode = 'ok';
+  const rig = createStaffUiHarness({
+    initialAuth: makeAuthIdentity('u-1', 1, 1),
+    onGet: (url) => {
+      if (url === '/staff/events') {
+        if (eventsMode === '503') return Promise.reject(Object.assign(new Error('503'), { status: 503 }));
+        if (eventsMode === '403') return Promise.reject(Object.assign(new Error('403'), { status: 403 }));
+        return Promise.resolve({
+          events: [{ id: EV_A, name: 'Arena STAFF-04', status: 'open', effectivePhase: 'open' }],
+        });
+      }
+      if (url === `/staff/events/${EV_A}/stations`) {
+        if (stationsMode === 'network') return Promise.reject(Object.assign(new Error('offline'), { isNetworkError: true }));
+        return Promise.resolve({
+          eventId: EV_A,
+          stations: [{ id: ST_1, experienceId: EXP_1, label: 'Estação 01', availability: 'available', pendingServiceSessionId: null }],
+        });
+      }
+      if (url === `/staff/events/${EV_A}/experiences`) {
+        return Promise.resolve({ eventId: EV_A, experiences: [{ id: EXP_1, name: 'Just Dance' }] });
+      }
+      if (url === `/staff/events/${EV_A}/entry-control`) {
+        return Promise.resolve({
+          eventId: EV_A,
+          externalQueueEnabled: true,
+          canManage: true,
+          observedAt: '2026-11-17T15:00:00.000Z',
+          canCall: false,
+          canConfirm: false,
+          canMarkAbsent: false,
+          canRemove: false,
+          waitingCount: 0,
+          waiting: [],
+          pendingCall: null,
+        });
+      }
+      return Promise.reject(new Error(`URL inesperada: ${url}`));
+    },
+  });
+
+  try {
+    await rig.mount();
+    assert.ok(rig.hasText('Atualização indisponível · aguardando recuperação (a cada 60s)'));
+    const recoveryPoll = rig.latestEventsPolling();
+    assert.ok(recoveryPoll && recoveryPoll.enabled === true);
+
+    // Recuperação automática por GET na Seleção de Eventos sem clique manual
+    eventsMode = 'ok';
+    await rig.triggerEventsPolling();
+    assert.ok(rig.hasText('Arena STAFF-04'));
+    assert.ok(rig.hasText('Atualização automática ativa · a cada 60s'));
+
+    await rig.setFocused(false);
+    assert.ok(rig.hasText('Atualização temporariamente pausada'));
+    await rig.setFocused(true);
+    assert.ok(rig.hasText('Atualização automática ativa · a cada 60s'));
+
+    // Painel operacional reflete 5s ativo, pausa em segundo plano e stale em falha transitória
+    await rig.press('Selecionar evento Arena STAFF-04');
+    await rig.settle();
+    assert.ok(rig.hasText('Atualização automática ativa · a cada 5s'));
+
+    await rig.setAppState('background');
+    assert.ok(rig.hasText('Atualização temporariamente pausada'));
+    assert.ok(!rig.hasText('Atualização automática ativa'));
+    await rig.setAppState('active');
+    assert.ok(rig.hasText('Atualização automática ativa · a cada 5s'));
+
+    stationsMode = 'network';
+    await rig.triggerPolling(':stations:');
+    assert.ok(rig.hasText('Dados desatualizados · tentando atualizar a cada 5s'));
+    stationsMode = 'ok';
+    await rig.triggerPolling(':stations:');
+    assert.ok(rig.hasText('Atualização automática ativa · a cada 5s'));
+
+    // Voltar para eventos e receber 403 oculta indicador de polling e exibe mensagem de acesso negado
+    await rig.press('Voltar aos eventos');
+    eventsMode = '403';
+    await rig.press('Atualizar eventos');
+    await rig.settle();
+    assert.ok(rig.hasText('Acesso Staff indisponível para esta conta.'));
+    assert.ok(!rig.hasText('Atualização automática ativa'));
+    assert.ok(!rig.hasText('Atualização indisponível'));
+    assert.equal(rig.latestEventsPolling()?.enabled, false);
   } finally {
     rig.dispose();
   }

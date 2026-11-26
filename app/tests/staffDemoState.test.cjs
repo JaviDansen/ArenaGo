@@ -226,6 +226,7 @@ const realStaffScreens = [
   'components/StaffEntrySections.js',
   'components/StaffLiveScreen.js',
   'components/StaffStationSections.js',
+  'components/StaffSyncFeedback.js',
   'useStaffPolling.js',
 ];
 
@@ -238,6 +239,14 @@ test('estação operacional real não carrega estado demonstrativo', () => {
     'utf8',
   );
   assert.doesNotMatch(sectionsSource, /staffDemoState|staffDemoData|StaffDemoContext|StaffStationScreen/);
+  const syncFeedbackSource = readFileSync(
+    path.join(appDirectory, 'screens', 'staff', 'components', 'StaffSyncFeedback.js'),
+    'utf8',
+  );
+  assert.doesNotMatch(
+    syncFeedbackSource,
+    /staffDemoState|staffDemoData|StaffDemoContext|StaffStationScreen|StaffEntryControlScreen/,
+  );
 });
 
 test('controle de entrada real não carrega estado demonstrativo', () => {

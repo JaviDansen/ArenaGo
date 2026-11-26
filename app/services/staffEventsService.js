@@ -24,6 +24,16 @@ export async function fetchStaffEvents(client) {
 const empty = () => ({ identity: null, status: 'idle', events: [], selected: null, error: null });
 const sameIdentity = (a, b) => Boolean(a && b && a.userId === b.userId &&
   a.epoch === b.epoch && a.revision === b.revision);
+const eventsErrorKind = (error) => (
+  error?.status === 401
+    ? 'session'
+    : error?.status === 403
+      ? 'denied'
+      : (error?.isNetworkError || error?.isTimeout)
+        ? 'network'
+        : 'unavailable'
+);
+const isRecoverableEventsError = (kind) => kind === 'network' || kind === 'unavailable';
 
 // A identidade é consultada novamente antes de publicar cada resposta ou aceitar uma seleção.
 export function createStaffEventsStore({ client, getIdentity }) {
@@ -37,6 +47,7 @@ export function createStaffEventsStore({ client, getIdentity }) {
 
   function setIdentity(identity) {
     generation += 1;
+    silentFlight = false;
     publish(identity ? { ...empty(), identity, status: 'loading' } : empty());
   }
 
@@ -44,6 +55,7 @@ export function createStaffEventsStore({ client, getIdentity }) {
     const identity = state.identity;
     if (!isCurrent(identity)) return;
     const requestGeneration = ++generation;
+    silentFlight = false;
     publish({ ...state, status: 'loading', events: [], selected: null, error: null });
     try {
       const events = await fetchStaffEvents(client);
@@ -51,25 +63,34 @@ export function createStaffEventsStore({ client, getIdentity }) {
       publish({ ...state, status: 'ready', events, selected: null, error: null });
     } catch (error) {
       if (requestGeneration !== generation || !isCurrent(identity)) return;
-      const kind = error?.status === 401 ? 'session' : error?.isNetworkError ? 'network' : 'unavailable';
+      const kind = eventsErrorKind(error);
       publish({ ...state, status: 'error', events: [], selected: null, error: kind });
     }
   }
 
   async function refreshSilent() {
-    if (silentFlight || !isCurrent() || state.status !== 'ready') return;
-    const identity = state.identity, requestGeneration = generation;
+    const canRetry = state.status === 'error' && isRecoverableEventsError(state.error);
+    if (silentFlight || !isCurrent() || (state.status !== 'ready' && !canRetry)) return;
+    const identity = state.identity, requestGeneration = generation, wasReady = state.status === 'ready';
     silentFlight = true;
     try {
       const events = await fetchStaffEvents(client);
       if (requestGeneration !== generation || !isCurrent(identity)) return;
       const selected = state.selected ? events.find(item => item.id === state.selected.id) ?? null : null;
-      publish({ ...state, events, selected, error: null });
+      publish({ ...state, status: 'ready', events, selected, error: null });
     } catch (error) {
       if (requestGeneration !== generation || !isCurrent(identity)) return;
-      if ([401, 403].includes(error?.status)) publish({ ...state, events: [], selected: null, status: 'error', error: 'session' });
-      else publish({ ...state, error: 'stale' });
-    } finally { silentFlight = false; }
+      const kind = eventsErrorKind(error);
+      if (kind === 'session' || kind === 'denied') {
+        publish({ ...state, events: [], selected: null, status: 'error', error: kind });
+      } else if (wasReady) {
+        publish({ ...state, error: 'stale' });
+      } else {
+        publish({ ...state, status: 'error', events: [], selected: null, error: kind });
+      }
+    } finally {
+      if (requestGeneration === generation) silentFlight = false;
+    }
   }
 
   function select(eventId) {

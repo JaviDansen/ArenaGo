@@ -175,6 +175,13 @@ function createEntryScreenHarness({
     if (name === './StaffStationSections') return stationSections;
     return require(name);
   }).exports;
+  const syncFeedback = loadModule('screens/staff/components/StaffSyncFeedback.js', (name) => {
+    if (name === 'react') return React;
+    if (name === 'react/jsx-runtime') return jsx;
+    if (name === 'react-native') return native;
+    if (name === '../../admin/components/AdminLiveUI') return adminLiveUi;
+    return require(name);
+  }).exports;
 
   const StaffEntryControlRealScreen = loadModule('screens/staff/StaffEntryControlRealScreen.js', (name) => {
     if (name === 'react') return React;
@@ -201,6 +208,7 @@ function createEntryScreenHarness({
     if (name === '../../services/staffEntryIntentStorage') return entryStorageSvc;
     if (name === '../admin/components/AdminLiveUI') return adminLiveUi;
     if (name === './components/StaffEntrySections') return entrySections;
+    if (name === './components/StaffSyncFeedback') return syncFeedback;
     if (name === './useStaffPolling') {
       return {
         useStaffPolling(enabled, read, intervalMs, scope) {
@@ -819,4 +827,323 @@ test('STAFF-03 modal seguro, incerteza dispatching e limpeza imediata em revoga�
   assert.equal(h401.hasText('Pedro Henrique'), false);
   assert.ok(h401.hasText('Sessão inválida'));
   h401.unmount();
+});
+
+// ============================================================================
+// 3. Testes unitários de StaffSyncFeedback e cobertura STAFF-04 da tela Entrada
+// ============================================================================
+
+const pureSyncFeedback = (() => {
+  const nativeStub = Object.fromEntries(['Text', 'View'].map((n) => [n, n]));
+  nativeStub.StyleSheet = { create: (s) => s };
+  const adminTheme = loadModule('screens/admin/components/adminTheme.js', require).exports;
+  const adminLiveUi = loadModule('screens/admin/components/AdminLiveUI.js', (name) => {
+    if (name === 'react/jsx-runtime') return require('react/jsx-runtime');
+    if (name === 'react-native') return nativeStub;
+    if (name === './adminTheme') return adminTheme;
+    return require(name);
+  }).exports;
+  return loadModule('screens/staff/components/StaffSyncFeedback.js', (name) => {
+    if (name === 'react') return require('react');
+    if (name === 'react/jsx-runtime') return require('react/jsx-runtime');
+    if (name === 'react-native') return nativeStub;
+    if (name === '../../admin/components/AdminLiveUI') return adminLiveUi;
+    return require(name);
+  }).exports;
+})();
+
+test('STAFF-04: StaffSyncFeedback cobre indicadores honestos, confirmações específicas, códigos reais de recusa e fallback seguro', () => {
+  const {
+    resolveStaffPollingIndicator,
+    describeEntryConfirmed,
+    describeEntryRejection,
+    describeEntryNotice,
+    describeStationConfirmed,
+    describeStationRejection,
+    describeStationFeedback,
+  } = pureSyncFeedback;
+
+  // Indicadores de polling em todos os estados obrigatórios
+  assert.equal(resolveStaffPollingIndicator({ hidden: true }), null);
+  assert.equal(
+    resolveStaffPollingIndicator({ verifying: true }).text,
+    'Atualização indisponível · verificando autorização',
+  );
+  assert.equal(
+    resolveStaffPollingIndicator({ loading: true }).text,
+    'Atualização temporariamente pausada · carregamento em andamento',
+  );
+  assert.equal(
+    resolveStaffPollingIndicator({ stale: true, pollingEnabled: true, visible: true, intervalSeconds: 5 }).text,
+    'Dados desatualizados · tentando atualizar a cada 5s',
+  );
+  assert.equal(
+    resolveStaffPollingIndicator({ stale: true, pollingEnabled: true, visible: false, intervalSeconds: 5 }).text,
+    'Dados desatualizados · atualização temporariamente pausada',
+  );
+  assert.equal(
+    resolveStaffPollingIndicator({ recoverableError: true, pollingEnabled: true, visible: true, intervalSeconds: 60 }).text,
+    'Atualização indisponível · aguardando recuperação (a cada 60s)',
+  );
+  assert.equal(
+    resolveStaffPollingIndicator({ recoverableError: true, pollingEnabled: true, visible: false, intervalSeconds: 5 }).text,
+    'Atualização temporariamente pausada',
+  );
+  assert.equal(
+    resolveStaffPollingIndicator({ unavailableError: true, pollingEnabled: false, visible: true }).text,
+    'Atualização indisponível · aguardando recuperação',
+  );
+  assert.equal(
+    resolveStaffPollingIndicator({ pollingEnabled: false, visible: true }).text,
+    'Atualização temporariamente pausada',
+  );
+  assert.equal(
+    resolveStaffPollingIndicator({ pollingEnabled: true, visible: true, intervalSeconds: 5 }).text,
+    'Atualização automática ativa · a cada 5s',
+  );
+
+  // Confirmações do Controle de Entrada (incluindo absent com requeued true vs false)
+  assert.equal(describeEntryConfirmed('call', {}), 'Participante chamado pelo servidor.');
+  assert.equal(describeEntryConfirmed('confirm_call', {}), 'Entrada confirmada pelo servidor.');
+  assert.equal(
+    describeEntryConfirmed('absent', { requeued: true }),
+    'Ausência registrada pelo servidor. Participante retornou ao fim da fila externa.',
+  );
+  assert.equal(
+    describeEntryConfirmed('absent', { requeued: false }),
+    'Ausência registrada pelo servidor. Após o corte de entrada, o participante não retornou à fila externa.',
+  );
+  assert.equal(describeEntryConfirmed('remove', {}), 'Participante removido da fila externa pelo servidor.');
+  assert.equal(describeEntryConfirmed('toggle', { externalQueueEnabled: true }), 'Fila externa reativada pelo servidor.');
+  assert.equal(
+    describeEntryConfirmed('toggle', { externalQueueEnabled: false, releasedCount: 3 }),
+    'Fila externa desativada pelo servidor. Participantes liberados: 3.',
+  );
+
+  // Recusas reais do Controle de Entrada + fallback seguro
+  for (const [code, fragment] of [
+    ['ENTRY_NOT_FIRST', 'A fila mudou. Confira o primeiro participante'],
+    ['ENTRY_QUEUE_EMPTY', 'A fila externa está vazia'],
+    ['ENTRY_CALL_PENDING', 'Já existe uma chamada externa pendente'],
+    ['ENTRY_CALL_REQUIRED', 'necessário chamar um participante'],
+    ['ENTRY_CALL_NOT_PENDING', 'já não está pendente'],
+    ['EVENT_ENTRY_UNAVAILABLE', 'não é permitida no estado atual'],
+    ['STAFF_EVENT_FORBIDDEN', 'acesso a este evento não está disponível'],
+    ['SESSION_REVOKED', 'Sessão inválida'],
+  ]) {
+    assert.ok(describeEntryRejection(code).includes(fragment), code);
+  }
+  const unknownEntryMsg = describeEntryRejection('PG_ERROR_23505');
+  assert.ok(unknownEntryMsg.includes('Operação recusada pelo servidor'));
+  assert.equal(unknownEntryMsg.includes('PG_ERROR_23505'), false);
+  assert.equal(describeEntryNotice({ outcome: { kind: 'rejected', code: 'ENTRY_CALL_PENDING' } }), describeEntryRejection('ENTRY_CALL_PENDING'));
+
+  // Estações: confirmações, recusas e feedbacks especiais
+  assert.equal(describeStationConfirmed({ status: 'pending' }), 'Participante chamado. Operação confirmada pelo servidor.');
+  assert.equal(describeStationConfirmed({ status: 'completed' }), 'Atendimento concluído. Operação confirmada pelo servidor.');
+  assert.equal(describeStationConfirmed({ status: 'canceled' }), 'Participante removido da fila. Operação confirmada pelo servidor.');
+  assert.equal(describeStationConfirmed({ status: 'absent', requeued: true }), 'Ausência registrada; participante retornou ao fim da fila.');
+  assert.equal(describeStationConfirmed({ status: 'absent', requeued: false }), 'Ausência registrada; participante não retornou à fila após o corte.');
+  for (const [code, fragment] of [
+    ['QUEUE_EMPTY', 'fila da experiência está vazia'],
+    ['STATION_UNAVAILABLE', 'estação não está disponível'],
+    ['STATION_HAS_PENDING_CALL', 'já possui um atendimento pendente'],
+    ['SERVICE_NOT_PENDING', 'chamada já não está pendente'],
+    ['EVENT_OPERATION_ENDED', 'não é permitida no estado atual'],
+    ['QUEUE_ENTRY_NOT_WAITING', 'A fila mudou'],
+  ]) {
+    assert.ok(describeStationRejection(code).includes(fragment), code);
+  }
+  const unknownStationMsg = describeStationRejection('RAW_INTERNAL_ERR');
+  assert.ok(unknownStationMsg.includes('Operação recusada pelo servidor'));
+  assert.equal(unknownStationMsg.includes('RAW_INTERNAL_ERR'), false);
+  assert.ok(describeStationFeedback({ kind: 'rejected', phase: 'precondition', network: true, code: null }).text.includes('Falha de conexão'));
+  assert.ok(describeStationFeedback({ kind: 'blocked' }).text.includes('estado operacional mudou'));
+  assert.ok(describeStationFeedback({ kind: 'confirmed_cleanup_pending' }).text.includes('reconhecimento local ainda não foi concluído'));
+  assert.ok(describeStationFeedback({ kind: 'rejected_cleanup_pending' }).text.includes('Recusa registrada pelo servidor'));
+  assert.ok(describeStationFeedback({ kind: 'storage_error' }).text.includes('Armazenamento seguro indisponível'));
+  assert.ok(describeStationFeedback({ kind: 'uncertain' }).text.includes('O resultado exige verificação ou reconciliação. Não repita a operação.'));
+});
+
+test('STAFF-04 tela Controle de Entrada: recuperação automática após erro inicial, busy, absent requeued vs corte e códigos de recusa', { skip }, async () => {
+  const entrySlot = `arenago.staff.entry.${USER_1}`;
+  let getMode = 'timeout';
+  let postDeferred = null;
+  let postMode = 'absent_requeue';
+  let postCalls = 0;
+
+  let currentState = buildState({
+    enabled: true,
+    pendingCall: { id: CALL_1, participationId: PART_1, displayName: 'Ana Clara', calledAt: AT },
+    waiting: [{ participationId: PART_2, displayName: 'Lucas Ferreira', position: 1 }],
+  });
+
+  const h = createEntryScreenHarness({
+    onGet: async () => {
+      if (getMode === 'timeout') throw Object.assign(new Error('timeout'), { isTimeout: true });
+      if (getMode === '503') throw Object.assign(new Error('503'), { status: 503 });
+      if (getMode === 'malformed') return { eventId: EV_A, waitingCount: 4, waiting: [] };
+      return currentState;
+    },
+    onPost: async () => {
+      postCalls += 1;
+      if (postDeferred) {
+        const d = postDeferred;
+        postDeferred = null;
+        return d.promise;
+      }
+      if (postMode === 'absent_requeue') {
+        currentState = buildState({
+          enabled: true,
+          pendingCall: null,
+          waiting: [
+            { participationId: PART_2, displayName: 'Lucas Ferreira', position: 1 },
+            { participationId: PART_1, displayName: 'Ana Clara', position: 2 },
+          ],
+        });
+        return {
+          eventId: EV_A,
+          call: { id: CALL_1, participationId: PART_1, status: 'absent', calledAt: AT, resolvedAt: AT },
+          participation: { id: PART_1, status: 'waiting', arenaEnteredAt: null, finishReason: null, externalQueueOrder: '3' },
+          requeued: true,
+        };
+      }
+      if (postMode === 'absent_cutoff') {
+        currentState = buildState({
+          enabled: true,
+          pendingCall: null,
+          waiting: [{ participationId: PART_2, displayName: 'Lucas Ferreira', position: 1 }],
+        });
+        return {
+          eventId: EV_A,
+          call: { id: CALL_1, participationId: PART_1, status: 'absent', calledAt: AT, resolvedAt: AT },
+          participation: { id: PART_1, status: 'finished', arenaEnteredAt: null, finishReason: 'external_absence_after_entry_cutoff', externalQueueOrder: null },
+          requeued: false,
+        };
+      }
+      if (postMode.startsWith('reject:')) {
+        throw Object.assign(new Error('conflict'), { status: 409, code: postMode.slice('reject:'.length) });
+      }
+      throw Object.assign(new Error('bad'), { status: 400, code: 'INTERNAL_UNMAPPED_ERR' });
+    },
+  });
+
+  const flush = () => h.act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+  // 1. Falha inicial por timeout habilita recuperação automática (5s) e não fabrica fila vazia
+  await h.mount();
+  assert.ok(h.hasText('Não foi possível conectar. Verifique sua conexão e atualize.'));
+  assert.ok(h.hasExactText('Atualização indisponível · aguardando recuperação (a cada 5s)'));
+  assert.equal(h.getPolling().enabled, true);
+  assert.ok(!h.hasText('Ninguém está aguardando'));
+
+  // 503 e payload inválido continuam em erro elegível para recuperação
+  getMode = '503';
+  await h.act(async () => { await h.getPolling().read(); });
+  assert.ok(h.hasText('Não foi possível consultar a fila de entrada. Tente atualizar.'));
+  assert.equal(h.getPolling().enabled, true);
+
+  getMode = 'malformed';
+  await h.act(async () => { await h.getPolling().read(); });
+  assert.equal(h.getPolling().enabled, true);
+
+  // Recuperação automática por GET lê SecureStore e preserva intenção dispatching bloqueante
+  h.secureValues.set(entrySlot, JSON.stringify({
+    userId: USER_1,
+    sessionId: SESSION_1,
+    eventId: EV_A,
+    key: '50000000-0000-4000-8000-000000000091',
+    kind: 'call',
+    participationId: null,
+    callId: null,
+    enabled: null,
+    phase: 'dispatching',
+  }));
+  getMode = 'ok';
+  await h.act(async () => { await h.getPolling().read(); });
+  assert.ok(h.hasExactText('Ana Clara'));
+  assert.ok(h.hasText('O resultado de uma solicitação ainda não foi confirmado'));
+  assert.equal(h.isDisabled('Confirmar entrada'), true);
+  assert.equal(postCalls, 0);
+
+  // Intenção reservada (não enviada) exibe aviso distinto e pode ser descartada com segurança
+  h.secureValues.set(entrySlot, JSON.stringify({
+    userId: USER_1,
+    sessionId: SESSION_1,
+    eventId: EV_A,
+    key: '50000000-0000-4000-8000-000000000092',
+    kind: 'call',
+    participationId: null,
+    callId: null,
+    enabled: null,
+    phase: 'reserved',
+  }));
+  await h.press('Atualizar fila de entrada');
+  assert.ok(h.hasText('Há uma solicitação registrada que ainda não foi enviada.'));
+  assert.equal(h.isDisabled('Confirmar entrada'), true);
+  await h.press('Descartar solicitação não enviada');
+  assert.equal(h.isDisabled('Confirmar entrada'), false);
+
+  // 2. Estado busy durante POST exibe processamento explícito e pausa polling
+  postDeferred = deferred();
+  await h.press('Marcar ausência');
+  let inflightAbsent;
+  await h.act(async () => {
+    inflightAbsent = h.handler('CONFIRMAR ALTERAÇÃO')();
+  });
+  assert.ok(h.hasExactText('Processando operação no servidor...'));
+  assert.equal(h.getPolling().enabled, false);
+  currentState = buildState({
+    enabled: true,
+    pendingCall: null,
+    waiting: [
+      { participationId: PART_2, displayName: 'Lucas Ferreira', position: 1 },
+      { participationId: PART_1, displayName: 'Ana Clara', position: 2 },
+    ],
+  });
+  await h.act(async () => {
+    postDeferred.resolve({
+      eventId: EV_A,
+      call: { id: CALL_1, participationId: PART_1, status: 'absent', calledAt: AT, resolvedAt: AT },
+      participation: { id: PART_1, status: 'waiting', arenaEnteredAt: null, finishReason: null, externalQueueOrder: '3' },
+      requeued: true,
+    });
+    await inflightAbsent;
+  });
+  await flush();
+  assert.ok(h.hasText('Ausência registrada pelo servidor. Participante retornou ao fim da fila externa.'));
+
+  // 3. Ausência após o corte (requeued: false) não afirma reinserção
+  currentState = buildState({
+    enabled: true,
+    pendingCall: { id: CALL_1, participationId: PART_1, displayName: 'Ana Clara', calledAt: AT },
+    waiting: [{ participationId: PART_2, displayName: 'Lucas Ferreira', position: 1 }],
+  });
+  await h.press('Atualizar fila de entrada');
+  postMode = 'absent_cutoff';
+  await h.press('Marcar ausência');
+  await h.press('CONFIRMAR ALTERAÇÃO');
+  await flush();
+  assert.ok(h.hasText('Ausência registrada pelo servidor. Após o corte de entrada, o participante não retornou à fila externa.'));
+
+  // 4. Recusa com código real do backend e fallback seguro sem vazar detalhes internos
+  currentState = buildState({
+    enabled: true,
+    pendingCall: { id: CALL_1, participationId: PART_1, displayName: 'Ana Clara', calledAt: AT },
+    waiting: [],
+  });
+  await h.press('Atualizar fila de entrada');
+  postMode = 'reject:ENTRY_CALL_NOT_PENDING';
+  await h.press('Confirmar entrada');
+  await h.press('CONFIRMAR ALTERAÇÃO');
+  await flush();
+  assert.ok(h.hasText('A chamada externa já não está pendente. Confira o estado atualizado.'));
+
+  postMode = 'reject_unknown';
+  await h.press('Confirmar entrada');
+  await h.press('CONFIRMAR ALTERAÇÃO');
+  await flush();
+  assert.ok(h.hasText('Operação recusada pelo servidor.'));
+  assert.equal(h.hasText('INTERNAL_UNMAPPED_ERR'), false);
+  h.unmount();
 });

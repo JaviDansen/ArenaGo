@@ -114,14 +114,22 @@ export function createStaffEntryStore({ client, storage, createKey, getContext }
     }
   }
   async function poll() {
-    if (silentFlight || flight || !isCurrent() || state.status !== 'ready' || revokedKind) return;
-    const context = state.context, currentGeneration = generation, request = readGeneration;
+    const canRetry = state.status === 'error' && (state.error === 'network' || state.error === 'unavailable');
+    if (silentFlight || flight || !isCurrent() || (state.status !== 'ready' && !canRetry) || revokedKind) return;
+    const context = state.context, currentGeneration = generation, request = readGeneration, wasReady = state.status === 'ready';
     const sameScope = () => generation === currentGeneration && isCurrent(context);
     silentFlight = true;
     try {
       const data = parseEntryState(await client.get(`/staff/events/${context.eventId}/entry-control`, { auth: true }), context.eventId);
-      if (sameScope() && request === readGeneration && !revokedKind)
+      if (!sameScope() || request !== readGeneration || revokedKind) return;
+      if (wasReady) {
         publish({ data, error: null });
+        return;
+      }
+      let pending = null, storageError = false;
+      try { pending = active(await storage.get(context.userId)); } catch { storageError = true; }
+      if (!sameScope() || request !== readGeneration || revokedKind) return;
+      publish({ status: 'ready', data, error: null, pending, storageError });
     } catch (error) {
       if (!sameScope()) return;
       const kind = failure(error);
@@ -132,7 +140,8 @@ export function createStaffEntryStore({ client, storage, createKey, getContext }
         return;
       }
       if (request !== readGeneration || revokedKind) return;
-      publish({ error: 'stale' });
+      if (wasReady) publish({ error: 'stale' });
+      else publish({ status: 'error', data: null, error: kind });
     } finally {
       if (generation === currentGeneration && request === readGeneration) silentFlight = false;
     }

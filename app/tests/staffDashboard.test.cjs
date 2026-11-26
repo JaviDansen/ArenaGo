@@ -1383,3 +1383,82 @@ test('STAFF02-AUD-01: verifyStationAccess limpa cache nominal imediatamente, sep
   }
   assert.equal(postCalls, 0, 'a verificação de acesso não envia POST');
 });
+
+test('STAFF-04: timeout classifica como network e pollQueue recupera automaticamente após erro inicial transitório sem fabricar fila vazia', async () => {
+  const current = context();
+  let stationMode = 'ok';
+  let queueMode = 'timeout';
+  let queueGets = 0;
+
+  const store = createStaffDashboardStore({
+    getContext: () => current,
+    client: {
+      get: async (url) => {
+        if (url.endsWith('/stations')) {
+          if (stationMode === 'timeout') throw Object.assign(new Error('timeout'), { isTimeout: true });
+          return stations();
+        }
+        if (url.endsWith('/experiences')) {
+          return { eventId, experiences: [{ id: experienceId, name: 'Just Dance' }] };
+        }
+        if (url.endsWith('/entry-control')) {
+          return entrySummary();
+        }
+        if (url.endsWith('/queue')) {
+          queueGets += 1;
+          if (queueMode === 'timeout') throw Object.assign(new Error('timeout'), { isTimeout: true });
+          if (queueMode === '503') throw Object.assign(new Error('503'), { status: 503 });
+          if (queueMode === 'malformed') return { eventId, experienceId, waitingCount: -1 };
+          if (queueMode === '403') throw Object.assign(new Error('403'), { status: 403 });
+          return { ...queue(), waitingCount: 3, canCallWaitingEntries: true, firstWaitingQueueEntryId: stationId };
+        }
+        throw new Error(`URL inesperada: ${url}`);
+      },
+    },
+  });
+
+  store.setContext(current);
+  stationMode = 'timeout';
+  await store.refreshStations();
+  assert.equal(store.getSnapshot().stationStatus, 'error');
+  assert.equal(store.getSnapshot().stationError, 'network', 'timeout em /stations classifica como network');
+
+  stationMode = 'ok';
+  await store.refreshPanel();
+  assert.equal(store.getSnapshot().stationStatus, 'ready');
+
+  // Falha inicial por timeout em /queue mantém queue=null e permite recuperação automática via pollQueue
+  await store.refreshQueue(experienceId);
+  assert.equal(store.getSnapshot().queueStatus, 'error');
+  assert.equal(store.getSnapshot().queueError, 'network');
+  assert.equal(store.getSnapshot().queue, null);
+
+  // Nova falha transitória (503 e payload inválido) no pollQueue mantém status error sem fabricar fila vazia
+  queueMode = '503';
+  await store.pollQueue(experienceId);
+  assert.equal(store.getSnapshot().queueStatus, 'error');
+  assert.equal(store.getSnapshot().queueError, 'unavailable');
+  assert.equal(store.getSnapshot().queue, null);
+
+  queueMode = 'malformed';
+  await store.pollQueue(experienceId);
+  assert.equal(store.getSnapshot().queueStatus, 'error');
+  assert.equal(store.getSnapshot().queueError, 'unavailable');
+  assert.equal(store.getSnapshot().queue, null);
+
+  // Recuperação automática por GET publica dados oficiais sem precisar sair da tela
+  queueMode = 'ok';
+  await store.pollQueue(experienceId);
+  assert.equal(store.getSnapshot().queueStatus, 'ready');
+  assert.equal(store.getSnapshot().queueError, null);
+  assert.equal(store.getSnapshot().queue.waitingCount, 3);
+
+  // Negativa de autorização (403) bloqueia acesso e impede novas consultas em pollQueue
+  queueMode = '403';
+  await store.pollQueue(experienceId);
+  const callsAfter403 = queueGets;
+  assert.equal(store.getSnapshot().accessLocked, true);
+  assert.equal(store.getSnapshot().queue, null);
+  await store.pollQueue(experienceId);
+  assert.equal(queueGets, callsAfter403, 'pollQueue não volta a consultar após 403');
+});

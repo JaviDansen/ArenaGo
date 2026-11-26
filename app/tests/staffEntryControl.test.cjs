@@ -289,3 +289,93 @@ test('R3-02: negativa 403/404 ou 401 em GET anterior não é descartada por refr
     assert.equal(r.store.getSnapshot().error, null);
   }
 });
+
+test('STAFF-04: poll recupera automaticamente após falha inicial transitória (rede/timeout/503/inválida) preservando intenção persistida e respeitando 401/403', async () => {
+  const persisted = adapter();
+  const dispatchingIntent = {
+    ...context,
+    key: id(77),
+    kind: 'call',
+    participationId: null,
+    callId: null,
+    enabled: null,
+    phase: 'reserved',
+  };
+  await persisted.storage.reserve(dispatchingIntent);
+  await persisted.storage.dispatch(dispatchingIntent);
+
+  let mode = 'timeout';
+  const calls = [];
+  const client = {
+    get: async (path, opts) => {
+      calls.push({ method: 'GET', path, opts });
+      if (mode === 'timeout') throw Object.assign(new Error('timeout'), { isTimeout: true });
+      if (mode === '503') throw Object.assign(new Error('unavailable'), { status: 503 });
+      if (mode === 'malformed') return { eventId: context.eventId, waitingCount: 5, waiting: [] };
+      if (mode === '403') throw Object.assign(new Error('forbidden'), { status: 403 });
+      return body();
+    },
+    post: async () => { calls.push({ method: 'POST' }); return callResult(); },
+    patch: async () => { calls.push({ method: 'PATCH' }); return {}; },
+  };
+  const store = api.createStaffEntryStore({
+    client,
+    storage: persisted.storage,
+    getContext: () => context,
+    createKey: () => id(78),
+  });
+  store.setContext(context);
+  await store.refresh();
+  assert.equal(store.getSnapshot().status, 'error');
+  assert.equal(store.getSnapshot().error, 'network');
+  assert.equal(store.getSnapshot().data, null);
+
+  // 503 e payload malformado no poll mantêm status error sem fabricar fila vazia
+  mode = '503';
+  await store.poll();
+  assert.equal(store.getSnapshot().status, 'error');
+  assert.equal(store.getSnapshot().error, 'unavailable');
+  assert.equal(store.getSnapshot().data, null);
+
+  mode = 'malformed';
+  await store.poll();
+  assert.equal(store.getSnapshot().status, 'error');
+  assert.equal(store.getSnapshot().error, 'unavailable');
+  assert.equal(store.getSnapshot().data, null);
+
+  // Recuperação por GET carrega estado oficial e preserva a intenção dispatching do SecureStore bloqueando mutações
+  mode = 'ok';
+  await store.poll();
+  assert.equal(store.getSnapshot().status, 'ready');
+  assert.equal(store.getSnapshot().error, null);
+  assert.equal(store.getSnapshot().data.waitingCount, 2);
+  assert.equal(store.getSnapshot().pending?.phase, 'dispatching');
+  assert.equal((await store.mutate({ kind: 'call' })).kind, 'blocked');
+  assert.equal(calls.filter((c) => c.method !== 'GET').length, 0, 'nenhuma mutação automática enviada na recuperação');
+
+  // 403 no poll limpa dados nominais, bloqueia novas tentativas de poll e preserva SecureStore
+  mode = '403';
+  await store.poll();
+  const getsAfter403 = calls.length;
+  assert.equal(store.getSnapshot().status, 'error');
+  assert.equal(store.getSnapshot().error, 'denied');
+  assert.equal(store.getSnapshot().data, null);
+  await store.poll();
+  assert.equal(calls.length, getsAfter403, 'poll não volta a consultar após 403');
+  assert.equal((await persisted.storage.get(context.userId)).phase, 'dispatching');
+});
+
+test('STAFF-04: falha de armazenamento ao gravar recusa definitiva preserva knownOutcome rejected sem reenviar mutação', async () => {
+  const persisted = adapter(new Map(), { phase: 'terminal', mode: 'before' });
+  const r = await rig({
+    persisted,
+    post: async () => { throw { status: 409, code: 'ENTRY_NOT_FIRST' }; },
+  });
+  const outcome = await r.store.mutate({ kind: 'call' });
+  assert.equal(outcome.kind, 'storage_error');
+  assert.equal(r.store.getSnapshot().knownOutcome?.kind, 'rejected');
+  assert.equal(r.store.getSnapshot().knownOutcome?.code, 'ENTRY_NOT_FIRST');
+  assert.equal(r.store.getSnapshot().pending?.phase, 'dispatching');
+  assert.equal((await r.store.mutate({ kind: 'call' })).kind, 'blocked');
+  assert.equal(r.calls.filter((c) => c.method === 'POST').length, 1);
+});

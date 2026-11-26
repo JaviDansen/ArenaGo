@@ -24,8 +24,8 @@ function fixture() {
   }).exports;
   const scheduler = { set: (callback, delay) => { const id = ++serial; timers.set(id, { callback, due: now + delay }); return id; },
     clear: id => timers.delete(id) };
-  const Component = ({ enabled = true, read, scope = 'event' }) => {
-    useStaffPolling(enabled, read, 5000, scope, scheduler); return null;
+  const Component = ({ enabled = true, read, intervalMs = 5000, scope = 'event' }) => {
+    useStaffPolling(enabled, read, intervalMs, scope, scheduler); return null;
   };
   return { Component, timers, listeners,
     advance(ms) { now += ms; for (const [id, timer] of [...timers]) if (timer.due <= now) {
@@ -98,4 +98,45 @@ test('leitura de contexto anterior não agenda novo ciclo após troca ou desmont
     await Renderer.act(async () => { renderer.unmount(); });
     f.advance(5000); assert.equal(calls, 1);
   } finally { old.resolve(); try { if (renderer) await Renderer.act(async () => renderer.unmount()); } finally { f.restore(); } }
+});
+
+test('STAFF-04: intervalo de 60s, alternância de enabled e falha transitória em read preservam ciclo único sem timers duplicados', { skip }, async () => {
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const f = fixture();
+  let calls = 0;
+  let renderer;
+  const read = () => {
+    calls += 1;
+    if (calls === 1) return Promise.reject(new Error('transient'));
+    return Promise.resolve();
+  };
+  try {
+    await Renderer.act(async () => {
+      renderer = Renderer.create(React.createElement(f.Component, { enabled: true, read, intervalMs: 60000, scope: 'events' }));
+    });
+    assert.equal(f.timers.size, 1);
+    await Renderer.act(async () => { f.advance(59999); });
+    assert.equal(calls, 0, 'não dispara antes do intervalo de 60s');
+    await Renderer.act(async () => { f.advance(1); await Promise.resolve(); });
+    assert.equal(calls, 1);
+    assert.equal(f.timers.size, 1, 'rejeição em read ainda agenda exatamente um próximo ciclo');
+
+    // Desabilitar (ex.: modal aberto ou acesso negado) cancela o timer imediatamente
+    await Renderer.act(async () => {
+      renderer.update(React.createElement(f.Component, { enabled: false, read, intervalMs: 60000, scope: 'events' }));
+    });
+    assert.equal(f.timers.size, 0);
+    await Renderer.act(async () => { f.advance(120000); });
+    assert.equal(calls, 1);
+
+    // Reabilitar agenda exatamente um novo ciclo de 60s
+    await Renderer.act(async () => {
+      renderer.update(React.createElement(f.Component, { enabled: true, read, intervalMs: 60000, scope: 'events' }));
+    });
+    assert.equal(f.timers.size, 1);
+    await Renderer.act(async () => { f.advance(60000); await Promise.resolve(); });
+    assert.equal(calls, 2);
+  } finally {
+    try { if (renderer) await Renderer.act(async () => renderer.unmount()); } finally { f.restore(); }
+  }
 });

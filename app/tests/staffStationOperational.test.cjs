@@ -177,6 +177,13 @@ function createStationHarness({
     if (name === '../../admin/components/AdminLiveUI') return adminLiveUi;
     return require(name);
   }).exports;
+  const syncFeedback = loadModule('screens/staff/components/StaffSyncFeedback.js', (name) => {
+    if (name === 'react') return React;
+    if (name === 'react/jsx-runtime') return jsx;
+    if (name === 'react-native') return native;
+    if (name === '../../admin/components/AdminLiveUI') return adminLiveUi;
+    return require(name);
+  }).exports;
 
   const StaffStationOperationalScreen = loadModule('screens/staff/StaffStationOperationalScreen.js', (name) => {
     if (name === 'react') return React;
@@ -203,6 +210,7 @@ function createStationHarness({
     if (name === '../../services/staffIntentStorage') return intentStorageSvc;
     if (name === '../admin/components/AdminLiveUI') return adminLiveUi;
     if (name === './components/StaffStationSections') return stationSections;
+    if (name === './components/StaffSyncFeedback') return syncFeedback;
     if (name === './useStaffPolling') {
       return {
         useStaffPolling(enabled, read, intervalMs, scope) {
@@ -681,6 +689,227 @@ test('STAFF-02 + STAFF02-AUD-01/05: troca de estação/evento, stale/erro no ind
     assert.ok(!h.hasText('Pessoa Evento B'));
     assert.equal(h.hasButton('Chamar próximo'), false);
     assert.equal(postCount, 0);
+  } finally {
+    h.dispose();
+  }
+});
+
+test('STAFF-04 tela Estação: recuperação automática após erro inicial (preservando SecureStore), processamento busy, confirmações específicas e códigos de recusa', { skip }, async () => {
+  const slot = `arenago.staff.operation.${USER_1}`;
+  let getMode = 'timeout';
+  let postDeferred = null;
+  let postMode = 'call';
+  let postCalls = 0;
+
+  const waitingState = {
+    eventId: EV_A,
+    experienceId: EXP_1,
+    stationId: ST_1,
+    availability: 'available',
+    canCall: true,
+    waitingCount: 1,
+    waiting: [{ queueEntryId: ENTRY_1, displayName: 'Ana Clara', position: 1 }],
+    pending: null,
+  };
+  const calledState = {
+    eventId: EV_A,
+    experienceId: EXP_1,
+    stationId: ST_1,
+    availability: 'available',
+    canCall: false,
+    waitingCount: 0,
+    waiting: [],
+    pending: {
+      serviceSessionId: SESS_1,
+      queueEntryId: ENTRY_1,
+      displayName: 'Ana Clara',
+      calledAt: '2026-11-19T15:00:00.000Z',
+    },
+  };
+  let activeState = waitingState;
+
+  const h = createStationHarness({
+    onGet: async (url) => {
+      if (url.endsWith('/stations')) {
+        if (getMode === '404_then_500') throw Object.assign(new Error('500'), { status: 500 });
+        return {
+          eventId: EV_A,
+          stations: [{
+            id: ST_1,
+            experienceId: EXP_1,
+            label: 'Cabine 01',
+            availability: activeState.availability,
+            pendingServiceSessionId: activeState.pending?.serviceSessionId ?? null,
+          }],
+        };
+      }
+      if (url.endsWith('/queue')) {
+        return {
+          eventId: EV_A,
+          experienceId: EXP_1,
+          waitingCount: activeState.waitingCount,
+          canCallWaitingEntries: activeState.canCall,
+          firstWaitingQueueEntryId: activeState.waiting[0]?.queueEntryId ?? null,
+        };
+      }
+      if (getMode === 'timeout') throw Object.assign(new Error('timeout'), { isTimeout: true });
+      if (getMode === '503') throw Object.assign(new Error('503'), { status: 503 });
+      if (getMode === 'malformed') return { eventId: EV_A, experienceId: EXP_1, stationId: ST_1, waitingCount: 9, waiting: [] };
+      if (getMode === '404_then_500') throw Object.assign(new Error('404'), { status: 404 });
+      return activeState;
+    },
+    onPost: async () => {
+      postCalls += 1;
+      if (postDeferred) {
+        const currentDeferred = postDeferred;
+        postDeferred = null;
+        return currentDeferred.promise;
+      }
+      if (postMode === 'call') {
+        activeState = calledState;
+        return {
+          serviceSession: {
+            id: SESS_1,
+            queueEntryId: ENTRY_1,
+            experienceId: EXP_1,
+            station: { id: ST_1, label: 'Cabine 01' },
+            status: 'pending',
+            calledAt: '2026-11-19T15:00:00.000Z',
+          },
+        };
+      }
+      if (postMode === 'complete') {
+        activeState = waitingState;
+        return {
+          serviceSession: { id: SESS_1, status: 'completed', resolvedAt: '2026-11-19T15:05:00.000Z' },
+          queueEntry: { status: 'closed', closeReason: 'completed' },
+          participation: { status: 'active', currentQueueEntryId: null },
+        };
+      }
+      if (postMode === 'remove_called') {
+        activeState = waitingState;
+        return {
+          serviceSession: { id: SESS_1, status: 'canceled', cancelReason: 'staff_queue_removed', resolvedAt: '2026-11-19T15:05:00.000Z' },
+          queueEntry: { status: 'closed', closeReason: 'staff_queue_removed' },
+          participation: { status: 'active', currentQueueEntryId: null },
+        };
+      }
+      if (postMode.startsWith('reject:')) {
+        throw Object.assign(new Error('conflict'), { status: 409, code: postMode.slice('reject:'.length) });
+      }
+      if (postMode === 'reject_unknown') {
+        throw Object.assign(new Error('bad-request'), { status: 400, code: 'INTERNAL_SQL_STATE_XYZ' });
+      }
+      throw Object.assign(new Error('timeout'), { isTimeout: true, outcomeUnknown: true });
+    },
+  });
+
+  const flush = () => h.act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+  try {
+    // 1. Falha inicial por timeout classifica como network, habilita recuperação automática (5s) e não inventa fila vazia
+    await h.mount();
+    assert.ok(h.hasExactText('Falha de conexão. Atualize a estação.'));
+    assert.ok(h.hasExactText('Atualização indisponível · aguardando recuperação (a cada 5s)'));
+    assert.equal(h.getPolling().enabled, true);
+    assert.ok(!h.hasText('Fila vazia'));
+
+    // 503 e payload inválido mantêm estado de erro elegível para recuperação
+    getMode = '503';
+    await h.triggerPoll();
+    assert.ok(h.hasExactText('Não foi possível consultar a estação.'));
+    assert.equal(h.getPolling().enabled, true);
+
+    getMode = 'malformed';
+    await h.triggerPoll();
+    assert.ok(h.hasExactText('Não foi possível consultar a estação.'));
+    assert.equal(h.getPolling().enabled, true);
+
+    // Recuperação automática lê SecureStore antes de liberar ready: intenção dispatching permanece bloqueando mutações
+    const dispatchingRecord = JSON.stringify({
+      kind: 'call', userId: USER_1, sessionId: SESSION_1, eventId: EV_A,
+      experienceId: EXP_1, stationId: ST_1, serviceSessionId: null,
+      key: '50000000-0000-4000-8000-000000000077', phase: 'dispatching',
+    });
+    h.secureValues.set(slot, dispatchingRecord);
+    getMode = 'ok';
+    await h.triggerPoll();
+    assert.ok(h.hasQueueRow(1, 'Ana Clara'));
+    assert.ok(h.hasText('Resultado incerto. Não repita a operação'));
+    assert.equal(h.isDisabled('Chamar próximo'), true);
+    assert.equal(postCalls, 0);
+
+    // Limpa intenção para testar busy + confirmação específica de chamada, conclusão e remoção
+    h.secureValues.delete(slot);
+    await h.press('Atualizar atendimento');
+    assert.equal(h.isDisabled('Chamar próximo'), false);
+
+    postDeferred = deferred();
+    const callHandler = h.handler('Chamar próximo');
+    let inflightCall;
+    await h.act(async () => {
+      inflightCall = callHandler();
+    });
+    assert.ok(h.hasExactText('Processando operação no servidor...'));
+    assert.equal(h.getPolling().enabled, false, 'polling pausado durante operação em andamento');
+    await h.act(async () => {
+      await callHandler(); // duplo toque bloqueado enquanto busy
+    });
+    assert.equal(postCalls, 1);
+    activeState = calledState;
+    await h.act(async () => {
+      postDeferred.resolve({
+        serviceSession: {
+          id: SESS_1,
+          queueEntryId: ENTRY_1,
+          experienceId: EXP_1,
+          station: { id: ST_1, label: 'Cabine 01' },
+          status: 'pending',
+          calledAt: '2026-11-19T15:00:00.000Z',
+        },
+      });
+      await inflightCall;
+    });
+    await flush();
+    assert.ok(h.hasText('Participante chamado. Operação confirmada pelo servidor.'));
+
+    // Recusa com código real SERVICE_NOT_PENDING mostra mensagem contextual clara
+    postMode = 'reject:SERVICE_NOT_PENDING';
+    await h.press('Concluir experiência');
+    await h.press('CONFIRMAR OPERAÇÃO');
+    await flush();
+    assert.ok(h.hasText('A chamada já não está pendente. Atualize o atendimento antes de decidir a próxima ação.'));
+
+    // Código desconhecido nunca expõe detalhe interno ao operador
+    postMode = 'reject_unknown';
+    await h.press('Concluir experiência');
+    await h.press('CONFIRMAR OPERAÇÃO');
+    await flush();
+    assert.ok(h.hasText('Operação recusada pelo servidor. Atualize o atendimento antes de decidir a próxima ação.'));
+    assert.equal(h.hasText('INTERNAL_SQL_STATE_XYZ'), false);
+
+    // Concluir atendimento confirmado exibe ação específica
+    postMode = 'complete';
+    await h.press('Concluir experiência');
+    await h.press('CONFIRMAR OPERAÇÃO');
+    await flush();
+    assert.ok(h.hasText('Atendimento concluído. Operação confirmada pelo servidor.'));
+
+    // Chamar novamente e remover da fila exibe ação específica
+    postMode = 'call';
+    await h.press('Chamar próximo');
+    await flush();
+    postMode = 'remove_called';
+    await h.press('Remover da fila');
+    await h.press('CONFIRMAR OPERAÇÃO');
+    await flush();
+    assert.ok(h.hasText('Participante removido da fila. Operação confirmada pelo servidor.'));
+
+    // Caso C (404 -> /stations 500) mantém acesso incerto SEM polling automático (preservando STAFF02-AUD-01)
+    getMode = '404_then_500';
+    await h.press('Atualizar atendimento');
+    assert.equal(h.getPolling().enabled, false);
+    assert.ok(h.hasExactText('Atualização indisponível · aguardando recuperação'));
   } finally {
     h.dispose();
   }

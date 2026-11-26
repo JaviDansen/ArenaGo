@@ -16,10 +16,16 @@ import {
   StationConfirmModal,
   StationHeaderCard,
 } from './components/StaffStationSections';
+import {
+  describeStationFeedback,
+  resolveStaffPollingIndicator,
+  StaffPollingStatusPill,
+} from './components/StaffSyncFeedback';
 import { useStaffPolling } from './useStaffPolling';
 
 const same = (a, b) => Boolean(a && b && ['userId', 'sessionId', 'eventId', 'stationId', 'epoch', 'revision']
   .every((key) => a[key] === b[key]));
+const isRecoverableError = (kind) => kind === 'network' || kind === 'unavailable';
 
 function ActionButton({ label, onPress, disabled = false, variant = 'primary' }) {
   const isSecondary = variant === 'secondary';
@@ -124,6 +130,7 @@ export default function StaffStationOperationalScreen({
     status: 'loading',
     data: null,
     error: null,
+    autoRecoverable: false,
     pending: null,
     busy: false,
     feedback: null,
@@ -159,7 +166,7 @@ export default function StaffStationOperationalScreen({
         } else if (verifyError?.status === 403 || verifyError?.status === 404) {
           outcome = { outcome: 'event_denied', kind: 'denied' };
         } else {
-          const verifyKind = verifyError?.isNetworkError ? 'network' : 'unavailable';
+          const verifyKind = (verifyError?.isNetworkError || verifyError?.isTimeout) ? 'network' : 'unavailable';
           outcome = { outcome: 'uncertain', kind: verifyKind };
         }
       }
@@ -168,7 +175,7 @@ export default function StaffStationOperationalScreen({
     if (outcome?.outcome === 'stale') return;
     if (outcome?.outcome === 'session' || outcome?.outcome === 'event_denied') {
       const denyKind = outcome.outcome === 'session' ? 'session' : 'denied';
-      setView((previous) => ({ ...previous, status: 'error', data: null, pending: null, error: denyKind }));
+      setView((previous) => ({ ...previous, status: 'error', data: null, pending: null, error: denyKind, autoRecoverable: false }));
       if (!verifyFn) {
         liveRef.current.onAccessDenied?.(denyKind);
       }
@@ -176,10 +183,10 @@ export default function StaffStationOperationalScreen({
     }
     if (outcome?.outcome === 'uncertain') {
       const errKind = outcome.kind === 'network' ? 'network' : 'unavailable';
-      setView((previous) => ({ ...previous, status: 'error', data: null, pending: null, error: errKind }));
+      setView((previous) => ({ ...previous, status: 'error', data: null, pending: null, error: errKind, autoRecoverable: false }));
       return;
     }
-    setView((previous) => ({ ...previous, status: 'error', data: null, pending: null, error: 'denied' }));
+    setView((previous) => ({ ...previous, status: 'error', data: null, pending: null, error: 'denied', autoRecoverable: false }));
   }
 
   async function refresh(preserveFeedback = false) {
@@ -188,7 +195,16 @@ export default function StaffStationOperationalScreen({
     dialogRef.current = null;
     setDialog(null);
     if (!initial) {
-      setView({ scope: null, status: 'loading', data: null, error: null, pending: null, busy: false, feedback: null });
+      setView({
+        scope: null,
+        status: 'loading',
+        data: null,
+        error: null,
+        autoRecoverable: false,
+        pending: null,
+        busy: false,
+        feedback: null,
+      });
       return false;
     }
     setView((previous) => ({
@@ -197,6 +213,7 @@ export default function StaffStationOperationalScreen({
       status: 'loading',
       data: null,
       error: null,
+      autoRecoverable: false,
       feedback: preserveFeedback ? previous.feedback : null,
     }));
     const current = () => request === generation.current && same(initial, getContext());
@@ -212,7 +229,7 @@ export default function StaffStationOperationalScreen({
         pending = await coordinator.pending(initial);
       }
       if (!current()) return false;
-      setView((previous) => ({ ...previous, status: 'ready', data, pending, error: null }));
+      setView((previous) => ({ ...previous, status: 'ready', data, pending, error: null, autoRecoverable: false }));
       return true;
     } catch (error) {
       if (!same(initial, getContext())) return false;
@@ -221,7 +238,7 @@ export default function StaffStationOperationalScreen({
         dialogRef.current = null;
         setDialog(null);
         const kind = error.status === 401 ? 'session' : 'denied';
-        setView((previous) => ({ ...previous, status: 'error', data: null, pending: null, error: kind }));
+        setView((previous) => ({ ...previous, status: 'error', data: null, pending: null, error: kind, autoRecoverable: false }));
         liveRef.current.onAccessDenied?.(kind);
         return false;
       }
@@ -230,17 +247,18 @@ export default function StaffStationOperationalScreen({
         const nextGen = ++generation.current;
         dialogRef.current = null;
         setDialog(null);
-        setView((previous) => ({ ...previous, status: 'error', data: null, pending: null, error: 'verifying' }));
+        setView((previous) => ({ ...previous, status: 'error', data: null, pending: null, error: 'verifying', autoRecoverable: false }));
         await handleStationNotFound(initial, nextGen);
         return false;
       }
-      const kind = error?.isNetworkError ? 'network' : 'unavailable';
+      const kind = (error?.isNetworkError || error?.isTimeout) ? 'network' : 'unavailable';
       setView((previous) => ({
         ...previous,
         status: 'error',
         data: null,
         pending: stage === 'pending' ? { kind: 'storage_error' } : null,
         error: kind,
+        autoRecoverable: stage === 'read',
       }));
       return false;
     }
@@ -249,21 +267,38 @@ export default function StaffStationOperationalScreen({
   async function poll() {
     const scope = getContext();
     const request = generation.current;
+    const currentView = viewRef.current;
+    const canRetry = currentView.status === 'error'
+      && currentView.autoRecoverable
+      && isRecoverableError(currentView.error);
     if (
       !scope
-      || viewRef.current.status !== 'ready'
-      || viewRef.current.busy
+      || (currentView.status !== 'ready' && !canRetry)
+      || currentView.busy
       || dialogRef.current
       || dispatching.current
       || acknowledging.current
     ) return;
+    const wasReady = currentView.status === 'ready';
     try {
       const data = coordinator
         ? await coordinator.readStationState(scope, experience.id, station.id)
         : await fetchStaffStationState(liveRef.current.auth.httpClient, event.id, experience.id, station.id);
-      if (request === generation.current && same(scope, getContext())) {
-        setView((previous) => ({ ...previous, data, error: null }));
+      if (request !== generation.current || !same(scope, getContext())) return;
+      if (wasReady) {
+        setView((previous) => ({ ...previous, data, error: null, autoRecoverable: false }));
+        return;
       }
+      let pending = null;
+      if (coordinator) {
+        try {
+          pending = await coordinator.pending(scope);
+        } catch {
+          pending = { kind: 'storage_error' };
+        }
+      }
+      if (request !== generation.current || !same(scope, getContext())) return;
+      setView((previous) => ({ ...previous, status: 'ready', data, pending, error: null, autoRecoverable: false }));
     } catch (error) {
       if (!same(scope, getContext())) return;
       if (error?.status === 401 || error?.status === 403) {
@@ -271,7 +306,7 @@ export default function StaffStationOperationalScreen({
         dialogRef.current = null;
         setDialog(null);
         const kind = error.status === 401 ? 'session' : 'denied';
-        setView((previous) => ({ ...previous, data: null, status: 'error', pending: null, error: kind }));
+        setView((previous) => ({ ...previous, data: null, status: 'error', pending: null, error: kind, autoRecoverable: false }));
         liveRef.current.onAccessDenied?.(kind);
         return;
       }
@@ -280,20 +315,28 @@ export default function StaffStationOperationalScreen({
         const nextGen = ++generation.current;
         dialogRef.current = null;
         setDialog(null);
-        setView((previous) => ({ ...previous, data: null, status: 'error', pending: null, error: 'verifying' }));
+        setView((previous) => ({ ...previous, data: null, status: 'error', pending: null, error: 'verifying', autoRecoverable: false }));
         await handleStationNotFound(scope, nextGen);
         return;
       }
-      setView((previous) => ({ ...previous, error: 'stale' }));
+      if (wasReady) {
+        setView((previous) => ({ ...previous, error: 'stale', autoRecoverable: false }));
+        return;
+      }
+      const kind = (error?.isNetworkError || error?.isTimeout) ? 'network' : 'unavailable';
+      setView((previous) => ({ ...previous, status: 'error', data: null, error: kind, autoRecoverable: true }));
     }
   }
 
   const hasModalOpen = Boolean(dialog && !accessDenied && same(dialog.context, context) && !view.busy);
+  const recoverableError = view.status === 'error'
+    && view.autoRecoverable
+    && isRecoverableError(view.error);
   const pollingEnabled = Boolean(
     !accessDenied
     && context
     && same(view.scope, context)
-    && view.status === 'ready'
+    && (view.status === 'ready' || recoverableError)
     && !view.busy
     && !hasModalOpen
     && !dispatching.current
@@ -329,6 +372,7 @@ export default function StaffStationOperationalScreen({
       status: 'error',
       data: null,
       error: accessDeniedKind === 'session' ? 'session' : 'denied',
+      autoRecoverable: false,
       pending: null,
       busy: false,
       feedback: null,
@@ -505,26 +549,18 @@ export default function StaffStationOperationalScreen({
     || data?.availability !== 'available';
   const showUnavailableHint = Boolean(data && !data.pending && data.availability === 'unavailable');
   const showCallClosedHint = Boolean(data && !data.pending && data.availability === 'available' && !data.canCall && data.waitingCount > 0);
-  const pollingIndicator = (() => {
-    if (accessDenied || (view.status === 'error' && (view.error === 'denied' || view.error === 'session'))) {
-      return null;
-    }
-    if (view.error === 'stale') {
-      return { dotStyle: styles.pollingDotStale, text: 'Dados desatualizados · tentando atualizar a cada 5s' };
-    }
-    if (view.status === 'error') {
-      return {
-        dotStyle: styles.pollingDotMuted,
-        text: view.error === 'verifying'
-          ? 'Atualização indisponível · verificando autorização'
-          : 'Atualização indisponível · aguardando recuperação',
-      };
-    }
-    if (!pollingEnabled || !focused || appState !== 'active') {
-      return { dotStyle: styles.pollingDotStale, text: 'Atualização temporariamente pausada' };
-    }
-    return { dotStyle: styles.pollingDotActive, text: 'Atualização automática ativa · a cada 5s' };
-  })();
+  const feedbackNotice = describeStationFeedback(view.feedback);
+  const pollingIndicator = resolveStaffPollingIndicator({
+    hidden: accessDenied || (view.status === 'error' && (view.error === 'denied' || view.error === 'session')),
+    verifying: view.status === 'error' && view.error === 'verifying',
+    loading: view.status === 'loading',
+    pollingEnabled,
+    visible: focused && appState === 'active',
+    stale: view.error === 'stale',
+    recoverableError,
+    unavailableError: view.status === 'error' && !recoverableError && view.error !== 'verifying',
+    intervalSeconds: 5,
+  });
 
   return (
     <View style={styles.content}>
@@ -539,6 +575,17 @@ export default function StaffStationOperationalScreen({
         <View accessibilityRole="progressbar" style={styles.stateCard}>
           <ActivityIndicator color={c.accent} />
           <Text style={styles.message}>Carregando atendimento...</Text>
+        </View>
+      )}
+
+      {view.busy && (
+        <View accessibilityRole="progressbar" style={styles.stateCard}>
+          <ActivityIndicator color={c.accent} />
+          <Text style={styles.message}>
+            {acknowledging.current
+              ? 'Finalizando reconhecimento seguro...'
+              : 'Processando operação no servidor...'}
+          </Text>
         </View>
       )}
 
@@ -561,31 +608,13 @@ export default function StaffStationOperationalScreen({
         </View>
       )}
 
-      {view.feedback?.kind === 'confirmed' && (
-        <View style={styles.successCard}>
-          <Text accessibilityRole="alert" style={styles.successMessage}>
-            {view.feedback.result?.status === 'absent'
-              ? view.feedback.result.requeued
-                ? 'Ausência registrada; participante retornou ao fim da fila.'
-                : 'Ausência registrada; participante não retornou à fila após o corte.'
-              : 'Operação confirmada pelo servidor.'}
-          </Text>
-        </View>
-      )}
-
-      {view.feedback?.kind === 'rejected' && (
-        <View style={styles.warningCard}>
-          <Text accessibilityRole="alert" style={styles.warningMessage}>
-            Operação recusada pelo servidor. Atualize o atendimento antes de decidir a próxima ação.
-          </Text>
-        </View>
-      )}
-
-      {['uncertain', 'pending_reconciliation', 'confirmed_cleanup_pending', 'rejected_cleanup_pending', 'storage_error']
-        .includes(view.feedback?.kind) && (
-        <View style={styles.warningCard}>
-          <Text accessibilityRole="alert" style={styles.warningMessage}>
-            O resultado exige verificação ou reconciliação. Não repita a operação.
+      {feedbackNotice && (
+        <View style={feedbackNotice.tone === 'success' ? styles.successCard : styles.warningCard}>
+          <Text
+            accessibilityRole="alert"
+            style={feedbackNotice.tone === 'success' ? styles.successMessage : styles.warningMessage}
+          >
+            {feedbackNotice.text}
           </Text>
         </View>
       )}
@@ -680,12 +709,7 @@ export default function StaffStationOperationalScreen({
         </View>
       )}
 
-      {pollingIndicator && (
-        <View style={styles.pollingRow}>
-          <View style={[styles.pollingDot, pollingIndicator.dotStyle]} />
-          <Text style={styles.pollingText}>{pollingIndicator.text}</Text>
-        </View>
-      )}
+      <StaffPollingStatusPill indicator={pollingIndicator} />
 
       <ActionButton
         label="Atualizar atendimento"
@@ -723,12 +747,6 @@ const styles = StyleSheet.create({
   warningMessage: { color: '#FDE68A', fontSize: 14, lineHeight: 20 },
   successMessage: { color: '#A7F3D0', fontSize: 14, lineHeight: 20 },
   helperNote: { color: c.muted, fontSize: 13, lineHeight: 19 },
-  pollingRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 2 },
-  pollingDot: { width: 8, height: 8, borderRadius: 4, flexShrink: 0 },
-  pollingDotActive: { backgroundColor: '#10B981' },
-  pollingDotStale: { backgroundColor: '#F59E0B' },
-  pollingDotMuted: { backgroundColor: '#64748B' },
-  pollingText: { color: c.muted, fontSize: 13, lineHeight: 18, flex: 1 },
   button: { backgroundColor: c.accentStrong, borderRadius: 14, minHeight: 52, paddingVertical: 14,
     paddingHorizontal: 18, alignItems: 'center', justifyContent: 'center' },
   buttonSecondary: { backgroundColor: '#251A33', borderWidth: 1, borderColor: c.border, minHeight: 48, paddingVertical: 12 },

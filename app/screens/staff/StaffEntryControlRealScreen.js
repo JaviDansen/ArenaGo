@@ -16,6 +16,11 @@ import {
   EntrySummaryCard,
   getDisableAffectedCount,
 } from './components/StaffEntrySections';
+import {
+  describeEntryNotice,
+  resolveStaffPollingIndicator,
+  StaffPollingStatusPill,
+} from './components/StaffSyncFeedback';
 import { useStaffPolling } from './useStaffPolling';
 
 function evaluateEntryDialog(candidate, currentSnapshot, currentStore) {
@@ -208,7 +213,12 @@ export default function StaffEntryControlRealScreen({
 
   // Mantém polling de 5s ativo também durante modais porque StaffEventsNavigator não consulta
   // /entry-control nesta subtela; qualquer mudança de chamada, permissão, contagem ou 401/403 invalida o modal.
-  const pollingEnabled = !accessDenied && store.isCurrent(snapshot.context) && snapshot.status === 'ready' && !snapshot.busy;
+  const recoverableError = snapshot.status === 'error'
+    && (snapshot.error === 'network' || snapshot.error === 'unavailable');
+  const pollingEnabled = !accessDenied
+    && store.isCurrent(snapshot.context)
+    && (snapshot.status === 'ready' || recoverableError)
+    && !snapshot.busy;
   useStaffPolling(pollingEnabled, () => store.poll(), 5000, `${event.id}:${epoch}:${revision}`);
 
   useEffect(() => {
@@ -337,39 +347,19 @@ export default function StaffEntryControlRealScreen({
     void store.refresh();
   };
 
-  const noticeText = (() => {
-    if (!notice || snapshot.pending || snapshot.storageError) return null;
-    if (notice.outcome.kind === 'confirmed') {
-      if (notice.operation !== 'toggle') {
-        return {
-          call: 'Participante chamado pelo servidor.',
-          confirm_call: 'Entrada confirmada pelo servidor.',
-          absent: 'Ausência registrada pelo servidor.',
-          remove: 'Participante removido da espera externa.',
-        }[notice.operation] ?? 'Entrada confirmada pelo servidor.';
-      }
-      return `Fila ${notice.outcome.result.externalQueueEnabled ? 'reativada' : 'desativada'}. Participantes liberados: ${notice.outcome.result.releasedCount}.`;
-    }
-    return notice.outcome.code === 'ENTRY_NOT_FIRST'
-      ? 'A fila mudou. Confira o primeiro participante na lista atualizada.'
-      : 'A solicitação foi recusada pelo servidor. Confira o estado atualizado.';
-  })();
+  const noticeText = (!notice || snapshot.pending || snapshot.storageError)
+    ? null
+    : describeEntryNotice(notice);
 
-  const pollingIndicator = (() => {
-    if (accessDenied || (snapshot.status === 'error' && (snapshot.error === 'denied' || snapshot.error === 'session'))) {
-      return null;
-    }
-    if (snapshot.error === 'stale') {
-      return { dotStyle: styles.pollingDotStale, text: 'Dados desatualizados · tentando atualizar a cada 5s' };
-    }
-    if (snapshot.status === 'error') {
-      return { dotStyle: styles.pollingDotMuted, text: 'Atualização indisponível · aguardando recuperação' };
-    }
-    if (!pollingEnabled || !focused || appState !== 'active') {
-      return { dotStyle: styles.pollingDotStale, text: 'Atualização temporariamente pausada' };
-    }
-    return { dotStyle: styles.pollingDotActive, text: 'Atualização automática ativa · a cada 5s' };
-  })();
+  const pollingIndicator = resolveStaffPollingIndicator({
+    hidden: accessDenied || (snapshot.status === 'error' && (snapshot.error === 'denied' || snapshot.error === 'session')),
+    loading: snapshot.status === 'loading',
+    pollingEnabled,
+    visible: focused && appState === 'active',
+    stale: snapshot.error === 'stale',
+    recoverableError,
+    intervalSeconds: 5,
+  });
 
   const data = snapshot.data;
   const dialogVisible = Boolean(!accessDenied && dialog && evaluateEntryDialog(dialog, snapshot, store).valid);
@@ -385,6 +375,17 @@ export default function StaffEntryControlRealScreen({
         <View accessibilityRole="progressbar" style={styles.stateCard}>
           <ActivityIndicator color={c.accent} />
           <Text style={styles.message}>Carregando fila de entrada...</Text>
+        </View>
+      )}
+
+      {snapshot.busy && (
+        <View accessibilityRole="progressbar" style={styles.stateCard}>
+          <ActivityIndicator color={c.accent} />
+          <Text style={styles.message}>
+            {pending?.phase === 'terminal'
+              ? 'Finalizando reconhecimento seguro...'
+              : 'Processando operação no servidor...'}
+          </Text>
         </View>
       )}
 
@@ -424,6 +425,14 @@ export default function StaffEntryControlRealScreen({
         <View style={styles.successCard}>
           <Text style={styles.successMessage}>
             O servidor confirmou a alteração, mas o registro local não foi confirmado. Não repita a operação; procure o responsável.
+          </Text>
+        </View>
+      )}
+
+      {snapshot.knownOutcome?.kind === 'rejected' && pending?.phase !== 'terminal' && (
+        <View style={styles.warningCard}>
+          <Text accessibilityRole="alert" style={styles.warningMessage}>
+            O servidor recusou a alteração, mas o registro local não foi confirmado. Não repita a operação; atualize ou procure o responsável.
           </Text>
         </View>
       )}
@@ -524,12 +533,7 @@ export default function StaffEntryControlRealScreen({
         </>
       )}
 
-      {pollingIndicator && (
-        <View style={styles.pollingRow}>
-          <View style={[styles.pollingDot, pollingIndicator.dotStyle]} />
-          <Text style={styles.pollingText}>{pollingIndicator.text}</Text>
-        </View>
-      )}
+      <StaffPollingStatusPill indicator={pollingIndicator} />
 
       <EntryActionButton
         label="Atualizar fila de entrada"
@@ -563,10 +567,4 @@ const styles = StyleSheet.create({
   alertMessage: { color: '#FECACA', fontSize: 14, lineHeight: 20 },
   warningMessage: { color: '#FDE68A', fontSize: 14, lineHeight: 20 },
   successMessage: { color: '#A7F3D0', fontSize: 14, lineHeight: 20 },
-  pollingRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 2 },
-  pollingDot: { width: 8, height: 8, borderRadius: 4, flexShrink: 0 },
-  pollingDotActive: { backgroundColor: '#10B981' },
-  pollingDotStale: { backgroundColor: '#F59E0B' },
-  pollingDotMuted: { backgroundColor: '#64748B' },
-  pollingText: { color: c.muted, fontSize: 13, lineHeight: 18, flex: 1 },
 });

@@ -183,6 +183,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
         'screens/staff/StaffEntryControlRealScreen', 'screens/staff/components/StaffEntrySections',
         'services/staffEntryService', 'services/staffEntryIntentStorage',
         'screens/staff/StaffStationOperationalScreen', 'screens/staff/components/StaffStationSections',
+        'screens/staff/components/StaffSyncFeedback',
         'services/staffIntentStorage', 'services/staffDashboardService', 'services/staffOperationsService',
         'screens/staff/useStaffPolling', 'screens/staff/components/StaffLiveScreen',
         'screens/admin/components/AdminLiveUI', 'screens/admin/components/adminTheme'].includes(target)) {
@@ -3662,6 +3663,366 @@ test('STAFF03-AUD-04 integração com timer real: substituição da chamada dura
     assert.ok(!app.hasExactText('Ana'));
     await app.act(async () => staleConfirm());
     assert.equal(mutations, 0);
+  } finally {
+    app.dispose();
+  }
+});
+
+test('STAFF-04 integração ponta a ponta: recuperação automática inicial (60s/5s), coerência ao voltar ao painel, ausência após corte e pausa por foco/segundo plano', { skip }, async () => {
+  const at = '2026-11-10T15:00:00.000Z';
+  const expId = '33333333-3333-4333-8333-333333333301';
+  const stationId = '44444444-4444-4444-8444-444444444401';
+  const queueEntryId = '77777777-7777-4777-8777-777777777701';
+  const serviceSessId = '88888888-8888-4888-8888-888888888801';
+  const partAna = 'abcdef00-0000-4000-8000-000000000004';
+  const call1Id = 'dddddddd-dddd-4ddd-8ddd-000000000011';
+  const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000001', roles: ['staff'] };
+  const secureValues = new Map();
+
+  let eventsFail = true;
+  let entryFail = false;
+  let stationOpFail = false;
+  let entryPendingCall = { id: call1Id, participationId: partAna, displayName: 'Ana', calledAt: at };
+  let stationPending = null;
+  let stationWaiting = [{ queueEntryId, displayName: 'Diego Costa', position: 1 }];
+  let entryPosts = 0;
+  let stationPosts = 0;
+
+  const app = createIntegration({
+    initialUser: staffUser,
+    control: {
+      realStaff: true,
+      manualTimers: true,
+      platformOS: 'android',
+      events: [staffEvent],
+      secureStore: {
+        isAvailableAsync: async () => true,
+        getItemAsync: async (key) => secureValues.get(key) ?? null,
+        setItemAsync: async (key, value) => { secureValues.set(key, value); },
+        deleteItemAsync: async (key) => { secureValues.delete(key); },
+      },
+      http: async (route, options) => {
+        if (route === '/staff/events') {
+          if (eventsFail) return { statusCode: 503, body: { code: 'SERVICE_UNAVAILABLE' } };
+          return { events: [staffEvent] };
+        }
+        if (route === `/staff/events/${staffEvent.id}/experiences`) {
+          return { eventId: staffEvent.id, experiences: [{ id: expId, name: 'Arena VR' }] };
+        }
+        if (route === `/staff/events/${staffEvent.id}/stations`) {
+          return {
+            eventId: staffEvent.id,
+            stations: [{
+              id: stationId,
+              experienceId: expId,
+              label: 'Cabine A',
+              availability: 'available',
+              pendingServiceSessionId: stationPending?.serviceSessionId ?? null,
+              pendingCalledAt: stationPending?.calledAt ?? null,
+            }],
+          };
+        }
+        if (route === `/staff/events/${staffEvent.id}/experiences/${expId}/queue`) {
+          return {
+            eventId: staffEvent.id,
+            experienceId: expId,
+            waitingCount: stationWaiting.length,
+            canCallWaitingEntries: stationWaiting.length > 0 && !stationPending,
+            firstWaitingQueueEntryId: stationWaiting[0]?.queueEntryId ?? null,
+            acceptingNewEntries: true,
+          };
+        }
+        if (route === `/staff/events/${staffEvent.id}/entry-control` && options.method === 'GET') {
+          if (entryFail) throw new TypeError('offline');
+          return {
+            eventId: staffEvent.id,
+            externalQueueEnabled: true,
+            canManage: true,
+            observedAt: at,
+            pendingCall: entryPendingCall,
+            canCall: false,
+            canConfirm: Boolean(entryPendingCall),
+            canMarkAbsent: Boolean(entryPendingCall),
+            canRemove: Boolean(entryPendingCall),
+            waitingCount: 0,
+            waiting: [],
+          };
+        }
+        if (route === `/staff/events/${staffEvent.id}/entry-control/calls/${call1Id}/absent` && options.method === 'POST') {
+          entryPosts += 1;
+          entryPendingCall = null;
+          return {
+            eventId: staffEvent.id,
+            call: { id: call1Id, participationId: partAna, status: 'absent', calledAt: at, resolvedAt: at },
+            participation: {
+              id: partAna,
+              status: 'finished',
+              arenaEnteredAt: null,
+              finishReason: 'external_absence_after_entry_cutoff',
+              externalQueueOrder: null,
+            },
+            requeued: false,
+          };
+        }
+        if (route === `/staff/events/${staffEvent.id}/experiences/${expId}/stations/${stationId}/operational-state`) {
+          if (stationOpFail) return { statusCode: 503, body: { code: 'SERVICE_UNAVAILABLE' } };
+          return {
+            eventId: staffEvent.id,
+            experienceId: expId,
+            stationId,
+            availability: 'available',
+            canCall: !stationPending && stationWaiting.length > 0,
+            waitingCount: stationWaiting.length,
+            waiting: stationWaiting,
+            pending: stationPending,
+          };
+        }
+        if (route === `/staff/events/${staffEvent.id}/experiences/${expId}/stations/${stationId}/call-next` && options.method === 'POST') {
+          stationPosts += 1;
+          const person = stationWaiting.shift();
+          stationPending = {
+            serviceSessionId: serviceSessId,
+            queueEntryId: person.queueEntryId,
+            displayName: person.displayName,
+            calledAt: at,
+          };
+          return {
+            serviceSession: {
+              id: serviceSessId,
+              queueEntryId: person.queueEntryId,
+              experienceId: expId,
+              station: { id: stationId, label: 'Cabine A' },
+              status: 'pending',
+              calledAt: at,
+            },
+          };
+        }
+        if (route === `/staff/events/${staffEvent.id}/service-sessions/${serviceSessId}/complete` && options.method === 'POST') {
+          stationPosts += 1;
+          stationPending = null;
+          return {
+            serviceSession: { id: serviceSessId, status: 'completed', resolvedAt: at },
+            queueEntry: { status: 'closed', closeReason: 'completed' },
+            participation: { status: 'active', currentQueueEntryId: null },
+          };
+        }
+        return undefined;
+      },
+    },
+  });
+
+  try {
+    await app.mount();
+    await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
+
+    // 1. Falha inicial 503 em /staff/events habilita recuperação automática em 60s
+    assert.ok(app.hasExactText('Atualização indisponível · aguardando recuperação (a cada 60s)'));
+    assert.ok(!app.hasText('Nenhum evento autorizado'));
+    eventsFail = false;
+    await app.tickTimers(60000);
+    assert.ok(app.hasText('Evento autorizado'));
+    assert.ok(app.hasExactText('Atualização automática ativa · a cada 60s'));
+
+    // 2. Painel operacional exibe indicador 5s e reage a segundo plano/foco
+    await app.press('Selecionar evento Evento autorizado');
+    assert.ok(app.hasExactText('Atualização automática ativa · a cada 5s'));
+    assert.ok(app.hasText('Chamada pendente: Ana'));
+    await app.setAppState('background');
+    assert.ok(app.hasExactText('Atualização temporariamente pausada'));
+    await app.setAppState('active');
+    assert.ok(app.hasExactText('Atualização automática ativa · a cada 5s'));
+
+    // 3. Controle de Entrada falha na carga inicial (rede) -> recupera automaticamente em 5s -> ausência após corte -> painel coerente ao retornar
+    entryFail = true;
+    await app.press('Controle de Entrada');
+    assert.ok(app.hasExactText('Atualização indisponível · aguardando recuperação (a cada 5s)'));
+    assert.ok(!app.hasText('Ninguém está aguardando'));
+    entryFail = false;
+    await app.tickTimers(5000);
+    assert.ok(app.hasExactText('Ana'));
+    assert.ok(app.hasExactText('Atualização automática ativa · a cada 5s'));
+
+    await app.press('Marcar ausência');
+    await app.press('CONFIRMAR ALTERAÇÃO');
+    assert.ok(app.hasText('Ausência registrada pelo servidor. Após o corte de entrada, o participante não retornou à fila externa.'));
+
+    await app.press('Voltar ao painel');
+    assert.ok(!app.hasText('Chamada pendente: Ana'));
+    assert.ok(app.hasText('Sem atendimento pendente'));
+
+    // 4. Estação falha na carga inicial (503) -> recupera automaticamente em 5s -> chamada/conclusão com mensagens específicas -> painel coerente
+    stationOpFail = true;
+    await app.press('Selecionar estação Cabine A da experiência Arena VR');
+    assert.ok(app.hasExactText('Atualização indisponível · aguardando recuperação (a cada 5s)'));
+    assert.ok(!app.hasText('Fila vazia'));
+    stationOpFail = false;
+    await app.tickTimers(5000);
+    assert.ok(app.hasQueueRow(1, 'Diego Costa'));
+    assert.ok(app.hasExactText('Atualização automática ativa · a cada 5s'));
+
+    await app.press('Chamar próximo');
+    assert.ok(app.hasText('Participante chamado. Operação confirmada pelo servidor.'));
+    await app.press('Concluir experiência');
+    await app.press('CONFIRMAR OPERAÇÃO');
+    assert.ok(app.hasText('Atendimento concluído. Operação confirmada pelo servidor.'));
+
+    await app.press('Voltar ao painel');
+    assert.equal(app.metricValueFor('Em atendimento'), '0');
+    assert.equal(entryPosts, 1);
+    assert.equal(stationPosts, 2);
+  } finally {
+    app.dispose();
+  }
+});
+
+test('STAFF-04 integração ponta a ponta: mutação incerta preserva intenção em polling, logout, nova sessão e troca de conta sem replay nem vazamento', { skip }, async () => {
+  const expA = '33333333-3333-4333-8333-333333333311';
+  const stationA = '44444444-4444-4444-8444-444444444411';
+  const entryA = '77777777-7777-4777-8777-777777777711';
+  const eventB = { id: '22222222-2222-4222-8222-222222222222', name: 'Evento Conta B', status: 'open', effectivePhase: 'open' };
+  const expB = '33333333-3333-4333-8333-333333333322';
+  const stationB = '44444444-4444-4444-8444-444444444422';
+  const entryB = '77777777-7777-4777-8777-777777777722';
+
+  const staffA1 = {
+    ...participant,
+    id: 'abcdef00-0000-4000-8000-000000000001',
+    sessionId: '10000000-0000-4000-8000-000000000001',
+    roles: ['staff'],
+  };
+  const staffA2 = { ...staffA1, sessionId: '20000000-0000-4000-8000-000000000002' };
+  const staffB = {
+    ...participant,
+    id: 'abcdef00-0000-4000-8000-000000000002',
+    email: 'staff-b@example.test',
+    sessionId: '30000000-0000-4000-8000-000000000003',
+    roles: ['staff'],
+  };
+  const slotA = `arenago.staff.operation.${staffA1.id}`;
+  const secureValues = new Map();
+  let deleteCalls = 0;
+  let activeAccount = 'A';
+  let stationPostCount = 0;
+
+  const app = createIntegration({
+    initialUser: staffA1,
+    control: {
+      realStaff: true,
+      manualTimers: true,
+      platformOS: 'ios',
+      secureStore: {
+        isAvailableAsync: async () => true,
+        getItemAsync: async (key) => secureValues.get(key) ?? null,
+        setItemAsync: async (key, value) => { secureValues.set(key, value); },
+        deleteItemAsync: async (key) => { deleteCalls += 1; secureValues.delete(key); },
+      },
+      http: async (route, options) => {
+        if (route === '/staff/events') {
+          return { events: activeAccount === 'A' ? [staffEvent] : [eventB] };
+        }
+        if (route === `/staff/events/${staffEvent.id}/experiences`) {
+          return { eventId: staffEvent.id, experiences: [{ id: expA, name: 'Just Dance A' }] };
+        }
+        if (route === `/staff/events/${staffEvent.id}/stations`) {
+          return {
+            eventId: staffEvent.id,
+            stations: [{ id: stationA, experienceId: expA, label: 'Cabine A', availability: 'available', pendingServiceSessionId: null, pendingCalledAt: null }],
+          };
+        }
+        if (route === `/staff/events/${staffEvent.id}/experiences/${expA}/queue`) {
+          return { eventId: staffEvent.id, experienceId: expA, waitingCount: 1, canCallWaitingEntries: true, firstWaitingQueueEntryId: entryA, acceptingNewEntries: true };
+        }
+        if (route === `/staff/events/${staffEvent.id}/experiences/${expA}/stations/${stationA}/operational-state`) {
+          return {
+            eventId: staffEvent.id,
+            experienceId: expA,
+            stationId: stationA,
+            availability: 'available',
+            canCall: true,
+            waitingCount: 1,
+            waiting: [{ queueEntryId: entryA, displayName: 'Participante Conta A', position: 1 }],
+            pending: null,
+          };
+        }
+        if (route.endsWith('/call-next') && options.method === 'POST') {
+          stationPostCount += 1;
+          throw new TypeError('connection dropped after dispatch');
+        }
+        if (route === `/staff/events/${eventB.id}/experiences`) {
+          return { eventId: eventB.id, experiences: [{ id: expB, name: 'Just Dance B' }] };
+        }
+        if (route === `/staff/events/${eventB.id}/stations`) {
+          return {
+            eventId: eventB.id,
+            stations: [{ id: stationB, experienceId: expB, label: 'Cabine B', availability: 'available', pendingServiceSessionId: null, pendingCalledAt: null }],
+          };
+        }
+        if (route === `/staff/events/${eventB.id}/experiences/${expB}/queue`) {
+          return { eventId: eventB.id, experienceId: expB, waitingCount: 1, canCallWaitingEntries: true, firstWaitingQueueEntryId: entryB, acceptingNewEntries: true };
+        }
+        if (route === `/staff/events/${eventB.id}/experiences/${expB}/stations/${stationB}/operational-state`) {
+          return {
+            eventId: eventB.id,
+            experienceId: expB,
+            stationId: stationB,
+            availability: 'available',
+            canCall: true,
+            waitingCount: 1,
+            waiting: [{ queueEntryId: entryB, displayName: 'Participante Conta B', position: 1 }],
+            pending: null,
+          };
+        }
+        return undefined;
+      },
+    },
+  });
+
+  try {
+    await app.mount();
+    await app.act(() => app.manager.login({ email: staffA1.email, password: 'ficticia' }));
+    await app.press('Selecionar evento Evento autorizado');
+    await app.press('Selecionar estação Cabine A da experiência Just Dance A');
+    assert.ok(app.hasQueueRow(1, 'Participante Conta A'));
+
+    // Perda de conexão durante mutação preserva dispatching e bloqueia repetição mesmo após novos ciclos de polling
+    await app.press('Chamar próximo');
+    assert.equal(stationPostCount, 1);
+    assert.equal(secureValues.has(slotA), true);
+    assert.equal(JSON.parse(secureValues.get(slotA)).phase, 'dispatching');
+    assert.ok(app.hasText('Não foi possível confirmar o resultado desta operação.'));
+    assert.equal(app.isDisabled('Chamar próximo'), true);
+
+    await app.tickTimers(5000);
+    await app.tickTimers(5000);
+    assert.equal(stationPostCount, 1, 'polling nunca repete mutação incerta');
+    assert.equal(app.isDisabled('Chamar próximo'), true);
+
+    // Logout preserva SecureStore; nova sessão da mesma conta permanece bloqueada (pending_other) sem replay
+    await app.act(() => app.manager.logout());
+    assert.equal(deleteCalls, 0);
+    assert.equal(secureValues.has(slotA), true);
+
+    app.setUser(staffA2);
+    await app.act(() => app.manager.login({ email: staffA2.email, password: 'ficticia' }));
+    await app.press('Selecionar evento Evento autorizado');
+    await app.press('Selecionar estação Cabine A da experiência Just Dance A');
+    assert.ok(app.hasText('Há uma operação pendente em outra sessão, evento ou estação desta conta.'));
+    assert.equal(app.isDisabled('Chamar próximo'), true);
+    assert.equal(stationPostCount, 1);
+
+    // Troca para conta Staff B não vaza dados nominais da conta A nem apaga a intenção da conta A
+    await app.act(() => app.manager.logout());
+    activeAccount = 'B';
+    app.setUser(staffB);
+    await app.act(() => app.manager.login({ email: staffB.email, password: 'ficticia' }));
+    await app.press('Selecionar evento Evento Conta B');
+    await app.press('Selecionar estação Cabine B da experiência Just Dance B');
+    assert.ok(app.hasQueueRow(1, 'Participante Conta B'));
+    assert.ok(!app.hasText('Participante Conta A'));
+    assert.equal(app.isDisabled('Chamar próximo'), false);
+    assert.equal(deleteCalls, 0);
+    assert.equal(secureValues.has(slotA), true);
+    assert.equal(stationPostCount, 1);
   } finally {
     app.dispose();
   }
