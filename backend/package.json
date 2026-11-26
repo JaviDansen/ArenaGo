@@ -13,7 +13,7 @@
     "start:prod": "node dist/main.js",
     "lint": "eslint \"src/**/*.ts\" \"test/**/*.ts\"",
     "test": "tsx --test test/unit/*.test.ts",
-    "test:integration": "tsx --tsconfig tsconfig.test.json --test --test-concurrency=1 test/integration/*.test.ts",
+    "test:integration": "node scripts/integration-command.cjs",
     "typecheck:test": "tsc --project tsconfig.test.json",
     "db:generate": "drizzle-kit generate",
     "db:check": "drizzle-kit check",

@@ -1,4 +1,5 @@
 import "reflect-metadata";
+import { requirePilotSuite } from "../infrastructure/pilot-authorization";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { after, before, test } from "node:test";
@@ -14,6 +15,7 @@ import type * as schema from "../../src/database/schema";
 import type { ParticipationsService } from "../../src/participations/participations.service";
 import { adminEventOperationsTestHooks } from "./admin-event-operations-db-guard";
 
+requirePilotSuite("admin-external-queue-http");
 let pool: Pool;
 let app:INestApplication,database:NodePgDatabase<typeof schema>,participations:ParticipationsService;
 let signAccess:(userId:string,sessionId:string,expired?:boolean)=>string;
